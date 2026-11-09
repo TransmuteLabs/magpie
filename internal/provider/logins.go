@@ -1035,6 +1035,8 @@ func loginsNow(agent string) []Login {
 	}
 	var side []Login
 	switch agent {
+	case "opencode-go", "opencode-zen":
+		return loginsOf(openCodeLogins(agent))
 	case "copilot":
 		return copilotLoginList()
 	case ChatGPTAPIID:
@@ -1064,6 +1066,8 @@ func loginsNow(agent string) []Login {
 			{"qoder", nil}, {QoderCNID, nil}, {"zed", nil}, {"factory", nil},
 			{MiMoID, nil}, {ChatGPTAPIID, siwcLoginList}, {"gemini", func() []Login { return googleLoginList("gemini") }},
 			{"antigravity", func() []Login { return googleLoginList("antigravity") }},
+			{"opencode-go", func() []Login { return loginsOf(openCodeLogins("opencode-go")) }},
+			{"opencode-zen", func() []Login { return loginsOf(openCodeLogins("opencode-zen")) }},
 		} {
 			if !PluginServes(b.id) {
 				side = append(side, b.list()...)
@@ -1286,6 +1290,8 @@ func switchLoginBy(agent, user string, byMagpie bool) error {
 		return switchPluginLogin(pp, user)
 	}
 	switch agent {
+	case "opencode-go", "opencode-zen":
+		return switchSideLogin(agent, user, openCodeLogins(agent))
 	case "copilot":
 		return switchCopilotLogin(user)
 	case ChatGPTAPIID:
@@ -1504,6 +1510,8 @@ func ForgetLogin(agent, user string) error {
 		return forgetPluginLogin(pp, user)
 	}
 	switch agent {
+	case "opencode-go", "opencode-zen":
+		return forgetSideLogin(agent, user, openCodeLogins(agent), nil)
 	case "copilot":
 		return forgetCopilotLogin(user)
 	case ChatGPTAPIID:

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/fx"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -128,6 +130,9 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		m.openProviderModels(p.ID)
 	case "e":
+		if pr := provider.Preset(p.Preset); pr != nil && pr.OAuth && p.ID == pr.ID {
+			return m, oauthSignIn(pr.ID)
+		}
 		if p.Account != nil {
 			m.flash, m.flashOK = p.Name+" is a signed-in account: its key is the agent's sign-in", false
 			return m, nil
@@ -449,8 +454,8 @@ func kindNote(k provider.Kind) string {
 	return string(k)
 }
 
-// openPresets picks a vendor magpie knows, then asks for its key, or for
-// Google Vertex AI the project it takes in place of one.
+// openPresets picks a vendor, then starts OAuth or asks for its key (a
+// Google Cloud project for Vertex AI).
 func (m *model) openPresets() {
 	var items []agent.Option
 	var shown []string
@@ -475,6 +480,9 @@ func (m *model) openPresets() {
 		onPick: func(id string) tea.Cmd {
 			if i := slices.IndexFunc(customAPIs, func(c customAPI) bool { return c.id == id }); i >= 0 {
 				return func() tea.Msg { return askMsg{customURLAsk(customAPIs[i])} }
+			}
+			if pr := provider.Preset(id); pr != nil && pr.OAuth {
+				return oauthSignIn(pr.ID)
 			}
 			return func() tea.Msg {
 				p, err := provider.FromPreset(id)
@@ -511,6 +519,21 @@ func (m *model) openPresets() {
 	}
 	m.pk.refilter()
 	m.mode = modePick
+}
+
+// oauthSignIn lets the existing CLI show the device code and wait for the
+// browser in this terminal, then returns to the providers page.
+func oauthSignIn(id string) tea.Cmd {
+	exe, err := os.Executable()
+	if err != nil {
+		return func() tea.Msg { return flashMsg{text: err.Error()} }
+	}
+	return tea.ExecProcess(proc.Command(exe, "accounts", "add", id), func(err error) tea.Msg {
+		if err != nil {
+			return flashMsg{text: "sign-in: " + err.Error()}
+		}
+		return flashMsg{text: id + " signed in", ok: true}
+	})
 }
 
 // customAPI is an API a provider of the user's own is asked on, as the

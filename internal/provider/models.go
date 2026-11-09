@@ -546,6 +546,9 @@ func (p Provider) ListAll(ctx context.Context) ([]catalog.Model, error) {
 		return nil, ErrListOff
 	}
 	ctx = p.ownRequests(p.Via(ctx), probelog.KindList)
+	if p.Account != nil && isOpenCodeOAuth(p.Account.Agent) && p.Account.models != nil {
+		return p.Account.models(), nil
+	}
 	if pr := Preset(p.Preset); pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" && !p.listRegion(pr) {
 		// with its embedding and rerank models, marked so (Voyage AI's)
 		return append(p.planModels(nil), p.PlanRetrieval("")...), nil

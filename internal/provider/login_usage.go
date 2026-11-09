@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -334,6 +335,11 @@ func usageLogins(agent string) (logins []Login, ok bool) {
 // allowance can be asked; false for an agent that tells none.
 func builtinLogins(agent string) (logins []Login, ok bool) {
 	switch agent {
+	case "opencode-go":
+		if slices.ContainsFunc(storedFile().Providers, func(p Provider) bool { return p.ID == agent && hasEndpoint(p) }) {
+			return nil, true // a legacy key still shadows the account
+		}
+		logins = loginsOf(openCodeLogins(agent))
 	case "claude", "codex":
 		logins = Logins(agent)
 	case "copilot":
@@ -362,6 +368,9 @@ func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	ctx = ViaLogin(ctx, loginProvider(l), l.User) // asked through the account's own proxy
 	if strings.HasPrefix(l.Agent, "plugin:") {
 		return pluginLoginQuota(ctx, l)
+	}
+	if l.Agent == "opencode-go" {
+		return openCodeQuota(ctx, l)
 	}
 	if l.Agent == "gemini" || l.Agent == "antigravity" {
 		return googleLoginQuota(ctx, l)

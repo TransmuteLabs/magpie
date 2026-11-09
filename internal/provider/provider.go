@@ -284,13 +284,15 @@ type Provider struct {
 	// key+URL provider — forwarded calls, connectivity tests, and model-list
 	// fetches — applied after the auth headers, so the user can override those
 	// when a gateway insists on a private scheme. Signed-in agent accounts
-	// ignore them: their auth is the agent's own.
+	// ignore them: their auth is the agent's own. OpenCode Console accounts
+	// keep non-auth headers, with the sign-in's auth and workspace authoritative.
 	Headers map[string]string `json:"headers,omitempty"`
 
 	// ExtraBody are JSON fields added to the body of every request to the
 	// vendor (#1604), filling in what the body lacks, or replacing it for a
 	// name written "!name"; ${sessionId} and ${threadId} in a value are the
-	// conversation's ids (extrabody.go, conversation.go). Signed-in agent accounts ignore it, as Headers.
+	// conversation's ids (extrabody.go, conversation.go). OpenCode and
+	// Codex accounts take it too (extraBodyTakes).
 	ExtraBody ExtraBody `json:"extraBody,omitempty"`
 
 	// ReplyHeaders are headers of the vendor's reply passed on to the
@@ -1043,6 +1045,12 @@ func accountSettings(a, pk Provider) Provider {
 	a.ReplyHeaders = pk.ReplyHeaders
 	// and the headers of the agent's requests passed on
 	a.PassHeaders = pk.PassHeaders
+	if isOpenCodeOAuth(a.ID) {
+		a.Was, a.Gave, a.Headers = pk.Was, pk.Gave, pk.Headers
+		if pk.Name != "" {
+			a.Name = pk.Name
+		}
+	}
 	return a
 }
 
@@ -1147,6 +1155,13 @@ func Save(p Provider) error {
 	if p.ID == "" {
 		p.ID = Slug(p.Name)
 	}
+	if isOpenCodeOAuth(p.ID) {
+		unlock, err := openCodeLock()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	// an id stored already is the provider's, whatever it is: one put in
 	// providers.json by hand ("b.ai") was refused on every Save, so the
 	// editor could neither change it nor rename it to one that is right
@@ -1172,7 +1187,13 @@ func Save(p Provider) error {
 	if p.Name == "" {
 		p.Name = p.ID
 	}
-	if _, ok := find(Accounts(), p.ID); ok || p.ID == "kiro" && (p.Key != "" || stored(p.ID)) {
+	_, hasAccount := find(Accounts(), p.ID)
+	// A legacy keyed OpenCode preset continues to shadow an interrupted
+	// sign-in until the login's conversion commits.
+	if isOpenCodeOAuth(p.ID) && p.Account == nil && hasEndpoint(p) {
+		hasAccount = false
+	}
+	if hasAccount || p.ID == "kiro" && (p.Key != "" || stored(p.ID)) {
 		// an account keeps only the user's model picks; the rest is the
 		// agent's own sign-in. One the user removed stays removed: only
 		// ShowAccount brings it back. Kiro's alone also keeps a key, which
@@ -1589,11 +1610,22 @@ func ShowAccount(id string) error {
 // only hidden from magpie (its accounts and model picks kept, shown again
 // from Hidden or by signing in); signing out is each account's Remove.
 func Delete(id string) error {
+	if isOpenCodeOAuth(id) {
+		unlock, err := openCodeLock()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	f, err := read()
 	if err != nil {
 		return err
 	}
-	if _, ok := find(Accounts(), id); ok {
+	_, account := find(Accounts(), id)
+	if isOpenCodeOAuth(id) && slices.ContainsFunc(f.Providers, func(p Provider) bool { return p.ID == id && hasEndpoint(p) }) {
+		account = false // a custom or legacy provider, not the shadowed login
+	}
+	if account {
 		for i := range f.Providers {
 			if f.Providers[i].ID == id {
 				f.Providers[i].Hidden = true

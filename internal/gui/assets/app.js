@@ -7335,7 +7335,7 @@ function renderAdd() {
     // this machine's (Avalon on Discord didn't find it among the relays)
     for (const [kind, title, hint] of [["vendor", "Vendors", "the makers' own APIs"], ["relay", "Relays", "one key, many vendors"], ["local", "On this machine", ""], ["remote", "Another computer's magpie", "shared on its network"]]) {
       // a vendor's China endpoint is a preset of its own: one row with the global one
-      const rows = providers.presets.filter((p) => p.kind === kind && !globalOf(p))
+      const rows = providers.presets.filter((p) => p.kind === kind && !p.oauth && !globalOf(p))
         .map((p) => [p, chinaOf(p)]).filter(([p, cn]) => hit(p) || (cn && hit(cn)));
       if (!rows.length) continue;
       any = true;
@@ -9249,8 +9249,16 @@ function draftOf(p) {
   return { id: p.id, name: p.name, preset: p.preset, chat: p.chat, responses: p.responses, anthropic: p.anthropic, gemini: p.gemini || "", catalog: p.catalog, decide: p.decide || "", key: "", api: baseAPIOf(p), chosen: pickedOf(p), none: !!p.noModels, best: !!p.bestInFamily, extra: [], headers: headerRows(p.headers), extraBody: extraBodyText(p.extraBody), replyHeaders: (p.replyHeaders || []).join(", "), passHeaders: (p.passHeaders || []).join(", "), icon: p.icon || "", iconFrom: p.iconFrom || "", fallback: [...(p.fallback || [])], unlisted: !!p.unlisted, hiddenDrawers: [...(p.hiddenDrawers || [])], hiddenVideomakers: [...(p.hiddenVideomakers || [])], searches: !!p.searches, unredacted: !!p.unredacted, countFree: !!p.countFree, insecureTLS: !!p.insecureTLS, http1: !!p.http1, limitRestOff: !!p.limitRestOff, passErrors: !!p.passErrors, imageFilesOff: !!p.imageFilesOff, nativeCompaction: !!p.nativeCompaction, passUserAgent: p.passUserAgent !== false, pinUpstream: !!p.pinUpstream, authHeader: p.authHeader || "", balanceURL: p.balanceURL || "", balancePath: p.balancePath || "", balanceMethod: p.balanceMethod || "", modelsURL: p.modelsURL || "", listOff: !!p.listOff, contexts: contextsText(p.contexts), outputs: contextsText(p.outputs), compacts: contextsText(p.compacts), keysUrl: p.keysUrl || "", ...proxyDraft(p), ...concurrencyDraft(p), rateWindows: (p.rateWindows || []).map((w) => ({ ...w })) };
 }
 
-// duplicateProvider opens the Add form on a copy of p, its key p's unless another is pasted (#268).
+async function signInFromEditor(agent) {
+  if (providerDirty() && !(await confirmDiscard())) return;
+  adding = true; editing = null; draft = null; presetQuery = "";
+  renderProviders();
+  startSignIn(agent);
+}
+
+// duplicateProvider opens a copy, or adds another OAuth account.
 function duplicateProvider(p) {
+  if (providers.presets.some((pr) => pr.id === p.preset && pr.oauth)) return signInFromEditor(p.preset);
   const name = t("{name} copy", { name: p.name });
   editing = p.preset && providers.presets.some((x) => x.id === p.preset) ? { preset: p.preset } : { custom: true };
   const d = draftOf(p);
@@ -9310,6 +9318,11 @@ function drawEditor(p, presetID) {
     if (p) h.append(providerSwitch(p));
     ed.append(h);
     if (p?.off) ed.append(el("div", "hint off-note", t("Switched off: agents aren't given its models and no request goes to it. Its keys and settings are kept; switch it on to use it again.")));
+    if (pr?.oauth && p?.id === pr.id && !p.account) {
+      const signIn = el("button", "text primary", t("Sign in"));
+      signIn.onclick = () => signInFromEditor(pr.id);
+      ed.append(signIn);
+    }
     if (p?.self) {
       const [keep, cb] = tick(t("Use it anyway"), !!p.keepSelf);
       cb.onchange = () => accountAction("provider/keepself", { id: p.id, keepSelf: cb.checked }, t(cb.checked ? "{name} is used anyway" : "{name} is left out: it is this magpie", { name: p.name }));
@@ -10183,10 +10196,13 @@ function drawEditor(p, presetID) {
     bar.append(del);
   }
   if (p && pr) {
-    // another key of the vendor, or the same key for another workspace
+    // another OAuth account, key, or workspace of the vendor
     const more = el("button", "text", t("Add another {name}", { name: pr.name }));
-    more.title = vertex ? t("One more {name} provider, with its own project, credentials, headers and models", { name: pr.name }) : t("One more {name} provider, with its own key, headers and models", { name: pr.name });
-    more.onclick = () => { editing = { preset: pr.id }; draft = null; renderProviders(); };
+    more.title = pr.oauth ? t("click to add another account") : vertex ? t("One more {name} provider, with its own project, credentials, headers and models", { name: pr.name }) : t("One more {name} provider, with its own key, headers and models", { name: pr.name });
+    more.onclick = () => {
+      if (pr.oauth) return signInFromEditor(pr.id);
+      editing = { preset: pr.id }; draft = null; renderProviders();
+    };
     bar.append(more);
   }
   if (p) {
@@ -12341,6 +12357,8 @@ const SUBS = [
   // OpenAI's Sign in with ChatGPT: the plan asked on api.openai.com, with the agent's own instructions (#933)
   { agent: "chatgpt-api", name: "ChatGPT API", icon: "openai", plans: "Plus · Pro · Business", own: true,
     hint: "Sign in with ChatGPT: your plan on OpenAI's own API, with your agent's own instructions rather than Codex's." },
+  { agent: "opencode-go", name: "OpenCode Go", icon: "opencode", plans: "Go · Go Plus · Go Teams", own: true },
+  { agent: "opencode-zen", name: "OpenCode Zen", icon: "opencode", plans: "OpenCode Console", own: true },
   // cursor-agent keeps one account; signing in again replaces it
   { agent: "cursor", name: "Cursor", icon: "cursor", plans: "Pro · Ultra · Teams", single: true },
   // so does Grok Build

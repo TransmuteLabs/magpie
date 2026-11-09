@@ -34,8 +34,9 @@ package provider
 // nor one to another API (embeddings, images, video, a decision API's):
 // the fields are for asking the model for a reply. Neither does a
 // signed-in account's: its body is the agent's own, as its headers are —
-// except a ChatGPT (Codex) account's, whose requests magpie builds as Codex
-// CLI would (codexBody), and which take fields Codex CLI adds by choice
+// except an OpenCode Console account's and a ChatGPT (Codex) account's.
+// The latter's requests are built as Codex CLI would (codexBody), and take
+// fields Codex CLI adds by choice
 // (access_programs, OpenAI's Daybreak, magpie-releases#18). On it the
 // fields codexBody decides for the backend to answer at all — not stored,
 // tool_choice auto, its reasoning carried — can't be set either
@@ -84,6 +85,8 @@ var codexOwned = []string{"store", "tool_choice", "include"}
 func (p Provider) extraBodyTakes() (owned []string, ok bool) {
 	switch {
 	case p.Account == nil:
+		return nil, true
+	case isOpenCodeOAuth(p.Account.Agent):
 		return nil, true
 	case p.Account.Agent == "codex":
 		return codexOwned, true
