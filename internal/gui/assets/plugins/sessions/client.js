@@ -1284,7 +1284,7 @@ magpie.plugin("sessions", (ctx) => {
 
   // carryPick is the other agents that can carry a session on (#845):
   // from its file as it is (oh-my-pi forks a Pi session), or from a new
-  // session of theirs converted from it (Claude Code and Codex), in the
+  // session of theirs converted from it (Claude Code, Codex and omp), in the
   // app's menu: copy the command, or open it in the session terminal.
   function carryPick(s) {
     const b = el("button", "sess-pick sess-carry");
@@ -1317,8 +1317,8 @@ magpie.plugin("sessions", (ctx) => {
     return b;
   }
 
-  // carryOver converts a session for another agent (Claude Code's for
-  // Codex, Codex's for Claude Code) when the user picks it, then copies the
+  // carryOver converts a session for another agent when the user picks it,
+  // between Claude Code, Codex and omp, then copies the
   // line that opens the new one, or opens it in the session terminal
   function carryOver(s, to, open, btn) {
     const agent = agentOf(to).name;

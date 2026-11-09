@@ -543,10 +543,11 @@ are two kinds:
 
 - **From the file as it is.** oh-my-pi forks a Pi session: `Carry.Command`
   is `omp --fork <file>` run in the session's folder (#845).
-- **Converted** (`Carry.Convert`, no command). A Claude Code session can go
-  on in Codex, and a Codex one in Claude Code, when the other agent is
+- **Converted** (`Carry.Convert`, no command). Claude Code, Codex and omp
+  sessions can go on in either of the other two, when the target is
   installed (`agentThere`: its binary on the PATH or its config folder,
-  checked at most every 30s). Listing converts nothing. When the user picks
+  or omp's initialized XDG data folder, checked at most every 30s). Each
+  target is checked independently. Listing converts nothing. When the user picks
   it, `POST /api/sessions/carry` `{agent, id, to, open}` calls
   `sessions.CarryOver`
   ([`carry_convert.go`](../../internal/sessions/carry_convert.go)). It writes
@@ -563,16 +564,36 @@ What a conversion carries:
   caveat. For Codex, the `response_item`s, or a `compacted` line's
   `replacement_history` in place of what came before it. Codex's
   `<environment_context>`, `<user_instructions>`, AGENTS.md and developer
-  messages are left out.
-- **Pasted images**, as data URLs, into the target's own image block.
+  messages are left out. For omp,
+  [`ompCarryItems`](../../internal/sessions/carry_omp_read.go) follows the
+  active leaf's parent chain, after the latest reset, not abandoned branches.
+  A portable compaction contributes its summary followed by the retained
+  tail and later messages; an empty summary still cuts off older history.
+  A provider-only compaction, snapcompact archive, summary containing raw
+  `¶think:` reasoning, or notes-rollover marker is not copied: the recorded
+  branch is re-expanded back to the preceding portable boundary or reset.
+- **User images**, in their original order among text blocks, into the
+  target's own image blocks. omp's inline and `blob:sha256:` images and
+  image attachments in `fileMention` messages are carried; automatically
+  read file text and filenames are not. Blob lookup tries the source's
+  sibling store first, then existing default and named-profile stores
+  under `~/.omp` and an absolute `XDG_DATA_HOME`. A selected image with an
+  invalid or unresolved reference fails before a destination journal is
+  published; off-branch images are not opened.
 - **Shell calls**, in the target's native shape with their output: Claude
-  Code's Bash and Codex's `exec_command`, `shell`, `shell_command` and
-  `local_shell_call`. Any other tool (Read, Edit, Write, `apply_patch` as a
+  Code's Bash, Codex's `exec_command` and omp's `bash`. Source Codex
+  `shell`, `shell_command` and `local_shell_call` calls are carried too.
+  Any other tool (Read, Edit, Write, `apply_patch` as a
   custom tool, MCP tools) is written as the agent's own text: its name,
-  input and result in fences. A result is cut at 64 KiB.
-- **Not carried:** thinking, reasoning, signatures and encrypted content, and
-  a compaction encrypted by OpenAI. Of compactions, only magpie's own
-  summary is read.
+  input and result in fences. A result is cut at 64 KiB. omp calls without
+  a later result on the selected branch are omitted, rather than made to
+  look completed. Its standalone bash/Python execution messages are
+  carried unless excluded from context.
+- **Not carried:** private thinking/reasoning, signatures, encrypted content
+  or provider-only replay payloads. omp's explicitly marked narration is
+  visible assistant prose, so it is kept without its signature. Synthetic
+  or agent-attributed user messages, system/developer messages and hidden
+  extension context are left out.
 
 What it writes:
 
@@ -587,21 +608,51 @@ What it writes:
   (`CodexProviderIn`), so the thread is listed under the provider in use.
   `response_item`s are written, plus the `event_msg` user and agent messages
   the TUI shows as history. Codex indexes the file into its state database
-  itself on resume, so magpie writes no index. `codex resume <id>` opens it.
+  itself on resume, so magpie writes no index. Its tool-output format has no
+  error flag: failed shell output is prefixed with `[error]`, without
+  discarding the recorded output. `codex resume <id>` opens it.
+- **omp:** a version-3 JSONL journal under the default profile's
+  `~/.omp/agent/sessions/<cwd bucket>/<time>_<uuidv7>.jsonl`, using
+  [`ompCarryBucket`](../../internal/sessions/carry_omp.go) for omp's
+  home-relative, temp-relative or absolute project name. On macOS and Linux,
+  an absolute `XDG_DATA_HOME` whose `omp` directory already exists selects
+  `<XDG_DATA_HOME>/omp/sessions` instead; conversion never initializes that
+  migration itself. A 256-byte title slot precedes the session header, and
+  message entries form one `parentId` chain. Assistant messages have model
+  `<synthetic>` and zero usage, so imported history selects no model and adds
+  no spending. omp uses its own configured model on resume. Images smaller
+  than 1024 base64 characters stay inline; larger ones use omp's
+  `blob:sha256:` references to decoded image bytes in the same store's
+  sibling `blobs` directory. `omp --resume <id>` opens it.
 
-The source file is only read. The new file is written to a temp file
-beside it, synced and renamed, and is never written over an existing path.
+OMP conversion targets only the default profile. It does not follow
+`PI_CODING_AGENT_DIR` (used by magpie's Pi integration). Named profiles can
+be read by magpie but are not conversion destinations. Run the command in
+the default OMP environment; an inherited custom agent directory or named
+profile can make ID lookup select a different store.
+
+Source journals and image blobs are only read. A temp file in the destination
+directory is synced and renamed, never written over an existing path.
 `CarryOver` keeps the result per source path, target, size and mtime while
 the new file exists, so asking twice for an unchanged session gives the
 same one.
 
-Not converted: Pi, omp, OpenCode, Kimi, Cursor and the other agents, and
-sessions in WSL.
+Not converted as sources: Pi, OpenCode, Kimi, Cursor and the other
+agents, and sessions in WSL. Pi still has the direct omp fork described above.
 
 Verification: `TestCarryClaudeToCodex`, `TestCarryCodexToClaude` (real
 Claude Code 2.1.310 and Codex 0.162.1 files in `testdata/carry`),
 `TestCarryConvertOffered`, `TestCarryImagesAndCompaction` and
-`TestCarryPiToOmp`; browser `sessions-convert.test.cjs` and
+`TestCarryPiToOmp`, plus `TestCarryFixturesToOmp`,
+`TestCarryOmpImagesErrorsAndMissingOutput`, `TestCarryOmpStorePrecedence`,
+`TestCarryOmpExternalizedImages`, `TestCarryOmpReusesBlobWithWriteGrace`,
+`TestCarryOmpTimestampFallbackAndResultLimit`, `TestCarryOmpBucketBoundaries`
+and `TestCarryOmpDetection`. Reverse conversion: `TestCarryOmpRoundTripFixtures`,
+`TestCarryOmpRealV3Fixture`, `TestCarryOmpActiveLeafAndParents`,
+`TestCarryOmpPortableCompactionResetAndSnapshot`,
+`TestCarryOmpNonportableCompactionsReexpand`,
+`TestCarryOmpMessagesAndCalls`, `TestCarryOmpOrderedImagesAndBlobStores`
+and `TestCarryOmpBlobErrorsAndOffBranch`; browser `sessions-convert.test.cjs` and
 `sessions-talk.test.cjs`.
 
 ## Usage over the gateway, and subagents

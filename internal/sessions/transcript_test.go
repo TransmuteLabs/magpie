@@ -174,8 +174,10 @@ func TestCarryPiToOmp(t *testing.T) {
 	if m, ok := findManaged(ListAgent("pi"), piFirst); !ok || !reflect.DeepEqual(m.Carry, want) {
 		t.Fatalf("managed pi carry %+v", m.Carry)
 	}
-	if c := carries(Session{Agent: "omp", ID: "o", Cwd: "/w", Path: "/w/o.jsonl"}); c != nil {
-		t.Fatalf("omp carried: %+v", c)
+	for _, c := range carries(Session{Agent: "omp", ID: "o", Cwd: "/w", Path: "/w/o.jsonl"}) {
+		if c.Agent == "pi" {
+			t.Fatalf("omp offered an incompatible Pi destination: %+v", c)
+		}
 	}
 	oldThere := agentThere
 	agentThere = func(string) bool { return false }

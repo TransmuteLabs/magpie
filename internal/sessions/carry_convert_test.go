@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/codexsummary"
 )
 
 // The fixtures are real sessions of the same project, made in a sandbox
@@ -90,7 +93,7 @@ func TestCarryClaudeToCodex(t *testing.T) {
 	if !ok {
 		t.Fatal("claude session not found")
 	}
-	if len(s.Carry) != 1 || s.Carry[0] != (Carry{Agent: "codex", Convert: true}) {
+	if want := []Carry{{Agent: "codex", Convert: true}, {Agent: "omp", Convert: true}}; !reflect.DeepEqual(s.Carry, want) {
 		t.Fatalf("carry %+v", s.Carry)
 	}
 	r, err := CarryOver(s, "codex")
@@ -246,7 +249,7 @@ func TestCarryCodexToClaude(t *testing.T) {
 		t.Fatalf("listed %+v (found %v)", c, ok)
 	}
 	// and it is carried back the way it came
-	if len(c.Carry) != 1 || c.Carry[0].Agent != "codex" {
+	if want := []Carry{{Agent: "codex", Convert: true}, {Agent: "omp", Convert: true}}; !reflect.DeepEqual(c.Carry, want) {
 		t.Fatalf("carry back %+v", c.Carry)
 	}
 }
@@ -256,13 +259,18 @@ func TestCarryCodexToClaude(t *testing.T) {
 func TestCarryConvertOffered(t *testing.T) {
 	carrySetup(t)
 	base := Session{Agent: "claude", ID: "c", Cwd: "/w", Path: "/w/c.jsonl"}
-	if c := carries(base); len(c) != 1 || c[0] != (Carry{Agent: "codex", Convert: true}) {
+	if c, want := carries(base), []Carry{{Agent: "codex", Convert: true}, {Agent: "omp", Convert: true}}; !reflect.DeepEqual(c, want) {
 		t.Fatalf("carries %+v", c)
+	}
+	codex := Session{Agent: "codex", ID: "x", Cwd: "/w", Path: "/w/x.jsonl"}
+	if c, want := carries(codex), []Carry{{Agent: "claude", Convert: true}, {Agent: "omp", Convert: true}}; !reflect.DeepEqual(c, want) {
+		t.Fatalf("codex carries %+v", c)
 	}
 	for _, s := range []Session{
 		{Agent: "claude", ID: "c", Cwd: "/w", Path: "/w/c.jsonl", ReadOnly: true},
 		{Agent: "claude", ID: "c", Cwd: "/w", Path: "/w/c.jsonl", WSL: "Ubuntu"},
 		{Agent: "claude", ID: "c", Path: "/w/c.jsonl"},
+		{Agent: "claude", ID: "c", Cwd: "/w"},
 		{Agent: "opencode", ID: "o", Cwd: "/w", Path: "/w/o"},
 	} {
 		if c := carries(s); c != nil {
@@ -270,20 +278,91 @@ func TestCarryConvertOffered(t *testing.T) {
 		}
 	}
 	agentThere = func(a string) bool { return a != "codex" }
-	if c := carries(base); c != nil {
+	if c, want := carries(base), []Carry{{Agent: "omp", Convert: true}}; !reflect.DeepEqual(c, want) {
 		t.Fatalf("carried with no codex: %+v", c)
 	}
 	if _, err := CarryOver(base, "codex"); err == nil {
 		t.Fatal("converted what wasn't offered")
 	}
-	if _, err := CarryOver(Session{Agent: "codex", ID: "x", Cwd: "/w", Path: "/w/x.jsonl"}, "omp"); err == nil {
-		t.Fatal("converted for an agent with no writer")
+	agentThere = func(a string) bool { return a != "claude" }
+	if c, want := carries(codex), []Carry{{Agent: "omp", Convert: true}}; !reflect.DeepEqual(c, want) {
+		t.Fatalf("codex carried with no claude: %+v", c)
+	}
+	if _, err := CarryOver(codex, "claude"); err == nil {
+		t.Fatal("converted for an unavailable claude")
+	}
+	agentThere = func(a string) bool { return a != "omp" }
+	if c, want := carries(base), []Carry{{Agent: "codex", Convert: true}}; !reflect.DeepEqual(c, want) {
+		t.Fatalf("carried with no omp: %+v", c)
+	}
+	if c, want := carries(codex), []Carry{{Agent: "claude", Convert: true}}; !reflect.DeepEqual(c, want) {
+		t.Fatalf("codex carried with no omp: %+v", c)
+	}
+	if _, err := CarryOver(codex, "omp"); err == nil {
+		t.Fatal("converted for an unavailable omp")
+	}
+	agentThere = func(string) bool { return true }
+	if _, err := CarryOver(base, "opencode"); err == nil {
+		t.Fatal("converted for an unsupported agent")
+	}
+	agentThere = func(string) bool { return false }
+	if c := carries(base); c != nil {
+		t.Fatalf("carried with no destinations: %+v", c)
+	}
+}
+
+func TestCarryOmpConvertOffered(t *testing.T) {
+	carrySetup(t)
+	omp := Session{Agent: "omp", ID: "o", Cwd: "/w", Path: "/w/o.jsonl"}
+	for _, tc := range []struct {
+		name   string
+		claude bool
+		codex  bool
+		omp    bool
+		want   []Carry
+	}{
+		{"both", true, true, true, []Carry{{Agent: "claude", Convert: true}, {Agent: "codex", Convert: true}}},
+		{"claude only", true, false, true, []Carry{{Agent: "claude", Convert: true}}},
+		{"codex only", false, true, true, []Carry{{Agent: "codex", Convert: true}}},
+		{"neither", false, false, true, nil},
+		{"source not installed", true, true, false, []Carry{{Agent: "claude", Convert: true}, {Agent: "codex", Convert: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agentThere = func(agent string) bool {
+				switch agent {
+				case "claude":
+					return tc.claude
+				case "codex":
+					return tc.codex
+				case "omp":
+					return tc.omp
+				}
+				return false
+			}
+			if got := carries(omp); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("offers %+v, want %+v", got, tc.want)
+			}
+			if _, err := CarryOver(omp, "omp"); err == nil {
+				t.Fatal("OMP source offered itself")
+			}
+			for _, target := range []struct {
+				name      string
+				installed bool
+			}{{"claude", tc.claude}, {"codex", tc.codex}} {
+				if !target.installed {
+					if _, err := CarryOver(omp, target.name); err == nil {
+						t.Fatalf("converted for unavailable %s", target.name)
+					}
+				}
+			}
+		})
 	}
 }
 
 // A pasted image goes over as the target's own image, and a compaction
 // stands for what came before it: the history Codex kept in its place.
 func TestCarryImagesAndCompaction(t *testing.T) {
+	carrySetup(t)
 	dir := t.TempDir()
 	img := "iVBORw0KGgo="
 	cc := filepath.Join(dir, "c.jsonl")
@@ -294,7 +373,8 @@ func TestCarryImagesAndCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 || items[0].Text != "what is this?" || len(items[0].Images) != 1 || items[0].Images[0] != "data:image/png;base64,"+img || items[1].Text != "a cat" {
+	want := []carryContent{{Type: "text", Text: "what is this?"}, {Type: "image", Data: img, MimeType: "image/png"}}
+	if len(items) != 2 || !reflect.DeepEqual(items[0].Content, want) || items[1].Text != "a cat" {
 		t.Fatalf("items %+v", items)
 	}
 	r, err := writeCodexCarry(dir, "/w", items, time.Now())
@@ -302,7 +382,7 @@ func TestCarryImagesAndCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := codexCarryItems(r.Path)
-	if err != nil || len(got) != 2 || len(got[0].Images) != 1 || got[0].Images[0] != items[0].Images[0] || got[1].Text != "a cat" {
+	if err != nil || len(got) != 2 || !reflect.DeepEqual(got[0].Content, want) || got[1].Text != "a cat" {
 		t.Fatalf("codex read back %+v %v", got, err)
 	}
 
@@ -311,7 +391,9 @@ func TestCarryImagesAndCompaction(t *testing.T) {
 		`{"timestamp":"2026-10-25T03:48:12.208Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}]},{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,`+img+`"}]}]}}`+"\n"+
 		`{"timestamp":"2026-10-25T03:48:13.208Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}}`+"\n"), 0o644)
 	got, err = codexCarryItems(cx)
-	if err != nil || len(got) != 3 || got[0].Text != "kept" || len(got[1].Images) != 1 || got[2].Text != "after" {
+	kept := []carryContent{{Type: "text", Text: "kept"}}
+	image := []carryContent{{Type: "image", Data: img, MimeType: "image/png"}}
+	if err != nil || len(got) != 3 || !reflect.DeepEqual(got[0].Content, kept) || !reflect.DeepEqual(got[1].Content, image) || got[2].Text != "after" {
 		t.Fatalf("compacted %+v %v", got, err)
 	}
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
@@ -320,7 +402,196 @@ func TestCarryImagesAndCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	back, err := claudeCarryItems(r.Path)
-	if err != nil || len(back) != 3 || back[0].Text != "kept" || len(back[1].Images) != 1 || back[1].Images[0] != "data:image/png;base64,"+img || back[2].Text != "after" {
+	if err != nil || len(back) != 3 || !reflect.DeepEqual(back[0].Content, kept) || !reflect.DeepEqual(back[1].Content, image) || back[2].Text != "after" {
 		t.Fatalf("claude read back %+v %v", back, err)
+	}
+}
+
+func TestCarryInterleavedUserContent(t *testing.T) {
+	carrySetup(t)
+	const png = "iVBORw0KGgo="
+	const jpeg = "anBn"
+	want := []carryContent{
+		{Type: "text", Text: "Before"},
+		{Type: "image", Data: png, MimeType: "image/png"},
+		{Type: "text", Text: "Between"},
+		{Type: "image", Data: jpeg, MimeType: "image/jpeg"},
+		{Type: "text", Text: "After"},
+	}
+	wantClaude := []any{
+		map[string]any{"type": "text", "text": "Before"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": png}},
+		map[string]any{"type": "text", "text": "Between"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/jpeg", "data": jpeg}},
+		map[string]any{"type": "text", "text": "After"},
+	}
+	wantCodex := []any{
+		map[string]any{"type": "input_text", "text": "Before"},
+		map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + png},
+		map[string]any{"type": "input_text", "text": "Between"},
+		map[string]any{"type": "input_image", "image_url": "data:image/jpeg;base64," + jpeg},
+		map[string]any{"type": "input_text", "text": "After"},
+	}
+	wantOmp := []any{
+		map[string]any{"type": "text", "text": "Before"},
+		map[string]any{"type": "image", "data": png, "mimeType": "image/png"},
+		map[string]any{"type": "text", "text": "Between"},
+		map[string]any{"type": "image", "data": jpeg, "mimeType": "image/jpeg"},
+		map[string]any{"type": "text", "text": "After"},
+	}
+	sources := []struct {
+		name string
+		line string
+		read func(string) ([]carryItem, error)
+	}{
+		{"claude", `{"parentUuid":null,"type":"user","message":{"role":"user","content":[{"type":"text","text":"Before"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + png + `"}},{"type":"text","text":"Between"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"` + jpeg + `"}},{"type":"text","text":"After"}]},"uuid":"a","timestamp":"2026-10-25T03:50:25.170Z"}` + "\n", claudeCarryItems},
+		{"codex", `{"timestamp":"2026-10-25T03:50:25.170Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Before"},{"type":"input_image","image_url":"data:image/png;base64,` + png + `"},{"type":"input_text","text":"Between"},{"type":"input_image","image_url":"data:image/jpeg;base64,` + jpeg + `"},{"type":"input_text","text":"After"}]}}` + "\n", codexCarryItems},
+	}
+	targets := []struct {
+		name  string
+		write func([]carryItem) (CarryResult, error)
+		read  func(string) ([]carryItem, error)
+	}{
+		{"claude", func(items []carryItem) (CarryResult, error) { return writeClaudeCarry("/w", items, time.Now()) }, claudeCarryItems},
+		{"codex", func(items []carryItem) (CarryResult, error) {
+			return writeCodexCarry(CodexDir(), "/w", items, time.Now())
+		}, codexCarryItems},
+		{"omp", func(items []carryItem) (CarryResult, error) { return writeOmpCarry("/w", items, time.Now()) }, ompCarryItems},
+	}
+	for _, source := range sources {
+		t.Run("read/"+source.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.jsonl")
+			if err := os.WriteFile(path, []byte(source.line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			items, err := source.read(path)
+			if err != nil || len(items) != 1 || items[0].Kind != "user" || !reflect.DeepEqual(items[0].Content, want) {
+				t.Fatalf("source content = %+v, %v", items, err)
+			}
+		})
+	}
+	for _, target := range targets {
+		t.Run("write/"+target.name, func(t *testing.T) {
+			r, err := target.write([]carryItem{{Kind: "user", Content: want}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := readLines(t, r.Path)
+			switch target.name {
+			case "claude":
+				message := lines[0]["message"].(map[string]any)
+				if got := message["content"]; !reflect.DeepEqual(got, wantClaude) {
+					t.Fatalf("Claude content = %#v", got)
+				}
+			case "codex":
+				payload := lines[1]["payload"].(map[string]any)
+				if lines[1]["type"] != "response_item" || payload["role"] != "user" || !reflect.DeepEqual(payload["content"], wantCodex) {
+					t.Fatalf("Codex response item = %#v", lines[1])
+				}
+				event := lines[2]["payload"].(map[string]any)
+				images := []any{"data:image/png;base64," + png, "data:image/jpeg;base64," + jpeg}
+				if lines[2]["type"] != "event_msg" || event["type"] != "user_message" || event["message"] != "Before\nBetween\nAfter" || !reflect.DeepEqual(event["images"], images) {
+					t.Fatalf("Codex user event = %#v", lines[2])
+				}
+			case "omp":
+				message := lines[2]["message"].(map[string]any)
+				if got := message["content"]; !reflect.DeepEqual(got, wantOmp) {
+					t.Fatalf("OMP content = %#v", got)
+				}
+			}
+			back, err := target.read(r.Path)
+			if err != nil || len(back) != 1 || back[0].Kind != "user" || !reflect.DeepEqual(back[0].Content, want) {
+				t.Fatalf("readback = %+v, %v", back, err)
+			}
+		})
+	}
+}
+
+func TestCarryCodexSummaryContent(t *testing.T) {
+	carrySetup(t)
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{"compacted", `{"type":"compacted","payload":{"message":"portable summary"}}` + "\n", codexsummary.Prefix + "\nportable summary"},
+		{"magpie compaction", `{"type":"response_item","payload":{"type":"compaction","encrypted_content":"` + codexsummary.Encrypted("portable summary") + `"}}` + "\n", codexsummary.Prefix + "\nportable summary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "summary.jsonl")
+			if err := os.WriteFile(path, []byte(tc.line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			items, err := codexCarryItems(path)
+			want := []carryContent{{Type: "text", Text: tc.want}}
+			if err != nil || len(items) != 1 || items[0].Kind != "user" || !reflect.DeepEqual(items[0].Content, want) {
+				t.Fatalf("summary = %+v, %v", items, err)
+			}
+			r, err := writeClaudeCarry("/w", items, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := claudeCarryItems(r.Path)
+			if err != nil || len(back) != 1 || !reflect.DeepEqual(back[0].Content, want) {
+				t.Fatalf("summary readback = %+v, %v", back, err)
+			}
+		})
+	}
+}
+
+func TestCarryCodexShellErrorOutput(t *testing.T) {
+	carrySetup(t)
+	path := filepath.Join(t.TempDir(), "errors.jsonl")
+	source := `{"parentUuid":null,"type":"user","message":{"role":"user","content":"run both"},"uuid":"a"}` + "\n" +
+		`{"parentUuid":"a","type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"bad","name":"Bash","input":{"command":"false"}},{"type":"tool_use","id":"good","name":"Bash","input":{"command":"true"}}]},"uuid":"b"}` + "\n" +
+		`{"parentUuid":"b","type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bad","content":"command failed","is_error":true},{"type":"tool_result","tool_use_id":"good","content":"success","is_error":false}]},"uuid":"c"}` + "\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := claudeCarryItems(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	omp, err := writeOmpCarry(carryCwd, pairCarry(items), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []Session{
+		{Agent: "claude", ID: "errors", Cwd: carryCwd, Path: path},
+		{Agent: "omp", ID: omp.ID, Cwd: carryCwd, Path: omp.Path},
+	} {
+		t.Run(source.Agent, func(t *testing.T) {
+			r, err := CarryOver(source, "codex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outputs []string
+			for _, line := range readLines(t, r.Path) {
+				if line["type"] != "response_item" {
+					continue
+				}
+				payload := line["payload"].(map[string]any)
+				if payload["type"] == "function_call_output" {
+					outputs = append(outputs, payload["output"].(string))
+				}
+			}
+			want := []string{"[error]\ncommand failed", "success"}
+			if !reflect.DeepEqual(outputs, want) {
+				t.Fatalf("Codex output = %q, want %q", outputs, want)
+			}
+			back, err := codexCarryItems(r.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var readback []string
+			for _, item := range back {
+				if item.Kind == "result" {
+					readback = append(readback, item.Text)
+				}
+			}
+			if !reflect.DeepEqual(readback, want) {
+				t.Fatalf("Codex consumer output = %q, want %q", readback, want)
+			}
+		})
 	}
 }
