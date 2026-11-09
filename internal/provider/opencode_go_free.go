@@ -48,7 +48,7 @@ func openCodeGoToZenFree(u string, proto Protocol) string {
 	if len(seg) == 3 {
 		rest = "/" + seg[2]
 	}
-	if strings.HasPrefix(rest, "/openai/") || strings.HasPrefix(rest, "/anthropic/") {
+	if strings.HasPrefix(rest, "/openai/") || strings.HasPrefix(rest, "/anthropic/") || strings.HasPrefix(rest, "/google/") {
 		pu.Path = "/inference" + rest
 		pu.RawPath = ""
 		return pu.String()
@@ -92,6 +92,7 @@ func RetryOpenCodeFreeOnZen(p Provider, proto Protocol, req *http.Request, res *
 			again.Host = u.Host
 			// the public key, never the user's Go key, as OpenCode asks
 			// Zen's free tier signed out
+			clearOpenCodeAuth(again.Header)
 			again.Header.Del("x-api-key")
 			again.Header.Set("Authorization", "Bearer "+OpenCodeAnonymousKey)
 			if proto == Anthropic {

@@ -37,6 +37,8 @@ func accountCard(agent string) cardFace {
 		return cardFace{"Codex", "codex-color"}
 	case "copilot":
 		return cardFace{"Copilot", "githubcopilot"}
+	case "opencode-go":
+		return cardFace{"OpenCode Go", "opencode"}
 	case QoderCNID:
 		return cardFace{"Qoder CN", "qoder"}
 	case "gemini", "antigravity":
@@ -77,7 +79,7 @@ func pluginCardFace(pp plugin.Provider) cardFace {
 // on the Usage page, read as LoginUsage reads them. Cursor's account is
 // known by asking its CLI, Grok's are read by home, and a Kiro key has
 // one card for itself: their cards stay as the page read them.
-var cardAgents = []string{"claude", "codex", "copilot", "kiro", "zcode", "workbuddy", WorkBuddyAIID,
+var cardAgents = []string{"claude", "codex", "copilot", "opencode-go", "kiro", "zcode", "workbuddy", WorkBuddyAIID,
 	CommandCodePlanID, "qoder", QoderCNID, "zed", "devin", "factory", MiMoID, "gemini", "antigravity"}
 
 // cardLogins are the accounts the Usage page has a card of its own for,

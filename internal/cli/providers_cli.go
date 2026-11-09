@@ -33,6 +33,7 @@ const providerUsage = `usage:
   magpie provider <id>                    show one provider and its models
   magpie provider add <preset> <key>      add a preset vendor   e.g. magpie provider add deepseek sk-…
                                           again, it adds another (deepseek-2); k=v pairs too: id, name, header.X-Foo
+  magpie provider add opencode-go|opencode-zen   sign in to OpenCode Console with OAuth, without an API key
   magpie provider add <name> k=v…         add a custom vendor   k: url, anthropic, responses, gemini, decide, key, models, catalog, icon, header.X-Foo, balance, balance.path, balance.method, balance.token, models.url, list, search, user-agent,
                                           access.key, access.secret (a Volcengine access key, or a Tencent Cloud SecretId and SecretKey, for its plan's windows)
   magpie provider set <id> k=v…           change a provider's settings, with the same k=v pairs as add;
@@ -343,7 +344,7 @@ func presets() error {
 			name += " " + faint.Render("sponsored")
 		}
 		state := muted.Render("magpie provider add " + pr.ID + " <key>")
-		if pr.NoKey {
+		if pr.NoKey || pr.OAuth {
 			state = muted.Render("magpie provider add " + pr.ID)
 		}
 		if pr.ID == provider.VertexPreset {
@@ -515,6 +516,11 @@ func providerCmd(args []string) error {
 		}
 		if p.IsVertex() {
 			return fmt.Errorf("%s is asked with your Google credentials, not an API key · magpie provider set %s credentials=<file> impersonate=<service account> changes them", p.Name, p.ID)
+		}
+		if p.Account != nil {
+			if pr := provider.Preset(p.Account.Agent); pr != nil && pr.OAuth {
+				return fmt.Errorf("%s uses OAuth; sign in again with magpie accounts add %s", p.Name, pr.ID)
+			}
 		}
 		p.Key = rest[1]
 		if err := provider.Save(*p); err != nil {
@@ -781,6 +787,12 @@ func addProvider(rest []string) error {
 			return err
 		}
 		return announce(strings.ToLower(rest[0]))
+	}
+	if pr := provider.Preset(strings.ToLower(rest[0])); pr != nil && pr.OAuth {
+		if len(rest) != 1 {
+			return fmt.Errorf("%s signs in with OAuth, not an API key; run magpie provider add %s, then change its settings with magpie provider set", pr.Name, pr.ID)
+		}
+		return addAccount(pr.ID)
 	}
 	var p provider.Provider
 	if pr, err := provider.FromPreset(strings.ToLower(rest[0])); err == nil {
@@ -1128,6 +1140,11 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 				p.KeysURL = r.KeysURL
 			}
 		case "key":
+			if p.Account != nil {
+				if pr := provider.Preset(p.Account.Agent); pr != nil && pr.OAuth {
+					return fmt.Errorf("%s uses OAuth; sign in again with magpie accounts add %s", p.Name, pr.ID)
+				}
+			}
 			p.Key = v
 		case "catalog":
 			p.Catalog = v
