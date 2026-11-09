@@ -128,6 +128,39 @@ func startedByAgent(r *http.Request, agent string) bool {
 // "" leaves the model as asked. Set by main.
 var StandIn func(agent, model string) string
 
+// SetToGroup reports whether magpie set one of agent's fields to the
+// routing group gid ("group/<id>"): the user picked that found group for
+// the agent, so a bare model's name it asks for by (#750) stays on the
+// group rather than going to the agent's own subscription (ownFirst). Set
+// by main; nil reads as no.
+var SetToGroup func(agent, gid string) bool
+
+// ownFirst is where a bare model's id agent asks for goes when the agent's
+// own subscription in magpie serves it (provider.OwnRoute; freefcw on X:
+// Codex's gpt-6-astra went to Devin through the group magpie found, and
+// with found groups off to the first provider in the order). ok is false
+// for a key held to some models, whose own rules pick, and for a found
+// group magpie set the agent to.
+func ownFirst(r *http.Request, agent, m string) (string, bool) {
+	if _, held := keyHolds(r); held {
+		return "", false
+	}
+	to, group, ok := provider.OwnRoute(agent, m)
+	if !ok {
+		return "", false
+	}
+	if group != "" && SetToGroup != nil && SetToGroup(agent, group) {
+		return "", false
+	}
+	return to, true
+}
+
+// offSpreadRefused is the error for a bare model's id several providers
+// serve, none the agent's own, while found groups are off (provider.OffSpread).
+func offSpreadRefused(model string, ids []string) string {
+	return fmt.Sprintf("%q is served by %s in Magpie and auto groups are off, so Magpie picks none of them: ask for one by its provider/model id, or turn auto groups on (magpie group auto on)", model, strings.Join(ids, ", "))
+}
+
 // wiresKey carries the upstream names in force on a request's context: read
 // once where the request comes in rather than once per place a name is
 // looked up, since settings.Load reads and parses the whole file every call
@@ -1840,7 +1873,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	model, _ = askedAt(model) // counted as the model, whatever its effort
 	id := unprefixed(model)
-	if sid, ok := provider.AutoStandIn(id); ok {
+	if own, ok := ownFirst(r, agentOf(r), id); ok {
+		id = own // counted where serve sends it
+	} else if sid, ok := provider.AutoStandInFor(agentOf(r), id); ok {
 		id = sid
 	}
 	pick := desktopSubagentPick(r, agentOf(r), named, id, body)
@@ -2409,10 +2444,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// spelling of a group's model (#750) — is that group, as asked for or
 	// as an agent's config names its stand-in
 	grouped := func(m string) string {
+		if id, ok := ownFirst(r, agent, m); ok {
+			// a bare name the agent's own subscription serves: there,
+			// before a group magpie found or another vendor
+			return id
+		}
 		if id, ok := keyGroupFor(r, m); ok {
 			return id
 		}
-		if id, ok := provider.AutoStandIn(m); ok {
+		if id, ok := provider.AutoStandInFor(agent, m); ok {
 			// a group magpie found, while the user has those off: its
 			// model from one provider, rather than refused
 			return id
@@ -2467,6 +2507,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	// any Claude Code subagent's turn, moved or not, for the Routing page's tag
 	subagentID := subagentTurnOf(r, call.Kind, body, desktopPick != nil || subagentEffort != "")
+	if _, held := keyHolds(r); !held {
+		// auto groups off: a bare name several vendors serve, none the
+		// agent's own, goes to none of them (freefcw on X)
+		if ids := provider.OffSpread(agent, asked); len(ids) > 0 {
+			call.Status, call.Error = 400, "model on several providers"
+			writeError(w, from, 400, offSpreadRefused(call.Model, ids))
+			turnedAway()
+			return
+		}
+	}
 	p, model, ok := provider.Resolve(asked)
 	// a model the user disabled (#1867) — asked by its id, the model a
 	// sub-agent was put on, a group with every model in it disabled — is
@@ -5289,7 +5339,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// a response the request named that magpie doesn't hold goes only to
 	// a provider it is relayed to as written (prev_response.go): Claude's
 	// and the ChatGPT backend's accounts drop it, as a translation does
-	noteAnswered(r, "")
+	noteAnswered(r, "", "")
 	if id := prevLost(r); id != "" && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "codex") {
 		return writePrevNotFound(w, id)
 	}
@@ -6435,10 +6485,15 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	// the new input alone, after the id the provider keeps the previous
 	// response under, when it answered that one (prev_response.go)
-	sentWhole, delta := body, false
+	// and when not, the items it brought back without the ids that name
+	// them where they were made, when that was another provider or key
+	asSent, sentWhole, delta := body, body, false
 	var remote *remoteTurn
 	if proto == provider.Responses {
-		body, delta = prevDelta(r, p, body)
+		sentWhole = prevElsewhere(r, p, body, false)
+		if body, delta = prevDelta(r, p, body); !delta {
+			body = sentWhole
+		}
 		// and to another magpie, which Codex's store false would leave
 		// sent whole each turn: asked to keep it, and sent the input after
 		// the turn it kept last (remote_delta.go)
@@ -6470,14 +6525,24 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 		}
 	}
-	if delta && badRequest(res.StatusCode) || delta && res.StatusCode == http.StatusNotFound {
-		// one it no longer holds: the conversation whole
+	if (delta || proto == provider.Responses && prevHeld(r)) && (badRequest(res.StatusCode) || res.StatusCode == http.StatusNotFound) {
+		// one it no longer holds: the conversation whole; and one another
+		// of its resources made (prevForeign): the whole, with the items
+		// magpie brought back naming nothing. Asked again once, and only
+		// with a body that differs.
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
-		if prevRefused(res.StatusCode, b) {
-			body = sentWhole
-			if remote != nil {
+		next := body
+		switch {
+		case proto == provider.Responses && prevForeign(res.StatusCode, b):
+			next = prevElsewhere(r, p, asSent, true)
+		case delta && prevRefused(res.StatusCode, b):
+			next = sentWhole
+		}
+		if !bytes.Equal(next, body) {
+			body = next
+			if delta && remote != nil {
 				remote.refused()
 			}
 			if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
@@ -6485,8 +6550,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 		}
 	}
-	if proto == provider.Responses && prevKeptBy(p) && !storeOff(body) {
-		noteAnswered(r, prevRoute(p))
+	if proto == provider.Responses {
+		route := ""
+		if prevKeptBy(p) && !storeOff(body) {
+			route = prevRoute(p)
+		}
+		noteAnswered(r, route, prevRoute(p))
 	}
 	if res.StatusCode >= 400 && p.PassesErrors() {
 		// the user leaves its errors to the client (errors=pass): the
