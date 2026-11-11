@@ -17850,7 +17850,7 @@ function resetsWords(r, q) {
     if (!parts.length && r.pending) parts.push(t("Reset confirmation pending"));
     w.append(el("span", "resets-n", "↺ " + parts.join(" · ")));
     // a GLM Coding plan's resets, a team's or the person's own (#1191)
-    w.title = r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
+    w.title = r.source === "zcode" ? t("ZCode account…") : r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
     if (r.until) {
       const at = new Date(r.until);
       w.append(el("span", "resets-until", " · " + t("until {when}", { when: resetClock(at) })));

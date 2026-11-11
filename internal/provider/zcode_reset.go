@@ -112,6 +112,7 @@ func (j zcodeResetJournal) valid() bool {
 type ZCodeResetState struct {
 	Source            string           `json:"source"`
 	Available         bool             `json:"available"`
+	Team              bool             `json:"team,omitempty"`
 	Error             string           `json:"error,omitempty"`
 	FiveHour          []float64        `json:"fiveHour,omitempty"`
 	Week              []float64        `json:"week,omitempty"`
@@ -141,6 +142,34 @@ func resetState(w zcodeResetWire, j zcodeResetJournal) ZCodeResetState {
 			out.Pending = "observed-completion"
 		}
 	}
+	return out
+}
+
+// The standard allowance cards and account summaries use ResetCredits.
+// Keep the account operation's pending state separate; these are inventory,
+// never permission to spend a reset through the Codex controls.
+func zcodeResetCredits(state ZCodeResetState) *ResetCredits {
+	if !state.Available {
+		return nil
+	}
+	out := &ResetCredits{
+		Source: "zcode", ByWindow: true, Team: state.Team,
+		Count:    len(state.FiveHour) + len(state.Week),
+		FiveHour: len(state.FiveHour), Weekly: len(state.Week),
+		Each: make([]ResetCard, 0, len(state.FiveHour)+len(state.Week)),
+	}
+	add := func(window string, expiries []float64) {
+		for _, expiry := range expiries {
+			until := time.UnixMilli(int64(expiry)).UTC()
+			out.Each = append(out.Each, ResetCard{Window: window, Until: &until})
+			if out.Until == nil || until.Before(*out.Until) {
+				out.Until = &until
+			}
+		}
+	}
+	add("fiveHour", state.FiveHour)
+	add("weekly", state.Week)
+	sortResetCards(out.Each)
 	return out
 }
 
@@ -331,7 +360,9 @@ func ZCodeResetStatus(ctx context.Context, providerID, account string, opportuni
 	if c.Kind != "individual" && c.Kind != "team" {
 		return ZCodeResetState{}, errors.New("native reset is unavailable for this account; sign in to a Coding Plan")
 	}
-	return zcodeResetStatus(ctx, providerID, key, c, opportunity)
+	state, err := zcodeResetStatus(ctx, providerID, key, c, opportunity)
+	state.Team = c.Kind == "team"
+	return state, err
 }
 
 func zcodeResetStatus(ctx context.Context, providerID, key string, c plugin.AccountContext, opportunity bool) (ZCodeResetState, error) {

@@ -27,11 +27,12 @@ import (
 type ResetCredits struct {
 	Count int        `json:"count"`
 	Until *time.Time `json:"until,omitempty"`
-	// Source identifies a plugin's separate read-only legacy reset list.
+	// Source identifies native ZCode inventory or a separate read-only
+	// legacy reset list; neither uses the Codex spending controls.
 	Source string `json:"source,omitempty"`
 	// ByWindow: each reset is for one window, FiveHour of the five hours'
-	// and Weekly of the week's, and is spent on the vendor's own page (a
-	// GLM Coding team plan's, zcode_team.go), not from magpie
+	// and Weekly of the week's. A legacy GLM list is read-only; native
+	// ZCode uses its account-bound controls, never the Codex controls.
 	ByWindow bool `json:"byWindow,omitempty"`
 	FiveHour int  `json:"fiveHour,omitempty"`
 	Weekly   int  `json:"weekly,omitempty"`

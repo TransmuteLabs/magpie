@@ -218,8 +218,8 @@ type SubscriptionQuota struct {
 	// minute's, or a Claude account's until Claude Code tells it again)
 	// can hand back long after; nil when not known.
 	ReadAt *time.Time `json:"readAt,omitempty"`
-	// Resets are the rate-limit resets a Codex account holds, nil when it
-	// holds none (codex_resets.go).
+	// Resets are the account's rate-limit reset inventory, including
+	// window-specific ZCode resets. Spending remains provider-specific.
 	Resets *ResetCredits `json:"resets,omitempty"`
 	// ZCodeReset is the account service's availability and pending state;
 	// it is distinct from any legacy reset-list observation.

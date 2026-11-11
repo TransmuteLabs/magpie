@@ -29,6 +29,15 @@ func TestZCodeResetAcrossPluginHost(t *testing.T) {
 	if err != nil || !state.Available || len(state.FiveHour) != 1 {
 		t.Fatalf("status=%+v err=%v", state, err)
 	}
+	card := pluginLoginQuota(ctx, Login{Agent: "plugin:zcode", User: PluginAccountUser("zcode", account)})
+	resets := card.Resets
+	if card.Error != "" || card.ZCodeReset == nil || len(card.ZCodeReset.FiveHour) != 1 ||
+		resets == nil || resets.Source != "zcode" || !resets.ByWindow ||
+		resets.Count != 2 || resets.FiveHour != 1 || resets.Weekly != 1 || len(resets.Each) != 2 ||
+		resets.Each[0].Window != "fiveHour" || resets.Each[1].Window != "weekly" || resets.Until == nil ||
+		resets.Until.UnixMilli() != int64(card.ZCodeReset.FiveHour[0]) {
+		t.Fatalf("native inventory is missing from the standard allowance card: error=%s state=%+v resets=%+v", card.Error, card.ZCodeReset, resets)
+	}
 	fenced := WithZCodeAccountExpectation(ctx, captured.Context.Scope, captured.Context.Generation)
 	state, err = UseZCodeReset(fenced, PluginID("zcode"), account, "five-hour")
 	if err != nil || state.Pending != "" || state.Last == nil {

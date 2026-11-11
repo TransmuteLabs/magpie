@@ -409,15 +409,16 @@ function zcodeResetRow(q) {
   const r = q.zcodeReset, row = el("div", "quota-resets zcode-resets");
   if (!r.available) {
     row.append(el("span", "", t("ZCode reset unavailable") + (r.error ? ": " + r.error : "")));
-  } else {
+  } else if (!q.resets?.count) {
     row.append(el("span", "", t("ZCode resets: {five} five-hour · {week} weekly", {
       five: r.fiveHour?.length || 0, week: r.week?.length || 0,
     })));
   }
+  const separator = row.childElementCount ? " · " : "";
   if (r.pending) {
-    row.append(el("span", "", " · " + t(r.pending === "observed-completion"
+    row.append(el("span", "", separator + t(r.pending === "observed-completion"
       ? "Completion observed; its cause is uncertain" : "Reset outcome unconfirmed")));
-  } else if (r.available && r.last) row.append(el("span", "", " · " + t("Completion observed")));
+  } else if (r.available && r.last) row.append(el("span", "", separator + t("Completion observed")));
   if (hasZCodeUser(q)) row.append(zcodeAccountEntry(q));
   return row;
 }

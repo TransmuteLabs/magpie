@@ -32,6 +32,9 @@ func TestRemoveListedAccountLeavesHiddenNamesake(t *testing.T) {
 	if len(ls) != 1 || ls[0].Own {
 		t.Fatalf("listed %+v, want the one magpie signed in", ls)
 	}
+	if ls[0].User != "dev@z" {
+		t.Fatalf("a hidden namesake renamed the visible account and detached its menu bar card: %q", ls[0].User)
+	}
 	if err := ForgetLogin("zcode", ls[0].User); err != nil {
 		t.Fatal(err)
 	}

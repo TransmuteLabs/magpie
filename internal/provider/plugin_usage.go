@@ -133,6 +133,9 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 			state.Source, state.Error = "zcode", err.Error()
 		}
 		q.ZCodeReset = &state
+		if state.Available {
+			q.Resets = zcodeResetCredits(state)
+		}
 	}
 	// a wallet's spend counted, for a cap to hold it (#5770)
 	return withWalletSpend(q, l.User, time.Now())

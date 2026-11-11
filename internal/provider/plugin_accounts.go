@@ -47,7 +47,7 @@ func publicPlugin(pp plugin.Provider) bool {
 // are left unread then (discovery.go), so the first is in use and every
 // one is on.
 func publicLogins(pp plugin.Provider) []pluginLogin {
-	agent, labels := pluginAgent(pp), pluginLabels(pp, nil)
+	agent, labels := pluginAgent(pp), pluginLabels(pp, nil, nil)
 	var out []pluginLogin
 	for _, a := range pp.Accounts {
 		saved := savedLogin{Agent: agent, User: labels[a.Key], Home: a.Key, On: true}
@@ -67,11 +67,11 @@ func (p Provider) publicAccount() bool {
 
 // pluginLabels names each account: by named (the agent's own, as the
 // agent is signed in now), else its id, else the end of its key, else what
-// it signed in with; a name two share gets the account's slot. The slot
+// it signed in with; a name two visible accounts share gets the slot. The slot
 // goes on after the own name, so the own account never reads as another
 // signed in to the same one (dev on Discord: ZCode's, its id "ZCode",
 // named as one magpie signed in, and Remove on that one took the own).
-func pluginLabels(pp plugin.Provider, named map[string]string) map[string]string {
+func pluginLabels(pp plugin.Provider, named map[string]string, hidden map[string]bool) map[string]string {
 	out := map[string]string{}
 	seen := map[string]int{}
 	for _, a := range pp.Accounts {
@@ -89,10 +89,12 @@ func pluginLabels(pp plugin.Provider, named map[string]string) map[string]string
 			l = "Signed in"
 		}
 		out[a.Key] = l
-		seen[strings.ToLower(l)]++
+		if !hidden[a.Key] {
+			seen[strings.ToLower(l)]++
+		}
 	}
 	for _, a := range pp.Accounts {
-		if seen[strings.ToLower(out[a.Key])] > 1 {
+		if !hidden[a.Key] && seen[strings.ToLower(out[a.Key])] > 1 {
 			if _, slot, ok := strings.Cut(a.Key, "#"); ok {
 				out[a.Key] += " (" + slot + ")"
 			}
@@ -104,8 +106,38 @@ func pluginLabels(pp plugin.Provider, named map[string]string) map[string]string
 // pluginNames is pluginLabels as the accounts list names them, the
 // agent's own as the agent is signed in now.
 func pluginNames(pp plugin.Provider) map[string]string {
-	_, named := pluginOwnNames(pp)
-	return pluginLabels(pp, named)
+	own, named := pluginOwnNames(pp)
+	mark := ""
+	if len(own) > 0 {
+		mark = ownMark(pp.ID)
+	}
+	labels, _ := pluginAccountLabels(pp, own, named, mark, sharedLogins())
+	return labels
+}
+
+// Hidden accounts do not rename the only visible account beside them.
+// Decide which own accounts reappear before disambiguating the visible names,
+// using the same sign-in mark as the account reconciliation below.
+func pluginAccountLabels(pp plugin.Provider, own map[string]bool, named map[string]string, mark string, ls []savedLogin) (map[string]string, map[string]bool) {
+	labels := pluginLabels(pp, named, nil)
+	agent := pluginAgent(pp)
+	var hidden map[string]bool
+	for _, l := range ls {
+		if l.Agent != agent || l.Hidden == "" {
+			continue
+		}
+		if own[l.Home] && (mark != "" && mark != l.Hidden || mark == "" && l.Hidden == hiddenNoMark && l.User != labels[l.Home]) {
+			continue
+		}
+		if hidden == nil {
+			hidden = map[string]bool{}
+		}
+		hidden[l.Home] = true
+	}
+	if len(hidden) > 0 {
+		labels = pluginLabels(pp, named, hidden)
+	}
+	return labels, hidden
 }
 
 // pluginOwnNames tells the provider's accounts that are the agent's own,
@@ -297,10 +329,10 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 	if len(own) > 0 {
 		mark = ownMark(pp.ID)
 	}
-	labels := pluginLabels(pp, named)
 	// looked at as kept, and copied only at the first change: nearly
 	// every list changes nothing, and a page's state lists each plugin's
 	settle := func(ls []savedLogin) ([]savedLogin, bool) {
+		labels, hidden := pluginAccountLabels(pp, own, named, mark, ls)
 		changed := false
 		have := map[string]bool{}
 		var keep []savedLogin
@@ -317,7 +349,7 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 					}
 					// the agent's own, hidden, shows again once the agent signs
 					// in anew: told by its sign-in's mark, else by another account
-					if l.Hidden != "" && own[l.Home] && (mark != "" && mark != l.Hidden || mark == "" && l.Hidden == hiddenNoMark && renamed) {
+					if l.Hidden != "" && own[l.Home] && !hidden[l.Home] {
 						l.Hidden, edit = "", true
 					}
 				}

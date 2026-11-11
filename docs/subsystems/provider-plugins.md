@@ -117,6 +117,21 @@ account maps old debt; unmappable debt blocks new reset grants and debits,
 never initializes as an empty history. Restarting or signing in again does
 not erase an unanswered financial operation.
 
+Native reset inventory also populates the standard `resets` summary on
+Usage cards, account rows and the tray panel, including each window and
+expiry. `zcodeReset` independently retains availability and uncertain
+operation state. Its `byWindow` summary never enables Codex's use or
+auto-use controls; mutations still require the captured ZCode account
+context. An unavailable native service does not promote a legacy list to
+financial authority.
+
+Hidden account slots do not disambiguate the sole visible account's
+display name. Visible namesakes still retain their slot suffixes, and an
+own account reappears only under the existing sign-in-mark rules. This
+keeps a stored menu-bar card selection attached when the old hidden
+ZCode app login shares the new visible login's name, without merging
+their credentials or changing the user's tray selections.
+
 Status and opportunity run on the existing quota refresh. A reset is
 manual, names one account and one window, and must match the context shown
 before confirmation. Acceptance is not completion: an unknown result

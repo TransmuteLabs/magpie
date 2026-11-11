@@ -6,6 +6,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPart } = require("./reader.cjs");
 const assets = path.resolve(__dirname, "../assets");
 const user = "alice@example.test";
 const expiry = Date.now() + 86400000;
@@ -21,15 +22,22 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     let generation = "epoch-a", behavior = "stale", pending = false;
     const captured = () => ({ scope: "scope-alice-personal", generation, origin: "https://zcode.z.ai", family: "zai", userId: "alice-id", kind: "individual" });
     const reset = () => ({ source: "zcode", available: true, fiveHour: [expiry], week: [expiry], ...(pending ? { pending: "unconfirmed", pendingWindow: "week" } : {}) });
+    const quota = () => ({
+      provider: "zcode", name: "ZCode", icon: "zcode", user, plan: "GLM Coding Pro",
+      windows: [{ name: "5 hours", used: 17, remaining: 83, resetsAt: new Date(expiry).toISOString() }],
+      resets: { source: "zcode", count: 2, byWindow: true, fiveHour: 1, weekly: 1, until: new Date(expiry).toISOString(),
+        each: [{ window: "fiveHour", until: new Date(expiry).toISOString() }, { window: "weekly", until: new Date(expiry).toISOString() }] },
+      zcodeReset: reset(),
+    });
     const provider = { id: "zcode", name: "ZCode", icon: "zcode", models: [{ id: "GLM-5.3", on: true }], agents: [], fallback: [], headers: {}, keyList: [], account: { agent: "zcode", builtin: "zcode", agentName: "ZCode", user, plan: "GLM Coding Pro", logins: [{ user, active: true, on: true }] } };
     page.on("pageerror", (error) => errors.push(error.message));
     await page.route("**/*", async (route) => {
       const request = route.request(), url = new URL(request.url());
       const json = (value) => route.fulfill({ json: value });
-      if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs={lang:"en",theme:"light",web:true};' });
+      if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs={lang:"en",theme:"light",web:false};' });
       if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window={};" });
       if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang: "en", theme: "light", quotaLeft: true } });
-      if (url.pathname === "/api/settings") return json({ lang: "en", theme: "light", quotaLeft: true, version: "fixture", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", fx: { rate: 1, stale: false } });
+      if (url.pathname === "/api/settings") return json({ lang: "en", theme: "light", quotaLeft: true, tray: "panel", trayUsages: ["zcode|" + user], version: "fixture", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", fx: { rate: 1, stale: false } });
       if (url.pathname === "/api/providers") return json({ providers: [provider], presets: [], excluded: [], onPlugins: [], plugins: [{ id: "zcode", pid: "zcode", name: "ZCode", spec: "builtin:zcode", methods: [{ type: "oauth", label: "ZCode: Z.ai GLM Coding Plan" }], signedIn: true }], gateway: { running: true, window: true } });
       if (url.pathname === "/api/plugin-signin/prompt") return json({});
       if (url.pathname === "/api/plugin-signin") {
@@ -40,7 +48,8 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
         legacySignins.push(request.postDataJSON());
         return json({ agent: "zcode", state: "failed", error: "Retired built-in sign-in must not run" });
       }
-      if (url.pathname === "/api/login/usage") return json({ [user]: { provider: "zcode", user, windows: [], zcodeReset: reset() } });
+      if (url.pathname === "/api/login/usage") return json({ [user]: quota() });
+      if (url.pathname === "/api/usage/quotas") return json([quota()]);
       if (url.pathname === "/api/usage/zcode-accounts") return json({ available: true, accounts: [{ provider: "zcode", account: "zcode", user, name: "ZCode" }] });
       if (url.pathname === "/api/usage/zcode-account") {
         const input = request.postDataJSON();
@@ -125,5 +134,35 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     }
     await sheet.getByRole("button", { name: "Close", exact: true }).click();
     await sheet.waitFor({ state: "detached" });
+
+    await page.goto("http://magpie.test/?view=usage");
+    const summary = page.locator(".quota-resets .resets-words");
+    await summary.waitFor();
+    assert.equal(await summary.count(), 1);
+    assert.match(await summary.textContent(), /1 five-hour reset.*1 weekly reset/);
+    assert.match(await summary.getAttribute("title"), /Five-hour reset runs out/);
+    assert.doesNotMatch(await summary.getAttribute("title"), /used on bigmodel.cn or z.ai/);
+    assert.equal(await page.getByRole("button", { name: "Use a reset", exact: true }).count(), 0);
+    assert.equal(await page.locator(".zcode-resets").getByText("Reset outcome unconfirmed", { exact: false }).count(), 1);
+    assert.doesNotMatch(await page.locator(".zcode-resets").textContent(), /^\s*·/);
+    if (process.env.ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `zcode-usage-${engine}.png`) });
+
+    await page.locator("#prefs").click();
+    await openPart(page, "usage");
+    await page.locator("#trayUsagePick button").click();
+    const selected = page.locator(".proto-menu .pm-item", { hasText: "ZCode" });
+    await selected.waitFor();
+    assert.equal(await selected.getAttribute("aria-checked"), "true");
+    await page.keyboard.press("Escape");
+
+    await page.goto("http://magpie.test/?mode=panel");
+    await page.locator('#ptabs [data-ptab="usage"]').click();
+    const panel = page.locator(".pq-resets .resets-words");
+    await panel.waitFor();
+    assert.equal(await panel.count(), 1);
+    assert.match(await panel.textContent(), /1 five-hour reset.*1 weekly reset/);
+    assert.equal(changes.length, 2, "displaying reset inventory never spends another reset");
+    assert.deepEqual(errors, []);
+    if (process.env.ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `zcode-panel-${engine}.png`) });
   });
 }
