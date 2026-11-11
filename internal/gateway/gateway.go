@@ -2452,6 +2452,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if call.Kind == "" && factsOf(from, plain).compact {
 		call.Kind = KindCompact
 	}
+	// Claude Code's auto mode classifier and AgentSummary name themselves
+	// nowhere: told by their content, recorded as inferred
+	if call.Kind == "" {
+		call.Kind = inferredKind(r.Header, from, body)
+	}
 	// the reply counted as it reaches the agent, for the Routing page
 	// while it is out (#4951); learned from once it ends
 	capture.live = liveBegin(inflightOf(r.Context()), call.Model, from)
@@ -3052,6 +3057,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// (#954), as a group's member may be; its fallbacks, other
 			// models, go as they are
 			fastPick(cands, pl, p.ID, model, provider.IsUltraPick(agent, p.ID+"/"+model))
+		} else if tier := provider.ModelTier(p.ID, model); tier != "" {
+			// the speed the user gave the model in its Model settings, for
+			// every agent that has no pick of its own for it
+			fastPick(cands, pl, p.ID, model, tier == "ultrafast")
 		}
 	}
 	agentPick := provider.AgentEffort(agent)
