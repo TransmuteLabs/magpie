@@ -1,13 +1,16 @@
 name: Fork release
 
-# Свой конвейер обновлений форка: пуш тега v* собирает macOS arm64-приложение,
-# подписывает ad-hoc и публикует релиз с magpie-darwin-arm64.zip и latest.json.
-# latest.json — фид самообновления приложения (internal/update: Feed, AppAsset,
-# sameSigner): приложение с env
+# Свой конвейер обновлений форка. Пуш тега v* собирает приложение на всех
+# платформах и публикует релиз с ассетами и latest.json — фидом
+# самообновления (internal/update: Feed, AppAsset, BinaryAsset, sameSigner):
+# приложение с env
 #   MAGPIE_UPDATE_FEED=https://github.com/TransmuteLabs/magpie/releases/latest/download/latest.json
-# читает его, качает zip из того же релиза, сверяет SHA-256 и меняет себя.
-# Установленное приложение должно быть сборкой этого же конвейера (первая
-# установка вручную): sameSigner пускает только ту же подпись, ad-hoc -> ad-hoc.
+# читает его, качает ассет своей платформы из того же релиза, сверяет
+# SHA-256 и меняет себя.
+# macOS-приложение должно быть сборкой этого же конвейера (первая установка
+# вручную): sameSigner пускает только ту же подпись, ad-hoc -> ad-hoc.
+# workflow_dispatch собирает без релиза (артефакты рана), для ручной
+# установки и проверки.
 
 on:
   push:
@@ -35,9 +38,6 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # все теги: решить, самый ли новый этот (--latest)
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -54,16 +54,91 @@ jobs:
         run: |
           mkdir -p dist
           ditto -c -k --keepParent magpie.app dist/magpie-darwin-arm64.zip
-          ( cd dist && shasum -a 256 magpie-darwin-arm64.zip | awk '{print $1}' > magpie-darwin-arm64.zip.sha256 )
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-darwin-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    # WebView2 без cgo: обе архитектуры кросс-компилятся (Makefile,
+    # release-windows: go-winres, -H windowsgui, comlauncher)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build the app
+        run: make release-windows VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-windows
+          path: dist/magpie-windows-*.exe
+          if-no-files-found: error
+
+  linux:
+    # GUI линкует GTK 3 и WebKitGTK 4.1 через cgo — нативно, одна архитектура
+    # на машину (Makefile, release-linux); arm64-раннеры публичным репо бесплатны
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: GTK 3 and WebKitGTK 4.1 headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Build the app
+        run: make release-linux VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-linux-${{ matrix.arch }}
+          path: dist/magpie-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [app, windows, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # все теги: решить, самый ли новый этот (--latest)
+
+      - name: Gather the builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: magpie-*
+          path: dist
+          merge-multiple: true
 
       - name: latest.json
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           python3 - "$TAG" "$REPO" << 'PY'
-          import json, os, subprocess, sys
+          import glob, hashlib, json, os, subprocess, sys
           tag, repo = sys.argv[1], sys.argv[2]
           version = tag[1:] if tag.startswith("v") else tag
           tags = subprocess.run(
@@ -76,32 +151,27 @@ jobs:
               capture_output=True, text=True, check=True,
           ).stdout.strip()
           notes = log or version
-          sha = open("dist/magpie-darwin-arm64.zip.sha256").read().strip()
+          assets = {}
+          for path in sorted(glob.glob("dist/magpie-*")):
+              name = os.path.basename(path)
+              digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+              assets[name] = {
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+                  "size": os.path.getsize(path),
+                  "sha256": digest,
+              }
           feed = {
               "version": version,
               "notes": notes,
               "url": f"https://github.com/{repo}/releases/tag/{tag}",
-              "assets": {
-                  "magpie-darwin-arm64.zip": {
-                      "url": f"https://github.com/{repo}/releases/download/{tag}/magpie-darwin-arm64.zip",
-                      "size": os.path.getsize("dist/magpie-darwin-arm64.zip"),
-                      "sha256": sha,
-                  }
-              },
+              "assets": assets,
           }
           json.dump(feed, open("dist/latest.json", "w"), indent=2)
           open("dist/notes.md", "w").write(f"# {tag}\n\n{notes}\n")
+          print("assets:", ", ".join(sorted(assets)))
           PY
 
-      - name: Upload the build
-        uses: actions/upload-artifact@v4
-        with:
-          name: magpie-darwin-arm64
-          path: dist/*
-          if-no-files-found: error
-
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
@@ -111,5 +181,5 @@ jobs:
           # только наивысший тег забирает метку Latest (адрес фида
           # releases/latest/download/... ведёт по ней)
           if [ "$HIGHEST" = "$TAG" ]; then LATEST+=(--latest); fi
-          gh release create "$TAG" dist/magpie-darwin-arm64.zip dist/latest.json \
+          gh release create "$TAG" dist/magpie-* dist/latest.json \
             --title "$TAG" --notes-file dist/notes.md "${LATEST[@]}"
