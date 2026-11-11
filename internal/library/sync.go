@@ -821,6 +821,11 @@ func SaveServer(old string, s Server) (*Result, error) {
 			if s.DisabledTools == nil {
 				s.DisabledTools = l.MCP[i].DisabledTools
 			}
+			// so do the accounts, which have calls of their own
+			if s.Accounts == nil && s.Account == "" {
+				s.Accounts, s.Account = l.MCP[i].Accounts, l.MCP[i].Account
+				_ = s.checkAccounts()
+			}
 			// Older editors do not send pluginAccount. Only the explicit
 			// account control removes an existing binding.
 			if s.PluginAccount == nil && l.MCP[i].PluginAccount != nil {

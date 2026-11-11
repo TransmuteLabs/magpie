@@ -31,7 +31,7 @@ var Keys = []string{
 	"theme", "colorblind", "reduceMotion", "noBird", "lang", "uiFont", "codeFont",
 	// the tray, the Dock and this computer
 	"tray", "dock", "dockWindow", "dockNever", "lightweight", "keepAwake", "keepAwakeDisplay",
-	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk",
+	"noWSLAgents", "sessionTerminal", "signInLinkOnly", "quitNoAsk", "restoreOnQuit",
 	// the menu bar's allowance cards
 	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
 	// usage and alerts
@@ -241,6 +241,10 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	if _, sent := fields["quitNoAsk"]; !sent {
 		in.QuitNoAsk = cur.QuitNoAsk
 	}
+	// nor whether a quit puts the agents back as they were
+	if _, sent := fields["restoreOnQuit"]; !sent {
+		in.RestoreOnQuit = cur.RestoreOnQuit
+	}
 	// nor what a reply's model name says, which they sent as memberModel:
 	// a change of it is that, and else the name stays as it is (vendor
 	// too, which they can't show). memberModel itself is only ever
@@ -365,6 +369,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// in their Agents rows
 	in.CodexSubagentModel = cur.CodexSubagentModel
 	in.DesktopSubagentModel = cur.DesktopSubagentModel
+	in.DesktopGateway = cur.DesktopGateway     // Desktop's address, set in its row
 	in.CodexServiceTier = cur.CodexServiceTier // codex-service-tier
 	// and the model DeepSeek Harness compacts on, set in its row
 	in.DshCompactModel = cur.DshCompactModel

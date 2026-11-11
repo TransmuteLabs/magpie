@@ -1099,6 +1099,41 @@ each one.
     budget's history. 6cc182339 counts code only. When a guard keeps
     going red the same way, fix the guard's class; don't feed it
     another cut.
+  - A commit's message belongs to that commit: 16ed1a952 carries
+    d1a2e92e8's subject and body word for word (a hint card at the
+    pointer), while its diff is the plugin-page drag order: a new
+    route, a setting and two tests. Its run record names none of them,
+    and the new route wasn't named in the CLI route map, so
+    TestEveryRouteHasACommandOrIsNamed was red on main for hours
+    (#6162, fixed in 1c95c87c2). Before pushing, check that
+    `git show --stat` matches what the subject says.
+    The same day 85e6ec540 (the Paseo agent, 36 files, 887 lines out)
+    was committed on a stale index and took out the six commits before
+    it (WebView2, library skills, OpenCode Go endpoints, remote quotas);
+    its body records runs that passed on that tree. b52c71114 restored
+    them. A stat with files the change never touched is a stale index:
+    stop, don't push.
+  - A value added to a shared list re-runs every loop over it: ab5824aee
+    added "total" to access.Periods and ran internal/access, budget, cli
+    and provider. internal/gateway's
+    TestKeyLimitReservationsStayInTheirWindow loops over every period and
+    crosses each window's end, which a total window doesn't have, and
+    went red on CI (#6165, 535f0dd95). Grep the list's name across the
+    tree and run each package that reads it.
+  - A test that counts work counts that work, not the process's bytes:
+    efdca11be's TestPiGroupEntryKeepsItsMembers compared
+    runtime.MemStats.TotalAlloc, which every goroutine earlier tests left
+    running adds to. Alone it passed; after ~1,000 earlier tests in a full
+    run it was red (#6178, a bisect on mote showed no single test causes
+    it). 7b9ae7cf9 counts how often the group's members are found.
+  - The suite, a third commit the same day: 5a475f90c (OpenCode Go's
+    endpoints) and 0706d7a35 (#6160, an image row on ChatGPT cards) each
+    ran a `-run` of their own tests. TestAddSameKeyOtherFormat still
+    pinned Go's old URL, and TestQuotaSpanCarriesEveryWindowField and
+    TestKeptQuotaReportAsksNobody saw the new Lane and the new row, all
+    red on main until 7e8214d60. Two of them had issues (#4457, #6187)
+    with "still red" comments and no owner. A change to a package runs
+    that package whole.
 - **Done right on 10-17.** The retire stack (0f1666b38 to de671719a)
   diffed staticcheck's U1000 against its base for dead code, b98f906b1
   was red on the old code for an own-account gap, and 8 subscriptions

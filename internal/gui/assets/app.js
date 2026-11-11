@@ -505,7 +505,7 @@ function renderAgents() {
     const fields = el("div", "fields");
     const wide = (f) => f.label === "model" || f.label === "large" || f.label === "executor" || f.label === "planner";
     // a field with nothing to pick and nothing set isn't drawn (#1499)
-    const none = (f) => (f.key === "effort" || toggled(f) || f.label === "subagents" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === AUTO_MODE || f.label === MEMORIES || f.label === COMPACT_MODEL || f.label === "sign-in" || f.key === "small" || asideAccount(a, f)) && !f.options.length && !f.value;
+    const none = (f) => (f.key === "effort" || toggled(f) || f.label === "subagents" || f.label === "gateway" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === AUTO_MODE || f.label === MEMORIES || f.label === COMPACT_MODEL || f.label === "sign-in" || f.key === "small" || asideAccount(a, f)) && !f.options.length && !f.value;
     const shownFields = a.fields.filter((f) => !grouped(a, f) && !none(f) && !codexOwnSub(a, f) && !codexRowed(a, f) && !hermesBot(f));
     const tiers = tierMenu(a);
     if (tiers) shownFields.push(tiers);
@@ -6055,7 +6055,10 @@ $("#foldOff").onclick = () => {
 // One row per provider: logo, name, the agents pointed at it, key status.
 // Everything else lives in the editor, a dialog over the page.
 let providersBehind = false;
+// the readers of a pasted curl command or environment lines (pasteread.js)
+const pasteLoad = () => import("./pasteread.js").catch(() => {});
 function renderProviders(quiet) {
+  pasteLoad();
   if (accountArranging || providerArranging) { accountRenderPending = true; return; }
   providersBehind = false;
   // a rebuild clamps the scroll to the top: put it back
@@ -6739,6 +6742,7 @@ function copyBtn(text, what, message) {
 const decideEntry = (m) => !m.group && !!m.provider?.id && decidesModel(m.provider, m.id.slice(m.provider.id.length + 1));
 
 let segsMade = 0;
+const segsOO = (on, fn) => segs([["off", t("Off")], ["on", t("On")]], on ? "on" : "off", (v) => fn(v === "on"));
 function segs(items, current, onPick) {
   const box = el("div", "segs");
   const kind = items.map(([id]) => id).join("|");
@@ -7110,6 +7114,25 @@ function renderAdd() {
     if (q.value) { q.value = presetQuery = ""; drawTiles(); } else if (providers.providers.length) closeAddSheet();
   };
   q.oninput = () => { presetQuery = q.value; drawTiles(); };
+  // environment lines from a vendor's page (envOf) pasted here open a custom
+  // provider with the name, URL, API and key they give, and the icon of the
+  // site (WJaunita45604 on X); the key goes nowhere but into the draft
+  q.onpaste = (e) => {
+    const c = window.envOf?.(e.clipboardData?.getData("text") || "");
+    if (!c || !c.bases.length) return;
+    e.preventDefault();
+    const name = c.name || t("Custom provider");
+    const d = { id: slug(name), name, preset: "", chat: "", responses: "", anthropic: "", decide: "", catalog: "", key: c.key, api: c.api, chosen: [], extra: c.model ? [c.model] : [], headers: [], icon: "" };
+    for (const [a, base] of c.bases) d[apiField[a]] = base;
+    editing = { custom: true }; draft = d; presetQuery = "";
+    renderProviders();
+    // the site's own icon, when it has one; the draft may be gone by then
+    api("icons/favicon", { url: c.base, name }).then((r) => {
+      if (draft !== d || !r?.icon) return;
+      d.icon = r.icon;
+      renderProviders(true);
+    }).catch(() => {});
+  };
   const c = el("button", "text custom" + (editing?.custom ? " on" : ""));
   c.append(svg(PLUS, 11, 1.8), t("Custom provider"));
   c.dataset.pick = "custom";
@@ -9670,19 +9693,25 @@ function drawEditor(p, presetID) {
   key.oninput = () => { draft.key = key.value; countKeys(); };
   // a pasted curl command fills the form (@mark_li21 on X)
   const fromCurl = (e) => {
-    const c = curlOf(e.clipboardData?.getData("text") || "");
+    const text = e.clipboardData?.getData("text") || "";
+    const c = window.curlOf?.(text) || window.envOf?.(text);
     if (!c) return false;
+    const env = !!c.bases;
     e.preventDefault();
     const took = [], notes = [];
-    if (curlBase && c.api) { curlBase(c.api, c.base); took.push(t("Base URL") + " (" + t(API_NAMES[c.api]) + ")"); }
-    // no key box when keys are Accounts: none taken unseen
-    if (c.key && key.isConnected) { key.value = draft.key = c.key; countKeys(); took.push(t("API key")); }
+    if (curlBase) {
+      for (const [api, base] of env ? c.bases : c.api ? [[c.api, c.base]] : []) {
+        curlBase(api, base);
+        took.push(t("Base URL") + " (" + t(API_NAMES[api]) + ")");
+      }
+    }
+    if (c.key) { key.value = draft.key = c.key; countKeys(); took.push(t("API key")); }
     if (curlModel && c.model) { curlModel(c.model); took.push(t("model {model}", { model: c.model })); }
-    if (took.length) notes.push(t("Filled in from the curl command: {what}.", { what: took.join(" · ") }));
+    if (took.length) notes.push(env ? t("Filled in from the pasted text: {what}.", { what: took.join(" · ") }) : t("Filled in from the curl command: {what}.", { what: took.join(" · ") }));
     if (curlBase && !c.api) notes.push(t("Its URL isn't an address ending in /chat/completions, /messages or /responses: type the base URL."));
     if (curlBase && c.urlHole) notes.push(t("Replace {part} in the base URL.", { part: c.urlHole }));
     if (c.placeholder) notes.push(t("Its key, {key}, only stands for one: paste your own API key.", { key: c.placeholder }));
-    if (!c.key) shown(key)?.focus(NO_SCROLL);
+    if (!c.key) shown(key)?.focus({ preventScroll: true });
     editorError(notes.join(" "), "note");
     return true;
   };
@@ -9999,6 +10028,8 @@ function drawEditor(p, presetID) {
       ...field(idName, ak, ""),
       ...field(secretName, pair, tc
         ? t("Token Plan Enterprise's usage is told only to the Tencent Cloud account's API key (console → Access management → API keys), not to the plan's API key. Give its SecretId and SecretKey here for the Usage page to show it; a sub-user's key that may read TokenHub is enough. It is used for nothing else.")
+        : access.vendor === "alibaba"
+        ? t("The plan's usage is told only to the Alibaba Cloud account's AccessKey (console → AccessKey), not to the plan's API key. Give its AccessKey ID and Secret here for the Usage page to show it; a RAM user that may use Model Studio is enough. It is used for nothing else.")
         : t("The plan's 5-hour, weekly and monthly windows are told only to the account's access key (Volcengine console → API Access Keys), not to the plan's API key. Give it here for the Usage page to show them; it is used for nothing else.")),
     ];
     ed.append(...rows);
@@ -11273,7 +11304,7 @@ function renderModels(p) {
     // the API it was asked on said, where the answer says (01huadalang:
     // 右键选择测试只能测试出是不是通的，不能说什么协议是通的)
     const via = x?.protocol ? apiLabel(x.protocol) : "";
-    c.title = !x ? t("Testing…") : x.ok ? (via ? t("Answered via {api} in {took}", { api: via, took: ledTook(x.ms) }) : t("Answered in {took}", { took: ledTook(x.ms) })) : (via ? via + " · " : "") + (x.status ? x.status + " · " : "") + x.error;
+    c.title = !x ? t("Testing…") : x.ok && x.queued ? x.queued : x.ok ? (via ? t("Answered via {api} in {took}", { api: via, took: ledTook(x.ms) }) : t("Answered in {took}", { took: ledTook(x.ms) })) : (via ? via + " · " : "") + (x.status ? x.status + " · " : "") + x.error;
   };
   // a chip's right-click tests that model alone (yonghe); off, saying why, where it can't be (ARNO)
   const noTest = modelTestWhy(p);
@@ -14477,7 +14508,8 @@ function quotaText(w) {
   if (w.balance != null) return t("{n} left", { n: (countFormat.format(w.balance) + " " + t(w.unit || "")).trim() });
   // a text row used 100 is Claude's overages (claudeOveragesWindow): "In use", said in the reader's language
   if (w.text && w.used >= 100) return t("In use");
-  if (quotaNoShare(w)) return w.display || t("No allowance reported");
+  // a Text row's display is said in the reader's language (the image row's "Used up" and "Unknown", #6160)
+  if (quotaNoShare(w)) return t(w.display || "No allowance reported");
   const used = to100(w.used);
   const n = quotaLeft ? 100 - used : used;
   const pct = t(quotaLeft ? "{n} left" : "{n} used", { n: (Number.isInteger(n) ? n : n.toFixed(1)) + "%" });
@@ -15427,80 +15459,6 @@ function respellURL(u, api) {
   if (api === "decide") u = u.replace(/\/systemone$/, "");
   if (api === "gemini") return /^https?:\/\/[^/]+\/v1$/.test(u) ? u + "beta" : /^https?:\/\/[^/]+$/.test(u) ? u + "/v1beta" : u;
   return /\/v\d+[a-z]*$/.test(u) || !/^https?:\/\/[^/]+$/.test(u) ? u : u + "/v1";
-}
-
-// curlOf reads a pasted curl command (@mark_li21) into the editor's API,
-// base URL, key and model; a stand-in key ($KEY, <API_KEY>) is the
-// placeholder; null if it isn't curl
-function curlOf(text) {
-  let s = String(text || "").trim();
-  const head = /^curl(?:\.exe)?(?=\s)/i.exec(s);
-  if (!head) return null;
-  const cmd = /\^[ \t]*\r?\n/.test(s), ps = /`[ \t]*\r?\n/.test(s) || /^curl\.exe/i.test(s);
-  s = s.slice(head[0].length).replace(/(?:\\|\^|`)[ \t]*\r?\n/g, " ");
-  // the words as the shell hands them to curl: quotes taken off, escapes read
-  const words = [];
-  let w = null;
-  for (let i = 0; i < s.length;) {
-    const c = s[i];
-    if (/\s/.test(c)) { if (w !== null) words.push(w); w = null; i++; continue; }
-    w ??= "";
-    if (c === "'") {
-      // PowerShell doubles a quote inside single quotes
-      let j = i + 1;
-      for (;;) {
-        const k = s.indexOf("'", j);
-        if (k < 0) { w += s.slice(j); i = s.length; break; }
-        if (ps && s[k + 1] === "'") { w += s.slice(j, k) + "'"; j = k + 2; continue; }
-        w += s.slice(j, k); i = k + 1; break;
-      }
-    } else if (c === '"') {
-      for (i++; i < s.length && s[i] !== '"'; i++) {
-        const esc = (s[i] === "\\" && /["\\$`]/.test(s[i + 1] || "")) || (ps && s[i] === "`");
-        if (esc) i++;
-        w += s[i] ?? "";
-      }
-      i++;
-    } else if ((c === "\\" && !cmd && !ps) || (c === "^" && cmd)) { w += s[i + 1] ?? ""; i += 2; }
-    else { w += c; i++; }
-  }
-  if (w !== null) words.push(w);
-  // the options curl reads a value after; the others stand alone
-  const valued = /^(-[HdXuoAeFbcmT]|--(header|data|data-raw|data-binary|data-ascii|data-urlencode|json|request|url|user|output|user-agent|referer|form|cookie|max-time|connect-timeout|proxy|upload-file|retry|cert|key|cacert))$/;
-  let url = "", body = "";
-  const headers = [];
-  for (let i = 0; i < words.length; i++) {
-    const x = words[i];
-    let opt = x, val = null;
-    if (/^-[Hd]./.test(x)) { opt = x.slice(0, 2); val = x.slice(2); }
-    else if (valued.test(x)) val = words[++i] ?? "";
-    else if (x.startsWith("-")) continue;
-    else { if (!url) url = x; continue; }
-    if (opt === "-H" || opt === "--header") headers.push(val);
-    else if (opt === "--url") url = val;
-    else if (/^(-d|--data(-raw|-binary|-ascii)?|--json)$/.test(opt) && !val.startsWith("@")) body = val;
-  }
-  const out = { url, api: "", base: "", urlHole: "", key: "", placeholder: "", model: "" };
-  const at = /^(https?:\/\/[^?#]*?)\/*(\/chat\/completions|\/messages|\/responses)\/*(?:[?#].*)?$/i.exec(url);
-  if (at) {
-    out.api = { "/chat/completions": "openai", "/messages": "anthropic", "/responses": "responses" }[at[2].toLowerCase()];
-    out.base = respellURL(at[1], out.api);
-    out.urlHole = (/\{[^}]*\}|<[^>]*>|\$\{?\w+\}?|%\w+%/.exec(out.base) || [""])[0];
-  }
-  for (const h of headers) {
-    const m = /^\s*(authorization|x-api-key|api-key)\s*:\s*(.*?)\s*$/i.exec(h);
-    if (!m) continue;
-    const v = m[1].toLowerCase() === "authorization" ? m[2].replace(/^bearer\s+/i, "") : m[2];
-    if (!v) continue;
-    if (/^\$|^%\w+%$|^<.*>$|^\{\{.*\}\}$|^\[.*\]$|your[_-]?|api[_-]?key|x{6,}|\.\.\.|…/i.test(v)) out.placeholder = v;
-    else out.key = v;
-    break;
-  }
-  // a body for PowerShell 5 often escapes its quotes for curl.exe: '{\"model\": …}'
-  for (const b of [body, body.replace(/\\"/g, '"')]) {
-    try { const j = JSON.parse(b); if (typeof j?.model === "string") out.model = j.model.trim(); break; } catch {}
-  }
-  return out;
 }
 
 // renderMove: a built-in subscription a community plugin can run — which
@@ -20036,11 +19994,11 @@ function renderSettings() {
   renderFonts(s);
   $("#themeSegs").replaceChildren(segs(THEMES.map(([id, name]) => [id, t(name)]), s.theme, (theme) => savePrefs({ ...keep, theme })));
   $("#colorblindSegs").title = t("Colorblind-safe chart colors, and each allowance window's line in a dash of its own");
-  $("#colorblindSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.colorblind ? "on" : "off", (v) => savePrefs({ ...keep, colorblind: v === "on" })));
+  $("#colorblindSegs").replaceChildren(segsOO(s.colorblind, (v) => savePrefs({ ...keep, colorblind: v })));
   $("#reduceMotionSegs").title = t("Animations stand still, as with the system's Reduce Motion, so magpie keeps the computer less busy");
-  $("#reduceMotionSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.reduceMotion ? "on" : "off", (v) => savePrefs({ ...keep, reduceMotion: v === "on" })));
+  $("#reduceMotionSegs").replaceChildren(segsOO(s.reduceMotion, (v) => savePrefs({ ...keep, reduceMotion: v })));
   $("#birdSegs").title = t("magpie's bird hops on what is still loading; Off keeps it away, and magpie stops looking for it");
-  $("#birdSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.noBird ? "off" : "on", (v) => savePrefs({ ...keep, noBird: v === "off" })));
+  $("#birdSegs").replaceChildren(segsOO(!s.noBird, (v) => savePrefs({ ...keep, noBird: !v })));
   renderLangPick(s, keep);
   renderGatewayMode(s);
   window.renderNavPages ? renderNavPages() : import("./navpages.js").then(() => renderNavPages(), () => {});
@@ -20075,7 +20033,9 @@ function renderSettings() {
   $("#gatewayPauseSegs").replaceChildren(segs([["on", t("On")], ["paused", t("Paused")]], s.gatewayPaused ? "paused" : "on",
     (v) => setGatewayPaused(v === "paused")));
   // quitask.js's question
-  $("#quitAskSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.quitNoAsk ? "off" : "on", (v) => savePrefs({ ...keep, quitNoAsk: v === "off" })));
+  $("#quitAskSegs").replaceChildren(segsOO(!s.quitNoAsk, (v) => savePrefs({ ...keep, quitNoAsk: !v })));
+  // agents put back as they were at a quit, connected again at the start
+  $("#restoreQuitSegs").replaceChildren(segsOO(s.restoreOnQuit, (v) => savePrefs({ ...keep, restoreOnQuit: v })));
   // WSL's distros, looked in on Windows unless turned off (#1264)
   $("#wslAgentsRow").hidden = !s.wsl;
   $("#wslAgentsSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.noWSLAgents ? "off" : "on",
@@ -20189,7 +20149,7 @@ function renderSettings() {
   // whether magpie asks for a newer version by itself, and how often;
   // off, only the version row's Check asks (#472)
   row(t("Automatic updates"), t("Checks for a newer magpie by itself"),
-    "", segs([["off", t("Off")], ["on", t("On")]], s.noAutoUpdate ? "off" : "on", (v) => savePrefs({ ...keep, noAutoUpdate: v === "off" }))).classList.add("update-auto-row");
+    "", segsOO(!s.noAutoUpdate, (v) => savePrefs({ ...keep, noAutoUpdate: !v }))).classList.add("update-auto-row");
   // kept in place while off, dimmed, its height the same (a row or a line
   // taken away would shorten the page under the click), for when they are
   // turned on again
@@ -20211,9 +20171,9 @@ function renderSettings() {
   row(t("Download updates automatically"), s.noAutoDownload
     ? t("Off: a newer version is only shown, with its size; it downloads when you click Download update. For metered networks and proxies billed by traffic")
     : t("Downloads a newer version as soon as it is found. Turn off on a metered network or a proxy billed by traffic"), "",
-    segs([["off", t("Off")], ["on", t("On")]], s.noAutoDownload ? "off" : "on", (v) => savePrefs({ ...keep, noAutoDownload: v === "off" }))).classList.add("update-download-row");
+    segsOO(!s.noAutoDownload, (v) => savePrefs({ ...keep, noAutoDownload: !v }))).classList.add("update-download-row");
   row(t("Restart automatically"), s.noAutoUpdate ? t("While automatic updates are on") : t("Once an update is downloaded, restarts into it without cutting off an agent's request"), "",
-    segs([["off", t("Off")], ["on", t("On")]], s.autoRestart ? "on" : "off", (v) => savePrefs({ ...keep, autoRestart: v === "on" }))).classList.add("update-restart-row", ...(s.noAutoUpdate ? ["off"] : []));
+    segsOO(s.autoRestart, (v) => savePrefs({ ...keep, autoRestart: v }))).classList.add("update-restart-row", ...(s.noAutoUpdate ? ["off"] : []));
   renderUpdateMirror(row(t("Download source"), "", ""), s);
   const open = el("button", "text", t("Open"));
   open.onclick = () => api("settings/reveal", {}).catch(statusErr);
@@ -21914,7 +21874,7 @@ function renderDiscovery(s, keep) {
   ow.append(el("div", "name", t("Open sign-in pages in the browser")),
     el("div", "sub", t("Adding an account opens its sign-in page in your default browser. Off, magpie only shows the link, to copy into the browser you sign in with")));
   const ov = el("div", "val");
-  ov.append(segs([["off", t("Off")], ["on", t("On")]], s.signInLinkOnly ? "off" : "on", (v) => savePrefs({ ...keep, signInLinkOnly: v === "off" })));
+  ov.append(segsOO(!s.signInLinkOnly, (v) => savePrefs({ ...keep, signInLinkOnly: !v })));
   o.append(ow, ov);
   box.replaceChildren(r);
   $("#signInOpenList").replaceChildren(o);
@@ -22794,7 +22754,7 @@ function dockChoice(s) {
 
 // prefsKeep is what the settings page sends of s, all of it each time.
 function prefsKeep(s) {
-  return { theme: s.theme, colorblind: !!s.colorblind, reduceMotion: !!s.reduceMotion, noBird: !!s.noBird, lang: s.lang, tray: s.tray, dock: !!s.dock, dockWindow: !!s.dockWindow, dockNever: !!s.dockNever, lightweight: s.lightweight, keepAwake: !!s.keepAwake, keepAwakeDisplay: !!s.keepAwakeDisplay, noWSLAgents: !!s.noWSLAgents, quitNoAsk: !!s.quitNoAsk, proxy: s.proxy || "", pluginProxy: s.pluginProxy || "", updateProxy: s.updateProxy || "",
+  return { theme: s.theme, colorblind: !!s.colorblind, reduceMotion: !!s.reduceMotion, noBird: !!s.noBird, lang: s.lang, tray: s.tray, dock: !!s.dock, dockWindow: !!s.dockWindow, dockNever: !!s.dockNever, lightweight: s.lightweight, keepAwake: !!s.keepAwake, keepAwakeDisplay: !!s.keepAwakeDisplay, noWSLAgents: !!s.noWSLAgents, quitNoAsk: !!s.quitNoAsk, restoreOnQuit: !!s.restoreOnQuit, proxy: s.proxy || "", pluginProxy: s.pluginProxy || "", updateProxy: s.updateProxy || "",
     sessionTerminal: s.sessionTerminal || "",
     uiFont: s.uiFont || null, codeFont: s.codeFont || null,
     otel: s.otel || {},

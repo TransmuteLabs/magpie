@@ -260,6 +260,13 @@ database gives it, so `Titles` looks a `zcode:` key up under both and
 answers under the id asked for (#5195). Verification:
 `TestZCodeTitlesByRequestID`.
 
+The calls read from ZCode's database name their session the same way
+(`readZCodeCalls`, `zcodeBareID`). The Usage page pairs a gateway record with
+the session file's call by session, tokens and end time, so under `sess_…` a
+call magpie had routed was counted again as a local session's whatever
+provider id ZCode wrote beside it (nori_tsukiji on X). Verification:
+`TestZCodeCallsPairWithTheGatewaysRecords`.
+
 A ZCode session's name is the app's: its task index
 (`v2/tasks-index.sqlite` in the data folder, `tasks.title` by `task_id`,
 the session's id) holds what the app shows and what the user renamed it to,
@@ -322,6 +329,14 @@ list the session), and `HasGatewayConversations` counts it.
 Implementation: [`internal/sessions/gateway_delete.go`](../../internal/sessions/gateway_delete.go),
 `Restore` in [`internal/sessions/manage.go`](../../internal/sessions/manage.go), and
 [`internal/gui/sessions_manage.go`](../../internal/gui/sessions_manage.go).
+An agent whose sessions magpie cannot delete (OpenCode, Cline, Grok, Kimi, Hermes:
+rows in the agent's own database or store) and whose command is no longer on
+PATH (`cliGone`) is forgettable (_SekiBetu_ on X): its rows get Delete, which
+only hides them through the same hidden list (`sessions.Forget`, trash note
+marked `forgot`; the agent's own files are not touched), and no Resume
+(`resumeFor`). Restore unhides. With the command installed nothing changes.
+Tests: `TestUninstalledAgentSessionsAreForgotten`,
+`TestManageDeleteOfAnUninstalledAgentTakesItOffTheList`, `sessions-forget.test.cjs`.
 A deleted Codex session also leaves the Codex app's list (zhuddan on Discord).
 The app (ChatGPT.app's Codex, 26.x) lists threads from its own catalog,
 `<CODEX_HOME>/sqlite/codex.db` (`codex-dev.db` for a non-prod build), table
@@ -392,8 +407,16 @@ at the value its row shows) and a row per agent.
 `magpie sessions read [on|off all|<agent>…]` shows and changes the same
 choice from the CLI (`sessionReadsTo`); while it is not asked,
 `magpie sessions` says so on stderr and the TUI's empty Sessions page
-says how (`sessNothing`). Tests: `TestSessionsRead`,
-`TestSessionsNotAskedSaysHow`.
+says how (`sessNothing`). With no provider set up, Claude Code's and Codex's sessions, and each
+call's tokens and duration, need only this consent: the session files are
+the source (`/api/usage/requests` rows with `source: "log"`, the speed a
+call's tokens over its time gives, shown as a floor). An empty Usage
+Overview or Requests page says so while `asked` is false and offers the
+agents found with one button (`readsNote` in the usage plugin's
+`page.js`; simonzyzy on X), and the Sessions page says the live output
+speed curve is measured only on requests through the gateway
+(`sm-speed-note`). Tests: `TestSessionsRead`,
+`TestSessionsNotAskedSaysHow`, `usage-reads-note.test.cjs`.
 
 In gateway mode (`magpie web`'s page, [`gatewaymode.go`](../../internal/gui/gatewaymode.go))
 no agent's own session files are read, whatever `SessionReads` says

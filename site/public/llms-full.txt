@@ -1153,7 +1153,7 @@ OpenCode’s config in ~/.config/opencode (or $OPENCODE_CONFIG_DIR): the first o
 
 Pick one of OpenCode’s own models on its row in magpie, or run `magpie opencode default`. It puts back the model and `small_model` you had and removes magpie’s provider.
 
-Other agents: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Models in Codex](https://usemagpie.ai/docs/codex-models), [Models in Gemini CLI](https://usemagpie.ai/docs/gemini-cli-models), [OpenClaw on any model](https://usemagpie.ai/docs/openclaw). Stuck? Ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+Other agents: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Models in Codex](https://usemagpie.ai/docs/codex-models), [Models in Gemini CLI](https://usemagpie.ai/docs/gemini-cli-models), [OpenClaw on any model](https://usemagpie.ai/docs/openclaw), [OpenChamber on any model](https://usemagpie.ai/docs/openchamber). Stuck? Ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -3895,7 +3895,7 @@ No. It writes only its own provider, the default model and, if you have one, the
 
 Yes. It reads OPENCLAW_PROFILE, OPENCLAW_STATE_DIR, OPENCLAW_CONFIG_PATH and OPENCLAW_HOME the way OpenClaw does.
 
-More agents on the same models: [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [Hermes Agent on any model](https://usemagpie.ai/docs/hermes) and [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [Hermes Agent on any model](https://usemagpie.ai/docs/hermes), [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models) and [nanobot on any model](https://usemagpie.ai/docs/nanobot). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -4304,7 +4304,7 @@ No. Raycast watches providers.yaml and picks up magpie’s entry when it changes
 
 Yes. Every model is listed with tools on, and the gateway carries tool calls to each model’s provider.
 
-More agents on the same models: [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Crush on any model](https://usemagpie.ai/docs/crush) and [Copilot CLI on any model](https://usemagpie.ai/docs/copilot-cli). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Obsidian on any model](https://usemagpie.ai/docs/obsidian), [Crush on any model](https://usemagpie.ai/docs/crush) and [Copilot CLI on any model](https://usemagpie.ai/docs/copilot-cli). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -4882,7 +4882,548 @@ Yes. Both CLI editions are one npm package, and CodeBuddy.app and CodeBuddy CN.a
 
 CodeBuddy Code reads its model when a session starts. Restart codebuddy or run /clear. In the IDE, pick the model in its model picker.
 
-More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Kimi Code on any model](https://usemagpie.ai/docs/kimi-code) and [Qwen Code on any model](https://usemagpie.ai/docs/qwen-code). Tencent Cloud's models: [Tencent Cloud](https://usemagpie.ai/docs/tencent-cloud). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Kimi Code on any model](https://usemagpie.ai/docs/kimi-code), [Qwen Code on any model](https://usemagpie.ai/docs/qwen-code) and [T3 Code on any model](https://usemagpie.ai/docs/t3-code). Tencent Cloud's models: [Tencent Cloud](https://usemagpie.ai/docs/tencent-cloud). Notes on the same models: [Obsidian on any model](https://usemagpie.ai/docs/obsidian). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/obsidian
+
+# Obsidian on any model
+
+Obsidian has no AI of its own; its community plugins bring it. magpie wires Copilot for Obsidian (logancyang/obsidian-copilot), which takes an OpenAI-compatible endpoint you name. magpie adds a provider called magpie in every vault that has Copilot, so Obsidian's AI chat runs on any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription.
+
+## Set up Obsidian
+
+1. **Install Copilot in Obsidian.** Install and turn on Copilot from Obsidian's Settings › Community plugins. magpie shows the Obsidian row once a vault has Copilot.
+2. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+3. **Pick magpie on Obsidian's row.** On the Agents page, pick magpie. Then reload Copilot in Obsidian, and magpie's models are in its model menu.
+
+```
+magpie obsidian provider magpie
+```
+
+## Vaults
+
+Obsidian lists its vaults in `obsidian.json` in its config folder: `~/Library/Application Support/obsidian` on a Mac, `%APPDATA%\obsidian` on Windows, `$XDG_CONFIG_HOME/obsidian` on Linux, or the Flatpak's and the Snap's own folders. Copilot keeps its settings in each vault's `.obsidian/plugins/copilot/data.json`. magpie wires every vault that has Copilot; after that it keeps the wired vaults up to date and wires none you haven't asked for.
+
+## The model list
+
+This is what magpie writes into data.json. Only these keys change; everything else in the file stays as written:
+
+```
+"providers": {"magpie": {
+  "providerType": "openai-compatible", "displayName": "magpie",
+  "baseUrl": "http://127.0.0.1:3425/agent/obsidian/v1",
+  "requiresApiKey": false, …}},
+"configuredModels": [{"providerId": "magpie", "info": {"id": "deepseek/deepseek-v4-pro", …}}, …],
+"backends": {"chat": {"enabledModels": […]}},
+"defaultModelKey": "…"
+```
+
+Each model carries its context size, output limit, images and thinking levels from magpie's catalog. A model new in magpie comes on in chat; a magpie model you turned off in Copilot stays off; one gone from magpie leaves every backend. Models and providers you added in Copilot yourself are untouched. The first time, Copilot's default model becomes magpie's first, and the one it had is kept to put back when you switch back.
+
+## No key to enter
+
+Copilot keeps API keys in Obsidian's keychain, which magpie doesn't write. So magpie's provider needs no key (`requiresApiKey: false`): its requests carry no Authorization, and the gateway takes a call with no key from this computer. Copilot calls it with fetch from Obsidian's window, so replies stream, and the gateway answers that window's CORS. The `/agent/obsidian` in the address is how magpie knows it is Obsidian, since the window's User-Agent is a browser's.
+
+## Reloading Copilot
+
+While Obsidian runs, Copilot holds its settings and writes data.json whole when it saves. So after wiring, reload Copilot in Settings › Community plugins (or restart Obsidian) before changing Copilot's settings, or the old settings write over magpie's. magpie says so while Obsidian is running.
+
+## Copilot 3
+
+magpie writes only Copilot 4's format (`providers` and `configuredModels`). Copilot 3 kept models in `activeModels`; magpie leaves such a vault alone and names it in the error. Update Copilot to 4, which moves the settings itself when it first loads.
+
+## Switching back
+
+Turn the row off in magpie. magpie takes its provider, its models and their places in every backend out of each vault's data.json, and puts back the default model you had while magpie's is still the default. A provider you added by hand under the name magpie, at an address that isn't magpie's Obsidian route, is yours and stays.
+
+```
+magpie obsidian default
+```
+
+## FAQ
+
+### Can Obsidian use DeepSeek, GLM, Kimi or Qwen?
+
+Yes, through the Copilot for Obsidian plugin. magpie adds a magpie provider in every vault with Copilot, and every model you have in magpie is in Copilot's model menu.
+
+### Do I enter an API key in Copilot?
+
+No. magpie's provider needs no key: requests go to the magpie gateway on this computer, which calls the model with your key or subscription.
+
+### Why doesn't Copilot show magpie's models?
+
+Reload Copilot in Obsidian's Settings › Community plugins, or restart Obsidian. A vault on Copilot 3 needs Copilot 4 first.
+
+### Does Smart Connections work?
+
+No. Its free plugin embeds with a local model only; its API providers are in the closed Pro plugin, with keys in the keychain magpie can't write.
+
+More apps on the same models: [Raycast](https://usemagpie.ai/docs/raycast), [Cherry Studio](https://usemagpie.ai/docs/cherry-studio) and [CodeBuddy on any model](https://usemagpie.ai/docs/codebuddy). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/t3-code
+
+# T3 Code on any model
+
+T3 Code (pingdotgg/t3code) is a GUI that drives Claude Code, Codex, Cursor and others. Each provider it lists is an instance of a driver, and it takes instances of your own. magpie adds two: **magpie**, on Claude Code, and **magpie · Codex**, on Codex. So T3 Code's model picker lists every model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription, on the harness you choose.
+
+## Set up T3 Code
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick magpie on T3 Code's row.** On the Agents page, pick magpie. magpie writes both instances into T3 Code's settings.json.
+3. **Pick a model in T3 Code.** T3 Code's server watches the file and reloads it on an outside edit. In the model picker, models under magpie run on Claude Code, those under magpie · Codex on Codex.
+
+```
+magpie t3code provider magpie
+```
+
+The settings file is `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata` when set). These are the two instances magpie writes:
+
+```
+"providerInstances": {
+  "magpie": {"driver": "claudeAgent", "displayName": "magpie",
+    "environment": [{"name": "ANTHROPIC_BASE_URL", "value": "http://127.0.0.1:3425", …}, …],
+    "config": {"customModels": [{"slug": "deepseek/deepseek-v4-pro", "name": …,
+      "capabilities": {"optionDescriptors": […]}}, …]}},
+  "magpie-codex": {"driver": "codex", "displayName": "magpie · Codex",
+    "config": {"launchArgs": […]}}
+}
+```
+
+## magpie, on Claude Code
+
+The magpie instance is a `claudeAgent` instance: T3 Code runs Claude Code through Anthropic's Agent SDK, reading your `~/.claude` settings, with the instance's environment added. magpie sets `ANTHROPIC_BASE_URL` to the gateway and the token Claude Code is routed with, so its requests are Claude Code's to the gateway. Every magpie model is one of its custom models, a 1M one marked `[1m]` as magpie marks it for Claude Code. A binary path or Claude home you gave T3's own Claude is carried over, so it runs the same Claude Code.
+
+## magpie · Codex, on Codex
+
+T3 Code runs each thread on the harness of the instance its model is picked from, so with the Claude Code instance alone every magpie model ran there. So magpie adds a `codex` instance, magpie · Codex. Its `launchArgs`, which T3 passes to `codex app-server` and `codex exec`, are Codex's own `-c` overrides: magpie as its model provider, and `magpie-codex-models.json` beside settings.json as its catalog, so T3 lists every magpie model under it from Codex's model list. Your `~/.codex/config.toml` isn't written, and T3's own Codex stays as it is. If you remove the instance in T3, a sync doesn't bring it back; turning T3 Code's row on again in magpie does.
+
+## Reasoning
+
+Without capabilities, T3 Code shows no picks beside a custom model and sends no effort. So each of magpie's custom models gets a Reasoning pick of the Claude Code levels it takes, medium first (else the lowest), which T3 hands to Claude Code as it is. A model that thinks also gets a Thinking switch, on at first; T3 sets Claude Code's `alwaysThinkingEnabled` by it, and with it off requests ask for no thinking.
+
+## Your own settings
+
+The instances' names, whether they are on, and every key magpie doesn't write (such as `autoCompactWindow` and `accentColor`) are yours, and what you change in T3 Code stays. Environment variables you add on magpie's instance stay too. Your own instances, their custom models and T3's other settings are untouched. magpie's are only the custom models, the gateway's variables, and the Codex instance's launch arguments and catalog.
+
+## Claude Code's own routing
+
+The `env` in `~/.claude/settings.json` is applied over the process', so a Claude Code routed elsewhere in its own settings takes the magpie instance's requests there; one routed through magpie or not routed at all asks the gateway. A provider switch on there, such as `CLAUDE_CODE_USE_BEDROCK`, takes it to that cloud, and magpie's check says so.
+
+## Switching back
+
+Turn the row off in magpie. magpie takes out only its two instances; your others and your settings stay.
+
+```
+magpie t3code default
+```
+
+## FAQ
+
+### Can T3 Code use DeepSeek, GLM, Kimi or Qwen?
+
+Yes. magpie adds two provider instances to T3 Code's settings.json, and every model you have in magpie is in T3's model picker, on Claude Code or on Codex.
+
+### What is the difference between magpie and magpie · Codex?
+
+The same models on a different harness: those under magpie run on Claude Code, those under magpie · Codex on Codex.
+
+### Does it change my ~/.codex/config.toml or T3's own Claude and Codex?
+
+No. Codex's settings are launch arguments of the magpie · Codex instance alone; T3's own instances and yours stay as they are.
+
+### Why don't requests go through magpie?
+
+Check the env in ~/.claude/settings.json: a Claude Code routed elsewhere there, or with a cloud switch such as Bedrock on, takes the magpie instance's requests there.
+
+More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Models in Codex](https://usemagpie.ai/docs/codex-models), [CodeBuddy on any model](https://usemagpie.ai/docs/codebuddy) and [Craft Agents on any model](https://usemagpie.ai/docs/craft-agents). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/craft-agents
+
+# Craft Agents on any model
+
+Craft Agents (lukilabs/craft-agents-oss) is an Electron app that runs Claude and Pi sessions. Its models come from connections, and a custom endpoint is one. magpie adds a connection named magpie and makes it the one new sessions start on, so Craft Agents runs on any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription.
+
+## Set up Craft Agents
+
+1. **Open Craft Agents once.** Craft Agents won't load a config.json without its workspaces, so magpie never makes one. It is there once Craft Agents has run.
+2. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+3. **Pick a model on Craft Agents' row.** On the Agents page, pick a magpie model for Craft Agents. Craft Agents watches config.json, so a running app takes it at once, from its next new session.
+
+```
+magpie craft-agents deepseek/deepseek-v4-pro
+```
+
+## The magpie connection
+
+Connections are in `config.json` in Craft Agents' config folder (`CRAFT_CONFIG_DIR` when set, else `~/.craft-agent`). magpie's is a `pi_compat` connection on OpenAI-compatible Chat Completions; its `models` are the models picked for Craft Agents in magpie, and `defaultModel` is the one you chose.
+
+```
+"llmConnections": [
+  …,
+  {"slug": "magpie", "name": "magpie", "providerType": "pi_compat",
+   "authType": "none",
+   "baseUrl": "http://127.0.0.1:3425/agent/craft-agents/v1",
+   "customEndpoint": {"api": "openai-completions"},
+   "models": [{"id": "deepseek/deepseek-v4-pro", "name": …}, …],
+   "defaultModel": "deepseek/deepseek-v4-pro"}
+],
+"defaultLlmConnection": "magpie"
+```
+
+Craft Agents resets a `defaultModel` that isn't in `models` to the first one there, so magpie always puts the model you picked in the list. A name or other field you give the connection in Craft Agents is kept when magpie syncs it.
+
+## No key to enter
+
+Craft Agents keeps keys apart from config.json, sealed in `credentials.enc`, which magpie doesn't open. magpie's connection has `authType: none`, which is what Craft Agents itself saves for an endpoint on this computer with no key ("Local Model"); its Pi server then sends a placeholder key, which the gateway takes from this computer. Craft Agents sends no User-Agent of its own, so `/agent/craft-agents` in the address tells the gateway which agent is asking.
+
+## New and open sessions
+
+New sessions start on the connection `defaultLlmConnection` names; a workspace's own default goes over it. A session keeps the connection it started on, so start a new one after switching to magpie. magpie says so while Craft Agents is running.
+
+## Your own connections
+
+Your connections and every other key in config.json stay as written. Before taking over the default, magpie stashes the one you had and puts it back when it steps out, where that connection is still there (else Craft Agents picks its first). If you delete the magpie connection in Craft Agents, magpie's check says it no longer reaches magpie.
+
+## Switching back
+
+Set the row back to default in magpie: magpie takes its connection out and puts your default back. Or pick a model of one of your own connections, and magpie makes it that connection's default model.
+
+```
+magpie craft-agents default
+```
+
+## FAQ
+
+### Can Craft Agents use DeepSeek, GLM, Kimi or Qwen?
+
+Yes. magpie adds a magpie connection to Craft Agents' config.json and makes it the default for new sessions; every model you picked in magpie is in it.
+
+### Do I enter an API key in Craft Agents?
+
+No. magpie's connection has authType none, as Craft Agents saves an endpoint on this computer with no key, and the gateway takes requests from this computer.
+
+### Why is a session still on my old model?
+
+A session keeps the connection it started on. Start a new session; a workspace's own default connection goes over the global one.
+
+### magpie says to open Craft Agents first?
+
+Craft Agents won't load a config.json without its workspaces, so magpie never makes one. Run Craft Agents once, then set it up.
+
+More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [T3 Code on any model](https://usemagpie.ai/docs/t3-code) and [CodeBuddy on any model](https://usemagpie.ai/docs/codebuddy). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/openchamber
+
+# OpenChamber on any model
+
+OpenChamber is a desktop, web and VS Code front end for OpenCode. It runs an OpenCode of its own (the desktop app bundles OpenCode 2) on your OpenCode config. magpie sets OpenChamber's default model to one of magpie's and puts magpie's provider in the OpenCode config, so OpenChamber runs on any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription.
+
+## Set up OpenChamber
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model on OpenChamber's row.** On the Agents page, pick OpenChamber's default model, and a small model if you like.
+3. **Start a new session.** OpenChamber takes the new model for new sessions.
+
+```
+magpie openchamber deepseek/deepseek-v4-pro          # new sessions
+magpie openchamber small deepseek/deepseek-v4-flash  # titles, commit messages
+```
+
+OpenChamber's settings are under `$OPENCHAMBER_DATA_DIR`, `~/.config/openchamber` by default (not moved by `XDG_CONFIG_HOME`). magpie writes its profile, `preferences.json`, and the copy in `settings.json` that older builds read, where that file is:
+
+```
+// ~/.config/openchamber/preferences.json
+{"version": 1, "fields": {
+  "defaultModel": {"value": "magpie/deepseek/deepseek-v4-pro", "updatedAt": …},
+  "smallModelUseDefault": {"value": false, …},
+  "smallModelOverride": {"value": "magpie/deepseek/deepseek-v4-flash", …}
+}}
+```
+
+## Which model a session gets
+
+OpenChamber sends each new session the model it picks, in this order: the project's `defaultModel` (settings.json's projects), the profile's `defaultModel`, the agent's own, and only then OpenCode's `model`. So setting OpenCode's model alone doesn't reach OpenChamber; magpie sets the profile's `defaultModel`. A project with a default model of its own keeps it there, and magpie names the project and its model. On a new model magpie also clears the old one's `defaultVariant`, as OpenChamber's own picker does.
+
+## The small model
+
+OpenChamber's small model writes session titles and commit messages. It is `smallModelOverride` once `smallModelUseDefault` is false, else OpenCode's `small_model`. Picking a small model in magpie writes those two keys; switching back takes both out and leaves it to OpenCode.
+
+## The OpenCode config
+
+A model in OpenChamber is OpenCode's `provider/model`, so one of magpie's needs magpie's provider in the OpenCode config: `$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`. A provider of your own that already sends that model to magpie's gateway is used instead of a second list of the same models. An OpenCode 2 config is written in OpenCode 2's words. Once OpenChamber steps off magpie, magpie's provider goes too, when nothing else in the OpenCode config names one of its models. Its requests count as OpenCode's, since OpenChamber's OpenCode sends them.
+
+## New and open sessions
+
+OpenChamber takes the new model for new sessions; sessions already open keep theirs. magpie says so while OpenChamber is running.
+
+## Switching back
+
+Set the row back to default in magpie: magpie takes out the profile's `defaultModel` and `defaultVariant`, and OpenChamber goes back to the OpenCode config's model.
+
+```
+magpie openchamber default
+```
+
+## FAQ
+
+### Can OpenChamber use DeepSeek, GLM, Kimi or Qwen?
+
+Yes. magpie sets OpenChamber's default model to the one you pick in magpie and puts magpie's provider in the OpenCode config.
+
+### OpenCode is on magpie already; why is OpenChamber still on my old model?
+
+OpenChamber takes a project's and its profile's own defaultModel before OpenCode's model. Pick a model on OpenChamber's own row in magpie.
+
+### One project is still on the old model?
+
+That project has a default model of its own in settings.json, which goes first there. magpie names the project.
+
+### Which model writes session titles and commit messages?
+
+The small model: smallModelOverride once smallModelUseDefault is false, else OpenCode's small_model.
+
+More agents on the same models: [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [T3 Code on any model](https://usemagpie.ai/docs/t3-code) and [Craft Agents on any model](https://usemagpie.ai/docs/craft-agents). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/nanobot
+
+# nanobot on any model
+
+nanobot (HKUDS/nanobot, `pip install nanobot-ai`) is a personal AI assistant that answers in chat apps, its CLI and its WebUI. Its model comes from `~/.nanobot/config.json`, where any key under `providers` that isn't one of its own is an OpenAI-compatible endpoint. magpie adds a magpie provider there and sets the default model to one of magpie's, so nanobot runs on any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription.
+
+## Set up nanobot
+
+1. **Run nanobot once.** `nanobot onboard` or its first run makes `~/.nanobot`.
+2. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+3. **Pick a model on nanobot's row.** On the Agents page, pick a magpie model for nanobot. A nanobot in WSL is set up there too.
+
+```
+pip install nanobot-ai && nanobot onboard   # nanobot makes ~/.nanobot
+magpie nanobot deepseek/deepseek-v4-pro
+```
+
+## What goes in config.json
+
+magpie adds `providers.magpie` at the gateway's `/v1`, with the gateway's key and a User-Agent of `nanobot` (the OpenAI SDK's otherwise, which tells it from no one), and sets `agents.defaults` to provider magpie, model `magpie/<model id>` and the context window magpie knows the model to take. nanobot strips the `magpie/` prefix before it sends the model.
+
+```
+// ~/.nanobot/config.json
+{
+  "providers": {
+    …,
+    "magpie": {"apiBase": "http://127.0.0.1:3425/v1", "apiKey": "…",
+               "extraHeaders": {"User-Agent": "nanobot"}}
+  },
+  "agents": {"defaults": {
+    "provider": "magpie",
+    "model": "magpie/deepseek/deepseek-v4-pro",
+    "contextWindowTokens": …
+  }}
+}
+```
+
+nanobot's pydantic models read camelCase and snake_case keys alike. magpie writes nanobot's own camelCase, and takes out a snake_case spelling of the same key, so no two settings disagree.
+
+## modelPreset
+
+When `agents.defaults.modelPreset` names one of `modelPresets`, it goes over both provider and model. So magpie stashes it and takes it out while magpie's model is on, and puts it back when it steps out; your `modelPresets` stay as they are.
+
+## When it takes effect
+
+nanobot's gateway (`nanobot gateway`, the WebUI's) watches the file and takes a change at its next reply. `nanobot agent` reads it once, so restart an open `nanobot agent` chat. magpie says so while nanobot is running.
+
+## Your own settings
+
+The provider, model, context window and modelPreset you had under `agents.defaults` are stashed and put back when magpie steps out. Your other providers, presets and keys stay as they are. A config.json magpie made goes again once nothing is left in it. If you delete the magpie provider in nanobot, magpie's check says it no longer reaches magpie.
+
+## Switching back
+
+Set the row back to default in magpie: magpie takes out `providers.magpie` and puts `agents.defaults` back. Or pick a model of your own, and magpie puts things back and then sets it as the model.
+
+```
+magpie nanobot default
+```
+
+## FAQ
+
+### Can nanobot use DeepSeek, GLM, Kimi or Qwen?
+
+Yes. magpie adds an OpenAI-compatible magpie provider to ~/.nanobot/config.json and sets the default model to the one you pick in magpie.
+
+### Why is nanobot still on the old model?
+
+nanobot's gateway and WebUI take the change at their next reply; nanobot agent reads its config once, so restart the chat.
+
+### Do I lose my modelPreset?
+
+No. magpie stashes agents.defaults.modelPreset and takes it out (it would go over magpie's model), and puts it back when it steps out; modelPresets stay.
+
+### Does it work for nanobot in WSL?
+
+Yes. magpie sets up a nanobot in a WSL distro too.
+
+More agents on the same models: [OpenClaw on any model](https://usemagpie.ai/docs/openclaw), [Hermes Agent on any model](https://usemagpie.ai/docs/hermes), [OpenChamber on any model](https://usemagpie.ai/docs/openchamber) and [AstrBot on any model](https://usemagpie.ai/docs/astrbot). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/astrbot
+
+# AstrBot on any model
+
+AstrBot (AstrBotDevs/AstrBot) is a chatbot framework that puts a model on QQ, Telegram, Discord, Lark and other platforms. It keeps every setting in one file, `data/cmd_config.json`. magpie adds an OpenAI-compatible magpie source there, an entry for each of magpie's models, and makes the one you pick AstrBot's default chat model. So your bot runs on any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, or a ChatGPT or Copilot subscription, with no key typed into AstrBot's WebUI.
+
+## Set up AstrBot
+
+1. **Start AstrBot once.** Its first start writes `data/cmd_config.json`. It needs 4.10 or later (a config with `provider_sources`).
+2. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+3. **Pick a model on AstrBot's row.** On the Agents page, pick a magpie model for AstrBot.
+4. **Restart AstrBot.** AstrBot reads its config at start-up only; after a restart the bot is on the new model.
+
+```
+magpie astrbot deepseek/deepseek-v4-pro
+# then restart AstrBot
+```
+
+magpie finds AstrBot's root in this order: `ASTRBOT_ROOT`; the desktop app's `~/.astrbot`; a folder where `astrbot init` was run, either your home, `~/astrbot` or `~/AstrBot` (where its README and a clone of its source put it). For AstrBot run anywhere else, start magpie with `ASTRBOT_ROOT` set to that folder.
+
+## What goes in cmd_config.json
+
+Since 4.10 AstrBot splits a chat provider into two lists: `provider_sources` holds endpoints and keys, and each entry of `provider` is one model of a source. magpie adds a source with id `magpie` (OpenAI Compatible, at the gateway's `/v1`, with a key naming AstrBot, so its requests count as AstrBot's in magpie's usage), an entry `magpie/<provider>/<model>` for each model, and sets `agent_runner.config.model.provider_id` to the one you pick (`provider_settings.default_provider_id` in a file from before agent_runner).
+
+```
+// /data/cmd_config.json
+{
+  "provider_sources": [
+    …,
+    {"id": "magpie", "provider": "openai", "type": "openai_chat_completion",
+     "provider_type": "chat_completion", "enable": true,
+     "key": ["…"], "api_base": "http://127.0.0.1:3425/v1", …}
+  ],
+  "provider": [
+    …,
+    {"id": "magpie/deepseek/deepseek-v4-pro", "provider_source_id": "magpie",
+     "model": "deepseek/deepseek-v4-pro",
+     "modalities": ["text", "tool_use"], "max_context_tokens": …}
+  ],
+  "agent_runner": {"runner_type": "local",
+    "config": {"model": {"provider_id": "magpie/deepseek/deepseek-v4-pro"}}}
+}
+```
+
+Every model is marked `tool_use`: without it AstrBot drops the model's tools, and the gateway passes a tool call on whatever the model. Images are marked as magpie knows the model sees them. A context window magpie doesn't know is 0, and AstrBot looks it up itself.
+
+## Why it needs a restart
+
+AstrBot reads the whole file into memory at start, and its WebUI writes the whole of it back on every save. So magpie's change needs AstrBot restarted, and a WebUI save made before that restart writes over it. magpie's check notices that its source is gone and asks you to connect again.
+
+When `agent_runner.runner_type` isn't `local` (an outside agent runner), AstrBot doesn't ask its chat model, and magpie's check says so.
+
+## Your own settings
+
+Before it first writes the file, magpie copies it to `cmd_config.json.before-magpie`. Your own sources and models stay byte for byte, and so do changes you make to magpie's entries in the WebUI (a source's timeout or proxy, a model switched off, its extra body). A model picked for one chat with `/provider` lives in AstrBot's own database; it is yours and stands. AstrBot writes the file with a UTF-8 BOM, which magpie keeps.
+
+## AstrBot in Docker
+
+AstrBot in Docker isn't one magpie wires: its data folder is a volume magpie can't know, and the gateway on this machine's loopback isn't the container's.
+
+## Switching back
+
+Set the row back to default in magpie: magpie takes its source and models out and puts the default chat model back to the one AstrBot was on, unless you have picked another in AstrBot since, which stands. Or pick a model of your own; magpie's models stay in the list beside it until you disconnect. Restart AstrBot after either.
+
+```
+magpie astrbot default
+# then restart AstrBot
+```
+
+## FAQ
+
+### Can AstrBot use DeepSeek, GLM, Kimi or Qwen?
+
+Yes. magpie adds an OpenAI-compatible magpie source to cmd_config.json, an entry for each of magpie's models, and sets the one you pick as the default chat model. Restart AstrBot to use it.
+
+### Why is my bot still on the old model?
+
+AstrBot reads cmd_config.json at start-up only, so restart it. Don't save anything in the WebUI before that, or it writes over magpie's change.
+
+### magpie's source is gone. What now?
+
+A WebUI save most likely wrote the whole file back. Connect AstrBot again in magpie, then restart AstrBot.
+
+### Does it work for AstrBot in Docker?
+
+Not on its own: magpie can't know the container's data volume, and this machine's loopback isn't the container's.
+
+More agents on the same models: [nanobot on any model](https://usemagpie.ai/docs/nanobot), [OpenClaw on any model](https://usemagpie.ai/docs/openclaw) and [Every model in Cherry Studio, through magpie](https://usemagpie.ai/docs/cherry-studio). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/aionui
+
+# AionUi on any model
+
+AionUi is an Electron desktop app that runs Claude Code, Codex and Gemini CLI, and has a chat of its own. It keeps its model providers in its own database, their keys encrypted, so magpie writes nothing there. It opens AionUi's own add-provider link instead, which brings up AionUi's add-model form with magpie filled in, for you to confirm in AionUi. AionUi then has every model in magpie: DeepSeek, GLM, Kimi, Qwen, an OpenAI or Anthropic key, and the Claude, ChatGPT or Copilot subscription you signed in to.
+
+## Add magpie to AionUi
+
+1. **Open AionUi once.** Once AionUi has run, its data folder has an `aionui` folder and magpie's Agents page lists it.
+2. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+3. **Click Add magpie.** On AionUi's row, click Add magpie. AionUi opens Settings → Model's add form with magpie filled in: name magpie, platform custom (OpenAI-compatible), the gateway's address and a key.
+4. **Confirm it in AionUi.** Nothing is added until you do.
+
+The link magpie opens looks like this:
+
+```
+aionui://add-provider?api_key=…&base_url=http%3A%2F%2F127.0.0.1%3A3425%2Fv1&name=magpie&platform=custom
+```
+
+If nothing opens, nothing on this computer handles AionUi's links yet: open AionUi once or install it again, then click Add magpie again.
+
+## Picking models
+
+The magpie provider's address ends in `/v1`, as AionUi's own OpenAI preset does, and it lists every model in magpie from the gateway, named provider/model (for example `deepseek/deepseek-v4-pro`). A provider you add to magpie later shows up when AionUi fetches the list again, with nothing changed in AionUi. Several accounts behind one model, the rest after a 429 and fallback work as they do for every other agent.
+
+## From the command line
+
+```
+magpie aionui add      # opens AionUi to add magpie; confirm it there
+```
+
+## How magpie knows it was added
+
+magpie reads AionUi's database (`aionui/aionui-backend.db` in AionUi's data folder: `~/Library/Application Support/AionUi` on macOS, `%APPDATA%\AionUi` on Windows, `~/.config/AionUi` on Linux) read-only, for a provider at the gateway's address. It can read it while AionUi runs, and never writes it. Once there is one, the row says it's added, and you can click again to add it again. When the database can't be read, magpie says it doesn't know, not that it isn't added.
+
+## Usage and keys
+
+The key in the link is AionUi's own, so its requests are counted as AionUi's in magpie's usage, apart from other agents.
+
+## FAQ
+
+### Do I need an API key to use Claude or ChatGPT in AionUi?
+
+No. Sign in to a Claude, ChatGPT or Copilot subscription in magpie and its models show up under AionUi's magpie provider.
+
+### Does magpie change AionUi's settings?
+
+No. magpie opens AionUi's own add-model form, and you confirm it. It only reads AionUi's database to show whether magpie was added.
+
+### What address and platform does the magpie provider use?
+
+Platform custom (OpenAI-compatible), at http://127.0.0.1:3425/v1, or the gateway address you set in magpie.
+
+### AionUi isn't on magpie's Agents page.
+
+magpie lists AionUi once it has run on this computer. Open AionUi once, then look again.
+
+More desktop apps on the same models: [Every model in Cherry Studio, through magpie](https://usemagpie.ai/docs/cherry-studio) and [AstrBot on any model](https://usemagpie.ai/docs/astrbot). Using coding agents too? See [Subscriptions in any agent](https://usemagpie.ai/docs/subscriptions). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -4949,7 +5490,7 @@ Cherry Studio shows models you added to the provider. Fetch the magpie provider�
 
 magpie lists it once Cherry Studio has run on this computer. Open Cherry Studio once, then look again.
 
-Using a coding agent too? See [Subscriptions in any agent](https://usemagpie.ai/docs/subscriptions) and [Get started](https://usemagpie.ai/docs/start). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+Another desktop app on the same models: [AionUi on any model](https://usemagpie.ai/docs/aionui). Using a coding agent too? See [Subscriptions in any agent](https://usemagpie.ai/docs/subscriptions) and [Get started](https://usemagpie.ai/docs/start). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 

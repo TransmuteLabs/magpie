@@ -835,6 +835,7 @@ func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) 
 		h := failed("protocol", "a plugin-account MCP server cannot use direct headers")
 		return nil, &h
 	}
+	s = s.live()
 	h := http.Header{}
 	headers, unset := expandAll(s.Headers)
 	if len(unset) > 0 {
