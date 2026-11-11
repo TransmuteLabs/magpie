@@ -241,7 +241,6 @@ var cliForRoute = map[string]string{
 }
 
 var notYet = map[string]string{
-	"POST /api/library/mcp-account":              L,  // Library editor's header/OAuth account switcher, not the CLI's provider-account binding.
 	"GET /api/library/servers/account-target":    W,  // GUI trust preview; CLI binding validates the target itself.
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go
@@ -390,6 +389,7 @@ var notYet = map[string]string{
 	"POST /api/library/bili":                     L,  // library.go
 	"POST /api/library/bili/install":             L,  // library.go
 	"POST /api/library/market/about":             L,  // library.go
+	"POST /api/library/mcp-account":              L,  // library.go
 	"POST /api/library/mcp-signin":               L,  // library.go
 	"POST /api/library/mcp-signin/{id}/cancel":   L,  // library.go
 	"POST /api/library/mcp-signout":              L,  // library.go

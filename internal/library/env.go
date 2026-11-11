@@ -7,7 +7,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -16,6 +15,7 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Environment variables (paopao_baobao on X) are set once in the library
@@ -54,7 +54,7 @@ const (
 	maxEnvValue = 8192
 )
 
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var envName = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (e *EnvVar) check() error {
 	if !envName.MatchString(e.Name) || len(e.Name) > maxEnvName {
@@ -252,7 +252,8 @@ func (l *Library) syncEnv(t *Target, b *backups, res *Result) {
 	a := l.applied(id)
 	want := map[string]string{}
 	for _, e := range l.Env {
-		if slices.Contains(e.Agents, id) {
+		// no value is a variable carried without its key: nothing to give
+		if slices.Contains(e.Agents, id) && e.Value != "" {
 			want[e.Name] = e.Value
 		}
 	}
