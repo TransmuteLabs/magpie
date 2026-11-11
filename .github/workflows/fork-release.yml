@@ -24,7 +24,9 @@ name: Fork release
 
 on:
   push:
-    branches: [devzeus]
+    # мерж-флоу юзера пушит main, рабочие правки — devzeus; гейт по версии
+    # не даст задвоить релиз, если одна версия приедет с обеих веток
+    branches: [devzeus, main]
   workflow_dispatch:
     inputs:
       version:
