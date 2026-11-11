@@ -5039,7 +5039,7 @@ No. Codex's settings are launch arguments of the magpie · Codex instance alone;
 
 Check the env in ~/.claude/settings.json: a Claude Code routed elsewhere there, or with a cloud switch such as Bedrock on, takes the magpie instance's requests there.
 
-More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Models in Codex](https://usemagpie.ai/docs/codex-models), [CodeBuddy on any model](https://usemagpie.ai/docs/codebuddy) and [Craft Agents on any model](https://usemagpie.ai/docs/craft-agents). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [Models in Codex](https://usemagpie.ai/docs/codex-models), [CodeBuddy on any model](https://usemagpie.ai/docs/codebuddy), [Craft Agents on any model](https://usemagpie.ai/docs/craft-agents) and [Every magpie model in Paseo](https://usemagpie.ai/docs/paseo). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -5660,7 +5660,246 @@ jcode reads its settings at start-up. Restart the open jcode session.
 
 Yes. magpie removes only [providers.magpie], and puts [provider] back when jcode still starts on magpie; every other key stays as written.
 
-More agents on the same models: [Crush on any model](https://usemagpie.ai/docs/crush), [Models in OpenCode](https://usemagpie.ai/docs/opencode-models) and [Goose on any model](https://usemagpie.ai/docs/goose). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Crush on any model](https://usemagpie.ai/docs/crush), [Models in OpenCode](https://usemagpie.ai/docs/opencode-models), [Goose on any model](https://usemagpie.ai/docs/goose) and [Reasonix Studio on any model](https://usemagpie.ai/docs/reasonix). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/paseo
+
+# Every magpie model in Paseo
+
+Paseo (getpaseo/paseo) is an app that runs Claude Code, Codex and others for you. It starts the same Claude Code, so a Claude Code connected to magpie goes through magpie in Paseo too. But Paseo lists models itself, and most of the models magpie serves aren't in its picker. magpie writes them into Paseo's own `additionalModels`, so Paseo's Claude model picker offers every model you have in magpie: DeepSeek, GLM, Kimi, Qwen, GPT or a ChatGPT subscription.
+
+## Set up Paseo
+
+1. **Connect Claude Code to magpie first.** On magpie's Agents page, pick a magpie model for Claude Code. The ids Paseo lists are served by a Claude Code that is on magpie.
+2. **Switch Paseo's row on.** With a `~/.paseo` folder, magpie has a Paseo row. Pick magpie: every magpie model in Paseo's Claude model picker.
+3. **Restart Paseo's daemon.** Paseo reads its model list when its daemon starts; after a restart magpie's models are there.
+
+```
+magpie claude deepseek/deepseek-v4-pro   # Claude Code on magpie first
+magpie paseo magpie                      # every magpie model in Paseo's picker
+```
+
+## Why Paseo needs its own switch
+
+Claude Code's own `/model` reads modelPicker in `~/.claude/settings.json`, where magpie writes every model when it connects Claude Code. Paseo never reads modelPicker: its list is its own first-party models plus settings.json's `model` and a few `ANTHROPIC_*_MODEL` tier variables. So with only Claude Code connected, magpie's models other than the main one and the tiers aren't in Paseo's picker. Paseo also appends `agents.providers.claude.additionalModels` from its own config, each id passed to Claude Code as written, and that is where magpie writes.
+
+## What magpie writes
+
+Paseo's folder is `PASEO_HOME`, else `~/.paseo`. In `config.json` magpie adds one `{id, label, description}` entry per model to `agents.providers.claude.additionalModels`: the same ids, [1m] marks and names as Claude Code's `/model`, with a description ending `via magpie`, which is how magpie knows its own entries.
+
+```
+// ~/.paseo/config.json
+{"agents": {"providers": {"claude": {"additionalModels": [
+  {"id": "my-own-model", "label": "…", "description": "…"},
+  {"id": "…", "label": "…", "description": "via magpie"},
+  {"id": "…", "label": "…", "description": "1M context · via magpie"}
+]}}}}
+```
+
+Your own entries keep their place and come first. An id you listed yourself stays yours, and magpie doesn't add it again. A list magpie can't read is left as it is. When magpie's models change, magpie updates its entries.
+
+## When it takes effect
+
+Paseo reads its model list when its daemon starts, so restart Paseo's daemon to see magpie's models; magpie says so while Paseo is running. Claude Code itself must be connected to magpie too, for those ids to be served.
+
+## Switching back
+
+Set Paseo's row back to default in magpie: magpie takes out only the entries whose description ends `via magpie`, and yours stay; with none left, `additionalModels` goes.
+
+```
+magpie paseo default
+```
+
+## FAQ
+
+### Why doesn't Paseo's model picker show magpie's models?
+
+Paseo doesn't read Claude Code's modelPicker; it lists its own models, settings.json's model and a few ANTHROPIC_*_MODEL variables. Switch Paseo's row on in magpie and magpie writes every model into Paseo's additionalModels.
+
+### Does Claude Code need to be connected first?
+
+Yes. Paseo passes those ids as written to the Claude Code it starts, and magpie serves them once Claude Code is connected to magpie.
+
+### I switched it on and still see nothing. Why?
+
+Paseo reads its model list when its daemon starts. Restart Paseo's daemon.
+
+### Will my own additionalModels be changed?
+
+No. magpie adds and removes only entries whose description ends via magpie; yours come first and keep their place.
+
+More agents on the same models: [Models in Claude Code](https://usemagpie.ai/docs/claude-code-models), [T3 Code on any model](https://usemagpie.ai/docs/t3-code) and [Craft Agents on any model](https://usemagpie.ai/docs/craft-agents). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/reasonix
+
+# Reasonix Studio on any model
+
+Reasonix Studio 2.x and its CLI share one `config.toml` and `.env`. magpie adds a provider named magpie there, pointing at magpie's local gateway, so Reasonix's executor and planner can each be any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, GPT or a ChatGPT subscription. Your other providers, keys and project or session settings are left alone.
+
+## Set up Reasonix
+
+1. **Open magpie's Agents page.** Find the Reasonix Studio row. Its model field is called executor.
+2. **Pick a magpie model.** The list has two groups: Reasonix Studio's own models and the ones via magpie. Pick one of the latter; magpie writes the provider and key, then sets `default_model` to `magpie/<model>`.
+3. **Set effort and a planner if you want.** A model with effort levels can take an effort. The planner can be a different model, or off to turn the separate planner off.
+
+```
+magpie reasonix magpie/deepseek/deepseek-v4-pro   # executor
+magpie reasonix effort high
+magpie reasonix planner magpie/deepseek/deepseek-v4-flash # a separate planner, or: off
+```
+
+## What magpie writes
+
+Reasonix's folder is `REASONIX_HOME`; without it, `%APPDATA%\reasonix` on Windows and `~/.reasonix` elsewhere. A Reasonix in WSL uses Linux's `~/.reasonix`, with the gateway as the distro reaches it. magpie writes:
+
+```
+# ~/.reasonix/config.toml
+default_model = "magpie/deepseek/deepseek-v4-pro"
+
+[[providers]]
+name = "magpie"
+kind = "openai"
+base_url = "http://127.0.0.1:3425/v1"
+api_key_env = "MAGPIE_REASONIX_API_KEY"
+models = ["…", "…"]
+default = "deepseek/deepseek-v4-pro"
+reasoning_protocol = "openai"
+no_proxy = true
+
+[providers.model_overrides."deepseek/deepseek-v4-pro"]
+supported_efforts = ["…"]
+context_window = …
+max_output_tokens = …
+
+# ~/.reasonix/.env
+MAGPIE_REASONIX_API_KEY=…
+```
+
+Each model carries its context window, max output, image support and effort levels; a model with no effort levels gets `reasoning_protocol = "none"`. When magpie's models change, magpie updates the provider. When Studio has a `[desktop] provider_access` list, magpie adds magpie to it. The key goes only in `.env`; config.toml names the variable.
+
+magpie only touches its own entry. If there is already a magpie provider magpie didn't make, another provider uses `MAGPIE_REASONIX_API_KEY`, or `.env` sets it twice, magpie stops with an error rather than overwrite. magpie keeps a restore record in its own config folder (settings only, never an upstream credential) to put your `default_model` back when you switch back.
+
+## Executor and planner
+
+The executor is `default_model` and the planner is `[agent] planner_model`; each can come from magpie or from one of Reasonix's own providers. While the planner still uses magpie, magpie's provider stays, even with the executor back on your own model.
+
+## When it takes effect
+
+Reasonix Studio 2.x and the native 1.39.x/2.x CLI read global settings at startup, so start a new process after a change. A model set for a project or session overrides the executor and planner.
+
+## Switching back
+
+Switching back undoes only what magpie added: the magpie provider goes, `default_model` returns to what it was before (or goes if there was none), magpie leaves `provider_access`, and magpie's key leaves `.env`; a file magpie created is removed once empty. A model you picked later, and edits to other providers and keys, stay. You can also just pick a model from the Reasonix Studio group.
+
+```
+magpie reasonix default
+```
+
+## FAQ
+
+### How do I use DeepSeek, GLM or a ChatGPT subscription in Reasonix Studio?
+
+On magpie's Agents page, pick a via-magpie model as Reasonix Studio's executor. magpie adds a magpie provider to config.toml, the key to .env, and sets default_model to magpie/.
+
+### Can the planner be a different model?
+
+Yes. The planner field writes [agent] planner_model: another magpie model, one of Reasonix's own, or off.
+
+### I changed it and Reasonix didn't notice. Why?
+
+Reasonix reads global settings at startup. Start a new Studio or CLI process; a model set for a project or session also overrides the global one.
+
+### Will my own providers and keys change?
+
+No. magpie adds and removes only the provider named magpie and MAGPIE_REASONIX_API_KEY, and stops with an error on a same-named entry it didn't make.
+
+More agents on the same models: [jcode on any model](https://usemagpie.ai/docs/jcode), [Crush on any model](https://usemagpie.ai/docs/crush), [Models in OpenCode](https://usemagpie.ai/docs/opencode-models) and [AtomCode on any model](https://usemagpie.ai/docs/atomcode). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/atomcode
+
+# AtomCode on any model
+
+AtomCode is a Rust terminal coding agent on AtomGit (atomgit.com/atomgit_atomcode/atomcode). Its models live in `config.toml`: a `[models."…"]` table names a `[provider_accounts.…]` table, the shape AtomCode's own CodingPlan sign-in writes since 5.0.7. magpie writes the same shape, a magpie account and one table per model, so AtomCode can use any model you have in magpie: DeepSeek, GLM, Kimi, Qwen, GPT or a ChatGPT subscription.
+
+## Set up AtomCode
+
+1. **Open magpie's Agents page.** Find the AtomCode row. Its list has the models you set up in AtomCode yourself, and the ones via magpie.
+2. **Pick a magpie model.** magpie writes the account and model tables and points `default_provider` and `default_model` at your pick; with both set, AtomCode goes by `default_model`.
+3. **Restart atomcode.** AtomCode reads its settings at start-up, so reopen any running session.
+
+```
+magpie atomcode deepseek/deepseek-v4-pro
+magpie atomcode effort high
+```
+
+## What magpie writes
+
+AtomCode's folder is `ATOMCODE_HOME` (an absolute path), else `~/.atomcode`. An AtomCode in WSL uses Linux's `~/.atomcode`, with the gateway as the distro reaches it. magpie writes:
+
+```
+# ~/.atomcode/config.toml
+default_provider = "magpie/deepseek/deepseek-v4-pro"
+default_model = "magpie/deepseek/deepseek-v4-pro"
+
+[provider_accounts."magpie"]
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:3425/v1"
+api_key = "…"
+
+[models."magpie/deepseek/deepseek-v4-pro"]
+account = "magpie"
+model = "deepseek/deepseek-v4-pro"
+context_window = …
+max_tokens = …
+supports_vision = false
+reasoning_effort_levels = ["…"]
+```
+
+The account uses `openai-compatible`, AtomCode's documented preset for a custom endpoint, at magpie's gateway `/v1`, with a key magpie issues to AtomCode alone. A model table's key is `magpie/<provider>/<model>`, and its `model` goes to the gateway as written. Each carries the context window (AtomCode compacts as it nears it; 128000 when magpie doesn't know it), the output limit (never above the window), image support and the effort levels on offer. When magpie's models change, magpie rewrites its own tables; your own model tables and legacy `providers.*` entries are left alone.
+
+Requests are Chat Completions with Bearer auth and a User-Agent of `atomcode/<version>`; the key is AtomCode's own, so magpie knows a request is AtomCode's even when the header is changed.
+
+## Effort
+
+Effort is the current model table's `reasoning_effort`, sent with every request to it and kept per model. magpie picks none for you, so the vendor's default stands until you do. Only the levels that model supports (some of low, medium, high, xhigh, max) are offered.
+
+## When it takes effect
+
+AtomCode reads its settings at start-up. While atomcode is running, magpie tells you to restart open atomcode sessions.
+
+## Switching back
+
+Switching back removes magpie's account and model tables and puts back the `default_provider` and `default_model` you had before, where AtomCode still has that model (otherwise they go). Picking one of your own AtomCode models in magpie also removes magpie's tables.
+
+```
+magpie atomcode default
+```
+
+## FAQ
+
+### How do I use DeepSeek, GLM or a ChatGPT subscription in AtomCode?
+
+On magpie's Agents page, pick a via-magpie model for AtomCode. magpie adds [provider_accounts."magpie"] and one [models."magpie/…"] table per model to ~/.atomcode/config.toml and points the defaults at your pick.
+
+### What context window does AtomCode get?
+
+magpie writes each model's context_window, or 128000 when it doesn't know it. AtomCode compacts as it nears the window.
+
+### I changed it and AtomCode didn't notice. Why?
+
+AtomCode reads its settings at start-up. Restart the open atomcode sessions.
+
+### Do my own defaults come back when I switch back?
+
+Yes. magpie stashes default_provider and default_model when it steps in and puts them back when it steps out, where AtomCode still has that model.
+
+More agents on the same models: [Reasonix Studio on any model](https://usemagpie.ai/docs/reasonix), [jcode on any model](https://usemagpie.ai/docs/jcode) and [Crush on any model](https://usemagpie.ai/docs/crush). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
