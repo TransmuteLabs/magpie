@@ -93,17 +93,21 @@ jobs:
           - { arch: amd64, os: ubuntu-latest }
           - { arch: arm64, os: ubuntu-24.04-arm }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
+      # застрявшее apt-зеркало — известный режим отказа раннеров (см.
+      # test.yml: "A stuck apt mirror held main's run here for 2.5 hours");
+      # ретраи + короткий таймаут шага, чтобы фейл был быстрым и видимым
       - name: GTK 3 and WebKitGTK 4.1 headers
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build the app
         run: make release-linux VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
