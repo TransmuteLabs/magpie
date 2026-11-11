@@ -34,6 +34,7 @@ type PresetDef struct {
 	Website   string   `json:"website,omitempty"`
 	SiteHost  string   `json:"siteHost,omitempty"` // a partner's: the host its usemagpie.ai/go Website sends the browser to, which the editor's link reads
 	KeysURL   string   `json:"keysUrl,omitempty"`
+	OAuth     bool     `json:"oauth,omitempty"`     // sign in to the vendor instead of entering a key
 	NoKey     bool     `json:"noKey,omitempty"`     // local servers: a key is optional
 	KeyHint   string   `json:"keyHint,omitempty"`   // the key field's placeholder, when it says more than NoKey's
 	Sponsored bool     `json:"sponsored,omitempty"` // shown first, with a tag
@@ -556,7 +557,7 @@ var presets = []PresetDef{
 	{ID: "vercel", Name: "Vercel AI Gateway", Icon: "vercel", Kind: KindRelay, Catalog: "vercel",
 		Chat: "https://ai-gateway.vercel.sh/v1", Responses: "https://ai-gateway.vercel.sh/v1", Anthropic: "https://ai-gateway.vercel.sh",
 		Website: "https://vercel.com/docs/ai-gateway", KeysURL: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys"},
-	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindRelay, Catalog: "opencode-go",
+	{ID: "opencode-go", Name: "OpenCode Go", Icon: "opencode", Kind: KindRelay, Catalog: "opencode-go", OAuth: true,
 		Chat: "https://opencode.ai/zen/go/v1", Responses: "https://opencode.ai/zen/go/v1", Anthropic: "https://opencode.ai/zen/go",
 		Note:    "open coding models, $10/month",
 		Website: "https://opencode.ai/docs/go", KeysURL: "https://opencode.ai/auth"},
@@ -572,7 +573,7 @@ var presets = []PresetDef{
 		Models: []string{"cline-pass/glm-5.3", "cline-pass/glm-5.3-flash", "cline-pass/kimi-k3", "cline-pass/deepseek-v4-pro",
 			"cline-pass/deepseek-v4.1-flash", "cline-pass/mimo-v2.5", "cline-pass/mimo-v2.5-pro", "cline-pass/minimax-m3",
 			"cline-pass/muse-spark-1.3-contributor", "cline-pass/qwen3.8-max", "cline-pass/qwen3.7-max", "cline-pass/qwen3.7-plus"}},
-	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay, Catalog: "opencode", NoKey: true,
+	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay, Catalog: "opencode", NoKey: true, OAuth: true,
 		KeyHint: "optional: free models need no key",
 		Chat:    "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
 		// TypeSafe's Jev (jev-1.13, jev-1.13-free) is no chat model there:

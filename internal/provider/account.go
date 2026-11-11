@@ -222,6 +222,9 @@ func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, b
 	// the agent's own headers the provider lists (PassHeaders), before an
 	// account's signing, which has the last word on its own
 	passed := p.passClientHeaders(ctx, req.Header)
+	if p.Account != nil && isOpenCodeOAuth(p.Account.Agent) {
+		return p.signOpenCode(ctx, req, proto, passed)
+	}
 	if p.Account != nil && p.Account.sign != nil {
 		return p.Account.sign(ctx, req, body)
 	}
@@ -935,6 +938,11 @@ func Accounts() []Provider {
 	}
 	if p, ok := siwcAccount(); ok {
 		out = append(out, p)
+	}
+	for _, id := range []string{"opencode-go", "opencode-zen"} {
+		if p, ok := openCodeAccount(id); ok {
+			out = append(out, p)
+		}
 	}
 	for _, agent := range []string{"gemini", "antigravity"} {
 		if p, ok := googleAccountOf(agent); ok {

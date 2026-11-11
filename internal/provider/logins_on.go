@@ -35,6 +35,8 @@ func SetLoginOn(agent, user string, on bool) error {
 		return setPluginLoginOn(pp, user, on)
 	}
 	switch agent {
+	case "opencode-go", "opencode-zen":
+		return setSideLoginOn(agent, user, on, openCodeLogins(agent))
 	case "copilot":
 		return setCopilotLoginOn(user, on)
 	case ChatGPTAPIID:
@@ -136,6 +138,9 @@ func (p Provider) AlsoOn() []Provider {
 func (p Provider) alsoOn() []Provider {
 	if p.IsPlugin() {
 		return pluginAlsoOn(*p.Account.plugin)
+	}
+	if p.Account != nil && isOpenCodeOAuth(p.Account.Agent) {
+		return openCodeAlsoOn(p.Account.Agent)
 	}
 	if p.Account != nil && p.Account.Agent == "copilot" {
 		return copilotAlsoOn()

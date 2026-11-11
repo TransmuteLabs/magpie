@@ -1,23 +1,20 @@
 package sessions
 
 // Carrying a conversation over to an agent that can't read the session's
-// own file (0xPlato on X): Claude Code's is converted into a new Codex
-// session, and Codex's into a new Claude Code session, each in that agent's
-// own folder and form, so its own resume opens it. The source file is only
-// read.
+// own file (0xPlato on X): Claude Code, Codex, and omp sessions are converted
+// among the three, each in the destination's own folder and form, so its own
+// resume opens it. The source file is only read.
 //
 // What goes over: what the user and the agent said, a shell command and what
 // it printed as the target's own tool call and result (Claude Code's Bash,
 // Codex's exec_command), every other tool's call and result as words the
 // agent said (the target has no tool of that name), and the user's pasted
-// images. What doesn't: reasoning. Claude Code's thinking is checked by its
-// signature and Codex's by its encrypted_content, neither of which the other
-// vendor can read, and a summary of it is only what the model thought. The
-// target picks its model as it does for any resumed session: Codex from its
-// config.toml (the rollout names none and keeps no base_instructions, so
-// Codex uses its own), Claude Code from its settings; the assistant lines
-// say "<synthetic>", Claude Code's own name for a line no model wrote here,
-// so magpie's usage counts none of them as a call.
+// images. Claude Code's thinking and Codex's reasoning stay behind: their
+// signatures and encrypted content can't be replayed by the other vendor.
+// The target picks its model as it does for any resumed session: Codex from
+// its config.toml (the rollout names none and keeps no base_instructions),
+// Claude Code and omp from their settings. Their assistant lines say
+// "<synthetic>" and have zero usage, so no carried line becomes a model call.
 //
 // The conversion runs when the user asks for it (CarryOver), never on a
 // listing, and the one made from a file's bytes is handed back again while
@@ -43,11 +40,19 @@ import (
 	"github.com/yetone/magpie/internal/proc"
 )
 
+// carryContent is one ordered block of a user's message.
+type carryContent struct {
+	Type     string // text | image
+	Text     string
+	Data     string // base64, not a data URL
+	MimeType string
+}
+
 // carryItem is one thing said in a conversation, in neither agent's form.
 type carryItem struct {
-	Kind   string   // user | assistant | call | result
-	Text   string   // what was said; a result's output
-	Images []string // a user's images, as data: URLs
+	Kind    string         // user | assistant | call | result
+	Text    string         // assistant text or a result's output
+	Content []carryContent // a user's ordered text and image blocks
 	// a call's: its tool and input, the shell line when it ran one, and
 	// the folder it ran in
 	Name    string
@@ -76,7 +81,11 @@ type CarryResult struct {
 }
 
 // convertsTo are the agents a session of an agent can be converted for.
-var convertsTo = map[string]string{"claude": "codex", "codex": "claude"}
+var convertsTo = map[string][]string{
+	"claude": {"codex", "omp"},
+	"codex":  {"claude", "omp"},
+	"omp":    {"claude", "codex"},
+}
 
 // agentThere says whether an agent is installed: its command, or its folder.
 // A var so tests can say. Answers are kept a little while, as the listing
@@ -93,6 +102,8 @@ var agentThere = func(agent string) bool {
 		ok = lookOK("claude") || dirOK(ClaudeDir())
 	case "codex":
 		ok = lookOK("codex") || dirOK(CodexDir())
+	case "omp":
+		ok = lookOK("omp") || dirOK(OmpDir()) || dirOK(filepath.Dir(ompCarrySessionsRoot()))
 	}
 	thereAt[agent] = there{ok, time.Now()}
 	return ok
@@ -156,6 +167,8 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 		items, err = claudeCarryItems(s.Path)
 	case "codex":
 		items, err = codexCarryItems(s.Path)
+	case "omp":
+		items, err = ompCarryItems(s.Path)
 	}
 	if err != nil {
 		return CarryResult{}, err
@@ -170,6 +183,8 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 		r, err = writeClaudeCarry(s.Cwd, items, time.Now())
 	case "codex":
 		r, err = writeCodexCarry(CodexDir(), s.Cwd, items, time.Now())
+	case "omp":
+		r, err = writeOmpCarry(s.Cwd, items, time.Now())
 	}
 	if err != nil {
 		return CarryResult{}, err
@@ -330,6 +345,9 @@ func claudeLineItems(l ccCarryLine, at time.Time) []carryItem {
 		if l.Type == "user" && claudeOwnWords(text) {
 			return nil
 		}
+		if l.Type == "user" {
+			return []carryItem{{Kind: "user", Content: []carryContent{{Type: "text", Text: text}}, Time: at}}
+		}
 		return []carryItem{{Kind: l.Type, Text: text, Time: at}}
 	}
 	var blocks []ccCarryBlock
@@ -338,20 +356,19 @@ func claudeLineItems(l ccCarryLine, at time.Time) []carryItem {
 	}
 	var items []carryItem
 	user := carryItem{Kind: "user", Time: at}
-	var words []string
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
 			if l.Type == "user" {
 				if !claudeOwnWords(b.Text) {
-					words = append(words, b.Text)
+					user.Content = append(user.Content, carryContent{Type: "text", Text: b.Text})
 				}
 			} else if strings.TrimSpace(b.Text) != "" {
 				items = append(items, carryItem{Kind: "assistant", Text: b.Text, Time: at})
 			}
 		case "image":
 			if l.Type == "user" && b.Source.Type == "base64" && b.Source.Data != "" {
-				user.Images = append(user.Images, "data:"+b.Source.MediaType+";base64,"+b.Source.Data)
+				user.Content = append(user.Content, carryContent{Type: "image", Data: b.Source.Data, MimeType: b.Source.MediaType})
 			}
 		case "tool_use":
 			it := carryItem{Kind: "call", Name: b.Name, ID: b.ID, Input: pretty(b.Input), Time: at}
@@ -369,8 +386,7 @@ func claudeLineItems(l ccCarryLine, at time.Time) []carryItem {
 		}
 		// thinking and redacted_thinking stay behind: see the top
 	}
-	if l.Type == "user" && (len(words) > 0 || len(user.Images) > 0) {
-		user.Text = strings.Join(words, "\n\n")
+	if l.Type == "user" && len(user.Content) > 0 {
 		items = append([]carryItem{user}, items...)
 	}
 	return items
@@ -458,7 +474,7 @@ func codexCarryItems(path string) ([]carryItem, error) {
 						kept = append(kept, it)
 					}
 				}
-				items = append(kept, carryItem{Kind: "user", Text: codexsummary.Prefix + "\n" + p.Message, Time: at})
+				items = append(kept, carryItem{Kind: "user", Content: []carryContent{{Type: "text", Text: codexsummary.Prefix + "\n" + p.Message}}, Time: at})
 			}
 		}
 	})
@@ -468,27 +484,39 @@ func codexCarryItems(path string) ([]carryItem, error) {
 func codexItem(p cxCarryPayload, at time.Time) []carryItem {
 	switch p.Type {
 	case "message":
-		var words, images []string
+		var words []string
+		var content []carryContent
 		for _, c := range p.Content {
 			switch c.Type {
 			case "input_text", "output_text", "text":
 				words = append(words, c.Text)
+				if p.Role == "user" {
+					content = append(content, carryContent{Type: "text", Text: c.Text})
+				}
 			case "input_image":
-				if strings.HasPrefix(c.ImageURL, "data:") {
-					images = append(images, c.ImageURL)
+				if p.Role == "user" {
+					if mt, data, ok := splitDataURL(c.ImageURL); ok {
+						content = append(content, carryContent{Type: "image", Data: data, MimeType: mt})
+					}
 				}
 			}
 		}
 		text := strings.Join(words, "\n")
 		switch p.Role {
 		case "user":
-			if codexOwnWords(text) && len(images) == 0 {
+			if codexOwnWords(text) {
+				images := content[:0]
+				for _, block := range content {
+					if block.Type == "image" {
+						images = append(images, block)
+					}
+				}
+				content = images
+			}
+			if len(content) == 0 {
 				return nil
 			}
-			if codexOwnWords(text) {
-				text = ""
-			}
-			return []carryItem{{Kind: "user", Text: text, Images: images, Time: at}}
+			return []carryItem{{Kind: "user", Content: content, Time: at}}
 		case "assistant":
 			if strings.TrimSpace(text) == "" {
 				return nil
@@ -530,7 +558,7 @@ func codexItem(p cxCarryPayload, at time.Time) []carryItem {
 			c, _ := msg["content"].([]map[string]any)
 			if len(c) > 0 {
 				if t, _ := c[0]["text"].(string); t != "" {
-					return []carryItem{{Kind: "user", Text: t, Time: at}}
+					return []carryItem{{Kind: "user", Content: []carryContent{{Type: "text", Text: t}}, Time: at}}
 				}
 			}
 		}
@@ -724,15 +752,17 @@ func writeClaudeCarry(cwd string, items []carryItem, now time.Time) (CarryResult
 		switch it.Kind {
 		case "user":
 			msgID = ""
-			var content any = it.Text
-			if len(it.Images) > 0 {
-				var blocks []any
-				if it.Text != "" {
-					blocks = append(blocks, o("type", "text", "text", it.Text))
-				}
-				for _, img := range it.Images {
-					if mt, data, ok := splitDataURL(img); ok {
-						blocks = append(blocks, o("type", "image", "source", o("type", "base64", "media_type", mt, "data", data)))
+			var content any
+			if len(it.Content) == 1 && it.Content[0].Type == "text" {
+				content = it.Content[0].Text
+			} else {
+				blocks := []any{}
+				for _, block := range it.Content {
+					switch block.Type {
+					case "text":
+						blocks = append(blocks, o("type", "text", "text", block.Text))
+					case "image":
+						blocks = append(blocks, o("type", "image", "source", o("type", "base64", "media_type", block.MimeType, "data", block.Data)))
 					}
 				}
 				content = blocks
@@ -859,18 +889,21 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 		switch it.Kind {
 		case "user":
 			content := []any{}
-			if it.Text != "" {
-				content = append(content, o("type", "input_text", "text", it.Text))
-			}
 			images := []string{}
-			for _, img := range it.Images {
-				if _, _, ok := splitDataURL(img); ok {
+			var words []string
+			for _, block := range it.Content {
+				switch block.Type {
+				case "text":
+					content = append(content, o("type", "input_text", "text", block.Text))
+					words = append(words, block.Text)
+				case "image":
+					img := "data:" + block.MimeType + ";base64," + block.Data
 					content = append(content, o("type", "input_image", "image_url", img))
 					images = append(images, img)
 				}
 			}
 			add(it.Time, "response_item", o("type", "message", "role", "user", "content", content))
-			add(it.Time, "event_msg", o("type", "user_message", "message", it.Text,
+			add(it.Time, "event_msg", o("type", "user_message", "message", strings.Join(words, "\n"),
 				"images", images, "local_images", []any{}, "text_elements", []any{}))
 		case "assistant":
 			say(it.Time, it.Text)
@@ -889,6 +922,9 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 			out := it.Result
 			if !it.Done {
 				out = "[no output was recorded]"
+			}
+			if it.IsError {
+				out = "[error]\n" + out
 			}
 			add(it.Time, "response_item", o("type", "function_call_output", "call_id", callID, "output", out))
 		}

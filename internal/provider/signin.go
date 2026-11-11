@@ -245,6 +245,11 @@ func StartSignInWith(agent string, o SignInOptions) (SignInState, error) {
 	if settings.AccountDiscoveryOff() {
 		return SignInState{}, errAccountDiscoveryOff
 	}
+	if isOpenCodeOAuth(agent) {
+		if err := checkOpenCodeProvider(agent); err != nil {
+			return SignInState{}, err
+		}
+	}
 	// one moved onto its plugin signs in there: an account signed in to
 	// here would be the built-in's, which nothing serves now
 	if PluginServes(agent) {
@@ -384,6 +389,10 @@ func (s *signInFlow) begin() error {
 	case "copilot":
 		// GitHub's device code, as Copilot's editors sign in
 		if err := startCopilotSignIn(s); err != nil {
+			return err
+		}
+	case "opencode-go", "opencode-zen":
+		if err := startOpenCodeSignIn(s); err != nil {
 			return err
 		}
 	case "gemini", "antigravity":

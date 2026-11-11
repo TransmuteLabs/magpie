@@ -84,8 +84,9 @@ const usage = `magpie — one place to pick every agent's model
   magpie library [sync|instructions|mcp|skill]   the instructions, MCP servers and skills written into every agent (magpie library help)
 
   magpie providers                list your providers: host, key, models, who uses them
-  magpie presets                  the vendors magpie knows: add one with just a key
+  magpie presets                  the vendors magpie knows: add one with a key or OAuth
   magpie provider add <preset> <key>   e.g. magpie provider add deepseek sk-…
+  magpie provider add opencode-go|opencode-zen   sign in to OpenCode Console with OAuth, without a key
   magpie provider add <name> k=v…      a custom vendor (magpie provider for the fields)
   magpie provider key|models|test|rm <id>
   magpie provider fallback <id> <provider/model>…   use these when it's out of quota or down
@@ -102,7 +103,7 @@ const usage = `magpie — one place to pick every agent's model
   magpie group add <name> models=<m1>,<m2> [routing=smart|order|rotate|usage|pace|weight|free|fast|cheap|drain|expiring] [stays=auto|session|turn|off]
   magpie group <id> | set <id> k=v… | rm <id>   show, change or remove one (magpie group help for more)
   magpie accounts [agent] [--json]  every subscription magpie knows, with each one's allowance used and when it resets
-  magpie accounts add <agent>     sign in to one more Claude, ChatGPT or Google (Gemini CLI, Antigravity) subscription
+  magpie accounts add <agent>     sign in to one more Claude, ChatGPT, OpenCode or Google (Gemini CLI, Antigravity) subscription
   magpie accounts add copilot [--host <name>.ghe.com]   one more Copilot account, on github.com or an enterprise's GHE.com
   magpie accounts discovery [on|off]   read agents' sign-ins (default on; MAGPIE_NO_ACCOUNTS=1 disables too)
   magpie accounts import <codex|claude|antigravity|factory> <file>... [--yes]   bring in accounts from other tools' files (Codex's auth.json, Cockpit Tools, CLIProxyAPI, Sub2API, claude-swap); the tool a ChatGPT or Claude file came from is signed out of it

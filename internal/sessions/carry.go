@@ -9,8 +9,9 @@ package sessions
 // thinking; the model from its assistant messages, as omp names models
 // provider/id) and writes a new omp session from it, the Pi file untouched.
 // The other way doesn't work: Pi opens a file only when its first line is
-// the session header, and omp's first line is its title. Claude Code's and
-// Codex's sessions are converted for each other (carry_convert.go).
+// the session header, and omp's first line is its title. Claude Code, Codex,
+// and omp sessions are converted bidirectionally among the three
+// (carry_convert.go).
 
 import (
 	"os"
@@ -52,10 +53,13 @@ func carries(s Session) []Carry {
 		}
 		return []Carry{{Agent: "omp", Command: inFolder(s.Cwd, "omp --fork "+argQuote(s.Path))}}
 	}
-	if to := convertsTo[s.Agent]; to != "" && agentThere(to) {
-		return []Carry{{Agent: to, Convert: true}}
+	var out []Carry
+	for _, to := range convertsTo[s.Agent] {
+		if agentThere(to) {
+			out = append(out, Carry{Agent: to, Convert: true})
+		}
 	}
-	return nil
+	return out
 }
 
 // inFolder is a shell line running run in the folder cwd.
