@@ -1371,9 +1371,7 @@ func TestHostStreamFrameOverheadBoundsTheQueue(t *testing.T) {
 
 // errAnswer is the answer a plugin's fetch that failed gives.
 func errAnswer(why string) message {
-	return message{Error: &struct {
-		Message string `json:"message"`
-	}{why}}
+	return message{Error: &messageError{Message: why}}
 }
 
 var _ = base64.StdEncoding

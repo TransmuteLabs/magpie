@@ -52,7 +52,19 @@ import (
 	"github.com/yetone/magpie/internal/mcpauth"
 )
 
-func init() { gateway.MCPHub = theHub{} }
+func init() {
+	gateway.MCPHub = theHub{}
+	gateway.MCPAccountBound = func(name string) (bool, error) {
+		mu.Lock()
+		l, err := load()
+		mu.Unlock()
+		if err != nil {
+			return false, err
+		}
+		s := l.server(name)
+		return s != nil && s.PluginAccount != nil, nil
+	}
+}
 
 // HubEntry is the name of the one entry the hub is given to an agent by.
 const HubEntry = "magpie"
@@ -94,6 +106,9 @@ func ServerHub(name string, direct bool) (*Result, error) {
 		s := l.server(name)
 		if s == nil {
 			return fmt.Errorf("no server called %s", name)
+		}
+		if direct && s.PluginAccount != nil {
+			return errPluginAccountDirect
 		}
 		s.Hub = ""
 		if direct {
@@ -242,7 +257,9 @@ func hubAbouts(ss []*Server) []gateway.HubServer {
 // hereOnly is whether s acts as this computer's user beyond what its
 // tools' arguments say (gateway.HubServer's HereOnly): Magpie Browser and
 // another magpie's router (keepsSession), and magpie's image server.
-func hereOnly(s *Server) bool { return keepsSession(s) || isSelf(s) || isMemory(s) }
+func hereOnly(s *Server) bool {
+	return s.PluginAccount != nil || keepsSession(s) || isSelf(s) || isMemory(s)
+}
 
 // isMemory is whether s is magpie's own memory server (`magpie mcp
 // memory`), which holds what is known about this computer's user.
@@ -277,7 +294,15 @@ func (theHub) Tools(ctx context.Context, agentID string) []gateway.HubTool {
 			var ts []map[string]json.RawMessage
 			var says serverSays
 			var err error
-			if s.Plugin != "" {
+			if s.PluginAccount != nil {
+				var c hubConn
+				c, err = dialHub(ctx, s, func() {})
+				if err == nil {
+					ts, err = listHubTools(ctx, c)
+					says = c.said()
+					c.close()
+				}
+			} else if s.Plugin != "" {
 				ts, err = pluginHubTools(ctx, s)
 			} else {
 				b := backendOf(s)
@@ -287,7 +312,9 @@ func (theHub) Tools(ctx context.Context, agentID string) []gateway.HubTool {
 			if err != nil {
 				return
 			}
-			noteCard(s, says, ts)
+			if s.PluginAccount == nil {
+				noteCard(s, says, ts)
+			}
 			for _, t := range ts {
 				var name string
 				if json.Unmarshal(t["name"], &name) != nil || name == "" || slices.Contains(s.DisabledTools, name) {
@@ -333,6 +360,14 @@ func (theHub) Call(ctx context.Context, agentID, server, tool string, args json.
 			meta = map[string]any{}
 		}
 		meta[gateway.HubSessionMeta] = c.Session
+	}
+	if s.PluginAccount != nil {
+		c, err := dialHub(ctx, s, func() {})
+		if err != nil {
+			return nil, err
+		}
+		defer c.close()
+		return callHubTool(ctx, c, tool, args, meta, true)
 	}
 	if s.Plugin != "" {
 		return pluginHubCall(ctx, gateway.HubAgentOf(agentID), s, tool, args)
@@ -626,6 +661,17 @@ func (b *backend) tools(ctx context.Context) ([]map[string]json.RawMessage, erro
 	if err != nil {
 		return nil, err
 	}
+	all, err := listHubTools(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.list, b.listed = all, true
+	b.mu.Unlock()
+	return all, nil
+}
+
+func listHubTools(ctx context.Context, c hubConn) ([]map[string]json.RawMessage, error) {
 	var all []map[string]json.RawMessage
 	cursor := ""
 	for page := 0; page < maxToolPages; page++ {
@@ -656,9 +702,6 @@ func (b *backend) tools(ctx context.Context) ([]map[string]json.RawMessage, erro
 		}
 		cursor = r.NextCursor
 	}
-	b.mu.Lock()
-	b.list, b.listed = all, true
-	b.mu.Unlock()
 	return all, nil
 }
 
@@ -671,6 +714,10 @@ func (b *backend) call(ctx context.Context, tool string, args json.RawMessage, m
 	if err != nil {
 		return nil, err
 	}
+	return callHubTool(ctx, c, tool, args, meta, false)
+}
+
+func callHubTool(ctx context.Context, c hubConn, tool string, args json.RawMessage, meta map[string]any, private bool) (json.RawMessage, error) {
 	params := map[string]any{"name": tool, "arguments": args}
 	if meta != nil {
 		params["_meta"] = meta
@@ -680,6 +727,9 @@ func (b *backend) call(ctx context.Context, tool string, args json.RawMessage, m
 		return nil, err
 	}
 	if m.Error != nil {
+		if private {
+			return nil, errors.New("the plugin-account MCP server refused the tool call")
+		}
 		return nil, fmt.Errorf("%s (%d)", m.Error.Message, m.Error.Code)
 	}
 	return m.Result, nil
@@ -689,6 +739,8 @@ func (b *backend) call(ctx context.Context, tool string, args json.RawMessage, m
 func healthErr(h ServerHealth) error {
 	var s string
 	switch {
+	case h.State == "auth" && h.Why == "plugin-account":
+		s = h.Detail
 	case h.State == "auth":
 		s = "it asks for a sign-in or a key: sign in to it, or give it its key, in magpie's Library"
 	case h.Why == "notfound":
@@ -710,6 +762,8 @@ func healthErr(h ServerHealth) error {
 		}
 	case h.Why == "http":
 		s = "it answered " + h.Detail
+	case h.Why == "redirect":
+		s = h.Detail
 	case h.Why == "refused" || h.Why == "unreachable":
 		s = "it couldn't be reached: " + h.Detail
 	case h.Why == "novar":
@@ -723,6 +777,9 @@ func healthErr(h ServerHealth) error {
 // dialHub connects to s, initialized, for the hub; changed is called when
 // it says its tools changed.
 func dialHub(ctx context.Context, s *Server, changed func()) (hubConn, error) {
+	if s.PluginAccount != nil && !validPluginMCPServer(s) {
+		return nil, errors.New("the plugin-account MCP binding is invalid or needs command trust")
+	}
 	var c *streamConn
 	var err error
 	switch s.Transport {
@@ -742,7 +799,11 @@ func dialHub(ctx context.Context, s *Server, changed func()) (hubConn, error) {
 	}
 	m, err := c.ask(ctx, "initialize", initParams())
 	if err == nil && m.Error != nil {
-		err = healthErr(*initError(m))
+		if s.PluginAccount != nil {
+			err = errors.New("the plugin-account MCP server refused initialization")
+		} else {
+			err = healthErr(*initError(m))
+		}
 	}
 	if err != nil {
 		c.close()
@@ -902,6 +963,12 @@ func (c *streamConn) close() {
 
 // dialStdio starts the command s runs, as the check starts it.
 func dialStdio(s *Server, changed func()) (*streamConn, error) {
+	if s.PluginAccount != nil {
+		digest, err := commandTrustDigest(s)
+		if err != nil || s.PluginAccount.Scope == "" || s.Hub == HubDirect || s.Plugin != "" || s.Bridge != "" || digest != s.PluginAccount.CommandDigest {
+			return nil, errors.New("the credential-bearing command changed; bind it again with --trust-command")
+		}
+	}
 	// the hub's server lives until the hub ends it, not with a request
 	tree, stdin, stdout, errs, stop, bad := startServer(context.Background(), s, "", "")
 	if bad != nil {
@@ -912,7 +979,14 @@ func dialStdio(s *Server, changed func()) (*streamConn, error) {
 	go func() { exitErr = tree.Wait(); close(exited) }()
 	var wmu sync.Mutex
 	c := &streamConn{}
-	c.send = func(_ context.Context, b []byte) error {
+	c.send = func(ctx context.Context, b []byte) error {
+		if s.PluginAccount != nil {
+			var err error
+			b, err = stdioAuthMessage(ctx, s, b)
+			if err != nil {
+				return err
+			}
+		}
 		wmu.Lock()
 		defer wmu.Unlock()
 		_, err := stdin.Write(append(b, '\n'))
@@ -941,9 +1015,17 @@ func dialStdio(s *Server, changed func()) (*streamConn, error) {
 		// its output ended: it is ending, and says why once it has
 		select {
 		case <-exited:
-			c.w.end(healthErr(exitHealth(exitErr, errs)))
+			if s.PluginAccount != nil {
+				c.w.end(errors.New("the credential-bearing command exited"))
+			} else {
+				c.w.end(healthErr(exitHealth(exitErr, errs)))
+			}
 		case <-time.After(2 * time.Second):
-			c.w.end(errors.New("it closed its output: " + errs.last()))
+			if s.PluginAccount != nil {
+				c.w.end(errors.New("the credential-bearing command closed its output"))
+			} else {
+				c.w.end(errors.New("it closed its output: " + errs.last()))
+			}
 		}
 	}()
 	return c, nil

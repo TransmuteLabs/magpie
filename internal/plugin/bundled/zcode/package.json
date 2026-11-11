@@ -1,0 +1,38 @@
+{
+  "name": "magpie-builtin-zcode",
+  "version": "3.18.0",
+  "private": true,
+  "description": "Core-owned builtin:zcode account and vendor transport",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "*.mjs",
+    "README.md",
+    "LICENSE.MIT",
+    "LICENSE.ZCode",
+    "NOTICE.ZCode",
+    "NOTICE"
+  ],
+  "keywords": [
+    "magpie",
+    "zcode",
+    "z.ai",
+    "bigmodel",
+    "glm",
+    "coding-plan"
+  ],
+  "license": "MIT AND Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TransmuteLabs/magpie.git",
+    "directory": "internal/plugin/bundled/zcode"
+  },
+  "magpie": {
+    "maxConcurrency": 3,
+    "maxAccounts": 2,
+    "bundled": true
+  }
+}

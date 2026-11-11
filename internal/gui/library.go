@@ -194,6 +194,49 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, f)
 	})
+	mux.HandleFunc("GET /api/library/servers/account-target", func(rw http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("binding") == "1" {
+			binding, err := library.LibraryPluginAccountBinding(r.URL.Query().Get("name"))
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			writeJSON(rw, map[string]any{"binding": binding})
+			return
+		}
+		target, err := library.LibraryPluginAccountTarget(r.URL.Query().Get("name"))
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, target)
+	})
+	mux.HandleFunc("POST /api/library/servers/account-unbind/scoped", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Name    string
+			Binding *library.PluginAccount
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if in.Name == "" || in.Binding == nil || in.Binding.Provider == "" || in.Binding.Account == "" || in.Binding.Scope == "" {
+			http.Error(rw, "the displayed account binding is required", http.StatusBadRequest)
+			return
+		}
+		ctx := library.WithPluginAccountBinding(r.Context(), *in.Binding)
+		res, err := library.ServerPluginAccount(ctx, in.Name, nil, false)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		v, err := libraryView(res)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, v)
+	})
 	// the market: what it offers for a search, and each skill's description
 	// once asked for, which skills.sh gives one at a time
 	mux.HandleFunc("GET /api/library/market/servers", func(rw http.ResponseWriter, r *http.Request) {
@@ -621,6 +664,14 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			Keep     bool              // a project removed keeps what magpie put in it
 			On       bool              // every skill or server given to the agents, or taken from them
 			How      string            // link or copy: how skills are given to Agent, or to every agent with none (#896)
+
+			Provider          string
+			Account           string
+			Scope             string
+			Generation        string
+			TargetFingerprint string
+			TrustCommand      bool
+
 			// Replace updates a skill changed here all the same, its
 			// changed version kept with the backups (#1449)
 			Replace bool
@@ -644,6 +695,27 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ImportInstructions(in.Name)
 		case "servers/save":
 			res, err = library.SaveServer(in.Old, in.Server)
+		case "servers/account-bind":
+			if in.Name == "" || in.Provider == "" || in.Account == "" || in.Scope == "" || in.Generation == "" || in.TargetFingerprint == "" {
+				http.Error(rw, "a saved target, provider, account and captured identity are required", http.StatusBadRequest)
+				return
+			}
+			choices, available := provider.ZCodeAccountChoices()
+			if !available {
+				err = errors.New("local account choices are unavailable")
+				break
+			}
+			if !slices.ContainsFunc(choices, func(c provider.ZCodeAccountChoice) bool {
+				return c.PluginProvider == in.Provider && c.Account == in.Account
+			}) {
+				err = errors.New("the selected local account is unavailable")
+				break
+			}
+			ctx := library.WithPluginAccountTarget(r.Context(), in.TargetFingerprint)
+			ctx = library.WithPluginAccountExpectation(ctx, in.Scope, in.Generation)
+			res, err = library.ServerPluginAccount(ctx, in.Name, &library.PluginAccount{Provider: in.Provider, Account: in.Account}, in.TrustCommand)
+		case "servers/account-unbind":
+			res, err = library.ServerPluginAccount(r.Context(), in.Name, nil, false)
 		case "servers/agents":
 			res, err = library.ServerAgents(in.Name, in.Agents)
 		case "servers/hub":

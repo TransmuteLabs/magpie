@@ -44,6 +44,10 @@ var mcpHop = map[string]bool{
 // nil until the library sets it.
 var RunMCP func(w http.ResponseWriter, r *http.Request, name string)
 
+// MCPAccountBound reads the current Library binding; the library sets it
+// without making the gateway depend on that package.
+var MCPAccountBound func(name string) (bool, error)
+
 // runMCP is RunMCP, for this computer's agents alone: it starts a command
 // the user gave their agents, and no other machine, and no web page (one
 // posting a form, or of a name pointed at 127.0.0.1), may have it started.
@@ -84,6 +88,17 @@ func (s *Server) mcpProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Origin") != "" || !sharedWith(r) && !loopbackHost(r.Host) {
 		http.Error(w, "magpie lends its MCP sign-ins to agents, not to web pages", http.StatusForbidden)
 		return
+	}
+	if MCPAccountBound != nil {
+		bound, err := MCPAccountBound(name)
+		if err != nil {
+			http.Error(w, "the Library's MCP account policy could not be read", http.StatusServiceUnavailable)
+			return
+		}
+		if bound {
+			http.Error(w, "this MCP server uses a plugin account and is available only through the MCP router", http.StatusForbidden)
+			return
+		}
 	}
 	// a gateway key held to some MCP servers or tools (access.Key.MCP)
 	w, r, done, held := mcpKeyGuard(w, r, name)

@@ -41,7 +41,9 @@ func relaysAny() bool {
 	if err != nil {
 		return false
 	}
-	return slices.ContainsFunc(l.MCP, func(s *Server) bool { return s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL) })
+	return slices.ContainsFunc(l.MCP, func(s *Server) bool {
+		return s.PluginAccount == nil && s.Transport == "http" && mcpauth.SignedIn(s.Name, s.URL)
+	})
 }
 
 // through is the server as an agent that reaches the gateway at base is
@@ -108,6 +110,9 @@ func SignInServer(ctx context.Context, name string) (mcpauth.State, error) {
 	s := l.server(name)
 	if s == nil {
 		return mcpauth.State{}, fmt.Errorf("no server called %s", name)
+	}
+	if s.PluginAccount != nil {
+		return mcpauth.State{}, errors.New("this server uses a plugin account; unbind it before using MCP OAuth sign-in")
 	}
 	if s.Transport != "http" {
 		return mcpauth.State{}, errNotHTTP

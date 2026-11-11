@@ -27,6 +27,8 @@ import (
 type ResetCredits struct {
 	Count int        `json:"count"`
 	Until *time.Time `json:"until,omitempty"`
+	// Source identifies a plugin's separate read-only legacy reset list.
+	Source string `json:"source,omitempty"`
 	// ByWindow: each reset is for one window, FiveHour of the five hours'
 	// and Weekly of the week's, and is spent on the vendor's own page (a
 	// GLM Coding team plan's, zcode_team.go), not from magpie
@@ -35,11 +37,6 @@ type ResetCredits struct {
 	Weekly   int  `json:"weekly,omitempty"`
 	// Team: the resets are a GLM Coding team plan's, not the person's own
 	Team bool `json:"team,omitempty"`
-	// Windowed resets are usable here only when their plugin supplied the
-	// current nonsecret context. Pending names an unconfirmed use's window.
-	CanUse  bool   `json:"canUse,omitempty"`
-	Context string `json:"context,omitempty"`
-	Pending string `json:"pending,omitempty"`
 	// Each is every reset still to be used and when it runs out, the
 	// soonest first, one that never does last (#960: the card's tooltip
 	// lists them, where it only said the first). Empty when the vendor

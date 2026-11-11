@@ -86,6 +86,9 @@ var pluginCheckinProviders = func() []pluginCheckinProvider {
 			id := pp.ID
 			p.accounts = append(p.accounts, pluginCheckinAcct{User: l.User, On: l.On, key: pluginCheckinKey(id, acct), legacy: pluginCheckinLegacyKey(id, l.acct), card: card,
 				do: func(ctx context.Context) WorkBuddyCheckin {
+					if id == "zcode" {
+						return zcodeScheduledCheckin(ctx, card, acct)
+					}
 					c, err := plugin.AccountCheckin(ctx, id, acct)
 					if err != nil {
 						return wbCheckinFailed(err)

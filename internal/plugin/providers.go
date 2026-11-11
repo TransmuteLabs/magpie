@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,6 +152,8 @@ type Provider struct {
 	Icon string `json:"icon,omitempty"`
 	// Usage says the plugin tells each account's allowance (auth.usage)
 	Usage bool `json:"usage"`
+	// Account lists the operations advertised by the account hook.
+	Account []string `json:"account,omitempty"`
 	// Checkin says the plugin presses its vendor's daily check-in for each
 	// account (auth.checkin)
 	Checkin bool `json:"checkin,omitempty"`
@@ -295,6 +298,10 @@ var (
 	// provSettling is set while Settle runs: no refresh starts, nor goes
 	// on to a newer invalidation, to start a host in a folder going away.
 	provSettling bool
+	// An intrinsic activation failure is local to ZCode. Keep the last
+	// unrelated listing, but never present that failure as a successful
+	// ZCode model list.
+	zcodeActivationError string
 )
 
 func providersPath() string { return filepath.Join(settings.Dir(), "plugin-providers.json") }
@@ -323,6 +330,27 @@ func forgetProviders() {
 // Providers asks the plugins for their providers, starting the host if
 // need be, and keeps the answer for Cached.
 func Providers(ctx context.Context) ([]Provider, error) {
+	if PrepareZCode != nil {
+		if err := PrepareZCode(); err != nil {
+			provMu.Lock()
+			zcodeActivationError = err.Error()
+			provMu.Unlock()
+			ps, _ := Listed()
+			return currentProviderAccounts(ps, Load()), nil
+		}
+	}
+	if len(Load().Plugins) == 0 && !SignedIn("zcode") && !Running() {
+		return currentProviderAccounts(nil, List{}), nil
+	}
+	if SignedIn("zcode") {
+		if _, err := getZCode(ctx); err != nil {
+			// Do not start or refresh unrelated providers after an intrinsic
+			// activation failure. Their last listing remains authoritative;
+			// the ZCode projection below carries the activation error.
+			ps, _ := Listed()
+			return currentProviderAccounts(ps, Load()), nil
+		}
+	}
 	var ps []Provider
 	if err := Call(ctx, "providers", listingArgs(), &ps); err != nil {
 		return nil, err
@@ -574,6 +602,7 @@ func keepUnloaded(ps, last []Provider) []Provider {
 func UseCached(ps []Provider) {
 	provMu.Lock()
 	provCache, provGood, provTried = ps, ps != nil, ps != nil
+	zcodeActivationError = ""
 	// a refresh in flight began under what this replaces: what it read
 	// must not go over it
 	provEpoch++
@@ -603,6 +632,119 @@ func Listed() ([]Provider, bool) {
 		return nil, false
 	}
 	return ps, true
+}
+
+// PassiveProviders joins the last known provider metadata to current local
+// sign-ins and enabled plugins without scheduling a model refresh.
+func PassiveProviders() ([]Provider, bool) {
+	ps, _ := Listed() // intrinsic metadata does not require a previous host listing
+	l, known := listSnapshot()
+	if !known {
+		return nil, false
+	}
+	auth, known := readCurrentAuth()
+	if !known {
+		return nil, false
+	}
+	return providerAccounts(ps, l, auth), true
+}
+
+func currentProviderAccounts(ps []Provider, l List) []Provider {
+	return providerAccounts(ps, l, readAuth())
+}
+
+// zcodeMetadata makes the intrinsic provider discoverable without starting
+// Bun. A host listing replaces these conservative fallback models and
+// capabilities once ZCode is actually used.
+func zcodeMetadata() Provider {
+	methods := []Method{
+		{Type: "oauth", Label: "ZCode: Z.ai GLM Coding Plan"},
+		{Type: "oauth", Label: "ZCode: BigModel (智谱) GLM Coding Plan"},
+		{Type: "oauth", Label: "ZCode: Z.ai paste callback URL"},
+		{Type: "oauth", Label: "ZCode: BigModel paste callback URL"},
+		{Type: "oauth", Label: "ZCode: a team's GLM Coding Plan"},
+		{Type: "oauth", Label: "ZCode app's sign-in"},
+		{Type: "api", Label: "GLM Coding Plan API key"},
+	}
+	models := []Model{
+		{ID: "GLM-5.3", Name: "GLM-5.3", NPM: "@ai-sdk/anthropic", Context: 1_000_000, Output: 128_000, Reasoning: true, Variants: []string{"low", "high", "max"}},
+		{ID: "GLM-5.3-Flash", Name: "GLM-5.3-Flash", NPM: "@ai-sdk/anthropic", Context: 1_000_000, Output: 128_000, Reasoning: true, Variants: []string{"low", "high", "max"}},
+		{ID: "GLM-5.2", Name: "GLM-5.2", NPM: "@ai-sdk/anthropic", Context: 1_000_000, Output: 128_000, Reasoning: true, Variants: []string{"none", "high", "max"}},
+		{ID: "GLM-5-Turbo", Name: "GLM-5-Turbo", NPM: "@ai-sdk/anthropic", Context: 200_000, Output: 64_000, Reasoning: true, Variants: []string{"none", "high"}},
+	}
+	return Provider{
+		ID: "zcode", Spec: bundledZCodePackage, Name: "ZCode", NPM: "@ai-sdk/anthropic",
+		API: "https://api.z.ai/api/anthropic/v1", Methods: methods, Models: models, FellBack: true,
+		Usage: true, Checkin: true, MaxConcurrency: 3, MaxAccounts: 2,
+		Account: []string{"context", "selection.list", "selection.select", "usage.model", "usage.tool", "usage.activity",
+			"usage.detail", "usage.health", "usage.mcp", "usage.balance", "entitlement", "reset.status",
+			"reset.opportunity", "reset.use", "reset.history.read", "billing.preview", "billing.claim",
+			"marketing.feed", "marketing.action", "offpeak.availability", "offpeak.ticket", "offpeak.status",
+			"offpeak.settle", "highspeed.draw", "highspeed.healthy", "mcp.headers"},
+		Options: []Option{{Key: "free_first", Label: "Free quota first", Default: true},
+			{Key: "coding_plan_ultra", Label: "ZCode ultra gateway"}},
+	}
+}
+
+func providerAccounts(ps []Provider, l List, auth map[string]storedAuth) []Provider {
+	provMu.Lock()
+	zcodeError := zcodeActivationError
+	provMu.Unlock()
+	out := make([]Provider, 0, len(ps)+1)
+	on := map[string]bool{bundledZCodePackage: true}
+	zcode := zcodeMetadata()
+	for _, e := range l.Plugins {
+		if !e.Off {
+			on[e.Spec] = true
+		}
+	}
+	for _, p := range ps {
+		if p.ID == "zcode" && IsBundledZCode(p.Spec) {
+			zcode = p
+			break
+		}
+	}
+	ps = append(slices.Clone(ps), zcode)
+	haveZCode := false
+	for _, p := range ps {
+		if p.ID == "zcode" {
+			if p.Spec != bundledZCodePackage || haveZCode {
+				continue
+			}
+			haveZCode = true
+			if zcodeError != "" {
+				p.FellBack = true
+				p.ListError = "ZCode runtime unavailable: " + zcodeError
+			}
+			p.Checkin = true
+			p.Account = slices.Clone(p.Account)
+			for i, operation := range p.Account {
+				if operation == "billing.claim.raw" {
+					p.Account[i] = "billing.claim"
+				}
+			}
+		}
+		if !on[p.Spec] {
+			continue
+		}
+		was := p.Accounts
+		p.Accounts = accountsOf(auth, p.ID)
+		for i, a := range p.Accounts {
+			for _, w := range was {
+				if w.Key == a.Key {
+					p.Accounts[i].Models, p.Accounts[i].FellBack, p.Accounts[i].ListError = w.Models, w.FellBack, w.ListError
+				}
+			}
+		}
+		p.SignedIn = len(p.Accounts) > 0
+		p.AuthType = ""
+		if p.SignedIn {
+			p.AuthType = p.Accounts[0].Type
+			p.AccountID = p.Accounts[0].AccountID
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // refreshing is Cached's refreshes in the background.
@@ -685,6 +827,15 @@ func Settle() {
 // host: what is known of them when magpie has only just started. A
 // provider's sign-in is read afresh from plugin-auth.json.
 func Cached() []Provider {
+	if PrepareZCode != nil {
+		// A failed adoption leaves the legacy source untouched. A ZCode
+		// operation reports the error instead of starting another owner.
+		if err := PrepareZCode(); err != nil {
+			provMu.Lock()
+			zcodeActivationError = err.Error()
+			provMu.Unlock()
+		}
+	}
 	checkList()
 	l := list() // one read of plugins.json for the whole call
 	provMu.Lock()
@@ -694,38 +845,7 @@ func Cached() []Provider {
 	if ps == nil {
 		ps = savedProviders()
 	}
-	if len(l.Plugins) == 0 {
-		return nil
-	}
-	auth := readAuth()
-	out := make([]Provider, 0, len(ps))
-	on := map[string]bool{}
-	for _, e := range l.Plugins {
-		if !e.Off {
-			on[e.Spec] = true
-		}
-	}
-	for _, p := range ps {
-		if !on[p.Spec] {
-			continue
-		}
-		was := p.Accounts
-		p.Accounts = accountsOf(auth, p.ID)
-		for i, a := range p.Accounts {
-			for _, w := range was {
-				if w.Key == a.Key {
-					p.Accounts[i].Models, p.Accounts[i].FellBack, p.Accounts[i].ListError = w.Models, w.FellBack, w.ListError
-				}
-			}
-		}
-		p.SignedIn = len(p.Accounts) > 0
-		p.AuthType = ""
-		if p.SignedIn {
-			p.AuthType = p.Accounts[0].Type
-			p.AccountID = p.Accounts[0].AccountID
-		}
-		out = append(out, p)
-	}
+	out := currentProviderAccounts(ps, l)
 	if !good && len(l.Plugins) > 0 {
 		// refreshed in the background: a sign-in or the plugins changed.
 		// Whether one is already in flight is read and set under one lock,
@@ -875,17 +995,50 @@ func firstNonEmpty(ss ...string) string {
 // readAuth is plugin-auth.json's sign-ins as storedAuth, by key. What it
 // returns is shared: the caller must not change it.
 func readAuth() map[string]storedAuth {
-	m, _ := filememo.Read("plugin-auth:stored", AuthPath(), func(b []byte) (map[string]storedAuth, error) {
-		raw, err := parseAuth(b)
-		out := make(map[string]storedAuth, len(raw))
-		for k, v := range raw {
-			var a storedAuth
-			_ = json.Unmarshal(v, &a)
-			out[k] = a
+	m, _ := readAuthSnapshot()
+	return m.accounts
+}
+
+type storedAuthSnapshot struct {
+	accounts map[string]storedAuth
+	current  bool
+	digest   [sha256.Size]byte
+}
+
+func parseStoredAuth(b []byte) (storedAuthSnapshot, error) {
+	raw, current, err := parseAuthSnapshot(b)
+	out := make(map[string]storedAuth, len(raw))
+	for k, v := range raw {
+		var a storedAuth
+		trimmed := bytes.TrimSpace(v)
+		if json.Unmarshal(v, &a) != nil || len(trimmed) == 0 || trimmed[0] != '{' || a.Type == "" {
+			current = false
 		}
-		return out, err
-	})
-	return m
+		out[k] = a
+	}
+	return storedAuthSnapshot{accounts: out, current: current, digest: sha256.Sum256(b)}, err
+}
+
+func readAuthSnapshot() (storedAuthSnapshot, error) {
+	return filememo.Read("plugin-auth:stored", AuthPath(), parseStoredAuth)
+}
+
+// readCurrentAuth verifies the file can still be read before using its
+// memoized parse. The digest also detects same-size, same-time replacement;
+// an older recovered backup is never authoritative for reconciliation.
+func readCurrentAuth() (map[string]storedAuth, bool) {
+	b, err := steady.ReadFile(AuthPath())
+	if os.IsNotExist(err) {
+		return nil, true
+	}
+	if err != nil {
+		return nil, false
+	}
+	m, err := readAuthSnapshot()
+	if err != nil || m.digest != sha256.Sum256(b) {
+		m, err = parseStoredAuth(b)
+	}
+	return m.accounts, err == nil && m.current
 }
 
 // authRaw is plugin-auth.json's sign-ins by key, each as it is written.
@@ -904,17 +1057,24 @@ var authParses atomic.Int64
 // it twice over, for each plugin signed in to, on every request the
 // gateway served (#2502).
 func parseAuth(b []byte) (map[string]json.RawMessage, error) {
+	m, _, err := parseAuthSnapshot(b)
+	return m, err
+}
+
+func parseAuthSnapshot(b []byte) (map[string]json.RawMessage, bool, error) {
 	authParses.Add(1)
 	var m map[string]json.RawMessage
-	if json.Unmarshal(b, &m) != nil {
+	err := json.Unmarshal(b, &m)
+	current := err == nil && m != nil
+	if err != nil {
 		bak, err := lastgood.Fallback(AuthPath(), b, validAuth)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		m = nil
 		_ = json.Unmarshal(bak, &m)
 	}
-	return m, nil
+	return m, current, nil
 }
 
 // validAuth is plugin-auth.json's contents: one object of sign-ins.
@@ -1121,7 +1281,20 @@ var (
 // sign-in and host) and gives what it returned; account "" is the
 // provider's first.
 func LoaderOptions(ctx context.Context, provider, account string) (Options, error) {
-	ck := provider + "\x00" + account
+	return loaderOptions(ctx, provider, account, "", "")
+}
+
+// LoaderOptionsBundled binds the loader to the expected immutable ZCode
+// generation before it can see an account's authentication.
+func LoaderOptionsBundled(ctx context.Context, provider, account, spec, target string) (Options, error) {
+	if provider != "zcode" || !IsBundledZCode(spec) || target == "" {
+		return Options{}, errors.New("invalid bundled ZCode loader target")
+	}
+	return loaderOptions(ctx, provider, account, spec, target)
+}
+
+func loaderOptions(ctx context.Context, provider, account, spec, target string) (Options, error) {
+	ck := provider + "\x00" + account + "\x00" + spec + "\x00" + target
 	optMu.Lock()
 	if optGen != generation.Load() {
 		optCache, optGen = map[string]Options{}, generation.Load()
@@ -1131,7 +1304,7 @@ func LoaderOptions(ctx context.Context, provider, account string) (Options, erro
 	if ok {
 		return o, nil
 	}
-	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx)}, &o); err != nil {
+	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx), "bundleSpec": spec, "bundleTarget": target}, &o); err != nil {
 		return Options{}, err
 	}
 	optMu.Lock()
@@ -1222,22 +1395,46 @@ func Restore(ctx context.Context, provider, key string, auth map[string]any) err
 // Usage is how much of its allowance one account has used, as the
 // plugin's auth.usage tells it (host.js has the shape).
 type Usage struct {
-	Plan    string        `json:"plan"`
-	Until   string        `json:"until"` // RFC 3339, "" when not told
-	Renew   string        `json:"renew"`
-	Balance string        `json:"balance"`
-	Error   string        `json:"error"`
-	User    string        `json:"user"`
-	SignIn  string        `json:"signIn"` // "expired", "kept", "renewed" or ""
-	Windows []UsageWindow `json:"windows"`
-	Resets  *UsageResets  `json:"resets"`
-	// Only nonsecret reset snapshot bindings; credentials stay in the plugin.
-	ResetScope   string `json:"resetScope,omitempty"`
-	ResetContext string `json:"resetContext,omitempty"`
+	Plan         string             `json:"plan"`
+	Until        string             `json:"until"` // RFC 3339, "" when not told
+	Renew        string             `json:"renew"`
+	Balance      string             `json:"balance"`
+	Error        string             `json:"error"`
+	User         string             `json:"user"`
+	SignIn       string             `json:"signIn"` // "expired", "kept", "renewed" or ""
+	Windows      []UsageWindow      `json:"windows"`
+	Resets       *UsageResets       `json:"resets"`
+	Observations []UsageObservation `json:"observations,omitempty"`
+}
+
+// UsageIdentity distinguishes separately reported native entitlements.
+type UsageIdentity struct {
+	UserPlanID    string `json:"userPlanId,omitempty"`
+	PlanID        string `json:"planId,omitempty"`
+	BucketID      string `json:"bucketId,omitempty"`
+	EntitlementID string `json:"entitlementId,omitempty"`
+	PeriodStart   string `json:"periodStart,omitempty"`
+	PeriodEnd     string `json:"periodEnd,omitempty"`
+	ExpiresAt     string `json:"expiresAt,omitempty"`
+}
+
+// UsageObservation is an independently reported balance or MCP aggregate.
+type UsageObservation struct {
+	Kind          string         `json:"kind"`
+	Name          string         `json:"name"`
+	Models        []string       `json:"models,omitempty"`
+	Used          *float64       `json:"used"`
+	Limit         *float64       `json:"limit"`
+	Remaining     *float64       `json:"remaining"`
+	Unit          string         `json:"unit"`
+	At            string         `json:"at"`
+	NextRefreshAt string         `json:"nextRefreshAt"`
+	Identity      *UsageIdentity `json:"identity,omitempty"`
 }
 
 // UsageResets are the rate-limit resets an account may spend.
 type UsageResets struct {
+	Source   string `json:"source,omitempty"`
 	Count    int    `json:"count"`
 	Until    string `json:"until"`
 	ByWindow bool   `json:"byWindow"`

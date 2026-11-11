@@ -4,22 +4,12 @@
 // Discord). app.js imports this when a reset's Use is pressed, so it
 // weighs nothing on the core.
 window.askResetSheet = function (q) {
-  const windowed = !!(q.resets.byWindow && q.resets.canUse);
-  const windowName = (id) => t(id === "fiveHour" ? "Five-hour reset" : "Weekly reset");
-  const windows = [
-    { v: "fiveHour", count: q.resets.fiveHour || 0 },
-    { v: "weekly", count: q.resets.weekly || 0 },
-  ].filter((x) => q.resets.pending ? x.v === q.resets.pending : x.count > 0);
-  let chosenWindow = windows[0]?.v;
-  if (windowed && !chosenWindow) return status(t("no reset left on the account"), "err");
   const ed = el("div", "editor reset-ask");
   const head = el("div", "ehead");
-  head.append(icon(q.icon || (windowed ? "zcode" : "codex")), el("b", "", t(windowed ? "Use a ZCode reset?" : "Use a Codex reset?")));
+  head.append(icon(q.icon || "codex"), el("b", "", t("Use a Codex reset?")));
   ed.append(head);
   const who = q.alias || q.user || q.name;
-  ed.append(el("p", "lib-confirm", windowed ? t(q.resets.pending
-    ? "The previous reset for {who} is unconfirmed. This retries the same operation; no new reset is chosen."
-    : "Choose which window to reset for {who}. It starts again, but the other window does not change. It can't be undone.", { who }) : t(q.resets.count === 1
+  ed.append(el("p", "lib-confirm", t(q.resets.count === 1
     ? "{who} has 1 reset. Using it starts its windows again at once, as if none of them had been used. It can't be undone."
     : "{who} has {n} resets. Using one starts its windows again at once, as if none of them had been used. It can't be undone.", { who, n: q.resets.count })));
   // a remote magpie's card (office/codex, #3850): that magpie spends it,
@@ -29,7 +19,7 @@ window.askResetSheet = function (q) {
   // which of them is used: the one that runs out first unless the user
   // picks another of those listed one by one (01huadalang on Discord),
   // and the dialog names the one it spends
-  const cards = !windowed && q.resets.each?.length > 1 && q.resets.each.every((c) => c.id) ? q.resets.each : null;
+  const cards = q.resets.each?.length > 1 && q.resets.each.every((c) => c.id) ? q.resets.each : null;
   let chosen = 0;
   const which = el("p", "lib-confirm reset-which");
   const sooner = el("p", "lib-confirm reset-sooner");
@@ -38,7 +28,6 @@ window.askResetSheet = function (q) {
     return c.until ? t("Reset {n} runs out {when}", { n: i + 1, when: at(new Date(c.until)) }) : t("Reset {n} never runs out", { n: i + 1 });
   };
   const sayWhich = () => {
-    if (windowed) { which.hidden = sooner.hidden = true; return; }
     const full = (d) => d.toLocaleString(intlLang());
     if (!chosen) {
       which.textContent = q.resets.until ? t("The one used is the one that runs out first, {when}.", { when: full(new Date(q.resets.until)) }) : "";
@@ -54,24 +43,6 @@ window.askResetSheet = function (q) {
     sooner.textContent = cards[0].until ? t("The one that runs out first, {when}, is kept, and is lost if it isn't used by then.", { when: full(new Date(cards[0].until)) }) : "";
     sooner.hidden = !cards[0].until || cards[0].until === c.until;
   };
-  if (windowed) {
-    const row = el("div", "reset-pick");
-    const pick = el("button", "sess-pick reset-card");
-    pick.type = "button";
-    pick.setAttribute("aria-haspopup", "menu");
-    pick.setAttribute("aria-expanded", "false");
-    pick.append(el("span", "", windowName(chosenWindow)), svg(CHEV, 11, 1.6));
-    pick.onclick = (e) => {
-      e.stopPropagation();
-      if (pick.classList.contains("open")) return closeProtoMenu();
-      openProtoMenu(pick, windows.map((x) => ({ v: x.v, name: windowName(x.v), note: t(x.count === 1 ? "1 reset" : "{n} resets", { n: x.count }), literalName: true })), chosenWindow, (v) => {
-        chosenWindow = v;
-        pick.firstChild.textContent = windowName(v);
-      }, "Reset to use", "sess-menu");
-    };
-    row.append(el("span", "reset-pick-label", t("Reset to use")), pick);
-    ed.append(row);
-  }
   if (cards) {
     const row = el("div", "reset-pick");
     const pick = el("button", "sess-pick reset-card");
@@ -97,7 +68,7 @@ window.askResetSheet = function (q) {
   sayWhich();
   ed.append(which, sooner);
   // nothing used yet: a reset would start nothing again
-  if (!windowed && !q.windows?.some((w) => w.used > 0)) ed.append(el("p", "lib-confirm reset-idle", t("None of its windows has been used yet, so there is nothing to start again.")));
+  if (!q.windows?.some((w) => w.used > 0)) ed.append(el("p", "lib-confirm reset-idle", t("None of its windows has been used yet, so there is nothing to start again.")));
   const bar = el("div", "bar");
   const go = el("button", "text primary", t("Use a reset"));
   go.onclick = async (e) => {
@@ -106,27 +77,22 @@ window.askResetSheet = function (q) {
     go.classList.add("busy");
     try {
       const ask = { user: q.user || "" };
-      if (remote || windowed) ask.provider = q.provider;
+      if (remote) ask.provider = q.provider;
       if (chosen) ask.credit = cards[chosen].id;
-      if (windowed) {
-        ask.window = chosenWindow;
-        ask.context = q.resets.context;
-      }
-      const out = await api(windowed ? "usage/zcode-reset" : "usage/codex-reset", ask);
+      const out = await api("usage/codex-reset", ask);
       // the providers' editor and Settings read the account's windows
       // and resets on their own, kept a minute: read again, as Usage is
       // (#1491); asked from the editor, closing goes back to it
-      if (!windowed) delete loginUsage.codex;
-      else if (!remote) delete loginUsage[q.provider];
+      delete loginUsage.codex;
       closeConfirmAsk();
-      status(who + ": " + resetOutcome(out), out.code === "reset" || windowed && out.code === "already_used" ? "ok" : "err");
+      status(who + ": " + resetOutcome(out), out.code === "reset" ? "ok" : "err");
       if (editing && view === "providers") renderProviders();
-      if (!windowed && window.autoResetOwnPaint && $("#codexAutoResetRow")) autoResetOwnPaint(prefs);
+      if (window.autoResetOwnPaint && $("#codexAutoResetRow")) autoResetOwnPaint(prefs);
       loadQuotas();
     } catch (err) {
       go.disabled = false;
       go.classList.remove("busy");
-      status(windowed && /account_changed|account changed/.test(err.message) ? t("The ZCode account or plan changed. Refresh the card before using a reset.") : remote ? remoteResetError(err.message) : err.message, "err");
+      status(remote ? remoteResetError(err.message) : err.message, "err");
     }
   };
   const cancel = el("button", "text", t("Cancel"));

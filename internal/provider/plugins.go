@@ -100,7 +100,7 @@ func (p Provider) warmPlugin(ctx context.Context) {
 // routing groups, when it is id-plugin — but for a built-in moved
 // onto the plugin, whose id the plugin has now.
 func PluginID(id string) string {
-	if PluginServes(id) {
+	if id == "zcode" || PluginServes(id) {
 		return id
 	}
 	if slices.Contains(accountIDs, id) || Preset(id) != nil || id == "magpie" || id == autoID || id == strings.TrimSuffix(GroupPrefix, "/") || customIDs()[id] {
@@ -687,6 +687,16 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 		}
 		body = buf.Bytes()
 	}
+	ordinary, expectedBundleSpec, expectedBundleTarget, err := zcodeFallbackModel(ctx, pp.ID, account)
+	if err != nil {
+		return nil, err
+	}
+	if ordinary != "" {
+		if pp.ID != "zcode" || !plugin.IsBundledZCode(pp.Spec) {
+			return nil, zcodeFallbackReject(ctx, zcodeFallbackInvalid("provider changed"))
+		}
+		body = withModel(body, ordinary)
+	}
 	rest := strings.TrimPrefix(req.URL.String(), pluginBase+pp.ID)
 	model := bodyModel(body)
 	codeAssist := strings.HasPrefix(rest, "/v1internal:")
@@ -703,21 +713,80 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 		model, body = env.Model, env.Request
 	}
 	m, ok := pluginModel(pp, model)
+	if zcodeUnbundledNative(pp, model, m, ok) {
+		return nil, errors.New("native ZCode lanes require the bundled plugin generation")
+	}
 	if !ok {
 		if cur, found := PluginOf(PluginID(pp.ID)); found {
 			pp = cur
 			m, ok = pluginModel(pp, model)
+			if zcodeUnbundledNative(pp, model, m, ok) {
+				return nil, errors.New("native ZCode lanes require the bundled plugin generation")
+			}
+		}
+	}
+	bundled := pp.ID == "zcode" && plugin.IsBundledZCode(pp.Spec)
+	if ordinary != "" && !bundled {
+		return nil, zcodeFallbackReject(ctx, zcodeFallbackInvalid("provider changed"))
+	}
+	if !ok && bundled {
+		if base, _, sized := strings.Cut(model, "@"); sized {
+			if candidate, found := pluginModel(pp, base); found {
+				if _, _, _, lane := zcodeAlias(candidate.ID); lane {
+					m, ok = candidate, true
+				}
+			}
 		}
 	}
 	if !ok {
 		m = plugin.Model{ID: model, NPM: pp.NPM}
 	}
+	requestedModel := m.ID
+	if requestedModel == "" {
+		requestedModel = model
+	}
+	session := req.Header.Get(ConversationHeader)
+	requestedSession := req.Header.Get(SessionToPluginHeader)
+	var execution json.RawMessage
+	privateModel := ""
+	if bundled {
+		privateModel = requestedModel
+		if alias, raw, laneName, lane := zcodeAlias(requestedModel); lane {
+			if _, size, sized := strings.Cut(model, "@"); sized && (size == "" || strings.Contains(size, "@")) {
+				return nil, errors.New("malformed ZCode native model size")
+			}
+			requestedModel, privateModel, m.APIID = alias, alias, raw
+			var err error
+			execution, err = zcodeExecutionFor(ctx, pp.ID, account, requestedSession, requestedModel)
+			if err != nil {
+				if laneName == "highspeed" {
+					return nil, zcodeFallbackReject(ctx, err)
+				}
+				return nil, err
+			}
+		}
+	}
 	api := modelAPIID(m)
 	if api != model && !codeAssist {
 		body = withModel(body, api)
 	}
-	o, err := plugin.LoaderOptions(ctx, pp.ID, account)
+	bundleSpec, bundleTarget := "", ""
+	if bundled {
+		bundleSpec, bundleTarget = pp.Spec, plugin.Target(pp.Spec)
+	}
+	if ordinary != "" && (bundleSpec != expectedBundleSpec || bundleTarget != expectedBundleTarget || bundleTarget == "") {
+		return nil, zcodeFallbackReject(ctx, zcodeFallbackInvalid("bundled generation changed"))
+	}
+	var o plugin.Options
+	if bundled {
+		o, err = plugin.LoaderOptionsBundled(ctx, pp.ID, account, bundleSpec, bundleTarget)
+	} else {
+		o, err = plugin.LoaderOptions(ctx, pp.ID, account)
+	}
 	if err != nil {
+		if ordinary != "" || errors.Is(err, plugin.ErrBundledZCodeSource) && execution != nil {
+			return nil, zcodeFallbackReject(ctx, err)
+		}
 		return nil, err
 	}
 	base := pluginRequestBase(pp, m, o.BaseURL)
@@ -745,21 +814,68 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 	}
 	h := map[string]string{}
 	for k, vs := range req.Header {
-		if len(vs) > 0 && !strings.EqualFold(k, ConversationHeader) {
+		if len(vs) > 0 && !strings.EqualFold(k, ConversationHeader) &&
+			!strings.EqualFold(k, zcodeFallbackHeader) && !strings.EqualFold(k, zcodeFallbackModelHeader) {
 			h[strings.ToLower(k)] = vs[0]
 		}
 	}
 	if e, _ := ctx.Value(effortKey{}).(string); e != "" {
 		h[strings.ToLower(EffortHeader)] = e
 	}
+	var zcodeScope, zcodeGeneration string
+	if ordinary != "" {
+		expected := zcodeFallbackExpectation(ctx)
+		if expected.scope == "" || expected.generation == "" {
+			return nil, zcodeFallbackReject(ctx, zcodeFallbackInvalid("admitted account binding is unavailable"))
+		}
+		fenced := WithZCodeAccountExpectation(ctx, expected.scope, expected.generation)
+		if _, err := zcodeContext(fenced, pp.ID, account); err != nil {
+			return nil, zcodeFallbackReject(ctx, err)
+		}
+		zcodeScope, zcodeGeneration = expected.scope, expected.generation
+	}
 	resp, err := plugin.Fetch(ctx, plugin.FetchRequest{
 		Provider: pp.ID, Account: account, Model: api, NPM: m.NPM, URL: url, Method: req.Method,
-		Headers: h, Body: body, Session: req.Header.Get(ConversationHeader),
+		Headers: h, Body: body, Session: session, RequestedModel: privateModel, RequestedSession: requestedSession, Execution: execution,
+		BundleSpec: bundleSpec, BundleTarget: bundleTarget, ZCodeScope: zcodeScope, ZCodeGeneration: zcodeGeneration,
 	})
-	if err == nil {
-		notePluginSignIn(pp, account, resp)
+	if err != nil {
+		if errors.Is(err, plugin.ErrBundledZCodeSource) && (ordinary != "" || execution != nil) {
+			return nil, zcodeFallbackReject(ctx, err)
+		}
+		return nil, err
 	}
-	return resp, err
+	markers, targets := resp.Header.Values(zcodeFallbackHeader), resp.Header.Values(zcodeFallbackModelHeader)
+	resp.Header.Del(zcodeFallbackHeader)
+	resp.Header.Del(zcodeFallbackModelHeader)
+	if len(markers) != 0 || len(targets) != 0 {
+		if !bundled {
+			return resp, nil
+		}
+		_ = resp.Body.Close()
+		alias, raw, lane, native := zcodeAlias(requestedModel)
+		var binding struct {
+			Lane       string `json:"lane"`
+			RawModel   string `json:"rawModel"`
+			Scope      string `json:"scope"`
+			Generation string `json:"generation"`
+		}
+		if resp.StatusCode != http.StatusConflict || len(markers) != 1 || markers[0] != "ordinary" ||
+			len(targets) != 1 || !native || lane != "highspeed" || targets[0] != raw ||
+			json.Unmarshal(execution, &binding) != nil || binding.Lane != "highspeed" || binding.RawModel != raw || binding.Scope == "" || binding.Generation == "" {
+			return nil, zcodeFallbackReject(ctx, zcodeFallbackInvalid("marker does not match the admitted Highspeed model"))
+		}
+		if err := zcodeFallbackAuthorize(ctx, ZCodeFallbackRequest{Provider: pp.ID, Account: account, RequestedModel: alias, Model: raw}, bundleSpec, bundleTarget,
+			zcodeAccountExpectation{scope: binding.Scope, generation: binding.Generation}); err != nil {
+			return nil, err
+		}
+		next := req.Clone(ctx)
+		next.Body = io.NopCloser(bytes.NewReader(body))
+		next.ContentLength = int64(len(body))
+		return pluginFetch(pp, account, next)
+	}
+	notePluginSignIn(pp, account, resp)
+	return resp, nil
 }
 
 // pluginRequestBase is the base URL a plugin provider's request for m goes

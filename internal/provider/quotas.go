@@ -102,7 +102,9 @@ type Quota struct {
 	Until *time.Time `json:"until,omitempty"`
 	Renew string     `json:"renew,omitempty"`
 	// Resets are a Codex account's rate-limit resets, when it holds any.
-	Resets *ResetCredits `json:"resets,omitempty"`
+	Resets       *ResetCredits      `json:"resets,omitempty"`
+	ZCodeReset   *ZCodeResetState   `json:"zcodeReset,omitempty"`
+	Observations []UsageObservation `json:"observations,omitempty"`
 	// ResetsUsed are the Codex account's resets magpie spent, newest
 	// first, by itself or by hand (codex_resets_used.go)
 	ResetsUsed []ResetUse `json:"resetsUsed,omitempty"`
@@ -202,7 +204,7 @@ func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quo
 	}{{"subscription", subs}, {"plan", plans}, {"balance", balances}} {
 		for _, q := range g.qs {
 			r := Quota{Provider: q.Provider, Name: q.Name, Kind: g.kind, Plan: q.Plan, User: q.User, AsOf: q.AsOf, ReadAt: q.ReadAt, ReadDeferred: q.ReadDeferred,
-				Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat}
+				Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ZCodeReset: q.ZCodeReset, Observations: q.Observations, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat}
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range PooledWindows(q.Windows) {

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
@@ -8,8 +9,48 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/plugin"
+	nativefixture "github.com/yetone/magpie/internal/plugin/testdata/nativeaccount"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
+
+// List the real embedded provider with either a current gift or no gift.
+// A gift introduced after listing exercises a legitimately stale model list
+// without allowing an external plugin to serve ZCode.
+func intrinsicTrialFixture(t *testing.T, listed, introduce bool, handler http.HandlerFunc) {
+	t.Helper()
+	fresh(t)
+	vendor := nativefixture.Start(t)
+	if listed {
+		vendor.TrialModels("GLM-5.3", "GLM-5.3-Flash")
+	} else {
+		vendor.TrialModels()
+	}
+	vendor.Inference(handler)
+	if err := settings.EditPluginOptions(func(options map[string]map[string]bool) (map[string]map[string]bool, error) {
+		if options["zcode"] == nil {
+			options["zcode"] = map[string]bool{}
+		}
+		options["zcode"]["free_first"] = false
+		return options, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	nativefixture.Install(t, ctx)
+	plugin.Refreshed()
+	if !listed && introduce {
+		saved, ok := plugin.Listed()
+		if !ok {
+			t.Fatal("intrinsic model list was not retained")
+		}
+		vendor.TrialModels("GLM-5.3", "GLM-5.3-Flash")
+		plugin.Restart()
+		plugin.UseCached(saved)
+	}
+}
 
 // The ZCode plugin's refusals of a Start Plan trial entry, as it writes them
 // (zcode 0.1.31's fetch, JSON.stringify of its error): the trial ended, in
@@ -89,7 +130,7 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 			var mu sync.Mutex
 			var asked []string
 			good := &adaptiveVendor{}
-			movedFake(t, tc.vendor, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Error(err)
@@ -97,18 +138,36 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 					return
 				}
 				model := modelOf(body)
+				if tc.vendor == "zcode" && strings.Contains(r.URL.Path, "/zcode-plan/anthropic/") &&
+					strings.HasSuffix(tc.model, "-Trial") && strings.EqualFold(model, strings.TrimSuffix(tc.model, "-Trial")) {
+					model = tc.model
+				}
 				mu.Lock()
 				asked = append(asked, model)
 				mu.Unlock()
 				if model == tc.model {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(tc.status)
+					if tc.vendor == "zcode" && tc.body == zcodeStartEdge {
+						io.WriteString(w, edgeBlockPage)
+						return
+					}
+					if tc.vendor == "zcode" && tc.body == zcodeStartRisk {
+						io.WriteString(w, `{"code":3012,"msg":"request has been blocked due to unusual activity"}`)
+						return
+					}
 					io.WriteString(w, tc.body)
 					return
 				}
 				r.Body = io.NopCloser(strings.NewReader(string(body)))
 				good.ServeHTTP(w, r)
-			}))
+			})
+			if tc.vendor == "zcode" {
+				introduce := strings.HasSuffix(tc.model, "-Trial") && tc.name != "flash trial ended" && tc.name != "trial ended"
+				intrinsicTrialFixture(t, tc.listed, introduce, handler)
+			} else {
+				movedFake(t, tc.vendor, handler)
+			}
 			p, err := provider.Find(tc.vendor)
 			if err != nil {
 				t.Fatal(err)
@@ -153,6 +212,9 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 			if _, ok := restOf(c.restID()); !tc.accountRest && !ok {
 				t.Fatalf("%s isn't resting", tc.model)
 			}
+			mu.Lock()
+			beforeSecond := len(asked)
+			mu.Unlock()
 			// then the account's own GLM-5.3: served by the account unless
 			// the account was refused
 			if code, body := postAs(t, s, "", `{"model":"group/s","messages":[{"role":"user","content":"hi"}]}`); code != 200 {
@@ -161,12 +223,12 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			if tc.accountRest {
-				if b.n != 2 || len(asked) != 1 {
+				if b.n != 2 || len(asked) != beforeSecond {
 					t.Fatalf("account fault: asked %v, the other provider %d times", asked, b.n)
 				}
 				return
 			}
-			if b.n != 1 || len(asked) != 2 || asked[1] != "GLM-5.3" {
+			if b.n != 1 || len(asked) != beforeSecond+1 || asked[len(asked)-1] != "GLM-5.3" {
 				t.Fatalf("the trial's refusal kept the account's GLM-5.3 out: asked %v, the other provider %d times", asked, b.n)
 			}
 		})
@@ -203,7 +265,7 @@ func TestZCodeCodingPlanLimitLeavesTrials(t *testing.T) {
 			var mu sync.Mutex
 			var asked []string
 			good := &adaptiveVendor{}
-			movedFake(t, tc.vendor, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, err := io.ReadAll(r.Body)
 				if err != nil {
 					t.Error(err)
@@ -211,6 +273,9 @@ func TestZCodeCodingPlanLimitLeavesTrials(t *testing.T) {
 					return
 				}
 				model := modelOf(body)
+				if tc.vendor == "zcode" && strings.Contains(r.URL.Path, "/zcode-plan/anthropic/") && model == "GLM-5.3" {
+					model = "GLM-5.3-Trial"
+				}
 				mu.Lock()
 				asked = append(asked, model)
 				mu.Unlock()
@@ -222,7 +287,12 @@ func TestZCodeCodingPlanLimitLeavesTrials(t *testing.T) {
 				}
 				r.Body = io.NopCloser(strings.NewReader(string(body)))
 				good.ServeHTTP(w, r)
-			}))
+			})
+			if tc.vendor == "zcode" {
+				intrinsicTrialFixture(t, tc.free, false, handler)
+			} else {
+				movedFake(t, tc.vendor, handler)
+			}
 			p, err := provider.Find(tc.vendor)
 			if err != nil {
 				t.Fatal(err)

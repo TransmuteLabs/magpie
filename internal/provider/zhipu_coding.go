@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -191,6 +192,61 @@ func LearnZhipuCoding(p Provider, from string) {
 // docs.z.ai/devpack/mcp/search-mcp-server).
 const ZhipuSearchPath = "/api/mcp/web_search_prime/mcp"
 
+// isZhipuCodingPlan identifies the plan from the endpoint, including mirrors
+// of the presets. A key narrowed to Messages has lost its Chat URL, but its
+// explicitly selected plan still identifies the same endpoint.
+func isZhipuCodingPlan(p Provider) bool {
+	if p.Account != nil {
+		return false
+	}
+	b := strings.TrimRight(strings.TrimSpace(p.Chat), "/")
+	if basePath(b) == zhipuCodingPath && (zhipuHost(HostOf(b)) || p.Preset == "zhipu" || p.Preset == "zai") {
+		return true
+	}
+	return p.keyView && p.Chat == "" && p.KeyPlan == "coding" && (p.Preset == "zhipu" || p.Preset == "zai")
+}
+
+// glmCodingMessages prefers Messages only for GLM models on a Coding Plan.
+// The effective wire name may differ from the id used for model settings.
+func (p Provider) glmCodingMessages(model string) bool {
+	if p.Account != nil {
+		return false
+	}
+	wire := UpstreamNameIn(heldSettings().Wires(), p.ID, model)
+	wire = strings.ToLower(wire[strings.LastIndex(wire, "/")+1:])
+	if !strings.HasPrefix(wire, "glm-") {
+		return false
+	}
+	// A preset name alone does not make a mirror, relay, or mismatched
+	// Anthropic endpoint the Coding Plan's native Messages endpoint.
+	host := zhipuEndpointHost(p.Anthropic, "/api/anthropic")
+	if host == "" {
+		return false
+	}
+	if p.Chat != "" {
+		return zhipuEndpointHost(p.Chat, zhipuCodingPath) == host
+	}
+	if p.Responses != "" {
+		return zhipuEndpointHost(p.Responses, "/api/v1") == host
+	}
+	// A protocol-restricted key has lost both identifying URLs. Its
+	// explicitly selected plan and preset still identify the family.
+	return p.keyView && p.KeyPlan == "coding" &&
+		(p.Preset == "zai" && host == "api.z.ai" || p.Preset == "zhipu" && host == "open.bigmodel.cn")
+}
+
+func zhipuEndpointHost(raw, path string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || strings.TrimRight(u.Path, "/") != path {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if !zhipuHost(host) {
+		return ""
+	}
+	return host
+}
+
 // ZhipuCodingSearch is where p, a GLM Coding Plan with a key, searches the
 // web (ZhipuSearchPath on its OpenAI endpoint's host), "" for a provider
 // that isn't one. A plan is known by its OpenAI endpoint, the Coding Plan's
@@ -203,7 +259,7 @@ func ZhipuCodingSearch(p Provider) string {
 		return ""
 	}
 	b := strings.TrimRight(strings.TrimSpace(p.Chat), "/")
-	if basePath(b) != zhipuCodingPath || !zhipuHost(HostOf(b)) && p.Preset != "zhipu" && p.Preset != "zai" {
+	if !isZhipuCodingPlan(p) || basePath(b) != zhipuCodingPath {
 		return ""
 	}
 	return strings.TrimSuffix(b, zhipuCodingPath) + ZhipuSearchPath

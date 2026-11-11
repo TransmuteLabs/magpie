@@ -21,6 +21,14 @@ type quotaReadKey struct{}
 
 var quotaReadSequence atomic.Uint64
 
+// quotaReadBarriers prevents a response started before an observed reset
+// from becoming the authoritative fallback. It is held only around the
+// existing last-reading commit, never around vendor I/O.
+var quotaReadBarriers struct {
+	sync.Mutex
+	m map[string]uint64
+}
+
 // quotaReading orders reads when they start, not when the vendor answers.
 // A card refresh shares its order across the three kinds of usage.
 // A read the user didn't ask for, while they have allowances read only
@@ -38,7 +46,44 @@ func quotaReading(ctx context.Context) (context.Context, uint64) {
 // must not become the fallback for the next failed request.
 func keepReading(ctx context.Context, q SubscriptionQuota, user string) SubscriptionQuota {
 	q.readSeq, _ = ctx.Value(quotaReadKey{}).(uint64)
+	if user == "" {
+		user = q.User
+	}
+	key := q.Provider + "/" + strings.ToLower(user)
+	quotaReadBarriers.Lock()
+	defer quotaReadBarriers.Unlock()
+	if barrier := quotaReadBarriers.m[key]; barrier != 0 && q.readSeq < barrier {
+		q.Windows, q.Balance, q.AsOf = nil, "", nil
+		q.Error = "quota read started before reset completion; refresh required"
+		return q
+	}
 	return keepLast(q, user)
+}
+
+// resetQuotaReadBarrier detaches an older in-flight account read and forces
+// the next one to start after a reset completion was observed. Waiters on
+// the old read follow the new generation rather than returning its result.
+func resetQuotaReadBarrier(l Login) {
+	key := l.Agent + "/" + strings.ToLower(l.User)
+	card := loginProvider(l) + "/" + strings.ToLower(l.User)
+	quotaReadBarriers.Lock()
+	if quotaReadBarriers.m == nil {
+		quotaReadBarriers.m = map[string]uint64{}
+	}
+	quotaReadBarriers.m[card] = quotaReadSequence.Add(1)
+	c := &loginUsageCache
+	c.Lock()
+	if c.generation == nil {
+		c.generation = map[string]uint64{}
+	}
+	c.generation[key]++
+	delete(c.pending, key)
+	if e, ok := c.m[key]; ok {
+		e.at = time.Time{}
+		c.m[key] = e
+	}
+	c.Unlock()
+	quotaReadBarriers.Unlock()
 }
 
 // refreshing is the card a read is for, when it is for one card alone.

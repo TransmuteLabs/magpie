@@ -485,12 +485,15 @@ type Try struct {
 	RuleEffort string `json:"ruleEffort,omitempty"`
 	// MappedFrom: the level asked for, which the group's member it went
 	// to sends Effort in place of (Group.EffortMaps)
-	MappedFrom string    `json:"mappedFrom,omitempty"`
-	Fast       bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
-	Start      time.Time `json:"start"`
-	Done       bool      `json:"done"`
-	Status     int       `json:"status,omitempty"`
-	Millis     int64     `json:"ms,omitempty"`
+	MappedFrom string `json:"mappedFrom,omitempty"`
+	// ModelMappedFrom is the native lane alias when this try was
+	// authorized to continue on its ordinary model.
+	ModelMappedFrom string    `json:"modelMappedFrom,omitempty"`
+	Fast            bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
+	Start           time.Time `json:"start"`
+	Done            bool      `json:"done"`
+	Status          int       `json:"status,omitempty"`
+	Millis          int64     `json:"ms,omitempty"`
 	// TTFT: ms from Start to its reply's first content, FirstText to its
 	// first text, when it streamed any (#196)
 	TTFT      int64 `json:"ttft,omitempty"`

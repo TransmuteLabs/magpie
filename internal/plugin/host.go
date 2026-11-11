@@ -45,11 +45,9 @@ var piJS []byte
 
 // message is a line the host writes.
 type message struct {
-	ID     int64           `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *struct {
-		Message string `json:"message"`
-	} `json:"error"`
+	ID      int64             `json:"id"`
+	Result  json.RawMessage   `json:"result"`
+	Error   *messageError     `json:"error"`
 	Event   string            `json:"event"`
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers"`
@@ -71,6 +69,27 @@ type message struct {
 	// Usage is a "usage" event's request, one the plugin sent its vendor
 	// on its own (magpie.usage in host.js)
 	Usage *OwnCall `json:"usage"`
+}
+
+type messageError struct {
+	Message string        `json:"message"`
+	Account *AccountError `json:"account,omitempty"`
+	Code    string        `json:"code,omitempty"`
+}
+
+// ErrBundledZCodeSource means the active host no longer serves the expected
+// immutable bundled generation; it is not a vendor or quota failure.
+var ErrBundledZCodeSource = errors.New("the serving plugin is not the expected bundled generation")
+
+func (e *messageError) err() error {
+	if e.Account != nil {
+		e.Account.Message = e.Message
+		return e.Account
+	}
+	if e.Code == "bundle_mismatch" {
+		return ErrBundledZCodeSource
+	}
+	return errors.New(e.Message)
 }
 
 // OwnCall is a request a plugin sent its vendor on its own, outside any
@@ -375,9 +394,7 @@ func (c *call) transitionLocked(event callEvent, why error, answer *message) fun
 		}
 		c.queue, c.queued, c.owed = nil, 0, 0
 		if c.terminal == nil && why != nil {
-			m := message{Error: &struct {
-				Message string `json:"message"`
-			}{c.over.Error()}}
+			m := message{Error: &messageError{Message: c.over.Error()}}
 			c.terminal = &m
 		}
 		if event == callCancelled && c.state == callActive && (c.stream || c.cancellable) {
@@ -493,6 +510,9 @@ type host struct {
 	proxyAt time.Time
 	// addr is the gateway's address the host was told (hostAddr)
 	addr string
+	// bundle is the immutable generation this host imported, not a mutable
+	// shared node_modules path that another binary can replace under it.
+	bundle string
 	// output is the child's stdout and stderr, read apart from its Wait,
 	// and waited gives what that Wait said; both are nil in the tests'
 	// fake hosts, which have no child
@@ -975,10 +995,55 @@ func get(ctx context.Context) (*host, error) {
 	return getLocked(ctx)
 }
 
+// getZCode activates the intrinsic provider only on a ZCode operation. Keep
+// an existing host until its replacement is ready, so a damaged bundle does
+// not interrupt unrelated plugins.
+func getZCode(ctx context.Context) (h *host, err error) {
+	defer func() {
+		provMu.Lock()
+		if err != nil {
+			zcodeActivationError = err.Error()
+		} else {
+			zcodeActivationError = ""
+		}
+		provMu.Unlock()
+	}()
+	if PrepareZCode != nil {
+		if err := PrepareZCode(); err != nil {
+			return nil, err
+		}
+	}
+	checkList()
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	if current != nil && current.alive() && !hostStale.Load() &&
+		current.bundle == bundledTarget() && !current.proxyMoved() {
+		return current, nil
+	}
+	if err := ensureBundledZCode(); err != nil {
+		return nil, err
+	}
+	h, err = startWithZCode(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	old := current
+	current = h
+	hostStale.Store(false)
+	if old != nil {
+		go old.retire()
+	}
+	return h, nil
+}
+
 // getLocked requires hostMu. Gateway hooks bound both the lock wait and
 // startup with their request-hook budget.
 func getLocked(ctx context.Context) (*host, error) {
 	if hostStale.Swap(false) && current != nil {
+		go current.retire()
+		current = nil
+	}
+	if current != nil && current.alive() && current.bundle != "" && current.bundle != bundledTarget() {
 		go current.retire()
 		current = nil
 	}
@@ -998,11 +1063,15 @@ func getLocked(ctx context.Context) (*host, error) {
 }
 
 func start(ctx context.Context) (*host, error) {
+	return startWithZCode(ctx, false)
+}
+
+func startWithZCode(ctx context.Context, zcode bool) (*host, error) {
 	bun, err := Bun(ctx)
 	if err != nil {
 		return nil, err
 	}
-	h, crashed, err := startOn(ctx, bun)
+	h, crashed, err := startOnWithZCode(ctx, bun, zcode)
 	if crashed {
 		err = whyDied(ctx, bun, err)
 	}
@@ -1018,7 +1087,7 @@ func start(ctx context.Context) (*host, error) {
 	if !ok {
 		return nil, err
 	}
-	h, _, perr := startOn(ctx, prev)
+	h, _, perr := startOnWithZCode(ctx, prev, zcode)
 	if perr != nil {
 		return nil, err
 	}
@@ -1051,6 +1120,18 @@ func cancelCatalogSyncs() {
 // startOn starts the host on the bun given; crashed is whether it died
 // before it started.
 func startOn(ctx context.Context, bun string) (*host, bool, error) {
+	return startOnWithZCode(ctx, bun, false)
+}
+
+func startOnWithZCode(ctx context.Context, bun string, zcode bool) (*host, bool, error) {
+	l := Load()
+	bundle := ""
+	if zcode {
+		if err := ensureBundledZCode(); err != nil {
+			return nil, false, err
+		}
+		bundle = bundledTarget()
+	}
 	js, err := hostFile()
 	if err != nil {
 		return nil, false, err
@@ -1132,6 +1213,7 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		proxy:    proxy,
 		proxyAt:  time.Now(),
 		addr:     addr,
+		bundle:   bundle,
 		output:   output,
 		waited:   waited,
 		tree:     tree,
@@ -1149,7 +1231,6 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	go h.ctrlLoop()
 	generation.Add(1)
 
-	l := Load()
 	type item struct {
 		Spec    string         `json:"spec"`
 		Target  string         `json:"target"`
@@ -1160,9 +1241,12 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	for _, e := range l.Plugins {
 		// a plugin that is only gateway middleware or an agent runs in
 		// magpie (internal/middleware, internal/agentplug), not here
-		if !e.Off && !InMagpieOnly(Target(e.Spec)) {
+		if !e.Off && !IsBundledZCode(e.Spec) && !InMagpieOnly(Target(e.Spec)) {
 			items = append(items, item{e.Spec, Target(e.Spec), hostOptions(Target(e.Spec), e.Options), Gateway(Target(e.Spec))})
 		}
+	}
+	if zcode {
+		items = append(items, item{Spec: bundledZCodePackage, Target: bundle})
 	}
 	var res struct {
 		Plugins []Loaded `json:"plugins"`
@@ -1194,6 +1278,23 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		crashed := !h.alive()
 		h.stop()
 		return nil, crashed, fmt.Errorf("starting plugins: %w", err)
+	}
+	if zcode {
+		valid := false
+		for _, p := range res.Plugins {
+			if p.Spec != bundledZCodePackage {
+				continue
+			}
+			if p.Error != "" {
+				h.stop()
+				return nil, false, fmt.Errorf("loading intrinsic ZCode: %s", p.Error)
+			}
+			valid = slices.Contains(p.Provides, "zcode")
+		}
+		if !valid {
+			h.stop()
+			return nil, false, errors.New("intrinsic ZCode account hook is unavailable")
+		}
 	}
 	h.loaded = res.Plugins
 	noteTools(res.Plugins)
@@ -1819,7 +1920,7 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 	case m := <-c.done:
 		c.release()
 		if m.Error != nil {
-			return errors.New(m.Error.Message)
+			return m.Error.err()
 		}
 		if out != nil && len(m.Result) > 0 {
 			return json.Unmarshal(m.Result, out)
@@ -1835,7 +1936,7 @@ func (h *host) call(ctx context.Context, method string, params, out any) error {
 		c.release()
 		if m != nil {
 			if m.Error != nil {
-				return errors.New(m.Error.Message)
+				return m.Error.err()
 			}
 			if out != nil && len(m.Result) > 0 {
 				return json.Unmarshal(m.Result, out)
@@ -1863,7 +1964,13 @@ func callWithTimeout(ctx context.Context, method string, params, out any, timeou
 	if timeout > 0 {
 		startup = context.WithoutCancel(ctx)
 	}
-	h, err := get(startup)
+	var h *host
+	var err error
+	if p, ok := params.(map[string]any); ok && p["provider"] == "zcode" {
+		h, err = getZCode(startup)
+	} else {
+		h, err = get(startup)
+	}
 	if err != nil {
 		return err
 	}
@@ -1885,20 +1992,35 @@ func Plugins(ctx context.Context) ([]Loaded, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h.loaded, nil
+	loaded := make([]Loaded, 0, len(h.loaded))
+	for _, p := range h.loaded {
+		if !IsBundledZCode(p.Spec) {
+			loaded = append(loaded, p)
+		}
+	}
+	return loaded, nil
 }
 
 // FetchRequest is a request a provider's plugin makes.
 type FetchRequest struct {
-	Provider string            `json:"provider"`
-	Account  string            `json:"account,omitempty"` // the provider's first when ""
-	Model    string            `json:"model"`
-	NPM      string            `json:"npm"`
-	URL      string            `json:"url"`
-	Method   string            `json:"method"`
-	Headers  map[string]string `json:"headers"`
-	Body     []byte            `json:"-"`
-	Session  string            `json:"session,omitempty"`
+	Provider         string          `json:"provider"`
+	Account          string          `json:"account,omitempty"` // the provider's first when ""
+	Model            string          `json:"model"`
+	RequestedModel   string          `json:"requestedModel,omitempty"`
+	RequestedSession string          `json:"requestedSession,omitempty"`
+	Execution        json.RawMessage `json:"execution,omitempty"`
+	BundleSpec       string          `json:"bundleSpec,omitempty"`
+	BundleTarget     string          `json:"bundleTarget,omitempty"`
+	// ZCodeScope and ZCodeGeneration are the admitted account binding for
+	// an authorized intrinsic fallback. They are never provider headers.
+	ZCodeScope      string            `json:"zcodeScope,omitempty"`
+	ZCodeGeneration string            `json:"zcodeGeneration,omitempty"`
+	NPM             string            `json:"npm"`
+	URL             string            `json:"url"`
+	Method          string            `json:"method"`
+	Headers         map[string]string `json:"headers"`
+	Body            []byte            `json:"-"`
+	Session         string            `json:"session,omitempty"`
 	// Proxy is the provider's or the account's own proxy (netproxy.With):
 	// "direct", or its URL; "" follows magpie's. Fetch takes it from ctx
 	// when it isn't set.
@@ -2080,10 +2202,22 @@ func hostEnv(env []string) []string {
 // Fetch sends r through the provider's plugin — its loader's fetch, or
 // Bun's own when it gives none — and streams back the reply.
 func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
+	if r.ZCodeScope != "" || r.ZCodeGeneration != "" {
+		if r.Provider != "zcode" || r.BundleSpec != bundledZCodePackage || r.BundleTarget != bundledTarget() ||
+			r.ZCodeScope == "" || r.ZCodeGeneration == "" {
+			return nil, errors.New("invalid intrinsic ZCode account binding")
+		}
+	}
 	if err := netproxy.Held(ctx); err != nil {
 		return nil, err
 	}
-	h, err := get(ctx)
+	var h *host
+	var err error
+	if r.Provider == "zcode" {
+		h, err = getZCode(ctx)
+	} else {
+		h, err = get(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2157,7 +2291,7 @@ func (c *call) headRead(ctx context.Context) (head message, answer *message, err
 		}
 		if m := c.result(); m != nil {
 			if m.Error != nil {
-				return message{}, m, errors.New(m.Error.Message)
+				return message{}, m, m.Error.err()
 			}
 			return message{}, m, errors.New("the plugin answered no response")
 		}
@@ -2169,7 +2303,7 @@ func (c *call) headRead(ctx context.Context) (head message, answer *message, err
 				return hm, &m, nil
 			}
 			if m.Error != nil {
-				return message{}, &m, errors.New(m.Error.Message)
+				return message{}, &m, m.Error.err()
 			}
 			return message{}, &m, errors.New("the plugin answered no response")
 		case <-ctx.Done():
@@ -2250,7 +2384,7 @@ func (b *body) Read(p []byte) (int, error) {
 			// the answer ends the reply: its error, or the end of it
 			b.c.release()
 			if b.answer.Error != nil {
-				return 0, errors.New(b.answer.Error.Message)
+				return 0, b.answer.Error.err()
 			}
 			return 0, io.EOF
 		}

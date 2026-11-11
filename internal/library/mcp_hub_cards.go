@@ -104,6 +104,12 @@ func loadCards() {
 
 // cardOf is s's card, nil when there is none for s as it is now.
 func cardOf(s *Server) *hubCard {
+	// A card's tool list can depend on the bound account's current login.
+	// It cannot be safely reused without an account operation, whose trust
+	// preflight must precede any account read.
+	if s.PluginAccount != nil {
+		return nil
+	}
 	cards.Lock()
 	defer cards.Unlock()
 	loadCards()
@@ -176,7 +182,7 @@ func writeCards(m map[string]hubCard) {
 // for, else what it says of itself; its title; and its tools but those
 // turned off, as it last listed them.
 func hubServerOf(s *Server) gateway.HubServer {
-	out := gateway.HubServer{Name: s.Name, About: serverAbout(s), Bridge: s.Bridge != "", HereOnly: hereOnly(s), Program: s.Plugin != "" || !s.Remote(), Keyed: keepsSession(s) && !s.Remote()}
+	out := gateway.HubServer{Name: s.Name, About: serverAbout(s), Bridge: s.Bridge != "", HereOnly: hereOnly(s), OwnerIdentity: s.PluginAccount != nil, Program: s.Plugin != "" || !s.Remote(), Keyed: s.PluginAccount == nil && keepsSession(s) && !s.Remote()}
 	c := cardOf(s)
 	if c == nil {
 		return out

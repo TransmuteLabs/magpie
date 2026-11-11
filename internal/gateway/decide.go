@@ -876,6 +876,54 @@ func withModelEffort(proto provider.Protocol, body []byte, model, effort string)
 	return withFixedEffort(proto, body, effort)
 }
 
+// withSelectedEffort carries an Anthropic client's chosen level without a
+// budget when the selected endpoint is native GLM. Dynamic picks, unlike
+// fixed ones, still leave requests that did not ask to think alone.
+func withSelectedEffort(proto provider.Protocol, body []byte, model, effort string, native int, fixed bool) []byte {
+	if native == 0 || proto != provider.Anthropic {
+		if fixed {
+			return withModelEffort(proto, body, model, effort)
+		}
+		return withEffort(proto, body, effort)
+	}
+	if effort == "" {
+		return body
+	}
+	var v struct {
+		Thinking     map[string]json.RawMessage `json:"thinking"`
+		OutputConfig map[string]json.RawMessage `json:"output_config"`
+	}
+	if decodeJSON(body, &v) != nil {
+		return body
+	}
+	if !fixed {
+		var kind string
+		_ = json.Unmarshal(v.Thinking["type"], &kind)
+		if kind != "enabled" && kind != "adaptive" {
+			return body
+		}
+	}
+	if v.Thinking == nil {
+		v.Thinking = map[string]json.RawMessage{}
+	}
+	delete(v.Thinking, "budget_tokens")
+	if effort == "none" {
+		v.Thinking["type"] = json.RawMessage(`"disabled"`)
+		delete(v.OutputConfig, "effort")
+	} else {
+		v.Thinking["type"] = json.RawMessage(`"enabled"`)
+		if v.OutputConfig == nil {
+			v.OutputConfig = map[string]json.RawMessage{}
+		}
+		v.OutputConfig["effort"], _ = json.Marshal(effort)
+	}
+	fields := map[string]any{"thinking": v.Thinking}
+	if v.OutputConfig != nil {
+		fields["output_config"] = v.OutputConfig
+	}
+	return withFields(body, fields)
+}
+
 // withGeminiEffort asks a Gemini request's generationConfig.thinkingConfig
 // for effort, as model takes it, keeping includeThoughts as asked: a
 // Gemini 2.5 a budget in its range (vertexBudgets; it turns a level away),

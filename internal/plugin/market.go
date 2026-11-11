@@ -161,6 +161,10 @@ func InfoCached(names []string) map[string]NPM {
 	c := npmCached()
 	out := map[string]NPM{}
 	for _, n := range names {
+		if IsBundledZCode(n) {
+			out[n] = bundledZCodeInfo()
+			continue
+		}
 		if e, ok := c[n]; ok && !e.missingStale(time.Hour) {
 			out[n] = e.Info
 		}
@@ -369,10 +373,17 @@ func infoWithin(ctx context.Context, names []string, age time.Duration) map[stri
 	npmMu.Lock()
 	cache := npmCached()
 	for _, n := range names {
-		if asked[n] || !pkgName.MatchString(n) {
+		if asked[n] {
 			continue
 		}
 		asked[n] = true
+		if IsBundledZCode(n) {
+			out[n] = bundledZCodeInfo()
+			continue
+		}
+		if !pkgName.MatchString(n) {
+			continue
+		}
 		e, hit := cache[n]
 		if hit {
 			// what it said last, until it says otherwise
@@ -487,6 +498,9 @@ func npmInfo(ctx context.Context, name string) (NPM, bool) {
 // npmAsk is what npm says of the package now, or why it said nothing:
 // errNotFound when it has no such package.
 func npmAsk(ctx context.Context, name string) (NPM, error) {
+	if IsBundledZCode(name) {
+		return bundledZCodeInfo(), nil
+	}
 	var info NPM
 	var wg sync.WaitGroup
 	var latestErr error
@@ -790,6 +804,9 @@ func Installed(spec string) string {
 	}
 	var p struct{ Version string }
 	_ = json.Unmarshal(b, &p)
+	if IsBundledZCode(spec) && p.Version != bundledZCodeVersion {
+		return ""
+	}
 	return p.Version
 }
 
@@ -883,6 +900,19 @@ func ownSummary(raw json.RawMessage) map[string]string {
 // Upgrade installs the newest version of one plugin: npm's, or its git
 // repository's commit now. One bun won't install says why.
 func Upgrade(ctx context.Context, name string) error {
+	if name == bundledZCodePackage || IsBundledZCode(name) {
+		l := Load()
+		i := indexOf(l, name)
+		if i < 0 {
+			return fmt.Errorf("no plugin %q", name)
+		}
+		if IsBundledZCode(l.Plugins[i].Spec) {
+			_, err := add(ctx, l.Plugins[i].Spec, "")
+			return err
+		}
+		_, err := add(ctx, name, newestOf(ctx, name))
+		return err
+	}
 	for _, e := range Load().Plugins {
 		if (Name(e.Spec) == name || e.Spec == name) && IsGit(e.Spec) {
 			err := reinstall(ctx, e.Spec)

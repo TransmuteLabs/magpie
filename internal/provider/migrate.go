@@ -304,7 +304,6 @@ var retiredBuiltins = map[string]bool{
 	"workbuddy":       true,
 	WorkBuddyAIID:     true,
 	MiMoID:            true,
-	"zcode":           true,
 	"factory":         true,
 	"grok":            true,
 	"devin":           true,
@@ -314,7 +313,7 @@ var retiredBuiltins = map[string]bool{
 // PluginServes is whether the built-in id's subscription is its plugin's to
 // serve, and magpie's built-in code serves none of it: moved onto its plugin,
 // or retired.
-func PluginServes(id string) bool { return Moved(id) || BuiltinRetired(id) }
+func PluginServes(id string) bool { return id == "zcode" || Moved(id) || BuiltinRetired(id) }
 
 // MovableIDs are the built-ins that have a plugin to move to, by id: the
 // page marks them deprecated, moved or not.
@@ -524,13 +523,24 @@ var (
 		// what the user has is theirs: a version they pinned stays, and
 		// a git one is reinstalled from its own repository, where a bare
 		// name would replace either with <pkg>@latest
+		bundleSpec := pkg + "@" + min
+		bundled := plugin.IsBundledZCode(bundleSpec)
 		found, older := pkg, false
+		if bundled {
+			found = bundleSpec
+		}
 		for _, e := range plugin.Load().Plugins {
 			if plugin.PackageName(e.Spec) != pkg {
 				continue
 			}
 			if e.Off {
 				return fmt.Errorf("%s is turned off in Plugins", pkg)
+			}
+			if bundled && !plugin.IsPath(e.Spec) && !plugin.IsGit(e.Spec) && !plugin.Pinned(e.Spec) {
+				// A move selects its embedded generation explicitly; a
+				// generic package-name upgrade would select npm instead.
+				found = bundleSpec
+				break
 			}
 			v := plugin.Version(e.Spec)
 			if min == "" || !update.Newer(min, v) {
@@ -552,11 +562,19 @@ var (
 			// version without a word (sweanng424 on Discord)
 			err = upgradePlugin(ctx, pkg)
 		} else {
-			_, err = addPlugin(ctx, found)
+			var entry plugin.Entry
+			entry, err = addPlugin(ctx, found)
+			if err == nil && bundled && found == bundleSpec && entry.Spec != bundleSpec {
+				return fmt.Errorf("%s installed as %q; moving needs the bundled generation", bundleSpec, entry.Spec)
+			}
 		}
 		if err == nil && min != "" {
-			if v := plugin.Version(pkg); update.Newer(min, v) {
-				return fmt.Errorf("%s %s is installed; moving needs %s or newer", pkg, v, min)
+			verify := pkg
+			if bundled && found == bundleSpec {
+				verify = bundleSpec
+			}
+			if v := plugin.Version(verify); (bundled && verify == bundleSpec && v != min) || update.Newer(min, v) {
+				return fmt.Errorf("%s %s is installed; moving needs %s or newer", verify, v, min)
 			}
 		}
 		return err
@@ -1208,6 +1226,11 @@ func agentGoing(name, left string) error {
 // plugin is installed again. The agent it adds is taken off magpie first
 // (PluginAgentGoing).
 func RemovePlugin(ctx context.Context, name string) error {
+	if spec := installedSpec(name); plugin.PackageName(spec) == "@magpie-community/opencode-zcode-auth" {
+		if err := adoptZCodeAccounts(); err != nil {
+			return fmt.Errorf("ZCode accounts and options were not adopted; plugin is left installed: %w", err)
+		}
+	}
 	if err := agentGoing(name, "installed"); err != nil {
 		return err
 	}

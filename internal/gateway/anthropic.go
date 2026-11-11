@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -859,21 +860,139 @@ func outputEffortAt(host, model string) bool {
 	return host == deepseekHost || effortInOutputConfig.MatchString(model)
 }
 
-// AdaptiveWithEffort is, for agents told how to ask a model, one of
-// effortInOutputConfig's that takes thinking adaptive with its level in
-// output_config.effort: Z.ai's GLM-5.2 and GLM-5.3 (tried live on GLM-5.3,
-// 10-24: max thought about three times high's). An agent whose budget
-// can't say max (pi-ai clamps it to high's) asks them so. MiniMax's
-// M3.1-Flash isn't, until it is tried (#3496).
+// AdaptiveWithEffort identifies GLM models for which pi-ai's adaptive input
+// carries max without its budget clamp. Native Z.ai requests use enabled,
+// not adaptive; the gateway converts the input before it goes upstream.
 func AdaptiveWithEffort(model string) bool { return glmOutputEffort.MatchString(model) }
 
 // glmOutputEffort is effortInOutputConfig's Z.ai half.
 var glmOutputEffort = lazyre.New(`(?i)glm-5\.[23](?:$|[-.:/\[])`)
 
+// nativeGLM identifies the actual Anthropic endpoint, not the provider's
+// display host or ID. The zcode plugin owns its own transport to Z.ai.
+func nativeGLM(p provider.Provider, model string) int {
+	match := strings.ToLower(glmOutputEffort.FindString(model))
+	if match == "" {
+		return 0
+	}
+	base := p.Base(provider.Anthropic)
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return 0
+	}
+	if !(p.IsPlugin() && p.PluginProvider() == "zcode" && u.Scheme == "plugin") {
+		host := strings.ToLower(u.Hostname())
+		if (u.Scheme != "http" && u.Scheme != "https") || (host != "api.z.ai" && host != "open.bigmodel.cn") || strings.TrimRight(u.Path, "/") != "/api/anthropic" {
+			return 0
+		}
+	}
+	if strings.HasPrefix(match, "glm-5.2") {
+		return 2
+	}
+	return 3
+}
+
+func glmNativeEffort(e string, version int) string {
+	e = effortOf(e)
+	if e == "" {
+		return "high"
+	}
+	if version == 2 {
+		return fitEffort(e, []string{"high", "max"})
+	}
+	return fitEffort(e, []string{"low", "high", "max"})
+}
+
+// glmUserEffort retains an explicit model-level preference without fitting
+// native GLM to a stale vendor catalog's possibly inaccurate levels.
+func glmUserEffort(p provider.Provider, model, effort string) string {
+	if offEffort(effort) {
+		return effort
+	}
+	return fitEffort(effort, provider.HeldSettings().ModelEfforts[p.ID+"/"+model])
+}
+
+// glmUserBodyEffort applies the same public-model restriction to relayed
+// generation and count requests, including budget-only and effort-only asks.
+func glmUserBodyEffort(p provider.Provider, model string, body []byte) []byte {
+	levels := provider.HeldSettings().ModelEfforts[p.ID+"/"+model]
+	if len(levels) == 0 || offEffort(bodyEffort(provider.Anthropic, body)) {
+		return body
+	}
+	body = withOutputEffort(body, levels)
+	if asked := bodyEffort(provider.Anthropic, body); asked != "" {
+		if effort := fitEffort(asked, levels); effort != asked {
+			body = withBodyEffort(provider.Anthropic, body, effort)
+		}
+	}
+	return body
+}
+
+func selectedEffortLevel(p provider.Provider, model, effort string, native int) string {
+	if native != 0 {
+		return glmUserEffort(p, model, effort)
+	}
+	return fitLevel(effort, p.Efforts(model))
+}
+
+// nativeGLMThinking is the last wire normalization, after user extra fields.
+// Keep other thinking and output_config members while removing the fields
+// that Z.ai's native API does not take.
+func nativeGLMThinking(body []byte, version int) []byte {
+	if version == 0 {
+		return body
+	}
+	var v struct {
+		Thinking     map[string]json.RawMessage `json:"thinking"`
+		OutputConfig map[string]json.RawMessage `json:"output_config"`
+	}
+	if decodeJSON(body, &v) != nil {
+		return body
+	}
+	var kind, asked string
+	_ = json.Unmarshal(v.Thinking["type"], &kind)
+	_ = json.Unmarshal(v.OutputConfig["effort"], &asked)
+	off := kind == "disabled" || kind == "between_tools" || strings.EqualFold(strings.TrimSpace(asked), "none")
+	if v.Thinking == nil && asked != "" && !off {
+		kind = "enabled"
+	}
+	if !off && kind != "enabled" && kind != "adaptive" {
+		return body
+	}
+	if v.Thinking == nil {
+		v.Thinking = map[string]json.RawMessage{}
+	}
+	delete(v.Thinking, "budget_tokens")
+	delete(v.Thinking, "display")
+	if off && version == 2 {
+		v.Thinking["type"] = json.RawMessage(`"disabled"`)
+		if v.OutputConfig != nil {
+			delete(v.OutputConfig, "effort")
+		}
+	} else {
+		v.Thinking["type"] = json.RawMessage(`"enabled"`)
+		if off {
+			asked = "low"
+		} else if asked == "" {
+			asked = requestEffort(provider.Anthropic, body)
+		}
+		effort := glmNativeEffort(asked, version)
+		if v.OutputConfig == nil {
+			v.OutputConfig = map[string]json.RawMessage{}
+		}
+		v.OutputConfig["effort"], _ = json.Marshal(effort)
+	}
+	fields := map[string]any{"thinking": v.Thinking}
+	if v.OutputConfig != nil {
+		fields["output_config"] = v.OutputConfig
+	}
+	return withFields(body, fields)
+}
+
 // withOutputEffort is body asking, in output_config.effort, for the level
 // of levels nearest the reasoning it asks for; body when it asks for none.
-// Thinking asked for adaptively (DSH asks these models so, its Max not
-// clamped to a high budget) stays adaptive: Z.ai takes it with the level.
+// Thinking asked for adaptively stays adaptive here; native GLM is
+// normalized separately at the outgoing boundary.
 func withOutputEffort(body []byte, levels []string) []byte {
 	e := requestEffort(provider.Anthropic, body)
 	var v struct {
@@ -927,6 +1046,12 @@ func buildAnthropic(r *Request, model string) []byte {
 // signature goes as its text instead of being left out. host is the
 // upstream's (outputEffortAt).
 func anthropicBody(r *Request, model, host string, replay bool) []byte {
+	return anthropicBodyFor(r, model, host, replay, 0)
+}
+
+// anthropicBodyFor constructs native GLM thinking without ever allocating
+// part of max_tokens to a budget the vendor does not use.
+func anthropicBodyFor(r *Request, model, host string, replay bool, native int) []byte {
 	r = responseInstructions(r)
 	if r.Format != nil && r.Format.schema() == nil {
 		// output_config.format takes a schema only: any JSON object is
@@ -1059,7 +1184,18 @@ func anthropicBody(r *Request, model, host string, replay bool) []byte {
 	if r.ThinkOff {
 		out["thinking"] = map[string]any{"type": "disabled"}
 	}
-	if think && adaptiveOnly(model) {
+	if native != 0 && (think || r.ThinkOff) {
+		if r.ThinkOff && native == 2 {
+			out["thinking"] = map[string]any{"type": "disabled"}
+		} else {
+			effort := r.Effort
+			if r.ThinkOff {
+				effort = "low"
+			}
+			out["thinking"] = map[string]any{"type": "enabled"}
+			out["output_config"] = map[string]any{"effort": glmNativeEffort(effort, native)}
+		}
+	} else if think && adaptiveOnly(model) {
 		// Opus 4.7 and later leave the thinking text out unless asked
 		// (display "omitted" by default), and a Chat or Responses client
 		// that asked to reason would see none of it; OpenAI is asked for

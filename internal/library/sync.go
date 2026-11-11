@@ -692,13 +692,26 @@ func readView(problems []Problem, glance bool) (*View, error) {
 			s = &c
 		}
 		sv := ServerView{Server: s, Icon: serverIcon(l, s), Problems: of("mcp:" + s.Name)}
-		if s.Transport == "http" {
+		if s.Transport == "http" && s.PluginAccount == nil {
 			st := mcpauth.StatusOf(s.Name, s.URL)
 			sv.SignIn = &st
 		}
 		for _, t := range targets {
 			if t.MCP != nil && slices.Contains(s.Agents, t.Agent.ID) {
-				if err := t.MCP.supports(s); err != nil {
+				var err error
+				if s.PluginAccount != nil {
+					a := l.Applied[t.Agent.ID]
+					if a == nil {
+						a = &Applied{}
+					}
+					entries, _ := t.MCP.entries()
+					if hs, _ := l.hubFor(t, a, entries); hs == nil || !inHub(s, t.Agent.ID) {
+						err = errPluginAccountDirect
+					}
+				} else {
+					err = t.MCP.supports(s)
+				}
+				if err != nil {
 					if sv.Problems == nil {
 						sv.Problems = map[string]string{}
 					}
@@ -801,16 +814,33 @@ func SaveServer(old string, s Server) (*Result, error) {
 			if i < 0 {
 				return fmt.Errorf("no server called %s", old)
 			}
-			// magpie's sign-in goes with a renamed server, before the agents
-			// are given it under its new name
-			if old != s.Name {
-				if err := mcpauth.Rename(old, s.Name); err != nil {
-					return err
-				}
+			if s.PluginAccount != nil && (l.MCP[i].PluginAccount == nil || *s.PluginAccount != *l.MCP[i].PluginAccount) {
+				return fmt.Errorf("%s: change plugin accounts with the explicit account control", s.Name)
 			}
 			// the tools turned off stay, the editor not sending them
 			if s.DisabledTools == nil {
 				s.DisabledTools = l.MCP[i].DisabledTools
+			}
+			// Older editors do not send pluginAccount. Only the explicit
+			// account control removes an existing binding.
+			if s.PluginAccount == nil && l.MCP[i].PluginAccount != nil {
+				a := *l.MCP[i].PluginAccount
+				s.PluginAccount = &a
+				if err := s.check(); err != nil {
+					return err
+				}
+			}
+			if s.PluginAccount != nil && s.Transport == "stdio" {
+				digest, err := commandTrustDigest(&s)
+				if err != nil || digest != s.PluginAccount.CommandDigest {
+					return fmt.Errorf("%s: the command changed; unbind it or explicitly trust it again", s.Name)
+				}
+			}
+			// Rename only after all validation, before syncing the agents.
+			if old != s.Name {
+				if err := mcpauth.Rename(old, s.Name); err != nil {
+					return err
+				}
 			}
 			// a plugin's server stays the plugin's, and on this computer
 			if p := l.MCP[i].Plugin; p != "" && s.Plugin == "" {
@@ -827,6 +857,8 @@ func SaveServer(old string, s Server) (*Result, error) {
 			if old != s.Name {
 				l.renameProjectServers(old, s.Name)
 			}
+		} else if s.PluginAccount != nil {
+			return fmt.Errorf("%s: bind a plugin account with the explicit account control", s.Name)
 		}
 		s.Agents = slices.Sorted(slices.Values(s.Agents))
 		l.MCP = append(l.MCP, &s)
@@ -934,6 +966,11 @@ func reachNow() reach {
 }
 
 func (r reach) takes(a string, s *Server) bool {
+	if s.PluginAccount != nil {
+		// Selection can be saved before the router is enabled; sync still
+		// refuses a direct entry if the router cannot serve the agent.
+		s = &Server{Transport: "http"}
+	}
 	return r.mcp[a] != nil && r.mcp[a].supports(s) == nil || r.shapes[a] != nil && r.shapes[a].reaches(s)
 }
 

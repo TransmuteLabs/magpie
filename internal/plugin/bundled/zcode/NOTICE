@@ -1,0 +1,15 @@
+Core-owned builtin:zcode runtime bundled by Magpie.
+
+Community baseline: magpie-community/plugins@1aab125, packages/zcode 0.1.57;
+project-token and authentication adaptations also draw on a9146f5.
+Copyright (c) 2026 magpie-community contributors; MIT license in LICENSE.MIT.
+
+Official protocol reference and adapted implementations: zai-org/ZCode
+3.18.0, b95ebaff. Copyright 2026 Z.AI Co., Ltd.
+Apache-2.0 license in LICENSE.ZCode; original upstream notice in NOTICE.ZCode.
+The upstream notice describes ZCode, not magpie defaults or privileges.
+
+Magpie owns account selection, execution, financial-operation coordination,
+and access controls. This bundle supplies the internal vendor transport; it is
+not an installable community plugin or an official Z.AI distribution. It does
+not implement unavailable proprietary request-signature or captcha mechanisms.

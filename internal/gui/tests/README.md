@@ -1,5 +1,14 @@
 # Dropdown browser regression
 
+`zcode-reset.test.cjs` exercises the intrinsic ZCode account controls in
+Chromium and WebKit, one engine at a time: native sign-in without a plugin
+installation or migration, cancellation before dispatch, a login-generation
+change during confirmation, and an unknown reset outcome that cannot spend
+again. It uses the real lazy account sheet and shared controls with isolated
+API fixtures; no vendor or live account is contacted.
+Run only this file with
+`make test-ui UI_TESTS=internal/gui/tests/zcode-reset.test.cjs UI_TEST_CONCURRENCY=1`.
+
 `agent-details-ready.test.cjs` holds the first settings read and the lazy
 Long conversations module on the main window's Agents → Details path. It
 checks a complete first and warm opening without a final height jump in all

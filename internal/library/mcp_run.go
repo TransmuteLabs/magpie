@@ -61,7 +61,7 @@ func (r runSpec) key() string { b, _ := json.Marshal(r); return string(b) }
 // specOf is the command magpie runs s with, false for a server it doesn't
 // run: a remote one, or one with a variable magpie's environment hasn't.
 func specOf(s *Server) (runSpec, bool) {
-	if s.Remote() || s.Command == "" {
+	if s.PluginAccount != nil || s.Remote() || s.Command == "" {
 		return runSpec{}, false
 	}
 	env, unset := expandAll(s.Env)
@@ -171,13 +171,8 @@ func runGiven(given map[string]runSpec) {
 // runSpecOf is the spec of the server called name: as the last sync gave
 // it, or, before a sync has, as the library has it.
 func runSpecOf(name string) (runSpec, bool) {
-	runs.Lock()
-	given := runs.given
-	runs.Unlock()
-	if given != nil {
-		spec, ok := given[name]
-		return spec, ok
-	}
+	// A binding may have been added by another magpie since this process
+	// last synced. It must not keep the old direct command endpoint alive.
 	mu.Lock()
 	l, err := load()
 	mu.Unlock()
@@ -185,8 +180,15 @@ func runSpecOf(name string) (runSpec, bool) {
 		return runSpec{}, false
 	}
 	s := l.server(name)
-	if s == nil || !slices.Contains(s.Agents, "codex") || s.Hub == HubDirect {
+	if s == nil || s.PluginAccount != nil || !slices.Contains(s.Agents, "codex") || s.Hub == HubDirect {
 		return runSpec{}, false
+	}
+	runs.Lock()
+	given := runs.given
+	runs.Unlock()
+	if given != nil {
+		spec, ok := given[name]
+		return spec, ok
 	}
 	return specOf(npxDirect(s))
 }
@@ -589,6 +591,10 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case http.MethodGet:
+		if _, ok := runSpecOf(name); !ok {
+			http.Error(w, "magpie gives Codex no server called "+name, http.StatusNotFound)
+			return
+		}
 		runStream(w, r, name, sid)
 		return
 	case http.MethodPost:

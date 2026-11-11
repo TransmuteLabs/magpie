@@ -125,14 +125,14 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	}
 	keepPluginPlan(pp, key, u.Plan)
 	q = quotaOfPlugin(q, u)
-	if pp.ID == "zcode" && validResetBinding(u.ResetScope) && validResetBinding(u.ResetContext) {
-		resets, why := fetchZCodeResets(ctx, zcodeResetAccount{provider: pp.ID, key: key, user: l.User}, u.ResetScope, u.ResetContext)
-		if resets != nil {
-			q.Resets = resets
+	if pp.ID == "zcode" && !holding(ctx) {
+		read, cancel := context.WithTimeout(ctx, 2*time.Second)
+		state, err := ZCodeResetStatus(read, PluginID(pp.ID), key, true)
+		cancel()
+		if err != nil && state.Source == "" {
+			state.Source, state.Error = "zcode", err.Error()
 		}
-		if why != "" {
-			q.Windows = append(q.Windows, QuotaWindow{Name: "Rate-limit resets", Text: true, Aside: true, Display: why})
-		}
+		q.ZCodeReset = &state
 	}
 	// a wallet's spend counted, for a cap to hold it (#5770)
 	return withWalletSpend(q, l.User, time.Now())
@@ -147,12 +147,13 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
 		q.User = u.User
 	}
 	q.Balance, q.Renew, q.Error = u.Balance, u.Renew, u.Error
+	q.Observations = u.Observations
 	q.PluginError = u.Error != ""
 	if t, err := time.Parse(time.RFC3339, u.Until); err == nil {
 		q.Until = &t
 	}
 	if r := u.Resets; r != nil {
-		q.Resets = &ResetCredits{Count: r.Count, ByWindow: r.ByWindow, FiveHour: r.FiveHour, Weekly: r.Weekly, Team: r.Team}
+		q.Resets = &ResetCredits{Count: r.Count, ByWindow: r.ByWindow, FiveHour: r.FiveHour, Weekly: r.Weekly, Team: r.Team, Source: r.Source}
 		if t, err := time.Parse(time.RFC3339, r.Until); err == nil {
 			q.Resets.Until = &t
 		}

@@ -138,18 +138,25 @@ func writeUpdates(b []byte) error {
 // (matrix0487, #4802: fdaa691 installed, 3b411a5 found, ba898e7 updated to).
 func waitsNoMore(have map[string]Entry) func(Waiting) bool {
 	return func(w Waiting) bool {
+		if !w.Git && IsBundledZCode(w.Spec) {
+			return true
+		}
 		e, ok := have[w.Package]
 		if ok && w.Git {
 			return e.Off || e.Spec != w.Spec || !GitBehind(e.Spec, w.Latest) || !SameCommit(GitCommit(e.Spec), w.Version)
 		}
-		return !ok || e.Off || !update.Newer(w.Latest, Installed(e.Spec))
+		return !ok || e.Off || IsGit(e.Spec) || !update.Newer(w.Latest, Installed(e.Spec))
 	}
 }
 
-// installedNow is each plugin on the list by its package.
+// installedNow is each updatable plugin on the list by its package. A
+// bundled generation has no updates and must not shadow a git source.
 func installedNow() map[string]Entry {
 	have := map[string]Entry{}
 	for _, e := range Load().Plugins {
+		if IsBundledZCode(e.Spec) {
+			continue
+		}
 		have[Name(e.Spec)] = e
 	}
 	return have
@@ -212,6 +219,9 @@ func CheckUpdates(ctx context.Context) (Updates, error) {
 	var es, gits []Entry
 	var names []string
 	for _, e := range Load().Plugins {
+		if IsBundledZCode(e.Spec) {
+			continue
+		}
 		// a git one's package may be on npm too, as someone else's: its
 		// repository is asked instead
 		if IsGit(e.Spec) && !e.Off {
@@ -398,6 +408,12 @@ func CheckNow(ctx context.Context) VersionChecks {
 		c := VersionCheck{Spec: e.Spec, Package: Name(e.Spec), Version: Installed(e.Spec), Off: e.Off}
 		c.Auto = Official(c.Package) && !Pinned(e.Spec) && !e.Off
 		switch {
+		case IsBundledZCode(e.Spec):
+			c.Auto = false
+			c.Latest, c.Status = bundledZCodeVersion, "current"
+			if c.Version == "" {
+				c.Status, c.Why, c.Error = "unknown", "missing", "the bundled ZCode generation is missing or invalid"
+			}
 		case IsPath(e.Spec):
 			c.Status = "folder"
 		case IsGit(e.Spec):

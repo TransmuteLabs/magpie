@@ -62,13 +62,13 @@ func TestZCodeCountTokensEstimated(t *testing.T) {
 	}
 }
 
-// ZCode moved onto its plugin estimates as the built-in does.
+// The intrinsic provider estimates without asking its model endpoint.
 func TestMovedZCodeCountTokensEstimated(t *testing.T) {
 	up := &countAsked{}
-	movedFake(t, "zcode", up)
+	intrinsicTrialFixture(t, false, false, up.ServeHTTP)
 	rec := httptest.NewRecorder()
 	New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/messages/count_tokens",
-		strings.NewReader(`{"model":"zcode/fake-claude","messages":[{"role":"user","content":"hello there"}]}`)))
+		strings.NewReader(`{"model":"zcode/GLM-5.3","messages":[{"role":"user","content":"hello there"}]}`)))
 	if n := estimated(t, rec); n == 999 || len(up.asked()) > 0 {
 		t.Fatalf("the vendor was asked to count: %v, %d", up.asked(), n)
 	}
@@ -301,8 +301,7 @@ func TestZCodeRiskControlNotToldAsFirewall(t *testing.T) {
 		{"block page", `{"type":"error","error":{"type":"permission_error","message":"405 Method Not Allowed — ` + provider.BlockedHint + `"}}`, provider.BlockedHint, provider.ZCodeRestrictedHint, failOther},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("FAKE_ZCODE", "1")
-			movedFake(t, "zcode", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			intrinsicTrialFixture(t, false, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				io.WriteString(w, tc.body)

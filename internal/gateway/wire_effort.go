@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -45,6 +46,24 @@ func noteWireEffort(ctx context.Context, to provider.Protocol, req *Request) {
 	if e, ok := wireEffort(to, req); ok {
 		w.effort, w.set = e, true
 	}
+}
+
+// noteNativeWireEffort records the final native body after extra fields and
+// normalization, including on retries and passthroughs.
+func noteNativeWireEffort(ctx context.Context, body []byte) {
+	w, _ := ctx.Value(wireAtKey{}).(*wireAt)
+	if w == nil {
+		return
+	}
+	fields := gjson.GetManyBytes(body, "thinking.type", "output_config.effort")
+	effort := ""
+	switch fields[0].String() {
+	case "disabled", "between_tools":
+		effort = "none"
+	case "enabled", "adaptive":
+		effort = fields[1].String()
+	}
+	w.effort, w.set = effort, true
 }
 
 // wireEffort is the reasoning a request built from req asks the model for,

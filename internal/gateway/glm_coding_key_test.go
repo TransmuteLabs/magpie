@@ -38,10 +38,25 @@ func (g *glmKeys) RoundTrip(r *http.Request) (*http.Response, error) {
 		served = g.payg[key]
 	case strings.HasPrefix(r.URL.Path, "/api/coding/paas/v4/"):
 		served = g.plan[key]
+	case strings.HasPrefix(r.URL.Path, "/api/anthropic/"):
+		served = g.plan[key] || g.payg[key]
 	}
 	if !served {
 		return &http.Response{StatusCode: 429, Status: "429 Too Many Requests", Header: http.Header{"Content-Type": {"application/json"}},
 			Body: io.NopCloser(strings.NewReader(zhipuNoBalance)), Request: r}, nil
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/anthropic/") {
+		if gjson.GetBytes(body, "stream").Bool() {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.1\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n" +
+					"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+					"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\n" +
+					"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+					"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+					"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")), Request: r}, nil
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"id":"m","type":"message","role":"assistant","model":"glm-5.1","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`)), Request: r}, nil
 	}
 	if gjson.GetBytes(body, "stream").Bool() {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}},
@@ -127,12 +142,12 @@ func TestGLMCodingPlanKeyAtPayAsYouGo(t *testing.T) {
 			if p.Chat != "https://"+tc.host+"/api/coding/paas/v4" || p.Responses != "https://"+tc.host+"/api/v1" || p.Anthropic != "https://"+tc.host+"/api/anthropic" {
 				t.Errorf("plan provider not moved to the Coding Plan's endpoints: chat %s responses %s anthropic %s", p.Chat, p.Responses, p.Anthropic)
 			}
-			// and from then on the plan's own endpoints are asked first
+			// and from then on the plan's Messages endpoint is preferred
 			if rec := ask("/v1/chat/completions", `{"model":"`+tc.preset+`-plan/glm-5.1","messages":[{"role":"user","content":"Say pong"}]}`); rec.Code != 200 {
 				t.Fatalf("plan key again: %d %s", rec.Code, rec.Body)
 			}
-			if got := fake.took(); len(got) != 1 || got[0] != tc.host+"/api/coding/paas/v4/chat/completions" {
-				t.Errorf("plan key asked %v the second time, want the plan's endpoint alone", got)
+			if got := fake.took(); len(got) != 1 || got[0] != tc.host+"/api/anthropic/v1/messages" {
+				t.Errorf("plan key asked %v the second time, want the plan's Messages endpoint", got)
 			}
 
 			// a pay-as-you-go key with a balance: where it was

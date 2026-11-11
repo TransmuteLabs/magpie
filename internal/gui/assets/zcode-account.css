@@ -1,0 +1,45 @@
+/* ZCode account controls use the same framed editor, fields and menus as
+   Providers and Library. Only the body scrolls vertically. */
+.modal .editor.zcode-account > .ebody {
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: max-content;
+}
+.zcode-account :is(.zcode-section, .zcode-fields, .zcode-list, .zcode-table, .zcode-kv) { min-width: 0; }
+.zcode-account .zcode-section { display: grid; gap: 10px; }
+.zcode-account .zcode-section + .zcode-section { margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line-2); }
+.zcode-account :is(h2, h3, h4, p) { margin: 0; }
+.zcode-account :is(h3, h4) { font-size: 13px; font-weight: 600; }
+.zcode-account .zcode-fields { display: grid; grid-template-columns: fit-content(132px) minmax(0, 1fr); align-items: start; gap: 10px 14px; }
+.zcode-account .zcode-fields > div { min-width: 0; }
+.zcode-account .zcode-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; min-width: 0; }
+.zcode-account .zcode-actions .text { height: auto; min-height: 27px; white-space: normal; }
+.zcode-account .zcode-list { display: grid; gap: 12px; }
+.zcode-account .zcode-list > .zcode-list, .zcode-account .zcode-list > article { padding: 10px; border: 1px solid var(--line-2); border-radius: 8px; }
+.zcode-account .zcode-kv { display: grid; grid-template-columns: fit-content(156px) minmax(0, 1fr); gap: 5px 14px; margin: 0; font-size: 12px; }
+.zcode-account .zcode-kv dt { color: var(--fg-2); }
+.zcode-account div.zcode-kv > :first-child { color: var(--fg-2); }
+.zcode-account div.zcode-kv > :last-child { white-space: pre-wrap; overflow-wrap: anywhere; }
+.zcode-account .zcode-kv dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.zcode-account :is(.zcode-empty, .zcode-note) { color: var(--fg-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.zcode-account .zcode-error { color: var(--red); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.zcode-account .zcode-error:empty { display: none; }
+.zcode-account :is(code, pre) { font-family: var(--code-font, var(--code)); font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.zcode-account .zcode-table { max-width: 100%; overflow-x: auto; }
+.zcode-account table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.zcode-account :is(th, td) { padding: 7px 9px; text-align: start; vertical-align: top; border-bottom: 1px solid var(--line-2); overflow-wrap: anywhere; }
+.zcode-account th { color: var(--fg-2); font-weight: 500; }
+.zcode-account :is(th, td):first-child { padding-left: 0; }
+.zcode-account :is(th, td):last-child { padding-right: 0; }
+.zcode-account input:is([type="date"], [type="datetime-local"]) { width: 100%; min-width: 0; height: 27px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--fg); font: inherit; font-size: 12.5px; }
+.zcode-account .zcode-fields textarea { width: 100%; min-width: 0; box-sizing: border-box; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--fg); font: inherit; font-size: 12.5px; resize: vertical; }
+.zcode-account .proto.pick { max-width: 100%; }
+.zcode-account .proto.pick > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.zcode-account .ehead .grow { min-width: 0; }
+.zcode-account-open { flex: none; }
+.zcode-resets { flex-wrap: wrap; }
+@media (max-width: 540px) {
+  .zcode-account .zcode-fields { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+  .zcode-account .zcode-fields > label { text-align: start; padding-top: 7px; }
+  .zcode-account .zcode-kv { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .zcode-account .zcode-kv dd + dt { margin-top: 5px; }
+}

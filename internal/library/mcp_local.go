@@ -53,6 +53,22 @@ func (l *Library) putServers(in []*Server) {
 		c.Local = false // only this computer says what is its own
 		c.Bridge = ""   // and which of its providers a server is
 		c.Agents = slices.Sorted(slices.Values(orNone(s.Agents)))
+		if c.PluginAccount != nil {
+			a := *c.PluginAccount
+			a.CommandDigest = "" // never import another machine's trust
+			if c.Transport == "stdio" {
+				old := l.server(c.Name)
+				if old != nil && old.PluginAccount != nil &&
+					old.PluginAccount.Provider == a.Provider && old.PluginAccount.Account == a.Account &&
+					old.PluginAccount.Scope == a.Scope && old.PluginAccount.CommandDigest != "" &&
+					accountTargetFingerprint(old) == accountTargetFingerprint(&c) {
+					if digest, err := commandTrustDigest(&c); err == nil && digest == old.PluginAccount.CommandDigest {
+						a.CommandDigest = digest
+					}
+				}
+			}
+			c.PluginAccount = &a
+		}
 		if own[c.Name] {
 			l.Away = append(l.Away, &c)
 		} else {

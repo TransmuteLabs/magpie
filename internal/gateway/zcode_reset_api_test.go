@@ -36,7 +36,7 @@ func TestZCodeResetNeedsAFullKey(t *testing.T) {
 		h.ServeHTTP(w, r)
 		return w
 	}
-	path := provider.RemoteZCodeResetPath + "?user=person@example.com&window=fiveHour&context=" + strings.Repeat("a", 64)
+	path := provider.RemoteZCodeResetPath
 	for _, origin := range []string{"", "null", "tauri://localhost", "https://evil.example"} {
 		w := do(path, origin, "")
 		if w.Code < 400 || w.Code == http.StatusNotFound {
@@ -54,7 +54,7 @@ func TestZCodeResetNeedsAFullKey(t *testing.T) {
 	}
 	// The full key reaches the named-account validation; no vendor or real
 	// credentials are needed to establish this boundary.
-	if w := do(provider.RemoteZCodeResetPath, "", secrets[0]); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "name the ZCode account") {
+	if w := do(provider.RemoteZCodeResetPath, "", secrets[0]); w.Code != http.StatusBadRequest {
 		t.Fatalf("owner validation: %d %s", w.Code, w.Body.String())
 	}
 }

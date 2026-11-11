@@ -152,6 +152,7 @@ async function api(path, body, heads, signal) {
   }
   if (!res.ok) {
     const err = new Error(data?.error || `${res.status} ${res.statusText}`);
+    if (path === "usage/zcode-account" && data?.accountError && typeof data.accountError === "object") err.accountError = data.accountError;
     if (data?.code === "runtime_unavailable") {
       err.code = data.code;
       if (data.offline === "stage" || data.offline === "disconnect") err.offline = data.offline;
@@ -6169,7 +6170,9 @@ function renderProviders(quiet) {
   keptIcons = null;
   markUpstream();
   view.scrollTop = top; // first: a closing dialog folds into its row where it is
-  if (dialog) openModal(dialog, quiet); else closeModal();
+  if (!zcodeAccountOwner) {
+    if (dialog) openModal(dialog, quiet); else closeModal();
+  }
 }
 
 // providerHandle is an on row's logo and its handle (#499): drag, or
@@ -6675,12 +6678,13 @@ function accountPlan(a) {
 // magpie refuses a copy it can't read back (#1881); none copying, the page
 // shows the text to copy by hand.
 async function copy(text, what, btn, message) {
-  const done = () => { status(message || t("{what} copied", { what }), "ok"); flashCopied(btn); };
+  const done = () => { status(message || t("{what} copied", { what }), "ok"); flashCopied(btn); return true; };
   const res = await fetch("/api/copy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }).catch(() => null);
   if (res && res.ok) return done();
   try { await navigator.clipboard.writeText(text); return done(); } catch {}
   if (copyByCommand(text)) return done();
   status(t("Couldn't copy. Select it here and copy it yourself: {text}", { text }), "err");
+  return false;
 }
 
 // copyByCommand copies text with the page's copy command, through a
@@ -7519,6 +7523,14 @@ function input(value, placeholder, type = "text") {
 // keep: leaving the page, a sign-in under way in the editor goes on; the
 // editor put away (Cancel, Escape, a click outside) takes it with it (#526)
 let providerDraftRef = null, providerDraftBase = "";
+// ZCode account sheets borrow the same modal as provider editors.
+// Redraws preserve its owner; a real replacement disposes only that sheet.
+let zcodeAccountOwner = null;
+function disposeZCodeAccount() {
+  const previous = zcodeAccountOwner;
+  zcodeAccountOwner = null;
+  previous?.dispose();
+}
 function providerDraftValue() {
   return JSON.stringify({ ...draft, headers: headersOf(draft?.headers), modelHeaderRows: undefined, onLimits: undefined, modelPrefs: modelPrefsOfDraft() });
 }
@@ -8914,6 +8926,7 @@ function modalClimb(body) {
   body.scrollTop -= by;
 }
 function openModal(content, quiet) {
+  if (zcodeAccountOwner && zcodeAccountOwner.root !== content) disposeZCodeAccount();
   const m = $("#modal"), d = m.firstElementChild;
   const fresh = m.hidden || m.classList.contains("out");
   const top = m.hidden ? 0 : d.querySelector(".ebody")?.scrollTop || 0;
@@ -9021,6 +9034,7 @@ function frame(ed) {
   ed.classList.add("framed");
 }
 function closeModal() {
+  disposeZCodeAccount();
   const m = $("#modal"), d = m.firstElementChild;
   if (m.hidden) return Promise.resolve();
   if (m.classList.contains("out")) return modalDone || Promise.resolve();
@@ -12421,7 +12435,9 @@ const SUBS = [
 const subOf = (agent) => {
   const own = SUBS.find((x) => x.agent === agent);
   const pl = pluginSubs().find((x) => x.agent === agent);
-  if (own && pl && movedSub(agent)) {
+  // Intrinsic ZCode uses the same branded auth-hook controls without an
+  // external plugin installation or a recorded subscription migration.
+  if (own && pl && (movedSub(agent) || pl.plugin.spec === "builtin:zcode")) {
     const { name, icon, plans, risk, riskNote, hint, sites, importable } = own;
     // a moved Factory's imported API keys go to its plugin (factory_key.go)
     return { ...pl, name, icon, plans, risk, riskNote, hint, sites, importable, moved: true };
@@ -13427,6 +13443,8 @@ function renderAccounts(a, p) {
     // what is set shows on it; the rest waits under ⋯ on a line below
     const tools = el("div", "acc-tools");
     const pill = (x) => (x.classList.contains("set") ? line : tools).append(x);
+    const zcode = { provider: p?.id || a.agent, user: l.user };
+    if (hasZCodeUser(zcode)) tools.append(zcodeControl(zcode, "entry"));
     if (amPill) pill(amPill);
     // its usage cap: the share of each window it is used to at most
     const cap = accountCapOf(p, l.user);
@@ -16157,6 +16175,7 @@ function renderQuotas(lazy) {
       if (!brief && !history && (sub.resets?.count || sub.resets?.pending)) {
         const r = el("div", "quota-resets");
         r.append(resetsWords(sub.resets, sub));
+        if (sub.resets.source === "legacy-list") r.append(el("span", "", " · " + t("Legacy reset list, read-only")));
         // Only a broker-supported reset is usable from this card.
         if (canUseReset(sub)) {
           const use = el("button", "text", t("Use a reset"));
@@ -16165,6 +16184,10 @@ function renderQuotas(lazy) {
           r.append(use);
         }
         card.append(r);
+      }
+      if (!brief && !history) {
+        appendZCodeControls(card, sub, "quota");
+        for (const observation of sub.observations || []) card.append(zcodeControl(sub, "observation", observation));
       }
       // the account's standing say on its resets, held or not (#719)
       const policy = !brief && !history && autoResetRow(sub, "quota-autoreset");
@@ -17737,6 +17760,7 @@ function panelQuotaCard(q, first = false) {
     card.classList.add("err");
     card.append(pqLine(quotaError(q.error, q), q, " err", q.error));
     card.title += "\n" + q.error;
+    appendZCodeControls(card, q, "panel");
     return card;
   }
   if (q.asOf) {
@@ -17751,6 +17775,7 @@ function panelQuotaCard(q, first = false) {
   if (!fam.length && (tx || q.windows.some((w) => w.unlimited))) {
     card.append(pqLine(tx || t("Unlimited"), q));
     if (balance) card.append(balance);
+    appendZCodeControls(card, q, "panel");
     return card;
   }
   const ws = fam.slice(0, fam.some((w) => w.members) ? Math.max(4, fam.filter((w) => w.members).length) : 3);
@@ -17810,6 +17835,8 @@ function panelQuotaCard(q, first = false) {
     }
     card.append(r);
   }
+  appendZCodeControls(card, q, "panel");
+  for (const observation of q.observations || []) card.append(zcodeControl(q, "observation", observation));
   const policy = autoResetRow(q, "pq-autoreset");
   const credits = creditsRow(q, "pq-credits");
   if (policy || credits) {
@@ -17865,8 +17892,7 @@ function resetsWords(r, q) {
     if (!parts.length && r.pending) parts.push(t("Reset confirmation pending"));
     w.append(el("span", "resets-n", "↺ " + parts.join(" · ")));
     // a GLM Coding plan's resets, a team's or the person's own (#1191)
-    w.title = r.canUse ? t("Use a reset")
-      : r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
+    w.title = r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
     if (r.until) {
       const at = new Date(r.until);
       w.append(el("span", "resets-until", " · " + t("until {when}", { when: resetClock(at) })));
@@ -17906,7 +17932,24 @@ function resetsEach(r) {
 
 function canUseReset(q) {
   const r = q.resets;
-  return !!(r && (r.byWindow ? r.canUse && r.context : q.provider === "codex" || q.from && q.user && /^[^/]+\/codex$/.test(q.provider || "")));
+  return !!(r && !r.byWindow && (q.provider === "codex" || q.from && q.user && /^[^/]+\/codex$/.test(q.provider || "")));
+}
+
+function hasZCodeUser(q) {
+  const id = q?.provider?.split("/").pop();
+  return !!q?.user && (id === "zcode" || id === "zcode-plugin");
+}
+
+function zcodeControl(q, kind, observation) {
+  const at = el("span");
+  import("./zcode-account.js").then((m) => {
+    if (at.parentNode) at.replaceWith(m.renderZCodeControl(q, kind, observation));
+  }).catch((error) => { if (at.isConnected) statusErr(error); at.remove(); });
+  return at;
+}
+
+function appendZCodeControls(card, q, kind) {
+  if (q.zcodeReset || hasZCodeUser(q)) card.append(zcodeControl(q, kind));
 }
 
 // resetUseTitle: a use spends the one that runs out first

@@ -216,6 +216,10 @@ type SubscriptionQuota struct {
 	// Resets are the rate-limit resets a Codex account holds, nil when it
 	// holds none (codex_resets.go).
 	Resets *ResetCredits `json:"resets,omitempty"`
+	// ZCodeReset is the account service's availability and pending state;
+	// it is distinct from any legacy reset-list observation.
+	ZCodeReset   *ZCodeResetState   `json:"zcodeReset,omitempty"`
+	Observations []UsageObservation `json:"observations,omitempty"`
 	// ResetsUsed are the Codex account's resets magpie spent, newest
 	// first, by itself or by hand (codex_resets_used.go): what the card
 	// says when one is gone and the user asks where

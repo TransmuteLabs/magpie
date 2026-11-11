@@ -102,6 +102,11 @@ func Collect() (*Bundle, error) {
 	// name, which a sync brought, goes on as it came (mcp_local.go)
 	for _, s := range sorted(l.carriedServers(), func(s *Server) string { return s.Name }) {
 		c := *carried(s) // magpie's own by name, each computer's own binary
+		if c.PluginAccount != nil && c.Transport == "stdio" {
+			a := *c.PluginAccount
+			a.CommandDigest = "" // another computer must acknowledge its own command
+			c.PluginAccount = &a
+		}
 		c.Agents = orNone(slices.Sorted(slices.Values(s.Agents)))
 		b.MCP = append(b.MCP, &c)
 	}

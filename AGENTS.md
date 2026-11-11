@@ -22,6 +22,20 @@ authors whose PRs are closed on sight.
 Before changing code, read [LESSONS.md](LESSONS.md): what recent merged
 work got wrong and the rule that would have caught it.
 
+## Native ZCode
+
+ZCode (`zcode`) is an intrinsic provider owned by magpie. Its official 3.18
+protocol is compiled into `internal/plugin/bundled/zcode` and activated
+lazily as `builtin:zcode`; Bun is an internal execution engine, not an
+external plugin dependency. No Plugins-page installation or community
+publication is required. External ZCode hooks cannot serve this provider.
+
+Fix its vendor transport in that directory and its account, reset, claim
+and execution owners in `internal/provider/zcode_*.go`. Existing account
+material is adopted by `zcode_adopt.go`; the former ZCode mover is gone.
+Do not send a ZCode bug to the community plugin or restore that mover.
+See [provider ownership](docs/subsystems/provider-plugins.md).
+
 ## Built-in subscriptions that a plugin serves
 
 These built-in subscriptions are retired. Reaching them can break their
@@ -41,7 +55,6 @@ the same job:
 | Xiaomi MiMo | `mimo-app` | `@magpie-community/opencode-mimo-auth` | `internal/provider/migrate_mimo.go` |
 | Qoder, Qoder CN | `qoder`, `qoder-cn` | `@magpie-community/opencode-qoder-auth` | `internal/provider/migrate_qoder.go` |
 | WorkBuddy, WorkBuddy AI | `workbuddy`, `workbuddy-ai` | `@magpie-community/opencode-workbuddy-auth` | `internal/provider/migrate_workbuddy.go` |
-| ZCode | `zcode` | `@magpie-community/opencode-zcode-auth` | `internal/provider/migrate_zcode.go` |
 | Zed | `zed` | `@magpie-community/opencode-zed-auth` | `internal/provider/migrate_zed.go` |
 
 The `movers` map in `internal/provider/migrate*.go` is the source of truth.

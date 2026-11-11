@@ -116,10 +116,38 @@ func pluginOwnNames(pp plugin.Provider) (own map[string]bool, named map[string]s
 	for _, a := range pp.Accounts {
 		listed[a.Key] = true
 	}
-	for k, a := range plugin.Auths(pp.ID) {
+	auths := plugin.Auths(pp.ID)
+	for k, a := range auths {
 		if listed[k] && pluginOwn(pp.ID, a) {
 			own[k] = true
 		}
+	}
+	if pp.ID == "zcode" {
+		family, uid, user := zcodeAppLabel()
+		legacyUser, legacyRead := user, user != ""
+		for k := range own {
+			var saved struct {
+				Site string `json:"site"`
+				UID  string `json:"uid"`
+			}
+			if json.Unmarshal([]byte(str(auths[k]["refresh"])), &saved) != nil {
+				continue
+			}
+			saved.UID = firstNonEmpty(saved.UID, str(auths[k]["uid"]))
+			// Old unbound own slots follow the app. Keep their display
+			// names; this compatibility is never an account-scope proof.
+			if saved.Site == "" && saved.UID == "" {
+				if !legacyRead {
+					legacyUser, legacyRead = pluginOwnUser(pp.ID), true
+				}
+				if legacyUser != "" {
+					named[k] = legacyUser
+				}
+			} else if family != "" && uid != "" && user != "" && saved.Site == family && saved.UID == uid {
+				named[k] = user
+			}
+		}
+		return own, named
 	}
 	if len(own) > 0 {
 		if u := pluginOwnUser(pp.ID); u != "" {
@@ -129,6 +157,47 @@ func pluginOwnNames(pp plugin.Provider) (own map[string]bool, named map[string]s
 		}
 	}
 	return own, named
+}
+
+// zcodeAppLabel reads the active family and its matching profile, never
+// guessing identity from a display name or a stale other-family profile.
+var zcodeAppLabel = func() (family, uid, user string) {
+	var store map[string]string
+	if !readJSON(zcodeCredentialsPath(), &store) {
+		return "", "", ""
+	}
+	secret := zcodeSecret()
+	value := func(key string) string {
+		v := store[key]
+		if strings.HasPrefix(v, "enc:v1:") {
+			s, ok := zcodeDecrypt(secret, v)
+			if !ok {
+				return ""
+			}
+			return s
+		}
+		return v
+	}
+	family = strings.TrimSpace(value("oauth:active_provider"))
+	if family != "zai" && family != "bigmodel" {
+		return "", "", ""
+	}
+	var profile struct {
+		UserID      string `json:"user_id"`
+		ID          string `json:"id"`
+		Email       string `json:"email"`
+		Name        string `json:"name"`
+		Username    string `json:"username"`
+		DisplayName string `json:"displayName"`
+	}
+	if json.Unmarshal([]byte(value("oauth:"+family+":user_info")), &profile) != nil {
+		return "", "", ""
+	}
+	uid = strings.TrimSpace(firstNonEmpty(profile.UserID, profile.ID))
+	if uid == "" {
+		return "", "", ""
+	}
+	return family, uid, zcodeWho(profile.Email, firstNonEmpty(profile.Name, profile.Username, profile.DisplayName), uid)
 }
 
 type pluginLogin struct {

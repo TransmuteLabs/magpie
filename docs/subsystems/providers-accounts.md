@@ -88,6 +88,212 @@ keys and accounts per request is in [Gateway routing and fallback](gateway-routi
 | A pasted curl command | A curl command from a vendor's docs pasted into a custom provider's Base URL or API key fills the editor in (@mark_li21 on X). `curlOf` reads it as a shell would (lines joined by `\`, cmd's `^` or PowerShell's backtick; `curl.exe`; quotes and escapes), and takes: the API its URL's endpoint names (`…/chat/completions` Chat, `…/messages` Anthropic Messages, `…/responses` Responses) with the base URL before it, spelled as that API wants it (`respellURL`: Anthropic at its root, `/v1` after a bare host); the key from `Authorization: Bearer`, `x-api-key` or `api-key`, unless it only stands for one (`$OPENAI_API_KEY`, `${X}`, `%X%`, `<token>`, `YOUR_API_KEY`), when the key's box is left empty and focused; and the `model` of its JSON body, added to a new provider's models (a saved one's picks are left alone, since adding to none would narrow what it serves). A preset's editor takes only the key. A note (`editorError`, kind `note`) says what was taken, a placeholder like `{WorkspaceId}` left in the URL, and a URL with no known endpoint. Text that isn't a curl command pastes as before, several keys included. Tested on the docs' own examples (`fixtures/curl`). | [`app.js`](../../internal/gui/assets/app.js) (`curlOf`, `fromCurl`), [`provider-curl-paste.test.cjs`](../../internal/gui/tests/provider-curl-paste.test.cjs) |
 | Saved proxies | `settings.Proxies` holds named proxies (`NamedProxy`: id, name, address, optional login), kept in Settings › Network. Wherever a proxy is chosen (global, plugin downloads, app updates, a provider, a key, a Claude account) the value is "" (inherit), `direct`, an address as typed, or `@<id>` for a saved one (@tsingchao on X). Addresses as typed are untouched. App updates take a proxy of their own, Settings › Network › App updates (`settings.UpdateProxy`, `magpie settings set updateProxy <url|direct>`; moonlityu on X: models direct, updates through a proxy): "" follows the global proxy as before, a proxy given to one `magpie update --proxy` run comes first, and it covers the feed, the notes and the release's file (`updateProxy` in [`update.go`](../../internal/update/update.go); `TestUpdateTakesItsOwnProxy`, `settings-update-proxy.test.cjs`). Per-model proxies within one provider are not offered: a proxy belongs to a provider, an account or a key, and a model that needs the other route is a second provider on the same URL. `netproxy.Parse`, `Resolve`, `Redact`, `EnvWith` and `Dispatch` resolve an `@id` at the lowest layer, so an edit reaches every user at the next request; a Claude Code `settings.json` env is a snapshot and is rewritten after an edit (`provider.ProxyEdited`). An `@id` this computer lacks fails closed (`netproxy.DeadProxy`, the request error and the provider row say "Proxy missing: {name}", `provider.ProxyGone`); it never goes direct. The password is written to settings.json (0600) and never read back by the page, logged or put in `Settings` sync; the list rides with the providers part of a sync (`backup.Bundle.Proxies`, `settings.MergeProxies`, passwords only with keys). A proxy in use cannot be deleted (409). `TestSavedProxyChoice`, `TestDanglingProxyReferenceFailsClosed`, `TestSavedProxiesTravelWithProviders`, `saved-proxies.test.cjs`, `provider-proxy-missing.test.cjs`. | [`proxies.go`](../../internal/settings/proxies.go), [`netproxy.go`](../../internal/netproxy/netproxy.go), [`proxies.go`](../../internal/gui/proxies.go) |
 
+## Z.ai and BigModel Coding Plan inference
+
+GLM models on a Coding Plan prefer Anthropic Messages at `/api/anthropic`,
+as the official [ZCode provider configuration](https://github.com/zai-org/ZCode/blob/a9fe401eede6e6e5e01be9048679c206fe6f02d9/config/provider/zcode-builtin.json)
+does, rather than the plan's Chat or Responses API. `MessagesFirst` and
+`OnMessages` in [`provider.go`](../../internal/provider/provider.go) apply
+this preference to the effective upstream model, including a model listed
+under the user's own id. The model's explicit API choice and the vendor's
+listed APIs still take precedence. Each key uses its own plan's endpoints
+before this choice is made. The actual Messages destination must be the
+same official vendor as the plan's Chat or Responses endpoint; a
+Responses-plus-Messages provider needs no Chat URL. A preset pointed at a
+third-party relay does not acquire this preference.
+
+Pay-as-you-go keeps Chat as its default; the shared Anthropic endpoint
+alone does not identify a key as a Coding Plan key. Existing
+`RetryZhipuCoding`/`LearnZhipuCoding` discovery is unchanged: after a single
+key's successful move to the plan, subsequent GLM inference prefers
+Messages. No new URL migration is performed. Arbitrary relays keep their
+existing protocol preference.
+
+The native Messages reasoning shape, including requests explicitly sent
+to the shared endpoint with a pay-as-you-go key, is described in
+[Gateway routing](gateway-routing.md#constraints-and-failure-behavior).
+ZCode account sign-in and final upstream requests are owned by magpie's
+[intrinsic ZCode runtime](provider-plugins.md#intrinsic-zcode-provider-and-account-host),
+not an external community plugin.
+
+`TestZhipuProtocolCodingPlanPreference` and
+`TestZhipuProtocolAliasesAndAPIOverrides` in
+[`zhipu_protocol_test.go`](../../internal/provider/zhipu_protocol_test.go)
+check plan, alias and API-choice precedence. The gateway's
+[`protocol tests`](../../internal/gateway/zhipu_protocol_test.go) exercise
+the request and reply boundary, including streaming, small output caps,
+extra fields, retries, token counts and plugin ownership. Run both in the
+[sandbox](provider-plugins.md#verification):
+
+```sh
+go test -tags nogui ./internal/provider ./internal/gateway -run TestZhipuProtocol
+```
+
+These fixtures do not prove acceptance by a live vendor account.
+
+## ZCode account controls
+
+The intrinsic ZCode provider exposes its account service separately from
+ordinary API-key quota. A saved account is selected explicitly; the account
+context names its family, stable selection scope and login generation, not
+its tokens. The Usage card and `magpie quota --json` keep Start balance and
+Server MCP observations distinct from Coding Plan quota windows. The
+`zcodeReset` card field holds the ZCode reset state; a legacy reset-list
+reading is labelled read-only and does not mean that service is available.
+
+The protocol follows ZCode 3.18.0 (`b95ebaff`). Z.ai and BigModel, and their
+Personal, Team and Start selections, remain distinct. Business credentials,
+ZCode sessions and memory-only inference PATs have independent lifetimes.
+Billing uses a verified ZCode session user ID, never a linked BigModel
+customer ID. Legacy credentials without that proof may still infer but
+cannot manufacture financial permission. HTTP-success business failures,
+terminal concurrency refusals, cancellation and streamed errors retain
+their meaning; accepted stream output is never replayed.
+
+An own-app account with a saved family and UID borrows the app's display
+name only when both match. Legacy unbound own slots, saved before those
+identity fields existed, retain the app-following display name so hidden
+slots and same-name sign-ins stay distinct. A partial identity is not
+treated as unbound. Display names never establish the account scope or
+authorize an operation.
+
+**ZCode account…** on a Providers account, Usage card or tray card opens
+the same ZCode account sheet, including when the Usage plugin is off.
+The sheet lists accounts through `GET /api/usage/zcode-accounts` and sends
+operations through `POST /api/usage/zcode-account`.
+It uses the shared editor, fields, menus, segmented controls and action
+confirmation, not a free-form operation/JSON console:
+
+- **Account** shows the selected family, user, Personal/Team/Start identity
+  and entitlement. Selection lists the full organization/project/product
+  identity; switching opens the returned saved slot instead of overwriting
+  the source. The returned card user is resolved from that exact slot,
+  not substituted with a possibly duplicated vendor account ID.
+  Start balances show each bucket's used, limit, remaining,
+  applicable models, plan/entitlement identity, period, expiry and reading
+  time. Unknown values are not zero. ZCode reset status, use and explicit
+  uncertainty resolution stay separate from the legacy read-only list.
+- **Reports** reads model, tool, activity, detailed MODEL/MCP, Server MCP
+  and model-performance reports. The report's own date range and native
+  metrics are shown in tables; Start balance is not inferred from Coding
+  Plan quota or available gift plans.
+- **Gifts** previews billing plans and entitlements, then asks before a
+  claim. Marketing text is inert: remote HTML, styles, scripts and visual
+  bundles never run in the magpie page. A successful supported action is
+  reported as confirmed; dismissal is cancellation. A failed, cancelled or
+  uncertain action is not confirmed. Chinese UI languages use the
+  `zh-CN` wire locale, the other UI languages `en-US`. ZCode-only navigation
+  with no usable magpie destination is identified as such, not replaced
+  with an unrelated setting or an invented deep link.
+  A claim response must identify the requested plan itself: a missing,
+  blank or different plan ID is a dispatched unknown result, never
+  fabricated from the request and never followed by campaign confirmation.
+- **Execution** discovers persisted Off-Peak/Highspeed tasks and cooldown,
+  and provides explicit admission, draw, status, health, finish, cancel,
+  expired-ticket continuation and uncertainty resolution. It shows the
+  exact session header, account pin and lane model needed for inference.
+  A GUI task ID must survive the gateway's session-header parser unchanged:
+  at most 128 UTF-8 bytes, no control bytes or leading/trailing whitespace.
+  Nothing is admitted, retried or settled merely by opening the panel.
+
+The sheet captures the exact owner, account scope and login generation.
+Every subsequent read and mutation carries that expectation; confirmation
+freezes the displayed identity and parameters before the dialog opens.
+A changed sign-in requires an explicit refresh, not an action silently
+retargeted to the new account. Account dispatch uses passive provider
+metadata, not an implicit models refresh or credential renewal before the
+scope check. Local account choices join current saved account metadata
+with enabled provider metadata without contacting vendors.
+Unreadable or malformed current auth or plugin configuration is unavailable,
+not an empty sign-in list; a readable backup is not proof of the current
+snapshot and cannot erase saved account order, disabled or hidden state.
+
+Action completion only marks the matching cached UI card stale; it does
+not start an unscoped quota, model or opportunity request by display name.
+Reset completion keeps its exact-slot quota invalidation/read barrier, so
+the next independent authoritative read starts after the observed reset.
+The error wire preserves known `dispatched:false`, known `true`, and an
+absent dispatch observation separately. Identity changes after dispatch
+remain unknown; a known preflight refusal is not reported as a spent or
+uncertain mutation. Typed `scope_changed` during reset status requires
+refreshing the account, not treating the old sheet as merely unavailable.
+
+Remote controls use the owner's strict `/v1/magpie/accounts/zcode/scoped`
+and `/v1/magpie/quotas/zcode-reset/scoped` routes. An older owner that
+does not implement them fails closed; there is no retry through an
+unfenced route. ZCode gateway controls require full, unheld access, not a
+read-only or browser key. GUI reset actions use the same scoped adapter.
+
+Leaving a tab aborts its reads, not a dispatched mutation. Reset and
+execution uncertainty is recovered from their durable coordinator. The
+coordinator keeps its existing journal filename, schema, fence paths and
+scope and idempotency derivation so pending operations remain discoverable.
+Billing claims, marketing actions and selection changes have no such mutation
+journal: a lost reply is reported as unknown and must be inspected before
+an explicit retry, never presented as a recovered success.
+
+`magpie quota account <provider> <account> <operation> [--params '<JSON>']`
+offers nonsecret selection, usage reports, entitlement, billing, marketing
+and execution controls. `selection.list` enumerates choices;
+`selection.select` takes `{"selection":{"kind":"…","family":"…",
+"userId":"…","organization":"…","project":"…","product":"…"}}`.
+Select the full identity returned by the list rather than guessing a Team.
+Usage reports take their native `startTime` and `endTime`; `usage.detail`
+also takes `usageType` (`MODEL` or `MCP`). This command cannot invoke
+`mcp.headers`, raw `reset.*`, raw ticket admission, settlement or card
+draws. Claim and other mutations ask first; `--yes` confirms them.
+`usage.balance` exposes the existing Start balance projection;
+`execution.list` lists known coordinator tasks and retained draw cooldown
+without asking the vendor for admission or status. GUI and strict-remote
+execution status omit internal claims and prior login generations.
+
+Use an admitted task rather than relying on an implicit scheduler:
+
+```
+magpie quota account zcode ACCOUNT execution.take --params '{"taskId":"SESSION","model":"GLM-5.3"}'
+magpie quota account zcode ACCOUNT execution.status --params '{"taskId":"SESSION"}'
+magpie quota account zcode ACCOUNT execution.finish --params '{"taskId":"SESSION"}'
+```
+
+`execution.draw` admits a Highspeed card; `execution.cancel` finishes a
+task, and `execution.continue` explicitly takes a replacement only for an
+expired Off-Peak ticket. The gateway's `GLM-5.3-OffPeak`,
+`GLM-5.3-Flash-OffPeak`, `GLM-5.3-Highspeed` and
+`GLM-5.3-Flash-Highspeed` aliases require that exact conversation session,
+account, login generation and model. An absent binding is an error, not an
+implicit paid request. Off-Peak finish/cancel settles its ticket; Highspeed
+finish/cancel only ends the local binding. A lost admission or draw reply
+stays unknown across processes and sign-ins, never silently retried.
+`execution.resolve` with `{"taskId":"SESSION","resolution":"forget"}` is
+an explicit operator decision: the vendor may already have admitted the
+task. Highspeed's server cooldown remains after the local finish.
+
+`magpie quota reset --provider zcode --account ACCOUNT --window five-hour`
+(or `week`) asks before spending; `--yes` confirms. Codex's card-number
+reset command is unchanged. A reset opportunity can be evaluated on an
+allowed quota read even with unused cards, but no reset is used automatically.
+An accepted use is unconfirmed until a genuinely newer history timestamp is
+observed. If the reply was lost, even newer history is an observation, not
+proof of which request caused it: `magpie quota account zcode ACCOUNT
+reset-status` shows the state, and `reset-resolve` asks before explicitly
+clearing uncertainty. Check the vendor account first; resolving may allow
+another spend. Nonsecret per-scope state is committed in SQLite with
+rollback journaling and EXTRA synchronization before a mutation; OS-backed
+cross-process fences prevent a live claim from being stolen. Pending state
+survives process restart and relogin; unreadable, corrupt or unrecognized
+database state blocks mutations. SQLite durability assumes the filesystem
+and storage honor synchronization; it is not proof of physical power-loss
+behavior. A
+completion invalidates older in-flight quota reads and the next authoritative
+read starts after the observation. No optimistic full quota is written for
+routing. Existing “read only when asked” settings still apply.
+
+The public ZCode source does not supply the proprietary claim-verification
+or refresh-token exchange implementation. The provider reports unavailable
+verification or asks for sign-in again rather than inventing either wire
+protocol. An existing API key continues to work for inference independently
+of account-only operations.
+
 ## OpenCode Console accounts
 
 `opencode-go` and `opencode-zen` use OpenCode Console's first-party

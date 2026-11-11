@@ -17,6 +17,73 @@ The `movers` map assembled in `internal/provider/migrate*.go` is the authoritati
 
 ## Ownership and runtime paths
 
+### Intrinsic ZCode provider and account host
+
+The `zcode` provider is owned by magpie, with the official ZCode 3.18.0
+protocol (`b95ebaff`) compiled into
+[`internal/plugin/bundled/zcode`](../../internal/plugin/bundled/zcode).
+`builtin:zcode` is an internal source identity, not an installed plugin
+entry. Discovery and the normal sign-in controls need no npm package,
+community publication or Plugins-page installation. An empty-profile
+listing does not start or download Bun; actual ZCode operations activate
+the embedded runtime lazily. Bun remains the internal execution engine.
+
+[`zcode_adopt.go`](../../internal/provider/zcode_adopt.go) preserves existing
+credentials, account settings and protocol options while adopting the old
+built-in/plugin slots. The former mover and its update/hand-over path no
+longer own ZCode. External canonical, local, git or preferred hooks cannot
+serve or alter intrinsic ZCode discovery, sign-in, models, account
+operations, MCP authentication, loaders or fetches. Other providers and
+capabilities of those plugins stay available. Generic plugin removal or
+update cannot remove the intrinsic provider or its adopted accounts.
+
+The bundle contains root runtime modules, manifest, README and licence and
+notice files, not the source tests. Each binary extracts an immutable
+content-addressed generation under its plugin directory, publishing complete
+flushed files by rename. Simultaneous processes can share an identical
+generation; invalid or unwritable generations are reported, not silently
+replaced. The host validates the intrinsic account hook and its generation
+before serving ZCode. A damaged or unavailable generation is projected as
+a ZCode error without hiding or starting unrelated providers; an existing
+host is retained until a replacement is ready. Retired hosts retain their
+old generation while finishing calls. Generations are not removed while
+another process may still use them.
+
+Plugins can advertise `auth.accountOperations` and implement `auth.account`
+for explicitly selected existing accounts. The host sends the account's
+proxy and cancellation, reports structured nonsecret account errors, and
+passes separately typed usage observations through to magpie. Account
+contexts bind the stable selection scope and durable login epoch, without
+credentials. Account-hook writes with an expected auth value are
+compare-and-set: a conflict is observable and never overwrites a newer
+sign-in. Sign-in deduplication respects `accountScope`; selection changes
+create a separate slot or reuse the existing exact scope without replacing
+its session. For `mcp.headers`, a plugin's trust preflight runs before the
+host looks up the account or its credentials. This operation is internal to
+the MCP transport, not a generic public credential export.
+
+For intrinsic ZCode lane aliases, magpie preserves the requested model
+before API-ID rewriting and supplies the loader fetch a private
+`init.magpie` containing the requested model, conversation session and the
+Go-owned account/epoch/task execution binding. The runtime removes this
+metadata before vendor I/O. An alias without its matching explicit admission
+or draw is refused rather than silently routed to a paid lane. A reserved
+native lane alias on an explicit local or git source is also refused; it is
+not converted into an ordinary request. Ordinary
+plugins do not receive that private ZCode metadata. The host verifies the
+expected intrinsic generation before running its loader and fetch, including
+the ordinary repeat of an authorized transition.
+
+Highspeed can report a pre-acceptance failure to the gateway for an optional
+transition to its exact ordinary model. The gateway authorizes that same
+account and model against routing, account, key, rest and usage policies;
+restricted gateway keys cannot make the implicit transition. With no guard,
+or after accepted output, there is no ordinary replay. An authorized repeat
+is a fresh ordinary Go-side request bound to the originally admitted scope
+and login generation, through both the Go authorization and the embedded
+loader's capture. A changed login or selection refuses the transition
+instead of retargeting it. Its trace and usage ledger name the ordinary model.
+
 `provider.Moved(id)` identifies a subscription whose migration state in `migrations.json` is `plugin`. In `/api/providers`, its row exposes `move.state == "plugin"`; the GUI also receives its id in `onPlugins`.
 
 A retired built-in (`retiredBuiltins` in [`migrate.go`](../../internal/provider/migrate.go), `provider.BuiltinRetired(id)`) has no built-in code left: the plugin serves it whether or not a move has run, and its row's `move.state` is `plugin`. Gates that once asked `Moved(id)` ask `provider.PluginServes(id)`, which is moved or retired. Built-in accounts of a retired subscription that haven't moved yet are served by nothing; `/api/providers` lists them in `unmoved` (each a `MoveCandidate`, with the failed move's `error` and `why`), and the GUI shows a line over the Providers list with a Move button (`unmovedLine` in `app.js`). Built-ins are retired one at a time, each in the commit that removes its code.
@@ -34,33 +101,44 @@ Quota aggregation in [`quotas.go`](../../internal/provider/quotas.go) suppresses
 
 ## ZCode reset ownership
 
-ZCode remains a community plugin, not a second built-in provider. Its
-usage result may include opaque `resetScope` and `resetContext` bindings;
-[`host.js`](../../internal/plugin/host.js) validates these before exposing
-them through `plugin.Usage`. They contain no account credentials.
+[`zcode_reset.go`](../../internal/provider/zcode_reset.go) owns reset
+operations below local and remote controls. The embedded runtime owns the
+exact vendor wire and credential roles; no account secret leaves that
+boundary. Durable nonsecret reset, claim and execution state lives in
+`native-account-state.sqlite`. The filename is retained for compatibility,
+not a generic provider facade.
 
-[`zcode_resets.go`](../../internal/provider/zcode_resets.go) uses the
-existing `plugin.Fetch` path, as plugin-backed check-ins do. The plugin
-owns vendor authentication, exact request headers and identity checks;
-the broker owns durable operation keys and server observations in
-`zcode-resets.json`, under the existing file-lock/atomic-write conventions.
-Replacing a sign-in does not erase an unanswered financial operation.
+[`zcode_reset_migration.go`](../../internal/provider/zcode_reset_migration.go)
+holds the old `zcode-resets.json.lock` while importing exact pending keys,
+baselines and opportunity state. The SQLite commit precedes an atomic,
+flushed version-2 JSON tombstone; old JSON readers fail closed. The SQLite
+schema version also fences old native readers. An authoritative captured
+account maps old debt; unmappable debt blocks new reset grants and debits,
+never initializes as an empty history. Restarting or signing in again does
+not erase an unanswered financial operation.
 
 Status and opportunity run on the existing quota refresh. A reset is
 manual, names one account and one window, and must match the context shown
 before confirmation. Acceptance is not completion: an unknown result
-retains its key until status reconciliation. Only the chosen five-hour
-or weekly pool is spent. Optional reset errors do not replace authoritative
-usage with an error or a fabricated allowance. An older plugin or key-only
-sign-in keeps its read-only inventory.
+retains its key until status reconciliation. Only the chosen `five-hour`
+or `week` pool is spent. Optional reset errors do not replace authoritative
+usage with an error or a fabricated allowance. A key-only sign-in may keep
+usable inference and a read-only inventory without financial permissions.
 
-The GUI reuses `resetask.js` and `POST /api/usage/zcode-reset`; the CLI uses
-`magpie quota reset --provider zcode <account> --window five-hour|weekly`.
-Remote cards retain their captured context and send the same operation to
-`POST /v1/magpie/quotas/zcode-reset`. That endpoint requires a full,
-unheld gateway key even on loopback; browser-origin, read-only and
-restricted keys cannot spend resets. It calls the same `SpendZCodeReset`
-owner as local controls, with no fallback to an older unbound API.
+The native account sheet sends `POST /api/usage/zcode-account`; the CLI uses
+`magpie quota reset --provider zcode --account <account> --window five-hour|week`.
+Both freeze the account scope and generation before confirmation.
+Remote cards use the strict `/scoped` account/reset endpoints and never
+retry an older unbound API. These require a full, unheld gateway key even
+on loopback; browser-origin, read-only and restricted keys cannot mutate.
+
+[`zcode_claim.go`](../../internal/provider/zcode_claim.go) is the single
+durable owner of manual claims and scheduled gift check-ins. Its fence is
+the ZCode origin plus verified ZCode user ID, shared by Personal, Team and
+Start selections; a family/PAT customer ID is not that identity. Dispatch
+is recorded before I/O. A lost reply remains uncertain across restart;
+an entitlement later observed is not proof that this claim caused it and
+does not authorize automatic reposting after its expiry.
 
 ## Usage a plugin collects late
 

@@ -24,6 +24,38 @@ With the Library's switch "MCP router" on (#2679, @minggang123 on X), each agent
 
 The CLI's `magpie library mcp router on|off` (`hub`, its name before, still works) calls `SetMCPHub`, and `magpie library mcp router <name> shared|direct` calls `ServerHub`. `magpie library` lists the agents given magpie's entry and those that keep their own, with why (`libraryStatus` in [`library_cli.go`](../../internal/cli/library_cli.go)).
 
+An HTTP or command server may be bound explicitly to a provider's saved plugin account:
+
+```sh
+magpie library mcp account <server> bind <provider> <account>
+magpie library mcp account <command-server> bind <provider> <account> --trust-command
+magpie library mcp account <server> unbind
+```
+
+The binding stores the provider, explicit account key and verified nonsecret account scope in `pluginAccount`, never the returned credentials. Binding resolves `mcp.headers` only after the plugin's independent destination preflight; an account must be available when it is bound. The router is **not** enabled by binding. A bound server is only given through the router: when it is off, direct is selected, or an agent cannot use the router, the server is not written as a direct entry and the Library reports why. Unbind before choosing direct. Copy config and project files do not export the server either.
+
+In the Library's saved server editor, **Bind account…** reads local account metadata without refreshing the vendor and offers **Refresh accounts** for a fresh local list. It never chooses the first account implicitly. Save target changes first; the editor shows the actual HTTP destination or the configured command and argument references, the configured environment key names (not their values), and an opaque fingerprint. Expanded process/login environment values are hashed internally, not returned in the preview or confirmation. For a command, explicitly acknowledge that it receives credentials. The editor captures the selected account's public family, kind, user, organization and project before asking for confirmation. Its bind request carries the captured scope and generation and the target fingerprint: the server checks the target, including the command's expanded configuration and executable and file-argument bytes, and the existing binding or its absence before requesting headers. It checks the account reply and current context, rehashes the reviewed command files after that final account RPC, then compares that same target and binding again inside the Library change before committing. A replacement binding made meanwhile is not overwritten. The added preview hash is computed outside the Library lock when the bind controls open, not on every Library refresh or MCP message; existing command-launch checks remain. These checks do not make Library files and account state one atomic transaction.
+
+The editor's **Unbind account** compares the displayed binding against the current one inside the Library change, so an older view cannot unbind a replacement. The CLI unbind still removes the binding current when it runs. GUI generation fencing applies to the binding operation only: the saved binding remains scope-only, and the next router connection can use a same-identity relogin.
+
+The editor reads `GET /api/library/servers/account-target?name=…` for the destination, fingerprint and current binding; `binding=1` reads only the binding without hashing the command. It captures the selected local account through `POST /api/usage/zcode-account` with operation `context`, then sends `POST /api/library/servers/account-bind` with the exact plugin provider and slot, scope, generation, `targetFingerprint` and `trustCommand`. The route rechecks that the slot is in the current passive local choices. Unbind posts `name` and the displayed `binding` to `servers/account-unbind`; neither response includes the resolved account headers.
+
+For HTTP, every request resolves fresh headers for its actual URL and the bound scope, with no context or credential lookup before preflight. Static identity, session and protocol headers cannot override them, even when credentials are unavailable. A trusted destination can adjudicate an anonymous request when the account hook reports credentials unavailable; a 401 is retried once only after credentials were sent, 403 is forbidden, and redirects are never followed. Each hub list or call opens a new connection and lists afresh: changing a binding, account scope or login cannot reuse another account's session or cached tools. A same-account relogin is picked up on the next connection. The internal header operation is not a public credential endpoint.
+
+`--trust-command` acknowledges that the stdio executable receives credential-bearing metadata. Each outgoing request and notification carries `params._meta["com.zcode/official-mcp-auth"]` with freshly resolved headers or an explicit unavailable/untrusted reason, alongside any other metadata. At launch, the executable, arguments, configured environment and existing file arguments are checked against the acknowledged fingerprint; a changed command requires an explicit new binding before it can be launched. Trust applies to the launched process: it is not a sandbox or a guarantee against that process loading changed code afterward. Command trust is local to this computer and is not carried in library backups or sync. A receiving computer must bind and trust its own command. The plugin, not the command or its arguments, chooses the trusted ZCode origin for stdio preflight.
+
+The same digest covers `--preload=path` and `--preload path`, plus `-r path`,
+`--require=path` and `--require path` for Bun, Node and nodejs. These option
+targets must be readable regular files named absolutely or with explicit
+`./` or `../`; empty/missing paths, bare module specifiers, file URLs and
+directories fail closed. This is not a closure over arbitrary imports,
+other runtime flags or ambient `BUN_OPTIONS`/`NODE_OPTIONS`. A changed
+covered preload is refused before credential lookup at binding or launch.
+
+Both kinds act as this computer's account owner: remote callers and local keys held to models, accounts or spending cannot list or invoke them; read-only keys cannot use MCP. This does not change another user's ordinary HTTP server. The Library editor preserves a binding it does not send and supports explicit binding, command trust and unbinding.
+
+The older `/mcp/<server>` OAuth relay checks the current Library binding before it reads an OAuth token. A bound server is refused there even if an old sign-in or a late OAuth callback left a record, and an unreadable Library fails that check closed. Sign out of an existing MCP OAuth login before binding; while bound, use the plugin account rather than starting another MCP OAuth sign-in. Likewise `/mcp/run/<server>` does not start a bound command, even if another magpie bound it after the gateway cached its former direct configuration.
+
 The gateway can't import the library (the library imports the gateway), so the gateway declares `Hub` and `MCPHub`, and the library sets `MCPHub` in its `init`.
 
 ## Runtime path
@@ -52,7 +84,9 @@ The gateway can't import the library (the library imports the gateway), so the g
 
 ```sh
 go test -tags nogui ./internal/gui -run 'TestHubOpen|TestHubNote|TestHubAllTools'
+go test -tags nogui ./internal/gui -run 'TestLibraryAccountTargetAndBindGuards|TestLibraryStdioAccountBindingHTTPRoundTrip'
 go test -tags nogui ./internal/library -run 'TestHub|TestRunDirect|TestFakeMCPServer|TestCheck|TestPluginTools|TestRemoteMagpieRouter|TestRemoteMagpieMCP|TestCarriedServerIsNoBridge'
+go test -race -tags nogui ./internal/library -run TestPluginMCP
 go test -tags nogui ./internal/settings -run TestRouterNote
 go test -tags nogui ./internal/gateway -run 'HubMCP|OwnMCPRejects|TestHubLeavesRemoteRouterToARouter|TestInfoSaysMCPHub' -timeout 45m
 go test -tags nogui ./internal/provider -run 'TestRemoteHubNoted|TestRemoteSelf'

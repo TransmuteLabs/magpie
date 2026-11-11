@@ -43,6 +43,9 @@ type Server struct {
 	URL       string            `json:"url,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Agents    []string          `json:"agents"`
+	// PluginAccount selects an explicit plugin account for per-request
+	// authentication. Its credentials are never part of the library.
+	PluginAccount *PluginAccount `json:"pluginAccount,omitempty"`
 	// DisabledTools are the server's tools its agents leave out, by the
 	// names the server gives them, written in each agent's own way where
 	// it has one (mcp_tools_off.go)
@@ -94,6 +97,14 @@ type Server struct {
 	// entry being written, 0 for none: one the entry has otherwise is the
 	// user's, and stays (startupTheirs)
 	startupWrote float64
+}
+
+// PluginAccount identifies the plugin provider and its explicit account.
+type PluginAccount struct {
+	Provider      string `json:"provider"`
+	Account       string `json:"account"`
+	Scope         string `json:"scope"`
+	CommandDigest string `json:"commandDigest,omitempty"`
 }
 
 // OAuthApp is an OAuth app made with a server's vendor, by the names
@@ -154,6 +165,28 @@ func (s *Server) check() error {
 	case HubDirect:
 	default:
 		return fmt.Errorf("%s: unknown hub policy %q: shared or direct", s.Name, s.Hub)
+	}
+	if s.PluginAccount != nil {
+		a := *s.PluginAccount
+		a.Provider, a.Account = strings.TrimSpace(a.Provider), strings.TrimSpace(a.Account)
+		if a.Provider == "" || a.Account == "" || a.Scope == "" || strings.ContainsAny(a.Provider+a.Account+a.Scope, "\r\n") {
+			return fmt.Errorf("%s: a plugin provider, explicit account and verified scope are required", s.Name)
+		}
+		if (s.Transport != "http" && s.Transport != "stdio") || s.Hub == HubDirect || s.Plugin != "" || s.Bridge != "" {
+			return fmt.Errorf("%s: a plugin account requires a shared HTTP or trusted command MCP server", s.Name)
+		}
+		if s.OAuth != nil {
+			return fmt.Errorf("%s: remove the MCP OAuth app before binding a plugin account", s.Name)
+		}
+		s.PluginAccount = &a
+		// A previously direct server may have had static credentials.
+		// They must not survive a binding or override its per-request auth.
+		s.Headers = maps.Clone(s.Headers)
+		for k := range s.Headers {
+			if reservedPluginMCPHeader(k) {
+				delete(s.Headers, k)
+			}
+		}
 	}
 	// magpie signs in only to a streamable HTTP server
 	if s.Transport != "http" {
@@ -228,7 +261,9 @@ func program(path string) bool {
 // have it doesn't matter.
 func (s *Server) same(o *Server) bool {
 	return s.Transport == o.Transport && s.Command == o.Command && slices.Equal(s.Args, o.Args) &&
-		maps.Equal(s.Env, o.Env) && s.URL == o.URL && maps.Equal(s.Headers, o.Headers) && s.about == o.about
+		maps.Equal(s.Env, o.Env) && s.URL == o.URL && maps.Equal(s.Headers, o.Headers) && s.about == o.about &&
+		(s.PluginAccount == nil && o.PluginAccount == nil ||
+			s.PluginAccount != nil && o.PluginAccount != nil && *s.PluginAccount == *o.PluginAccount)
 }
 
 // ---- each agent's own format ----------------------------------------------
@@ -337,6 +372,9 @@ func (f *mcpFile) key() string {
 
 // supports says why the agent can't reach a server, or nil when it can.
 func (f *mcpFile) supports(s *Server) error {
+	if s.PluginAccount != nil {
+		return errPluginAccountDirect
+	}
 	if f.Format == fmtDesktop && s.Remote() {
 		return errNoRemote
 	}
@@ -352,6 +390,8 @@ func (f *mcpFile) supports(s *Server) error {
 	_, err := f.side(s)
 	return err
 }
+
+var errPluginAccountDirect = errors.New("a plugin-account MCP server requires magpie's MCP router; it cannot be given directly")
 
 // windowsPath is a program named as Windows names one: C:/…, a path with a
 // backslash in it, or …/npx.cmd.

@@ -2269,13 +2269,22 @@ func (p Provider) ResponsesTellsCache() bool {
 	return p.Preset == "modelscope" || HostOf(p.Responses) == "api-inference.modelscope.cn"
 }
 
-// MessagesFirst: a Claude model where the provider has Anthropic's Messages
-// API, which is best asked there though its Chat or Responses API serves
-// it too — a relay that serves both drops cache_control on Chat, so every
-// turn was billed uncached (#997; ReturnTrue on Discord: 0% cache hits
-// until the relay's OpenAI URL was left empty), and thinking with it.
+// MessagesFirst prefers Claude on Messages, and GLM on a Coding Plan when
+// neither a model API choice nor the vendor's list names its APIs.
 func (p Provider) MessagesFirst(model string) bool {
-	return p.Anthropic != "" && claudeModel(model)
+	if p.Anthropic == "" {
+		return false
+	}
+	if claudeModel(model) {
+		return true
+	}
+	if !p.glmCodingMessages(model) {
+		return false
+	}
+	if _, ok := p.ModelAPI(model); ok {
+		return false
+	}
+	return p.ListedAPIs(model) == nil
 }
 
 // OnMessages: a Claude model MessagesFirst asks on Messages whatever API

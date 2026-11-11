@@ -16,7 +16,8 @@ import (
 
 const quotaUsage = `usage: magpie quota [<provider>…] [--json]
        magpie quota reset [<codex account>] [--card <n>] [--yes]
-       magpie quota reset --provider zcode <account> --window five-hour|weekly [--yes]
+       magpie quota reset --provider <provider> --account <account> --window <five-hour|week> [--yes]
+       magpie quota account <provider> <account> <operation> [--params <JSON>] [--yes]
        magpie quota auto-reset [<codex account>] [week|expiring] [on|off]
        magpie quota auto-reset lead [<minutes or hours, like 30m or 3h>|default]
        magpie quota credits [<codex account>] [on|first|last|off]
@@ -86,12 +87,26 @@ const quotaUsage = `usage: magpie quota [<provider>…] [--json]
   shows only it, --json with each card's readAt and error. A saved Claude account is
   read by running Claude Code's /usage in its own folder, which plain magpie quota
   never does. A card read less than 30 seconds ago isn't asked again: what was read
-  then is shown.`
+  then is shown.
+  For a ZCode account, quota reset with --provider, --account and --window spends
+  the named five-hour or weekly reset and asks first unless --yes is given.
+  quota account names a ZCode provider and account explicitly. Operations include
+  context, selection.list, selection.select, usage.model, usage.tool, usage.activity,
+  usage.detail, usage.health, usage.mcp, entitlement, billing.preview, billing.claim,
+  marketing.feed, marketing.action, offpeak.availability, offpeak.status,
+  highspeed.healthy, execution.take, execution.draw, execution.status,
+  execution.finish, execution.cancel, execution.continue and execution.resolve.
+  Pass operation fields as --params '{"taskId":"SESSION","model":"GLM-5.3"}'.
+  reset-status inspects coordinated reset state; reset-resolve explicitly clears
+  uncertainty after warning that the vendor may already have used the reset.`
 
 // quotaCmd: magpie quota [<provider>…] [--json]
 func quotaCmd(args []string) error {
 	if len(args) > 1 && args[1] == "reset" {
 		return quotaResetCmd(args[2:])
+	}
+	if len(args) > 1 && args[1] == "account" {
+		return zcodeAccountCmd(args[2:])
 	}
 	if len(args) > 1 && args[1] == "auto-reset" {
 		return quotaAutoResetCmd(args[2:])
@@ -176,6 +191,23 @@ func printQuotas(qs []provider.Quota) {
 		}
 		if q.Resets != nil {
 			line += "  " + resetsCell(q.Resets, q.Provider, q.User)
+			if q.Resets.Source == "legacy-list" {
+				line += muted.Render(" · legacy read-only list")
+			}
+		}
+		if q.ZCodeReset != nil {
+			r := q.ZCodeReset
+			if !r.Available {
+				line += "  " + muted.Render("ZCode resets unavailable: "+r.Error)
+			}
+			if r.Pending != "" {
+				line += "  " + muted.Render("ZCode reset "+r.Pending+" ("+r.PendingWindow+")")
+			} else if r.Available {
+				line += fmt.Sprintf("  ZCode resets: %d five-hour · %d weekly", len(r.FiveHour), len(r.Week))
+			}
+		}
+		for _, o := range q.Observations {
+			line += "  " + zcodeObservationCell(o)
 		}
 		if q.Error != "" {
 			line += "  " + muted.Render(q.Error)
@@ -216,7 +248,7 @@ func resetsCell(r *provider.ResetCredits, agent, user string) string {
 // — spends one of the account's rate-limit resets, once the user has said
 // so: the one that runs out first, or the nth to run out.
 func quotaResetCmd(args []string) error {
-	if slices.Contains(args, "--provider") || slices.Contains(args, "--window") {
+	if zcodeResetArgs(args) {
 		return quotaZCodeResetCmd(args)
 	}
 	yes, user, card := false, "", 0
@@ -307,90 +339,6 @@ func quotaResetCmd(args []string) error {
 		return fmt.Errorf("%s: %s", who, out.Text())
 	}
 	fmt.Println(green.Render("✓"), who+":", out.Text())
-	return nil
-}
-
-func quotaZCodeResetCmd(args []string) error {
-	id, user, window, yes := "zcode", "", "", false
-	for i := 0; i < len(args); i++ {
-		switch arg := args[i]; arg {
-		case "--yes", "-y":
-			yes = true
-		case "--window", "--provider":
-			if i+1 == len(args) {
-				return fmt.Errorf("%s requires a value", arg)
-			}
-			i++
-			if arg == "--provider" {
-				id = args[i]
-			} else {
-				switch args[i] {
-				case "five-hour":
-					window = "fiveHour"
-				case "weekly":
-					window = "weekly"
-				default:
-					return fmt.Errorf("--window is five-hour or weekly")
-				}
-			}
-		case "help", "--help", "-h":
-			fmt.Println(quotaUsage)
-			return nil
-		default:
-			if strings.HasPrefix(arg, "-") {
-				return fmt.Errorf("magpie quota reset --provider zcode doesn't know %s", arg)
-			}
-			if user != "" {
-				return fmt.Errorf("name one ZCode account")
-			}
-			user = arg
-		}
-	}
-	if user == "" || window == "" {
-		return fmt.Errorf("name the ZCode account and --window five-hour or weekly")
-	}
-	ctx, cancel := context.WithTimeout(provider.Asked(context.Background()), 45*time.Second)
-	defer cancel()
-	resets, err := provider.ReadZCodeResets(ctx, id, user)
-	if err != nil {
-		return err
-	}
-	if !resets.CanUse {
-		return fmt.Errorf("this ZCode account cannot use a reset here")
-	}
-	if resets.Pending != "" && resets.Pending != window {
-		return fmt.Errorf("the previous %s reset is not confirmed; resolve it before choosing another window", resets.Pending)
-	}
-	count, label := resets.FiveHour, "five-hour"
-	if window == "weekly" {
-		count, label = resets.Weekly, "weekly"
-	}
-	if count == 0 && resets.Pending == "" {
-		return fmt.Errorf("%s holds no %s reset", user, label)
-	}
-	if !yes {
-		if resets.Pending != "" {
-			fmt.Printf("Retry the same unconfirmed %s reset on %s? No new reset is chosen. [y/N] ", label, user)
-		} else {
-			plan := "personal"
-			if resets.Team {
-				plan = "team"
-			}
-			fmt.Printf("Use one %s reset on %s's %s plan? Only this window starts again, and it can't be undone. [y/N] ", label, user, plan)
-		}
-		line, _ := stdin().ReadString('\n')
-		if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
-			return fmt.Errorf("nothing spent")
-		}
-	}
-	out, err := provider.SpendZCodeReset(ctx, id, user, window, resets.Context)
-	if err != nil {
-		return err
-	}
-	if out.Code != "reset" && out.Code != "already_used" {
-		return fmt.Errorf("%s: %s", user, out.Text())
-	}
-	fmt.Println(green.Render("✓"), user+":", out.Text())
 	return nil
 }
 

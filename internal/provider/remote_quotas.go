@@ -46,9 +46,9 @@ const RemoteRefreshPath = "/v1/magpie/quotas/refresh"
 // access, never from a page or app it lets in without one.
 const RemoteCodexResetPath = "/v1/magpie/quotas/codex-reset"
 
-// RemoteZCodeResetPath spends one explicitly selected window's reset,
-// bound to the account context shown on the remote card.
+// ZCode operations run only on the magpie that owns the account.
 const RemoteZCodeResetPath = "/v1/magpie/quotas/zcode-reset"
+const RemoteZCodeAccountPath = "/v1/magpie/accounts/zcode"
 
 // RemoteResetWait is how long a remote magpie is waited for to spend a
 // reset: its use (20s at most) and its wait for routing to know (10s).
@@ -325,9 +325,7 @@ func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota
 		// a check-in is the other magpie's to do. A Codex reset is
 		// spent there when pressed here (UseRemoteCodexReset, #3850);
 		// a GLM team's (byWindow) is spent on the vendor's page
-		codexReset := q.Provider == p.ID+"/codex" && (q.Resets == nil || !q.Resets.ByWindow)
-		zcodeReset := (q.Provider == p.ID+"/zcode" || q.Provider == p.ID+"/zcode-plugin") && q.Resets != nil && q.Resets.ByWindow && q.Resets.CanUse && validResetBinding(q.Resets.Context)
-		if !codexReset && !zcodeReset {
+		if q.Provider != p.ID+"/codex" || q.Resets != nil && q.Resets.ByWindow {
 			q.Resets = nil
 		}
 		q.Checkins, q.CheckinBy, q.Checkin, q.CheckinOff = false, "", nil, false
@@ -615,29 +613,3 @@ func UseRemoteCodexReset(ctx context.Context, id, user, credit string) (ResetOut
 
 // UseRemoteZCodeReset uses the same full-key-only remote control as the
 // Codex card, but names one window and retains the card's account context.
-func UseRemoteZCodeReset(ctx context.Context, id, user, window, contextID string) (ResetOutcome, error) {
-	p, card, ok := remoteOf(id)
-	if !ok || card != "zcode" && card != "zcode-plugin" {
-		return ResetOutcome{}, fmt.Errorf("%s is no remote magpie's ZCode card", id)
-	}
-	if user == "" || !validZCodeResetWindow(window) || !validResetBinding(contextID) {
-		return ResetOutcome{}, errors.New("name the ZCode account, window and current card context")
-	}
-	q := url.Values{"provider": {card}, "user": {user}, "window": {window}, "context": {contextID}}
-	b, err := remoteBody(ctx, p, http.MethodPost, RemoteZCodeResetPath+"?"+q.Encode(), 45*time.Second)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return ResetOutcome{}, fmt.Errorf(errRemoteResetUnknown, remoteName(p))
-		}
-		return ResetOutcome{}, err
-	}
-	var out ResetOutcome
-	if json.Unmarshal(b, &out) != nil || out.Code == "" {
-		return ResetOutcome{}, fmt.Errorf(errRemoteResetUnknown, remoteName(p))
-	}
-	read, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	remoteCards(read, p, true)
-	cancel()
-	toldUsage()
-	return out, nil
-}

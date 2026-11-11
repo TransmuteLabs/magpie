@@ -402,6 +402,7 @@ function inTime(step, ms, what, ctl) {
 // fetch is given magpie's own here when it has none of its own.
 // Loopback never goes through one.
 const via = new AsyncLocalStorage() // the proxy: "", "direct" or its URL
+const protectZCodeResponse = new AsyncLocalStorage()
 const bunFetch = globalThis.fetch
 
 function proxyVar(k) {
@@ -613,11 +614,31 @@ function said(res, url) {
   return res
 }
 
+// These headers can only be minted by a plugin's own Response, not by a
+// network peer pretending to be a host-internal routing instruction.
+function withoutPrivateResponse(res) {
+  if (!res.headers.has("x-magpie-zcode-fallback") && !res.headers.has("x-magpie-zcode-fallback-model")) return res
+  const headers = new Headers(res.headers)
+  headers.delete("x-magpie-zcode-fallback")
+  headers.delete("x-magpie-zcode-fallback-model")
+  const clean = new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+  try {
+    Object.defineProperty(clean, "url", { value: res.url })
+    Object.defineProperty(clean, "redirected", { value: res.redirected })
+  } catch {}
+  return clean
+}
+
+function networkFetch(input, init) {
+  const pending = bunFetch(input, init)
+  return protectZCodeResponse.getStore() ? pending.then(withoutPrivateResponse) : pending
+}
+
 async function hop(input, init) {
-  if (init && "proxy" in init) return bunFetch(input, init).catch((e) => throwTLS(e, input))
+  if (init && "proxy" in init) return networkFetch(input, init).catch((e) => throwTLS(e, input))
   const p = await proxyFor(input)
-  if (!p) return bunFetch(input, init).catch((e) => throwTLS(e, input))
-  return bunFetch(input, { ...init, proxy: p }).catch(async (e) => {
+  if (!p) return networkFetch(input, init).catch((e) => throwTLS(e, input))
+  return networkFetch(input, { ...init, proxy: p }).catch(async (e) => {
     if (e?.name === "AbortError" || init?.signal?.aborted) throw e
     const why = await proxyRefuses(p, input)
     if (why) throw Object.assign(new Error(`proxyconnect tcp: ${why}`), { code: e?.code, cause: e })
@@ -732,7 +753,8 @@ function asked(input, init) {
 // and the effort asked of a model with variants (EffortHeader):
 // for the plugin to read, never for its vendor, so a plugin that sends on
 // the headers it was given sends them nowhere.
-const MAGPIE_ONLY = ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort"]
+const MAGPIE_ONLY = ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort",
+  "x-magpie-zcode-fallback", "x-magpie-zcode-fallback-model"]
 
 function unsaid(input, init) {
   if (input instanceof Request && MAGPIE_ONLY.some((k) => input.headers.has(k))) {
@@ -1045,10 +1067,19 @@ async function writeDurable(p, data) {
     // and a file held open by a reader refuses to be renamed over
     for (let i = 0; ; i++) {
       try {
-        return fs.renameSync(tmp, p)
+        fs.renameSync(tmp, p)
+        break
       } catch (e) {
         if (i >= 50 || !["EPERM", "EACCES", "EBUSY"].includes(e?.code)) throw e
         await sleep(10)
+      }
+    }
+    if (process.platform !== "win32") {
+      const dir = fs.openSync(path.dirname(p), "r")
+      try {
+        fs.fsyncSync(dir)
+      } finally {
+        fs.closeSync(dir)
       }
     }
   } catch (e) {
@@ -1193,7 +1224,10 @@ function changeAuth(change) {
   return run
 }
 
-async function setAuth(key, info) {
+async function setAuth(key, info, signIn = false) {
+  if (signIn && typeof auths().get(providerOf(key))?.auth?.account === "function") {
+    info = { ...info, accountEpoch: randomUUID() }
+  }
   await changeAuth((all) => {
     all[key] = info
   })
@@ -1308,9 +1342,11 @@ async function settle(provider, key) {
     for (const k of accountsOf(all, provider)) {
       if (k === key) continue
       const was = all[k]
+      const scoped = now?.accountScope || was?.accountScope
+      if (scoped && (!now?.accountScope || now.accountScope !== was?.accountScope)) continue
       const other = uidOf(now) && uidOf(was) && uidOf(now) !== uidOf(was)
       const renamed = renamedBy(now, was)
-      if ((who && whoOf(was) === who && !other) || renamed || (!who && !whoOf(was) && secret && secretOf(was) === secret)) {
+      if (scoped || (who && whoOf(was) === who && !other) || renamed || (!who && !whoOf(was) && secret && secretOf(was) === secret)) {
         all[k] = renamed && typeof was.accountId === "string" && was.accountId ? { ...now, accountId: was.accountId } : now
         delete all[key]
         return k
@@ -1348,6 +1384,7 @@ function makeClient() {
       set: async (opts) => {
         const id = opts?.path?.id ?? opts?.id ?? opts?.providerID
         const body = opts?.body ?? opts?.auth
+        const hasExpected = opts != null && Object.hasOwn(opts, "expected")
         if (typeof id === "string" && body && typeof body === "object") {
           // OpenCode keeps what the plugin gives it, saving refreshed
           // tokens over the old; nothing is merged. It goes to the
@@ -1355,9 +1392,17 @@ function makeClient() {
           const key = keyFor(id)
           const s = scope.getStore()
           const had = s?.provider === id && s.had
+          let conflict = false
           const kept = await changeAuth((all) => {
+            if (hasExpected && JSON.stringify(all[key]) !== JSON.stringify(opts.expected)) {
+              conflict = true
+              return false
+            }
             // signed out while the hook ran: it stays signed out
-            if (had && !(key in all)) return false
+            if (had && !(key in all)) {
+              conflict = hasExpected
+              return false
+            }
             if (JSON.stringify(all[key]) === JSON.stringify(body)) return false
             all[key] = body
           })
@@ -1365,7 +1410,9 @@ function makeClient() {
             forgetAccount(key)
             send({ event: "auth", provider: providerOf(key), account: key })
           }
+          if (hasExpected) return { data: { saved: !conflict, conflict } }
         }
+        if (hasExpected) return { data: { saved: false, conflict: true } }
         return { data: true }
       },
       remove: async (opts) => {
@@ -1518,7 +1565,8 @@ async function loadPlugins(list) {
     const pkg = readJSON(path.join(p.target, "package.json"))
     const onlyGateway = isPi || (p.gateway && (p.gateway === p.target || (!pkg?.main && !pkg?.exports && !INDEX_FILES.some((f) => fs.existsSync(path.join(p.target, f))))))
     for (const file of onlyGateway ? [] : entries(p.target)) {
-      fns = servers(await import(pathToFileURL(file).href))
+      const mod = await import(pathToFileURL(file).href)
+      fns = p.spec === "builtin:zcode" ? [mod.ZCodeAuthPlugin].filter((fn) => typeof fn === "function") : servers(mod)
       if (fns.length) break
     }
     if (fns.length === 0 && !gateway) throw new Error("exports no OpenCode plugin function")
@@ -1556,7 +1604,8 @@ async function loadPlugins(list) {
     // plugin's that signs in to it too: a third party's that set it
     // first (models: {}) left the other's `??=` nothing to add, and the
     // provider no models (豆包工作, two plugins of doubao-work)
-    const ids = signsIn(h.spec)
+    const ids = signsIn(h.spec).filter((id) => id !== "zcode" || h.spec === "builtin:zcode")
+    const protectedZCode = h.spec === "builtin:zcode" ? undefined : structuredClone(config.provider.zcode)
     for (const id of ids) {
       const own = ownConfig.get(ownKey(h.spec, id)) ?? structuredClone(userConfig.provider?.[id])
       if (own === undefined) delete config.provider[id]
@@ -1567,6 +1616,11 @@ async function loadPlugins(list) {
       await inTime(() => h.hooks.config(config), loadWait, "config hook")
     } catch (e) {
       send({ event: "log", level: "error", message: `${h.spec}: config hook: ${e?.message ?? e}` })
+    } finally {
+      if (h.spec !== "builtin:zcode") {
+        if (protectedZCode === undefined) delete config.provider.zcode
+        else config.provider.zcode = protectedZCode
+      }
     }
     for (const id of ids) ownConfig.set(ownKey(h.spec, id), config.provider?.[id])
   }
@@ -1759,10 +1813,14 @@ async function gatewayRequest(p, signal) {
 // the same provider id is then theirs to choose, not the list's order.
 function auths() {
   const m = new Map()
-  for (const h of hooks) if (h.hooks.auth?.provider) m.set(h.hooks.auth.provider, { spec: h.spec, target: h.target, auth: h.hooks.auth })
   for (const h of hooks) {
     const id = h.hooks.auth?.provider
-    if (id && prefer[id] === h.spec) m.set(id, { spec: h.spec, target: h.target, auth: h.hooks.auth })
+    if (id && (id !== "zcode" || h.spec === "builtin:zcode"))
+      m.set(id, { spec: h.spec, target: h.target, auth: h.hooks.auth })
+  }
+  for (const h of hooks) {
+    const id = h.hooks.auth?.provider
+    if (id && id !== "zcode" && prefer[id] === h.spec) m.set(id, { spec: h.spec, target: h.target, auth: h.hooks.auth })
   }
   return m
 }
@@ -2224,6 +2282,7 @@ async function info(id, key, strict, limit, quiet, signal) {
   for (const h of quiet ? [] : hooks) {
     const ph = h.hooks.provider
     if (ph?.id !== id || typeof ph.models !== "function") continue
+    if (id === "zcode" && h.spec !== "builtin:zcode") continue
     // a plugin that signs in to id too but doesn't serve it: its list
     // would be asked with the serving plugin's account
     if (server && h.spec !== server && signsIn(h.spec).includes(id)) continue
@@ -2253,7 +2312,7 @@ async function info(id, key, strict, limit, quiet, signal) {
     try {
       const given = JSON.parse(JSON.stringify(out))
       const l = { tried: false, lastOk: false }
-      const ask = () => listing.run(l, () => inScope(id, k, () => ph.models(given, { auth: authCopy(k), signal: ctl.signal })))
+      const ask = () => listing.run(l, () => inScope(id, k, () => ph.models(given, { auth: authCopy(k), getAuth: async () => authCopy(k), signal: ctl.signal })))
       const next = limit > 0 ? await inTime(ask, Math.max(limit - (Date.now() - began), 0), "the plugin's model list", ctl) : await ask()
       // a hook that asked its vendor, got no list and gave back the one it
       // was given fell back: magpie keeps the list it had, as a built-in
@@ -2620,6 +2679,9 @@ function rowOf(id, a, keys, stored, p, own) {
     single: a.auth.single === true,
     icon: iconOf(a),
     usage: typeof a.auth.usage === "function",
+    account: typeof a.auth.account === "function" && Array.isArray(a.auth.accountOperations)
+      ? [...new Set(a.auth.accountOperations.filter((op) => typeof op === "string" && /^[a-z][a-z0-9._-]{0,79}$/.test(op)))].slice(0, 100)
+      : [],
     checkin: typeof a.auth.checkin === "function",
     calls: typeof a.auth.calls === "function",
     // its sign-ins are renewed in the background as they come due, so
@@ -2745,10 +2807,10 @@ async function save(provider, key, result, inputs, apiKey, method) {
   if (id !== provider) key = freshKey(id)
   if ("refresh" in result) {
     const { type: _t, provider: _p, refresh, access, expires, ...extra } = result
-    await setAuth(key, { type: "oauth", refresh, access, expires, ...extra })
+    await setAuth(key, { type: "oauth", refresh, access, expires, ...extra }, true)
   } else if ("key" in result || apiKey) {
     const md = { ...plainAnswers(provider, method, inputs), ...(result.metadata ?? {}) }
-    await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) })
+    await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) }, true)
   }
   return { provider: id, account: await settle(id, key) }
 }
@@ -2850,7 +2912,7 @@ async function apiKey({ provider, method, inputs, key, account, proxy }, signal)
   const at = signInKey(provider, account)
   if (typeof m.authorize !== "function") {
     const md = inputs && Object.keys(inputs).length ? { metadata: inputs } : {}
-    await setAuth(at, { type: "api", key, ...md })
+    await setAuth(at, { type: "api", key, ...md }, true)
     return { ok: true, provider, account: await settle(provider, at) }
   }
   const r = await signingIn(signal, proxy ?? "", provider, at, () => m.authorize(inputs ?? {}, { signal }))
@@ -3138,7 +3200,18 @@ async function options(provider, key) {
   return opts
 }
 
-async function load({ provider, account, proxy }) {
+function requireBundled(provider, spec, target) {
+  const serving = auths().get(provider)
+  if (provider === "zcode" && serving?.spec !== "builtin:zcode")
+    throw new BundledSourceError("ZCode's built-in provider is unavailable")
+  if (!spec && !target) return
+  if (!target || !spec || serving?.spec !== spec || serving?.target !== target) {
+    throw new BundledSourceError("the serving plugin is not the expected bundled generation")
+  }
+}
+
+async function load({ provider, account, proxy, bundleSpec, bundleTarget }) {
+  requireBundled(provider, bundleSpec, bundleTarget)
   const key = accountKey(provider, account)
   const o = await via.run(proxy ?? "", () => inScope(provider, key, () => options(provider, key)))
   return {
@@ -3147,6 +3220,88 @@ async function load({ provider, account, proxy }) {
     headers: o.headers && typeof o.headers === "object" ? o.headers : {},
     fetch: typeof o.fetch === "function",
   }
+}
+
+function accountFailure(kind) {
+  const error = new Error("account operation failed")
+  error.kind = kind
+  return error
+}
+
+// Account operations do not inherit inference's first-account fallback.
+// MCP trust is decided before even looking up the supplied account.
+async function accountOperation({ provider, account, proxy, operation, params, scope: expectedScope, generation: expectedGeneration }, signal) {
+  requireBundled(provider)
+  const a = auths().get(provider)?.auth
+  if (operation === "mcp.headers") {
+    if (typeof a?.accountPreflight !== "function") throw accountFailure("untrusted_url")
+    try {
+      if (await a.accountPreflight({ operation, params, provider }) === false) throw accountFailure("untrusted_url")
+    } catch {
+      if (signal?.aborted) throw signal.reason ?? accountFailure("cancelled")
+      throw accountFailure("untrusted_url")
+    }
+  }
+  if (typeof a?.account !== "function" || !Array.isArray(a.accountOperations) || !a.accountOperations.includes(operation)) {
+    throw accountFailure("unsupported")
+  }
+  if (typeof account !== "string" || !account || providerOf(account) !== provider) throw accountFailure("invalid_account")
+  if (operation !== "context" && operation !== "mcp.headers" &&
+      (typeof expectedScope !== "string" || !expectedScope || typeof expectedGeneration !== "string" || !expectedGeneration)) {
+    throw accountFailure("invalid_context")
+  }
+  return via.run(proxy ?? "", async () => {
+    const state = readAuthState()
+    if (!state.known) throw accountFailure("account_store_unavailable")
+    if (!state.all[account]) throw accountFailure("unavailable")
+    // Account controls must not renew a login or ask a models hook before
+    // the requested account generation has been checked.
+    const p = await info(provider, account, false, 0, true, signal)
+    const getAuth = async () => authCopy(account)
+    const contextOptions = { operation: "context", params: {}, expectedScope, expectedGeneration, signal }
+    return inScope(provider, account, async () => {
+      if (operation !== "context" && (expectedScope || expectedGeneration)) {
+        const captured = await a.account(getAuth, structuredClone(p), contextOptions)
+        if (expectedScope && captured?.context?.scope !== expectedScope) throw accountFailure("account_scope_changed")
+        if (expectedGeneration && captured?.context?.generation !== expectedGeneration) throw accountFailure("account_generation_changed")
+      }
+      if (operation !== "selection.select") {
+        return a.account(getAuth, structuredClone(p), { operation, params: params ?? {}, expectedScope, expectedGeneration, signal })
+      }
+      if (typeof a.select !== "function") throw accountFailure("unsupported")
+      const selected = await a.select(getAuth, structuredClone(p), { selection: params?.selection, expectedScope, expectedGeneration, signal })
+      if (!selected || typeof selected !== "object" || typeof selected.accountScope !== "string" || !selected.accountScope) {
+        throw accountFailure("invalid_selection")
+      }
+      await a.account(getAuth, structuredClone(p), contextOptions)
+      const original = await getAuth()
+      if (signal?.aborted) throw signal.reason ?? accountFailure("cancelled")
+      let destination = "", created = false
+      await changeAuth((all) => {
+        if (signal?.aborted) throw signal.reason ?? accountFailure("cancelled")
+        if (!original || JSON.stringify(all[account]) !== JSON.stringify(original)) throw accountFailure("account_changed")
+        destination = accountsOf(all, provider).find((key) => all[key]?.accountScope === selected.accountScope) ?? ""
+        if (destination) return false
+        do {
+          destination = provider + "#" + randomUUID().slice(0, 8)
+        } while (destination in all)
+        all[destination] = { ...selected, accountEpoch: randomUUID() }
+        created = true
+      })
+      if (created) {
+        forgetAccount(destination)
+        send({ event: "auth", provider, account: destination })
+      }
+      const result = await inScope(provider, destination, () => a.account(
+        async () => authCopy(destination), structuredClone(p),
+        { operation: "context", params: {}, expectedScope: selected.accountScope, signal },
+      ))
+      const c = result?.context
+      if (!c || c.scope !== selected.accountScope) throw accountFailure("invalid_selection")
+      return { context: c, data: { account: destination, user: whoOf(authCopy(destination)),
+        selection: { kind: c.kind, family: c.family, userId: c.userId, organization: c.organization, project: c.project, product: c.product } } }
+    })
+  })
 }
 
 // ---- usage -------------------------------------------------------------------
@@ -3209,7 +3364,6 @@ async function usageOf(provider, account, signal) {
   const text = (v) => (typeof v === "string" ? v : "")
   const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0)
   const ids = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : [])
-  const resetScope = text(u.resetScope), resetContext = text(u.resetContext)
   return {
     plan: text(u.plan),
     until: when(u.until),
@@ -3218,18 +3372,31 @@ async function usageOf(provider, account, signal) {
     error: text(u.error),
     user: text(u.user),
     signIn: ["expired", "kept", "renewed"].includes(u.signIn) ? u.signIn : "",
-    ...(/^[a-f0-9]{64}$/.test(resetScope) && /^[a-f0-9]{64}$/.test(resetContext)
-      ? { resetScope, resetContext } : {}),
     resets:
       u.resets && typeof u.resets === "object"
         ? {
-            count: num(u.resets.count), until: when(u.resets.until), byWindow: !!u.resets.byWindow,
+            source: shown(u.resets.source, 100), count: num(u.resets.count), until: when(u.resets.until), byWindow: !!u.resets.byWindow,
             fiveHour: num(u.resets.fiveHour), weekly: num(u.resets.weekly), team: !!u.resets.team,
             each: (Array.isArray(u.resets.each) ? u.resets.each : [])
               .filter((r) => r && typeof r === "object")
               .map((r) => ({ until: when(r.until), window: r.window === "fiveHour" || r.window === "weekly" ? r.window : "" })),
           }
         : null,
+    observations: (Array.isArray(u.observations) ? u.observations : [])
+      .filter((o) => o && ["start-balance", "server-mcp"].includes(o.kind))
+      .slice(0, 1000)
+      .map((o) => {
+        const number = (v) => typeof v === "number" && Number.isFinite(v) ? Math.max(0, v) : null
+        const i = o.identity && typeof o.identity === "object" && !Array.isArray(o.identity) ? o.identity : null
+        return {
+          kind: o.kind, name: shown(o.name, 200), models: ids(o.models).slice(0, 1000).map((id) => shown(id, 200)).filter(Boolean),
+          used: number(o.used), limit: number(o.limit), remaining: number(o.remaining), unit: shown(o.unit, 100),
+          at: when(o.at), nextRefreshAt: when(o.nextRefreshAt),
+          ...(i ? { identity: { userPlanId: shown(i.userPlanId, 200), planId: shown(i.planId, 200),
+            bucketId: shown(i.bucketId, 200), entitlementId: shown(i.entitlementId, 200),
+            periodStart: when(i.periodStart), periodEnd: when(i.periodEnd), expiresAt: when(i.expiresAt) } } : {}),
+        }
+      }),
     windows: (Array.isArray(u.windows) ? u.windows : []).map((w) => ({
       name: text(w?.name),
       used: w?.used == null ? null : Math.max(0, num(w?.used)), // past 100 when overspent; null: not said
@@ -3364,8 +3531,17 @@ function bodyOf(b64) {
 }
 
 async function doFetch(id, record, params) {
+  if (params.provider === "zcode" || params.bundleSpec || params.bundleTarget) requireBundled(params.provider, params.bundleSpec, params.bundleTarget)
+  if (params.zcodeScope !== undefined || params.zcodeGeneration !== undefined) {
+    if (params.provider !== "zcode" || typeof params.zcodeScope !== "string" || !params.zcodeScope ||
+        typeof params.zcodeGeneration !== "string" || !params.zcodeGeneration)
+      throw new Error("invalid intrinsic ZCode account binding")
+  }
   const key = accountKey(params.provider, params.account)
-  return via.run(params.proxy ?? "", () => inScope(params.provider, key, () => fetchAs(id, record, key, params)))
+  return via.run(params.proxy ?? "", () => {
+    const run = () => inScope(params.provider, key, () => fetchAs(id, record, key, params))
+    return params.bundleTarget ? protectZCodeResponse.run(true, run) : run()
+  })
 }
 
 // staleAccess is what a bare 401 says of the OAuth sign-in at key that
@@ -3401,7 +3577,7 @@ async function staleAccess(key, before) {
 
 async function fetchAs(id, record, key, params) {
   const { controller: ctl, gate } = record
-  const { provider, model, npm, url, method, headers, body, session } = params
+  const { provider, model, requestedModel, requestedSession, execution, zcodeScope, zcodeGeneration, npm, url, method, headers, body, session } = params
   // the sign-in as the request found it, before its loader or magpie
   // renewed it: a 401 is judged against it (staleAccess)
   const before = key ? readAuth()[key] : undefined
@@ -3416,7 +3592,8 @@ async function fetchAs(id, record, key, params) {
     // They are told the provider as info builds it once for the account
     // (infoOf), the one object every request is told, as OpenCode tells
     // them the provider it keeps
-    const said = hooks.filter((x) => typeof x.hooks["chat.headers"] === "function")
+    const said = hooks.filter((x) => typeof x.hooks["chat.headers"] === "function" &&
+      (provider !== "zcode" || x.spec === "builtin:zcode" || !signsIn(x.spec).includes("zcode")))
     let p, m
     if (said.length) {
       p = await infoOf(provider, key)
@@ -3452,6 +3629,10 @@ async function fetchAs(id, record, key, params) {
       headers: h,
       body: bodyOf(body),
       signal: ctl.signal,
+      ...(provider === "zcode" && (requestedModel || execution || zcodeScope) ? { magpie: {
+        model: requestedModel || model, session: requestedSession || "", execution,
+        expectedScope: zcodeScope, expectedGeneration: zcodeGeneration,
+      } } : {}),
     })
     record.unconsumedBody = res.body
     checkFetch(record)
@@ -3540,6 +3721,7 @@ const handlers = {
   search: runSearch,
   apiKey,
   load,
+  account: accountOperation,
   usage,
   checkin,
   calls,
@@ -3615,6 +3797,11 @@ const handlers = {
 
 // Everything waits for init; a request is answered even when magpie has
 // closed stdin behind it, the host leaving once nothing is pending.
+class BundledSourceError extends Error {}
+function hostError(e) {
+  return { message: String(e?.message ?? e), ...(e instanceof BundledSourceError ? { code: "bundle_mismatch" } : {}) }
+}
+
 let ready
 let readyState
 const readyWaiters = new Set()
@@ -3667,6 +3854,27 @@ const signInSteps = new Set(["authorize", "callback", "apiKey"])
 const signInInflight = new Map() // RPC id -> AbortController
 const rpcInflight = new Map() // an ordinary RPC's id -> its AbortController (#4678)
 const rl = readline.createInterface({ input: process.stdin, terminal: false })
+// Account hooks can fail with vendor metadata. Forward only a bounded typed
+// allowlist, never a raw response body or arbitrary exception message.
+function accountError(e) {
+  const kind = typeof e?.kind === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(e.kind) ? e.kind : "unknown"
+  const account = { kind }
+  if (Number.isSafeInteger(e?.code)) account.code = e.code
+  if (Number.isInteger(e?.httpStatus) && e.httpStatus >= 100 && e.httpStatus <= 599) account.httpStatus = e.httpStatus
+  for (const key of ["nextTakeAt", "nextDrawAt"]) {
+    if (Number.isSafeInteger(e?.[key]) && e[key] > 0) account[key] = e[key]
+  }
+  if (typeof e?.retryAfter === "number" && Number.isFinite(e.retryAfter) && e.retryAfter >= 0) account.retryAfter = e.retryAfter
+  for (const key of ["retryable", "throttled", "dispatched"]) {
+    if (typeof e?.[key] === "boolean") account[key] = e[key]
+  }
+  if (typeof e?.requestId === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(e.requestId)) account.requestId = e.requestId
+  const message = kind === "untrusted_url" ? "The MCP URL is not trusted" :
+    kind === "unavailable" ? "The account operation is unavailable; check the account or sign in again" :
+      `Plugin account operation failed (${kind})`
+  return { message, account }
+}
+
 rl.on("line", (line) => {
   if (!line.trim()) return
   let msg
@@ -3736,7 +3944,7 @@ rl.on("line", (line) => {
     waitForReady(record).then(start)
       .catch((e) => {
         transitionFetch(record, "finishing")
-        return sendForFetch(record, { id, error: { message: String(e?.message ?? e) } })
+        return sendForFetch(record, { id, error: hostError(e) })
       })
       .finally(() => {
         transitionFetch(record, "finished")
@@ -3784,7 +3992,7 @@ rl.on("line", (line) => {
     .then(() => fn(msg.params ?? {}, ctl.signal))
     .then(
       (result) => { if (!ctl.signal.aborted) send({ id: msg.id, result: result ?? null }) },
-      (e) => { if (!ctl.signal.aborted) send({ id: msg.id, error: { message: String(e?.message ?? e) } }) },
+      (e) => { if (!ctl.signal.aborted) send({ id: msg.id, error: msg.method === "account" ? accountError(e) : hostError(e) }) },
     )
     .finally(() => {
       rpcInflight.delete(msg.id)

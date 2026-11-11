@@ -4,11 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/update"
-	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 )
@@ -248,74 +245,4 @@ func wbAuthFile(home string) string {
 		base = filepath.Join(home, "AppData", "Local")
 	}
 	return filepath.Join(base, "CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
-}
-
-// ZCode's accounts go as the plugin's sign-in keeps them and come back as
-// they were; ZCode's own goes marked as ZCode's, for the plugin to read
-// ZCode's sign-in anew, its session alone (the Start Plan) too.
-func TestZCodeMover(t *testing.T) {
-	home := signIn(t)
-	t.Setenv("ZCODE_CREDENTIAL_SECRET", "test-secret")
-	creds := filepath.Join(home, ".zcode", "v2", "credentials.json")
-	writeFile(t, creds, map[string]any{
-		"oauth:zai:user_info": zcodeEncrypt(t, `{"user_id":"u1","email":"own@example.com"}`),
-		"account-provider:coding-plan:account:zai-individual-coding-plan:account:abc:api-key": zcodeEncrypt(t, "own.secret"),
-	})
-	team := zcodeKey{Base: ZCodeBigModelBase, Token: "biz", Org: "o1", Project: "p1", Key: "team.key"}
-	saveLogins(t, savedLogin{Agent: "zcode", User: "team@x", Plan: "Team", On: true, Auth: json.RawMessage(jsonText(team))})
-
-	ms := movingOf(t, "zcode")
-	own := ms["own@example.com"]
-	var st map[string]any
-	if !own.Own || own.Auth["access"] != "own.secret" || json.Unmarshal([]byte(str(own.Auth["refresh"])), &st) != nil ||
-		st["site"] != "zai" || st["key"] != "own.secret" || st["device"] != zcodeDeviceMid() || st["base"] != ZCodeZaiBase || st["source"] != "zcode" {
-		t.Fatalf("ZCode's own: %+v %+v", own, st)
-	}
-	// marked as ZCode's, it comes back as ZCode's own, with nothing saved
-	var ownBack map[string]any
-	_ = json.Unmarshal([]byte(jsonText(own.Auth)), &ownBack)
-	before := len(readLogins())
-	if ls, user, err := movers["zcode"].back(readLogins(), "own@example.com", ownBack); err != nil || len(ls) != before || user != "own@example.com" {
-		t.Fatalf("ZCode's own back: %v %q %+v", err, user, ls)
-	}
-	tm := ms["team@x"]
-	st = nil
-	if json.Unmarshal([]byte(str(tm.Auth["refresh"])), &st) != nil || st["source"] != nil || st["site"] != "bigmodel" || st["org"] != "o1" ||
-		st["project"] != "p1" || st["token"] != "biz" || st["plan"] != "Team" || tm.Auth["expires"] != int64(0) {
-		t.Fatalf("team@x: %+v %+v", tm.Auth, st)
-	}
-
-	var back map[string]any
-	_ = json.Unmarshal([]byte(jsonText(tm.Auth)), &back)
-	ls, user, err := movers["zcode"].back(readLogins(), "team@x", back)
-	if err != nil || user != "team@x" {
-		t.Fatalf("back: %v %q %+v", err, user, ls)
-	}
-	if tl := loginOf(t, ls, "zcode", "team@x"); tl.Plan != "Team" {
-		t.Fatalf("team@x back: %+v", tl)
-	} else if k, ok := zcodeSaved(tl); !ok || k != team {
-		t.Fatalf("team@x back: %+v", k)
-	}
-	// a key saved in the plugin since
-	ls, user, err = movers["zcode"].back(ls, "", map[string]any{"type": "api", "key": "k.2", "metadata": map[string]any{"site": "bigmodel"}})
-	if k, _ := zcodeSaved(loginOf(t, ls, "zcode", "ZCode")); err != nil || user != "ZCode" || k.Key != "k.2" || k.Base != ZCodeBigModelBase {
-		t.Fatalf("a key back: %v %q %+v", err, user, k)
-	}
-
-	// ZCode's session alone
-	writeFile(t, creds, map[string]any{
-		"oauth:zai:user_info": zcodeEncrypt(t, `{"user_id":"u1","email":"own@example.com"}`),
-		"zcodejwttoken":       zcodeEncrypt(t, zcodeTestJWT(time.Now().Add(time.Hour))),
-	})
-	if ms := movingOf(t, "zcode"); !ms["own@example.com"].Own || ms["own@example.com"].Auth["expires"] != int64(0) ||
-		!strings.Contains(str(ms["own@example.com"].Auth["refresh"]), `"source":"zcode"`) {
-		t.Fatalf("ZCode's session alone: %+v", ms["own@example.com"])
-	}
-	if update.Newer("0.1.2", movers["zcode"].min) {
-		t.Fatalf("the move installs zcode-auth %q, which doesn't read ZCode's own", movers["zcode"].min)
-	}
-	os.Remove(creds)
-	if ms := movingOf(t, "zcode"); len(ms) != 1 {
-		t.Fatalf("with ZCode signed out: %+v", ms)
-	}
 }

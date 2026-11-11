@@ -101,6 +101,7 @@ func requestContent(agent, session string, from, to, at time.Time) contentJSON {
 }
 
 func usageRoutes(mux *http.ServeMux, w Windows) {
+	zcodeAccountRoutes(mux)
 	mux.HandleFunc("GET /api/usage", coldTurn(func(rw http.ResponseWriter, r *http.Request) {
 		// the days and hours of the reader's zone, which the page names
 		writeJSON(rw, usageState(periodOf(r.URL.Query().Get("period")), usageapi.ZoneOf(r)))
@@ -438,27 +439,6 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
 		out, err := provider.SpendCodexReset(ctx, in.User, in.Credit)
-		if err != nil {
-			fail(rw, err)
-			return
-		}
-		writeJSON(rw, out)
-	})
-	mux.HandleFunc("POST /api/usage/zcode-reset", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ Provider, User, Window, Context string }
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-		defer cancel()
-		var out provider.ResetOutcome
-		var err error
-		if strings.Contains(in.Provider, "/") {
-			out, err = provider.UseRemoteZCodeReset(ctx, in.Provider, in.User, in.Window, in.Context)
-		} else {
-			out, err = provider.SpendZCodeReset(ctx, in.Provider, in.User, in.Window, in.Context)
-		}
 		if err != nil {
 			fail(rw, err)
 			return

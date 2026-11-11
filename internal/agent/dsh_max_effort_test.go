@@ -4,14 +4,14 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // TestDshMaxReachesOutputEffortModels: pi-ai asks a model on Messages for a
 // budget unless it is told to think adaptively, and its budget path clamps
 // max to high (16384), so DSH's Max on zcode's GLM-5.3 reached it as high
-// (01huadalang on Discord, 10-24). Z.ai's GLM-5.2 and GLM-5.3, which take
-// adaptive thinking with their level, are told to think adaptively on
-// magpie's Anthropic route, which has pi-ai send the level itself; on the
+// (01huadalang on Discord, 10-24). GLM uses adaptive as pi-ai's effort
+// carrier; the gateway sends enabled to the native endpoint. On the
 // other routes, for MiniMax (not tried adaptive, #3496) and for a model
 // that takes a budget, nothing changes.
 func TestDshMaxReachesOutputEffortModels(t *testing.T) {
@@ -39,5 +39,21 @@ func TestDshMaxReachesOutputEffortModels(t *testing.T) {
 				t.Errorf("%s on %s: forceAdaptiveThinking %v, want %v", tc.id, tc.route, adaptive, tc.want)
 			}
 		}
+	}
+}
+
+func TestDshMaxReachesAliasedGLM(t *testing.T) {
+	dshRouteHome(t)
+	p := provider.Provider{ID: "my-plan", Name: "Plan", Key: "k", Anthropic: "https://api.z.ai/api/anthropic", Models: []string{"fast"}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetUpstreamName("my-plan/fast", "GLM-5.3-Flash"); err != nil {
+		t.Fatal(err)
+	}
+	m := catalog.Model{ID: "my-plan/fast", Efforts: []string{"low", "high", "max"}}
+	got := dshKindConfig(dshKinds[2], []catalog.Model{m}, "anthropic-messages", "http://127.0.0.1:3425").Models[0]
+	if got.Compat == nil || !got.Compat.ForceAdaptiveThinking {
+		t.Fatalf("alias lost pi-ai max carrier: %+v", got.Compat)
 	}
 }

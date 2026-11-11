@@ -1031,6 +1031,9 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST "+provider.RemoteRefreshPath, s.quotaCardsRefresh)
 	mux.HandleFunc("POST "+provider.RemoteCodexResetPath, s.codexReset)
 	mux.HandleFunc("POST "+provider.RemoteZCodeResetPath, s.zcodeReset)
+	mux.HandleFunc("POST "+provider.RemoteZCodeResetPath+"/scoped", s.zcodeReset)
+	mux.HandleFunc("POST "+provider.RemoteZCodeAccountPath, s.zcodeAccount)
+	mux.HandleFunc("POST "+provider.RemoteZCodeAccountPath+"/scoped", s.zcodeAccount)
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET "+StatuslinePath, s.statusline)
 	mux.HandleFunc("POST "+StatuslinePath, s.statusline)
@@ -1406,38 +1409,6 @@ func (s *Server) codexReset(w http.ResponseWriter, r *http.Request) {
 		done()
 	}
 	writeJSON(w, 200, out)
-}
-
-func (s *Server) zcodeReset(w http.ResponseWriter, r *http.Request) {
-	if !local(r) && !sharedWith(r) {
-		writeError(w, provider.Chat, http.StatusForbidden, "magpie's quotas are shared only with an authenticated gateway key")
-		return
-	}
-	who := access.Caller(r.Context())
-	if who.KeyID == "" || who.ReadOnly {
-		writeError(w, provider.Chat, http.StatusUnauthorized, "using a ZCode reset takes an enabled magpie gateway key with full access")
-		return
-	}
-	if refuseHeld(w, r, "this gateway key is held to a budget, models or accounts, so it uses none of this magpie's ZCode resets: use a key with full access") {
-		return
-	}
-	q := r.URL.Query()
-	id, user := q.Get("provider"), strings.TrimSpace(q.Get("user"))
-	if id == "" {
-		id = "zcode"
-	}
-	if user == "" {
-		writeError(w, provider.Chat, http.StatusBadRequest, "name the ZCode account whose reset is used: ?user=<account>")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
-	defer cancel()
-	out, err := provider.SpendZCodeReset(ctx, id, user, q.Get("window"), q.Get("context"))
-	if err != nil {
-		writeError(w, provider.Chat, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
 }
 
 func modelObject(e provider.Entry) map[string]any {
@@ -1960,6 +1931,8 @@ func decisionGroupRefused(g provider.Group) string {
 	return fmt.Sprintf("the routing group %s holds decision models: it only decides a routing group's model and effort, asked at /v1/systemone; it holds no conversation", g.Name)
 }
 
+type countEffortKey struct{}
+
 // countTokens answers Anthropic's count_tokens: through the provider when
 // it implements counting, else a rough estimate. A failed connection or
 // limited key yields to the next key; other failures reach the client.
@@ -2043,7 +2016,7 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if level := desktopSubagentEffort(r, agentOf(r), body, pick); level != "" && ok && !provider.Reasonless(p.ID, model) {
-		body = withFixedEffort(provider.Anthropic, body, fitLevel(level, p.Efforts(model)))
+		r = r.WithContext(context.WithValue(r.Context(), countEffortKey{}, level))
 	}
 	s.countOn(w, r, p, model, ok, body)
 }
@@ -2056,6 +2029,7 @@ func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Prov
 	if ok {
 		body = withModelSystem(r, p, model, provider.Anthropic, body)
 	}
+	level, _ := r.Context().Value(countEffortKey{}).(string)
 	// Claude Subscription generations run through the Claude Code binary. Its
 	// OAuth token must not take a direct HTTP side path just for token counting.
 	if ok && p.Account != nil && (p.Account.Agent == "claude" || p.Account.Agent == "cursor" || p.Account.Agent == "grok" || p.Account.Agent == "devin" || p.Account.Agent == "kiro" || p.Account.Agent == "qoder" || p.Account.Agent == provider.QoderCNID || p.Account.Agent == "zed" || p.Account.Agent == "factory" || p.Account.Agent == "gemini" || p.Account.Agent == "antigravity" ||
@@ -2100,7 +2074,24 @@ func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Prov
 	// counted, and not at all where there are none
 	wires := sync.OnceValue(func() map[string]string { return settings.Shared().Wires() })
 	for i, c := range counts {
-		res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, provider.UpstreamNameIn(wires(), c.p.ID, model)), r.Header)
+		wire := provider.UpstreamNameIn(wires(), c.p.ID, model)
+		native := nativeGLM(c.p, wire)
+		countBody := body
+		if level != "" {
+			effort := level
+			if native != 0 {
+				effort = glmUserEffort(c.p, model, effort)
+			} else {
+				// Non-native counts retain the resolved provider's existing
+				// fitting, rather than changing it per candidate key.
+				effort = fitLevel(effort, p.Efforts(model))
+			}
+			countBody = withSelectedEffort(provider.Anthropic, countBody, model, effort, native, true)
+		}
+		if native != 0 {
+			countBody = glmUserBodyEffort(c.p, model, countBody)
+		}
+		res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(countBody, wire), r.Header)
 		if tooMany := (*errRPM)(nil); errors.As(err, &tooMany) {
 			break // its minute filled since: nobody rests, the estimate answers
 		}
@@ -3561,6 +3552,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}()
 	nearBehind := map[string]bool{} // accounts near their cap moved behind the rest once
 	var nearInKey time.Duration     // the key's slot waited for before an account's turn near its cap
+	zcodeMapped := map[string]string{}
+	zcodeWindows := map[string]int{}
+	zcodeOutputs := map[string]int{}
+	smallerBound := func(a, b int) int {
+		if a <= 0 {
+			return b
+		}
+		if b <= 0 || a < b {
+			return a
+		}
+		return b
+	}
 	for i := 0; i < len(cands); i++ {
 		if failedRow != nil {
 			failedRow()
@@ -3705,7 +3708,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// asked again, of it or of the next candidate. Only a stream the
 		// agent has the headers of already is held, to be told in it
 		pass := c.p.PassesErrors()
-		hw := newHoldWriter(w, kept.sent || !pass && (!last || again < max(lastRetries, rateRetries) || other != nil || autoPicks(c) && repicked < 2 ||
+		hw := newHoldWriter(w, c.p.IsBundledZCodeHighspeed(c.model) || kept.sent || !pass && (!last || again < max(lastRetries, rateRetries) || other != nil || autoPicks(c) && repicked < 2 ||
 			patience > 0 && rounds < replanRounds && (waitFrom.IsZero() || time.Since(waitFrom) < patience) || wantWhole))
 		// a compaction's summary is held to its end, for a cut or an
 		// error halfway to go to the next candidate (#2274)
@@ -3876,6 +3879,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// short (DeepSeek's 8K), asks for the model's own, relayed or
 		// translated (withOwnOutput)
 		attemptBody = withOwnOutput(c.p, c.model, from, attemptBody)
+		if n := zcodeOutputs[c.p.PluginAccountKey()+"\x00"+c.model]; n > 0 {
+			attemptBody = withMaxOutput(from, attemptBody, n)
+		}
 		if roomFor == c.who()+"|"+c.model {
 			if b, ok := withReplyCap(from, attemptBody, roomCap); ok {
 				attemptBody = b
@@ -3914,6 +3920,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// agent's pick in magpie, the turn's pick or the agent itself. A
 		// rule's effort is the user's for this member already
 		mappedFrom, mapped := "", ""
+		modelMappedFrom := zcodeMapped[c.p.PluginAccountKey()+"\x00"+c.model]
 		if c.effort == "" && ruled == "" && len(c.effortMap) > 0 {
 			in := fixed
 			if in == "" && effort != "" {
@@ -3926,22 +3933,30 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				mappedFrom, mapped = in, to
 			}
 		}
+		native := 0
+		if from == provider.Anthropic && (mapped != "" || ruled != "" || fixed != "" || effort != "" || len(levels) > 0) {
+			wire := provider.UpstreamNameIn(wiresOf(r.Context()), c.p.ID, c.model)
+			native = nativeGLM(c.p, wire)
+			if native != 0 && !slices.Contains(s.usable(c.p, c.model), provider.Anthropic) {
+				native = 0
+			}
+		}
 		if mapped != "" {
 			// "none" turns its reasoning off; another level is asked at
 			// the one its model has nearest, as a fixed member's is
 			if mapped != "none" {
-				mapped = fitLevel(mapped, c.p.Efforts(c.model))
+				mapped = selectedEffortLevel(c.p, c.model, mapped, native)
 			}
-			attemptBody = withModelEffort(from, attemptBody, c.model, mapped)
+			attemptBody = withSelectedEffort(from, attemptBody, c.model, mapped, native, true)
 		} else if ruled != "" {
 			// asked even of a request that asked for no reasoning, as a
 			// member fixed at an effort is; already fitted to its levels
-			attemptBody = withModelEffort(from, attemptBody, c.model, ruled)
+			attemptBody = withSelectedEffort(from, attemptBody, c.model, ruled, native, true)
 		} else if fixed != "" {
 			// a member fixed at an effort is asked for it, at the level its
 			// model has nearest, whatever the agent asked or the turn's
 			// pick: even a request that asked for no reasoning
-			attemptBody = withModelEffort(from, attemptBody, c.model, fitLevel(fixed, c.p.Efforts(c.model)))
+			attemptBody = withSelectedEffort(from, attemptBody, c.model, selectedEffortLevel(c.p, c.model, fixed, native), native, true)
 		} else if effort != "" {
 			// the level this model has nearest to the one picked; one whose
 			// levels aren't known isn't asked for more than high, which
@@ -3952,13 +3967,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if wanted != "" && from == provider.Responses && plainFor != c.who()+"|"+c.model && takesEffortUpdates(c.p, c.model) {
 				pick = wanted
 			}
-			if b := withEffort(from, attemptBody, fitLevel(withinLevels(pick, levels), c.p.Efforts(c.model))); !bytes.Equal(b, attemptBody) {
+			if b := withSelectedEffort(from, attemptBody, c.model, selectedEffortLevel(c.p, c.model, withinLevels(pick, levels), native), native, false); !bytes.Equal(b, attemptBody) {
 				attemptBody, picked = b, true
 			}
 		} else if e := agentEffort(from, attemptBody); e != "" && e != "none" {
 			// the agent's own level, where the group doesn't offer it
 			if want := withinLevels(e, levels); want != e {
-				attemptBody = withEffort(from, attemptBody, want)
+				attemptBody = withSelectedEffort(from, attemptBody, c.model, want, native, false)
 			}
 		}
 		// a member sent fast is, in its vendor's words, where its model
@@ -4035,10 +4050,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				attemptBody, updated = b, true
 			}
 		}
-		window := windowOf(c.p, c.model) // as the route's end reads it
+		window := smallerBound(windowOf(c.p, c.model), zcodeWindows[c.p.PluginAccountKey()+"\x00"+c.model]) // as the route's end reads it
 		s.trace.update(tr, func(t *Route) {
 			t.imageProvider = c.p.ID
-			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, RuleEffort: ruled, MappedFrom: mappedFrom, Fast: fast, Start: began})
+			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, RuleEffort: ruled, MappedFrom: mappedFrom, ModelMappedFrom: modelMappedFrom, Fast: fast, Start: began})
 			t.window = window
 			if t.Prompt != nil && !t.Done {
 				t.Prompt = livePrompt(t.Prompt, window)
@@ -4049,6 +4064,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		var heldBack time.Time  // when the first of those held out of their allowance is back
 		var queued int64        // ms it waited for a slot of its key's or account's
 		var laneErr error       // turned away by its key's or account's queue
+		var zcodeDenied error   // local ordinary-fallback policy, not a vendor refusal
 		at := &wireAt{}         // the level a translated request was built at
 		// the models Copilot's Auto picked for it, where from, and which
 		// were refused (#256)
@@ -4155,6 +4171,37 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// with the try's own, to the agent if it is the one it gets
 			// (#4145)
 			ctx = withReplySink(ctx, c.p.ID, hw.heardUpstream)
+			if c.p.IsBundledZCodeHighspeed(c.model) {
+				ctx = provider.WithZCodeFallback(ctx, func(request provider.ZCodeFallbackRequest) error {
+					if err := authorizeZCodeFallback(ctx, c, from, request); err != nil {
+						return err
+					}
+					modelMappedFrom = c.model
+					output := userOutput(c.p, c.model)
+					if isGroup {
+						output = outputLimit(c.p, c.model)
+					}
+					c.model = request.Model
+					model = c.model
+					binding := c.p.PluginAccountKey() + "\x00" + c.model
+					zcodeMapped[binding] = modelMappedFrom
+					zcodeOutputs[binding] = output
+					zcodeWindows[binding] = window
+					cands[i] = c
+					window = smallerBound(windowOf(c.p, c.model), window)
+					noteMember(hw, r, c.p, c.model)
+					liveOfInflight(inflightOf(ctx)).routed(c.p.ID, unprefixed(c.model))
+					s.trace.update(tr, func(t *Route) {
+						tt := &t.Tries[len(t.Tries)-1]
+						tt.Model, tt.ModelMappedFrom = c.model, modelMappedFrom
+						t.window = window
+						if t.Prompt != nil && !t.Done {
+							t.Prompt = livePrompt(t.Prompt, window)
+						}
+					})
+					return nil
+				})
+			}
 			if from != provider.Responses {
 				// the reasoning its calls carry that this one refused
 				// earlier in the conversation isn't sent to be refused
@@ -4246,6 +4293,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					call.Status, call.Error = s.attempt(hw, r.WithContext(ctx), from, c.p, c.model, attemptBody, &call)
 				}()
 			}
+			_, zcodeDenied = provider.ZCodeFallbackResult(ctx)
 			stop()
 		}
 		if handed.release != nil && handed.who == c.who() {
@@ -4253,6 +4301,27 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// quotaHeld): the slot taken for it goes back
 			handed.release()
 			handed.release = nil
+		}
+		if zcodeDenied != nil {
+			// This is magpie's ordinary-model policy, not evidence that the
+			// native lane or its account is exhausted or should rest.
+			call.Status, call.Error = http.StatusConflict, zcodeDenied.Error()
+			var denial *zcodeFallbackDenial
+			if errors.As(zcodeDenied, &denial) {
+				call.Status = denial.status
+			}
+			s.trace.update(tr, func(t *Route) {
+				tt := &t.Tries[len(t.Tries)-1]
+				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Queued, tt.Millis = true, call.Status, call.Error, failOther, queued, time.Since(began).Milliseconds()
+			})
+			if i < len(cands)-1 {
+				skipped = append(skipped, c.label()+": "+call.Error)
+				continue
+			}
+			failTo(w, kept, from, call.Status, call.Error)
+			call.Millis = time.Since(start).Milliseconds()
+			logged()
+			break
 		}
 		if laneErr != nil {
 			// its key's or account's queue was full, or it waited as long
@@ -4348,7 +4417,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		wentTier = at.tier
 		ended = time.Now()
-		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, RuleEffort: ruled, MappedFrom: mappedFrom, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
+		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, RuleEffort: ruled, MappedFrom: mappedFrom, ModelMappedFrom: modelMappedFrom, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
 			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Pin: c.p.ClinePassAsked(c.model), Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked(),
 			Net: nt.timing(began, queued), SentBy: sentBy(c.p)}
 		if resetFirst != nil {
@@ -5521,7 +5590,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	prompt, window := promptRead(), 0
 	if prompt != nil && lastTried.ID != "" {
-		window = windowOf(lastTried, model)
+		window = smallerBound(windowOf(lastTried, model), zcodeWindows[lastTried.PluginAccountKey()+"\x00"+model])
 	}
 	tries := 0 // the request's tries, as its route lists them
 	s.trace.update(tr, func(t *Route) {
@@ -5810,7 +5879,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 
 // firstElsewhere is whether model is best asked on an API other than
 // from at p, which usable puts first: Responses for an OpenAI model on
-// OpenAI's API, Messages for a Claude model where it is served.
+// OpenAI's API, Messages for Claude or a GLM Coding Plan model.
 func firstElsewhere(p provider.Provider, model string, from provider.Protocol) bool {
 	return p.ResponsesFirst(model) && from != provider.Responses || p.MessagesFirst(model) && from != provider.Anthropic
 }
@@ -6085,6 +6154,16 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			extra = s.withoutRefusedShapes(p, adaptiveThinking(extra))
 		}
 		body = extra
+	}
+	if to == provider.Anthropic {
+		// The same native wire shape is used for translated, relayed,
+		// retried and token-count requests, including forced extra fields.
+		if native := nativeGLM(p, modelOf(body)); native != 0 {
+			body = nativeGLMThinking(body, native)
+			if !countsTokens(path) {
+				noteNativeWireEffort(reqCtx, body)
+			}
+		}
 	}
 	if !countsTokens(path) {
 		// the tier it goes at, the user's own fields in it (#1784)
@@ -6479,6 +6558,10 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 	}
 	upstream := provider.UpstreamNameIn(wiresOf(r.Context()), p.ID, model)
+	native := 0
+	if proto == provider.Anthropic {
+		native = nativeGLM(p, upstream)
+	}
 	body = rewriteModel(body, upstream)
 	if proto == provider.Responses {
 		// Claude's blocks magpie gave a Responses client go back to Claude
@@ -6665,13 +6748,19 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			body = withThinkingOnToolTurns(body)
 		}
 		if !anthropicModel.MatchString(model) && !provider.Reasonless(p.ID, model) {
-			body = thinkingOffUnlessAsked(body)
+			// Native GLM treats an explicit effort without a thinking
+			// object as an effort request; don't turn it into disabled.
+			if native == 0 || bodyEffort(provider.Anthropic, body) == "" {
+				body = thinkingOffUnlessAsked(body)
+			}
 			// Claude Code's auto mode classifier, on a vendor's model that
 			// may think whatever it is told (#250); a Claude model's request
 			// goes as it was sent, safeguards and all
 			body = autoModeClassifierBody(model, body)
 		}
-		if outputEffortAt(p.VendorHost(), model) {
+		if native != 0 {
+			body = glmUserBodyEffort(p, model, body)
+		} else if outputEffortAt(p.VendorHost(), model) {
 			levels := p.Efforts(model)
 			if len(levels) == 0 && p.VendorHost() == deepseekHost {
 				levels = deepseekEfforts
@@ -6699,7 +6788,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	// reasoning off at a level the model turned away before (below), at its
 	// lowest
 	asked := bodyEffort(proto, body)
-	effort := fitFor(p, model, asked)
+	effort := asked
+	if native != 0 {
+		effort = glmUserEffort(p, model, asked)
+	} else {
+		effort = fitFor(p, model, asked)
+	}
 	if offEffort(effort) && s.turnedAway(p, model, effort, proto) {
 		effort = onEffort(p, model)
 	}
@@ -7916,6 +8010,13 @@ func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
 func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to provider.Protocol, req *Request, model string, in http.Header) (*http.Response, provider.Protocol, error) {
 	// the headers the user gave the model, on p's requests for it
 	ctx = provider.WithModel(ctx, p.ID, model)
+	// The same wire name is used for native construction and the request.
+	wires := wiresOf(ctx)
+	wire := provider.UpstreamNameIn(wires, p.ID, model)
+	native, nativeChecked := 0, false
+	if to == provider.Anthropic {
+		native, nativeChecked = nativeGLM(p, wire), true
+	}
 	if req.ThinkOff && req.Effort != "none" && slices.Contains(p.Efforts(model), "none") {
 		// the client turned reasoning off (Effort reads that as low), and
 		// the model can stop thinking: asked for none (#899)
@@ -7929,7 +8030,13 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		r.Effort, r.ThinkOff, r.Thinking, req = "", false, false, &r
 	}
 	if req.Effort != "" {
-		if e := fitFor(p, model, req.Effort); e != req.Effort {
+		e := req.Effort
+		if to == provider.Anthropic && native != 0 {
+			e = glmUserEffort(p, model, e)
+		} else {
+			e = fitFor(p, model, e)
+		}
+		if e != req.Effort {
 			r := *req
 			r.Effort, req = e, &r
 		}
@@ -7942,9 +8049,6 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		// at any vendor of that API
 		req = vertexEffort(req, p.Efforts(model))
 	}
-	// the names in force, read once however many endpoints the request is
-	// built for below
-	wires := wiresOf(ctx)
 	web := req.WebSearch
 	// the cache key was left out to see if it was what the upstream refused
 	dropped := false
@@ -8132,7 +8236,6 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 				filledOutput = to != provider.Anthropic
 			}
 		}
-		wire := provider.UpstreamNameIn(wires, p.ID, model)
 		sent := req
 		if dropsBillingLine(p, to, model, wire) && billingHeader.MatchString(req.System) {
 			// Claude Code's billing line, which changes every turn, as the
@@ -8142,7 +8245,15 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			r := *req
 			r.System, sent = withoutBillingHeader(r.System), &r
 		}
-		body, err := buildFor(p, to, sent, model)
+		var body []byte
+		var err error
+		if to == provider.Anthropic && native != 0 {
+			// Preserve provided unsigned reasoning without imposing a
+			// requirement to invent it on tool turns.
+			body = anthropicBodyFor(sent, model, buildHost(p), true, native)
+		} else {
+			body, err = buildFor(p, to, sent, model)
+		}
 		if err != nil {
 			return nil, to, err
 		}
@@ -8500,6 +8611,21 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			return res, to, nil
 		}
 		to, beforeOff = next[0], nil
+		if to == provider.Anthropic && !nativeChecked {
+			native, nativeChecked = nativeGLM(p, wire), true
+		}
+		if req.Effort != "" {
+			e := req.Effort
+			if to == provider.Anthropic && native != 0 {
+				e = glmUserEffort(p, model, e)
+			} else {
+				e = fitFor(p, model, e)
+			}
+			if e != req.Effort {
+				r := *req
+				r.Effort, req = e, &r
+			}
+		}
 	}
 }
 

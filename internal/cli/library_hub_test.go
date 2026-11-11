@@ -1,12 +1,18 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // magpie library mcp router on|off (#2679): on, the agent is given magpie's
@@ -84,5 +90,112 @@ func TestLibraryMCPHub(t *testing.T) {
 	}
 	if got := names(); !slices.Equal(got, []string{"fs"}) {
 		t.Fatalf("hub off: %v", got)
+	}
+}
+
+func TestLibraryMCPAccountUnbind(t *testing.T) {
+	h := t.TempDir()
+	for k, v := range map[string]string{"HOME": h, "USERPROFILE": h, "XDG_CONFIG_HOME": filepath.Join(h, ".config"), "CLAUDE_CONFIG_DIR": "", "CODEX_HOME": "", "APPDATA": "", "LOCALAPPDATA": ""} {
+		t.Setenv(k, v)
+	}
+	if err := libraryCmd([]string{"library", "mcp", "add", "official", "https://example.test/mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(settings.Dir(), "library.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	server := doc["mcp"].([]any)[0].(map[string]any)
+	server["pluginAccount"] = map[string]any{"provider": "zcode", "account": "slot", "scope": "verified-scope"}
+	b, _ = json.Marshal(doc)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := libraryCmd([]string{"library", "mcp", "account", "official", "bind", "zcode", "slot", "--unknown"}); err == nil {
+		t.Fatal("an unknown flag was accepted as a bind command")
+	}
+	if err := libraryCmd([]string{"library", "mcp", "account", "official", "unbind"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(path)
+	doc = nil
+	if err != nil || json.Unmarshal(b, &doc) != nil {
+		t.Fatalf("reading library after unbind: %v", err)
+	}
+	server = doc["mcp"].([]any)[0].(map[string]any)
+	if _, ok := server["pluginAccount"]; ok {
+		t.Fatalf("unbind left the account binding: %s", b)
+	}
+}
+
+func TestLibraryMCPAccountBind(t *testing.T) {
+	bun := testenv.Bun(t)
+	h := t.TempDir()
+	for k, v := range map[string]string{"HOME": h, "USERPROFILE": h, "XDG_CONFIG_HOME": filepath.Join(h, ".config"),
+		"XDG_CACHE_HOME": filepath.Join(h, ".cache"), "CLAUDE_CONFIG_DIR": filepath.Join(h, ".claude"), "MAGPIE_BUN": bun,
+		"CODEX_HOME": "", "APPDATA": "", "LOCALAPPDATA": ""} {
+		t.Setenv(k, v)
+	}
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	p := filepath.Join(t.TempDir(), "fixture.mjs")
+	src := `export const Fixture = async () => ({
+  config: async c => { c.provider = c.provider || {}; c.provider.fixture = {
+    name: "Fixture", npm: "@ai-sdk/openai-compatible", api: "https://fixture.invalid",
+    models: {"one": {name: "One", limit: {context: 1000, output: 100}}}
+  }},
+  auth: {
+    provider: "fixture", methods: [{type: "api", label: "Fixture"}],
+    accountOperations: ["mcp.headers"],
+    accountPreflight: ({params}) => {
+      if (params.url !== "https://trusted.invalid/mcp") throw new Error("untrusted")
+    },
+    account: async (getAuth, _provider, input) => {
+      const auth = await getAuth()
+      if (auth.key !== "fixture-secret" || input.operation !== "mcp.headers") throw new Error("wrong account")
+      return {context: {scope: "fixture-scope", generation: "fixture-epoch"},
+              data: {headers: {Authorization: "Bearer fixture-secret"}}}
+    }
+  }
+})`
+	if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Add(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	account, err := plugin.Import(ctx, "fixture", map[string]any{"type": "api", "key": "fixture-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := libraryCmd([]string{"library", "mcp", "add", "official", "https://trusted.invalid/mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := libraryCmd([]string{"library", "mcp", "account", "official", "bind", "fixture", account}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(settings.Dir(), "library.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"scope": "fixture-scope"`) || strings.Contains(string(b), "fixture-secret") {
+		t.Fatalf("binding did not preserve only nonsecret identity: %s", b)
+	}
+	if err := libraryCmd([]string{"library", "mcp", "account", "official", "unbind"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err = os.ReadFile(path)
+	if err != nil || strings.Contains(string(b), "pluginAccount") {
+		t.Fatalf("unbind left the binding: %s %v", b, err)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/mcpauth"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/wslrun"
 )
@@ -124,6 +125,9 @@ func healthKey(s *Server, own ownSignIns) string {
 	c := *s
 	c.Name, c.Agents = "", nil
 	b, _ := json.Marshal(c)
+	if s.PluginAccount != nil {
+		return string(b)
+	}
 	st := mcpauth.StatusOf(s.Name, s.URL)
 	// and where a command is started, which its agents decide
 	// and whether magpie runs it in home (inProject)
@@ -169,7 +173,7 @@ func CheckServers(ctx context.Context, names []string, fresh bool) (map[string]S
 		checked.Lock()
 		c, ok := checked.m[s.Name]
 		checked.Unlock()
-		if ok && c.key == key && !fresh {
+		if ok && c.key == key && !fresh && s.PluginAccount == nil {
 			outMu.Lock()
 			out[s.Name] = c.h
 			outMu.Unlock()
@@ -187,7 +191,7 @@ func CheckServers(ctx context.Context, names []string, fresh bool) (map[string]S
 			// a check cut short by the page going away isn't one, and a
 			// server that didn't answer in time is asked again next time:
 			// a slow server may answer then (#1467)
-			if ctx.Err() == nil {
+			if ctx.Err() == nil && s.PluginAccount == nil {
 				checked.Lock()
 				if h.Why == "timeout" {
 					// nor is an answer from before kept in its place
@@ -215,6 +219,9 @@ func CheckServer(ctx context.Context, s *Server) ServerHealth {
 // once for every server checked together; nil reads them when a server
 // asks for a sign-in.
 func checkServer(ctx context.Context, s *Server, own ownSignIns) ServerHealth {
+	if s.PluginAccount != nil && !validPluginMCPServer(s) {
+		return failed("protocol", "the plugin-account MCP binding is invalid or needs command trust")
+	}
 	each := remoteStep
 	if s.Transport == "stdio" {
 		each = stdioStep
@@ -227,25 +234,44 @@ func checkServer(ctx context.Context, s *Server, own ownSignIns) ServerHealth {
 	var h ServerHealth
 	switch s.Transport {
 	case "stdio":
-		h = checkStdio(ctx, s)
+		if s.PluginAccount != nil {
+			h = checkPluginStdio(ctx, s)
+		} else {
+			h = checkStdio(ctx, s)
+		}
 	case "sse":
 		h = checkSSE(ctx, s)
 	default:
 		h = checkHTTP(ctx, s)
 	}
 	h.At = time.Now().UnixMilli()
-	if s.Transport == "http" {
+	if s.Transport == "http" && s.PluginAccount == nil {
 		// only a server magpie is signed in to has one to report
 		if st := mcpauth.StatusOf(s.Name, s.URL); st.SignedIn || st.Dead {
 			h.SignIn = &st
 		}
 	}
-	if h.State == "auth" && s.Transport != "stdio" {
+	if h.State == "auth" && s.Transport != "stdio" && s.PluginAccount == nil {
 		if own == nil {
 			own = readOwnSignIns()
 		}
 		h.AgentSignIn = own.of(s)
 	}
+	return h
+}
+
+func checkPluginStdio(ctx context.Context, s *Server) ServerHealth {
+	c, err := dialHub(ctx, s, func() {})
+	if err != nil {
+		return failed("protocol", "the credential-bearing command could not be initialized")
+	}
+	defer c.close()
+	ts, err := listHubTools(ctx, c)
+	if err != nil {
+		return failed("protocol", "the credential-bearing command could not list its tools")
+	}
+	data, _ := json.Marshal(map[string]any{"tools": ts})
+	h, _ := toolsOf(&rpcMsg{Result: data})
 	return h
 }
 
@@ -805,6 +831,10 @@ func exitHealth(err error, errs *tail) ServerHealth {
 // remoteHeaders are the server's own headers, with magpie's token when it
 // is signed in to it: the agents reach it with that too.
 func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) {
+	if s.PluginAccount != nil {
+		h := failed("protocol", "a plugin-account MCP server cannot use direct headers")
+		return nil, &h
+	}
 	h := http.Header{}
 	headers, unset := expandAll(s.Headers)
 	if len(unset) > 0 {
@@ -828,6 +858,39 @@ func remoteHeaders(ctx context.Context, s *Server) (http.Header, *ServerHealth) 
 	}
 	return h, nil
 }
+
+// Static identity, session and tracing headers cannot override a plugin's
+// per-request identity or the MCP client's own protocol state.
+func reservedPluginMCPHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "x-bigmodel-authorization", "bigmodel-target-type",
+		"bigmodel-organization", "bigmodel-project", "x-coding-plan-api-key",
+		"mcp-session-id", "mcp-protocol-version", "x-request-id", "x-trace-id":
+		return true
+	}
+	return false
+}
+
+func pluginMCPAllowedHeader(name string) bool {
+	if name == "" || name != strings.TrimSpace(name) {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c)) {
+			return false
+		}
+	}
+	switch strings.ToLower(name) {
+	case "host", "connection", "transfer-encoding", "content-length", "content-type", "accept",
+		"mcp-session-id", "mcp-protocol-version", "x-request-id", "x-trace-id":
+		return false
+	}
+	return true
+}
+
+// Kept as a function variable so transport tests can exercise real HTTP
+// without accessing a person's plugin accounts.
+var pluginMCPAccountOperation = plugin.AccountOperation
 
 // netHealth puts a failed request in the page's words.
 func netHealth(ctx context.Context, err error) ServerHealth {
@@ -878,9 +941,34 @@ type httpSession struct {
 	session, version string
 	// init is initialize's result
 	init json.RawMessage
+	// Captured only after the URL has passed plugin preflight. Subsequent
+	// requests cannot combine a new login with the old MCP session.
+	accountScope, accountGeneration string
 }
 
 func newHTTPSession(ctx context.Context, s *Server) (*httpSession, *ServerHealth) {
+	if s.PluginAccount != nil {
+		if s.Transport != "http" || !validPluginMCPServer(s) {
+			h := failed("protocol", "a plugin account requires a shared HTTP MCP server")
+			return nil, &h
+		}
+		static := make(map[string]string, len(s.Headers))
+		for k, v := range s.Headers {
+			if !reservedPluginMCPHeader(k) {
+				static[k] = v
+			}
+		}
+		headers, unset := expandAll(static)
+		if len(unset) > 0 {
+			h := failed("novar", strings.Join(unset, ", "))
+			return nil, &h
+		}
+		hdr := http.Header{}
+		for k, v := range headers {
+			hdr.Set(k, v)
+		}
+		return &httpSession{s: s, hdr: hdr, version: mcpProtocol}, nil
+	}
 	hdr, bad := remoteHeaders(ctx, s)
 	if bad != nil {
 		return nil, bad
@@ -893,6 +981,9 @@ func newHTTPSession(ctx context.Context, s *Server) (*httpSession, *ServerHealth
 }
 
 func (c *httpSession) post(ctx context.Context, body []byte) (*http.Response, error) {
+	if c.s.PluginAccount != nil {
+		return c.pluginRequest(ctx, http.MethodPost, body)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.s.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -912,11 +1003,88 @@ func (c *httpSession) post(ctx context.Context, body []byte) (*http.Response, er
 	return checkClient.Do(req)
 }
 
+// pluginRequest invokes the internal account hook for the actual request URL
+// on every attempt. Only a typed unavailable result after host preflight is
+// allowed to go out anonymously. No credential is retained in the session.
+func (c *httpSession) pluginRequest(ctx context.Context, method string, body []byte) (*http.Response, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, method, c.s.URL, bytes.NewReader(body))
+		if err != nil {
+			return nil, errors.New("invalid plugin-account MCP URL")
+		}
+		if req.URL.User != nil {
+			return nil, errors.New("plugin-account MCP URLs cannot contain user information")
+		}
+		c.mu.Lock()
+		hdr, session, version := c.hdr.Clone(), c.session, c.version
+		scope, generation := c.s.PluginAccount.Scope, c.accountGeneration
+		c.mu.Unlock()
+		result, err := pluginMCPAccountOperation(ctx, c.s.PluginAccount.Provider, c.s.PluginAccount.Account, plugin.AccountRequest{
+			Operation:  "mcp.headers",
+			Params:     map[string]any{"url": req.URL.String()},
+			Scope:      scope,
+			Generation: generation,
+		})
+		sent := false
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			var ae *plugin.AccountError
+			if !errors.As(err, &ae) || ae.Kind != "unavailable" {
+				return nil, errors.New("plugin-account MCP authorization or destination validation failed")
+			}
+		} else {
+			identity, err := pluginMCPHeaders(result.Data)
+			if err != nil || result.Context.Scope != scope || result.Context.Generation == "" {
+				return nil, errors.New("invalid plugin-account MCP authorization result")
+			}
+			for k := range identity {
+				hdr.Set(k, identity.Get(k))
+				sent = true
+			}
+			c.mu.Lock()
+			if c.accountScope != "" && (c.accountScope != result.Context.Scope || c.accountGeneration != result.Context.Generation) {
+				c.mu.Unlock()
+				return nil, errors.New("plugin account changed during the MCP session")
+			}
+			c.accountScope, c.accountGeneration = result.Context.Scope, result.Context.Generation
+			c.mu.Unlock()
+		}
+		req.Header = hdr
+		if method == http.MethodPost {
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+		}
+		if session != "" {
+			req.Header.Set("Mcp-Session-Id", session)
+			req.Header.Set("MCP-Protocol-Version", version)
+		}
+		client := *checkClient
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		res, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if res.StatusCode == http.StatusUnauthorized && sent && attempt == 0 {
+			io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
+			res.Body.Close()
+			continue
+		}
+		return res, nil
+	}
+	return nil, errors.New("plugin-account MCP authorization failed")
+}
+
 // call posts a request and reads its reply, as JSON or from an event
 // stream.
 func (c *httpSession) call(ctx context.Context, id int, body []byte) (*rpcMsg, *ServerHealth) {
 	res, err := c.post(ctx, body)
 	if err != nil {
+		if c.s.PluginAccount != nil && ctx.Err() == nil {
+			h := failed("unreachable", "the plugin-account MCP request could not be authorized or sent")
+			return nil, &h
+		}
 		h := netHealth(ctx, err)
 		return nil, &h
 	}
@@ -942,10 +1110,20 @@ func (c *httpSession) call(ctx context.Context, id int, body []byte) (*rpcMsg, *
 	}
 	if res.StatusCode == 401 || res.StatusCode == 403 {
 		h := refused(res)
+		if c.s.PluginAccount != nil {
+			h.Why = "plugin-account"
+			h.Detail = "the account credentials were rejected"
+			if res.StatusCode == http.StatusForbidden {
+				h.Detail = "the account or plan was forbidden"
+			}
+		}
 		return nil, &h
 	}
 	if res.StatusCode/100 != 2 {
 		h := statusHealth(res)
+		if c.s.PluginAccount != nil && res.StatusCode >= 300 && res.StatusCode < 400 {
+			h.Why, h.Detail = "redirect", "the plugin-account MCP redirect was blocked"
+		}
 		return nil, &h
 	}
 	if sid := res.Header.Get("Mcp-Session-Id"); sid != "" {
@@ -959,7 +1137,11 @@ func (c *httpSession) call(ctx context.Context, id int, body []byte) (*rpcMsg, *
 			h := timedOut(ctx)
 			return nil, &h
 		}
-		h := failed("protocol", err.Error())
+		detail := err.Error()
+		if c.s.PluginAccount != nil {
+			detail = "invalid plugin-account MCP response"
+		}
+		h := failed("protocol", detail)
 		return nil, &h
 	}
 	return m, nil
@@ -987,8 +1169,26 @@ func (c *httpSession) initialize(ctx context.Context, init []byte) *ServerHealth
 	if res, err := c.post(ctx, initializedNote); err == nil {
 		io.Copy(io.Discard, io.LimitReader(res.Body, 1<<16))
 		res.Body.Close()
+		if c.s.PluginAccount != nil && res.StatusCode/100 != 2 {
+			if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+				h := refused(res)
+				h.Why, h.Detail = "plugin-account", "the account credentials were rejected"
+				if res.StatusCode == http.StatusForbidden {
+					h.Detail = "the account or plan was forbidden"
+				}
+				return &h
+			}
+			h := statusHealth(res)
+			if res.StatusCode >= 300 && res.StatusCode < 400 {
+				h.Why, h.Detail = "redirect", "the plugin-account MCP redirect was blocked"
+			}
+			return &h
+		}
 	} else if ctx.Err() != nil {
 		h := timedOut(ctx)
+		return &h
+	} else if c.s.PluginAccount != nil {
+		h := failed("unreachable", "the plugin-account MCP request could not be authorized or sent")
 		return &h
 	}
 	return nil
@@ -1000,6 +1200,14 @@ func (c *httpSession) end() {
 	hdr, session := c.hdr.Clone(), c.session
 	c.mu.Unlock()
 	if session != "" {
+		if c.s.PluginAccount != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if res, err := c.pluginRequest(ctx, http.MethodDelete, nil); err == nil {
+				res.Body.Close()
+			}
+			return
+		}
 		endSession(c.s.URL, hdr, session)
 	}
 }

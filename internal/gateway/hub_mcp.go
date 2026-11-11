@@ -155,6 +155,9 @@ type HubServer struct {
 	// own). It is given only to a caller on this computer (HubVisitor),
 	// Magpie Browser also to a keyed one elsewhere (Keyed).
 	HereOnly bool
+	// OwnerIdentity is an account-bound HTTP service using this computer's
+	// own plugin account. Even a local held key cannot spend that identity.
+	OwnerIdentity bool
 	// Program: the server is a program run on this computer, with the
 	// user's rights (a command, or a tools plugin), not an HTTP server
 	// elsewhere. A gateway key held to some models, accounts or a spend
@@ -180,6 +183,9 @@ type HubVisitor struct {
 
 // Gives is whether v is given s.
 func (v HubVisitor) Gives(s HubServer) bool {
+	if s.OwnerIdentity && (v.Away || v.Held) {
+		return false
+	}
 	if !v.Away {
 		return true
 	}
@@ -206,7 +212,8 @@ func HubVisitorOf(ctx context.Context) HubVisitor {
 // hubVisitor is who r is from (HubVisitor).
 func hubVisitor(r *http.Request) HubVisitor {
 	away := !local(r) || hubFromPage(r)
-	v := HubVisitor{Away: away, Held: away && nativeHeld(access.Caller(r.Context()))}
+	who := access.Caller(r.Context())
+	v := HubVisitor{Away: away, Held: nativeHeld(who) || who.ReadOnly || who.Browser}
 	if !local(r) && !hubFromPage(r) {
 		v.Key = access.Caller(r.Context()).KeyID
 	}

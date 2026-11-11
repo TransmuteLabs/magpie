@@ -7,9 +7,9 @@ import (
 // TestAdaptiveOnOutputEffortModelAsksItsLevel: DSH asks a model that takes
 // its level in output_config.effort (zcode's GLM-5.3) adaptively, so that
 // its Max is not clamped to a 16384 budget (01huadalang on Discord, 10-24).
-// The level goes upstream as asked, max as max, thinking still adaptive
-// (Z.ai took it so, live), and the Routing log and usage say the level. A
-// budget alone is still read as before, 16384 as high.
+// The gateway sends the native enabled shape, with no budget or display.
+// The Routing log and usage say the level. A budget alone is still read as
+// before, 16384 as high.
 func TestAdaptiveOnOutputEffortModelAsksItsLevel(t *testing.T) {
 	t.Setenv("FAKE_ZCODE", "1")
 	up := &adaptiveVendor{}
@@ -19,10 +19,10 @@ func TestAdaptiveOnOutputEffortModelAsksItsLevel(t *testing.T) {
 		maxTokens        int
 		want, kind       string
 	}{
-		{`{"type":"adaptive","display":"summarized"}`, "max", 128000, "max", "adaptive"},
-		{`{"type":"adaptive","display":"summarized"}`, "high", 128000, "high", "adaptive"},
-		{`{"type":"adaptive","display":"summarized"}`, "low", 128000, "low", "adaptive"},
-		{`{"type":"adaptive","display":"summarized"}`, "max", 8000, "max", "adaptive"},
+		{`{"type":"adaptive","display":"summarized"}`, "max", 128000, "max", "enabled"},
+		{`{"type":"adaptive","display":"summarized"}`, "high", 128000, "high", "enabled"},
+		{`{"type":"adaptive","display":"summarized"}`, "low", 128000, "low", "enabled"},
+		{`{"type":"adaptive","display":"summarized"}`, "max", 8000, "max", "enabled"},
 		{`{"type":"enabled","budget_tokens":16384,"display":"summarized"}`, "", 128000, "high", "enabled"},
 	} {
 		oc := ""
@@ -39,6 +39,12 @@ func TestAdaptiveOnOutputEffortModelAsksItsLevel(t *testing.T) {
 		}
 		if th["type"] != tc.kind || got["max_tokens"] != float64(tc.maxTokens) {
 			t.Errorf("%s %s: upstream thinking %v at max_tokens %v, want %s at %d", tc.thinking, tc.effort, got["thinking"], got["max_tokens"], tc.kind, tc.maxTokens)
+		}
+		if _, ok := th["budget_tokens"]; ok {
+			t.Errorf("native thinking retained a budget: %v", th)
+		}
+		if _, ok := th["display"]; ok {
+			t.Errorf("native thinking retained display: %v", th)
 		}
 		if u := lastUsage(t).Effort; u != tc.want {
 			t.Errorf("%s %s: usage effort %q, want %s", tc.thinking, tc.effort, u, tc.want)

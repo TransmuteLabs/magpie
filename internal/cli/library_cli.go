@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,9 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library mcp set <name> header=K=V | header-=K | env=K=V | env-=K | timeout=SECS   change one setting of a server
   magpie library mcp show <name>     print the server as the library keeps it, as JSON
   magpie library mcp agents <name> <a,b…|none>
+  magpie library mcp account <name> bind <provider> <account> [--trust-command]   bind through the router
+                                     --trust-command acknowledges that a command receives account credentials
+  magpie library mcp account <name> unbind                      remove the account binding
   magpie library mcp local <name> on|off   keep it to this computer: a sync or a backup never carries it, and one
                                      coming in neither takes it away nor puts another computer's in its place
   magpie library mcp off|on <name>   take it from every agent, project and app, keeping its settings; on gives it back as it was
@@ -164,6 +168,10 @@ func libraryCmd(args []string) error {
 			if as, err = libraryAgents(rest[2], "mcp"); err == nil {
 				res, err = library.ServerAgents(rest[1], as)
 			}
+		case (len(rest) == 5 || len(rest) == 6 && rest[5] == "--trust-command") && rest[0] == "account" && rest[2] == "bind" && !strings.HasPrefix(rest[1], "-") && !strings.HasPrefix(rest[3], "-") && !strings.HasPrefix(rest[4], "-"):
+			res, err = library.ServerPluginAccount(context.Background(), rest[1], &library.PluginAccount{Provider: rest[3], Account: rest[4]}, len(rest) == 6)
+		case len(rest) == 3 && rest[0] == "account" && rest[2] == "unbind" && !strings.HasPrefix(rest[1], "-"):
+			res, err = library.ServerPluginAccount(context.Background(), rest[1], nil, false)
 		case len(rest) == 3 && rest[0] == "local" && (rest[2] == "on" || rest[2] == "off") && !strings.HasPrefix(rest[1], "-"):
 			if res, err = library.ServerLocal(rest[1], rest[2] == "on"); err == nil && len(res.Changed) == 0 && len(res.Problems) == 0 {
 				if rest[2] == "on" {

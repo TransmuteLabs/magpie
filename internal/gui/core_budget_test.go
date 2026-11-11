@@ -18,9 +18,11 @@ import (
 // `git log -L` of this file.
 // The fork's OpenCode OAuth and ZCode reset controls add 1,107 code bytes.
 // Carry that exact delta, preserving upstream's code-only headroom.
+// Intrinsic ZCode adds 1,703 bytes for lazy control entrypoints, native
+// sign-in routing, modal ownership and structured errors; sheets stay lazy.
 const (
 	appScriptBudget  = 1_087_374 // upstream 1,086,267 + the fork's 1,107
-	coreScriptBudget = 1_264_440 // upstream 1,263,333 + the fork's 1,107
+	coreScriptBudget = 1_266_143 // previous 1,264,440 + intrinsic ZCode's 1,703
 )
 
 // codeBytes is how many bytes of b are code: its blank lines, its lines

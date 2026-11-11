@@ -1,113 +1,129 @@
-// Existing provider/confirmation controls, with ZCode's two independent
-// pools. The API is synthetic; no vendor account or real credit is used.
+// The real lazy ZCode account sheet: confirmation freezes the named login,
+// a rejected generation disables mutation, and an unknown reset cannot spend again.
+// Run through make test-ui with this file and UI_TEST_CONCURRENCY=1.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-
 const assets = path.resolve(__dirname, "../assets");
-const user = "reset@example.com";
-const context = "a".repeat(64);
-const later = new Date(Date.now() + 864e5).toISOString();
+const user = "alice@example.test";
+const expiry = Date.now() + 86400000;
 
-function fixture(lang) {
-  const state = { posts: [], phase: 0 };
-  const quota = () => ({ provider: "zcode", user, plan: "Team", icon: "zcode", windows: [
-    { name: "5 hours", used: 50, resetsAt: later },
-    { name: "7 days", used: state.phase === 2 ? 0 : 100, resetsAt: later },
-  ], resets: { byWindow: true, count: state.phase === 2 ? 1 : 2, fiveHour: 1, weekly: state.phase === 2 ? 0 : 1,
-    team: true, canUse: true, context, ...(state.phase === 1 ? { pending: "weekly" } : {}) } });
-  state.serve = async (route) => {
-    const req = route.request(), url = new URL(req.url());
-    const json = (data) => route.fulfill({ json: data });
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs={lang:${JSON.stringify(lang)},theme:"light",web:true};` });
-    if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window={};" });
-    if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light", quotaLeft: true } });
-    if (url.pathname === "/api/settings") return json({ lang, theme: "light", quotaLeft: true });
-    if (url.pathname === "/api/providers") return json({ providers: [{ id: "zcode", name: "ZCode", icon: "zcode", models: [{ id: "GLM-5.3", on: true }], agents: [],
-      account: { agent: "zcode", user, plan: "Team", logins: [{ user, plan: "Team", active: true, on: true }] } }], presets: [], excluded: [], gateway: { running: true, window: true } });
-    if (url.pathname === "/api/login/usage") return json({ [user]: quota() });
-    if (url.pathname === "/api/usage/quotas") return json([quota()]);
-    if (url.pathname === "/api/usage/zcode-reset") {
-      state.posts.push(req.postDataJSON());
-      state.phase++;
-      return json({ code: state.phase === 1 ? "reset_unconfirmed" : "reset", windows: state.phase === 1 ? 0 : 1 });
+for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"]) {
+  test(`${engine}: native ZCode confirmation keeps scope and uncertain resets cannot repeat`, { timeout: 60000 }, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const context = await browser.newContext({ viewport: { width: 960, height: 900 }, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    page.setDefaultTimeout(5000);
+    const errors = [], changes = [], signins = [], legacySignins = [];
+    let generation = "epoch-a", behavior = "stale", pending = false;
+    const captured = () => ({ scope: "scope-alice-personal", generation, origin: "https://zcode.z.ai", family: "zai", userId: "alice-id", kind: "individual" });
+    const reset = () => ({ source: "zcode", available: true, fiveHour: [expiry], week: [expiry], ...(pending ? { pending: "unconfirmed", pendingWindow: "week" } : {}) });
+    const provider = { id: "zcode", name: "ZCode", icon: "zcode", models: [{ id: "GLM-5.3", on: true }], agents: [], fallback: [], headers: {}, keyList: [], account: { agent: "zcode", builtin: "zcode", agentName: "ZCode", user, plan: "GLM Coding Pro", logins: [{ user, active: true, on: true }] } };
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/*", async (route) => {
+      const request = route.request(), url = new URL(request.url());
+      const json = (value) => route.fulfill({ json: value });
+      if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs={lang:"en",theme:"light",web:true};' });
+      if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window={};" });
+      if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang: "en", theme: "light", quotaLeft: true } });
+      if (url.pathname === "/api/settings") return json({ lang: "en", theme: "light", quotaLeft: true, version: "fixture", dir: "~/.config/magpie", gateway: "http://127.0.0.1:3425", fx: { rate: 1, stale: false } });
+      if (url.pathname === "/api/providers") return json({ providers: [provider], presets: [], excluded: [], onPlugins: [], plugins: [{ id: "zcode", pid: "zcode", name: "ZCode", spec: "builtin:zcode", methods: [{ type: "oauth", label: "ZCode: Z.ai GLM Coding Plan" }], signedIn: true }], gateway: { running: true, window: true } });
+      if (url.pathname === "/api/plugin-signin/prompt") return json({});
+      if (url.pathname === "/api/plugin-signin") {
+        signins.push(request.postDataJSON());
+        return json({ agent: "zcode", state: "failed", error: "Fixture stops before remote authorization" });
+      }
+      if (url.pathname === "/api/signin") {
+        legacySignins.push(request.postDataJSON());
+        return json({ agent: "zcode", state: "failed", error: "Retired built-in sign-in must not run" });
+      }
+      if (url.pathname === "/api/login/usage") return json({ [user]: { provider: "zcode", user, windows: [], zcodeReset: reset() } });
+      if (url.pathname === "/api/usage/zcode-accounts") return json({ available: true, accounts: [{ provider: "zcode", account: "zcode", user, name: "ZCode" }] });
+      if (url.pathname === "/api/usage/zcode-account") {
+        const input = request.postDataJSON();
+        if (input.operation === "reset.use") {
+          changes.push(input);
+          if (behavior === "stale") return route.fulfill({ status: 409, json: { error: "The account changed", accountError: { kind: "account_generation_changed", dispatched: false } } });
+          pending = true;
+          return json({ context: captured(), data: reset() });
+        }
+        const data = input.operation === "context" ? { accountSelector: user }
+          : input.operation === "selection.list" ? { selections: [] }
+            : input.operation === "entitlement" ? { kind: "available", subscription: { productName: "GLM Coding Pro", status: "VALID" } }
+              : input.operation === "usage.balance" ? { kind: "available", observations: [{ kind: "start-balance", name: "Start bucket", used: 3, limit: 10, remaining: 7, unit: "tokens", models: ["GLM-5.3"], identity: { planId: "plan-a", bucketId: "bucket-a", periodStart: "2026-11-01T00:00:00Z", periodEnd: "2026-12-01T00:00:00Z" } }] }
+                : input.operation === "reset.status" ? reset() : {};
+        return json({ context: captured(), data });
+      }
+      if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
+      if (url.pathname === "/api/plugins") return json({ plugins: [] });
+      if (url.pathname.startsWith("/api/")) return json(url.pathname === "/api/usage/quotas" ? [] : {});
+      const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
+      const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
+      return route.fulfill({ body: await fs.readFile(file).catch(() => ""), contentType });
+    });
+    await page.goto("http://magpie.test/?view=providers");
+    await page.locator(".row.provider", { hasText: "ZCode" }).first().click();
+    await page.getByText("Add another ZCode (GLM Coding Plan) account", { exact: true }).click();
+    await page.locator('.signing.site-pick button[data-site="zai"]').click();
+    await page.locator(".signing.failed").waitFor();
+    assert.equal(signins.length, 1);
+    assert.equal(signins[0].provider, "zcode");
+    assert.equal(signins[0].method, 0);
+    assert.deepEqual(legacySignins, []);
+    await page.locator(".signing.failed").getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.locator(".editor .acc-more").click();
+    await page.locator(".editor .zcode-account-open").click();
+    const sheet = page.locator(".editor.zcode-account");
+    const weekly = () => sheet.getByRole("button", { name: "Use weekly reset", exact: true });
+    await weekly().waitFor();
+    assert.match(await sheet.textContent(), /alice@example\.test/);
+    assert.match(await sheet.textContent(), /Start bucket/);
+    assert.match(await sheet.textContent(), /bucket-a/);
+    for (const name of ["Account", "Reports", "Gifts", "Execution"]) assert.equal(await sheet.getByRole("button", { name, exact: true }).count(), 1);
+
+    await weekly().click();
+    const confirmation = page.locator("dialog.action-confirm");
+    await confirmation.waitFor();
+    assert.match(await confirmation.textContent(), /alice-id/);
+    await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
+    assert.deepEqual(changes, []);
+
+    await weekly().click();
+    await confirmation.waitFor();
+    generation = "epoch-b"; // the server switches while the captured confirmation is open
+    await confirmation.getByRole("button", { name: "Use weekly reset", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
+    await sheet.getByText("This account changed. Refresh the account before making changes.", { exact: false }).waitFor();
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].account, "zcode");
+    assert.equal(changes[0].scope, "scope-alice-personal");
+    assert.equal(changes[0].generation, "epoch-a");
+    assert.deepEqual(changes[0].params, { window: "week" });
+    assert.equal(await weekly().isDisabled(), true);
+
+    behavior = "pending";
+    await sheet.getByRole("button", { name: "Refresh account", exact: true }).click();
+    await weekly().waitFor();
+    await weekly().click();
+    await confirmation.waitFor();
+    await confirmation.getByRole("button", { name: "Use weekly reset", exact: true }).click();
+    await confirmation.waitFor({ state: "detached" });
+    await sheet.getByRole("button", { name: "Resolve uncertainty", exact: true }).waitFor();
+    assert.equal(changes.length, 2);
+    assert.equal(changes[1].generation, "epoch-b");
+    assert.equal(await sheet.getByRole("button", { name: "Use weekly reset", exact: true }).count(), 0);
+    assert.equal(await sheet.getByRole("button", { name: "Use five-hour reset", exact: true }).count(), 0);
+    assert.match(await sheet.textContent(), /Reset outcome unconfirmed/);
+    assert.deepEqual(errors, []);
+    if (process.env.ARTIFACT_DIR) {
+      await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+      await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `zcode-${engine}.png`) });
     }
-    if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
-    if (url.pathname === "/api/plugins") return json({ plugins: [] });
-    if (url.pathname.startsWith("/api/")) return json({});
-    const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
-    const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
-    return route.fulfill({ body: await fs.readFile(file).catch(() => ""), contentType });
-  };
-  return state;
-}
-
-for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
-    for (const width of [420, 1000]) {
-      test(`${engine} ${lang} ${width}px: ZCode resets bind one window and retry only the pending operation`, async (t) => {
-        const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-        t.after(() => browser.close());
-        const page = await (await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" })).newPage();
-        page.setDefaultTimeout(5000);
-        const errors = [];
-        page.on("pageerror", (e) => errors.push(e.message));
-        const state = fixture(lang);
-        await page.route("**/*", state.serve);
-        await page.goto("http://magpie.test/?view=providers");
-        await page.locator('.row.provider[data-id="zcode"]').click();
-        const chip = page.locator(`.editor .acc[data-account-id="${user}"] .aq-resets`);
-        await chip.waitFor();
-        assert.equal(await chip.getAttribute("role"), "button");
-        const words = await page.evaluate(() => ({ title: t("Use a ZCode reset?"), cancel: t("Cancel"), use: t("Use a reset"), weekly: t("Weekly reset"), five: t("Five-hour reset"), pending: t("The reset may have been used. Refresh or retry the same operation before spending another reset.") }));
-        const top = await page.evaluate(() => document.scrollingElement.scrollTop);
-        await chip.click();
-        const ask = page.locator(".reset-ask");
-        await ask.waitFor();
-        assert.equal((await ask.locator(".ehead b").textContent()).trim(), words.title);
-        assert.ok((await ask.textContent()).includes(user));
-        assert.equal(await ask.locator("select").count(), 0);
-        await ask.getByRole("button", { name: words.cancel, exact: true }).click();
-        await ask.waitFor({ state: "detached" });
-        assert.deepEqual(state.posts, []);
-        assert.equal(await page.evaluate(() => document.scrollingElement.scrollTop), top);
-
-        await chip.click();
-        await ask.waitFor();
-        await ask.locator(".reset-card").click();
-        const menu = page.locator(".proto-menu");
-        await menu.waitFor();
-        await menu.locator(".pm-item").filter({ hasText: words.weekly }).click();
-        assert.equal((await ask.locator(".reset-card").textContent()).trim(), words.weekly);
-        await ask.getByRole("button", { name: words.use, exact: true }).click();
-        await ask.waitFor({ state: "detached" });
-        assert.deepEqual(state.posts, [{ provider: "zcode", user, window: "weekly", context }]);
-        await page.locator("#status", { hasText: words.pending }).waitFor();
-
-        await chip.waitFor();
-        await chip.click();
-        await ask.waitFor();
-        assert.equal((await ask.locator(".reset-card").textContent()).trim(), words.weekly, "retry changed the pending window");
-        await ask.locator(".reset-card").click();
-        await menu.waitFor();
-        assert.deepEqual(await menu.locator(".pm-item .pm-name").allTextContents(), [words.weekly]);
-        await page.keyboard.press("Escape");
-        await ask.getByRole("button", { name: words.use, exact: true }).click();
-        await ask.waitFor({ state: "detached" });
-        assert.deepEqual(state.posts, [
-          { provider: "zcode", user, window: "weekly", context },
-          { provider: "zcode", user, window: "weekly", context },
-        ]);
-        await chip.waitFor();
-        await chip.click();
-        await ask.waitFor();
-        assert.equal((await ask.locator(".reset-card").textContent()).trim(), words.five, "the confirmed week consumed the other pool");
-        await ask.getByRole("button", { name: words.cancel, exact: true }).click();
-        assert.equal(state.posts.length, 2);
-        assert.deepEqual(errors, []);
-      });
-    }
-  }
+    await sheet.getByRole("button", { name: "Close", exact: true }).click();
+    await sheet.waitFor({ state: "detached" });
+  });
 }

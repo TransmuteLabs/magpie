@@ -56,11 +56,10 @@ func (g *glmPlan) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// The GLM Coding Plan's Responses API (#306): the zhipu and zai presets'
-// Coding Plan regions give it at /api/v1, as the plans' Codex pages set
-// base_url with wire_api = "responses", so Codex's request is relayed there
-// as it came rather than translated to chat; chat clients stay on the plan's
-// chat completions and Claude Code on its messages.
+// The GLM Coding Plan's alternate APIs remain available when explicitly
+// selected (#306): Responses at /api/v1 and Chat at /api/coding/paas/v4.
+// Automatic GLM routing prefers Messages; an explicit API choice still
+// relays the client's request on the selected API.
 func TestGLMCodingPlanResponses(t *testing.T) {
 	for _, tc := range []struct{ preset, host string }{
 		{"zhipu", "https://open.bigmodel.cn"},
@@ -109,6 +108,16 @@ func TestGLMCodingPlanResponses(t *testing.T) {
 				up.mu.Lock()
 				up.paths, up.model = nil, nil
 				up.mu.Unlock()
+				api := provider.Anthropic
+				switch c.path {
+				case "/v1/responses":
+					api = provider.Responses
+				case "/v1/chat/completions":
+					api = provider.Chat
+				}
+				if err := provider.SetModelAPI(m, string(api)); err != nil {
+					t.Fatal(err)
+				}
 				code, body := post(t, c.path, c.body)
 				if code != 200 || !strings.Contains(body, c.reply) {
 					t.Fatalf("%s: status %d: %s", c.path, code, body)

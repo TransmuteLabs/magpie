@@ -2998,6 +2998,9 @@ magpie.plugin("library", (ctx) => {
     const sub = el("div", "sub mono", serverLine(s));
     sub.title = serverLine(s);
     who.append(noteSub(s.note, sub, serverLine(s)), toolsEl(s.name));
+    if (s.pluginAccount) who.append(el("div", "sub lib-plugin-account", t("Account: {provider} / {account}", {
+      provider: s.pluginAccount.provider, account: s.pluginAccount.account,
+    })));
     row.append(mark(s.icon, s.transport === "stdio" ? GLYPH.cmd : GLYPH.web), who, ...removeAct(() => confirmRemoveServer(s)),
       // no agent to give it to: other apps reach it through the router
       ...(agentless() ? [] : [agentChips(withGone(all, s.agents), s.agents, chipsChange("servers/agents", s.name, "servers", (x) => serverRow(x, all)), { problems: s.problems, blocked: sseBlocked(s), all: true })]),
@@ -3779,6 +3782,237 @@ magpie.plugin("library", (ctx) => {
     ed.append(top);
     const note = noteBox(d.note, t("e.g. The shop's database, read only"), (v) => { d.note = v; });
     ed.append(...field(t("Note"), note, noteHint()));
+    if (s?.pluginAccount && s.pluginAccount.provider !== "zcode") {
+      const binding = el("div", "lib-plugin-account");
+      binding.append(el("span", "", t("Account: {provider} / {account}", {
+        provider: s.pluginAccount.provider, account: s.pluginAccount.account,
+      })));
+      const unbind = button(t("Unbind account"), "text", async () => {
+        if (!await change("servers/account-unbind", { name: s.name }, t("Account unbound"))) return;
+        s = lib.servers.find((x) => x.name === s.name) || s;
+        delete d.pluginAccount;
+        fields.forEach((x) => x.remove());
+        showAccount();
+      });
+      binding.append(unbind);
+      const fields = field(t("Account binding"), binding, t("This server uses the account on this computer through the MCP router."));
+      ed.append(...fields);
+    }
+    const accountBox = el("div", "lib-plugin-account");
+    accountBox.style.overflowWrap = "anywhere";
+    const accountFields = field(t("ZCode account"), accountBox, t("Binding does not turn on the MCP router. Bound servers are available only through the router to unrestricted local callers; they cannot be used directly or by remote callers."));
+    let bindOpen = false, bindRevision = 0, accountBusy = false;
+    let target = null, choices = [], chosen = null, available = false, trust = false, accountError = "", zcodeEligible = false;
+    const hasZCode = (list) => list?.available === true && Array.isArray(list.accounts) && list.accounts.some((a) => a?.pluginProvider === "zcode");
+    const bindingID = (a) => a ? JSON.stringify([a.provider, a.account, a.scope, a.commandDigest || ""]) : "";
+    const sortedPairs = (v) => Object.entries(v || {}).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+    const targetOf = (v) => JSON.stringify([
+      v.name, v.transport,
+      ...(v.transport === "stdio" ? [v.command || "", v.args || [], sortedPairs(v.env)] : [v.url || "", sortedPairs(v.headers), appOf(v)]),
+      v.hub || "", v.plugin || "", v.bridge || "",
+    ]);
+    const targetDirty = () => !s || !!jsonBad || targetOf(d) !== targetOf(s);
+    const targetURL = (bindingOnly = false) => "library/servers/account-target?name=" + encodeURIComponent(s.name) + (bindingOnly ? "&binding=1" : "");
+    function updateBinding(afterBind = false) {
+      const unchanged = targetOf(d) === targetOf(s);
+      s = lib.servers.find((x) => x.name === s.name) || s;
+      if (s.pluginAccount) d.pluginAccount = structuredClone(s.pluginAccount);
+      else delete d.pluginAccount;
+      const baseline = JSON.parse(original);
+      if (s.pluginAccount) baseline.pluginAccount = structuredClone(s.pluginAccount);
+      else delete baseline.pluginAccount;
+      // Binding removes reserved static HTTP headers. Preserve any new edits
+      // made while the request was in flight, but make the saved baseline and
+      // unchanged form reflect what the Library actually kept.
+      if (afterBind && s.transport === "http") {
+        baseline.headers = structuredClone(s.headers || {});
+        if (unchanged) d.headers = structuredClone(s.headers || {});
+      }
+      original = JSON.stringify(baseline);
+      if (afterBind && unchanged) draw();
+    }
+    async function refreshChoices(revision) {
+      chosen = null;
+      available = false;
+      choices = [];
+      try {
+        const list = await api("usage/zcode-accounts");
+        if (!bindOpen || revision !== bindRevision || !ed.isConnected) return;
+        available = list?.available === true;
+        zcodeEligible = hasZCode(list);
+        choices = (Array.isArray(list?.accounts) ? list.accounts : []).filter((a) => a?.provider && a.pluginProvider === "zcode" && a.account &&
+          (a.account === a.pluginProvider || a.account.startsWith(a.pluginProvider + "#")));
+        if (!available) accountError = t("Local account choices are unavailable. Refresh accounts to try again.");
+      } catch (e) {
+        if (revision !== bindRevision || !ed.isConnected) return;
+        zcodeEligible = false;
+        accountError = e.message;
+      }
+    }
+    async function openBinding() {
+      if (accountBusy) return;
+      if (targetDirty()) { accountError = t("Save the server target before binding an account."); drawAccount(); return; }
+      bindOpen = true;
+      const revision = ++bindRevision;
+      accountBusy = true;
+      target = null;
+      trust = false;
+      accountError = "";
+      drawAccount();
+      try {
+        const [preview] = await Promise.all([api(targetURL()), refreshChoices(revision)]);
+        if (!bindOpen || revision !== bindRevision || !ed.isConnected) return;
+        if (bindingID(preview.binding) !== bindingID(s.pluginAccount)) {
+          throw new Error(t("The account binding changed. Close and reopen the server editor."));
+        }
+        target = preview;
+      } catch (e) {
+        if (revision === bindRevision && ed.isConnected) accountError = e.message;
+      } finally {
+        if (revision === bindRevision && ed.isConnected) { accountBusy = false; showAccount(); }
+      }
+    }
+    async function unbindAccount() {
+      if (accountBusy || !s?.pluginAccount) return;
+      const name = s.name, displayed = structuredClone(s.pluginAccount);
+      accountBusy = true;
+      accountError = "";
+      drawAccount();
+      try {
+        const preview = await api(targetURL(true));
+        if (!ed.isConnected) return;
+        if (bindingID(preview.binding) !== bindingID(displayed)) throw new Error(t("The account binding changed. Close and reopen the server editor."));
+        if (!await confirmAction(t("Unbind account"), t("Remove the binding for {provider} / {account} from {server}?", {
+          provider: displayed.provider, account: displayed.account, server: name,
+        }), t("Unbind account"))) return;
+        if (!ed.isConnected) return;
+        if (await change("servers/account-unbind/scoped", { name, binding: displayed }, t("Account unbound"))) {
+          updateBinding();
+          bindOpen = false;
+          bindRevision++;
+        }
+      } catch (e) { if (ed.isConnected) accountError = e.message; }
+      finally { if (ed.isConnected) { accountBusy = false; showAccount(); } }
+    }
+    async function bindAccount() {
+      if (accountBusy || !target || !chosen || !available || target.transport === "stdio" && !trust) return;
+      if (targetDirty()) { accountError = t("Save the server target before binding an account."); drawAccount(); return; }
+      const server = s.name, selected = Object.freeze({ ...chosen }), preview = structuredClone(target), trustCommand = !!trust;
+      if (preview.args) Object.freeze(preview.args);
+      if (preview.environment) Object.freeze(preview.environment);
+      Object.freeze(preview);
+      accountBusy = true;
+      accountError = "";
+      drawAccount();
+      try {
+        const result = await api("usage/zcode-account", { provider: selected.provider, account: selected.account, operation: "context" });
+        if (!ed.isConnected || !bindOpen) return;
+        const captured = result?.context;
+        if (!captured?.scope || !captured?.generation) throw new Error(t("The selected account has no verified identity."));
+        const c = Object.freeze({
+          scope: captured.scope, generation: captured.generation, family: captured.family, kind: captured.kind,
+          userId: captured.userId, organization: captured.organization, project: captured.project,
+        });
+        const identity = {
+          family: c.family || "—", kind: c.kind || "—", user: c.userId || "—",
+          organization: c.organization || "—", project: c.project || "—",
+        };
+        const destination = preview.transport === "http" ? preview.url :
+          [preview.command, ...(preview.args || [])].map(quote).join(" ");
+        if (!await confirmAction(t("Bind account?"), t("Bind {provider} / {account} to {server}? Family: {family}; kind: {kind}; user: {user}; organization: {organization}; project: {project}. Destination: {destination}", {
+          provider: selected.pluginProvider, account: selected.account, server, ...identity, destination,
+        }), t("Bind account"))) return;
+        if (!ed.isConnected || !bindOpen) return;
+        if (targetDirty()) throw new Error(t("Save the server target before binding an account."));
+        if (await change("servers/account-bind", {
+          name: server, provider: selected.pluginProvider, account: selected.account,
+          scope: c.scope, generation: c.generation, targetFingerprint: preview.fingerprint, trustCommand,
+        }, t("Account bound"))) {
+          updateBinding(true);
+          bindOpen = false;
+          bindRevision++;
+        }
+      } catch (e) { if (ed.isConnected) accountError = e.message; }
+      finally { if (ed.isConnected) { accountBusy = false; showAccount(); } }
+    }
+    function drawAccount() {
+      accountBox.replaceChildren();
+      if (s?.pluginAccount?.provider === "zcode") {
+        const line = el("div");
+        line.append(el("span", "", t("Account: {provider} / {account}", {
+          provider: s.pluginAccount.provider, account: s.pluginAccount.account,
+        })));
+        const unbind = button(t("Unbind account"), "", unbindAccount);
+        unbind.disabled = accountBusy;
+        line.append(unbind);
+        accountBox.append(line);
+      }
+      if (!s) {
+        accountBox.append(el("div", "hint", t("Save the server target before binding an account.")));
+      } else if (!bindOpen) {
+        const open = button(t("Bind account…"), "", openBinding);
+        open.disabled = accountBusy;
+        accountBox.append(open);
+      } else {
+        if (target) {
+          if (target.transport === "http") {
+            accountBox.append(el("div", "mono", t("HTTP destination: {url}", { url: target.url })));
+          } else {
+            accountBox.append(el("div", "mono", t("Command: {command}", { command: target.command })),
+              el("div", "mono", t("Arguments: {args}", { args: (target.args || []).map(quote).join(" ") || t("None") })),
+              el("div", "hint", t("Configured environment keys: {keys}. Values are hidden and covered by the fingerprint.", { keys: (target.environment || []).join(", ") || t("None") })));
+            const check = el("input");
+            check.type = "checkbox";
+            check.checked = trust;
+            check.disabled = accountBusy;
+            check.onchange = () => { trust = check.checked; bind.disabled = accountBusy || !available || !chosen || !trust; };
+            const label = el("label", "lib-pick");
+            label.style.textAlign = "left";
+            label.append(check, el("span", "", t("I trust this command to receive this account's credentials.")));
+            accountBox.append(label);
+          }
+          accountBox.append(el("div", "hint mono", t("Target fingerprint: {fingerprint}", { fingerprint: target.fingerprint })));
+        }
+        const pick = el("button", "sess-pick lib-menu");
+        pick.append(el("span", "", chosen ? (chosen.name || chosen.user || chosen.account) + " · " + chosen.account : t("Pick a local account")), svg(CHEV, 11, 1.6));
+        pick.type = "button";
+        pick.setAttribute("aria-haspopup", "menu");
+        pick.setAttribute("aria-expanded", "false");
+        pick.disabled = accountBusy || !available || !choices.length;
+        pick.onclick = (e) => {
+          e.stopPropagation();
+          const options = choices.map((a, i) => ({ v: String(i), name: (a.name || a.user || a.account) + " · " + a.pluginProvider + " / " + a.account, literalName: true, note: "" }));
+          openProtoMenu(pick, options, chosen ? String(choices.indexOf(chosen)) : "", (v) => { chosen = choices[Number(v)] || null; drawAccount(); }, "Pick a local account");
+        };
+        const refresh = button(t("Refresh accounts"), "", async () => {
+          if (accountBusy) return;
+          accountBusy = true; accountError = ""; drawAccount();
+          await refreshChoices(bindRevision);
+          if (ed.isConnected && bindOpen) { accountBusy = false; showAccount(); }
+        });
+        refresh.disabled = accountBusy;
+        const bind = button(t("Bind account"), "primary", bindAccount);
+        bind.disabled = accountBusy || !target || !available || !chosen || target.transport === "stdio" && !trust;
+        const cancel = button(t("Cancel"), "", () => { bindOpen = false; bindRevision++; accountError = ""; showAccount(); });
+        cancel.disabled = accountBusy;
+        accountBox.append(pick, refresh, bind, cancel);
+        if (available && !choices.length) accountBox.append(el("div", "hint", t("No local accounts are available.")));
+      }
+      if (accountError) accountBox.append(el("div", "editor-error", accountError));
+    }
+    function showAccount() {
+      // An already-open picker must remain refreshable if account metadata disappears.
+      const visible = s?.pluginAccount?.provider === "zcode" || !s?.pluginAccount && (zcodeEligible || bindOpen);
+      if (!visible) {
+        if (bindOpen) { bindOpen = false; bindRevision++; }
+        accountFields.forEach((x) => x.remove());
+        return;
+      }
+      if (!accountFields[0].isConnected) slot.before(...accountFields);
+      drawAccount();
+    }
+    drawAccount();
+    if (s?.pluginAccount?.provider === "zcode") ed.append(...accountFields);
     const slot = el("div", "lib-slot");
     ed.append(slot);
     const agentsBox = el("div");
@@ -3978,8 +4212,15 @@ magpie.plugin("library", (ctx) => {
       } else pasteMany(found, d.agents);
     });
     let original = JSON.stringify(d);
-    modal = { save, dirty: () => !!jsonBad || JSON.stringify(d) !== original };
+    const editorModal = { save, dirty: () => !!jsonBad || JSON.stringify(d) !== original };
+    modal = editorModal;
     openLib(ed);
+    const eligibilityRevision = bindRevision;
+    api("usage/zcode-accounts").then((list) => {
+      if (modal !== editorModal || !ed.isConnected || $("#modal").classList.contains("out") || bindRevision !== eligibilityRevision) return;
+      zcodeEligible = hasZCode(list);
+      showAccount();
+    }).catch(() => {});
     if (!s) requestAnimationFrame(() => name.focus());
   }
 

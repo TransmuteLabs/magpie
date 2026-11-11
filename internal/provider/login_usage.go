@@ -18,8 +18,9 @@ import (
 
 var loginUsageCache struct {
 	sync.Mutex
-	m       map[string]loginUsageEntry // agent/user
-	pending map[string]*loginRead      // agent/user: being read now
+	m          map[string]loginUsageEntry // agent/user
+	pending    map[string]*loginRead      // agent/user: being read now
+	generation map[string]uint64          // incremented after a reset is observed
 }
 
 type loginUsageEntry struct {
@@ -60,8 +61,9 @@ func (e loginUsageEntry) state() readState {
 // loginRead is an account's allowance being read: whoever asks for it
 // meanwhile waits for it rather than asking the vendor again.
 type loginRead struct {
-	done chan struct{} // closed once e is in
-	e    loginUsageEntry
+	done       chan struct{} // closed once e is in
+	e          loginUsageEntry
+	generation uint64
 }
 
 // loginUsageFor, when set, stands in for LoginUsage's readings (tests),
@@ -306,12 +308,15 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 		if stale {
 			takeStaleRead(key)
 		}
-		r = &loginRead{done: make(chan struct{})}
+		r = &loginRead{done: make(chan struct{}), generation: c.generation[key]}
 		if c.pending == nil {
 			c.pending = map[string]*loginRead{}
 		}
 		c.pending[key] = r
-		ctx, _ = quotaReading(ctx)
+		// The vendor read starts here, not when its caller started a batch.
+		// A reset observed after that batch began must not make a genuinely
+		// new request look older than the reset.
+		ctx = context.WithValue(ctx, quotaReadKey{}, quotaReadSequence.Add(1))
 		asked := claudeAskGeneration.Load()
 		go func() {
 			// read for all who wait for it: no one's ctx cuts it short, but
@@ -339,6 +344,15 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	c.Unlock()
 	select {
 	case <-r.done:
+		c.Lock()
+		stale := c.generation[key] != r.generation
+		c.Unlock()
+		if stale && ctx.Err() == nil {
+			return cachedLoginReading(ctx, l)
+		}
+		if stale {
+			return entry(SubscriptionQuota{Provider: loginProvider(l), Error: ctx.Err().Error()})
+		}
 		return r.e
 	case <-ctx.Done():
 		// given up on: as a reading cut short would have said

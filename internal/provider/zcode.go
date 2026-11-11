@@ -1,15 +1,11 @@
 package provider
 
-// PLUGIN-SERVED (see AGENTS.md): ZCode ("zcode") is a retired built-in
-// subscription, served by its plugin alone,
-// @magpie-community/opencode-zcode-auth (provider.BuiltinRetired). Its
-// sign-in, models, requests and usage are the plugin's; what is left here
-// is reading the accounts signed in to the built-in and ZCode's own one,
-// for the move onto the plugin (migrate_zcode.go) and the plugin's own
-// account (zcodeOwn), and the Zhipu plan readers a GLM Coding Plan key's
-// card still uses (planquota.go). A fix belongs in the plugin
-// (github.com/magpie-community/plugins, packages/zcode), with the mover's
-// min raised in internal/provider/migrate_zcode.go.
+// ZCode is an intrinsic provider. The official vendor transport is embedded
+// in internal/plugin/bundled/zcode; zcode_account.go and its coordinators
+// own account operations, resets, claims and execution inside magpie.
+// This file retains former built-in/app credential readers for adoption,
+// plus the Zhipu plan readers a GLM Coding Plan key's card still uses.
+// There is no external ZCode serving dependency or subscription mover.
 
 // ZCode's own account is read, never changed, from its credential store,
 // ~/.zcode/v2/credentials.json: each value is "enc:v1:" + iv.tag.ciphertext

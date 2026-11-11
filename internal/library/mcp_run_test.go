@@ -72,12 +72,18 @@ func TestFakeRunServer(t *testing.T) {
 // serves it, and the log of its starts.
 func runFixture(t *testing.T) (*httptest.Server, string, runSpec) {
 	t.Helper()
+	sandbox(t)
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	logf := filepath.Join(t.TempDir(), "starts")
 	spec := runSpec{Command: self, Args: []string{"-test.run=^TestFakeRunServer$"}, Env: map[string]string{"MAGPIE_FAKE_RUN": logf}}
+	library, err := json.Marshal(&Library{MCP: []*Server{{Name: "fake", Transport: "stdio", Command: spec.Command, Args: spec.Args, Env: spec.Env, Agents: []string{"codex"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, path(), string(library))
 	resetRuns(t)
 	runGiven(map[string]runSpec{"fake": spec})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

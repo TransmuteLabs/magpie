@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -36,26 +35,5 @@ func TestRetiredBuiltinIsThePlugins(t *testing.T) {
 	}
 	if _, err := StartSignInWith(id, SignInOptions{}); err == nil || !strings.Contains(err.Error(), "plugin") {
 		t.Fatalf("signing in to the retired built-in: %v", err)
-	}
-}
-
-// A retired built-in's accounts not moved yet are its mover's to take,
-// the agent's own sign-in too: listed as the agent's own, not left out as
-// the plugin's, until the move has run.
-func TestRetiredOwnAccountStillMoves(t *testing.T) {
-	home := signIn(t)
-	was := retiredBuiltins["zcode"]
-	retiredBuiltins["zcode"] = true
-	t.Cleanup(func() { retiredBuiltins["zcode"] = was })
-	t.Setenv("ZCODE_CREDENTIAL_SECRET", "test-secret")
-	writeFile(t, filepath.Join(home, ".zcode", "v2", "credentials.json"), map[string]any{
-		"oauth:zai:user_info": zcodeEncrypt(t, `{"user_id":"u1","email":"own@example.com"}`),
-		"account-provider:coding-plan:account:zai-individual-coding-plan:account:abc:api-key": zcodeEncrypt(t, "own.secret"),
-	})
-	if own := movingOf(t, "zcode")["own@example.com"]; !own.Own {
-		t.Fatalf("ZCode's own, retired and not moved: %+v", own)
-	}
-	if c := MoveCandidates(); len(c) != 1 || c[0].ID != "zcode" || c[0].Accounts != 1 {
-		t.Fatalf("candidates: %+v", c)
 	}
 }

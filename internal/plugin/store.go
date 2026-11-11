@@ -162,32 +162,80 @@ func ListPath() string { return listPath() }
 // put back) would be missed by a stamp, and only the parse is reused.
 var pluginsList struct {
 	sync.Mutex
-	path string
-	raw  []byte
-	list List
+	path  string
+	raw   []byte
+	list  List
+	valid bool
 }
 
 // list is plugins.json, read now. What it gives is shared and must not be
 // changed; Load gives the mutable copy.
 func list() List {
+	l, _ := listSnapshot()
+	return l
+}
+
+// listSnapshot also reports whether the current file was readable and
+// decoded completely. A recovered backup is useful to existing readers but
+// cannot establish the current list for destructive reconciliation.
+func listSnapshot() (List, bool) {
 	path := listPath()
 	// one a crash left all zero (#1505) is its last good generation: the
 	// plugins installed are unknown, never none
-	b, err := lastgood.Read(path, lastgood.JSON)
+	b, err := steady.ReadFile(path)
+	if os.IsNotExist(err) {
+		return List{}, true
+	}
 	if err != nil {
 		// Do not cache read failures; a later call will read the file again.
-		return List{}
+		return List{}, false
+	}
+	current := lastgood.JSON(b)
+	if !current {
+		b, err = lastgood.Fallback(path, b, lastgood.JSON)
+		if err != nil {
+			return List{}, false
+		}
 	}
 	pluginsList.Lock()
 	defer pluginsList.Unlock()
 	if pluginsList.path == path && bytes.Equal(pluginsList.raw, b) {
-		return pluginsList.list
+		return pluginsList.list, current && pluginsList.valid
 	}
 	var l List
 	// Preserve partially decoded values on type errors, as Load has always done.
-	_ = json.Unmarshal(b, &l)
+	err = json.Unmarshal(b, &l)
+	trimmed := bytes.TrimSpace(b)
+	valid := err == nil && len(trimmed) > 0 && trimmed[0] == '{' && validPluginEntries(b)
 	pluginsList.path, pluginsList.raw, pluginsList.list = path, b, l
-	return l
+	pluginsList.valid = valid
+	return l, current && valid
+}
+
+func validPluginEntries(b []byte) bool {
+	var raw struct {
+		Plugins []json.RawMessage `json:"plugins"`
+	}
+	if json.Unmarshal(b, &raw) != nil {
+		return false
+	}
+	for _, entry := range raw.Plugins {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(entry, &fields) != nil || fields == nil {
+			return false
+		}
+		var spec string
+		if json.Unmarshal(fields["spec"], &spec) != nil || spec == "" {
+			return false
+		}
+		if off, ok := fields["off"]; ok {
+			var value *bool
+			if json.Unmarshal(off, &value) != nil || value == nil {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Load reads plugins.json. What it gives is the caller's to change at every
@@ -389,6 +437,9 @@ func Target(spec string) string {
 		}
 		return p
 	}
+	if IsBundledZCode(spec) {
+		return bundledTarget()
+	}
 	return filepath.Join(Dir(), "node_modules", filepath.FromSlash(Name(spec)))
 }
 
@@ -397,6 +448,9 @@ func Target(spec string) string {
 // community plugin's short or shown name (workbuddy, WorkBuddy) is its
 // package (resolve); the entry gives the package installed.
 func Add(ctx context.Context, spec string) (Entry, error) {
+	if IsBundledZCode(strings.TrimSpace(spec)) {
+		return Entry{}, errors.New("ZCode is built into magpie and cannot be installed as a plugin")
+	}
 	spec, err := resolve(ctx, strings.TrimSpace(spec))
 	if err != nil {
 		return Entry{}, err
@@ -414,6 +468,9 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return Entry{}, errors.New("no plugin given")
+	}
+	if IsBundledZCode(spec) {
+		return Entry{}, errors.New("ZCode is built into magpie and cannot be installed as a plugin")
 	}
 	// the package each plugin is before the install, which may take a git
 	// one's name over (one repository in place of another, or of npm's)
@@ -438,10 +495,16 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 		if !pkgName.MatchString(Name(spec)) {
 			return Entry{}, fmt.Errorf("%q isn't an npm package name", spec)
 		}
-		if Name(spec) == spec {
+		if IsBundledZCode(spec) {
+			if err := ensureBundledZCode(); err != nil {
+				return Entry{}, err
+			}
+		} else if Name(spec) == spec {
 			spec += "@latest"
 		}
-		if version != "" {
+		if IsBundledZCode(spec) {
+			// Already published from this binary, never from npm or dist.
+		} else if version != "" {
 			if err := installAt(ctx, Name(spec), version); err != nil {
 				return Entry{}, err
 			}
@@ -451,7 +514,7 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 	}
 	if err := notPlugin(Target(spec)); err != nil {
 		// installed just now for this, and nothing loads it: taken out again
-		if !IsPath(spec) && !slices.Contains(slices.Collect(maps.Values(was)), Name(spec)) {
+		if !IsPath(spec) && !IsBundledZCode(spec) && !slices.Contains(slices.Collect(maps.Values(was)), Name(spec)) {
 			if bun, berr := Bun(ctx); berr == nil {
 				_, _ = runBun(ctx, bun, "remove", "--ignore-scripts", Name(spec))
 			}
@@ -470,6 +533,9 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 		n, ok := was[x.Spec]
 		if !ok {
 			n = Name(x.Spec)
+		}
+		if IsBundledZCode(spec) != IsBundledZCode(x.Spec) && (IsGit(spec) || IsGit(x.Spec)) {
+			return false
 		}
 		return x.Spec == spec || n == name
 	}); i >= 0 {
@@ -561,6 +627,12 @@ func Update(ctx context.Context) error {
 	var errs []error
 	for _, e := range Load().Plugins {
 		if !IsPath(e.Spec) {
+			if IsBundledZCode(e.Spec) {
+				if err := ensureBundledZCode(); err != nil {
+					errs = append(errs, fmt.Errorf("%s: %w", e.Spec, err))
+				}
+				continue
+			}
 			v := ""
 			if !IsGit(e.Spec) {
 				v = newestOf(ctx, Name(e.Spec))
@@ -601,11 +673,21 @@ func indexOf(l List, name string) int {
 	if i := slices.IndexFunc(l.Plugins, func(x Entry) bool { return x.Spec == name }); i >= 0 {
 		return i
 	}
+	if name == bundledZCodePackage {
+		// The package name addresses its registry entry, not a git source
+		// which happens to install under the same name.
+		return slices.IndexFunc(l.Plugins, func(x Entry) bool {
+			return !IsPath(x.Spec) && !IsGit(x.Spec) && Name(x.Spec) == name
+		})
+	}
 	return slices.IndexFunc(l.Plugins, func(x Entry) bool { return Name(x.Spec) == name })
 }
 
 // Remove takes a plugin off the list (and out of plugins/).
 func Remove(ctx context.Context, name string) error {
+	if IsBundledZCode(name) {
+		return errors.New("ZCode is built into magpie and cannot be removed as a plugin")
+	}
 	listMu.Lock()
 	l := Load()
 	i := indexOf(l, name)
@@ -621,7 +703,7 @@ func Remove(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if !IsPath(e.Spec) {
+	if !IsPath(e.Spec) && !IsBundledZCode(e.Spec) {
 		if bun, err := Bun(ctx); err == nil {
 			_, _ = runBun(ctx, bun, "remove", "--ignore-scripts", Name(e.Spec))
 		}
@@ -684,6 +766,11 @@ func SetOptions(name string, opts map[string]any) error {
 	if i < 0 {
 		// a short name, as the community's READMEs write it: param-override
 		// for @magpie-community/middleware-param-override
+		if Called(bundledZCodePackage, name) {
+			i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return IsBundledZCode(x.Spec) })
+		}
+	}
+	if i < 0 {
 		i = slices.IndexFunc(l.Plugins, func(x Entry) bool { return Called(Name(x.Spec), name) })
 	}
 	if i < 0 {
@@ -735,6 +822,15 @@ func Called(pkg, name string) bool {
 // install puts an npm package into plugins/ with bun add, its scripts
 // left unrun as OpenCode leaves them.
 func install(ctx context.Context, spec string) error {
+	if IsBundledZCode(spec) {
+		return ensureBundledZCode()
+	}
+	return installPackage(ctx, spec)
+}
+
+// installPackage installs a registry or git source, without interpreting a
+// version obtained from registry metadata as an explicit bundle selection.
+func installPackage(ctx context.Context, spec string) error {
 	bun, err := Bun(ctx)
 	if err != nil {
 		return err
@@ -812,7 +908,7 @@ func bunAdd(ctx context.Context, bun, spec string) error {
 // through restarts and the hourly updates). Asked for the version, bun
 // says why it can't install it.
 func installAt(ctx context.Context, pkg, version string) error {
-	if err := install(ctx, pkg+"@"+version); err != nil {
+	if err := installPackage(ctx, pkg+"@"+version); err != nil {
 		// what bun said comes first: the page's status line shows the
 		// start of a long message
 		if m := minAge.FindStringSubmatch(err.Error()); m != nil {
@@ -867,6 +963,9 @@ func plural(n int, unit string) string {
 // newestOf is npm's newest version of the package, asked now, "" when npm
 // didn't say; what it says is kept, as Info keeps it (tests stub it).
 var newestOf = func(ctx context.Context, name string) string {
+	if IsBundledZCode(name) {
+		return bundledZCodeVersion
+	}
 	c, cancel := context.WithTimeout(ctx, checkEach)
 	info, err := npmAsk(c, name)
 	cancel()
@@ -954,6 +1053,9 @@ func ensurePi(ctx context.Context, target string) error {
 // the one bun.lock has — through bun's cache's clone of the repository,
 // whose refs refreshGitCache fetches first (#2954).
 func reinstall(ctx context.Context, spec string) error {
+	if IsBundledZCode(spec) {
+		return ensureBundledZCode()
+	}
 	name := Name(spec)
 	if !IsGit(spec) || name == spec {
 		return install(ctx, spec)
@@ -1031,6 +1133,9 @@ func Version(spec string) string {
 		Version string `json:"version"`
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil && json.Unmarshal(b, &pj) == nil {
+		if IsBundledZCode(spec) && pj.Version != bundledZCodeVersion {
+			return ""
+		}
 		return pj.Version
 	}
 	return ""
