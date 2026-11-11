@@ -241,6 +241,7 @@ var cliForRoute = map[string]string{
 }
 
 var notYet = map[string]string{
+	"POST /api/library/mcp-account":              L,  // Library editor's header/OAuth account switcher, not the CLI's provider-account binding.
 	"GET /api/library/servers/account-target":    W,  // GUI trust preview; CLI binding validates the target itself.
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go

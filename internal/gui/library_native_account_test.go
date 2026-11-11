@@ -14,7 +14,7 @@ import (
 
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
-	"github.com/yetone/magpie/internal/testenv"
+	nativefixture "github.com/yetone/magpie/internal/plugin/testdata/nativeaccount"
 )
 
 func TestLibraryAccountTargetAndBindGuards(t *testing.T) {
@@ -183,57 +183,12 @@ func TestLibraryAccountUnbindScopedAndLegacyCurrent(t *testing.T) {
 }
 
 func TestLibraryStdioAccountBindingHTTPRoundTrip(t *testing.T) {
-	bun := testenv.Bun(t)
+	nativefixture.Start(t)
 	home := sandboxHome(t)
-	t.Setenv("MAGPIE_BUN", bun)
 	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
-	t.Cleanup(plugin.Settle)
-	fixture := filepath.Join(home, "native-fixture.mjs")
-	source := `export const Fixture = async () => ({
-  config(c) {
-    c.provider ??= {};
-    c.provider.zcode = {name: "Fixture", npm: "@ai-sdk/openai-compatible",
-      api: "https://fixture.invalid/v1",
-      models: {one: {name: "One", limit: {context: 1000, output: 100}}}};
-  },
-  auth: {
-    provider: "zcode", methods: [{type: "api", label: "Fixture"}],
-    accountOperations: ["context", "mcp.headers"],
-    accountPreflight({operation, params}) {
-      if (operation === "mcp.headers" && (params?.stdio !== true || params?.url))
-        throw new Error("untrusted");
-    },
-    async account(getAuth, _, {operation, expectedScope, expectedGeneration}) {
-      const a = await getAuth();
-      if (!a || expectedScope && expectedScope !== a.accountScope ||
-          expectedGeneration && expectedGeneration !== a.accountEpoch)
-        throw Object.assign(new Error("changed"), {kind: "account_changed"});
-      const context = {scope: a.accountScope, generation: a.accountEpoch,
-        origin: "https://fixture.invalid", family: "fixture", userId: "user",
-        kind: "individual", organization: "", project: "", product: ""};
-      return {context, data: operation === "mcp.headers" ?
-        {headers: {Authorization: "Bearer " + a.key}} : {}};
-    }
-  }
-})`
-	if err := os.WriteFile(fixture, []byte(source), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if _, err := plugin.Add(ctx, fixture); err != nil {
-		t.Fatal(err)
-	}
-	account, err := plugin.Import(ctx, "zcode", map[string]any{
-		"type": "api", "key": "fixture-secret", "accountId": "user",
-		"accountScope": "scope", "accountEpoch": "generation",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plugin.Providers(ctx); err != nil {
-		t.Fatal(err)
-	}
+	_, account := nativefixture.Install(t, ctx)
 	command := filepath.Join(home, "program")
 	if err := os.WriteFile(command, []byte("trusted fixture"), 0o700); err != nil {
 		t.Fatal(err)
@@ -259,8 +214,10 @@ func TestLibraryStdioAccountBindingHTTPRoundTrip(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s %s: %d %s", method, path, w.Code, w.Body.String())
 		}
-		if strings.Contains(w.Body.String(), "fixture-secret") {
-			t.Fatalf("%s leaked the account credential: %s", path, w.Body.String())
+		for _, secret := range []string{"fixture-business", "fixture-zcode"} {
+			if strings.Contains(w.Body.String(), secret) {
+				t.Fatalf("%s leaked the account credential: %s", path, w.Body.String())
+			}
 		}
 		return w
 	}
