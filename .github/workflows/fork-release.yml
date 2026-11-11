@@ -13,9 +13,20 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the build (e.g. 0.1.4000); empty: 0.0.0-<sha>'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+
+# версия сборки: из тега (v0.1.4000 -> 0.1.4000), из input ручного запуска
+# или 0.0.0-<sha> для ручного без input
+env:
+  BUILD_VERSION: ${{ github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
 
 jobs:
   app:
@@ -32,9 +43,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Build the app
-        env:
-          TAG: ${{ github.ref_name }}
-        run: make app VERSION="${TAG#v}"
+        run: make app VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
 
       - name: Sign ad-hoc
         run: |
@@ -48,6 +57,7 @@ jobs:
           ( cd dist && shasum -a 256 magpie-darwin-arm64.zip | awk '{print $1}' > magpie-darwin-arm64.zip.sha256 )
 
       - name: latest.json
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
@@ -83,7 +93,15 @@ jobs:
           open("dist/notes.md", "w").write(f"# {tag}\n\n{notes}\n")
           PY
 
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: magpie-darwin-arm64
+          path: dist/*
+          if-no-files-found: error
+
       - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
