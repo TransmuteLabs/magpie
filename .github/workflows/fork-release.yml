@@ -63,6 +63,8 @@ jobs:
           if-no-files-found: error
 
   windows:
+    # пока выключено: one word убрать if — и джоба вернётся
+    if: false
     # WebView2 без cgo: обе архитектуры кросс-компилятся (Makefile,
     # release-windows: go-winres, -H windowsgui, comlauncher)
     runs-on: ubuntu-latest
@@ -84,26 +86,28 @@ jobs:
           if-no-files-found: error
 
   linux:
-    # GUI линкует GTK 3 и WebKitGTK 4.1 через cgo — нативно, одна архитектура
-    # на машину (Makefile, release-linux); arm64-раннеры публичным репо бесплатны
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: amd64, os: ubuntu-latest }
-          - { arch: arm64, os: ubuntu-24.04-arm }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # пока выключено; включить — убрать if. Alma-вариант (контейнер
+    # almalinux:10 + dnf golang git gtk3-devel webkit2gtk4.1-devel)
+    # проверен руками на usbox-adm: та же make release-linux собирается
+    # меньше чем за минуту
+    if: false
+    # GUI линкует GTK 3 и WebKitGTK 4.1 через cgo — нативно; arm64 не нужен
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
+      # застрявшее apt-зеркало — известный режим отказа раннеров (см.
+      # test.yml); ForceIPv4 закрывает DNS-сбой "Temporary failure resolving
+      # archive.ubuntu.com", короткий таймаут шага делает фейл видимым
       - name: GTK 3 and WebKitGTK 4.1 headers
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          sudo apt-get -o Acquire::ForceIPv4 -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::ForceIPv4 -o Acquire::Retries=3 install -y libgtk-3-dev libwebkit2gtk-4.1-dev
 
       - name: Build the app
         run: make release-linux VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
@@ -111,8 +115,8 @@ jobs:
       - name: Upload the build
         uses: actions/upload-artifact@v4
         with:
-          name: magpie-linux-${{ matrix.arch }}
-          path: dist/magpie-linux-${{ matrix.arch }}
+          name: magpie-linux-amd64
+          path: dist/magpie-linux-amd64
           if-no-files-found: error
 
   release:
