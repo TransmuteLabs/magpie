@@ -21733,7 +21733,7 @@ function renderReplies(s, keep) {
   // a Claude run's, in its provider's editor (PROV_PREFS)
   $("#claudeRunList").replaceChildren(c, u);
   $("#claudeRunList").classList.toggle("gw", gatewayMode);
-  $("#routeList").replaceChildren(f, a, k, $("#busyLoadRow"));
+  $("#routeList").replaceChildren(f, a, k, $("#busyLoadRow"), $("#contextCapRow"));
 }
 
 // renderDisabledModels: models turned off for every request (#1867), a row per
