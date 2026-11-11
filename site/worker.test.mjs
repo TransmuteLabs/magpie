@@ -907,3 +907,72 @@ test("r2: the five-minute cron copies the newest release's files from github.com
     store.clear();
   }
 });
+
+test("plugins/tagged: the dist branch's list passed on, jsDelivr and the last copy when it fails", async () => {
+  const was = globalThis.fetch;
+  const list = { version: 1, plugins: [{ repo: "a/b", spec: "github:a/b", stars: 3 }] };
+  let rawDown = false, cdnDown = false;
+  globalThis.fetch = async (u) => {
+    u = String(u);
+    if (u.startsWith("https://raw.githubusercontent.com/magpie-community/plugins/dist/")) return rawDown ? new Response("x", { status: 503 }) : Response.json(list);
+    if (u.startsWith("https://cdn.jsdelivr.net/gh/magpie-community/plugins@dist/")) return cdnDown ? new Response("x", { status: 503 }) : Response.json(list);
+    throw new Error("a test reached " + u);
+  };
+  try {
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    const ask = () => worker.fetch(new Request("https://usemagpie.ai/api/plugins/tagged"), {}, ctx);
+    let res = await ask();
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).plugins, list.plugins);
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    rawDown = true;
+    assert.equal((await (await ask()).json()).plugins[0].repo, "a/b", "jsDelivr stands in");
+    store.delete("https://usemagpie.ai/__v2/tagged");
+    cdnDown = true;
+    assert.equal((await (await ask()).json()).plugins[0].repo, "a/b", "the last whole copy stands in");
+    store.delete("https://usemagpie.ai/__v2/tagged-good");
+    assert.equal((await ask()).status, 503);
+  } finally {
+    globalThis.fetch = was;
+  }
+});
+
+test("plugins/readme: a plugin's kept README passed on, from jsDelivr when raw fails, 404 when none", async () => {
+  const was = globalThis.fetch;
+  const asked = [];
+  let rawDown = false;
+  globalThis.fetch = async (u) => {
+    u = String(u);
+    asked.push(u);
+    const raw = "https://raw.githubusercontent.com/magpie-community/plugins/dist/readmes/";
+    const cdn = "https://cdn.jsdelivr.net/gh/magpie-community/plugins@dist/readmes/";
+    for (const [base, down] of [[raw, rawDown], [cdn, false]]) {
+      if (!u.startsWith(base)) continue;
+      if (down) return new Response("x", { status: 503 });
+      if (u.endsWith("/rsshub-plugin.md")) return new Response("# kept");
+      if (u.endsWith("/%40sc/scoped.md")) return new Response("# scoped");
+      if (u.endsWith("/github/o/r.md")) return new Response("# repo");
+      return new Response("nope", { status: 404 });
+    }
+    throw new Error("a test reached " + u);
+  };
+  try {
+    const ask = (n) => worker.fetch(new Request("https://usemagpie.ai/api/plugins/readme?name=" + encodeURIComponent(n)), {}, ctx);
+    for (const [n, want] of [["rsshub-plugin", "# kept"], ["@sc/scoped", "# scoped"], ["github:o/r", "# repo"]]) {
+      store.delete("https://usemagpie.ai/__v2/readme/" + (n.startsWith("github:") ? "github/" + n.slice(7) : n));
+      const res = await ask(n);
+      assert.equal(res.status, 200, n);
+      assert.equal(await res.text(), want);
+    }
+    const before = asked.length;
+    assert.equal(await (await ask("rsshub-plugin")).text(), "# kept");
+    assert.equal(asked.length, before, "the edge keeps it");
+    store.delete("https://usemagpie.ai/__v2/readme/rsshub-plugin");
+    rawDown = true;
+    assert.equal(await (await ask("rsshub-plugin")).text(), "# kept", "jsDelivr stands in");
+    assert.equal((await ask("missing-one")).status, 404);
+    for (const bad of ["../x", "github:../../x", "", "A B"]) assert.equal((await ask(bad)).status, 400, bad);
+  } finally {
+    globalThis.fetch = was;
+  }
+});

@@ -1357,7 +1357,7 @@ function routingPage(part) {
   // this browser doesn't know it
   function zoneOffset(zone, at = new Date()) {
     try {
-      const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, ...hourClock(), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
         .formatToParts(at).map((x) => [x.type, x.value]));
       return Math.round((Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second) - Math.floor(at.getTime() / 1000) * 1000) / 60000);
     } catch { return null; }
@@ -1446,6 +1446,22 @@ function routingPage(part) {
       add("vendor", "Streaming", (tr.ms || 0) - tr.ttft);
     } else add("vendor", "Reading the reply", (tr.ms || 0) - head);
     return out;
+  }
+  // why a run was claude -p, by gateway.claudePrint's code
+  const ENTRY_WHY = {
+    off: "the interactive mode is turned off",
+    os: "this system can't run the interactive mode",
+    "no-shim": "this system can't run the interactive mode",
+    missing: "Claude Code isn't installed on this computer",
+    image: "the request has an image known by its URL, which only claude -p takes",
+    "third-party": "the interactive mode was turned away over this agent's system prompt",
+    "cache-marks": "the client's cache marks keep history that a fresh interactive run would write again",
+  };
+  // entryNote: what a try's entry point chip says (Try.Entry)
+  function entryNote(tr) {
+    if (tr.entry === "tui") return t("Claude Code ran this request in its interactive mode (TUI)");
+    const why = ENTRY_WHY[tr.entryWhy];
+    return t("Claude Code ran this request as claude -p") + (why ? ": " + t(why) : "");
   }
   const WHO = { magpie: "magpie {ms}", net: "network {ms}", vendor: "vendor {ms}" };
   // why a try that went out some other way has no split (gateway.sentBy)
@@ -4274,7 +4290,7 @@ function routingPage(part) {
     // all the row says, and its titles
     const title = reqTitle(r, how, tr);
     const sig = JSON.stringify([lang, said, how, title, r.time, r.agent, name, ag?.icon, r.model, r.provider, tagKind(r), r.effort,
-      tr?.effort, tr?.picked, tr?.fixed, tr?.fast, tr?.swapped && tr.done && tryOk(tr) ? [tr.model, tr.served] : 0, tr?.routed && tr.done && tryOk(tr) ? tr.served : 0, tr?.done && tryOk(tr) ? tr.upstream : 0, meta, metrics, cost]);
+      tr?.effort, tr?.picked, tr?.fixed, tr?.fast, tr?.entry, tr?.entryWhy, tr?.swapped && tr.done && tryOk(tr) ? [tr.model, tr.served] : 0, tr?.routed && tr.done && tryOk(tr) ? tr.served : 0, tr?.done && tryOk(tr) ? tr.upstream : 0, meta, metrics, cost]);
     s = { lang, shows, name, icon, cost, said, how, tr, ag, meta, metrics, title, sig };
     rowSaid.set(r, s);
     return s;
@@ -4607,6 +4623,12 @@ function routingPage(part) {
       const ft = el("span", "ef", t("fast"));
       ft.title = t("Sent in its vendor's fast mode, as the group says");
       to.append(ft);
+    }
+    if (tr?.entry) {
+      // how Claude Code ran it, whose cost to the plan differs (Anotiaww on X)
+      const en = el("span", "ef", tr.entry === "tui" ? "TUI" : "-p");
+      en.title = entryNote(tr);
+      to.append(en);
     }
     if (tr?.swapped && tr.done && tryOk(tr)) to.append(swapTag(tr, true)); // beside the model asked for
     else if (tr?.routed && tr.done && tryOk(tr)) to.append(routedTag(tr));
@@ -5398,7 +5420,7 @@ function routingPage(part) {
   }
   function replayBar(p, fast) {
     const d = new Date(p.real);
-    rClock.textContent = d.toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + "." + Math.floor(d.getMilliseconds() / 100);
+    rClock.textContent = d.toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", ...hourClock() }) + "." + Math.floor(d.getMilliseconds() / 100);
     const day = d.toDateString() === new Date().toDateString() ? t("today") : d.toLocaleDateString(intlLang(), { weekday: "short", month: "short", day: "numeric" });
     setText(rDay, day);
     // a quiet stretch cut short: the clock runs fast through it, whatever
@@ -5426,7 +5448,7 @@ function routingPage(part) {
       const [said] = outcome(r);
       row.append(el("span", "rp-n", t("request {i} of {n}", { i: g.n, n: p.plan.length })), sw,
         el("b", "", callerName(r)), el("code", "mdl", r.model), ...rowTags(r), el("span", "rp-to", "→ " + said),
-        el("span", "rp-at", t("sent {time}", { time: new Date(r.time).toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) })));
+        el("span", "rp-at", t("sent {time}", { time: new Date(r.time).toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", ...hourClock() }) })));
       row.onclick = () => { cur = r; renderLog(); };
       return row;
     }) : [el("span", "rp-wait", t("starting…"))]));
@@ -6202,7 +6224,7 @@ function routingPage(part) {
   // there, rather than leaving the slot empty.
   const openGroupEditor = async (g) => {
     if (groupDirty() && !(await confirmDiscard())) return false;
-    gEdit = { id: g.id, draft: { name: g.name, note: g.note || "", members: [...g.members], match: [...(g.match || [])], matched: [...(g.matched || [])], fast: [...(g.fast || [])], off: [...(g.off || [])], weights: { ...(g.weights || {}) }, effortMaps: Object.fromEntries(Object.entries(g.effortMaps || {}).map(([id, m]) => [id, { ...m }])), accounts: [...(g.accounts || [])], keys: [...(g.keys || [])], routing: g.routing || "", pick: g.pick || "", affinity: g.affinity || "", sink: sinkModeOf(g), unlists: !!g.unlists, firstToken: g.firstToken || 0, patience: g.patience || 0, context: g.context || 0, classifier: g.classifier || "", intentSure: g.intentSure ?? null, effort: g.effort || "", levels: [...(g.levels || [])], rules: (g.rules || []).map((r) => ({ ...r, ...(r.more?.length ? { more: [...r.more] } : {}), intent: r.intent || "", agents: [...(r.agents || [])], folders: [...(r.folders || [])], exceptFolders: [...(r.exceptFolders || [])], where: (r.where || []).map((c) => ({ ...c })), time: r.time ? { ...r.time, days: [...(r.time.days || [])] } : null })) } };
+    gEdit = { id: g.id, draft: { name: g.name, note: g.note || "", members: [...g.members], match: [...(g.match || [])], matched: [...(g.matched || [])], fast: [...(g.fast || [])], off: [...(g.off || [])], weights: { ...(g.weights || {}) }, effortMaps: Object.fromEntries(Object.entries(g.effortMaps || {}).map(([id, m]) => [id, { ...m }])), accounts: [...(g.accounts || [])], keys: [...(g.keys || [])], redact: g.redact || "", routing: g.routing || "", pick: g.pick || "", affinity: g.affinity || "", sink: sinkModeOf(g), unlists: !!g.unlists, firstToken: g.firstToken || 0, patience: g.patience || 0, context: g.context || 0, classifier: g.classifier || "", intentSure: g.intentSure ?? null, effort: g.effort || "", levels: [...(g.levels || [])], rules: (g.rules || []).map((r) => ({ ...r, ...(r.more?.length ? { more: [...r.more] } : {}), intent: r.intent || "", agents: [...(r.agents || [])], folders: [...(r.folders || [])], exceptFolders: [...(r.exceptFolders || [])], where: (r.where || []).map((c) => ({ ...c })), time: r.time ? { ...r.time, days: [...(r.time.days || [])] } : null })) } };
     renderGroups();
     return true;
   };
@@ -6984,7 +7006,7 @@ function routingPage(part) {
       if (s && !s.isCollapsed && row.contains(s.focusNode) && String(s) !== selAtDown) return;
       open();
     };
-    row.oncontextmenu = (e) => { e.preventDefault(); groupMenu(ics, g); };
+    row.oncontextmenu = (e) => { e.preventDefault(); groupMenu(ics, g, { x: e.clientX, y: e.clientY }); };
     row.append(ics, main, tags, edit);
     // a group of the user's switches off as a whole, kept as it is (PAMI
     // on Discord); one magpie found is removed rather (provider.SwitchGroup)
@@ -7076,7 +7098,7 @@ function routingPage(part) {
     };
     return b;
   }
-  function groupMenu(anchor, g) {
+  function groupMenu(anchor, g, at) {
     const again = agentMenu?.anchor === anchor;
     closeAgentMenu();
     if (again) return;
@@ -7091,7 +7113,7 @@ function routingPage(part) {
       // the group as text for someone else's magpie (laincatx on X)
       { name: "Copy to share", icon: OUT, tip: t("{name} as text to paste into another magpie: its models, routing and rules, no key", { name: g.name }),
         run: () => shareGroup(g) },
-    ]);
+    ], at);
   }
   // nextTo: where a group moved one up (-1) or down goes, among them all:
   // the place of the card listed next to it, so a filtered list moves it
@@ -7694,6 +7716,27 @@ function routingPage(part) {
       keysBox.replaceChildren(row);
     };
     drawKeys();
+
+    // masking (1dwsdqwd2 on X): the group follows each member's provider
+    // ("Send requests unmasked") and Settings, or is masked as Settings say
+    // whichever provider it has, or is sent as written (Group.Redact)
+    const redactLabel = el("label", "rt-gredact", t("Masking")), redactBox = el("div", "rt-gredact");
+    ed.append(redactLabel, redactBox);
+    const REDACT = { "": "Follow providers", on: "Always masked", off: "Sent as written" };
+    const drawRedact = () => {
+      const b = el("button", "rt-cond rt-gredact-b" + (d.redact ? " on" : ""));
+      b.type = "button";
+      b.append(el("span", "", t(REDACT[d.redact] || REDACT[""])));
+      b.setAttribute("aria-label", `${t("Masking")}: ${b.textContent}`);
+      b.onclick = (ev) => pickFrom("masking", b, ev, Object.entries(REDACT).map(([value, label]) => ({ value, label: t(label), note: d.redact === value ? "✓" : "" })), (v) => {
+        d.redact = v === "on" || v === "off" ? v : "";
+        drawRedact();
+      }, d.redact);
+      const row = el("div", "rt-pickrow");
+      row.append(b, infoTip(t("Whether requests through this group are masked. Follow providers: each model's own setting, Send requests unmasked, decides. Always masked: as Settings say, even to a provider set to go unmasked. Sent as written: not masked, to every model in it. Masking turned off in Settings masks nothing.")));
+      redactBox.replaceChildren(row);
+    };
+    drawRedact();
 
     // patterns: models found by their ids, now and as providers list new
     // ones (#766): after the models named, in the catalog's order, until
@@ -8756,7 +8799,7 @@ function routingPage(part) {
       if (own && !d.levels.length) return status(t("Pick a level to offer, or leave them to its models"), "warn");
       saveBtn.classList.add("busy");
       // refused, Add can be pressed again (busy, it takes no clicks)
-      groupAction("save", { id: idOf(), from: g?.id, name: d.name.trim() || idOf(), note: (d.note || "").trim(), members: namedOf(d), placed: d.members, match: d.match, routing: d.routing, pick: d.pick || "", affinity: d.affinity, sink: d.sink === "sink" && sinkable(d.routing), noSink: d.sink === "", firstToken: d.firstToken || 0, patience: d.patience || 0, rules: d.rules, effort: d.effort, classifier: d.rules.some((r) => r.intent) || d.effort === "auto" ? d.classifier : "", intentSure: d.intentSure ?? null, context: d.context || 0, levels: own ? d.levels : [], family: g?.family || "", fast: d.fast.filter((x) => d.members.includes(x)), off: d.off.filter((x) => d.members.includes(x)), weights: Object.fromEntries(Object.entries(d.weights).filter(([x, n]) => d.members.includes(x) && n > 1)), effortMaps: Object.fromEntries(Object.entries(d.effortMaps).filter(([x, m]) => d.members.includes(x) && Object.keys(m).length)), accounts: d.accounts.filter((a) => accountPids().includes(a.slice(0, a.indexOf("/")))), keys: d.keys, unlists: !!d.unlists }, t(g ? "{name} saved" : "{name} added", { name: d.name.trim() || idOf() }))
+      groupAction("save", { id: idOf(), from: g?.id, name: d.name.trim() || idOf(), note: (d.note || "").trim(), members: namedOf(d), placed: d.members, match: d.match, routing: d.routing, pick: d.pick || "", affinity: d.affinity, sink: d.sink === "sink" && sinkable(d.routing), noSink: d.sink === "", firstToken: d.firstToken || 0, patience: d.patience || 0, rules: d.rules, effort: d.effort, classifier: d.rules.some((r) => r.intent) || d.effort === "auto" ? d.classifier : "", intentSure: d.intentSure ?? null, context: d.context || 0, levels: own ? d.levels : [], family: g?.family || "", fast: d.fast.filter((x) => d.members.includes(x)), off: d.off.filter((x) => d.members.includes(x)), weights: Object.fromEntries(Object.entries(d.weights).filter(([x, n]) => d.members.includes(x) && n > 1)), effortMaps: Object.fromEntries(Object.entries(d.effortMaps).filter(([x, m]) => d.members.includes(x) && Object.keys(m).length)), accounts: d.accounts.filter((a) => accountPids().includes(a.slice(0, a.indexOf("/")))), keys: d.keys, redact: d.redact || "follow", unlists: !!d.unlists }, t(g ? "{name} saved" : "{name} added", { name: d.name.trim() || idOf() }))
         .then(() => saveBtn.classList.remove("busy"));
     };
     // what goes wrong is said where it is seen, never a click that does nothing
@@ -9234,7 +9277,7 @@ function routingPage(part) {
     const asked = el("span", "pr-a");
     asked.append(icon(ag?.icon || "generic"), el("span", "pr-who", callerName(r)), el("code", "m", r.model));
     asked.append(...rowTags(r));
-    const when = el("span", "at", new Date(r.time).toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }));
+    const when = el("span", "at", new Date(r.time).toLocaleTimeString(intlLang(), { hour: "2-digit", minute: "2-digit", second: "2-digit", ...hourClock() }));
     // where it went: the provider, the account or key, and the model that
     // answered — marked when the reply names another than the one sent
     const to = el("span", "pr-to");

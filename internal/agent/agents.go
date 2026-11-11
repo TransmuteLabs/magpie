@@ -39,12 +39,15 @@ func init() {
 	// the Sessions page reads the sessions of the agents in WSL distros
 	sessions.WSLHomes = wslHomes
 	sessions.WSLRunning = WSLRunning
+	sessions.WSLListed = wslAnswered
 	sessions.WSLOff = func() bool { return !wslLooks() }
 	// an agy conversation started on magpie's gateway is picked up again
 	// there, with the variables and --model it was started with
 	sessions.AgyStart = func() string {
-		home, _ := homes()
-		return agy(home).Launch()
+		if a, _ := FindIn(local(), "agy"); a != nil && a.Launch != nil {
+			return a.Launch()
+		}
+		return ""
 	}
 	// a Copilot CLI signed in inside a running distro (#723)
 	provider.CopilotWSLDirs = copilotWSLDirs
@@ -247,8 +250,27 @@ func local() []*Agent {
 	return append(own, pluggedAgents(home, own, nil)...)
 }
 
-// onMachine are builtins but those in WSL.
-func onMachine(home, cfg string) []*Agent {
+// Starter is the agent on this machine typed as q, by its id or an alias
+// (no prefix: every argument after it is the agent's), that magpie starts
+// from the command line (Agent.Start); nil for none.
+func Starter(q string) *Agent {
+	for _, a := range local() {
+		if a.Start == nil {
+			continue
+		}
+		if strings.EqualFold(a.ID, q) || slices.Contains(a.Aliases, strings.ToLower(q)) {
+			return a
+		}
+	}
+	return nil
+}
+
+// onMachine are builtins but those in WSL, and but those a plugin serves
+// now (agentMovers).
+func onMachine(home, cfg string) []*Agent { return dropMoved(onMachineAll(home, cfg)) }
+
+// onMachineAll is onMachine with every built-in.
+func onMachineAll(home, cfg string) []*Agent {
 	return append([]*Agent{
 		claude(home),
 		claudeDesktop(home),
@@ -337,7 +359,7 @@ func onMachine(home, cfg string) []*Agent {
 		aionui(),
 		cherryStudio(home),
 		lody(home),
-	}, append(ompProfiles(home), qwenpawAgents(home)...)...)
+	}, append(append(append(ompProfiles(home), qwenpawAgents(home)...), hermesProfileAgents(home)...), claudeDirAgents(home)...)...)
 }
 
 // ---- accessors -------------------------------------------------------------
@@ -1525,8 +1547,13 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	before := beforeMagpie{at.key(id + ".before.absent"), []string{path, modelsPath}}
 	// the entries of enabledModels a sync took out (scope_gone.go)
 	gone := at.key(id + ".scope.gone")
+	var telemetry *Telemetry
+	if id == "pi" {
+		telemetry = piTelemetry(at, path)
+	}
 	return &Agent{
-		ID: id, Name: name, Icon: id, Bin: id, Dir: dir, Path: path, Spelled: prefixed,
+		Telemetry: telemetry,
+		ID:        id, Name: name, Icon: id, Bin: id, Dir: dir, Path: path, Spelled: prefixed,
 		Restore: before.restore,
 		Check: func() string {
 			if p, _ := get("defaultProvider"); p != magpieID {
@@ -1662,7 +1689,8 @@ func gooseIn(at place, cfg string) *Agent {
 		keyEnv = func(string) string { return "" }
 	}
 	return &Agent{
-		ID: "goose", Name: "Goose", Icon: "goose", Bin: "goose", Dir: filepath.Dir(path), Path: path, Spelled: prefixed, NoNames: true,
+		Telemetry: gooseTelemetry(at, path),
+		ID:        "goose", Name: "Goose", Icon: "goose", Bin: "goose", Dir: filepath.Dir(path), Path: path, Spelled: prefixed, NoNames: true,
 		UA: []string{"goose"},
 		Check: func() string {
 			if p, _ := gooseActive(path); p != gooseProviderID {
@@ -2051,7 +2079,8 @@ func crushAt(at place, path, data string) *Agent {
 		}
 	}
 	return &Agent{
-		ID: "crush", Name: "Crush", Icon: "crush", Bin: "crush", Dir: filepath.Dir(path), Path: path, Spelled: prefixed,
+		Telemetry: crushTelemetry(at, path),
+		ID:        "crush", Name: "Crush", Icon: "crush", Bin: "crush", Dir: filepath.Dir(path), Path: path, Spelled: prefixed,
 		UA: []string{"crush"},
 		Check: func() string {
 			large, _ := pick("models.large.provider")

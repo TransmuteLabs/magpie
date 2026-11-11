@@ -1666,6 +1666,7 @@ func serve() error {
 	follow := newServeFollow(s, stop)
 	if follow != nil {
 		gateway.SetRestarter(follow.answer)
+		gateway.SetForceRestarter(follow.answerNow)
 		go follow.run(ctx)
 	}
 	// another magpie using this one updated (serve_update.go), and this
@@ -1831,8 +1832,8 @@ func accountCapCmd(rest []string) error {
 	if err != nil {
 		return err
 	}
-	if p.Account == nil {
-		return fmt.Errorf("%s has keys, not subscription accounts with usage windows to cap", p.Name)
+	if !p.TakesUsageCap() {
+		return fmt.Errorf("%s has keys with no usage windows magpie reads, not subscription accounts with windows to cap", p.Name)
 	}
 	if amountSet {
 		n, err := parseWindowAmount(amount)

@@ -132,7 +132,13 @@ const usage = `magpie — one place to pick every agent's model
                                   --web: the service serves magpie web's page too, with a key kept across restarts; installed again, it keeps what it served
   magpie daemon web [on|off] [--lan] [--addr host:port]
                                   the service's page: its link, or turn it on or off
-  magpie healthcheck              exit 0 when the gateway answers (a container's HEALTHCHECK)
+  magpie healthcheck [--addr host:port]
+                                  exit 0 when the gateway answers (a container's HEALTHCHECK). It looks where
+                                  --addr says, else at MAGPIE_ADDR, else where the running magpie wrote down
+                                  that it listens, else at the port in Settings' Gateway address
+  magpie status [--json] [--addr host:port]
+                                  which magpie serves the gateway: its role (app, tray, web, serve), pid,
+                                  version and listen address, also in <config folder>/gateway.json
   magpie mtls [on|off|issue <device>|list|revoke <device>]
                                   require a client certificate magpie issued from other computers (mTLS)
   magpie https [on|off|import <files>|remove|ca]
@@ -176,8 +182,11 @@ const usage = `magpie — one place to pick every agent's model
   magpie agents                   list every supported agent
   magpie settings [list|get <key>|set <key> <value>|reset <key>] [--json]
                                   every setting the window's Settings page saves, read and set as it saves them (magpie settings help)
-  magpie update [check] [--proxy <url>] [--mirror <prefix>]
-                                  install the newest release (check: only say if there is one); --proxy: an
+  magpie update [check] [--proxy <url>] [--mirror <prefix>] [--addr host:port] [--force]
+                                  install the newest release (check: only say if there is one); the running
+                                  magpie is restarted into it, found by --addr, MAGPIE_ADDR or the address it
+                                  wrote down (a service started with MAGPIE_ADDR needs none of them); a restart waits at most 10
+                                  minutes for requests in flight, --force restarts at once; --proxy: an
                                   http(s):// or socks5:// proxy for it; --mirror: a GitHub download mirror put
                                   before the github.com URL (none unless given; still checked against usemagpie.ai's SHA-256)
   magpie update mirror [<prefix>|off]  the mirror every update, the app's own too, is downloaded through
@@ -328,14 +337,15 @@ func run(args []string) error {
 		agent.SyncCatalogSettled()
 		catalog.Changed = was
 	}()
-	// what a shell's agy runs (agy_cli.go): every argument after run is
-	// agy's, --help too, and nothing is moved or started first
-	if ok, err := agyCmd(args); ok {
-		return err
-	}
 	// claude-magpie (claude_launch_cli.go): every argument after run is
 	// claude's, --help too
 	if ok, err := claudeLaunchCmd(args); ok {
+		return err
+	}
+	// what a shell's agy, or another agent's function, runs
+	// (start_cli.go): every argument after run is the agent's, --help
+	// too, and nothing is moved or started first
+	if ok, err := startCmd(args); ok {
 		return err
 	}
 	// Claude Magpie.app (claude_desktop_launch_cli.go), --help too
@@ -349,7 +359,7 @@ func run(args []string) error {
 		return nil
 	}
 	if len(args) > 0 && args[0] == "healthcheck" {
-		return healthcheck() // every few seconds in a container: nothing else
+		return healthcheck(args[1:]) // every few seconds in a container: nothing else
 	}
 	if len(args) > 0 && args[0] == "heap" {
 		// the running magpie's heap profile: asks it, and moves nothing here
@@ -615,6 +625,8 @@ func run(args []string) error {
 		return sessionsCmd(args)
 	case "quota", "quotas":
 		return quotaCmd(args)
+	case "status":
+		return statusCmd(args[1:])
 	case "update":
 		return updateCmd(args)
 	case "library", "lib":

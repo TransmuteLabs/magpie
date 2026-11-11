@@ -37,7 +37,7 @@ var Keys = []string{
 	// usage and alerts
 	"currency", "chineseUnits", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
 	// network
-	"proxy", "pluginProxy",
+	"proxy", "pluginProxy", "updateProxy",
 	// privacy
 	"redact", "redactPersonal", "redactKinds", "redactWords", "redactWordsAnyCase", "redactWordsWhole", "redactShape",
 	"noStats", "noUsageStats", "otel",
@@ -286,17 +286,20 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// Bark has its own route (bark); the page never sees its key
 	in.BarkServer, in.BarkKey, in.BarkDaily = cur.BarkServer, cur.BarkKey, cur.BarkDaily
 
-	in.Port = cur.Port                                 // set on its own (port), which moves the gateway
-	in.CORSOrigins = cur.CORSOrigins                   // set on its own (cors)
-	in.AllowIPs = cur.AllowIPs                         // set on its own (allowips)
-	in.MTLS = cur.MTLS                                 // set on its own (mtls)
-	in.HTTPS = cur.HTTPS                               // set on its own (https)
-	in.FetchPrivate = cur.FetchPrivate                 // in settings.json only
-	in.RouterNote = cur.RouterNote                     // set on its own (the Library's servers/hub-note)
-	in.RouterAllTools = cur.RouterAllTools             // set on its own (the Library's servers/hub-tools)
-	in.GitHubToken = cur.GitHubToken                   // set on its own (github-token), never sent to the page
-	in.ProxyCustom = cur.ProxyCustom                   // set by settings.Save from the proxy, never by the page
-	in.PluginProxyCustom = cur.PluginProxyCustom       // and plugin downloads' from theirs
+	in.Port = cur.Port                           // set on its own (port), which moves the gateway
+	in.CORSOrigins = cur.CORSOrigins             // set on its own (cors)
+	in.AllowIPs = cur.AllowIPs                   // set on its own (allowips)
+	in.MTLS = cur.MTLS                           // set on its own (mtls)
+	in.HTTPS = cur.HTTPS                         // set on its own (https)
+	in.FetchPrivate = cur.FetchPrivate           // in settings.json only
+	in.RouterNote = cur.RouterNote               // set on its own (the Library's servers/hub-note)
+	in.RouterAllTools = cur.RouterAllTools       // set on its own (the Library's servers/hub-tools)
+	in.GitHubToken = cur.GitHubToken             // set on its own (github-token), never sent to the page
+	in.ProxyCustom = cur.ProxyCustom             // set by settings.Save from the proxy, never by the page
+	in.PluginProxyCustom = cur.PluginProxyCustom // and plugin downloads' from theirs
+	in.UpdateProxyCustom = cur.UpdateProxyCustom // and updates'
+	in.ProxyNames = cur.ProxyNames
+	in.Proxies = cur.Proxies                           // set on its own (proxies), the password never sent to the page
 	in.RequestArchive = cur.RequestArchive             // the Gateway page's, set on its own
 	in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB   // in settings.json only
 	in.ClaudeRunsMost = cur.ClaudeRunsMost             // magpie claude-code runs, or settings.json (#2956)
@@ -316,10 +319,11 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.RequestArchiveLocal, in.RequestArchiveLocalMB = cur.RequestArchiveLocal, cur.RequestArchiveLocalMB
 	// used or left is the Usage page's toggle as much as Settings', set on its own
 	in.QuotaLeft = cur.QuotaLeft
-	in.QuotaReads = cur.QuotaReads   // set on its own (quota-reads)
-	in.SearchAll = cur.SearchAll     // set on its own (search-all)
-	in.SearchCount = cur.SearchCount // and so is this (search-count)
-	in.UsageOrder = cur.UsageOrder   // the Usage page's, dragged there
+	in.QuotaReads = cur.QuotaReads           // set on its own (quota-reads)
+	in.SearchAll = cur.SearchAll             // set on its own (search-all)
+	in.SearchCount = cur.SearchCount         // and so is this (search-count)
+	in.UsageOrder = cur.UsageOrder           // the Usage page's, dragged there
+	in.PluginPageOrder = cur.PluginPageOrder // the sidebar plugin pages, dragged there
 	// and what the tray panel's Allowances tab leaves out, set there
 	in.PanelUsageHidden = cur.PanelUsageHidden
 	// and the clients the Usage page's Agents list leaves out, set there
@@ -342,6 +346,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.CompactAt = cur.CompactAt         // and so is the threshold
 	in.AgentCompacts = cur.AgentCompacts // and each agent's own (agent-compact)
 	in.ContextCap = cur.ContextCap       // and the longest window of every model (context-cap)
+	in.ContextCapAll = cur.ContextCapAll // and whether it holds the user's own windows
 	// Codex's background compaction, set on its own (codex-async-compact)
 	in.CodexAsyncCompact, in.CodexAsyncCompactPercent = cur.CodexAsyncCompact, cur.CodexAsyncCompactPercent
 	// Claude Desktop's list, set in its row on the Agents page
@@ -363,6 +368,8 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.CodexServiceTier = cur.CodexServiceTier // codex-service-tier
 	// and the model DeepSeek Harness compacts on, set in its row
 	in.DshCompactModel = cur.DshCompactModel
+	// and the model Codex compacts on, set in its row
+	in.CodexCompactModel = cur.CodexCompactModel
 	// and the model for requests masking would change (redact-route)
 	in.RedactRouteTo = cur.RedactRouteTo
 	in.DesktopSubagentEffort = cur.DesktopSubagentEffort

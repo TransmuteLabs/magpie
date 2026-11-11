@@ -151,7 +151,7 @@ function fixture(lang, theme, events, options = {}) {
       { id: "relay/me@example.com", name: "me@example.com", provider: "relay", providerName: "Relay", account: true, plan: "Pro" },
       { id: "relay/spare@example.com", name: "spare@example.com", provider: "relay", providerName: "Relay", account: true },
       { id: "openai/k-1a2b3c", name: "k-1a2b3c", provider: "openai", providerName: "OpenAI", key: true },
-    ], groups: accountGroups });
+    ], providers: options.emptyProvider ? [{ id: "later/*", name: "Later", provider: "later", providerName: "Later" }] : [], groups: accountGroups });
     // the MCP servers and tools a key may be held to: magpie's own, then
     // the Library's (wakaka on Discord)
     if (url.pathname === "/api/caller-keys/mcp") return json({ servers: [
@@ -228,6 +228,7 @@ function fixture(lang, theme, events, options = {}) {
         if (!Number.isInteger(body.maxConcurrency) || body.maxConcurrency < 0 || body.maxConcurrency > 1000) return route.fulfill({ status: 400, json: { error: "Concurrency: a whole number from 0 to 1000" } });
         k.maxConcurrency = body.maxConcurrency || undefined;
       }
+      if (action === "tier-key") k.serviceTier = body.serviceTier || undefined;
       if (action === "access-key") k.readOnly = body.readOnly || undefined;
       // a key put at a place in the list, as access.Update keeps it;
       // options.refuseMove: the store can't be written

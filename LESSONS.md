@@ -289,6 +289,20 @@ writes it.**
   a bit is used twice. After a rebase, grep the values both sides claim.
 - Seen 1× (2026-10-13).
 
+**A cache entry is reused only when every field read back from it
+matches what the key rounded away.**
+- 059d995d5 (11-11) kept AllOf's counted windows under window{key,
+  start's Unix second, scope}, and reused the kept prefix, start and
+  all. A 10-day limit reset and made a 5-hour one 1.7ms later shared
+  the key, so the 5-hour window reported the 10-day start and counted
+  its rows. TestGatewayKeyLimitCLI was red on ubuntu and macOS CI;
+  8b2fb6b08 reuses an entry only when its start equals the limit's.
+  The same commit's package regexps skipped lazyre and turned
+  TestNoEagerPackageRegexps red (d62220d43): it ran chosen tests, not
+  the packages it touched.
+- Test two values that round to one key, in the same second.
+- Seen 1× (2026-11-11).
+
 **A command never takes a flag, or a value it doesn't know, as data to
 write.**
 - `magpie snow --help` took "--help" as a model: it deleted
@@ -358,6 +372,18 @@ rate and at its largest input.**
 - Put a body scan after the cheap checks that rule it out, and time it
   on the largest reply a test has.
 - Seen 2× (2026-10-14, 2026-10-18).
+
+**A new route or setting runs the packages whose guards list them.**
+TestEveryRouteHasACommandOrIsNamed (internal/cli) lists every route, and
+TestSettingsSaveKeepsWhatItDoesNotSend (internal/gui) every setting.
+- 11-11: 747632890 (context-cap) and eb56de0b5 (the catalog's model list)
+  ran chosen tests and turned both guards red on CI at 8aae124b0. An hour
+  later 58fb07095 (named proxies, 1,714 lines) did it again with three
+  routes and two settings, a minute after c1a072636 mended the first.
+  Both bodies say what they ran; neither ran `go test ./internal/cli`
+  (40s). The same day three commits that each fit the core's script
+  budget at their own base left it 4 bytes over together (61a93b531).
+- Seen 1× (2026-11-11).
 
 **A full run gives the slow packages room.** `go test ./...` at the default
 10m timeout times out in internal/gateway (#2108), and under load in
@@ -485,6 +511,45 @@ browser API is tried in the real Linux app too.
   reads.
 - Seen 1× (2026-10-11).
 
+**Two paths are compared with links followed on both sides.**
+- 3bb9575dc followed the rtk path's links and compared it with a winget
+  record read as written. macOS's /var is a link to /private/var, so
+  TestRTKWingetFolderWithoutRecord was red on mote (#6127), and the same
+  mismatch sat in askWingetOwns: an rtk under a junctioned folder read as
+  not winget's (a1961f5ca). The test's own expected path was the link too.
+- When one side goes through EvalSymlinks, so does the other, in the code
+  and in the test's want. Run it where the temp folder is a link (macOS).
+- Seen 1× (2026-11-11).
+
+**A path check in a test expects what the code writes, in the file's own
+encoding.**
+- TestPluginImportCarryOnOffRemove wanted filepath.Join's all-backslash
+  path in raw JSON. The import replaces ${CLAUDE_PLUGIN_ROOT} as written
+  (`C:\...\acme-kit/scripts/lint.sh`), and JSON doubles each backslash,
+  so it was red on Windows only, where CI runs no tests (#6065, fixed in
+  ff11275ae).
+- Seen 1× (2026-11-11).
+
+**A fix that keeps something past a collection keeps its siblings
+too.**
+- #2278 took dirent's listings out of a sync.Pool, because "each
+  collection emptied the pool before the next folder was read", and
+  left the 64 KiB read buffer beside them in one. A collection, a Get
+  on another P or -race's dropped Put made a new buffer inside
+  TestListingsOfDifferentSizesMadeOnce's 64 KiB window, so it went red
+  on macOS CI (#5990). The issue sat 19 hours with no owner before
+  6b31147b6 kept the buffers the way listings are, with two
+  collections in the test's window: red 5 of 5 on the old code.
+- Seen 1× (2026-11-11).
+
+**A release step that waits on a vendor has its own timeout-minutes.**
+- notarytool's `--timeout 30m` bounds only its wait for Apple's
+  answer. v0.1.3737's mac job hung in "Notarise and staple" for over
+  90 minutes, under GitHub's six-hour job limit, holding a macOS
+  runner; magpie's mirror job timed out waiting and the version never
+  published. magpie-releases c856019a gives the step 45 minutes.
+- Seen 1× (2026-11-11).
+
 **Reproduce on CI's Go version.**
 - #1184 couldn't be reproduced on go1.27.1 locally. CI ran 1.26.x, and the
   cause was a Go 1.26.8 segfault. Docker `golang:1.26.8` with
@@ -510,6 +575,43 @@ Two habits from them:
   TestProviderListReadsSettingsOnce's 2s bar, now a count of parses
   (a36319d60), and TestCursorEditorCopiedOncePerChange's 100ms linger
   (2efb71ea0).
+
+**A value put in a request's context lives as long as anything that
+holds the context, a stopped timer included.**
+- #5250: TestSocketTurnBodiesFreed kept 1 of 12 turn bodies in full
+  runs. A `context.WithTimeout` under the request's context, cancelled,
+  stays in an idle P's timer heap with its closure, and reached the
+  request through the unrouted watch held as a context value and as
+  the inflight's f.unrouted. 032340056 puts the watch behind a pointer
+  unwatch clears and drops f.unrouted when it ends; the test is red
+  with either half alone.
+- Found by reading a heap path after a goroutine dump showed no
+  holder, not by adding delays: a 300ms injected delay in the first
+  suspect still passed.
+- Seen 1× (2026-11-11).
+
+**An allocation bar is relative to the same call at the small size.**
+- TestAutoVisionDoesNotBuildListsAgain held searcherModel to a fixed
+  50 allocations: 51 on Linux and 130 on Windows with the lists kept as
+  meant (#5123). c1b8010a2 compares 400 models against 4, as the
+  AutoVision half did, and is still red with the cache broken by hand.
+- The same day TestDshRoundWithNothingChangedBuildsNothing's fixed 300
+  read 421 on Windows CI. It now compares a settled round over 402
+  models with one over 2; with the skip broken by hand that is 78375
+  against 1780.
+- Seen 1× (2026-11-11).
+
+**A new route or setting field is run against the guard tests that list
+every route and field, not only its own tests.**
+- f5e1b1091 (11-11) added POST /api/settings/context-cap-mode and
+  Settings.ContextCapAll and ran `cli -run ContextCap`. The CLI parity
+  test (#6102) and the GUI keep test (#6103) list every route and
+  field, and both went red on main; its usage line also broke the help
+  column a test checks (#6104). e0cadc312 added three /api/memory
+  routes the same day with no parity entry.
+- Run the whole internal/cli and internal/gui packages for a new route
+  or field; `grep -n` the parity map for the route before pushing.
+- Seen 1× (2026-11-11).
 
 ## Red tests and releases
 
@@ -980,6 +1082,23 @@ each one.
     TestNoEagerPackageRegexps went red on ubuntu and macOS CI. It was
     found by yinwu01 (#6020) and fixed in a68f114d9. A new package-level
     var runs the guards in `.` too.
+- **11-11, criteria still missed.**
+  - The suite, a second day for the same two guards: 55dff77b4 (plugin
+    pages behind a cookie proxy) ran `go test -run PluginPage
+    ./internal/gui`. Seven new package-level regexps tripped
+    TestNoEagerPackageRegexps (fixed in de10c6676, #6145), and its 11
+    lines in assets/pluginpages.js put TestCoreScriptBudget over until
+    f54920280 cut a comment (#5918). A `-run` of a package's own tests
+    is not a run of the package; its guards take a second, so run it
+    whole.
+  - A red on main had three "seen again" comments and no owner: #5918
+    (TestCoreScriptBudget, red from 16ed1a952) was commented on at
+    11:51, 12:22 and 13:14, and 8016205e3 shipped past it "commented".
+    The cause was the measure. It counted comments, so each red was paid
+    for by cutting the comments that said why, about 40 times in the
+    budget's history. 6cc182339 counts code only. When a guard keeps
+    going red the same way, fix the guard's class; don't feed it
+    another cut.
 - **Done right on 10-17.** The retire stack (0f1666b38 to de671719a)
   diffed staticcheck's U1000 against its base for dead code, b98f906b1
   was red on the old code for an own-account gap, and 8 subscriptions

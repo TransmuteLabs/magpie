@@ -157,6 +157,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		GatewayConversations: true,
 		QuotaLeft:            true,
 		UsageOrder:           []string{"kimi", "codex"},
+		PluginPageOrder:      []string{"plugin-b", "plugin-a"},
 		PanelUsageHidden:     []string{"deepseek"},
 		UsageAgentsHidden:    []string{"curl"},
 		UsageCardsHidden:     []string{"stepfun|balance"},
@@ -174,6 +175,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		CodexServiceTier:     "priority",
 		DesktopSubagentModel: "fake/m2",
 		DshCompactModel:      "fake/m1",
+		CodexCompactModel:    "fake/m1",
 		ChinaMirror:          true,
 		NPMRegistry:          "https://npm.corp.example",
 		CodexAutoReset:       []string{"me@example.com"},
@@ -212,7 +214,12 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.RequestArchiveLocal, was.RequestArchiveLocalMB = true, 256
 	was.ProxyCustom = "http://me:secret@proxy.example:8080"
 	was.PluginProxyCustom = "http://me:secret@plugins.example:8080"
+	was.UpdateProxyCustom = "http://me:secret@updates.example:8080"
 	was.PanelShortcut = "Ctrl+Alt+K"
+	was.Proxies = []settings.NamedProxy{{ID: "p1", Name: "Office", URL: "http://proxy.example:8080"}} // their own routes, /api/proxies/*
+	was.ProxyNames = map[string]string{"p1": "Office"}
+	was.ContextCap = 200000                           // its own route, POST /api/settings/context-cap
+	was.ContextCapAll = true                          // its own route, POST /api/settings/context-cap-mode
 	was.SearcherThen = []string{"fake/m1", "fake/m2"} // set in its own row
 	was.RouterNote = "Los Angeles"                    // the Library's servers/hub-note
 	was.RouterAllTools = true                         // the Library's servers/hub-tools

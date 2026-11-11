@@ -95,12 +95,19 @@ type candidate struct {
 	// what a member listed after it stands in for (standsInFor)
 	member string
 	place  int
+	// redact is what the groups the member is in say of masking
+	// (Member.Masking): "" for one that is in none, or none says
+	redact string
 	// reserve is set, to the provider's AtOnce, on an account or key held
 	// back past the first that many (keepAtOnce): tried after them, never
 	// given a request for want of a slot (laneMate) nor kept on by a
 	// conversation (affine)
 	reserve int
 }
+
+// unmasked says a request to the try goes as written: its groups say so,
+// or none says otherwise and its provider is set to (provider.UnmaskedBy).
+func (c candidate) unmasked() bool { return provider.UnmaskedBy(c.redact, c.p) }
 
 // capHold is how an account is held at its usage cap: the cap of the
 // fullest window at or past its own cap, that window's share used, and when the last such window
@@ -144,6 +151,18 @@ func spendHeld(p provider.Provider, k provider.KeyAccount, now time.Time) *capHo
 		return nil
 	}
 	return &capHold{cap: 100, used: 100 * spent / sc.USD, back: reset, spend: &spendHold{usd: sc.USD, spent: spent, period: sc.Period, since: start}}
+}
+
+// keyCapHeld is how the key k of p is held at the usage cap set on it (the
+// share of its own windows, provider/account_caps.go) for model at now, nil
+// when nothing holds it. A key whose windows aren't known (not read yet, or
+// the read failed) is not held: unknown is not spent.
+func keyCapHeld(p provider.Provider, k provider.KeyAccount, model string, now time.Time) *capHold {
+	h := p.KeyCapHeld(k, model, now, keyAllowance)
+	if h == nil {
+		return nil
+	}
+	return &capHold{cap: h.Cap, used: h.Used, back: h.Back, amount: h.Amount, count: h.Count, unit: h.Unit}
 }
 
 // label names a candidate in a call's record: the provider, and the key
@@ -415,6 +434,9 @@ func perKeyEvery(p provider.Provider, model string, from provider.Protocol) (out
 	spends := map[int]*capHold{}
 	on, unlisted, off, noURL := p.KeysFor(model, func(k provider.KeyOn) bool {
 		h := spendHeld(p, k.KeyAccount, now)
+		if h == nil {
+			h = keyCapHeld(p, k.KeyAccount, model, now)
+		}
 		if h != nil {
 			spends[k.Rank] = h
 		}
@@ -766,6 +788,7 @@ func planLevel(g provider.Group, ms []provider.Member, depth int, from provider.
 			for i := range l {
 				l[i].effort, l[i].levels, l[i].effortMap, l[i].fast = m.Effort, m.Levels, m.EffortMap, m.Fast
 				l[i].firstToken = innerFirstToken(m)
+				l[i].redact = m.Masking()
 				l[i].patience = innerPatience(m)
 				if len(m.Path) > 0 {
 					l[i].member = m.Path[0]
@@ -2231,7 +2254,7 @@ func windowIn(served func() []provider.Entry, p provider.Provider, model string)
 			return e.Context
 		}
 	}
-	return p.ContextOf(model)
+	return settings.Shared().CappedOwn(p.ContextOf(model))
 }
 
 const (

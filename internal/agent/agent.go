@@ -291,6 +291,10 @@ type Agent struct {
 	// to start it on magpie, a function magpie gave their shells (agy);
 	// "" when there is none, and Launch is the way.
 	Typed func() string
+	// Start, for such an agent, is what `magpie <id> run` starts it with:
+	// its command, the variables and its model flag, the model "" while
+	// it isn't on magpie's, when it starts as it is.
+	Start func() Starting
 	// SplitSuffix, for an agent whose model values carry something of its
 	// own after the model that varies from value to value (omp's thinking
 	// level, "…:max"), splits a value into the model the picker offers and
@@ -461,15 +465,15 @@ func (a *Agent) Detected() bool {
 // and added that to the user's PATH, or a self-update restarting with the
 // PATH it had then, never listed it, while the sign-in, which asked
 // FindTool, found it (#839, #1482). A mise wrapper script found there is
-// given as the program it runs (proc.LookPath). "" when it is in none.
+// given as the program it runs (proc.LookPath). Linux and macOS are no
+// different when magpie is started from a desktop launcher: its PATH has no
+// ~/.local/bin, where the official Antigravity CLI installer puts agy
+// (Xuanwo on X). "" when it is in none.
 func binAt(name string) string {
 	if p, err := proc.LookPath(name); err == nil {
 		return p
 	}
-	if runtime.GOOS == "windows" {
-		return proc.FindTool(name)
-	}
-	return ""
+	return proc.FindTool(name)
 }
 
 // agentDir reports whether p is a folder an agent itself made. Skill

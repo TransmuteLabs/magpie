@@ -97,8 +97,9 @@ func listedExternal(nativeKeys map[string]bool, n int) []sessions.ExternalSessio
 		if len(ext) == n {
 			return false
 		}
-		// one a list leaves out (externalSessions) takes no room
-		if g.Agent != "" && g.ID != "" && !hidden(g.Agent, g.ID, g.Last) {
+		// one a list leaves out (externalSessions) takes no room; nor does
+		// one that spent nothing, with no file behind it (SpentNothing)
+		if g.Agent != "" && g.ID != "" && !hidden(g.Agent, g.ID, g.Last) && !g.SpentNothing() {
 			ext = append(ext, gatewayListed(g, title))
 		}
 		return true
@@ -126,12 +127,12 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		if n <= 0 {
 			n = sessions.All
 		}
-		agents := map[string]*agent.Agent{}
+		agents := map[string]agent.Look{}
 		// what a row is named and drawn as, beside the list, for listTag
 		var drawn strings.Builder
-		for _, a := range agent.Clients() {
+		for _, a := range agent.Looks() {
 			agents[a.ID] = a
-			drawn.WriteString(a.ID + "\x00" + a.SharedName() + "\x00" + a.Icon + "\x00")
+			drawn.WriteString(a.ID + "\x00" + a.Shared + "\x00" + a.Icon + "\x00")
 		}
 		out := sessionsJSON{Sessions: []sessionJSON{}, Terminal: terminalHere() && !isWeb(w),
 			Dirs: []string{}}
@@ -199,8 +200,8 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			// drawn as the agent it ran in: Claude Desktop's Code tab's
 			// sessions are in Claude Code's folder (Session.App)
 			j.Name, j.Icon, j.Via = s.Agent, "generic", viaOf(vias, s)
-			if a := agents[cmp.Or(s.App, s.Agent)]; a != nil {
-				j.Name, j.Icon = a.SharedName(), a.Icon
+			if a, ok := agents[cmp.Or(s.App, s.Agent)]; ok {
+				j.Name, j.Icon = a.Shared, a.Icon
 			}
 			j.Name = wslName(j.Name, s)
 			j.Path = tilde(j.Path)
@@ -228,8 +229,8 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		n, _ := strconv.Atoi(r.URL.Query().Get("days"))
 		st, gen := statsForGen(n)
 		names := map[string]string{}
-		for _, a := range agent.Clients() {
-			names[a.ID] = a.SharedName()
+		for _, a := range agent.Looks() {
+			names[a.ID] = a.Shared
 		}
 		agents := map[string]string{}
 		for _, d := range st.Days {
@@ -298,9 +299,9 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			addCodexModelEffort(&s, usage.CodexModelEffort(usage.All))
 		}
 		j := sessionJSON{Session: s, Name: s.Agent, Icon: "generic"}
-		for _, a := range agent.Clients() {
+		for _, a := range agent.Looks() {
 			if a.ID == cmp.Or(s.App, s.Agent) {
-				j.Name, j.Icon = a.SharedName(), a.Icon
+				j.Name, j.Icon = a.Shared, a.Icon
 			}
 		}
 		j.Name = wslName(j.Name, s)
@@ -499,9 +500,9 @@ func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
 		s = gatewaySession(g)
 	}
 	name := s.Agent
-	for _, a := range agent.Clients() {
+	for _, a := range agent.Looks() {
 		if a.ID == s.Agent {
-			name = a.SharedName()
+			name = a.Shared
 		}
 	}
 	var b bytes.Buffer
@@ -747,8 +748,15 @@ func statsForGen(days int) (sessions.Stats, uint64) {
 		return st, gen
 	}
 	statsMemo.Unlock()
-	st, gen := combinedSessionStats(days), statsGen.Add(1)
+	return keepStats(days, combinedSessionStats(days))
+}
+
+// keepStats keeps st as days' stats unless another ask kept them first,
+// and gives what is kept.
+func keepStats(days int, st sessions.Stats) (sessions.Stats, uint64) {
+	gen := statsGen.Add(1)
 	statsMemo.Lock()
+	defer statsMemo.Unlock()
 	if statsMemo.m == nil {
 		statsMemo.m = map[int]*statsKept{}
 	}
@@ -765,8 +773,34 @@ func statsForGen(days int) (sessions.Stats, uint64) {
 		statsMemo.asks++
 		statsMemo.m[days] = &statsKept{at: time.Now(), st: st, gen: gen, used: statsMemo.asks}
 	}
-	statsMemo.Unlock()
 	return st, gen
+}
+
+// statsAndNative is sessions.StatsAndNativeAll, for a test that counts
+// the passes over the session files.
+var statsAndNative = sessions.StatsAndNativeAll
+
+// warmStats reads each of days' stats not kept yet in one pass over the
+// session files. The warm-up read every day and 30 days one after the
+// other, each listing every file, grouping the sessions and finding
+// Claude Code's copies and branches again: ~100 MB of garbage apiece
+// with a real account's history.
+func warmStats(days ...int) {
+	keepStatsWhileAsked()
+	statsMemo.Lock()
+	var todo []int
+	for _, d := range days {
+		if statsMemo.m[d] == nil {
+			todo = append(todo, d)
+		}
+	}
+	statsMemo.Unlock()
+	if len(todo) == 0 {
+		return
+	}
+	for i, st := range combinedSessionStatsAll(todo) {
+		keepStats(todo[i], st)
+	}
 }
 
 // statsIdle is how long the Sessions page's stats are kept after the last
@@ -832,7 +866,7 @@ func combinedSessionStats(days int) sessions.Stats {
 // combinedSessionStatsAll is combinedSessionStats for each of days, the
 // session files read once for all of them.
 func combinedSessionStatsAll(days []int) []sessions.Stats {
-	sts, nativeKeys := sessions.StatsAndNativeAll(days)
+	sts, nativeKeys := statsAndNative(days)
 	for i := range sts {
 		sts[i] = withGatewaySessions(sts[i], days[i], nativeKeys)
 	}
@@ -893,8 +927,7 @@ func warmStart() {
 // waited (#2776), and every later ask is answered from what it kept.
 func warmSteps() []func() {
 	return []func(){
-		func() { statsFor(0) },
-		func() { statsFor(30) },
+		func() { warmStats(0, 30) },
 		func() { underTightGC(func() { usage.QueryPage(usage.All, usage.Filter{}, 0, 50) }) },
 		func() {
 			if slices.ContainsFunc(statsFor(0).Keys, func(k string) bool { return strings.HasPrefix(k, "codex:") }) {
