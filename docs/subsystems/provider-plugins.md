@@ -32,6 +32,36 @@ For a moved subscription, its built-in upstream implementation does not run. Plu
 
 Quota aggregation in [`quotas.go`](../../internal/provider/quotas.go) suppresses a key's GLM Coding Plan card only when its comparable reset windows match a ZCode subscription card: built-in or moved `zcode`, or independently installed `zcode-plugin`. [`PlanQuotas`](../../internal/provider/planquota.go) identifies GLM plans by their quota endpoint, including custom provider ids. Matching reset schedules from unrelated vendors do not hide cards. Within this pair, resets remain a heuristic for the shared account; a plan's `User` is a key label or mask, not a login identity. Errors, conflicting resets, or no comparable resets keep the plan visible. This applies to the Usage page, tray, quota reports, alerts, and quota waits; it does not change plugin ownership or upstream requests.
 
+## ZCode reset ownership
+
+ZCode remains a community plugin, not a second built-in provider. Its
+usage result may include opaque `resetScope` and `resetContext` bindings;
+[`host.js`](../../internal/plugin/host.js) validates these before exposing
+them through `plugin.Usage`. They contain no account credentials.
+
+[`zcode_resets.go`](../../internal/provider/zcode_resets.go) uses the
+existing `plugin.Fetch` path, as plugin-backed check-ins do. The plugin
+owns vendor authentication, exact request headers and identity checks;
+the broker owns durable operation keys and server observations in
+`zcode-resets.json`, under the existing file-lock/atomic-write conventions.
+Replacing a sign-in does not erase an unanswered financial operation.
+
+Status and opportunity run on the existing quota refresh. A reset is
+manual, names one account and one window, and must match the context shown
+before confirmation. Acceptance is not completion: an unknown result
+retains its key until status reconciliation. Only the chosen five-hour
+or weekly pool is spent. Optional reset errors do not replace authoritative
+usage with an error or a fabricated allowance. An older plugin or key-only
+sign-in keeps its read-only inventory.
+
+The GUI reuses `resetask.js` and `POST /api/usage/zcode-reset`; the CLI uses
+`magpie quota reset --provider zcode <account> --window five-hour|weekly`.
+Remote cards retain their captured context and send the same operation to
+`POST /v1/magpie/quotas/zcode-reset`. That endpoint requires a full,
+unheld gateway key even on loopback; browser-origin, read-only and
+restricted keys cannot spend resets. It calls the same `SpendZCodeReset`
+owner as local controls, with no fallback to an older unbound API.
+
 ## Usage a plugin collects late
 
 A plugin that learns a step's usage only after the step has ended reports it with a later step, in `usage.magpie_deferred` (`prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`) beside that step's own usage fields. The Cursor plugin does this: a tool step's usage event shows seconds after the step, so the step says 0 and the conversation's next step collects the event ([#1053](https://github.com/yetone/magpie/issues/1053)).

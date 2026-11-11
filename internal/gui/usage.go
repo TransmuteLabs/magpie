@@ -444,6 +444,27 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, out)
 	})
+	mux.HandleFunc("POST /api/usage/zcode-reset", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Provider, User, Window, Context string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		var out provider.ResetOutcome
+		var err error
+		if strings.Contains(in.Provider, "/") {
+			out, err = provider.UseRemoteZCodeReset(ctx, in.Provider, in.User, in.Window, in.Context)
+		} else {
+			out, err = provider.SpendZCodeReset(ctx, in.Provider, in.User, in.Window, in.Context)
+		}
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, out)
+	})
 }
 
 // trafficJSON is the gateway's bytes so far (gateway.Traffic) with its

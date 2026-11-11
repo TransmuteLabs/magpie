@@ -1024,6 +1024,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET "+provider.RemoteCardsPath, s.quotaCards)
 	mux.HandleFunc("POST "+provider.RemoteRefreshPath, s.quotaCardsRefresh)
 	mux.HandleFunc("POST "+provider.RemoteCodexResetPath, s.codexReset)
+	mux.HandleFunc("POST "+provider.RemoteZCodeResetPath, s.zcodeReset)
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET "+StatuslinePath, s.statusline)
 	mux.HandleFunc("POST "+StatuslinePath, s.statusline)
@@ -1367,6 +1368,38 @@ func (s *Server) codexReset(w http.ResponseWriter, r *http.Request) {
 		done()
 	}
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) zcodeReset(w http.ResponseWriter, r *http.Request) {
+	if !local(r) && !sharedWith(r) {
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's quotas are shared only with an authenticated gateway key")
+		return
+	}
+	who := access.Caller(r.Context())
+	if who.KeyID == "" || who.ReadOnly {
+		writeError(w, provider.Chat, http.StatusUnauthorized, "using a ZCode reset takes an enabled magpie gateway key with full access")
+		return
+	}
+	if refuseHeld(w, r, "this gateway key is held to a budget, models or accounts, so it uses none of this magpie's ZCode resets: use a key with full access") {
+		return
+	}
+	q := r.URL.Query()
+	id, user := q.Get("provider"), strings.TrimSpace(q.Get("user"))
+	if id == "" {
+		id = "zcode"
+	}
+	if user == "" {
+		writeError(w, provider.Chat, http.StatusBadRequest, "name the ZCode account whose reset is used: ?user=<account>")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	defer cancel()
+	out, err := provider.SpendZCodeReset(ctx, id, user, q.Get("window"), q.Get("context"))
+	if err != nil {
+		writeError(w, provider.Chat, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func modelObject(e provider.Entry) map[string]any {

@@ -14005,15 +14005,15 @@ function accountQuota(data, user, capFor = () => 0, settable = null, prov) {
     line.classList.add("stale");
     line.append(el("span", "aq-asof", asOfText(q)));
   }
-  if (q?.resets?.count && !q.error) {
+  if ((q?.resets?.count || q?.resets?.pending) && !q.error) {
     // Codex's are used from here too, as on Usage (roamlog on X)
-    const words = resetsWords(q.resets), use = prov == "codex" && !q.resets.byWindow;
+    const words = resetsWords(q.resets), use = canUseReset(q);
     const resets = el("span", "aq-w aq-resets" + (use ? " aq-set" : ""));
     resets.title = tipLines(words.textContent, words.title, use && "\n" + resetUseTitle(q));
     resets.append(words.querySelector(".resets-n"));
     if (use) {
       spanBtn(resets).setAttribute("aria-haspopup", "dialog");
-      resets.onclick = (e) => { e.stopPropagation(); askReset({ ...q, provider: prov, user }); };
+      resets.onclick = (e) => { e.stopPropagation(); askReset({ ...q, provider: q.resets.byWindow ? q.provider : prov, user }); };
     }
     line.append(resets);
   }
@@ -16128,12 +16128,11 @@ function renderQuotas(lazy) {
       // balance alone says it in its row)
       const read = !brief && sub.windows?.length && !sub.error && readWhen(shownSub, true);
       if (read) card.append(read);
-      if (!brief && !history && sub.resets?.count) {
+      if (!brief && !history && (sub.resets?.count || sub.resets?.pending)) {
         const r = el("div", "quota-resets");
         r.append(resetsWords(sub.resets, sub));
-        // only Codex's are spent from here: a GLM team's are spent on
-        // bigmodel.cn, a plugin's wherever its vendor spends them
-        if (codexResetCard(sub)) {
+        // Only a broker-supported reset is usable from this card.
+        if (canUseReset(sub)) {
           const use = el("button", "text", t("Use a reset"));
           use.title = resetUseTitle(sub);
           use.onclick = () => askReset(sub);
@@ -17776,10 +17775,10 @@ function panelQuotaCard(q, first = false) {
   const spark = ws[0] && !ws[0].tiers ? quotaSpark(q, ws[0]) : null;
   if (spark) card.append(spark);
   if (q.asOf) card.append(el("span", "pq-sub pq-asof", asOfText(q, true)));
-  if (q.resets?.count) {
+  if (q.resets?.count || q.resets?.pending) {
     const r = el("div", "pq-resets");
     r.append(resetsWords(q.resets, q));
-    if (codexResetCard(q)) { // as on the Usage page
+    if (canUseReset(q)) { // as on the Usage page
       const use = el("button", "pq-use", t("Use one…"));
       use.title = resetUseTitle(q);
       use.onclick = () => askReset(q);
@@ -17839,9 +17838,11 @@ function resetsWords(r, q) {
     const parts = [];
     if (r.fiveHour) parts.push(t(r.fiveHour === 1 ? "1 five-hour reset" : "{n} five-hour resets", { n: r.fiveHour }));
     if (r.weekly) parts.push(t(r.weekly === 1 ? "1 weekly reset" : "{n} weekly resets", { n: r.weekly }));
+    if (!parts.length && r.pending) parts.push(t("Reset confirmation pending"));
     w.append(el("span", "resets-n", "↺ " + parts.join(" · ")));
     // a GLM Coding plan's resets, a team's or the person's own (#1191)
-    w.title = r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
+    w.title = r.canUse ? t("Use a reset")
+      : r.team ? t("The team plan's resets, used on bigmodel.cn or z.ai") : t("The plan's resets, used on bigmodel.cn or z.ai");
     if (r.until) {
       const at = new Date(r.until);
       w.append(el("span", "resets-until", " · " + t("until {when}", { when: resetClock(at) })));
@@ -17879,15 +17880,15 @@ function resetsEach(r) {
   }).join("\n");
 }
 
-// codexResetCard: this computer's Codex card, or a remote magpie's (#3850)
-function codexResetCard(q) {
-  if (!q.resets || q.resets.byWindow) return false;
-  return q.provider === "codex" || !!(q.from && q.user && /^[^/]+\/codex$/.test(q.provider || ""));
+function canUseReset(q) {
+  const r = q.resets;
+  return !!(r && (r.byWindow ? r.canUse && r.context : q.provider === "codex" || q.from && q.user && /^[^/]+\/codex$/.test(q.provider || "")));
 }
 
 // resetUseTitle: a use spends the one that runs out first
 function resetUseTitle(q) {
   const r = q.resets;
+  if (r.byWindow) return t("Use a reset");
   return (r.until
     ? t("Uses the reset that runs out first ({when}), never one that lasts longer.", { when: new Date(r.until).toLocaleString(intlLang()) })
     : t("Uses one of its resets; none of them runs out."))

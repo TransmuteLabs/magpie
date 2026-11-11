@@ -16,6 +16,7 @@ import (
 
 const quotaUsage = `usage: magpie quota [<provider>…] [--json]
        magpie quota reset [<codex account>] [--card <n>] [--yes]
+       magpie quota reset --provider zcode <account> --window five-hour|weekly [--yes]
        magpie quota auto-reset [<codex account>] [week|expiring] [on|off]
        magpie quota auto-reset lead [<minutes or hours, like 30m or 3h>|default]
        magpie quota credits [<codex account>] [on|first|last|off]
@@ -215,6 +216,9 @@ func resetsCell(r *provider.ResetCredits, agent, user string) string {
 // — spends one of the account's rate-limit resets, once the user has said
 // so: the one that runs out first, or the nth to run out.
 func quotaResetCmd(args []string) error {
+	if slices.Contains(args, "--provider") || slices.Contains(args, "--window") {
+		return quotaZCodeResetCmd(args)
+	}
 	yes, user, card := false, "", 0
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
@@ -303,6 +307,90 @@ func quotaResetCmd(args []string) error {
 		return fmt.Errorf("%s: %s", who, out.Text())
 	}
 	fmt.Println(green.Render("✓"), who+":", out.Text())
+	return nil
+}
+
+func quotaZCodeResetCmd(args []string) error {
+	id, user, window, yes := "zcode", "", "", false
+	for i := 0; i < len(args); i++ {
+		switch arg := args[i]; arg {
+		case "--yes", "-y":
+			yes = true
+		case "--window", "--provider":
+			if i+1 == len(args) {
+				return fmt.Errorf("%s requires a value", arg)
+			}
+			i++
+			if arg == "--provider" {
+				id = args[i]
+			} else {
+				switch args[i] {
+				case "five-hour":
+					window = "fiveHour"
+				case "weekly":
+					window = "weekly"
+				default:
+					return fmt.Errorf("--window is five-hour or weekly")
+				}
+			}
+		case "help", "--help", "-h":
+			fmt.Println(quotaUsage)
+			return nil
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("magpie quota reset --provider zcode doesn't know %s", arg)
+			}
+			if user != "" {
+				return fmt.Errorf("name one ZCode account")
+			}
+			user = arg
+		}
+	}
+	if user == "" || window == "" {
+		return fmt.Errorf("name the ZCode account and --window five-hour or weekly")
+	}
+	ctx, cancel := context.WithTimeout(provider.Asked(context.Background()), 45*time.Second)
+	defer cancel()
+	resets, err := provider.ReadZCodeResets(ctx, id, user)
+	if err != nil {
+		return err
+	}
+	if !resets.CanUse {
+		return fmt.Errorf("this ZCode account cannot use a reset here")
+	}
+	if resets.Pending != "" && resets.Pending != window {
+		return fmt.Errorf("the previous %s reset is not confirmed; resolve it before choosing another window", resets.Pending)
+	}
+	count, label := resets.FiveHour, "five-hour"
+	if window == "weekly" {
+		count, label = resets.Weekly, "weekly"
+	}
+	if count == 0 && resets.Pending == "" {
+		return fmt.Errorf("%s holds no %s reset", user, label)
+	}
+	if !yes {
+		if resets.Pending != "" {
+			fmt.Printf("Retry the same unconfirmed %s reset on %s? No new reset is chosen. [y/N] ", label, user)
+		} else {
+			plan := "personal"
+			if resets.Team {
+				plan = "team"
+			}
+			fmt.Printf("Use one %s reset on %s's %s plan? Only this window starts again, and it can't be undone. [y/N] ", label, user, plan)
+		}
+		line, _ := stdin().ReadString('\n')
+		if answer := strings.ToLower(strings.TrimSpace(line)); answer != "y" && answer != "yes" {
+			return fmt.Errorf("nothing spent")
+		}
+	}
+	out, err := provider.SpendZCodeReset(ctx, id, user, window, resets.Context)
+	if err != nil {
+		return err
+	}
+	if out.Code != "reset" && out.Code != "already_used" {
+		return fmt.Errorf("%s: %s", user, out.Text())
+	}
+	fmt.Println(green.Render("✓"), user+":", out.Text())
 	return nil
 }
 

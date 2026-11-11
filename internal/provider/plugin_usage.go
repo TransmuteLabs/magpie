@@ -124,8 +124,18 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 		notePluginLapseSince(pp, key, http.StatusOK, began)
 	}
 	keepPluginPlan(pp, key, u.Plan)
+	q = quotaOfPlugin(q, u)
+	if pp.ID == "zcode" && validResetBinding(u.ResetScope) && validResetBinding(u.ResetContext) {
+		resets, why := fetchZCodeResets(ctx, zcodeResetAccount{provider: pp.ID, key: key, user: l.User}, u.ResetScope, u.ResetContext)
+		if resets != nil {
+			q.Resets = resets
+		}
+		if why != "" {
+			q.Windows = append(q.Windows, QuotaWindow{Name: "Rate-limit resets", Text: true, Aside: true, Display: why})
+		}
+	}
 	// a wallet's spend counted, for a cap to hold it (#5770)
-	return withWalletSpend(quotaOfPlugin(q, u), l.User, time.Now())
+	return withWalletSpend(q, l.User, time.Now())
 }
 
 // quotaOfPlugin fills q with what the plugin told.

@@ -500,6 +500,7 @@ var notYet = map[string]string{
 	"POST /api/usage/checkin-account":            U,  // usage.go: one account now; `magpie accounts checkin` does every account
 	"POST /api/usage/clear":                      U,  // usage.go
 	"POST /api/usage/codex-reset":                U,  // usage.go
+	"POST /api/usage/zcode-reset":                U,  // usage.go: quota reset --provider zcode
 	"POST /api/usage/deleted":                    U,  // usage.go
 	"POST /api/usage/minimax-checkin":            U,  // usage.go
 	"POST /api/usage/plugin-checkin":             U,  // usage.go

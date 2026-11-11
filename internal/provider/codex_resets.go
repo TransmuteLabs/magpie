@@ -35,6 +35,11 @@ type ResetCredits struct {
 	Weekly   int  `json:"weekly,omitempty"`
 	// Team: the resets are a GLM Coding team plan's, not the person's own
 	Team bool `json:"team,omitempty"`
+	// Windowed resets are usable here only when their plugin supplied the
+	// current nonsecret context. Pending names an unconfirmed use's window.
+	CanUse  bool   `json:"canUse,omitempty"`
+	Context string `json:"context,omitempty"`
+	Pending string `json:"pending,omitempty"`
 	// Each is every reset still to be used and when it runs out, the
 	// soonest first, one that never does last (#960: the card's tooltip
 	// lists them, where it only said the first). Empty when the vendor
@@ -226,6 +231,8 @@ func (o ResetOutcome) Text() string {
 		return "no reset left on the account"
 	case "already_redeemed", "already_used":
 		return "that reset was already used"
+	case "reset_unconfirmed":
+		return "the reset may have been used; refresh or retry the same reset before spending another"
 	}
 	return o.Code
 }

@@ -1231,6 +1231,9 @@ type Usage struct {
 	SignIn  string        `json:"signIn"` // "expired", "kept", "renewed" or ""
 	Windows []UsageWindow `json:"windows"`
 	Resets  *UsageResets  `json:"resets"`
+	// Only nonsecret reset snapshot bindings; credentials stay in the plugin.
+	ResetScope   string `json:"resetScope,omitempty"`
+	ResetContext string `json:"resetContext,omitempty"`
 }
 
 // UsageResets are the rate-limit resets an account may spend.

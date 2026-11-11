@@ -3209,6 +3209,7 @@ async function usageOf(provider, account, signal) {
   const text = (v) => (typeof v === "string" ? v : "")
   const num = (v) => (typeof v === "number" && isFinite(v) ? v : 0)
   const ids = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : [])
+  const resetScope = text(u.resetScope), resetContext = text(u.resetContext)
   return {
     plan: text(u.plan),
     until: when(u.until),
@@ -3217,6 +3218,8 @@ async function usageOf(provider, account, signal) {
     error: text(u.error),
     user: text(u.user),
     signIn: ["expired", "kept", "renewed"].includes(u.signIn) ? u.signIn : "",
+    ...(/^[a-f0-9]{64}$/.test(resetScope) && /^[a-f0-9]{64}$/.test(resetContext)
+      ? { resetScope, resetContext } : {}),
     resets:
       u.resets && typeof u.resets === "object"
         ? {
