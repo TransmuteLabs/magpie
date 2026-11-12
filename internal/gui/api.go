@@ -265,7 +265,7 @@ type agentJSON struct {
 	// copies; Terminal: and opens in a terminal, this system having one
 	Command  string `json:"command,omitempty"`
 	Terminal bool   `json:"terminal,omitempty"`
-	// OpenApp: its Open button opens the desktop app, not a terminal
+	// OpenApp: its row menu opens the desktop app, not only a terminal
 	// (Codex, by the setting codexOpen, Yink88564391 on X)
 	OpenApp bool `json:"openApp,omitempty"`
 }
@@ -1135,7 +1135,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		webPage.Store(true)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", devPage(revalidated(http.FileServer(http.FS(staticFS())))))
+	page := devPage(revalidated(http.FileServer(http.FS(staticFS()))))
+	mux.Handle("/", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if warmsSessions(r) {
+			warmSessions()
+		}
+		page.ServeHTTP(rw, r)
+	}))
 	devRoutes(mux)
 	pluginPageRoutes(mux, isWeb(w))
 	feedbackRoutes(mux)
@@ -2193,7 +2199,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
-	// what the Open button of Codex's Agents row opens: "", "app" or
+	// the Codex client magpie presents to the ChatGPT backend: "" (Codex
+	// CLI) or "desktop" (ouhthuo on X)
+	mux.HandleFunc("POST /api/settings/codex-client", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Client string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetCodexClient(in.Client); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// what Codex opens in from its Agents row menu: "", "app" or
 	// "terminal" (Yink88564391 on X)
 	mux.HandleFunc("POST /api/settings/codex-open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ Open string }

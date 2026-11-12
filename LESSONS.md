@@ -508,6 +508,18 @@ push.**
   can't be spelled by a port, an id, a time or a hash.
 - Seen 2× (2026-10-10, 2026-11-10).
 
+**A script Settings loads runs in every mode the GUI has: the window,
+the panel and gateway mode.**
+- 22f2759d7 (11-11) added navpages.js, which read `$("#nav")` before
+  checking the mode. The panel has no #nav, so each Settings draw there
+  threw, and openAgentPrefs, which waits on that draw, opened no sheet
+  from the panel's menu. agent-prefs was red in both engines and all
+  five languages for two days. #6139 got two "seen again" comments and
+  a duplicate (#6311) before 41e330bdf fixed it.
+- Run the GUI files that open Settings in the panel too (`?mode=panel`),
+  and read the `pageerror` stack before calling a timeout load.
+- Seen 1× (2026-11-13).
+
 **Playwright's WebKit is not WebKitGTK.** A GUI change with motion or a new
 browser API is tried in the real Linux app too.
 - 18e82adc6 (10-11) traded the layouts in a view transition. The GUI suite
@@ -929,6 +941,10 @@ is read back before the push.**
   pushing.
 - Seen 2× (2026-10-15, 2026-11-12).
 
+**A commit's `--stat` names only the files its change touched** is in
+the code standards since 11-13. See
+[Moved to the code standards](#moved-to-the-code-standards).
+
 **A community PR that changes how a page looks is not merged on review
 alone.**
 - #1354 (Nxir) rearranged the Routing page with no issue asking for it. It
@@ -945,6 +961,10 @@ standards since 10-18, widened to a worktree and its logs. See
 
 ## Moved to the code standards
 
+- **A commit's `--stat` names only the files its change touched; any
+  other file is a stale tree** (11-11, 11-12, 11-13). On 11-13 8c7328f3a
+  (remote quotas) wrote 21 files back to 35aaaa4b9^ and took out three
+  commits; 926b1e7df put them back.
 - **A red's issue is read to its last comment, and a patch on it is
   taken first** (10-12, 10-17, 10-27, 10-28). On 10-28 JoeyWu-tech's
   #3568 patch sat three days until CI went red on it again (11c427eaa).
