@@ -336,6 +336,8 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.UsageAgentsHidden = cur.UsageAgentsHidden
 	// and the allowance cards the Usage page's Overview leaves out, set there
 	in.UsageCardsHidden = cur.UsageCardsHidden
+	// and the quota rows of a card it leaves out, set there too
+	in.UsageWindowsHidden = cur.UsageWindowsHidden
 	// and the names models' usage is counted under (magpie model alias)
 	in.UsageAliases = cur.UsageAliases
 	// and the clears of usage made on the Usage page
@@ -351,6 +353,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.FullContext = cur.FullContext     // set on its own (full-context)
 	in.CompactAt = cur.CompactAt         // and so is the threshold
 	in.AgentCompacts = cur.AgentCompacts // and each agent's own (agent-compact)
+	in.AgentContexts = cur.AgentContexts // and the windows each is told (agent-contexts)
 	in.ContextCap = cur.ContextCap       // and the longest window of every model (context-cap)
 	in.ContextCapAll = cur.ContextCapAll // and whether it holds the user's own windows
 	// Codex's background compaction, set on its own (codex-async-compact)
@@ -370,6 +373,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// and the models Codex's and Desktop's subagents are put on, set
 	// in their Agents rows
 	in.CodexSubagentModel = cur.CodexSubagentModel
+	in.CodexOpen = cur.CodexOpen // set on its own (codex-open)
 	in.DesktopSubagentModel = cur.DesktopSubagentModel
 	in.DesktopGateway = cur.DesktopGateway     // Desktop's address, set in its row
 	in.CodexServiceTier = cur.CodexServiceTier // codex-service-tier
@@ -413,7 +417,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 		}
 	}
 	if v := strings.TrimSpace(in.ImageGen); v != "" && v != "off" && v != cur.ImageGen {
-		if _, _, ok := provider.Resolve(v); !ok {
+		if gateway.DrawerMissingOf(v) != "" {
 			return in, fmt.Errorf("no model %s to generate images", v)
 		}
 	}

@@ -265,6 +265,9 @@ type agentJSON struct {
 	// copies; Terminal: and opens in a terminal, this system having one
 	Command  string `json:"command,omitempty"`
 	Terminal bool   `json:"terminal,omitempty"`
+	// OpenApp: its Open button opens the desktop app, not a terminal
+	// (Codex, by the setting codexOpen, Yink88564391 on X)
+	OpenApp bool `json:"openApp,omitempty"`
 }
 
 // clientJSON is an agent, or another client the gateway knows, as a
@@ -1969,6 +1972,28 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
+	// the windows one agent is told, apart from every other's
+	// (settings.AgentContexts): Contexts replaces them, none takes them away
+	mux.HandleFunc("POST /api/settings/agent-contexts", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Agent    string
+			Contexts map[string]int
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		a, err := agent.Find(in.Agent)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetAgentContexts(a.ListsFor(), in.Contexts); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
 	// an agent's own Provider in model names (settings.AgentSuffix): Mode
 	// "" follows the one for every agent again
 	mux.HandleFunc("POST /api/settings/agent-suffix", func(rw http.ResponseWriter, r *http.Request) {
@@ -2163,6 +2188,20 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			return
 		}
 		if err := provider.SetCodexServiceTier(in.Tier); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// what the Open button of Codex's Agents row opens: "", "app" or
+	// "terminal" (Yink88564391 on X)
+	mux.HandleFunc("POST /api/settings/codex-open", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Open string }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if err := provider.SetCodexOpen(in.Open); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -2538,11 +2577,12 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	// not sent stays as it is
 	mux.HandleFunc("POST /api/usage/arrange", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Order        *[]string
-			PanelHidden  *[]string
-			AgentsHidden *[]string
-			CardsHidden  *[]string
-			Count        *struct{ Client, As string }
+			Order         *[]string
+			PanelHidden   *[]string
+			AgentsHidden  *[]string
+			CardsHidden   *[]string
+			WindowsHidden *[]string
+			Count         *struct{ Client, As string }
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
@@ -2568,6 +2608,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		if in.CardsHidden != nil {
 			s.UsageCardsHidden = *in.CardsHidden
+		}
+		if in.WindowsHidden != nil {
+			s.UsageWindowsHidden = *in.WindowsHidden
 		}
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
@@ -3214,6 +3257,7 @@ func state() stateJSON {
 		// as agentCommand makes it, Launch asked once
 		aj.Command = agentLine(a, aj.Launch, runtime.GOOS)
 		aj.Terminal = terminalHere() && aj.Command != ""
+		aj.OpenApp = a.ID == "codex" && codexOpensApp()
 		if a.Native != nil {
 			native := a.Native.Read()
 			aj.Native = &native
