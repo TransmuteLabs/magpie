@@ -31,6 +31,7 @@ import (
 	"github.com/yetone/magpie/internal/awake"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexrelay"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/gwmw"
@@ -515,8 +516,9 @@ type Call struct {
 
 // Server is the gateway.
 type Server struct {
-	client    *http.Client
-	protocols *protocolext.Host
+	client     *http.Client
+	protocols  *protocolext.Host
+	extensions *extension.Manager
 	// ending closes once the gateway stops serving, for a stream with no
 	// end of its own (routeEvents) to end before Shutdown, which would
 	// wait its whole drain for it (streamsEnding)
@@ -635,6 +637,7 @@ func New() *Server {
 		// redirect is followed to its own origin only, so its key goes
 		// nowhere else (provider.KeepsCredentials)
 		client:       &http.Client{Transport: rpmTransport{upstreamTransport()}, CheckRedirect: provider.KeepsCredentials},
+		extensions:   extension.Default(),
 		unfit:        make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
@@ -812,6 +815,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 		}
 		return err
+	}
+	if s.extensions != nil {
+		defer func() {
+			drain, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.extensions.Close(drain)
+		}()
 	}
 	ClearHeld()
 	s.lnMu.Lock()
@@ -2362,6 +2372,8 @@ func estimate(req *Request) int {
 
 // serve routes one parsed-enough request to its provider.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+	extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+	r = r.WithContext(extensionContext)
 	start := time.Now()
 	// a client's "off" is magpie's none, for every route and check below
 	// that reads the body's effort (plugins#334)
@@ -3557,6 +3569,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			nearDone()
 			nearDone = nil
 		}
+		if outcome := extensionAttempt.Outcome(true); outcome != nil {
+			call.Status, call.Error = extensionOperationFailure(w, kept, from, askedFor, false, outcome, extensionAttempt)
+			call.Usage.ErrType = "extension_operation_terminal"
+			break
+		}
 		c := cands[i]
 		if handed.release != nil && handed.who != c.who() {
 			handed.release()
@@ -4247,6 +4264,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// quotaHeld): the slot taken for it goes back
 			handed.release()
 			handed.release = nil
+		}
+		if totals := extensionAttempt.Usage(); totals != nil {
+			call.Usage.Input, call.Usage.Output = int(totals.InputTokens), int(totals.OutputTokens)
+			call.Usage.CacheRead, call.Usage.CacheWrite = int(totals.CachedTokens), int(totals.CacheWriteTokens)
+		}
+		if outcome := extensionAttempt.Outcome(call.Status >= 400 || hw.failure != 0 || hw.refused || hw.looped != "" || hw.slow); outcome != nil {
+			call.Status, call.Error = extensionOperationFailure(w, kept, from, askedFor, hw.passing && streams, outcome, extensionAttempt)
+			call.Usage.ErrType = "extension_operation_terminal"
+			s.trace.update(tr, func(t *Route) {
+				tt := &t.Tries[len(t.Tries)-1]
+				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Millis = true, call.Status, call.Error, failOther, time.Since(began).Milliseconds()
+			})
+			break
 		}
 		if laneErr != nil {
 			// its key's or account's queue was full, or it waited as long
@@ -6235,7 +6265,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			}
 		}
 	}
-	if p.IsPlugin() {
+	if p.IsPlugin() || p.IsExtension() {
 		req.Header.Set(provider.ConversationHeader, conversationID(in, body))
 		// the session and subagent the agent named, for a plugin that
 		// keeps state per conversation (plugins#620)

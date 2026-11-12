@@ -8,6 +8,55 @@ supported agent: where its config lives, which fields matter and which
 values to offer. It also records what magpie set, so a later change made by
 something else shows up as drift.
 
+## Executable SDK agents
+
+An enabled executable extension with `agent-wiring` can add an ordinary agent
+without a built-in switch or an `agent.js` sidecar. Its `AgentDescriptor`
+declares `id`, `name`, an optional executable basename `bin`, exact
+HOME-relative `configFiles`, and model picker `fields` (`key`, `label`).
+Paths are clean relative paths without traversal, expansion or globs.
+An ID/Name-only descriptor remains available through explicit action commands;
+it does not register an ordinary tile. Rich descriptors negotiate both
+`agent.inspect` and `agent.plan`.
+
+[`All` and `local`](../../internal/agent/agents.go) append these descriptors
+after built-in and existing JS agents. Existing agent IDs and aliases cannot
+be replaced. [`extension_actions.go`](../../internal/agent/extension_actions.go)
+adapts each descriptor to `Agent`, `Field` and `NativeConnection`, so the
+normal `Find`, `ConnectHow`, `Apply`, `Disconnect`, preview and catalog sync
+paths reach the module. Disabled modules disappear on the next discovery.
+`PluginErrors` reports discovery and ownership conflicts.
+
+`agent.inspect` receives `{id, options, settings}` and returns
+`{connected, values: {field: value}, detail?}`. `settings.files` contains host
+snapshots: `{path, body, beforeHash, mode, exists}`; `body` is base64 bytes,
+and a missing file has hash `"missing"`. Inspection does not write files.
+The ordinary adapter supplies `options.gateway` (gateway base URL),
+`key` (the agent-scoped credential), `models` (model options with `value`,
+`label` and `ref`), and, for a field change, `field` and `value`. Model
+values use `magpie/<reference>`; the module translates these into its own
+config schema. `options.previous` contains the snapshots before magpie's
+first successful adoption, for module-owned restoration of its keys.
+
+Connect, set, sync and disconnect prepare `agent.plan`, then the host action
+service validates and executes the file plan. A preview only prepares it.
+Exact config paths, hashes, root identity, private durable backups, a write
+lock and rollback constrain host writes; the worker remains a trusted local
+executable, not a filesystem sandbox. Parent scope is preserved by explicit
+action calls. The ordinary adapter uses bounded agent-operation scopes.
+
+The host records adoption in its stash only after successful file application.
+A module reporting an existing connection alone does not transfer ownership:
+background sync and disconnect leave manually wired files alone. If saving
+ownership fails after application, the operation reports that distinction and
+the durable backup location. Modules own format-aware restoration and must
+preserve unrelated changes made by the user.
+
+`TestExtensionAgentOrdinaryLifecycle` installs a real executable fixture and
+exercises ordinary discovery, connect, apply, rediscovery, preview, stale-file
+refusal, disconnect and disable. Sibling tests protect manual wiring and
+built-in ID ownership.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

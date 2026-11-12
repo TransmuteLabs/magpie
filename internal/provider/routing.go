@@ -269,9 +269,10 @@ func SetAffinity(id, affinity string) error {
 
 var usedCache struct {
 	sync.Mutex
-	m       map[string]map[string]Allowance // agent → user → allowance
-	at      map[string]time.Time
-	loading map[string]chan struct{} // closed when the fetch in flight is done
+	m          map[string]map[string]Allowance // agent → user → allowance
+	at         map[string]time.Time
+	loading    map[string]chan struct{} // closed when the fetch in flight is done
+	extensions map[string]map[string]string
 	// renewed: the generation when an account's windows were started
 	// again. Read/reset order cannot use the clock: two events can have
 	// the same timestamp, even with its monotonic part.
@@ -885,16 +886,21 @@ func (l Limit) expiring(u float64, now, ends time.Time) (pace float64, at time.T
 // ago. Only the very first ask waits, and not for long. An account
 // missing is one not known yet.
 func Allowances(agent string) map[string]Allowance {
+	bindings, external := extensionUsageBindings(agent)
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
 		c.m, c.at, c.loading = map[string]map[string]Allowance{}, map[string]time.Time{}, map[string]chan struct{}{}
+	}
+	if external {
+		syncExtensionAllowanceBindings(agent, bindings)
 	}
 	done := c.loading[agent]
 	if done == nil && time.Since(c.at[agent]) > time.Minute {
 		done = make(chan struct{})
 		c.loading[agent] = done
 		began := c.generation
+		captured := maps.Clone(bindings)
 		goRead(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -909,7 +915,16 @@ func Allowances(agent string) map[string]Allowance {
 					all[user] = a
 				}
 			}
+			current, _ := extensionUsageBindings(agent)
 			c.Lock()
+			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) {
+				delete(c.m, agent)
+				c.at[agent] = time.Time{}
+				delete(c.loading, agent)
+				c.Unlock()
+				close(done)
+				return
+			}
 			now := time.Now()
 			// as old as its oldest reading: one the Usage page made 50s
 			// ago, taken here, is read again in 10s, not kept a minute
@@ -991,6 +1006,12 @@ func Allowances(agent string) map[string]Allowance {
 		case <-time.After(firstWait):
 		}
 	}
+	if external {
+		current, _ := extensionUsageBindings(agent)
+		c.Lock()
+		syncExtensionAllowanceBindings(agent, current)
+		c.Unlock()
+	}
 	c.Lock()
 	m, known := c.m[agent]
 	c.Unlock()
@@ -1007,6 +1028,11 @@ func Allowances(agent string) map[string]Allowance {
 // an account whose reading is too old or failed (Provider.CapCareful).
 func UsageRead(agent, user string) (at time.Time, failed, ok bool) {
 	c := &usedCache
+	if bindings, external := extensionUsageBindings(agent); external {
+		c.Lock()
+		syncExtensionAllowanceBindings(agent, bindings)
+		c.Unlock()
+	}
 	c.Lock()
 	defer c.Unlock()
 	st, ok := c.read[agent+"/"+strings.ToLower(user)]
@@ -1186,7 +1212,7 @@ func forgetAllowance(agent, user string) {
 // now, asked before, comes back with: the account just answered that it
 // has run out.
 func StaleAllowance(agent, user string) {
-	key := agent + "/" + strings.ToLower(user)
+	key := loginReadingUserKey(agent, user)
 	if readsAsked() {
 		markStaleRead(agent, user) // read though allowances are read only when asked (#1518)
 	}
@@ -1224,6 +1250,9 @@ func (a Allowance) restartedBy(runsOut time.Time) Allowance {
 // (#3650): the account is then not known, as one never read, rather than
 // one with all of it left, ahead of the rest.
 func routedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Allowance, bool) {
+	if slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool { return window.Unknown || window.AsOf != nil }) {
+		return nil, false
+	}
 	a := allowanceOf(q.Windows, now)
 	if len(a) == 0 {
 		return nil, false

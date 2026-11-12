@@ -4,6 +4,10 @@ Date: 2026-11-12
 
 Status: accepted; branch separation completed, external runtimes remain staged.
 
+This records the branch-split checkpoint `000de62dc`. Subsequent external SDK
+runtime work is covered by [ADR 0003](0003-external-extension-runtime.md);
+the implementation limits below describe that checkpoint.
+
 ## Decision
 
 Maintain `devzeus` on upstream Magpie with only vendor-neutral SDK integration,

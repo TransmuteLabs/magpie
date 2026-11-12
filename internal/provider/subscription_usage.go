@@ -32,6 +32,9 @@ type QuotaWindow struct {
 	Used      float64    `json:"used"`
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
 	ResetSecs int64      `json:"resetSecs,omitempty"`
+	AsOf      *time.Time `json:"asOf,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Unknown   bool       `json:"unknown,omitempty"`
 	Display   string     `json:"display,omitempty"`
 	// Text is set on a window that is its Display alone, with no share
 	// to tell: a plugin's row of what an account holds or has done
@@ -586,6 +589,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 	}
 	fetches = append(fetches, pluginUsageFetches(via, hidden, placed)...)
+	fetches = append(fetches, extensionUsageFetches(via, hidden)...)
 	// each fetch keeps what it read (keepLast) itself: an account's
 	// reading, shared with LoginUsage, is kept once
 	out := make([]SubscriptionQuota, len(fetches))
@@ -689,7 +693,7 @@ func claudeSubscriptionUsage(ctx context.Context, user string) SubscriptionQuota
 // readNow stamps a reading just made, one that doesn't say when it was
 // read itself, with the time.
 func readNow(q SubscriptionQuota) SubscriptionQuota {
-	if q.Error == "" && q.AsOf == nil && q.ReadAt == nil && (len(q.Windows) > 0 || q.Balance != "") {
+	if q.Error == "" && q.AsOf == nil && !q.ReadDeferred && q.ReadAt == nil && (len(q.Windows) > 0 || q.Balance != "") {
 		now := time.Now()
 		q.ReadAt = &now
 	}

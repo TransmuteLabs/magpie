@@ -47,10 +47,15 @@ func (e loginUsageEntry) state() readState {
 	if !e.readAt.IsZero() {
 		at = e.readAt
 	}
+	for _, window := range e.read.Windows {
+		if window.Unknown || window.AsOf != nil {
+			return readState{failed: true}
+		}
+	}
 	switch {
 	case e.read.AsOf != nil:
 		return readState{at: *e.read.AsOf, failed: true}
-	case e.read.Error != "" || len(e.read.Windows) == 0:
+	case e.read.Error != "" || e.read.ReadDeferred || len(e.read.Windows) == 0:
 		return readState{failed: true}
 	}
 	return readState{at: at}
@@ -263,7 +268,13 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 
 // cachedLoginReading is loginReading as read or kept.
 func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingCacheKey(l)
+	if l.extension != nil {
+		if err := l.extension.check(ctx); err != nil {
+			q := SubscriptionQuota{Provider: l.Agent, User: l.User, Error: err.Error()}
+			return loginUsageEntry{at: time.Now(), q: q, read: q}
+		}
+	}
 	c := &loginUsageCache
 	// with allowances read only when asked, one nobody asked for is what
 	// was read last, however old, unless the vendor just turned the
@@ -351,6 +362,9 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 // False for an agent that tells none, and for the built-in Grok, read by
 // home.
 func usageLogins(agent string) (logins []Login, ok bool) {
+	if logins, ok := extensionLogins(agent); ok {
+		return logins, true
+	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return pluginUsageLogins(pp), true
 	}
@@ -390,6 +404,9 @@ func loginProvider(l Login) string {
 
 func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	ctx = ViaLogin(ctx, loginProvider(l), l.User) // asked through the account's own proxy
+	if l.extension != nil {
+		return extensionQuota(ctx, l)
+	}
 	if strings.HasPrefix(l.Agent, "plugin:") {
 		return pluginLoginQuota(ctx, l)
 	}
@@ -629,7 +646,7 @@ func knownLoginUsage(agent string) map[string]SubscriptionQuota {
 // loginReading's cache alone, and none of its reading. False when the
 // cache has nothing at all for the account.
 func loginReadingKnown(l Login) (loginUsageEntry, bool) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingCacheKey(l)
 	c := &loginUsageCache
 	c.Lock()
 	defer c.Unlock()

@@ -134,10 +134,13 @@ func ToolNames(pts []plugin.PluginTools) map[string]map[string]string {
 	return out
 }
 
-// anyPluginOn is whether plugins.json has a plugin that is on: none, and
-// there is no tool to list without starting Bun.
+// anyPluginOn checks both installed catalogs without starting either runtime.
 var anyPluginOn = func() bool {
-	for _, e := range plugin.Load().Plugins {
+	list, err := plugin.ReadList()
+	if err != nil {
+		return false
+	}
+	for _, e := range list.Plugins {
 		if !e.Off {
 			return true
 		}
@@ -205,6 +208,18 @@ func PluginToolsOf(ctx context.Context, name string) ([]plugin.Tool, error) {
 // MCP hub calls it: the text it answered, or why it couldn't run. The hub
 // has held the call to the caller's key limit already.
 func RunPluginToolOf(ctx context.Context, name, tool string, args json.RawMessage, agent string) (string, error) {
+	spec, err := selectedPluginTool(ctx, name, tool)
+	if err != nil {
+		return "", err
+	}
+	ctx, args, err = extensionToolContext(ctx, spec, args)
+	if err != nil {
+		return "", err
+	}
+	return runPluginTool(ctx, spec, tool, args, agent)
+}
+
+func selectedPluginTool(ctx context.Context, name, tool string) (string, error) {
 	if !gwtool.Served(gwtool.PluginTools) {
 		return "", errors.New(errToolsOff)
 	}
@@ -215,7 +230,7 @@ func RunPluginToolOf(ctx context.Context, name, tool string, args json.RawMessag
 	if !slices.ContainsFunc(ts, func(t plugin.Tool) bool { return t.Name == tool }) {
 		return "", fmt.Errorf("the plugin %s isn't on in magpie, or gives no tool %s", name, tool)
 	}
-	return runPluginTool(ctx, spec, tool, args, agent)
+	return spec, nil
 }
 
 // toolsMCPServe answers m for the tools list gives: every plugin's (one
@@ -274,7 +289,7 @@ func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, served
 				if err != nil {
 					return toolResult(err.Error(), true), nil
 				}
-				return toolResult(said, false), nil
+				return said, nil
 			}
 		}
 		if one != "" {
@@ -287,11 +302,26 @@ func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, served
 
 // toolsMCPRun runs one plugin tool, held to the calling gateway key's
 // limit.
-func (s *Server) toolsMCPRun(r *http.Request, t mcpTool, args json.RawMessage) (string, error) {
+func (s *Server) toolsMCPRun(r *http.Request, t mcpTool, args json.RawMessage) (map[string]any, error) {
 	release, err := reserveFor(access.Caller(r.Context()), int64(len(args)), "", limitClock())
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer release()
-	return runPluginTool(r.Context(), t.spec, t.Name, args, callerOf(r).agent)
+	ctx, args, err := extensionToolContext(r.Context(), t.spec, args)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(t.spec, plugin.ExtensionToolPrefix) {
+		result, err := runExtensionPluginTool(ctx, t.spec, t.Name, args)
+		if err != nil {
+			return nil, err
+		}
+		return extensionMCPResult(result)
+	}
+	text, err := runPluginTool(ctx, t.spec, t.Name, args, callerOf(r).agent)
+	if err != nil {
+		return nil, err
+	}
+	return toolResult(text, false), nil
 }

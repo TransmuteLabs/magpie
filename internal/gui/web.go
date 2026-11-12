@@ -517,6 +517,8 @@ func onePort(page http.Handler) http.Handler {
 		clientPath := gateway.ClientPath(r.URL.Path)
 		if server != nil {
 			clientPath = server.ClientPath(r.URL.Path)
+		} else {
+			clientPath = gateway.InstalledClientPath(r.URL.Path)
 		}
 		if !clientPath {
 			page.ServeHTTP(rw, r)

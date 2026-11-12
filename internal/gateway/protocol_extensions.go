@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/protocolext"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/protocolext"
@@ -26,6 +27,7 @@ func NewWithProtocols(registry *sdk.Registry) (*Server, error) {
 	}
 	server := New()
 	server.protocols = host
+	server.extensions = nil
 	return server, nil
 }
 
@@ -43,29 +45,68 @@ func protocolPathReserved(endpoint string) bool {
 
 type protocolRegistryCtx struct{}
 
+type protocolBinding struct {
+	server *Server
+	host   *protocolext.Host
+	err    error
+}
+
+func (server *Server) protocolHost() (*protocolext.Host, error) {
+	if server.protocols != nil || server.extensions == nil {
+		return server.protocols, nil
+	}
+	registry, err := server.extensions.Protocols()
+	if err != nil {
+		return nil, err
+	}
+	return protocolext.New(registry, protocolPathReserved)
+}
+
 func (server *Server) withProtocolRegistry(next http.Handler) http.Handler {
-	if server.protocols == nil {
+	if server.protocols == nil && server.extensions == nil {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, server.protocols)
+		if pinned, ok := request.Context().Value(protocolRegistryCtx{}).(protocolBinding); ok && pinned.server == server {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		host, err := server.protocolHost()
+		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, protocolBinding{server: server, host: host, err: err})
 		next.ServeHTTP(writer, request.WithContext(ctx))
 	})
 }
 
 func registeredProtocolRequest(request *http.Request) bool {
-	host, _ := request.Context().Value(protocolRegistryCtx{}).(*protocolext.Host)
-	return host.ClientPath(request.URL.Path)
+	binding, _ := request.Context().Value(protocolRegistryCtx{}).(protocolBinding)
+	return binding.host.ClientPath(request.URL.Path)
 }
 
 func (server *Server) protocolEntry(next http.Handler) http.Handler {
-	if server.protocols == nil {
+	if server.protocols == nil && server.extensions == nil {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		inbound, found := server.protocols.Lookup(request.URL.Path)
+		binding, _ := request.Context().Value(protocolRegistryCtx{}).(protocolBinding)
+		if binding.server != server {
+			host, err := server.protocolHost()
+			binding = protocolBinding{server: server, host: host, err: err}
+		}
+		if binding.err != nil && !ClientPath(request.URL.Path) {
+			writeError(writer, provider.Chat, http.StatusServiceUnavailable, "extension catalog is unavailable")
+			return
+		}
+		inbound, found := binding.host.Lookup(request.URL.Path)
 		if !found {
 			next.ServeHTTP(writer, request)
+			return
+		}
+		if server.extensions != nil {
+			request = request.WithContext(extension.WithInboundLease(request.Context()))
+		}
+		inbound = sdk.Bind(inbound, request.Context())
+		if inbound == nil {
+			writeError(writer, provider.Chat, http.StatusBadGateway, "protocol adapter did not bind this request")
 			return
 		}
 		began := time.Now()
@@ -77,8 +118,16 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 				log.Printf("protocol adapter %s finished with an error", inbound.ID())
 			}
 		}()
+		errorProtocol := provider.Chat
+		canonicalTool := false
 		refuse := func(status int, message string) {
-			writeError(reply, provider.Chat, status, message)
+			if canonicalTool {
+				reply.Header().Set("Content-Type", "application/json")
+				reply.WriteHeader(status)
+				_ = json.NewEncoder(reply).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "error": map[string]any{"code": -32603, "message": message}})
+				return
+			}
+			writeError(reply, errorProtocol, status, message)
 		}
 		if request.URL.RawPath != "" {
 			refuse(http.StatusBadRequest, "protocol endpoint requires its literal path")
@@ -128,12 +177,37 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if contextual, ok := reply.(interface{ SetContext(context.Context) }); ok {
+			contextual.SetContext(request.Context())
+		}
 		method, target := http.MethodPost, "/v1/chat/completions"
 		switch decoded.Protocol {
-		case sdk.Chat:
+		case sdk.Chat, sdk.Responses, sdk.Messages, sdk.Anthropic, sdk.Gemini:
 			if !json.Valid(decoded.Body) || len(decoded.Body) > protocolBodyLimit {
 				refuse(http.StatusBadGateway, "adapter produced an invalid chat request")
 				return
+			}
+			switch decoded.Protocol {
+			case sdk.Responses:
+				target = "/v1/responses"
+				errorProtocol = provider.Responses
+			case sdk.Messages, sdk.Anthropic:
+				target = "/v1/messages"
+				errorProtocol = provider.Anthropic
+			case sdk.Gemini:
+				var value struct {
+					Model  string `json:"model"`
+					Stream bool   `json:"stream"`
+				}
+				if json.Unmarshal(decoded.Body, &value) != nil || !validProtocolModel(value.Model) {
+					refuse(http.StatusBadGateway, "adapter produced an invalid Gemini model")
+					return
+				}
+				target = "/v1beta/models/" + value.Model + ":generateContent"
+				if value.Stream {
+					target = "/v1beta/models/" + value.Model + ":streamGenerateContent"
+				}
+				errorProtocol = provider.Gemini
 			}
 		case sdk.Models:
 			if !inbound.Contract().Has(sdk.ModelDiscovery) || len(decoded.Body) != 0 {
@@ -141,11 +215,30 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 				return
 			}
 			method, target = http.MethodGet, "/v1/models"
+		case sdk.Tool:
+			canonicalTool = true
+			var err error
+			decoded.Body, err = server.protocolToolBody(request, inbound, decoded.Body)
+			if err != nil {
+				refuse(http.StatusBadGateway, "native module tool dispatch is unavailable")
+				return
+			}
+			target = ToolsMCPPath
 		default:
 			refuse(http.StatusBadGateway, "adapter produced an unsupported wire request")
 			return
 		}
+		if len(decoded.Metadata) > 64<<10 || len(decoded.Metadata) > 0 && !json.Valid(decoded.Metadata) ||
+			len(decoded.RequestID) > 256 || strings.ContainsAny(decoded.RequestID, "\r\n\x00") {
+			refuse(http.StatusBadGateway, "adapter produced invalid request metadata")
+			return
+		}
 		normalized := request.Clone(request.Context())
+		if len(decoded.Metadata) > 0 || decoded.RequestID != "" {
+			owner, _, _ := strings.Cut(inbound.ID(), ":")
+			normalized = normalized.WithContext(extension.WithRequestMetadata(normalized.Context(),
+				extension.RequestMetadata{Plugin: owner, RequestID: decoded.RequestID, CallerID: extension.CallerIDFrom(request.Context()), Value: decoded.Metadata}))
+		}
 		normalized.Method = method
 		normalized.URL.Path, normalized.URL.RawPath, normalized.URL.RawQuery = target, "", ""
 		normalized.RequestURI = normalized.URL.RequestURI()
@@ -173,9 +266,12 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 				normalized = normalized.WithContext(context.WithValue(normalized.Context(), callerCtx{}, original))
 			}
 		}
-		if decoded.Protocol == sdk.Chat {
+		if decoded.Protocol != sdk.Models {
 			normalized.Header.Set("Content-Type", "application/json")
 			normalized.Header.Set("Accept", "text/event-stream")
+			if decoded.Protocol == sdk.Tool {
+				normalized.Header.Set("Accept", "application/json")
+			}
 		} else {
 			normalized.Body = nil
 			normalized.Header.Set("Accept", "application/json")
@@ -183,4 +279,17 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 		normalized = aliasRequest(normalized, access.Caller(normalized.Context()))
 		next.ServeHTTP(reply, normalized)
 	})
+}
+
+func validProtocolModel(model string) bool {
+	checked, err := validateModel(model)
+	if err != nil || checked != model || strings.ContainsAny(model, "?#%\\\r\n") {
+		return false
+	}
+	for _, segment := range strings.Split(model, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }

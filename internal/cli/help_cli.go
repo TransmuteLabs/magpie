@@ -52,6 +52,9 @@ func helpFor(args []string) string {
 		}
 		return "  " + libraryUsage
 	case "plugin", "plugins":
+		if len(args) > 1 && (args[1] == "sdk" || args[1] == "extension") {
+			return sdkPluginUsage
+		}
 		return pluginUsage
 	case "quota", "quotas":
 		return quotaUsage

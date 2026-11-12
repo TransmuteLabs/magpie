@@ -138,6 +138,14 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 	if !ok {
 		return CarryResult{}, fmt.Errorf("a %s session can't be carried over to %s", s.Agent, to)
 	}
+	for _, route := range extensionSessionRoutes(s.Agent) {
+		if route.Session.To == to {
+			return carryExtension(s, route)
+		}
+	}
+	if convertsTo[s.Agent] != to {
+		return CarryResult{}, errors.New("session converter is no longer available")
+	}
 	st, err := os.Stat(s.Path)
 	if err != nil {
 		return CarryResult{}, err

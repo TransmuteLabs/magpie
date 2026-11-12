@@ -54,8 +54,12 @@ func CatalogContract() Contract {
 	return Contract{Version: APIVersion{Major: Version, Minor: 2}, Capabilities: []Capability{InboundCodec, ModelDiscovery}}
 }
 
+func ToolContract() Contract {
+	return Contract{Version: APIVersion{Major: Version, Minor: 3}, Capabilities: []Capability{InboundCodec, ToolProvider}}
+}
+
 func HostContract() Contract {
-	return CatalogContract()
+	return Contract{Version: APIVersion{Major: Version, Minor: 3}, Capabilities: []Capability{InboundCodec, ModelDiscovery, ToolProvider}}
 }
 
 func (contract Contract) Has(capability Capability) bool {

@@ -79,7 +79,7 @@ func refreshLogins(ctx context.Context, ls []Login) []Login {
 // forgetLoginReading has l's next reading asked for, keeping what it was
 // for a hiccup (as AskUsage does for every account).
 func forgetLoginReading(l Login) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingCacheKey(l)
 	c := &loginUsageCache
 	c.Lock()
 	if e, ok := c.m[key]; ok {

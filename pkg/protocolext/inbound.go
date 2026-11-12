@@ -2,6 +2,7 @@ package protocolext
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"path"
@@ -16,15 +17,22 @@ const Version = 0
 type Protocol string
 
 const (
-	Chat   Protocol = "chat"
-	Models Protocol = "models"
+	Chat      Protocol = "chat"
+	Responses Protocol = "responses"
+	Messages  Protocol = "messages"
+	Anthropic Protocol = "anthropic"
+	Gemini    Protocol = "gemini"
+	Models    Protocol = "models"
+	Tool      Protocol = "tool"
 )
 
 type Request struct {
-	Protocol Protocol
-	Body     []byte
-	Session  string
-	Timeout  time.Duration
+	Protocol  Protocol
+	Body      []byte
+	Session   string
+	Timeout   time.Duration
+	RequestID string
+	Metadata  json.RawMessage
 }
 
 type Inbound interface {
@@ -33,6 +41,17 @@ type Inbound interface {
 	Path() string
 	Decode(context.Context, http.Header, []byte) (Request, error)
 	Reply(http.ResponseWriter) Response
+}
+
+type RequestBinder interface {
+	Bind(context.Context) Inbound
+}
+
+func Bind(inbound Inbound, ctx context.Context) Inbound {
+	if binder, ok := inbound.(RequestBinder); ok {
+		return binder.Bind(ctx)
+	}
+	return inbound
 }
 
 type Response interface {
@@ -66,6 +85,11 @@ func (entry registeredInbound) Contract() Contract {
 
 func (entry registeredInbound) ID() string   { return entry.id }
 func (entry registeredInbound) Path() string { return entry.path }
+
+func (entry registeredInbound) Bind(ctx context.Context) Inbound {
+	entry.Inbound = Bind(entry.Inbound, ctx)
+	return entry
+}
 
 func New(inbounds ...Inbound) (*Registry, error) {
 	registry := &Registry{paths: make(map[string]Inbound, len(inbounds))}

@@ -2353,6 +2353,9 @@ func (p Provider) listPriceIn(c priceCats, model string) (catalog.Price, bool, i
 			return pr, true, from
 		}
 	}
+	if pr, ok := p.extensionListPrice(model); ok {
+		return pr, true, pricedOwn
+	}
 	if pr, ok := p.remotePrice(model); ok {
 		return pr, true, pricedOwn
 	}

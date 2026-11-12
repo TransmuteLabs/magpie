@@ -36,12 +36,26 @@ type PluginTools struct {
 	Tools []Tool `json:"tools"`
 }
 
-// Tools are the tools the plugins the host loaded give, in plugins.json's
-// order, starting the host if need be.
+// Tools lists enabled legacy tools followed by installed SDK descriptors.
+// The legacy host starts only when a legacy plugin is enabled.
 func Tools(ctx context.Context) ([]PluginTools, error) {
-	loaded, err := Plugins(ctx)
+	list, err := readLegacyToolList()
 	if err != nil {
 		return nil, err
+	}
+	entries, err := extensionToolsRuntime().List()
+	if err != nil {
+		return nil, err
+	}
+	var loaded []Loaded
+	for _, entry := range list.Plugins {
+		if !entry.Off {
+			loaded, err = legacyToolPlugins(ctx)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
 	}
 	var out []PluginTools
 	for _, l := range loaded {
@@ -49,7 +63,7 @@ func Tools(ctx context.Context) ([]PluginTools, error) {
 			out = append(out, PluginTools{Spec: l.Spec, Tools: l.Tools})
 		}
 	}
-	return out, nil
+	return append(out, extensionTools(entries, true)...), nil
 }
 
 // ToolTimeout is how long a tool may run before its call is answered that
@@ -61,6 +75,13 @@ var ToolTimeout = 55 * time.Second
 // the host: its answer as text. agent is the agent that called it, as the
 // tool's context names it.
 func RunTool(ctx context.Context, spec, name string, args json.RawMessage, agent string) (string, error) {
+	if strings.HasPrefix(spec, ExtensionToolPrefix) {
+		result, err := RunExtensionTool(ctx, spec, name, args)
+		if err != nil {
+			return "", err
+		}
+		return extensionToolText(result)
+	}
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage("{}")
 	}
@@ -124,10 +145,10 @@ func noteTools(loaded []Loaded) {
 // own then (library/plugin_tools.go), which can't be imported here.
 var ToolsNoted func()
 
-// ReadList is plugins.json, or an error when it couldn't be read or
+// readLegacyToolList is plugins.json, or an error when it couldn't be read or
 // parsed: the plugins installed are then unknown, never none. No file is
 // no plugin.
-func ReadList() (List, error) {
+func readLegacyToolList() (List, error) {
 	b, err := lastgood.Read(listPath(), lastgood.JSON)
 	if errors.Is(err, fs.ErrNotExist) {
 		return List{}, nil
@@ -142,10 +163,10 @@ func ReadList() (List, error) {
 	return l, nil
 }
 
-// ToolsOn counts the plugins on in plugins.json that gave tools when the
+// legacyToolsOn counts the plugins on in plugins.json that gave tools when the
 // host last loaded them. A note that can't be read or parsed is an error:
 // not known.
-func ToolsOn() (int, error) {
+func legacyToolsOn(list List) (int, error) {
 	b, err := steady.ReadFile(toolsPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -158,7 +179,7 @@ func ToolsOn() (int, error) {
 		return 0, fmt.Errorf("%s: %w", toolsPath(), err)
 	}
 	n := 0
-	for _, e := range Load().Plugins {
+	for _, e := range list.Plugins {
 		if !e.Off && len(m[e.Spec]) > 0 {
 			n++
 		}
@@ -166,19 +187,22 @@ func ToolsOn() (int, error) {
 	return n, nil
 }
 
-// ToolNames are the tools noted for each plugin, by spec, sorted: what the
+// legacyToolNames are the tools noted for each plugin, by spec, sorted: what the
 // Plugins page shows for a plugin whose host isn't running.
-func ToolNames() map[string][]string {
+func legacyToolNames() (map[string][]string, error) {
 	b, err := steady.ReadFile(toolsPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var m map[string][]string
-	if json.Unmarshal(b, &m) != nil {
-		return nil
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
 	}
 	for _, v := range m {
 		sort.Strings(v)
 	}
-	return m
+	return m, nil
 }

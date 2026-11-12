@@ -45,17 +45,27 @@ func carries(s Session) []Carry {
 	if s.ReadOnly || s.WSL != "" || s.Path == "" || s.Cwd == "" {
 		return nil
 	}
+	var out []Carry
 	switch s.Agent {
 	case "pi":
-		if !ompThere() {
-			return nil
+		if ompThere() {
+			out = append(out, Carry{Agent: "omp", Command: inFolder(s.Cwd, "omp --fork "+argQuote(s.Path))})
 		}
-		return []Carry{{Agent: "omp", Command: inFolder(s.Cwd, "omp --fork "+argQuote(s.Path))}}
 	}
 	if to := convertsTo[s.Agent]; to != "" && agentThere(to) {
-		return []Carry{{Agent: to, Convert: true}}
+		out = append(out, Carry{Agent: to, Convert: true})
 	}
-	return nil
+	taken := map[string]bool{}
+	for _, carry := range out {
+		taken[carry.Agent] = true
+	}
+	for _, route := range extensionSessionRoutes(s.Agent) {
+		if !taken[route.Session.To] {
+			out = append(out, Carry{Agent: route.Session.To, Convert: true})
+			taken[route.Session.To] = true
+		}
+	}
+	return out
 }
 
 // inFolder is a shell line running run in the folder cwd.

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/yetone/magpie/internal/extension"
 )
 
 // Front is what the gateway's own listener serves: Handler behind
@@ -58,7 +60,25 @@ func ClientPath(p string) bool {
 }
 
 func (s *Server) ClientPath(p string) bool {
-	return ClientPath(p) || s.protocols.ClientPath(p)
+	if ClientPath(p) {
+		return true
+	}
+	host, err := s.protocolHost()
+	return err == nil && host.ClientPath(p)
+}
+
+// InstalledClientPath forwards an installed extension when the page proxies
+// to another local gateway process rather than owning a Server itself.
+func InstalledClientPath(p string) bool {
+	if ClientPath(p) {
+		return true
+	}
+	registry, err := extension.Default().Protocols()
+	if err != nil {
+		return false
+	}
+	_, found := registry.Lookup(p)
+	return found
 }
 
 // PagePortHeader marks a request `magpie web`'s page port handed to the

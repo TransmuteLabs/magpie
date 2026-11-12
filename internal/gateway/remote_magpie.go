@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"os"
@@ -10,7 +12,9 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -102,6 +106,12 @@ func withCaller(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), callerCtx{}, c)
+		principal := "local:" + c.agent
+		if who := access.Caller(r.Context()); who.KeyID != "" {
+			principal = "key:" + who.KeyID
+		}
+		sum := sha256.Sum256([]byte(principal))
+		ctx = extension.WithCallerID(ctx, hex.EncodeToString(sum[:16]))
 		if searchingFrom(r) {
 			// another magpie's search: only the model itself searches
 			ctx = context.WithValue(ctx, searchingKey{}, true)

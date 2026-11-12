@@ -128,6 +128,9 @@ type QuotaSpan struct {
 	Used      float64    `json:"used"`
 	Remaining float64    `json:"remaining"`
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
+	AsOf      *time.Time `json:"asOf,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Unknown   bool       `json:"unknown,omitempty"`
 	Display   string     `json:"display,omitempty"` // the vendor's own count, "1.2k / 3k"
 	// Text: the window is its Display alone, Used and Remaining no
 	// reading (QuotaWindow.Text)
@@ -209,6 +212,7 @@ func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quo
 			// as the usage page shows them
 			for _, w := range PooledWindows(q.Windows) {
 				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Lane: w.Lane,
+					AsOf: w.AsOf, Error: w.Error, Unknown: w.Unknown,
 					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Balance: w.Balance,
 					Spent: w.Spent, SpentSince: w.SpentSince, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
 				if s.ResetsAt == nil && w.ResetSecs > 0 {

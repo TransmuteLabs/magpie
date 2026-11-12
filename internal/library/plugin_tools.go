@@ -44,10 +44,11 @@ import (
 // pluginToolsOf and runPluginToolOf are the gateway's, a test's fakes in
 // their place; pluginsInstalled and toolsNoted are the plugin package's.
 var (
-	pluginToolsOf    = gateway.PluginToolsOf
-	runPluginToolOf  = gateway.RunPluginToolOf
-	pluginsInstalled = plugin.ReadList
-	toolsNoted       = plugin.ToolNames
+	pluginToolsOf         = gateway.PluginToolsOf
+	runPluginToolOf       = gateway.RunPluginToolOf
+	runPluginToolResultOf = gateway.RunPluginToolResultOf
+	pluginsInstalled      = plugin.ReadList
+	toolsNoted            = plugin.ToolNames
 )
 
 func init() {
@@ -187,6 +188,9 @@ func pluginHubTools(ctx context.Context, s *Server) ([]map[string]json.RawMessag
 // pluginHubCall runs tool of the plugin of s for agent, its answer as an
 // MCP tool result.
 func pluginHubCall(ctx context.Context, agentID string, s *Server, tool string, args json.RawMessage) (json.RawMessage, error) {
+	if strings.HasPrefix(s.Plugin, plugin.ExtensionToolPrefix) {
+		return runPluginToolResultOf(ctx, s.Plugin, tool, args, agentID)
+	}
 	said, err := runPluginToolOf(ctx, s.Plugin, tool, args, agentID)
 	if err != nil {
 		return nil, err

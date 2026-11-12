@@ -1,5 +1,39 @@
 # Gateway Session Aggregation
 
+## Executable extension conversion
+
+An enabled `session-migration` extension can declare
+`SessionDescriptor{id, name, from, to, outputDir}`. `from` and `to` are
+distinct native format/agent IDs; `outputDir` is a clean HOME-relative
+create-only directory. An ID/Name-only descriptor remains available for
+explicit file conversion. Unknown file formats use that explicit path.
+
+[`carries`](../../internal/sessions/carry.go) offers declared SDK routes
+for eligible native sessions, and
+[`CarryOver`](../../internal/sessions/carry_convert.go) dispatches a selected
+route through [`ConvertExtension`](../../internal/sessions/extension_actions.go)
+and the host Actions service. Listing does not invoke the worker. Built-in
+conversions retain precedence; duplicate SDK routes are unavailable. The
+target must be available and already have a host-supported native resume
+command. No module-supplied shell command is executed.
+
+Read consent, source session identity, local writable provenance and bounded
+stable source-file checks run before conversion. The module receives the
+original document bytes, the source scope and `options.cwd`. It returns
+documents in the requested target format plus `SessionResult.id` for native
+resume. The host requires that ID before ordinary publication, confines new
+files below `outputDir`, rejects existing-file collisions, backs up and
+executes the plan with rollback, and leaves the source unchanged. Explicit
+file-conversion callers may omit a native resume ID.
+
+`TestSessionExtensionOrdinaryCarryOver` installs an executable converter,
+discovers it through the native session's normal `Carry` list, converts through
+`CarryOver`, checks original bytes/context and source preservation, and checks
+that disabling the module revokes dispatch. Its output is a fixture format,
+not evidence of a real vendor converter.
+
+## Native and gateway identities
+
 The Sessions API combines file-backed native sessions with a read-only
 projection of gateway usage records. A gateway session identity is exactly
 `AgentOf(record.Agent) + record.Session`, where the session is the one the

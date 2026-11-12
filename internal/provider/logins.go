@@ -75,7 +75,8 @@ type Login struct {
 	first bool
 	// home is the other Codex folder a ChatGPT account is signed in to
 	// in, Codex's own there (codexHomeLogins): not one to switch ~/.codex to.
-	home string
+	home      string
+	extension *extensionAccount
 }
 
 type savedLogin struct {
@@ -1124,6 +1125,9 @@ func loginsNow(agent string) []Login {
 	if settings.AccountDiscoveryOff() {
 		return nil
 	}
+	if logins, ok := extensionLogins(agent); ok {
+		return logins
+	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return pluginLoginList(pp)
 	}
@@ -1136,6 +1140,10 @@ func loginsNow(agent string) []Login {
 	case "gemini", "antigravity":
 		return googleLoginList(agent)
 	case "":
+		for _, provider := range extensionAccounts() {
+			logins, _ := extensionLogins(provider.ID)
+			side = append(side, logins...)
+		}
 		// a plugin's accounts go by its provider's id (a moved built-in's
 		// by the built-in's), the one in use first marked, as its own page
 		// lists them
@@ -1203,7 +1211,7 @@ func loginsNow(agent string) []Login {
 		}
 	}
 	for _, l := range ls {
-		if (agent != "" && l.Agent != agent) || sideAgent(l.Agent) || strings.HasPrefix(l.Agent, "plugin:") {
+		if (agent != "" && l.Agent != agent) || sideAgent(l.Agent) || strings.HasPrefix(l.Agent, "plugin:") || strings.HasPrefix(l.Agent, "extension-") {
 			continue
 		}
 		using := strings.EqualFold(active[l.Agent], l.User)
@@ -1383,6 +1391,12 @@ func switchLogin(agent, user string) error { return switchLoginBy(agent, user, f
 // itself (SwitchWhenSpent) rather than the user: the Codex app is then
 // restarted to follow it only when the user asked for that (RestartApp).
 func switchLoginBy(agent, user string, byMagpie bool) error {
+	if strings.HasPrefix(agent, "extension-") {
+		if settings.AccountDiscoveryOff() {
+			return errAccountDiscoveryOff
+		}
+		return switchExtensionLogin(agent, user)
+	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return switchPluginLogin(pp, user)
 	}
@@ -1603,6 +1617,9 @@ func putClaudeLogin(l savedLogin) error {
 func ForgetLogin(agent, user string) error {
 	if settings.AccountDiscoveryOff() {
 		return errAccountDiscoveryOff
+	}
+	if strings.HasPrefix(agent, "extension-") {
+		return forgetExtensionLogin(agent, user)
 	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return forgetPluginLogin(pp, user)

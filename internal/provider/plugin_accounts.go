@@ -62,6 +62,9 @@ func publicLogins(pp plugin.Provider) []pluginLogin {
 // publicAccount is whether p is a public plugin's provider (publicPlugin),
 // served while subscription accounts are off.
 func (p Provider) publicAccount() bool {
+	if p.IsExtension() {
+		return !p.Account.extension.manifest.Contract.Has("account-auth")
+	}
 	return p.IsPlugin() && publicPlugin(*p.Account.plugin)
 }
 

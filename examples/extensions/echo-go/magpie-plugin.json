@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "id": "sdk-echo",
+  "version": "1.0.0",
+  "runtime": "exec",
+  "entry": "plugin",
+  "contract": {
+    "version": {"major": 1, "minor": 0},
+    "capabilities": ["inbound-codec", "outbound-executor", "model-discovery", "tool-provider"]
+  },
+  "inbounds": [{"id": "echo", "path": "/sdk-echo/rpc"}],
+  "providers": [{
+    "id": "echo",
+    "name": "SDK Echo",
+    "protocols": ["chat"],
+    "models": [{"id": "echo", "name": "SDK Echo", "contextWindow": 65536, "maxOutput": 8192, "price": {"currency": "USD", "input": 0, "output": 0}}]
+  }],
+  "tools": [{
+    "name": "echo",
+    "description": "Return the supplied text without contacting a vendor",
+    "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": false}
+  }]
+}

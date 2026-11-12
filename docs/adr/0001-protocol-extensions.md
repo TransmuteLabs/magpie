@@ -2,7 +2,10 @@
 
 Date: 2026-11-12
 
-Status: implemented as an experimental in-process Go inbound contract.
+Status: implemented as the initial in-process Go inbound contract. The
+executable runtime and subsequent protocol expansion are recorded in
+[ADR 0003](0003-external-extension-runtime.md); current behavior is in the
+[subsystem references](../subsystems/executable-extensions.md).
 
 ## Problem
 

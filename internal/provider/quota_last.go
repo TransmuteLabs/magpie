@@ -59,6 +59,9 @@ func keyTag(kind, key string) string {
 // keepLast is q, or the last reading of its account when q failed in
 // passing; a good reading is kept for next time.
 func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
+	if strings.HasPrefix(q.Provider, "extension-") {
+		return q
+	}
 	if user == "" {
 		user = q.User
 	}

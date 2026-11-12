@@ -1,0 +1,28 @@
+{
+  "name": "@magpie/extension-sdk",
+  "version": "1.0.0",
+  "description": "Dependency-free executable extension authoring SDK for Magpie",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "manifest.js",
+    "bytes.js",
+    "worker.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "conformance": "node test/conformance.js"
+  }
+}

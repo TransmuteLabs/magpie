@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
@@ -30,11 +31,12 @@ var held struct {
 	// fgen is filememo's generation it was built in: a write that only
 	// tells filememo (settings.Save, an account's file) has it built again
 	fgen uint64
-	// roots is the providers' and the settings' files as last looked at
-	roots [2]rootStamp
+	// roots is the provider, settings and extension catalog files as last
+	// looked at.
+	roots [3]rootStamp
 	// stamp is StampNow's files as a request holding the catalog last
 	// looked at them, at stampAt (stampNowFiles)
-	stamp   [3]rootStamp
+	stamp   [4]rootStamp
 	stampAt time.Time
 }
 
@@ -54,9 +56,9 @@ func stampOf(path string) rootStamp {
 }
 
 // heldFreshLocked drops what is built when a file was written since, by
-// this process (filememo.Gen) or, for the providers' and the settings'
-// files, by another (the CLI's "magpie group add", seen by the next
-// request, not a second later). Called with held held.
+// this process (filememo.Gen) or, for the provider, settings and extension
+// catalog files, by another (the CLI's write, seen by the next request,
+// not a second later). Called with held held.
 func heldFreshLocked(look bool) {
 	if g := filememo.Gen(); g != held.fgen {
 		held.built, held.fgen = nil, g
@@ -64,7 +66,7 @@ func heldFreshLocked(look bool) {
 	if !look {
 		return
 	}
-	for i, path := range [2]string{Path(), settings.Path()} {
+	for i, path := range [3]string{Path(), settings.Path(), extensionhost.CatalogPath()} {
 		if st := stampOf(path); st != held.roots[i] {
 			held.roots[i] = st
 			held.built = nil
@@ -102,6 +104,7 @@ func init() {
 	// after it was written (#2373).
 	plugin.OnChange(catalog.Touched)
 	plugin.OnListed(catalog.Touched)
+	extensionhost.OnChange(catalog.Touched)
 	// and what a request holds goes at once: a SyncCatalog running holds
 	// the plugins as they were before a sign-in, and a look at the
 	// accounts right after it was given those for a second (#2449)
@@ -166,14 +169,14 @@ func dropHeld() {
 // Two equal stamps mean nothing magpie wrote or was told of came between
 // them: no Changed (a provider, an account, a setting saved), no plugin's
 // change, no catalog.Reset or Touched, no filememo.Forget, the same
-// environment, and the providers', the settings' and the catalog's own
-// files with the same time and size, as another process leaves them.
+// environment, and the provider, settings, model cache and extension
+// catalog files with the same time and size, as another process leaves them.
 // What it can't see — another app rewriting an account's file, a model
 // retired by its date — a caller that keeps what it built across stamps
 // builds again now and then all the same.
 type Stamp struct {
 	gen, fgen, env uint64
-	roots          [3]rootStamp
+	roots          [4]rootStamp
 }
 
 // StampNow is the Stamp as things are now.
@@ -190,11 +193,11 @@ var stampLooks atomic.Int64
 // stampNowFiles is the files' part of StampNow: looked at once by a
 // request holding the catalog and its overlapping ones, for heldFor at
 // most, as what is held is. KeptListing takes a stamp for every
-// provider, and its three stats a provider were most of what a
+// provider, and its stats per provider were most of what a
 // Providers page poll spent (~600 of them a poll with 200 providers).
 // Another process's write is seen by the next request, as Hold's look
 // sees it.
-func stampNowFiles() [3]rootStamp {
+func stampNowFiles() [4]rootStamp {
 	held.Lock()
 	roots, fresh := held.stamp, held.holds > 0 && !held.stampAt.IsZero() && time.Since(held.stampAt) < heldFor
 	held.Unlock()
@@ -202,7 +205,7 @@ func stampNowFiles() [3]rootStamp {
 		return roots
 	}
 	stampLooks.Add(1)
-	roots = [3]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath())}
+	roots = [4]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath()), stampOf(extensionhost.CatalogPath())}
 	held.Lock()
 	if held.holds > 0 {
 		held.stamp, held.stampAt = roots, time.Now()

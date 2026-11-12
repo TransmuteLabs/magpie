@@ -1,10 +1,14 @@
 # Providers and accounts
 
-The gateway can send a request to three kinds of upstream:
+The gateway can send a request to these kinds of upstream:
 
 - A **provider** in `providers.json`: an endpoint with one or more API keys. Google Vertex AI's is signed with the user's Google credentials, or with one API key (express mode).
 - A **subscription account**: an agent's own sign-in (Codex, Claude Code, Copilot and others) that magpie reads from the agent's store, or an account signed in from magpie.
 - A **plugin's account**: a subscription served by an OpenCode plugin.
+- An **external extension provider**: an installed executable or Bun module,
+  with an explicitly scoped account or public access. Its catalog, normalized
+  transport and authentication boundary are described in
+  [External provider adapters](extension-providers.md).
 
 Package `internal/provider` holds all three, the routing groups built over
 them, and what is left of each one's allowance.
