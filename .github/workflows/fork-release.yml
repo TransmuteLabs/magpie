@@ -61,18 +61,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # теги апстрима — источник номеров версий (своих на форке нет)
+          # теги апстрима — источник номеров версий (своих на форке нет).
+          # Только строгие X.Y.Z: в апстриме бывают v0.1.3833.1 — для
+          # update.parse (три части) такая версия не версия, и фид с ней
+          # приложение отклонит «нет обновления». По ним — обычный
+          # буквальный X.Y.Z-тег следующего мержа, который и встанет.
           git fetch --no-tags https://github.com/yetone/magpie.git 'refs/tags/v*:refs/tags/v*'
-          VER=$(git tag --list 'v*' --merged HEAD --sort=-v:refname | head -1)
+          VER=$(git tag --list 'v*' --merged HEAD --sort=-v:refname |
+                grep -m1 -x 'v[0-9]*\.[0-9]*\.[0-9]*')
           VER=${VER#v}
           if [ -z "$VER" ]; then
             echo "release=no" >> "$GITHUB_OUTPUT"
-            echo "HEAD reaches no upstream v-tag"
+            echo "HEAD reaches no three-part upstream v-tag"
             exit 0
           fi
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          CUR=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName \
-                --jq .tagName 2>/dev/null | sed -n 's/^f-v//p')
+          # больше не «latest релиз»: последний по метке может быть старше —
+          # сравниваем со старшим опубликованным f-vX.Y.Z, сортировка по
+          # номеру, по одному тегу на релиз
+          CUR=$(gh release list -R "$GITHUB_REPOSITORY" \
+                --json tagName --jq '.[].tagName' 2>/dev/null |
+                grep -o 'f-v[0-9]*\.[0-9]*\.[0-9]*' | sort -V | tail -1)
+          CUR=${CUR#f-v}
           if [ -z "$CUR" ]; then
             REL=yes
           elif [ "$CUR" = "$VER" ]; then
