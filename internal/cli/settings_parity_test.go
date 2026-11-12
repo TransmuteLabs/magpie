@@ -241,6 +241,7 @@ var cliForRoute = map[string]string{
 }
 
 var notYet = map[string]string{
+	"GET /api/feedback":                          W,  // GUI clipboard report and feedback link.
 	"GET /api/library/servers/account-target":    W,  // GUI trust preview; CLI binding validates the target itself.
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go

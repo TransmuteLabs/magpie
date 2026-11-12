@@ -42,6 +42,17 @@ three.
 
 ## Constraints and failure behavior
 
+### Feedback report
+
+Settings › About's Report a problem reads `GET /api/feedback`, copies the
+application version, OS version, architecture and app/browser surface, then
+opens the feedback post. The report contains no account, key, user name or
+path and is never put in the link. This is a GUI clipboard action, named as
+window-only in the CLI route registry. Its OS-version parser is compiled
+lazily, not at application startup. See
+[`feedback.go`](../../internal/gui/feedback.go), `feedback_test.go` and
+`about-report.test.cjs`.
+
 ### First opening of an agent's Details
 
 In the main window, `expandLink` in

@@ -24,7 +24,7 @@ import (
 // provenance and safe native/tray controls; account sheets and pickers stay lazy.
 const (
 	appScriptBudget  = 1_087_374 // upstream 1,086,267 + the fork's 1,107
-	coreScriptBudget = 1_268_620 // upstream 1,263,700 + the fork's 1,107 + intrinsic ZCode 1,703 + built-in parity 2,110
+	coreScriptBudget = 1_269_381 // upstream 1,264,309 + its unaccounted UI glue 152 + the fork's 1,107 + intrinsic ZCode 1,703 + built-in parity 2,110
 )
 
 // codeBytes is how many bytes of b are code: its blank lines, its lines
