@@ -60,15 +60,9 @@ func (p Provider) available() []catalog.Model {
 	if signedIn {
 		known = p.Account.models()
 	} else {
-		seen := map[string]bool{}
-		for _, id := range p.Catalogs() {
-			for _, m := range catalog.Provider(id) {
-				if !seen[m.ID] {
-					seen[m.ID] = true
-					known = append(known, m)
-				}
-			}
-		}
+		// read only below: every way out of here returns a new list
+		// (Decorate's, or the one without previews) or none of known
+		known = catalogsOf(p.Catalogs())
 	}
 	if live, _, ok := p.live(); ok && (p.Account == nil || !p.Account.magpieList) {
 		if p.Account != nil && p.Account.unusable != nil {
@@ -127,13 +121,47 @@ func (p Provider) available() []catalog.Model {
 			return ms
 		}
 	}
-	var out []catalog.Model
+	n := 0
 	for _, m := range known {
-		if !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview") {
+		if released(m) {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]catalog.Model, 0, n)
+	for _, m := range known {
+		if released(m) {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// released is a catalog's model that is not an experiment or a preview.
+func released(m catalog.Model) bool {
+	return !strings.Contains(m.ID, "-exp") && !strings.Contains(m.ID, "preview")
+}
+
+// catalogsOf are the models of these models.dev catalogs, the first's of
+// an id kept. One catalog's is its shared list, with no copy: the caller
+// only reads it.
+func catalogsOf(ids []string) []catalog.Model {
+	if len(ids) == 1 {
+		return catalog.ProviderShared(ids[0])
+	}
+	var known []catalog.Model
+	seen := map[string]bool{}
+	for _, id := range ids {
+		for _, m := range catalog.ProviderShared(id) {
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				known = append(known, m)
+			}
+		}
+	}
+	return known
 }
 
 func (p Provider) firstCatalog() string {
@@ -3191,14 +3219,14 @@ type Entry struct {
 	Plain string `json:"-"`
 	// By is the provider a remote magpie's list names as serving the
 	// model there, the first in a chain of magpies (catalog.Model's)
-	By         string   `json:"-"`
-	Efforts    []string `json:"efforts,omitempty"`
-	Provider   Provider `json:"-"`                // a group's: its first member's
-	Group      string   `json:"group,omitempty"`  // set on a routing group (group.go)
-	Named      bool     `json:"-"`                // a routing group the user made or changed: its name is theirs (Labels)
-	Icons      []string `json:"-"`                // a group's: its providers' icons, one per provider
-	Images     bool     `json:"images,omitempty"` // takes images as input (a group's: a member does)
-	ImageInput *bool    `json:"-"`                // explicit answer, nil when unknown
+	By         string    `json:"-"`
+	Efforts    []string  `json:"efforts,omitempty"`
+	Provider   *Provider `json:"-"`                // a group's: its first member's; shared, read only
+	Group      string    `json:"group,omitempty"`  // set on a routing group (group.go)
+	Named      bool      `json:"-"`                // a routing group the user made or changed: its name is theirs (Labels)
+	Icons      []string  `json:"-"`                // a group's: its providers' icons, one per provider
+	Images     bool      `json:"images,omitempty"` // takes images as input (a group's: a member does)
+	ImageInput *bool     `json:"-"`                // explicit answer, nil when unknown
 	// Inputs and Outputs are what the model's source listed it takes and
 	// gives (catalog.Model's InputModalities, OutputModalities); see
 	// Modalities
@@ -3501,7 +3529,7 @@ func entriesOf(of func(Provider) bool, off func(pid, model string) bool) []Entry
 				continue
 			}
 			if !p.isDecision(m) && !gone[p.ID+"/"+m.ID] {
-				out = append(out, entryFor(p, m, s))
+				out = append(out, sharedEntry(&p, m, s))
 			}
 		}
 	}
@@ -3512,6 +3540,12 @@ func entriesOf(of func(Provider) bool, off func(pid, model string) bool) []Entry
 // window and the reply limit a request on it is routed and metered against,
 // with what the user set taken over the vendor's list and models.dev.
 func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
+	return sharedEntry(&p, m, s)
+}
+
+// sharedEntry is entryFor that keeps p itself in the entry, so every model of
+// one provider shares one Provider (1.3KB each) instead of a copy a model.
+func sharedEntry(p *Provider, m catalog.Model, s settings.Settings) Entry {
 	ctx := p.windowIn(m, s)
 	output := p.replyLimit(m, s)
 	images := m.Images || catalog.SeesImages(m.ID)
@@ -3663,16 +3697,16 @@ func Resolve(id string) (Provider, string, bool) {
 		// poll, every 15s)
 		entries := providerEntries()
 		if e, ok := entryIn(groupEntries(entries), id); ok {
-			return e.Provider, e.Model, true
+			return *e.Provider, e.Model, true
 		}
 		if e, ok := entryIn(Catalog(), id); ok {
-			return e.Provider, e.Model, true
+			return *e.Provider, e.Model, true
 		}
 		// a group renamed from it (Former) answers for it, as routing does
 		if gid, ok := GroupIDOf(id); ok {
 			if g, ok := routedGroupOf(sharedGroupsIn(entries), gid); ok && g.ID != gid {
 				if e, ok := entryIn(groupEntries(entries), "group/"+g.ID); ok {
-					return e.Provider, e.Model, true
+					return *e.Provider, e.Model, true
 				}
 			}
 		}
@@ -3686,7 +3720,7 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	// one looked past was most of a group's members resolved (membersIn)
 	for i := range entries {
 		if e := &entries[i]; e.ID == id {
-			return e.Provider, e.Model, true
+			return *e.Provider, e.Model, true
 		}
 	}
 	if pid, model, ok := strings.Cut(id, "/"); ok {
@@ -3698,7 +3732,7 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	}
 	for i := range entries {
 		if e := &entries[i]; e.Model == id {
-			return e.Provider, e.Model, true // the first that serves it
+			return *e.Provider, e.Model, true // the first that serves it
 		}
 	}
 	// not exposed, but some provider lists it

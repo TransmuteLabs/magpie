@@ -7147,11 +7147,15 @@ function renderAdd() {
   c.dataset.pick = "custom";
   c.title = t("any OpenAI or Anthropic compatible URL");
   c.onclick = () => { editing = { custom: true }; draft = null; renderProviders(); };
-  head.append(q, c);
   const imp = el("button", "text", t("Import…"));
   imp.title = t("Bring over providers set up in other apps");
   imp.onclick = openImportApps;
-  head.append(imp);
+  // the sheet's tools, one group: scrolled out of sight beside the sidebar
+  // they show in the title bar (addToolsFloat), the same nodes, so the
+  // search keeps its words and the focus
+  const tools = el("span", "add-tools");
+  tools.append(q, c, imp);
+  head.append(tools);
   if (providers.providers.length) {
     const x = el("button", "text", t("Close"));
     x.onclick = closeAddSheet;
@@ -7276,6 +7280,8 @@ function renderAdd() {
     }
   };
   drawTiles();
+  // its tools shown in the title bar once out of sight (addfloat.js)
+  if (self.addToolsFloat) addToolsFloat(true); else import("./addfloat.js").then(() => addToolsFloat(true), () => {});
   if (hadFocus && $("#modal").hidden) {
     (focusPick && sheet.querySelector(`[data-pick="${CSS.escape(focusPick)}"]`) || q).focus(NO_SCROLL);
     if (selection) q.setSelectionRange(...selection);
@@ -7757,7 +7763,6 @@ function proxyPicker() {
   });
   seg.classList.add("proxy-mode");
   place(draft.proxyMode || "");
-  // its room kept while not asked for: a pick never moves the dialog
   const row = el("div", "proxy-row");
   row.append(seg, addr, saved);
   box.append(row, login, hint);
@@ -9534,6 +9539,12 @@ function drawEditor(p, presetID) {
   adv.append(el("summary", "", t("Advanced")));
   const advIn = el("div", "inner");
   adv.append(advIn);
+  // Routing, Rate limited and Stays: changed by few, so under Advanced, at
+  // its top, and opening it when one isn't its default (the owner, 11-12)
+  const routingAdvanced = (p) => {
+    if (!(advanced && advanced.of === editing) && ((draft.routing ?? p.routing) || (draft.affinity ?? p.affinity) || (draft.sink ?? p.sink))) adv.open = true;
+    return renderRouting(p);
+  };
 
   const unmaskRow = (hint, urls) => {
     const [ltk, lcb] = tick(t("Send requests unmasked"), !!draft.unredacted);
@@ -9557,7 +9568,7 @@ function drawEditor(p, presetID) {
       const via = a.wsl ? t("Runs through WSL · {distro}: Claude Code there signs in and answers; Windows has none of its own.", { distro: a.wsl }) + " " : "", alone = /^c(laude|odex)$/.test(a.agent) ? " " + t("Just want accounts switched? {agent} needn't be connected to magpie.", { agent: a.agentName }) : "";
       ed.append(...field(t("Accounts"), renderAccounts(a, p), via + (p.routing ? t("Tick every account to use; Routing says how requests spread over them.") + (subOf(a.agent).own ? " " + t("Only requests through magpie use them; {agent} itself stays signed in as it is.", { agent: a.agentName || p.name }) : "") : subOf(a.agent).single ? t("{agent} keeps one account; the gateway runs it for every request. Signing in to another replaces it.", { agent: a.agentName }) : subOf(a.agent).own && (a.logins || []).some((l) => l.own) ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota. {agent} itself stays signed in as it is.", { agent: a.agentName && a.agentName !== a.agent ? a.agentName : p.name }) : subOf(a.agent).own || subOf(a.agent).plugin ? t("The gateway uses the first. Tick more and it moves on to the next when the one before it is out of quota.") : t("{agent} signs in to the first. Tick more and magpie moves on to the next when the one before it is out of quota. Sessions already running keep theirs until restarted.", { agent: a.agentName })) + alone));
       ed.append(...pluginOptionsField(subOf(a.agent), true));
-      if ((a.logins || []).filter((l) => l.active || l.on).length > 1) ed.append(...renderRouting(p));
+      if ((a.logins || []).filter((l) => l.active || l.on).length > 1) advIn.append(...routingAdvanced(p));
       if (p.move) ed.append(...renderMove(p));
     } else {
       const acct = el("div", "acct");
@@ -9778,7 +9789,7 @@ function drawEditor(p, presetID) {
   };
   if (addressField) ed.append(...addressField);
   if (p?.keyList?.length) ed.append(...field(t("Accounts"), renderKeyAccounts(p), p.routing ? t("Tick every key to use; Routing says how requests spread over them.") : t("Tick every key to use. Requests go to the first; when it runs out of quota or hits a rate limit, the next ticked key takes over.")));
-  if (p?.keyList?.filter((k) => k.on).length > 1) ed.append(...renderRouting(p));
+  if (p?.keyList?.filter((k) => k.on).length > 1) advIn.append(...routingAdvanced(p));
   else if (vertex) ed.append(...vertexFields());
   // keys are replaced in Accounts; the box is for no key yet (Kylin_Cloud on X)
   else if (!p?.keyList?.length) ed.append(...field(t("API key"), keyWrap, isNew ? t("Kept in ~/.config/magpie/providers.json, readable by you alone. Nothing is read from your shell.") : ""));
@@ -13683,8 +13694,9 @@ function renderAccounts(a, p) {
       imp.title = importSay(a.agent).from;
       list.append(imp);
     }
-    if (sub.importable && (a.agent === "claude" || a.agent === "codex")) list.append(addRow(t("Export accounts to a file…"), () => startExport(a.agent)));
     if (a.agent === "claude") list.append(addRow(t("Add an account by setup-token…"), startClaudeToken));
+    // last of them, and no plus: it adds nothing (the owner, 11-12)
+    if (sub.importable && (a.agent === "claude" || a.agent === "codex")) list.append(addRow(t("Export accounts to a file…"), () => startExport(a.agent), EXPORT_GLYPH));
   }
   arrangeAccountRows(list, p);
   return list;
@@ -14213,9 +14225,11 @@ function accountNameButton(p, user) {
   return wrap;
 }
 // an account or key list's last row, adding one
-function addRow(say, go) {
+// an arrow up out of a tray: what leaves magpie, CLI_UP the other way
+const EXPORT_GLYPH = "M8 10.5v-8M4.5 6 8 2.5 11.5 6M3.5 13.5h9";
+function addRow(say, go, glyph = PLUS) {
   const b = el("button", "acc add"), ic = el("span", "dot");
-  ic.append(svg(PLUS, 10, 1.8));
+  ic.append(svg(glyph, 10, 1.8));
   b.append(ic, el("span", "n", say));
   b.onclick = go;
   return b;
@@ -23685,6 +23699,7 @@ function layoutNav() {
   sideWidth();
   renderSideToggle();
   fitTop();
+  self.addToolsFloat?.(true);
 }
 // the sidebar's width, the reader's own once dragged (sideDrag), else
 // app.css's; at most ~a third of a narrow window
@@ -24158,7 +24173,7 @@ if (mode === "window") {
         set("--crumb-max", "none");
         return;
       }
-      const head = $(":is(#view-library .lib-head, #view-plugins .pm-head, #view-settings .set-head):not([hidden] *)");
+      const head = $(":is(#view-library .lib-head, #view-plugins .pm-head, #view-settings .set-head, #addSheet .add-tools.afloat):not([hidden] *)");
       const c = crumb.getBoundingClientRect(), gap = parseFloat(getComputedStyle(crumb).columnGap) || 0;
       const wide = kids.map((e) => (e.tagName === "B" ? e.scrollWidth : e.getBoundingClientRect().width) + gap);
       const whole = Math.ceil(wide.reduce((w, x) => w + x, 0) - (kids.length ? gap : 0));
@@ -24190,6 +24205,7 @@ if (mode === "window") {
       set("--tools-l", Math.ceil(c.left + max + 16) + "px");
     });
   };
+  self.sideTools = tools;
   const ro = new ResizeObserver(tools);
   for (const e of [$(".top"), $("#crumb"), $(".actions")]) ro.observe(e);
   addEventListener("resize", tools);
