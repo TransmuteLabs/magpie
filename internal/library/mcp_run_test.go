@@ -72,6 +72,7 @@ func TestFakeRunServer(t *testing.T) {
 // serves it, and the log of its starts.
 func runFixture(t *testing.T) (*httptest.Server, string, runSpec) {
 	t.Helper()
+	sandbox(t)
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -79,12 +80,65 @@ func runFixture(t *testing.T) (*httptest.Server, string, runSpec) {
 	logf := filepath.Join(t.TempDir(), "starts")
 	spec := runSpec{Command: self, Args: []string{"-test.run=^TestFakeRunServer$"}, Env: map[string]string{"MAGPIE_FAKE_RUN": logf}}
 	resetRuns(t)
+	l := &Library{MCP: []*Server{{Name: "fake", Command: spec.Command, Args: spec.Args, Env: spec.Env, Agents: []string{"codex"}}}}
+	if err := l.save(); err != nil {
+		t.Fatal(err)
+	}
 	runGiven(map[string]runSpec{"fake": spec})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ServeRun(w, r, strings.TrimPrefix(r.URL.Path, RunPath))
 	}))
 	t.Cleanup(srv.Close)
 	return srv, logf, spec
+}
+
+func TestRunReloadsPolicyBeforeGiven(t *testing.T) {
+	for _, change := range []string{"removed", "unticked", "direct", "unreadable"} {
+		t.Run(change, func(t *testing.T) {
+			sandbox(t)
+			resetRuns(t)
+			spec := runSpec{Command: "synthetic-command"}
+			l := &Library{MCP: []*Server{{Name: "fake", Command: spec.Command, Agents: []string{"codex"}}}}
+			if err := l.save(); err != nil {
+				t.Fatal(err)
+			}
+			runGiven(map[string]runSpec{"fake": spec})
+			if _, ok := runSpecOf("fake"); !ok {
+				t.Fatal("eligible server was not given")
+			}
+			switch change {
+			case "removed":
+				l.MCP = nil
+			case "unticked":
+				l.MCP[0].Agents = nil
+			case "direct":
+				l.MCP[0].Hub = HubDirect
+			}
+			if change == "unreadable" {
+				write(t, path(), "{")
+			} else if err := l.save(); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := runSpecOf("fake"); ok {
+				t.Error("stale given spec bypassed the current library policy")
+			}
+			for _, method := range []string{http.MethodGet, http.MethodPost} {
+				req := httptest.NewRequest(method, RunPath+"fake", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+				req.Header.Set("Mcp-Session-Id", "old-session")
+				response := httptest.NewRecorder()
+				ServeRun(response, req, "fake")
+				if response.Code != http.StatusNotFound {
+					t.Errorf("%s under %s policy: %d, want 404", method, change, response.Code)
+				}
+			}
+			runs.Lock()
+			sessions := len(runs.sessions)
+			runs.Unlock()
+			if sessions != 0 {
+				t.Fatal("revoked server created a session")
+			}
+		})
+	}
 }
 
 // resetRuns ends every session's server, before the test and after it.

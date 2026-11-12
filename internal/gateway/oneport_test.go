@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +11,83 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/access"
+	sdk "github.com/yetone/magpie/pkg/protocolext"
 )
+
+func TestClientPathProtocolsArePerServerAndExact(t *testing.T) {
+	fresh(t)
+	adapter := fixtureInbound{}
+	enabled := protocolServer(t, adapter)
+	plain := New()
+	for _, endpoint := range []string{"/v1/models", "/v1/chat/completions", "/mcp/magpie/tools"} {
+		if !enabled.ClientPath(endpoint) || !plain.ClientPath(endpoint) {
+			t.Errorf("existing route lost: %s", endpoint)
+		}
+	}
+	if !enabled.ClientPath(adapter.Path()) || plain.ClientPath(adapter.Path()) || ClientPath(adapter.Path()) {
+		t.Fatal("protocol registration escaped its server")
+	}
+	for _, endpoint := range []string{"/fixture", "/fixture/rpc/", "/fixture/rpc/extra", "/fixture/%72pc", "/fixture/../api/state", "/api/state", "/_magpie/sign-in"} {
+		if enabled.ClientPath(endpoint) {
+			t.Errorf("registered matcher claimed %s", endpoint)
+		}
+	}
+	response := protocolPost(plain.Front(), adapter.Path(), "", "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("default constructor enabled protocols: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestClientPathProtocolsCannotShadowCoreNamespaces(t *testing.T) {
+	fresh(t)
+	for _, endpoint := range []string{"/api", "/api/state", "/api/new-admin-route", "/_magpie/sign-in", "/agent/codex/v1/models", "/wsl-secret/v1/models",
+		"/v1", "/v1/chat/completions", "/v1/future-api", "/v1/magpie/usage", "/mcp/custom", "/models", "/models/custom", "/backend-api/codex/responses"} {
+		registry, err := sdk.New(fixtureInbound{path: endpoint})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := NewWithProtocols(registry)
+		if err == nil || server != nil {
+			t.Errorf("registered %s over a core namespace", endpoint)
+		}
+	}
+}
+
+func TestClientPathProtocolPageForwardingUsesFrontGuards(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3499")
+	calls := limitedUpstream(t, 0)
+	_, secrets := newCaller(t, "Page client")
+	decoded := 0
+	adapter := fixtureInbound{decode: func(ctx context.Context, _ http.Header, _ []byte) (sdk.Request, error) {
+		decoded++
+		if marked, _ := ctx.Value(pagePort{}).(bool); !marked {
+			t.Fatal("page forwarding lost its provenance")
+		}
+		return sdk.Request{Protocol: sdk.Chat, Body: []byte(`{"model":"plan/m1","messages":[{"role":"user","content":"hello"}]}`)}, nil
+	}}
+	server := protocolServer(t, adapter)
+	front := server.Front()
+	forward := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if server.ClientPath(request.URL.Path) {
+			front.ServeHTTP(writer, FromPagePort(request))
+			return
+		}
+		writer.WriteHeader(http.StatusTeapot)
+	})
+	unkeyed := protocolPost(forward, adapter.Path(), "native", "")
+	if unkeyed.Code != http.StatusUnauthorized || decoded != 0 {
+		t.Fatalf("page-port caller bypassed key guard: %d decodes=%d", unkeyed.Code, decoded)
+	}
+	keyed := protocolPost(forward, adapter.Path(), "native", secrets[0])
+	if keyed.Code != http.StatusOK || decoded != 1 || calls.Load() != 1 {
+		t.Fatalf("page-port caller: %d decodes=%d provider=%d: %s", keyed.Code, decoded, calls.Load(), keyed.Body)
+	}
+	page := protocolPost(forward, "/api/state", "", secrets[0])
+	if page.Code != http.StatusTeapot || decoded != 1 {
+		t.Fatalf("page API was forwarded to a protocol: %d decodes=%d", page.Code, decoded)
+	}
+}
 
 // Every route Handler registers is either a client route `magpie web`'s
 // port hands to the gateway (ClientPath), or one named here that stays on

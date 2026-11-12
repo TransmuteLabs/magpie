@@ -185,6 +185,9 @@ func updateFlagsForce(args []string) (rest []string, proxy, mirror string, force
 // updateCmd is `magpie update [check] [--proxy <url>] [--mirror <prefix>]`:
 // the app replaces its bundle, the terminal build its binary.
 func updateCmd(args []string) error {
+	if len(args) > 1 && args[1] == "signing" {
+		return updateSigningCmd(args[2:])
+	}
 	args, proxy, mirror, force, err := updateFlagsForce(args)
 	if err != nil {
 		return err

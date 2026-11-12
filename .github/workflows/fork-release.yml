@@ -1,0 +1,271 @@
+name: Fork release
+
+# Свой конвейер обновлений форка. Пуш в devzeus (обычно — мерж официального)
+# собирает mac-приложение и публикует релиз с ассетами и latest.json — фидом
+# самообновления (internal/update: Feed, AppAsset, BinaryAsset, sameSigner):
+# приложение с env
+#   MAGPIE_UPDATE_FEED=https://github.com/TransmuteLabs/magpie/releases/latest/download/latest.json
+# читает его, качает ассет своей платформы из того же релиза, сверяет
+# SHA-256 и меняет себя. macOS-приложение должно быть сборкой этого же
+# конвейера (первая установка вручную): sameSigner пускает только ту же
+# подпись, ad-hoc -> ad-hoc.
+#
+# Теги на форк не пушатся. Мерж апстрима переносит коммиты, но не теги;
+# тег апстрима к тому же лежит на коммит БЕЗ этого файла — зато с их
+# release.yml и docker.yml (обе на v*), и его пуш разбудил бы их конвейер
+# на форке. Вместо этого: версия = самый свежий тег апстрима, достижимый
+# из HEAD; релиз выходит, только если она новее последнего релиза форка.
+# Тег f-v<версия> создаёт сам релиз (--target HEAD пуши): теги, созданные
+# из воркфлоу, не будят воркфлоу, а префикс f-v не матчит их v*-триггеры.
+# Расписания апстрима (notes-mirror, docker-*) на форке не тикают: GitHub
+# выключает schedules на форках по умолчанию.
+# workflow_dispatch собирает без релиза (артефакты рана) — ручная
+# установка и проверка.
+
+on:
+  push:
+    branches: [devzeus]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label for the build (e.g. 0.1.4000); empty: 0.0.0-<sha>'
+        required: false
+        default: ''
+      release:
+        description: 'Also publish a release when the version is newer (push-events are sometimes dropped by GitHub)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: write
+
+# мержи приходят пачками: новый пуш заменяет старый ран, а гейт по версии
+# делает повтор идемпотентным (отменённый релиз сделает следующий)
+concurrency:
+  group: fork-release
+  cancel-in-progress: true
+
+jobs:
+  # есть ли в HEAD мерж версии апстрима, которую ещё не релизили
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      release: ${{ steps.ver.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: New upstream version merged?
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          # теги апстрима — источник номеров версий (своих на форке нет).
+          # Только строгие X.Y.Z: в апстриме бывают v0.1.3833.1 — для
+          # update.parse (три части) такая версия не версия, и фид с ней
+          # приложение отклонит «нет обновления». По ним — обычный
+          # буквальный X.Y.Z-тег следующего мержа, который и встанет.
+          if [ -n "$REQUESTED_VERSION" ]; then
+            VER=${REQUESTED_VERSION#v}
+            if ! [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "The version must have exactly three numeric components"
+              exit 1
+            fi
+          else
+            git fetch --no-tags https://github.com/yetone/magpie.git 'refs/tags/v*:refs/tags/v*'
+            VER=$(git tag --list 'v*' --merged HEAD --sort=-v:refname |
+                  awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { print; found=1 }')
+            VER=${VER#v}
+          fi
+          if [ -z "$VER" ]; then
+            echo "release=no" >> "$GITHUB_OUTPUT"
+            echo "HEAD reaches no three-part upstream v-tag"
+            exit 0
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          # больше не «latest релиз»: последний по метке может быть старше —
+          # сравниваем со старшим опубликованным f-vX.Y.Z, сортировка по
+          # номеру, по одному тегу на релиз
+          RELEASES=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                     --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+          CUR=$(printf '%s\n' "$RELEASES" |
+                sed -n '/^f-v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/p' |
+                sort -V | tail -1)
+          CUR=${CUR#f-v}
+          if [ -z "$CUR" ]; then
+            REL=yes
+          elif [ "$CUR" = "$VER" ]; then
+            REL=no
+          else
+            MAX=$(printf '%s\n%s\n' "$CUR" "$VER" | sort -V | tail -1)
+            REL=$([ "$MAX" = "$VER" ] && echo yes || echo no)
+          fi
+          echo "release=$REL" >> "$GITHUB_OUTPUT"
+          echo "merged: v$VER, released: ${CUR:-none} -> release=$REL"
+
+  app:
+    needs: check
+    # пуш: собирать только под релиз; dispatch: всегда (проверка руками)
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.release == 'yes'
+    env:
+      BUILD_VERSION: ${{ needs.check.outputs.version || format('0.0.0-{0}', github.sha) }}
+    # arm64-раннер: GUI линкует webview платформы нативно (cgo), кросс-сборки нет
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build the app
+        run: make app VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
+
+      - name: Sign ad-hoc
+        run: |
+          codesign --force --deep -s - magpie.app
+          codesign --verify --deep --strict magpie.app
+
+      - name: Pack
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent magpie.app dist/magpie-darwin-arm64.zip
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v6
+        with:
+          name: magpie-darwin-arm64
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    # пока выключено: one word убрать if — и джоба вернётся
+    if: false
+    # WebView2 без cgo: обе архитектуры кросс-компилятся (Makefile,
+    # release-windows: go-winres, -H windowsgui, comlauncher)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build the app
+        run: make release-windows VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v6
+        with:
+          name: magpie-windows
+          path: dist/magpie-windows-*.exe
+          if-no-files-found: error
+
+  linux:
+    # пока выключено; включить — убрать if. Alma-вариант (контейнер
+    # almalinux:10 + dnf golang git gtk3-devel webkit2gtk4.1-devel)
+    # проверен руками на usbox-adm: та же make release-linux собирается
+    # меньше чем за минуту
+    if: false
+    # GUI линкует GTK 3 и WebKitGTK 4.1 через cgo — нативно; arm64 не нужен
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # застрявшее apt-зеркало — известный режим отказа раннеров (см.
+      # test.yml); ForceIPv4 закрывает DNS-сбой "Temporary failure resolving
+      # archive.ubuntu.com", короткий таймаут шага делает фейл видимым
+      - name: GTK 3 and WebKitGTK 4.1 headers
+        timeout-minutes: 15
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4 -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::ForceIPv4 -o Acquire::Retries=3 install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Build the app
+        run: make release-linux VERSION="${BUILD_VERSION:-0.0.0-${GITHUB_SHA::7}}"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v6
+        with:
+          name: magpie-linux-amd64
+          path: dist/magpie-linux-amd64
+          if-no-files-found: error
+
+  release:
+    # пуш с новой версией; или ручной запуск с флагом release — пуш-события
+    # GitHub иногда роняет (ран по коммиту push может не появиться вовсе)
+    if: needs.check.outputs.release == 'yes' &&
+        (github.event_name == 'push' ||
+         (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'))
+    # при возврате windows/linux добавить их в needs
+    needs: [check, app]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # теги f-v*: предыдущий релиз для notes
+
+      - name: Gather the builds
+        uses: actions/download-artifact@v7
+        with:
+          pattern: magpie-*
+          path: dist
+          merge-multiple: true
+
+      - name: latest.json
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          PREV=$(git tag --list 'f-v*' --sort=-v:refname | head -1)
+          python3 - "$VERSION" "$REPO" "${PREV:-}" << 'PY'
+          import glob, hashlib, json, os, subprocess, sys
+          version, repo, prev = sys.argv[1], sys.argv[2], sys.argv[3]
+          tag = f"f-v{version}"
+          if prev:
+              log = subprocess.run(["git", "log", "--oneline", f"{prev}..HEAD"],
+                                   capture_output=True, text=True, check=True).stdout
+              # первый релиз без prev не тащит всю историю в notes
+              notes = "\n".join(log.splitlines()[:100])
+          else:
+              notes = f"Первый релиз форка (официальная версия {version})."
+          assets = {}
+          for path in sorted(glob.glob("dist/magpie-*")):
+              name = os.path.basename(path)
+              digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+              assets[name] = {
+                  "url": f"https://github.com/{repo}/releases/download/{tag}/{name}",
+                  "size": os.path.getsize(path),
+                  "sha256": digest,
+              }
+          feed = {
+              "version": version,
+              "notes": notes,
+              "url": f"https://github.com/{repo}/releases/tag/{tag}",
+              "assets": assets,
+          }
+          json.dump(feed, open("dist/latest.json", "w"), indent=2)
+          open("dist/notes.md", "w").write(f"# {tag}\n\n{notes}\n")
+          print("assets:", ", ".join(sorted(assets)))
+          PY
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="f-v$VERSION"
+          # гейт уже доказал VERSION > последнего релиза — этот релиз Latest
+          gh release create "$TAG" dist/magpie-* dist/latest.json \
+            --target "$GITHUB_SHA" --title "$TAG" --notes-file dist/notes.md --latest

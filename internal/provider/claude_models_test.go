@@ -125,7 +125,7 @@ func TestClaudePicksOfEveryModelTakeOnesListedSince(t *testing.T) {
 	writeAnthropicCatalog(t, mdOpus55, mdHaiku55)
 
 	// picks saved before PickedFrom was kept, as the reporter's are
-	if err := store(file{Providers: []Provider{{ID: "claude", Models: claudeAllPicked}}}); err != nil {
+	if err := replaceProviderFixture(file{Providers: []Provider{{ID: "claude", Models: claudeAllPicked}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := claudeExposed(t); !slices.Contains(got, "claude-haiku-5-5") || !slices.Contains(got, "claude-sonnet-5-5") {
@@ -186,7 +186,7 @@ func TestClaudeAccountListsFable52(t *testing.T) {
 	claudeSignIn(t, home, time.Now().Add(time.Hour))
 	t.Cleanup(catalog.Reset)
 	writeAnthropicCatalog(t, mdOpus55, mdHaiku55)
-	if err := store(file{Providers: []Provider{{ID: "claude", Models: claudeAllPicked}}}); err != nil {
+	if err := replaceProviderFixture(file{Providers: []Provider{{ID: "claude", Models: claudeAllPicked}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := claudeExposed(t); slices.Contains(got, "claude-fable-5-2") {

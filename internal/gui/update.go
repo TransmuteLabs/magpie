@@ -601,6 +601,10 @@ func (u *updater) install(ask bool) bool {
 		}
 	}
 	u.err = ""
+	if errors.Is(err, update.ErrSigningStale) {
+		u.staged, u.state, u.err = "", "error", err.Error()
+		return false
+	}
 	if errors.As(err, new(*update.BlockedError)) {
 		u.staged = "" // removed: this computer won't run it
 		u.wontStart(err)
@@ -784,6 +788,7 @@ func (u *updater) relang(version, lang string) {
 }
 
 func updateRoutes(mux *http.ServeMux, w Windows) {
+	updateSigningRoutes(mux)
 	// a page's word of the user's input, which a restart by itself waits
 	// for to end (inUseAt); open: a dialog is open
 	mux.HandleFunc("POST /api/update/using", func(rw http.ResponseWriter, r *http.Request) {

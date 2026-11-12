@@ -1,11 +1,69 @@
 package gui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestTrayCardFreshnessText(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.Local)
+	read := now.Add(-3 * time.Hour)
+	for _, lang := range []struct {
+		code, failed, deferred, deferredAt string
+	}{
+		{"en", "as of Sep 27 09:00, couldn't be read just now", "not refreshed this time", "as of Sep 27 09:00, not refreshed this time"},
+		{"zh", "截至 9月27日 09:00，暂时无法获取最新额度", "本次未刷新", "截至 9月27日 09:00，本次未刷新"},
+		{"zh-TW", "截至 9月27日 09:00，暫時無法取得最新額度", "本次未重新整理", "截至 9月27日 09:00，本次未重新整理"},
+		{"ja", "9月27日 09:00 時点、現在は読み取れません", "今回は更新していません", "9月27日 09:00 時点、今回は更新していません"},
+		{"de", "Stand 27.9. 09:00, konnte gerade nicht gelesen werden", "diesmal nicht aktualisiert", "Stand 27.9. 09:00, diesmal nicht aktualisiert"},
+	} {
+		t.Run(lang.code, func(t *testing.T) {
+			for _, state := range []struct {
+				name     string
+				asOf     *time.Time
+				deferred bool
+				want     string
+			}{
+				{name: "fresh"},
+				{name: "failed", asOf: &read, want: "\n" + lang.failed},
+				{name: "deferred", deferred: true, want: "\n" + lang.deferred},
+				{name: "deferred-as-of", asOf: &read, deferred: true, want: "\n" + lang.deferredAt},
+			} {
+				t.Run(state.name, func(t *testing.T) {
+					for _, card := range []struct {
+						name, label string
+						quota       provider.SubscriptionQuota
+					}{
+						{name: "error", quota: provider.SubscriptionQuota{Error: "unavailable", Windows: []provider.QuotaWindow{{Name: "Window", Used: 25}}}},
+						{name: "balance", label: "$4.20", quota: provider.SubscriptionQuota{Balance: "$4.20"}},
+						{name: "window", label: "25%", quota: provider.SubscriptionQuota{Windows: []provider.QuotaWindow{{Name: "Window", Used: 25}}}},
+					} {
+						t.Run(card.name, func(t *testing.T) {
+							quota := card.quota
+							quota.Name, quota.AsOf, quota.ReadDeferred = "Sample", state.asOf, state.deferred
+							label, tip := trayCardText(lang.code, quota, now, false, false, nil)
+							if label != card.label {
+								t.Fatalf("label %q, want %q", label, card.label)
+							}
+							if got := trayAsOf(lang.code, quota); got != state.want {
+								t.Errorf("freshness %q, want %q", got, state.want)
+							}
+							if !strings.HasSuffix(tip, state.want) {
+								t.Errorf("tooltip %q lacks freshness %q", tip, state.want)
+							}
+							if quota.Error != "" && tip != "Sample: unavailable"+state.want {
+								t.Errorf("error tooltip %q", tip)
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestTrayUsageText(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)

@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,7 +176,7 @@ func passedOnCards() []SubscriptionQuota {
 		if r.held {
 			continue
 		}
-		for _, q := range namedRemoteCards(p, r.cards) {
+		for _, q := range namedRemoteRead(p, r) {
 			q.Via = catalog.ViaHere(q.Via)
 			out = append(out, q)
 		}
@@ -204,17 +206,19 @@ var remoteCardCache struct {
 }
 
 type remoteCardsRead struct {
-	at    time.Time
-	cards []SubscriptionQuota // as the remote has them, not yet named
-	err   string
-	held  bool // the remote holds the key: no card of its accounts is shown
+	at     time.Time
+	goodAt time.Time
+	cards  []SubscriptionQuota // as the remote has them, not yet named
+	err    string
+	held   bool // the remote holds the key: no card of its accounts is shown
 }
 
 // remoteCardsID is what a remote's cards are kept here by: the provider
-// and its key, so cards read with one key are never shown under another
-// (a key replaced by one the remote holds shows none of them).
+// and hashes of its endpoint and key, so cards read from one address or
+// with one key are never shown under another.
 func remoteCardsID(p Provider) string {
-	return p.ID + "\x00" + keyID(p.Key)
+	endpoint := sha256.Sum256([]byte(p.Anthropic))
+	return p.ID + "\x00" + hex.EncodeToString(endpoint[:]) + "\x00" + keyID(p.Key)
 }
 
 // ForgetRemoteCardsForTest drops the remote magpies' cards kept here, for
@@ -295,7 +299,24 @@ func remoteCards(ctx context.Context, p Provider, fresh bool) []SubscriptionQuot
 		}
 		return []SubscriptionQuota{{Provider: p.ID, Name: name, Icon: "magpie", Kind: "subscription", From: name, Windows: []QuotaWindow{}, Error: msg}}
 	}
-	return namedRemoteCards(p, r.cards)
+	return namedRemoteRead(p, r)
+}
+
+func namedRemoteRead(p Provider, r remoteCardsRead) []SubscriptionQuota {
+	cards := namedRemoteCards(p, r.cards)
+	if r.err != "" && !r.goodAt.IsZero() {
+		for i := range cards {
+			at := r.goodAt
+			for _, known := range []*time.Time{cards[i].AsOf, cards[i].ReadAt} {
+				if known != nil && known.Before(at) {
+					at = *known
+				}
+			}
+			cards[i].AsOf = &at
+			cards[i].ReadDeferred = false
+		}
+	}
+	return cards
 }
 
 // namedRemoteCards is cards, as the remote magpie p told them, named for
@@ -313,6 +334,12 @@ func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota
 	for _, q := range cards {
 		if q.Provider == "" || catalog.Loops(q.Via) || !wanted(q.Provider) {
 			continue
+		}
+		q.Windows = slices.Clone(q.Windows)
+		if q.Resets != nil {
+			resets := *q.Resets
+			resets.Each = slices.Clone(resets.Each)
+			q.Resets = &resets
 		}
 		q.Provider = p.ID + "/" + q.Provider
 		q.Name += " · " + name
@@ -407,6 +434,7 @@ func keepRemoteCards(id string, asked time.Time, cards []SubscriptionQuota, err 
 	default:
 		// a card that came back round isn't kept, nor told again
 		r.cards, r.err, r.held = withoutLoops(cards), "", false
+		r.goodAt = asked
 	}
 	if c.m == nil {
 		c.m = map[string]remoteCardsRead{}

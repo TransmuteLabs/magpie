@@ -7,7 +7,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, wheelTo, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -70,26 +70,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, saved));
+        await watchSettingsReads(page);
 
         await page.goto("http://magpie.test/?view=usage");
         await page.locator("#usageCost b").waitFor();
         await page.locator("#prefs").click();
         await openPart(page, "usage");
+        await settingsDrawn(page);
         const segs = page.locator("#dayStartSegs .opt");
         await segs.first().waitFor();
         assert.equal(await segs.count(), 7);
         assert.equal((await segs.nth(4).textContent()).trim(), "4:00");
         assert.equal(await segs.nth(0).evaluate((b) => b.classList.contains("on")), true, "0:00 starts picked");
 
-        // a real wheel down, then back until the row is clear of the header
-        await page.locator("#dayStartSegs").hover();
-        for (let i = 0; i < 20 && !(await view(page)); i++) { await page.mouse.wheel(0, 200); await page.waitForTimeout(20); }
-        for (let i = 0; i < 40; i++) {
-          const box = await segs.nth(4).boundingBox();
-          if (box && box.y >= 60) break;
-          await page.mouse.wheel(0, -60);
-          await page.waitForTimeout(30);
-        }
+        // Let the real wheel land before recording what the click must preserve.
+        await wheelTo(page, segs.nth(4), 80);
         const before = await view(page);
         const box = await segs.nth(4).boundingBox();
         await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);

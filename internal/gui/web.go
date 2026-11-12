@@ -513,13 +513,18 @@ func ownWeb(w Windows) bool { _, ok := w.(webHost); return ok }
 // allow list and key.
 func onePort(page http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		if !gateway.ClientPath(r.URL.Path) {
+		server := served.Load()
+		clientPath := gateway.ClientPath(r.URL.Path)
+		if server != nil {
+			clientPath = server.ClientPath(r.URL.Path)
+		}
+		if !clientPath {
 			page.ServeHTTP(rw, r)
 			return
 		}
 		r = gateway.FromPagePort(r)
-		if gw := served.Load(); gw != nil {
-			gw.Front().ServeHTTP(rw, r)
+		if server != nil {
+			server.Front().ServeHTTP(rw, r)
 			return
 		}
 		toGateway.ServeHTTP(rw, r)

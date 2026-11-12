@@ -10,6 +10,7 @@ package provider
 import (
 	"bytes"
 	"cmp"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -767,6 +769,24 @@ type file struct {
 	// Deleted are the providers the user deleted, so the calls made to
 	// one stay its own when another is added under its id (Renames).
 	Deleted []Deleted `json:"deleted,omitempty"`
+	source  providerSource
+}
+
+type providerSource struct {
+	digest [sha256.Size]byte
+	exists bool
+	known  bool
+}
+
+func readProviderSource(path string) ([]byte, providerSource, error) {
+	b, err := steady.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, providerSource{known: true}, nil
+	}
+	if err != nil {
+		return nil, providerSource{}, err
+	}
+	return b, providerSource{digest: sha256.Sum256(b), exists: true, known: true}, nil
 }
 
 // Path is the file the user's providers live in.
@@ -827,12 +847,13 @@ var fileReads atomic.Int64
 func read() (file, error) {
 	fileReads.Add(1)
 	var f file
-	b, err := steady.ReadFile(Path())
-	if errors.Is(err, os.ErrNotExist) {
-		return f, nil
-	}
+	b, source, err := readProviderSource(Path())
 	if err != nil {
 		return f, &unreadableError{Path(), err}
+	}
+	if !source.exists {
+		f.source = source
+		return f, nil
 	}
 	// An editor that saves with a byte-order mark leaves JSON that Go's
 	// decoder refuses; read as broken, the file fell back to its .bak, an
@@ -849,6 +870,7 @@ func read() (file, error) {
 			return file{}, &unreadableError{Path(), err}
 		}
 	}
+	f.source = source
 	return f, nil
 }
 
@@ -894,11 +916,22 @@ func Routings() ([]string, error) {
 	return out, nil
 }
 
-// store replaces providers.json whole, through a file renamed over it, so
-// that a read at that moment sees the old catalog or the new one, never a
-// file cut short.
+var errProvidersChanged = errors.New("providers.json changed since it was read")
+
+// store publishes a read/modify/write snapshot and notifies catalog owners.
 func store(f file) error {
+	if err := publishProviders(f); err != nil {
+		return err
+	}
+	finishProviderStore(f)
+	return nil
+}
+
+func publishProviders(f file) error {
 	p := Path()
+	if !f.source.known {
+		return errors.New("providers.json write requires a known source")
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -912,16 +945,28 @@ func store(f file) error {
 	if err != nil {
 		return err
 	}
+	unlock, held := filelock.Lock(p+".lock", filelock.Wait)
+	if !held {
+		return fmt.Errorf("%s: providers lock unavailable", p)
+	}
+	defer unlock()
+	_, current, err := readProviderSource(p)
+	if err != nil {
+		return &unreadableError{p, err}
+	}
+	if current != f.source {
+		return fmt.Errorf("%s: %w", p, errProvidersChanged)
+	}
 	if err := lastgood.Keep(p, validProviders, 0o600); err != nil {
 		return err
 	}
-	if err := writePrivate(p, append(b, '\n')); err != nil {
-		return err
-	}
+	return writePrivate(p, append(b, '\n'))
+}
+
+func finishProviderStore(f file) {
 	pruneIcons(f)
 	// what agents were handed of the catalog may be out of date now
 	catalog.Touched()
-	return nil
 }
 
 // All lists the configured providers in the order they were added, then

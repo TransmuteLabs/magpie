@@ -38,6 +38,7 @@ import (
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
+	"github.com/yetone/magpie/internal/protocolext"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/redact"
 	"github.com/yetone/magpie/internal/settings"
@@ -514,7 +515,8 @@ type Call struct {
 
 // Server is the gateway.
 type Server struct {
-	client *http.Client
+	client    *http.Client
+	protocols *protocolext.Host
 	// ending closes once the gateway stops serving, for a stream with no
 	// end of its own (routeEvents) to end before Shutdown, which would
 	// wait its whole drain for it (streamsEnding)
@@ -997,7 +999,7 @@ func (s *Server) Handler() http.Handler {
 	// on (dumpFirst)
 	// a socket's turns go through all of it again (socketEntry); the
 	// agent's Retry-After is bounded on the way out (retryCapped)
-	return socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keyLimited(s.keySlots(mux, mux))))))))))))
+	return s.withProtocolRegistry(socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(s.protocolEntry(keyLimited(s.keySlots(mux, mux))))))))))))))
 }
 
 // routes are the client APIs, each by its pattern: readOnlyGuard reads

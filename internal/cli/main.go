@@ -195,6 +195,12 @@ const usage = `magpie — one place to pick every agent's model
   magpie update auto [on|off] [download|notify] [30m|1h|6h|24h]
                                   whether the app looks for updates by itself, how often (6h), and whether
                                   it downloads one at once or only says it is out (notify: for metered networks)
+  magpie update signing            local macOS update signing status; the installed app is left as it is
+  magpie update signing list       list usable Keychain identities with their full certificate fingerprints
+  magpie update signing use <fullfingerprint>
+                                  pin one identity and the exact custom MAGPIE_UPDATE_FEED for future updates;
+                                  run the macOS app's command; the private key stays in Keychain
+  magpie update signing off        disable local signing; the installed app is left as it is
   magpie licenses                 the third-party notices of what magpie is built with
 
 agents: claude (cc), codex, gemini, opencode (oc), mimocode, deveco, pi, goose, cursor, zed, copilot, crush, aside

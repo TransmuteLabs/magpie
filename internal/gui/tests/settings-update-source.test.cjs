@@ -10,7 +10,8 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
-function server(lang, posts) {
+function server(lang, posts, signing = false) {
+  let pin = { supported: signing, configured: false };
   let cur = {
     theme: "light", lang, tray: "panel", currency: "usd", textSize: 100,
     proxy: "direct", proxyNow: "", proxySource: "off", pluginProxy: "", updateProxy: "",
@@ -32,6 +33,16 @@ function server(lang, posts) {
         cur = { ...cur, ...body };
       }
       return json(cur);
+    }
+    if (url.pathname === "/api/update/signing") {
+      if (req.method() === "POST") {
+        const body = req.postDataJSON(); posts.push({ signing: body });
+        pin = { supported: true, configured: !body.off, fingerprint: body.off ? undefined : body.fingerprint, team: "TEAM", feed: "https://fork.test/latest.json" };
+      }
+      return json({ ...pin, identities: url.searchParams.has("identities") ? [
+        { fingerprint: "A".repeat(40), name: "Same signing name", team: "TEAM" },
+        { fingerprint: "B".repeat(40), name: "Same signing name", team: "TEAM" },
+      ] : undefined });
     }
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
@@ -95,6 +106,34 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.keyboard.press("Escape");
         const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         assert(over <= 0, `the page scrolls sideways by ${over}px`);
+        assert.deepEqual(errors, []);
+      });
+      test(`${engine} ${lang} ${width}px: local signing selects an exact certificate beside update source`, async (t) => {
+        const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+        t.after(() => browser.close());
+        const page = await browser.newPage({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
+        page.setDefaultTimeout(8000);
+        const posts = [], errors = [];
+        page.on("pageerror", (e) => errors.push(e.message));
+        await page.route("**/*", server(lang, posts, true));
+        await page.goto("http://magpie.test/?view=settings&tab=network");
+        const row = page.locator("#updateSigningRow"), pick = page.locator("#updateSigningPick");
+        await pick.waitFor();
+        assert.equal(await row.locator("select").count(), 0);
+        assert(await row.evaluate((r) => r.previousElementSibling.id === "updateSourceRow"));
+        assert.equal(posts.length, 0, "rendering never enrolls a certificate");
+        for (const letter of ["B", "A", ""]) {
+          await pick.click();
+          const menu = page.locator(".proto-menu");
+          await menu.waitFor();
+          const response = page.waitForResponse((r) => r.url().endsWith("/api/update/signing") && r.request().method() === "POST");
+          await menu.getByRole("menuitemradio").nth(letter === "B" ? 2 : letter === "A" ? 1 : 0).click();
+          await response;
+          await page.waitForFunction(() => !document.querySelector("#updateSigningPick").disabled);
+          assert.deepEqual(posts.at(-1), { signing: letter ? { fingerprint: letter.repeat(40) } : { off: true } });
+        }
+        assert.equal(posts.length, 3, "only signing policy was saved");
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
         assert.deepEqual(errors, []);
       });
     }

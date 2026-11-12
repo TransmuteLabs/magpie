@@ -16,7 +16,7 @@ func (s *Server) Front() http.Handler {
 	// the goroutine dump ahead of lanGuard too, whose allow list reads
 	// settings.json under its lock (dumpFirst)
 	// (socketEntry: a socket's turns go through all of it again)
-	s.frontOnce.Do(func() { s.front = socketEntry(s.dumpFirst(lanGuard(s.Handler()))) })
+	s.frontOnce.Do(func() { s.front = s.withProtocolRegistry(socketEntry(s.dumpFirst(lanGuard(s.Handler())))) })
 	return s.front
 }
 
@@ -55,6 +55,10 @@ func ClientPath(p string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) ClientPath(p string) bool {
+	return ClientPath(p) || s.protocols.ClientPath(p)
 }
 
 // PagePortHeader marks a request `magpie web`'s page port handed to the

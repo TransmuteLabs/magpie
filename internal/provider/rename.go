@@ -94,12 +94,13 @@ func Rename(from, to string) error {
 			f.Deleted[j].Into = to
 		}
 	}
+	if err := publishProviders(f); err != nil {
+		return err
+	}
 	// the vendor's list last fetched goes with it
 	os.Rename(catalog.LivePath(from), catalog.LivePath(to))
 	os.Rename(catalog.LivePath(decisionsID(from)), catalog.LivePath(decisionsID(to)))
-	if err := store(f); err != nil {
-		return err
-	}
+	finishProviderStore(f)
 	// so is its StepFun sign-in, kept by provider id
 	if err := renameStepFun(from, to); err != nil {
 		return err

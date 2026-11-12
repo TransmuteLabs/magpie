@@ -2,7 +2,7 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, devzeus]
   pull_request:
   workflow_dispatch:
 
@@ -11,7 +11,7 @@ on:
 # replaces a run that hasn't started. A PR's run is cancelled by its next push.
 concurrency:
   group: test-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/devzeus' }}
 
 permissions:
   contents: read
@@ -26,9 +26,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -162,15 +162,15 @@ jobs:
             goarch: arm64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Build the terminal-only release
         env:
           CGO_ENABLED: '0'
         run: make release-cli TARGETS="${{ matrix.goos }}/${{ matrix.goarch }}"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: matrix.goos == 'linux'
         with:
           node-version: 22

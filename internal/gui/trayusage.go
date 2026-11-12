@@ -273,7 +273,7 @@ func trayCardText(lang string, q provider.SubscriptionQuota, now time.Time, left
 	}
 	q.Name = trayName(q)
 	if q.Error != "" {
-		return "", q.Name + ": " + q.Error
+		return "", q.Name + ": " + q.Error + trayAsOf(lang, q)
 	}
 	ws := trayWindows(q)
 	if len(ws) == 0 {
@@ -358,7 +358,13 @@ func trayPace(p float64, left bool) string {
 // "As of …"); nothing for a reading just made.
 func trayAsOf(lang string, q provider.SubscriptionQuota) string {
 	if q.AsOf == nil {
+		if q.ReadDeferred {
+			return "\n" + trayText(lang, "not refreshed this time")
+		}
 		return ""
+	}
+	if q.ReadDeferred {
+		return "\n" + trayText(lang, "as of %s, not refreshed this time", q.AsOf.Local().Format(trayText(lang, "Jan 2 15:04")))
 	}
 	return "\n" + trayText(lang, "as of %s, couldn't be read just now", q.AsOf.Local().Format(trayText(lang, "Jan 2 15:04")))
 }
