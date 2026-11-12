@@ -325,6 +325,7 @@ func onMachineAll(home, cfg string) []*Agent {
 		qwenpaw(home),
 		openClaw(home),
 		jcode(home),
+		vibe(home),
 		miniMax(home),
 		droid(home),
 		cline(home),
@@ -648,7 +649,7 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 		for _, m := range models {
 			window := m.Context
 			if window == 0 {
-				window = 200000
+				window = unknownWindow(200000)
 			}
 			// without it Crush caps every reply at 16384 tokens, a model
 			// that can write more of them never asked for it; an output

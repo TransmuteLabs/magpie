@@ -6610,7 +6610,7 @@ Your allowedModels doesn't list it. magpie leaves that list to you; add the mode
 
 By the key magpie gives it, magpie-prime-agent, since its requests carry no User-Agent.
 
-More agents on the same models: [Pi on any model](https://usemagpie.ai/docs/pi), [Kimi Code on any model](https://usemagpie.ai/docs/kimi-code) and [DS Bot on any model](https://usemagpie.ai/docs/ds-bot). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More agents on the same models: [Pi on any model](https://usemagpie.ai/docs/pi), [Kimi Code on any model](https://usemagpie.ai/docs/kimi-code), [DS Bot on any model](https://usemagpie.ai/docs/ds-bot) and [Muse Code on any model](https://usemagpie.ai/docs/muse-code). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -6748,7 +6748,1120 @@ Yes. The desktop app and the kun TUI are both clients of kun serve and share its
 
 Yes. magpie stashed the default Kun had, picks it again, then removes its connection.
 
-More desktop apps on the same models: [OpenHanako on any model](https://usemagpie.ai/docs/openhanako), [DS Bot on any model](https://usemagpie.ai/docs/ds-bot) and [Tuanjie Cowork on any model](https://usemagpie.ai/docs/tuanjie-cowork). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+More desktop apps on the same models: [OpenHanako on any model](https://usemagpie.ai/docs/openhanako), [DS Bot on any model](https://usemagpie.ai/docs/ds-bot), [Tuanjie Cowork on any model](https://usemagpie.ai/docs/tuanjie-cowork) and [Alma on any model](https://usemagpie.ai/docs/alma). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/alma
+
+# Alma on any model
+
+Alma is a desktop AI chat app that keeps its providers and settings in the app, not in a file magpie can edit. magpie adds a provider named magpie through the local API Alma serves while it runs, and makes it the default model, so Alma runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Alma
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Open Alma.** magpie can change Alma's settings only through a running Alma. When it isn't open, magpie says to open Alma and try again.
+3. **Pick a model for Alma on the Agents page.** Pick a model via magpie; it becomes Alma's default model.
+
+```
+magpie alma deepseek/deepseek-v4-pro
+```
+
+## Through Alma's local API
+
+While it runs, Alma serves a local API at `http://localhost:23001`, and that is what magpie uses:
+
+```
+GET  /api/providers              Alma's providers
+POST /api/providers              magpie's provider
+PUT  /api/providers/:id/models   its model list
+GET  /api/settings, PUT it back  chat.defaultModel, imageGen.model
+```
+
+magpie's provider is of type openai at the gateway's `/v1`, with magpie's own key for Alma. Alma's requests carry only the AI SDK's User-Agent, so the key is how the gateway knows them for Alma's. The default model is `chat.defaultModel`, as `providerId:model`; Alma takes only the whole settings, so magpie puts the rest back as they were.
+
+## Models and thinking levels
+
+Alma works out a model's capabilities from models.dev by its id, and magpie's ids (codex/gpt-5.5) aren't models.dev's, so such a model would show no thinking. magpie tells Alma each model's capabilities: a model that reasons comes with the thinking levels Alma knows, and its window, output limit and images when magpie knows them. One you set yourself in Alma's model options (tool calling) stays as you set it. Models added or dropped in magpie reach Alma while it is open.
+
+## Image generation
+
+When magpie has an image model and Alma's image generation model is Auto, picking one of magpie's models for Alma makes magpie's image model Alma's too. An image model you picked is left as it is.
+
+## Switching back
+
+Switching back clears Alma's default model when it is magpie's, leaving it to Alma, puts an image generation model of magpie's back to Auto, and removes magpie's provider. If Alma has been uninstalled, magpie remembers, and takes its provider out once Alma is installed again and answers.
+
+```
+magpie alma default
+```
+
+## FAQ
+
+### Can Alma run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Open Alma and pick a via-magpie model for Alma on magpie's Agents page. magpie adds a magpie provider and makes it the default model.
+
+### magpie says Alma isn't running. Why?
+
+Alma's settings change only through the local API it serves while it runs. Open Alma and try again.
+
+### Why do magpie's models have thinking levels in Alma?
+
+magpie tells Alma each model's capabilities: whether it reasons, its thinking levels and its window.
+
+### What happens when I switch back?
+
+magpie's provider is removed, a default model of magpie's is cleared for Alma to pick, and the image generation model goes back to Auto.
+
+More desktop apps on the same models: [Kun on any model](https://usemagpie.ai/docs/kun), [Every model in Cherry Studio, through magpie](https://usemagpie.ai/docs/cherry-studio), [OpenHanako on any model](https://usemagpie.ai/docs/openhanako) and [OpenPencil on any model](https://usemagpie.ai/docs/openpencil). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/openpencil
+
+# OpenPencil on any model
+
+OpenPencil (ZSeven-W/openpencil, the openpencil-desktop app) is a design canvas whose chat runs models through builtin agents of your own: an Anthropic or OpenAI-compatible endpoint, a key and a list of models, each listed in the chat's model picker. magpie adds an entry named magpie, so OpenPencil runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up OpenPencil
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Quit OpenPencil.** Why is below.
+3. **Pick magpie for OpenPencil on the Agents page.** Then tick the models it should list.
+4. **Open OpenPencil and pick a magpie model in its chat's model picker.** The model is picked in OpenPencil, not in a file.
+
+```
+magpie openpencil magpie
+```
+
+## The entry in settings.json
+
+OpenPencil keeps its settings in one settings.json:
+
+```
+macOS    ~/Library/Application Support/openpencil/settings.json
+Linux    ~/.config/openpencil/settings.json   ($XDG_CONFIG_HOME)
+Windows  %APPDATA%\openpencil\settings.json
+```
+
+magpie writes one entry of `builtin_agents`, id `magpie`, of kind openai-compat, which posts to `/chat/completions` under the gateway's `/v1`. OpenPencil's User-Agent isn't known, so the gateway tells its requests apart by the key `magpie-openpencil`:
+
+```
+{"version": 1,
+ "builtin_agents": [{"id": "magpie", "preset": "custom", "display_name": "magpie",
+   "kind": "openai-compat", "api_key": "magpie-openpencil",
+   "model": "", "models": ["", …],
+   "base_url": "http://127.0.0.1:3425/v1", "enabled": true}]}
+```
+
+Your other entries and settings stay, and so do the name and the on/off you give magpie's entry in OpenPencil. `version` has to be 1: without it OpenPencil sets the file aside as corrupt and then refuses to save at all. So magpie writes version 1 in a file it makes, and leaves alone a file whose version it doesn't know.
+
+## Quit OpenPencil first
+
+OpenPencil reads settings.json once, when it starts, and writes all of it back from what it holds when a setting changes and when it quits. A change magpie makes while it runs is written over when it quits, so magpie refuses one then and says to quit OpenPencil and try again. On Windows, where magpie can't tell it is running, a notice asks you to quit it first.
+
+## The model list
+
+The entry's models are the ones you tick for OpenPencil on magpie's Agents page, each once, at most 64 (OpenPencil drops the rest when it next saves). The `models` list is written for two or more, with the first again as `model`; v0.8.4 knows only `model`, so it lists the first model alone. Changes in magpie are synced to it.
+
+## Switching back
+
+Switching back takes magpie's entry out of `builtin_agents`, and the file too when all that is left is the version and empty list magpie wrote. Quit OpenPencil first here too.
+
+```
+magpie openpencil default
+```
+
+open-pencil/open-pencil, the other app of the name, keeps its providers in its webview's localStorage, which magpie can't write. It reaches magpie through an agent magpie sets up (Pi, an ACP agent) or a base URL typed in.
+
+## FAQ
+
+### Can OpenPencil run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Quit OpenPencil, pick magpie for it on magpie's Agents page, then open OpenPencil and pick a magpie model in its chat's model picker.
+
+### Why quit OpenPencil first?
+
+OpenPencil writes its whole settings back to settings.json when it quits, over what magpie wrote while it ran.
+
+### Why does OpenPencil show only one magpie model?
+
+OpenPencil v0.8.4 reads only the model field, so it lists the first model; later versions read the models list, up to 64.
+
+### Are my other builtin agents kept when I switch back?
+
+Yes. magpie removes only the entry with id magpie and leaves the rest as it was.
+
+More desktop apps on the same models: [Alma on any model](https://usemagpie.ai/docs/alma), [Kun on any model](https://usemagpie.ai/docs/kun) and [Pi on any model](https://usemagpie.ai/docs/pi). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/muse-code
+
+# Muse Code on any model
+
+Muse Code is Meta's `muse` coding agent CLI. Where its requests go is `endpoint_transport` in its settings.json, and the model sessions start on is the top-level `model`. magpie points both at the gateway, so Muse Code runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Muse Code
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Muse Code on the Agents page.** Pick a model via magpie.
+3. **Restart open muse sessions.** Muse Code reads its settings at start-up.
+
+```
+magpie muse deepseek/deepseek-v4-pro
+```
+
+## settings.json
+
+Muse Code keeps its settings in `${XDG_CONFIG_HOME:-~/.config}/muse/settings.json`, and refuses the file without `"schema_version": 1`. magpie writes:
+
+```
+{
+  "schema_version": 1,
+  "endpoint_transport": {
+    "base_url": "http://127.0.0.1:3425/v1",
+    "auth": "none"
+  },
+  "model": "deepseek/deepseek-v4-pro"
+}
+```
+
+Muse Code streams to `/responses` under `base_url` (OpenAI's Responses API), where the gateway answers. The file's other keys are left as they are. With no file, magpie makes one with the schema version. Muse Code in a WSL distro is set up the same way, in `~/.config/muse` there.
+
+## Why auth is none
+
+With `auth` `bearer`, Muse Code sends the Meta sign-in's token (auth.json, or META_API_KEY); with `none` it sends no Authorization and asks for no sign-in. magpie uses none, so your Meta token is neither read by magpie nor sent to the gateway.
+
+## The model list
+
+Muse Code lists its models from `/muse-code/models` on `base_url`'s host, which the gateway serves, so magpie's models show in Muse Code's model choice.
+
+## Switching back
+
+When it first steps in, magpie stashes the `endpoint_transport` and `model` you had. Switching back puts them back, or takes magpie's out where you had none. A file magpie made goes again once only the schema version is left.
+
+```
+magpie muse default
+```
+
+## FAQ
+
+### Can Muse Code run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for Muse Code on magpie's Agents page, then restart open muse sessions.
+
+### Does magpie read my Meta sign-in token?
+
+No. magpie sets auth to none, so Muse Code sends no Authorization; the token is neither read nor sent to the gateway.
+
+### Nothing changed in Muse Code. Why?
+
+Muse Code reads settings.json at start-up. Restart open muse sessions.
+
+### Does switching back restore my settings?
+
+Yes. magpie stashed the endpoint_transport and model you had and puts them back; the file's other keys were never touched.
+
+More agents on the same models: [Prime Agent on any model](https://usemagpie.ai/docs/prime-agent), [Pi on any model](https://usemagpie.ai/docs/pi), [Kimi Code on any model](https://usemagpie.ai/docs/kimi-code) and [Paimon on any model](https://usemagpie.ai/docs/paimon). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/paimon
+
+# Paimon on any model
+
+Paimon (aisk/paimon, installed with `uv tool install paimon`) is a coding agent in the terminal, built on pydantic-ai. Its settings are one JSON file: the model is `provider:name`, and each provider keeps its own address and key. magpie adds a provider at the gateway, so Paimon runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Paimon
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Paimon on the Agents page.** Pick a model via magpie.
+3. **Restart Paimon.** Paimon reads its settings when it starts, so a running one keeps its model until it starts again.
+
+```
+magpie paimon deepseek/deepseek-v4-pro
+```
+
+## config.json
+
+The file is `$PAIMON_CONFIG_HOME/config.json`, else `~/.config/paimon/config.json` (on Windows too). magpie changes three things:
+
+```
+{
+  "model": "litellm:deepseek/deepseek-v4-pro",
+  "providers": {
+    "litellm": {
+      "api_base": "http://127.0.0.1:3425/v1",
+      "api_key": ""
+    }
+  },
+  "compaction": { "context_window": 1000000 }
+}
+```
+
+A model is sent with its own provider's key only. The rest of the file is left alone; with no file, magpie makes one readable by you alone (it holds keys), as Paimon makes it. Paimon in a WSL distro is set up the same way.
+
+## Why litellm
+
+magpie uses pydantic-ai's litellm provider, an OpenAI-compatible proxy that profiles a `vendor/model` name by its vendor, as magpie's ids are spelled. Paimon's login doesn't offer it, so it is almost never one of your own. The gateway knows the provider for magpie's by magpie's own key for Paimon.
+
+## Context window and compaction
+
+For a name genai-prices doesn't know, which magpie's ids aren't, Paimon compacts against `compaction.context_window` only, and doesn't compact at all without it. So magpie writes the window it knows the model to take; for a model whose window it doesn't know, your own value, never the last model's.
+
+## Switching back
+
+When it first steps in, magpie stashes the model, providers.litellm and compaction.context_window you had. Switching back puts all three back, takes out the empty objects it left, and removes a file it made once nothing is left in it. A model you picked in Paimon since, on a provider of your own, counts as yours and is the one put back.
+
+```
+magpie paimon default
+```
+
+## FAQ
+
+### Can Paimon run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for Paimon on magpie's Agents page, then restart Paimon.
+
+### Why does the model in config.json start with litellm:?
+
+magpie goes through pydantic-ai's litellm provider, an OpenAI-compatible proxy that reads magpie's vendor/model ids.
+
+### Does Paimon still compact its context?
+
+Yes. magpie writes the model's context window, which Paimon compacts against; without it Paimon doesn't compact.
+
+### Does switching back restore my settings?
+
+Yes. magpie stashed the model, litellm provider and context window you had and puts them back; the rest of the file was never touched.
+
+More agents on the same models: [Muse Code on any model](https://usemagpie.ai/docs/muse-code), [Prime Agent on any model](https://usemagpie.ai/docs/prime-agent), [Pi on any model](https://usemagpie.ai/docs/pi) and [PenguinHarness on any model](https://usemagpie.ai/docs/penguin). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/penguin
+
+# PenguinHarness on any model
+
+PenguinHarness (Prism-Shadow/penguin-harness, the `penguin` command, npm `@prismshadow/penguin-cli`, and a desktop app) keeps each Project's models in one TOML file. magpie adds a provider named magpie and its models there, so PenguinHarness runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription. The CLI and the desktop app read the same file.
+
+## Set up PenguinHarness
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for PenguinHarness on the Agents page.** Pick a model via magpie. A running PenguinHarness moves to it at once, with no restart.
+
+```
+magpie penguin deepseek/deepseek-v4-pro
+```
+
+## .project_config.toml
+
+The file is under the data root: `$PENGUIN_HOME`, else `~/.penguin/data` on every system. The CLI works in the Project `$PENGUIN_PROJECT_ID`, else `default_project`, so the file is `~/.penguin/data/default_project/.project_config.toml`. What magpie writes:
+
+```
+default_model = { provider = "magpie", model_id = "deepseek/deepseek-v4-pro" }
+
+[providers.magpie]
+base_url = "http://127.0.0.1:3425/v1"
+client_type = "openai-responses"
+api_key = ""
+
+[[models]]
+provider = "magpie"
+model_id = "deepseek/deepseek-v4-pro"
+display_name = "…"
+context_window = …
+vision = …
+max_tokens = …
+
+[models.pricing]
+unit = "usd_per_mtok"
+cache_read = …
+cache_write = …
+output = …
+```
+
+A model is the pair of provider and model_id, and one without an address or key of its own takes its provider's. magpie uses the `openai-responses` client: requests go to base_url plus `/responses`, with the thinking level as reasoning.effort, which the openai-chat client leaves out. Your own providers and models stay as they are. With no file, magpie makes one readable by you alone (it holds keys), as PenguinHarness makes it. PenguinHarness in a WSL distro is set up the same way, in `~/.penguin/data` there.
+
+## The model list
+
+Each of magpie's models is one `[[models]]` entry, with what PenguinHarness's own Models page records for one: the display name, context window, cap on a reply, whether it reads images, and its price per million tokens. `vision` is always written, since PenguinHarness takes a model to read images unless told not. PenguinHarness refuses a default_model naming no entry, so magpie writes the entries before the default, and on the way back changes the default before taking them out.
+
+## No restart
+
+PenguinHarness's server reads the file again whenever its modification time moves, so a change needs no restart. Its own Models page and `penguin config model …` write the whole file back, and every key magpie writes is one it knows, so none is lost. A sync with nothing new leaves the file, and its time, alone.
+
+## Switching back
+
+When it first steps in, magpie stashes the default_model you had. Switching back picks it again if PenguinHarness still has it, takes out a vision_model picked among magpie's, then removes magpie's models and `[providers.magpie]`. A file magpie made is removed once nothing is left in it.
+
+```
+magpie penguin default
+```
+
+## FAQ
+
+### Can PenguinHarness run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for PenguinHarness on magpie's Agents page; the CLI and the desktop app both use it.
+
+### Which file does magpie change?
+
+The current Project's .project_config.toml under the data root ($PENGUIN_HOME, else ~/.penguin/data). The default Project is default_project.
+
+### Do I need to restart PenguinHarness?
+
+No. It reads its settings again whenever the file's modification time moves.
+
+### Does switching back restore my model?
+
+Yes. magpie stashed the default_model you had, picks it again if PenguinHarness still has it, and removes the provider and models it added.
+
+More agents on the same models: [Paimon on any model](https://usemagpie.ai/docs/paimon), [Muse Code on any model](https://usemagpie.ai/docs/muse-code), [Prime Agent on any model](https://usemagpie.ai/docs/prime-agent) and [MothX on any model](https://usemagpie.ai/docs/mothx). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/mothx
+
+# MothX on any model
+
+MothX (OSCHINA's oschina/mothx, the `mothx` command, formerly vibecoding) is a coding agent in the terminal, written in Go. Its providers and the model it starts on are in one settings.json. magpie adds a provider named magpie and makes it the default, so MothX runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up MothX
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for MothX on the Agents page.** Pick a model via magpie, and a thinking level if you want one.
+3. **Restart MothX.** MothX reads its settings when it starts, so an open session keeps its model until it starts again.
+
+```
+magpie mothx deepseek/deepseek-v4-pro
+```
+
+## settings.json
+
+The config folder is `$MOTHX_DIR`, else `%APPDATA%\mothx` on Windows and `~/.mothx` elsewhere. What magpie writes:
+
+```
+{
+  "defaultProvider": "magpie",
+  "defaultModel": "deepseek/deepseek-v4-pro",
+  "defaultThinkingLevel": "high",
+  "providers": {
+    "magpie": {
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-chat",
+      "apiKey": "",
+      "thinkingFormat": "openai",
+      "models": [
+        { "id": "deepseek/deepseek-v4-pro", "name": "…", "reasoning": true,
+          "input": ["text"], "contextWindow": …, "maxTokens": …,
+          "cost": { "input": …, "output": …, "cacheRead": …, "cacheWrite": … } }
+      ]
+    }
+  }
+}
+```
+
+MothX asks the default provider for the default model on that provider's api: `openai-chat` is baseUrl plus `/chat/completions`, under Bearer apiKey. Each of magpie's models is one entry, with whether it reads images, its context window, its cap on a reply and its price per million tokens; without them MothX takes its own default window and cap, and can't count a turn's cost. Headers or an httpProxy you put in magpie's provider stay, and your own providers aren't touched. MothX in a WSL distro is set up the same way, in `~/.mothx` there.
+
+## Thinking levels
+
+`defaultThinkingLevel` is the level a session starts at: off, minimal, low, medium, high, xhigh or max, narrowed to the ones a model takes when magpie knows them. MothX sends a level only for a model whose entry says `reasoning` is true. magpie writes `thinkingFormat: "openai"`, so MothX asks every model as reasoning_effort, which the gateway carries to each vendor's own form. Without it MothX guesses the vendor from the model id and the address: a model named qwen… got Qwen's enable_thinking, a deepseek… one only thinking:{type:enabled}, whatever served it. A thinkingFormat you already set is left alone.
+
+## Restart MothX
+
+MothX reads settings.json at start-up, so a running MothX needs a restart; magpie tells you when a mothx or vibecoding process is running. MothX's own /model and /auth dialogs write the whole file back, and magpie's settings survive that. Its requests say `Vibecoding Client/<version>` as their User-Agent, and Usage counts them as MothX.
+
+## Switching back
+
+Switching back takes out defaultProvider, defaultModel and `providers.magpie`, and a providers object left empty. When the file then says the same as before magpie's first write, the original file is put back byte for byte.
+
+```
+magpie mothx default
+```
+
+## FAQ
+
+### Can MothX run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for MothX on magpie's Agents page, then restart MothX.
+
+### Does this work for vibecoding too?
+
+Yes. vibecoding is MothX's old name; magpie takes it for MothX, with the same settings.json.
+
+### How does the thinking level reach the model?
+
+magpie sets thinkingFormat to openai, so MothX sends reasoning_effort, which the gateway turns into each vendor's own form.
+
+### Does switching back restore my settings?
+
+Yes. magpie takes out the default and the provider it added; when the file says the same as before, the original is put back as it was.
+
+More agents on the same models: [PenguinHarness on any model](https://usemagpie.ai/docs/penguin), [Paimon on any model](https://usemagpie.ai/docs/paimon), [Pi on any model](https://usemagpie.ai/docs/pi) and [Avibe on any model](https://usemagpie.ai/docs/avibe). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/avibe
+
+# Avibe on any model
+
+Avibe (avibe-bot/avibe, MIT, the `avibe-os` package and its `vibe` CLI) is a local agent OS. Its own agent, Vibey, and the Claude Code, Codex and OpenCode it runs all take their models from its Model Hub, a gateway of Avibe's own (CLIProxyAPI) in front of the model sources added on its Models page. magpie is added as one such source, so every agent in Avibe runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Avibe
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Start Avibe.** Avibe adds and removes model sources only while it runs, so start it with `vibe start` first.
+3. **Pick magpie for Avibe on the Agents page.** magpie shows up as a model source on Avibe's Models page, for Vibey and the agents it runs.
+
+```
+vibe start
+magpie avibe magpie
+```
+
+## magpie as a model source
+
+Avibe's home is `$AVIBE_HOME`, else `~/.avibe` (`~/.vibe_remote` before 3.0), and its sources are `model_hub.sources` in `config/config.json` there. A source can't be written into config.json by hand: each is checked whole, its key lives in the Model Hub's store, and Avibe adds it to its agents' route chains as it is added. So magpie adds and removes it as Avibe's Models page does, through Avibe's internal API: the socket `state/dispatch.sock` in its home on macOS and Linux, or on Windows the loopback port and bearer token `runtime/control-ipc/endpoint.json` gives. What magpie sends:
+
+```
+POST /internal/model-hub
+{
+  "operation": "create_source",
+  "payload": {
+    "source": {
+      "kind": "api_key",
+      "vendor": "custom",
+      "display_name": "magpie",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "key": "",
+      "protocol": "openai_chat",
+      "supply_channel": "hub",
+      "billing": "metered",
+      "save_unverified": true
+    }
+  }
+}
+```
+
+magpie keeps the source's id, so one you rename in Avibe is still magpie's. A custom source at the gateway that you added by hand on the Models page counts as magpie's too. When the gateway moves to another port, a sync removes the old source and adds it again at the new address, since the key is sealed with the address; one pointed at another machine, a local proxy's path or the way a WSL distro reaches Windows stays where it is.
+
+## Why chat completions
+
+The source's protocol is `openai_chat`, not Responses. For a Responses source the Model Hub runs Codex's executor, which names itself codex-tui and would be taken for Codex itself; for chat it passes each backend's own headers on. A hub source serves every backend, the Model Hub translating Claude's and Codex's requests. It is saved without Avibe's protocol probe, which can't tell the gateway's protocols apart, as it serves them all.
+
+## The model list
+
+Avibe lists its models from the gateway's `/v1/models` itself, so what it offers is the models you picked for Avibe on magpie's Agents page. Avibe lists them again on its own only once the listing is half an hour old, so magpie has it refresh the source when you add or drop one.
+
+## Removing it
+
+Switching back has magpie delete the source through the same internal API and forget its id. When removing it would take a hop out of a route or interrupt work in progress, Avibe asks for that to be confirmed, as its Models page does; you asked for it in magpie, so magpie asks again with what Avibe listed.
+
+```
+magpie avibe default
+```
+
+## FAQ
+
+### Do Claude Code and Codex inside Avibe get magpie's models too?
+
+Yes. magpie is a Model Hub source, and a hub source serves Vibey and every backend Avibe runs: Claude Code, Codex and OpenCode.
+
+### Why does magpie say to start Avibe first?
+
+Avibe adds and removes model sources only through its internal API while it runs; config.json can't be edited for it. Run vibe start and try again.
+
+### Which models does Avibe offer?
+
+The ones you picked for Avibe on magpie's Agents page. Avibe reads them from the gateway's /v1/models, and magpie has it refresh when the list changes.
+
+### How do I remove magpie?
+
+Switch Avibe back to its default in magpie, or run magpie avibe default. magpie deletes the source it added.
+
+More agents on the same models: [MothX on any model](https://usemagpie.ai/docs/mothx), [PenguinHarness on any model](https://usemagpie.ai/docs/penguin), [Paimon on any model](https://usemagpie.ai/docs/paimon) and [StepCode on any model](https://usemagpie.ai/docs/stepcode). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/stepcode
+
+# StepCode on any model
+
+StepCode is StepFun's coding agent in the terminal, the `step` command. Its default provider and model are in config.toml, and its providers in models.json, in Pi's provider format. magpie adds a provider named magpie to models.json and makes it the default in config.toml, so StepCode runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up StepCode
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for StepCode on the Agents page.** Pick a model via magpie. On the command line, `magpie step` is the same agent.
+3. **Start StepCode.** StepCode reads both files when it starts, so a new session is on the model you picked.
+
+```
+magpie stepcode deepseek/deepseek-v4-pro
+```
+
+## config.toml and models.json
+
+The files are in `~/.stepcode`, or the folder above an absolute `STEP_CODING_AGENT_DIR`. A folder renamed with `STEPCODE_CONFIG_DIR` is followed on this computer. In config.toml magpie writes only these keys, and the rest of the file stays as it was:
+
+```
+# ~/.stepcode/config.toml
+defaultProvider = "magpie"
+defaultModel = "deepseek/deepseek-v4-pro"
+enabledModels = ["…", "magpie/deepseek/deepseek-v4-pro"]
+```
+
+In models.json magpie writes only `providers.magpie`: the gateway's `/v1` as baseUrl, the `openai-completions` api, magpie's own key for StepCode, and magpie's models. models.json may have comments (JSONC). magpie checks it first: the root, providers and providers.magpie must be objects, or nothing is written, so a file it can't read safely isn't broken.
+
+```
+// ~/.stepcode/models.json
+{
+  "providers": {
+    "magpie": {
+      "name": "magpie",
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-completions",
+      "apiKey": "",
+      "models": [ { "id": "deepseek/deepseek-v4-pro", … } ]
+    }
+  }
+}
+```
+
+## The enabledModels scope
+
+`enabledModels` is a scope of patterns matched against models. At start-up StepCode uses the default model when a pattern in the scope takes it, and otherwise the scope's first entry, with any `:level` suffix taken off. So the default alone isn't enough: when you have a scope, magpie appends its pick to it and remembers that it did. Switching back takes out only those entries, never your own. A provider renamed takes its scope entries with it.
+
+## Switching back
+
+Before its first write magpie saves the original provider, model and scope, the original `providers.magpie` text, and whether config.toml, models.json and providers existed. Switching back puts all of these back, and removes files magpie made.
+
+```
+magpie stepcode default
+```
+
+## FAQ
+
+### Can StepCode run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for StepCode on magpie's Agents page, then start StepCode.
+
+### Why did StepCode start on another model when defaultModel was set?
+
+With enabledModels set, the default is used only when the scope takes it. magpie appends its pick to the scope and removes only that entry when switching back.
+
+### Does a models.json with comments work?
+
+Yes. magpie reads it as JSONC, and writes nothing when the root, providers or providers.magpie isn't an object.
+
+### Does switching back restore my settings?
+
+Yes. The original provider, model, scope and providers.magpie go back, and files magpie made are removed.
+
+More agents on the same models: [Avibe on any model](https://usemagpie.ai/docs/avibe), [MothX on any model](https://usemagpie.ai/docs/mothx), [Pi on any model](https://usemagpie.ai/docs/pi) and [omp on any model](https://usemagpie.ai/docs/omp). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/omp
+
+# omp on any model
+
+omp (oh-my-pi, the `omp` command) is a fork of Pi, a coding agent in the terminal. It gives each kind of work a model role: default for the session, task for subagents, smol for small jobs, slow for review, plus plan, commit and more. magpie adds a provider named magpie to models.yml and points the roles you pick at it, so each of omp's roles runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up omp
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick models for omp on the Agents page.** Pick the default role's model first, then one for any other role and a thinking level if you want. On the command line, `magpie oh-my-pi` is the same agent.
+3. **Start a new session.** A new omp session starts on the default role's model.
+
+```
+magpie omp deepseek/deepseek-v4-pro
+```
+
+## config.yml and models.yml
+
+omp's settings are in `~/.omp/agent/config.yml`; `PI_CONFIG_DIR` renames `~/.omp`, and `PI_CODING_AGENT_DIR` moves the agent folder. Each role's model is under `modelRoles` as provider/model, so one of magpie's is `magpie/<provider>/<model>`, with an optional `:level` on the end.
+
+```
+# ~/.omp/agent/config.yml
+modelRoles:
+  default: magpie/deepseek/deepseek-v4-pro
+  slow: magpie/…:high
+enabledModels:
+  - …
+  - magpie/**
+```
+
+In models.yml beside it, magpie's provider takes no key on this computer (`auth: none`), and its models carry their context window, cap on a reply, whether they read images, the thinking levels each takes and the price per million tokens. With the price, omp counts what each call cost; without it a magpie model matches none of omp's bundled ones and every call costs 0. Your own providers and what else you keep in models.yml, such as modelOverrides, are left alone.
+
+```
+# ~/.omp/agent/models.yml
+providers:
+  magpie:
+    baseUrl: http://127.0.0.1:3425/v1
+    auth: none
+    models:
+      - id: deepseek/deepseek-v4-pro
+        …
+```
+
+## A model per role
+
+default is the model a session starts on. task is for subagents; scout and sonic run on smol and reviewer on slow. Unset, task takes the parent session's model, and smol and slow the default's. plan is plan mode's, vision handles images, advisor gives a second opinion (slow first when unset), commit writes commit messages, tiny names sessions, and memory follows tiny. Every role but default can have a thinking level of its own, say medium for sessions and high for slow. The levels are minimal, low, medium, high, xhigh and max; an omp before 16.4.0 doesn't take max, so it gets xhigh. Image models set in magpie's Settings › Models › Images show up for omp's image role in its own Roles view, from omp 18.7.0.
+
+## enabledModels
+
+While `enabledModels` lists models, a new session is held to it: a default model outside the list never starts, and omp picks another from the list. So when you have one, magpie adds `magpie/**` to it, which also keeps all of magpie's models in omp's picker and Ctrl+P. The list is yours: magpie keeps its entries, order and comments, never makes one where there is none, and leaves entries scoped to folders as they are. The other roles aren't held to it.
+
+## Each model on its own API
+
+As with Pi, each model is asked on its provider's native API, and the gateway relays it as it is: OpenAI's Responses, Anthropic's Messages, Gemini's `/v1beta`. Over Chat, a Claude lost its thinking's signatures between tool turns, since Chat has no place for them. magpie also has omp send its session id and its own name in headers, so Usage counts it as omp and Record gateway conversations keeps its turns.
+
+## Profiles and WSL
+
+Each profile in `~/.omp/profiles/<name>/agent` is an omp of its own, shown on the Agents page as `omp#<name>` with its own config.yml and models.yml; the one `OMP_PROFILE` picks is the default row. omp in a WSL distro uses `~/.omp/agent` there; when it reaches Windows' address from behind NAT, the provider carries the key the gateway is shared on the network with.
+
+## Switching back
+
+Before magpie takes a role over it saves what the role had, and setting the role back puts that back as it was, a YAML list in the style it was written. magpie's provider stays in models.yml while any role, fallback chain or task agent is on one of its models, and goes once none is, with the `enabledModels` entry magpie added.
+
+```
+magpie omp default
+```
+
+## FAQ
+
+### Can omp run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for omp's default role on magpie's Agents page, then start a new session.
+
+### Can smol, slow and commit each have their own model?
+
+Yes. Each role can take its own magpie model, and every role but default its own thinking level.
+
+### Why did omp start on another model when default was set?
+
+While enabledModels lists models, the default model has to be in it. magpie adds magpie/** and removes it when switching back.
+
+### Does switching back restore my settings?
+
+Yes. Each role gets back what it had; once nothing is on magpie, its provider and its enabledModels entry go too.
+
+More agents on the same models: [Pi on any model](https://usemagpie.ai/docs/pi), [StepCode on any model](https://usemagpie.ai/docs/stepcode), [MothX on any model](https://usemagpie.ai/docs/mothx) and [Ante on any model](https://usemagpie.ai/docs/ante). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/ante
+
+# Ante on any model
+
+Ante is antigma.ai's coding agent in the terminal, the `ante` command. It ships its own providers, and takes more of yours in catalog.json, merged on top. magpie adds a provider named magpie there and has Ante start on it in settings.json, so Ante runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Ante
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Ante on the Agents page.** Pick a model via magpie.
+3. **Restart Ante.** Ante reads catalog.json once per process, so a running one needs a restart.
+
+```
+magpie ante deepseek/deepseek-v4-pro
+```
+
+## catalog.json
+
+The file is `~/.ante/catalog.json`, or `$ANTE_HOME/catalog.json` when `ANTE_HOME` is set. A key under providers is what `--provider` takes. magpie's entry points at the gateway's `/v1` on the OpenAiCompatible wire style, which is how Ante speaks Chat Completions, and the gateway takes every model on it. magpie's models are listed in `preferred_models`, Ante's model picker.
+
+```
+// ~/.ante/catalog.json
+{
+  "providers": {
+    "magpie": {
+      "display_name": "magpie",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "wire_style": "OpenAiCompatible",
+      "preferred_models": [
+        { "id": "deepseek/deepseek-v4-pro", "display_name": "…",
+          "context_limit": …, "max_tokens": …, "supported_efforts": […] }
+      ]
+    }
+  }
+}
+```
+
+The entry has no auth: the gateway listens on this computer and lets its requests in without a key, and Ante counts a provider with no auth block as signed in. A bearer env_key would mean putting a key into Ante's environment, which is yours to decide. An auth block, http_headers or extra_body you add inside magpie's entry stays, which is how a gateway shared on the network or reached from WSL gets its key. Your own providers and the models section are left alone. magpie doesn't write support_vision either: Ante takes a model as seeing images unless told otherwise, and false would have Ante drop your images before the gateway, which can describe them to a model that can't see. A routing group gets no thinking levels, since which member answers each turn, and what it takes, is the group's to decide.
+
+## settings.json
+
+Being in the catalog isn't enough. The provider a session starts on is `provider` and `model` in `~/.ante/settings.json`; with neither set, Ante takes the first signed-in provider in catalog order, and the ones it ships come first. So magpie sets those two as well, and saves what was there.
+
+```
+// ~/.ante/settings.json
+{ "provider": "magpie", "model": "deepseek/deepseek-v4-pro" }
+```
+
+## Restart Ante
+
+Ante reads the catalog once per process, so an edit needs a restart. It parses the file leniently: an entry it can't read is skipped with a notice and the rest still load, so a bad entry would cost you magpie's provider, not your own.
+
+## Switching back
+
+Switching back puts Ante's original provider and model back (or nothing, which leaves Ante to its own detection) and takes magpie's entry out of the catalog, with a providers map left empty and files magpie made. A provider you picked in Ante's own /providers while magpie was set up is your choice and stands.
+
+```
+magpie ante default
+```
+
+## FAQ
+
+### Can Ante run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for Ante on magpie's Agents page, then restart Ante.
+
+### Why didn't Ante use magpie's provider when it was in the catalog?
+
+Ante starts on provider and model in settings.json, else the first signed-in provider it ships. magpie sets those two as well.
+
+### Why is there no API key in magpie's entry?
+
+The gateway takes no key on this computer, and Ante counts a provider with no auth as signed in. An auth block you add stays.
+
+### Does switching back restore my settings?
+
+Yes. Your original provider and model go back and magpie's entry comes out; a choice you made in Ante since stands.
+
+More agents on the same models: [omp on any model](https://usemagpie.ai/docs/omp), [StepCode on any model](https://usemagpie.ai/docs/stepcode), [Avibe on any model](https://usemagpie.ai/docs/avibe) and [Aside on any model](https://usemagpie.ai/docs/aside). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/aside
+
+# Aside on any model
+
+Aside (the `aside` command) keeps settings, a model list and sign-in for each account. magpie adds a provider named magpie to the account's models.json and has Aside itself make it the default, so Aside runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription, and draws with magpie's image models too.
+
+## Set up Aside
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Aside on the Agents page.** Pick a default model via magpie, and a thinking level, categories and an image model if you want.
+3. **Carry on in Aside.** magpie has Aside change its own settings, then reads them back to check they took.
+
+```
+magpie aside deepseek/deepseek-v4-pro
+```
+
+## models.json
+
+Each Aside account has a folder, `~/.aside/u/<id>`, with settings.json, models.json and its sign-in. magpie writes `providers.magpie` in models.json in Pi's format: the gateway's `/v1` as baseUrl, magpie's own key for Aside, and magpie's models.
+
+```
+// ~/.aside/u//models.json
+{
+  "providers": {
+    "magpie": {
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "…",
+      "apiKey": "",
+      "models": [ { "id": "deepseek/deepseek-v4-pro", … } ]
+    }
+  }
+}
+```
+
+magpie changes only its own entry. When the magpie entry there has no key or another key, magpie won't write over it; one pointing at another gateway changes only when you reconnect on purpose.
+
+## Aside's own settings
+
+magpie doesn't edit settings.json for the default model and the like. It has Aside set them, through `aside repl --account <id> --host local`, then reads them back. When the value read back differs, magpie says so instead of calling it done. The default model is a provider and a modelId, and magpie's are the ones whose provider is magpie. The thinking level goes with the default model, offering only the levels that model takes.
+
+## Categories and the image model
+
+Aside's `modelCategories` are fast, standard, deep and visual, and each can take its own model; unset, they follow the default. `imageGenerationModel` is the model Aside draws with, and can be one of magpie's image models. One unticked in its provider's editor isn't offered, but one already picked keeps drawing.
+
+## More than one account
+
+`currentAccountId` in `~/.aside/accounts.json` is the account Aside is on. magpie sets up the account picked in magpie, else the one Aside has active, else u0 when neither can be read. Each account's settings, and what magpie remembers of them, stay with that account. Picking another account changes only which one magpie sets up; nothing in Aside changes.
+
+```
+magpie aside account u1
+```
+
+## Switching back
+
+Before each setting it changes, magpie saves what was there. Switching back restores only the settings magpie changed; the rest are left as they are.
+
+```
+magpie aside default
+```
+
+## FAQ
+
+### Can Aside run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie default model for Aside on magpie's Agents page; magpie has Aside apply it.
+
+### Can fast, standard, deep and visual each have their own model?
+
+Yes. Each category can take its own magpie model, and follows the default when unset.
+
+### Which account does magpie set up when Aside has several?
+
+The one Aside is on, unless you pick one in magpie, for example magpie aside account u1.
+
+### Does switching back restore my settings?
+
+Yes. magpie restores only the settings it changed, from the values it saved before.
+
+More agents on the same models: [Ante on any model](https://usemagpie.ai/docs/ante), [omp on any model](https://usemagpie.ai/docs/omp), [Pi on any model](https://usemagpie.ai/docs/pi) and [fx on any model](https://usemagpie.ai/docs/fx). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/fx
+
+# fx on any model
+
+fx (fx.sh, from Vercel Labs, not the JSON viewer of the same name) keeps its settings in `~/.fx/settings.json`: `provider` is the provider it talks to (gateway, codex, grok or one of your own), `models` each provider's model, and `providers` the providers of your own. magpie adds itself there as the provider magpie, so fx runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up fx
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for fx on the Agents page.** Pick one via magpie. magpie finds fx by its `~/.fx` folder, not the `fx` command, as the name is a common one.
+3. **Restart fx.** fx reads its settings at start-up.
+
+```
+magpie fx deepseek/deepseek-v4-pro
+```
+
+## settings.json
+
+With one of magpie's models picked, magpie sets `provider` to magpie and `models.magpie` to the model, such as `deepseek/deepseek-v4-pro`, and writes `providers.magpie`: the openai-chat-completions protocol, the gateway's `/v1` as base_url, and auth none, so no key. In fx the model reads `magpie/deepseek/deepseek-v4-pro`.
+
+```
+// ~/.fx/settings.json
+{
+  "provider": "magpie",
+  "models": { "magpie": "deepseek/deepseek-v4-pro" },
+  "providers": {
+    "magpie": {
+      "protocol": "openai-chat-completions",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "auth": { "type": "none" },
+      "tool_choice_mode": "send",
+      "model_metadata": {
+        "deepseek/deepseek-v4-pro": { "supports_tool_use": true, "supports_vision": …, "context_window": …, "max_output_tokens": … }
+      }
+    }
+  }
+}
+```
+
+fx sends no effort to a provider of your own, so there is no effort to pick. An fx in WSL is set up the same way, its base_url the gateway as that distro reaches it.
+
+## The model list
+
+fx's model picker lists `model_metadata`: magpie's catalog, each model marked as taking tools, with whether it takes images, its context window and its output limit. fx refuses an output limit that isn't below the context window, so magpie leaves such a limit out. fx takes at most 256 models and refuses the whole settings file past that, so magpie writes at most 256, the model in use first so it is never the one cut. When the catalog changes, magpie brings the list up to date while fx is connected.
+
+## What you set yourself
+
+A provider in fx can have a `reviewer_model`, the model its auto permission mode asks. magpie doesn't write one, and one you set stays. magpie writes `tool_choice_mode` send, and omit stays when you turn it to that. The protocol, address, auth and model_metadata are magpie's; auth is written whole, as fx refuses an env beside type none.
+
+## Restarting fx
+
+fx reads its settings at start-up. When fx is running as the model changes, magpie says to restart open fx sessions.
+
+## Switching back
+
+Picking one of fx's own models removes `providers.magpie` and `models.magpie`, and `provider` when it is magpie, so fx is back on the provider it talks to without magpie: Vercel's AI Gateway when none was set. The model goes into that provider's `models`; default removes it, leaving fx on its own default.
+
+```
+magpie fx default
+```
+
+## FAQ
+
+### Which fx is this?
+
+Vercel Labs' coding agent fx (fx.sh), with its settings in ~/.fx. The JSON viewer named fx is another program.
+
+### Does fx need an API key for magpie?
+
+No. magpie's provider in fx has auth none and talks to the gateway on this computer.
+
+### Why does fx list at most 256 of magpie's models?
+
+fx refuses the whole settings file when model_metadata holds more than 256, so magpie writes at most 256, the model in use first.
+
+### Which provider does fx use after switching back?
+
+The one it talks to without magpie; Vercel's AI Gateway when none was set.
+
+More agents on the same models: [Aside on any model](https://usemagpie.ai/docs/aside), [Ante on any model](https://usemagpie.ai/docs/ante), [omp on any model](https://usemagpie.ai/docs/omp) and [Grok App on any model](https://usemagpie.ai/docs/grok-app). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/grok-app
+
+# Grok App on any model
+
+Grok App (RongleCat/grok-app) is a desktop front end for the grok CLI, which it starts over ACP. Its own model list is Grok Build's official catalog only; a model of your choosing is a provider channel in its settings. magpie adds itself as a custom provider named magpie, so Grok App's model picker offers any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Grok App
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Grok App on the Agents page.** Pick one via magpie, and magpie writes its custom provider.
+3. **Press Use in Grok App.** Press Use on magpie in Grok App's Settings › Account; that is what moves the App onto magpie.
+
+```
+magpie grok-app deepseek/deepseek-v4-pro
+```
+
+## magpie's custom provider
+
+magpie writes `[model.magpie]` in `agent-home/config.toml` under the App's data folder, the way the App writes a channel itself: the gateway's `/v1` as base_url, magpie's own key for Grok App, chat completions. `app_models` is a JSON list of magpie's models, each with its context window, whether it takes images and its effort levels, so the custom providers in Settings list magpie and the model picker can offer those models and their efforts.
+
+```
+# /agent-home/config.toml
+[model.magpie]
+model = "deepseek/deepseek-v4-pro"
+base_url = "http://127.0.0.1:3425/v1"
+name = "magpie"
+api_key = ""
+api_backend = "chat_completions"
+app_provider_mode = "generic"
+app_models = "[…]"
+app_efforts = "[…]"
+supports_reasoning_effort = …
+context_window = …
+```
+
+The channel's context window, images and efforts follow the model picked. When the picked model is one magpie no longer has, the channel moves to the first in the list.
+
+## The route is yours to switch
+
+`[models] default` is the route the App starts on. magpie doesn't write it: making it magpie takes the App over, and the App then drops its own sign-in and the session no longer runs. So the route stays what the App had, and pressing Use in the App's settings is what switches it, the App's own choice. An older magpie set the route to magpie; this one puts the old route back once, on the next sync or connect, and a Use you press after that stays. A model you pick in the App's picker since is yours too, and stays through a sync.
+
+On magpie, the App starts the CLI with GROK_HOME at agent-home, its independent mode; its default shared mode uses `~/.grok`, Grok Build's home.
+
+## Models and efforts
+
+Grok Build has no effort none for a channel, so the levels are the model's others. The one the picker starts on is the default you marked for that model on the App's Providers page, while the model still has it, else medium, or the middle level without it.
+
+## The data folder
+
+magpie finds Grok App's data folder at `$GROK_APP_HOME` when it is set, else by system, the first that is there.
+
+```
+macOS    ~/Library/Application Support/com.grokapp.grok-app
+Windows  %APPDATA%\grokapp\grok-app\data
+Linux    $XDG_DATA_HOME/grok-app (~/.local/share/grok-app)
+         or ~/.grok-app; $GROK_APP_HOME when set
+```
+
+## Disconnecting
+
+Disconnecting takes `[model.magpie]` out. The route is touched only when it still names magpie, a route that doesn't run: magpie puts back the one it remembered, or clears it. Any other route is the App's and stays. Picking one of the App's own routes in magpie, such as the official Grok, also takes magpie's channel out and makes that the route.
+
+## FAQ
+
+### Can Grok App run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. magpie adds itself as a custom provider in Grok App, so its model picker offers magpie's models; press Use on magpie in its settings to switch.
+
+### Why is Grok App not on magpie after connecting?
+
+magpie leaves the App's route alone, as taking it over makes the App drop its own sign-in. Press Use on magpie in Grok App's Settings › Account.
+
+### Can I pick an effort in Grok App?
+
+Yes. Each magpie model comes with its own effort levels, starting on the one you marked, else medium.
+
+### Does disconnecting put Grok App's old route back?
+
+Yes, when the route still names magpie; any other route is left alone.
+
+More agents on the same models: [fx on any model](https://usemagpie.ai/docs/fx), [Aside on any model](https://usemagpie.ai/docs/aside), [Ante on any model](https://usemagpie.ai/docs/ante) and [Mister Morph on any model](https://usemagpie.ai/docs/mister-morph). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
+
+---
+
+Source: https://usemagpie.ai/docs/mister-morph
+
+# Mister Morph on any model
+
+Mister Morph (the `morph` command) keeps its settings in `~/.morph/config.yaml`, or the file `MISTER_MORPH_CONFIG` names: the main model under `llm.model`, asked of the vendor `llm.inference_provider` names at `llm.endpoint` with `llm.api_key`. It has no list of providers to add one to, so magpie takes those llm keys over, and Mister Morph runs on any model in magpie: DeepSeek, GLM, Kimi, Qwen, Claude or a ChatGPT subscription.
+
+## Set up Mister Morph
+
+1. **Add a provider in magpie.** Add an API key on the Providers page, or sign in to a subscription.
+2. **Pick a model for Mister Morph on the Agents page.** Pick one via magpie, and an effort if you want. magpie finds it by its `~/.morph` folder, not the `morph` command, which other tools are named too; the folder is made by its first run, `morph install` or the desktop app's setup.
+3. **Start a new task.** Mister Morph's Console uses the model for new tasks; restart open morph chats to use it there.
+
+```
+magpie morph deepseek/deepseek-v4-pro
+```
+
+## config.yaml
+
+magpie writes these keys under llm: `inference_provider` openai_response_compatible, OpenAI's Responses API, Mister Morph's own default, which the gateway serves for every vendor; `endpoint` the gateway's `/v1` (Mister Morph adds no second /v1 to a base ending in one); `api_key` magpie's key; and `model` the catalog id. In Mister Morph the model reads `magpie/deepseek/deepseek-v4-pro`. magpie also sets a User-Agent of mistermorph in `llm.headers`, as its requests otherwise carry the OpenAI SDK's, which tells them from no one's.
+
+```
+# ~/.morph/config.yaml (or $MISTER_MORPH_CONFIG)
+llm:
+  inference_provider: openai_response_compatible
+  endpoint: http://127.0.0.1:3425/v1
+  api_key: 
+  model: deepseek/deepseek-v4-pro
+  context_window_tokens: …
+  headers:
+    User-Agent: mistermorph
+  reasoning_effort: high
+```
+
+`llm.provider` is left as it is: Mister Morph derives it from inference_provider. A Mister Morph in WSL is set up the same way, at `~/.morph/config.yaml`, as MISTER_MORPH_CONFIG isn't read there.
+
+## The context window
+
+Mister Morph knows a model's context window only from a list of its own, by the id after its last slash. So magpie writes the window it knows in `llm.context_window_tokens`, and removes the key when it knows none.
+
+## Effort
+
+The effort goes in `llm.reasoning_effort`: none, minimal, low, medium, high, xhigh or max. Unset, Mister Morph sends none.
+
+```
+magpie morph effort high
+```
+
+## Profiles and routes
+
+`llm.profiles` and `llm.routes` are yours, and magpie leaves them alone. A route that sends the main loop to another profile still does.
+
+## Switching back
+
+Before it first takes llm over, magpie saves what you had under those keys. Switching back puts them back, and removes the ones you didn't have; when the User-Agent was alone in llm.headers, headers goes too. Picking one of Mister Morph's own models restores them the same way, then sets `llm.model` to it.
+
+```
+magpie morph default
+```
+
+## FAQ
+
+### Can Mister Morph run on DeepSeek, GLM or a ChatGPT subscription?
+
+Yes. Pick a via-magpie model for Mister Morph on magpie's Agents page, and magpie sets the llm keys in config.yaml.
+
+### Which API does Mister Morph use through magpie?
+
+OpenAI's Responses API (openai_response_compatible), Mister Morph's default, which magpie's gateway serves for every vendor.
+
+### Why does magpie write context_window_tokens?
+
+Mister Morph looks a window up only in its own list, which doesn't have magpie's model ids, so magpie gives it the window it knows.
+
+### Are my llm.profiles and llm.routes changed?
+
+No. They are yours; magpie changes only its keys under llm and puts them back when you switch back.
+
+More agents on the same models: [Grok App on any model](https://usemagpie.ai/docs/grok-app), [fx on any model](https://usemagpie.ai/docs/fx) and [Aside on any model](https://usemagpie.ai/docs/aside). Something fails? See [Fixing common errors](https://usemagpie.ai/docs/troubleshooting), or ask on [Discord](https://discord.gg/vGSnD3ZKQF).
 
 ---
 
@@ -7284,6 +8397,23 @@ steps:
 ```
 
 The key is issued under the rule’s gateway key and held to it like any other issued key, lives no longer than the rule says, and is named after the repository, branch and run. A token from another repository or branch, an expired one, or one already traded gets `401` and why. The route answers another computer only while magpie is shared, and refused tokens count against the failed sign-ins it allows. Without a rule nothing is traded.
+
+## Management API
+
+Providers, accounts, gateway keys and account groups can be managed with no hand-edited file, by a key you allow to. Allow it from the command line (not through the API: a key can't give another more than it has):
+
+```
+magpie gateway-key add automation
+magpie gateway-key admin <id> local   # this computer only
+magpie gateway-key admin <id> any     # also from other computers
+curl -s http://127.0.0.1:3425/v1/magpie/admin/providers -H "Authorization: Bearer $KEY"
+curl -s -X POST http://127.0.0.1:3425/v1/magpie/admin/gateway-keys/add-key \
+  -H "Authorization: Bearer $KEY" -d '{"name":"ci"}'
+```
+
+It answers the same as the app’s own pages do, under `/v1/magpie/admin/`: `GET providers`, `POST provider/{save,delete,on,off,name,…}`, `POST keys/…` (a provider’s keys), `GET`/`POST gateway-keys[/{add-key,rename-key,limit-key,models-key,remove-key,…}]`, `GET`/`POST account-groups[/…]`, and `POST signin` with `{"agent":…}`, which answers the vendor’s page and the code to type there, never a password; open it on a computer with a browser. A saved key and a gateway key’s secret are never told again, and what changes this computer’s apps is not served.
+
+A key that is read-only, the extension’s, issued or short-lived, or the sharing key, can’t have it. A web page can’t call it, with a key or without (any request with `Origin` or `Sec-Fetch-*` is refused), and nor can a request under another name for this computer. Shared over the network, only a key set to `any` gets in.
 
 ## Stats API
 

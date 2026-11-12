@@ -155,6 +155,9 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     assert.match(await row.textContent(), /Sign in again/);
     assert.match(await row.textContent(), /40%/);
 
+    // Finish lazy Settings reads before replacing their document: WebKit
+    // reports their navigation cancellation through pageerror.
+    await page.waitForLoadState("networkidle");
     await page.goto("http://magpie.test/?view=usage");
     const card = page.locator('#subscriptionUsage .subscription-card[data-provider="zcode"]');
     await card.locator(".zcode-observation").waitFor();
@@ -165,6 +168,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     assert.match(await card.textContent(), /Updated/);
 
     mode = "mcp";
+    await page.waitForLoadState("networkidle");
     await page.goto("http://magpie.test/?mode=panel");
     await page.locator('#ptabs [data-ptab="usage"]').click();
     const panel = page.locator(".pq-card", { hasText: user });
@@ -177,6 +181,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     assert.equal(await panel.locator(".pq-ring").count(), 0);
 
     mode = "full";
+    await page.waitForLoadState("networkidle");
     await page.reload();
     await page.locator('#ptabs [data-ptab="usage"]').click();
     const failed = page.locator(".pq-card", { hasText: user });
@@ -185,6 +190,7 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     assert.equal(await failed.locator(".pq-ring, .zcode-observation").count(), 0);
 
     mode = "remote";
+    await page.waitForLoadState("networkidle");
     await page.reload();
     await page.locator('#ptabs [data-ptab="usage"]').click();
     const remote = page.locator(".pq-card", { hasText: user });

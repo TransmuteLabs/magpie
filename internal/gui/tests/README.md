@@ -9,6 +9,13 @@ API fixtures; no vendor or live account is contacted.
 Run only this file with
 `make test-ui UI_TESTS=internal/gui/tests/zcode-reset.test.cjs UI_TEST_CONCURRENCY=1`.
 
+`day-start.test.cjs` records its no-scroll baseline only after the settings
+reads and real wheel input have settled, using `watchSettingsReads`,
+`settingsDrawn` and `wheelTo` from `reader.cjs`. Before replacing a document,
+`zcode-reset.test.cjs` lets its lazy Settings reads finish: WebKit otherwise
+reports their navigation cancellation through `pageerror`. Neither fixture
+relaxes its scroll, persistence, quota-data or error assertions.
+
 `agent-details-ready.test.cjs` holds the first settings read and the lazy
 Long conversations module on the main window's Agents → Details path. It
 checks a complete first and warm opening without a final height jump in all

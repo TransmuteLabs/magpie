@@ -75,10 +75,15 @@ const (
 	// cache_control's ttl "1h" (cache_creation's ephemeral_1h_input_tokens)
 	// without it being read, as Claude Code asks of a subscription (#2302)
 	cacheHour = time.Hour
-	// stickKeep is how long a conversation's last answerer is remembered.
-	stickKeep = 24 * time.Hour
+	// stickKeep is how long a conversation's last answerer is remembered,
+	// counted from its last answer: a binding in use is renewed by every
+	// answer. A long task is often picked up again after a weekend or a
+	// week, and a binding gone by then moves it to another provider, which
+	// refuses the reasoning the first sealed (invalid_encrypted_content;
+	// npikng161274 on X).
+	stickKeep = 30 * 24 * time.Hour
 	// sticksKept is how many conversations, the latest, are kept on disk.
-	sticksKept = 512
+	sticksKept = 4096
 )
 
 // coldAfter is how long p's vendor keeps a prompt cached without it being
@@ -571,7 +576,7 @@ func affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http
 	if had && time.Since(st.at) > stickKeep {
 		had = false
 	}
-	if had && mode == "" && !a.Within && st.at.Before(provider.ReorderedAt()) {
+	if had && mode == "" && !a.Within && reorderedSince(st, cs) {
 		// the user put the accounts in another order after this
 		// conversation was last answered: the order they chose counts at
 		// its next turn, whatever the old answerer cached (Richyisaflower
@@ -1558,4 +1563,16 @@ func keptAgain(aff *Affinity, c candidate, hw *holdWriter, asked bool) (time.Dur
 // cases of affine read the same.
 func cacheHolds(st stick, p provider.Provider) bool {
 	return st.cacheRead+st.cacheWrite >= cacheWorth && (time.Since(st.at) <= coldAfter(p) || st.hour.warm(time.Now()))
+}
+
+// reorderedSince: the user changed the order of the accounts of the
+// provider that last answered st after it did. Only that provider's
+// reorder counts: one of another provider's moves no conversation here.
+func reorderedSince(st stick, cs []candidate) bool {
+	for _, c := range cs {
+		if c.who() == st.who {
+			return st.at.Before(provider.ReorderedAt(c.p.ID))
+		}
+	}
+	return false
 }

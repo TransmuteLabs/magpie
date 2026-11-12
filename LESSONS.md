@@ -357,6 +357,19 @@ could match the same key.**
   it once with TZ=UTC and once in a far zone.
 - Seen 1× (2026-10-15).
 
+**A test never swaps time.Local: the code it tests takes its zone from a
+variable of its own.**
+- 4028687b8 (11-12) set time.Local to +08:00 in
+  TestMemorySearchDatesInLocalTime. Every time.Now reads time.Local, so
+  the swap raced an http conn goroutine an earlier test had left
+  finishing, and main's Test run at 727e23637 went red on macOS -race.
+  af212c945 gave memoryStamp a memoryZone variable and moved the
+  saved-zone check into memory, where the clock is already a variable.
+- #2949 (TestHeldClock) and #4360 (testenv.Zone's cleanup) are the same
+  race and still open. testenv.Zone waits for its own stand-ins only, not
+  for whatever another test left running.
+- Seen 1× (2026-11-12).
+
 **Work added to a path every request or poll takes is costed at that
 rate and at its largest input.**
 - 644f4316f's Codex model/effort consumption was read again on every 15s
@@ -829,9 +842,44 @@ it doesn't.**
   (quotatable.js and its test deleted, its app.js, app.css and i18n
   hunks reverted) and 88d2962e0's 16-byte sessions hashes (digest.go
   deleted). Both were gone from main until c14fa0ce9 put them back.
+- The same day, three hours later: d31988c95 ("the Mac's plain title
+  bar is done as the main window is first shown") also reversed
+  1648fcfe2 and 95eab9a66, Mistral's prompt_cache_key: gateway.go's
+  withMistralCacheKey, mistral_cache_key_test.go and two
+  TestOwnCacheKey rows, none of them in its body. 2858566a1 put them
+  back. A GUI change has no reason to touch internal/gateway.
 - Before pushing, read `git show --stat HEAD` after the rebase. A deleted
   file or a hunk in a package the goal never names means the tree is
   stale: rebuild the change on origin/main, don't push the old tree.
+- Seen 1× (2026-11-12).
+
+**State added for one provider or one feature is keyed by it, not
+held process-wide.**
+- b70563ec6 kept one "accounts reordered at" stamp for the whole
+  gateway. Reordering Claude's accounts dropped every other provider's
+  conversation stick, so a Codex conversation lost its account and its
+  prompt cache on the next turn. In tests, any earlier reorder made
+  three cache tests red in package runs (#6249 and #6262, filed twice
+  for one cause). 04e38e604 keys the stamp by provider and has tests
+  forget it.
+- A test of such a value resets it in `t.Cleanup`, and a case where
+  another provider changes it shows the scope is right.
+- A process-local value set by the CLI never reaches the running
+  gateway (#6265).
+- Seen 1× (2026-11-12).
+
+**A commit saved early stays local until it is finished; "wip" never
+reaches main.**
+- f1e6705c5 (11-12 12:10), subject "wip" and no body, pushed the
+  turn-effort and thinking-summary code to main. Its test change came
+  35 minutes later in 9d47b441e, a one-line commit that carries the
+  whole record, and in between
+  TestClaudeSubscriptionPromptKeepsForeignHarnessOutOfSystem was red on
+  main (the CLI's --settings gained showThinkingSummaries). Its CI run
+  was cancelled, so nothing showed it.
+- Committing at once (the machine reboots) is right; pushing it isn't.
+  Before a push, `git log origin/main..HEAD --format=%s` names no
+  "wip", and the change and its tests go out as one commit.
 - Seen 1× (2026-11-12).
 
 **A squash merge's message is written, not GitHub's default.** Give

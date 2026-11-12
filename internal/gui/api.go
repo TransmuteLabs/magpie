@@ -186,6 +186,9 @@ type fieldJSON struct {
 	Label   string         `json:"label"`
 	Value   string         `json:"value"`
 	Options []agent.Option `json:"options"`
+	// List is, in place of Options, which of the state's OptionLists the
+	// field offers, from 1 (shareOptions); 0 when Options is its own
+	List int `json:"list,omitempty"`
 }
 
 type agentJSON struct {
@@ -336,6 +339,13 @@ type stateJSON struct {
 	// GatewayHeld: the program that has the gateway's port when this magpie
 	// couldn't listen on it, as far as it could be read (gateway.PortHeld)
 	GatewayHeld *gateway.PortHeld `json:"gatewayHeld,omitempty"`
+	// OptionLists are the fields' option lists, each once, that a field's
+	// List names (shareOptions), as indexes into Options, where each option
+	// is once: with real accounts 13 agents' model pickers offered the same
+	// 51KB catalog, 650KB of a 690KB state, beside a few models of their
+	// own. Last of the fields: writeStateJSON writes them after the rest.
+	OptionLists [][]int32       `json:"optionLists,omitempty"`
+	Options     []*agent.Option `json:"options,omitempty"`
 }
 
 // unlistedJSON is a model of a provider kept for routing groups, and the
@@ -1142,6 +1152,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			if hc := systemHourCycle(); hc != "" {
 				boot["hourCycle"] = hc
 			}
+			if loc := systemLocale(); loc != "" {
+				boot["locale"] = loc
+			}
 		}
 		if s.Colorblind {
 			boot["colorblind"] = true
@@ -1607,7 +1620,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// is in (yi_time)
 		if (!slices.Equal(settings.Load().TrayUsages, cur.TrayUsages) || in.TrayUsageEvery != cur.TrayUsageEvery ||
 			in.TrayNoLogos != cur.TrayNoLogos || in.TrayNoBird != cur.TrayNoBird || in.TrayNoNumber != cur.TrayNoNumber || in.TrayPace != cur.TrayPace ||
-			in.TrayNoCost != cur.TrayNoCost || !maps.EqualFunc(in.TrayWindows, cur.TrayWindows, slices.Equal) || in.Lang != cur.Lang) && onTrayUsage != nil {
+			in.TrayNoCost != cur.TrayNoCost || !maps.EqualFunc(in.TrayWindows, cur.TrayWindows, slices.Equal) || in.Lang != cur.Lang || in.ChineseUnits != cur.ChineseUnits) && onTrayUsage != nil {
 			onTrayUsage()
 		}
 		// an alert turned on or moved is looked at now, the Mac asked for its
@@ -1766,6 +1779,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		s := settings.Load()
 		s.UpdateSkip = strings.TrimSpace(in.Version)
+		if s.UpdateSkip != "" {
+			updates.quietAgain() // a dismissal holds for the quiet, not only the next release
+		}
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
 			return
