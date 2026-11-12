@@ -1247,3 +1247,5 @@ still follows the existing Not set up folding rules. The dialog explains that
 restoring visibility does not pin an unconfigured agent into the main list.
 See `agent-bulk-visibility.test.cjs` for persistence, partial selection, failed
 saves, narrow layouts and all five languages in Chromium and WebKit.
+
+- A gateway port another program holds names that program (pluoki on X). `gateway.NoteHeld` reads the holder with `proc.PortHolder` (lsof on the Mac, /proc on Linux, Get-NetTCPConnection on Windows) and, when the daemon is root's and unreadable, falls back to `tailscale serve status --json` for the port. Tailscale's line carries `tailscale serve --https=<other> http://127.0.0.1:<port>`. The sentence (`PortHeld.Sentence`) goes to the `magpie serve` standby line and bind error, the app's log, `gatewayHeld` in `/api/state` (Gateway page) and Start's `taken` answer. A holder that can't be read says nothing, and the old wording stands. Nothing is killed or touched. See `TestWhoHolds`, `TestListenErrorNamesTheHolder`, `TestPortHolderNamesTheProgram` and `gateway-port-holder.test.cjs`.
