@@ -49,11 +49,12 @@ func keepReading(ctx context.Context, q SubscriptionQuota, user string) Subscrip
 	if user == "" {
 		user = q.User
 	}
-	key := q.Provider + "/" + strings.ToLower(user)
+	key := quotaLastKey(q, user)
 	quotaReadBarriers.Lock()
 	defer quotaReadBarriers.Unlock()
 	if barrier := quotaReadBarriers.m[key]; barrier != 0 && q.readSeq < barrier {
 		q.Windows, q.Balance, q.AsOf = nil, "", nil
+		q.Partial, q.Observations, q.ReadAt = false, nil, nil
 		q.Error = "quota read started before reset completion; refresh required"
 		return q
 	}
@@ -64,8 +65,11 @@ func keepReading(ctx context.Context, q SubscriptionQuota, user string) Subscrip
 // the next one to start after a reset completion was observed. Waiters on
 // the old read follow the new generation rather than returning its result.
 func resetQuotaReadBarrier(l Login) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
-	card := loginProvider(l) + "/" + strings.ToLower(l.User)
+	key := loginReadingKey(l)
+	card := loginLastKey(l)
+	if key == "" || card == "" {
+		return
+	}
 	quotaReadBarriers.Lock()
 	if quotaReadBarriers.m == nil {
 		quotaReadBarriers.m = map[string]uint64{}
@@ -124,7 +128,10 @@ func refreshLogins(ctx context.Context, ls []Login) []Login {
 // forgetLoginReading has l's next reading asked for, keeping what it was
 // for a hiccup (as AskUsage does for every account).
 func forgetLoginReading(l Login) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingKey(l)
+	if key == "" {
+		return
+	}
 	c := &loginUsageCache
 	c.Lock()
 	if e, ok := c.m[key]; ok {
@@ -280,7 +287,8 @@ func mergeCards(kept, got []SubscriptionQuota) []SubscriptionQuota {
 	out := slices.Clone(kept)
 	for _, g := range got {
 		i := slices.IndexFunc(out, func(q SubscriptionQuota) bool {
-			return q.Provider == g.Provider && strings.EqualFold(q.User, g.User)
+			return q.Provider == g.Provider && strings.EqualFold(q.User, g.User) &&
+				q.AccountIdentity == g.AccountIdentity && q.AccountGeneration == g.AccountGeneration
 		})
 		if i < 0 {
 			out = append(out, g)

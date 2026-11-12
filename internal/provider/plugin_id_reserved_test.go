@@ -47,7 +47,7 @@ func TestPluginIDReservedSignedOut(t *testing.T) {
 			t.Fatalf("a provider was renamed onto %s", id)
 		}
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := plugin.Providers(ctx); err != nil {

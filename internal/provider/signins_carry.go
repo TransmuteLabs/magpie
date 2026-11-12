@@ -103,10 +103,36 @@ func loginRecID(l savedLogin) string {
 }
 
 func pluginRecID(key string, raw json.RawMessage) string {
+	if plugin.ProviderOf(key) == "zcode" {
+		if scope, ok := plugin.AuthZCodeScope(raw); ok {
+			return "plugin|zcode|selection|" + scope
+		}
+		// An old or incomplete native record is not identified by its
+		// display name or by a slot that can mean something else elsewhere.
+		// Only an identical credential record can match it.
+		return "plugin|zcode|unverified|" + credHash(raw)
+	}
 	if who := plugin.AuthWho(raw); who != "" {
 		return "plugin|" + plugin.ProviderOf(key) + "|" + strings.ToLower(who)
 	}
 	return "plugin|" + key
+}
+
+// carriedPluginKey keeps two independently carried records when both
+// computers happened to use the same local slot.
+func carriedPluginKey(entries map[string]json.RawMessage, preferred, identity string) string {
+	if _, exists := entries[preferred]; !exists {
+		return preferred
+	}
+	sum := sha256.Sum256([]byte(identity))
+	base := plugin.ProviderOf(preferred) + "#" + hex.EncodeToString(sum[:8])
+	key := base
+	for n := 2; ; n++ {
+		if _, exists := entries[key]; !exists {
+			return key
+		}
+		key = fmt.Sprintf("%s-%d", base, n)
+	}
 }
 
 func credHash(b []byte) string {
@@ -396,7 +422,7 @@ func MergeSignIns(local, remote *SignIns, prev map[string]string) (*SignIns, Sig
 		if out.Plugins == nil {
 			out.Plugins = map[string]json.RawMessage{}
 		}
-		out.Plugins[r.key] = r.raw
+		out.Plugins[carriedPluginKey(out.Plugins, r.key, r.id)] = r.raw
 	}
 	switch {
 	case local != nil && local.Codex != "":
@@ -598,15 +624,12 @@ func applyPlugins(put []signInRec, gone map[string]bool, seen map[string]string,
 				continue
 			}
 			ks := ids[r.id]
-			if raw, ok := m[r.key]; ok && !slices.Contains(ks, r.key) && plugin.AuthWho(raw) == "" {
+			if raw, ok := m[r.key]; ok && plugin.ProviderOf(r.key) != "zcode" && !slices.Contains(ks, r.key) && plugin.AuthWho(raw) == "" {
 				ks = append(ks, r.key) // the same key, whose sign-in doesn't say who
 			}
 			switch len(ks) {
 			case 0:
-				key := r.key
-				if _, taken := m[key]; taken {
-					key = plugin.ProviderOf(r.key) + "#" + r.hash[:8]
-				}
+				key := carriedPluginKey(m, r.key, r.id)
 				m[key] = r.raw
 				res.Added++
 				changed = true

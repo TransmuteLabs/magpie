@@ -34,7 +34,7 @@ func TestPluginIDBesideCustomProvider(t *testing.T) {
 	if got := PluginID("fakeco"); got != "fakeco-plugin" {
 		t.Fatalf("PluginID(fakeco) = %s", got)
 	}
-	id, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456")
+	id, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456", SignInOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

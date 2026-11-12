@@ -35,7 +35,7 @@ func pluginCheckinSandbox(t *testing.T, keys ...string) string {
 		t.Fatal(err)
 	}
 	for _, k := range keys {
-		if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, k); err != nil {
+		if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, k, SignInOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

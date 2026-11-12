@@ -77,13 +77,15 @@ func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
 // ids (provider/model) for a key's plan or balance, the agent for a
 // subscription.
 type Quota struct {
-	Provider string      `json:"provider"`
-	Name     string      `json:"name"`
-	Kind     string      `json:"kind"` // subscription, plan (bought with a key) or balance (a key's money)
-	Plan     string      `json:"plan,omitempty"`
-	User     string      `json:"user,omitempty"`
-	Windows  []QuotaSpan `json:"windows"`
-	Balance  string      `json:"balance,omitempty"`
+	Provider          string      `json:"provider"`
+	Name              string      `json:"name"`
+	Kind              string      `json:"kind"` // subscription, plan (bought with a key) or balance (a key's money)
+	Plan              string      `json:"plan,omitempty"`
+	User              string      `json:"user,omitempty"`
+	AccountIdentity   string      `json:"accountIdentity,omitempty"`
+	AccountGeneration string      `json:"accountGeneration,omitempty"`
+	Windows           []QuotaSpan `json:"windows"`
+	Balance           string      `json:"balance,omitempty"`
 	// BalanceSplit is what the Balance is made of, when the vendor tells
 	// it (SubscriptionQuota's)
 	BalanceSplit []BalancePart `json:"balanceSplit,omitempty"`
@@ -91,6 +93,7 @@ type Quota struct {
 	// account's too (SubscriptionQuota's)
 	SharedBalance string     `json:"sharedBalance,omitempty"`
 	Error         string     `json:"error,omitempty"`
+	Partial       bool       `json:"partial,omitempty"`
 	AsOf          *time.Time `json:"asOf,omitempty"` // the cached reading's time, nil for a new one
 	// ReadDeferred says no request was made this time, rather than one failed.
 	ReadDeferred bool `json:"readDeferred,omitempty"`
@@ -205,8 +208,8 @@ func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quo
 		qs   []SubscriptionQuota
 	}{{"subscription", subs}, {"plan", plans}, {"balance", balances}} {
 		for _, q := range g.qs {
-			r := Quota{Provider: q.Provider, Name: q.Name, Kind: g.kind, Plan: q.Plan, User: q.User, AsOf: q.AsOf, ReadAt: q.ReadAt, ReadDeferred: q.ReadDeferred,
-				Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ZCodeReset: q.ZCodeReset, Observations: q.Observations, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat}
+			r := Quota{Provider: q.Provider, Name: q.Name, Kind: g.kind, Plan: q.Plan, User: q.User, AccountIdentity: q.AccountIdentity, AccountGeneration: q.AccountGeneration, AsOf: q.AsOf, ReadAt: q.ReadAt, ReadDeferred: q.ReadDeferred,
+				Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Partial: q.Partial, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ZCodeReset: q.ZCodeReset, Observations: q.Observations, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat}
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range PooledWindows(q.Windows) {

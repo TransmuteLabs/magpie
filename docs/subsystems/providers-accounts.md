@@ -133,6 +133,67 @@ go test -tags nogui ./internal/provider ./internal/gateway -run TestZhipuProtoco
 
 These fixtures do not prove acceptance by a live vendor account.
 
+## Account identity and checked updates
+
+A plugin account's label is not its identity. Intrinsic ZCode policy
+ownership is bound to the saved slot and validated native selection scope;
+quota caches, pending reads and last-good entries also require the current
+login generation. Historical quota/alert identity can survive a new epoch
+of that same selection, but a removed account's label cannot lend its
+allowance, history or historical window holds to another selection.
+Portable sign-in carry validates scope rather than merging equal display
+names or assuming two machines' slot names identify the same account.
+
+Native label/policy migration persists a `PluginRename` intent before
+moving references. It stages checked policy/tray copies while retaining
+their sources, publishes the new label/scope, then removes only source
+values that still match and clears the intent. A pending account cannot
+route or perform native controls and is visibly unavailable in the picker.
+Unreadable sources and destination conflicts retain the obligation rather
+than relying on an unchecked rollback. This native migration is not imposed
+on unrelated plugins without its durable identity contract.
+
+All normal provider read/modify/store writes carry a private exact-source
+baseline. The `providers.json.lock` owner checks that baseline under the
+lock before last-good and atomic publication; a concurrent changed or
+created/deleted source is rejected, not overwritten by a stale snapshot.
+Native policy staging uses a strict actual-source read. The baseline is
+not a public JSON field or a replacement API. Lock/source errors leave a
+pending native migration unresolved. Manual or older writers ignoring the
+lock are outside its mutual-exclusion guarantee.
+
+Exact-slot API-key re-login carries the selected user/proxy and compares
+the captured auth before replacement; ordinary add remains separate.
+Native account RPC and trusted MCP credential acquisition use that
+account's saved proxy, independently of the MCP server's own transport.
+
+## Partial and retained quota readings
+
+`Partial`/`partial` means the supplied windows or observations are a newly
+read authoritative subset while `Error` names another failed source. It
+does not make the whole account healthy. Host normalization, `plugin.Usage`,
+`SubscriptionQuota`, public `Quota` and CLI account JSON preserve the flag,
+error, observations and reading provenance together.
+
+`ReadAt` dates a new partial once, including observation-only data; cached
+delivery does not create another sample. `AsOf`, `ReadDeferred` and
+unverified identities cannot create fresh history, alerts or reminders.
+Partial processing touches only observed windows, preserves absent-source
+alert marks even after their normal retention age, and does not grant
+freshness to absent balance or reset fields. A partial neither overwrites
+the prior complete last-good record nor disappears behind it. Display and
+history use the attempted reading while routing retains its separate
+conservative result. A pre-reset read invalidated by the completion barrier
+also loses its dependent partial flag, observations and reading time.
+
+Remote cache namespaces include the actual owner endpoint and gateway key.
+Stable account/history namespaces include the endpoint, but not the
+rotatable gateway key. After any provider's failed remote read, a retained
+clone keeps the oldest known reading time instead of looking fresh at the
+latest attempt. Held-key, empty-success and late-response rules still apply.
+Source-qualified ZCode reset inventory survives remote projection as
+read-only data, independently of mutation permission.
+
 ## ZCode account controls
 
 The intrinsic ZCode provider exposes its account service separately from
@@ -152,15 +213,19 @@ cannot manufacture financial permission. HTTP-success business failures,
 terminal concurrency refusals, cancellation and streamed errors retain
 their meaning; accepted stream output is never replayed.
 
-An own-app account with a saved family and UID borrows the app's display
-name only when both match. Legacy unbound own slots, saved before those
-identity fields existed, retain the app-following display name so hidden
-slots and same-name sign-ins stay distinct. A partial identity is not
-treated as unbound. Display names never establish the account scope or
-authorize an operation.
+An own-app account borrows the app's display name only after the active
+family, UID, kind and full Team selection positively match. China login
+uses only the linked BigModel identity belonging to that current ZCode
+user. Ambiguous families and unbound legacy identities do not borrow a
+different profile's label or policy. Display names never establish the
+account scope or authorize an operation.
 
 **ZCode account…** on a Providers account, Usage card or tray card opens
 the same ZCode account sheet, including when the Usage plugin is off.
+Local and directly connected remote owners retain their scoped controls.
+Deeper remote cards keep readable inventory but show a disabled account
+entry with a localized direct-owner explanation, not a request that can
+never succeed or an implicit delegation.
 The sheet lists accounts through `GET /api/usage/zcode-accounts` and sends
 operations through `POST /api/usage/zcode-account`.
 It uses the shared editor, fields, menus, segmented controls and action

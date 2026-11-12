@@ -3,12 +3,15 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // zeroedAuth is plugin-auth.json as #1505's Windows crash left it: its full
@@ -85,22 +88,54 @@ func TestZeroedPluginAuthReadFromBackup(t *testing.T) {
 	}
 }
 
-// With no backup, a zeroed plugin-auth.json is unknown, never none: a
-// sign-out doesn't write none over it, magpie's or the host's.
+// With no backup, a zeroed plugin-auth.json is unknown, never none.
+// Background auth.set and sign-out fail without touching it; an explicit
+// import can seed one sign-in after preserving the damaged bytes.
 func TestZeroedPluginAuthWithoutBackupNotWrittenOver(t *testing.T) {
 	sandbox(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	addRenew(t, ctx)
+	status := filepath.Join(t.TempDir(), "background-auth")
+	t.Setenv("AUTH_UNKNOWN_STATUS", status)
+	fixture := filepath.Join(t.TempDir(), "index.js")
+	source := `import fs from "node:fs"
+export const BackgroundAuth = async ({ client }) => ({
+  config: async () => {
+    try {
+      await client.auth.set({ path: { id: "background" }, body: { type: "api", key: "must-not-save" } })
+      fs.writeFileSync(process.env.AUTH_UNKNOWN_STATUS, "saved")
+    } catch {
+      fs.writeFileSync(process.env.AUTH_UNKNOWN_STATUS, "refused")
+    }
+  },
+})
+`
+	if err := os.WriteFile(fixture, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Add(ctx, fixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(AuthPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AuthPath(), zeroedAuth, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := get(ctx); err != nil {
 		t.Fatal(err)
 	}
-	os.MkdirAll(filepath.Dir(AuthPath()), 0o700)
-	os.WriteFile(AuthPath(), zeroedAuth, 0o600)
+	if got, err := os.ReadFile(status); err != nil || string(got) != "refused" {
+		t.Fatalf("background auth.set on unknown store = %q, %v", got, err)
+	}
+	if got, _ := os.ReadFile(AuthPath()); !bytes.Equal(got, zeroedAuth) {
+		t.Fatal("background auth.set overwrote the unreadable store")
+	}
 	// one account named, and every one of the provider's
 	for _, account := range []string{"renewco#a@renew", ""} {
-		if err := SignOut(ctx, "renewco", account); err != nil {
-			t.Fatal(err)
+		if err := SignOut(ctx, "renewco", account); err == nil {
+			t.Fatalf("the host's sign-out of %q reported success on an unreadable store", account)
 		}
 		if got, _ := os.ReadFile(AuthPath()); !bytes.Equal(got, zeroedAuth) {
 			t.Fatalf("the host's sign-out of %q wrote %q over sign-ins that don't read", account, got)
@@ -113,43 +148,87 @@ func TestZeroedPluginAuthWithoutBackupNotWrittenOver(t *testing.T) {
 	if got, _ := os.ReadFile(AuthPath()); !bytes.Equal(got, zeroedAuth) {
 		t.Fatalf("magpie's sign-out wrote %q over sign-ins that don't read", got)
 	}
+	if kept, _ := filepath.Glob(AuthPath() + ".bad-*"); len(kept) != 0 {
+		t.Fatalf("a refused background change unexpectedly kept bad copies: %v", kept)
+	}
 	// a sign-in added writes, the zeroed file kept aside first
 	k := importRenew(t, ctx, "new@renew")
-	if authFile(t)[k] == nil {
-		t.Fatal("the sign-in added wasn't kept")
+	all := authFile(t)
+	if all[k] == nil || all["background"] != nil || len(all) != 1 {
+		t.Fatalf("explicit import did not seed only its own sign-in: %v", all)
 	}
-	if kept, _ := filepath.Glob(AuthPath() + ".bad-*"); len(kept) != 1 {
+	kept, _ := filepath.Glob(AuthPath() + ".bad-*")
+	if len(kept) != 1 {
 		t.Fatalf("the zeroed file not kept aside: %v", kept)
+	}
+	if got, _ := os.ReadFile(kept[0]); !bytes.Equal(got, zeroedAuth) {
+		t.Fatalf("the preserved bad generation has %d bytes", len(got))
 	}
 }
 
-// The host flushes plugin-auth.json before renaming it over the old: a
-// flush that fails leaves the sign-ins there as they were.
+func TestZeroedPluginAuthExplicitAPIKeySeeds(t *testing.T) {
+	sandbox(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("testdata/fake/index.js")
+	if _, err := Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(AuthPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AuthPath(), zeroedAuth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := APIKey(ctx, "fakeco", 0, nil, "fresh-key", NewAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := authFile(t)[saved.Account]; a["key"] != "fresh-key" {
+		t.Fatalf("explicit sign-in was not saved: %v", a)
+	}
+	kept, _ := filepath.Glob(AuthPath() + ".bad-*")
+	if len(kept) != 1 {
+		t.Fatalf("unreadable store not preserved: %v", kept)
+	}
+	if got, _ := os.ReadFile(kept[0]); !bytes.Equal(got, zeroedAuth) {
+		t.Fatalf("the preserved bad generation has %d bytes", len(got))
+	}
+}
+
+// Core flushes a host's plugin-auth.json proposal before renaming it over
+// the old file: a flush that fails leaves the sign-ins there as they were.
 func TestPluginAuthSyncedBeforeRename(t *testing.T) {
 	sandbox(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	flag := filepath.Join(t.TempDir(), "fail")
-	t.Setenv("FSYNC_FAIL", flag)
-	abs, _ := filepath.Abs("testdata/nofsync/index.js")
+	abs, _ := filepath.Abs("testdata/fake/index.js")
 	if _, err := Add(ctx, abs); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Import(ctx, "syncco", map[string]any{"type": "api", "key": "k-old"}); err != nil {
+	if _, err := Import(ctx, "fakeco", map[string]any{"type": "api", "key": "k-old"}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(AuthPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(flag, nil, 0o600)
-	if _, err := Import(ctx, "syncco", map[string]any{"type": "api", "key": "k-new"}); err == nil {
+	syncFile := steady.Sync
+	steady.Sync = func(f *os.File) error {
+		name := filepath.Base(f.Name())
+		if strings.HasPrefix(name, ".plugin-auth.json.") && !strings.HasPrefix(name, ".plugin-auth.json.bak.") {
+			return errors.New("injected auth flush failure")
+		}
+		return syncFile(f)
+	}
+	t.Cleanup(func() { steady.Sync = syncFile })
+	if _, err := Import(ctx, "fakeco", map[string]any{"type": "api", "key": "k-new"}); err == nil {
 		t.Fatal("a sign-in saved without its flush said done")
 	}
 	if after, _ := os.ReadFile(AuthPath()); !bytes.Equal(after, before) {
 		t.Fatalf("a failed flush changed plugin-auth.json:\n%s\nwas\n%s", after, before)
 	}
-	if left, _ := filepath.Glob(AuthPath() + ".tmp-*"); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(AuthPath()), ".plugin-auth.json.*")); len(left) != 0 {
 		t.Fatalf("a failed write left %v", left)
 	}
 }

@@ -76,6 +76,11 @@ type Login struct {
 	// home is the other Codex folder a ChatGPT account is signed in to
 	// in, Codex's own there (codexHomeLogins): not one to switch ~/.codex to.
 	home string
+	// Plugin identity is the slot and its verified selection, while
+	// generation changes when that slot's credential is replaced.
+	pluginSlot       string
+	pluginIdentity   string
+	pluginGeneration string
 }
 
 type savedLogin struct {
@@ -107,6 +112,12 @@ type savedLogin struct {
 	// Grok or Copilot account ahead of the agent's own (side_logins.go).
 	Home  string `json:"home,omitempty"`
 	First bool   `json:"first,omitempty"`
+	// PluginScope binds name-keyed account policy to the native selection
+	// last reconciled for this slot, not to the display name.
+	PluginScope string `json:"pluginScope,omitempty"`
+	// PluginRename is a durable, nonsecret intent. The account is not
+	// routed until its name-keyed references have been reconciled.
+	PluginRename *pluginRenameIntent `json:"pluginRename,omitempty"`
 	// Project is the Google Cloud project a Gemini CLI or Antigravity
 	// account's requests go to, when the user named one (google.go).
 	Project string `json:"project,omitempty"`
@@ -146,6 +157,20 @@ type savedLogin struct {
 	// file (#1220): its per-account settings are still kept by it, and
 	// move to the new one before the new name is written (renameSettled).
 	was string
+}
+
+type pluginRenameIntent struct {
+	Slot          string            `json:"slot"`
+	From          string            `json:"from"`
+	To            string            `json:"to"`
+	PreviousScope string            `json:"previousScope,omitempty"`
+	Scope         string            `json:"scope,omitempty"`
+	Generation    string            `json:"generation,omitempty"`
+	MovePolicy    bool              `json:"movePolicy,omitempty"`
+	Prepared      bool              `json:"prepared,omitempty"`
+	Published     bool              `json:"published,omitempty"`
+	Policy        map[string]string `json:"policy,omitempty"`
+	Tray          bool              `json:"tray,omitempty"`
 }
 
 var (

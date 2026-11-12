@@ -2,10 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,10 +90,10 @@ func TestPluginSignIn(t *testing.T) {
 		t.Fatalf("Hidden = %+v", h)
 	}
 
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "  "); err == nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "  ", SignInOptions{}); err == nil {
 		t.Fatal("an empty key was taken")
 	}
-	if id, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k1"); err != nil || id != "fakeco" {
+	if id, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k1", SignInOptions{}); err != nil || id != "fakeco" {
 		t.Fatalf("PluginAPIKey = %q, %v", id, err)
 	}
 	if _, err := Find("fakeco"); err != nil {
@@ -201,13 +205,13 @@ func TestPluginAccounts(t *testing.T) {
 	}
 
 	// two keys with nothing to tell them by are told apart by their slot
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k1"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k1", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k2"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k2", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "sk-long-key-abcd"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "sk-long-key-abcd", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	us := users()
@@ -228,6 +232,122 @@ func TestPluginAccounts(t *testing.T) {
 	}
 	if got := users(); !slices.Equal(got, us) {
 		t.Fatalf("shown again with %v, was %v", got, us)
+	}
+}
+
+func TestPluginAPIKeyReplacesSelectedSlotAndKeepsNewAdd(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"first-key-1111", "second-key-2222"} {
+		if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, key, SignInOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	auth := plugin.Auths("fakeco")
+	var first, second, user string
+	for _, l := range pluginLogins(mustPlugin(t)) {
+		switch auth[l.acct.Key]["key"] {
+		case "first-key-1111":
+			first = l.acct.Key
+		case "second-key-2222":
+			second, user = l.acct.Key, l.User
+		}
+	}
+	if first == "" || second == "" || user == "" {
+		t.Fatalf("initial slots: first=%q second=%q user=%q", first, second, user)
+	}
+	direct := "direct"
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "replacement-key-3333", SignInOptions{User: user, Proxy: &direct}); err != nil {
+		t.Fatal(err)
+	}
+	auth = plugin.Auths("fakeco")
+	if len(auth) != 2 || auth[first]["key"] != "first-key-1111" || auth[second]["key"] != "replacement-key-3333" {
+		t.Fatalf("selected key was not replaced in place: %v", auth)
+	}
+	if user := PluginAccountUser("fakeco", second); user == "" || ProxyOfLogin("fakeco", user) != direct {
+		t.Fatalf("replacement proxy not kept for its account: %q", user)
+	}
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "new-key-4444", SignInOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(plugin.Auths("fakeco")); got != 3 {
+		t.Fatalf("ordinary new-account sign-in has %d slots, want 3", got)
+	}
+}
+
+func TestPluginAPIKeyReloginRejectsConcurrentReplacement(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() {
+		unblock()
+		server.Close()
+	})
+	t.Setenv("CAS_AUTH_URL", server.URL)
+	source := `export const Plugin = async () => ({
+  config: c => { c.provider ??= {}; c.provider.casfixture = {name:"CAS", npm:"@ai-sdk/openai-compatible", api:"https://fixture.invalid", models:{one:{name:"One"}}} },
+  auth: { provider:"casfixture", methods:[{type:"api", label:"Token", prompts:[{type:"text", key:"credential", message:"Token"}],
+    authorize: async inputs => { await fetch(process.env.CAS_AUTH_URL); return {type:"success", key:inputs.credential} }}] }
+})`
+	file := filepath.Join(t.TempDir(), "cas.mjs")
+	if err := os.WriteFile(file, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if _, err := plugin.Add(ctx, file); err != nil {
+		t.Fatal(err)
+	}
+	slot, err := plugin.Import(ctx, "casfixture", map[string]any{"type": "api", "accountId": "Alice", "key": "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := PluginAPIKey(ctx, "casfixture", 0, map[string]string{"credential": "stale"}, "", SignInOptions{User: "Alice"})
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("key authorization did not start")
+	}
+	replacement, _ := json.Marshal(map[string]any{"type": "api", "accountId": "Alice", "key": "concurrent"})
+	if err := plugin.EditAuth(func(auth map[string]json.RawMessage) (bool, error) {
+		auth[slot] = replacement
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	if err := <-done; err == nil {
+		t.Fatal("stale key authorization replaced a newer login")
+	}
+	if got := plugin.Auths("casfixture")[slot]["key"]; got != "concurrent" {
+		t.Fatalf("newer credential was overwritten: %v", got)
 	}
 }
 
@@ -253,7 +373,7 @@ func TestPluginKeylessSingleIdentity(t *testing.T) {
 		t.Fatalf("keyless metadata lost or leaked to OAuth: %+v", ps)
 	}
 	for _, credential := range []string{"public-fixture", "renewed-fixture"} {
-		if id, err := PluginAPIKey(ctx, "fakeco", 0, map[string]string{"credential": credential}, ""); err != nil || id != "fakeco" {
+		if id, err := PluginAPIKey(ctx, "fakeco", 0, map[string]string{"credential": credential}, "", SignInOptions{}); err != nil || id != "fakeco" {
 			t.Fatalf("keyless sign-in: %q %v", id, err)
 		}
 	}
@@ -261,7 +381,7 @@ func TestPluginKeylessSingleIdentity(t *testing.T) {
 	if err != nil || len(ps[0].Accounts) != 1 {
 		t.Fatalf("single identity duplicated: %+v %v", ps, err)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 1, nil, ""); err == nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 1, nil, "", SignInOptions{}); err == nil {
 		t.Fatal("OAuth must not accept an empty API key")
 	}
 }
@@ -280,11 +400,11 @@ func TestPluginEmptyKeyOnlyKeyless(t *testing.T) {
 		Methods: []plugin.Method{{Type: "api", Label: "API key"}, {Type: "oauth", Label: "Browser", Keyless: true}}}})
 	t.Cleanup(func() { plugin.UseCached(nil) })
 	for _, m := range []int{0, 1, 2, -1} {
-		if _, err := PluginAPIKey(context.Background(), "acme", m, nil, " "); err == nil || err.Error() != "enter the key" {
+		if _, err := PluginAPIKey(context.Background(), "acme", m, nil, " ", SignInOptions{}); err == nil || err.Error() != "enter the key" {
 			t.Errorf("method %d with no key: %v, want enter the key", m, err)
 		}
 	}
-	if _, err := PluginAPIKey(context.Background(), "nobody", 0, nil, ""); err == nil || err.Error() != "enter the key" {
+	if _, err := PluginAPIKey(context.Background(), "nobody", 0, nil, "", SignInOptions{}); err == nil || err.Error() != "enter the key" {
 		t.Errorf("an unknown plugin with no key: %v", err)
 	}
 }
@@ -302,7 +422,7 @@ func TestPluginEmptyKeyKeyAsked(t *testing.T) {
 	plugin.UseCached([]plugin.Provider{{ID: "acme", Spec: spec, Name: "Acme",
 		Methods: []plugin.Method{{Type: "api", Label: "Session token", KeyAsked: true}}}})
 	t.Cleanup(func() { plugin.UseCached(nil) })
-	if _, err := PluginAPIKey(context.Background(), "acme", 0, map[string]string{"token": "t"}, ""); err != nil && err.Error() == "enter the key" {
+	if _, err := PluginAPIKey(context.Background(), "acme", 0, map[string]string{"token": "t"}, "", SignInOptions{}); err != nil && err.Error() == "enter the key" {
 		t.Errorf("a keyAsked method with no key: %v", err)
 	}
 }

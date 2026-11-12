@@ -210,10 +210,9 @@ func (s *signInFlow) pluginDone(saved plugin.Saved, err error) {
 	}
 }
 
-// PluginAPIKey signs in to a plugin's provider with a key, as its "api"
-// method does, beside the accounts signed in already; it gives the
-// provider's magpie id.
-func PluginAPIKey(ctx context.Context, id string, method int, inputs map[string]string, key string) (string, error) {
+// PluginAPIKey signs in with an API key, adding an account unless o.User
+// names the account to replace. A selected proxy is kept for that account.
+func PluginAPIKey(ctx context.Context, id string, method int, inputs map[string]string, key string, o SignInOptions) (string, error) {
 	// with subscription accounts off, a key is refused as a browser
 	// sign-in is (StartPluginSignInWith), but for a public plugin's: one
 	// saved would be signed in and listed nowhere
@@ -228,12 +227,54 @@ func PluginAPIKey(ctx context.Context, id string, method int, inputs map[string]
 			return "", errors.New("enter the key")
 		}
 	}
-	// through the proxy the provider's requests go through (#1663)
-	saved, err := plugin.APIKey(Via(ctx, PluginID(id)), id, method, inputs, strings.TrimSpace(key), plugin.NewAccount)
+	account := plugin.NewAccount
+	if user := strings.TrimSpace(o.User); user != "" {
+		pp, ok := PluginOf(PluginID(id))
+		if !ok {
+			return "", errors.New("the selected plugin account is unavailable")
+		}
+		logins := pluginLogins(pp)
+		for _, l := range logins {
+			if l.acct.Key == user {
+				account, o.User = l.acct.Key, l.User
+				break
+			}
+		}
+		if account == plugin.NewAccount {
+			for _, l := range logins {
+				if !strings.EqualFold(l.User, user) {
+					continue
+				}
+				if account != plugin.NewAccount {
+					return "", errors.New("the selected plugin account is ambiguous")
+				}
+				account = l.acct.Key
+				o.User = l.User
+			}
+		}
+		if account == plugin.NewAccount {
+			return "", errors.New("the selected plugin account is unavailable")
+		}
+	}
+	s := &signInFlow{}
+	if err := s.pickProxy(PluginID(id), o); err != nil {
+		return "", err
+	}
+	saved, err := plugin.APIKey(s.via(ctx), id, method, inputs, strings.TrimSpace(key), account)
 	if err != nil {
 		return "", err
 	}
-	return PluginSignedIn(saved), nil
+	providerID := PluginSignedIn(saved)
+	if s.chosen {
+		user := pluginUser(saved)
+		if user == "" {
+			return providerID, errors.New("signed in, but its account could not be resolved to keep the proxy")
+		}
+		if err := keepSignInProxy(providerID, user, s.proxy); err != nil {
+			return providerID, err
+		}
+	}
+	return providerID, nil
 }
 
 // PluginSignedIn finishes a sign-in to a plugin's provider that magpie

@@ -73,3 +73,56 @@ func TestPluginSignInPageOpensOnce(t *testing.T) {
 		t.Fatalf("a page nothing opened was opened %d times: %+v", n, st)
 	}
 }
+
+func TestPluginKeyReloginHandlerReplacesSelectedAccount(t *testing.T) {
+	bun := testenv.Bun(t)
+	dir := t.TempDir()
+	testenv.SetHome(t, dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
+	t.Cleanup(plugin.Settle)
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(t.Context(), abs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"first-key-1111", "second-key-2222"} {
+		if _, err := provider.PluginAPIKey(t.Context(), "fakeco", 0, nil, key, provider.SignInOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = provider.Logins("fakeco")
+	auth := plugin.Auths("fakeco")
+	var first, selected string
+	for slot, value := range auth {
+		switch value["key"] {
+		case "first-key-1111":
+			first = slot
+		case "second-key-2222":
+			selected = slot
+		}
+	}
+	user := provider.PluginAccountUser("fakeco", selected)
+	if first == "" || selected == "" || user == "" {
+		t.Fatal("fixture account selection is unavailable")
+	}
+	body, _ := json.Marshal(map[string]any{"provider": "fakeco", "method": 0, "user": user,
+		"proxy": "direct", "key": "replacement-key-3333"})
+	rec := httptest.NewRecorder()
+	Handler(&openCounter{}, nil).ServeHTTP(rec, httptest.NewRequest("POST", "/api/plugin-signin", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("key re-login: %d %s", rec.Code, rec.Body)
+	}
+	auth = plugin.Auths("fakeco")
+	if len(auth) != 2 || auth[first]["key"] != "first-key-1111" || auth[selected]["key"] != "replacement-key-3333" {
+		t.Fatal("handler did not replace exactly the selected slot")
+	}
+	user = provider.PluginAccountUser("fakeco", selected)
+	if user == "" || provider.ProxyOfLogin("fakeco", user) != "direct" {
+		t.Fatalf("selected account proxy was not retained: %q", user)
+	}
+}

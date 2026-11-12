@@ -134,3 +134,50 @@ func TestPluginsListedAgainWhileRunning(t *testing.T) {
 		t.Fatalf("models after the list was read again: %v", got)
 	}
 }
+
+func TestZCodeAuthoritativeEmptyReconcilesPicksButUnknownDoesNot(t *testing.T) {
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", "")
+	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auth, _ := json.Marshal(map[string]any{"zcode": map[string]any{"type": "api", "key": "fixture"}})
+	if err := os.WriteFile(filepath.Join(settings.Dir(), "plugin-auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := []plugin.Provider{{ID: "zcode", Spec: "builtin:zcode",
+		Models: []plugin.Model{{ID: "GLM-5.3-Flash", Name: "GLM-5.3-Flash"}}}}
+	plugin.UseCached(before)
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	if err := Save(Provider{ID: "zcode", Models: []string{"GLM-5.3-Flash"}}); err != nil {
+		t.Fatal(err)
+	}
+	unknown := []plugin.Provider{{ID: "zcode", Spec: "builtin:zcode", FellBack: true}}
+	if gone := dropGonePluginPicks(before, unknown); len(gone) != 0 {
+		t.Fatalf("unknown list dropped picks: %v", gone)
+	}
+	if kept := keptListed(before, unknown); len(kept[0].Models) != 1 {
+		t.Fatalf("unknown list lost its baseline: %+v", kept)
+	}
+	empty := []plugin.Provider{{ID: "zcode", Spec: "builtin:zcode", Models: []plugin.Model{}, ModelsKnownEmpty: true}}
+	if gone := dropGonePluginPicks(before, empty)["zcode"]; !slices.Equal(gone, []string{"GLM-5.3-Flash"}) {
+		t.Fatalf("authoritative empty list did not delist the old pick: %v", gone)
+	}
+	if kept := keptListed(before, empty); len(kept[0].Models) != 0 || !kept[0].ModelsKnownEmpty {
+		t.Fatalf("empty list was replaced by the old baseline: %+v", kept)
+	}
+	p, err := Find("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(p.Models, "GLM-5.3-Flash") || !slices.Contains(p.Delisted, "GLM-5.3-Flash") {
+		t.Fatalf("empty list did not set aside the old pick: models=%v delisted=%v", p.Models, p.Delisted)
+	}
+	if gone := dropGonePluginPicks(empty, before); len(gone) != 0 {
+		t.Fatalf("restored list incorrectly dropped picks: %v", gone)
+	}
+	p, err = Find("zcode")
+	if err != nil || !slices.Contains(p.Models, "GLM-5.3-Flash") || len(p.Delisted) != 0 {
+		t.Fatalf("returning model did not restore the pick: %+v, %v", p, err)
+	}
+}

@@ -103,7 +103,11 @@ test("native GLM reasoning preserves model-specific off behavior and fits effort
 
 test("native aliases retain raw model ID and require a matching execution", async () => {
   const { hooks, slot, loader, context } = await setup()
-  _internal.config({ config: { providerConfigRules: { providerRules: [{ providerId: "account:zai-individual-coding-plan", builtinModelIds: ["GLM-5.3"] }] } } })
+  _internal.config({ config: {
+    providerConfigRules: { templateRules: [], providerRules: [{ providerId: "account:zai-individual-coding-plan", config: { builtinModelIds: ["GLM-5.3"] } }] },
+    modelConfigRules: { modelRules: [{ modelMatch: ".*", config: { enabled: true } }], modelApiRules: [], providerSiteRules: [],
+      templateModelRules: [], builtinProviderModelRules: [] },
+  } })
   const listed = await hooks.provider.models({ models: {} }, { getAuth: slot.getAuth })
   expect(listed["GLM-5.3-OffPeak"].api.id).toBe("GLM-5.3")
   expect(listed["GLM-5.3-Highspeed"].api.id).toBe("GLM-5.3")

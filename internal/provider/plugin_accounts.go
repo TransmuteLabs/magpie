@@ -1,17 +1,28 @@
 package provider
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // A plugin's provider is signed in to as many times as the user likes, as
@@ -51,7 +62,9 @@ func publicLogins(pp plugin.Provider) []pluginLogin {
 	var out []pluginLogin
 	for _, a := range pp.Accounts {
 		saved := savedLogin{Agent: agent, User: labels[a.Key], Home: a.Key, On: true}
-		out = append(out, pluginLogin{sideLogin{Login{Agent: agent, User: saved.User, On: true}, saved}, a})
+		l := sideLogin{Login{Agent: agent, User: saved.User, On: true}, saved}
+		setPluginLoginIdentity(&l.Login, a)
+		out = append(out, pluginLogin{l, a})
 	}
 	if len(out) > 0 {
 		out[0].Active = true
@@ -106,12 +119,19 @@ func pluginLabels(pp plugin.Provider, named map[string]string, hidden map[string
 // pluginNames is pluginLabels as the accounts list names them, the
 // agent's own as the agent is signed in now.
 func pluginNames(pp plugin.Provider) map[string]string {
-	own, named := pluginOwnNames(pp)
-	mark := ""
-	if len(own) > 0 {
-		mark = ownMark(pp.ID)
+	if pp.ID != "zcode" {
+		own, named := pluginOwnNames(pp)
+		mark := ""
+		if len(own) > 0 {
+			mark = ownMark(pp.ID)
+		}
+		labels, _ := pluginAccountLabels(pp, own, named, mark, sharedLogins())
+		return labels
 	}
-	labels, _ := pluginAccountLabels(pp, own, named, mark, sharedLogins())
+	labels := map[string]string{}
+	for _, l := range pluginLogins(pp) {
+		labels[l.acct.Key] = l.User
+	}
 	return labels
 }
 
@@ -137,7 +157,444 @@ func pluginAccountLabels(pp plugin.Provider, own map[string]bool, named map[stri
 	if len(hidden) > 0 {
 		labels = pluginLabels(pp, named, hidden)
 	}
+	if pp.ID != "zcode" {
+		return labels, hidden
+	}
+	for _, l := range ls {
+		if l.Agent != agent || l.Hidden != "" {
+			continue
+		}
+		base := labels[l.Home]
+		_, slot, hasSlot := strings.Cut(l.Home, "#")
+		if hasSlot && strings.EqualFold(l.User, base+" ("+slot+")") {
+			labels[l.Home] = l.User
+		} else if l.PluginScope != "" && strings.EqualFold(l.User, scopedPluginLabel(base, l.Home, l.PluginScope)) {
+			labels[l.Home] = l.User
+		} else if hasSlot && l.PluginScope != "" && strings.EqualFold(l.User, scopedPluginLabel(base+" ("+slot+")", l.Home, l.PluginScope)) {
+			labels[l.Home] = l.User
+		}
+	}
 	return labels, hidden
+}
+
+func scopedPluginLabel(base, slot, scope string) string {
+	if _, suffix, ok := strings.Cut(slot, "#"); ok {
+		slot = suffix
+	}
+	if len(scope) > 12 {
+		scope = scope[:12]
+	}
+	return base + " (" + slot + "-" + scope + ")"
+}
+
+func pluginPolicyScope(id string, a plugin.Account) string {
+	if id != "zcode" {
+		return ""
+	}
+	if a.Scope != "" {
+		return a.Scope
+	}
+	if a.Generation != "" {
+		generation, _, _ := strings.Cut(a.Generation, "/app:")
+		return "material:" + generation
+	}
+	return ""
+}
+
+func pluginPolicyFile() (file, error) {
+	b, source, err := readProviderSource(Path())
+	if err != nil {
+		return file{}, errors.New("account settings are unreadable")
+	}
+	if !source.exists {
+		return file{source: source}, nil
+	}
+	if !validProviders(b) {
+		return file{}, errors.New("account settings are unreadable")
+	}
+	var f file
+	if err := json.Unmarshal(bytes.TrimPrefix(b, utf8BOM), &f); err != nil {
+		return file{}, err
+	}
+	f.source = source
+	return f, nil
+}
+
+func pluginPolicyTargetFree(id, user string) (bool, error) {
+	f, err := pluginPolicyFile()
+	if err != nil {
+		return false, err
+	}
+	key := accountKey(user)
+	for _, p := range f.Providers {
+		if p.ID != id {
+			continue
+		}
+		if _, ok := p.AccountProxies[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountModels[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountCaps[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountWindowCaps[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountWindowAmounts[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountConcurrency[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountWeights[key]; ok {
+			return false, nil
+		}
+		if _, ok := p.AccountNames[key]; ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func pluginLabelAvailable(id, agent, slot, label string, ls []savedLogin) (bool, error) {
+	for _, l := range ls {
+		if l.Agent == agent && l.Home != slot &&
+			(strings.EqualFold(l.User, label) || l.PluginRename != nil && strings.EqualFold(l.PluginRename.To, label)) {
+			return false, nil
+		}
+	}
+	free, err := pluginPolicyTargetFree(id, label)
+	if err != nil || !free {
+		return free, err
+	}
+	err = settings.EditTrayUsages(func(ids []string) ([]string, error) {
+		for _, ref := range ids {
+			if strings.EqualFold(ref, id+"|"+label) {
+				free = false
+				break
+			}
+		}
+		return ids, nil
+	})
+	return free, err
+}
+
+func pluginPolicyMark[V any](m map[string]V, key string) string {
+	value, ok := m[key]
+	if !ok {
+		return ""
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func preparePluginIntent(id string, intent *pluginRenameIntent) error {
+	f, err := pluginPolicyFile()
+	if err != nil {
+		return err
+	}
+	free, err := pluginPolicyTargetFree(id, intent.To)
+	if err != nil || !free {
+		return errors.New("destination account policy is unavailable")
+	}
+	if intent.MovePolicy {
+		from := accountKey(intent.From)
+		for _, p := range f.Providers {
+			if p.ID != id {
+				continue
+			}
+			intent.Policy = map[string]string{
+				"proxy":       pluginPolicyMark(p.AccountProxies, from),
+				"models":      pluginPolicyMark(p.AccountModels, from),
+				"cap":         pluginPolicyMark(p.AccountCaps, from),
+				"windows":     pluginPolicyMark(p.AccountWindowCaps, from),
+				"amounts":     pluginPolicyMark(p.AccountWindowAmounts, from),
+				"concurrency": pluginPolicyMark(p.AccountConcurrency, from),
+				"weight":      pluginPolicyMark(p.AccountWeights, from),
+				"name":        pluginPolicyMark(p.AccountNames, from),
+			}
+			break
+		}
+	}
+	return settings.EditTrayUsages(func(ids []string) ([]string, error) {
+		for _, ref := range ids {
+			if strings.EqualFold(ref, id+"|"+intent.To) {
+				return nil, errors.New("destination tray selection is already owned")
+			}
+			if intent.MovePolicy && strings.EqualFold(ref, id+"|"+intent.From) {
+				intent.Tray = true
+			}
+		}
+		return ids, nil
+	})
+}
+
+func stagePluginPolicyMap[V any](m map[string]V, from, to, expected string, cleanup bool) (bool, error) {
+	source, hasSource := m[from]
+	target, hasTarget := m[to]
+	if expected == "" {
+		if hasSource || hasTarget {
+			return false, errors.New("account policy changed during rename")
+		}
+		return false, nil
+	}
+	if !hasSource {
+		if cleanup && hasTarget && pluginPolicyMark(m, to) == expected {
+			return false, nil
+		}
+		return false, errors.New("source policy changed during account rename")
+	}
+	if pluginPolicyMark(m, from) != expected || hasTarget && !reflect.DeepEqual(source, target) {
+		return false, errors.New("destination policy conflicts with account rename")
+	}
+	if cleanup {
+		if !hasTarget {
+			return false, errors.New("staged account policy is missing")
+		}
+		delete(m, from)
+		return true, nil
+	}
+	if !hasTarget {
+		m[to] = source
+		return true, nil
+	}
+	return false, nil
+}
+
+// stagePluginPolicies copies before publishing the new login name, then
+// removes the old copy only after publication. Both phases are idempotent.
+func stagePluginPolicies(id string, intent *pluginRenameIntent, cleanup bool) error {
+	if !intent.MovePolicy {
+		free, err := pluginPolicyTargetFree(id, intent.To)
+		if err != nil {
+			return err
+		}
+		if !free {
+			return errors.New("destination account policy is already owned")
+		}
+		return nil
+	}
+	f, err := pluginPolicyFile()
+	if err != nil {
+		return err
+	}
+	from, to := accountKey(intent.From), accountKey(intent.To)
+	for i := range f.Providers {
+		p := &f.Providers[i]
+		if p.ID != id {
+			continue
+		}
+		changed := false
+		record := func(moved bool, err error) error {
+			changed = changed || moved
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountProxies, from, to, intent.Policy["proxy"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountModels, from, to, intent.Policy["models"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountCaps, from, to, intent.Policy["cap"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountWindowCaps, from, to, intent.Policy["windows"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountWindowAmounts, from, to, intent.Policy["amounts"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountConcurrency, from, to, intent.Policy["concurrency"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountWeights, from, to, intent.Policy["weight"], cleanup)); err != nil {
+			return err
+		}
+		if err := record(stagePluginPolicyMap(p.AccountNames, from, to, intent.Policy["name"], cleanup)); err != nil {
+			return err
+		}
+		if changed {
+			return store(f)
+		}
+		return nil
+	}
+	for _, expected := range intent.Policy {
+		if expected != "" {
+			return errors.New("source account policy is unavailable")
+		}
+	}
+	return nil
+}
+
+func stagePluginTray(id string, intent *pluginRenameIntent, cleanup bool) error {
+	return settings.EditTrayUsages(func(ids []string) ([]string, error) {
+		old, next := -1, -1
+		for i, ref := range ids {
+			if strings.EqualFold(ref, id+"|"+intent.From) {
+				old = i
+			}
+			if strings.EqualFold(ref, id+"|"+intent.To) {
+				next = i
+			}
+		}
+		if !intent.MovePolicy || !intent.Tray {
+			if next >= 0 || intent.MovePolicy && old >= 0 {
+				return nil, errors.New("destination tray selection is already owned")
+			}
+			return ids, nil
+		}
+		if cleanup {
+			if old >= 0 && next < 0 {
+				return nil, errors.New("staged tray selection is missing")
+			}
+			if old >= 0 {
+				ids = slices.Delete(ids, old, old+1)
+			}
+			return ids, nil
+		}
+		if old < 0 {
+			return nil, errors.New("destination tray selection changed during account rename")
+		}
+		if old >= 0 && next < 0 {
+			ids = slices.Insert(ids, old+1, id+"|"+intent.To)
+		}
+		return ids, nil
+	})
+}
+
+func pendingPluginAccountError(agent, slot string) error {
+	for _, l := range sharedLogins() {
+		if l.Agent == agent && l.Home == slot && l.PluginRename != nil {
+			return errors.New("account rename is pending; repair the account settings and retry")
+		}
+	}
+	return nil
+}
+
+func currentPluginAccount(id, slot string) (plugin.Account, bool) {
+	providers, available := plugin.PassiveProviders()
+	if !available {
+		return plugin.Account{}, false
+	}
+	for _, pp := range providers {
+		if pp.ID == id {
+			for _, a := range pp.Accounts {
+				if a.Key == slot {
+					return a, true
+				}
+			}
+		}
+	}
+	return plugin.Account{}, false
+}
+
+// reconcilePluginPending resumes each durable intent without routing the
+// account. The source copies remain until the new name has been published.
+func reconcilePluginPending(pp plugin.Provider) {
+	if pp.ID != "zcode" {
+		return
+	}
+	agent, id := pluginAgent(pp), PluginID(pp.ID)
+	if !slices.ContainsFunc(sharedLogins(), func(l savedLogin) bool { return l.Agent == agent && l.PluginRename != nil }) {
+		return
+	}
+	loginsMu.Lock()
+	defer loginsMu.Unlock()
+	b, err := steady.ReadFile(loginsPath())
+	if err != nil || !validLogins(b) {
+		log.Printf("%s: account rename pending: login state is unreadable", id)
+		return
+	}
+	ls, err := parseLogins(b)
+	if err != nil {
+		log.Printf("%s: account rename pending: %v", id, err)
+		return
+	}
+	blocked := map[string]bool{}
+	for {
+		i := slices.IndexFunc(ls, func(l savedLogin) bool { return l.Agent == agent && l.PluginRename != nil && !blocked[l.Home] })
+		if i < 0 {
+			return
+		}
+		l := &ls[i]
+		intent := l.PluginRename
+		a, ok := currentPluginAccount(pp.ID, l.Home)
+		valid := ok && intent.Slot == l.Home && intent.From != "" && intent.To != "" &&
+			pluginPolicyScope(pp.ID, a) == intent.Scope
+		if !intent.Published {
+			valid = valid && l.User == intent.From && l.PluginScope == intent.PreviousScope
+		} else {
+			valid = valid && l.User == intent.To && l.PluginScope == intent.Scope
+		}
+		for _, other := range ls {
+			if other.Agent == agent && other.Home != l.Home &&
+				(strings.EqualFold(other.User, intent.To) || other.PluginRename != nil && strings.EqualFold(other.PluginRename.To, intent.To) ||
+					intent.MovePolicy && strings.EqualFold(other.User, intent.From)) {
+				valid = false
+			}
+		}
+		if !valid {
+			log.Printf("%s: account rename pending: identity or name ownership changed", id)
+			blocked[l.Home] = true
+			continue
+		}
+		if !intent.Prepared {
+			if err := preparePluginIntent(id, intent); err != nil {
+				log.Printf("%s: account rename pending: %v", id, err)
+				blocked[l.Home] = true
+				continue
+			}
+			intent.Prepared = true
+			if err := writeLogins(ls); err != nil {
+				log.Printf("%s: account rename pending: %v", id, err)
+				return
+			}
+			continue
+		}
+		if !intent.Published {
+			if err := stagePluginPolicies(id, intent, false); err != nil {
+				log.Printf("%s: account rename pending: %v", id, err)
+				blocked[l.Home] = true
+				continue
+			}
+			if err := stagePluginTray(id, intent, false); err != nil {
+				log.Printf("%s: account rename pending: %v", id, err)
+				blocked[l.Home] = true
+				continue
+			}
+			l.User, l.PluginScope = intent.To, intent.Scope
+			if intent.PreviousScope != intent.Scope {
+				l.ID = ""
+			}
+			intent.Published = true
+			if err := writeLogins(ls); err != nil {
+				log.Printf("%s: account rename pending: %v", id, err)
+				return
+			}
+			continue
+		}
+		if err := stagePluginPolicies(id, intent, true); err != nil {
+			log.Printf("%s: account rename pending: %v", id, err)
+			blocked[l.Home] = true
+			continue
+		}
+		if err := stagePluginTray(id, intent, true); err != nil {
+			log.Printf("%s: account rename pending: %v", id, err)
+			blocked[l.Home] = true
+			continue
+		}
+		l.PluginRename = nil
+		if err := writeLogins(ls); err != nil {
+			log.Printf("%s: account rename pending: %v", id, err)
+			return
+		}
+	}
 }
 
 // pluginOwnNames tells the provider's accounts that are the agent's own,
@@ -155,28 +612,24 @@ func pluginOwnNames(pp plugin.Provider) (own map[string]bool, named map[string]s
 		}
 	}
 	if pp.ID == "zcode" {
-		family, uid, user := zcodeAppLabel()
-		legacyUser, legacyRead := user, user != ""
+		app := zcodeAppLabel()
 		for k := range own {
 			var saved struct {
-				Site string `json:"site"`
-				UID  string `json:"uid"`
+				Site    string `json:"site"`
+				UID     string `json:"uid"`
+				Kind    string `json:"kind"`
+				Org     string `json:"org"`
+				Project string `json:"project"`
+				Product string `json:"product"`
 			}
 			if json.Unmarshal([]byte(str(auths[k]["refresh"])), &saved) != nil {
 				continue
 			}
 			saved.UID = firstNonEmpty(saved.UID, str(auths[k]["uid"]))
-			// Old unbound own slots follow the app. Keep their display
-			// names; this compatibility is never an account-scope proof.
-			if saved.Site == "" && saved.UID == "" {
-				if !legacyRead {
-					legacyUser, legacyRead = pluginOwnUser(pp.ID), true
-				}
-				if legacyUser != "" {
-					named[k] = legacyUser
-				}
-			} else if family != "" && uid != "" && user != "" && saved.Site == family && saved.UID == uid {
-				named[k] = user
+			if app.family != "" && app.uid != "" && app.user != "" &&
+				saved.Site == app.family && saved.UID == app.uid && saved.Kind == app.kind &&
+				(saved.Kind != "team" || saved.Org == app.org && saved.Project == app.project && saved.Product == app.product) {
+				named[k] = app.user
 			}
 		}
 		return own, named
@@ -191,17 +644,25 @@ func pluginOwnNames(pp plugin.Provider) (own map[string]bool, named map[string]s
 	return own, named
 }
 
-// zcodeAppLabel reads the active family and its matching profile, never
-// guessing identity from a display name or a stale other-family profile.
-var zcodeAppLabel = func() (family, uid, user string) {
+type zcodeAppIdentity struct {
+	family, uid, user, kind, org, project, product string
+	generation                                     string
+}
+
+// zcodeAppLabel follows the SDK's active provider, selected family and
+// full selection, without borrowing a stale profile from another family.
+var zcodeAppLabel = func() zcodeAppIdentity {
 	var store map[string]string
 	if !readJSON(zcodeCredentialsPath(), &store) {
-		return "", "", ""
+		return zcodeAppIdentity{}
 	}
 	secret := zcodeSecret()
 	value := func(key string) string {
 		v := store[key]
-		if strings.HasPrefix(v, "enc:v1:") {
+		if strings.HasPrefix(v, "enc:") {
+			if !strings.HasPrefix(v, "enc:v1:") {
+				return ""
+			}
 			s, ok := zcodeDecrypt(secret, v)
 			if !ok {
 				return ""
@@ -210,9 +671,9 @@ var zcodeAppLabel = func() (family, uid, user string) {
 		}
 		return v
 	}
-	family = strings.TrimSpace(value("oauth:active_provider"))
-	if family != "zai" && family != "bigmodel" {
-		return "", "", ""
+	family, active := zcodeActiveFamily(store, secret)
+	if family == "" || active == "" {
+		return zcodeAppIdentity{}
 	}
 	var profile struct {
 		UserID      string `json:"user_id"`
@@ -222,19 +683,217 @@ var zcodeAppLabel = func() (family, uid, user string) {
 		Username    string `json:"username"`
 		DisplayName string `json:"displayName"`
 	}
-	if json.Unmarshal([]byte(value("oauth:"+family+":user_info")), &profile) != nil {
-		return "", "", ""
+	if json.Unmarshal([]byte(value("oauth:"+active+":user_info")), &profile) != nil {
+		return zcodeAppIdentity{}
 	}
-	uid = strings.TrimSpace(firstNonEmpty(profile.UserID, profile.ID))
+	uid := strings.TrimSpace(firstNonEmpty(profile.UserID, profile.ID))
 	if uid == "" {
-		return "", "", ""
+		return zcodeAppIdentity{}
 	}
-	return family, uid, zcodeWho(profile.Email, firstNonEmpty(profile.Name, profile.Username, profile.DisplayName), uid)
+	home, _ := os.UserHomeDir()
+	var set struct {
+		Domain     string `json:"providerFamilyDomain"`
+		Selections map[string]struct {
+			Kind    string `json:"kind"`
+			Org     string `json:"organizationId"`
+			Project string `json:"projectId"`
+			Product string `json:"productId"`
+		} `json:"providerFamilyConnectionSelections"`
+		Legacy map[string]string `json:"modelProviderFamilySelectedKeys"`
+	}
+	b, err := readAccountFile(filepath.Join(appdir.ZCodeHome(home), ".zcode", "v2", "setting.json"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) || err == nil && json.Unmarshal(b, &set) != nil {
+		return zcodeAppIdentity{}
+	}
+	if (set.Domain == "zai" || set.Domain == "bigmodel") && set.Domain != family {
+		return zcodeAppIdentity{}
+	}
+	app := zcodeAppIdentity{family: family, uid: uid, user: zcodeWho(profile.Email, firstNonEmpty(profile.Name, profile.Username, profile.DisplayName), uid)}
+	if selected, ok := set.Selections[family]; ok {
+		switch selected.Kind {
+		case "start-plan":
+			app.kind = "start"
+		case "individual-coding-plan":
+			app.kind = "individual"
+		case "team-coding-plan":
+			app.kind, app.org, app.project, app.product = "team", strings.TrimSpace(selected.Org), strings.TrimSpace(selected.Project), strings.TrimSpace(selected.Product)
+		}
+	}
+	if app.kind == "" {
+		prefix := "team-plan:builtin:" + family + "-coding-plan:"
+		if legacy, ok := strings.CutPrefix(strings.TrimSpace(set.Legacy[family]), prefix); ok {
+			parts := strings.Split(legacy, ":")
+			if len(parts) != 3 {
+				return zcodeAppIdentity{}
+			}
+			decoded := make([]string, len(parts))
+			for i, part := range parts {
+				decoded[i], err = url.PathUnescape(part)
+				if err != nil {
+					return zcodeAppIdentity{}
+				}
+			}
+			app.kind, app.product, app.org, app.project = "team", decoded[0], decoded[1], decoded[2]
+		}
+	}
+	token := ""
+	if active == family {
+		token = strings.TrimSpace(value("oauth:" + active + ":access_token"))
+	}
+	accountIdentity := uid
+	if family == "bigmodel" {
+		var linked struct {
+			UserID      string `json:"userId"`
+			CustomerID  string `json:"customerId"`
+			AccessToken string `json:"accessToken"`
+		}
+		verifiedUID := strings.TrimSpace(profile.UserID)
+		if verifiedUID == "" && profile.Username != "" && profile.DisplayName != "" && profile.ID != "unknown" {
+			verifiedUID = strings.TrimSpace(profile.ID)
+		}
+		if json.Unmarshal([]byte(value("oauth:linked_bigmodel")), &linked) == nil &&
+			verifiedUID != "" && strings.TrimSpace(linked.UserID) == verifiedUID &&
+			strings.TrimSpace(linked.CustomerID) != "" && strings.TrimSpace(linked.AccessToken) != "" {
+			accountIdentity, token = strings.TrimSpace(linked.CustomerID), strings.TrimSpace(linked.AccessToken)
+		}
+	}
+	unbear := func(s string) string {
+		s = strings.TrimSpace(s)
+		if len(s) > 7 && strings.EqualFold(s[:7], "Bearer ") {
+			s = strings.TrimSpace(s[7:])
+		}
+		return s
+	}
+	jwt := unbear(value("zcodejwttoken"))
+	token = unbear(token)
+	if token == jwt {
+		token = ""
+	}
+	var legacy zcodeKey
+	if token == "" && app.kind != "start" && app.kind != "team" {
+		legacy = zcodeConfigKey(secret, family)
+	}
+	if app.kind == "" {
+		switch {
+		case token != "":
+			app.kind = "individual"
+		case legacy.Key != "":
+			app.kind = "legacy-key"
+		default:
+			app.kind = "start"
+		}
+	} else if app.kind == "individual" && token == "" && legacy.Key != "" {
+		app.kind = "legacy-key"
+	}
+	if app.kind == "team" && (app.org == "" || app.project == "" || app.product == "") || token == "" && jwt == "" && legacy.Key == "" {
+		return zcodeAppIdentity{}
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{accountIdentity, value("oauth:session_revision"), token, jwt, value("oauth:" + active + ":refresh_token"), legacy.Key}, "\x00")))
+	app.generation = hex.EncodeToString(sum[:])
+	return app
 }
 
 type pluginLogin struct {
 	sideLogin
 	acct plugin.Account
+}
+
+func setPluginLoginIdentity(l *Login, a plugin.Account) {
+	l.pluginSlot, l.pluginGeneration = a.Key, a.Generation
+	if a.Key == "" || a.Generation == "" {
+		return
+	}
+	scope := a.Scope
+	if scope == "" {
+		// Unscoped plugins have no verified durable selection. Bind even
+		// their historical identity to the nonsecret material generation.
+		scope = "material:" + a.Generation
+	}
+	sum := sha256.Sum256([]byte(a.Key + "\x00" + scope))
+	l.pluginIdentity = hex.EncodeToString(sum[:])
+}
+
+func pluginLoginByUser(agent, user string) (Login, bool) {
+	id := strings.TrimPrefix(agent, "plugin:")
+	if id == agent {
+		pp, ok := pluginOfAgent(agent)
+		if !ok {
+			return Login{}, false
+		}
+		id = pp.ID
+	}
+	providers, available := plugin.PassiveProviders()
+	if !available {
+		return Login{}, false
+	}
+	var pp plugin.Provider
+	for _, candidate := range providers {
+		if candidate.ID == id {
+			pp = candidate
+			break
+		}
+	}
+	if pp.ID == "" {
+		return Login{}, false
+	}
+	var found Login
+	for _, l := range pluginLogins(pp) {
+		if strings.EqualFold(l.User, user) {
+			if found.pluginSlot != "" {
+				return Login{}, false
+			}
+			found = l.Login
+		}
+	}
+	return found, found.pluginSlot != ""
+}
+
+func pluginUsageBindings(agent string) (map[string]string, bool) {
+	id := strings.TrimPrefix(agent, "plugin:")
+	if id == agent {
+		pp, ok := pluginOfAgent(agent)
+		if !ok {
+			return nil, false
+		}
+		id = pp.ID
+	}
+	out := map[string]string{}
+	providers, available := plugin.PassiveProviders()
+	if !available {
+		return out, true
+	}
+	for _, pp := range providers {
+		if pp.ID != id {
+			continue
+		}
+		for _, l := range pluginLogins(pp) {
+			out[strings.ToLower(l.User)] = loginReadingKey(l.Login)
+		}
+		break
+	}
+	return out, true
+}
+
+func pluginLoginCurrent(l Login) bool {
+	current, ok := pluginLoginByUser(l.Agent, l.User)
+	return ok && l.pluginSlot != "" && current.pluginSlot == l.pluginSlot &&
+		l.pluginIdentity != "" && current.pluginIdentity == l.pluginIdentity &&
+		l.pluginGeneration != "" && current.pluginGeneration == l.pluginGeneration
+}
+
+func currentPluginQuota(q SubscriptionQuota) bool {
+	if q.From != "" || q.AccountIdentity == "" && !q.accountUnverified {
+		return true
+	}
+	if q.accountUnverified {
+		return false
+	}
+	pp, ok := pluginOfAgent(q.Provider)
+	if !ok {
+		return false
+	}
+	l, ok := pluginLoginByUser("plugin:"+pp.ID, q.User)
+	return ok && l.pluginIdentity == q.AccountIdentity && l.pluginGeneration == q.AccountGeneration
 }
 
 // cliMarked says a sign-in carries the "cli" mark of the agent's own
@@ -325,13 +984,25 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 		byKey[a.Key] = a
 	}
 	own, named := pluginOwnNames(pp)
+	if pp.ID == "zcode" && len(own) > 0 {
+		app := zcodeAppLabel()
+		for key := range own {
+			if named[key] == "" || app.generation == "" {
+				continue
+			}
+			a := byKey[key]
+			a.Generation += "/app:" + app.generation
+			byKey[key] = a
+		}
+	}
 	mark := ""
 	if len(own) > 0 {
 		mark = ownMark(pp.ID)
 	}
+	reconcilePluginPending(pp)
 	// looked at as kept, and copied only at the first change: nearly
 	// every list changes nothing, and a page's state lists each plugin's
-	settle := func(ls []savedLogin) ([]savedLogin, bool) {
+	settle := func(ls []savedLogin) ([]savedLogin, bool, error) {
 		labels, hidden := pluginAccountLabels(pp, own, named, mark, ls)
 		changed := false
 		have := map[string]bool{}
@@ -339,18 +1010,93 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 		for i, l := range ls {
 			drop, edit := false, false
 			if l.Agent == agent {
-				if _, ok := byKey[l.Home]; !ok || have[l.Home] {
+				if l.PluginRename != nil {
+					have[l.Home] = true
+					if changed {
+						keep = append(keep, l)
+					}
+					continue
+				}
+				a, ok := byKey[l.Home]
+				if !ok || have[l.Home] {
 					drop = true // signed out, or listed twice
 				} else {
 					have[l.Home] = true
-					renamed := l.User != labels[l.Home]
-					if renamed {
-						l.User, edit = labels[l.Home], true
+					if pp.ID != "zcode" {
+						if l.User != labels[l.Home] {
+							l.User, edit = labels[l.Home], true
+						}
+					} else {
+						desired := labels[l.Home]
+						scope := pluginPolicyScope(pp.ID, a)
+						scopeChanged := l.PluginScope != "" && l.PluginScope != scope
+						scopeLabel := scopeChanged || l.PluginScope == "" && !strings.EqualFold(l.User, desired)
+						if scopeChanged && (scope == "" || l.Hidden != "") {
+							// An unproved or hidden old selection is never
+							// rebound to whatever now occupies its slot.
+							if changed {
+								keep = append(keep, l)
+							}
+							continue
+						}
+						if scope != "" && l.PluginScope == "" && strings.EqualFold(l.User, desired) {
+							free, err := pluginLabelAvailable(PluginID(pp.ID), agent, l.Home, desired, ls)
+							if err != nil {
+								// Preparation stops until the source files can be read.
+								free = false
+							}
+							if !free {
+								scopeLabel = true
+							}
+						}
+						if scope != "" && scopeLabel {
+							desired = scopedPluginLabel(desired, l.Home, scope)
+							if scopeChanged && strings.EqualFold(desired, l.User) {
+								desired += "-" + scope
+							}
+						}
+						if !strings.EqualFold(l.User, desired) {
+							free, err := pluginLabelAvailable(PluginID(pp.ID), agent, l.Home, desired, ls)
+							if err != nil {
+								free = true // the durable intent checks again
+							}
+							if !free && scope != "" {
+								desired = scopedPluginLabel(desired, l.Home, scope)
+								free, err = pluginLabelAvailable(PluginID(pp.ID), agent, l.Home, desired, ls)
+								if err != nil {
+									free = true
+								}
+							}
+							if !free {
+								if changed {
+									keep = append(keep, l)
+								}
+								continue
+							}
+							// Only a positively bound native scope owns the
+							// old name's settings. A shared name owns none.
+							owned := a.Scope != "" && l.PluginScope == a.Scope
+							for _, other := range ls {
+								if other.Agent == agent && other.Home != l.Home && strings.EqualFold(other.User, l.User) {
+									owned = false
+								}
+							}
+							l.PluginRename = &pluginRenameIntent{Slot: l.Home, From: l.User, To: desired,
+								PreviousScope: l.PluginScope, Scope: scope, Generation: a.Generation, MovePolicy: owned}
+							edit = true
+						}
+						if scope != "" && l.PluginScope != scope && l.PluginRename == nil {
+							l.PluginRename = &pluginRenameIntent{Slot: l.Home, From: l.User, To: l.User,
+								PreviousScope: l.PluginScope, Scope: scope, Generation: a.Generation}
+							edit = true
+						}
 					}
 					// the agent's own, hidden, shows again once the agent signs
 					// in anew: told by its sign-in's mark, else by another account
 					if l.Hidden != "" && own[l.Home] && !hidden[l.Home] {
-						l.Hidden, edit = "", true
+						if l.PluginRename == nil {
+							l.Hidden, edit = "", true
+						}
 					}
 				}
 			}
@@ -369,27 +1115,57 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 				if !changed {
 					ls, changed = slices.Clone(ls), true
 				}
-				ls = append(ls, savedLogin{Agent: agent, User: labels[a.Key], Home: a.Key, On: true, Seen: time.Now().UTC().Truncate(time.Second)})
+				label := labels[a.Key]
+				scope := pluginPolicyScope(pp.ID, a)
+				if pp.ID == "zcode" && scope != "" {
+					free, err := pluginLabelAvailable(PluginID(pp.ID), agent, a.Key, label, ls)
+					if err != nil {
+						free = true // the durable intent checks again
+					}
+					if !free {
+						label = scopedPluginLabel(label, a.Key, scope)
+						free, err = pluginLabelAvailable(PluginID(pp.ID), agent, a.Key, label, ls)
+						if err != nil {
+							free = true
+						}
+						if !free {
+							return ls, false, errors.New("the new account's label is unavailable")
+						}
+					}
+				}
+				row := savedLogin{Agent: agent, User: label, Home: a.Key, On: true, Seen: time.Now().UTC().Truncate(time.Second)}
+				if pp.ID == "zcode" && scope != "" {
+					row.PluginRename = &pluginRenameIntent{Slot: a.Key, From: label, To: label, Scope: scope, Generation: a.Generation}
+				}
+				ls = append(ls, row)
 			}
 		}
-		return ls, changed
+		return ls, changed, nil
 	}
 	// what nothing changes takes no lock: taken, it opens logins.json's
 	// lock file, across magpies, and /api/providers lists every plugin
 	// (a fifth of its CPU). A change is made from a read under it.
-	if _, changed := settle(sharedLogins()); changed {
+	if _, changed, err := settle(sharedLogins()); changed && err == nil {
 		pluginLoginLocks.Add(1)
 		loginsMu.Lock()
-		if ls, changed := settle(sharedLogins()); changed {
-			_ = writeLogins(ls)
+		if ls, changed, err := settle(sharedLogins()); changed && err == nil {
+			if err = writeLogins(ls); err != nil {
+				log.Printf("%s: account reconciliation failed: %v", PluginID(pp.ID), err)
+			}
 		}
 		loginsMu.Unlock()
 	}
+	reconcilePluginPending(pp)
 	var out []pluginLogin
-	for _, l := range sideLogins(agent, "", func(l savedLogin) bool { _, ok := byKey[l.Home]; return ok && l.Hidden == "" }) {
+	for _, l := range sideLogins(agent, "", func(l savedLogin) bool {
+		a, ok := byKey[l.Home]
+		return ok && l.Hidden == "" && l.PluginRename == nil && (l.PluginScope == "" || l.PluginScope == pluginPolicyScope(pp.ID, a))
+	}) {
 		l.Lapsed = l.saved.Lapsed // a refused sign-in shows on the account
 		l.Own = own[l.saved.Home]
-		out = append(out, pluginLogin{l, byKey[l.saved.Home]})
+		a := byKey[l.saved.Home]
+		setPluginLoginIdentity(&l.Login, a)
+		out = append(out, pluginLogin{l, a})
 	}
 	return out
 }

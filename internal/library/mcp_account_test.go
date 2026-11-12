@@ -18,6 +18,7 @@ import (
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -809,7 +810,18 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
 	hubSandbox(t)
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(t.TempDir(), "cache"))
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(key, "")
+	}
 	t.Cleanup(plugin.Settle)
+	var proxied atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.String() == "http://credential.invalid/material" {
+			proxied.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
 	var mu sync.Mutex
 	var auth []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -844,12 +856,12 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
 	t.Setenv("NATIVE_MCP_TEST_ORIGIN", server.URL)
 	file := filepath.Join(t.TempDir(), "native-mcp.mjs")
 	source := `export const Plugin = async () => ({
-  config: c => { c.provider ??= {}; c.provider.native_mcp_test = {
+  config: c => { c.provider ??= {}; c.provider["native-mcp-test"] = {
     name: "Fixture", npm: "@ai-sdk/openai-compatible", api: "https://fixture.invalid",
     models: {one: {name: "One", limit: {context: 1000, output: 100}}}
   }},
   auth: {
-    provider: "native_mcp_test", methods: [{type: "api", label: "Fixture"}],
+    provider: "native-mcp-test", methods: [{type: "api", label: "Fixture"}],
     accountOperations: ["mcp.headers"],
     accountPreflight({params}) {
       if (new URL(params.url).origin !== process.env.NATIVE_MCP_TEST_ORIGIN) throw new Error("untrusted")
@@ -862,6 +874,8 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
       if (expectedGeneration && expectedGeneration !== a.accountEpoch) {
         const e = new Error("generation changed"); e.kind = "account_generation_changed"; throw e
       }
+      const material = await fetch("http://credential.invalid/material")
+      if (!material.ok) throw new Error("credential service unavailable")
       return {context: {scope: a.accountScope, generation: a.accountEpoch},
               data: {headers: {Authorization: "Bearer " + a.key}}}
     }
@@ -875,14 +889,30 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
 	if _, err := plugin.Add(ctx, file); err != nil {
 		t.Fatal(err)
 	}
-	account, err := plugin.Import(ctx, "native_mcp_test", map[string]any{
-		"type": "api", "key": "fixture-first", "accountScope": "scope", "accountEpoch": "epoch-one",
+	account, err := plugin.Import(ctx, "native-mcp-test", map[string]any{
+		"type": "api", "accountId": "fixture-account", "key": "fixture-first", "accountScope": "scope", "accountEpoch": "epoch-one",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	logins := provider.Logins(provider.PluginID("native-mcp-test"))
+	if len(logins) != 1 {
+		t.Fatalf("fixture account listing: %+v", logins)
+	}
+	p, err := provider.Find(provider.PluginID("native-mcp-test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Proxy = "direct"
+	p.AccountProxies = map[string]string{strings.ToLower(logins[0].User): proxy.URL}
+	if err := provider.Save(*p); err != nil {
+		t.Fatal(err)
+	}
 	ok(t)(SaveServer("", Server{Name: "native", Transport: "http", URL: server.URL + "/mcp"}))
-	if _, err := ServerPluginAccount(ctx, "native", &PluginAccount{Provider: "native_mcp_test", Account: account}, false); err != nil {
+	if _, err := ServerPluginAccount(ctx, "native", &PluginAccount{Provider: "native-mcp-test", Account: account}, false); err != nil {
 		t.Fatal(err)
 	}
 	ok(t)(SetMCPHub(true))
@@ -890,8 +920,8 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
 	if _, err := hub.Call(ctx, "", "native", "do", json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	again, err := plugin.Import(ctx, "native_mcp_test", map[string]any{
-		"type": "api", "key": "fixture-rotated", "accountScope": "scope", "accountEpoch": "epoch-two",
+	again, err := plugin.Import(ctx, "native-mcp-test", map[string]any{
+		"type": "api", "accountId": "fixture-account", "key": "fixture-rotated", "accountScope": "scope", "accountEpoch": "epoch-two",
 	})
 	if err != nil || again != account {
 		t.Fatalf("same-scope login did not keep the account slot: %q %q %v", again, account, err)
@@ -903,6 +933,9 @@ func TestPluginMCPRealHostAndCredentialRotation(t *testing.T) {
 	defer mu.Unlock()
 	if !slices.Contains(auth, "Bearer fixture-first") || !slices.Contains(auth, "Bearer fixture-rotated") {
 		t.Fatalf("real plugin host did not rotate request credentials: %v", auth)
+	}
+	if proxied.Load() < 2 {
+		t.Fatalf("credential acquisition bypassed the account proxy: %d", proxied.Load())
 	}
 }
 

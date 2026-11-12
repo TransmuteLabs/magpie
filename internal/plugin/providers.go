@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -190,6 +192,9 @@ type Provider struct {
 	AuthType  string  `json:"authType"`
 	AccountID string  `json:"accountId"`
 	Models    []Model `json:"models"`
+	// ModelsKnownEmpty distinguishes a successful empty ZCode catalog from
+	// a provider that has not supplied a list.
+	ModelsKnownEmpty bool `json:"modelsKnownEmpty,omitempty"`
 	// FellBack says the plugin's models hook couldn't fetch its vendor's
 	// list and gave the default one back.
 	FellBack bool `json:"fellBack,omitempty"`
@@ -273,11 +278,15 @@ type Account struct {
 	Key       string `json:"key"`
 	Type      string `json:"type"`
 	AccountID string `json:"accountId"`
+	// Scope and Generation are nonsecret, current auth-snapshot identity.
+	// They are not persisted in the provider listing.
+	Scope      string `json:"-"`
+	Generation string `json:"-"`
 	// Hint tells an account with no id from another: the end of its key.
 	Hint string `json:"hint,omitempty"`
-	// Models are the ids of the provider's models this account has, when
-	// the provider has more than one account; none, it has them all.
-	Models    []string `json:"models,omitempty"`
+	// Models is nil when the account's list is unknown; an empty slice is
+	// an authoritative empty list and must survive JSON persistence.
+	Models    []string `json:"models"`
 	FellBack  bool     `json:"fellBack,omitempty"`
 	ListError string   `json:"listError,omitempty"`
 }
@@ -330,12 +339,25 @@ func forgetProviders() {
 // Providers asks the plugins for their providers, starting the host if
 // need be, and keeps the answer for Cached.
 func Providers(ctx context.Context) ([]Provider, error) {
+	return providers(ctx, "", "")
+}
+
+// RefreshProviderModels explicitly re-observes the selected provider's
+// model source; ordinary provider discovery retains its normal caches.
+func RefreshProviderModels(ctx context.Context, id, key string) ([]Provider, error) {
+	return providers(ctx, id, key)
+}
+
+func providers(ctx context.Context, refetch, key string) ([]Provider, error) {
 	if PrepareZCode != nil {
 		if err := PrepareZCode(); err != nil {
 			provMu.Lock()
 			zcodeActivationError = err.Error()
 			provMu.Unlock()
 			ps, _ := Listed()
+			if refetch != "" {
+				return currentProviderAccounts(ps, Load()), fmt.Errorf("ZCode runtime unavailable: %w", err)
+			}
 			return currentProviderAccounts(ps, Load()), nil
 		}
 	}
@@ -348,14 +370,57 @@ func Providers(ctx context.Context) ([]Provider, error) {
 			// activation failure. Their last listing remains authoritative;
 			// the ZCode projection below carries the activation error.
 			ps, _ := Listed()
+			if refetch != "" {
+				return currentProviderAccounts(ps, Load()), fmt.Errorf("ZCode runtime unavailable: %w", err)
+			}
 			return currentProviderAccounts(ps, Load()), nil
 		}
 	}
 	var ps []Provider
-	if err := Call(ctx, "providers", listingArgs(), &ps); err != nil {
+	args := listingArgs()
+	if refetch == "zcode" {
+		args["refetch"] = refetch
+	}
+	if err := Call(ctx, "providers", args, &ps); err != nil {
 		return nil, err
 	}
+	var listError string
+	if refetch != "" {
+		found := false
+		for _, p := range ps {
+			if p.ID != refetch {
+				continue
+			}
+			found = true
+			accountFound := key == ""
+			for _, account := range p.Accounts {
+				if account.Key == key {
+					accountFound = true
+					listError = account.ListError
+					if listError == "" && account.FellBack {
+						listError = "the plugin couldn't get its vendor's list"
+					}
+					break
+				}
+			}
+			if !accountFound {
+				listError = "the selected account is no longer listed"
+			} else if listError == "" && p.FellBack {
+				listError = p.ListError
+				if listError == "" {
+					listError = "the plugin couldn't get its vendor's list"
+				}
+			}
+			break
+		}
+		if !found {
+			listError = "the provider is no longer listed"
+		}
+	}
 	ps = commitProviders(ps, nil)
+	if listError != "" {
+		return ps, fmt.Errorf("%s couldn't list its models: %s", refetch, listError)
+	}
 	return ps, nil
 }
 
@@ -546,8 +611,9 @@ func keepListed(ps, last []Provider) []Provider {
 		if !ok {
 			continue
 		}
-		if p.FellBack && !l.FellBack && len(l.Models) > 0 {
+		if p.FellBack && !l.FellBack && (len(l.Models) > 0 || l.ModelsKnownEmpty) {
 			ps[i].Models, ps[i].FellBack, ps[i].ListError = l.Models, false, ""
+			ps[i].ModelsKnownEmpty = l.ModelsKnownEmpty
 			// the first account's list is the provider's: it is kept with it
 			if len(ps[i].Accounts) > 0 && ps[i].Accounts[0].Models == nil {
 				ps[i].Accounts[0].FellBack, ps[i].Accounts[0].ListError = false, ""
@@ -558,9 +624,47 @@ func keepListed(ps, last []Provider) []Provider {
 				continue
 			}
 			for _, b := range l.Accounts {
-				if b.Key == a.Key && !b.FellBack && len(b.Models) > 0 {
-					ps[i].Accounts[j].Models, ps[i].Accounts[j].FellBack, ps[i].Accounts[j].ListError = b.Models, false, ""
+				if b.Key != a.Key || b.FellBack {
+					continue
 				}
+				models := b.Models
+				// Older single-account rows omitted models because that
+				// account's list was the provider's complete list.
+				if models == nil && len(l.Accounts) == 1 && (len(l.Models) > 0 || l.ModelsKnownEmpty) {
+					models = make([]string, 0, len(l.Models))
+					for _, m := range l.Models {
+						models = append(models, m.ID)
+					}
+				}
+				if models != nil {
+					ps[i].Accounts[j].Models, ps[i].Accounts[j].FellBack, ps[i].Accounts[j].ListError = models, false, ""
+				}
+			}
+		}
+		if p.ID == "zcode" && len(ps[i].Accounts) > 0 {
+			known, ids := true, map[string]bool{}
+			for _, a := range ps[i].Accounts {
+				if a.Models == nil || a.FellBack {
+					known = false
+					break
+				}
+				for _, id := range a.Models {
+					ids[id] = true
+				}
+			}
+			if known {
+				models := make([]Model, 0, len(ps[i].Models))
+				added := map[string]bool{}
+				for _, source := range [][]Model{ps[i].Models, l.Models} {
+					for _, m := range source {
+						if ids[m.ID] && !added[m.ID] {
+							models = append(models, m)
+							added[m.ID] = true
+						}
+					}
+				}
+				ps[i].Models = models
+				ps[i].ModelsKnownEmpty = len(models) == 0
 			}
 		}
 	}
@@ -658,13 +762,13 @@ func currentProviderAccounts(ps []Provider, l List) []Provider {
 // capabilities once ZCode is actually used.
 func zcodeMetadata() Provider {
 	methods := []Method{
-		{Type: "oauth", Label: "ZCode: Z.ai GLM Coding Plan"},
-		{Type: "oauth", Label: "ZCode: BigModel (智谱) GLM Coding Plan"},
-		{Type: "oauth", Label: "ZCode: Z.ai paste callback URL"},
-		{Type: "oauth", Label: "ZCode: BigModel paste callback URL"},
-		{Type: "oauth", Label: "ZCode: a team's GLM Coding Plan"},
-		{Type: "oauth", Label: "ZCode app's sign-in"},
-		{Type: "api", Label: "GLM Coding Plan API key"},
+		{Type: "oauth", Label: "ZCode: Z.ai GLM Coding Plan", Labels: map[string]string{"zh": "ZCode：Z.ai GLM Coding Plan 登录", "zh-TW": "ZCode：Z.ai GLM Coding Plan 登入", "ja": "ZCode：Z.ai GLM Coding Plan にサインイン", "de": "ZCode: bei Z.ai GLM Coding Plan anmelden"}},
+		{Type: "oauth", Label: "ZCode: BigModel (智谱) GLM Coding Plan", Labels: map[string]string{"zh": "ZCode：智谱 GLM Coding Plan 登录", "zh-TW": "ZCode：智譜 GLM Coding Plan 登入", "ja": "ZCode：BigModel GLM Coding Plan にサインイン", "de": "ZCode: bei BigModel GLM Coding Plan anmelden"}},
+		{Type: "oauth", Label: "ZCode: Z.ai paste callback URL", Labels: map[string]string{"zh": "ZCode：粘贴 Z.ai 回调网址", "zh-TW": "ZCode：貼上 Z.ai 回呼網址", "ja": "ZCode：Z.ai のコールバック URL を貼り付け", "de": "ZCode: Z.ai-Rückruf-URL einfügen"}},
+		{Type: "oauth", Label: "ZCode: BigModel paste callback URL", Labels: map[string]string{"zh": "ZCode：粘贴智谱回调网址", "zh-TW": "ZCode：貼上智譜回呼網址", "ja": "ZCode：BigModel のコールバック URL を貼り付け", "de": "ZCode: BigModel-Rückruf-URL einfügen"}},
+		{Type: "oauth", Label: "ZCode: a team's GLM Coding Plan", Labels: map[string]string{"zh": "ZCode：团队的 GLM Coding Plan", "zh-TW": "ZCode：團隊的 GLM Coding Plan", "ja": "ZCode：チームの GLM Coding Plan", "de": "ZCode: GLM Coding Plan eines Teams"}},
+		{Type: "oauth", Label: "ZCode app's sign-in", Labels: map[string]string{"zh": "ZCode 应用的登录", "zh-TW": "ZCode 應用程式的登入", "ja": "ZCode アプリのサインイン", "de": "Anmeldung der ZCode-App"}},
+		{Type: "api", Label: "GLM Coding Plan API key", Labels: map[string]string{"zh": "GLM Coding Plan API 密钥", "zh-TW": "GLM Coding Plan API 金鑰", "ja": "GLM Coding Plan API キー", "de": "GLM Coding Plan API-Schlüssel"}},
 	}
 	models := []Model{
 		{ID: "GLM-5.3", Name: "GLM-5.3", NPM: "@ai-sdk/anthropic", Context: 1_000_000, Output: 128_000, Reasoning: true, Variants: []string{"low", "high", "max"}},
@@ -681,9 +785,91 @@ func zcodeMetadata() Provider {
 			"reset.opportunity", "reset.use", "reset.history.read", "billing.preview", "billing.claim",
 			"marketing.feed", "marketing.action", "offpeak.availability", "offpeak.ticket", "offpeak.status",
 			"offpeak.settle", "highspeed.draw", "highspeed.healthy", "mcp.headers"},
-		Options: []Option{{Key: "free_first", Label: "Free quota first", Default: true},
-			{Key: "coding_plan_ultra", Label: "ZCode ultra gateway"}},
+		Options: []Option{
+			{Key: "free_first", Label: "Free quota first",
+				Description: "When on, the plain GLM models spend ZCode's free Start Plan quota (the -Trial entries' quota) before the GLM Coding Plan, and go to the plan when it is spent or refused. Off: only the -Trial entries use it. freeFirst: false in the options JSON turns it off too.",
+				Labels:      map[string]string{"zh": "优先用免费额度", "zh-TW": "優先用免費額度", "ja": "無料枠を優先", "de": "Gratis-Kontingent zuerst"},
+				Descriptions: map[string]string{
+					"zh":    "开启后，普通的 GLM 模型先用 ZCode 的免费 Start Plan 额度（即 -Trial 条目的额度），用完或被拒时再用 GLM Coding Plan。关闭后只有 -Trial 条目会用它。选项 JSON 里的 freeFirst: false 也会关闭它。",
+					"zh-TW": "開啟後，一般的 GLM 模型先用 ZCode 的免費 Start Plan 額度（即 -Trial 項目的額度），用完或被拒時再用 GLM Coding Plan。關閉後只有 -Trial 項目會用它。選項 JSON 裡的 freeFirst: false 也會關閉它。",
+					"ja":    "オンにすると、通常の GLM モデルは GLM Coding Plan より先に ZCode の無料 Start Plan 枠（-Trial 項目の枠）を使い、使い切るか拒否されるとプランに戻ります。オフでは -Trial 項目だけが使います。オプション JSON の freeFirst: false でもオフになります。",
+					"de":    "Ist dies an, nutzen die normalen GLM-Modelle zuerst ZCodes freies Start-Plan-Kontingent (das der -Trial-Einträge) und erst danach den GLM Coding Plan. Aus: nur die -Trial-Einträge nutzen es. freeFirst: false im Optionen-JSON schaltet es auch aus.",
+				}, Default: true},
+			{Key: "coding_plan_ultra", Label: "ZCode ultra gateway",
+				Description:  "Route supported paid Messages requests through ZCode's optional ultra gateway.",
+				Labels:       map[string]string{"zh": "ZCode 极速网关", "zh-TW": "ZCode 極速閘道", "ja": "ZCode ウルトラゲートウェイ", "de": "ZCode-Ultra-Gateway"},
+				Descriptions: map[string]string{"zh": "将支持的付费 Messages 请求通过 ZCode 的可选极速网关路由。", "zh-TW": "將支援的付費 Messages 請求透過 ZCode 的選用極速閘道路由。", "ja": "対応する有料 Messages リクエストを ZCode のオプションのウルトラゲートウェイ経由で送信します。", "de": "Unterstützte kostenpflichtige Messages-Anfragen über ZCodes optionales Ultra-Gateway leiten."}},
+		},
 	}
+}
+
+// A listing saved by an older build can still supply models and account
+// state, but it must not make the current intrinsic controls English-only.
+func zcodeMetadataForListing(p, declared Provider) Provider {
+	missingWords := func(have, defaults map[string]string) (map[string]string, bool) {
+		var merged map[string]string
+		for lang, text := range defaults {
+			if have[lang] == "" {
+				if merged == nil {
+					merged = maps.Clone(have)
+					if merged == nil {
+						merged = map[string]string{}
+					}
+				}
+				merged[lang] = text
+			}
+		}
+		if merged == nil {
+			return have, false
+		}
+		return merged, true
+	}
+	if len(p.Methods) == 0 {
+		p.Methods = declared.Methods
+	}
+	methodsCopied := false
+	for i, method := range p.Methods {
+		for _, fallback := range declared.Methods {
+			if method.Type != fallback.Type || method.Label != fallback.Label {
+				continue
+			}
+			labels, changed := missingWords(method.Labels, fallback.Labels)
+			if changed {
+				if !methodsCopied {
+					p.Methods = slices.Clone(p.Methods)
+					methodsCopied = true
+				}
+				p.Methods[i].Labels = labels
+			}
+			break
+		}
+	}
+	optionsCopied := false
+	for _, fallback := range declared.Options {
+		i := slices.IndexFunc(p.Options, func(o Option) bool { return o.Key == fallback.Key })
+		if i < 0 {
+			if !optionsCopied {
+				p.Options = slices.Clone(p.Options)
+				optionsCopied = true
+			}
+			p.Options = append(p.Options, fallback)
+			continue
+		}
+		option := p.Options[i]
+		labels, labelsChanged := missingWords(option.Labels, fallback.Labels)
+		descriptions, descriptionsChanged := missingWords(option.Descriptions, fallback.Descriptions)
+		if labelsChanged || descriptionsChanged || option.Description == "" {
+			if !optionsCopied {
+				p.Options = slices.Clone(p.Options)
+				optionsCopied = true
+			}
+			p.Options[i].Labels, p.Options[i].Descriptions = labels, descriptions
+			if option.Description == "" {
+				p.Options[i].Description = fallback.Description
+			}
+		}
+	}
+	return p
 }
 
 func providerAccounts(ps []Provider, l List, auth map[string]storedAuth) []Provider {
@@ -700,7 +886,7 @@ func providerAccounts(ps []Provider, l List, auth map[string]storedAuth) []Provi
 	}
 	for _, p := range ps {
 		if p.ID == "zcode" && IsBundledZCode(p.Spec) {
-			zcode = p
+			zcode = zcodeMetadataForListing(p, zcode)
 			break
 		}
 	}
@@ -712,6 +898,7 @@ func providerAccounts(ps []Provider, l List, auth map[string]storedAuth) []Provi
 				continue
 			}
 			haveZCode = true
+			p = zcode
 			if zcodeError != "" {
 				p.FellBack = true
 				p.ListError = "ZCode runtime unavailable: " + zcodeError
@@ -890,8 +1077,14 @@ type storedAuth struct {
 	AccountID string          `json:"accountId"`
 	Email     string          `json:"email"`
 	Key       string          `json:"key"`
+	UID       json.RawMessage `json:"uid"`
+	Refresh   json.RawMessage `json:"refresh"`
+	Scope     json.RawMessage `json:"accountScope"`
+	Epoch     json.RawMessage `json:"accountEpoch"`
+	mark      string
 	Metadata  struct {
-		Email string `json:"email"`
+		Email string          `json:"email"`
+		Site  json.RawMessage `json:"site"`
 	} `json:"metadata"`
 }
 
@@ -965,7 +1158,15 @@ func accountsOf(auth map[string]storedAuth, provider string) []Account {
 			continue
 		}
 		who := firstNonEmpty(a.AccountID, a.Metadata.Email, a.Email)
-		acct := Account{Key: k, Type: a.Type, AccountID: who}
+		acct := Account{Key: k, Type: a.Type, AccountID: who, Generation: a.mark}
+		if provider == "zcode" {
+			if scope, ok := zcodeAuthScope(a); ok {
+				acct.Scope = scope
+				if epoch, ok := authString(a.Epoch); ok && epoch != "" {
+					acct.Generation = epoch
+				}
+			}
+		}
 		if a.Type == "api" && len(a.Key) >= 12 {
 			acct.Hint = a.Key[len(a.Key)-4:]
 		}
@@ -1014,6 +1215,8 @@ func parseStoredAuth(b []byte) (storedAuthSnapshot, error) {
 		if json.Unmarshal(v, &a) != nil || len(trimmed) == 0 || trimmed[0] != '{' || a.Type == "" {
 			current = false
 		}
+		sum := sha256.Sum256(trimmed)
+		a.mark = hex.EncodeToString(sum[:])
 		out[k] = a
 	}
 	return storedAuthSnapshot{accounts: out, current: current, digest: sha256.Sum256(b)}, err
@@ -1233,7 +1436,10 @@ func SignOut(ctx context.Context, provider, account string) error {
 	if Running() {
 		return Call(ctx, "signOut", map[string]any{"provider": provider, "account": account}, nil)
 	}
-	unlock := lockAuth()
+	unlock, err := lockAuth()
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	var m map[string]json.RawMessage
 	b, err := readAuthFile()
@@ -1400,6 +1606,7 @@ type Usage struct {
 	Renew        string             `json:"renew"`
 	Balance      string             `json:"balance"`
 	Error        string             `json:"error"`
+	Partial      bool               `json:"partial,omitempty"`
 	User         string             `json:"user"`
 	SignIn       string             `json:"signIn"` // "expired", "kept", "renewed" or ""
 	Windows      []UsageWindow      `json:"windows"`

@@ -23,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/fx"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -130,6 +131,9 @@ func (m model) updateProviders(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", " ":
 		m.openProviderModels(p.ID)
 	case "e":
+		if p.IsPlugin() {
+			return m, oauthSignIn(p.ID)
+		}
 		if pr := provider.Preset(p.Preset); pr != nil && pr.OAuth && p.ID == pr.ID {
 			return m, oauthSignIn(pr.ID)
 		}
@@ -288,9 +292,6 @@ func refetchCmd(id string) tea.Cmd {
 		p, err := provider.Find(id)
 		if err != nil {
 			return flashMsg{text: err.Error()}
-		}
-		if p.IsPlugin() {
-			return flashMsg{text: p.Name + "'s models are what its plugin lists"}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -459,25 +460,56 @@ func kindNote(k provider.Kind) string {
 func (m *model) openPresets() {
 	var items []agent.Option
 	var shown []string
+	seen := map[string]bool{}
 	for _, d := range provider.Partners() {
 		items = append(items, agent.Option{Value: d.ID, Note: d.Name + " · partner (sponsor)"})
 		shown = append(shown, d.ID)
+		seen[d.ID] = true
 	}
 	go func() {
 		provider.CountPartner(provider.PartnerShown, shown...)
 		provider.NoticePartners(shown...)
 	}()
 	for _, d := range provider.Presets() {
+		if seen[d.ID] {
+			continue
+		}
 		items = append(items, agent.Option{Value: d.ID, Note: d.Name + " · " + kindNote(d.Kind)})
+		seen[d.ID] = true
 	}
 	for _, c := range customAPIs {
 		items = append(items, agent.Option{Value: c.id, Note: "your own · " + c.name + " API, at its address"})
+		seen[c.id] = true
+	}
+	plugins := map[string]bool{}
+	addPlugin := func(id, name string) {
+		plugins[id] = true
+		if seen[id] {
+			return
+		}
+		items = append(items, agent.Option{Value: id, Note: name + " · plugin account"})
+		seen[id] = true
+	}
+	for _, p := range m.provs {
+		if p.IsPlugin() {
+			addPlugin(p.ID, p.Name)
+		}
+	}
+	if ps, known := plugin.PassiveProviders(); known {
+		for _, p := range ps {
+			if len(p.Methods) > 0 {
+				addPlugin(provider.PluginID(p.ID), p.Name)
+			}
+		}
 	}
 	m.pk = picker{
 		crumbs: []string{"providers", "add"},
 		input:  newInput("a vendor magpie knows, or custom for your own API"),
 		items:  items,
 		onPick: func(id string) tea.Cmd {
+			if plugins[id] {
+				return oauthSignIn(id)
+			}
 			if i := slices.IndexFunc(customAPIs, func(c customAPI) bool { return c.id == id }); i >= 0 {
 				return func() tea.Msg { return askMsg{customURLAsk(customAPIs[i])} }
 			}
@@ -1441,31 +1473,36 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 		if ci != "" {
 			ci = "   " + ci
 		}
-		switch {
-		case q.Balance != "" && len(q.Windows) == 0:
-			c := sText.Render(q.Balance) + sMuted.Render(" left")
-			if len(q.BalanceSplit) > 0 {
-				// what it is made of: DeepSeek's granted credit apart
-				c += sFaint.Render(" (" + provider.SplitWords(q.BalanceSplit) + ")")
-			}
-			out = append(out, line+"  "+c+ci)
-			continue
-		case q.Error != "":
-			out = append(out, line+"  "+sMuted.Render(trunc(q.Error, max(20, width-tw-2-lipgloss.Width(ci))))+ci)
-			continue
-		case len(q.Windows) == 0:
-			out = append(out, line+"  "+sMuted.Render("no usage reported")+ci)
-			continue
-		}
 		// the windows follow the name, those that don't fit on lines below
 		// it, then the credits a ChatGPT account holds beside them and a
 		// Codex account's resets
 		var cells []string
-		for _, w := range provider.PooledWindows(q.Windows) {
-			cells = append(cells, quotaCell(w, left, now))
+		if q.Error != "" {
+			cells = append(cells, sMuted.Render(trunc(q.Error, max(20, width-tw-3))))
+		}
+		if q.Error == "" || q.Partial {
+			for _, w := range provider.PooledWindows(q.Windows) {
+				cells = append(cells, quotaCell(w, left, now))
+			}
+			for _, o := range q.Observations {
+				name := o.Name
+				if name == "" {
+					name = o.Kind
+				}
+				value := "unavailable"
+				if o.Remaining != nil {
+					value = provider.BalanceText(*o.Remaining, o.Unit)
+				} else if o.Used != nil && o.Limit != nil {
+					value = fmt.Sprintf("%g / %g %s", *o.Used, *o.Limit, o.Unit)
+				}
+				cells = append(cells, sMuted.Render(name+" ")+sText.Render(strings.TrimSpace(value)))
+			}
 		}
 		if q.Balance != "" {
 			c := sText.Render(q.Balance) + sMuted.Render(" left")
+			if len(q.BalanceSplit) > 0 {
+				c += sFaint.Render(" (" + provider.SplitWords(q.BalanceSplit) + ")")
+			}
 			if q.Provider == "codex" && q.User != "" && !provider.CodexCredits(q.User) {
 				c += sFaint.Render(" · not spent") // held once a window is used up
 			}
@@ -1485,6 +1522,46 @@ func quotaLines(qs []provider.SubscriptionQuota, asked, left bool, width int, no
 				}
 			}
 			cells = append(cells, c)
+		}
+		if r := q.ZCodeReset; r != nil {
+			if !r.Available {
+				text := "ZCode reset unavailable"
+				if r.Error != "" {
+					text += ": " + r.Error
+				}
+				cells = append(cells, sMuted.Render(text))
+			}
+			if r.Pending != "" {
+				text := "Reset outcome unconfirmed"
+				if r.Pending == "observed-completion" {
+					text = "Completion observed; its cause is uncertain"
+				}
+				if r.PendingWindow != "" {
+					text += " · " + r.PendingWindow
+				}
+				if r.ObservedAt > 0 {
+					text += " · observed " + time.UnixMilli(int64(r.ObservedAt)).Local().Format("2006-01-02 15:04")
+				}
+				cells = append(cells, sMuted.Render(text))
+			} else if r.Available && r.Last != nil {
+				cells = append(cells, sMuted.Render("Completion observed"))
+			}
+		}
+		if q.AsOf != nil {
+			text := "as of " + q.AsOf.Local().Format("2006-01-02 15:04")
+			if q.ReadDeferred {
+				text += " · not refreshed"
+			} else {
+				text += " · couldn't be read"
+			}
+			cells = append(cells, sFaint.Render(text))
+		} else if q.ReadDeferred {
+			cells = append(cells, sFaint.Render("not refreshed"))
+		} else if q.Partial && q.ReadAt != nil {
+			cells = append(cells, sFaint.Render("read "+q.ReadAt.Local().Format("2006-01-02 15:04")))
+		}
+		if len(cells) == 0 {
+			cells = append(cells, sMuted.Render("no usage reported"))
 		}
 		at := tw
 		for _, c := range cells {

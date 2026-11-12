@@ -45,13 +45,14 @@ var piJS []byte
 
 // message is a line the host writes.
 type message struct {
-	ID      int64             `json:"id"`
-	Result  json.RawMessage   `json:"result"`
-	Error   *messageError     `json:"error"`
-	Event   string            `json:"event"`
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers"`
-	Data    string            `json:"data"`
+	ID       int64             `json:"id"`
+	Result   json.RawMessage   `json:"result"`
+	Error    *messageError     `json:"error"`
+	Event    string            `json:"event"`
+	AuthLock *authLockFrame    `json:"authLock"`
+	Status   int               `json:"status"`
+	Headers  map[string]string `json:"headers"`
+	Data     string            `json:"data"`
 	// raw is Data decoded, filled by push so the body reads it without
 	// decoding the same frame a second time. It is never on the wire.
 	raw      []byte
@@ -464,8 +465,16 @@ func (c *call) notify() {
 
 // host is one Bun process running host.js.
 type host struct {
-	cmd *exec.Cmd
-	in  io.WriteCloser
+	cmd            *exec.Cmd
+	in             io.WriteCloser
+	authPath       string
+	authMu         sync.Mutex
+	authAcquiring  bool
+	authCommitting bool
+	authExited     bool
+	authToken      string
+	authUnlock     func()
+	authBase       authLeaseSnapshot
 	// out carries messages to the single writer goroutine that owns the
 	// child's stdin. A caller enqueues and returns, so it is never parked in
 	// a blocked write; the queue is bounded by the call limit, so a wedged
@@ -541,7 +550,9 @@ func (h *host) wait() error {
 // after 47 hours as a systemd service). proc.Output waits for the child
 // at once and closes the pipe a moment later, which ends the reader too.
 func (h *host) reap() {
-	h.fail(quitErr(h.wait()))
+	err := h.wait()
+	h.endAuthLease()
+	h.fail(quitErr(err))
 	live.Lock()
 	delete(live.hosts, h)
 	live.Unlock()
@@ -928,9 +939,12 @@ var (
 )
 
 func (h *host) stop() {
-	h.in.Close()
 	start := time.Now()
-	wait := time.NewTimer(stopWait)
+	defer h.in.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), stopWait)
+	_ = h.enqueue(ctx, map[string]string{"method": "shutdown"})
+	cancel()
+	wait := time.NewTimer(max(0, stopWait-time.Since(start)))
 	defer wait.Stop()
 	select {
 	case <-h.dead:
@@ -944,6 +958,17 @@ func (h *host) stop() {
 		case <-h.dead:
 			return
 		case <-tick.C:
+		}
+	}
+	// Once a renewal finishes, let the host send its last frames and
+	// leave on its own; never extend the renewal deadline.
+	if grace := min(100*time.Millisecond, stopRenewing-time.Since(start)); grace > 0 {
+		wait := time.NewTimer(grace)
+		select {
+		case <-h.dead:
+			wait.Stop()
+			return
+		case <-wait.C:
 		}
 	}
 	h.kill()
@@ -1201,6 +1226,7 @@ func startOnWithZCode(ctx context.Context, bun string, zcode bool) (*host, bool,
 	hctx, hcancel := context.WithCancel(context.Background())
 	h := &host{
 		cmd: cmd, in: in,
+		authPath: AuthPath(),
 		calls:    map[int64]*call{},
 		dead:     make(chan struct{}),
 		slots:    make(chan struct{}, callLimit()),
@@ -1258,7 +1284,7 @@ func startOnWithZCode(ctx context.Context, bun string, zcode bool) (*host, bool,
 		catalogPath = catalog.CachePath()
 	}
 	err = h.call(ictx, "init", map[string]any{
-		"authPath":      AuthPath(),
+		"authPath":      h.authPath,
 		"modelsDevPath": catalogPath,
 		"piPath":        pi,
 		"directory":     settings.Dir(),
@@ -1496,6 +1522,10 @@ func readLine(r *bufio.Reader, max int) ([]byte, error) {
 }
 
 func (h *host) dispatch(m message) {
+	if m.AuthLock != nil {
+		h.authLockRequest(*m.AuthLock)
+		return
+	}
 	if m.ID == 0 {
 		switch m.Event {
 		case "auth":

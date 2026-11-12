@@ -42,6 +42,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
@@ -100,7 +101,10 @@ func zcodeWhen(v any) *time.Time {
 
 // zcodeOwnTeam is ZCode's own account when ZCode is switched to a team's
 // plan: the project it picked and the sign-in its key is found with.
-func zcodeOwnTeam(store map[string]string, secret []byte) (zcodeKey, bool) {
+func zcodeOwnTeam(store map[string]string, secret []byte, family, active, uid string) (zcodeKey, bool) {
+	if family != "zai" && family != "bigmodel" || uid == "" {
+		return zcodeKey{}, false
+	}
 	home, _ := os.UserHomeDir()
 	var set struct {
 		Domain string `json:"providerFamilyDomain"`
@@ -108,49 +112,61 @@ func zcodeOwnTeam(store map[string]string, secret []byte) (zcodeKey, bool) {
 			Kind    string `json:"kind"`
 			Org     string `json:"organizationId"`
 			Project string `json:"projectId"`
+			Product string `json:"productId"`
 		} `json:"providerFamilyConnectionSelections"`
 		Legacy map[string]string `json:"modelProviderFamilySelectedKeys"` // before providerFamilyConnectionSelections (migrateLegacyAccountConnectionSettings)
 	}
 	if !readJSON(filepath.Join(appdir.ZCodeHome(home), ".zcode", "v2", "setting.json"), &set) {
 		return zcodeKey{}, false
 	}
-	families := []string{"zai", "bigmodel"}
-	if set.Domain == "zai" || set.Domain == "bigmodel" {
-		families = []string{set.Domain}
+	if (set.Domain == "zai" || set.Domain == "bigmodel") && set.Domain != family {
+		return zcodeKey{}, false
 	}
-	for _, fam := range families {
-		org, project := "", ""
+	for _, fam := range []string{family} {
+		org, project, product := "", "", ""
 		if s, ok := set.Sel[fam]; ok {
 			if s.Kind == "team-coding-plan" {
-				org, project = strings.TrimSpace(s.Org), strings.TrimSpace(s.Project)
+				org, project, product = strings.TrimSpace(s.Org), strings.TrimSpace(s.Project), strings.TrimSpace(s.Product)
 			}
 		} else if rest, ok := strings.CutPrefix(strings.TrimSpace(set.Legacy[fam]), "team-plan:builtin:"+fam+"-coding-plan:"); ok {
 			if parts := strings.Split(rest, ":"); len(parts) == 3 {
+				product, _ = url.PathUnescape(parts[0])
 				org, _ = url.PathUnescape(parts[1])
 				project, _ = url.PathUnescape(parts[2])
 			}
 		}
-		if org == "" || project == "" {
+		if org == "" || project == "" || product == "" {
 			continue
 		}
-		v, ok := store["oauth:"+fam+":access_token"]
-		if !ok {
-			continue
+		token := ""
+		if active == fam {
+			token = zcodeStoreValue(store, secret, "oauth:"+active+":access_token")
 		}
-		tok, ok := zcodeDecrypt(secret, v)
-		if tok = strings.TrimSpace(tok); !ok || tok == "" {
-			continue
-		}
-		if jv, ok := store["zcodejwttoken"]; ok && fam == "bigmodel" {
-			if jwt, ok := zcodeDecrypt(secret, jv); ok && strings.TrimSpace(jwt) == tok {
-				continue // a stale token ZCode won't use either
+		if fam == "bigmodel" {
+			var linked struct {
+				UserID      string `json:"userId"`
+				CustomerID  string `json:"customerId"`
+				AccessToken string `json:"accessToken"`
 			}
+			if json.Unmarshal([]byte(zcodeStoreValue(store, secret, "oauth:linked_bigmodel")), &linked) == nil &&
+				strings.TrimSpace(linked.UserID) == uid && strings.TrimSpace(linked.CustomerID) != "" && strings.TrimSpace(linked.AccessToken) != "" {
+				token = strings.TrimSpace(linked.AccessToken)
+			}
+		}
+		if token == "" {
+			continue
+		}
+		jwt := zcodeStoreValue(store, secret, "zcodejwttoken")
+		token = strings.TrimSpace(strings.TrimPrefix(token, "Bearer "))
+		jwt = strings.TrimSpace(strings.TrimPrefix(jwt, "Bearer "))
+		if token == jwt {
+			continue // a ZCode session is not a business credential
 		}
 		base := ZCodeZaiBase
 		if fam == "bigmodel" {
 			base = ZCodeBigModelBase
 		}
-		return zcodeKey{Base: base, Token: tok, Org: org, Project: project}, true
+		return zcodeKey{Base: base, Token: token, Org: org, Project: project}, true
 	}
 	return zcodeKey{}, false
 }

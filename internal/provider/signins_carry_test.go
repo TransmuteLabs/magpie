@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -450,4 +452,175 @@ func TestKnownRotatingSignInsStayWithNoPluginListed(t *testing.T) {
 	if _, ok := s.Plugins["kiro"]; !ok {
 		t.Fatal("a plain sign-in stopped being carried")
 	}
+}
+
+func TestZCodeCarryRestoresSameNameDistinctSelections(t *testing.T) {
+	signIn(t)
+	entry := func(kind string) (json.RawMessage, string) {
+		state := map[string]any{"version": 1, "site": "zai", "uid": "user-1", "kind": kind}
+		if kind == "team" {
+			state["org"], state["project"], state["product"] = "org", "project", "product"
+		}
+		refresh, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth := map[string]any{
+			"type": "oauth", "uid": "user-1", "accountId": "Alice",
+			"refresh": string(refresh),
+		}
+		org, project, product := "", "", ""
+		if kind == "team" {
+			org, project, product = "org", "project", "product"
+		}
+		tuple, err := json.Marshal([]string{"https://api.z.ai", "https://zcode.z.ai", "zai", "user-1", kind, org, project, product})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(tuple)
+		scope := hex.EncodeToString(sum[:])
+		auth["accountScope"] = scope
+		raw, err := json.Marshal(auth)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := plugin.AuthZCodeScope(raw); !ok || got != scope {
+			t.Fatalf("selection scope = %q, valid=%v, want %q", got, ok, scope)
+		}
+		return raw, scope
+	}
+	personal, personalScope := entry("individual")
+	team, teamScope := entry("team")
+	local := &SignIns{Plugins: map[string]json.RawMessage{"zcode": personal}}
+	remote := &SignIns{Plugins: map[string]json.RawMessage{"zcode": team}}
+	shared, _, hashes := MergeSignIns(local, remote, nil)
+	if len(shared.Plugins) != 2 || len(hashes) != 2 {
+		t.Fatalf("same-name selections were collapsed: %d records, %d identities", len(shared.Plugins), len(hashes))
+	}
+	result, err := RestoreSignIns(shared)
+	if err != nil || result.Added != 2 {
+		t.Fatalf("restoring selections: %+v, %v", result, err)
+	}
+	auth, err := plugin.AuthEntries()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopes := map[string]bool{}
+	for key, raw := range auth {
+		if plugin.ProviderOf(key) != "zcode" {
+			continue
+		}
+		var value struct {
+			Scope string `json:"accountScope"`
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			t.Fatal(err)
+		}
+		scopes[value.Scope] = true
+	}
+	if !scopes[personalScope] || !scopes[teamScope] || len(scopes) != 2 {
+		t.Fatalf("restored scopes: %v", scopes)
+	}
+
+	t.Run("distinct legacy keys", func(t *testing.T) {
+		signIn(t)
+		local := &SignIns{Plugins: map[string]json.RawMessage{
+			"zcode": json.RawMessage(`{"type":"api","accountId":"Alice","key":"legacy-alpha"}`),
+		}}
+		remote := &SignIns{Plugins: map[string]json.RawMessage{
+			"zcode": json.RawMessage(`{"type":"api","accountId":"Alice","key":"legacy-beta"}`),
+		}}
+		merged, _, _ := MergeSignIns(local, remote, nil)
+		if len(merged.Plugins) != 2 {
+			t.Fatalf("two legacy keys with one label collapsed: %+v", merged.Plugins)
+		}
+		result, err := RestoreSignIns(merged)
+		if err != nil || result.Added != 2 {
+			t.Fatalf("restoring both legacy keys: %+v, %v", result, err)
+		}
+		entries, err := plugin.AuthEntries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys := map[string]bool{}
+		for slot, raw := range entries {
+			if plugin.ProviderOf(slot) != "zcode" {
+				continue
+			}
+			var auth struct {
+				Key string `json:"key"`
+			}
+			if err := json.Unmarshal(raw, &auth); err != nil {
+				t.Fatal(err)
+			}
+			keys[auth.Key] = true
+		}
+		if len(keys) != 2 || !keys["legacy-alpha"] || !keys["legacy-beta"] {
+			t.Fatalf("restored legacy keys: %v", keys)
+		}
+	})
+
+	t.Run("invalid native scopes and token rotation", func(t *testing.T) {
+		signIn(t)
+		raw := func(value map[string]any) json.RawMessage {
+			t.Helper()
+			b, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+		old := zcodeScopedAuth(t, "Alice", "individual")
+		old["access"], old["expires"] = "personal-old", int64(1000)
+		rotated := zcodeScopedAuth(t, "Alice", "individual")
+		rotated["access"], rotated["expires"], rotated["accountEpoch"] = "personal-new", int64(9000), "epoch-2"
+		team := zcodeScopedAuth(t, "Alice", "team")
+		team["access"], team["expires"] = "team", int64(5000)
+		malformed := zcodeScopedAuth(t, "Alice", "individual")
+		malformed["refresh"], malformed["access"] = "{", "malformed"
+		wrongUID := zcodeScopedAuth(t, "Alice", "individual")
+		wrongUID["uid"], wrongUID["access"] = "different-user", "wrong-uid"
+		wrongScope := zcodeScopedAuth(t, "Alice", "individual")
+		wrongScope["accountScope"], wrongScope["access"] = "contradictory-scope", "wrong-scope"
+		local := &SignIns{Plugins: map[string]json.RawMessage{
+			"zcode": raw(old), "zcode#team": raw(team), "zcode#malformed": raw(malformed),
+		}}
+		remote := &SignIns{Plugins: map[string]json.RawMessage{
+			"zcode": raw(rotated), "zcode#uid": raw(wrongUID), "zcode#scope": raw(wrongScope),
+		}}
+		merged, plan, _ := MergeSignIns(local, remote, nil)
+		if len(merged.Plugins) != 5 {
+			t.Fatalf("merge collapsed a selection or invalid native record: %+v", merged.Plugins)
+		}
+		if result, err := RestoreSignIns(local); err != nil || result.Added != 3 {
+			t.Fatalf("installing local selections: %+v, %v", result, err)
+		}
+		if result, err := ApplySignIns(plan); err != nil || result.Updated != 1 || result.Added != 2 {
+			t.Fatalf("applying rotated token and separate records: %+v, %v", result, err)
+		}
+		if result, err := RestoreSignIns(&SignIns{Plugins: map[string]json.RawMessage{"zcode": raw(old)}}); err != nil || result.Updated != 0 || result.Kept != 1 {
+			t.Fatalf("older backup replaced rotated token: %+v, %v", result, err)
+		}
+		entries, err := plugin.AuthEntries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		access := map[string]bool{}
+		for slot, auth := range entries {
+			if plugin.ProviderOf(slot) != "zcode" {
+				continue
+			}
+			var value struct {
+				Access string `json:"access"`
+			}
+			if err := json.Unmarshal(auth, &value); err != nil {
+				t.Fatal(err)
+			}
+			access[value.Access] = true
+		}
+		if len(access) != 5 || !access["personal-new"] || !access["team"] ||
+			!access["malformed"] || !access["wrong-uid"] || !access["wrong-scope"] || access["personal-old"] {
+			t.Fatalf("restore lost a separate selection or accepted old token: %v", access)
+		}
+	})
 }

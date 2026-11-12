@@ -5,7 +5,7 @@ const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
 const ok = (data, code = 0) => Response.json({ code, data })
 const init = () => ({ flow_id: "flow", authorize_url: "https://login.example/authorize?state=expected-state", expires_at: Date.now() / 1000 + 300, poll_interval_sec: 1 })
-function fixture(site, { initData = init(), pollData, tokenData, profileData, initCode = 0, pollStatuses = [], customerUnavailable = false } = {}) {
+function fixture(site, { initData = init(), pollData, tokenData, profileData, initCode = 0, pollStatuses = [], customerUnavailable = false, businessStatus = 200 } = {}) {
   const calls = []
   globalThis.fetch = async (input, options = {}) => {
     const u = new URL(String(input)), payload = options.body ? JSON.parse(options.body) : null
@@ -17,7 +17,8 @@ function fixture(site, { initData = init(), pollData, tokenData, profileData, in
     }
     if (u.pathname === "/api/v1/oauth/token") return ok(tokenData ?? { token: "zcode", user: { user_id: "u1", name: "Ada" }, [site]: { access_token: "oauth" } })
     if (u.pathname === "/api/v1/oauth/profile") return ok(profileData ?? { user: { user_id: "u1", name: "Ada" } })
-    if (u.pathname === "/api/auth/z/login") return ok({ accessToken: "business" })
+    if (u.pathname === "/api/auth/z/login") return businessStatus === 200
+      ? ok({ accessToken: "business", expires_in: 600 }) : new Response("{}", { status: businessStatus })
     if (u.pathname.endsWith("/billing/balance")) return ok({ plans: [], balances: [] })
     if (u.pathname.endsWith("/getCustomerInfo")) return customerUnavailable ? new Response("unavailable", { status: 503 }) : ok({ organizations: [{ organizationId: "o", projects: [{ projectId: "p", projectType: 1 }] }] })
     if (u.pathname.endsWith("/api_keys")) return ok([{ apiKey: "key", name: "zcode-api-key" }])
@@ -35,6 +36,7 @@ async function method(label) {
 test("CLI polling retains distinct OAuth materials for both families", async () => {
   for (const [site, label] of [["zai", "ZCode: Z.ai GLM Coding Plan"], ["bigmodel", "ZCode: BigModel (智谱) GLM Coding Plan"]]) {
     const calls = fixture(site)
+    const began = Date.now()
     const flow = await (await method(label)).authorize()
     const [a, b] = await Promise.all([flow.callback(), flow.callback()])
     expect(a).toEqual(b)
@@ -43,11 +45,38 @@ test("CLI polling retains distinct OAuth materials for both families", async () 
     expect(a.accountScope).toBeTruthy()
     const state = JSON.parse(a.refresh)
     expect(state).toMatchObject({ site, kind: "individual", uid: "u1", zcodeUserId: "u1", jwt: "zcode",
-      ...(site === "zai" ? { oauthToken: "oauth" } : { business: "oauth" }) })
+      ...(site === "zai" ? { oauthToken: "oauth", business: "business" } : { business: "oauth" }) })
+    if (site === "zai") {
+      expect(state.businessExpiresAt).toBeGreaterThanOrEqual(began + 600_000)
+      expect(state.businessExpiresAt).toBeLessThanOrEqual(Date.now() + 600_000)
+      expect(calls.filter((c) => c.url.endsWith("/api/auth/z/login"))).toHaveLength(1)
+    }
     if (site === "bigmodel") expect(state.refreshToken).toBe("refresh")
     expect(calls.filter((c) => c.url.includes("/oauth/cli/poll/")).length).toBe(1)
     expect(calls.some((c) => c.url.includes("/copy/"))).toBe(false)
   }
+})
+
+test("Z.ai callback persists business material before accepting the sign-in", async () => {
+  const calls = fixture("zai")
+  const flow = await (await method("ZCode: Z.ai paste callback URL")).authorize()
+  const authorize = new URL(flow.url), callback = new URL(authorize.searchParams.get("redirect_uri"))
+  callback.searchParams.set("state", authorize.searchParams.get("state"))
+  callback.searchParams.set("code", "one-time-code")
+  const result = await flow.callback(callback.href)
+  expect(result.type).toBe("success")
+  expect(JSON.parse(result.refresh)).toMatchObject({ site: "zai", uid: "u1", jwt: "zcode", oauthToken: "oauth", business: "business" })
+  expect(calls.filter((call) => call.url.endsWith("/api/auth/z/login"))).toHaveLength(1)
+})
+
+test("a failed Z.ai business exchange cannot become a successful paid sign-in", async () => {
+  const calls = fixture("zai", { businessStatus: 503 })
+  const flow = await (await method("ZCode: Z.ai GLM Coding Plan")).authorize()
+  const result = await flow.callback()
+  expect(result.type).toBe("failed")
+  expect(result.error).toContain("project_token_login_failed")
+  expect(calls.filter((call) => call.url.endsWith("/api/auth/z/login"))).toHaveLength(1)
+  expect(calls.some((call) => call.url.endsWith("/access_tokens"))).toBe(false)
 })
 
 test("polling rejects invalid init timing, state, code and incomplete ready responses", async () => {

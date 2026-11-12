@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/yetone/magpie/internal/netproxy"
@@ -64,13 +63,13 @@ var staleReads struct {
 	m map[string]bool
 }
 
-func markStaleRead(agent, user string) {
+func markStaleRead(key string) {
 	staleReads.Lock()
 	defer staleReads.Unlock()
 	if staleReads.m == nil {
 		staleReads.m = map[string]bool{}
 	}
-	staleReads.m[agent+"/"+strings.ToLower(user)] = true
+	staleReads.m[key] = true
 }
 
 // takeStaleRead says whether key is to be read though not asked, and

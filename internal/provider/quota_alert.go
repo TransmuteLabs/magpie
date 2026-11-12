@@ -75,13 +75,15 @@ func dueAlerts(qs []SubscriptionQuota, marks map[string]alertMark, pct int, bal 
 	var out []QuotaAlert
 	seen := map[string]bool{}
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil {
+		if q.Error != "" || q.AsOf != nil || q.ReadDeferred || q.accountUnverified {
 			for k := range marks {
 				if strings.HasPrefix(k, alertPrefix(q)) {
 					seen[k] = true
 				}
 			}
-			continue
+			if !q.Partial || q.AsOf != nil || q.ReadDeferred || q.accountUnverified {
+				continue
+			}
 		}
 		// the pools' own windows stand in for the models' drawing on them,
 		// so a pool is told of once, not once per model
@@ -106,7 +108,7 @@ func dueAlerts(qs []SubscriptionQuota, marks map[string]alertMark, pct int, bal 
 			marks[key] = alertMark{At: now, Until: resets}
 			out = append(out, QuotaAlert{Provider: q.Provider, Name: q.Name, User: q.User, Window: w.Name, Used: w.Used, ResetsAt: resets})
 		}
-		if q.Balance == "" {
+		if q.Partial || q.Balance == "" {
 			continue
 		}
 		key := alertPrefix(q) + "b"
@@ -164,7 +166,7 @@ func dueReminders(qs []SubscriptionQuota, marks map[string]alertMark, lead time.
 		return true
 	}
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil {
+		if q.Error != "" && !q.Partial || q.AsOf != nil || q.ReadDeferred || q.accountUnverified {
 			continue
 		}
 		for _, w := range PooledWindows(q.Windows) {
@@ -181,7 +183,7 @@ func dueReminders(qs []SubscriptionQuota, marks map[string]alertMark, lead time.
 			}
 			out = append(out, QuotaAlert{Provider: q.Provider, Name: q.Name, User: q.User, Window: w.Name, Used: w.Used, ResetsAt: at, Kind: "renews"})
 		}
-		if r := q.Resets; r != nil && r.Count > 0 && r.Until != nil && due(alertPrefix(q)+"c", *r.Until) {
+		if r := q.Resets; !q.Partial && r != nil && r.Count > 0 && r.Until != nil && due(alertPrefix(q)+"c", *r.Until) {
 			at := *r.Until
 			out = append(out, QuotaAlert{Provider: q.Provider, Name: q.Name, User: q.User, ResetsAt: &at, Kind: "expires", Credits: r.Count})
 		}
@@ -190,7 +192,12 @@ func dueReminders(qs []SubscriptionQuota, marks map[string]alertMark, lead time.
 }
 
 // alertPrefix begins the keys of one card's marks: its provider and account.
-func alertPrefix(q SubscriptionQuota) string { return q.Provider + "|" + q.User + "|" }
+func alertPrefix(q SubscriptionQuota) string {
+	if q.AccountIdentity != "" {
+		return q.Provider + "|@plugin:" + q.AccountIdentity + "|"
+	}
+	return q.Provider + "|" + q.User + "|"
+}
 
 // sameRun is whether a window marked as resetting at was and one read now
 // resetting at now are one run of it. A window that says no reset is taken

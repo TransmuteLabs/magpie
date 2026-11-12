@@ -123,18 +123,19 @@ func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
 	c := &loginUsageCache
 	c.Lock()
 	for _, l := range ls {
-		k := l.Agent + "/" + strings.ToLower(l.User)
+		k := loginReadingKey(l)
 		if e, ok := c.m[k]; ok {
 			read[k] = e.read
 		}
 	}
 	c.Unlock()
-	out := slices.Clone(cards)
+	out := slices.DeleteFunc(slices.Clone(cards), func(q SubscriptionQuota) bool { return !currentPluginQuota(q) })
 	for _, l := range ls {
 		id := loginProvider(l)
-		q, ok := read[l.Agent+"/"+strings.ToLower(l.User)]
+		q, ok := read[loginReadingKey(l)]
 		i := slices.IndexFunc(out, func(x SubscriptionQuota) bool {
-			return x.From == "" && x.Provider == id && strings.EqualFold(x.User, l.User)
+			return x.From == "" && x.Provider == id && strings.EqualFold(x.User, l.User) &&
+				(l.pluginSlot == "" || x.AccountIdentity == l.pluginIdentity && x.AccountGeneration == l.pluginGeneration)
 		})
 		if i >= 0 {
 			// the same reading (perLogin's) or a later one
@@ -146,7 +147,7 @@ func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
 			continue
 		}
 		if !ok {
-			if q, ok = lastReading(id + "/" + strings.ToLower(l.User)); !ok {
+			if q, ok = lastReading(loginLastKey(l)); !ok {
 				q = SubscriptionQuota{Plan: l.Plan, Windows: []QuotaWindow{}}
 			}
 		}
@@ -154,6 +155,7 @@ func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
 			continue
 		}
 		f := accountCard(l.Agent)
+		q = quotaForLogin(q, l)
 		q.Provider, q.Name, q.Icon, q.User = id, f.name, f.icon, l.User
 		out = append(out, q)
 	}

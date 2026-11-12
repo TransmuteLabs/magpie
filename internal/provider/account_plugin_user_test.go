@@ -100,8 +100,12 @@ func TestPluginAccountShownByItsUsageUser(t *testing.T) {
 	forget()
 	shown(phone, "after a restart")
 	// a read that failed holds the account's own id, not the phone
+	login, ok := pluginLoginByUser("plugin:fakeco", iam)
+	if !ok {
+		t.Fatal("plugin account disappeared")
+	}
 	loginUsageCache.Lock()
-	loginUsageCache.m = map[string]loginUsageEntry{"plugin:fakeco/" + iam: {at: time.Now(), q: SubscriptionQuota{Provider: id, User: iam, Error: "fetch failed"}}}
+	loginUsageCache.m = map[string]loginUsageEntry{loginReadingKey(login): {at: time.Now(), q: SubscriptionQuota{Provider: id, User: iam, Error: "fetch failed"}}}
 	loginUsageCache.Unlock()
 	shown(phone, "a failed read")
 	// the user's own name is never overridden

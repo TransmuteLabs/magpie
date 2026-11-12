@@ -171,7 +171,7 @@ func TestPluginProvider(t *testing.T) {
 	}
 
 	// a second account: the first rate limited, a request goes on the second
-	if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, "k2"); err != nil {
+	if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, "k2", provider.SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if ls := provider.Logins("fakeco"); len(ls) != 2 || !ls[1].On {

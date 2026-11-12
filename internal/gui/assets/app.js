@@ -12735,7 +12735,10 @@ async function pluginKey(sub, key) {
   signing = { ...flow, busy: true };
   renderProviders();
   try {
-    const st = await api("plugin-signin", { provider: sub.pid, method: flow.method, inputs: flow.inputs, key });
+    const body = { provider: sub.pid, method: flow.method, inputs: flow.inputs, key };
+    if (flow.forUser) body.user = flow.forUser;
+    if (flow.picked != null) body.proxy = flow.picked;
+    const st = await api("plugin-signin", body);
     if (signing?.agent === sub.agent) signedIn(st);
   } catch (e) {
     if (signing?.agent === sub.agent) {
@@ -13574,7 +13577,10 @@ function renderAccounts(a, p) {
       }
     }
     if (quota && !l.lapsed) line.querySelector(".plan").after(accountRefresh(a.agent, p, l.user));
-    const aq = accountQuota(l.lapsed ? { [l.user]: { error: t(l.lapsed) } } : quota, l.user, capFor, p ? (m, w) => windowCapMeter(m, p, l.user, w) : null, a.agent);
+    const shownQuota = l.lapsed
+      ? { [l.user]: quota?.[l.user]?.partial ? { ...quota[l.user], error: quota[l.user].error || t(l.lapsed) } : { error: t(l.lapsed) } }
+      : quota;
+    const aq = accountQuota(shownQuota, l.user, capFor, p ? (m, w) => windowCapMeter(m, p, l.user, w) : null, a.agent);
     // its plan's end, under its line (danzi002)
     if (l.until) aq.append(Object.assign(planSpan({ until: l.until }), { className: "aq-until" }));
     // Check in now (xwoffice_91592)
@@ -14080,9 +14086,19 @@ function accountQuota(data, user, capFor = () => 0, settable = null, prov) {
     return line;
   }
   const q = data[user];
-  if (q?.asOf && !q.error) {
+  if (q?.asOf) {
     line.classList.add("stale");
     line.append(el("span", "aq-asof", asOfText(q)));
+  } else if (q?.readDeferred) {
+    const when = readWhen(q);
+    if (when) line.append(when);
+  }
+  if (q?.error && q.partial) {
+    const warning = el("span", "aq-none", quotaError(q.error, q));
+    warning.title = q.error;
+    line.append(warning);
+    line.title = q.error;
+    for (const observation of q.observations || []) line.append(zcodeControl(q, "observation", observation));
   }
   if ((q?.resets?.count || q?.resets?.pending) && !q.error) {
     // Codex's are used from here too, as on Usage (roamlog on X)
@@ -14103,10 +14119,12 @@ function accountQuota(data, user, capFor = () => 0, settable = null, prov) {
     line.append(el("span", "aq-none", [...noPlan, t("Balance") + " " + q.balance].join(" · ")));
     return line;
   }
-  if (!q || q.error || !q.windows?.length) {
-    const none = el("span", "aq-none", [...noPlan, q?.error ? quotaError(q.error, q) : t("No allowance reported")].join(" · "));
-    line.append(none);
-    if (q?.error) line.title = none.title = q.error;
+  if (!q || q.error && !q.partial || !q.windows?.length) {
+    if (!q?.partial || !q.error) {
+      const none = el("span", "aq-none", [...noPlan, q?.error ? quotaError(q.error, q) : t("No allowance reported")].join(" · "));
+      line.append(none);
+      if (q?.error) line.title = none.title = q.error;
+    }
     return line;
   }
   if (q.balance) {
@@ -14121,7 +14139,7 @@ function accountQuota(data, user, capFor = () => 0, settable = null, prov) {
   const ws = familyWindows(counted);
   if (!ws.length) { line.append(el("span", "aq-none", t("Unlimited"))); return line; }
   if (ws.some((w) => w.members)) return poolLine(line, ws, q, capFor, settable);
-  line.title = ws.slice(2).map((w) => w.tiers ? tiersText(w) : t(w.name) + " " + quotaText(w)).join(ws !== counted ? "\n" : " · ");
+  line.title = tipLines(line.title, ws.slice(2).map((w) => w.tiers ? tiersText(w) : t(w.name) + " " + quotaText(w)).join(ws !== counted ? "\n" : " · "));
   if (q.asOf) line.title = tipLines(line.title, asOfText(q));
   for (const w of ws.slice(0, 2)) {
     const used = to100(w.used);
@@ -15355,6 +15373,7 @@ function openProtoMenu(anchor, opts, value, choose, head = "Protocol this key sp
   const items = opts.map((o) => {
     const b = el("button", "pm-item" + (o.group ? " pm-group" : ""));
     b.type = "button";
+    b.disabled = !!o.disabled;
     if (o.title) b.title = o.title;
     b.setAttribute("role", o.group || multi && o.v && o.v !== "\x00" || typeof o.ticked === "boolean" ? "menuitemcheckbox" : "menuitemradio");
     const words = el("span", "pm-words");
@@ -15379,7 +15398,7 @@ function openProtoMenu(anchor, opts, value, choose, head = "Protocol this key sp
         b.focus(NO_SCROLL);
       }
     };
-    hoverFocus(b);
+    if (!b.disabled) hoverFocus(b);
     box.append(b);
     return b;
   });
@@ -16156,7 +16175,7 @@ function renderQuotas(lazy) {
       // when the windows were read: "Updated 3 min ago", or the time of
       // ones standing in for a reading that failed just now (#802; a
       // balance alone says it in its row)
-      const read = !brief && sub.windows?.length && !sub.error && readWhen(shownSub, true);
+      const read = !brief && (sub.windows?.length || sub.partial && sub.observations?.length) && (!sub.error || sub.partial) && readWhen(shownSub, true);
       if (read) card.append(read);
       if (!brief && !history && (sub.resets?.count || sub.resets?.pending)) {
         const r = el("div", "quota-resets");
@@ -17130,7 +17149,7 @@ let panelZeroOpen = kept("panelZeroOpen", false);
 // any balance 0 or less (runking on Discord); not a failed or old one, a
 // percent, a text or unlimited window, Codex's credits, resets or a check-in
 function quotaAtZero(q) {
-  if (q.error || q.asOf || q.resets?.count || q.checkins || creditsOn(q)) return false;
+  if (q.error || q.asOf || q.readDeferred || q.resets?.count || q.checkins || creditsOn(q)) return false;
   const ns = (q.balanceParts?.length ? q.balanceParts.map((p) => p.text) : q.balance ? [q.balance] : []).map((s) => String(s || "").match(/^(-?)[^\d-]*(-?)(\d[\d,]*(?:\.\d+)?)[^\d%]*$/));
   const ws = q.windows || [];
   return ws.length + ns.length > 0 && ns.every((m) => m && (m[1] || m[2] || !(+m[3].replace(/,/g, "") > 0)))
@@ -17599,7 +17618,7 @@ function renderPanelQuota(lazy) {
     }
     // whether the rings say what is used or what is left, once above them,
     // turned here as by a ring (#184)
-    if (qs.some((q) => !q.error && q.windows?.length)) {
+    if (qs.some((q) => (!q.error || q.partial) && q.windows?.length)) {
       const m = el("button", "pq-mode", t(quotaLeft ? "Left" : "Used"));
       m.title = t(quotaLeft ? "Show how much of each window is used" : "Show how much of each window is left");
       m.onclick = () => setQuotaLeft(!quotaLeft);
@@ -17750,14 +17769,24 @@ function panelQuotaCard(q, first = false) {
     card.classList.add("err");
     card.append(pqLine(quotaError(q.error, q), q, " err", q.error));
     card.title += "\n" + q.error;
-    appendZCodeControls(card, q, "panel");
-    return card;
+    if (!q.partial) {
+      appendZCodeControls(card, q, "panel");
+      return card;
+    }
   }
   if (q.asOf) {
     card.classList.add("stale");
     card.title += "\n" + asOfText(q);
   }
   const balance = q.balance && balanceRow(q, "What is left on the account besides its windows", false);
+  if (q.partial && !q.windows?.length) {
+    if (balance) card.append(balance);
+    if (q.asOf) card.append(el("span", "pq-sub pq-asof", asOfText(q, true)));
+    else if (q.readAt || q.readDeferred) card.append(readWhen(q));
+    appendZCodeControls(card, q, "panel");
+    for (const observation of q.observations || []) card.append(zcodeControl(q, "observation", observation));
+    return card;
+  }
   // a pool's 5-hour and weekly rings, every pool's (a third pool once left
   // Claude's out: 01huadalang on Discord), else three
   const fam = familyWindows(q.windows.filter((w) => !w.unlimited && !quotaNoShare(w)));
@@ -17765,7 +17794,10 @@ function panelQuotaCard(q, first = false) {
   if (!fam.length && (tx || q.windows.some((w) => w.unlimited))) {
     card.append(pqLine(tx || t("Unlimited"), q));
     if (balance) card.append(balance);
+    if (q.asOf) card.append(el("span", "pq-sub pq-asof", asOfText(q, true)));
+    else if (q.partial && (q.readAt || q.readDeferred)) card.append(readWhen(q));
     appendZCodeControls(card, q, "panel");
+    for (const observation of q.observations || []) card.append(zcodeControl(q, "observation", observation));
     return card;
   }
   const ws = fam.slice(0, fam.some((w) => w.members) ? Math.max(4, fam.filter((w) => w.members).length) : 3);
@@ -17814,6 +17846,7 @@ function panelQuotaCard(q, first = false) {
   const spark = ws[0] && !ws[0].tiers ? quotaSpark(q, ws[0]) : null;
   if (spark) card.append(spark);
   if (q.asOf) card.append(el("span", "pq-sub pq-asof", asOfText(q, true)));
+  else if (q.partial && (q.readAt || q.readDeferred)) card.append(readWhen(q));
   if (q.resets?.count || q.resets?.pending) {
     const r = el("div", "pq-resets");
     r.append(resetsWords(q.resets, q));
@@ -17927,7 +17960,7 @@ function canUseReset(q) {
 
 function hasZCodeUser(q) {
   const id = q?.provider?.split("/").pop();
-  return !!q?.user && (id === "zcode" || id === "zcode-plugin");
+  return !!q?.user && id === "zcode";
 }
 
 function zcodeControl(q, kind, observation) {
@@ -18479,6 +18512,10 @@ function readWhen(q, refresh = false) {
   } else if (q.asOf) {
     s = el("div", "quota-read stale", asOfText(q));
     s.title = asOfText(q);
+  } else if (q.readDeferred) {
+    const text = q.readAt ? asOfText({ ...q, asOf: q.readAt }) : t("As of {when} — not refreshed this time", { when: t("Unknown") });
+    s = el("div", "quota-read stale", text);
+    s.title = text;
   } else if (q.readAt) {
     s = el("div", "quota-read");
     const when = el("span", "quota-ago", t("Updated {when}", { when: ago(q.readAt) }));
@@ -18738,9 +18775,10 @@ function quotaWindows(sub) {
     box.append(b, failed());
     return box;
   }
-  if (sub.error) return failed();
+  if (sub.error && !sub.partial) return failed();
   const windows = el("div", "quota-windows");
-  for (const w of sub.windows) {
+  if (sub.error) windows.append(failed());
+  for (const w of sub.windows || []) {
     const quota = el("div", "quota");
     const labels = el("div", "quota-labels");
     // the count and its share in parts, so a count too long for its
@@ -20675,7 +20713,9 @@ function renderTrayUsage(s, keep) {
     if (!pill.isConnected) return;
     // the Usage page's cards (keyCards, #1658), one row an id; not one
     // whose windows are all text, with no figure to draw (LuckymanJC)
-    const cards = keyCards((quotas || []).filter((q) => !q.error && (q.windows?.some((w) => !w.text) || q.balance)))
+    const cards = keyCards((quotas || []).filter((q) => (!q.error || q.partial && !q.asOf && !q.readDeferred &&
+      q.windows?.some((w) => w.trayKind && !w.text && !w.unlimited && w.balance == null && !(w.display && !w.used && !w.limit))) &&
+      (q.windows?.some((w) => !w.text) || q.balance)))
       .filter((q, i, all) => all.findIndex((c) => trayCardID(c) === trayCardID(q)) === i);
     const opts = [{ v: "", name: "Off", note: "" }];
     for (const q of cards) {
@@ -20683,7 +20723,7 @@ function renderTrayUsage(s, keep) {
       // it is now, before each by name
       if (q.user && !opts.some((o) => o.v === q.provider + IN_USE) && cards.filter((c) => c.provider === q.provider).length > 1)
         opts.push({ v: q.provider + IN_USE, name: q.name, note: "Account in use" });
-      opts.push({ v: trayCardID(q), name: q.name, note: [planName(q.plan), q.alias, q.user].filter(Boolean).join(" · ") });
+      opts.push({ v: trayCardID(q), name: q.name, note: [planName(q.plan), q.alias, q.user, q.error].filter(Boolean).join(" · ") });
     }
     // magpie's own count of every agent's requests, as the Usage page's
     // Overview has it: tokens over cost (#1984)

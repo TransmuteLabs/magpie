@@ -269,9 +269,10 @@ func SetAffinity(id, affinity string) error {
 
 var usedCache struct {
 	sync.Mutex
-	m       map[string]map[string]Allowance // agent → user → allowance
-	at      map[string]time.Time
-	loading map[string]chan struct{} // closed when the fetch in flight is done
+	m        map[string]map[string]Allowance // agent → user → allowance
+	at       map[string]time.Time
+	loading  map[string]chan struct{}     // closed when the fetch in flight is done
+	bindings map[string]map[string]string // plugin agent → current user → slot/scope/generation
 	// renewed: the generation when an account's windows were started
 	// again. Read/reset order cannot use the clock: two events can have
 	// the same timestamp, even with its monotonic part.
@@ -853,16 +854,21 @@ func (l Limit) expiring(u float64, now, ends time.Time) (pace float64, at time.T
 // ago. Only the very first ask waits, and not for long. An account
 // missing is one not known yet.
 func Allowances(agent string) map[string]Allowance {
+	bindings, isPlugin := pluginUsageBindings(agent)
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
 		c.m, c.at, c.loading = map[string]map[string]Allowance{}, map[string]time.Time{}, map[string]chan struct{}{}
+	}
+	if isPlugin {
+		syncPluginAllowanceBindings(agent, bindings)
 	}
 	done := c.loading[agent]
 	if done == nil && time.Since(c.at[agent]) > time.Minute {
 		done = make(chan struct{})
 		c.loading[agent] = done
 		began := c.generation
+		captured := maps.Clone(bindings)
 		goRead(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -877,7 +883,16 @@ func Allowances(agent string) map[string]Allowance {
 					all[user] = a
 				}
 			}
+			current, currentPlugin := pluginUsageBindings(agent)
 			c.Lock()
+			if isPlugin && (!currentPlugin || !maps.Equal(captured, current) || !maps.Equal(c.bindings[agent], captured)) {
+				delete(c.m, agent)
+				c.at[agent] = time.Time{}
+				delete(c.loading, agent)
+				c.Unlock()
+				close(done)
+				return
+			}
 			now := time.Now()
 			// as old as its oldest reading: one the Usage page made 50s
 			// ago, taken here, is read again in 10s, not kept a minute
@@ -959,6 +974,12 @@ func Allowances(agent string) map[string]Allowance {
 		case <-time.After(firstWait):
 		}
 	}
+	if isPlugin {
+		current, _ := pluginUsageBindings(agent)
+		c.Lock()
+		syncPluginAllowanceBindings(agent, current)
+		c.Unlock()
+	}
 	c.Lock()
 	m, known := c.m[agent]
 	c.Unlock()
@@ -969,12 +990,55 @@ func Allowances(agent string) map[string]Allowance {
 	return m
 }
 
+// syncPluginAllowanceBindings is called with usedCache held. A reused name
+// must not inherit the previous slot's routing or freshness state.
+func syncPluginAllowanceBindings(agent string, current map[string]string) {
+	c := &usedCache
+	if c.bindings == nil {
+		c.bindings = map[string]map[string]string{}
+	}
+	if previous, ok := c.bindings[agent]; ok && maps.Equal(previous, current) {
+		return
+	}
+	c.bindings[agent] = maps.Clone(current)
+	delete(c.m, agent)
+	c.at[agent] = time.Time{}
+	for key := range c.seen {
+		if strings.HasPrefix(key, agent+"/") {
+			delete(c.seen, key)
+		}
+	}
+	for key := range c.read {
+		if strings.HasPrefix(key, agent+"/") {
+			delete(c.read, key)
+		}
+	}
+	for key := range c.heard {
+		if strings.HasPrefix(key, agent+"/") {
+			delete(c.heard, key)
+		}
+	}
+	for key := range c.renewed {
+		if strings.HasPrefix(key, agent+"/") {
+			delete(c.renewed, key)
+		}
+	}
+}
+
 // UsageRead is when user's allowance under agent was last read well, and
 // whether the last try to read it failed (or was held back); ok is false
 // when it hasn't been tried since magpie started. A careful provider holds
 // an account whose reading is too old or failed (Provider.CapCareful).
 func UsageRead(agent, user string) (at time.Time, failed, ok bool) {
 	c := &usedCache
+	if current, isPlugin := pluginUsageBindings(agent); isPlugin {
+		c.Lock()
+		if c.at == nil {
+			c.at = map[string]time.Time{}
+		}
+		syncPluginAllowanceBindings(agent, current)
+		c.Unlock()
+	}
 	c.Lock()
 	defer c.Unlock()
 	st, ok := c.read[agent+"/"+strings.ToLower(user)]
@@ -1155,8 +1219,11 @@ func forgetAllowance(agent, user string) {
 // has run out.
 func StaleAllowance(agent, user string) {
 	key := agent + "/" + strings.ToLower(user)
+	if l, ok := pluginLoginByUser(agent, user); ok {
+		key = loginReadingKey(l)
+	}
 	if readsAsked() {
-		markStaleRead(agent, user) // read though allowances are read only when asked (#1518)
+		markStaleRead(key) // read though allowances are read only when asked (#1518)
 	}
 	loginUsageCache.Lock()
 	delete(loginUsageCache.m, key)

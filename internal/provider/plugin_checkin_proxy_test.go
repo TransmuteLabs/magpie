@@ -71,7 +71,7 @@ func TestPluginCheckinGoesThroughItsProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"ck-direct", "ck-own"} {
-		if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, k); err != nil {
+		if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, k, SignInOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

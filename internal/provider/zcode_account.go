@@ -23,6 +23,7 @@ type ZCodeAccountChoice struct {
 	Account        string `json:"account"`
 	User           string `json:"user"`
 	Name           string `json:"name,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // ZCodeAccountChoices re-reads local sign-ins and enabled plugins without
@@ -48,6 +49,14 @@ func ZCodeAccountChoices() ([]ZCodeAccountChoice, bool) {
 				Provider: id, PluginProvider: pp.ID, Account: login.acct.Key,
 				User: login.User, Name: AccountNameOf(id, login.User),
 			})
+		}
+		for _, login := range sharedLogins() {
+			if login.Agent == pluginAgent(pp) && login.PluginRename != nil {
+				choices = append(choices, ZCodeAccountChoice{
+					Provider: id, PluginProvider: pp.ID, Account: login.Home,
+					User: login.User, Error: "account rename is pending; repair the account settings and retry",
+				})
+			}
 		}
 	}
 	return choices, true
@@ -175,13 +184,22 @@ func zcodeAccountKey(providerID, account string) (string, error) {
 	if !ok || pp.ID != "zcode" {
 		return "", fmt.Errorf("%s is not a native ZCode account provider", providerID)
 	}
+	logins := pluginLogins(pp)
 	for _, a := range pp.Accounts {
 		if a.Key == account {
+			if err := pendingPluginAccountError(pluginAgent(pp), a.Key); err != nil {
+				return "", err
+			}
 			return a.Key, nil
 		}
 	}
+	for _, l := range sharedLogins() {
+		if l.Agent == pluginAgent(pp) && l.PluginRename != nil && strings.EqualFold(l.User, account) {
+			return "", errors.New("account rename is pending; repair the account settings and retry")
+		}
+	}
 	match := ""
-	for _, a := range pluginLogins(pp) {
+	for _, a := range logins {
 		if strings.EqualFold(a.User, account) {
 			if match != "" && match != a.acct.Key {
 				return "", errors.New("account name is ambiguous; specify its exact account key")
@@ -225,6 +243,10 @@ func ZCodeAccountOperation(ctx context.Context, providerID, account, operation s
 		}
 	}
 	key, err := zcodeAccountKey(providerID, account)
+	if err != nil {
+		return plugin.AccountResult{}, err
+	}
+	ctx, err = ViaPluginAccount(ctx, providerID, key)
 	if err != nil {
 		return plugin.AccountResult{}, err
 	}

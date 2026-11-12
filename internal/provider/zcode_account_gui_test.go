@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
 )
 
@@ -67,6 +70,60 @@ func TestZCodeAccountChoicesFollowCurrentLocalAccounts(t *testing.T) {
 	choices, available = ZCodeAccountChoices()
 	if !available || len(choices) != 2 {
 		t.Fatalf("external plugin toggle changed intrinsic choices=%+v available=%v", choices, available)
+	}
+}
+
+func TestZCodeNativeControlUsesSelectedAccountProxy(t *testing.T) {
+	c := zcodeTestContext(t)
+	movedPlugin(t, "zcode", map[string]map[string]any{
+		"zcode":      zcodeScopedAuth(t, "Alice", "individual"),
+		"zcode#team": zcodeScopedAuth(t, "Alice", "team"),
+	})
+	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(key, "")
+	}
+	own, seen := recordingProxy(t)
+	pp, _ := PluginOf("zcode")
+	var user string
+	for _, l := range pluginLogins(pp) {
+		if l.acct.Key == "zcode#team" {
+			user = l.User
+		}
+	}
+	if user == "" {
+		t.Fatal("team account not listed")
+	}
+	setProxies(t, "zcode", "direct", map[string]string{accountKey(user): own.URL})
+	transport := &http.Transport{
+		Proxy: netproxy.Func,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != own.Listener.Addr().String() {
+				return nil, errors.New("proxy fixture refuses any non-proxy destination")
+			}
+			return (&net.Dialer{}).DialContext(ctx, network, address)
+		},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := Keyed(&http.Client{Transport: transport})
+	old := zcodeAccountRPC
+	zcodeAccountRPC = func(ctx context.Context, _, _ string, request plugin.AccountRequest) (plugin.AccountResult, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://vendor.invalid/"+request.Operation, nil)
+		if err != nil {
+			return plugin.AccountResult{}, err
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			return plugin.AccountResult{}, err
+		}
+		res.Body.Close()
+		return zcodeTestData(t, c, map[string]any{}), nil
+	}
+	t.Cleanup(func() { zcodeAccountRPC = old })
+	if _, err := ZCodeAccountOperation(context.Background(), "zcode", "zcode#team", "entitlement", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := seen(); len(got) != 2 || got[0] != "http://vendor.invalid/context" || got[1] != "http://vendor.invalid/entitlement" {
+		t.Fatalf("native control did not use the account proxy: %v", got)
 	}
 }
 

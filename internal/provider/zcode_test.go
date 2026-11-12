@@ -69,9 +69,41 @@ func TestZCodePlanKeyFromConfig(t *testing.T) {
 	}
 	// a key in credentials.json still comes first
 	writeFile(t, filepath.Join(dir, "credentials.json"), map[string]any{
+		"oauth:active_provider": zcodeEncrypt(t, "zai"),
+		"oauth:zai:user_info":   zcodeEncrypt(t, `{"user_id":"a","name":"Z.ai user"}`),
 		"account-provider:coding-plan:account:zai-individual-coding-plan:account:a:api-key": zcodeEncrypt(t, "own.secret"),
 	})
 	if _, k, _ := zcodeOwn(); k.Key != "own.secret" || k.Base != ZCodeZaiBase {
 		t.Fatalf("credentials first: %+v", k)
+	}
+}
+
+func TestZCodeConfigKeyNeverBorrowsAnotherFamily(t *testing.T) {
+	home := signIn(t)
+	t.Setenv("ZCODE_CREDENTIAL_SECRET", "test-secret")
+	dir := filepath.Join(home, ".zcode", "v2")
+	writeFile(t, filepath.Join(dir, "credentials.json"), map[string]any{
+		"oauth:active_provider":    zcodeEncrypt(t, "bigmodel"),
+		"oauth:bigmodel:user_info": zcodeEncrypt(t, `{"user_id":"bm-user","name":"BigModel user"}`),
+		"zcodejwttoken":            zcodeEncrypt(t, "session"),
+	})
+	writeFile(t, filepath.Join(dir, "config.json"), map[string]any{"provider": map[string]any{
+		"builtin:zai-coding-plan": map[string]any{"options": map[string]any{"apiKey": "zai.secret"}},
+	}})
+	if k := zcodeConfigKey(zcodeSecret(), "bigmodel"); k.Key != "" {
+		t.Fatalf("BigModel borrowed Z.ai's key: %+v", k)
+	}
+	if _, k, ok := zcodeOwn(); !ok || k.Key != "" || k.Base != ZCodeBigModelBase {
+		t.Fatalf("active BigModel borrowed another family: ok=%v key=%+v", ok, k)
+	}
+	writeFile(t, filepath.Join(dir, "config.json"), map[string]any{"provider": map[string]any{
+		"builtin:zai-coding-plan":      map[string]any{"options": map[string]any{"apiKey": "zai.secret"}},
+		"builtin:bigmodel-coding-plan": map[string]any{"options": map[string]any{"apiKey": "bm.secret"}},
+	}})
+	writeFile(t, filepath.Join(dir, "credentials.json"), map[string]any{
+		"zcodejwttoken": zcodeEncrypt(t, "session"),
+	})
+	if _, _, ok := zcodeOwn(); ok {
+		t.Fatal("an ambiguous family was selected by configuration order")
 	}
 }

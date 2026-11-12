@@ -5,6 +5,8 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Subsystem | Reference |
 | --- | --- |
 | Built-in subscriptions moving to plugins | [Provider and plugin ownership](provider-plugins.md) |
+| Adding an intrinsic, Core-owned provider: packaging, authority, all consumers and verification | [Built-in provider development](builtin-provider-development.md) |
+| Complete ZCode comparison, corrected omissions, protocol differences and exercised boundaries | [ZCode parity inventory](zcode-provider-parity.md) |
 | Built-in plugins: registry, lifecycle, plugins.yml, presets, settings schemas, the window's kernel (slots, error boundary, kit) | [Plugin runtime](plugin-runtime.md) |
 | Plugins that run on the gateway's requests and replies | [Gateway middleware](gateway-middleware.md) |
 | Tools that plugins give, offered to every agent as an MCP server | [Plugin tools](plugin-tools.md) |

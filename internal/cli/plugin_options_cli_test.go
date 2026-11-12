@@ -127,3 +127,68 @@ func TestPluginOptionsMovesOldSwitch(t *testing.T) {
 		t.Fatal("switch not set")
 	}
 }
+
+func TestIntrinsicZCodeOptions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Setenv("MAGPIE_BUN", filepath.Join(home, "must-not-start"))
+	plugin.Settle()
+	t.Cleanup(plugin.Settle)
+	ctx := context.Background()
+	for _, name := range []string{"zcode", "builtin:zcode"} {
+		out, err := stdoutOf(t, func() error { return pluginOptions(ctx, name, nil) })
+		if err != nil || !strings.Contains(out, "free_first  zcode on") || !strings.Contains(out, "coding_plan_ultra  zcode off") {
+			t.Fatalf("%s defaults = %q, %v", name, out, err)
+		}
+	}
+	if _, err := stdoutOf(t, func() error {
+		return pluginOptions(ctx, "zcode", []string{`{"free_first":false,"coding_plan_ultra":true}`})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := settings.Load().PluginOptions["zcode"]
+	if before["free_first"] || !before["coding_plan_ultra"] || len(before) != 2 {
+		t.Fatalf("intrinsic overrides = %v", before)
+	}
+	for _, input := range []string{`{"free_first":true,"unknown":true}`, `{"free_first":true,"coding_plan_ultra":"yes"}`} {
+		if _, err := stdoutOf(t, func() error { return pluginOptions(ctx, "builtin:zcode", []string{input}) }); err == nil {
+			t.Fatalf("accepted %s", input)
+		}
+		got := settings.Load().PluginOptions["zcode"]
+		if got["free_first"] || !got["coding_plan_ultra"] || len(got) != 2 {
+			t.Fatalf("refused %s changed overrides: %v", input, got)
+		}
+	}
+	out, err := stdoutOf(t, func() error { return pluginOptions(ctx, "builtin:zcode", nil) })
+	if err != nil || !strings.Contains(out, "free_first  zcode off") || !strings.Contains(out, "coding_plan_ultra  zcode on") {
+		t.Fatalf("selected options = %q, %v", out, err)
+	}
+	if err := settings.EditPluginOptions(func(m map[string]map[string]bool) (map[string]map[string]bool, error) {
+		m["zcode"]["old_override"] = true
+		return m, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdoutOf(t, func() error { return pluginOptions(ctx, "builtin:zcode", []string{"off"}) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings.Load().PluginOptions["zcode"]; len(got) != 0 {
+		t.Fatalf("reset left overrides: %v", got)
+	}
+	out, err = stdoutOf(t, func() error { return pluginOptions(ctx, "zcode", nil) })
+	if err != nil || !strings.Contains(out, "free_first  zcode on") || !strings.Contains(out, "coding_plan_ultra  zcode off") {
+		t.Fatalf("restored defaults = %q, %v", out, err)
+	}
+	plugin.UseCached([]plugin.Provider{{ID: "zcode", Spec: "builtin:zcode", ModelsKnownEmpty: true,
+		Options: []plugin.Option{{Key: "free_first", Label: "Free quota first", Default: true}}}})
+	out, err = stdoutOf(t, func() error { return pluginOptions(ctx, "zcode", nil) })
+	if err != nil || !strings.Contains(out, "coding_plan_ultra  zcode off") {
+		t.Fatalf("an older passive listing hid the current intrinsic switch: %q, %v", out, err)
+	}
+	if plugin.Running() || len(plugin.Load().Plugins) != 0 {
+		t.Fatal("intrinsic options started a host or installed a package")
+	}
+}

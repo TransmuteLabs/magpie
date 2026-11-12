@@ -47,7 +47,7 @@ const fs = { ...realFs, readFileSync: (p, ...rest) => {
 } }
 const context = vm.createContext({ fs, authPath, Buffer, structuredClone, Date, toErr: () => {}, send: () => {}, pause: () => {} })
 const run = code => vm.runInContext(code, context)
-run(section('function parseAuth(', '// writeDurable'))
+run(section('function parseAuth(', '// sleep waits'))
 const past = new Date(Date.now() - 60e3)
 const write = (v, at) => {
   realFs.writeFileSync(authPath, JSON.stringify(v))

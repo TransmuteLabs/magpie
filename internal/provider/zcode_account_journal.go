@@ -113,6 +113,10 @@ func zcodeContext(ctx context.Context, providerID, accountKey string) (plugin.Ac
 	if strings.TrimSpace(providerID) == "" || strings.TrimSpace(accountKey) == "" {
 		return plugin.AccountContext{}, errors.New("name both the provider and the account")
 	}
+	ctx, err := ViaPluginAccount(ctx, providerID, accountKey)
+	if err != nil {
+		return plugin.AccountContext{}, err
+	}
 	request := plugin.AccountRequest{Operation: "context"}
 	expectation, expected := expectedZCodeAccount(ctx)
 	if expected {
@@ -145,6 +149,10 @@ func zcodeContext(ctx context.Context, providerID, accountKey string) (plugin.Ac
 }
 
 func zcodeAccountCall(ctx context.Context, providerID, accountKey string, c plugin.AccountContext, operation string, params any) (json.RawMessage, error) {
+	ctx, err := ViaPluginAccount(ctx, providerID, accountKey)
+	if err != nil {
+		return nil, err
+	}
 	r, err := zcodeAccountRPC(ctx, providerID, accountKey, plugin.AccountRequest{Operation: operation, Params: params, Scope: c.Scope, Generation: c.Generation})
 	if err != nil {
 		return nil, err

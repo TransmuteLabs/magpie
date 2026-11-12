@@ -74,6 +74,32 @@ func TestQuotaLines(t *testing.T) {
 	}
 }
 
+func TestQuotaLinesPartialObservationsAndResetUncertainty(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	remaining, used, limit := 16.0, 4.0, 20.0
+	qs := []provider.SubscriptionQuota{
+		{Name: "MCP only", Error: "paid failed", Partial: true, ReadAt: &now,
+			Observations: []provider.UsageObservation{{Name: "Server MCP", Kind: "server-mcp", Remaining: &remaining, Used: &used, Limit: &limit}},
+			ZCodeReset:   &provider.ZCodeResetState{Source: "zcode", Error: "offline"}},
+		{Name: "Start partial", Error: "paid failed", Partial: true, ReadAt: &now,
+			Windows: []provider.QuotaWindow{{Name: "Start", Used: 40}}},
+		{Name: "pending", ZCodeReset: &provider.ZCodeResetState{Source: "zcode", Available: true, Pending: "unconfirmed", PendingWindow: "week"}},
+		{Name: "balance", Balance: "$3", AsOf: &now, ReadDeferred: true,
+			ZCodeReset: &provider.ZCodeResetState{Source: "zcode", Available: true, Pending: "observed-completion", ObservedAt: float64(now.UnixMilli())}},
+		{Name: "failure", Error: "sign in again"},
+	}
+	text := strings.Join(quotaLines(qs, true, false, 200, now), "\n")
+	for _, want := range []string{"paid failed", "Start", "40% used", "Server MCP", "16 left", "ZCode reset unavailable: offline",
+		"Reset outcome unconfirmed", "week", "$3 left", "as of", "not refreshed", "Completion observed; its cause is uncertain", "sign in again"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(text, "not used") || strings.Contains(text, " 0% used") || strings.Contains(text, "no usage reported") {
+		t.Fatalf("invented a meter or placeholder: %s", text)
+	}
+}
+
 // fmtCost shows a computed cost at Settings' currency choice — $ (its own,
 // unconverted) by default, ¥ at the cached exchange rate once cny is chosen
 // — never touching a vendor's own balance string (that's quotaLines above).

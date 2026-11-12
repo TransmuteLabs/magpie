@@ -361,7 +361,7 @@ function zcodeAccountDetails(c, switchAccount) {
         zcodeAccountPair(fields, "Five-hour expiry", five.length ? five.map((x) => c.formatTime(x)).join(", ") : t("None reported"));
         zcodeAccountPair(fields, "Weekly expiry", week.length ? week.map((x) => c.formatTime(x)).join(", ") : t("None reported"));
       } else {
-        contents.append(zcodeAccountNote(t("ZCode reset unavailable") + (r.error ? ": " + r.error : "")));
+        contents.append(zcodeAccountNote(t("ZCode reset unavailable") + (r.error ? ": " + t(r.error) : "")));
       }
       if (r.pending) {
         zcodeAccountPair(fields, "Status", t(r.pending === "observed-completion" ? "Completion observed; its cause is uncertain" : "Reset outcome unconfirmed"));
@@ -408,7 +408,7 @@ function zcodeAccountDetails(c, switchAccount) {
 function zcodeResetRow(q) {
   const r = q.zcodeReset, row = el("div", "quota-resets zcode-resets");
   if (!r.available) {
-    row.append(el("span", "", t("ZCode reset unavailable") + (r.error ? ": " + r.error : "")));
+    row.append(el("span", "", t("ZCode reset unavailable") + (r.error ? ": " + t(r.error) : "")));
   } else if (!q.resets?.count) {
     row.append(el("span", "", t("ZCode resets: {five} five-hour · {week} weekly", {
       five: r.fiveHour?.length || 0, week: r.week?.length || 0,
@@ -442,6 +442,12 @@ function zcodeAccountSource(q) {
 function zcodeAccountEntry(q) {
   const button = el("button", "text zcode-account-open", t("ZCode account…"));
   button.type = "button";
+  if ((q.provider || "").split("/").length > 2) {
+    button.disabled = true;
+    button.title = t("Open this account on its directly connected owner to use native controls.");
+    button.append(document.createTextNode(" · " + button.title));
+    return button;
+  }
   button.onclick = async (event) => {
     event.stopPropagation();
     const source = zcodeAccountSource(q);
@@ -473,10 +479,14 @@ async function openZCodeAccountEntry(button, source, current) {
     if (!current()) return;
     const matches = (listed?.accounts || []).filter((a) => a.provider === source.provider
       && (a.account === source.account || a.user === source.user));
-    if (matches.length === 1) source.account = matches[0].account;
+    if (matches.length === 1) {
+      if (matches[0].error) { status(t(matches[0].error), "err"); return; }
+      source.account = matches[0].account;
+    }
     else if (matches.length > 1) {
       openProtoMenu(button, matches.map((a) => ({
-        v: a.account, name: `${a.user} · ${a.account}`, literalName: true, note: "",
+        v: a.account, name: `${a.user} · ${a.account}`, literalName: true,
+        note: a.error ? t(a.error) : "", title: a.error ? t(a.error) : "", disabled: !!a.error,
       })), "", (account) => {
         if (current()) openZCodeAccount({ ...source, account }).catch(statusErr);
       }, t("ZCode account…"));

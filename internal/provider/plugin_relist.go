@@ -84,7 +84,7 @@ func KeepPluginsListed(ctx context.Context) {
 func pluginListedIDs(ps []plugin.Provider) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	for _, p := range ps {
-		if p.FellBack || len(p.Models) == 0 {
+		if p.FellBack || (len(p.Models) == 0 && !p.ModelsKnownEmpty) {
 			continue
 		}
 		ids := make(map[string]bool, len(p.Models))
@@ -118,12 +118,11 @@ func dropGonePluginPicks(before, now []plugin.Provider) map[string][]string {
 }
 
 // keptListed is what the next relist compares with: now's lists, and for
-// a provider whose list fell back or went empty this time the one before,
-// so a model dropped once its vendor answers again still leaves the picks.
+// a provider whose list fell back or was unknown this time the one before.
 func keptListed(before, now []plugin.Provider) []plugin.Provider {
 	out := make([]plugin.Provider, 0, len(now))
 	for _, p := range now {
-		if p.FellBack || len(p.Models) == 0 {
+		if p.FellBack || (len(p.Models) == 0 && !p.ModelsKnownEmpty) {
 			if i := slices.IndexFunc(before, func(b plugin.Provider) bool { return b.ID == p.ID }); i >= 0 {
 				p = before[i]
 			}

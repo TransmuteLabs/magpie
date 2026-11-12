@@ -10,9 +10,14 @@
 // is done), so it may send that much more. A fetch starts with the window
 // magpie gave it and sends no more than that ahead of its reader, so a slow
 // reader pauses its upstream instead of the host buffering without bound.
+// {method: "shutdown"} asks the host to drain without closing stdin, so
+// pending auth changes can still receive their Core replies.
 // host → magpie, unasked: {event: "log", level, message} and {event:
 // "toast", ...} (what a plugin logs or shows), {event: "auth", provider}
 // (a sign-in the host saved or refreshed).
+// The private host → magpie {authLock: {id, op, token?, all?, reseed?}}
+// request and magpie → host {authLock: {id, token?, all?, known?, error?}}
+// response borrow the parent's OS lock and auth store for one change.
 //
 // The plugins get what OpenCode hands them (PluginInput): a client whose
 // auth.set saves to magpie's plugin-auth.json in OpenCode's auth.json shape,
@@ -936,7 +941,7 @@ function parseAuth(text) {
 // while the file is being renamed over) is tried again at once and then
 // thrown, never read as none: the next setAuth would write the others'
 // accounts away. It never waits: the event loop is every plugin's (#5112),
-// so a caller that can wait uses readFileSteadyAsync.
+// so reads never stall the event loop.
 function readFileSteady(p) {
   for (let i = 0; ; i++) {
     try {
@@ -944,18 +949,6 @@ function readFileSteady(p) {
     } catch (e) {
       if (e?.code === "ENOENT") return null
       if (i >= 2) throw e
-    }
-  }
-}
-
-async function readFileSteadyAsync(p) {
-  for (let i = 0; ; i++) {
-    try {
-      return fs.readFileSync(p)
-    } catch (e) {
-      if (e?.code === "ENOENT") return null
-      if (i >= 50) throw e
-      await sleep(10)
     }
   }
 }
@@ -975,10 +968,6 @@ let authUnread = false
 // none, unknown.
 function readAuthState(buf = readFileSteady(authPath)) {
   return authStateOf(buf)
-}
-
-async function readAuthStateAsync() {
-  return authStateOf(await readFileSteadyAsync(authPath))
 }
 
 function authStateOf(buf) {
@@ -1049,196 +1038,130 @@ function authCopy(key) {
   return v === undefined ? undefined : structuredClone(v)
 }
 
-// writeDurable replaces p with data through a temp file flushed to the
-// disk before it is renamed over p: a rename reaches the disk on its own
-// schedule, the data behind it later, and a machine that went down between
-// the two left plugin-auth.json all zero (#1505). A write or flush that
-// fails leaves p as it was.
-async function writeDurable(p, data) {
-  const tmp = p + ".tmp-" + process.pid
-  try {
-    const f = fs.openSync(tmp, "w", 0o600)
-    try {
-      for (let off = 0; off < data.length; ) off += fs.writeSync(f, data, off, data.length - off)
-      fs.fsyncSync(f)
-    } finally {
-      fs.closeSync(f)
-    }
-    // and a file held open by a reader refuses to be renamed over
-    for (let i = 0; ; i++) {
-      try {
-        fs.renameSync(tmp, p)
-        break
-      } catch (e) {
-        if (i >= 50 || !["EPERM", "EACCES", "EBUSY"].includes(e?.code)) throw e
-        await sleep(10)
-      }
-    }
-    if (process.platform !== "win32") {
-      const dir = fs.openSync(path.dirname(p), "r")
-      try {
-        fs.fsyncSync(dir)
-      } finally {
-        fs.closeSync(dir)
-      }
-    }
-  } catch (e) {
-    try {
-      fs.unlinkSync(tmp)
-    } catch {}
-    throw e
-  }
-}
-
-// badStamp is the time a bad file is kept under, as Go's lastgood names it.
-function badStamp(d = new Date()) {
-  const p = (n) => String(n).padStart(2, "0")
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
-}
-
-// keepBad copies buf, a plugin-auth.json that doesn't read, aside: two
-// within one second are both kept (-2, …), the same bytes kept already
-// not again.
-function keepBad(buf) {
-  const stamp = authPath + ".bad-" + badStamp()
-  for (let i = 1; i < 1000; i++) {
-    const name = i > 1 ? `${stamp}-${i}` : stamp
-    let f
-    try {
-      f = fs.openSync(name, "wx", 0o600)
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e
-      let old = null
-      try {
-        old = fs.readFileSync(name)
-      } catch {}
-      if (old && old.equals(buf)) return name
-      continue
-    }
-    try {
-      for (let off = 0; off < buf.length; ) off += fs.writeSync(f, buf, off, buf.length - off)
-      fs.fsyncSync(f)
-    } catch (e) {
-      fs.closeSync(f)
-      try {
-        fs.unlinkSync(name)
-      } catch {}
-      throw e
-    }
-    fs.closeSync(f)
-    toErr(`plugin-auth.json can't be read (${describeBad(buf)}); it is kept as ${path.basename(name)}`)
-    return name
-  }
-  throw new Error("plugin-auth.json can't be read and there is no free name to keep it under")
-}
-
-// keepAuth is called before plugin-auth.json is replaced: the file there
-// now becomes plugin-auth.json.bak when it reads, or is copied aside when
-// it doesn't. A failure stops the write.
-async function keepAuth() {
-  const buf = await readFileSteadyAsync(authPath)
-  if (buf === null) return
-  if (!parseAuth(buf.toString("utf8"))) {
-    keepBad(buf)
-    return
-  }
-  const bak = authPath + ".bak"
-  let old = null
-  try {
-    old = fs.readFileSync(bak)
-  } catch {}
-  if (!old || !old.equals(buf)) await writeDurable(bak, buf)
-}
-
-async function writeAuth(all) {
-  fs.mkdirSync(path.dirname(authPath), { recursive: true })
-  await keepAuth()
-  await writeDurable(authPath, Buffer.from(JSON.stringify(all, null, 2) + "\n"))
-}
-
 // sleep waits ms without holding the event loop. Nothing in the host waits
 // any other way: Atomics.wait here froze every plugin's requests, model
 // lists and check-ins for as long as one of them spun on the lock (#5112).
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// Two hosts run at once while one is restarted (the old one finishing its
-// calls), and magpie writes the file when no host runs: each change to it
-// is made under plugin-auth.json.lock, read afresh and written back with
-// only its own accounts changed, so a host never writes another's newer
-// token away with what it read before. The change itself is synchronous;
-// the lock is waited for, and the write made, without holding the event
-// loop. A lock held longer than AUTH_LOCK_STALE was left by a host that
-// died. Changes within this host take the file lock one at a time
-// (authQueue), so they don't poll against each other.
-const AUTH_LOCK_STALE = 10 * 1000
+// Core owns the OS lock and publication for this host. Waiting for its
+// reply leaves the event loop free; authQueue serializes this host's
+// snapshot, compare and commit under each granted lease.
+let authLockNext = 0
+let authLockUnavailable = false
+const authLockPending = new Map()
+const AUTH_LOCK_REPLY_WAIT = 15000
 
-async function lockAuth() {
-  const lock = authPath + ".lock"
-  fs.mkdirSync(path.dirname(authPath), { recursive: true })
-  let tries = 0
-  for (const start = Date.now(); ; ) {
-    try {
-      fs.closeSync(fs.openSync(lock, "wx", 0o600))
-      return () => {
-        try {
-          fs.unlinkSync(lock)
-        } catch {}
-      }
-    } catch (e) {
-      if (e?.code !== "EEXIST" && e?.code !== "EPERM" && e?.code !== "EACCES") throw e
-    }
-    let old = false
-    try {
-      old = Date.now() - fs.statSync(lock).mtimeMs > AUTH_LOCK_STALE
-    } catch {}
-    if (old || Date.now() - start > 2 * AUTH_LOCK_STALE) {
-      try {
-        fs.unlinkSync(lock)
-      } catch {}
-    }
-    await sleep(Math.min(50, 5 + 5 * tries++))
+function authLockRequest(op, token, all, reseed = false) {
+  if (op === "acquire" && authLockUnavailable) {
+    return Promise.reject(new Error("plugin sign-in change not made: auth lock connection unavailable"))
   }
+  const id = ++authLockNext
+  return new Promise((resolve, reject) => {
+    const pending = { resolve, reject, abandoned: false, timer: null }
+    if (op === "acquire") {
+      pending.timer = setTimeout(() => {
+        pending.abandoned = true
+        authLockUnavailable = true
+        reject(new Error("plugin sign-in change not made: auth lock request timed out"))
+      }, AUTH_LOCK_REPLY_WAIT)
+    }
+    authLockPending.set(id, pending)
+    let sent
+    try {
+      sent = send({ authLock: { id, op, ...(token ? { token } : {}), ...(all ? { all } : {}), ...(reseed ? { reseed: true } : {}) } })
+    } catch (err) {
+      authLockPending.delete(id)
+      clearTimeout(pending.timer)
+      reject(err)
+      return
+    }
+    sent.then((err) => {
+      if (!err || !authLockPending.has(id)) return
+      authLockPending.delete(id)
+      clearTimeout(pending.timer)
+      if (op === "acquire") authLockUnavailable = true
+      if (!pending.abandoned) reject(new Error("plugin sign-in change not made: auth lock connection failed"))
+    })
+  })
+}
+
+function authLockResponse(frame) {
+  const pending = authLockPending.get(frame?.id)
+  if (!pending) return
+  authLockPending.delete(frame.id)
+  clearTimeout(pending.timer)
+  if (pending.abandoned) {
+    // A grant arriving after our acquisition timed out is still owned by
+    // this host. Give it back, without ever starting a write.
+    if (frame.token) send({ authLock: { id: ++authLockNext, op: "abort", token: frame.token } })
+    return
+  }
+  if (frame.error) pending.reject(new Error(frame.error))
+  else pending.resolve(frame)
+}
+
+async function lockAuth(reseed) {
+  const lease = await authLockRequest("acquire", undefined, undefined, reseed)
+  if (typeof lease.token !== "string" || !lease.token || !lease.all || typeof lease.all !== "object" || Array.isArray(lease.all)) {
+    if (typeof lease.token === "string" && lease.token) await authLockRequest("abort", lease.token).catch(() => {})
+    throw new Error("plugin sign-in change not made: invalid auth lock lease")
+  }
+  return lease
 }
 
 // changeAuth runs change on the file as it is now, under the lock, and
 // writes it back when change says it changed it.
 let authQueue = Promise.resolve()
-function changeAuth(change) {
+let authPending = 0
+function changeAuth(change, signal = signInSignal.getStore(), reseed = false) {
+  authPending++
   const run = authQueue.then(async () => {
-    const unlock = await lockAuth()
+    signal?.throwIfAborted()
+    const lease = await lockAuth(reseed)
+    let finished = false
     try {
-      const { all, known } = await readAuthStateAsync()
+      signal?.throwIfAborted()
+      const { all, known } = lease
       const out = change(all)
+      signal?.throwIfAborted()
       // sign-ins that don't read are never written over with none: a
       // sign-out of one of them waits for the file to be put right
-      if (out !== false && (known || Object.keys(all).length > 0)) await writeAuth(all)
+      if (out !== false && (known || reseed && Object.keys(all).length > 0)) {
+        await authLockRequest("commit", lease.token, all)
+      } else {
+        await authLockRequest("abort", lease.token)
+      }
+      finished = true
       return out
     } finally {
-      unlock()
+      if (!finished) await authLockRequest("abort", lease.token).catch(() => {})
     }
   })
   authQueue = run.then(
-    () => {},
-    () => {},
+    () => { authPending--; maybeExit() },
+    () => { authPending--; maybeExit() },
   )
   return run
 }
 
-async function setAuth(key, info, signIn = false) {
+async function setAuth(key, info, signIn = false, signal, reseed = signIn, expected) {
   if (signIn && typeof auths().get(providerOf(key))?.auth?.account === "function") {
     info = { ...info, accountEpoch: randomUUID() }
   }
   await changeAuth((all) => {
+    if (expected !== undefined && JSON.stringify(all[key]) !== JSON.stringify(expected)) {
+      throw new Error("the selected account changed; sign in again")
+    }
     all[key] = info
-  })
+  }, signal, reseed)
   forgetAccount(key)
   send({ event: "auth", provider: providerOf(key), account: key })
 }
 
-async function removeAuth(key) {
+async function removeAuth(key, signal) {
   await changeAuth((all) => {
     delete all[key]
-  })
+  }, signal)
   forgetAccount(key)
   send({ event: "auth", provider: providerOf(key), account: key })
 }
@@ -1333,7 +1256,7 @@ function renamedBy(now, was) {
 // replaces that one's and goes. It gives where it is kept. An account
 // named another way before keeps its account id, which the user's name
 // for it, its proxy and gateway keys are kept by.
-async function settle(provider, key) {
+async function settle(provider, key, signal) {
   const k = await changeAuth((all) => {
     const now = all[key]
     if (!now) return false
@@ -1353,7 +1276,7 @@ async function settle(provider, key) {
       }
     }
     return false
-  })
+  }, signal)
   if (k) {
     forgetAccount(k)
     forgetAccount(key)
@@ -2225,7 +2148,7 @@ const refusedLists = new Map()
 // signInOf is what tells one sign-in of an account from the next.
 const signInOf = (a) => JSON.stringify([a?.access ?? "", a?.refresh ?? "", a?.key ?? ""])
 
-async function info(id, key, strict, limit, quiet, signal) {
+async function info(id, key, strict, limit, quiet, signal, refetch = false) {
   const md = mdev()[id]
   const cfg = providerConfig(id)
   const out = {
@@ -2300,7 +2223,8 @@ async function info(id, key, strict, limit, quiet, signal) {
       // again, and the account stays marked as it was
       const r = reach.getStore()
       if (r) r.refused ??= held.error
-      out.fellBack = true
+      out.fellBack = !held.noModels
+      if (held.noModels) out.models = {}
       out.listError = held.error
       continue
     }
@@ -2312,7 +2236,8 @@ async function info(id, key, strict, limit, quiet, signal) {
     try {
       const given = JSON.parse(JSON.stringify(out))
       const l = { tried: false, lastOk: false }
-      const ask = () => listing.run(l, () => inScope(id, k, () => ph.models(given, { auth: authCopy(k), getAuth: async () => authCopy(k), signal: ctl.signal })))
+      const ask = () => listing.run(l, () => inScope(id, k, () => ph.models(given, { auth: authCopy(k), getAuth: async () => authCopy(k), signal: ctl.signal,
+        ...(id === "zcode" && refetch ? { refresh: true } : {}) })))
       const next = limit > 0 ? await inTime(ask, Math.max(limit - (Date.now() - began), 0), "the plugin's model list", ctl) : await ask()
       // a hook that asked its vendor, got no list and gave back the one it
       // was given fell back: magpie keeps the list it had, as a built-in
@@ -2322,7 +2247,9 @@ async function info(id, key, strict, limit, quiet, signal) {
       out.fellBack = (next === given.models && l.tried && !l.lastOk) || next?.[Symbol.for("magpie.fellBack")] === true
       // why, as far as the host saw it: the editor says so rather than
       // show the plugin's short defaults as if they were the account's
-      if (out.fellBack) out.listError = l.said || "the plugin couldn't get its vendor's list"
+      const listError = next?.[Symbol.for("magpie.listError")]
+      if (typeof listError === "string" && listError.trim()) out.listError = listError.trim().slice(0, 1000)
+      else if (out.fellBack) out.listError = l.said || "the plugin couldn't get its vendor's list"
       out.models = Object.fromEntries(Object.entries(next ?? {}).map(([k, m]) => [k, { ...m, id: k, providerID: id }]))
       refusedLists.delete(k)
     } catch (e) {
@@ -2342,11 +2269,14 @@ async function info(id, key, strict, limit, quiet, signal) {
       if (e?.signIn === "expired" && all[k]) {
         const was = refusedLists.get(k)
         const sign = signInOf(all[k])
-        refusedLists.set(k, { sign, at: Date.now(), n: was?.sign === sign ? was.n + 1 : 1, error: e?.message ?? String(e) })
+        refusedLists.set(k, { sign, at: Date.now(), n: was?.sign === sign ? was.n + 1 : 1,
+          error: e?.message ?? String(e), noModels: e?.noModels === true })
       }
       // a hook that threw on its vendor's failure has no list to tell:
       // magpie keeps the one it had, as for one that gave its defaults back
-      out.fellBack = true
+      const noModels = e?.signIn === "expired" && e?.noModels === true
+      out.fellBack = !noModels
+      if (noModels) out.models = {}
       out.listError = e?.message ?? String(e)
       // a listing the caller gave up on says its abort itself, not as if
       // the vendor had failed
@@ -2623,7 +2553,7 @@ function tiersOf(v) {
 // that gave up (signal) has every hook it would still have asked told, so
 // a timed-out listing stops its vendor reads instead of multiplying them
 // (#4678).
-async function providers({ proxies, off } = {}, signal) {
+async function providers({ proxies, off, refetch } = {}, signal) {
   const stored = readAuth()
   // a provider switched off in magpie is asked nothing: its models hook
   // (and the sign-in renewal before it) would reach its vendor. It is
@@ -2644,12 +2574,12 @@ async function providers({ proxies, off } = {}, signal) {
     // listWaits back to back took one provider past refreshDeadline twice
     // over (#4065)
     const [p, own] = await Promise.all([
-      via.run(through(), () => info(id, undefined, false, listWait, false, signal)).then((q) => (keepInfo(keys[0] ?? id, q, gen), q)),
+      via.run(through(), () => info(id, undefined, false, listWait, false, signal, refetch === id)).then((q) => (keepInfo(keys[0] ?? id, q, gen), q)),
       // each account's own models, as the built-ins read each account's: a
       // plan may serve fewer, or others, than the first account's. One that
       // can't be read is taken to have them all, or the ones it was last
       // told to have, as a built-in account whose fetch failed keeps its own.
-      Promise.all(keys.slice(1).map((k) => via.run(through(k), () => info(id, k, true, listWait, false, signal)).then((q) => (keepInfo(k, q, gen), q)).catch((e) => ({ failed: true, listError: e?.message ?? String(e) })))),
+      Promise.all(keys.slice(1).map((k) => via.run(through(k), () => info(id, k, true, listWait, false, signal, refetch === id)).then((q) => (keepInfo(k, q, gen), q)).catch((e) => ({ failed: true, listError: e?.message ?? String(e) })))),
     ])
     return rowOf(id, a, keys, stored, p, own)
   }
@@ -2701,15 +2631,17 @@ function rowOf(id, a, keys, stored, p, own) {
     authType: first?.type ?? "",
     accountId: whoOf(first),
     fellBack,
-    listError: fellBack ? p.listError ?? "" : "",
+    listError: fellBack || (id === "zcode" && p.listError) ? p.listError ?? "" : "",
+    modelsKnownEmpty: id === "zcode" && keys.length > 0 && !p.fellBack &&
+      own.every((q) => q && !q.fellBack && !q.failed) && Object.keys(models).length === 0,
     accounts: keys.map((k, i) => ({
       key: k,
       type: stored[k]?.type ?? "",
       accountId: whoOf(stored[k]),
       hint: hintOf(stored[k]),
-      models: own.length === 0 ? undefined : i === 0 ? ids(p) : own[i - 1]?.models ? ids(own[i - 1]) : undefined,
+      models: own.length === 0 && id !== "zcode" ? undefined : i === 0 ? ids(p) : own[i - 1]?.models ? ids(own[i - 1]) : undefined,
       fellBack: i === 0 ? !!p.fellBack : !!(own[i - 1]?.fellBack || own[i - 1]?.failed),
-      listError: (i === 0 ? p.fellBack && p.listError : own[i - 1]?.listError) || "",
+      listError: (i === 0 ? p.listError : own[i - 1]?.listError) || "",
     })),
     models: Object.values(models)
       .filter((m) => m.status !== "deprecated")
@@ -2802,17 +2734,18 @@ function validate(provider, index, key, value) {
 // save keeps a successful sign-in as OpenCode's CLI does, at key (or, for
 // a sign-in the plugin says is another provider's, a new account of
 // that one). It gives the provider and where the account is kept.
-async function save(provider, key, result, inputs, apiKey, method) {
+async function save(provider, key, result, inputs, apiKey, method, signal, expected) {
   const id = result.provider ?? provider
+  if (expected !== undefined && id !== provider) throw new Error("the selected account's provider changed")
   if (id !== provider) key = freshKey(id)
   if ("refresh" in result) {
     const { type: _t, provider: _p, refresh, access, expires, ...extra } = result
-    await setAuth(key, { type: "oauth", refresh, access, expires, ...extra }, true)
+    await setAuth(key, { type: "oauth", refresh, access, expires, ...extra }, true, signal, true, expected)
   } else if ("key" in result || apiKey) {
     const md = { ...plainAnswers(provider, method, inputs), ...(result.metadata ?? {}) }
-    await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) }, true)
+    await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) }, true, signal, true, expected)
   }
-  return { provider: id, account: await settle(id, key) }
+  return { provider: id, account: expected !== undefined ? key : await settle(id, key, signal) }
 }
 
 // plainAnswers are the answers to an "api" method's questions that the
@@ -2903,24 +2836,28 @@ async function callback({ session, code }, signal) {
   const r = await signingIn(signal, s.proxy, s.provider, s.key, () => (s.a.method === "code" ? s.a.callback(code ?? "", { signal }) : s.a.callback(undefined, { signal })))
   if (signal?.aborted) throw abortedSignIn()
   if (!r || r.type !== "success") return failed(r)
-  return { ok: true, ...(await save(s.provider, s.key, r, undefined)) }
+  return { ok: true, ...(await save(s.provider, s.key, r, undefined, undefined, undefined, signal)) }
 }
 
 async function apiKey({ provider, method, inputs, key, account, proxy }, signal) {
   const m = authOf(provider).methods[method]
   if (!m || m.type !== "api") throw new Error("not an API key method")
   const at = signInKey(provider, account)
+  const targeted = typeof account === "string" && account !== "" && account !== "new"
+  if (targeted && (providerOf(account) !== provider || at !== account)) throw new Error("the selected account is unavailable")
+  const expected = targeted ? authCopy(at) : undefined
+  if (targeted && !expected) throw new Error("the selected account is unavailable")
   if (typeof m.authorize !== "function") {
     const md = inputs && Object.keys(inputs).length ? { metadata: inputs } : {}
-    await setAuth(at, { type: "api", key, ...md }, true)
-    return { ok: true, provider, account: await settle(provider, at) }
+    await setAuth(at, { type: "api", key, ...md }, true, signal, true, expected)
+    return { ok: true, provider, account: targeted ? at : await settle(provider, at, signal) }
   }
   const r = await signingIn(signal, proxy ?? "", provider, at, () => m.authorize(inputs ?? {}, { signal }))
   if (signal?.aborted) throw abortedSignIn()
   if (!r || r.type !== "success") return failed(r)
   // nothing to keep: no key typed, and the plugin's authorize gave none
   if (!("key" in r) && !("refresh" in r) && !key) return { ok: false, error: `${provider}'s sign-in gave no key` }
-  return { ok: true, ...(await save(provider, at, r, inputs, key, method)) }
+  return { ok: true, ...(await save(provider, at, r, inputs, key, method, signal, expected)) }
 }
 
 // ---- renewing a sign-in ------------------------------------------------------
@@ -2998,7 +2935,9 @@ function renewal(provider, key) {
   const f = unrenewed.get(key)
   if (f && f.secret === secretOf(stored) && (f.gone || Date.now() - f.at < retryAfter(f.n ?? 1))) return null
   pending++ // the host doesn't leave in the middle of it
-  r = renew(provider, key, a).finally(() => {
+  // A caller's cancelled sign-in scope must not discard a refresh token
+  // the vendor has already rotated; renewal has its own lifetime.
+  r = signInSignal.run(undefined, () => renew(provider, key, a)).finally(() => {
     renewing.delete(key)
     // nor does magpie stop it in the middle of one (host.go's stop)
     send({ event: "renewing", count: renewing.size })
@@ -3287,7 +3226,7 @@ async function accountOperation({ provider, account, proxy, operation, params, s
         } while (destination in all)
         all[destination] = { ...selected, accountEpoch: randomUUID() }
         created = true
-      })
+      }, signal)
       if (created) {
         forgetAccount(destination)
         send({ event: "auth", provider, account: destination })
@@ -3370,6 +3309,7 @@ async function usageOf(provider, account, signal) {
     renew: u.renew === "auto" || u.renew === "off" ? u.renew : "",
     balance: text(u.balance),
     error: text(u.error),
+    partial: u.partial === true,
     user: text(u.user),
     signIn: ["expired", "kept", "renewed"].includes(u.signIn) ? u.signIn : "",
     resets:
@@ -3756,18 +3696,18 @@ const handlers = {
   // onto its plugin) as one more account, or as the account it already is
   // import keeps a sign-in made elsewhere as one of provider's accounts;
   // with a key, as that account again (one taken back)
-  async import(p) {
+  async import(p, signal) {
     if (p.key && providerOf(p.key) === p.provider) {
-      await setAuth(p.key, p.auth)
+      await setAuth(p.key, p.auth, false, signal, true)
       return { account: p.key }
     }
     const key = freshKey(p.provider)
-    await setAuth(key, p.auth)
-    return { account: await settle(p.provider, key) }
+    await setAuth(key, p.auth, false, signal, true)
+    return { account: await settle(p.provider, key, signal) }
   },
   // take gives the accounts named (else every account of the provider) and
   // forgets them in one step: nothing renews a token between the two
-  async take(p) {
+  async take(p, signal) {
     const out = {}
     await changeAuth((all) => {
       for (const k of p.accounts?.length ? p.accounts : accountsOf(all, p.provider)) {
@@ -3776,7 +3716,7 @@ const handlers = {
         delete all[k]
       }
       if (!Object.keys(out).length) return false
-    })
+    }, signal)
     for (const k of Object.keys(out)) {
       forgetAccount(k)
       send({ event: "auth", provider: providerOf(k), account: k })
@@ -3784,9 +3724,17 @@ const handlers = {
     return { auths: out }
   },
   // signOut forgets the account named, else every account of the provider
-  async signOut(p) {
-    const keys = p.account ? [p.account] : accountsOf(readAuth(), p.provider)
-    for (const k of keys) await removeAuth(k)
+  async signOut(p, signal) {
+    let keys = []
+    await changeAuth((all) => {
+      keys = p.account ? [p.account] : accountsOf(all, p.provider)
+      if (!keys.length) return false
+      for (const k of keys) delete all[k]
+    }, signal)
+    for (const k of keys) {
+      forgetAccount(k)
+      send({ event: "auth", provider: providerOf(k), account: k })
+    }
     return null
   },
   reload(p) {
@@ -3841,8 +3789,12 @@ function waitForReady(record) {
 }
 let pending = 0
 let closed = false
+const maybeExit = () => {
+  if (closed && pending === 0 && authPending === 0) process.exit(0)
+}
 const done = () => {
-  if (--pending === 0 && closed) process.exit(0)
+  pending--
+  maybeExit()
 }
 
 const gatewayInflight = new Map() // RPC id -> AbortController
@@ -3881,6 +3833,15 @@ rl.on("line", (line) => {
   try {
     msg = JSON.parse(line)
   } catch {
+    return
+  }
+  if (msg.authLock) {
+    authLockResponse(msg.authLock)
+    return
+  }
+  if (msg.method === "shutdown") {
+    closed = true
+    maybeExit()
     return
   }
   if (msg.method === "abort") {
@@ -4001,5 +3962,5 @@ rl.on("line", (line) => {
 })
 rl.on("close", () => {
   closed = true
-  if (pending === 0) process.exit(0)
+  maybeExit()
 })

@@ -212,3 +212,32 @@ func TestZCodeOwnTeam(t *testing.T) {
 		t.Fatalf("own, individual: %v %+v", ok, k)
 	}
 }
+
+func TestZCodeChinaTeamUsesOnlyMatchingLinkedBusinessIdentity(t *testing.T) {
+	home := signIn(t)
+	t.Setenv("ZCODE_CREDENTIAL_SECRET", "test-secret")
+	dir := filepath.Join(home, ".zcode", "v2")
+	writeFile(t, filepath.Join(dir, "setting.json"), map[string]any{
+		"providerFamilyDomain": "bigmodel",
+		"providerFamilyConnectionSelections": map[string]any{
+			"bigmodel": map[string]any{"kind": "team-coding-plan", "productId": "product", "organizationId": "org", "projectId": "project"},
+		},
+	})
+	store := map[string]any{
+		"oauth:active_provider":       zcodeEncrypt(t, "zai_cn"),
+		"oauth:zai_cn:user_info":      zcodeEncrypt(t, `{"user_id":"china-user","name":"China user"}`),
+		"oauth:bigmodel:access_token": zcodeEncrypt(t, "stale-other-family"),
+		"oauth:linked_bigmodel":       zcodeEncrypt(t, `{"userId":"china-user","customerId":"business-user","accessToken":"linked-business"}`),
+		"zcodejwttoken":               zcodeEncrypt(t, "session"),
+	}
+	writeFile(t, filepath.Join(dir, "credentials.json"), store)
+	_, k, ok := zcodeOwn()
+	if !ok || k.Token != "linked-business" || k.Org != "org" || k.Project != "project" {
+		t.Fatalf("matching linked team: ok=%v key=%+v", ok, k)
+	}
+	store["oauth:linked_bigmodel"] = zcodeEncrypt(t, `{"userId":"other-user","customerId":"business-user","accessToken":"wrong"}`)
+	writeFile(t, filepath.Join(dir, "credentials.json"), store)
+	if _, k, _ := zcodeOwn(); k.Token != "" || k.team() {
+		t.Fatalf("another identity's business credential was used: %+v", k)
+	}
+}

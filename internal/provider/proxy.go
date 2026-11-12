@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -101,6 +102,65 @@ func Via(ctx context.Context, id string) context.Context {
 // subscription id (ProxyOfLogin).
 func ViaLogin(ctx context.Context, id, user string) context.Context {
 	return netproxy.With(ctx, ProxyOfLogin(id, user))
+}
+
+// ViaPluginAccount resolves the exact saved plugin slot before choosing its
+// account proxy. It does not read the plugin credential or choose by label.
+func ViaPluginAccount(ctx context.Context, id, slot string) (context.Context, error) {
+	if id == "" || slot == "" || plugin.ProviderOf(slot) != id {
+		return nil, errors.New("an explicit plugin account is required")
+	}
+	user, boundScope := "", ""
+	for _, l := range sharedLogins() {
+		if l.Agent != "plugin:"+id || l.Home != slot {
+			continue
+		}
+		if l.PluginRename != nil {
+			return nil, errors.New("account rename is pending; repair the account settings and retry")
+		}
+		if user != "" {
+			return nil, errors.New("the plugin account's proxy identity is ambiguous")
+		}
+		user = l.User
+		boundScope = l.PluginScope
+	}
+	if user == "" {
+		// Without any account-specific choice there is no label-dependent
+		// policy to misapply. Otherwise do not guess which proxy belongs
+		// to an unreconciled or unreadable account.
+		if p, ok := storedPicks(PluginID(id)); ok && len(p.AccountProxies) != 0 {
+			return nil, errors.New("the plugin account's proxy identity is unavailable")
+		}
+		return Via(ctx, PluginID(id)), nil
+	}
+	if id == "zcode" {
+		providers, available := plugin.PassiveProviders()
+		if !available {
+			return nil, errors.New("the plugin account's proxy identity is unavailable")
+		}
+		var current plugin.Account
+		for _, pp := range providers {
+			if pp.ID != id {
+				continue
+			}
+			for _, a := range pp.Accounts {
+				if a.Key == slot {
+					current = a
+					break
+				}
+			}
+		}
+		if boundScope != "" && boundScope != pluginPolicyScope(id, current) {
+			return nil, errors.New("the plugin account's proxy identity changed")
+		}
+		if boundScope == "" || current.Scope == "" {
+			if p, ok := storedPicks(PluginID(id)); ok && p.AccountProxies[accountKey(user)] != "" {
+				return nil, errors.New("the plugin account's proxy identity is unverified")
+			}
+			return Via(ctx, PluginID(id)), nil
+		}
+	}
+	return ViaLogin(ctx, PluginID(id), user), nil
 }
 
 // ViaSignedIn is ctx for requests made with the sign-in an agent has now

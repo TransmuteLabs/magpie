@@ -20,6 +20,7 @@ import (
 type fakePeer struct {
 	sync.Mutex
 	cards     []SubscriptionQuota
+	history   []QuotaHistory
 	status    int
 	gets      int
 	refreshes []string // provider|user of each refresh asked
@@ -80,7 +81,11 @@ func (f *fakePeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST " + RemoteRefreshPath:
 		f.refreshes = append(f.refreshes, r.URL.Query().Get("provider")+"|"+r.URL.Query().Get("user"))
 	case "GET /v1/magpie/quotas/history":
-		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []QuotaHistory{{Provider: "codex", User: "a@x.com", Lines: []QuotaLine{{Name: "5h"}}}}})
+		history := f.history
+		if history == nil {
+			history = []QuotaHistory{{Provider: "codex", User: "a@x.com", Lines: []QuotaLine{{Name: "5h"}}}}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": history})
 		return
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -172,6 +177,283 @@ func TestRemoteMagpieCards(t *testing.T) {
 	}
 	if !found {
 		t.Error("QuotaReport has no office/codex from Office")
+	}
+}
+
+func TestRemoteZCodeHistoryFollowsOwnerAndSelectionIdentity(t *testing.T) {
+	peer := &fakePeer{cards: []SubscriptionQuota{{
+		Provider: "zcode", User: "Alice", Kind: "subscription",
+		AccountIdentity: "scope-a", AccountGeneration: "epoch-a",
+		Windows: []QuotaWindow{{Name: "Week", Used: 10}},
+	}}, history: []QuotaHistory{{Provider: "zcode", User: "Alice", AccountIdentity: "scope-a", Lines: []QuotaLine{{Name: "Week"}}}}}
+	remoteQuotaHome(t, peer)
+	p, err := Find("office")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := remoteCards(context.Background(), *p, true)
+	if len(first) != 1 || first[0].AccountIdentity != remoteAccountIdentity(*p, "scope-a") {
+		t.Fatalf("owner identity was not carried: %+v", first)
+	}
+	other := *p
+	other.ID = "other"
+	if first[0].AccountIdentity == remoteAccountIdentity(other, "scope-a") {
+		t.Fatal("two remote owners share an account identity")
+	}
+	if history := RemoteQuotaHistories(context.Background(), "7"); len(history) != 1 ||
+		history[0].AccountIdentity != first[0].AccountIdentity || history[0].Provider != "office/zcode" {
+		t.Fatalf("remote history lost its owner binding: %+v", history)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	noteQuotaHistory(first, now)
+	peer.Lock()
+	peer.cards[0].AccountIdentity, peer.cards[0].AccountGeneration = "scope-b", "epoch-b"
+	peer.cards[0].Windows[0].Used = 20
+	peer.Unlock()
+	second := remoteCards(context.Background(), *p, true)
+	if len(second) != 1 || second[0].AccountIdentity == first[0].AccountIdentity {
+		t.Fatalf("replacement reused the old remote identity: %+v", second)
+	}
+	noteQuotaHistory(second, now.Add(time.Minute))
+	history := QuotaHistories(time.Time{}, "office/zcode", "Alice")
+	if len(history) != 1 || history[0].AccountIdentity != second[0].AccountIdentity ||
+		len(history[0].Lines) != 1 || history[0].Lines[0].Points[len(history[0].Lines[0].Points)-1].Left != 80 {
+		t.Fatalf("history rebound the old selection: %+v", history)
+	}
+	peer.Lock()
+	peer.status = http.StatusServiceUnavailable
+	peer.Unlock()
+	stale := remoteCards(context.Background(), *p, true)
+	if len(stale) != 1 || stale[0].AsOf == nil {
+		t.Fatalf("failed owner read was presented as current: %+v", stale)
+	}
+	if history := QuotaHistories(time.Time{}, "office/zcode", "Alice"); len(history) != 0 {
+		t.Fatalf("stale remote identity was projected as current: %+v", history)
+	}
+}
+
+func TestRemoteIdentitylessFailureRetainsOldestReadingAndRecovers(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	read, older := now.Add(-4*time.Hour), now.Add(-8*time.Hour)
+	peer := &fakePeer{cards: []SubscriptionQuota{
+		{Provider: "claude", Name: "Claude", User: "alice", ReadAt: &read, Windows: []QuotaWindow{{Name: "5 hours", Used: 91}}},
+		{Provider: "codex", Name: "Codex", User: "bob", ReadAt: &read, AsOf: &older, ReadDeferred: true, Windows: []QuotaWindow{{Name: "Weekly", Used: 75}}},
+	}}
+	remoteQuotaHome(t, peer)
+	p, err := Find("office")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first := remoteCards(ctx, *p, true)
+	if len(first) != 2 || first[0].AsOf != nil || first[0].AccountIdentity != "" {
+		t.Fatalf("initial identity-less cards: %+v", first)
+	}
+	noteQuotaHistory(first, now)
+	first[0].Windows[0].Used = 1
+	if again := remoteCards(ctx, *p, false); again[0].Windows[0].Used != 91 {
+		t.Fatalf("named card mutated cache owner: %+v", again)
+	}
+	peer.Lock()
+	peer.status = http.StatusServiceUnavailable
+	peer.Unlock()
+	stale := remoteCards(ctx, *p, true)
+	if len(stale) != 2 || stale[0].AsOf == nil || !stale[0].AsOf.Equal(read) ||
+		stale[1].AsOf == nil || !stale[1].AsOf.Equal(older) || stale[1].ReadDeferred {
+		t.Fatalf("failed remote did not preserve oldest provenance: %+v", stale)
+	}
+	remoteCardCache.Lock()
+	owner := remoteCardCache.m[remoteCardsID(*p)].cards
+	remoteCardCache.Unlock()
+	if owner[0].AsOf != nil || owner[0].Windows[0].Used != 91 || !owner[1].ReadDeferred {
+		t.Fatalf("naming modified the cached owner's cards: %+v", owner)
+	}
+	before := readQuotaHist()
+	noteQuotaHistory(stale, now.Add(time.Hour))
+	after := readQuotaHist()
+	a, _ := json.Marshal(before)
+	b, _ := json.Marshal(after)
+	if string(a) != string(b) || len(dueAlerts(stale, map[string]alertMark{}, 80, 0, now)) != 0 {
+		t.Fatalf("failed remote produced history or alerts: %s / %s", a, b)
+	}
+	soon := now.Add(time.Hour)
+	stale[0].Windows[0].Span, stale[0].Windows[0].ResetsAt, stale[0].Windows[0].Used = 7*24*time.Hour, &soon, 10
+	if got := dueReminders(stale, map[string]alertMark{}, 2*time.Hour, now); len(got) != 0 {
+		t.Fatalf("failed remote produced reminders: %+v", got)
+	}
+	peer.Lock()
+	peer.status = 0
+	peer.cards[0].Windows[0].Used = 42
+	peer.cards[0].ReadAt = &now
+	peer.cards[1].AsOf, peer.cards[1].ReadDeferred = nil, false
+	peer.Unlock()
+	recovered := remoteCards(ctx, *p, true)
+	if len(recovered) != 2 || recovered[0].AsOf != nil || recovered[0].Windows[0].Used != 42 || recovered[1].AsOf != nil {
+		t.Fatalf("recovery kept failure provenance: %+v", recovered)
+	}
+	peer.Lock()
+	peer.cards = nil
+	peer.Unlock()
+	if empty := remoteCards(ctx, *p, true); len(empty) != 1 || empty[0].Provider != "office" || empty[0].Error != errRemoteNothingRead {
+		t.Fatalf("successful empty list retained old cards: %+v", empty)
+	}
+	peer.Lock()
+	peer.cards = []SubscriptionQuota{{Provider: "claude", Name: "Claude", Windows: []QuotaWindow{{Name: "5 hours", Used: 2}}}}
+	peer.held = true
+	peer.Unlock()
+	held := remoteCards(ctx, *p, true)
+	if len(held) != 1 || held[0].Error != errRemoteHeld {
+		t.Fatalf("held key leaked cards: %+v", held)
+	}
+	remoteCardCache.Lock()
+	heldAt := remoteCardCache.m[remoteCardsID(*p)].at
+	remoteCardCache.Unlock()
+	late := keepRemoteCards(remoteCardsID(*p), heldAt.Add(-time.Nanosecond), []SubscriptionQuota{{Provider: "claude"}}, nil)
+	if !late.held || len(late.cards) != 0 {
+		t.Fatalf("late response resurrected held cards: %+v", late)
+	}
+}
+
+func TestRemoteZCodeResetInventoryIsSourceQualifiedAndReadOnly(t *testing.T) {
+	now := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Millisecond)
+	five, week := float64(now.UnixMilli()), float64(now.Add(time.Hour).UnixMilli())
+	peer := &fakePeer{cards: []SubscriptionQuota{
+		{Provider: "zcode", Name: "ZCode", User: "alice", AccountIdentity: "scope", ZCodeReset: &ZCodeResetState{
+			Source: "zcode", Available: true, FiveHour: []float64{five}, Week: []float64{week}}},
+		{Provider: "zcode", Name: "Legacy", Resets: &ResetCredits{Source: "legacy-list", ByWindow: true, Count: 1, Weekly: 1,
+			Each: []ResetCard{{Window: "weekly", Until: &now}}}},
+		{Provider: "unrelated", Name: "Unrelated", Resets: &ResetCredits{Source: "zcode", ByWindow: true, Count: 2}},
+	}}
+	remoteQuotaHome(t, peer)
+	p, err := Find("office")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards := remoteCards(context.Background(), *p, true)
+	if len(cards) != 3 || cards[0].Resets == nil || cards[0].Resets.Source != "zcode" || !cards[0].Resets.ByWindow ||
+		cards[0].Resets.Count != 2 || cards[0].Resets.FiveHour != 1 || cards[0].Resets.Weekly != 1 ||
+		len(cards[0].Resets.Each) != 2 || cards[0].Resets.Each[0].Until.UnixMilli() != int64(five) ||
+		cards[1].Resets == nil || cards[1].Resets.Source != "legacy-list" || cards[2].Resets != nil {
+		t.Fatalf("remote reset projection: %+v", cards)
+	}
+	b, err := json.Marshal(cards)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded []SubscriptionQuota
+	if err := json.Unmarshal(b, &decoded); err != nil || decoded[0].Resets == nil ||
+		len(decoded[0].Resets.Each) != 2 || decoded[0].Resets.Each[1].Until.UnixMilli() != int64(week) {
+		t.Fatalf("remote reset JSON: %s, %v", b, err)
+	}
+}
+
+func TestRemoteEndpointSwitchSeparatesCachedPendingCardsAndHistory(t *testing.T) {
+	azureHome(t)
+	ForgetRemoteCardsForTest()
+	t.Cleanup(ForgetRemoteCardsForTest)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	var oldRequests, newRequests atomic.Int32
+	peer := func(name string, counter *atomic.Int32, blockSecond bool) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if key := r.Header.Get("Authorization"); key != "Bearer gateway-one" && key != "Bearer gateway-two" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			switch r.URL.Path {
+			case RemoteCardsPath:
+				if counter.Add(1) == 2 && blockSecond {
+					close(entered)
+					<-release
+				}
+				json.NewEncoder(w).Encode(map[string]any{"data": []SubscriptionQuota{{
+					Provider: "zcode", User: "Alice", Name: name, Kind: "subscription",
+					AccountIdentity: "same-selection", Windows: []QuotaWindow{{Name: "Week"}},
+				}}})
+			case "/v1/magpie/quotas/history":
+				json.NewEncoder(w).Encode(map[string]any{"data": []QuotaHistory{{
+					Provider: "zcode", User: "Alice", AccountIdentity: "same-selection",
+					Lines: []QuotaLine{{Name: "Week"}},
+				}}})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+	}
+	oldPeer := httptest.NewServer(peer("old", &oldRequests, true))
+	newPeer := httptest.NewServer(peer("new", &newRequests, false))
+	t.Cleanup(func() {
+		unblock()
+		oldPeer.Close()
+		newPeer.Close()
+	})
+	save := func(endpoint, key string) Provider {
+		t.Helper()
+		if err := Save(Provider{ID: "office", Name: "Office", Preset: RemoteMagpiePreset, Key: key, Chat: endpoint}); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Find("office")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *p
+	}
+	old := save(oldPeer.URL, "gateway-one")
+	if strings.Contains(remoteCardsID(old), old.Anthropic) || strings.Contains(remoteCardsID(old), old.Key) {
+		t.Fatal("remote cache key exposed endpoint or gateway credentials")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first := remoteCards(ctx, old, false)
+	if len(first) != 1 || !strings.HasPrefix(first[0].Name, "old") || first[0].AccountIdentity == "" {
+		t.Fatalf("old owner card: %+v", first)
+	}
+	pending := make(chan []SubscriptionQuota, 1)
+	go func() { pending <- remoteCards(ctx, old, true) }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("old endpoint read did not start")
+	}
+	current := save(newPeer.URL, "gateway-one")
+	switched := remoteCards(ctx, current, false)
+	if len(switched) != 1 || !strings.HasPrefix(switched[0].Name, "new") ||
+		switched[0].AccountIdentity == first[0].AccountIdentity {
+		t.Fatalf("new endpoint reused old cached card or identity: %+v", switched)
+	}
+	history := RemoteQuotaHistories(ctx, "7")
+	if len(history) != 1 || history[0].AccountIdentity != switched[0].AccountIdentity {
+		t.Fatalf("new endpoint history did not follow its card: %+v", history)
+	}
+	unblock()
+	select {
+	case prior := <-pending:
+		if len(prior) != 1 || !strings.HasPrefix(prior[0].Name, "old") {
+			t.Fatalf("old pending request lost its owner: %+v", prior)
+		}
+	case <-ctx.Done():
+		t.Fatal("old endpoint read did not finish")
+	}
+	after := remoteCards(ctx, current, false)
+	if len(after) != 1 || after[0].AccountIdentity != switched[0].AccountIdentity ||
+		!strings.HasPrefix(after[0].Name, "new") || newRequests.Load() != 1 {
+		t.Fatalf("old pending answer entered new endpoint cache: %+v, requests=%d", after, newRequests.Load())
+	}
+	rotated := save(newPeer.URL, "gateway-two")
+	rotatedCards := remoteCards(ctx, rotated, false)
+	if len(rotatedCards) != 1 || rotatedCards[0].AccountIdentity != switched[0].AccountIdentity || newRequests.Load() != 2 {
+		t.Fatalf("key rotation changed history identity or reused old-key cache: %+v", rotatedCards)
+	}
+	history = RemoteQuotaHistories(ctx, "7")
+	if len(history) != 1 || history[0].AccountIdentity != switched[0].AccountIdentity {
+		t.Fatalf("key rotation changed history namespace: %+v", history)
+	}
+	outer := Provider{ID: "outer", Anthropic: "https://outer.invalid"}
+	oldHop := namedRemoteCards(outer, first)
+	newHop := namedRemoteCards(outer, switched)
+	if len(oldHop) != 1 || len(newHop) != 1 || oldHop[0].AccountIdentity == newHop[0].AccountIdentity {
+		t.Fatalf("another owner hop collapsed endpoint identities: old=%+v new=%+v", oldHop, newHop)
 	}
 }
 

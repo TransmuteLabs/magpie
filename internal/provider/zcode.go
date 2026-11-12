@@ -135,28 +135,49 @@ func zcodeOwn() (who string, k zcodeKey, ok bool) {
 		return "", zcodeKey{}, false
 	}
 	secret := zcodeSecret()
+	family, active := zcodeActiveFamily(store, secret)
+	if family == "" {
+		return "", zcodeKey{}, false
+	}
+	var info struct {
+		Email       string `json:"email"`
+		Name        string `json:"name"`
+		Username    string `json:"username"`
+		DisplayName string `json:"displayName"`
+		ID          string `json:"user_id"`
+		AlternateID string `json:"id"`
+	}
+	_ = json.Unmarshal([]byte(zcodeStoreValue(store, secret, "oauth:"+active+":user_info")), &info)
+	uid := strings.TrimSpace(firstNonEmpty(info.ID, info.AlternateID))
 	for name, v := range store {
 		// account-provider:coding-plan:account:zai-individual-coding-plan:account:<uuid>:api-key
-		if !strings.Contains(name, ":coding-plan:") || !strings.HasSuffix(name, ":api-key") {
+		if !strings.Contains(name, ":"+family+"-individual-coding-plan:") || !strings.HasSuffix(name, ":api-key") ||
+			uid == "" || !strings.Contains(name, ":account:"+uid+":") {
 			continue
 		}
 		key, ok := zcodeDecrypt(secret, v)
 		if !ok || !strings.Contains(key, ".") {
 			continue
 		}
-		base := ZCodeZaiBase
-		if strings.Contains(name, ":bigmodel-") {
-			base = ZCodeBigModelBase
+		if k.Key != "" && k.Key != key {
+			return "", zcodeKey{}, false
 		}
-		// Z.ai's first, as ZCode lists it
-		if k.Key == "" || (base == ZCodeZaiBase && k.Base != ZCodeZaiBase) {
-			k = zcodeKey{Key: key, Base: base}
-		}
+		k.Key = key
+	}
+	k.Base = ZCodeZaiBase
+	if family == "bigmodel" {
+		k.Base = ZCodeBigModelBase
 	}
 	// ZCode 3.15 keeps no plan key in its credentials; the one it uses
 	// sits in config.json, the provider's options.apiKey (#2130)
 	if k.Key == "" {
-		k = zcodeConfigKey(secret)
+		k = zcodeConfigKey(secret, family)
+		if k.Base == "" {
+			k.Base = ZCodeZaiBase
+			if family == "bigmodel" {
+				k.Base = ZCodeBigModelBase
+			}
+		}
 	}
 	if v, ok := store["zcodejwttoken"]; ok {
 		if s, ok := zcodeDecrypt(secret, v); ok {
@@ -164,36 +185,81 @@ func zcodeOwn() (who string, k zcodeKey, ok bool) {
 		}
 	}
 	// ZCode switched to a team's plan: that project's key, found when asked
-	if t, ok := zcodeOwnTeam(store, secret); ok {
+	if t, ok := zcodeOwnTeam(store, secret, family, active, uid); ok {
 		t.JWT = k.JWT
 		k = t
 	}
 	if k.Key == "" && k.JWT == "" && !k.team() {
 		return "", zcodeKey{}, false
 	}
-	if k.Base == "" {
-		k.Base = ZCodeZaiBase
-	}
-	var info struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
-		ID    string `json:"user_id"`
-	}
-	for _, name := range []string{"oauth:zai:user_info", "oauth:bigmodel:user_info"} {
-		if v, ok := store[name]; ok && info.Email+info.Name+info.ID == "" {
-			if s, ok := zcodeDecrypt(secret, v); ok {
-				_ = json.Unmarshal([]byte(s), &info)
-			}
-		}
-	}
-	k.UID = strings.TrimSpace(info.ID)
-	return zcodeWho(info.Email, info.Name, info.ID), k, true
+	k.UID = uid
+	return zcodeWho(info.Email, firstNonEmpty(info.Name, info.Username, info.DisplayName), uid), k, true
 }
 
-// zcodeConfigKey is the coding plan key ZCode's config.json gives its
-// built-in coding plan provider, Z.ai's first, as ZCode lists them; ZCode
-// reads it as it is, and one written encrypted is read too.
-func zcodeConfigKey(secret []byte) zcodeKey {
+func zcodeStoreValue(store map[string]string, secret []byte, name string) string {
+	v := store[name]
+	if strings.HasPrefix(v, "enc:") {
+		if !strings.HasPrefix(v, "enc:v1:") {
+			return ""
+		}
+		v, _ = zcodeDecrypt(secret, v)
+	}
+	return strings.TrimSpace(v)
+}
+
+// zcodeActiveFamily follows the SDK's active provider and explicit family.
+// Legacy data with no active provider is usable only when one family is
+// positively identifiable; a second configured family is ambiguous.
+func zcodeActiveFamily(store map[string]string, secret []byte) (family, active string) {
+	home, _ := os.UserHomeDir()
+	var set struct {
+		Domain string `json:"providerFamilyDomain"`
+	}
+	b, err := readAccountFile(filepath.Join(appdir.ZCodeHome(home), ".zcode", "v2", "setting.json"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) || err == nil && json.Unmarshal(b, &set) != nil {
+		return "", ""
+	}
+	if _, present := store["oauth:active_provider"]; present {
+		active = zcodeStoreValue(store, secret, "oauth:active_provider")
+		if active != "zai" && active != "bigmodel" && active != "zai_cn" {
+			return "", ""
+		}
+		if set.Domain == "zai" || set.Domain == "bigmodel" {
+			return set.Domain, active
+		}
+		if active == "zai" {
+			return "zai", active
+		}
+		return "bigmodel", active
+	}
+	if set.Domain == "zai" || set.Domain == "bigmodel" {
+		return set.Domain, set.Domain
+	}
+	var found []string
+	for _, site := range []string{"zai", "bigmodel"} {
+		has := zcodeStoreValue(store, secret, "oauth:"+site+":user_info") != "" ||
+			zcodeStoreValue(store, secret, "oauth:"+site+":access_token") != "" ||
+			zcodeConfigKey(secret, site).Key != ""
+		for name := range store {
+			if strings.Contains(name, ":"+site+"-individual-coding-plan:") && strings.HasSuffix(name, ":api-key") {
+				has = true
+			}
+		}
+		if has {
+			found = append(found, site)
+		}
+	}
+	if len(found) != 1 {
+		return "", ""
+	}
+	return found[0], found[0]
+}
+
+// zcodeConfigKey reads only the requested family's coding plan key.
+func zcodeConfigKey(secret []byte, family string) zcodeKey {
+	if family != "zai" && family != "bigmodel" {
+		return zcodeKey{}
+	}
 	var cfg struct {
 		Provider map[string]struct {
 			Options struct {
@@ -211,6 +277,9 @@ func zcodeConfigKey(secret []byte) zcodeKey {
 		{[]string{"builtin:zai-coding-plan", "account:zai-individual-coding-plan"}, ZCodeZaiBase},
 		{[]string{"builtin:bigmodel-coding-plan", "account:bigmodel-individual-coding-plan"}, ZCodeBigModelBase},
 	} {
+		if family == "zai" && p.base != ZCodeZaiBase || family == "bigmodel" && p.base != ZCodeBigModelBase {
+			continue
+		}
 		for _, id := range p.ids {
 			key := strings.TrimSpace(cfg.Provider[id].Options.APIKey)
 			if strings.HasPrefix(key, "enc:") {

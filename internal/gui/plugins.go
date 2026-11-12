@@ -852,7 +852,7 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		if pp.Methods[in.Method].Type == "api" {
 			ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 			defer cancel()
-			id, err := provider.PluginAPIKey(ctx, in.Provider, in.Method, in.Inputs, in.Key)
+			id, err := provider.PluginAPIKey(ctx, in.Provider, in.Method, in.Inputs, in.Key, provider.SignInOptions{Proxy: in.Proxy, User: in.User})
 			if err != nil {
 				fail(rw, err)
 				return

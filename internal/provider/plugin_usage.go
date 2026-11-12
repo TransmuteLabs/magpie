@@ -90,14 +90,20 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 		q.Error = "no such plugin provider"
 		return q
 	}
-	key := ""
-	for _, x := range pluginLogins(pp) {
-		if strings.EqualFold(x.User, l.User) {
-			key = x.acct.Key
+	if l.pluginSlot == "" {
+		if current, found := pluginLoginByUser(l.Agent, l.User); found {
+			l = current
 		}
 	}
+	q.AccountIdentity, q.AccountGeneration = l.pluginIdentity, l.pluginGeneration
+	q.accountUnverified = l.pluginIdentity == "" || l.pluginGeneration == ""
+	key := l.pluginSlot
 	if key == "" {
 		q.Error = "not signed in"
+		return q
+	}
+	if !q.accountUnverified && !pluginLoginCurrent(l) {
+		q.Error = "the account changed; refresh its usage"
 		return q
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -106,6 +112,10 @@ func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	u, err := plugin.AccountUsage(ctx, pp.ID, key)
 	if err != nil {
 		q.Error = err.Error()
+		return q
+	}
+	if !q.accountUnverified && !pluginLoginCurrent(l) {
+		q.Error = "the account changed; refresh its usage"
 		return q
 	}
 	// the plugin says what the read means for the sign-in, as a built-in's
@@ -149,7 +159,7 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
 	if u.User != "" {
 		q.User = u.User
 	}
-	q.Balance, q.Renew, q.Error = u.Balance, u.Renew, u.Error
+	q.Balance, q.Renew, q.Error, q.Partial = u.Balance, u.Renew, u.Error, u.Partial
 	q.Observations = u.Observations
 	q.PluginError = u.Error != ""
 	if t, err := time.Parse(time.RFC3339, u.Until); err == nil {

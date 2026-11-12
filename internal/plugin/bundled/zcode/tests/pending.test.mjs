@@ -22,6 +22,7 @@ const real = globalThis.fetch
 afterAll(() => (globalThis.fetch = real))
 beforeEach(() => {
   globalThis.fetch = async () => { throw new Error("no network in tests") }
+  _internal.config(undefined)
   _internal.routes.clear()
   _internal.blocked.clear()
   resetClientConfigs()
@@ -120,6 +121,15 @@ test("a gift-only account whose only plan starts later gets a card, not 'ended o
   zcode({ plans: [{ ...next("active"), name: "ZCode Trust Build" }], balances: [] })
   const u = await usage(startAuth())
   expect(u).toMatchObject({ signIn: "kept", plan: "ZCode Trust Build", windows: [{ name: PENDING, used: 0, aside: true, display: `ZCode Trust Build · ${local(later)}` }] })
+  _internal.config({ config: { providerConfigRules: { templateRules: [], providerRules: [
+    { providerId: "account:zai-start-plan", config: { builtinModelIds: ["GLM-5.3-Flash"] } },
+  ] }, modelConfigRules: { modelRules: [{ modelMatch: ".*", config: { enabled: true } }], modelApiRules: [], providerSiteRules: [],
+    templateModelRules: [], builtinProviderModelRules: [] } } })
+  const account = accountFixture(startAuth())
+  const hooks = await ZCodeAuthPlugin({ client: account.client })
+  const models = await hooks.provider.models({ models: {} }, { getAuth: account.getAuth })
+  expect(Object.keys(models)).toEqual([])
+  expect(models[Symbol.for("magpie.fellBack")]).toBeUndefined()
 })
 
 test("several coming plans are each named, the soonest first; an expired one with a later start is not", async () => {

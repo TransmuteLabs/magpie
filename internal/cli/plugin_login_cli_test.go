@@ -20,7 +20,7 @@ import (
 // magpie, brings it back, as the window's sign-in and a built-in's do.
 func TestAccountsAddBringsBackARemovedPlugin(t *testing.T) {
 	ctx := fakeCoHome(t)
-	if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, "sk-one-key-1111"); err != nil {
+	if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, "sk-one-key-1111", provider.SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.Delete("fakeco"); err != nil {

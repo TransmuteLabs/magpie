@@ -75,6 +75,17 @@ refreshing it preserves local providers and other remote magpies.
 `usage-card-refresh.test.cjs` checks the real button in both browser
 engines and all five languages. A cached `readDeferred` card says no
 refresh was requested this time; a failed read retains its failure notice.
+An explicitly partial reading keeps independently successful windows or
+observations beside its primary error in account rows, cards, table and
+panel; observation-only data never invents a meter or a “not used” state.
+Terminal/statusline and history consumers follow the same
+[quota provenance contract](providers-accounts.md#partial-and-retained-quota-readings).
+Settings offers a fresh partial card only when it has an actual eligible
+tray window, keeping the failure in its choice and tooltip. The lazy
+`traywindows.js` picker resolves exact selected card IDs: one account's
+windows, the identified union of selected accounts, or an explicitly
+labelled possible-window union for the in-use selector. Preferences stay
+provider-keyed; the backend still chooses the actual current account.
 The tray panel's Allowances cards use the same `quotaRefresh`, at the
 start of the line under the account (the reset deadline, the error, or a
 balance's name), opened as the card is hovered or the button is focused.

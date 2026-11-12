@@ -126,3 +126,24 @@ func TestWindowHoldsFirstReadingIsNotARefill(t *testing.T) {
 		t.Fatal("first observed reading was mistaken for a reset")
 	}
 }
+
+func TestWindowHistoryDoesNotFollowReusedAccountName(t *testing.T) {
+	holdsHome(t)
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	before, dryAt, reset := now.Add(-2*time.Hour), now.Add(-time.Hour), now.Add(time.Hour)
+	card := provider.SubscriptionQuota{Provider: "zcode", User: "Alice", AccountIdentity: "selection-b", ReadAt: &now,
+		Windows: []provider.QuotaWindow{{Name: "5 hours", Used: 100, Span: 5 * time.Hour, ResetsAt: &reset}}}
+	old := provider.QuotaHistory{Provider: "zcode", User: "Alice", AccountIdentity: "selection-a",
+		Lines: []provider.QuotaLine{{Name: "5 hours", Points: []provider.QuotaPoint{{At: before, Left: 20}, {At: dryAt, Left: 0, ResetsAt: &reset}}}}}
+	if got := HistoricalWindowHolds([]provider.SubscriptionQuota{card}, []provider.QuotaHistory{old}, before, now); len(got) != 0 {
+		t.Fatalf("historical holds used another selection: %+v", got)
+	}
+	if got := dryRuns([]provider.SubscriptionQuota{card}, []provider.QuotaHistory{old}, now); len(got["zcode\x00alice"]) != 1 || !got["zcode\x00alice"][0].lastLeft.IsZero() {
+		t.Fatalf("old selection supplied a dry-run boundary: %+v", got)
+	}
+	same := old
+	same.User, same.AccountIdentity = "Former name", "selection-b"
+	if got := dryRuns([]provider.SubscriptionQuota{card}, []provider.QuotaHistory{same}, now); len(got["zcode\x00alice"]) != 1 || !got["zcode\x00alice"][0].lastLeft.Equal(before) {
+		t.Fatalf("same selection did not retain its renamed history: %+v", got)
+	}
+}

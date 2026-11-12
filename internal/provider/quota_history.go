@@ -38,6 +38,7 @@ import (
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/plugin"
 )
 
 const (
@@ -71,9 +72,10 @@ type QuotaLine struct {
 
 // QuotaHistory is one account's windows over time. User is lowercased.
 type QuotaHistory struct {
-	Provider string      `json:"provider"`
-	User     string      `json:"user"`
-	Lines    []QuotaLine `json:"lines"`
+	Provider        string      `json:"provider"`
+	User            string      `json:"user"`
+	AccountIdentity string      `json:"accountIdentity,omitempty"`
+	Lines           []QuotaLine `json:"lines"`
 }
 
 // quotaHist is the file: account ("provider|user") → window → points.
@@ -296,6 +298,15 @@ func (h quotaHist) prune(now time.Time) {
 
 func quotaHistKey(provider, user string) string { return provider + "|" + strings.ToLower(user) }
 
+// quotaHistoryKey keeps a plugin selection's history across a re-login of
+// that same selection, without attaching it to a reused visible name.
+func quotaHistoryKey(q SubscriptionQuota) string {
+	if q.AccountIdentity != "" {
+		return q.Provider + "|@plugin:" + q.AccountIdentity
+	}
+	return quotaHistKey(q.Provider, q.User)
+}
+
 // noteQuotaHistory keeps what each window among qs says, at when it was
 // read (ReadAt), or now: a reading handed back again from a cache (a
 // Claude account's, kept until Claude Code tells it again) keeps its time
@@ -313,14 +324,14 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 	// not be read and parsed for that batch again (#1358).
 	skip := true
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil || q.Provider == "" {
+		if q.Error != "" && !q.Partial || q.AsOf != nil || q.ReadDeferred || q.Provider == "" || q.accountUnverified {
 			continue // a reading kept from before isn't a new one
 		}
 		at := now
 		if q.ReadAt != nil && !q.ReadAt.After(now) {
 			at = *q.ReadAt
 		}
-		key := quotaHistKey(q.Provider, q.User)
+		key := quotaHistoryKey(q)
 		if lastNoted[key].Before(at) {
 			lastNoted[key] = at
 			skip = false
@@ -332,7 +343,7 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 	var h quotaHist
 	changed := false
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil || q.Provider == "" {
+		if q.Error != "" && !q.Partial || q.AsOf != nil || q.ReadDeferred || q.Provider == "" || q.accountUnverified {
 			continue // a reading kept from before isn't a new one
 		}
 		at := now
@@ -347,7 +358,7 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 			if h == nil {
 				h = heldQuotaHist()
 			}
-			key := quotaHistKey(q.Provider, q.User)
+			key := quotaHistoryKey(q)
 			if h[key] == nil {
 				h[key] = map[string][]QuotaPoint{}
 			}
@@ -439,13 +450,51 @@ func QuotaHistories(since time.Time, provider, user string) []QuotaHistory {
 	if err != nil {
 		return []QuotaHistory{}
 	}
+	// Plugin history is keyed by its selection, projected to a name only
+	// while that exact selection is currently present. Legacy label-only
+	// plugin history is not evidence that the current account owns it.
+	pluginIDs := map[string]bool{}
+	names := map[string]map[string]string{}
+	for _, pp := range plugin.Cached() {
+		pluginIDs[PluginID(pp.ID)] = true
+	}
+	for _, l := range cardLogins() {
+		if l.pluginSlot == "" || l.pluginIdentity == "" {
+			continue
+		}
+		id := loginProvider(l)
+		if names[id] == nil {
+			names[id] = map[string]string{}
+		}
+		names[id]["@plugin:"+l.pluginIdentity] = strings.ToLower(l.User)
+	}
+	for _, q := range passedOnCards() {
+		if q.AccountIdentity == "" || q.accountUnverified || q.AsOf != nil {
+			continue
+		}
+		if names[q.Provider] == nil {
+			names[q.Provider] = map[string]string{}
+		}
+		names[q.Provider]["@plugin:"+q.AccountIdentity] = strings.ToLower(q.User)
+	}
 	out := []QuotaHistory{}
 	for _, key := range slices.Sorted(maps.Keys(h)) {
 		p, u, _ := strings.Cut(key, "|")
+		identity := strings.TrimPrefix(u, "@plugin:")
+		if identity == u {
+			identity = ""
+		}
+		if pluginIDs[p] || strings.HasPrefix(u, "@plugin:") {
+			var ok bool
+			u, ok = names[p][u]
+			if !ok {
+				continue
+			}
+		}
 		if provider != "" && p != provider || user != "" && u != strings.ToLower(user) {
 			continue
 		}
-		a := QuotaHistory{Provider: p, User: u, Lines: []QuotaLine{}}
+		a := QuotaHistory{Provider: p, User: u, AccountIdentity: identity, Lines: []QuotaLine{}}
 		for _, name := range slices.Sorted(maps.Keys(h[key])) {
 			pts := h[key][name]
 			i, _ := slices.BinarySearchFunc(pts, since, func(p QuotaPoint, t time.Time) int { return p.At.Compare(t) })

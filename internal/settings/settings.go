@@ -2265,6 +2265,32 @@ func EditUsageAliases(edit func(map[string]string) (map[string]string, error)) e
 	return save(s, false)
 }
 
+// EditTrayUsages changes only the selected tray cards under the settings
+// lock. An unreadable file or a rejected edit leaves the settings untouched.
+func EditTrayUsages(edit func([]string) ([]string, error)) error {
+	defer lockFile()()
+	b, err := steady.ReadFile(Path())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil && !validSettings(b) {
+		return fmt.Errorf("could not read settings at %s: invalid settings", Path())
+	}
+	s, err := loadChecked()
+	if err != nil {
+		return err
+	}
+	next, err := edit(slices.Clone(s.TrayUsages))
+	if err != nil {
+		return err
+	}
+	if slices.Equal(next, s.TrayUsages) {
+		return nil
+	}
+	s.TrayUsages = next
+	return save(s, false)
+}
+
 // EditPluginOptions changes PluginOptions alone, as edit returns them from
 // what the file holds now (provider id → option key → on), as
 // EditUsageAliases does. edit is given a deep copy; an error from it, or a

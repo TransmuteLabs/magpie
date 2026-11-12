@@ -351,17 +351,41 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 			e = &ps[i]
 		}
 	}
+	intrinsic := name == "zcode" || plugin.IsBundledZCode(name)
 	// a short name, as the community's READMEs write it
 	for i, x := range ps {
-		if e == nil && plugin.Called(plugin.Name(x.Spec), name) {
+		if e == nil && !intrinsic && plugin.Called(plugin.Name(x.Spec), name) {
 			e = &ps[i]
 		}
 	}
-	if e == nil {
+	if e != nil && !plugin.IsBundledZCode(e.Spec) {
+		intrinsic = false
+	}
+	if e == nil && !intrinsic {
 		return fmt.Errorf("no plugin %q", name)
 	}
+	var switches []declaredSwitch
+	if intrinsic {
+		providers, known := plugin.PassiveProviders()
+		if !known {
+			return errors.New("intrinsic provider metadata is unavailable")
+		}
+		for _, p := range providers {
+			if p.ID == "zcode" && plugin.IsBundledZCode(p.Spec) {
+				for _, o := range p.Options {
+					switches = append(switches, declaredSwitch{o, p.ID})
+				}
+				break
+			}
+		}
+		if len(switches) == 0 {
+			return errors.New("intrinsic provider options are unavailable")
+		}
+	}
 	if len(set) == 0 {
-		switches := declaredSwitches(ctx, e.Spec, false)
+		if !intrinsic {
+			switches = declaredSwitches(ctx, e.Spec, false)
+		}
 		if len(switches) > 0 {
 			chosen := settings.Load().PluginOptions
 			for _, sw := range switches {
@@ -371,6 +395,9 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 				}
 				fmt.Printf("%s  %s %s  %s\n", sw.Key, sw.provider, v, muted.Render(sw.Label))
 			}
+		}
+		if intrinsic {
+			return nil
 		}
 		if len(e.Options) == 0 {
 			if len(switches) > 0 {
@@ -402,7 +429,9 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 	// ctx.options, which a provider plugin never sees. `options cursor
 	// '{"wire_trace": true}'` wrote the second and nothing turned on
 	// (plugins#550): a declared key goes to the first, the rest as before.
-	switches := declaredSwitches(ctx, e.Spec, opts != nil)
+	if !intrinsic {
+		switches = declaredSwitches(ctx, e.Spec, opts != nil)
+	}
 	byKey := map[string][]string{}
 	for _, sw := range switches {
 		byKey[sw.Key] = append(byKey[sw.Key], sw.provider)
@@ -411,6 +440,9 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 	rest := map[string]any{}
 	for k, v := range opts {
 		if len(byKey[k]) == 0 {
+			if intrinsic {
+				return fmt.Errorf("unknown option %q for %s", k, name)
+			}
 			rest[k] = v
 			continue
 		}
@@ -424,6 +456,10 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 		err := settings.EditPluginOptions(func(m map[string]map[string]bool) (map[string]map[string]bool, error) {
 			if m == nil {
 				m = map[string]map[string]bool{}
+			}
+			if intrinsic && opts == nil {
+				delete(m, "zcode")
+				return m, nil
 			}
 			for _, sw := range switches {
 				if opts == nil {
@@ -455,8 +491,8 @@ func pluginOptions(ctx context.Context, name string, set []string) error {
 	// plugins.json keeps what isn't a declared switch: set with only
 	// switches leaves a middleware's options as they were, less any
 	// switch written there before
-	write, keep := opts == nil || len(rest) > 0, rest
-	if !write && len(on) > 0 {
+	write, keep := !intrinsic && (opts == nil || len(rest) > 0), rest
+	if !intrinsic && !write && len(on) > 0 {
 		keep = map[string]any{}
 		for k, v := range e.Options {
 			if len(byKey[k]) == 0 {
@@ -638,6 +674,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 	// signed in through the proxy its requests will go through (#1663)
 	ctx = provider.Via(ctx, provider.PluginID(pp.ID))
 	var saved plugin.Saved
+	var id string
 	if pp.Methods[m].Type == "api" {
 		key := ""
 		if !pp.Methods[m].NoKey() {
@@ -647,7 +684,7 @@ func pluginLogin(ctx context.Context, name, method string) error {
 				return err
 			}
 		}
-		if saved, err = plugin.APIKey(ctx, pp.ID, m, inputs, key, plugin.NewAccount); err != nil {
+		if id, err = provider.PluginAPIKey(ctx, pp.ID, m, inputs, key, provider.SignInOptions{}); err != nil {
 			return err
 		}
 	} else {
@@ -707,10 +744,10 @@ func pluginLogin(ctx context.Context, name, method string) error {
 		if saved, err = plugin.Finish(wait, a.Session, code); err != nil {
 			return err
 		}
+		id = provider.PluginSignedIn(saved)
 	}
 	// as the window's sign-in does: its lapsed mark goes and, removed from
 	// magpie, it comes back
-	id := provider.PluginSignedIn(saved)
 	fmt.Println(green.Render("✓"), "signed in to", pp.Name, muted.Render("· its models are "+id+"/<model>"))
 	sayStillOff(id)
 	return nil

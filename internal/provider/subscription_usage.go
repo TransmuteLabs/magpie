@@ -170,7 +170,11 @@ type SubscriptionQuota struct {
 	AccessSKU string        `json:"accessSku,omitempty"`
 	User      string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
 	Windows   []QuotaWindow `json:"windows"`
-	Balance   string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
+	// These opaque values identify the account without exposing credentials.
+	AccountIdentity   string `json:"accountIdentity,omitempty"`
+	AccountGeneration string `json:"accountGeneration,omitempty"`
+	accountUnverified bool
+	Balance           string `json:"balance,omitempty"` // what is left on an API key, instead of windows
 	// BalanceParts are the Balance's amounts each apart, when the balance
 	// field the user wrote has several or a percent (cardParts)
 	BalanceParts []BalancePart `json:"balanceParts,omitempty"`
@@ -195,6 +199,9 @@ type SubscriptionQuota struct {
 	Until *time.Time `json:"until,omitempty"`
 	Renew string     `json:"renew,omitempty"`
 	Error string     `json:"error,omitempty"`
+	// Partial marks newly read windows or observations from an independent
+	// source when Error reports that the primary allowance could not be read.
+	Partial bool `json:"partial,omitempty"`
 	// PluginError is an Error a plugin's own usage read gave, in its own
 	// words: magpie has no reading of it to say better, so the GUI shows
 	// it on the card rather than only in a tooltip (aqiu817/magpie-sensenova#1).
@@ -413,6 +420,9 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 	out := []SubscriptionQuota{}
 	for _, q := range all {
 		if hidden[q.Provider] {
+			continue
+		}
+		if !currentPluginQuota(q) {
 			continue
 		}
 		if q.Provider == "gemini" || q.Provider == "antigravity" {
@@ -698,7 +708,8 @@ func claudeSubscriptionUsage(ctx context.Context, user string) SubscriptionQuota
 // readNow stamps a reading just made, one that doesn't say when it was
 // read itself, with the time.
 func readNow(q SubscriptionQuota) SubscriptionQuota {
-	if q.Error == "" && q.AsOf == nil && q.ReadAt == nil && (len(q.Windows) > 0 || q.Balance != "") {
+	if (q.Error == "" || q.Partial) && q.AsOf == nil && !q.ReadDeferred && q.ReadAt == nil &&
+		(len(q.Windows) > 0 || q.Error == "" && q.Balance != "" || q.Partial && len(q.Observations) > 0) {
 		now := time.Now()
 		q.ReadAt = &now
 	}

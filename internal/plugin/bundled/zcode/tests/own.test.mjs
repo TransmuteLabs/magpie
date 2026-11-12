@@ -71,6 +71,16 @@ test("an explicitly signed-out app never imports stale family credentials", () =
   expect(_internal.ownSignIn()).toBeNull()
 })
 
+test("a ZCode session cannot be imported as Z.ai business material", async () => {
+  store({ "oauth:active_provider": "zai", "oauth:zai:user_info": JSON.stringify({ user_id: "u1" }),
+    "oauth:zai:access_token": "same-session", zcodejwttoken: "same-session" }, {}, true)
+  const signed = await importApp()
+  const state = JSON.parse(signed.refresh)
+  expect(state.kind).toBe("start")
+  expect(state.business).toBeFalsy()
+  expect(state.jwt).toBe("same-session")
+})
+
 test("plaintext import uses the active family and the raw profile's exact location to mint a PAT", async () => {
   store({ "oauth:active_provider": "zai", "oauth:zai:user_info": JSON.stringify({ user_id: "u1", name: "User" }),
     "oauth:zai:access_token": "zai-business", zcodejwttoken: "zcode-jwt", [locKey("zai", "u1")]: location,
@@ -80,11 +90,11 @@ test("plaintext import uses the active family and the raw profile's exact locati
   const before = readFileSync(join(dir(), "credentials.json"), "utf8")
   const signed = await importApp()
   const state = JSON.parse(signed.refresh)
-  expect(state).toMatchObject({ site: "zai", kind: "individual", uid: "u1", oauthToken: "zai-business", loc: { apiKeyId: "key-id" } })
+  expect(state).toMatchObject({ site: "zai", kind: "individual", uid: "u1", business: "zai-business", loc: { apiKeyId: "key-id" } })
+  expect(state.oauthToken).toBeUndefined()
   const requests = []
   globalThis.fetch = async (input, init = {}) => {
     const u = new URL(String(input)); requests.push({ path: u.pathname, headers: new Headers(init.headers) })
-    if (u.pathname === "/api/auth/z/login") return Response.json({ code: 0, data: { access_token: "business-jwt", expires_in: 600 } })
     if (u.pathname.endsWith("/access_tokens")) return Response.json({ code: 0, data: { accessToken: "short-pat", tokenType: "Bearer", expiresIn: 600, expiresAt: Date.now() / 1000 + 600 } })
     if (u.pathname.endsWith("/billing/balance")) return Response.json({ code: 0, data: { plans: [], balances: [] } })
     if (u.pathname.endsWith("/messages")) return Response.json({ type: "message", content: [] })
@@ -95,9 +105,56 @@ test("plaintext import uses the active family and the raw profile's exact locati
   const loader = await hooks.auth.loader(slot.getAuth, {})
   expect((await loader.fetch("https://api.z.ai/api/anthropic/v1/messages", { method: "POST", body: JSON.stringify({ model: "GLM-5.3", messages: [] }) })).status).toBe(200)
   expect(requests.find((r) => r.path.endsWith("/messages")).headers.get("x-api-key")).toBe("short-pat")
+  expect(requests.find((r) => r.path.endsWith("/access_tokens")).headers.get("authorization")).toBe("Bearer zai-business")
+  expect(requests.some((r) => r.path === "/api/auth/z/login")).toBe(false)
   expect(JSON.stringify(requests.map((r) => r.path))).not.toContain("/copy/")
   expect(JSON.stringify(requests.map((r) => r.path))).not.toContain("wrong")
   expect(readFileSync(join(dir(), "credentials.json"), "utf8")).toBe(before)
+})
+
+test("correcting an older app import's Z.ai business role preserves its account generation", async () => {
+  store({ "oauth:active_provider": "zai", "oauth:zai:user_info": JSON.stringify({ user_id: "u1", name: "User" }),
+    "oauth:zai:access_token": "zai-business", "oauth:session_revision": "session-1", zcodejwttoken: "zcode-jwt" },
+  { providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } } }, true)
+  const signed = await importApp()
+  const legacy = JSON.parse(signed.refresh)
+  legacy.oauthToken = legacy.business
+  delete legacy.business
+  const slot = accountFixture({ ...signed, type: "oauth", refresh: JSON.stringify(legacy), accountEpoch: "same-login" })
+  const hooks = await ZCodeAuthPlugin({ client: slot.client })
+  const before = await slot.current()
+  const account = await hooks.auth.account(slot.getAuth, {}, { operation: "context" })
+  const after = await slot.current(), state = JSON.parse(after.refresh)
+  expect(after.accountScope).toBe(before.accountScope)
+  expect(after.accountEpoch).toBe("same-login")
+  expect(account.context.generation).toBe("same-login")
+  expect(state.business).toBe("zai-business")
+  expect(state.oauthToken).toBeFalsy()
+})
+
+test("a same-session Z.ai app business update preserves scope and account generation", async () => {
+  const info = JSON.stringify({ user_id: "u1", name: "User" })
+  const settings = { providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } } }
+  store({ "oauth:active_provider": "zai", "oauth:zai:user_info": info, "oauth:zai:access_token": "business-a",
+    "oauth:session_revision": "revision-a", zcodejwttoken: "same-zcode-jwt" }, settings, true)
+  const signed = await importApp()
+  const slot = accountFixture({ ...signed, type: "oauth" })
+  const hooks = await ZCodeAuthPlugin({ client: slot.client })
+  const first = (await hooks.auth.account(slot.getAuth, {}, { operation: "context" })).context
+  const current = await slot.current(), state = JSON.parse(current.refresh)
+  Object.assign(state, { businessExpiresAt: 1_900_000_000_000, businessGeneration: "old-material",
+    businessRejectedFingerprint: "old-rejection", businessRejectedGeneration: "old-material" })
+  slot.replace({ ...current, refresh: JSON.stringify(state) })
+  store({ "oauth:active_provider": "zai", "oauth:zai:user_info": info, "oauth:zai:access_token": "business-b",
+    "oauth:session_revision": "revision-b", zcodejwttoken: "same-zcode-jwt" }, settings, true)
+  const second = (await hooks.auth.account(slot.getAuth, {}, { operation: "context" })).context
+  const updated = JSON.parse((await slot.current()).refresh)
+  expect(second.scope).toBe(first.scope)
+  expect(second.generation).toBe(first.generation)
+  expect(updated.business).toBe("business-b")
+  expect(updated.businessExpiresAt).toBeUndefined()
+  expect(updated.businessGeneration).toBeUndefined()
+  expect(updated.businessRejectedFingerprint).toBeUndefined()
 })
 
 test("China login uses only the current user's linked BigModel account and revision", async () => {

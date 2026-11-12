@@ -121,14 +121,15 @@ func LoginUsageShown(ctx context.Context, agent string) map[string]SubscriptionQ
 			return keptLoginUsage(logins)
 		}
 	}
-	return LoginUsage(ctx, agent)
+	out, _, _ := loginUsageOf(ctx, agent, nil, true)
+	return out
 }
 
 // keptLoginUsage is each of logins' last reading, asking no one.
 func keptLoginUsage(logins []Login) map[string]SubscriptionQuota {
 	out := map[string]SubscriptionQuota{}
 	for _, l := range logins {
-		out[l.User] = keepLast(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: errLeftAlone.Error()}, l.User)
+		out[l.User] = keepLast(quotaForLogin(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: errLeftAlone.Error()}, l), l.User)
 	}
 	return out
 }
@@ -139,7 +140,7 @@ func keptLoginUsage(logins []Login) map[string]SubscriptionQuota {
 // each account's reading's state: when it was last read well, and
 // whether this try failed.
 func loginUsageAt(ctx context.Context, agent string) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
-	return loginUsageOf(ctx, agent, nil)
+	return loginUsageOf(ctx, agent, nil, false)
 }
 
 // someLoginUsage is LoginUsage of the named accounts alone. What a
@@ -157,13 +158,13 @@ func someLoginUsage(ctx context.Context, agent string, users ...string) map[stri
 	if len(want) == 0 {
 		return map[string]SubscriptionQuota{}
 	}
-	out, _, _ := loginUsageOf(ctx, agent, want)
+	out, _, _ := loginUsageOf(ctx, agent, want, false)
 	return out
 }
 
 // loginUsageOf is loginUsageAt over the accounts whose lower-cased user
 // is in only, or over every account when only is nil.
-func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
+func loginUsageOf(ctx context.Context, agent string, only map[string]bool, shown bool) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
 	// nor of a provider switched off or removed (leftAlone)
 	if settings.AccountDiscoveryOff() || leftAlone(agent) {
 		return nil, time.Time{}, nil
@@ -186,6 +187,7 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		return out, asked, states
 	}
 	out := map[string]SubscriptionQuota{}
+	readings := map[string]SubscriptionQuota{}
 	logins, ok := usageLogins(agent)
 	if !ok {
 		return out, asked, states
@@ -201,8 +203,15 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		go func() {
 			defer wg.Done()
 			e := loginReading(ctx, l)
+			if l.pluginSlot != "" && !pluginLoginCurrent(l) {
+				return
+			}
 			mu.Lock()
 			out[l.User] = e.q
+			if shown {
+				out[l.User] = e.read
+			}
+			readings[l.User] = e.read
 			states[l.User] = e.state()
 			if e.q.Error == "" && e.at.Before(oldest) {
 				oldest = e.at
@@ -227,8 +236,8 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		// commands have moved on (#1318 review). A cached reading notes
 		// nothing new, its ReadAt no newer than what is kept; a failed
 		// one is skipped.
-		qs := make([]SubscriptionQuota, 0, len(out))
-		for user, q := range out {
+		qs := make([]SubscriptionQuota, 0, len(readings))
+		for user, q := range readings {
 			q.User = user // a login's reading itself carries no user
 			qs = append(qs, q)
 		}
@@ -264,9 +273,47 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 	return e
 }
 
+// loginReadingKey binds plugin cache entries and pending reads to both the
+// current selection and its credential generation, never its visible label.
+func loginReadingKey(l Login) string {
+	if strings.HasPrefix(l.Agent, "plugin:") {
+		if l.pluginIdentity == "" || l.pluginGeneration == "" {
+			return ""
+		}
+		return l.Agent + "/@" + l.pluginIdentity + "/" + l.pluginGeneration
+	}
+	return l.Agent + "/" + strings.ToLower(l.User)
+}
+
+func loginLastKey(l Login) string {
+	if strings.HasPrefix(l.Agent, "plugin:") {
+		if l.pluginIdentity == "" || l.pluginGeneration == "" {
+			return ""
+		}
+		return loginProvider(l) + "/@" + l.pluginIdentity + "/" + l.pluginGeneration
+	}
+	return loginProvider(l) + "/" + strings.ToLower(l.User)
+}
+
+func quotaForLogin(q SubscriptionQuota, l Login) SubscriptionQuota {
+	if strings.HasPrefix(l.Agent, "plugin:") {
+		q.AccountIdentity, q.AccountGeneration = l.pluginIdentity, l.pluginGeneration
+		q.accountUnverified = l.pluginIdentity == "" || l.pluginGeneration == ""
+	}
+	return q
+}
+
 // cachedLoginReading is loginReading as read or kept.
 func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingKey(l)
+	if l.pluginSlot != "" && !pluginLoginCurrent(l) {
+		q := SubscriptionQuota{Provider: loginProvider(l), Error: "the account changed; refresh its usage", accountUnverified: true}
+		return loginUsageEntry{at: time.Now(), q: q, read: q}
+	}
+	if key == "" {
+		read := readNow(loginQuota(ctx, l))
+		return loginUsageEntry{at: time.Now(), q: read, read: read}
+	}
 	c := &loginUsageCache
 	// with allowances read only when asked, one nobody asked for is what
 	// was read last, however old, unless the vendor just turned the
@@ -302,7 +349,7 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 		// nothing read since magpie started: the reading kept on disk,
 		// as of when it was made
 		c.Unlock()
-		return entry(keepLast(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: errNotAsked.Error()}, l.User))
+		return entry(keepLast(quotaForLogin(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: errNotAsked.Error()}, l), l.User))
 	}
 	if r == nil {
 		if stale {
@@ -323,7 +370,13 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 			// it is bounded as the Usage page's refresh is
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subscriptionTimeout)
 			defer cancel()
-			r.e = entry(keepReading(rctx, readNow(loginQuota(rctx, l)), l.User))
+			read := readNow(loginQuota(rctx, l))
+			if l.pluginSlot != "" && !pluginLoginCurrent(l) {
+				read = SubscriptionQuota{Provider: loginProvider(l), Error: "the account changed; refresh its usage", accountUnverified: true}
+				r.e = loginUsageEntry{at: time.Now(), q: read, read: read}
+			} else {
+				r.e = entry(keepReading(rctx, read, l.User))
+			}
 			c.Lock()
 			// one dropped meanwhile (StaleAllowance) read too soon, and a
 			// Claude account the user asked to see meanwhile is read again
@@ -356,7 +409,7 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 		return r.e
 	case <-ctx.Done():
 		// given up on: as a reading cut short would have said
-		return entry(keepReading(ctx, SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: ctx.Err().Error()}, l.User))
+		return entry(keepReading(ctx, quotaForLogin(SubscriptionQuota{Provider: loginProvider(l), Plan: l.Plan, Windows: []QuotaWindow{}, Error: ctx.Err().Error()}, l), l.User))
 	}
 }
 
@@ -652,7 +705,10 @@ func knownLoginUsage(agent string) map[string]SubscriptionQuota {
 // loginReading's cache alone, and none of its reading. False when the
 // cache has nothing at all for the account.
 func loginReadingKnown(l Login) (loginUsageEntry, bool) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingKey(l)
+	if key == "" {
+		return loginUsageEntry{}, false
+	}
 	c := &loginUsageCache
 	c.Lock()
 	defer c.Unlock()

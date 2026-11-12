@@ -3,17 +3,164 @@ package provider
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/plugin"
 	fixture "github.com/yetone/magpie/internal/plugin/testdata/nativeaccount"
 )
+
+func TestZCodePartialUsageAcrossEmbeddedHostAndLoginCache(t *testing.T) {
+	claudeHome(t)
+	fixture.Start(t)
+	var mode atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		reply := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": v}) }
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
+			reply(map[string]any{"accessToken": "project-token", "tokenType": "Bearer", "expiresIn": 3600, "expiresAt": time.Now().Unix() + 3600})
+		case strings.HasSuffix(r.URL.Path, "/quota/limit"):
+			if mode.Load() == 0 || mode.Load() == 4 {
+				reply(map[string]any{"limits": []any{map[string]any{"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 25}}})
+			} else {
+				http.Error(w, "paid unavailable", http.StatusServiceUnavailable)
+			}
+		case r.URL.Path == "/api/v1/zcode-plan/billing/balance" && mode.Load() == 1:
+			now := time.Now().Unix()
+			reply(map[string]any{"server_time": now, "plans": []any{map[string]any{"plan_id": "start", "user_plan_id": "u", "name": "Start", "status": "active", "ends_at": now + 3600}},
+				"balances": []any{map[string]any{"plan_id": "start", "user_plan_id": "u", "show_name": "GLM-5.3", "capabilities": []string{"model:GLM-5.3"}, "total_units": 100, "remaining_units": 60}}})
+		case r.URL.Path == "/api/v1/mcp/usage" && mode.Load() < 3:
+			reply(map[string]any{"server_time": time.Now().Unix(), "total_usage": map[string]any{"used": 4, "limit": 20, "remaining": 16}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("ZCODE_FIXTURE_URL", server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, account := fixture.Install(t, ctx)
+	logins, ok := usageLogins("plugin:zcode")
+	if !ok || len(logins) != 1 {
+		t.Fatalf("fixture logins: %+v", logins)
+	}
+	l := logins[0]
+	first := LoginUsageShown(Asked(ctx), l.Agent)[l.User]
+	if first.Error != "" || first.ReadAt == nil || len(first.Windows) != 1 || first.Windows[0].Used != 25 {
+		t.Fatalf("initial paid read: %+v", first)
+	}
+	age := func() {
+		key := loginReadingKey(l)
+		loginUsageCache.Lock()
+		e := loginUsageCache.m[key]
+		e.at = time.Now().Add(-2 * time.Minute)
+		loginUsageCache.m[key] = e
+		loginUsageCache.Unlock()
+	}
+	mode.Store(1)
+	age()
+	routing := LoginUsage(Asked(ctx), l.Agent)[l.User]
+	reading := loginReading(Asked(ctx), l).read
+	key := quotaHistoryKey(reading)
+	history := readQuotaHist()[key]
+	if len(reading.Windows) != 1 || len(history[reading.Windows[0].LineName()]) != 1 || len(history[first.Windows[0].LineName()]) != 1 {
+		t.Fatalf("LoginUsage-only history missed the fresh subset: %+v; read=%+v", history, reading)
+	}
+	shown := LoginUsageShown(Asked(ctx), l.Agent)[l.User]
+	if routing.Error != "" || len(routing.Windows) != 1 || routing.Windows[0].Name != first.Windows[0].Name {
+		t.Fatalf("routing fallback changed: %+v", routing)
+	}
+	if !shown.Partial || shown.Error != "Coding Plan quota unavailable" || shown.ReadAt == nil || shown.AsOf != nil ||
+		len(shown.Windows) != 1 || shown.Windows[0].Used != 40 || len(shown.Observations) != 2 {
+		t.Fatalf("shown partial: %+v", shown)
+	}
+	wire, err := json.Marshal(quotaReport([]SubscriptionQuota{shown}, nil, nil, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report []Quota
+	if err := json.Unmarshal(wire, &report); err != nil || len(report) != 1 || !report[0].Partial ||
+		report[0].Error != shown.Error || len(report[0].Windows) != 1 || len(report[0].Observations) != 2 {
+		t.Fatalf("public quota JSON lost partial data: %s, %v", wire, err)
+	}
+	again := LoginUsageShown(Asked(ctx), l.Agent)[l.User]
+	if again.ReadAt == nil || !again.ReadAt.Equal(*shown.ReadAt) {
+		t.Fatalf("cached partial was restamped: first=%+v again=%+v", shown, again)
+	}
+	noteQuotaHistory([]SubscriptionQuota{again}, shown.ReadAt.Add(time.Hour))
+	if n := len(readQuotaHist()[key][shown.Windows[0].LineName()]); n != 1 {
+		t.Fatalf("cached partial made %d history samples", n)
+	}
+	mode.Store(2)
+	age()
+	mcp := LoginUsageShown(Asked(ctx), l.Agent)[l.User]
+	if !mcp.Partial || mcp.Error == "" || mcp.ReadAt == nil || len(mcp.Windows) != 0 || len(mcp.Observations) != 1 ||
+		mcp.Observations[0].Kind != "server-mcp" || mcp.Observations[0].Remaining == nil || *mcp.Observations[0].Remaining != 16 {
+		t.Fatalf("MCP-only host result: %+v", mcp)
+	}
+	repeated := LoginUsageShown(Asked(ctx), l.Agent)[l.User]
+	if repeated.ReadAt == nil || !repeated.ReadAt.Equal(*mcp.ReadAt) {
+		t.Fatalf("MCP-only partial was restamped: %+v", repeated)
+	}
+	mode.Store(3)
+	full, err := plugin.AccountUsage(ctx, "zcode", account)
+	if err != nil || full.Error == "" || full.Partial || len(full.Windows) != 0 || len(full.Observations) != 0 {
+		t.Fatalf("full failure: %+v %v", full, err)
+	}
+	mode.Store(4)
+	good, err := plugin.AccountUsage(ctx, "zcode", account)
+	if err != nil || good.Error != "" || good.Partial || len(good.Windows) != 1 {
+		t.Fatalf("optional source failure lost paid quota: %+v %v", good, err)
+	}
+	mode.Store(1)
+	expiredAuth := fixture.AuthFor("expired-user", "", "fixture-zcode")
+	var state map[string]any
+	if err := json.Unmarshal([]byte(expiredAuth["refresh"].(string)), &state); err != nil {
+		t.Fatal(err)
+	}
+	claims, _ := json.Marshal(map[string]any{"exp": time.Now().Add(-time.Hour).Unix()})
+	state["oauthToken"] = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
+	raw, _ := json.Marshal(state)
+	expiredAuth["refresh"] = string(raw)
+	expiredAccount, err := plugin.Import(ctx, "zcode", expiredAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expired, err := plugin.AccountUsage(ctx, "zcode", expiredAccount)
+	if err != nil || expired.SignIn != "expired" || expired.Error == "" || !expired.Partial || len(expired.Windows) == 0 {
+		t.Fatalf("expired mandatory sign-in with independent Start: %+v %v", expired, err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = usageLogins("plugin:zcode")
+	expiredUser := PluginAccountUser("zcode", expiredAccount)
+	if expiredUser == "" {
+		t.Fatal("expired account has no visible login")
+	}
+	expiredShown := LoginUsageShown(Asked(ctx), "plugin:zcode")[expiredUser]
+	if !expiredShown.Partial || expiredShown.Error == "" || len(expiredShown.Windows) == 0 {
+		t.Fatalf("expired account view lost independent Start: %+v", expiredShown)
+	}
+	var lapsed bool
+	for _, saved := range readLogins() {
+		if saved.Agent == "plugin:zcode" && saved.Home == expiredAccount {
+			lapsed = saved.Lapsed != ""
+		}
+	}
+	if !lapsed {
+		t.Fatal("mandatory expired sign-in was not marked lapsed")
+	}
+}
 
 func TestZCodeResetAcrossPluginHost(t *testing.T) {
 	claudeHome(t)

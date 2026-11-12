@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,63 @@ import (
 func TestFallenBackListKeepsTheLastOne(t *testing.T) {
 	for _, throws := range []string{"", "1", "own"} {
 		t.Run("throws="+throws, func(t *testing.T) { fallenBack(t, throws) })
+	}
+}
+
+func TestZCodeAuthoritativeEmptySurvivesPersistenceAndFailedListing(t *testing.T) {
+	sandbox(t)
+	last := []Provider{{ID: "zcode", Spec: "builtin:zcode", Models: []Model{{ID: "GLM-5.3-Flash"}},
+		Accounts: []Account{{Key: "zcode", Models: []string{"GLM-5.3-Flash"}}}}}
+	empty := []Provider{{ID: "zcode", Spec: "builtin:zcode", Models: []Model{}, ModelsKnownEmpty: true,
+		Accounts: []Account{{Key: "zcode", Models: []string{}}}}}
+	got := keepListed(empty, last)
+	if len(got[0].Models) != 0 || !got[0].ModelsKnownEmpty || got[0].Accounts[0].Models == nil {
+		t.Fatalf("a successful empty list was revived: %+v", got)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk []Provider
+	if err := json.Unmarshal(b, &disk); err != nil {
+		t.Fatal(err)
+	}
+	if !disk[0].ModelsKnownEmpty || disk[0].Accounts[0].Models == nil || len(disk[0].Accounts[0].Models) != 0 {
+		t.Fatalf("empty account authority lost on disk: %s", b)
+	}
+	failed := []Provider{{ID: "zcode", Spec: "builtin:zcode", FellBack: true, ListError: "offline",
+		Models: []Model{{ID: "GLM-5.3"}}, Accounts: []Account{{Key: "zcode", Models: []string{"GLM-5.3"}, FellBack: true, ListError: "offline"}}}}
+	got = keepListed(failed, disk)
+	if len(got[0].Models) != 0 || !got[0].ModelsKnownEmpty || got[0].Accounts[0].Models == nil || len(got[0].Accounts[0].Models) != 0 {
+		t.Fatalf("failure revived defaults over last-good empty: %+v", got)
+	}
+}
+
+func TestZCodeFailedAccountKeepsItsEmptyListBesideLiveAccount(t *testing.T) {
+	sandbox(t)
+	last := []Provider{{ID: "zcode", Spec: "builtin:zcode", Models: []Model{{ID: "live"}},
+		Accounts: []Account{{Key: "zcode", Models: []string{}}, {Key: "zcode#2", Models: []string{"live"}}}}}
+	now := []Provider{{ID: "zcode", Spec: "builtin:zcode", Models: []Model{{ID: "fallback"}, {ID: "live"}},
+		Accounts: []Account{{Key: "zcode", Models: []string{"fallback"}, FellBack: true, ListError: "offline"},
+			{Key: "zcode#2", Models: []string{"live"}}}}}
+	got := keepListed(now, last)[0]
+	if len(got.Models) != 1 || got.Models[0].ID != "live" || got.Accounts[0].Models == nil ||
+		len(got.Accounts[0].Models) != 0 || got.Accounts[0].FellBack || !slices.Equal(got.Accounts[1].Models, []string{"live"}) {
+		t.Fatalf("unknown account revived defaults beside a live account: %+v", got)
+	}
+}
+
+func TestZCodeFailedListingKeepsOlderSingleAccountCatalog(t *testing.T) {
+	sandbox(t)
+	var last []Provider
+	if err := json.Unmarshal([]byte(`[{"id":"zcode","spec":"builtin:zcode","models":[{"id":"old-start"}],"accounts":[{"key":"zcode"}]}]`), &last); err != nil {
+		t.Fatal(err)
+	}
+	now := []Provider{{ID: "zcode", Spec: "builtin:zcode", FellBack: true, ListError: "offline",
+		Models: []Model{{ID: "default"}}, Accounts: []Account{{Key: "zcode", Models: []string{"default"}, FellBack: true}}}}
+	got := keepListed(now, last)[0]
+	if len(got.Models) != 1 || got.Models[0].ID != "old-start" || !slices.Equal(got.Accounts[0].Models, []string{"old-start"}) || got.Accounts[0].FellBack {
+		t.Fatalf("older single-account list was not retained: %+v", got)
 	}
 }
 
@@ -71,6 +129,10 @@ func fallenBack(t *testing.T, throws string) {
 	}
 
 	down.Store(true)
+	ps, err = RefreshProviderModels(ctx, "fakeco", "fakeco")
+	if err == nil || !has(ps, "fake-extra") || ps[0].FellBack {
+		t.Fatalf("explicit failed refresh did not report its source while keeping the list: %+v, %v", ps, err)
+	}
 	ps, err = Providers(ctx)
 	if err != nil || !has(ps, "fake-extra") || ps[0].FellBack {
 		t.Fatalf("with the vendor down, the list told last went: %+v, %v", ps, err)

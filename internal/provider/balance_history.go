@@ -125,7 +125,7 @@ func addBalancePoint(pts []BalancePoint, n BalancePoint) []BalancePoint {
 // several currencies, one for each under the card's key and the currency.
 func balancePointsOf(q SubscriptionQuota, now time.Time) map[string]BalancePoint {
 	// an estimate counted down from a balance typed is no reading
-	if q.Error != "" || q.AsOf != nil || q.Estimate != nil || q.Provider == "" || q.Balance == "" || len(q.BalanceParts) > 0 {
+	if q.Error != "" || q.AsOf != nil || q.Estimate != nil || q.Provider == "" || q.Balance == "" || len(q.BalanceParts) > 0 || q.accountUnverified {
 		return nil
 	}
 	at := now
@@ -133,7 +133,7 @@ func balancePointsOf(q SubscriptionQuota, now time.Time) map[string]BalancePoint
 		at = *q.ReadAt
 	}
 	at = at.UTC().Truncate(time.Second)
-	key := quotaHistKey(q.Provider, q.User)
+	key := quotaHistoryKey(q)
 	if cs := balanceCurrencies(q.Balance); cs != nil {
 		out := map[string]BalancePoint{}
 		for _, c := range cs {
@@ -200,7 +200,7 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
 		if len(pts) > 0 && h == nil {
 			h = readBalanceHist()
 		}
-		if card := quotaHistKey(q.Provider, q.User); len(pts) > 1 && len(h[card]) > 0 {
+		if card := quotaHistoryKey(q); len(pts) > 1 && len(h[card]) > 0 {
 			// the card's own line, kept before its currencies were told
 			// apart, took whichever came first in a read and can't be
 			// split again: it goes
@@ -244,7 +244,7 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
 		if h == nil {
 			h = readBalanceHist()
 		}
-		key := quotaHistKey(q.Provider, q.User)
+		key := quotaHistoryKey(q)
 		cs := balanceCurrencies(q.Balance)
 		if cs != nil {
 			key = currencyHistKey(key, cs[0].Sign)

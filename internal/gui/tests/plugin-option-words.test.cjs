@@ -11,6 +11,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { pathToFileURL } = require("node:url");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
@@ -62,6 +63,104 @@ const W = {
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: ZCode's actual methods, prompts and options follow the window language`, { timeout: 60000 }, async (t) => {
+    const moduleURL = pathToFileURL(path.resolve(__dirname, "../../plugin/bundled/zcode/index.mjs")).href;
+    const { ZCodeAuthPlugin } = await import(moduleURL);
+    const auth = (await ZCodeAuthPlugin()).auth;
+    const methods = auth.methods.map(({ type, label, labels }) => ({ type, label, labels }));
+    const options = auth.options.map((option) => ({ ...option, on: !!option.default }));
+    const plugin = { id: "zcode", pid: "zcode", name: "ZCode", icon: "zcode", spec: "builtin:zcode", signedIn: true, methods, options };
+    const provider = { id: "zcode", name: "ZCode", icon: "zcode", models: [], agents: [], fallback: [], headers: {}, keyList: [],
+      account: { agent: "zcode", builtin: "zcode", agentName: "ZCode", user: "fixture", logins: [{ user: "fixture", active: true, on: true }] } };
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+      await t.test(lang, async () => {
+        const context = await browser.newContext({ viewport: { width: 960, height: 800 }, reducedMotion: "reduce" });
+        const page = await context.newPage(), asked = [], errors = [];
+        page.setDefaultTimeout(5000);
+        page.on("pageerror", (e) => errors.push(e.message));
+        await page.route("**/*", async (route) => {
+          const request = route.request(), url = new URL(request.url());
+          const json = (data) => route.fulfill({ json: data });
+          if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs={lang:${JSON.stringify(lang)},theme:"light",web:false};` });
+          if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window={};" });
+          if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
+          if (url.pathname === "/api/providers") return json({ providers: [provider], presets: [], excluded: [], onPlugins: [], plugins: [plugin], gateway: { running: true, window: true } });
+          if (url.pathname === "/api/plugin-signin/prompt") {
+            const body = request.postDataJSON(), inputs = { ...(body.inputs || {}) };
+            asked.push(["prompt", body]);
+            if (body.key) inputs[body.key] = body.value;
+            return json({ inputs, prompt: inputs.site ? null : auth.methods[body.method].prompts?.[0] || null });
+          }
+          if (url.pathname === "/api/plugin-signin") {
+            const input = request.postDataJSON();
+            asked.push(["signin", input]);
+            if (input.method === 6) return route.fulfill({ status: 400, json: { error: "fixture stops before authorization" } });
+            return json({ agent: "zcode", state: "failed", error: "fixture stops before authorization" });
+          }
+          if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
+          if (url.pathname.startsWith("/api/")) return json({});
+          const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
+          const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
+          return route.fulfill({ body: await fs.readFile(file).catch(() => ""), contentType });
+        });
+        try {
+          await page.goto("http://magpie.test/?view=providers");
+          await page.locator(".row.provider", { hasText: "ZCode" }).first().click();
+          const ultra = page.locator('.plugin-option[data-key="coding_plan_ultra"]');
+          await ultra.waitFor();
+          const optionLabel = await ultra.locator(".n").textContent();
+          const optionDescription = await ultra.locator(".hint").textContent();
+          assert.ok(optionLabel && optionDescription);
+          if (lang !== "en") {
+            assert.notEqual(optionLabel, auth.options[1].label);
+            assert.notEqual(optionDescription, auth.options[1].description);
+          }
+          for (const method of [4, 6]) {
+            await page.goto("http://magpie.test/?view=providers");
+            await page.waitForFunction(() => providers);
+            await page.evaluate(() => {
+              window.renderProviders = () => {
+                const host = document.getElementById("zcode-language") || Object.assign(document.createElement("div"), { id: "zcode-language" });
+                host.style.cssText = "position:fixed;inset:0 auto auto 0;width:100%;z-index:1000;";
+                host.replaceChildren(signing ? renderSigning(subOf("zcode")) : "");
+                document.body.append(host);
+              };
+              startSignIn("zcode", true);
+            });
+            const host = page.locator("#zcode-language");
+            const way = host.locator(`[data-method="${method}"]`);
+            await way.waitFor();
+            if (lang !== "en") assert.notEqual(await way.textContent(), auth.methods[method].label);
+            await way.click();
+            const prompt = host.locator(".plugin-ask");
+            await prompt.waitFor();
+            const question = await prompt.locator(".tt .n").textContent();
+            if (lang !== "en") assert.notEqual(question, auth.methods[method].prompts[0].message);
+            const choices = prompt.locator(".choices button");
+            assert.equal(await choices.count(), 2);
+            if (lang !== "en") assert.notEqual(await choices.nth(1).textContent(), auth.methods[method].prompts[0].options[1].label);
+            await choices.nth(1).click();
+            if (method === 6) {
+              const key = host.locator('.callback-form input[type="password"]');
+              await key.waitFor();
+              if (lang !== "en") assert.notEqual(await key.getAttribute("aria-label"), auth.methods[method].label);
+              await key.fill("fixture-key");
+              await key.press("Enter");
+            }
+            await page.waitForFunction(() => signing?.error?.includes("fixture stops before authorization"));
+            const sent = asked.filter(([kind]) => kind === "signin").at(-1)?.[1];
+            assert.equal(sent?.method, method);
+            assert.equal(sent?.inputs?.site, "bigmodel");
+          }
+          assert.deepEqual(errors, []);
+        } finally {
+          await context.close();
+        }
+      });
+    }
+  });
   test(engine + ": a plugin option's own words and its filtered list", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());

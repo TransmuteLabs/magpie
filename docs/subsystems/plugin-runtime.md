@@ -18,6 +18,30 @@ the plugin host) are a different thing; see
 [provider and plugin ownership](provider-plugins.md) and
 [gateway middleware](gateway-middleware.md).
 
+A Core-owned account provider can use that host protocol without becoming
+an installed community package or a switchable feature plugin. The
+[built-in provider development guide](builtin-provider-development.md)
+maps its separate packaging, source-authority, account and UI obligations.
+
+## Provider sign-in storage during upgrades
+
+Plugin sign-in changes use a persistent `plugin-auth.json.flock` OS lock;
+the Go auth store performs each host's durable publication under that lock.
+Do not remove the lock file during normal cleanup. Previous-version magpie
+processes and Bun hosts use a different, incompatible lock and cannot safely
+write the store concurrently with this version. Drain and restart **all**
+previous-version magpie processes and Bun hosts before relying on this
+guarantee. The store checks its source bytes before a host proposal is
+published and rejects a detected external change. Manual editors and other
+writers that ignore the lock are not mutually excluded, however: an edit
+can still race the final check and publication.
+
+If neither the sign-in file nor its backup is readable, background changes
+and sign-out fail without replacing them. An explicit sign-in or import can
+seed its own account after the unreadable file is preserved as a `.bad-*`
+generation. A stopping host keeps its stdio connection open while its
+pending changes and renewals drain, subject to the existing stop deadlines.
+
 ## Responsibilities and boundaries
 
 | Part | What it does | Source |

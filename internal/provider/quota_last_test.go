@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -55,5 +56,62 @@ func TestKeepLast(t *testing.T) {
 	keepLast(good, "")
 	if q := keepLast(limited, ""); q.Windows[0].Used != 0 {
 		t.Fatalf("reset: %+v", q)
+	}
+}
+
+func TestPartialKeepsCompleteFallbackAndResetBarrier(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ForgetKeptCardsForTest()
+	t.Cleanup(ForgetKeptCardsForTest)
+	now := time.Now()
+	good := SubscriptionQuota{Provider: "zcode", User: "a", AccountIdentity: "scope", AccountGeneration: "epoch",
+		Windows: []QuotaWindow{{Name: "Paid", Used: 35}}}
+	keepLast(good, "")
+	partial := SubscriptionQuota{Provider: "zcode", User: "a", AccountIdentity: "scope", AccountGeneration: "epoch",
+		Error: "HTTP 503", Partial: true, ReadAt: &now, Windows: []QuotaWindow{{Name: "Start", Used: 70}}}
+	got := keepLast(partial, "")
+	if !got.Partial || got.Error != partial.Error || len(got.Windows) != 1 || got.Windows[0].Name != "Start" {
+		t.Fatalf("partial replaced by fallback: %+v", got)
+	}
+	failed := good
+	failed.Windows, failed.Error = nil, "HTTP 503"
+	kept := keepLast(failed, "")
+	if kept.AsOf == nil || len(kept.Windows) != 1 || kept.Windows[0].Name != "Paid" || kept.Windows[0].Used != 35 {
+		t.Fatalf("partial replaced the complete fallback: %+v", kept)
+	}
+	key := quotaLastKey(partial, partial.User)
+	quotaReadBarriers.Lock()
+	if quotaReadBarriers.m == nil {
+		quotaReadBarriers.m = map[string]uint64{}
+	}
+	quotaReadBarriers.m[key] = 2
+	quotaReadBarriers.Unlock()
+	t.Cleanup(func() {
+		quotaReadBarriers.Lock()
+		delete(quotaReadBarriers.m, key)
+		quotaReadBarriers.Unlock()
+	})
+	partial.Observations = []UsageObservation{{Kind: "server-mcp", Name: "Server MCP"}}
+	observationOnly := partial
+	observationOnly.Windows, observationOnly.ReadAt = nil, nil
+	stamped := readNow(observationOnly)
+	if stamped.ReadAt == nil || stamped.Error != partial.Error || !stamped.Partial {
+		t.Fatalf("observation-only read was not stamped: %+v", stamped)
+	}
+	if again := readNow(stamped); again.ReadAt == nil || !again.ReadAt.Equal(*stamped.ReadAt) {
+		t.Fatalf("partial was restamped: %+v", again)
+	}
+	for _, stale := range []SubscriptionQuota{
+		{Error: partial.Error, Partial: true, AsOf: &now, Observations: partial.Observations},
+		{Error: partial.Error, Partial: true, ReadDeferred: true, Observations: partial.Observations},
+	} {
+		if read := readNow(stale); read.ReadAt != nil {
+			t.Fatalf("stale or deferred subset was stamped as fresh: %+v", read)
+		}
+	}
+	invalid := keepReading(context.WithValue(context.Background(), quotaReadKey{}, uint64(1)), partial, "")
+	if invalid.Partial || len(invalid.Windows) != 0 || len(invalid.Observations) != 0 || invalid.ReadAt != nil ||
+		invalid.AccountIdentity != "scope" || invalid.AccountGeneration != "epoch" || invalid.Error == "" {
+		t.Fatalf("superseded subset remained fresh: %+v", invalid)
 	}
 }

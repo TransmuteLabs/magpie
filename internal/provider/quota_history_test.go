@@ -83,6 +83,44 @@ func TestQuotaHistoryRecords(t *testing.T) {
 	}
 }
 
+func TestPartialHistoryRejectsStaleDeferredAndObservationOnly(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	now := time.Now().UTC().Truncate(time.Second)
+	q := SubscriptionQuota{Provider: "relay", User: "alice", Error: "paid failed", Partial: true,
+		ReadAt: &now, Windows: []QuotaWindow{{Name: "Start", Used: 40}},
+		Observations: []UsageObservation{{Kind: "server-mcp", Name: "Server MCP"}}}
+	noteQuotaHistory([]SubscriptionQuota{q}, now)
+	noteQuotaHistory([]SubscriptionQuota{q}, now.Add(time.Hour))
+	h := readQuotaHist()
+	key := quotaHistoryKey(q)
+	if len(h[key]) != 1 || len(h[key]["Start"]) != 1 || h[key]["Start"][0].Left != 60 {
+		t.Fatalf("fresh subset and cached duplicate: %+v", h)
+	}
+	for _, variant := range []string{"as-of", "deferred", "unverified"} {
+		bad := q
+		at := now.Add(2 * time.Hour)
+		bad.ReadAt, bad.Windows = &at, []QuotaWindow{{Name: variant, Used: 90}}
+		switch variant {
+		case "as-of":
+			bad.AsOf = &now
+		case "deferred":
+			bad.ReadDeferred = true
+		case "unverified":
+			bad.accountUnverified = true
+		}
+		noteQuotaHistory([]SubscriptionQuota{bad}, at)
+	}
+	only := q
+	at := now.Add(3 * time.Hour)
+	only.ReadAt, only.Windows = &at, nil
+	noteQuotaHistory([]SubscriptionQuota{only}, at)
+	h = readQuotaHist()
+	if len(h[key]) != 1 || len(h[key]["Start"]) != 1 {
+		t.Fatalf("stale or MCP aggregate became history: %+v", h)
+	}
+}
+
 // TestQuotaHistoryCycles: a window started again is a new cycle, never
 // folded into the one before, a rolling window's reset moving with the
 // clock isn't one, and points older than 45 days go.

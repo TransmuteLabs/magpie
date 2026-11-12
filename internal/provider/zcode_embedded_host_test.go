@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,198 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	fixture "github.com/yetone/magpie/internal/plugin/testdata/nativeaccount"
 )
+
+// A native paid slot must survive a host restart when its bootstrap OAuth is
+// expired but the separately saved business JWT is still valid.
+func TestZCodeEmbeddedHostReusesSavedBusinessAfterBootstrapExpiry(t *testing.T) {
+	claudeHome(t)
+	vendor := fixture.Start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	token := func(role string, expiry int64) string {
+		payload, _ := json.Marshal(map[string]any{"role": role, "exp": expiry})
+		return "e30." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+	}
+	now := time.Now().Unix()
+	business := token("business", now+3600)
+	bootstrap := token("bootstrap", now-60)
+	session := token("zcode", now-60)
+	state, _ := json.Marshal(map[string]any{"site": "zai", "kind": "individual", "uid": "fixture-user",
+		"zcodeUserId": "fixture-user", "device": "fixture-device", "base": "https://api.z.ai/api/anthropic",
+		"jwt": session, "oauthToken": bootstrap, "business": business,
+		"loc": map[string]any{"origin": "https://api.z.ai", "organizationId": "fixture-org",
+			"projectId": "fixture-project", "apiKeyId": "fixture-key"}})
+	account, err := plugin.Import(ctx, "zcode", map[string]any{"type": "oauth", "refresh": string(state),
+		"access": session, "uid": "fixture-user", "accountId": "fixture-user", "expires": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := ZCodeAccountOperation(ctx, "zcode", account, "context", nil)
+	if err != nil || first.Context.Scope == "" || first.Context.Generation == "" {
+		t.Fatalf("initial account context = %+v, %v", first, err)
+	}
+	patPath := "/api/biz/v1/organization/fixture-org/projects/fixture-project/api_keys/fixture-key/access_tokens"
+	serve := func() {
+		t.Helper()
+		ps, err := plugin.Providers(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, p := range ps {
+			if p.ID != "zcode" {
+				continue
+			}
+			for _, m := range p.Models {
+				if m.ID == "GLM-5.3" {
+					found = true
+				}
+			}
+			for _, a := range p.Accounts {
+				if a.Key == account && strings.Contains(a.ListError, "project_token_login_failed") {
+					t.Fatalf("paid model hook failed on the expired bootstrap: %+v", a)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("paid model catalog missing after host startup: %+v", ps)
+		}
+		res, err := plugin.Fetch(ctx, plugin.FetchRequest{Provider: "zcode", Account: account, Model: "GLM-5.3",
+			NPM: "@ai-sdk/anthropic", URL: "https://api.z.ai/api/anthropic/v1/messages", Method: http.MethodPost,
+			Headers: map[string]string{"content-type": "application/json", "anthropic-version": "2023-06-01"},
+			Body:    []byte(`{"model":"GLM-5.3","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(res.Body)
+		res.Body.Close()
+		if readErr != nil || res.StatusCode != http.StatusOK || !strings.Contains(string(body), "ordinary reply") {
+			t.Fatalf("paid inference = %d %s, %v", res.StatusCode, body, readErr)
+		}
+		usage, err := plugin.AccountUsage(ctx, "zcode", account)
+		if err != nil || usage.SignIn != "kept" || usage.Error != "" || len(usage.Windows) == 0 ||
+			usage.Windows[0].Used == nil || *usage.Windows[0].Used != 25 {
+			t.Fatalf("paid quota with expired optional session = %+v, %v", usage, err)
+		}
+	}
+	serve()
+	plugin.Refreshed()
+	plugin.Told()
+	before := len(vendor.Calls(patPath))
+	if before == 0 {
+		t.Fatal("paid model/inference did not mint a project token")
+	}
+	plugin.Restart()
+	second, err := ZCodeAccountOperation(ctx, "zcode", account, "context", nil)
+	if err != nil || second.Context.Scope != first.Context.Scope || second.Context.Generation != first.Context.Generation {
+		t.Fatalf("host restart changed the account identity: before=%+v after=%+v err=%v", first.Context, second.Context, err)
+	}
+	serve()
+	if calls := vendor.Calls(patPath); len(calls) <= before {
+		t.Fatalf("cold host did not issue its own PAT: before=%d after=%d", before, len(calls))
+	} else {
+		for _, call := range calls {
+			if call.Auth != "Bearer "+business {
+				t.Fatal("project token request used material other than the saved business credential")
+			}
+		}
+	}
+	unrecoverable, _ := json.Marshal(map[string]any{"site": "zai", "kind": "individual", "uid": "expired-user",
+		"zcodeUserId": "expired-user", "device": "fixture-device-2", "base": "https://api.z.ai/api/anthropic",
+		"jwt": session, "oauthToken": bootstrap})
+	expiredAccount, err := plugin.Import(ctx, "zcode", map[string]any{"type": "oauth", "refresh": string(unrecoverable),
+		"access": session, "uid": "expired-user", "accountId": "expired-user", "expires": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := plugin.Providers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundExpired := false
+	for _, p := range ps {
+		if p.ID != "zcode" {
+			continue
+		}
+		for _, a := range p.Accounts {
+			if a.Key == expiredAccount {
+				foundExpired = true
+				if a.FellBack || len(a.Models) != 0 || !strings.Contains(a.ListError, "sign in") {
+					t.Fatalf("expired account inherited a paid catalog: %+v", a)
+				}
+			}
+		}
+	}
+	if !foundExpired {
+		t.Fatal("unrecoverable synthetic account was not listed")
+	}
+	expiredUsage, err := plugin.AccountUsage(ctx, "zcode", expiredAccount)
+	if err != nil || expiredUsage.SignIn != "expired" || !strings.Contains(expiredUsage.Error, "sign in") {
+		t.Fatalf("unrecoverable account did not request relogin: %+v, %v", expiredUsage, err)
+	}
+	if calls := vendor.Calls("/api/auth/z/login"); len(calls) != 0 {
+		t.Fatalf("expired bootstrap was exchanged %d times", len(calls))
+	}
+	if first.Context.Kind != "individual" {
+		t.Fatalf("unexpected account kind %q", first.Context.Kind)
+	}
+}
+
+func TestZCodeAPIKeyReloginChangesScopeWithoutDiscardingJournal(t *testing.T) {
+	claudeHome(t)
+	fixture.Start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	pp, slot := fixture.Install(t, ctx)
+	old, err := ZCodeAccountOperation(ctx, "zcode", slot, "context", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := withZCodeJournal(old.Context, func(j *zcodeJournal) (bool, error) {
+		j.Reset.Pending = &zcodeResetClaim{Key: "unconfirmed-operation", Window: "five-hour", Generation: old.Context.Generation, Accepted: true}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	method := -1
+	for i, m := range pp.Methods {
+		if m.Type == "api" {
+			method = i
+			break
+		}
+	}
+	if method < 0 {
+		t.Fatal("intrinsic ZCode has no API-key method")
+	}
+	user := PluginAccountUser("zcode", slot)
+	if user == "" {
+		t.Fatal("selected account has no visible name")
+	}
+	direct := "direct"
+	if _, err := PluginAPIKey(ctx, "zcode", method, map[string]string{"site": "zai"}, "replacement.fixture", SignInOptions{User: user, Proxy: &direct}); err != nil {
+		t.Fatal(err)
+	}
+	auth := plugin.Auths("zcode")
+	if len(auth) != 1 || auth[slot]["key"] != "replacement.fixture" {
+		t.Fatalf("re-login did not replace the selected slot")
+	}
+	stale := WithZCodeAccountExpectation(ctx, old.Context.Scope, old.Context.Generation)
+	if _, err := ZCodeAccountOperation(stale, "zcode", slot, "context", nil); err == nil {
+		t.Fatal("old scope/generation authorized the replacement")
+	}
+	current, err := ZCodeAccountOperation(ctx, "zcode", slot, "context", nil)
+	if err != nil || current.Context.Scope == old.Context.Scope || current.Context.Generation == old.Context.Generation {
+		t.Fatalf("replacement did not establish a new identity: %+v, %v", current.Context, err)
+	}
+	if err := withZCodeJournal(old.Context, func(j *zcodeJournal) (bool, error) {
+		if j.Reset.Pending == nil || j.Reset.Pending.Key != "unconfirmed-operation" || j.Reset.Pending.Generation != old.Context.Generation {
+			t.Fatal("old scope's unresolved journal state was removed")
+		}
+		return false, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // This uses the embedded host, real account hooks and a loopback-only vendor;
 // it does not install an external provider or contact a registry.

@@ -30,6 +30,17 @@ test("login material is family-specific, per-kind and absent from public context
   expect(stored.business).toBe("business-secret")
 })
 
+test("a Start selection requires its own missing or expired session", async () => {
+  for (const token of ["", jwt(Math.floor(Date.now() / 1000) - 60)]) {
+    const { slot, runtime } = make(auth({ site: "bigmodel", kind: "start", uid: "u1", jwt: token }))
+    const ctx = await runtime.capture(slot.getAuth)
+    expect(ctx.public().kind).toBe("start")
+    await expect(ctx.loginMaterial({ business: "none", zcode: "required" })).rejects.toMatchObject({
+      signIn: "expired", noModels: true, credentialState: token ? "expired" : "missing",
+    })
+  }
+})
+
 test("legacy keys remain usable as keys, never as business JWTs", async () => {
   const { slot, runtime } = make({ type: "api", key: "legacy.secret" })
   const ctx = await runtime.capture(slot.getAuth)
@@ -112,6 +123,30 @@ test("following a positively identified app session changes epoch without changi
   expect(second.generation).not.toBe(first.generation)
   expect(await second.loginMaterial()).toEqual({ business: "new-business", zcode: "new-jwt" })
   await expect(first.assertCurrent()).rejects.toMatchObject({ kind: "account_generation_changed" })
+})
+
+test("a concurrent same-generation app update is not overwritten during material follow", async () => {
+  const initial = { version: 1, source: "zcode", site: "zai", kind: "individual", uid: "u1",
+    jwt: "same-session", business: "business-a", loginGeneration: "revision-a", base: "https://api.z.ai/api/anthropic" }
+  let live = { ...initial }, race = false
+  const slot = accountFixture(auth(initial))
+  const client = { auth: { set: async (request) => {
+    if (race && JSON.parse(request.body.refresh).business === "business-b") {
+      race = false
+      const current = await slot.current(), state = JSON.parse(current.refresh)
+      slot.replace({ ...current, refresh: JSON.stringify({ ...state, business: "business-c", businessGeneration: "newer-material" }) })
+    }
+    return slot.client.auth.set(request)
+  } } }
+  const stateOf = (a, options) => options?.follow ? live : decode(a)
+  const runtime = createAccountRuntime({ client, providerId: "zcode", stateOf, claimVerification: async () => false })
+  const first = await runtime.capture(slot.getAuth)
+  live = { ...initial, business: "business-b", loginGeneration: "revision-b" }
+  race = true
+  await expect(runtime.capture(slot.getAuth)).rejects.toMatchObject({ kind: "account_generation_changed" })
+  const current = await slot.current()
+  expect(current.accountEpoch).toBe(first.generation)
+  expect(JSON.parse(current.refresh)).toMatchObject({ business: "business-c", businessGeneration: "newer-material" })
 })
 
 test("context request deadline includes a stalled response body", async () => {

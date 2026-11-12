@@ -452,13 +452,12 @@ func pluginAccountCatalog(pp plugin.Provider, key string) []catalog.Model {
 	return all
 }
 
-// PluginListError is why the plugin couldn't list the account at key's
-// models, "" when it did or kept the list it had: what it shows instead
-// is its short defaults (Cursor's Auto alone).
+// PluginListError is why the account's latest model observation failed,
+// including a source failure beside an authoritative empty list.
 func PluginListError(pp plugin.Provider, key string) string {
 	for _, a := range pp.Accounts {
 		if a.Key == key {
-			if a.FellBack {
+			if a.FellBack || a.ListError != "" {
 				return a.ListError
 			}
 			return ""
@@ -557,8 +556,18 @@ func pluginProviderServing(pp plugin.Provider, l pluginLogin, keys []string) Pro
 		return serves(pp)
 	}
 	a.fetch = func(ctx context.Context) ([]catalog.Model, error) {
-		ps, err := plugin.Providers(ctx)
+		var before []plugin.Provider
+		if pp.ID == "zcode" {
+			before = plugin.Cached()
+		}
+		ps, err := plugin.RefreshProviderModels(ctx, pp.ID, acct.Key)
 		if err != nil {
+			// A failed config refresh can accompany an authoritative Start
+			// balance or installed config. Reconcile that list while still
+			// returning the source error to the explicit refresh caller.
+			if before != nil && ps != nil {
+				dropGonePluginPicks(before, ps)
+			}
 			return nil, err
 		}
 		for _, cur := range ps {

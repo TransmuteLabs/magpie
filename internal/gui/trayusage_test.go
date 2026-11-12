@@ -1,11 +1,42 @@
 package gui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestTrayFreshPartialShowsSelectedWindowAndWarning(t *testing.T) {
+	now := time.Now()
+	q := provider.SubscriptionQuota{Provider: "zcode", Name: "ZCode", Error: "paid unavailable", Partial: true,
+		Windows: []provider.QuotaWindow{{Name: "Start", Used: 40, Span: time.Hour}, {Name: "Trial", Used: 70, Span: 24 * time.Hour}}}
+	label, tip := trayCardText("en", q, now, false, false, []string{"1h"})
+	if label != "40%" || !strings.Contains(tip, "paid unavailable") || !strings.Contains(tip, "Start") {
+		t.Fatalf("partial tray: %q %q", label, tip)
+	}
+	textOnly := q
+	textOnly.Windows = []provider.QuotaWindow{{Name: "Note", Text: true, Display: "unavailable"}}
+	if label, tip := trayUsageText(textOnly, now, false, false); label != "" || !strings.Contains(tip, "paid unavailable") {
+		t.Fatalf("text-only partial became a number: %q %q", label, tip)
+	}
+	for _, variant := range []string{"as-of", "deferred", "failure"} {
+		stale := q
+		switch variant {
+		case "as-of":
+			stale.AsOf = &now
+		case "deferred":
+			stale.ReadDeferred = true
+		case "failure":
+			stale.Partial = false
+		}
+		label, tip = trayUsageText(stale, now, false, false)
+		if label != "" || !strings.Contains(tip, "paid unavailable") {
+			t.Fatalf("%s: %q %q", variant, label, tip)
+		}
+	}
+}
 
 func TestTrayUsageText(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)

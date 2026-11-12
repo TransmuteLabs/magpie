@@ -782,7 +782,7 @@ func TestOpenCodeOAuthCustomProviderAppearingDuringCommit(t *testing.T) {
 		}
 		if first {
 			first = false
-			return store(file{Providers: []Provider{custom}})
+			return replaceProviderFixture(file{Providers: []Provider{custom}})
 		}
 		return nil
 	}

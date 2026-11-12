@@ -28,7 +28,7 @@ const quotas = [
     windows: [{ name: "Weekly", used: 30, trayKind: "7d" }, { name: "Grok Bot", used: 64, trayKind: "7d:grok bot", trayExtra: true }, { name: "Total", used: 30, trayKind: "name:total", trayExtra: true }] },
 ];
 
-function server(lang, posts, over) {
+function server(lang, posts, over, data = quotas) {
   let cur = {
     theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", dock: false, dockWindow: false, proxy: "",
     trayUsage: "claude|*", trayUsages: ["claude|*", "copilot", "usage:today"], trayUsageEvery: 3,
@@ -45,7 +45,7 @@ function server(lang, posts, over) {
       if (req.method() === "POST") { posts.push(req.postDataJSON()); cur = { ...cur, ...req.postDataJSON() }; }
       return json(cur);
     }
-    if (url.pathname === "/api/usage/quotas") return json(quotas);
+    if (url.pathname === "/api/usage/quotas") return json(data);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
@@ -54,7 +54,7 @@ function server(lang, posts, over) {
   };
 }
 
-async function open(browser, lang, posts, { platform = "MacIntel", width = 900, over = {} } = {}) {
+async function open(browser, lang, posts, { platform = "MacIntel", width = 900, over = {}, data = quotas } = {}) {
   const context = await browser.newContext({ viewport: { width, height: 560 }, reducedMotion: "reduce" });
   await context.addInitScript((p) => Object.defineProperty(Navigator.prototype, "platform", { get: () => p }), platform);
   const page = await context.newPage();
@@ -62,7 +62,7 @@ async function open(browser, lang, posts, { platform = "MacIntel", width = 900, 
   page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/*", server(lang, posts, over));
+  await page.route("**/*", server(lang, posts, over, data));
   await page.goto("http://magpie.test/?view=usage");
   await page.locator("#prefs").click();
   await openPart(page, "usage");
@@ -79,6 +79,91 @@ const LANGS = [
 ];
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: selected account windows and the in-use union`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const data = [
+      { provider: "zcode", name: "ZCode", user: "trial@example.test", plan: "Start",
+        windows: [{ name: "Trial Start", used: 20, trayKind: "trial:start" }, { name: "Trial Daily", used: 30, trayKind: "trial:daily" }] },
+      { provider: "zcode", name: "ZCode", user: "paid@example.test", plan: "Pro",
+        windows: [{ name: "Paid Five", used: 40, trayKind: "paid:five" }, { name: "Paid Week", used: 50, trayKind: "paid:week" }] },
+      { provider: "zcode", name: "ZCode", user: "other@example.test", plan: "Max",
+        windows: [{ name: "Other Five", used: 60, trayKind: "other:five" }, { name: "Other Week", used: 70, trayKind: "other:week" }] },
+    ];
+    const trial = "zcode|trial@example.test", paid = "zcode|paid@example.test";
+    for (const scenario of [
+      { ids: [trial], names: ["All windows", "Trial Start", "Trial Daily"], saved: ["paid:week"] },
+      { ids: [paid], names: ["All windows", "Paid Five", "Paid Week"] },
+      { ids: [trial, paid], names: ["All windows", "Trial Start", "Trial Daily", "Paid Five", "Paid Week"], notes: true },
+      { ids: ["zcode|*"], names: ["All windows", "Trial Start", "Trial Daily", "Paid Five", "Paid Week", "Other Five", "Other Week"], notes: true, inUse: true },
+    ]) {
+      await t.test(scenario.ids.join(", "), async () => {
+        const posts = [];
+        const { context, page, errors } = await open(browser, "en", posts, { over: { trayUsages: scenario.ids, trayUsage: scenario.ids[0],
+          ...(scenario.saved ? { trayWindows: { zcode: scenario.saved } } : {}) }, data });
+        try {
+          const pill = page.locator("#trayWindowsPick button");
+          await pill.waitFor();
+          assert.equal(await pill.count(), 1, "window preferences remain provider-keyed");
+          await pill.click();
+          const menu = page.locator(".proto-menu"), items = menu.locator(".pm-item");
+          await items.first().waitFor();
+          assert.deepEqual((await items.locator(".pm-name").allTextContents()).map((s) => s.trim()), scenario.names);
+          if (scenario.notes) {
+            assert.match(await items.filter({ hasText: "Trial Start" }).textContent(), /trial@example\.test/);
+            assert.match(await items.filter({ hasText: "Paid Five" }).textContent(), /paid@example\.test/);
+          }
+          if (scenario.inUse) {
+            assert.match(await menu.locator(".pm-head").textContent(), /Possible windows for the account in use/);
+            assert.match(await items.filter({ hasText: "Other Five" }).textContent(), /other@example\.test/);
+          }
+          await items.nth(1).click();
+          await page.keyboard.press("Escape");
+          await page.waitForFunction(() => document.querySelector("#trayWindowsPick button")?.textContent.includes(" · ") && document.querySelector("#trayWindowsPick button").textContent !== "ZCode · All windows");
+          assert.deepEqual(posts.at(-1).trayWindows, { zcode: [...(scenario.saved || []), scenario.ids[0] === paid ? "paid:five" : "trial:start"] });
+          assert.deepEqual(errors, []);
+        } finally {
+          await context.close();
+        }
+      });
+    }
+  });
+  test(`${engine}: select a fresh partial account and its actual tray window`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const posts = [];
+    const partial = { provider: "zcode", name: "ZCode", user: "alice", error: "Coding Plan quota unavailable", partial: true,
+      windows: [{ name: "Start", used: 40, trayKind: "name:start" }, { name: "Trial", used: 60, trayKind: "name:trial" }] };
+    const { context, page, errors } = await open(browser, "en", posts, {
+      over: { trayUsages: [], trayUsage: "" }, data: [partial,
+        { ...partial, user: "stale", asOf: new Date().toISOString() },
+        { ...partial, user: "deferred", readDeferred: true },
+        { ...partial, user: "failed", partial: false },
+        { ...partial, user: "text-only", windows: [{ name: "Note", text: true, display: "unavailable", trayKind: "name:note" }] }],
+    });
+    t.after(() => context.close());
+    await page.locator("#trayUsagePick button").click();
+    const menu = page.locator(".proto-menu");
+    const choice = menu.locator(".pm-item", { hasText: "alice" });
+    await choice.waitFor();
+    assert.match(await choice.textContent(), /Coding Plan quota unavailable/);
+    assert.equal(await menu.locator(".pm-item", { hasText: "stale" }).count(), 0);
+    assert.equal(await menu.locator(".pm-item", { hasText: "deferred" }).count(), 0);
+    assert.equal(await menu.locator(".pm-item", { hasText: "failed" }).count(), 0);
+    assert.equal(await menu.locator(".pm-item", { hasText: "text-only" }).count(), 0);
+    await choice.click();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector("#trayWindowsPick button"));
+    assert.deepEqual(posts.at(-1).trayUsages, ["zcode|alice"]);
+    await page.locator("#trayWindowsPick button").click();
+    await page.locator(".proto-menu .pm-item", { hasText: "Trial" }).click();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector("#trayWindowsPick button")?.textContent.includes("Trial"));
+    assert.deepEqual(posts.at(-1).trayWindows, { zcode: ["name:trial"] });
+    await page.locator("#trayUsagePick button").click();
+    assert.match(await page.locator(".proto-menu .pm-item", { hasText: "alice" }).textContent(), /Coding Plan quota unavailable/);
+    assert.deepEqual(errors, []);
+  });
   test(engine + ": which windows a menu bar card shows", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));

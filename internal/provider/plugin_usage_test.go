@@ -2,12 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,7 +46,7 @@ func TestPluginUsage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -355,7 +357,7 @@ func TestPluginAccountModels(t *testing.T) {
 	if err := SubmitSignInCallback(st.ID, "good"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "few"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "few", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := plugin.Providers(ctx); err != nil {
@@ -458,7 +460,7 @@ func TestKeyListedIsAPluginAccountsOwnList(t *testing.T) {
 	if got := KeyListed(id, "a@fake"); got != nil {
 		t.Fatalf("one account, which has every model: %v, want nil", got)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "few"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "few", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := plugin.Providers(ctx); err != nil {
@@ -472,5 +474,121 @@ func TestKeyListedIsAPluginAccountsOwnList(t *testing.T) {
 	}
 	if got := KeyListed(id, "nobody@fake"); got != nil {
 		t.Errorf("an account the plugin doesn't have: %v, want nil", got)
+	}
+}
+
+func TestPluginUsageDoesNotFollowReusedAccountName(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	first, err := plugin.Import(ctx, "fakeco", map[string]any{"type": "oauth", "accountId": "Alice", "uid": "a", "refresh": "r-ok", "access": "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := plugin.Import(ctx, "fakeco", map[string]any{"type": "oauth", "accountId": "Alice", "uid": "b", "refresh": "r-offline", "access": "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := pluginLogins(mustPlugin(t))
+	var original string
+	for _, l := range rows {
+		if l.acct.Key == first {
+			original = l.User
+		}
+	}
+	if original == "" || first == second {
+		t.Fatalf("fixture accounts: %+v", rows)
+	}
+	read := LoginUsage(ctx, "plugin:fakeco")[original]
+	if read.Error != "" || len(read.Windows) == 0 {
+		t.Fatalf("first account's usage: %+v", read)
+	}
+	if err := plugin.SignOut(ctx, "fakeco", first); err != nil {
+		t.Fatal(err)
+	}
+	// A later saved label may reuse the old name; identity must still win.
+	loginsMu.Lock()
+	ls := readLogins()
+	for i := range ls {
+		if ls[i].Agent == "plugin:fakeco" && ls[i].Home == second {
+			ls[i].User = original
+		}
+	}
+	err = writeLogins(ls)
+	loginsMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := LoginUsage(ctx, "plugin:fakeco")[original]
+	if got.Error == "" || len(got.Windows) != 0 {
+		t.Fatalf("replacement inherited old allowance: %+v", got)
+	}
+	if history := QuotaHistories(time.Time{}, "fakeco", original); len(history) != 0 {
+		t.Fatalf("replacement inherited old history: %+v", history)
+	}
+}
+
+func TestPluginPendingUsageCannotPublishToReplacement(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+			fmt.Fprint(w, "old plan")
+			return
+		}
+		fmt.Fprint(w, "new plan")
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("FAKE_USAGE", server.URL)
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	slot, err := plugin.Import(ctx, "fakeco", map[string]any{"type": "oauth", "accountId": "Alice", "uid": "a", "refresh": "old", "access": "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan map[string]SubscriptionQuota, 1)
+	go func() { done <- LoginUsage(ctx, "plugin:fakeco") }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("old usage read did not start")
+	}
+	replacement, _ := json.Marshal(map[string]any{"type": "oauth", "accountId": "Alice", "uid": "b", "refresh": "new", "access": "new"})
+	if err := plugin.EditAuth(func(auth map[string]json.RawMessage) (bool, error) {
+		auth[slot] = replacement
+		return true, nil
+	}); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	close(release)
+	if old := <-done; old["Alice"].Plan == "old plan" {
+		t.Fatalf("old in-flight result was published to the replacement: %+v", old)
+	}
+	if next := LoginUsage(ctx, "plugin:fakeco")["Alice"]; next.Error != "" || next.Plan != "new plan" {
+		t.Fatalf("replacement did not read its own allowance: %+v", next)
 	}
 }

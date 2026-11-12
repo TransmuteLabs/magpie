@@ -57,7 +57,7 @@ func TestPluginSecondAccountKeepsTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"k1", "k2"} {
-		if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, k); err != nil {
+		if _, err := provider.PluginAPIKey(ctx, "fakeco", 0, nil, k, provider.SignInOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}

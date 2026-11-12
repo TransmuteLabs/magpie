@@ -100,7 +100,7 @@ export class ProjectTokenClient {
         throw new ProjectTokenError(`project_token_http_${res.status}`, {
           status: res.status, transient: res.status === 429 || res.status >= 500 && res.status < 600,
           businessRejected: res.status === 401 && new URL(url).pathname.startsWith("/api/biz/") &&
-            new Headers(init.headers).get("Authorization") === "Bearer " + session.token,
+            [session.token, "Bearer " + session.token].includes(new Headers(init.headers).get("Authorization")),
           ...(res.status === 429 ? { retryAfter: retryAfter(res.headers.get("retry-after"), this.#now()) } : {}),
         })
       }
@@ -283,11 +283,11 @@ export class ProjectTokenClient {
   }
 }
 
-// The CLI OAuth token and the business JWT have different lifetimes. This
-// is the official CLI adapter's memory-only cache, owned by the same account.
+// The bootstrap OAuth token and business JWT have different lifetimes. The
+// account runtime persists the business material; this cache coalesces refresh.
 export class ZaiBusinessTokenCache {
   #session
-  #rejected = new WeakSet()
+  #rejected = new Set()
   #now
 
   constructor({ now = Date.now } = {}) { this.#now = now }
@@ -295,11 +295,25 @@ export class ZaiBusinessTokenCache {
   clear() { this.#session = undefined }
 
   invalidate(value) {
-    this.#rejected.add(value)
-    if (this.#session?.value === value) this.#session.value = undefined
+    const token = text(value?.token)
+    if (!token) return
+    const generation = text(value?.generation)
+    this.#rejected.add(JSON.stringify([generation, token]))
+    if (this.#session?.value?.token === token && this.#session.value.generation === generation) this.#session.value = undefined
   }
 
-  wasRejected(value) { return this.#rejected.has(value) }
+  wasRejected(value) { return this.#rejected.has(JSON.stringify([text(value?.generation), text(value?.token)])) }
+
+  seed(oauth, value) {
+    const token = text(value?.token), generation = text(value?.generation)
+    if (!token || this.wasRejected({ token, generation })) return
+    if (this.#session?.oauth !== oauth) this.#session = { oauth }
+    const expiresAt = positive(value.expiresAt) ? value.expiresAt : undefined
+    if (this.#session.value?.token === token && this.#session.value.expiresAt === expiresAt &&
+        this.#session.value.generation === generation) return
+    this.#session.value = Object.freeze({ token, generation, expiresAt, refreshAt: expiresAt === undefined ? this.#now() : expiresAt - LEAD })
+    this.#session.retryAt = undefined
+  }
 
   resolve(oauth, exchange, signal) {
     signal?.throwIfAborted()
@@ -318,7 +332,7 @@ export class ZaiBusinessTokenCache {
       return exchange()
     }).then((raw) => {
       if (this.#session !== session) throw new ProjectTokenError("project_token_scope_invalidated")
-      if (!raw || raw.code != null && !success(raw.code)) throw new ProjectTokenError("project_token_login_failed")
+      if (!raw || raw.success === false || raw.code != null && !success(raw.code)) throw new ProjectTokenError("project_token_login_failed")
       const data = raw.data
       const token = text(data?.access_token) || text(data?.accessToken)
       if (!token) throw new ProjectTokenError("project_token_login_failed")
@@ -332,12 +346,13 @@ export class ZaiBusinessTokenCache {
       const expiresAt = deadlines.length ? Math.min(...deadlines) : undefined
       const cacheUntil = expiresAt ?? started + 300_000
       if (cacheUntil <= this.#now()) throw new ProjectTokenError("project_token_login_failed")
-      const value = Object.freeze({ token, expiresAt, refreshAt: cacheUntil - LEAD })
+      const value = Object.freeze({ token, generation: crypto.randomUUID(), expiresAt, refreshAt: cacheUntil - LEAD })
       session.value = value
       session.retryAt = undefined
       return value
     }).catch((error) => {
       if (this.#session !== session) throw new ProjectTokenError("project_token_scope_invalidated")
+      if (error?.kind === "account_scope_changed" || error?.kind === "account_generation_changed" || error?.signIn === "expired") throw error
       const value = session.value
       if (error instanceof ProjectTokenError && error.transient && value && !this.wasRejected(value) && value.expiresAt !== undefined && this.#now() < value.expiresAt) {
         session.retryAt = Math.min(this.#now() + BACKOFF, value.expiresAt)

@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -178,7 +180,7 @@ func passedOnCards() []SubscriptionQuota {
 		if r.held {
 			continue
 		}
-		for _, q := range namedRemoteCards(p, r.cards) {
+		for _, q := range namedRemoteRead(p, r) {
 			q.Via = catalog.ViaHere(q.Via)
 			out = append(out, q)
 		}
@@ -208,17 +210,19 @@ var remoteCardCache struct {
 }
 
 type remoteCardsRead struct {
-	at    time.Time
-	cards []SubscriptionQuota // as the remote has them, not yet named
-	err   string
-	held  bool // the remote holds the key: no card of its accounts is shown
+	at     time.Time
+	goodAt time.Time
+	cards  []SubscriptionQuota // as the remote has them, not yet named
+	err    string
+	held   bool // the remote holds the key: no card of its accounts is shown
 }
 
-// remoteCardsID is what a remote's cards are kept here by: the provider
-// and its key, so cards read with one key are never shown under another
-// (a key replaced by one the remote holds shows none of them).
+// remoteCardsID separates the actual request endpoint and the gateway key,
+// so a pending read from either old value cannot populate the new cache.
+// Hash the endpoint rather than retaining URL credentials in the key.
 func remoteCardsID(p Provider) string {
-	return p.ID + "\x00" + keyID(p.Key)
+	endpoint := sha256.Sum256([]byte(p.Anthropic))
+	return p.ID + "\x00" + hex.EncodeToString(endpoint[:]) + "\x00" + keyID(p.Key)
 }
 
 // ForgetRemoteCardsForTest drops the remote magpies' cards kept here, for
@@ -299,7 +303,24 @@ func remoteCards(ctx context.Context, p Provider, fresh bool) []SubscriptionQuot
 		}
 		return []SubscriptionQuota{{Provider: p.ID, Name: name, Icon: "magpie", Kind: "subscription", From: name, Windows: []QuotaWindow{}, Error: msg}}
 	}
-	return namedRemoteCards(p, r.cards)
+	return namedRemoteRead(p, r)
+}
+
+func namedRemoteRead(p Provider, r remoteCardsRead) []SubscriptionQuota {
+	cards := namedRemoteCards(p, r.cards)
+	if r.err != "" && !r.goodAt.IsZero() {
+		for i := range cards {
+			at := r.goodAt
+			for _, known := range []*time.Time{cards[i].AsOf, cards[i].ReadAt} {
+				if known != nil && known.Before(at) {
+					at = *known
+				}
+			}
+			cards[i].AsOf = &at
+			cards[i].ReadDeferred = false // the remote fetch was attempted and failed
+		}
+	}
+	return cards
 }
 
 // namedRemoteCards is cards, as the remote magpie p told them, named for
@@ -318,6 +339,26 @@ func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota
 		if q.Provider == "" || catalog.Loops(q.Via) || !wanted(q.Provider) {
 			continue
 		}
+		q.Windows = slices.Clone(q.Windows)
+		q.Observations = slices.Clone(q.Observations)
+		if q.Resets != nil {
+			resets := *q.Resets
+			resets.Each = slices.Clone(resets.Each)
+			q.Resets = &resets
+		}
+		if q.ZCodeReset != nil {
+			state := *q.ZCodeReset
+			state.FiveHour, state.Week = slices.Clone(state.FiveHour), slices.Clone(state.Week)
+			q.ZCodeReset = &state
+		}
+		if q.AccountIdentity != "" {
+			q.AccountIdentity = remoteAccountIdentity(p, q.AccountIdentity)
+		} else if q.User != "" && (q.Provider == "zcode" || strings.HasSuffix(q.Provider, "/zcode")) {
+			// An older owner did not bind this name to a selection. It may
+			// still be shown, but must not claim current history or alerts.
+			q.accountUnverified = true
+		}
+		zcode := q.Provider == "zcode" || strings.HasSuffix(q.Provider, "/zcode")
 		q.Provider = p.ID + "/" + q.Provider
 		q.Name += " · " + name
 		q.From = name
@@ -325,7 +366,11 @@ func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota
 		// a check-in is the other magpie's to do. A Codex reset is
 		// spent there when pressed here (UseRemoteCodexReset, #3850);
 		// a GLM team's (byWindow) is spent on the vendor's page
-		if q.Provider != p.ID+"/codex" || q.Resets != nil && q.Resets.ByWindow {
+		if zcode && q.Resets != nil && (q.Resets.Source == "zcode" || q.Resets.Source == "legacy-list") {
+			// Source-qualified inventory is read-only on a remote card.
+		} else if zcode && q.ZCodeReset != nil && q.ZCodeReset.Source == "zcode" && q.ZCodeReset.Available {
+			q.Resets = zcodeResetCredits(*q.ZCodeReset)
+		} else if q.Provider != p.ID+"/codex" || q.Resets != nil && q.Resets.ByWindow {
 			q.Resets = nil
 		}
 		q.Checkins, q.CheckinBy, q.Checkin, q.CheckinOff = false, "", nil, false
@@ -335,6 +380,11 @@ func namedRemoteCards(p Provider, cards []SubscriptionQuota) []SubscriptionQuota
 		out = append(out, q)
 	}
 	return out
+}
+
+func remoteAccountIdentity(owner Provider, identity string) string {
+	sum := sha256.Sum256([]byte(owner.ID + "\x00" + owner.Anthropic + "\x00" + identity))
+	return hex.EncodeToString(sum[:])
 }
 
 func remoteName(p Provider) string {
@@ -411,6 +461,7 @@ func keepRemoteCards(id string, asked time.Time, cards []SubscriptionQuota, err 
 	default:
 		// a card that came back round isn't kept, nor told again
 		r.cards, r.err, r.held = withoutLoops(cards), "", false
+		r.goodAt = asked
 	}
 	if c.m == nil {
 		c.m = map[string]remoteCardsRead{}
@@ -435,6 +486,9 @@ func RemoteQuotaHistories(ctx context.Context, days string) []QuotaHistory {
 				return
 			}
 			for j := range hs {
+				if hs[j].AccountIdentity != "" {
+					hs[j].AccountIdentity = remoteAccountIdentity(p, hs[j].AccountIdentity)
+				}
 				hs[j].Provider = p.ID + "/" + hs[j].Provider
 			}
 			got[i] = hs

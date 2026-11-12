@@ -307,9 +307,13 @@ func accountsCmd(args []string) error {
 		if r.Resets != nil {
 			line += "  " + resetsCell(r.Resets, r.Agent, r.User)
 		}
+		for _, o := range r.Observations {
+			line += "  " + zcodeObservationCell(o)
+		}
 		if r.Lapsed != "" {
 			line += "  " + muted.Render(r.Lapsed)
-		} else if r.Error != "" {
+		}
+		if r.Error != "" && r.Error != r.Lapsed {
 			line += "  " + muted.Render(r.Error)
 		}
 		line += quotaReadingCell(r.AsOf, r.ReadAt, r.Windows)
@@ -321,16 +325,19 @@ func accountsCmd(args []string) error {
 
 // accountRow is one account and its allowance, as `magpie accounts` shows it.
 type accountRow struct {
-	Agent   string      `json:"agent"`
-	User    string      `json:"user"`
-	Plan    string      `json:"plan,omitempty"`
-	Active  bool        `json:"active"` // the agent is signed in to it
-	On      bool        `json:"on"`     // in use: the active one, or next in line
-	Windows []quotaSpan `json:"windows"`
-	Error   string      `json:"error,omitempty"`
-	Lapsed  string      `json:"lapsed,omitempty"` // its sign-in has to be made again
-	AsOf    *time.Time  `json:"asOf,omitempty"`   // last reading when it couldn't be read now
-	ReadAt  *time.Time  `json:"readAt,omitempty"` // when what is shown was read, when known
+	Agent        string                      `json:"agent"`
+	User         string                      `json:"user"`
+	Plan         string                      `json:"plan,omitempty"`
+	Active       bool                        `json:"active"` // the agent is signed in to it
+	On           bool                        `json:"on"`     // in use: the active one, or next in line
+	Windows      []quotaSpan                 `json:"windows"`
+	Error        string                      `json:"error,omitempty"`
+	Partial      bool                        `json:"partial,omitempty"`
+	Lapsed       string                      `json:"lapsed,omitempty"` // its sign-in has to be made again
+	AsOf         *time.Time                  `json:"asOf,omitempty"`   // last reading when it couldn't be read now
+	ReadAt       *time.Time                  `json:"readAt,omitempty"` // when what is shown was read, when known
+	ReadDeferred bool                        `json:"readDeferred,omitempty"`
+	Observations []provider.UsageObservation `json:"observations,omitempty"`
 	// Resets are a Codex account's rate-limit resets, when it holds any.
 	Resets *provider.ResetCredits `json:"resets,omitempty"`
 	// Balance is what the account holds beside its windows, a ChatGPT
@@ -382,7 +389,8 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 			if r.Plan == "" {
 				r.Plan = q.Plan
 			}
-			r.Error, r.Resets, r.AsOf, r.ReadAt, r.Balance = q.Error, q.Resets, q.AsOf, q.ReadAt, q.Balance
+			r.Error, r.Partial, r.Resets, r.AsOf, r.ReadAt, r.Balance = q.Error, q.Partial, q.Resets, q.AsOf, q.ReadAt, q.Balance
+			r.ReadDeferred, r.Observations = q.ReadDeferred, q.Observations
 			// a pool's own windows stand in for the models' drawing on it,
 			// as the usage page shows them
 			for _, w := range provider.PooledWindows(q.Windows) {

@@ -20,9 +20,11 @@ import (
 // Carry that exact delta, preserving upstream's code-only headroom.
 // Intrinsic ZCode adds 1,703 bytes for lazy control entrypoints, native
 // sign-in routing, modal ownership and structured errors; sheets stay lazy.
+// Built-in parity adds 2,110 code bytes for scoped re-login, partial quota
+// provenance and safe native/tray controls; account sheets and pickers stay lazy.
 const (
 	appScriptBudget  = 1_087_374 // upstream 1,086,267 + the fork's 1,107
-	coreScriptBudget = 1_266_143 // previous 1,264,440 + intrinsic ZCode's 1,703
+	coreScriptBudget = 1_268_253 // previous 1,266,143 + built-in parity's 2,110
 )
 
 // codeBytes is how many bytes of b are code: its blank lines, its lines

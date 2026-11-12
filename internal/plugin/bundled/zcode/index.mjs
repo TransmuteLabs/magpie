@@ -13,7 +13,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { arch, homedir, release, userInfo } from "node:os"
 import { isAbsolute, join } from "node:path"
 import PROMPT from "./prompt.mjs"
-import { accountScope, createAccountRuntime } from "./account.mjs"
+import { accountScope, createAccountRuntime, START_EXPIRED } from "./account.mjs"
 import { ZCODE_VERSION } from "./project-token.mjs"
 import { readNativeUsage, nativeUsageOperation, nativeUsageOperations, startBucketModels, startBalanceNow } from "./usage.mjs"
 import { resetOperation, resetOperations } from "./reset.mjs"
@@ -181,7 +181,7 @@ const jwtExpired = (jwt) => {
 }
 // EXPIRED is the built-in's words (errZCodeExpired) for a Start Plan
 // sign-in past its end.
-const EXPIRED = "ZCode's sign-in has expired; sign in to ZCode again (or add the account again in magpie)"
+const EXPIRED = START_EXPIRED
 
 const num = (v) => {
   const n = typeof v === "string" ? parseFloat(v) : v
@@ -226,7 +226,10 @@ async function startPlan(jwt, device, coming = false, ctx) {
   await ctx?.assertCurrent()
   const response = await call("GET", `${ZCODE}/api/v1/zcode-plan/billing/balance?app_version=${APP_VERSION}`, { auth: "Bearer " + jwt, device, withHeaders: true, signal: ctx?.signal })
   await ctx?.assertCurrent()
-  const b = response.data ?? {}
+  const b = response.data
+  if (!b || typeof b !== "object" || Array.isArray(b) ||
+      (b.plans !== undefined && !Array.isArray(b.plans)) ||
+      (b.balances !== undefined && !Array.isArray(b.balances))) throw new Error("invalid Start Plan balance")
   const now = startBalanceNow(b, response.headers.get("date")) / 1000
   const same = (x, p) => (x.user_plan_id && p.user_plan_id ? x.user_plan_id === p.user_plan_id : String(x.plan_id ?? "") === String(p.plan_id ?? ""))
   const plans = Array.isArray(b.plans) ? b.plans : []
@@ -279,8 +282,8 @@ function accountBoundaryFailure(error, ctx) {
 
 async function plansOf(s, ctx) {
   await ctx?.assertCurrent()
-  if (!s.jwt) return { start: false, gift: null }
   if (s.kind === "start") return { start: true, gift: null }
+  if (!s.jwt) return { start: false, gift: null }
   const id = s.key + "\0" + s.jwt
   const r = routes.get(id)
   if (r && Date.now() - r.at < r.ttl) return r
@@ -687,6 +690,9 @@ async function signedIn(site, token, jwt, device, uid, refreshToken, onTeam = fa
     } } },
   })
   const ctx = await provisional.capture(async () => draft, { signal })
+  // Desktop normalizes Z.ai's bootstrap OAuth token to business material
+  // before the successful sign-in is persisted.
+  if (site === "zai") await ctx.loginMaterial({ business: "required", zcode: "none" })
   const candidates = await selectionCandidates(ctx, { allowIncompleteTeams: !onTeam })
   let chosen
   if (onTeam) {
@@ -1034,7 +1040,7 @@ function ownSignIn() {
     }
     const jwt = first(decrypt(key, store.zcodejwttoken)).replace(/^Bearer\s+/i, "")
     token = token.replace(/^Bearer\s+/i, "")
-    if (site === "bigmodel" && token === jwt) token = ""
+    if (token && token === jwt) token = ""
     const legacyKey = !token && selected?.kind !== "start" && selected?.kind !== "team" ? configKey(key, site)?.key ?? "" : ""
     const kind = selected?.kind === "individual" && legacyKey ? "legacy-key" :
       selected?.kind ?? (token && uid ? "individual" : legacyKey ? "legacy-key" : "start")
@@ -1044,7 +1050,7 @@ function ownSignIn() {
     const refreshToken = first(decrypt(key, store[`oauth:${active}:refresh_token`]))
     return { version: 1, source: "zcode", site, uid, ...(zcodeUserId ? { zcodeUserId } : {}), accountIdentity, user: who(info), loginProvider: active,
       base: SITES[site].base, device: anyDevice, kind, jwt,
-      ...(site === "zai" ? { oauthToken: token } : { business: token }),
+      business: token,
       ...(loginGeneration ? { loginGeneration } : {}), ...(refreshToken ? { refreshToken } : {}),
       ...(kind === "legacy-key" ? { key: legacyKey } : {}),
       ...(loc ? { loc } : {}), ...(selected ? { org: selected.org, project: selected.project, product: selected.product } : {}) }
@@ -1064,7 +1070,7 @@ function ownSignIn() {
   if (selected?.kind === "invalid") return null
   const jwt = first(decrypt(key, store.zcodejwttoken)).replace(/^Bearer\s+/i, "")
   let business = first(decrypt(key, store[`oauth:${site}:access_token`])).replace(/^Bearer\s+/i, "")
-  if (site === "bigmodel" && business === jwt) business = ""
+  if (business && business === jwt) business = ""
   const refreshToken = first(decrypt(key, store[`oauth:${site}:refresh_token`]))
   const loginGeneration = first(decrypt(key, store["oauth:session_revision"]))
   let legacyKey = ""
@@ -1082,7 +1088,7 @@ function ownSignIn() {
   const loc = ownLocation(store, key, site, uid, selected)
   if (!jwt && !business && !legacyKey) return null
   return { version: 1, source: "zcode", site, uid, ...(zcodeUserId ? { zcodeUserId } : {}), user: who(info), base: SITES[site].base, device: anyDevice,
-    kind, jwt, ...(site === "zai" ? { oauthToken: business } : { business }),
+    kind, jwt, business,
     ...(loginGeneration ? { loginGeneration } : {}), ...(refreshToken ? { refreshToken } : {}), ...(loc ? { loc } : {}),
     ...(selected ? { org: selected.org, project: selected.project, product: selected.product } : {}),
     ...(kind === "legacy-key" ? { key: legacyKey } : {}) }
@@ -1097,18 +1103,13 @@ function asZCode() {
     async callback(_code, { signal } = {}) {
       const own = ownSignIn()
       if (!own) return { type: "failed", error: "ZCode isn't signed in on this computer; sign in to ZCode, or sign in to Z.ai or BigModel here" }
-      if (own.kind === "team" && !own.org && own.project && own.product && (own.business || own.oauthToken) && own.uid) {
+      if (own.kind === "team" && !own.org && own.project && own.product && own.business && own.uid) {
         try {
           const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000)
-          const login = own.site === "zai" ? await call("POST", `${SITES.zai.api}/api/auth/z/login`, {
-            body: { token: own.oauthToken }, headers: { "User-Agent": UA }, signal: deadline,
-          }) : null
-          const business = own.site === "zai" ? first(login?.access_token, login?.accessToken) : own.business
-          if (!business) throw new Error("ZCode business credential unavailable")
-          const data = await call("GET", `${SITES[own.site].api}/api/biz/customer/getCustomerInfo`, { auth: business, signal: deadline })
+          const data = await call("GET", `${SITES[own.site].api}/api/biz/customer/getCustomerInfo`, { auth: own.business, signal: deadline })
           const now = ownSignIn()
           if (!now || now.uid !== own.uid || now.site !== own.site || now.business !== own.business ||
-              now.oauthToken !== own.oauthToken || now.loginGeneration !== own.loginGeneration ||
+              now.loginGeneration !== own.loginGeneration ||
               now.jwt !== own.jwt || now.project !== own.project || now.product !== own.product)
             throw new Error("ZCode account changed while resolving team identity")
           const matches = (data?.organizations ?? []).filter((o) => o.projects?.some((p) => p.projectId === own.project)).map((o) => first(o.organizationId)).filter(Boolean)
@@ -1145,7 +1146,19 @@ function stateOf(auth, { follow = true } = {}) {
           own.kind === s.kind && (own.kind !== "team" ||
             (own.org === s.org && own.project === s.project && own.product === s.product))))) {
         const { user, ...now } = own
+        const previousBusiness = first(s.business, s.token)
         s = { ...s, ...now, device: s.device }
+        if (own.site === "zai") {
+          // The Desktop's saved Z.ai access_token is business material, not
+          // the bootstrap OAuth formerly inferred by older app imports.
+          s.oauthToken = ""
+          if (previousBusiness !== own.business) {
+            s.businessExpiresAt = undefined
+            s.businessGeneration = undefined
+            s.businessRejectedFingerprint = undefined
+            s.businessRejectedGeneration = undefined
+          }
+        }
       }
     }
     const site = siteOf(s.site)
@@ -1171,43 +1184,66 @@ const planID = (base, site = "zai", kind = "individual") =>
 
 const efforts = (vs) => [...new Set(vs.map((v) => (v === "disabled" ? "none" : v === "enabled" ? "high" : v)))]
 
-// modelsOf is a plan's models in ZCode's provider config.
-function modelsOf(cfg, plan) {
-  const c = cfg?.config ?? {}
-  const ids = []
-  const on = new Set()
-  const add = (id) => {
-    if (!on.has(id.toLowerCase())) on.add(id.toLowerCase()), ids.push(id)
+// ZCode applies the ordered global, API, site, template and provider-model
+// rules to members, not the other way around.
+function modelsOf(cfg, plan, base, membership, personal = []) {
+  const c = cfg?.config
+  const provider = c?.providerConfigRules?.providerRules?.find((r) => r.providerId === plan)
+  if (!provider?.config || (provider.config.builtinModelIds != null && !Array.isArray(provider.config.builtinModelIds)) ||
+      (provider.config.personalModelIds != null && !Array.isArray(provider.config.personalModelIds))) return null
+  const ids = [], seen = new Set()
+  for (const id of [...(membership ?? provider.config.builtinModelIds ?? []), ...(provider.config.personalModelIds ?? []), ...personal]) {
+    if (typeof id !== "string" || !id || seen.has(id.toLowerCase())) continue
+    seen.add(id.toLowerCase())
+    ids.push(id)
   }
-  for (const r of c.providerConfigRules?.providerRules ?? []) if (r.providerId === plan) (r.builtinModelIds ?? []).forEach(add)
-  const off = new Set()
-  for (const r of c.modelConfigRules?.builtinProviderModelRules ?? []) {
-    if (r.providerId !== plan) continue
-    if (r.config?.enabled === false) off.add(String(r.modelId).toLowerCase())
-    else add(r.modelId)
+  const rules = c.modelConfigRules ?? {}
+  let endpoint
+  try {
+    const u = new URL(base)
+    const suffix = u.search + u.hash
+    const url = u.toString()
+    endpoint = (suffix ? url.slice(0, -suffix.length) : url).replace(/\/+$/, "") + suffix
+  } catch {}
+  const matches = (pattern, value, insensitive = false) => {
+    try { return typeof pattern === "string" && new RegExp(`^(?:${pattern})$`, insensitive ? "i" : "").test(value) }
+    catch { return false }
   }
   const out = []
   for (const id of ids) {
-    if (off.has(id.toLowerCase())) continue
-    const m = { id, context: 0, output: 0, efforts: [] }
-    for (const r of c.modelConfigRules?.modelRules ?? []) {
-      let re
-      try {
-        re = new RegExp(`^(?:${r.modelMatch})$`, "i")
-      } catch {
-        continue
+    const m = { id, context: 0, output: 0, efforts: [], enabled: undefined }
+    const apply = (x) => {
+      if (!x || typeof x !== "object") return
+      if (x.enabled !== undefined) m.enabled = x.enabled
+      if (x.properties === null) Object.assign(m, { context: 0, image: undefined, video: undefined, pdf: undefined, audio: undefined })
+      else if (x.properties) {
+        const p = x.properties
+        if (p.contextWindow !== undefined) m.context = p.contextWindow ?? 0
+        if (p.inputFormat === null) Object.assign(m, { image: undefined, video: undefined, pdf: undefined, audio: undefined })
+        else if (p.inputFormat) for (const [key, field] of [["image", "supportsImage"], ["video", "supportsVideo"], ["pdf", "supportsPdf"], ["audio", "supportsAudio"]]) {
+          if (p.inputFormat[field] !== undefined) m[key] = p.inputFormat[field]
+        }
       }
-      if (!re.test(id)) continue
-      const x = r.config ?? {}
-      if (x.properties?.contextWindow > 0) m.context = x.properties.contextWindow
-      if (x.optionSpecs?.maxOutputTokens?.max > 0) m.output = x.optionSpecs.maxOutputTokens.max
-      if (typeof x.properties?.inputFormat?.supportsImage === "boolean") m.image = x.properties.inputFormat.supportsImage
-      if (typeof x.properties?.inputFormat?.supportsVideo === "boolean") m.video = x.properties.inputFormat.supportsVideo
-      if (typeof x.properties?.inputFormat?.supportsPdf === "boolean") m.pdf = x.properties.inputFormat.supportsPdf
-      if (typeof x.properties?.inputFormat?.supportsAudio === "boolean") m.audio = x.properties.inputFormat.supportsAudio
-      if (x.optionSpecs?.reasoningLevel?.values?.length) m.efforts = efforts(x.optionSpecs.reasoningLevel.values)
+      if (x.optionSpecs === null) Object.assign(m, { output: 0, efforts: [] })
+      else if (x.optionSpecs) {
+        const o = x.optionSpecs
+        if (o.maxOutputTokens === null) m.output = 0
+        else if (o.maxOutputTokens?.max !== undefined) m.output = o.maxOutputTokens.max ?? 0
+        if (o.reasoningLevel === null || o.reasoningLevel?.values === null) m.efforts = []
+        else if (Array.isArray(o.reasoningLevel?.values)) m.efforts = efforts(o.reasoningLevel.values)
+      }
     }
-    out.push(m)
+    for (const r of rules.modelRules ?? []) if (matches(r.modelMatch, id, true)) apply(r.config)
+    for (const r of rules.modelApiRules ?? [])
+      if (matches(r.modelMatch, id, true) && matches(r.apiTypeMatch, "anthropic-messages")) apply(r.config)
+    for (const r of rules.providerSiteRules ?? [])
+      if (matches(r.modelMatch, id, true) && endpoint && matches(r.baseUrlMatch, endpoint) &&
+          (r.apiTypeMatch === undefined || matches(r.apiTypeMatch, "anthropic-messages"))) apply(r.config)
+    for (const r of rules.templateModelRules ?? [])
+      if (provider.templateId && r.templateId === provider.templateId && r.modelId === id) apply(r.config)
+    for (const r of rules.builtinProviderModelRules ?? [])
+      if (r.providerId === plan && r.modelId === id) apply(r.config)
+    if (m.enabled === true) out.push(m)
   }
   return out
 }
@@ -1242,11 +1278,14 @@ function localConfig() {
 }
 
 // remoteConfig is the release of ZCode's provider config zcode.z.ai names now.
-async function remoteConfig() {
+async function remoteConfig(refresh = false) {
   const signal = AbortSignal.timeout(8000)
-  const c = await clientConfigs()
+  const c = await clientConfigs(refresh)
   const url = c?.configs?.builtin_provider_config_json
-  if (!String(url ?? "").startsWith("https://")) throw new Error("ZCode's configs name no provider config")
+  if (!String(url ?? "").startsWith("https://")) {
+    resetClientConfigs()
+    throw new Error("ZCode's configs name no provider config")
+  }
   const res = await fetch(url, { headers: { "User-Agent": UA }, signal })
   if (!res.ok) throw new Error(`ZCode's provider config: ${res.status}`)
   return res.json()
@@ -1258,30 +1297,44 @@ async function remoteConfig() {
 // came through is kept for 10 minutes; a failed one is not kept, and
 // throws.
 let clientCache = null
-async function clientConfigs() {
+let clientEpoch = 0
+async function clientConfigs(refresh = false) {
+  if (refresh) resetClientConfigs()
   if (clientCache && Date.now() - clientCache.at < 600_000) return clientCache.c
+  const epoch = clientEpoch
   const c = await call("GET", `${ZCODE}/api/v1/client/configs?app_version=${APP_VERSION}&platform=${platform()}`, { signal: AbortSignal.timeout(8000) })
-  clientCache = { c, at: Date.now() }
+  if (!c || typeof c !== "object" || Array.isArray(c)) throw new Error("ZCode's client config is unavailable")
+  if (epoch === clientEpoch) clientCache = { c, at: Date.now() }
   return c
 }
 // resetClientConfigs is for tests: the next read asks zcode.z.ai again.
 export function resetClientConfigs() {
   clientCache = null
+  clientEpoch++
 }
 
 // config is ZCode's provider config, the later of zcode.z.ai's and an
 // installed ZCode's, kept for 10 minutes.
 let cfgCache = null
-async function zcodeConfig() {
-  if (cfgCache && Date.now() - cfgCache.at < 600_000) return cfgCache.cfg
+let cfgEpoch = 0
+async function zcodeConfig(refresh = false) {
+  if (refresh) { cfgCache = null; cfgEpoch++ }
+  if (cfgCache?.cfg && Date.now() - cfgCache.at < 600_000) return { cfg: cfgCache.cfg, failed: false }
+  const epoch = cfgEpoch
   let cfg = null
+  let failed = false
+  const usable = (value) => value && typeof value === "object" && !Array.isArray(value) &&
+    Array.isArray(value.config?.providerConfigRules?.providerRules) &&
+    ["modelRules", "modelApiRules", "providerSiteRules", "templateModelRules", "builtinProviderModelRules"]
+      .every((key) => Array.isArray(value.config?.modelConfigRules?.[key]))
   try {
-    cfg = await remoteConfig()
-  } catch {}
+    cfg = await remoteConfig(refresh)
+    if (!usable(cfg)) { cfg = null; failed = true }
+  } catch { failed = true }
   const local = localConfig()
-  if (local && (!cfg || (local.revision ?? 0) > (cfg.revision ?? 0))) cfg = local
-  cfgCache = { cfg, at: Date.now() }
-  return cfg
+  if (usable(local) && (!cfg || (local.revision ?? 0) > (cfg.revision ?? 0))) cfg = local
+  if (cfg && epoch === cfgEpoch && !failed) cfgCache = { cfg, at: Date.now() }
+  return { cfg, failed }
 }
 
 // variants are a model's reasoning efforts as @ai-sdk/anthropic options.
@@ -2097,6 +2150,7 @@ function sessionOf(id, device) {
 // ---- the plugin ------------------------------------------------------------------
 
 export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
+  let userModels = {}
   const log = (message) => {
     try {
       client?.app?.log?.({ body: { service: "zcode-auth", level: "error", message } })
@@ -2136,6 +2190,9 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
   const oauth = (site) => ({
     type: "oauth",
     label: `ZCode: ${SITES[site].name}${site === "bigmodel" ? " (智谱)" : ""} GLM Coding Plan`,
+    labels: site === "bigmodel"
+      ? { zh: "ZCode：智谱 GLM Coding Plan 登录", "zh-TW": "ZCode：智譜 GLM Coding Plan 登入", ja: "ZCode：BigModel GLM Coding Plan にサインイン", de: "ZCode: bei BigModel GLM Coding Plan anmelden" }
+      : { zh: "ZCode：Z.ai GLM Coding Plan 登录", "zh-TW": "ZCode：Z.ai GLM Coding Plan 登入", ja: "ZCode：Z.ai GLM Coding Plan にサインイン", de: "ZCode: bei Z.ai GLM Coding Plan anmelden" },
     authorize: () => authorize(site, log),
   })
   return {
@@ -2150,6 +2207,7 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
     config: async (cfg) => {
       cfg.provider ??= {}
       const was = cfg.provider[PROVIDER] ?? {}
+      userModels = was.models ?? {}
       cfg.provider[PROVIDER] = {
         name: "ZCode",
         npm: "@ai-sdk/anthropic",
@@ -2161,43 +2219,49 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
     provider: {
       id: PROVIDER,
       // the account's plan's models, as ZCode's config lists them now
-      async models(provider, { getAuth, signal } = {}) {
+      async models(provider, { getAuth, signal, refresh = false } = {}) {
         const ctx = await runtime.capture(getAuth, { signal })
         const s = stateOf(await getAuth(), { follow: false })
-        s.jwt = (await ctx.loginMaterial({ business: "none", zcode: "optional" })).zcode
+        s.jwt = (await ctx.loginMaterial({ business: "none", zcode: ctx.state.kind === "start" ? "required" : "optional" })).zcode
         if (ctx.state.kind !== "start") s.key = (await ctx.projectToken()).token
         const { start, gift: known } = await plansOf(s, ctx)
+        let balanceKnown = true
         const gift = start ? await startPlan(s.jwt, s.device, false, ctx).catch((error) => {
           if (accountBoundaryFailure(error, ctx)) throw error
+          balanceKnown = false
           return null
         }) : known
         const base = start ? START_BASE : s.base
-        const cfg = await zcodeConfig().catch(() => null)
-        let ms = modelsOf(cfg, planID(base, s.site, ctx.state.kind))
-        // ZCode's config can't be had: its table stands in, and magpie keeps
-        // the list it was told last, as the built-in keeps the one it fetched last
-        const fell = !ms.length
-        if (fell) ms = start ? START_MODELS : CODING_MODELS
-        // a gift-only account serves what its balance names, as ZCode
-        // offers it (resolveStartPlanBalanceAvailability): the Start
-        // Plan's config models the balance lacks would only be refused
-        // (young02036). A balance naming none leaves the config's list.
-        if (start && giftNames(gift).length) ms = ms.filter((m) => giftNames(gift).some((x) => x.toLowerCase() === m.id.toLowerCase()))
+        const { cfg, failed } = await zcodeConfig(refresh).catch(() => ({ cfg: null, failed: true }))
+        const names = giftNames(gift)
+        const own = Object.keys(userModels).filter((id) => !userModels[id]?.disabled &&
+          (!start || !balanceKnown || names.some((name) => name.toLowerCase() === id.toLowerCase())))
+        const plan = planID(base, s.site, ctx.state.kind)
+        const configured = modelsOf(cfg, plan, base, start && balanceKnown ? names.map(wireModel) : undefined, own)
+        if (!configured && cfgCache?.cfg === cfg) cfgCache = null
+        const emptyStart = start && balanceKnown && !names.length
+        let ms = emptyStart ? [] : configured
+        // A successful Start balance owns membership even without config;
+        // otherwise a usable selected config owns it, including an empty set.
+        const fell = !balanceKnown || (!start && !configured)
+        if (!ms) {
+          ms = start && balanceKnown
+            ? names.map((id) => MODELS.find((m) => m.id.toLowerCase() === id.toLowerCase()) ?? { id: wireModel(id), efforts: [] })
+            : start ? START_MODELS : CODING_MODELS
+          const have = new Set(ms.map((m) => m.id.toLowerCase()))
+          ms = [...ms, ...own.filter((id) => !have.has(id.toLowerCase())).map((id) => ({ id, efforts: [] }))]
+        }
         const url = s.base + "/v1"
         const out = Object.fromEntries(ms.map((m) => [m.id, model(m, url)]))
-        const details = [...ms, ...modelsOf(cfg, planID(START_BASE, s.site)), ...modelsOf(cfg, planID(s.base, s.site)), ...MODELS]
+        const details = [...ms,
+          ...(modelsOf(cfg, planID(START_BASE, s.site), START_BASE, names.map(wireModel)) ?? []),
+          ...(modelsOf(cfg, planID(s.base, s.site), s.base) ?? []), ...MODELS]
         const about = (raw) => details.find((m) => m.id.toLowerCase() === raw.toLowerCase()) ?? { efforts: [] }
         const has = new Set(Object.keys(out).map((id) => id.toLowerCase()))
-        for (const raw of giftNames(gift)) {
-          // a gift-only account's models are its gift's, by their own
-          // names, as ZCode lists them (its Start Plan's GLM-5.3, which the
-          // plan's config leaves out): every request of it goes to the gift
-          // anyway, and the card counts them by that name too (#1261)
-          if (start && !has.has(raw.toLowerCase())) {
-            const plain = about(raw).id ?? raw
-            has.add(raw.toLowerCase())
-            out[plain] = model({ ...about(raw), id: plain }, url)
-          }
+        for (const raw of names) {
+          // Start membership is the balance, with the selected provider's
+          // enabled rules applied before adding its Trial spelling.
+          if (start && !has.has(raw.toLowerCase())) continue
           const id = giftID(raw)
           out[id] ??= model({ ...about(raw), id }, url)
           out[id].free = true
@@ -2213,11 +2277,11 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
           }
         }
         await ctx.assertCurrent()
-        // a fallback tells magpie to keep the list it was told last, which
-        // predates the gift read just made: an account whose gift lists
-        // trial entries is told this list, so ZCode's config out of reach
-        // (a remote box that can't get its CDN) never hides them
-        if (fell && !giftNames(gift).length) out[Symbol.for("magpie.fellBack")] = true
+        // Only unknown membership keeps the previous list. A failed remote
+        // read is reported separately from a valid local config or balance.
+        if (fell) out[Symbol.for("magpie.fellBack")] = true
+        if (!configured || failed)
+          out[Symbol.for("magpie.listError")] = "ZCode's provider config is unavailable"
         return out
       },
     },
@@ -2250,7 +2314,10 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
           default: true,
         },
         { key: "coding_plan_ultra", label: "ZCode ultra gateway",
-          description: "Route supported paid Messages requests through ZCode's optional ultra gateway.", default: false },
+          description: "Route supported paid Messages requests through ZCode's optional ultra gateway.",
+          labels: { zh: "ZCode 极速网关", "zh-TW": "ZCode 極速閘道", ja: "ZCode ウルトラゲートウェイ", de: "ZCode-Ultra-Gateway" },
+          descriptions: { zh: "将支持的付费 Messages 请求通过 ZCode 的可选极速网关路由。", "zh-TW": "將支援的付費 Messages 請求透過 ZCode 的選用極速閘道路由。", ja: "対応する有料 Messages リクエストを ZCode のオプションのウルトラゲートウェイ経由で送信します。", de: "Unterstützte kostenpflichtige Messages-Anfragen über ZCodes optionales Ultra-Gateway leiten." },
+          default: false },
       ],
       accountOperations: ["context", "selection.list", "selection.select", ...nativeUsageOperations, ...resetOperations, ...nativeLaneOperations],
       accountPreflight,
@@ -2319,8 +2386,7 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
               expectedScope: metadata.expectedScope, expectedGeneration: metadata.expectedGeneration })
             const auth = await getAuth()
             const s = stateOf(auth, { follow: false })
-            const zcode = (await ctx.loginMaterial({ business: "none", zcode: "optional" })).zcode
-            if (ctx.state.kind === "start" && !zcode && s.jwt && jwtExpired(s.jwt)) throw new Error(EXPIRED)
+            const zcode = (await ctx.loginMaterial({ business: "none", zcode: ctx.state.kind === "start" ? "required" : "optional" })).zcode
             s.jwt = zcode
             if (ctx.state.kind !== "legacy-key") s.key = ctx.scope
             // the account a Start Plan slot belongs to: its user id, which a
@@ -2695,38 +2761,48 @@ export async function ZCodeAuthPlugin({ client, magpie } = {}, options = {}) {
       methods: [
         oauth("zai"),
         oauth("bigmodel"),
-        { type: "oauth", label: "ZCode: Z.ai paste callback URL", authorize: async () => authorizeCallback("zai", log) },
-        { type: "oauth", label: "ZCode: BigModel paste callback URL", authorize: async () => authorizeCallback("bigmodel", log) },
+        { type: "oauth", label: "ZCode: Z.ai paste callback URL",
+          labels: { zh: "ZCode：粘贴 Z.ai 回调网址", "zh-TW": "ZCode：貼上 Z.ai 回呼網址", ja: "ZCode：Z.ai のコールバック URL を貼り付け", de: "ZCode: Z.ai-Rückruf-URL einfügen" },
+          authorize: async () => authorizeCallback("zai", log) },
+        { type: "oauth", label: "ZCode: BigModel paste callback URL",
+          labels: { zh: "ZCode：粘贴智谱回调网址", "zh-TW": "ZCode：貼上智譜回呼網址", ja: "ZCode：BigModel のコールバック URL を貼り付け", de: "ZCode: BigModel-Rückruf-URL einfügen" },
+          authorize: async () => authorizeCallback("bigmodel", log) },
         // a team's plan beside the account's own (#285): the sign-ins above
         // take the account's own plan when it has one
         {
           type: "oauth",
           label: "ZCode: a team's GLM Coding Plan",
+          labels: { zh: "ZCode：团队的 GLM Coding Plan", "zh-TW": "ZCode：團隊的 GLM Coding Plan", ja: "ZCode：チームの GLM Coding Plan", de: "ZCode: GLM Coding Plan eines Teams" },
           prompts: [
             {
               type: "select",
               key: "site",
               message: "Where is the team's plan?",
+              messages: { zh: "团队的计划在哪个网站？", "zh-TW": "團隊的方案在哪個網站？", ja: "チームのプランはどのサイトにありますか？", de: "Wo befindet sich der Plan des Teams?" },
               options: [
-                { label: "Z.ai", value: "zai", hint: "z.ai" },
-                { label: "BigModel (智谱)", value: "bigmodel", hint: "bigmodel.cn" },
+                { label: "Z.ai", value: "zai", hint: "z.ai", labels: { zh: "Z.ai", "zh-TW": "Z.ai", ja: "Z.ai", de: "Z.ai" } },
+                { label: "BigModel (智谱)", value: "bigmodel", hint: "bigmodel.cn", labels: { zh: "智谱 BigModel", "zh-TW": "智譜 BigModel", ja: "BigModel（智谱）", de: "BigModel (Zhipu)" } },
               ],
             },
           ],
           authorize: (inputs) => authorize(inputs?.site === "bigmodel" ? "bigmodel" : "zai", log, true),
         },
-        { type: "oauth", label: "ZCode app's sign-in", authorize: async () => asZCode() },
+        { type: "oauth", label: "ZCode app's sign-in",
+          labels: { zh: "ZCode 应用的登录", "zh-TW": "ZCode 應用程式的登入", ja: "ZCode アプリのサインイン", de: "Anmeldung der ZCode-App" },
+          authorize: async () => asZCode() },
         {
           type: "api",
           label: "GLM Coding Plan API key",
+          labels: { zh: "GLM Coding Plan API 密钥", "zh-TW": "GLM Coding Plan API 金鑰", ja: "GLM Coding Plan API キー", de: "GLM Coding Plan API-Schlüssel" },
           prompts: [
             {
               type: "select",
               key: "site",
               message: "Where is the key from?",
+              messages: { zh: "密钥来自哪个网站？", "zh-TW": "金鑰來自哪個網站？", ja: "キーはどのサイトのものですか？", de: "Von welcher Website stammt der Schlüssel?" },
               options: [
-                { label: "Z.ai", value: "zai", hint: "api.z.ai" },
-                { label: "BigModel (智谱)", value: "bigmodel", hint: "open.bigmodel.cn" },
+                { label: "Z.ai", value: "zai", hint: "api.z.ai", labels: { zh: "Z.ai", "zh-TW": "Z.ai", ja: "Z.ai", de: "Z.ai" } },
+                { label: "BigModel (智谱)", value: "bigmodel", hint: "open.bigmodel.cn", labels: { zh: "智谱 BigModel", "zh-TW": "智譜 BigModel", ja: "BigModel（智谱）", de: "BigModel (Zhipu)" } },
               ],
             },
           ],

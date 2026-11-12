@@ -25,6 +25,7 @@ import (
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -891,7 +892,13 @@ func pluginMCPAllowedHeader(name string) bool {
 
 // Kept as a function variable so transport tests can exercise real HTTP
 // without accessing a person's plugin accounts.
-var pluginMCPAccountOperation = plugin.AccountOperation
+var pluginMCPAccountOperation = func(ctx context.Context, id, account string, request plugin.AccountRequest) (plugin.AccountResult, error) {
+	ctx, err := provider.ViaPluginAccount(ctx, id, account)
+	if err != nil {
+		return plugin.AccountResult{}, err
+	}
+	return plugin.AccountOperation(ctx, id, account, request)
+}
 
 // netHealth puts a failed request in the page's words.
 func netHealth(ctx context.Context, err error) ServerHealth {

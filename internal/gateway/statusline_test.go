@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -123,6 +124,79 @@ func TestStatuslineEndpoint(t *testing.T) {
 	// a key held to a budget is told none of the accounts
 	if c, b := do("POST", StatuslinePath, host, secrets[2], claudeCode); c != http.StatusForbidden || strings.Contains(b, "alpha 5h") {
 		t.Errorf("POST with a held key: %d %q", c, b)
+	}
+}
+
+func TestSharedStatuslineShowsPartialAndStaleProvenance(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	past, old := now.Add(-time.Hour), now.Add(-4*time.Hour)
+	qs := []provider.Quota{
+		{Provider: "zcode", Kind: "subscription", Error: "paid failed", Partial: true,
+			Windows: []provider.QuotaSpan{{Name: "Start", Used: 40}}},
+		{Provider: "office/claude", Kind: "subscription", AsOf: &old, ReadDeferred: true,
+			Windows: []provider.QuotaSpan{{Name: "5 hours", Used: 82, ResetsAt: &past}}},
+	}
+	text := provider.StatuslineText("", qs, nil, now)
+	for _, want := range []string{"partial", "paid failed", "Start 40%", "as of", "not refreshed", "5h 82%"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "5h 0%") {
+		t.Fatalf("stale passed reset became a fresh zero: %s", text)
+	}
+	if selected := provider.StatuslineText("", qs, []string{"zcode"}, now); strings.Contains(selected, "office/claude") || !strings.Contains(selected, "paid failed") {
+		t.Fatalf("selected status line: %s", selected)
+	}
+	remaining := 16.0
+	onlyMCP := provider.StatuslineText("", []provider.Quota{{Provider: "zcode", Kind: "subscription", Partial: true, Error: "paid failed",
+		Observations: []provider.UsageObservation{{Kind: "server-mcp", Name: "Server MCP", Remaining: &remaining}}}}, nil, now)
+	if !strings.Contains(onlyMCP, "paid failed") || !strings.Contains(onlyMCP, "Server MCP 16 left") || strings.Contains(onlyMCP, "0%") {
+		t.Fatalf("observation-only statusline: %s", onlyMCP)
+	}
+}
+
+func TestStatuslineEndpointRendersRemotePartialAndStale(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "")
+	now := time.Now()
+	old, passed := now.Add(-4*time.Hour), now.Add(-time.Hour)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != provider.RemoteCardsPath {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []provider.SubscriptionQuota{
+			{Provider: "zcode", Name: "ZCode", User: "alice", AccountIdentity: "scope", Error: "paid failed", Partial: true,
+				Windows: []provider.QuotaWindow{{Name: "Start", Used: 40}}},
+			{Provider: "claude", Name: "Claude", User: "bob", AsOf: &old, ReadDeferred: true,
+				Windows: []provider.QuotaWindow{{Name: "5 hours", Used: 82, ResetsAt: &passed}}},
+		}})
+	}))
+	t.Cleanup(remote.Close)
+	if err := provider.Save(provider.Provider{ID: "office", Name: "Office", Preset: provider.RemoteMagpiePreset,
+		Key: "fixture-gateway-key", Chat: remote.URL}); err != nil {
+		t.Fatal(err)
+	}
+	provider.ForgetRemoteCardsForTest()
+	t.Cleanup(provider.ForgetRemoteCardsForTest)
+	provider.RemoteCards(context.Background())
+	h := lanGuard(New().Handler())
+	r := httptest.NewRequest("GET", StatuslinePath, nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	line := w.Body.String()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, line)
+	}
+	for _, word := range []string{"partial", "paid failed", "Start 40%", "as of", "not refreshed", "5h 82%"} {
+		if !strings.Contains(line, word) {
+			t.Errorf("missing %q: %s", word, line)
+		}
+	}
+	if strings.Contains(line, "5h 0%") {
+		t.Fatalf("stale passed reset became a fresh zero: %s", line)
 	}
 }
 

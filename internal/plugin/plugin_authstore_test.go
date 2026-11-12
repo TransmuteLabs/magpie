@@ -96,6 +96,60 @@ func TestStopLetsARenewalEnd(t *testing.T) {
 	}
 }
 
+// A caller giving up does not cancel a vendor-completed rotating refresh,
+// even when the host is not being stopped.
+func TestCancelledCallerKeepsCompletedRenewal(t *testing.T) {
+	sandbox(t)
+	t.Setenv("FAKE_BASE", "http://127.0.0.1:1/v1")
+	logf := filepath.Join(t.TempDir(), "renewals")
+	t.Setenv("RENEW_LOG", logf)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("testdata/renew/index.js")
+	if _, err := Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	key, err := Import(ctx, "renewco", map[string]any{
+		"type": "oauth", "refresh": "r-slow", "access": "old",
+		"expires": time.Now().Add(time.Minute).UnixMilli(), "accountId": "slow@renew",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	callCtx, giveUp := context.WithCancel(ctx)
+	called := make(chan error, 1)
+	go func() {
+		called <- Call(callCtx, "load", map[string]any{"provider": "renewco", "account": key}, nil)
+	}()
+	for {
+		if b, _ := os.ReadFile(logf); strings.Contains(string(b), "r-slow") {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the renewal never started")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	giveUp()
+	select {
+	case <-called:
+	case <-ctx.Done():
+		t.Fatal("the cancelled caller did not return")
+	}
+	for {
+		if a := authFile(t)[key]; a["refresh"] == "r-slow+" && a["access"] == "a-1" {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("the completed renewal was not saved after cancellation")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !Running() {
+		t.Fatal("the caller's cancellation stopped the host")
+	}
+}
+
 // A host with no renewal under way stops as fast as before.
 func TestStopWithoutRenewalIsQuick(t *testing.T) {
 	sandbox(t)
@@ -173,7 +227,7 @@ func TestTwoHostsKeepEachOthersSignIns(t *testing.T) {
 	if len(lost) > 0 {
 		t.Fatalf("%d of %d sign-ins lost: %v", len(lost), 2*n, lost)
 	}
-	if _, err := os.Stat(AuthPath() + ".lock"); !os.IsNotExist(err) {
-		t.Fatalf("the lock is left behind: %v", err)
+	if _, err := os.Stat(AuthPath() + ".flock"); err != nil {
+		t.Fatalf("the persistent lock file is missing: %v", err)
 	}
 }

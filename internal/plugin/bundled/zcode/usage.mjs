@@ -165,7 +165,10 @@ function windowSpan(unit, number) {
 }
 function windowName(span) {
   if (!span) return "Credits"
-  if (span < 86400) return `${Math.trunc(span / 3600)} hours`
+  if (span % 3600 !== 0 || span < 86400 || span % 86400 !== 0) {
+    const minutes = span % 3600 !== 0, count = span / (minutes ? 60 : 3600)
+    return `${count} ${minutes ? "minute" : "hour"}${count === 1 ? "" : "s"}`
+  }
   if (span === 7 * 86400) return "Weekly"
   if (span >= 28 * 86400) return "Monthly"
   return `${Math.trunc(span / 86400)} days`
@@ -453,6 +456,13 @@ export async function readNativeUsage(ctx) {
   if (ctx.signal?.aborted) throw usageError("cancelled")
   requireCompleteLegacyScope(ctx)
   const startOnly = ctx.state.kind === "start"
+  if (startOnly) {
+    try { await ctx.loginMaterial({ business: "none", zcode: "required" }) }
+    catch (error) {
+      if (error?.signIn === "expired") return { signIn: "expired", error: error.message, observations: [] }
+      throw error
+    }
+  }
   let project = null
   const optional = (run) => within(ctx, 2000, run).catch(() => null)
   const primary = startOnly ? Promise.resolve(null) : within(ctx, 15_000, (signal, remaining) => {
@@ -474,7 +484,10 @@ export async function readNativeUsage(ctx) {
     if (!start.plan) return { signIn: "kept", error: "No active Start Plan", observations }
     return { signIn: "kept", plan: start.plan, ...(start.until ? { until: start.until, renew: "off" } : {}), windows: [...startWindows(start, true), ...pendingWindows(start)], observations }
   }
-  const paid = quota?.error ? { error: "Coding Plan quota unavailable", windows: [] } : quota
+  const expiredSignIn = quota?.error?.signIn === "expired"
+  const paid = quota?.error ? { error: expiredSignIn
+    ? quota.error.publicMessage ?? "ZCode's Z.ai sign-in requires re-login; sign in to ZCode again"
+    : "Coding Plan quota unavailable", windows: [] } : quota
   if (legacyResets) paid.resets = legacyResets
   if (entitlement?.kind === "available") {
     const name = text(entitlement.subscription.productName)
@@ -490,7 +503,8 @@ export async function readNativeUsage(ctx) {
     paid.windows.push(...windows)
   }
   if (start?.pending.length) paid.windows.push(...pendingWindows(start))
-  return { signIn: "kept", ...paid, observations }
+  if (paid.error && (paid.windows.length || observations.length)) paid.partial = true
+  return { signIn: expiredSignIn ? "expired" : "kept", ...paid, observations }
 }
 
 // Projection keeps optional fields absent instead of turning them into zeroes.

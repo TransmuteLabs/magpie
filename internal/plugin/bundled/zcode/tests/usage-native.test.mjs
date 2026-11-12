@@ -125,6 +125,21 @@ test("ordinary quota windows never claim native lane aliases or gift trials", as
   for (const alias of aliases) expect(startWindow.models.map((model) => model.toLowerCase())).not.toContain(alias)
 })
 
+test("recognized minute windows retain their exact names and spans", async () => {
+  route = (call, res) => call.url.pathname.endsWith("/quota/limit")
+    ? send(res, ok({ limits: [1, 15, 60, 90, 1470, 1500].map((number) => ({ type: "TOKENS_LIMIT", unit: 1, number, percentage: 25 })) }))
+    : send(res, {}, 404)
+  const card = await readNativeUsage(await context())
+  expect(card.windows.map(({ name, span, used }) => ({ name, span, used }))).toEqual([
+    { name: "1 minute", span: 60, used: 25 },
+    { name: "15 minutes", span: 900, used: 25 },
+    { name: "1 hour", span: 3600, used: 25 },
+    { name: "90 minutes", span: 5400, used: 25 },
+    { name: "1470 minutes", span: 88200, used: 25 },
+    { name: "25 hours", span: 90000, used: 25 },
+  ])
+})
+
 test("Date and model helpers retain source precedence and identity", () => {
   expect(startBucketModels({ capabilities: [" MoDeL:glm-5.3-flash ", "MODEL:GLM-5.3-FLASH", "tool:web"], show_name: "Other" })).toEqual(["GLM-5.3-Flash"])
   expect(startBucketModels({ capabilities: ["tool:web"], show_name: "GLM-5.3" })).toEqual(["GLM-5.3"])
@@ -165,6 +180,7 @@ test("optional stalled response bodies cannot erase completed quota", async () =
   const start = Date.now()
   const card = await readNativeUsage(ctx)
   expect(card.error).toBeUndefined()
+  expect(card.partial).toBeUndefined()
   expect(card.windows).toHaveLength(1)
   expect(card.windows[0]).toMatchObject({ name: "Weekly", used: 27, span: 7 * 86400 })
   expect(card.observations).toEqual([])
@@ -177,7 +193,61 @@ test("a failed quota envelope is not mistaken for a zero-percent allowance", asy
     : send(res, {}, 404)
   const card = await readNativeUsage(await context())
   expect(card.error).toBeDefined()
+  expect(card.signIn).toBe("kept")
   expect(card.windows).toEqual([])
+  expect(card.partial).toBeUndefined()
+})
+
+test("paid failure retains only fresh Start and MCP observations as partial", async () => {
+  const now = Math.floor(Date.now() / 1000)
+  let start = true, mcp = true, paid = false
+  route = (call, res) => {
+    if (call.url.pathname.endsWith("/quota/limit")) return paid
+      ? send(res, ok({ limits: [{ type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 27 }] }))
+      : send(res, { code: 500 }, 503)
+    if (start && call.url.pathname.endsWith("/billing/balance")) return send(res, ok({
+      server_time: now, plans: [{ plan_id: "start", user_plan_id: "u", name: "Start", status: "active", ends_at: now + 3600 }],
+      balances: [{ plan_id: "start", user_plan_id: "u", show_name: "GLM-5.3", capabilities: ["model:GLM-5.3"], total_units: 100, remaining_units: 60 }],
+    }))
+    if (mcp && call.url.pathname === "/api/v1/mcp/usage") return send(res, ok({
+      server_time: now, total_usage: { used: 4, limit: 20, remaining: 16 },
+    }))
+    return send(res, {}, 404)
+  }
+  let card = await readNativeUsage(await context())
+  expect(card).toMatchObject({ error: "Coding Plan quota unavailable", partial: true, signIn: "kept" })
+  expect(card.windows.some((w) => w.models?.includes("GLM-5.3-Trial") && w.used === 40)).toBe(true)
+  expect(card.observations.map((o) => o.kind)).toEqual(["start-balance", "server-mcp"])
+  start = false
+  card = await readNativeUsage(await context())
+  expect(card).toMatchObject({ error: "Coding Plan quota unavailable", partial: true, windows: [],
+    observations: [{ kind: "server-mcp", used: 4, limit: 20, remaining: 16 }] })
+  mcp = false
+  card = await readNativeUsage(await context())
+  expect(card.error).toBeDefined()
+  expect(card.partial).toBeUndefined()
+  expect(card.windows).toEqual([])
+  paid = true
+  card = await readNativeUsage(await context())
+  expect(card.error).toBeUndefined()
+  expect(card.partial).toBeUndefined()
+  expect(card.windows[0].used).toBe(27)
+
+  mcp = true
+  const expired = await context()
+  expired.projectToken = async () => { throw Object.assign(new Error("sign in again"), { signIn: "expired", publicMessage: "sign in again" }) }
+  card = await readNativeUsage(expired)
+  expect(card).toMatchObject({ signIn: "expired", error: "sign in again", partial: true, windows: [],
+    observations: [{ kind: "server-mcp", remaining: 16 }] })
+})
+
+test("an expired mandatory Z.ai bootstrap is reported as a relogin by usage", async () => {
+  const expired = `e30.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 60 })).toString("base64url")}.sig`
+  const card = await readNativeUsage(await context("individual", "zai", { business: "", oauthToken: expired, jwt: "" }))
+  expect(card.signIn).toBe("expired")
+  expect(card.error).toContain("sign in")
+  expect(card.windows).toEqual([])
+  expect(calls.some((call) => call.url.pathname === "/api/auth/z/login" || call.url.pathname.endsWith("/access_tokens"))).toBe(false)
 })
 
 test("Team entitlement remains visible if project-token resolution fails", async () => {
@@ -201,6 +271,18 @@ test("missing ZCode JWT cannot disable project-token quota or dispatch reset", a
   await expect(resetOperation(ctx, "reset.status")).rejects.toMatchObject({ kind: "unavailable", dispatched: false })
   expect((await readNativeUsage(ctx)).windows[0]).toMatchObject({ name: "Weekly", span: 604800, used: 16 })
   expect(calls.some((call) => call.url.pathname.includes("/reset/"))).toBe(false)
+})
+
+test("expired optional ZCode JWT does not expire an otherwise valid paid quota", async () => {
+  route = (call, res) => call.url.pathname.endsWith("/quota/limit")
+    ? send(res, ok({ limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 7, percentage: 16 }] }))
+    : send(res, {}, 404)
+  const expired = `e30.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 60 })).toString("base64url")}.sig`
+  const card = await readNativeUsage(await context("individual", "zai", { jwt: expired }))
+  expect(card.signIn).toBe("kept")
+  expect(card.error).toBeUndefined()
+  expect(card.windows[0]).toMatchObject({ name: "Weekly", span: 604800, used: 16 })
+  expect(calls.some((call) => call.url.pathname.endsWith("/billing/balance"))).toBe(false)
 })
 
 test("legacy API key quota keeps its separately identified read-only reset list", async () => {

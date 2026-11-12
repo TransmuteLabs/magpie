@@ -28,6 +28,26 @@ community publication or Plugins-page installation. An empty-profile
 listing does not start or download Bun; actual ZCode operations activate
 the embedded runtime lazily. Bun remains the internal execution engine.
 
+The TUI add picker uses `PassiveProviders`, not `Cached` (which may schedule
+a refresh), and delegates sign-in to the existing `accounts add` command.
+Its model-refresh action uses the same provider-owned refetch as GUI and
+CLI. An explicit selected-provider/account attempt retains its raw failure
+before last-good catalog projection, so a kept list is not announced as a
+new successful fetch. Authoritative empty membership remains distinct from
+an unavailable list.
+
+`magpie plugin options zcode` and `magpie plugin options builtin:zcode`
+reach the declared intrinsic switches through `settings.PluginOptions`,
+without an installed middleware entry. Unknown or nonboolean input is
+rejected before any switch is written; `off` removes overrides. Passive
+and active first-party methods, prompts and switch descriptions use the
+same five GUI language conventions.
+
+For the complete integration checklist, see
+[Adding a Core-owned provider](builtin-provider-development.md); for the
+source comparison and exercised boundaries, see the
+[ZCode parity inventory](zcode-provider-parity.md).
+
 [`zcode_adopt.go`](../../internal/provider/zcode_adopt.go) preserves existing
 credentials, account settings and protocol options while adopting the old
 built-in/plugin slots. The former mover and its update/hand-over path no
@@ -37,7 +57,7 @@ operations, MCP authentication, loaders or fetches. Other providers and
 capabilities of those plugins stay available. Generic plugin removal or
 update cannot remove the intrinsic provider or its adopted accounts.
 
-The bundle contains root runtime modules, manifest, README and licence and
+The bundle contains root runtime modules, manifest, and licence and
 notice files, not the source tests. Each binary extracts an immutable
 content-addressed generation under its plugin directory, publishing complete
 flushed files by rename. Simultaneous processes can share an identical

@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/testenv"
@@ -127,6 +130,102 @@ func wantFlash(t *testing.T, m model, ok bool, has string) {
 	t.Helper()
 	if m.flashOK != ok || !strings.Contains(m.flash, has) {
 		t.Fatalf("flash %q (ok %v), want %q (ok %v)", m.flash, m.flashOK, has, ok)
+	}
+}
+
+// Inspect the actual Bubble Tea ExecProcess request without running the CLI.
+func wantAccountAdd(t *testing.T, cmd tea.Cmd, id string) {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("no sign-in command")
+	}
+	msg := reflect.ValueOf(cmd())
+	if msg.Type().String() != "tea.execMsg" {
+		t.Fatalf("sign-in returned %T, not an ExecProcess request", msg.Interface())
+	}
+	args := msg.FieldByName("cmd").Elem().Elem().FieldByName("Cmd").Elem().FieldByName("Args")
+	var got []string
+	for i := 0; i < args.Len(); i++ {
+		got = append(got, args.Index(i).String())
+	}
+	if len(got) != 4 || !slices.Equal(got[1:], []string{"accounts", "add", id}) {
+		t.Fatalf("sign-in command arguments = %v", got)
+	}
+}
+
+func TestProviderPickerPassivePluginDiscoveryAndSignIn(t *testing.T) {
+	h := home(t)
+	marker := filepath.Join(h, "host-started")
+	bun := filepath.Join(h, "bun-sentinel")
+	write(t, bun, "#!/bin/sh\nprintf started > '"+marker+"'\nexit 1\n")
+	if err := os.Chmod(bun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MAGPIE_BUN", bun)
+	plugin.Settle()
+	t.Cleanup(plugin.Settle)
+	m := model{}
+	m.openPresets()
+	count := func(id string) int {
+		n := 0
+		for _, item := range m.pk.items {
+			if item.Value == id {
+				n++
+			}
+		}
+		return n
+	}
+	if count("zcode") != 1 {
+		t.Fatalf("clean profile picker did not offer intrinsic ZCode once: %+v", m.pk.items)
+	}
+	wantAccountAdd(t, m.pk.onPick("zcode"), "zcode")
+	write(t, filepath.Join(h, ".config", "magpie", "plugins.json"), `{"plugins":[{"spec":"opencode-uncached-auth"}]}`)
+	plugin.UseCached(nil)
+	m.openPresets()
+	if count("zcode") != 1 {
+		t.Fatal("an installed uncached plugin hid or duplicated ZCode")
+	}
+	time.Sleep(100 * time.Millisecond) // a mistakenly scheduled background host would start the sentinel
+	if plugin.Running() {
+		t.Fatal("opening the picker started the host")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("opening the picker started the Bun sentinel: %v", err)
+	}
+
+	spec := "opencode-uncached-auth"
+	write(t, filepath.Join(h, ".config", "magpie", "plugin-auth.json"), `{"fakeco":{"type":"api","key":"fixture"}}`)
+	plugin.UseCached([]plugin.Provider{{ID: "fakeco", Spec: spec, Name: "FakeCo", Methods: []plugin.Method{{Type: "api", Label: "API key"}},
+		Models: []plugin.Model{{ID: "fake-1"}}}})
+	m.provs = provider.All()
+	i := slices.IndexFunc(m.provs, func(p provider.Provider) bool { return p.ID == "fakeco" && p.IsPlugin() })
+	if i < 0 {
+		t.Fatalf("signed-in plugin row missing: %+v", m.provs)
+	}
+	m.prow = i
+	m.openPresets()
+	if count("fakeco") != 1 {
+		t.Fatal("held and passive plugin entries were not deduplicated")
+	}
+	wantAccountAdd(t, m.pk.onPick("fakeco"), "fakeco")
+	_, cmd := m.updateProviders(keyMsg("e"))
+	wantAccountAdd(t, cmd, "fakeco")
+
+	// An unreadable passive snapshot must not fall back to active discovery;
+	// an already held row remains usable.
+	write(t, filepath.Join(h, ".config", "magpie", "plugins.json"), `{broken`)
+	plugin.UseCached(nil)
+	m.openPresets()
+	if count("fakeco") != 1 {
+		t.Fatal("unknown passive metadata hid the existing plugin row")
+	}
+	wantAccountAdd(t, m.pk.onPick("fakeco"), "fakeco")
+	time.Sleep(100 * time.Millisecond)
+	if plugin.Running() {
+		t.Fatal("unknown passive metadata started the host")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("unknown passive metadata started the Bun sentinel: %v", err)
 	}
 }
 

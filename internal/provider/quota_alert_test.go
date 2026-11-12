@@ -88,6 +88,52 @@ func TestDueAlertsStaleReadingKeepsMarks(t *testing.T) {
 	}
 }
 
+func TestPartialAlertsPreserveOldMissingMarksAndOnlyObserveFreshWindows(t *testing.T) {
+	now := time.Now()
+	soon := now.Add(time.Hour)
+	old := alertMark{At: now.Add(-alertKeep - time.Hour)}
+	q := SubscriptionQuota{Provider: "zcode", User: "alice", Error: "paid failed", Partial: true,
+		Windows: []QuotaWindow{{Name: "Start", Used: 90, Span: 7 * 24 * time.Hour, ResetsAt: &soon}},
+		Balance: "$1", Resets: &ResetCredits{Count: 1, Until: &soon}}
+	prefix := alertPrefix(q)
+	marks := map[string]alertMark{
+		prefix + "w|Paid|": old, prefix + "b": old, prefix + "c": old, prefix + "r|Paid|": old,
+	}
+	got := dueAlerts([]SubscriptionQuota{q}, marks, 80, 5, now)
+	if len(got) != 1 || got[0].Window != "Start" || marks[prefix+"w|Paid|"] != old || marks[prefix+"b"] != old ||
+		marks[prefix+"c"] != old || marks[prefix+"r|Paid|"] != old {
+		t.Fatalf("partial alerts or missing marks: %+v %+v", got, marks)
+	}
+	q.Windows[0].Used = 40
+	dueAlerts([]SubscriptionQuota{q}, marks, 80, 5, now)
+	if _, ok := marks[prefix+"w|Start|"]; ok {
+		t.Fatal("observed window below threshold did not clear")
+	}
+	reminders := dueReminders([]SubscriptionQuota{q}, marks, 2*time.Hour, now)
+	if len(reminders) != 1 || reminders[0].Window != "Start" || reminders[0].Kind != "renews" {
+		t.Fatalf("fresh window or absent reset reminder: %+v", reminders)
+	}
+	for _, variant := range []string{"as-of", "deferred", "unverified"} {
+		bad := q
+		bad.Windows[0].Used = 95
+		switch variant {
+		case "as-of":
+			bad.AsOf = &now
+		case "deferred":
+			bad.ReadDeferred = true
+		case "unverified":
+			bad.accountUnverified = true
+		}
+		before := len(marks)
+		if got := dueAlerts([]SubscriptionQuota{bad}, marks, 80, 5, now); len(got) != 0 || len(marks) != before {
+			t.Fatalf("%s partial alerted or cleared: %+v %+v", variant, got, marks)
+		}
+		if got := dueReminders([]SubscriptionQuota{bad}, marks, 2*time.Hour, now); len(got) != 0 {
+			t.Fatalf("%s partial reminded: %+v", variant, got)
+		}
+	}
+}
+
 func TestDueAlertsBalance(t *testing.T) {
 	now := time.Now()
 	q := func(b string) []SubscriptionQuota {

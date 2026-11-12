@@ -42,7 +42,7 @@ function windowCell(w, long) {
 }
 
 function quotaTable(subs) {
-  const rows = subs.map((sub, order) => ({ sub, order, ws: sub.error ? [] : familyWindows(sub.windows) || [] }));
+  const rows = subs.map((sub, order) => ({ sub, order, ws: sub.error && !sub.partial ? [] : familyWindows(sub.windows || []) || [] }));
   // the windows most rows have, by their span
   const count = new Map();
   for (const r of rows) for (const w of new Set(r.ws.filter((x) => !x.members).map((x) => x.name))) count.set(w, (count.get(w) || 0) + 1);
@@ -104,9 +104,17 @@ function quotaTable(subs) {
     const name = el("div", "subscription-account");
     name.append(...quotaWho(sub));
     a.append(name);
+    if (sub.error && sub.partial) {
+      const warning = el("div", "qt-msg", quotaError(sub.error, sub));
+      warning.title = sub.error;
+      a.append(warning);
+      for (const observation of sub.observations || []) a.append(zcodeControl(sub, "observation", observation));
+      const when = readWhen(sub);
+      if (when) a.append(when);
+    }
     tr.append(s, a);
     const cols = names.length + (more ? 1 : 0);
-    if (sub.error) {
+    if (sub.error && !sub.partial) {
       const e = el("td", "qt-msg", quotaError(sub.error, sub));
       e.colSpan = cols;
       e.title = sub.error;

@@ -19,7 +19,7 @@ func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.Q
 			continue
 		}
 		for _, h := range hist {
-			if h.Provider != q.Provider || !strings.EqualFold(h.User, q.User) {
+			if !sameHistoryAccount(q, h) {
 				continue
 			}
 			for _, w := range q.Windows {
@@ -45,7 +45,7 @@ func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.Q
 					w.Span = last.ResetsAt.Sub(*last.Start)
 					// Balance stays: a card that tells one is never reckoned,
 					// now or for a past cycle.
-					snapshots = append(snapshots, provider.SubscriptionQuota{Provider: q.Provider, User: q.User, Balance: q.Balance, ReadAt: &last.At, Windows: []provider.QuotaWindow{w}})
+					snapshots = append(snapshots, provider.SubscriptionQuota{Provider: q.Provider, User: q.User, AccountIdentity: q.AccountIdentity, AccountGeneration: q.AccountGeneration, Balance: q.Balance, ReadAt: &last.At, Windows: []provider.QuotaWindow{w}})
 				}
 			}
 		}
@@ -58,7 +58,7 @@ func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.Q
 	// No later reading or call can change what this historical range held.
 	past := make([]provider.QuotaHistory, 0, len(hist))
 	for _, h := range hist {
-		a := provider.QuotaHistory{Provider: h.Provider, User: h.User}
+		a := provider.QuotaHistory{Provider: h.Provider, User: h.User, AccountIdentity: h.AccountIdentity}
 		for _, l := range h.Lines {
 			line := provider.QuotaLine{Name: l.Name}
 			for _, p := range l.Points {
@@ -95,7 +95,7 @@ func withRecordedWindowStarts(cards []provider.SubscriptionQuota, hist []provide
 				continue
 			}
 			for _, h := range hist {
-				if h.Provider != q.Provider || !strings.EqualFold(h.User, q.User) {
+				if !sameHistoryAccount(q, h) {
 					continue
 				}
 				for _, l := range h.Lines {
@@ -140,6 +140,23 @@ func withRecordedWindowStarts(cards []provider.SubscriptionQuota, hist []provide
 		}
 	}
 	return out
+}
+
+func sameHistoryAccount(q provider.SubscriptionQuota, h provider.QuotaHistory) bool {
+	if h.Provider != q.Provider {
+		return false
+	}
+	if q.AccountIdentity != "" || h.AccountIdentity != "" {
+		return q.AccountIdentity != "" && q.AccountIdentity == h.AccountIdentity
+	}
+	return strings.EqualFold(h.User, q.User)
+}
+
+func historyAccountKey(providerID, user, identity string) string {
+	if identity != "" {
+		return providerID + "\x00@" + identity
+	}
+	return providerID + "\x00" + strings.ToLower(user)
 }
 
 // withSpansOf is out with each window's Span as it was in qs: a later

@@ -3,6 +3,8 @@
 import { createHash, randomUUID } from "node:crypto"
 import { ProjectTokenClient, ProjectTokenError, ZaiBusinessTokenCache, ZCODE_VERSION } from "./project-token.mjs"
 
+export const START_EXPIRED = "ZCode's sign-in has expired; sign in to ZCode again (or add the account again in magpie)"
+
 const hash = (value) => createHash("sha256").update(value).digest("hex")
 const text = (value) => typeof value === "string" ? value.trim() : ""
 const rawToken = (value) => text(value).replace(/^Bearer\s+/i, "")
@@ -25,15 +27,34 @@ function unavailable(code, kind = "unavailable") {
   return error
 }
 
-function expired(token, now = Date.now()) {
+function jwtDeadline(token) {
   const parts = token.split(".")
-  if (parts.length !== 3) return false
+  if (parts.length !== 3) return undefined
   try {
-    const exp = Number(JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")).exp)
-    return Number.isFinite(exp) && exp > 0 && exp * 1000 <= now + 30_000
+    const raw = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")).exp
+    const exp = typeof raw === "number" || typeof raw === "string" && raw.trim() ? Number(raw) : NaN
+    const deadline = exp * 1000
+    return Number.isFinite(deadline) ? deadline : undefined
   } catch {
-    return false
+    return undefined
   }
+}
+
+function expired(token, now = Date.now(), skew = 30_000) {
+  const deadline = jwtDeadline(token)
+  return deadline !== undefined && deadline <= now + skew
+}
+
+function businessRelogin(state) {
+  const message = state === "rejected" ? "ZCode's Z.ai business sign-in was rejected; sign in to ZCode again" :
+    state === "missing" ? "ZCode's Z.ai business sign-in is unavailable; sign in to ZCode again" :
+      "ZCode's Z.ai sign-in has expired; sign in to ZCode again"
+  const error = unavailable(`account_business_relogin_required: ${message}`)
+  error.signIn = "expired"
+  error.noModels = true
+  error.credentialState = state
+  error.publicMessage = message
+  return error
 }
 
 function origin(value) {
@@ -110,6 +131,7 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
         const current = stateFor(before)
         if (accountScope(current) !== scope) throw unavailable("account_scope_changed")
         const nextState = change(current)
+        if (nextState === null) { saved = current; return false }
         const next = { ...before, accountScope: scope,
           accountEpoch: newSession ? randomUUID() : oldEpoch || randomUUID(),
           ...(before.type === "oauth" ? { refresh: JSON.stringify(nextState) } : {}) }
@@ -119,7 +141,7 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
           if (!fresh || fresh.accountEpoch !== next.accountEpoch || fresh.accountScope !== scope) throw unavailable("account_scope_changed")
           auth = fresh
           saved = stateFor(fresh)
-          return
+          return true
         }
         if (!result?.data?.conflict) throw unavailable("account_persistence_unavailable")
         const fresh = await getAuth()
@@ -127,9 +149,10 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
             JSON.stringify(stateFor(fresh)) === JSON.stringify(current)) {
           auth = fresh
           saved = stateFor(fresh)
-          return
+          return true
         }
-        if (!fresh || text(fresh.accountEpoch) !== oldEpoch || accountScope(stateFor(fresh)) !== scope) throw unavailable("account_scope_changed")
+        if (!fresh || text(fresh.accountEpoch) !== oldEpoch) throw unavailable("account_generation_changed")
+        if (accountScope(stateFor(fresh)) !== scope) throw unavailable("account_scope_changed")
         auth = fresh
       }
     }
@@ -146,7 +169,35 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
          (text(followed.zcodeUserId) && text(followed.zcodeUserId) !== text(saved.zcodeUserId)) ||
          text(followed.refreshToken) !== text(saved.refreshToken) ||
          text(followed.key) !== text(saved.key))) {
-      await writeDerived(() => ({ ...saved, ...followed, loc: followed.loc }), { newSession: true })
+      const roleOnly = saved.site === "zai" && !rawToken(saved.business || saved.token) &&
+        !!rawToken(saved.oauthToken) && rawToken(saved.oauthToken) === rawToken(followed.business) &&
+        !rawToken(followed.oauthToken) && rawToken(saved.jwt) === rawToken(followed.jwt) &&
+        text(saved.loginGeneration) === text(followed.loginGeneration) &&
+        text(saved.accountIdentity) === text(followed.accountIdentity) &&
+        text(saved.zcodeUserId) === text(followed.zcodeUserId) &&
+        text(saved.refreshToken) === text(followed.refreshToken) && text(saved.key) === text(followed.key)
+      const sameAppSession = saved.site === "zai" && !!rawToken(saved.jwt) &&
+        rawToken(saved.jwt) === rawToken(followed.jwt) &&
+        text(saved.accountIdentity || saved.uid) === text(followed.accountIdentity || followed.uid) &&
+        (!text(saved.zcodeUserId) || text(saved.zcodeUserId) === text(followed.zcodeUserId)) &&
+        text(saved.key) === text(followed.key)
+      const observed = saved
+      const written = await writeDerived((current) => {
+        if (rawToken(current.business || current.token) !== rawToken(observed.business || observed.token) ||
+            rawToken(current.oauthToken) !== rawToken(observed.oauthToken) ||
+            rawToken(current.jwt) !== rawToken(observed.jwt) ||
+            text(current.loginGeneration) !== text(observed.loginGeneration) ||
+            text(current.accountIdentity) !== text(observed.accountIdentity) ||
+            text(current.zcodeUserId) !== text(observed.zcodeUserId) ||
+            text(current.refreshToken) !== text(observed.refreshToken) ||
+            text(current.key) !== text(observed.key) ||
+            text(current.businessGeneration) !== text(observed.businessGeneration) ||
+            current.businessExpiresAt !== observed.businessExpiresAt ||
+            text(current.businessRejectedFingerprint) !== text(observed.businessRejectedFingerprint) ||
+            text(current.businessRejectedGeneration) !== text(observed.businessRejectedGeneration)) return null
+        return { ...current, ...followed, loc: followed.loc }
+      }, { newSession: !roleOnly && !sameAppSession })
+      if (!written) throw unavailable("account_generation_changed")
     }
     const generation = text(auth.accountEpoch)
     if (expectedScope && expectedScope !== scope) throw unavailable("account_scope_changed")
@@ -226,9 +277,30 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
     async function resolveBusiness(operationSignal) {
       await assertCurrent()
       const oauth = rawToken(saved.oauthToken)
-      if (state.site !== "zai" || !oauth) return { token: rawToken(saved.business || saved.token) }
-      return owner.business.resolve(oauth, async () => {
+      const token = rawToken(saved.business || saved.token)
+      if (state.site !== "zai") return { token }
+      const recorded = typeof saved.businessExpiresAt === "number" && Number.isFinite(saved.businessExpiresAt) && saved.businessExpiresAt > 0
+        ? saved.businessExpiresAt : undefined
+      const deadlines = [recorded, jwtDeadline(token)].filter((value) => value !== undefined)
+      const expiresAt = deadlines.length ? Math.min(...deadlines) : undefined
+      const generation = text(saved.businessGeneration)
+      const rejected = token && (text(saved.businessRejectedFingerprint) === hash(token) &&
+        text(saved.businessRejectedGeneration) === generation || owner.business.wasRejected({ token, generation }))
+      if (rejected) owner.business.invalidate({ token, generation })
+      const previous = { token, generation, marker: text(saved.businessRejectedFingerprint),
+        markerGeneration: text(saved.businessRejectedGeneration) }
+      const usable = token && !rejected && (expiresAt === undefined || now() < expiresAt) ? { token, generation, expiresAt } : null
+      const bootstrapUsable = oauth && !expired(oauth, now(), 0)
+      if (!bootstrapUsable) {
+        // An opaque saved credential can be tried as primary material, but
+        // its unknown expiry is never promoted to a valid refresh fallback.
+        if (usable) return usable
+        throw businessRelogin(oauth ? "expired" : "missing")
+      }
+      if (usable) owner.business.seed(oauth, usable)
+      const value = await owner.business.resolve(oauth, async () => {
         await verifyCurrent()
+        if (expired(oauth, now(), 0)) throw businessRelogin("expired")
         const timeout = AbortSignal.timeout(15_000)
         try {
           const res = await untilAbort(fetch(`${state.origins.business}/api/auth/z/login`, {
@@ -238,16 +310,44 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
           await verifyCurrent()
           if (!res.ok) {
             await res.body?.cancel().catch(() => {})
-            throw new ProjectTokenError("project_token_login_failed", { transient: res.status === 429 || res.status >= 500 && res.status < 600 })
+            throw new ProjectTokenError("project_token_login_failed", { status: res.status, transient: res.status === 429 || res.status >= 500 && res.status < 600 })
           }
           const raw = await untilAbort(res.json(), timeout)
           await verifyCurrent()
           return raw
         } catch (error) {
-          if (error instanceof ProjectTokenError || error?.kind === "account_generation_changed" || error?.kind === "account_scope_changed") throw error
+          if (error instanceof ProjectTokenError || error?.kind === "account_generation_changed" || error?.kind === "account_scope_changed" || error?.signIn === "expired") throw error
           throw new ProjectTokenError("project_token_login_failed", { transient: error instanceof TypeError || timeout.aborted })
         }
       }, operationSignal)
+      await assertCurrent()
+      if (value.expiresAt !== undefined && value.expiresAt <= now()) throw new ProjectTokenError("project_token_login_failed")
+      if (rawToken(saved.oauthToken) !== oauth) throw unavailable("account_generation_changed")
+      if (!state.uid) return value
+      if (rawToken(saved.business || saved.token) === value.token &&
+          text(saved.businessGeneration) === value.generation &&
+          (saved.businessExpiresAt ?? undefined) === value.expiresAt && !saved.businessRejectedFingerprint) return value
+      const written = await writeDerived((current) => {
+        if (rawToken(current.oauthToken) !== oauth) throw unavailable("account_generation_changed")
+        if (rawToken(current.business || current.token) !== previous.token ||
+            text(current.businessGeneration) !== previous.generation ||
+            text(current.businessRejectedFingerprint) !== previous.marker ||
+            text(current.businessRejectedGeneration) !== previous.markerGeneration) return null
+        const next = { ...current, business: value.token, businessGeneration: value.generation }
+        if (value.expiresAt !== undefined) next.businessExpiresAt = value.expiresAt
+        else delete next.businessExpiresAt
+        delete next.businessRejectedFingerprint
+        delete next.businessRejectedGeneration
+        return next
+      })
+      if (!written) return resolveBusiness(operationSignal)
+      await assertCurrent()
+      if (value.expiresAt !== undefined && value.expiresAt <= now()) throw new ProjectTokenError("project_token_login_failed")
+      if (rawToken(saved.business || saved.token) !== value.token ||
+          text(saved.businessGeneration) !== value.generation ||
+          text(saved.businessRejectedFingerprint) === hash(value.token) &&
+            text(saved.businessRejectedGeneration) === value.generation) return resolveBusiness(operationSignal)
+      return value
     }
 
     async function loginMaterial({ business = "required", zcode = "required" } = {}) {
@@ -256,24 +356,36 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
         if (!["required", "optional", "none"].includes(requirement)) throw unavailable("account_credential_requirement_invalid")
         if (requirement === "none") return ""
         const value = rawToken(token)
-        if (!value || expired(value, now())) {
+        if (!value || expired(value, now(), name === "business" ? 0 : 30_000)) {
           if (requirement === "required") {
             const error = unavailable(`account_${name}_relogin_required`)
             error.credentialState = value ? "expired" : "missing"
+            if (name === "zcode" && state.kind === "start") {
+              error.message = START_EXPIRED
+              error.signIn = "expired"
+              error.noModels = true
+            }
             throw error
           }
           return ""
         }
         return value
       }
-      let businessToken = ""
+      let businessToken = "", businessExpiresAt
       if (business !== "none") {
-        try { businessToken = (await resolveBusiness(signal)).token }
-        catch (error) {
+        try {
+          const value = await resolveBusiness(signal)
+          businessToken = value.token
+          businessExpiresAt = value.expiresAt
+        } catch (error) {
           if (business === "required" || signal?.aborted || error?.kind === "account_generation_changed" || error?.kind === "account_scope_changed") throw error
         }
       }
       await assertCurrent()
+      if (businessExpiresAt !== undefined && businessExpiresAt <= now()) {
+        if (business === "required") throw new ProjectTokenError("project_token_login_failed")
+        businessToken = ""
+      }
       return { business: get("business", business, businessToken), zcode: get("zcode", zcode, saved.jwt) }
     }
 
@@ -373,7 +485,8 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
       if (!state.uid) throw unavailable("project_token_identity_required")
       for (let attempt = 0; attempt < 2; attempt++) {
         const business = await resolveBusiness(ownSignal)
-        if (!business.token || expired(business.token, now())) throw unavailable("account_business_relogin_required")
+        if (business.expiresAt !== undefined && business.expiresAt <= now()) throw new ProjectTokenError("project_token_login_failed")
+        if (!business.token || expired(business.token, now(), 0)) throw state.site === "zai" ? businessRelogin("expired") : unavailable("account_business_relogin_required")
         const loc = saved.loc
         try {
           let knownLocation
@@ -397,9 +510,18 @@ export function createAccountRuntime({ client, providerId, stateOf, origins, cla
           return { kind: "project-token", token: value.token, fingerprint: value.fingerprint, expiresAt: value.expiresAt }
         } catch (error) {
           if (error?.status === 404 && loc && !ownSignal?.aborted) await saveLocation(null, loc)
-          if (error?.businessRejected && saved.oauthToken && attempt === 0) {
+          if (error?.businessRejected && state.site === "zai") {
+            await assertCurrent()
             owner.business.invalidate(business)
-            continue
+            const marked = await writeDerived((current) => {
+              if (rawToken(current.business || current.token) !== business.token ||
+                  text(current.businessGeneration) !== business.generation) return null
+              return { ...current, businessRejectedFingerprint: hash(business.token), businessRejectedGeneration: business.generation }
+            })
+            if (!marked && attempt === 0) continue
+            const oauth = rawToken(saved.oauthToken)
+            if (attempt === 0 && oauth && !expired(oauth, now(), 0)) continue
+            throw businessRelogin(!oauth ? "missing" : expired(oauth, now(), 0) ? "expired" : "rejected")
           }
           if (error instanceof ProjectTokenError) {
             error.kind = error.code === "project_token_scope_invalidated" ? "account_generation_changed" : "unavailable"

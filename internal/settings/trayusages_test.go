@@ -57,3 +57,33 @@ func TestTrayUsagesMigrate(t *testing.T) {
 		t.Fatalf("none: %q %q", s.TrayUsages, s.TrayUsage)
 	}
 }
+
+func TestEditTrayUsagesPreservesOtherSettingsAndUnreadableSource(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := Save(Settings{TrayUsages: []string{"zcode|old"}, TrayUsageEvery: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := EditTrayUsages(func(ids []string) ([]string, error) {
+		ids[0] = "zcode|new"
+		return ids, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := Load()
+	if !slices.Equal(got.TrayUsages, []string{"zcode|new"}) || got.TrayUsage != "zcode|new" || got.TrayUsageEvery != 5 {
+		t.Fatalf("tray edit lost another setting: %+v", got)
+	}
+	bad := []byte(`{"trayUsages":`)
+	if err := os.WriteFile(Path(), bad, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EditTrayUsages(func(ids []string) ([]string, error) {
+		return append(ids, "zcode|other"), nil
+	}); err == nil {
+		t.Fatal("an unreadable settings source was accepted")
+	}
+	after, err := os.ReadFile(Path())
+	if err != nil || string(after) != string(bad) {
+		t.Fatalf("unreadable settings changed: %q, %v", after, err)
+	}
+}

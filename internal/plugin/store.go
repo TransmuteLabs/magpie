@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -124,31 +125,18 @@ func Dir() string { return filepath.Join(settings.Dir(), "plugins") }
 // AuthPath is the plugins' sign-ins, OpenCode's auth.json in shape.
 func AuthPath() string { return filepath.Join(settings.Dir(), "plugin-auth.json") }
 
-// authLockStale is how long plugin-auth.json.lock is held at most: one
-// older was left by a host or a magpie that died holding it.
-const authLockStale = 10 * time.Second
+// lockAuth holds the OS lock through the entire read, change and durable
+// publication. Its inode must remain in place even after the lock is released.
+func lockAuth() (func(), error) {
+	return lockAuthAt(AuthPath())
+}
 
-// lockAuth takes plugin-auth.json.lock, which host.js takes too, for a
-// change to plugin-auth.json read afresh under it: two hosts (one being
-// restarted) and magpie never write each other's accounts away. It gives
-// the unlock.
-func lockAuth() func() {
-	lock := AuthPath() + ".lock"
-	start := time.Now()
-	for {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(lock) }
-		}
-		if !os.IsExist(err) && !os.IsPermission(err) {
-			return func() {} // no folder to lock in: no file to change either
-		}
-		if fi, err := os.Stat(lock); err == nil && time.Since(fi.ModTime()) > authLockStale || time.Since(start) > 2*authLockStale {
-			os.Remove(lock)
-		}
-		time.Sleep(5 * time.Millisecond)
+func lockAuthAt(path string) (func(), error) {
+	unlock, held := filelock.Lock(path+".flock", filelock.Wait)
+	if !held {
+		return nil, errors.New("plugin sign-in change not made: could not acquire auth lock")
 	}
+	return unlock, nil
 }
 
 func listPath() string { return filepath.Join(settings.Dir(), "plugins.json") }

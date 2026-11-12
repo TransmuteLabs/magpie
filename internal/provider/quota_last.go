@@ -59,13 +59,18 @@ func keyTag(kind, key string) string {
 // keepLast is q, or the last reading of its account when q failed in
 // passing; a good reading is kept for next time.
 func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
+	// A partial is an independent fresh subset, not a replacement for the
+	// previous complete reading, nor a reason to hide it behind that reading.
+	if q.Partial {
+		return q
+	}
 	if user == "" {
 		user = q.User
 	}
-	if user == "" || q.Provider == "" {
+	if user == "" || q.Provider == "" || q.accountUnverified {
 		return q
 	}
-	key := q.Provider + "/" + strings.ToLower(user)
+	key := quotaLastKey(q, user)
 	c := &lastQuotas
 	c.Lock()
 	defer c.Unlock()
@@ -115,10 +120,18 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 	}
 	out.ReadDeferred = readDeferred(q.Error)
 	out.Name, out.Icon, out.User = q.Name, q.Icon, q.User
+	out.AccountIdentity, out.AccountGeneration = q.AccountIdentity, q.AccountGeneration
 	if out.Name == "" {
 		out.Name, out.Icon = c.m[key].Q.Name, c.m[key].Q.Icon
 	}
 	return out
+}
+
+func quotaLastKey(q SubscriptionQuota, user string) string {
+	if q.AccountIdentity != "" && q.AccountGeneration != "" {
+		return q.Provider + "/@" + q.AccountIdentity + "/" + q.AccountGeneration
+	}
+	return q.Provider + "/" + strings.ToLower(user)
 }
 
 // hadReading is whether a good reading of provider's account (or key
@@ -218,7 +231,11 @@ func lastAllowances(agent string) map[string]Allowance {
 	defer c.Unlock()
 	c.load()
 	for _, l := range logins {
-		q, ok := c.reading(loginProvider(l) + "/" + strings.ToLower(l.User))
+		key := loginLastKey(l)
+		if key == "" {
+			continue
+		}
+		q, ok := c.reading(key)
 		if !ok || len(q.Windows) == 0 {
 			continue
 		}

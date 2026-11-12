@@ -88,10 +88,10 @@ func TestPublicPluginListedWithAccountsOff(t *testing.T) {
 
 	// a key to Acme is refused before anything is saved; Zen Free's goes
 	// on to the plugin (no Bun here, so it fails there, not on the gate)
-	if _, err := PluginAPIKey(context.Background(), "acme", 0, nil, "sk-acme-5678"); !errors.Is(err, errAccountDiscoveryOff) {
+	if _, err := PluginAPIKey(context.Background(), "acme", 0, nil, "sk-acme-5678", SignInOptions{}); !errors.Is(err, errAccountDiscoveryOff) {
 		t.Errorf("Acme's key with accounts off: %v, want %v", err, errAccountDiscoveryOff)
 	}
-	if _, err := PluginAPIKey(context.Background(), "opencode-zen-free", 0, nil, ""); errors.Is(err, errAccountDiscoveryOff) {
+	if _, err := PluginAPIKey(context.Background(), "opencode-zen-free", 0, nil, "", SignInOptions{}); errors.Is(err, errAccountDiscoveryOff) {
 		t.Errorf("Zen Free's keyless sign-in refused with accounts off")
 	}
 	if after, _ := os.ReadFile(loginsPath()); string(after) != string(before) {

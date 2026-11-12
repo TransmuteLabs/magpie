@@ -36,7 +36,7 @@ const quotas = [
   { provider: "kimi", name: "Kimi", icon: "kimi", user: "n@example.com", windows: [w("Weekly", 77, 70)] },
 ];
 
-function serve(lang, left) {
+function serve(lang, left, data = quotas) {
   const settings = { theme: "light", lang, tray: "panel", quotaLeft: left, currency: "usd" };
   return async (route) => {
     const url = new URL(route.request().url());
@@ -46,7 +46,7 @@ function serve(lang, left) {
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings });
     if (url.pathname === "/api/settings") return json(settings);
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
-    if (url.pathname === "/api/usage/quotas") return json(quotas);
+    if (url.pathname === "/api/usage/quotas") return json(data);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname.startsWith("/api/")) return json({});
@@ -60,6 +60,24 @@ const CARDS = { en: "Cards", zh: "卡片", "zh-TW": "卡片", ja: "カード", d
 const TABLE = { en: "Table", zh: "表格", "zh-TW": "表格", ja: "表", de: "Tabelle" };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: table keeps partial windows and the primary error`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await (await browser.newContext({ viewport: { width: 1000, height: 800 } })).newPage();
+    await page.addInitScript(() => localStorage.setItem("magpie.quotaView", '"table"'));
+    await page.route("**/*", serve("en", false, [
+      { provider: "zcode", name: "ZCode", user: "alice", windows: [w("5 hours", 40, 2)], error: "Coding Plan quota unavailable", partial: true, pluginError: true },
+      { provider: "claude", name: "Claude", user: "bob", windows: [w("5 hours", 88, 2)], error: "full failure", pluginError: true },
+    ]));
+    await page.goto("http://magpie.test/?view=usage");
+    const partial = page.locator('.qt tbody tr[data-provider="zcode"]');
+    await partial.waitFor();
+    assert.match(await partial.innerText(), /Coding Plan quota unavailable/);
+    assert.match(await partial.innerText(), /40%/);
+    const failed = await page.locator('.qt tbody tr[data-provider="claude"]').innerText();
+    assert.match(failed, /full failure/);
+    assert.doesNotMatch(failed, /88%/);
+  });
   for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
     for (const width of [1100, 420]) {
       test(`${engine} ${lang} ${width}px: the allowances as cards or a table`, async (t) => {

@@ -98,7 +98,7 @@ func shareBalances(qs []SubscriptionQuota, h balanceHist) []SubscriptionQuota {
 			if b.SharedBalance != "" || b.Provider != a.Provider || b.From != a.From || b.Balance != a.Balance || !sharesAccountBalance(*b) {
 				continue
 			}
-			if movedTogether(h[quotaHistKey(a.Provider, a.User)], h[quotaHistKey(b.Provider, b.User)]) {
+			if movedTogether(h[quotaHistoryKey(*a)], h[quotaHistoryKey(*b)]) {
 				a.SharedBalance, b.SharedBalance = a.User, a.User
 			}
 		}

@@ -30,7 +30,7 @@ func TestFetchNewLeavesListedPlugins(t *testing.T) {
 	if _, err := plugin.Add(ctx, abs); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456"); err != nil {
+	if _, err := PluginAPIKey(ctx, "fakeco", 0, nil, "k-123456", SignInOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := plugin.Providers(ctx); err != nil {

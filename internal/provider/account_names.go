@@ -170,10 +170,11 @@ func PluginUserOf(id, user string) string {
 
 // usageUser is PluginUserOf of the plugin's provider pid.
 func usageUser(pid, user string) string {
-	key := strings.ToLower(strings.TrimSpace(user))
-	if key == "" {
+	l, ok := pluginLoginByUser("plugin:"+pid, user)
+	if !ok {
 		return ""
 	}
+	key := strings.ToLower(strings.TrimSpace(user))
 	other := func(u string) string {
 		if u = strings.TrimSpace(u); strings.EqualFold(u, key) {
 			return ""
@@ -181,7 +182,7 @@ func usageUser(pid, user string) string {
 		return u
 	}
 	loginUsageCache.Lock()
-	e := loginUsageCache.m["plugin:"+pid+"/"+key]
+	e := loginUsageCache.m[loginReadingKey(l)]
 	loginUsageCache.Unlock()
 	if u := other(e.q.User); u != "" {
 		return u
@@ -190,7 +191,7 @@ func usageUser(pid, user string) string {
 	c.Lock()
 	defer c.Unlock()
 	c.load()
-	return other(c.m[PluginID(pid)+"/"+key].Q.User)
+	return other(c.m[loginLastKey(l)].Q.User)
 }
 
 // SetAccountName names the account ref of the subscription id; "" takes

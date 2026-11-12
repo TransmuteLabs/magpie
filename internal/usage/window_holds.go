@@ -110,13 +110,44 @@ func (d dryRun) holds(t time.Time) bool {
 func dryRuns(qs []provider.SubscriptionQuota, hist []provider.QuotaHistory, now time.Time) map[string][]dryRun {
 	out := map[string][]dryRun{}
 	lines := map[string][]provider.QuotaPoint{} // account and window → readings, oldest first
+	owners := map[string]string{}
+	ambiguous := map[string]bool{}
+	identified := map[string]bool{}
+	for _, q := range qs {
+		public := q.Provider + "\x00" + strings.ToLower(q.User)
+		key := historyAccountKey(q.Provider, q.User, q.AccountIdentity)
+		if previous, ok := owners[public]; ok && previous != key {
+			ambiguous[public] = true
+		}
+		owners[public] = key
+		if q.AccountIdentity != "" {
+			identified[public] = true
+		}
+	}
 	for _, h := range hist {
+		public := h.Provider + "\x00" + strings.ToLower(h.User)
+		key := historyAccountKey(h.Provider, h.User, h.AccountIdentity)
+		if ambiguous[public] || h.AccountIdentity == "" && identified[public] {
+			continue
+		}
+		if h.AccountIdentity != "" {
+			matched := false
+			for _, q := range qs {
+				if sameHistoryAccount(q, h) && !ambiguous[q.Provider+"\x00"+strings.ToLower(q.User)] {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
 		for _, l := range h.Lines {
-			lines[h.Provider+"\x00"+strings.ToLower(h.User)+"\x00"+l.Name] = l.Points
+			lines[key+"\x00"+l.Name] = l.Points
 		}
 	}
 	for _, q := range qs {
-		if q.User == "" {
+		if q.User == "" || ambiguous[q.Provider+"\x00"+strings.ToLower(q.User)] {
 			continue
 		}
 		at := readAtOf(q, now)
@@ -124,7 +155,7 @@ func dryRuns(qs []provider.SubscriptionQuota, hist []provider.QuotaHistory, now 
 			if w.Unlimited || w.Aside || w.Family != "" || math.IsNaN(w.Used) {
 				continue
 			}
-			k := q.Provider + "\x00" + strings.ToLower(q.User) + "\x00" + w.Name
+			k := historyAccountKey(q.Provider, q.User, q.AccountIdentity) + "\x00" + w.Name
 			pts := lines[k]
 			if n := len(pts); n == 0 || pts[n-1].At.Before(at) {
 				p := provider.QuotaPoint{At: at, Left: max(0, 100-w.Used), ResetsAt: w.ResetsAt}
@@ -139,6 +170,12 @@ func dryRuns(qs []provider.SubscriptionQuota, hist []provider.QuotaHistory, now 
 	}
 	for k, pts := range lines {
 		acct := k[:strings.LastIndex(k, "\x00")]
+		for _, q := range qs {
+			if historyAccountKey(q.Provider, q.User, q.AccountIdentity) == acct {
+				acct = q.Provider + "\x00" + strings.ToLower(q.User)
+				break
+			}
+		}
 		var run *dryRun
 		var lastLeft time.Time
 		for _, p := range pts {
