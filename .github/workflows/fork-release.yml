@@ -33,6 +33,12 @@ on:
         description: 'Version label for the build (e.g. 0.1.4000); empty: 0.0.0-<sha>'
         required: false
         default: ''
+      release:
+        description: 'Also publish a release when the version is newer (push-events are sometimes dropped by GitHub)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['true', 'false']
 
 permissions:
   contents: write
@@ -99,7 +105,7 @@ jobs:
     # пуш: собирать только под релиз; dispatch: всегда (проверка руками)
     if: github.event_name == 'workflow_dispatch' || needs.check.outputs.release == 'yes'
     env:
-      BUILD_VERSION: ${{ github.event_name == 'push' && needs.check.outputs.version || github.event.inputs.version }}
+      BUILD_VERSION: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.version) || needs.check.outputs.version || format('0.0.0-{0}', github.sha) }}
     # arm64-раннер: GUI линкует webview платформы нативно (cgo), кросс-сборки нет
     runs-on: macos-15
     timeout-minutes: 40
@@ -187,7 +193,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push' && needs.check.outputs.release == 'yes'
+    # пуш с новой версией; или ручной запуск с флагом release — пуш-события
+    # GitHub иногда роняет (ран по коммиту push может не появиться вовсе)
+    if: needs.check.outputs.release == 'yes' &&
+        (github.event_name == 'push' ||
+         (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'))
     # при возврате windows/linux добавить их в needs
     needs: [check, app]
     runs-on: ubuntu-latest
