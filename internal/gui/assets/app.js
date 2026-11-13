@@ -12199,7 +12199,7 @@ function mediaChips(cls, ids, key, p, names) {
 // renderRouting: spread over keys or accounts and stickiness, staged in
 // the draft and made with Save (01huadalang on Discord)
 const ROUTINGS = [
-  ["", "Smart", "Of the accounts with quota to spare, the one whose quota renews soonest goes first, since what it has left is lost then; one not started yet renews last, so it waits, and keys go in their order. One at 90% waits until the others can't answer. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
+  ["", "Smart", "Not load balancing: requests go to one account at a time, the one whose quota renews soonest, since what it has left is lost then; the next takes over when it is at 90% or can't answer. Keys go in their order. To spread requests evenly, pick In turn or Least used first. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
   ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
   // dzxx0496 on Discord: free accounts one after another, the first not
   // taking the requests back once it renews (routes.Drain)
@@ -12573,6 +12573,7 @@ async function startSignIn(agent, risky, site, o = {}) {
     if (site) body.site = site;
     if (o.user) body.user = o.user;
     if (o.proxy != null) body.proxy = o.proxy;
+    if (o.linkOnly) body.linkOnly = true;
     signing = { ...(await api("signin", body)), ...keep };
     if (web && signing.url && !signing.linkOnly) {
       const id = signing.id;
@@ -13671,7 +13672,7 @@ function renderAccounts(a, p) {
   const capped = (l) => accountCapOf(p, l.user) || windowCapsOf(p, l.user);
   if (p && (ls.some(capped) || p.capStop || p.capCareful)) {
     const box = el("div", "pool-ends");
-    for (const [k, say, tip] of [["capStop", "Stop when every account is at its cap", "On: once every account in use is at its cap, requests get 429 instead of going to the fallbacks."],
+    for (const [k, say, tip] of [["capStop", "Don't go to fallbacks when every account is at its cap", "Off: once every account in use is at its cap, requests go on to this provider's fallbacks (other providers or keys). On: they get 429 and nothing else is tried."],
       ["capCareful", "Check usage again near a cap", "On: an account near its cap has its usage read again before a request. One whose usage can't be read is held."]]) {
       const [l, c] = tick(t(say), !!p[k]);
       l.title = t(tip);
@@ -13694,6 +13695,8 @@ function renderAccounts(a, p) {
       imp.title = importSay(a.agent).from;
       list.append(imp);
     }
+    // the link alone, to open where the account can sign in (Wing8Aqua on X)
+    if (cx || a.agent === "claude") list.append(addRow(t("Sign in on another computer…"), () => startSignIn(a.agent, 0, 0, { linkOnly: 1 })));
     if (a.agent === "claude") list.append(addRow(t("Add an account by setup-token…"), startClaudeToken));
     // last of them, and no plus: it adds nothing (the owner, 11-12)
     if (sub.importable && (a.agent === "claude" || a.agent === "codex")) list.append(addRow(t("Export accounts to a file…"), () => startExport(a.agent), EXPORT_GLYPH));
