@@ -6,12 +6,22 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/ghtoken"
 	"github.com/yetone/magpie/internal/settings"
 )
+
+// githubTokenRuns makes every run's tokens its own. A token GitHub refused
+// stays refused for the life of the process (#3926), so a fixed token would
+// be refused in the next run of the same test too.
+var githubTokenRuns atomic.Int64
+
+func githubRunToken(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, githubTokenRuns.Add(1))
+}
 
 // fakeGitHub stands in for GitHub's API and codeload: it notes the
 // Authorization each was asked with, and answers the API as answer says.
@@ -180,13 +190,14 @@ func TestGitHubRateLimitSaid(t *testing.T) {
 		}
 	}
 
-	setGitHubToken(t, "ghp_x")
+	token := githubRunToken("ghp_x")
+	setGitHubToken(t, token)
 	c = check(t)["pdf"]
 	if c.Limited == nil || !c.Limited.Token || !strings.Contains(c.Error, "your GitHub token") || !strings.Contains(c.Error, "until "+at) ||
 		strings.Contains(c.Error, "Add a GitHub token") {
 		t.Errorf("with a token: %+v", c)
 	}
-	if strings.Contains(c.Error, "ghp_x") {
+	if strings.Contains(c.Error, token) {
 		t.Errorf("the token is in the error: %q", c.Error)
 	}
 
@@ -231,7 +242,8 @@ func TestGitHubRateLimitSaid(t *testing.T) {
 	// is dropped: the check is asked again without it, and isn't sent
 	// again
 	setGitHubToken(t, "")
-	t.Setenv("GH_TOKEN", "bad-env-skills")
+	envToken := githubRunToken("bad-env-skills")
+	t.Setenv("GH_TOKEN", envToken)
 	g.mu.Lock()
 	n = len(g.apiAuth)
 	g.mu.Unlock()
@@ -240,7 +252,7 @@ func TestGitHubRateLimitSaid(t *testing.T) {
 		t.Errorf("refused from the environment: %+v", c)
 	}
 	g.mu.Lock()
-	if a := g.apiAuth[n:]; len(a) < 2 || a[0] != "Bearer bad-env-skills" || a[1] != "" {
+	if a := g.apiAuth[n:]; len(a) < 2 || a[0] != "Bearer "+envToken || a[1] != "" {
 		t.Errorf("refused from the environment: GitHub was asked with %q, want the token then none", a)
 	}
 	n = len(g.apiAuth)
