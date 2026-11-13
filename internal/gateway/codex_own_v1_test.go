@@ -33,7 +33,7 @@ func codexOwnOffMagpieSetup(t *testing.T, discoveryOff bool) (got *http.Header, 
 	os.WriteFile(filepath.Join(home, ".codex", "models_cache.json"),
 		[]byte(`{"etag":"e1","models":[{"slug":"gpt-6.1-sol","display_name":"gpt-6.1-sol","priority":1}]}`), 0o600)
 	got, models = &http.Header{}, &[]string{}
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(inferenceOnlyFixture(t, "/backend-api/codex/responses", "gpt-6.1-sol", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		*got = r.Header.Clone()
 		*models = append(*models, modelOf(b))
@@ -42,7 +42,7 @@ func codexOwnOffMagpieSetup(t *testing.T, discoveryOff bool) (got *http.Header, 
 			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-6.1-sol"}}`,
 			`data: {"type":"response.output_text.delta","delta":"pong"}`,
 			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
@@ -183,7 +183,7 @@ func codexOwnSideCallEnv(t *testing.T) *fake {
 	t.Helper()
 	fresh(t) // no agent signed in anywhere
 	f := &fake{t: t}
-	setup(t, provider.Chat, f)
+	setupCodexChatFixture(t, f)
 	home := os.Getenv("HOME")
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
 		t.Fatal(err)
@@ -260,6 +260,7 @@ func TestCodexSideCallOnOwnModelUnsetGoesOnSignIn(t *testing.T) {
 	_, models := codexOwnOffMagpieSetup(t, false)
 	for _, kind := range []string{"thread_title", "thread_description", "thread_summary", "composer_predictions"} {
 		*models = nil
+		probeInferenceFixture(t, strings.TrimSuffix(provider.CodexBase, "/backend-api/codex"), "/backend-api/codex/models")
 		req := codexOnMagpieRequest("127.0.0.1:51000")
 		req.Header.Set("x-codex-turn-metadata", `{"thread_source":"`+kind+`","parent_thread_id":"main-chat"}`)
 		rec := httptest.NewRecorder()
