@@ -112,6 +112,7 @@ func gatewaySession(g usage.GatewaySession) sessions.Session {
 }
 
 func sessionRoutes(mux *http.ServeMux, w Windows) {
+	extensionSessionSourceRoutes(mux)
 	steadyGC()
 	mux.HandleFunc("GET /api/sessions", coldTurn(func(rw http.ResponseWriter, r *http.Request) {
 		// the list and the Codex threads' effort each list every session file

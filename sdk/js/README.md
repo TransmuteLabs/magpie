@@ -540,3 +540,20 @@ host retain those responsibilities. SDK 1.4 root bindings keep their existing
 
 See [the workflow record](../../docs/adr/0018-window-account-workflow.md) for
 the concurrency, failure and verification boundaries.
+
+## Session sources in API 1.6-preview
+
+Capability `session-source` negotiates exactly `session.source.read`.
+The `SessionSourceDescriptor`, `SessionSourceReadRequest` and
+`SessionSourceReadResult` declarations describe a finite local JSONL reader.
+Manifest validation and worker dispatch enforce source ownership, selected
+session scope, ID confirmation, unary results and binary/frame budgets.
+
+Read only the captured `documents` passed by the host. Return a typed summary
+or transcript within the supplied limits; do not return filesystem roots,
+absolute paths, shell commands or costs. Omitted usage is unknown, while an
+empty usage array is a measured zero. Native takeover requires an explicit
+host binding and existing read consent still applies.
+
+`session-migration` continues to declare conversion only. API 1.6 is a preview;
+SQLite, compressed journals and remote/backend history are not included.

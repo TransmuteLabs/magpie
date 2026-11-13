@@ -226,6 +226,19 @@ func SearchSession(ctx context.Context, s Session, needle string) (Hit, bool, er
 	if !Reads(s.Agent) {
 		return Hit{}, false, ErrNotRead
 	}
+	if s.source != nil {
+		transcript, err := extensionSourceTranscript(ctx, s.source)
+		if err != nil {
+			return Hit{}, false, err
+		}
+		match := matcher{needle: needle}
+		for _, part := range transcript.Parts {
+			if !match.add(part) {
+				break
+			}
+		}
+		return match.hit, match.found, ctx.Err()
+	}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return Hit{}, false, ErrNoTranscript
 	}

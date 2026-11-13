@@ -22,10 +22,10 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 5},
+		Version: APIVersion{Major: 1, Minor: 6},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks, SessionSource,
 		},
 	}
 }
@@ -42,6 +42,7 @@ type Manifest struct {
 	Providers         []ProviderDescriptor          `json:"providers,omitempty"`
 	Agents            []AgentDescriptor             `json:"agents,omitempty"`
 	Sessions          []SessionDescriptor           `json:"sessions,omitempty"`
+	SessionSources    []SessionSourceDescriptor     `json:"sessionSources,omitempty"`
 	Tools             []ToolDescriptor              `json:"tools,omitempty"`
 	Actions           []ActionDescriptor            `json:"actions,omitempty"`
 	Services          []ServiceDescriptor           `json:"services,omitempty"`

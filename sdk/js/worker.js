@@ -341,6 +341,10 @@ export async function serve(module, { input = process.stdin, output = process.st
       const operation = (async () => {
         assertOpen();
         const hookEffect = gatewayMethodEffect(call.method);
+        if (call.method === "session.source.read") {
+          record.creditError = new SDKError("invalid_params", "Session source reads are unary");
+          throw record.creditError;
+        }
         if (hookEffect && (hookEffect !== "write" || event !== "accepted")) {
           record.creditError = new SDKError("invalid_params", "Gateway hooks are unary and permit only write acceptance receipts");
           throw record.creditError;

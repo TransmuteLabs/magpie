@@ -6,6 +6,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -31,6 +32,15 @@ var ErrNoTranscript = errors.New("this agent's conversations can't be shown")
 // HasTranscript says whether an agent's sessions can be read as a
 // transcript.
 func HasTranscript(agent string) bool {
+	if extensionSourceAgent(agent) {
+		view := sourceView.Load()
+		for _, record := range view.records {
+			if record.grant.descriptor.Agent == agent && record.grant.descriptor.Transcript {
+				return true
+			}
+		}
+		return false
+	}
 	switch agent {
 	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy":
 		return true
@@ -65,6 +75,12 @@ func TranscriptOf(s Session) (Transcript, error) {
 	if !Reads(s.Agent) {
 		return Transcript{Parts: []Part{}}, ErrNotRead
 	}
+	if s.source != nil {
+		return extensionSourceTranscript(context.Background(), s.source)
+	}
+	if extensionSourceAgent(s.Agent) {
+		return Transcript{}, ErrNoTranscript
+	}
 	out := Transcript{Parts: []Part{}}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return out, ErrNoTranscript
@@ -82,6 +98,18 @@ func readTranscript(s Session, add func(bool, Part) bool) error {
 // to, where a line stands alone (Claude's, Codex's, Kimi's); Pi's lines are a tree,
 // read whole.
 func readTranscriptOf(s Session, keep func([]byte) bool, add func(bool, Part) bool) error {
+	if s.source != nil {
+		transcript, err := extensionSourceTranscript(context.Background(), s.source)
+		if err != nil {
+			return err
+		}
+		for _, part := range transcript.Parts {
+			if !add(part.Role == "user", part) {
+				break
+			}
+		}
+		return nil
+	}
 	whole := Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}
 	switch s.Agent {
 	case "opencode":

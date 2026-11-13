@@ -60,6 +60,10 @@ func cloneManifest(manifest Manifest) Manifest {
 		manifest.Agents[index] = manifest.Agents[index].Clone()
 	}
 	manifest.Sessions = slices.Clone(manifest.Sessions)
+	manifest.SessionSources = slices.Clone(manifest.SessionSources)
+	for index := range manifest.SessionSources {
+		manifest.SessionSources[index].Stores = slices.Clone(manifest.SessionSources[index].Stores)
+	}
 	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
 	manifest.Tools = slices.Clone(manifest.Tools)
 	for index := range manifest.Tools {
@@ -298,6 +302,9 @@ func (manifest Manifest) Validate() error {
 	if manifest.Contract.Has(SessionMigration) && len(manifest.Sessions) == 0 {
 		return fmt.Errorf("session migration requires a session descriptor")
 	}
+	if err := manifest.validateSessionSources(); err != nil {
+		return err
+	}
 	if err := manifest.validateComposite(); err != nil {
 		return err
 	}
@@ -434,6 +441,8 @@ func RequiredMethods(manifest Manifest) []string {
 			}
 		case SessionMigration:
 			methods = append(methods, MethodSessionConvert)
+		case SessionSource:
+			methods = append(methods, MethodSessionSourceRead)
 		case ModuleRPC:
 			methods = append(methods, MethodModuleCall)
 		case GatewayHooks:

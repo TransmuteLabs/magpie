@@ -117,7 +117,9 @@ type CodexIdentity struct {
 
 // Session is one agent session.
 type Session struct {
-	ReadOnly bool `json:"read_only,omitempty"`
+	SourceStatus string `json:"source_status,omitempty"`
+	source       *sessionSourceRecord
+	ReadOnly     bool `json:"read_only,omitempty"`
 	// Gateway: seen only through magpie's gateway, with no file of the
 	// agent's on this computer (external.go)
 	Gateway       bool          `json:"gateway,omitempty"`
@@ -224,7 +226,8 @@ type state struct {
 	HeadSize int32 `json:"head_size,omitempty"`
 	// Claude Code: parsed by a magpie that reads /cd's relocated lines
 	// (ccRelocated), so Cwd is the folder the session was last moved to
-	CdRead        bool           `json:"cd_read,omitempty"`
+	CdRead        bool `json:"cd_read,omitempty"`
+	sourceOwned   bool
 	ContentHash   digest         `json:"content_hash,omitzero"`
 	Size          int64          `json:"size"`
 	Mod           int64          `json:"mod"` // unix nanoseconds
@@ -569,6 +572,7 @@ func (s modTime) Compare(t modTime) int { return cmp.Compare(s, t) }
 
 // fileMore is what a file of some agents has besides.
 type fileMore struct {
+	source *sessionSourceRecord
 	// OpenCode and ZCode: the session, and where it is kept; parent is
 	// the session that started it, "" for one the user did
 	sid    string
@@ -998,7 +1002,7 @@ func allFilesWith(kept *filesKept, zcode func() []file) []file {
 		antigravityFiles()) // #2190
 	// each lister asked Reads already; a file listed under another
 	// agent's name is held to that agent too
-	return allowed(kept.distinct(lists...))
+	return allowed(extensionSourceFiles(kept.distinct(lists...)))
 }
 
 // distinctOf is lists one after another with each path kept once, the
@@ -1693,6 +1697,12 @@ func refresh(want, all []file) {
 	var todo, waits []file
 	named := false
 	for _, f := range want {
+		if source := f.m().source; source != nil {
+			if source.summary != nil {
+				cache[f.path] = source.summary
+			}
+			continue
+		}
 		if f.cold {
 			continue // in a stopped WSL distro: what was read of it stands
 		}
@@ -1989,6 +1999,8 @@ func pricer() func(string) *catalog.Price {
 
 // Reset forgets the kept parses, in memory only.
 func Reset() {
+	invalidateSessionSources()
+	sourceView.Store(nil)
 	desktopTitles.Lock()
 	desktopTitles.names, desktopTitles.last = nil, nil
 	desktopTitles.Unlock()
@@ -2045,6 +2057,19 @@ func listSessions(limit int) []Session {
 // listing is the listing at limit, kept or made now, and keptList.made
 // for it: none when the kept one is made, the number the caller had.
 func listing(limit, made int) ([]Session, int, bool) {
+	type result struct {
+		rows []Session
+		made int
+		same bool
+	}
+	published := publishSourceRead(func() result {
+		rows, version, same := sourceListing(limit, made)
+		return result{rows, version, same}
+	})
+	return published.rows, published.made, published.same
+}
+
+func sourceListing(limit, made int) ([]Session, int, bool) {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	if limit <= 0 {
@@ -2166,6 +2191,11 @@ func assemble(fs []file, price func(string) *catalog.Price, codexTitle func(stri
 	if !ok {
 		return s, false
 	}
+	if s.source != nil {
+		s.Resume = sourceResume(s.source)
+		s.Carry, s.Transcript = carries(s), s.source.grant.descriptor.Transcript && !s.source.stale
+		return s, true
+	}
 	if !s.ReadOnly {
 		s.Resume = resumeFor(s.WSL, s.Agent, s.ID, s.Cwd, s.Path)
 	}
@@ -2184,6 +2214,19 @@ func assemble(fs []file, price func(string) *catalog.Price, codexTitle func(stri
 func assembleListed(fs []file, price func(string) *catalog.Price, codexTitle func(string) string) (Session, bool) {
 	sortSessionFiles(fs)
 	s := Session{Agent: fs[0].agent, Path: fs[0].path, Models: []Model{}, WSL: fs[0].m().wsl}
+	s.source = fs[0].m().source
+	if s.source != nil {
+		s.ParentSession, s.RootSession = s.source.parentID, s.source.rootID
+	}
+	if s.source != nil && s.source.stale {
+		s.SourceStatus = "stale"
+	}
+	if s.source != nil && s.SourceStatus == "" {
+		s.SourceStatus = "ready"
+		if !s.source.usageKnown {
+			s.SourceStatus = "usage-unavailable"
+		}
+	}
 	for _, f := range fs {
 		s.ReadOnly = s.ReadOnly || f.readOnly
 	}
@@ -2294,6 +2337,9 @@ type sessionParser struct {
 }
 
 func parserFor(agent string) sessionParser {
+	if extensionSourceAgent(agent) {
+		return sessionParser{}
+	}
 	switch agent {
 	case "hermes":
 		return sessionParser{whole: parseHermes}
@@ -2342,6 +2388,18 @@ func parseWith(f file, old *state, calls *callsRide) *state {
 }
 
 func parseRead(f file, old *state, calls *callsRide) *state {
+	if source := f.m().source; source != nil {
+		if calls != nil {
+			calls.release()
+		}
+		return source.summary
+	}
+	if extensionSourceAgent(f.agent) && !nativeSourceOwner(f.agent) {
+		if calls != nil {
+			calls.release()
+		}
+		return &state{Agent: f.agent}
+	}
 	defer func() {
 		if calls != nil {
 			calls.release()
@@ -3107,6 +3165,10 @@ func findListed(agent, id string) (Session, bool) {
 // A ZCode request names its session without the sess_ prefix its database
 // gives it, so that id names the session too.
 func Titles(keys []string) map[string]string {
+	return publishSourceRead(func() map[string]string { return sourceTitles(keys) })
+}
+
+func sourceTitles(keys []string) map[string]string {
 	out := map[string]string{}
 	if len(keys) == 0 {
 		return out
@@ -3263,6 +3325,18 @@ func Get(key string) (Session, bool) {
 // get is Get, and whether key has files at all: ok is false for a session
 // nothing was said in, which found still says is there.
 func get(key string) (s Session, ok, found bool) {
+	type result struct {
+		session   Session
+		ok, found bool
+	}
+	published := publishSourceRead(func() result {
+		session, ok, found := sourceGet(key)
+		return result{session, ok, found}
+	})
+	return published.session, published.ok, published.found
+}
+
+func sourceGet(key string) (s Session, ok, found bool) {
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "id": "fixture.session-source",
+  "version": "1.0.0",
+  "runtime": "native",
+  "entry": "plugin.so",
+  "contract": {
+    "version": {"major": 1, "minor": 6},
+    "capabilities": ["session-source", "session-migration", "module-rpc"]
+  },
+  "sessionSources": [
+    {
+      "id": "history",
+      "agent": "fixture-source",
+      "codec": "synthetic-jsonl-v1",
+      "container": "jsonl",
+      "stores": [{"slot": "main", "homeRelativePath": ".fixture-source/sessions"}],
+      "layout": {"kind": "flat", "idFrom": "filename-stem"},
+      "transcript": true,
+      "resume": "none"
+    },
+    {
+      "id": "native-omp",
+      "agent": "omp",
+      "codec": "synthetic-jsonl-v1",
+      "container": "jsonl",
+      "stores": [{"slot": "main", "homeRelativePath": ".fixture-omp/sessions"}],
+      "layout": {"kind": "flat", "idFrom": "filename-stem"},
+      "transcript": true,
+      "resume": "native"
+    }
+  ],
+  "sessions": [
+    {"id": "to-omp", "name": "Synthetic source to OMP", "from": "fixture-source", "to": "omp", "outputDir": ".omp/agent/sessions"}
+  ],
+  "actions": [{"id": "session.inputs.v1", "effect": "read", "inputSchema": {"type": "object"}}]
+}

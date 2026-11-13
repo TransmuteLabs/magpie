@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -52,6 +53,9 @@ func bunFixturePackage(t *testing.T) string {
 		Tools:     []sdk.ToolDescriptor{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 		Hooks:     &sdk.GatewayHookDescriptor{Request: true, Response: true, SignIn: true},
 	}
+	manifest.Contract.Capabilities = slices.DeleteFunc(manifest.Contract.Capabilities, func(capability sdk.Capability) bool {
+		return capability == sdk.SessionSource
+	})
 	body, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
