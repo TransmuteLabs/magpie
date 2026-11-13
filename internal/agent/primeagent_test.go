@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -19,6 +20,7 @@ import (
 // Prime Agent, whose requests carry no User-Agent; Disconnect puts both
 // files back as they were, byte for byte.
 func TestPrimeAgent(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no installed command: detection starts from an absent config
 	home := syncHome(t)
 	var a *Agent
 	for _, x := range All() {
@@ -112,6 +114,37 @@ func TestPrimeAgent(t *testing.T) {
 	}
 	if b := readFile(models); b != userModels {
 		t.Fatalf("models.json not as it was:\n%s", b)
+	}
+}
+
+func TestPrimeAgentDetectedFromCLIWithoutConfig(t *testing.T) {
+	home := syncHome(t)
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+	a := primeAgent(home)
+	if a.Detected() {
+		t.Fatal("Prime Agent detected without its command or config")
+	}
+	command := filepath.Join(bin, "prime-agent")
+	body := "#!/bin/sh\nexit 99\n"
+	if runtime.GOOS == "windows" {
+		t.Setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+		command, body = command+".cmd", "@exit /b 99\r\n"
+	}
+	if err := os.WriteFile(command, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !a.Detected() {
+		t.Fatal("Prime Agent command on PATH was not detected before its first run")
+	}
+	if _, err := os.Stat(a.Dir); !os.IsNotExist(err) {
+		t.Fatalf("command detection created the config directory: %v", err)
+	}
+	if err := os.Remove(command); err != nil {
+		t.Fatal(err)
+	}
+	if a.Detected() {
+		t.Fatal("removed Prime Agent command still detected without config")
 	}
 }
 
