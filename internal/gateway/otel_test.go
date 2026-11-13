@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,8 +81,13 @@ func TestOTelSessionDedupOnlyUnkeyedLoopback(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	collectorNonce := rand.Text()
 	received := make(chan []byte, 32)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/traces" || r.Header.Get("X-Fixture-Export") != collectorNonce {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		received <- b
 		io.WriteString(w, `{}`)
@@ -89,7 +95,7 @@ func TestOTelSessionDedupOnlyUnkeyedLoopback(t *testing.T) {
 	defer collector.Close()
 	t.Setenv("MAGPIE_OTEL_ENABLED", "true")
 	t.Setenv("MAGPIE_OTEL_ENDPOINT", collector.URL)
-	t.Setenv("MAGPIE_OTEL_HEADERS", "")
+	t.Setenv("MAGPIE_OTEL_HEADERS", "X-Fixture-Export="+collectorNonce)
 	t.Setenv("MAGPIE_OTEL_METRICS", "false")
 	t.Setenv("MAGPIE_OTEL_SESSIONS", "true")
 	fastOTel(t)
@@ -185,6 +191,11 @@ func TestOTelSessionDedupOnlyUnkeyedLoopback(t *testing.T) {
 		}
 	}
 	stop()
+	unrelated := httptest.NewRequest(http.MethodGet, "/", nil)
+	unrelated.Header.Set("X-Fixture-Export", collectorNonce)
+	collector.Config.Handler.ServeHTTP(httptest.NewRecorder(), unrelated)
+	collector.Config.Handler.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/traces", strings.NewReader("unrelated")))
 	counts := map[string]int{}
 	for len(received) > 0 {
 		var wire struct {
@@ -763,8 +774,13 @@ func TestOTelWholeWaterfallFallback(t *testing.T) {
 	plan := &fake{ctype: "application/json", code: 429, reply: `{"error":{"message":"` + big + `"}}`}
 	spare := &fake{ctype: "application/json", reply: `{"choices":[{"message":{"content":"` + big + `"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`}
 	twoProviders(t, plan, spare)
+	collectorNonce := rand.Text()
 	received := make(chan string, 4)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/traces" || r.Header.Get("X-Fixture-Export") != collectorNonce {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		received <- string(b)
 		io.WriteString(w, `{}`)
@@ -772,7 +788,7 @@ func TestOTelWholeWaterfallFallback(t *testing.T) {
 	defer collector.Close()
 	t.Setenv("MAGPIE_OTEL_ENABLED", "true")
 	t.Setenv("MAGPIE_OTEL_ENDPOINT", collector.URL)
-	t.Setenv("MAGPIE_OTEL_HEADERS", "")
+	t.Setenv("MAGPIE_OTEL_HEADERS", "X-Fixture-Export="+collectorNonce)
 	t.Setenv("MAGPIE_OTEL_METRICS", "false")
 	t.Setenv("MAGPIE_OTEL_BODIES", "true")
 	t.Setenv("MAGPIE_OTEL_BODIES_WHOLE", "true")
@@ -784,6 +800,11 @@ func TestOTelWholeWaterfallFallback(t *testing.T) {
 		t.Fatalf("gateway: %d", code)
 	}
 	stop()
+	unrelated := httptest.NewRequest(http.MethodGet, "/", nil)
+	unrelated.Header.Set("X-Fixture-Export", collectorNonce)
+	collector.Config.Handler.ServeHTTP(httptest.NewRecorder(), unrelated)
+	collector.Config.Handler.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/traces", strings.NewReader("unrelated")))
 	exported := ""
 	for len(received) > 0 {
 		exported += <-received + "\n"

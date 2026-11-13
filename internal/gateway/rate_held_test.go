@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,9 +20,14 @@ import (
 type limitedUp struct {
 	refuse func(w http.ResponseWriter)
 	n      atomic.Int32
+	nonce  string
 }
 
 func (u *limitedUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || u.nonce != "" && r.Header.Get("X-Fixture-Limit") != u.nonce {
+		http.NotFound(w, r)
+		return
+	}
 	io.Copy(io.Discard, r.Body)
 	u.n.Add(1)
 	w.Header()["Content-Type"] = nil
@@ -102,10 +108,11 @@ func TestRateLimitedKeysHeldUntilTheirReset(t *testing.T) {
 		for _, keys := range [][]string{{"k-a"}, {"k-a", "k-b"}} {
 			t.Run(x.name+"/"+strconv.Itoa(len(keys))+" keys", func(t *testing.T) {
 				fresh(t)
-				up := &limitedUp{refuse: x.refuse}
+				up := &limitedUp{refuse: x.refuse, nonce: rand.Text()}
 				srv := httptest.NewServer(up)
 				t.Cleanup(srv.Close)
 				p := provider.Provider{ID: "lim", Name: "lim", Chat: srv.URL + "/v1", Models: []string{"m"}, Key: keys[0]}
+				p.Headers = map[string]string{"X-Fixture-Limit": up.nonce}
 				for _, k := range keys[1:] {
 					p.Keys = append(p.Keys, provider.KeyAccount{Key: k})
 				}
@@ -127,6 +134,11 @@ func TestRateLimitedKeysHeldUntilTheirReset(t *testing.T) {
 				if first != len(keys) {
 					t.Errorf("first request asked %d times, want each key once", first)
 				}
+				unrelated := httptest.NewRequest(http.MethodGet, "/", nil)
+				unrelated.Header.Set("X-Fixture-Limit", up.nonce)
+				up.ServeHTTP(httptest.NewRecorder(), unrelated)
+				up.ServeHTTP(httptest.NewRecorder(),
+					httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{}")))
 				rec := clientRetries(t, 4, ask)
 				if n := int(up.n.Load()); n != first {
 					t.Errorf("the agent's 4 retries reached the vendor %d times while every key was limited for %v", n-first, limitedFor)
