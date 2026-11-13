@@ -4895,7 +4895,10 @@ magpie.plugin("library", (ctx) => {
     const who = el("div", "who");
     who.append(el("div", "name mono", p.name + (p.version ? " " + p.version : "")));
     if (p.description) who.append(el("div", "lib-subagentdesc", p.description));
-    const line = pluginParts(p);
+    // counts, not every name: PStack has a hundred (jinpwng on X); the
+    // names are in the dialog, folded
+    const line = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]]
+      .filter(([, v]) => v?.length).map(([k, v]) => k + " " + v.length).join(" · ");
     if (line) who.append(el("div", "sub lib-plparts", line));
     row.append(glyph(GLYPH.folder), who,
       agentChips(all, p.agents, chipsChange("plugins/agents", p.name, "plugins", (x) => pluginRow(x, all)), { all: true }),
@@ -4913,7 +4916,11 @@ magpie.plugin("library", (ctx) => {
     ed.append(head);
     if (p.description) ed.append(el("p", "lib-subagentdesc", p.description));
     const rows = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]].filter(([, v]) => v?.length);
-    for (const [label, names] of rows) ed.append(...field(label, el("div", "mono lib-plnames", names.join(", "))));
+    for (const [label, names] of rows) {
+      const d = el("details", "lib-plgroup");
+      d.append(el("summary", "", label + " " + names.length), el("div", "mono lib-plnames", names.join(", ")));
+      ed.append(d);
+    }
     if (p.missing?.length) ed.append(el("div", "hint lib-plmissing", t("Taken out by hand: {names}", { names: p.missing.join(", ") })));
     if (p.left?.length) {
       const left = el("div", "lib-plleft");
@@ -6540,7 +6547,9 @@ magpie.plugin("library", (ctx) => {
     bar.append(el("span", "label", t("Put skills in")), segs([["agents", t("Each agent's own folder")], ["shared", "~/.agents/skills"]], where, (w) => {
       if (w !== where) change("skills/where", { how: w }, w === "shared" ? t("Every skill is in ~/.agents/skills now") : t("Skills go to the agents they're ticked for now"));
     }));
-    bar.append(el("span", "note", where === "shared"
+    bar.append(el("span", "note", where === "shared" && lib.skillRouter
+      ? t("The skill router lists nothing while every skill is in ~/.agents/skills: choose each agent's own folder.")
+      : where === "shared"
       ? t("Every skill on here is linked into ~/.agents/skills too: each agent that reads that folder has every skill, whatever is ticked. The files stay in the library.")
       : t("Each agent gets the skills ticked for it, in its own folder.")));
     return bar;
@@ -7404,6 +7413,7 @@ magpie.plugin("library", (ctx) => {
     if (readers) ed.append(el("p", "lib-confirm", one
       ? t("{agents} read ~/.agents/skills themselves. They keep it, ticked here, and you can turn it off for any of them, or on this computer only.", { agents: readers })
       : t("{agents} read ~/.agents/skills themselves. They keep them, ticked here, and you can turn each off for any of them, or on this computer only.", { agents: readers })));
+    if (lib.sharedSkills) ed.append(el("p", "lib-confirm", t("Every skill is kept in ~/.agents/skills now, which can't go with choosing agents. That setting goes off: magpie's links there are taken away, your own entries stay.")));
     ed.append(el("p", "lib-confirm lib-muted", one
       ? t("To put it back: {cmd}", { cmd: "magpie library skill hand-back " + s.name })
       : t("To put one back: {cmd}", { cmd: "magpie library skill hand-back <name>" })));
