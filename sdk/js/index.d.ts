@@ -10,7 +10,7 @@ export type Method = "inbound.decode" | "inbound.response" | "provider.execute" 
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
 export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate";
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
