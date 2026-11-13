@@ -126,9 +126,7 @@ func helperModule() sdk.Module {
 		sdk.MethodAuthFinish: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 			return sdk.AuthResult{ID: "account", Credentials: json.RawMessage(`{"token":"only-this-account"}`)}, nil
 		},
-		sdk.MethodAuthRefresh: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
-			return sdk.AuthResult{ID: call.Scope.Account, Credentials: call.Auth}, nil
-		},
+		sdk.MethodAuthRefresh: fixtureAuthRefresh,
 		sdk.MethodAuthLogout: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 			return map[string]bool{"ok": true}, nil
 		},
@@ -164,7 +162,16 @@ func helperModule() sdk.Module {
 	if manifest.Contract.Has(sdk.InboundCodec) {
 		inbounds = []codec.Inbound{fixtureCodec{}}
 	}
-	return sdk.Module{Manifest: manifest, Handlers: handlers, Inbounds: inbounds}
+	actions := map[string]sdk.Handler{}
+	for _, action := range manifest.Actions {
+		if action.ID == "fixture.input-size" && action.Effect == "read" &&
+			(action.Component == "" || action.Component == sdk.PrimaryComponent) {
+			actions[action.ID] = func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+				return map[string]int{"bytes": len(call.Params)}, nil
+			}
+		}
+	}
+	return sdk.Module{Manifest: manifest, Handlers: handlers, Inbounds: inbounds, Actions: actions}
 }
 
 func fixtureTool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {

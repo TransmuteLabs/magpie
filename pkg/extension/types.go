@@ -39,16 +39,28 @@ type HeadersEvent struct {
 }
 
 type ExecuteRequest struct {
-	Protocol    string          `json:"protocol"`
-	Body        []byte          `json:"body,omitempty"`
-	Headers     http.Header     `json:"headers,omitempty"`
-	Model       string          `json:"model"`
-	OperationID string          `json:"operationId,omitempty"`
-	Credentials json.RawMessage `json:"credentials,omitempty"`
-	Options     json.RawMessage `json:"options,omitempty"`
+	Protocol    string            `json:"protocol"`
+	Operation   ProviderOperation `json:"operation,omitempty"`
+	Body        []byte            `json:"body,omitempty"`
+	Headers     http.Header       `json:"headers,omitempty"`
+	Model       string            `json:"model"`
+	OperationID string            `json:"operationId,omitempty"`
+	Credentials json.RawMessage   `json:"credentials,omitempty"`
+	Options     json.RawMessage   `json:"options,omitempty"`
 }
 
 type ProviderRequest = ExecuteRequest
+
+type ExecuteOptions struct {
+	Method      string          `json:"method"`
+	Path        string          `json:"path"`
+	Query       string          `json:"query"`
+	Proxy       string          `json:"proxy"`
+	EscapedPath string          `json:"escapedPath,omitempty"`
+	CallerID    string          `json:"callerId,omitempty"`
+	RequestID   string          `json:"requestId,omitempty"`
+	Native      json.RawMessage `json:"native,omitempty"`
+}
 
 type ExecuteResult struct {
 	Status  int         `json:"status,omitempty"`
@@ -63,16 +75,29 @@ type AcceptedEvent struct {
 }
 
 type Model struct {
-	ID            string                 `json:"id"`
-	Name          string                 `json:"name,omitempty"`
-	Protocols     []protocolext.Protocol `json:"protocols,omitempty"`
-	ContextWindow int64                  `json:"contextWindow,omitempty"`
-	MaxOutput     int64                  `json:"maxOutput,omitempty"`
-	Tools         bool                   `json:"tools,omitempty"`
-	Vision        bool                   `json:"vision,omitempty"`
-	Reasoning     bool                   `json:"reasoning,omitempty"`
-	Price         *ModelPrice            `json:"price,omitempty"`
-	Efforts       []string               `json:"efforts,omitempty"`
+	ID               string                 `json:"id"`
+	Name             string                 `json:"name,omitempty"`
+	Protocols        []protocolext.Protocol `json:"protocols,omitempty"`
+	ContextWindow    int64                  `json:"contextWindow,omitempty"`
+	MaxContextWindow int64                  `json:"maxContextWindow,omitempty"`
+	MaxOutput        int64                  `json:"maxOutput,omitempty"`
+	Tools            bool                   `json:"tools,omitempty"`
+	Vision           bool                   `json:"vision,omitempty"`
+	Reasoning        bool                   `json:"reasoning,omitempty"`
+	Price            *ModelPrice            `json:"price,omitempty"`
+	Efforts          []string               `json:"efforts,omitempty"`
+	Kind             string                 `json:"kind,omitempty"`
+	InputModalities  []string               `json:"inputModalities"`
+	OutputModalities []string               `json:"outputModalities"`
+	Released         string                 `json:"released,omitempty"`
+	Temperature      *bool                  `json:"temperature,omitempty"`
+	ServiceTiers     []string               `json:"serviceTiers,omitempty"`
+	Free             bool                   `json:"free,omitempty"`
+	Rate             float64                `json:"rate,omitempty"`
+	RateWas          float64                `json:"rateWas,omitempty"`
+	AlwaysThinks     bool                   `json:"alwaysThinks,omitempty"`
+	DynamicTools     bool                   `json:"dynamicTools,omitempty"`
+	DefaultEffort    string                 `json:"defaultEffort,omitempty"`
 }
 
 type ModelPrice struct {

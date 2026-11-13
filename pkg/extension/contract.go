@@ -22,7 +22,7 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 2},
+		Version: APIVersion{Major: 1, Minor: 3},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
 			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks,
@@ -58,10 +58,11 @@ type InboundDescriptor struct {
 }
 
 type ProviderDescriptor struct {
-	ID        string                 `json:"id"`
-	Name      string                 `json:"name"`
-	Protocols []protocolext.Protocol `json:"protocols"`
-	Models    []Model                `json:"models,omitempty"`
+	ID         string                 `json:"id"`
+	Name       string                 `json:"name"`
+	Protocols  []protocolext.Protocol `json:"protocols"`
+	Models     []Model                `json:"models,omitempty"`
+	Operations []ProviderOperation    `json:"operations,omitempty"`
 }
 
 type AgentDescriptor struct {

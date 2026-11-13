@@ -27,7 +27,7 @@ const call = (worker, id, method, input = params(method), extra = {}) =>
   worker.send({ kind: "call", id, method, params: input, scope: { plugin: "hooks", session: "session", operation: id }, ...extra });
 
 test("SDK 1.2 advertises gateway hooks and accepts explicit host compatibility", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 2 });
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 3 });
   assert.equal(SDK.CONTRACT.capabilities.length, 11);
   assert.equal(SDK.MAX_GATEWAY_STATE_BYTES, 64 << 10);
   const source = manifest();
@@ -73,7 +73,7 @@ test("only declared gateway methods require handlers and service manifests do no
 });
 
 test("tool exposure requires API 1.2 and retains shared defaults for SDK 1.0 and 1.1", () => {
-  for (const minor of [0, 1, 2]) {
+  for (const minor of [0, 1, 2, 3]) {
     const value = { ...manifest(), hooks: undefined, contract: { version: { major: 1, minor }, capabilities: ["tool-provider"] },
       tools: [{ name: "tool", inputSchema: {} }] };
     assert.doesNotThrow(() => SDK.validateManifest(value));

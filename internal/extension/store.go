@@ -37,6 +37,7 @@ type Account struct {
 	ID         string          `json:"id"`
 	Generation uint64          `json:"generation"`
 	Auth       json.RawMessage `json:"auth"`
+	ExpiresAt  int64           `json:"expiresAt,omitempty"`
 }
 
 type JournalEntry struct {
@@ -52,7 +53,8 @@ type Store struct {
 
 type storeAccount struct {
 	Account
-	Deleted bool `json:"deleted,omitempty"`
+	Deleted bool           `json:"deleted,omitempty"`
+	Refresh *refreshRecord `json:"refresh,omitempty"`
 }
 
 type storeAccounts struct {
@@ -170,7 +172,7 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 	if !storeAccountID(account.Plugin, account.Provider, account.ID) {
 		return result, storeInvalid()
 	}
-	if len(account.Auth) > storeFileLimit || !json.Valid(account.Auth) {
+	if len(account.Auth) > storeFileLimit || !json.Valid(account.Auth) || account.ExpiresAt < 0 {
 		return result, storeError("invalid_state", "Extension credentials must be bounded JSON.")
 	}
 	err := s.withStore(account.Plugin, func(root *os.Root) error {
@@ -201,7 +203,8 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 		if index < 0 {
 			records.Accounts = append(records.Accounts, storeAccount{Account: account})
 		} else {
-			records.Accounts[index] = storeAccount{Account: account}
+			records.Accounts[index].Account = account
+			records.Accounts[index].Deleted = false
 		}
 		if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
 			return err
@@ -230,6 +233,7 @@ func (s *Store) DeleteAccount(plugin, provider, id string, expectedGeneration ui
 			}
 			record.Generation++
 			record.Auth = nil
+			record.ExpiresAt = 0
 			record.Deleted = true
 			records.Accounts[index] = record
 			return storeWrite(root, "accounts.json", records, storeFileLimit)
@@ -244,6 +248,11 @@ func (s *Store) Journal(scope sdk.Scope, state string) (JournalEntry, error) {
 		return result, storeInvalid()
 	}
 	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+		if _, found, err := refreshOperation(root, scope.Plugin, scope.Operation); err != nil {
+			return err
+		} else if found {
+			return storeError("operation_conflict", "Refresh receipts are owned by the account transaction.")
+		}
 		previous, found, err := storeReadOperation(root, scope.Plugin, scope.Operation)
 		if err != nil {
 			return err
@@ -285,6 +294,10 @@ func (s *Store) Operation(plugin, operation string) (JournalEntry, error) {
 		return result, storeInvalid()
 	}
 	err := s.withStore(plugin, func(root *os.Root) error {
+		if entry, found, err := refreshOperation(root, plugin, operation); err != nil || found {
+			result = entry
+			return err
+		}
 		entry, found, err := storeReadOperation(root, plugin, operation)
 		if err != nil {
 			return err
@@ -372,18 +385,21 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 	if !found {
 		return storeAccounts{Schema: 1, Accounts: []storeAccount{}}, nil
 	}
-	if records.Schema != 1 || records.Accounts == nil {
+	if records.Schema != 1 && records.Schema != 2 || records.Accounts == nil {
 		return storeAccounts{}, storeUnreadable()
 	}
 	seen := make(map[string]bool, len(records.Accounts))
 	for _, record := range records.Accounts {
-		if record.Plugin != plugin || !storeAccountID(record.Plugin, record.Provider, record.ID) || record.Generation == 0 ||
+		if record.Plugin != plugin || !storeAccountID(record.Plugin, record.Provider, record.ID) || record.Generation == 0 || record.ExpiresAt < 0 ||
 			record.Deleted && len(record.Auth) != 0 && !bytes.Equal(record.Auth, []byte("null")) ||
 			!record.Deleted && !json.Valid(record.Auth) {
 			return storeAccounts{}, storeUnreadable()
 		}
 		identity := storeHash(record.Provider, record.ID)
 		if seen[identity] {
+			return storeAccounts{}, storeUnreadable()
+		}
+		if record.Refresh != nil && (records.Schema != 2 || !validRefreshRecord(record)) {
 			return storeAccounts{}, storeUnreadable()
 		}
 		seen[identity] = true

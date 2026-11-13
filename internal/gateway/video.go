@@ -26,6 +26,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The gateway makes videos: POST /v1/videos, GET /v1/videos/{id} and
@@ -126,6 +127,19 @@ func customVideomakers(p provider.Provider) []catalog.Model {
 }
 
 func customVideomakersOf(p provider.Provider, avail func() []catalog.Model) []catalog.Model {
+	if p.IsExtension() {
+		if !p.ExtensionSupportsOperation(sdk.OperationVideoCreate) {
+			return nil
+		}
+		var out []catalog.Model
+		for _, model := range avail() {
+			if model.Films || slices.Contains(model.OutputModalities, "video") {
+				model.Provider = p.ID
+				out = append(out, model)
+			}
+		}
+		return out
+	}
 	if p.IsPlugin() && !drawsGrok(p) {
 		var out []catalog.Model
 		for _, m := range avail() {
@@ -221,6 +235,10 @@ func arkTasks(p provider.Provider) string {
 // first now. "0" for a provider with no key (a local server); a plugin's
 // account's signer, the vendor keeping it for that account.
 func keyMark(p provider.Provider) string {
+	if scope, ok := p.ExtensionScope(); ok {
+		digest := sha256.Sum256([]byte(scope.Plugin + "\x00" + scope.Provider + "\x00" + scope.Account))
+		return "e" + hex.EncodeToString(digest[:12])
+	}
 	if p.IsPlugin() {
 		return "a" + signer(p)
 	}
@@ -239,7 +257,7 @@ func customVideoID(p provider.Provider, theirs string, t time.Time) string {
 // markedKey is p on its key whose mark is by (keyMark), while that key is
 // still on.
 func markedKey(p provider.Provider, by string) (provider.Provider, bool) {
-	if p.IsPlugin() {
+	if p.IsPlugin() || p.IsExtension() {
 		// the plugin's account that started it, while it is still on
 		for _, q := range append([]provider.Provider{p}, p.AlsoOn()...) {
 			if keyMark(q) == by {
@@ -1035,6 +1053,8 @@ func (s *Server) videoStatus(ctx context.Context, p provider.Provider, vendorID 
 
 // videosCreate starts a video and answers with its id.
 func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
+	extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+	r = r.WithContext(extensionContext)
 	inputBody, admitted := s.requestBody(w, r, provider.Chat)
 	if !admitted {
 		return
@@ -1179,6 +1199,10 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		v, code, err = s.startVideo(ctx, memberOn(r, g, m), m.Provider, m.Model, f)
 		p, call.Provider = v.p, v.p.ID
 		side.tryAt(candidateOf(v.p, m.Model), at)(code, err)
+		if outcome := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400); outcome != nil {
+			code, err = http.StatusConflict, outcome
+			break
+		}
 		// a group's next member is asked as a chat's would be: while this
 		// one can't make videos, its vendor fails, is out of quota or
 		// doesn't serve the model; a refusal of the request is the request's

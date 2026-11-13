@@ -50,9 +50,10 @@ type hostWait struct {
 }
 
 type outputFrame struct {
-	ctx  context.Context
-	body []byte
-	done chan error
+	ctx      context.Context
+	body     []byte
+	done     chan error
+	complete *callState
 }
 
 func Serve(ctx context.Context, input io.Reader, output io.Writer, module Module) error {
@@ -252,19 +253,17 @@ func (server *worker) run(state *callState) {
 			frame.Result = nil
 		}
 	}
-	if err := server.send(server.ctx, frame); err != nil && server.ctx.Err() == nil {
+	if err := server.sendFinal(server.ctx, frame, state); err != nil && server.ctx.Err() == nil {
 		if frame.Error == nil {
 			fallback := Frame{Kind: KindResult, ID: state.call.ID, Error: publicError(err)}
-			if writeError := server.send(server.ctx, fallback); writeError != nil {
+			if writeError := server.sendFinal(server.ctx, fallback, state); writeError != nil {
 				server.cancel(writeError)
 			}
 		} else {
 			server.cancel(err)
 		}
 	}
-	server.mu.Lock()
-	delete(server.calls, state.call.ID)
-	server.mu.Unlock()
+	server.finishCall(state)
 }
 
 func (server *worker) invoke(state *callState, stream *Stream) (result any, err error) {
@@ -320,6 +319,10 @@ func (server *worker) invoke(state *callState, stream *Stream) (result any, err 
 }
 
 func (server *worker) send(ctx context.Context, frame Frame) error {
+	return server.sendFinal(ctx, frame, nil)
+}
+
+func (server *worker) sendFinal(ctx context.Context, frame Frame, complete *callState) error {
 	body, err := marshalPayload(frame)
 	if err != nil {
 		return err
@@ -327,7 +330,7 @@ func (server *worker) send(ctx context.Context, frame Frame) error {
 	if len(body) > MaxFrameBytes {
 		return &Error{Code: "resource_exhausted", Message: "extension frame exceeds its byte limit"}
 	}
-	request := outputFrame{ctx: ctx, body: append(body, '\n'), done: make(chan error, 1)}
+	request := outputFrame{ctx: ctx, body: append(body, '\n'), done: make(chan error, 1), complete: complete}
 	select {
 	case server.output <- request:
 	case <-ctx.Done():
@@ -345,12 +348,24 @@ func (server *worker) send(ctx context.Context, frame Frame) error {
 	}
 }
 
+func (server *worker) finishCall(state *callState) {
+	if state == nil {
+		return
+	}
+	server.mu.Lock()
+	if server.calls[state.call.ID] == state {
+		delete(server.calls, state.call.ID)
+	}
+	server.mu.Unlock()
+}
+
 func (server *worker) writeLoop(output io.Writer) {
 	for {
 		select {
 		case <-server.ctx.Done():
 			return
 		case request := <-server.output:
+			server.finishCall(request.complete)
 			if err := request.ctx.Err(); err != nil {
 				request.done <- err
 				continue

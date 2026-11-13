@@ -50,6 +50,11 @@ const request: ProviderRequest = { protocol: "chat", model: "echo" };
 const modelPrice: ModelPrice = { currency: "USD", input: 3, output: 5, cacheRead: 0.5, cacheWrite: 1, cacheWrite1h: 2 };
 const efforts: Effort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const models: Model[] = [{ id: "unknown" }, { id: "nullable", price: null }, { id: "free", price: {} }, { id: "priced", price: modelPrice, efforts }];
+const mediaRequest: ProviderRequest = { protocol: "chat", operation: "audio.speech", model: "voice" };
+const mediaModel: Model = { id: "vector", kind: "embedding", inputModalities: ["text"], outputModalities: [],
+  maxContextWindow: 512000, temperature: false, serviceTiers: ["priority", "ultrafast"], rate: 0.5 };
+void mediaRequest;
+void mediaModel;
 const field: AgentField = { key: "model", label: "Model" };
 const agent: AgentDescriptor = { id: "editor", name: "Editor", bin: "editor", configFiles: [".config/editor/config.json"], fields: [field] };
 const session: SessionDescriptor = { id: "convert", name: "Convert", from: "source", to: "target", outputDir: ".config/converted" };

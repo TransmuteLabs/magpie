@@ -14,6 +14,10 @@ export interface Contract {
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ProviderOperation = "embeddings" | "rerank" | "images.generate" | "images.edit"
+  | "audio.transcribe" | "audio.translate" | "audio.speech"
+  | "videos.create" | "videos.get" | "videos.content" | "videos.delete" | "videos.remix";
+export type Modality = "text" | "image" | "audio" | "video" | "pdf";
 export interface ModelPrice {
   currency?: "USD";
   input?: number;
@@ -27,12 +31,25 @@ export interface Model {
   name?: string;
   protocols?: Protocol[];
   contextWindow?: number;
+  maxContextWindow?: number;
   maxOutput?: number;
   tools?: boolean;
   vision?: boolean;
   reasoning?: boolean;
   price?: ModelPrice | null;
   efforts?: Effort[];
+  kind?: "chat" | "image" | "video" | "embedding" | "rerank" | "speech" | "transcription";
+  inputModalities?: Modality[] | null;
+  outputModalities?: Modality[] | null;
+  released?: string;
+  temperature?: boolean | null;
+  serviceTiers?: ("priority" | "ultrafast")[];
+  free?: boolean;
+  rate?: number;
+  rateWas?: number;
+  alwaysThinks?: boolean;
+  dynamicTools?: boolean;
+  defaultEffort?: Effort;
 }
 export interface AgentField {
   key: string;
@@ -59,7 +76,7 @@ interface ManifestFields {
   entry: string;
   contract: Contract;
   inbounds?: { id: string; path: string }[];
-  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[] }[];
+  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[] }[];
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
   tools?: ToolDescriptor[];
@@ -179,10 +196,20 @@ export interface ResponseEvent {
 }
 export interface HeadersEvent { status: number; headers?: Headers }
 export interface ExecuteRequest {
-  protocol: Protocol; body?: string; headers?: Headers; model: string; operationId?: string;
+  protocol: Protocol; operation?: ProviderOperation; body?: string; headers?: Headers; model: string; operationId?: string;
   credentials?: JSONValue; options?: JSONValue;
 }
 export type ProviderRequest = ExecuteRequest;
+export interface ExecuteOptions {
+  method: string;
+  path: string;
+  query: string;
+  proxy: string;
+  escapedPath?: string;
+  callerId?: string;
+  requestId?: string;
+  native?: JSONValue;
+}
 export interface Usage {
   inputTokens?: number; outputTokens?: number; cachedTokens?: number; cacheWriteTokens?: number;
   cost?: number; currency?: string;
@@ -236,7 +263,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string }
 export interface ComponentIdentity { id: string; contract: ServiceContract }

@@ -220,12 +220,12 @@ func TestGatewayBrowserOriginRequiresExplicitOptIn(t *testing.T) {
 }
 
 func TestToolExposureRequiresAPI12AndPreservesLegacyOmission(t *testing.T) {
-	for _, minor := range []int{0, 1, 2} {
+	for _, minor := range []int{0, 1, 2, 3} {
 		for _, exposure := range []string{"", "shared", "local-owner", "remote", "local"} {
 			manifest := testManifest(ToolProvider)
 			manifest.Contract.Version.Minor = minor
 			manifest.Tools = []ToolDescriptor{{Name: "memory_search", InputSchema: json.RawMessage(`true`), Exposure: exposure}}
-			valid := exposure == "" || minor == 2 && (exposure == "shared" || exposure == "local-owner")
+			valid := exposure == "" || minor >= 2 && (exposure == "shared" || exposure == "local-owner")
 			if err := manifest.Validate(); (err == nil) != valid {
 				t.Fatalf("minor=%d exposure=%q validation=%v", minor, exposure, err)
 			}

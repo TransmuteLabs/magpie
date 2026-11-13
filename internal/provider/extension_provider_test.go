@@ -23,6 +23,7 @@ type fixtureExtensionProviderHost struct {
 	namespace string
 	disabled  bool
 	call      func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error)
+	refresh   func(context.Context, string, sdk.Scope) (sdk.AuthResult, error)
 }
 
 func (host *fixtureExtensionProviderHost) List() ([]extensionhost.Installed, error) {
@@ -39,6 +40,13 @@ func (host *fixtureExtensionProviderHost) Manifest(id string) (sdk.Manifest, err
 func (host *fixtureExtensionProviderHost) Store() *extensionhost.Store { return host.store }
 
 func (host *fixtureExtensionProviderHost) Namespace() string { return host.namespace }
+
+func (host *fixtureExtensionProviderHost) RefreshAccount(ctx context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
+	if host.refresh == nil {
+		return sdk.AuthResult{}, errors.New("fixture has no refresh transaction")
+	}
+	return host.refresh(ctx, id, scope)
+}
 
 func (host *fixtureExtensionProviderHost) Call(ctx context.Context, id, method string, scope sdk.Scope, params any, consume func(extensionhost.Event) error) (json.RawMessage, error) {
 	if id != host.manifest.ID || scope.Plugin != id {
@@ -247,11 +255,15 @@ func TestExtensionProviderTerminalOutcomePreservesTypedError(t *testing.T) {
 func TestExtensionAuthSavesWithGenerationCAS(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	scope := sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
-	host.call = func(_ context.Context, method string, got sdk.Scope, params any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
-		if method != sdk.MethodAuthRefresh || got != scope {
-			t.Fatalf("refresh scope: %s %+v", method, got)
+	host.refresh = func(_ context.Context, id string, got sdk.Scope) (sdk.AuthResult, error) {
+		if id != scope.Plugin || got != scope {
+			t.Fatalf("refresh scope: %s %+v", id, got)
 		}
-		return json.RawMessage(`{"id":"alice","credentials":{"access":"new-access"}}`), nil
+		_, err := host.store.SaveAccount(extensionhost.Account{
+			Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account,
+			Auth: json.RawMessage(`{"access":"new-access"}`),
+		}, scope.Generation)
+		return sdk.AuthResult{ID: scope.Account}, err
 	}
 	result, err := RefreshExtensionAuth(context.Background(), scope)
 	if err != nil || result.ID != "alice" || result.Credentials != nil {

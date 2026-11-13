@@ -99,6 +99,8 @@ func (j *jsonRetrieval) forModel(model string) ([]byte, string, error) {
 // serveRetrieval routes a retrieval request for the model asked to its
 // provider, or over a group's members, and passes the answer back.
 func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, operation string, start time.Time, asked string, req retrieval) {
+	extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+	r = r.WithContext(extensionContext)
 	who := callerOf(r)
 	call := Call{Time: start, From: provider.Chat, Agent: who.agent, Via: who.via, Model: asked, headers: headerLogOf(r.Context())}
 	usage.Saw(agentOf(r))
@@ -304,7 +306,11 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 		}
 		tried(code, err)
 		call.Millis = time.Since(start).Milliseconds()
-		if err != nil && !last && r.Context().Err() == nil {
+		noReplay := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400)
+		if noReplay != nil {
+			code, err = http.StatusConflict, noReplay
+		}
+		if err != nil && noReplay == nil && !last && r.Context().Err() == nil {
 			skipped = append(skipped, c.label()+": "+err.Error())
 			continue
 		}

@@ -70,11 +70,37 @@ func RefreshExtensionAuth(ctx context.Context, scope sdk.Scope) (sdk.AuthResult,
 	if scope.Account == "" || scope.Generation == 0 {
 		return sdk.AuthResult{}, errors.New("an explicit extension account generation is required")
 	}
-	var result sdk.AuthResult
-	if err := extensionAuthCall(ctx, scope, sdk.MethodAuthRefresh, sdk.AuthRefreshRequest{}, &result); err != nil {
+	if settings.AccountDiscoveryOff() {
+		return sdk.AuthResult{}, errAccountDiscoveryOff
+	}
+	host := providerExtensionHost()
+	manifest, err := host.Manifest(scope.Plugin)
+	if err != nil {
 		return sdk.AuthResult{}, err
 	}
-	return saveExtensionAuth(scope, result)
+	found := false
+	for _, provider := range manifest.Providers {
+		found = found || provider.ID == scope.Provider
+	}
+	if manifest.ID != scope.Plugin || !manifest.Contract.Has(sdk.AccountAuth) || !found {
+		return sdk.AuthResult{}, errors.New("extension provider authentication is unavailable")
+	}
+	owner, ok := host.(interface {
+		RefreshAccount(context.Context, string, sdk.Scope) (sdk.AuthResult, error)
+	})
+	if !ok {
+		return sdk.AuthResult{}, errors.New("extension host does not support transactional credential refresh")
+	}
+	ctx, err = extensionNetworkContext(ctx, scope)
+	if err != nil {
+		return sdk.AuthResult{}, err
+	}
+	result, err := owner.RefreshAccount(ctx, scope.Plugin, scope)
+	result.Credentials = nil
+	if err == nil {
+		Changed()
+	}
+	return result, err
 }
 
 func saveExtensionAuth(scope sdk.Scope, result sdk.AuthResult) (sdk.AuthResult, error) {
@@ -93,7 +119,7 @@ func saveExtensionAuth(scope sdk.Scope, result sdk.AuthResult) (sdk.AuthResult, 
 		return sdk.AuthResult{}, errors.New("extension authentication returned no credentials")
 	}
 	_, err := providerExtensionHost().Store().SaveAccount(extensionhost.Account{
-		Plugin: scope.Plugin, Provider: scope.Provider, ID: id, Auth: result.Credentials,
+		Plugin: scope.Plugin, Provider: scope.Provider, ID: id, Auth: result.Credentials, ExpiresAt: result.ExpiresAt,
 	}, scope.Generation)
 	if err != nil {
 		return sdk.AuthResult{}, err

@@ -347,8 +347,9 @@ func (manifest Manifest) validateComposite() error {
 		bindings[binding.ID] = true
 	}
 	if compatibility := manifest.Compatibility; compatibility != nil {
-		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" ||
-			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 {
+		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" ||
+			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 ||
+			compatibility.HostAPI == "^1.3" && manifest.Contract.Version.Minor < 3 {
 			return fmt.Errorf("unsupported host API requirement %q", compatibility.HostAPI)
 		}
 		if len(compatibility.Platforms) > 128 {

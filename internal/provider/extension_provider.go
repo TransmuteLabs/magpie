@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -44,6 +45,7 @@ type extensionAccount struct {
 	descriptor sdk.ProviderDescriptor
 	scope      sdk.Scope
 	modelKey   string
+	generation *atomic.Uint64
 }
 
 func ExtensionProviderID(module, provider string) string {
@@ -184,6 +186,8 @@ func extensionServedModels(primary Provider, providers []Provider) []catalog.Mod
 }
 
 func extensionProvider(binding *extensionAccount) Provider {
+	binding.generation = &atomic.Uint64{}
+	binding.generation.Store(binding.scope.Generation)
 	id := ExtensionProviderID(binding.scope.Plugin, binding.scope.Provider)
 	user := binding.scope.Account
 	if user == "" {
@@ -224,6 +228,25 @@ func extensionProtocol(protocol string) Protocol {
 }
 
 func (binding *extensionAccount) check(ctx context.Context) error {
+	if err := binding.checkAvailability(ctx); err != nil {
+		return err
+	}
+	scope := binding.currentScope()
+	if scope.Account != "" {
+		account, err := binding.host.Store().RefreshedAccount(scope)
+		if err != nil {
+			return err
+		}
+		if binding.generation != nil {
+			binding.generation.CompareAndSwap(scope.Generation, account.Generation)
+		} else if account.Generation != scope.Generation {
+			return errors.New("extension account generation changed")
+		}
+	}
+	return nil
+}
+
+func (binding *extensionAccount) checkAvailability(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -243,21 +266,21 @@ func (binding *extensionAccount) check(ctx context.Context) error {
 	if !found {
 		return errors.New("extension provider is unavailable")
 	}
-	if binding.scope.Account != "" {
-		account, err := binding.host.Store().GetAccount(binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
-		if err != nil {
-			return err
-		}
-		if account.Generation != binding.scope.Generation {
-			return errors.New("extension account generation changed")
-		}
-	}
 	return nil
 }
 
+func (binding *extensionAccount) currentScope() sdk.Scope {
+	scope := binding.scope
+	if binding.generation != nil {
+		scope.Generation = binding.generation.Load()
+	}
+	return scope
+}
+
 func (binding *extensionAccount) cacheKey() string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", binding.host.Namespace(), binding.scope.Plugin, binding.scope.Provider,
-		binding.scope.Account, binding.scope.Generation, binding.modelKey)
+	scope := binding.currentScope()
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", binding.host.Namespace(), scope.Plugin, scope.Provider,
+		scope.Account, scope.Generation, binding.modelKey)
 }
 
 func loginReadingCacheKey(login Login) string {
@@ -332,8 +355,9 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 	}
 	out := make([]catalog.Model, 0, len(models))
 	for _, model := range models {
-		if model.ContextWindow < 0 || model.MaxOutput < 0 ||
-			int64(int(model.ContextWindow)) != model.ContextWindow || int64(int(model.MaxOutput)) != model.MaxOutput {
+		if model.ContextWindow < 0 || model.MaxContextWindow < 0 || model.MaxOutput < 0 ||
+			int64(int(model.ContextWindow)) != model.ContextWindow || int64(int(model.MaxContextWindow)) != model.MaxContextWindow ||
+			int64(int(model.MaxOutput)) != model.MaxOutput {
 			return nil, errors.New("extension model has invalid limits")
 		}
 		protocols := model.Protocols
@@ -342,7 +366,28 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 		}
 		entry := catalog.Model{ID: model.ID, Name: model.Name, Provider: ExtensionProviderID(binding.scope.Plugin, binding.scope.Provider),
 			Context: catalog.Window(int(model.ContextWindow)), Output: int(model.MaxOutput), Images: model.Vision,
-			Reasoning: model.Reasoning || len(model.Efforts) > 0, Efforts: slices.Clone(model.Efforts)}
+			MaxContext: int(model.MaxContextWindow), Released: model.Released, Temperature: model.Temperature,
+			InputModalities: slices.Clone(model.InputModalities), OutputModalities: slices.Clone(model.OutputModalities),
+			Tiers: slices.Clone(model.ServiceTiers), Fast: slices.Contains(model.ServiceTiers, "priority"),
+			Free: model.Free, Rate: model.Rate, RateWas: model.RateWas,
+			AlwaysThinks: model.AlwaysThinks, DynamicTools: model.DynamicTools, DefaultEffort: model.DefaultEffort,
+			Reasoning: model.Reasoning || model.AlwaysThinks || len(model.Efforts) > 0, Efforts: slices.Clone(model.Efforts)}
+		if model.Temperature != nil {
+			temperature := *model.Temperature
+			entry.Temperature = &temperature
+		}
+		if model.InputModalities != nil {
+			images := slices.Contains(model.InputModalities, "image")
+			entry.Images, entry.ImageInput = images, &images
+		}
+		switch model.Kind {
+		case "image":
+			entry.Draws = true
+		case "video":
+			entry.Films = true
+		case "embedding", "rerank", "speech", "transcription":
+			entry.Serves = model.Kind
+		}
 		if model.Price != nil {
 			entry.Price = &catalog.Price{Input: model.Price.Input, Output: model.Price.Output,
 				CacheRead: model.Price.CacheRead, CacheWrite: model.Price.CacheWrite, CacheWrite1h: model.Price.CacheWrite1h}
@@ -356,13 +401,15 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 }
 
 func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Model, error) {
-	if err := binding.check(ctx); err != nil {
+	prepared, err := binding.prepare(ctx)
+	if err != nil {
 		return nil, err
 	}
+	binding = prepared
 	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
 		return binding.models()
 	}
-	ctx, err := extensionNetworkContext(ctx, binding.scope)
+	ctx, err = extensionNetworkContext(ctx, binding.scope)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +445,7 @@ func (p Provider) ExtensionScope() (sdk.Scope, bool) {
 	if !p.IsExtension() {
 		return sdk.Scope{}, false
 	}
-	return p.Account.extension.scope, true
+	return p.Account.extension.currentScope(), true
 }
 
 func (p Provider) extensionAPIs(model string) []Protocol {
@@ -463,11 +510,13 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 		return quota
 	}
 	quota.Name = binding.descriptor.Name
-	if err := binding.check(ctx); err != nil {
-		quota.Error = err.Error()
+	prepared, err := binding.prepare(ctx)
+	if err != nil {
+		quota.Error, quota.ReadDeferred = err.Error(), netproxy.Held(ctx) != nil
 		return quota
 	}
-	ctx, err := extensionNetworkContext(ctx, binding.scope)
+	binding = prepared
+	ctx, err = extensionNetworkContext(ctx, binding.scope)
 	if err != nil {
 		quota.Error, quota.ReadDeferred = err.Error(), netproxy.Held(ctx) != nil
 		return quota

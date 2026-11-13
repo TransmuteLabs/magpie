@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
 import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
 import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
+import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation } from "./provider-policy.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -19,7 +20,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 2 }),
+  version: Object.freeze({ major: 1, minor: 3 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -143,7 +144,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -166,6 +167,7 @@ export function validateManifest(value) {
           || !Array.isArray(protocols) || !protocols.length || new Set(protocols).size !== protocols.length
           || protocols.some(protocol => !["chat", "responses", "messages", "anthropic", "gemini"].includes(protocol))
           || descriptor.models !== undefined && !Array.isArray(descriptor.models)) fail("Invalid provider descriptor");
+        validateProviderPolicy(manifest, descriptor, fail);
         const models = new Set();
         for (const model of descriptor.models || []) {
           if (!object(model) || typeof model.id !== "string" || !model.id || Buffer.byteLength(model.id) > 300
@@ -173,6 +175,7 @@ export function validateManifest(value) {
             || ["contextWindow", "maxOutput"].some(field => model[field] !== undefined && (!Number.isSafeInteger(model[field]) || model[field] < 0))
             || model.protocols !== undefined && (!Array.isArray(model.protocols) || model.protocols.some(protocol => !protocols.includes(protocol)))) fail("Invalid or duplicate provider model");
           modelPolicy(model);
+          validateExtendedModel(manifest, model, fail);
           models.add(model.id);
         }
       } else if (key === "tools") {
@@ -245,6 +248,12 @@ export function validateModule(module) {
   if (required.some(method => typeof handlers.get(method) !== "function")
     || [...handlers].some(([method, handler]) => !required.includes(method) || typeof handler !== "function")) fail("Missing or undeclared extension handler");
   for (const [method, handler] of handlers) {
+    if (method === "provider.execute") {
+      handlers.set(method, (ctx, call, stream) => {
+        validateExecuteOperation(manifest, call, message => { throw new SDKError("invalid_params", message, "not-started"); });
+        return handler(ctx, call, stream);
+      });
+    }
     if (!gatewayMethodEffect(method)) continue;
     handlers.set(method, async (ctx, call, stream) => {
       validateGatewayCall(method, call, manifest.hooks, stringifyJSON);

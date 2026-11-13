@@ -32,10 +32,18 @@ func cloneManifest(manifest Manifest) Manifest {
 	for index := range manifest.Providers {
 		provider := &manifest.Providers[index]
 		provider.Protocols = slices.Clone(provider.Protocols)
+		provider.Operations = slices.Clone(provider.Operations)
 		provider.Models = slices.Clone(provider.Models)
 		for model := range provider.Models {
 			provider.Models[model].Protocols = slices.Clone(provider.Models[model].Protocols)
 			provider.Models[model].Efforts = slices.Clone(provider.Models[model].Efforts)
+			provider.Models[model].InputModalities = slices.Clone(provider.Models[model].InputModalities)
+			provider.Models[model].OutputModalities = slices.Clone(provider.Models[model].OutputModalities)
+			provider.Models[model].ServiceTiers = slices.Clone(provider.Models[model].ServiceTiers)
+			if provider.Models[model].Temperature != nil {
+				temperature := *provider.Models[model].Temperature
+				provider.Models[model].Temperature = &temperature
+			}
 			if provider.Models[model].Price != nil {
 				price := *provider.Models[model].Price
 				provider.Models[model].Price = &price
@@ -151,8 +159,14 @@ func (manifest Manifest) Validate() error {
 			}
 			protocols[value] = true
 		}
+		if err := validateProviderOperations(manifest, provider); err != nil {
+			return err
+		}
 		models := map[string]bool{}
 		for _, model := range provider.Models {
+			if err := validateExtendedModel(manifest, model); err != nil {
+				return err
+			}
 			if model.ID == "" || len(model.ID) > 300 || strings.ContainsFunc(model.ID, func(char rune) bool { return unicode.IsSpace(char) || unicode.IsControl(char) }) || models[model.ID] {
 				return fmt.Errorf("invalid or duplicate model %q", model.ID)
 			}

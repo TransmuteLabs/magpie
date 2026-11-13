@@ -69,9 +69,11 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if err := extensionAttemptOf(ctx).Outcome(true); err != nil {
 		return nil, err
 	}
-	if err := binding.check(ctx); err != nil {
+	prepared, err := binding.prepare(ctx)
+	if err != nil {
 		return nil, err
 	}
+	binding = prepared
 	if err := netproxy.Held(ctx); err != nil {
 		return nil, err
 	}
@@ -87,28 +89,25 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			return nil, errors.New("extension provider request exceeds its body limit")
 		}
 	}
-	protocol, model := "", bodyModel(body)
+	protocol, operation, err := extensionRequestOperation(request, binding.descriptor)
+	if err != nil {
+		return nil, err
+	}
+	model := bodyModel(body)
 	path := request.URL.Path
-	switch {
-	case strings.HasSuffix(path, "/chat/completions"):
-		protocol = "chat"
-	case strings.HasSuffix(path, "/responses"):
-		protocol = "responses"
-	case strings.Contains(path, "/messages"):
-		protocol = "anthropic"
-	case strings.Contains(path, "/models/") && strings.Contains(path, ":"):
-		protocol = "gemini"
+	if protocol == "gemini" {
 		model = strings.Split(strings.SplitN(path, "/models/", 2)[1], ":")[0]
-	default:
-		return nil, errors.New("extension provider does not support this operation")
 	}
 	allowed := slicesContainProtocol(binding.descriptor, protocol)
 	if !allowed {
 		return nil, errors.New("extension provider did not declare the requested protocol")
 	}
 	headers := request.Header.Clone()
-	for _, name := range []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key", "Proxy-Authorization"} {
-		headers.Del(name)
+	for name := range headers {
+		switch strings.ToLower(name) {
+		case "authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "cookie2":
+			delete(headers, name)
+		}
 	}
 	scope := binding.scope
 	scope.Operation, scope.Attempt = randomToken(18), 1
@@ -116,19 +115,22 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if scope.Session == "" {
 		scope.Session = request.Header.Get(SessionToPluginHeader)
 	}
-	optionsValue := map[string]any{
-		"method": request.Method, "path": path, "query": request.URL.RawQuery, "proxy": netproxy.Choice(ctx),
+	optionsValue := sdk.ExecuteOptions{
+		Method: request.Method, Path: path, Query: request.URL.RawQuery, Proxy: netproxy.Choice(ctx),
+	}
+	if binding.manifest.Contract.Version.Minor >= 3 {
+		optionsValue.EscapedPath = request.URL.EscapedPath()
 	}
 	metadata := extensionhost.MetadataFrom(ctx)
 	if metadata.Plugin == scope.Plugin {
 		if metadata.CallerID != "" {
-			optionsValue["callerId"] = metadata.CallerID
+			optionsValue.CallerID = metadata.CallerID
 		}
 		if len(metadata.Value) > 0 {
-			optionsValue["native"] = metadata.Value
+			optionsValue.Native = metadata.Value
 		}
 		if metadata.RequestID != "" {
-			optionsValue["requestId"] = metadata.RequestID
+			optionsValue.RequestID = metadata.RequestID
 			identity, err := json.Marshal([]any{scope.Plugin, scope.Provider, scope.Account,
 				metadata.CallerID, scope.Session, metadata.RequestID})
 			if err != nil {
@@ -143,7 +145,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if err != nil {
 		return nil, err
 	}
-	params := sdk.ExecuteRequest{Protocol: protocol, Model: model, Body: body, Headers: headers,
+	params := sdk.ExecuteRequest{Protocol: protocol, Operation: operation, Model: model, Body: body, Headers: headers,
 		OperationID: scope.Operation, Options: options}
 	ctx, cancel := context.WithCancel(ctx)
 	reader, writer := io.Pipe()

@@ -47,11 +47,23 @@ default manager under the provider cache lock.
 
 `StartExtensionAuth`, `FinishExtensionAuth`, `RefreshExtensionAuth` and
 `LogoutExtensionAuth` use the installed authentication contract. Completed
-sign-ins and refreshes save credentials through generation CAS; returned
+sign-ins save credentials and expiry through generation CAS; returned
 helper results omit credentials. The manager supplies credentials through
 `Frame.Auth`, rather than copying them into execute/models/usage parameters.
-Renewal timing and native authentication logic remain separate from these
-provider helpers.
+Refresh uses a host-owned [transaction](../adr/0007-transactional-account-refresh.md):
+one cross-process owner rereads the selected generation, records dispatch,
+and atomically publishes credentials, expiry, the next generation and a
+sanitized completion receipt. An orphaned dispatch is uncertain and cannot
+spend the same rotating token again. Caller cancellation after dispatch does
+not abandon the bounded owner. Manager shutdown cancels and joins that work.
+Publication stays in the originally selected Manager/Store.
+
+Before execution, model refresh or usage, an account expiring within one
+minute is renewed through the same owner. A local binding copy adopts only
+the exact next generation and an expiry more than thirty seconds away.
+Unknown expiry leaves current behavior unchanged. Network holds and manually
+superseded generations fail closed. This is request-driven preflight,
+separate from periodic scheduling and the module's vendor-specific exchange.
 
 Auth, model discovery and usage calls apply the selected provider/account's
 `Via` policy while preserving their parent request context. A network hold
@@ -60,6 +72,28 @@ prevents invoking the module; a held usage read remains deferred. The
 context through `netproxy.Func`, including named and global proxies or a
 direct route. `Options.proxy` is the selected choice, not necessarily a
 resolved proxy URL.
+
+## Declared operations and model facts
+
+API 1.3 adds a finite `ProviderDescriptor.operations` registry separate from
+conversational protocols. The
+[operation contract](../adr/0008-provider-operation-contracts.md) defines exact
+endpoints, raw binary/multipart handling and the compatibility floor. An
+omitted list retains conversational execution only. The actual leased
+manifest and both author SDKs reject undeclared operations before dispatch.
+`ExecuteRequest.operation` names the operation; `Options` preserves method,
+path, escapedPath, query and selected proxy. Host credentials remain separate.
+
+Kinds distinguish images, video, embeddings, rerank, speech and transcription
+from chat. Modalities retain unknown versus explicitly empty values.
+Maximum/default context, release, temperature, service tiers, subscription
+rates and reasoning defaults reach the ordinary catalog. Invalid refreshes
+retain the last validated catalog.
+
+Ordinary image/video selection requires supported operations. Video IDs bind
+continuations to the original module/provider/account, including after
+credential rotation. Pausing that account cannot transfer its video to
+another account that became the provider's default.
 
 ## Quota and execution
 

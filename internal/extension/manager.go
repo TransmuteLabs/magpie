@@ -28,14 +28,15 @@ import (
 )
 
 type managedWorker struct {
-	mu       sync.Mutex
-	entry    Installed
-	client   *workerClient
-	active   int
-	retiring bool
-	idle     chan struct{}
-	starting chan struct{}
-	config   sdk.ConfigSnapshot
+	mu         sync.Mutex
+	entry      Installed
+	client     *workerClient
+	active     int
+	refreshing int
+	retiring   bool
+	idle       chan struct{}
+	starting   chan struct{}
+	config     sdk.ConfigSnapshot
 }
 
 type Manager struct {
@@ -53,6 +54,8 @@ type Manager struct {
 	startWG     sync.WaitGroup
 	retireWG    sync.WaitGroup
 	gatewayRuns map[*GatewayRun]struct{}
+	refreshes   map[refreshKey]*refreshRun
+	refreshWG   sync.WaitGroup
 	// Bun is an explicitly selected runtime executable; empty uses discovery.
 	Bun string
 	// ReleaseClient optionally supplies the client used for GitHub packages.
@@ -454,6 +457,15 @@ func (m *Manager) retire(worker *managedWorker) {
 		select {
 		case <-idle:
 		case <-timer.C:
+			worker.mu.Lock()
+			refreshing := worker.refreshing > 0
+			worker.mu.Unlock()
+			if refreshing {
+				select {
+				case <-idle:
+				case <-m.startCtx.Done():
+				}
+			}
 		case <-m.startCtx.Done():
 		}
 		worker.mu.Lock()
@@ -690,6 +702,13 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 	if err := validateMethod(manifest, method, scope); err != nil {
 		return nil, err
 	}
+	if method == sdk.MethodAuthRefresh {
+		result, err := m.RefreshAccount(ctx, id, scope)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
 	if _, err := m.authFor(scope); err != nil {
 		return nil, err
 	}
@@ -719,6 +738,22 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := validateMethod(manifest, method, scope); err != nil {
 		return nil, err
 	}
+	if method == sdk.MethodProviderExecute {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		if err := sdk.ValidateExecuteOperation(manifest, scope, raw); err != nil {
+			return nil, err
+		}
+	}
+	if method == sdk.MethodAuthRefresh {
+		result, err := m.refreshFromLease(ctx, l, scope)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(result)
+	}
 	if method == sdk.MethodToolCall {
 		if err := checkLeasedTool(ctx, manifest, params); err != nil {
 			return nil, err
@@ -734,7 +769,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if method == sdk.MethodModuleCall {
 		encoded, marshalErr := json.Marshal(params)
 		var request sdk.ModuleCallRequest
-		if marshalErr != nil || !decodeHostParams(encoded, &request) || !json.Valid(request.Input) {
+		if marshalErr != nil || !decodeParamsLimit(encoded, &request, sdk.MaxFrameBytes-4096) || !json.Valid(request.Input) {
 			return nil, errors.New("module.call requires a declared action and JSON input")
 		}
 		action, exists := manifest.ResolveAction(request.Action)
@@ -1034,7 +1069,11 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 }
 
 func decodeHostParams(raw json.RawMessage, value any) bool {
-	if len(raw) > sdk.MaxHostBytes {
+	return decodeParamsLimit(raw, value, sdk.MaxHostBytes)
+}
+
+func decodeParamsLimit(raw json.RawMessage, value any, limit int) bool {
+	if len(raw) > limit {
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -1071,26 +1110,25 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 	m.workers = make(map[string]*managedWorker)
 	m.mu.Unlock()
+	go m.finishClose(workers, runs)
+	select {
+	case <-m.closeDone:
+		return m.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *Manager) finishClose(workers map[string]*managedWorker, runs []*GatewayRun) {
 	m.stopStarts()
 	for _, run := range runs {
 		run.abort()
-		select {
-		case <-run.done:
-		case <-ctx.Done():
-		}
+		<-run.done
 	}
+	m.refreshWG.Wait()
 	for _, worker := range workers {
 		worker.mu.Lock()
 		worker.retiring = true
-		idle, active := worker.idle, worker.active
-		worker.mu.Unlock()
-		if active > 0 {
-			select {
-			case <-idle:
-			case <-ctx.Done():
-			}
-		}
-		worker.mu.Lock()
 		client := worker.client
 		worker.mu.Unlock()
 		if client != nil {
@@ -1099,9 +1137,7 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 	m.startWG.Wait()
 	m.retireWG.Wait()
-	m.closeErr = ctx.Err()
 	close(m.closeDone)
-	return m.closeErr
 }
 
 func randomID() (string, error) {

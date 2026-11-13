@@ -25,6 +25,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The gateway draws: /v1/images/generations and /v1/images/edits take
@@ -396,6 +397,17 @@ func DrawersOf(p provider.Provider, avail func() []catalog.Model) []catalog.Mode
 		}
 		return out
 	}
+	if p.IsExtension() {
+		var out []catalog.Model
+		for _, model := range avail() {
+			if (model.Draws || imagesOnly(model.OutputModalities)) &&
+				(p.ExtensionSupportsOperation(sdk.OperationImageGenerate) || extensionDrawsGemini(p, model.ID)) {
+				model.Provider = p.ID
+				out = append(out, model)
+			}
+		}
+		return out
+	}
 	if p.IsPlugin() {
 		// a plugin in front of an OpenAI-compatible API: the image models
 		// its list names that draw on the images API, sent through its
@@ -681,6 +693,8 @@ type drawn struct {
 
 func (s *Server) images(edit bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+		r = r.WithContext(extensionContext)
 		inputBody, admitted := s.requestBody(w, r, provider.Chat)
 		if !admitted {
 			return
@@ -811,6 +825,10 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		for i, m := range tries {
 			call.Provider, model = m.Provider.ID, m.Model
 			drew, out, code, capBack, err = s.drawOnAccounts(ctx, memberOn(r, g, m), m.Provider, m.Model, d)
+			if outcome := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400); outcome != nil {
+				code, err = http.StatusConflict, outcome
+				break
+			}
 			// a group's next member is asked as a chat's would be: while
 			// this one's vendor fails, is out of quota or doesn't serve the
 			// model; a refusal of the request itself is the request's
@@ -1186,6 +1204,10 @@ func viaFor(p provider.Provider, model string) drawVia {
 		return viaImages
 	case isGoogle(p) && strings.Contains(strings.ToLower(model), "gemini"):
 		return viaGemini
+	case extensionDrawsGemini(p, model):
+		return viaGemini
+	case p.ExtensionSupportsOperation(sdk.OperationImageGenerate):
+		return viaImages
 	case p.ModelKind(model) == provider.KindImage:
 		// one the user said is an image model is asked at the images API
 		// first, as the editor's Makes: Image model says (a relay's
@@ -1206,6 +1228,13 @@ func viaFor(p provider.Provider, model string) drawVia {
 // imagesOnly is whether a model's output modalities are images and no text.
 func imagesOnly(out []string) bool {
 	return slices.Contains(out, "image") && !slices.Contains(out, "text")
+}
+
+func extensionDrawsGemini(p provider.Provider, model string) bool {
+	return p.IsExtension() && slices.Contains(p.APIs(model), provider.Gemini) &&
+		slices.ContainsFunc(p.Available(), func(entry catalog.Model) bool {
+			return entry.ID == model && (entry.Draws || slices.Contains(entry.OutputModalities, "image"))
+		})
 }
 
 // pluginImagesOnly is whether p, a plugin, lists model as giving images

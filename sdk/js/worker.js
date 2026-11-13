@@ -205,6 +205,7 @@ export async function serve(module, { input = process.stdin, output = process.st
     throw new SDKError("invalid", "Invalid worker streams or shutdown timeout");
   }
   const description = publicManifest(manifest), calls = new Map(), hostCalls = new Map(), running = new Set();
+  const inflight = new Set();
   const closedCredits = new Map(), closedHostCalls = new Map();
   const transport = deferred(), iterator = input[Symbol.asyncIterator]();
   const writer = new Writer(output, error => transport.reject(error));
@@ -289,7 +290,7 @@ export async function serve(module, { input = process.stdin, output = process.st
     }
     if (calls.has(frame.id)) throw new SDKError("invalid", "Duplicate active call ID");
     if (closedCredits.has(frame.id)) throw new SDKError("invalid", "Call ID still has closed stream credit");
-    if (calls.size >= MAX_CONCURRENT) {
+    if (inflight.size >= MAX_CONCURRENT) {
       await writer.write({ kind: "result", id: frame.id, error: { code: "resource_exhausted", message: "Too many concurrent calls" } });
       return;
     }
@@ -317,9 +318,11 @@ export async function serve(module, { input = process.stdin, output = process.st
     const record = {
       call, controller, aborted: deferred(), deadline: call.deadlineUnixMs, closed: false, event: null, seq: 0,
       hostTail: Promise.resolve(), hostPending: 0,
+      handlerFinished: false, retired: false,
       actionEffect: frame.method === "module.call" ? manifest.actions?.find(action => action.id === frame.params?.action)?.effect : undefined,
     };
     calls.set(call.id, record);
+    inflight.add(record);
     setDeadline(record);
     const assertOpen = () => {
       if (record.closed || ending) throw controller.signal.reason instanceof SDKError ? controller.signal.reason : canceled();
@@ -407,8 +410,18 @@ export async function serve(module, { input = process.stdin, output = process.st
         throw new SDKError("resource_exhausted", "Gateway hook state exceeds its byte limit");
       }
       return method(Object.freeze({ signal: controller.signal, ...(moduleContext ? { module: moduleContext } : {}) }), call, Object.freeze({ emit, hostCall }));
-    }).finally(() => stopLifetime?.());
+    }).finally(() => {
+      try { stopLifetime?.(); } finally {
+        record.handlerFinished = true;
+        if (record.retired) inflight.delete(record);
+      }
+    });
     handler.catch(() => {});
+    const retire = () => {
+      if (calls.get(call.id) === record) calls.delete(call.id);
+      record.retired = true;
+      if (record.handlerFinished) inflight.delete(record);
+    };
     const task = (async () => {
       try {
         const result = await Promise.race([handler, record.aborted.promise]);
@@ -418,18 +431,18 @@ export async function serve(module, { input = process.stdin, output = process.st
         assertOpen();
         stopCall(record, canceled());
         try {
-          await writer.write({ kind: "result", id: call.id, result: result ?? null });
+          await writer.write({ kind: "result", id: call.id, result: result ?? null }, undefined, retire);
         } catch (error) {
           if (error.code === "transport" || writer.closed) throw error;
-          await writer.write({ kind: "result", id: call.id, error: publicError(error) });
+          await writer.write({ kind: "result", id: call.id, error: publicError(error) }, undefined, retire);
         }
       } catch (error) {
         stopCall(record, error instanceof SDKError ? error : internal());
-        if (!writer.closed) await writer.write({ kind: "result", id: call.id, error: publicError(error) });
+        if (!writer.closed) await writer.write({ kind: "result", id: call.id, error: publicError(error) }, undefined, retire);
       } finally {
         stopCall(record, canceled());
         await handler.catch(() => {});
-        calls.delete(call.id);
+        retire();
       }
     })();
     running.add(task);
