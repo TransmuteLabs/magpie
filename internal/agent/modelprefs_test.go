@@ -31,8 +31,8 @@ func TestModelNameAndLevelsReachAgentFiles(t *testing.T) {
 	codexCat := filepath.Join(codexDir, "magpie-models.json")
 	writeFile(t, filepath.Join(codexDir, "config.toml"), "model = \"relay/glm-4.6\"\nmodel_provider = \"magpie\"\nmodel_catalog_json = '"+codexCat+"'\n")
 	writeFile(t, codexCat, `{"models":[]}`)
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := provider.SetModelName("relay/glm-4.6", "GLM"); err != nil {
 		t.Fatal(err)

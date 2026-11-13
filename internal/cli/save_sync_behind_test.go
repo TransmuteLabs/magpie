@@ -36,11 +36,11 @@ func TestSaveAnswersBeforeTheAgentsSync(t *testing.T) {
 		"XDG_DATA_HOME": filepath.Join(home, ".local", "share"), "PI_CODING_AGENT_DIR": ""} {
 		t.Setenv(k, v)
 	}
-	was := catalog.Changed
-	catalog.Changed = nil
+	was := catalog.ChangedHook()
+	catalog.SetChanged(nil)
 	t.Cleanup(func() {
 		agent.SyncCatalogSettled()
-		catalog.Changed = was
+		catalog.SetChanged(was)
 	})
 	if err := provider.Save(provider.Provider{ID: "a", Name: "a", Key: "ka",
 		Chat: "http://127.0.0.1:1/v1", Models: []string{"m1", "m2"}}); err != nil {

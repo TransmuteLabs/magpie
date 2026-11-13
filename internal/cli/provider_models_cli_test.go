@@ -17,7 +17,7 @@ import (
 // exposed became 8 with nothing said).
 func TestProviderModelsAddsRemovesAndSaysWhatItReplaced(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := provider.Save(provider.Provider{ID: "og", Name: "OG", Key: "k", Chat: "http://127.0.0.1:1/v1",
 		Models: []string{"m1", "m2", "m3"}}); err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestProviderModelsAddsRemovesAndSaysWhatItReplaced(t *testing.T) {
 // opencode-go/deepseek-flash not in magpie models).
 func TestModelsSayWhatIsNotExposed(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := provider.Save(provider.Provider{ID: "og", Name: "OG", Key: "k", Chat: "http://127.0.0.1:1/v1",
 		Models: []string{"m1", "m2"}}); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestModelsSayWhatIsNotExposed(t *testing.T) {
 // to expose it, in magpie groups and magpie group show <id>.
 func TestGroupMemberNotExposedSaysHow(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := provider.Save(provider.Provider{ID: "og", Name: "OG", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestGroupMemberNotExposedSaysHow(t *testing.T) {
 // list back, and a pick or none clears it.
 func TestProviderModelsBest(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := provider.Save(provider.Provider{ID: "og", Name: "OG", Key: "k", Chat: "http://127.0.0.1:1/v1"}); err != nil {
 		t.Fatal(err)
 	}

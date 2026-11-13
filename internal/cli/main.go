@@ -283,7 +283,7 @@ var tuiRun = tui.Run
 // in files of their own are brought up to date behind the save, which
 // answers without waiting for every agent's files to be written (on
 // Windows, half a second for each one another program holds open).
-func syncAgentsOnChange() { catalog.Changed = agent.SyncCatalogSoon }
+func syncAgentsOnChange() { catalog.SetChanged(agent.SyncCatalogSoon) }
 
 // startUp brings the files magpie and its agents keep up to what this
 // magpie reads, before a command that may read them; a var so a test can
@@ -337,11 +337,11 @@ func servesPages(args []string) bool {
 func run(args []string) error {
 	// a command that saved a provider or a group ends with the agents'
 	// files written, which its save no longer waits for; and a test's run
-	// leaves catalog.Changed as it found it
-	was := catalog.Changed
+	// leaves the catalog change hook as it found it
+	was := catalog.ChangedHook()
 	defer func() {
 		agent.SyncCatalogSettled()
-		catalog.Changed = was
+		catalog.SetChanged(was)
 	}()
 	// claude-magpie (claude_launch_cli.go): every argument after run is
 	// claude's, --help too

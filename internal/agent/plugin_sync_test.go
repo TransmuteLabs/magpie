@@ -28,8 +28,8 @@ func TestPluginSignInReachesPiModels(t *testing.T) {
 	// test points that global at its own sync, so no background read
 	// overlaps the assignment (#2449's background hooks read it too).
 	plugin.Told()
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { plugin.Told(); catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { plugin.Told(); catalog.SetChanged(nil) })
 	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro"}}); err != nil {
 		t.Fatal(err)
 	}

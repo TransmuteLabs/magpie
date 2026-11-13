@@ -17,8 +17,8 @@ import (
 func TestSetModelPrefs(t *testing.T) {
 	prefsHome(t)
 	touched := 0
-	catalog.Changed = func() { touched++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { touched++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	name, yes := "My Sol", true
 	efforts := []string{"low", "high"}
 	if err := SetModelPrefs("a", map[string]ModelPref{"sol": {Name: &name, Efforts: &efforts, Images: &yes}}); err != nil {

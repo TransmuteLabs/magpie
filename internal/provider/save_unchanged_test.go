@@ -23,8 +23,8 @@ func TestSaveUnchangedTellsNoAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := Save(in); err != nil {
 		t.Fatal(err)

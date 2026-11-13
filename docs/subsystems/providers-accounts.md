@@ -17,6 +17,13 @@ Plugin ownership of the deprecated built-in subscriptions is in
 [Provider and plugin ownership](provider-plugins.md). How the gateway orders
 keys and accounts per request is in [Gateway routing and fallback](gateway-routing.md).
 
+Catalog change notifications install their callback with `catalog.SetChanged`
+and read it through `catalog.ChangedHook`. `catalog.Touched` takes one callback
+snapshot after the provider's `Forget` hook and invokes it without holding
+synchronization. Replacing or clearing the callback is safe while a background
+plugin announces a catalog change. An invocation already holding an older
+snapshot may finish; installing another callback does not wait for it.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

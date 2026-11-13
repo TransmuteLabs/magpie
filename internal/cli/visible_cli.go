@@ -127,8 +127,8 @@ func visibleCmd(args []string) error {
 	if err := settings.Save(s); err != nil {
 		return err
 	}
-	if catalog.Changed != nil {
-		catalog.Changed() // the agents' files follow
+	if hook := catalog.ChangedHook(); hook != nil {
+		hook() // the agents' files follow
 	}
 	fmt.Println(green.Render("✓"), "saved")
 	return models([]string{id})

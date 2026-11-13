@@ -23,7 +23,7 @@ import (
 // that changes nothing says so.
 func TestModelEffortsOfARelayThatListsNone(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
 	if err := os.WriteFile(catalog.CachePath(), []byte(`{"anthropic":{"id":"anthropic","models":{
 	  "claude-opus-5-5":{"id":"claude-opus-5-5","reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high","xhigh","max"]}]}}}}`), 0o644); err != nil {

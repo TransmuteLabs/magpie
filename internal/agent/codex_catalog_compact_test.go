@@ -22,8 +22,8 @@ import (
 func TestCodexCatalogCompactAtReachesDisk(t *testing.T) {
 	home := syncHome(t)
 	// a threshold changed on a provider rewrites the agents' lists
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	if err := provider.SetModelCompacts("relay", map[string]int{"*": 100000}); err != nil {
 		t.Fatalf("SetModelCompacts: %v", err)
 	}

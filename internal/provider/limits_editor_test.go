@@ -30,8 +30,8 @@ func TestModelOutputsSetFromTheEditor(t *testing.T) {
 		t.Fatalf("OutputsOf: %v", got)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := SetModelOutputs("relay", map[string]int{"*": 32000, "sol": 128000}); err != nil {
 		t.Fatal(err)

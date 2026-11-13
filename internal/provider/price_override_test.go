@@ -270,8 +270,8 @@ func TestSetModelPriceTellsNoAgent(t *testing.T) {
 		t.Fatal(err) // saving a provider does tell them, so it is done first
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := SetModelPrice("relay/sol", &catalog.Price{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 0.2}); err != nil {
 		t.Fatal(err)

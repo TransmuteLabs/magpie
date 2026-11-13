@@ -48,8 +48,8 @@ func TestModelSpecSetListReset(t *testing.T) {
 		t.Fatalf("before: a model nothing knows has %+v", e)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := SetModelSpec("kenari/glm-5:free", SpecChange{
 		Context: new(131072), Output: new(16384), Vision: new("on"), Reasoning: new("low-high"),

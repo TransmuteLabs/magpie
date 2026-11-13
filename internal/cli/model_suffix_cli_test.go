@@ -13,7 +13,7 @@ import (
 // user gave (#92); anything else is refused.
 func TestModelSuffixCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"suffix"}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestModelSuffixCmd(t *testing.T) {
 // agent's is left as it was, and a word it doesn't know is refused.
 func TestModelSuffixAgentCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	for _, args := range [][]string{{"suffix", "pi"}, {"suffix", "pi", "off"}, {"suffix", "pi"}} {
 		if err := modelCmd(args); err != nil {
 			t.Fatal(args, err)

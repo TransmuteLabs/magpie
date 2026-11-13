@@ -13,7 +13,7 @@ import (
 // is refused.
 func TestModelCompactCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"compact"}); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestModelCompactCmd(t *testing.T) {
 // that writes no compaction window is refused (molianyin4227 on Discord).
 func TestModelCompactAgentCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := modelCmd([]string{"compact", "codex", "300k"}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestModelCompactAgentCmd(t *testing.T) {
 // model, off takes them away, and a size that is not one is refused.
 func TestModelAgentWindowCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := modelCmd([]string{"window", "dsh", "a/m=500k", "*=256k"}); err != nil {
 		t.Fatal(err)
 	}

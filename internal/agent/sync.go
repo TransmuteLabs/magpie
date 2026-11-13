@@ -28,7 +28,7 @@ var syncing struct {
 }
 
 // SyncCatalog brings every model list magpie wrote into an agent's files up
-// to the catalog as it is now. It is what catalog.Changed is set to, so a
+// to the catalog as it is now. It is what catalog.SetChanged installs, so a
 // provider saved or removed, or a vendor's list fetched anew, reaches the
 // agents; one already running asks for another round rather than waiting.
 // Errors are left for the picker: a file magpie can't write now is one the
@@ -87,7 +87,7 @@ var soon struct {
 func init() { soon.idle = sync.NewCond(&soon.Mutex) }
 
 // SyncCatalogSoon is SyncCatalog behind the caller, which is what
-// catalog.Changed is set to: a group or a provider saved answers at once,
+// catalog.SetChanged installs: a group or a provider saved answers at once,
 // and the agents' files follow a moment later. The sync builds every
 // agent's lists and writes the ones that differ. On Windows a file another
 // program holds open refuses the rename over it, and steady.Rename waits

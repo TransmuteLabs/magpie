@@ -119,7 +119,7 @@ func init() {
 	// a plugin's sign-in saved or renewed, a plugin added, and the models
 	// a plugin lists once the host has answered: the catalog may be
 	// another, so the model lists agents keep in their own files follow,
-	// as for a provider saved (catalog.Changed). Dropping only what is
+	// as for a provider saved (catalog.Touched). Dropping only what is
 	// held left Pi's models.json without a plugin's models signed in to
 	// after it was written (#2373).
 	plugin.OnChange(catalog.Touched)

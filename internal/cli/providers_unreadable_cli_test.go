@@ -42,7 +42,7 @@ func printed(t *testing.T, fn func() error) (string, error) {
 // (#1505), it is unknown.
 func TestProvidersCmdSaysUnreadable(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := os.Remove(provider.Path() + ".bak"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}

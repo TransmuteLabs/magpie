@@ -11,9 +11,9 @@ import (
 // the account is out; the same state again is not.
 func TestNoteCodexUsedUp(t *testing.T) {
 	told := 0
-	was := catalog.Changed
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = was; codexWasUsedUp.Store(false) })
+	was := catalog.ChangedHook()
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(was); codexWasUsedUp.Store(false) })
 	codexWasUsedUp.Store(false)
 	for i, c := range []struct {
 		now  bool

@@ -226,15 +226,15 @@ func TestProviderRenameKeepsCatalogOnRejectedPublication(t *testing.T) {
 	if err := os.Remove(Path() + ".lock"); err != nil {
 		t.Fatal(err)
 	}
-	wasChanged := catalog.Changed
-	t.Cleanup(func() { catalog.Changed = wasChanged })
+	wasChanged := catalog.ChangedHook()
+	t.Cleanup(func() { catalog.SetChanged(wasChanged) })
 	notifications, sawMovedLists := 0, false
-	catalog.Changed = func() {
+	catalog.SetChanged(func() {
 		notifications++
 		_, modelsErr := os.Stat(catalog.LivePath("renamed"))
 		_, decisionsErr := os.Stat(catalog.LivePath(decisionsID("renamed")))
 		sawMovedLists = modelsErr == nil && decisionsErr == nil
-	}
+	})
 	if err := Rename("original", "renamed"); err != nil {
 		t.Fatal(err)
 	}

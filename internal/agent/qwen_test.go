@@ -364,8 +364,8 @@ func TestQwenNamesFollowSuffixMode(t *testing.T) {
 	if err := a.Apply("model", "magpie/deepseek/pro"); err != nil {
 		t.Fatal(err)
 	}
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	for _, c := range []struct{ mode, pro, flash string }{
 		{provider.SuffixOn, "pro · DeepSeek", "Quick · DeepSeek"},
 		{provider.SuffixOwn, "pro · DeepSeek", "Quick"},

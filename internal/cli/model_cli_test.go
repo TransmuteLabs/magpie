@@ -70,7 +70,7 @@ func mustFind(t *testing.T, id string) provider.Provider {
 // provider's model, a name of several words included.
 func TestModelNameCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"name", "a/m", "My", "Model"}); err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestModelPriceResetAfterTheProviderIsGone(t *testing.T) {
 // user meant stayed in the file to be counted at.
 func TestModelPriceResetTakesTheKeyThePriceIsStoredAt(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"price", "b/vendor/m", "0.5,1.5,0.05,0.1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestModelPriceResetTakesTheKeyThePriceIsStoredAt(t *testing.T) {
 // price they set was never there.
 func TestModelPriceResetByTheNameTheUserAsksFor(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := provider.Save(provider.Provider{
 		ID: "c", Name: "Cee", Key: "kc", Models: []string{"vendor/m"}, Chat: "http://127.0.0.1:1/v1",
 	}); err != nil {
@@ -337,7 +337,7 @@ func TestModelPriceResetByTheNameTheUserAsksFor(t *testing.T) {
 // through its provider, both read as a price gone.
 func TestModelPriceResetSaysWhenThereIsNoPriceToTakeAway(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"price", "a/*", "2,3,0,0"}); err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestModelPriceCmdSaysWhereThePriceCameFrom(t *testing.T) {
 	groupsHome(t)
 	// a maker's catalogue is what the last line is reached through, and
 	// groupsHome leaves no cache behind; seed one the way a real run has it.
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
 	os.WriteFile(catalog.CachePath(), []byte(`{"anthropic":{"id":"anthropic","models":{
 	  "claude-opus-5-5":{"id":"claude-opus-5-5","cost":{"input":5,"output":25,"cache_read":0.5}}}}}`), 0o644)
@@ -560,7 +560,7 @@ func TestModelPriceCmdSaysWhereThePriceCameFrom(t *testing.T) {
 // refused the same as one is for a name.
 func TestModelLimitCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 
 	if err := modelCmd([]string{"context", "a/*", "200000"}); err != nil {
 		t.Fatal(err)
@@ -620,7 +620,7 @@ func TestModelLimitCmd(t *testing.T) {
 // the user's own limit stays as they set it, for a wider window to take.
 func TestModelOutputCmdWithinTheWindow(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	if err := modelCmd([]string{"context", "a/m", "200k"}); err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +650,7 @@ func TestModelOutputCmdWithinTheWindow(t *testing.T) {
 // itself.
 func TestModelLimitCmdOnAProviderTheCatalogHasNot(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, c := range []struct {
 		id, model     string
 		unlisted, off bool
@@ -697,7 +697,7 @@ func TestModelLimitCmdOnAProviderTheCatalogHasNot(t *testing.T) {
 // provider has no such model and left with the file.
 func TestModelLimitCmdResetsAModelTheProviderHasNot(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, verb := range []string{"context", "output"} {
 		if err := modelCmd([]string{verb, "a/m", "200k"}); err != nil {
 			t.Fatal(err)
@@ -747,7 +747,7 @@ func TestModelLimitCmdResetsAModelTheProviderHasNot(t *testing.T) {
 // prints must not point at a query that could only report the model is gone.
 func TestModelLimitCmdResetsALimitOfAProviderThatIsGone(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"output", "a/m", "128k"}); err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +792,7 @@ func TestModelLimitCmdResetsALimitOfAProviderThatIsGone(t *testing.T) {
 // about in the file to go on answering with.
 func TestModelLimitCmdResetsTheKeyTheEntryIsStoredUnder(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, id := range []string{"a/m", "a/*"} {
 		if err := modelCmd([]string{"output", id, "128k"}); err != nil {
 			t.Fatal(err)
@@ -850,7 +850,7 @@ func TestModelLimitCmdResetsTheKeyTheEntryIsStoredUnder(t *testing.T) {
 // number nobody set.
 func TestModelLimitCmdSaysWhereResetGoes(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, verb := range []string{"context", "output"} {
 		if err := modelCmd([]string{verb, "a/*", "200k"}); err != nil { // every model of a
 			t.Fatal(err)
@@ -902,7 +902,7 @@ func TestModelUsageSaysPerProviderOnce(t *testing.T) {
 // on it, and the second --reset of a limit already taken off.
 func TestModelLimitCmdSaysWhenThereIsNoLimitToTakeAway(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, verb := range []string{"context", "output"} {
 		for _, id := range []string{"a/nosuch", "a/m"} {
 			out, err := said(t, func() error { return modelCmd([]string{verb, id, "--reset"}) })
@@ -971,7 +971,7 @@ func TestModelLimitCmdSaysWhenThereIsNoLimitToTakeAway(t *testing.T) {
 // not a model of its own.
 func TestModelLimitCmdZeroNamesEveryModelOfTheProvider(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, verb := range []string{"context", "output"} {
 		err := modelCmd([]string{verb, "a/*", "0"})
 		if err == nil {
@@ -994,7 +994,7 @@ func TestModelLimitCmdZeroNamesEveryModelOfTheProvider(t *testing.T) {
 // send the user to a number this command never touched.
 func TestModelLimitCmdResetDoesNotPointAtAnotherProvidersModel(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"output", "b/vendor/m", "128k"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1117,7 +1117,7 @@ func TestModelCmdQuotesAWildcardInEveryCommandItShows(t *testing.T) {
 	}
 
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	type shown struct{ as, out string }
 	var shows []shown
 	run := func(args ...string) {
@@ -1180,7 +1180,7 @@ func helpRow(cmd string) string {
 // query a reply limit pointed at read as though it reported a window.
 func TestModelLimitCmdSaysWhatALimitIsInTheVerbOfItsOwnCommand(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	for _, tc := range []struct{ verb, says string }{
 		{"context", "takes"},
 		{"output", "answers with"},
@@ -1213,7 +1213,7 @@ func TestModelLimitCmdSaysWhatALimitIsInTheVerbOfItsOwnCommand(t *testing.T) {
 // is rather than as a setting that took.
 func TestModelWireCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 
 	// a custom provider's every model, with the model in the name: the
@@ -1341,7 +1341,7 @@ func TestModelWireCmd(t *testing.T) {
 // picked and shows the name standing for a model it was not given for.
 func TestModelWireExampleIsAModelTheUserIsShown(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	// C lists two models of its own while its fetched list has a third
 	// first: the one only the fetched list knows is the one a user never
 	// sees, and the one an example read off that list would name.
@@ -1387,7 +1387,7 @@ func TestModelWireExampleIsAModelTheUserIsShown(t *testing.T) {
 // and a provider whose every model has one is left with the pattern alone.
 func TestModelWireExampleStandsOnAModelWithNoNameOfItsOwn(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	// a relay of three models, of which the first is given a name of its
 	// own before the provider's own name is set
 	if err := provider.Save(provider.Provider{
@@ -1439,7 +1439,7 @@ func TestModelWireExampleStandsOnAModelWithNoNameOfItsOwn(t *testing.T) {
 // and the claim is made only where there are none.
 func TestModelWireResetWildcardNamesTheModelsThatKeepAName(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 
 	if err := modelCmd([]string{"wire", "a/m", "vendor-c/m"}); err != nil {
 		t.Fatal(err)
@@ -1508,7 +1508,7 @@ func TestModelWireResetWildcardNamesTheModelsThatKeepAName(t *testing.T) {
 // over the same removal already does.
 func TestModelWireResetWildcardRefusalNamesTheModelsThatKeepAName(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 
 	if out := saidArgs(t, "wire", "a/*", "vendor-c/*"); !strings.Contains(out, "every model of A is asked for as") {
@@ -1552,7 +1552,7 @@ func TestModelWireResetWildcardRefusalNamesTheModelsThatKeepAName(t *testing.T) 
 // for, in the one line whose whole claim is that this is the name in force.
 func TestModelWireNamesTheModelsWithAStarInTheirOwnName(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 
 	if err := modelCmd([]string{"wire", "a/m", "vendor-c/*"}); err != nil {
 		t.Fatal(err)
@@ -1597,7 +1597,7 @@ func TestModelWireNamesTheModelsWithAStarInTheirOwnName(t *testing.T) {
 // are named with the name in force for each.
 func TestModelWireWildcardSaysTheModelsItDoesNotReach(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 
 	if err := modelCmd([]string{"wire", "a/m", "vendor-c/m"}); err != nil {
 		t.Fatal(err)
@@ -1634,7 +1634,7 @@ func TestModelWireWildcardSaysTheModelsItDoesNotReach(t *testing.T) {
 // and is in force for whichever provider takes that id next.
 func TestModelWiresCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 	listed := func(t *testing.T) string {
 		t.Helper()
@@ -1695,7 +1695,7 @@ func TestModelWiresCmd(t *testing.T) {
 // that no vendor is ever asked for by.
 func TestModelWiresCmdSkipsANameOfOnlyWhitespace(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	// magpie will not write one itself — a name of only whitespace is
 	// taken as a removal — so it is the file that is read, as one left by
 	// an older magpie or edited by hand is
@@ -1745,7 +1745,7 @@ func TestModelWiresCmdSkipsANameOfOnlyWhitespace(t *testing.T) {
 // error here is a command that exits 1.
 func TestModelWireResetRefusesANameThereIsNot(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 
 	// the second --reset of a name that is gone: the first took it, so this
@@ -1873,7 +1873,7 @@ func TestModelWireResetRefusesANameThereIsNot(t *testing.T) {
 // the provider first could not take off at all.
 func TestModelWireResetAfterTheProviderIsGone(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 
 	if out := saidArgs(t, "wire", "b/vendor/m", "vendor-c/m"); !strings.Contains(out, "is asked for as vendor-c/m") {
@@ -1927,7 +1927,7 @@ func TestModelWireResetAfterTheProviderIsGone(t *testing.T) {
 // behind is the one doing the damage, with nothing having said so.
 func TestModelWireResetUnderAProviderShownAsTheGoneId(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	wires := func() map[string]string { return settings.Load().ModelWires }
 
 	if out := saidArgs(t, "wire", "b/vendor/m", "vendor-c/m"); !strings.Contains(out, "is asked for as vendor-c/m") {

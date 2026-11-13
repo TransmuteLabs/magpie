@@ -69,8 +69,8 @@ func TestSameModelVendorSpellings(t *testing.T) {
 func TestModelSameAsMergesFoundGroup(t *testing.T) {
 	prefsHome(t)
 	touched := 0
-	catalog.Changed = func() { touched++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { touched++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	if err := Save(Provider{ID: "c", Name: "C", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"ep-sol-x"}}); err != nil {
 		t.Fatal(err)
 	}

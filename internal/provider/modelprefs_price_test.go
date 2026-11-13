@@ -14,8 +14,8 @@ import (
 func TestSetModelPrefsPrice(t *testing.T) {
 	prefsHome(t)
 	touched := 0
-	catalog.Changed = func() { touched++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { touched++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	want := catalog.Price{Input: 0.5, Output: 2, CacheRead: 0.05, CacheWrite: 0}
 	if err := SetModelPrefs("a", map[string]ModelPref{"sol": {Price: &want}}); err != nil {
 		t.Fatal(err)
