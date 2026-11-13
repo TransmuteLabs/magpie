@@ -1,4 +1,5 @@
 // Browser author entry. The existing page bridge owns transport and lifetime.
+export { createAccountWorkflow } from "./account-selection.js";
 function bridge() {
   const value = globalThis.window?.magpie;
   if (!value?.backend?.call || !value?.config?.get || !value?.config?.cas) {

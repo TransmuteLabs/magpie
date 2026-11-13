@@ -505,3 +505,38 @@ gates. Terminal IDs retire before result bytes become visible, while canceled
 handlers retain independent admission capacity until they finish.
 Those scoped results do not imply full SDK surface completion, current
 whole-repository acceptance, Windows native execution or live vendor parity.
+## Selected-account UI workflow
+
+`createAccountWorkflow` composes the existing SDK 1.5 window grants without
+adding a host capability:
+
+```ts
+import { createAccountWorkflow } from "@magpie/extension-sdk/ui";
+
+const accountsUI = createAccountWorkflow("account.inspect", "signin");
+await accountsUI.refresh();
+async function inspectChosenRow(chosenRowID: string) {
+  accountsUI.select(chosenRowID);
+  return accountsUI.call({ operation: "info" });
+}
+// In a separate sign-in handler, after explicit row selection:
+await accountsUI.start({ method: "device" }, true);
+```
+
+Render `snapshot.accounts` and let the user choose the row. IDs and canonical
+generation strings come only from host discovery. Refresh never auto-selects;
+an observed generation change clears the selection. A refused call clears
+the cached list and selection, sets `snapshot.stale`, and is never retried.
+Refresh and obtain another explicit choice before attempting a new action.
+
+For new sign-in, omit the second `start` argument. Render the safe
+`snapshot.flow` URL/code, wait its `retryAfterMs`, and call `finish()` to poll.
+Use `cancel()` to request host cancellation. Completion refreshes discovery
+without selecting its returned account. Identical in-flight starts are
+coalesced; a failed start is not silently exchanged again. The helper owns
+no timer, direct HTTP, credential storage or authority: the parent bridge and
+host retain those responsibilities. SDK 1.4 root bindings keep their existing
+`ui.backend.call(binding, input)` interface.
+
+See [the workflow record](../../docs/adr/0018-window-account-workflow.md) for
+the concurrency, failure and verification boundaries.

@@ -55,3 +55,21 @@ export interface ModuleUI {
   };
 }
 export const ui: ModuleUI;
+
+export interface AccountWorkflowSnapshot {
+  readonly accounts: readonly Readonly<AccountSummary>[];
+  readonly selection: Readonly<AccountSelection> | null;
+  readonly stale: boolean;
+  readonly flow: Readonly<WindowAuthFlowView> | null;
+  readonly busy: boolean;
+}
+export interface AccountWorkflow {
+  readonly snapshot: AccountWorkflowSnapshot;
+  refresh(): Promise<readonly Readonly<AccountSummary>[]>;
+  select(id: string | null): Readonly<AccountSelection> | null;
+  call<T = UIValue>(input?: UIValue): Promise<T>;
+  start(options: { method: string; input?: UIValue }, reauthorize?: boolean): Promise<WindowAuthFlowView>;
+  finish(): Promise<WindowAuthFlowView>;
+  cancel(): Promise<WindowAuthFlowView>;
+}
+export function createAccountWorkflow(binding: string, authBinding?: string): AccountWorkflow;
