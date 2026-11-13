@@ -290,17 +290,22 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	e, ok := c.m[key]
 	if ok && (held || time.Since(e.at) < time.Minute) {
 		c.Unlock()
-		if held {
-			if e.readAt.IsZero() {
-				e.readAt = e.at // as it really was: a careful provider counts its age
+		if !extensionUsageValid(l, e.q) {
+			c.Lock()
+			ok = false
+		} else {
+			if held {
+				if e.readAt.IsZero() {
+					e.readAt = e.at // as it really was: a careful provider counts its age
+				}
+				e.at = time.Now() // as good as it gets until asked: Allowances keeps it its minute
 			}
-			e.at = time.Now() // as good as it gets until asked: Allowances keeps it its minute
+			return e
 		}
-		return e
 	}
 	entry := func(read SubscriptionQuota) loginUsageEntry {
 		q := read
-		if q.Error != "" && ok && q.Provider != "claude" {
+		if q.Error != "" && ok && q.Provider != "claude" && extensionUsageValid(l, e.q) {
 			q = e.q // a hiccup keeps what was known
 		}
 		return loginUsageEntry{at: time.Now(), q: q, read: read}
@@ -335,7 +340,7 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 			// (AskClaudeUsage), as SubscriptionUsage reads it: neither is kept
 			if c.pending[key] == r {
 				delete(c.pending, key)
-				if l.Agent != "claude" || claudeAskGeneration.Load() == asked {
+				if (l.Agent != "claude" || claudeAskGeneration.Load() == asked) && extensionUsageValid(l, r.e.q) {
 					if c.m == nil {
 						c.m = map[string]loginUsageEntry{}
 					}
@@ -349,6 +354,10 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	c.Unlock()
 	select {
 	case <-r.done:
+		if !extensionUsageValid(l, r.e.q) {
+			return entry(SubscriptionQuota{Provider: l.Agent, User: l.User,
+				Error: "account usage was invalidated; refresh required", ReadDeferred: true})
+		}
 		return r.e
 	case <-ctx.Done():
 		// given up on: as a reading cut short would have said

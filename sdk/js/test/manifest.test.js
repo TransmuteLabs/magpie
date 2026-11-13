@@ -40,7 +40,7 @@ test("manifest refuses malformed versions, capabilities, identities and entries"
     { version: "1.0.0-01" }, { version: "1.0.0+a..b" }, { runtime: "node" }, { entry: "../worker.js" },
     { entry: "/worker.js" }, { entry: "a/../worker.js" }, { entry: "C:\\worker.js" }, { args: ["\0"] },
     { contract: { version: { major: 2, minor: 0 }, capabilities: ["operation-control"] } },
-    { contract: { version: { major: 1, minor: 4 }, capabilities: ["operation-control"] } },
+    { contract: { version: { major: 1, minor: 5 }, capabilities: ["operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: [] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["operation-control", "operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["unknown"] } },

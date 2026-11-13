@@ -8,10 +8,11 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package source version 1.3.0 advertises SDK API 1.3 and eleven capabilities.
+Package source version 1.4.0 advertises SDK API 1.4 and eleven capabilities.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
-Explicit 1.0/1.1/1.2 manifests retain their earlier behavior. This is a source
+API 1.4 adds declared routing strategies through existing read actions.
+Explicit 1.0/1.1/1.2/1.3 manifests retain their earlier behavior. This is a source
 version, not a claim that an npm package or release was published.
 
 ```js
@@ -198,7 +199,7 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract versions are 1.0, 1.1, 1.2 and 1.3. Handlers outside the
+handlers. Supported contract versions are 1.0, 1.1, 1.2, 1.3 and 1.4. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
@@ -282,6 +283,46 @@ API 1.3 attachment-aware session modules may declare the read-only
 reads approved paths/digests from the selected native store and pins
 planner/converter to one lease. It does not grant the module arbitrary host
 filesystem access or generic session reader/resume registration.
+
+## Routing strategies (API 1.4)
+
+Declare root `routingStrategies` with `id`, `name`, `action`, optional
+`flags` and `timeoutMs`, and declare that action with `effect: "read"` under
+`module-rpc`. Require contract minor 4. The
+[tested descriptor fragment](../../docs/adr/0012-sdk-routing-strategies.md#author-contract)
+matches the installed Go worker fixture; no additional runtime capability is
+required.
+
+The ordinary provider/group `routing` setting is `moduleID/strategyID`.
+Enabled declarations appear in the existing selector, with no worker startup
+from discovery. The action receives `RoutingRequest`; use exported
+`validateRoutingRequest`, and return one unary `RoutingResult` validated by
+`validateRoutingResult(result, request.seats.length)`. Its `order` is a full
+permutation of seat indexes. Public
+[TypeScript usage](test/routing-types.ts) is checked alongside the other
+consumer fixtures.
+
+The action may be implemented by a private service. `publicManifest` filters
+each component's routing descriptors together with its owned action list;
+the complete root still registers the private strategy and the host lazily
+dispatches it to its declared backend. Public handshake metadata does not
+replace the root's installed contribution authority.
+
+Flags are `exact`, `byUse`, `byFree`, `byPlan`, `bySpeed`, `byPrice`, retaining
+the existing Strategy semantics. Metrics and opaque seat/wallet identities
+carry no auth, selected-account binding or conversation. Bounds are 64
+descriptors, 256 seats, 32 renewals per seat and 1 MiB JSON input/output,
+with finite measurements and safe integer timestamps. API 1.4 read authority
+refuses persistent `state.cas` writes.
+
+The ordering context defaults to 500 ms; explicit `timeoutMs` is 25–2000 ms
+and covers cold acquisition plus RPC. The upstream Strategy signature has no
+HTTP caller context. Errors, streaming/invalid results, deadlines and revoked
+package/configuration results preserve listed order and all core guards.
+The [routing record](../../docs/adr/0012-sdk-routing-strategies.md) has scoped
+race and ordinary HTTP proof. The
+[SDK 1.4 checkpoint](../../docs/adr/0014-sdk14-validation.md) records
+combined gates, with application acceptance separate.
 
 ## Gateway hooks and tool exposure (API 1.2)
 

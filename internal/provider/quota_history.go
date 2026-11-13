@@ -301,6 +301,7 @@ func quotaHistKey(provider, user string) string { return provider + "|" + string
 // Claude account's, kept until Claude Code tells it again) keeps its time
 // and so isn't taken for a new one.
 func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
+	qs = currentExtensionQuotas(slices.Clone(qs))
 	quotaHistMu.Lock()
 	defer quotaHistMu.Unlock()
 	path := quotaHistPath()

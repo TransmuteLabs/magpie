@@ -153,7 +153,7 @@ func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account,
 			Schema: 1, Scope: scope, Revision: revision, Config: config,
 			State: "dispatched", Updated: time.Now().UTC(),
 		}
-		records.Schema = 2
+		records.Schema = max(records.Schema, 2)
 		if !validRefreshRecord(*account) {
 			return storeInvalid()
 		}

@@ -4,3 +4,5 @@ export { serve } from "./worker.js";
 export { moduleContextFrom, moduleHTTPHeaders } from "./lifecycle.js";
 export { MAX_MODULE_SERVICES } from "./composite.js";
 export { MAX_GATEWAY_STATE_BYTES } from "./hooks.js";
+export { validateUsageResult, parseUsageRevision } from "./usage.js";
+export { validateRoutingRequest, validateRoutingResult } from "./routing.js";

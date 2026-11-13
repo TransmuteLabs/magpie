@@ -233,7 +233,17 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 			refuse(http.StatusBadGateway, "adapter produced invalid request metadata")
 			return
 		}
-		normalized := request.Clone(request.Context())
+		if err := sdk.ValidateExecutor(decoded.Executor, decoded.Protocol); err != nil ||
+			decoded.Executor != "" && !inbound.Contract().Has(sdk.ExecutorBinding) {
+			refuse(http.StatusBadGateway, "adapter produced an unnegotiated executor constraint")
+			return
+		}
+		executorContext, err := extension.WithExecutorPolicy(request.Context(), decoded.Executor)
+		if err != nil {
+			refuse(http.StatusBadGateway, "native request has no owned module executor")
+			return
+		}
+		normalized := request.Clone(executorContext)
 		if len(decoded.Metadata) > 0 || decoded.RequestID != "" {
 			owner, _, _ := strings.Cut(inbound.ID(), ":")
 			normalized = normalized.WithContext(extension.WithRequestMetadata(normalized.Context(),

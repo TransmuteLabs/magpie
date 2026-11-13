@@ -27,7 +27,7 @@ const call = (worker, id, method, input = params(method), extra = {}) =>
   worker.send({ kind: "call", id, method, params: input, scope: { plugin: "hooks", session: "session", operation: id }, ...extra });
 
 test("SDK 1.2 advertises gateway hooks and accepts explicit host compatibility", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 3 });
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 4 });
   assert.equal(SDK.CONTRACT.capabilities.length, 11);
   assert.equal(SDK.MAX_GATEWAY_STATE_BYTES, 64 << 10);
   const source = manifest();

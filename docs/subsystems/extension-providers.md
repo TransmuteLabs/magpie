@@ -58,6 +58,12 @@ spend the same rotating token again. Caller cancellation after dispatch does
 not abandon the bounded owner. Manager shutdown cancels and joins that work.
 Publication stays in the originally selected Manager/Store.
 
+Stateful authentication continuation uses the module's scoped private state.
+API 1.4 permits that CAS for declared authentication lifecycle calls while
+read-only actions and recall remain unable to mutate state. This does not
+grant an accepted business-write receipt, usage invalidation or direct access
+to the host-owned root configuration namespace.
+
 Before execution, model refresh or usage, an account expiring within one
 minute is renewed through the same owner. A local binding copy adopts only
 the exact next generation and an expiry more than thirty seconds away.
@@ -102,6 +108,30 @@ subscription quota path. Both the reading cache and routing freshness are
 fenced by current account generations. Late reads cannot publish routing
 state for a replaced account. External quotas do not reuse the legacy
 name-only disk fallback across generations.
+
+API 1.4 adds exact model inclusion/exclusion sets and informational `aside`
+windows through the existing quota matcher. A selected account also has a
+durable usage revision independent of its credential generation. Only an
+accepted declared write can call `usage.invalidate`, with no account selector
+in its parameters. Dirty usage blocks inference, including the atomic
+execution-journal admission boundary.
+
+Usage reads capture and echo their revision. Only a current, fresh ordinary
+reading can acknowledge it; unknown, deferred or historical results cannot
+reopen the account. Store-backed proofs fence cached reads, late waiters,
+routing and display across processes. Disk history alone restores no routing
+authority after restart. See [ADR 0013](../adr/0013-usage-revisions-and-business-cancel.md)
+for schema, durability and vendor mutation-ordering responsibilities.
+
+Business `operation.cancel` at API 1.4 uses a new journaled intent while
+retaining a separate target operation/reference. It leaves the target's
+receipt unchanged. Transport cancellation and legacy API 1.3 control
+cancellation keep their existing semantics.
+
+Native-only conversations can require the original inbound module executor.
+The host enforces that binding before signing and dispatch, including
+aliases, groups and fallback. The module still validates its account/model
+receipts; see [ADR 0011](../adr/0011-native-executor-constraints.md).
 
 An explicit numeric `used: 0` is a real reading. Missing or null `used`,
 `unknown: true`, or a window error produces an unknown text window instead.

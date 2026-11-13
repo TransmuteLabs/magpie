@@ -4,14 +4,20 @@ Date: November 13, 2026.
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. The current SDK is API 1.3: native/exec/Bun and composite/window
-integration, API 1.2 gateway hooks/private tools, and API 1.3 transactional
-refresh, richer models and a finite provider-operation registry. It does not
-replace every upstream extension surface. Public contracts, ordinary host
+modules. The current SDK source advertises API 1.4: native/exec/Bun,
+composite/window integration, API 1.2 gateway hooks/private tools, and API 1.3 transactional
+refresh, richer models and a finite provider-operation registry, plus the API
+1.4 routing, quota applicability/usage revisions, business cancellation and
+native executor constraints. It does not replace every upstream extension
+surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
 The [combined API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records
 the frozen source and completed SDK gates, without making this census a
 full-repository or full-surface acceptance claim.
+The [routing 1.4 record](../adr/0012-sdk-routing-strategies.md) has scoped
+ordinary-route, lifecycle and race evidence. The
+[SDK 1.4 checkpoint](../adr/0014-sdk14-validation.md) records combined gates;
+application acceptance remains separate.
 
 This census is for modules we maintain ourselves, keeping integration logic
 outside frequently merged upstream code. It distinguishes three layers:
@@ -51,9 +57,9 @@ an optional SDK ownership binding is not a missing extension runtime.
 | --- | --- | --- | --- |
 | Native / exec / Bun installation and distribution | [`native.Register`](../../pkg/extension/native/native.go), [`release.go`](../../internal/extension/release.go), [`release_auth.go`](../../internal/extension/release_auth.go) | Real native C ABI without author C glue; executable/Bun options; full-package hashes, private developer auth, pins/updates | **Implemented 1.1.** Runtime conformance does not imply vendor migration or identical platform proof. |
 | Composite components, readiness, config and disposal | [`composite.go`](../../pkg/extension/composite.go), [`components.go`](../../internal/extension/components.go) | Primary + private exec/Bun services, DAG, readiness, root CAS snapshot, opaque local State, same-generation leases | **Implemented 1.1.** Services are private components, not cross-module pluginrt services. |
-| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary provider/account/routing owners use declared capabilities; API 1.3 adds finite operations, rich model projection, host-owned refresh and expiry preflight | **Implemented through 1.3** for the declared registry. Arbitrary operations and complete legacy-provider metadata parity remain outside it. See the extended matrix below. |
+| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary owners use declared capabilities; API 1.3 supplies finite operations/models/refresh; API 1.4 adds quota model filters, durable usage invalidation/read barriers and separate cancellation intents | **Implemented through 1.4** for the declared registry; scoped records are separate from combined acceptance. Arbitrary operations and full legacy-provider metadata parity remain outside it. |
 | Legacy provider extras | [`Provider`](../../internal/plugin/providers.go), [`plugin_checkin.go`](../../internal/provider/plugin_checkin.go), [`plugin_keepalive.go`](../../internal/provider/plugin_keepalive.go) | Transactional `auth.refresh`, persisted expiry and ordinary renewal cover credential rotation; usage has its own DTOs | **Partial:** check-in, outside calls, provider options and background keepAlive declarations/adapters remain. They are not supplied by the refresh transaction. |
-| Incoming protocols and response codecs | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go), [`inbound.go`](../../pkg/extension/inbound.go) | Installed codecs enter ordinary guards/canonical dispatch and retain the primary lease through response encoding | **Implemented 1.1** for negotiated canonical operations; not arbitrary gateway route registration. |
+| Incoming protocols and response codecs | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go), [`inbound.go`](../../pkg/extension/inbound.go) | Installed codecs enter ordinary guards/canonical dispatch and retain the primary lease; API 1.4 can require that exact lease's module for native-only execution | **Implemented through 1.4** for negotiated canonical operations; not arbitrary gateway route registration or vendor receipt validation. |
 | Plugin tools / MCP tools | [`extension_tools.go`](../../internal/plugin/extension_tools.go), [`extension_tools.go`](../../internal/gateway/extension_tools.go) | `tool-provider` enters ordinary plugin-tools MCP/hub; API 1.2 adds shared/local-owner exposure | **Implemented through 1.2.** Discovery and actual leased invocation enforce local-owner authority, including after package replacement. |
 | MCP server configuration and protocol integration | [`Server`](../../internal/library/mcp.go), [`ServeRun`](../../internal/library/mcp_run.go) | Library already supports configured servers, prompts/resources/templates and protocol notifications; SDK declares tools | **Existing data/protocol integration.** Automatic ownership binding of a module's MCP service is not supplied, but this is not an unimplemented extension runtime. |
 | Ordinary agent wiring | [`extensionAgents`](../../internal/agent/extension_actions.go), [`AgentDescriptor`](../../pkg/extension/contract.go) | Rich descriptors reach ordinary discovery, inspect/connect/set/disconnect and checked plans | **Implemented 1.1.** Ordinary discovery requires ConfigFiles; ID/Name-only descriptors remain manual actions. |
@@ -64,7 +70,7 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Synchronous gateway middleware | [`middleware.go`](../../internal/middleware/middleware.go), [`gwmw`](../../internal/gwmw/gwmw.go) | Legacy onRequest/onAccount/onProvider/onEvent/onResponse chain | **Remaining:** SDK adapter at those points. Request recall hooks do not replace stream/account/provider middleware. |
 | Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 `gateway-hooks` enters ordinary request/completion/sign-in owners with origin, effect and lease checks | **Implemented 1.2, scoped host proof.** Recall is read-only; capture keeps the selected generation and durable effect policy. This is not synchronous middleware or built-in Memory access. |
 | Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go) | Existing Go/legacy observer points | **Remaining:** `usage-reporter` concerns its provider; it is not a global observer adapter. |
-| Routing strategy / seat ordering | [`Strategy`, `Register`](../../internal/routes/routes.go), [`points.go`](../../internal/middleware/points.go) | Existing strategy registry and legacy JS strategies | **Remaining:** SDK descriptor and adapter. |
+| Routing strategy / seat ordering | [`RoutingStrategyDescriptor`](../../pkg/extension/routing.go), [`extensionrouting`](../../internal/extensionrouting/routing.go), [`Manager.OrderRouting`](../../internal/extension/routing.go) | Namespaced root READ actions, owned by the primary or a private service, enter ordinary provider/group ordering; component-filtered public handshakes retain full-root registration and lazy dispatch | **Implemented 1.4.** Selected revision/config leases, bounded permutations and identity fallback retain core guards. [Record](../adr/0012-sdk-routing-strategies.md), including hybrid regression; SDK checkpoint and application acceptance are separate. |
 | Budget limiter / spender | [`Limiter`, `Spender`](../../internal/gwbudget/gwbudget.go) | Host reserve/release/spent contract | **Remaining:** SDK adapter preserving the point's fail-closed policy. |
 | Reversible masking | [`Masker`](../../internal/gwmw/gwmw.go), [`plugins/redact`](../../plugins/redact/redact.go) | Dedicated host transformation point | **Remaining:** SDK adapter; ordinary request hooks are not this contract. |
 | Search source / gateway web search | [`searchesOf`](../../internal/plugin/host.js), [`gwtool`](../../internal/gwtool/gwtool.go) | Legacy search hooks and the web-search point | **Remaining:** a tool named search does not register a search source. |
@@ -185,13 +191,16 @@ application. This enables attachment-aware native OMP conversion through
 existing readers/resume owners; it is not generic SDK reader registration.
 Explicit callers retaining an output plan still own deferred source checks.
 
-## Remaining contracts and a possible API 1.4
+## Remaining owner adapters after API 1.4
 
 Use common declaration/lifecycle machinery with typed subsystem adapters,
 rather than a new capability for every feature or an unrestricted host RPC.
-The following remain proposed boundaries, not current API 1.3 fields. A
-future API 1.4 is a possible delivery increment, not an accepted manifest
-version or a promise that these all ship together:
+The following remain proposed boundaries, not implemented API 1.4 fields.
+An API 1.5 increment is a delivery proposal; it is not an accepted manifest
+version or a promise that these all ship together. Selected-account window
+bindings and agent launch/explicit handoff are the first concrete cuts:
+window backend calls currently carry only module scope, and ordinary SDK
+agent discovery deliberately retains its default collision policy.
 
 1. **Contribution registration:** a versioned descriptor names an ID, a
    host-known point/contract and a declared action. The host validates DTOs,
@@ -210,7 +219,8 @@ version or a promise that these all ship together:
 The implemented memory slice is gateway hooks, local-owner tools and
 module-owned storage. Explicit built-in Memory owner access is an optional follow-up,
 alongside independent Library targets/resources and session readers.
-Global routing, observation, budget and masking retain their own timing and
+Routing's implemented adapter and the remaining observation, budget and
+masking points retain their own timing and
 failure contracts; a shared registration envelope cannot erase those.
 
 ## Evidence and limits

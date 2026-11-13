@@ -32,7 +32,7 @@ const configure = (id = "configure", extra = {}) => ({
 });
 
 test("current SDK preserves API 1.1 primary and service authority projections", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 3 });
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 4 });
   assert.equal(SDK.CONTRACT.capabilities.length, 11);
   const root = SDK.validateManifest(compositeManifest());
   assert.deepEqual(SDK.requiredMethods(root), ["module.call"]);

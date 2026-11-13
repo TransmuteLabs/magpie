@@ -36,6 +36,19 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 	if handlers == nil {
 		handlers = make(map[string]Handler)
 	}
+	if handler := handlers[MethodProviderUsage]; handler != nil {
+		handlers[MethodProviderUsage] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			result, err := handler(ctx, call, stream)
+			if err == nil {
+				var raw json.RawMessage
+				raw, err = json.Marshal(result)
+				if err == nil {
+					_, _, err = ValidateUsageResult(module.Manifest, raw)
+				}
+			}
+			return result, err
+		}
+	}
 	if _, exists := handlers[MethodModuleCall]; exists {
 		return nil, nil, fmt.Errorf("module.call is owned by the SDK; register Module.Actions")
 	}

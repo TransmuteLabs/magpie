@@ -81,6 +81,7 @@ const (
 	MethodAuthLogout      = "auth.logout"
 	MethodOperationStatus = "operation.status"
 	MethodOperationCancel = "operation.cancel"
+	MethodUsageInvalidate = "usage.invalidate"
 	MethodToolCall        = "tool.call"
 	MethodAgentPlan       = "agent.plan"
 	MethodAgentInspect    = "agent.inspect"

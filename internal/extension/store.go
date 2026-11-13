@@ -55,6 +55,7 @@ type storeAccount struct {
 	Account
 	Deleted bool           `json:"deleted,omitempty"`
 	Refresh *refreshRecord `json:"refresh,omitempty"`
+	Usage   *usageState    `json:"usage,omitempty"`
 }
 
 type storeAccounts struct {
@@ -201,7 +202,11 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 		account.Generation = generation + 1
 		account.Auth = bytes.Clone(account.Auth)
 		if index < 0 {
-			records.Accounts = append(records.Accounts, storeAccount{Account: account})
+			record := storeAccount{Account: account}
+			if records.Schema >= 3 {
+				record.Usage = &usageState{}
+			}
+			records.Accounts = append(records.Accounts, record)
 		} else {
 			records.Accounts[index].Account = account
 			records.Accounts[index].Deleted = false
@@ -243,11 +248,28 @@ func (s *Store) DeleteAccount(plugin, provider, id string, expectedGeneration ui
 }
 
 func (s *Store) Journal(scope sdk.Scope, state string) (JournalEntry, error) {
+	return s.journal(scope, state, false)
+}
+
+func (s *Store) journal(scope sdk.Scope, state string, inference bool) (JournalEntry, error) {
 	var result JournalEntry
 	if !storeValidScope(scope) || !storeToken(scope.Operation) || !storeJournalState(state) && state != "canceled" {
 		return result, storeInvalid()
 	}
 	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+		if inference && state == "dispatched" && scope.Account != "" {
+			records, err := storeReadAccounts(root, scope.Plugin)
+			if err != nil {
+				return err
+			}
+			account, err := usageAccount(&records, scope)
+			if err != nil {
+				return err
+			}
+			if usageStamp(*account).Dirty {
+				return &sdk.Error{Code: "usage_refresh_required", Message: "A fresh account usage acknowledgment is required.", Outcome: "not-started"}
+			}
+		}
 		if _, found, err := refreshOperation(root, scope.Plugin, scope.Operation); err != nil {
 			return err
 		} else if found {
@@ -385,7 +407,7 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 	if !found {
 		return storeAccounts{Schema: 1, Accounts: []storeAccount{}}, nil
 	}
-	if records.Schema != 1 && records.Schema != 2 || records.Accounts == nil {
+	if records.Schema < 1 || records.Schema > 3 || records.Accounts == nil {
 		return storeAccounts{}, storeUnreadable()
 	}
 	seen := make(map[string]bool, len(records.Accounts))
@@ -399,7 +421,11 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 		if seen[identity] {
 			return storeAccounts{}, storeUnreadable()
 		}
-		if record.Refresh != nil && (records.Schema != 2 || !validRefreshRecord(record)) {
+		if record.Refresh != nil && (records.Schema < 2 || !validRefreshRecord(record)) {
+			return storeAccounts{}, storeUnreadable()
+		}
+		if records.Schema < 3 && record.Usage != nil || records.Schema == 3 &&
+			(record.Usage == nil || record.Usage.Acknowledged > record.Usage.Revision) {
 			return storeAccounts{}, storeUnreadable()
 		}
 		seen[identity] = true

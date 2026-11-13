@@ -4,6 +4,7 @@ import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
 import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
 import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
 import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation } from "./provider-policy.js";
+import { validateRouting } from "./routing.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -20,7 +21,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 3 }),
+  version: Object.freeze({ major: 1, minor: 4 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -144,7 +145,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -210,6 +211,7 @@ export function validateManifest(value) {
     || has("agent-wiring") && !manifest.agents?.length
     || has("session-migration") && !manifest.sessions?.length) fail("Missing capability descriptors");
   validateComposite(manifest);
+  validateRouting(manifest, fail);
   validateHooks(manifest);
   return freezeJSON(manifest);
 }
@@ -221,6 +223,9 @@ export function publicManifest(manifest) {
   delete result.args;
   for (const key of ["services", "window", "bindings", "compatibility"]) delete result[key];
   if (result.actions != null) result.actions = result.actions.filter(action => actionOwner(action) === componentID(manifest));
+  if (result.routingStrategies != null) {
+    result.routingStrategies = result.routingStrategies.filter(strategy => result.actions?.some(action => action.id === strategy.action));
+  }
   for (const provider of result.providers || []) for (const model of provider.models || []) modelPolicy(model);
   return freezeJSON(result);
 }

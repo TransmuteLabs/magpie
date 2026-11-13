@@ -12,6 +12,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if slices.Contains(os.Args, "--sdk-routing-disable") {
+		routingCatalogChild()
+		os.Exit(0)
+	}
+	if slices.Contains(os.Args, "--sdk-usage-child") {
+		usageChild()
+		os.Exit(0)
+	}
 	if slices.Contains(os.Args, "--sdk-refresh-child") {
 		refreshChild()
 		os.Exit(0)

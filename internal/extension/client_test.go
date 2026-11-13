@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -117,24 +118,64 @@ func helperModule() sdk.Module {
 		sdk.MethodProviderModels: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 			return sdk.ModelsResult{Models: []sdk.Model{{ID: "model", Name: "Fixture", ContextWindow: 65536}}}, nil
 		},
-		sdk.MethodProviderUsage: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
-			return sdk.UsageResult{Windows: []sdk.UsageWindow{{Name: "daily", Used: 12}}}, nil
+		sdk.MethodProviderUsage: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			var request sdk.UsageRequest
+			_ = json.Unmarshal(call.Params, &request)
+			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "daily", Used: 12}}}, nil
 		},
-		sdk.MethodAuthStart: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+		sdk.MethodAuthStart: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+			var request sdk.AuthStartRequest
+			if err := json.Unmarshal(call.Params, &request); err != nil {
+				return nil, err
+			}
+			if request.Method == "stateful" {
+				var result sdk.StateCASResult
+				if err := stream.HostCall(ctx, sdk.MethodStateCAS, sdk.StateCASRequest{
+					Key: "auth.continuation", Version: "0", Value: json.RawMessage(`"started"`),
+				}, &result); err != nil {
+					return nil, err
+				}
+				if !result.Swapped {
+					return nil, errors.New("auth continuation already exists")
+				}
+			}
 			return sdk.AuthStartResult{UserCode: "fixture-code", Continuation: json.RawMessage(`{"nonce":"fixture"}`)}, nil
 		},
-		sdk.MethodAuthFinish: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+		sdk.MethodAuthFinish: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+			var request sdk.AuthFinishRequest
+			if err := json.Unmarshal(call.Params, &request); err != nil {
+				return nil, err
+			}
+			if request.Code == "stateful" {
+				if err := fixtureAuthContinuation(ctx, stream, "started", "finished"); err != nil {
+					return nil, err
+				}
+			}
 			return sdk.AuthResult{ID: "account", Credentials: json.RawMessage(`{"token":"only-this-account"}`)}, nil
 		},
 		sdk.MethodAuthRefresh: fixtureAuthRefresh,
-		sdk.MethodAuthLogout: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+		sdk.MethodAuthLogout: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+			if call.Scope.Session == "stateful-auth" {
+				if err := fixtureAuthContinuation(ctx, stream, "finished", "logged-out"); err != nil {
+					return nil, err
+				}
+			}
 			return map[string]bool{"ok": true}, nil
 		},
 		sdk.MethodOperationStatus: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 			return sdk.OperationResult{OperationID: call.Scope.Operation, Outcome: "completed"}, nil
 		},
-		sdk.MethodOperationCancel: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
-			return sdk.OperationResult{OperationID: call.Scope.Operation, Outcome: "canceled"}, nil
+		sdk.MethodOperationCancel: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+			target := call.Scope.Operation
+			if manifest.Contract.Version.Minor >= 4 {
+				var request sdk.OperationRequest
+				_ = json.Unmarshal(call.Params, &request)
+				target = request.OperationID
+				if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
+					return nil, err
+				}
+			}
+			return sdk.OperationResult{OperationID: target, Outcome: "canceled"}, nil
 		},
 		sdk.MethodToolCall: fixtureTool,
 		sdk.MethodAgentPlan: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
@@ -170,8 +211,38 @@ func helperModule() sdk.Module {
 				return map[string]int{"bytes": len(call.Params)}, nil
 			}
 		}
+		if action.ID == "fixture.auth-read" && action.Effect == "read" &&
+			(action.Component == "" || action.Component == sdk.PrimaryComponent) {
+			actions[action.ID] = func(ctx context.Context, _ sdk.Call, stream *sdk.Stream) (any, error) {
+				var result sdk.StateCASResult
+				err := stream.HostCall(ctx, sdk.MethodStateCAS, sdk.StateCASRequest{
+					Key: "auth.read-escape", Version: "0", Value: json.RawMessage(`true`),
+				}, &result)
+				return result, err
+			}
+		}
 	}
 	return sdk.Module{Manifest: manifest, Handlers: handlers, Inbounds: inbounds, Actions: actions}
+}
+
+func fixtureAuthContinuation(ctx context.Context, stream *sdk.Stream, before, after string) error {
+	var current sdk.StateValue
+	if err := stream.HostCall(ctx, sdk.MethodStateGet, sdk.StateGetRequest{Key: "auth.continuation"}, &current); err != nil {
+		return err
+	}
+	if string(current.Value) != strconv.Quote(before) {
+		return errors.New("auth continuation is not current")
+	}
+	var result sdk.StateCASResult
+	if err := stream.HostCall(ctx, sdk.MethodStateCAS, sdk.StateCASRequest{
+		Key: "auth.continuation", Version: current.Version, Value: json.RawMessage(strconv.Quote(after)),
+	}, &result); err != nil {
+		return err
+	}
+	if !result.Swapped {
+		return errors.New("auth continuation was replaced")
+	}
+	return nil
 }
 
 func fixtureTool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
@@ -189,6 +260,15 @@ func fixtureTool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, e
 		return nil, err
 	}
 	switch args.Action {
+	case "usage-invalidate":
+		if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
+			return nil, err
+		}
+		var result sdk.UsageInvalidateResult
+		if err := stream.HostCall(ctx, sdk.MethodUsageInvalidate, sdk.UsageInvalidateRequest{}, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	case "stream":
 		for _, text := range []string{"first", "second"} {
 			if err := stream.Emit(ctx, "data", []byte(text)); err != nil {

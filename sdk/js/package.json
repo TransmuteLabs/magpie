@@ -1,6 +1,6 @@
 {
   "name": "@magpie/extension-sdk",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Dependency-free executable extension authoring SDK for Magpie",
   "type": "module",
   "exports": {
@@ -24,6 +24,8 @@
     "composite.js",
     "lifecycle.js",
     "hooks.js",
+    "usage.js",
+    "routing.js",
     "ui.js",
     "ui.d.ts",
     "README.md"

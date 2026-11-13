@@ -3089,6 +3089,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			fastPick(cands, pl, p.ID, model, tier == "ultrafast")
 		}
 	}
+	cands, pl = protocolExecutors(r.Context(), cands, pl)
+	if len(cands) == 0 && len(pl.held) == 0 && len(pl.capped) == 0 && len(pl.unlisted) == 0 && extension.ExecutorRequired(r.Context()) {
+		call.Status, call.Error = http.StatusConflict, "native request requires its original module executor"
+		writeError(w, from, call.Status, call.Error)
+		turnedAway()
+		return
+	}
 	agentPick := provider.AgentEffort(agent)
 	if sealedTask {
 		cands, pl = s.sealedReaders(cands, pl, sealers)
@@ -3607,6 +3614,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// request read it is asked there, a retry of it too
 			// (le13ure on X)
 			c.p = q
+		}
+		if err := c.p.CheckExecutor(r.Context()); err != nil {
+			if i < len(cands)-1 {
+				continue
+			}
+			call.Status, call.Error = http.StatusConflict, err.Error()
+			failTo(w, kept, from, call.Status, call.Error)
+			break
 		}
 		if handed.release != nil && handed.who != c.who() {
 			handed.release()

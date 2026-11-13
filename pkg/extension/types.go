@@ -21,6 +21,7 @@ type DecodedRequest struct {
 	TimeoutMs int64           `json:"timeoutMs,omitempty"`
 	RequestID string          `json:"requestId,omitempty"`
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	Executor  ExecutorPolicy  `json:"executor,omitempty"`
 }
 
 type ResponseEvent struct {
@@ -163,24 +164,35 @@ type Usage struct {
 
 type UsageRequest struct {
 	Credentials json.RawMessage `json:"credentials,omitempty"`
+	Revision    string          `json:"revision,omitempty"`
 }
 
 type UsageWindow struct {
-	Name     string  `json:"name"`
-	Used     float64 `json:"used"`
-	Limit    float64 `json:"limit,omitempty"`
-	ResetsAt int64   `json:"resetsAt,omitempty"`
-	Unknown  bool    `json:"unknown,omitempty"`
-	Error    string  `json:"error,omitempty"`
-	AsOf     int64   `json:"asOf,omitempty"`
+	Name      string   `json:"name"`
+	Used      float64  `json:"used"`
+	Limit     float64  `json:"limit,omitempty"`
+	ResetsAt  int64    `json:"resetsAt,omitempty"`
+	Unknown   bool     `json:"unknown,omitempty"`
+	Error     string   `json:"error,omitempty"`
+	AsOf      int64    `json:"asOf,omitempty"`
+	Models    []string `json:"models,omitempty"`
+	NotModels []string `json:"notModels,omitempty"`
+	Aside     bool     `json:"aside,omitempty"`
 }
 
 type UsageResult struct {
+	Revision     string        `json:"revision,omitempty"`
 	Usage        Usage         `json:"usage"`
 	Windows      []UsageWindow `json:"windows,omitempty"`
 	AsOf         int64         `json:"asOf,omitempty"`
 	ReadDeferred bool          `json:"readDeferred,omitempty"`
 	Error        string        `json:"error,omitempty"`
+}
+
+type UsageInvalidateRequest struct{}
+
+type UsageInvalidateResult struct {
+	Revision string `json:"revision"`
 }
 
 type OperationRequest struct {

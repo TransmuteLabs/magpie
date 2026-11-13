@@ -30,6 +30,13 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 		stream.server.mu.Unlock()
 		return err
 	}
+	if BusinessCancel(stream.server.manifest, stream.state.call.Method) && event != "accepted" {
+		err = &Error{Code: "invalid_params", Message: "business cancellation is unary"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
 	if ctx == nil || event == "" || len(event) > 128 {
 		return &Error{Code: "invalid_params", Message: "invalid extension event"}
 	}
@@ -101,7 +108,7 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
-	if ctx == nil || method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall {
+	if ctx == nil || method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
 	}
 	ctx, cancel := stream.context(ctx)

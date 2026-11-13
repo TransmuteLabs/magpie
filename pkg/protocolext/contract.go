@@ -18,6 +18,7 @@ const (
 	UsageReporter    Capability = "usage-reporter"
 	OperationControl Capability = "operation-control"
 	ToolProvider     Capability = "tool-provider"
+	ExecutorBinding  Capability = "executor-binding"
 )
 
 type Contract struct {
@@ -38,7 +39,7 @@ func (host Contract) Check(module Contract) error {
 	}
 	seen := make(map[Capability]bool, len(module.Capabilities))
 	for _, capability := range module.Capabilities {
-		if !available[capability] || seen[capability] {
+		if !available[capability] || seen[capability] || capability == ExecutorBinding && module.Version.Minor < 4 {
 			return fmt.Errorf("unsupported or duplicate protocol extension capability %q", capability)
 		}
 		seen[capability] = true
@@ -59,7 +60,7 @@ func ToolContract() Contract {
 }
 
 func HostContract() Contract {
-	return Contract{Version: APIVersion{Major: Version, Minor: 3}, Capabilities: []Capability{InboundCodec, ModelDiscovery, ToolProvider}}
+	return Contract{Version: APIVersion{Major: Version, Minor: 4}, Capabilities: []Capability{InboundCodec, ModelDiscovery, ToolProvider, ExecutorBinding}}
 }
 
 func (contract Contract) Has(capability Capability) bool {

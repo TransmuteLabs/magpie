@@ -65,7 +65,7 @@ func fixtureExtensionProvider(t *testing.T, authenticated bool) *fixtureExtensio
 	root := t.TempDir()
 	host := &fixtureExtensionProviderHost{store: extensionhost.NewStore(root), namespace: root, manifest: sdk.Manifest{
 		Schema: sdk.ManifestSchema, ID: "fixture.external", Version: "1.0.0", Runtime: "exec", Entry: "worker",
-		Contract: sdk.Contract{Version: sdk.FullContract().Version, Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.ModelDiscovery, sdk.UsageReporter}},
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 3}, Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.ModelDiscovery, sdk.UsageReporter}},
 		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture vendor", Protocols: []protocolext.Protocol{"chat", "messages"},
 			Models: []sdk.Model{{ID: "m1", Name: "Model", ContextWindow: 32768, MaxOutput: 4096, Protocols: []protocolext.Protocol{"chat"}}}}},
 	}}

@@ -166,14 +166,15 @@ type QuotaWindow struct {
 // SubscriptionQuota is provider-reported allowance usage. This is separate
 // from Dial's local token log: vendors expose percentages, not token totals.
 type SubscriptionQuota struct {
-	Provider  string        `json:"provider"`
-	Name      string        `json:"name"`
-	Icon      string        `json:"icon"`
-	Plan      string        `json:"plan,omitempty"`
-	AccessSKU string        `json:"accessSku,omitempty"`
-	User      string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
-	Windows   []QuotaWindow `json:"windows"`
-	Balance   string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
+	extensionUsage *extensionUsageProof
+	Provider       string        `json:"provider"`
+	Name           string        `json:"name"`
+	Icon           string        `json:"icon"`
+	Plan           string        `json:"plan,omitempty"`
+	AccessSKU      string        `json:"accessSku,omitempty"`
+	User           string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
+	Windows        []QuotaWindow `json:"windows"`
+	Balance        string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
 	// BalanceParts are the Balance's amounts each apart, when the balance
 	// field the user wrote has several or a percent (cardParts)
 	BalanceParts []BalancePart `json:"balanceParts,omitempty"`
@@ -404,6 +405,7 @@ func SubscriptionUsageReading() bool {
 
 // visibleQuotas drops accounts removed from magpie since the last refresh.
 func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
+	all = currentExtensionQuotas(slices.Clone(all))
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden || p.Off // switched off: not asked either

@@ -2,12 +2,14 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Current API 1.3 includes native/exec/Bun and composite
-modules, gateway hooks/private tools, transactional refresh, finite provider
-operations and rich model metadata. The
+advertised capability. Current source API 1.4 includes native/exec/Bun,
+composite modules, gateway hooks/private tools, transactional refresh, finite provider
+operations, rich model metadata and namespaced routing strategies. The
 [combined validation record](../../docs/adr/0009-sdk13-validation.md) names
 its frozen SDK snapshot; the [surface census](../../docs/subsystems/extension-surface-coverage.md)
 retains remaining adapters and does not claim full SDK or repository acceptance.
+The [SDK 1.4 checkpoint](../../docs/adr/0014-sdk14-validation.md) records
+combined SDK gates; final application acceptance remains separate.
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -69,9 +71,22 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.3 with eleven capabilities; explicit API 1.0 modules without composite fields
-retain their original single-controller behavior. The original codec host contract remains
-API 0.3 with the 0.1 inbound and 0.2 catalog contracts still supported.
+`FullContract()` is API 1.4 with eleven capabilities; explicit API 1.0 modules without composite fields
+retain their original single-controller behavior. The separate codec host
+contract is API 0.4, accepting the older 0.1 inbound, 0.2 catalog and 0.3 tool
+contracts as well.
+
+An API 1.4 paired inbound/outbound module can return
+`DecodedRequest.Executor = SameModuleExecutor` to preserve native-only
+conversation semantics. The Go codec helper also declares
+`protocolext.ExecutorContract()` and sets `protocolext.Request.Executor`.
+The host derives the owner from the original pinned request lease and
+checks that exact lease on every attempt, including groups and aliases.
+Empty preserves ordinary routing; null, unknown policies, discovery/tools,
+legacy modules and another inbound lease cannot grant or relax this
+constraint. The module must still validate native receipts against the
+actual account, generation and model. See
+[ADR 0011](../../docs/adr/0011-native-executor-constraints.md).
 
 Handlers receive `Call{ID, Method, Scope, Params, Auth}`. Scope belongs to the
 host: plugin/provider/account/session/operation are strings, and account
@@ -237,6 +252,43 @@ journal/blob documents; it does not select another profile or read host
 paths by itself. Source and target-store guards remain host-owned. This is
 not generic SDK session discovery/reader/resume registration; see the
 [session reference](../../docs/subsystems/extension-agents-sessions.md).
+
+## Routing strategies API 1.4
+
+Declare `Manifest.RoutingStrategies` with `RoutingStrategyDescriptor` entries
+and a `module-rpc` read action. API 1.4 is required. Each descriptor names
+`ID`, display `Name`, `Action`, optional `RoutingFlags` and `TimeoutMs`.
+Use the fixed `moduleID/strategyID` as a provider or group's `routing` value;
+the existing selector discovers enabled declarations without starting a worker.
+
+The read action may belong to a declared private backend. The full root
+retains its registration and dispatches through that component's lazy client.
+`Manifest.Public()` exposes only routing whose action belongs to the
+described component, so a primary handshake does not contain dangling
+references to private actions. This projection does not change root authority.
+
+The action decodes `RoutingRequest`, calls its `Validate` method and returns
+a unary `RoutingResult`. Its `Order` must contain every input seat index once;
+`RoutingResult.Validate` checks this independently. The
+[tested worker](../../internal/extension/testdata/routingworker/main.go)
+shows the full handler and read-only callback behavior, and
+[ADR 0012](../../docs/adr/0012-sdk-routing-strategies.md) has the tested
+descriptor fragment and ordinary HTTP evidence.
+
+Flags retain the existing Strategy meanings: `Exact`, `ByUse`, `ByFree`,
+`ByPlan`, `BySpeed`, `ByPrice`. Input contains bounded metrics and opaque
+seat/wallet identities, without auth or selected-account scope. Limits are
+64 descriptors, 256 seats, 32 renewals per seat and 1 MiB input/output JSON.
+The host validates finite measurements, timestamps and the full permutation.
+Read actions cannot persist `state.cas` changes on API 1.4.
+
+The ordering context defaults to 500 ms; explicit `TimeoutMs` is 25–2000 ms,
+including cold acquisition and the RPC. Existing `Strategy.Order` has no HTTP
+caller context; this seam uses a bounded background context. Errors,
+invalid/streaming output, deadlines and off/update/config revocation fall back
+to identity order. Core account/key/model guards and failover remain intact.
+Scoped worker/race verification and the combined SDK checkpoint passed;
+application acceptance remains separate.
 
 ## Composite API 1.1
 

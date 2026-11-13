@@ -28,6 +28,7 @@ type inboundModule struct {
 	adapters     map[string]protocolext.Inbound
 	discovery    bool
 	toolProvider bool
+	executor     bool
 	tools        map[string]bool
 	mu           sync.Mutex
 	responses    map[string]*inboundResponse
@@ -66,6 +67,7 @@ func newInboundModule(manifest Manifest, adapters []protocolext.Inbound) (*inbou
 		adapters: make(map[string]protocolext.Inbound), responses: make(map[string]*inboundResponse),
 		discovery:    manifest.Contract.Has(ModelDiscovery),
 		toolProvider: manifest.Contract.Has(ToolProvider), tools: make(map[string]bool),
+		executor: manifest.Contract.Version.Minor >= 4 && manifest.Contract.Has(OutboundExecutor),
 	}
 	for _, tool := range manifest.Tools {
 		module.tools[tool.Name] = true
@@ -111,6 +113,10 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 	if decoded.Timeout < 0 || len(decoded.Body) > MaxNativeBodyBytes {
 		return nil, &Error{Code: "internal", Message: "codec produced an invalid request"}
 	}
+	if err := protocolext.ValidateExecutor(decoded.Executor, decoded.Protocol); err != nil ||
+		decoded.Executor != "" && (!module.executor || !adapter.Contract().Has(protocolext.ExecutorBinding)) {
+		return nil, &Error{Code: "internal", Message: "codec produced an unnegotiated executor constraint"}
+	}
 	if len(decoded.Metadata) > MaxChunkBytes || len(decoded.Metadata) != 0 && !json.Valid(decoded.Metadata) {
 		return nil, &Error{Code: "internal", Message: "codec produced invalid or oversized metadata"}
 	}
@@ -141,6 +147,7 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 	return DecodedRequest{
 		Protocol: string(decoded.Protocol), Body: decoded.Body, Session: decoded.Session, TimeoutMs: timeout,
 		RequestID: decoded.RequestID, Metadata: bytes.Clone(decoded.Metadata),
+		Executor: decoded.Executor,
 	}, nil
 }
 

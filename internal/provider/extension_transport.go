@@ -66,6 +66,9 @@ func (body *extensionResponseBody) noteUsage(usage *sdk.Usage) {
 
 func (binding *extensionAccount) execute(request *http.Request) (*http.Response, error) {
 	ctx := request.Context()
+	if err := extensionhost.CheckExecutor(ctx, binding.scope.Plugin, binding.host.Namespace()); err != nil {
+		return nil, err
+	}
 	if err := extensionAttemptOf(ctx).Outcome(true); err != nil {
 		return nil, err
 	}

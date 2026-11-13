@@ -754,6 +754,27 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		}
 		return json.Marshal(result)
 	}
+	if sdk.BusinessCancel(manifest, method) {
+		if err := validateCancelIntent(params, scope); err != nil {
+			return nil, err
+		}
+		if manifest.Contract.Has(sdk.AccountAuth) && (scope.Account == "" || scope.Provider == "") {
+			return nil, errors.New("business cancellation requires its selected account")
+		}
+	}
+	if method == sdk.MethodProviderExecute {
+		if err := m.store.UsageReady(scope); err != nil {
+			return nil, err
+		}
+	}
+	var usageRead *UsageStamp
+	if method == sdk.MethodProviderUsage {
+		var err error
+		params, usageRead, err = m.prepareUsageRead(manifest, scope, params)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if method == sdk.MethodToolCall {
 		if err := checkLeasedTool(ctx, manifest, params); err != nil {
 			return nil, err
@@ -764,7 +785,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil, err
 	}
 	effect := method == sdk.MethodProviderExecute || method == sdk.MethodToolCall ||
-		method == sdk.MethodGatewayResponse || method == sdk.MethodGatewaySignIn
+		method == sdk.MethodGatewayResponse || method == sdk.MethodGatewaySignIn || sdk.BusinessCancel(manifest, method)
 	component := sdk.PrimaryComponent
 	if method == sdk.MethodModuleCall {
 		encoded, marshalErr := json.Marshal(params)
@@ -815,7 +836,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if scope.Attempt == 0 {
 			scope.Attempt = 1
 		}
-		if _, err := m.store.Journal(scope, "dispatched"); err != nil {
+		if _, err := m.store.journal(scope, "dispatched", method == sdk.MethodProviderExecute); err != nil {
 			return nil, err
 		}
 	}
@@ -833,6 +854,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if sdk.IsGatewayMethod(method) && event.Name != "accepted" {
 			return errors.New("gateway hook calls are unary")
 		}
+		if sdk.BusinessCancel(manifest, method) && event.Name != "accepted" {
+			return errors.New("business cancellation is unary")
+		}
 		if event.Name == "accepted" {
 			var value sdk.AcceptedEvent
 			if !effect || json.Unmarshal(event.Data, &value) != nil || value.OperationID != scope.Operation {
@@ -849,6 +873,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil
 	}
 	result, err := client.call(ctx, method, scope, auth, params, onEvent)
+	if err == nil && method == sdk.MethodProviderUsage {
+		err = m.finishUsageRead(manifest, scope, usageRead, result)
+	}
 	if effect {
 		state := "completed"
 		var declared struct {
@@ -959,6 +986,8 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		return nil, err
 	}
 	switch method {
+	case sdk.MethodUsageInvalidate:
+		return m.invalidateUsage(ctx, scope, raw, authority)
 	case sdk.MethodComponentCall:
 		component, ok := ctx.Value(componentAuthorityKey{}).(componentAuthority)
 		var request sdk.ComponentCallRequest
@@ -1037,6 +1066,13 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	case sdk.MethodStateCAS:
 		if readOnly, _ := ctx.Value(gatewayReadOnlyKey{}).(bool); readOnly {
 			return nil, errors.New("gateway recall cannot write persistent module state")
+		}
+		authControl := authority.manifest.Contract.Has(sdk.AccountAuth) &&
+			(authority.method == sdk.MethodAuthStart || authority.method == sdk.MethodAuthFinish ||
+				authority.method == sdk.MethodAuthLogout)
+		if component, ok := ctx.Value(componentAuthorityKey{}).(componentAuthority); ok &&
+			authority.manifest.Contract.Version.Minor >= 4 && component.effect != "write" && !authControl {
+			return nil, errors.New("a read-only module call cannot write persistent state")
 		}
 		var request sdk.StateCASRequest
 		if !decodeHostParams(raw, &request) {

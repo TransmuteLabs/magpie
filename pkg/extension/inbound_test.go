@@ -23,6 +23,7 @@ type fixtureCodec struct {
 	protocol    protocolext.Protocol
 	contract    protocolext.Contract
 	decodedBody []byte
+	executor    protocolext.ExecutorPolicy
 }
 
 func (codec *fixtureCodec) Contract() protocolext.Contract {
@@ -79,6 +80,7 @@ func (codec *boundFixtureCodec) Decode(_ context.Context, _ http.Header, body []
 		Protocol: protocol, Body: canonical,
 		Session: fmt.Sprint(codec.instance), Timeout: 1500 * time.Microsecond,
 		RequestID: "native-operation", Metadata: metadata,
+		Executor: codec.source.executor,
 	}, nil
 }
 func (codec *boundFixtureCodec) Reply(writer http.ResponseWriter) protocolext.Response {
@@ -195,6 +197,52 @@ func TestInboundHelpersBindOnceBeforeDecodeAndIsolateResponses(t *testing.T) {
 	}
 	if codec.finishes.Load() != 2 {
 		t.Fatal("Finish was not called exactly once per response", codec.finishes.Load())
+	}
+}
+
+func TestInboundHelperNegotiatesExecutorConstraint(t *testing.T) {
+	for _, scenario := range []string{"paired", "legacy", "inbound-only", "undeclared-codec", "invalid-policy", "models"} {
+		t.Run(scenario, func(t *testing.T) {
+			codec := &fixtureCodec{contract: protocolext.ExecutorContract(), executor: protocolext.SameModuleExecutor}
+			module := inboundFixtureModule(codec)
+			module.Manifest.Contract.Version.Minor = 4
+			module.Manifest.Contract.Capabilities = []Capability{InboundCodec, OutboundExecutor}
+			module.Manifest.Providers = []ProviderDescriptor{{ID: "vendor", Name: "Vendor", Protocols: []protocolext.Protocol{protocolext.Chat}}}
+			module.Handlers = map[string]Handler{MethodProviderExecute: func(context.Context, Call, *Stream) (any, error) {
+				return ExecuteResult{Outcome: "not-started"}, nil
+			}}
+			switch scenario {
+			case "legacy":
+				module.Manifest.Contract.Version.Minor = 3
+			case "inbound-only":
+				module.Manifest.Contract.Capabilities = []Capability{InboundCodec}
+				module.Manifest.Providers, module.Handlers = nil, nil
+			case "undeclared-codec":
+				codec.contract = protocolext.InboundContract()
+			case "invalid-policy":
+				codec.executor = "another-module"
+			case "models":
+				codec.protocol = protocolext.Models
+				codec.decodedBody = []byte{}
+			}
+			if err := module.Validate(); err != nil {
+				t.Fatal("invalid executor fixture", err)
+			}
+			peer := startPeer(t, module)
+			configurePeer(t, peer, module.Manifest, "0")
+			result, _ := completeRPC(t, peer, callFrame("decode", MethodInboundDecode,
+				NativeRequest{ID: "codec", ResponseID: "response", Body: []byte("native")}))
+			if scenario != "paired" {
+				if result.Error == nil {
+					t.Fatal("codec returned an unnegotiated executor constraint", result)
+				}
+				return
+			}
+			var decoded DecodedRequest
+			if result.Error != nil || json.Unmarshal(result.Result, &decoded) != nil || decoded.Executor != SameModuleExecutor {
+				t.Fatal("paired codec lost its executor constraint", result)
+			}
+		})
 	}
 }
 

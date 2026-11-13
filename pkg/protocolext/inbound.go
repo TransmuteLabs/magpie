@@ -33,6 +33,7 @@ type Request struct {
 	Timeout   time.Duration
 	RequestID string
 	Metadata  json.RawMessage
+	Executor  ExecutorPolicy
 }
 
 type Inbound interface {

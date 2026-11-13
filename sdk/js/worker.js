@@ -4,6 +4,7 @@ import { MAX_CHUNK_BYTES, MAX_CONCURRENT, MAX_FRAME_BYTES, MAX_HOST_BYTES, SDKEr
 import { freezeJSON, parseJSON, publicManifest, stringifyJSON, validateModule } from "./manifest.js";
 import { ComponentLifecycle } from "./lifecycle.js";
 import { MAX_GATEWAY_STATE_BYTES, gatewayMethodEffect, validateGatewayCall } from "./hooks.js";
+import { validateUsageResult } from "./usage.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const identifier = value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\s\p{Cc}]/u.test(value);
@@ -13,6 +14,15 @@ const invalid = () => new SDKError("invalid", "Invalid RPC frame");
 const canceled = () => new SDKError("canceled", "Call canceled");
 const deadline = () => new SDKError("deadline", "Call deadline exceeded");
 const internal = () => new SDKError("internal", "Internal extension error");
+
+function checkDecodedExecutor(manifest, result) {
+  if (!object(result) || result.executor === undefined || result.executor === "") return;
+  if (result.executor !== "same-module" || manifest.contract.version.minor < 4
+    || !manifest.contract.capabilities.includes("outbound-executor")
+    || !["chat", "responses", "messages", "anthropic", "gemini"].includes(result.protocol)) {
+    throw new SDKError("internal", "Codec produced an unnegotiated executor constraint");
+  }
+}
 
 function publicError(error) {
   if (!(error instanceof SDKError)) error = internal();
@@ -339,6 +349,10 @@ export async function serve(module, { input = process.stdin, output = process.st
           record.creditError = new SDKError("invalid_params", "module.call is unary and permits only a write acceptance receipt");
           throw record.creditError;
         }
+        if (manifest.contract.version.minor >= 4 && call.method === "operation.cancel" && event !== "accepted") {
+          record.creditError = new SDKError("invalid_params", "Business cancellation is unary");
+          throw record.creditError;
+        }
         checkEvent(event, data);
         if (record.event) throw new SDKError("backpressure", "Only one stream event may await acknowledgement");
         const wait = deferred(), seq = ++record.seq;
@@ -368,7 +382,7 @@ export async function serve(module, { input = process.stdin, output = process.st
         try {
           await Promise.race([previous, record.aborted.promise]);
           assertOpen();
-          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call"].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call", "usage.invalidate"].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
           const serializedParams = stringifyJSON(params);
           if (Buffer.byteLength(serializedParams) > MAX_HOST_BYTES) throw new SDKError("resource_exhausted", "Host parameters exceed the size limit");
           const payload = parseJSON(serializedParams);
@@ -425,6 +439,8 @@ export async function serve(module, { input = process.stdin, output = process.st
     const task = (async () => {
       try {
         const result = await Promise.race([handler, record.aborted.promise]);
+        if (call.method === "inbound.decode") checkDecodedExecutor(manifest, result);
+        if (call.method === "provider.usage") validateUsageResult(manifest, result);
         if (record.creditError) throw record.creditError;
         if (record.event) await record.event.wait.promise;
         if (record.hostPending) await Promise.race([record.hostTail, record.aborted.promise]);

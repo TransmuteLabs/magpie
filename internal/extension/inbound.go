@@ -47,7 +47,8 @@ func (m *Manager) Protocols() (*codec.Registry, error) {
 			adapters = append(adapters, &remoteInbound{
 				manager: m, module: entry.Manifest.ID, revision: entry.Revision,
 				descriptor: inbound, discovery: entry.Manifest.Contract.Has(sdk.ModelDiscovery),
-				tools: entry.Manifest.Contract.Has(sdk.ToolProvider),
+				tools:    entry.Manifest.Contract.Has(sdk.ToolProvider),
+				executor: entry.Manifest.Contract.Version.Minor >= 4 && entry.Manifest.Contract.Has(sdk.OutboundExecutor),
 			})
 		}
 	}
@@ -61,6 +62,7 @@ type remoteInbound struct {
 	descriptor sdk.InboundDescriptor
 	discovery  bool
 	tools      bool
+	executor   bool
 }
 
 func (remote *remoteInbound) ID() string   { return remote.module + ":" + remote.descriptor.ID }
@@ -73,6 +75,10 @@ func (remote *remoteInbound) Contract() codec.Contract {
 	if remote.tools {
 		contract.Version = codec.HostContract().Version
 		contract.Capabilities = append(contract.Capabilities, codec.ToolProvider)
+	}
+	if remote.executor {
+		contract.Version = codec.HostContract().Version
+		contract.Capabilities = append(contract.Capabilities, codec.ExecutorBinding)
 	}
 	return contract
 }
@@ -156,10 +162,16 @@ func (call *remoteCall) Decode(ctx context.Context, headers http.Header, body []
 		request.TimeoutMs > int64((24*time.Hour)/time.Millisecond) {
 		return codec.Request{}, errors.New("invalid native extension request")
 	}
+	if err := codec.ValidateExecutor(request.Executor, codec.Protocol(request.Protocol)); err != nil ||
+		request.Executor != "" && (call.lease.Manifest().Contract.Version.Minor < 4 ||
+			!call.lease.Manifest().Contract.Has(sdk.OutboundExecutor)) {
+		return codec.Request{}, errors.New("invalid native extension executor constraint")
+	}
 	return codec.Request{
 		Protocol: codec.Protocol(request.Protocol), Body: request.Body,
 		Session: request.Session, Timeout: time.Duration(request.TimeoutMs) * time.Millisecond,
 		RequestID: request.RequestID, Metadata: bytes.Clone(request.Metadata),
+		Executor: request.Executor,
 	}, nil
 }
 

@@ -285,7 +285,7 @@ func (binding *extensionAccount) cacheKey() string {
 
 func loginReadingCacheKey(login Login) string {
 	if login.extension != nil {
-		return login.extension.cacheKey()
+		return extensionUsageKey(login.extension)
 	}
 	return login.Agent + "/" + strings.ToLower(login.User)
 }
@@ -318,33 +318,27 @@ func syncExtensionAllowanceBindings(agent string, bindings map[string]string) {
 	if cache.extensions == nil {
 		cache.extensions = map[string]map[string]string{}
 	}
-	if before, known := cache.extensions[agent]; known && maps.Equal(before, bindings) {
+	before, known := cache.extensions[agent]
+	if known && maps.Equal(before, bindings) {
 		return
 	}
 	cache.extensions[agent] = maps.Clone(bindings)
-	delete(cache.m, agent)
 	if cache.at != nil {
 		cache.at[agent] = time.Time{}
 	}
-	for key := range cache.read {
-		if strings.HasPrefix(key, agent+"/") {
-			delete(cache.read, key)
-		}
+	if previous, exists := cache.m[agent]; exists {
+		cache.m[agent] = maps.Clone(previous)
 	}
-	for key := range cache.seen {
-		if strings.HasPrefix(key, agent+"/") {
-			delete(cache.seen, key)
+	for user, previous := range before {
+		if previous == bindings[user] {
+			continue
 		}
-	}
-	for key := range cache.heard {
-		if strings.HasPrefix(key, agent+"/") {
-			delete(cache.heard, key)
-		}
-	}
-	for key := range cache.renewed {
-		if strings.HasPrefix(key, agent+"/") {
-			delete(cache.renewed, key)
-		}
+		delete(cache.m[agent], user)
+		key := agent + "/" + strings.ToLower(user)
+		delete(cache.read, key)
+		delete(cache.seen, key)
+		delete(cache.heard, key)
+		delete(cache.renewed, key)
 	}
 }
 
@@ -516,13 +510,19 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 		return quota
 	}
 	binding = prepared
+	request, proof, err := extensionUsageRequest(binding)
+	if err != nil {
+		quota.Error, quota.ReadDeferred = err.Error(), true
+		return quota
+	}
+	quota.extensionUsage = proof
 	ctx, err = extensionNetworkContext(ctx, binding.scope)
 	if err != nil {
 		quota.Error, quota.ReadDeferred = err.Error(), netproxy.Held(ctx) != nil
 		return quota
 	}
 	var result sdk.UsageResult
-	raw, err := binding.host.Call(ctx, binding.scope.Plugin, sdk.MethodProviderUsage, binding.scope, sdk.UsageRequest{}, nil)
+	raw, err := binding.host.Call(ctx, binding.scope.Plugin, sdk.MethodProviderUsage, binding.scope, request, nil)
 	if err == nil {
 		err = json.Unmarshal(raw, &result)
 	}
@@ -533,6 +533,31 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 	if err := binding.check(ctx); err != nil {
 		quota.Error = err.Error()
 		return quota
+	}
+	validated, fresh, err := sdk.ValidateUsageResult(binding.manifest, raw)
+	if err != nil {
+		quota.Error = err.Error()
+		return quota
+	}
+	result = validated
+	if proof != nil {
+		proof.fresh = fresh
+		if binding.manifest.Contract.Version.Minor >= 4 {
+			if result.Revision != proof.stamp.Version() {
+				quota.Error, quota.ReadDeferred = "usage result revision did not match its read", true
+				return quota
+			}
+			if fresh {
+				if _, err := proof.store.AcknowledgeUsage(binding.scope, proof.stamp.Revision); err != nil {
+					quota.Error, quota.ReadDeferred = err.Error(), true
+					return quota
+				}
+			}
+		}
+		if !proof.current() {
+			quota.Error, quota.ReadDeferred = "usage read preceded an invalidation or lacks a fresh acknowledgment", true
+			return quota
+		}
 	}
 	quota.Error, quota.ReadDeferred = extensionUsageError(result.Error), result.ReadDeferred
 	quota.AsOf, err = extensionUsageTime(result.AsOf)
@@ -556,7 +581,12 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 			quota.Windows, quota.Error = nil, "extension provider returned an invalid quota window"
 			return quota
 		}
-		entry := QuotaWindow{Name: window.Name, Used: window.Used, Error: extensionUsageError(window.Error)}
+		entry := QuotaWindow{Name: window.Name, Used: window.Used, Error: extensionUsageError(window.Error), Aside: window.Aside}
+		if set := idSetOf(window.Models); set != nil {
+			entry.matches = set.has
+		} else if set := idSetOf(window.NotModels); set != nil {
+			entry.matches = func(model string) bool { return !set.has(model) }
+		}
 		entry.AsOf, err = extensionUsageTime(window.AsOf)
 		if err == nil {
 			entry.ResetsAt, err = extensionUsageTime(window.ResetsAt)

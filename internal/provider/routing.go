@@ -947,7 +947,6 @@ func readAllowances(agent string) map[string]Allowance {
 			current, _ := extensionUsageBindings(agent)
 			c.Lock()
 			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) {
-				delete(c.m, agent)
 				c.at[agent] = time.Time{}
 				delete(c.loading, agent)
 				c.Unlock()
@@ -1279,7 +1278,14 @@ func (a Allowance) restartedBy(runsOut time.Time) Allowance {
 // (#3650): the account is then not known, as one never read, rather than
 // one with all of it left, ahead of the rest.
 func routedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Allowance, bool) {
-	if slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool { return window.Unknown || window.AsOf != nil }) {
+	if strings.HasPrefix(agent, "extension-") && q.extensionUsage == nil {
+		return nil, false
+	}
+	if q.extensionUsage != nil && !q.extensionUsage.current() {
+		return nil, false
+	}
+	if (q.extensionUsage == nil || !q.extensionUsage.fresh) &&
+		slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool { return window.Unknown || window.AsOf != nil }) {
 		return nil, false
 	}
 	a := allowanceOf(q.Windows, now)

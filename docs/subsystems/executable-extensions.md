@@ -6,9 +6,10 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Current SDK API 1.3 includes native/composite APIs, API 1.2 gateway
+Current SDK source API 1.4 includes native/composite APIs, API 1.2 gateway
 hooks/private tools, and API 1.3 transactional refresh, provider operations
-and extended model metadata.
+and extended model metadata, plus API 1.4 routing strategies, selected-account
+usage revisions, business cancellation and native executor constraints.
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
 immutable aggregate runs from later fixes. Those scoped records do not
@@ -16,6 +17,9 @@ establish whole-repository acceptance; the
 [surface census](extension-surface-coverage.md) lists remaining adapters.
 The [API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records the combined
 implementation and its separate policy, lifecycle, JS/TS and platform gates.
+The [routing 1.4 record](../adr/0012-sdk-routing-strategies.md) records scoped
+verification; the [SDK 1.4 checkpoint](../adr/0014-sdk14-validation.md)
+records combined gates with final application acceptance separate.
 
 The original contract decision is [ADR 0003](../adr/0003-external-extension-runtime.md).
 [ADR 0004](../adr/0004-native-extension-abi.md) adds native Go, and
@@ -23,6 +27,9 @@ The original contract decision is [ADR 0003](../adr/0003-external-extension-runt
 [ADR 0007](../adr/0007-transactional-account-refresh.md) owns rotating
 credential publication; [ADR 0008](../adr/0008-provider-operation-contracts.md)
 separates conversational protocols, finite operations and catalog metadata.
+[ADR 0011](../adr/0011-native-executor-constraints.md) owns native executor
+binding; [ADR 0013](../adr/0013-usage-revisions-and-business-cancel.md) owns
+quota applicability, usage freshness and separate cancellation intents.
 See [extension providers](extension-providers.md),
 [agents and sessions](extension-agents-sessions.md), and
 [legacy Go codec embedding](protocol-extensions.md) for their owners.
@@ -42,11 +49,13 @@ See [extension providers](extension-providers.md),
 | [`refresh.go`](../../internal/extension/refresh.go), [`refresh_store.go`](../../internal/extension/refresh_store.go) | Cross-process refresh ownership, bounded lifetime, atomic credential/expiry publication and replay fences |
 | [`extension_operations.go`](../../internal/provider/extension_operations.go), [`provider_operations.go`](../../pkg/extension/provider_operations.go) | Exact operation admission, extended model validation and author/host enforcement |
 | [`inbound.go`](../../internal/extension/inbound.go) | Native codec calls and response encoding |
+| [`executor.go`](../../internal/extension/executor.go), [`protocol_executor.go`](../../internal/gateway/protocol_executor.go) | Same-module native executor policy and exact inbound lease checks |
+| [`usage_runtime.go`](../../internal/extension/usage_runtime.go), [`usage_store.go`](../../internal/extension/usage_store.go) | Accepted-write invalidation, durable usage revisions and inference admission |
 | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go) | Gateway guards and canonical dispatch |
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 3}` and eleven capabilities. The finite operation
+SDK API `{major: 1, minor: 4}` and eleven capabilities. The finite operation
 registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
@@ -390,6 +399,45 @@ Root ModuleRPC parameters have the bounded frame budget
 `MaxFrameBytes - 4096`; scoped callbacks retain their independent
 `MaxHostBytes` budget. Large session input is not permission to enlarge
 callback authority or streaming ModuleRPC.
+
+## Routing strategies (API 1.4)
+
+A root module with `module-rpc` may declare `routingStrategies`, referencing
+declared read actions. Each entry has `id`, `name`, `action`, optional
+`flags` and `timeoutMs`. Its public name is `moduleID/strategyID`; set that
+as the provider or group's ordinary `routing` value. Smart and directly
+registered strategies retain priority.
+
+An action may be owned by the primary or a declared private service.
+The full root retains that registration; each component's public handshake
+filters routing metadata to its owned actions. Private-service strategies
+still resolve through the root binding and lazily start that component.
+
+[`Manager.OrderRouting`](../../internal/extension/routing.go) calls the
+selected package/configuration lease.
+[`extensionrouting`](../../internal/extensionrouting/routing.go) projects
+seats and bridges into the existing `routes.Strategy` point.
+[`gateway`](../../internal/gateway/extension_routing.go) registers only lazy
+callbacks; metadata and synctest start no workers or lifecycle resources.
+The existing routing selector discovers enabled descriptors through
+`middleware.Routings`. Off/update/config changes and cross-process catalog
+changes are checked again before accepting an in-flight result.
+
+The action receives `RoutingRequest` and returns one unary `RoutingResult`
+whose `order` is a complete seat-index permutation. Go and JS validate
+64 descriptors, 256 seats, 32 renewals per seat, 1 MiB request/result JSON,
+finite measurements and safe integer timestamps. The six flags match the
+existing Strategy flags. Seats expose opaque keys and metrics, without
+credentials, account bindings or prompts; API 1.4 read authority refuses
+persistent state writes.
+
+Errors, invalid results, streaming, timeouts and revoked results preserve
+listed order. Core account/key/model guards, rests, affinity and failover
+retain their owners. The default context deadline is 500 ms, or an explicit
+25–2000 ms including cold acquisition and RPC. `Strategy.Order` has no
+HTTP request context, so this seam uses a bounded background context.
+See [ADR 0012](../adr/0012-sdk-routing-strategies.md) for a tested descriptor,
+actual worker/gateway proof and the pending aggregate acceptance boundary.
 
 ## Window integration
 

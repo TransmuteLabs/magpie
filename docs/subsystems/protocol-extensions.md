@@ -59,6 +59,15 @@ never included in that public message.
 
 The legacy codec version is separate from process-manifest v1. Catalog
 adapters using minor 2 remain valid; tool adapters negotiate minor 3.
+Minor 4 adds `ExecutorContract()` and `Request.Executor = SameModuleExecutor`.
+Only an installed SDK 1.4 module with inbound and outbound capabilities can
+use that conversation constraint. The host derives its owner from the live,
+original inbound lease, filters ordinary candidates and checks the same
+lease again before signing and dispatch. Aliases, groups, fallback and nested
+empty policies cannot change that lease. Null or unknown wire policies fail
+decoding; discovery, tools and linked-only codecs cannot require this
+installed-module executor. Native receipt/signature validation still belongs
+to the module. See [ADR 0011](../adr/0011-native-executor-constraints.md).
 The host still refuses unrelated outbound/auth/wiring authority through this
 inbound registry.
 

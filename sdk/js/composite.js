@@ -122,8 +122,9 @@ export function validateComposite(manifest) {
   }
   if (manifest.compatibility != null) {
     const value = manifest.compatibility;
-    if (!object(value) || !["^1", "^1.1", "^1.2", "^1.3"].includes(value.hostAPI)
+    if (!object(value) || !["^1", "^1.1", "^1.2", "^1.3", "^1.4"].includes(value.hostAPI)
       || value.hostAPI === "^1.3" && manifest.contract.version.minor < 3
+      || value.hostAPI === "^1.4" && manifest.contract.version.minor < 4
       || value.nativeABI !== undefined && !uint32(value.nativeABI)) fail("Unsupported host API requirement");
     const values = list(value.platforms, 128, "compatibility platforms");
     if (new Set(values).size !== values.length || values.some(value => !validPlatform(value))) fail("Invalid or duplicate compatibility platform");

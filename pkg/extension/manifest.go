@@ -18,6 +18,10 @@ func (manifest Manifest) Public() Manifest {
 	snapshot.Actions = slices.DeleteFunc(snapshot.Actions, func(action ActionDescriptor) bool {
 		return actionOwner(action) != componentID(manifest)
 	})
+	snapshot.RoutingStrategies = slices.DeleteFunc(snapshot.RoutingStrategies, func(strategy RoutingStrategyDescriptor) bool {
+		_, owned := snapshot.ResolveAction(strategy.Action)
+		return !owned
+	})
 	return snapshot
 }
 
@@ -56,6 +60,7 @@ func cloneManifest(manifest Manifest) Manifest {
 		manifest.Agents[index].Fields = slices.Clone(manifest.Agents[index].Fields)
 	}
 	manifest.Sessions = slices.Clone(manifest.Sessions)
+	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
 	manifest.Tools = slices.Clone(manifest.Tools)
 	for index := range manifest.Tools {
 		manifest.Tools[index].InputSchema = slices.Clone(manifest.Tools[index].InputSchema)
@@ -128,7 +133,7 @@ func (manifest Manifest) Validate() error {
 	if err := FullContract().Check(manifest.Contract); err != nil {
 		return err
 	}
-	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools) > 1024 {
+	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools)+len(manifest.RoutingStrategies) > 1024 {
 		return fmt.Errorf("too many extension descriptors")
 	}
 	paths := map[string]bool{}
@@ -278,6 +283,9 @@ func (manifest Manifest) Validate() error {
 		return fmt.Errorf("session migration requires a session descriptor")
 	}
 	if err := manifest.validateComposite(); err != nil {
+		return err
+	}
+	if err := manifest.validateRouting(); err != nil {
 		return err
 	}
 	return manifest.validateHooks()

@@ -8,7 +8,7 @@ export type Method = "inbound.decode" | "inbound.response" | "provider.execute" 
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "module.call"
   | "gateway.request" | "gateway.response" | "gateway.signin";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
-export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call";
+export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate";
 export interface Contract {
   version: { major: 1; minor: 0 | 1 | 2 };
   capabilities: readonly Capability[];
@@ -69,6 +69,23 @@ export interface SessionDescriptor {
   to?: string;
   outputDir?: string;
 }
+export interface RoutingFlags {
+  exact?: boolean; byUse?: boolean; byFree?: boolean; byPlan?: boolean; bySpeed?: boolean; byPrice?: boolean;
+}
+export interface RoutingStrategyDescriptor {
+  id: string; name: string; action: string; flags?: RoutingFlags; timeoutMs?: number;
+}
+export interface RoutingSeat {
+  key: string; account?: boolean; known?: boolean; learns?: boolean; used?: number;
+  weekLow?: boolean; soon?: number[]; unreached?: number; lapse?: number; lapsing?: number;
+  pace?: number; weight: number; resting?: boolean; spent?: boolean; tokens?: number;
+  free?: boolean; freePlan?: boolean; credits?: boolean; first?: boolean; lead?: boolean;
+  ttft?: number; tps?: number; left?: number; leftIn?: string; priced?: boolean; cost?: number; cacheCost?: number;
+}
+export interface RoutingRequest { strategy: string; pool: string; seats: RoutingSeat[] }
+export interface RoutingResult { order: number[] }
+export function validateRoutingRequest(request: unknown): RoutingRequest;
+export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 interface ManifestFields {
   schema: 1;
   id: string;
@@ -87,6 +104,7 @@ interface ManifestFields {
   bindings?: BindingDescriptor[];
   component?: ComponentIdentity;
   hooks?: GatewayHookDescriptor;
+  routingStrategies?: RoutingStrategyDescriptor[];
 }
 export type Manifest = ManifestFields & (
   { runtime: "exec" | "bun"; args?: string[] }
@@ -189,6 +207,7 @@ export interface NativeRequest { id: string; responseId: string; headers?: Heade
 export interface DecodedRequest {
   protocol: Protocol | "models" | "tool"; body?: string; session?: string; timeoutMs?: number;
   requestId?: string; metadata?: JSONValue;
+  executor?: "same-module";
 }
 export interface ResponseEvent {
   id: string; responseId: string; action: "start" | "write" | "flush" | "finish" | "cancel";
@@ -224,14 +243,18 @@ export interface AuthFinishRequest { code?: string; continuation?: JSONValue; in
 export interface AuthRefreshRequest { credentials: JSONValue }
 export interface AuthLogoutRequest { credentials?: JSONValue }
 export interface AuthResult { id?: string; name?: string; credentials?: JSONValue; expiresAt?: number; pending?: boolean }
-export interface UsageRequest { credentials?: JSONValue }
+export interface UsageRequest { credentials?: JSONValue; revision?: string }
 export interface UsageWindow {
   name: string; used: number; limit?: number; resetsAt?: number;
-  unknown?: boolean; error?: string; asOf?: number;
+  unknown?: boolean; error?: string; asOf?: number; models?: string[]; notModels?: string[]; aside?: boolean;
 }
 export interface UsageResult {
-  usage: Usage; windows?: UsageWindow[]; asOf?: number; readDeferred?: boolean; error?: string;
+  usage: Usage; windows?: UsageWindow[]; asOf?: number; readDeferred?: boolean; error?: string; revision?: string;
 }
+export interface UsageInvalidateRequest {}
+export interface UsageInvalidateResult { revision: string }
+export function parseUsageRevision(value: string): bigint;
+export function validateUsageResult(manifest: Manifest, value: UsageResult): boolean;
 export interface OperationRequest { operationId: string; reference?: JSONValue }
 export interface OperationResult { operationId: string; outcome: string; result?: JSONValue }
 export interface ToolRequest { id: string; arguments: JSONValue }
@@ -263,7 +286,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string }
 export interface ComponentIdentity { id: string; contract: ServiceContract }
