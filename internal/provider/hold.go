@@ -408,8 +408,10 @@ func keptFit[T any](key string, fits func(any) bool, build func() T) T {
 var staleFor struct {
 	sync.Mutex
 	held, kept time.Duration
-	next       time.Time
+	next       time.Duration
 }
+
+var staleEpoch = time.Now()
 
 // armStaleSweep arms the sweep, unless one is armed for as soon: what was
 // held or kept past its time was dropped only when the next request
@@ -426,8 +428,8 @@ func armStaleSweep() {
 // staleFor is held.
 func staleArmLocked(d time.Duration) {
 	d = max(d, 10*time.Millisecond)
-	at := time.Now().Add(d)
-	if !staleFor.next.IsZero() && !at.Before(staleFor.next) {
+	at := time.Since(staleEpoch) + d
+	if staleFor.next != 0 && at >= staleFor.next {
 		return
 	}
 	staleFor.next = at
@@ -440,7 +442,7 @@ func sweepStale() {
 	staleFor.Lock()
 	heldFor, keptFor := staleFor.held, staleFor.kept
 	// let go first: what is held or kept while this one looks arms its own
-	staleFor.next = time.Time{}
+	staleFor.next = 0
 	staleFor.Unlock()
 	next := time.Duration(-1)
 	soon := func(left time.Duration) {
