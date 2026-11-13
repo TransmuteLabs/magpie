@@ -539,7 +539,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, mcpSignInOpened{st, openError(w, st.URL)})
+		writeJSON(rw, openMCPSignIn(w, st))
 	})
 	mux.HandleFunc("GET /api/library/mcp-signin/{id}", func(rw http.ResponseWriter, r *http.Request) {
 		st, ok := mcpauth.Progress(r.PathValue("id"))
@@ -852,6 +852,8 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ProjectSkill(in.Dir, in.Name, in.Agents)
 		case "projects/skills":
 			res, err = library.ProjectSkills(in.Dir, in.Names, in.Agents)
+		case "projects/subagents":
+			res, err = library.ProjectSubagents(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
 		case "projects/server":
 			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
 		case "projects/server-off":

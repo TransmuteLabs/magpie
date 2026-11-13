@@ -392,6 +392,16 @@ agent's; any other of yours is always sent. The beta of the agent's own
 sign-in (`oauth-2025-04-20`, which Claude Code signed in to claude.ai asks)
 never goes, as the sign-in never does; one you set yourself does.
 
+`magpie provider set <id> resolve.<host>=<place>[,<place>…]` connects a
+host name of the provider's own base URLs to the places listed, as curl's
+`--resolve` does (the provider editor's Advanced › Connect to): a place is
+an IP address (with a port if it has its own) or `dns:<name>`, looked up at
+each connection, tried in order, and the URL's name stays for TLS and Host.
+An empty value takes that host out; `resolve=` clears them all. Only a
+provider you added with a base URL of its own, or a preset you pointed at a
+server of your own, takes them. `magpie provider <id>` lists them as
+`connect`.
+
 A key+URL provider is sent the User-Agent the agent sent magpie, as it
 sent it, on every API (chat, Anthropic, Responses, Gemini, count_tokens,
 embeddings, images, videos): a coding plan that serves only the agents it
@@ -1263,12 +1273,14 @@ credentials are read when a request is signed.
 
 Each location serves models of its own, and Vertex AI has no list to ask which,
 so magpie gives each location the models it answered with on 2026-10-06
-(and `gemini-4-argon`, at `global` since 2026-10-13):
+(and Gemini 4: `gemini-4-argon` since 2026-10-13, `gemini-4-carbon` since
+2026-11-10 and `gemini-4-hydrogen` since 2026-11-12, at `global`, `us` and
+`eu`):
 
 | Location | Models |
 | --- | --- |
-| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
-| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` |
+| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
+| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
 | A region | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 
 A region that serves one more, as asia-northeast1 serves `gemini-3.5-flash`,
@@ -2527,7 +2539,7 @@ adding one; use an account you can afford to lose.
 
 Accounts signed in elsewhere can be imported from their files instead of
 signed in again: *Import accounts from a file…* under a subscription's
-accounts, or `magpie accounts import <codex|claude|antigravity|factory>
+accounts, or `magpie accounts import <codex|claude|antigravity|factory|<plugin>>
 <file>... [--yes]`. For ChatGPT that takes Codex's `auth.json`, codexbar's
 `~/.codexbar/config.json` (every ChatGPT account it switches between) and
 the exports of Cockpit Tools, CLIProxyAPI and Sub2API, as many files as
@@ -3425,9 +3437,10 @@ From v0.1.3891 the release workflow also attests every file with
 `actions/attest-build-provenance` (a SLSA provenance statement signed through
 Sigstore with the run's GitHub identity). Before downloading a file of such a
 release, the updater (`internal/update/attest.go`, sigstore-go) fetches the
-bundle for the file's signed SHA-256 from
-`api.github.com/repos/yetone/magpie-releases/attestations/sha256:<digest>` and
-checks it offline against the Sigstore trusted root embedded in the binary
+bundles for the file's signed SHA-256 (from the site's copy first when the file
+comes from the site, below, else from
+`api.github.com/repos/yetone/magpie-releases/attestations/sha256:<digest>`) and
+checks them offline against the Sigstore trusted root embedded in the binary
 (`attest_root.json`, public-good instance): certificate chain, certificate
 timestamp, Rekor entry, issuer `token.actions.githubusercontent.com`, subject
 `release.yml` of `yetone/magpie-releases` on `main` or a `v*` tag, source
@@ -3435,7 +3448,7 @@ repository `yetone/magpie-releases`, and the digest among the statement's
 subjects. This is in addition to the ed25519 check, never instead of it. A
 bundle that fails, or GitHub saying it has none (404, empty list), refuses the
 file. Anything that leaves it unknown (GitHub unreachable, rate limited, 5xx,
-not JSON, *Update source* set to the site alone) does not stop the update,
+not JSON, *Update source* set to the site alone and the site has none) does not stop the update,
 since the signature has held; the log says the file went unattested. A
 `MAGPIE_UPDATE_FEED` of your own skips it. The embedded root must be renewed
 (`gh attestation trusted-root`, first line) when Sigstore rotates its public
@@ -3447,8 +3460,19 @@ once every file has one, writes `<tag>/attestations.jsonl` (a bundle to a line),
 served at `https://usemagpie.ai/files/<tag>/attestations.jsonl` and checked with
 `gh attestation verify <file> -R yetone/magpie-releases --bundle
 attestations.jsonl`. It is not a release asset (the release's count is
-unchanged), is written only whole, and is pruned with its tag. The updater does
-not read it yet; it still asks GitHub's API (ArcticLampyrid on X).
+unchanged), is written only whole, and is pruned with its tag.
+
+The updater reads it for a file the feed names on the site
+(`https://usemagpie.ai/files/<tag>/<file>`), before asking GitHub's API
+(ArcticLampyrid on X). The site is only transport: its bundles go through the
+same check (embedded root, identity, the signed digest), so it can't make a bad
+one pass. A miss (a pruned tag's 302 to GitHub, which is not followed; any
+other status; no bundle in the body; the site unreachable) asks GitHub's API as
+before. A bundle from the site that fails asks GitHub's API too, and a valid one
+there holds; when that API can't be read, it is a refusal, not unknown. With
+*Update source* set to the site alone, the site's bundles are checked and
+GitHub is never asked: a miss is unknown, a failing bundle a refusal. With it
+set to GitHub, the file and its bundles come from GitHub alone.
 
 The feed hands the app that `SHA256SUMS` and signature (`signed`). The app
 checks the signature against its key, takes every file's SHA-256 from the

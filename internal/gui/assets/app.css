@@ -94,6 +94,15 @@
   --tk-s: #98d8a4; --tk-k: #c4b5fd; --tk-f: #93c5fd; --tk-n: #f2b544; --tk-v: #67e8f9; --tk-o: #f0abfc; --tk-c: #8b8b94;
   --c1: #a5b4fc; --c2: #7dd3fc; --c3: #6ee7b7; --c4: #fcd34d; --c5: #f9a8d4; --c6: #c4b5fd; --c7: #94a3b8;
 }
+/* magpie draws both themes itself. The root says so, as index.html's meta
+   does, so a browser that repaints light pages dark (Chrome's Auto Dark
+   Theme, Safari's Adaptive Dark Mode) leaves the page alone (xjp on X).
+   The page under it takes the theme shown, so native controls, scrollbars
+   and a plugin's frame match it, and a theme chosen in Settings is the
+   only one: Light stays light on a dark system. */
+:root { color-scheme: light dark; }
+:root[data-theme="light"] body { color-scheme: light only; }
+:root[data-theme="dark"] body { color-scheme: dark; }
 /* Okabe–Ito qualitative series (#2073): adjacent series stay apart in hue and
    lightness in both light and dark themes */
 :root[data-colorblind="1"] {
@@ -1041,12 +1050,10 @@ body.panel .row.pref.flash { border-radius: 10px; }
 .subscription-head .ic { width: 17px; height: 17px; }
 .subscription-head b { font-size: 12.5px; font-weight: 600; }
 .subscription-account { display: flex; align-items: baseline; gap: 7px; margin: 0 0 6px; font-size: 11px; color: var(--fg-2); }
-.subscription-card.several .quota-windows:not([hidden]) + .subscription-account,
-.subscription-card.several .subscription-error:not([hidden]) + .subscription-account,
-.subscription-card.several .quota-balance:not([hidden]) + .subscription-account,
-.subscription-card.several .quota-read:not([hidden]) + .subscription-account,
-.subscription-card.several .credit-days:not([hidden]) + .subscription-account,
-.subscription-card.several .quota-curve:not([hidden]) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+/* every account after the first has a hairline over it, whatever the one
+   before ends with (normalcoder_ on X: a check-in row or magpie's own
+   requests, which no list of row kinds named, ran two accounts together) */
+.subscription-card.several > :not(.subscription-head, .quota-all) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .subscription-account .user { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* an account the user named (#1515): the name, then the account and the
    key plan it stands in for, muted, giving their room up first */
@@ -1195,7 +1202,6 @@ body.panel .row.pref.flash { border-radius: 10px; }
 :root[data-colorblind="1"] :is(.qc-line, .qc-dash)[data-series="6"] { stroke-dasharray: 12 4 3.5 4 3.5 4; }
 .quota-resets { display: flex; align-items: center; gap: 8px; margin-top: 9px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .quota-resets .text { margin-left: auto; flex: none; font-size: 11px; padding: 2px 7px; }
-.subscription-card.several .quota-resets:not([hidden]) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 /* a remote magpie's gateway key (#1547): its cycle, calls, used up */
 .quota-keyline { margin-top: 7px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .quota-keyline.spent { color: var(--red); }
@@ -1204,7 +1210,6 @@ body.panel .row.pref.flash { border-radius: 10px; }
 .led .who .own-badge { margin-left: 0; }
 .quota-own { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 7px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .quota-own .own-badge { margin-left: 0; }
-.subscription-card.several .quota-keyline + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .reset-ask .reset-idle { color: var(--amber); }
 /* which of an account's resets is used, the soonest unless another is picked */
 .reset-ask .reset-pick { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; font-size: 12px; color: var(--muted); }
@@ -1418,6 +1423,12 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .us-hid .us-showall { align-self: flex-start; margin: 4px 0 0 2px; font-size: 11.5px; }
 .us-hid .us-showall[hidden] { display: none; }
 #quotaHid .row.stat .who { flex: 1 1 auto; min-width: 0; }
+/* the switched-off providers' check-ins (wxkwxk666 on X) */
+#quotaOff .row.stat .who { flex: 1 1 auto; min-width: 0; }
+#quotaOff .wb-checkin { margin-top: 3px; }
+#quotaOff .ci-acct { flex: none; margin-right: -4px; }
+.quota-head .us-ciall { font-variant-numeric: tabular-nums; }
+.quota-head .us-ciall:disabled { color: var(--muted); }
 .row.stat.hid > :not(.us-unhide) { opacity: .55; }
 .usage-note { padding: 10px 4px 2px; font-size: 11px; color: var(--faint); user-select: text; -webkit-user-select: text; }
 .usage-clear { margin: 0; padding: 2px 0 6px; }
@@ -2195,8 +2206,6 @@ body.panel .profiles #save { height: 25px; } /* the field's: the line keeps its 
 .quota-autoreset .ar-say, .pq-autoreset .ar-say, .quota-credits .ar-say, .pq-credits .ar-say { line-height: 16px; }
 .quota-autoreset, .quota-credits { margin-top: 8px; font-size: 10.5px; }
 .quota-resets + .quota-autoreset, .quota-autoreset + .quota-credits { margin-top: 6px; }
-.subscription-card.several .quota-autoreset + .subscription-account,
-.subscription-card.several .quota-credits + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
 .pq-autoreset, .pq-credits { grid-column: 1 / -1; margin-top: 5px; padding-top: 7px; border-top: 1px solid var(--line-2); font-size: 11px; }
 .pq-resets + .pq-autoreset, .pq-autoreset + .pq-credits { margin-top: 5px; padding-top: 0; border-top: 0; }
 /* spending them only after everything else, a line of its own under the
@@ -2866,8 +2875,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .row.model .minfo .mi-ctx, .rt-gedit .fbrow .minfo .mi-ctx { font-variant-numeric: tabular-nums; }
 /* the image chip holds a glyph, not a line of text: it is given the text
    chips' 16px line as its height, so it stands as tall as they do (nb5p) */
-.row.model .minfo .mi-img, .rt-gedit .fbrow .minfo .mi-img { padding: 0 4px; height: 16px; box-sizing: border-box; }
-.row.model .minfo .mi-img svg, .rt-gedit .fbrow .minfo .mi-img svg { display: block; }
+.row.model .minfo :is(.mi-img, .mi-media), .rt-gedit .fbrow .minfo :is(.mi-img, .mi-media) { padding: 0 4px; height: 16px; box-sizing: border-box; }
+.row.model .minfo :is(.mi-img, .mi-media) svg, .rt-gedit .fbrow .minfo :is(.mi-img, .mi-media) svg { display: block; }
 .provider .pswitch { margin-left: 8px; }
 .editor .off-note { grid-column: 1 / -1; }
 .editor .self-note label.tick { margin-top: 6px; }
@@ -3211,6 +3220,19 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .row.pref .tray-windows { flex: 0 1 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; max-width: 55%; }
 .row.pref .tray-windows .proto.pick { max-width: 100%; margin-left: 0; }
 .row.pref .tray-windows .proto.pick > span { overflow: hidden; text-overflow: ellipsis; }
+/* Accent color and Background image (appearance.js): a row of swatches,
+   the chosen one ringed; the last is a colour of the reader's own */
+.accent-pick { flex: 0 1 auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-left: auto; min-width: 0; }
+.accent-pick .swatch { position: relative; flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: var(--sw); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); cursor: default; transition: box-shadow .15s ease, transform .12s var(--ease-out); }
+.accent-pick .swatch.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--sw); }
+.accent-pick .swatch:active { transform: scale(.92); }
+.accent-pick .swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+/* not yet chosen, the own colour is an empty ring with a plus */
+.accent-pick .swatch.own:not(.on) { background: none; box-shadow: inset 0 0 0 1.5px var(--line); }
+.accent-pick .swatch.own:not(.on)::after { content: "+"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; line-height: 1; color: var(--muted); }
+.accent-pick .swatch.own input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; cursor: default; }
+.wall-pick { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.wall-pick .wall-thumb { width: 40px; height: 26px; border-radius: 5px; object-fit: cover; box-shadow: inset 0 0 0 1px var(--line), 0 0 0 .5px var(--line); }
 .pop.proto-menu { width: 262px; max-height: min(360px, 70vh); overflow-y: auto; overscroll-behavior: contain; padding: 4px; border: 1px solid var(--line); display: grid; gap: 1px; }
 .proto-menu .pm-head { padding: 6px 8px 5px; font-size: 11px; color: var(--muted); }
 .proto-menu .pm-item { display: flex; align-items: flex-start; gap: 7px; width: 100%; padding: 6px 8px 7px; border: 0; border-radius: 7px; background: none; color: var(--fg); font: inherit; text-align: left; cursor: default; outline: none; }
@@ -3551,6 +3573,13 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 .editor .plugin-option .segs { flex: none; }
 .editor .acct-proxy .who { font-size: 12px; font-weight: 500; color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor .acct-proxies > .hint { margin-top: 0; }
+/* a key's own price rate (@tnt12231 on X): its name, then the rate */
+.editor .key-rates { display: grid; gap: 8px; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+.editor .key-rates > .hint { margin-top: 0; }
+.editor .key-rates > .acct-proxy-more { justify-self: start; }
+.editor .key-rate { display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: center; gap: 8px; min-width: 0; }
+.editor .key-rate .who { font-size: 12px; font-weight: 500; color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor .key-rate input { min-width: 0; width: 100%; }
 /* past eight keys their lines fold behind All N keys, opened with a filter */
 .editor .acct-proxy-tools { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .editor .acct-proxy-tools .acct-proxy-filter { flex: 1 1 auto; min-width: 0; }
@@ -3679,6 +3708,19 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { box-shadow: 0 1px 0 va
 /* a provider's Routing and Stays, with "unsaved" beside a pick not saved yet */
 .route-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .route-pick > .hint { margin: 0; }
+/* In turn, drawn (app.js rotateFigure): quiet greys from the theme's own
+   tokens, an account told by its letter and its shade */
+.rot-wrap { margin-top: 8px; max-width: 100%; overflow-x: auto; }
+.rot-fig { display: block; max-width: 100%; height: auto; font-family: var(--font); }
+.rot-fig .rot-track { fill: var(--card-2); stroke: var(--line); }
+.rot-fig .rot-link { stroke: var(--line); stroke-width: 1.5; }
+.rot-fig .rot-l { font-size: 9px; font-weight: 600; fill: var(--card); }
+.rot-fig .rot-l.rot-c { fill: var(--fg); }
+.rot-fig .rot-acct.rot-a, .rot-fig .rot-call.rot-a { fill: var(--fg-2); }
+.rot-fig .rot-acct.rot-b, .rot-fig .rot-call.rot-b { fill: var(--muted); }
+.rot-fig .rot-acct.rot-c, .rot-fig .rot-call.rot-c { fill: var(--faint); }
+.rot-fig .rot-key { fill: none; stroke: var(--muted); }
+.rot-fig .rot-legend { font-size: 9.5px; fill: var(--muted); }
 .thumb.still { transition: none; }
 .link { font-size: 12px; color: var(--accent); padding: 3px 4px; white-space: nowrap; }
 .link:hover { text-decoration: underline; text-underline-offset: 2px; }
@@ -5128,8 +5170,18 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .ag-menu-cap > .ag-dot { margin-top: calc(0.8em - 3px); }
 .ag-menu-cap > span:last-child { flex: 1; min-width: 0; }
 /* Claude Desktop's "largest window only" switch (#1272): its words beside it, the hint after them */
-.ag-longest, .ag-isolated { cursor: pointer; }
-.ag-longest-say, .ag-isolated-say { color: var(--fg-2); }
+.ag-longest, .ag-isolated, .ag-iso-claude { cursor: pointer; }
+.ag-longest-say, .ag-isolated-say, .ag-iso-claude-say { color: var(--fg-2); }
+/* the Claude Magpie app's own Claude Code folder (#6459), folded under Advanced */
+.ag-iso-more > summary { font-size: 12px; line-height: 18px; color: var(--fg-2); list-style: none; display: inline-flex; align-items: center; gap: 5px; padding: 3px 0; border-radius: 4px; cursor: pointer; transition: color .12s ease; }
+.ag-iso-more > summary::-webkit-details-marker { display: none; }
+.ag-iso-more > summary::before { content: ""; flex: none; width: 10px; height: 10px; background: var(--muted); transition: transform .2s cubic-bezier(.23, 1, .32, 1), background-color .12s ease;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M3.6 1.6 7 5 3.6 8.4' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat; }
+.ag-iso-more[open] > summary::before { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .ag-iso-more > summary:hover { color: var(--fg); } }
+.ag-iso-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .ag-iso-more > summary, .ag-iso-more > summary::before { transition: none; } }
 /* which copy is left on the old list: a sentence that wraps as one, under the warning's words */
 .ag-vl.ag-stale-copy { display: block; padding-left: 14px; font-size: 12px; line-height: 1.6; color: var(--fg-2); }
 /* Codex's daemon: restarted from its line, a button that sits in the sentence */

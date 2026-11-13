@@ -253,6 +253,9 @@ var notYet = map[string]string{
 	"GET /api/notices":                           W,  // api.go
 	"GET /api/feedback":                          W,  // feedback.go: Settings › About's Report a problem, which opens a page
 	"GET /api/omarchy":                           W,  // api.go
+	"GET /api/appearance/css":                    W,  // appearance.go: the stylesheet of the accent and the picture behind the pages; the accent is `magpie settings set accent`
+	"GET /api/appearance/wallpaper":              W,  // appearance.go
+	"POST /api/appearance/wallpaper":             W,  // appearance.go: the picture comes from the window's file picker
 	"GET /api/quit":                              W,  // api.go: the window's Quit question
 	"GET /api/remote":                            W,  // remote.go: another magpie opened in a window of the app
 	"POST /api/remote":                           W,  // remote.go
@@ -302,6 +305,7 @@ var notYet = map[string]string{
 	"POST /api/settings/codex-warm-at":           S2, // api.go
 	"POST /api/settings/cors":                    S2, // api.go
 	"POST /api/settings/desktop-isolated":        A,  // api.go; `magpie claude-desktop launcher`, an agent's form this check can't read
+	"POST /api/settings/desktop-isolated-claude": A,  // api.go; `magpie claude-desktop launcher claude-dir`, an agent's form this check can't read
 	"POST /api/settings/desktop-longest":         S2, // api.go
 	"POST /api/settings/disabled-models":         S2, // api.go
 	"POST /api/settings/full-context":            S2, // api.go
@@ -513,6 +517,7 @@ var notYet = map[string]string{
 	"POST /api/tune/apply":                       U,  // tune.go
 	"POST /api/tune/undo":                        U,  // tune.go
 	"POST /api/uninstall/finish":                 A,  // uninstall.go
+	"GET /api/usage/checkins/off":                U,  // usage.go: the Usage page's switched-off check-ins; `magpie accounts checkin` does every account
 	"GET /api/usage/deleted/into":                U,  // usage.go
 	"GET /api/usage/heatmap":                     U,  // usage.go
 	"GET /api/usage/quotas/history/holds":        U,  // usage.go

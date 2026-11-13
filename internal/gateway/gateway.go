@@ -1580,9 +1580,15 @@ func drawerObjects(r *http.Request) []map[string]any {
 				"owned_by": p.ID, "display_name": name, "magpie_label": name + " · " + p.Name,
 				"modalities": map[string]any{"input": []string{"text"}, "output": []string{"image"}},
 				"magpie_via": catalog.ViaHere(m.Via)}
+			// the endpoints it is drawn through, in new-api's words, which
+			// Cherry Studio's new-api provider reads its kind from
+			// (listModels.ts newApiFetcher): image-generation first
+			ends := []string{"image-generation"}
 			if m.Images {
 				o["modalities"] = map[string]any{"input": []string{"text", "image"}, "output": []string{"image"}}
+				ends = append(ends, "image-edit")
 			}
+			o["supported_endpoint_types"] = ends
 			out = append(out, o)
 		}
 	}
@@ -1607,8 +1613,9 @@ func videomakerObjects(r *http.Request) []map[string]any {
 			name := cmp.Or(m.Name, m.ID)
 			out = append(out, map[string]any{"id": p.ID + "/" + m.ID, "object": "model", "type": "model", "kind": "video", "created": 0,
 				"owned_by": p.ID, "display_name": name, "magpie_label": name + " · " + p.Name,
-				"modalities": map[string]any{"input": []string{"text", "image"}, "output": []string{"video"}},
-				"magpie_via": catalog.ViaHere(m.Via)})
+				"modalities":               map[string]any{"input": []string{"text", "image"}, "output": []string{"video"}},
+				"supported_endpoint_types": []string{"openai-video"},
+				"magpie_via":               catalog.ViaHere(m.Via)})
 		}
 	}
 	return out
@@ -1653,10 +1660,21 @@ func catalogFor(r *http.Request) []provider.Entry {
 // Cherry Studio's, ZCode's pasted ?format=text) would offer an image model
 // in their chat pickers (axelburks on Discord asked for them here). A kind
 // it doesn't know is refused, not read as none.
+//
+// Cherry Studio is the exception: it can't ask, and it tells an image model
+// from a chat one itself. Its provider of magpie (an OpenAI-compatible one)
+// reads only each id, then looks the id's last segment up in its own model
+// registry (provider-registry's models.json, by normalizeModelId), which
+// marks gpt-image-2, dall-e-3, the gemini-*-image, imagen, seedream and
+// grok-imagine models as image generation: those go to its Paintings page,
+// not its chat picker (isNonChatModel). Without them listed, Paintings had
+// no model of magpie's (pingqipai3 on X). So it is listed every kind.
 func listKinds(r *http.Request) (chat, image, video bool, err error) {
 	q, ok := r.URL.Query()["kind"]
 	if !ok {
-		return true, false, false, nil
+		// a list of ids pasted somewhere (?format=text) stays chat models
+		media := cherryStudio(r) && r.URL.Query().Get("format") != "text"
+		return true, media, media, nil
 	}
 	for _, v := range q {
 		for k := range strings.SplitSeq(v, ",") {
@@ -1675,6 +1693,14 @@ func listKinds(r *http.Request) (chat, image, video bool, err error) {
 		}
 	}
 	return chat, image, video, nil
+}
+
+// cherryStudio is a request of Cherry Studio's: with the key magpie's link
+// gives it (agentOf), or a key the user typed in by hand, by its User-Agent,
+// Electron's own with the app's name in it ("Mozilla/5.0 (…)
+// CherryStudio/2.1.2 Chrome/… Electron/…").
+func cherryStudio(r *http.Request) bool {
+	return agentOf(r) == "cherrystudio" || strings.Contains(r.Header.Get("User-Agent"), "CherryStudio/")
 }
 
 func (s *Server) models(w http.ResponseWriter, r *http.Request) {
@@ -1703,6 +1729,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		shown := catalogFor(r)
 		if agent := agentOf(r); agent == "claude-desktop" {
 			data = desktopModels(shown, desktopKnowsMythos(r.Header.Get("User-Agent")))
+			data = append(data, DesktopTierRows(shown, data)...)
 		} else if agent == ScienceID {
 			data = scienceModels(shown)
 		} else {
@@ -3575,6 +3602,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		c := cands[i]
+		if q, ok := provider.Readdressed(c.p); ok {
+			// a Remote magpie saved at another address since the
+			// request read it is asked there, a retry of it too
+			// (le13ure on X)
+			c.p = q
+		}
 		if handed.release != nil && handed.who != c.who() {
 			handed.release()
 			handed.release = nil
@@ -4943,15 +4976,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
 			again++
-			select {
-			case <-time.After(wait):
+			if pauseUntilReaddressed(r.Context(), wait, readdressedOf([]candidate{c})) {
 				i--
 				continue
-			case <-r.Context().Done():
-				call.Status, call.Error = canceled(r.Context())
-				try.Gone = true
-				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			}
+			call.Status, call.Error = canceled(r.Context())
+			try.Gone = true
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			break
 		}
 		if !last && hw.failed() && codexReset(hw.code(), hw.errBody()) {
@@ -5235,7 +5266,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 				skipped = append(skipped, c.label()+": "+call.Error)
 				rounds, busyNow = rounds+1, nil
-				if pauseAlive(r.Context(), w, kept, streams, start, wait) {
+				if pauseAlive(r.Context(), w, kept, streams, start, wait, readdressedOf(next)) {
 					cands = append(cands[:i+1:i+1], next...)
 					continue
 				}
@@ -5253,15 +5284,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
 			again++
-			select {
-			case <-time.After(wait):
+			if pauseUntilReaddressed(r.Context(), wait, readdressedOf([]candidate{c})) {
 				i--
 				continue
-			case <-r.Context().Done():
-				call.Status, call.Error = canceled(r.Context())
-				try.Gone = true
-				s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			}
+			call.Status, call.Error = canceled(r.Context())
+			try.Gone = true
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			break
 		}
 		// (not for one account pinned: the others weren't asked)
@@ -5705,6 +5734,11 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if relay && searchedForIt(r.Context(), p, from, model, body) && !(from == provider.Responses && (hasSealedAgentMessage(body) || codexAsSent(p, r.Header))) {
 		relay, ownAPI = false, true
 	}
+	// Claude Code's advisor, which magpie runs for a model whose upstream
+	// can't (advisor_serve.go): a relay would leave it out (advisorTools)
+	if relay && advisedHere(p, from, from, model, body, wiresOf(r.Context())) {
+		relay, ownAPI = false, true
+	}
 	// Copilot seals an argument the tools mark "encrypted" (spawn_agent's
 	// message, MultiAgentV2) and then can't open what it sealed: the
 	// subagent's turn came back "Encrypted function output content could
@@ -6061,7 +6095,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		body = s.withoutRefusedThinking(p, body)
 		// and those another vendor signed, to Claude (thinking_bound.go)
 		body = s.withoutForeignThinking(p, body)
-		if isKimi(p, to) || isDeepSeekAnthropic(p, to) || p.IsOpenCode() && strings.Contains(strings.ToLower(modelOf(body)), "deepseek") {
+		if deferredOutUpFront(p, to, body) {
 			// Claude Code's deferred-tool blocks, for which Kimi's
 			// Anthropic endpoint turns the whole request away with a 400
 			// that names nothing to learn from (#2042). DeepSeek's own
@@ -6677,7 +6711,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		toolSeen = clientToolUseIDs(body)
 		body = saltedCallIDsBack(body)
 		// Claude Code's advisor, named by magpie's id (advisor.go)
-		body = advisorTools(body, p, upstream, wiresOf(r.Context()))
+		body = advisorTools(body, p, upstream, wiresOf(r.Context()), keyAllows(r, p))
 		if p.IsBedrock() {
 			// Claude Code's metadata.user_id, a JSON string these days, is
 			// not the plain id Bedrock checks it against (#176)
@@ -9078,11 +9112,18 @@ var cacheControlField = []byte("cache_control")
 // not refused with a 400 the old translation never gave (#3835). Every
 // other request is one bytes.Contains away from this, a scan next to the
 // parse of the same body.
-func parseTranslated(from, to provider.Protocol, body []byte) (*Request, error) {
+func parseTranslated(from, to provider.Protocol, body []byte, advised bool) (*Request, error) {
 	if from == provider.Anthropic && to == provider.Anthropic && bytes.Contains(body, cacheControlField) {
-		if req, err := parseAnthropicRequest(body, true); err == nil {
+		if req, err := readAdvised(body, true, false, advised); err == nil {
 			return afterParse(from, body, req)
 		}
+	}
+	if advised && from == provider.Anthropic {
+		req, err := readAdvised(body, false, false, true)
+		if err != nil {
+			return nil, err
+		}
+		return afterParse(from, body, req)
 	}
 	return parseRequest(from, body, false, to == provider.Responses)
 }
@@ -9095,7 +9136,10 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		msg := "input_image without image_url cannot be translated; send an image_url or use a native Responses route"
 		return writeError(w, from, 400, msg), msg
 	}
-	request, err := parseTranslated(from, to, body)
+	// Claude Code's advisor, run by magpie for a model whose upstream
+	// can't (advisor_serve.go)
+	advised := advisedHere(p, from, to, model, body, wiresOf(r.Context()))
+	request, err := parseTranslated(from, to, body, advised)
 	if err != nil {
 		return writeError(w, from, 400, err.Error()), err.Error()
 	}
@@ -9138,16 +9182,17 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	if p.OpenCodeFree(model) {
 		zen = &zenReply{z: zenFreeTools(request)}
 	}
-	if request.WebSearch {
-		if !searching(r.Context()) && canSearchFor(p) && (!searchesFor(p, to, model, request) || magpieSearches(r.Context(), p)) {
-			ask := antigravityRound(w, p, s.askTranslated(p, to, model, r.Header, w.Header()))
-			if zen != nil {
-				ask = zenRound(zen.z, ask)
-			}
+	search := request.WebSearch && !searching(r.Context()) && canSearchFor(p) && (!searchesFor(p, to, model, request) || magpieSearches(r.Context(), p))
+	if search || request.Advisor != "" {
+		ask := antigravityRound(w, p, s.askTranslated(p, to, model, r.Header, w.Header()))
+		if zen != nil {
+			ask = zenRound(zen.z, ask)
+		}
+		if search {
 			// a Kimi Code plan's own searches stay on it
 			r = r.WithContext(searchingOn(r.Context(), p))
-			return s.searchReply(w, r, from, p.Name, request, u, ask)
 		}
+		return s.searchReply(w, r, from, p.Name, request, u, ask, search)
 	}
 	if msg := unportableVideo(to, request); msg != "" {
 		// told, not left out for the model to answer the words alone (#6135)
@@ -9401,7 +9446,7 @@ func saysSomething(ev Event) bool {
 	switch ev.Kind {
 	case KText:
 		return ev.Text != ""
-	case KToolStart, KSearch, KImage:
+	case KToolStart, KSearch, KImage, KAdvice:
 		return true
 	}
 	return false

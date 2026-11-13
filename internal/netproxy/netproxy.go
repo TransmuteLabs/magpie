@@ -123,10 +123,10 @@ func Held(ctx context.Context) error {
 // "direct", #1522) goes through its own provider's proxy, never the one
 // it was made under. A provider's leave not to check its certificate
 // (WithUncheckedTLS) goes the same way: it is the outer provider's, and
-// dropped here, and so is its ask for HTTP/1.1 (WithHTTP1) and its own
-// TLS identity (WithClientCert).
+// dropped here, and so is its ask for HTTP/1.1 (WithHTTP1), its own
+// TLS identity (WithClientCert) and its host rules (WithResolve).
 func With(ctx context.Context, choice string) context.Context {
-	if choice = strings.TrimSpace(choice); choice == "" && choiceOf(ctx) == "" && uncheckedOf(ctx) == nil && http1Of(ctx) == nil && clientCertOf(ctx) == nil {
+	if choice = strings.TrimSpace(choice); choice == "" && choiceOf(ctx) == "" && uncheckedOf(ctx) == nil && http1Of(ctx) == nil && clientCertOf(ctx) == nil && resolveOf(ctx) == nil {
 		return ctx
 	}
 	ctx = context.WithValue(ctx, choiceKey{}, choice)
@@ -138,6 +138,9 @@ func With(ctx context.Context, choice string) context.Context {
 	}
 	if http1Of(ctx) != nil {
 		ctx = context.WithValue(ctx, http1Key{}, map[string]bool(nil))
+	}
+	if resolveOf(ctx) != nil {
+		ctx = context.WithValue(ctx, resolveKey{}, map[string][]string(nil))
 	}
 	return ctx
 }
@@ -215,8 +218,10 @@ var HTTP1 func(u *url.URL) bool
 // said not to check (WithUncheckedTLS) through a clone kept for that
 // host alone (uncheckTLS), and one made with a provider's own TLS
 // identity (WithClientCert) through a clone kept for it (clientTLS). A host whose IPv6 is taken but goes nowhere
-// is dialed over IPv4 (v4Fallback).
+// is dialed over IPv4 (v4Fallback), and one on the user's own network
+// is given lanDial to connect (lanDialCap).
 func Dispatch(base *http.Transport) http.RoundTripper {
+	lanDialCap(base)
 	v4Fallback(base)
 	return &dispatch{base: base, own: map[route]*http.Transport{}, moved: Watch()}
 }
@@ -239,16 +244,24 @@ type route struct {
 	h1        bool
 	unchecked string
 	client    string // clientRoute
+	resolve   string // resolveRoute
 }
 
 func (d *dispatch) RoundTrip(req *http.Request) (*http.Response, error) {
 	if d.moved() {
 		d.CloseIdleConnections()
 	}
-	r := route{choice: Resolve(choiceOf(req.Context())), h1: HTTP1 != nil && HTTP1(req.URL) || http1Asked(req) || overHTTP1(req.Context()) || h2BrokenFor(req), unchecked: uncheckedHost(req), client: clientRoute(req)}
+	r := route{choice: Resolve(choiceOf(req.Context())), h1: HTTP1 != nil && HTTP1(req.URL) || http1Asked(req) || overHTTP1(req.Context()) || h2BrokenFor(req), unchecked: uncheckedHost(req), client: clientRoute(req), resolve: resolveRoute(req)}
 	t := d.base
 	if r != (route{}) {
 		t = d.transport(r)
+	}
+	if r.resolve != "" {
+		// a rule is for a connection made direct: through a proxy, the
+		// proxy connects to the name itself
+		if u, err := proxyOf(t, req); err == nil && u == nil {
+			req = req.WithContext(context.WithValue(req.Context(), directKey{}, true))
+		}
 	}
 	res, err := v4Retry(t, req)
 	if r.h1 {
@@ -325,6 +338,9 @@ func (d *dispatch) transport(r route) *http.Transport {
 	}
 	if r.client != "" {
 		clientTLS(t, r.client)
+	}
+	if r.resolve != "" {
+		resolveTLS(t, r.resolve)
 	}
 	if isCalm(d.base) {
 		// a clone shares base's HTTP/2 connections, dialled through
@@ -703,4 +719,12 @@ func bypassed(host string, list []string) bool {
 		}
 	}
 	return false
+}
+
+// proxyOf is the proxy t sends req through, nil for none.
+func proxyOf(t *http.Transport, req *http.Request) (*url.URL, error) {
+	if t.Proxy == nil {
+		return nil, nil
+	}
+	return t.Proxy(req)
 }

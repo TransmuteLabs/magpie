@@ -81,6 +81,14 @@ var claudeOwnEnv = append([]string{
 // comes before it.
 const claudeAutoModeEnv = "CLAUDE_CODE_AUTO_MODE_MODEL"
 
+// claudeAdvisorEnv turns Claude Code's advisor (/advisor, settings.json's
+// advisorModel) on for any model (2.1.316): without it, Claude Code sends
+// the advisor only for Anthropic's own models by their public names, and
+// a model on magpie gets none. The advisor field writes it, and magpie's
+// gateway runs the advisor for a model whose upstream can't
+// (internal/gateway/advisor_serve.go).
+const claudeAdvisorEnv = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL"
+
 // claudeNoClassifier are the Claude models Claude Code 2.1.303 won't run
 // its classifier on from claudeAutoModeEnv ("the API's safeguards refuse
 // the classifier's escalated check on it"): it warns and takes its own
@@ -739,6 +747,14 @@ func claudeIn(at place) *Agent {
 		v := rawEnv(claudeAutoModeEnv)
 		return v != "" && (v == stashShared()[autoKey] || isMagpie(env(claudeAutoModeEnv)))
 	}
+	// the advisor's switch as magpie wrote it (the advisor field), which
+	// goes when the advisor does or magpie steps out; one the user wrote
+	// is theirs
+	advisorKey := at.key("claude.advisor_env")
+	advisorOurs := func() bool {
+		v := rawEnv(claudeAdvisorEnv)
+		return v != "" && v == stashShared()[advisorKey]
+	}
 	// set once magpie has taken what the env said about each tier's model
 	// from before it routed Claude Code (claudeAbout): what is there after
 	// that the user wrote about magpie's model, and stays while the tier
@@ -1149,6 +1165,11 @@ func claudeIn(at place) *Agent {
 		// tells (young02036 on Discord: 500K group at "/ 200k" in WSL)
 		if at.sys != nil {
 			return desktopWiredAny(desktopSetsHere())
+		}
+		// the isolated Desktop's Code tab on a folder of its own (#6459):
+		// that folder's Claude Code, and ~/.claude's no more
+		if d := desktopCodeDir(at.home); d != "" {
+			return at.dir != "" && filepath.Clean(at.dir) == filepath.Clean(d) && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
 		}
 		return at.id == "" && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
 	}
@@ -1657,6 +1678,19 @@ func claudeIn(at place) *Agent {
 			}
 		}
 		forget(autoKey)
+		// the advisor goes where it is on magpie's model, and its switch
+		// where magpie wrote it
+		if isMagpie(strings.TrimSuffix(claudeReadOwn(jsonGet(path, "advisorModel")()), "[1m]")) {
+			if err := edit.DelJSON(path, "advisorModel"); err != nil {
+				return "", err
+			}
+		}
+		if advisorOurs() {
+			if err := edit.DelJSON(path, "env."+claudeAdvisorEnv); err != nil {
+				return "", err
+			}
+		}
+		forget(advisorKey)
 		was := unstash(at.key("claude.model"))
 		var back []edit.KV
 		for _, k := range claudeOwnEnv {
@@ -2292,6 +2326,51 @@ func claudeIn(at place) *Agent {
 			})
 		},
 	})
+	// advisor: the model Claude Code's advisor runs on (settings.json's
+	// advisorModel, as /advisor writes it), turned on for magpie's models
+	// (claudeAdvisorEnv). Unset, no advisor. The gateway runs it for a
+	// model whose upstream can't. Claude Code reads both as it starts.
+	fields = append(fields, Field{
+		Key: "advisor", Label: "advisor model", Quiet: true,
+		Get: func() string {
+			if !routed() {
+				return ""
+			}
+			return claudeReadOwn(jsonGet(path, "advisorModel")())
+		},
+		Set: func(v string) error {
+			v = strings.TrimSpace(v)
+			if !routed() {
+				if v == "" {
+					return nil
+				}
+				return fmt.Errorf("pick a model through magpie for Claude Code first; its advisor can then have a model")
+			}
+			if v != "" && !isMagpie(strings.TrimSuffix(v, "[1m]")) {
+				return fmt.Errorf("advisor: %q is not a model magpie serves", v)
+			}
+			if v == "" {
+				keys := []string{"advisorModel"}
+				if advisorOurs() {
+					keys = append(keys, "env."+claudeAdvisorEnv)
+				}
+				forget(advisorKey)
+				return edit.DelJSON(path, keys...)
+			}
+			kv := []edit.KV{{Path: "advisorModel", Value: spell(v)}}
+			if rawEnv(claudeAdvisorEnv) == "" || advisorOurs() {
+				stash(map[string]string{advisorKey: "1"})
+				kv = append(kv, edit.KV{Path: "env." + claudeAdvisorEnv, Value: "1"})
+			}
+			return edit.SetJSON(path, kv...)
+		},
+		Options: func(map[string]string) []Option {
+			if !routed() {
+				return nil
+			}
+			return claudeViaMagpie(false)
+		},
+	})
 	// its sign-in while it runs through magpie: magpie's key, or its own
 	// claude.ai sign-in kept (loginKey), where the gateway takes any key
 	fields = append(fields, Field{
@@ -2343,7 +2422,7 @@ func claudeIn(at place) *Agent {
 	self = &Agent{
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
-		Bin: "claude", Dir: filepath.Dir(path), Path: path,
+		Bin: "claude", Dir: filepath.Dir(path), Path: path, signIn: ".credentials.json",
 		Fields:       fields,
 		ModelAliases: claudeAliases,
 		Telemetry:    claudeTelemetry(at, path),

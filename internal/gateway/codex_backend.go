@@ -1222,7 +1222,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 	askAgain := func(status int, msg string, wait time.Duration) bool {
 		handOn(status, msg, wait)
 		busyAgain++
-		if !pauseAlive(r.Context(), w, kept, streams, start, wait) {
+		if !pauseAlive(r.Context(), w, kept, streams, start, wait, nil) {
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1].Gone = true })
 			end(status, msg, 0, 0)
 			return false
@@ -1409,6 +1409,13 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				break
 			}
 			body = b
+		}
+		if rest == "/images/generations" || rest == "/images/edits" {
+			if acct, ok := codexRelayedAccount(base, r.Header, on); ok {
+				// Codex's own drawing, relayed: the image window its reply
+				// tells is the account's image row (#6412)
+				heardCodexImage(acct, res.Header)
+			}
 		}
 		if rest == "/responses" {
 			if acct, ok := codexRelayedAccount(base, r.Header, on); ok {

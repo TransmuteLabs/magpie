@@ -522,20 +522,39 @@ func (a Allowance) CapUsed(model string, now time.Time) float64 {
 // Zero when that window's reset isn't known, or has passed (it is empty
 // again then, its next reset not known).
 func (a Allowance) Fullest(model string, now time.Time) time.Time {
+	at, _ := a.fullest(model, now)
+	return at
+}
+
+// FullestName is the name of the window For's share is of (Fullest's),
+// when more than one window counts model: the share alone ("41% used")
+// read as the five hours on the Routing page while it was the week's,
+// the five hours at 0% (Wing8Aqua on X). Empty when one window, or none,
+// counts it, or the vendor didn't name it.
+func (a Allowance) FullestName(model string, now time.Time) string {
+	_, name := a.fullest(model, now)
+	return name
+}
+
+func (a Allowance) fullest(model string, now time.Time) (time.Time, string) {
 	model = strings.ToLower(model)
-	used, at := -1.0, time.Time{}
+	used, at, name, n := -1.0, time.Time{}, "", 0
 	for _, l := range a {
 		if !l.applies(model) {
 			continue
 		}
+		n++
 		if !l.Resets.IsZero() && !l.Resets.After(now) {
 			l.Used, l.Resets = 0, time.Time{}
 		}
 		if l.Used > used || l.Used == used && l.Resets.After(at) {
-			used, at = l.Used, l.Resets
+			used, at, name = l.Used, l.Resets, l.Name
 		}
 	}
-	return at
+	if n < 2 {
+		name = ""
+	}
+	return at, name
 }
 
 // Count is the count of the window For's share is of — the fullest that
@@ -884,8 +903,18 @@ func (l Limit) expiring(u float64, now, ends time.Time) (pace float64, at time.T
 // Allowances is each of an agent's accounts' allowance by user, as last
 // known, asked for again in the background when that was over a minute
 // ago. Only the very first ask waits, and not for long. An account
-// missing is one not known yet.
+// missing is one not known yet. A ChatGPT API account is known by the
+// same ChatGPT account's Codex reading (samePlanAllowances).
 func Allowances(agent string) map[string]Allowance {
+	m := readAllowances(agent)
+	if agent == ChatGPTAPIID {
+		m = samePlanAllowances(m)
+	}
+	return m
+}
+
+// readAllowances is Allowances as agent's own readings tell it.
+func readAllowances(agent string) map[string]Allowance {
 	bindings, external := extensionUsageBindings(agent)
 	c := &usedCache
 	c.Lock()
@@ -1049,7 +1078,7 @@ func ReadUsageNow(ctx context.Context, agent string, users ...string) bool {
 	}
 	c := &usedCache
 	for range 3 {
-		Allowances(agent)
+		readAllowances(agent)
 		c.Lock()
 		done, back := c.loading[agent], !c.at[agent].IsZero()
 		c.Unlock()
@@ -1157,7 +1186,7 @@ func AwaitAllowance(ctx context.Context, agent, user string) bool {
 		return false
 	}
 	for range 3 {
-		Allowances(agent)
+		readAllowances(agent)
 		c.Lock()
 		done := c.loading[agent]
 		c.Unlock()

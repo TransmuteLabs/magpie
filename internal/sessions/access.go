@@ -245,9 +245,18 @@ func Found() []string {
 	add("hermes", HermesDirs()...)
 	add("alma", almaDB())
 	add("minimax-code", minimaxSessions())
-	add("kimi", kimiSessions())
+	kimi := []string{kimiSessions()}
+	for _, sh := range kimiWorkShares() {
+		kimi = append(kimi, filepath.Join(kimiWorkRuntime(sh), "home", "sessions"))
+	}
+	add("kimi", kimi...)
 	add("agy", filepath.Join(AgyDir(), "brain"))
 	add("antigravity", antigravityConversations(), filepath.Join(AntigravityInsidersDir(), "conversations"))
 	add("gemini", geminiTmpDir())
+	var devin []string
+	for _, d := range DevinCLIDirs() {
+		devin = append(devin, filepath.Join(d, "sessions.db"), filepath.Join(d, "sessions"))
+	}
+	add("devin", devin...)
 	return out
 }

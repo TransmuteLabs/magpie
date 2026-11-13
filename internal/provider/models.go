@@ -2208,6 +2208,31 @@ func (p Provider) Known(model string) []string {
 	return p.knownElsewhere(model)
 }
 
+// KnownBorrowed reports whether the model's levels (Known) are not its
+// provider's word but borrowed for its id (borrowedEfforts): its list
+// names none for it — a relay's /v1/models with reasoning_levels: [] or
+// no levels at all — and models.dev has none for that vendor, so it is
+// asked at the levels its maker, or the others serving it, give it
+// (@czhhcz on X: `magpie model efforts` listed five for a relay's Claude
+// model whose list said none, and didn't say where they came from).
+func (p Provider) KnownBorrowed(model string) bool {
+	for _, m := range p.Available() {
+		if m.ID == model {
+			if m.EffortsBorrowed {
+				return len(m.Efforts) > 0
+			}
+			return len(m.Efforts) == 0 && m.Provider == "" && len(borrowedEfforts(m.ID)) > 0
+		}
+	}
+	if p.ID == "devin" && devinEffortOf(model) != "" {
+		return false
+	}
+	if _, ok := catalog.ListedBy(p.Catalogs(), model); ok {
+		return false
+	}
+	return len(borrowedEfforts(model)) > 0
+}
+
 // knownElsewhere are the reasoning levels of a model the provider's list
 // doesn't have — one of the vendor's own its list leaves out (a preview),
 // or typed in: the vendor's word on it, before the others'.
@@ -2398,6 +2423,9 @@ func (p Provider) listPriceIn(c priceCats, model string) (catalog.Price, bool, i
 		return pr, true, pricedOwn
 	}
 	if pr, ok := p.grokFastPrice(model); ok {
+		return pr, true, pricedOwn
+	}
+	if pr, ok := p.openDesignSamePrice(model); ok {
 		return pr, true, pricedOwn
 	}
 	// the names on the stack: made for each model priced, they were
@@ -2617,6 +2645,31 @@ func (p Provider) grokFastPrice(model string) (catalog.Price, bool) {
 	return pr.Times(GrokFastTimes), true
 }
 
+// openDesignSame are the Open Design plugin's ids of a model it serves
+// under another of its ids too, on another schedule: deepseek-v4.1-flash-eco
+// is DeepSeek V4.1 Flash on the low-priority, high-quota schedule, the same
+// weights ("Yes, same weights as DeepSeek V4.1 Flash", Open Design on X,
+// read 2026-11-13; the plugin's models.mjs seeds it as the same model). No
+// catalog lists the -eco id, so its calls had no estimated cost (#6352,
+// Winnie7572 on X).
+var openDesignSame = map[string]string{"deepseek-v4.1-flash-eco": "deepseek-v4.1-flash"}
+
+// openDesignSamePrice is an Open Design model's price as the model it is
+// the same as (openDesignSame), on the Open Design plugin only: elsewhere
+// an -eco id is another vendor's to price.
+func (p Provider) openDesignSamePrice(model string) (catalog.Price, bool) {
+	if p.PluginProvider() != "opendesign" {
+		return catalog.Price{}, false
+	}
+	m := strings.ToLower(strings.TrimSpace(model))
+	m = strings.TrimPrefix(m, "opendesign/")
+	base, ok := openDesignSame[m]
+	if !ok {
+		return catalog.Price{}, false
+	}
+	return p.ListPrice(base)
+}
+
 // GrokFastTimes is how many times its model's price xAI sells a Grok
 // model's fast variant at (grokFastPrice).
 const GrokFastTimes = 2
@@ -2822,11 +2875,19 @@ func priceIn(s settings.Settings, all []Provider, providerID, model string, at t
 // pricing many records holds both and multiplies the rates itself, as
 // the usage ledger's Pricer does, so one read serves every time of day.
 func BasePriceIn(s settings.Settings, providerID, model string) (catalog.Price, bool, []RateWindow) {
+	return BaseKeyPriceIn(s, providerID, "", model)
+}
+
+// BaseKeyPriceIn is BasePriceIn for a call the provider's key keyID sent:
+// at the key's own price rate when it has one (KeyPriceRates, @tnt12231
+// on X), else the provider's. An empty keyID, or one the provider doesn't
+// rate apart, is BasePriceIn.
+func BaseKeyPriceIn(s settings.Settings, providerID, keyID, model string) (catalog.Price, bool, []RateWindow) {
 	p, known := byIDOrWas(providerID)
 	if !known {
 		p = Provider{ID: providerID}
 	}
-	pr, ok := priceOf(s, p, known, model, time.Time{})
+	pr, ok := priceOf(s, p.atKeyRate(keyID), known, model, time.Time{})
 	return pr, ok, p.RateWindows
 }
 
@@ -2868,12 +2929,16 @@ func priceOf(s settings.Settings, p Provider, known bool, model string, at time.
 
 // PriceAt is what a call to model at p costs when made at at, as Usage
 // counts one made then: EffectivePriceAt for p as the caller holds it (a
-// routing group's member), its Peak still set, for the caller to apply
+// routing group's member, at the rate of the key it holds), its Peak still set, for the caller to apply
 // with Price.In and tell whether it did. A model served at no cost there
 // (FreeModel) costs nothing.
 func (p Provider) PriceAt(s settings.Settings, model string, at time.Time) (catalog.Price, bool) {
 	if p.FreeModel(model) {
 		return catalog.Price{}, true
+	}
+	// a key that bills at its own rate (KeyPriceRates) is priced at it
+	if p.Account == nil && p.Key != "" {
+		p = p.atKeyRate(keyID(p.Key))
 	}
 	return priceOf(s, p, true, model, at)
 }

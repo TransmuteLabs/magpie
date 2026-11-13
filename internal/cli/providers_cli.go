@@ -55,6 +55,9 @@ const providerUsage = `usage:
                                           keeps the cache); OpenAI's API and a ChatGPT (Codex) account do so by
                                           default; additional-tools=off puts it with the other tools,
                                           additional-tools=default is magpie's
+                                          resolve.<host>=<IP>[,dns:<name>…] connects a host of its base URLs there
+                                          (curl --resolve: the URL's name stays for TLS and Host); empty takes the
+                                          host's out, resolve= clears them all
                                           image-files=off sends DeepSeek's API an agent's images inline on every
                                           turn; image-files=on, the default, uploads each once (for a day)
                                           and names it by its file id
@@ -108,7 +111,11 @@ const providerUsage = `usage:
                                           how much an API key may spend, in USD as the Usage page prices its calls,
                                           a day (the default), a month or in all from now: at it, routing takes the
                                           key for used up and goes on to the other keys and the fallbacks
-  magpie provider key-balance <id> [key [usd|¥cny|off] [--refill monthly[:day]|weekly[:mon…sun]|off] [--expiring amount@yyyy-mm-dd|off]… [--expiring-remove [amount@]yyyy-mm-dd]…]
+  magpie provider key-rate <id> [key [rate|default]]
+                                          the price rate one API key bills at against the official price, as a relay
+                                          bills its key groups apart (e.g. 0.5): the Usage page counts that key's calls
+                                          at it; default has it bill at the provider's rate
+  magpie provider key-balance <id> [key [usd|¥cny|off] [--refill monthly[:day]|weekly[:mon…sun]|daily|off] [--expiring amount@yyyy-mm-dd|off]… [--expiring-remove [amount@]yyyy-mm-dd]…]
                                           the balance on an API key whose vendor tells none, typed from its own page
                                           in USD or in yuan (¥100): the Usage page shows it less what magpie prices the
                                           key's calls at since; with --refill it is whole again each month or week;
@@ -174,6 +181,9 @@ const providerUsage = `usage:
        magpie provider set my-relay models.url=https://relay.example.com/api/models catalog=
        magpie provider set volcengine list=off models=ep-20261108-abcde
                                    (its model list is never asked for: only the models given by id are served)
+       magpie provider set my-relay resolve.relay.example.com=10.0.0.5,dns:gw.corp.example
+                                   (Advanced › Connect to: connects to 10.0.0.5, then gw.corp.example's
+                                    address, while TLS and Host still say relay.example.com)
        magpie provider set my-relay search=yes
                                    (the relay answers Claude Code's WebSearch and Codex's web_search itself:
                                     those go to it as sent, not through magpie's own search)
@@ -675,6 +685,8 @@ func providerCmd(args []string) error {
 		return keyBalanceCmd(rest)
 	case "spend-cap", "spend-caps":
 		return spendCapCmd(rest)
+	case "key-rate", "key-rates":
+		return keyRateCmd(rest)
 	case "account-weight", "account-weights":
 		return accountWeightCmd(rest)
 	case "queue":
@@ -1035,6 +1047,9 @@ func showProviderAsking(p provider.Provider, ask bool) error {
 	cancel()
 	for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 		kv("header", k+": "+muted.Render(p.Headers[k]))
+	}
+	for _, h := range slices.Sorted(maps.Keys(p.Resolve)) {
+		kv("connect", h+muted.Render(" → ")+strings.Join(p.Resolve[h], ", "))
 	}
 	if d := p.RefreshInterval(); d > 0 {
 		kv("refresh", "every "+p.RefreshSchedule()+muted.Render("  the gateway fetches its list by itself"))
@@ -1436,6 +1451,12 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			if err := setContext(p, "*", v); err != nil {
 				return err
 			}
+		case "resolve":
+			// resolve= takes every connect address out
+			if strings.TrimSpace(v) != "" {
+				return fmt.Errorf("resolve.<host>=<IP or dns:name>[,…] gives a host's connect addresses; resolve= alone clears them all, not %q", v)
+			}
+			p.Resolve = nil
 		case "family", "tag":
 			p.Family = strings.TrimSpace(v)
 		case "routing", "strategy":
@@ -1482,6 +1503,28 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 					p.Headers = map[string]string{}
 				}
 				p.Headers[name] = v
+				continue
+			}
+			if len(k) > len("resolve.") && strings.EqualFold(k[:len("resolve.")], "resolve.") {
+				// resolve.<host>=<IP or dns:name>[,…] connects the host
+				// of its base URLs to those places, as curl --resolve
+				// (quantum_lsfc on X); empty takes the host's out. Save
+				// checks the host and each place (netproxy.CheckResolve)
+				host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(k[len("resolve."):]), "."))
+				delete(p.Resolve, host)
+				var places []string
+				for pl := range strings.SplitSeq(v, ",") {
+					if pl = strings.TrimSpace(pl); pl != "" {
+						places = append(places, pl)
+					}
+				}
+				if len(places) == 0 {
+					continue
+				}
+				if p.Resolve == nil {
+					p.Resolve = map[string][]string{}
+				}
+				p.Resolve[host] = places
 				continue
 			}
 			if len(k) > len("context.") && strings.EqualFold(k[:len("context.")], "context.") {

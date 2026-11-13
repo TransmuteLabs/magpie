@@ -660,6 +660,7 @@ func loadGen() (map[string]mdProvider, int) {
 				}
 				var m map[string]mdProvider
 				if json.Unmarshal(b, &m) == nil && len(m) > 0 {
+					shareCatalog(m)
 					mdev = m
 					votes, reasons := map[string]int{}, map[string]int{}
 					named := map[string]map[string]int{}
@@ -879,15 +880,21 @@ func syncLock(ctx context.Context, onlyIfMissing bool) error {
 		return fmt.Errorf("models.dev: unexpected payload")
 	}
 	// written whole through a rename: a reader never sees it half
-	// written, and a failed write keeps the last good copy
-	if err := writeWhole(CachePath(), b, time.Time{}); err != nil {
+	// written, and a failed write keeps the last good copy. The same
+	// bytes again are only dated now: a Claude account's list asks for a
+	// fetch every 45 minutes (Asked), and each one forgot the parsed
+	// catalog and rewrote every agent's list for nothing changed.
+	changed, err := keepFetched(CachePath(), b)
+	if err != nil {
 		return err
 	}
 	// the lab catalog beside it is best effort: without it the provider
 	// catalog answers alone, and one kept before is kept
-	_ = syncLabs(ctx)
-	Reset()
-	Touched() // names, reasoning levels and context windows may be others
+	labsChanged, _ := syncLabs(ctx)
+	if changed || labsChanged {
+		Reset()
+		Touched() // names, reasoning levels and context windows may be others
+	}
 	return nil
 }
 
@@ -2283,6 +2290,14 @@ func WrongEndpoint(status int, body []byte) bool {
 		// /v1/responses（OpenAI Responses API）。")
 		"不支持 /v1/chat/completions 接口",
 		"改用 /v1/responses",
+		// a relay's refusal of a model on the API it was asked on, in
+		// WandAPI's word for that API, "入口协议" (the entry protocol):
+		// "模型 gpt-6.1-sol 不支持当前入口协议" and, for gpt-6.1-terra,
+		// "当前没有能承接该入口协议的货源，…" (equinox0253 on X, both 404
+		// to Claude Code's /v1/messages). However it is worded, a refusal
+		// that names the entry protocol is about the API, which a 404 for
+		// a wrong base URL or a missing model ("模型 X 不存在") never names.
+		"入口协议",
 	} {
 		if strings.Contains(msg, phrase) {
 			return true

@@ -68,7 +68,12 @@ const callCacheVersion = "calls-v15"
 // (gemini-4-argon-d) is its model's (GeminiDeployment).
 // zcode 3: a call names its session as a request does, without the sess_
 // prefix (zcodeBareID), so the gateway's record of it pairs with it.
-var callParseVersions = map[string]int{"antigravity": 1, "cindy": 1, "codex": 3, "zcode": 3}
+// agy 1: a call names the model its conversation's database names for its
+// step (agyStepModels).
+// pi 1, raft 1, cindy 2: a pi-subagents subagent's calls are its own
+// file's, on the model and provider it ran, not its tool result's on the
+// lead's (piSubagentsRead).
+var callParseVersions = map[string]int{"agy": 1, "antigravity": 1, "cindy": 2, "codex": 3, "pi": 1, "raft": 1, "zcode": 3}
 
 // CallCacheVersion is callCacheVersion and callParseVersions, for a cache
 // of what is made of the calls (usage's requests-v1.bin and heatmap): a
@@ -262,6 +267,7 @@ var wholeCallReaders = map[string]func(file) (*callFile, bool){
 	"minimax-code": readMiniMaxCalls,
 	"agy":          readAgyCalls,         // #2097
 	"antigravity":  readAntigravityCalls, // #2190
+	"devin":        readDevinCalls,       // aohan0905 on X
 }
 
 // resumeCallReaders read an agent's calls from a file only appended to that

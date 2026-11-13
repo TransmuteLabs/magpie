@@ -19,6 +19,7 @@ import (
 	"maps"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -1180,6 +1181,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	devRoutes(mux)
 	pluginPageRoutes(mux, isWeb(w))
 	feedbackRoutes(mux)
+	appearanceRoutes(mux)
 	// boot.js hands the page the saved language and theme before it paints:
 	// they came only with the settings, so the tabs showed English first
 	mux.HandleFunc("GET /boot.js", func(rw http.ResponseWriter, r *http.Request) {
@@ -1266,10 +1268,19 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if th, ok := omarchyTheme(); ok {
 			boot["omarchy"] = th
 		}
+		// and the accent and wallpaper of the user's own (appearance.go),
+		// drawn before the first paint
+		boot["look"] = lookKey(s)
 		b, _ := json.Marshal(boot)
 		rw.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		rw.Header().Set("Cache-Control", "no-store")
-		rw.Write(append(append([]byte("window.bootPrefs = "), b...), ";\n"...))
+		out := append(append([]byte("window.bootPrefs = "), b...), ";\n"...)
+		if css := lookCSS(s); css != "" {
+			c, _ := json.Marshal(css)
+			out = append(out, `(function(){var e=document.createElement("style");e.id="lookCSS";e.textContent=`...)
+			out = append(append(out, c...), ";document.head.appendChild(e)})();\n"...)
+		}
+		rw.Write(out)
 	})
 	// the Omarchy theme as it is now, asked again every few seconds so a
 	// theme picked in Omarchy's menu reaches the page at once; null off Omarchy
@@ -1417,6 +1428,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		home, _ := os.UserHomeDir()
 		if _, err := agent.SetDesktopIsolated(home, in.On); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, state())
+	})
+	// its Code tab's Claude Code on a folder of its own, or back on
+	// ~/.claude (#6459): the app made again with the folder or without
+	mux.HandleFunc("POST /api/settings/desktop-isolated-claude", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ On bool }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		home, _ := os.UserHomeDir()
+		if err := agent.SetDesktopIsolatedClaude(home, in.On); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -3363,6 +3389,22 @@ func openSignIn(w Windows, st provider.SignInState, linkOnly bool) signInOpened 
 type mcpSignInOpened struct {
 	mcpauth.State
 	OpenError string `json:"openError,omitempty"`
+	LinkOnly  bool   `json:"linkOnly,omitempty"`
+}
+
+// openMCPSignIn is openSignIn for a sign-in to an MCP server: kept to its
+// link when the user keeps sign-in pages to a browser of their own
+// (settings.SignInLinkOnly), as an account's is. It opened the page in the
+// default browser whatever the setting (hkxhkxhkx on X).
+func openMCPSignIn(w Windows, st mcpauth.State) mcpSignInOpened {
+	if settings.Load().SignInLinkOnly {
+		return mcpSignInOpened{State: st, LinkOnly: true}
+	}
+	if u, err := url.Parse(st.URL); st.URL != "" && (err != nil || !mcpauth.WebURL(u)) {
+		// the server named it: only a web page is handed to the system
+		return mcpSignInOpened{State: st, OpenError: "not a web page"}
+	}
+	return mcpSignInOpened{State: st, OpenError: openError(w, st.URL)}
 }
 
 // openError opens url in the browser, and says why it didn't open: "" when

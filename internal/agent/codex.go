@@ -474,6 +474,10 @@ func codexIn(at place) *Agent {
 	deskList := func() error {
 		named := deskCatalog(get("model_catalog_json"))
 		if !deskWanted() {
+			// the list not wanted: the next one named is named anew
+			if stashShared()[at.key("codex.desk_at")] != "" {
+				stash(map[string]string{at.key("codex.desk_at"): ""})
+			}
 			if named {
 				if err := edit.DelTOMLTop(path, "model_catalog_json"); err != nil {
 					return err
@@ -507,7 +511,17 @@ func codexIn(at place) *Agent {
 			}
 		}
 		if !named {
-			return edit.SetTOMLTop(path, edit.KV{Path: "model_catalog_json", Value: deskRef})
+			if err := edit.SetTOMLTop(path, edit.KV{Path: "model_catalog_json", Value: deskRef}); err != nil {
+				return err
+			}
+			// when, for the Codex app's app-servers started before it,
+			// which list Codex's models alone till they restart (DeskAt).
+			// Taken out and named again in one change (a model picked in
+			// magpie, a reset to Codex's default) it was named all along,
+			// and keeps its time: a new one would restart the app for it
+			if stashShared()[at.key("codex.desk_at")] == "" {
+				stash(map[string]string{at.key("codex.desk_at"): strconv.FormatInt(time.Now().UnixNano(), 10)})
+			}
 		}
 		return nil
 	}
@@ -1123,6 +1137,80 @@ func codexIn(at place) *Agent {
 		}
 		return out
 	}
+	// filedTables is the provider ids config.toml has had a table of
+	// that magpie didn't write (noteTables), kept in the stash
+	filedTables := func() []string {
+		var ids []string
+		json.Unmarshal([]byte(stashShared()[at.key("codex.filed_tables")]), &ids)
+		return ids
+	}
+	// noteTables records the provider tables config.toml has now that
+	// aren't putThreadTables', for putThreadTables to tell a table that
+	// was in the file and is gone from one that never was
+	noteTables := func(providers map[string]any) {
+		ids := filedTables()
+		n := len(ids)
+		for id, v := range providers {
+			if id == magpieID || codexBuiltinProvider[id] || codexThreadTableOurs(id, v) || slices.Contains(ids, id) {
+				continue
+			}
+			ids = append(ids, id)
+		}
+		if len(ids) == n {
+			return
+		}
+		slices.Sort(ids)
+		b, _ := json.Marshal(ids)
+		stash(map[string]string{at.key("codex.filed_tables"): string(b)})
+	}
+	// threadTableFor says whether putThreadTables may write a table for
+	// the provider id a thread names: CC Switch's own ids, and one
+	// config.toml had a table of. Another app can start Codex with a
+	// provider of its own on the command line (T3 Code's
+	// openai_token_sharing, `-c model_providers.openai_token_sharing=
+	// {…, auth = {command = …}}`), and its threads name that id while
+	// config.toml never had it. A table magpie wrote for it was merged
+	// with the app's -c one, and Codex refused the config: "provider auth
+	// cannot be combined with experimental_bearer_token" (JsonParser on
+	// X). Such an id is the app's, never magpie's to write.
+	threadTableFor := func(id string) bool {
+		return ccSwitchProvider.MatchString(id) || slices.Contains(filedTables(), id)
+	}
+	// dropStrayTables takes out a table putThreadTables wrote, by an
+	// older magpie, for an id threadTableFor no longer gives one: as
+	// written, with magpie's key, nothing of the user's in it
+	dropStrayTables := func(providers map[string]any) error {
+		names, _ := edit.TOMLTables(path)
+		named := profileNamed(names)
+		for id, v := range providers {
+			// one Codex or a profile is on is the user's, however made
+			if threadTableFor(id) || !codexThreadTableOurs(id, v) || !slices.Contains(names, "model_providers."+id) || named[id] || get("model_provider") == id {
+				continue
+			}
+			if slices.ContainsFunc(names, func(n string) bool { return strings.HasPrefix(n, "model_providers."+id+".") }) {
+				continue
+			}
+			if err := edit.DelTOMLTable(path, "model_providers."+id); err != nil {
+				return err
+			}
+			log.Printf("codex: took out [model_providers.%s], written by an older magpie for threads another app starts on its own provider", id)
+		}
+		return nil
+	}
+	// tidyTables notes config.toml's provider tables and drops the stray
+	// ones; a config that doesn't parse is left alone
+	tidyTables := func() error {
+		doc, err := codexTopOf(path)
+		if err != nil {
+			return nil
+		}
+		providers, _ := doc.ModelProviders.(map[string]any)
+		if len(providers) == 0 {
+			return nil
+		}
+		noteTables(providers)
+		return dropStrayTables(providers)
+	}
 	// putThreadTables writes a table for each provider a Codex thread was
 	// started on that config.toml has none of, pointed at magpie. The
 	// Codex app resumes a thread on its own provider, and without that
@@ -1130,8 +1218,13 @@ func codexIn(at place) *Agent {
 	// a thread started through CC Switch reopened after CC Switch rewrote
 	// config.toml without its table (#1372). Codex's built-in providers
 	// need none, and magpie's own is putProvider's. A table written so
-	// stays, as magpie's own does, for the threads that name it.
+	// stays, as magpie's own does, for the threads that name it. Only for
+	// a table config.toml lost (threadTableFor): an id another app gives
+	// Codex on its command line is that app's.
 	putThreadTables := func() error {
+		if err := tidyTables(); err != nil {
+			return err
+		}
 		// the providers config.toml has, however spelled (a table, inline,
 		// dotted keys); one that doesn't parse is left alone
 		doc, err := codexTopOf(path)
@@ -1143,7 +1236,7 @@ func codexIn(at place) *Agent {
 			return nil
 		}
 		for _, id := range sessions.CodexThreadProviders(dir) {
-			if _, ok := providers[id]; ok || id == magpieID || codexBuiltinProvider[id] {
+			if _, ok := providers[id]; ok || id == magpieID || codexBuiltinProvider[id] || !threadTableFor(id) {
 				continue
 			}
 			if err := edit.SetTOMLTable(path, "model_providers."+id,
@@ -1661,6 +1754,11 @@ func codexIn(at place) *Agent {
 	}
 	set := func(v string) error {
 		if v == "" {
+			// a stray table of an older magpie's goes with a Disconnect
+			// too, an uninstall's or a quit's: no Sync may come after
+			if err := tidyTables(); err != nil {
+				return err
+			}
 			if err := dropSubagent(); err != nil {
 				return err
 			}
@@ -1830,7 +1928,7 @@ func codexIn(at place) *Agent {
 	}
 
 	a := atomic(&Agent{
-		ID: "codex", Name: "Codex", Icon: "codex-color", Bin: "codex", Dir: dir, Path: path,
+		ID: "codex", Name: "Codex", Icon: "codex-color", Bin: "codex", Dir: dir, Path: path, signIn: "auth.json",
 		Telemetry: codexTelemetry(at, path),
 		UA:        []string{"codex", "acp-extension-codex"}, // The ACP adapter's default client name becomes Codex's originator.
 		// Codex as it was before magpie: its default puts it back as
@@ -1921,6 +2019,16 @@ func codexIn(at place) *Agent {
 		Joined:    func() bool { return joined() && !asProvider() },
 		AppOut:    func() bool { return asProvider() && !api() && chatGPT() && stashShared()[at.key("codex.out")] == "1" },
 		AppOutOff: func() bool { return stashShared()[at.key("codex.login")] == "chatgpt" || !routed() },
+		DeskAt: func() time.Time {
+			if !deskCatalog(get("model_catalog_json")) {
+				return time.Time{}
+			}
+			n, err := strconv.ParseInt(stashShared()[at.key("codex.desk_at")], 10, 64)
+			if err != nil || n <= 0 {
+				return time.Time{}
+			}
+			return time.Unix(0, n)
+		},
 		HoldMatters: func() bool {
 			return stashShared()[at.key("codex.login")] == "" && chatGPT() &&
 				(viaBase() || asProvider() && stashShared()[at.key("codex.out")] == "1")
@@ -1938,6 +2046,10 @@ func codexIn(at place) *Agent {
 		// itself goes, by the same gates a Disconnect takes them by
 		TakeLeftovers: func() (bool, error) {
 			took := false
+			// a table an older magpie wrote for another app's provider
+			if err := tidyTables(); err != nil {
+				return false, err
+			}
 			if viaBase() {
 				if err := dropBase(); err != nil {
 					return false, err
@@ -1960,6 +2072,11 @@ func codexIn(at place) *Agent {
 			return ""
 		},
 		Sync: func() error {
+			// a table an older magpie wrote for another app's provider
+			// goes, wired or not: Codex refuses its config with it
+			if err := tidyTables(); err != nil {
+				return err
+			}
 			// after the sync, which may have put Codex back beside its
 			// sign-in or made magpie its provider, and whatever it failed at
 			defer lendOwn()
@@ -2011,6 +2128,14 @@ func codexIn(at place) *Agent {
 			}
 			if err := failover(); err != nil {
 				return err
+			}
+			// a magpie model the user has since unchecked in its
+			// provider's list: Codex, the app and the CLI, goes on to the
+			// provider's first pick, as picking it here does (pickedInstead)
+			if m := get("model"); isMagpie(m) {
+				if to := pickedInstead("codex", m); to != "" {
+					return set(to)
+				}
 			}
 			// magpie API on one of Codex's own models, as an older magpie
 			// left it unwired: wired again, as picking it does now (#701);
@@ -2464,8 +2589,9 @@ func codexIn(at place) *Agent {
 	if at.spell == nil {
 		a.reach = at.base
 		a.viaProxy = func() (bool, bool, string, string) { return codexThroughProxy(path, at.gw()) }
-		a.move = func(from, to string) error { return codexMoveGateway(path, from, to) }
 	}
+	// in a distro too: its way to Windows moves (wslFindVia)
+	a.move = func(from, to string) error { return codexMoveGateway(path, from, to) }
 	return a
 }
 
@@ -2480,6 +2606,21 @@ const ccSwitchOfficial = "cc-switch-official"
 const packedSince = 30 * 24 * time.Hour
 
 var packedBudget int64 = 128 << 20
+
+// codexThreadTableOurs says whether config.toml's provider id, decoded as
+// v, is the table putThreadTables writes: name, base_url, wire_api
+// "responses" and magpie's key, and nothing else.
+func codexThreadTableOurs(id string, v any) bool {
+	t, ok := v.(map[string]any)
+	if !ok || len(t) != 4 {
+		return false
+	}
+	name, _ := t["name"].(string)
+	wire, _ := t["wire_api"].(string)
+	key, _ := t["experimental_bearer_token"].(string)
+	_, url := t["base_url"].(string)
+	return name == id && wire == "responses" && url && ourKey(key)
+}
 
 // ccSwitchProvider matches the ids of the provider tables CC Switch writes
 // into Codex's config: "custom", and "cc-switch", "cc-switch-2"… from its
