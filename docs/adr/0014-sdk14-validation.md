@@ -75,12 +75,59 @@ executable-source verification.
 
 ## Pending application acceptance
 
-The native session target-store/reuse work subsequently exposed shared
-Pi/OMP discovery and read-consent cases. A fresh full source after those
-owner fixes must run the ordinary provider/gateway/session integrations and
-safe whole-repository suite. Its source and terminal result belong here
-before an application-success claim. Existing SDK evidence is not replaced
-with an unverified global-green statement.
+The later combined application snapshot includes the corrected native
+Pi/OMP owner and per-account generation fixture:
+
+- HEAD at capture: `0dc09a544`.
+- Tree: `33b2bc95f7fd3530b6d14db7c170da66fef186f9`.
+- Archive SHA256:
+  `7f7d95808e1c1c0a3defd4f2bdb0e2438ca3eb078e31c893e3166e0e3d263278`.
+- Evidence: `usbox:/tmp/magpie-sdk14-final-5sWPZp`.
+- All 10,188 source hashes and six native fixture inputs remained unchanged
+  through the recorded gates.
+
+The SDK/runtime race gate passed 975 events with no skips. Ordinary
+provider/gateway/GUI/session integrations passed 717 events across race ×3;
+their 63 native-fixture skips are explicit. Three separate fresh-process
+native session suites each passed 95 events with zero skips. Node/Bun
+each passed 115 tests, five strict TypeScript fixtures passed, formatting
+was empty, and all six whole-tree nogui vet/build gates passed.
+
+The single safe whole-repository run on that same source finished
+**exit 1** after 1,879.45 seconds: 29,932 test/subtest pass events,
+13,307 root passes, 104 passing packages and 172 recorded test/package
+skip events. Five roots failed in three packages:
+
+- `TestVertexExpressEditor`.
+- `TestGroupFirstTokenFailsOver`.
+- `TestHandedOverGatewayFinishesItsStream`.
+- `TestOTelRetriesOnlyRetryableResponses`.
+- `TestSentTellsMagpieFromEarlierTries`.
+
+These original failures remain historical failures. Later commits isolate
+fixture-owned POST traffic without raising expected counts:
+`029eddd2a` covers the Vertex siblings and `240aab8e9` covers the
+first-token helper, handover and OTLP retries. Their controlled unrelated
+GETs reproduce assertion failures when only the isolation guards are
+removed. Targeted race ×20, nested-group neighbors and Sent timing checks
+pass after the fixes; this does not turn the frozen broad run green.
+
+Separately, full session race testing exposed mutable-local-time access
+from a stale-sweep timer and live state aliased into asynchronous cache
+encoding. `708035d72` makes scheduling monotonic; `606325223` queues owned
+persistent snapshots. Both have old-source/negative evidence and scoped
+race/static verification. A fresh full session race gate on committed
+`606325223` is tracked separately.
+
+One bounded diagnostic positively attributes an observed unrelated GET to
+an external `moshi-hook` process, using the exact client socket inode and
+PID distinct from the Go test. It records no headers, command arguments or
+secrets and kills no process. This attributes that observation only; it is
+not a claim that every historical request had the same sender.
+
+Final application acceptance still requires a fresh whole-repository
+result after the subsequent fixes and any later SDK changes. Existing SDK
+evidence is not replaced with an unverified global-green statement.
 
 The whole-repository run excludes `TestScriptFindsClaudeMoved`, which can
 launch the real installed app. That exclusion is explicit rather than a
