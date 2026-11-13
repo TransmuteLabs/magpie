@@ -116,8 +116,19 @@ Separately, full session race testing exposed mutable-local-time access
 from a stale-sweep timer and live state aliased into asynchronous cache
 encoding. `708035d72` makes scheduling monotonic; `606325223` queues owned
 persistent snapshots. Both have old-source/negative evidence and scoped
-race/static verification. A fresh full session race gate on committed
-`606325223` is tracked separately.
+race/static verification. The fresh full session race gate on committed
+`606325223` completed **exit 0**: 954 test/subtest pass events, 709 roots,
+zero failures or race warnings, 32 explicit skip events, 131.41 seconds.
+Native opt-ins were unset; their separate native suite evidence above is
+not relabeled as execution on this snapshot.
+
+That committed source is tree
+`7283e9c29d194422a4ae970ae4232ff8f35244f3`, archived independently of
+then-uncommitted fixture edits at
+`usbox:/tmp/magpie-sdk14-main606-nsBxfN`. The baseline regression race ×3
+gate on the same source passed 180 events/144 roots with no failures or
+skips in 40.28 seconds. It includes provider hold/kept/clock checks,
+cache snapshots, original Claude `/cd` coverage and the Vertex fixtures.
 
 One bounded diagnostic positively attributes an observed unrelated GET to
 an external `moshi-hook` process, using the exact client socket inode and
