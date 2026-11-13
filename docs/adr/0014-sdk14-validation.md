@@ -1,7 +1,8 @@
 # SDK 1.4 validation
 
 Date: 2026-11-13
-Status: Combined SDK checkpoint passed; final application acceptance pending.
+Status: SDK 1.4 safe application snapshot accepted in the recorded environment;
+later SDK 1.5+ changes require separate acceptance.
 
 The upstream integration is already recorded in
 [SDK 1.3 validation](0009-sdk13-validation.md). This record concerns the
@@ -136,9 +137,52 @@ PID distinct from the Go test. It records no headers, command arguments or
 secrets and kills no process. This attributes that observation only; it is
 not a claim that every historical request had the same sender.
 
-Final application acceptance still requires a fresh whole-repository
-result after the subsequent fixes and any later SDK changes. Existing SDK
-evidence is not replaced with an unverified global-green statement.
+## Committed SDK 1.4 safe application acceptance
+
+The exact committed source `08d29765db9f7da69897a5b5fff58b3216c4b2e1`
+completed the safe whole-repository command **exit 0**. Its tree is
+`062e0d746411ceb77ca990d2d7d149efdce14c03`, archive SHA256
+`5f6e5f17717a0022c278cad59f520b5fa08854329c41a9f124184838b3406623`.
+There are no overlays or later SDK 1.5 changes in this source.
+
+| Result | Recorded value |
+| --- | --- |
+| Successful tests/subtests | 29,942 events; 13,316 roots |
+| Successful packages | 107 |
+| Failures / unfinished tests | Zero |
+| Full command duration | 1,785.46 seconds; wrapper exit 0 |
+| Explicit skips | 149 tests and 25 package/no-test events |
+| Source integrity | All 10,191 hashes unchanged before/after |
+
+The command is the safe `go test -json -tags nogui -p 2 -timeout=45m
+-skip '^TestScriptFindsClaudeMoved$' ./...`, run on usbox with pinned
+Go 1.26.8, Linux amd64 CGO1, isolated HOME/XDG and offline Go lookup.
+It uses a private user/network namespace: caller UID/EUID/GID/EGID stay
+1000, loopback is enabled there, and all five capability masks are zero
+after setup. A real chmod-000 read fails before tests begin. No sudo,
+global settings, dependency installation or process termination is needed.
+
+Network isolation prevents the unrelated host loopback probes observed
+earlier. It also adds two non-loopback-address skips. The exact same source
+subsequently runs those two callback roots on the host network with
+race ×3: six passes, zero failures/skips. This is supplementary coverage,
+not a relabeling of the canceled host whole-suite run.
+
+The native opt-in, platform-specific, live/browser and helper skips remain
+explicit; the unsafe installed-Claude test has zero run events. This is
+not a whole-repository race run or native execution on every platform.
+
+Remote evidence is
+`usbox:/tmp/magpie-sdk14-app08d-netns-a90s5p9n`. The copied packet at
+`/tmp/magpie-sdk14-app08d-netns-verification-evidence` contains the exact
+command/results, full raw log, all skip outputs, callback gate, namespace
+proof and source audits. The verified raw-log SHA256 is
+`9b6d3135bce7fa83039b125ac20d9c897ffe67676ca154d65467c3472ad7ccfc`.
+
+Historical results remain separate: completed 33b host run is FAIL;
+08d host run is canceled PARTIAL_RED; the same 08d namespace run is PASS
+within these bounds. Later SDK 1.5 UI/Agent/Auth and source-adapter changes
+need their own coherent snapshot and acceptance.
 
 The whole-repository run excludes `TestScriptFindsClaudeMoved`, which can
 launch the real installed app. That exclusion is explicit rather than a
