@@ -15,6 +15,7 @@ func (manifest Manifest) Public() Manifest {
 	snapshot := cloneManifest(manifest)
 	snapshot.Runtime, snapshot.Entry, snapshot.Args = "", "", nil
 	snapshot.Services, snapshot.Window, snapshot.Bindings, snapshot.Compatibility = nil, nil, nil, nil
+	snapshot.AuthBindings = nil
 	snapshot.Actions = slices.DeleteFunc(snapshot.Actions, func(action ActionDescriptor) bool {
 		return actionOwner(action) != componentID(manifest)
 	})
@@ -78,6 +79,10 @@ func cloneManifest(manifest Manifest) Manifest {
 		service.Ready.HTTPEndpoints = slices.Clone(service.Ready.HTTPEndpoints)
 	}
 	manifest.Bindings = slices.Clone(manifest.Bindings)
+	manifest.AuthBindings = slices.Clone(manifest.AuthBindings)
+	for index := range manifest.AuthBindings {
+		manifest.AuthBindings[index].Methods = slices.Clone(manifest.AuthBindings[index].Methods)
+	}
 	if manifest.Compatibility != nil {
 		value := *manifest.Compatibility
 		value.Platforms = slices.Clone(value.Platforms)
@@ -100,6 +105,9 @@ func cloneManifest(manifest Manifest) Manifest {
 }
 
 func (manifest Manifest) Validate() error {
+	if err := manifest.validateWindowAuthBindings(); err != nil {
+		return err
+	}
 	if manifest.Schema != ManifestSchema {
 		return fmt.Errorf("unsupported extension manifest schema %d", manifest.Schema)
 	}

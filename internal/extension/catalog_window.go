@@ -35,7 +35,11 @@ func validateWindowPackage(ctx context.Context, root *os.Root, manifest sdk.Mani
 	if window == nil || window.Page == nil && len(window.Panels) == 0 {
 		return errors.New("module declares a window but its metadata provides no valid page or panel")
 	}
-	for _, binding := range manifest.Bindings {
+	bindings := append([]sdk.BindingDescriptor(nil), manifest.Bindings...)
+	for _, grant := range manifest.AuthBindings {
+		bindings = append(bindings, sdk.BindingDescriptor{ID: grant.ID, From: grant.From})
+	}
+	for _, binding := range bindings {
 		if binding.From == "window:page" {
 			if window.Page == nil {
 				return fmt.Errorf("module binding %q requires a declared window page", binding.ID)

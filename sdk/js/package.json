@@ -16,6 +16,7 @@
   "types": "./index.d.ts",
   "files": [
     "account-selection.js",
+    "window-auth.js",
     "index.js",
     "index.d.ts",
     "manifest.js",

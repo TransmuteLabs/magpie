@@ -155,6 +155,7 @@ func resolveExtensionWindow(ctx context.Context, ref string) (*extensionWindowPa
 // Only refs issued to the parent window are accepted. An iframe never supplies
 // a module ID, revision, component, account scope, state key or endpoint URL.
 func extensionWindowRoutes(mux *http.ServeMux) {
+	extensionWindowAuthRoutes(mux)
 	mux.HandleFunc("POST /api/plugin-pages/accounts", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Ref     string `json:"ref"`

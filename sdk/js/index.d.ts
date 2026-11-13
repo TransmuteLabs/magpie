@@ -102,6 +102,7 @@ interface ManifestFields {
   compatibility?: Compatibility;
   window?: WindowDescriptor;
   bindings?: BindingDescriptor[];
+  authBindings?: WindowAuthBindingDescriptor[];
   component?: ComponentIdentity;
   hooks?: GatewayHookDescriptor;
   routingStrategies?: RoutingStrategyDescriptor[];
@@ -193,7 +194,7 @@ export class SDKError extends Error implements RPCError {
 export function encodeBytes(value: Uint8Array, maxBytes?: number): string;
 export function decodeBytes(value: string, maxBytes?: number): Uint8Array;
 export function validateManifest(value: unknown): Readonly<Manifest>;
-export function publicManifest(manifest: Manifest): Readonly<Omit<Manifest, "runtime" | "entry" | "args" | "services" | "window" | "bindings" | "compatibility">>;
+export function publicManifest(manifest: Manifest): Readonly<Omit<Manifest, "runtime" | "entry" | "args" | "services" | "window" | "bindings" | "authBindings" | "compatibility">>;
 export function serviceManifest(root: Manifest, id: string): Manifest;
 export function checkCompatibility(manifest: Manifest, platform?: string): Manifest;
 export function moduleContextFrom(ctx: Context): ModuleContext | undefined;
@@ -292,6 +293,13 @@ export interface BindingDescriptor { id: string; from: string; action?: string; 
 export interface AccountSelection { id: string; expectedGeneration: string }
 export interface AccountSummary { id: string; generation: string; expiresAt?: number }
 export interface WindowCallOptions { account?: AccountSelection }
+export interface WindowAuthMethod { id: string; mode: "poll" }
+export interface WindowAuthBindingDescriptor { id: string; from: string; provider: string; methods: WindowAuthMethod[]; reauthorize?: boolean }
+export interface WindowAuthStartOptions { method: string; input?: JSONValue; account?: AccountSelection }
+export interface WindowAuthFlowView {
+  flow: string; state: "waiting" | "pending" | "complete" | "canceled" | "expired" | "uncertain";
+  url?: string; userCode?: string; retryAfterMs?: number; account?: AccountSummary;
+}
 export function validateAccountSelection(value: unknown): AccountSelection;
 export interface ComponentIdentity { id: string; contract: ServiceContract }
 export interface ModuleCallRequest { action: string; input: JSONValue }

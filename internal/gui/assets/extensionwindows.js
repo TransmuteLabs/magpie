@@ -22,6 +22,12 @@ export async function answerPluginPage(p, m, theme, titled) {
     case "backend.accounts":
       sdk();
       return request("plugin-pages/accounts", { ref: e.ref, binding: m.params?.binding });
+    case "auth.start":
+    case "auth.finish":
+    case "auth.cancel":
+      sdk();
+      p.instance ||= Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+      return request("plugin-pages/auth", { ref: e.ref, binding: m.params?.binding, parent: p.instance, request: p.instance + ":" + m.id, operation: m.method.slice(5), ...(m.method === "auth.start" ? { options: m.params?.options } : { flow: m.params?.flow }) });
     case "config.get":
       sdk();
       return request("plugin-pages/config", { ref: e.ref });

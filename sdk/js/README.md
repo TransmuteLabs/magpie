@@ -12,8 +12,9 @@ Package source version 1.5.0 advertises SDK API 1.5 and eleven capabilities.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
 API 1.4 adds declared routing strategies through existing read actions.
-API 1.5 adds declared selected-account window actions.
-This UI-only cut does not complete the separately developing agent
+API 1.5 adds declared selected-account window actions and separate poll/link
+window authentication.
+These window-specific cuts do not complete the separately developing agent
 launch/profile adapter or establish a complete SDK 1.5 release.
 Explicit 1.0/1.1/1.2/1.3/1.4 manifests retain their earlier behavior. This is a source
 version, not a claim that an npm package or release was published.
@@ -269,8 +270,40 @@ The optional hybrid bundle `--account-bindings` mode compiles
 and exercises native/helper execution through the
 [real GUI owner fixture](../../internal/gui/extension_window_accounts_integration_test.go).
 [ADR 0015](../../docs/adr/0015-selected-account-window-bindings.md) records
-scoped race/Node/Bun/TS proof; combined 1.5 acceptance, auth-broker UI and
-account-bound tool metadata remain separate.
+scoped race/Node/Bun/TS proof; combined 1.5 acceptance and account-bound tool
+metadata remain separate.
+
+## Poll/link authentication from a window (API 1.5)
+
+Declare root `authBindings` with `id`, exact `from`, same-root `provider` and
+`methods: [{id: "device", mode: "poll"}]`, plus optional `reauthorize`.
+The root needs `account-auth`. This grant is separate from action bindings:
+an existing `binding.provider` does not grant sign-in.
+
+```ts
+const started = await ui.auth.start("signin", {method: "device"});
+const progress = await ui.auth.finish("signin", started.flow);
+```
+
+Schedule another finish using `retryAfterMs` while the state is waiting or
+pending; core enforces the next-poll deadline itself. `ui.auth.cancel` takes
+the same binding and opaque flow. The return type is `WindowAuthFlowView`,
+with display/progress fields and a safe account summary on completion.
+The host retains module continuations and credentials; it does not return
+raw authentication results/errors to the iframe.
+
+When `reauthorize` is declared, pass `account: {id, expectedGeneration}`
+outside `input`. A completed sign-in or an existing granted account picker
+provides a safe summary. Exact generation is checked; no successor is adopted.
+The first admitted flow upgrades that module's account store to schema 4, so
+co-running older CLI/gateway Store readers must be upgraded. No such upgrade
+occurs during metadata/configuration discovery.
+
+`poll` is a transport mode; ZCode's method named `browser` can use it.
+Devin's genuine callback, key/snapshot import and arbitrary auth methods are
+outside this cut. See
+[ADR 0017](../../docs/adr/0017-window-auth-broker.md) for corrected review
+evidence and separately tracked consumer/combined acceptance.
 
 ## Provider operations, models and refresh (API 1.3)
 

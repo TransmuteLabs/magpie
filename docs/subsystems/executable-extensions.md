@@ -10,10 +10,11 @@ Current SDK source API 1.5 includes native/composite APIs, API 1.2 gateway
 hooks/private tools, and API 1.3 transactional refresh, provider operations
 and extended model metadata, plus API 1.4 routing strategies, selected-account
 usage revisions, business cancellation and native executor constraints.
-API 1.5 adds declared selected-account window action bindings; its
+API 1.5 adds declared selected-account window action bindings and a separate
+host-owned poll/link authentication broker; its
 [scoped record](../adr/0015-selected-account-window-bindings.md) is separate
 from combined 1.5 or whole-application acceptance.
-That 1.5 cut is UI-only; agent launch/profile adoption remains in progress
+Those 1.5 cuts are window adapters; agent launch/profile adoption remains in progress
 and needs its own ordinary-owner evidence.
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
@@ -481,7 +482,23 @@ existing operation journal admits one dispatch. Changed account/generation,
 binding or input is a conflict. Window admission is checked after lazy start,
 before acceptance and before host callbacks. See
 [ADR 0015](../adr/0015-selected-account-window-bindings.md) for compatibility,
-actual hybrid proof and the separate future tool/auth-broker boundaries.
+actual hybrid proof and the separate account-bound tool boundary.
+
+API 1.5 root `authBindings` independently grant an exact window part permission
+to use named `account-auth` methods for a same-root provider. The browser uses
+`ui.auth.start/finish/cancel`; it receives an opaque host flow and projected
+display/progress/account summaries. Continuations and credential results stay
+private. `mode: "poll"` covers verification links and device flows; it does not
+implement Devin's callback transport or key/snapshot import. Explicit
+reauthorization requires its own grant and an exact typed account selection.
+The host fixes intent, owner, Store and lease across the exchange, enforces
+poll timing and atomically publishes credentials with a safe receipt.
+Existing usage barriers and refresh receipts survive reauthorization.
+The first admitted broker flow upgrades that module's SDK account namespace
+to schema 4: older CLI/gateway Store readers must be upgraded and refuse the
+file without rewriting it. See
+[ADR 0017](../adr/0017-window-auth-broker.md) for compatibility, lock ordering,
+corrected review findings and separately tracked acceptance.
 
 Named loopback services use the existing HTTP/SSE proxy. It strips cookies,
 holds the root lease for the entire response and verifies three exact response

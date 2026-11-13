@@ -40,22 +40,24 @@ type managedWorker struct {
 }
 
 type Manager struct {
-	mu          sync.Mutex
-	reloadMu    sync.Mutex
-	root        string
-	catalog     *Catalog
-	store       *Store
-	workers     map[string]*managedWorker
-	closed      bool
-	closeDone   chan struct{}
-	closeErr    error
-	startCtx    context.Context
-	stopStarts  context.CancelFunc
-	startWG     sync.WaitGroup
-	retireWG    sync.WaitGroup
-	gatewayRuns map[*GatewayRun]struct{}
-	refreshes   map[refreshKey]*refreshRun
-	refreshWG   sync.WaitGroup
+	mu               sync.Mutex
+	reloadMu         sync.Mutex
+	root             string
+	catalog          *Catalog
+	store            *Store
+	workers          map[string]*managedWorker
+	closed           bool
+	closeDone        chan struct{}
+	closeErr         error
+	startCtx         context.Context
+	stopStarts       context.CancelFunc
+	startWG          sync.WaitGroup
+	retireWG         sync.WaitGroup
+	gatewayRuns      map[*GatewayRun]struct{}
+	refreshes        map[refreshKey]*refreshRun
+	refreshWG        sync.WaitGroup
+	windowAuthOwners map[string]*windowAuthOwner
+	windowAuthWG     sync.WaitGroup
 	// Bun is an explicitly selected runtime executable; empty uses discovery.
 	Bun string
 	// ReleaseClient optionally supplies the client used for GitHub packages.
@@ -428,6 +430,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 	}
 	m.retireWG.Add(len(retiring))
 	m.mu.Unlock()
+	m.revokeWindowAuthOwners(current, configs)
 	// New lookups have already lost these generations. An active call keeps
 	// its own worker until it drains; retiring never redirects its response.
 	for _, worker := range retiring {
@@ -1171,6 +1174,7 @@ func (m *Manager) finishClose(workers map[string]*managedWorker, runs []*Gateway
 		<-run.done
 	}
 	m.refreshWG.Wait()
+	m.windowAuthWG.Wait()
 	for _, worker := range workers {
 		worker.mu.Lock()
 		worker.retiring = true

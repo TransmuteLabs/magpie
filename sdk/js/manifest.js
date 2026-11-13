@@ -5,6 +5,7 @@ import { actionOwner, componentID, validateComposite, checkHostCompatibility } f
 import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
 import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation } from "./provider-policy.js";
 import { validateRouting } from "./routing.js";
+import { validateWindowAuthBindings } from "./window-auth.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -211,6 +212,7 @@ export function validateManifest(value) {
     || has("agent-wiring") && !manifest.agents?.length
     || has("session-migration") && !manifest.sessions?.length) fail("Missing capability descriptors");
   validateComposite(manifest);
+  validateWindowAuthBindings(manifest);
   validateRouting(manifest, fail);
   validateHooks(manifest);
   return freezeJSON(manifest);
@@ -221,7 +223,7 @@ export function publicManifest(manifest) {
   delete result.runtime;
   delete result.entry;
   delete result.args;
-  for (const key of ["services", "window", "bindings", "compatibility"]) delete result[key];
+  for (const key of ["services", "window", "bindings", "authBindings", "compatibility"]) delete result[key];
   if (result.actions != null) result.actions = result.actions.filter(action => actionOwner(action) === componentID(manifest));
   if (result.routingStrategies != null) {
     result.routingStrategies = result.routingStrategies.filter(strategy => result.actions?.some(action => action.id === strategy.action));

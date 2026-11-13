@@ -27,6 +27,11 @@ export const ui = Object.freeze({
     },
     accounts(binding) { return bridge().backend.accounts(binding); },
   }),
+  auth: Object.freeze({
+    start(binding, options) { return bridge().auth.start(binding, options); },
+    finish(binding, flow) { return bridge().auth.finish(binding, flow); },
+    cancel(binding, flow) { return bridge().auth.cancel(binding, flow); },
+  }),
   config: Object.freeze({
     get() { return bridge().config.get(); },
     cas(expected, values) { return bridge().config.cas(expected, values); },

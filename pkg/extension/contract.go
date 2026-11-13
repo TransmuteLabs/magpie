@@ -31,26 +31,27 @@ func FullContract() Contract {
 }
 
 type Manifest struct {
-	Schema            int                         `json:"schema"`
-	ID                string                      `json:"id"`
-	Version           string                      `json:"version"`
-	Runtime           string                      `json:"runtime,omitempty"`
-	Entry             string                      `json:"entry,omitempty"`
-	Args              []string                    `json:"args,omitempty"`
-	Contract          Contract                    `json:"contract"`
-	Inbounds          []InboundDescriptor         `json:"inbounds,omitempty"`
-	Providers         []ProviderDescriptor        `json:"providers,omitempty"`
-	Agents            []AgentDescriptor           `json:"agents,omitempty"`
-	Sessions          []SessionDescriptor         `json:"sessions,omitempty"`
-	Tools             []ToolDescriptor            `json:"tools,omitempty"`
-	Actions           []ActionDescriptor          `json:"actions,omitempty"`
-	Services          []ServiceDescriptor         `json:"services,omitempty"`
-	Compatibility     *Compatibility              `json:"compatibility,omitempty"`
-	Window            *WindowDescriptor           `json:"window,omitempty"`
-	Bindings          []BindingDescriptor         `json:"bindings,omitempty"`
-	Component         *ComponentIdentity          `json:"component,omitempty"`
-	Hooks             *GatewayHookDescriptor      `json:"hooks,omitempty"`
-	RoutingStrategies []RoutingStrategyDescriptor `json:"routingStrategies,omitempty"`
+	Schema            int                           `json:"schema"`
+	ID                string                        `json:"id"`
+	Version           string                        `json:"version"`
+	Runtime           string                        `json:"runtime,omitempty"`
+	Entry             string                        `json:"entry,omitempty"`
+	Args              []string                      `json:"args,omitempty"`
+	Contract          Contract                      `json:"contract"`
+	Inbounds          []InboundDescriptor           `json:"inbounds,omitempty"`
+	Providers         []ProviderDescriptor          `json:"providers,omitempty"`
+	Agents            []AgentDescriptor             `json:"agents,omitempty"`
+	Sessions          []SessionDescriptor           `json:"sessions,omitempty"`
+	Tools             []ToolDescriptor              `json:"tools,omitempty"`
+	Actions           []ActionDescriptor            `json:"actions,omitempty"`
+	Services          []ServiceDescriptor           `json:"services,omitempty"`
+	Compatibility     *Compatibility                `json:"compatibility,omitempty"`
+	Window            *WindowDescriptor             `json:"window,omitempty"`
+	Bindings          []BindingDescriptor           `json:"bindings,omitempty"`
+	AuthBindings      []WindowAuthBindingDescriptor `json:"authBindings,omitempty"`
+	Component         *ComponentIdentity            `json:"component,omitempty"`
+	Hooks             *GatewayHookDescriptor        `json:"hooks,omitempty"`
+	RoutingStrategies []RoutingStrategyDescriptor   `json:"routingStrategies,omitempty"`
 }
 
 type InboundDescriptor struct {

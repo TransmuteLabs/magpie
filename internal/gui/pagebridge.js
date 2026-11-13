@@ -205,6 +205,11 @@
       call: (binding, input, options) => call("backend.call", { binding, input, ...(options === undefined ? {} : { options }) }),
       accounts: (binding) => call("backend.accounts", { binding }),
     },
+    auth: {
+      start: (binding, options) => call("auth.start", { binding, options }),
+      finish: (binding, flow) => call("auth.finish", { binding, flow }),
+      cancel: (binding, flow) => call("auth.cancel", { binding, flow }),
+    },
     config: {
       get: () => call("config.get"),
       cas: (expected, values) => call("config.cas", { expected, values }),

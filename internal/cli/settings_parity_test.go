@@ -216,6 +216,7 @@ var cliForRoute = map[string]string{
 	"POST /api/plugins/{op}":               "magpie plugin",
 	"POST /api/plugin-pages/call":          "magpie plugin sdk call", // module.call invokes the action named by the UI binding
 	"POST /api/plugin-pages/accounts":      "magpie plugin sdk accounts",
+	"POST /api/plugin-pages/auth":          "magpie plugin sdk auth",
 	"POST /api/plugin-pages/config":        "magpie plugin sdk config", // module configuration read/CAS
 	"GET /api/login/usage":                 "magpie quota",
 	"GET /api/providers":                   "magpie providers",

@@ -59,8 +59,55 @@ type storeAccount struct {
 }
 
 type storeAccounts struct {
-	Schema   int            `json:"schema"`
-	Accounts []storeAccount `json:"accounts"`
+	Schema    int                `json:"schema"`
+	Accounts  []storeAccount     `json:"accounts"`
+	AuthFlows []windowAuthRecord `json:"authFlows,omitempty"`
+}
+
+func (records *storeAccounts) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil {
+		return storeUnreadable()
+	}
+	var schema int
+	if len(fields["schema"]) == 0 || bytes.Equal(bytes.TrimSpace(fields["schema"]), []byte("null")) ||
+		json.Unmarshal(fields["schema"], &schema) != nil {
+		return storeUnreadable()
+	}
+	if _, found := fields["authFlows"]; schema < 4 && found {
+		return storeUnreadable()
+	}
+	if schema >= 4 {
+		if len(fields["authFlows"]) == 0 || bytes.Equal(bytes.TrimSpace(fields["authFlows"]), []byte("null")) {
+			return storeUnreadable()
+		}
+		probe := json.NewDecoder(bytes.NewReader(raw))
+		probe.UseNumber()
+		if catalogJSONValue(probe, 0) != nil || probe.Decode(new(any)) != io.EOF {
+			return storeUnreadable()
+		}
+	}
+	type plain storeAccounts
+	var value plain
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&value) != nil || decoder.Decode(new(any)) != io.EOF {
+		return storeUnreadable()
+	}
+	*records = storeAccounts(value)
+	return nil
+}
+
+func (records storeAccounts) MarshalJSON() ([]byte, error) {
+	var flows *[]windowAuthRecord
+	if records.Schema >= 4 {
+		flows = &records.AuthFlows
+	}
+	return json.Marshal(struct {
+		Schema    int                 `json:"schema"`
+		Accounts  []storeAccount      `json:"accounts"`
+		AuthFlows *[]windowAuthRecord `json:"authFlows,omitempty"`
+	}{records.Schema, records.Accounts, flows})
 }
 
 type storeState struct {
@@ -407,7 +454,7 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 	if !found {
 		return storeAccounts{Schema: 1, Accounts: []storeAccount{}}, nil
 	}
-	if records.Schema < 1 || records.Schema > 3 || records.Accounts == nil {
+	if records.Schema < 1 || records.Schema > 4 || records.Accounts == nil || !validWindowAuthRecords(records, plugin) {
 		return storeAccounts{}, storeUnreadable()
 	}
 	seen := make(map[string]bool, len(records.Accounts))
@@ -424,7 +471,7 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 		if record.Refresh != nil && (records.Schema < 2 || !validRefreshRecord(record)) {
 			return storeAccounts{}, storeUnreadable()
 		}
-		if records.Schema < 3 && record.Usage != nil || records.Schema == 3 &&
+		if records.Schema < 3 && record.Usage != nil || records.Schema >= 3 &&
 			(record.Usage == nil || record.Usage.Acknowledged > record.Usage.Revision) {
 			return storeAccounts{}, storeUnreadable()
 		}

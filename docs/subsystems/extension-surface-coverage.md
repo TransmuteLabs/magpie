@@ -4,11 +4,15 @@ Date: November 13, 2026.
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. The current SDK source advertises API 1.4: native/exec/Bun,
+modules. The current SDK source advertises API 1.5: native/exec/Bun,
 composite/window integration, API 1.2 gateway hooks/private tools, and API 1.3 transactional
 refresh, richer models and a finite provider-operation registry, plus the API
 1.4 routing, quota applicability/usage revisions, business cancellation and
-native executor constraints. It does not replace every upstream extension
+native executor constraints. API 1.5 adds selected-account window actions
+and separately declared poll/link sign-in; their scoped evidence is recorded
+in [ADR 0015](../adr/0015-selected-account-window-bindings.md) and
+[ADR 0017](../adr/0017-window-auth-broker.md). Combined 1.5 acceptance and
+agent launch/profile adoption remain separate. It does not replace every upstream extension
 surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
 The [combined API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records
@@ -78,7 +82,7 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Semantic Memory / distillation / background indexing | [`Semantic`](../../internal/memory/search.go), [`memembed`](../../internal/memembed/memembed.go), [`memory_distill.go`](../../internal/gui/memory_distill.go) | Built-in search fusion, embedder and jobs | **Remaining:** SDK registration and ownership. This is separate from a generic module service being ready. |
 | Library resources and optional module contributions | [`Library`](../../internal/library/library.go), [`Hook`](../../internal/library/hooks.go), [`Subagent`](../../internal/library/subagents.go), [`EnvVar`](../../internal/library/env.go) | Instructions, skills, agent hooks, env and subagents already have apply/remove ownership | **Existing data/owner integration.** An SDK declaration/binding is a possible addition, not a missing runtime. Arbitrary file plans do not join regular Library reconciliation automatically. |
 | Library sources and imported packages | [`Source`](../../internal/library/skills.go), [`Claude bundles`](../../internal/library/plugin.go), [`Pi management`](../../internal/library/piext.go) | GitHub/Git/folder sources and imported resources retain their existing owners | **Existing import category.** Skills/bundles/Pi package management are not unimplemented SDK runtimes; automatic SDK package/resource lifecycle binding would be a separate feature. |
-| Window pages / panels / replacements / row actions | [`windowmeta`](../../internal/windowmeta/window.go), [`extension_window.go`](../../internal/gui/extension_window.go) | Existing page/panel renderer and package metadata; named action/service bindings, revision/config refs | **Implemented 1.1.** Adjacent assets alone do not register a window. |
+| Window pages / panels / replacements / row actions | [`windowmeta`](../../internal/windowmeta/window.go), [`extension_window.go`](../../internal/gui/extension_window.go), [`window_auth.go`](../../internal/extension/window_auth.go) | Existing renderer and metadata; named action/service bindings; API 1.5 adds exact selected-account action grants and independent host-owned polling authentication grants | **Implemented 1.1 / scoped 1.5.** Combined acceptance remains separate; callbacks, key import and account-bound tools are not supplied by this window adapter. Adjacent assets alone do not register a window. |
 | Other browser bridge functions | [`pagebridge.js`](../../internal/gui/pagebridge.js), [`ui.d.ts`](../../sdk/js/ui.d.ts) | Browser-only typed entry delegates theme/context/visibility events, actions, permission-checked reads and PNG operations as well as ready/service/backend/config | **Implemented facade.** Actual page bridge exercised in a VM fixture; native clipboard/download and the full browser matrix remain separate verification. |
 | Generated settings and built-in UI slots | [`Manifest.Settings/Parts/Client`](../../internal/pluginrt/pluginrt.go), [`kernel.js`](../../internal/gui/assets/kernel.js) | SDK has root config CAS and package window metadata | **Partial:** no SDK settings-schema or general built-in-parts adapter. |
 | pluginrt registry / InUse / Requires / Provides | [`Manifest`, `Ctx`, `Runtime.Reconcile`](../../internal/pluginrt/pluginrt.go) | Compile-time Go plugin registry with scoped disposal and services | **Remaining:** no equivalent SDK contribution registration. Private sidecar dependencies do not expose arbitrary Go services. |
@@ -196,11 +200,11 @@ Explicit callers retaining an output plan still own deferred source checks.
 Use common declaration/lifecycle machinery with typed subsystem adapters,
 rather than a new capability for every feature or an unrestricted host RPC.
 The following remain proposed boundaries, not implemented API 1.4 fields.
-An API 1.5 increment is a delivery proposal; it is not an accepted manifest
-version or a promise that these all ship together. Selected-account window
-bindings and agent launch/explicit handoff are the first concrete cuts:
-window backend calls currently carry only module scope, and ordinary SDK
-agent discovery deliberately retains its default collision policy.
+API 1.5 selected-account window bindings and poll/link authentication now
+have actual adapters with separate scoped records. They do not complete the
+other owner integrations or establish combined 1.5 acceptance.
+Agent launch/explicit handoff remains a separate in-progress contribution;
+the accepted baseline retains its default agent collision policy.
 
 1. **Contribution registration:** a versioned descriptor names an ID, a
    host-known point/contract and a declared action. The host validates DTOs,

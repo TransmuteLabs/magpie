@@ -5,7 +5,7 @@ Implement a `Module` with a validated `Manifest` and handlers for each
 advertised capability. Current source API 1.5 includes native/exec/Bun,
 composite modules, gateway hooks/private tools, transactional refresh, finite provider
 operations, rich model metadata, namespaced routing strategies and declared
-selected-account window actions. The
+selected-account window actions and poll/link window authentication. The
 [combined validation record](../../docs/adr/0009-sdk13-validation.md) names
 its frozen SDK snapshot; the [surface census](../../docs/subsystems/extension-surface-coverage.md)
 retains remaining adapters and does not claim full SDK or repository acceptance.
@@ -13,7 +13,7 @@ The [SDK 1.4 checkpoint](../../docs/adr/0014-sdk14-validation.md) records
 combined SDK gates; final application acceptance remains separate.
 The [selected-account 1.5 record](../../docs/adr/0015-selected-account-window-bindings.md)
 has scoped host/UI evidence; combined 1.5 acceptance remains separate.
-This is the UI-only SDK 1.5 cut. Agent launch/profile adoption remains a
+These are the window-specific SDK 1.5 cuts. Agent launch/profile adoption remains a
 separate in-progress adapter and is not implied by the source version.
 
 | Runtime | Author entry | Result |
@@ -462,7 +462,36 @@ exercises the actual GUI/native/helper owner path. Its optional
 `build.py --account-bindings` mode includes a typed account picker; the
 default example remains API 1.1. See
 [ADR 0015](../../docs/adr/0015-selected-account-window-bindings.md) for scoped
-gates and the deferred auth-broker/tool adapter.
+gates and the separate account-bound tool adapter.
+
+### Poll/link window authentication (API 1.5)
+
+Declare `Manifest.AuthBindings` independently from action `Bindings`.
+Each `WindowAuthBindingDescriptor` names an exact window part, a same-root
+provider and explicit `WindowAuthMethod{ID, Mode: "poll"}` entries. The root
+requires `AccountAuth`. `Reauthorize` additionally permits a caller-supplied
+typed `AccountSelection`; it does not permit choosing scope in business input.
+
+The page calls `ui.auth.start(binding, {method, input?, account?})`, followed
+by `finish(binding, flow)` or `cancel(binding, flow)`. Only
+`WindowAuthFlowView` crosses to the page: an opaque flow, finite state, optional
+verification URL/code/poll interval and committed `AccountSummary`.
+`AuthStartResult.Continuation` and `AuthResult.Credentials` are backend DTOs
+and are not browser return values.
+
+Core captures the immutable lease/Store, persists intent before dispatch,
+throttles polls and publishes account plus receipt atomically. Reauthorization
+preserves dirty usage barriers and earlier refresh receipts. The first
+admitted flow upgrades that module's account namespace to schema 4;
+co-running older CLI/gateway Store readers must be upgraded. Metadata and
+ordinary existing-account reads do not migrate the namespace.
+
+This cut covers device and verification-link polling, including a method
+whose vendor ID is `browser`. Loopback/PKCE callbacks, key/snapshot import
+and arbitrary auth-method invocation are separate work.
+[ADR 0017](../../docs/adr/0017-window-auth-broker.md) records the public
+shape, compatibility and corrected scoped evidence; combined acceptance
+remains separate.
 
 ## Gateway hooks API 1.2
 

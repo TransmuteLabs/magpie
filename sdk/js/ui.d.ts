@@ -5,6 +5,11 @@ export interface UIConfigSnapshot { version: string; values: UIConfigValues }
 export interface AccountSelection { id: string; expectedGeneration: string }
 export interface AccountSummary { id: string; generation: string; expiresAt?: number }
 export interface WindowCallOptions { account?: AccountSelection }
+export interface WindowAuthStartOptions { method: string; input?: UIValue; account?: AccountSelection }
+export interface WindowAuthFlowView {
+  flow: string; state: "waiting" | "pending" | "complete" | "canceled" | "expired" | "uncertain";
+  url?: string; userCode?: string; retryAfterMs?: number; account?: AccountSummary;
+}
 export interface UITheme {
   readonly dark: boolean;
   readonly lang: string;
@@ -38,6 +43,11 @@ export interface ModuleUI {
     /** Unary. Frame disposal/update cancellation remains owned by the bridge. */
     call<T = UIValue>(binding: string, input?: UIValue, options?: WindowCallOptions): Promise<T>;
     accounts(binding: string): Promise<AccountSummary[]>;
+  };
+  readonly auth: {
+    start(binding: string, options: WindowAuthStartOptions): Promise<WindowAuthFlowView>;
+    finish(binding: string, flow: string): Promise<WindowAuthFlowView>;
+    cancel(binding: string, flow: string): Promise<WindowAuthFlowView>;
   };
   readonly config: {
     get(): Promise<UIConfigSnapshot>;
