@@ -38,6 +38,10 @@ type capped struct {
 }
 
 func (c *capped) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	b, _ := io.ReadAll(r.Body)
 	c.mu.Lock()
 	c.got = append(c.got, b)
