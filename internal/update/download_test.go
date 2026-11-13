@@ -29,6 +29,13 @@ func TestDownloadRetriesAndReports(t *testing.T) {
 	sum := sha256.Sum256(body)
 	tries := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// only the file's own ask is counted: another process may ask
+		// this machine's addresses at any time, and that is not a try
+		// of this download.
+		if r.URL.Path != "/asset" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		tries++
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		if tries == 1 {
@@ -42,7 +49,7 @@ func TestDownloadRetriesAndReports(t *testing.T) {
 	var done, total int64
 	ctx := WithProgress(context.Background(), func(d, t int64) { done, total = d, t })
 	path := filepath.Join(t.TempDir(), "magpie.new")
-	if err := download(ctx, Asset{URL: srv.URL, SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
+	if err := download(ctx, Asset{URL: srv.URL + "/asset", SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
 		t.Fatal(err)
 	}
 	if tries != 2 {

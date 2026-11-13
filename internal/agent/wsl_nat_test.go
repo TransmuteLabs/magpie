@@ -87,7 +87,9 @@ func TestWSLReachAskedInsideTheDistro(t *testing.T) {
 		}
 		return nil, nil
 	}
-	t.Cleanup(func() { wslRun = was })
+	// the probes a drift starts are read by the goroutine they run in:
+	// let them finish before the stand-in for wsl.exe is put back.
+	t.Cleanup(func() { reachForget(); wslRun = was })
 	d := fakeDistro(home, false)
 	a := wslCodex(d)
 	if err := a.Fields[0].Set("fake/m1"); err != nil {
@@ -165,7 +167,7 @@ func TestWSLFirewalledFindsAnotherWay(t *testing.T) {
 		}
 		return nil, nil
 	}
-	t.Cleanup(func() { wslRun = was })
+	t.Cleanup(func() { reachForget(); wslRun = was })
 	d := fakeDistro(home, false)
 	wsl.Lock()
 	seen := wsl.seen
