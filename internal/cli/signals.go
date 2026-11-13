@@ -47,7 +47,7 @@ func endProbesOnSignal() {
 				gateway.FlushSticks()  // and who answered which conversation
 				// and the session index, or the next start reads every
 				// file a scan read since the last save again
-				savedWithin(sessionsSaved, saveOnSignal)
+				saveSessionsOnSignal()
 				die(s)
 			}
 		}
@@ -57,10 +57,22 @@ func endProbesOnSignal() {
 // saveOnSignal bounds how long a signal waits for the session index to be
 // written: a long history's takes a second or two, and a signal is asked to
 // end magpie now.
-var saveOnSignal = 5 * time.Second
+const saveOnSignal = 5 * time.Second
 
-// sessionsSaved is sessions.Saved; a var so tests can hold it.
-var sessionsSaved = sessions.Saved
+type signalSaveConfig struct {
+	save func()
+	wait time.Duration
+}
+
+var signalSaveSettings atomic.Pointer[signalSaveConfig]
+
+func saveSessionsOnSignal() {
+	if config := signalSaveSettings.Load(); config != nil {
+		savedWithin(config.save, config.wait)
+		return
+	}
+	savedWithin(sessions.Saved, saveOnSignal)
+}
 
 // savedWithin runs save and waits for it up to d.
 func savedWithin(save func(), d time.Duration) {
