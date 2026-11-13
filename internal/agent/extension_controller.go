@@ -58,7 +58,14 @@ func (controller *extensionController) read(ctx context.Context) (extensionBindi
 		return extensionBindingRecord{}, err
 	}
 	defer unlock()
-	ledger, err := extensionBindingRead()
+	return controller.observe(ctx)
+}
+
+func (controller *extensionController) observe(ctx context.Context) (extensionBindingRecord, error) {
+	if err := controller.checkRoot(); err != nil {
+		return extensionBindingRecord{}, err
+	}
+	ledger, err := extensionBindingObserve(ctx)
 	key := extensionBindingKey(controller.home, controller.item.Plugin, controller.item.Agent.ID)
 	record := ledger.Records[key]
 	if err == nil && (record.Phase == "" || record.Phase == "disconnected") {
@@ -393,7 +400,7 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 	read := func() (extensionBindingRecord, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		return controller.read(ctx)
+		return controller.observe(ctx)
 	}
 	owned := func() bool {
 		record, err := read()

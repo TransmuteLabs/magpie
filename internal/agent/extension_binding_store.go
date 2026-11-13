@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
@@ -118,30 +119,104 @@ func extensionBindingTarget(record extensionBindingRecord) string {
 }
 
 func extensionBindingRead() (extensionBindingLedger, error) {
+	return extensionBindingSnapshot(context.Background(), false, os.Open)
+}
+
+func extensionBindingObserve(ctx context.Context) (extensionBindingLedger, error) {
+	return extensionBindingSnapshot(ctx, true, os.Open)
+}
+
+func extensionBindingSnapshot(ctx context.Context, retry bool, open func(string) (*os.File, error)) (extensionBindingLedger, error) {
 	ledger := extensionBindingLedger{Schema: 1, Records: map[string]extensionBindingRecord{}}
-	before, err := os.Lstat(extensionBindingPath())
-	if errors.Is(err, fs.ErrNotExist) {
-		return ledger, nil
+	for {
+		if err := ctx.Err(); err != nil {
+			return ledger, err
+		}
+		before, err := os.Lstat(extensionBindingPath())
+		if errors.Is(err, fs.ErrNotExist) {
+			return ledger, nil
+		}
+		if err != nil || !before.Mode().IsRegular() || before.Size() > extensionBindingLimit ||
+			runtime.GOOS != "windows" && before.Mode().Perm()&0o077 != 0 {
+			return ledger, errors.New("agent binding ownership ledger is unreadable")
+		}
+		file, err := open(extensionBindingPath())
+		if err != nil {
+			if retry && errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return ledger, err
+		}
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > extensionBindingLimit ||
+			runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+			file.Close()
+			return ledger, errors.New("agent binding ownership ledger is unreadable")
+		}
+		if !os.SameFile(before, info) {
+			file.Close()
+			if retry {
+				continue
+			}
+			return ledger, errors.New("agent binding ownership ledger changed while opening")
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(file, extensionBindingLimit+1))
+		after, statErr := file.Stat()
+		closeErr := file.Close()
+		if readErr != nil || statErr != nil || closeErr != nil || len(raw) > extensionBindingLimit ||
+			after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+			return ledger, errors.New("agent binding ownership ledger changed while reading")
+		}
+		if err := ctx.Err(); err != nil {
+			return ledger, err
+		}
+		return extensionBindingDecode(raw)
 	}
-	if err != nil || !before.Mode().IsRegular() || before.Size() > extensionBindingLimit ||
-		runtime.GOOS != "windows" && before.Mode().Perm()&0o077 != 0 {
-		return ledger, errors.New("agent binding ownership ledger is unreadable")
+}
+
+func extensionBindingDecode(raw []byte) (extensionBindingLedger, error) {
+	var ledger extensionBindingLedger
+	probe := json.NewDecoder(bytes.NewReader(raw))
+	probe.UseNumber()
+	if !utf8.Valid(raw) || extensionBindingJSONValue(probe, 0) != nil || probe.Decode(new(any)) != io.EOF {
+		return ledger, errors.New("agent binding ownership ledger is invalid")
 	}
-	file, err := os.Open(extensionBindingPath())
-	if err != nil {
-		return ledger, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !os.SameFile(before, info) || info.Size() > extensionBindingLimit {
-		return ledger, errors.New("agent binding ownership ledger is unreadable")
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, extensionBindingLimit+1))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&ledger) != nil || decoder.Decode(new(any)) != io.EOF || ledger.Schema != 1 || ledger.Records == nil {
 		return ledger, errors.New("agent binding ownership ledger is invalid")
 	}
 	return ledger, extensionBindingValidate(ledger)
+}
+
+func extensionBindingJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > 128 {
+		return errors.New("agent binding ownership nesting exceeds its limit")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, nested := token.(json.Delim)
+	if !nested {
+		return nil
+	}
+	keys := map[string]bool{}
+	for decoder.More() {
+		if delimiter == '{' {
+			token, err := decoder.Token()
+			key, valid := token.(string)
+			if err != nil || !valid || keys[key] {
+				return errors.New("agent binding ownership contains duplicate keys")
+			}
+			keys[key] = true
+		}
+		if err := extensionBindingJSONValue(decoder, depth+1); err != nil {
+			return err
+		}
+	}
+	_, err = decoder.Token()
+	return err
 }
 
 func extensionBindingValidate(ledger extensionBindingLedger) error {

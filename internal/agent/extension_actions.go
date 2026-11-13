@@ -138,13 +138,11 @@ func extensionAgents(home string, existing []*Agent, errs map[string]string) []*
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	unlock, err := extensionBindingLock(ctx, "", "ledger", true)
+	ledger, err := extensionBindingObserve(ctx)
 	if err != nil {
-		return out
-	}
-	ledger, err := extensionBindingRead()
-	unlock()
-	if err != nil {
+		if errs != nil {
+			errs["sdk-ownership"] = err.Error()
+		}
 		return out
 	}
 	for _, record := range ledger.Records {
