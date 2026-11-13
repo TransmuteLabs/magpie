@@ -235,6 +235,7 @@ func (binding *extensionAccount) check(ctx context.Context) error {
 	if scope.Account != "" {
 		account, err := binding.host.Store().RefreshedAccount(scope)
 		if err != nil {
+			extensionSelectionFailure(ctx, scope, err)
 			return err
 		}
 		if binding.generation != nil {

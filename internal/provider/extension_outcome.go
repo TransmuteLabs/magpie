@@ -103,6 +103,22 @@ func extensionOutcome(ctx context.Context, err error) {
 	}
 }
 
+func extensionSelectionFailure(ctx context.Context, scope sdk.Scope, err error) {
+	var revoked *sdk.Error
+	if !errors.As(err, &revoked) || revoked.Code != "stale_generation" && revoked.Code != "not_found" {
+		return
+	}
+	Changed()
+	if attempt := extensionAttemptOf(ctx); attempt != nil {
+		attempt.mu.Lock()
+		if attempt.err == nil && !attempt.accepted && !attempt.completed {
+			attempt.err = &sdk.Error{Code: revoked.Code, Message: revoked.Message, Outcome: "not-started"}
+			attempt.scope = scope
+		}
+		attempt.mu.Unlock()
+	}
+}
+
 func extensionUsage(ctx context.Context, usage *sdk.Usage) {
 	if attempt := extensionAttemptOf(ctx); attempt != nil && usage != nil {
 		attempt.mu.Lock()

@@ -45,6 +45,32 @@ including GUI snapshots keyed by the stamp. Local manager changes notify
 use the pure `extension.CatalogPath` helper and never acquire or replace the
 default manager under the provider cache lock.
 
+Private SDK account-file metadata is a separate source stamp. Each new hold,
+including one overlapping an existing request, detects another process's
+account replacement/deletion before reusing provider/model snapshots.
+`extension.AccountStamp` reads directory/file metadata and handle-derived
+portable file identities without reading credential contents, acquiring store
+locks or initializing a manager. Identity distinguishes an atomic replacement
+even when size, mode and mtime are preserved. Observations are serialized outside
+the global provider cache mutex and published with monotonically increasing
+revisions; a delayed old observation cannot replace a newer published one.
+Unavailable metadata invalidates the snapshot rather than comparing as unchanged.
+Quota-only account-file publication conservatively invalidates it too;
+unrelated scoped state does not.
+The stamp remains an optimistic cache hint: an in-place rewrite preserving
+identity and metadata need not change it. Authoritative generation checks at
+signing/preflight still reject the old binding and invalidate discovery, so
+the following request reads the new account even in that case.
+
+A request that already captured a revoked account generation stays fenced:
+`RefreshedAccount` may follow only a proven refresh successor, never a manual
+replacement. Signing/preflight records a terminal selection failure on the
+existing `ExtensionAttempt`, so a stale local generation is returned as a
+non-retryable conflict rather than entering generic upstream outage patience.
+This is a not-started policy rejection, not a fabricated accepted/uncertain
+write receipt, and it cannot overwrite an earlier durable terminal outcome.
+The next request discovers a new binding and uses its current `Frame.Auth`.
+
 `StartExtensionAuth`, `FinishExtensionAuth`, `RefreshExtensionAuth` and
 `LogoutExtensionAuth` use the installed authentication contract. Completed
 sign-ins save credentials and expiry through generation CAS; returned
@@ -192,6 +218,13 @@ journal scope without executing it again.
 including install, enable/disable, upgrade and removal, and local changes
 inside an active hold; its cache lifetimes are held long to exclude TTL
 expiry as the cause of invalidation.
+`extension_generation_test.go` adds independent-store manual replacement with
+long cache lifetimes, overlapping holds, revoked selection before dispatch
+and preservation of accepted, uncertain, completed and replay outcomes and their
+original durable operations. It also blocks an account observation to verify
+the global cache lock stays available and a delayed older observation cannot
+discard a newer catalog. `account_stamp_test.go` checks read-only metadata stamps,
+atomic replacement with preserved metadata and unavailable namespace boundaries.
 
 The gateway regression builds a small external Go worker from
 `testdata/extensionworker`, installs it into a temporary configuration and

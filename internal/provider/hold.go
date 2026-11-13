@@ -36,8 +36,28 @@ var held struct {
 	roots [3]rootStamp
 	// stamp is StampNow's files as a request holding the catalog last
 	// looked at them, at stampAt (stampNowFiles)
-	stamp   [4]rootStamp
-	stampAt time.Time
+	stamp    [4]rootStamp
+	stampAt  time.Time
+	accounts extensionAccountFiles
+}
+
+type extensionAccountFiles uint64
+
+var extensionAccountObservations struct {
+	sync.Mutex
+	stamp    extensionhost.AccountFileStamp
+	revision extensionAccountFiles
+}
+
+func extensionAccountFilesNow() extensionAccountFiles {
+	extensionAccountObservations.Lock()
+	defer extensionAccountObservations.Unlock()
+	stamp, err := extensionhost.AccountStamp()
+	if err != nil || !stamp.Equal(extensionAccountObservations.stamp) {
+		extensionAccountObservations.stamp = stamp
+		extensionAccountObservations.revision++
+	}
+	return extensionAccountObservations.revision
 }
 
 // rootStamp is a file's time and size, or that it wasn't there.
@@ -118,7 +138,18 @@ var heldFor = time.Second
 // Hold keeps the catalog built once until release is called, for a
 // request that only reads; a write meanwhile (Changed) drops it.
 func Hold() (release func()) {
+	return holdWithAccounts(extensionAccountFilesNow)
+}
+
+func holdWithAccounts(read func() extensionAccountFiles) (release func()) {
+	accounts := read()
 	held.Lock()
+	if accounts > held.accounts {
+		held.accounts = accounts
+		held.built = nil
+		held.gen++
+		held.stampAt = time.Time{}
+	}
 	if held.holds == 0 {
 		// what was built under another environment (a HOME or config
 		// folder of its own: a test's) isn't this one's
@@ -177,14 +208,19 @@ func dropHeld() {
 type Stamp struct {
 	gen, fgen, env uint64
 	roots          [4]rootStamp
+	accounts       extensionAccountFiles
 }
 
 // StampNow is the Stamp as things are now.
 func StampNow() Stamp {
 	held.Lock()
 	gen := held.gen
+	accounts, holding := held.accounts, held.holds > 0
 	held.Unlock()
-	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(), roots: stampNowFiles()}
+	if !holding {
+		accounts = extensionAccountFilesNow()
+	}
+	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(), roots: stampNowFiles(), accounts: accounts}
 }
 
 // stampLooks counts StampNow's looks at its files, for a test.

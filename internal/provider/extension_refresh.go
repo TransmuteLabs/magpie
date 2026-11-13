@@ -24,10 +24,13 @@ func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount
 	}
 	account, err := binding.host.Store().GetAccount(binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
 	if err != nil {
+		extensionSelectionFailure(ctx, binding.scope, err)
 		return nil, err
 	}
 	if account.Generation != binding.scope.Generation {
-		return nil, errors.New("extension account generation changed")
+		err := &sdk.Error{Code: "stale_generation", Message: "Extension account generation changed."}
+		extensionSelectionFailure(ctx, binding.scope, err)
+		return nil, err
 	}
 	if account.ExpiresAt == 0 || account.ExpiresAt > time.Now().Add(extensionRefreshLead).UnixMilli() {
 		return binding, nil
