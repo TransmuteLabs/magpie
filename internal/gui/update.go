@@ -77,6 +77,10 @@ type updater struct {
 	lang     string    // the pages' language, "" before one asked
 	notesIn  string    // the language latest's notes are in
 	relangAt time.Time // when they were last asked for in another
+	// Background note reads have their own lifetime: a settled check does
+	// not mean its urgency or language lookup has returned.
+	notesCtx context.Context // nil follows the backend's lifetime
+	notes    sync.WaitGroup
 	// A restart asked for while the gateway is busy waits until it is idle
 	// (#577): waiting since waitFrom, then whenIdle restarts, unless it ran
 	// waitMost first (gaveUp). onWait tells the tray what it waits on.
@@ -433,6 +437,7 @@ func (u *updater) begin() bool {
 var checkWait = 10 * time.Minute
 
 func (u *updater) run() {
+	installedVersion := Version
 	ctx := context.Background()
 	cctx, cancel := context.WithTimeout(ctx, checkWait)
 	defer cancel()
@@ -454,8 +459,8 @@ func (u *updater) run() {
 	// the app was installed again by hand each time (ylspcm on X). Asked
 	// before u.mu, which the pages' reads need.
 	newest := ""
-	if stable && err == nil && !update.Newer(rel.Version, Version) {
-		if every, e := update.LatestEvery(cctx, lang); e == nil && update.Newer(every.Version, Version) {
+	if stable && err == nil && !update.Newer(rel.Version, installedVersion) {
+		if every, e := update.LatestEvery(cctx, lang); e == nil && update.Newer(every.Version, installedVersion) {
 			newest = every.Version
 		}
 	}
@@ -502,19 +507,20 @@ func (u *updater) run() {
 		return
 	}
 	u.latest, u.notesIn, u.stable = rel, lang, stable
-	if update.Released(Version) && update.Newer(rel.Version, Version) {
-		u.behind = update.NoteBehind(Version, rel.Version, update.UrgentIn(rel.Notes), time.Now())
+	if update.Released(installedVersion) && update.Newer(rel.Version, installedVersion) {
+		u.behind = update.NoteBehind(installedVersion, rel.Version, update.UrgentIn(rel.Notes), time.Now())
 		if u.behind.Urgent == "" {
 			// an urgent release between this one and the latest: its
 			// notes aren't the latest's
-			go u.urgentBetween(rel.Version, lang)
+			latest := rel.Version
+			u.lookUpNotes(func(ctx context.Context) { u.urgentBetween(ctx, installedVersion, latest, lang) })
 		}
 	}
 	switch {
-	case !update.Released(Version):
+	case !update.Released(installedVersion):
 		u.state = "source"
 		return
-	case !update.Newer(rel.Version, Version):
+	case !update.Newer(rel.Version, installedVersion):
 		u.state = "latest"
 		return
 	case u.bundle == "" && u.exe == "":
@@ -671,7 +677,8 @@ func (u *updater) jsonIn(lang string) updateJSON {
 		u.lang = lang
 		if u.latest != nil && u.notesIn != lang && u.state != "checking" && time.Since(u.relangAt) >= time.Minute {
 			u.relangAt = time.Now()
-			go u.relang(u.latest.Version, lang)
+			version := u.latest.Version
+			u.lookUpNotes(func(ctx context.Context) { u.relang(ctx, version, lang) })
 		}
 	}
 	j := updateJSON{State: u.state, Current: Version, Error: u.err, Retry: u.retry}
@@ -732,22 +739,39 @@ func (u *updater) jsonIn(lang string) updateJSON {
 
 // urgentBetween notes it when a release after this one up to latest is
 // urgent: a security fix a few releases back isn't in the latest's notes.
-func (u *updater) urgentBetween(latest, lang string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func (u *updater) urgentBetween(ctx context.Context, installedVersion, latest, lang string) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	notes, err := update.NotesBetween(ctx, Version, latest, lang)
+	notes, err := update.NotesBetween(ctx, installedVersion, latest, lang)
 	if err != nil {
 		return
 	}
 	for _, n := range notes {
 		if update.UrgentIn(n.Notes) {
-			b := update.NoteUrgent(Version, n.Version, time.Now())
+			b := update.NoteUrgent(installedVersion, n.Version, time.Now())
 			u.mu.Lock()
 			u.behind = b
 			u.mu.Unlock()
 			return
 		}
 	}
+}
+
+// lookUpNotes registers the work before launching it, so its owner can cancel
+// the context and join every lookup before releasing its resources.
+func (u *updater) lookUpNotes(lookup func(context.Context)) {
+	ctx := u.notesCtx
+	if ctx == nil {
+		ctx = backendCtx
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	u.notes.Add(1)
+	go func() {
+		defer u.notes.Done()
+		lookup(ctx)
+	}()
 }
 
 // quietAgain starts the pill's quiet over: it was dismissed.
@@ -770,8 +794,8 @@ func (u *updater) inLang(lang string) {
 
 // relang asks the feed again for version's notes in lang, the pages'
 // language not being the one they were asked in.
-func (u *updater) relang(version, lang string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (u *updater) relang(ctx context.Context, version, lang string) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	rel, err := update.LatestIn(ctx, lang)
 	if err != nil {
