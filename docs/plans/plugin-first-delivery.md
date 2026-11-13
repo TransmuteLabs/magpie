@@ -11,10 +11,14 @@ backlog; it is not a sequential prerequisite for every module.
 - SDK API 1.1 is committed locally at `b3055364`, with its
   [scoped validation record](../adr/0005-native-composite-validation.md).
   It has not been published by this work.
-- API 1.2 gateway hooks/private tools have scoped proof and a final immutable
-  aggregate candidate, tree `7e2a72b6178eb2a51c4e6018ee9515fdbb321da7`.
-  Aggregate acceptance is still running. These features are not prerequisites
-  for the first three module slices below.
+- API 1.2 gateway hooks/private tools are committed locally at `e9831f37d`.
+  The [validation record](../adr/0006-gateway-hooks-validation.md) distinguishes
+  immutable aggregate tree `7e2a72b6178eb2a51c4e6018ee9515fdbb321da7` from the
+  reviewed generation-authorization follow-up. These features are not
+  prerequisites for the first three module slices below.
+- The generic HTTP rejection/cancellation correction at `3f213a6d6`
+  unblocks Devin's existing codec status contract without adding vendor code
+  or changing the native ABI.
 - Active modules have separate repositories in `TransmuteLabs`, with adjacent
   local checkouts and a development replacement for the public SDK:
   `../magpie-sdk-plugin-protocol-devin`,

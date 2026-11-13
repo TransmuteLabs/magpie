@@ -96,6 +96,16 @@ Independent source/evidence review closed the three hook findings and the
 private-tool HIGH finding. This is bounded approval of those contracts and
 fixes, not approval of every remaining SDK surface.
 
+After the generic native HTTP-rejection correction was committed separately,
+the combined committed host at
+`3f213a6d64ac3597feb101b3aee8e00d5f4ba17b` passed the complete SDK race targets
+again: **879 test/subtest pass events, zero failures and zero test skips**.
+This usbox run took 122.08 seconds and used the same declared Go 1.26.8
+toolchain and isolated configuration. Its result is
+`/tmp/magpie-sdk-v11-usbox-niq306rt/sdk-plugin-ready-head-result.json`.
+It establishes coexistence of the reviewed tool-generation guard and native
+status/cancellation correction; it is not another full-repository run.
+
 ## Actual behavior exercised
 
 - Real SDK worker: one agent saves module-private memory through a tool,
