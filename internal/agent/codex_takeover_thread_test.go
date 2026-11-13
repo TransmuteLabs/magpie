@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -16,28 +17,46 @@ import (
 func watchCodexThreads(t *testing.T) <-chan struct{} {
 	t.Helper()
 	asked := make(chan struct{}, 4)
+	codexThreadsMu.Lock()
 	oldAgain, oldWait := codexThreadsAgain, codexThreadsWait
 	codexThreadsAgain = func() { asked <- struct{}{} }
 	codexThreadsWait = 10 * time.Millisecond
+	codexThreadsMu.Unlock()
 	codexThreadsFor.Store(int64(time.Minute))
 	t.Cleanup(func() {
 		codexThreadsFor.Store(0)
-		for end := time.Now().Add(5 * time.Second); ; {
-			codexThreadsMu.Lock()
-			n := len(codexThreadsPending)
-			codexThreadsMu.Unlock()
-			if n == 0 {
-				break
-			}
-			if time.Now().After(end) {
-				t.Error("a wait for Codex's threads outlived its test")
-				break
-			}
-			time.Sleep(5 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := waitCodexThreadsIdle(ctx, nil); err != nil {
+			t.Error("a wait or callback for Codex's threads outlived its test", err)
+			return
 		}
+		codexThreadsMu.Lock()
 		codexThreadsAgain, codexThreadsWait = oldAgain, oldWait
+		codexThreadsMu.Unlock()
 	})
 	return asked
+}
+
+func waitCodexThreadsIdle(ctx context.Context, observed func(int)) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		codexThreadsMu.Lock()
+		active := codexThreadsActive
+		codexThreadsMu.Unlock()
+		if observed != nil {
+			observed(active)
+		}
+		if active == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // nb5p on Discord: with the ChatGPT account Codex is signed in to used
