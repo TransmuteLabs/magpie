@@ -385,6 +385,7 @@ func TestExtensionProviderGenerationInvalidatesRoutingFreshness(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	provider := extensionAccounts()[0]
 	UsageRead(provider.ID, "alice")
+	bobReadAt := time.Now().Add(-time.Second)
 	usedCache.Lock()
 	if usedCache.m == nil {
 		usedCache.m = map[string]map[string]Allowance{}
@@ -392,8 +393,11 @@ func TestExtensionProviderGenerationInvalidatesRoutingFreshness(t *testing.T) {
 	if usedCache.read == nil {
 		usedCache.read = map[string]readState{}
 	}
-	usedCache.m[provider.ID] = map[string]Allowance{"alice": {}}
+	usedCache.m[provider.ID] = map[string]Allowance{
+		"alice": {{Used: 87}}, "bob": {{Used: 23}},
+	}
 	usedCache.read[provider.ID+"/alice"] = readState{at: time.Now()}
+	usedCache.read[provider.ID+"/bob"] = readState{at: bobReadAt}
 	usedCache.Unlock()
 	scope, _ := provider.ExtensionScope()
 	if _, err := host.store.SaveAccount(extensionhost.Account{Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account,
@@ -403,11 +407,18 @@ func TestExtensionProviderGenerationInvalidatesRoutingFreshness(t *testing.T) {
 	if _, _, known := UsageRead(provider.ID, "alice"); known {
 		t.Fatal("new generation inherited old routing freshness")
 	}
+	if at, failed, known := UsageRead(provider.ID, "bob"); !known || failed || !at.Equal(bobReadAt) {
+		t.Fatal("one account's replacement discarded another account's routing freshness")
+	}
 	usedCache.Lock()
-	_, retained := usedCache.m[provider.ID]
+	_, retained := usedCache.m[provider.ID]["alice"]
+	bob := usedCache.m[provider.ID]["bob"]
 	usedCache.Unlock()
 	if retained {
 		t.Fatal("new generation inherited the old routing allowance")
+	}
+	if len(bob) != 1 || bob[0].Used != 23 {
+		t.Fatal("one account's replacement discarded another account's routing allowance")
 	}
 }
 
