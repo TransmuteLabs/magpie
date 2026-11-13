@@ -178,6 +178,22 @@ glance is never saved in the index (`savable`) nor taken by a refresh as a
 parse (`parsed`). See
 [`internal/sessions/manage_quick.go`](../../internal/sessions/manage_quick.go),
 `TestManageAnswersBeforeFirstReads` and `sessions-pending-fill.test.cjs`.
+
+Native parsed summaries are queued for asynchronous persistence from an
+owned snapshot (`savable`, `snapshotCacheState`, `saveCacheWithin`). The
+scheduling boundary runs under the cache mutex and detaches persisted
+states, identity, models/days, nested metadata collections, Claude revision
+windows, carry/tail data and the parser-version map. Codex's non-persistent
+revision state is omitted from the disk snapshot. A later live correction,
+including lazy Codex provider discovery, cannot change an earlier save.
+Glances remain excluded and sparse/null entries retain their serialized
+form. Save coalescing, delay and the persisted schema remain unchanged.
+Encoding and file I/O stay outside the cache mutex. The writer does not
+acquire it: cache loading waits for saves while holding that same mutex.
+See [`cache_snapshot.go`](../../internal/sessions/cache_snapshot.go) and
+the queued-write/concurrent-mutation regressions in
+[`cache_snapshot_test.go`](../../internal/sessions/cache_snapshot_test.go).
+
 A Claude Code session's folder is its first line's `cwd`, unless
 Claude Code's `/cd` moved it: the file goes to the new folder's project
 directory with a `{"type":"relocated","relocatedCwd":…}` line, while the

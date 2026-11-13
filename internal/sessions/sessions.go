@@ -503,6 +503,9 @@ func (s *state) clone() *state {
 	c.Days = slices.Clone(s.Days)
 	for i, e := range c.Days {
 		v := e.v
+		if v == nil {
+			continue
+		}
 		d := &day{Active: v.Active, Models: slices.Clone(v.Models), Prompts: v.Prompts, Replies: v.Replies}
 		d.Hours = slices.Clone(v.Hours)
 		d.Tools, d.Skills = slices.Clone(v.Tools), slices.Clone(v.Skills)
@@ -1508,16 +1511,15 @@ func loadCache() {
 
 // saveCache keeps the parses on disk. Writing the whole index (tens of MB
 // for a long history) takes a second or more, so it is done behind the
-// request: the parses in the cache are never changed once put there (a new
-// parse starts from a clone), so a copy of the map is a snapshot; saves in a
-// row are folded into the latest, and one is written saveGap after the
-// last at the soonest.
+// request: the queued save owns its persistent state, independent of later
+// cache updates. Saves in a row are folded into the latest, and one is
+// written saveGap after the last at the soonest.
 func saveCache() { saveCacheWithin(saveGap) }
 
 // saveCacheWithin is saveCache written gap after the last save at the
 // soonest; saves folded into one wait the shortest gap any of them asked.
 func saveCacheWithin(gap time.Duration) {
-	snap := save{cacheFile{Version: cacheVersion, Zone: zone(), Parsers: parseVersions, Files: savable()}, CachePath()}
+	snap := save{cacheFile{Version: cacheVersion, Zone: zone(), Parsers: maps.Clone(parseVersions), Files: savable()}, CachePath()}
 	saving.Lock()
 	defer saving.Unlock()
 	if saving.next == nil || gap < saving.gap {

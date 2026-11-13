@@ -264,6 +264,9 @@ func savable() map[string]*state {
 			delete(c, p)
 		}
 	}
+	for path, value := range c {
+		c[path] = snapshotCacheState(value)
+	}
 	return c
 }
 
