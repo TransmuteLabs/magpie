@@ -8,7 +8,7 @@ import shutil
 import subprocess
 
 
-def build(destination, version):
+def build(destination, version, account_bindings=False):
     source = Path(__file__).resolve().parent
     repository = source.parents[2]
     platform = json.loads(subprocess.check_output(
@@ -30,11 +30,19 @@ def build(destination, version):
     if target not in manifest["compatibility"]["platforms"]:
         raise SystemExit("unsupported hybrid example platform: " + target)
     manifest["version"] = version
+    if account_bindings:
+        manifest["contract"]["version"]["minor"] = 5
+        manifest["compatibility"]["hostAPI"] = "^1.5"
+        for binding in manifest["bindings"]:
+            if binding["from"] == "window:page" and binding.get("action"):
+                binding["provider"] = "hybrid-fixture"
     manifest["entry"] = "lib/primary" + suffix
     if platform["GOOS"] == "windows":
         manifest["services"][0]["entry"] += ".exe"
     manifest["compatibility"]["platforms"] = [target]
     ldflags = "-X github.com/yetone/magpie/examples/extensions/hybrid-go.Version=" + version
+    if account_bindings:
+        ldflags += " -X github.com/yetone/magpie/examples/extensions/hybrid-go.AccountBindings=true"
     for package, entry, flags in (
         ("primary", manifest["entry"], ["-buildmode=c-shared"]),
         ("backend", manifest["services"][0]["entry"], []),
@@ -52,9 +60,9 @@ def build(destination, version):
     subprocess.run([
         "tsc", "--strict", "--target", "ES2020", "--module", "ES2020",
         "--lib", "ES2020,DOM", "--outDir", str(ui),
-        str(source / "ui" / "app.ts"),
+        str(source / "ui" / ("account-app.ts" if account_bindings else "app.ts")),
     ], cwd=repository, check=True)
-    shutil.copyfile(source / "ui" / "index.html", ui / "index.html")
+    shutil.copyfile(source / "ui" / ("account-index.html" if account_bindings else "index.html"), ui / "index.html")
     metadata = json.loads((source / "package.json").read_text())
     metadata["version"] = version
     (destination / "package.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -66,5 +74,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination")
     parser.add_argument("--version", default="1.0.0")
+    parser.add_argument("--account-bindings", action="store_true")
     args = parser.parse_args()
-    build(args.destination, args.version)
+    build(args.destination, args.version, args.account_bindings)

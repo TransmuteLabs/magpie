@@ -204,6 +204,10 @@ func windowBinding(manifest sdk.Manifest, part, id string) (sdk.BindingDescripto
 }
 
 func (m *Manager) CallWindowBinding(ctx context.Context, id, revision, part, bindingID string, input json.RawMessage) (json.RawMessage, error) {
+	return m.CallWindowBindingWithOptions(ctx, id, revision, part, bindingID, input, sdk.WindowCallOptions{})
+}
+
+func (m *Manager) CallWindowBindingWithOptions(ctx context.Context, id, revision, part, bindingID string, input json.RawMessage, options sdk.WindowCallOptions) (json.RawMessage, error) {
 	entry, _, err := m.windowEntry(ctx, id, revision)
 	if err != nil {
 		return nil, err
@@ -219,18 +223,39 @@ func (m *Manager) CallWindowBinding(ctx context.Context, id, revision, part, bin
 	if request != "" && (len(request) > 256 || strings.TrimSpace(request) == "" || strings.ContainsFunc(request, unicode.IsControl)) {
 		return nil, errors.New("module window request identity is invalid")
 	}
+	scope, err := m.selectedWindowScope(entry.Manifest, binding, options.Account)
+	if err != nil {
+		return nil, err
+	}
+	action, _ := entry.Manifest.ResolveAction(binding.Action)
+	if binding.Provider != "" && action.Effect == "write" && request == "" {
+		return nil, errors.New("selected-account writes require a window request intent")
+	}
 	lease, _, err := m.windowLease(ctx, id, revision)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Close()
-	scope := sdk.Scope{Plugin: id}
+	if binding.Provider != "" {
+		ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
+			_, _, err := m.windowEntry(current, id, revision)
+			return err
+		})
+	}
 	if request != "" {
-		action, _ := entry.Manifest.ResolveAction(binding.Action)
 		if action.Effect == "write" {
 			key := strings.Join([]string{id, revision, part, bindingID, request}, "\x00")
+			if binding.Provider != "" {
+				key = strings.Join([]string{id, revision, part, request}, "\x00")
+			}
 			sum := sha256.Sum256([]byte(key))
 			scope.Operation = hex.EncodeToString(sum[:])
+			scope.Attempt = 1
+			if binding.Provider != "" {
+				if err := m.store.bindWindowIntent(scope, bindingID, input); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return lease.Call(ctx, sdk.MethodModuleCall, scope,

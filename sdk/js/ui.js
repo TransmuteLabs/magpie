@@ -22,7 +22,10 @@ export const ui = Object.freeze({
     save(png, name) { return bridge().image.save(png, name); },
   }),
   backend: Object.freeze({
-    call(binding, input = null) { return bridge().backend.call(binding, input); },
+    call(binding, input = null, options) {
+      return options === undefined ? bridge().backend.call(binding, input) : bridge().backend.call(binding, input, options);
+    },
+    accounts(binding) { return bridge().backend.accounts(binding); },
   }),
   config: Object.freeze({
     get() { return bridge().config.get(); },

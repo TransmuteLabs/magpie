@@ -813,6 +813,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err != nil {
 		return nil, err
 	}
+	if err := checkWindowAdmission(ctx); err != nil {
+		return nil, err
+	}
 	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest, method: method})
 	if method == sdk.MethodGatewayRequest {
 		// Retain this restriction when a recall delegates a read action to
@@ -843,6 +846,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	accepted := false
 	onEvent := func(event Event) error {
 		if _, err := m.authFor(scope); err != nil {
+			return err
+		}
+		if err := checkWindowAdmission(ctx); err != nil {
 			return err
 		}
 		if len(event.Data) > sdk.MaxChunkBytes*2 {
@@ -975,6 +981,9 @@ func (m *Manager) authFor(scope sdk.Scope) (json.RawMessage, error) {
 }
 
 func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, raw json.RawMessage) (any, error) {
+	if err := checkWindowAdmission(ctx); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

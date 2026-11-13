@@ -2,6 +2,9 @@
 export type UIValue = null | boolean | number | string | UIValue[] | { [key: string]: UIValue };
 export interface UIConfigValues { [key: string]: UIValue }
 export interface UIConfigSnapshot { version: string; values: UIConfigValues }
+export interface AccountSelection { id: string; expectedGeneration: string }
+export interface AccountSummary { id: string; generation: string; expiresAt?: number }
+export interface WindowCallOptions { account?: AccountSelection }
 export interface UITheme {
   readonly dark: boolean;
   readonly lang: string;
@@ -33,7 +36,8 @@ export interface ModuleUI {
   };
   readonly backend: {
     /** Unary. Frame disposal/update cancellation remains owned by the bridge. */
-    call<T = UIValue>(binding: string, input?: UIValue): Promise<T>;
+    call<T = UIValue>(binding: string, input?: UIValue, options?: WindowCallOptions): Promise<T>;
+    accounts(binding: string): Promise<AccountSummary[]>;
   };
   readonly config: {
     get(): Promise<UIConfigSnapshot>;

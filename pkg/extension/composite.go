@@ -77,6 +77,7 @@ type BindingDescriptor struct {
 	Action   string `json:"action,omitempty"`
 	Service  string `json:"service,omitempty"`
 	Endpoint string `json:"endpoint,omitempty"`
+	Provider string `json:"provider,omitempty"`
 }
 
 type ComponentIdentity struct {
@@ -337,6 +338,11 @@ func (manifest Manifest) validateComposite() error {
 		if !validID(binding.ID) || bindings[binding.ID] || !validBindingFrom(binding.From, manifest.Window != nil) {
 			return fmt.Errorf("invalid or duplicate module binding %q", binding.ID)
 		}
+		if binding.Provider != "" && (manifest.Contract.Version.Minor < 5 ||
+			!manifest.Contract.Has(AccountAuth) || !strings.HasPrefix(binding.From, "window:") || binding.Action == "" ||
+			!slices.ContainsFunc(manifest.Providers, func(provider ProviderDescriptor) bool { return provider.ID == binding.Provider })) {
+			return fmt.Errorf("selected-account bindings require SDK API 1.5 and a declared authenticated provider")
+		}
 		if binding.Action != "" {
 			if !actions[binding.Action] || binding.Service != "" || binding.Endpoint != "" {
 				return fmt.Errorf("binding requires one declared action or service endpoint")
@@ -347,10 +353,11 @@ func (manifest Manifest) validateComposite() error {
 		bindings[binding.ID] = true
 	}
 	if compatibility := manifest.Compatibility; compatibility != nil {
-		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" ||
+		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" ||
 			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 ||
 			compatibility.HostAPI == "^1.3" && manifest.Contract.Version.Minor < 3 ||
-			compatibility.HostAPI == "^1.4" && manifest.Contract.Version.Minor < 4 {
+			compatibility.HostAPI == "^1.4" && manifest.Contract.Version.Minor < 4 ||
+			compatibility.HostAPI == "^1.5" && manifest.Contract.Version.Minor < 5 {
 			return fmt.Errorf("unsupported host API requirement %q", compatibility.HostAPI)
 		}
 		if len(compatibility.Platforms) > 128 {

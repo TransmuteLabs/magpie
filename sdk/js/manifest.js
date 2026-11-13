@@ -21,7 +21,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 4 }),
+  version: Object.freeze({ major: 1, minor: 5 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -145,7 +145,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");

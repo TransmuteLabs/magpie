@@ -18,7 +18,10 @@ export async function answerPluginPage(p, m, theme, titled) {
     case "backend.call":
       sdk();
       p.instance ||= Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
-      return request("plugin-pages/call", { ref: e.ref, request: p.instance + ":" + m.id, binding: m.params?.binding, input: m.params?.input ?? null });
+      return request("plugin-pages/call", { ref: e.ref, request: p.instance + ":" + m.id, binding: m.params?.binding, input: m.params?.input ?? null, ...(m.params?.options?.account === undefined ? {} : { account: m.params.options.account }) });
+    case "backend.accounts":
+      sdk();
+      return request("plugin-pages/accounts", { ref: e.ref, binding: m.params?.binding });
     case "config.get":
       sdk();
       return request("plugin-pages/config", { ref: e.ref });

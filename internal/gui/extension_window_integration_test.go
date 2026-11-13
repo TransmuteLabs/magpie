@@ -54,6 +54,11 @@ func windowHybridSourceRoot(t *testing.T) string {
 
 func windowHybridBuild(t *testing.T) string {
 	t.Helper()
+	return windowHybridBuildMode(t, false)
+}
+
+func windowHybridBuildMode(t *testing.T, accounts bool) string {
+	t.Helper()
 	// pagePlugins clears PATH and changes HOME. Resolve author tools and pin
 	// caches before that fixture is installed; execution needs none of them.
 	tools := map[string]string{}
@@ -78,7 +83,11 @@ func windowHybridBuild(t *testing.T) string {
 	}
 	destination := filepath.Join(t.TempDir(), "distribution")
 	sourceRoot := windowHybridSourceRoot(t)
-	command = proc.CommandContext(ctx, tools["python3"], filepath.Join(sourceRoot, "examples", "extensions", "hybrid-go", "build.py"), destination)
+	arguments := []string{filepath.Join(sourceRoot, "examples", "extensions", "hybrid-go", "build.py"), destination}
+	if accounts {
+		arguments = append(arguments, "--account-bindings")
+	}
+	command = proc.CommandContext(ctx, tools["python3"], arguments...)
 	command.Dir = sourceRoot
 	command.Env = append(os.Environ(),
 		"GOPATH="+caches["GOPATH"], "GOMODCACHE="+caches["GOMODCACHE"], "GOCACHE="+caches["GOCACHE"],

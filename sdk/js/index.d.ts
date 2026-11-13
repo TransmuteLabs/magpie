@@ -286,9 +286,13 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
-export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string }
+export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string; provider?: string }
+export interface AccountSelection { id: string; expectedGeneration: string }
+export interface AccountSummary { id: string; generation: string; expiresAt?: number }
+export interface WindowCallOptions { account?: AccountSelection }
+export function validateAccountSelection(value: unknown): AccountSelection;
 export interface ComponentIdentity { id: string; contract: ServiceContract }
 export interface ModuleCallRequest { action: string; input: JSONValue }
 export type ModuleCallResult = JSONValue;

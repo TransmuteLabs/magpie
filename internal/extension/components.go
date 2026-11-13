@@ -480,6 +480,9 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	if err != nil || !bytes.Equal(current, auth) {
 		return nil, errors.New("component binding account authority changed")
 	}
+	if err := checkWindowAdmission(call); err != nil {
+		return nil, err
+	}
 	result, err := group.invoke(client, call, sdk.MethodModuleCall, scope, bytes.Clone(auth),
 		sdk.ModuleCallRequest{Action: action.ID, Input: bytes.Clone(input)}, func(event Event) error {
 			if event.Name != "accepted" || action.Effect != "write" {

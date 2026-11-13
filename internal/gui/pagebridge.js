@@ -201,7 +201,10 @@
       get: () => call("options.get"),
       set: (options) => call("options.set", { options }),
     },
-    backend: { call: (binding, input) => call("backend.call", { binding, input }) },
+    backend: {
+      call: (binding, input, options) => call("backend.call", { binding, input, ...(options === undefined ? {} : { options }) }),
+      accounts: (binding) => call("backend.accounts", { binding }),
+    },
     config: {
       get: () => call("config.get"),
       cas: (expected, values) => call("config.cas", { expected, values }),

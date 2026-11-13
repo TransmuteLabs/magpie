@@ -8,11 +8,14 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package source version 1.4.0 advertises SDK API 1.4 and eleven capabilities.
+Package source version 1.5.0 advertises SDK API 1.5 and eleven capabilities.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
 API 1.4 adds declared routing strategies through existing read actions.
-Explicit 1.0/1.1/1.2/1.3 manifests retain their earlier behavior. This is a source
+API 1.5 adds declared selected-account window actions.
+This UI-only cut does not complete the separately developing agent
+launch/profile adapter or establish a complete SDK 1.5 release.
+Explicit 1.0/1.1/1.2/1.3/1.4 manifests retain their earlier behavior. This is a source
 version, not a claim that an npm package or release was published.
 
 ```js
@@ -199,7 +202,7 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract versions are 1.0, 1.1, 1.2, 1.3 and 1.4. Handlers outside the
+handlers. Supported contract versions are 1.0, 1.1, 1.2, 1.3, 1.4 and 1.5. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
@@ -233,6 +236,41 @@ decoded operation, never a provider protocol or an additional capability.
 | session-migration | session.convert |
 | module-rpc (SDK 1.1) | module.call (auto-dispatched from module.actions) |
 | gateway-hooks (SDK 1.2) | gateway.request / gateway.response / gateway.signin, only as enabled by hooks |
+
+## Selected-account window actions (API 1.5)
+
+A window action binding may declare `provider`, fixed to a provider of the
+same module with `account-auth`. Primary bindings and service endpoints cannot
+grant accounts. Existing root bindings and two-argument calls stay compatible.
+
+`ui.backend.accounts(binding)` returns only
+`AccountSummary{id, generation, expiresAt?}`. The user selects an entry;
+`ui.backend.call(binding, input, {account: {id, expectedGeneration}})` sends
+that selection outside business input. No first-account fallback is made.
+Use strings for generation, including values above 2^53. The backend author
+entry exports `validateAccountSelection`; the browser entry keeps its own
+Node-free types and delegates through the existing parent bridge.
+
+The host owns ref/part/provider, verifies exact current generation and fixes
+the backend scope/auth on one lease. Neither input fields nor a module
+callback choose credentials. The primary and private helper inherit the same
+scope; auth is never put into summaries or frontend configuration. Handlers
+must not return auth in their own domain results.
+
+Selected writes require a stable parent request intent. Host persistence
+binds that intent to the selection, binding and business-input fingerprint;
+changed values conflict before a new effect, including across Store reopen.
+The action still emits ordinary accepted receipts. The host rechecks
+window admission after lazy startup and before acceptance/callbacks.
+It does not silently renew credentials or adopt a replacement generation.
+
+The optional hybrid bundle `--account-bindings` mode compiles
+[a typed account picker](../../examples/extensions/hybrid-go/ui/account-app.ts)
+and exercises native/helper execution through the
+[real GUI owner fixture](../../internal/gui/extension_window_accounts_integration_test.go).
+[ADR 0015](../../docs/adr/0015-selected-account-window-bindings.md) records
+scoped race/Node/Bun/TS proof; combined 1.5 acceptance, auth-broker UI and
+account-bound tool metadata remain separate.
 
 ## Provider operations, models and refresh (API 1.3)
 

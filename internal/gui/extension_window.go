@@ -30,6 +30,11 @@ type extensionWindowHost interface {
 	ReadyWindowServiceTarget(context.Context, string, string, string, string) (extension.WindowServiceTarget, func(), error)
 }
 
+type extensionWindowAccountHost interface {
+	WindowAccounts(context.Context, string, string, string, string) ([]sdk.AccountSummary, error)
+	CallWindowBindingWithOptions(context.Context, string, string, string, string, json.RawMessage, sdk.WindowCallOptions) (json.RawMessage, error)
+}
+
 const windowRequestLimit = (1 << 20) + (64 << 10) // a public 1 MiB value plus its envelope
 
 var extensionWindows = func() extensionWindowHost { return extension.Default() }
@@ -150,12 +155,39 @@ func resolveExtensionWindow(ctx context.Context, ref string) (*extensionWindowPa
 // Only refs issued to the parent window are accepted. An iframe never supplies
 // a module ID, revision, component, account scope, state key or endpoint URL.
 func extensionWindowRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/plugin-pages/accounts", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Ref     string `json:"ref"`
+			Binding string `json:"binding"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, windowRequestLimit)).Decode(&in); err != nil {
+			fail(w, err)
+			return
+		}
+		part, err := resolveExtensionWindow(r.Context(), in.Ref)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		host, supported := extensionWindows().(extensionWindowAccountHost)
+		if !supported {
+			fail(w, errors.New("selected-account window bindings are unavailable"))
+			return
+		}
+		accounts, err := host.WindowAccounts(r.Context(), part.id, part.revision, part.part, in.Binding)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, accounts)
+	})
 	mux.HandleFunc("POST /api/plugin-pages/call", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Ref     string          `json:"ref"`
-			Binding string          `json:"binding"`
-			Request string          `json:"request"`
-			Input   json.RawMessage `json:"input"`
+			Ref     string                `json:"ref"`
+			Binding string                `json:"binding"`
+			Request string                `json:"request"`
+			Input   json.RawMessage       `json:"input"`
+			Account *sdk.AccountSelection `json:"account,omitempty"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, windowRequestLimit)).Decode(&in); err != nil {
 			fail(w, err)
@@ -177,7 +209,15 @@ func extensionWindowRoutes(mux *http.ServeMux) {
 		if in.Request != "" {
 			ctx = extension.WithModuleRequestID(ctx, in.Request)
 		}
-		result, err := extensionWindows().CallWindowBinding(ctx, part.id, part.revision, part.part, in.Binding, in.Input)
+		var result json.RawMessage
+		if in.Account == nil {
+			result, err = extensionWindows().CallWindowBinding(ctx, part.id, part.revision, part.part, in.Binding, in.Input)
+		} else if host, supported := extensionWindows().(extensionWindowAccountHost); supported {
+			result, err = host.CallWindowBindingWithOptions(ctx, part.id, part.revision, part.part, in.Binding, in.Input,
+				sdk.WindowCallOptions{Account: in.Account})
+		} else {
+			err = errors.New("selected-account window bindings are unavailable")
+		}
 		if err != nil {
 			fail(w, err)
 			return

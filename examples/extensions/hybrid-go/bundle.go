@@ -16,6 +16,7 @@ import (
 
 // Version is set for both components by build.py's -ldflags argument.
 var Version = "1.0.0"
+var AccountBindings = "false"
 
 //go:embed magpie-plugin.json
 var declaration []byte
@@ -26,6 +27,16 @@ func Manifest() sdk.Manifest {
 		panic(err)
 	}
 	manifest.Version = Version
+	if AccountBindings == "true" {
+		manifest.Contract.Version.Minor = 5
+		manifest.Compatibility.HostAPI = "^1.5"
+		for index := range manifest.Bindings {
+			binding := &manifest.Bindings[index]
+			if binding.From == "window:page" && binding.Action != "" {
+				binding.Provider = "hybrid-fixture"
+			}
+		}
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		manifest.Entry = "lib/primary.dylib"

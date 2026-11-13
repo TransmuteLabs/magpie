@@ -2,14 +2,19 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Current source API 1.4 includes native/exec/Bun,
+advertised capability. Current source API 1.5 includes native/exec/Bun,
 composite modules, gateway hooks/private tools, transactional refresh, finite provider
-operations, rich model metadata and namespaced routing strategies. The
+operations, rich model metadata, namespaced routing strategies and declared
+selected-account window actions. The
 [combined validation record](../../docs/adr/0009-sdk13-validation.md) names
 its frozen SDK snapshot; the [surface census](../../docs/subsystems/extension-surface-coverage.md)
 retains remaining adapters and does not claim full SDK or repository acceptance.
 The [SDK 1.4 checkpoint](../../docs/adr/0014-sdk14-validation.md) records
 combined SDK gates; final application acceptance remains separate.
+The [selected-account 1.5 record](../../docs/adr/0015-selected-account-window-bindings.md)
+has scoped host/UI evidence; combined 1.5 acceptance remains separate.
+This is the UI-only SDK 1.5 cut. Agent launch/profile adoption remains a
+separate in-progress adapter and is not implied by the source version.
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -71,7 +76,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.4 with eleven capabilities; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.5 with eleven capabilities; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
 contract is API 0.4, accepting the older 0.1 inbound, 0.2 catalog and 0.3 tool
 contracts as well.
@@ -431,6 +436,33 @@ bridge cancels pending work on frame disposal,
 update/config change/off. The existing HTTP/SSE proxy holds a root lease for
 the whole response, strips cookies and validates/removes the three proof
 headers above before frontend body delivery.
+
+### Selected-account window actions (API 1.5)
+
+Set `BindingDescriptor.Provider` on a window action binding to a provider
+declared by the same root. The root needs `AccountAuth`; the binding cannot
+be a primary binding or HTTP endpoint. The page selects a sanitized
+`AccountSummary` and submits `AccountSelection{ID, ExpectedGeneration}` in
+`WindowCallOptions`, outside the action input. Generations are canonical
+nonzero uint64 decimal strings; `AccountSelection.Validate` and the JS
+validator preserve values above 2^53.
+
+The host resolves exact current account scope and sends `Call.Auth` only to
+backend handlers. Private services inherit the same selected scope and lease.
+Never serialize auth into domain results. Business input cannot grant
+provider/account authority, and ungranted root bindings reject selection.
+The host does not silently refresh or switch a selected generation.
+
+Selected writes use a stable parent intent plus a durable immutable
+scope/binding/input fingerprint and the ordinary acceptance journal.
+Off/config/update/cancellation are checked after lazy startup and before new
+acceptance or callbacks. The
+[native hybrid fixture](../../internal/gui/extension_window_accounts_integration_test.go)
+exercises the actual GUI/native/helper owner path. Its optional
+`build.py --account-bindings` mode includes a typed account picker; the
+default example remains API 1.1. See
+[ADR 0015](../../docs/adr/0015-selected-account-window-bindings.md) for scoped
+gates and the deferred auth-broker/tool adapter.
 
 ## Gateway hooks API 1.2
 
