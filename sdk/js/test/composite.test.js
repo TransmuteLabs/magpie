@@ -111,6 +111,7 @@ test("composite descriptors reject invalid ownership, DAGs, bindings, paths and 
     value => { value.bindings[2].endpoint = "undeclared"; },
     value => { value.window.metadata = "ui/other.json"; },
     value => { value.compatibility.hostAPI = "^2"; },
+    value => { value.compatibility.hostAPI = "^1.2"; value.contract.version.minor = 1; },
     value => { value.compatibility.platforms = ["darwin/mips"]; },
     value => { value.compatibility.platforms = ["constructor/amd64"]; },
     value => { value.compatibility.platforms.push(value.compatibility.platforms[0]); },
