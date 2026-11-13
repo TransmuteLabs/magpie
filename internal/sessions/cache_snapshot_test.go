@@ -141,15 +141,16 @@ func TestCacheSaveOwnsScheduledState(test *testing.T) {
 	}
 }
 
-func TestCacheSnapshotDoesNotKeepTransientRevisions(test *testing.T) {
+func TestCacheSnapshotOmitsCodexWindowFromJSON(test *testing.T) {
 	setup(test)
 	value := sessionCacheSnapshotFixture()
 	mu.Lock()
 	cache = map[string]*state{"session": value}
 	snapshot := savable()["session"]
 	mu.Unlock()
-	if snapshot == nil || snapshot.Codex != nil {
-		test.Fatal("disk snapshot retained non-persistent Codex revision state")
+	body, err := json.Marshal(snapshot)
+	if err != nil || bytes.Contains(body, []byte("transient")) {
+		test.Fatal("aggregate JSON retained the separately stored Codex window:", err)
 	}
 	if value.Codex == nil || value.Codex.Models["transient"] != "model" {
 		test.Fatal("disk snapshot changed the live parser state")

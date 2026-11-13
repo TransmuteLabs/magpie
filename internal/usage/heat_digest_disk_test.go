@@ -26,7 +26,7 @@ func TestSourceDigestsKeptAcrossStarts(t *testing.T) {
 	restart := func() {
 		sourceDigests.Lock()
 		sourceDigests.by, sourceDigests.last, sourceDigests.made = nil, nil, nil
-		sourceDigestsDisk.path, sourceDigestsDisk.kept = "", nil
+		sourceDigestsDisk.path, sourceDigestsDisk.kept, sourceDigestsDisk.mapped = "", nil, nil
 		sourceDigests.Unlock()
 	}
 	key := func(cs ...*rowChunk) (string, int) {
@@ -54,10 +54,22 @@ func TestSourceDigestsKeptAcrossStarts(t *testing.T) {
 	if len(sourceDigests.made) != 0 || sourceDigestsDisk.kept.len() != 2 {
 		t.Fatalf("after a save: %d made, %d kept", len(sourceDigests.made), sourceDigestsDisk.kept.len())
 	}
+	if mapsFiles && sourceDigestsDisk.mapped == nil {
+		t.Fatal("after a save the digests are kept as encoded, not from the file written")
+	}
 	sourceDigests.Unlock()
 	restart()
 	if again, n := key(chunk(1<<63|1, 10), chunk(1<<63|2, 20)); n != 0 || again != first {
 		t.Fatalf("started again, hashed %d chunks, key %s, was %s", n, again, first)
+	}
+	// what was read is the file mapped, not a copy in the heap
+	if mapsFiles {
+		sourceDigests.Lock()
+		m, kept := sourceDigestsDisk.mapped, sourceDigestsDisk.kept
+		sourceDigests.Unlock()
+		if m == nil || kept.len() != 2 || &kept[0] != &m.data[len(m.data)-len(kept)] {
+			t.Fatalf("kept %d digests, mapped %v: not read from the mapped file", kept.len(), m != nil)
+		}
 	}
 	// a start that met one file keeps the other's for the next
 	restart()
@@ -107,5 +119,45 @@ func TestSourceDigestsKeptAcrossStarts(t *testing.T) {
 	// a serial used with no digest made or kept is left out
 	if got := decodeSourceDigests(encodeSourceDigests("c", 9, nil, map[uint64][sha256.Size]byte{1: sum}, map[uint64]struct{}{1: {}, 2: {}}), "c"); got.len() != 1 {
 		t.Fatalf("kept %d, want 1", got.len())
+	}
+}
+
+// The serials a turn met go when idle, after what was made is written:
+// the next key hashes nothing again.
+func TestDigestTurnsGoWhenIdle(t *testing.T) {
+	pageHome(t)
+	cut := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	d := heatDiskRef{root: "r", meta: "m"}
+	c := &rowChunk{serial: 1<<63 | 7}
+	c.Source.Agent, c.Source.Key, c.Source.Path = "codex", "k", "/s/7"
+	c.add(Row{Record: Record{Time: cut.Add(-time.Hour), Agent: "codex", Model: "m", Input: 3}}, "msg", 1, false)
+	sourceDigests.Lock()
+	sourceDigests.by, sourceDigests.last, sourceDigests.made = nil, nil, nil
+	sourceDigestsDisk.path, sourceDigestsDisk.kept, sourceDigestsDisk.mapped = "", nil, nil
+	sourceDigests.Unlock()
+	key := func() (string, int) {
+		sourceDigests.Lock()
+		was := sourceDigestsHashed
+		sourceDigests.Unlock()
+		k, ok := heatSettledKey(d, cut, time.Time{}, Filter{}, nil, [3][]*rowChunk{{c}}, heatSum{})
+		if !ok {
+			t.Fatal("not named")
+		}
+		sourceDigests.Lock()
+		defer sourceDigests.Unlock()
+		return k, sourceDigestsHashed - was
+	}
+	first, _ := key()
+	if n := dropDigestTurns(); n == 0 {
+		t.Fatal("no serials let go")
+	}
+	sourceDigests.Lock()
+	by, last := sourceDigests.by, sourceDigests.last
+	sourceDigests.Unlock()
+	if by != nil || last != nil {
+		t.Fatalf("kept %d and %d serials when idle", len(by), len(last))
+	}
+	if again, n := key(); n != 0 || again != first {
+		t.Fatalf("after idle: hashed %d, key %s, was %s", n, again, first)
 	}
 }

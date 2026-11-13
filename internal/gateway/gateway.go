@@ -399,7 +399,7 @@ func ServedAt(base string) Served {
 		Serves  string `json:"serves"`
 	}
 	if decodeJSON(b, &info) != nil || info.Name != "magpie" {
-		return Served{Running: bytes.Contains(b, []byte(`"magpie"`)), Window: bytes.Contains(b, []byte(`"window":true`))}
+		return Served{Running: bodyHas(b, `"magpie"`), Window: bodyHas(b, `"window":true`)}
 	}
 	return Served{Running: true, Window: info.Window, Version: info.Version, Pid: info.Pid, Serves: info.Serves}
 }
@@ -926,6 +926,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// and keeps the community's plugins up to date, noting others' updates, and the Bun they run on
 	go plugin.KeepUpdated(ctx)
 	go plugin.KeepBunUpdated(ctx)
+	// and keeps macOS from App Napping the process the agents wait on (#6261)
+	defer awake.NoNap()()
 	// and, when settings say to, keeps the computer awake while agents work
 	go awake.Keep(ctx, func() awake.Level {
 		switch set := settings.Load(); {
@@ -1959,6 +1961,20 @@ func askedAt(id string) (string, string) {
 	return m, e
 }
 
+// namedFor is the catalog id of the model an agent that is given its
+// models' names as their ids asked for by name: WorkBuddy and WorkBuddy AI
+// (buddyIDs in internal/agent), by their keys.
+func namedFor(r *http.Request, model string) (string, bool) {
+	if model == "" {
+		return "", false
+	}
+	switch agent := agentOf(r); agent {
+	case "workbuddy", "workbuddy-ai":
+		return provider.AgentNamed(agent, model)
+	}
+	return "", false
+}
+
 // estimatedMoved are the built-ins that estimated a count, as their
 // plugins do, moved or beside the built-in (kiro-plugin); Command Code's
 // whatever its plan, as the plugin alone knows a Go key.
@@ -2294,7 +2310,7 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			// which magpie points here, #1301): the summary is magpie's to
 			// make, as on CodexPath, and magpie's summaries go back as text;
 			// a provider set to compact natively is asked Codex's own (#1099)
-			if bytes.Contains(body, []byte(`"compaction`)) {
+			if bodyHas(body, `"compaction`) {
 				var compact bool
 				if body, compact = codexInputAs(body, true, s.nativeCompactionFor(modelOf(body))); compact {
 					s.codexCompact(w, r, body)
@@ -2442,9 +2458,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// request is already whole in memory, so keep it as it came, and the
 	// reply goes to a spool as it streams
 	wholeBodies := usage.ObservedBodies() == usage.WholeBodies
+	// WorkBuddy names a model by the name its list shows it under, given
+	// as its id with the provider left out of the names (buddyIDs in
+	// internal/agent): the model of that name, before any other a bare
+	// id would find. The reply keeps the name asked for (askedFor)
+	byName := askedFor
+	if id, ok := namedFor(r, askedFor); ok {
+		body = rewriteModel(body, id)
+		plain = rewriteModel(plain, id)
+		byName = id
+	}
 	// a model asked for at an effort of its own (a Claude Code tier, #536)
 	// is the model, every try of it asked for that effort
-	asked, askedEffort := askedAt(askedFor)
+	asked, askedEffort := askedAt(byName)
 	if askedEffort != "" {
 		body = rewriteModel(body, asked)
 		plain = rewriteModel(plain, asked)
@@ -3000,7 +3026,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// a video for a model its list says takes none is turned away, not
 	// left out for the model to answer the words alone (#6135); a group's
 	// members are picked by it below
-	if !isGroup && bytes.Contains(body, []byte("video")) && noVideo(p.ID, model) && hasCurrentVideo(from, body) {
+	if !isGroup && bodyHas(body, "video") && noVideo(p.ID, model) && hasCurrentVideo(from, body) {
 		call.Status, call.Error = 400, "model does not support video input"
 		writeError(w, from, 400, videoRefused(call.Model, ""))
 		turnedAway()
@@ -7984,6 +8010,13 @@ func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
 	if p.MessagesFirst(model) {
 		sort.SliceStable(out, func(i, j int) bool { return out[i] == provider.Anthropic && out[j] != provider.Anthropic })
 	}
+	if p.IsPlugin() && len(apis) > 1 {
+		// a plugin's model is translated to its own API, the first it
+		// lists: the others its vendor serves it on (Open Design's) take a
+		// client's request as it was sent, and are no default
+		own := apis[0]
+		sort.SliceStable(out, func(i, j int) bool { return out[i] == own && out[j] != own })
+	}
 	return out
 }
 
@@ -8332,7 +8365,7 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 			r.MaxTokens, req, filledOutput = 0, &r, false
 			continue
 		}
-		if req.LoadedInPlace && refusesField(res.StatusCode, b, additionalToolsItem) && bytes.Contains(body, []byte(`"`+additionalToolsItem+`"`)) {
+		if req.LoadedInPlace && refusesField(res.StatusCode, b, additionalToolsItem) && bodyHas(body, `"`+additionalToolsItem+`"`) {
 			// an upstream that turns the item away is asked again with the
 			// loaded tools among the others, and not sent it again: the
 			// prompt's prefix changes from here, as before #2660, and the
@@ -8783,7 +8816,7 @@ func cacheKeyOf(in http.Header, req *Request) string {
 // doesn't take — Gemini's "Unknown name", Mistral's extra_forbidden,
 // Groq's "unsupported" — by the field's name in the error.
 func refusesField(status int, body []byte, field string) bool {
-	return badRequest(status) && bytes.Contains(body, []byte(field))
+	return badRequest(status) && bodyHas(body, field)
 }
 
 // hourMarksRefused is an upstream that turned away the hour-long cache
@@ -8793,7 +8826,7 @@ const hourMarksRefused = "cache_control.ttl"
 // hourMarksRefusal is a 400 over a cache mark's ttl: a relay that knows no
 // ttl, or a 1h mark after a 5m one.
 func hourMarksRefusal(status int, b []byte) bool {
-	return badRequest(status) && bytes.Contains(b, []byte("ttl")) && bytes.Contains(b, []byte("cache_control"))
+	return badRequest(status) && bodyHas(b, "ttl") && bodyHas(b, "cache_control")
 }
 
 // tierField is the client's service tier as a request carries it upstream
@@ -9005,7 +9038,7 @@ func refusedInMessages(status int, msg, body []byte) []string {
 		return nil
 	}
 	if m := fieldAtPosition.FindSubmatch(msg); m != nil {
-		if f := string(m[1]); bytes.Contains(body, []byte(`"`+f+`"`)) {
+		if f := string(m[1]); bodyHas(body, `"`+f+`"`) {
 			return []string{f}
 		}
 	}
@@ -9028,7 +9061,7 @@ func refusedInMessages(status int, msg, body []byte) []string {
 				}
 				f, _ := loc[len(loc)-1].(string)
 				if loc[0] == "messages" && slices.Contains(messageReasoning, f) && !slices.Contains(out, f) &&
-					bytes.Contains(body, []byte(`"`+f+`"`)) {
+					bodyHas(body, `"`+f+`"`) {
 					out = append(out, f)
 				}
 				return
@@ -9128,7 +9161,7 @@ var cacheControlField = []byte("cache_control")
 // other request is one bytes.Contains away from this, a scan next to the
 // parse of the same body.
 func parseTranslated(from, to provider.Protocol, body []byte, advised bool) (*Request, error) {
-	if from == provider.Anthropic && to == provider.Anthropic && bytes.Contains(body, cacheControlField) {
+	if from == provider.Anthropic && to == provider.Anthropic && bodyHasBytes(body, cacheControlField) {
 		if req, err := readAdvised(body, true, false, advised); err == nil {
 			return afterParse(from, body, req)
 		}
@@ -9961,7 +9994,7 @@ func rewriteModel(body []byte, model string) []byte {
 // accepts, but other Chat Completions backends (DeepSeek among them) reject
 // the whole request; every backend accepts system, OpenAI included.
 func developerAsSystem(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"developer"`)) {
+	if !bodyHas(body, `"developer"`) {
 		return body
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -10478,7 +10511,7 @@ func offAsNone(from provider.Protocol, body []byte) []byte {
 func saysOff(body []byte) bool {
 	key := []byte(`effort"`)
 	for rest := body; ; {
-		i := bytes.Index(rest, key)
+		i := bodyIndexBytes(rest, key)
 		if i < 0 {
 			return false
 		}
@@ -10726,7 +10759,7 @@ func withFields(body []byte, fields map[string]any) []byte {
 // max_completion_tokens in place of max_tokens, as Bedrock's OpenAI
 // endpoint takes it: its GPT models turn max_tokens away (#176).
 func asCompletionTokens(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"max_tokens"`)) {
+	if !bodyHas(body, `"max_tokens"`) {
 		return body
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -10753,7 +10786,7 @@ func asCompletionTokens(body []byte) []byte {
 func withoutFields(body []byte, fields ...string) []byte {
 	found := false
 	for _, f := range fields {
-		found = found || bytes.Contains(body, []byte(`"`+f+`"`))
+		found = found || bodyHas(body, `"`+f+`"`)
 	}
 	if !found {
 		return body
@@ -10791,7 +10824,7 @@ func refusesLoneToolChoice(p provider.Provider) bool {
 // withoutLoneToolChoice leaves out a tool_choice sent with no tools; with
 // none to choose from it says nothing.
 func withoutLoneToolChoice(body []byte) []byte {
-	if !bytes.Contains(body, []byte(`"tool_choice"`)) {
+	if !bodyHas(body, `"tool_choice"`) {
 		return body
 	}
 	var q struct {

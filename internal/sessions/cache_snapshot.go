@@ -6,9 +6,7 @@ func snapshotCacheState(value *state) *state {
 	if value == nil {
 		return nil
 	}
-	persistent := *value
-	persistent.Codex = nil
-	snapshot := persistent.clone()
+	snapshot := value.clone()
 	snapshot.CodexIdentity = cacheValue(value.CodexIdentity)
 	if extra := snapshot.StateMore; extra != nil {
 		extra.Grok = cacheValue(extra.Grok)

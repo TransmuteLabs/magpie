@@ -35,7 +35,7 @@ var Keys = []string{
 	// the menu bar's allowance cards
 	"trayUsages", "trayUsage", "trayUsageEvery", "trayNoLogos", "trayNoBird", "trayNoNumber", "trayPace", "trayNoCost", "trayWindows",
 	// usage and alerts
-	"currency", "chineseUnits", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
+	"currency", "totalCurrency", "trayCurrency", "chineseUnits", "dayStart", "usageAlert", "balanceAlert", "resetReminder", "turnDoneAlert", "maskAlert",
 	// network
 	"proxy", "pluginProxy", "updateProxy", "updateSource",
 	// privacy
@@ -45,7 +45,7 @@ var Keys = []string{
 	"codexWarmup", "claudeWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
 	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
-	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudePrintMode", "refusalRetries", "retryAfterCap",
+	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap",
 	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout",
 	// what every routing group does that says nothing of its own
 	"groupSink", "groupFirstToken", "groupPatience",
@@ -63,6 +63,8 @@ var Choices = map[string][]string{
 	"lang":           settings.Langs,
 	"tray":           settings.Trays,
 	"currency":       settings.Currencies,
+	"totalCurrency":  settings.TotalCurrencies,
+	"trayCurrency":   settings.TotalCurrencies,
 	"codexWarmup":    {"off", "week", "all"},
 	"claudeWarmup":   {"off", "week", "all"},
 	"trayUsageEvery": ints(settings.TrayEvery),
@@ -369,6 +371,7 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	in.DesktopIsolated = cur.DesktopIsolated
 	// and whether its Code tab has a Claude Code folder of its own (#6459)
 	in.DesktopIsolatedClaude = cur.DesktopIsolatedClaude
+	in.DesktopIsolatedClaudeChosen = cur.DesktopIsolatedClaudeChosen
 	// and the Get started card put away, from the card itself
 	in.GuideHidden = cur.GuideHidden
 

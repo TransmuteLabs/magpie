@@ -334,6 +334,9 @@ every user.**
 - dccfefdf7 (#2635) made an imported skill follow the app's versioned
   folder. Skills imported before keep the stale link, and only the
   reporter was told to import again.
+- Done right on 11-13: 873a5caa2 (Edward4226, #2961) wrote new launch
+  agents as Standard, and 58ea9cade mended the Background ones already
+  installed the same day.
 - Seen 1× (2026-10-17).
 
 ## The user's own files and settings
@@ -777,6 +780,12 @@ cause:
 - A cancelled run tests nothing. On 10-14 nine pushes in ten minutes
   cancelled each other's runs, and 3c4b4dc97 never had a run of its own;
   its red showed first at 84f14e555.
+  - 11-13: 459d668b3 (#6428) edited docs/sync.html and did not run
+    `node llms-full.mjs`. site's "llms-full.txt is current" test went
+    red at 21:05. Every Test run after it was cancelled by the next
+    push until d5585933f's run finished at ~01:45 with the red. A docs
+    page change runs site/worker.test.mjs, because llms-full.txt is
+    built from those pages (fixed in 3d8860010).
   - 10-28: of main's last 58 Test runs, 49 were cancelled by the next
     push. 0b99b8fbe's new allocation bound went red in macOS's Race job
     (sync.Pool lets go under -race) at 25df3187b, the first run after it
@@ -1347,6 +1356,15 @@ each one.
     (v0.1.4043) met the budget with no raise, partly by joining
     statements onto one line. Joining lines moves nothing out and costs
     readability; it is a last resort, not the way to meet the budget.
+    The same evening 5211fd3ba (+1,016 lines) "packed" costInYuan to
+    land 3 bytes under it, after 9a8219237 had left 14. Each change now
+    shaves until it fits, and the next one has nothing to shave: move a
+    page out of the core first (#2710).
+    An hour later 23457a51f raised it 316 ("no page to move it to")
+    and left the media chip's Copy model ID out to fit: the budget now
+    shapes what users get. Done right: 817d35ffa then moved ~2.8KB of
+    usage helpers into page.js. The raises live in one ~3KB comment
+    line on coreScriptBudget; that is a log, not a growth rate.
   - A record that points elsewhere: 2f34649a6's body is "Run: see push
     notes", and 8f82e08b4's "(see below)" has nothing below it; neither
     says whether what it ran passed. A pointer is not a record (10-14).
@@ -1356,6 +1374,11 @@ each one.
     lives in the root package, so a run of the changed package never
     reaches it. A new package-level regexp is lazyre.New, and `go test
     .` runs beside the package's own.
+    A third on 11-13: d21cb563e (davsync's setupBody) ran
+    ./internal/gui and ./internal/davsync, and 48e394146 (#6534) fixed
+    it. Six times in this file now, so a line here is not reaching the
+    sessions that add a regexp. A guard that only the root package runs
+    belongs in a check every push runs, or beside each package's tests.
 - **Done right on 10-17.** The retire stack (0f1666b38 to de671719a)
   diffed staticcheck's U1000 against its base for dead code, b98f906b1
   was red on the old code for an own-account gap, and 8 subscriptions

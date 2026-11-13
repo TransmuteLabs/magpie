@@ -176,6 +176,7 @@ async function api(path, body, heads, signal) {
       setTimeout(() => configBlockedAsk(data.blocked), 0);
     }
     if (data?.why) err.why = data.why; // a failed move's reason, said in the reader's language
+    if (data?.changed) err.changed = data.changed; // an undo's parts changed since (davsync/undo-sync)
     if (data?.said) err.message = t(data.said, data); // an i18n.js key (api.go)
     // an account the agent is signed in to, refused removal while it has
     // another: said in the reader's language
@@ -515,7 +516,7 @@ function renderAgents() {
     const wide = (f) => f.label === "model" || f.label === "large" || f.label === "executor" || f.label === "planner";
     // a field with nothing to pick and nothing set isn't drawn (#1499)
     const none = (f) => (f.key === "effort" || toggled(f) || f.label === "subagents" || f.label === "gateway" || f.label === SUB_EFFORT || f.label === SUB_MODEL || f.label === AUTO_MODE || f.label === ADVISOR || f.label === MEMORIES || f.label === COMPACT_MODEL || f.label === "sign-in" || f.key === "small" || asideAccount(a, f)) && !f.options.length && !f.value;
-    const shownFields = a.fields.filter((f) => !grouped(a, f) && !none(f) && !codexOwnSub(a, f) && !codexRowed(a, f) && !hermesBot(f) && !ompAdvisorKey(f));
+    const shownFields = a.fields.filter((f) => !grouped(a, f) && !none(f) && !codexOwnSub(a, f) && !codexRowed(a, f) && !hermesBot(f) && !ompAdvisorKey(f) && !protocolField(f));
     const tiers = tierMenu(a);
     if (tiers) shownFields.push(tiers);
     const sorted = shownFields.sort((x, y) => wide(y) - wide(x) || extra(x) - extra(y));
@@ -1402,6 +1403,8 @@ function connectLine(a, kind) {
       words.title = t("magpie set openai_base_url in {agent}'s config.toml, so a request the ChatGPT account {agent} is signed in to has no allowance for goes on to your other ChatGPT accounts on in magpie. {agent} keeps to its own models. To stop it, tick Only switch {agent}'s sign-in under Providers › Codex, or switch those accounts off; connecting {agent} adds magpie's models.", { agent: a.name });
     }
     else if (sw?.p.switchOnly) say(t("Not connected · switching accounts only"));
+    // with Claude Magpie made, connecting wires it, not the user's own Desktop (desktopSets; xMopf7RF on X)
+    else if (a.isolated?.on) say(t("Not connected · connecting puts Claude Magpie on magpie; your own Claude Desktop stays signed in with Anthropic"));
     else if (CONNECT_BEFORE[kindOf(a)]) say(t(CONNECT_BEFORE[kindOf(a)]));
     else if (src === "sub") say(t("Not connected · now on its Claude subscription"));
     else if (src === "chatgpt") say(t("Not connected · now signed in with ChatGPT · OpenAI's models stay available once connected"));
@@ -1413,7 +1416,6 @@ function connectLine(a, kind) {
     else say(t("Not connected · {agent} uses its own settings", { agent: a.name }));
     if (sw) line.append(sw.button);
     if (a.appRestart) line.append(appRestart(a));
-    if (a.isolated && !a.isolated.on) line.append(isoLazy("desktopTwinBtn", a));
     return line;
   }
   if (a.native) {
@@ -1580,6 +1582,10 @@ function connectRow(a, row, who, { fields, extras, fieldBtn, sw, kind }) {
     if (start) row.append(startButton(a, start, fieldBtn));
     // Claude Desktop's: which models its own menu lists
     else if (menuFromList(a)) row.append(menuButton(a));
+    // Use Claude Magpie, beside the switch: the twin, made without the user's own Desktop (xMopf7RF on X).
+    // Shown whenever Desktop isn't on magpie, the twin made already too: it was hidden then, with the
+    // app perhaps deleted since, and the row read as if the switch moved the user's own Desktop
+    if (!a.wired && a.isolated) row.append(isoLazy("desktopTwinBtn", a));
     row.append(sw);
   } else if (kind === "empty") {
     const add = el("button", "ag-add", t("Add a provider"));
@@ -2273,6 +2279,17 @@ function connectPanel(a, { fields, fieldBtn }) {
     // its own Provider in model names, over Settings' (KillTry27355 on X);
     // an agent whose list doesn't take magpie's names has none
     if (!a.noNames) { const v = kv(t("Provider in model names")), put = () => v.append(line(agentSuffixPick(a))); window.agentSuffixPick ? put() : import("./agentsuffix.js").then(put, () => {}); }
+  }
+  // which API magpie's models are asked on, in the app's menu; an api
+  // typed in its file by hand shows as it is (xiaomanweiman on X)
+  const f = a.fields.find(protocolField);
+  if (f?.options.length) {
+    const b = el("button", "field ag-pick ag-protocol"), c = el("span", "chev");
+    b.append(el("span", "v" + (f.value ? "" : " empty"), t(optionFor(f, f.value)?.label || f.value)), c);
+    c.append(svg(CHEV, 11, 1.7));
+    b.dataset.key = f.key;
+    b.onclick = (ev) => openPicker(a, f, b, ev);
+    kv(t("Protocol"), line(b));
   }
   // what a new session starts on: optional, the agent's own last pick
   // unset; Codex's is the very value its /model picks, so one choice
@@ -3493,6 +3510,13 @@ async function openAgentModels(a, anchor, ev) {
   const me = agentModels = { a, anchor, box, saving: Promise.resolve(), changed: false };
   const save = () => {
     me.changed = true;
+    // one its visibility kept, ticked, has the agent shown its provider
+    // (or its group): the provider's others are listed from then on, off
+    // until ticked (whysugarsweet on X)
+    const widen = models.filter((m) => m.kept && !m.hidden).map((m) => m.id);
+    for (const w of models.filter((m) => m.kept && !m.hidden)) {
+      for (const m of models) if (m.kept && (m === w || w.group !== ROUTING_GROUPS && m.group === w.group)) m.kept = false;
+    }
     const hidden = models.filter((m) => m.hidden).map((m) => m.id);
     me.hidden = new Set(hidden);
     // by whose they are, as the state counts them, for a connected row's chips
@@ -3504,7 +3528,9 @@ async function openAgentModels(a, anchor, ev) {
       g.n++;
     }
     const names = models.filter((m) => !m.hidden).slice(0, 3).map((m) => m.name);
-    const count = { shown: models.length - hidden.length, listed: models.length, by, names };
+    const listed = models.filter((m) => !m.kept).length;
+    // a kept one is off and not listed: it counts in neither
+    const count = { shown: models.length - hidden.length, listed, by, names };
     me.count = a.models = count;
     // the line under the name counts them, a menu's button names them; an
     // opened row is drawn again
@@ -3518,7 +3544,13 @@ async function openAgentModels(a, anchor, ev) {
     // shown only its picks, the ones ticked are what is sent: a model that
     // came since the list was opened isn't among them, so it stays off
     const body = only ? { shown: models.filter((m) => !m.hidden).map((m) => m.id) } : { hidden };
+    if (widen.length) body.widen = widen;
     me.saving = me.saving.then(() => api("agent-models/" + encodeURIComponent(a.id), body))
+      .then((r) => {
+        if (!widen.length || !r?.models) return;
+        const still = new Map(r.models.map((m) => [m.id, !!m.kept]));
+        for (const m of models) if (still.has(m.id)) m.kept = still.get(m.id);
+      })
       .catch(statusErr);
   };
   onlySw.onclick = (e) => {
@@ -3958,6 +3990,9 @@ const codexSub = (a) => kindOf(a) === "codex" && a.fields.some((f) => f.label ==
 const codexOwnSub = (a, f) => f.label === "subagents" && codexSub(a);
 // named rows in Codex's settings: no square too (the owner, 10-25)
 const hermesBot = (f) => f.key.startsWith("profile:");
+// Pi's protocol, the api magpie's models are asked on (pi_protocol.go): a
+// row of its own in the opened row, not a control on the row
+const protocolField = (f) => f.label === "protocol";
 const codexRowed = (a, f) => a.id === "codex" && !gatewayMode && (f.label === SUB_MODEL || f.label === MEMORIES);
 // Lead's pick ("") takes the model the lead names; Same as the lead holds
 // every subagent to the lead's own (cleverpigo on X)
@@ -5379,7 +5414,7 @@ function renderList() {
     if (hasIcons) li.append(optionIcon(o));
     const words = el("span", "option-words");
     // a choice of magpie's own (Codex's sign-in) reads in the page's language
-    const own = pick.field.label === "sign-in";
+    const own = pick.field.label === "sign-in" || protocolField(pick.field);
     words.append(el("span", "v", own ? t(o.label || o.value) : o.label || o.value));
     const tell = tellTag(o.tell);
     if (tell) words.append(tell);
@@ -6088,6 +6123,13 @@ $("#foldOff").onclick = () => {
 let providersBehind = false;
 // the readers of a pasted curl command or environment lines (pasteread.js)
 const pasteLoad = () => import("./pasteread.js").catch(() => {});
+// a vendor's setup pasted into a search box opens a custom provider
+// (pastedProvider); a paste with no text in its event, or before the reader
+// loaded, is read from what the box took
+const setupPaste = (q) => {
+  q.addEventListener("paste", (e) => window.pastedProvider?.(e.clipboardData?.getData("text") || "") && e.preventDefault());
+  q.addEventListener("input", (e) => /^insertFrom(Paste|Drop)/.test(e.inputType) && pasteLoad().then(() => window.pastedProvider?.(q.value) && (q.value = "", q.dispatchEvent(new Event("input")))));
+};
 function renderProviders(quiet) {
   pasteLoad();
   if (accountArranging || providerArranging) { accountRenderPending = true; return; }
@@ -6314,6 +6356,7 @@ function findProviders() {
   const q = $("#pvQ");
   if (q) {
     q.oninput = () => { pvQuery = q.value.trim().toLowerCase(); findProviders(); };
+    setupPaste(q);
     q.onkeydown = (e) => {
       if (e.key !== "Escape" || !q.value) return;
       e.preventDefault();
@@ -7135,21 +7178,9 @@ function renderAdd() {
     if (q.value) { q.value = presetQuery = ""; drawTiles(); } else if (providers.providers.length) closeAddSheet();
   };
   q.oninput = () => { presetQuery = q.value; drawTiles(); };
-  // environment lines from a vendor's page (envOf) pasted here open a custom
-  // provider with the name, URL, API and key they give, and the icon of the
-  // site (WJaunita45604 on X); the key goes nowhere but into the draft
-  q.onpaste = (e) => {
-    const c = window.envOf?.(e.clipboardData?.getData("text") || "");
-    if (!c || !c.bases.length) return;
-    e.preventDefault();
-    const name = c.name || t("Custom provider");
-    const d = { id: slug(name), name, preset: "", chat: "", responses: "", anthropic: "", decide: "", catalog: "", key: c.key, api: c.api, chosen: [], extra: c.model ? [c.model] : [], headers: [], icon: "" };
-    for (const [a, base] of c.bases) d[apiField[a]] = base;
-    editing = { custom: true }; draft = d; presetQuery = "";
-    renderProviders();
-    // the site's own icon, when it has one; the draft may be gone by then
-    api("icons/favicon", { url: c.base, name }).then((r) => draft === d && r?.icon && (d.icon = r.icon, renderProviders(true))).catch(() => {});
-  };
+  setupPaste(q);
+  // its hint never cut off (addfloat.js wholeHint)
+  import("./addfloat.js").then(() => wholeHint(q, t("Find a provider")), () => {});
   const c = el("button", "text custom" + (editing?.custom ? " on" : ""));
   c.append(svg(PLUS, 11, 1.8), t("Custom provider"));
   c.dataset.pick = "custom";
@@ -9598,7 +9629,7 @@ function drawEditor(p, presetID) {
     const cx = input(draft.contexts || "", t("e.g. 128k · or gpt-6=1m, comma separated"));
     advIn.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
     advIn.append(...outputField());
-    advIn.append(...compactField());
+    advIn.append(...compactField(p));
     if (p.carriesCompaction) advIn.append(...nativeCompactionField(() => true)[0]);
     advIn.append(...field(t("Fallback"), renderFallback(p), fallbackHint(p)));
     const proxies = el("div", "stack");
@@ -9931,7 +9962,10 @@ function drawEditor(p, presetID) {
   const certTakes = () => p ? !!p.takesClientCert : (custom || remote);
   const certAt = document.createComment("");
   advIn.append(certAt);
-  import("./tlscerts.js").then(() => tlsCertRows({ p, pr, draft, at: certAt, certTakes, onHTTPS, addressOf, asTyped, show: (f) => { const was = showTLS; showTLS = () => { was(); f(); }; showTLS(); }, save: (f) => { pinBody = f; } }), statusErr);
+  // an editor closed before the import is in (#6216) has no draft, or
+  // another editor's: no rows for it
+  const certDraft = draft;
+  import("./tlscerts.js").then(() => draft === certDraft && tlsCertRows({ p, pr, draft, at: certAt, certTakes, onHTTPS, addressOf, asTyped, show: (f) => { const was = showTLS; showTLS = () => { was(); f(); }; showTLS(); }, save: (f) => { pinBody = f; } }), statusErr);
   // Responses over WebSocket (#5781): auto, or the CLI's on kept
   const socketable = () => !p?.account && (p?.preset || pr?.id) !== "google-vertex" && /^\s*https?:\/\//i.test(addressOf("responses"));
   {
@@ -10107,7 +10141,7 @@ function drawEditor(p, presetID) {
     if (!decideOnly(p || pr)) advIn.append(...field(t("Context window"), contextPicks(p, cx), t("How long a request the models take, told to the agents; empty leaves it to the vendor and models.dev")));
     if (!decideOnly(p || pr)) advIn.append(...outputField());
     if (!decideOnly(p || pr)) {
-      advIn.append(...compactField());
+      advIn.append(...compactField(p));
       const [row, refresh] = nativeCompactionField(carriesCompaction);
       advIn.append(...row);
       showCompaction = refresh;
@@ -10423,7 +10457,7 @@ function contextsText(cx) {
 function contextPicks(p, cx) {
   cx.classList.add("contexts");
   const size = (n) => contextsText({ "*": n });
-  const picks = [128e3, 200e3, 256e3, 400e3, 512e3, 1e6].map((n) => ({ label: size(n).toUpperCase(), value: size(n) }));
+  const picks = [128e3, 200e3, 256e3, 400e3, 512e3, 1e6];
   // above the window its vendor says, not the one set here: a model set to
   // its most still offers it
   const big = (p?.models || []).filter((m) => m.max > ("listed" in m ? m.listed || 0 : m.context || 0));
@@ -10438,57 +10472,49 @@ function contextPicks(p, cx) {
       title: big.map((m) => `${m.id}: ${size(m.max).toUpperCase()}`).join("\n"), value, most: true,
     });
   }
-  const row = el("div", "cxpicks");
-  const same = sameContexts;
-  const light = () => {
-    for (const [i, b] of [...row.children].entries()) {
-      const v = picks[i].value;
-      b.classList.toggle("on", !!cx.value.trim() && same(cx.value, typeof v === "function" ? v() : v));
-    }
-  };
-  for (const pk of picks) {
-    const b = el("button", "cxpick" + (pk.most ? " most" : ""), pk.label);
-    b.type = "button";
-    if (pk.title) b.title = pk.title;
-    b.onclick = () => {
-      cx.value = typeof pk.value === "function" ? pk.value() : pk.value;
-      draft.contexts = cx.value;
-      light();
-      limitsSaid();
-    };
-    row.append(b);
-  }
-  cx.oninput = () => { draft.contexts = cx.value; light(); limitsSaid(); };
-  light();
-  const wrap = el("div", "cxfield");
-  wrap.append(cx, row);
-  return wrap;
+  return sizePicks(cx, "contexts", picks, null, limitsSaid);
 }
 
 // limitsSaid: Model settings' rows follow Advanced
 const limitsSaid = () => { for (const f of Object.values(draft?.onLimits || {})) f(); };
 
+// sizePicks: a field's usual sizes as chips under it (or picks of its own,
+// whose value is a function); a chip sets its size for all the models.
+// Compact at's (given p), with models to name, opens All models and each
+// model instead, so several get one size at once (Yanzhongixuy on X).
+function sizePicks(box, key, ns, p, after = () => {}) {
+  const row = el("div", "cxpicks"), now = () => parseContexts(box.value).map;
+  const picks = ns.map((n) => n.value ? n : { n, label: contextsText({ "*": n }).toUpperCase(), value: () => contextsText({ "*": n }) });
+  const light = () => picks.forEach((pk, i) => row.children[i].classList.toggle("on", !!box.value.trim() && (p && Object.values(now() || {}).includes(pk.n) || sameContexts(box.value, pk.value()))));
+  const put = (v) => { box.value = draft[key] = v; light(); after(); };
+  for (const pk of picks) {
+    const b = el("button", "cxpick" + (pk.most ? " most" : ""), pk.label), n = pk.n;
+    b.type = "button";
+    if (pk.title) b.title = pk.title;
+    b.onclick = () => {
+      const map = now(), ids = [...new Set([...(p?.models?.length ? servedIds(p) : []), ...Object.keys(map || {})])].filter((id) => id !== "*");
+      if (!p || !ids.length || !map) return put(pk.value());
+      const set = (on) => {
+        const m = now() || {};
+        for (const id of ["*", ...ids]) if (on.includes(id)) m[id] = n; else if (m[id] === n) delete m[id];
+        put(contextsText(m));
+      };
+      openProtoMenu(b, [{ v: "*", name: "All models" }, ...ids.map((id) => ({ v: id, name: id, literalName: true }))], ["*", ...ids].filter((id) => map[id] === n), set, t("Compact at {n}", { n: pk.label }), "", "left", true, ids.length > 8 ? "Search models" : "");
+    };
+    row.append(b);
+  }
+  box.oninput = () => { draft[key] = box.value; light(); after(); };
+  light();
+  const wrap = el("div", "cxfield");
+  wrap.append(box, row);
+  return wrap;
+}
+
 // outputField: the editor's Max output, set as the window is (ARNO, #875)
 function outputField() {
   const ox = input(draft.outputs || "", t("e.g. 32k · or gpt-6=128k, comma separated"));
   ox.classList.add("outputs");
-  const sizes = [8e3, 16e3, 32e3, 64e3, 128e3].map((n) => contextsText({ "*": n }));
-  const row = el("div", "cxpicks");
-  const same = sameContexts;
-  const light = () => {
-    for (const [i, b] of [...row.children].entries()) b.classList.toggle("on", !!ox.value.trim() && same(ox.value, sizes[i]));
-  };
-  for (const v of sizes) {
-    const b = el("button", "cxpick", v.toUpperCase());
-    b.type = "button";
-    b.onclick = () => { ox.value = v; draft.outputs = v; light(); limitsSaid(); };
-    row.append(b);
-  }
-  ox.oninput = () => { draft.outputs = ox.value; light(); limitsSaid(); };
-  light();
-  const wrap = el("div", "cxfield");
-  wrap.append(ox, row);
-  return field(t("Max output"), wrap, t("The most a reply may hold, told to the agents as their max tokens and sent as max_tokens on Anthropic's API when the agent names none; empty leaves it to the vendor and models.dev"));
+  return field(t("Max output"), sizePicks(ox, "outputs", [8e3, 16e3, 32e3, 64e3, 128e3], null, limitsSaid), t("The most a reply may hold, told to the agents as their max tokens and sent as max_tokens on Anthropic's API when the agent names none; empty leaves it to the vendor and models.dev"));
 }
 
 // nativeCompactionField: Codex's own compaction on the provider (#1099),
@@ -10506,25 +10532,10 @@ function nativeCompactionField(show) {
 // compactField is the editor's Compact at (#876): where Codex and Claude
 // Code compact a conversation on its models when their window is longer,
 // one for all of them and model=size for one, as the window is set.
-function compactField() {
+function compactField(p) {
   const cp = input(draft.compacts || "", t("e.g. 500k · or deepseek-v4-flash=272k, comma separated"));
   cp.classList.add("compacts");
-  const sizes = [128e3, 200e3, 272e3, 500e3, 1e6].map((n) => contextsText({ "*": n }));
-  const row = el("div", "cxpicks");
-  const same = sameContexts;
-  const light = () => {
-    for (const [i, b] of [...row.children].entries()) b.classList.toggle("on", !!cp.value.trim() && same(cp.value, sizes[i]));
-  };
-  for (const v of sizes) {
-    const b = el("button", "cxpick", v.toUpperCase());
-    b.type = "button";
-    b.onclick = () => { cp.value = v; draft.compacts = v; light(); };
-    row.append(b);
-  }
-  cp.oninput = () => { draft.compacts = cp.value; light(); };
-  light();
-  const wrap = el("div", "cxfield");
-  wrap.append(cp, row);
+  const wrap = sizePicks(cp, "compacts", [128e3, 200e3, 272e3, 500e3, 1e6], p);
   return field(t("Compact at"), wrap, t("Where Codex, Claude Code and Grok Build compact a long conversation on these models; empty follows Long conversations, in their settings on the Agents page (else in Settings), and a size at or above a model's window runs it to its whole window"));
 }
 
@@ -11352,24 +11363,6 @@ function renderModels(p) {
       status(v ? t("{model} is asked on {api} once saved", { model: id, api: apiLabel(v) }) : t("{model} is asked as its vendor's list says once saved", { model: id }), "ok");
     }, "API this model is asked on", "model-api-menu");
   };
-  // what a model makes, said by the user (shen-joe, #1399), staged as its API is
-  const kindNow = (id) => draft.modelPrefs?.[id]?.kind ?? p.models.find((m) => m.id === id)?.kind ?? "";
-  const KIND_NAMES = { "": "Auto", image: "Image model", video: "Video model" };
-  const pickKind = (c, id) => {
-    const m = p.models.find((x) => x.id === id) || { id };
-    const opts = [{ v: "", name: "Auto", note: "As its vendor's model list and its name say" },
-      { v: "image", name: "Image model", note: "Draws at the provider's images API (/images/generations), listed under Image generation" },
-      { v: "video", name: "Video model", note: "Makes videos at the provider's videos API (POST /videos, then GET /videos/<id>)" }];
-    openProtoMenu(c, opts, kindNow(id), (v) => {
-      if (v === kindNow(id)) return;
-      const prefs = draft.modelPrefs = draft.modelPrefs || {};
-      prefs[id] = prefs[id] || {};
-      if (v === (m.kind || "")) delete prefs[id].kind; else prefs[id].kind = v;
-      if (!Object.keys(prefs[id]).length) delete prefs[id];
-      draw();
-      status(t(v === "video" ? "{model} makes videos once saved" : v === "image" ? "{model} draws images once saved" : "{model} makes what its vendor's list says once saved", { model: id }), "ok");
-    }, "What this model makes", "model-kind-menu");
-  };
   // staged as Model settings' tick stages it (archsiono on X)
   const setImages = (id, m, v) => {
     const P = draft.modelPrefs = draft.modelPrefs || {}, x = P[id] = P[id] || {};
@@ -11416,10 +11409,7 @@ function renderModels(p) {
         const on = x?.ownImages ? !!m.ownImages : x?.images ?? !!m.images;
         acts.push({ name: on ? "Turn off image input" : "Turn on image input", icon: "M2.5 3.5h11v9h-11zM2.5 10.5l3-3 2.5 2.5 2-2 3 3", tip: t("Whether agents are told {id} can see images", { id }), run: () => setImages(id, m, !on) });
       }
-      if (p.marksKinds && !decidesModel(p, id)) {
-        const k = kindNow(id);
-        acts.push({ name: k ? t("Makes: {kind}…", { kind: t(KIND_NAMES[k]) }) : t("Makes: Auto…"), icon: "M2.5 4h11v8h-11zM6.5 6.25v3.5L9.5 8z", tip: t("Say this model makes images or videos, when the provider's model list doesn't"), run: () => pickKind(c, id) });
-      }
+      if (p.marksKinds && !decidesModel(p, id)) acts.push(kindAct(c, p, id, draw));
       openRowMenu(c, acts, { x: e.clientX, y: e.clientY });
     };
     // the API it is asked on, when one is picked (or staged)
@@ -11429,12 +11419,7 @@ function renderModels(p) {
       tag.title = t("Asked on {api} alone; right-click to change", { api: apiLabel(now) });
       c.append(tag);
     }
-    const kind = p.marksKinds && !decidesModel(p, id) ? kindNow(id) : "";
-    if (kind) {
-      const tag = el("span", "badge mkind-tag", t(kind === "video" ? "video" : "image"));
-      tag.title = t("{kind}, as you said; right-click to change", { kind: t(KIND_NAMES[kind]) });
-      c.append(tag);
-    }
+    if (p.marksKinds && !decidesModel(p, id)) kindTag(c, modelKindNow(p, id));
   };
   const box = el("div", "models");
   const chips = el("div", "mchips");
@@ -12205,9 +12190,51 @@ function mediaChips(cls, ids, key, p, names) {
       show();
     };
     show();
+    // its right-click says what it makes, as a chat model's does: a
+    // video model its id doesn't name sat among the image models with
+    // no way to move it (iceloon on X)
+    if (p.marksKinds) {
+      const tag = () => kindTag(c, modelKindNow(p, id));
+      tag();
+      c.oncontextmenu = (e) => {
+        e.preventDefault();
+        const again = agentMenu?.anchor === c || protoMenu?.anchor === c;
+        closeAgentMenu(); closeProtoMenu();
+        again || openRowMenu(c, [kindAct(c, p, id, tag)], { x: e.clientX, y: e.clientY });
+      };
+    }
     chips.append(c);
   }
   return chips;
+}
+
+// what a model makes, said by the user (shen-joe, #1399), staged in
+// draft.modelPrefs as its API is: a chat model's, or an image or video
+// model's, listed apart (p.mediaKinds)
+const KIND_NAMES = { "": "Auto", image: "Image model", video: "Video model" };
+const savedModelKind = (p, id) => p.models.find((m) => m.id === id)?.kind ?? p.mediaKinds?.[id] ?? "";
+const modelKindNow = (p, id) => draft.modelPrefs?.[id]?.kind ?? savedModelKind(p, id);
+
+// kindAct: the right-click menu's Makes… for p's model id, staged in
+// draft.modelPrefs; redraw shows what was staged
+function kindAct(c, p, id, redraw) {
+  const k = modelKindNow(p, id);
+  return { name: k ? t("Makes: {kind}…", { kind: t(KIND_NAMES[k]) }) : t("Makes: Auto…"), icon: "M2.5 4h11v8h-11zM6.5 6.25v3.5L9.5 8z", tip: t("Say this model makes images or videos, when the provider's model list doesn't"), run: () => openProtoMenu(c, [{ v: "", name: "Auto", note: "As its vendor's model list and its name say" },
+    { v: "image", name: "Image model", note: "Draws at the provider's images API (/images/generations), listed under Image generation" },
+    { v: "video", name: "Video model", note: "Makes videos at the provider's videos API (POST /videos, then GET /videos/<id>)" }], k, (v) => {
+    if (v == k) return;
+    const P = draft.modelPrefs ||= {}, x = P[id] ||= {};
+    if (v == savedModelKind(p, id)) delete x.kind; else x.kind = v;
+    if (!Object.keys(x).length) delete P[id];
+    redraw();
+    status(t(v === "video" ? "{model} makes videos once saved" : v === "image" ? "{model} draws images once saved" : "{model} makes what its vendor's list says once saved", { model: id }), "ok");
+  }, "What this model makes", "model-kind-menu") };
+}
+
+// kindTag: chip c's tag of what the user said it makes, or none
+function kindTag(c, kind) {
+  c.querySelector(".mkind-tag")?.remove();
+  if (kind) c.append(Object.assign(el("span", "badge mkind-tag", t(kind === "video" ? "video" : "image")), { title: t("{kind}, as you said; right-click to change", { kind: t(KIND_NAMES[kind]) }) }));
 }
 
 // renderRouting: spread over keys or accounts and stickiness, staged in
@@ -14396,7 +14423,8 @@ function windowCapMeter(m, p, user, w) {
   if (amount) b.append(el("span", "aq-own", t("Cap {n}", { n: amountText(amount) })));
   else if (own) b.append(el("span", "aq-own", own >= 100 ? t("No cap") : t("Cap {n}%", { n: own })));
   const reset = m.title || (w.resetsAt ? resetText(new Date(w.resetsAt), new Date(w.resetsAt).toLocaleString(intlLang())) : "");
-  b.title = [reset, amount ? t("{window} has a cap of its own: magpie counts this account as used up once it has used {n} of {window}, until it renews. Click to change", { window: name, n: amountText(amount) })
+  b.title = [reset, w.extra && (amount || own && own < 100) ? t("Once this account has spent {n} of its extra usage, magpie sends it nothing past its plan: it is used until its plan runs out, then rests until the plan renews. Click to change", { n: amount ? amountText(amount) : own + "%" })
+    : amount ? t("{window} has a cap of its own: magpie counts this account as used up once it has used {n} of {window}, until it renews. Click to change", { window: name, n: amountText(amount) })
     : own >= 100 ? t("No cap on {window}: it is used to 100%, whatever this account's cap. Click to change", { window: name })
     : own ? t("{window} has a cap of its own: magpie counts this account as used up once {window} is at {n}%, until it renews. Click to change", { window: name, n: own })
     : t("Click to give {window} a cap of its own, apart from this account's", { window: name })].filter(Boolean).join("\n");
@@ -16018,14 +16046,21 @@ function fmtN(n) {
 // or cny, converted with fx (the rate this session last got from magpie,
 // with when that was and whether it's stale — kept only for the tooltip;
 // see applyPrefs, which fills both from what /api/settings answers).
+// "provider" shows a cost of one provider's calls in what that provider
+// sells in (yuanProviders, from fx's yuan: DeepSeek, Kimi's .cn, Zhipu…)
+// and every sum across providers in totalCurrency.
 let currency = "usd";
+let totalCurrency = "usd";
+let yuanProviders = [];
 let fx = { rate: 0, at: null, stale: true };
-function fmtCost(t) {
+// costInYuan is whether a cost of prov's calls (none: a sum) shows in yuan
+const costInYuan = (p) => fx.rate > 0 && (currency !== "provider" ? currency === "cny" : p && p !== "session-unknown" ? yuanProviders.includes(p) : totalCurrency === "cny");
+function fmtCost(t, prov) {
   // no cost read (null, or a reply without one) is unknown: nothing shown,
   // not $0 and not a throw that stops the page drawing (#3406)
   if (typeof t.cost !== "number" || (!t.cost && t.unpriced)) return "";
   let c = t.cost, sign = "$";
-  if (currency === "cny" && fx.rate > 0) { c = c * fx.rate; sign = "¥"; }
+  if (costInYuan(prov)) { c = c * fx.rate; sign = "¥"; }
   const s = c >= 100 ? c.toFixed(0) : c >= 1 ? c.toFixed(2) : c.toFixed(3);
   return sign + s + (t.unpriced ? "+" : "");
 }
@@ -17376,11 +17411,14 @@ if (mode === "panel") {
 let panelUse = null; // the answer for the period, and provider, shown
 // the window's Usage periods, All among them (#860)
 const PANEL_USE_PERIODS = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All"]];
-let panelUsePeriod = "today", panelUseProvider = "", panelUseMetric = "tokens", panelUseComputer = "", panelUseDay = "";
+// what the ranking tells apart, all providers' calls: their providers or
+// their models (OHHHHHH05 on X); one provider picked, its models
+let panelUsePeriod = "today", panelUseProvider = "", panelUseMetric = "tokens", panelUseComputer = "", panelUseDay = "", panelUseSplit = "provider";
 try {
   const p = localStorage.getItem("magpie.panelUsePeriod"), m = localStorage.getItem("magpie.panelUseMetric");
   if (PANEL_USE_PERIODS.some(([id]) => id === p)) panelUsePeriod = p;
   if (["tokens", "cost", "calls"].includes(m)) panelUseMetric = m;
+  if (localStorage.getItem("magpie.panelUseSplit") == "model") panelUseSplit = "model";
 } catch {}
 let panelUseAt = 0;
 
@@ -17525,25 +17563,32 @@ function renderPanelUse() {
     blk("Cache hit rate", hitRate === null ? "—" : hitPct(hitRate), cacheLeftOut(l) || t("of the prompt"));
     const card = el("div", "pu-card");
     const head = el("div", "led-bar");
-    const met = el("div", "segs");
-    for (const [id, name] of LED_METRICS) {
-      const b = el("button", "opt" + (id === panelUseMetric ? " on" : ""), t(name));
-      b.onclick = () => {
-        if (id === panelUseMetric) return;
-        panelUseMetric = id;
-        try { localStorage.setItem("magpie.panelUseMetric", id); } catch {}
-        renderPanelUse();
-      };
-      met.append(b);
-    }
-    head.append(met);
-    const split = panelUseProvider ? "model" : "provider";
+    // a switch of the card's, kept for the next time the panel opens
+    const seg = (cls, opts, cur, key, set) => {
+      const s = el("div", cls);
+      for (const [id, name] of opts) {
+        const b = el("button", "opt" + (id === cur ? " on" : ""), t(name));
+        b.onclick = () => {
+          if (id === cur) return;
+          set(id);
+          try { localStorage.setItem("magpie." + key, id); } catch {}
+          renderPanelUse();
+        };
+        s.append(b);
+      }
+      return s;
+    };
+    const met = seg("segs", LED_METRICS, panelUseMetric, "panelUseMetric", (id) => panelUseMetric = id);
+    const by = seg("segs pu-split", [["provider", "Provider"], ["model", "Model"]], panelUseSplit, "panelUseSplit", (id) => panelUseSplit = id);
+    head.append(met, ...(panelUseProvider ? [] : [el("span", "grow"), by]));
+    const split = panelUseProvider ? "model" : panelUseSplit;
     const chart = el("div", "led-chart"), rank = el("div", "led-rank");
     card.append(head, chart, rank);
     out.push(tot, card);
     box.replaceChildren(...out);
     slide(per, "puPeriod");
     slide(met, "puMetric");
+    if (!panelUseProvider) slide(by, "puSplit");
     drawLedColumns(chart, l, split, panelUseMetric, true, (day) => {
       panelUseDay = panelUseDay === day ? "" : day;
       loadPanelUse().catch(() => {});
@@ -18667,63 +18712,6 @@ function familyQuota(sub) {
   return [box, b];
 }
 
-// holdsLine: a window's whole (WindowHolds), how in its tooltip. With a
-// baseCost (#5861, no long-context premium) its figure switches every card.
-let holdsBase = kept("holdsBase", false);
-function holdsCostText(h) {
-  const c = fmtCost({ cost: holdsBase ? h.baseCost : h.cost });
-  return holdsBase ? t("≈ {cost} base", { cost: c }) : t("≈ {cost} API", { cost: c });
-}
-function holdsLine(h) {
-  const cost = (c) => fmtCost({ cost: c });
-  const line = el("span", "quota-holds");
-  line.append(el("span", "", t("Whole ≈ {n} tokens", { n: fmtN(h.tokens) }) + (h.priced ? " ·" : "")));
-  const two = h.priced && h.baseCost > 0;
-  if (two) {
-    const b = el("button", "quota-holds-cost", holdsCostText(h));
-    b.type = "button";
-    b._holds = h;
-    b.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      holdsBase = !holdsBase;
-      keep("holdsBase", holdsBase);
-      for (const o of document.querySelectorAll(".quota-holds-cost")) if (o._holds) o.textContent = holdsCostText(o._holds);
-    };
-    line.append(" ", b);
-  } else if (h.priced) line.append(" ", el("span", "", "≈ " + cost(h.cost)));
-  const r = h.routed || {};
-  line.title = [
-    h.priced ? t("The whole window ≈ {tokens} tokens of input and output, ≈ {cost} at API list prices", { tokens: fmtN(h.tokens), cost: cost(h.cost) })
-      : t("The whole window ≈ {tokens} tokens of input and output; some of its models have no API price", { tokens: fmtN(h.tokens) }),
-    ...(two ? [
-      t("≈ {cost} at base rates, without long-context premiums: for comparing cycles", { cost: cost(h.baseCost) }),
-      t("Neither is an official dollar allowance or a fixed quota; click the figure to switch"),
-    ] : []),
-    t("Reckoned from what magpie routed through this account in this window: {tokens} tokens in {calls} calls, {cache} cache reads, over the {used} the vendor says is used", { tokens: fmtN(r.tokens || 0), calls: r.calls || 0, cache: fmtN(r.cacheRead || 0), used: Math.round(h.used) + "%" }),
-    t("Only magpie's calls are counted: if this account is also used elsewhere, this reads low"),
-    t("A heavier model fills a window sooner: this holds for the models used so far"),
-  ].join("\n");
-  return line;
-}
-
-// holdsWhy: why a whole isn't told (provider.Holds*); one not listed says nothing.
-const holdsWhy = {
-  low: () => t("Under {n}% of it is used: a rounded share that small is too coarse to scale up", { n: 5 }),
-  clock: () => t("Its reset time isn't known, so neither is when it began"),
-  log: () => t("It began before magpie's request log, so some of its calls weren't seen"),
-  none: () => t("magpie hasn't routed a call through this account in it yet"),
-  credits: () => t("A call in it may have been paid from credits or extra usage, not from the window"),
-};
-// holdsUnknownLine: a window whose whole the server couldn't reckon
-// (#2045): "not enough data", muted, and why in its tooltip, where it said
-// nothing before and a reader couldn't tell a gap from a fault.
-function holdsUnknownLine(why) {
-  const line = el("span", "quota-holds-why", t("Whole: not enough data"));
-  line.title = t("The whole window can't be estimated from magpie's calls yet") + "\n" + holdsWhy[why]();
-  return line;
-}
-
 // isKeyCard: the card of a remote magpie's gateway keys (#1547,
 // remote_key_limits.go), "<remote>/~keys", one account per key; quotaName
 // says so by its name, which is the remote's.
@@ -18826,7 +18814,7 @@ function quotaWindows(sub) {
     // the reset's line, so the window keeps its three rows
     if (w.holds) {
       if (!r) quota.append(r = el("div", "quota-reset"));
-      const line = holdsLine(w.holds);
+      const line = holdsLine(w.holds, sub.provider);
       // a past cycle's whole is reckoned at its own last reading (#2009)
       // the last window's, kept until this one has data to tell its own
       if (sub.history || w.holds.prevAt) line.title = t("Estimated from the window that began {start}, read {at}", { start: quotaCycleDate(w.holds.since), at: quotaCycleDate(w.recordedAt || w.holds.prevAt) }) + "\n" + line.title;
@@ -18876,9 +18864,9 @@ function ledCredits(x) {
 const ledTook = (ms = 0) => (ms = Math.round(ms) || 0) < 1000 ? t("{n} ms", { n: ms }) : t("{n} s", { n: (ms / 1000).toFixed(ms < 10e3 ? 1 : 0) });
 
 // a cost as an axis says it: the currency Settings picks, no more digits than it takes
-function ledMoney(v) {
+function ledMoney(v, prov) {
   let sign = "$";
-  if (currency === "cny" && fx.rate > 0) { v *= fx.rate; sign = "¥"; }
+  if (costInYuan(prov)) { v *= fx.rate; sign = "¥"; }
   return sign + (v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(2));
 }
 
@@ -19351,7 +19339,7 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
 const THEMES = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
 const LOCALES = [["system", "System"], ["en", "English"], ["zh", "简体中文"], ["zh-TW", "繁體中文"], ["ja", "日本語"], ["de", "Deutsch"]];
 const TRAYS = [["panel", "Open the quick panel"], ["window", "Open the main window"]];
-const CURRENCIES = [["usd", "$ USD"], ["cny", "¥ CNY"]];
+const CURRENCIES = [["usd", "$ USD"], ["cny", "¥ CNY"], ["provider", "By provider"]];
 // The text size is the windows' own zoom, as a browser's Ctrl/Cmd +: the
 // page is laid out again in larger CSS pixels, so everything it measures is
 // as at 100%, and magpie sizes the windows around it (textsize.go). None is
@@ -19605,8 +19593,12 @@ function applyPrefs(s, rate) {
   const moved = !!got && got.rate !== fx.rate;
   if (got) fx = got;
   let costs = false;
-  if (currency !== (s.currency || "usd") || (moved && currency === "cny")) {
+  const yuan = got?.yuan || [];
+  if (currency !== (s.currency || "usd") || totalCurrency !== (s.totalCurrency || "usd") ||
+    (currency === "provider" && yuan + "" !== yuanProviders + "") || (moved && currency !== "usd")) {
     currency = s.currency || "usd";
+    totalCurrency = s.totalCurrency || "usd";
+    yuanProviders = yuan;
     costs = true;
   }
   if (chineseUnits !== !!s.chineseUnits) {
@@ -20381,17 +20373,14 @@ async function renderSync(v) {
   };
   const btn = (label, fn, cls = "text") => { const b = el("button", cls, label); b.onclick = fn; return b; };
   const toggle = (id) => () => { syncOpen = syncOpen === id ? "" : id; renderSync(); };
-  const parts = (ps) => ps.map((p) => t({ providers: "providers", settings: "settings", profiles: "profiles", agents: "agents' models", library: "library", memory: "memory", usage: "usage", signins: "sign-ins" }[p])).join(t(", "));
+  const parts = window.syncParts = (ps) => ps.map((p) => t({ providers: "providers", settings: "settings", profiles: "profiles", agents: "agents' models", library: "library", memory: "memory", usage: "usage", signins: "sign-ins" }[p])).join(t(", "));
 
   // off: what it would keep the same, from the view's toggles (none: all on)
-  const goes = ["settings", "profiles"];
-  if (v.agents !== false) goes.push("agents");
-  if (v.library !== false) goes.push("library");
-  if (v.memory !== false) goes.push("memory");
+  const goes = ["settings", "profiles", "agents", "library", "memory"].filter((p) => v[p] !== false);
   if (v.usage) goes.push("usage");
   if (v.signIns) goes.push("signins");
-  let line = t("Keeps {parts} the same on every computer", {
-    parts: t(v.keys === false ? "providers without their API keys" : "providers with their API keys") + t(", ") + parts(goes) });
+  const provs = v.providers === false ? [] : [t(v.keys === false ? "providers without their API keys" : "providers with their API keys")];
+  let line = t("Keeps {parts} the same on every computer", { parts: [...provs, parts(goes)].filter(Boolean).join(t(", ")) });
   const s3 = v.on && v.kind === "s3";
   const github = v.on && v.kind === "github";
   if (v.on) {
@@ -20453,6 +20442,9 @@ async function renderSync(v) {
   }
   if (syncOpen === "dav") box.append(syncFile("davForm", v));
   if (v.on) {
+    // the parts left out of sync, Preview a sync and Undo the last sync
+    // (#6428), in syncfiles.js
+    syncFile("askPreviewRows", box.appendChild(el("div")), v, sub);
     // how often it syncs by itself, or never: a free 坚果云 account is
     // allowed only so many requests (#847)
     const every = v.auto ?? 3;
@@ -20685,7 +20677,8 @@ function renderTrayUsage(s, keep) {
   $("#quotaReadsSegs").replaceChildren(segs([["", t("Automatic")], ["asked", t("When I ask")]], s.quotaReads || "", (v) =>
     writingPrefs(api("settings/quota-reads", { reads: v })).then((ns) => { prefs = state.settings = ns; renderSettings(); })
       .catch(settingsErr)));
-  $("#currencySegs").replaceChildren(segs(CURRENCIES.map(([id, name]) => [id, t(name)]), s.currency || "usd", (v) => savePrefs({ ...keep, currency: v })));
+  // the currency rows, in currencyprefs.js
+  import("./currencyprefs.js").then(() => currencyPrefs(s, keep), () => {});
   // 万 and 亿 are Chinese's alone: in English a count is always K, M and B
   $("#unitsRow").hidden = locale !== "zh" && locale !== "zh-TW";
   $("#unitsSegs").replaceChildren(segs([[false, t("K / M / B")], [true, t("万 / 亿")]], !!s.chineseUnits,
@@ -20697,10 +20690,6 @@ function renderTrayUsage(s, keep) {
   renderAgentPrefs();
   renderAgentPrefLinks();
   renderProvPrefLinks();
-  const rate = s.fx?.rate;
-  const currencySub = $("#currencySub");
-  currencySub.textContent = t("What a cost — the Usage page's, the tray panel's, the TUI's and the CLI's — is shown as; a vendor's own balance, already in its own currency, is never converted");
-  currencySub.title = rate ? t("1 USD = {rate} CNY{when}", { rate: rate.toFixed(2), when: s.fx.at ? " · " + (s.fx.stale ? t("last fetched {when}", { when: syncWhen(s.fx.at) }) : t("fetched {when}", { when: syncWhen(s.fx.at) })) : "" }) : "";
   $("#trayUsageRow").hidden = web;
   if (web) return;
   const mac = document.body.classList.contains("mac");
@@ -21846,9 +21835,14 @@ function renderReplies(s, keep) {
   const c = segRow("claudeLeanRow", t("Short Claude system prompt"),
     t("A Claude subscription answers with the agent's own instructions as its system prompt, in place of Claude Code's, about 1K fewer tokens each request. Still the real Claude Code, but its requests look less like Claude Code's own, which can put the account more at risk"),
     onOff, s.claudeLeanPrompt ? "on" : "off", (v) => savePrefs({ ...keep, claudeLeanPrompt: v === "on" }));
+  // whether a Claude account past its plan is sent requests Anthropic
+  // bills as extra usage (on unless turned off)
+  const x = segRow("claudeExtraRow", t("Spend extra usage"),
+    t("Once a Claude account has used up its plan, Anthropic bills further requests as extra usage. Off, magpie sends the account nothing until its plan renews, and your other accounts take the requests"),
+    onOff, s.claudeNoExtraUsage ? "off" : "on", (v) => savePrefs({ ...keep, claudeNoExtraUsage: v === "off" }));
   box.append(r, l);
   // a Claude run's, in its provider's editor (PROV_PREFS)
-  $("#claudeRunList").replaceChildren(c);
+  $("#claudeRunList").replaceChildren(c, x);
   $("#claudeRunList").classList.toggle("gw", gatewayMode);
   $("#routeList").replaceChildren(f, a, k, $("#busyLoadRow"), $("#contextCapRow"));
 }
@@ -22858,9 +22852,9 @@ function prefsKeep(s) {
     redact: !!s.redact, redactPersonal: !!s.redactPersonal, redactKinds: s.redactKinds || {}, redactWords: s.redactWords || [], redactWordsAnyCase: !!s.redactWordsAnyCase, redactWordsWhole: !!s.redactWordsWhole, redactShape: !!s.redactShape, codexWarmup: s.codexWarmup || "",
     claudeWarmup: s.claudeWarmup || "", codexWarmAt: s.codexWarmAt || "", claudeWarmAt: s.claudeWarmAt || "",
     codexWarmAts: warmTimes(s.codexWarmAts, s.codexWarmAt), claudeWarmAts: warmTimes(s.claudeWarmAts, s.claudeWarmAt), workbuddyCheckin: !!s.workbuddyCheckin, traeCheckin: !!s.traeCheckin, minimaxCheckin: !!s.minimaxCheckin, qoderCheckin: !!s.qoderCheckin, checkinAt: s.checkinAt || "", noStats: !!s.noStats, noUsageStats: !!s.noUsageStats, signInLinkOnly: !!s.signInLinkOnly,
-    replyModel: s.replyModel || "", noLoopGuard: !!s.noLoopGuard, claudeLeanPrompt: !!s.claudeLeanPrompt, claudePrintMode: !!s.claudePrintMode, refusalRetries: s.refusalRetries ?? null, retryAfterCap: s.retryAfterCap ?? null,
+    replyModel: s.replyModel || "", noLoopGuard: !!s.noLoopGuard, claudeLeanPrompt: !!s.claudeLeanPrompt, claudeNoExtraUsage: !!s.claudeNoExtraUsage, claudePrintMode: !!s.claudePrintMode, refusalRetries: s.refusalRetries ?? null, retryAfterCap: s.retryAfterCap ?? null,
     noUpdatePill: !!s.noUpdatePill, noAutoUpdate: !!s.noAutoUpdate, updateEvery: s.updateEvery || 360, autoRestart: !!s.autoRestart, noAutoDownload: !!s.noAutoDownload, updateChannel: s.updateChannel || "",
-    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayNoNumber: !!s.trayNoNumber, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, trayWindows: s.trayWindows || {}, vision: s.vision || "", visionEffort: s.visionEffort || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", videoGen: s.videoGen || "", imageTimeout: s.imageTimeout || 0, classifyTimeout: s.classifyTimeout || 0, searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd",
+    trayUsage: s.trayUsage || "", trayUsageEvery: s.trayUsageEvery || 3, trayNoLogos: !!s.trayNoLogos, trayNoBird: !!s.trayNoBird, trayNoNumber: !!s.trayNoNumber, trayPace: !!s.trayPace, trayNoCost: !!s.trayNoCost, trayWindows: s.trayWindows || {}, vision: s.vision || "", visionEffort: s.visionEffort || "", searcherEffort: s.searcherEffort || "", imageGen: s.imageGen || "", videoGen: s.videoGen || "", imageTimeout: s.imageTimeout || 0, classifyTimeout: s.classifyTimeout || 0, searcher: s.searcher || "", searchFirst: s.searchFirst || "", currency: s.currency || "usd", totalCurrency: s.totalCurrency || "", trayCurrency: s.trayCurrency || "",
     chineseUnits: !!s.chineseUnits, dayStart: s.dayStart || 0, usageAlert: s.usageAlert || 0, balanceAlert: s.balanceAlert || 0, resetReminder: s.resetReminder || 0,
     turnDoneAlert: s.turnDoneAlert || 0, maskAlert: !!s.maskAlert };
 }

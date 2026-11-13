@@ -102,8 +102,21 @@ type Settings struct {
 	// TUI's and the CLI's — is shown converted to: usd (its native
 	// currency, list prices being in dollars) or cny, at a live exchange
 	// rate (see internal/fx). A vendor's own balance, already in its own
-	// currency (a Chinese relay's ¥), is never touched by this.
+	// currency (a Chinese relay's ¥), is never touched by this. "provider"
+	// shows each provider's costs in the currency it prices in (yuan for
+	// one that sells in China's, provider.PricesInYuan; dollars for the
+	// rest), and a sum of several providers' in TotalCurrency (CostIn,
+	// TotalCostIn; onkashiko on X).
 	Currency string `json:"currency,omitempty"`
+	// TotalCurrency is what a sum of several providers' costs — a total, an
+	// agent's, a chart's — is shown in when Currency is "provider": usd or
+	// cny, "" being usd. It means nothing with another Currency.
+	TotalCurrency string `json:"totalCurrency,omitempty"`
+	// TrayCurrency is what the menu bar's and the tray tooltip's cost of
+	// magpie's totals is in: usd or cny, "" following the totals'
+	// (TrayCostIn; onkashiko on X, who wanted the bar and the totals set
+	// apart). Every sum is still made in dollars and changed once.
+	TrayCurrency string `json:"trayCurrency,omitempty"`
 	// ChineseUnits shortens a large count in 万 and 亿 when magpie speaks
 	// Chinese (8000 万 rather than 80M); otherwise it is in K, M and B, as
 	// prices per million tokens and context windows (200K, 1M) are, in
@@ -481,6 +494,15 @@ type Settings struct {
 	// real Claude Code, its billing line and identity line kept; off, as by
 	// default, the run is the shape every Claude Code run has.
 	ClaudeLeanPrompt bool `json:"claudeLeanPrompt,omitempty"`
+	// ClaudeNoExtraUsage keeps magpie from sending a Claude subscription
+	// account a request once a plan window that stops it is used up,
+	// where Anthropic would go on on the account's extra usage (usage
+	// credits bought beyond the plan, baksili_ on X): routing holds it at
+	// 100% of that window, as a Codex account set not to spend its
+	// credits (CodexNoCredits), and the user's other accounts, groups and
+	// fallbacks take the request. Off, as by default, such an account is
+	// sent requests and Anthropic decides whether extra usage pays.
+	ClaudeNoExtraUsage bool `json:"claudeNoExtraUsage,omitempty"`
 	// ClaudePrintMode runs a Claude subscription's Claude Code as `claude
 	// -p` always. Off, as by default, a model request runs in Claude
 	// Code's interactive mode, as a person runs it, and never as -p: the
@@ -923,9 +945,16 @@ type Settings struct {
 	// config folder of its own (#6459, xMopf7RF on X): Claude Magpie.app
 	// starts Desktop with CLAUDE_CONFIG_DIR set to ~/.claude-magpie-desktop,
 	// and magpie writes the windows and capabilities of Desktop's models
-	// there instead of ~/.claude/settings.json. Off by default: the folder
-	// starts with none of ~/.claude's CLAUDE.md, skills, plugins or history.
+	// there instead of ~/.claude/settings.json. The folder starts with none
+	// of ~/.claude's CLAUDE.md, skills, plugins or history. Turned on when
+	// a Claude Magpie is made new (no Claude-Magpie-3p yet) and the user
+	// never chose (xMopf7RF on X: a twin like a phone's app clone); one
+	// made before keeps what it had.
 	DesktopIsolatedClaude bool `json:"desktopIsolatedClaude,omitempty"`
+	// DesktopIsolatedClaudeChosen: the user set DesktopIsolatedClaude
+	// themselves (the Advanced fold, `launcher claude-dir`), so a new
+	// Claude Magpie never turns it on over their off.
+	DesktopIsolatedClaudeChosen bool `json:"desktopIsolatedClaudeChosen,omitempty"`
 	// GuideHidden: the user put away the Agents page's Get started card
 	// (wangye1644294 on X) before finishing it. Kept here, not in the
 	// page's storage, so the panel, the window and a reload agree.
@@ -1484,12 +1513,53 @@ func (s Settings) ClassifyWait() time.Duration {
 	return time.Duration(min(n, ClassifyTimeoutMost)) * time.Second
 }
 
+// CurrencyByProvider is Currency's choice of each provider's own currency.
+const CurrencyByProvider = "provider"
+
+// CostIn is the currency, usd or cny, a cost of one provider's calls is
+// shown in: with Currency "provider", the one it prices in (yuan: whether
+// it sells in China's yuan, provider.PricesInYuan), else Currency.
+func (s Settings) CostIn(yuan bool) string {
+	if s.Currency == CurrencyByProvider {
+		if yuan {
+			return "cny"
+		}
+		return "usd"
+	}
+	return s.TotalCostIn()
+}
+
+// TotalCostIn is the currency, usd or cny, a sum of several providers'
+// costs is shown in: TotalCurrency with Currency "provider", else
+// Currency.
+func (s Settings) TotalCostIn() string {
+	c := s.Currency
+	if c == CurrencyByProvider {
+		c = s.TotalCurrency
+	}
+	if c == "cny" {
+		return "cny"
+	}
+	return "usd"
+}
+
+// TrayCostIn is the currency, usd or cny, the menu bar's and the tray
+// tooltip's totals are shown in: TrayCurrency, else TotalCostIn.
+func (s Settings) TrayCostIn() string {
+	if s.TrayCurrency == "usd" || s.TrayCurrency == "cny" {
+		return s.TrayCurrency
+	}
+	return s.TotalCostIn()
+}
+
 // Themes and Langs are the accepted values, in the order the UI offers them.
 var (
 	Themes     = []string{"system", "light", "dark"}
 	Langs      = []string{"system", "en", "zh", "zh-TW", "ja", "de"}
 	Trays      = []string{"panel", "window"}
-	Currencies = []string{"usd", "cny"}
+	Currencies = []string{"usd", "cny", CurrencyByProvider}
+	// TotalCurrencies are TotalCurrency's values, "" being usd.
+	TotalCurrencies = []string{"usd", "cny"}
 	// Warmups are CodexWarmup's and ClaudeWarmup's values, off as "".
 	Warmups = []string{"", "week", "all"}
 	// TrayEvery are TrayUsageEvery's values, in minutes.
@@ -1698,7 +1768,7 @@ func (s *Settings) KeepOwn(cur Settings) {
 	s.WindowMaximised, s.KeepAwake, s.KeepAwakeDisplay = cur.WindowMaximised, cur.KeepAwake, cur.KeepAwakeDisplay
 	s.WindowAt = cur.WindowAt
 	s.TrayUsages, s.TrayUsage, s.TrayUsageEvery, s.TrayNoLogos, s.TrayNoBird, s.TrayPace, s.TrayNoCost = cur.TrayUsages, cur.TrayUsage, cur.TrayUsageEvery, cur.TrayNoLogos, cur.TrayNoBird, cur.TrayPace, cur.TrayNoCost
-	s.TrayWindows, s.TrayNoNumber = cur.TrayWindows, cur.TrayNoNumber
+	s.TrayWindows, s.TrayNoNumber, s.TrayCurrency = cur.TrayWindows, cur.TrayNoNumber, cur.TrayCurrency
 	s.GatewayMode = cur.GatewayMode
 	s.NoWSLAgents = cur.NoWSLAgents
 	s.QuotaReads = cur.QuotaReads
@@ -2469,6 +2539,12 @@ func saveOwn(s Settings, recording, reads bool) error {
 	}
 	if !slices.Contains(Currencies, s.Currency) {
 		return fmt.Errorf("currency must be one of %v, not %q", Currencies, s.Currency)
+	}
+	if s.TotalCurrency != "" && !slices.Contains(TotalCurrencies, s.TotalCurrency) {
+		return fmt.Errorf("total currency must be usd or cny, not %q", s.TotalCurrency)
+	}
+	if s.TrayCurrency != "" && !slices.Contains(TotalCurrencies, s.TrayCurrency) {
+		return fmt.Errorf("menu bar currency must be usd or cny, not %q", s.TrayCurrency)
 	}
 	if !slices.Contains(Warmups, s.CodexWarmup) {
 		return fmt.Errorf("codex warm-up must be off, week or all, not %q", s.CodexWarmup)

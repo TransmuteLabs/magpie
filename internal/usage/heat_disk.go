@@ -73,6 +73,7 @@ func heatDiskRead(key string) ([]Day, bool) {
 // heatDiskWrite keeps days before cut from since under key, through a
 // file renamed over the last.
 func heatDiskWrite(key string, cut, since time.Time, days []Day) error {
+	saveAsks() // the asks its rows were made of first (catalogBase)
 	b, err := json.Marshal(heatDiskEntry{Key: key, Cut: cut, Since: since, Days: days})
 	if err != nil {
 		return err
@@ -202,6 +203,7 @@ func sourceDigest(c *rowChunk, rows *chunkRows) [sha256.Size]byte {
 	}
 	d.by[c.serial] = struct{}{}
 	d.Unlock()
+	derivedUsed() // by and last go when idle (dropDigestTurns)
 	return sum
 }
 
