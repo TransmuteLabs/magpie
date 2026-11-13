@@ -994,6 +994,10 @@ magpie.plugin("library", (ctx) => {
     const top = page.scrollTop;
     const focus = document.activeElement?.dataset?.lib; // keep the caret where the reader is typing
     const caret = focus ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+    // an editor open before is open still, not opened again: drawn anew
+    // it would fade and slide in on every render, which a poll's made a
+    // jitter every 2s (Nietzsche_Li on X)
+    const had = new Set([...page.querySelectorAll(".lib-detail[data-detail]")].map((d) => d.dataset.detail));
     page.replaceChildren();
     fits = [];
     // the MCP servers alone with no agent to write to; the tab the reader
@@ -1025,6 +1029,7 @@ magpie.plugin("library", (ctx) => {
     else renderSkills(body);
     page.append(body);
     for (const n of body.querySelectorAll(".row-head .note")) n.title = n.textContent;
+    for (const d of page.querySelectorAll(".lib-detail[data-detail]")) if (had.has(d.dataset.detail)) d.classList.add("kept");
     for (const f of fits.splice(0)) f();
     page.scrollTop = top;
     syncLists(); // a long list's rows where the view is, before it's painted
@@ -1518,9 +1523,9 @@ magpie.plugin("library", (ctx) => {
     if (!s?.on || !(s.downloading || s.reading || (s.installed && s.read < s.of && !s.failed))) return;
     semPoll = setTimeout(async () => {
       if (tab !== "memory") return;
-      const was = s.installed;
+      const was = s.installed, before = JSON.stringify(sem);
       try { sem = await api("memory/semantic"); } catch {}
-      render();
+      if (JSON.stringify(sem) !== before) redrawRow(".lib-memsem", semRow);
       semWatch();
       if (!was && sem.installed) rankSoon();
     }, 2000);
@@ -1555,13 +1560,22 @@ magpie.plugin("library", (ctx) => {
     if (!dist?.running && !dist?.dreaming) return;
     distPoll = setTimeout(async () => {
       if (tab !== "memory") return;
+      const before = JSON.stringify(dist), memWas = JSON.stringify(mem);
       try {
         dist = await api("memory/distill");
         if (!dist.running && !dist.dreaming) mem = await api("memory");
       } catch {}
-      render();
+      if (JSON.stringify(mem) !== memWas) render();
+      else if (JSON.stringify(dist) !== before) { redrawRow(".lib-memdistill", distillRow); redrawRow(".lib-memdream", dreamRow); }
       distWatch();
     }, 2000);
+  }
+  // a poll's news drawn in its own row of the memory card, so the
+  // memories under it, and the one open to edit, stay as they are
+  function redrawRow(sel, make) {
+    const old = page.querySelector(".lib-memcard > " + sel);
+    if (old) old.replaceWith(make());
+    else render();
   }
   function memRow(m) {
     const isOpen = !memPicking && memOpen === m.id;
@@ -1600,6 +1614,7 @@ magpie.plugin("library", (ctx) => {
   function memDetail(m) {
     const d = memDraft;
     const det = el("div", "lib-detail lib-memdetail");
+    det.dataset.detail = "mem:" + (m ? m.id : "new");
     const ta = el("textarea", "lib-text small");
     ta.dataset.lib = "mem:" + (m ? m.id : "new");
     ta.value = d.text;
@@ -1607,7 +1622,9 @@ magpie.plugin("library", (ctx) => {
     ta.oninput = () => { d.text = ta.value; };
     ta.onkeydown = (e) => { e.stopPropagation(); if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "Enter")) { e.preventDefault(); saveMemory(); } };
     autosize(ta, 52);
-    if (!m) queueMicrotask(() => ta.focus());
+    // a new one's text takes the focus when it opens, not on every render
+    // after (the reader may be in its tags)
+    if (!m) queueMicrotask(() => { if (!det.classList.contains("kept")) ta.focus(); });
     const pick = (label, value, opts, head, set) => {
       const b = menuButton(label(value), "lib-mempick", () => openProtoMenu(b, opts.map((v) => ({ v, name: label(v), literalName: true, note: "" })), value, (v) => { set(v); render(); }, head));
       return b;
@@ -2394,6 +2411,7 @@ magpie.plugin("library", (ctx) => {
     if (!isOpen) return [row];
 
     const det = el("div", "lib-detail");
+    det.dataset.detail = "set:" + x.id;
     const nm = input(setName(x), t("Name"));
     nm.dataset.lib = "setname:" + x.id;
     nm.className = "lib-setname";
@@ -2533,6 +2551,7 @@ magpie.plugin("library", (ctx) => {
     if (!isOpen) return [row];
 
     const det = el("div", "lib-detail");
+    det.dataset.detail = "agent:" + a.agent;
     if (a.override) {
       const w = el("div", "lib-warn");
       w.append(el("span", "", t("{agent} reads {file} instead of this file while it has anything in it.", { agent: a.name, file: tilde(a.override) }) + " "), pathLink(a.override));
@@ -4895,10 +4914,7 @@ magpie.plugin("library", (ctx) => {
     const who = el("div", "who");
     who.append(el("div", "name mono", p.name + (p.version ? " " + p.version : "")));
     if (p.description) who.append(el("div", "lib-subagentdesc", p.description));
-    // counts, not every name: PStack has a hundred (jinpwng on X); the
-    // names are in the dialog, folded
-    const line = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]]
-      .filter(([, v]) => v?.length).map(([k, v]) => k + " " + v.length).join(" · ");
+    const line = pluginParts(p);
     if (line) who.append(el("div", "sub lib-plparts", line));
     row.append(glyph(GLYPH.folder), who,
       agentChips(all, p.agents, chipsChange("plugins/agents", p.name, "plugins", (x) => pluginRow(x, all)), { all: true }),
@@ -4916,11 +4932,7 @@ magpie.plugin("library", (ctx) => {
     ed.append(head);
     if (p.description) ed.append(el("p", "lib-subagentdesc", p.description));
     const rows = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]].filter(([, v]) => v?.length);
-    for (const [label, names] of rows) {
-      const d = el("details", "lib-plgroup");
-      d.append(el("summary", "", label + " " + names.length), el("div", "mono lib-plnames", names.join(", ")));
-      ed.append(d);
-    }
+    for (const [label, names] of rows) ed.append(...field(label, el("div", "mono lib-plnames", names.join(", "))));
     if (p.missing?.length) ed.append(el("div", "hint lib-plmissing", t("Taken out by hand: {names}", { names: p.missing.join(", ") })));
     if (p.left?.length) {
       const left = el("div", "lib-plleft");
