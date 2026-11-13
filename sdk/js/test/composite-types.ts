@@ -42,6 +42,6 @@ const module: Module = { manifest, start, actions: {
 const request: ModuleCallRequest = { action: "read", input: null };
 const uiConfig: Promise<UIConfigSnapshot> = ui.config.get();
 void ui.backend.call("page.read", { mode: "test" });
-void ui.config.cas(snapshot.version, null);
+void ui.config.cas(snapshot.version, {});
 void uiConfig; void configure; void context; void request; void component; void proof;
 void serviceManifest; void checkCompatibility; void serve(module);

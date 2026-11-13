@@ -408,8 +408,9 @@ config version and exact part (`window:page` or `window:panel:<index>`).
 Old refs fail after update/config change/off rather than selecting new code.
 
 The browser-only `@magpie/extension-sdk/ui` entry delegates to
-`window.magpie`: `ui.ready`, `ui.service`, `ui.backend.call(binding,input)`,
-`ui.config.get()` and `ui.config.cas(expected,values)`. It imports no
+`window.magpie`: readiness, service URL, theme/context/visibility and events,
+row actions, declared reads, PNG copy/save, named backend calls and root
+configuration get/CAS. Config values are JSON objects. The entry imports no
 Node/Bun APIs. The parent bridge supplies identity and disposes pending
 requests; callers cannot supply arbitrary URLs, state keys or account scope.
 

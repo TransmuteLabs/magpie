@@ -45,3 +45,53 @@ test("published package contains server dependencies and a separate browser ui e
     assert((await readFile(new URL("../" + file, import.meta.url))).length);
   }
 });
+
+test("browser facade exposes existing theme, context, visibility, actions, reads and image operations", async () => {
+  const previous = globalThis.window;
+  const calls = [];
+  const theme = { dark: true, lang: "en", tokens: { bg: "#101010" } };
+  const context = { provider: { id: "fixture", name: "Fixture" } };
+  let themeListener, visibilityListener, actionListener;
+  const png = new Blob(["fixture"], { type: "image/png" });
+  globalThis.window = { magpie: {
+    ready: Promise.resolve(theme), theme, context, visible: true,
+    backend: { call() {} }, config: { get() {}, cas() {} },
+    onTheme(listener) { themeListener = listener; },
+    onVisibility(listener) { visibilityListener = listener; },
+    onAction(listener) { actionListener = listener; },
+    read(name, params) { calls.push(["read", name, params]); return Promise.resolve({ items: [] }); },
+    image: {
+      copy(value) { calls.push(["copy", value]); return Promise.resolve({ ok: true }); },
+      save(value, name) { calls.push(["save", value, name]); return Promise.resolve({ path: "" }); },
+    },
+  } };
+  try {
+    assert.equal(ui.theme, theme);
+    assert.equal(ui.context, context);
+    assert.equal(ui.visible, true);
+    ui.onTheme(value => calls.push(["theme", value]));
+    ui.onVisibility(value => calls.push(["visible", value]));
+    ui.onAction(value => calls.push(["action", value]));
+    const nextTheme = { ...theme, dark: false };
+    themeListener(nextTheme);
+    visibilityListener(false);
+    actionListener({ id: "fixture.action", provider: context.provider });
+    globalThis.window.magpie.theme = nextTheme;
+    globalThis.window.magpie.visible = false;
+    assert.equal(ui.theme, nextTheme);
+    assert.equal(ui.visible, false);
+    assert.deepEqual(await ui.read("providers:list", { fixture: true }), { items: [] });
+    assert.deepEqual(await ui.image.copy(png), { ok: true });
+    assert.deepEqual(await ui.image.save(png, "fixture"), { path: "" });
+    assert.deepEqual(calls, [
+      ["theme", nextTheme], ["visible", false], ["action", { id: "fixture.action", provider: context.provider }],
+      ["read", "providers:list", { fixture: true }], ["copy", png], ["save", png, "fixture"],
+    ]);
+    const denied = new Error("Read is not declared");
+    globalThis.window.magpie.read = () => Promise.reject(denied);
+    await assert.rejects(ui.read("not-declared"), error => error === denied);
+  } finally {
+    if (previous === undefined) delete globalThis.window;
+    else globalThis.window = previous;
+  }
+});

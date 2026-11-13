@@ -111,10 +111,15 @@ const answer = await ui.backend.call("page.start", { prompt: "hello" });
 ```
 
 `ui.service` is the existing bridge's absolute token-proxied service URL.
+`ui.theme`, `ui.context` and `ui.visible` expose the current frame state;
+`onTheme`, `onVisibility` and `onAction` subscribe to its existing events.
+`ui.read(name, params)` uses declared page permissions. PNG operations
+`ui.image.copy(blob)` and `ui.image.save(blob, name?)` use the same parent
+bridge. They do not grant additional permissions.
 The adapter preserves bridge errors. It does not add a per-call AbortSignal,
 streaming RPC or another transport: frame disable/update/unmount cancellation
 is owned by the existing page bridge. Config DTOs use `{version,values}`;
-CAS takes `(expectedVersion, values)`.
+CAS takes `(expectedVersion, values)`, where values is a JSON object.
 
 Handlers receive `ctx: {signal: AbortSignal}`, an immutable call and a
 stream. `call.auth` is the host-selected account's JSON authentication

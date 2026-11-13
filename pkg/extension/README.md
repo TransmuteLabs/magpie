@@ -370,10 +370,12 @@ Opaque refs bind package revision, config version and exact page/panel.
 Named `bindings` grant that part an action or service endpoint, without
 frontend account scope, arbitrary state keys or backend URLs.
 
-The separate browser entry `@magpie/extension-sdk/ui` exposes `ui.ready`,
-`ui.service`, `ui.backend.call(binding,input)`, `ui.config.get()` and
-`ui.config.cas(expected,values)`. It imports no Node/Bun API and delegates to
-`window.magpie`. The parent bridge cancels pending work on frame disposal,
+The separate browser entry `@magpie/extension-sdk/ui` exposes readiness,
+the service URL, theme/context/visibility state and events, row actions,
+permission-checked reads and PNG copy/save. Named backend calls and root
+config get/CAS use the same entry; config values must be a JSON object.
+It imports no Node/Bun API and delegates to `window.magpie`. The parent
+bridge cancels pending work on frame disposal,
 update/config change/off. The existing HTTP/SSE proxy holds a root lease for
 the whole response, strips cookies and validates/removes the three proof
 headers above before frontend body delivery.

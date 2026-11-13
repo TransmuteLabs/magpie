@@ -10,6 +10,17 @@ function bridge() {
 export const ui = Object.freeze({
   get ready() { return bridge().ready; },
   get service() { return bridge().service ?? ""; },
+  get theme() { return bridge().theme ?? null; },
+  get context() { return bridge().context ?? {}; },
+  get visible() { return bridge().visible !== false; },
+  onTheme(listener) { return bridge().onTheme(listener); },
+  onVisibility(listener) { return bridge().onVisibility(listener); },
+  onAction(listener) { return bridge().onAction(listener); },
+  read(name, params = null) { return bridge().read(name, params); },
+  image: Object.freeze({
+    copy(png) { return bridge().image.copy(png); },
+    save(png, name) { return bridge().image.save(png, name); },
+  }),
   backend: Object.freeze({
     call(binding, input = null) { return bridge().backend.call(binding, input); },
   }),
