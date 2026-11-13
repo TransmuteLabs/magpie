@@ -2,9 +2,12 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Native C ABI loading, executable Go and API 1.1
-composite modules are implemented; final immutable integration gates remain
-pending the integration owner.
+advertised capability. Current API 1.3 includes native/exec/Bun and composite
+modules, gateway hooks/private tools, transactional refresh, finite provider
+operations and rich model metadata. The
+[combined validation record](../../docs/adr/0009-sdk13-validation.md) names
+its frozen SDK snapshot; the [surface census](../../docs/subsystems/extension-surface-coverage.md)
+retains remaining adapters and does not claim full SDK or repository acceptance.
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -35,6 +38,12 @@ supports `magpie plugin sdk add github:owner/repository[@tag]` and
 for archive layout, full-package hashes, provenance, updates and private
 developer authentication through env tokens, `gh` or HTTPS Git credentials.
 Installer credentials are never module/provider configuration.
+The public fork retains Go module path `github.com/yetone/magpie`. Our four
+adjacent plugin repositories use
+`replace github.com/yetone/magpie => ../magpie` during development, as used
+by the native fixtures. Public repository access permits source dependencies;
+it does not publish local revisions. Release consumers pin an available
+fork revision; a separate SDK repository is optional.
 
 Ordinary `plugin add` uses the SDK for local directories with this descriptor.
 Absence preserves legacy JS/TS behavior; a malformed or unsupported SDK
@@ -60,7 +69,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.2; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.3 with eleven capabilities; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The original codec host contract remains
 API 0.3 with the 0.1 inbound and 0.2 catalog contracts still supported.
 
@@ -113,7 +122,8 @@ account ID and generation. The host authorizes it only for an accepted
 and a selected provider/account/generation. The host performs generation CAS
 against its account store. The module must return its terminal result after
 replacement: old scoped state and subsequent events are deliberately revoked.
-Ordinary token refresh continues to use the existing auth/state lifecycle.
+Rotating refresh instead uses the API 1.3 host-owned `auth.refresh`
+transaction below; private state CAS is not its publication mechanism.
 
 An earlier caller-provided context can shorten an Emit/HostCall deadline.
 The parent call's cancellation always interrupts them, even if a handler
@@ -162,6 +172,72 @@ are copied into immutable manifest snapshots. `Model.Efforts` lists at most
 seven distinct canonical levels: none, minimal, low, medium, high, xhigh, max.
 Vendor aliases, auto and ultra are not SDK model effort levels.
 
+## Provider API 1.3
+
+API 1.3 providers declare finite `ProviderDescriptor.Operations` independently
+of their conversational `Protocols`. `ExecuteRequest.Operation` selects the
+operation on the OpenAI-compatible `chat` wire family; ordinary conversation
+and native Anthropic/Gemini counting keep an empty operation.
+
+| Operation identifiers | Selected upstream work |
+| --- | --- |
+| `embeddings`, `rerank` | Retrieval |
+| `images.generate`, `images.edit` | Image generation/edit |
+| `audio.transcribe`, `audio.translate`, `audio.speech` | Audio input/output |
+| `videos.create`, `videos.get`, `videos.content`, `videos.delete`, `videos.remix` | Video lifecycle |
+
+Both the actual leased host descriptor and the author server reject
+undeclared operations before dispatch. Metadata is not permission, and
+declarations add no arbitrary upstream URL or new public gateway route.
+`ExecuteOptions` types method, path, query, proxy choice and optional
+caller/request/native metadata; `EscapedPath` is sent only to API 1.3
+modules. Use `network.proxy` for effective transport resolution. Preserve
+selected raw/multipart/binary bytes and the host's accepted/uncertain
+no-replay policy. Vendor execution remains module-owned.
+
+API 1.3 `Model` adds `Kind`, `InputModalities`, `OutputModalities`,
+`MaxContextWindow`, `Released`, `Temperature`, `ServiceTiers`, `Free`,
+`Rate`, `RateWas`, `AlwaysThinks`, `DynamicTools` and `DefaultEffort`.
+Kinds and modalities are validated finite sets. Nil modality slices mean
+unknown; explicit empty slices mean none and survive public snapshots.
+Temperature is a pointer so unknown differs from false. Ordinary catalog
+projection preserves these facts and user overrides remain authoritative.
+These fields do not add dedicated decision-model or provider-option adapters.
+
+### Host-owned credential renewal
+
+Require API 1.3 and `Compatibility.HostAPI: "^1.3"` when a module relies on
+rotating refresh. Keep the existing unary `auth.refresh` handler and return
+an `AuthResult` with the selected account's replacement credentials and
+expiry. Credentials come from `Call.Auth`, never a caller's replacement
+scope. The host owns strict cross-process locking, a durable dispatch fence,
+atomic credential/expiry/generation publication and a secret-free completion
+receipt. Repeated completed-generation requests do not spend the token again.
+
+`AuthResult.ExpiresAt` and host `Account.ExpiresAt` use Unix milliseconds;
+zero is unknown. Ordinary provider preflight can renew known expiry before
+execution, model refresh or quota reads and adopt only a receipt-proven
+successor. Manual account replacement remains stale. Do not implement an
+implicit refresh/retry inside paid execution or substitute a module mutex
+for the host transaction.
+
+Caller cancellation after dispatch ends its wait while the bounded owner
+publishes or fences the result; Manager shutdown owns that work. An unseen
+token lost after remote rotation cannot be recovered: uncertainty requires
+explicit reauthorization. Native ABI stays 1. Exact limits and upgrade
+behavior are in [ADR 0007](../../docs/adr/0007-transactional-account-refresh.md).
+
+### Attachment-aware session inputs
+
+An API 1.3 session module may declare the read-only ModuleRPC action
+`session.inputs.v1`. The ordinary session owner validates its versioned
+path/SHA-256 plan, acquires bounded inputs from the selected native store
+and retains planner/converter on one lease. The module receives verified
+journal/blob documents; it does not select another profile or read host
+paths by itself. Source and target-store guards remain host-owned. This is
+not generic SDK session discovery/reader/resume registration; see the
+[session reference](../../docs/subsystems/extension-agents-sessions.md).
+
 ## Composite API 1.1
 
 [ADR 0005](../../docs/adr/0005-composite-module-contract.md) defines one root
@@ -184,6 +260,9 @@ and the declared ID in `Call.Action`; its result is terminal JSON. ModuleRPC
 is unary. A write may emit an acknowledged `accepted` receipt; read actions
 cannot emit events, and data/progress are rejected even if a handler ignores
 the Emit error. Existing capability streams are unchanged.
+Root `module.call` parameters use `MaxFrameBytes - 4096`; scoped
+`component.call`/host callback envelopes retain `MaxHostBytes`. Large source
+documents do not increase callback authority or make ModuleRPC streaming.
 
 Use `ServiceManifest(root, id)` to derive a helper declaration with the same
 root ID/version, its `ComponentIdentity`, only its owned actions, and no
@@ -359,11 +438,15 @@ native root PID equals host PID, helper PID differs, and an old lease starts
 lazy v1/config1 after v2/config2 publication. The
 [GUI integration fixture](../../internal/gui/extension_window_integration_test.go)
 checks real status/SSE, cookies, off/update, response proof and lease hold.
-Go-host/Bun API 1.1 passed race count 3 without skips; JS has 87 Node/87 Bun
-passes plus strict types. These checks do not establish vendor parity.
+Go-host/Bun API 1.1 passed race count 3 without skips; its historical JS
+record has 87 Node/87 Bun passes plus strict types. The combined API 1.3
+[checkpoint](../../docs/adr/0009-sdk13-validation.md) records 898 Go SDK/runtime
+pass events, 108 Node and 108 Bun tests and three strict TS fixtures, alongside
+policy/lifecycle/platform gates. These checks do not establish vendor parity.
 
-Current native runtime proof is macOS. Remote Linux execution is being
-prepared with no result yet; Windows native execution is unverified.
-No-cgo/cross-build checks are build/refusal evidence. No benchmarks or vendor
-migrations were performed. Final immutable gates are recorded by the
-integration owner; this README claims no green whole-repository result.
+Native runtime proof includes earlier macOS fixtures and Linux composite and
+standalone OpenCode fixtures, including ordinary renewal and all four packaged
+model routes. Windows native execution remains unverified.
+No-cgo/cross-build checks are build/refusal evidence. Domain modules live in
+separate repositories; no complete vendor migration or benchmark is implied.
+This README claims no green whole-repository result.

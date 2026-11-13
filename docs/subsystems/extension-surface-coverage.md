@@ -4,10 +4,14 @@ Date: November 13, 2026.
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. SDK API 1.1 implements its ten negotiated capabilities and composite
-runtime/window integration. It does not replace every upstream extension
-surface. API 1.2 gateway hooks and tool exposure are being integrated; public
-contracts alone do not establish completed host integration.
+modules. The current SDK is API 1.3: native/exec/Bun and composite/window
+integration, API 1.2 gateway hooks/private tools, and API 1.3 transactional
+refresh, richer models and a finite provider-operation registry. It does not
+replace every upstream extension surface. Public contracts, ordinary host
+adapters and domain-module acceptance remain separate claims.
+The [combined API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records
+the frozen source and completed SDK gates, without making this census a
+full-repository or full-surface acceptance claim.
 
 This census is for modules we maintain ourselves, keeping integration logic
 outside frequently merged upstream code. It distinguishes three layers:
@@ -18,8 +22,10 @@ outside frequently merged upstream code. It distinguishes three layers:
 - **Domain module:** our actual provider, memory backend or agent implementation,
   with its own behavior, account correctness and migration evidence.
 
-A complete contract or fixture is not a migrated domain module. No vendor
-implementation was migrated by this SDK work. `module.call`, checked file
+A complete contract or fixture is not a complete vendor migration. Our
+Devin, OpenCode, OMP and ZCode implementations have separate repositories and
+bounded acceptance records; vendor logic stays outside the host.
+`module.call`, checked file
 plans and private `state.cas` do not supply missing adapters automatically.
 The initial 29 categories below are an inventory of extension families,
 not an exhaustive operation list or 29 SDK capabilities. The operation,
@@ -36,9 +42,8 @@ a proposed, optional next integration point.
 
 ## Initial extension-family inventory
 
-“Implemented 1.1” describes the existing SDK path and its scoped fixtures.
+“Implemented” describes an actual SDK path, with its minimum API version.
 “Partial” identifies an actual boundary. “Remaining” means no SDK adapter.
-“1.2 integration” remains pending owner tests for the complete host path.
 Data/resource imports already supported by Library are identified separately;
 an optional SDK ownership binding is not a missing extension runtime.
 
@@ -46,18 +51,18 @@ an optional SDK ownership binding is not a missing extension runtime.
 | --- | --- | --- | --- |
 | Native / exec / Bun installation and distribution | [`native.Register`](../../pkg/extension/native/native.go), [`release.go`](../../internal/extension/release.go), [`release_auth.go`](../../internal/extension/release_auth.go) | Real native C ABI without author C glue; executable/Bun options; full-package hashes, private developer auth, pins/updates | **Implemented 1.1.** Runtime conformance does not imply vendor migration or identical platform proof. |
 | Composite components, readiness, config and disposal | [`composite.go`](../../pkg/extension/composite.go), [`components.go`](../../internal/extension/components.go) | Primary + private exec/Bun services, DAG, readiness, root CAS snapshot, opaque local State, same-generation leases | **Implemented 1.1.** Services are private components, not cross-module pluginrt services. |
-| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary provider/account/routing owners use declared SDK capabilities | **Implemented 1.1** within the DTOs and executor path whitelist; not every provider operation or legacy model metadata field. See the extended matrix below. |
-| Legacy provider extras | [`Provider`](../../internal/plugin/providers.go), [`plugin_checkin.go`](../../internal/provider/plugin_checkin.go), [`plugin_keepalive.go`](../../internal/provider/plugin_keepalive.go) | `auth.refresh` and usage DTOs cover part of the lifecycle | **Partial:** no equivalent declarations/adapters for check-in, outside calls, provider options and all rotating/keepAlive metadata. |
+| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary provider/account/routing owners use declared capabilities; API 1.3 adds finite operations, rich model projection, host-owned refresh and expiry preflight | **Implemented through 1.3** for the declared registry. Arbitrary operations and complete legacy-provider metadata parity remain outside it. See the extended matrix below. |
+| Legacy provider extras | [`Provider`](../../internal/plugin/providers.go), [`plugin_checkin.go`](../../internal/provider/plugin_checkin.go), [`plugin_keepalive.go`](../../internal/provider/plugin_keepalive.go) | Transactional `auth.refresh`, persisted expiry and ordinary renewal cover credential rotation; usage has its own DTOs | **Partial:** check-in, outside calls, provider options and background keepAlive declarations/adapters remain. They are not supplied by the refresh transaction. |
 | Incoming protocols and response codecs | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go), [`inbound.go`](../../pkg/extension/inbound.go) | Installed codecs enter ordinary guards/canonical dispatch and retain the primary lease through response encoding | **Implemented 1.1** for negotiated canonical operations; not arbitrary gateway route registration. |
-| Plugin tools / MCP tools | [`extension_tools.go`](../../internal/plugin/extension_tools.go), [`extension_tools.go`](../../internal/gateway/extension_tools.go) | `tool-provider` enters ordinary plugin-tools MCP/hub | **Implemented 1.1.** API 1.2 adds `ToolDescriptor.exposure`; local-owner filtering remains a separately tested host responsibility. |
+| Plugin tools / MCP tools | [`extension_tools.go`](../../internal/plugin/extension_tools.go), [`extension_tools.go`](../../internal/gateway/extension_tools.go) | `tool-provider` enters ordinary plugin-tools MCP/hub; API 1.2 adds shared/local-owner exposure | **Implemented through 1.2.** Discovery and actual leased invocation enforce local-owner authority, including after package replacement. |
 | MCP server configuration and protocol integration | [`Server`](../../internal/library/mcp.go), [`ServeRun`](../../internal/library/mcp_run.go) | Library already supports configured servers, prompts/resources/templates and protocol notifications; SDK declares tools | **Existing data/protocol integration.** Automatic ownership binding of a module's MCP service is not supplied, but this is not an unimplemented extension runtime. |
 | Ordinary agent wiring | [`extensionAgents`](../../internal/agent/extension_actions.go), [`AgentDescriptor`](../../pkg/extension/contract.go) | Rich descriptors reach ordinary discovery, inspect/connect/set/disconnect and checked plans | **Implemented 1.1.** Ordinary discovery requires ConfigFiles; ID/Name-only descriptors remain manual actions. |
 | Agent launch / aliases / WSL / own-model metadata | [`agentplug.go`](../../internal/agentplug/agentplug.go) | Legacy adapter has launch/startup/own/aliases/WSL metadata; SDK has Bin/ConfigFiles/Fields | **Partial:** SDK does not declare equivalent launch/wrapper metadata. |
 | Library target of an SDK agent | [`pluginTarget`](../../internal/library/targets.go), [`extensionAgent`](../../internal/agent/extension_actions.go) | Legacy `agent.library` binds instructions/MCP/skills; SDK ordinary agents do not declare that target | **Remaining:** automatic Library sync and memory digest for a newly declared SDK agent. |
-| Session document conversion | [`extension_actions.go`](../../internal/sessions/extension_actions.go), [`CarryOver`](../../internal/sessions/carry_convert.go) | `session.convert`, checked output plans and declared ordinary CarryOver routes | **Implemented 1.1.** Conversion pins the selected native source snapshot. |
+| Session document conversion | [`extension_actions.go`](../../internal/sessions/extension_actions.go), [`extension_source_inputs.go`](../../internal/sessions/extension_source_inputs.go) | `session.convert`, checked output plans and ordinary CarryOver routes; optional read action `session.inputs.v1` acquires checked journal/blob inputs under one lease | **Implemented through 1.3.** Selected-store/file/parent snapshots and target-store guards protect ordinary application; deferred explicit callers retain source-validation responsibility. |
 | Session source / discovery / reader / resume | [`allFilesWith`, `parserFor`, `resumeCommand`](../../internal/sessions/sessions.go) | Existing mappings discover, parse and resume supported native formats | **Remaining:** SDK source/reader/resume registration. Explicit unknown-format conversion does not add a Sessions indexer. |
 | Synchronous gateway middleware | [`middleware.go`](../../internal/middleware/middleware.go), [`gwmw`](../../internal/gwmw/gwmw.go) | Legacy onRequest/onAccount/onProvider/onEvent/onResponse chain | **Remaining:** SDK adapter at those points. Request recall hooks do not replace stream/account/provider middleware. |
-| Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 declares `gateway-hooks`, gateway.request/response/signin and primary handler flags | **1.2 integration:** contract/server parity and runtime/gateway adapters must be proven together. Not complete solely because DTOs exist. |
+| Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 `gateway-hooks` enters ordinary request/completion/sign-in owners with origin, effect and lease checks | **Implemented 1.2, scoped host proof.** Recall is read-only; capture keeps the selected generation and durable effect policy. This is not synchronous middleware or built-in Memory access. |
 | Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go) | Existing Go/legacy observer points | **Remaining:** `usage-reporter` concerns its provider; it is not a global observer adapter. |
 | Routing strategy / seat ordering | [`Strategy`, `Register`](../../internal/routes/routes.go), [`points.go`](../../internal/middleware/points.go) | Existing strategy registry and legacy JS strategies | **Remaining:** SDK descriptor and adapter. |
 | Budget limiter / spender | [`Limiter`, `Spender`](../../internal/gwbudget/gwbudget.go) | Host reserve/release/spent contract | **Remaining:** SDK adapter preserving the point's fail-closed policy. |
@@ -83,32 +88,37 @@ inbound operations. Image generation, transcription or token counting can
 be operations within or beside those families.
 
 Legacy [`pluginFetch`](../../internal/provider/plugins.go) retains HTTP
-method/path/body and uses the selected plugin account. The SDK
-[`execute`](../../internal/provider/extension_transport.go) accepts chat,
-responses, messages and Gemini-style paths, rejecting other paths before
-calling `provider.execute`. It nevertheless passes the original method,
-path and query in `ExecuteRequest.Options`. That distinction matters for
-token counting and prevents an incorrect blanket “all non-chat unsupported”
-claim. Model DTO/projection coverage is a separate question from transport.
+method/path/body and uses the selected plugin account. SDK API 1.3 separately
+declares conversational `protocols` and a finite provider `operations` list.
+[`extension_operations.go`](../../internal/provider/extension_operations.go)
+matches exact method/path pairs; both the actual leased manifest and the
+author SDK reject undeclared operations before dispatch. Selected upstream
+bytes, content type, method/path/query and API 1.3 escaped path reach the
+module through `ExecuteRequest` and typed `ExecuteOptions`.
+The registry adds no arbitrary URL handler or public gateway route.
+See [ADR 0008](../adr/0008-provider-operation-contracts.md).
 
 | Operation / metadata / transport | Existing upstream or legacy path | SDK contract and actual adapter | Evidence / boundary |
 | --- | --- | --- | --- |
-| Multimodal conversation input | [`plugin.Model.Inputs/Outputs`](../../internal/plugin/providers.go), copied by [`serves`](../../internal/provider/plugins.go), includes image/audio/video/pdf | [`sdk.Model`](../../pkg/extension/types.go) has Vision but no complete input/output modality declarations; its [catalog projection](../../internal/provider/extension_provider.go) copies only that narrower metadata | **Partial metadata parity.** Image input in supported conversational protocols is not the same as an image-generation operation. |
-| Image generation / edits | [Plugin image selection](../../internal/gateway/draw.go) explicitly supports OpenAI-compatible image routes and Gemini image generation, using model IDs/output modalities | `/images/*` is outside the SDK executor whitelist; SDK lacks the rich output metadata used by ordinary image selection | **Ordinary image-operation gap.** A Gemini module can still implement image-producing generateContent within Gemini; not all image behavior requires a new protocol enum. No new media fixture was run for this census. |
-| Audio transcription / translation / speech | [`transcribe`](../../internal/gateway/transcribe.go) preserves multipart bodies; [`speech`](../../internal/gateway/speech.go) and [`retrieveOpen`](../../internal/gateway/embeddings.go) use provider signing/transport and stream answers | `/audio/*` is outside the SDK executor whitelist; full audio model-kind metadata is absent | **Operation/catalog gap.** Legacy generic fetch is broader than the current SDK dispatch; declaring a service or a tool does not add these ordinary routes. |
-| Video create / status / content | [`customVideomakersOf`, `keyMark`, `markedKey`](../../internal/gateway/video.go) support plugin video outputs and retain the account that created a video | Video metadata and the required POST/GET operations are not represented by the current SDK executor dispatch | **Operation/lifecycle gap**, including result-account affinity; no generic video capability is claimed from byte transport alone. |
-| Embeddings / rerank | [`retrieve`, `retrieveOpen`](../../internal/gateway/embeddings.go) send non-chat operations through the selected provider's signing and `Do`; legacy fetch retains their paths | `/embeddings` and `/rerank` are rejected by SDK dispatch; SDK model projection does not declare catalog `Serves` kinds | **Operation/model-kind gap.** These existing provider paths extend the initial provider row rather than proving a separate registered plugin runtime. |
+| Multimodal conversation input | [`plugin.Model.Inputs/Outputs`](../../internal/plugin/providers.go), copied by [`serves`](../../internal/provider/plugins.go), includes image/audio/video/pdf | API 1.3 [`Model`](../../pkg/extension/types.go) declares kind, input/output modalities, default/maximum context, temperature, release, tiers, rates and reasoning defaults; ordinary projection retains them | **Implemented 1.3 metadata.** Nil/unknown and explicit empty modality lists stay distinct. Metadata grants no transport permission; legacy fields outside this DTO remain gaps. |
+| Image generation / edits | [Ordinary image selection](../../internal/gateway/draw.go) supports OpenAI-compatible image routes and Gemini image generation | API 1.3 `images.generate`/`images.edit` declarations admit the corresponding exact upstream requests; image kinds/output modalities enter ordinary selection | **Implemented finite operation adapter.** Modules supply vendor execution. Gemini generateContent remains its native protocol path; no universal image codec or live-vendor parity is implied. |
+| Audio transcription / translation / speech | [`transcribe`](../../internal/gateway/transcribe.go), [`speech`](../../internal/gateway/speech.go), [`retrieveOpen`](../../internal/gateway/embeddings.go) retain ordinary caller/signing/transport owners | API 1.3 `audio.transcribe`, `audio.translate`, `audio.speech` carry selected multipart/binary/streaming requests and model kinds | **Implemented declared upstream operations.** The registry does not create additional public audio routes or implement a vendor's audio service. |
+| Video create / status / content | [`customVideomakersOf`, `keyMark`, `markedKey`](../../internal/gateway/video.go) select video models and retain result ownership | API 1.3 `videos.create/get/content/delete/remix`; stable module/provider/account marks bind continuations across credential refresh | **Implemented finite operation/account adapter.** Switching accounts cannot take over a video; vendor status/cancel semantics still belong to the module. |
+| Embeddings / rerank | [`retrieve`, `retrieveOpen`](../../internal/gateway/embeddings.go) send selected requests through provider signing/transport | API 1.3 `embeddings`/`rerank`, projected model kinds and declared-operation checks enter ordinary retrieval | **Implemented finite operation adapter.** Accepted/uncertain/completed work cannot automatically fall through to another account/provider. |
 | Anthropic token counting | [`countOn`](../../internal/gateway/gateway.go) forwards `/v1/messages/count_tokens` when supported and otherwise may estimate | The SDK messages-path branch accepts that path as Anthropic and preserves it in `Options.path` | **Reachable source path, targeted parity unverified here.** It is not simply omitted because there is no count protocol enum. |
 | Dedicated decision models versus ordinary classifiers | Legacy [`Provider.Decide`, `Model.Decides`](../../internal/plugin/providers.go) feed [`DecidesModel`](../../internal/provider/decide.go) and System One; direct OpenAI Decisions eligibility is separately checked by [`canDecide`](../../internal/gateway/decisions.go) | SDK model/provider projection lacks that dedicated decision metadata/base. An ordinary SDK chat model can still answer the core's normal [classifier](../../internal/gateway/classify.go) requests | **Dedicated decision metadata/adapter gap; ordinary classifier path exists.** Legacy plugins are explicitly refused by direct `canDecide`; their System One integration is not full OpenAI Decisions parity. |
 | Client Responses WebSocket | [`responsesSocket.turn`](../../internal/gateway/responses_ws.go) turns a socket frame into the ordinary POST handler path | That shared path can route to an SDK Responses provider; no SDK raw-socket callback is declared | **Indirect integration in source.** This census did not execute a WebSocket + SDK-provider fixture; no blanket unsupported or full parity claim. |
 | Window service WebSocket | [`servePageServiceTarget`](../../internal/gui/pageservice.go), [`serveExtensionWindowService`, `verifyWindowServiceProof`](../../internal/gui/extension_window_service.go) support upgrade handling, retain duplex bodies and hold the response lease | Composite UI uses this existing HTTP/SSE/WebSocket service adapter with component proof | **Implemented adapter path.** WebSocket service transport must not be confused with a provider protocol or ModuleRPC streaming. |
 | Module-owned upstream sockets | Legacy provider implementations own vendor I/O behind their fetch; exec/native/Bun SDK implementations likewise own their networking | [`network.proxy`](../../pkg/extension/README.md) resolves policy for HTTP(S)/WS(S), but is not a host socket-dial API | **Networking implementation choice.** No separate public provider-WebSocket registration point was established by this bounded source inspection. |
 
-These rows separate contract shape, reachable production paths and fixture
-proof. They do not add API 1.3 fields or adapters. A future provider-operation
-phase must decide operation dispatch, rich model metadata, binary/streaming
-bounds and account affinity together; a new capability name alone would not
-complete any of them.
+The API 1.3 media/retrieval fixture is
+[`extension_media_test.go`](../../internal/gateway/extension_media_test.go);
+provider transport/catalog tests and
+[`provider_operation_admission_test.go`](../../internal/extension/provider_operation_admission_test.go)
+cover raw bytes and actual leased-generation admission. These are scoped
+synthetic proofs, not live implementations of every declared vendor operation.
+Dedicated decisions, arbitrary endpoints and the extras in the inventory
+remain separate work.
 
 The browser extension is another boundary:
 [`browserext`](../../internal/browserext/browserext.go) packages a companion
@@ -124,10 +134,11 @@ exercises tool write,
 another agent's recall, completed-response capture and reopening the same
 private store after Manager restart. That is evidence for an external
 module's own memory flow, not built-in Memory CRUD/digest integration.
-Its execution result belongs to the API 1.2 integration owner's test record;
-the existence of the fixture alone is not a passing gate.
+The [API 1.2 validation record](../adr/0006-gateway-hooks-validation.md)
+records its host evidence; the existence of a source fixture alone is not
+a passing gate for a different tree.
 
-## API 1.2 boundary
+## API 1.2 hooks and private-tool boundary
 
 The authoritative public contract is
 [`pkg/extension/hooks.go`](../../pkg/extension/hooks.go), with matching JS
@@ -152,14 +163,35 @@ API 1.2 tool exposure distinguishes shared and local-owner. Descriptor
 validation and public projection are SDK responsibilities; deciding which
 ordinary MCP/hub callers may discover or invoke a local-owner tool belongs
 to the host adapter. A JS unit test cannot prove those host access paths.
-Keep the complete gateway/tool integration marked pending until those owner
-tests pass.
+The [owner validation](../adr/0006-gateway-hooks-validation.md) includes these
+host checks; JS conformance alone must not be substituted for them.
 
-## Smallest reusable next contracts
+## API 1.3 account and session boundaries
+
+[ADR 0007](../adr/0007-transactional-account-refresh.md) defines the host-owned
+refresh transaction: strict per-account OS ownership, a durable dispatch
+fence, one unary exchange, atomic credentials/expiry/generation/receipt
+publication, and an uncertain fence after an ambiguous result. API 1.3
+ordinary provider preflight renews known near-expiry credentials. It accepts
+only a receipt-proven refresh successor of a cached account; manual
+replacement or deletion remains stale. A module lock or state CAS is not
+that transaction, and no unseen rotated token is recoverable after a crash.
+
+The session adapter's `session.inputs.v1` action plans additional source
+files. The host chooses the selected native store, checks paths/digests and
+bounded inputs, retains planner/converter on one lease, and rechecks source
+file, permission, parent-directory and store identities before ordinary
+application. This enables attachment-aware native OMP conversion through
+existing readers/resume owners; it is not generic SDK reader registration.
+Explicit callers retaining an output plan still own deferred source checks.
+
+## Remaining contracts and a possible API 1.4
 
 Use common declaration/lifecycle machinery with typed subsystem adapters,
 rather than a new capability for every feature or an unrestricted host RPC.
-The following are proposed boundaries, not API 1.1 fields:
+The following remain proposed boundaries, not current API 1.3 fields. A
+future API 1.4 is a possible delivery increment, not an accepted manifest
+version or a promise that these all ship together:
 
 1. **Contribution registration:** a versioned descriptor names an ID, a
    host-known point/contract and a declared action. The host validates DTOs,
@@ -175,8 +207,8 @@ The following are proposed boundaries, not API 1.1 fields:
    background activation reuse existing flows. They are separate adapters
    with separate proofs, not implied by a ready sidecar or UI binding.
 
-The current slice is gateway hooks, local-owner tools and module-owned
-storage. Explicit built-in Memory owner access is an optional follow-up,
+The implemented memory slice is gateway hooks, local-owner tools and
+module-owned storage. Explicit built-in Memory owner access is an optional follow-up,
 alongside independent Library targets/resources and session readers.
 Global routing, observation, budget and masking retain their own timing and
 failure contracts; a shared registration envelope cannot erase those.
@@ -192,7 +224,7 @@ backend/status/SSE/cookies/off/lease hold, Go-host/Bun race count 3, and the
 The [native/composite validation record](../adr/0005-native-composite-validation.md)
 is historical API 1.1 evidence, not an API 1.2 acceptance result.
 
-API 1.2 is a separate integration increment. Its tests must name the actual
+API 1.2 was a separate integration increment. Its tests name the actual
 snapshot and distinguish public/server conformance from ordinary gateway
 and tool-owner behavior. JS public/server parity has 102 Node and 102 Bun
 passes without skips, plus strict declarations, on an independent usbox copy
@@ -203,6 +235,12 @@ state bounds and unary effects. The
 [real process checks](../../sdk/js/test/gateway-process.test.js) use Node/Bun
 children with fixture host state; they do not prove ordinary gateway routing,
 local-owner tool filtering or a durable Go Memory owner.
-Final acceptance records belong to the integration
-owner. This census adds no full-repository green, benchmark, vendor parity
-or migrated-domain-module claim.
+API 1.3 refresh/operation/source-input acceptance is recorded separately by
+the owners; [ADR 0007](../adr/0007-transactional-account-refresh.md) and
+[ADR 0008](../adr/0008-provider-operation-contracts.md) define current
+responsibilities. OpenCode's independent native slice passed ordinary
+expiry renewal and all four packaged model routes on Linux. Other module
+slices have their own source/proof boundaries in the
+[delivery plan](../plans/plugin-first-delivery.md).
+This census adds no full-repository green, benchmark or live vendor-parity
+claim and does not turn the remaining rows into implemented SDK adapters.

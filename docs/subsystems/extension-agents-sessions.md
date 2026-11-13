@@ -1,6 +1,6 @@
 # Executable extension agents and sessions
 
-This reference describes the implemented host paths for executable SDK agent
+This reference describes the implemented host paths for native/exec/Bun SDK agent
 wiring and session conversion. The host owns discovery, scope, approved paths,
 file preconditions, execution and recovery. The extension owns the agent's
 config schema, inspection, format-aware restoration and session serialization.
@@ -15,6 +15,7 @@ An executable extension is a trusted local program, not a filesystem sandbox.
 | Ordinary agent discovery | [`agents.go`](../../internal/agent/agents.go), `All`, `local`; [`extension_actions.go`](../../internal/agent/extension_actions.go), `ExtensionAgents`, `extensionAgents`, `extensionAgent` |
 | Agent lifecycle and preview | [`applied.go`](../../internal/agent/applied.go), `ConnectHow`, `Apply`, `Pick`, `Wired`, `Disconnect`; [`native.go`](../../internal/agent/native.go), `NativeConnection`, `DisconnectPlan.Revision`; [`preview.go`](../../internal/agent/preview.go), `DisconnectPreview` |
 | Session routes and native source reads | [`carry.go`](../../internal/sessions/carry.go), `carries`; [`carry_convert.go`](../../internal/sessions/carry_convert.go), `CarryOver`; [`extension_actions.go`](../../internal/sessions/extension_actions.go), `SessionExtensions`, `extensionSessionRoutes`, `carryExtension`, `ConvertExtension` |
+| Selected-store journal/blob planning | [`extension_source_inputs.go`](../../internal/sessions/extension_source_inputs.go), `sessionSourceRuntime`, `collectSessionSourceInputs`, `readSessionInputs`, `sessionInputSnapshot.check` |
 | File plan preparation and execution | [`actions.go`](../../internal/extension/actions.go), `Actions.AgentInspect`, `AgentPlan`, `SessionConvert`, `Execute`, `ActionPolicy`, `ActionPlan` |
 | Module lifecycle and scoped state | [`manager.go`](../../internal/extension/manager.go), `Default`, `Manifest`, `Invoke`, `Store`; [`store.go`](../../internal/extension/store.go), `Store.GetAccount` |
 
@@ -231,6 +232,8 @@ native session assembly -> carries -> enabled descriptor route -> Carry
 CarryOver -> read consent + offered Convert route
           -> extensionSessionRoutes -> carryExtension
           -> convertExtensionSource(selected Session)
+          -> optional session.inputs.v1 -> checked source files
+             (planner and converter share one Manager lease)
           -> Actions.SessionConvert -> ActionPlan
           -> validate native ID/resume command -> Actions.Execute
           -> CarryResult {agent, id, path, command}
@@ -255,17 +258,46 @@ selected path, physical file identity and SHA-256 content hash.
 After module planning, and again immediately before ordinary execution, the
 host rechecks that identity and hash. Same-size edits with restored mtime and
 same-content file replacement both fail. `options.cwd` and native resume use
-the selected session's working directory.
+the selected session's working directory. API 1.3 ordinary OMP targets also
+receive host-canonical `canonicalCwd`, `home` and `temp`; Codex targets receive
+the selected Codex store's provider choice. The module does not choose these
+roots from document content.
 
-The module receives one document containing `filepath.Base(source.Path)`,
-source format and original bytes. This does not capture all files of an
-aggregated session or infer the working directory from vendor document
-contents. It is a file-source path, not a generic database export or complete
-session-graph exporter. The source check is local to the session adapter:
-Actions has no source-read guard hook. A public explicit caller retaining a
-prepared plan does not gain a deferred source guard on its later `Execute`,
-and ordinary conversion does not lock another application's source across
-the final check and output application.
+Without an input planner, the module receives one document containing
+`filepath.Base(source.Path)`, source format and journal bytes. Packed Codex
+journals are decoded under the existing bounded source budget while the
+snapshot still binds their stored file. The host does not automatically
+export every aggregated journal, database or session graph.
+
+### Optional source-input planning
+
+A module may declare the read-only ModuleRPC action `session.inputs.v1`.
+The host first supplies a `SessionRequest` with the selected journal and a
+path relative to its approved native store. The result is a version-1 input
+plan naming relative `path` and lowercase SHA-256 pairs. This is a read
+action, not permission for module-authored filesystem access or output.
+
+The host chooses the source store, rejects traversal, symlink components,
+duplicate paths and malformed hashes, then reads each requested digest
+without searching another profile or default store. The plan result is
+bounded to 64 KiB. At most 127 additional files fit beside the selected
+journal; aggregate input stays within the existing 128-file/16-MiB action
+budget and the SDK frame budget. Root ModuleRPC input uses its frame-sized
+budget; scoped host callbacks keep their smaller independent limit.
+
+With the ordinary Manager, planning and conversion share one acquired
+module lease. A changed manifest fails the plan instead of substituting a
+different generation between the two calls. Conversion receives the journal
+and verified extra documents together. Source snapshots bind journal/blob
+contents, file identities and permissions, parent-directory identities and
+the selected store identity; they are checked after conversion and before
+ordinary output application.
+
+The source check stays local to the session adapter: Actions has no deferred
+source-read hook. A public explicit caller retaining a prepared `ActionPlan`
+still validates its source before a later `Execute`. Ordinary conversion
+does not lock another application's source across the final check and output
+application.
 
 The converter returns documents in the requested target format and an
 optional `SessionResult.id`. Ordinary conversion requires a nonempty ID and
@@ -287,6 +319,30 @@ caller; this adapter does not execute a shell. Targets with no existing
 native resume implementation, unknown source formats and explicitly selected
 file sets use manual conversion workflows. The SDK path returns before the
 native converter's `carried` cache and adds no equivalent reuse cache.
+
+Conventional native output prefixes are also bound to the selected target
+store. `.claude/projects` is unavailable when Claude uses another config
+root, and `.codex/sessions` requires the selected default Codex root.
+The conventional `.omp/agent/sessions` route is not offered when a selected
+existing XDG OMP store would make it undiscoverable. The adapter rechecks
+these guards immediately before ordinary apply; it does not silently publish
+into a different default store.
+
+### Independent OMP module
+
+`magpie-sdk-plugin-session-omp` imports only public SDK packages and requires
+API 1.3/native ABI 1 with `session-migration` and `module-rpc`. Its explicit
+`omp-conversation-v1` interchange remains module-owned and lossless; it is
+not a new SDK-wide conversation schema.
+
+The module now declares ordinary OMP→Claude, OMP→Codex, Claude→OMP and
+Codex→OMP routes, using the host's existing native discovery/readers and safe
+resume commands. OMP→Claude has an actual native ordinary CarryOver fixture
+including input attachments and later native Claude discovery. Reverse and
+Codex route implementation/acceptance are tracked by the module owner;
+declaring them is not proof that every route or vendor application was
+validated. Claude↔Codex remains upstream-owned. None of these routes registers
+generic SDK session discovery, readers or resume callbacks.
 
 ## Scoped verification record and limits
 
@@ -366,3 +422,13 @@ The observed race run passed 7 agent roots and 9 session roots three times:
 finished with exit 0. It used the same isolated HOME and pinned offline
 caches described above. This follow-up did not run the broad suite or change
 public SDK contracts.
+
+The API 1.3 follow-up adds
+[`extension_source_inputs_test.go`](../../internal/sessions/extension_source_inputs_test.go)
+and [`extension_omp_native_test.go`](../../internal/sessions/extension_omp_native_test.go).
+They cover the read-only input plan, source/store/parent guards and the
+ordinary native OMP path. Route-specific, large-document and reverse-route
+results belong to the owning frozen-source record; the historical tables
+above are not acceptance results for those later changes.
+The [combined API 1.3 record](../adr/0009-sdk13-validation.md) covers the host
+checkpoint separately from each standalone route's native/domain proof.

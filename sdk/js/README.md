@@ -8,9 +8,11 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package 1.2.0 adds the negotiated `gateway-hooks` capability and tool exposure;
-`CONTRACT` now advertises SDK API 1.2 and eleven capabilities. Explicit
-1.0 and 1.1 manifests retain their earlier behavior.
+Package source version 1.3.0 advertises SDK API 1.3 and eleven capabilities.
+API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
+operations, extended model metadata and the host-owned refresh guarantee.
+Explicit 1.0/1.1/1.2 manifests retain their earlier behavior. This is a source
+version, not a claim that an npm package or release was published.
 
 ```js
 import { serve, SDKError } from "@magpie/extension-sdk";
@@ -51,6 +53,9 @@ ModuleRPC is unary. A write action may emit and await `accepted` before its
 effect; every other event is rejected, including read-action acceptance.
 A forbidden event also fails the terminal result if author code catches the
 emit error. Existing non-ModuleRPC capability streams retain their protocol.
+Root `module.call` input uses the bounded frame budget; scoped host callbacks
+retain `MAX_HOST_BYTES`. A large session journal does not make ModuleRPC
+streaming or enlarge a service callback's authority.
 `stream.hostCall("component.call", {binding,input})` carries the unchanged
 parent scope and does not forward `call.auth` in the callback.
 
@@ -188,7 +193,7 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract versions are 1.0, 1.1 and 1.2. Handlers outside the
+handlers. Supported contract versions are 1.0, 1.1, 1.2 and 1.3. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
@@ -223,10 +228,60 @@ decoded operation, never a provider protocol or an additional capability.
 | module-rpc (SDK 1.1) | module.call (auto-dispatched from module.actions) |
 | gateway-hooks (SDK 1.2) | gateway.request / gateway.response / gateway.signin, only as enabled by hooks |
 
+## Provider operations, models and refresh (API 1.3)
+
+A provider's `operations` is a finite list, separate from conversational
+`protocols`: `embeddings`, `rerank`, `images.generate`, `images.edit`,
+`audio.transcribe`, `audio.translate`, `audio.speech`,
+`videos.create`, `videos.get`, `videos.content`, `videos.delete`,
+`videos.remix`. They require `outbound-executor`, contract minor 3 and the
+OpenAI-compatible `chat` family. `ExecuteRequest.operation` selects one;
+ordinary conversation and native token-counting calls keep it empty.
+
+The author server and actual leased Go-host descriptor both validate
+permission before dispatch. Declaring metadata or a service does not grant
+an operation or register arbitrary URLs/public routes. The typed
+`ExecuteOptions` has method, path, query, proxy choice and optional
+caller/request/native metadata. The host includes `escapedPath` only for
+API 1.3; API 1.1/1.2 retain their earlier option shape. Use `network.proxy`
+for effective network policy rather than treating the proxy-choice field
+as a dial URL.
+
+API 1.3 model fields add `kind`, `inputModalities`, `outputModalities`,
+`maxContextWindow`, `released`, `temperature`, `serviceTiers`, `free`,
+`rate`, `rateWas`, `alwaysThinks`, `dynamicTools`, `defaultEffort`.
+Omitted/null modalities mean unknown; `[]` explicitly means none and survives
+public snapshots. Temperature omission differs from false. Ordinary host
+catalog projection preserves the declared facts and user overrides.
+Dedicated decision metadata and provider extras remain separate work.
+
+Require `compatibility.hostAPI: "^1.3"` for a module that relies on rotating
+`auth.refresh`. The handler still makes one unary exchange using the
+host-selected `call.auth` and returns replacement credentials plus expiry.
+The Go host owns strict per-account cross-process locking, durable dispatch
+fences and atomic credentials/expiry/generation/receipt publication.
+The public caller receives only a sanitized receipt. A module mutex or
+`state.cas` cannot substitute for this owner.
+
+`AuthResult.expiresAt` is Unix milliseconds; zero is unknown. Ordinary
+provider execute/model-fetch/usage preflight can renew known near-expiry
+credentials and adopt only a durably proven refresh successor. Manual
+replacement/deletion still revokes stale selections. The module must not
+silently rotate/retry inside execution. Canceling a dispatched caller ends
+its wait while the bounded host owner publishes or fences the result;
+an unseen rotated token lost during a crash still requires reauthorization.
+See [ADR 0007](../../docs/adr/0007-transactional-account-refresh.md).
+
+API 1.3 attachment-aware session modules may declare the read-only
+`session.inputs.v1` ModuleRPC action. The host validates the input plan,
+reads approved paths/digests from the selected native store and pins
+planner/converter to one lease. It does not grant the module arbitrary host
+filesystem access or generic session reader/resume registration.
+
 ## Gateway hooks and tool exposure (API 1.2)
 
 Declare `hooks: {request, response, signIn, timeoutMs, origins}` with the
-`gateway-hooks` capability and contract minor 2. At least one flag must be
+`gateway-hooks` capability and contract minor at least 2. At least one flag must be
 true. Register ordinary functions in `module.handlers` under
 `"gateway.request"`, `"gateway.response"` and `"gateway.signin"` for exactly
 the flags declared. The SDK owns validation, cancellation and wire dispatch;
@@ -261,7 +316,7 @@ request-hook origin model remains unchanged. A sign-in hook requires local
 permission. `timeoutMs` is 0/default or an integer from 100 through 30000;
 the host owns that execution budget.
 
-Tools may declare `exposure: "local-owner"` or `"shared"` only in API 1.2.
+Tools may declare `exposure: "local-owner"` or `"shared"` with API 1.2 or later.
 Omission keeps the legacy shared default. The host adapter owns discovery and
 invocation filtering; SDK descriptor validation alone does not make a tool
 private. API 1.2 accepts compatibility `hostAPI: "^1.2"`.
@@ -325,3 +380,11 @@ generations, streamed acknowledgements, cancellation, public/private errors,
 and stdout purity. Bun is used only if already present (`BUN_BIN` may name
 an existing binary). No vendor endpoint, live config or package registry
 is contacted.
+
+The [combined API 1.3 checkpoint](../../docs/adr/0009-sdk13-validation.md)
+records 108 Node and 108 Bun tests plus three strict consumer fixtures.
+It also records the distinct Go-host policy, lifecycle, refresh and operation
+gates. Terminal IDs retire before result bytes become visible, while canceled
+handlers retain independent admission capacity until they finish.
+Those scoped results do not imply full SDK surface completion, current
+whole-repository acceptance, Windows native execution or live vendor parity.

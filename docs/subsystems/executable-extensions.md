@@ -6,15 +6,23 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Native/composite APIs and SDK 1.2 gateway hooks/private tools are implemented.
+Current SDK API 1.3 includes native/composite APIs, API 1.2 gateway
+hooks/private tools, and API 1.3 transactional refresh, provider operations
+and extended model metadata.
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
-immutable aggregate runs from later fixes. Whole-repository acceptance remains
-non-green; the [surface census](extension-surface-coverage.md) lists remaining adapters.
+immutable aggregate runs from later fixes. Those scoped records do not
+establish whole-repository acceptance; the
+[surface census](extension-surface-coverage.md) lists remaining adapters.
+The [API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records the combined
+implementation and its separate policy, lifecycle, JS/TS and platform gates.
 
 The original contract decision is [ADR 0003](../adr/0003-external-extension-runtime.md).
 [ADR 0004](../adr/0004-native-extension-abi.md) adds native Go, and
 [ADR 0005](../adr/0005-composite-module-contract.md) defines component ownership.
+[ADR 0007](../adr/0007-transactional-account-refresh.md) owns rotating
+credential publication; [ADR 0008](../adr/0008-provider-operation-contracts.md)
+separates conversational protocols, finite operations and catalog metadata.
 See [extension providers](extension-providers.md),
 [agents and sessions](extension-agents-sessions.md), and
 [legacy Go codec embedding](protocol-extensions.md) for their owners.
@@ -31,12 +39,15 @@ See [extension providers](extension-providers.md),
 | [`components.go`](../../internal/extension/components.go), [`module_config.go`](../../internal/extension/module_config.go) | One generation's component group, readiness and root configuration CAS |
 | [`module_window.go`](../../internal/extension/module_window.go), [`extension_window.go`](../../internal/gui/extension_window.go) | Revision/config-bound window parts and bindings |
 | [`store.go`](../../internal/extension/store.go) | Scoped state, account CAS and durable operation journal |
+| [`refresh.go`](../../internal/extension/refresh.go), [`refresh_store.go`](../../internal/extension/refresh_store.go) | Cross-process refresh ownership, bounded lifetime, atomic credential/expiry publication and replay fences |
+| [`extension_operations.go`](../../internal/provider/extension_operations.go), [`provider_operations.go`](../../pkg/extension/provider_operations.go) | Exact operation admission, extended model validation and author/host enforcement |
 | [`inbound.go`](../../internal/extension/inbound.go) | Native codec calls and response encoding |
 | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go) | Gateway guards and canonical dispatch |
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 2}` and eleven capabilities. Explicit SDK 1.0 manifests
+SDK API `{major: 1, minor: 3}` and eleven capabilities. The finite operation
+registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
 independent version.
@@ -166,6 +177,8 @@ outbound executor, agent wiring, account auth, model discovery, usage,
 operation control, tools and session migration. API 1.1 adds `module-rpc`
 for declared actions. API 1.2 adds primary `gateway-hooks` for request, completed
 response and sign-in notifications, plus explicit local-owner tool exposure.
+API 1.3 adds typed execution options, declared provider operations, richer
+models and a host-owned refresh transaction without changing native ABI 1.
 Only `module.call {action,input}` routes by action owner; codec/provider/response
 calls retain the existing primary lease. See [hooks](gateway-request-hooks.md)
 and [private tools](plugin-tools.md#installable-sdk-tools-and-private-memory).
@@ -241,7 +254,8 @@ after the cancellation grace period; native code must cooperate. Replacement
 starts new work in the new root generation while old leases drain for up to
 30 seconds. Stop cancels business calls, ACK/host waits and startup, and joins
 the returned disposer once. Failed startup also runs its returned disposer.
-Groups close owned clients in reverse start order with bounded control waits.
+The primary disposer runs while its helper dependencies are still available;
+private services then stop in reverse dependency order with bounded control waits.
 Unix process groups and the Windows child-tree owner stop module children.
 
 Native logical close revokes handles and unblocks transport without waiting
@@ -311,6 +325,59 @@ not automatically replayed or sent to a fallback. A known unsent call may be
 reported as not started. Module-specific status/cancel can reconcile an
 operation; the journal does not claim a vendor transaction was undone.
 
+### Account refresh and ordinary expiry preflight
+
+A module depending on rotating refresh requires API 1.3 and
+`compatibility.hostAPI: "^1.3"`. `Manager.RefreshAccount` and raw
+`auth.refresh` through Manager/Lease share one owner: reread the selected
+generation under a strict account OS lock, persist dispatch before one unary
+RPC, then atomically publish credentials, expiry, generation and a sanitized
+receipt. The caller receives no replacement credentials. Same-generation
+completed retries reuse the receipt; an ambiguous exchange leaves a durable
+uncertain fence. Module mutexes, private state CAS and a post-RPC SaveAccount
+alone are not equivalent.
+
+`Account.ExpiresAt` and `AuthResult.ExpiresAt` are Unix milliseconds; zero
+means unknown. Ordinary provider execute/model-fetch/usage preflight renews
+known expiry within one minute, checks the published successor and refuses
+credentials still within 30 seconds of expiry. Cached bindings follow only a
+durably proven refresh successor; manual replacement/deletion still revokes
+the old selection. Network policy, caller guards and account choice stay with
+the host.
+
+After dispatch, caller cancellation stops its wait while the bounded owner
+publishes or fences the result. Manager shutdown joins refresh ownership
+before closing its clients; it does not wait indefinitely for ordinary
+leases to become idle. The transaction cannot recover an unseen token lost
+between remote rotation and local publication. See
+[ADR 0007](../adr/0007-transactional-account-refresh.md) for exact limits and
+upgrade requirements.
+
+### Provider operations and model metadata
+
+API 1.3 `ProviderDescriptor.operations` lists the finite embedding/rerank,
+image, audio and video operations in
+[`provider_operations.go`](../../pkg/extension/provider_operations.go).
+They use the OpenAI-compatible `chat` wire family plus
+`ExecuteRequest.operation`; ordinary conversation calls keep an empty
+operation. Existing Anthropic/Gemini counting paths remain native protocol
+requests. There is no arbitrary upstream URL registration.
+
+`ExecuteOptions` names method, decoded path, query, parent proxy choice and
+optional caller/request/native metadata. Only API 1.3 modules receive
+`escapedPath`, preserving the earlier option shape for API 1.1/1.2.
+`network.proxy` remains the effective transport-policy resolver. Both the
+actual leased descriptor and author SDK validate an operation before
+authorization/effect dispatch; catalog modalities alone grant no operation.
+Ordinary retrieval/media owners preserve accepted-operation fallback fences
+and video module/provider/account affinity across credential renewal.
+
+API 1.3 models describe kind, input/output modalities, default/maximum context,
+release, temperature, service tiers, subscription rates and reasoning
+defaults. Nil/unknown modality declarations differ from explicit empty lists;
+user overrides stay authoritative. Dedicated decisions, provider options,
+check-in and background keepalive remain separate contracts.
+
 ModuleRPC is unary: one terminal JSON value, with only an acknowledged
 `accepted` receipt permitted for a write. Read actions cannot emit; data and
 progress events fail the call even when a handler catches the Emit error.
@@ -319,6 +386,10 @@ for the same root operation. The helper inherits its lease, selected account,
 auth generation, cancellation and operation; it creates no second dispatched
 journal entry. A read parent cannot delegate a write. These action semantics
 do not add inference retry or MCP permission behavior.
+Root ModuleRPC parameters have the bounded frame budget
+`MaxFrameBytes - 4096`; scoped callbacks retain their independent
+`MaxHostBytes` budget. Large session input is not permission to enlarge
+callback authority or streaming ModuleRPC.
 
 ## Window integration
 
@@ -362,14 +433,21 @@ Scoped checks use temporary HOME/XDG, pinned caches and offline resolution:
 | [`TestCompositeHybridBundle`](../../internal/extension/composite_integration_test.go) | Native primary PID = host; Go helper PID differs; scope/readiness/disposal and old lazy v1/config1 after v2/config2 replacement |
 | [`TestExtensionWindowHybridRuntime`](../../internal/gui/extension_window_integration_test.go) | Real backend/status and SSE, cookies, config/update/off invalidation, response proof and held response lease |
 | Go-host/Bun API 1.1 fixture, race count 3 | Real Bun installed and invoked by Go Manager; three passes, no skips |
-| JS SDK checks | 87 Node and 87 Bun tests, no failures/skips; strict declarations pass |
+| Historical API 1.1 JS checks | 87 Node and 87 Bun tests, no failures/skips; strict declarations pass |
+| [`refresh_test.go`](../../internal/extension/refresh_test.go), [`refresh_review_test.go`](../../internal/extension/refresh_review_test.go) | Actual worker/Store and cross-process synthetic refresh, cancellation, publication and uncertain recovery; API 1.3 |
+| [`extension_media_test.go`](../../internal/gateway/extension_media_test.go) | Scoped ordinary media/retrieval, operation permission, account affinity and accepted-fallback behavior |
+| [`extension_source_inputs_test.go`](../../internal/sessions/extension_source_inputs_test.go), [`extension_omp_native_test.go`](../../internal/sessions/extension_omp_native_test.go) | Selected-store source planning, journal/blob guards and native OMP integration; per-route acceptance stays separate |
 
 These are completed scoped proofs, not a final immutable whole-tree gate or
 vendor parity. The integration owner maintains the final gate records.
-Remote Linux native execution has no result yet; Windows native execution
-and performance benchmarks were not performed. Cross-build/no-cgo checks
+Linux native execution is recorded for the composite runtime and independent
+OpenCode module, including ordinary expiry renewal and four packaged model
+routes on `usbox`. Earlier macOS native proof belongs to its named snapshot.
+Windows native execution and performance benchmarks were not performed.
+Cross-build/no-cgo checks
 do not substitute for loading a library on those systems.
 
-The SDK itself migrates no OpenCode, ZCode, OMP or Devin implementation, changes
-no installed app and publishes no package. Those modules keep separate source
-and migration ownership.
+The SDK does not embed OpenCode, ZCode, OMP or Devin vendor implementations.
+Those modules have separate repositories, source and migration ownership in
+the [delivery plan](../plans/plugin-first-delivery.md). This work changes no
+installed app and publishes no package.
