@@ -107,6 +107,11 @@ func record(id, key, v string) {
 // which read as changed outside magpie, and the drift kept the row up
 // among the connected ones while it said Not connected (#834).
 func (a *Agent) Apply(key, v string) error {
+	release, err := a.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if a.Native != nil {
 		return a.Native.Apply(key, v)
 	}
@@ -407,6 +412,11 @@ func orDefault(v string) string {
 // catches. A replaced field brings back the others magpie set with it.
 // Either way the record is renewed, so a use before now no longer counts.
 func (a *Agent) Reapply() error {
+	release, err := a.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if a.Native != nil {
 		return a.Native.Connect()
 	}
@@ -536,6 +546,11 @@ func (a *Agent) Wired() bool {
 // model picked in magpie in one click, both): the agent gets magpie's whole
 // list, and Disconnect puts back what it had before.
 func (a *Agent) Pick(key, v string) error {
+	release, err := a.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if a.Native != nil {
 		value, err := a.Spell(key, v)
 		if err != nil {
@@ -626,6 +641,11 @@ func (a *Agent) rewired(err error) {
 
 // ConnectHow is Connect, saying how the model was chosen.
 func (a *Agent) ConnectHow() (c Connection, err error) {
+	release, lockErr := a.lockMutation()
+	if lockErr != nil {
+		return c, lockErr
+	}
+	defer release()
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		return Connection{How: "joined"}, a.Native.Connect()
@@ -642,7 +662,12 @@ const disconnectedKey = ".disconnected"
 
 // Disconnected reports whether the user disconnected the agent and hasn't
 // connected it since.
-func (a *Agent) Disconnected() bool { return stashShared()[a.ID+disconnectedKey] == "1" }
+func (a *Agent) Disconnected() bool {
+	if a.extensionMetadata != nil && a.extensionMetadata.disconnected != nil {
+		return a.extensionMetadata.disconnected()
+	}
+	return stashShared()[a.ID+disconnectedKey] == "1"
+}
 
 // noModelLeft says why there is no model of magpie's to connect the agent
 // to: none added yet (NoModelsError), or every one taken out of its lists
@@ -835,6 +860,11 @@ func connectWas(v string, opts []Option) string {
 // each one magpie set that reads as magpie set it (an effort). What magpie
 // remembered setting is forgotten.
 func (a *Agent) Disconnect() (err error) {
+	release, lockErr := a.lockMutation()
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		plan, err := a.Native.Disconnect()
@@ -915,6 +945,11 @@ func (a *Agent) Disconnect() (err error) {
 // DisconnectOffline restores a native agent's saved files only after an
 // explicit offline choice. Legacy callers of Disconnect keep live semantics.
 func (a *Agent) DisconnectOffline() error {
+	release, err := a.lockMutation()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if a.Native == nil || a.Native.ExecuteOffline == nil {
 		return fmt.Errorf("%s does not support offline disconnect", a.Name)
 	}

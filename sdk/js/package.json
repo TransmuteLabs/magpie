@@ -20,6 +20,7 @@
     "index.js",
     "index.d.ts",
     "manifest.js",
+    "agent-metadata.js",
     "provider-policy.js",
     "bytes.js",
     "worker.js",

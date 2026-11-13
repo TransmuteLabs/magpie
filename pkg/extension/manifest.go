@@ -57,8 +57,7 @@ func cloneManifest(manifest Manifest) Manifest {
 	}
 	manifest.Agents = slices.Clone(manifest.Agents)
 	for index := range manifest.Agents {
-		manifest.Agents[index].ConfigFiles = slices.Clone(manifest.Agents[index].ConfigFiles)
-		manifest.Agents[index].Fields = slices.Clone(manifest.Agents[index].Fields)
+		manifest.Agents[index] = manifest.Agents[index].Clone()
 	}
 	manifest.Sessions = slices.Clone(manifest.Sessions)
 	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
@@ -227,6 +226,9 @@ func (manifest Manifest) Validate() error {
 		if agent.Bin != "" && (!validID(agent.Bin) || strings.ContainsAny(agent.Bin, "/\\")) {
 			return fmt.Errorf("agent binary must be an executable basename")
 		}
+		if err := agentMetadata(manifest, agent); err != nil {
+			return err
+		}
 		if len(agent.ConfigFiles) > 128 || len(agent.Fields) > 128 {
 			return fmt.Errorf("agent wiring metadata exceeds descriptor limits")
 		}
@@ -245,6 +247,12 @@ func (manifest Manifest) Validate() error {
 			fields[field.Key] = true
 		}
 		ids[agent.ID] = true
+		for _, alias := range agent.Aliases {
+			if ids[alias] {
+				return fmt.Errorf("duplicate agent identity %q", alias)
+			}
+			ids[alias] = true
+		}
 	}
 	ids = map[string]bool{}
 	for _, session := range manifest.Sessions {
@@ -419,7 +427,7 @@ func RequiredMethods(manifest Manifest) []string {
 		case AgentWiring:
 			methods = append(methods, MethodAgentPlan)
 			for _, agent := range manifest.Agents {
-				if agent.Bin != "" || len(agent.ConfigFiles) != 0 || len(agent.Fields) != 0 {
+				if agent.Bin != "" || len(agent.ConfigFiles) != 0 || len(agent.Fields) != 0 || agent.Launch != nil || agent.Profile != nil {
 					methods = append(methods, MethodAgentInspect)
 					break
 				}

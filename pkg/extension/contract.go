@@ -68,11 +68,16 @@ type ProviderDescriptor struct {
 }
 
 type AgentDescriptor struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Bin         string       `json:"bin,omitempty"`
-	ConfigFiles []string     `json:"configFiles,omitempty"`
-	Fields      []AgentField `json:"fields,omitempty"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Bin         string        `json:"bin,omitempty"`
+	ConfigFiles []string      `json:"configFiles,omitempty"`
+	Fields      []AgentField  `json:"fields,omitempty"`
+	Aliases     []string      `json:"aliases,omitempty"`
+	UA          []string      `json:"ua,omitempty"`
+	Launch      *AgentLaunch  `json:"launch,omitempty"`
+	Profile     *AgentProfile `json:"profile,omitempty"`
+	Library     *AgentLibrary `json:"library,omitempty"`
 }
 
 type AgentField struct {

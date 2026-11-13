@@ -16,15 +16,20 @@ declares `id`, `name`, an optional executable basename `bin`, exact
 HOME-relative `configFiles`, and model picker `fields` (`key`, `label`).
 Paths are clean relative paths without traversal, expansion or globs.
 An ID/Name-only descriptor remains available through explicit action commands;
-it does not register an ordinary tile. Rich descriptors negotiate both
+it does not register an ordinary tile. SDK 1.5 also declares aliases, UA,
+structured launch metadata, explicit existing-agent profiles and typed Library
+locations. A launch-only declaration needs no invented config file. Rich descriptors negotiate both
 `agent.inspect` and `agent.plan`.
 
 [`All` and `local`](../../internal/agent/agents.go) append these descriptors
 after built-in and existing JS agents. Existing agent IDs and aliases cannot
-be replaced. [`extension_actions.go`](../../internal/agent/extension_actions.go)
+be replaced by an ordinary declaration. An explicit 1.5 profile may adopt a
+local base through a checked user action; until then the base remains.
+[`extension_actions.go`](../../internal/agent/extension_actions.go)
 adapts each descriptor to `Agent`, `Field` and `NativeConnection`, so the
 normal `Find`, `ConnectHow`, `Apply`, `Disconnect`, preview and catalog sync
-paths reach the module. Disabled modules disappear on the next discovery.
+paths reach the module. Disabled modules disappear on the next discovery,
+except that an owned 1.5 binding retains a checked recovery row.
 `PluginErrors` reports discovery and ownership conflicts.
 
 `agent.inspect` receives `{id, options, settings}` and returns
@@ -45,12 +50,31 @@ lock and rollback constrain host writes; the worker remains a trusted local
 executable, not a filesystem sandbox. Parent scope is preserved by explicit
 action calls. The ordinary adapter uses bounded agent-operation scopes.
 
-The host records adoption in its stash only after successful file application.
+The existing config adapter records adoption in its stash only after successful file application.
 A module reporting an existing connection alone does not transfer ownership:
 background sync and disconnect leave manually wired files alone. If saving
 ownership fails after application, the operation reports that distinction and
 the durable backup location. Modules own format-aware restoration and must
 preserve unrelated changes made by the user.
+
+[`extension_controller.go`](../../internal/agent/extension_controller.go)
+owns 1.5 launch/profile bindings in the private `sdk-agent-bindings.json`.
+It supplies typed binding snapshots to module plans and uses durable pending,
+owned and disconnected records, file/shell preimages, strict cross-process
+locks and captured module/config checks. Ordinary mutations, direct
+field/native callbacks and local atomic owners are fenced during a profile
+handoff. An off or replaced module cannot silently start its still-owned
+agent on its own account. Incomplete rollback keeps its recovery record;
+unknown user changes are refused. Legacy stash ownership must be released
+by its previous descriptor before a new launch/profile adoption.
+
+Launchers reuse `Starting`, the ordinary CLI run/env path and the existing
+shell-function owner. `Starting.Active` supports an environment-only agent
+without a selected model. Typed Library locations reuse the instructions,
+MCP and skills writers; active profiles inherit their base identity. The
+full state/compatibility contract is in
+[SDK agents and sessions](extension-agents-sessions.md#sdk-15-launch-profile-and-library-metadata)
+and [ADR 0016](../adr/0016-sdk-agent-profiles.md).
 
 `TestExtensionAgentOrdinaryLifecycle` installs a real executable fixture and
 exercises ordinary discovery, connect, apply, rediscovery, preview, stale-file

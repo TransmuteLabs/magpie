@@ -61,6 +61,24 @@ export interface AgentDescriptor {
   bin?: string;
   configFiles?: string[];
   fields?: AgentField[];
+  aliases?: string[];
+  ua?: string[];
+  launch?: AgentLaunch;
+  profile?: AgentProfile;
+  library?: AgentLibrary;
+}
+export interface AgentLaunch {
+  env?: Record<string, string>;
+  args?: Record<string, string>;
+  model?: string;
+  plain?: string[];
+}
+export interface AgentProfile { target: string }
+export interface AgentLibrary {
+  instructions?: string;
+  mcp?: string;
+  mcpFormat?: string;
+  skills?: string;
 }
 export interface SessionDescriptor {
   id: string;
@@ -260,11 +278,15 @@ export interface OperationRequest { operationId: string; reference?: JSONValue }
 export interface OperationResult { operationId: string; outcome: string; result?: JSONValue }
 export interface ToolRequest { id: string; arguments: JSONValue }
 export interface ToolResult { content: JSONValue; isError?: boolean }
-export interface AgentInspectRequest { id: string; options?: JSONValue; settings?: JSONValue }
+export interface AgentBindingSnapshot { target: string; revision: string; connected: boolean; values: Record<string, string> }
+export interface AgentBindingChange { revision: string; connected: boolean; values: Record<string, string> }
+export function validateAgentBindingSnapshot(manifest: Manifest, descriptor: AgentDescriptor, value?: AgentBindingSnapshot | null): void;
+export function validateAgentBindingChange(manifest: Manifest, descriptor: AgentDescriptor, before: AgentBindingSnapshot | null, action: string, value?: AgentBindingChange | null): void;
+export interface AgentInspectRequest { id: string; options?: JSONValue; settings?: JSONValue; binding?: AgentBindingSnapshot }
 export interface AgentInspectResult { connected: boolean; values: Record<string, string>; detail?: string }
-export interface AgentPlanRequest { id: string; action: string; options?: JSONValue; settings?: JSONValue }
+export interface AgentPlanRequest { id: string; action: string; options?: JSONValue; settings?: JSONValue; binding?: AgentBindingSnapshot }
 export interface FileChange { path: string; body?: string; beforeHash?: string; mode?: number; remove?: boolean }
-export interface AgentPlan { files: FileChange[] }
+export interface AgentPlan { files: FileChange[]; binding?: AgentBindingChange }
 export interface SessionDocument { path: string; format: string; body: string }
 export interface SessionRequest { id: string; from: string; to: string; files: SessionDocument[]; options?: JSONValue }
 export interface SessionResult { files: SessionDocument[]; id?: string }

@@ -49,6 +49,11 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 			return result, err
 		}
 	}
+	for _, method := range []string{MethodAgentInspect, MethodAgentPlan} {
+		if handler := handlers[method]; handler != nil {
+			handlers[method] = agentBindingHandler(module.Manifest, method, handler)
+		}
+	}
 	if _, exists := handlers[MethodModuleCall]; exists {
 		return nil, nil, fmt.Errorf("module.call is owned by the SDK; register Module.Actions")
 	}

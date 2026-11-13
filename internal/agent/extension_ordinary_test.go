@@ -39,6 +39,9 @@ func installAgentActionFixture(t *testing.T, descriptor sdk.AgentDescriptor) *ex
 	manifest := sdk.Manifest{Schema: 1, ID: "fixture.agent", Version: "1.0.0", Runtime: "exec", Entry: entry,
 		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1}, Capabilities: []sdk.Capability{sdk.AgentWiring}},
 		Agents:   []sdk.AgentDescriptor{descriptor}}
+	if descriptor.Aliases != nil || descriptor.UA != nil || descriptor.Launch != nil || descriptor.Profile != nil || descriptor.Library != nil {
+		manifest.Contract.Version.Minor = 5
+	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +61,47 @@ func installAgentActionFixture(t *testing.T, descriptor sdk.AgentDescriptor) *ex
 		t.Fatal(err)
 	}
 	return host
+}
+
+func TestExtensionAgentMetadataOrdinaryDiscovery(t *testing.T) {
+	installAgentActionFixture(t, sdk.AgentDescriptor{
+		ID: "fixture-metadata", Name: "Metadata fixture", Bin: "fixture-editor",
+		ConfigFiles: []string{".fixture/config.json"}, Aliases: []string{"fixture-alias"},
+		UA: []string{"Fixture-Agent/"}, Fields: []sdk.AgentField{{Key: "model", Label: "Model"}},
+		Library: &sdk.AgentLibrary{Instructions: ".fixture/AGENTS.md", MCP: ".fixture/mcp.json", MCPFormat: "claude", Skills: ".fixture/skills"},
+	})
+	home, _ := os.UserHomeDir()
+	if err := os.MkdirAll(filepath.Join(home, ".fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".fixture/config.json"), []byte(`{"model":"own"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Find("fixture-alias")
+	if err != nil || a.ID != "fixture-metadata" || len(a.UA) != 1 || a.UA[0] != "fixture-agent/" {
+		t.Fatalf("ordinary identity metadata was lost: %+v %v", a, err)
+	}
+	target, places, sdkOwned := a.SDKLibraryTarget()
+	if !sdkOwned || target != a || places == nil || places.MCP != ".fixture/mcp.json" {
+		t.Fatal("ordinary agent did not expose typed Library metadata")
+	}
+	places.MCP = "changed"
+	_, fresh, _ := a.SDKLibraryTarget()
+	if fresh.MCP != ".fixture/mcp.json" {
+		t.Fatal("Library caller mutated the agent's installed declaration")
+	}
+}
+
+func TestExtensionAgentMetadataCannotStealBuiltinAlias(t *testing.T) {
+	installAgentActionFixture(t, sdk.AgentDescriptor{
+		ID: "fixture-collision", Name: "Metadata fixture", ConfigFiles: []string{".fixture.json"}, Aliases: []string{"claude"},
+	})
+	if _, err := Find("fixture-collision"); err == nil {
+		t.Fatal("SDK alias replaced a built-in identity")
+	}
+	if a, err := Find("claude"); err != nil || a.ID != "claude" || a.extensionMetadata != nil {
+		t.Fatal("built-in lookup changed without explicit profile adoption")
+	}
 }
 
 func TestExtensionAgentOrdinaryLifecycle(t *testing.T) {
@@ -174,5 +218,21 @@ func TestExtensionAgentOrdinaryRejectsBuiltinCollision(t *testing.T) {
 	}
 	if PluginErrors()["fixture.agent"] == "" {
 		t.Fatal("collision was not reported")
+	}
+}
+
+func TestExtensionAgentOrdinaryDiscoveryDoesNotCreateOwnershipFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("APPDATA", filepath.Join(home, "appdata"))
+	if len(All()) == 0 {
+		t.Fatal("ordinary discovery returned no agents")
+	}
+	for _, path := range []string{extensionBindingPath(), filepath.Join(filepath.Dir(extensionBindingPath()), "sdk-agent-locks")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("read-only ordinary discovery created ownership state", path, err)
+		}
 	}
 }

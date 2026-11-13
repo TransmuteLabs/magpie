@@ -41,18 +41,82 @@ basename. Declared fields become ordinary model picker fields: their options
 contain default, the current value, and gateway model options. The module
 translates the host's `magpie/<reference>` values into its own schema.
 
-`All()` builds the native/built-in and existing JS agent list, then appends
-`extensionAgents`. `local()` does the same without WSL agents.
+`All()` builds the native/built-in and existing JS agent list, then adds
+`extensionAgents` and applies explicit SDK profile ownership. `local()` does
+the same without WSL agents.
 `ExtensionAgents` reads the enabled installed manifests without calling a
-worker. A descriptor without config files has the explicit action API but
-does not register an ordinary agent. Rich descriptors negotiate inspection;
-ordinary wiring uses descriptors with config files.
+worker. An ID/name-only descriptor has the explicit action API. A descriptor
+with config files, or a declared SDK 1.5 launch, registers an ordinary agent.
+Rich descriptors negotiate inspection.
 
 `extensionAgents` reserves existing IDs and aliases, other known clients, and
 `magpie`, then rejects collisions. Duplicate SDK agent IDs also fail discovery.
-It does not replace a native or JS agent. `PluginErrors()` reports discovery
-and ownership conflicts. A module disabled or removed from the enabled
-catalog is absent from the next ordinary discovery.
+Ordinary descriptors do not replace a native or JS agent. SDK 1.5 profiles
+may explicitly adopt an existing local target under the ownership rules
+below. `PluginErrors()` reports discovery and ownership conflicts. A disabled
+or removed module is absent unless its durable binding still needs recovery.
+
+### SDK 1.5 launch, profile and Library metadata
+
+[`agent_metadata.go`](../../pkg/extension/agent_metadata.go) adds `aliases`,
+`ua`, structured `launch` (`env`, flag/value `args`, model flag and `plain`
+commands), `profile.target`, and typed Library locations. All require API
+1.5; earlier agent declarations keep their existing adapter and behavior.
+A model flag requires a declared model field. A launch with no config files
+uses a host binding rather than a manufactured editable file.
+
+[`extension_controller.go`](../../internal/agent/extension_controller.go)
+adapts these declarations to ordinary All/Find/Starter, NativeConnection and
+CLI run/env. Environment-only launches use `Starting.Active`. SDK shell
+functions fail closed when Magpie is unavailable. A bound module that is
+off, replaced or awaiting recovery cannot silently launch its agent on an
+own account.
+
+An explicit profile keeps a distinct ID and resolves an existing local
+built-in/legacy target. Before adoption, the base remains unchanged. A
+successful connect/set reserves the target, suppresses its ordinary row,
+and resolves its aliases to the profile. A target cannot be another SDK
+profile or WSL agent. ID/alias/launch-command collision refusal otherwise
+remains the default.
+
+The host supplies `binding:{target,revision,connected,values}` to inspect
+and plan. A plan returns `binding:{revision,connected,values}` beside its
+files. Revisions are canonical decimal uint64 strings. Scope selectors,
+undeclared values, null values and stale revisions are refused. The
+confirmation hash includes both binding snapshots. `Actions.Execute`
+approves/applies files; the ordinary controller commits agent ownership.
+
+The private `sdk-agent-bindings.json` ledger records pending/owned/
+disconnected states, original/applied files, shell blocks and selected
+package/config. Strict target and ledger locks coordinate cross-process
+ownership. Held base objects, ordinary mutation entrypoints and local atomic
+owners are fenced. Actions recheck selected authority after waiting for
+their write lock, before every file and at completion.
+
+Failed transitions clear pending ownership only after both file and shell
+preimages are proven restored. Otherwise a recovery row retains the known
+snapshots. Disabled/redefined modules are recovered without invoking their
+code. Unknown user changes are never overwritten. A successful online action
+that rebases user edits disables offline whole-file recovery; the original
+module's schema-aware disconnect is then required. Different target
+generations cannot be recovered through a held old object.
+
+The copied configuration used by ordinary file-agent disconnect previews
+omits only the ephemeral `sdk-agent-locks` directory link, so the child
+creates private locks for its sandbox. The durable binding ledger is
+copied unchanged. Legacy plugin directory links retain their normal
+behavior; no ownership guard or general symlink check is bypassed.
+
+Legacy config ownership is not automatically adopted into the new
+controller. It names the exact previous module/descriptor and refuses new
+ownership until that descriptor's normal disconnect releases it. Config,
+stash and durable backup bytes remain intact on refusal.
+
+Typed Library metadata reuses existing instructions/MCP/skills owners. An
+active profile inherits its base's target identity by default; an inactive
+profile adds no duplicate Library target. See
+[`0016-sdk-agent-profiles.md`](../adr/0016-sdk-agent-profiles.md) for the
+contract and acceptance cases.
 
 `extensionAgent` constructs `Agent`, its fields and `NativeConnection`:
 

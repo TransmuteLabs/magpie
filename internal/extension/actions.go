@@ -45,6 +45,7 @@ type ActionPolicy struct {
 	Paths       []string
 	CreateUnder string
 	BackupDir   string
+	Binding     *sdk.AgentBindingSnapshot
 }
 
 type ActionSettings struct {
@@ -60,8 +61,9 @@ type ActionSettingFile struct {
 }
 
 type ActionPreview struct {
-	Revision string           `json:"revision"`
-	Files    []sdk.FileChange `json:"files"`
+	Revision string                  `json:"revision"`
+	Files    []sdk.FileChange        `json:"files"`
+	Binding  *sdk.AgentBindingChange `json:"binding,omitempty"`
 }
 
 type ActionResult struct {
@@ -101,6 +103,9 @@ type ActionPlan struct {
 	files      []sdk.FileChange
 	revision   string
 	used       bool
+	agent      sdk.AgentDescriptor
+	binding    *sdk.AgentBindingChange
+	contract   sdk.Contract
 }
 
 func (plan *ActionPlan) Preview() ActionPreview {
@@ -108,7 +113,7 @@ func (plan *ActionPlan) Preview() ActionPreview {
 	for index := range files {
 		files[index].Body = bytes.Clone(files[index].Body)
 	}
-	return ActionPreview{Revision: plan.revision, Files: files}
+	return ActionPreview{Revision: plan.revision, Files: files, Binding: plan.binding.Clone()}
 }
 
 func (plan *ActionPlan) Snapshots() []ActionSettingFile {
@@ -143,6 +148,7 @@ func (actions *Actions) AgentInspect(ctx context.Context, plugin string, scope s
 		return sdk.AgentInspectResult{}, err
 	}
 	request.Options = bytes.Clone(request.Options)
+	request.Binding = plan.policy.Binding.Clone()
 	if err := actionRequest(request); err != nil {
 		return sdk.AgentInspectResult{}, err
 	}
@@ -170,6 +176,7 @@ func (actions *Actions) AgentPlan(ctx context.Context, plugin string, scope sdk.
 		return nil, errors.New("unknown extension agent action")
 	}
 	plan.intent = request.Action
+	request.Binding = plan.policy.Binding.Clone()
 	request.Options, request.Settings = bytes.Clone(request.Options), bytes.Clone(request.Settings)
 	if len(request.Settings) == 0 {
 		request.Settings, err = json.Marshal(ActionSettings{Files: plan.Snapshots()})
@@ -184,6 +191,13 @@ func (actions *Actions) AgentPlan(ctx context.Context, plugin string, scope sdk.
 	if err := actions.host.Invoke(ctx, plugin, sdk.MethodAgentPlan, plan.scope, request, &result, nil); err != nil {
 		return nil, err
 	}
+	if plan.policy.Binding != nil && result.Binding == nil {
+		return nil, errors.New("agent binding action requires a checked binding change")
+	}
+	if err := sdk.ValidateAgentBindingChange(sdk.Manifest{Contract: plan.contract}, plan.agent, plan.policy.Binding, request.Action, result.Binding); err != nil {
+		return nil, err
+	}
+	plan.binding = result.Binding.Clone()
 	return actions.finish(ctx, plan, result.Files)
 }
 
@@ -268,9 +282,12 @@ func (actions *Actions) prepare(ctx context.Context, plugin string, scope sdk.Sc
 		return nil, errors.New("extension does not own this action capability")
 	}
 	found := false
+	var agentDescriptor sdk.AgentDescriptor
 	if capability == sdk.AgentWiring {
 		for _, agent := range manifest.Agents {
-			found = found || agent.ID == descriptor
+			if agent.ID == descriptor {
+				found, agentDescriptor = true, agent.Clone()
+			}
 		}
 	} else {
 		for _, session := range manifest.Sessions {
@@ -284,8 +301,15 @@ func (actions *Actions) prepare(ctx context.Context, plugin string, scope sdk.Sc
 		return nil, err
 	}
 	createOnly := capability == sdk.SessionMigration && actionPath(policy.CreateUnder)
+	policy.Binding = policy.Binding.Clone()
+	if policy.Binding != nil && (capability != sdk.AgentWiring ||
+		sdk.ValidateAgentBindingSnapshot(manifest, agentDescriptor, policy.Binding) != nil) {
+		return nil, errors.New("extension action requires a valid host agent binding snapshot")
+	}
+	bindingOnly := capability == sdk.AgentWiring && manifest.Contract.Version.Minor >= 5 &&
+		agentDescriptor.Launch != nil && len(agentDescriptor.ConfigFiles) == 0 && policy.Binding != nil
 	if !filepath.IsAbs(policy.Root) || len(policy.Paths) > MaxActionFiles ||
-		len(policy.Paths) == 0 && !createOnly || policy.CreateUnder != "" && (!createOnly || len(policy.Paths) != 0) {
+		len(policy.Paths) == 0 && !createOnly && !bindingOnly || policy.CreateUnder != "" && (!createOnly || len(policy.Paths) != 0) {
 		return nil, errors.New("extension actions require an explicit root and file allowlist")
 	}
 	policy.Root, err = filepath.EvalSymlinks(policy.Root)
@@ -331,8 +355,9 @@ func (actions *Actions) prepare(ctx context.Context, plugin string, scope sdk.Sc
 	if capability == sdk.SessionMigration {
 		method = sdk.MethodSessionConvert
 	}
+	manifest.Contract.Capabilities = slices.Clone(manifest.Contract.Capabilities)
 	return &ActionPlan{owner: actions, plugin: plugin, scope: scope, manifest: actionManifest(manifest), method: method, descriptor: descriptor,
-		policy: policy, rootInfo: info, before: before}, nil
+		policy: policy, rootInfo: info, before: before, agent: agentDescriptor, contract: manifest.Contract}, nil
 }
 
 func (actions *Actions) generation(scope sdk.Scope) error {
@@ -415,18 +440,20 @@ func (actions *Actions) finish(ctx context.Context, plan *ActionPlan, files []sd
 	}
 	slices.SortFunc(plan.files, func(first, second sdk.FileChange) int { return strings.Compare(first.Path, second.Path) })
 	body, err := json.Marshal(struct {
-		Plugin      string
-		Scope       sdk.Scope
-		Manifest    string
-		Method      string
-		Descriptor  string
-		Intent      string
-		Root        string
-		BackupDir   string
-		CreateUnder string
-		Before      map[string]actionFile
-		Files       []sdk.FileChange
-	}{plan.plugin, plan.scope, plan.manifest, plan.method, plan.descriptor, plan.intent, plan.policy.Root, plan.policy.BackupDir, plan.policy.CreateUnder, plan.before, plan.files})
+		Plugin        string
+		Scope         sdk.Scope
+		Manifest      string
+		Method        string
+		Descriptor    string
+		Intent        string
+		Root          string
+		BackupDir     string
+		CreateUnder   string
+		Before        map[string]actionFile
+		Files         []sdk.FileChange
+		BindingBefore *sdk.AgentBindingSnapshot
+		BindingAfter  *sdk.AgentBindingChange
+	}{plan.plugin, plan.scope, plan.manifest, plan.method, plan.descriptor, plan.intent, plan.policy.Root, plan.policy.BackupDir, plan.policy.CreateUnder, plan.before, plan.files, plan.policy.Binding, plan.binding})
 	if err != nil {
 		return nil, err
 	}
@@ -518,14 +545,7 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	manifest, err := actions.host.Manifest(plan.plugin)
-	if err != nil {
-		return result, err
-	}
-	if actionManifest(manifest) != plan.manifest {
-		return result, ErrActionChanged
-	}
-	if err := actions.generation(plan.scope); err != nil {
+	if err := actions.checkAuthority(plan); err != nil {
 		return result, err
 	}
 	root, err := os.OpenRoot(plan.policy.Root)
@@ -542,6 +562,9 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 		return result, err
 	}
 	defer unlock()
+	if err := actions.checkAuthority(plan); err != nil {
+		return result, err
+	}
 	if err := plan.check(root); err != nil {
 		return result, err
 	}
@@ -562,7 +585,7 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 	var directories []string
 	for _, change := range plan.files {
 		if err = ctx.Err(); err == nil {
-			err = actions.generation(plan.scope)
+			err = actions.checkAuthority(plan)
 		}
 		if err == nil {
 			err = plan.checkFile(root, change.Path)
@@ -594,7 +617,7 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 		err = ctx.Err()
 	}
 	if err == nil {
-		err = actions.generation(plan.scope)
+		err = actions.checkAuthority(plan)
 	}
 	if err == nil {
 		err = actionBackupStatus(backup, "applied")
@@ -644,6 +667,17 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 	}
 	result.Applied = true
 	return result, nil
+}
+
+func (actions *Actions) checkAuthority(plan *ActionPlan) error {
+	manifest, err := actions.host.Manifest(plan.plugin)
+	if err != nil {
+		return err
+	}
+	if actionManifest(manifest) != plan.manifest {
+		return ErrActionChanged
+	}
+	return actions.generation(plan.scope)
 }
 
 func (plan *ActionPlan) check(root *os.Root) error {

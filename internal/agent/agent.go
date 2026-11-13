@@ -129,9 +129,11 @@ type Agent struct {
 	Path    string // config file magpie edits
 	// Plugin is the spec of the plugin that adds this agent (plugged.go),
 	// "" for magpie's own
-	Plugin string
-	Fields []Field
-	Native *NativeConnection
+	Plugin            string
+	Fields            []Field
+	Native            *NativeConnection
+	extensionMetadata *extensionAgentMetadata
+	mutationGuard     func() (func(), error)
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
 	Notice func() string
@@ -832,5 +834,6 @@ func atomic(a *Agent, paths ...string) *Agent {
 	if unwire := a.Unwire; unwire != nil {
 		a.Unwire = func() error { return edit.Atomically(unwire, paths...) }
 	}
+	extensionFenceLocalAtomic(a, paths)
 	return a
 }

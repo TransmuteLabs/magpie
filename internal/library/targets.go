@@ -141,6 +141,15 @@ func codexDir() string { return appdir.CodexHomeIn(home()) }
 // targetOf is where a known agent keeps them, or nil for one magpie can't
 // give any of them to.
 func targetOf(a *agent.Agent) *Target {
+	if target, places, sdkOwned := a.SDKLibraryTarget(); sdkOwned {
+		if target == nil {
+			return nil
+		}
+		if places == nil {
+			return targetOf(target)
+		}
+		return extensionAgentTarget(target, places)
+	}
 	if a.WSL != "" {
 		return wslTargetOf(a)
 	}

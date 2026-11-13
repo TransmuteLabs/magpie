@@ -12,6 +12,14 @@ and billion-context's plugin, which folds a long session's older turns into
 summaries the model can open again, and lists, switches and copies each
 Pi's extensions and packages.
 
+SDK 1.5 agents may declare typed HOME-relative instructions, MCP location and
+format, and skills locations. `agent.SDKLibraryTarget` and
+[`extension_agent.go`](../../internal/library/extension_agent.go) map them to
+the existing `Target` and writers; no legacy plugin VM is created. An active
+explicit profile inherits its existing base's Library identity by default.
+An inactive profile contributes no duplicate target. Instructions/MCP/skills
+ownership and preservation of user content remain the Library's normal rules.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

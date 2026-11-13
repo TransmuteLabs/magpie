@@ -247,7 +247,7 @@ func All() []*Agent {
 	home, cfg := homes()
 	own := builtins(home, cfg)
 	all := append(own, pluggedAgents(home, own, nil)...)
-	return append(all, extensionAgents(home, all, nil)...)
+	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
 }
 
 func homes() (home, cfg string) {
@@ -272,7 +272,7 @@ func local() []*Agent {
 	home, cfg := homes()
 	own := onMachine(home, cfg)
 	all := append(own, pluggedAgents(home, own, nil)...)
-	return append(all, extensionAgents(home, all, nil)...)
+	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
 }
 
 // Starter is the agent on this machine typed as q, by its id or an alias

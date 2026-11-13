@@ -224,9 +224,10 @@ type ToolResult struct {
 }
 
 type AgentInspectRequest struct {
-	ID       string          `json:"id"`
-	Options  json.RawMessage `json:"options,omitempty"`
-	Settings json.RawMessage `json:"settings,omitempty"`
+	ID       string                `json:"id"`
+	Options  json.RawMessage       `json:"options,omitempty"`
+	Settings json.RawMessage       `json:"settings,omitempty"`
+	Binding  *AgentBindingSnapshot `json:"binding,omitempty"`
 }
 
 type AgentInspectResult struct {
@@ -236,10 +237,11 @@ type AgentInspectResult struct {
 }
 
 type AgentPlanRequest struct {
-	ID       string          `json:"id"`
-	Action   string          `json:"action"`
-	Options  json.RawMessage `json:"options,omitempty"`
-	Settings json.RawMessage `json:"settings,omitempty"`
+	ID       string                `json:"id"`
+	Action   string                `json:"action"`
+	Options  json.RawMessage       `json:"options,omitempty"`
+	Settings json.RawMessage       `json:"settings,omitempty"`
+	Binding  *AgentBindingSnapshot `json:"binding,omitempty"`
 }
 
 type FileChange struct {
@@ -251,7 +253,8 @@ type FileChange struct {
 }
 
 type AgentPlan struct {
-	Files []FileChange `json:"files"`
+	Files   []FileChange        `json:"files"`
+	Binding *AgentBindingChange `json:"binding,omitempty"`
 }
 
 type SessionDocument struct {

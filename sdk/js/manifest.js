@@ -6,6 +6,7 @@ import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, valida
 import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation } from "./provider-policy.js";
 import { validateRouting } from "./routing.js";
 import { validateWindowAuthBindings } from "./window-auth.js";
+import { validateAgentMetadata, validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -126,7 +127,7 @@ export function requiredMethods(manifest) {
       continue;
     }
     methods.push(...capabilities[capability]);
-    if (capability === "agent-wiring" && manifest.agents?.some(agent => agent.bin || agent.configFiles?.length || agent.fields?.length)) {
+    if (capability === "agent-wiring" && manifest.agents?.some(agent => agent.bin || agent.configFiles?.length || agent.fields?.length || agent.launch || agent.profile)) {
       methods.push("agent.inspect");
     }
   }
@@ -186,6 +187,11 @@ export function validateManifest(value) {
       } else {
         if (!has(key === "agents" ? "agent-wiring" : "session-migration") || !validName(descriptor.name)) fail("Invalid agent or session descriptor");
         if (key === "agents") {
+          validateAgentMetadata(manifest, descriptor, fail, homePath);
+          for (const alias of descriptor.aliases ?? []) {
+            if (ids.has(alias)) fail("Duplicate agent identity");
+            ids.add(alias);
+          }
           const files = descriptor.configFiles ?? [], fields = descriptor.fields ?? [];
           if (descriptor.bin !== undefined && (typeof descriptor.bin !== "string" || descriptor.bin !== "" && !validID(descriptor.bin))
             || !Array.isArray(files) || !Array.isArray(fields) || files.length > 128 || fields.length > 128) fail("Invalid agent wiring metadata");
@@ -255,6 +261,22 @@ export function validateModule(module) {
   if (required.some(method => typeof handlers.get(method) !== "function")
     || [...handlers].some(([method, handler]) => !required.includes(method) || typeof handler !== "function")) fail("Missing or undeclared extension handler");
   for (const [method, handler] of handlers) {
+    if (method === "agent.inspect" || method === "agent.plan") {
+      handlers.set(method, async (ctx, call, stream) => {
+        const params = call.params;
+        const descriptor = manifest.agents?.find(agent => agent.id === params?.id);
+        if (params?.binding != null) {
+          if (!descriptor) fail("Unknown host agent binding");
+          validateAgentBindingSnapshot(manifest, descriptor, params.binding);
+        }
+        const result = await handler(ctx, call, stream);
+        if (method !== "agent.plan" || params?.binding == null && result?.binding == null) return result;
+        if (!descriptor || !object(result) || result.binding == null) fail("Agent binding action requires a checked binding change");
+        const snapshot = jsonSnapshot(result);
+        validateAgentBindingChange(manifest, descriptor, params.binding, params.action, snapshot.binding);
+        return snapshot;
+      });
+    }
     if (method === "provider.execute") {
       handlers.set(method, (ctx, call, stream) => {
         validateExecuteOperation(manifest, call, message => { throw new SDKError("invalid_params", message, "not-started"); });

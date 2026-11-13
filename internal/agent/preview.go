@@ -283,7 +283,7 @@ func copyTop(from, to string, before map[string][]byte, link bool) error {
 			continue
 		}
 		if st.IsDir() {
-			if link {
+			if link && e.Name() != "sdk-agent-locks" {
 				os.Symlink(p, filepath.Join(to, e.Name()))
 			}
 			continue

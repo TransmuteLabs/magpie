@@ -59,6 +59,9 @@ func main() {
 			if err := json.Unmarshal(call.Params, &request); err != nil {
 				return nil, err
 			}
+			if request.Binding != nil {
+				return sdk.AgentInspectResult{Connected: request.Binding.Connected, Values: request.Binding.Clone().Values}, nil
+			}
 			_, values, err := settings(request.Settings)
 			if err != nil {
 				return nil, err
@@ -70,12 +73,38 @@ func main() {
 			if err := json.Unmarshal(call.Params, &request); err != nil {
 				return nil, err
 			}
-			file, values, err := settings(request.Settings)
-			if err != nil {
-				return nil, err
-			}
 			var opts options
 			if err := json.Unmarshal(request.Options, &opts); err != nil {
+				return nil, err
+			}
+			var change *sdk.AgentBindingChange
+			if request.Binding != nil {
+				change = &sdk.AgentBindingChange{Revision: request.Binding.Revision, Connected: request.Binding.Connected, Values: request.Binding.Clone().Values}
+				switch request.Action {
+				case "connect":
+					change.Connected = true
+					for _, descriptor := range manifest.Agents {
+						if descriptor.ID == request.ID && descriptor.Launch != nil && descriptor.Launch.Model != "" && change.Values["model"] == "" {
+							change.Values["model"] = "magpie/test-model"
+						}
+					}
+				case "set":
+					change.Values[opts.Field], change.Connected = opts.Value, true
+				case "disconnect":
+					change.Connected = false
+				}
+				var files struct {
+					Files []snapshot `json:"files"`
+				}
+				if err := json.Unmarshal(request.Settings, &files); err != nil {
+					return nil, err
+				}
+				if len(files.Files) == 0 {
+					return sdk.AgentPlan{Binding: change}, nil
+				}
+			}
+			file, values, err := settings(request.Settings)
+			if err != nil {
 				return nil, err
 			}
 			switch request.Action {
@@ -108,7 +137,7 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			return sdk.AgentPlan{Files: []sdk.FileChange{{Path: file.Path, Body: body, BeforeHash: file.BeforeHash}}}, nil
+			return sdk.AgentPlan{Binding: change, Files: []sdk.FileChange{{Path: file.Path, Body: body, BeforeHash: file.BeforeHash}}}, nil
 		}
 	}
 	if manifest.Contract.Has(sdk.SessionMigration) {

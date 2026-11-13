@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -63,28 +65,106 @@ func extensionAgents(home string, existing []*Agent, errs map[string]string) []*
 		if errs != nil {
 			errs["sdk"] = err.Error()
 		}
-		return nil
+		list = nil
 	}
 	taken := map[string]bool{magpieID: true}
+	binaries := map[string]bool{}
 	for _, a := range append(append([]*Agent{}, existing...), others...) {
 		taken[strings.ToLower(a.ID)] = true
 		for _, alias := range a.Aliases {
 			taken[strings.ToLower(alias)] = true
 		}
+		if a.Bin != "" {
+			binaries[strings.ToLower(a.Bin)] = true
+		}
 	}
 	var out []*Agent
 	for _, item := range list {
-		if len(item.Agent.ConfigFiles) == 0 {
+		if len(item.Agent.ConfigFiles) == 0 && item.Agent.Launch == nil {
 			continue // ID/Name-only modules have the explicit action API.
 		}
-		if taken[strings.ToLower(item.Agent.ID)] {
+		var base *Agent
+		if item.Agent.Profile != nil {
+			for _, candidate := range existing {
+				if candidate.ID == item.Agent.Profile.Target && candidate.extensionMetadata == nil && candidate.WSL == "" {
+					base = candidate
+				}
+			}
+			if base == nil {
+				if errs != nil {
+					errs[item.Plugin] = "agent profile target is unavailable"
+				}
+				continue
+			}
+		}
+		conflict := ""
+		for _, identity := range append([]string{item.Agent.ID}, item.Agent.Aliases...) {
+			if taken[strings.ToLower(identity)] {
+				conflict = identity
+				break
+			}
+		}
+		if conflict != "" {
 			if errs != nil {
-				errs[item.Plugin] = fmt.Sprintf("agent id %q is already owned", item.Agent.ID)
+				errs[item.Plugin] = fmt.Sprintf("agent identity %q is already owned", conflict)
+			}
+			continue
+		}
+		bin := item.Agent.Bin
+		if bin == "" && base != nil {
+			bin = base.Bin
+		}
+		if item.Agent.Launch != nil && binaries[strings.ToLower(bin)] && (base == nil || base.Bin != bin) {
+			if errs != nil {
+				errs[item.Plugin] = fmt.Sprintf("agent launch command %q is already owned; declare an explicit profile", bin)
 			}
 			continue
 		}
 		taken[strings.ToLower(item.Agent.ID)] = true
-		out = append(out, extensionAgent(home, host, item))
+		for _, alias := range item.Agent.Aliases {
+			taken[strings.ToLower(alias)] = true
+		}
+		if item.Agent.Launch != nil {
+			binaries[strings.ToLower(bin)] = true
+		}
+		if item.Agent.Launch != nil || item.Agent.Profile != nil {
+			out = append(out, extensionControlledAgent(home, host, item, base))
+		} else {
+			out = append(out, extensionAgent(home, host, item))
+		}
+	}
+	if _, err := os.Lstat(extensionBindingPath()); os.IsNotExist(err) {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	unlock, err := extensionBindingLock(ctx, "", "ledger", true)
+	if err != nil {
+		return out
+	}
+	ledger, err := extensionBindingRead()
+	unlock()
+	if err != nil {
+		return out
+	}
+	for _, record := range ledger.Records {
+		if !extensionSameHome(record.Home, home) || record.Phase == "disconnected" {
+			continue
+		}
+		if slices.ContainsFunc(out, func(a *Agent) bool {
+			return a.ID == record.Agent && a.extensionMetadata != nil && a.extensionMetadata.plugin == record.Plugin &&
+				extensionBindingSameDescriptor(a.extensionMetadata.descriptor, record.Descriptor)
+		}) {
+			continue
+		}
+		out = slices.DeleteFunc(out, func(a *Agent) bool { return a.ID == record.Agent })
+		var base *Agent
+		for _, candidate := range existing {
+			if candidate.ID == extensionBindingTarget(record) && candidate.extensionMetadata == nil {
+				base = candidate
+			}
+		}
+		out = append(out, extensionControlledAgent(home, host, ExtensionAgent{Plugin: record.Plugin, Agent: record.Descriptor.Clone()}, base))
 	}
 	return out
 }
@@ -180,6 +260,12 @@ func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgen
 	}
 	a := &Agent{ID: desc.ID, Name: desc.Name, Bin: desc.Bin, Path: filepath.Join(home, filepath.FromSlash(desc.ConfigFiles[0])),
 		ListOnly: true, Spelled: prefixed}
+	a.Aliases = append([]string(nil), desc.Aliases...)
+	a.UA = make([]string, len(desc.UA))
+	for index, prefix := range desc.UA {
+		a.UA[index] = strings.ToLower(prefix)
+	}
+	a.extensionMetadata = &extensionAgentMetadata{plugin: item.Plugin, descriptor: desc.Clone(), owns: owned}
 	a.Dir = filepath.Dir(a.Path)
 	a.detect = func() bool {
 		for _, name := range desc.ConfigFiles {
