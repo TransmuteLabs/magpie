@@ -23,6 +23,11 @@ import (
 func TestPluginSignInReachesPiModels(t *testing.T) {
 	home := syncHome(t)
 	t.Setenv("MAGPIE_BUN", "")
+	// The catalog's change hook is a global the plugin host reads from its
+	// own goroutine. Let the hooks a previous test told finish before this
+	// test points that global at its own sync, so no background read
+	// overlaps the assignment (#2449's background hooks read it too).
+	plugin.Told()
 	catalog.Changed = SyncCatalog
 	t.Cleanup(func() { plugin.Told(); catalog.Changed = nil })
 	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro"}}); err != nil {
