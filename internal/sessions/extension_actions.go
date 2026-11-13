@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -47,7 +49,7 @@ func extensionSessionRoutes(source string) []SessionExtension {
 			convertsTo[source] == desc.To {
 			continue
 		}
-		if resumeCommand("", desc.To, "probe", "/work", "") == "" || !extensionTargetThere(desc.To) {
+		if resumeCommand("", desc.To, "probe", "/work", "") == "" || !extensionTargetThere(desc.To) || !extensionSessionTargetMatches(desc) {
 			continue
 		}
 		routes = append(routes, item)
@@ -57,22 +59,81 @@ func extensionSessionRoutes(source string) []SessionExtension {
 
 func extensionTargetThere(target string) bool { return agentThere(target) || lookOK(target) }
 
+func extensionSessionTargetMatches(descriptor sdk.SessionDescriptor) bool {
+	_, err := resolveSessionTargetStore(descriptor)
+	return err == nil
+}
+
 func carryExtension(source Session, route SessionExtension) (CarryResult, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return CarryResult{}, err
-	}
-	options, err := json.Marshal(struct {
-		Cwd string `json:"cwd"`
-	}{source.Cwd})
-	if err != nil {
-		return CarryResult{}, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	return carryExtensionContext(context.Background(), source, route)
+}
+
+func carryExtensionContext(parent context.Context, source Session, route SessionExtension) (CarryResult, error) {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return CarryResult{}, err
+	}
+	if !Reads(source.Agent) {
+		return CarryResult{}, ErrNotRead
+	}
+	manager := extension.Default()
+	manifest, identity, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	owned := false
+	for _, descriptor := range manifest.Sessions {
+		if descriptor == route.Session {
+			owned = true
+		}
+	}
+	if !owned {
+		return CarryResult{}, extension.ErrActionChanged
+	}
+	store, err := resolveSessionTargetStore(route.Session)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	options, err := json.Marshal(map[string]string{"cwd": source.Cwd})
+	if manifest.Contract.Version.Minor >= 3 {
+		options, err = sessionConversionOptions(source, route.Session.To)
+	}
+	if err != nil {
+		return CarryResult{}, err
+	}
+	key := sessionMigrationKey(identity, source, route, store, options)
+	release, err := acquireSessionMigration(ctx, key)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	defer release()
+	if receipt, ok := cachedSessionMigration(key); ok {
+		if sessionMigrationReceiptValid(ctx, receipt) {
+			_, current, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
+			if err != nil {
+				return CarryResult{}, err
+			}
+			if current != identity {
+				return CarryResult{}, extension.ErrActionChanged
+			}
+			if !Reads(source.Agent) {
+				return CarryResult{}, ErrNotRead
+			}
+			return receipt.result, nil
+		}
+		forgetSessionMigration(key)
+	}
+	store, err = resolveSessionTargetStore(route.Session)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	if sessionMigrationKey(identity, source, route, store, options) != key {
+		return CarryResult{}, extension.ErrActionChanged
+	}
 	plan, snapshot, err := convertExtensionSource(ctx, extension.Default(), route.Plugin, route.Session.ID, source,
 		route.Session.To, sdk.Scope{Session: source.ID, Operation: "session.convert"}, options,
-		extension.ActionPolicy{Root: home, CreateUnder: route.Session.OutputDir,
+		extension.ActionPolicy{Root: store.root, CreateUnder: store.prefix,
 			BackupDir: filepath.Join(appdir.Config(), "extensions", "action-backups", route.Plugin, route.Session.ID)})
 	if err != nil {
 		return CarryResult{}, err
@@ -84,16 +145,78 @@ func carryExtension(source Session, route SessionExtension) (CarryResult, error)
 	}
 	output := filepath.Join(plan.Root(), filepath.FromSlash(preview.Files[0].Path))
 	command := resumeCommand("", target, plan.SessionID(), source.Cwd, output)
+	if target == "omp" && store.profile != "" && command != "" {
+		command = inFolder(source.Cwd, "omp --profile "+store.profile+" --resume "+plan.SessionID())
+	}
 	if command == "" {
 		return CarryResult{}, errors.New("converted session has no safe native resume command")
 	}
 	if err := snapshot.check(ctx); err != nil {
 		return CarryResult{}, err
 	}
+	if err := store.check(ctx); err != nil {
+		return CarryResult{}, err
+	}
+	currentOptions := options
+	if manifest.Contract.Version.Minor >= 3 {
+		currentOptions, err = sessionConversionOptions(source, target)
+		if err != nil {
+			return CarryResult{}, err
+		}
+	}
+	_, currentIdentity, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	if currentIdentity != identity || !bytes.Equal(options, currentOptions) {
+		return CarryResult{}, extension.ErrActionChanged
+	}
+	if !Reads(source.Agent) {
+		return CarryResult{}, ErrNotRead
+	}
 	if _, err := plan.Execute(ctx, preview.Revision); err != nil {
 		return CarryResult{}, err
 	}
-	return CarryResult{Agent: target, ID: plan.SessionID(), Path: output, Command: command}, nil
+	post, err := resolveSessionTargetStore(route.Session)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	if post.selection() != store.selection() {
+		return CarryResult{}, extension.ErrActionChanged
+	}
+	outputs, err := captureMigrationOutputs(ctx, post, plan)
+	if err != nil {
+		return CarryResult{}, err
+	}
+	result := CarryResult{Agent: target, ID: plan.SessionID(), Path: output, Command: command}
+	rememberSessionMigration(key, sessionMigrationReceipt{result: result, source: snapshot, target: post, outputs: outputs})
+	return result, nil
+}
+
+func sessionConversionOptions(source Session, target string) ([]byte, error) {
+	options := map[string]string{"cwd": source.Cwd}
+	canonical := func(name string) string {
+		if resolved, err := filepath.EvalSymlinks(name); err == nil {
+			return resolved
+		}
+		absolute, _ := filepath.Abs(name)
+		return filepath.Clean(absolute)
+	}
+	switch target {
+	case "omp":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		options["canonicalCwd"], options["home"], options["temp"] = canonical(source.Cwd), canonical(home), canonical(os.TempDir())
+	case "codex":
+		provider, _, err := sessionCodexTargetConfiguration(CodexDir())
+		if err != nil {
+			return nil, err
+		}
+		options["provider"] = provider
+	}
+	return json.Marshal(options)
 }
 
 func SessionExtensions(host SessionExtensionRegistry) ([]SessionExtension, error) {
@@ -154,8 +277,33 @@ func convertExtensionSource(ctx context.Context, host extension.ActionRuntime, p
 	if err != nil {
 		return nil, nil, err
 	}
+	if source.Agent == "codex" && packed(source.Path) {
+		decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(extension.MaxActionBytes))
+		if err != nil {
+			return nil, nil, err
+		}
+		body, err = decoder.DecodeAll(body, nil)
+		decoder.Close()
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(body) > extension.MaxActionBytes {
+			return nil, nil, errors.New("unpacked session source exceeds its byte budget")
+		}
+		if err := snapshot.check(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
 	request := sdk.SessionRequest{ID: converter, From: source.Agent, To: target, Options: options,
 		Files: []sdk.SessionDocument{{Path: filepath.Base(source.Path), Format: source.Agent, Body: body}}}
+	host, release, err := sessionSourceRuntime(ctx, host, plugin)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer release()
+	if err := collectSessionSourceInputs(ctx, host, plugin, scope, source, &request, snapshot); err != nil {
+		return nil, nil, err
+	}
 	plan, err := extension.NewActions(host).SessionConvert(ctx, plugin, scope, request, policy)
 	if err != nil {
 		return nil, nil, err
@@ -167,9 +315,10 @@ func convertExtensionSource(ctx context.Context, host extension.ActionRuntime, p
 }
 
 type sessionSourceSnapshot struct {
-	path string
-	info os.FileInfo
-	hash [sha256.Size]byte
+	path   string
+	info   os.FileInfo
+	hash   [sha256.Size]byte
+	inputs *sessionInputSnapshot
 }
 
 func (snapshot *sessionSourceSnapshot) check(ctx context.Context) error {
@@ -179,6 +328,9 @@ func (snapshot *sessionSourceSnapshot) check(ctx context.Context) error {
 	}
 	if !os.SameFile(snapshot.info, current.info) || snapshot.hash != current.hash {
 		return extension.ErrActionChanged
+	}
+	if snapshot.inputs != nil {
+		return snapshot.inputs.check(ctx)
 	}
 	return nil
 }

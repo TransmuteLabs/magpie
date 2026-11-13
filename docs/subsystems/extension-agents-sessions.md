@@ -15,6 +15,8 @@ An executable extension is a trusted local program, not a filesystem sandbox.
 | Ordinary agent discovery | [`agents.go`](../../internal/agent/agents.go), `All`, `local`; [`extension_actions.go`](../../internal/agent/extension_actions.go), `ExtensionAgents`, `extensionAgents`, `extensionAgent` |
 | Agent lifecycle and preview | [`applied.go`](../../internal/agent/applied.go), `ConnectHow`, `Apply`, `Pick`, `Wired`, `Disconnect`; [`native.go`](../../internal/agent/native.go), `NativeConnection`, `DisconnectPlan.Revision`; [`preview.go`](../../internal/agent/preview.go), `DisconnectPreview` |
 | Session routes and native source reads | [`carry.go`](../../internal/sessions/carry.go), `carries`; [`carry_convert.go`](../../internal/sessions/carry_convert.go), `CarryOver`; [`extension_actions.go`](../../internal/sessions/extension_actions.go), `SessionExtensions`, `extensionSessionRoutes`, `carryExtension`, `ConvertExtension` |
+| Shared Pi/OMP native ownership | [`extension_omp_owner.go`](../../internal/sessions/extension_omp_owner.go), `extensionOMPFileOwners`, `extensionOMPSharedFiles`; small hooks in `piFilesIn` and `ompFilesUnder` |
+| Native target binding and checked reuse | [`extension_target_store.go`](../../internal/sessions/extension_target_store.go), `resolveSessionTargetStore`, `sessionTargetStore.check`; [`extension_reuse.go`](../../internal/sessions/extension_reuse.go), `acquireSessionMigration`, `sessionMigrationReceiptValid` |
 | Selected-store journal/blob planning | [`extension_source_inputs.go`](../../internal/sessions/extension_source_inputs.go), `sessionSourceRuntime`, `collectSessionSourceInputs`, `readSessionInputs`, `sessionInputSnapshot.check` |
 | File plan preparation and execution | [`actions.go`](../../internal/extension/actions.go), `Actions.AgentInspect`, `AgentPlan`, `SessionConvert`, `Execute`, `ActionPolicy`, `ActionPlan` |
 | Module lifecycle and scoped state | [`manager.go`](../../internal/extension/manager.go), `Default`, `Manifest`, `Invoke`, `Store`; [`store.go`](../../internal/extension/store.go), `Store.GetAccount` |
@@ -290,7 +292,8 @@ module lease. A changed manifest fails the plan instead of substituting a
 different generation between the two calls. Conversion receives the journal
 and verified extra documents together. Source snapshots bind journal/blob
 contents, file identities and permissions, parent-directory identities and
-the selected store identity; they are checked after conversion and before
+permissions, and the selected store identity; they are checked after
+conversion and before
 ordinary output application.
 
 The source check stays local to the session adapter: Actions has no deferred
@@ -305,9 +308,25 @@ a safe host-generated resume command before publishing files. Explicit
 conversion may omit an ID. The host neither accepts a worker-supplied shell
 command nor validates the target's complete vendor session schema.
 
-Ordinary output uses HOME plus a session-only `CreateUnder=outputDir`
-policy. Returned relative document paths are rebased below that prefix and
-must be new files; existing files, traversal and collisions appearing after
+Ordinary output resolves a host-owned native target before preparing its
+`CreateUnder` policy. Conventional `.claude/projects` and `.codex/sessions`
+prefixes select the current Claude/Codex config roots; `.omp/agent/sessions`
+selects OMP's configured root, absolute agent override, active profile or
+migrated XDG store. Named profiles select XDG only when that profile's
+own XDG directory exists. Other descriptor prefixes keep their literal
+HOME-relative behavior. No module option selects an arbitrary output root.
+
+Binding and preview create no target directories. The closest existing
+canonical ancestor becomes the confined action root. Before apply, the
+adapter rechecks destination selection, physical directory identities,
+permissions, absent components and freshly parsed Codex provider config.
+Unreadable config, a dangling config symlink, directory replacement,
+retargeted root or changed profile/provider invalidates the plan. A relative
+default OMP agent override is rejected rather than published into another
+store; named profiles ignore that default override as OMP does.
+
+Returned relative document paths are rebased below the host-selected prefix
+and must be new files; existing files, traversal and collisions appearing after
 preview are rejected. The source is not a planned output and is not changed
 by host conversion. The returned `CarryResult.path` is the first path in the
 action's lexicographically sorted preview, so the adapter has no separate
@@ -317,16 +336,33 @@ Native resume uses the existing `resumeCommand` with the returned ID,
 working directory and selected output path. It returns the command to the
 caller; this adapter does not execute a shell. Targets with no existing
 native resume implementation, unknown source formats and explicitly selected
-file sets use manual conversion workflows. The SDK path returns before the
-native converter's `carried` cache and adds no equivalent reuse cache.
+file sets use manual conversion workflows. Host discovery includes current
+OMP config/agent roots and named XDG profile stores. Native resume identifies
+the configured profile, including through a symlinked root.
 
-Conventional native output prefixes are also bound to the selected target
-store. `.claude/projects` is unavailable when Claude uses another config
-root, and `.codex/sessions` requires the selected default Codex root.
-The conventional `.omp/agent/sessions` route is not offered when a selected
-existing XDG OMP store would make it undiscoverable. The adapter rechecks
-these guards immediately before ordinary apply; it does not silently publish
-into a different default store.
+Shared Pi/OMP stores use the recovered fixed 256-byte UTF-8 v1 OMP title slot
+to assign ownership before path deduplication. The probe reads that prefix
+only, with regular-file and identity checks. Genuine Pi remains Pi; unknown
+or unreadable shared prefixes are never claimed as OMP. Pi's flat session
+directory is covered too. All four combinations of the independent Pi/OMP
+read-consent gates retain those owners. Nonshared legacy OMP keeps its prior
+ownership. This is native session metadata discrimination, not conversion or
+an extension-selected filesystem root.
+
+The SDK adapter keeps at most 128 in-memory checked migration receipts.
+Their key binds host namespace, source selection and working directory,
+converter descriptor, module package/config generation, target selection and
+host options. A hit rechecks the source journal, every declared attachment,
+published output identities/hashes/permissions and parent directories,
+target binding, module generation and read consent. Changed output is
+preserved and a fresh create-only migration is prepared; revoked authority
+or invalid source fails.
+
+Only an identical migration key waits for an in-flight conversion, and that
+wait observes the caller's context. Other keys can progress independently.
+The cache mutex protects maps only, never Manager calls, RPC or file I/O.
+These are process-local receipts, not restart-persistent deduplication or a
+transaction against another application's concurrent writes.
 
 ### Independent OMP module
 
@@ -337,12 +373,16 @@ not a new SDK-wide conversation schema.
 
 The module now declares ordinary OMP→Claude, OMP→Codex, Claude→OMP and
 Codex→OMP routes, using the host's existing native discovery/readers and safe
-resume commands. OMP→Claude has an actual native ordinary CarryOver fixture
-including input attachments and later native Claude discovery. Reverse and
-Codex route implementation/acceptance are tracked by the module owner;
-declaring them is not proof that every route or vendor application was
-validated. Claude↔Codex remains upstream-owned. None of these routes registers
-generic SDK session discovery, readers or resume callbacks.
+resume commands. All four native routes have ordinary Find/preview/
+CarryOver/native-reader/resume fixtures, including attachments, packed Codex
+input, configured target roots, OMP XDG/profile stores and checked reuse.
+Large ordinary round trips retain more than 3 MiB of text and attachment
+blocks; the explicit archive round trip separately crosses 8 MiB.
+The module's existing byte budgets remain enforced, including Codex's
+duplicated UI event records. Fixtures execute the native module and host,
+not the vendor applications. Claude↔Codex remains upstream-owned. None of
+these routes registers generic SDK session discovery, readers or resume
+callbacks.
 
 ## Scoped verification record and limits
 
