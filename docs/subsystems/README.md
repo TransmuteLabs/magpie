@@ -8,6 +8,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Built-in plugins: registry, lifecycle, plugins.yml, presets, settings schemas, the window's kernel (slots, error boundary, kit) | [Plugin runtime](plugin-runtime.md) |
 | Plugins that run on the gateway's requests and replies | [Gateway middleware](gateway-middleware.md) |
 | Installable Go/Bun SDK, executable lifecycle, state and native protocols | [Executable extensions](executable-extensions.md) |
+| Upstream extension surfaces, SDK contract/adapter coverage and remaining boundaries | [Extension surface coverage](extension-surface-coverage.md) |
 | Explicitly linked Go codec contracts and compatibility | [Protocol codec embedding](protocol-extensions.md) |
 | SDK provider catalog, account auth, usage, pricing and replay policy | [Extension providers](extension-providers.md) |
 | SDK agent wiring and session conversion | [Extension agents and sessions](extension-agents-sessions.md) |

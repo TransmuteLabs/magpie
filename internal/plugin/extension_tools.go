@@ -30,6 +30,26 @@ func ExtensionToolID(spec string) (string, bool) {
 }
 
 func extensionTools(entries []extension.Installed, enabledOnly bool) []PluginTools {
+	// Configuration inventory is independent of any shared MCP request.
+	return extensionToolsVisible(entries, enabledOnly, true)
+}
+
+func callerExtensionTools(ctx context.Context, entries []extension.Installed) []PluginTools {
+	return extensionToolsVisible(entries, true, extension.LocalOwner(ctx))
+}
+
+func extensionToolVisible(exposure string, owner bool) bool {
+	switch exposure {
+	case "", "shared":
+		return true
+	case "local-owner":
+		return owner
+	default:
+		return false
+	}
+}
+
+func extensionToolsVisible(entries []extension.Installed, enabledOnly, owner bool) []PluginTools {
 	var tools []PluginTools
 	for _, entry := range entries {
 		if enabledOnly && entry.Disabled || !entry.Manifest.Contract.Has(sdk.ToolProvider) {
@@ -37,6 +57,9 @@ func extensionTools(entries []extension.Installed, enabledOnly bool) []PluginToo
 		}
 		group := PluginTools{Spec: ExtensionToolPrefix + entry.Manifest.ID}
 		for _, descriptor := range entry.Manifest.Tools {
+			if !extensionToolVisible(descriptor.Exposure, owner) {
+				continue
+			}
 			group.Tools = append(group.Tools, Tool{
 				Name: descriptor.Name, Description: descriptor.Description, Schema: bytes.Clone(descriptor.InputSchema),
 			})
@@ -131,7 +154,7 @@ func RunExtensionTool(ctx context.Context, spec, name string, args json.RawMessa
 		return result, err
 	}
 	declared := false
-	for _, group := range extensionTools(entries, true) {
+	for _, group := range callerExtensionTools(ctx, entries) {
 		if group.Spec == spec {
 			for _, tool := range group.Tools {
 				declared = declared || tool.Name == name

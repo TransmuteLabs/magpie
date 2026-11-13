@@ -17,6 +17,57 @@ A community plugin (an OpenCode plugin, an npm package in the plugin host) can g
 
 plugins.json is the source of truth for which plugins are on. The host only loads those, so only their tools are listed.
 
+## Installable SDK tools and private memory
+
+The [extension SDK](executable-extensions.md) also supplies tools, from its
+installed catalog rather than `plugins.json`. A module declares
+`tool-provider`, tool names/descriptions/input schemas, and `tool.call`.
+[`extension_tools.go`](../../internal/plugin/extension_tools.go) combines
+those descriptors with legacy tools without starting Bun for an SDK-only
+installation. The ordinary MCP, Library/hub, key and budget owners still
+dispatch the call. SDK authors validate their tool's domain arguments; this
+path does not execute the legacy host's zod hooks.
+
+SDK API 1.2 adds `tools[].exposure`: `"shared"` or `"local-owner"`. Omission
+preserves the shared behavior of SDK 1.0/1.1. A private memory module can
+declare local-owner search/save/forget tools alongside its
+[request/completion hooks](gateway-request-hooks.md); this does not replace
+the built-in Memory store, its digest or its distillation jobs.
+
+The host filters local-owner tools both when listing and when executing:
+
+- HTTP entry points replace any inherited ownership bit from authenticated
+  request provenance. Direct owner requests and this computer's own generated
+  gateway key can qualify. Named keys, remote or forwarded traffic, browser
+  pages and unknown provenance do not. Node fetch's Sec-Fetch-Mode alone is
+  not a browser mark; the existing `hubFromPage` predicate is reused.
+- Client `_meta`, roots, sessions, arguments, caller IDs and old tool names
+  cannot confer ownership. Execution rereads the current descriptor so a
+  previously shared tool cannot remain callable after becoming private.
+- The final check uses the **executing lease's** tool declaration before
+  journaling or dispatch. A shared discovery snapshot cannot authorize a
+  private replacement acquired later. An already acquired shared lease
+  retains its own declaration while it drains. Direct local SDK CLI calls
+  establish owner authority at their management entry point.
+- Library/hub cards use the optional contextual `ServersFor` projection.
+  Cached local-owner tool names and descriptions are withdrawn from remote
+  initialize and on-demand discovery as well as from tools/list. Administrative
+  inventories remain available to configure the module.
+
+The private host context is
+[`WithLocalOwner`/`LocalOwner`](../../internal/extension/caller_policy.go).
+It is not an SDK argument or a module-supplied identity. The entry and call
+checks are in [`extension_tools.go`](../../internal/gateway/extension_tools.go);
+the Library projection is in
+[`plugin_tools.go`](../../internal/library/plugin_tools.go).
+
+`TestExtensionToolExposureHTTPProvenance`,
+`TestExtensionToolExposureHTTPManifestTransition`,
+`TestExtensionToolExposureNativeControlListing` and
+`TestExtensionToolExposureLibraryContextAndCards` exercise actual request
+paths and cached-card behavior. The public descriptor alone is not proof of
+private exposure.
+
 ## Runtime path
 
 1. An agent's MCP client posts `tools/list` to `/mcp/magpie/tools`. `servedTools` returns nothing while the point isn't served or no plugin is on; then the plugin host (Bun) isn't started for it. Otherwise it asks the host for its plugins' tools (`plugin.Tools`, which starts the host if need be) and names them (`namedTools`).

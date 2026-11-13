@@ -37,7 +37,7 @@ func TestNetworkProxyHostCallUsesOnlyItsParentScope(t *testing.T) {
 	if err != nil || string(body) != "{}" {
 		t.Fatal("direct/bypassed proxy response changed", string(body), err)
 	}
-	if _, found := MethodCapability(MethodNetworkProxy); found || len(FullContract().Capabilities) != 10 {
+	if _, found := MethodCapability(MethodNetworkProxy); found || len(FullContract().Capabilities) != 11 {
 		t.Fatal("host proxy service acquired a worker capability")
 	}
 }

@@ -13,9 +13,10 @@ code with little author boilerplate. Private GitHub release packages using
 developer authentication are the normal distribution path. There is no
 marketplace, new registry or arbitrary-language framework implied.
 
-Implementation has scoped runtime proof. Final immutable gates remain
-pending the integration owner; this is not a whole-repository green claim.
-No vendor implementation was migrated by the SDK work.
+Implementation has scoped native/composite and gateway/tool proof;
+[1.1 validation](../adr/0005-native-composite-validation.md) and
+[1.2 validation](../adr/0006-gateway-hooks-validation.md) identify the actual
+trees and later fixes. This is not a whole-repository green or vendor-parity claim.
 
 ## Compared implementations
 
@@ -24,8 +25,8 @@ No vendor implementation was migrated by the SDK work.
 | Legacy TS | Magpie provider/OpenCode/Pi host: shared Bun child. Inspected source; no live vendor account used. Separate legacy `agent.js` and gateway middleware run through moejs inside Magpie, outside this column. |
 | ProxyPilot C | CLIProxyAPI-family C-shared implementation in the local ProxyPilot checkout identified below. Source comparison only; no ProxyPilot binary/vendor flow run. |
 | SDK exec Go | Installed executable using the public Go SDK, common host/lease/journal and process transport. Real compiled-worker/CLI/gateway fixture evidence exists. |
-| SDK native Go | Installed Go C-shared library using the public SDK adapter and common host owners. Actual host-PID, stream/callback/lifecycle and composite fixture proof on macOS. |
-| SDK Bun TS | Installed JS/TS primary or service using the JS SDK and managed Bun. Real Go-host/Bun API 1.1 race count 3, plus 87 Node/87 Bun tests and strict types. |
+| SDK native Go | Installed Go C-shared library using the public SDK adapter and common host owners. Actual host-PID, stream/callback/lifecycle and composite fixture proof on macOS and Linux. |
+| SDK Bun TS | Installed JS/TS primary or service using the JS SDK and managed Bun. Real Go-host/Bun API 1.1/1.2 fixtures, plus 102 Node/102 Bun tests and strict types. |
 
 “Native protocol” in an older gateway test means a provider request format,
 not library loading. Actual PID checks now separately establish native
@@ -134,9 +135,13 @@ pending work is canceled on frame disposal/off/update.
 
 ## Capability coverage and missing ProxyPilot hooks
 
-The SDK has ten negotiated capabilities. The first nine stay on the primary:
+The SDK has eleven negotiated capabilities. The first nine stay on the primary:
 inbound codecs, outbound execution, agent wiring, account auth, model discovery,
-usage, operation control, tools and session migration. ModuleRPC is the tenth.
+usage, operation control, tools and session migration. ModuleRPC is the tenth;
+API 1.2 gateway-hooks is the eleventh. Gateway hooks and local-owner tools
+allow independent memory-module composition; they are not shared-Memory,
+stream-middleware, router or global-observer adapters. See the
+[coverage census](extension-surface-coverage.md).
 All three SDK transports use common production owners. These rows describe
 implemented surfaces; the scoped fixtures below do not exercise every vendor
 or every capability through every transport.

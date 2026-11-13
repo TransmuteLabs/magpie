@@ -236,6 +236,7 @@ func selectedPluginTool(ctx context.Context, name, tool string) (string, error) 
 // toolsMCPServe answers m for the tools list gives: every plugin's (one
 // "") or one plugin's.
 func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, servedTools func(context.Context) ([]mcpTool, error)) (any, map[string]any) {
+	r = r.WithContext(extensionToolHTTPContext(r))
 	switch m.Method {
 	case "initialize":
 		say := "The tools the plugins added to magpie give, each named <plugin>_<tool>. Add or switch plugins in magpie's Settings → Plugins."
@@ -303,6 +304,7 @@ func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, served
 // toolsMCPRun runs one plugin tool, held to the calling gateway key's
 // limit.
 func (s *Server) toolsMCPRun(r *http.Request, t mcpTool, args json.RawMessage) (map[string]any, error) {
+	r = r.WithContext(extensionToolHTTPContext(r))
 	release, err := reserveFor(access.Caller(r.Context()), int64(len(args)), "", limitClock())
 	if err != nil {
 		return nil, err

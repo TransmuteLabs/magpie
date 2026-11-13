@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -49,6 +50,7 @@ func bunFixturePackage(t *testing.T) string {
 		Agents:    []sdk.AgentDescriptor{{ID: "editor", Name: "Editor"}},
 		Sessions:  []sdk.SessionDescriptor{{ID: "text", Name: "Text"}},
 		Tools:     []sdk.ToolDescriptor{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+		Hooks:     &sdk.GatewayHookDescriptor{Request: true, Response: true, SignIn: true},
 	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
@@ -58,6 +60,88 @@ func bunFixturePackage(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return directory
+}
+
+func TestBunGatewayHooksThroughGoHost(t *testing.T) {
+	bun, err := exec.LookPath("bun")
+	if err != nil {
+		t.Skip("Bun runtime is not installed")
+	}
+	directory := bunFixturePackage(t)
+	worker := filepath.Join("test", "fixtures", "gateway-worker.js")
+	body, err := os.ReadFile(filepath.Join("..", "..", "sdk", "js", worker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, worker), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := sdk.Manifest{
+		Schema: 1, ID: "hooks", Version: "1.0.0", Runtime: "bun", Entry: filepath.ToSlash(worker),
+		Contract: sdk.Contract{
+			Version: sdk.APIVersion{Major: 1, Minor: 2}, Capabilities: []sdk.Capability{sdk.GatewayHooks, sdk.ToolProvider},
+		},
+		Compatibility: &sdk.Compatibility{HostAPI: "^1.2"},
+		Hooks:         &sdk.GatewayHookDescriptor{Request: true, Response: true, SignIn: true},
+		Tools:         []sdk.ToolDescriptor{{Name: "remember", InputSchema: json.RawMessage(`{}`), Exposure: "local-owner"}},
+	}
+	catalogTestWriteManifest(t, directory, manifest)
+	manager := NewManager(t.TempDir())
+	manager.Bun = bun
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := manager.Install(t.Context(), directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Call(WithLocalOwner(t.Context(), true), manifest.ID, sdk.MethodToolCall, sdk.Scope{Session: "agent-one"},
+		sdk.ToolRequest{ID: "remember", Arguments: json.RawMessage(`{"text":"remembered by Bun"}`)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	run := manager.BeginGateway(ctx, []byte(`{"model":"m","messages":[]}`),
+		sdk.GatewayContext{Origin: "local", Protocol: "chat", Model: "m", Session: "agent-two"})
+	if run == nil || !bytes.Contains(run.Body, []byte("remembered by Bun")) {
+		cancel()
+		if run != nil {
+			run.Close()
+		}
+		t.Fatal("Go host did not receive the Bun module's recalled data")
+	}
+	cancel()
+	run.Finish(ctx, json.RawMessage(`{}`), true)
+	run.Close()
+	waitGatewayDone(t, run)
+	captured, err := manager.Store().StateGet(sdk.Scope{Plugin: manifest.ID}, "capture")
+	if err != nil || captured.Version != 1 || !bytes.Contains(captured.Value, []byte(`"session":"agent-two"`)) {
+		t.Fatalf("Bun capture lost its recall state or lifetime: %+v %v", captured, err)
+	}
+	manager.GatewaySignIn(t.Context(), sdk.GatewaySignInEvent{Provider: "p", ProviderName: "Fixture", State: "signed-out"})
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		notification, err := manager.Store().StateGet(sdk.Scope{Plugin: manifest.ID}, "notification")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if notification.Version == 1 {
+			if !bytes.Contains(notification.Value, []byte(`"state":"signed-out"`)) {
+				t.Fatalf("Bun sign-in DTO changed: %s", notification.Value)
+			}
+			break
+		}
+		select {
+		case <-timer.C:
+			t.Fatal("Bun sign-in notification did not complete")
+		case <-tick.C:
+		}
+	}
 }
 
 func TestBunWorkerInstalledThroughGoHost(t *testing.T) {

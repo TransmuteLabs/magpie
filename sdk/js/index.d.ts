@@ -2,14 +2,15 @@ export type UInt64 = number | bigint;
 export type JSONValue = null | boolean | number | bigint | string | JSONValue[] | { [key: string]: JSONValue };
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
-  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc";
+  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
-  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "module.call";
+  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "module.call"
+  | "gateway.request" | "gateway.response" | "gateway.signin";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
 export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call";
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 };
+  version: { major: 1; minor: 0 | 1 | 2 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -61,13 +62,14 @@ interface ManifestFields {
   providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[] }[];
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
-  tools?: { name: string; description?: string; inputSchema: { [key: string]: JSONValue } | boolean }[];
+  tools?: ToolDescriptor[];
   actions?: ActionDescriptor[];
   services?: ServiceDescriptor[];
   compatibility?: Compatibility;
   window?: WindowDescriptor;
   bindings?: BindingDescriptor[];
   component?: ComponentIdentity;
+  hooks?: GatewayHookDescriptor;
 }
 export type Manifest = ManifestFields & (
   { runtime: "exec" | "bun"; args?: string[] }
@@ -234,7 +236,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string }
 export interface ComponentIdentity { id: string; contract: ServiceContract }
@@ -258,3 +260,50 @@ export interface ModuleContext {
 export interface ModuleReady { endpoints?: Record<string, string>; state?: unknown }
 export interface ModuleStartResult extends ModuleReady { dispose?: () => void | Promise<void> }
 export type StartFunc = (ctx: Context, module: ModuleContext) => ModuleStartResult | Promise<ModuleStartResult>;
+
+export const MAX_GATEWAY_STATE_BYTES: number;
+export type GatewayOrigin = "local" | "magpie-key" | "gateway-key" | "remote" | "browser";
+export interface GatewayHookDescriptor {
+  request?: boolean;
+  response?: boolean;
+  signIn?: boolean;
+  timeoutMs?: number;
+  origins?: GatewayOrigin[];
+}
+export interface GatewayContext {
+  origin: GatewayOrigin;
+  protocol: string;
+  model: string;
+  stream: boolean;
+  path: string;
+  agent: string;
+  session: string;
+  cwd: string;
+  query: string;
+  kind: string;
+}
+export interface GatewayRequest { body: { [key: string]: JSONValue }; context: GatewayContext }
+export interface GatewayRequestResult { body?: { [key: string]: JSONValue }; state?: JSONValue }
+export interface GatewayResponse {
+  request: { [key: string]: JSONValue };
+  reply: JSONValue;
+  success: boolean;
+  state?: JSONValue;
+  context: GatewayContext;
+}
+export interface GatewaySignInEvent {
+  provider: string;
+  providerName: string;
+  account: string;
+  state: "signed-out" | "ending";
+  /** RFC3339 text; never an epoch number. */
+  endsAt?: string;
+}
+export interface GatewaySignIn { event: GatewaySignInEvent }
+export interface ToolDescriptor {
+  name: string;
+  description?: string;
+  inputSchema: { [key: string]: JSONValue } | boolean;
+  /** Omitted exposure retains legacy shared behavior. Host adapters enforce owner access. */
+  exposure?: "local-owner" | "shared";
+}

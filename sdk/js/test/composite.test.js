@@ -31,9 +31,9 @@ const configure = (id = "configure", extra = {}) => ({
   params: { component: "primary", instance: "instance", contract: {}, config: { version: "2", values: { mode: "first" } }, ...extra },
 });
 
-test("SDK 1.1 advertises ten capabilities and projects primary and service authority", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 1 });
-  assert.equal(SDK.CONTRACT.capabilities.length, 10);
+test("current SDK preserves API 1.1 primary and service authority projections", () => {
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 2 });
+  assert.equal(SDK.CONTRACT.capabilities.length, 11);
   const root = SDK.validateManifest(compositeManifest());
   assert.deepEqual(SDK.requiredMethods(root), ["module.call"]);
   const view = SDK.publicManifest(root);

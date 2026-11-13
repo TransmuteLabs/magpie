@@ -113,6 +113,8 @@ func MethodCapability(method string) (Capability, bool) {
 		return SessionMigration, true
 	case MethodModuleCall:
 		return ModuleRPC, true
+	case MethodGatewayRequest, MethodGatewayResponse, MethodGatewaySignIn:
+		return GatewayHooks, true
 	default:
 		return "", false
 	}

@@ -78,6 +78,11 @@ func cloneManifest(manifest Manifest) Manifest {
 		value := *manifest.Component
 		manifest.Component = &value
 	}
+	if manifest.Hooks != nil {
+		value := *manifest.Hooks
+		value.Origins = slices.Clone(value.Origins)
+		manifest.Hooks = &value
+	}
 	return manifest
 }
 
@@ -258,7 +263,10 @@ func (manifest Manifest) Validate() error {
 	if manifest.Contract.Has(SessionMigration) && len(manifest.Sessions) == 0 {
 		return fmt.Errorf("session migration requires a session descriptor")
 	}
-	return manifest.validateComposite()
+	if err := manifest.validateComposite(); err != nil {
+		return err
+	}
+	return manifest.validateHooks()
 }
 
 func ValidID(value string) bool {
@@ -390,6 +398,18 @@ func RequiredMethods(manifest Manifest) []string {
 			methods = append(methods, MethodSessionConvert)
 		case ModuleRPC:
 			methods = append(methods, MethodModuleCall)
+		case GatewayHooks:
+			if manifest.Hooks != nil {
+				if manifest.Hooks.Request {
+					methods = append(methods, MethodGatewayRequest)
+				}
+				if manifest.Hooks.Response {
+					methods = append(methods, MethodGatewayResponse)
+				}
+				if manifest.Hooks.SignIn {
+					methods = append(methods, MethodGatewaySignIn)
+				}
+			}
 		}
 	}
 	slices.Sort(methods)

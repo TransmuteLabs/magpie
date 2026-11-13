@@ -60,7 +60,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.1; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.2; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The original codec host contract remains
 API 0.3 with the 0.1 inbound and 0.2 catalog contracts still supported.
 
@@ -298,6 +298,46 @@ The separate browser entry `@magpie/extension-sdk/ui` exposes `ui.ready`,
 update/config change/off. The existing HTTP/SSE proxy holds a root lease for
 the whole response, strips cookies and validates/removes the three proof
 headers above before frontend body delivery.
+
+## Gateway hooks API 1.2
+
+Negotiate `GatewayHooks` and `Manifest.Hooks` with at least one of `request`,
+`response` or `signIn`. Register only declared `MethodGatewayRequest`,
+`MethodGatewayResponse` and `MethodGatewaySignIn` handlers in `Module.Handlers`.
+Normal `Handler(ctx, Call, *Stream)` retains scoped state/CAS/proxy/component
+HostCall support. API 1.0 and 1.1 declarations cannot advertise these additions.
+`GatewayMethodEffect` classifies request as read and response/sign-in as write.
+
+Request params are `GatewayRequest{Body, Context}`; return
+`GatewayRequestResult{Body?, State?}`. An absent body preserves the request,
+and a provided body must be a JSON object. `GatewayResponse` contains the
+accepted request, reply, success, state and context. Opaque per-request JSON
+state is bounded by `MaxGatewayStateBytes` (64 KiB). `GatewaySignIn` wraps an
+`Event` with provider, providerName, account label, state and optional RFC3339
+endsAt string. No credential fields are accepted.
+
+Gateway context contains only host-derived origin/protocol/model/stream/path,
+agent/session/cwd/query/kind. Provider/account/generation scopes and any Auth
+payload are rejected. The host must enforce origins before sending private
+bytes: defaults are `local` and `magpie-key`; explicit origins may also name
+`gateway-key`, `remote` or `browser`. Browser traffic requires explicit opt-in,
+even on loopback or with the default sharing key. The host overrides only the
+SDK context to `browser` for a page request; legacy classification is unchanged.
+Unknown or duplicate origins are invalid. Sign-in
+requires explicit opt-in and local permission. Timeout is 100–30000 ms, or
+zero for the host default.
+
+Hook RPC is unary. Request emits no events; write response/sign-in hooks may
+emit only an acknowledged `accepted` receipt. Other events are errors even
+when a handler ignores Emit's error. Write hook results remain domain JSON;
+their `outcome` field has no provider-execution interpretation. The host owns
+body rollback, protected model/stream/tool fields, generation leases, bounded
+completion delivery, operation journaling and conversation-export opt-in.
+
+`ToolDescriptor.Exposure` omission preserves legacy shared behavior. Explicit
+`shared` or `local-owner` requires API 1.2; the host enforces it on discovery
+and execution. Memory can compose these tools, hooks and existing services,
+without implied access to the independent built-in memory store.
 
 ## Stop and verification boundaries
 

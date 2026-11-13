@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { posix } from "node:path";
 import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
 import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
+import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -14,10 +15,11 @@ const capabilities = {
   "tool-provider": ["tool.call"],
   "session-migration": ["session.convert"],
   "module-rpc": ["module.call"],
+  "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 1 }),
+  version: Object.freeze({ major: 1, minor: 2 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -114,6 +116,12 @@ export function requiredMethods(manifest) {
   const methods = [];
   for (const capability of manifest.contract.capabilities) {
     if (capability === "model-discovery" && !manifest.providers?.length) continue;
+    if (capability === "gateway-hooks") {
+      for (const [flag, method] of [["request", "gateway.request"], ["response", "gateway.response"], ["signIn", "gateway.signin"]]) {
+        if (manifest.hooks?.[flag]) methods.push(method);
+      }
+      continue;
+    }
     methods.push(...capabilities[capability]);
     if (capability === "agent-wiring" && manifest.agents?.some(agent => agent.bin || agent.configFiles?.length || agent.fields?.length)) {
       methods.push("agent.inspect");
@@ -135,7 +143,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -199,6 +207,7 @@ export function validateManifest(value) {
     || has("agent-wiring") && !manifest.agents?.length
     || has("session-migration") && !manifest.sessions?.length) fail("Missing capability descriptors");
   validateComposite(manifest);
+  validateHooks(manifest);
   return freezeJSON(manifest);
 }
 
@@ -235,6 +244,15 @@ export function validateModule(module) {
   });
   if (required.some(method => typeof handlers.get(method) !== "function")
     || [...handlers].some(([method, handler]) => !required.includes(method) || typeof handler !== "function")) fail("Missing or undeclared extension handler");
+  for (const [method, handler] of handlers) {
+    if (!gatewayMethodEffect(method)) continue;
+    handlers.set(method, async (ctx, call, stream) => {
+      validateGatewayCall(method, call, manifest.hooks, stringifyJSON);
+      const { auth: _auth, ...clean } = call;
+      const result = await handler(ctx, Object.freeze(clean), stream);
+      return method === "gateway.request" ? validateGatewayResult(result == null ? {} : jsonSnapshot(result), stringifyJSON) : result;
+    });
+  }
   return { manifest, handlers, start: module.start };
 }
 

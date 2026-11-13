@@ -39,19 +39,20 @@ type managedWorker struct {
 }
 
 type Manager struct {
-	mu         sync.Mutex
-	reloadMu   sync.Mutex
-	root       string
-	catalog    *Catalog
-	store      *Store
-	workers    map[string]*managedWorker
-	closed     bool
-	closeDone  chan struct{}
-	closeErr   error
-	startCtx   context.Context
-	stopStarts context.CancelFunc
-	startWG    sync.WaitGroup
-	retireWG   sync.WaitGroup
+	mu          sync.Mutex
+	reloadMu    sync.Mutex
+	root        string
+	catalog     *Catalog
+	store       *Store
+	workers     map[string]*managedWorker
+	closed      bool
+	closeDone   chan struct{}
+	closeErr    error
+	startCtx    context.Context
+	stopStarts  context.CancelFunc
+	startWG     sync.WaitGroup
+	retireWG    sync.WaitGroup
+	gatewayRuns map[*GatewayRun]struct{}
 	// Bun is an explicitly selected runtime executable; empty uses discovery.
 	Bun string
 	// ReleaseClient optionally supplies the client used for GitHub packages.
@@ -718,11 +719,17 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := validateMethod(manifest, method, scope); err != nil {
 		return nil, err
 	}
+	if method == sdk.MethodToolCall {
+		if err := checkLeasedTool(ctx, manifest, params); err != nil {
+			return nil, err
+		}
+	}
 	auth, err := m.authFor(scope)
 	if err != nil {
 		return nil, err
 	}
-	effect := method == sdk.MethodProviderExecute || method == sdk.MethodToolCall
+	effect := method == sdk.MethodProviderExecute || method == sdk.MethodToolCall ||
+		method == sdk.MethodGatewayResponse || method == sdk.MethodGatewaySignIn
 	component := sdk.PrimaryComponent
 	if method == sdk.MethodModuleCall {
 		encoded, marshalErr := json.Marshal(params)
@@ -751,6 +758,11 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil, err
 	}
 	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest, method: method})
+	if method == sdk.MethodGatewayRequest {
+		// Retain this restriction when a recall delegates a read action to
+		// a private component, which has its own module.call authority.
+		ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
+	}
 	if l.group != nil {
 		effectName := "read"
 		if effect {
@@ -783,6 +795,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodModuleCall && event.Name != "accepted" {
 			return errors.New("module RPC 1.1 is unary")
 		}
+		if sdk.IsGatewayMethod(method) && event.Name != "accepted" {
+			return errors.New("gateway hook calls are unary")
+		}
 		if event.Name == "accepted" {
 			var value sdk.AcceptedEvent
 			if !effect || json.Unmarshal(event.Data, &value) != nil || value.OperationID != scope.Operation {
@@ -804,7 +819,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		var declared struct {
 			Outcome string `json:"outcome"`
 		}
-		if method != sdk.MethodModuleCall && err == nil && json.Unmarshal(result, &declared) == nil {
+		if method != sdk.MethodModuleCall && !sdk.IsGatewayMethod(method) && err == nil && json.Unmarshal(result, &declared) == nil {
 			switch declared.Outcome {
 			case "accepted", "uncertain":
 				err = &OutcomeError{Outcome: "uncertain", Cause: errors.New("extension left an operation unfinished")}
@@ -859,6 +874,9 @@ func (m *Manager) Invoke(ctx context.Context, id, method string, scope sdk.Scope
 }
 
 func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) error {
+	if err := validateGatewayScope(method, scope); err != nil {
+		return err
+	}
 	needsProvider := method == sdk.MethodProviderExecute || method == sdk.MethodProviderModels ||
 		method == sdk.MethodProviderUsage || method == sdk.MethodAuthStart || method == sdk.MethodAuthFinish ||
 		method == sdk.MethodAuthRefresh || method == sdk.MethodAuthLogout
@@ -982,6 +1000,9 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 			Found: value.Version != 0, Version: strconv.FormatUint(value.Version, 10), Value: value.Value,
 		}, nil
 	case sdk.MethodStateCAS:
+		if readOnly, _ := ctx.Value(gatewayReadOnlyKey{}).(bool); readOnly {
+			return nil, errors.New("gateway recall cannot write persistent module state")
+		}
 		var request sdk.StateCASRequest
 		if !decodeHostParams(raw, &request) {
 			return nil, errors.New("invalid state request")
@@ -1044,9 +1065,20 @@ func (m *Manager) Close(ctx context.Context) error {
 		return m.closeErr
 	}
 	workers := m.workers
+	runs := make([]*GatewayRun, 0, len(m.gatewayRuns))
+	for run := range m.gatewayRuns {
+		runs = append(runs, run)
+	}
 	m.workers = make(map[string]*managedWorker)
 	m.mu.Unlock()
 	m.stopStarts()
+	for _, run := range runs {
+		run.abort()
+		select {
+		case <-run.done:
+		case <-ctx.Done():
+		}
+	}
 	for _, worker := range workers {
 		worker.mu.Lock()
 		worker.retiring = true

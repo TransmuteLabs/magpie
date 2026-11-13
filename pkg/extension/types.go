@@ -173,6 +173,7 @@ type ToolDescriptor struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"inputSchema"`
+	Exposure    string          `json:"exposure,omitempty"`
 }
 
 type ToolRequest struct {

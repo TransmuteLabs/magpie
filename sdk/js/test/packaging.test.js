@@ -5,7 +5,7 @@ import { harness, manifest } from "./helpers.js";
 
 function sharedManifest() {
   return {
-    ...manifest(CONTRACT.capabilities.filter(capability => capability !== "module-rpc")),
+    ...manifest(CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks"].includes(capability))),
     inbounds: [{ id: "native", path: "/fixture/native" }],
     providers: [{ id: "sample", name: "Sample", protocols: ["chat"], models: [{ id: "echo" }] }],
     agents: [{ id: "editor", name: "Editor" }],

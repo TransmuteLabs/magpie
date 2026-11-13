@@ -2,9 +2,9 @@
 
 Date: 2026-11-13
 
-Status: implemented with scoped macOS native and composite integration proof.
-Final immutable acceptance gates remain pending the integration owner; no
-whole-repository green result is claimed. This supersedes ADR 0003's
+Status: implemented with scoped macOS/Linux native and composite proof.
+See the [validation record](0005-native-composite-validation.md) for exact
+source identities and the non-green whole-repository result. This supersedes ADR 0003's
 external-executable-only Go installation decision.
 
 The scope is our internal modules, maintained by the same developers as the
@@ -96,8 +96,8 @@ v1/config1 execution after v2/config2 publication. These go beyond the earlier
 export-in-dependency probe; that probe alone was never Manager proof.
 
 Supported loader source branches are Darwin, Linux, FreeBSD and Windows,
-with cgo enabled. Current runtime evidence is macOS. Remote Linux native
-execution is being prepared with no result yet; Windows native execution
+with cgo enabled. Runtime evidence includes macOS checkpoints and Linux
+native install/CLI/PID proof on usbox. Windows native execution
 has not been performed. No-cgo tests/vet and cross-target checks are scoped
 build/refusal evidence, not runtime evidence for those systems.
 

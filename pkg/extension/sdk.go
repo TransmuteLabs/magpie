@@ -95,6 +95,11 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 		if handler == nil || !slices.Contains(required, method) {
 			return nil, nil, fmt.Errorf("unnegotiated or invalid extension handler %q", method)
 		}
+		if IsGatewayMethod(method) {
+			descriptor := *module.Manifest.Hooks
+			descriptor.Origins = slices.Clone(descriptor.Origins)
+			handlers[method] = gatewayHandler(method, handler, descriptor)
+		}
 	}
 	snapshot := cloneManifest(module.Manifest)
 	handlers[MethodDescribe] = func(context.Context, Call, *Stream) (any, error) {

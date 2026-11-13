@@ -3,6 +3,7 @@ import { TextDecoder } from "node:util";
 import { MAX_CHUNK_BYTES, MAX_CONCURRENT, MAX_FRAME_BYTES, MAX_HOST_BYTES, SDKError, decodeBytes } from "./bytes.js";
 import { freezeJSON, parseJSON, publicManifest, stringifyJSON, validateModule } from "./manifest.js";
 import { ComponentLifecycle } from "./lifecycle.js";
+import { MAX_GATEWAY_STATE_BYTES, gatewayMethodEffect, validateGatewayCall } from "./hooks.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const identifier = value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\s\p{Cc}]/u.test(value);
@@ -71,7 +72,7 @@ function checkEvent(event, data) {
   }
 }
 
-function jsonFieldBytes(text, field) {
+function jsonFieldBytes(text, field, child) {
   let index = 0, bytes;
   const whitespace = () => { while (text.charCodeAt(index) <= 32) index++; };
   const stringEnd = start => {
@@ -98,7 +99,7 @@ function jsonFieldBytes(text, field) {
     return end;
   };
   whitespace();
-  index++;
+  if (text[index++] !== "{") return;
   while (index < text.length) {
     whitespace();
     if (text[index] === "}") break;
@@ -110,7 +111,10 @@ function jsonFieldBytes(text, field) {
     whitespace();
     const start = index;
     index = valueEnd(index);
-    if (key === field) bytes = Buffer.byteLength(text.slice(start, index));
+    if (key === field) {
+      const value = text.slice(start, index);
+      bytes = child ? jsonFieldBytes(value, child) : Buffer.byteLength(value);
+    }
     whitespace();
     if (text[index++] !== ",") break;
   }
@@ -241,7 +245,7 @@ export async function serve(module, { input = process.stdin, output = process.st
     record.timer = setTimeout(() => setDeadline(record), Math.min(left, 2147483647));
   };
 
-  const dispatch = async (frame, hostResultBytes) => {
+  const dispatch = async (frame, hostResultBytes, gatewayStateBytes) => {
     validateFrame(frame);
     if (frame.kind === "cancel") {
       const record = calls.get(frame.id);
@@ -323,6 +327,11 @@ export async function serve(module, { input = process.stdin, output = process.st
     const emit = (event, data = null) => {
       const operation = (async () => {
         assertOpen();
+        const hookEffect = gatewayMethodEffect(call.method);
+        if (hookEffect && (hookEffect !== "write" || event !== "accepted")) {
+          record.creditError = new SDKError("invalid_params", "Gateway hooks are unary and permit only write acceptance receipts");
+          throw record.creditError;
+        }
         if (call.method === "module.call" && (record.actionEffect !== "write" || event !== "accepted")) {
           record.creditError = new SDKError("invalid_params", "module.call is unary and permits only a write acceptance receipt");
           throw record.creditError;
@@ -393,6 +402,10 @@ export async function serve(module, { input = process.stdin, output = process.st
         stopLifetime = bound.stop;
         controller.signal.throwIfAborted();
       }
+      if (call.method === "gateway.response" && gatewayStateBytes > MAX_GATEWAY_STATE_BYTES) {
+        validateGatewayCall(call.method, call, manifest.hooks, stringifyJSON);
+        throw new SDKError("resource_exhausted", "Gateway hook state exceeds its byte limit");
+      }
       return method(Object.freeze({ signal: controller.signal, ...(moduleContext ? { module: moduleContext } : {}) }), call, Object.freeze({ emit, hostCall }));
     }).finally(() => stopLifetime?.());
     handler.catch(() => {});
@@ -431,7 +444,8 @@ export async function serve(module, { input = process.stdin, output = process.st
     try { text = decoder.decode(Buffer.concat(pieces, length)); frame = parseJSON(text); } catch { throw invalid(); }
     pieces = [];
     length = 0;
-    await dispatch(frame, frame?.kind === "host.result" ? jsonFieldBytes(text, "result") : undefined);
+    await dispatch(frame, frame?.kind === "host.result" ? jsonFieldBytes(text, "result") : undefined,
+      frame?.kind === "call" && frame.method === "gateway.response" ? jsonFieldBytes(text, "params", "state") : undefined);
   };
   try {
     while (true) {

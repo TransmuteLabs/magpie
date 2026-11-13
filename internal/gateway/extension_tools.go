@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 
 	"github.com/yetone/magpie/internal/access"
@@ -24,6 +25,15 @@ type extensionToolAccountSource interface {
 var extensionToolAccounts = func() extensionToolAccountSource { return extension.Default() }
 
 var runExtensionPluginTool = plugin.RunExtensionTool
+
+// extensionToolHTTPContext replaces inherited authority using authenticated
+// request provenance. Client roots, sessions, arguments and IDs grant nothing.
+func extensionToolHTTPContext(request *http.Request) context.Context {
+	origin := gatewayOrigin(request)
+	owner := (origin == "local" || origin == "magpie-key") && ownComputer(request) &&
+		!hubFromPage(request) && !forwarded(request)
+	return extension.WithLocalOwner(request.Context(), owner)
+}
 
 // extensionToolContext consumes optional _magpie: {provider, account}.
 // Authors declare that optional property in their tool's input schema; only

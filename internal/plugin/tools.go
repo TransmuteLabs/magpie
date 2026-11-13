@@ -63,7 +63,7 @@ func Tools(ctx context.Context) ([]PluginTools, error) {
 			out = append(out, PluginTools{Spec: l.Spec, Tools: l.Tools})
 		}
 	}
-	return append(out, extensionTools(entries, true)...), nil
+	return append(out, callerExtensionTools(ctx, entries)...), nil
 }
 
 // ToolTimeout is how long a tool may run before its call is answered that

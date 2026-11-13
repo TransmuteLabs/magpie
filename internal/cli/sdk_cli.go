@@ -331,6 +331,9 @@ func sdkCLICall(ctx context.Context, args []string, host sdkCLIHost, out io.Writ
 	if err != nil {
 		return err
 	}
+	// This command is a direct local management invocation, unlike a
+	// forwarded MCP request. The runtime still checks the executing lease.
+	ctx = extensionhost.WithLocalOwner(ctx, true)
 	encoder := json.NewEncoder(out)
 	result, err := host.Call(ctx, id, method, scope, json.RawMessage(input), func(event extensionhost.Event) error {
 		return encoder.Encode(struct {

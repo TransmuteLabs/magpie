@@ -6,9 +6,11 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Native and composite APIs are implemented, with the scoped evidence listed
-below. Final immutable acceptance gates remain pending the integration owner;
-this reference does not claim a green whole-repository run.
+Native/composite APIs and SDK 1.2 gateway hooks/private tools are implemented.
+The [1.1 validation](../adr/0005-native-composite-validation.md) and
+[1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
+immutable aggregate runs from later fixes. Whole-repository acceptance remains
+non-green; the [surface census](extension-surface-coverage.md) lists remaining adapters.
 
 The original contract decision is [ADR 0003](../adr/0003-external-extension-runtime.md).
 [ADR 0004](../adr/0004-native-extension-abi.md) adds native Go, and
@@ -34,7 +36,7 @@ See [extension providers](extension-providers.md),
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 1}` and ten capabilities. Explicit SDK 1.0 manifests
+SDK API `{major: 1, minor: 2}` and eleven capabilities. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
 independent version.
@@ -58,7 +60,7 @@ The [native example](../../examples/extensions/echo-native/README.md) and
 actual build scripts and author source. Native authoring and loading require
 cgo and an appropriate C toolchain. The host loader has Darwin, Linux,
 FreeBSD and Windows branches; actual native execution evidence here is on
-macOS. Linux execution is being prepared, and Windows execution is unverified.
+macOS and Linux; Windows native execution is unverified.
 No-cgo or unsupported hosts refuse native loading clearly and retain exec/Bun.
 
 ## Installation
@@ -162,8 +164,11 @@ source again. A local reinstall clears the remote source.
 The original nine capability paths stay on the primary: inbound codec,
 outbound executor, agent wiring, account auth, model discovery, usage,
 operation control, tools and session migration. API 1.1 adds `module-rpc`
-for declared actions. Only `module.call {action,input}` routes by action
-owner; codec/provider/response calls retain the existing primary lease.
+for declared actions. API 1.2 adds primary `gateway-hooks` for request, completed
+response and sign-in notifications, plus explicit local-owner tool exposure.
+Only `module.call {action,input}` routes by action owner; codec/provider/response
+calls retain the existing primary lease. See [hooks](gateway-request-hooks.md)
+and [private tools](plugin-tools.md#installable-sdk-tools-and-private-memory).
 
 The complete root manifest declares `actions`, `services`, `compatibility`,
 `window` and `bindings`. Actions name an owner and `read`/`write` effect.

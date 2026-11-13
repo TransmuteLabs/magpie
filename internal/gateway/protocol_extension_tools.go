@@ -15,6 +15,7 @@ import (
 // Native control RPCs use the existing MCP tool policy and budget path. A
 // codec can select only a tool its own installed module has declared.
 func (server *Server) protocolToolBody(request *http.Request, inbound codec.Inbound, body []byte) ([]byte, error) {
+	request = request.WithContext(extensionToolHTTPContext(request))
 	owner, _, named := strings.Cut(inbound.ID(), ":")
 	if !named || server.extensions == nil || !inbound.Contract().Has(codec.ToolProvider) {
 		return nil, errors.New("native codec did not negotiate tool dispatch")

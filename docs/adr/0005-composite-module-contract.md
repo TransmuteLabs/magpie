@@ -3,8 +3,8 @@
 Date: 2026-11-13
 
 Status: implemented with scoped native/Go-service/window and Go-host/Bun
-proof. Final immutable acceptance gates remain pending the integration
-owner; this decision does not claim a green whole-repository run.
+proof. The [validation record](0005-native-composite-validation.md) retains
+source identities and limits; no whole-repository green is claimed.
 
 ## Decision
 
@@ -86,7 +86,7 @@ error, never a reason to silently retry it as a legacy TypeScript plugin.
 The descriptor declares its SDK contract, composite-host API, native ABI and
 supported platforms. These name API compatibility rather than requiring
 our integrations to track every upstream application release tag.
-`compatibility.hostAPI` accepts `"^1"` or `"^1.1"`; `nativeABI`, when set,
+`compatibility.hostAPI` accepts `"^1"`, `"^1.1"` or, with SDK 1.2, `"^1.2"`; `nativeABI`, when set,
 must match ABI 1; `platforms` optionally restricts `GOOS/GOARCH`.
 These are separate from semantic module versions. Platform/ABI compatibility
 is checked before executing the component. An installed CLI must itself
@@ -117,8 +117,9 @@ without returning its disposer remain the author's cleanup responsibility.
 Go `Module.Start` returns `(ModuleReady, func(), error)`; JS `module.start`
 returns `{endpoints, state, dispose}`. SDK-owned `component.stop` cancels
 business calls, pending emits/host callbacks and startup, joins cooperative
-startup cleanup and invokes the disposer once. Group cleanup stops clients
-in reverse start order with bounded control waits. Exec/Bun can be terminated;
+startup cleanup and invokes the disposer once. Group cleanup disposes the
+primary while helpers are still available, then stops helpers in reverse
+dependency order, with bounded control waits. Exec/Bun can be terminated;
 native cancellation and disposal remain cooperative. Logical native close
 revokes transport without unloading the library or waiting for stuck code.
 
@@ -236,6 +237,8 @@ status/SSE, cookie removal, response proof, invalidation and held response lease
 Go-host/Bun API 1.1 passed race count 3 with no skips. The JS SDK has 87 Node
 and 87 Bun passes plus strict declaration checks. These are scoped proofs;
 they do not establish vendor parity, benchmark results, Windows native
-execution or final immutable repository acceptance. Remote Linux native
-execution is being prepared with no result yet. The integration owner
-maintains final gates; this lane migrated no vendor implementation.
+execution or whole-repository acceptance. Linux native installation and
+CLI proof subsequently passed on usbox. The [1.1 validation record](0005-native-composite-validation.md)
+retains those exact checkpoints; [1.2 validation](0006-gateway-hooks-validation.md)
+records the later 102/102 JS checks and gateway/tool increment. This decision
+does not establish vendor migration.

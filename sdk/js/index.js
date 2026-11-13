@@ -3,3 +3,4 @@ export { CONTRACT, validateManifest, publicManifest, requiredMethods, serviceMan
 export { serve } from "./worker.js";
 export { moduleContextFrom, moduleHTTPHeaders } from "./lifecycle.js";
 export { MAX_MODULE_SERVICES } from "./composite.js";
+export { MAX_GATEWAY_STATE_BYTES } from "./hooks.js";

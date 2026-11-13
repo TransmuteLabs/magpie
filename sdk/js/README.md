@@ -8,6 +8,9 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
+Package 1.2.0 adds the negotiated `gateway-hooks` capability and tool exposure;
+`CONTRACT` now advertises SDK API 1.2 and eleven capabilities. Explicit
+1.0 and 1.1 manifests retain their earlier behavior.
 
 ```js
 import { serve, SDKError } from "@magpie/extension-sdk";
@@ -31,7 +34,7 @@ await serve({
 
 ## SDK 1.1 modules and components
 
-`CONTRACT` advertises SDK 1.1 and all ten capabilities. Keep the manifest's
+SDK 1.1 introduced ten capabilities and component groups. Keep the manifest's
 explicit minor version at 0 for an existing SDK 1.0 worker. A 1.1 module
 receives SDK-owned `component.configure`, `component.ready` and
 `component.stop`; ordinary calls require successful configuration.
@@ -185,14 +188,14 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract version is exactly 1.0. Handlers outside the
+handlers. Supported contract versions are 1.0, 1.1 and 1.2. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
 
 Packaging metadata also accepts `runtime: "native"` for the Go C-shared
 libraries described by ADR 0004. A native package has the same clean
-relative `entry` and nine-capability contract, with `args` absent or empty:
+relative `entry` and negotiated SDK contract, with `args` absent or empty:
 libraries have no process argv. The public handshake omits runtime,
 entry and args for every runtime. JS/Bun `serve` remains a stdio worker;
 native library loading and the C ABI belong to the Go host/SDK.
@@ -218,6 +221,55 @@ decoded operation, never a provider protocol or an additional capability.
 | agent-wiring | agent.plan; agent.inspect for rich descriptors |
 | session-migration | session.convert |
 | module-rpc (SDK 1.1) | module.call (auto-dispatched from module.actions) |
+| gateway-hooks (SDK 1.2) | gateway.request / gateway.response / gateway.signin, only as enabled by hooks |
+
+## Gateway hooks and tool exposure (API 1.2)
+
+Declare `hooks: {request, response, signIn, timeoutMs, origins}` with the
+`gateway-hooks` capability and contract minor 2. At least one flag must be
+true. Register ordinary functions in `module.handlers` under
+`"gateway.request"`, `"gateway.response"` and `"gateway.signin"` for exactly
+the flags declared. The SDK owns validation, cancellation and wire dispatch;
+authors implement no additional RPC adapter. See the
+[real process fixture](test/fixtures/gateway-worker.js).
+
+`GatewayRequest` carries an object `body` and `GatewayContext`: origin,
+protocol, model, stream, path, agent, session, cwd, query and kind.
+The request handler returns `GatewayRequestResult` with optional replacement
+object `body` and JSON `state`; null/undefined means an empty result.
+`GatewayResponse` carries request, reply, success, state and the same context.
+`GatewaySignIn` carries `{event: GatewaySignInEvent}` with provider,
+providerName, account label, state (`signed-out` or `ending`) and optional
+`endsAt` as RFC3339 text, never epoch milliseconds. These labels do not grant
+account authority.
+
+Request hooks are read; response/sign-in hooks are write. All are unary.
+Only a write may emit an acknowledged `accepted` receipt; every streaming
+data/progress event is rejected, and catching the Emit error still fails the
+terminal result. A response/sign-in result may contain domain fields such
+as `outcome`; it is not an inference executor outcome. Gateway handlers
+receive no selected credential auth, provider/account or nonzero account
+generation. Populated credential scope is refused before invoking the handler.
+
+State is bounded to `MAX_GATEWAY_STATE_BYTES` (64 KiB) of UTF-8 JSON, both
+when returned by request and received by response. Origins default to
+`local` and `magpie-key`; explicit entries may be `local`, `magpie-key`,
+`gateway-key`, `remote` or `browser`, without duplicates. Browser is an
+explicit SDK opt-in: a loopback web page is not granted the default local
+memory recall/capture access, even when it uses the default key. The legacy
+request-hook origin model remains unchanged. A sign-in hook requires local
+permission. `timeoutMs` is 0/default or an integer from 100 through 30000;
+the host owns that execution budget.
+
+Tools may declare `exposure: "local-owner"` or `"shared"` only in API 1.2.
+Omission keeps the legacy shared default. The host adapter owns discovery and
+invocation filtering; SDK descriptor validation alone does not make a tool
+private. API 1.2 accepts compatibility `hostAPI: "^1.2"`.
+
+Our memory module can combine these hooks/tools with its own private store,
+service and UI. That is independent of access to Magpie's built-in shared
+Memory owner, which is not supplied by these DTOs. See the
+[surface coverage matrix](../../docs/subsystems/extension-surface-coverage.md).
 
 An agent descriptor with only `id` and `name` remains a manual action.
 Rich descriptors declare any nonempty `bin` (an executable basename),
@@ -259,12 +311,15 @@ Run checks without downloading anything:
 ```sh
 node --test sdk/js/test/*.test.js
 node sdk/js/test/conformance.js
-tsc --noEmit --strict --target es2022 --module nodenext --lib es2023,dom sdk/js/test/types.ts
+tsc --noEmit --strict --target es2022 --module nodenext --lib es2023,dom sdk/js/test/types.ts sdk/js/test/composite-types.ts sdk/js/test/gateway-hooks-types.ts
 ```
 
 The tests use in-memory `PassThrough` streams plus real Node/Bun children.
 SDK 1.0 conformance covers the original nine capabilities; SDK 1.1 process
 tests cover configure/ready/stop, auto actions and component callbacks.
+API 1.2 tests use real Node/Bun child processes for hooks, unary acceptance,
+host callbacks, private errors and cancellation; their host state fixture
+does not claim ordinary gateway/tool-owner integration.
 Conformance also checks scoped host calls, full uint64
 generations, streamed acknowledgements, cancellation, public/private errors,
 and stdout purity. Bun is used only if already present (`BUN_BIN` may name

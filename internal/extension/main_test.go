@@ -12,6 +12,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if slices.Contains(os.Args, "--sdk-hook-worker") {
+		if err := sdk.Serve(context.Background(), os.Stdin, os.Stdout, gatewayFixtureModule()); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if slices.Contains(os.Args, "--sdk-wedged-input") {
 		wedgedInputHelper()
 		os.Exit(0)

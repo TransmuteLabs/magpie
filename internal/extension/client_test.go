@@ -344,7 +344,14 @@ func fixturePackage(t *testing.T) string {
 	}
 	manifest := sdk.Manifest{
 		Schema: 1, ID: "fixture", Version: "1.0.0", Runtime: "exec", Entry: entry, Args: []string{"--sdk-test-worker"},
-		Contract:  sdk.FullContract(),
+		Contract: sdk.Contract{
+			Version: sdk.APIVersion{Major: 1, Minor: 1},
+			Capabilities: []sdk.Capability{
+				sdk.InboundCodec, sdk.OutboundExecutor, sdk.AgentWiring, sdk.AccountAuth,
+				sdk.ModelDiscovery, sdk.UsageReporter, sdk.OperationControl,
+				sdk.ToolProvider, sdk.SessionMigration, sdk.ModuleRPC,
+			},
+		},
 		Inbounds:  []sdk.InboundDescriptor{{ID: "echo", Path: "/sdk-fixture/echo"}},
 		Providers: []sdk.ProviderDescriptor{{ID: "provider", Name: "Fixture", Protocols: []codec.Protocol{codec.Chat}, Models: []sdk.Model{{ID: "model"}}}},
 		Agents:    []sdk.AgentDescriptor{{ID: "agent", Name: "Fixture agent"}},

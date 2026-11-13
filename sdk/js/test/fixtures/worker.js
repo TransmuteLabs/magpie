@@ -4,7 +4,7 @@ import { parseJSON } from "../../manifest.js";
 
 let manifest = {
   schema: 1, id: "conformance", version: "1.0.0", runtime: "bun", entry: "worker.js",
-  contract: { version: { major: 1, minor: 0 }, capabilities: CONTRACT.capabilities.filter(capability => capability !== "module-rpc") },
+  contract: { version: { major: 1, minor: 0 }, capabilities: CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks"].includes(capability)) },
   inbounds: [{ id: "native", path: "/conformance/native" }],
   providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"], models: [{ id: "echo" }] }],
   agents: [{ id: "editor", name: "Editor" }],
@@ -71,6 +71,13 @@ const handlers = {
   async "agent.plan"() { return { files: [{ path: "config.json", body: encodeBytes(new TextEncoder().encode("{}")) }] }; },
   async "session.convert"(ctx, call) { return { files: call.params.files.map(file => ({ ...file, format: call.params.to })) }; },
 };
+// A newer Go host may supply gateway-hook declarations with its manifest.
+// The standalone fixture deliberately remains the original nine-capability API.
+if (manifest.contract.capabilities.includes("gateway-hooks")) {
+  if (manifest.hooks?.request) handlers["gateway.request"] = async (_ctx, call) => ({ body: call.params.body, state: { session: call.params.context.session } });
+  if (manifest.hooks?.response) handlers["gateway.response"] = async () => ({ outcome: "captured-domain" });
+  if (manifest.hooks?.signIn) handlers["gateway.signin"] = async () => null;
+}
 
 try {
   await serve({ manifest, handlers }, { shutdownTimeoutMs: 100 });
