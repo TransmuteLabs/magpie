@@ -291,7 +291,7 @@ func TestClaudeClientCacheAbsentUnchanged(t *testing.T) {
 		if !strings.Contains(log, "cache-disabled 0") || strings.Contains(log, "apply_flag_settings") {
 			t.Fatalf("ordinary environment/settings changed: %s", log)
 		}
-		if !strings.Contains(log, "\"cache_control\":{\"ttl\":\"1h\",\"type\":\"ephemeral\"},\"text\":\"\\u003cexternal_system_instructions\\u003e\nshared\n\\u003c/external_system_instructions\\u003e\n\n\"") {
+		if !strings.Contains(log, "\"cache_control\":{\"ttl\":\"1h\",\"type\":\"ephemeral\"},\"text\":\"\\u003cexternal_system_instructions\\u003e\\nshared\\n\\u003c/external_system_instructions\\u003e\\n\\n\"") {
 			t.Fatalf("ordinary prompt changed: %s", log)
 		}
 	}
