@@ -188,3 +188,48 @@ The whole-repository run excludes `TestScriptFindsClaudeMoved`, which can
 launch the real installed app. That exclusion is explicit rather than a
 passing test. Native Windows/macOS execution, live vendor parity and the
 full browser matrix remain separate evidence requirements.
+
+## SDK 1.5 application acceptance
+
+Committed Main `9157d371bd5b0eb8fe4fa7821a95ab22e745c471` completed the
+safe whole-repository command **exit 0** in 1,595.65 seconds. Its tree is
+`f4d67ccf35d87c44a03e2b5f7bd1f3506436b65e`, archive SHA256
+`b5f1486924dd1dc9605bdf4ef30ace26e297eda7e7afd2b74ce4cf2c6a85861b`.
+
+| Measure | Count |
+| --- | ---: |
+| Test PASS events | 30,211 |
+| Root PASS events | 13,405 |
+| Passing packages | 107 |
+| Test skip events | 149 |
+| Package skip events | 25 |
+| Failed test/package events | 0 |
+| Unsafe installed-Claude run events | 0 |
+
+The command is the same `go test -json -tags nogui -p 2 -timeout=45m
+-skip '^TestScriptFindsClaudeMoved$' ./...`, run on usbox with pinned Go
+1.26.8 and offline caches. The private user/network namespace kept
+UID/EUID/GID/EGID 1000, brought loopback up and dropped every capability
+mask to zero; a chmod-000 read failed. The pre/post audits checked all
+10,258 captured paths and reported zero changes.
+
+This is not a race-detector run. Scoped race, JS/TS and static gates have
+their own records. Browser behavior, live vendors, native opt-ins and the
+native TLS stress limit stay outside it.
+
+Five reviewed fixes separate the earlier red run from this one: the catalog
+change hook behind an atomic setter/getter, three fixture counters, and the
+read-only observation of the agent ownership ledger. The agent-help change
+(`9b8c60f47`) keeps help out of launch preparation, and the UI
+account-workflow slice (`0ae75b49c`) is a later delta with its own scoped
+record.
+
+Two failures remain visible and are not caused by this work:
+`TestListedByReadsAnIndex` exceeds its 8 KiB-per-ask budget on unchanged
+pre-Auth and `f091` sources alike, and the earlier full agent race run hit a
+30-minute package deadline inside `TestReasonixCLIRecoversAfterProbeTimeout`.
+Neither budget nor expectation was changed.
+
+Evidence: `usbox:/tmp/magpie-sdk15-final-o568g7c8`, copied to
+`/tmp/magpie-sdk15-9157-verification-evidence/BROAD-REPORT.md` with the
+command result, namespace proof, audits and unsafe-test exclusion proof.
