@@ -115,6 +115,9 @@ func (call *remoteCall) ready(ctx context.Context) error {
 
 func (call *remoteCall) Decode(ctx context.Context, headers http.Header, body []byte) (codec.Request, error) {
 	if err := call.ready(ctx); err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return codec.Request{}, cause
+		}
 		return codec.Request{}, &codec.Error{Status: http.StatusBadGateway, Message: "native protocol extension is unavailable"}
 	}
 	// identifyCaller has replaced the request's authorization with Magpie's
@@ -135,9 +138,16 @@ func (call *remoteCall) Decode(ctx context.Context, headers http.Header, body []
 		ID: call.descriptor.ID, ResponseID: call.responseID, Headers: headers, Body: body,
 	}, nil)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return codec.Request{}, err
+		}
 		var public *sdk.Error
-		if errors.As(err, &public) && public.Code != "internal" {
-			return codec.Request{}, &codec.Error{Status: http.StatusBadRequest, Message: public.Message}
+		if errors.As(err, &public) && public != nil && public.Code != "internal" {
+			status := public.HTTPStatus()
+			if status == 0 {
+				status = http.StatusBadRequest
+			}
+			return codec.Request{}, &codec.Error{Status: status, Message: public.Message}
 		}
 		return codec.Request{}, errors.New("native extension decoding failed")
 	}
@@ -284,13 +294,18 @@ func (reply *remoteResponse) Finish(cause error) error {
 		if reply.err != nil || cause != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
+			code := "canceled"
+			if errors.Is(cause, context.DeadlineExceeded) || errors.Is(reply.err, context.DeadlineExceeded) {
+				code = "deadline"
+			}
 			// Cancellation is cleanup for this already acquired response ID.
 			// It cannot select another endpoint, scope or host operation.
+			// The codec may still emit its native terminal cancellation frame.
 			_, _ = reply.call.lease.client.call(ctx, sdk.MethodInboundResponse,
 				sdk.Scope{Plugin: reply.call.module}, nil, sdk.ResponseEvent{
 					ID: reply.call.descriptor.ID, ResponseID: reply.call.responseID,
-					Action: sdk.ResponseCancel, Error: &sdk.Error{Code: "canceled", Message: "native request ended"},
-				}, func(Event) error { return nil })
+					Action: sdk.ResponseCancel, Error: &sdk.Error{Code: code, Message: "native request ended"},
+				}, reply.native)
 		}
 	}
 	if reply.err != nil && !reply.nativeStarted {

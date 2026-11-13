@@ -101,7 +101,7 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 	if err != nil {
 		var public *protocolext.Error
 		if errors.As(err, &public) && public != nil {
-			return nil, &Error{Code: "invalid_params", Message: public.Message}
+			return nil, NewHTTPError(public.Status, public.Message)
 		}
 		return nil, err
 	}
@@ -192,6 +192,9 @@ func (module *inboundModule) response(ctx context.Context, call Call, stream *St
 		var cause error
 		if event.Action == ResponseCancel {
 			cause = context.Canceled
+			if event.Error != nil && event.Error.Code == "deadline" {
+				cause = context.DeadlineExceeded
+			}
 		} else if event.Error != nil {
 			switch event.Error.Code {
 			case "canceled":
