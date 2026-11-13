@@ -34,11 +34,22 @@ Capabilities use the existing vocabulary plus `session-migration`:
 `model-discovery`, `usage-reporter`, `operation-control`, `tool-provider`.
 Declarations do not grant methods from another capability.
 
-Installation copies a bounded local package, rejects symlinks/traversal,
+Installation copies a bounded package, rejects symlinks/traversal,
 records file hashes and publishes the catalog atomically under a lock.
 Uninstall/disable revokes new work; old generations drain. Private state and
 old package generations are retained for recovery rather than deleted while
 another host process can still be using them.
+
+The November 13 distribution addition follows the useful boundary in the
+neighboring CLIProxyAPI plugin store: platform-specific release assets and
+SHA-256 before activation. It keeps executable workers rather than adopting
+the donor's C-shared runtime. GitHub release ZIPs stage through the existing
+catalog installer and worker handshake. The catalog records source provenance;
+explicit updates follow unpinned sources, preserve user pins and private
+state, reject module-identity changes and use a source-generation precondition
+to prevent stale updates from resurrecting removed modules. See the
+[owning reference](../subsystems/executable-extensions.md#installation) for
+the distribution naming and update behavior.
 
 ## RPC contract
 

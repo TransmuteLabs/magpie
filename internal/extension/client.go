@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -18,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/yetone/magpie/internal/proc"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -57,8 +55,8 @@ type workerWrite struct {
 }
 
 type workerClient struct {
+	group         *componentGroup
 	mu            sync.Mutex
-	cmd           *exec.Cmd
 	stdin         io.WriteCloser
 	stdout        io.ReadCloser
 	cancel        context.CancelFunc
@@ -117,36 +115,31 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 		args = append([]string{program}, args...)
 		program = bun
 	}
-	home, err := workerHome(root, entry.Manifest.ID)
-	if err != nil {
-		return nil, err
-	}
-	// The handshake context may end while the worker continues serving. Its
-	// lifetime therefore belongs to close, not to the first request.
+	// The handshake deadline does not own a serving module's lifetime.
 	lifetime, cancel := context.WithCancel(context.Background())
-	cmd := proc.CommandContext(lifetime, program, args...)
-	prepareWorker(cmd)
-	cmd.Dir, cmd.Env = directory, workerEnv(home)
-	input, err := cmd.StdinPipe()
+	var transport *moduleTransport
+	var err error
+	if entry.Manifest.Runtime == "native" {
+		transport, err = openNativeTransport(ctx, program)
+	} else {
+		var home string
+		home, err = workerHome(root, entry.Manifest.ID)
+		if err == nil {
+			transport, err = openProcessTransport(lifetime, directory, program, args, home)
+		}
+	}
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	output, err := cmd.StdoutPipe()
-	if err != nil {
-		input.Close()
+	stop := func() {
 		cancel()
-		return nil, err
-	}
-	diagnostics, err := cmd.StderrPipe()
-	if err != nil {
-		input.Close()
-		output.Close()
-		cancel()
-		return nil, err
+		if transport.stop != nil {
+			transport.stop()
+		}
 	}
 	client := &workerClient{
-		cmd: cmd, stdin: input, stdout: output, cancel: cancel,
+		stdin: transport.input, stdout: transport.output, cancel: stop,
 		done: make(chan struct{}), readDone: make(chan struct{}),
 		writeDone: make(chan struct{}),
 		logDone:   make(chan struct{}), pending: make(map[string]*pendingCall),
@@ -158,18 +151,11 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 		lifetime:      lifetime, hostCall: hostCall,
 		cancelFrames: make(chan sdk.Frame, sdk.MaxConcurrent),
 	}
-	if err := cmd.Start(); err != nil {
-		input.Close()
-		output.Close()
-		diagnostics.Close()
-		cancel()
-		return nil, err
-	}
 	go func() {
 		defer close(client.logDone)
 		// Drain even an overlong line, without retaining or logging request
 		// data a module may have mistakenly printed to stderr.
-		_, _ = io.Copy(io.Discard, diagnostics)
+		_, _ = io.Copy(io.Discard, transport.diagnostics)
 	}()
 	go client.writeLoop()
 	go client.read()
@@ -177,7 +163,7 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 		// StdoutPipe must be drained before Wait closes it. On a protocol
 		// failure read cancels the process and releases both pipes.
 		<-client.readDone
-		err := cmd.Wait()
+		err := transport.wait()
 		<-client.logDone
 		client.fail(err)
 		<-client.writeDone
@@ -408,7 +394,8 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 	}
 	c.mu.Unlock()
 	if !valid || c.hostCall == nil ||
-		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != "network.proxy" && frame.Method != "account.replace") {
+		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != "network.proxy" &&
+			frame.Method != "account.replace" && frame.Method != sdk.MethodComponentCall) {
 		return false
 	}
 	// At most one host callback per live call is admitted by the SDK's
@@ -449,7 +436,8 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	switch method {
 	case sdk.MethodInboundResponse:
 		class = c.responseSlots
-	case sdk.MethodDescribe, sdk.MethodOperationStatus, sdk.MethodOperationCancel:
+	case sdk.MethodDescribe, sdk.MethodOperationStatus, sdk.MethodOperationCancel,
+		sdk.MethodComponentConfigure, sdk.MethodComponentReady, sdk.MethodComponentStop:
 		class = c.controlSlots
 	}
 	select {

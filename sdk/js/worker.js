@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 import { MAX_CHUNK_BYTES, MAX_CONCURRENT, MAX_FRAME_BYTES, MAX_HOST_BYTES, SDKError, decodeBytes } from "./bytes.js";
 import { freezeJSON, parseJSON, publicManifest, stringifyJSON, validateModule } from "./manifest.js";
+import { ComponentLifecycle } from "./lifecycle.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const identifier = value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\s\p{Cc}]/u.test(value);
@@ -194,7 +195,7 @@ class Writer {
 }
 
 export async function serve(module, { input = process.stdin, output = process.stdout, shutdownTimeoutMs = 1000 } = {}) {
-  const { manifest, handlers } = validateModule(module);
+  const { manifest, handlers, start } = validateModule(module);
   if (!input?.[Symbol.asyncIterator] || typeof output?.write !== "function"
     || !Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 0 || shutdownTimeoutMs > 30000) {
     throw new SDKError("invalid", "Invalid worker streams or shutdown timeout");
@@ -203,6 +204,9 @@ export async function serve(module, { input = process.stdin, output = process.st
   const closedCredits = new Map(), closedHostCalls = new Map();
   const transport = deferred(), iterator = input[Symbol.asyncIterator]();
   const writer = new Writer(output, error => transport.reject(error));
+  const lifetime = new ComponentLifecycle(manifest, start);
+  const lifecycleMethods = new Set(manifest.contract.version.minor >= 1
+    ? ["component.configure", "component.ready", "component.stop"] : []);
   let childID = 0, ending = false, failure;
 
   const remember = (history, id, value) => {
@@ -265,7 +269,8 @@ export async function serve(module, { input = process.stdin, output = process.st
         return;
       }
       if (!request.sent) throw invalid();
-      if (frame.parent !== undefined && frame.parent !== request.parent.call.id) throw invalid();
+      if (manifest.contract.version.minor >= 1 ? frame.parent !== request.parent.call.id
+        : frame.parent !== undefined && frame.parent !== request.parent.call.id) throw invalid();
       hostCalls.delete(frame.id);
       if (frame.error) {
         try {
@@ -284,7 +289,13 @@ export async function serve(module, { input = process.stdin, output = process.st
       await writer.write({ kind: "result", id: frame.id, error: { code: "resource_exhausted", message: "Too many concurrent calls" } });
       return;
     }
-    const method = frame.method === "sdk.describe" ? () => description : handlers.get(frame.method);
+    const method = frame.method === "sdk.describe" ? () => description
+      : lifecycleMethods.has(frame.method) ? async (ctx, call) => {
+        if (call.method === "component.configure") return lifetime.configure(call.params, ctx.signal);
+        if (call.params !== null && (!object(call.params) || Object.keys(call.params).length)) throw new SDKError("invalid_params", "Invalid component control parameters");
+        if (call.method === "component.stop") { await lifetime.stop(); return {}; }
+        return lifetime.ready();
+      } : handlers.get(frame.method);
     if (!method) {
       await writer.write({ kind: "result", id: frame.id, error: { code: "method_not_found", message: "Method not supported" } });
       return;
@@ -302,6 +313,7 @@ export async function serve(module, { input = process.stdin, output = process.st
     const record = {
       call, controller, aborted: deferred(), deadline: call.deadlineUnixMs, closed: false, event: null, seq: 0,
       hostTail: Promise.resolve(), hostPending: 0,
+      actionEffect: frame.method === "module.call" ? manifest.actions?.find(action => action.id === frame.params?.action)?.effect : undefined,
     };
     calls.set(call.id, record);
     setDeadline(record);
@@ -311,6 +323,10 @@ export async function serve(module, { input = process.stdin, output = process.st
     const emit = (event, data = null) => {
       const operation = (async () => {
         assertOpen();
+        if (call.method === "module.call" && (record.actionEffect !== "write" || event !== "accepted")) {
+          record.creditError = new SDKError("invalid_params", "module.call is unary and permits only a write acceptance receipt");
+          throw record.creditError;
+        }
         checkEvent(event, data);
         if (record.event) throw new SDKError("backpressure", "Only one stream event may await acknowledgement");
         const wait = deferred(), seq = ++record.seq;
@@ -340,7 +356,7 @@ export async function serve(module, { input = process.stdin, output = process.st
         try {
           await Promise.race([previous, record.aborted.promise]);
           assertOpen();
-          if (!["state.get", "state.cas", "network.proxy", "account.replace"].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call"].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
           const serializedParams = stringifyJSON(params);
           if (Buffer.byteLength(serializedParams) > MAX_HOST_BYTES) throw new SDKError("resource_exhausted", "Host parameters exceed the size limit");
           const payload = parseJSON(serializedParams);
@@ -367,15 +383,23 @@ export async function serve(module, { input = process.stdin, output = process.st
       operation.catch(() => {});
       return operation;
     };
-    const context = Object.freeze({ signal: controller.signal });
+    let stopLifetime;
     const handler = Promise.resolve().then(() => {
       assertOpen();
-      return method(context, call, Object.freeze({ emit, hostCall }));
-    });
+      let moduleContext;
+      if (manifest.contract.version.minor >= 1 && call.method !== "sdk.describe" && !lifecycleMethods.has(call.method)) {
+        const bound = lifetime.callContext(controller, reason => stopCall(record, reason));
+        moduleContext = bound.module;
+        stopLifetime = bound.stop;
+        controller.signal.throwIfAborted();
+      }
+      return method(Object.freeze({ signal: controller.signal, ...(moduleContext ? { module: moduleContext } : {}) }), call, Object.freeze({ emit, hostCall }));
+    }).finally(() => stopLifetime?.());
     handler.catch(() => {});
     const task = (async () => {
       try {
         const result = await Promise.race([handler, record.aborted.promise]);
+        if (record.creditError) throw record.creditError;
         if (record.event) await record.event.wait.promise;
         if (record.hostPending) await Promise.race([record.hostTail, record.aborted.promise]);
         assertOpen();
@@ -432,10 +456,11 @@ export async function serve(module, { input = process.stdin, output = process.st
     failure = error instanceof SDKError ? error : new SDKError("transport", "RPC input failed");
   } finally {
     ending = true;
+    const stopped = lifetime.stop();
     for (const record of calls.values()) stopCall(record, canceled());
     let timer;
     await Promise.race([
-      Promise.allSettled([...running]),
+      Promise.allSettled([...running, stopped]),
       new Promise(resolve => { timer = setTimeout(resolve, shutdownTimeoutMs); }),
     ]);
     clearTimeout(timer);

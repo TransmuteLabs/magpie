@@ -1,14 +1,23 @@
 import { CONTRACT, SDKError, decodeBytes, encodeBytes, serve } from "../../index.js";
+import { readFile } from "node:fs/promises";
+import { parseJSON } from "../../manifest.js";
 
-const manifest = {
+let manifest = {
   schema: 1, id: "conformance", version: "1.0.0", runtime: "bun", entry: "worker.js",
-  contract: { version: { major: 1, minor: 0 }, capabilities: [...CONTRACT.capabilities] },
+  contract: { version: { major: 1, minor: 0 }, capabilities: CONTRACT.capabilities.filter(capability => capability !== "module-rpc") },
   inbounds: [{ id: "native", path: "/conformance/native" }],
   providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"], models: [{ id: "echo" }] }],
   agents: [{ id: "editor", name: "Editor" }],
   sessions: [{ id: "text", name: "Text" }],
   tools: [{ name: "echo", inputSchema: { type: "object" } }],
 };
+// Go-host installation supplies its authoritative manifest next to the SDK.
+// Standalone process tests continue to exercise the unchanged SDK 1.0 path.
+try {
+  manifest = parseJSON(await readFile(new URL("../../magpie-plugin.json", import.meta.url), "utf8"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
 const handlers = {
   async "inbound.decode"(ctx, call) {
     ctx.signal.throwIfAborted();

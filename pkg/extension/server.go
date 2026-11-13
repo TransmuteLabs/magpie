@@ -27,6 +27,7 @@ type worker struct {
 	running       sync.WaitGroup
 	closedCredits recentFrames
 	closedHosts   recentFrames
+	lifetime      *componentLifecycle
 }
 
 type callState struct {
@@ -67,6 +68,7 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, module Module
 		ctx: serverCtx, cancel: cancel, manifest: cloneManifest(module.Manifest), handlers: handlers,
 		output: make(chan outputFrame, MaxConcurrent), calls: make(map[string]*callState), host: make(map[string]*hostWait),
 	}
+	server.lifetime = &componentLifecycle{ctx: serverCtx, manifest: cloneManifest(module.Manifest), start: module.Start}
 	closed := make(chan struct{})
 	go func() {
 		defer close(closed)
@@ -85,6 +87,7 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, module Module
 	}()
 	defer func() {
 		cancel(context.Canceled)
+		server.lifetime.close()
 		server.running.Wait()
 		if inbounds != nil {
 			inbounds.close()
@@ -276,11 +279,44 @@ func (server *worker) invoke(state *callState, stream *Stream) (result any, err 
 	if state.call.Scope.Plugin != "" && state.call.Scope.Plugin != server.manifest.ID {
 		return nil, &Error{Code: "invalid_params", Message: "call scope belongs to another extension"}
 	}
+	if server.manifest.Contract.Version.Minor >= 1 {
+		switch state.call.Method {
+		case MethodComponentConfigure:
+			return server.lifetime.configure(state.ctx, state.call.Params)
+		case MethodComponentReady:
+			if len(state.call.Params) != 0 && string(state.call.Params) != "null" {
+				if err := decodeParams(state.call.Params, &struct{}{}); err != nil {
+					return nil, err
+				}
+			}
+			return server.lifetime.ready()
+		case MethodComponentStop:
+			if len(state.call.Params) != 0 && string(state.call.Params) != "null" {
+				if err := decodeParams(state.call.Params, &struct{}{}); err != nil {
+					return nil, err
+				}
+			}
+			return server.lifetime.stop(state.ctx)
+		}
+	}
 	handler := server.handlers[state.call.Method]
 	if handler == nil {
 		return nil, &Error{Code: "method_not_found", Message: "extension method was not negotiated"}
 	}
-	return handler(state.ctx, state.call, stream)
+	ctx := state.ctx
+	if server.manifest.Contract.Version.Minor >= 1 && state.call.Method != MethodDescribe {
+		var err error
+		var stop func()
+		ctx, stop, err = server.lifetime.callContext(ctx, state.cancel)
+		if err != nil {
+			return nil, err
+		}
+		defer stop()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return handler(ctx, state.call, stream)
 }
 
 func (server *worker) send(ctx context.Context, frame Frame) error {

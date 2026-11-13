@@ -22,27 +22,33 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 0},
+		Version: APIVersion{Major: 1, Minor: 1},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC,
 		},
 	}
 }
 
 type Manifest struct {
-	Schema    int                  `json:"schema"`
-	ID        string               `json:"id"`
-	Version   string               `json:"version"`
-	Runtime   string               `json:"runtime,omitempty"`
-	Entry     string               `json:"entry,omitempty"`
-	Args      []string             `json:"args,omitempty"`
-	Contract  Contract             `json:"contract"`
-	Inbounds  []InboundDescriptor  `json:"inbounds,omitempty"`
-	Providers []ProviderDescriptor `json:"providers,omitempty"`
-	Agents    []AgentDescriptor    `json:"agents,omitempty"`
-	Sessions  []SessionDescriptor  `json:"sessions,omitempty"`
-	Tools     []ToolDescriptor     `json:"tools,omitempty"`
+	Schema        int                  `json:"schema"`
+	ID            string               `json:"id"`
+	Version       string               `json:"version"`
+	Runtime       string               `json:"runtime,omitempty"`
+	Entry         string               `json:"entry,omitempty"`
+	Args          []string             `json:"args,omitempty"`
+	Contract      Contract             `json:"contract"`
+	Inbounds      []InboundDescriptor  `json:"inbounds,omitempty"`
+	Providers     []ProviderDescriptor `json:"providers,omitempty"`
+	Agents        []AgentDescriptor    `json:"agents,omitempty"`
+	Sessions      []SessionDescriptor  `json:"sessions,omitempty"`
+	Tools         []ToolDescriptor     `json:"tools,omitempty"`
+	Actions       []ActionDescriptor   `json:"actions,omitempty"`
+	Services      []ServiceDescriptor  `json:"services,omitempty"`
+	Compatibility *Compatibility       `json:"compatibility,omitempty"`
+	Window        *WindowDescriptor    `json:"window,omitempty"`
+	Bindings      []BindingDescriptor  `json:"bindings,omitempty"`
+	Component     *ComponentIdentity   `json:"component,omitempty"`
 }
 
 type InboundDescriptor struct {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -46,6 +47,14 @@ type Installed struct {
 	Files     map[string]string `json:"files"`
 	Disabled  bool              `json:"disabled"`
 	Revision  string            `json:"revision"`
+	Source    *PackageSource    `json:"source,omitempty"`
+}
+
+type installOptions struct {
+	source      *PackageSource
+	expected    *Installed
+	force       bool
+	commitCheck func(context.Context) error
 }
 
 func NewCatalog(root string) *Catalog {
@@ -71,8 +80,20 @@ func (catalog *Catalog) List() ([]Installed, error) {
 }
 
 func (catalog *Catalog) Install(ctx context.Context, source string, check func(context.Context, Installed) error) (Installed, error) {
+	return catalog.install(ctx, source, check, installOptions{})
+}
+
+func (catalog *Catalog) install(ctx context.Context, source string, check func(context.Context, Installed) error,
+	options installOptions) (Installed, error) {
 	if err := ctx.Err(); err != nil {
 		return Installed{}, err
+	}
+	provenance, expected := options.source, options.expected
+	if provenance != nil {
+		if err := provenance.Validate(); err != nil {
+			return Installed{}, err
+		}
+		provenance = new(*provenance)
 	}
 	if check == nil {
 		return Installed{}, errors.New("extension installation requires a handshake check")
@@ -96,6 +117,12 @@ func (catalog *Catalog) Install(ctx context.Context, source string, check func(c
 	manifest, err := catalogManifest(input)
 	if err != nil {
 		return Installed{}, err
+	}
+	if err := sdk.CheckCompatibility(manifest); err != nil {
+		return Installed{}, fmt.Errorf("extension compatibility: %w", err)
+	}
+	if provenance != nil && strings.TrimPrefix(provenance.Tag, "v") != manifest.Version {
+		return Installed{}, errors.New("extension source version does not match its manifest")
 	}
 	root, err := catalog.open(true)
 	if err != nil {
@@ -129,6 +156,31 @@ func (catalog *Catalog) Install(ctx context.Context, source string, check func(c
 	unlock()
 	if err != nil {
 		return Installed{}, err
+	}
+	if expected != nil {
+		var current *Installed
+		for _, entry := range previous {
+			if entry.Manifest.ID == expected.Manifest.ID {
+				current = new(entry)
+				break
+			}
+		}
+		if current == nil || current.Revision != expected.Revision {
+			return Installed{}, ErrCatalogConflict
+		}
+		if manifest.ID != current.Manifest.ID {
+			return Installed{}, errors.New("extension update changed its module identity")
+		}
+		comparison := semver.Compare("v"+manifest.Version, "v"+current.Manifest.Version)
+		if comparison <= 0 && !options.force {
+			if comparison == 0 && (provenance == nil || current.Source == nil || provenance.SHA256 != current.Source.SHA256) {
+				return Installed{}, errors.New("extension release changed without a version increase; explicitly reinstall it to replace that version")
+			}
+			if err := catalog.verify(ctx, *current); err != nil {
+				return Installed{}, err
+			}
+			return *current, nil
+		}
 	}
 	parent, err := catalogPrivateDir(root, "packages")
 	if err != nil {
@@ -172,10 +224,14 @@ func (catalog *Catalog) Install(ctx context.Context, source string, check func(c
 	if !catalogSameManifest(manifest, frozen) {
 		return Installed{}, errors.New("extension manifest changed during installation")
 	}
+	if err := validateWindowPackage(ctx, output, frozen); err != nil {
+		return Installed{}, err
+	}
 	entry := Installed{
 		Manifest:  frozen,
 		Directory: path.Join("packages", manifest.ID, release),
 		Files:     files,
+		Source:    provenance,
 	}
 	for _, installed := range previous {
 		if installed.Manifest.ID == entry.Manifest.ID {
@@ -208,6 +264,11 @@ func (catalog *Catalog) Install(ctx context.Context, source string, check func(c
 	}
 	if before != after {
 		return Installed{}, ErrCatalogConflict
+	}
+	if options.commitCheck != nil {
+		if err := options.commitCheck(ctx); err != nil {
+			return Installed{}, err
+		}
 	}
 	found := false
 	for index := range entries {
@@ -311,6 +372,15 @@ func (catalog *Catalog) verify(ctx context.Context, entry Installed) error {
 	}
 	files := 0
 	var total int64
+	executables := make(map[string]bool, len(entry.Manifest.Services)+1)
+	if entry.Manifest.Runtime == "exec" {
+		executables[entry.Manifest.Entry] = true
+	}
+	for _, service := range entry.Manifest.Services {
+		if service.Runtime == "exec" {
+			executables[service.Entry] = true
+		}
+	}
 	err = fs.WalkDir(directory.FS(), ".", func(name string, item fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -332,13 +402,13 @@ func (catalog *Catalog) verify(ctx context.Context, entry Installed) error {
 		if expected != digest {
 			return fmt.Errorf("extension file %q failed its hash check", name)
 		}
-		if name == entry.Manifest.Entry && entry.Manifest.Runtime == "exec" && runtime.GOOS != "windows" {
+		if executables[name] && runtime.GOOS != "windows" {
 			info, err := directory.Lstat(name)
 			if err != nil {
 				return err
 			}
 			if info.Mode().Perm()&0o100 == 0 {
-				return errors.New("extension exec entry is not executable by its owner")
+				return fmt.Errorf("extension executable %q is not executable by its owner", name)
 			}
 		}
 		total += size
@@ -624,6 +694,14 @@ func catalogValidate(entry Installed) error {
 	if err := entry.Manifest.Validate(); err != nil {
 		return err
 	}
+	if entry.Source != nil {
+		if err := entry.Source.Validate(); err != nil {
+			return err
+		}
+		if strings.TrimPrefix(entry.Source.Tag, "v") != entry.Manifest.Version {
+			return errors.New("extension source version does not match its manifest")
+		}
+	}
 	parts := strings.Split(entry.Directory, "/")
 	if !catalogRelative(entry.Directory) || len(parts) != 3 || parts[0] != "packages" ||
 		parts[1] != entry.Manifest.ID || !strings.HasPrefix(parts[2], entry.Manifest.Version+"-") ||
@@ -643,6 +721,16 @@ func catalogValidate(entry Installed) error {
 	}
 	if _, exists := entry.Files[entry.Manifest.Entry]; !exists {
 		return errors.New("extension inventory has no entry")
+	}
+	for _, service := range entry.Manifest.Services {
+		if _, exists := entry.Files[service.Entry]; !exists {
+			return fmt.Errorf("extension inventory has no service entry %q", service.ID)
+		}
+	}
+	if entry.Manifest.Window != nil {
+		if _, exists := entry.Files[entry.Manifest.Window.Metadata]; !exists {
+			return errors.New("extension inventory has no declared window metadata")
+		}
 	}
 	if !catalogDigest(entry.Revision) || entry.Revision != catalogRevision(entry) {
 		return errors.New("extension revision does not match its frozen metadata")

@@ -14,8 +14,15 @@ import (
 func (manifest Manifest) Public() Manifest {
 	snapshot := cloneManifest(manifest)
 	snapshot.Runtime, snapshot.Entry, snapshot.Args = "", "", nil
+	snapshot.Services, snapshot.Window, snapshot.Bindings, snapshot.Compatibility = nil, nil, nil, nil
+	snapshot.Actions = slices.DeleteFunc(snapshot.Actions, func(action ActionDescriptor) bool {
+		return actionOwner(action) != componentID(manifest)
+	})
 	return snapshot
 }
+
+// Clone retains the complete installation authority in an independent copy.
+func (manifest Manifest) Clone() Manifest { return cloneManifest(manifest) }
 
 func cloneManifest(manifest Manifest) Manifest {
 	manifest.Args = slices.Clone(manifest.Args)
@@ -45,6 +52,32 @@ func cloneManifest(manifest Manifest) Manifest {
 	for index := range manifest.Tools {
 		manifest.Tools[index].InputSchema = slices.Clone(manifest.Tools[index].InputSchema)
 	}
+	manifest.Actions = slices.Clone(manifest.Actions)
+	for index := range manifest.Actions {
+		manifest.Actions[index].InputSchema = slices.Clone(manifest.Actions[index].InputSchema)
+	}
+	manifest.Services = slices.Clone(manifest.Services)
+	for index := range manifest.Services {
+		service := &manifest.Services[index]
+		service.Args = slices.Clone(service.Args)
+		service.Methods = slices.Clone(service.Methods)
+		service.DependsOn = slices.Clone(service.DependsOn)
+		service.Ready.HTTPEndpoints = slices.Clone(service.Ready.HTTPEndpoints)
+	}
+	manifest.Bindings = slices.Clone(manifest.Bindings)
+	if manifest.Compatibility != nil {
+		value := *manifest.Compatibility
+		value.Platforms = slices.Clone(value.Platforms)
+		manifest.Compatibility = &value
+	}
+	if manifest.Window != nil {
+		value := *manifest.Window
+		manifest.Window = &value
+	}
+	if manifest.Component != nil {
+		value := *manifest.Component
+		manifest.Component = &value
+	}
 	return manifest
 }
 
@@ -58,7 +91,7 @@ func (manifest Manifest) Validate() error {
 	if !validVersion(manifest.Version) {
 		return fmt.Errorf("invalid extension version %q", manifest.Version)
 	}
-	if manifest.Runtime != "exec" && manifest.Runtime != "bun" {
+	if manifest.Runtime != "exec" && manifest.Runtime != "bun" && manifest.Runtime != "native" {
 		return fmt.Errorf("unsupported extension runtime %q", manifest.Runtime)
 	}
 	if manifest.Entry == "" || strings.HasPrefix(manifest.Entry, "/") || path.Clean(manifest.Entry) != manifest.Entry ||
@@ -70,6 +103,9 @@ func (manifest Manifest) Validate() error {
 	}
 	if len(manifest.Args) > 128 {
 		return fmt.Errorf("too many extension arguments")
+	}
+	if manifest.Runtime == "native" && len(manifest.Args) != 0 {
+		return fmt.Errorf("native extensions do not take process arguments")
 	}
 	for _, argument := range manifest.Args {
 		if len(argument) > MaxChunkBytes || strings.ContainsRune(argument, 0) {
@@ -222,7 +258,7 @@ func (manifest Manifest) Validate() error {
 	if manifest.Contract.Has(SessionMigration) && len(manifest.Sessions) == 0 {
 		return fmt.Errorf("session migration requires a session descriptor")
 	}
-	return nil
+	return manifest.validateComposite()
 }
 
 func ValidID(value string) bool {
@@ -352,6 +388,8 @@ func RequiredMethods(manifest Manifest) []string {
 			}
 		case SessionMigration:
 			methods = append(methods, MethodSessionConvert)
+		case ModuleRPC:
+			methods = append(methods, MethodModuleCall)
 		}
 	}
 	slices.Sort(methods)

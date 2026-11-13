@@ -1,0 +1,14 @@
+{
+  "name": "magpie-sdk-hybrid-go",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline SDK 1.1 native controller, Go service and static TypeScript interface",
+  "magpie": {
+    "page": {
+      "title": "Hybrid SDK example",
+      "titles": {"zh": "混合 SDK 示例", "zh-TW": "混合 SDK 範例", "ja": "ハイブリッド SDK の例", "de": "Hybrides SDK-Beispiel"},
+      "file": "ui/index.html"
+    },
+    "permissions": []
+  }
+}

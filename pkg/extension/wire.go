@@ -53,6 +53,7 @@ type Call struct {
 	Scope  Scope
 	Params json.RawMessage
 	Auth   json.RawMessage
+	Action string
 }
 
 type Envelope = Frame
@@ -110,6 +111,8 @@ func MethodCapability(method string) (Capability, bool) {
 		return AgentWiring, true
 	case MethodSessionConvert:
 		return SessionMigration, true
+	case MethodModuleCall:
+		return ModuleRPC, true
 	default:
 		return "", false
 	}

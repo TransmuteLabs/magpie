@@ -2,11 +2,12 @@
 
 `@magpie/extension-sdk` has no package dependencies and runs on Node 22+
 and Bun with the same newline-delimited JSON protocol as `pkg/extension`.
-The package exports its JavaScript entry and TypeScript declarations from
-the root. Nothing is installed or published by the examples or tests.
-With the state/proxy services, agent/session metadata, decoded tools and
-model policy included, this authoring API is frozen; subsequent work is
-limited to bug fixes.
+The root exports the server authoring API and TypeScript declarations.
+`@magpie/extension-sdk/ui` is a separate browser-only author entry.
+Nothing is installed or published by the examples or tests.
+SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
+SDK 1.0 manifests retain their original nine-capability behavior without
+requiring component configuration.
 
 ```js
 import { serve, SDKError } from "@magpie/extension-sdk";
@@ -27,6 +28,85 @@ await serve({
   },
 });
 ```
+
+## SDK 1.1 modules and components
+
+`CONTRACT` advertises SDK 1.1 and all ten capabilities. Keep the manifest's
+explicit minor version at 0 for an existing SDK 1.0 worker. A 1.1 module
+receives SDK-owned `component.configure`, `component.ready` and
+`component.stop`; ordinary calls require successful configuration.
+`sdk.describe` stays available before configuration and after stop.
+
+Register declared action handlers in `module.actions`, not
+`handlers["module.call"]`. The SDK dispatches `module.call {action,input}`
+to that component's handler, exposes `call.action`, and replaces
+`call.params` with the input. Action owner, service methods, acyclic
+dependencies, compatibility, bindings and package paths are validated
+against the manifest.
+
+ModuleRPC is unary. A write action may emit and await `accepted` before its
+effect; every other event is rejected, including read-action acceptance.
+A forbidden event also fails the terminal result if author code catches the
+emit error. Existing non-ModuleRPC capability streams retain their protocol.
+`stream.hostCall("component.call", {binding,input})` carries the unchanged
+parent scope and does not forward `call.auth` in the callback.
+
+An optional `module.start(ctx, snapshot)` returns
+`{endpoints?: Record<string,string>, dispose?: () => void | Promise<void>}`.
+Its context survives a successful configure call and ends on component stop
+or transport shutdown. Configuration is immutable for that instance:
+`{component,contract,instance,config:{version,values},services}`. Version is
+a canonical uint64 decimal string. Endpoint URLs are loopback HTTP(S) with
+an explicit port; no endpoint is dialed by the SDK.
+
+Business handlers receive the frozen per-call `ctx.module`. Use
+`moduleContextFrom(ctx)` for an independent mutable clone of config,
+dependencies and endpoint maps. Stop aborts active handlers/ACK/host-call
+waits and joins the disposer and cooperative startup cleanup once.
+Private startup/disposal diagnostics are not serialized. Author code must
+cooperate with cancellation; shutdown waiting remains bounded by
+`shutdownTimeoutMs`.
+
+Startup may also return `state`, an opaque instance-local value. Business
+handlers receive the same reference at `ctx.module.state` and through
+`moduleContextFrom(ctx).state`; it is deliberately not JSON-cloned, frozen,
+or included in readiness/wire messages. Config/services remain independent
+snapshots. Use this for per-instance controller state rather than globals
+shared by multiple `serve` instances.
+
+`moduleHTTPHeaders(moduleContext)` returns a fresh plain object with
+`X-Magpie-Component-Instance`, `X-Magpie-Component` and
+`X-Magpie-Component-Config`, from the instance, component and config version.
+Stamp these on the component's HTTP responses. The helper reads no opaque
+state, config values or account auth and adds no HTTP server/client framework.
+The host proxy owns proof validation and removal before frontend delivery.
+
+`publicManifest` publishes only the current component's actions and clears
+runtime packaging, services, window, bindings and compatibility.
+`serviceManifest(root, id)` derives that service's runtime/entry, root
+identity/version, SDK 1.1 ModuleRPC contract, component identity and owned
+actions. `checkCompatibility` additionally checks declared native ABI and
+host platform; plain validation does not load native code.
+
+## Browser author entry
+
+The `ui` entry imports no Node/Bun module and delegates the installed
+`window.magpie` page bridge:
+
+```js
+import { ui } from "@magpie/extension-sdk/ui";
+
+await ui.ready;
+const snapshot = await ui.config.get();
+await ui.config.cas(snapshot.version, { mode: "selected" });
+const answer = await ui.backend.call("page.start", { prompt: "hello" });
+```
+
+`ui.service` is the existing bridge's absolute token-proxied service URL.
+The adapter preserves bridge errors. It does not add a per-call AbortSignal,
+streaming RPC or another transport: frame disable/update/unmount cancellation
+is owned by the existing page bridge. Config DTOs use `{version,values}`;
+CAS takes `(expectedVersion, values)`.
 
 Handlers receive `ctx: {signal: AbortSignal}`, an immutable call and a
 stream. `call.auth` is the host-selected account's JSON authentication
@@ -106,9 +186,17 @@ global logging functions. Authors remain responsible for their own code.
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
 handlers. Supported contract version is exactly 1.0. Handlers outside the
-advertised capabilities are rejected. Runtime is `exec` or `bun`; protocol
+advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
+
+Packaging metadata also accepts `runtime: "native"` for the Go C-shared
+libraries described by ADR 0004. A native package has the same clean
+relative `entry` and nine-capability contract, with `args` absent or empty:
+libraries have no process argv. The public handshake omits runtime,
+entry and args for every runtime. JS/Bun `serve` remains a stdio worker;
+native library loading and the C ABI belong to the Go host/SDK.
+This manifest parity does not load or test a native library from JavaScript.
 
 An inbound decoder may also return `DecodedRequest.protocol: "models"`
 or `"tool"`. A tool decode requires both `inbound-codec` and
@@ -129,6 +217,7 @@ decoded operation, never a provider protocol or an additional capability.
 | tool-provider | tool.call |
 | agent-wiring | agent.plan; agent.inspect for rich descriptors |
 | session-migration | session.convert |
+| module-rpc (SDK 1.1) | module.call (auto-dispatched from module.actions) |
 
 An agent descriptor with only `id` and `name` remains a manual action.
 Rich descriptors declare any nonempty `bin` (an executable basename),
@@ -174,7 +263,9 @@ tsc --noEmit --strict --target es2022 --module nodenext --lib es2023,dom sdk/js/
 ```
 
 The tests use in-memory `PassThrough` streams plus real Node/Bun children.
-Conformance covers all nine capabilities, scoped host calls, full uint64
+SDK 1.0 conformance covers the original nine capabilities; SDK 1.1 process
+tests cover configure/ready/stop, auto actions and component callbacks.
+Conformance also checks scoped host calls, full uint64
 generations, streamed acknowledgements, cancellation, public/private errors,
 and stdout purity. Bun is used only if already present (`BUN_BIN` may name
 an existing binary). No vendor endpoint, live config or package registry

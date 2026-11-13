@@ -2,13 +2,14 @@ export type UInt64 = number | bigint;
 export type JSONValue = null | boolean | number | bigint | string | JSONValue[] | { [key: string]: JSONValue };
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
-  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration";
+  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
-  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert";
-export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace";
+  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "module.call";
+export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
+export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call";
 export interface Contract {
-  version: { major: 1; minor: 0 };
+  version: { major: 1; minor: 0 | 1 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -50,20 +51,28 @@ export interface SessionDescriptor {
   to?: string;
   outputDir?: string;
 }
-export interface Manifest {
+interface ManifestFields {
   schema: 1;
   id: string;
   version: string;
-  runtime: "exec" | "bun";
   entry: string;
-  args?: string[];
   contract: Contract;
   inbounds?: { id: string; path: string }[];
   providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[] }[];
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
   tools?: { name: string; description?: string; inputSchema: { [key: string]: JSONValue } | boolean }[];
+  actions?: ActionDescriptor[];
+  services?: ServiceDescriptor[];
+  compatibility?: Compatibility;
+  window?: WindowDescriptor;
+  bindings?: BindingDescriptor[];
+  component?: ComponentIdentity;
 }
+export type Manifest = ManifestFields & (
+  { runtime: "exec" | "bun"; args?: string[] }
+  | { runtime: "native"; args?: [] }
+);
 export interface Scope {
   readonly plugin?: string;
   readonly provider?: string;
@@ -75,7 +84,8 @@ export interface Scope {
 }
 export interface Call {
   readonly id: string;
-  readonly method: Method | "sdk.describe";
+  readonly method: Method | ComponentMethod | "sdk.describe";
+  readonly action?: string;
   readonly params: JSONValue;
   readonly auth?: JSONValue;
   readonly scope: Scope;
@@ -83,6 +93,7 @@ export interface Call {
 }
 export interface Context {
   readonly signal: AbortSignal;
+  readonly module?: ModuleContext;
 }
 export interface Stream {
   emit(event: string, data?: unknown): Promise<void>;
@@ -91,7 +102,9 @@ export interface Stream {
 export type Handler = (ctx: Context, call: Call, stream: Stream) => unknown | Promise<unknown>;
 export interface Module {
   manifest: Manifest;
-  handlers: Partial<Record<Method, Handler>>;
+  handlers?: Partial<Record<Method, Handler>>;
+  actions?: Record<string, Handler>;
+  start?: StartFunc;
 }
 export interface RPCError {
   code: string;
@@ -134,6 +147,7 @@ export const MAX_CHUNK_BYTES: number;
 export const MAX_HOST_BYTES: number;
 export const MAX_NATIVE_BODY_BYTES: number;
 export const MAX_CONCURRENT: number;
+export const MAX_MODULE_SERVICES: 16;
 export class SDKError extends Error implements RPCError {
   constructor(code: string, message: string, outcome?: string);
   readonly code: string;
@@ -142,7 +156,12 @@ export class SDKError extends Error implements RPCError {
 export function encodeBytes(value: Uint8Array, maxBytes?: number): string;
 export function decodeBytes(value: string, maxBytes?: number): Uint8Array;
 export function validateManifest(value: unknown): Readonly<Manifest>;
-export function publicManifest(manifest: Manifest): Readonly<Omit<Manifest, "runtime" | "entry" | "args">>;
+export function publicManifest(manifest: Manifest): Readonly<Omit<Manifest, "runtime" | "entry" | "args" | "services" | "window" | "bindings" | "compatibility">>;
+export function serviceManifest(root: Manifest, id: string): Manifest;
+export function checkCompatibility(manifest: Manifest, platform?: string): Manifest;
+export function moduleContextFrom(ctx: Context): ModuleContext | undefined;
+/** Fresh HTTP response proof headers; excludes state, config values and auth. */
+export function moduleHTTPHeaders(context: ModuleContext): Record<string, string>;
 export function requiredMethods(manifest: Manifest): Method[];
 export function serve(module: Module, options?: ServeOptions): Promise<void>;
 
@@ -204,3 +223,38 @@ export interface NetworkProxyRequest { url: string }
 export interface NetworkProxyResult { url: string }
 export interface AccountReplaceRequest { credentials: JSONValue }
 export interface AccountReplaceResult { id: string; generation: UInt64 }
+
+export interface ActionDescriptor {
+  id: string; component?: string; inputSchema: { [key: string]: JSONValue } | boolean; effect: "read" | "write";
+}
+export interface ServiceContract { id: string; version: number }
+export interface ServiceReady { timeoutMs?: number; httpEndpoints?: string[] }
+export interface ServiceDescriptor {
+  id: string; runtime: "exec" | "bun"; entry: string; args?: string[];
+  contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
+  dependsOn?: string[]; ready?: ServiceReady;
+}
+export interface Compatibility { hostAPI: "^1" | "^1.1"; nativeABI?: number; platforms?: string[] }
+export interface WindowDescriptor { metadata: string }
+export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string }
+export interface ComponentIdentity { id: string; contract: ServiceContract }
+export interface ModuleCallRequest { action: string; input: JSONValue }
+export type ModuleCallResult = JSONValue;
+export interface ComponentCallRequest { binding: string; input: JSONValue }
+export interface ConfigSnapshot { version: string; values: JSONValue }
+export interface ComponentConfigureRequest {
+  component: string; contract: ServiceContract; instance: string; config: ConfigSnapshot;
+  services?: Record<string, ComponentReadyResult>;
+}
+export interface ComponentReadyResult {
+  component: string; contract: ServiceContract; instance: string; configVersion: string;
+  endpoints: Record<string, string>;
+}
+export interface ModuleContext {
+  config: ConfigSnapshot; component: string; instance: string; services: Record<string, ComponentReadyResult>;
+  /** Instance-local opaque reference. Never serialized or cloned by the SDK. */
+  state?: unknown;
+}
+export interface ModuleReady { endpoints?: Record<string, string>; state?: unknown }
+export interface ModuleStartResult extends ModuleReady { dispose?: () => void | Promise<void> }
+export type StartFunc = (ctx: Context, module: ModuleContext) => ModuleStartResult | Promise<ModuleStartResult>;

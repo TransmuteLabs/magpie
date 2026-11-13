@@ -1,12 +1,16 @@
 {
   "name": "@magpie/extension-sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Dependency-free executable extension authoring SDK for Magpie",
   "type": "module",
   "exports": {
     ".": {
       "types": "./index.d.ts",
       "default": "./index.js"
+    },
+    "./ui": {
+      "types": "./ui.d.ts",
+      "default": "./ui.js"
     }
   },
   "types": "./index.d.ts",
@@ -16,6 +20,10 @@
     "manifest.js",
     "bytes.js",
     "worker.js",
+    "composite.js",
+    "lifecycle.js",
+    "ui.js",
+    "ui.d.ts",
     "README.md"
   ],
   "engines": {

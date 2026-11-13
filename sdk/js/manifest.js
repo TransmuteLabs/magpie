@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { posix } from "node:path";
 import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
+import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -12,10 +13,11 @@ const capabilities = {
   "operation-control": ["operation.status", "operation.cancel"],
   "tool-provider": ["tool.call"],
   "session-migration": ["session.convert"],
+  "module-rpc": ["module.call"],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 0 }),
+  version: Object.freeze({ major: 1, minor: 1 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -124,15 +126,16 @@ export function validateManifest(value) {
   let manifest;
   try { manifest = jsonSnapshot(value); } catch { fail("Invalid extension manifest"); }
   if (!object(manifest) || manifest.schema !== 1 || !validID(manifest.id) || !validVersion(manifest.version)) fail("Invalid extension identity or schema");
-  if (!["exec", "bun"].includes(manifest.runtime)) fail("Unsupported extension runtime");
+  if (!["exec", "bun", "native"].includes(manifest.runtime)) fail("Unsupported extension runtime");
   if (typeof manifest.entry !== "string" || !manifest.entry || manifest.entry.startsWith("/")
     || manifest.entry === "." || manifest.entry === ".." || manifest.entry.startsWith("../")
     || posix.normalize(manifest.entry).replace(/\/+$/, "") !== manifest.entry || /[\\:]/.test(manifest.entry)
     || control.test(manifest.entry) || Buffer.byteLength(manifest.entry) > 1024) fail("Invalid extension entry");
   if (manifest.args !== undefined && (!Array.isArray(manifest.args) || manifest.args.length > 128
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
+  if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || contract.version.minor !== 0
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -195,6 +198,7 @@ export function validateManifest(value) {
     || !manifest.providers?.length && ["outbound-executor", "account-auth", "usage-reporter"].some(has)
     || has("agent-wiring") && !manifest.agents?.length
     || has("session-migration") && !manifest.sessions?.length) fail("Missing capability descriptors");
+  validateComposite(manifest);
   return freezeJSON(manifest);
 }
 
@@ -203,15 +207,53 @@ export function publicManifest(manifest) {
   delete result.runtime;
   delete result.entry;
   delete result.args;
+  for (const key of ["services", "window", "bindings", "compatibility"]) delete result[key];
+  if (result.actions != null) result.actions = result.actions.filter(action => actionOwner(action) === componentID(manifest));
   for (const provider of result.providers || []) for (const model of provider.models || []) modelPolicy(model);
   return freezeJSON(result);
 }
 
 export function validateModule(module) {
-  if (!object(module) || !object(module.handlers)) fail("Invalid extension module");
+  if (!object(module) || module.handlers !== undefined && !object(module.handlers)
+    || module.actions !== undefined && !object(module.actions) || module.start !== undefined && typeof module.start !== "function") fail("Invalid extension module");
   const manifest = validateManifest(module.manifest), required = requiredMethods(manifest);
-  const handlers = new Map(Object.entries(module.handlers));
+  if (module.start && manifest.contract.version.minor < 1) fail("Module startup requires SDK API 1.1");
+  const handlers = new Map(Object.entries(module.handlers ?? {}));
+  if (handlers.has("module.call")) fail("module.call is owned by the SDK; register module.actions");
+  const actions = new Map(Object.entries(module.actions ?? {}));
+  const declared = new Map((manifest.actions ?? []).filter(action => actionOwner(action) === componentID(manifest)).map(action => [action.id, action]));
+  if ([...declared.keys()].some(id => typeof actions.get(id) !== "function")
+    || [...actions].some(([id, handler]) => !declared.has(id) || typeof handler !== "function")) fail("Missing or undeclared module action handler");
+  if (manifest.contract.capabilities.includes("module-rpc")) handlers.set("module.call", (ctx, call, stream) => {
+    const params = call.params;
+    if (!object(params) || Object.keys(params).some(key => !["action", "input"].includes(key)) || !Object.hasOwn(params, "input")
+      || params.action != null && typeof params.action !== "string") {
+      throw new SDKError("invalid_params", "module.call requires a declared action and JSON input");
+    }
+    if (!declared.has(params.action)) throw new SDKError("method_not_found", "Module action is not owned by this component");
+    return actions.get(params.action)(ctx, freezeJSON({ ...call, action: params.action, params: params.input }), stream);
+  });
   if (required.some(method => typeof handlers.get(method) !== "function")
     || [...handlers].some(([method, handler]) => !required.includes(method) || typeof handler !== "function")) fail("Missing or undeclared extension handler");
-  return { manifest, handlers };
+  return { manifest, handlers, start: module.start };
+}
+
+export function serviceManifest(root, id) {
+  root = validateManifest(root);
+  if (root.component != null) fail("A service manifest requires the root module");
+  const service = root.services?.find(service => service.id === id);
+  if (!service) fail("Unknown module service");
+  return validateManifest({
+    schema: root.schema, id: root.id, version: root.version,
+    runtime: service.runtime, entry: service.entry, ...(service.args ? { args: service.args } : {}),
+    contract: { version: { major: 1, minor: 1 }, capabilities: ["module-rpc"] },
+    component: { id, contract: service.contract },
+    actions: (root.actions ?? []).filter(action => actionOwner(action) === id),
+  });
+}
+
+export function checkCompatibility(value, platform = `${process.platform === "win32" ? "windows" : process.platform}/${({ x64: "amd64", ia32: "386" })[process.arch] ?? process.arch}`) {
+  const manifest = validateManifest(value);
+  checkHostCompatibility(manifest, platform);
+  return manifest;
 }

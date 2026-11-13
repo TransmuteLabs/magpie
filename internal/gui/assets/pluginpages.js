@@ -22,6 +22,7 @@
   const pages = new Map(); // key → { entry, frame, hello, timer, shown, idle }
   const panels = new Map(); // frame → { entry, frame, context, hello, timer, body }
   let panelList = []; // /api/plugin-panels: every panel of a plugin on
+  let loadID = 0, panelID = 0;
   let ctx = null;
   // a built-in page → the plugin's page in its place (magpie.page.replaces)
   let replaced = new Map();
@@ -66,6 +67,19 @@
     if (p.hello) post(p.frame?.contentWindow, { event: "visibility", data: { visible } });
   }
 
+  function dispose(p) {
+    post(p.frame?.contentWindow, { event: "dispose" });
+    p.abort?.abort();
+    clearTimeout(p.timer);
+    clearTimeout(p.idle);
+    p.said?.();
+    p.said = null;
+    p.frame?.remove();
+    p.frame = null;
+    p.hello = false;
+    p.instance = null;
+  }
+
   // the page's frame, made the first time the page is opened (and again
   // after Try again, or once it was let go): a plugin's page costs
   // nothing until it is looked at
@@ -85,6 +99,7 @@
     f.title = titled(p.entry);
     f.src = framed(p.entry.url);
     p.frame = f;
+    p.abort = new AbortController();
     p.hello = false;
     p.shown = true;
     p.ready = new Promise((resolve, reject) => {
@@ -107,48 +122,11 @@
     if (p.entry.keepAlive) return;
     p.idle = setTimeout(() => {
       if (view === key || !p.frame) return;
-      clearTimeout(p.timer);
-      p.frame.remove();
-      p.frame = null;
-      p.hello = false;
+      dispose(p);
     }, IDLE_MS);
   }
 
-  async function answer(p, m) {
-    const e = p.entry;
-    switch (m.method) {
-      case "hello":
-        p.hello = true;
-        clearTimeout(p.timer);
-        p.said?.();
-        // a panel is told where it is: the provider whose editor it is in;
-        // a page served to a browser, where its local service is through
-        // this server (pageservice.go), relative to the page
-        return { ...theme(), context: p.context || {}, service: (!p.context && e.service) || "", visible: p.shown ?? true };
-      case "theme":
-        return theme();
-      case "options.get":
-        return api("plugin-pages/options", { spec: e.spec });
-      case "options.set": {
-        const o = m.params?.options;
-        if (!o || typeof o !== "object" || Array.isArray(o)) throw new Error(t("A page's options are an object"));
-        return api("plugin-pages/options", { spec: e.spec, options: o });
-      }
-      case "read": {
-        const name = String(m.params?.name || "");
-        // what its package didn't declare is refused here, and again by
-        // the server
-        if (!e.reads.includes(name)) throw new Error(t("{name} doesn't ask to read {what}", { name: titled(e), what: name }));
-        return api("plugin-pages/read", { spec: e.spec, read: name, params: m.params?.params || {} });
-      }
-      case "asset":
-        return import("./pageshare.js").then(() => pageAsset(e.url, m.params?.url));
-      case "image.copy":
-      case "image.save":
-        return import("./pageshare.js").then(() => pageShare(e.spec, m.method === "image.save", m.params));
-    }
-    throw new Error(t("No such call: {what}", { what: String(m.method) }));
-  }
+  const bridge = import("./extensionwindows.js");
 
   addEventListener("message", async (ev) => {
     // only a page's own frame is listened to: another window's message,
@@ -157,7 +135,7 @@
     for (const [k, x] of pages) if (x.frame && ev.source === x.frame.contentWindow) { key = k; p = x; break; }
     if (!p) {
       for (const [f, x] of panels) {
-        if (!f.isConnected) { panels.delete(f); clearTimeout(x.timer); continue; }
+        if (!f.isConnected) { panels.delete(f); dispose(x); continue; }
         if (ev.source === f.contentWindow) { p = x; break; }
       }
     }
@@ -166,7 +144,7 @@
     if (!m || typeof m !== "object" || m.magpie !== 1 || typeof m.method !== "string") return;
     if (m.method === "error") {
       const why = String(m.params?.message || t("The page hit an error"));
-      if (p.context) panelBroke(p, why); else broke(key, why);
+      if (p.context) panelBroke(p, why); else { dispose(p); broke(key, why); }
       return;
     }
     // a panel is as tall as what it draws; a page fills its view
@@ -175,11 +153,15 @@
       if (p.context && Number.isFinite(h)) p.frame.style.height = Math.min(Math.max(Math.ceil(h), 0), PANEL_MAX) + "px";
       return;
     }
+    if (!Number.isSafeInteger(m.id) || m.id < 1) return;
     const src = ev.source;
     try {
-      post(src, { id: m.id, result: await answer(p, m) });
+      const handler = await bridge;
+      if (p.frame?.contentWindow !== src) return;
+      const result = await handler.answerPluginPage(p, m, theme, titled);
+      if (p.frame?.contentWindow === src) post(src, { id: m.id, result });
     } catch (err) {
-      post(src, { id: m.id, error: String(err?.message || err) });
+      if (p.frame?.contentWindow === src) post(src, { id: m.id, error: String(err?.message || err) });
     }
   });
 
@@ -239,11 +221,13 @@
   }
 
   async function load() {
-    loadPanels();
+    const id = ++loadID;
+    const panelReady = loadPanels();
     let list;
-    try { list = await api("plugin-pages"); } catch { return; }
+    try { list = await api("plugin-pages"); } catch { return false; }
     // an answer that isn't a list is not known: the tabs drawn stay
-    if (!Array.isArray(list)) return;
+    if (!Array.isArray(list)) return false;
+    if (id !== loadID) return true;
     const nav = $("#nav");
     const keys = new Set(list.map((e) => e.key));
     // a page whose plugin went off, or away: its tab goes, and the window
@@ -255,8 +239,7 @@
     replaced = replacing;
     for (const [k, p] of pages) {
       if (keys.has(k)) continue;
-      p.frame?.remove();
-      p.frame = null;
+      dispose(p);
       p.gone = true;
       if (view === k) show("plugins");
     }
@@ -276,15 +259,15 @@
       if (!p) {
         p = { entry: e };
         pages.set(e.key, p);
-        ctx.slots.add("page", { key: e.key, title: titled(e), html: "", mount(main) { main.classList.add("plugin-page"); p.frame = null; }, open: () => open(e.key), leave: () => leave(e.key) });
+        ctx.slots.add("page", { key: e.key, title: titled(e), html: "", mount(main) { main.classList.add("plugin-page"); dispose(p); }, open: () => open(e.key), leave: () => leave(e.key) });
       } else if (p.entry.url !== e.url || p.gone) {
-        p.frame?.remove();
-        p.frame = null;
+        dispose(p);
       }
       p.gone = false;
       p.entry = e;
       const part = magpie.page(e.key);
       if (part) part.title = titled(e);
+      if (view === e.key && !p.frame) magpie.call(e.key, "open");
       let b = nav.querySelector(`button[data-plugin-page][data-view="${e.key}"]`);
       if (!b) b = tab(e);
       else b.querySelector("span").textContent = titled(e);
@@ -311,6 +294,7 @@
       if (!want) { try { want = localStorage.getItem("magpie.lastView") || ""; } catch { /* none kept */ } }
       if (pages.has(want)) show(want);
     }
+    return await panelReady !== false;
   }
   let opened = false;
 
@@ -348,6 +332,7 @@
     p.broken = true;
     clearTimeout(p.timer);
     panels.delete(p.frame);
+    dispose(p);
     const card = el("div", "plugin-panel-broke");
     card.setAttribute("role", "alert");
     card.append(el("b", "", t("{name} stopped working", { name: titled(p.entry) })), el("span", "note", why));
@@ -376,7 +361,7 @@
     f.setAttribute("allow", "");
     f.title = titled(e);
     f.src = framed(e.url);
-    const p = { entry: e, frame: f, context, body, hello: false, broken: false };
+    const p = { entry: e, frame: f, context, body, hello: false, broken: false, abort: new AbortController() };
     p.timer = setTimeout(() => { if (!p.hello) panelBroke(p, t("{name}'s page didn't answer", { name: titled(e) })); }, HELLO_MS);
     panels.set(f, p);
     body.replaceChildren(f);
@@ -391,6 +376,7 @@
     if (box.dataset.sig === sig && box.childElementCount === list.length) return;
     box.dataset.sig = sig;
     const context = box.pluginContext || {};
+    for (const [f, p] of panels) if (box.contains(f)) { panels.delete(f); dispose(p); }
     const parts = list.map((e) => {
       const sec = el("section", "plugin-panel");
       sec.dataset.panel = e.key;
@@ -425,15 +411,22 @@
   magpie.fillSlots = (root) => { for (const box of root.querySelectorAll(".plugin-slot[data-slot]")) fill(box); };
 
   async function loadPanels() {
+    const id = ++panelID;
     let list;
-    try { list = await api("plugin-panels"); } catch { return; }
+    try { list = await api("plugin-panels"); } catch { return false; }
     // an answer that isn't a list is not known: the panels drawn stay
-    if (!Array.isArray(list)) return;
+    if (!Array.isArray(list)) return false;
+    if (id !== panelID) return;
     panelList = list;
     for (const box of document.querySelectorAll(".plugin-slot[data-slot]")) fill(box);
+    return true;
   }
 
   window.loadPluginPages = load;
+  bridge.then(({ watchExtensionWindows }) => ctx.onDispose(watchExtensionWindows(load)));
+  new MutationObserver(() => {
+    for (const [f, p] of panels) if (!f.isConnected) { panels.delete(f); dispose(p); }
+  }).observe(document.body, { childList: true, subtree: true });
   load();
   // a new language: the tabs and the panels' heads are titled in it
   let lang = document.documentElement.lang;

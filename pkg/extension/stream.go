@@ -7,14 +7,22 @@ import (
 )
 
 type Stream struct {
-	server   *worker
-	state    *callState
-	emitGate chan struct{}
-	hostGate chan struct{}
-	seq      uint64
+	server       *worker
+	state        *callState
+	emitGate     chan struct{}
+	hostGate     chan struct{}
+	seq          uint64
+	actionEffect string
 }
 
 func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
+	if stream.state.call.Method == MethodModuleCall && (stream.actionEffect != "write" || event != "accepted") {
+		err := &Error{Code: "invalid_params", Message: "module.call is unary and permits only a write acceptance receipt"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
 	if ctx == nil || event == "" || len(event) > 128 {
 		return &Error{Code: "invalid_params", Message: "invalid extension event"}
 	}
@@ -86,7 +94,7 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
-	if ctx == nil || method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace {
+	if ctx == nil || method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
 	}
 	ctx, cancel := stream.context(ctx)

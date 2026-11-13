@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 )
 
 const sdkPluginUsage = `usage: magpie plugin sdk list [--json]
-       magpie plugin sdk add|install <directory>
+       magpie plugin sdk add|install <directory | github:owner/repo[@tag]>
+       magpie plugin sdk update [<module>]
        magpie plugin sdk inspect <module>
+       magpie plugin sdk config <module>
+       magpie plugin sdk config <module> <json-object> --expected <version>
        magpie plugin sdk on|off|rm|reload <module>
        magpie plugin sdk call|invoke <module> <method> <json> [--scope <json>]
        magpie plugin sdk accounts <module> <provider> [--json]
@@ -33,15 +37,22 @@ call/invoke emits JSON event records followed by a result record.
 Account scopes resolve the current saved generation; an explicitly stale generation is refused.
 agent takes an AgentPlanRequest; session takes a SessionRequest with base64 document bodies.
 agent/session preview the bounded host plan. Only --apply writes files, with an explicit backup directory.
+GitHub sources use release ZIPs for this platform and require checksums.txt; @tag pins a release.
+update follows saved unpinned sources; pinned and local packages stay unchanged.
+config reads SDK 1.1 module configuration without starting a worker.
+config writes replace the whole object and require the CAS version from a previous read.
 Removing a module retains its installed generations and private state.`
 
 type sdkCLIHost interface {
 	extensionhost.ActionRuntime
 	List() ([]extensionhost.Installed, error)
 	Install(context.Context, string) (extensionhost.Installed, error)
+	Update(context.Context, string) (extensionhost.Installed, error)
 	SetEnabled(context.Context, string, bool) error
 	Remove(context.Context, string) error
 	Restart(context.Context, string) error
+	ModuleConfig(context.Context, string) (sdk.ConfigSnapshot, error)
+	CompareAndSwapModuleConfig(context.Context, string, string, json.RawMessage) (sdk.ConfigSnapshot, error)
 	Call(context.Context, string, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error)
 	Close(context.Context) error
 }
@@ -54,13 +65,14 @@ type sdkCLIAuth struct {
 }
 
 type sdkCLIOptions struct {
-	args   []string
-	json   bool
-	scope  sdk.Scope
-	root   string
-	paths  []string
-	backup string
-	apply  bool
+	args     []string
+	json     bool
+	scope    sdk.Scope
+	root     string
+	paths    []string
+	backup   string
+	apply    bool
+	expected string
 }
 
 func sdkPluginCmd(ctx context.Context, args []string) error {
@@ -112,7 +124,7 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 			return sdkCLIJSON(out, entries)
 		}
 		if len(entries) == 0 {
-			_, err := fmt.Fprintln(out, "No SDK modules installed. Add one: magpie plugin sdk add <directory>")
+			_, err := fmt.Fprintln(out, "No SDK modules installed. Add one: magpie plugin sdk add <directory | github:owner/repo[@tag]>")
 			return err
 		}
 		for _, entry := range entries {
@@ -121,13 +133,17 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 			}
 		}
 		return nil
+	case "update":
+		return sdkCLIUpdate(ctx, rest, host, out)
+	case "config":
+		return sdkCLIConfig(ctx, rest, host, out)
 	case "add", "install", "inspect", "on", "off", "rm", "remove", "reload":
 		options, err := sdkCLIFlags(rest)
 		if err != nil {
 			return err
 		}
 		if len(options.args) != 1 {
-			return sdkCLIUsage(command + " requires exactly one directory or module")
+			return sdkCLIUsage(command + " requires exactly one package source or module")
 		}
 		id := options.args[0]
 		switch command {
@@ -172,11 +188,114 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 	}
 }
 
+func sdkCLIConfig(ctx context.Context, args []string, host sdkCLIHost, out io.Writer) error {
+	options, err := sdkCLIFlags(args, "--expected")
+	if err != nil {
+		return err
+	}
+	if len(options.args) < 1 || len(options.args) > 2 {
+		return sdkCLIUsage("config requires a module and optional JSON object with --expected")
+	}
+	id := options.args[0]
+	if len(options.args) == 1 {
+		if options.expected != "" {
+			return sdkCLIUsage("config --expected requires a JSON object")
+		}
+		snapshot, err := host.ModuleConfig(ctx, id)
+		if err != nil {
+			return err
+		}
+		return sdkCLIJSON(out, snapshot)
+	}
+	if options.expected == "" {
+		return sdkCLIUsage("config writes require an explicit --expected version")
+	}
+	version, err := strconv.ParseUint(options.expected, 10, 64)
+	if err != nil || strconv.FormatUint(version, 10) != options.expected {
+		return errors.New("SDK configuration requires a canonical CAS version")
+	}
+	var object map[string]json.RawMessage
+	if err := sdkCLIDecode(options.args[1], &object); err != nil {
+		return err
+	}
+	if object == nil {
+		return errors.New("SDK configuration must be a JSON object")
+	}
+	snapshot, err := host.CompareAndSwapModuleConfig(ctx, id, options.expected, json.RawMessage(options.args[1]))
+	if err != nil {
+		return err
+	}
+	return sdkCLIJSON(out, snapshot)
+}
+
 func sdkCLIEnabled(entry extensionhost.Installed) string {
 	if entry.Disabled {
 		return "off"
 	}
 	return "on"
+}
+
+func sdkCLIUpdate(ctx context.Context, args []string, host sdkCLIHost, out io.Writer) error {
+	options, err := sdkCLIFlags(args)
+	if err != nil {
+		return err
+	}
+	if len(options.args) > 1 {
+		return sdkCLIUsage("update takes at most one module")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entries, err := host.List()
+	if err != nil {
+		return err
+	}
+	if len(options.args) == 1 {
+		id := options.args[0]
+		index := slices.IndexFunc(entries, func(entry extensionhost.Installed) bool {
+			return entry.Manifest.ID == id
+		})
+		if index < 0 {
+			return fmt.Errorf("unknown SDK module %q", id)
+		}
+		entries = entries[index : index+1]
+	}
+	if len(entries) == 0 {
+		_, err := fmt.Fprintln(out, "No SDK modules installed.")
+		return err
+	}
+	var failures []error
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		id := entry.Manifest.ID
+		switch {
+		case entry.Source == nil:
+			_, err = fmt.Fprintf(out, "%s skipped: local package has no update source\n", id)
+		case strings.Contains(entry.Source.Reference, "@"):
+			_, pin, _ := strings.Cut(entry.Source.Reference, "@")
+			_, err = fmt.Fprintf(out, "%s unchanged: pinned to %s\n", id, pin)
+		default:
+			updated, updateErr := host.Update(ctx, id)
+			if updateErr != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", id, updateErr))
+				if ctx.Err() != nil {
+					return errors.Join(failures...)
+				}
+				continue
+			}
+			status := "updated to"
+			if updated.Revision == entry.Revision {
+				status = "unchanged at"
+			}
+			_, err = fmt.Fprintf(out, "%s %s %s (%s)\n", id, status, updated.Manifest.Version, sdkCLIEnabled(updated))
+		}
+		if err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func sdkCLIInstalled(host sdkCLIHost, id string) (extensionhost.Installed, error) {
@@ -466,6 +585,8 @@ func sdkCLIFlags(args []string, allowed ...string) (sdkCLIOptions, error) {
 				options.paths = append(options.paths, value)
 			case "--backup-dir":
 				options.backup = value
+			case "--expected":
+				options.expected = value
 			}
 		}
 	}

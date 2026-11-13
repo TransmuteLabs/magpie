@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +35,7 @@ type managedWorker struct {
 	retiring bool
 	idle     chan struct{}
 	starting chan struct{}
+	config   sdk.ConfigSnapshot
 }
 
 type Manager struct {
@@ -52,6 +54,9 @@ type Manager struct {
 	retireWG   sync.WaitGroup
 	// Bun is an explicitly selected runtime executable; empty uses discovery.
 	Bun string
+	// ReleaseClient optionally supplies the client used for GitHub packages.
+	// Set it before using the manager; nil uses Magpie's proxy-aware transport.
+	ReleaseClient *http.Client
 }
 
 func NewManager(root string) *Manager {
@@ -178,6 +183,32 @@ func (m *Manager) Manifest(id string) (sdk.Manifest, error) {
 }
 
 func (m *Manager) Install(ctx context.Context, source string) (Installed, error) {
+	return m.install(ctx, source, installOptions{})
+}
+
+// Update follows a saved release source. Pinned and local distributions stay
+// at the version the user explicitly installed; Install selects another pin.
+func (m *Manager) Update(ctx context.Context, id string) (Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return Installed{}, err
+	}
+	entries, err := m.List()
+	if err != nil {
+		return Installed{}, err
+	}
+	for _, entry := range entries {
+		if entry.Manifest.ID != id {
+			continue
+		}
+		if entry.Source == nil || strings.Contains(entry.Source.Reference, "@") {
+			return entry, nil
+		}
+		return m.install(ctx, entry.Source.Reference, installOptions{expected: &entry})
+	}
+	return Installed{}, fmt.Errorf("unknown extension %q", id)
+}
+
+func (m *Manager) install(ctx context.Context, source string, options installOptions) (Installed, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -191,7 +222,41 @@ func (m *Manager) Install(ctx context.Context, source string) (Installed, error)
 	stop := context.AfterFunc(m.startCtx, cancel)
 	defer func() { stop(); cancel() }()
 	ctx = installCtx
-	entry, err := m.catalog.Install(ctx, source, func(ctx context.Context, candidate Installed) error {
+	if strings.HasPrefix(source, "github:") {
+		client := m.ReleaseClient
+		if client == nil {
+			client = releaseHTTPClient()
+			defer client.CloseIdleConnections()
+		}
+		prepared, cleanup, err := PrepareRelease(netproxy.Downloads(ctx), client, source)
+		if err != nil {
+			return Installed{}, err
+		}
+		defer cleanup()
+		source, options.source = prepared.Directory, &prepared.Source
+	}
+	var checkedConfig *sdk.ConfigSnapshot
+	var checkedModuleID string
+	priorCheck := options.commitCheck
+	options.commitCheck = func(ctx context.Context) error {
+		if priorCheck != nil {
+			if err := priorCheck(ctx); err != nil {
+				return err
+			}
+		}
+		if checkedConfig == nil {
+			return nil
+		}
+		config, err := m.readModuleConfig(checkedModuleID)
+		if err != nil {
+			return err
+		}
+		if config.Version != checkedConfig.Version {
+			return ErrCatalogConflict
+		}
+		return nil
+	}
+	entry, err := m.catalog.install(ctx, source, func(ctx context.Context, candidate Installed) error {
 		entries, err := m.List()
 		if err != nil {
 			return err
@@ -201,12 +266,30 @@ func (m *Manager) Install(ctx context.Context, source string) (Installed, error)
 		}
 		handshake, done := context.WithTimeout(ctx, 10*time.Second)
 		defer done()
-		worker, err := startWorker(handshake, m.root, candidate, m.Bun, m.hostCall)
-		if err == nil {
-			worker.close()
+		config, err := m.runtimeModuleConfig(candidate.Manifest)
+		if err != nil {
+			return err
 		}
-		return err
-	})
+		if candidate.Manifest.Contract.Version.Minor >= 1 {
+			checkedConfig, checkedModuleID = &config, candidate.Manifest.ID
+		}
+		worker, err := startWorker(handshake, m.root, candidate, m.Bun, m.hostCall)
+		if err != nil {
+			return err
+		}
+		group := newComponentGroup(m, candidate, config)
+		if err := group.prepare(handshake, worker); err != nil {
+			_ = group.Close(context.Background())
+			return err
+		}
+		for _, service := range candidate.Manifest.Services {
+			if _, err := group.ensureService(handshake, service.ID); err != nil {
+				_ = group.Close(context.Background())
+				return err
+			}
+		}
+		return group.Close(context.Background())
+	}, options)
 	if err == nil {
 		err = m.Reload(ctx)
 		notifyChanged()
@@ -292,10 +375,12 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 	}
 	for _, entry := range entries {
 		if entry.Manifest.ID == id {
-			if err := m.catalog.Verify(entry); err != nil {
+			if err := m.catalog.verify(ctx, entry); err != nil {
 				return err
 			}
-			_, err = m.Install(ctx, filepath.Join(m.root, entry.Directory))
+			_, err = m.install(ctx, filepath.Join(m.root, entry.Directory), installOptions{
+				source: entry.Source, expected: &entry, force: true,
+			})
 			return err
 		}
 	}
@@ -313,9 +398,15 @@ func (m *Manager) Reload(ctx context.Context) error {
 		return err
 	}
 	current := make(map[string]Installed, len(entries))
+	configs := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		if !entry.Disabled {
 			current[entry.Manifest.ID] = entry
+			config, err := m.runtimeModuleConfig(entry.Manifest)
+			if err != nil {
+				return err
+			}
+			configs[entry.Manifest.ID] = config.Version
 		}
 	}
 	m.mu.Lock()
@@ -326,7 +417,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 	var retiring []*managedWorker
 	for id, worker := range m.workers {
 		entry, found := current[id]
-		if !found || entry.Revision != worker.entry.Revision {
+		if !found || entry.Revision != worker.entry.Revision || configs[id] != worker.config.Version {
 			delete(m.workers, id)
 			retiring = append(retiring, worker)
 		}
@@ -348,7 +439,7 @@ func (m *Manager) retire(worker *managedWorker) {
 		client := worker.client
 		worker.mu.Unlock()
 		if client != nil {
-			client.close()
+			_ = closeModuleClient(client)
 		}
 		m.retireWG.Done()
 		return
@@ -368,12 +459,17 @@ func (m *Manager) retire(worker *managedWorker) {
 		client := worker.client
 		worker.mu.Unlock()
 		if client != nil {
-			client.close()
+			_ = closeModuleClient(client)
 		}
 	}()
 }
 
-func (m *Manager) acquire(ctx context.Context, id string) (*managedWorker, *workerClient, error) {
+type expectedGeneration struct {
+	packageRevision string
+	configVersion   string
+}
+
+func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGeneration) (*managedWorker, *workerClient, error) {
 	if err := m.Reload(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -391,15 +487,34 @@ func (m *Manager) acquire(ctx context.Context, id string) (*managedWorker, *work
 	if selected == nil {
 		return nil, nil, errors.New("extension is not enabled")
 	}
+	config, err := m.runtimeModuleConfig(selected.Manifest)
+	if err != nil {
+		return nil, nil, err
+	}
+	if expected != nil && (expected.packageRevision != "" && expected.packageRevision != selected.Revision ||
+		expected.configVersion != "" && expected.configVersion != config.Version) {
+		return nil, nil, errors.New("module generation changed before acquisition")
+	}
+	if err := sdk.CheckCompatibility(selected.Manifest); err != nil {
+		return nil, nil, err
+	}
+	return m.acquireSelected(ctx, id, selected, config)
+}
+
+func (m *Manager) acquireSelected(ctx context.Context, id string, selected *Installed, config sdk.ConfigSnapshot) (*managedWorker, *workerClient, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return nil, nil, errors.New("extension manager is closed")
 	}
 	worker := m.workers[id]
+	if worker != nil && (worker.entry.Revision != selected.Revision || worker.config.Version != config.Version) {
+		m.mu.Unlock()
+		return nil, nil, errors.New("module generation changed before cached worker admission")
+	}
 	if worker == nil {
 		m.startLifecycleLocked()
-		worker = &managedWorker{entry: *selected}
+		worker = &managedWorker{entry: *selected, config: cloneModuleConfig(config)}
 		m.workers[id] = worker
 	}
 	m.mu.Unlock()
@@ -441,14 +556,23 @@ func (m *Manager) acquire(ctx context.Context, id string) (*managedWorker, *work
 		worker.client = nil
 		worker.mu.Unlock()
 		if old != nil {
-			old.close()
+			_ = closeModuleClient(old)
 		}
 		handshake, cancel := context.WithTimeout(ctx, 10*time.Second)
 		stop := context.AfterFunc(m.startCtx, cancel)
-		err := m.catalog.Verify(worker.entry)
+		err := m.catalog.verify(handshake, worker.entry)
 		var client *workerClient
 		if err == nil {
 			client, err = startWorker(handshake, m.root, worker.entry, m.Bun, m.hostCall)
+		}
+		if err == nil {
+			group := newComponentGroup(m, worker.entry, worker.config)
+			err = group.prepare(handshake, client)
+			if err == nil {
+				client.group = group
+			} else {
+				_ = group.Close(context.Background())
+			}
 		}
 		cancel()
 		stop()
@@ -461,7 +585,7 @@ func (m *Manager) acquire(ctx context.Context, id string) (*managedWorker, *work
 		close(started)
 		worker.mu.Unlock()
 		if retiring && client != nil {
-			client.close()
+			_ = closeModuleClient(client)
 			err = errors.New("extension generation was retired during startup")
 		}
 		m.startWG.Done()
@@ -491,15 +615,24 @@ type Lease struct {
 	cancel  context.CancelFunc
 	closed  atomic.Bool
 	native  bool
+	group   *componentGroup
 }
 
 func (m *Manager) Acquire(ctx context.Context, id string) (*Lease, error) {
-	worker, client, err := m.acquire(ctx, id)
+	return m.acquireLease(ctx, id, nil)
+}
+
+func (m *Manager) AcquireRevision(ctx context.Context, id, packageRevision, configVersion string) (*Lease, error) {
+	return m.acquireLease(ctx, id, &expectedGeneration{packageRevision: packageRevision, configVersion: configVersion})
+}
+
+func (m *Manager) acquireLease(ctx context.Context, id string, expected *expectedGeneration) (*Lease, error) {
+	worker, client, err := m.acquire(ctx, id, expected)
 	if err != nil {
 		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 	}
 	lifetime, cancel := context.WithCancel(ctx)
-	return &Lease{manager: m, worker: worker, client: client, ctx: lifetime, cancel: cancel}, nil
+	return &Lease{manager: m, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: cancel}, nil
 }
 
 // AcquireNative reserves a logical codec response as well as its process
@@ -525,6 +658,7 @@ func (m *Manager) AcquireNative(ctx context.Context, id string) (*Lease, error) 
 
 func (l *Lease) Manifest() sdk.Manifest { return l.worker.entry.Manifest.Public() }
 func (l *Lease) Revision() string       { return l.worker.entry.Revision }
+func (l *Lease) ConfigVersion() string  { return l.worker.config.Version }
 func (l *Lease) Close() {
 	l.once.Do(func() {
 		l.closed.Store(true)
@@ -576,7 +710,6 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	stop := context.AfterFunc(l.ctx, cancel)
 	defer func() { stop(); cancel() }()
 	m, manifest, client := l.manager, l.worker.entry.Manifest, l.client
-	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest.Public(), method: method})
 	id := manifest.ID
 	if scope.Plugin != "" && scope.Plugin != id {
 		return nil, errors.New("extension scope belongs to another module")
@@ -590,6 +723,41 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil, err
 	}
 	effect := method == sdk.MethodProviderExecute || method == sdk.MethodToolCall
+	component := sdk.PrimaryComponent
+	if method == sdk.MethodModuleCall {
+		encoded, marshalErr := json.Marshal(params)
+		var request sdk.ModuleCallRequest
+		if marshalErr != nil || !decodeHostParams(encoded, &request) || !json.Valid(request.Input) {
+			return nil, errors.New("module.call requires a declared action and JSON input")
+		}
+		action, exists := manifest.ResolveAction(request.Action)
+		if !exists || l.group == nil {
+			return nil, errors.New("module action has no owned component group")
+		}
+		var err error
+		client, err = l.group.actionClient(ctx, action)
+		if err != nil {
+			return nil, err
+		}
+		if action.Component != "" {
+			component = action.Component
+		}
+		effect = action.Effect == "write"
+	}
+	// A lazy service may have needed time to start. Account replacement
+	// during that wait revokes this generation before action dispatch.
+	auth, err = m.authFor(scope)
+	if err != nil {
+		return nil, err
+	}
+	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest, method: method})
+	if l.group != nil {
+		effectName := "read"
+		if effect {
+			effectName = "write"
+		}
+		ctx = l.group.withAuthority(ctx, component, effectName)
+	}
 	if effect {
 		if scope.Operation == "" {
 			scope.Operation, err = randomID()
@@ -612,6 +780,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if len(event.Data) > sdk.MaxChunkBytes*2 {
 			return errors.New("extension event exceeds its contract")
 		}
+		if method == sdk.MethodModuleCall && event.Name != "accepted" {
+			return errors.New("module RPC 1.1 is unary")
+		}
 		if event.Name == "accepted" {
 			var value sdk.AcceptedEvent
 			if !effect || json.Unmarshal(event.Data, &value) != nil || value.OperationID != scope.Operation {
@@ -633,7 +804,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		var declared struct {
 			Outcome string `json:"outcome"`
 		}
-		if err == nil && json.Unmarshal(result, &declared) == nil {
+		if method != sdk.MethodModuleCall && err == nil && json.Unmarshal(result, &declared) == nil {
 			switch declared.Outcome {
 			case "accepted", "uncertain":
 				err = &OutcomeError{Outcome: "uncertain", Cause: errors.New("extension left an operation unfinished")}
@@ -735,6 +906,17 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		return nil, err
 	}
 	switch method {
+	case sdk.MethodComponentCall:
+		component, ok := ctx.Value(componentAuthorityKey{}).(componentAuthority)
+		var request sdk.ComponentCallRequest
+		if !ok || component.group == nil || !decodeHostParams(raw, &request) {
+			return nil, errors.New("component call requires its parent module generation and declared binding")
+		}
+		auth, err := m.authFor(scope)
+		if err != nil {
+			return nil, err
+		}
+		return component.group.callBinding(ctx, component.component, request.Binding, scope, auth, request.Input)
 	case sdk.MethodAccountReplace:
 		if authority.method != sdk.MethodToolCall || !authority.manifest.Contract.Has(sdk.AccountAuth) ||
 			scope.Account == "" || scope.Generation == 0 || scope.Operation == "" {
@@ -803,6 +985,10 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		var request sdk.StateCASRequest
 		if !decodeHostParams(raw, &request) {
 			return nil, errors.New("invalid state request")
+		}
+		if authority.manifest.Contract.Version.Minor >= 1 &&
+			scope.Provider == "" && scope.Account == "" && request.Key == moduleConfigKey {
+			return nil, errors.New("module configuration uses its dedicated CAS API")
 		}
 		var version uint64
 		var err error
@@ -876,7 +1062,7 @@ func (m *Manager) Close(ctx context.Context) error {
 		client := worker.client
 		worker.mu.Unlock()
 		if client != nil {
-			client.close()
+			_ = closeModuleClient(client)
 		}
 	}
 	m.startWG.Wait()

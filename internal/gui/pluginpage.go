@@ -90,7 +90,9 @@ type pluginPage struct {
 	Service string `json:"service,omitempty"`
 	// KeepAlive keeps its frame while the reader is on another page
 	// (plugin.PageSpec); else the window lets it go after a while hidden
-	KeepAlive bool `json:"keepAlive,omitempty"`
+	KeepAlive bool   `json:"keepAlive,omitempty"`
+	Ref       string `json:"ref,omitempty"` // SDK module/revision/part authority, supplied by the parent
+	window    *extensionWindowPart
 	token     string
 	dir       string
 	file      string // its HTML, relative to dir, with forward slashes
@@ -110,18 +112,21 @@ type pluginAction struct {
 // pluginPanel is a panel a plugin that is on adds to one of magpie's own
 // pages (plugin.PanelSlots).
 type pluginPanel struct {
-	Spec   string            `json:"spec"`
-	Name   string            `json:"name"`  // its package's
-	Key    string            `json:"key"`   // the panel's, among every plugin's
-	Slot   string            `json:"slot"`  // the page it is in
-	Title  string            `json:"title"` // the panel's, or the package's magpie.name or short name
-	Titles map[string]string `json:"titles,omitempty"`
-	URL    string            `json:"url"`   // the panel, under pluginPagePrefix
-	Reads  []string          `json:"reads"` // what it may read, of plugin.PageReads
-	token  string
-	dir    string
-	file   string
-	hosted bool
+	Spec    string            `json:"spec"`
+	Name    string            `json:"name"`  // its package's
+	Key     string            `json:"key"`   // the panel's, among every plugin's
+	Slot    string            `json:"slot"`  // the page it is in
+	Title   string            `json:"title"` // the panel's, or the package's magpie.name or short name
+	Titles  map[string]string `json:"titles,omitempty"`
+	URL     string            `json:"url"`   // the panel, under pluginPagePrefix
+	Reads   []string          `json:"reads"` // what it may read, of plugin.PageReads
+	Ref     string            `json:"ref,omitempty"`
+	Service string            `json:"service,omitempty"`
+	window  *extensionWindowPart
+	token   string
+	dir     string
+	file    string
+	hosted  bool
 }
 
 // pageKeyChars are what a window page's key can't have
@@ -209,6 +214,13 @@ func pluginPages() []pluginPage {
 // window: its package's name and the reads it declared.
 func windowOf(spec string) (name string, reads []string, ok bool) {
 	pages, panels := windowParts()
+	if strings.HasPrefix(spec, "sdk:") {
+		var err error
+		pages, panels, err = extensionWindowParts(context.Background())
+		if err != nil {
+			return "", nil, false
+		}
+	}
 	for _, p := range pages {
 		if p.Spec == spec {
 			return p.Name, p.Reads, true
@@ -345,6 +357,9 @@ func pageHost(ctx context.Context) {
 // servePluginPage serves a file of a plugin's page, by its token, and on
 // a page served to a browser (web) the page's local service too.
 func servePluginPage(rw http.ResponseWriter, r *http.Request, web bool) {
+	if serveExtensionWindowFile(rw, r, web) {
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, pluginPagePrefix)
 	tok, rel, ok := strings.Cut(rest, "/")
 	if !ok || len(tok) != 32 {
@@ -469,8 +484,23 @@ func pluginPageRoutes(mux *http.ServeMux, web bool) {
 	mux.HandleFunc(pluginPagePrefix, func(rw http.ResponseWriter, r *http.Request) { servePluginPage(rw, r, web) })
 	// a picture a page drew, to the clipboard or to Downloads (pageimage.go)
 	pageImageRoutes(mux)
+	extensionWindowRoutes(mux)
 	mux.HandleFunc("GET /api/plugin-pages", func(rw http.ResponseWriter, r *http.Request) {
 		out := pluginPages()
+		sdkPages, _, err := extensionWindowParts(r.Context())
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		out = append(out, sdkPages...)
+		replaced := map[string]bool{}
+		for i := range out {
+			if replaced[out[i].Replaces] {
+				out[i].Replaces = ""
+			} else if out[i].Replaces != "" {
+				replaced[out[i].Replaces] = true
+			}
+		}
 		if out == nil {
 			out = []pluginPage{}
 		}
@@ -516,6 +546,12 @@ func pluginPageRoutes(mux *http.ServeMux, web bool) {
 	})
 	mux.HandleFunc("GET /api/plugin-panels", func(rw http.ResponseWriter, r *http.Request) {
 		_, out := windowParts()
+		_, sdkPanels, err := extensionWindowParts(r.Context())
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		out = append(out, sdkPanels...)
 		if out == nil {
 			out = []pluginPanel{}
 		}
@@ -526,6 +562,7 @@ func pluginPageRoutes(mux *http.ServeMux, web bool) {
 	mux.HandleFunc("POST /api/plugin-pages/read", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Spec   string         `json:"spec"`
+			Ref    string         `json:"ref"`
 			Read   string         `json:"read"`
 			Params map[string]any `json:"params"`
 		}
@@ -534,6 +571,14 @@ func pluginPageRoutes(mux *http.ServeMux, web bool) {
 			return
 		}
 		name, reads, ok := windowOf(in.Spec)
+		if in.Ref != "" {
+			part, err := resolveExtensionWindow(r.Context(), in.Ref)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			name, reads, ok = part.id, part.reads, true
+		}
 		if !ok {
 			fail(rw, errors.New("no plugin page "+in.Spec))
 			return
@@ -560,6 +605,10 @@ func pluginPageRoutes(mux *http.ServeMux, web bool) {
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 64<<10)).Decode(&in); err != nil {
 			fail(rw, err)
+			return
+		}
+		if strings.HasPrefix(in.Spec, "sdk:") {
+			fail(rw, errors.New("module windows use configuration CAS"))
 			return
 		}
 		if _, _, ok := windowOf(in.Spec); !ok {

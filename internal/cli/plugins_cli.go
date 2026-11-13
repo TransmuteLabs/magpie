@@ -26,7 +26,7 @@ import (
 const pluginUsage = `usage: magpie plugin [list] [--json]
        magpie plugin add <name | npm | git | path> install a community plugin by its name (workbuddy, think-tags, Qoder), an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts); npm:<name> is npm's package of a name a community plugin goes by
        magpie plugin rm <name>                     remove one
-       magpie plugin update                        install the newest version of each
+       magpie plugin update                        update legacy plugins and SDK modules; SDK release pins stay fixed
        magpie plugin on|off <name>                 turn one on or off
        magpie plugin options <name> [<json> | off] show or set what a plugin is handed: the switches it declares for its provider (as its editor's Plugin options), else a middleware's ctx.options
        magpie plugin use <name> <provider>         have this plugin serve a provider another plugin signs in to as well
@@ -103,12 +103,23 @@ func pluginCmd(args []string) error {
 		}
 		return nil
 	case "update", "upgrade":
-		if err := plugin.Update(ctx); err != nil {
-			return err
+		if len(rest) != 0 {
+			if len(rest) == 1 && (rest[0] == "--help" || rest[0] == "-h") {
+				fmt.Println(pluginUsage)
+				return nil
+			}
+			return errors.New(pluginUsage)
 		}
-		fmt.Println(green.Render("✓"), "plugins updated")
-		provider.HandOver(ctx, false)
-		return listPlugins(ctx, false)
+		return pluginUpdateAll(ctx, len(plugin.Load().Plugins) > 0, func(ctx context.Context) error {
+			if err := plugin.Update(ctx); err != nil {
+				return err
+			}
+			fmt.Println(green.Render("✓"), "legacy plugins updated")
+			provider.HandOver(ctx, false)
+			return listPlugins(ctx, false)
+		}, func(ctx context.Context) error {
+			return sdkPluginCmd(ctx, []string{"update"})
+		})
 	case "on", "off":
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
@@ -220,6 +231,14 @@ func pluginCmd(args []string) error {
 		return nil
 	}
 	return errors.New(pluginUsage)
+}
+
+func pluginUpdateAll(ctx context.Context, hasLegacy bool, updateLegacy, updateSDK func(context.Context) error) error {
+	var legacyErr error
+	if hasLegacy {
+		legacyErr = updateLegacy(ctx)
+	}
+	return errors.Join(legacyErr, updateSDK(ctx))
 }
 
 func listPlugins(ctx context.Context, asJSON bool) error {

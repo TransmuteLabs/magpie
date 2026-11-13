@@ -6,7 +6,7 @@ import { manifest, moduleFor } from "./helpers.js";
 
 test("capabilities require exactly their declared handlers", () => {
   const full = {
-    ...manifest([...CONTRACT.capabilities]),
+    ...manifest(CONTRACT.capabilities.filter(capability => capability !== "module-rpc")),
     inbounds: [{ id: "native", path: "/fixture/native" }],
     providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"] }],
     agents: [{ id: "editor", name: "Editor" }],
@@ -40,7 +40,7 @@ test("manifest refuses malformed versions, capabilities, identities and entries"
     { version: "1.0.0-01" }, { version: "1.0.0+a..b" }, { runtime: "node" }, { entry: "../worker.js" },
     { entry: "/worker.js" }, { entry: "a/../worker.js" }, { entry: "C:\\worker.js" }, { args: ["\0"] },
     { contract: { version: { major: 2, minor: 0 }, capabilities: ["operation-control"] } },
-    { contract: { version: { major: 1, minor: 1 }, capabilities: ["operation-control"] } },
+    { contract: { version: { major: 1, minor: 2 }, capabilities: ["operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: [] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["operation-control", "operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["unknown"] } },

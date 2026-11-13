@@ -36,21 +36,51 @@ func wedgedInputHelper() {
 	input := bufio.NewScanner(os.Stdin)
 	input.Buffer(make([]byte, 4096), sdk.MaxFrameBytes+1)
 	output := json.NewEncoder(os.Stdout)
+	var ready *sdk.ComponentReadyResult
 	for input.Scan() {
 		var frame sdk.Frame
 		if json.Unmarshal(input.Bytes(), &frame) != nil {
 			os.Exit(1)
 		}
-		if frame.Method == sdk.MethodDescribe {
-			body, _ := json.Marshal(manifest.Public())
-			if output.Encode(sdk.Frame{Kind: "result", ID: frame.ID, Result: body}) != nil {
+		var result any
+		switch frame.Method {
+		case sdk.MethodDescribe:
+			result = manifest.Public()
+		case sdk.MethodComponentConfigure:
+			var configuration sdk.ComponentConfigureRequest
+			if json.Unmarshal(frame.Params, &configuration) != nil {
+				os.Exit(1)
+			}
+			ready = &sdk.ComponentReadyResult{
+				Component: configuration.Component, Contract: configuration.Contract, Instance: configuration.Instance,
+				ConfigVersion: configuration.Config.Version, Endpoints: map[string]string{},
+			}
+			result = ready
+		case sdk.MethodComponentReady:
+			if ready == nil {
+				os.Exit(1)
+			}
+			result = ready
+		case sdk.MethodComponentStop:
+			ready = nil
+			result = struct{}{}
+		default:
+			if frame.Method != sdk.MethodToolCall || manifest.Contract.Version.Minor >= 1 && ready == nil {
+				os.Exit(1)
+			}
+			// Complete control RPCs before simulating a payload handler that
+			// stops reading stdin, including its ACK and cancellation frames.
+			body, _ := json.Marshal(ready)
+			if output.Encode(sdk.Frame{Kind: "event", ID: frame.ID, Seq: 1, Event: "ready", Data: body}) != nil {
 				return
 			}
-			continue
+			for {
+				time.Sleep(time.Hour)
+			}
 		}
-		_ = output.Encode(sdk.Frame{Kind: "event", ID: frame.ID, Seq: 1, Event: "ready", Data: json.RawMessage("null")})
-		for {
-			time.Sleep(time.Hour)
+		body, err := json.Marshal(result)
+		if err != nil || output.Encode(sdk.Frame{Kind: "result", ID: frame.ID, Result: body}) != nil {
+			return
 		}
 	}
 }
@@ -756,6 +786,9 @@ func TestWorkerCancellationDoesNotWaitForWedgedStdin(t *testing.T) {
 	if err = json.Unmarshal(body, &manifest); err != nil {
 		t.Fatal(err)
 	}
+	if manifest.Contract.Version.Major != 1 || manifest.Contract.Version.Minor < 1 {
+		t.Fatal("wedged stdin regression must exercise the SDK 1.1 component handshake")
+	}
 	manifest.Args = []string{"--sdk-wedged-input"}
 	body, _ = json.Marshal(manifest)
 	if err = os.WriteFile(path, body, 0o600); err != nil {
@@ -770,6 +803,8 @@ func TestWorkerCancellationDoesNotWaitForWedgedStdin(t *testing.T) {
 	}
 	defer lease.Close()
 	ready := make(chan struct{})
+	var configuration sdk.ComponentReadyResult
+	var configurationErr error
 	done := make(chan error, 1)
 	callCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -777,6 +812,7 @@ func TestWorkerCancellationDoesNotWaitForWedgedStdin(t *testing.T) {
 		_, err := manager.Call(callCtx, "fixture", sdk.MethodToolCall, sdk.Scope{},
 			sdk.ToolRequest{ID: "tool", Arguments: json.RawMessage(`{}`)}, func(event Event) error {
 				if event.Name == "ready" {
+					configurationErr = json.Unmarshal(event.Data, &configuration)
 					close(ready)
 				}
 				return nil
@@ -787,6 +823,10 @@ func TestWorkerCancellationDoesNotWaitForWedgedStdin(t *testing.T) {
 	case <-ready:
 	case <-time.After(5 * time.Second):
 		t.Fatal("wedged fixture did not start")
+	}
+	if configurationErr != nil || configuration.Component != sdk.PrimaryComponent || configuration.Instance == "" ||
+		configuration.ConfigVersion != lease.ConfigVersion() {
+		t.Fatalf("fixture wedged before completing its SDK 1.1 configuration: %+v, %v", configuration, configurationErr)
 	}
 	large := json.RawMessage(`"` + strings.Repeat("x", 8<<20) + `"`)
 	written := make(chan error, 1)

@@ -8,6 +8,9 @@
 //   magpie.onTheme(fn)            fn(theme) on each change of it
 //   await magpie.options.get()    the plugin's own options (plugins.json)
 //   await magpie.options.set(o)   sets them, and answers with them
+//   await magpie.backend.call(binding, input)  an SDK module's declared binding
+//   await magpie.config.get()    {version, values}, the SDK module's snapshot
+//   await magpie.config.cas(expected, values)  replaces it with an explicit CAS
 //   await magpie.read(name, p)    a read its package.json's
 //                                 magpie.permissions declares
 //   await magpie.image.copy(png)  puts a PNG (a Blob, as a canvas's
@@ -54,11 +57,13 @@
 (() => {
   const waiting = new Map();
   let next = 0;
+  let disposed = false;
   const themed = [];
   const watched = [];
   let acting = null;
   const acted = [];
   function call(method, params) {
+    if (disposed) return Promise.reject(new Error("Module window disposed"));
     const id = ++next;
     return new Promise((resolve, reject) => {
       waiting.set(id, { resolve, reject });
@@ -107,6 +112,12 @@
     if (e.source !== parent) return;
     const m = e.data;
     if (!m || m.magpie !== 1) return;
+    if (m.event === "dispose") {
+      disposed = true;
+      for (const w of waiting.values()) w.reject(new Error("Module window disposed"));
+      waiting.clear();
+      return;
+    }
     if (m.event === "theme") {
       api.theme = m.data;
       paint(m.data);
@@ -187,6 +198,11 @@
     options: {
       get: () => call("options.get"),
       set: (options) => call("options.set", { options }),
+    },
+    backend: { call: (binding, input) => call("backend.call", { binding, input }) },
+    config: {
+      get: () => call("config.get"),
+      cas: (expected, values) => call("config.cas", { expected, values }),
     },
     read: (name, params) => call("read", { name, params }),
     image: {

@@ -18,6 +18,38 @@ the plugin host) are a different thing; see
 [provider and plugin ownership](provider-plugins.md) and
 [gateway middleware](gateway-middleware.md).
 
+## Installable SDK modules and this window
+
+Our installable modules use the separate
+[extension SDK](executable-extensions.md), with native Go C ABI, exec Go
+and Bun runtimes. They do not call `pluginrt.Register`, enter `plugins.yml`
+or register a Bun backend through legacy `plugins.json`. An absent SDK
+descriptor preserves existing JS/TS loading; an invalid explicit descriptor
+is an error.
+
+SDK API 1.1 can combine a primary, declared private services and TS window
+parts under one root package/configuration generation. Its `window.metadata`
+points to the existing `package.json.magpie.page/panels/actions/permissions`
+format. [`extension_window.go`](../../internal/gui/extension_window.go)
+adapts those parts to the same page/panel renderer, error boundary, read
+permissions and [`pagebridge.js`](../../internal/gui/pagebridge.js).
+Shipping adjacent assets alone does not register a page.
+
+Named bindings grant a particular frame its module actions or ready service
+endpoint. Refs bind package revision and config version, and off/update/config
+change invalidates them. The existing HTTP/SSE proxy holds a root lease for
+the response, strips cookies and checks the component's instance/component/
+config proof headers before forwarding body bytes. The browser-only
+`@magpie/extension-sdk/ui` entry delegates backend/config calls to this bridge.
+SDK root config uses its own fixed `module.config` CAS namespace; it is
+distinct from built-in settings composition below.
+
+See [composite ownership](../adr/0005-composite-module-contract.md) for the
+descriptor, lifecycle and proof contract, and the
+[runtime comparison](extension-runtime-comparison.md) for the five runtime
+paths and their limits. This adapter reuses the window kernel; it adds no
+vendor implementation or alternate UI framework.
+
 ## Responsibilities and boundaries
 
 | Part | What it does | Source |

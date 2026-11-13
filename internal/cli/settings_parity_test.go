@@ -214,6 +214,8 @@ var cliForRoute = map[string]string{
 	"POST /api/library/{what}/{action}":    "magpie library",
 	"GET /api/plugins":                     "magpie plugin",
 	"POST /api/plugins/{op}":               "magpie plugin",
+	"POST /api/plugin-pages/call":          "magpie plugin sdk call",   // module.call invokes the action named by the UI binding
+	"POST /api/plugin-pages/config":        "magpie plugin sdk config", // module configuration read/CAS
 	"GET /api/login/usage":                 "magpie quota",
 	"GET /api/providers":                   "magpie providers",
 	"POST /api/provider/{action}":          "magpie provider",
@@ -432,6 +434,7 @@ var notYet = map[string]string{
 	"GET /api/omarchy/widget":                    W,  // omarchy.go
 	"POST /api/omarchy/widget":                   W,  // omarchy.go
 	"GET /api/plugin-pages":                      W,  // pluginpage.go
+	"GET /api/plugin-pages/changes":              W,  // extension_window.go: the parent bridge waits for window revision changes
 	"GET /api/plugin-panels":                     W,  // pluginpage.go
 	"POST /api/plugin-pages/image":               W,  // pageimage.go
 	"POST /api/plugin-pages/arrange":             W,  // pluginpage.go: the sidebar's order of plugin pages, dragged

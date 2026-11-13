@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "sdk-native-echo",
+  "version": "1.0.0",
+  "runtime": "native",
+  "entry": "plugin.dylib",
+  "contract": {
+    "version": {"major": 1, "minor": 0},
+    "capabilities": ["tool-provider"]
+  },
+  "tools": [
+    {
+      "name": "pid",
+      "description": "Return the host PID and supplied text",
+      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "additionalProperties": false}
+    },
+    {
+      "name": "stream",
+      "description": "Stream supplied text with SDK acknowledgements",
+      "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "additionalProperties": false}
+    },
+    {
+      "name": "state",
+      "description": "Read or compare-and-swap this module's scoped state",
+      "inputSchema": {"type": "object", "properties": {"key": {"type": "string"}, "value": {}}, "additionalProperties": false}
+    },
+    {
+      "name": "wait",
+      "description": "Wait until the host cancels this call",
+      "inputSchema": {"type": "object", "additionalProperties": false}
+    }
+  ]
+}

@@ -54,7 +54,7 @@ func TestAccountReplaceHostCallPreservesSelectedIdentityAfterAcceptedAck(t *test
 		strings.Contains(string(terminal.Result), "secret") {
 		t.Fatal("replacement did not return a secret-free terminal identity", terminal)
 	}
-	if _, found := MethodCapability(MethodAccountReplace); found || len(FullContract().Capabilities) != 9 {
+	if _, found := MethodCapability(MethodAccountReplace); found || len(FullContract().Capabilities) != 10 {
 		t.Fatal("account replacement added a module capability")
 	}
 }

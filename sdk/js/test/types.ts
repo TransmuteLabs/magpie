@@ -10,6 +10,16 @@ const manifest: Manifest = {
   schema: 1, id: "typed", version: "1.0.0", runtime: "bun", entry: "worker.js",
   contract: { version: CONTRACT.version, capabilities: ["operation-control"] },
 };
+const nativeManifest: Manifest = {
+  schema: 1, id: "typed-native", version: "1.0.0", runtime: "native", entry: "lib/worker.so",
+  args: [], contract: { version: CONTRACT.version, capabilities: ["operation-control"] },
+};
+const execManifest: Manifest = { ...manifest, runtime: "exec", entry: "bin/worker", args: ["--stdio"] };
+type NativeManifest = Extract<Manifest, { runtime: "native" }>;
+type AssertNativeNoArgs<Valid extends true> = Valid;
+type NativeRejectsProcessArgs = AssertNativeNoArgs<["--stdio"] extends NativeManifest["args"] ? false : true>;
+void nativeManifest;
+void execManifest;
 const handler = async (ctx: Context, call: Call, stream: Stream) => {
   ctx.signal.throwIfAborted();
   const bytes: Uint8Array = decodeBytes(encodeBytes(new Uint8Array([1])));
