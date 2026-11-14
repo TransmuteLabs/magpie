@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/proc"
 )
 
 // A config.toml with one table for each project Codex was opened in grows
@@ -15,6 +18,27 @@ import (
 // nothing to change decodes only the few tables it reads, not the whole
 // file once for each of them: 21 MB a sync here before, about 5 MB after.
 func TestCodexSyncDecodesTheConfigOnce(t *testing.T) {
+	if os.Getenv("MAGPIE_CODEX_ALLOC_CHILD") != "1" {
+		binary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		command := proc.CommandContext(ctx, binary,
+			"-test.run=^TestCodexSyncDecodesTheConfigOnce$", "-test.count=1", "-test.timeout=2m")
+		command.Env = append(os.Environ(), "MAGPIE_CODEX_ALLOC_CHILD=1")
+		command.WaitDelay = time.Second
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("isolated Codex allocation check: %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "codex allocation child entered\n") {
+			t.Fatalf("isolated Codex allocation root did not run:\n%s", output)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stdout, "codex allocation child entered")
 	var b strings.Builder
 	b.WriteString("model = \"gpt-5.5\"\n\n")
 	for i := range 10000 {
