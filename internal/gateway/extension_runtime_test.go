@@ -15,10 +15,129 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestEmptyPluginCatalogsUseOrdinaryGateway(t *testing.T) {
+	fresh(t)
+	t.Setenv("PATH", os.Getenv(standInsEnv))
+	t.Setenv("MAGPIE_BUN", "")
+	plugin.Restart()
+	t.Cleanup(plugin.Settle)
+	manager := extension.Default()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	checkEmpty := func() {
+		t.Helper()
+		if entries, err := manager.List(); err != nil || len(entries) != 0 {
+			t.Fatalf("SDK catalog: entries=%v err=%v", entries, err)
+		}
+		if list, err := plugin.ReadList(); err != nil || len(list.Plugins) != 0 {
+			t.Fatalf("plugin catalog: list=%v err=%v", list, err)
+		}
+		registry, err := manager.Protocols()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if paths := registry.Paths(); len(paths) != 0 {
+			t.Fatalf("empty SDK catalog registered native routes: %v", paths)
+		}
+		if proc.FindTool("bun") != "" || plugin.HasBun() || plugin.Running() {
+			t.Fatal("plugin-free gateway found Bun or started a legacy host")
+		}
+	}
+	checkEmpty()
+
+	type observation struct {
+		path, body, authorization string
+	}
+	observed := make(chan observation, 2)
+	serveOn(t, "base", "builtin-key", []string{"m1"}, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		select {
+		case observed <- observation{request.URL.Path, string(body), request.Header.Get("Authorization")}:
+		default:
+			t.Error("plugin-free request reached the upstream more than once")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		io.WriteString(writer, `{"id":"builtin","choices":[{"message":{"role":"assistant","content":"builtin reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	server := New()
+	t.Cleanup(server.idle.stop)
+	for _, path := range []string{"/v1/models", "/v1/chat/completions"} {
+		if !server.ClientPath(path) {
+			t.Fatalf("empty registry lost core route %s", path)
+		}
+	}
+	if server.ClientPath("/fixture/rpc") {
+		t.Fatal("empty registry claimed an uninstalled native route")
+	}
+	web := httptest.NewServer(server.Front())
+	t.Cleanup(web.Close)
+	client := web.Client()
+	client.Timeout = 20 * time.Second
+	call := func(method, path, body string, status int) []byte {
+		t.Helper()
+		request, err := http.NewRequestWithContext(t.Context(), method, web.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		answer, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != status {
+			t.Fatalf("%s %s with empty plugin catalogs: HTTP %d: %s", method, path, response.StatusCode, answer)
+		}
+		return answer
+	}
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	body := call(http.MethodGet, "/v1/models", "", http.StatusOK)
+	if err := json.Unmarshal(body, &models); err != nil {
+		t.Fatal(err)
+	}
+	if len(models.Data) != 1 || models.Data[0].ID != "base/m1" {
+		t.Fatalf("builtin model catalog with no plugins: %s", body)
+	}
+	call(http.MethodPost, "/fixture/rpc", `{}`, http.StatusNotFound)
+	body = call(http.MethodPost, "/v1/chat/completions", `{"model":"base/m1","messages":[{"role":"user","content":"hello"}]}`, http.StatusOK)
+	if !strings.Contains(string(body), `"content":"builtin reply"`) {
+		t.Fatalf("builtin reply with no plugins: %s", body)
+	}
+	select {
+	case got := <-observed:
+		if got.path != "/v1/chat/completions" || modelOf([]byte(got.body)) != "m1" || got.authorization != "Bearer builtin-key" {
+			t.Fatalf("builtin HTTP provider request: %+v", got)
+		}
+	default:
+		t.Fatal("ordinary gateway never reached the builtin HTTP provider")
+	}
+	if len(observed) != 0 {
+		t.Fatal("model discovery or an uninstalled native route called the HTTP provider")
+	}
+	checkEmpty()
+}
 
 func compiledSDKExample(t *testing.T) string {
 	t.Helper()
