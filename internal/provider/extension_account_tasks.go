@@ -79,16 +79,16 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if !selected.On() || selected.OwnPaused() || !selected.AccountServes(scope.Account, selection.Model) {
 		return fail(errors.New("paid task selected account no longer serves its model"))
 	}
-	models, err := binding.models()
-	if err != nil || !slices.ContainsFunc(models, func(model catalog.Model) bool { return model.ID == selection.Model }) {
-		return fail(errors.New("paid task model is absent from its current account catalog"))
-	}
 	ctx, err = extensionNetworkContext(ctx, scope)
 	if err != nil {
 		return fail(err)
 	}
 	if err := netproxy.Held(ctx); err != nil {
 		return fail(err)
+	}
+	models, err := binding.fetchModels(ctx)
+	if err != nil || !slices.ContainsFunc(models, func(model catalog.Model) bool { return model.ID == selection.Model }) {
+		return fail(errors.New("paid task model is absent from its current account catalog"))
 	}
 	quota := extensionQuota(ctx, Login{Agent: id, User: scope.Account, On: true, extension: binding})
 	if quota.Error != "" || quota.ReadDeferred || quota.extensionUsage == nil ||

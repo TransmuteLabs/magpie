@@ -210,6 +210,14 @@ acknowledgment; a deferred or failed read cannot admit another foreground.
 The module may register one successor from a successful live tick. No
 stream, auth, vendor client or original request context survives a timer.
 
+For a provider with model discovery, tick admission fetches and validates
+the selected account's current catalog under its network hold and proxy.
+A hot root-configuration CAS therefore requires no cold restart or explicit
+catalog refresh before a new task can be admitted. An empty, failed or
+malformed discovery cannot borrow an older catalog to admit the task.
+Concurrent package, configuration and account changes still fence the read
+and dispatch. Ordinary metadata-only catalog reads remain inert.
+
 The private durable intent and ordinary operation journal prevent the same
 tick from paying twice, including after an uncertain outcome or a new host
 process. Tasks are not replayed after restart. An accepted action may report
@@ -244,6 +252,10 @@ policy, refresh receipts, cancellation snapshots, normal accounting and
 successor/no-replay behavior. `internal/extension/account_tasks_test.go`
 checks durable intents and refusal of ordinary RPC authority; Go and JS task
 tests check descriptor and wire parity.
+`internal/provider/extension_account_tasks_catalog_test.go` checks hot
+configuration admission with an actual model-discovery worker, current
+account/proxy selection, failed and empty refreshes, holds, cancellation and
+package/configuration/generation changes during discovery.
 `internal/gateway/extension_account_tasks_service_test.go` runs separate Go
 and JS private workers through the ordinary gateway, cancels after two
 acknowledged snapshots, and checks the last facts, one normal observer row,
