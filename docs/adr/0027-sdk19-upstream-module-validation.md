@@ -2,7 +2,7 @@
 
 Date: November 14, 2026.
 Status: the consolidated host passed plugin-free acceptance after the explicit
-upstream221 merge. Module, browser and live-platform boundaries remain
+upstream221 and pinned upstream442 merges. Module, browser and live-platform boundaries remain
 separate below.
 This extends [ADR0026](0026-sdk19-host-validation.md), preserving that historical record.
 
@@ -235,6 +235,114 @@ ordinary-owner proofs, not actual vendor/client acceptance.
 | CommandCode `b0f5c5f`; 0.1.2 / 1.9 | `/tmp/magpie-commandcode-merge221-smoke.jKvKGC/ordinary-refresh`: auth/catalog/SystemOne/quota/ledger exit0 |
 | Devin `3bb7420`; 0.8.0 / 1.9 | `/tmp/magpie-devin-final-fixture-20261114.3miL8Zfd/fresh-host`: strict paid/cancel replay exit0, two ACU rows, no external request |
 
+## Pinned upstream442 follow-up
+
+Merge `1daf37be822d854cad132d7e2b0f7cc13e7477bb` includes the fixed upstream
+cut `442964d70c32c31ad078245954adae569dfb82e5`: 25 commits beyond upstream221.
+Its tree `85b65e4b297bdaa6fb46a0468987733fedc12067` is the tested physical
+source under `usbox:/tmp/magpie-sdk-final-base-fu2hgmm4/source`.
+The sibling binary SHA256 is
+`64e47d2ce6dc1ec30655cb669b992ff66c0cb465b7ba0017b49dc2d4d31bfbcc`.
+All 10,807 source entries retain their post-run hash/mode identity.
+No later upstream revision is included in this acceptance.
+
+The merge changes common Library, proxy, catalog and gateway owners. Public
+SDK/runtime, update/local-signing implementation and fork-release workflow
+are unchanged. The 38 key-slot mappings agree with upstream. Resolution
+retains the page/page and mixed page/agent regressions, removing only the
+equivalent appended duplicate of `TestKeyConcurrencyChatPage`. The core
+script budget is 1,270,110: upstream's 17-byte change with the SDK's existing
+270-byte saving retained.
+
+| Final tree85 gate | Terminal result |
+| --- | --- |
+| Safe broad `go test -tags nogui ./...` | Exit0; 31,414 PASS, 109 passing packages, 190 skipped test events; 1,431.84s |
+| Ordinary SDK provider/gateway/agent/Library/GUI/CLI/session owners, `-race` | 602 PASS |
+| Canonical provider/gateway routes, `-race -count=20` | 580 PASS |
+| Usage, middleware and OTLP owners, `-race` | 790 PASS |
+| Feed/mirror/local-signing policy, `-race -count=20` | 820 PASS |
+| Empty catalogs and installed-only startup migration, `-race -count=20` | 320 PASS |
+| Library commands/profile ownership and proxy precedence, `-race -count=20` | 1,540 PASS |
+| Ordinary route guards | 13 PASS |
+| Actual compiled empty-catalog CLI/web | Exit0; no installed external module or Bun worker |
+| Six affected Chromium files, one worker | 57 PASS, no failure/cancellation/skip; 59.48s |
+| Corrected Darwin no-CGO vet and formatting | Exit0 |
+| Post-run source audit | 10,807 entries; `changed: []` |
+
+All listed race groups have zero race warnings or failures. The broad receipt
+has 216 skip entries: 190 tests and 26 packages with no tests. The unsafe
+installed-app launcher and six named native opt-in exclusions remain
+explicit; their earlier proofs are not relabelled as this run.
+
+Initial tree `013b3ab2d4cb863c3150af3110a377718402f38b` at
+`usbox:/tmp/magpie-sdk-final-base-k848ot99` retains three REDs: CLI
+`providers/delete` was both supported and `notYet`; LazyCat's documented
+prefix was duplicated; the new AppKit tray test lacked its implementation's
+`darwin && cgo` constraint. The correction changes exactly those three
+test/doc paths. Production, SDK, assets and workflows are identical across
+the two captures. `source-reuse-013b-to-85b65e4.json` records that identity
+and the original receipts reused for five unchanged platform vet/build
+gates, startup/TUI, Node203/Bun203 and strict types. These are explicit
+reused positives, not claimed new executions. Darwin vet, failed route
+guards, core build, empty-catalog and all gates in the table ran on tree85.
+
+| Final packet receipt | SHA256 |
+| --- | --- |
+| `broad-network-result.json` | `aee8f701ebaef7a2bba93839f4e83ab69b9570624bae23e3980daa337ef60176` |
+| `upstream442-library-netproxy-race20-result.json` | `a01a527d93dcd6e964080ac635b9d647fae69f1ab32c3bf11e0017e0f4963d1f` |
+| `signing-race-result.json` | `892260ff92324542c3eb62cab42b03af281844973f428ade066f4e797dd853aa` |
+| `upstream442-chromium-result.json` | `33730e5020a70f5ec68b38de5c9312d48bcbb3aaa9d9abb61f571ea6692de045` |
+| `audit-result.json` | `1d476e08566880ceceb43e30588dab81ad3295b9eae97bf13ac65e76b803e703` |
+
+The commit-bound `checkpoint-85-1daf37b-evidence.tar.gz` preserves all 13
+fresh terminal gates and 12 explicitly reused positive gates. Its SHA256 is
+`0afd369a7ff5d732e07400d86187ea3a20d143b2cc686a1f2d4e5b9685026696`;
+all 63 manifest entries were verified after copying the 4,421,149-byte
+archive locally. The final owned-process census is empty. This archive
+includes the initial capture's reused evidence; no original RED was relabelled.
+
+### Browser fixture and module corrections
+
+Host commit `6508c079` changes three tests only. It checks the existing
+`index.html → pluginpages.js → extensionwindows.js` loader chain and gives
+two SDK fixtures the existing 60-second navigation allowance; action
+deadlines and all-script syntax/built-in scans remain unchanged. On private
+tree0bd plus those three overlays, Chromium passes 20 cases in five
+languages. Four Node/Bun missing-import/missing-HTML-link controls fail at
+their precise new assertions. The complete static guards still fail on 25
+navigation entries in 23 originally-upstream files and the upstream
+`headerpresets.js` dynamic-loader omission. Those failures were not exempted.
+The packet is `usbox:/tmp/magpie-gui-0bd-fixture-closure-85_n630w`; its
+97-entry evidence archive has SHA256
+`d0e97da29385989174b2dc733c00e67d22f106fce5d2fe152e9bf349269de186`.
+It remains distinct from tree85's 57 rendered Chromium cases.
+
+OpenCode commit `e2112da6fe0c601ee6523a972ebcb69cbaeef681` repairs the
+consumer's static-model overwrite of host context and lost API1.9
+output/effort metadata. Default package 0.6.1 now requires API1.9; explicit
+API1.8 compatibility is a separate current 0.6.1 variant, not a repackaged
+0.6.0 release. Prior generated values can update while independent user
+output, variants and default effort survive synchronization. Six old-code
+assertion failures, 500 agent race passes, 271 module race passes, five final
+version checks and both distribution checks are recorded separately.
+Ordinary installed-native API9/V1, API9/V2 and API8/V2 flows all exit0 on
+the exact tree013b host binary, including connect, reapply and model edits.
+These are synthetic config proofs, not live OpenCode/vendor acceptance.
+The packet is `usbox:/tmp/magpie-opencode-metadata-repair.T6xHh5YL`;
+its delivery archive SHA256 is
+`3f9609e9762b254036d20df8f16443f5b4bb2b7596421b315cdf438fd62c7501`.
+
+ZCode fixture commit `687af12d52871e4d9995f9548639b005e68104e7` withdraws
+the unproven closed-socket admission experiment. Active ingress again
+matches `9bec47b` exactly and fails closed. All unsaved experimental source,
+reviews and RED observations are preserved in a tracked 113-member archive,
+SHA256 `088e272aa6d8ad2727894fcacb897c54bb59bf87d6a8c48577ce023dd4b75269`.
+Separate bounded process-cleanup tests pass five cases and fail two on old
+behavior. The independent review approves withdrawal/preservation and that
+cleanup scope, not browser QA. Runtime/package source is unchanged:
+0.13.1/API1.9. The 17.02s `auth.start` browser timeout remains RED with
+unknown cause, and the original three unknown connections remain unknown.
+
 ## Remaining limits
 
 Rendered Chromium acceptance on f7's eleven touched test files is terminal:
@@ -260,8 +368,9 @@ unattributed connections. A separate diagnostic reproduction attributes its
 own three failures to Magpie-spawned Devin processes whose sockets closed
 before `ss` inspected them. That establishes an attribution-fixture race for
 the reproduction, not a ZCode production defect or the sender of the original
-three connections. The fixture repair has separate acceptance and does not
-change the bounded native-package result above.
+three connections. The later admission experiment was withdrawn and preserved
+as described above; it has no browser acceptance. This does not change the
+bounded native-package result above.
 
 WebKit lacks `libgtk-4.so.1`, `libjpeg.so.8` and codec `libx264.so`; no rendered
 WebKit/full-GUI-matrix pass or OS-dependency workaround is claimed.

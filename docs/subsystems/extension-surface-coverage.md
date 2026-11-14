@@ -25,9 +25,11 @@ the exact combined implementation and completed safe broad, race, platform
 and empty-catalog gates. It keeps actual macOS signing, browser and domain
 acceptance separate. Source availability alone is not a passing final gate.
 The [upstream and module follow-up](../adr/0027-sdk19-upstream-module-validation.md)
-records upstream221 merge `9b55245a`, exact tree0bd's completed safe broad,
-route/startup, signing and empty-catalog gates, the task-admission regression
-and the exact earlier host used by each module's installed-package fixture.
+records upstream221 merge `9b55245a` and pinned upstream442 merge `1daf37be`,
+their exact completed safe broad, route/startup, signing and empty-catalog
+gates, Library/proxy integration checks, and the exact earlier host used
+by each module's installed-package fixture. OpenCode's API1.9 consumer
+correction has its own ordinary installed-native evidence.
 The SDK does not replace every
 upstream extension surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
@@ -245,6 +247,33 @@ reader transports.
 Routing's implemented adapter and the remaining observation, budget and
 masking points retain their own timing and
 failure contracts; a shared registration envelope cannot erase those.
+
+## Logging and collection boundaries
+
+SDK provider execution and decoded native inference enter the ordinary
+gateway attempt, usage ledger, Watch and OTLP owners. Terminal failures
+retain their measured usage. Own background calls use `usage.Append`;
+outside-account history uses `IngestReported` with its separate dedup and
+observer policy. Paid-task cancellation flushes the last measured facts
+once. Structured module diagnostics use host-derived scope and the existing
+host logger, rejecting forged, stale or excessive messages.
+
+The owner regressions include
+`TestExtensionTerminalAttemptsReachWatchAndLedger`,
+`TestSDKOwnCallUsesAppendWhileOutsideHistoryUsesIngestReported`,
+`TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce` and
+`TestModuleDiagnosticsReachTheExistingHostWithSelectedAuthority`.
+The [validation record](../adr/0027-sdk19-upstream-module-validation.md)
+keeps their ordinary-owner, installed-module and historical source pins
+separate.
+
+This preserves Magpie's collection semantics, not a lossless raw transport
+recorder. Archive sees canonical input after native decode; it does not
+archive every native protobuf or background HTTP body. OTLP does not project
+every ACU amount/currency, native ID or tier stored in the ledger. Diagnostic
+rate limits and bounded archive/export queues remain. Community Devin0.1.40
+has no outside-account call-history reader, so its absence from our module
+is not an omitted donor implementation.
 
 ## Evidence and limits
 

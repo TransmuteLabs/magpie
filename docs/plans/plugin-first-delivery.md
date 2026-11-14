@@ -14,11 +14,14 @@ for every module.
 
 - Host implementations are consolidated on `devzeus`, SDK API 1.9/native
   ABI 1. The current implementation checkpoint is
-  `9b55245a4ce77819984b04ab43e893de914b2632`, including upstream
-  `221c91fae3ef70328ad115c445034de1cea40aa1`. Its exact tree
-  `0bd9c4b3b33a792e0046b04ddc99b7656062cef7` passed safe broad
-  (31,320 PASS / 109 packages), empty-catalog binary, route/startup,
-  signing and platform gates on usbox.
+  `1daf37be822d854cad132d7e2b0f7cc13e7477bb`, including the pinned upstream
+  `442964d70c32c31ad078245954adae569dfb82e5`. Its exact tree
+  `85b65e4b297bdaa6fb46a0468987733fedc12067` passed safe broad
+  (31,414 PASS / 109 packages), empty-catalog binary, route/startup,
+  Library/proxy and signing gates on usbox. Platform/static gates record
+  explicit source-identity reuse from the initial capture; 57 affected
+  Chromium cases passed on this final tree. Earlier tree0bd acceptance
+  remains a separate completed checkpoint.
   The [upstream and module checkpoint](../adr/0027-sdk19-upstream-module-validation.md)
   records this acceptance, preserved earlier failures and the separately
   pinned module/browser evidence. Earlier implementation `d5b098d8` and its
@@ -76,7 +79,7 @@ installation and restart remain separate from source verification.
 | Lane | Current default package | Minimum contract | Acceptance boundary | Independent of |
 | --- | --- | --- | --- | --- |
 | Devin | 0.8.0: native paired protocol/provider, auth, agent/window, bootstrap and explicitly enabled paid cache work | API 1.9, ABI 1 | Donor protocol and installed-host fixtures have separate evidence. Final no-op/transition and paid-task replays use the combined host; live vendor acceptance remains separate | Unrelated media, built-in Memory access and other module releases |
-| OpenCode | 0.6.0: native Go/Zen provider, auth, agent/window and SQLite/WAL history in one package | API 1.8, ABI 1 | Ordinary installed-host discovery, execution, Library and history must pass on the selected host. Actual client/vendor versions retain separate evidence | Unrelated SDK owners and other module releases |
+| OpenCode | 0.6.1: native Go/Zen provider, auth, agent/window and SQLite/WAL history in one package; effective host model metadata preserved | API 1.9, ABI 1; explicit current API1.8 compatibility variant | Ordinary native connect/sync/model-edit proofs cover both config formats, prior generated values and independent user overrides. Discovery/execution/Library/history and actual client/vendor versions retain their separate evidence | Unrelated SDK owners and other module releases |
 | OMP sessions | 0.1.0: attachment-aware six-route conversion and JSONL Source with descendant identities in the default package | API 1.9, ABI 1 | Repaired OMP→Codex export has actual Codex 0.160 continuation evidence. A new host replay does not repeat or broaden that historical client proof | Provider execution, routing and other module releases |
 | ZCode | 0.13.1: native provider/controller, auth, SQLite state, agent/window, billing and claim policy | API 1.9, ABI 1 | Recovered-client and installed-host fixtures are distinct from actual vendor startup. Source provenance records desktop 3.18.2/CLI 0.17.1 and subsequent community donor changes | Unrelated SDK owners and other module releases |
 | CommandCode | 0.1.2: native provider, auth/quota, agent and dedicated System One decisions | API 1.9, ABI 1 | Jev uses the declared decision operation and remains outside conversational catalogs. Installed-host protocol, accounting and agent-option tests are separate from live vendor evidence | First plugin-free host rollout and unrelated module features |
