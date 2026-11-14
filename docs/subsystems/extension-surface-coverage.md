@@ -20,7 +20,11 @@ projections, independent ledger observation, own-call/outside-history separation
 and synchronous middleware. API 1.9 adds provider switches, paid selected-account
 tasks, effective agent model limits/efforts, provider defaults, richer quota
 facts and descendant session identities. Their combined acceptance is recorded separately;
-source availability is not a passing final gate. It does not replace every
+the [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md) records
+the exact combined implementation and completed safe broad, race, platform
+and empty-catalog gates. It keeps actual macOS signing, browser and domain
+acceptance separate. Source availability alone is not a passing final gate.
+The SDK does not replace every
 upstream extension surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
 The [combined API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records

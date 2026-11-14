@@ -12,10 +12,14 @@ for every module.
 
 ## Current bases and workspaces
 
-- Host implementations are consolidated on `devzeus`, runtime checkpoint
-  `d07078c7926daf6f33af09c40297c941bd39da92`, SDK API 1.6/native ABI 1.
-  The [consolidated validation record](../adr/0021-consolidated-sdk16-validation.md)
-  separates completed scoped gates from whole-repository acceptance.
+- Host implementations are consolidated on `devzeus`, SDK API 1.9/native
+  ABI 1. The current implementation checkpoint is
+  `46756a48c9c9f204a8369638dc63cbcb83d02031`, including upstream
+  `e6e0585bd3d92a79dab08f0955789a5801382b71`.
+  The [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md)
+  records the combined synthetic acceptance and actual empty-catalog binary.
+  Historical [SDK 1.6 validation](../adr/0021-consolidated-sdk16-validation.md)
+  remains a record of its own source, rather than acceptance of this checkpoint.
   No further host branches or worktrees are needed for module-specific SDK
   variants. New generic fixes belong on this shared base.
 - [Native/composite](../adr/0005-native-composite-validation.md),
@@ -32,9 +36,9 @@ for every module.
   `../magpie-sdk-plugin-protocol-commandcode`. Each owns its implementation,
   provenance, packaging and acceptance. The former `magpie-extensions`
   workspace is not used by implementation or verification.
-- `../magpie-devzeus-archive` is the retained historical donor. The recovered
-  uncommitted host work was inventoried and compared with the consolidated
-  implementation; backups remain preserved. Devin protocol evidence is under
+- The archived `devzeus` history and recovery backups remain historical
+  donors. Recovered uncommitted host work was inventoried and compared with
+  the consolidated implementation. Devin protocol evidence is under
   `../../Agents/devinapp`.
 - SDK source remains in the public fork `TransmuteLabs/magpie`, with canonical
   Go module path `github.com/yetone/magpie`. A separate SDK repository is not
@@ -62,13 +66,13 @@ installation and restart remain separate from source verification.
 
 ## Independent module slices
 
-| Lane | Current slice | Minimum contract | Specific integration gate / remaining work | Independent of |
+| Lane | Current default package | Minimum contract | Acceptance boundary | Independent of |
 | --- | --- | --- | --- | --- |
-| Devin | Paired native inbound/outbound execution, discovery, auth, agent and bootstrap implementation | Distribution declares its exact minimum; bootstrap uses API 1.6 native account operations, ABI 1 | Synthetic paired inference passes; duplicate assignment and bootstrap-read acceptance remain open. Native startup, signed history and delegation require separate proof | Unrelated media, Memory and other module releases |
-| OpenCode | Native Go device auth/refresh, four Go models and an optional agent/window distribution of the same module | Provider minimum API 1.3; agent/window minimum API 1.5; ABI 1 | Installed-host auth/launch/Library/provider slices have scoped evidence. Zen/Console parity and native SQLite history remain separate work | Unrelated SDK owners and other module releases |
-| OMP sessions | Lossless interchange, attachment-aware native migration and optional JSONL Source distribution | Default API 1.3; alternative Source distribution API 1.6; ABI 1 | Repaired OMP→Codex export has actual Codex 0.160 continuation evidence. Other routes, source grants and client versions retain their own records | Provider execution, routing and other module releases |
-| ZCode | Native provider/controller, auth, SQLite state and optional agent/window in one package | Provider/controller and agent/window distributions declare different minima; ABI 1 | Installed-host synthetic agent/auth/transport proof is separate from actual ZCode startup. Donor billing/claim parity and safe native resume remain active work | Unrelated SDK owners and other module releases |
-| CommandCode | Native account/auth/quota and recovered generation transport with checked agent integration | Current package API 1.5/native ABI 1 | Jev is explicitly refused until a generic decision operation/model adapter is implemented. Own-model capability metadata also needs a bounded host addition | First plugin-free host rollout and unrelated module features |
+| Devin | 0.8.0: native paired protocol/provider, auth, agent/window, bootstrap and explicitly enabled paid cache work | API 1.9, ABI 1 | Donor protocol and installed-host fixtures have separate evidence. Final no-op/transition and paid-task replays use the combined host; live vendor acceptance remains separate | Unrelated media, built-in Memory access and other module releases |
+| OpenCode | 0.6.0: native Go/Zen provider, auth, agent/window and SQLite/WAL history in one package | API 1.8, ABI 1 | Ordinary installed-host discovery, execution, Library and history must pass on the selected host. Actual client/vendor versions retain separate evidence | Unrelated SDK owners and other module releases |
+| OMP sessions | 0.1.0: attachment-aware six-route conversion and JSONL Source with descendant identities in the default package | API 1.9, ABI 1 | Repaired OMP→Codex export has actual Codex 0.160 continuation evidence. A new host replay does not repeat or broaden that historical client proof | Provider execution, routing and other module releases |
+| ZCode | 0.13.1: native provider/controller, auth, SQLite state, agent/window, billing and claim policy | API 1.9, ABI 1 | Recovered-client and installed-host fixtures are distinct from actual vendor startup. Source provenance records desktop 3.18.2/CLI 0.17.1 and subsequent community donor changes | Unrelated SDK owners and other module releases |
+| CommandCode | 0.1.2: native provider, auth/quota, agent and dedicated System One decisions | API 1.9, ABI 1 | Jev uses the declared decision operation and remains outside conversational catalogs. Installed-host protocol, accounting and agent-option tests are separate from live vendor evidence | First plugin-free host rollout and unrelated module features |
 
 Repository names follow `magpie-sdk-plugin-<type>-<name>`. The type names the
 primary purpose, not an exclusive runtime or capability set. Each module
@@ -76,31 +80,14 @@ owns its domain code, tests, command entry, package manifest,
 optional web assets and README. No module imports host `internal` packages.
 There is no shared vendor utility layer until real duplication justifies one.
 
-```mermaid
-flowchart LR
-  Base["Native/composite SDK and minimum contracts"] --> Devin["Devin codec + discovery"]
-  Base --> OC["OpenCode auth + chat"]
-  Base --> OMP["OMP explicit conversion"]
-  DBlock["Concrete Devin contract gap"] --> Patch["Small generic SDK increment"]
-  OBlock["Concrete OpenCode contract gap"] --> Patch
-  SBlock["Concrete session asset/plan gap"] --> Patch
-  Patch --> Devin
-  Patch --> OC
-  Patch --> OMP
-  SDK13["SDK 1.3 refresh / operations / source inputs"] --> OC
-  SDK13 --> OMP
-  SDK13 --> Z["External ZCode native/controller lane"]
-  Future["Remaining surfaces / possible API 1.4"] --> Separate["Independent contracts and adapters"]
-```
-
 ## Contract freeze and blocker rule
 
 A module declares only the capabilities and minimum version it uses, rather
 than copying the host's FullContract superset. The transport/SDK may grow
-without adding new requirements to an existing module. API 1.3's new
-operation declarations, extended models and rotating-refresh guarantee need
-their minimum floor; native ABI remains 1. Future API 1.4 work is not a
-dependency for modules that already have their required adapters.
+without adding new requirements to an existing module. A new operation,
+metadata field or lifecycle guarantee requires its declared minimum floor;
+native ABI remains 1. Further owner adapters are not dependencies of modules
+that already have their required contracts.
 
 When blocked, the module lane reports:
 
@@ -114,14 +101,17 @@ The SDK lane implements that bounded contract; it does not bring the vendor
 implementation into core. Module lanes keep working against their frozen
 minimum, fixtures or explicit contract-level doubles until the host adapter
 is ready. A double is recorded as such and is not actual-host proof.
+Each package records its exact tested host in its provenance and acceptance
+packet; a declared minimum is not evidence that the newest host was tested.
 
 Do not respond to an unsupported vendor field by discarding it, approximating
 its meaning or widening an HTTP allowlist without a defined operation
-contract. The OMP source-input and OpenCode rotating-refresh blockers now
-have bounded generic implementations. Native Devin constraints/signed
-history, ZCode native lifecycle and provider outside-call policy retain
-separate work. An additional gap needs its own evidence; it is not a reason
-to stop independent module progress.
+contract. Source inputs, rotating refresh, native account operations,
+System One, provider outside calls and paid account tasks have bounded
+generic adapters. API 1.9 also passes the upstream decision catalog to
+agent adapters as `decisionModels`, separately from conversation `models`;
+API 1.8 adapters keep their earlier options. An additional gap needs its own
+evidence; it is not a reason to stop independent module progress.
 
 ## Parallel ownership and verification
 
