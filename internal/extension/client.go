@@ -394,8 +394,8 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 	}
 	c.mu.Unlock()
 	if !valid || c.hostCall == nil ||
-		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != "network.proxy" &&
-			frame.Method != "account.replace" && frame.Method != sdk.MethodComponentCall && frame.Method != sdk.MethodUsageInvalidate) {
+		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != sdk.MethodCatalogRead && frame.Method != sdk.MethodDiagnosticEmit && frame.Method != "network.proxy" &&
+			frame.Method != "account.replace" && frame.Method != sdk.MethodComponentCall && frame.Method != sdk.MethodUsageInvalidate && !sdk.IsStorageHostMethod(frame.Method) && !sdk.IsOwnCallHostMethod(frame.Method)) {
 		return false
 	}
 	// At most one host callback per live call is admitted by the SDK's

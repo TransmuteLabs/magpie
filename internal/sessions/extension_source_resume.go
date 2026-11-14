@@ -18,7 +18,7 @@ func checkSelectedSource(ctx context.Context, record *sessionSourceRecord) error
 	if view == nil || view.epoch != sourceEpoch.Load() {
 		return extension.ErrActionChanged
 	}
-	if err := checkSourceGrant(ctx, record.grant); err != nil {
+	if err := checkSourceRecordGrant(ctx, record); err != nil {
 		return err
 	}
 	found := false
@@ -29,6 +29,9 @@ func checkSelectedSource(ctx context.Context, record *sessionSourceRecord) error
 	}
 	if !found {
 		return extension.ErrActionChanged
+	}
+	if record.storage != nil {
+		return nil
 	}
 	return record.snapshot.check(ctx)
 }
@@ -84,11 +87,13 @@ func sourceResume(record *sessionSourceRecord) string {
 	if record.stale || record.grant.descriptor.Resume != "native" {
 		return ""
 	}
-	return resumeFor("", record.grant.descriptor.Agent, record.request.Locator.SessionID, record.summary.Cwd,
-		sourcePhysicalPath(record.grant, record.request.Locator.Path))
+	return resumeFor("", record.grant.descriptor.Agent, sourceRecordID(record), record.summary.Cwd, sourceRecordPath(record))
 }
 
 func extensionSourceTranscript(ctx context.Context, record *sessionSourceRecord) (Transcript, error) {
+	if record.storage != nil {
+		return storageSourceTranscript(ctx, record)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	ctx = withSessionSourceAdmission(ctx, func() error { return checkSelectedSource(ctx, record) })

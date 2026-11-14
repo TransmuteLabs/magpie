@@ -150,6 +150,9 @@ func (p Provider) DecideOnly() bool {
 // also serves. A dedicated decision API may use any model name, and a
 // plugin's are the ones it marks besides Jev's (#1514).
 func (p Provider) DecidesModel(model string) bool {
+	if p.IsExtension() {
+		return p.Account.extension.decisionModel(p.OwnModelID(model))
+	}
 	if !p.Decides() {
 		return false
 	}
@@ -186,6 +189,9 @@ func (p Provider) DecidesModel(model string) bool {
 // isDecision uses a listed remote model's marker without reading its whole
 // list again. Other providers keep their endpoint and name-based rules.
 func (p Provider) isDecision(m catalog.Model) bool {
+	if p.IsExtension() {
+		return m.Decides
+	}
 	if p.IsRemoteMagpie() {
 		return m.Decides
 	}
@@ -372,7 +378,7 @@ func (p Provider) DecideVia() string {
 // Jev is the model a decision provider is asked with when the user picked
 // none: TypeSafe's latest stable one, or the one Jev a gateway serves.
 func (p Provider) Jev() string {
-	if p.IsRemoteMagpie() || p.IsPlugin() {
+	if p.IsRemoteMagpie() || p.IsPlugin() || p.IsExtension() {
 		if models := p.decideListed(); len(models) > 0 {
 			return models[0].ID
 		}
@@ -432,6 +438,9 @@ func (p Provider) Jev() string {
 // list when fetched, else Jev's aliases (a gateway's one Jev), each with
 // its window and whether it takes images where its vendor's docs say.
 func (p Provider) decideModels() []catalog.Model {
+	if p.IsExtension() {
+		return p.extensionDecisionModels()
+	}
 	ms := p.decideListed()
 	// and the ones the user set to be asked on System One, first
 	if set := p.decideSetModels(); len(set) > 0 {
@@ -494,6 +503,9 @@ func withDecideFacts(ms []catalog.Model) []catalog.Model {
 }
 
 func (p Provider) decideListed() []catalog.Model {
+	if p.IsExtension() {
+		return p.extensionDecisionModels()
+	}
 	if p.IsRemoteMagpie() {
 		live, _, _ := catalog.Live(p.ID)
 		// Live returns a filtered copy, so it can be compacted in place.
@@ -726,6 +738,9 @@ func deciders(keep func(id string) bool) []Entry {
 // provider's model.
 func IsDecider(id string) bool {
 	p, model, ok := Resolve(id)
+	if ok && p.IsExtension() {
+		return p.ExtensionListsDecisionModel(model)
+	}
 	return ok && p.DecidesModel(model)
 }
 
@@ -853,6 +868,12 @@ func DecideRouteStatus(err error) int {
 // jev-latest (Vercel: typesafe-ai/jev, Cloudflare: typesafe/jev). Preview
 // and other unlisted names are none: the channel has no such model.
 func resolveDecideModel(p Provider, name string) (string, bool) {
+	if p.IsExtension() {
+		if p.ExtensionListsDecisionModel(name) {
+			return name, true
+		}
+		return "", false
+	}
 	if !p.DecidesModel(name) {
 		return "", false
 	}

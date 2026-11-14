@@ -40,24 +40,29 @@ type managedWorker struct {
 }
 
 type Manager struct {
-	mu               sync.Mutex
-	reloadMu         sync.Mutex
-	root             string
-	catalog          *Catalog
-	store            *Store
-	workers          map[string]*managedWorker
-	closed           bool
-	closeDone        chan struct{}
-	closeErr         error
-	startCtx         context.Context
-	stopStarts       context.CancelFunc
-	startWG          sync.WaitGroup
-	retireWG         sync.WaitGroup
-	gatewayRuns      map[*GatewayRun]struct{}
-	refreshes        map[refreshKey]*refreshRun
-	refreshWG        sync.WaitGroup
-	windowAuthOwners map[string]*windowAuthOwner
-	windowAuthWG     sync.WaitGroup
+	mu                sync.Mutex
+	reloadMu          sync.Mutex
+	root              string
+	catalog           *Catalog
+	store             *Store
+	workers           map[string]*managedWorker
+	closed            bool
+	closeDone         chan struct{}
+	closeErr          error
+	startCtx          context.Context
+	stopStarts        context.CancelFunc
+	startWG           sync.WaitGroup
+	retireWG          sync.WaitGroup
+	gatewayRuns       map[*GatewayRun]struct{}
+	refreshes         map[refreshKey]*refreshRun
+	refreshWG         sync.WaitGroup
+	windowAuthOwners  map[string]*windowAuthOwner
+	windowAuthWG      sync.WaitGroup
+	activationWG      sync.WaitGroup
+	gatewayActivation *GatewayActivation
+	diagnostics       map[string]diagnosticWindow
+	diagnosticLog     func(moduleDiagnostic)
+	catalogReader     CatalogProjectionReader
 	// Bun is an explicitly selected runtime executable; empty uses discovery.
 	Bun string
 	// ReleaseClient optionally supplies the client used for GitHub packages.
@@ -708,6 +713,9 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
 		return nil, err
 	}
+	if err := validateStorageScope(manifest, method, scope, params); err != nil {
+		return nil, err
+	}
 	if method == sdk.MethodAuthRefresh {
 		result, err := m.RefreshAccount(ctx, id, scope)
 		if err != nil {
@@ -747,6 +755,26 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
 		return nil, err
 	}
+	if err := validateStorageScope(manifest, method, scope, params); err != nil {
+		return nil, err
+	}
+	var outsideRead *sdk.OutsideCallsRequest
+	if method == sdk.MethodProviderCalls {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		request, err := sdk.DecodeOutsideCallsRequest(manifest, scope, raw)
+		if err != nil {
+			return nil, err
+		}
+		outsideRead = &request
+	}
+	ctx, finishStorage, err := beginStorageCall(ctx, l, method, scope, params)
+	if err != nil {
+		return nil, err
+	}
+	defer finishStorage()
 	if method == sdk.MethodProviderExecute {
 		raw, err := json.Marshal(params)
 		if err != nil {
@@ -822,11 +850,15 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err != nil {
 		return nil, err
 	}
+	if err := checkLeasedCheckin(ctx, l, method, scope, params); err != nil {
+		return nil, err
+	}
 	if err := checkWindowAdmission(ctx); err != nil {
 		return nil, err
 	}
 	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest, method: method})
-	if method == sdk.MethodGatewayRequest || method == sdk.MethodSessionSourceRead {
+	ctx = withOwnCallParent(ctx, method)
+	if method == sdk.MethodGatewayRequest || method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
 		// Retain this restriction when a recall delegates a read action to
 		// a private component, which has its own module.call authority.
 		ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
@@ -854,8 +886,11 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	accepted := false
 	onEvent := func(event Event) error {
-		if method == sdk.MethodSessionSourceRead {
+		if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
 			return errors.New("session source reads are unary")
+		}
+		if method == sdk.MethodProviderCalls {
+			return errors.New("outside-call history reads are unary")
 		}
 		if _, err := m.authFor(scope); err != nil {
 			return err
@@ -891,8 +926,17 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil
 	}
 	result, err := client.call(ctx, method, scope, auth, params, onEvent)
+	if err == nil && sdk.IsStorageMethod(method) {
+		err = finishStorageCall(ctx, result)
+	}
 	if err == nil && method == sdk.MethodProviderUsage {
 		err = m.finishUsageRead(manifest, scope, usageRead, result)
+	}
+	if err == nil && outsideRead != nil {
+		_, err = sdk.DecodeOutsideCallsResult(manifest, *outsideRead, result)
+		if err == nil {
+			_, err = m.authFor(scope)
+		}
 	}
 	if effect {
 		state := "completed"
@@ -954,6 +998,15 @@ func (m *Manager) Invoke(ctx context.Context, id, method string, scope sdk.Scope
 }
 
 func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) error {
+	if sdk.IsMiddlewareMethod(method) {
+		if err := sdk.ValidateMiddlewareScope(scope); err != nil {
+			return err
+		}
+	}
+	if method == sdk.MethodLedgerObserve && (scope.Provider != "" || scope.Account != "" || scope.Generation != 0 ||
+		scope.Session != "" || scope.Operation != "" || scope.Attempt != 0) {
+		return errors.New("ledger observation cannot borrow account, session or write authority")
+	}
 	if err := validateGatewayScope(method, scope); err != nil {
 		return err
 	}
@@ -1006,7 +1059,17 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	if _, err := m.authFor(scope); err != nil {
 		return nil, err
 	}
+	if sdk.IsStorageHostMethod(method) {
+		return m.storageHostCall(ctx, scope, method, raw, authority)
+	}
+	if sdk.IsOwnCallHostMethod(method) {
+		return m.appendOwnCall(ctx, scope, raw, authority)
+	}
 	switch method {
+	case sdk.MethodCatalogRead:
+		return m.readCatalogProjection(ctx, scope, raw, authority)
+	case sdk.MethodDiagnosticEmit:
+		return m.emitDiagnostic(scope, raw, authority)
 	case sdk.MethodUsageInvalidate:
 		return m.invalidateUsage(ctx, scope, raw, authority)
 	case sdk.MethodComponentCall:
@@ -1178,6 +1241,7 @@ func (m *Manager) Close(ctx context.Context) error {
 
 func (m *Manager) finishClose(workers map[string]*managedWorker, runs []*GatewayRun) {
 	m.stopStarts()
+	m.activationWG.Wait()
 	for _, run := range runs {
 		run.abort()
 		<-run.done

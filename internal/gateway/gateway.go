@@ -829,6 +829,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	s.lnMu.Unlock()
 	recordListening(ln.Addr())
 	defer forgetListening()
+	stopExtensionActivation := s.activateExtensions(ctx)
+	defer stopExtensionActivation()
 	// the keys out of credit a magpie before this one rested go on
 	// resting, and climb on from their rung (rest_store.go)
 	loadRests()
@@ -842,6 +844,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// `magpie plugin builtin`) come and go here too
 	stopObservers := usage.ServeObservers()
 	defer stopObservers()
+	stopExtensionObservers := usage.ServeExtensionLedgerObservers(ctx, s.extensions)
+	defer stopExtensionObservers()
 	// and the user's own routing groups are served while plugins/groups is
 	// on (provider.GateGroups); one made a moment ago turns it on as it is
 	// looked up, not on KeepFresh's next look
@@ -917,6 +921,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go provider.KeepPluginsListed(ctx) // models a plugin's vendor drops or adds, while magpie runs
 	// and renews the plugins' sign-ins as they come due, used or not (#5080)
 	go provider.KeepPluginsSignedIn(ctx)
+	defer provider.KeepExtensionsSignedIn(ctx)()
 	// and those a signed-in account's vendor adds (a ChatGPT plan's new GPT)
 	go provider.KeepAccountsListed(ctx)
 	// and fetches the lists of the providers the user asked to keep fresh (#2135)
@@ -2965,6 +2970,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	if ruleReq != nil && g.Ruled() {
 		hit = ruleFor(ruleAt, g, ms, ruleReq, agent, ask, "")
+		if hit != nil && hit.terminal != nil {
+			call.Status, call.Error = http.StatusConflict, hit.terminal.Error()
+			decisionFailureHeaders(w.Header(), hit.terminal)
+			writeError(w, from, call.Status, call.Error)
+			turnedAway()
+			return
+		}
 	}
 	// Some clients send images even when the selected model is known to
 	// accept text only. Reject a new image and omit images from history.
@@ -3343,6 +3355,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			picked = hit.Pick
 		}
 		nested, nestedAt, cands, pl = s.nestedRules(ruleAt, ruleReq, agent, ask, ruled, cands, pl, aff, picked)
+		for _, classified := range nested {
+			if classified.Rule != nil && classified.Rule.terminal != nil {
+				call.Status, call.Error = http.StatusConflict, classified.Rule.terminal.Error()
+				decisionFailureHeaders(w.Header(), classified.Rule.terminal)
+				writeError(w, from, call.Status, call.Error)
+				turnedAway()
+				return
+			}
+		}
 	}
 	// the effort a group's decision model picked for the turn: the
 	// outermost group's that did
@@ -4357,13 +4378,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			handed.release()
 			handed.release = nil
 		}
-		if totals := extensionAttempt.Usage(); totals != nil {
-			call.Usage.Input, call.Usage.Output = int(totals.InputTokens), int(totals.OutputTokens)
-			call.Usage.CacheRead, call.Usage.CacheWrite = int(totals.CachedTokens), int(totals.CacheWriteTokens)
-		}
+		call.Usage = normalizedExtensionUsage(c.p, extensionAttempt, call.Usage)
 		if outcome := extensionAttempt.Outcome(call.Status >= 400 || hw.failure != 0 || hw.refused || hw.looped != "" || hw.slow); outcome != nil {
 			call.Status, call.Error = extensionOperationFailure(w, kept, from, askedFor, hw.passing && streams, outcome, extensionAttempt)
 			call.Usage.ErrType = "extension_operation_terminal"
+			watched.attempt(call, Try{Start: began, Model: c.model, Status: call.Status, Error: call.Error}, c.p.ID, sent, hw, capture)
 			s.trace.update(tr, func(t *Route) {
 				tt := &t.Tries[len(t.Tries)-1]
 				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Millis = true, call.Status, call.Error, failOther, time.Since(began).Milliseconds()
@@ -4511,6 +4530,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 				TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 				RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+			rec = accountedUsage(rec, call.Usage)
 			failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 			failed := &Call{RequestBody: call.RequestBody, RequestTruncated: call.RequestTruncated, ResponseBody: string(hw.errBody()), maskIn: call.maskIn}
 			if call.wholeIn != nil {
@@ -4756,6 +4776,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+				rec = accountedUsage(rec, call.Usage)
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 				// what this account answered is its refusal, the reply
 				// captured so far being no one's yet
@@ -4801,6 +4822,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+				rec = accountedUsage(rec, call.Usage)
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 				// what this account answered is its refusal, the reply
 				// captured so far being no one's yet
@@ -5686,6 +5708,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			rec.DownBytes, rec.ImageFilesSaved, rec.ImageFiles = up.downOf(), up.saved, up.images
 			rec.UpParts = upParts(prompt, up)
 		}
+		rec = accountedUsage(rec, call.Usage)
 		failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 		withBodies(&rec, &call)
 		appendUsage(r, rec)
@@ -6710,7 +6733,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		// a call no tool message answers, or an answer to no call, which
 		// Kimi and OpenAI turn the whole request away for: what a fork
 		// at an earlier turn or a stopped reply leaves (Paidaixinbao on X)
-		body = toolPairsOut(body)
+		if !p.IsExtension() {
+			body = toolPairsOut(body)
+		}
 		if mistral := p.VendorPreset() == "mistral" || p.VendorHost() == "api.mistral.ai"; !mistral && (chatReplaysReasoning(buildHost(p), model) || chatReplaysReasoning(buildHost(p), upstream)) {
 			// a tool call the client kept no thinking for, which DeepSeek
 			// turns the whole request away for (#1462)

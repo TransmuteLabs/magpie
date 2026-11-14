@@ -304,17 +304,16 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 		} else {
 			defer cancel() // once the answer is copied
 		}
-		tried(code, err)
 		call.Millis = time.Since(start).Milliseconds()
 		noReplay := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400)
 		if noReplay != nil {
 			code, err = http.StatusConflict, noReplay
 		}
 		if err != nil && noReplay == nil && !last && r.Context().Err() == nil {
+			tried(code, err)
 			skipped = append(skipped, c.label()+": "+err.Error())
 			continue
 		}
-		call.Status = code
 		in, outTokens := retrievedTokens(b), answeredTokens(b)
 		var cached Usage // the cache's share, when the answer tells it
 		if cr, ok := req.(countedRetrieval); ok && res == nil && err == nil {
@@ -328,31 +327,41 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 			w.WriteHeader(code)
 			var cut error
 			in, outTokens, cut = copyAnswer(w, res.Body)
-			res.Body.Close()
+			cut = errors.Join(cut, res.Body.Close())
 			call.Millis = time.Since(start).Milliseconds()
 			if cut != nil {
-				call.Error = "the answer was cut off: " + cut.Error()
+				code, err = http.StatusBadGateway, fmt.Errorf("the answer was cut off: %w", cut)
+			}
+			if outcome := extensionSideOutcome(w, extensionAttempt, err != nil); outcome != nil {
+				code, err = http.StatusConflict, outcome
 			}
 		}
-		call.Usage.Input, call.Usage.Output = in, outTokens
-		call.Usage.CacheRead, call.Usage.CacheWrite = cached.CacheRead, cached.CacheWrite
+		tried(code, err)
+		call.Status = code
+		call.Usage = normalizedExtensionUsage(c.p, extensionAttempt, Usage{
+			Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite,
+		})
 		call.Fallback = strings.Join(skipped, "; ")
 		providerKeyID, providerKeyName := "", ""
 		if c.p.Account == nil && c.p.Key != "" {
 			providerKeyID, providerKeyName = provider.KeyID(c.p.Key), c.p.KeyName
 		}
-		side.end(c.p, c.model, code, err, Usage{Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite})
-		appendUsage(r, usage.Record{RouteID: side.id(), Operation: operation, Time: start, Agent: call.Agent, Via: call.Via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(c.p),
-			Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite, Millis: call.Millis, Status: code, Session: sessionOf(r.Header)})
 		if err != nil {
 			call.Error = err.Error()
+		}
+		side.end(c.p, c.model, code, err, call.Usage)
+		appendUsage(r, accountedUsage(usage.Record{RouteID: side.id(), Operation: operation, Time: start, Agent: call.Agent, Via: call.Via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(c.p),
+			Millis: call.Millis, Status: code, Error: call.Error, Session: sessionOf(r.Header)}, call.Usage))
+		if err != nil {
 			s.record(call)
 			msg := err.Error()
 			if len(skipped) > 0 {
 				msg += " (tried first: " + call.Fallback + ")"
 			}
-			heard.into(w.Header())
-			writeError(w, provider.Chat, code, msg)
+			if res == nil {
+				heard.into(w.Header())
+				writeError(w, provider.Chat, code, msg)
+			}
 			return
 		}
 		s.record(call)

@@ -39,6 +39,8 @@ func extensionRequestOperation(request *http.Request, descriptor sdk.ProviderDes
 	}
 	var operation sdk.ProviderOperation
 	switch request.Method + " " + endpoint {
+	case "POST /systemone":
+		operation = sdk.OperationSystemOne
 	case "POST /embeddings":
 		operation = sdk.OperationEmbeddings
 	case "POST /rerank":
@@ -76,6 +78,9 @@ func extensionRequestOperation(request *http.Request, descriptor sdk.ProviderDes
 	}
 	if operation == "" || !descriptor.SupportsOperation(operation) {
 		return "", "", errors.New("extension provider did not declare the requested operation")
+	}
+	if operation == sdk.OperationSystemOne {
+		return "", operation, nil
 	}
 	return "chat", operation, nil
 }

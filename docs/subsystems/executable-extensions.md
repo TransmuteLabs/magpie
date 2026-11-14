@@ -6,7 +6,7 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Current SDK source API 1.6 includes native/composite APIs, API 1.2 gateway
+Current SDK source API 1.8 includes native/composite APIs, API 1.2 gateway
 hooks/private tools, and API 1.3 transactional refresh, provider operations
 and extended model metadata, plus API 1.4 routing strategies, selected-account
 usage revisions, business cancellation and native executor constraints.
@@ -19,6 +19,15 @@ targets through the ordinary agent controller. API 1.6 adds bounded local
 JSONL session sources and finite native account operations bound to the
 original inbound lease and owned agent. Each adapter has separate scoped
 evidence; contract composition does not establish vendor compatibility.
+API 1.7 adds the selected-account `systemone` operation and decision model
+association, using the existing System One, Decisions and classifier owners.
+Its bounded contract and verification are recorded in
+[ADR 0022](../adr/0022-sdk17-decision-operation.md); own-model agent metadata
+and controller changes are separate work.
+API 1.8 adds scoped own-call accounting and explicitly declared outside
+account-history readers through the existing usage owners. Their distinct
+observer, generation, paging and deduplication contracts are recorded in
+[ADR 0025](../adr/0025-sdk-own-calls-and-outside-history.md).
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
 immutable aggregate runs from later fixes. Those scoped records do not
@@ -39,6 +48,10 @@ separates conversational protocols, finite operations and catalog metadata.
 [ADR 0011](../adr/0011-native-executor-constraints.md) owns native executor
 binding; [ADR 0013](../adr/0013-usage-revisions-and-business-cancel.md) owns
 quota applicability, usage freshness and separate cancellation intents.
+The selected-account check-in and gateway activation owner is
+[ADR 0024](../adr/0024-sdk-account-checkin-gateway-activation.md). These
+optional API 1.8 declarations retain the ordinary check-in and component
+lifetime owners; merely installing a module grants neither behavior.
 See [extension providers](extension-providers.md),
 [agents and sessions](extension-agents-sessions.md), and
 [legacy Go codec embedding](protocol-extensions.md) for their owners.
@@ -64,7 +77,7 @@ See [extension providers](extension-providers.md),
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 6}` and thirteen capabilities. The finite operation
+SDK API `{major: 1, minor: 8}`. The finite operation
 registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
@@ -195,6 +208,28 @@ failures leave the previous published generation active. Once published,
 old workers drain under the ordinary lifecycle; vendor state is not rolled
 back automatically. To select another version, explicitly add its tagged
 source again. A local reinstall clears the remote source.
+
+## Gateway activation (API 1.8)
+
+A root `activation: ["gateway"]` explicitly requests a component lease while
+the ordinary gateway listens. Unknown or duplicate activation points and
+pre-1.8 declarations fail admission. `Server.New`, `Server.Front`, metadata
+discovery and a failed listener bind acquire no activation. Empty catalogs
+continue to need no module, native library, executable worker or Bun.
+
+After successful bind, [`extension_activation.go`](../../internal/gateway/extension_activation.go)
+attaches [`Manager.BeginGatewayActivation`](../../internal/extension/gateway_activation.go).
+Its handle pins package and configuration identity, reconciles local and
+external catalog changes, and joins its removable change subscription.
+Disable, removal, configuration replacement and shutdown release the lease
+and retire the cached generation through the existing bounded drain and
+disposer before replacement. Startup failure is logged and the ordinary
+listener continues serving.
+
+Private service manifests inherit no activation. Public component
+handshakes also omit a provider's check-in declaration when its referenced
+action belongs to a different component, just as they omit that action;
+the installed root retains the complete registration authority.
 
 ## Module components and configuration
 

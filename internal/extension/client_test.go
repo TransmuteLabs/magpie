@@ -177,7 +177,8 @@ func helperModule() sdk.Module {
 			}
 			return sdk.OperationResult{OperationID: target, Outcome: "canceled"}, nil
 		},
-		sdk.MethodToolCall: fixtureTool,
+		sdk.MethodToolCall:      fixtureTool,
+		sdk.MethodLedgerObserve: fixtureLedger,
 		sdk.MethodAgentPlan: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 			return sdk.AgentPlan{Files: []sdk.FileChange{{Path: "config.json", Body: []byte(`{"model":"fixture"}`)}}}, nil
 		},
@@ -260,6 +261,16 @@ func fixtureTool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, e
 		return nil, err
 	}
 	switch args.Action {
+	case "catalog":
+		var projection sdk.CatalogReadResult
+		err := stream.HostCall(ctx, sdk.MethodCatalogRead, sdk.CatalogReadRequest{}, &projection)
+		return projection, err
+	case "diagnostic":
+		var result sdk.DiagnosticResult
+		if err := stream.HostCall(ctx, sdk.MethodDiagnosticEmit, args.Value, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
 	case "usage-invalidate":
 		if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
 			return nil, err

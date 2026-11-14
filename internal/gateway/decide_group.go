@@ -9,7 +9,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/usage"
 )
 
 // decisionGroupOf is the decision group a System One request's model names:
@@ -60,11 +58,19 @@ func decisionGroupOf(asked string) (g provider.Group, ms []provider.Member, ok b
 // chat — with the models of it that answer no System One left out. left
 // and order are what the routing log shows of the plan.
 func (s *Server) decideTries(g provider.Group, ms []provider.Member) ([]candidate, planned, []provider.Member) {
-	ms = slices.DeleteFunc(slices.Clone(ms), func(m provider.Member) bool { return !m.Provider.DecidesModel(m.Model) })
+	ms = slices.DeleteFunc(slices.Clone(ms), func(m provider.Member) bool {
+		if m.Provider.IsExtension() {
+			return !m.Provider.ExtensionListsDecisionModel(m.Model)
+		}
+		return !m.Provider.DecidesModel(m.Model)
+	})
 	if len(ms) == 0 {
 		return nil, planned{}, nil
 	}
 	cs, pl := s.planGroup(g, ms, provider.Chat)
+	cs = slices.DeleteFunc(cs, func(c candidate) bool {
+		return c.p.IsExtension() && !c.p.DecidesModel(c.model)
+	})
 	return cs, pl, ms
 }
 
@@ -157,7 +163,12 @@ func (s *Server) decideKeys(p provider.Provider, model string) ([]candidate, pla
 	// a key on another of its preset's plans is asked at that plan's
 	// endpoints, where there may be no System One (Volcengine's Coding
 	// Plan beside its pay as you go): never there
-	cs = slices.DeleteFunc(cs, func(c candidate) bool { return !c.p.Decides() })
+	cs = slices.DeleteFunc(cs, func(c candidate) bool {
+		if c.p.IsExtension() {
+			return !c.p.DecidesModel(c.model)
+		}
+		return !c.p.Decides()
+	})
 	return cs, pl
 }
 
@@ -236,13 +247,39 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 				}
 			})
 		}
-		d, err := s.postDecideSent(r.Context(), c.p, c.model, withModel(body, c.model))
+		ctx := provider.WithClientHeaders(r.Context(), c.p.ID, r.Header)
+		d, err := s.postDecideSent(ctx, c.p, c.model, withModel(body, c.model))
 		status, b, header := d.status, d.answer, d.header
+		if err == nil && status < 300 && c.p.IsExtension() {
+			if validate, ok := ctx.Value(decisionAnswerValidatorKey{}).(func([]byte) error); ok {
+				err = validate(b)
+			}
+		}
 		call.Provider = c.p.ID
+		used := d.counted()
+		var outcome error
+		if err != nil {
+			outcome = decisionFailure(err, d.attempt)
+		} else if status >= 400 {
+			outcome = decisionFailure(errors.New(provider.APIError(b, http.StatusText(status))), d.attempt)
+		}
+		terminal := terminalExtensionError(outcome)
+		if terminal {
+			status, err, last = http.StatusConflict, outcome, true
+		}
+		note := func() {
+			call.Usage = used
+			record := decisionUsageRecord(at, c.p, c.model, asked, used, status, call.archiveName())
+			record.RouteID, record.Agent, record.Via = tr.ID, who.agent, who.via
+			if call.Error != "" {
+				failedWith(&record, status, call.Error, used.ErrType)
+			}
+			appendUsage(r, record)
+		}
 		if err != nil {
 			fail, rest := failOther, (*Rest)(nil)
 			var tooMany *errRPM
-			if r.Context().Err() == nil && !errors.As(err, &tooMany) {
+			if !terminal && r.Context().Err() == nil && !errors.As(err, &tooMany) {
 				// unreachable: it rests, as a chat's would
 				fail, rest = s.decideFailed(c, http.StatusBadGateway, nil, []byte(err.Error()))
 			}
@@ -252,24 +289,25 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 				continue
 			}
 			last = true
-			tried(http.StatusBadGateway, err.Error(), fail, rest, Usage{})
+			if !terminal {
+				status = http.StatusBadGateway
+			}
+			tried(status, err.Error(), fail, rest, used)
 			msg := err.Error()
 			if len(skipped) > 0 {
 				msg += " (tried first: " + strings.Join(skipped, "; ") + ")"
 			}
-			call.Status, call.Error = http.StatusBadGateway, msg
-			writeError(w, provider.Chat, http.StatusBadGateway, msg)
+			call.Status, call.Error, call.Fallback = status, msg, strings.Join(skipped, "; ")
+			if d.usage != nil || terminal {
+				note()
+			}
+			passReplyHeaders(w.Header(), c.p, &http.Response{Header: header})
+			if terminal {
+				decisionFailureHeaders(w.Header(), err)
+			}
+			writeError(w, provider.Chat, status, msg)
 			return
 		}
-		var use struct {
-			Model string `json:"model"` // the one that answered, when the reply says
-			Usage struct {
-				Input  int `json:"input_tokens"`
-				Output int `json:"output_tokens"`
-			} `json:"usage"`
-		}
-		_ = json.Unmarshal(b, &use)
-		used := Usage{Input: use.Usage.Input, Output: use.Usage.Output}
 		errMsg, fail := "", ""
 		var rest *Rest
 		if status >= 300 {
@@ -284,26 +322,26 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 			}
 		}
 		last = true
-		took := time.Since(start).Milliseconds() // before what magpie writes down of it (#1939)
 		tried(status, errMsg, fail, rest, used)
 		if status < 400 {
 			servedCandidate(c, used.Input+used.Output)
 		}
-		var keyID, keyName string
-		if c.p.Account == nil && c.p.Key != "" {
-			keyID, keyName = provider.KeyID(c.p.Key), c.p.KeyName
-		}
 		call.Status, call.Error, call.Fallback = status, errMsg, strings.Join(skipped, "; ")
-		call.Usage = Usage{Input: use.Usage.Input, Output: use.Usage.Output, Served: use.Model}
-		appendUsage(r, usage.Record{RouteID: tr.ID, Time: start, Agent: who.agent, Via: who.via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, Served: use.Model,
-			ProviderKeyID: keyID, ProviderKeyName: keyName, ProviderAccount: accountOf(c.p),
-			Input: use.Usage.Input, Output: use.Usage.Output, Millis: took, Status: status, Archive: call.archiveName()})
+		note()
 		ctype := header.Get("Content-Type")
 		if ctype == "" || status < 300 {
 			ctype = "application/json"
 		}
 		if status >= 400 {
 			keepRetryOut(w.Header(), header, b)
+		}
+		passReplyHeaders(w.Header(), c.p, &http.Response{Header: header})
+		if c.p.IsExtension() && d.attempt != nil {
+			module, operation := d.attempt.Operation()
+			if operation != "" {
+				w.Header().Set("X-Magpie-Extension", module)
+				w.Header().Set("X-Magpie-Operation", operation)
+			}
 		}
 		w.Header().Set("Content-Type", ctype)
 		w.WriteHeader(status)
@@ -381,6 +419,9 @@ func (s *Server) askDecideTries(wait time.Duration, cs []candidate, intents []st
 		if v, err = s.askJev(ctx, wait, c.p, c.model, intents, prev, effort, text); err == nil {
 			servedCandidate(c, 0)
 			return v, nil
+		}
+		if terminalExtensionError(err) {
+			return verdict{}, err
 		}
 		var refused decideRefused
 		var answer answerError

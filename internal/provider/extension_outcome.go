@@ -49,11 +49,24 @@ func (attempt *ExtensionAttempt) Usage() *sdk.Usage {
 	}
 	attempt.mu.Lock()
 	defer attempt.mu.Unlock()
-	if attempt.usage == nil {
+	return attempt.usage.Clone()
+}
+
+func (attempt *ExtensionAttempt) UsageFor(p Provider) *sdk.Usage {
+	if attempt == nil {
 		return nil
 	}
-	usage := *attempt.usage
-	return &usage
+	scope, ok := p.ExtensionScope()
+	if !ok {
+		return nil
+	}
+	attempt.mu.Lock()
+	defer attempt.mu.Unlock()
+	if attempt.usage == nil || attempt.scope.Plugin != scope.Plugin || attempt.scope.Provider != scope.Provider ||
+		attempt.scope.Account != scope.Account || attempt.scope.Generation != scope.Generation {
+		return nil
+	}
+	return attempt.usage.Clone()
 }
 
 func (attempt *ExtensionAttempt) Operation() (string, string) {
@@ -66,6 +79,7 @@ func extensionBegin(ctx context.Context, scope sdk.Scope) {
 	if attempt := extensionAttemptOf(ctx); attempt != nil {
 		attempt.mu.Lock()
 		attempt.scope = scope
+		attempt.usage = nil
 		attempt.mu.Unlock()
 	}
 }
@@ -122,8 +136,7 @@ func extensionSelectionFailure(ctx context.Context, scope sdk.Scope, err error) 
 func extensionUsage(ctx context.Context, usage *sdk.Usage) {
 	if attempt := extensionAttemptOf(ctx); attempt != nil && usage != nil {
 		attempt.mu.Lock()
-		copy := *usage
-		attempt.usage = &copy
+		attempt.usage = usage.Clone()
 		attempt.mu.Unlock()
 	}
 }

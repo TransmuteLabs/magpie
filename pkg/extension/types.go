@@ -80,6 +80,7 @@ type Model struct {
 	ID               string                 `json:"id"`
 	Name             string                 `json:"name,omitempty"`
 	Protocols        []protocolext.Protocol `json:"protocols,omitempty"`
+	Operations       []ProviderOperation    `json:"operations,omitempty"`
 	ContextWindow    int64                  `json:"contextWindow,omitempty"`
 	MaxContextWindow int64                  `json:"maxContextWindow,omitempty"`
 	MaxOutput        int64                  `json:"maxOutput,omitempty"`
@@ -155,12 +156,13 @@ type AuthResult struct {
 }
 
 type Usage struct {
-	InputTokens      int64   `json:"inputTokens,omitempty"`
-	OutputTokens     int64   `json:"outputTokens,omitempty"`
-	CachedTokens     int64   `json:"cachedTokens,omitempty"`
-	CacheWriteTokens int64   `json:"cacheWriteTokens,omitempty"`
-	Cost             float64 `json:"cost,omitempty"`
-	Currency         string  `json:"currency,omitempty"`
+	InputTokens      int64                `json:"inputTokens,omitempty"`
+	OutputTokens     int64                `json:"outputTokens,omitempty"`
+	CachedTokens     int64                `json:"cachedTokens,omitempty"`
+	CacheWriteTokens int64                `json:"cacheWriteTokens,omitempty"`
+	Cost             float64              `json:"cost,omitempty"`
+	Currency         string               `json:"currency,omitempty"`
+	Facts            *ExecutionUsageFacts `json:"facts,omitempty"`
 }
 
 type UsageRequest struct {

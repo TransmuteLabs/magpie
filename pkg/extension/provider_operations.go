@@ -11,6 +11,7 @@ import (
 type ProviderOperation string
 
 const (
+	OperationSystemOne       ProviderOperation = "systemone"
 	OperationEmbeddings      ProviderOperation = "embeddings"
 	OperationRerank          ProviderOperation = "rerank"
 	OperationImageGenerate   ProviderOperation = "images.generate"
@@ -27,7 +28,7 @@ const (
 
 func (operation ProviderOperation) Valid() bool {
 	switch operation {
-	case OperationEmbeddings, OperationRerank, OperationImageGenerate, OperationImageEdit,
+	case OperationSystemOne, OperationEmbeddings, OperationRerank, OperationImageGenerate, OperationImageEdit,
 		OperationAudioTranscribe, OperationAudioTranslate, OperationAudioSpeech,
 		OperationVideoCreate, OperationVideoGet, OperationVideoContent, OperationVideoDelete, OperationVideoRemix:
 		return true
@@ -41,26 +42,54 @@ func (provider ProviderDescriptor) SupportsOperation(operation ProviderOperation
 
 func ValidateExecuteOperation(manifest Manifest, scope Scope, raw json.RawMessage) error {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields["operation"] == nil {
+	if json.Unmarshal(raw, &fields) != nil {
 		return nil
 	}
+	var model string
+	_ = json.Unmarshal(fields["model"], &model)
 	var operation ProviderOperation
-	if json.Unmarshal(fields["operation"], &operation) != nil {
+	if fields["operation"] != nil && json.Unmarshal(fields["operation"], &operation) != nil {
 		return &Error{Code: "invalid_params", Message: "invalid provider operation", Outcome: "not-started"}
 	}
 	if operation == "" {
+		for _, provider := range manifest.Providers {
+			if provider.ID == scope.Provider && slices.ContainsFunc(provider.Models, func(entry Model) bool {
+				return entry.ID == model && entry.Kind == "decision"
+			}) {
+				return &Error{Code: "invalid_params", Message: "decision model requires its declared operation", Outcome: "not-started"}
+			}
+		}
 		return nil
 	}
+	for _, provider := range manifest.Providers {
+		if provider.ID == scope.Provider && operation != OperationSystemOne &&
+			slices.ContainsFunc(provider.Models, func(entry Model) bool { return entry.ID == model && entry.Kind == "decision" }) {
+			return &Error{Code: "invalid_params", Message: "decision model requires its systemone operation", Outcome: "not-started"}
+		}
+	}
 	var protocol string
-	if json.Unmarshal(fields["protocol"], &protocol) != nil || protocol != "chat" ||
-		manifest.Contract.Version.Minor < 3 || !operation.Valid() {
-		return &Error{Code: "invalid_params", Message: "provider operation requires its negotiated OpenAI-compatible protocol", Outcome: "not-started"}
+	expected, minor := "chat", 3
+	if operation == OperationSystemOne {
+		expected, minor = "", 7
+	}
+	if json.Unmarshal(fields["protocol"], &protocol) != nil || protocol != expected ||
+		manifest.Contract.Version.Minor < minor || !operation.Valid() {
+		return &Error{Code: "invalid_params", Message: "provider operation requires its negotiated API and protocol envelope", Outcome: "not-started"}
 	}
 	for _, provider := range manifest.Providers {
-		if provider.ID == scope.Provider && provider.SupportsOperation(operation) &&
-			slices.Contains(provider.Protocols, "chat") {
-			return nil
+		if provider.ID != scope.Provider || !provider.SupportsOperation(operation) {
+			continue
 		}
+		if operation == OperationSystemOne {
+			if model == "" || !manifest.Contract.Has(ModelDiscovery) && !slices.ContainsFunc(provider.Models, func(entry Model) bool {
+				return entry.ID == model && entry.Kind == "decision" && slices.Contains(entry.Operations, operation)
+			}) {
+				return &Error{Code: "invalid_params", Message: "decision model did not declare the requested operation", Outcome: "not-started"}
+			}
+		} else if !slices.Contains(provider.Protocols, "chat") {
+			continue
+		}
+		return nil
 	}
 	return &Error{Code: "method_not_found", Message: "provider operation is not declared by this generation", Outcome: "not-started"}
 }
@@ -78,9 +107,37 @@ func validateProviderOperations(manifest Manifest, provider ProviderDescriptor) 
 			return fmt.Errorf("invalid or duplicate provider operation %q", operation)
 		}
 		seen[operation] = true
+		if operation == OperationSystemOne {
+			if manifest.Contract.Version.Minor < 7 {
+				return fmt.Errorf("decision operations require SDK API 1.7")
+			}
+			if !manifest.Contract.Has(ModelDiscovery) {
+				return fmt.Errorf("decision operations require selected-account model discovery")
+			}
+		} else if !slices.Contains(provider.Protocols, "chat") {
+			return fmt.Errorf("provider operations require the OpenAI-compatible chat protocol")
+		}
 	}
-	if !slices.Contains(provider.Protocols, "chat") {
-		return fmt.Errorf("provider operations require the OpenAI-compatible chat protocol")
+	return nil
+}
+
+func validateModelOperations(manifest Manifest, provider ProviderDescriptor, model Model) error {
+	if (model.Kind == "decision" || len(model.Operations) > 0) && manifest.Contract.Version.Minor < 7 {
+		return fmt.Errorf("model operations and decision kind require SDK API 1.7")
+	}
+	seen := map[ProviderOperation]bool{}
+	for _, operation := range model.Operations {
+		if !operation.Valid() || !provider.SupportsOperation(operation) || seen[operation] {
+			return fmt.Errorf("invalid, undeclared or duplicate model operation %q", operation)
+		}
+		seen[operation] = true
+	}
+	if model.Kind == "decision" {
+		if len(model.Protocols) != 0 || len(model.Operations) != 1 || model.Operations[0] != OperationSystemOne {
+			return fmt.Errorf("decision models require only systemone and no conversational protocols")
+		}
+	} else if seen[OperationSystemOne] {
+		return fmt.Errorf("systemone requires a decision model")
 	}
 	return nil
 }
@@ -94,7 +151,7 @@ func validateExtendedModel(manifest Manifest, model Model) error {
 		return fmt.Errorf("extended model metadata requires SDK API 1.3")
 	}
 	switch model.Kind {
-	case "", "chat", "image", "video", "embedding", "rerank", "speech", "transcription":
+	case "", "chat", "image", "video", "embedding", "rerank", "speech", "transcription", "decision":
 	default:
 		return fmt.Errorf("unsupported model kind %q", model.Kind)
 	}

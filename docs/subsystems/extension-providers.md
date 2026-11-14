@@ -113,6 +113,28 @@ Unknown expiry leaves current behavior unchanged. Network holds and manually
 superseded generations fail closed. This is request-driven preflight,
 separate from periodic scheduling and the module's vendor-specific exchange.
 
+API 1.8 providers with `account-auth` may opt into idle authentication renewal
+with `keepAlive: {leadMs: 60000}`. An absent/null declaration is off; an empty
+object defaults to one minute. An explicit lead is an integer from one minute
+through one hour. This renews authentication only, without model execution,
+paid cache warming or inference accounting. Public and complete manifest
+clones retain independent policy; private service manifests gain no account
+renewal authority.
+
+[`KeepExtensionsSignedIn`](../../internal/provider/extension_keepalive.go)
+starts only after the ordinary gateway listener binds and joins on shutdown.
+Catalog inspection starts no worker or Bun, including with empty catalogs.
+Only enabled providers and ordinarily listed, enabled, visible, nonpaused,
+nonlapsed accounts with known expiry are eligible. Discovery off and failed
+policy/store reads suppress renewal. The timer uses the selected account's
+network hold/proxy policy and pins its package, configuration and generation
+before calling the existing leased `auth.refresh` transaction. It verifies an
+actual refresh-successor receipt, rechecks policy and binding, and never
+adopts a manual credential replacement. Startup is cancellable; an already
+dispatched rotating-token exchange finishes under the bounded refresh owner
+before shutdown returns. Failures use the existing exponential backoff per
+binding, capped at thirty minutes, without marking the account lapsed.
+
 Auth, model discovery and usage calls apply the selected provider/account's
 `Via` policy while preserving their parent request context. A network hold
 prevents invoking the module; a held usage read remains deferred. The
@@ -120,6 +142,34 @@ prevents invoking the module; a held usage read remains deferred. The
 context through `netproxy.Func`, including named and global proxies or a
 direct route. `Options.proxy` is the selected choice, not necessarily a
 resolved proxy URL.
+
+## Selected-account check-in (API 1.8)
+
+An authenticated provider may declare
+`checkin: {"action": "daily.claim", "recheck": false}` under `module-rpc`.
+The action must be a declared write, on the primary or its private service.
+[`extension_checkin.go`](../../internal/provider/extension_checkin.go)
+appends exact account IDs to the ordinary check-in runner, Settings and
+quota cards. Automatic execution defaults to off. Provider/account Off,
+account exclusion, manual policy, the ordinary owner's day and retry gates
+keep their existing owners. Identical display names never merge accounts.
+
+[`Manager.CheckinAccount`](../../internal/extension/account_checkin.go)
+pins package/configuration and selected account generation, rechecks after
+lazy service startup and applies the selected refresh, proxy and hold
+policy. Its unary request carries `day` and `proxy`; credentials stay in
+`Frame.Auth`. The finite result preserves absent and explicit zero credit,
+and accepts a bounded message and strict RFC3339 boundary.
+
+The host-private [`checkin_intent.go`](../../internal/extension/checkin_intent.go)
+reserves a durable operation before dispatch. Lost, invalid, failed or
+uncertain completion refuses another write across manual presses, manager
+restart, credential generation changes and loss of the display record.
+Known not-started and ordinary completed non-claim rechecks get distinct
+intents. The saved result retains the exact operation scope and terminal
+state. Credit grants do not create an inference ledger row. See
+[ADR 0024](../adr/0024-sdk-account-checkin-gateway-activation.md) for the
+wire, reconciliation boundary and scoped evidence.
 
 ## Declared operations and model facts
 
@@ -131,6 +181,38 @@ omitted list retains conversational execution only. The actual leased
 manifest and both author SDKs reject undeclared operations before dispatch.
 `ExecuteRequest.operation` names the operation; `Options` preserves method,
 path, escapedPath, query and selected proxy. Host credentials remain separate.
+
+API 1.7 adds `systemone` with `ExecuteRequest.protocol == ""`. A model of
+kind `decision` declares `operations: ["systemone"]`; its absent, null or
+empty protocols mean no conversational API. Other model kinds keep their
+existing protocol defaults, and pre-1.7 media operations keep the chat
+envelope without acquiring a per-model operation requirement. Provider
+admission and the actual leased execute both enforce the negotiated minor.
+System One requires model discovery. Static decision entries are hints;
+unknown, stale and successfully empty account catalogs grant no decision
+operation. A cold empty catalog stays empty. The provider-wide display union
+can resolve a group or classifier, but the selected account's current
+catalog authorizes execution. No model is inferred from its name.
+
+The adapter enters ordinary `/v1/systemone`, `/v1/decisions`, decision groups
+and classifier routing. Each execution has its own acceptance state, usage
+snapshot and operation receipt. Calibration and main classification remain
+distinct executions, including under one native request ID. Accepted,
+uncertain or completed-but-failed work stops account/group fallback and
+the original classifier turn before previous-intent, default or nested
+conversational dispatch. Errors retain their typed cause through deadlines
+and caches. A cached/shared failure preserves the terminal fence but cannot
+give another request the original operation receipt.
+
+The decision owner consumes normalized usage once after reading and closing
+the response: a present final snapshot overrides cumulative events, including
+zero; an absent final snapshot retains the latest event. Only absent
+normalized usage falls back to raw System One token counts. Measured terminal
+failures reach the ledger, observers and recent-call/route diagnostics.
+Decisions translation validates the answer before the SDK execution is
+recorded as successful and appends no second billing row. This slice uses
+normalized token/cache totals; SDK cost/currency is not a new monetary
+conversion policy.
 
 Kinds distinguish images, video, embeddings, rerank, speech and transcription
 from chat. Modalities retain unknown versus explicitly empty values.
@@ -144,6 +226,57 @@ credential rotation. Pausing that account cannot transfer its video to
 another account that became the provider's default.
 
 ## Quota and execution
+
+Execution accounting uses the ordinary ledger, routing history, Recent calls,
+observers and budgets. The selected execution owns a deeply copied cumulative
+snapshot. A present final snapshot replaces the latest event, including zero;
+an absent final snapshot retains it. API 1.7's optional sparse `Usage.facts`
+also preserves cache TTL, reasoning, deferred counters, vendor identifiers,
+service tier, credits and reported monetary currency. An explicit USD amount
+uses the existing USD cost override; another currency is retained as
+`reported_cost` without conversion. Media closes the response before reading
+terminal status and never appends an error payload to already streamed audio.
+See [the accounting decision](../adr/0023-sdk-execution-observability.md) and
+[`extension_usage.go`](../../internal/gateway/extension_usage.go).
+
+API 1.8 separates accepted module-owned calls from outside account history.
+`usage.append` sends one measured call per live accepted module/tool write
+intent through the ordinary `Append` and its observers. The host supplies
+identity and refuses read/inference origins, revoked generations and replaced
+package/configuration bindings. A provider's explicit `calls: true` opt-in
+adds `provider.calls`, a bounded unary paged reader used by the existing
+`ReadOutsideCalls` loop and `IngestReported`. History has reported-RID
+deduplication and retains its watermark on failure; it has no live observer
+effects. See [the own-call/history contract](../adr/0025-sdk-own-calls-and-outside-history.md)
+for exact authority, limits, failure and best-effort delivery semantics.
+
+`diagnostics.emit` is a scoped API 1.7 host callback. Modules provide bounded
+codes/phases and numeric facts; the host supplies identity and applies a
+sixty-entry per-module minute budget before the existing application logger.
+Free-text, request bodies and credentials are not accepted. Worker stderr is
+still drained without logging. Diagnostic records do not mutate an account or
+constitute an acceptance receipt.
+
+API 1.8 `catalogAccess` declares `selected` or `inventory` authority for
+`catalog.read`. The provider owner projects enabled, listed models, per-account
+restrictions and cached quota windows with model applicability and timestamps.
+The caller receives opaque account references, not account names, keys, endpoints
+or headers. A missing or failed reading is unknown. Reading this projection does
+not refresh vendor data. The host checks package, configuration, cancellation and
+selected account generation before and after the owner read; private services
+retain only explicitly granted root permission.
+
+The separate API 1.8 `ledger-observer` capability and `ledger` descriptor use the
+ordinary `usage.Observer` entry point. Only the serving gateway consumes the
+bounded queue, with an allow-listed numeric/metadata projection. Bodies, sessions,
+request IDs, account names, key labels and raw error text are omitted. Enqueuing
+does not read a catalog or wait for a module. Each queued delivery pins the
+package/configuration target observed when the row was appended; replacement or
+disable cannot redirect old rows to a new target. Calls are unary and read-only,
+including delegated host callbacks. Overflow and failed delivery are counted and
+reported through the application log. Stopping the observer cancels and joins its
+processor. Imported outside-account history retains its deliberate observer
+bypass. This sink is not request capture or guaranteed durable export.
 
 `provider.usage` returns validated quota windows through the existing
 subscription quota path. Both the reading cache and routing freshness are
@@ -195,11 +328,12 @@ Streaming data uses bounded chunks and synchronous pipe writes, preserving
 consumer backpressure. Usage events provide normalized token totals to the
 existing ledger.
 
-Native metadata is included under `Options.native` only when its module
-matches the selected executor. A matching native request ID is also carried
-as `Options.requestId`, with the host's opaque caller identity in
-`Options.callerId` when present. Caller identity comes from trusted request
-metadata, separately from the module's raw metadata. The operation ID hashes
+Every SDK execution projects `Options.callerId` from the host-owned
+`extension.CallerIDFrom(ctx)`, including ordinary canonical requests and
+local-owner requests. Body fields, headers and native metadata cannot supply
+or override it. Native metadata is included under `Options.native` only when
+its module matches the selected executor. Only that matching native request
+ID is carried as `Options.requestId`. The operation ID hashes
 module, provider, account, caller identity, the effective session and native
 request ID, so equal request IDs in different callers or sessions remain
 independent. Without a matching request ID, a call receives a new
@@ -207,6 +341,14 @@ random operation ID. Authors must give intentional regeneration a new native
 request ID or session. Credential generation remains in the journal scope
 for fencing, but does not change a logical native operation's identity:
 reauthentication must not execute an already recorded request again.
+
+Same-protocol Chat execution bypasses the legacy `toolPairsOut` repair for
+SDK providers. Consecutive assistant fragments, reasoning aliases, distinct
+cache boundaries and missing tool results reach the module without that
+repair joining or manufacturing them. The module owns validation and any
+vendor-specific normalization. Ordinary non-SDK Chat relays retain their
+existing repair. Other gateway policies and protocol translations are
+unchanged.
 
 The manager owns durable operation acceptance and replay rejection. The
 ordinary gateway inference path shares an `ExtensionAttempt` across its
@@ -222,6 +364,10 @@ operation; status/cancel remain explicit operation-control calls.
 `extension_provider_test.go` in the provider package exercises account and
 generation policy, model discovery, quota conversion, credential separation,
 streaming, native metadata, stable operation IDs and store isolation.
+The separate `extension_canonical_test.go` files in provider and gateway
+verify trusted caller projection, private metadata ownership, exact Chat
+tool histories at the installed SDK execution boundary and the non-SDK
+repair control. Gateway cases enter through `Front`.
 `extension_models_test.go` checks custom-model prices and effort levels,
 unknown versus zero prices, core overrides and rates, and rejection of
 invalid refreshes without replacing the last validated snapshot.
@@ -235,6 +381,19 @@ resolution, named proxy authentication, direct routes, parent context and
 held calls without dialing any target. `extension_replay_test.go` checks
 that reauthentication retains a native operation's identity and original
 journal scope without executing it again.
+`extension_keepalive_test.go` and `extension_keepalive_policy_test.go` cover
+idle opt-in/eligibility, unknown reads, package/config/account revocation,
+selected proxy, backoff and a single real exec refresh shared with foreground
+renewal. The gateway test of the same name goes through `ListenAndServe`,
+checks that `New`, `Front` and failed bind stay inert, joins an in-flight
+refresh on shutdown and serves empty catalogs without Bun. Public Go/JS/type
+tests cover bounds, API compatibility and independent manifest snapshots.
+`extension_decisions_test.go` covers decision projection and selected-account
+warm/cold entitlements. The gateway test of the same name installs actual
+exec and C-shared native fixtures, then exercises both public decision APIs,
+group and original classifier replay fences, separate calibration accounting,
+headers and receipt isolation. The leased-operation admission test checks
+that unnegotiated work never reaches the durable journal.
 `extension_hold_test.go` covers catalog writes without local callbacks,
 including install, enable/disable, upgrade and removal, and local changes
 inside an active hold; its cache lifetimes are held long to exclude TTL
@@ -269,5 +428,5 @@ those reads and selections. Replacing module configuration or credentials
 must remove that model until discovery runs again; deleting the account
 must remove it as well.
 
-These fixtures establish the provider boundary, not native vendor parity,
-background refresh scheduling, or complete Go/Bun runtime conformance.
+These fixtures establish the provider boundary and synthetic idle renewal,
+not live vendor parity or complete Go/Bun runtime conformance.

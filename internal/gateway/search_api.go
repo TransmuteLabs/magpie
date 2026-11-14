@@ -249,7 +249,7 @@ func pageKey(raw string) string {
 // turned away; #1477), which then rests (searchRestFor). Anything else, such as
 // no answer in time, isn't about the key, and the next isn't tried.
 func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
-	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" && v.Auth != "" {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && (v.Plugin != "" || v.Extension != "") && v.Auth != "" {
 		return s.askSearchSignedIn(ctx, a, v, query)
 	}
 	keys := a.Keys()
@@ -381,6 +381,9 @@ func pagesSaid(pages []foundPage) (string, []Hit) {
 
 // askSearchAPI asks one search API for the query.
 func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
+	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Extension != "" {
+		return s.askExtensionSearch(ctx, v, nil, query)
+	}
 	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" {
 		return s.askPluginSearch(ctx, a, v, query)
 	}

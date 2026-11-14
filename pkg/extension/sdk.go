@@ -36,6 +36,21 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 	if handlers == nil {
 		handlers = make(map[string]Handler)
 	}
+	if handler := handlers[MethodProviderExecute]; handler != nil {
+		handlers[MethodProviderExecute] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			result, err := handler(ctx, call, stream)
+			if err != nil {
+				return result, err
+			}
+			raw, err := json.Marshal(result)
+			var execution ExecuteResult
+			if err != nil || json.Unmarshal(raw, &execution) != nil ||
+				ValidateExecutionUsage(module.Manifest, execution.Usage) != nil {
+				return nil, &Error{Code: "invalid_result", Message: "invalid provider execution usage", Outcome: "uncertain"}
+			}
+			return result, nil
+		}
+	}
 	if handler := handlers[MethodProviderUsage]; handler != nil {
 		handlers[MethodProviderUsage] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
 			result, err := handler(ctx, call, stream)
@@ -47,6 +62,23 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 				}
 			}
 			return result, err
+		}
+	}
+	if handler := handlers[MethodProviderCalls]; handler != nil {
+		handlers[MethodProviderCalls] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			request, err := DecodeOutsideCallsRequest(module.Manifest, call.Scope, call.Params)
+			if err != nil {
+				return nil, err
+			}
+			result, err := handler(ctx, call, stream)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			return DecodeOutsideCallsResult(module.Manifest, request, raw)
 		}
 	}
 	for _, method := range []string{MethodAgentInspect, MethodAgentPlan} {
@@ -113,6 +145,9 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 		if handler == nil || !slices.Contains(required, method) {
 			return nil, nil, fmt.Errorf("unnegotiated or invalid extension handler %q", method)
 		}
+		if IsStorageMethod(method) {
+			handlers[method] = storageHandler(module.Manifest.Clone(), method, handler)
+		}
 		if method == MethodSessionSourceRead {
 			descriptor := module.Manifest.Clone()
 			handlers[method] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
@@ -148,6 +183,13 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 			descriptor := *module.Manifest.Hooks
 			descriptor.Origins = slices.Clone(descriptor.Origins)
 			handlers[method] = gatewayHandler(method, handler, descriptor)
+		}
+		if IsMiddlewareMethod(method) {
+			descriptor := *module.Manifest.Clone().Middleware
+			handlers[method] = middlewareHandler(descriptor, method, handler)
+		}
+		if method == MethodLedgerObserve {
+			handlers[method] = ledgerHandler(handler)
 		}
 	}
 	snapshot := cloneManifest(module.Manifest)

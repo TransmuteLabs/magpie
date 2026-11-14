@@ -31,6 +31,11 @@ release after the module is disabled. Listing and help never grant read consent.
 
 ## API 1.6 JSONL session sources
 
+The separate API 1.8 rooted storage authoring and adapter seam is described in
+[Rooted executable storage sources](extension-storage-sources.md). Its
+coordinated capability admission and ordinary owner acceptance remain
+separate from the accepted JSONL reader contract.
+
 `session-source` is independent of `session-migration`. A converter does not
 register a reader. `sessionSources` descriptors declare a codec, agent, exact
 store slots and one finite JSONL layout. The host extracts the selected ID;

@@ -193,6 +193,11 @@ func ServiceManifest(root Manifest, id string) (Manifest, error) {
 			Contract:  Contract{Version: APIVersion{Major: 1, Minor: 1}, Capabilities: []Capability{ModuleRPC}},
 			Component: &ComponentIdentity{ID: id, Contract: service.Contract},
 		}
+		if root.CatalogAccess != nil {
+			value := *root.CatalogAccess
+			view.CatalogAccess = &value
+			view.Contract.Version = root.Contract.Version
+		}
 		for _, action := range root.Actions {
 			if actionOwner(action) == id {
 				action.InputSchema = slices.Clone(action.InputSchema)
@@ -353,12 +358,14 @@ func (manifest Manifest) validateComposite() error {
 		bindings[binding.ID] = true
 	}
 	if compatibility := manifest.Compatibility; compatibility != nil {
-		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" && compatibility.HostAPI != "^1.6" ||
+		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" && compatibility.HostAPI != "^1.6" && compatibility.HostAPI != "^1.7" && compatibility.HostAPI != "^1.8" ||
 			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 ||
 			compatibility.HostAPI == "^1.3" && manifest.Contract.Version.Minor < 3 ||
 			compatibility.HostAPI == "^1.4" && manifest.Contract.Version.Minor < 4 ||
 			compatibility.HostAPI == "^1.5" && manifest.Contract.Version.Minor < 5 ||
-			compatibility.HostAPI == "^1.6" && manifest.Contract.Version.Minor < 6 {
+			compatibility.HostAPI == "^1.6" && manifest.Contract.Version.Minor < 6 ||
+			compatibility.HostAPI == "^1.7" && manifest.Contract.Version.Minor < 7 ||
+			compatibility.HostAPI == "^1.8" && manifest.Contract.Version.Minor < 8 {
 			return fmt.Errorf("unsupported host API requirement %q", compatibility.HostAPI)
 		}
 		if len(compatibility.Platforms) > 128 {

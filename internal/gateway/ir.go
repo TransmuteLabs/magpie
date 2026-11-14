@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // The APIs are close cousins; everything below is the shape they have
@@ -554,8 +555,9 @@ type Usage struct {
 	// failed request's error body called the error
 	RequestID string `json:"request_id,omitempty"`
 	// ResponseID is the final client response ID, independent of request headers.
-	ResponseID string `json:"response_id,omitempty"`
-	ErrType    string `json:"err_type,omitempty"`
+	ResponseID         string `json:"response_id,omitempty"`
+	UpstreamResponseID string `json:"upstream_response_id,omitempty"`
+	ErrType            string `json:"err_type,omitempty"`
 	// Stop is why the upstream said its reply ended, in its own words
 	// (stop_reason, finish_reason, a Responses status): "" when it said
 	// none, as a stream that just stops does (upstreamStop)
@@ -570,7 +572,8 @@ type Usage struct {
 	// Credits is what the reply said the request cost in its plan's own
 	// credits, nil when it said none: WorkBuddy's usage.credit, the
 	// figure its app shows on each reply as "Credits Consumed" (#2512)
-	Credits *float64 `json:"credits,omitempty"`
+	Credits      *float64            `json:"credits,omitempty"`
+	ReportedCost *usage.ReportedCost `json:"reported_cost,omitempty"`
 }
 
 // billed is what the request is billed for: its own count, and what it
@@ -642,6 +645,9 @@ func (u *Usage) add(v Usage) {
 	if v.ResponseID != "" {
 		u.ResponseID = v.ResponseID
 	}
+	if v.UpstreamResponseID != "" {
+		u.UpstreamResponseID = v.UpstreamResponseID
+	}
 	if v.ErrType != "" {
 		u.ErrType = v.ErrType
 	}
@@ -653,6 +659,9 @@ func (u *Usage) add(v Usage) {
 	}
 	if v.Credits != nil {
 		u.Credits = v.Credits
+	}
+	if v.ReportedCost != nil {
+		u.ReportedCost = v.ReportedCost
 	}
 }
 

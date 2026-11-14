@@ -11,6 +11,7 @@ These pages describe current responsibilities, runtime paths, state, and contrac
 | Upstream extension surfaces, SDK contract/adapter coverage and remaining boundaries | [Extension surface coverage](extension-surface-coverage.md) |
 | Explicitly linked Go codec contracts and compatibility | [Protocol codec embedding](protocol-extensions.md) |
 | SDK provider catalog, account auth, usage, pricing and replay policy | [Extension providers](extension-providers.md) |
+| SDK search source registration, selected accounts and ordinary web search | [Extension search sources](extension-search.md) |
 | SDK agent wiring and session conversion | [Extension agents and sessions](extension-agents-sessions.md) |
 | Tools that plugins give, offered to every agent as an MCP server | [Plugin tools](plugin-tools.md) |
 | Plugins that await context recall and observe completed replies | [Asynchronous gateway request hooks](gateway-request-hooks.md) |

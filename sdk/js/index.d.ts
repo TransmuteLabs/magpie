@@ -1,23 +1,55 @@
+import type { StorageSourceDescriptor } from "./storage-source.js";
+import type { AccountKeepAliveDescriptor } from "./account-keepalive.js";
+export * from "./account-keepalive.js";
+import type { CatalogAccessDescriptor } from "./catalog-projection.js";
+import type { LedgerObservationDescriptor } from "./ledger.js";
+export * from "./ledger.js";
+export * from "./catalog-projection.js";
+export * from "./own-calls.js";
+export * from "./storage-source.js";
+import type { SearchSourceDescriptor } from "./search-sources.js";
+import type { GatewayMiddlewareDescriptor } from "./middleware.js";
+export * from "./middleware.js";
+export { type SearchSourceDescriptor, type SearchRequest, type SearchPage, type SearchResult, validateSearchRequest, validateSearchResult } from "./search-sources.js";
 export type UInt64 = number | bigint;
 export type JSONValue = null | boolean | number | bigint | string | JSONValue[] | { [key: string]: JSONValue };
+export interface AccountCheckinDescriptor {
+  action: string;
+  recheck?: boolean;
+}
+export interface AccountCheckinRequest {
+  day: string;
+  proxy?: string;
+}
+export interface AccountCheckinResult {
+  outcome: "claimed" | "done" | "inactive" | "ineligible" | "failed" | "captcha" | "own-app";
+  credit?: number | null;
+  streak?: number | null;
+  message?: string;
+  until?: string;
+}
+export function validateAccountCheckinRequest(value: unknown): AccountCheckinRequest;
+export function validateAccountCheckinResult(value: unknown): AccountCheckinResult;
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
-  | "session-source" | "native-account-operations";
+  | "session-source" | "native-account-operations" | "session-storage-source" | "ledger-observer" | "gateway-middleware";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
-  | "provider.usage" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
+  | "provider.usage" | "provider.calls" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
-  | "gateway.request" | "gateway.response" | "gateway.signin";
+  | "gateway.request" | "gateway.response" | "gateway.signin" | "session.storage.list" | "session.storage.read" | "ledger.observe"
+  | "middleware.request" | "middleware.account" | "middleware.provider" | "middleware.event" | "middleware.response";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
-export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate";
+export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate" | "usage.append" | "diagnostics.emit"
+  | "storage.native" | "storage.list" | "storage.read" | "storage.check" | "catalog.read";
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ProviderOperation = "embeddings" | "rerank" | "images.generate" | "images.edit"
   | "audio.transcribe" | "audio.translate" | "audio.speech"
-  | "videos.create" | "videos.get" | "videos.content" | "videos.delete" | "videos.remix";
+  | "videos.create" | "videos.get" | "videos.content" | "videos.delete" | "videos.remix" | "systemone";
 export type Modality = "text" | "image" | "audio" | "video" | "pdf";
 export interface ModelPrice {
   currency?: "USD";
@@ -30,7 +62,8 @@ export interface ModelPrice {
 export interface Model {
   id: string;
   name?: string;
-  protocols?: Protocol[];
+  protocols?: Protocol[] | null;
+  operations?: ProviderOperation[] | null;
   contextWindow?: number;
   maxContextWindow?: number;
   maxOutput?: number;
@@ -39,7 +72,7 @@ export interface Model {
   reasoning?: boolean;
   price?: ModelPrice | null;
   efforts?: Effort[];
-  kind?: "chat" | "image" | "video" | "embedding" | "rerank" | "speech" | "transcription";
+  kind?: "chat" | "image" | "video" | "embedding" | "rerank" | "speech" | "transcription" | "decision";
   inputModalities?: Modality[] | null;
   outputModalities?: Modality[] | null;
   released?: string;
@@ -143,16 +176,19 @@ export interface RoutingResult { order: number[] }
 export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 interface ManifestFields {
+  ledger?: LedgerObservationDescriptor;
   schema: 1;
   id: string;
   version: string;
   entry: string;
   contract: Contract;
   inbounds?: { id: string; path: string }[];
-  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[] }[];
+  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[]; calls?: boolean; checkin?: AccountCheckinDescriptor | null; keepAlive?: AccountKeepAliveDescriptor | null }[];
+  activation?: "gateway"[] | null;
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
   sessionSources?: SessionSourceDescriptor[];
+  storageSources?: StorageSourceDescriptor[];
   tools?: ToolDescriptor[];
   actions?: ActionDescriptor[];
   services?: ServiceDescriptor[];
@@ -162,7 +198,10 @@ interface ManifestFields {
   authBindings?: WindowAuthBindingDescriptor[];
   component?: ComponentIdentity;
   hooks?: GatewayHookDescriptor;
+  middleware?: GatewayMiddlewareDescriptor;
+  catalogAccess?: CatalogAccessDescriptor;
   routingStrategies?: RoutingStrategyDescriptor[];
+  searchSources?: SearchSourceDescriptor[];
   accountOperations?: AccountOperationDescriptor[];
 }
 export type Manifest = ManifestFields & (
@@ -278,7 +317,7 @@ export interface ResponseEvent {
 }
 export interface HeadersEvent { status: number; headers?: Headers }
 export interface ExecuteRequest {
-  protocol: Protocol; operation?: ProviderOperation; body?: string; headers?: Headers; model: string; operationId?: string;
+  protocol: Protocol | ""; operation?: ProviderOperation; body?: string; headers?: Headers; model: string; operationId?: string;
   credentials?: JSONValue; options?: JSONValue;
 }
 export type ProviderRequest = ExecuteRequest;
@@ -295,7 +334,19 @@ export interface ExecuteOptions {
 export interface Usage {
   inputTokens?: number; outputTokens?: number; cachedTokens?: number; cacheWriteTokens?: number;
   cost?: number; currency?: string;
+  facts?: ExecutionUsageFacts;
 }
+export interface ExecutionCounts {
+  inputTokens?: number; outputTokens?: number; cachedTokens?: number; cacheWriteTokens?: number;
+  cacheWrite1hTokens?: number; reasoningTokens?: number;
+}
+export interface ExecutionCost { amount: number; currency: string }
+export interface ExecutionUsageFacts extends ExecutionCounts {
+  cacheUnknown?: boolean; deferred?: ExecutionCounts; servedModel?: string; upstreamProvider?: string;
+  requestId?: string; responseId?: string; stop?: string; tier?: string; errorType?: string;
+  credits?: number; cost?: ExecutionCost;
+}
+export function validateExecutionUsage(manifest: Manifest, value: Usage | null | undefined): void;
 export interface ExecuteResult { status?: number; headers?: Headers; usage?: Usage; outcome?: string }
 export interface AcceptedEvent { operationId: string; reference?: JSONValue }
 export interface ModelsRequest { credentials?: JSONValue }
@@ -340,6 +391,12 @@ export interface StateCASRequest { key: string; version?: string; value: JSONVal
 export interface StateCASResult { swapped: boolean; version: string }
 export interface NetworkProxyRequest { url: string }
 export interface NetworkProxyResult { url: string }
+export interface Diagnostic {
+  level: "debug" | "info" | "warn" | "error"; code: string; phase?: string;
+  status?: number; millis?: number; count?: number; retryable?: boolean;
+}
+export interface DiagnosticResult { recorded: boolean }
+export function validateDiagnostic(manifest: Manifest, value: Diagnostic): void;
 export interface AccountReplaceRequest { credentials: JSONValue }
 export interface AccountReplaceResult { id: string; generation: UInt64 }
 
@@ -353,7 +410,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string; provider?: string }
 export interface AccountSelection { id: string; expectedGeneration: string }

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -47,11 +46,7 @@ func (body *extensionResponseBody) Close() error {
 func (body *extensionResponseBody) ExtensionUsage() *sdk.Usage {
 	body.mu.Lock()
 	defer body.mu.Unlock()
-	if body.usage == nil {
-		return nil
-	}
-	usage := *body.usage
-	return &usage
+	return body.usage.Clone()
 }
 
 func (body *extensionResponseBody) noteUsage(usage *sdk.Usage) {
@@ -60,8 +55,7 @@ func (body *extensionResponseBody) noteUsage(usage *sdk.Usage) {
 	if usage == nil {
 		return
 	}
-	copy := *usage
-	body.usage = &copy
+	body.usage = usage.Clone()
 }
 
 func (binding *extensionAccount) execute(request *http.Request) (*http.Response, error) {
@@ -102,6 +96,17 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		model = strings.Split(strings.SplitN(path, "/models/", 2)[1], ":")[0]
 	}
 	allowed := slicesContainProtocol(binding.descriptor, protocol)
+	if operation == sdk.OperationSystemOne {
+		allowed = protocol == "" && binding.decisionModel(model)
+	} else if binding.decisionModel(model) {
+		allowed = false
+	} else {
+		for _, declared := range binding.descriptor.Models {
+			if declared.ID == model && declared.Kind == "decision" {
+				allowed = false
+			}
+		}
+	}
 	if !allowed {
 		return nil, errors.New("extension provider did not declare the requested protocol")
 	}
@@ -120,22 +125,25 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	}
 	optionsValue := sdk.ExecuteOptions{
 		Method: request.Method, Path: path, Query: request.URL.RawQuery, Proxy: netproxy.Choice(ctx),
+		CallerID: extensionhost.CallerIDFrom(ctx),
 	}
 	if binding.manifest.Contract.Version.Minor >= 3 {
 		optionsValue.EscapedPath = request.URL.EscapedPath()
 	}
 	metadata := extensionhost.MetadataFrom(ctx)
 	if metadata.Plugin == scope.Plugin {
-		if metadata.CallerID != "" {
-			optionsValue.CallerID = metadata.CallerID
-		}
 		if len(metadata.Value) > 0 {
 			optionsValue.Native = metadata.Value
 		}
 		if metadata.RequestID != "" {
 			optionsValue.RequestID = metadata.RequestID
-			identity, err := json.Marshal([]any{scope.Plugin, scope.Provider, scope.Account,
-				metadata.CallerID, scope.Session, metadata.RequestID})
+			parts := []any{scope.Plugin, scope.Provider, scope.Account,
+				metadata.CallerID, scope.Session, metadata.RequestID}
+			if operation == sdk.OperationSystemOne {
+				digest := sha256.Sum256(body)
+				parts = append(parts, operation, model, hex.EncodeToString(digest[:]))
+			}
+			identity, err := json.Marshal(parts)
 			if err != nil {
 				return nil, err
 			}
@@ -188,7 +196,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 				if err := json.Unmarshal(event.Data, &usage); err != nil {
 					return errors.New("extension provider returned invalid usage")
 				}
-				if !validExtensionUsage(&usage) {
+				if sdk.ValidateExecutionUsage(binding.manifest, &usage) != nil {
 					return errors.New("extension provider returned invalid usage totals")
 				}
 				responseBody.noteUsage(&usage)
@@ -210,11 +218,11 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			finish(&extensionhost.OutcomeError{Outcome: "uncertain", Cause: errors.New("invalid extension execution result")})
 			return
 		}
-		responseBody.noteUsage(result.Usage)
-		if !validExtensionUsage(result.Usage) || seenHead && result.Status != 0 && result.Status != responseStatus {
+		if sdk.ValidateExecutionUsage(binding.manifest, result.Usage) != nil || seenHead && result.Status != 0 && result.Status != responseStatus {
 			finish(&extensionhost.OutcomeError{Outcome: "uncertain", Cause: errors.New("invalid extension execution totals or status")})
 			return
 		}
+		responseBody.noteUsage(result.Usage)
 		extensionUsage(ctx, result.Usage)
 		if result.Outcome == "uncertain" || result.Outcome == "accepted" {
 			finish(&extensionhost.OutcomeError{Outcome: result.Outcome})
@@ -253,18 +261,6 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		responseBody.Close()
 		return nil, ctx.Err()
 	}
-}
-
-func validExtensionUsage(usage *sdk.Usage) bool {
-	if usage == nil {
-		return true
-	}
-	for _, count := range []int64{usage.InputTokens, usage.OutputTokens, usage.CachedTokens, usage.CacheWriteTokens} {
-		if count < 0 || int64(int(count)) != count {
-			return false
-		}
-	}
-	return !math.IsNaN(usage.Cost) && !math.IsInf(usage.Cost, 0) && usage.Cost >= 0
 }
 
 func slicesContainProtocol(descriptor sdk.ProviderDescriptor, protocol string) bool {

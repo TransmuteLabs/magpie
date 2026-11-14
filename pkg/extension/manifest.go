@@ -23,6 +23,14 @@ func (manifest Manifest) Public() Manifest {
 		_, owned := snapshot.ResolveAction(strategy.Action)
 		return !owned
 	})
+	for index := range snapshot.Providers {
+		provider := &snapshot.Providers[index]
+		if provider.Checkin != nil {
+			if _, owned := snapshot.ResolveAction(provider.Checkin.Action); !owned {
+				provider.Checkin = nil
+			}
+		}
+	}
 	return snapshot
 }
 
@@ -30,6 +38,10 @@ func (manifest Manifest) Public() Manifest {
 func (manifest Manifest) Clone() Manifest { return cloneManifest(manifest) }
 
 func cloneManifest(manifest Manifest) Manifest {
+	manifest.Activation = slices.Clone(manifest.Activation)
+	if manifest.Ledger != nil {
+		manifest.Ledger = new(*manifest.Ledger)
+	}
 	manifest.Args = slices.Clone(manifest.Args)
 	manifest.Contract.Capabilities = slices.Clone(manifest.Contract.Capabilities)
 	manifest.Inbounds = slices.Clone(manifest.Inbounds)
@@ -37,11 +49,18 @@ func cloneManifest(manifest Manifest) Manifest {
 	manifest.Providers = slices.Clone(manifest.Providers)
 	for index := range manifest.Providers {
 		provider := &manifest.Providers[index]
+		if provider.Checkin != nil {
+			provider.Checkin = new(*provider.Checkin)
+		}
+		if provider.KeepAlive != nil {
+			provider.KeepAlive = new(*provider.KeepAlive)
+		}
 		provider.Protocols = slices.Clone(provider.Protocols)
 		provider.Operations = slices.Clone(provider.Operations)
 		provider.Models = slices.Clone(provider.Models)
 		for model := range provider.Models {
 			provider.Models[model].Protocols = slices.Clone(provider.Models[model].Protocols)
+			provider.Models[model].Operations = slices.Clone(provider.Models[model].Operations)
 			provider.Models[model].Efforts = slices.Clone(provider.Models[model].Efforts)
 			provider.Models[model].InputModalities = slices.Clone(provider.Models[model].InputModalities)
 			provider.Models[model].OutputModalities = slices.Clone(provider.Models[model].OutputModalities)
@@ -61,11 +80,13 @@ func cloneManifest(manifest Manifest) Manifest {
 		manifest.Agents[index] = manifest.Agents[index].Clone()
 	}
 	manifest.Sessions = slices.Clone(manifest.Sessions)
+	manifest.StorageSources = cloneStorageSources(manifest.StorageSources)
 	manifest.SessionSources = slices.Clone(manifest.SessionSources)
 	for index := range manifest.SessionSources {
 		manifest.SessionSources[index].Stores = slices.Clone(manifest.SessionSources[index].Stores)
 	}
 	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
+	manifest.SearchSources = slices.Clone(manifest.SearchSources)
 	manifest.Tools = slices.Clone(manifest.Tools)
 	for index := range manifest.Tools {
 		manifest.Tools[index].InputSchema = slices.Clone(manifest.Tools[index].InputSchema)
@@ -105,10 +126,38 @@ func cloneManifest(manifest Manifest) Manifest {
 		value.Origins = slices.Clone(value.Origins)
 		manifest.Hooks = &value
 	}
+	if manifest.Middleware != nil {
+		value := *manifest.Middleware
+		value.Origins = slices.Clone(value.Origins)
+		value.Events = slices.Clone(value.Events)
+		manifest.Middleware = &value
+	}
+	if manifest.CatalogAccess != nil {
+		value := *manifest.CatalogAccess
+		manifest.CatalogAccess = &value
+	}
 	return manifest
 }
 
 func (manifest Manifest) Validate() error {
+	if err := manifest.validateAccountKeepAlives(); err != nil {
+		return err
+	}
+	if err := manifest.validateAccountCheckins(); err != nil {
+		return err
+	}
+	if err := manifest.validateActivation(); err != nil {
+		return err
+	}
+	if err := manifest.validateMiddleware(); err != nil {
+		return err
+	}
+	if err := manifest.validateLedgerObserver(); err != nil {
+		return err
+	}
+	if err := ValidateCatalogAccess(manifest); err != nil {
+		return err
+	}
 	if err := manifest.validateAccountOperations(); err != nil {
 		return err
 	}
@@ -148,7 +197,7 @@ func (manifest Manifest) Validate() error {
 	if err := FullContract().Check(manifest.Contract); err != nil {
 		return err
 	}
-	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools)+len(manifest.RoutingStrategies) > 1024 {
+	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools)+len(manifest.RoutingStrategies)+len(manifest.SearchSources) > 1024 {
 		return fmt.Errorf("too many extension descriptors")
 	}
 	paths := map[string]bool{}
@@ -164,11 +213,15 @@ func (manifest Manifest) Validate() error {
 	}
 	ids = map[string]bool{}
 	for _, provider := range manifest.Providers {
-		if !validID(provider.ID) || ids[provider.ID] || !validName(provider.Name) || len(provider.Protocols) == 0 {
+		if !validID(provider.ID) || ids[provider.ID] || !validName(provider.Name) {
 			return fmt.Errorf("invalid or duplicate provider descriptor %q", provider.ID)
 		}
 		if !manifest.Contract.Has(OutboundExecutor) && !manifest.Contract.Has(ModelDiscovery) {
 			return fmt.Errorf("provider descriptor requires an executor or discovery capability")
+		}
+		if provider.Calls && (manifest.Contract.Version.Minor < 8 ||
+			!manifest.Contract.Has(UsageReporter) || !manifest.Contract.Has(AccountAuth)) {
+			return fmt.Errorf("outside calls require SDK API 1.8, usage reporting and account auth")
 		}
 		ids[provider.ID] = true
 		protocols := map[string]bool{}
@@ -182,9 +235,15 @@ func (manifest Manifest) Validate() error {
 		if err := validateProviderOperations(manifest, provider); err != nil {
 			return err
 		}
+		if len(provider.Protocols) == 0 && (len(provider.Operations) != 1 || provider.Operations[0] != OperationSystemOne) {
+			return fmt.Errorf("provider requires conversational protocols or the isolated decision operation")
+		}
 		models := map[string]bool{}
 		for _, model := range provider.Models {
 			if err := validateExtendedModel(manifest, model); err != nil {
+				return err
+			}
+			if err := validateModelOperations(manifest, provider, model); err != nil {
 				return err
 			}
 			if model.ID == "" || len(model.ID) > 300 || strings.ContainsFunc(model.ID, func(char rune) bool { return unicode.IsSpace(char) || unicode.IsControl(char) }) || models[model.ID] {
@@ -309,10 +368,16 @@ func (manifest Manifest) Validate() error {
 	if err := manifest.validateSessionSources(); err != nil {
 		return err
 	}
+	if err := ValidateStorageSources(manifest); err != nil {
+		return err
+	}
 	if err := manifest.validateComposite(); err != nil {
 		return err
 	}
 	if err := manifest.validateRouting(); err != nil {
+		return err
+	}
+	if err := manifest.validateSearchSources(); err != nil {
 		return err
 	}
 	return manifest.validateHooks()
@@ -431,6 +496,9 @@ func RequiredMethods(manifest Manifest) []string {
 			methods = append(methods, MethodAuthStart, MethodAuthFinish, MethodAuthRefresh, MethodAuthLogout)
 		case UsageReporter:
 			methods = append(methods, MethodProviderUsage)
+			if slices.ContainsFunc(manifest.Providers, func(provider ProviderDescriptor) bool { return provider.Calls }) {
+				methods = append(methods, MethodProviderCalls)
+			}
 		case OperationControl:
 			methods = append(methods, MethodOperationStatus, MethodOperationCancel)
 		case ToolProvider:
@@ -447,6 +515,14 @@ func RequiredMethods(manifest Manifest) []string {
 			methods = append(methods, MethodSessionConvert)
 		case SessionSource:
 			methods = append(methods, MethodSessionSourceRead)
+		case StorageSource:
+			methods = append(methods, MethodStorageList, MethodStorageRead)
+		case LedgerObserver:
+			methods = append(methods, MethodLedgerObserve)
+		case GatewayMiddleware:
+			if manifest.Middleware != nil {
+				methods = append(methods, manifest.Middleware.Methods()...)
+			}
 		case ModuleRPC:
 			methods = append(methods, MethodModuleCall)
 		case GatewayHooks:

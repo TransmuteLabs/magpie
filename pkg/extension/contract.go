@@ -23,10 +23,10 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 6},
+		Version: APIVersion{Major: 1, Minor: 8},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware,
 		},
 	}
 }
@@ -44,6 +44,7 @@ type Manifest struct {
 	Agents            []AgentDescriptor             `json:"agents,omitempty"`
 	Sessions          []SessionDescriptor           `json:"sessions,omitempty"`
 	SessionSources    []SessionSourceDescriptor     `json:"sessionSources,omitempty"`
+	StorageSources    []StorageSourceDescriptor     `json:"storageSources,omitempty"`
 	Tools             []ToolDescriptor              `json:"tools,omitempty"`
 	Actions           []ActionDescriptor            `json:"actions,omitempty"`
 	Services          []ServiceDescriptor           `json:"services,omitempty"`
@@ -53,8 +54,13 @@ type Manifest struct {
 	AuthBindings      []WindowAuthBindingDescriptor `json:"authBindings,omitempty"`
 	Component         *ComponentIdentity            `json:"component,omitempty"`
 	Hooks             *GatewayHookDescriptor        `json:"hooks,omitempty"`
+	Middleware        *GatewayMiddlewareDescriptor  `json:"middleware,omitempty"`
+	CatalogAccess     *CatalogAccessDescriptor      `json:"catalogAccess,omitempty"`
+	Ledger            *LedgerObservationDescriptor  `json:"ledger,omitempty"`
 	RoutingStrategies []RoutingStrategyDescriptor   `json:"routingStrategies,omitempty"`
+	SearchSources     []SearchSourceDescriptor      `json:"searchSources,omitempty"`
 	AccountOperations []AccountOperationDescriptor  `json:"accountOperations,omitempty"`
+	Activation        []string                      `json:"activation,omitempty"`
 }
 
 type InboundDescriptor struct {
@@ -63,11 +69,14 @@ type InboundDescriptor struct {
 }
 
 type ProviderDescriptor struct {
-	ID         string                 `json:"id"`
-	Name       string                 `json:"name"`
-	Protocols  []protocolext.Protocol `json:"protocols"`
-	Models     []Model                `json:"models,omitempty"`
-	Operations []ProviderOperation    `json:"operations,omitempty"`
+	ID         string                      `json:"id"`
+	Name       string                      `json:"name"`
+	Protocols  []protocolext.Protocol      `json:"protocols"`
+	Models     []Model                     `json:"models,omitempty"`
+	Operations []ProviderOperation         `json:"operations,omitempty"`
+	Calls      bool                        `json:"calls,omitempty"`
+	Checkin    *AccountCheckinDescriptor   `json:"checkin,omitempty"`
+	KeepAlive  *AccountKeepAliveDescriptor `json:"keepAlive,omitempty"`
 }
 
 type AgentDescriptor struct {

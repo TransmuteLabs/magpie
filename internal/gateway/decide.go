@@ -28,6 +28,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // jevSure is how confident Jev must be of an intent for it to count, a
@@ -356,10 +357,26 @@ func (s *Server) jevLevelled(ctx context.Context, p provider.Provider, model str
 			"criteria":     levelWork}
 	}
 	body, _ := json.Marshal(map[string]any{"model": model, "state": map[string]any{"kinds": intents}, "questions": qs})
+	validate := func(answer []byte) error {
+		_, err := readLevelling(answer, intents)
+		return err
+	}
+	ctx = context.WithValue(ctx, decisionAnswerValidatorKey{}, validate)
 	b, err := s.systemOne(ctx, p, model, body)
 	if err != nil {
 		return levelling{}, err
 	}
+	l, err = readLevelling(b, intents)
+	if err != nil {
+		return levelling{}, err
+	}
+	levelled.Lock()
+	levelled.m[key] = l
+	levelled.Unlock()
+	return l, nil
+}
+
+func readLevelling(b []byte, intents []string) (levelling, error) {
 	var out struct {
 		Answers map[string]struct {
 			Noul  *float64 `json:"noul"`
@@ -369,6 +386,7 @@ func (s *Server) jevLevelled(ctx context.Context, p provider.Provider, model str
 	if decodeJSON(b, &out) != nil || out.Answers["levels"].Noul == nil {
 		return levelling{}, answerError{fmt.Errorf("not a System One answer")}
 	}
+	var l levelling
 	l.levels = *out.Answers["levels"].Noul >= 0.5
 	if l.levels {
 		scores := make([]float64, 0, len(intents))
@@ -379,9 +397,6 @@ func (s *Server) jevLevelled(ctx context.Context, p provider.Provider, model str
 		}
 		l.work = levelsOf(intents, scores)
 	}
-	levelled.Lock()
-	levelled.m[key] = l
-	levelled.Unlock()
 	return l, nil
 }
 
@@ -393,12 +408,15 @@ var errNoAnswer = errors.New("no answer in the classifier's wait")
 // within ctx: the classifier's wait, which is wait long, that every try
 // of askDecideTries shares.
 func (s *Server) askJev(ctx context.Context, wait time.Duration, p provider.Provider, model string, intents []string, prev before, effort bool, text string) (v verdict, err error) {
+	sequence := &decisionSequence{}
+	ctx = context.WithValue(ctx, decisionSequenceKey{}, sequence)
 	defer func() {
+		err = decisionFailure(err, sequence.attempt)
 		// only a call cut off by the wait is reworded: a refusal or an
 		// answer read as the wait ran out keeps its own type, which
 		// askDecideTries rests the account by
 		if errors.Is(err, errNoAnswer) {
-			err = fmt.Errorf("%s gave no answer in %s", p.Name, wait)
+			err = fmt.Errorf("%s gave no answer in %s: %w", p.Name, wait, err)
 		}
 	}()
 	if model == "" {
@@ -421,6 +439,14 @@ func (s *Server) askJev(ctx context.Context, wait time.Duration, p provider.Prov
 			return verdict{}, err
 		}
 	}
+	validate := func(answer []byte) error {
+		parsed, err := readJev(answer, intents, l.levels, prev)
+		if err == nil && (len(intents) > 0 && parsed.Said == "" || effort && parsed.Effort == "") {
+			err = answerError{errors.New("not a System One answer to the requested questions")}
+		}
+		return err
+	}
+	ctx = context.WithValue(ctx, decisionAnswerValidatorKey{}, validate)
 	b, err := s.systemOne(ctx, p, model, jevBody(model, intents, l.work, prev, effort, text))
 	if err != nil {
 		return verdict{}, err
@@ -457,53 +483,97 @@ func (s *Server) systemOne(ctx context.Context, p provider.Provider, model strin
 	start := time.Now()
 	d, err := s.postDecideSent(ctx, p, model, body)
 	status, b, header := d.status, d.answer, d.header
+	if err != nil {
+		status = http.StatusBadGateway
+	} else if status >= 300 {
+		err = decideRefused{fmt.Errorf("%s: %s", p.Name, provider.APIError(b, fmt.Sprintf("%d %s", status, http.StatusText(status)))), status, header, b}
+	}
+	if err == nil && p.IsExtension() {
+		if validate, ok := ctx.Value(decisionAnswerValidatorKey{}).(func([]byte) error); ok {
+			err = validate(b)
+		}
+	}
+	err = decisionFailure(err, d.attempt)
+	if terminalExtensionError(err) {
+		status = http.StatusConflict
+	}
 	archived := ""
 	if d.sent != nil {
 		c := Call{Time: start, From: provider.Chat, To: provider.Chat, Model: p.ID + "/" + model, Provider: p.ID,
 			Agent: usage.AgentOf(RouterAgent), Kind: "routing", Millis: time.Since(start).Milliseconds()}
+		c.Status, c.Usage = status, d.counted()
 		if err != nil {
 			c.Error = err.Error()
 		} else if status >= 300 {
 			c.Error = provider.APIError(b, fmt.Sprintf("%d %s", status, http.StatusText(status)))
 		}
 		archived = archiveOwn(c, d.sent, d.body, status, header, b)
+		if p.IsExtension() {
+			c.Archive = archived
+			c.RequestBody, c.RequestTruncated = captureRequestBody(d.body)
+			c.ResponseBody, c.ResponseTruncated = captureRequestBody(b)
+			s.record(c)
+		}
+	}
+	used := d.counted()
+	if err == nil || d.usage != nil || terminalExtensionError(err) {
+		record := decisionUsageRecord(start, p, model, model, used, status, archived)
+		record.Agent, record.Kind = usage.AgentOf(RouterAgent), "routing"
+		if err != nil {
+			failedWith(&record, status, err.Error(), used.ErrType)
+		}
+		usage.Append(record)
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, errNoAnswer
+		if ctx.Err() != nil && !terminalExtensionError(err) {
+			return nil, errors.Join(errNoAnswer, err)
 		}
 		return nil, err
 	}
-	if status >= 300 {
-		return nil, decideRefused{fmt.Errorf("%s: %s", p.Name, provider.APIError(b, fmt.Sprintf("%d %s", status, http.StatusText(status)))), status, header, b}
-	}
-	var use struct {
-		Model string `json:"model"` // the one that answered, when the reply says
-		Usage struct {
-			Input  int `json:"input_tokens"`
-			Output int `json:"output_tokens"`
-		} `json:"usage"`
-	}
-	_ = decodeJSON(b, &use)
+	return b, nil
+}
+
+func decisionUsageRecord(start time.Time, p provider.Provider, model, asked string, used Usage, status int, archived string) usage.Record {
 	var keyID, keyName string
 	if p.Account == nil && p.Key != "" {
 		keyID, keyName = provider.KeyID(p.Key), p.KeyName
 	}
-	usage.Append(usage.Record{Time: start, Agent: usage.AgentOf(RouterAgent), Kind: "routing", Provider: p.ID, Host: p.Where(), Model: model, Requested: model, Served: use.Model,
+	return accountedUsage(usage.Record{Time: start, Provider: p.ID, Host: p.Where(), Model: model, Requested: asked,
 		ProviderKeyID: keyID, ProviderKeyName: keyName, ProviderAccount: accountOf(p),
-		Input: use.Usage.Input, Output: use.Usage.Output, Millis: time.Since(start).Milliseconds(), Status: status, Archive: archived})
-	return b, nil
+		Millis: time.Since(start).Milliseconds(), Status: status, Archive: archived}, used)
+}
+
+type decisionSequenceKey struct{}
+
+type decisionSequence struct {
+	attempt *provider.ExtensionAttempt
 }
 
 // decided is a decision call as it went and came back: the request magpie
 // sent and its body (in the provider's own shape), for the request archive,
 // and the answer's status, body and headers.
 type decided struct {
-	sent   *http.Request
-	body   []byte
-	status int
-	answer []byte
-	header http.Header
+	sent    *http.Request
+	body    []byte
+	status  int
+	answer  []byte
+	header  http.Header
+	attempt *provider.ExtensionAttempt
+	usage   *sdk.Usage
+}
+
+func (reply decided) counted() Usage {
+	var raw struct {
+		Model string `json:"model"`
+		Usage struct {
+			Input  int `json:"input_tokens"`
+			Output int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	_ = json.Unmarshal(reply.answer, &raw)
+	used := Usage{Input: max(0, raw.Usage.Input), Output: max(0, raw.Usage.Output), Served: raw.Model,
+		RequestID: requestID(reply.header)}
+	return normalizedExtensionTotals(reply.usage, used)
 }
 
 // postDecideSent posts body to p's System One API as model (DecideAsk),
@@ -511,6 +581,10 @@ type decided struct {
 // another one. DecideURL and Sign errors are as they are; a transport
 // error is named with p. The request it sent is there once one was.
 func (s *Server) postDecideSent(ctx context.Context, p provider.Provider, model string, body []byte) (decided, error) {
+	ctx, attempt := provider.WithExtensionAttempt(ctx)
+	if sequence, ok := ctx.Value(decisionSequenceKey{}).(*decisionSequence); ok {
+		sequence.attempt = attempt
+	}
 	// the headers the user gave the decision model
 	ctx = provider.WithModel(ctx, p.ID, model)
 	// every decision call goes through here — System One, a group rule's
@@ -548,15 +622,25 @@ func (s *Server) postDecideSent(ctx context.Context, p provider.Provider, model 
 		return decided{}, err
 	}
 	res, err := p.Do(s.client, req)
+	reply := decided{sent: req, body: body, attempt: attempt, usage: attempt.Usage()}
 	if err != nil {
-		return decided{sent: req, body: body}, fmt.Errorf("%s: %v", p.Name, err)
+		return reply, fmt.Errorf("%s: %w", p.Name, err)
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode < 300 {
+	reply.status, reply.header = res.StatusCode, res.Header
+	b, readErr := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
+	closeErr := res.Body.Close()
+	if counted, ok := res.Body.(interface{ ExtensionUsage() *sdk.Usage }); ok {
+		reply.usage = counted.ExtensionUsage()
+	}
+	err = errors.Join(readErr, closeErr)
+	if len(b) > 1<<20 {
+		err = errors.Join(err, errors.New("System One response exceeds its body limit"))
+	}
+	if err == nil && res.StatusCode < 300 {
 		b = provider.DecideAnswer(via, b)
 	}
-	return decided{sent: req, body: body, status: res.StatusCode, answer: b, header: res.Header}, nil
+	reply.answer = b
+	return reply, err
 }
 
 // maxSystemOneBody is the most a System One request may be; larger is 413

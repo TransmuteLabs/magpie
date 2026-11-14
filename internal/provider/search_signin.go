@@ -9,6 +9,9 @@ package provider
 // first account; AlsoOn the others on), nil while it isn't signed in or
 // another plugin serves the id (the user picked another plugin for it).
 func SearchSignIn(v SearchVendor) (name string, p *Provider) {
+	if v.Extension != "" {
+		return extensionSearchSignIn(v)
+	}
 	if v.Auth == "" || v.Plugin == "" {
 		return v.Auth, nil
 	}

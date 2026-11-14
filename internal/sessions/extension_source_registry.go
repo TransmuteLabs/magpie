@@ -98,6 +98,9 @@ func BindSessionSourceNative(ctx context.Context, plugin, source, expectedRevisi
 		return err
 	}
 	descriptor, ok := manifest.ResolveSessionSource(source)
+	if _, storage := manifest.ResolveStorageSource(source); storage {
+		return bindSingleStorageSource(ctx, manifest, source, expectedRevision)
+	}
 	if !ok || !nativeSourceOwner(descriptor.Agent) || expectedRevision == "" {
 		return errors.New("native source binding requires an existing owner and exact package revision")
 	}
@@ -158,7 +161,7 @@ func UnbindSessionSourceNative(ctx context.Context, agent, expectedIdentity stri
 		return binding.Agent == agent && binding.Identity == expectedIdentity
 	})
 	if index < 0 {
-		return extension.ErrActionChanged
+		return UnbindStorageSource(ctx, agent, expectedIdentity)
 	}
 	bindings = slices.Delete(bindings, index, index+1)
 	if err := ctx.Err(); err != nil {
@@ -191,6 +194,11 @@ func sourceStoreRoots(descriptor sdk.SessionSourceDescriptor, store sdk.SessionS
 	}
 	var roots []string
 	switch store.NativeRootSlot {
+	case "opencode.data":
+		if descriptor.Agent != "opencode" {
+			return nil, errors.New("foreign native session root")
+		}
+		roots = []string{OpenCodeDir()}
 	case "claude.projects":
 		if descriptor.Agent != "claude" {
 			return nil, errors.New("foreign native session root")

@@ -151,6 +151,9 @@ func ReadOutsideCalls(ctx context.Context) {
 			changed = true
 		}
 	}
+	if readExtensionOutsideCalls(ctx, marks) {
+		changed = true
+	}
 	if changed {
 		_ = writeOutsideMarks(marks)
 	}

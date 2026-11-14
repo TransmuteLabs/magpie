@@ -4,7 +4,13 @@ import { MAX_CHUNK_BYTES, MAX_CONCURRENT, MAX_FRAME_BYTES, MAX_HOST_BYTES, SDKEr
 import { freezeJSON, parseJSON, publicManifest, stringifyJSON, validateModule } from "./manifest.js";
 import { ComponentLifecycle } from "./lifecycle.js";
 import { MAX_GATEWAY_STATE_BYTES, gatewayMethodEffect, validateGatewayCall } from "./hooks.js";
+import { MIDDLEWARE_METHODS } from "./middleware.js";
 import { validateUsageResult } from "./usage.js";
+import { validateExecutionUsage } from "./usage-facts.js";
+import { validateOwnCall, validateOutsideCallsRequest, validateOutsideCallsResult } from "./own-calls.js";
+import { validateDiagnostic } from "./diagnostics.js";
+import { validateCatalogRead } from "./catalog-projection.js";
+import { STORAGE_HOST_METHODS, STORAGE_METHODS } from "./storage-source.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const identifier = value => typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\s\p{Cc}]/u.test(value);
@@ -341,7 +347,7 @@ export async function serve(module, { input = process.stdin, output = process.st
       const operation = (async () => {
         assertOpen();
         const hookEffect = gatewayMethodEffect(call.method);
-        if (call.method === "session.source.read") {
+        if (call.method === "session.source.read" || call.method === "provider.calls" || call.method === "ledger.observe" || MIDDLEWARE_METHODS.includes(call.method)) {
           record.creditError = new SDKError("invalid_params", "Session source reads are unary");
           throw record.creditError;
         }
@@ -358,6 +364,7 @@ export async function serve(module, { input = process.stdin, output = process.st
           throw record.creditError;
         }
         checkEvent(event, data);
+        if (call.method === "provider.execute" && event === "usage") validateExecutionUsage(manifest, data);
         if (record.event) throw new SDKError("backpressure", "Only one stream event may await acknowledgement");
         const wait = deferred(), seq = ++record.seq;
         const credit = record.event = { wait, seq, sent: false };
@@ -386,7 +393,11 @@ export async function serve(module, { input = process.stdin, output = process.st
         try {
           await Promise.race([previous, record.aborted.promise]);
           assertOpen();
-          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call", "usage.invalidate"].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call", "usage.invalidate", "usage.append", "diagnostics.emit", "catalog.read", ...STORAGE_HOST_METHODS].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (STORAGE_HOST_METHODS.includes(method) && !STORAGE_METHODS.includes(call.method)) throw new SDKError("invalid", "Storage callbacks require their selected source parent");
+          if (method === "usage.append") validateOwnCall(manifest, params);
+          if (method === "diagnostics.emit") validateDiagnostic(manifest, params);
+          if (method === "catalog.read") validateCatalogRead(manifest, call.scope, params);
           const serializedParams = stringifyJSON(params);
           if (Buffer.byteLength(serializedParams) > MAX_HOST_BYTES) throw new SDKError("resource_exhausted", "Host parameters exceed the size limit");
           const payload = parseJSON(serializedParams);
@@ -427,6 +438,7 @@ export async function serve(module, { input = process.stdin, output = process.st
         validateGatewayCall(call.method, call, manifest.hooks, stringifyJSON);
         throw new SDKError("resource_exhausted", "Gateway hook state exceeds its byte limit");
       }
+      if (call.method === "provider.calls") validateOutsideCallsRequest(manifest, call.scope, call.params);
       return method(Object.freeze({ signal: controller.signal, ...(moduleContext ? { module: moduleContext } : {}) }), call, Object.freeze({ emit, hostCall }));
     }).finally(() => {
       try { stopLifetime?.(); } finally {
@@ -445,6 +457,11 @@ export async function serve(module, { input = process.stdin, output = process.st
         const result = await Promise.race([handler, record.aborted.promise]);
         if (call.method === "inbound.decode") checkDecodedExecutor(manifest, result);
         if (call.method === "provider.usage") validateUsageResult(manifest, result);
+        if (call.method === "provider.calls") validateOutsideCallsResult(manifest, call.params, result);
+        if (call.method === "provider.execute") {
+          try { validateExecutionUsage(manifest, result?.usage); }
+          catch { throw new SDKError("invalid_result", "Invalid provider execution usage", "uncertain"); }
+        }
         if (record.creditError) throw record.creditError;
         if (record.event) await record.event.wait.promise;
         if (record.hostPending) await Promise.race([record.hostTail, record.aborted.promise]);

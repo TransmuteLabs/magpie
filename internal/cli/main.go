@@ -173,6 +173,7 @@ const usage = `magpie — one place to pick every agent's model
                                   what every session spent, day by day, with the top models and folders (7 days)
   magpie sessions read [on|off all|<agent>…]   which agents' session history magpie may read (none until allowed)
   magpie sessions sources [--json]   SDK history source status and checked native bindings
+  magpie sessions sources list [--json]   storage roots and their checked read consent
   magpie quota [<provider>] [--json]  what is left of every subscription, plan and key balance
   magpie quota wait <provider|account> [--timeout <d>] [--quiet]
                                   block until that subscription (any of its accounts) or account has allowance again

@@ -2,7 +2,7 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Current source API 1.6 includes native/exec/Bun,
+advertised capability. Current source API 1.8 includes native/exec/Bun,
 composite modules, gateway hooks/private tools, transactional refresh, finite provider
 operations, rich model metadata, namespaced routing strategies and declared
 selected-account window actions and poll/link window authentication. API 1.5
@@ -20,6 +20,14 @@ The [consolidated host record](../../docs/adr/0021-consolidated-sdk16-validation
 names the shared runtime and its acceptance boundaries. A module advertises only
 the minimum contract it uses; the source version alone establishes no vendor
 compatibility.
+
+API 1.8 authors can report a module's own measured work with
+`Stream.AppendOwnCall`, under a live accepted module/tool write bound to its
+selected account. A provider may separately declare `Calls: true` and serve
+`MethodProviderCalls` for outside account history. Own work uses ordinary live
+accounting; history uses reported ingestion without live observer effects.
+The [own-call/history contract](../../docs/adr/0025-sdk-own-calls-and-outside-history.md)
+defines identity, generation checks, paging and acknowledgment semantics.
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -81,10 +89,24 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.6 with thirteen capabilities; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.8; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
 contract is API 0.5, retaining the older 0.1 inbound, 0.2 catalog, 0.3 tool
 and 0.4 executor-binding contracts.
+
+API 1.8 also supplies explicit `CatalogAccess` with the `catalog.read` host
+callback. `inventory` projects enabled, listed account/model choices and cached
+quota evidence; `selected` restricts it to the inherited account generation.
+The copied result contains opaque account references and quota applicability,
+never provider keys, endpoints, headers or account names. It performs no vendor
+refresh. Private services inherit only their root's explicit permission.
+
+`LedgerObserver` and `Manifest.Ledger` independently opt a primary into
+`ledger.observe`. Its numeric/metadata projection excludes request bodies,
+sessions, request IDs, account names, key labels and raw errors. Delivery uses
+the ordinary ledger observer with a bounded queue, deadline and original package
+and configuration identity. It is read-only, unary and best-effort; dropping or
+failing a delivery cannot delay the ledger writer or modify billing.
 
 An API 1.4 paired inbound/outbound module can return
 `DecodedRequest.Executor = SameModuleExecutor` to preserve native-only
@@ -262,6 +284,41 @@ journal/blob documents; it does not select another profile or read host
 paths by itself. Source and target-store guards remain host-owned. This is
 not generic SDK session discovery/reader/resume registration; see the
 [session reference](../../docs/subsystems/extension-agents-sessions.md).
+
+## Check-in and gateway activation API 1.8
+
+An authenticated provider can set `ProviderDescriptor.Checkin` to
+`&AccountCheckinDescriptor{Action: "daily.claim", Recheck: false}`.
+Require minor 8, `AccountAuth`, `ModuleRPC` and a declared write action.
+The host joins the ordinary Settings, manual/daily runner and quota-card
+owners; automatic check-in remains off until enabled. The action may live
+on the primary or a private service. Component handshakes omit check-in
+metadata for actions owned by another component; the full root keeps it.
+
+Decode `AccountCheckinRequest` from `Call.Params` and validate it. Its
+canonical `Day` comes from the ordinary check-in owner; `Proxy` is the
+selected account's policy. Credentials remain in `Call.Auth`. Await the
+existing `accepted` event before a vendor write, then return one
+`AccountCheckinResult`. Outcomes are `claimed`, `done`, `inactive`,
+`ineligible`, `failed`, `captcha` and `own-app`. Optional `Credit` and
+`Streak` pointers preserve absence and zero. A message is bounded to
+4096 UTF-8 bytes; `Until` is a strict RFC3339 boundary with at most nine
+fractional digits. `Validate`, `Clone` and `DecodeAccountCheckinResult`
+provide the shared wire checks.
+
+The host reserves a durable intent before invoking the write and keeps its
+operation receipt alongside the ordinary saved result. An unknown or failed
+completion cannot replay through manual/daily check-in, restart or a new
+credential generation. Known not-started and ordinary non-claim rechecks
+have distinct intents. This operation reports no inference usage.
+
+A root `Activation: []string{ActivationGateway}` requests a lease only
+after the ordinary gateway successfully binds. Stop, disable, removal and
+configuration replacement release and retire the generation through its
+bounded component disposer. `New`/`Front`, metadata reads and a failed bind
+remain cold. Startup failure leaves ordinary HTTP serving. Private services
+inherit no activation. The [owner record](../../docs/adr/0024-sdk-account-checkin-gateway-activation.md)
+keeps implementation and verification boundaries separate from API acceptance.
 
 ## Routing strategies API 1.4
 

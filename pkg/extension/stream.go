@@ -16,7 +16,7 @@ type Stream struct {
 }
 
 func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
-	if stream.state.call.Method == MethodSessionSourceRead {
+	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
 		err := &Error{Code: "invalid_params", Message: "session source reads are unary"}
 		stream.server.mu.Lock()
 		stream.state.creditErr = err
@@ -68,6 +68,12 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 	if event == "accepted" && (len(payload) == 0 || payload[0] != '{') {
 		return &Error{Code: "invalid_params", Message: "acceptance event requires a JSON object"}
 	}
+	if event == "usage" && stream.state.call.Method == MethodProviderExecute {
+		var totals Usage
+		if json.Unmarshal(payload, &totals) != nil || ValidateExecutionUsage(stream.server.manifest, &totals) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid provider execution usage"}
+		}
+	}
 	stream.server.mu.Lock()
 	if stream.state.finished || stream.state.ctx.Err() != nil {
 		stream.server.mu.Unlock()
@@ -115,8 +121,11 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
-	if ctx == nil || method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate {
+	if ctx == nil || method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
+	}
+	if IsStorageHostMethod(method) && !IsStorageMethod(stream.state.call.Method) {
+		return &Error{Code: "invalid_params", Message: "storage callbacks require a source parent"}
 	}
 	ctx, cancel := stream.context(ctx)
 	defer cancel()
@@ -130,6 +139,28 @@ func (stream *Stream) HostCall(ctx context.Context, method string, params any, o
 	}
 	if len(payload) > MaxHostBytes {
 		return &Error{Code: "resource_exhausted", Message: "host service parameters exceed their byte limit"}
+	}
+	if method == MethodDiagnosticEmit {
+		var diagnostic Diagnostic
+		if decodeParams(payload, &diagnostic) != nil || ValidateDiagnostic(stream.server.manifest, diagnostic) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid structured diagnostic"}
+		}
+	}
+	if method == MethodUsageAppend {
+		var request OwnCallRequest
+		if decodeParams(payload, &request) != nil || ValidateOwnCall(stream.server.manifest, request.Call) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid own-call usage"}
+		}
+	}
+	if method == MethodCatalogRead {
+		manifest := stream.server.manifest
+		var request CatalogReadRequest
+		scope := stream.state.call.Scope
+		if manifest.CatalogAccess == nil || ValidateCatalogAccess(manifest) != nil ||
+			decodeParams(payload, &request) != nil ||
+			manifest.CatalogAccess.Scope == "selected" && (scope.Account == "" || scope.Generation == 0) {
+			return &Error{Code: "invalid_params", Message: "catalog access requires its declared authority"}
+		}
 	}
 	stream.server.mu.Lock()
 	if stream.state.finished || stream.state.ctx.Err() != nil {

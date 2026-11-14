@@ -45,6 +45,11 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	w, body, hooked := gatewayHooks(w, r, from, body)
 	defer hooked()
 	agents := gwmw.AgentsWanted(middlewareWanted)
+	origin := gatewayOrigin(r)
+	if hubFromPage(r) {
+		origin = "browser"
+	}
+	agents = append(agents, extensionMiddlewareAgent{ctx: r.Context(), origin: origin})
 	if len(agents) == 0 {
 		s.serve(w, r, from, body)
 		return

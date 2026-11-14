@@ -318,7 +318,7 @@ func TestExtensionProviderNativeMetadataAndStableOperationIdentity(t *testing.T)
 	}
 	send := func(plugin, requestID, callerID, session string) {
 		t.Helper()
-		ctx := extensionhost.WithRequestMetadata(context.Background(), extensionhost.RequestMetadata{
+		ctx := extensionhost.WithRequestMetadata(extensionhost.WithCallerID(context.Background(), callerID), extensionhost.RequestMetadata{
 			Plugin: plugin, RequestID: requestID, CallerID: callerID,
 			Value: json.RawMessage(`{"nativeTag":"private-to-owner","callerId":"raw-spoofed"}`),
 		})
@@ -343,7 +343,7 @@ func TestExtensionProviderNativeMetadataAndStableOperationIdentity(t *testing.T)
 		!strings.Contains(string(seen[0].native), "private-to-owner") {
 		t.Fatalf("native request identity was not preserved: %+v", seen[:2])
 	}
-	if seen[2].requestID != "" || seen[2].callerID != "" || len(seen[2].native) != 0 || seen[2].scope.Operation == seen[0].scope.Operation {
+	if seen[2].requestID != "" || seen[2].callerID != "host-caller-a" || len(seen[2].native) != 0 || seen[2].scope.Operation == seen[0].scope.Operation {
 		t.Fatalf("another module's native metadata escaped: %+v", seen[2])
 	}
 	if seen[3].scope.Operation == seen[4].scope.Operation {

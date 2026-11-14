@@ -123,8 +123,9 @@ type classifiedAs struct {
 }
 
 type classifyFailure struct {
-	err string
-	at  time.Time
+	err   string
+	at    time.Time
+	cause error
 }
 
 // answerError is a classifier that answered, but not with one of the
@@ -162,10 +163,13 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 	if c, ok := classified.inflight[key]; ok {
 		classified.Unlock()
 		<-c.done
-		return c.v, c.err == nil, c.err
+		return c.v, c.err == nil, sharedClassifierError(c.err)
 	}
 	if f, ok := classified.failed[model]; ok && now.Sub(f.at) < classifyRest {
 		classified.Unlock()
+		if f.cause != nil {
+			return verdict{}, false, fmt.Errorf("%s failed %s ago; not asked again for now: %w", model, now.Sub(f.at).Round(time.Second), f.cause)
+		}
 		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
 	}
 	c := &classifyCall{done: make(chan struct{}), err: errors.New("classifier did not finish")}
@@ -184,6 +188,9 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 	c.err = err
 	if err != nil {
 		f := classifyFailure{err: err.Error(), at: time.Now()}
+		if terminalExtensionError(err) {
+			f.cause = sharedClassifierError(err)
+		}
 		if !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
 			classified.failed[model] = f
 		}

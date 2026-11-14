@@ -101,13 +101,14 @@ func wbCheckinDay(t time.Time) string { return t.In(beijing).Format("2006-01-02"
 // WorkBuddyCheckin is what came of a WorkBuddy account's check-in on Day
 // (Beijing): the credits it gave and the streak it made, or why none.
 type WorkBuddyCheckin struct {
-	User    string    `json:"user,omitempty"` // as listed now; never kept
-	Day     string    `json:"day"`
-	At      time.Time `json:"at"`
-	Outcome string    `json:"outcome"`
-	Credit  float64   `json:"credit,omitempty"`
-	Streak  int       `json:"streak,omitempty"`
-	Msg     string    `json:"msg,omitempty"`
+	Operation *CheckinOperationReceipt `json:"operation,omitempty"`
+	User      string                   `json:"user,omitempty"` // as listed now; never kept
+	Day       string                   `json:"day"`
+	At        time.Time                `json:"at"`
+	Outcome   string                   `json:"outcome"`
+	Credit    float64                  `json:"credit,omitempty"`
+	Streak    int                      `json:"streak,omitempty"`
+	Msg       string                   `json:"msg,omitempty"`
 	// ValidUntil is a campaign's end, or when a plugin said its vendor's
 	// day turns (auth.checkin's until), when the answer must be checked
 	// again, even if the Beijing day hasn't changed; on a failure, the

@@ -210,6 +210,9 @@ func extensionProvider(binding *extensionAccount) Provider {
 	account.transport = binding.execute
 	provider := Provider{ID: id, Name: binding.descriptor.Name, Account: account}
 	base := "extension://" + id
+	if binding.manifest.Contract.Version.Minor >= 7 && binding.descriptor.SupportsOperation(sdk.OperationSystemOne) {
+		provider.Decide = base + "/v1"
+	}
 	for _, protocol := range binding.descriptor.Protocols {
 		switch extensionProtocol(string(protocol)) {
 		case Chat:
@@ -364,9 +367,10 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 	}
 	key := binding.cacheKey()
 	models := binding.descriptor.Models
-	publish := false
+	publish, known := false, false
 	if cached, ok := extensionModelCache.Load(key); ok {
 		models = cached.([]sdk.Model)
+		known = true
 	} else if cached, known, err := binding.readModelCatalog(); err != nil {
 		return nil, err
 	} else if known {
@@ -380,7 +384,11 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 		return nil, err
 	}
 	if publish {
-		extensionModelCache.Store(key, slices.Clone(models))
+		extensionModelCache.Store(key, cloneExtensionModels(models))
+		known = true
+	}
+	if !known {
+		models = slices.DeleteFunc(slices.Clone(models), func(model sdk.Model) bool { return model.Kind == "decision" })
 	}
 	return binding.projectModels(models)
 }
@@ -394,7 +402,7 @@ func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Mo
 			return nil, errors.New("extension model has invalid limits")
 		}
 		protocols := model.Protocols
-		if len(protocols) == 0 {
+		if len(protocols) == 0 && model.Kind != "decision" {
 			protocols = binding.descriptor.Protocols
 		}
 		entry := catalog.Model{ID: model.ID, Name: model.Name, Provider: ExtensionProviderID(binding.scope.Plugin, binding.scope.Provider),
@@ -414,6 +422,9 @@ func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Mo
 			entry.Images, entry.ImageInput = images, &images
 		}
 		switch model.Kind {
+		case "decision":
+			entry.Decides = binding.manifest.Contract.Version.Minor >= 7 &&
+				binding.descriptor.SupportsOperation(sdk.OperationSystemOne) && slices.Contains(model.Operations, sdk.OperationSystemOne)
 		case "image":
 			entry.Draws = true
 		case "video":
@@ -466,7 +477,7 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	if err := binding.writeModelCatalog(ctx, result); err != nil {
 		return nil, err
 	}
-	extensionModelCache.Store(binding.cacheKey(), slices.Clone(result.Models))
+	extensionModelCache.Store(binding.cacheKey(), cloneExtensionModels(result.Models))
 	Changed()
 	return binding.models()
 }

@@ -43,6 +43,7 @@ func (c *rowChunk) pack() *rowChunk {
 	next := *c
 	next.Count = len(c.Rows) // what rowsIn says of it
 	next.Rows, next.Strings, next.Shapes, next.dict, next.shapeIDs = nil, nil, nil, nil, nil
+	next.executionText = nil
 	next.Archive, next.Locations = encoded, locations
 	next.Bytes = int64(len(next.Archive)+len(locations)*8) + next.codexActors.bytes()
 	return &next
@@ -66,6 +67,12 @@ func (c *rowChunk) encode(keep func([]byte) bool) ([]byte, []*time.Location) {
 	for _, shape := range c.Shapes {
 		for _, n := range shape {
 			put(uint64(n))
+		}
+	}
+	put(uint64(len(c.executionText)))
+	for _, execution := range c.executionText {
+		for _, id := range execution {
+			put(uint64(id))
 		}
 	}
 	var locations []*time.Location
@@ -273,6 +280,21 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 		}
 	}
 	next.Bytes += int64(len(next.Shapes)) * int64(unsafe.Sizeof([rowTexts]uint32{}))
+	executionCount := take()
+	if executionCount > rows || executionCount > uint64(len(data))/3 {
+		return nil
+	}
+	next.executionText = make([][3]uint32, int(executionCount))
+	for index := range next.executionText {
+		for field := range next.executionText[index] {
+			id := take()
+			if id >= count || id >= uint64(rowExecutionTag) {
+				return nil
+			}
+			next.executionText[index][field] = uint32(id)
+		}
+	}
+	next.Bytes += int64(len(next.executionText)) * int64(unsafe.Sizeof([3]uint32{}))
 	var few [4]uint16
 	zones := few[:0]
 	for _, loc := range c.Locations {
@@ -291,7 +313,11 @@ func (c *rowChunk) unpackReusing(dst *rowChunk, into []packedRow, strs []string,
 		}
 		for j := range p.Varied {
 			n := take()
-			if n >= count {
+			if j == rowResponseAt && n&uint64(rowExecutionTag) != 0 {
+				if n > math.MaxUint32 || n&^uint64(rowExecutionTag) >= executionCount {
+					return nil
+				}
+			} else if n >= count || n >= uint64(rowExecutionTag) {
 				return nil
 			}
 			p.Varied[j] = uint32(n)

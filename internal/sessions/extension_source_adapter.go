@@ -14,6 +14,7 @@ import (
 )
 
 type sessionSourceRecord struct {
+	storage    *storageSourceRecord
 	grant      sourceGrant
 	request    sdk.SessionSourceReadRequest
 	snapshot   *sessionInputSnapshot
@@ -80,6 +81,11 @@ func PrepareSessionSources(ctx context.Context) error {
 	var problems []error
 	counts := map[string]int{}
 	for _, entry := range entries {
+		if !entry.Disabled {
+			for _, source := range entry.Manifest.StorageSources {
+				counts[source.Agent]++
+			}
+		}
 		for _, source := range entry.Manifest.SessionSources {
 			if !nativeSourceOwner(source.Agent) {
 				view.agents[source.Agent] = true
@@ -91,6 +97,7 @@ func PrepareSessionSources(ctx context.Context) error {
 			}
 		}
 	}
+	problems = append(problems, prepareStorageSources(ctx, manager, entries, view, counts)...)
 	for _, entry := range entries {
 		if entry.Disabled {
 			continue
@@ -148,10 +155,10 @@ func PrepareSessionSources(ctx context.Context) error {
 	}
 	duplicates := map[string]int{}
 	for _, record := range view.records {
-		duplicates[record.grant.descriptor.Agent+":"+record.request.Locator.SessionID]++
+		duplicates[record.grant.descriptor.Agent+":"+sourceRecordID(record)]++
 	}
 	view.records = slices.DeleteFunc(view.records, func(record *sessionSourceRecord) bool {
-		ambiguous := duplicates[record.grant.descriptor.Agent+":"+record.request.Locator.SessionID] != 1
+		ambiguous := duplicates[record.grant.descriptor.Agent+":"+sourceRecordID(record)] != 1
 		if ambiguous {
 			problems = append(problems, errors.New("ambiguous session source identity"))
 		}
@@ -164,7 +171,7 @@ func PrepareSessionSources(ctx context.Context) error {
 		return extension.ErrActionChanged
 	}
 	for _, record := range view.records {
-		if err := checkSourceGrant(ctx, record.grant); err != nil {
+		if err := checkSourceRecordGrant(ctx, record); err != nil {
 			sourceView.Store(&sessionSourceView{epoch: epoch, owners: view.owners, agents: view.agents})
 			return err
 		}
@@ -282,24 +289,7 @@ func prepareSourceRecord(ctx context.Context, manager *extension.Manager, entry 
 
 func sourceSummaryState(grant sourceGrant, request sdk.SessionSourceReadRequest, snapshot *sessionInputSnapshot, summary *sdk.SessionSourceSummary) *state {
 	file := snapshot.files[0]
-	value := &state{Agent: grant.descriptor.Agent, ID: request.Locator.SessionID, Title: summary.Title, Cwd: summary.Cwd,
-		Size: file.info.Size(), Mod: file.info.ModTime().UnixNano(), sourceOwned: true}
-	value.Start, _ = time.Parse(time.RFC3339Nano, summary.Start)
-	value.Last, _ = time.Parse(time.RFC3339Nano, summary.Last)
-	var total uint64
-	for _, point := range summary.Usage {
-		for _, count := range []uint64{point.Input, point.Output, point.CacheRead, point.CacheWrite, point.CacheWrite1h} {
-			if count > uint64(^uint(0)>>1)-total {
-				return nil
-			}
-			total += count
-		}
-		at, _ := time.Parse(time.RFC3339Nano, point.At)
-		value.use(at.In(time.Local).Format("2006-01-02"), point.Model,
-			Tokens{Input: int(point.Input), Output: int(point.Output), CacheRead: int(point.CacheRead),
-				CacheWrite: int(point.CacheWrite), CacheWrite1h: int(point.CacheWrite1h)})
-	}
-	return value
+	return projectSourceSummary(grant.descriptor.Agent, request.Locator.SessionID, summary, file.info.Size(), file.info.ModTime().UnixNano())
 }
 
 func prepareSourcesBeforeRead() {
@@ -320,7 +310,7 @@ func refreshSourceAuthority(ctx context.Context) {
 		allowed := map[string]bool{}
 		for _, record := range view.records {
 			if _, checked := allowed[record.grant.reference]; !checked {
-				allowed[record.grant.reference] = view.epoch == sourceEpoch.Load() && checkSourceGrant(ctx, record.grant) == nil
+				allowed[record.grant.reference] = view.epoch == sourceEpoch.Load() && checkSourceRecordGrant(ctx, record) == nil
 			}
 		}
 		records := slices.DeleteFunc(slices.Clone(view.records), func(record *sessionSourceRecord) bool {
@@ -382,12 +372,12 @@ func extensionSourceFiles(native []file) []file {
 		if !Reads(agent) {
 			continue
 		}
-		path := sourcePhysicalPath(record.grant, record.request.Locator.Path)
+		path := sourceRecordPath(record)
 		if seen[path] {
 			continue
 		}
 		seen[path] = true
-		item := file{agent: agent, key: agent + ":" + record.request.Locator.SessionID, path: path,
+		item := file{agent: agent, key: agent + ":" + sourceRecordID(record), path: path,
 			size: record.summary.Size, mod: modTime(record.summary.Mod), main: true}
 		item.w().source = record
 		out = append(out, item)

@@ -840,7 +840,8 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		p = drew
 		call.Fallback = strings.Join(skipped, "; ")
 		call.Millis = time.Since(start).Milliseconds()
-		call.Status, call.Usage.Input, call.Usage.Output = code, out.Input, out.Output
+		call.Status = code
+		call.Usage = normalizedExtensionUsage(p, extensionAttempt, Usage{Input: out.Input, Output: out.Output})
 		if err == nil && len(out.Images) == 0 {
 			code, err = 502, errors.New(model+" drew nothing"+vendorSaid(out.Text))
 			call.Status = code
@@ -849,11 +850,13 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		if p.Account == nil && p.Key != "" {
 			providerKeyID, providerKeyName = provider.KeyID(p.Key), p.KeyName
 		}
-		side.end(p, model, call.Status, err, Usage{Input: out.Input, Output: out.Output})
-		appendUsage(r, usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(p),
-			Input: out.Input, Output: out.Output, Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
 		if err != nil {
 			call.Error = err.Error()
+		}
+		side.end(p, model, call.Status, err, call.Usage)
+		appendUsage(r, accountedUsage(usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(p),
+			Millis: call.Millis, Status: call.Status, Error: call.Error, Session: sessionOf(r.Header)}, call.Usage))
+		if err != nil {
 			s.record(call)
 			if d := time.Until(capBack); d > 0 {
 				w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))

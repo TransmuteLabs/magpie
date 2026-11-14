@@ -127,9 +127,10 @@ func (o *observed) attempt(call Call, attempt Try, providerID, effort string, he
 	}
 	u := call.Usage.billed()
 	rec := usage.Record{RouteID: o.routeID, Time: attempt.Start, Agent: call.Agent,
-		Provider: providerID, Model: attempt.Model, Requested: call.Model, Served: u.Served, Effort: effort,
-		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheUnknown: u.cacheNotCounted(), Reasoning: u.Reasoning,
+		Provider: providerID, Model: attempt.Model, Requested: call.Model, Served: u.Served, Upstream: call.Usage.Upstream, Effort: effort,
+		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h, CacheUnknown: u.cacheNotCounted(), Reasoning: u.Reasoning, Credits: call.Usage.Credits, TierServed: call.Usage.Tier,
 		Millis: time.Since(attempt.Start).Milliseconds(), Status: attempt.Status, TTFT: attempt.TTFT, FirstText: attempt.FirstText, FirstReasoning: attempt.FirstReasoning, ReasoningHidden: attempt.ReasoningHidden, CallerKeyName: o.keyName}
+	rec = accountedUsage(rec, call.Usage)
 	canceledAs(&rec, attempt.Status, attempt.Error)
 	if wanted := usage.ObservedBodies(); wanted != usage.NoBodies {
 		reply, cut := capture.body.text(), capture.body.truncated

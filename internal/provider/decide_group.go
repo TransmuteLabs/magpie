@@ -43,7 +43,12 @@ func (g Group) Decides() bool {
 // are decision models, every one: the group answers System One, not a
 // conversation.
 func DecisionGroup(ms []Member) bool {
-	return len(ms) > 0 && !slices.ContainsFunc(ms, func(m Member) bool { return !m.Provider.DecidesModel(m.Model) })
+	return len(ms) > 0 && !slices.ContainsFunc(ms, func(m Member) bool {
+		if m.Provider.IsExtension() {
+			return !m.Provider.ExtensionListsDecisionModel(m.Model)
+		}
+		return !m.Provider.DecidesModel(m.Model)
+	})
 }
 
 // cleanDecisionGroup checks a decision group as SaveGroup is to keep it,

@@ -8,7 +8,7 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package source version 1.6.0 advertises SDK API 1.6 and thirteen capabilities.
+Package source version 1.8.0 advertises SDK API 1.8.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
 API 1.4 adds declared routing strategies through existing read actions.
@@ -17,8 +17,25 @@ window authentication.
 API 1.5 also declares agent launch, explicit profile ownership and Library
 targets. API 1.6 adds bounded JSONL session sources and native account
 operations on the shared host.
-Explicit 1.0/1.1/1.2/1.3/1.4/1.5 manifests retain their earlier behavior. This is a source
+API 1.7 adds the finite `systemone` provider operation and `Model.operations`.
+Decision models use `kind: "decision"`, `operations: ["systemone"]` and
+no conversational protocols; missing, null and empty decision protocols all
+mean none. The provider declares the operation and model discovery. The
+host uses the selected account's discovered model association, rather than
+static hints or another account's catalog. Execute uses `protocol: ""`;
+admission and dispatch require the module's own negotiated minor 7.
+Explicit older manifests retain their earlier negotiated behavior. This is a source
 version, not a claim that an npm package or release was published.
+
+API 1.8 adds own-call reporting, account history, search sources, native storage
+sources and explicit catalog projection. `catalogAccess` grants either an
+inherited selected-account or inventory read; `catalog.read` returns visible
+models and cached quota evidence without credentials or vendor refresh.
+The independent `ledger-observer` capability with `ledger: {}` receives
+`ledger.observe`. This is a bounded, sanitized, read-only numeric/metadata sink,
+separate from body capture and memory hooks. The host retains original package
+and configuration authority, counts delivery drops and never waits for it while
+writing a ledger row.
 
 ```js
 import { serve, SDKError } from "@magpie/extension-sdk";
@@ -204,7 +221,7 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract versions are 1.0 through 1.6. Handlers outside the
+handlers. Supported contract versions are 1.0 through 1.8. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
@@ -355,6 +372,39 @@ API 1.3 attachment-aware session modules may declare the read-only
 reads approved paths/digests from the selected native store and pins
 planner/converter to one lease. It does not grant the module arbitrary host
 filesystem access or generic session reader/resume registration.
+
+## Check-in and gateway activation (API 1.8)
+
+An authenticated provider can declare
+`checkin: {action: "daily.claim", recheck: false}`. Require minor 8,
+`account-auth`, `module-rpc` and the corresponding declared write action.
+The ordinary host check-in owner retains Settings, the default-off daily
+switch, account exclusion, manual policy, retry gates and quota cards.
+The action may belong to the primary or a private service; public
+handshakes omit check-in metadata for actions owned by another component.
+
+Use `validateAccountCheckinRequest(call.params)` for the owner's canonical
+`day` and selected `proxy`. Credentials stay in `call.auth`. Await
+`stream.emit("accepted", {operationId: call.scope.operation})` before the
+write and return `validateAccountCheckinResult(result)`. Outcomes are
+`claimed`, `done`, `inactive`, `ineligible`, `failed`, `captcha` and
+`own-app`; optional `credit` and `streak` preserve absent and explicit zero.
+`message` is at most 4096 UTF-8 bytes. `until` is a strict RFC3339 boundary
+with at most nine fractional digits.
+
+The host durably reserves the intent and retains its terminal operation
+reference in the ordinary saved result. Unknown or failed completion blocks
+another write across manual/daily calls, process restart and credential
+generation changes. Known not-started and ordinary completed non-claim
+rechecks use new intents; credit grants create no inference billing row.
+
+A root `activation: ["gateway"]` requests a lease after successful listener
+bind. The ordinary gateway stays cold during `New`/`Front`, metadata reads
+and failed binds. Disable, removal, configuration replacement and shutdown
+release and retire that generation through the bounded component disposer.
+Startup failure leaves ordinary HTTP serving. Private services inherit no
+activation. See [ADR 0024](../../docs/adr/0024-sdk-account-checkin-gateway-activation.md)
+for the host owners and scoped verification.
 
 ## Routing strategies (API 1.4)
 

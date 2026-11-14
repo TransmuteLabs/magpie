@@ -1256,11 +1256,14 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 			call.Status = code
 		}
 	}
-	side.end(p, model, call.Status, err, Usage{})
-	appendUsage(r, usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderAccount: accountOf(p),
-		Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
+	call.Usage = normalizedExtensionUsage(p, extensionAttempt, Usage{})
 	if err != nil {
 		call.Error = err.Error()
+	}
+	side.end(p, model, call.Status, err, call.Usage)
+	appendUsage(r, accountedUsage(usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderAccount: accountOf(p),
+		Millis: call.Millis, Status: call.Status, Error: call.Error, Session: sessionOf(r.Header)}, call.Usage))
+	if err != nil {
 		s.record(call)
 		msg := err.Error()
 		if len(skipped) > 0 {

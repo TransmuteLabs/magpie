@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTRACT, SDKError, publicManifest, requiredMethods, validateManifest } from "../index.js";
+import { SDKError, publicManifest, requiredMethods, validateManifest } from "../index.js";
 import { harness, manifest } from "./helpers.js";
 
 function sharedManifest() {
   return {
-    ...manifest(CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks", "session-source", "native-account-operations"].includes(capability))),
+    ...manifest([
+      "inbound-codec", "outbound-executor", "agent-wiring", "account-auth",
+      "model-discovery", "usage-reporter", "operation-control", "tool-provider",
+      "session-migration",
+    ]),
     inbounds: [{ id: "native", path: "/fixture/native" }],
     providers: [{ id: "sample", name: "Sample", protocols: ["chat"], models: [{ id: "echo" }] }],
     agents: [{ id: "editor", name: "Editor" }],

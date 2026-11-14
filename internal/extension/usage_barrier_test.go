@@ -51,7 +51,7 @@ func usageManager(t *testing.T) (*Manager, sdk.Scope) {
 	return usageManagerVersion(t, 4)
 }
 
-func usageManagerVersion(t *testing.T, minor int) (*Manager, sdk.Scope) {
+func usageManagerVersion(t *testing.T, minor int, configure ...func(*sdk.Manifest)) (*Manager, sdk.Scope) {
 	t.Helper()
 	path := fixturePackage(t)
 	raw, _ := os.ReadFile(filepath.Join(path, sdk.ManifestFile))
@@ -62,6 +62,9 @@ func usageManagerVersion(t *testing.T, minor int) (*Manager, sdk.Scope) {
 	manifest.Actions = append(manifest.Actions, sdk.ActionDescriptor{
 		ID: "fixture.auth-read", Effect: "read", InputSchema: json.RawMessage(`{"type":"object"}`),
 	})
+	for _, option := range configure {
+		option(&manifest)
+	}
 	raw, _ = json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(path, sdk.ManifestFile), raw, 0o600); err != nil {
 		t.Fatal(err)

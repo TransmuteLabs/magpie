@@ -3,12 +3,20 @@ import { posix } from "node:path";
 import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
 import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
 import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
-import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation } from "./provider-policy.js";
+import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation, validateModelOperations } from "./provider-policy.js";
 import { validateRouting } from "./routing.js";
+import { validateSearchSources } from "./search-sources.js";
+import { MIDDLEWARE_METHODS, middlewareMethods, validateMiddleware, validateMiddlewareCall, validateMiddlewareResult } from "./middleware.js";
 import { validateWindowAuthBindings } from "./window-auth.js";
 import { validateAgentMetadata, validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
 import { validateSessionSources, validateSessionSourceRequest, validateSessionSourceResult } from "./session-source.js";
+import { STORAGE_METHODS, validateStorageSources, validateStorageRequest, validateStorageResult } from "./storage-source.js";
 import { validateAccountOperations } from "./account-operations.js";
+import { validateAccountCheckins } from "./account-checkin.js";
+import { validateAccountKeepAlives } from "./account-keepalive.js";
+import { validateActivation } from "./gateway-activation.js";
+import { validateCatalogAccess } from "./catalog-projection.js";
+import { validateLedgerObserver, validateLedgerCall, validateLedgerResult } from "./ledger.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -21,13 +29,16 @@ const capabilities = {
   "tool-provider": ["tool.call"],
   "session-migration": ["session.convert"],
   "session-source": ["session.source.read"],
+  "session-storage-source": STORAGE_METHODS,
   "module-rpc": ["module.call"],
   "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
+  "gateway-middleware": MIDDLEWARE_METHODS,
   "native-account-operations": [],
+  "ledger-observer": ["ledger.observe"],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 6 }),
+  version: Object.freeze({ major: 1, minor: 8 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -123,6 +134,10 @@ function modelPolicy(model) {
 export function requiredMethods(manifest) {
   const methods = [];
   for (const capability of manifest.contract.capabilities) {
+    if (capability === "session-storage-source") {
+      methods.push(...STORAGE_METHODS);
+      continue;
+    }
     if (capability === "model-discovery" && !manifest.providers?.length) continue;
     if (capability === "gateway-hooks") {
       for (const [flag, method] of [["request", "gateway.request"], ["response", "gateway.response"], ["signIn", "gateway.signin"]]) {
@@ -130,7 +145,12 @@ export function requiredMethods(manifest) {
       }
       continue;
     }
+    if (capability === "gateway-middleware") {
+      methods.push(...middlewareMethods(manifest.middleware));
+      continue;
+    }
     methods.push(...capabilities[capability]);
+    if (capability === "usage-reporter" && manifest.providers?.some(provider => provider.calls)) methods.push("provider.calls");
     if (capability === "agent-wiring" && manifest.agents?.some(agent => agent.bin || agent.configFiles?.length || agent.fields?.length || agent.launch || agent.profile)) {
       methods.push("agent.inspect");
     }
@@ -151,7 +171,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5, 6].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -169,20 +189,27 @@ export function validateManifest(value) {
         if (!has("inbound-codec") || !endpoint(descriptor.path) || paths.has(descriptor.path)) fail("Invalid, reserved or duplicate inbound path");
         paths.add(descriptor.path);
       } else if (key === "providers") {
+        if (descriptor.calls !== undefined && (typeof descriptor.calls !== "boolean"
+          || descriptor.calls && (contract.version.minor < 8 || !has("usage-reporter") || !has("account-auth"))))
+          fail("Outside calls require SDK API 1.8, usage reporting and account auth");
         const protocols = descriptor.protocols;
         if (!(has("outbound-executor") || has("model-discovery")) || !validName(descriptor.name)
-          || !Array.isArray(protocols) || !protocols.length || new Set(protocols).size !== protocols.length
+          || !Array.isArray(protocols) || new Set(protocols).size !== protocols.length
           || protocols.some(protocol => !["chat", "responses", "messages", "anthropic", "gemini"].includes(protocol))
           || descriptor.models !== undefined && !Array.isArray(descriptor.models)) fail("Invalid provider descriptor");
         validateProviderPolicy(manifest, descriptor, fail);
+        if (!protocols.length && (descriptor.operations?.length !== 1 || descriptor.operations[0] !== "systemone"))
+          fail("Provider requires conversational protocols or the isolated decision operation");
         const models = new Set();
         for (const model of descriptor.models || []) {
           if (!object(model) || typeof model.id !== "string" || !model.id || Buffer.byteLength(model.id) > 300
             || space.test(model.id) || models.has(model.id)
             || ["contextWindow", "maxOutput"].some(field => model[field] !== undefined && (!Number.isSafeInteger(model[field]) || model[field] < 0))
-            || model.protocols !== undefined && (!Array.isArray(model.protocols) || model.protocols.some(protocol => !protocols.includes(protocol)))) fail("Invalid or duplicate provider model");
+            || model.protocols !== undefined && !(model.kind === "decision" && model.protocols === null)
+              && (!Array.isArray(model.protocols) || model.protocols.some(protocol => !protocols.includes(protocol)))) fail("Invalid or duplicate provider model");
           modelPolicy(model);
           validateExtendedModel(manifest, model, fail);
+          validateModelOperations(manifest, descriptor, model, fail);
           models.add(model.id);
         }
       } else if (key === "tools") {
@@ -224,9 +251,17 @@ export function validateManifest(value) {
   validateComposite(manifest);
   validateWindowAuthBindings(manifest);
   validateRouting(manifest, fail);
+  validateSearchSources(manifest, fail);
   validateSessionSources(manifest);
+  validateStorageSources(manifest);
   validateAccountOperations(manifest, fail);
+  validateAccountCheckins(manifest);
+  validateAccountKeepAlives(manifest);
+  validateActivation(manifest);
   validateHooks(manifest);
+  validateMiddleware(manifest);
+  validateCatalogAccess(manifest);
+  validateLedgerObserver(manifest);
   return freezeJSON(manifest);
 }
 
@@ -240,7 +275,10 @@ export function publicManifest(manifest) {
   if (result.routingStrategies != null) {
     result.routingStrategies = result.routingStrategies.filter(strategy => result.actions?.some(action => action.id === strategy.action));
   }
-  for (const provider of result.providers || []) for (const model of provider.models || []) modelPolicy(model);
+  for (const provider of result.providers || []) {
+    if (provider.checkin != null && !result.actions?.some(action => action.id === provider.checkin.action)) delete provider.checkin;
+    for (const model of provider.models || []) modelPolicy(model);
+  }
   return freezeJSON(result);
 }
 
@@ -267,6 +305,21 @@ export function validateModule(module) {
   if (required.some(method => typeof handlers.get(method) !== "function")
     || [...handlers].some(([method, handler]) => !required.includes(method) || typeof handler !== "function")) fail("Missing or undeclared extension handler");
   for (const [method, handler] of handlers) {
+    if (MIDDLEWARE_METHODS.includes(method)) {
+      handlers.set(method, async (ctx, call, stream) => {
+        validateMiddlewareCall(method, call, manifest.middleware, stringifyJSON);
+        const result = await handler(ctx, call, stream);
+        return validateMiddlewareResult(method, jsonSnapshot(result ?? {}), stringifyJSON);
+      });
+    }
+    if (STORAGE_METHODS.includes(method)) {
+      handlers.set(method, async (ctx, call, stream) => {
+        validateStorageRequest(manifest, method, call.scope, call.auth, call.params);
+        const result = validateStorageResult(call.params, await handler(ctx, call, stream), stringifyJSON);
+        await stream.hostCall("storage.check", call.params.lease);
+        return result;
+      });
+    }
     if (method === "agent.inspect" || method === "agent.plan") {
       handlers.set(method, async (ctx, call, stream) => {
         const params = call.params;
@@ -300,6 +353,12 @@ export function validateModule(module) {
         return handler(ctx, call, stream);
       });
     }
+    if (method === "ledger.observe") {
+      handlers.set(method, async (ctx, call, stream) => {
+        validateLedgerCall(call);
+        return validateLedgerResult(await handler(ctx, call, stream));
+      });
+    }
     if (!gatewayMethodEffect(method)) continue;
     handlers.set(method, async (ctx, call, stream) => {
       validateGatewayCall(method, call, manifest.hooks, stringifyJSON);
@@ -319,7 +378,8 @@ export function serviceManifest(root, id) {
   return validateManifest({
     schema: root.schema, id: root.id, version: root.version,
     runtime: service.runtime, entry: service.entry, ...(service.args ? { args: service.args } : {}),
-    contract: { version: { major: 1, minor: 1 }, capabilities: ["module-rpc"] },
+    contract: { version: root.catalogAccess ? root.contract.version : { major: 1, minor: 1 }, capabilities: ["module-rpc"] },
+    ...(root.catalogAccess ? { catalogAccess: root.catalogAccess } : {}),
     component: { id, contract: service.contract },
     actions: (root.actions ?? []).filter(action => actionOwner(action) === id),
   });

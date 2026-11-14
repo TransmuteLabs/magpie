@@ -2,8 +2,9 @@ const operations = new Set([
   "embeddings", "rerank", "images.generate", "images.edit",
   "audio.transcribe", "audio.translate", "audio.speech",
   "videos.create", "videos.get", "videos.content", "videos.delete", "videos.remix",
+  "systemone",
 ]);
-const kinds = new Set(["", "chat", "image", "video", "embedding", "rerank", "speech", "transcription"]);
+const kinds = new Set(["", "chat", "image", "video", "embedding", "rerank", "speech", "transcription", "decision"]);
 const modalities = new Set(["text", "image", "audio", "video", "pdf"]);
 
 export function validateProviderPolicy(manifest, provider, fail) {
@@ -14,17 +15,45 @@ export function validateProviderPolicy(manifest, provider, fail) {
     fail("Provider operations require SDK API 1.3 and outbound-executor");
   if (new Set(provider.operations).size !== provider.operations.length
     || provider.operations.some(operation => !operations.has(operation))) fail("Invalid or duplicate provider operation");
-  if (!provider.protocols.includes("chat")) fail("Provider operations require the OpenAI-compatible chat protocol");
+  if (provider.operations.includes("systemone") && manifest.contract.version.minor < 7)
+    fail("Decision operations require SDK API 1.7");
+  if (provider.operations.includes("systemone") && !manifest.contract.capabilities.includes("model-discovery"))
+    fail("Decision operations require selected-account model discovery");
+  if (provider.operations.some(operation => operation !== "systemone") && !provider.protocols.includes("chat"))
+    fail("Provider operations require the OpenAI-compatible chat protocol");
 }
 
 export function validateExecuteOperation(manifest, call, fail) {
   const operation = call.params?.operation;
-  if (operation == null || operation === "") return;
-  if (manifest.contract.version.minor < 3 || !operations.has(operation) || call.params?.protocol !== "chat")
-    fail("Provider operation requires its negotiated OpenAI-compatible protocol");
   const provider = manifest.providers?.find(provider => provider.id === call.scope?.provider);
-  if (!provider?.operations?.includes(operation) || !provider.protocols.includes("chat"))
+  const model = provider?.models?.find(model => model.id === call.params?.model);
+  if (operation == null || operation === "") {
+    if (model?.kind === "decision") fail("Decision model requires its declared operation");
+    return;
+  }
+  const decision = operation === "systemone";
+  if (model?.kind === "decision" && !decision) fail("Decision model requires its systemone operation");
+  if (manifest.contract.version.minor < (decision ? 7 : 3) || !operations.has(operation)
+    || call.params?.protocol !== (decision ? "" : "chat"))
+    fail("Provider operation requires its negotiated API and protocol envelope");
+  if (!provider?.operations?.includes(operation) || !decision && !provider.protocols.includes("chat"))
     fail("Provider operation is not declared by this generation");
+  if (decision && (!call.params?.model || !manifest.contract.capabilities.includes("model-discovery")
+    && (model?.kind !== "decision" || !model.operations?.includes(operation))))
+    fail("Decision model did not declare the requested operation");
+}
+
+export function validateModelOperations(manifest, provider, model, fail) {
+  if ((model.kind === "decision" || model.operations?.length) && manifest.contract.version.minor < 7)
+    fail("Model operations and decision kind require SDK API 1.7");
+  if (model.operations != null && (!Array.isArray(model.operations)
+    || new Set(model.operations).size !== model.operations.length
+    || model.operations.some(operation => !operations.has(operation) || !provider.operations?.includes(operation))))
+    fail("Invalid, undeclared or duplicate model operation");
+  if (model.kind === "decision") {
+    if (model.protocols?.length || model.operations?.length !== 1 || model.operations[0] !== "systemone")
+      fail("Decision models require only systemone and no conversational protocols");
+  } else if (model.operations?.includes("systemone")) fail("Systemone requires a decision model");
 }
 
 export function validateExtendedModel(manifest, model, fail) {

@@ -16,6 +16,10 @@ import (
 
 const extensionModelChunkBytes = 512 << 10
 
+func cloneExtensionModels(models []sdk.Model) []sdk.Model {
+	return (sdk.Manifest{Providers: []sdk.ProviderDescriptor{{Models: models}}}).Clone().Providers[0].Models
+}
+
 type extensionModelCatalog struct {
 	Schema int      `json:"schema"`
 	Bytes  int      `json:"bytes"`

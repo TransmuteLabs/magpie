@@ -1,6 +1,6 @@
 # Internal extension runtime comparison
 
-Date: November 13, 2026.
+Date: November 14, 2026.
 
 Native Go C ABI loading, the preserved exec runtime, SDK Bun and composite
 modules are implemented. Native Go runs inside Magpie's PID; exec Go runs
@@ -16,7 +16,10 @@ marketplace, new registry or arbitrary-language framework implied.
 Implementation has scoped native/composite and gateway/tool proof;
 [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) identify the actual
-trees and later fixes. This is not a whole-repository green or vendor-parity claim.
+trees and later fixes. The [consolidated 1.6 record](../adr/0021-consolidated-sdk16-validation.md)
+records the later ordinary-owner and repository gates. The current 1.8 source
+adds the adapters listed below; its final combined verification is a separate
+record. None of these records establishes live vendor parity.
 
 ## Compared implementations
 
@@ -25,8 +28,8 @@ trees and later fixes. This is not a whole-repository green or vendor-parity cla
 | Legacy TS | Magpie provider/OpenCode/Pi host: shared Bun child. Inspected source; no live vendor account used. Separate legacy `agent.js` and gateway middleware run through moejs inside Magpie, outside this column. |
 | ProxyPilot C | CLIProxyAPI-family C-shared implementation in the local ProxyPilot checkout identified below. Source comparison only; no ProxyPilot binary/vendor flow run. |
 | SDK exec Go | Installed executable using the public Go SDK, common host/lease/journal and process transport. Real compiled-worker/CLI/gateway fixture evidence exists. |
-| SDK native Go | Installed Go C-shared library using the public SDK adapter and common host owners. Actual host-PID, stream/callback/lifecycle and composite fixture proof on macOS and Linux. |
-| SDK Bun TS | Installed JS/TS primary or service using the JS SDK and managed Bun. Real Go-host/Bun API 1.1/1.2 fixtures, plus 102 Node/102 Bun tests and strict types. |
+| SDK native Go | Installed Go C-shared library using the public SDK adapter and common host owners. Host-PID, stream/callback/lifecycle and composite fixtures include earlier macOS evidence and later Linux execution. A later cross-build is not new macOS runtime proof. |
+| SDK Bun TS | Installed JS/TS primary or service using the JS SDK and managed Bun. Actual Go-host/Bun fixtures, JS conformance and strict types are recorded at their exact source revisions. |
 
 “Native protocol” in an older gateway test means a provider request format,
 not library loading. Actual PID checks now separately establish native
@@ -63,7 +66,7 @@ fixed latency, RSS or throughput ranking.
 | Accepted effects | Legacy provider-specific rules. | Separate adapter/retry rules; not Magpie's journal. | Accepted/uncertain/completed journal; no automatic replay of uncertain dispatched work. | Same root journal/account owners. | Same root journal/account owners. |
 | Replacement / drain | Shared-host replacement; source permits up to ten minutes. | Config/snapshot replacement; explicit unload waits for active calls. | New root generation handles new work; old leases drain up to 30 seconds. | Same logical generation drain; code remains mapped. | Same root-generation drain as exec. |
 | Stop / disposal | Legacy owner cleanup. | Shutdown/free/unload after guarded calls. | `component.stop` joins cooperative startup/disposer; hard close remains available. | Same SDK stop; session close revokes without waiting for arbitrary code. | Stop aborts calls/waits and joins cooperative startup/disposer; child can be killed. |
-| Physical unload | Ends child host. | Unix `dlclose` / Windows DLL release. | Exits child. | Libraries remain mapped until Magpie exits; close is not `dlclose`. | Exits child. |
+| Physical unload | Ends child host. | Unix `dlclose` / Windows DLL release. | Exits child. | Libraries remain mapped until Magpie exits; close is not `dlclose`. Verified identical images may be reused with fresh logical instances. Unsafe image reuse or capacity exhaustion requires a restart. | Exits child. |
 | Retry after failure | Legacy-specific. | Host-specific. | Later independent call may start a new runtime; effects are not silently retried. | Same common policy; reopening is not unloading a Go image. | Same common policy. |
 
 ## Account correctness, configuration and host authority
@@ -92,7 +95,7 @@ identities; both stay pinned when a primary calls its helper.
 | Artifact | Existing package/file workflow. | Platform shared library. | Executable plus manifest/payloads. | Shared library plus manifest/payloads; no native argv. | Script/package plus manifest/payloads. |
 | Bun dependency | Yes for provider host; separate moejs paths differ. | None for native loader. | None unless a declared component uses Bun. | None for native + Go helpers + prebuilt TS UI. | Managed Bun required for execution; Node is a conformance runner. |
 | cgo / C toolchain | Not for JS source. | Go C-shared build and Unix loader need C toolchain/cgo; separate Windows loader. | Pure Go possible, dependencies permitting. | C-shared author build and supported cgo host required; no-cgo refuses native clearly. | Not for JS source itself. |
-| OS / execution proof | Bun/platform dependencies. | Unix/Windows loaders inspected, not executed here. | Platform executable; pure Go cross-build possible. | Darwin/Linux/FreeBSD/Windows loader branches; macOS executed. Linux test preparing, no result yet; Windows unexecuted. | Bun-supported platform and dependencies. |
+| OS / execution proof | Bun/platform dependencies. | Unix/Windows loaders inspected, not executed here. | Platform executable; pure Go cross-build possible. | Darwin/Linux/FreeBSD/Windows loader branches. Earlier macOS and later Linux fixtures executed; current Darwin/Windows cross-builds do not prove native execution there. | Bun-supported platform and dependencies. |
 | ABI / version coupling | Legacy OpenCode/Pi/host APIs. | C ABI 1 + JSON schema 1. | SDK version/capabilities/JSON; no shared Go package build IDs. | C ABI 1 + SDK contract; no `plugin.Open` Go type identity. Compiler/runtime combinations still need platform proof. | Same SDK contract plus Bun/JS compatibility. |
 | SDK selection | Absent SDK descriptor retains legacy loading. | Its own library discovery. | Explicit valid SDK manifest; runtime `exec`. | Explicit valid SDK manifest; runtime `native`. | Explicit valid SDK manifest; runtime `bun`. |
 | Backward compatibility | Existing plugins/accounts retain owners. | Different ABI/registration/accounts; not Magpie binary-compatible. | API 1.0 single-primary format retained. | Supports same contracts; not an automatic port of legacy or ProxyPilot libraries. | API 1.0 nine-capability behavior retained; invalid new descriptors error. |
@@ -135,13 +138,16 @@ pending work is canceled on frame disposal/off/update.
 
 ## Capability coverage and missing ProxyPilot hooks
 
-The SDK has eleven negotiated capabilities. The first nine stay on the primary:
-inbound codecs, outbound execution, agent wiring, account auth, model discovery,
-usage, operation control, tools and session migration. ModuleRPC is the tenth;
-API 1.2 gateway-hooks is the eleventh. Gateway hooks and local-owner tools
-allow independent memory-module composition; they are not shared-Memory,
-stream-middleware, router or global-observer adapters. See the
-[coverage census](extension-surface-coverage.md).
+The negotiated capability list comes from
+[`FullContract`](../../pkg/extension/contract.go). API 1.8 includes the original
+nine primary capabilities, ModuleRPC, gateway hooks, session sources, native
+account operations, rooted storage sources, ledger observation and synchronous
+gateway middleware. Routing strategies, search sources and selected catalog
+access have explicit descriptors and owner adapters; a generic module action
+alone does not register them. Gateway hooks and local-owner tools also allow
+an independent memory module with its own storage. Access to Magpie's built-in
+Memory owner is a separate optional integration. See the
+[coverage census](extension-surface-coverage.md) for the remaining boundaries.
 All three SDK transports use common production owners. These rows describe
 implemented surfaces; the scoped fixtures below do not exercise every vendor
 or every capability through every transport.
@@ -152,11 +158,11 @@ or every capability through every transport.
 | Provider execution | OpenCode loader/fetch; adapted Pi provider runtime. | Executor/streaming executor. | `provider.execute`, ordinary routing/account selection. | Same executor/stream contract. | Same executor/stream contract. |
 | Account auth | OAuth/key and Pi sign-in/refresh hooks. | Parse/login/poll/refresh plus frontend auth. | `auth.*`, selected auth/generation CAS. | Same account owner and scoped callbacks. | Same; generation-2 replacement fixture exists. |
 | Models | Legacy provider/Pi catalog. | Static/per-auth registration and discovery. | Manifest/dynamic models, prices/efforts, authorized catalog. | Same model contract. | Same model contract. |
-| Usage | Provider usage; separate global middleware observer. | Completed usage observer. | Provider usage/allowances and execution events. | Same; no new global observer. | Same; no new global observer. |
+| Usage | Provider usage; separate global middleware observer. | Completed usage observer. | Provider allowances, sparse execution facts, own-call/outside-history separation and explicit ledger observation. | Same common owners; native placement does not change billing or observer policy. | Same contract and owner adapters. |
 | Operations | Legacy call/abort behavior. | Executor/context/stream lifecycle. | Status/cancel and durable accepted/uncertain no-replay journal. | Same journal; cancellation cooperative. | Same journal. |
 | Tools | MCP/hub tools; Pi-specific tools not exposed by provider adapter. | No dedicated Magpie-style MCP capability in reviewed API. | `tool.call` through ordinary MCP/hub and key/budget owners. | Same primary tool contract. | Same primary tool contract. |
 | Agent wiring | Separate `agent.js`/moejs adapter. | No dedicated Magpie-style agent-plan capability in reviewed API. | Rich descriptors enter ordinary `Agent.All`/inspect/connect/apply/disconnect via checked plans. | Same agent-plan owner. | Same agent-plan owner. |
-| Sessions | Pi provider adapter does not import session tools/commands/renderers. | No dedicated session-convert capability in reviewed API. | Routed converters reach normal CarryOver; explicit conversion also available. | Same converter owner. | Same converter owner. |
+| Sessions | Pi provider adapter does not import session tools/commands/renderers. | No dedicated session-convert capability in reviewed API. | Routed converters reach normal CarryOver; JSONL sources use explicit bindings and checked file plans. | Same; rooted storage sources additionally require a native reader and host-owned storage grant. | Converter/JSONL contracts; native rooted readers are not supplied by Bun. |
 | Module actions | Existing plugin-specific hooks. | Different registration/callback contract. | Declared owner dispatch, inherited helper scope; unary only. | Same action/group ownership. | Same action/group ownership. |
 
 The actual ProxyPilot API includes hooks not provided as equivalent SDK
@@ -164,11 +170,13 @@ surfaces, or not verified at the same execution point:
 
 - Frontend auth replacement, including exclusive frontend auth.
 - Auth-candidate scheduler and model-router callbacks before account selection.
-- Ordered request interception before/after credentials; response normalization
-  before/after translation; response and stream-chunk interception on other
-  providers' traffic.
-- Global thinking applier, completed-usage observer, executor token-count and
-  raw executor HTTP-request hooks.
+- Exact ProxyPilot interception order before/after credentials and translation.
+  SDK synchronous middleware has its own request/account/provider/event/reply
+  points, rather than claiming identical hook placement.
+- Global thinking applier and raw executor HTTP-request hooks. Declared
+  Messages/Gemini protocols admit their existing token-count routes; there is
+  no separate arbitrary executor-count hook. Ledger observation is separately
+  declared and does not imply an arbitrary request/body observer.
 - Plugin-defined CLI flags, Management API routes and resource registration.
 - Host HTTP/model stream APIs and auth-file inventory/runtime/save callbacks.
 
@@ -186,13 +194,17 @@ establishes primary PID = host/helper PID differs, scope/readiness/cleanup and
 held old lazy v1/config1 after v2/config2 update.
 [`TestExtensionWindowHybridRuntime`](../../internal/gui/extension_window_integration_test.go)
 uses the real backend/status/SSE and checks cookies, off/update, response
-identity and response lease hold. Go-host/Bun API 1.1 passed race count 3
-without skips. JS has 87/87 Node and 87/87 Bun plus strict types.
+identity and response lease hold. Later Source, account-operation, catalog,
+agent and routing gates are recorded with their source in the validation ADRs.
+Counts in an older record describe that revision, rather than the current test
+inventory.
 
-These scoped checks are complete. Final immutable gates remain pending the
-integration owner. Remote Linux native has no execution result yet; Windows
-native is unexecuted. Cross-build/refusal tests do not close those runtime
-gaps. No benchmark or live vendor migration was performed.
+Linux native execution includes actual installed-module fixtures. Native
+Windows execution and current macOS Keychain/application-update execution
+remain separate gates. Cross-build/refusal tests do not close runtime gaps.
+No benchmark or live vendor migration was performed. The first application
+rollout uses an empty external-module catalog, so module installation and
+account migration do not block that independent host milestone.
 
 ## Source references
 

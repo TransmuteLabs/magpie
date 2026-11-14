@@ -100,7 +100,7 @@ func MethodCapability(method string) (Capability, bool) {
 		return OutboundExecutor, true
 	case MethodProviderModels:
 		return ModelDiscovery, true
-	case MethodProviderUsage:
+	case MethodProviderUsage, MethodProviderCalls:
 		return UsageReporter, true
 	case MethodAuthStart, MethodAuthFinish, MethodAuthRefresh, MethodAuthLogout:
 		return AccountAuth, true
@@ -114,6 +114,12 @@ func MethodCapability(method string) (Capability, bool) {
 		return SessionMigration, true
 	case MethodSessionSourceRead:
 		return SessionSource, true
+	case MethodStorageList, MethodStorageRead:
+		return StorageSource, true
+	case MethodLedgerObserve:
+		return LedgerObserver, true
+	case MethodMiddlewareRequest, MethodMiddlewareAccount, MethodMiddlewareProvider, MethodMiddlewareEvent, MethodMiddlewareResponse:
+		return GatewayMiddleware, true
 	case MethodModuleCall:
 		return ModuleRPC, true
 	case MethodGatewayRequest, MethodGatewayResponse, MethodGatewaySignIn:

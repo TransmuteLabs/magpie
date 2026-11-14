@@ -6,7 +6,11 @@ import { manifest, moduleFor } from "./helpers.js";
 
 test("capabilities require exactly their declared handlers", () => {
   const full = {
-    ...manifest(CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks", "native-account-operations"].includes(capability))),
+    ...manifest([
+      "inbound-codec", "outbound-executor", "agent-wiring", "account-auth",
+      "model-discovery", "usage-reporter", "operation-control", "tool-provider",
+      "session-migration", "session-source",
+    ]),
     inbounds: [{ id: "native", path: "/fixture/native" }],
     providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"] }],
     agents: [{ id: "editor", name: "Editor" }],

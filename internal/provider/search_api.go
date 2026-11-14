@@ -70,7 +70,8 @@ type SearchVendor struct {
 	// Plugin is the spec of the plugin that gives this API (its search
 	// hook), "" for one of magpie's own; PluginID is its id there. The
 	// plugin asks it (plugin.RunSearch); ID is plugin.PluginSearch.VendorID.
-	Plugin, PluginID string
+	Plugin, PluginID       string
+	Extension, ExtensionID string
 	// NeedURL: a plugin's API the user gives an address for, as a SearXNG
 	NeedURL bool
 	// Auth: a plugin's API that signs in as the same plugin's provider of
@@ -81,7 +82,9 @@ type SearchVendor struct {
 
 // WantsURL is whether the user must give its address (a SearXNG's, or a
 // plugin's that asked for one).
-func (v SearchVendor) WantsURL() bool { return v.Base == "" && (v.Plugin == "" || v.NeedURL) }
+func (v SearchVendor) WantsURL() bool {
+	return v.Extension == "" && v.Base == "" && (v.Plugin == "" || v.NeedURL)
+}
 
 // YouFreeSearch is You.com's search that takes no key (#1626): 100
 // searches a day for each address, then 429. With a key, You.com is
@@ -120,7 +123,7 @@ func AllSearchVendors() []SearchVendor {
 		out = append(out, SearchVendor{ID: p.VendorID(), Name: p.Name, KeysURL: p.KeysURL, KeyOptional: p.KeyOptional,
 			Plugin: p.Spec, PluginID: p.ID, NeedURL: p.NeedURL, Auth: p.Auth})
 	}
-	return out
+	return append(out, extensionSearchVendors()...)
 }
 
 // SearchVendorOf is the vendor by its id: one of magpie's, or a plugin's.
@@ -291,6 +294,9 @@ func (a SearchAPI) ownBase() string {
 // asked).
 func (a SearchAPI) Ready() bool {
 	v, known := SearchVendorOf(a.Vendor)
+	if v.Extension != "" {
+		return known && a.Key == "" && len(a.KeyList) == 0 && a.URL == ""
+	}
 	return known && (a.Base() != "" || (v.Plugin != "" && !v.NeedURL)) && (a.Key != "" || v.KeyOptional || v.Auth != "")
 }
 
@@ -303,6 +309,9 @@ func (a SearchAPI) check() error {
 			ids = append(ids, v.ID)
 		}
 		return fmt.Errorf("no search API %q: one of %s", a.Vendor, strings.Join(ids, ", "))
+	}
+	if v.Extension != "" && (a.Key != "" || len(a.KeyList) != 0 || a.URL != "") {
+		return fmt.Errorf("%s uses its module configuration or declared provider accounts", a.Name())
 	}
 	if a.URL != "" {
 		u, err := url.Parse(a.URL)

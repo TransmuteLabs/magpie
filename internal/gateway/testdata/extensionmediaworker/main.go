@@ -26,6 +26,18 @@ func execute(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 		}
 		return nil, &sdk.Error{Code: "fixture_failed", Message: "fixture failed after acceptance", Outcome: "accepted"}
 	}
+	if strings.Contains(string(request.Body), "not started normalized usage") {
+		if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusServiceUnavailable}); err != nil {
+			return nil, err
+		}
+		if err := stream.Emit(ctx, "data", []byte(`{"error":{"message":"fixture unavailable"}}`)); err != nil {
+			return nil, err
+		}
+		if err := stream.Emit(ctx, "usage", sdk.Usage{InputTokens: 99}); err != nil {
+			return nil, err
+		}
+		return sdk.ExecuteResult{Status: http.StatusServiceUnavailable, Outcome: "not-started"}, nil
+	}
 	account := call.Scope.Account
 	contentType, body := "application/json", []byte{}
 	switch request.Operation {
@@ -53,6 +65,43 @@ func execute(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 	}
 	if err := stream.Emit(ctx, "data", body); err != nil {
 		return nil, err
+	}
+	if strings.Contains(string(request.Body), "rich normalized usage") {
+		pointer := func(value int64) *int64 { return &value }
+		text := func(value string) *string { return &value }
+		credits := 0.25
+		currency := "USD"
+		if strings.Contains(string(request.Body), "rich normalized usage EUR") {
+			currency = "EUR"
+		}
+		return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed", Usage: &sdk.Usage{Facts: &sdk.ExecutionUsageFacts{
+			ExecutionCounts: sdk.ExecutionCounts{InputTokens: pointer(17), OutputTokens: pointer(5), CachedTokens: pointer(4),
+				CacheWriteTokens: pointer(7), CacheWrite1hTokens: pointer(3), ReasoningTokens: pointer(2)},
+			Deferred:    &sdk.ExecutionCounts{InputTokens: pointer(11), OutputTokens: pointer(1)},
+			ServedModel: text("served-fixture"), UpstreamProvider: text("fixture-upstream"), Tier: text("flex"),
+			RequestID: text("fixture-request"), ResponseID: text("fixture-response"), Stop: text("completed"),
+			Credits: &credits, Cost: &sdk.ExecutionCost{Amount: 0.002, Currency: currency},
+		}}}, nil
+	}
+	if strings.Contains(string(request.Body), "normalized usage") {
+		totals := sdk.Usage{InputTokens: 11, OutputTokens: 3, CachedTokens: 2, CacheWriteTokens: 1}
+		if err := stream.Emit(ctx, "usage", totals); err != nil {
+			return nil, err
+		}
+		if strings.Contains(string(request.Body), "late normalized usage failure") {
+			if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
+				return nil, err
+			}
+			return nil, &sdk.Error{Code: "fixture_failed", Message: "fixture failed after audio data", Outcome: "uncertain"}
+		}
+		if strings.Contains(string(request.Body), "normalized usage event only") {
+			return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed"}, nil
+		}
+		totals = sdk.Usage{InputTokens: 17, OutputTokens: 5, CachedTokens: 4, CacheWriteTokens: 2}
+		if strings.Contains(string(request.Body), "normalized usage zero") {
+			totals = sdk.Usage{}
+		}
+		return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed", Usage: &totals}, nil
 	}
 	return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed"}, nil
 }
