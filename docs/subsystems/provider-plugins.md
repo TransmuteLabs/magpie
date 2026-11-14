@@ -17,6 +17,20 @@ The `movers` map assembled in `internal/provider/migrate*.go` is the authoritati
 
 ## Ownership and runtime paths
 
+The fork's unattended retirement loop maintains only plugins already installed
+by the user. Saved retired accounts, a failed or interrupted migration, or a
+stale `plugin` migration record cannot install a missing community package on
+startup. `KeepRetiringMoved` still tidies committed account backups and retries
+migrations when the installed, enabled target meets its minimum version.
+Explicit `Move`/`Adopt` and `MoveRetiring` retain installation behavior, and
+`HandOver` retains the user's own installation as its consent boundary.
+`keepMovedCurrent` updates installed targets without resurrecting absent ones.
+This lets an SDK-enabled Magpie start with empty extension catalogs even when
+an earlier installation left retired accounts behind. It does not restore
+removed built-in provider code or make those accounts serve without a module.
+The startup and installed-target regressions are in
+[`migrate_startup_test.go`](../../internal/provider/migrate_startup_test.go).
+
 `provider.Moved(id)` identifies a subscription whose migration state in `migrations.json` is `plugin`. In `/api/providers`, its row exposes `move.state == "plugin"`; the GUI also receives its id in `onPlugins`.
 
 A retired built-in (`retiredBuiltins` in [`migrate.go`](../../internal/provider/migrate.go), `provider.BuiltinRetired(id)`) has no built-in code left: the plugin serves it whether or not a move has run, and its row's `move.state` is `plugin`. Gates that once asked `Moved(id)` ask `provider.PluginServes(id)`, which is moved or retired. Built-in accounts of a retired subscription that haven't moved yet are served by nothing; `/api/providers` lists them in `unmoved` (each a `MoveCandidate`, with the failed move's `error` and `why`), and the GUI shows a line over the Providers list with a Move button (`unmovedLine` in `app.js`). Built-ins are retired one at a time, each in the commit that removes its code.
