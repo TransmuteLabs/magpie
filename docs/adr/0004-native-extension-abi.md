@@ -55,6 +55,47 @@ against our own native code. A host cannot forcibly kill a stuck native function
 recover from arbitrary memory corruption. Libraries with Go runtimes remain
 mapped until process exit; closing a session is not `dlclose`.
 
+Linux activation retains an independently copied, fully verified package
+snapshot for every loaded image. The private image cache keys the pinned
+catalog directory identity, complete manifest, all package-file digests,
+release provenance, platform and ABI. It excludes installation-directory
+randomness and configuration versions; those continue to fence logical
+worker generations. Every candidate, including a cache hit, still passes
+catalog verification, as does the retained snapshot before reuse. The cache
+shares only the image handle: each transport opens a fresh ABI session and receives independent component
+configuration, State, callback authority and disposal.
+
+Cross-generation reuse requires a verified Linux ELF dependency closure.
+The conservative adapter accepts unique already-mapped system DSOs with
+matching device/inode and stable file hashes, recursively checks their
+dependencies, and refuses loader overrides, RPATH/RUNPATH, dependency
+filters, audit libraries and loader configuration as evidence of equivalence.
+An unmapped/overflow UID does not prove root ownership. If a rootless user
+namespace hides the system owner, cross-generation equivalence is unknown
+and fails closed; it is not inferred from the UID map.
+Darwin, FreeBSD and Windows keep their existing verified loader path;
+cross-generation cache equivalence is not claimed for those platforms.
+
+An origin-sensitive or otherwise unprovable image can serve its exact
+verified installation generation. Activating another generation then
+requires a new host process, rather than assuming its dependencies match.
+The retained copy keeps origin-relative package files available even when
+the installing handshake fails or an installation directory is removed.
+Mapped-but-invalid loads are retained too; successful dependency proof
+allows identical failed loads to share their failure without mapping
+another runtime.
+
+The Linux owner admits at most 64 image-load attempts and 64 retained
+catalog authority namespaces per process. This is an explicit resource
+bound, not a portable TLS capacity: a loader can exhaust static TLS earlier.
+Known TLS-allocation failures and the admission bound return
+`native_restart_required` with outcome `not-started`. Restart the Magpie
+application or gateway process; module Restart/Reload cannot unload a Go
+runtime. Existing verified cache hits remain available when admission of
+new images stops. There is no `dlclose`, executable/Bun fallback or change
+to `GLIBC_TUNABLES`. A blocked native initializer remains bounded by the
+existing transport cancellation and callback-revocation path.
+
 Logical close revokes the session, cancels contexts and unblocks send/emit
 without joining arbitrary author code. A callback reserved before close may
 finish later; the host rejects its revoked opaque handle and keeps the

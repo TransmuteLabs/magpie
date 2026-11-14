@@ -120,7 +120,7 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 	var transport *moduleTransport
 	var err error
 	if entry.Manifest.Runtime == "native" {
-		transport, err = openNativeTransport(ctx, program)
+		transport, err = openInstalledNativeTransport(ctx, root, entry)
 	} else {
 		var home string
 		home, err = workerHome(root, entry.Manifest.ID)

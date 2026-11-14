@@ -96,6 +96,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -105,7 +106,7 @@ func loadNativeLibrary(filename string) (*nativeLibrary, error) {
 	var image C.magpie_native_image
 	var detail [1024]C.char
 	if C.magpie_native_load(name, &image, &detail[0], C.size_t(len(detail))) != 0 {
-		return nil, errors.New(C.GoString(&detail[0]))
+		return nil, nativeLoadError(C.GoString(&detail[0]))
 	}
 	return &nativeLibrary{
 		open: func(host uintptr) (uint64, error) {
@@ -133,6 +134,14 @@ func loadNativeLibrary(filename string) (*nativeLibrary, error) {
 			return nil
 		},
 	}, nil
+}
+
+func nativeLoadError(detail string) error {
+	if strings.Contains(detail, "cannot allocate memory in static TLS block") ||
+		strings.Contains(detail, "cannot load any more object with static TLS") {
+		return nativeRestartRequired()
+	}
+	return errors.New(detail)
 }
 
 //export magpieNativeHostEmit

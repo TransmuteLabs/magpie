@@ -13,3 +13,7 @@ func openNativeTransport(ctx context.Context, filename string) (*moduleTransport
 	}
 	return nil, errors.New("native extensions require a supported cgo-enabled build")
 }
+
+func openInstalledNativeTransport(ctx context.Context, root string, entry Installed) (*moduleTransport, error) {
+	return openNativeTransport(ctx, "")
+}
