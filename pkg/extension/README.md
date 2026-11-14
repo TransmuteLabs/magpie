@@ -2,10 +2,13 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Current source API 1.5 includes native/exec/Bun,
+advertised capability. Current source API 1.6 includes native/exec/Bun,
 composite modules, gateway hooks/private tools, transactional refresh, finite provider
 operations, rich model metadata, namespaced routing strategies and declared
-selected-account window actions and poll/link window authentication. The
+selected-account window actions and poll/link window authentication. API 1.5
+also supplies agent launch, explicit profile ownership and Library targets.
+API 1.6 adds bounded local JSONL session sources and finite native account
+operations. The
 [combined validation record](../../docs/adr/0009-sdk13-validation.md) names
 its frozen SDK snapshot; the [surface census](../../docs/subsystems/extension-surface-coverage.md)
 retains remaining adapters and does not claim full SDK or repository acceptance.
@@ -13,8 +16,10 @@ The [SDK 1.4 checkpoint](../../docs/adr/0014-sdk14-validation.md) records
 combined SDK gates; final application acceptance remains separate.
 The [selected-account 1.5 record](../../docs/adr/0015-selected-account-window-bindings.md)
 has scoped host/UI evidence; combined 1.5 acceptance remains separate.
-These are the window-specific SDK 1.5 cuts. Agent launch/profile adoption remains a
-separate in-progress adapter and is not implied by the source version.
+The [consolidated host record](../../docs/adr/0021-consolidated-sdk16-validation.md)
+names the shared runtime and its acceptance boundaries. A module advertises only
+the minimum contract it uses; the source version alone establishes no vendor
+compatibility.
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -45,7 +50,7 @@ supports `magpie plugin sdk add github:owner/repository[@tag]` and
 for archive layout, full-package hashes, provenance, updates and private
 developer authentication through env tokens, `gh` or HTTPS Git credentials.
 Installer credentials are never module/provider configuration.
-The public fork retains Go module path `github.com/yetone/magpie`. Our four
+The public fork retains Go module path `github.com/yetone/magpie`. Our five
 adjacent plugin repositories use
 `replace github.com/yetone/magpie => ../magpie` during development, as used
 by the native fixtures. Public repository access permits source dependencies;
@@ -76,10 +81,10 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.5 with eleven capabilities; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.6 with thirteen capabilities; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
-contract is API 0.4, accepting the older 0.1 inbound, 0.2 catalog and 0.3 tool
-contracts as well.
+contract is API 0.5, retaining the older 0.1 inbound, 0.2 catalog, 0.3 tool
+and 0.4 executor-binding contracts.
 
 An API 1.4 paired inbound/outbound module can return
 `DecodedRequest.Executor = SameModuleExecutor` to preserve native-only
@@ -565,7 +570,7 @@ model routes. Windows native execution remains unverified.
 No-cgo/cross-build checks are build/refusal evidence. Domain modules live in
 separate repositories; no complete vendor migration or benchmark is implied.
 This README claims no green whole-repository result.
-## Session sources in API 1.6-preview
+## Session sources in API 1.6
 
 `SessionSourceDescriptor` and `SessionSourceReadRequest/Result` register a
 bounded local JSONL reader through capability `SessionSource` and method
@@ -580,6 +585,37 @@ is omitted; measured zero is an explicit empty usage slice. Native readers
 remain default without an explicit host binding.
 
 See `examples/extensions/session-source-jsonl` for a synthetic native module
-with checked opaque attachments. API 1.6 is a preview isolated from the current
-Agent/Auth work; native ABI remains 1. No SQLite or remote-history support is
-implied.
+with checked opaque attachments. The contract shares the consolidated host
+with agent/auth support; native ABI remains 1. It supplies bounded regular
+local JSONL, not SQLite or remote history. See the
+[owner reference](../../docs/subsystems/extension-agents-sessions.md) for
+discovery, consent, publication, explicit binding and resume behavior.
+
+## Native account operations in API 1.6
+
+Capability `NativeAccountOperations` adds finite
+`AccountOperations: [{ID, Agent, Provider, Action}]` declarations. Each names a
+same-module provider, a declared model-bound agent launch and a primary
+ModuleRPC action with effect `read` or `write`. It also requires
+`InboundCodec`, `OutboundExecutor`, `AccountAuth`, `AgentWiring` and `ModuleRPC`.
+It grants neither an arbitrary HTTP handler nor direct access to the account
+store.
+
+The inbound codec negotiates `protocolext.AccountOperationContract()` (0.5)
+and returns protocol `account-operation`, the declaration's ID and executor
+`SameModuleExecutor`. A write also supplies a stable native `RequestID`.
+The host derives the exact explicit visible model and account generation from
+the current owned agent binding; groups and restricted or forwarded callers
+cannot delegate credentials through this adapter.
+
+The action receives `AccountOperationRequest{Model, Body, CallerID}`.
+Selected `Scope` and `Auth` stay on the original leased call, outside its
+parameters. Return `AccountOperationResult{Status, Headers, Body}`; the host
+admits only content type and retry-after headers and checks the binding,
+package/config and account generation again before replying. The body budget
+is `MaxHostBytes`. Reads retain read restrictions and writes use the existing
+durable acceptance journal. The module still owns vendor receipt and native
+wire validation. See the
+[decision record](../../docs/adr/native-account-operations.md) for the
+authority and verification limits; module startup and replay acceptance are
+separate from contract availability.

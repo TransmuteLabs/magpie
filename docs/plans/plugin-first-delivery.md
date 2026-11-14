@@ -1,44 +1,44 @@
-# Deliver our plugins alongside the SDK
+# Deliver Magpie with the SDK before installing our plugins
 
-Date: 2026-11-13
+Date: 2026-11-14
 
-This plan follows the user's request to begin useful plugin implementation
-before completing unrelated SDK surfaces. The coverage census remains the
-backlog; it is not a sequential prerequisite for every module.
+The first rollout is Magpie with our SDK and no external plugins installed.
+It must retain ordinary core operation, the fork release workflow/update feed
+and local macOS update signing. Module installation, account migration and
+vendor acceptance are later steps. Existing module owners continue in
+parallel; their unfinished features do not block this first host candidate.
+The coverage census remains the SDK backlog, not a sequential prerequisite
+for every module.
 
 ## Current bases and workspaces
 
-- Upstream was merged at `01bcc7c7d155b029769327f909372b2ff72252e2`.
-  The current API 1.3 checkpoint has a
-  [combined validation record](../adr/0009-sdk13-validation.md), including
-  transactional refresh, finite provider operations, rich models and session
-  input planning. It is a scoped SDK checkpoint, not full surface completion
-  or a green whole-repository claim.
-- SDK API 1.1 is committed locally at `b3055364`, with its
-  [scoped validation record](../adr/0005-native-composite-validation.md).
-  It has not been published by this work.
-- API 1.2 gateway hooks/private tools are committed locally at `e9831f37d`.
-  The [validation record](../adr/0006-gateway-hooks-validation.md) distinguishes
-  immutable aggregate tree `7e2a72b6178eb2a51c4e6018ee9515fdbb321da7` from the
-  reviewed generation-authorization follow-up. These features are not
-  prerequisites for the first three module slices below.
-- The generic HTTP rejection/cancellation correction at `3f213a6d6`
-  unblocks Devin's existing codec status contract without adding vendor code
-  or changing the native ABI.
-- Active modules have separate repositories in `TransmuteLabs`, with adjacent
-  local checkouts and a development replacement for the public SDK:
+- Host implementations are consolidated on `devzeus`, runtime checkpoint
+  `d07078c7926daf6f33af09c40297c941bd39da92`, SDK API 1.6/native ABI 1.
+  The [consolidated validation record](../adr/0021-consolidated-sdk16-validation.md)
+  separates completed scoped gates from whole-repository acceptance.
+  No further host branches or worktrees are needed for module-specific SDK
+  variants. New generic fixes belong on this shared base.
+- [Native/composite](../adr/0005-native-composite-validation.md),
+  [gateway hooks](../adr/0006-gateway-hooks-validation.md),
+  [API 1.3](../adr/0009-sdk13-validation.md) and
+  [API 1.4](../adr/0014-sdk14-validation.md) records retain their exact
+  historical evidence. They do not automatically validate a later tree.
+- Active modules have separate adjacent repositories and a development
+  replacement for the public SDK:
   `../magpie-sdk-plugin-protocol-devin`,
   `../magpie-sdk-plugin-provider-opencode`,
   `../magpie-sdk-plugin-session-omp`, and
-  `../magpie-sdk-plugin-protocol-zcode`.
-  The repositories were created private; source publication is separate.
-  The earlier `../magpie-extensions` scaffold is a read-only relocation
-  backup, not the active implementation workspace.
-- `../magpie-devzeus-archive` and `../magpie-protocol-sdk` remain read-only
-  donors. Recovered Devin evidence is under `../../Agents/devinapp`.
+  `../magpie-sdk-plugin-protocol-zcode`, plus
+  `../magpie-sdk-plugin-protocol-commandcode`. Each owns its implementation,
+  provenance, packaging and acceptance. The former `magpie-extensions`
+  workspace is not used by implementation or verification.
+- `../magpie-devzeus-archive` is the retained historical donor. The recovered
+  uncommitted host work was inventoried and compared with the consolidated
+  implementation; backups remain preserved. Devin protocol evidence is under
+  `../../Agents/devinapp`.
 - SDK source remains in the public fork `TransmuteLabs/magpie`, with canonical
   Go module path `github.com/yetone/magpie`. A separate SDK repository is not
-  required. All four adjacent module repositories use the tested development
+  required. The adjacent module repositories use a development
   replacement `replace github.com/yetone/magpie => ../magpie`; that local
   replacement is not a downloadable release version.
 
@@ -46,14 +46,29 @@ The local replacements do not make unpublished commits downloadable. A
 published plugin source later pins an available fork revision, while users
 install compiled module distributions separately.
 
-## Independent first slices
+## First host rollout
+
+The SDK is dormant with empty SDK and legacy catalogs. Acceptance exercises
+the ordinary built CLI/gateway and the public server front with Bun
+unavailable, without installing a fixture module or migrating an account.
+The permanent gateway regression also checks ordinary model discovery and a
+real request to a synthetic configured provider.
+
+The [update owner](../subsystems/app-updates.md) retains the existing fork
+feed and stages a verified download before optional local-key signing and
+replacement. Tests of that policy do not establish real Keychain access,
+macOS permission continuity or an installed-app transition. Publishing,
+installation and restart remain separate from source verification.
+
+## Independent module slices
 
 | Lane | Current slice | Minimum contract | Specific integration gate / remaining work | Independent of |
 | --- | --- | --- | --- | --- |
-| Devin | Installable native inbound Connect/protobuf/discovery, with actual ordinary HTTP ingress to a synthetic provider; outbound codecs/client/auth are a separate continuation | Stable manifest: SDK API 1.1/native ABI 1; inbound-codec, model-discovery and the generic HTTP status fix | Inbound guard/catalog/framing/cancel/off-on proof is separate from live Devin compatibility; outbound handler registration, native-only history and owner constraints remain | Agent launch, Library, media, unrelated UI |
-| OpenCode | Native Go device auth, transactional refresh, four packaged Go models on chat/Gemini, quota | SDK API 1.3/native ABI 1; account-auth, model-discovery, outbound-executor, usage-reporter | Local `031d093` has actual native ordinary expiry renewal, four model tests and isolated account rotation; Zen/free behavior, agent integration and live-vendor proof remain outside this slice | Standalone media operations, Library target, agent launch, optional TS UI |
-| OMP sessions | Lossless explicit interchange plus attachment-aware native routes declared for OMP↔Claude and OMP↔Codex | SDK API 1.3/native ABI 1; session-migration, module-rpc, read-only session.inputs.v1 | Actual OMP→Claude ordinary native carry/read/resume proof; reverse, Codex and large-document acceptance retain their own owner records | Generic SDK discovery/reader/resume registration, router, provider extras, Library |
-| ZCode | Active external native Messages/PAT-refresh slice and vendor execution/billing/reset controller work | SDK API 1.3/native ABI 1; selected auth/executor/model/usage/operation and declared module actions | The earlier migration hold ended after the upstream merge; family/session/claim/reset semantics and vendor parity require the module's explicit owner contracts and evidence | Unrelated SDK surface completion |
+| Devin | Paired native inbound/outbound execution, discovery, auth, agent and bootstrap implementation | Distribution declares its exact minimum; bootstrap uses API 1.6 native account operations, ABI 1 | Synthetic paired inference passes; duplicate assignment and bootstrap-read acceptance remain open. Native startup, signed history and delegation require separate proof | Unrelated media, Memory and other module releases |
+| OpenCode | Native Go device auth/refresh, four Go models and an optional agent/window distribution of the same module | Provider minimum API 1.3; agent/window minimum API 1.5; ABI 1 | Installed-host auth/launch/Library/provider slices have scoped evidence. Zen/Console parity and native SQLite history remain separate work | Unrelated SDK owners and other module releases |
+| OMP sessions | Lossless interchange, attachment-aware native migration and optional JSONL Source distribution | Default API 1.3; alternative Source distribution API 1.6; ABI 1 | Repaired OMP→Codex export has actual Codex 0.160 continuation evidence. Other routes, source grants and client versions retain their own records | Provider execution, routing and other module releases |
+| ZCode | Native provider/controller, auth, SQLite state and optional agent/window in one package | Provider/controller and agent/window distributions declare different minima; ABI 1 | Installed-host synthetic agent/auth/transport proof is separate from actual ZCode startup. Donor billing/claim parity and safe native resume remain active work | Unrelated SDK owners and other module releases |
+| CommandCode | Native account/auth/quota and recovered generation transport with checked agent integration | Current package API 1.5/native ABI 1 | Jev is explicitly refused until a generic decision operation/model adapter is implemented. Own-model capability metadata also needs a bounded host addition | First plugin-free host rollout and unrelated module features |
 
 Repository names follow `magpie-sdk-plugin-<type>-<name>`. The type names the
 primary purpose, not an exclusive runtime or capability set. Each module
@@ -110,7 +125,8 @@ to stop independent module progress.
 
 ## Parallel ownership and verification
 
-- Four module lanes own disjoint repositories: Devin, OpenCode, OMP and ZCode.
+- Five module lanes own disjoint repositories: Devin, OpenCode, OMP, ZCode and
+  CommandCode.
 - The SDK owner works only on agreed generic blockers.
 - A verification lane runs the frozen SDK aggregate and module host gates.
 - An independent reviewer checks contract boundaries and fixes.

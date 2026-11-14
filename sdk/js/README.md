@@ -8,15 +8,16 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package source version 1.5.0 advertises SDK API 1.5 and eleven capabilities.
+Package source version 1.6.0 advertises SDK API 1.6 and thirteen capabilities.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
 API 1.4 adds declared routing strategies through existing read actions.
 API 1.5 adds declared selected-account window actions and separate poll/link
 window authentication.
-These window-specific cuts do not complete the separately developing agent
-launch/profile adapter or establish a complete SDK 1.5 release.
-Explicit 1.0/1.1/1.2/1.3/1.4 manifests retain their earlier behavior. This is a source
+API 1.5 also declares agent launch, explicit profile ownership and Library
+targets. API 1.6 adds bounded JSONL session sources and native account
+operations on the shared host.
+Explicit 1.0/1.1/1.2/1.3/1.4/1.5 manifests retain their earlier behavior. This is a source
 version, not a claim that an npm package or release was published.
 
 ```js
@@ -203,7 +204,7 @@ global logging functions. Authors remain responsible for their own code.
 
 Manifest validation checks schema/version, clean package paths,
 capability/descriptors, duplicate IDs/paths/models/protocols and all required
-handlers. Supported contract versions are 1.0, 1.1, 1.2, 1.3, 1.4 and 1.5. Handlers outside the
+handlers. Supported contract versions are 1.0 through 1.6. Handlers outside the
 advertised capabilities are rejected. Runtime is `exec`, `bun` or `native`; protocol
 names match Go: `chat`, `responses`, `messages`, `anthropic`, `gemini`.
 The manifest does not grant filesystem or network sandboxing.
@@ -541,7 +542,7 @@ host retain those responsibilities. SDK 1.4 root bindings keep their existing
 See [the workflow record](../../docs/adr/0018-window-account-workflow.md) for
 the concurrency, failure and verification boundaries.
 
-## Session sources in API 1.6-preview
+## Session sources in API 1.6
 
 Capability `session-source` negotiates exactly `session.source.read`.
 The `SessionSourceDescriptor`, `SessionSourceReadRequest` and
@@ -555,5 +556,33 @@ absolute paths, shell commands or costs. Omitted usage is unknown, while an
 empty usage array is a measured zero. Native takeover requires an explicit
 host binding and existing read consent still applies.
 
-`session-migration` continues to declare conversion only. API 1.6 is a preview;
-SQLite, compressed journals and remote/backend history are not included.
+`session-migration` continues to declare conversion only. Source shares the
+consolidated host with agent/auth support. SQLite, compressed journals and
+remote/backend history are not included. The
+[host record](../../docs/adr/0021-consolidated-sdk16-validation.md) separates
+contract composition from application and vendor acceptance.
+
+## Native account operations in API 1.6
+
+Capability `native-account-operations` requires finite
+`accountOperations: [{id, agent, provider, action}]` declarations and
+`inbound-codec`, `outbound-executor`, `account-auth`, `agent-wiring` and
+`module-rpc`. Each operation refers to a same-module provider, a declared
+model-bound agent launch and a primary action with effect `read` or `write`.
+Compatibility validation does not grant arbitrary routes or account access.
+
+An inbound decode selects `protocol: "account-operation"`, `accountOperation`
+and `executor: "same-module"`. Writes also provide a stable `requestId`.
+The host resolves the current owned agent's explicit visible model and exact
+account generation. The action receives `{model, body, callerId}`, with the
+selected scope and auth kept separately on the call. `body` is base64 on the
+shared wire and bounded by `MAX_HOST_BYTES`.
+
+Return `{status, headers, body}`. Only content type and retry-after headers
+are admitted. The host retains the original inbound lease, local-owner
+policy, read/write restrictions and durable acceptance journal, then checks
+selection again before replying. Groups, forwarded/restricted callers and
+remote credential delegation are outside this adapter. The module still
+validates vendor wire and receipts. See the
+[operation decision](../../docs/adr/native-account-operations.md) and its
+separate module-startup/replay acceptance boundary.
