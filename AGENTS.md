@@ -1,5 +1,14 @@
 # Notes for coding agents
 
+## Preserve local work before removing a worktree
+
+Check staged, unstaged, untracked and relevant ignored files separately before
+removing a worktree. Branch ancestry alone does not preserve those files.
+Save their contents and index/worktree patches, verify recovery, then compare
+needed behavior with the target base. Keep a dirty worktree until its work is
+committed or explicitly recovered and accounted for. Never force-remove it as
+routine cleanup.
+
 ## Subsystem design and review
 
 Before changing a documented subsystem, read its
