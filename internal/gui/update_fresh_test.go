@@ -493,7 +493,8 @@ func TestRestartAfterItsDownloadDoesNotAskAgain(t *testing.T) {
 // is what finds 0.1.12.
 func TestRestartPutsInTheClickedDownload(t *testing.T) {
 	busy := &fakeBusy{}
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop()
 	quick(t, busy, u)
 	waitRecheck = (*updater).recheck
 	f := newFreshFeed(t)

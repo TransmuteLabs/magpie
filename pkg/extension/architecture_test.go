@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestPublicSDKImportsOnlyStandardLibraryAndPublicContracts(t *testing.T) {
+func TestPublicSDKImportsStayWithinDeclaredBoundaries(t *testing.T) {
 	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, walkError error) error {
 		if walkError != nil {
 			return walkError
@@ -28,8 +28,11 @@ func TestPublicSDKImportsOnlyStandardLibraryAndPublicContracts(t *testing.T) {
 				return err
 			}
 			root, _, _ := strings.Cut(importPath, "/")
+			relative := filepath.ToSlash(path)
+			nativeSystemCalls := importPath == "golang.org/x/sys/unix" &&
+				(relative == "native/storage_reader_unix.go" || relative == "native/storage_reader_unix_test.go")
 			if strings.Contains(root, ".") && importPath != "github.com/yetone/magpie/pkg/extension" &&
-				importPath != "github.com/yetone/magpie/pkg/protocolext" {
+				importPath != "github.com/yetone/magpie/pkg/protocolext" && !nativeSystemCalls {
 				t.Errorf("%s imports a private or vendor package: %s", path, importPath)
 			}
 		}

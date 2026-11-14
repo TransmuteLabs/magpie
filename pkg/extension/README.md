@@ -53,6 +53,12 @@ remain. Native close revokes a session; the library stays mapped until host
 exit. Cancellation is cooperative and a native fault shares Magpie's failure
 domain. The exec option remains available.
 
+The public contracts use only the standard library and other public SDK
+contracts. The native rooted-storage reader and its platform test additionally
+use the host's already pinned `golang.org/x/sys/unix` for descriptor-relative
+Linux/Darwin operations. That exception is limited to those two files; it does
+not permit host-internal or vendor dependencies in the SDK.
+
 `Serve` runs newline-delimited JSON on its supplied transport. Exec stdout
 belongs exclusively to RPC; write diagnostics to stderr. This library
 performs no installation, process supervision or host filesystem writes.

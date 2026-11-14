@@ -3,6 +3,7 @@ import type { AccountKeepAliveDescriptor } from "./account-keepalive.js";
 import type { AccountTaskDescriptor } from "./account-tasks.js";
 export * from "./account-tasks.js";
 export * from "./agent-model-metadata.js";
+export * from "./agent-decision-models.js";
 export * from "./account-keepalive.js";
 import type { CatalogAccessDescriptor } from "./catalog-projection.js";
 import type { LedgerObservationDescriptor } from "./ledger.js";

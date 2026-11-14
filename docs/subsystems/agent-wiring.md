@@ -42,6 +42,11 @@ The ordinary adapter supplies `options.gateway` (gateway base URL),
 values use `magpie/<reference>`; the module translates these into its own
 config schema. `options.previous` contains the snapshots before magpie's
 first successful adoption, for module-owned restoration of its keys.
+API 1.9 additionally supplies typed `options.decisionModels`, separately
+from conversation `models`, using the same decision catalog as upstream
+agent-plugin connect. It is an empty array when none are offered and is
+absent below API 1.9; see
+[SDK agent options](extension-agents-sessions.md) for its fields and owner.
 
 Connect, set, sync and disconnect prepare `agent.plan`, then the host action
 service validates and executes the file plan. A preview only prepares it.

@@ -22,3 +22,4 @@ export { validateSearchRequest, validateSearchResult } from "./search-sources.js
 export { MIDDLEWARE_METHODS, MAX_MIDDLEWARE_BODY_BYTES, validateMiddlewareResult } from "./middleware.js";
 export { validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
 export { validateAgentModelMetadata } from "./agent-model-metadata.js";
+export { validateAgentDecisionModels } from "./agent-decision-models.js";

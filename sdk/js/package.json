@@ -34,6 +34,8 @@
     "agent-metadata.js",
     "agent-model-metadata.js",
     "agent-model-metadata.d.ts",
+    "agent-decision-models.js",
+    "agent-decision-models.d.ts",
     "provider-policy.js",
     "provider-defaults.js",
     "provider-options.js",

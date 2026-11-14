@@ -88,7 +88,7 @@ type canonicalExecution struct {
 	Scope   sdk.Scope          `json:"scope"`
 }
 
-func installCanonicalExtensionFixture(t *testing.T) string {
+func installCanonicalExtensionFixture(t *testing.T, modelIDs ...string) string {
 	t.Helper()
 	fresh(t)
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
@@ -110,13 +110,20 @@ func installCanonicalExtensionFixture(t *testing.T) string {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build canonical fixture: %v\n%s", err, output)
 	}
+	if len(modelIDs) == 0 {
+		modelIDs = []string{"m1"}
+	}
+	var models []sdk.Model
+	for _, model := range modelIDs {
+		models = append(models, sdk.Model{ID: model, Protocols: []protocolext.Protocol{"chat", "messages"},
+			ContextWindow: 32768, MaxOutput: 4096})
+	}
 	manifest := sdk.Manifest{
 		Schema: sdk.ManifestSchema, ID: "fixture.canonical", Version: "1.0.0", Runtime: "exec", Entry: entry,
 		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 3}, Capabilities: []sdk.Capability{sdk.OutboundExecutor}},
 		Providers: []sdk.ProviderDescriptor{{ID: "canonical", Name: "Canonical fixture",
 			Protocols: []protocolext.Protocol{"chat", "messages"},
-			Models: []sdk.Model{{ID: "m1", Protocols: []protocolext.Protocol{"chat", "messages"},
-				ContextWindow: 32768, MaxOutput: 4096}}}},
+			Models:    models}},
 	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {

@@ -180,7 +180,7 @@ type extensionAgentOptions struct {
 	PriorModels json.RawMessage               `json:"priorModels,omitempty"`
 }
 
-func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Manifest) ([]byte, error) {
+func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Manifest, agent string) ([]byte, error) {
 	if manifest.Contract.Version.Minor < 9 {
 		options.PriorModels = nil
 		for index := range options.Models {
@@ -188,6 +188,10 @@ func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Ma
 			options.Models[index].Efforts = nil
 		}
 		return json.Marshal(options)
+	}
+	decisions, err := extensionAgentDecisionModels(agent, manifest)
+	if err != nil {
+		return nil, err
 	}
 	var models []json.RawMessage
 	if options.Models != nil {
@@ -210,8 +214,9 @@ func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Ma
 	type envelope extensionAgentOptions
 	return json.Marshal(struct {
 		envelope
-		Models []json.RawMessage `json:"models"`
-	}{envelope(options), models})
+		Models         []json.RawMessage        `json:"models"`
+		DecisionModels []sdk.AgentDecisionModel `json:"decisionModels"`
+	}{envelope(options), models, decisions})
 }
 
 func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgent) *Agent {
@@ -234,7 +239,7 @@ func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgen
 		if err != nil {
 			return nil, err
 		}
-		return marshalExtensionAgentOptions(opts, manifest)
+		return marshalExtensionAgentOptions(opts, manifest, desc.ID)
 	}
 	inspect := func() (sdk.AgentInspectResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

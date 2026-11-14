@@ -170,7 +170,7 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 	}
 	opts, err := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(controller.item.Agent.ID, gateway.URL()),
 		Models: viaMagpie(controller.item.Agent.ID, "magpie/"), Field: field, Value: value, Previous: previous, PriorModels: record.ModelOptions},
-		host.entry.Manifest)
+		host.entry.Manifest, controller.item.Agent.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +465,7 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 						err = errors.New("agent module changed; sync or reconnect before using it")
 					} else {
 						opts, optionsErr := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(desc.ID, gateway.URL()),
-							Models: viaMagpie(desc.ID, "magpie/"), Previous: record.Before, PriorModels: record.ModelOptions}, runtime.entry.Manifest)
+							Models: viaMagpie(desc.ID, "magpie/"), Previous: record.Before, PriorModels: record.ModelOptions}, runtime.entry.Manifest, desc.ID)
 						err = optionsErr
 						if err == nil {
 							inspection, inspectErr := extension.NewActions(runtime).AgentInspect(ctx, item.Plugin, sdk.Scope{Operation: "agent.inspect"},

@@ -61,10 +61,13 @@ including GUI snapshots keyed by the stamp. Local manager changes notify
 use the pure `extension.CatalogPath` helper and never acquire or replace the
 default manager under the provider cache lock.
 
-Private SDK account-file metadata is a separate source stamp. Each new hold,
-including one overlapping an existing request, detects another process's
-account replacement/deletion before reusing provider/model snapshots.
-`extension.AccountStamp` reads directory/file metadata and handle-derived
+Private SDK account and root module-configuration metadata share a source
+stamp. Each new hold, including one overlapping an existing request, detects
+another process's account replacement/deletion or configuration CAS before
+reusing provider/model snapshots. A configuration transition rebuilds the
+selected model catalog under its new version; already selected old bindings
+remain fenced. Unrelated private state and account-local state do not
+invalidate it. `extension.AccountStamp` reads directory/file metadata and handle-derived
 portable file identities without reading credential contents, acquiring store
 locks or initializing a manager. Identity distinguishes an atomic replacement
 even when size, mode and mtime are preserved. Observations are serialized outside
@@ -473,6 +476,16 @@ vendor-specific normalization. Ordinary non-SDK Chat relays retain their
 existing repair. Other gateway policies and protocol translations are
 unchanged.
 
+Same-protocol Messages execution also leaves SDK-owned normalization to
+the module. After restoring gateway-salted tool IDs, `advisorTools` still
+enforces the caller key's model policy, maps allowed same-provider advisor
+IDs to upstream names and removes unavailable advisors and their references.
+Execution then bypasses legacy vendor thinking defaults and billing-line removal.
+An omitted thinking control stays omitted, explicit thinking controls and
+signed tool/cache history remain present. Ordinary non-SDK Messages relays
+retain their existing shaping. Model selection and trusted execution
+identity still use the ordinary host owners.
+
 The manager owns durable operation acceptance and replay rejection. The
 ordinary gateway inference path shares an `ExtensionAttempt` across its
 attempts. Accepted, uncertain or already completed execution cannot trigger
@@ -491,6 +504,12 @@ The separate `extension_canonical_test.go` files in provider and gateway
 verify trusted caller projection, private metadata ownership, exact Chat
 tool histories at the installed SDK execution boundary and the non-SDK
 repair control. Gateway cases enter through `Front`.
+`extension_messages_body_test.go` covers omitted and explicit Messages
+thinking controls, signed split tools/cache boundaries and the non-SDK
+thinking-default control. `account_stamp_config_test.go` and
+`extension_config_catalog_test.go` cover root configuration CAS, metadata
+identity, unreadable sources, public/authenticated held catalogs and
+unrelated-state stability.
 `extension_models_test.go` checks custom-model prices and effort levels,
 unknown versus zero prices, core overrides and rates, and rejection of
 invalid refreshes without replacing the last validated snapshot.

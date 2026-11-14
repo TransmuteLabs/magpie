@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 type AccountFileStamp struct {
@@ -76,44 +78,72 @@ func accountStampAt(root string) (AccountFileStamp, error) {
 		if err != nil {
 			return AccountFileStamp{}, err
 		}
-		accountInfo, statErr := accountFileInfo(namespace)
+		accountInfo, accountErr := accountFileInfo(namespace, "accounts.json")
+		configInfo, configErr := accountConfigFileInfo(namespace, entry.Name())
 		namespace.Close()
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
+		for _, source := range []struct {
+			name string
+			info os.FileInfo
+			err  error
+		}{{"accounts.json", accountInfo, accountErr}, {moduleConfigKey, configInfo, configErr}} {
+			if errors.Is(source.err, os.ErrNotExist) {
+				continue
+			}
+			if source.err != nil || !source.info.Mode().IsRegular() {
+				return AccountFileStamp{}, fmt.Errorf("extension account/config stamp file is unavailable")
+			}
+			hash.Write([]byte(entry.Name()))
+			hash.Write([]byte{0})
+			hash.Write([]byte(source.name))
+			hash.Write([]byte{0})
+			files = append(files, source.info)
+			var metadata [24]byte
+			binary.LittleEndian.PutUint64(metadata[:8], uint64(source.info.ModTime().UnixNano()))
+			binary.LittleEndian.PutUint64(metadata[8:16], uint64(source.info.Size()))
+			binary.LittleEndian.PutUint64(metadata[16:], uint64(source.info.Mode()))
+			hash.Write(metadata[:])
 		}
-		if statErr != nil || !accountInfo.Mode().IsRegular() {
-			return AccountFileStamp{}, fmt.Errorf("extension account stamp file is unavailable")
-		}
-		hash.Write([]byte(entry.Name()))
-		hash.Write([]byte{0})
-		files = append(files, accountInfo)
-		hash.Write([]byte{1})
-		var metadata [24]byte
-		binary.LittleEndian.PutUint64(metadata[:8], uint64(accountInfo.ModTime().UnixNano()))
-		binary.LittleEndian.PutUint64(metadata[8:16], uint64(accountInfo.Size()))
-		binary.LittleEndian.PutUint64(metadata[16:], uint64(accountInfo.Mode()))
-		hash.Write(metadata[:])
 	}
 	result := AccountFileStamp{files: files}
 	copy(result.sum[:], hash.Sum(nil))
 	return result, nil
 }
 
-func accountFileInfo(namespace *os.Root) (os.FileInfo, error) {
-	named, err := namespace.Lstat("accounts.json")
+func accountConfigFileInfo(namespace *os.Root, plugin string) (os.FileInfo, error) {
+	named, err := namespace.Lstat("state")
+	if err != nil {
+		return nil, err
+	}
+	if !named.IsDir() || named.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("extension configuration stamp directory is unavailable")
+	}
+	directory, err := namespace.OpenRoot("state")
+	if err != nil {
+		return nil, err
+	}
+	defer directory.Close()
+	opened, err := directory.Stat(".")
+	if err != nil || !os.SameFile(named, opened) {
+		return nil, fmt.Errorf("extension configuration stamp directory changed")
+	}
+	return accountFileInfo(directory, storeStateName(sdk.Scope{Plugin: plugin}, moduleConfigKey))
+}
+
+func accountFileInfo(namespace *os.Root, name string) (os.FileInfo, error) {
+	named, err := namespace.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
 	if !named.Mode().IsRegular() {
 		return nil, fmt.Errorf("extension account stamp file is unavailable")
 	}
-	file, err := namespace.Open("accounts.json")
+	file, err := namespace.Open(name)
 	if err != nil {
 		return nil, err
 	}
 	info, statErr := file.Stat()
 	closeErr := file.Close()
-	current, namedErr := namespace.Lstat("accounts.json")
+	current, namedErr := namespace.Lstat(name)
 	if statErr != nil || closeErr != nil || namedErr != nil || !info.Mode().IsRegular() ||
 		!current.Mode().IsRegular() || !os.SameFile(info, current) ||
 		named.Size() != info.Size() || !named.ModTime().Equal(info.ModTime()) {

@@ -287,14 +287,34 @@ list. Caller copies do not share mutable effort slices with the picker cache.
 under API 1.9 `agent-wiring`. Modules negotiating an earlier minor receive
 none of these new option fields.
 
+API 1.9 also supplies a separate `options.decisionModels` array to both
+ordinary agent adapters, for inspection and planning. Its
+[`AgentDecisionModel`](../../pkg/extension/agent_decision_models.go) DTO has
+`id`, `name`, either `provider` or `group: true`, and relative decision
+`endpoints`. It contains no credentials or account records. The projection
+reuses [`pluggedDecisionModels`](../../internal/agent/plugged_deciders.go),
+the upstream agent-plugin connect owner backed by `OfferedDeciders`, including
+its labels, provider picks and visible enabled decision groups. No decision
+models are added to conversational `options.models`. No available decision
+models means `[]`, never `null`; API 1.8 and earlier omit the new key.
+The [JS DTO and validator](../../sdk/js/agent-decision-models.js) use the same
+API 1.9 `agent-wiring` floor. This supplies discovery facts, not an invented
+vendor agent configuration schema.
+
 Controlled inspection receives the same gateway, key and model options as
 planning. The existing private binding ledger retains the last requested
 catalog as `modelOptions`; the next options envelope supplies it as
 `priorModels` only for API 1.9. This is previous catalog evidence, while
 `previous` remains the original settings preimage. A module can distinguish
 its generated limits from preserved user edits across multiple syncs without
-adopting those edits as generated values. No-op sync retains its binding only
-when both the checked configuration and requested catalog remain unchanged.
+adopting those edits as generated values. A zero-effect sync retains its binding
+revision and admitted native reads when checked configuration, launch state and
+model authority remain unchanged. Display labels, notes, icons, picker sections
+and catalog ordering alone do not republish that authority. Model references,
+capabilities, effective context/output/efforts and unknown future option fields
+still fence the old binding. The unchanged path consumes its checked plan and
+rechecks files, shell state and runtime; a module's declared file changes still
+use the ordinary durable transition.
 
 `agent.plan` accepts only `connect`, `set`, `sync` and `disconnect` actions.
 Its result is `AgentPlan{files: FileChange[]}`. Each change names an approved

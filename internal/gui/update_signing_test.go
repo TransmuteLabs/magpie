@@ -39,7 +39,7 @@ func TestUpdateSigningRoutes(t *testing.T) {
 	}
 	localSigningOff = func() error { offCalls++; c = nil; return nil }
 	mux := http.NewServeMux()
-	updateSigningRoutes(mux)
+	updateRoutes(mux, &quitCount{})
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		w := httptest.NewRecorder()

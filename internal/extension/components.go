@@ -448,6 +448,13 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	if !found || binding.Action == "" || scope.Plugin != group.entry.Manifest.ID {
 		return nil, errors.New("component binding does not name an owned action")
 	}
+	for _, provider := range group.entry.Manifest.Providers {
+		if slices.ContainsFunc(provider.AccountTasks, func(task sdk.AccountTaskDescriptor) bool {
+			return task.Action == action.ID
+		}) {
+			return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("paid task actions cannot be invoked through component bindings")}
+		}
+	}
 	if len(input) == 0 || len(input) > sdk.MaxHostBytes || !json.Valid(input) {
 		return nil, errors.New("module action input must be bounded JSON")
 	}

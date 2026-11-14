@@ -3,14 +3,18 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +26,99 @@ import (
 )
 
 func TestEmptyPluginCatalogsUseOrdinaryGateway(t *testing.T) {
+	t.Run("quiet", func(t *testing.T) {
+		emptyPluginCatalogsUseOrdinaryGateway(t, false)
+	})
+	t.Run("retired-listener-probe", func(t *testing.T) {
+		emptyPluginCatalogsUseOrdinaryGateway(t, true)
+	})
+}
+
+func emptyCatalogUpstream(t *testing.T, handler http.Handler, lateProbe bool, probe string) *httptest.Server {
+	t.Helper()
+	if !lateProbe {
+		upstream := httptest.NewServer(handler)
+		t.Cleanup(upstream.Close)
+		return upstream
+	}
+	retired, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { retired.Close() })
+	address := retired.Addr().String()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	queued, released, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(released) })
+	dialQueued := sync.OnceFunc(func() { close(queued) })
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dialQueued()
+		select {
+		case <-released:
+			return dial(ctx, network, address)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	result := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		release()
+		<-done
+		client.CloseIdleConnections()
+	})
+	go func() {
+		defer close(done)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+"/", nil)
+		if err == nil {
+			request.Header.Set("X-Fake-Probe", probe)
+			var response *http.Response
+			response, err = client.Do(request)
+			if err == nil {
+				if response.StatusCode != http.StatusMisdirectedRequest {
+					t.Errorf("retired-listener probe: HTTP %d, want 421", response.StatusCode)
+				}
+				_, err = io.Copy(io.Discard, response.Body)
+				response.Body.Close()
+			}
+		}
+		result <- err
+	}()
+	select {
+	case <-queued:
+	case <-ctx.Done():
+		t.Fatal("probe did not queue before its old listener retired")
+	}
+	if err := retired.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewUnstartedServer(handler)
+	upstream.Listener.Close()
+	upstream.Listener, err = net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream.Start()
+	t.Cleanup(upstream.Close)
+	t.Logf("rebound %s before releasing the controlled retired-listener GET /", address)
+	release()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("retired-listener probe did not finish against the reused listener")
+	}
+	<-done
+	return upstream
+}
+
+func emptyPluginCatalogsUseOrdinaryGateway(t *testing.T, lateProbe bool) {
+	t.Helper()
 	fresh(t)
 	t.Setenv("PATH", os.Getenv(standInsEnv))
 	t.Setenv("MAGPIE_BUN", "")
@@ -57,22 +154,46 @@ func TestEmptyPluginCatalogsUseOrdinaryGateway(t *testing.T) {
 	checkEmpty()
 
 	type observation struct {
-		path, body, authorization string
+		method, path, body, authorization string
 	}
-	observed := make(chan observation, 2)
-	serveOn(t, "base", "builtin-key", []string{"m1"}, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	run, probe := rand.Text(), rand.Text()
+	observed := make(chan observation, 1)
+	var executions, probes atomic.Int32
+	upstream := emptyCatalogUpstream(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Error(err)
 		}
-		select {
-		case observed <- observation{request.URL.Path, string(body), request.Header.Get("Authorization")}:
-		default:
+		if request.Header.Get("X-Fake-Run") != run {
+			if lateProbe && request.Header.Get("X-Fake-Probe") == probe &&
+				request.Method == http.MethodGet && request.RequestURI == "/" && len(body) == 0 &&
+				request.Header.Get("Authorization") == "" && request.Header.Get("X-Api-Key") == "" && request.Header.Get("Cookie") == "" {
+				if probes.Add(1) != 1 {
+					t.Error("controlled retired-listener probe reached the upstream more than once")
+				}
+			} else {
+				t.Errorf("unowned upstream request: %s %s from %s at %s (%d bytes)", request.Method, request.RequestURI, request.RemoteAddr, request.Host, len(body))
+			}
+			writer.WriteHeader(http.StatusMisdirectedRequest)
+			return
+		}
+		if executions.Add(1) == 1 {
+			observed <- observation{request.Method, request.URL.Path, string(body), request.Header.Get("Authorization")}
+		} else {
 			t.Error("plugin-free request reached the upstream more than once")
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		io.WriteString(writer, `{"id":"builtin","choices":[{"message":{"role":"assistant","content":"builtin reply"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
-	}))
+	}), lateProbe, probe)
+	if count := probes.Load(); lateProbe && count != 1 || !lateProbe && count != 0 {
+		t.Fatalf("controlled retired-listener probe reached the upstream %d times, late probe enabled: %t", count, lateProbe)
+	}
+	if err := provider.Save(provider.Provider{
+		ID: "base", Name: "BASE", Key: "builtin-key", Models: []string{"m1"}, Chat: upstream.URL + "/v1",
+		Headers: map[string]string{"X-Fake-Run": run},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	server := New()
 	t.Cleanup(server.idle.stop)
 	for _, path := range []string{"/v1/models", "/v1/chat/completions"} {
@@ -121,20 +242,23 @@ func TestEmptyPluginCatalogsUseOrdinaryGateway(t *testing.T) {
 		t.Fatalf("builtin model catalog with no plugins: %s", body)
 	}
 	call(http.MethodPost, "/fixture/rpc", `{}`, http.StatusNotFound)
+	if executions.Load() != 0 {
+		t.Fatal("model discovery or an uninstalled native route called the HTTP provider before execution")
+	}
 	body = call(http.MethodPost, "/v1/chat/completions", `{"model":"base/m1","messages":[{"role":"user","content":"hello"}]}`, http.StatusOK)
 	if !strings.Contains(string(body), `"content":"builtin reply"`) {
 		t.Fatalf("builtin reply with no plugins: %s", body)
 	}
 	select {
 	case got := <-observed:
-		if got.path != "/v1/chat/completions" || modelOf([]byte(got.body)) != "m1" || got.authorization != "Bearer builtin-key" {
+		if got.method != http.MethodPost || got.path != "/v1/chat/completions" || modelOf([]byte(got.body)) != "m1" || got.authorization != "Bearer builtin-key" {
 			t.Fatalf("builtin HTTP provider request: %+v", got)
 		}
 	default:
 		t.Fatal("ordinary gateway never reached the builtin HTTP provider")
 	}
-	if len(observed) != 0 {
-		t.Fatal("model discovery or an uninstalled native route called the HTTP provider")
+	if count := executions.Load(); count != 1 {
+		t.Fatalf("plugin-free request reached the HTTP provider %d times, want one", count)
 	}
 	checkEmpty()
 }

@@ -98,7 +98,7 @@ func TestExtensionProviderOptionsResponseKeepsUnrelatedConfigPrivate(test *testi
 	mux := http.NewServeMux()
 	providerRoutes(mux, nil)
 	body, err := json.Marshal(map[string]any{
-		"id": provider.ExtensionProviderID(entry.Manifest.ID, "vendor"),
+		"id":     provider.ExtensionProviderID(entry.Manifest.ID, "vendor"),
 		"module": entry.Manifest.ID, "provider": "vendor", "packageRevision": entry.Revision,
 		"expected": "1", "values": map[string]bool{"paid": true}, "confirmed": []string{"paid"},
 	})
