@@ -490,6 +490,7 @@ var notYet = map[string]string{
 	"POST /api/open":                             W,  // providers.go
 	"POST /api/partner":                          P,  // providers.go
 	"POST /api/providers/arrange":                W,  // providers.go
+	"POST /api/providers/delete":                "magpie provider rm <id> removes one provider at a time; bulk removal with one final reseat has no CLI equivalent",
 	"POST /api/signin":                           P,  // providers.go
 	"POST /api/signin/{id}/callback":             P,  // providers.go
 	"POST /api/signin/{id}/cancel":               P,  // providers.go
