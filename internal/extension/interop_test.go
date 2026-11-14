@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
@@ -45,7 +44,10 @@ func bunFixturePackage(t *testing.T) string {
 	}
 	manifest := sdk.Manifest{
 		Schema: 1, ID: "conformance", Version: "1.0.0", Runtime: "bun", Entry: "test/fixtures/worker.js",
-		Contract:  sdk.FullContract(),
+		Contract: sdk.Contract{Version: sdk.FullContract().Version, Capabilities: []sdk.Capability{
+			sdk.InboundCodec, sdk.OutboundExecutor, sdk.AgentWiring, sdk.AccountAuth, sdk.ModelDiscovery,
+			sdk.UsageReporter, sdk.OperationControl, sdk.ToolProvider, sdk.SessionMigration, sdk.ModuleRPC, sdk.GatewayHooks,
+		}},
 		Inbounds:  []sdk.InboundDescriptor{{ID: "native", Path: "/conformance/native"}},
 		Providers: []sdk.ProviderDescriptor{{ID: "sample", Name: "Sample", Protocols: []codec.Protocol{codec.Chat, codec.Responses, codec.Messages, codec.Gemini}, Models: []sdk.Model{{ID: "echo"}}}},
 		Agents:    []sdk.AgentDescriptor{{ID: "editor", Name: "Editor"}},
@@ -53,9 +55,6 @@ func bunFixturePackage(t *testing.T) string {
 		Tools:     []sdk.ToolDescriptor{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 		Hooks:     &sdk.GatewayHookDescriptor{Request: true, Response: true, SignIn: true},
 	}
-	manifest.Contract.Capabilities = slices.DeleteFunc(manifest.Contract.Capabilities, func(capability sdk.Capability) bool {
-		return capability == sdk.SessionSource
-	})
 	body, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)

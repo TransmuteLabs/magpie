@@ -28,7 +28,7 @@ const call = (worker, id, method, input = params(method), extra = {}) =>
 
 test("SDK 1.2 advertises gateway hooks and accepts explicit host compatibility", () => {
   assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 6 });
-  assert.equal(SDK.CONTRACT.capabilities.length, 12);
+  assert.equal(SDK.CONTRACT.capabilities.length, 13);
   assert.equal(SDK.MAX_GATEWAY_STATE_BYTES, 64 << 10);
   const source = manifest();
   source.compatibility = { hostAPI: "^1.2" };

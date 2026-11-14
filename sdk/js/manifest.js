@@ -8,6 +8,7 @@ import { validateRouting } from "./routing.js";
 import { validateWindowAuthBindings } from "./window-auth.js";
 import { validateAgentMetadata, validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
 import { validateSessionSources, validateSessionSourceRequest, validateSessionSourceResult } from "./session-source.js";
+import { validateAccountOperations } from "./account-operations.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -22,6 +23,7 @@ const capabilities = {
   "session-source": ["session.source.read"],
   "module-rpc": ["module.call"],
   "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
+  "native-account-operations": [],
 };
 
 export const CONTRACT = Object.freeze({
@@ -223,6 +225,7 @@ export function validateManifest(value) {
   validateWindowAuthBindings(manifest);
   validateRouting(manifest, fail);
   validateSessionSources(manifest);
+  validateAccountOperations(manifest, fail);
   validateHooks(manifest);
   return freezeJSON(manifest);
 }

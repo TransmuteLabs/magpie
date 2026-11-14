@@ -17,23 +17,25 @@ const Version = 0
 type Protocol string
 
 const (
-	Chat      Protocol = "chat"
-	Responses Protocol = "responses"
-	Messages  Protocol = "messages"
-	Anthropic Protocol = "anthropic"
-	Gemini    Protocol = "gemini"
-	Models    Protocol = "models"
-	Tool      Protocol = "tool"
+	Chat             Protocol = "chat"
+	Responses        Protocol = "responses"
+	Messages         Protocol = "messages"
+	Anthropic        Protocol = "anthropic"
+	Gemini           Protocol = "gemini"
+	Models           Protocol = "models"
+	Tool             Protocol = "tool"
+	AccountOperation Protocol = "account-operation"
 )
 
 type Request struct {
-	Protocol  Protocol
-	Body      []byte
-	Session   string
-	Timeout   time.Duration
-	RequestID string
-	Metadata  json.RawMessage
-	Executor  ExecutorPolicy
+	Protocol         Protocol
+	Body             []byte
+	Session          string
+	Timeout          time.Duration
+	RequestID        string
+	Metadata         json.RawMessage
+	Executor         ExecutorPolicy
+	AccountOperation string
 }
 
 type Inbound interface {

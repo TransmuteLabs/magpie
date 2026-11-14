@@ -33,6 +33,7 @@ func cloneManifest(manifest Manifest) Manifest {
 	manifest.Args = slices.Clone(manifest.Args)
 	manifest.Contract.Capabilities = slices.Clone(manifest.Contract.Capabilities)
 	manifest.Inbounds = slices.Clone(manifest.Inbounds)
+	manifest.AccountOperations = slices.Clone(manifest.AccountOperations)
 	manifest.Providers = slices.Clone(manifest.Providers)
 	for index := range manifest.Providers {
 		provider := &manifest.Providers[index]
@@ -108,6 +109,9 @@ func cloneManifest(manifest Manifest) Manifest {
 }
 
 func (manifest Manifest) Validate() error {
+	if err := manifest.validateAccountOperations(); err != nil {
+		return err
+	}
 	if err := manifest.validateWindowAuthBindings(); err != nil {
 		return err
 	}

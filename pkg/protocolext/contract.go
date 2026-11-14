@@ -10,15 +10,16 @@ type APIVersion struct {
 type Capability string
 
 const (
-	InboundCodec     Capability = "inbound-codec"
-	OutboundExecutor Capability = "outbound-executor"
-	AgentWiring      Capability = "agent-wiring"
-	AccountAuth      Capability = "account-auth"
-	ModelDiscovery   Capability = "model-discovery"
-	UsageReporter    Capability = "usage-reporter"
-	OperationControl Capability = "operation-control"
-	ToolProvider     Capability = "tool-provider"
-	ExecutorBinding  Capability = "executor-binding"
+	InboundCodec            Capability = "inbound-codec"
+	OutboundExecutor        Capability = "outbound-executor"
+	AgentWiring             Capability = "agent-wiring"
+	AccountAuth             Capability = "account-auth"
+	ModelDiscovery          Capability = "model-discovery"
+	UsageReporter           Capability = "usage-reporter"
+	OperationControl        Capability = "operation-control"
+	ToolProvider            Capability = "tool-provider"
+	ExecutorBinding         Capability = "executor-binding"
+	NativeAccountOperations Capability = "native-account-operations"
 )
 
 type Contract struct {
@@ -39,7 +40,9 @@ func (host Contract) Check(module Contract) error {
 	}
 	seen := make(map[Capability]bool, len(module.Capabilities))
 	for _, capability := range module.Capabilities {
-		if !available[capability] || seen[capability] || capability == ExecutorBinding && module.Version.Minor < 4 {
+		if !available[capability] || seen[capability] || capability == ExecutorBinding && module.Version.Minor < 4 ||
+			capability == NativeAccountOperations && (module.Version.Major == Version && module.Version.Minor < 5 ||
+				module.Version.Major != Version && module.Version.Minor < 6) {
 			return fmt.Errorf("unsupported or duplicate protocol extension capability %q", capability)
 		}
 		seen[capability] = true
@@ -60,7 +63,12 @@ func ToolContract() Contract {
 }
 
 func HostContract() Contract {
-	return Contract{Version: APIVersion{Major: Version, Minor: 4}, Capabilities: []Capability{InboundCodec, ModelDiscovery, ToolProvider, ExecutorBinding}}
+	return Contract{Version: APIVersion{Major: Version, Minor: 5}, Capabilities: []Capability{InboundCodec, ModelDiscovery, ToolProvider, ExecutorBinding, NativeAccountOperations}}
+}
+
+func AccountOperationContract() Contract {
+	return Contract{Version: APIVersion{Major: Version, Minor: 5},
+		Capabilities: []Capability{InboundCodec, ExecutorBinding, NativeAccountOperations}}
 }
 
 func (contract Contract) Has(capability Capability) bool {

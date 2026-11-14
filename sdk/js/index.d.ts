@@ -2,7 +2,8 @@ export type UInt64 = number | bigint;
 export type JSONValue = null | boolean | number | bigint | string | JSONValue[] | { [key: string]: JSONValue };
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
-  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks" | "session-source";
+  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
+  | "session-source" | "native-account-operations";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
@@ -162,6 +163,7 @@ interface ManifestFields {
   component?: ComponentIdentity;
   hooks?: GatewayHookDescriptor;
   routingStrategies?: RoutingStrategyDescriptor[];
+  accountOperations?: AccountOperationDescriptor[];
 }
 export type Manifest = ManifestFields & (
   { runtime: "exec" | "bun"; args?: string[] }
@@ -262,10 +264,14 @@ export function serve(module: Module, options?: ServeOptions): Promise<void>;
 export type Headers = Record<string, string[]>;
 export interface NativeRequest { id: string; responseId: string; headers?: Headers; body?: string }
 export interface DecodedRequest {
-  protocol: Protocol | "models" | "tool"; body?: string; session?: string; timeoutMs?: number;
+  protocol: Protocol | "models" | "tool" | "account-operation"; body?: string; session?: string; timeoutMs?: number;
   requestId?: string; metadata?: JSONValue;
   executor?: "same-module";
+  accountOperation?: string;
 }
+export interface AccountOperationDescriptor { id: string; agent: string; provider: string; action: string }
+export interface AccountOperationRequest { model: string; body?: string; callerId?: string }
+export interface AccountOperationResult { status: number; headers?: Headers; body?: string }
 export interface ResponseEvent {
   id: string; responseId: string; action: "start" | "write" | "flush" | "finish" | "cancel";
   status?: number; headers?: Headers; body?: string; error?: RPCError;

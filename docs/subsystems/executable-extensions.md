@@ -6,7 +6,7 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Current SDK source API 1.5 includes native/composite APIs, API 1.2 gateway
+Current SDK source API 1.6 includes native/composite APIs, API 1.2 gateway
 hooks/private tools, and API 1.3 transactional refresh, provider operations
 and extended model metadata, plus API 1.4 routing strategies, selected-account
 usage revisions, business cancellation and native executor constraints.
@@ -14,8 +14,11 @@ API 1.5 adds declared selected-account window action bindings and a separate
 host-owned poll/link authentication broker; its
 [scoped record](../adr/0015-selected-account-window-bindings.md) is separate
 from combined 1.5 or whole-application acceptance.
-Those 1.5 cuts are window adapters; agent launch/profile adoption remains in progress
-and needs its own ordinary-owner evidence.
+API 1.5 also declares agent launch, explicit profile ownership and Library
+targets through the ordinary agent controller. API 1.6 adds bounded local
+JSONL session sources and finite native account operations bound to the
+original inbound lease and owned agent. Each adapter has separate scoped
+evidence; contract composition does not establish vendor compatibility.
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
 immutable aggregate runs from later fixes. Those scoped records do not
@@ -61,11 +64,19 @@ See [extension providers](extension-providers.md),
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 4}` and eleven capabilities. The finite operation
+SDK API `{major: 1, minor: 6}` and thirteen capabilities. The finite operation
 registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
 independent version.
+
+The session-source decision is [ADR 0019](../adr/0019-jsonl-session-sources.md).
+[Native account operations](../adr/native-account-operations.md) negotiate
+codec 0.5 separately from SDK 1.6. Both declarations survive the primary
+handshake and cloning; private services inherit neither authority.
+No modules are required to run Magpie. With empty SDK and legacy catalogs,
+these adapters preserve built-in agent/provider owners and do not start
+native libraries, executable workers or Bun.
 
 ## Selection and authoring
 

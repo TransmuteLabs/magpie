@@ -159,7 +159,7 @@ func TestModuleRequiresEveryAdvertisedHandlerAndRefusesUnknownMethods(t *testing
 		t.Fatal("inbound model projection required provider.models")
 	}
 	legacy := protocolext.HostContract()
-	if legacy.Version.Major != 0 || legacy.Version.Minor != 4 || protocolext.CatalogContract().Version.Minor != 2 ||
+	if legacy.Version.Major != 0 || legacy.Version.Minor != 5 || protocolext.CatalogContract().Version.Minor != 2 ||
 		FullContract().Version.Major != 1 || FullContract().Version.Minor != 6 {
 		t.Fatal("external version altered the legacy codec contract")
 	}

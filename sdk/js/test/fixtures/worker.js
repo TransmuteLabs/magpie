@@ -4,7 +4,7 @@ import { parseJSON } from "../../manifest.js";
 
 let manifest = {
   schema: 1, id: "conformance", version: "1.0.0", runtime: "bun", entry: "worker.js",
-  contract: { version: { major: 1, minor: 0 }, capabilities: CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks", "session-source"].includes(capability)) },
+  contract: { version: { major: 1, minor: 0 }, capabilities: CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks", "session-source", "native-account-operations"].includes(capability)) },
   inbounds: [{ id: "native", path: "/conformance/native" }],
   providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"], models: [{ id: "echo" }] }],
   agents: [{ id: "editor", name: "Editor" }],

@@ -11,8 +11,8 @@ func TestToolContractNegotiatesOnlyInboundToolAuthority(t *testing.T) {
 		t.Fatalf("wrong tool contract: %+v", tool)
 	}
 	host := HostContract()
-	if host.Version != (APIVersion{Major: 0, Minor: 4}) ||
-		!reflect.DeepEqual(host.Capabilities, []Capability{InboundCodec, ModelDiscovery, ToolProvider, ExecutorBinding}) {
+	if host.Version != (APIVersion{Major: 0, Minor: 5}) ||
+		!reflect.DeepEqual(host.Capabilities, []Capability{InboundCodec, ModelDiscovery, ToolProvider, ExecutorBinding, NativeAccountOperations}) {
 		t.Fatalf("legacy host acquired unrelated authority: %+v", host)
 	}
 	for _, compatible := range []Contract{InboundContract(), CatalogContract(), tool} {
@@ -21,7 +21,7 @@ func TestToolContractNegotiatesOnlyInboundToolAuthority(t *testing.T) {
 		}
 	}
 	for _, unsupported := range []Contract{
-		{Version: APIVersion{Major: 0, Minor: 5}, Capabilities: []Capability{InboundCodec}},
+		{Version: APIVersion{Major: 0, Minor: 6}, Capabilities: []Capability{InboundCodec}},
 		{Version: APIVersion{Major: 0, Minor: 3}, Capabilities: []Capability{InboundCodec, OutboundExecutor}},
 		{Version: APIVersion{Major: 0, Minor: 3}, Capabilities: []Capability{InboundCodec, AccountAuth}},
 	} {

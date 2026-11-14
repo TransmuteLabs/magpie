@@ -180,6 +180,17 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 		if contextual, ok := reply.(interface{ SetContext(context.Context) }); ok {
 			contextual.SetContext(request.Context())
 		}
+		if decoded.Protocol == sdk.AccountOperation {
+			if err := server.protocolAccountOperation(reply, request, inbound, decoded); err != nil {
+				reply.Header().Set("X-Should-Retry", "false")
+				refuse(http.StatusForbidden, "native account operation is unavailable for the current binding")
+			}
+			return
+		}
+		if decoded.AccountOperation != "" {
+			refuse(http.StatusBadGateway, "adapter produced an unexpected native account operation")
+			return
+		}
 		method, target := http.MethodPost, "/v1/chat/completions"
 		switch decoded.Protocol {
 		case sdk.Chat, sdk.Responses, sdk.Messages, sdk.Anthropic, sdk.Gemini:
