@@ -306,6 +306,7 @@ recorded as a prediction failure (`noPrediction`).
 - A provider can be set never to be a fallback for another model (sonnnnnnnnnnnna on X: an agent on a local uncensored model whose server is down or out of KV room must not have its request sent on to Claude or Codex, whose vendor may ban the account for it). *Never a fallback* on a provider row's right-click (GUI `provider/standin`, `magpie provider set <id> fallback-for-others=no`, `provider.SetNoStandIn`, `Provider.NoStandIn`, copied onto its accounts by `accountSettings`) has `standInsOut` leave out, in `planPaused` and `planGroup`, each of its keys and accounts planned after one of a provider not so set. It runs on the planned order before `restLast` and `sinkPlanned`, so a local model that failed and rests still counts as first; a provider request whose own provider is unmarked starts as seen, so one with nothing planned (its model off, every account capped) still keeps them out, and a fallback group's marked members, a marked fallback's unlisted accounts and `groupsAfter`'s groups go the same way. A request that goes first to a marked provider moves on to another marked one, or an unmarked one, as before; a group routed by weight (Smart, Cheapest) that weighs a marked member first sends it the request as the group's pick. The left-out rows carry `Weighed.StandIn` (and `Unlisted`), and the Routing page says why (`leftWhy`, `unlistedWord`); they don't count toward the cap, held or barred refusals. No classifier reads the request: the model that would judge it is the local one that is down, and any other would send the text somewhere the user didn't choose. `TestNoStandInTakesNoOtherModelsRequest`, `stand-in.test.cjs`.
 - Different failures are classified separately: out of credit, out of quota, rate limit and other errors rest for different lengths. A fix must not merge them into one bucket (see #873).
 - A refusal of where the request comes from (`regionWords`: Google's 400 "User location is not supported for the API use.", as Antigravity and Code Assist pass it on, and OpenAI's `unsupported_country_region_territory` / "Country, region, or territory not supported"; `regionRefused`) is the network's and the edge's the connection reached, not the account's. It rests no account and counts no failure (`restAfterMarked` returns `Rest.By` `off`, `Until` now), and the next try goes out on a new connection: `regionFresh` (in `upstreamTransport`, around each of its three transports, so under every request the gateway sends through `s.client`) reads the head of each failed reply, and when it matches it closes the transport's idle connections as the body closes and again before the next request (`pending`), so the HTTP/2 or keep-alive connection that drew the refusal isn't reused. The last candidate is asked again after `retryPause` (`passing`). Refused a second time for the same provider and model within a request (`regionAsked` in the serve loop), it is the place, not a connection: Google serves some models to no request from where the user is while the same account's other models answer (taoxiaoxin, #5182: Antigravity's gemini-3.8-flash refused, its Claude models answered). Then none of the provider's other accounts is asked that model (`notMates`), the last isn't asked again (`protected`), another provider or model left is, and the agent is told the vendor's words with `regionNote` (through `explained`, beside `Provider.Explain`): the vendor doesn't serve that model to requests from that region, it is no account's fault, other models may answer, and a proxy in a served region or another provider gets past it. So a refused model costs two asks a request, not one per account and retries. Before, every Antigravity account was asked on the one kept-alive connection, each refused the same and rested, and the agent got a 400, while a new connection answered 12 seconds on (#5182, ggdayup; `TestRegionRefusalDropsItsConnection`, `TestAntigravityRegionRefusalAsksTheNextOnANewConnection`, `TestAntigravityRegionRefusalAsksTheLastAgain`, `TestRegionRefusalRestsNoAccount`, `TestRegionRefusalOfTheModelEndsAfterOneMoreAsk`, `TestRegionNote`). Not covered: an HTTP/2 connection carrying another stream at that moment outlives the close until it is idle, and the close drops other vendors' idle connections too (one handshake each). A user whose region is refused gets the refusal after the one more ask, a moment later than before.
+- OpenRouter's 403 for a free model it serves only to the agent apps it lists ("… is only available on agentic harnesses", routing step "Gate Free Endpoints by Agentic Harness"; `provider.HarnessOnly`) is about the app the request came from, not the key or the model. It rests nothing and counts no failure (`restAfterMarked` returns `Rest.By` `off`), and a group's next member is asked as after any 403. Read as the key's 403, it set every model of the OpenRouter key aside (Wade111999 on X; `TestOpenRouterHarnessOnlyRestsNothing`). `APIError` puts `HarnessOnlyHint` after the words, so a model test, magpie's own request and no listed app's, says why it was refused and that the model without `:free` has no such gate (`TestHarnessOnlyTestSaysWhy`). magpie never names an app it isn't. Not covered: whether OpenRouter takes an agent's request through magpie as that agent's, since agents send OpenRouter's attribution headers only to openrouter.ai itself.
 - One of Codex's own models on the backend path with no routing to do (`codexAccounts` false: one ChatGPT account, no usage cap, no key holds, nothing pinned, and the sign-in not known to be out of its allowance, `provider.CodexUsedUpKnown`, which routes the turn as `codex/<model>` as a restarted Codex's goes) is relayed as Codex sent it, on Codex's own sign-in, its bytes and headers unchanged and its reply streamed as it comes (`codexUpstreamOn` with no account): routing was built for more than one account, and that path also keeps the turn's native compaction with the backend. Before, nothing was asked again on it, so an overload went straight to Codex, which doesn't retry the backend's `server_is_overloaded` itself (夜松云 on Discord). Now a transient overload (`codexBusy`: what `busy` calls busy, a 529, a 503 saying overloaded, the backend's in-stream `response.failed` with `server_is_overloaded` (#1418); never a 429, a usage limit, an edge's drop of the connection (`edgeSaidDrop`) or a reset (`codexReset`)) is asked again of the same account, the same body and headers, up to `lastRetries` times after `retryPause<<n`, as the accounts loop asks its last account, and only before any of the reply has reached Codex. A stream is held for it through a `holdWriter` with its reasoning let through (`thinkingShown`), kept alive past `keepHeldAfter` across the tries (one `keptAlive`), so Codex sees the stream's headers and comments, never a failed try's frames. Nothing rests for an overload. Once the retries are spent, a turn whose codex subscription has fallbacks (`codexFallsBack`; never a compaction) goes on to them (`codexFallBack`: the turn served as `codex/<model>` with the account left out of the candidates, `fallbacksOnly`, and the same keepalive carried in `handedOnKey`); without fallbacks Codex gets the last try's failure as the backend said it. The account out of its allowance goes on to the same fallbacks at once, after the credits retry and the automatic reset are looked at (`codexAccountOut`: a quota, credit or rate refusal, as a status or as a stream's failure before any reply, and a 403 `usage_not_included`; never a 401, which Codex renews its sign-in on). Before that, Codex was handed the 429 with its fallbacks unused (adorable_piglet on Discord, `TestCodexOneAccountSpentFallsBack`); with none set it still is (`TestCodexOneAccountSpentNoFallbackRelayed`). A routing group the user built with the model in it counts as one more fallback after the subscription's own (`provider.GroupsAfter` in `codexFallsBack`, and in serve for a turn handed on), so a group of the Codex subscription first and an API after it takes the spent turn (`TestCodexOneAccountSpentGoesToItsGroup`). Codex's auto-review, on `codex-auto-review`, which no group or fallback names, goes on where its conversation's own turns go (`codexReviewAfter`, from `codexLeads`): to the fallbacks and groups of the conversation's model, or to the magpie model it is on, as `codexFallsBack` and serve's `groupsAfter` add them (riverleaf88 on X, `TestCodexReviewSpentFollowsTheGroup`, `TestCodexReviewSpentFollowsMagpieModel`). Each try is a `HandedOn` usage record and a try in the trace. The reply's `x-codex-*` windows are kept as the sign-in's usage and a `usage_limit_reached` refusal has it read again at once (`heardCodexLimits`, `codexMayBeUsedUp`), as on the accounts path. A success is relayed as before, with nothing held when no retry or fallback is left (`TestCodexOneAccountOverloadAskedAgain`, `…StreamOverloadAskedAgain`, `…OverloadBounded`, `…OverloadFallsBack`, `…OverloadKeptAlive`, `…RefusalNotAskedAgain` in [`codex_one_account_overload_test.go`](../../internal/gateway/codex_one_account_overload_test.go)).
 - A subscription account whose sign-in its vendor revoked (`provider.SignInRevoked`: 401 `token_revoked` and the like, #1793) fails as `failAuth`: the next member is asked at once, nothing rests, and the account is marked (`noteSignIn` in [`signin_revoked.go`](../../internal/gateway/signin_revoked.go)). Its later requests aren't sent while it has that credential: `forwardOnce` answers them with a 401 of magpie's own (`revokedReply`), so they too pass on. Compaction on an account of magpie's (`compactOn`) picks a marked one last. A key's provider answering the same words rests as before.
 - A ChatGPT 401 that says the token sent has expired and asks for a refresh (`provider.SignInExpired`, #2973) while its `exp` is ahead renews the account's sign-in once (`provider.NoteExpiredSignIn` from `noteSignIn`), keyed on the token sent, so the next request goes with a fresh one; nothing is marked, and the request fails over as any 401 does ([Providers and accounts](providers-accounts.md), A token called expired).
@@ -536,14 +537,22 @@ recorded as a prediction failure (`noPrediction`).
   the newest `heldKept` (5) kept. It has the time, version and system,
   method and path, the model and agent, how long it was held, each kind
   of known wait and its time ("(under way)" for the one it was in), the
-  body room's state, the requests in flight and every goroutine's stack
-  (function names and lines, no values; 128 KB at most, one dump for a
-  burst within 10s). Never the body or headers. Its file name is
+  body room's state, the requests in flight, where the request itself
+  stood (`stood at:`, the first of magpie's own functions on its
+  handler's stack and what it waited in, and that stack in full under
+  "where this request stood", ahead of the rest: `watchUnrouted` keeps
+  the handler's goroutine id, `heldOwn` finds it in a dump of every
+  goroutine and strips the argument words and pc offsets; the log line
+  says it as "standing at", wilsonxuuuu on X: a report pasted cut before
+  the stacks said 30s in no known wait and nothing more) and every
+  goroutine's stack (function names and lines, no values; 128 KB at
+  most, one dump for a burst within 10s). Never the body or headers. Its file name is
   `Route.Held`; the Routing page's story of that request has Copy Report
   (`GET /api/gateway/held/{name}`, only a report's own name is read) and,
   in the app, Open Folder (`POST /api/gateway/held/reveal`). The 504 and
   the log line say where it is. `TestUnroutedHeldReportSaved`,
-  `TestHeldReportsKeptAndNamed`, `routing-held-report.test.cjs`.
+  `TestHeldReportsKeptAndNamed`, `TestHeldReportSaysWhereItStood`,
+  `TestHeldOfFindsItsGoroutine`, `routing-held-report.test.cjs`.
   `TestUnroutedRequestShownThenAnswered`, `TestUnroutedShownGivesWayToItsRoute`,
   `TestUnroutedUnknownHoldAnsweredSooner`, `TestUnroutedSlowBodyNotCutOff`,
   `TestUnroutedMaskingNotCutOff`, `TestUnroutedSlotWaitNotCutOff`,
@@ -1482,7 +1491,7 @@ told its own calls and limit alone:
 | `GET /v1/magpie/concurrency` | requests in flight per account |
 | `POST`/`GET /v1/magpie/keys`, `DELETE /v1/magpie/keys/{id}` | short-lived keys, above |
 | `POST /v1/magpie/keys/oidc` | an OIDC token traded for a short-lived key, above |
-| `/v1/magpie/admin/…` | the management API: the app's provider, account, gateway-key and account-group handlers for a key with `Key.Admin`, below |
+| `/v1/magpie/admin/…` | the management API: the app's provider, account, gateway-key, account-group and routing-group handlers for a key with `Key.Admin`, below |
 
 ### The management API
 
@@ -1504,7 +1513,15 @@ key. A key action through the API on another key that has `Admin`
 secret, or set one the caller chose, so a `local` key would get an `any`
 one or take over a peer's. The caller's own key is its to change. The route is in `readOnlyRefused`, so a read-only key never reaches
 it. The handlers are built with no window, so a sign-in opens no browser.
-Routing Groups and sign-in export are not in it yet (#6307).
+Routing Groups go to `/api/groups` (`adminGroupActions`; `found` and `skip`
+are left out, as they set this computer's agents), with
+`routing-groups/{id...}` (an id may be `group/<id>`), `create` and `update`
+of the API's own in front: `update` reads the stored group, lays the body's
+fields over it and hands that to the same `save` (`adminGroupWrite`), so
+`provider.SaveGroup` checks every write the page's does
+(`TestAdminAPIRoutingGroups`, `TestAdminAPIRoutingGroupsGuarded`). The app
+sets `Key.Admin` from a key's menu, Advanced (`gatewayAdminPick`,
+`gateway-key-admin.test.cjs`). Sign-in export is left out (#6307).
 
 ### Route events for a display
 
@@ -1687,18 +1704,26 @@ first as the page's default) and sent as the `magpie_chat_model` cookie.
   runs with `fetchPage` between rounds, all said to the page as one reply
   in its own shapes (`chatTurn`). Each round goes through the gateway's
   own Messages route, so routing, masking, limits and usage apply as to
-  any agent. The page shows sources only from text blocks' `citations`; a
-  model that names URLs in its text without citing gets no source chips.
+  any agent. A gateway key's MaxConcurrency holds a turn as it holds an
+  agent's request (`keySlotRoutes`, lazy: the rounds' tries take the
+  slot, which `chatInner`'s copy of the context carries), and the speech
+  routes eagerly; the file routes are free. The page shows sources only
+  from text blocks' `citations`; a model that names URLs in its text
+  without citing gets no source chips.
 - Files the page uploads (`/anthropic/v1/files`) are kept in memory for
   the key that uploaded them until magpie restarts: images, PDFs and
   text; Word, PowerPoint and EPUB files are refused.
 - Voice input and read-aloud (`/v1/tools/asr`, `/v1/tools/tts`) use the
   first speech-to-text or text-to-speech model a provider serves, and say
   so when there is none.
+- A LazyCat box's manifest makes `/deepseek-chat` public, as it does the
+  key page, for a key's holder who isn't signed in to the box
+  (docs/reference.md).
 
 Tests: `TestChatPageOpensWithoutAKey`, `TestChatPageConversation`,
 `TestChatPageSearchesAndReadsLinks`, `TestChatPageFiles`,
-`TestTextCallsCitationAfterItsBlock`, `gateway-chat-page.test.cjs`.
+`TestTextCallsCitationAfterItsBlock`, `TestKeyConcurrencyChatPage`,
+`gateway-chat-page.test.cjs`.
 
 ## Turning provider search off
 
@@ -2054,6 +2079,9 @@ instead of `search_query` for `images`, `settings.filters`,
 searcher is asked the sites as `site:` and `-site:` operators in the query
 (`searchScoped`, at the top of `webSearch`) and ignores the rest. Image
 results come back as pages whose text starts "Image: <url>" (`imageSaid`).
+The output is cut into pages at each line of 80 dashes (`codexBlocks`),
+which often follows a page's last word with no line break: an image
+search always does. `TestImageSearchGivesTheCount`.
 `TestSearchScopeReachesCodexSearch`, `TestSearchScopeOperatorsForOtherSearchers`.
 
 ## How many results a search is answered with

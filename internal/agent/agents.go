@@ -327,7 +327,7 @@ func onMachineAll(home, cfg string) []*Agent {
 		copilotJetBrains(home),
 		air(home, cfg),
 		airIDE(home, cfg),
-		copilot(home),
+		copilot(home, cfg),
 		crush(home, cfg),
 		dsh(home),
 		dsbot(home),
@@ -624,6 +624,32 @@ func magpieProviderJSONFor(shape, catalog string) any {
 }
 
 // magpieProviderJSONAt is magpieProviderJSONFor for an agent that reaches
+// openCodeKinds are the input kinds OpenCode's config takes for a model
+// (its modalities enum, models.dev's words).
+var openCodeKinds = []string{"text", "image", "audio", "video", "pdf"}
+
+// openCodeInputs is a model's input as OpenCode is told it: text, image
+// when it sees, and the audio, video and pdf its source listed (Gemini's,
+// Parlevent_ on X: OpenCode was told text and image alone), in OpenCode's
+// order. nil, nothing said, for a model that takes text alone, as before.
+func openCodeInputs(m catalog.Model) []string {
+	var in []string
+	for _, k := range openCodeKinds {
+		switch {
+		case k == "text":
+		case k == "image" && m.Images:
+		case k != "image" && slices.Contains(m.InputModalities, k):
+		default:
+			continue
+		}
+		in = append(in, k)
+	}
+	if len(in) == 1 {
+		return nil
+	}
+	return in
+}
+
 // the gateway at gw: one in a WSL distro under NAT (see wsl.go).
 func magpieProviderJSONAt(shape, catalog, gw string) any {
 	models := magpieModels(catalog) // the catalog is the agent's
@@ -639,8 +665,8 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 			// its image input from them, and its attachment flag, which
 			// nothing of OpenCode 1.18 reads, is a legacy field OpenCode 2
 			// drops with a WARN per model on every load (#2209)
-			if m.Images {
-				e["modalities"] = map[string]any{"input": []string{"text", "image"}, "output": []string{"text"}}
+			if in := openCodeInputs(m); in != nil {
+				e["modalities"] = map[string]any{"input": in, "output": []string{"text"}}
 			}
 			// without it OpenCode doesn't know when to compact, and a
 			// group's context (magpie group set … context=) never reaches
@@ -1866,7 +1892,7 @@ func cursor(home string) *Agent {
 	}
 }
 
-func copilot(home string) *Agent {
+func copilot(home, cfg string) *Agent {
 	dir := filepath.Join(home, ".copilot")
 	// COPILOT_HOME moves the whole folder, settings.json and providers.json
 	// with it (Copilot's `copilot help environment`)
@@ -1900,6 +1926,14 @@ func copilot(home string) *Agent {
 		// folder says nothing of the CLI: its settings.json or the copilot
 		// command does (#1495)
 		dirShared: true,
+		// and they read its copilot-instructions.md as the user's own
+		// instructions (VS Code's promptsServiceImpl, the JetBrains
+		// plugin's getCopilotCliHomePath): the Library's row is GitHub
+		// Copilot's, kept with VS Code or the plugin alone here
+		shared: "GitHub Copilot",
+		sharedApp: func() bool {
+			return copilotJBInstalled(home) || vscode(home, cfg).Detected() || vscodeInsidersAgent(home, cfg).Detected()
+		},
 		// VS Code 1.143 ships a copilot launcher of its own in
 		// bin\copilot-shim in its install folder, which is on the user's
 		// PATH, and running it only asks for the CLI to be installed

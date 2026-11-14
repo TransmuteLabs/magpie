@@ -222,6 +222,7 @@ var cliForRoute = map[string]string{
 	"GET /api/login/usage":                 "magpie quota",
 	"GET /api/providers":                   "magpie providers",
 	"POST /api/provider/{action}":          "magpie provider",
+	"POST /api/providers/delete":           "magpie provider rm",
 	"GET /api/sessions/reads":              "magpie sessions read",
 	"GET /api/sessions/sources":            "magpie sessions sources",
 	"POST /api/sessions/reads":             "magpie sessions read",
@@ -557,7 +558,6 @@ var notYet = map[string]string{
 	"POST /api/whatsnew/today":                   W,  // whatsnew.go
 
 	"GET /api/sessions/storage-media": "selected storage media bytes have no CLI export command",
-	"POST /api/providers/delete":      "magpie provider rm <id> removes one provider at a time; bulk removal with one final reseat has no CLI equivalent",
 }
 
 // guiRoutes are the /api routes internal/gui serves, as "METHOD /path".

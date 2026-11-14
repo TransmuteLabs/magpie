@@ -247,6 +247,10 @@ func chatParts(raw json.RawMessage) []Part {
 		VideoURL struct {
 			URL string `json:"url"`
 		} `json:"video_url"`
+		InputAudio struct {
+			Data   string `json:"data"`
+			Format string `json:"format"`
+		} `json:"input_audio"`
 		// the AI SDK's file part, flat (#4101: ZCode's), whose video
 		// alone is read here
 		Data      string `json:"data"`
@@ -278,9 +282,32 @@ func chatParts(raw json.RawMessage) []Part {
 			if v, ok := videoPart(it.VideoURL.URL, "", ""); ok {
 				out = append(out, v)
 			}
+		case "input_audio":
+			// a recording, as OpenAI's Chat takes one ({data, format}):
+			// left out before, so Gemini answered for the words alone
+			// (Parlevent_ on X); a Gemini upstream is given it inline
+			if it.InputAudio.Data != "" {
+				out = append(out, Part{Kind: File, MediaType: audioType(it.InputAudio.Format), Data: it.InputAudio.Data})
+			}
 		}
 	}
 	return out
+}
+
+// audioType is the media type of a Chat input_audio's format: wav and mp3
+// are OpenAI's, a type given whole is kept, and the others are taken as
+// audio/<format>, as Gemini names them (audio/aac, audio/flac, audio/ogg).
+func audioType(format string) string {
+	f := strings.ToLower(strings.TrimSpace(format))
+	switch {
+	case f == "":
+		return "audio/wav"
+	case strings.Contains(f, "/"):
+		return f
+	case f == "mpeg":
+		return "audio/mp3"
+	}
+	return "audio/" + f
 }
 
 // chatFile is a Chat Completions file part (a PDF, say) as a file of the
@@ -478,14 +505,13 @@ func buildChat(r *Request, model, host string, rejectTemp bool) []byte {
 					names[id] = p.Name
 					call := map[string]any{"id": id, "type": "function",
 						"function": map[string]any{"name": p.Name, "arguments": argsString(p)}}
-					if gemini {
-						// a later call of a signed step goes without: Gemini
-						// signs the first
-						if sig := p.Signature; sig != "" {
-							call["extra_content"] = googleExtra(sig)
-						} else if !signed {
-							call["extra_content"] = googleExtra(skipSignature)
-						}
+					if sig := p.Signature; sig != "" && (gemini || r.signer != "" && signerOf(sig) == r.signer) {
+						// Gemini's, or a relay's that gave it there
+						call["extra_content"] = googleExtra(sig)
+					} else if gemini && !signed {
+						// a later call of a signed step goes without:
+						// Gemini signs the first
+						call["extra_content"] = googleExtra(skipSignature)
 					}
 					calls = append(calls, call)
 				case Thinking:

@@ -30,8 +30,8 @@ var keySlotFree = []string{
 	"POST " + claudeMCPPath + "{token}", "/mcp/{name}", "/mcp/run/{name}", SearchMCPPath, VisionMCPPath,
 	ImageMCPPath, BrowserMCPPath, MemoryMCPPath, ImageMCPFiles + "{name}", ToolsMCPPath, ToolsMCPOne + "{plugin}",
 	HubMCPPath + "{agent}", HubMCPAll, "/", "POST " + joinData, AdminPath,
-	"POST " + ChatPagePath + "/anthropic/v1/files",
-	"DELETE " + ChatPagePath + "/anthropic/v1/files/{id}",
+	// the chat page's files are kept in magpie, never sent to a model
+	"POST " + ChatPagePath + "/anthropic/v1/files", "DELETE " + ChatPagePath + "/anthropic/v1/files/{id}",
 }
 
 // Every route is judged for a key's MaxConcurrency: held (keySlotRoutes)
