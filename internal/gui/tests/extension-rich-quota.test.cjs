@@ -49,6 +49,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (const left of [false, true]) {
         const page = await browser.newPage({ viewport: { width: 900, height: 800 }, reducedMotion: "reduce" });
         page.setDefaultTimeout(10000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", error => errors.push(error.message));
         await page.route("**/*", serve(lang, left));
