@@ -14,11 +14,15 @@ for every module.
 
 - Host implementations are consolidated on `devzeus`, SDK API 1.9/native
   ABI 1. The current implementation checkpoint is
-  `d5b098d8183e88ab9fee1da0170d1c90b9590822`, including upstream
-  `aa358555f`.
+  `9b55245a4ce77819984b04ab43e893de914b2632`, including upstream
+  `221c91fae3ef70328ad115c445034de1cea40aa1`. Its exact tree
+  `0bd9c4b3b33a792e0046b04ddc99b7656062cef7` passed safe broad
+  (31,320 PASS / 109 packages), empty-catalog binary, route/startup,
+  signing and platform gates on usbox.
   The [upstream and module checkpoint](../adr/0027-sdk19-upstream-module-validation.md)
-  records the current implementation, its preceding functional broad-suite
-  candidate and the final test-only corrections. The earlier
+  records this acceptance, preserved earlier failures and the separately
+  pinned module/browser evidence. Earlier implementation `d5b098d8` and its
+  preceding functional candidate retain their own receipts. The earlier
   [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md)
   retains the exact acceptance of `46756a48c`, including its empty-catalog binary.
   Historical [SDK 1.6 validation](../adr/0021-consolidated-sdk16-validation.md)

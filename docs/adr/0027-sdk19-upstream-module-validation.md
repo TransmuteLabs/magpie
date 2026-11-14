@@ -1,13 +1,14 @@
 # SDK 1.9 upstream and module validation checkpoint
 
 Date: November 14, 2026.
-Status: functional broad and final-tree host gates passed; remaining module,
-browser and live-platform boundaries are explicit below.
+Status: the consolidated host passed plugin-free acceptance after the explicit
+upstream221 merge. Module, browser and live-platform boundaries remain
+separate below.
 This extends [ADR0026](0026-sdk19-host-validation.md), preserving that historical record.
 
 ## Source identity and rollout
 
-The shared implementation checkpoint is commit
+The historical shared implementation checkpoint is commit
 `d5b098d8183e88ab9fee1da0170d1c90b9590822`, tree
 `11c2b9dd3d514bcc76c338f9ae680552319494dc`.
 Upstream `aa358555f` is included through merges `222570209` and `c11acbc2`.
@@ -115,20 +116,153 @@ Source donors are not runtime community-plugin dependencies.
 | OpenCode `376fa22`, default0.6.0/API1.8 | Same packet: native full-owner fixture and stock default SQLite/WAL HTTP owner GREEN; libraries distinguished |
 | ZCode `9bec47b`, default0.13.1/API1.9 | `usbox:/tmp/magpie-zcode-final-native-75dm4l0j`: same-library lifecycle GREEN; 93 owned requests, one verified foreign connection rejected, zero unknown |
 | CommandCode `b0f5c5f`, default0.1.2/API1.9 | `usbox:/tmp/magpie-commandcode-final-repin.YJ06ocvO`: newly terminal native-agent20/SystemOne20/quota/package GREEN; binary install/list/inspect and exact-source overlays distinguished |
-| Devin default0.8/API1.9 | Sampler correction and final package/replay receipt pending; historical successful controls remain separately pinned |
+| Devin `3bb7420`, default0.8.0/API1.9 | Corrected strict hot-CAS fixture passes three repetitions on `c018c443`; its f7 replay is recorded separately below |
 
 The original installed held-task 38-second RED remains unattributed.
 `usbox:/tmp/magpie-hot-cas-closure-20261114.sQVusLEq/EVIDENCE.json`
 records six later captures reaching paid/held cancellation and two measured
-rows, then all exiting1 on unsupported fixed32 wire type5 in the old sampler.
-Five use diagnostic host builds; one uses exact `c018c443`. These are failed
-installed gates, not six overall passes. Sampler correction/replay is pending;
-it does not explain the earlier held timeout or reopen the approved catalog fix.
+rows, then all exiting1 in the old sampler. Native temperature and top_p use
+FIXED64/wire1; FIXED32/wire5 is separate structural-negative coverage, not the
+native sampling representation. Five captures use diagnostic host builds; one
+uses exact `c018c443`. These remain failed installed gates.
+
+The corrected fixture reuses the bounded wire scanner and checks original
+sampling/tool bytes. Nine fixture regressions pass, including the old-parser
+negative. Three corrected installed runs on `c018c443` and one on f7 pass:
+both paid arrivals, cancellation/join and exactly two measured ACU rows.
+`magpie-sdk-plugin-protocol-devin/FINAL-PACKAGE-RECEIPT.json` records the
+package SHA256 `f38a8d230ec0ac494c6217470e1d68bff4be4fb23b634e11f0735e6c1053393d`.
+This fixture correction does not explain the earlier held timeout or reopen
+the separately approved catalog fix.
+
+## Explicit upstream221 merge acceptance
+
+Commit `9b55245a4ce77819984b04ab43e893de914b2632` merges
+`221c91fae3ef70328ad115c445034de1cea40aa1`, twelve upstream commits beyond
+`aa358555f`, into the shared SDK base. Its tree is exactly the final immutable
+acceptance source, `0bd9c4b3b33a792e0046b04ddc99b7656062cef7`, captured over
+`98f47d5f14914d5ab8999bafbf6b47918df85e55`.
+
+The packet is `usbox:/tmp/magpie-sdk-final-base-iwlhew6h`; source is its
+`source` directory and the sibling `magpie` binary has SHA256
+`ae10487987e7e5464f96d741dc9a0fea2adb3a34cb464c58e169861bb4311c29`.
+All 10,773 source entries retain their hash/mode identity after verification.
+Later documentation commits do not change this implementation identity.
+
+| Final tree0bd gate | Terminal result |
+| --- | --- |
+| Safe broad `go test -tags nogui ./...` | Exit0; 31,320 PASS events, 109 passing packages, 216 explicit skips; 2,112.59s |
+| Complete root/TUI preflight and ordinary route guards, `-race` | 72 and 13 PASS |
+| Unchanged permission-word guard, `-race -count=20` | 20 PASS |
+| Chat-page behavior/startup guard, `-race -count=20` | 380 PASS |
+| Ordinary chat/page concurrency, cancellation, caller/read-only and path guards, `-race -count=20` | 700 PASS |
+| Fresh upstream agent/profile/routing/update regressions, `-race -count=20` | 840 PASS |
+| Update/feed/mirror/local-signing policy, `-race -count=20` | 820 PASS |
+| Actual empty-catalog compiled binary | Exit0; ordinary CLI and HTTP/settings/update/signing routes, no Bun, native module image or external plugin worker |
+| Public JS SDK, strict types and GUI function fixtures | Node203 and Bun203; all five groups exit0 |
+| Formatting and Linux CGO / Darwin-Windows no-CGO `nogui` vet/build | All seven groups exit0 |
+| Post-run inventory audit | 10,773 checked; `changed: []` |
+
+All listed race groups have zero failures and race warnings. The safe broad
+keeps the installed-app launcher and named native opt-in exclusions described
+above; their separate evidence is not relabelled as this final-tree run.
+Execution used usbox, temporary HOME/XDG, pinned existing offline caches and
+the existing descendant network guards. No new dependency, live account,
+installed-app or update-source change was made.
+
+| Final packet receipt | SHA256 |
+| --- | --- |
+| `broad-network-result.json` | `3c8420d134cf60a11faf4d9f154eb3edbf490260563c36377cd947c35544d3f3` |
+| `final-broad-gates.json` | `a3a3703316dca65c865f43623d8e043db8f66f84ba281e57548792fde370611c` |
+| `final-runtime-final-gates.json` | `6ead7ebf2711ae67379f2c504d645ebd845fab320a6945528b71e1f839417bc3` |
+| `final-static-gates.json` | `b69ef932a39c76d0ca4ba2e8935a6efa68d2d44ef7933a5b236c6474e1a402af` |
+| `signing-race-result.json` | `36a96e585e401890e52bea9a76f43386df1034477c9a3812f24bc4466ff3f59a` |
+| `audit-result.json` | `179453dad10236fb7470700de301b17a365f035bacd4618df96043464772501f` |
+
+### Preserved merge failures and corrections
+
+The first capture f7, tree
+`f7f26b2d5ee5388a089ab07a72f7372ed0068971`, is under
+`usbox:/tmp/magpie-sdk-final-base-p2tiu0uf`; its binary SHA256 is
+`9ddc4e4a076dbcc119e71b5c3b140253e8c419f3278dfadc5d8cdadd59c20adb`.
+Its ordinary owners602, usage/OTel790, signing820, empty320 and prior-upstream120
+race gates passed, as did the native/Source owner gates and twelve static
+groups. Its broad was superseded after the unchanged startup guard detected
+four eager upstream regexps: 11,837 partial PASS, process-15/driver241.
+
+The second capture q, tree
+`256c885c22c1751ccf959f4962b57749657ea9d4`, is under
+`usbox:/tmp/magpie-sdk-final-base-a1r2qrqh`. Its superseded broad retains
+22,292 passing test events, three failing guards and process-15/driver241:
+missing TUI `permission mode`, unclassified DeepSeek chat key-slot routes and
+the missing LazyCat client prefix. Both stopped jobs have
+`remaining_owned_pids: []`; cancellation is not acceptance.
+
+Original empty-binary drivers on f7 and q exited2 before any app attempt
+because the freezer omitted the helper. The accepted helper was restored
+verbatim, SHA256
+`a052774c7f3db7c4d377925871c589a227e942736790b99abd9889001ea3198b`.
+Separate `empty-core-recheck` and unchanged inventory audits pass on both;
+the original setup errors remain intact. The final verification packet
+includes the helper outside product tree0bd and passes the ordinary
+`empty-core` gate.
+
+The corrections reuse `lazyre.New`, the TUI dictionary and existing key-slot
+owners. Chat Messages holds a lazy slot across rounds; ASR/TTS take eager
+slots; local attachment operations are free. These classifications agree
+with upstream `cd030691a36a164f7d2493127e3b0d653d035bda`. Existing startup,
+translation and route guards remain unchanged. Test-only overlays on old
+production preserve two ordinary concurrency negatives: page/page requests
+did not queue, and a page request bypassed an agent's held slot.
+
+Exactly seven paths differ between f7 and final0bd: `docs/reference.md`,
+the gateway-routing reference, chatpage implementation/tests, key-slot
+implementation/tests and the TUI dictionary. Public SDK, domain adapters,
+signing and GUI assets are byte-identical between those captures; native
+module proofs below remain attributed to f7.
+
+### Five installed-package smokes on f7
+
+All five use one self-contained native package, synthetic endpoints,
+temporary state and no community runtime dependency. These are bounded
+ordinary-owner proofs, not actual vendor/client acceptance.
+
+| Module revision; default version / minimum API | Exact f7 packet and result |
+| --- | --- |
+| OMP `c3677c9`; 0.1.0 / 1.9 | `/tmp/magpie-two-owner-smoke-f7f26b2.6rd18vp9`: installed checked-plan CLI exit0 |
+| OpenCode `376fa22`; 0.6.0 / 1.8 | Same packet: stock native SQLite/WAL HTTP owner exit0 |
+| ZCode `9bec47b`; 0.13.1 / 1.9 | `/tmp/magpie-zcode-merge221-native-lsmaE5UY`: native lifecycle exit0, 93 owned requests, one identified foreign connection denied, zero unknown |
+| CommandCode `b0f5c5f`; 0.1.2 / 1.9 | `/tmp/magpie-commandcode-merge221-smoke.jKvKGC/ordinary-refresh`: auth/catalog/SystemOne/quota/ledger exit0 |
+| Devin `3bb7420`; 0.8.0 / 1.9 | `/tmp/magpie-devin-final-fixture-20261114.3miL8Zfd/fresh-host`: strict paid/cancel replay exit0, two ACU rows, no external request |
 
 ## Remaining limits
 
-Latest merge222 Chromium acceptance is pending a terminal receipt. Earlier467
-rendered 11-test positives and three causal negatives keep their original pin.
+Rendered Chromium acceptance on f7's eleven touched test files is terminal:
+142 PASS, no failure/skip, Chromium151/Playwright1.62.1, one worker, 225.078s.
+Its packet is `/tmp/magpie-gui-pinned-browsers-9sjvuwee/snapshot-f7f26b2-touched-221`;
+the copied evidence archive SHA256 is
+`d0b63fee1b09132fe26c583181773732860476b6f2619925afa9eca347ee8ab3`.
+Earlier467 positives and three causal negatives keep their original pin.
+The separate old full222 Chromium diagnostic is terminal RED: 13,881 tests,
+13,324 PASS, 557 FAIL across 110 files, no cancellation/skip, 8,084.314s.
+Its source is `2225702` / tree `5f3295a3`, not f7 or final0bd; all 1,872
+frozen inputs retain their hashes. The archive
+`gui-2225702-full-clean-evidence.tar.gz` has SHA256
+`780a21d60e418050ab3065ad5cfe38d9e41dd4dc6f85d64d7a645719b6a81023`;
+all 1,600 manifest entries were verified locally under
+`/tmp/magpie-gui-2225702-full-evidence`. Only named baseline comparisons
+are established; the remaining failures are not collectively classified as
+upstream-only. This is not an accepted full-GUI run.
+
+An additional f7 ZCode packaged-iframe test completes synthetic sign-in and
+account persistence/selection, but its aggregate remains RED on three
+unattributed connections. A separate diagnostic reproduction attributes its
+own three failures to Magpie-spawned Devin processes whose sockets closed
+before `ss` inspected them. That establishes an attribution-fixture race for
+the reproduction, not a ZCode production defect or the sender of the original
+three connections. The fixture repair has separate acceptance and does not
+change the bounded native-package result above.
+
 WebKit lacks `libgtk-4.so.1`, `libjpeg.so.8` and codec `libx264.so`; no rendered
 WebKit/full-GUI-matrix pass or OS-dependency workaround is claimed.
 Native macOS/Windows runtime, real Keychain/codesign, permission continuity,

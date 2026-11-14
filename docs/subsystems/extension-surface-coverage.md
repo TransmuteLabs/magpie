@@ -25,8 +25,9 @@ the exact combined implementation and completed safe broad, race, platform
 and empty-catalog gates. It keeps actual macOS signing, browser and domain
 acceptance separate. Source availability alone is not a passing final gate.
 The [upstream and module follow-up](../adr/0027-sdk19-upstream-module-validation.md)
-records the later merged implementation, final task-admission regression and
-the exact host used by each module's installed-package fixture.
+records upstream221 merge `9b55245a`, exact tree0bd's completed safe broad,
+route/startup, signing and empty-catalog gates, the task-admission regression
+and the exact earlier host used by each module's installed-package fixture.
 The SDK does not replace every
 upstream extension surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
