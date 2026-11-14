@@ -32,6 +32,7 @@ type extensionProviderHost interface {
 	List() ([]extensionhost.Installed, error)
 	Manifest(string) (sdk.Manifest, error)
 	Store() *extensionhost.Store
+	ModuleConfig(context.Context, string) (sdk.ConfigSnapshot, error)
 	Call(context.Context, string, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error)
 }
 
@@ -65,10 +66,14 @@ func ExtensionProviders() ([]Provider, error) {
 			continue
 		}
 		manifest := entry.Manifest
+		modelRevision, err := extensionModelRevision(context.Background(), host, entry)
+		if err != nil {
+			return nil, err
+		}
 		for _, descriptor := range manifest.Providers {
 			if !manifest.Contract.Has(sdk.AccountAuth) {
 				out = append(out, extensionProvider(&extensionAccount{host: host, manifest: manifest, descriptor: descriptor,
-					scope: sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}, modelKey: entry.Revision}))
+					scope: sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}, modelKey: modelRevision}))
 				continue
 			}
 			if settings.AccountDiscoveryOff() {
@@ -87,7 +92,7 @@ func ExtensionProviders() ([]Provider, error) {
 				identities[identity] = true
 				out = append(out, extensionProvider(&extensionAccount{host: host, manifest: manifest, descriptor: descriptor,
 					scope:    sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID, Account: account.ID, Generation: account.Generation},
-					modelKey: entry.Revision}))
+					modelKey: modelRevision}))
 			}
 		}
 	}
@@ -344,10 +349,43 @@ func syncExtensionAllowanceBindings(agent string, bindings map[string]string) {
 }
 
 func (binding *extensionAccount) models() ([]catalog.Model, error) {
-	models := binding.descriptor.Models
-	if cached, ok := extensionModelCache.Load(binding.cacheKey()); ok {
-		models = cached.([]sdk.Model)
+	snapshot := *binding
+	snapshot.scope, snapshot.generation = binding.currentScope(), nil
+	binding = &snapshot
+	ctx := context.Background()
+	if err := binding.check(ctx); err != nil {
+		return nil, err
 	}
+	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
+		return binding.projectModels(binding.descriptor.Models)
+	}
+	if err := binding.checkModelRevision(ctx); err != nil {
+		return nil, err
+	}
+	key := binding.cacheKey()
+	models := binding.descriptor.Models
+	publish := false
+	if cached, ok := extensionModelCache.Load(key); ok {
+		models = cached.([]sdk.Model)
+	} else if cached, known, err := binding.readModelCatalog(); err != nil {
+		return nil, err
+	} else if known {
+		models = cached
+		publish = true
+	}
+	if err := binding.checkModelRevision(ctx); err != nil {
+		return nil, err
+	}
+	if err := binding.check(ctx); err != nil {
+		return nil, err
+	}
+	if publish {
+		extensionModelCache.Store(key, slices.Clone(models))
+	}
+	return binding.projectModels(models)
+}
+
+func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Model, error) {
 	out := make([]catalog.Model, 0, len(models))
 	for _, model := range models {
 		if model.ContextWindow < 0 || model.MaxContextWindow < 0 || model.MaxOutput < 0 ||
@@ -404,6 +442,9 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
 		return binding.models()
 	}
+	if err := binding.checkModelRevision(ctx); err != nil {
+		return nil, err
+	}
 	ctx, err = extensionNetworkContext(ctx, binding.scope)
 	if err != nil {
 		return nil, err
@@ -416,17 +457,13 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, errors.New("invalid extension model catalog")
 	}
-	validation := binding.manifest
-	validation.Providers = slices.Clone(validation.Providers)
-	for index := range validation.Providers {
-		if validation.Providers[index].ID == binding.scope.Provider {
-			validation.Providers[index].Models = result.Models
-		}
-	}
-	if err := validation.Validate(); err != nil {
+	if err := binding.validateModels(result.Models); err != nil {
 		return nil, fmt.Errorf("invalid extension model catalog: %w", err)
 	}
 	if err := binding.check(ctx); err != nil {
+		return nil, err
+	}
+	if err := binding.writeModelCatalog(ctx, result); err != nil {
 		return nil, err
 	}
 	extensionModelCache.Store(binding.cacheKey(), slices.Clone(result.Models))

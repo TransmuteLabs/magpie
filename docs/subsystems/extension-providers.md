@@ -27,7 +27,23 @@ of models available to its enabled accounts; `Account.Lists` retains each
 account's own restriction. `Account.fetch` invokes `provider.models` and
 publishes a validated account-specific snapshot. A failed refresh keeps the
 previous snapshot. Cache namespaces use `Manager.Namespace` and distinguish
-store roots, package revisions, accounts and credential generations.
+store roots, package revisions, configuration versions, accounts and
+credential generations. The validated SDK catalog is also persisted in the
+existing private Store, so a fresh CLI can select dynamically discovered
+models without starting another worker or vendor request. A measured empty
+catalog remains distinct from a list that has never been fetched.
+
+Catalog bytes are split into bounded content-addressed chunks. The root
+record is published only after all chunks, validation and the selected
+package/config checks succeed. Interrupted or failed refreshes retain the
+earlier root. Cold reads verify every chunk and the complete digest, then
+apply the same SDK model validation as live discovery; unreadable data is
+unknown rather than an empty or unrestricted entitlement list. Account or
+configuration changes cannot reuse another selection's cache key. Each read
+pins its account generation and cache key before lookup. Both warm and cold
+reads recheck the account and selected package/configuration before returning
+models; a deleted or replaced selection fails closed, and a late cold read
+cannot publish an earlier generation's catalog under a newer key.
 
 Models carry optional prices in USD per million tokens and explicit core
 effort levels. The adapter maps these to `catalog.Model.Price` and
@@ -209,6 +225,11 @@ streaming, native metadata, stable operation IDs and store isolation.
 `extension_models_test.go` checks custom-model prices and effort levels,
 unknown versus zero prices, core overrides and rates, and rejection of
 invalid refreshes without replacing the last validated snapshot.
+`extension_models_cache_test.go` checks cold discovery without another worker
+call, measured empty catalogs, configuration isolation, late refresh rejection,
+chunk integrity and held-read account/configuration revocation. Its generation
+barrier checks that a cold read cannot publish an earlier account's models
+under a later generation.
 `extension_network_test.go` checks selected account/provider/global proxy
 resolution, named proxy authentication, direct routes, parent context and
 held calls without dialing any target. `extension_replay_test.go` checks
@@ -236,8 +257,17 @@ as part of installation or contact a vendor. Run the focused packages
 under temporary HOME/XDG with pinned caches and offline dependency lookup:
 
 ```sh
-go test -race -tags nogui ./internal/provider ./internal/gateway -run '^TestExtension(Provider|Auth)' -count=3
+go test -race -tags nogui ./internal/provider ./internal/gateway -run '^TestExtension' -count=3
 ```
+
+An in-process cold binding is not proof of cross-process persistence. For
+that check, let a real `magpie serve` discover a fixture-only dynamic model,
+stop it, then run separate `magpie models`, `magpie model spec` and
+`magpie group add ... models=...` processes against the same temporary
+configuration. The fixture's invocation journal must stay unchanged during
+those reads and selections. Replacing module configuration or credentials
+must remove that model until discovery runs again; deleting the account
+must remove it as well.
 
 These fixtures establish the provider boundary, not native vendor parity,
 background refresh scheduling, or complete Go/Bun runtime conformance.
