@@ -162,6 +162,17 @@ ownership. Held base objects, ordinary mutation entrypoints and local atomic
 owners are fenced. Actions recheck selected authority after waiting for
 their write lock, before every file and at completion.
 
+An effect-free `sync` keeps the existing ownership revision. This requires an
+owned, recovery-safe record with identical package/config, descriptor,
+executable, selected values, applied file snapshots and shell targets/bodies,
+and no declared file changes. The controller still executes the one-use checked
+action and rechecks current authority under its normal locks; it simply leaves
+the ledger untouched. Native account-operation receipts and admitted reads
+therefore survive a catalog refresh that changes no owned state. Explicit
+reconnects, field changes, package/config replacement, drift and recovery retain
+their normal transition and fencing behavior. The regressions are in
+[`extension_controller_sync_test.go`](../../internal/agent/extension_controller_sync_test.go).
+
 Failed transitions clear pending ownership only after both file and shell
 preimages are proven restored. Otherwise a recovery row retains the known
 snapshots. Disabled/redefined modules are recovered without invoking their

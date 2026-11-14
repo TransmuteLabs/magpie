@@ -274,6 +274,9 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 			return err
 		}
 	}
+	if controller.unchangedSync(prior, plan) {
+		return controller.applyUnchangedSync(ctx, prior, plan)
+	}
 	record := extensionBindingRecord{
 		Plugin: controller.item.Plugin, Agent: controller.item.Agent.ID, Home: controller.home,
 		Revision: prior.Revision + 1, Phase: "pending", Descriptor: controller.item.Agent.Clone(), Bin: controller.bin,
