@@ -199,6 +199,10 @@ type agentJSON struct {
 	Icon   string      `json:"icon"`
 	Path   string      `json:"path"`
 	Fields []fieldJSON `json:"fields"`
+	// Own: the user's own settings of the agent's (agent.Field.Own,
+	// Claude Code's permission mode), apart from Fields so no picker on
+	// its row draws them: agentcompact.js folds them under Advanced
+	Own []fieldJSON `json:"own,omitempty"`
 	// Drift: its config no longer does what magpie set, and how to set it again
 	Drift *agent.Drift `json:"drift,omitempty"`
 	// Wired: magpie is in its config, which its menu's Disconnect takes out
@@ -1886,6 +1890,8 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		s.UpdateSkip = strings.TrimSpace(in.Version)
 		if s.UpdateSkip != "" {
 			updates.quietAgain() // a dismissal holds for the quiet, not only the next release
+		} else {
+			updates.unhush() // Show again
 		}
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
@@ -3314,7 +3320,7 @@ func state() stateJSON {
 		}
 		vals := a.Values()
 		now[a.ID] = vals
-		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path), Fields: agentFields(a, vals)}
+		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path), Fields: agentFields(a, vals), Own: ownFields(a, vals)}
 		aj.Models = agentModelCount(a, aj.Fields)
 		aj.Menu = a.ListsModels
 		aj.NoNames = a.NoNames

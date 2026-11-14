@@ -3849,6 +3849,7 @@ application:
     - /chat/completions
     - /responses
     - /messages
+    - /deepseek-chat
     - /images
     - /embeddings
     - /rerank

@@ -82,6 +82,10 @@ var keySlotRoutes = map[string]keySlotKind{
 	"PUT " + NativePath + "{provider}/{path...}":    keySlotEager,
 	"PATCH " + NativePath + "{provider}/{path...}":  keySlotEager,
 	"DELETE " + NativePath + "{provider}/{path...}": keySlotEager,
+
+	"POST " + ChatPagePath + "/anthropic/v1/messages": keySlotLazy,
+	"POST " + ChatPagePath + "/v1/tools/asr":          keySlotEager,
+	"POST " + ChatPagePath + "/v1/tools/tts":          keySlotEager,
 }
 
 // keyCapped says whether who's key, or the one it was issued under, has a

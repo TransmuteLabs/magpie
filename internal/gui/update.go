@@ -33,8 +33,8 @@ type updater struct {
 	mu     sync.Mutex
 	state  string // checking | latest | found | downloading | ready | available | source | error | blocked
 	latest *update.Release
-	// behind: since when a newer version has been out for this one, and
-	// whether it is urgent; the pill waits for it (update.Behind)
+	// behind: when the pill was dismissed, and whether a newer version is
+	// urgent; a dismissed pill waits for it (update.Behind)
 	behind update.Behind
 	err    string
 	bundle string // the .app to replace, "" when not in one or stuck
@@ -149,9 +149,9 @@ type updateJSON struct {
 	// blocked: the version this computer wouldn't start, and why (#894)
 	Blocked *update.Blocked `json:"blocked,omitempty"`
 
-	// Quiet: a newer version is out but this one has not been behind long
-	// enough, and none is urgent, so the header's pill stays out (the
-	// Version row and Restart to update still offer it)
+	// Quiet: a newer version is out but the header's pill was dismissed
+	// less than update.Quiet ago, and none is urgent, so the pill stays out
+	// (the Version row and Restart to update still offer it)
 	Quiet bool  `json:"quiet,omitempty"`
 	Total int64 `json:"total,omitempty"`
 	// found: the size of the file Download update would fetch, in bytes
@@ -555,7 +555,7 @@ func (u *updater) run() {
 	}
 	u.latest, u.notesIn, u.stable = rel, lang, stable
 	if update.Released(installedVersion) && update.Newer(rel.Version, installedVersion) {
-		u.behind = update.NoteBehind(installedVersion, rel.Version, update.UrgentIn(rel.Notes), time.Now())
+		u.behind = update.NoteBehind(installedVersion, rel.Version, update.UrgentIn(rel.Notes))
 		if u.behind.Urgent == "" {
 			// an urgent release between this one and the latest: its
 			// notes aren't the latest's
@@ -795,7 +795,7 @@ func (u *updater) urgentBetween(ctx context.Context, installedVersion, latest, l
 	}
 	for _, n := range notes {
 		if update.UrgentIn(n.Notes) {
-			b := update.NoteUrgent(installedVersion, n.Version, time.Now())
+			b := update.NoteUrgent(installedVersion, n.Version)
 			u.mu.Lock()
 			u.behind = b
 			u.mu.Unlock()
@@ -824,6 +824,14 @@ func (u *updater) lookUpNotes(lookup func(context.Context)) {
 // quietAgain starts the pill's quiet over: it was dismissed.
 func (u *updater) quietAgain() {
 	b := update.QuietAgain(Version, time.Now())
+	u.mu.Lock()
+	u.behind = b
+	u.mu.Unlock()
+}
+
+// unhush lifts the pill's dismissal: Settings' Show again.
+func (u *updater) unhush() {
+	b := update.Unhush(Version)
 	u.mu.Lock()
 	u.behind = b
 	u.mu.Unlock()

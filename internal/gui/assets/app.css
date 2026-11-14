@@ -1040,6 +1040,12 @@ body.panel .row.pref.flash { border-radius: 10px; }
 .qt .qt-acct { min-width: 120px; max-width: 220px; color: var(--fg-2); }
 .qt .subscription-account { margin: 0; font-size: 12px; }
 .qt .qt-acct .quota-of, .qt .qt-acct .quota-seat { color: var(--muted); }
+/* the name over its account, seat and shared keys, a line each with the
+   cell's whole width (normalcoder_ on X: side by side, a long one was cut);
+   the eye stays on the first line */
+.qt .qt-acct .subscription-account { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 4px; row-gap: 1px; }
+.qt .qt-acct .subscription-account > * { grid-column: 1; }
+.qt .qt-acct .subscription-account > .acct-eye { grid-column: 2; grid-row: 1; }
 .qt-win { display: grid; gap: 4px; }
 .qt-win + .qt-win { margin-top: 8px; }
 .qt-fig { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -1063,6 +1069,12 @@ body.panel .row.pref.flash { border-radius: 10px; }
    before ends with (normalcoder_ on X: a check-in row or magpie's own
    requests, which no list of row kinds named, ran two accounts together) */
 .subscription-card.several > :not(.subscription-head, .quota-all) + .subscription-account { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line); }
+/* of several accounts, each a card of its own inside the provider's
+   (normalcoder_ on X: a hairline alone didn't tell them apart); a
+   provider's keys, a balance a line, keep the hairline above */
+.subscription-acct { min-width: 0; padding: 6px 9px 7px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--card-2); }
+.subscription-acct + .subscription-acct { margin-top: 5px; }
+.subscription-acct > :last-child { margin-bottom: 0; }
 .subscription-account .user { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* an account the user named (#1515): the name, then the account and the
    key plan it stands in for, muted, giving their room up first */
@@ -1071,7 +1083,7 @@ body.panel .row.pref.flash { border-radius: 10px; }
 .subscription-head .quota-alias, .subscription-head .quota-seat { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--fg-2); }
 /* an account of several in brief (ARNO): its windows' names, figures and
    bars, closer to the next (its line where a full one's is, so a fold keeps it in place); its fold at the row's end */
-.subscription-card.several .subscription-account.brief:not(:nth-child(2)) { padding-top: 7px; }
+.subscription-card.several > .subscription-account.brief:not(:nth-child(2)) { padding-top: 7px; }
 .subscription-account.brief { margin-bottom: 4px; }
 .quota-acct-fold { align-self: center; display: inline-grid; place-items: center; flex: none; width: 18px; height: 18px; margin: -2px -5px -2px -3px; padding: 0; border-radius: 4px; color: var(--faint); transition: background .12s, color .12s; }
 .subscription-account :is(.user, .acct-eye) + .quota-acct-fold { margin-left: auto; }
@@ -1240,7 +1252,7 @@ body.panel .row.pref.flash { border-radius: 10px; }
 .wb-checkin[data-state="ok"] .ci-say { color: var(--fg-2); }
 .wb-checkin .text { flex: none; font-size: 11px; padding: 2px 7px; }
 .wb-checkin .ci-auto { margin-left: auto; }
-.subscription-card.several .wb-checkin { margin-bottom: 6px; }
+.subscription-card.several > .wb-checkin { margin-bottom: 6px; }
 .wb-checkin .ci-auto.on { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
 .quota-balance { display: flex; align-items: baseline; gap: 6px; font-size: 10.5px; color: var(--muted); }
 .quota-windows + .quota-balance { margin-top: 9px; }
@@ -1402,19 +1414,17 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 .row.stat .us-more:focus-visible { opacity: 1; }
 .row.stat .us-more.open { opacity: 1; background: var(--pill); color: var(--fg); }
 @media (hover: none) { .row.stat .us-more { opacity: 1; margin: 0 -4px 0 -2px; } }
-/* a Usage card's ⋯, its menu (jen_celeus on X): at the head's end, over what
-   ends there, on the card's colour, so the head at rest is laid out as it
-   was; where nothing hovers it is always shown, with room kept for it */
-.subscription-head { position: relative; }
+/* a Usage card's ⋯, its menu (jen_celeus on X): at the head's end, shown as
+   the card is hovered, and always where nothing hovers. Room is kept for it
+   either way: drawn over what ends there, it hid the end of "Show the other
+   accounts in brief" (normalcoder_ on X) */
+.subscription-head { position: relative; padding-right: 18px; }
 .subscription-head .us-more { position: absolute; top: 50%; right: -6px; width: 22px; height: 22px; margin-top: -11px; background: var(--card); opacity: 0; transition: opacity .12s, background .12s, color .12s; }
 .subscription-head .us-more:hover { background: var(--pill); }
 .subscription-card:hover .subscription-head .us-more { opacity: 1; }
 .subscription-head .us-more:focus-visible { opacity: 1; }
 .subscription-head .us-more.open { opacity: 1; background: var(--pill); color: var(--fg); }
-@media (hover: none) {
-  .subscription-head { padding-right: 18px; }
-  .subscription-head .us-more { opacity: 1; }
-}
+@media (hover: none) { .subscription-head .us-more { opacity: 1; } }
 .row.stat .us-unhide { flex: none; margin-right: -4px; }
 /* the action's room comes out of the name's, which ends in "…" */
 .row.stat.acts .who { flex-shrink: 1; }
@@ -2651,7 +2661,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .gw .sub.err { color: var(--red); overflow-wrap: anywhere; }
 /* the take-over / restart button: bordered, so it reads as a button on the
    card in either theme (leslie_luo on Discord: in dark mode it didn't) */
-.gw .gw-fix { display: inline-flex; flex: none; height: auto; min-height: 27px; max-width: 100%; margin: 0 0 0 auto; padding: 4px 10px; white-space: normal; text-align: left; }
+.gw :is(.gw-fix, .gw-chat) { display: inline-flex; flex: none; height: auto; min-height: 27px; max-width: 100%; margin: 0 0 0 auto; padding: 4px 10px; white-space: normal; text-align: left; }
+/* the chat page (chatpage.go) and the restart button, wrapped as one */
+.gw .gw-acts { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 100%; margin-left: auto; }
+.gw .gw-acts > * { margin: 0; }
 /* Share on local network, on the card under the state, and the addresses
    the gateway answers on: one quiet line each, the copy beside it */
 #gatewayLan { border-top: 1px solid var(--line-2); }
@@ -4742,7 +4755,8 @@ body.panel .modal { padding: 16px 12px; }
   body.web .row.gw { flex-wrap: wrap; }
   body.web .row.gw > .who { flex: 1 1 0; min-width: 0; }
   body.web .row.gw .sub { white-space: normal; }
-  body.web .row.gw > .gw-fix { order: 2; margin-left: 39px; max-width: calc(100% - 39px); }
+  body.web .row.gw > :is(.gw-fix, .gw-acts) { order: 2; margin-left: 39px; max-width: calc(100% - 39px); }
+  body.web .row.gw > .gw-acts { justify-content: flex-start; }
   body.web .call { flex-wrap: wrap; height: auto; min-height: 24px; padding: 3px 6px; }
   body.web .call > .m { order: 2; margin-left: 20px; min-width: 0; }
   body.web .call > .p { order: 3; }

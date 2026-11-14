@@ -890,7 +890,10 @@ handler again) all pass it; `keySlotRoutes` names the routes it holds, and
 through `serve`'s tries (chat, Responses, Messages, Ollama, Gemini, the Codex
 backend) take the slot in the try, after `keepQueued`, so a waiting stream
 gets its 200 and keepalive comments as it does waiting for a provider's
-slot. A try on an account within 5 points of its usage cap takes it
+slot. The DeepSeek chat page's Messages route uses that same hold across
+its model rounds; its ASR and TTS routes take an eager slot before audio
+execution. Its in-memory file upload and deletion do not ask a model and
+are free. A try on an account within 5 points of its usage cap takes it
 before the account's one turn at a time (`nearCap`), its wait still in the
 try's `Queued` (only when the user set a usage limit on the account, or there is another candidate to go to: a sole account held only by Codex credits being off, with no limit of the user's, is sent at once, `userCapped`): taken the other way round, a turn kept on the account after
 a passing failure held the key's slot and waited for the account's turn,
@@ -1654,6 +1657,48 @@ now (the round's average once nothing is in flight); a click opens the
 round's numbers and its gaps. Tests: [`session_speed_test.go`](../../internal/gateway/session_speed_test.go)
 (`TestSessionCurveFromARealStream`, `TestSessionCurveFromCodexOwnSignIn`)
 and `sessions-speed.test.cjs`.
+
+## DeepSeek's chat page
+
+`/deepseek-chat/` is DeepSeek's open-source web chat page
+([deepseek-ai/chat-demo](https://github.com/deepseek-ai/chat-demo), MIT,
+release v0.1.1) served by the gateway, so any of magpie's models chats in
+it and its search and link reading are magpie's (@yanghonghang on X). The
+release zip is embedded as published (`chatDemoZip`, its LICENSE served at
+`/deepseek-chat/LICENSE`; `TestChatPageIsTheRelease` holds it to the
+release's sha256). Nothing is built: the one place the bundle names
+`https://api.deepseek.com` is served as `location.origin+"/deepseek-chat"`,
+so the page calls the routes below at whatever address it was opened at.
+`chatpage/magpie.js`, added to its index.html, gives the page the key
+`magpie-deepseek-chat` on this computer (an agent key, counted as
+`deepseek-chat`) and draws a model picker in its top bar, read from
+`GET /deepseek-chat/models` (the caller's models, a DeepSeek flash model
+first as the page's default) and sent as the `magpie_chat_model` cookie.
+
+- Files: the page's own files (GET and HEAD) are the only keyless routes,
+  in `readOnlyRoutes` and, while shared, `lanGuard`'s `chatPageOpen`, the
+  same bytes for everyone like the key page. A strict CSP keeps it to its
+  own origin and scripts. Every call it makes needs a key, which another
+  computer's user types into the page.
+- `POST /deepseek-chat/anthropic/v1/messages` (`chatMessages`): the page's
+  tools `deepseek_web_search` and `deepseek_read_url` become Anthropic's
+  `web_search_20250305` (magpie's own search for a model that can't
+  search, with its citations) and a `read_url` function tool, which magpie
+  runs with `fetchPage` between rounds, all said to the page as one reply
+  in its own shapes (`chatTurn`). Each round goes through the gateway's
+  own Messages route, so routing, masking, limits and usage apply as to
+  any agent. The page shows sources only from text blocks' `citations`; a
+  model that names URLs in its text without citing gets no source chips.
+- Files the page uploads (`/anthropic/v1/files`) are kept in memory for
+  the key that uploaded them until magpie restarts: images, PDFs and
+  text; Word, PowerPoint and EPUB files are refused.
+- Voice input and read-aloud (`/v1/tools/asr`, `/v1/tools/tts`) use the
+  first speech-to-text or text-to-speech model a provider serves, and say
+  so when there is none.
+
+Tests: `TestChatPageOpensWithoutAKey`, `TestChatPageConversation`,
+`TestChatPageSearchesAndReadsLinks`, `TestChatPageFiles`,
+`TestTextCallsCitationAfterItsBlock`, `gateway-chat-page.test.cjs`.
 
 ## Turning provider search off
 
