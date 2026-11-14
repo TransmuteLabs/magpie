@@ -522,6 +522,10 @@ if [ "$os" = darwin ]; then
   # leaves the old app in place
   rm -rf "$apps/.magpie.app.new"
   mv "$tmp/x/magpie.app" "$apps/.magpie.app.new"
+  if ! (signing_policies_absent); then
+    rm -rf "$apps/.magpie.app.new"
+    exit 1
+  fi
   rm -rf "$apps/magpie.app"
   mv "$apps/.magpie.app.new" "$apps/magpie.app"
   ln -sf "$apps/magpie.app/Contents/MacOS/magpie" "$bin/magpie"

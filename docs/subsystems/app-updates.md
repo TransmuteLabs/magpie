@@ -152,9 +152,9 @@ ignored as they are by `appdir.Config`; `MAGPIE_HOME` is not a supported
 configuration override. Explicit `--uninstall` and `--purge` retain their
 existing behavior. A stale CLI copy is repaired by linking it to the app's
 binary; its update advice does not recommend reinstalling the application.
-The installer repeats the check after downloading and after extraction, before
-replacing an existing app, so a policy enrolled during those steps also stops
-replacement.
+The installer repeats the check after downloading, extraction and moving the
+replacement into its staging name, immediately before deleting an existing
+app, so a policy enrolled during those steps also stops replacement.
 
 The first transition can require consent for macOS permissions again. TCC and
 Full Disk Access continuity have not been verified; a stable signing identity

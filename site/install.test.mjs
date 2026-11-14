@@ -337,6 +337,32 @@ test("Darwin explicit uninstall and purge retain their signing-policy semantics"
   }
 });
 
+test("Darwin refuses a signing policy enrolled during final staging", (t) => {
+  let policy;
+  const r = install(t, {
+    termux: false, platform: "Darwin", sudo: false,
+    setup({ tools, env }) {
+      env.INSTALL_REAL_MV = spawnSync("sh", ["-c", "command -v mv"], { encoding: "utf8" }).stdout.trim();
+      policy = env.INSTALL_POLICY_PATH = join(env.XDG_CONFIG_HOME, "magpie/update-signing.json");
+      writeFileSync(join(tools, "mv"), `#!/bin/sh
+"$INSTALL_REAL_MV" "$@" || exit
+case "$2" in
+  */.magpie.app.new)
+    mkdir -p "\${INSTALL_POLICY_PATH%/*}"
+    printf '%s' "newly enrolled signing pin" > "$INSTALL_POLICY_PATH"
+    ;;
+esac
+`, { mode: 0o755 });
+    },
+  });
+  assert.notEqual(r.status, 0, "policy enrolled during app staging was ignored");
+  assert.match(r.stderr, /local.*signing.*policy/i);
+  assert.equal(readFileSync(policy, "utf8"), "newly enrolled signing pin");
+  assert.equal(readFileSync(join(r.systemApps, "magpie.app/Contents/MacOS/magpie"), "utf8"), fakeMagpie("installed: "));
+  assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), "old installation");
+  assert.equal(existsSync(join(r.systemApps, ".magpie.app.new")), false, "refused staged app must be cleaned");
+});
+
 test("Linux install still ignores local macOS signing policies", (t) => {
   const r = install(t, {
     termux: false, sudo: false,
