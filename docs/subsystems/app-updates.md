@@ -33,6 +33,12 @@ verify the downloaded app's strict signature integrity, then compare its team
 with the installed app's team. This includes the existing handling of ad-hoc
 apps with empty team identifiers. Bare-binary updates retain their normal path.
 
+A restart uses an update already downloaded and staged, whether downloading is
+automatic or manual. It does not replace that payload with a newer feed version
+while the user waits to restart. This does not bypass local signing: the common
+installation preflight still rejects a stale policy or receipt and requires a
+fresh download before replacement.
+
 ## Fork release publishing
 
 The [fork workflow](../../.github/workflows/fork-release.yml) publishes from

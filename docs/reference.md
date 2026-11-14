@@ -1636,7 +1636,7 @@ export const agent = {
   prefix: "openai/",             // written before magpie's model id
   ua: ["aider", "litellm"],
 }
-export function connect({ gateway, model, models }) {
+export function connect({ gateway, model, models, decisionModels }) {
   return { "openai-api-base": gateway.v1, "openai-api-key": gateway.key }
 }
 ```
@@ -1657,6 +1657,20 @@ call costs. Each is left out when it isn't known (a routing group has no
 { "id": "deepseek/pro", "name": "pro · DeepSeek", "context": 0, "output": 0, "images": false, "efforts": [],
   "native_endpoints": ["/v1/chat/completions"],
   "pricing": { "prompt": "0.0000003", "completion": "0.0000012", "input_cache_read": "0.00000003" } }
+```
+
+`connect` also gets `decisionModels`: magpie's decision models (Jev, Clef,
+a vendor's or a plugin's model marked `decides`, as the routing groups'
+pickers offer them), and the routing groups made of them. They are kept
+out of `models`, which an agent offers for a conversation, and out of
+`/v1/models`. Each has `id`, `name`, `provider` (a group has `group: true`
+instead) and `endpoints`, the gateway paths it is asked on: `/v1/systemone`,
+and `/v1/decisions`, which the gateway translates to System One for it.
+It is `[]` when there are none:
+
+```json
+{ "id": "openrouter/~typesafe/jev-latest", "name": "Jev · OpenRouter", "provider": "openrouter",
+  "endpoints": ["/v1/systemone", "/v1/decisions"] }
 ```
 
 An agent that takes the gateway only from how it is started, not from a
@@ -2425,13 +2439,13 @@ to (an account added by setup-token doesn't count), magpie keeps it and
 says so. Add another account first, or sign out in Claude Code itself,
 then remove it.
 
-With more than one Codex account on, magpie also sets `openai_base_url`
-in Codex's config.toml, so a request the signed-in account has no
-allowance for goes on to the others through the gateway. *Only switch
-Codex's sign-in* under Providers › Codex (or `magpie accounts switch-only
-codex on`) leaves that out: magpie only moves Codex's own sign-in
-(`auth.json`) as above, and Codex's requests go straight to OpenAI, never
-through magpie (#1907). An `openai_base_url` you wrote yourself stays. The
+A Codex that isn't connected to magpie goes straight to OpenAI on its own
+sign-in, however many of its accounts are on: magpie only moves Codex's
+sign-in (`auth.json`) as above. Connected, a request the signed-in account
+has no allowance for goes on to the others through the gateway. *Only
+switch Codex's sign-in* under Providers › Codex (or `magpie accounts
+switch-only codex on`) keeps Codex's requests off magpie even then
+(#1907). An `openai_base_url` you wrote yourself stays. The
 Codex app and a running `codex app-server` read the sign-in when they
 start, so one already open stays on its account until it is opened again;
 a new `codex` session takes the new one. Connected to magpie, Codex's

@@ -265,6 +265,7 @@ var notYet = map[string]string{
 	"GET /api/appearance/wallpaper":              W,  // appearance.go
 	"POST /api/appearance/wallpaper":             W,  // appearance.go: the picture comes from the window's file picker
 	"GET /api/quit":                              W,  // api.go: the window's Quit question
+	"POST /api/page-away":                        W,  // api.go: the page says it went from view, so its caches can go
 	"GET /api/remote":                            W,  // remote.go: another magpie opened in a window of the app
 	"POST /api/remote":                           W,  // remote.go
 	"POST /api/remote/forget":                    W,  // remote.go
@@ -556,7 +557,6 @@ var notYet = map[string]string{
 	"POST /api/whatsnew/today":                   W,  // whatsnew.go
 
 	"GET /api/sessions/storage-media": "selected storage media bytes have no CLI export command",
-	"POST /api/page-away":             "window visibility notification releases page caches and has no CLI page lifecycle",
 }
 
 // guiRoutes are the /api routes internal/gui serves, as "METHOD /path".

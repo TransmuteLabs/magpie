@@ -103,7 +103,7 @@ func agentOf(r *http.Request) string {
 // runs Codex as its own engine and names it after itself (Lody) is
 // counted as that app.
 func codexForClaudeCode(h http.Header) bool {
-	if h.Get("X-Codex-Window-Id") == "" && h.Get("X-Codex-Turn-Metadata") == "" {
+	if !codexTurnHeaders(h) {
 		return false
 	}
 	for _, v := range []string{h.Get("User-Agent"), h.Get("Originator")} {
@@ -112,6 +112,27 @@ func codexForClaudeCode(h http.Header) bool {
 		}
 	}
 	return false
+}
+
+// codexTurnHeaders is whether h carries the headers Codex puts on every
+// Responses turn it sends, to any provider and whoever runs it
+// (x-codex-window-id, x-codex-turn-metadata: codex-rs core/src/
+// responses_metadata.rs compatibility_headers). Its User-Agent and
+// originator are the name of whatever runs it: `codex app-server` takes
+// its host's clientInfo.name for both (initialize_processor.rs,
+// set_default_originator), so LobeHub's is "lobehub-desktop/0.169.0 (…)
+// (lobehub-desktop; …)" and names no Codex at all.
+func codexTurnHeaders(h http.Header) bool {
+	return h.Get("X-Codex-Window-Id") != "" || h.Get("X-Codex-Turn-Metadata") != ""
+}
+
+// codexRuns is whether r is a turn the Codex binary sent: by its token or
+// its own names (fromCodex), or, run by an app under the app's name, by
+// the headers Codex puts on every turn. Only for what Codex alone reads
+// (its spawn_agent's list): what is sent upstream as Codex's own, to a
+// relay that checks it (codexAsSent), stays with fromCodex.
+func codexRuns(r *http.Request) bool {
+	return fromCodex(r.Header) || agentOf(r) == "codex" || codexTurnHeaders(r.Header)
 }
 
 // startedByAgent says whether a request is from no agent magpie knows but
@@ -2264,11 +2285,14 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		}
 		// Codex with magpie as its provider: spawn_agent names every
 		// model a subagent may be put on, not only Codex's first five
-		// (Gearclickist on Discord)
-		if from == provider.Responses && (fromCodex(r.Header) || agentOf(r) == "codex") {
+		// (Gearclickist on Discord), Codex run by an app under the app's
+		// own name too (LobeHub's app-server, @m0eaki on X)
+		if from == provider.Responses && codexRuns(r) {
 			body = spawnAgentModels(r, body, model, false)
-			// the service tier set for Codex, in place of the one it
-			// asked (codexTiered)
+		}
+		// the service tier set for Codex, in place of the one it asked
+		// (codexTiered)
+		if from == provider.Responses && (fromCodex(r.Header) || agentOf(r) == "codex") {
 			body = codexTiered(r, body, model)
 		}
 		// the service tier the gateway key is set to, over the client's
@@ -3521,6 +3545,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// request went as written. The record names the provider and model
 	// the last try went to, not the group's first member, which a
 	// failover may never have reached
+	noteChecked(r, sentWhole, maskedHits)
 	if !sentWhole {
 		m, done := noteMaskedUntil(r, "chat", maskedHits, sentOf(maskedHits, body), tr.ID, p.ID, call.Model)
 		if m != nil {
@@ -4259,6 +4284,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				ctx = withFallback(ctx)
 			}
 			hw.stop = stop
+			if magpieAsks(r) {
+				// another magpie asked: its log is told the tier this
+				// one sent (stampTier)
+				p := c.p
+				hw.tierStamp = func(h http.Header) { stampTier(h, p, at.tier) }
+			}
 			if sentBy(c.p) == "claude" {
 				// the entry point its Claude Code run takes, for the
 				// try's row (Try.Entry)
@@ -4484,6 +4515,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			wentAt = at.effort
 		}
 		wentTier = at.tier
+		if t, ok := hw.sentThere(); ok && c.p.IsRemoteMagpie() {
+			// the tier the remote magpie sent its vendor (stampTier)
+			wentTier = t
+		}
 		ended = time.Now()
 		try := Try{ID: c.rest, Model: c.model, Effort: wentAt, Picked: picked, Fixed: fixed, RuleEffort: ruled, MappedFrom: mappedFrom, Fast: fast, Start: began, Done: true, Status: call.Status, Millis: ended.Sub(began).Milliseconds(), Error: call.Error, Queued: queued,
 			Served: call.Usage.Served, Upstream: call.Usage.Upstream, Pin: c.p.ClinePassAsked(c.model), Tier: wentTier, TierServed: call.Usage.Tier, Auto: autoPicked(),
@@ -5744,7 +5779,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	liveOfInflight(inflightOf(r.Context())).routed(p.ID, unprefixed(model))
 	// the tier the reply said, unknown where the vendor's word tells
 	// nothing (servedTierAt)
-	defer func() { call.Usage.Tier = servedTierAt(p.VendorHost(), call.Usage.Tier) }()
+	defer func() { call.Usage.Tier = servedThere(w, p, servedTierAt(p.VendorHost(), call.Usage.Tier)) }()
 	// Normalize for the actual destination, separately on each fallback.
 	// Native ChatGPT accounts accept standalone tool outputs themselves.
 	if from == provider.Responses && (p.Account == nil || p.Account.Agent != "codex") {
