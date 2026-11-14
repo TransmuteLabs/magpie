@@ -51,7 +51,7 @@ they are not counts of unique test functions.
 | Safe broad `go test -tags nogui ./...` | Exit 0; 31,277 PASS events, 109 passing packages, 1,522.83 seconds |
 | SDK, codecs, runtime, routing and window metadata with `-race` | Exit 0; 1,404 PASS events; no race warnings |
 | Ordinary provider/gateway/agent/Library/GUI/CLI/session SDK owners with `-race` | Exit 0; 589 PASS events; no race warnings |
-| Complete usage, middleware and OTLP packages with `-race` | Exit 0; 790 PASS events, no skips or race warnings |
+| Complete `internal/usage`, `plugins/middleware` and `plugins/otel` packages with `-race` | Exit 0; 790 PASS events, no skips or race warnings |
 | Update/feed/mirror/signing owners with `-race -count=20` | Exit 0; 820 PASS events, no skips or race warnings |
 | Empty-catalog routing/startup with `-race -count=20` | Exit 0; 320 PASS events, no skips or race warnings |
 | Actual native/composite/window/auth-owner lifecycle | Exit 0; 10 PASS events, no skips or race warnings |
