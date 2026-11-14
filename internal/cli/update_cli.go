@@ -262,8 +262,7 @@ func updateCmd(args []string) error {
 			// The copy won't follow the app; the fix is the link install.sh
 			// makes. `magpie update` run from the copy can't do it (it
 			// replaces the copy with another copy), so name the real step.
-			bin := filepath.Join(app, "Contents", "MacOS", "magpie")
-			fmt.Println(muted.Render("  the `magpie` command at " + tilde(stale) + " is a copy behind this app; re-run the installer, or link it: ln -sf " + tilde(bin) + " " + tilde(stale)))
+			fmt.Println(muted.Render(staleCLIHint(app, stale)))
 		}
 		return nil
 	}
@@ -287,6 +286,11 @@ func updateCmd(args []string) error {
 	fmt.Println(green.Render("✓"), "updated to", rel.Version)
 	fmt.Println(muted.Render("  " + restartAsk(base, rel.Version, force)))
 	return nil
+}
+
+func staleCLIHint(app, stale string) string {
+	bin := filepath.Join(app, "Contents", "MacOS", "magpie")
+	return "  the `magpie` command at " + tilde(stale) + " is a copy behind this app; link it: ln -sf " + quoteArg(bin) + " " + quoteArg(stale)
 }
 
 // restartRunning asks the magpie serving the gateway at base to restart

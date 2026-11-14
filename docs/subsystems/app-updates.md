@@ -140,6 +140,22 @@ installation. A malformed policy is reported as an error; explicit `off` is
 the way to disable it. Linux and Windows do not provide local macOS signing
 and keep their normal update behavior.
 
+The shell installer refuses a macOS install before downloading anything when
+`update-signing.json` exists at any applicable local location: the default
+`$HOME/.config/magpie`, an absolute `$XDG_CONFIG_HOME/magpie`, or `data` beside
+either `/Applications/magpie.app` or `$HOME/Applications/magpie.app`. Both
+installed locations are checked because a Dock launch may not inherit a shell's
+XDG override. A malformed or unreadable file, a directory, a dangling symlink
+or an unsearchable/non-directory ancestor also refuses replacement; the
+installer does not interpret or change the policy. Relative XDG values are
+ignored as they are by `appdir.Config`; `MAGPIE_HOME` is not a supported
+configuration override. Explicit `--uninstall` and `--purge` retain their
+existing behavior. A stale CLI copy is repaired by linking it to the app's
+binary; its update advice does not recommend reinstalling the application.
+The installer repeats the check after downloading and after extraction, before
+replacing an existing app, so a policy enrolled during those steps also stops
+replacement.
+
 The first transition can require consent for macOS permissions again. TCC and
 Full Disk Access continuity have not been verified; a stable signing identity
 alone is not evidence that those permissions survive an update.

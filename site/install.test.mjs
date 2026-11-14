@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, rmSync, symlinkSync, chmodSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -42,7 +42,7 @@ function systemPath(dir) {
   return sys;
 }
 
-function install(t, { termux = true, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, r2 = false, api = false, args = [], env: extra = {}, tamper = "", libs = desktop, cli = !desktop, distro = "ID=ubuntu\nID_LIKE=debian\n", sessions = [], login = "", tty = false, uid = 1000, sudo = true, pmFails = false, payload = "test binary\n" } = {}) {
+function install(t, { termux = true, platform = "Linux", setup, arch = "aarch64", override = false, prefixOnly = false, missing = false, corrupt = false, desktop = false, github = false, r2 = false, api = false, args = [], env: extra = {}, tamper = "", libs = desktop, cli = !desktop, distro = "ID=ubuntu\nID_LIKE=debian\n", sessions = [], login = "", tty = false, uid = 1000, sudo = true, pmFails = false, payload = "test binary\n" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "magpie-install-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const tools = join(dir, "tools");
@@ -55,7 +55,7 @@ function install(t, { termux = true, arch = "aarch64", override = false, prefixO
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "magpie"), "old installation");
   const cpu = arch === "aarch64" ? "arm64" : "amd64";
-  const file = termux ? `magpie-cli-android-${cpu}` : desktop ? `magpie-linux-${cpu}` : `magpie-cli-linux-${cpu}`;
+  const file = platform === "Darwin" ? `magpie-darwin-${cpu}.zip` : termux ? `magpie-cli-android-${cpu}` : desktop ? `magpie-linux-${cpu}` : `magpie-cli-linux-${cpu}`;
   const assets = {};
   // A Linux asset is present even when Android's is missing: never use it.
   for (const name of new Set([file, `magpie-cli-linux-${cpu}`, `magpie-linux-${cpu}`])) {
@@ -66,7 +66,7 @@ function install(t, { termux = true, arch = "aarch64", override = false, prefixO
     if (api) assets[name].api = `https://api.github.com/repos/yetone/magpie-releases/releases/assets/${assetId(name)}`;
   }
   const requests = join(dir, "requests");
-  writeFileSync(join(tools, "uname"), `#!/bin/sh\ncase "$1" in -m) echo '${arch}';; -s) echo Linux;; esac\n`, { mode: 0o755 });
+  writeFileSync(join(tools, "uname"), `#!/bin/sh\ncase "$1" in -m) echo '${arch}';; -s) echo '${platform}';; esac\n`, { mode: 0o755 });
   // ldconfig -p as glibc prints it: the libraries the desktop app needs
   // when libs, and another library always (a cache that was read)
   const cache = ["libc.so.6", ...(libs ? ["libgtk-3.so.0", "libwebkit2gtk-4.1.so.0"] : [])]
@@ -127,7 +127,13 @@ if (url.endsWith("/api/latest")) process.stdout.write(process.env.INSTALL_FEED);
 else if ((process.env.INSTALL_DOWN || "").split(" ").some((p) => p && url.startsWith(p))) process.exit(22);
 else if (url.includes("/releases/tags/")) process.stdout.write(process.env.INSTALL_TAGS);
 else if (url.includes("/releases/assets/") && !args.includes("Accept: application/octet-stream")) fs.writeFileSync(args[args.indexOf("-o") + 1], "{}");
-else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tamper) ? "changed by the mirror" : process.env.INSTALL_PAYLOAD);
+else {
+  fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tamper) ? "changed by the mirror" : process.env.INSTALL_PAYLOAD);
+  if (process.env.INSTALL_POLICY_WHEN === "download") {
+    fs.mkdirSync(require("node:path").dirname(process.env.INSTALL_POLICY_PATH), { recursive: true });
+    fs.writeFileSync(process.env.INSTALL_POLICY_PATH, "newly enrolled signing pin");
+  }
+}
 `, { mode: 0o755 });
   const env = {
     ...process.env,
@@ -160,21 +166,188 @@ else fs.writeFileSync(args[args.indexOf("-o") + 1], tamper && url.startsWith(tam
     INSTALL_ARGS: join(dir, "args"),
     INSTALL_TAMPER: tamper,
     INSTALL_TAGS: TAGS,
+    INSTALL_POLICY_WHEN: "",
     MAGPIE_PROXY: "",
     MAGPIE_MIRROR: "",
     ...extra,
   };
+  const systemApps = join(dir, "Applications");
+  const userApps = join(home, "Applications");
+  let script = installer;
+  if (platform === "Darwin") {
+    mkdirSync(join(systemApps, "magpie.app/Contents/MacOS"), { recursive: true });
+    writeFileSync(join(systemApps, "magpie.app/Contents/MacOS/magpie"), fakeMagpie("installed: "), { mode: 0o755 });
+    env.INSTALL_SYSTEM_APPS = systemApps;
+    env.INSTALL_DITTO_LOG = join(dir, "ditto-log");
+    writeFileSync(join(tools, "ditto"), `#!/bin/sh
+echo "$*" >> "$INSTALL_DITTO_LOG"
+mkdir -p "$4/magpie.app/Contents/MacOS"
+printf '%s' "$INSTALL_PAYLOAD" > "$4/magpie.app/Contents/MacOS/magpie"
+chmod +x "$4/magpie.app/Contents/MacOS/magpie"
+if [ "$INSTALL_POLICY_WHEN" = unpack ]; then
+  mkdir -p "\${INSTALL_POLICY_PATH%/*}"
+  printf '%s' "newly enrolled signing pin" > "$INSTALL_POLICY_PATH"
+fi
+`, { mode: 0o755 });
+    script = join(dir, "install.sh");
+    writeFileSync(script, readFileSync(installer, "utf8").replace(/(^|[\s=])\/Applications(?=\/|[;\s]|$)/gm, '$1"$INSTALL_SYSTEM_APPS"'));
+  }
+  const fixture = { dir, tools, home, bin, env, systemApps, userApps };
+  setup?.(fixture);
   if (tty) writeFileSync(join(dir, "tty"), "");
   const read = (p) => (existsSync(p) ? readFileSync(p, "utf8") : "");
   const run = (args) => {
     rmSync(requests, { force: true });
     rmSync(env.INSTALL_ARGS, { force: true });
-    const result = spawnSync("sh", [installer, ...args], { env, encoding: "utf8" });
+    const result = spawnSync("sh", [script, ...args], { env, encoding: "utf8" });
     const calls = read(env.INSTALL_ARGS).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
     return { ...result, requests: read(requests), calls, pm: read(pmLog) };
   };
-  return { ...run(args), run, bin, file, payload, home, env, share: env.XDG_DATA_HOME, config: env.XDG_CONFIG_HOME };
+  return { ...run(args), run, ...fixture, file, payload, share: env.XDG_DATA_HOME, config: env.XDG_CONFIG_HOME };
 }
+
+test("Darwin refuses every local signing policy before any download or replacement", async (t) => {
+  for (const location of ["default", "xdg", "system-portable", "user-portable"]) {
+    for (const state of ["valid", "malformed", "unreadable", "symlink", "dangling-symlink", "directory"]) {
+      await t.test(`${location}: ${state}`, (t) => {
+        let policy;
+        let original;
+        const r = install(t, {
+          termux: false, platform: "Darwin", sudo: false,
+          setup({ home, env, systemApps, userApps }) {
+            const root = {
+              default: join(home, ".config/magpie"),
+              xdg: join(env.XDG_CONFIG_HOME, "magpie"),
+              "system-portable": join(systemApps, "data"),
+              "user-portable": join(userApps, "data"),
+            }[location];
+            mkdirSync(root, { recursive: true });
+            policy = join(root, "update-signing.json");
+            if (state === "symlink") {
+              writeFileSync(join(root, "retained-pin"), "keep-linked-pin");
+              symlinkSync(join(root, "retained-pin"), policy);
+            } else if (state === "dangling-symlink") symlinkSync(join(root, "missing"), policy);
+            else if (state === "directory") mkdirSync(policy);
+            else {
+              original = state === "malformed" ? "{unfinished" : '{"version":1,"fingerprint":"keep-this-pin"}';
+              writeFileSync(policy, original, { mode: state === "unreadable" ? 0 : 0o600 });
+            }
+          },
+        });
+        assert.notEqual(r.status, 0, "installer replaced an app protected by a signing policy");
+        assert.match(r.stderr, /local.*signing.*policy/i);
+        assert.equal(r.requests, "", "refusal must precede the feed and asset downloads");
+        assert.equal(existsSync(r.env.INSTALL_DITTO_LOG), false, "refusal must precede extraction");
+        assert.equal(readFileSync(join(r.systemApps, "magpie.app/Contents/MacOS/magpie"), "utf8"), fakeMagpie("installed: "));
+        assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), "old installation");
+        if (state === "symlink" || state === "dangling-symlink") {
+          assert.ok(lstatSync(policy).isSymbolicLink());
+          if (state === "symlink") assert.equal(readFileSync(policy, "utf8"), "keep-linked-pin");
+        }
+        else if (state === "directory") assert.ok(statSync(policy).isDirectory());
+        else {
+          if (state === "unreadable") {
+            assert.equal(statSync(policy).mode & 0o777, 0);
+            chmodSync(policy, 0o600);
+          }
+          assert.equal(readFileSync(policy, "utf8"), original);
+        }
+      });
+    }
+  }
+});
+
+test("Darwin refuses uncertain signing policy ancestors without downloading", async (t) => {
+  for (const state of ["unsearchable", "nondirectory", "dangling-symlink"]) {
+    await t.test(state, (t) => {
+      let root;
+      t.after(() => {
+        if (root && state === "unsearchable") chmodSync(root, 0o700);
+      });
+      const r = install(t, {
+        termux: false, platform: "Darwin", sudo: false,
+        setup({ env }) {
+          root = env.XDG_CONFIG_HOME;
+          if (state === "nondirectory") writeFileSync(root, "keep");
+          else if (state === "dangling-symlink") symlinkSync(root + "-missing", root);
+          else {
+            mkdirSync(join(root, "magpie"), { recursive: true });
+            writeFileSync(join(root, "magpie/update-signing.json"), "{unreadable");
+            chmodSync(root, 0);
+          }
+        },
+      });
+      assert.notEqual(r.status, 0, "unknown policy must not permit replacement");
+      assert.match(r.stderr, /local.*signing.*policy/i);
+      assert.equal(r.requests, "");
+      assert.equal(existsSync(r.env.INSTALL_DITTO_LOG), false);
+    });
+  }
+});
+
+test("Darwin still installs with no signing policy and ignores relative XDG_CONFIG_HOME", (t) => {
+  for (const xdg of ["", "relative-config", "~/.config"]) {
+    const r = install(t, {
+      termux: false, platform: "Darwin", sudo: false,
+      env: { XDG_CONFIG_HOME: xdg },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.requests, /magpie-darwin-arm64\.zip/);
+    assert.equal(readFileSync(join(r.systemApps, "magpie.app/Contents/MacOS/magpie"), "utf8"), r.payload);
+    assert.ok(lstatSync(join(r.bin, "magpie")).isSymbolicLink());
+  }
+});
+
+test("Darwin refuses signing policies appearing during download or extraction", (t) => {
+  for (const when of ["download", "unpack"]) {
+    const r = install(t, {
+      termux: false, platform: "Darwin", sudo: false,
+      setup({ home, env }) {
+        env.INSTALL_POLICY_WHEN = when;
+        env.INSTALL_POLICY_PATH = join(home, ".config/magpie/update-signing.json");
+      },
+    });
+    assert.notEqual(r.status, 0, `installer ignored a signing policy enrolled during ${when}`);
+    assert.match(r.stderr, /local.*signing.*policy/i);
+    assert.match(r.requests, /magpie-darwin-arm64\.zip/);
+    assert.equal(readFileSync(join(r.systemApps, "magpie.app/Contents/MacOS/magpie"), "utf8"), fakeMagpie("installed: "));
+    assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), "old installation");
+    assert.equal(readFileSync(r.env.INSTALL_POLICY_PATH, "utf8"), "newly enrolled signing pin");
+    assert.equal(existsSync(r.env.INSTALL_DITTO_LOG), when === "unpack");
+  }
+});
+
+test("Darwin explicit uninstall and purge retain their signing-policy semantics", (t) => {
+  for (const args of [["--uninstall"], ["--purge"]]) {
+    let policy;
+    const r = install(t, {
+      termux: false, platform: "Darwin", sudo: false, args,
+      setup({ bin, env }) {
+        rmSync(join(bin, "magpie"));
+        policy = join(env.XDG_CONFIG_HOME, "magpie/update-signing.json");
+        mkdirSync(join(env.XDG_CONFIG_HOME, "magpie"), { recursive: true });
+        writeFileSync(policy, "{keep-even-if-malformed");
+      },
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.requests, "", "the installed app must perform the explicit uninstall");
+    assert.equal(existsSync(join(r.systemApps, "magpie.app")), false);
+    assert.equal(existsSync(policy), args[0] !== "--purge");
+    assert.match(readFileSync(join(r.home, "magpie-calls"), "utf8"), /installed: uninstall --yes/);
+  }
+});
+
+test("Linux install still ignores local macOS signing policies", (t) => {
+  const r = install(t, {
+    termux: false, sudo: false,
+    setup({ env }) {
+      mkdirSync(join(env.XDG_CONFIG_HOME, "magpie"), { recursive: true });
+      writeFileSync(join(env.XDG_CONFIG_HOME, "magpie/update-signing.json"), "{unreadable-format");
+    },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(join(r.bin, "magpie"), "utf8"), r.payload);
+});
 
 test("Termux downloads Android arm64 into PREFIX/bin even with WebKit installed", (t) => {
   const r = install(t, { desktop: true });

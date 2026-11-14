@@ -329,6 +329,39 @@ if [ -n "$uninstall" ]; then
   exit 0
 fi
 
+if [ "$os" = darwin ]; then
+  signing_policy_absent() {
+    signing_policy="$1/update-signing.json"
+    if [ -e "$signing_policy" ] || [ -L "$signing_policy" ]; then
+      die "local update signing policy at $signing_policy; use the installed app's updater instead. The installer will not replace this app or change its signing policy"
+    fi
+    signing_parent=$1
+    while :; do
+      if [ -e "$signing_parent" ] || [ -L "$signing_parent" ]; then
+        [ -d "$signing_parent" ] && [ -x "$signing_parent" ] ||
+          die "cannot inspect local update signing policy at $signing_policy; use the installed app's updater instead"
+      fi
+      [ "$signing_parent" != / ] || break
+      signing_parent=${signing_parent%/*}
+      [ -n "$signing_parent" ] || signing_parent=/
+    done
+  }
+  signing_policies_absent() {
+    case "$HOME" in
+      /*) ;;
+      *) die "cannot inspect local update signing policy without an absolute HOME" ;;
+    esac
+    signing_policy_absent "$HOME/.config/magpie"
+    case "${XDG_CONFIG_HOME:-}" in
+      /*) signing_policy_absent "$XDG_CONFIG_HOME/magpie" ;;
+    esac
+    for signing_apps in /Applications "$HOME/Applications"; do
+      signing_policy_absent "$signing_apps/data"
+    done
+  }
+  signing_policies_absent
+fi
+
 # has_gui_libs: GTK 3 and WebKitGTK 4.1 (which brings libsoup 3 and
 # JavaScriptCore) can be loaded, which is all the desktop app links beyond
 # glibc. ldconfig is in /sbin, off a Debian user's PATH, so it is looked for
@@ -478,11 +511,13 @@ esac
 
 fetch "$file"
 
+[ "$os" != darwin ] || signing_policies_absent
 mkdir -p "$bin"
 if [ "$os" = darwin ]; then
   apps=/Applications
   [ -w "$apps" ] || { apps="$HOME/Applications"; mkdir -p "$apps"; }
   ditto -x -k "$tmp/$file" "$tmp/x"
+  signing_policies_absent
   # the new app beside the old one first: a move failing (a full disk)
   # leaves the old app in place
   rm -rf "$apps/.magpie.app.new"
