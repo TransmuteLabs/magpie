@@ -45,7 +45,10 @@ type Option struct {
 	RateWas float64 `json:"rateWas,omitempty"`
 	// Context is the tokens the model takes, when known; the picker marks
 	// the large ones
-	Context int `json:"context,omitempty"`
+	Context       int      `json:"context,omitempty"`
+	MaxOutput     int      `json:"maxOutput,omitempty"`
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"defaultEffort,omitempty"`
 	// Takes, on an effort field's default (Value ""), is the level the
 	// agent takes for the model with none set (Codex: the catalog entry's
 	// default_reasoning_level), shown beside "default"

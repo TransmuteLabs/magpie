@@ -82,6 +82,12 @@ func (m *Manager) compareAndSwapModuleConfig(ctx context.Context, id, packageRev
 			if packageRevision != "" && packageRevision != entry.Revision {
 				return VersionedValue{}, ErrCatalogConflict
 			}
+			if packageRevision != "" && entry.Disabled {
+				return VersionedValue{}, ErrCatalogConflict
+			}
+			if err := entry.Manifest.ValidateProviderOptionValues(values); err != nil {
+				return VersionedValue{}, err
+			}
 			if err := ctx.Err(); err != nil {
 				return VersionedValue{}, err
 			}

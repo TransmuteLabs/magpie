@@ -11,7 +11,14 @@ func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot
 	if manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	return m.readModuleConfig(manifest.ID)
+	config, err := m.readModuleConfig(manifest.ID)
+	if err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	if err := manifest.ValidateProviderOptionValues(config.Values); err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	return config, nil
 }
 
 func closeModuleClient(client *workerClient) error {

@@ -78,15 +78,14 @@ func accountStampAt(root string) (AccountFileStamp, error) {
 		}
 		accountInfo, statErr := accountFileInfo(namespace)
 		namespace.Close()
-		hash.Write([]byte(entry.Name()))
-		hash.Write([]byte{0})
 		if errors.Is(statErr, os.ErrNotExist) {
-			hash.Write([]byte{0})
 			continue
 		}
 		if statErr != nil || !accountInfo.Mode().IsRegular() {
 			return AccountFileStamp{}, fmt.Errorf("extension account stamp file is unavailable")
 		}
+		hash.Write([]byte(entry.Name()))
+		hash.Write([]byte{0})
 		files = append(files, accountInfo)
 		hash.Write([]byte{1})
 		var metadata [24]byte

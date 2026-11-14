@@ -8,7 +8,7 @@ Nothing is installed or published by the examples or tests.
 SDK API 1.1 adds `module-rpc`, actions and component lifecycle; explicit
 SDK 1.0 manifests retain their original nine-capability behavior without
 requiring component configuration.
-Package source version 1.8.0 advertises SDK API 1.8.
+Package source version 1.9.0 advertises SDK API 1.9.
 API 1.2 added `gateway-hooks` and tool exposure; API 1.3 adds finite provider
 operations, extended model metadata and the host-owned refresh guarantee.
 API 1.4 adds declared routing strategies through existing read actions.
@@ -36,6 +36,13 @@ The independent `ledger-observer` capability with `ledger: {}` receives
 separate from body capture and memory hooks. The host retains original package
 and configuration authority, counts delivery drops and never waits for it while
 writing a ledger row.
+
+API 1.9 adds provider switches, paid selected-account tasks, effective agent
+model metadata, provider defaults, rich quota facts and descendant session
+sources. Go and JS share those typed declarations and validators. Ordinary
+configuration, usage, budget and Sessions owners remain responsible for
+publication and policy. Paid tasks require an explicit descriptor and an
+admitted parent call; the source version does not schedule them.
 
 ```js
 import { serve, SDKError } from "@magpie/extension-sdk";

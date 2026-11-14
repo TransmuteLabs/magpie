@@ -34,12 +34,13 @@ type extensionController struct {
 }
 
 type extensionAgentPlan struct {
-	runtime    *extensionAgentRuntime
-	action     *extension.ActionPlan
-	before     extensionBindingRecord
-	shell      *update.ShellFunctionPlan
-	intent     string
-	applyShell func() error
+	runtime      *extensionAgentRuntime
+	action       *extension.ActionPlan
+	before       extensionBindingRecord
+	shell        *update.ShellFunctionPlan
+	intent       string
+	modelOptions json.RawMessage
+	applyShell   func() error
 }
 
 func (controller *extensionController) target() string {
@@ -167,10 +168,19 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 	if record.Phase == "owned" {
 		previous = record.Before
 	}
-	opts, err := json.Marshal(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(controller.item.Agent.ID, gateway.URL()),
-		Models: viaMagpie(controller.item.Agent.ID, "magpie/"), Field: field, Value: value, Previous: previous})
+	opts, err := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(controller.item.Agent.ID, gateway.URL()),
+		Models: viaMagpie(controller.item.Agent.ID, "magpie/"), Field: field, Value: value, Previous: previous, PriorModels: record.ModelOptions},
+		host.entry.Manifest)
 	if err != nil {
 		return nil, err
+	}
+	var catalog struct {
+		Models json.RawMessage `json:"models"`
+	}
+	if host.entry.Manifest.Contract.Version.Minor >= 9 {
+		if err := json.Unmarshal(opts, &catalog); err != nil {
+			return nil, err
+		}
 	}
 	action, err := extension.NewActions(host).AgentPlan(ctx, controller.item.Plugin, sdk.Scope{Operation: "agent." + intent},
 		sdk.AgentPlanRequest{ID: controller.item.Agent.ID, Action: intent, Options: opts}, controller.policy(record))
@@ -200,7 +210,7 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 			return nil, err
 		}
 	}
-	return &extensionAgentPlan{runtime: host, action: action, before: record, shell: shell, intent: intent}, nil
+	return &extensionAgentPlan{runtime: host, action: action, before: record, shell: shell, intent: intent, modelOptions: catalog.Models}, nil
 }
 
 func extensionAppliedSnapshots(plan *extension.ActionPlan) []extension.ActionSettingFile {
@@ -282,7 +292,8 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 		Revision: prior.Revision + 1, Phase: "pending", Descriptor: controller.item.Agent.Clone(), Bin: controller.bin,
 		PackageRevision: plan.runtime.entry.Revision, ConfigVersion: plan.runtime.config,
 		Values: maps.Clone(plan.action.Preview().Binding.Values), Before: plan.action.Snapshots(),
-		Applied: extensionAppliedSnapshots(plan.action), RecoverySafe: true,
+		ModelOptions: append(json.RawMessage(nil), plan.modelOptions...),
+		Applied:      extensionAppliedSnapshots(plan.action), RecoverySafe: true,
 	}
 	if prior.Phase == "owned" {
 		record.Before, record.PriorApplied = extension.CloneActionSnapshots(prior.Before), extension.CloneActionSnapshots(prior.Applied)
@@ -453,9 +464,14 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 					if runtime.entry.Revision != record.PackageRevision || runtime.config != record.ConfigVersion {
 						err = errors.New("agent module changed; sync or reconnect before using it")
 					} else {
-						inspection, inspectErr := extension.NewActions(runtime).AgentInspect(ctx, item.Plugin, sdk.Scope{Operation: "agent.inspect"},
-							sdk.AgentInspectRequest{ID: desc.ID}, controller.policy(record))
-						state.Detail, err = inspection.Detail, inspectErr
+						opts, optionsErr := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(desc.ID, gateway.URL()),
+							Models: viaMagpie(desc.ID, "magpie/"), Previous: record.Before, PriorModels: record.ModelOptions}, runtime.entry.Manifest)
+						err = optionsErr
+						if err == nil {
+							inspection, inspectErr := extension.NewActions(runtime).AgentInspect(ctx, item.Plugin, sdk.Scope{Operation: "agent.inspect"},
+								sdk.AgentInspectRequest{ID: desc.ID, Options: opts}, controller.policy(record))
+							state.Detail, err = inspection.Detail, inspectErr
+						}
 					}
 					runtime.lease.Close()
 				}

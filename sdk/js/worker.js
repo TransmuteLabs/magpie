@@ -8,6 +8,7 @@ import { MIDDLEWARE_METHODS } from "./middleware.js";
 import { validateUsageResult } from "./usage.js";
 import { validateExecutionUsage } from "./usage-facts.js";
 import { validateOwnCall, validateOutsideCallsRequest, validateOutsideCallsResult } from "./own-calls.js";
+import { validateAccountTaskSchedule, validateAccountTaskCancel, accountTaskUsageAllowed, validateAccountTaskUsage } from "./account-tasks.js";
 import { validateDiagnostic } from "./diagnostics.js";
 import { validateCatalogRead } from "./catalog-projection.js";
 import { STORAGE_HOST_METHODS, STORAGE_METHODS } from "./storage-source.js";
@@ -355,7 +356,9 @@ export async function serve(module, { input = process.stdin, output = process.st
           record.creditError = new SDKError("invalid_params", "Gateway hooks are unary and permit only write acceptance receipts");
           throw record.creditError;
         }
-        if (call.method === "module.call" && (record.actionEffect !== "write" || event !== "accepted")) {
+        const taskUsage = event === "accountTask.usage" && call.method === "module.call"
+          && accountTaskUsageAllowed(manifest, call.params?.action);
+        if (call.method === "module.call" && (record.actionEffect !== "write" || event !== "accepted" && !taskUsage)) {
           record.creditError = new SDKError("invalid_params", "module.call is unary and permits only a write acceptance receipt");
           throw record.creditError;
         }
@@ -364,6 +367,10 @@ export async function serve(module, { input = process.stdin, output = process.st
           throw record.creditError;
         }
         checkEvent(event, data);
+        if (event === "accountTask.usage") {
+          if (call.method !== "module.call" || !taskUsage) throw new SDKError("invalid_params", "Invalid paid task usage snapshot");
+          validateAccountTaskUsage(manifest, data);
+        }
         if (call.method === "provider.execute" && event === "usage") validateExecutionUsage(manifest, data);
         if (record.event) throw new SDKError("backpressure", "Only one stream event may await acknowledgement");
         const wait = deferred(), seq = ++record.seq;
@@ -393,9 +400,11 @@ export async function serve(module, { input = process.stdin, output = process.st
         try {
           await Promise.race([previous, record.aborted.promise]);
           assertOpen();
-          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call", "usage.invalidate", "usage.append", "diagnostics.emit", "catalog.read", ...STORAGE_HOST_METHODS].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (!["state.get", "state.cas", "network.proxy", "account.replace", "component.call", "usage.invalidate", "usage.append", "diagnostics.emit", "catalog.read", "accountTasks.schedule", "accountTasks.cancel", ...STORAGE_HOST_METHODS].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
           if (STORAGE_HOST_METHODS.includes(method) && !STORAGE_METHODS.includes(call.method)) throw new SDKError("invalid", "Storage callbacks require their selected source parent");
           if (method === "usage.append") validateOwnCall(manifest, params);
+          if (method === "accountTasks.schedule") validateAccountTaskSchedule(params);
+          if (method === "accountTasks.cancel") validateAccountTaskCancel(params);
           if (method === "diagnostics.emit") validateDiagnostic(manifest, params);
           if (method === "catalog.read") validateCatalogRead(manifest, call.scope, params);
           const serializedParams = stringifyJSON(params);

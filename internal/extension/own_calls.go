@@ -16,14 +16,20 @@ type ownCallParent struct {
 	mu       sync.Mutex
 	method   string
 	appended bool
+	reported bool
+	snapshot *sdk.OwnCall
 }
 
 var ownCalls struct {
 	sync.RWMutex
-	handler func(sdk.Scope, sdk.OwnCall)
+	handler func(context.Context, sdk.Scope, sdk.OwnCall)
 }
 
 func OnOwnCall(handler func(sdk.Scope, sdk.OwnCall)) func() {
+	return OnOwnCallContext(func(_ context.Context, scope sdk.Scope, call sdk.OwnCall) { handler(scope, call) })
+}
+
+func OnOwnCallContext(handler func(context.Context, sdk.Scope, sdk.OwnCall)) func() {
 	ownCalls.Lock()
 	previous := ownCalls.handler
 	ownCalls.handler = handler
@@ -43,6 +49,10 @@ func withOwnCallParent(ctx context.Context, method string) context.Context {
 }
 
 func (m *Manager) appendOwnCall(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority) (any, error) {
+	return m.recordOwnCall(ctx, scope, raw, authority, false)
+}
+
+func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority, snapshot bool) (any, error) {
 	parent, live := ctx.Value(ownCallParentKey{}).(*ownCallParent)
 	component, owned := ctx.Value(componentAuthorityKey{}).(componentAuthority)
 	readOnly, _ := ctx.Value(gatewayReadOnlyKey{}).(bool)
@@ -72,6 +82,13 @@ func (m *Manager) appendOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 	if err := group.accepted(scope); err != nil {
 		return nil, err
 	}
+	task, scheduled := ctx.Value(accountTaskExecutionKey{}).(*accountTaskExecution)
+	if snapshot && !scheduled {
+		return nil, errors.New("usage snapshots require a host-owned paid task")
+	}
+	if scheduled && (request.Call.Model != task.parent.selection.Model || task.scope != scope) {
+		return nil, errors.New("paid task usage must name its actual selected model")
+	}
 	ownCalls.RLock()
 	handler := ownCalls.handler
 	ownCalls.RUnlock()
@@ -79,7 +96,7 @@ func (m *Manager) appendOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 		return nil, errors.New("ordinary usage accounting is unavailable")
 	}
 	parent.mu.Lock()
-	if parent.appended {
+	if parent.appended || scheduled && parent.reported && !snapshot {
 		parent.mu.Unlock()
 		return sdk.OwnCallResult{Accepted: false}, nil
 	}
@@ -91,9 +108,15 @@ func (m *Manager) appendOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 		parent.mu.Unlock()
 		return nil, err
 	}
+	request.Call.Usage = *request.Call.Usage.Clone()
+	if scheduled {
+		parent.snapshot = &request.Call
+		parent.reported = parent.reported || !snapshot
+		parent.mu.Unlock()
+		return sdk.OwnCallResult{Accepted: true}, nil
+	}
 	parent.appended = true
 	parent.mu.Unlock()
-	request.Call.Usage = *request.Call.Usage.Clone()
-	handler(scope, request.Call)
+	handler(ctx, scope, request.Call)
 	return sdk.OwnCallResult{Accepted: true}, nil
 }

@@ -1,4 +1,5 @@
 import { SDKError } from "./bytes.js";
+import { validateRichQuotaWindow } from "./rich-quota.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const invalid = () => { throw new SDKError("invalid_params", "Invalid usage result or applicability"); };
@@ -18,6 +19,7 @@ export function validateUsageResult(manifest, value) {
   let fresh = !value.error && !value.asOf && !value.readDeferred, ordinary = false;
   for (const window of value.windows ?? []) {
     if (!object(window) || typeof window.name !== "string" || !window.name) invalid();
+    validateRichQuotaWindow(manifest, window);
     if (manifest.contract.version.minor < 4 && ["models", "notModels", "aside"].some(key => Object.hasOwn(window, key))) invalid();
     if (window.aside !== undefined && typeof window.aside !== "boolean") invalid();
     for (const key of ["asOf", "resetsAt"]) {

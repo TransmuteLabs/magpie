@@ -42,6 +42,9 @@ func ValidateUsageResult(manifest Manifest, raw json.RawMessage) (UsageResult, b
 	fresh, ordinary := result.Error == "" && result.AsOf == 0 && !result.ReadDeferred, false
 	for index, window := range result.Windows {
 		fields := presence.Windows[index]
+		if err := ValidateRichQuotaWindow(manifest, window, fields); err != nil {
+			return result, false, err
+		}
 		if manifest.Contract.Version.Minor < 4 && (fields["models"] != nil || fields["notModels"] != nil || fields["aside"] != nil) {
 			return result, false, errors.New("usage applicability requires SDK API 1.4")
 		}

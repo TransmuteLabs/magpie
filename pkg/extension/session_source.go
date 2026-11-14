@@ -22,14 +22,25 @@ const SessionSource Capability = "session-source"
 const MethodSessionSourceRead = "session.source.read"
 
 type SessionSourceDescriptor struct {
-	ID         string               `json:"id"`
-	Agent      string               `json:"agent"`
-	Codec      string               `json:"codec"`
-	Container  string               `json:"container"`
-	Stores     []SessionSourceStore `json:"stores"`
-	Layout     SessionSourceLayout  `json:"layout"`
-	Transcript bool                 `json:"transcript"`
-	Resume     string               `json:"resume"`
+	ID          string                    `json:"id"`
+	Agent       string                    `json:"agent"`
+	Codec       string                    `json:"codec"`
+	Container   string                    `json:"container"`
+	Stores      []SessionSourceStore      `json:"stores"`
+	Layout      SessionSourceLayout       `json:"layout"`
+	Transcript  bool                      `json:"transcript"`
+	Resume      string                    `json:"resume"`
+	Descendants *SessionSourceDescendants `json:"descendants,omitempty"`
+}
+
+type SessionSourceDescendants struct {
+	Kind               string   `json:"kind"`
+	ExcludeDirectories []string `json:"excludeDirectories,omitempty"`
+}
+
+type SessionSourceIdentity struct {
+	Path      string `json:"path"`
+	SessionID string `json:"sessionId"`
 }
 
 type SessionSourceStore struct {
@@ -56,12 +67,13 @@ type SessionSourceLimits struct {
 }
 
 type SessionSourceReadRequest struct {
-	SourceID  string               `json:"sourceId"`
-	Locator   SessionSourceLocator `json:"locator"`
-	Snapshot  string               `json:"snapshot"`
-	Mode      string               `json:"mode"`
-	Documents []SessionDocument    `json:"documents"`
-	Limits    SessionSourceLimits  `json:"limits"`
+	SourceID    string               `json:"sourceId"`
+	Locator     SessionSourceLocator `json:"locator"`
+	Snapshot    string               `json:"snapshot"`
+	Mode        string               `json:"mode"`
+	Documents   []SessionDocument    `json:"documents"`
+	Limits      SessionSourceLimits  `json:"limits"`
+	Descendants []string             `json:"descendants,omitempty"`
 }
 
 type SessionSourceReadResult struct {
@@ -73,13 +85,14 @@ type SessionSourceReadResult struct {
 }
 
 type SessionSourceSummary struct {
-	Title    string              `json:"title"`
-	Cwd      string              `json:"cwd"`
-	Start    string              `json:"start,omitempty"`
-	Last     string              `json:"last,omitempty"`
-	ParentID string              `json:"parentId,omitempty"`
-	RootID   string              `json:"rootId,omitempty"`
-	Usage    []SessionUsagePoint `json:"usage,omitempty"`
+	Title    string                  `json:"title"`
+	Cwd      string                  `json:"cwd"`
+	Start    string                  `json:"start,omitempty"`
+	Last     string                  `json:"last,omitempty"`
+	ParentID string                  `json:"parentId,omitempty"`
+	RootID   string                  `json:"rootId,omitempty"`
+	Usage    []SessionUsagePoint     `json:"usage,omitempty"`
+	Subs     []SessionSourceIdentity `json:"subs,omitempty"`
 }
 
 type SessionUsagePoint struct {
@@ -213,6 +226,14 @@ func (manifest Manifest) validateSessionSources() error {
 		if _, err := source.Layout.SessionID(probe[source.Layout.Kind]); err != nil {
 			return err
 		}
+		if source.Descendants != nil {
+			if manifest.Contract.Version.Minor < 9 || source.Layout.Kind == "directory" {
+				return errors.New("session source descendants require SDK API 1.9 and a journal filename layout")
+			}
+			if err := validateSessionSourceDescendants(source.Descendants); err != nil {
+				return err
+			}
+		}
 		slots := map[string]bool{}
 		for _, store := range source.Stores {
 			if !validID(store.Slot) || slots[store.Slot] || (store.NativeRootSlot == "") == (store.HomeRelativePath == "") {
@@ -306,6 +327,9 @@ func ValidateSessionSourceRequest(manifest Manifest, request SessionSourceReadRe
 			return errors.New("session source binary budget exceeded")
 		}
 	}
+	if err := validateSessionSourceDescendantRequest(manifest, source, request, seen); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(request)
 	if err != nil || len(raw) > MaxFrameBytes-4096 {
 		return errors.New("session source encoded frame budget exceeded")
@@ -329,6 +353,9 @@ func DecodeSessionSourceResult(request SessionSourceReadRequest, raw []byte) (Se
 			return result, errors.New("invalid source summary result")
 		}
 		summary := result.Summary
+		if err := validateSessionSourceIdentities(request, summary.Subs); err != nil {
+			return result, err
+		}
 		if len(summary.Title) > 4096 || len(summary.Cwd) > 4096 || strings.ContainsRune(summary.Cwd, 0) ||
 			len(summary.Usage) > 10000 || len(summary.ParentID) > 128 || len(summary.RootID) > 128 {
 			return result, errors.New("source summary budget exceeded")

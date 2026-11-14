@@ -65,7 +65,7 @@ func ExtensionProviders() ([]Provider, error) {
 		if entry.Disabled || !entry.Manifest.Contract.Has(sdk.OutboundExecutor) {
 			continue
 		}
-		manifest := entry.Manifest
+		manifest := entry.Manifest.Clone()
 		modelRevision, err := extensionModelRevision(context.Background(), host, entry)
 		if err != nil {
 			return nil, err
@@ -630,7 +630,15 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 			quota.Windows, quota.Error = nil, "extension provider returned an invalid quota window"
 			return quota
 		}
-		entry := QuotaWindow{Name: window.Name, Used: window.Used, Error: extensionUsageError(window.Error), Aside: window.Aside}
+		entry := QuotaWindow{Name: window.Name, Used: window.Used, Error: extensionUsageError(window.Error), Aside: window.Aside,
+			Limit: window.Limit, Display: window.Display, Unit: window.Unit, Span: time.Duration(window.Span) * time.Second,
+			amountPresence: quotaAmountAbsent, balanceInformational: true}
+		if window.Amount != nil {
+			entry.Amount, entry.amountPresence = *window.Amount, quotaAmountPresent
+		}
+		if window.Balance != nil {
+			entry.Balance = new(*window.Balance)
+		}
 		if set := idSetOf(window.Models); set != nil {
 			entry.matches = set.has
 		} else if set := idSetOf(window.NotModels); set != nil {
@@ -646,14 +654,18 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 		}
 		if unknown {
 			entry.Used, entry.Text, entry.Aside, entry.noShare, entry.Unknown = 0, true, true, true, true
-			entry.Display = entry.Error
+			if entry.Error != "" {
+				entry.Display = entry.Error
+			}
 			if entry.Display == "" {
 				entry.Display = "unknown"
 			}
 		}
 		if entry.AsOf != nil {
 			if !entry.Text {
-				entry.Display = fmt.Sprintf("%g%%", entry.Used)
+				if entry.Display == "" {
+					entry.Display = fmt.Sprintf("%g%%", entry.Used)
+				}
 				entry.Text, entry.Aside, entry.noShare = true, true, true
 			}
 			entry.Display += " (as of " + entry.AsOf.Format(time.RFC3339Nano) + ")"

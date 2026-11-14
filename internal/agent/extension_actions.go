@@ -171,12 +171,47 @@ func extensionAgents(home string, existing []*Agent, errs map[string]string) []*
 // snapshots so the module, which knows its config schema, can restore only
 // its own keys and preserve subsequent user edits.
 type extensionAgentOptions struct {
-	Gateway  string                        `json:"gateway"`
-	Key      string                        `json:"key"`
-	Models   []Option                      `json:"models"`
-	Field    string                        `json:"field,omitempty"`
-	Value    string                        `json:"value,omitempty"`
-	Previous []extension.ActionSettingFile `json:"previous,omitempty"`
+	Gateway     string                        `json:"gateway"`
+	Key         string                        `json:"key"`
+	Models      []Option                      `json:"models"`
+	Field       string                        `json:"field,omitempty"`
+	Value       string                        `json:"value,omitempty"`
+	Previous    []extension.ActionSettingFile `json:"previous,omitempty"`
+	PriorModels json.RawMessage               `json:"priorModels,omitempty"`
+}
+
+func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Manifest) ([]byte, error) {
+	if manifest.Contract.Version.Minor < 9 {
+		options.PriorModels = nil
+		for index := range options.Models {
+			options.Models[index].MaxOutput, options.Models[index].DefaultEffort = 0, ""
+			options.Models[index].Efforts = nil
+		}
+		return json.Marshal(options)
+	}
+	var models []json.RawMessage
+	if options.Models != nil {
+		models = make([]json.RawMessage, len(options.Models))
+	}
+	for index, option := range options.Models {
+		if err := sdk.ValidateAgentModelMetadata(manifest, sdk.AgentModelMetadata{MaxOutput: int64(option.MaxOutput),
+			Efforts: option.Efforts, DefaultEffort: option.DefaultEffort}); err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(struct {
+			Option
+			Efforts []string `json:"efforts"`
+		}{option, option.Efforts})
+		if err != nil {
+			return nil, err
+		}
+		models[index] = raw
+	}
+	type envelope extensionAgentOptions
+	return json.Marshal(struct {
+		envelope
+		Models []json.RawMessage `json:"models"`
+	}{envelope(options), models})
 }
 
 func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgent) *Agent {
@@ -195,7 +230,11 @@ func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgen
 				return nil, fmt.Errorf("extension agent ownership could not be read: %w", err)
 			}
 		}
-		return json.Marshal(opts)
+		manifest, err := host.Manifest(item.Plugin)
+		if err != nil {
+			return nil, err
+		}
+		return marshalExtensionAgentOptions(opts, manifest)
 	}
 	inspect := func() (sdk.AgentInspectResult, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

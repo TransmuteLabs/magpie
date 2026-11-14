@@ -17,6 +17,15 @@ import (
 
 func installAgentActionFixture(t *testing.T, descriptor sdk.AgentDescriptor) *extension.Manager {
 	t.Helper()
+	minor := 0
+	if descriptor.Aliases != nil || descriptor.UA != nil || descriptor.Launch != nil || descriptor.Profile != nil || descriptor.Library != nil {
+		minor = 5
+	}
+	return installAgentWorkerFixture(t, descriptor, "../extension/testdata/actionworker", minor)
+}
+
+func installAgentWorkerFixture(t *testing.T, descriptor sdk.AgentDescriptor, worker string, minor int) *extension.Manager {
+	t.Helper()
 	home := t.TempDir()
 	for _, env := range []string{"HOME", "USERPROFILE"} {
 		t.Setenv(env, home)
@@ -31,17 +40,14 @@ func installAgentActionFixture(t *testing.T, descriptor sdk.AgentDescriptor) *ex
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-mod=readonly", "-p=1", "-o",
-		filepath.Join(source, entry), "../extension/testdata/actionworker")
+		filepath.Join(source, entry), worker)
 	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build action fixture: %v\n%s", err, output)
 	}
 	manifest := sdk.Manifest{Schema: 1, ID: "fixture.agent", Version: "1.0.0", Runtime: "exec", Entry: entry,
-		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1}, Capabilities: []sdk.Capability{sdk.AgentWiring}},
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: minor}, Capabilities: []sdk.Capability{sdk.AgentWiring}},
 		Agents:   []sdk.AgentDescriptor{descriptor}}
-	if descriptor.Aliases != nil || descriptor.UA != nil || descriptor.Launch != nil || descriptor.Profile != nil || descriptor.Library != nil {
-		manifest.Contract.Version.Minor = 5
-	}
 	body, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)

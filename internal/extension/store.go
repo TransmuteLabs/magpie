@@ -372,6 +372,16 @@ func (s *Store) Operation(plugin, operation string) (JournalEntry, error) {
 			return err
 		}
 		if !found {
+			if strings.HasPrefix(operation, "account-task-") {
+				intent, exists, taskErr := readAccountTaskIntent(root, operation)
+				if taskErr != nil {
+					return taskErr
+				}
+				if exists {
+					result = intent.Receipt
+					return nil
+				}
+			}
 			return storeError("not_found", "Extension operation is unavailable.")
 		}
 		result = entry

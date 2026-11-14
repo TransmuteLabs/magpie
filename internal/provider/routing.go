@@ -1338,6 +1338,9 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 			continue
 		}
 		l := Limit{Used: w.Used, Span: w.Span, Model: w.Model, Amount: w.Amount, Of: w.Limit, Unit: w.Unit, matches: w.matches, partial: w.partial, Name: w.Name, Credits: w.Credits, Resets: resets(w)}
+		if w.amountPresence == quotaAmountAbsent {
+			l.Amount, l.Of = 0, 0
+		}
 		if ids := families[w.Model]; ids != nil && w.Family != "" && w.matches == nil {
 			l.Model = ""
 			l.matches = func(model string) bool { return ids[model] }
@@ -1348,7 +1351,7 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		if w.RunsOutAt != nil {
 			l.RunsOut, l.RunsOutLeft = *w.RunsOutAt, w.RunsOut
 		}
-		if w.Balance != nil {
+		if w.Balance != nil && !w.balanceInformational {
 			// a wallet is known by its balance, with no share invented:
 			// one with nothing left is used up, as the vendor refuses it
 			b := *w.Balance
@@ -1383,6 +1386,9 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		// with its count, so a cap of an amount of its unit holds too
 		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true,
 			Amount: w.Amount, Of: w.Limit, Unit: w.Unit, extra: w.Extra}
+		if w.amountPresence == quotaAmountAbsent {
+			al.Amount, al.Of = 0, 0
+		}
 		for i := range a {
 			a[i].pool = append(a[i].pool, al)
 		}

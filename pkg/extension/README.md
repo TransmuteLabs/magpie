@@ -2,7 +2,7 @@
 
 Our modules keep integration behavior outside upstream-owned Magpie code.
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. Current source API 1.8 includes native/exec/Bun,
+advertised capability. Current source API 1.9 includes native/exec/Bun,
 composite modules, gateway hooks/private tools, transactional refresh, finite provider
 operations, rich model metadata, namespaced routing strategies and declared
 selected-account window actions and poll/link window authentication. API 1.5
@@ -28,6 +28,14 @@ selected account. A provider may separately declare `Calls: true` and serve
 accounting; history uses reported ingestion without live observer effects.
 The [own-call/history contract](../../docs/adr/0025-sdk-own-calls-and-outside-history.md)
 defines identity, generation checks, paging and acknowledgment semantics.
+
+API 1.9 adds declared boolean provider switches, paid selected-account tasks,
+effective agent model limits/efforts, provider concurrency defaults, richer
+quota facts and descendant session-source identities. These use the existing
+configuration, caller budget, usage, agent and Sessions owners; they do not
+create parallel accounting or automatically enable paid work. See the
+[provider reference](../../docs/subsystems/extension-providers.md) and
+[agent/session reference](../../docs/subsystems/extension-agents-sessions.md).
 
 | Runtime | Author entry | Result |
 | --- | --- | --- |
@@ -89,7 +97,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.8; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.9; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
 contract is API 0.5, retaining the older 0.1 inbound, 0.2 catalog, 0.3 tool
 and 0.4 executor-binding contracts.

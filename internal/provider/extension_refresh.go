@@ -15,6 +15,11 @@ func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount
 	if err := binding.check(ctx); err != nil {
 		return nil, err
 	}
+	if binding.manifest.Contract.Version.Minor >= 9 {
+		if err := binding.checkModelRevision(ctx); err != nil {
+			return nil, err
+		}
+	}
 	origin := binding
 	snapshot := *binding
 	snapshot.scope, snapshot.generation = binding.currentScope(), nil

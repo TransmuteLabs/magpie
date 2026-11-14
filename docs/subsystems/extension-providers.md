@@ -143,6 +143,109 @@ context through `netproxy.Func`, including named and global proxies or a
 direct route. `Options.proxy` is the selected choice, not necessarily a
 resolved proxy URL.
 
+## Declared provider switches (API 1.9)
+
+Providers may declare bounded boolean `options` with defaults, localized labels,
+descriptions and enable confirmations. These keys belong to the root module's
+configuration; legacy plugin switches retain their existing settings owner.
+Listing options reads the catalog and configuration without starting a worker.
+Only declared values, the package revision and the configuration version reach
+the provider editor.
+
+The editor captures that owner when it opens. A redraw after an external
+package or configuration change cannot transfer an existing edit or
+acknowledgement to the replacement. Enabling a confirmed option asks even when
+its text is available only in another locale. Save uses one checked
+configuration CAS and returns only its version, preserving unrelated private
+configuration in the Store. A successful CAS updates the editor's baseline
+before the ordinary provider save; if that later save fails, retry does not
+resubmit the committed options. Edits made while CAS is pending remain pending
+against the new baseline and keep the editor open for another save. A failed
+or missing CAS receipt makes the state unknown and requires reopening the
+editor before another provider save, even if a later click removes its delta.
+Cached metadata retains that refusal; ordinary reopen reads fresh metadata. The first
+save of a fresh editor validates its complete declared switch snapshot through
+CAS, even when unchanged, fencing a delayed write with an older version.
+Further saves in that same editor can reuse its acknowledged unchanged
+snapshot. New edits or a different editor opened while the ordinary provider
+save is pending remain open when that save completes.
+
+The shared lazy renderer retains legacy placement, explicit false values,
+confirmation and delayed save behavior. Actual-source VM regressions cover
+these state transitions; they do not establish browser layout or native
+dialog behavior.
+
+## Paid selected-account tasks (API 1.9)
+
+An authenticated executor with `module-rpc` and `usage-reporter` may declare
+`accountTasks: [{"id":"cache-keepalive","action":"cache.ping"}]`. Each task
+names a declared write action on the primary or its private service.
+[`account_tasks.go`](../../pkg/extension/account_tasks.go) defines the bounded
+wire; [`AccountTasks`](../../internal/extension/account_tasks.go) owns the
+gateway lifetime. Empty catalogs and inspection start no task worker or Bun.
+This is separate from idle authentication renewal. The module owns explicit
+paid opt-in, vendor templates, cadence, cache evidence, stop rules and limits.
+
+While a selected foreground stream is live, the module first calls
+`accountTasks.cancel` with its task ID and opaque conversation `key`, before
+acceptance or vendor dispatch. This binds the current conversation claim,
+cancels and joins its previous task owners, and fences late scheduling by an
+older foreground. Other keys and host-derived callers remain independent.
+After successful measured execution, `accountTasks.schedule` carries only
+`task`, `key`, an opaque `job` and `dueAt` in Unix milliseconds. The module
+keeps credential-free templates itself; registration supplies no account,
+model, auth or vendor payload. The host waits for successful foreground
+completion. Overdue work runs once immediately, without a catch-up loop.
+There are at most 32 outstanding tasks per caller/account and 256 per owner.
+
+Each tick acquires a new lease and uses the existing selected-account,
+refresh, model, proxy, quota, routing-pool, rest, caller-budget and concurrency
+owners. It does not choose a replacement account. Package/configuration,
+credential generation and caller policy are rechecked before dispatch and
+while active. Dirty usage must be reconciled through the existing revision
+acknowledgment; a deferred or failed read cannot admit another foreground.
+The module may register one successor from a successful live tick. No
+stream, auth, vendor client or original request context survives a timer.
+
+The private durable intent and ordinary operation journal prevent the same
+tick from paying twice, including after an uncertain outcome or a new host
+process. Tasks are not replayed after restart. An accepted action may report
+cumulative `OwnCall` snapshots through `accountTask.usage`
+(`ReportAccountTaskUsage` / `reportAccountTaskUsage`). The host retains the
+latest validated snapshot; progress does not append ledger rows.
+`usage.append` and the terminal result's optional `call` share the same
+one-call gate. Termination, including cancellation, flushes admitted evidence
+once through normal accounting, its observers and the original caller's
+budget. The gateway supplies the existing `budget.Append` sink; it calls the
+ordinary ledger append without creating another row. Missing evidence never
+becomes invented zero usage. Canceled module callbacks cannot regain
+authority. Joining the host owner does not prove that a vendor stopped work,
+and ordinary accounting remains best effort rather than crash-durable
+exactly-once delivery.
+
+`ServiceManifest` delegates `component.accountTaskActions` only for the
+service's write actions named by the installed root's `accountTasks`.
+These services negotiate API 1.9 with `module-rpc` alone. Their task action
+may emit validated progress or return terminal usage without acquiring
+`usage-reporter`, `provider.usage`, outside-history, normal `usage.append`
+or account-auth authority. Ordinary services retain their API 1.1 projection
+unless another explicit declaration requires a newer version. The task
+owner reads the pinned complete root descriptor; the public primary
+handshake deliberately omits private actions and their task descriptors.
+The host still requires its exact scheduled context and accepted receipt.
+
+`internal/gateway/extension_account_tasks_test.go` exercises the real
+`Server.Front`, a separately built synthetic module and a local paid endpoint:
+ordinary lifecycle, conversation/caller isolation, current routing and
+policy, refresh receipts, cancellation snapshots, normal accounting and
+successor/no-replay behavior. `internal/extension/account_tasks_test.go`
+checks durable intents and refusal of ordinary RPC authority; Go and JS task
+tests check descriptor and wire parity.
+`internal/gateway/extension_account_tasks_service_test.go` runs separate Go
+and JS private workers through the ordinary gateway, cancels after two
+acknowledged snapshots, and checks the last facts, one normal observer row,
+the original caller's spent budget and no second vendor call.
+
 ## Selected-account check-in (API 1.8)
 
 An authenticated provider may declare
@@ -283,6 +386,26 @@ subscription quota path. Both the reading cache and routing freshness are
 fenced by current account generations. Late reads cannot publish routing
 state for a replaced account. External quotas do not reuse the legacy
 name-only disk fallback across generations.
+
+API 1.9 provider descriptors may declare `maxConcurrency` per account and
+`maxAccounts` for active account fanout. Omission preserves the existing
+default. Values are integers from zero through 1000; zero means unlimited.
+The ordinary provider and gateway lane owners apply these defaults after
+explicit provider/account settings, including a user's zero. The selected
+package, configuration and account generation fence the declaration.
+Queued requests recheck that selection before dispatch; cancellation and
+response EOF release the existing lane slots. These defaults add no second
+semaphore or account scheduler.
+
+API 1.9 usage windows may carry optional `amount`, `balance`, `display`,
+`unit` and `span` metadata. Amount is a nonnegative count; balance is a
+signed reported wallet figure. Exact zero and an absent count remain
+distinct through the native cards and JSON quota report. Numeric magnitude
+is at most 2^53-1; display/unit are bounded text and span is at most
+9223372036 integer seconds. Span and the vendor reset reach the ordinary
+pace presentation. A historical reading retains its vendor display and
+timestamp. This metadata supplies no missing `used` share, freshness,
+financial balance authority, execution currency or measured cost.
 
 API 1.4 adds exact model inclusion/exclusion sets and informational `aside`
 windows through the existing quota matcher. A selected account also has a

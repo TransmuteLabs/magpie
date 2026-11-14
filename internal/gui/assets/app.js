@@ -6228,7 +6228,7 @@ function renderProviders(quiet) {
       if (providerDirty() && !(await confirmDiscard())) return;
       // a list drawn before the fresh one is in (#1519) leaves out what the
       // editor shows (headers, proxies): the row opens on the fresh one
-      if (providers.last) {
+      if (providers.last || p.extensionOptionsUnknown || p.extensionOptionsError) {
         try { await loadProviders(); } catch (e) { statusErr(e); return; }
         if (!providers.providers.some((x) => x.id === p.id)) return;
       }
@@ -7886,33 +7886,9 @@ function pluginOptionsField(sub, top) {
   const opts = all.filter((o) => (o.placement === "top") === !!top);
   if (!opts.length) return [];
   const first = top || !all.some((o) => o.placement === "top");
-  const now = (o) => (draft.pluginOptions && o.key in draft.pluginOptions ? draft.pluginOptions[o.key] : !!o.on);
-  const set = (o, on) => {
-    const own = { ...draft.pluginOptions };
-    if (on === !!o.on) delete own[o.key]; else own[o.key] = on;
-    if (Object.keys(own).length) draft.pluginOptions = own; else delete draft.pluginOptions;
-  };
   const box = el("div", "stack plugin-options");
-  for (const o of opts) {
-    const row = el("div", "plugin-option");
-    row.dataset.key = o.key;
-    const text = el("div", "plugin-option-text");
-    const label = optionWords(o, "label"), about = optionWords(o, "description"), ask = optionWords(o, "confirm");
-    text.append(el("div", "n", label));
-    if (about) text.append(el("div", "hint", about));
-    const draw = () => {
-      const seg = segs([["off", t("Off")], ["on", t("On")]], now(o) ? "on" : "off", async (v) => {
-        if (v === "on" && !now(o) && ask && !(await confirmAction(t("Turn on {name}?", { name: label }), ask, t("Turn on")))) {
-          seg.replaceWith(draw());
-          return;
-        }
-        set(o, v === "on");
-      });
-      return seg;
-    };
-    row.append(text, draw());
-    box.append(row);
-  }
+  const values = draft.pluginOptions ??= {};
+  import("./provideroptions.js").then(() => paintProviderOptions(box, opts, values, new Set()), statusErr);
   box.classList.toggle("top", !!top);
   return field(t("Plugin options"), box, first ? t("{plugin} declares these and reads them as it works; nothing runs on its own when one changes.", { plugin: sub.plugin.name || sub.plugin.pid }) : "");
 }
@@ -7927,12 +7903,21 @@ function pluginFilterNote(sub) {
     .map((o) => t("Only some models are listed: the plugin option “{option}” is on.", { option: optionWords(o, "label") })).join(" ");
 }
 // savePluginOptions saves the draft's changed plugin options, by its own id.
-async function savePluginOptions(sub) {
-  const pid = sub?.plugin?.pid;
-  if (!pid) return;
-  for (const [key, on] of Object.entries(draft.pluginOptions || {})) {
-    prefs = await writingPrefs(api("settings/plugin-option", { provider: pid, key, on }));
-  }
+async function savePluginOptions(sub, p) {
+  const editingDraft = draft;
+  await import("./provideroptions.js");
+  await saveProviderOptionDraft(editingDraft, sub, p);
+}
+function extensionOptionsField(p) {
+  if (p.extensionOptionsError || p.extensionOptionsUnknown) return field(t("Plugin options"), el("div", "hint", p.extensionOptionsError || t("Provider options changed; reopen this editor before saving.")));
+  const own = p.extensionOptions;
+  if (!own?.options?.length) return [];
+  const box = el("div", "stack plugin-options"), editingDraft = draft;
+  editingDraft.extensionOwner ??= structuredClone(own);
+  editingDraft.extensionOptions ??= {};
+  editingDraft.extensionConfirms ??= new Set();
+  import("./provideroptions.js").then(() => paintExtensionProviderOptions(box, editingDraft, p), statusErr);
+  return field(t("Plugin options"), box);
 }
 // priceRateOfDraft: as saved, null for none, undefined if typed wrong
 function priceRateOfDraft() {
@@ -9608,6 +9593,7 @@ function drawEditor(p, presetID) {
   };
 
   if (p?.account) {
+    ed.append(...extensionOptionsField(p));
     const a = p.account;
     if (subOf(a.agent)) {
       if (a.agent === "claude" && !p.switchOnly) ed.append(claudeModeRow());
@@ -9690,7 +9676,7 @@ function drawEditor(p, presetID) {
       if (picked === false) return pickError();
       const body = { id: p.id, models: chosenIds(), noModels: noneChosen(), bestInFamily: bestChosen(), unlisted: draft.unlisted, hiddenDrawers: draft.hiddenDrawers, hiddenVideomakers: draft.hiddenVideomakers, fallback: draft.fallback, contexts: cx.map, outputs: ox.map, compacts: cpx.map, proxy, accountProxies: own.map, maxConcurrency, maxAccounts, ...queue, priceRate, rateWindows, modelPrefs: modelPrefsOfDraft(), pinUpstream: !!draft.pinUpstream, unredacted: !!draft.unredacted, countFree: !!draft.countFree, billing: draft.billing || "", ...(p.carriesCompaction ? { nativeCompaction: !!draft.nativeCompaction } : {}), ...routingOfDraft(p) };
       saving(saveBtn, t("Saving…"));
-      saveAccountModelsDraft(picked).then(() => savePluginOptions(subOf(a.agent))).then(() => providerAction("save", body, t("{name} saved", { name: p.name })), (e) => { doneSaving(saveBtn); editorError(e.message || String(e)); }); };
+      saveAccountModelsDraft(picked).then(() => savePluginOptions(subOf(a.agent), p)).then(() => providerAction("save", body, t("{name} saved", { name: p.name })), (e) => { doneSaving(saveBtn); editorError(e.message || String(e)); }); };
     bar.append(cancel, saveBtn);
     ed.append(bar);
     return ed;
@@ -14633,8 +14619,8 @@ function paceLine(w) {
 // "355 / 500 credits" used or left as the share says; else the vendor's text
 const countFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 function quotaCount(w) {
-  if (!(w.limit > 0)) return w.display || "";
-  const amount = Math.max(0, w.amount || 0), n = quotaLeft ? Math.max(0, w.limit - amount) : amount;
+  if (!(w.limit > 0) || w.amount == null) return w.display || "";
+  const amount = Math.max(0, w.amount), n = quotaLeft ? Math.max(0, w.limit - amount) : amount;
   return (countFormat.format(n) + " / " + countFormat.format(w.limit) + (w.unit ? " " + t(w.unit) : "")).trim();
 }
 // familyWindows: an account's per-model windows as one a model family
@@ -15638,7 +15624,9 @@ async function providerAction(action, body, okMsg, base = "provider/") {
     "Its saved configuration will be removed. Agents using it may switch to another provider or their default model.")) return false;
   try {
     const was = editing;
+    const keepOptions = action === "save" && window.captureProviderOptionsSave?.(okMsg);
     providers = await api(base + action, body);
+    if (keepOptions && await keepOptions()) return true;
     dropSigningIn(was); // saved or removed, the editor takes its sign-in with it
     editing = null;
     draft = null;

@@ -81,8 +81,9 @@ type BindingDescriptor struct {
 }
 
 type ComponentIdentity struct {
-	ID       string          `json:"id"`
-	Contract ServiceContract `json:"contract"`
+	ID                 string          `json:"id"`
+	Contract           ServiceContract `json:"contract"`
+	AccountTaskActions []string        `json:"accountTaskActions,omitempty"`
 }
 
 type ModuleCallRequest struct {
@@ -202,7 +203,16 @@ func ServiceManifest(root Manifest, id string) (Manifest, error) {
 			if actionOwner(action) == id {
 				action.InputSchema = slices.Clone(action.InputSchema)
 				view.Actions = append(view.Actions, action)
+				for _, provider := range root.Providers {
+					if slices.ContainsFunc(provider.AccountTasks, func(task AccountTaskDescriptor) bool { return task.Action == action.ID }) {
+						view.Component.AccountTaskActions = append(view.Component.AccountTaskActions, action.ID)
+						break
+					}
+				}
 			}
+		}
+		if len(view.Component.AccountTaskActions) != 0 {
+			view.Contract.Version = APIVersion{Major: 1, Minor: 9}
 		}
 		return view, nil
 	}
@@ -327,6 +337,20 @@ func (manifest Manifest) validateComposite() error {
 		}
 		actions[action.ID] = true
 	}
+	if manifest.Component != nil {
+		grants := manifest.Component.AccountTaskActions
+		if len(grants) > 1024 || len(grants) != 0 && manifest.Contract.Version.Minor < 9 {
+			return fmt.Errorf("service task actions require SDK API 1.9 and bounded grants")
+		}
+		seen := map[string]bool{}
+		for _, id := range grants {
+			action, found := manifest.ResolveAction(id)
+			if !found || actionOwner(action) != own || action.Effect != "write" || seen[id] {
+				return fmt.Errorf("service task actions require unique declared owned writes")
+			}
+			seen[id] = true
+		}
+	}
 	for _, service := range manifest.Services {
 		for _, method := range service.Methods {
 			action, found := manifest.ResolveAction(method)
@@ -358,14 +382,15 @@ func (manifest Manifest) validateComposite() error {
 		bindings[binding.ID] = true
 	}
 	if compatibility := manifest.Compatibility; compatibility != nil {
-		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" && compatibility.HostAPI != "^1.6" && compatibility.HostAPI != "^1.7" && compatibility.HostAPI != "^1.8" ||
+		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" && compatibility.HostAPI != "^1.6" && compatibility.HostAPI != "^1.7" && compatibility.HostAPI != "^1.8" && compatibility.HostAPI != "^1.9" ||
 			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 ||
 			compatibility.HostAPI == "^1.3" && manifest.Contract.Version.Minor < 3 ||
 			compatibility.HostAPI == "^1.4" && manifest.Contract.Version.Minor < 4 ||
 			compatibility.HostAPI == "^1.5" && manifest.Contract.Version.Minor < 5 ||
 			compatibility.HostAPI == "^1.6" && manifest.Contract.Version.Minor < 6 ||
 			compatibility.HostAPI == "^1.7" && manifest.Contract.Version.Minor < 7 ||
-			compatibility.HostAPI == "^1.8" && manifest.Contract.Version.Minor < 8 {
+			compatibility.HostAPI == "^1.8" && manifest.Contract.Version.Minor < 8 ||
+			compatibility.HostAPI == "^1.9" && manifest.Contract.Version.Minor < 9 {
 			return fmt.Errorf("unsupported host API requirement %q", compatibility.HostAPI)
 		}
 		if len(compatibility.Platforms) > 128 {

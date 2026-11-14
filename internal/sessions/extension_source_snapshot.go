@@ -177,6 +177,9 @@ func collectSourceDocuments(ctx context.Context, manager *extension.Manager, lea
 		}
 		snapshot.files = files
 	}
+	if err := collectSourceDescendants(ctx, grant, request, snapshot); err != nil {
+		return nil, err
+	}
 	identity := []string{grant.reference, request.Locator.Path}
 	for _, file := range snapshot.files {
 		identity = append(identity, file.path, hex.EncodeToString(file.hash[:]))

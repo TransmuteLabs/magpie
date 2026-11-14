@@ -180,6 +180,7 @@ const (
 
 // cliForRoute is the command that does what a route does, as `magpie …`.
 var cliForRoute = map[string]string{
+	"POST /api/provider/extension-options": "magpie plugin sdk provider-options",
 	"GET /api/agent-models/{id}":           "magpie models",
 	"GET /api/settings":                    "magpie settings list",
 	"POST /api/settings":                   "magpie settings set",
@@ -555,6 +556,7 @@ var notYet = map[string]string{
 	"POST /api/whatsnew/today":                   W,  // whatsnew.go
 
 	"GET /api/sessions/storage-media": "selected storage media bytes have no CLI export command",
+	"POST /api/page-away":             "window visibility notification releases page caches and has no CLI page lifecycle",
 }
 
 // guiRoutes are the /api routes internal/gui serves, as "METHOD /path".

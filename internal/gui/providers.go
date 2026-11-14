@@ -21,6 +21,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
@@ -146,21 +147,23 @@ func keysApart(listed, on []string, at map[string]int) ([]string, int) {
 }
 
 type providerJSON struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Icon      string            `json:"icon"`
-	IconFrom  string            `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
-	Preset    string            `json:"preset"`
-	Host      string            `json:"host"`
-	Chat      string            `json:"chat"`
-	Responses string            `json:"responses"`
-	Anthropic string            `json:"anthropic"`
-	Gemini    string            `json:"gemini,omitempty"` // a Gemini API's base (#1346)
-	Decide    string            `json:"decide,omitempty"` // a decision API: it only routes groups
-	Catalog   string            `json:"catalog"`
-	Website   string            `json:"website"`
-	KeysURL   string            `json:"keysUrl"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	ExtensionOptions      *extension.ProviderOptionsSnapshot `json:"extensionOptions,omitempty"`
+	ExtensionOptionsError string                             `json:"extensionOptionsError,omitempty"`
+	ID                    string                             `json:"id"`
+	Name                  string                             `json:"name"`
+	Icon                  string                             `json:"icon"`
+	IconFrom              string                             `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
+	Preset                string                             `json:"preset"`
+	Host                  string                             `json:"host"`
+	Chat                  string                             `json:"chat"`
+	Responses             string                             `json:"responses"`
+	Anthropic             string                             `json:"anthropic"`
+	Gemini                string                             `json:"gemini,omitempty"` // a Gemini API's base (#1346)
+	Decide                string                             `json:"decide,omitempty"` // a decision API: it only routes groups
+	Catalog               string                             `json:"catalog"`
+	Website               string                             `json:"website"`
+	KeysURL               string                             `json:"keysUrl"`
+	Headers               map[string]string                  `json:"headers,omitempty"`
 	// JSON fields added to each request's body (provider.ExtraBody, #1604)
 	ExtraBody provider.ExtraBody `json:"extraBody,omitempty"`
 	// headers of the vendor's reply passed on (provider.ReplyHeaders, #4145)
@@ -959,6 +962,13 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		AccountConcurrency: p.AccountConcurrency, AccountWeights: p.AccountWeights, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
 	}
+	if scope, ok := p.ExtensionScope(); ok {
+		var err error
+		out.ExtensionOptions, err = extensionProviderOptions().ProviderOptions(context.Background(), scope.Plugin, scope.Provider)
+		if err != nil {
+			out.ExtensionOptionsError = err.Error()
+		}
+	}
 	if p.Account != nil && p.Account.Agent == p.ID {
 		out.SignInMoves = provider.SignInMovesOf(p.ID)
 	}
@@ -1618,6 +1628,7 @@ const sponsorMail = "mailto:yetoneful@gmail.com?subject=Sponsoring%20magpie"
 var appLink = agent.OpenAppLink
 
 func providerRoutes(mux *http.ServeMux, w Windows) {
+	extensionProviderOptionRoutes(mux)
 	importAppsRoutes(mux)
 	pluginRoutes(mux, w)
 	traceRoutes(mux)

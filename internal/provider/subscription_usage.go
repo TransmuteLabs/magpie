@@ -165,7 +165,9 @@ type QuotaWindow struct {
 	// out: its Used is 0 for want of a share said, not a reading at 0, so
 	// quota history keeps no line for it (#4825). The card still tells
 	// the row's text and routing still sets it aside.
-	noShare bool
+	noShare              bool
+	amountPresence       uint8
+	balanceInformational bool
 }
 
 // SubscriptionQuota is provider-reported allowance usage. This is separate
@@ -1508,7 +1510,7 @@ func compactNumber(n float64) string {
 // "355 / 500 credits" used, or what is left of it when left (#659); the
 // vendor's Display when it doesn't count in amounts.
 func (w QuotaWindow) Count(left bool) string {
-	if w.Limit <= 0 {
+	if w.Limit <= 0 || w.amountPresence == quotaAmountAbsent {
 		return w.Display
 	}
 	n := w.Amount

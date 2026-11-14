@@ -14,6 +14,9 @@ import { STORAGE_METHODS, validateStorageSources, validateStorageRequest, valida
 import { validateAccountOperations } from "./account-operations.js";
 import { validateAccountCheckins } from "./account-checkin.js";
 import { validateAccountKeepAlives } from "./account-keepalive.js";
+import { validateProviderOptions } from "./provider-options.js";
+import { validateAccountTasks } from "./account-tasks.js";
+import { validateProviderDefaults } from "./provider-defaults.js";
 import { validateActivation } from "./gateway-activation.js";
 import { validateCatalogAccess } from "./catalog-projection.js";
 import { validateLedgerObserver, validateLedgerCall, validateLedgerResult } from "./ledger.js";
@@ -38,7 +41,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 8 }),
+  version: Object.freeze({ major: 1, minor: 9 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -123,7 +126,7 @@ function modelPolicy(model) {
       price[field] = value;
     }
   }
-  if (model.efforts !== undefined) {
+  if (model.efforts !== undefined && model.efforts !== null) {
     const levels = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
     if (!Array.isArray(model.efforts) || model.efforts.length > levels.length
       || new Set(model.efforts).size !== model.efforts.length
@@ -171,7 +174,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5, 6, 7, 8].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -189,6 +192,7 @@ export function validateManifest(value) {
         if (!has("inbound-codec") || !endpoint(descriptor.path) || paths.has(descriptor.path)) fail("Invalid, reserved or duplicate inbound path");
         paths.add(descriptor.path);
       } else if (key === "providers") {
+        validateProviderDefaults(manifest, descriptor);
         if (descriptor.calls !== undefined && (typeof descriptor.calls !== "boolean"
           || descriptor.calls && (contract.version.minor < 8 || !has("usage-reporter") || !has("account-auth"))))
           fail("Outside calls require SDK API 1.8, usage reporting and account auth");
@@ -257,6 +261,8 @@ export function validateManifest(value) {
   validateAccountOperations(manifest, fail);
   validateAccountCheckins(manifest);
   validateAccountKeepAlives(manifest);
+  validateProviderOptions(manifest);
+  validateAccountTasks(manifest);
   validateActivation(manifest);
   validateHooks(manifest);
   validateMiddleware(manifest);
@@ -276,6 +282,7 @@ export function publicManifest(manifest) {
     result.routingStrategies = result.routingStrategies.filter(strategy => result.actions?.some(action => action.id === strategy.action));
   }
   for (const provider of result.providers || []) {
+    if (provider.accountTasks) provider.accountTasks = provider.accountTasks.filter(task => result.actions?.some(action => action.id === task.action));
     if (provider.checkin != null && !result.actions?.some(action => action.id === provider.checkin.action)) delete provider.checkin;
     for (const model of provider.models || []) modelPolicy(model);
   }
@@ -375,13 +382,17 @@ export function serviceManifest(root, id) {
   if (root.component != null) fail("A service manifest requires the root module");
   const service = root.services?.find(service => service.id === id);
   if (!service) fail("Unknown module service");
+  const actions = (root.actions ?? []).filter(action => actionOwner(action) === id);
+  const accountTaskActions = actions.filter(action => (root.providers ?? [])
+    .some(provider => provider.accountTasks?.some(task => task.action === action.id))).map(action => action.id);
   return validateManifest({
     schema: root.schema, id: root.id, version: root.version,
     runtime: service.runtime, entry: service.entry, ...(service.args ? { args: service.args } : {}),
-    contract: { version: root.catalogAccess ? root.contract.version : { major: 1, minor: 1 }, capabilities: ["module-rpc"] },
+    contract: { version: accountTaskActions.length ? { major: 1, minor: 9 }
+      : root.catalogAccess ? root.contract.version : { major: 1, minor: 1 }, capabilities: ["module-rpc"] },
     ...(root.catalogAccess ? { catalogAccess: root.catalogAccess } : {}),
-    component: { id, contract: service.contract },
-    actions: (root.actions ?? []).filter(action => actionOwner(action) === id),
+    component: { id, contract: service.contract, ...(accountTaskActions.length ? { accountTaskActions } : {}) },
+    actions,
   });
 }
 

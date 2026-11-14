@@ -30,7 +30,13 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 		stream.server.mu.Unlock()
 		return err
 	}
-	if stream.state.call.Method == MethodModuleCall && (stream.actionEffect != "write" || event != "accepted") {
+	taskUsage := false
+	if event == EventAccountTaskUsage && stream.state.call.Method == MethodModuleCall {
+		var request ModuleCallRequest
+		taskUsage = decodeParams(stream.state.call.Params, &request) == nil &&
+			stream.server.manifest.accountTaskAction(request.Action)
+	}
+	if stream.state.call.Method == MethodModuleCall && (stream.actionEffect != "write" || event != "accepted" && !taskUsage) {
 		err := &Error{Code: "invalid_params", Message: "module.call is unary and permits only a write acceptance receipt"}
 		stream.server.mu.Lock()
 		stream.state.creditErr = err
@@ -56,6 +62,13 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 	payload, err := marshalPayload(data)
 	if err != nil {
 		return err
+	}
+	if event == EventAccountTaskUsage {
+		var call OwnCall
+		if stream.state.call.Method != MethodModuleCall || !taskUsage ||
+			decodeParams(payload, &call) != nil || validateAccountTaskCall(stream.server.manifest, call) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid paid task usage snapshot"}
+		}
 	}
 	if event == "data" {
 		var chunk []byte
@@ -121,7 +134,7 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
-	if ctx == nil || method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) {
+	if ctx == nil || method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) && !IsAccountTaskHostMethod(method) {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
 	}
 	if IsStorageHostMethod(method) && !IsStorageMethod(stream.state.call.Method) {

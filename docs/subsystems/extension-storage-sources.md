@@ -45,14 +45,29 @@ and carry no provider, account, generation, attempt or credentials. Private
 `storage.*` callbacks require that exact active parent and scope; a component
 or another parent cannot borrow the grant.
 
-Linux native access duplicates a private borrowed directory descriptor. Every
-path component is opened read-only with `O_NOFOLLOW`; devices, sockets,
-symlinks and undeclared family members fail. The native SDK helper exposes
-only declared family members. Legacy tree enumeration and byte
-snapshots remain brokered, with opaque file references and snapshot cursors.
-Other platforms currently refuse rooted native reads explicitly, including
-macOS. A Darwin source adapter and module WAL VFS remain required; a Linux
-native proof or Darwin CGO0 build does not establish Mac runtime support.
+Linux and Darwin native access atomically duplicate a private borrowed
+directory descriptor with close-on-exec set. Every path component is opened
+read-only with `Openat` and `O_NOFOLLOW`; devices, sockets, symlinks and
+undeclared family members fail. The owned descriptor remains pinned after a
+pathname replacement and is closed independently of the borrowed descriptor.
+There is no proc-fd reopen or path fallback. The native SDK helper exposes
+only declared family members. Legacy tree enumeration and byte snapshots
+remain brokered, with opaque file references and snapshot cursors. Other
+platforms refuse rooted native reads explicitly. Darwin arm64/amd64 CGO0
+build and vet establish source support; actual Mac native loading, rooted
+access and lock interoperability remain an isolated runtime acceptance gate.
+
+Darwin POSIX record locks belong to the process: closing another descriptor
+for that inode can release a live module reader's locks. The broker therefore
+uses rooted metadata-only probes for identity checks, and compares device and
+inode without requiring Go's private `os.FileInfo` representation. Darwin
+storage grants serialize across native library instances. Once native access
+starts, broker member descriptors are retained within a finite 256-descriptor
+budget until a validated parent terminal frame. Cancellation closes the
+grant to publication but does not release those descriptors or admit another
+native lifetime before that terminal. Worker retirement alone is insufficient;
+an uncertain handler that never terminates keeps admission closed. The module
+still owns its SQLite transaction and all DB/SHM lock and close coordination.
 
 The broker snapshots legacy bytes once, charges the complete physical
 snapshot against the aggregate budget, and serves bounded chunks from those

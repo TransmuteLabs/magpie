@@ -60,6 +60,8 @@ type Manager struct {
 	windowAuthWG      sync.WaitGroup
 	activationWG      sync.WaitGroup
 	gatewayActivation *GatewayActivation
+	accountTasks      *AccountTasks
+	accountTasksWG    sync.WaitGroup
 	diagnostics       map[string]diagnosticWindow
 	diagnosticLog     func(moduleDiagnostic)
 	catalogReader     CatalogProjectionReader
@@ -784,6 +786,16 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			return nil, err
 		}
 	}
+	taskCompleted := false
+	if method == sdk.MethodProviderExecute {
+		var finish func(bool)
+		var err error
+		ctx, finish, err = m.beginAccountTaskForeground(ctx, l, scope, params)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { finish(taskCompleted) }()
+	}
 	if method == sdk.MethodAuthRefresh {
 		result, err := m.refreshFromLease(ctx, l, scope)
 		if err != nil {
@@ -853,6 +865,10 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := checkLeasedCheckin(ctx, l, method, scope, params); err != nil {
 		return nil, err
 	}
+	accountTask, err := checkLeasedAccountTask(ctx, l, method, scope, params)
+	if err != nil {
+		return nil, err
+	}
 	if err := checkWindowAdmission(ctx); err != nil {
 		return nil, err
 	}
@@ -880,7 +896,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if scope.Attempt == 0 {
 			scope.Attempt = 1
 		}
-		if _, err := m.store.journal(scope, "dispatched", method == sdk.MethodProviderExecute); err != nil {
+		if _, err := m.store.journal(scope, "dispatched", method == sdk.MethodProviderExecute || accountTask); err != nil {
 			return nil, err
 		}
 	}
@@ -901,8 +917,15 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if len(event.Data) > sdk.MaxChunkBytes*2 {
 			return errors.New("extension event exceeds its contract")
 		}
-		if method == sdk.MethodModuleCall && event.Name != "accepted" {
+		if method == sdk.MethodModuleCall && event.Name != "accepted" &&
+			!(accountTask && event.Name == sdk.EventAccountTaskUsage) {
 			return errors.New("module RPC 1.1 is unary")
+		}
+		if event.Name == sdk.EventAccountTaskUsage {
+			if !accountTask || !accepted {
+				return errors.New("paid usage snapshots require their accepted scheduled task")
+			}
+			return m.captureAccountTaskUsage(ctx, scope, manifest, event.Data)
 		}
 		if sdk.IsGatewayMethod(method) && event.Name != "accepted" {
 			return errors.New("gateway hook calls are unary")
@@ -919,6 +942,11 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 				return err
 			}
 			accepted = true
+			if accountTask {
+				if _, err := m.store.InvalidateUsage(scope); err != nil {
+					return err
+				}
+			}
 		}
 		if consume != nil {
 			return consume(event)
@@ -926,6 +954,14 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil
 	}
 	result, err := client.call(ctx, method, scope, auth, params, onEvent)
+	if err == nil && accountTask {
+		err = m.finishAccountTaskCall(ctx, scope, manifest, result, accepted)
+	}
+	if accountTask {
+		if flushErr := m.flushAccountTaskUsage(ctx, scope, err); err == nil {
+			err = flushErr
+		}
+	}
 	if err == nil && sdk.IsStorageMethod(method) {
 		err = finishStorageCall(ctx, result)
 	}
@@ -971,6 +1007,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			return nil, &OutcomeError{Outcome: state, Cause: err}
 		}
 	}
+	taskCompleted = err == nil
 	return result, err
 }
 
@@ -1064,6 +1101,9 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	}
 	if sdk.IsOwnCallHostMethod(method) {
 		return m.appendOwnCall(ctx, scope, raw, authority)
+	}
+	if sdk.IsAccountTaskHostMethod(method) {
+		return m.accountTaskHostCall(ctx, scope, method, raw, authority)
 	}
 	switch method {
 	case sdk.MethodCatalogRead:
@@ -1241,6 +1281,7 @@ func (m *Manager) Close(ctx context.Context) error {
 
 func (m *Manager) finishClose(workers map[string]*managedWorker, runs []*GatewayRun) {
 	m.stopStarts()
+	m.accountTasksWG.Wait()
 	m.activationWG.Wait()
 	for _, run := range runs {
 		run.abort()

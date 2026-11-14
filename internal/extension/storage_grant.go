@@ -56,6 +56,7 @@ type StorageGrant struct {
 	active    bool
 	parent    *storageParent
 	closed    bool
+	lifetime  *storageLifetime
 }
 
 func NewStorageGrant(ctx context.Context, lease *Lease, sourceID, familyID, rootRef, path string, check func(context.Context) error) (*StorageGrant, error) {
@@ -67,6 +68,16 @@ func NewStorageGrant(ctx context.Context, lease *Lease, sourceID, familyID, root
 	if err := check(ctx); err != nil {
 		return nil, err
 	}
+	lifetime, err := acquireStorageLifetime(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owned := false
+	defer func() {
+		if !owned {
+			lifetime.close()
+		}
+	}()
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, err
@@ -83,7 +94,8 @@ func NewStorageGrant(ctx context.Context, lease *Lease, sourceID, familyID, root
 		directory.Close()
 		return nil, errors.New("storage grant root could not be pinned")
 	}
-	return &StorageGrant{lease: lease, family: source.Families[index], path: path, root: root, directory: directory,
+	owned = true
+	return &StorageGrant{lease: lease, family: source.Families[index], path: path, root: root, directory: directory, lifetime: lifetime,
 		info: info, check: check, files: map[string]*storageFile{}, pages: map[string]storageDirectory{}, absent: map[string]bool{},
 		request: sdk.StorageReadLease{SourceID: sourceID, RootRef: rootRef, SnapshotRef: snapshot,
 			FamilyID: familyID, Limits: sdk.DefaultStorageLimits()}}, nil
@@ -102,7 +114,11 @@ func (grant *StorageGrant) Close() error {
 		return nil
 	}
 	grant.closed = true
-	return errors.Join(grant.root.Close(), grant.directory.Close())
+	var err error
+	if grant.lifetime == nil || !grant.lifetime.native || !grant.lifetime.started || grant.lifetime.ended {
+		err = grant.lifetime.close()
+	}
+	return errors.Join(err, grant.root.Close(), grant.directory.Close())
 }
 
 func (grant *StorageGrant) Recheck(ctx context.Context) error {
@@ -124,7 +140,7 @@ func (grant *StorageGrant) Recheck(ctx context.Context) error {
 		}
 		hash := sha256.New()
 		count, err := io.Copy(hash, io.LimitReader(file, selected.info.Size()+1))
-		file.Close()
+		grant.closeMember(file)
 		if err != nil || count != selected.info.Size() || !slices.Equal(hash.Sum(nil), selected.hash[:]) {
 			return ErrActionChanged
 		}
@@ -135,7 +151,7 @@ func (grant *StorageGrant) Recheck(ctx context.Context) error {
 			return ErrActionChanged
 		}
 		entries, err := directory.ReadDir(len(selected.page) + 1)
-		directory.Close()
+		grant.closeMember(directory)
 		if err != nil && !errors.Is(err, io.EOF) || len(entries) != len(selected.page) {
 			return ErrActionChanged
 		}
@@ -157,7 +173,7 @@ func (grant *StorageGrant) recheck(ctx context.Context) error {
 		return err
 	}
 	info, err := os.Stat(grant.path)
-	if err != nil || !os.SameFile(grant.info, info) || info.Mode() != grant.info.Mode() {
+	if err != nil || !storageSameFile(grant.info, info) || info.Mode() != grant.info.Mode() {
 		return ErrActionChanged
 	}
 	manager := grant.lease.manager
@@ -176,9 +192,8 @@ func (grant *StorageGrant) recheck(ctx context.Context) error {
 		return ErrActionChanged
 	}
 	for name := range grant.absent {
-		file, err := grant.open(name)
+		_, err := grant.stat(name)
 		if err == nil {
-			file.Close()
 			return ErrActionChanged
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -186,31 +201,19 @@ func (grant *StorageGrant) recheck(ctx context.Context) error {
 		}
 	}
 	for _, file := range grant.files {
-		current, err := grant.open(file.name)
-		if err != nil {
-			return ErrActionChanged
-		}
-		info, err := current.Stat()
-		if err != nil || !os.SameFile(file.info, info) || info.Mode() != file.info.Mode() {
-			current.Close()
+		info, err := grant.stat(file.name)
+		if err != nil || !storageSameFile(file.info, info) || info.Mode() != file.info.Mode() {
 			return ErrActionChanged
 		}
 		if file.read {
 			if info.Size() != file.info.Size() || !info.ModTime().Equal(file.info.ModTime()) {
-				current.Close()
 				return ErrActionChanged
 			}
 		}
-		current.Close()
 	}
 	for name, selected := range grant.pages {
-		directory, err := grant.open(name)
-		if err != nil {
-			return ErrActionChanged
-		}
-		info, err := directory.Stat()
-		directory.Close()
-		if err != nil || !os.SameFile(info, selected.info) || info.Mode() != selected.info.Mode() ||
+		info, err := grant.stat(name)
+		if err != nil || !storageSameFile(info, selected.info) || info.Mode() != selected.info.Mode() ||
 			info.Size() != selected.info.Size() || !info.ModTime().Equal(selected.info.ModTime()) {
 			return ErrActionChanged
 		}
@@ -309,7 +312,7 @@ func (manager *Manager) storageHostCall(ctx context.Context, scope sdk.Scope, me
 			if name == "" {
 				continue
 			}
-			file, err := grant.open(name)
+			info, err := grant.stat(name)
 			if errors.Is(err, fs.ErrNotExist) {
 				grant.absent[name] = true
 				continue
@@ -317,12 +320,10 @@ func (manager *Manager) storageHostCall(ctx context.Context, scope sdk.Scope, me
 			if err != nil {
 				return nil, err
 			}
-			info, err := file.Stat()
-			file.Close()
-			if err != nil {
-				return nil, err
-			}
 			grant.files["native:"+name] = &storageFile{name: name, info: info}
+		}
+		if grant.lifetime != nil {
+			grant.lifetime.native = true
 		}
 		family := grant.family
 		family.Trees = nil
@@ -358,7 +359,7 @@ func (grant *StorageGrant) list(request sdk.StorageFilesRequest) (sdk.StorageDir
 		if err != nil {
 			return sdk.StorageDirectoryPage{}, err
 		}
-		defer directory.Close()
+		defer grant.closeMember(directory)
 		directoryInfo, err := directory.Stat()
 		if err != nil {
 			return sdk.StorageDirectoryPage{}, err
@@ -378,12 +379,7 @@ func (grant *StorageGrant) list(request sdk.StorageFilesRequest) (sdk.StorageDir
 			if !grant.family.Allows(name) || entry.Type()&os.ModeSymlink != 0 {
 				return sdk.StorageDirectoryPage{}, errors.New("invalid storage directory member")
 			}
-			member, err := grant.open(name)
-			if err != nil {
-				return sdk.StorageDirectoryPage{}, err
-			}
-			info, err := member.Stat()
-			member.Close()
+			info, err := grant.stat(name)
 			if err != nil || !info.Mode().IsRegular() && !info.IsDir() {
 				return sdk.StorageDirectoryPage{}, errors.New("unsupported storage file")
 			}
@@ -434,13 +430,13 @@ func (grant *StorageGrant) bytes(request sdk.StorageBytesRequest) (sdk.StorageRe
 			return sdk.StorageReadChunk{}, err
 		}
 		info, err := file.Stat()
-		if err != nil || !os.SameFile(info, selected.info) || info.Mode() != selected.info.Mode() ||
+		if err != nil || !storageSameFile(info, selected.info) || info.Mode() != selected.info.Mode() ||
 			info.Size() != selected.info.Size() || !info.ModTime().Equal(selected.info.ModTime()) {
-			file.Close()
+			grant.closeMember(file)
 			return sdk.StorageReadChunk{}, ErrActionChanged
 		}
 		body, err := io.ReadAll(io.LimitReader(file, selected.info.Size()+1))
-		file.Close()
+		grant.closeMember(file)
 		if err != nil || int64(len(body)) != selected.info.Size() {
 			return sdk.StorageReadChunk{}, ErrActionChanged
 		}

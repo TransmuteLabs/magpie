@@ -38,6 +38,7 @@ type extensionBindingRecord struct {
 	PackageRevision string                         `json:"packageRevision"`
 	ConfigVersion   string                         `json:"configVersion"`
 	Values          map[string]string              `json:"values"`
+	ModelOptions    json.RawMessage                `json:"modelOptions,omitempty"`
 	Before          []extension.ActionSettingFile  `json:"before"`
 	Applied         []extension.ActionSettingFile  `json:"applied"`
 	PriorApplied    []extension.ActionSettingFile  `json:"priorApplied,omitempty"`

@@ -39,9 +39,10 @@ type sessionInputFile struct {
 }
 
 type sessionInputSnapshot struct {
-	root  string
-	info  os.FileInfo
-	files []sessionInputFile
+	root        string
+	info        os.FileInfo
+	files       []sessionInputFile
+	descendants *sessionSourceTreeSnapshot
 }
 
 type sessionLeasedRuntime struct {
@@ -327,6 +328,11 @@ func (snapshot *sessionInputSnapshot) check(ctx context.Context) error {
 				!sessionStoreModeEqual(expected.parents[index].Mode(), current.parents[index].Mode()) {
 				return extension.ErrActionChanged
 			}
+		}
+	}
+	if snapshot.descendants != nil {
+		if err := snapshot.descendants.check(ctx, root); err != nil {
+			return err
 		}
 	}
 	return nil

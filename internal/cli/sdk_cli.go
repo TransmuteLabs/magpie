@@ -25,6 +25,7 @@ const sdkPluginUsage = `usage: magpie plugin sdk list [--json]
        magpie plugin sdk inspect <module>
        magpie plugin sdk config <module>
        magpie plugin sdk config <module> <json-object> --expected <version>
+       magpie plugin sdk provider-options <module> <provider> [<json-update>]
        magpie plugin sdk on|off|rm|reload <module>
        magpie plugin sdk call|invoke <module> <method> <json> [--scope <json>]
        magpie plugin sdk accounts <module> <provider> [--json]
@@ -137,6 +138,8 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 		return sdkCLIUpdate(ctx, rest, host, out)
 	case "config":
 		return sdkCLIConfig(ctx, rest, host, out)
+	case "provider-options":
+		return sdkCLIProviderOptions(ctx, rest, host, out)
 	case "add", "install", "inspect", "on", "off", "rm", "remove", "reload":
 		options, err := sdkCLIFlags(rest)
 		if err != nil {

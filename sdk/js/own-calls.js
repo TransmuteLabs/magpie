@@ -38,11 +38,16 @@ function callFacts(manifest, call) {
 
 export function validateOwnCall(manifest, request) {
   fields(request, ["call"]);
-  fields(request.call, callFields);
-  if (manifest.contract.version.minor < 8 || !manifest.contract.capabilities.includes("usage-reporter")
-    || !kind(request.call.kind)) invalid();
-  callFacts(manifest, request.call);
+  if (manifest.contract.version.minor < 8 || !manifest.contract.capabilities.includes("usage-reporter")) invalid();
+  validateOwnCallFacts(manifest, request.call);
   return request;
+}
+
+export function validateOwnCallFacts(manifest, call) {
+  fields(call, callFields);
+  if (!kind(call.kind)) invalid();
+  callFacts(manifest, call);
+  return call;
 }
 
 export function validateOutsideCallsRequest(manifest, scope, request) {

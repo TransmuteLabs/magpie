@@ -831,6 +831,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	defer forgetListening()
 	stopExtensionActivation := s.activateExtensions(ctx)
 	defer stopExtensionActivation()
+	stopAccountTasks := s.activateAccountTasks(ctx)
+	defer stopAccountTasks()
 	// the keys out of credit a magpie before this one rested go on
 	// resting, and climb on from their rung (rest_store.go)
 	loadRests()
@@ -1016,7 +1018,7 @@ func (s *Server) Handler() http.Handler {
 	// on (dumpFirst)
 	// a socket's turns go through all of it again (socketEntry); the
 	// agent's Retry-After is bounded on the way out (retryCapped)
-	return s.withProtocolRegistry(socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(s.protocolEntry(keyLimited(s.keySlots(mux, mux))))))))))))))
+	return s.withProtocolRegistry(socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(s.accountTaskRequests(s.protocolEntry(keyLimited(s.keySlots(mux, mux)))))))))))))))
 }
 
 // routes are the client APIs, each by its pattern: readOnlyGuard reads

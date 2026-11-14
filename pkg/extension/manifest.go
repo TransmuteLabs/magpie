@@ -25,6 +25,10 @@ func (manifest Manifest) Public() Manifest {
 	})
 	for index := range snapshot.Providers {
 		provider := &snapshot.Providers[index]
+		provider.AccountTasks = slices.DeleteFunc(provider.AccountTasks, func(task AccountTaskDescriptor) bool {
+			_, owned := snapshot.ResolveAction(task.Action)
+			return !owned
+		})
 		if provider.Checkin != nil {
 			if _, owned := snapshot.ResolveAction(provider.Checkin.Action); !owned {
 				provider.Checkin = nil
@@ -49,6 +53,14 @@ func cloneManifest(manifest Manifest) Manifest {
 	manifest.Providers = slices.Clone(manifest.Providers)
 	for index := range manifest.Providers {
 		provider := &manifest.Providers[index]
+		provider.Options = cloneProviderOptions(provider.Options)
+		provider.AccountTasks = slices.Clone(provider.AccountTasks)
+		if provider.MaxConcurrency != nil {
+			provider.MaxConcurrency = new(*provider.MaxConcurrency)
+		}
+		if provider.MaxAccounts != nil {
+			provider.MaxAccounts = new(*provider.MaxAccounts)
+		}
 		if provider.Checkin != nil {
 			provider.Checkin = new(*provider.Checkin)
 		}
@@ -84,6 +96,11 @@ func cloneManifest(manifest Manifest) Manifest {
 	manifest.SessionSources = slices.Clone(manifest.SessionSources)
 	for index := range manifest.SessionSources {
 		manifest.SessionSources[index].Stores = slices.Clone(manifest.SessionSources[index].Stores)
+		if manifest.SessionSources[index].Descendants != nil {
+			descendants := *manifest.SessionSources[index].Descendants
+			descendants.ExcludeDirectories = slices.Clone(descendants.ExcludeDirectories)
+			manifest.SessionSources[index].Descendants = &descendants
+		}
 	}
 	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
 	manifest.SearchSources = slices.Clone(manifest.SearchSources)
@@ -119,6 +136,7 @@ func cloneManifest(manifest Manifest) Manifest {
 	}
 	if manifest.Component != nil {
 		value := *manifest.Component
+		value.AccountTaskActions = slices.Clone(value.AccountTaskActions)
 		manifest.Component = &value
 	}
 	if manifest.Hooks != nil {
@@ -140,6 +158,12 @@ func cloneManifest(manifest Manifest) Manifest {
 }
 
 func (manifest Manifest) Validate() error {
+	if err := manifest.validateAccountTasks(); err != nil {
+		return err
+	}
+	if err := manifest.validateProviderOptions(); err != nil {
+		return err
+	}
 	if err := manifest.validateAccountKeepAlives(); err != nil {
 		return err
 	}
@@ -213,6 +237,9 @@ func (manifest Manifest) Validate() error {
 	}
 	ids = map[string]bool{}
 	for _, provider := range manifest.Providers {
+		if err := ValidateProviderDefaults(manifest, provider); err != nil {
+			return err
+		}
 		if !validID(provider.ID) || ids[provider.ID] || !validName(provider.Name) {
 			return fmt.Errorf("invalid or duplicate provider descriptor %q", provider.ID)
 		}

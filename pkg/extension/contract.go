@@ -23,7 +23,7 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 8},
+		Version: APIVersion{Major: 1, Minor: 9},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
 			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware,
@@ -69,14 +69,18 @@ type InboundDescriptor struct {
 }
 
 type ProviderDescriptor struct {
-	ID         string                      `json:"id"`
-	Name       string                      `json:"name"`
-	Protocols  []protocolext.Protocol      `json:"protocols"`
-	Models     []Model                     `json:"models,omitempty"`
-	Operations []ProviderOperation         `json:"operations,omitempty"`
-	Calls      bool                        `json:"calls,omitempty"`
-	Checkin    *AccountCheckinDescriptor   `json:"checkin,omitempty"`
-	KeepAlive  *AccountKeepAliveDescriptor `json:"keepAlive,omitempty"`
+	ID             string                      `json:"id"`
+	Name           string                      `json:"name"`
+	Protocols      []protocolext.Protocol      `json:"protocols"`
+	Models         []Model                     `json:"models,omitempty"`
+	Operations     []ProviderOperation         `json:"operations,omitempty"`
+	Calls          bool                        `json:"calls,omitempty"`
+	Checkin        *AccountCheckinDescriptor   `json:"checkin,omitempty"`
+	KeepAlive      *AccountKeepAliveDescriptor `json:"keepAlive,omitempty"`
+	Options        []ProviderOption            `json:"options,omitempty"`
+	AccountTasks   []AccountTaskDescriptor     `json:"accountTasks,omitempty"`
+	MaxConcurrency *int                        `json:"maxConcurrency,omitempty"`
+	MaxAccounts    *int                        `json:"maxAccounts,omitempty"`
 }
 
 type AgentDescriptor struct {

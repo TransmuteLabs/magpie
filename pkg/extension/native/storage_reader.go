@@ -12,7 +12,6 @@ import (
 
 type StorageRoot struct {
 	mu     sync.Mutex
-	root   *os.Root
 	keep   *os.File
 	family sdk.StorageFamily
 	ctx    context.Context
@@ -72,6 +71,5 @@ func (root *StorageRoot) Close() error {
 		return nil
 	}
 	root.closed = true
-	err := root.root.Close()
-	return errors.Join(err, root.keep.Close())
+	return root.keep.Close()
 }

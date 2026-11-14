@@ -14,6 +14,7 @@ import (
 func (controller *extensionController) unchangedSync(prior extensionBindingRecord, plan *extensionAgentPlan) bool {
 	if plan.intent != "sync" || prior.Phase != "owned" || !prior.RecoverySafe ||
 		plan.applyShell != nil ||
+		!bytes.Equal(prior.ModelOptions, plan.modelOptions) ||
 		prior.PackageRevision != plan.runtime.entry.Revision || prior.ConfigVersion != plan.runtime.config ||
 		prior.Bin != controller.bin || !extensionBindingSameDescriptor(prior.Descriptor, controller.item.Agent) {
 		return false

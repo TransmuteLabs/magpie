@@ -2269,7 +2269,7 @@ func (p Provider) Levelless(model string) bool {
 // model thinks and lists its family with levels (catalog's levels: a model
 // just added, gpt-6.1-sol).
 func effortsOf(m catalog.Model) []string {
-	if len(m.Efforts) > 0 || m.Provider != "" {
+	if m.Efforts != nil || m.Provider != "" {
 		return m.Efforts
 	}
 	return borrowedEfforts(m.ID)

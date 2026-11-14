@@ -6,16 +6,30 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+type ownCallAppenderKey struct{}
+
+func WithOwnCallAppender(ctx context.Context, appendRecord func(Record)) context.Context {
+	return context.WithValue(ctx, ownCallAppenderKey{}, appendRecord)
+}
+
 func init() {
-	extensionhost.OnOwnCall(func(scope sdk.Scope, call sdk.OwnCall) {
+	extensionhost.OnOwnCallContext(func(ctx context.Context, scope sdk.Scope, call sdk.OwnCall) {
 		record := extensionCall(scope, call)
 		record.Agent, record.Session = "magpie", scope.Session
-		Append(record)
+		who := access.Caller(ctx)
+		record.CallerKeyID, record.CallerKeyName, record.CallerIssuerID = who.KeyID, who.KeyName, who.IssuerID()
+		record.Operation = scope.Operation
+		appendRecord := Append
+		if appender, found := ctx.Value(ownCallAppenderKey{}).(func(Record)); found && appender != nil {
+			appendRecord = appender
+		}
+		appendRecord(record)
 	})
 }
 

@@ -105,6 +105,14 @@ export function validateComposite(manifest) {
     if (manifest.component != null ? owner !== own : owner !== "primary" && !byService.get(owner)?.methods.includes(action.id)) fail("Action owner does not declare its service method");
     byAction.set(action.id, action);
   }
+  if (manifest.component != null) {
+    const grants = list(manifest.component.accountTaskActions, 1024, "service task actions");
+    if (grants.length && manifest.contract.version.minor < 9) fail("Service task actions require SDK API 1.9");
+    uniqueIDs(grants, "service task action");
+    if (grants.some(id => byAction.get(id)?.effect !== "write" || actionOwner(byAction.get(id)) !== own)) {
+      fail("Service task actions require declared owned writes");
+    }
+  }
   for (const { service, methods } of byService.values()) {
     if (methods.some(method => actionOwner(byAction.get(method) ?? {}) !== service.id || !byAction.has(method))) fail("Service method does not name its own action");
   }
@@ -128,7 +136,7 @@ export function validateComposite(manifest) {
   }
   if (manifest.compatibility != null) {
     const value = manifest.compatibility;
-    if (!object(value) || !["^1", "^1.1", "^1.2", "^1.3", "^1.4", "^1.5", "^1.6", "^1.7", "^1.8"].includes(value.hostAPI)
+    if (!object(value) || !["^1", "^1.1", "^1.2", "^1.3", "^1.4", "^1.5", "^1.6", "^1.7", "^1.8", "^1.9"].includes(value.hostAPI)
       || value.hostAPI === "^1.3" && manifest.contract.version.minor < 3
       || value.hostAPI === "^1.2" && manifest.contract.version.minor < 2
       || value.hostAPI === "^1.4" && manifest.contract.version.minor < 4
@@ -136,6 +144,7 @@ export function validateComposite(manifest) {
       || value.hostAPI === "^1.6" && manifest.contract.version.minor < 6
       || value.hostAPI === "^1.7" && manifest.contract.version.minor < 7
       || value.hostAPI === "^1.8" && manifest.contract.version.minor < 8
+      || value.hostAPI === "^1.9" && manifest.contract.version.minor < 9
       || value.nativeABI !== undefined && !uint32(value.nativeABI)) fail("Unsupported host API requirement");
     const values = list(value.platforms, 128, "compatibility platforms");
     if (new Set(values).size !== values.length || values.some(value => !validPlatform(value))) fail("Invalid or duplicate compatibility platform");

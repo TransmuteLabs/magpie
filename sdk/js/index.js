@@ -1,8 +1,10 @@
 export { validateAccountSelection } from "./account-selection.js";
 export { validateAccountCheckinRequest, validateAccountCheckinResult } from "./account-checkin.js";
 export { accountKeepAliveLead } from "./account-keepalive.js";
+export { providerOptionOn, validateProviderOptionValues } from "./provider-options.js";
+export { validateAccountTasks, validateAccountTaskSchedule, validateAccountTaskCancel, validateAccountTaskRequest, validateAccountTaskResult, scheduleAccountTask, cancelAccountTask, reportAccountTaskUsage } from "./account-tasks.js";
 export { STORAGE_METHODS, STORAGE_HOST_METHODS, storageFamilyAllows, validateStorageSources, validateStorageRequest, validateStorageResult } from "./storage-source.js";
-export { sessionSourceID, validateSessionSources, validateSessionSourceRequest, validateSessionSourceResult } from "./session-source.js";
+export { sessionSourceID, sessionSourceDescendantPath, validateSessionSources, validateSessionSourceRequest, validateSessionSourceResult } from "./session-source.js";
 export { SDKError, encodeBytes, decodeBytes, MAX_FRAME_BYTES, MAX_CHUNK_BYTES, MAX_HOST_BYTES, MAX_NATIVE_BODY_BYTES, MAX_CONCURRENT } from "./bytes.js";
 export { CONTRACT, validateManifest, publicManifest, requiredMethods, serviceManifest, checkCompatibility } from "./manifest.js";
 export { serve } from "./worker.js";
@@ -19,3 +21,4 @@ export { validateRoutingRequest, validateRoutingResult } from "./routing.js";
 export { validateSearchRequest, validateSearchResult } from "./search-sources.js";
 export { MIDDLEWARE_METHODS, MAX_MIDDLEWARE_BODY_BYTES, validateMiddlewareResult } from "./middleware.js";
 export { validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
+export { validateAgentModelMetadata } from "./agent-model-metadata.js";

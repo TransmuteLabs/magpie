@@ -70,6 +70,26 @@ content digests. Bodies are released after summary decoding and reacquired for
 transcripts. Both the 16 MiB/128-document binary budget and the 24 MiB encoded
 frame budget apply.
 
+API 1.9 sources may opt into `descendants.kind: journal-stem-jsonl`.
+[`extension_source_descendants.go`](../../internal/sessions/extension_source_descendants.go)
+enumerates JSONL only below the selected journal filename without its `.jsonl`
+suffix. A descriptor may exclude at most 16 directory basenames; it cannot
+name another root or grant module-authored paths. Traversal is bounded to
+10,000 entries and 16 directory levels, with the same aggregate file/byte
+budgets as planned inputs. Symlinks fail closed. The snapshot retains checked
+directory membership and identity, including an absent tree, so new/removed
+children invalidate an otherwise unchanged journal.
+
+The host marks captured child paths in `SessionSourceReadRequest.Descendants`.
+A summary must return exactly one `{path, sessionId}` in `Subs` for each
+admitted child, with unique identities distinct from the main session.
+Unadmitted attachments grant no child identity. Colliding main/descendant
+identities suppress ambiguous records. The adapter projects validated IDs
+through ordinary `Session.Subs`, `GatewayKeys`, native-ID and statistics
+deduplication. Children contribute usage and IDs only; the module keeps its
+main transcript separate. Storage sources do not inherit this JSONL authority.
+The older API 1.6 descriptor and no-descendant behavior remain supported.
+
 Read consent remains `Reads(agent)` and `OwnOff`. Project/folder filters grant
 no extra authority. Calls cannot borrow account credentials; source methods are
 unary and read-only. Appends/rewrites are fully decoded initially; incomplete
@@ -254,6 +274,27 @@ agent-scoped credential), `models` (ordinary model options), and, for a set,
 `field` and `value`. `previous` contains the snapshots recorded before host
 adoption. The extension uses these originals for schema-aware disconnect,
 preserving unrelated user changes.
+
+API 1.9 agent model options additionally carry `maxOutput`, `efforts` and
+`defaultEffort`. Both individual models and routing groups use effective
+catalog entries: `Entry.PublishedOutput()` applies output overrides and
+context clamping; effective effort overrides and reasonless settings apply
+before projection. An unknown effort list is `null`, an explicitly empty
+list is `[]`, and a default is present only when it belongs to the effective
+list. Caller copies do not share mutable effort slices with the picker cache.
+[`AgentModelMetadata`](../../pkg/extension/agent_model_metadata.go) and the
+[JS helper](../../sdk/js/agent-model-metadata.js) validate these bounded facts
+under API 1.9 `agent-wiring`. Modules negotiating an earlier minor receive
+none of these new option fields.
+
+Controlled inspection receives the same gateway, key and model options as
+planning. The existing private binding ledger retains the last requested
+catalog as `modelOptions`; the next options envelope supplies it as
+`priorModels` only for API 1.9. This is previous catalog evidence, while
+`previous` remains the original settings preimage. A module can distinguish
+its generated limits from preserved user edits across multiple syncs without
+adopting those edits as generated values. No-op sync retains its binding only
+when both the checked configuration and requested catalog remain unchanged.
 
 `agent.plan` accepts only `connect`, `set`, `sync` and `disconnect` actions.
 Its result is `AgentPlan{files: FileChange[]}`. Each change names an approved

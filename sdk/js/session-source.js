@@ -25,6 +25,19 @@ const stamp = value => {
   return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
 };
 
+const descendantRule = rule => object(rule) && Object.keys(rule).every(key => ["kind", "excludeDirectories"].includes(key)) &&
+  rule.kind === "journal-stem-jsonl" && (rule.excludeDirectories === undefined ||
+    Array.isArray(rule.excludeDirectories) && rule.excludeDirectories.length <= 16 &&
+    rule.excludeDirectories.every(name => id(name) && !name.includes("/")) &&
+    new Set(rule.excludeDirectories).size === rule.excludeDirectories.length);
+
+export function sessionSourceDescendantPath(rule, journal, name) {
+  if (!descendantRule(rule) || !clean(journal) || !clean(name) || !journal.endsWith(".jsonl")) return false;
+  const prefix = journal.slice(0, -6) + "/";
+  if (!name.startsWith(prefix) || !name.endsWith(".jsonl")) return false;
+  return !name.slice(prefix.length).split("/").slice(0, -1).some(part => rule.excludeDirectories?.includes(part));
+}
+
 export function sessionSourceID(layout, name) {
   if (!clean(name)) fail("Invalid source locator");
   const parts = name.split("/");
@@ -47,13 +60,15 @@ export function validateSessionSources(manifest) {
     sources.length && manifest.contract.version.minor < 6) fail("Session sources require API 1.6 and session-source");
   const seen = new Set();
   for (const source of sources) {
-    keys(source, ["id", "agent", "codec", "container", "stores", "layout", "transcript", "resume"]);
+    keys(source, ["id", "agent", "codec", "container", "stores", "layout", "transcript", "resume", "descendants"]);
     if (!id(source.id) || !id(source.agent) || !id(source.codec) || seen.has(source.id) ||
       source.container !== "jsonl" || typeof source.transcript !== "boolean" || !["none", "native"].includes(source.resume) ||
       !Array.isArray(source.stores) || source.stores.length < 1 || source.stores.length > 16) fail("Invalid session source descriptor");
     seen.add(source.id);
     keys(source.layout, ["kind", "idFrom", "entry"]);
     sessionSourceID(source.layout, ({ flat: "id.jsonl", bucketed: "bucket/time_id.jsonl", directory: "id/log.jsonl" })[source.layout.kind]);
+    if (source.descendants !== undefined && (manifest.contract.version.minor < 9 || source.layout.kind === "directory" ||
+      !descendantRule(source.descendants))) fail("Source descendants require API 1.9 and a bounded journal tree");
     const slots = new Set();
     for (const store of source.stores) {
       keys(store, ["slot", "nativeRootSlot", "homeRelativePath"]);
@@ -67,7 +82,7 @@ export function validateSessionSources(manifest) {
 }
 
 export function validateSessionSourceRequest(manifest, request, stringify) {
-  keys(request, ["sourceId", "locator", "snapshot", "mode", "documents", "limits"]);
+  keys(request, ["sourceId", "locator", "snapshot", "mode", "documents", "limits", "descendants"]);
   const source = manifest.sessionSources?.find(item => item.id === request.sourceId);
   if (!source || !["summary", "transcript"].includes(request.mode) || request.mode === "transcript" && !source.transcript) fail("Unsupported source read");
   keys(request.locator, ["storeRef", "path", "sessionId"]);
@@ -88,6 +103,12 @@ export function validateSessionSourceRequest(manifest, request, stringify) {
     total += decodeBytes(document.body, 16 << 20).length;
     if (total > 16 << 20) fail("Source binary budget exceeded");
   }
+  if (request.descendants !== undefined && (manifest.contract.version.minor < 9 || !source.descendants ||
+    !Array.isArray(request.descendants) || request.descendants.length >= 128 ||
+    new Set(request.descendants).size !== request.descendants.length ||
+    request.descendants.some(name => !seen.has(name) || !sessionSourceDescendantPath(source.descendants, request.locator.path, name)))) {
+    fail("Source descendant is outside its declared admitted documents");
+  }
   if (Buffer.byteLength(stringify(request)) > MAX_FRAME_BYTES - 4096) fail("Source encoded frame budget exceeded");
   return request;
 }
@@ -100,12 +121,23 @@ export function validateSessionSourceResult(request, result, stringify) {
   if (request.mode === "summary") {
     if (!object(result.summary) || result.parts !== undefined || result.cut !== undefined) fail("Invalid source summary");
     const summary = result.summary;
-    keys(summary, ["title", "cwd", "start", "last", "parentId", "rootId", "usage"]);
+    keys(summary, ["title", "cwd", "start", "last", "parentId", "rootId", "usage", "subs"]);
     if (typeof summary.title !== "string" || Buffer.byteLength(summary.title) > 4096 ||
       typeof summary.cwd !== "string" || Buffer.byteLength(summary.cwd) > 4096 || summary.cwd.includes("\0") ||
       ["start", "last"].some(key => summary[key] !== undefined && (typeof summary[key] !== "string" || summary[key] !== "" && !stamp(summary[key]))) ||
       ["parentId", "rootId"].some(key => summary[key] !== undefined && (typeof summary[key] !== "string" || Buffer.byteLength(summary[key]) > 128)) ||
       summary.usage !== undefined && (!Array.isArray(summary.usage) || summary.usage.length > 10000)) fail("Invalid source summary metadata");
+    const identities = summary.subs ?? [];
+    if (summary.subs !== undefined && !Array.isArray(summary.subs) || !Array.isArray(identities) ||
+      identities.length !== (request.descendants?.length ?? 0) || identities.length >= 128) fail("Source identities must cover admitted descendants");
+    const admitted = new Set(request.descendants ?? []), identitiesSeen = new Set([request.locator.sessionId]);
+    if (admitted.size !== (request.descendants?.length ?? 0)) fail("Duplicate admitted source descendant");
+    for (const identity of identities) {
+      keys(identity, ["path", "sessionId"]);
+      if (!admitted.delete(identity.path) || !clean(identity.sessionId) || identity.sessionId.includes("/") ||
+        Buffer.byteLength(identity.sessionId) > 128 || identitiesSeen.has(identity.sessionId)) fail("Invalid source descendant identity");
+      identitiesSeen.add(identity.sessionId);
+    }
     let total = 0n;
     for (const point of summary.usage ?? []) {
       keys(point, ["at", "model", "input", "output", "cacheRead", "cacheWrite", "cacheWrite1h"]);

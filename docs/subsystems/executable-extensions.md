@@ -6,7 +6,7 @@ and combine that primary with private services and a TS interface. The module
 owns its behavior; core owns installation, scoped calls and lifecycle. This
 separation keeps our integrations outside code frequently merged from upstream.
 
-Current SDK source API 1.8 includes native/composite APIs, API 1.2 gateway
+Current SDK source API 1.9 includes native/composite APIs, API 1.2 gateway
 hooks/private tools, and API 1.3 transactional refresh, provider operations
 and extended model metadata, plus API 1.4 routing strategies, selected-account
 usage revisions, business cancellation and native executor constraints.
@@ -28,6 +28,12 @@ API 1.8 adds scoped own-call accounting and explicitly declared outside
 account-history readers through the existing usage owners. Their distinct
 observer, generation, paging and deduplication contracts are recorded in
 [ADR 0025](../adr/0025-sdk-own-calls-and-outside-history.md).
+API 1.9 adds provider switches, paid selected-account tasks, effective agent
+model metadata, provider defaults, rich quota evidence and descendant session
+identities. [Provider adapters](extension-providers.md) and
+[agent/session adapters](extension-agents-sessions.md) describe their ordinary
+owners and failure behavior. Source availability and scoped tests remain
+distinct from final application acceptance.
 The [1.1 validation](../adr/0005-native-composite-validation.md) and
 [1.2 validation](../adr/0006-gateway-hooks-validation.md) records distinguish
 immutable aggregate runs from later fixes. Those scoped records do not
@@ -77,7 +83,7 @@ See [extension providers](extension-providers.md),
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 8}`. The finite operation
+SDK API `{major: 1, minor: 9}`. The finite operation
 registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an

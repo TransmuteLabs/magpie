@@ -23,6 +23,7 @@ type sessionSourceRecord struct {
 	usageKnown bool
 	parentID   string
 	rootID     string
+	subs       []string
 }
 
 type sessionSourceView struct {
@@ -156,9 +157,15 @@ func PrepareSessionSources(ctx context.Context) error {
 	duplicates := map[string]int{}
 	for _, record := range view.records {
 		duplicates[record.grant.descriptor.Agent+":"+sourceRecordID(record)]++
+		for _, id := range record.subs {
+			duplicates[record.grant.descriptor.Agent+":"+id]++
+		}
 	}
 	view.records = slices.DeleteFunc(view.records, func(record *sessionSourceRecord) bool {
 		ambiguous := duplicates[record.grant.descriptor.Agent+":"+sourceRecordID(record)] != 1
+		for _, id := range record.subs {
+			ambiguous = ambiguous || duplicates[record.grant.descriptor.Agent+":"+id] != 1
+		}
 		if ambiguous {
 			problems = append(problems, errors.New("ambiguous session source identity"))
 		}
@@ -267,7 +274,8 @@ func prepareSourceRecord(ctx context.Context, manager *extension.Manager, entry 
 								request.Documents = nil
 								return &sessionSourceRecord{grant: grant, request: request, snapshot: snapshot,
 									summary: summary, usageKnown: result.Summary.Usage != nil,
-									parentID: result.Summary.ParentID, rootID: result.Summary.RootID}, nil
+									parentID: result.Summary.ParentID, rootID: result.Summary.RootID,
+									subs: sourceDescendantIDs(result.Summary.Subs)}, nil
 							}
 						}
 					}
@@ -341,6 +349,7 @@ func publishSourceRead[T any](read func() T) T {
 			sourceBeforePublish()
 		}
 		refreshSourceAuthority(ctx)
+		refreshSourceDescendantSnapshots(ctx)
 		if view == sourceView.Load() && epoch == sourceEpoch.Load() && ctx.Err() == nil {
 			return result
 		}

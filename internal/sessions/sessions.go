@@ -2188,6 +2188,9 @@ func sessionID(fs []file) string {
 // calls from the file. GatewayKeys keeps the gateway from counting them
 // a second time.
 func subIDs(fs []file, id string) []string {
+	if source := fs[0].m().source; source != nil {
+		return slices.Clone(source.subs)
+	}
 	var out []string
 	for _, f := range fs {
 		if f.main || !idInFile(f.agent) {

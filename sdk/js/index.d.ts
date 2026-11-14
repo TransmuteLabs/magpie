@@ -1,5 +1,8 @@
 import type { StorageSourceDescriptor } from "./storage-source.js";
 import type { AccountKeepAliveDescriptor } from "./account-keepalive.js";
+import type { AccountTaskDescriptor } from "./account-tasks.js";
+export * from "./account-tasks.js";
+export * from "./agent-model-metadata.js";
 export * from "./account-keepalive.js";
 import type { CatalogAccessDescriptor } from "./catalog-projection.js";
 import type { LedgerObservationDescriptor } from "./ledger.js";
@@ -41,9 +44,10 @@ export type Method = "inbound.decode" | "inbound.response" | "provider.execute" 
   | "middleware.request" | "middleware.account" | "middleware.provider" | "middleware.event" | "middleware.response";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
 export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate" | "usage.append" | "diagnostics.emit"
-  | "storage.native" | "storage.list" | "storage.read" | "storage.check" | "catalog.read";
+  | "storage.native" | "storage.list" | "storage.read" | "storage.check" | "catalog.read"
+  | "accountTasks.schedule" | "accountTasks.cancel";
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -71,7 +75,7 @@ export interface Model {
   vision?: boolean;
   reasoning?: boolean;
   price?: ModelPrice | null;
-  efforts?: Effort[];
+  efforts?: Effort[] | null;
   kind?: "chat" | "image" | "video" | "embedding" | "rerank" | "speech" | "transcription" | "decision";
   inputModalities?: Modality[] | null;
   outputModalities?: Modality[] | null;
@@ -125,7 +129,13 @@ export interface SessionSourceDescriptor {
   id: string; agent: string; codec: string; container: "jsonl";
   stores: SessionSourceStore[]; layout: SessionSourceLayout;
   transcript: boolean; resume: "none" | "native";
+  descendants?: SessionSourceDescendants;
 }
+export interface SessionSourceDescendants {
+  kind: "journal-stem-jsonl";
+  excludeDirectories?: string[];
+}
+export interface SessionSourceIdentity { path: string; sessionId: string }
 export type SessionSourceStore = { slot: string } & (
   { nativeRootSlot: "claude.projects" | "codex.sessions" | "codex.archived-sessions" | "omp.sessions" | "devin.file-sessions"; homeRelativePath?: never }
   | { homeRelativePath: string; nativeRootSlot?: never });
@@ -138,10 +148,12 @@ export interface SessionSourceLimits { maxParts: number; maxTextBytes: number }
 export interface SessionSourceReadRequest {
   sourceId: string; locator: SessionSourceLocator; snapshot: string;
   mode: "summary" | "transcript"; documents: SessionDocument[]; limits: SessionSourceLimits;
+  descendants?: string[];
 }
 export interface SessionSourceSummary {
   title: string; cwd: string; start?: string; last?: string; parentId?: string; rootId?: string;
   usage?: SessionUsagePoint[];
+  subs?: SessionSourceIdentity[];
 }
 export interface SessionUsagePoint {
   at: string; model: string; input: UInt64; output: UInt64; cacheRead: UInt64; cacheWrite: UInt64; cacheWrite1h: UInt64;
@@ -155,6 +167,7 @@ export type SessionSourceReadResult =
   | { mode: "summary"; sessionId: string; summary: SessionSourceSummary; parts?: never; cut?: never }
   | { mode: "transcript"; sessionId: string; parts: SessionSourcePart[]; cut: boolean; summary?: never };
 export function sessionSourceID(layout: SessionSourceLayout, name: string): string;
+export function sessionSourceDescendantPath(rule: SessionSourceDescendants, selected: string, name: string): boolean;
 export function validateSessionSources(manifest: Manifest): void;
 export function validateSessionSourceRequest(manifest: Manifest, request: SessionSourceReadRequest, stringify: (value: unknown) => string): SessionSourceReadRequest;
 export function validateSessionSourceResult(request: SessionSourceReadRequest, result: SessionSourceReadResult, stringify: (value: unknown) => string): SessionSourceReadResult;
@@ -183,7 +196,7 @@ interface ManifestFields {
   entry: string;
   contract: Contract;
   inbounds?: { id: string; path: string }[];
-  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[]; calls?: boolean; checkin?: AccountCheckinDescriptor | null; keepAlive?: AccountKeepAliveDescriptor | null }[];
+  providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[]; calls?: boolean; checkin?: AccountCheckinDescriptor | null; keepAlive?: AccountKeepAliveDescriptor | null; options?: ProviderOption[]; accountTasks?: AccountTaskDescriptor[]; maxConcurrency?: number; maxAccounts?: number }[];
   activation?: "gateway"[] | null;
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
@@ -359,6 +372,7 @@ export interface AuthLogoutRequest { credentials?: JSONValue }
 export interface AuthResult { id?: string; name?: string; credentials?: JSONValue; expiresAt?: number; pending?: boolean }
 export interface UsageRequest { credentials?: JSONValue; revision?: string }
 export interface UsageWindow {
+  amount?: number | null; balance?: number | null; display?: string; unit?: string; span?: number;
   name: string; used: number; limit?: number; resetsAt?: number;
   unknown?: boolean; error?: string; asOf?: number; models?: string[]; notModels?: string[]; aside?: boolean;
 }
@@ -410,7 +424,14 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9"; nativeABI?: number; platforms?: string[] }
+export interface ProviderOption {
+  key: string; label: string; description?: string; default?: boolean; confirm?: string;
+  labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;
+  filtersModels?: boolean; placement?: "" | "top";
+}
+export function providerOptionOn(option: ProviderOption, values: Record<string, JSONValue>): boolean;
+export function validateProviderOptionValues(manifest: Manifest, values: Record<string, JSONValue>): void;
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string; provider?: string }
 export interface AccountSelection { id: string; expectedGeneration: string }
@@ -424,7 +445,7 @@ export interface WindowAuthFlowView {
   url?: string; userCode?: string; retryAfterMs?: number; account?: AccountSummary;
 }
 export function validateAccountSelection(value: unknown): AccountSelection;
-export interface ComponentIdentity { id: string; contract: ServiceContract }
+export interface ComponentIdentity { id: string; contract: ServiceContract; accountTaskActions?: string[] }
 export interface ModuleCallRequest { action: string; input: JSONValue }
 export type ModuleCallResult = JSONValue;
 export interface ComponentCallRequest { binding: string; input: JSONValue }

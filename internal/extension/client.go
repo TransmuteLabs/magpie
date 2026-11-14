@@ -375,6 +375,9 @@ func (c *workerClient) read() {
 			c.fail(errors.New("extension response has no live call"))
 			return
 		}
+		if frame.Kind == "result" {
+			endStorageCall(pending.ctx)
+		}
 		select {
 		case pending.frames <- frame:
 		default:
@@ -395,7 +398,7 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 	c.mu.Unlock()
 	if !valid || c.hostCall == nil ||
 		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != sdk.MethodCatalogRead && frame.Method != sdk.MethodDiagnosticEmit && frame.Method != "network.proxy" &&
-			frame.Method != "account.replace" && frame.Method != sdk.MethodComponentCall && frame.Method != sdk.MethodUsageInvalidate && !sdk.IsStorageHostMethod(frame.Method) && !sdk.IsOwnCallHostMethod(frame.Method)) {
+			frame.Method != "account.replace" && frame.Method != sdk.MethodComponentCall && frame.Method != sdk.MethodUsageInvalidate && !sdk.IsStorageHostMethod(frame.Method) && !sdk.IsOwnCallHostMethod(frame.Method) && !sdk.IsAccountTaskHostMethod(frame.Method)) {
 		return false
 	}
 	// At most one host callback per live call is admitted by the SDK's
@@ -472,6 +475,7 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	}
 	c.pending[id] = pending
 	c.mu.Unlock()
+	trackStorageCall(ctx)
 	retained := false
 	defer func() {
 		if retained {

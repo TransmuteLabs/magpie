@@ -88,7 +88,7 @@ type Model struct {
 	Vision           bool                   `json:"vision,omitempty"`
 	Reasoning        bool                   `json:"reasoning,omitempty"`
 	Price            *ModelPrice            `json:"price,omitempty"`
-	Efforts          []string               `json:"efforts,omitempty"`
+	Efforts          []string               `json:"efforts"`
 	Kind             string                 `json:"kind,omitempty"`
 	InputModalities  []string               `json:"inputModalities"`
 	OutputModalities []string               `json:"outputModalities"`
@@ -171,6 +171,11 @@ type UsageRequest struct {
 }
 
 type UsageWindow struct {
+	Amount    *float64 `json:"amount,omitempty"`
+	Balance   *float64 `json:"balance,omitempty"`
+	Display   string   `json:"display,omitempty"`
+	Unit      string   `json:"unit,omitempty"`
+	Span      int64    `json:"span,omitempty"`
 	Name      string   `json:"name"`
 	Used      float64  `json:"used"`
 	Limit     float64  `json:"limit,omitempty"`
