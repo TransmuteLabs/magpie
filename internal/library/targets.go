@@ -1205,7 +1205,7 @@ func Takes(q, kind string) (string, error) {
 	if !has {
 		return "", fmt.Errorf("%s%s", noPlace(a, kind, what), takenBy(kind, what))
 	}
-	return a.ID, nil
+	return t.Agent.ID, nil
 }
 
 // noPlace says why an agent can't be given kind, and where it gets it

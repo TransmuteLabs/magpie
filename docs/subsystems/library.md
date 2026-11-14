@@ -19,6 +19,9 @@ the existing `Target` and writers; no legacy plugin VM is created. An active
 explicit profile inherits its existing base's Library identity by default.
 An inactive profile contributes no duplicate target. Instructions/MCP/skills
 ownership and preservation of user content remain the Library's normal rules.
+`Takes` resolves a profile selector to the selected Target's agent ID, so
+stored selections and the ordinary writers use the same identity. The
+separate sleeping-WSL path retains its recorded agent identity.
 
 ## Responsibilities and sources of truth
 
