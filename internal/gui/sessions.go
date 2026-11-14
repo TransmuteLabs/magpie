@@ -407,7 +407,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, errors.New("no such session"))
 			return
 		}
-		if err := openTerminal(run, s.Title, settings.Load().SessionTerminal); err != nil {
+		if err := openTerminal(run, s.Title, settings.Shared().SessionTerminal); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -453,7 +453,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, errors.New("no command starts this agent"))
 			return
 		}
-		if err := agentTerminal(run, name, settings.Load().SessionTerminal); err != nil {
+		if err := agentTerminal(run, name, settings.Shared().SessionTerminal); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -488,7 +488,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		if in.Open {
-			if err := openTerminal(c.Command, s.Title, settings.Load().SessionTerminal); err != nil {
+			if err := openTerminal(c.Command, s.Title, settings.Shared().SessionTerminal); err != nil {
 				fail(rw, err)
 				return
 			}
@@ -1258,7 +1258,7 @@ func agentCommand(a *agent.Agent) string {
 // the app where one is installed, unless the setting codexOpen asks for the
 // terminal (Yink88564391 on X).
 func codexOpensApp() bool {
-	return settings.Load().CodexOpen != "terminal" && codexAppInstalled()
+	return settings.Shared().CodexOpen != "terminal" && codexAppInstalled()
 }
 
 // codexAppInstalled and codexAppOpener are the agent package's, vars so a

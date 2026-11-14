@@ -844,7 +844,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// `magpie plugin builtin`) come and go here too
 	stopObservers := usage.ServeObservers()
 	defer stopObservers()
-	stopExtensionObservers := usage.ServeExtensionLedgerObservers(ctx, s.extensions)
+	stopExtensionObservers := usage.ServeExtensionLedgerObservers(context.WithoutCancel(ctx), s.extensions)
 	defer stopExtensionObservers()
 	// and the user's own routing groups are served while plugins/groups is
 	// on (provider.GateGroups); one made a moment ago turns it on as it is
@@ -3874,7 +3874,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			report = nil
 		}
 		cacheReportTry(hw, report)
-		if streams && !settings.Load().NoLoopGuard {
+		if streams && !settings.Shared().NoLoopGuard {
 			// a reply stuck in a loop is ended, not let run to its limit
 			// (#1359)
 			hw.loop = &loopGuard{}

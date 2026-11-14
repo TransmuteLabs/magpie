@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"html"
 	"io"
 	"io/fs"
 	"log"
@@ -61,6 +62,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/bridgesid"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/claudetui"
@@ -610,7 +612,7 @@ func clientNamedWorkPlace(req *Request) (dir string, inTurns bool) {
 		}
 		for _, m := range re.FindAllStringSubmatch(t, -1) {
 			for _, g := range m[1:] {
-				g = strings.Trim(strings.TrimSpace(g), "`'\"")
+				g = strings.Trim(strings.TrimSpace(html.UnescapeString(g)), "`'\"")
 				if g = wasDir.ReplaceAllString(g, ""); g != "" {
 					dir, inTurns = g, turn
 				}
@@ -652,8 +654,12 @@ func clientNamedWorkPlace(req *Request) (dir string, inTurns bool) {
 // is, on a line of its own: Claude Code's, in its instructions (" - Primary
 // working directory: /x", a moved folder as "Primary working directory: /y
 // (was /x)"), on a --bare run just "CWD: /x"; OpenCode's, in its <env>;
-// pi's ("Current working directory:"); Codex's and pi's <cwd>.
-var clientSaidWorkDir = lazyre.New(`(?m)^\s*(?:-\s*)?(?:Primary working directory|Working directory|Current working directory|CWD): *([^\r\n]+)$|<cwd>([^<\r\n]+)</cwd>`)
+// pi's ("Current working directory:"); Codex's <cwd> on its line, and
+// pi 1.x's, whose <cwd> holds the folder on a line of its own
+// ("<cwd>\n/x\n</cwd>"): read only on one line, pi's runs started in
+// magpie's temp folder and its model was told both (fysly on X). The
+// path's &, < and > come as entities (workDirIn reads them the same way).
+var clientSaidWorkDir = lazyre.New(`(?m)^\s*(?:-\s*)?(?:Primary working directory|Working directory|Current working directory|CWD): *([^\r\n]+)$|<cwd>\s*([^<\r\n]+?)\s*</cwd>`)
 
 // clientTurnWorkDir is where a caller says its working directory is in a
 // turn of the conversation, on a line of its own: Codex's
@@ -662,7 +668,7 @@ var clientSaidWorkDir = lazyre.New(`(?m)^\s*(?:-\s*)?(?:Primary working director
 // message of its own, and --bare's "CWD:" is its whole system prompt, so
 // their forms are not read in a turn: a line a user message quotes —
 // Claude Code's or anyone's — is no caller's word.
-var clientTurnWorkDir = lazyre.New(`(?m)^\s*(?:-\s*)?(?:Working directory|Current working directory): *([^\r\n]+)$|<cwd>([^<\r\n]+)</cwd>`)
+var clientTurnWorkDir = lazyre.New(`(?m)^\s*(?:-\s*)?(?:Working directory|Current working directory): *([^\r\n]+)$|<cwd>\s*([^<\r\n]+?)\s*</cwd>`)
 
 func evalSymlinks(path string) string {
 	if p, err := filepath.EvalSymlinks(path); err == nil {
@@ -1166,7 +1172,14 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	if from != nil {
 		args = append(args, "--resume", from.session)
 		fromLen = from.size()
-	} else if hasReply(req.Messages) {
+	} else {
+		// a session of the bridge's names itself so (bridgesid): the
+		// local-session readers leave it out, as the gateway counts its
+		// calls already (iwinux on X: each call listed twice, once as
+		// Claude Code's local session)
+		args = append(args, "--session-id", bridgesid.New())
+	}
+	if from == nil && hasReply(req.Messages) {
 		// no run had the conversation: this one is told it whole, in one
 		// message, its earlier turns marked as such (renderClaudePrompt)
 		log.Printf("claude: a new Claude Code is told the whole conversation: %d messages, %d images, the last turn marked as the one to answer", len(req.Messages), countImages(req.Messages))
@@ -1549,7 +1562,7 @@ func claudeMachineWhy(binary claudeCLI) (code, why string) {
 		{!claudeTUIRuns, "no-shim", "no shim"},
 		{runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows", "os", runtime.GOOS},
 		{binary.wsl == nil && binary.path == "", "missing", "no Claude Code path"},
-		{settings.Load().ClaudePrintMode, "off", "the interactive mode is turned off"},
+		{settings.Shared().ClaudePrintMode, "off", "the interactive mode is turned off"},
 	} {
 		if c.is {
 			return c.code, c.why
@@ -1830,7 +1843,7 @@ func (c claudeCLI) tuiEnv(env []string, configDir string) []string {
 // Claude Code's interactive mode, and never as -p: the user hasn't turned
 // it off (ClaudePrintMode), and magpie has its shim (claudeTUIRuns).
 func claudeTUIOn() bool {
-	return claudeTUIRuns && !settings.Load().ClaudePrintMode
+	return claudeTUIRuns && !settings.Shared().ClaudePrintMode
 }
 
 // wantTUI is whether req's run is to be the interactive mode: it is on,
@@ -3184,7 +3197,7 @@ func cutSessionWhere(dirs []string, sid, what string, at func(b []byte, last boo
 			if end <= 0 {
 				continue
 			}
-			id := newUUID()
+			id := bridgesid.New() // the copy is the bridge's too
 			lines := bytes.ReplaceAll(b[:end], []byte(`"sessionId":"`+sid+`"`), []byte(`"sessionId":"`+id+`"`))
 			// a name no one has: nothing reads it before the run starts
 			path := filepath.Join(dir, id+".jsonl")
@@ -7123,7 +7136,7 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	}
 	// a client that places its own cache marks keeps Claude Code's prompt:
 	// its system marks are placed in the run's first message (#1717)
-	req.leanPrompt = name == "Claude Code" && req.clientCache == nil && settings.Load().ClaudeLeanPrompt
+	req.leanPrompt = name == "Claude Code" && req.clientCache == nil && settings.Shared().ClaudeLeanPrompt
 	// the tools of a caller on another computer run there, not where
 	// Claude Code runs (envUnknownNote)
 	req.remoteCaller = !local(r)

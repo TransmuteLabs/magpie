@@ -35,6 +35,7 @@ import (
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/bark"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/desktopiso"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/fonts"
@@ -849,7 +850,7 @@ func codexWindowUnder(st settings.Settings, model string) *codexRunWindow {
 	if !ok && strings.HasPrefix(model, provider.GroupPrefix) {
 		e, ok = provider.EntryOf(model)
 	}
-	if !ok || e.Context <= 0 || provider.CompactFor(st, e, provider.GroupFinder()) > 0 || st.Working(e.Context) < e.Context {
+	if !ok || e.Context <= 0 || provider.CompactFor(st, e, provider.GroupFinder()) > 0 || codexcat.Working(st, e.ID, e.Context) < e.Context {
 		return nil
 	}
 	return &codexRunWindow{Model: model, Window: e.Context, Size: tokensSize(e.Context)}
@@ -1837,7 +1838,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			Refused string `json:"refused,omitempty"`
 		}
 		if err := agent.SetTelemetryAll(in.Off); err != nil {
-			if settings.Load().AgentTelemetryOff != in.Off {
+			if settings.Shared().AgentTelemetryOff != in.Off {
 				fail(rw, err)
 				return
 			}
@@ -2128,7 +2129,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		pct := settings.Load().CodexAsyncCompactPercent
+		pct := settings.Shared().CodexAsyncCompactPercent
 		if in.Percent != nil {
 			pct = *in.Percent
 		}
@@ -3413,7 +3414,7 @@ type signInOpened struct {
 // it went for signInOpened. linkOnly is this sign-in alone kept to its link
 // (the window's "Sign in on another computer"), whatever the setting.
 func openSignIn(w Windows, st provider.SignInState, linkOnly bool) signInOpened {
-	if linkOnly || settings.Load().SignInLinkOnly {
+	if linkOnly || settings.Shared().SignInLinkOnly {
 		return signInOpened{SignInState: st, LinkOnly: true}
 	}
 	var failed string
@@ -3435,7 +3436,7 @@ type mcpSignInOpened struct {
 // (settings.SignInLinkOnly), as an account's is. It opened the page in the
 // default browser whatever the setting (hkxhkxhkx on X).
 func openMCPSignIn(w Windows, st mcpauth.State) mcpSignInOpened {
-	if settings.Load().SignInLinkOnly {
+	if settings.Shared().SignInLinkOnly {
 		return mcpSignInOpened{State: st, LinkOnly: true}
 	}
 	if u, err := url.Parse(st.URL); st.URL != "" && (err != nil || !mcpauth.WebURL(u)) {

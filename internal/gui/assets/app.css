@@ -3004,12 +3004,12 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .acc.new { animation: sub-in .3s var(--ease-out); }
 .acc.new .dot { animation: copy-pop .3s var(--ease-out); }
 @keyframes sub-in { from { opacity: 0; transform: translateY(-4px); background: var(--pill-hover); } }
-.acc.add { width: 100%; color: var(--fg-2); background: none; border: 0 solid var(--line-2); cursor: default; }
-.acc + .acc.add { border-top-width: 1px; }
-.acc.add .dot { box-shadow: inset 0 0 0 1.5px var(--faint); border-radius: 50%; }
-.acc.add .n { font-weight: 450; }
-.acc.add:hover { background: var(--card-2); color: var(--fg); }
-.acc.add:hover .dot { box-shadow: inset 0 0 0 1.5px var(--fg); color: var(--fg); }
+.acc.add, .acc.keys-copy-all { width: 100%; color: var(--fg-2); background: none; border: 0 solid var(--line-2); cursor: default; }
+.acc + .acc.add, .acc + .acc.keys-copy-all { border-top-width: 1px; }
+.acc.add .dot, .acc.keys-copy-all .dot { box-shadow: inset 0 0 0 1.5px var(--faint); border-radius: 50%; }
+.acc.add .n, .acc.keys-copy-all .n { font-weight: 450; }
+.acc.add:hover, .acc.keys-copy-all:hover { background: var(--card-2); color: var(--fg); }
+.acc.add:hover .dot, .acc.keys-copy-all:hover .dot { box-shadow: inset 0 0 0 1.5px var(--fg); color: var(--fg); }
 
 /* a long list of keys, folded (361 on Discord): All N keys opens it on a
    filter, removing many at once, and a page of rows */
@@ -3259,10 +3259,12 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .row.pref .tray-windows .proto.pick { max-width: 100%; margin-left: 0; }
 .row.pref .tray-windows .proto.pick > span { overflow: hidden; text-overflow: ellipsis; }
 /* Accent color and Background image (appearance.js): a row of swatches,
-   the chosen one ringed; the last is a colour of the reader's own */
+   the chosen one ringed; the last is a colour of the reader's own. The
+   edge and the ring take a little of the text's ink, so black stays
+   seen on the black page it draws (CHENGJIAHEGOXIS on X) */
 .accent-pick { flex: 0 1 auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-left: auto; min-width: 0; }
-.accent-pick .swatch { position: relative; flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: var(--sw); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12); cursor: default; transition: box-shadow .15s ease, transform .12s var(--ease-out); }
-.accent-pick .swatch.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--sw); }
+.accent-pick .swatch { position: relative; flex: none; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: var(--sw); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 14%, transparent); cursor: default; transition: box-shadow .15s ease, transform .12s var(--ease-out); }
+.accent-pick .swatch.on { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px color-mix(in srgb, var(--sw) 78%, var(--fg)); }
 .accent-pick .swatch:active { transform: scale(.92); }
 .accent-pick .swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* not yet chosen, the own colour is an empty ring with a plus */
