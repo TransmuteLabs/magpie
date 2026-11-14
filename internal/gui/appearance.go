@@ -58,10 +58,18 @@ func lookKey(s settings.Settings) string {
 func lookCSS(s settings.Settings) string {
 	var b strings.Builder
 	if c, ok := parseHex(s.Accent); ok {
-		light, dark := accentVars(c, false), accentVars(c, true)
+		light := accentVars(c, false) + ";" + tintVars(c, lightSurfaces, lightTint)
+		dark := accentVars(c, true) + ";" + tintVars(c, darkSurfaces, darkTint) + ";" + popVar(c)
 		fmt.Fprintf(&b, "html:not(.omarchy):root{%s}\n", light)
 		fmt.Fprintf(&b, "@media (prefers-color-scheme: dark){html:not(.omarchy):root:not([data-theme=\"light\"]){%s}}\n", dark)
 		fmt.Fprintf(&b, "html:not(.omarchy):root[data-theme=\"dark\"]{%s}\n", dark)
+		// the tray panel draws its surfaces on body.panel, so they are
+		// tinted there too, the frosted panel's tint (tintPanel) with them
+		lightP, darkP := tintVars(c, lightPanelSurfaces, lightTint), tintVars(c, darkPanelSurfaces, darkTint)
+		fmt.Fprintf(&b, "@media (prefers-color-scheme: light){html:not(.omarchy):root:not([data-theme=\"dark\"]) body.panel{%s}}\n", lightP)
+		fmt.Fprintf(&b, "html:not(.omarchy):root[data-theme=\"light\"] body.panel{%s}\n", lightP)
+		fmt.Fprintf(&b, "@media (prefers-color-scheme: dark){html:not(.omarchy):root:not([data-theme=\"light\"]) body.panel{%s}}\n", darkP)
+		fmt.Fprintf(&b, "html:not(.omarchy):root[data-theme=\"dark\"] body.panel{%s}\n", darkP)
 	}
 	if s.Wallpaper != 0 {
 		if fi, err := os.Stat(settings.WallpaperPath()); err == nil && fi.Mode().IsRegular() {
@@ -134,34 +142,51 @@ var (
 	// the header switch's thumb (--seg-thumb over --seg-track)
 	lightPick = rgb{0xe9, 0xe9, 0xee}
 	darkPick  = rgb{0x4c, 0x4c, 0x52}
+	// the dark theme's chosen thumb before it is tinted (--mark-fill): the
+	// header switch's thumb as it reads over the page
+	darkFill = rgb{0x3a, 0x3a, 0x3f}
 	// how much of the theme's background lies over the picture
 	wallVeil = "color-mix(in srgb,var(--bg) 84%,transparent)"
 )
 
 // accentOn is c, darkened (light theme) or lightened (dark theme) just
-// enough to read as text on that theme's background and cards.
+// enough to read as text on that theme's background and cards, grey or
+// tinted with c.
 func accentOn(c rgb, dark bool) rgb {
 	if dark {
-		return inkOn(c, white, darkCard)
+		return inkOn(c, white, darkCard, tint(darkCard, c, darkTint), tint(darkBg, c, darkTint))
 	}
-	return inkOn(c, black, lightBg)
+	return inkOn(c, black, lightBg, tint(lightBg, c, lightTint))
 }
 
-// inkOn is c moved toward toward just enough to read as text on against.
-func inkOn(c, toward, against rgb) rgb {
+// inkOn is c moved toward toward just enough to read as text on each of
+// against.
+func inkOn(c, toward rgb, against ...rgb) rgb {
+	reads := func(o rgb) bool {
+		for _, bg := range against {
+			if contrast(o, bg) < accentInk {
+				return false
+			}
+		}
+		return true
+	}
 	out := c
-	for p := 0.0; p <= 1 && contrast(out, against) < accentInk; p += 0.02 {
+	for p := 0.0; p <= 1 && !reads(out); p += 0.02 {
 		out = c.mix(toward, p)
 	}
 	return out
 }
 
 // accentVars are the theme's --accent, its soft fill, the text on it, the
-// selection, and --mark, from c. --mark is the ink of what is chosen (the
-// open page's sidebar icon, a switch's or tab's chosen option), magpie's
-// own text colour without an accent of the user's, as a Mac's Graphite:
-// without it a colour picked showed nowhere on Settings, nor on most pages
-// (CHENGJIAHEGOXIS on X, 「选中任意强调色没反应」).
+// selection, --mark and --mark-fill, from c. --mark is the ink of what is
+// chosen (the open page's sidebar icon, a switch's or tab's chosen
+// option), magpie's own text colour without an accent of the user's, as a
+// Mac's Graphite: without it a colour picked showed nowhere on Settings,
+// nor on most pages (CHENGJIAHEGOXIS on X, 「选中任意强调色没反应」).
+// --mark-fill is the ground under it, a segmented control's thumb or a
+// chosen tab's, tinted with the colour: a grey thumb under a coloured word
+// still read as grey in the dark theme (「主题深色依然还是灰色」). It is
+// unset without an accent, so each keeps its own grey there.
 func accentVars(c rgb, dark bool) string {
 	a := accentOn(c, dark)
 	fg := white
@@ -169,12 +194,65 @@ func accentVars(c rgb, dark bool) string {
 		fg = rgb{0x14, 0x14, 0x1a}
 	}
 	soft, sel := white.mix(a, 0.09), white.mix(a, 0.11)
-	mark := inkOn(c, black, lightPick)
+	fill := white.mix(a, 0.12)
+	mark := inkOn(c, black, lightPick, tint(lightPick, c, lightTint), fill)
 	if dark {
 		soft, sel = darkBg.mix(a, 0.14), darkBg.mix(a, 0.2)
-		mark = inkOn(c, white, darkPick)
+		fill = darkFill.mix(a, 0.26)
+		mark = inkOn(c, white, darkPick, tint(darkPick, c, darkTint), fill)
 	}
-	return fmt.Sprintf("--accent:%s;--accent-soft:%s;--accent-fg:%s;--sel:%s;--mark:%s", a.hex(), soft.hex(), fg.hex(), sel.hex(), mark.hex())
+	return fmt.Sprintf("--accent:%s;--accent-soft:%s;--accent-fg:%s;--sel:%s;--mark:%s;--mark-fill:%s", a.hex(), soft.hex(), fg.hex(), sel.hex(), mark.hex(), fill.hex())
+}
+
+// surface is one of a theme's grounds, as app.css draws it without an
+// accent: its token and colour.
+type surface struct {
+	name string
+	base rgb
+}
+
+// The themes' grounds (app.css :root and its dark blocks, and body.panel's
+// own in each theme). The light theme's cards stay white, as on a Mac.
+var (
+	lightSurfaces = []surface{{"--bg", lightBg}, {"--card-2", rgb{0xf9, 0xf9, 0xfb}}, {"--pill", rgb{0xf1, 0xf1, 0xf4}}, {"--pill-hover", lightPick}, {"--seg-track", rgb{0xe6, 0xe6, 0xeb}}, {"--line", rgb{0xe3, 0xe3, 0xe8}}, {"--line-2", rgb{0xec, 0xec, 0xf0}}}
+	darkSurfaces  = []surface{{"--bg", darkBg}, {"--card", darkCard}, {"--card-2", rgb{0x1f, 0x1f, 0x23}}, {"--pill", rgb{0x2d, 0x2d, 0x33}}, {"--pill-hover", rgb{0x36, 0x36, 0x3d}}, {"--line", rgb{0x33, 0x33, 0x39}}, {"--line-2", rgb{0x2c, 0x2c, 0x32}}}
+	// --pop-bg, a menu's ground, is translucent: rgba(38, 38, 43, .96)
+	darkPop            = rgb{38, 38, 43}
+	lightPanelSurfaces = []surface{{"--bg", rgb{0xf2, 0xf2, 0xf5}}, {"--card-2", rgb{0xf8, 0xf8, 0xfa}}, {"--pill-hover", rgb{0xf4, 0xf4, 0xf7}}, {"--skel", rgb{0xee, 0xee, 0xf2}}, {"--skel-hi", rgb{0xe2, 0xe2, 0xe8}}}
+	darkPanelSurfaces  = []surface{{"--bg", rgb{0x1b, 0x1c, 0x20}}, {"--card", rgb{0x25, 0x26, 0x2c}}, {"--card-2", rgb{0x21, 0x22, 0x27}}, {"--pill", rgb{0x2e, 0x2f, 0x36}}, {"--pill-hover", rgb{0x38, 0x39, 0x42}}}
+	// how much of the colour's hue the grounds take: enough that the dark
+	// theme reads as the colour's, not grey (CHENGJIAHEGOXIS on X, 「目前我
+	// 个人感觉深色比较灰」), and only a breath of it on the light theme
+	lightTint = 0.05
+	darkTint  = 0.08
+)
+
+// tint is base with k of c's hue added: c less its own grey, so the ground
+// keeps its lightness (text on it reads as before) and a grey pick leaves
+// it as it was.
+func tint(base, c rgb, k float64) rgb {
+	g := (c[0] + c[1] + c[2]) / 3
+	var out rgb
+	for i := range out {
+		out[i] = min(255, max(0, base[i]+(c[i]-g)*k))
+	}
+	return out
+}
+
+// tintVars are surfaces tinted with c's hue, the theme's grounds once the user picked a colour of
+// their own. Without one each keeps app.css's grey.
+func tintVars(c rgb, surfaces []surface, k float64) string {
+	parts := make([]string, 0, len(surfaces))
+	for _, s := range surfaces {
+		parts = append(parts, s.name+":"+tint(s.base, c, k).hex())
+	}
+	return strings.Join(parts, ";")
+}
+
+// popVar is the dark theme's menu ground, tinted as its other grounds are.
+func popVar(c rgb) string {
+	p := tint(darkPop, c, darkTint)
+	return fmt.Sprintf("--pop-bg:rgba(%d,%d,%d,.96)", int(math.Round(p[0])), int(math.Round(p[1])), int(math.Round(p[2])))
 }
 
 // appearanceRoutes serve the look's stylesheet and the wallpaper, and take

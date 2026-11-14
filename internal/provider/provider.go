@@ -371,9 +371,9 @@ type Provider struct {
 	// Google answers with a 429 "Resource has been exhausted" whatever
 	// quota is left (Claude Code's billing line, the Claude Agent SDK's
 	// identity line, Codex's GPT-5 identity lines, Hermes Agent's earlier
-	// default persona) go with a zero-width space inside them, which Google
-	// lets through and the model reads the same (gateway's
-	// antigravityCloak). Set with `magpie provider set antigravity
+	// default persona, oh-my-pi's RFC 2119 line) go reworded with the same
+	// meaning, the billing line left out, which Google lets through and the
+	// model reads the same (gateway's antigravityCloak). Set with `magpie provider set antigravity
 	// prompt=as-written`; prompt=default turns it back.
 	PromptAsWritten bool `json:"promptAsWritten,omitempty"`
 
@@ -1963,6 +1963,13 @@ func normalize(p Provider) Provider {
 		p.BaseAPI = ""
 	}
 	p.Models = cleanList(p.Models)
+	if p.ID == "devin" {
+		// picked from the built-in's list before its API was served
+		// (ce8d0e065), which had Adaptive and Fusion: Devin's chat API
+		// serves neither, and they were listed, and refused, ever after
+		p.Models = withoutDevinRouters(p.Models)
+		p.Delisted = withoutDevinRouters(p.Delisted)
+	}
 	p.Fallback = cleanList(p.Fallback)
 	// a provider saved under an id a preset carried before (presetAliases:
 	// qianfan's first day's, Tencent Cloud's plan and TokenHub's two) is
