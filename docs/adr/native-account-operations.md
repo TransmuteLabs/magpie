@@ -1,7 +1,10 @@
 # Native account operations through an owned agent binding
 
-Status: implementation and verification in the isolated native-account-ops
-worktree, pending integration into the SDK 1.6 union. Base: f4232ea76.
+Status: integrated into `devzeus` by `c4b14f818`, together with the API 1.6
+session-source contract. The consolidated runtime is recorded in
+[`0021-consolidated-sdk16-validation.md`](0021-consolidated-sdk16-validation.md).
+The former isolated-worktree base was `f4232ea76`; it is historical evidence,
+not a second supported host.
 
 ## Problem
 
@@ -61,7 +64,8 @@ method names. None of those vendor choices belongs in core.
 ## Verification boundary
 
 The implementation uses isolated usbox snapshots and local synthetic peers.
-Full SDK/module race suites, actual native-host operation/assignment proof,
-no-replay and reconstructed application startup gates are recorded with
-exact source hashes before integration. Original vendor/application parity
-and live accounts are not implied by those local fixtures.
+The consolidated verification record identifies the exact host source,
+completed gates and remaining acceptance failures. Each domain module still
+needs its own installed-host operation/assignment, no-replay and application
+startup evidence against that shared host. Original vendor/application parity
+and live accounts are not implied by local SDK fixtures.

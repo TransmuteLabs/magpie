@@ -29,7 +29,7 @@ release after the module is disabled. Listing and help never grant read consent.
 | File plan preparation and execution | [`actions.go`](../../internal/extension/actions.go), `Actions.AgentInspect`, `AgentPlan`, `SessionConvert`, `Execute`, `ActionPolicy`, `ActionPlan` |
 | Module lifecycle and scoped state | [`manager.go`](../../internal/extension/manager.go), `Default`, `Manifest`, `Invoke`, `Store`; [`store.go`](../../internal/extension/store.go), `Store.GetAccount` |
 
-## API 1.6-preview session sources
+## API 1.6 JSONL session sources
 
 `session-source` is independent of `session-migration`. A converter does not
 register a reader. `sessionSources` descriptors declare a codec, agent, exact
@@ -78,8 +78,10 @@ It is not evidence of vendor format support. SQLite, compressed journals,
 remote/backend history, call/trace registration and deletion are outside this
 first cut. The decision and lifecycle bounds are in
 [`0019-jsonl-session-sources.md`](../adr/0019-jsonl-session-sources.md).
-Frozen-source verification and independent review are recorded in
+Historical preview verification and independent review are recorded in
 [`0020-session-source-preview-validation.md`](../adr/0020-session-source-preview-validation.md).
+The merged SDK 1.6 host and its current acceptance boundary are recorded in
+[`0021-consolidated-sdk16-validation.md`](../adr/0021-consolidated-sdk16-validation.md).
 
 ## Agent discovery and ordinary call graph
 
