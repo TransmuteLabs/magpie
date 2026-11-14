@@ -38,7 +38,8 @@ export function validateAgentMetadata(manifest, agent, fail, homePath) {
     if (!object(env) || Object.keys(env).length > 64 || !object(args) || Object.keys(args).length > 64
       || !Array.isArray(plain) || plain.length > 64) fail("Invalid agent launch metadata");
     for (const [name, value] of Object.entries(env)) {
-      if (name.length > 128 || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) || !text(value)) fail("Invalid agent launch environment");
+      if (name.length > 128 || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name) || !text(value)
+        || value.includes("{config}") && !agent.configFiles?.length && agent.profile == null) fail("Invalid agent launch environment");
     }
     for (const [name, value] of Object.entries(args)) {
       if (!flag(name) || !text(value) || value.includes("{config}") && !agent.configFiles?.length && agent.profile == null) fail("Invalid agent launch argument");

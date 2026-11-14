@@ -34,6 +34,8 @@ type launchSpec struct {
 	env           map[string]string // templates (agentplug.Fill)
 	args, plain   []string
 	strict        bool
+	config        string
+	err           error
 }
 
 // newLaunch is d's launch, its config's path, as the agent names it,
@@ -46,7 +48,7 @@ func newLaunch(d agentplug.Desc, config string) *launchSpec {
 }
 
 func declaredLaunch(id, bin, config, model string, env, args map[string]string, plain []string) *launchSpec {
-	l := &launchSpec{id: id, bin: bin, flag: model, env: maps.Clone(env), plain: slices.Clone(plain)}
+	l := &launchSpec{id: id, bin: bin, flag: model, env: maps.Clone(env), plain: slices.Clone(plain), config: config}
 	for _, flag := range sortedKeys(args) {
 		l.args = append(l.args, flag, strings.ReplaceAll(args[flag], "{config}", config))
 	}
@@ -71,7 +73,13 @@ func (l *launchSpec) plainCases() []string {
 func (l *launchSpec) vars(gw, key string) []string {
 	out := make([]string, 0, len(l.env))
 	for _, k := range sortedKeys(l.env) {
-		out = append(out, k+"="+agentplug.Fill(l.env[k], gw, gw+"/v1", key))
+		value := l.env[k]
+		if l.strict {
+			value = strings.NewReplacer("{url}", gw, "{v1}", gw+"/v1", "{key}", key, "{config}", l.config).Replace(value)
+		} else {
+			value = agentplug.Fill(value, gw, gw+"/v1", key)
+		}
+		out = append(out, k+"="+value)
 	}
 	return out
 }

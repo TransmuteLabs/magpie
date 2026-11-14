@@ -135,6 +135,15 @@ func (controller *extensionController) spec() *launchSpec {
 	}
 	launch := declaredLaunch(desc.ID, controller.bin, config, desc.Launch.Model, desc.Launch.Env, desc.Launch.Args, desc.Launch.Plain)
 	launch.strict = true
+	if config == "" {
+		for _, templates := range []map[string]string{desc.Launch.Env, desc.Launch.Args} {
+			for _, value := range templates {
+				if strings.Contains(value, "{config}") {
+					launch.err = errors.New("declared agent launch requires an available configuration path")
+				}
+			}
+		}
+	}
 	return launch
 }
 
@@ -170,6 +179,9 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 	}
 	var shell *update.ShellFunctionPlan
 	if launch := controller.spec(); launch != nil {
+		if launch.err != nil {
+			return nil, launch.err
+		}
 		var body update.ShellBody
 		if action.Preview().Binding.Connected {
 			body = launch.function
@@ -532,6 +544,9 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 	}
 	if launch := controller.spec(); launch != nil {
 		a.Start = func() Starting {
+			if launch.err != nil {
+				return Starting{Bin: controller.bin, Err: launch.err}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			record, err := controller.read(ctx)

@@ -67,3 +67,17 @@ test("agent metadata rejects identity collisions, invalid launch and escaping li
     assert.throws(() => validateManifest(value));
   }
 });
+
+test("agent environment config placeholder requires a declared config source", () => {
+  const value = fixture();
+  delete value.agents[0].profile;
+  delete value.agents[0].configFiles;
+  value.agents[0].launch.env.CONFIG = "{config}";
+  assert.throws(() => validateManifest(value));
+  const file = structuredClone(value);
+  file.agents[0].configFiles = ["config with spaces.json"];
+  assert.doesNotThrow(() => validateManifest(file));
+  const profile = structuredClone(value);
+  profile.agents[0].profile = { target: "base" };
+  assert.doesNotThrow(() => validateManifest(profile));
+});

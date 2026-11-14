@@ -64,6 +64,13 @@ commands), `profile.target`, and typed Library locations. All require API
 1.5; earlier agent declarations keep their existing adapter and behavior.
 A model flag requires a declared model field. A launch with no config files
 uses a host binding rather than a manufactured editable file.
+SDK launch Env and Args resolve `{config}` to the first declared configuration
+file, or the existing base agent's current path for a profile. The structural
+Go/JS validators require a declared file or profile when the placeholder is
+used; a profile whose base has no configuration path is refused before
+adoption or launch. SDK Env expands gateway/key/config placeholders in one
+pass, preserving spaces and literal placeholder-looking text inside the
+resolved path. Legacy agentplug Env keeps its existing placeholder behavior.
 
 [`extension_controller.go`](../../internal/agent/extension_controller.go)
 adapts these declarations to ordinary All/Find/Starter, NativeConnection and

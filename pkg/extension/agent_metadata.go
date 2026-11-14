@@ -86,7 +86,8 @@ func agentMetadata(manifest Manifest, agent AgentDescriptor) error {
 			return errors.New("agent launch model flag requires a declared model field")
 		}
 		for key, value := range launch.Env {
-			if !agentEnvName(key) || !agentLaunchText(value) {
+			if !agentEnvName(key) || !agentLaunchText(value) ||
+				strings.Contains(value, "{config}") && len(agent.ConfigFiles) == 0 && agent.Profile == nil {
 				return errors.New("invalid agent launch environment")
 			}
 		}
