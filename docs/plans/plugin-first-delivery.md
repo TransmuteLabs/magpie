@@ -14,10 +14,13 @@ for every module.
 
 - Host implementations are consolidated on `devzeus`, SDK API 1.9/native
   ABI 1. The current implementation checkpoint is
-  `46756a48c9c9f204a8369638dc63cbcb83d02031`, including upstream
-  `e6e0585bd3d92a79dab08f0955789a5801382b71`.
-  The [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md)
-  records the combined synthetic acceptance and actual empty-catalog binary.
+  `d5b098d8183e88ab9fee1da0170d1c90b9590822`, including upstream
+  `aa358555f`.
+  The [upstream and module checkpoint](../adr/0027-sdk19-upstream-module-validation.md)
+  records the current implementation, its preceding functional broad-suite
+  candidate and the final test-only corrections. The earlier
+  [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md)
+  retains the exact acceptance of `46756a48c`, including its empty-catalog binary.
   Historical [SDK 1.6 validation](../adr/0021-consolidated-sdk16-validation.md)
   remains a record of its own source, rather than acceptance of this checkpoint.
   No further host branches or worktrees are needed for module-specific SDK

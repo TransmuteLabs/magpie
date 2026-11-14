@@ -14,8 +14,8 @@ in [ADR 0015](../adr/0015-selected-account-window-bindings.md) and
 [ADR 0017](../adr/0017-window-auth-broker.md). Combined 1.5 acceptance and
 agent launch/profile adoption remain separate. API 1.6 adds bounded JSONL session
 sources and finite native account operations. API 1.7 adds dedicated System One
-decisions, sparse execution accounting and structured diagnostics. The API 1.8
-candidate adds native rooted storage readers, search sources, explicit catalog
+decisions, sparse execution accounting and structured diagnostics. API 1.8
+adds native rooted storage readers, search sources, explicit catalog
 projections, independent ledger observation, own-call/outside-history separation
 and synchronous middleware. API 1.9 adds provider switches, paid selected-account
 tasks, effective agent model limits/efforts, provider defaults, richer quota
@@ -24,6 +24,9 @@ the [SDK 1.9 host checkpoint](../adr/0026-sdk19-host-validation.md) records
 the exact combined implementation and completed safe broad, race, platform
 and empty-catalog gates. It keeps actual macOS signing, browser and domain
 acceptance separate. Source availability alone is not a passing final gate.
+The [upstream and module follow-up](../adr/0027-sdk19-upstream-module-validation.md)
+records the later merged implementation, final task-admission regression and
+the exact host used by each module's installed-package fixture.
 The SDK does not replace every
 upstream extension surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
@@ -86,7 +89,7 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Native agent account/bootstrap operations | [`account_operations.go`](../../pkg/extension/account_operations.go), [`protocol_account_operation.go`](../../internal/gateway/protocol_account_operation.go) | SDK 1.6 and codec 0.5 bind declared read/write actions to the original inbound module, current owned agent, explicit visible model and exact account generation | **Implemented 1.6 local-owner adapter.** No arbitrary routes, remote credential delegation or routing-group account selection. |
 | Synchronous gateway middleware | [`SDK adapter`](../../internal/gateway/extension_middleware.go), [`middleware contract`](../../pkg/extension/middleware.go), [`owner reference`](gateway-middleware.md#installable-sdk-middleware-api-18) | Explicit root `gateway-middleware` joins ordinary request/account/provider/event/response points with per-request state, read-only checked leases and protected request fields | **Implemented 1.8; scoped synthetic owner verification.** Separate from asynchronous request recall and ledger observation. Synthetic owner fixtures do not establish live community-package compatibility. |
 | Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 `gateway-hooks` enters ordinary request/completion/sign-in owners with origin, effect and lease checks | **Implemented 1.2, scoped host proof.** Recall is read-only; capture keeps the selected generation and durable effect policy. This is not synchronous middleware or built-in Memory access. |
-| Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go), [`extension_observer.go`](../../internal/usage/extension_observer.go) | API 1.8 `ledger-observer` joins ordinary `Append` through a sanitized metadata projection and a bounded asynchronous queue; existing request/attempt/OTLP owners remain intact | **Candidate 1.8 ledger adapter.** It requests no bodies and cannot mutate the ledger. Full request/attempt observer registration is separate; `usage-reporter` remains provider-specific. |
+| Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go), [`extension_observer.go`](../../internal/usage/extension_observer.go) | API 1.8 `ledger-observer` joins ordinary `Append` through a sanitized metadata projection and a bounded asynchronous queue; existing request/attempt/OTLP owners remain intact | **Implemented 1.8 ledger adapter, with scoped owner acceptance.** It requests no bodies and cannot mutate the ledger. Full request/attempt observer registration is separate; `usage-reporter` remains provider-specific. |
 | Routing strategy / seat ordering | [`RoutingStrategyDescriptor`](../../pkg/extension/routing.go), [`extensionrouting`](../../internal/extensionrouting/routing.go), [`Manager.OrderRouting`](../../internal/extension/routing.go) | Namespaced root READ actions, owned by the primary or a private service, enter ordinary provider/group ordering; component-filtered public handshakes retain full-root registration and lazy dispatch | **Implemented 1.4.** Selected revision/config leases, bounded permutations and identity fallback retain core guards. [Record](../adr/0012-sdk-routing-strategies.md), including hybrid regression; SDK checkpoint and application acceptance are separate. |
 | Budget limiter / spender | [`Limiter`, `Spender`](../../internal/gwbudget/gwbudget.go) | Host reserve/release/spent contract | **Remaining:** SDK adapter preserving the point's fail-closed policy. |
 | Reversible masking | [`Masker`](../../internal/gwmw/gwmw.go), [`plugins/redact`](../../plugins/redact/redact.go) | Dedicated host transformation point | **Remaining:** SDK adapter; ordinary request hooks are not this contract. |
