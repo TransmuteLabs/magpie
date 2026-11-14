@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/probelog"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -93,8 +96,8 @@ func twoAccountPlugin(t *testing.T, ctx context.Context, first map[string]any) (
 func TestModelTestAsksTheAccountThatServesIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	p, wrong := twoAccountPlugin(t, ctx, nil)
 	rows := probeRows(t)
+	p, wrong := twoAccountPlugin(t, ctx, nil)
 	p.AccountModels = map[string][]string{"a@fake": {"fake-1"}, "b@fake": {"grok-4.7"}}
 	rs := p.TestModels(ctx, []string{"grok-4.7"})
 	if len(rs) != 1 || !rs[0].OK {
@@ -103,10 +106,72 @@ func TestModelTestAsksTheAccountThatServesIt(t *testing.T) {
 	if w := wrong(); len(w) != 0 {
 		t.Errorf("asked an account the user kept off grok-4.7: %v", w)
 	}
+	var logged int
 	for _, r := range rows() {
-		if r.Model == "grok-4.7" && r.Account != "b@fake" {
+		if r.Model != "grok-4.7" || r.Kind != probelog.KindTest {
+			continue
+		}
+		logged++
+		if r.Account != "b@fake" || r.Status != http.StatusOK {
 			t.Errorf("the test's row names %q, not the account asked: %+v", r.Account, r)
 		}
+	}
+	if logged != 1 {
+		t.Errorf("model test logged %d requests, want one for b@fake: %+v", logged, rows())
+	}
+}
+
+type modelCatalogClient struct {
+	next    http.RoundTripper
+	started chan struct{}
+	once    sync.Once
+	changed atomic.Bool
+}
+
+func (c *modelCatalogClient) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Hostname() != "models.dev" {
+		return c.next.RoundTrip(req)
+	}
+	transport := http.DefaultClient.Transport
+	c.once.Do(func() { close(c.started) })
+	for {
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		default:
+			if http.DefaultClient.Transport != transport {
+				c.changed.Store(true)
+			}
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestModelTestKeepsProbeUntilCatalogSyncEnds(t *testing.T) {
+	testenv.Bun(t)
+	previous := http.DefaultClient.Transport
+	next := previous
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	client := &modelCatalogClient{next: next, started: make(chan struct{})}
+	http.DefaultClient.Transport = client
+	t.Cleanup(func() { http.DefaultClient.Transport = previous })
+	t.Run("model", func(t *testing.T) {
+		TestModelTestAsksTheAccountThatServesIt(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		select {
+		case <-client.started:
+		case <-ctx.Done():
+			t.Fatal("plugin catalog synchronization did not start")
+		}
+	})
+	if client.changed.Load() {
+		t.Error("default client transport changed while plugin catalog synchronization was active")
+	}
+	if plugin.Running() {
+		t.Error("model test left its plugin host running after probe cleanup")
 	}
 }
 

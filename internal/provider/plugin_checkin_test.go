@@ -715,19 +715,6 @@ func TestPluginCheckinEarlyDoneAskedAgain(t *testing.T) {
 // 10:00, not the next Beijing day, and not before, whatever the machine's
 // zone; a failure in the gap is asked again then too.
 func TestPluginCheckinAsksAgainAtUntil(t *testing.T) {
-	presses := pluginCheckinSandbox(t, "ck-until")
-	s := settings.Load()
-	s.PluginCheckins = map[string]bool{"fakeco": true}
-	if err := settings.Save(s); err != nil {
-		t.Fatal(err)
-	}
-	answer := func(outcome string, until time.Time) {
-		t.Helper()
-		b, _ := json.Marshal(map[string]any{"outcome": outcome, "credit": 100, "until": until.UTC().Format(time.RFC3339)})
-		if err := os.WriteFile(presses+".until", b, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
 	// the plugin's answer at t: before 10:00 Beijing, the day before's
 	// campaign (claimed at its first ask, done after), until today's 10:01
 	opens := func(at time.Time) time.Time {
@@ -738,14 +725,22 @@ func TestPluginCheckinAsksAgainAtUntil(t *testing.T) {
 		}
 		return o
 	}
-	defer func(l *time.Location) { time.Local = l }(time.Local)
 	for _, zone := range []*time.Location{time.UTC, time.FixedZone("UTC-8", -8*3600), beijing} {
 		t.Run(zone.String(), func(t *testing.T) {
-			time.Local = zone
-			if err := os.Remove(pluginCheckinPath()); err != nil && !os.IsNotExist(err) {
+			testenv.Zone(t, zone)
+			presses := pluginCheckinSandbox(t, "ck-until")
+			s := settings.Load()
+			s.PluginCheckins = map[string]bool{"fakeco": true}
+			if err := settings.Save(s); err != nil {
 				t.Fatal(err)
 			}
-			_ = os.Remove(presses)
+			answer := func(outcome string, until time.Time) {
+				t.Helper()
+				b, _ := json.Marshal(map[string]any{"outcome": outcome, "credit": 100, "until": until.UTC().Format(time.RFC3339)})
+				if err := os.WriteFile(presses+".until", b, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			now := time.Date(2026, 10, 28, 9, 27, 0, 0, beijing).In(zone)
