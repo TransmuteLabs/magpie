@@ -47,8 +47,9 @@ func (m *Manager) Protocols() (*codec.Registry, error) {
 			adapters = append(adapters, &remoteInbound{
 				manager: m, module: entry.Manifest.ID, revision: entry.Revision,
 				descriptor: inbound, discovery: entry.Manifest.Contract.Has(sdk.ModelDiscovery),
-				tools:    entry.Manifest.Contract.Has(sdk.ToolProvider),
-				executor: entry.Manifest.Contract.Version.Minor >= 4 && entry.Manifest.Contract.Has(sdk.OutboundExecutor),
+				tools:             entry.Manifest.Contract.Has(sdk.ToolProvider),
+				executor:          entry.Manifest.Contract.Version.Minor >= 4 && entry.Manifest.Contract.Has(sdk.OutboundExecutor),
+				accountOperations: entry.Manifest.Contract.Has(sdk.NativeAccountOperations),
 			})
 		}
 	}
@@ -56,13 +57,14 @@ func (m *Manager) Protocols() (*codec.Registry, error) {
 }
 
 type remoteInbound struct {
-	manager    *Manager
-	module     string
-	revision   string
-	descriptor sdk.InboundDescriptor
-	discovery  bool
-	tools      bool
-	executor   bool
+	manager           *Manager
+	module            string
+	revision          string
+	descriptor        sdk.InboundDescriptor
+	discovery         bool
+	tools             bool
+	executor          bool
+	accountOperations bool
 }
 
 func (remote *remoteInbound) ID() string   { return remote.module + ":" + remote.descriptor.ID }
@@ -79,6 +81,10 @@ func (remote *remoteInbound) Contract() codec.Contract {
 	if remote.executor {
 		contract.Version = codec.HostContract().Version
 		contract.Capabilities = append(contract.Capabilities, codec.ExecutorBinding)
+	}
+	if remote.accountOperations {
+		contract.Version = codec.HostContract().Version
+		contract.Capabilities = append(contract.Capabilities, codec.NativeAccountOperations)
 	}
 	return contract
 }
@@ -167,11 +173,20 @@ func (call *remoteCall) Decode(ctx context.Context, headers http.Header, body []
 			!call.lease.Manifest().Contract.Has(sdk.OutboundExecutor)) {
 		return codec.Request{}, errors.New("invalid native extension executor constraint")
 	}
+	if request.Protocol == string(codec.AccountOperation) {
+		if _, declared := call.lease.Manifest().AccountOperation(request.AccountOperation); !declared ||
+			!call.accountOperations || request.Executor != codec.SameModuleExecutor {
+			return codec.Request{}, errors.New("invalid native extension account operation")
+		}
+	} else if request.AccountOperation != "" {
+		return codec.Request{}, errors.New("unexpected native account operation")
+	}
 	return codec.Request{
 		Protocol: codec.Protocol(request.Protocol), Body: request.Body,
 		Session: request.Session, Timeout: time.Duration(request.TimeoutMs) * time.Millisecond,
 		RequestID: request.RequestID, Metadata: bytes.Clone(request.Metadata),
-		Executor: request.Executor,
+		Executor:         request.Executor,
+		AccountOperation: request.AccountOperation,
 	}, nil
 }
 

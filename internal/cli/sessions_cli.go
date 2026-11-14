@@ -22,6 +22,9 @@ const sessionsUsage = "usage: magpie sessions [--days N|today|all] [--model <mod
 // Codex; with --days, what they spent day by day, as the app's Sessions
 // view shows it.
 func sessionsCmd(args []string) error {
+	if len(args) > 1 && args[1] == "sources" {
+		return sessionSourcesTo(os.Stdout, args[2:])
+	}
 	if len(args) > 1 && args[1] == "relocate-claude" {
 		return relocateClaudeTo(os.Stdout, args[2:])
 	}

@@ -7,25 +7,26 @@ type Capability = protocolext.Capability
 type Contract = protocolext.Contract
 
 const (
-	ManifestSchema              = 1
-	ManifestFile                = "magpie-plugin.json"
-	InboundCodec                = protocolext.InboundCodec
-	OutboundExecutor            = protocolext.OutboundExecutor
-	AgentWiring                 = protocolext.AgentWiring
-	AccountAuth                 = protocolext.AccountAuth
-	ModelDiscovery              = protocolext.ModelDiscovery
-	UsageReporter               = protocolext.UsageReporter
-	OperationControl            = protocolext.OperationControl
-	ToolProvider                = protocolext.ToolProvider
-	SessionMigration Capability = "session-migration"
+	ManifestSchema                     = 1
+	ManifestFile                       = "magpie-plugin.json"
+	InboundCodec                       = protocolext.InboundCodec
+	OutboundExecutor                   = protocolext.OutboundExecutor
+	AgentWiring                        = protocolext.AgentWiring
+	AccountAuth                        = protocolext.AccountAuth
+	ModelDiscovery                     = protocolext.ModelDiscovery
+	UsageReporter                      = protocolext.UsageReporter
+	OperationControl                   = protocolext.OperationControl
+	ToolProvider                       = protocolext.ToolProvider
+	NativeAccountOperations            = protocolext.NativeAccountOperations
+	SessionMigration        Capability = "session-migration"
 )
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 5},
+		Version: APIVersion{Major: 1, Minor: 6},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations,
 		},
 	}
 }
@@ -42,6 +43,7 @@ type Manifest struct {
 	Providers         []ProviderDescriptor          `json:"providers,omitempty"`
 	Agents            []AgentDescriptor             `json:"agents,omitempty"`
 	Sessions          []SessionDescriptor           `json:"sessions,omitempty"`
+	SessionSources    []SessionSourceDescriptor     `json:"sessionSources,omitempty"`
 	Tools             []ToolDescriptor              `json:"tools,omitempty"`
 	Actions           []ActionDescriptor            `json:"actions,omitempty"`
 	Services          []ServiceDescriptor           `json:"services,omitempty"`
@@ -52,6 +54,7 @@ type Manifest struct {
 	Component         *ComponentIdentity            `json:"component,omitempty"`
 	Hooks             *GatewayHookDescriptor        `json:"hooks,omitempty"`
 	RoutingStrategies []RoutingStrategyDescriptor   `json:"routingStrategies,omitempty"`
+	AccountOperations []AccountOperationDescriptor  `json:"accountOperations,omitempty"`
 }
 
 type InboundDescriptor struct {

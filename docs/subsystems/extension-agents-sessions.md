@@ -6,6 +6,14 @@ file preconditions, execution and recovery. The extension owns the agent's
 config schema, inspection, format-aware restoration and session serialization.
 An executable extension is a trusted local program, not a filesystem sandbox.
 
+`magpie sessions sources --json` reports SDK source preparation, errors and
+native bindings through the same owner as `GET /api/sessions/sources`.
+Explicit native takeover uses `magpie sessions sources bind <module> <source>
+--expected <package-revision>`; release uses `sources unbind <agent> --expected
+<binding-identity>`. Inspection returns identities without filesystem roots.
+Bind and release retain the owner's revision and identity checks, including
+release after the module is disabled. Listing and help never grant read consent.
+
 ## Sources of truth
 
 | Responsibility | Source and symbols |
@@ -20,6 +28,58 @@ An executable extension is a trusted local program, not a filesystem sandbox.
 | Selected-store journal/blob planning | [`extension_source_inputs.go`](../../internal/sessions/extension_source_inputs.go), `sessionSourceRuntime`, `collectSessionSourceInputs`, `readSessionInputs`, `sessionInputSnapshot.check` |
 | File plan preparation and execution | [`actions.go`](../../internal/extension/actions.go), `Actions.AgentInspect`, `AgentPlan`, `SessionConvert`, `Execute`, `ActionPolicy`, `ActionPlan` |
 | Module lifecycle and scoped state | [`manager.go`](../../internal/extension/manager.go), `Default`, `Manifest`, `Invoke`, `Store`; [`store.go`](../../internal/extension/store.go), `Store.GetAccount` |
+
+## API 1.6-preview session sources
+
+`session-source` is independent of `session-migration`. A converter does not
+register a reader. `sessionSources` descriptors declare a codec, agent, exact
+store slots and one finite JSONL layout. The host extracts the selected ID;
+`session.source.read` must confirm it in a typed summary or transcript.
+The public DTOs and validation live in
+[`session_source.go`](../../pkg/extension/session_source.go).
+
+[`extension_source_registry.go`](../../internal/sessions/extension_source_registry.go)
+resolves current native stores or frozen HOME-relative declarations.
+Native readers stay default until an explicit checked host binding delegates
+their ownership. Disable/removal/revocation hides delegated data; it does not
+silently fall through to another parser. Unknown SDK formats never use Claude's
+default decoder.
+
+[`extension_source_adapter.go`](../../internal/sessions/extension_source_adapter.go)
+prepares summaries outside the session cache mutex, then exposes immutable
+records through ordinary discovery, `List`, `Find`, management and stats.
+`allFilesWith` and `parserFor` do not call workers. SDK summaries are not written
+into the persistent native path cache. Failed reads under unchanged authority
+retain detached last-good metadata as `source_status: stale`; revoked authority
+hides it. Source preparation errors are exposed at `/api/sessions/sources`.
+Persisted grant checks also run while another decoder is preparing. After
+locked listing/management/statistics reads, publication rechecks grants,
+consent, epoch and the immutable view outside the cache mutex. A changed view
+rebuilds the result, including cached unchanged replies; an update from a
+separate CLI cannot retain revoked rows through the old in-process epoch.
+
+The checked input reader is shared with conversion. Optional `session.inputs.v1`
+planning and source decoding use the same package/config lease and approved
+store. Journal/blob snapshots include physical identities, permissions and
+content digests. Bodies are released after summary decoding and reacquired for
+transcripts. Both the 16 MiB/128-document binary budget and the 24 MiB encoded
+frame budget apply.
+
+Read consent remains `Reads(agent)` and `OwnOff`. Project/folder filters grant
+no extra authority. Calls cannot borrow account credentials; source methods are
+unary and read-only. Appends/rewrites are fully decoded initially; incomplete
+trailing entries are excluded. Existing pricing computes costs from normalized
+nonnegative usage, and host-native recipes construct resume commands. Sources
+with no supported launcher have no resume action.
+
+The synthetic native fixture under `examples/extensions/session-source-jsonl`
+tests ordinary discovery/read/search/stats/conversion and opaque attachments.
+It is not evidence of vendor format support. SQLite, compressed journals,
+remote/backend history, call/trace registration and deletion are outside this
+first cut. The decision and lifecycle bounds are in
+[`0019-jsonl-session-sources.md`](../adr/0019-jsonl-session-sources.md).
+Frozen-source verification and independent review are recorded in
+[`0020-session-source-preview-validation.md`](../adr/0020-session-source-preview-validation.md).
 
 ## Agent discovery and ordinary call graph
 

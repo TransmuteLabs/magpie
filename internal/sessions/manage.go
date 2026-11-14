@@ -82,6 +82,9 @@ type AgentCount struct {
 // Deletable says whether magpie can move an agent's sessions to its trash:
 // those kept as files of their own, in a layout magpie knows whole.
 func Deletable(agent string) bool {
+	if extensionSourceAgent(agent) {
+		return false
+	}
 	switch agent {
 	case "claude", "qoder", "qoder-cn", "workbuddy", "workbuddy-ai", "codebuddy", "codex", "pi", "raft", "cindy", "omp", "cursor", "dsh", "droid", "agy":
 		return true
@@ -120,6 +123,10 @@ var ErrActive = errors.New("the session was written to in the last minute; it ma
 
 // Agents are the agents with sessions on this computer, by how many.
 func Agents() []AgentCount {
+	return publishSourceRead(sourceAgents)
+}
+
+func sourceAgents() []AgentCount {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	mu.Lock()
@@ -158,6 +165,10 @@ func agentCounts(all []file) []AgentCount {
 // ListAgent is every session of one agent, the most recently active first,
 // with no limit; one nothing was said in is listed too, to be cleared away.
 func ListAgent(agent string) []Managed {
+	return publishSourceRead(func() []Managed { return sourceListAgent(agent) })
+}
+
+func sourceListAgent(agent string) []Managed {
 	alias := provider.UsageAlias()
 	storeMu.RLock()
 	defer storeMu.RUnlock()
@@ -176,6 +187,10 @@ func ListAgent(agent string) []Managed {
 // agents' files are looked at, and of those only the ones whose session id
 // is inside the file are read when they changed.
 func NativeIDs(agents map[string]bool) map[string]map[string]bool {
+	return publishSourceRead(func() map[string]map[string]bool { return sourceNativeIDs(agents) })
+}
+
+func sourceNativeIDs(agents map[string]bool) map[string]map[string]bool {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	mu.Lock()
@@ -202,6 +217,10 @@ type ManageView struct {
 // Only native's agents and the one picked are read: a change to another
 // agent's sessions waits for a page that shows it (#2776).
 func Manage(native map[string]bool, pick func([]AgentCount, map[string]map[string]bool) string) ManageView {
+	return publishSourceRead(func() ManageView { return sourceManage(native, pick) })
+}
+
+func sourceManage(native map[string]bool, pick func([]AgentCount, map[string]map[string]bool) string) ManageView {
 	alias := provider.UsageAlias()
 	storeMu.RLock()
 	defer storeMu.RUnlock()
@@ -380,6 +399,11 @@ func keptSubagents(out []Managed) []Managed {
 // in, as ListAgent lists it and Find finds it: how to resume it, and
 // whether its conversation can be read.
 func listed(s *Session) {
+	if s.source != nil {
+		s.Resume = sourceResume(s.source)
+		s.Carry, s.Transcript = carries(*s), s.source.grant.descriptor.Transcript && !s.source.stale
+		return
+	}
 	if s.Resume == "" && !s.ReadOnly {
 		s.Resume = resumeFor(s.WSL, s.Agent, s.ID, s.Cwd, s.Path)
 	}
@@ -433,6 +457,7 @@ const manifest = "session.json"
 // \\wsl.localhost the same way, its Claude Code files from the distro's
 // ~/.claude, and Restore puts it back there.
 func Delete(agent, id string) (Trashed, error) {
+	prepareSourcesBeforeRead()
 	if !Deletable(agent) {
 		return Trashed{}, fmt.Errorf("magpie can't delete %s sessions", agent)
 	}

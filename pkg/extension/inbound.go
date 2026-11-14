@@ -25,13 +25,14 @@ const (
 )
 
 type inboundModule struct {
-	adapters     map[string]protocolext.Inbound
-	discovery    bool
-	toolProvider bool
-	executor     bool
-	tools        map[string]bool
-	mu           sync.Mutex
-	responses    map[string]*inboundResponse
+	adapters          map[string]protocolext.Inbound
+	discovery         bool
+	toolProvider      bool
+	executor          bool
+	tools             map[string]bool
+	accountOperations map[string]bool
+	mu                sync.Mutex
+	responses         map[string]*inboundResponse
 }
 
 type inboundResponse struct {
@@ -67,7 +68,11 @@ func newInboundModule(manifest Manifest, adapters []protocolext.Inbound) (*inbou
 		adapters: make(map[string]protocolext.Inbound), responses: make(map[string]*inboundResponse),
 		discovery:    manifest.Contract.Has(ModelDiscovery),
 		toolProvider: manifest.Contract.Has(ToolProvider), tools: make(map[string]bool),
-		executor: manifest.Contract.Version.Minor >= 4 && manifest.Contract.Has(OutboundExecutor),
+		executor:          manifest.Contract.Version.Minor >= 4 && manifest.Contract.Has(OutboundExecutor),
+		accountOperations: make(map[string]bool),
+	}
+	for _, operation := range manifest.AccountOperations {
+		module.accountOperations[operation.ID] = true
 	}
 	for _, tool := range manifest.Tools {
 		module.tools[tool.Name] = true
@@ -121,6 +126,11 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 		return nil, &Error{Code: "internal", Message: "codec produced invalid or oversized metadata"}
 	}
 	switch string(decoded.Protocol) {
+	case "account-operation":
+		if !adapter.Contract().Has(protocolext.NativeAccountOperations) ||
+			!module.accountOperations[decoded.AccountOperation] || decoded.Executor != SameModuleExecutor {
+			return nil, &Error{Code: "permission_denied", Message: "codec did not negotiate its native account operation"}
+		}
 	case "models":
 		if !module.discovery || !adapter.Contract().Has(protocolext.ModelDiscovery) || len(decoded.Body) != 0 {
 			return nil, &Error{Code: "permission_denied", Message: "codec did not negotiate model discovery"}
@@ -140,6 +150,9 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 	default:
 		return nil, &Error{Code: "internal", Message: "codec produced an unsupported canonical protocol"}
 	}
+	if decoded.Protocol != protocolext.AccountOperation && decoded.AccountOperation != "" {
+		return nil, &Error{Code: "invalid_params", Message: "account operation requires its negotiated native protocol"}
+	}
 	timeout := decoded.Timeout.Milliseconds()
 	if decoded.Timeout%time.Millisecond != 0 {
 		timeout++
@@ -147,7 +160,8 @@ func (module *inboundModule) decode(ctx context.Context, call Call, stream *Stre
 	return DecodedRequest{
 		Protocol: string(decoded.Protocol), Body: decoded.Body, Session: decoded.Session, TimeoutMs: timeout,
 		RequestID: decoded.RequestID, Metadata: bytes.Clone(decoded.Metadata),
-		Executor: decoded.Executor,
+		Executor:         decoded.Executor,
+		AccountOperation: decoded.AccountOperation,
 	}, nil
 }
 

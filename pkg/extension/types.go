@@ -15,13 +15,14 @@ type NativeRequest struct {
 }
 
 type DecodedRequest struct {
-	Protocol  string          `json:"protocol"`
-	Body      []byte          `json:"body,omitempty"`
-	Session   string          `json:"session,omitempty"`
-	TimeoutMs int64           `json:"timeoutMs,omitempty"`
-	RequestID string          `json:"requestId,omitempty"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
-	Executor  ExecutorPolicy  `json:"executor,omitempty"`
+	Protocol         string          `json:"protocol"`
+	Body             []byte          `json:"body,omitempty"`
+	Session          string          `json:"session,omitempty"`
+	TimeoutMs        int64           `json:"timeoutMs,omitempty"`
+	RequestID        string          `json:"requestId,omitempty"`
+	Metadata         json.RawMessage `json:"metadata,omitempty"`
+	Executor         ExecutorPolicy  `json:"executor,omitempty"`
+	AccountOperation string          `json:"accountOperation,omitempty"`
 }
 
 type ResponseEvent struct {

@@ -16,6 +16,13 @@ type Stream struct {
 }
 
 func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
+	if stream.state.call.Method == MethodSessionSourceRead {
+		err := &Error{Code: "invalid_params", Message: "session source reads are unary"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
 	if effect, hook := GatewayMethodEffect(stream.state.call.Method); hook && (effect != "write" || event != "accepted") {
 		err := &Error{Code: "invalid_params", Message: "gateway hooks are unary and permit only write acceptance receipts"}
 		stream.server.mu.Lock()

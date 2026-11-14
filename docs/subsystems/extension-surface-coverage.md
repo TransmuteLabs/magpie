@@ -1,10 +1,10 @@
 # Extension surface coverage
 
-Date: November 13, 2026.
+Date: November 14, 2026.
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. The current SDK source advertises API 1.5: native/exec/Bun,
+modules. The current SDK source advertises API 1.6: native/exec/Bun,
 composite/window integration, API 1.2 gateway hooks/private tools, and API 1.3 transactional
 refresh, richer models and a finite provider-operation registry, plus the API
 1.4 routing, quota applicability/usage revisions, business cancellation and
@@ -12,7 +12,8 @@ native executor constraints. API 1.5 adds selected-account window actions
 and separately declared poll/link sign-in; their scoped evidence is recorded
 in [ADR 0015](../adr/0015-selected-account-window-bindings.md) and
 [ADR 0017](../adr/0017-window-auth-broker.md). Combined 1.5 acceptance and
-agent launch/profile adoption remain separate. It does not replace every upstream extension
+agent launch/profile adoption remain separate. API 1.6 adds bounded JSONL session
+sources and finite native account operations. It does not replace every upstream extension
 surface. Public contracts, ordinary host
 adapters and domain-module acceptance remain separate claims.
 The [combined API 1.3 checkpoint](../adr/0009-sdk13-validation.md) records
@@ -67,10 +68,11 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Plugin tools / MCP tools | [`extension_tools.go`](../../internal/plugin/extension_tools.go), [`extension_tools.go`](../../internal/gateway/extension_tools.go) | `tool-provider` enters ordinary plugin-tools MCP/hub; API 1.2 adds shared/local-owner exposure | **Implemented through 1.2.** Discovery and actual leased invocation enforce local-owner authority, including after package replacement. |
 | MCP server configuration and protocol integration | [`Server`](../../internal/library/mcp.go), [`ServeRun`](../../internal/library/mcp_run.go) | Library already supports configured servers, prompts/resources/templates and protocol notifications; SDK declares tools | **Existing data/protocol integration.** Automatic ownership binding of a module's MCP service is not supplied, but this is not an unimplemented extension runtime. |
 | Ordinary agent wiring | [`extensionAgents`](../../internal/agent/extension_actions.go), [`AgentDescriptor`](../../pkg/extension/contract.go) | Rich descriptors reach ordinary discovery, inspect/connect/set/disconnect and checked plans | **Implemented 1.1.** Ordinary discovery requires ConfigFiles; ID/Name-only descriptors remain manual actions. |
-| Agent launch / aliases / WSL / own-model metadata | [`agentplug.go`](../../internal/agentplug/agentplug.go) | Legacy adapter has launch/startup/own/aliases/WSL metadata; SDK has Bin/ConfigFiles/Fields | **Partial:** SDK does not declare equivalent launch/wrapper metadata. |
-| Library target of an SDK agent | [`pluginTarget`](../../internal/library/targets.go), [`extensionAgent`](../../internal/agent/extension_actions.go) | Legacy `agent.library` binds instructions/MCP/skills; SDK ordinary agents do not declare that target | **Remaining:** automatic Library sync and memory digest for a newly declared SDK agent. |
+| Agent launch / aliases / WSL / own-model metadata | [`agent_metadata.go`](../../pkg/extension/agent_metadata.go), [`extension_controller.go`](../../internal/agent/extension_controller.go) | SDK 1.5 declares aliases, UA, structured launch, config placeholders and explicit local profiles; ordinary launch and ownership use the checked controller | **Implemented 1.5 local adapter.** An SDK profile cannot adopt another SDK profile or a WSL target. Full legacy WSL/own-model metadata parity remains outside this contract. |
+| Library target of an SDK agent | [`pluginTarget`](../../internal/library/targets.go), [`extensionAgent`](../../internal/agent/extension_actions.go) | SDK 1.5 typed Library metadata reuses instructions/MCP/skills owners; active profiles inherit the canonical base target | **Implemented 1.5.** Resource selection, application and removal use the same target identity; unrelated user content remains owned by the user. |
 | Session document conversion | [`extension_actions.go`](../../internal/sessions/extension_actions.go), [`extension_source_inputs.go`](../../internal/sessions/extension_source_inputs.go) | `session.convert`, checked output plans and ordinary CarryOver routes; optional read action `session.inputs.v1` acquires checked journal/blob inputs under one lease | **Implemented through 1.3.** Selected-store/file/parent snapshots and target-store guards protect ordinary application; deferred explicit callers retain source-validation responsibility. |
-| Session source / discovery / reader / resume | [`allFilesWith`, `parserFor`, `resumeCommand`](../../internal/sessions/sessions.go) | Existing mappings discover, parse and resume supported native formats | **Remaining:** SDK source/reader/resume registration. Explicit unknown-format conversion does not add a Sessions indexer. |
+| Session source / discovery / reader / resume | [`extension_source_registry.go`](../../internal/sessions/extension_source_registry.go), [`extension_source_adapter.go`](../../internal/sessions/extension_source_adapter.go) | SDK 1.6 declares finite JSONL layouts and host-selected stores; ordinary discovery, transcript, search, stats and supported native resume retain consent and current ownership | **Implemented 1.6 for bounded regular local JSONL.** SQLite, remote/compressed stores, call/trace readers and arbitrary launchers remain outside it. Native ownership requires an explicit checked binding. |
+| Native agent account/bootstrap operations | [`account_operations.go`](../../pkg/extension/account_operations.go), [`protocol_account_operation.go`](../../internal/gateway/protocol_account_operation.go) | SDK 1.6 and codec 0.5 bind declared read/write actions to the original inbound module, current owned agent, explicit visible model and exact account generation | **Implemented 1.6 local-owner adapter.** No arbitrary routes, remote credential delegation or routing-group account selection. |
 | Synchronous gateway middleware | [`middleware.go`](../../internal/middleware/middleware.go), [`gwmw`](../../internal/gwmw/gwmw.go) | Legacy onRequest/onAccount/onProvider/onEvent/onResponse chain | **Remaining:** SDK adapter at those points. Request recall hooks do not replace stream/account/provider middleware. |
 | Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 `gateway-hooks` enters ordinary request/completion/sign-in owners with origin, effect and lease checks | **Implemented 1.2, scoped host proof.** Recall is read-only; capture keeps the selected generation and durable effect policy. This is not synchronous middleware or built-in Memory access. |
 | Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go) | Existing Go/legacy observer points | **Remaining:** `usage-reporter` concerns its provider; it is not a global observer adapter. |
@@ -203,8 +205,9 @@ The following remain proposed boundaries, not implemented API 1.4 fields.
 API 1.5 selected-account window bindings and poll/link authentication now
 have actual adapters with separate scoped records. They do not complete the
 other owner integrations or establish combined 1.5 acceptance.
-Agent launch/explicit handoff remains a separate in-progress contribution;
-the accepted baseline retains its default agent collision policy.
+Agent launch and explicit handoff use the API 1.5 controller; automatic
+collisions still fail unless the user explicitly adopts a declared profile.
+JSONL source ownership has its API 1.6 adapter; other history transports do not.
 
 1. **Contribution registration:** a versioned descriptor names an ID, a
    host-known point/contract and a declared action. The host validates DTOs,
@@ -215,14 +218,15 @@ the accepted baseline retains its default agent collision policy.
    project and caller context; a plugin-supplied session string alone does
    not select Memory authority. Checked writes, backups and reconciliation
    stay in the owning subsystem.
-3. **Targets and activation:** Library metadata for SDK agents, session
-   source/read/resume descriptors, settings schema and gateway-owned
-   background activation reuse existing flows. They are separate adapters
-   with separate proofs, not implied by a ready sidecar or UI binding.
+3. **Targets and activation:** settings schema, additional history transports
+   and gateway-owned background activation need their owning adapters.
+   Existing agent Library targets and bounded JSONL sources do not provide
+   these unrelated registration points.
 
 The implemented memory slice is gateway hooks, local-owner tools and
 module-owned storage. Explicit built-in Memory owner access is an optional follow-up,
-alongside independent Library targets/resources and session readers.
+alongside module-owned Library resource contributions and additional session
+reader transports.
 Routing's implemented adapter and the remaining observation, budget and
 masking points retain their own timing and
 failure contracts; a shared registration envelope cannot erase those.

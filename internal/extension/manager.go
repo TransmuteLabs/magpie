@@ -705,6 +705,9 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 	if err := validateMethod(manifest, method, scope); err != nil {
 		return nil, err
 	}
+	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
+		return nil, err
+	}
 	if method == sdk.MethodAuthRefresh {
 		result, err := m.RefreshAccount(ctx, id, scope)
 		if err != nil {
@@ -739,6 +742,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	scope.Plugin = id
 	if err := validateMethod(manifest, method, scope); err != nil {
+		return nil, err
+	}
+	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
 		return nil, err
 	}
 	if method == sdk.MethodProviderExecute {
@@ -820,7 +826,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		return nil, err
 	}
 	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{manifest: manifest, method: method})
-	if method == sdk.MethodGatewayRequest {
+	if method == sdk.MethodGatewayRequest || method == sdk.MethodSessionSourceRead {
 		// Retain this restriction when a recall delegates a read action to
 		// a private component, which has its own module.call authority.
 		ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
@@ -848,6 +854,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	accepted := false
 	onEvent := func(event Event) error {
+		if method == sdk.MethodSessionSourceRead {
+			return errors.New("session source reads are unary")
+		}
 		if _, err := m.authFor(scope); err != nil {
 			return err
 		}

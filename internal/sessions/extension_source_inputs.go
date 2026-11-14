@@ -102,6 +102,24 @@ func collectSessionSourceInputs(ctx context.Context, host extension.ActionRuntim
 	if err != nil {
 		return err
 	}
+	return collectSessionInputsIn(ctx, host, plugin, scope, source.Agent, root, relative, request, snapshot)
+}
+
+func collectSessionInputsIn(ctx context.Context, host extension.ActionRuntime, plugin string, scope sdk.Scope, format, root, relative string, request *sdk.SessionRequest, snapshot *sessionSourceSnapshot) error {
+	if err := checkSessionSourceAdmission(ctx); err != nil {
+		return err
+	}
+	manifest, err := host.Manifest(plugin)
+	if err != nil {
+		return err
+	}
+	action, declared := manifest.ResolveAction(sessionInputsAction)
+	if !declared {
+		return nil
+	}
+	if action.Effect != "read" || !manifest.Contract.Has(sdk.ModuleRPC) {
+		return errors.New("session input planning requires a declared read-only module action")
+	}
 	opened, err := os.OpenRoot(root)
 	if err != nil {
 		return err
@@ -128,6 +146,9 @@ func collectSessionSourceInputs(ctx context.Context, host extension.ActionRuntim
 		sdk.ModuleCallRequest{Action: sessionInputsAction, Input: input}, &raw, nil); err != nil {
 		return err
 	}
+	if err := checkSessionSourceAdmission(ctx); err != nil {
+		return err
+	}
 	if len(raw) > 64<<10 {
 		return errors.New("session input plan exceeds its byte budget")
 	}
@@ -137,7 +158,7 @@ func collectSessionSourceInputs(ctx context.Context, host extension.ActionRuntim
 	if decoder.Decode(&plan) != nil || decoder.Decode(new(any)) != io.EOF || plan.Version != 1 {
 		return errors.New("invalid session input plan")
 	}
-	inputs, documents, err := readSessionInputs(ctx, root, source.Agent, relative, plan.Files, len(request.Files[0].Body))
+	inputs, documents, err := readSessionInputs(ctx, root, format, relative, plan.Files, max(len(request.Files[0].Body), int(snapshot.info.Size())))
 	if err != nil {
 		return err
 	}

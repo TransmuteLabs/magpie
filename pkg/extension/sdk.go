@@ -113,6 +113,28 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 		if handler == nil || !slices.Contains(required, method) {
 			return nil, nil, fmt.Errorf("unnegotiated or invalid extension handler %q", method)
 		}
+		if method == MethodSessionSourceRead {
+			descriptor := module.Manifest.Clone()
+			handlers[method] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+				request, err := DecodeSessionSourceRequest(descriptor, call.Params)
+				if err != nil {
+					return nil, err
+				}
+				if call.Scope.Session != request.Locator.SessionID || call.Scope.Provider != "" ||
+					call.Scope.Account != "" || call.Scope.Generation != 0 || len(call.Auth) != 0 {
+					return nil, &Error{Code: "invalid_params", Message: "source read cannot borrow account or another session authority"}
+				}
+				result, err := handler(ctx, call, stream)
+				if err != nil {
+					return nil, err
+				}
+				raw, err := json.Marshal(result)
+				if err != nil {
+					return nil, err
+				}
+				return DecodeSessionSourceResult(request, raw)
+			}
+		}
 		if method == MethodProviderExecute {
 			descriptor := module.Manifest.Clone()
 			handlers[method] = func(ctx context.Context, call Call, stream *Stream) (any, error) {

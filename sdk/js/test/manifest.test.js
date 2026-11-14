@@ -6,17 +6,21 @@ import { manifest, moduleFor } from "./helpers.js";
 
 test("capabilities require exactly their declared handlers", () => {
   const full = {
-    ...manifest(CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks"].includes(capability))),
+    ...manifest(CONTRACT.capabilities.filter(capability => !["module-rpc", "gateway-hooks", "native-account-operations"].includes(capability))),
     inbounds: [{ id: "native", path: "/fixture/native" }],
     providers: [{ id: "sample", name: "Sample", protocols: ["chat", "responses", "messages", "gemini"] }],
     agents: [{ id: "editor", name: "Editor" }],
     sessions: [{ id: "archive", name: "Archive" }],
     tools: [{ name: "echo", inputSchema: { type: "object" } }],
+    sessionSources: [{ id: "history", agent: "fixture-source", codec: "fixture-jsonl", container: "jsonl",
+      stores: [{ slot: "main", homeRelativePath: ".fixture/sessions" }],
+      layout: { kind: "flat", idFrom: "filename-stem" }, transcript: true, resume: "none" }],
   };
+  full.contract.version.minor = 6;
   const methods = requiredMethods(full);
-  assert.equal(methods.length, 14);
+  assert.equal(methods.length, 15);
   const handlers = Object.fromEntries(methods.map(method => [method, async () => null]));
-  assert.equal(validateModule({ manifest: full, handlers }).handlers.size, 14);
+  assert.equal(validateModule({ manifest: full, handlers }).handlers.size, 15);
   for (const method of methods) {
     const missing = { ...handlers };
     delete missing[method];
@@ -40,7 +44,7 @@ test("manifest refuses malformed versions, capabilities, identities and entries"
     { version: "1.0.0-01" }, { version: "1.0.0+a..b" }, { runtime: "node" }, { entry: "../worker.js" },
     { entry: "/worker.js" }, { entry: "a/../worker.js" }, { entry: "C:\\worker.js" }, { args: ["\0"] },
     { contract: { version: { major: 2, minor: 0 }, capabilities: ["operation-control"] } },
-    { contract: { version: { major: 1, minor: 6 }, capabilities: ["operation-control"] } },
+    { contract: { version: { major: 1, minor: CONTRACT.version.minor + 1 }, capabilities: ["operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: [] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["operation-control", "operation-control"] } },
     { contract: { version: { major: 1, minor: 0 }, capabilities: ["unknown"] } },

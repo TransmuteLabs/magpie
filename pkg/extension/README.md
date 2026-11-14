@@ -565,3 +565,21 @@ model routes. Windows native execution remains unverified.
 No-cgo/cross-build checks are build/refusal evidence. Domain modules live in
 separate repositories; no complete vendor migration or benchmark is implied.
 This README claims no green whole-repository result.
+## Session sources in API 1.6-preview
+
+`SessionSourceDescriptor` and `SessionSourceReadRequest/Result` register a
+bounded local JSONL reader through capability `SessionSource` and method
+`MethodSessionSourceRead`. This is separate from `SessionMigration`.
+The host selects roots and IDs, captures checked documents, supplies limits,
+and retains consent, pricing, native resume and publication authority.
+
+Implement a pure decoder over `request.Documents`. Confirm
+`request.Locator.SessionID`, return the requested mode, and report unsupported
+formats as errors. Do not return roots, shell commands or costs. Unknown usage
+is omitted; measured zero is an explicit empty usage slice. Native readers
+remain default without an explicit host binding.
+
+See `examples/extensions/session-source-jsonl` for a synthetic native module
+with checked opaque attachments. API 1.6 is a preview isolated from the current
+Agent/Auth work; native ABI remains 1. No SQLite or remote-history support is
+implied.

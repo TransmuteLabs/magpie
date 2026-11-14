@@ -32,7 +32,7 @@ func ValidateExecutor(policy ExecutorPolicy, protocol Protocol) error {
 	}
 	if policy == SameModuleExecutor {
 		switch protocol {
-		case Chat, Responses, Messages, Anthropic, Gemini:
+		case Chat, Responses, Messages, Anthropic, Gemini, AccountOperation:
 			return nil
 		}
 	}

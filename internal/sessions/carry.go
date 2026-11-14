@@ -42,6 +42,9 @@ var ompThere = func() bool {
 
 // carries are the other agents a session can be carried on in.
 func carries(s Session) []Carry {
+	if s.source != nil && s.source.stale {
+		return nil
+	}
 	if s.ReadOnly || s.WSL != "" || s.Path == "" || s.Cwd == "" {
 		return nil
 	}

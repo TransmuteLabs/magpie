@@ -242,6 +242,21 @@ func statsReadAll(ranges []int, now time.Time, native map[string]bool, alias fun
 // native is asked for. The ranges' Stats, aliased, and the map are kept for
 // the next read (keptStats), so neither is written.
 func statsKept(ranges []int, now time.Time, wantNative bool, alias func(string) string, names string) ([]Stats, map[string]bool) {
+	type result struct {
+		stats  []Stats
+		native map[string]bool
+	}
+	published := publishSourceRead(func() result {
+		stats, native := sourceStatsKept(ranges, now, wantNative, alias, names)
+		return result{stats, native}
+	})
+	if published.stats == nil {
+		published.stats = make([]Stats, len(ranges))
+	}
+	return published.stats, published.native
+}
+
+func sourceStatsKept(ranges []int, now time.Time, wantNative bool, alias func(string) string, names string) ([]Stats, map[string]bool) {
 	now = now.In(time.Local)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
 

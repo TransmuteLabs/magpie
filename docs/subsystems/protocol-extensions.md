@@ -71,6 +71,15 @@ to the module. See [ADR 0011](../adr/0011-native-executor-constraints.md).
 The host still refuses unrelated outbound/auth/wiring authority through this
 inbound registry.
 
+SDK 1.6 and codec 0.5 add a separate finite native account-operation lane,
+described in [the account-operation ADR](../adr/native-account-operations.md).
+It resolves an installed declaration against its current owned SDK agent
+binding and same-module provider/account, then uses the existing module.call
+effect/receipt path. The original inbound lease owns its reply. It accepts
+neither a client-selected account nor an arbitrary vendor destination.
+Initial admission is local-owner only; group routes and delegated restricted
+keys are refused. Accepted SDK 1.5 declarations retain their old behavior.
+
 Regression suites are in `pkg/protocolext`, `internal/protocolext` and the
 gateway's `TestProtocolBridge*`/`TestClientPath*` tests. Use temporary HOME with
 pinned caches as specified in the [code standards](../code-standards.md).

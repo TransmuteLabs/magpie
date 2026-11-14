@@ -7,6 +7,8 @@ import { validateExtendedModel, validateProviderPolicy, validateExecuteOperation
 import { validateRouting } from "./routing.js";
 import { validateWindowAuthBindings } from "./window-auth.js";
 import { validateAgentMetadata, validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
+import { validateSessionSources, validateSessionSourceRequest, validateSessionSourceResult } from "./session-source.js";
+import { validateAccountOperations } from "./account-operations.js";
 
 const capabilities = {
   "inbound-codec": ["inbound.decode", "inbound.response"],
@@ -18,12 +20,14 @@ const capabilities = {
   "operation-control": ["operation.status", "operation.cancel"],
   "tool-provider": ["tool.call"],
   "session-migration": ["session.convert"],
+  "session-source": ["session.source.read"],
   "module-rpc": ["module.call"],
   "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
+  "native-account-operations": [],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 5 }),
+  version: Object.freeze({ major: 1, minor: 6 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -147,7 +151,7 @@ export function validateManifest(value) {
     || manifest.args.some(arg => typeof arg !== "string" || Buffer.byteLength(arg) > MAX_CHUNK_BYTES || arg.includes("\0")))) fail("Invalid extension arguments");
   if (manifest.runtime === "native" && manifest.args?.length) fail("Native extensions do not take process arguments");
   const contract = manifest.contract;
-  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5].includes(contract.version.minor)
+  if (!object(contract) || !object(contract.version) || contract.version.major !== 1 || ![0, 1, 2, 3, 4, 5, 6].includes(contract.version.minor)
     || !Array.isArray(contract.capabilities) || !contract.capabilities.length
     || new Set(contract.capabilities).size !== contract.capabilities.length
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
@@ -220,6 +224,8 @@ export function validateManifest(value) {
   validateComposite(manifest);
   validateWindowAuthBindings(manifest);
   validateRouting(manifest, fail);
+  validateSessionSources(manifest);
+  validateAccountOperations(manifest, fail);
   validateHooks(manifest);
   return freezeJSON(manifest);
 }
@@ -275,6 +281,17 @@ export function validateModule(module) {
         const snapshot = jsonSnapshot(result);
         validateAgentBindingChange(manifest, descriptor, params.binding, params.action, snapshot.binding);
         return snapshot;
+      });
+    }
+    if (method === "session.source.read") {
+      handlers.set(method, async (ctx, call, stream) => {
+        validateSessionSourceRequest(manifest, call.params, stringifyJSON);
+        if (call.scope?.session !== call.params.locator.sessionId || call.scope?.provider ||
+          call.scope?.account || call.scope?.generation || call.auth != null) {
+          throw new SDKError("invalid_params", "Source read cannot borrow account or another session authority");
+        }
+        const result = await handler(ctx, call, stream);
+        return validateSessionSourceResult(call.params, result, stringifyJSON);
       });
     }
     if (method === "provider.execute") {

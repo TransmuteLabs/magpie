@@ -2,15 +2,16 @@ export type UInt64 = number | bigint;
 export type JSONValue = null | boolean | number | bigint | string | JSONValue[] | { [key: string]: JSONValue };
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
-  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks";
+  | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
+  | "session-source" | "native-account-operations";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
-  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "module.call"
+  | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
   | "gateway.request" | "gateway.response" | "gateway.signin";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
 export type HostMethod = "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate";
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -87,6 +88,43 @@ export interface SessionDescriptor {
   to?: string;
   outputDir?: string;
 }
+export interface SessionSourceDescriptor {
+  id: string; agent: string; codec: string; container: "jsonl";
+  stores: SessionSourceStore[]; layout: SessionSourceLayout;
+  transcript: boolean; resume: "none" | "native";
+}
+export type SessionSourceStore = { slot: string } & (
+  { nativeRootSlot: "claude.projects" | "codex.sessions" | "codex.archived-sessions" | "omp.sessions" | "devin.file-sessions"; homeRelativePath?: never }
+  | { homeRelativePath: string; nativeRootSlot?: never });
+export type SessionSourceLayout =
+  | { kind: "flat"; idFrom: "filename-stem"; entry?: never }
+  | { kind: "bucketed"; idFrom: "filename-after-first-underscore"; entry?: never }
+  | { kind: "directory"; idFrom: "parent-directory"; entry: "log.jsonl" };
+export interface SessionSourceLocator { storeRef: string; path: string; sessionId: string }
+export interface SessionSourceLimits { maxParts: number; maxTextBytes: number }
+export interface SessionSourceReadRequest {
+  sourceId: string; locator: SessionSourceLocator; snapshot: string;
+  mode: "summary" | "transcript"; documents: SessionDocument[]; limits: SessionSourceLimits;
+}
+export interface SessionSourceSummary {
+  title: string; cwd: string; start?: string; last?: string; parentId?: string; rootId?: string;
+  usage?: SessionUsagePoint[];
+}
+export interface SessionUsagePoint {
+  at: string; model: string; input: UInt64; output: UInt64; cacheRead: UInt64; cacheWrite: UInt64; cacheWrite1h: UInt64;
+}
+export interface SessionSourcePart {
+  role: "user" | "assistant" | "tool";
+  kind: "text" | "thinking" | "tool_use" | "tool_result" | "context" | "image";
+  text: string; name?: string; model?: string; cut?: number;
+}
+export type SessionSourceReadResult =
+  | { mode: "summary"; sessionId: string; summary: SessionSourceSummary; parts?: never; cut?: never }
+  | { mode: "transcript"; sessionId: string; parts: SessionSourcePart[]; cut: boolean; summary?: never };
+export function sessionSourceID(layout: SessionSourceLayout, name: string): string;
+export function validateSessionSources(manifest: Manifest): void;
+export function validateSessionSourceRequest(manifest: Manifest, request: SessionSourceReadRequest, stringify: (value: unknown) => string): SessionSourceReadRequest;
+export function validateSessionSourceResult(request: SessionSourceReadRequest, result: SessionSourceReadResult, stringify: (value: unknown) => string): SessionSourceReadResult;
 export interface RoutingFlags {
   exact?: boolean; byUse?: boolean; byFree?: boolean; byPlan?: boolean; bySpeed?: boolean; byPrice?: boolean;
 }
@@ -114,6 +152,7 @@ interface ManifestFields {
   providers?: { id: string; name: string; protocols: Protocol[]; models?: Model[]; operations?: ProviderOperation[] }[];
   agents?: AgentDescriptor[];
   sessions?: SessionDescriptor[];
+  sessionSources?: SessionSourceDescriptor[];
   tools?: ToolDescriptor[];
   actions?: ActionDescriptor[];
   services?: ServiceDescriptor[];
@@ -124,6 +163,7 @@ interface ManifestFields {
   component?: ComponentIdentity;
   hooks?: GatewayHookDescriptor;
   routingStrategies?: RoutingStrategyDescriptor[];
+  accountOperations?: AccountOperationDescriptor[];
 }
 export type Manifest = ManifestFields & (
   { runtime: "exec" | "bun"; args?: string[] }
@@ -224,10 +264,14 @@ export function serve(module: Module, options?: ServeOptions): Promise<void>;
 export type Headers = Record<string, string[]>;
 export interface NativeRequest { id: string; responseId: string; headers?: Headers; body?: string }
 export interface DecodedRequest {
-  protocol: Protocol | "models" | "tool"; body?: string; session?: string; timeoutMs?: number;
+  protocol: Protocol | "models" | "tool" | "account-operation"; body?: string; session?: string; timeoutMs?: number;
   requestId?: string; metadata?: JSONValue;
   executor?: "same-module";
+  accountOperation?: string;
 }
+export interface AccountOperationDescriptor { id: string; agent: string; provider: string; action: string }
+export interface AccountOperationRequest { model: string; body?: string; callerId?: string }
+export interface AccountOperationResult { status: number; headers?: Headers; body?: string }
 export interface ResponseEvent {
   id: string; responseId: string; action: "start" | "write" | "flush" | "finish" | "cancel";
   status?: number; headers?: Headers; body?: string; error?: RPCError;
@@ -309,7 +353,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6"; nativeABI?: number; platforms?: string[] }
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string; provider?: string }
 export interface AccountSelection { id: string; expectedGeneration: string }

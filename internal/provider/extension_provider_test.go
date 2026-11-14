@@ -22,6 +22,7 @@ type fixtureExtensionProviderHost struct {
 	store     *extensionhost.Store
 	namespace string
 	disabled  bool
+	config    string
 	call      func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error)
 	refresh   func(context.Context, string, sdk.Scope) (sdk.AuthResult, error)
 }
@@ -40,6 +41,20 @@ func (host *fixtureExtensionProviderHost) Manifest(id string) (sdk.Manifest, err
 func (host *fixtureExtensionProviderHost) Store() *extensionhost.Store { return host.store }
 
 func (host *fixtureExtensionProviderHost) Namespace() string { return host.namespace }
+
+func (host *fixtureExtensionProviderHost) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	if id != host.manifest.ID {
+		return sdk.ConfigSnapshot{}, errors.New("unknown fixture module")
+	}
+	version := host.config
+	if version == "" {
+		version = "0"
+	}
+	return sdk.ConfigSnapshot{Version: version, Values: json.RawMessage(`{}`)}, nil
+}
 
 func (host *fixtureExtensionProviderHost) RefreshAccount(ctx context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
 	if host.refresh == nil {
@@ -371,7 +386,14 @@ func TestExtensionProviderCacheIsolatedBetweenStores(t *testing.T) {
 	}
 	root := t.TempDir()
 	other := &fixtureExtensionProviderHost{manifest: host.manifest, store: extensionhost.NewStore(root), namespace: root}
-	second := &extensionAccount{host: other, manifest: host.manifest, descriptor: first.descriptor, scope: first.scope, modelKey: first.modelKey}
+	account, err := other.store.SaveAccount(extensionhost.Account{Plugin: first.scope.Plugin, Provider: first.scope.Provider,
+		ID: first.scope.Account, Auth: json.RawMessage(`{"access":"private-other-store"}`)}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := first.scope
+	scope.Generation = account.Generation
+	second := &extensionAccount{host: other, manifest: host.manifest, descriptor: first.descriptor, scope: scope, modelKey: first.modelKey}
 	if first.cacheKey() == second.cacheKey() {
 		t.Fatal("different stores share a model-cache namespace")
 	}

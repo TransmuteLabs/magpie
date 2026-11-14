@@ -1,6 +1,6 @@
 {
   "name": "@magpie/extension-sdk",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Dependency-free executable extension authoring SDK for Magpie",
   "type": "module",
   "exports": {
@@ -15,9 +15,11 @@
   },
   "types": "./index.d.ts",
   "files": [
+    "account-operations.js",
     "account-selection.js",
     "errors.js",
     "window-auth.js",
+    "session-source.js",
     "index.js",
     "index.d.ts",
     "manifest.js",

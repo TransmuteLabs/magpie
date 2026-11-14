@@ -112,6 +112,8 @@ func MethodCapability(method string) (Capability, bool) {
 		return AgentWiring, true
 	case MethodSessionConvert:
 		return SessionMigration, true
+	case MethodSessionSourceRead:
+		return SessionSource, true
 	case MethodModuleCall:
 		return ModuleRPC, true
 	case MethodGatewayRequest, MethodGatewayResponse, MethodGatewaySignIn:
