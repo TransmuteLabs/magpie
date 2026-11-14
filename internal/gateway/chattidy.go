@@ -897,7 +897,7 @@ func silentAssistantsOut(body []byte) []byte {
 		return body
 	}
 	var q map[string]json.RawMessage
-	if decodeJSON(body, &q) != nil || !anySilentAssistant(q["messages"]) {
+	if decodeJSONView(body, &q) != nil || !anySilentAssistant(q["messages"]) {
 		return body
 	}
 	dec := json.NewDecoder(bytes.NewReader(q["messages"]))
@@ -1028,7 +1028,10 @@ func withoutMessageReasoning(body []byte, fields []string) []byte {
 // editMessages hands each message of a Chat request whose JSON names any
 // of fields to edit, and puts back those edit reports it changed; every
 // other message keeps its bytes. The body comes back as it was if nothing
-// changed.
+// changed. What it decodes shares body's bytes (decodeJSONView): an edit
+// replaces a member, never writes into one, and keeps none past its
+// return, and a changed body is marshalled anew. A copy of each level
+// was ~3.8 MB a request for a 2 MB Chat conversation.
 func editMessages(body []byte, fields []string, edit func(m map[string]json.RawMessage) bool) []byte {
 	has := false
 	for _, f := range fields {
@@ -1038,17 +1041,17 @@ func editMessages(body []byte, fields []string, edit func(m map[string]json.RawM
 		return body
 	}
 	var q map[string]json.RawMessage
-	if decodeJSON(body, &q) != nil {
+	if decodeJSONView(body, &q) != nil {
 		return body
 	}
 	var msgs []json.RawMessage
-	if decodeJSON(q["messages"], &msgs) != nil {
+	if decodeJSONView(q["messages"], &msgs) != nil {
 		return body
 	}
 	changed := false
 	for i, raw := range msgs {
 		var m map[string]json.RawMessage
-		if decodeJSON(raw, &m) != nil || !edit(m) {
+		if decodeJSONView(raw, &m) != nil || !edit(m) {
 			continue
 		}
 		if nb, err := marshalPlain(m); err == nil {
@@ -1146,6 +1149,9 @@ func toolPairsOut(body []byte) []byte {
 	if !bodyHas(body, `"tool`) {
 		return body
 	}
+	if paired, ok := rawToolsPaired(body); ok && paired {
+		return body
+	}
 	var q map[string]json.RawMessage
 	if decodeJSON(body, &q) != nil {
 		return body
@@ -1236,6 +1242,111 @@ func toolsPaired(msgs []map[string]any) bool {
 		}
 	}
 	return closed()
+}
+
+// rawToolsPaired is toolsPaired read from the body as it came, without
+// decoding the conversation into maps: what nearly every request with
+// tools needs, since its calls are paired already. ok is false for any
+// shape the decoding path would read differently or turn away (a message
+// that isn't an object, tool_calls that aren't a list of objects), which
+// leaves the answer to that path. A key named twice counts as its last,
+// as decoding into a map does.
+func rawToolsPaired(body []byte) (paired, ok bool) {
+	msgs, found, valid := topMember(body, "messages")
+	if !valid || !found || len(msgs) == 0 || msgs[0] != '[' {
+		return false, false
+	}
+	type msg struct {
+		role, toolID string
+		ids          []string
+	}
+	str := func(v []byte) string {
+		if len(v) == 0 || v[0] != '"' {
+			return ""
+		}
+		s, _ := unquoteJSON(v)
+		return s
+	}
+	var list []msg
+	ok = true
+	eachElement(msgs, func(el []byte) bool {
+		if el[0] != '{' {
+			ok = false
+			return false
+		}
+		var m msg
+		var calls []byte
+		eachMember(el, func(k, v []byte) bool {
+			switch {
+			case keyIs(k, "role"):
+				m.role = str(v)
+			case keyIs(k, "tool_call_id"):
+				m.toolID = str(v)
+			case keyIs(k, "tool_calls"):
+				calls = v
+			}
+			return true
+		})
+		if len(calls) > 0 && string(calls) != "null" {
+			if calls[0] != '[' {
+				ok = false
+				return false
+			}
+			m.ids = []string{}
+			eachElement(calls, func(c []byte) bool {
+				if c[0] != '{' {
+					ok = false
+					return false
+				}
+				id := ""
+				eachMember(c, func(k, v []byte) bool {
+					if keyIs(k, "id") {
+						id = str(v)
+					}
+					return true
+				})
+				m.ids = append(m.ids, id)
+				return true
+			})
+		}
+		list = append(list, m)
+		return ok
+	})
+	if !ok {
+		return false, false
+	}
+	var pending map[string]bool
+	closed := func() bool {
+		for _, open := range pending {
+			if open {
+				return false
+			}
+		}
+		pending = nil
+		return true
+	}
+	for _, m := range list {
+		if m.role == "tool" {
+			if !pending[m.toolID] {
+				return false, true
+			}
+			pending[m.toolID] = false
+			continue
+		}
+		if !closed() {
+			return false, true
+		}
+		if m.role == "assistant" && len(m.ids) > 0 {
+			pending = map[string]bool{}
+			for _, id := range m.ids {
+				if _, twice := pending[id]; twice {
+					return false, true
+				}
+				pending[id] = true
+			}
+		}
+	}
+	return closed(), true
 }
 
 // joinSplitChatCalls joins a turn's calls split over consecutive
