@@ -611,6 +611,31 @@ the key's leaves the call as asked, with a log line (`compactRefused`).
   `TestUnroutedMaskingNotCutOff`, `TestUnroutedSlotWaitNotCutOff`,
   `TestUnroutedMostLeavesOutMasking`, `TestMaskingModelWaitNotCutOffAtMost`.
 
+### Standalone Responses compaction
+
+`POST /v1/responses/compact` and `POST /responses/compact` accept a
+self-contained `input` string or history array. Conversation references,
+input control items, and checkpoints the gateway cannot decode as a Magpie
+summary are rejected before any provider is contacted. The
+gateway applies its usual key, account, request-size, concurrency and
+service-tier limits. It uses the same summary request as Codex compaction and
+returns one `compaction` item in a JSON `response.compaction` envelope. Known
+usage is returned with the result and recorded through the ordinary gateway
+usage path. Subsequent `/responses` calls restore the `magpie1:` checkpoint.
+That checkpoint is base64-encoded text.
+
+The summary request offers no executable tools. If an SDK execution was
+accepted, completed or may have run, a failed or unusable summary returns an
+error with retry disabled. A refusal that the host retry policy marks final
+also ends the compaction. These outcomes take precedence over the shared
+compaction fallback ladder, including when the SDK returns only a tool call.
+A standalone request whose direct provider returns only tool calls reports
+a missing summary with retry disabled.
+Codex's native compaction and SSE response format retain their existing paths.
+`TestStandaloneResponsesCompact` and
+`TestResponsesCompactionDoesNotReplayCompletedToolOnlyResult` exercise these
+paths through the ordinary HTTP gateway.
+
 ## A route group held to chosen accounts
 
 A routing group may be held to some accounts of a provider (`Group.Accounts`,

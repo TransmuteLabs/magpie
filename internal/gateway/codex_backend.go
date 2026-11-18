@@ -3881,6 +3881,10 @@ var compactWithin = 4 * time.Minute
 // compaction that keeps failing stops being asked for a while
 // (compactFails, #2274).
 func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byte) {
+	s.compactConversation(w, r, body, false)
+}
+
+func (s *Server) compactConversation(w http.ResponseWriter, r *http.Request, body []byte, standalone bool) {
 	key, model := compactKey(body), modelOf(body)
 	// Codex's compaction on the model a thread is leaving, under magpie's
 	// provider: one that fails is compacted locally, as Codex would have
@@ -3888,7 +3892,7 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 	// turn's failure. On CodexPath Codex's provider is its own "OpenAI",
 	// which asks the turn's model itself, a summary where magpie's local
 	// one is only what was asked and the last reply
-	prev := !strings.HasPrefix(r.URL.Path, CodexPath+"/") && previousModelCompaction(r, body)
+	prev := !standalone && !strings.HasPrefix(r.URL.Path, CodexPath+"/") && previousModelCompaction(r, body)
 	if msg, held := s.compactFails.held(key, model); held && !prev {
 		log.Printf("codex compaction: %s", msg)
 		writeError(w, provider.Responses, http.StatusBadRequest, msg)
@@ -3918,19 +3922,50 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 	r = askCompaction(r)
 	ask := func(r *http.Request, b []byte) (*recorder, compactResult, error) {
 		rec := &recorder{header: http.Header{}, status: 200}
-		s.serve(rec, r, provider.Responses, b)
-		if rec.status >= 400 {
-			return rec, compactResult{}, nil
+		ctx, attempt := provider.WithExtensionAttempt(r.Context())
+		outcome := s.serve(rec, r.WithContext(ctx), provider.Responses, b)
+		var res compactResult
+		var err error
+		if rec.status < 400 {
+			res, err = compactReply(rec.body.Bytes())
+			if t := bytes.TrimSpace(rec.body.Bytes()); err == nil && res.Status == "" && (len(t) == 0 || t[0] != '{') {
+				err = errEndedShort
+			}
 		}
-		res, err := compactReply(rec.body.Bytes())
-		if t := bytes.TrimSpace(rec.body.Bytes()); err == nil && res.Status == "" && (len(t) == 0 || t[0] != '{') {
-			// a stream with no response.completed stopped before its end:
-			// what it had said is no summary (#2274)
-			err = errEndedShort
+		if outcome == nil && (rec.status >= 400 || err != nil || res.Status == "incomplete" || strings.TrimSpace(res.summary()) == "") {
+			outcome = decisionFailure(attempt.Outcome(true), attempt)
+		}
+		if terminalExtensionError(outcome) {
+			decisionFailureHeaders(rec.header, outcome)
+			if rec.status < 400 {
+				rec.body.Reset()
+				rec.header.Del("Content-Length")
+				writeError(rec, provider.Responses, http.StatusConflict, outcome.Error())
+			}
 		}
 		return rec, res, err
 	}
+	writeFailure := func(rec *recorder) {
+		who, msg := compactFailure(body, rec)
+		s.compactFails.failed(key, rec.status, msg)
+		for name, values := range rec.header {
+			if name != "Content-Length" && name != "Content-Type" {
+				w.Header()[name] = values
+			}
+		}
+		writeVendorError(w, provider.Responses, rec.status, compactFailed(who, rec.status, msg), rec.body.Bytes())
+	}
+	stopped := func(rec *recorder) bool {
+		if rec.status < 400 || rec.header.Get("X-Should-Retry") != "false" {
+			return false
+		}
+		writeFailure(rec)
+		return true
+	}
 	rec, res, err := ask(r, body)
+	if stopped(rec) {
+		return
+	}
 	// A relay of the ChatGPT backend takes developer alone: the summary
 	// ask went to it with the developer messages as system ones
 	// (forVendor, #2955), and it refused every one, 400 "System messages
@@ -3950,6 +3985,9 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		}
 		log.Printf("codex compaction: %s answered %d (%s); asking again with the roles as the client sent them", who, rec.status, msg)
 		rec, res, err = ask(askAsSent(r), body)
+		if stopped(rec) {
+			return
+		}
 	}
 	local := ""
 	if late() {
@@ -3963,6 +4001,9 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		}
 		log.Printf("codex compaction: %s answered %d (%s); asking again with the conversation as text", who, first, msg)
 		rec, res, err = ask(r, plainCompact(body))
+		if stopped(rec) {
+			return
+		}
 		if late() {
 			local = lateSummary()
 			rec, res, err = &recorder{header: http.Header{}, status: 200}, compactResult{}, nil
@@ -4015,14 +4056,7 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		// "Fake: 502 Bad Gateway" read as Codex's own, and a body with
 		// nothing in it as "Unknown error" (outrageous_piglet on Discord);
 		// the vendor's code, param and Retry-After go with it
-		who, msg := compactFailure(body, rec)
-		s.compactFails.failed(key, rec.status, msg)
-		for k, vs := range rec.header {
-			if k != "Content-Length" && k != "Content-Type" {
-				w.Header()[k] = vs
-			}
-		}
-		writeVendorError(w, provider.Responses, rec.status, compactFailed(who, rec.status, msg), rec.body.Bytes())
+		writeFailure(rec)
 		return
 	}
 	if err == nil && local == "" && res.Status == "incomplete" {
@@ -4048,7 +4082,7 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		writeError(w, provider.Responses, 502, msg)
 		return
 	}
-	if local == "" && strings.TrimSpace(res.summary()) == "" && calledTool(res.Output) {
+	if !standalone && local == "" && strings.TrimSpace(res.summary()) == "" && calledTool(res.Output) {
 		// a model deep in a conversation of tool calls goes on calling
 		// them, offered none or not: DeepSeek through a group answered the
 		// summary request with reasoning and an exec_command call, 3 times
@@ -4064,6 +4098,9 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 		called := answeredWith(res.Output)
 		log.Printf("codex compaction: %s wrote no summary%s; asking again with the conversation as text", who, called)
 		prec, pres, perr := ask(r, plainCompact(body))
+		if stopped(prec) {
+			return
+		}
 		switch {
 		case late():
 			local = lateSummary()
@@ -4093,6 +4130,9 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 	if strings.TrimSpace(sum.String()) == "" {
 		why := "the model wrote no summary" + answeredWith(res.Output)
 		s.compactFails.failed(key, http.StatusBadGateway, why)
+		if standalone {
+			w.Header().Set("X-Should-Retry", "false")
+		}
 		writeError(w, provider.Responses, 502, "compaction: "+why)
 		return
 	}
@@ -4118,6 +4158,14 @@ func (s *Server) codexCompact(w http.ResponseWriter, r *http.Request, body []byt
 	done := map[string]any{"id": id, "object": "response", "status": "completed", "output": []any{item}}
 	if len(res.Usage) > 0 {
 		done["usage"] = res.Usage
+	}
+	if standalone {
+		done["object"] = "response.compaction"
+		done["created_at"] = time.Now().Unix()
+		delete(done, "status")
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, done)
+		return
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")

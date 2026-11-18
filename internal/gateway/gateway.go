@@ -1159,6 +1159,8 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST /chat/completions", s.handle(provider.Chat))
 	mux.HandleFunc("POST /v1/responses", s.handle(provider.Responses))
 	mux.HandleFunc("POST /responses", s.handle(provider.Responses))
+	mux.HandleFunc("POST /v1/responses/compact", s.responsesCompact)
+	mux.HandleFunc("POST /responses/compact", s.responsesCompact)
 	mux.HandleFunc("GET /v1/responses", s.responsesOverHTTP)
 	mux.HandleFunc("GET /responses", s.responsesOverHTTP)
 	mux.HandleFunc("POST /v1/messages", keepsSignIn(s.handle(provider.Anthropic)))
@@ -2553,7 +2555,11 @@ func estimate(req *Request) int {
 
 // serve routes one parsed-enough request to its provider.
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (terminalOutcome error) {
+	parentContext := r.Context()
 	extensionContext, extensionAttempt := provider.WithExtensionAttempt(withRequestPolicy(r.Context()))
+	if inCompaction(parentContext) {
+		defer provider.MergeExtensionOutcome(parentContext, extensionAttempt, false)
+	}
 	r = r.WithContext(extensionContext)
 	start := time.Now()
 	// a client's "off" is magpie's none, for every route and check below
