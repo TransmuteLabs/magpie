@@ -2985,11 +2985,42 @@ model that sees, see "An image the describer can't describe"), and a
 searcher named there is not handed on
 to another provider when it fails (see "A searcher that fails or finds
 nothing"). Image and video generation (`AutoDrawer`,
-`AutoVideomaker`) are not held this way.
+`AutoVideomaker`) are not held to allowance this way.
 
 Covered by `TestAutoVisionPassesOverOneOut`,
 `TestAutoVisionTierAmongThoseWithAllowance`, `TestSpentModelAcrossAccounts`,
 `TestVisionDoesNotAskSpentDescriber` and `TestSearcherPassesOverOneOut`.
+
+## Automatic picks are held to the provider that serves them
+
+A slot Settings › Models leaves on Automatic (Image recognition, Web
+search, Image generation, Video generation) is held to the provider
+magpie first picked for it, in `auto-picks.json` beside providers.json
+(`auto_picks.go`: `heldPick`, `settlePick`). `seersRankedHeld` and
+`autoSearcherReady` put the held provider before every other of its
+readiness; `AutoDrawer` and `AutoVideomaker` pick among its models while it
+has one. A provider added later never takes a slot over: a Claude account
+ranks first for images and search, and one added for account switching
+alone took every agent's images and searches (hxy920830 on X). A default
+fills only a slot nothing serves: nothing held yet, or the held provider
+removed, turned off or left with no model for it; the next pick is then
+held. Allowance still comes first for the moment (above), and the hold
+stays. A model picked in Settings is the user's and no hold touches it;
+the picker shows Automatic's pick as `Automatic · <model>`.
+
+Holds begin once, when the gateway first serves (`KeepAutoPicksHeld`,
+`seedAutoPicks`, `Seeded`); until then each pick is made as before, and a
+file that can't be read holds nothing and is not written over. The seed
+reads the last 30 days of the ledger: Image description calls (`vision`)
+and the searcher's Web search calls (`web_search`, not `SourceSearch`). A
+slot taken over by a provider added later (`pickBefore`: the one that
+served the call just before the current pick's first) is given back while
+that provider can still serve it; one the current pick served from the
+first row is kept. Image and video generation have no Automatic call in
+the ledger and are held to the pick at the seed.
+
+Covered by `TestAddedProviderTakesNoAutomaticPick`,
+`TestAutoPicksSeededFromTheLedger` and `TestClaudeAccountAddedTakesNoImages`.
 
 ## Hidden image models
 
@@ -3291,12 +3322,19 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
 - `Run`'s shutdown ends each socket going away (1001) once its turn is
   answered, through `clientSockets.drain` beside `srv.Shutdown` (a hijacked
   connection isn't the server's), and refuses new ones 503.
-- Not covered: the leg to the vendor is the whole conversation each turn,
-  as before (for the ChatGPT backend, a socket per turn: see
-  [Providers and accounts](providers-accounts.md)); what is saved is
-  Codex's upload to magpie, and, when the provider is another magpie, the
-  leg between the two magpies (below). A socket's conversation doesn't
-  outlive the socket or the gateway.
+- The leg to the vendor cuts its own delta where the vendor keeps a
+  turn for the next: the ChatGPT backend and a Responses provider that
+  speaks the socket (`Socket`; unset, OpenAI's own API does, as Codex's
+  built-in OpenAI provider does, KawaiiZapic on X) take a turn as its new
+  input after `previous_response_id` on a kept socket (see
+  [Providers and accounts](providers-accounts.md)); OpenAI's API, Azure
+  and Ark over HTTP take the client's own `previous_response_id`
+  (`prevKeeps`, below), which Codex never sends (`store: false`); another
+  magpie takes the delta between the two (below). Everything else
+  (Chat Completions, Messages, Gemini, a Responses provider over HTTP)
+  is sent the whole conversation each turn, since those protocols keep
+  nothing between requests. A socket's conversation doesn't outlive the
+  socket or the gateway.
 
 ## A Realtime session
 
