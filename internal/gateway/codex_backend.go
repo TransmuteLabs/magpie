@@ -3917,7 +3917,7 @@ func (s *Server) compactConversation(w http.ResponseWriter, r *http.Request, bod
 		log.Printf("codex compaction: %s: %s; compacting locally", model, why)
 		return localSummary(body, why)
 	}
-	r = r.WithContext(budget)
+	r = r.WithContext(withRequestPolicy(budget))
 	r = askWhole(r)
 	r = askCompaction(r)
 	ask := func(r *http.Request, b []byte) (*recorder, compactResult, error) {

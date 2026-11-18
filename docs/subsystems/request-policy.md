@@ -88,6 +88,11 @@ and operation. A permitted nested SDK dispatch receives one fresh route permit,
 so it consumes that admission once. The individual repair still decides whether
 replay is safe; budget admission does not authorize a new business operation.
 
+Responses compaction uses one budget for its summary request. Role repair
+and text fallback share the initial dispatch's operation and consume the
+same retry limits, including when the gateway enters routing again. A local
+summary needs no upstream dispatch.
+
 Models apply after provider/default options, followed by window overrides.
 All applicable exhausted windows constrain eligibility together. When several
 window policies apply, the most restrictive wait/count limits win. Window

@@ -2,10 +2,14 @@ package gateway
 
 import (
 	"encoding/base64"
+	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // compactedText is the summary in a compaction Codex was answered with.
@@ -37,6 +41,52 @@ const compact404Request = `{"model":"fake/m1","stream":true,"store":false,"inclu
   {"type":"compaction_trigger"}]}`
 
 const relay404 = `{"error":{"message":"Upstream request failed","type":"upstream_error"}}`
+
+func TestResponsesCompactionSharesRetryBudget(t *testing.T) {
+	for _, path := range []string{"/v1/responses/compact", "/responses/compact", "/v1/responses", CodexPath + "/responses"} {
+		for _, retries := range []int{0, 1} {
+			t.Run(path[1:]+"/retries="+strconv.Itoa(retries), func(t *testing.T) {
+				upstream := &fake{t: t, reply: deepseekSummary(provider.Responses)}
+				upstream.refuse = func(body []byte) (int, string) {
+					if upstream.calls == 1 {
+						return http.StatusNotFound, relay404
+					}
+					return 0, ""
+				}
+				setup(t, provider.Responses, upstream)
+				current := settings.Load()
+				current.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxTotalRetries: &retries}}
+				if err := settings.Save(current); err != nil {
+					t.Fatal(err)
+				}
+				input := `{"type":"message","role":"user","content":"remember the login test"}`
+				if !strings.HasSuffix(path, "/compact") {
+					input += `,{"type":"compaction_trigger"}`
+				}
+				body := `{"model":"fake/m1","stream":true,"input":[` + input + `]}`
+				code, reply := post(t, path, body)
+				if upstream.calls != retries+1 {
+					t.Fatalf("sent %d upstream requests with %d permitted retries (status %d): %s", upstream.calls, retries, code, reply)
+				}
+				if code != http.StatusOK {
+					t.Fatalf("compaction did not return a checkpoint (status %d): %s", code, reply)
+				}
+				if retries > 0 {
+					if !strings.Contains(string(upstream.got), "CONTEXT CHECKPOINT COMPACTION") {
+						t.Fatalf("admitted retry did not compact as text: %s", upstream.got)
+					}
+				} else {
+					_, checkpoint, _ := strings.Cut(reply, `"encrypted_content":"`+magpieCompaction)
+					encoded, _, _ := strings.Cut(checkpoint, `"`)
+					summary, err := base64.StdEncoding.DecodeString(encoded)
+					if err != nil || !strings.Contains(string(summary), "remember the login test") {
+						t.Fatalf("local checkpoint lost the conversation: %s", reply)
+					}
+				}
+			})
+		}
+	}
+}
 
 // #866: a relay that answers a magpie model's summary request 404
 // ("flyapi: Upstream request failed") left Codex's compaction aborted and
