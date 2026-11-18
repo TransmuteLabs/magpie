@@ -337,6 +337,45 @@ availability failure on a limited request returns 503 before provider
 dispatch. Native accounting, reset handling, and reservation state remain
 with the host.
 
+### Executable masking rules
+
+The gateway owner selects an installed set with
+`magpie settings set redactRuleSet module-id/rule-set-id` or the
+`redactRuleSet` field in `settings.json`. Installing the module leaves the
+selection alone. An empty selection restores the native rule behavior.
+Ordinary Settings saves keep the selection when they omit the field.
+
+A primary declares `masking-rules` and `maskingRuleSets` at API 1.15.
+The host reads the declarations from the frozen catalog and applies them
+through its own masking engine. The module process receives no request
+data and the lookup does not start it.
+
+The Go and JavaScript validators allow up to eight sets of eight rules.
+Each rule has a canonical `SDK_` kind unique within the set. Literal
+prefixes use 3–64 identifier characters, start with an ASCII letter and
+match an identifier tail of at least eight characters. The finite RE2
+form takes a literal prefix, a single ASCII character class and a
+repetition of 4–128 characters, as in `ticket-[0-9]{8}`. Masking
+fails when a match exceeds 4096 bytes or the number of matches in one
+text exceeds 4096.
+
+[Gateway admission](../../internal/gateway/extension_masking.go) checks
+the selected package revision and enablement before and after masking.
+Native, model, word and user rules keep precedence on overlaps. SDK
+matches honor the owner's allow and kind-action settings and use the
+[native placeholder store](../../internal/redact/redact.go). A placeholder
+is scoped to the module, set, revision and enablement generation. The
+store restores a signed echo only when it retains the exact value and
+scoped issuance. Eviction retires both together. A placeholder collision
+blocks forwarding.
+
+An unavailable selection blocks an ordinary masked route before forwarding.
+Realtime checks before dialing and checks the selected generation before
+each outbound frame, including opaque audio and binary frames. A relay
+with an SDK selection uses local masking and omits the pre-masked
+fingerprint. Key and provider overrides still govern which requests go
+through the masking owner.
+
 ## P4: community plugins at every point
 
 P4 opens each extension point, the gateway's and the window's, to

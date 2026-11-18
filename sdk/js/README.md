@@ -109,6 +109,11 @@ From the declared tool's `tool.call` handler, use
 `await stream.hostCall("memory.search", { query, limit: 5 })` to receive
 `{ hits: [{ kind, text }] }` within the caller's scope.
 
+An API 1.15 primary can declare `masking-rules` and
+`maskingRuleSets: [{ id: "team", rules: [{ kind: "SDK_TICKET", regex: "ticket-[0-9]{8}" }] }]`.
+After explicit selection, the gateway applies the declarations through
+its existing masking engine without calling a worker method.
+
 A primary can use API 1.12's separate `request-observer` capability with
 `requestObserver: {}` to receive `request.observe`. Validate `call.params` with
 `validateRequestObservation` and acknowledge with `{}` or no return value.

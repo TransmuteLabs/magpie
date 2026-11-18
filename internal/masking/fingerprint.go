@@ -22,7 +22,8 @@ import (
 // the rules and of the local model (YeYaka88 on X). It reads no file and
 // starts no download.
 func Fingerprint(st settings.Settings) string {
-	if !Wanted(st) {
+	// Relay peers must make their own pass for an installed rule set.
+	if st.RedactRuleSet != "" || !Wanted(st) {
 		return ""
 	}
 	type modelPart struct {

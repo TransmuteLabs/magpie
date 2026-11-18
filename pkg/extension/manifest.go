@@ -44,6 +44,10 @@ func (manifest Manifest) Clone() Manifest { return cloneManifest(manifest) }
 func cloneManifest(manifest Manifest) Manifest {
 	manifest.Activation = slices.Clone(manifest.Activation)
 	manifest.BudgetPolicies = slices.Clone(manifest.BudgetPolicies)
+	manifest.MaskingRuleSets = slices.Clone(manifest.MaskingRuleSets)
+	for index := range manifest.MaskingRuleSets {
+		manifest.MaskingRuleSets[index].Rules = slices.Clone(manifest.MaskingRuleSets[index].Rules)
+	}
 	if manifest.RequestObserver != nil {
 		manifest.RequestObserver = new(*manifest.RequestObserver)
 	}
@@ -186,6 +190,9 @@ func (manifest Manifest) Validate() error {
 		return err
 	}
 	if err := manifest.validateBudgetPolicies(); err != nil {
+		return err
+	}
+	if err := manifest.validateMaskingRules(); err != nil {
 		return err
 	}
 	if err := manifest.validateRequestObserver(); err != nil {

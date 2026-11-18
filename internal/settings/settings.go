@@ -248,6 +248,7 @@ type Settings struct {
 	// RedactWordsWhole matches RedactWords only as whole words (acmilan_
 	// on Discord); off, the default, a word is found inside longer ones too.
 	RedactWordsWhole bool          `json:"redactWordsWhole,omitempty"`
+	RedactRuleSet    string        `json:"redactRuleSet,omitempty"` // installed module/rule set, empty for native rules only
 	RedactRules      []redact.Rule `json:"redactRules,omitempty"`
 	// RedactActions is what is done with a value of a kind (redact.Hit's
 	// Kind: API_KEY, EMAIL, a rule's own…) other than masking it, where

@@ -456,6 +456,14 @@ func MaskJSON(body []byte, o Options) ([]byte, int) {
 		seen = append(seen, v, p)
 		return p
 	}
+	// A newly masked unsigned field cannot authorize a rewrite of signed
+	// text in this same body under a different selected generation.
+	var priorIssuance uint64
+	if len(signed) > 0 && len(o.ExtensionRules) > 0 {
+		mu.RLock()
+		priorIssuance = clock
+		mu.RUnlock()
+	}
 	// the definitions after the rest, so a value the model found in what
 	// is said is masked in them too, as known
 	out, ok := walk(body, func(path, key, s string) string {
@@ -514,7 +522,13 @@ func MaskJSON(body []byte, o Options) ([]byte, int) {
 		// masked in another conversation (13800138000 is in many), and
 		// masked, its text would no longer match its signature
 		ko := Options{Secrets: o.Secrets, Route: o.Route}
-		t, n := apply(t, sentSpans(sentKnown, t, ko, func() []span { return knownSpans(t, ko) }), o.put(), o)
+		known := sentSpans(sentKnown, t, ko, func() []span { return knownSpans(t, ko) })
+		sdk := knownExtensionSpans(t, o.ExtensionRules, known, o.ExtensionScope, priorIssuance)
+		signedOptions := o
+		signedOptions.extensionPut = func(kind, value string) string {
+			return existingDeclarativePlaceholder(kind, value, o.ExtensionScope, priorIssuance)
+		}
+		t, n := apply(t, append(known, sdk...), o.put(), signedOptions)
 		total += n
 		return t
 	})

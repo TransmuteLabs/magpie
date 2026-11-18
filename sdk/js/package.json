@@ -53,6 +53,8 @@
     "diagnostics.js",
     "budget-policy.js",
     "budget-policy.d.ts",
+    "masking-rules.js",
+    "masking-rules.d.ts",
     "request-observer.js",
     "request-observer.d.ts",
     "ledger.js",

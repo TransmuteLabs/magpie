@@ -146,6 +146,11 @@ to allow the native outcome, or return one-based references to host-supplied lim
 bounded retry intervals. The module has no credential or host callback
 authority. See [Executable budget policy](../../docs/subsystems/plugin-runtime.md#executable-budget-policy).
 
+API 1.15 `MaskingRules` lets a primary declare `MaskingRuleSets`.
+The host applies checked prefix and finite RE2 rules through the existing
+reversible masking owner after the operator selects a set.
+See [Executable masking rules](../../docs/subsystems/plugin-runtime.md#executable-masking-rules).
+
 API 1.12's `RequestObserver` and `Manifest.RequestObserver` opt a primary into
 `MethodRequestObserve` for the ordinary gateway's start, attempts and end.
 The unary handler acknowledges with an empty struct or nil. See

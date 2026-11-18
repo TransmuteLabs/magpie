@@ -14,7 +14,8 @@ import (
 const observerEnablementLimit = 128
 
 func tracksEnablement(manifest sdk.Manifest) bool {
-	if manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver) || manifest.Contract.Has(sdk.BudgetPolicy) {
+	if manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver) ||
+		manifest.Contract.Has(sdk.BudgetPolicy) || manifest.Contract.Has(sdk.MaskingRules) {
 		return true
 	}
 	for _, tool := range manifest.Tools {

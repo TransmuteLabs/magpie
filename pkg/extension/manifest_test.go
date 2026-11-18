@@ -162,7 +162,7 @@ func TestModuleRequiresEveryAdvertisedHandlerAndRefusesUnknownMethods(t *testing
 	}
 	legacy := protocolext.HostContract()
 	if legacy.Version.Major != 0 || legacy.Version.Minor != 5 || protocolext.CatalogContract().Version.Minor != 2 ||
-		FullContract().Version.Major != 1 || FullContract().Version.Minor != 14 {
+		FullContract().Version.Major != 1 || FullContract().Version.Minor != 15 {
 		t.Fatal("external version altered the legacy codec contract")
 	}
 }

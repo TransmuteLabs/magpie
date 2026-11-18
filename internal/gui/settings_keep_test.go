@@ -247,6 +247,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	retries := 3
 	was.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxRetries: &retries}}
 	was.GatewayBudgetPolicy = "fixture.budget/limit"
+	was.RedactRuleSet = "fixture.mask/team"
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)
 	}

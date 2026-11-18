@@ -30,23 +30,25 @@ import (
 // goes to a vendor asks here. Fail closed: a forced pass needs a masker
 // that reads ctx, and one that doesn't is an error.
 func maskingFor(ctx context.Context) (context.Context, gwmw.Masker, error) {
-	switch access.Caller(ctx).Redact {
-	case access.RedactOff:
+	mode := access.Caller(ctx).Redact
+	if mode == access.RedactOff {
 		return ctx, nil, nil
-	case access.RedactOn:
-		if !redactionWanted() {
-			m, err := gwmw.Masking(true)
-			if err != nil {
-				return ctx, nil, err
-			}
-			if _, ok := m.(gwmw.ContextTeller); !ok {
-				return ctx, nil, gwmw.ErrUnmasked
-			}
-			return masking.WithForced(ctx), m, nil
-		}
 	}
-	m, err := gwmw.Masking(redactionWanted())
-	return ctx, m, err
+	st, err := settings.SharedChecked()
+	if err != nil {
+		return ctx, nil, errExtensionMasking
+	}
+	m, err := gwmw.Masking(mode == access.RedactOn || masking.Wanted(st))
+	if err != nil {
+		return ctx, nil, err
+	}
+	if mode == access.RedactOn && (!masking.Wanted(st) || st.RedactRuleSet != "") {
+		if _, ok := m.(gwmw.ContextTeller); !ok {
+			return ctx, nil, gwmw.ErrUnmasked
+		}
+		ctx = masking.WithForced(ctx)
+	}
+	return extensionMaskingFor(ctx, st.RedactRuleSet, m)
 }
 
 // redacted masks a request's secrets, as the settings say, before it goes
@@ -65,6 +67,9 @@ func redacted(ctx context.Context, w http.ResponseWriter, body []byte) (http.Res
 func redactedHits(ctx context.Context, w http.ResponseWriter, body []byte) (http.ResponseWriter, []byte, func(), maskHits, error) {
 	ctx, m, err := maskingFor(ctx)
 	if m == nil {
+		if err == nil {
+			err = checkExtensionMasking(ctx)
+		}
 		return w, body, func() {}, maskHits{}, err
 	}
 	type out struct {
@@ -86,6 +91,9 @@ func redactedHits(ctx context.Context, w http.ResponseWriter, body []byte) (http
 		return out{b, maskHits{n: n}}
 	})
 	o.h.took = time.Since(began)
+	if err == nil {
+		err = checkExtensionMasking(ctx)
+	}
 	if err == nil {
 		err = blocked(o.h)
 	}
@@ -156,6 +164,9 @@ func maskedText(ctx context.Context, s string) (string, int, error) {
 func maskTextHits(ctx context.Context, s string) (gwmw.Masker, string, maskHits, error) {
 	ctx, m, err := maskingFor(ctx)
 	if m == nil {
+		if err == nil {
+			err = checkExtensionMasking(ctx)
+		}
 		return nil, s, maskHits{}, err
 	}
 	type out struct {
@@ -177,6 +188,9 @@ func maskTextHits(ctx context.Context, s string) (gwmw.Masker, string, maskHits,
 		return out{got, maskHits{n: n}}
 	})
 	o.h.took = time.Since(began)
+	if err == nil {
+		err = checkExtensionMasking(ctx)
+	}
 	if err == nil {
 		err = blocked(o.h)
 	}
@@ -397,11 +411,22 @@ func maskedQuery(ctx context.Context, query string, p *provider.Provider) (strin
 // maskedCopy is body masked for a record of a request sent nowhere, nil
 // when masking fails: nothing unmasked is kept in its place.
 func maskedCopy(ctx context.Context, body []byte) []byte {
-	m, err := gwmw.Masking(redactionWanted())
+	st, err := settings.SharedChecked()
+	if err != nil {
+		return nil
+	}
+	m, err := gwmw.Masking(masking.Wanted(st))
+	if err != nil {
+		return nil
+	}
+	ctx, m, err = extensionMaskingFor(ctx, st.RedactRuleSet, m)
 	if err != nil {
 		return nil
 	}
 	if m == nil {
+		if checkExtensionMasking(ctx) != nil {
+			return nil
+		}
 		return body
 	}
 	b, err := gwmw.Safely(func() []byte {
@@ -412,7 +437,7 @@ func maskedCopy(ctx context.Context, body []byte) []byte {
 		b, _ := m.JSON(body)
 		return b
 	})
-	if err != nil {
+	if err != nil || checkExtensionMasking(ctx) != nil {
 		return nil
 	}
 	return b

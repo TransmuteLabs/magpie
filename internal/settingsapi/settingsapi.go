@@ -39,7 +39,7 @@ var Keys = []string{
 	// network
 	"proxy", "pluginProxy", "updateProxy", "updateSource",
 	// privacy
-	"redact", "redactPersonal", "redactKinds", "redactWords", "redactWordsAnyCase", "redactWordsWhole", "redactShape",
+	"redact", "redactPersonal", "redactKinds", "redactWords", "redactWordsAnyCase", "redactWordsWhole", "redactShape", "redactRuleSet",
 	"noStats", "noUsageStats", "otel",
 	// warm-ups and check-ins
 	"codexWarmup", "claudeWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
@@ -214,6 +214,9 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	// nor whether a key goes as a made-up one of its form
 	if _, sent := fields["redactShape"]; !sent {
 		in.RedactShape = cur.RedactShape
+	}
+	if _, sent := fields["redactRuleSet"]; !sent {
+		in.RedactRuleSet = cur.RedactRuleSet
 	}
 	// nor how long an image is given to be drawn
 	// nor the video model, picked in its own row

@@ -49,8 +49,10 @@ type Options struct {
 	// ABC masks "ABC IS" and 'ABC' but not XABCD, and 123456 masks no part
 	// of 91234567, 0.123456 or 123456.78 (wholeWord). Off, a word is found
 	// anywhere, inside a longer one too.
-	WordsWhole bool
-	Rules      []Rule // the user's own rules, masked with the secrets
+	WordsWhole     bool
+	Rules          []Rule // the user's own rules, masked with the secrets
+	ExtensionScope DeclarativeScope
+	ExtensionRules []DeclarativeRule // checked installed rules, supplementary to native policy
 	// Kinds turns each of the Categories of personal data on or off by its
 	// id, where the user chose; one not in it is as its Category.On says.
 	// None of them is masked while Personal is off.
@@ -88,7 +90,8 @@ type Options struct {
 	Seen func(Hit)
 
 	// found are the spans Model found, by text, for one request's texts
-	found map[string][]Found
+	found        map[string][]Found
+	extensionPut func(kind, v string) string
 	// args is masking a tool call's arguments (MaskJSON): the model's
 	// one-word name there is never taken for an app's (thingNamed)
 	args bool
@@ -762,9 +765,10 @@ func luhn(v string) bool {
 // ---- placeholders ---------------------------------------------------------------
 
 var (
-	mu     sync.RWMutex
-	values = map[string]string{} // placeholder → value
-	kinds  = map[string]bool{}   // the kinds of values, for wordTail
+	mu                sync.RWMutex
+	values            = map[string]string{}              // placeholder → value
+	declarativeValues = map[string]declarativeIssuance{} // issuing scope and order for extension-only placeholders
+	kinds             = map[string]bool{}                // the kinds of values, for wordTail
 	// used is when each placeholder was last made or met again, by
 	// clock: makeRoom lets the ones used longest ago go first
 	used    = map[string]uint64{}
@@ -828,12 +832,20 @@ var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 func tag(kind, v string) string {
 	h := hmac.New(sha256.New, key())
 	h.Write([]byte(kind + "\x00" + v))
-	return "{{" + kind + "_" + strings.ToLower(b32.EncodeToString(h.Sum(nil))[:8]) + "}}"
+	return formatTag(kind, h.Sum(nil))
+}
+
+func formatTag(kind string, digest []byte) string {
+	return "{{" + kind + "_" + strings.ToLower(b32.EncodeToString(digest)[:8]) + "}}"
 }
 
 func placeholder(kind, v string) string {
 	p := tag(kind, v)
 	mu.Lock()
+	defer mu.Unlock()
+	if _, declarative := declarativeValues[p]; declarative {
+		panic("native placeholder collides with a declarative placeholder")
+	}
 	if _, ok := values[p]; !ok {
 		makeRoom()
 		values[p] = v
@@ -841,7 +853,6 @@ func placeholder(kind, v string) string {
 		addKnown(p, v)
 	}
 	touch(p)
-	mu.Unlock()
 	return p
 }
 
@@ -857,7 +868,11 @@ func touch(p string) {
 // before could be gone by the time its placeholder came back, and the
 // answer kept the placeholder.
 func makeRoom() {
-	if len(values) < maxValues {
+	evictValues(maxValues)
+}
+
+func evictValues(limit int) {
+	if len(values) < limit {
 		return
 	}
 	ps := make([]string, 0, len(values))
@@ -867,6 +882,7 @@ func makeRoom() {
 	sort.Slice(ps, func(i, j int) bool { return used[ps[i]] < used[ps[j]] })
 	for _, p := range ps[:len(ps)/2] {
 		delete(values, p)
+		delete(declarativeValues, p)
 		delete(shapes, p)
 		delete(used, p)
 	}
@@ -1132,14 +1148,16 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 		found = append(found, modelSpans(raw, o)...) // the model was asked about raw
 		found = append(found, knownSpans(s, o)...)
 	}
+	extra := extensionSpans(s, o.ExtensionRules, found)
 	if escaped {
 		found = inStrings(raw, outsideEscapes(raw, found))
+		extra = inStrings(raw, outsideEscapes(raw, extra))
 	}
 	found = noNumbers(s, noIDs(s, found))
 	if o.sent {
 		noteScores(raw, found) // what is masked for a vendor, not a preview
 	}
-	return apply(raw, found, put, o)
+	return apply(raw, append(found, extra...), put, o)
 }
 
 // ruleSpans are what the rules, magpie's and the user's own, find in s,
@@ -1669,16 +1687,30 @@ func apply(s string, found []span, put func(kind, v string) string, o Options) (
 			act = ""
 		}
 		h := Hit{Kind: f.kind, By: f.by, Action: act}
+		if f.by == byExtension {
+			h.By = ByYours
+		}
 		h.Head, h.Len = Hint(f.kind, v)
 		if act == Warn {
 			if o.Seen != nil {
 				h.Placeholder = tag(f.kind, v)
+				if f.by == byExtension && o.sent {
+					h.Placeholder = declarativeTag(f.kind, v, o.ExtensionScope)
+				}
 				o.Seen(h)
 			}
 			continue
 		}
 		b.WriteString(s[last:f.start])
-		h.Placeholder = put(f.kind, v)
+		if f.by == byExtension && o.sent {
+			if o.extensionPut != nil {
+				h.Placeholder = o.extensionPut(f.kind, v)
+			} else {
+				h.Placeholder = declarativePlaceholder(f.kind, v, o.ExtensionScope)
+			}
+		} else {
+			h.Placeholder = put(f.kind, v)
+		}
 		if f.bare {
 			b.WriteString(`"` + h.Placeholder + `"`)
 		} else {

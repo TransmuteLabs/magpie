@@ -12,6 +12,8 @@ import type { RequestObservationDescriptor } from "./request-observer.js";
 export * from "./request-observer.js";
 import type { BudgetPolicyDescriptor } from "./budget-policy.js";
 export * from "./budget-policy.js";
+import type { MaskingRuleSet } from "./masking-rules.js";
+export * from "./masking-rules.js";
 export * from "./catalog-projection.js";
 export * from "./own-calls.js";
 export * from "./storage-source.js";
@@ -41,7 +43,7 @@ export function validateAccountCheckinResult(value: unknown): AccountCheckinResu
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
-  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "budget-policy";
+  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "budget-policy" | "masking-rules";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "provider.calls" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
@@ -94,7 +96,7 @@ export function requestWithPolicy(signal: AbortSignal, host: RequestPolicyHost, 
   classify: (response: Response) => RequestRecoveryRequest | null | Promise<RequestRecoveryRequest | null>
 ): Promise<{response: Response; decision: RequestRecoveryResult | null}>;
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -240,6 +242,7 @@ export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 interface ManifestFields {
   budgetPolicies?: readonly BudgetPolicyDescriptor[];
+  maskingRuleSets?: readonly MaskingRuleSet[];
   requestObserver?: RequestObservationDescriptor;
   ledger?: LedgerObservationDescriptor;
   schema: 1;
@@ -506,7 +509,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15"; nativeABI?: number; platforms?: string[] }
 export interface ProviderOption {
   key: string; label: string; description?: string; default?: boolean; confirm?: string;
   labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;

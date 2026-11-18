@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -219,6 +220,7 @@ func (s *Server) realtime(w http.ResponseWriter, r *http.Request) {
 	offered := realtimeSubprotocols(r.Header)
 	var up *websocket.Conn
 	var c candidate
+	var mask *realtimeMask
 	var skipped []string
 	for i, try := range tries {
 		last := i == len(tries)-1
@@ -229,6 +231,19 @@ func (s *Server) realtime(w http.ResponseWriter, r *http.Request) {
 		if why != "" {
 			err = errors.New(why)
 		} else {
+			mask = nil
+			if !try.unmasked() {
+				mctx, m, maskErr := maskingFor(ctx)
+				if maskErr != nil {
+					refuse(maskStatus(maskErr), maskErr.Error())
+					return
+				}
+				mask = &realtimeMask{ctx: mctx, m: m}
+				if maskErr := checkExtensionMasking(mctx); maskErr != nil {
+					refuse(maskStatus(maskErr), maskErr.Error())
+					return
+				}
+			}
 			up, code, err = s.dialRealtime(ctx, r, try.p, u, offered)
 		}
 		if err == nil {
@@ -250,21 +265,6 @@ func (s *Server) realtime(w http.ResponseWriter, r *http.Request) {
 	call.Fallback = strings.Join(skipped, "; ")
 	defer up.CloseNow()
 	up.SetReadLimit(realtimeReadLimit)
-
-	// what goes out is masked, unless the provider is set to go unmasked;
-	// fails closed before the client is answered
-	var mask *realtimeMask
-	if !c.unmasked() {
-		mctx, m, err := maskingFor(r.Context())
-		if err != nil {
-			up.Close(websocket.StatusGoingAway, "")
-			refuse(maskStatus(err), err.Error())
-			return
-		}
-		if m != nil {
-			mask = &realtimeMask{ctx: mctx, m: m}
-		}
-	}
 
 	var accept []string
 	if sp := up.Subprotocol(); sp != "" {
@@ -484,6 +484,12 @@ type realtimeMask struct {
 
 // out is a client's frame masked, or the error to hold it back for.
 func (rm *realtimeMask) out(b []byte) ([]byte, error) {
+	if rm.m == nil {
+		if err := checkExtensionMasking(rm.ctx); err != nil {
+			return nil, err
+		}
+		return b, nil
+	}
 	got, err := gwmw.Safely(func() []byte {
 		var hits []gwmw.Hit
 		switch t := rm.m.(type) {
@@ -500,18 +506,51 @@ func (rm *realtimeMask) out(b []byte) ([]byte, error) {
 		}
 		return b
 	})
-	return got, err
+	if err == nil {
+		err = checkExtensionMasking(rm.ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 // in is a vendor's frame with the masked values back.
 func (rm *realtimeMask) in(b []byte) []byte {
+	if rm.m == nil {
+		return b
+	}
 	return []byte(rm.m.Restore(string(b), true))
 }
 
-// audioFrame: a frame that carries base64 audio and nothing else, which
-// isn't masked (a run of base64 can look like a key) or read for values.
-func audioFrame(typ string) bool {
-	return typ == "input_audio_buffer.append" || strings.HasSuffix(typ, "audio.delta")
+// clientAudioFrame exempts only a well-formed audio-only append from masking.
+func clientAudioFrame(kind string, body []byte) bool {
+	if kind != "input_audio_buffer.append" || !gjson.ValidBytes(body) {
+		return false
+	}
+	object := gjson.ParseBytes(body)
+	if !object.IsObject() {
+		return false
+	}
+	var sawType, sawAudio bool
+	valid := true
+	var audio string
+	object.ForEach(func(key, value gjson.Result) bool {
+		switch {
+		case key.Str == "type" && !sawType && value.Type == gjson.String && value.Str == kind:
+			sawType = true
+		case key.Str == "audio" && !sawAudio && value.Type == gjson.String:
+			sawAudio, audio = true, value.Str
+		default:
+			valid = false
+		}
+		return valid
+	})
+	if !valid || !sawType || !sawAudio || audio == "" {
+		return false
+	}
+	_, err := io.Copy(io.Discard, base64.NewDecoder(base64.StdEncoding.Strict(), strings.NewReader(audio)))
+	return err == nil
 }
 
 type realtimeSession struct {
@@ -601,19 +640,25 @@ func (rs *realtimeSession) copy(ctx context.Context, from, to *websocket.Conn, f
 		if err != nil {
 			return err
 		}
+		var kind string
 		if typ == websocket.MessageText {
-			kind := gjson.GetBytes(b, "type").String()
-			switch {
-			case audioFrame(kind):
-			case fromClient && rs.mask != nil:
-				if b, err = rs.mask.out(b); err != nil {
-					return realtimeHeld{err}
-				}
-			case !fromClient:
-				rs.heard(kind, b)
-				if rs.mask != nil {
-					b = rs.mask.in(b)
-				}
+			kind = gjson.GetBytes(b, "type").String()
+		}
+		text := typ == websocket.MessageText
+		switch {
+		case fromClient && rs.mask != nil:
+			if text && !clientAudioFrame(kind, b) {
+				b, err = rs.mask.out(b)
+			} else {
+				err = checkExtensionMasking(rs.mask.ctx)
+			}
+			if err != nil {
+				return realtimeHeld{err}
+			}
+		case !fromClient && text && kind != "response.audio.delta" && kind != "response.output_audio.delta":
+			rs.heard(kind, b)
+			if rs.mask != nil {
+				b = rs.mask.in(b)
 			}
 		}
 		if err := to.Write(ctx, typ, b); err != nil {

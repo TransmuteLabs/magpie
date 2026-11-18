@@ -27,6 +27,10 @@ type Masker struct{}
 
 // Wanted says settings st ask for anything to be masked.
 func Wanted(st settings.Settings) bool {
+	return st.RedactRuleSet != "" || nativeWanted(st)
+}
+
+func nativeWanted(st settings.Settings) bool {
 	return st.Redact || st.RedactPersonal || len(st.RedactWords) > 0
 }
 
@@ -41,6 +45,18 @@ type routeKey struct{}
 // (redact.Options.Route).
 func WithRoute(ctx context.Context, route string) context.Context {
 	return context.WithValue(ctx, routeKey{}, route)
+}
+
+type extensionRulesKey struct{}
+
+type extensionRules struct {
+	rules []redact.DeclarativeRule
+	scope redact.DeclarativeScope
+}
+
+// WithExtensionRules carries compiled host-owned rules and their issuing scope into this mask.
+func WithExtensionRules(ctx context.Context, rules []redact.DeclarativeRule, scope redact.DeclarativeScope) context.Context {
+	return context.WithValue(ctx, extensionRulesKey{}, extensionRules{rules: rules, scope: scope})
 }
 
 type forcedKey struct{}
@@ -59,7 +75,9 @@ func optionsCtx(ctx context.Context) redact.Options {
 	o := redact.Options{Secrets: st.Redact, Personal: st.RedactPersonal, Kinds: st.RedactKinds, Words: st.RedactWords, WordsAnyCase: st.RedactWordsAnyCase, WordsWhole: st.RedactWordsWhole, Rules: st.RedactRules,
 		Actions: st.RedactActions, Allow: st.RedactAllow, Shape: st.RedactShape}
 	o.Route, _ = ctx.Value(routeKey{}).(string)
-	if forced, _ := ctx.Value(forcedKey{}).(bool); forced && !Wanted(st) {
+	extension, _ := ctx.Value(extensionRulesKey{}).(extensionRules)
+	o.ExtensionRules, o.ExtensionScope = extension.rules, extension.scope
+	if forced, _ := ctx.Value(forcedKey{}).(bool); forced && !nativeWanted(st) {
 		o.Secrets, o.Personal = true, true
 		st.Redact, st.RedactPersonal = true, true
 	}
@@ -363,7 +381,7 @@ func busy(st pii.Status) string {
 
 func (Masker) JSON(body []byte) ([]byte, int) {
 	o := options()
-	if !o.Secrets && !o.Personal && len(o.Words) == 0 {
+	if !o.Secrets && !o.Personal && len(o.Words) == 0 && len(o.ExtensionRules) == 0 {
 		return body, 0
 	}
 	return redact.MaskJSON(body, o)
@@ -380,7 +398,7 @@ func (m Masker) JSONHits(body []byte) ([]byte, []gwmw.Hit) {
 // (gwmw.ContextTeller).
 func (Masker) JSONHitsContext(ctx context.Context, body []byte) ([]byte, []gwmw.Hit) {
 	o := optionsCtx(ctx)
-	if !o.Secrets && !o.Personal && len(o.Words) == 0 {
+	if !o.Secrets && !o.Personal && len(o.Words) == 0 && len(o.ExtensionRules) == 0 {
 		return body, nil
 	}
 	var hits []gwmw.Hit
@@ -420,7 +438,7 @@ func told(hits *[]gwmw.Hit) func(redact.Hit) {
 // user can try it first.
 func Preview(s string) (out string, hits []gwmw.Hit, off bool) {
 	o := options()
-	if !o.Secrets && !o.Personal && len(o.Words) == 0 {
+	if !o.Secrets && !o.Personal && len(o.Words) == 0 && len(o.ExtensionRules) == 0 {
 		o.Secrets, o.Personal, off = true, true, true
 	}
 	o.Seen = told(&hits)

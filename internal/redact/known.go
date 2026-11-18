@@ -80,7 +80,9 @@ func reindexKnown() {
 	knownBits = [1 << 14]uint64{}
 	knownGen.Add(1)
 	for p, v := range values {
-		addKnown(p, v)
+		if _, declarative := declarativeValues[p]; !declarative {
+			addKnown(p, v)
+		}
 	}
 }
 

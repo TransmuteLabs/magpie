@@ -22,6 +22,7 @@ import { validateActivation } from "./gateway-activation.js";
 import { validateCatalogAccess } from "./catalog-projection.js";
 import { validateLedgerObserver, validateLedgerCall, validateLedgerResult } from "./ledger.js";
 import { isBudgetMethod, validateBudgetPolicies, validateBudgetPolicyCall, validateBudgetPolicyResult } from "./budget-policy.js";
+import { validateMaskingRuleSets } from "./masking-rules.js";
 import { validateRequestObserver, validateRequestObservationCall, validateRequestObservationResult } from "./request-observer.js";
 import { validateAgentProcesses } from "./process.js";
 
@@ -44,13 +45,14 @@ const capabilities = {
   "gateway-middleware": MIDDLEWARE_METHODS,
   "native-account-operations": [],
   "budget-policy": ["budget.reserve", "budget.spent"],
+  "masking-rules": [],
   "request-observer": ["request.observe"],
   "ledger-observer": ["ledger.observe"],
   "request-policy": [],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 14 }),
+  version: Object.freeze({ major: 1, minor: 15 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -286,6 +288,7 @@ export function validateManifest(value) {
   validateMiddleware(manifest);
   validateCatalogAccess(manifest);
   validateBudgetPolicies(manifest, validID);
+  validateMaskingRuleSets(manifest, validID);
   validateRequestObserver(manifest);
   validateLedgerObserver(manifest);
   return freezeJSON(manifest);

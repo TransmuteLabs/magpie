@@ -26,11 +26,12 @@ import (
 // a binary frame as it came, a response.create gets a response.done with
 // usage, and {"type":"close.me"} closes the session 1000 "bye".
 type rtUp struct {
-	mu     sync.Mutex
-	opened []*http.Request
-	frames []string
-	closed chan websocket.StatusCode // how each session's client side ended
-	url    string
+	mu       sync.Mutex
+	opened   []*http.Request
+	frames   []string
+	binaries int
+	closed   chan websocket.StatusCode // how each session's client side ended
+	url      string
 }
 
 func (u *rtUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +59,9 @@ func (u *rtUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if typ == websocket.MessageBinary {
+			u.mu.Lock()
+			u.binaries++
+			u.mu.Unlock()
 			c.Write(ctx, typ, b)
 			continue
 		}
