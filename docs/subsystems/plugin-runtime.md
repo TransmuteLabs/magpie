@@ -298,7 +298,9 @@ key-wide refusal carries `X-Magpie-Limit-Reset`.
 ### Executable budget policy
 
 A gateway owner can set `gatewayBudgetPolicy` to `module-id/policy-id` in
-`settings.json`. The primary executable declares the API 1.13
+`settings.json` or with `magpie settings set gatewayBudgetPolicy module-id/policy-id`.
+An ordinary Settings save keeps the selection when it omits the field. An
+explicit empty string clears it. The primary executable declares the API 1.13
 `budget-policy` capability and lists the selected ID in `budgetPolicies`.
 Installing it does not select it. Limited requests with no selection keep
 the native budget behavior. A missing built-in limiter continues to block

@@ -246,6 +246,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.GroupSink, was.GroupFirstToken, was.GroupPatience = true, 30, 120
 	retries := 3
 	was.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxRetries: &retries}}
+	was.GatewayBudgetPolicy = "fixture.budget/limit"
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)
 	}

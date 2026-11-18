@@ -45,7 +45,7 @@ var Keys = []string{
 	"codexWarmup", "claudeWarmup", "codexWarmAt", "claudeWarmAt", "codexWarmAts", "claudeWarmAts",
 	"workbuddyCheckin", "traeCheckin", "minimaxCheckin", "qoderCheckin", "checkinAt",
 	// models: replies, vision, images, search
-	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap", "requestPolicy",
+	"replyModel", "noLoopGuard", "claudeLeanPrompt", "claudeNoExtraUsage", "claudePrintMode", "refusalRetries", "retryAfterCap", "requestPolicy", "gatewayBudgetPolicy",
 	"vision", "visionEffort", "imageGen", "videoGen", "imageTimeout", "classifyTimeout",
 	// what every routing group does that says nothing of its own
 	"groupSink", "groupFirstToken", "groupPatience",
@@ -191,6 +191,9 @@ func Merge(body []byte, cur settings.Settings, web bool) (settings.Settings, err
 	}
 	if _, sent := fields["requestPolicy"]; !sent {
 		in.RequestPolicy = cur.RequestPolicy
+	}
+	if _, sent := fields["gatewayBudgetPolicy"]; !sent {
+		in.GatewayBudgetPolicy = cur.GatewayBudgetPolicy
 	}
 	// nor whether updates download by themselves (#2296)
 	if _, sent := fields["noAutoDownload"]; !sent {

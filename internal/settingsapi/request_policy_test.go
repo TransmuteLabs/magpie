@@ -40,3 +40,25 @@ func TestRequestPolicySettingsRejectInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayBudgetPolicySettingsRoundTrip(t *testing.T) {
+	home(t)
+	const selection = "fixture.budget/limit"
+	for _, step := range []struct {
+		body string
+		want string
+	}{
+		{`{"gatewayBudgetPolicy":"` + selection + `"}`, selection},
+		{`{"theme":"dark"}`, selection},
+		{`{"gatewayBudgetPolicy":""}`, ""},
+		{`{"gatewayBudgetPolicy":"` + selection + `"}`, selection},
+		{`{"gatewayBudgetPolicy":null}`, ""},
+	} {
+		if _, _, err := Apply([]byte(step.body), false); err != nil {
+			t.Fatal(err)
+		}
+		if got := settings.Load().GatewayBudgetPolicy; got != step.want {
+			t.Fatalf("after %s: policy %q, want %q", step.body, got, step.want)
+		}
+	}
+}
