@@ -20378,11 +20378,11 @@ function renderSettings() {
     row(who, t("MAGPIE_PUBLIC_URL: where other computers reach the gateway, with a gateway key"), s.publicURL, copyBtn(s.publicURL, who)).id = "publicURLRow";
   }
   row(t("Website"), t("downloads, docs and what's new"), "usemagpie.ai").id = "websiteRow";
-  row(t("Open-source licenses"), t("the notices of the code and data magpie is built with"), "").id = "licensesRow";
-  row(t("Community"), t("questions, ideas and feedback, on Discord or GitHub"), "").id = "communityRow";
+  row(t("Open-source licenses"), t("the notices of the code and data magpie is built with")).id = "licensesRow";
+  row(t("Community"), t("questions, ideas and feedback, on Discord or GitHub")).id = "communityRow";
   // the facts that help a fix, copied (never put in the link), then the
   // feedback post on X, to reply to there (River_WLan on X)
-  row(t("Report a problem"), "", "").id = "reportProblemRow";
+  row(t("Report a problem")).id = "reportProblemRow";
   window.aboutCommunity?.();
   // magpie uninstall, from the app (Jevik_AI on X deleted magpie's folders
   // by hand and Codex kept pointing at a gateway that was gone). Never in a
