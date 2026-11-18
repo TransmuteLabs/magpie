@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/yetone/magpie/internal/plugin"
@@ -18,6 +20,7 @@ func TestWithdrawnPluginKeptForItsUsers(t *testing.T) {
 	fakeMover(t)
 	const pkg = "@magpie-community/opencode-antigravity-auth"
 	movers["fakeco"].pkg, movers["fakeco"].min = pkg, "0.2.1"
+	list := plugin.ListPath()
 	var said []error
 	installPlugin = func(ctx context.Context, p, _ string) error {
 		err := plugin.RefuseWithdrawn(ctx, p)
@@ -47,7 +50,28 @@ func TestWithdrawnPluginKeptForItsUsers(t *testing.T) {
 	}
 
 	said = nil
-	_ = setMigration("fakeco", func(m *Migration) { m.State = MovePlugin })
+	if err := setMigration("fakeco", func(m *Migration) { m.State = MovePlugin }); err != nil {
+		t.Fatal(err)
+	}
+	if pluginListed(pkg) {
+		t.Fatal("absent maintenance fixture already lists the package")
+	}
+	keepMovedCurrent(ctx)
+	if len(said) != 0 {
+		t.Fatalf("a migration record reinstalled an absent withdrawn package: install said %v", said)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(list), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installed := []byte("{\"plugins\":[{\"spec\":\"" + pkg + "@latest\"}]}\n")
+	if err := os.WriteFile(list, installed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := plugin.Load().Plugins
+	if len(entries) != 1 || plugin.PackageName(entries[0].Spec) != pkg || entries[0].Off {
+		t.Fatalf("maintenance fixture must list one enabled target: %+v", entries)
+	}
 	keepMovedCurrent(ctx)
 	if len(said) != 1 || said[0] != nil {
 		t.Fatalf("keepMovedCurrent: install said %v, want it allowed", said)

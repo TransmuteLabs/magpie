@@ -1,5 +1,14 @@
 # Notes for coding agents
 
+## Preserve local work before removing a worktree
+
+Check staged, unstaged, untracked and relevant ignored files separately before
+removing a worktree. Branch ancestry alone does not preserve those files.
+Save their contents and index/worktree patches, verify recovery, then compare
+needed behavior with the target base. Keep a dirty worktree until its work is
+committed or explicitly recovered and accounted for. Never force-remove it as
+routine cleanup.
+
 ## Subsystem design and review
 
 Before changing a documented subsystem, read its
@@ -62,10 +71,12 @@ Two cases decide it:
   gateway's hourly loop (`KeepRetiringMoved`) when it has, unless the
   plugin is signed in under its own `-plugin` id already. Until
   then the Add sheet shows the plugin's tile only (`replacedSub` in app.js).
-  Since 10-16 the built-ins are being retired: the hourly loop's
-  `MoveRetiring` moves every subscription with a mover that still has
-  built-in accounts, a user who moved back included, and there is no way
-  back. Turning the plugin off turns the subscription off with it; removing
+  The fork's hourly loop maintains only installed, enabled migration targets;
+  it never installs an absent community package from historical accounts or
+  migration records. Explicit `MoveRetiring` retains the installation path.
+  The owning policy and recovery behavior are in
+  [Provider and plugin ownership](docs/subsystems/provider-plugins.md).
+  Turning the plugin off turns the subscription off with it; removing
   it records `removed` (accounts kept with the plugin's sign-ins), and
   installing it again gives the subscription back.
 - **Not moved:** the user still has accounts from the built-in: the move

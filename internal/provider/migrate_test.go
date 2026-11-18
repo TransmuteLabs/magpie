@@ -434,6 +434,17 @@ func TestKeepMovedCurrent(t *testing.T) {
 	}
 	_ = setMigration("fakeco", func(m *Migration) { m.State = MovePlugin })
 	keepMovedCurrent(context.Background())
+	if len(asked) != 0 {
+		t.Fatalf("a migration record reinstalled a missing package: %v", asked)
+	}
+	list := filepath.Join(filepath.Dir(plugin.Dir()), "plugins.json")
+	if err := os.MkdirAll(filepath.Dir(list), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(list, []byte(`{"plugins":[{"spec":"fake"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keepMovedCurrent(context.Background())
 	if strings.Join(asked, " ") != "fake@0.2.0" {
 		t.Fatalf("asked %v, want fake@0.2.0", asked)
 	}

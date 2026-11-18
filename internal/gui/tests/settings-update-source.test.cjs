@@ -12,7 +12,8 @@ const { chromium, webkit } = require("playwright");
 const { openPart, reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
-function server(lang, posts) {
+function server(lang, posts, signing = {}) {
+  let pin = { supported: !!signing.supported, configured: false };
   let cur = {
     theme: "light", lang, tray: "panel", currency: "usd", textSize: 100,
     proxy: "direct", proxyNow: "", proxySource: "off", pluginProxy: "", updateProxy: "",
@@ -36,7 +37,25 @@ function server(lang, posts) {
       }
       return json(cur);
     }
+    if (url.pathname === "/api/update/signing") {
+      signing.reads?.push(req.method() + url.search);
+      if (req.method() === "POST") {
+        const body = req.postDataJSON(); posts.push({ signing: body });
+        if (signing.saveError) return route.fulfill({ status: 400, json: { error: signing.saveError } });
+        pin = { supported: true, configured: !body.off, fingerprint: body.off ? undefined : body.fingerprint, team: "TEAM", feed: "https://fork.test/latest.json" };
+      }
+      if (url.searchParams.has("identities") && signing.listError) return route.fulfill({ status: 400, json: { error: signing.listError } });
+      return json({ ...pin, identities: url.searchParams.has("identities") ? [
+        { fingerprint: "A".repeat(40), name: "Same signing name", team: "TEAM" },
+        { fingerprint: "B".repeat(40), name: "Same signing name", team: "TEAM" },
+      ] : undefined });
+    }
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
+    if (url.pathname === "/api/plugin-pages" || url.pathname === "/api/plugin-panels") return json([]);
+    if (url.pathname === "/api/plugin-pages/changes") {
+      if (url.searchParams.get("version") !== "empty") return json({ version: "empty" });
+      return;
+    }
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname.startsWith("/api/")) return json({});
@@ -69,8 +88,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await context.route("**/*", server(lang, posts));
         await watchSettingsReads(page);
+        const signingRead = page.waitForResponse((response) => response.url().endsWith("/api/update/signing"));
         await page.goto("http://magpie.test/?view=settings&tab=about");
         await settingsDrawn(page);
+        await signingRead;
         const row = page.locator("#about > #updateSourceRow");
         await row.getByText(l.row, { exact: true }).waitFor();
         assert.equal(await page.locator("#updateSourceRow").count(), 1, "one Update source row");
@@ -138,8 +159,143 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.keyboard.press("Escape");
         await openPart(page, "about");
         await page.locator("#about .update-mirror-row").waitFor();
+        assert.equal(await page.locator("#updateSigningRow").count(), 0, "unsupported platforms have no local signing row");
         const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         assert(over <= 0, `the page scrolls sideways by ${over}px`);
+        assert.deepEqual(errors, []);
+      });
+      test(`${engine} ${lang} ${width}px: local signing in About retains the exact certificate and failed saves`, async (t) => {
+        const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+        t.after(() => browser.close());
+        const context = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce", serviceWorkers: "block" });
+        const page = await context.newPage();
+        page.setDefaultTimeout(8000);
+        const posts = [], errors = [];
+        const signing = { supported: true, reads: [] };
+        page.on("pageerror", (e) => errors.push(e.message));
+        await context.route("**/*", server(lang, posts, signing));
+        await watchSettingsReads(page);
+        await page.goto("http://magpie.test/?view=settings&tab=network");
+        await settingsDrawn(page);
+        const row = page.locator("#updateSigningRow"), pick = page.locator("#updateSigningPick");
+        await pick.waitFor({ state: "attached" });
+        assert.equal(await row.evaluate((element) => element.closest(".set-page").id), "setPage-about", "local signing belongs to Settings About");
+        assert.equal(await page.locator("#setPage-network #updateSigningRow").count(), 0);
+        await openPart(page, "about");
+        const search = page.locator("#setQ");
+        await search.fill(await row.locator(".name").textContent());
+        await row.waitFor();
+        await search.press("Escape");
+        const sourcePick = page.locator("#updateSourcePick");
+        await reach(page, sourcePick);
+        await sourcePick.click();
+        const sourceMenu = page.getByRole("menu");
+        await sourceMenu.getByRole("menuitemradio", { name: l.auto, exact: true }).waitFor();
+        assert.equal(await sourceMenu.getByRole("menuitemradio").count(), 3, "About retains the update source menu");
+        await page.keyboard.press("Escape");
+        await pick.waitFor();
+        assert.equal(await row.locator("select").count(), 0);
+        assert(await row.evaluate((element) => element.previousElementSibling.matches(".update-mirror-row")), "signing follows Download source");
+        assert.equal(await page.locator("#about .update-auto-row").count(), 1);
+        assert.equal(await page.locator("#about .update-download-row").count(), 1);
+        const off = await pick.textContent();
+        assert.equal(posts.length, 0, "rendering never enrolls a certificate");
+        assert(signing.reads.every((read) => read === "GET"), "rendering does not discover or select certificates");
+        const openMenu = async () => {
+          await reach(page, pick);
+          await pick.click();
+          const menu = page.locator(".proto-menu");
+          await menu.waitFor();
+          return menu;
+        };
+        const checkPin = async (fingerprint) => {
+          const label = fingerprint ? fingerprint.slice(-8) : off;
+          await page.waitForFunction((value) => document.querySelector("#updateSigningPick")?.textContent === value, label);
+          if (fingerprint) assert.equal(await pick.getAttribute("title"), `${fingerprint} · TEAM · https://fork.test/latest.json`);
+          const menu = await openMenu();
+          const selected = menu.locator('[aria-checked="true"]');
+          assert.equal(await selected.count(), 1);
+          if (fingerprint) assert.equal(await selected.locator(".pm-note").textContent(), `TEAM · ${fingerprint}`);
+          else assert.equal(await selected.locator(".pm-name").textContent(), off);
+          await page.keyboard.press("Escape");
+        };
+        const choose = async (fingerprint, failure = "") => {
+          const count = posts.length;
+          const menu = await openMenu();
+          assert.equal(await menu.getByText("Same signing name · AAAAAAAA", { exact: true }).count(), 1);
+          assert.equal(await menu.getByText("Same signing name · BBBBBBBB", { exact: true }).count(), 1);
+          const response = page.waitForResponse((reply) => reply.url().endsWith("/api/update/signing") && reply.request().method() === "POST");
+          const option = fingerprint
+            ? menu.getByRole("menuitemradio").filter({ has: page.getByText(`TEAM · ${fingerprint}`, { exact: true }) })
+            : menu.getByRole("menuitemradio").first();
+          await option.click();
+          await response;
+          await page.waitForFunction(({ word, failure }) => {
+            const status = document.querySelector("#status");
+            return !document.querySelector("#updateSigningPick")?.disabled && status?.textContent.includes(word) && (!failure || status.classList.contains("err"));
+          }, { word: failure || l.saved, failure: !!failure });
+          if (failure) {
+            const alert = page.locator('#status[role="alert"]');
+            assert.equal(await alert.innerText(), failure);
+            assert(await alert.isVisible(), "the signing failure is visible");
+          }
+          assert.equal(posts.length, count + 1, "each explicit choice writes only once");
+          assert.deepEqual(posts.at(-1), { signing: fingerprint ? { fingerprint } : { off: true } });
+        };
+        const redraw = async () => {
+          const oldRow = await row.elementHandle();
+          await page.evaluate(() => renderSettings());
+          assert.equal(await oldRow.evaluate((element) => element.isConnected), false, "Settings really redraws the row");
+          await pick.waitFor();
+          assert.equal(await row.evaluate((element) => element.closest(".set-page").id), "setPage-about");
+          assert.equal(await row.count(), 1);
+        };
+        for (const fingerprint of ["B".repeat(40), "A".repeat(40)]) {
+          await choose(fingerprint);
+          await checkPin(fingerprint);
+          const writes = posts.length;
+          await redraw();
+          await checkPin(fingerprint);
+          await page.reload();
+          await settingsDrawn(page);
+          await pick.waitFor();
+          await checkPin(fingerprint);
+          assert.equal(posts.length, writes, "redraw and reload do not enroll a certificate");
+        }
+        signing.listError = "Keychain identities unavailable";
+        await pick.click();
+        await page.waitForFunction((word) => document.querySelector("#status.err")?.textContent.includes(word), signing.listError);
+        assert(await page.getByRole("alert").isVisible(), "the discovery failure is visible");
+        assert.equal(await page.locator(".proto-menu").count(), 0);
+        signing.listError = "";
+        await checkPin("A".repeat(40));
+        signing.saveError = "local signing does not support this app’s signature options";
+        await choose("B".repeat(40), signing.saveError);
+        await checkPin("A".repeat(40));
+        await redraw();
+        await checkPin("A".repeat(40));
+        await page.reload();
+        await settingsDrawn(page);
+        await pick.waitFor();
+        await checkPin("A".repeat(40));
+        signing.saveError = "";
+        await choose("B".repeat(40));
+        await checkPin("B".repeat(40));
+        signing.saveError = "local signing does not support this app’s signature options";
+        await choose("", signing.saveError);
+        await checkPin("B".repeat(40));
+        signing.saveError = "";
+        await choose("");
+        await checkPin("");
+        await redraw();
+        await checkPin("");
+        await page.reload();
+        await settingsDrawn(page);
+        await pick.waitFor();
+        await checkPin("");
+        assert.equal(posts.length, 6, "only explicit signing policy writes, including failed writes");
+        assert(posts.every((body) => Object.keys(body).length === 1 && body.signing), "signing never writes synchronized Settings");
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
         assert.deepEqual(errors, []);
       });
     }

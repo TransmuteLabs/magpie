@@ -27,7 +27,7 @@ The later donor comparison used community commit
 includes MiniMax alongside CommandCode, Devin, OpenCode, OMP and ZCode.
 Exact versions and comparison paths live in each package's
 `docs/source-lock.json` and the sibling workspace's
-status record (`magpie-sdk-community-plugins/docs/STATUS.md` in the separately maintained workspace).
+[status record](../../../magpie-sdk-community-plugins/docs/STATUS.md).
 The counts in the original census remain counts at its pinned November 14
 commit; they are not recomputed counts at the later donor.
 
@@ -113,16 +113,16 @@ shapes, not additional host capabilities.
 
 | Actual family and donor evidence | Current SDK adapter and precise remaining boundary |
 | --- | --- |
-| Provider/auth/model/decision/media: Command Code (`magpie-community-plugins/packages/commandcode/index.mjs`), ZCode (`magpie-community-plugins/packages/zcode/index.mjs`), MiniMax (`magpie-community-plugins/packages/minimax/index.mjs`) and the 47 auth source families | Selected auth/refresh, provider models, protocols and finite operations exist. API 1.7 SystemOne now has a model-operation association and ordinary decision owners; the old module proposal is not evidence that this host adapter is still missing. Ordinary provider switches, bulk import, concurrency defaults and rich quota display remain distinct gaps below. |
-| Four actual tool packages: Calc (`magpie-community-plugins/packages/calc/index.mjs`), LayerFS (`magpie-community-plugins/packages/layerfs/index.mjs`), Search1API (`magpie-community-plugins/packages/search1api/src/index.ts`), SpecStream (`magpie-community-plugins/packages/specstream/index.mjs`) | `tool-provider` enters ordinary MCP/hub selection. [Account resolution](../../internal/gateway/extension_tools.go) supports explicit host-validated `_magpie` selection and strips it before dispatch; tools need not retain credentials. Search1API's auth-only provider declaration is not faithfully representable by the present provider admission rule. |
-| Three actual search-hook packages: SpecStream (`magpie-community-plugins/packages/specstream/index.mjs`) `search.specstream`, Antigravity (`magpie-community-plugins/packages/antigravity/index.mjs`) `search.antigravity`, MiniMax `createSearchHook` (`magpie-community-plugins/packages/minimax/native.mjs`) | API 1.8 `searchSources` plus a declared primary read action joins Settings and ordinary web search, selected accounts, preflight, proxy, sanitation and search accounting. A tool named `search` is separate: Search1API is a tool donor, not a fourth search-hook package. |
-| Twenty agent metadata packages, including Aider (`magpie-community-plugins/packages/aider/aider.agent.js`), Kimi Desktop (`magpie-community-plugins/packages/kimi-desktop/kimi-desktop.agent.js`), Nowledge agent (`magpie-community-plugins/packages/nowledge-mem-agent/nowledge-mem.agent.js`) | API 1.5 checked agent/profile/launch/Library adapters exist. Porting each agent's native schema remains module work. Own-model capability metadata in ordinary agent options and cross-WSL ownership are not supplied by the current contract. |
-| Fourteen synchronous middleware packages plus the `gateway` alias Reserve (`magpie-community-plugins/packages/reserve/reserve.gateway.js`) | The named hook union is `onRequest/onAccount/onProvider/onEvent/onResponse`, with separate `strategies` and `onUsage`. API 1.8 synchronous middleware now supplies the five request hooks; API 1.4 supplies seat ordering; API 1.8 ledger observation supplies sanitized completion rows. These are three registrations, not one capability. |
-| Eight async-hook packages: Aelios, Agent Office, Mail Watch, Notify, Nowledge Mem, Harnessweight, PowerContext, Respire | Actual exports are `onRequest/onResponse`, with Notify also exporting `onSignIn`. API 1.2 hooks, private tools/state and windows can serve external memory and completion consumers. PowerContext (`magpie-community-plugins/packages/powercontext/powercontext.hooks.mjs`) and Nowledge (`magpie-community-plugins/packages/nowledge-mem/nowledge-mem.hooks.mjs`) use their own services/stores; they do not require ownership of Magpie's built-in Memory. |
-| Twenty-three pages and one action-metadata package, including Usage (`magpie-community-plugins/packages/usage/page/app.js`), Fingerprint (`magpie-community-plugins/packages/fingerprint/package.json`), usage board (`magpie-community-plugins/packages/page-usage-board/server.mjs`), Window Warmup (`magpie-community-plugins/packages/window-warmup/src/plugin.ts`) | Existing window metadata, panels/replacements/actions, bridge reads, config CAS and private component services are present. `usage:summary`, `usage:day` and `providers:list` already reach [permission-checked reads](../../internal/gui/pluginpage.go). The detailed usage board additionally reads historical `usage.jsonl` and configured providers; a live sanitized ledger observer does not reproduce that historical/private-file API. |
-| Provider extras: WorkBuddy (`magpie-community-plugins/packages/workbuddy/index.mjs`) `auth.checkin/refresh/rotating/options/import`; Cursor (`magpie-community-plugins/packages/cursor/index.mjs`) `auth.calls` | New API 1.8 check-in, opt-in idle auth renewal, gateway activation and outside-call readers are present in source. [Check-in](../../internal/provider/extension_checkin.go) joins the existing daily/manual owner; [outside calls](../../internal/usage/extension_calls.go) use `IngestReported`, not a second live `Append`. Parent owns final acceptance of these concurrent additions. |
-| Paid post-reply pings and scheduled quota-window opening: Devin (`magpie-community-plugins/packages/devin/index.mjs`) `scheduleKeepalive/reportPing`; Warmup scheduler (`magpie-community-plugins/packages/window-warmup/src/scheduler.ts`) | Module lifetime and gateway activation can keep components alive. They do not create an account-bearing scheduled write invocation. Auth `keepAlive` refreshes expiring credentials; it does not authorize another billed prompt. This is a real scheduling gap, with vendor ping/rule policy remaining in the module. |
-| Observation, budgets and privacy: Privacy Gate (`magpie-community-plugins/packages/privacy-gate/privacy-gate.middleware.js`), Reserve (`magpie-community-plugins/packages/reserve/reserve.gateway.js`), ordinary [Observer/Watch](../../internal/usage/observe.go), [Limiter/Spender](../../internal/gwbudget/gwbudget.go), [Masker](../../internal/gwmw/gwmw.go) | Ledger observation exists; full SDK request/attempt observer registration, budget replacement and reversible masking registration do not. Privacy Gate explicitly rejects structural egress and counts usage; it is not a reversible text masker. Reserve orders seats; it is not a reserve/release budget limiter. No inspected donor requires replacing those built-in owners for our five modules. |
+| Provider/auth/model/decision/media: [Command Code][d-commandcode], [ZCode][d-zcode], [MiniMax][d-minimax] and the 47 auth source families | Selected auth/refresh, provider models, protocols and finite operations exist. API 1.7 SystemOne now has a model-operation association and ordinary decision owners; the old module proposal is not evidence that this host adapter is still missing. Ordinary provider switches, bulk import, concurrency defaults and rich quota display remain distinct gaps below. |
+| Four actual tool packages: [Calc][d-calc], [LayerFS][d-layerfs], [Search1API][d-search1api], [SpecStream][d-specstream] | `tool-provider` enters ordinary MCP/hub selection. [Account resolution](../../internal/gateway/extension_tools.go) supports explicit host-validated `_magpie` selection and strips it before dispatch; tools need not retain credentials. Search1API's auth-only provider declaration is not faithfully representable by the present provider admission rule. |
+| Three actual search-hook packages: [SpecStream][d-specstream] `search.specstream`, [Antigravity][d-antigravity] `search.antigravity`, [MiniMax `createSearchHook`][d-minimax-native] | API 1.8 `searchSources` plus a declared primary read action joins Settings and ordinary web search, selected accounts, preflight, proxy, sanitation and search accounting. A tool named `search` is separate: Search1API is a tool donor, not a fourth search-hook package. |
+| Twenty agent metadata packages, including [Aider][d-aider], [Kimi Desktop][d-kimi], [Nowledge agent][d-nowledge-agent] | API 1.5 checked agent/profile/launch/Library adapters exist. Porting each agent's native schema remains module work. Own-model capability metadata in ordinary agent options and cross-WSL ownership are not supplied by the current contract. |
+| Fourteen synchronous middleware packages plus the `gateway` alias [Reserve][d-reserve] | The named hook union is `onRequest/onAccount/onProvider/onEvent/onResponse`, with separate `strategies` and `onUsage`. API 1.8 synchronous middleware now supplies the five request hooks; API 1.4 supplies seat ordering; API 1.8 ledger observation supplies sanitized completion rows. These are three registrations, not one capability. |
+| Eight async-hook packages: Aelios, Agent Office, Mail Watch, Notify, Nowledge Mem, Harnessweight, PowerContext, Respire | Actual exports are `onRequest/onResponse`, with Notify also exporting `onSignIn`. API 1.2 hooks, private tools/state and windows can serve external memory and completion consumers. [PowerContext][d-powercontext] and [Nowledge][d-nowledge] use their own services/stores; they do not require ownership of Magpie's built-in Memory. |
+| Twenty-three pages and one action-metadata package, including [Usage][d-usage], [Fingerprint][d-fingerprint], [usage board][d-usage-board], [Window Warmup][d-warmup] | Existing window metadata, panels/replacements/actions, bridge reads, config CAS and private component services are present. `usage:summary`, `usage:day` and `providers:list` already reach [permission-checked reads](../../internal/gui/pluginpage.go). The detailed usage board additionally reads historical `usage.jsonl` and configured providers; a live sanitized ledger observer does not reproduce that historical/private-file API. |
+| Provider extras: [WorkBuddy][d-workbuddy] `auth.checkin/refresh/rotating/options/import`; [Cursor][d-cursor] `auth.calls` | New API 1.8 check-in, opt-in idle auth renewal, gateway activation and outside-call readers are present in source. [Check-in](../../internal/provider/extension_checkin.go) joins the existing daily/manual owner; [outside calls](../../internal/usage/extension_calls.go) use `IngestReported`, not a second live `Append`. Parent owns final acceptance of these concurrent additions. |
+| Paid post-reply pings and scheduled quota-window opening: [Devin][d-devin] `scheduleKeepalive/reportPing`; [Warmup scheduler][d-warmup-scheduler] | Module lifetime and gateway activation can keep components alive. They do not create an account-bearing scheduled write invocation. Auth `keepAlive` refreshes expiring credentials; it does not authorize another billed prompt. This is a real scheduling gap, with vendor ping/rule policy remaining in the module. |
+| Observation, budgets and privacy: [Privacy Gate][d-privacy], [Reserve][d-reserve], ordinary [Observer/Watch](../../internal/usage/observe.go), [Limiter/Spender](../../internal/gwbudget/gwbudget.go), [Masker](../../internal/gwmw/gwmw.go) | Ledger observation exists; full SDK request/attempt observer registration, budget replacement and reversible masking registration do not. Privacy Gate explicitly rejects structural egress and counts usage; it is not a reversible text masker. Reserve orders seats; it is not a reserve/release budget limiter. No inspected donor requires replacing those built-in owners for our five modules. |
 
 Package `options` defaults are not a generated settings schema. The donor
 has no top-level `magpie.settings`, `parts`, `requires` or `provides` keys
@@ -202,7 +202,7 @@ None justifies weakening current account, model, ownership or replay checks.
 
 5. **Own-model agent metadata — required for faithful Command Code
    generated configuration.** The module's
-   separate contract section (`magpie-sdk-plugin-protocol-commandcode/SYSTEMONE-SDK-CONTRACT.md`) asks for max output and effort
+   [separate contract section][m-commandcode] asks for max output and effort
    facts. SDK models have them, but
    [`extensionAgentOptions`](../../internal/agent/extension_actions.go)
    sends `[]agent.Option`, whose [definition](../../internal/agent/agent.go)
@@ -213,7 +213,7 @@ None justifies weakening current account, model, ownership or replay checks.
    conflict/stale/no-op/disconnect controls.
 
 6. **OMP descendants and source identity — required for automatic
-   aggregate history parity.** The OMP reader contract (`magpie-sdk-plugin-session-omp/SOURCE-PREVIEW.md`) accepts
+   aggregate history parity.** The [OMP reader contract][m-omp] accepts
    supplied descendant JSONL, but Source6
    [`session.inputs.v1`](../../internal/sessions/extension_source_inputs.go)
    asks for exact paths and preknown digests. Native OMP journals have no
@@ -319,3 +319,30 @@ or write authority.
 
 The referenced execution used isolated Linux homes and caches and
 synthetic local peers. The audit itself records source inspection.
+
+[d-commandcode]: ../../../magpie-community-plugins/packages/commandcode/index.mjs
+[d-zcode]: ../../../magpie-community-plugins/packages/zcode/index.mjs
+[d-minimax]: ../../../magpie-community-plugins/packages/minimax/index.mjs
+[d-minimax-native]: ../../../magpie-community-plugins/packages/minimax/native.mjs
+[d-calc]: ../../../magpie-community-plugins/packages/calc/index.mjs
+[d-layerfs]: ../../../magpie-community-plugins/packages/layerfs/index.mjs
+[d-search1api]: ../../../magpie-community-plugins/packages/search1api/src/index.ts
+[d-specstream]: ../../../magpie-community-plugins/packages/specstream/index.mjs
+[d-antigravity]: ../../../magpie-community-plugins/packages/antigravity/index.mjs
+[d-aider]: ../../../magpie-community-plugins/packages/aider/aider.agent.js
+[d-kimi]: ../../../magpie-community-plugins/packages/kimi-desktop/kimi-desktop.agent.js
+[d-nowledge-agent]: ../../../magpie-community-plugins/packages/nowledge-mem-agent/nowledge-mem.agent.js
+[d-reserve]: ../../../magpie-community-plugins/packages/reserve/reserve.gateway.js
+[d-powercontext]: ../../../magpie-community-plugins/packages/powercontext/powercontext.hooks.mjs
+[d-nowledge]: ../../../magpie-community-plugins/packages/nowledge-mem/nowledge-mem.hooks.mjs
+[d-usage]: ../../../magpie-community-plugins/packages/usage/page/app.js
+[d-fingerprint]: ../../../magpie-community-plugins/packages/fingerprint/package.json
+[d-usage-board]: ../../../magpie-community-plugins/packages/page-usage-board/server.mjs
+[d-warmup]: ../../../magpie-community-plugins/packages/window-warmup/src/plugin.ts
+[d-warmup-scheduler]: ../../../magpie-community-plugins/packages/window-warmup/src/scheduler.ts
+[d-workbuddy]: ../../../magpie-community-plugins/packages/workbuddy/index.mjs
+[d-cursor]: ../../../magpie-community-plugins/packages/cursor/index.mjs
+[d-devin]: ../../../magpie-community-plugins/packages/devin/index.mjs
+[d-privacy]: ../../../magpie-community-plugins/packages/privacy-gate/privacy-gate.middleware.js
+[m-commandcode]: ../../../magpie-sdk-plugin-protocol-commandcode/SYSTEMONE-SDK-CONTRACT.md
+[m-omp]: ../../../magpie-sdk-plugin-session-omp/SOURCE-PREVIEW.md

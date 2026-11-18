@@ -61,6 +61,9 @@ type Release struct {
 	Assets  map[string]Asset `json:"assets"`  // by file name
 	// Signed is what vouches for Assets' hashes (signed.go).
 	Signed *Signed `json:"signed,omitempty"`
+	// originFeed is captured locally when checking for updates. A JSON feed
+	// cannot assert its own provenance for local code signing.
+	originFeed string
 }
 
 // Asset is one downloadable file of a release.
@@ -135,13 +138,37 @@ func Latest(ctx context.Context) (*Release, error) { return LatestIn(ctx, "") }
 // InLang): the app's language, which What's new follows. On Settings'
 // Stable channel it is Stable's release (see Stable).
 func LatestIn(ctx context.Context, lang string) (*Release, error) {
-	return latestAt(ctx, withChannel(withLang(Feed(), lang)), lang)
+	feed := Feed()
+	return latestConfigured(ctx, feed, withChannel(withLang(feed, lang)), lang, latestAt)
 }
 
 // LatestEvery is LatestIn on every version, whatever Settings' channel:
 // what Stable's "up to date" leaves out, the newest release out.
 func LatestEvery(ctx context.Context, lang string) (*Release, error) {
-	return latestAt(ctx, withLang(Feed(), lang), lang)
+	feed := Feed()
+	return latestConfigured(ctx, feed, withLang(feed, lang), lang, latestAt)
+}
+
+func latestConfigured(ctx context.Context, feed, address, lang string, lookup func(context.Context, string, string) (*Release, error)) (*Release, error) {
+	if runtime.GOOS != "darwin" {
+		return lookup(ctx, address, lang)
+	}
+	policy, err := Signing()
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		return lookup(ctx, address, lang)
+	}
+	if feed != policy.Feed {
+		return nil, errors.New("the configured update feed differs from the local signing pin")
+	}
+	release, err := readReleaseFeed(ctx, address, lang, getSigningFeed)
+	if err != nil {
+		return nil, err
+	}
+	release.originFeed = feed
+	return release, nil
 }
 
 // LatestStable is the Stable channel's release, whatever Settings'
@@ -149,14 +176,15 @@ func LatestEvery(ctx context.Context, lang string) (*Release, error) {
 // when it is Stable's version (the site's Stable download). Only the site
 // knows it, so a failed feed is never answered from GitHub.
 func LatestStable(ctx context.Context) (*Release, error) {
-	u, err := url.Parse(Feed())
+	feed := Feed()
+	u, err := url.Parse(feed)
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
 	q.Set("channel", settings.UpdateStable)
 	u.RawQuery = q.Encode()
-	return latestFrom(ctx, u.String(), "")
+	return latestConfigured(ctx, feed, u.String(), "", latestFrom)
 }
 
 func latestAt(ctx context.Context, feed, lang string) (*Release, error) {
@@ -186,11 +214,17 @@ func latestAt(ctx context.Context, feed, lang string) (*Release, error) {
 }
 
 func latestFrom(ctx context.Context, feed, lang string) (*Release, error) {
+	return readReleaseFeed(ctx, feed, lang, func(request *http.Request) (*http.Response, error) {
+		return source.Do(client, request)
+	})
+}
+
+func readReleaseFeed(ctx context.Context, feed, lang string, get func(*http.Request) (*http.Response, error)) (*Release, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", feed, nil)
 	if err != nil {
 		return nil, err
 	}
-	res, err := source.Do(client, req)
+	res, err := get(req)
 	if err != nil {
 		return nil, err
 	}
@@ -396,6 +430,15 @@ func Writable(dir string) bool {
 // bundle, ready for Install. It returns the unpacked app, a bundle whose
 // folder is named stagedName.
 func Stage(ctx context.Context, rel *Release, bundle string) (string, error) {
+	unlock, err := signingLock()
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	policy, err := Signing()
+	if err != nil {
+		return "", err
+	}
 	a, ok := rel.Assets[AppAsset()]
 	if !ok {
 		return "", fmt.Errorf("release %s has no %s", rel.Version, AppAsset())
@@ -429,7 +472,7 @@ func Stage(ctx context.Context, rel *Release, bundle string) (string, error) {
 	os.Remove(out)
 	unregister(unzipped) // in case it looked in that moment
 	step(ctx, StepSignature)
-	if err := sameSigner(ctx, bundle, app); err != nil {
+	if err := prepareSigning(ctx, rel, bundle, app, policy); err != nil {
 		os.RemoveAll(dir)
 		return "", err
 	}
@@ -485,6 +528,14 @@ func stageDir(dir string) string {
 // magpie's to change the error is a permission one (NeedsAdmin), and
 // InstallAsAdmin can do it instead.
 func Install(staged, bundle string) error {
+	unlock, err := signingLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := signingPreflight(staged, bundle); err != nil {
+		return err
+	}
 	old := filepath.Join(filepath.Dir(staged), asideName)
 	os.RemoveAll(old)
 	if err := os.Rename(bundle, old); err != nil {
@@ -494,6 +545,9 @@ func Install(staged, bundle string) error {
 		os.Rename(old, bundle) // put it back
 		return err
 	}
+	if err := finishSigningBootstrap(); err != nil {
+		return err
+	}
 	os.RemoveAll(filepath.Dir(staged)) // .magpie-update
 	return nil
 }
@@ -501,9 +555,20 @@ func Install(staged, bundle string) error {
 // InstallAsAdmin is Install with the administrator's password, asked for
 // by the system.
 func InstallAsAdmin(staged, bundle string) error {
+	unlock, err := signingLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := signingPreflight(staged, bundle); err != nil {
+		return err
+	}
 	old := filepath.Join(filepath.Dir(staged), asideName)
-	err := asAdmin(swapScript(staged, bundle, old))
+	err = asAdmin(swapScript(staged, bundle, old))
 	if err == nil {
+		if err := finishSigningBootstrap(); err != nil {
+			return err
+		}
 		os.RemoveAll(filepath.Dir(staged))
 	}
 	return err

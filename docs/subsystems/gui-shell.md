@@ -77,9 +77,10 @@ response regression preserves both the selected model and a later theme
 change with one POST for each. These share one publisher with the existing
 typed optimistic owners and visibility fences.
 
-The Download source and Community rows render through the lazy
-`updatesource.js` module. Placeholders reserve their positions, and an import
-fills a row only while it remains attached.
+About keeps the update source and local signing controls together. Download
+source and Community render through the existing lazy `updatesource.js`;
+placeholders keep their positions and an import fills only an attached row.
+The Settings response changes do not create another scheduler.
 
 The session transcript route passes its request context to
 `TranscriptAtContext` for a `find=` hit, retaining the same history-owner

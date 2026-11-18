@@ -12,11 +12,6 @@ including decision/validation records sharing a number, remain distinct.
 The status and qualifications inside each dated record belong to its own
 source and environment.
 
-In this SDK-only projection, fork delivery schedules and optional local-signing
-qualifications in dated records remain historical context. The fork rollout
-plan itself is not included; its historical mentions are plain text, not
-deployment instructions or a source of current SDK contracts.
-
 ## Architectural decisions
 
 | Record | Responsibility or decision |
@@ -63,7 +58,8 @@ another contract-version authority.
 | [Session-source preview](0020-session-source-preview-validation.md) | Isolated reader preview and its limited integration scope |
 | [Consolidated SDK 1.6](0021-consolidated-sdk16-validation.md) | Shared host snapshot, split gates, retained setup failures and follow-ups |
 | [SDK 1.9 host](0026-sdk19-host-validation.md) | Synthetic combined host snapshot and unperformed deployment work |
-| [SDK 1.12 local validation](0029-sdk112-local-validation.md) | Current candidate checks and historical application qualification |
+| [SDK 1.9 integration](0027-sdk19-upstream-module-validation.md) | Named upstream/module snapshots, retained failures and later integration records |
+| [Magpie and SDK acceptance](0029-sdk112-local-validation.md) | Tested source trees, host checks, empty-catalog application smoke and module acceptance |
 
 Decision records can also contain scoped verification. Their evidence is
 subject to the same source and environment boundaries as the validation

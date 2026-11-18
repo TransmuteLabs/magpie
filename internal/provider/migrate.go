@@ -1028,11 +1028,13 @@ func handBack(ctx context.Context, id string, mv *mover, accts []movedAccount, k
 	return users, nil, nil
 }
 
-// MoveRetiring moves the built-ins being retired that have accounts, at
-// start-up: once, or again retryWait after one failed. One an older magpie
-// moved back is moved again: there is no way back, as the built-in is
-// going. One whose plugin the user removed waits for them to install it.
+// MoveRetiring explicitly moves retired built-ins that have accounts.
+// One whose plugin the user removed waits for them to install it.
 func MoveRetiring(ctx context.Context) map[string]error {
+	return moveRetiring(ctx, true)
+}
+
+func moveRetiring(ctx context.Context, canInstall bool) map[string]error {
 	if settings.AccountDiscoveryOff() {
 		return nil
 	}
@@ -1046,6 +1048,9 @@ func MoveRetiring(ctx context.Context) map[string]error {
 		case ok && m.State == MoveRemoved:
 			continue
 		case ok && m.State == MoveFailed && !retryDue(id, m.At):
+			continue
+		}
+		if !canInstall && !pluginReady(movers[id]) {
 			continue
 		}
 		if accts, err := movers[id].out(); err != nil || len(accts) == 0 {
@@ -1135,7 +1140,7 @@ func pluginReady(mv *mover) bool {
 func keepMovedCurrent(ctx context.Context) {
 	for _, id := range OnPlugins() {
 		mv := movers[id]
-		if mv.min == "" {
+		if mv.min == "" || !pluginListed(mv.pkg) {
 			continue
 		}
 		if err := installPlugin(plugin.KeepWithdrawn(ctx), mv.pkg, mv.min); err != nil {
@@ -1144,12 +1149,13 @@ func keepMovedCurrent(ctx context.Context) {
 	}
 }
 
-// KeepRetiringMoved moves the built-ins being retired, and hands over
+// KeepRetiringMoved maintains migrations onto installed plugins, and hands over
 // those whose plugin the user installed (HandOver), run by the magpie
 // serving the gateway (one magpie, never two at once): a little after it
 // starts, then every hour, so a failed move is tried again once retryWait
 // has gone; a retired built-in's failed move brings the next run forward
-// to when it is due. It also keeps each moved built-in's plugin up to date.
+// to when it is due. It keeps installed moved plugins up to date and never
+// installs a new package without an explicit move or plugin installation.
 func KeepRetiringMoved(ctx context.Context) {
 	t := time.NewTimer(20 * time.Second)
 	defer t.Stop()
@@ -1164,7 +1170,7 @@ func KeepRetiringMoved(ctx context.Context) {
 			continue
 		}
 		keepMovedCurrent(ctx)
-		moves := MoveRetiring(ctx)
+		moves := moveRetiring(ctx, false)
 		maps.Copy(moves, HandOver(ctx, true))
 		for id, err := range moves {
 			if err != nil {

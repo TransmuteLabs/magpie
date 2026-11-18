@@ -271,8 +271,9 @@ The owner regressions include
 `TestSDKOwnCallUsesAppendWhileOutsideHistoryUsesIngestReported`,
 `TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce` and
 `TestModuleDiagnosticsReachTheExistingHostWithSelectedAuthority`.
-The [validation index](../adr/README.md) records the scope and source of
-historical checks.
+The [validation record](../adr/0027-sdk19-upstream-module-validation.md)
+keeps their ordinary-owner, installed-module and historical source pins
+separate.
 
 This preserves Magpie's collection semantics, not a lossless raw transport
 recorder. Archive sees canonical input after native decode; it does not

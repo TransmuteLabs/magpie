@@ -132,6 +132,6 @@ store was used.
 
 Devin, OpenCode and OMP first slices proceed under their own minimum SDK
 contracts in separate plugin repositories, following the
-parallel delivery plan.
+[parallel delivery plan](../plans/plugin-first-delivery.md).
 Their domain behavior is not established by the generic SDK fixtures.
 ZCode migration remains held until the user's explicit signal.

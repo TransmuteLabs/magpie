@@ -36,6 +36,16 @@ before loading into the fields, masked addresses/status, clearing
 authentication, Tab and Escape, mode switches, and narrow windows in all
 five languages on Chromium and WebKit.
 
+`settings-update-source.test.cjs` keeps Network's Update source menu functional
+and places Local update signing in About immediately after Download source,
+beside the automatic update controls. It checks explicit selection between
+same-name certificates, full fingerprint persistence after Settings redraw and
+reload, signing-only writes, visible discovery and save errors, retention of the
+saved pin after failed replacement or disabling, successful retry, and no signing
+row on unsupported platforms. Every request uses a local fixture; nothing
+automatically chooses a certificate. Both widths and all five languages run in
+Chromium and WebKit.
+
 ## Installed desktop fonts
 
 `fonts.test.cjs` exercises the interface/code font controls with installed
