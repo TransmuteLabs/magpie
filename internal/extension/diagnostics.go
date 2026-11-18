@@ -11,7 +11,8 @@ import (
 
 const (
 	moduleDiagnosticLimit        = 60
-	moduleDiagnosticErrorReserve = 10
+	moduleDiagnosticWarnLimit    = 55
+	moduleDiagnosticRoutineLimit = 50
 )
 
 type diagnosticWindow struct {
@@ -46,8 +47,11 @@ func (m *Manager) emitDiagnostic(scope sdk.Scope, raw json.RawMessage, authority
 		window = diagnosticWindow{start: now}
 	}
 	limit := moduleDiagnosticLimit
-	if value.Level != "error" {
-		limit -= moduleDiagnosticErrorReserve
+	switch value.Level {
+	case "warn":
+		limit = moduleDiagnosticWarnLimit
+	case "info", "debug":
+		limit = moduleDiagnosticRoutineLimit
 	}
 	if window.count >= limit {
 		m.mu.Unlock()

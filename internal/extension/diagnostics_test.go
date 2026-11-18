@@ -89,7 +89,7 @@ func TestModuleDiagnosticsRejectForgedStaleCanceledAndExcessCalls(t *testing.T) 
 	}
 }
 
-func TestModuleDiagnosticNoiseLeavesRoomForAnotherAccountsError(t *testing.T) {
+func TestModuleDiagnosticNoiseLeavesRoomForAnotherAccountsFailure(t *testing.T) {
 	manager, scope := usageManagerVersion(t, 7)
 	failed := scope
 	failed.Account = "another-account"
@@ -110,10 +110,22 @@ func TestModuleDiagnosticNoiseLeavesRoomForAnotherAccountsError(t *testing.T) {
 	for range 60 {
 		emit(scope, "info")
 	}
-	if !emit(failed, "error") {
-		t.Fatal("successful requests exhausted the budget for another account's error")
+	for range 5 {
+		if !emit(failed, "warn") {
+			t.Fatal("successful requests exhausted the budget for another account's warning")
+		}
+	}
+	if emit(failed, "warn") {
+		t.Fatal("warnings consumed the entries reserved for errors")
 	}
 	last := records[len(records)-1]
+	if last.Account != failed.Account || last.Value.Level != "warn" {
+		t.Fatalf("wrong account warning recorded: %+v", last)
+	}
+	if !emit(failed, "error") {
+		t.Fatal("routine diagnostics and warnings exhausted the budget for another account's error")
+	}
+	last = records[len(records)-1]
 	if last.Account != failed.Account || last.Value.Level != "error" {
 		t.Fatalf("wrong account diagnostic recorded: %+v", last)
 	}

@@ -456,8 +456,9 @@ for exact authority, limits, failure and best-effort delivery semantics.
 `diagnostics.emit` is a scoped API 1.7 host callback. Modules provide bounded
 codes/phases and numeric facts; the host supplies identity and applies a
 sixty-entry per-module minute budget before the existing application logger.
-The final ten entries in the budget are reserved for errors, across all
-accounts and components of that module.
+Debug and info can use the first fifty entries. Warnings can use the first
+fifty-five, and errors can use all sixty. Accounts and components share
+these limits.
 Free-text, request bodies and credentials are not accepted. Worker stderr is
 still drained without logging. Diagnostic records do not mutate an account or
 constitute an acceptance receipt.

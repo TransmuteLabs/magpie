@@ -68,8 +68,10 @@ Linux/Darwin operations. That exception is limited to those two files; it does
 not permit host-internal or vendor dependencies in the SDK.
 
 `Serve` runs newline-delimited JSON on its supplied transport. Exec stdout
-belongs exclusively to RPC; write diagnostics to stderr. This library
-performs no installation, process supervision or host filesystem writes.
+belongs exclusively to RPC. Use `diagnostics.emit` during a scoped SDK call
+for the Magpie application log. Raw worker stderr is drained and discarded
+by Magpie. This library performs no installation, process supervision or host
+filesystem writes.
 
 Distribute the complete module with `magpie-plugin.json` in a local folder,
 or a platform-specific GitHub release ZIP with `checksums.txt`. Include helper
