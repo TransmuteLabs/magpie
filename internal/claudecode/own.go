@@ -25,6 +25,14 @@ var own = struct {
 	version: proc.Version,
 }
 
+// UsePathOrderForTests keeps a test's stand-in ahead of inherited installs
+// without changing the shell PATH shared by other tools.
+func UsePathOrderForTests() {
+	if proc.Isolated() {
+		own.all = func() []string { return nil }
+	}
+}
+
 // Own is this machine's own Claude Code, the newest of them when it has
 // more than one: a machine can have an old one first on PATH and a newer
 // one after it, two npm installs in two Node versions, of which `claude

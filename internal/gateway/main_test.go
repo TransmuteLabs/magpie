@@ -9,6 +9,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/gwtool"
@@ -113,6 +114,7 @@ func isolatedTests(m *testing.M) (int, error) {
 	if err := os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
 		return 1, err
 	}
+	claudecode.UsePathOrderForTests()
 	// no route is written to disk behind a test's back; the history's own
 	// tests call saveRoute themselves
 	keepRoutes = false
