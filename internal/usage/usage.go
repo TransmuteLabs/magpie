@@ -279,7 +279,7 @@ type Record struct {
 	// Credits is what the vendor said the call cost in its plan's own
 	// credits (WorkBuddy's usage.credit, #2512), nil when it said none
 	Credits *float64 `json:"credits,omitempty"`
-	// Watched is a row of a request an Observer watched (observe.go): it
+	// Watched is a row covered by an in-process observer watch (observe.go): it
 	// has the request's attempts already, so it can pass the row over.
 	// Never persisted.
 	Watched bool `json:"-"`

@@ -77,7 +77,8 @@ func TestSDKLedgerObserverOrdinaryAppendAndOutsideHistory(t *testing.T) {
 	stop := ServeExtensionLedgerObservers(t.Context(), manager)
 	t.Cleanup(stop)
 	for _, registered := range Observers() {
-		if _, isSDK := registered.(*extensionLedgerObserver); isSDK {
+		switch registered.(type) {
+		case *extensionLedgerObserver, *extensionRequestObserver:
 			t.Fatal("an empty catalog registered an SDK observer")
 		}
 	}

@@ -24,19 +24,31 @@ func fixtureLedger(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any,
 			return nil, errors.New("ledger observer acquired persistent write authority")
 		}
 	}
+	return fixtureObservationTrace(ctx, row)
+}
+
+func fixtureRequestObservation(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+	event, err := sdk.DecodeRequestObservation(call.Params)
+	if err != nil {
+		return nil, err
+	}
+	return fixtureObservationTrace(ctx, event)
+}
+
+func fixtureObservationTrace(ctx context.Context, observation any) (any, error) {
 	current, found := sdk.ModuleContextFrom(ctx)
 	var config struct {
 		Trace string `json:"trace"`
 	}
 	if !found || json.Unmarshal(current.Config.Values, &config) != nil || config.Trace == "" {
-		return nil, errors.New("missing fixture ledger trace")
+		return nil, errors.New("missing fixture observation trace")
 	}
 	output, err := os.OpenFile(config.Trace, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	defer output.Close()
-	return struct{}{}, json.NewEncoder(output).Encode(row)
+	return struct{}{}, json.NewEncoder(output).Encode(observation)
 }
 
 func TestLedgerObserverRetainsGenerationAndCannotWrite(t *testing.T) {

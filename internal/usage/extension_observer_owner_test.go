@@ -2,10 +2,11 @@ package usage
 
 import "testing"
 
-func TestSDKLedgerObserverImportDoesNotRegister(t *testing.T) {
+func TestSDKObserversImportDoesNotRegister(t *testing.T) {
 	for _, observer := range Observers() {
-		if _, registered := observer.(*extensionLedgerObserver); registered {
-			t.Fatal("importing usage registered an SDK ledger observer without a serving owner")
+		switch observer.(type) {
+		case *extensionLedgerObserver, *extensionRequestObserver:
+			t.Fatal("importing usage registered an SDK observer without a serving owner")
 		}
 	}
 }

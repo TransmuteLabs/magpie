@@ -17,8 +17,12 @@ type Stream struct {
 }
 
 func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
-	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
-		err := &Error{Code: "invalid_params", Message: "session source reads are unary"}
+	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || stream.state.call.Method == MethodRequestObserve || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
+		message := "session source reads are unary"
+		if stream.state.call.Method == MethodRequestObserve {
+			message = "request observation is unary"
+		}
+		err := &Error{Code: "invalid_params", Message: message}
 		stream.server.mu.Lock()
 		stream.state.creditErr = err
 		stream.server.mu.Unlock()
@@ -135,6 +139,9 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
+	if stream.state.call.Method == MethodRequestObserve {
+		return &Error{Code: "permission_denied", Message: "request observation cannot call host services"}
+	}
 	if ctx == nil || method != MethodRequestRecover && method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) && !IsAccountTaskHostMethod(method) && !IsProcessHostMethod(method) {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
 	}

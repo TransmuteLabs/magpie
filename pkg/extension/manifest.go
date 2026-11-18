@@ -43,6 +43,9 @@ func (manifest Manifest) Clone() Manifest { return cloneManifest(manifest) }
 
 func cloneManifest(manifest Manifest) Manifest {
 	manifest.Activation = slices.Clone(manifest.Activation)
+	if manifest.RequestObserver != nil {
+		manifest.RequestObserver = new(*manifest.RequestObserver)
+	}
 	if manifest.Ledger != nil {
 		manifest.Ledger = new(*manifest.Ledger)
 	}
@@ -179,6 +182,9 @@ func (manifest Manifest) Validate() error {
 		return err
 	}
 	if err := manifest.validateMiddleware(); err != nil {
+		return err
+	}
+	if err := manifest.validateRequestObserver(); err != nil {
 		return err
 	}
 	if err := manifest.validateLedgerObserver(); err != nil {
@@ -566,6 +572,8 @@ func RequiredMethods(manifest Manifest) []string {
 			methods = append(methods, MethodSessionSourceRead)
 		case StorageSource:
 			methods = append(methods, MethodStorageList, MethodStorageRead)
+		case RequestObserver:
+			methods = append(methods, MethodRequestObserve)
 		case LedgerObserver:
 			methods = append(methods, MethodLedgerObserve)
 		case GatewayMiddleware:

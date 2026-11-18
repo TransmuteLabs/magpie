@@ -25,8 +25,7 @@ type Observer interface {
 	// Begin is asked as each gateway request starts; nil leaves the
 	// request unwatched by it
 	Begin(Request) Watch
-	// Ledger is each row Append writes. A row of a request some observer
-	// watched has Watched set.
+	// Ledger is each row Append writes. A row covered by a request watch has Watched set.
 	Ledger(Record)
 }
 
@@ -37,6 +36,13 @@ type Watch interface {
 	Attempt(Record)
 	// End is the request's end: its time, agent, model, status and length
 	End(Record)
+}
+
+// CoversLedger reports whether the watch replaces this request's ordinary
+// ledger observation. SDK request events use an independent delivery path.
+func CoversLedger(w Watch) bool {
+	_, sdkRequest := w.(*extensionRequestWatch)
+	return !sdkRequest
 }
 
 // Request is what an Observer is told of a request as it starts.

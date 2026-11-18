@@ -8,6 +8,8 @@ export * from "./account-keepalive.js";
 import type { CatalogAccessDescriptor } from "./catalog-projection.js";
 import type { LedgerObservationDescriptor } from "./ledger.js";
 export * from "./ledger.js";
+import type { RequestObservationDescriptor } from "./request-observer.js";
+export * from "./request-observer.js";
 export * from "./catalog-projection.js";
 export * from "./own-calls.js";
 export * from "./storage-source.js";
@@ -37,11 +39,11 @@ export function validateAccountCheckinResult(value: unknown): AccountCheckinResu
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
-  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "ledger-observer" | "gateway-middleware" | "request-policy";
+  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "provider.calls" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
-  | "gateway.request" | "gateway.response" | "gateway.signin" | "session.storage.list" | "session.storage.read" | "ledger.observe"
+  | "gateway.request" | "gateway.response" | "gateway.signin" | "session.storage.list" | "session.storage.read" | "request.observe" | "ledger.observe"
   | "middleware.request" | "middleware.account" | "middleware.provider" | "middleware.event" | "middleware.response";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
 export type HostMethod = "request.recover" | "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate" | "usage.append" | "diagnostics.emit"
@@ -235,6 +237,7 @@ export interface RoutingResult { order: number[] }
 export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 interface ManifestFields {
+  requestObserver?: RequestObservationDescriptor;
   ledger?: LedgerObservationDescriptor;
   schema: 1;
   id: string;

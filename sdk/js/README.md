@@ -95,6 +95,13 @@ numeric/metadata sink, separate from body capture and memory hooks. The host
 retains original package and configuration authority, counts delivery drops
 and never waits for it while writing a ledger row.
 
+A primary can use API 1.12's separate `request-observer` capability with
+`requestObserver: {}` to receive `request.observe`. Validate `call.params` with
+`validateRequestObservation` and acknowledge with `{}` or no return value.
+The process-local `requestId` groups start, numbered attempts and end.
+The bounded, best-effort feed carries routing metadata without bodies,
+raw headers, session IDs or credentials. The worker has no host callbacks.
+
 Provider switches, paid selected-account tasks, effective agent model
 metadata, provider defaults, rich quota facts and descendant session sources
 use API1.9 typed declarations and validators shared by Go and JS. Ordinary

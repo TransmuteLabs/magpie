@@ -51,6 +51,8 @@
     "catalog-projection.js",
     "catalog-projection.d.ts",
     "diagnostics.js",
+    "request-observer.js",
+    "request-observer.d.ts",
     "ledger.js",
     "ledger.d.ts",
     "middleware.js",

@@ -17,6 +17,7 @@ const extensionLedgerQueue = 256
 type extensionLedgerObserver struct {
 	mu      sync.RWMutex
 	manager *extensionhost.Manager
+	request bool
 	active  *extensionLedgerServing
 	dropped atomic.Uint64
 	failed  atomic.Uint64
@@ -31,8 +32,9 @@ type extensionLedgerServing struct {
 }
 
 type extensionLedgerDelivery struct {
-	target extensionhost.LedgerTarget
-	row    sdk.LedgerObservation
+	target  extensionhost.LedgerTarget
+	row     sdk.LedgerObservation
+	request sdk.RequestObservation
 }
 
 func (*extensionLedgerObserver) Bodies() Bodies      { return NoBodies }
@@ -70,7 +72,13 @@ func (observer *extensionLedgerObserver) Serve() func() {
 }
 
 func (observer *extensionLedgerObserver) refresh(serving *extensionLedgerServing, manager *extensionhost.Manager) {
-	targets, err := manager.LedgerTargets()
+	var targets []extensionhost.LedgerTarget
+	var err error
+	if observer.request {
+		targets, err = manager.RequestObservationTargets()
+	} else {
+		targets, err = manager.LedgerTargets()
+	}
 	if err != nil {
 		targets = nil
 	}
@@ -91,11 +99,16 @@ func (observer *extensionLedgerObserver) run(serving *extensionLedgerServing, ma
 			observer.refresh(serving, manager)
 		case delivery := <-serving.queue:
 			ctx, cancel := context.WithTimeout(serving.ctx, delivery.target.Timeout)
-			err := manager.ObserveLedger(ctx, delivery.target, delivery.row)
+			var err error
+			if observer.request {
+				err = manager.ObserveRequest(ctx, delivery.target, delivery.request)
+			} else {
+				err = manager.ObserveLedger(ctx, delivery.target, delivery.row)
+			}
 			cancel()
 			if err != nil && serving.ctx.Err() == nil {
 				if failed := observer.failed.Add(1); failed%1000 == 1 {
-					log.Printf("SDK ledger observer %s: delivery unavailable; failed=%d", delivery.target.Module, failed)
+					log.Printf("SDK %s observer %s: delivery unavailable; failed=%d", observer.kind(), delivery.target.Module, failed)
 				}
 			}
 		}
@@ -119,15 +132,28 @@ func (observer *extensionLedgerObserver) Ledger(record Record) {
 		return
 	}
 	for _, target := range *targets {
-		select {
-		case <-serving.ctx.Done():
-			return
-		case serving.queue <- extensionLedgerDelivery{target: target, row: row}:
-		default:
-			if dropped := observer.dropped.Add(1); dropped%1000 == 1 {
-				log.Printf("SDK ledger observer %s: queue full; dropped=%d", target.Module, dropped)
-			}
+		observer.enqueue(serving, extensionLedgerDelivery{target: target, row: row})
+	}
+}
+
+func (observer *extensionLedgerObserver) kind() string {
+	if observer.request {
+		return "request"
+	}
+	return "ledger"
+}
+
+func (observer *extensionLedgerObserver) enqueue(serving *extensionLedgerServing, delivery extensionLedgerDelivery) bool {
+	select {
+	case <-serving.ctx.Done():
+		return false
+	case serving.queue <- delivery:
+		return true
+	default:
+		if dropped := observer.dropped.Add(1); !observer.request && dropped%1000 == 1 {
+			log.Printf("SDK ledger observer %s: queue full; dropped=%d", delivery.target.Module, dropped)
 		}
+		return false
 	}
 }
 

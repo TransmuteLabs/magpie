@@ -182,8 +182,9 @@ func helperModule() sdk.Module {
 			}
 			return sdk.OperationResult{OperationID: target, Outcome: "canceled"}, nil
 		},
-		sdk.MethodToolCall:      fixtureTool,
-		sdk.MethodLedgerObserve: fixtureLedger,
+		sdk.MethodToolCall:       fixtureTool,
+		sdk.MethodLedgerObserve:  fixtureLedger,
+		sdk.MethodRequestObserve: fixtureRequestObservation,
 		sdk.MethodAgentPlan: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 			return sdk.AgentPlan{Files: []sdk.FileChange{{Path: "config.json", Body: []byte(`{"model":"fixture"}`)}}}, nil
 		},

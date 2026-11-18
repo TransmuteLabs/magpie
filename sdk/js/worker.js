@@ -350,8 +350,8 @@ export async function serve(module, { input = process.stdin, output = process.st
       const operation = (async () => {
         assertOpen();
         const hookEffect = gatewayMethodEffect(call.method);
-        if (call.method === "session.source.read" || call.method === "provider.calls" || call.method === "ledger.observe" || MIDDLEWARE_METHODS.includes(call.method)) {
-          record.creditError = new SDKError("invalid_params", "Session source reads are unary");
+        if (call.method === "session.source.read" || call.method === "provider.calls" || call.method === "request.observe" || call.method === "ledger.observe" || MIDDLEWARE_METHODS.includes(call.method)) {
+          record.creditError = new SDKError("invalid_params", call.method === "request.observe" ? "Request observation is unary" : "Session source reads are unary");
           throw record.creditError;
         }
         if (hookEffect && (hookEffect !== "write" || event !== "accepted")) {
@@ -391,6 +391,9 @@ export async function serve(module, { input = process.stdin, output = process.st
     const hostCall = (method, params = null) => {
       let lane = 4;
       try {
+        if (call.method === "request.observe") {
+          throw new SDKError("permission_denied", "Request observation cannot call host services");
+        }
         if (PROCESS_HOST_METHODS.includes(method)) {
           processHostLane(method, params);
           params = parseJSON(stringifyJSON(params));

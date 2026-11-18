@@ -415,14 +415,17 @@ func (m *Manager) Reload(ctx context.Context) error {
 	current := make(map[string]Installed, len(entries))
 	configs := make(map[string]string, len(entries))
 	for _, entry := range entries {
-		if !entry.Disabled {
-			current[entry.Manifest.ID] = entry
-			config, err := m.runtimeModuleConfig(entry.Manifest)
-			if err != nil {
-				return err
-			}
-			configs[entry.Manifest.ID] = config.Version
+		if entry.Disabled {
+			continue
 		}
+		config, err := m.runtimeModuleConfig(entry.Manifest)
+		if err != nil {
+			// Revoke the unreadable generation without denying unrelated modules.
+			// Direct acquisition of this module still returns the config error.
+			continue
+		}
+		current[entry.Manifest.ID] = entry
+		configs[entry.Manifest.ID] = config.Version
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -432,7 +435,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 	var retiring []*managedWorker
 	for id, worker := range m.workers {
 		entry, found := current[id]
-		if !found || entry.Revision != worker.entry.Revision || configs[id] != worker.config.Version {
+		if !found || entry.Revision != worker.entry.Revision || entry.EnableGeneration != worker.entry.EnableGeneration || configs[id] != worker.config.Version {
 			delete(m.workers, id)
 			retiring = append(retiring, worker)
 		}
@@ -491,8 +494,9 @@ func (m *Manager) retire(worker *managedWorker) {
 }
 
 type expectedGeneration struct {
-	packageRevision string
-	configVersion   string
+	packageRevision  string
+	configVersion    string
+	enableGeneration *string
 }
 
 func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGeneration) (*managedWorker, *workerClient, error) {
@@ -517,8 +521,12 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if err != nil {
 		return nil, nil, err
 	}
+	if expected != nil && expected.enableGeneration != nil && selected.observerEnablementErr != nil {
+		return nil, nil, selected.observerEnablementErr
+	}
 	if expected != nil && (expected.packageRevision != "" && expected.packageRevision != selected.Revision ||
-		expected.configVersion != "" && expected.configVersion != config.Version) {
+		expected.configVersion != "" && expected.configVersion != config.Version ||
+		expected.enableGeneration != nil && *expected.enableGeneration != selected.EnableGeneration) {
 		return nil, nil, errors.New("module generation changed before acquisition")
 	}
 	if err := sdk.CheckCompatibility(selected.Manifest); err != nil {
@@ -534,7 +542,7 @@ func (m *Manager) acquireSelected(ctx context.Context, id string, selected *Inst
 		return nil, nil, errors.New("extension manager is closed")
 	}
 	worker := m.workers[id]
-	if worker != nil && (worker.entry.Revision != selected.Revision || worker.config.Version != config.Version) {
+	if worker != nil && (worker.entry.Revision != selected.Revision || worker.entry.EnableGeneration != selected.EnableGeneration || worker.config.Version != config.Version) {
 		m.mu.Unlock()
 		return nil, nil, errors.New("module generation changed before cached worker admission")
 	}
@@ -768,6 +776,17 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := validateStorageScope(manifest, method, scope, params); err != nil {
 		return nil, err
 	}
+	if method == sdk.MethodRequestObserve {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := sdk.DecodeRequestObservation(raw); err != nil {
+			return nil, err
+		}
+		// Send the exact validated envelope even if the caller gave us a custom marshaler.
+		params = json.RawMessage(raw)
+	}
 	var outsideRead *sdk.OutsideCallsRequest
 	if method == sdk.MethodProviderCalls {
 		raw, err := json.Marshal(params)
@@ -933,6 +952,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
 			return errors.New("session source reads are unary")
 		}
+		if method == sdk.MethodRequestObserve {
+			return errors.New("request observation is unary")
+		}
 		if method == sdk.MethodProviderCalls {
 			return errors.New("outside-call history reads are unary")
 		}
@@ -1001,6 +1023,12 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if accountTask {
 		if flushErr := m.flushAccountTaskUsage(ctx, scope, err); err == nil {
 			err = flushErr
+		}
+	}
+	if err == nil && method == sdk.MethodRequestObserve {
+		err = sdk.ValidateRequestObservationResult(result)
+		if err != nil {
+			result = nil
 		}
 	}
 	if err == nil && sdk.IsStorageMethod(method) {
@@ -1079,6 +1107,9 @@ func (m *Manager) Invoke(ctx context.Context, id, method string, scope sdk.Scope
 }
 
 func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) error {
+	if method == sdk.MethodRequestObserve {
+		return sdk.ValidateRequestObservationScope(scope)
+	}
 	if sdk.IsMiddlewareMethod(method) {
 		if err := sdk.ValidateMiddlewareScope(scope); err != nil {
 			return err
@@ -1144,6 +1175,9 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	}
 	if _, err := m.authFor(scope); err != nil {
 		return nil, err
+	}
+	if authority.method == sdk.MethodRequestObserve {
+		return nil, errors.New("request observation cannot call host services")
 	}
 	if sdk.IsProcessHostMethod(method) {
 		return m.processHostCall(ctx, scope, method, raw, authority)

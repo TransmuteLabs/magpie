@@ -21,6 +21,7 @@ import { validateProviderDefaults } from "./provider-defaults.js";
 import { validateActivation } from "./gateway-activation.js";
 import { validateCatalogAccess } from "./catalog-projection.js";
 import { validateLedgerObserver, validateLedgerCall, validateLedgerResult } from "./ledger.js";
+import { validateRequestObserver, validateRequestObservationCall, validateRequestObservationResult } from "./request-observer.js";
 import { validateAgentProcesses } from "./process.js";
 
 const capabilities = {
@@ -41,6 +42,7 @@ const capabilities = {
   "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
   "gateway-middleware": MIDDLEWARE_METHODS,
   "native-account-operations": [],
+  "request-observer": ["request.observe"],
   "ledger-observer": ["ledger.observe"],
   "request-policy": [],
 };
@@ -281,6 +283,7 @@ export function validateManifest(value) {
   validateHooks(manifest);
   validateMiddleware(manifest);
   validateCatalogAccess(manifest);
+  validateRequestObserver(manifest);
   validateLedgerObserver(manifest);
   return freezeJSON(manifest);
 }
@@ -380,6 +383,12 @@ export function validateModule(module) {
         if (method === "provider.execute")
           validateExecuteOperation(manifest, call, message => { throw new SDKError("invalid_params", message, "not-started"); });
         return handler(ctx, call, stream);
+      });
+    }
+    if (method === "request.observe") {
+      handlers.set(method, async (ctx, call, stream) => {
+        validateRequestObservationCall(call);
+        return validateRequestObservationResult(await handler(ctx, call, stream));
       });
     }
     if (method === "ledger.observe") {

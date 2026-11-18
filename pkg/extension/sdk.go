@@ -196,6 +196,9 @@ func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
 			descriptor := *module.Manifest.Clone().Middleware
 			handlers[method] = middlewareHandler(descriptor, method, handler)
 		}
+		if method == MethodRequestObserve {
+			handlers[method] = requestObservationHandler(handler)
+		}
 		if method == MethodLedgerObserve {
 			handlers[method] = ledgerHandler(handler)
 		}

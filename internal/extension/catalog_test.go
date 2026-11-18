@@ -338,6 +338,10 @@ func TestCatalogDisableRemoveRetainsPayloadAndState(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed[0].Disabled || listed[0].Revision != entry.Revision {
 		t.Fatalf("enable changed the frozen generation: %+v, %v", listed, err)
 	}
+	raw, err := os.ReadFile(filepath.Join(catalog.Root, "catalog.json"))
+	if err != nil || strings.Contains(string(raw), `"enableGeneration"`) {
+		t.Fatal("an ordinary non-observer toggle must retain the legacy catalog shape", err)
+	}
 	if err := catalog.Remove(t.Context(), "sample"); err != nil {
 		t.Fatal(err)
 	}
@@ -904,4 +908,101 @@ func TestCatalogBoundsAndCancellation(t *testing.T) {
 			t.Fatalf("locked operation ignored cancellation: %v", err)
 		}
 	})
+}
+
+func TestSDKObserverEnablementPreservesLegacyCatalogAndIsolatesMalformedMarker(t *testing.T) {
+	catalog := NewCatalog(t.TempDir())
+	ledger := func(id string) Installed {
+		t.Helper()
+		source := catalogTestPackage(t, id, "1.0.0")
+		raw, err := os.ReadFile(filepath.Join(source, sdk.ManifestFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest sdk.Manifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		manifest.Contract = sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 8},
+			Capabilities: []sdk.Capability{sdk.LedgerObserver}}
+		manifest.Ledger = &sdk.LedgerObservationDescriptor{}
+		catalogTestWriteManifest(t, source, manifest)
+		return catalogTestInstall(t, catalog, source)
+	}
+	const broken, healthy = "a-ledger", "z-ledger"
+	original := ledger(broken)
+	ledger(healthy)
+	source := catalogTestPackage(t, "legacy-provider", "1.0.0")
+	catalogTestWriteManifest(t, source, sdk.Manifest{
+		Schema: 1, ID: "legacy-provider", Version: "1.0.0", Runtime: "exec", Entry: "bin/worker",
+		Contract:  sdk.Contract{Version: sdk.APIVersion{Major: 1}, Capabilities: []sdk.Capability{sdk.OutboundExecutor}},
+		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Vendor", Protocols: []protocolext.Protocol{protocolext.Chat}}},
+	})
+	provider := catalogTestInstall(t, catalog, source)
+	if err := catalog.SetEnabled(t.Context(), broken, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SetEnabled(t.Context(), broken, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(catalog.Root, "catalog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Mirror the previous Installed wire shape and its strict JSON reader.
+	var legacy []struct {
+		Manifest  sdk.Manifest      `json:"manifest"`
+		Directory string            `json:"directory"`
+		Files     map[string]string `json:"files"`
+		Disabled  bool              `json:"disabled"`
+		Revision  string            `json:"revision"`
+		Source    *PackageSource    `json:"source,omitempty"`
+	}
+	if err := catalogDecode(raw, &legacy); err != nil {
+		t.Fatalf("the old strict reader rejected a toggled API 1.8 catalog: %v", err)
+	}
+	var originalFound, providerFound bool
+	for _, prior := range legacy {
+		originalFound = originalFound || prior.Manifest.ID == broken && prior.Revision == original.Revision && !prior.Disabled
+		providerFound = providerFound || prior.Manifest.ID == provider.Manifest.ID && prior.Revision == provider.Revision && !prior.Disabled
+	}
+	if len(legacy) != 3 || !originalFound || !providerFound {
+		t.Fatal("legacy catalog lost the observer or unrelated provider")
+	}
+
+	manager := NewManager(catalog.Root)
+	targets, err := manager.LedgerTargets()
+	if err != nil || len(targets) != 2 || targets[0].Module != broken || targets[0].EnableGeneration == "" {
+		t.Fatalf("expected a persisted generation for the enabled ledger module: %v, %v", targets, err)
+	}
+	marker := filepath.Join(catalog.Root, observerEnablementFile(broken))
+	const malformed = `{"invalid":"forensics"}`
+	catalogTestWrite(t, marker, []byte(malformed), 0o600)
+	isolated, err := manager.LedgerTargets()
+	if err != nil || len(isolated) != 1 || isolated[0].Module != healthy {
+		t.Fatalf("corrupt marker denied an unrelated ledger module: %v, %v", isolated, err)
+	}
+	if err := manager.ObserveLedger(t.Context(), targets[0], sdk.LedgerObservation{Time: 1}); err == nil ||
+		!strings.Contains(err.Error(), "extension observer enablement is unreadable") {
+		t.Fatalf("admission failed to reject the affected target for its corrupt marker: %v", err)
+	}
+	if err := catalog.SetEnabled(t.Context(), broken, false); err != nil {
+		t.Fatalf("damaged module cannot be disabled: %v", err)
+	}
+	if err := catalog.SetEnabled(t.Context(), broken, true); err == nil {
+		t.Fatal("damaged observer was re-enabled")
+	}
+	still, err := os.ReadFile(marker)
+	if err != nil || string(still) != malformed {
+		t.Fatal("enable overwrote unreadable marker evidence", err)
+	}
+	entries, err := catalog.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Manifest.ID == broken && !entry.Disabled {
+			t.Fatal("failed enable became visible")
+		}
+	}
 }

@@ -15,15 +15,17 @@ var extensionLedgerOwners struct {
 }
 
 type extensionLedgerOwner struct {
-	manager *extensionhost.Manager
-	ctx     context.Context
-	cancel  context.CancelFunc
-	ready   chan struct{}
-	done    chan struct{}
-	refs    int
-	remove  func()
+	manager       *extensionhost.Manager
+	ctx           context.Context
+	cancel        context.CancelFunc
+	ready         chan struct{}
+	done          chan struct{}
+	refs          int
+	remove        func()
+	removeRequest func()
 }
 
+// ServeExtensionLedgerObservers maintains the listener-owned SDK ledger and request observers.
 func ServeExtensionLedgerObservers(ctx context.Context, manager *extensionhost.Manager) func() {
 	if manager == nil || ctx.Err() != nil {
 		return func() {}
@@ -79,6 +81,9 @@ func (owner *extensionLedgerOwner) run() {
 		if owner.remove != nil {
 			owner.remove()
 		}
+		if owner.removeRequest != nil {
+			owner.removeRequest()
+		}
 		extensionLedgerOwners.Lock()
 		delete(extensionLedgerOwners.byManager, owner.manager)
 		extensionLedgerOwners.Unlock()
@@ -100,15 +105,21 @@ func (owner *extensionLedgerOwner) run() {
 }
 
 func (owner *extensionLedgerOwner) reconcile() {
-	targets, err := owner.manager.LedgerTargets()
-	if err != nil || len(targets) == 0 {
-		if owner.remove != nil {
-			owner.remove()
-			owner.remove = nil
-		}
-		return
-	}
-	if owner.remove == nil {
-		owner.remove = Observe(&extensionLedgerObserver{manager: owner.manager})
+	ledger, err := owner.manager.LedgerTargets()
+	reconcileObserver(&owner.remove, err == nil && len(ledger) > 0, func() Observer {
+		return &extensionLedgerObserver{manager: owner.manager}
+	})
+	requests, err := owner.manager.RequestObservationTargets()
+	reconcileObserver(&owner.removeRequest, err == nil && len(requests) > 0, func() Observer {
+		return &extensionRequestObserver{extensionLedgerObserver: extensionLedgerObserver{manager: owner.manager, request: true}}
+	})
+}
+
+func reconcileObserver(remove *func(), needed bool, newObserver func() Observer) {
+	if needed && *remove == nil {
+		*remove = Observe(newObserver())
+	} else if !needed && *remove != nil {
+		(*remove)()
+		*remove = nil
 	}
 }

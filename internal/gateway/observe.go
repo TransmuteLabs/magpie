@@ -14,8 +14,9 @@ import (
 // observed is a request the registered observers watch (usage.Observer,
 // the gateway's observer point): what each one's Begin answered.
 type observed struct {
-	watches []usage.Watch
-	routeID int64
+	watches       []usage.Watch
+	ledgerCovered bool
+	routeID       int64
 	// keyName is the gateway key the request came with, by the name the
 	// user gave it (access.Identity.KeyName), never its secret; "" without
 	// one. Each span carries it as the ledger's row does (CallerKeyName).
@@ -40,6 +41,7 @@ func observeRequest(r *http.Request, kind string, body []byte) (*http.Request, *
 	for _, ob := range observers {
 		if w := ob.Begin(q); w != nil {
 			o.watches = append(o.watches, w)
+			o.ledgerCovered = o.ledgerCovered || usage.CoversLedger(w)
 		}
 	}
 	if len(o.watches) == 0 {

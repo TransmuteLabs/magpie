@@ -48,6 +48,9 @@ type Installed struct {
 	Disabled  bool              `json:"disabled"`
 	Revision  string            `json:"revision"`
 	Source    *PackageSource    `json:"source,omitempty"`
+	// EnableGeneration tracks observer enablement independently of the frozen package.
+	EnableGeneration      string `json:"-"`
+	observerEnablementErr error
 }
 
 type installOptions struct {
@@ -76,7 +79,16 @@ func (catalog *Catalog) List() ([]Installed, error) {
 	}
 	defer unlock()
 	entries, _, err := catalogRead(root)
-	return entries, err
+	if err != nil {
+		return nil, err
+	}
+	for index := range entries {
+		entry := &entries[index]
+		if !entry.Disabled && observerCapable(entry.Manifest) {
+			entry.EnableGeneration, entry.observerEnablementErr = readObserverEnablement(root, entry.Manifest.ID)
+		}
+	}
+	return entries, nil
 }
 
 func (catalog *Catalog) Install(ctx context.Context, source string, check func(context.Context, Installed) error) (Installed, error) {
@@ -291,19 +303,32 @@ func (catalog *Catalog) install(ctx context.Context, source string, check func(c
 }
 
 func (catalog *Catalog) SetEnabled(ctx context.Context, id string, on bool) error {
-	return catalog.change(ctx, id, func(entries []Installed, index int) []Installed {
-		entries[index].Disabled = !on
-		return entries
+	return catalog.change(ctx, id, func(root *os.Root, entries []Installed, index int) ([]Installed, error) {
+		entry := &entries[index]
+		disabled := !on
+		if entry.Disabled == disabled {
+			return nil, nil
+		}
+		entry.Disabled = disabled
+		if on && observerCapable(entry.Manifest) {
+			if err := catalogValidateEntries(entries); err != nil {
+				return nil, err
+			}
+			if err := advanceObserverEnablement(root, id); err != nil {
+				return nil, err
+			}
+		}
+		return entries, nil
 	})
 }
 
 func (catalog *Catalog) Remove(ctx context.Context, id string) error {
-	return catalog.change(ctx, id, func(entries []Installed, index int) []Installed {
-		return slices.Delete(entries, index, index+1)
+	return catalog.change(ctx, id, func(_ *os.Root, entries []Installed, index int) ([]Installed, error) {
+		return slices.Delete(entries, index, index+1), nil
 	})
 }
 
-func (catalog *Catalog) change(ctx context.Context, id string, change func([]Installed, int) []Installed) error {
+func (catalog *Catalog) change(ctx context.Context, id string, change func(*os.Root, []Installed, int) ([]Installed, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -326,7 +351,11 @@ func (catalog *Catalog) change(ctx context.Context, id string, change func([]Ins
 	}
 	for index, entry := range entries {
 		if entry.Manifest.ID == id {
-			_, err := catalogWrite(ctx, root, change(entries, index))
+			updated, err := change(root, entries, index)
+			if err != nil || updated == nil {
+				return err
+			}
+			_, err = catalogWrite(ctx, root, updated)
 			return err
 		}
 	}

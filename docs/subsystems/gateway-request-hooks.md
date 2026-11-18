@@ -279,3 +279,48 @@ go test -race -tags nogui ./internal/plugin ./internal/gateway -run '^TestGatewa
 Service deployment, automatic installation and gateway-owned tool loops are
 outside this contract. A concrete companion integration is PowerContext recall
 via `/v1/context/prepare` and conversation capture via `/v1/sources/content`.
+
+## SDK request lifecycle observation
+
+An executable primary can declare API 1.12's `request-observer` capability
+and a `requestObserver` descriptor to receive unary `request.observe`
+calls. The gateway listener registers the adapter through
+[`usage.Observer`](../../internal/usage/observe.go) and uses its existing
+`Begin`, `Attempt` and `End` notifications. This covers the ordinary gateway
+paths that emit those lifecycle notifications. Every reported routing attempt,
+including retries and unbilled failures, gets its own attempt event.
+
+An opaque, process-local request ID groups the start, numbered attempts and
+end. The [wire record](../../pkg/extension/request_observer.go) carries Unix
+milliseconds, phase and the recognized agent and purpose. Attempts carry
+their own start, elapsed milliseconds, status, selected provider and
+attempted model and requested alias. End carries the request's start, total
+elapsed milliseconds, model and final status. Unknown agent labels are
+collapsed to `other` and unknown purposes are omitted. Routing labels can
+reflect client-provided model identifiers and aliases, limited to 600 bytes
+of identifier characters. Headers, raw session IDs, bodies, credentials,
+account and key labels, and raw errors are excluded.
+
+The listener uses a [separate bounded queue](../../internal/usage/extension_request_observer.go)
+from ledger observation. It snapshots the targets when the request starts and
+calls [the installed generation](../../internal/extension/ledger.go) with a
+250 ms default deadline, configurable from 10–1000 ms. Queue pressure, deadlines,
+retirement or shutdown may drop events, so the receiver must tolerate incomplete
+groups. Delivery never waits on the request path. Workers acknowledge with an
+empty result, have no host callbacks or selected scope, and cannot modify the
+request, response or ledger. Request observation leaves ledger delivery and
+body capture under their existing owners.
+
+An unreadable module configuration or enablement marker removes only that
+module from both SDK observer feeds. Enabling a disabled observer assigns it a
+new [enablement identity](../../internal/extension/observer_enablement.go)
+independent of its frozen package revision and configuration. The catalog
+lock covers both the private marker and catalog update. Events queued for an
+earlier enablement are discarded, including when another manager made both
+transitions between catalog reads. A failed catalog publication after marker
+publication can discard events conservatively. Disabling remains available
+when the marker is unreadable, and re-enabling preserves the evidence and
+fails closed until the marker is repaired.
+
+The marker leaves the catalog schema and package revision compatible with
+older strict readers. Only versions with the marker fence can advance it.

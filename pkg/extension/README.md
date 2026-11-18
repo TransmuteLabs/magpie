@@ -138,6 +138,12 @@ the ordinary ledger observer with a bounded queue, deadline and original package
 and configuration identity. It is read-only, unary and best-effort; dropping or
 failing a delivery cannot delay the ledger writer or modify billing.
 
+API 1.12's `RequestObserver` and `Manifest.RequestObserver` opt a primary into
+`MethodRequestObserve` for the ordinary gateway's start, attempts and end.
+The unary handler acknowledges with an empty struct or nil. See
+[SDK request lifecycle observation](../../docs/subsystems/gateway-request-hooks.md#sdk-request-lifecycle-observation)
+for the metadata and delivery contract.
+
 API 1.8 own-call accounting uses `Stream.AppendOwnCall` under a live accepted
 module/tool write bound to its selected account. A provider can independently
 declare `Calls: true` and serve `MethodProviderCalls` for outside account
