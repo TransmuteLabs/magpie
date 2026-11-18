@@ -36,9 +36,9 @@ func TestSameCatalogFetchedAgainChangesNothing(t *testing.T) {
 	defer srv.Close()
 	pointAt(t, srv.URL+"/api.json")
 	told := 0
-	was := Changed
-	Changed = func() { told++ }
-	t.Cleanup(func() { Changed = was; labsTried.Store(false) })
+	was := ChangedHook()
+	SetChanged(func() { told++ })
+	t.Cleanup(func() { SetChanged(was); labsTried.Store(false) })
 
 	again := func() {
 		t.Helper()

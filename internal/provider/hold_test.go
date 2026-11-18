@@ -150,11 +150,13 @@ func TestHoldKeptUntilAWrite(t *testing.T) {
 // is looked at.
 func TestHeldGoesWithAPluginChange(t *testing.T) {
 	plugin.Told()
-	forget, changed := catalog.Forget, catalog.Changed
-	catalog.Forget, catalog.Changed = nil, nil
+	forget, changed := catalog.Forget, catalog.ChangedHook()
+	catalog.Forget = nil
+	catalog.SetChanged(nil)
 	t.Cleanup(func() {
 		plugin.Told()
-		catalog.Forget, catalog.Changed = forget, changed
+		catalog.Forget = forget
+		catalog.SetChanged(changed)
 	})
 	defer Hold()()
 	n := 0

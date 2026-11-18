@@ -77,11 +77,25 @@ type Mutex struct {
 }
 
 func (m *Mutex) Lock() {
+	m.lock()
+}
+
+func (m *Mutex) LockChecked() bool {
+	if m.lock() {
+		return true
+	}
+	m.Unlock()
+	return false
+}
+
+func (m *Mutex) lock() bool {
 	m.mu.Lock()
-	m.unlock, _ = Lock(m.Path(), Wait)
+	var held bool
+	m.unlock, held = Lock(m.Path(), Wait)
 	if m.Locked != nil {
 		m.Locked()
 	}
+	return held
 }
 
 func (m *Mutex) Unlock() {

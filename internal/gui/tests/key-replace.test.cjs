@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const until = new Date(Date.now() + 40 * 60e3).toISOString();
@@ -64,7 +65,6 @@ const want = {
   de: { edit: "Schlüssel ändern", hint: "Neuen Wert des Schlüssels einfügen", note: "Team nutzt jetzt den neuen Wert" },
 };
 
-const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 // a reader wheels the row into sight and points at it
 async function reach(page, row) {
@@ -74,6 +74,28 @@ async function reach(page, row) {
   await row.hover();
 }
 const at = (loc) => loc.evaluate((e) => { const r = e.getBoundingClientRect(); return e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); });
+
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: scroll snapshot preserves exact pixels across overflow bookkeeping`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
+    await page.setContent('<div class="ebody holds" style="height:100px;overflow:auto"><div style="height:1000px"></div></div><div class="other-body" style="height:100px;overflow:auto"><div style="height:1000px"></div></div>');
+    const body = page.locator(".ebody");
+    await body.evaluate((element) => { element.scrollTop = 100; });
+    const before = await scrolled(page);
+    await body.evaluate((element) => element.classList.remove("holds"));
+    assert.equal(await scrolled(page), before, "an overflow marker is not a changed scroll position");
+    await body.evaluate((element) => { element.scrollTop += 1; });
+    assert.notEqual(await scrolled(page), before, "a real one-pixel move must still fail the original scroll oracle");
+    assert.equal(await body.evaluate((element) => element.scrollTop), 101);
+    await body.evaluate((element) => { element.scrollTop = 0; });
+    await page.locator(".other-body").evaluate((element) => { element.scrollTop = 100; });
+    assert.notEqual(await scrolled(page), before, "the same offset on a different structural scroll owner must not compare equal");
+  });
+}
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(want)) {

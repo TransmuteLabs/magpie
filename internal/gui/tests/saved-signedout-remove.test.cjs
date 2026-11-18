@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const why = "2 accounts are saved in magpie, but it isn't signed in here (nothing at /home/me/.claude/.credentials.json), and they are only offered beside the account it is signed in to. Sign in (claude, then /login) with this HOME.";
@@ -24,6 +25,7 @@ function serve(lang, posts) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
+    if (isPageLifecycleRequest(route.request())) return json({});
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
@@ -42,6 +44,21 @@ function serve(lang, posts) {
     await route.fulfill({ body: await fs.readFile(file), contentType });
   };
 }
+
+test("the saved-account fixture separates page lifecycle notices from mutations", async () => {
+  const posts = [], route = serve("en", posts);
+  const send = (pathname, body) => route({
+    request: () => ({ url: () => `http://magpie.test${pathname}`, method: () => "POST", postDataJSON: () => body }),
+    fulfill: async response => response,
+  });
+  await send("/api/page-away", null);
+  await send("/api/update/using", { open: true });
+  assert.deepEqual(posts, []);
+  const body = { agent: "claude", user: USERS[0] };
+  const response = await send("/api/login/forget", body);
+  assert.deepEqual(response.json.excluded[0].users, [USERS[1]]);
+  assert.deepEqual(posts, [{ path: "/api/login/forget", body }]);
+});
 
 const words = {
   en: {

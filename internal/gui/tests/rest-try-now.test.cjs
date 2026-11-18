@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -83,7 +84,6 @@ const posted = async (lifted) => {
   for (let i = 0; i < 60 && !lifted.length; i++) await new Promise((r) => setTimeout(r, 50));
   return lifted;
 };
-const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 // a reader wheels down to it, and it is the button under the pointer
 async function reach(page, go) {
@@ -128,13 +128,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await row.locator(".fix button").count(), 1, "a quota's rest has nothing to verify");
         assert(!(await sideways(page)), "the page scrolls sideways");
         await reach(page, go);
-        const sc = await scrolled(page);
+        const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await go.click();
         assert.deepEqual(await posted(lifted), [{ key: rest.key }]);
         // the row no longer says it rests, though the kept request does
         await row.locator(".st.rest").waitFor({ state: "detached" });
         assert.equal(await row.locator(".fix").count(), 0);
-        assert.equal(await scrolled(page), sc, "the click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "the click scrolled");
         assert.deepEqual(errors, []);
       });
 
@@ -155,13 +155,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const btn = row.getByRole("button", { name: b, exact: true });
           assert(await btn.evaluate((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); }), `${b} can't be reached`);
         }
-        const sc = await scrolled(page);
+        const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await go.click();
         assert.deepEqual(await posted(lifted), [{ key: "relay#bbbbbbbbbb" }]);
         await page.locator('.acc[data-account-id="bbbbbbbbbb"] .key-rest').waitFor({ state: "detached" });
         assert.equal(await page.locator('.acc[data-account-id="bbbbbbbbbb"] .key-unrest').count(), 0);
         assert.equal((await page.locator("#status").textContent()).trim(), want[lang].note);
-        assert.equal(await scrolled(page), sc, "the click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "the click scrolled");
         assert.deepEqual(errors, []);
       });
     }

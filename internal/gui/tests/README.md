@@ -35,6 +35,7 @@ password, escaped and non-UTF-8 credentials, a login saved in the address
 before loading into the fields, masked addresses/status, clearing
 authentication, Tab and Escape, mode switches, and narrow windows in all
 five languages on Chromium and WebKit.
+
 ## Installed desktop fonts
 
 `fonts.test.cjs` exercises the interface/code font controls with installed
@@ -2420,15 +2421,60 @@ move an idle page, including after momentum stops. This uses Settings → Allowa
 at 390×600, where the real settings rows leave room to scroll. The API is faked;
 no user configuration is read or changed.
 
+Each fixture page owns the separate context created by `browser.newPage`.
+Cleanup marks closing, cancels its held quota-readiness operation, closes that
+context with its own reason and joins route callbacks and underlying waits.
+Only that explicit cancellation is consumed; live or unrelated failures remain
+errors. It does not ignore unhandled route failures.
+
 At desktop widths 900/1280, screenshots are compared with the same pages from
-`origin/main`. Dimensions must match; a pixel counts as different only when
+an admitted baseline. Dimensions must match; a pixel counts as different only when
 any RGBA channel differs by more than 48, and more than 300 such pixels fails.
 This tolerates Chromium's small antialiasing differences while still detecting
-layout changes. Fetch that branch before running; set `BASE_REF` to another
-local Git ref (`HEAD` for a self-comparison) to select a particular baseline.
+layout changes. In an ordinary checkout, `BASE_REF` defaults to `origin/main`;
+set it to an available immutable upstream commit for a reproducible comparison.
+The fixture resolves the ref once and preloads its assets before any browser
+starts. A missing repository or ref fails admission directly.
 PNG decoding uses the copy bundled with Playwright, without another dependency.
 The empty allowance fixture completes after usage totals render, so both pages
 compare the same completed API state rather than a loading-order difference.
+
+For the recognized canvas-era baseline's desktop Providers search, the
+reference input alone uses the approved full-hint DOM sizing contract derived
+from that baseline's own text, typography and insets, including its existing
+2px allowance. The current page is left untouched. Before normalization,
+guards check the full localized hint, typography and native paint, exact
+expected width, fixed right edge, neighboring buttons, gap and hit targets.
+Real native input controls compare actual-width paint with a nonempty ample
+reference, independently of the span's advance. The reference's ordinary flex
+layout supplies its origin; buttons/right edge must remain unchanged, and its
+exact inline state is restored in finally. Equal widths are a no-op.
+Unknown baseline implementations receive no such normalization. This does
+not change any screenshot mask, the channel threshold48 or the300pixel limit.
+
+For a Git-less source export, prepare a separate baseline from the selected
+upstream commit. Its schema-1 manifest records `provenance.commit`,
+`provenance.assetsGitTree` and a nonempty `files` array of asset-relative
+`path`, `type: "file"`, Git `mode` and content `sha256` entries. Put those files
+under `files/` beside the manifest. Preparation must verify the complete
+inventory against the immutable Git tree, including absence of extra files.
+An independent binding owner verifies and pins the exact manifest SHA256.
+Pass that external pin and path together:
+
+```sh
+MOBILE_BASELINE_MANIFEST=/verified/baseline/manifest.json \
+MOBILE_BASELINE_MANIFEST_SHA256="$BOUND_MANIFEST_SHA256" \
+node --test internal/gui/tests/mobile-web.test.cjs
+```
+
+Either offline variable being present selects explicit admission, including
+an empty value. Both must be valid; an error never falls back to Git or current
+assets. If `BASE_REF` is also supplied, it must equal the manifest's commit.
+The reader checks the manifest pin, paths, regular files, modes and content
+before launch, then serves its checked byte snapshots. The manifest pin comes
+from the binding, not a digest calculated from the supplied manifest at runtime.
+The browserless admission controls run with
+`node --test internal/gui/tests/mobile-baseline.test.cjs`.
 
 ```sh
 node --test internal/gui/tests/mobile-web.test.cjs internal/gui/tests/old-webkit.test.cjs

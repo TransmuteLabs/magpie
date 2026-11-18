@@ -18,8 +18,8 @@ import (
 func TestPlainNames(t *testing.T) {
 	prefsHome(t)
 	touched := 0
-	catalog.Changed = func() { touched++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { touched++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	if err := SetModelName("a/sol", "My Sol"); err != nil {
 		t.Fatal(err)
 	}

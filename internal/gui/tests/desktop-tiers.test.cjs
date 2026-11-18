@@ -76,6 +76,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/");
       await page.locator(cd).waitFor();
       await page.locator(`${cd} .ag-link`).click();
+      await page.locator(`${cd} .ag-exp`).waitFor();
 
       const square = page.locator(`${cd} .ag-exp .field.extra[data-key="tiers"]`);
       assert.equal(await square.count(), 1, "no tiers square");

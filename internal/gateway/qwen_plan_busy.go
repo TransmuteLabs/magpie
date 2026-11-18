@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"math/rand/v2"
 	"net/http"
 	"time"
@@ -19,7 +20,7 @@ const qwenPlanHost = "token-plan.maas.qianwenaiapi.com"
 // same request asked again a moment later is served (pelikanade on X).
 // It rests as a rate limit already (dashScopeRate); here it is also
 // asked again on the same account, as a rate limit is, before any byte
-// reaches the agent (passingFor), and a group's member is asked again
+// reaches the agent (passingForCandidate), and a group's member is asked again
 // in place before the group moves on. Only this host: DashScope's
 // pay-as-you-go TPM limit says the same words and lasts the minute, and
 // another vendor's "Allocated quota exceeded" is its own.
@@ -40,19 +41,8 @@ func jittered(d time.Duration) time.Duration {
 	return d/2 + rand.N(d)
 }
 
-// passingFor is passing for c's failure: the Qwen Token Plan's
-// concurrency 429 (qwenPlanBusy) passes as a rate limit does, for up to
-// rateRetries tries again after jittered pauses of about 1, 2 and 4s, or
-// what Retry-After says; any other failure is passing's.
-func passingFor(c candidate, status int, header http.Header, body []byte, again int) (time.Duration, bool) {
-	if !qwenPlanBusy(c.p, status, body) || routedThere(header) {
-		return passing(status, header, body, again)
-	}
-	wait := jittered(retryPause << again)
-	if d := retryAfter(header, time.Now()); d > 0 {
-		wait = d
-	}
-	return wait, wait <= longestPause && again < rateRetries
+func passingForCandidate(ctx context.Context, selected candidate, status int, header http.Header, body []byte, again int) (time.Duration, bool) {
+	return passingForResponse(ctx, selected.p.ID, status, header, body, again, qwenPlanBusy(selected.p, status, body))
 }
 
 // busyFor is busy for c's failure: the Qwen Token Plan's concurrency

@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const SEAT = "某某·GLM高级版", TEAM = "3141592636@qq.com", ME = "me@example.com";
@@ -72,7 +73,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       return browser;
     };
     const tr = (page, k) => page.evaluate((k) => t(k), k);
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     const wide = (page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     const stripes = (page, sel) => page.evaluate((sel) => [...document.querySelectorAll(sel)].map((e) => getComputedStyle(e).borderLeftWidth).filter((b) => parseFloat(b) > 1), sel);
     // a re-render can replace the card between the locator's resolve and
@@ -140,11 +140,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the window has it, its tooltips too; nothing moves
         await eye(ME).scrollIntoViewIfNeeded();
         await page.waitForTimeout(150);
-        const top = await row(ME).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page);
+        const top = await row(ME).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await eye(ME).click();
         await page.waitForFunction((me) => !document.querySelector(`.editor .acc[data-account-id="${me}"] .pii`), ME);
         assert.equal(await row(ME).evaluate((e) => Math.round(e.getBoundingClientRect().top)), top, "the row moved");
-        assert.equal(await scrolled(page), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         assert.equal(await row(ME).locator(".n.rename").textContent(), "Personal");
         assert.equal(await row(ME).locator(".acct-user").textContent(), ME);
         assert.ok((await row(ME).locator(".n.rename").getAttribute("title")).includes(ME), "its tooltip names it");
@@ -242,11 +242,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await eye("Personal").getAttribute("title"), await tr(panel, KEYS[0]));
 
         // a click shows that one, its card's tooltip too; the other stays hidden; nothing moves
-        const sc = await scrolled(panel);
+        const sc = await scrolled(panel, { axes: "y", windowAxes: "y", positiveY: true });
         await eye("Personal").click();
         await panel.waitForFunction((me) => [...document.querySelectorAll("#panelQuota .pq-card")].some((c) => c.querySelector(".pq-user").textContent === "Personal" && c.title.includes(me)), ME);
         assert.equal(await panel.locator("#panelQuota .pq-user .pii").count(), 1);
-        assert.equal(await scrolled(panel), sc, "a click scrolled");
+        assert.equal(await scrolled(panel, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         assert.equal(await card("Personal").locator(".pq-user").textContent(), "Personal");
         assert.ok((await card("Personal").getAttribute("title")).includes(ME), "its tooltip names it");
         assert.equal(await eye("Personal").getAttribute("aria-pressed"), "true");
@@ -307,10 +307,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await opacity(eye(ME)), "0");
         await page.locator(".subscription-account").nth(1).hover();
         assert.equal(await opacity(eye(ME)), "1");
-        const sc = await scrolled(page);
+        const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await eye(ME).click();
         await page.waitForFunction(() => document.querySelectorAll(".subscription-account .quota-of .pii").length === 1);
-        assert.equal(await scrolled(page), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         const mine = page.locator(".subscription-account").nth(1), team = page.locator(".subscription-account").nth(0);
         assert.equal(await mine.locator(".quota-alias").textContent(), "Personal");
         assert.equal(await mine.locator(".quota-alias").getAttribute("title"), "Personal · " + ME);

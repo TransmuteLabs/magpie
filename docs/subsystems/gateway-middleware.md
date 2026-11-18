@@ -19,6 +19,46 @@ A plugin can be a JS gateway plugin: JavaScript that magpie runs inside its gate
 
 plugins.json is the source of truth for which middleware is installed and on, in its order; a middleware that is off isn't loaded.
 
+## Installable SDK middleware (API 1.8)
+
+An installed SDK primary may opt into `gateway-middleware` and declare a
+`middleware` descriptor with request, account, provider, event and response
+flags. This is separate from asynchronous `gateway-hooks`, ledger observation
+and routing strategies. Private services inherit none of this authority.
+The Go contract is [`pkg/extension/middleware.go`](../../pkg/extension/middleware.go);
+the JS SDK implements the same descriptor and bounded unary methods.
+
+[`extensionMiddlewareAgent`](../../internal/gateway/extension_middleware.go)
+joins the ordinary `serveAgent` chain after legacy middleware. It uses the
+same account skip, per-provider try and response parser points described
+below. Each request keeps its own state and selected package/config lease;
+each provider try starts from the accepted request body. Key tries clear
+the previous account context. The account DTO contains a per-module opaque
+reference and sanitized provider/kind/model metadata, without account
+identity, credentials, request headers or vendor endpoints.
+
+Origins default to `local` and `magpie-key`; other origins require explicit
+registration. Unknown origins and disabled modules stay cold. All five
+hooks have read-only host authority, cannot emit events or acceptance and
+cannot borrow an account or session scope. Only the request hook may reject,
+only the account hook may skip and only the event hook may drop an event.
+Request and provider transforms cannot change the caller-authorized model,
+stream setting or client tool declarations/choice.
+
+[`MiddlewareRun`](../../internal/extension/middleware.go) rechecks the selected
+package revision and configuration before admission, on host callbacks and
+before accepting a result. Cancellation closes the request lease. Startup
+has a one-second budget; hooks have 250 ms, or 50 ms per event. Hook failure
+retains the last accepted body/state. DTO bodies are limited to 1 MiB and
+request state to 64 KiB. Oversized or compressed replies pass through
+unchanged; response buffering stays bounded. These limits apply to the SDK
+wrapper; the legacy JS wrapper retains its existing behavior.
+
+SDK synthetic verification uses `TestMiddlewareExplicitRootContract`,
+`TestMiddlewareDTOAuthorityAndBounds`, `TestSDKMiddleware*` and
+`TestSDKResponseHooks*`. This establishes the ordinary local owner contract,
+not live community-package or vendor compatibility.
+
 ## Runtime path
 
 1. `serveAgent` establishes the [gateway session identity and optional recording](gateway-sessions.md), runs any [asynchronous request hooks](gateway-request-hooks.md) through Bun, then calls `Begin` on each registered `gwmw.Agent` (the JS chain's is `middleware.Begin`) with the request's protocol, model, stream flag, path and agent. With no middleware it calls `serve` directly.

@@ -86,9 +86,9 @@ func TestCodexHoldEndsAtItsWindowsReset(t *testing.T) {
 // magpie its provider till something else ran the sync.
 func TestCodexUsedUpToldWhenKnownChanges(t *testing.T) {
 	told := 0
-	was := catalog.Changed
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = was; codexWasUsedUp.Store(false) })
+	was := catalog.ChangedHook()
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(was); codexWasUsedUp.Store(false) })
 	codexWasUsedUp.Store(false)
 	// the sync knew held, the loop last said not, the read now says not
 	noteCodexUsedUp(true, false)

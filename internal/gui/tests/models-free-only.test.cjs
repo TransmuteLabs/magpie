@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -88,7 +89,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
       const bulk = (name) => editor.locator(".mbulk").getByRole("button", { name, exact: true });
       const picks = () => editor.locator(".mchips .mchip.on").evaluateAll((cs) => cs.map((c) => c.querySelector("span").textContent).sort());
-      const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 
       // none free, or all free: not offered
       for (const name of ["Paid Relay", "Free Relay"]) {
@@ -121,10 +121,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // click leaves it, the page and the button where they are
       await editor.locator(".ebody").evaluate((b) => { b.scrollTop += b.querySelector(".mbulk").getBoundingClientRect().top - b.getBoundingClientRect().top - 8; });
       assert(await editor.locator(".ebody").evaluate((b) => b.scrollTop > 0), "the editor's body must have scrolled");
-      const before = await scrolled(), at = await free.evaluate((e) => Math.round(e.getBoundingClientRect().top));
+      const before = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), at = await free.evaluate((e) => Math.round(e.getBoundingClientRect().top));
       await free.click();
       assert.deepEqual(await picks(), FREE, "exactly the free models picked");
-      assert.equal(await scrolled(), before, "the page moved");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), before, "the page moved");
       assert.equal(await free.evaluate((e) => Math.round(e.getBoundingClientRect().top)), at, "the button moved");
 
       // a Save sends exactly those

@@ -20,7 +20,7 @@ const words = {
   de: { row: "magpie deinstallieren", title: "magpie deinstallieren?", go: "Deinstallieren", cancel: "Abbrechen" },
 };
 
-async function setup(t, engine, lang, width, { web = false, reply = { failed: false, says: [] } } = {}) {
+async function setup(t, engine, lang, width, { web = false, reply = { failed: false, says: [] }, beforeNavigation } = {}) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" })).newPage();
@@ -35,6 +35,7 @@ async function setup(t, engine, lang, width, { web = false, reply = { failed: fa
     if (p === "/api/uninstall/finish") return route.fulfill({ status: 204 });
     return route.fulfill({ json: { agents: [], system: [], data: [], ...reply } });
   });
+  await beforeNavigation?.(page);
   await page.goto("http://magpie.test/?view=gateway");
   await page.locator("#prefs").click();
   await openPart(page, "about");
@@ -43,7 +44,7 @@ async function setup(t, engine, lang, width, { web = false, reply = { failed: fa
 }
 
 // the window as `magpie uninstall --window` opens it
-async function opened(t, engine, lang, width, { web = false }) {
+async function opened(t, engine, lang, width, { web = false, beforeNavigation }) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   t.after(() => browser.close());
   const page = await (await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" })).newPage();
@@ -58,6 +59,7 @@ async function opened(t, engine, lang, width, { web = false }) {
     if (p === "/api/uninstall/finish") return route.fulfill({ status: 204 });
     return route.fulfill({ json: { agents: [], system: [], data: [], failed: false, says: [] } });
   });
+  await beforeNavigation?.(page);
   await page.goto("http://magpie.test/?view=settings&tab=about&uninstall=1");
   return { page, errors, posts };
 }
@@ -148,6 +150,43 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(errors, []);
       });
     }
+  }
+
+  for (const installed of [false, true]) {
+    test(`${engine}: ${installed ? "Installed apps" : "Settings click"} asks once after a redraw during the uninstall import`, { timeout: 30000 }, async (t) => {
+      const requested = Promise.withResolvers(), release = Promise.withResolvers();
+      const beforeNavigation = (page) => page.route("**/uninstall.js", async (route) => {
+        requested.resolve();
+        await release.promise;
+        await route.fallback();
+      });
+      try {
+        const open = installed ? opened : setup;
+        const { page, posts, errors } = await open(t, engine, "en", 1100, { beforeNavigation });
+        const button = page.locator("#uninstallRow button");
+        if (!installed) {
+          await showRow(page, page.locator("#uninstallRow"));
+          await button.click();
+        }
+        await requested.promise;
+        const oldButton = await button.elementHandle();
+        await page.evaluate(() => renderSettings());
+        assert.equal(await oldButton.evaluate((element) => element.isConnected), false);
+        assert.equal(await button.count(), 1);
+        assert.equal(await dialog(page).count(), 0);
+        release.resolve();
+        await dialog(page).waitFor();
+        assert.equal(await dialog(page).count(), 1);
+        assert.deepEqual(posts, []);
+        await dialog(page).getByRole("button", { name: "Uninstall", exact: true }).click();
+        await waitFor(() => posts.length === 2);
+        assert.deepEqual(posts, ["/api/uninstall", "/api/uninstall/finish"]);
+        assert.equal(await dialog(page).count(), 0);
+        assert.deepEqual(errors, []);
+      } finally {
+        release.resolve();
+      }
+    });
   }
 
   test(`${engine}: magpie web opened at the uninstall link asks nothing`, async (t) => {

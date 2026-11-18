@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = process.env.MAGPIE_QUOTA_ASSETS || path.resolve(__dirname, "../assets");
 const user = "current@example.invalid", other = "saved@example.invalid";
@@ -27,6 +28,7 @@ const provider = { id: "claude", name: "Claude Code", icon: "claude", models: []
 function serve(lang, state) {
   return async route => {
     const url = new URL(route.request().url()), json = body => route.fulfill({ json: body });
+    if (isPageLifecycleRequest(route.request())) return json({});
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme: "light", web: false })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });

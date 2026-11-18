@@ -153,10 +153,10 @@ func TestTUIKeepsSignalsWhileLoading(t *testing.T) {
 // that won't write doesn't hold the signal past saveOnSignal
 func TestSignalSavesTheSessionIndex(t *testing.T) {
 	died := deaths(t, syscall.SIGTERM)
-	oldSave, oldWait := sessionsSaved, saveOnSignal
-	t.Cleanup(func() { sessionsSaved, saveOnSignal = oldSave, oldWait })
+	previous := signalSaveSettings.Load()
+	t.Cleanup(func() { signalSaveSettings.Store(previous) })
 	saved := make(chan struct{}, 1)
-	sessionsSaved = func() { saved <- struct{}{} }
+	signalSaveSettings.Store(&signalSaveConfig{save: func() { saved <- struct{}{} }, wait: saveOnSignal})
 	endProbesOnSignal()
 	send(t, syscall.SIGTERM)
 	diesOf(t, died, syscall.SIGTERM)
@@ -166,10 +166,9 @@ func TestSignalSavesTheSessionIndex(t *testing.T) {
 		t.Fatal("died without the session index saved")
 	}
 
-	saveOnSignal = 50 * time.Millisecond
 	stuck := make(chan struct{})
 	t.Cleanup(func() { close(stuck) })
-	sessionsSaved = func() { <-stuck }
+	signalSaveSettings.Store(&signalSaveConfig{save: func() { <-stuck }, wait: 50 * time.Millisecond})
 	send(t, syscall.SIGTERM)
 	diesOf(t, died, syscall.SIGTERM)
 }

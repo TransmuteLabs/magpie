@@ -3,7 +3,6 @@ package profile
 import (
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -84,13 +83,21 @@ func DetailsIn(p Profile, all []*agent.Agent) []Group {
 			byID[id] = map[string]string{}
 		}
 	}
-	for k, v := range p.Fields {
-		i := strings.LastIndex(k, ".") // codex@wsl:Ubuntu-24.04.model
-		if i < 0 {
+	var unresolved []Group
+	for _, saved := range resolveProfileFields(p.Fields, known) {
+		if saved.err != nil {
+			item := Item{Key: saved.key, Label: saved.key, Value: saved.value}
+			if secret(item.Key, item.Label, item.Value) {
+				item.Value, item.Hidden = "", true
+			}
+			unresolved = append(unresolved, Group{ID: saved.key, Name: saved.err.Error(), Fields: []Item{item}})
 			continue
 		}
-		take(k[:i])
-		byID[k[:i]][k[i+1:]] = v
+		if saved.agent == "" {
+			continue
+		}
+		take(saved.agent)
+		byID[saved.agent][saved.field] = saved.value
 	}
 	if l := p.Library; l != nil {
 		for _, m := range []map[string][]string{l.MCP, l.Skills} {
@@ -178,7 +185,7 @@ func DetailsIn(p Profile, all []*agent.Agent) []Group {
 		}
 		out = append(out, g)
 	}
-	return out
+	return append(out, unresolved...)
 }
 
 // givenTo is the names in m given to the agent id, sorted.

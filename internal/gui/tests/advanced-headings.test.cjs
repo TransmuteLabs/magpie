@@ -64,6 +64,80 @@ const layout = () => {
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  for (const unavailable of [false, true]) test(`${engine}: the first editor ${unavailable ? "opens after both Advanced imports fail" : "waits for Advanced headings without moving its rows"}`, { timeout: 30000 }, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" });
+    page.setDefaultTimeout(5000);
+    const waiting = Promise.withResolvers(), release = Promise.withResolvers();
+    await page.route("**/*", serve("en", relay));
+    let imports = 0;
+    await page.route(/\/advgroups\.js(?:\?|$)/, async (route) => {
+      const attempt = ++imports;
+      if (attempt === 1) {
+        waiting.resolve();
+        await release.promise;
+      }
+      if (unavailable && attempt <= 2) return route.abort();
+      await route.fallback();
+    });
+    try {
+      await page.goto("http://magpie.test/?view=providers");
+      await waiting.promise;
+      const row = page.locator(".row.provider", { hasText: relay.name }).first();
+      await row.click();
+      assert.equal(await page.locator(".editor details.advanced").count(), 0);
+      release.resolve();
+      const advanced = page.locator(".editor details.advanced");
+      await advanced.waitFor();
+      if (unavailable) {
+        assert.equal(imports, 2);
+        assert.equal(await advanced.locator(".adv-head").count(), 0);
+        await page.keyboard.press("Escape");
+        await advanced.waitFor({ state: "detached" });
+        await row.click();
+        await advanced.waitFor();
+        assert.equal(imports, 3);
+      }
+      assert.ok(await advanced.locator(".adv-head").count());
+    } finally {
+      release.resolve();
+    }
+  });
+
+  for (const failures of [1, 2]) test(`${engine}: Advanced headings recover after ${failures} failed imports`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" });
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/*", serve("en", relay));
+    const requests = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/advgroups.js") requests.push(request.url());
+    });
+    const failedURLs = [];
+    await page.route(/\/advgroups\.js(?:\?|$)/, (route) => route.abort(), { times: failures });
+    const failed = page.waitForEvent("requestfailed", { predicate: (request) => {
+      if (new URL(request.url()).pathname !== "/advgroups.js") return false;
+      failedURLs.push(request.url());
+      return failedURLs.length === failures;
+    } });
+    await page.goto("http://magpie.test/?view=providers");
+    await failed;
+    await page.evaluate(async () => { await advMod.p; });
+    await page.evaluate(async () => {
+      renderProviders();
+      await advMod.p;
+    });
+    assert.equal(requests.length, failures === 1 ? 2 : failures, "a list redraw must not retry a failed preload");
+    await page.locator(".row.provider", { hasText: relay.name }).first().click();
+    await page.locator(".editor details.advanced > summary").click();
+    await page.locator(".editor details.advanced .adv-head").first().waitFor();
+    assert.equal(new Set(failedURLs).size, failures);
+    assert.deepEqual(errors, []);
+  });
   for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
     test(`${engine} ${lang}: the provider editor's Advanced rows sit under Routing, Models, Limits and cost, Connection`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));

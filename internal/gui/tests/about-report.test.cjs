@@ -18,6 +18,27 @@ const block = "magpie 0.1.9\nOS: macOS 26.2\nArch: arm64\nOpened in: app";
 const post = "https://x.com/magpie_router/status/2119861020978188499";
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: About keeps its sidebar target when an earlier tab is hidden`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 1100, height: 800 }, reducedMotion: "reduce" });
+    page.setDefaultTimeout(6000);
+    page.setDefaultNavigationTimeout(60000);
+    await page.route("**/*", fixture("zh", "light", []));
+    await page.goto("http://magpie.test/");
+    await page.locator("#prefs").click();
+    const about = page.locator('.nav-sub:not(.leaving) [data-of="setTab-about"]');
+    await about.waitFor();
+    const selected = await about.evaluate((sidebarTab) => {
+      const earlier = document.querySelector('#setTabs > button:not([hidden]):not(#setTab-about)');
+      earlier.hidden = true;
+      sidebarTab.click();
+      return document.querySelector('#setTabs > button[aria-selected="true"]')?.id;
+    });
+    assert.equal(selected, "setTab-about");
+    await page.locator("#reportProblemRow button").waitFor();
+  });
+
   for (const lang of Object.keys(words)) {
     for (const width of [1100, 420]) {
       test(`${engine} ${lang} ${width}: About reports a problem`, async (t) => {

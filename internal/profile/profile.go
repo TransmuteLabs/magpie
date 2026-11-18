@@ -20,7 +20,8 @@ import (
 
 // Profile is every agent's fields, and the library's setup.
 type Profile struct {
-	// Fields maps "agent.field" to a value.
+	// Fields maps fieldKey(agent, field) to a value; legacy agent.field
+	// keys remain readable when their declared owner is unambiguous.
 	Fields map[string]string
 	// Library is which agents got which servers and skills, and the
 	// instructions; nil for a profile saved while the library was empty,
@@ -156,7 +157,7 @@ func Fields() map[string]string {
 			if f := a.Field(k); f != nil && f.Own {
 				continue
 			}
-			p[a.ID+"."+k] = v
+			p[fieldKey(a.ID, k)] = v
 		}
 	}
 	return p
@@ -259,6 +260,9 @@ type Applied struct {
 // and its model is set last, over them.
 func Apply(p Profile) (Applied, error) {
 	var out Applied
+	if err := profileFieldError(resolveProfileFields(p.Fields, agentsByID(agent.All()))); err != nil {
+		return out, err
+	}
 	if len(p.Models) > 0 {
 		lists, err := provider.SetModelLists(p.Models)
 		out.Changed = len(lists)
@@ -281,54 +285,46 @@ func Apply(p Profile) (Applied, error) {
 // make them look installed.
 // It returns the number of changes made and the first error encountered.
 func ApplyFields(p map[string]string) (int, error) {
-	agents := map[string]*agent.Agent{}
-	for _, a := range agent.Detected() {
-		agents[a.ID] = a
-	}
-	keys := make([]string, 0, len(p))
-	for k := range p {
-		keys = append(keys, k)
+	all := agent.All()
+	agents := agentsByID(agent.DetectedIn(all))
+	fields := resolveProfileFields(p, agentsByID(all))
+	if err := profileFieldError(fields); err != nil {
+		return 0, err
 	}
 	// providers first: switching one re-settles the model behind it; then
 	// models, which settle what the other fields (Claude Code's tiers) hang on
 	rank := func(k string) int {
 		switch {
-		case strings.HasSuffix(k, ".provider"):
+		case k == "provider":
 			return 0
-		case strings.HasSuffix(k, ".model"):
+		case k == "model":
 			return 1
 		}
 		return 2
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if ri, rj := rank(keys[i]), rank(keys[j]); ri != rj {
+	sort.Slice(fields, func(i, j int) bool {
+		if ri, rj := rank(fields[i].field), rank(fields[j].field); ri != rj {
 			return ri < rj
 		}
-		return keys[i] < keys[j]
+		return fields[i].key < fields[j].key
 	})
 	changed := 0
-	for _, k := range keys {
-		// the last dot: a WSL distro's name may have one (codex@wsl:Ubuntu-24.04)
-		i := strings.LastIndex(k, ".")
-		if i < 0 {
-			continue
-		}
-		id, field := k[:i], k[i+1:]
-		a := agents[id]
+	for _, saved := range fields {
+		a := agents[saved.agent]
 		if a == nil {
 			continue
 		}
-		f := a.Field(field)
+		f := a.Field(saved.field)
 		// one saved before a field was the user's own isn't written over it
 		if f == nil || f.Own {
 			continue
 		}
-		v := wanted(a, f.Key, p[k])
+		v := wanted(a, f.Key, saved.value)
 		if f.Get() == v {
 			continue
 		}
 		if err := a.Apply(f.Key, v); err != nil {
-			return changed, fmt.Errorf("%s: %w", k, err)
+			return changed, fmt.Errorf("%s: %w", saved.key, err)
 		}
 		changed++
 	}
@@ -356,21 +352,18 @@ func wanted(a *agent.Agent, key, v string) string {
 // read here. A profile that names nothing found on this computer (one
 // synced from another) is not in use, as applying it would do nothing.
 func InUse(p Profile, agents []*agent.Agent, now map[string]map[string]string) bool {
-	byID := make(map[string]*agent.Agent, len(agents))
-	for _, a := range agents {
-		byID[a.ID] = a
+	byID := agentsByID(agents)
+	fields := resolveProfileFields(p.Fields, legacyFieldAgents(p.Fields, agents))
+	if profileFieldError(fields) != nil {
+		return false
 	}
 	compared := false
-	for k, v := range p.Fields {
-		i := strings.LastIndex(k, ".")
-		if i < 0 {
-			continue
-		}
-		a := byID[k[:i]]
+	for _, saved := range fields {
+		a := byID[saved.agent]
 		if a == nil {
 			continue
 		}
-		f := a.Field(k[i+1:])
+		f := a.Field(saved.field)
 		if f == nil || f.Own {
 			continue
 		}
@@ -378,7 +371,7 @@ func InUse(p Profile, agents []*agent.Agent, now map[string]map[string]string) b
 		if !ok {
 			cur = f.Get()
 		}
-		if cur != wanted(a, f.Key, v) {
+		if cur != wanted(a, f.Key, saved.value) {
 			return false
 		}
 		compared = true
@@ -401,15 +394,18 @@ func InUse(p Profile, agents []*agent.Agent, now map[string]map[string]string) b
 // Summary renders a profile's non-default models as a short one-line description.
 func Summary(p Profile) string {
 	keys := make([]string, 0, len(p.Fields))
+	addresses := map[string]fieldAddress{}
 	for k := range p.Fields {
-		if strings.HasSuffix(k, ".model") && p.Fields[k] != "" {
+		address, err := readFieldKey(k)
+		if err == nil && address.field == "model" && p.Fields[k] != "" {
+			addresses[k] = address
 			keys = append(keys, k)
 		}
 	}
 	sort.Strings(keys)
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		parts = append(parts, strings.TrimSuffix(k, ".model")+" "+p.Fields[k])
+		parts = append(parts, addresses[k].agent+" "+p.Fields[k])
 	}
 	return strings.Join(parts, " · ")
 }

@@ -3,6 +3,7 @@ package gui
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -112,6 +113,7 @@ func gatewaySession(g usage.GatewaySession) sessions.Session {
 }
 
 func sessionRoutes(mux *http.ServeMux, w Windows) {
+	extensionSessionSourceRoutes(mux)
 	steadyGC()
 	mux.HandleFunc("GET /api/sessions", coldTurn(func(rw http.ResponseWriter, r *http.Request) {
 		// the list and the Codex threads' effort each list every session file
@@ -320,7 +322,11 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 	// which is only read.
 	mux.HandleFunc("GET /api/sessions/transcript", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		s, ok := sessions.Find(q.Get("agent"), q.Get("id"))
+		s, ok := sessions.FindContext(r.Context(), q.Get("agent"), q.Get("id"))
+		if err := r.Context().Err(); err != nil {
+			fail(rw, err)
+			return
+		}
 		if !ok {
 			if _, found := usage.GatewaySessionByID(q.Get("agent"), q.Get("id"), nil); found {
 				t, err := sessions.GatewayTranscript(q.Get("agent"), q.Get("id"))
@@ -336,14 +342,18 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		}
 		// sub: one of its subagents, found among those the session lists
 		// (#2261)
-		// find: the words a search found in it, so that the part they
-		// are in is among those read (a long session's is cut)
-		read := sessions.TranscriptOf
+		read := func(s sessions.Session) (sessions.Transcript, error) {
+			return sessions.TranscriptOfContext(r.Context(), s)
+		}
 		if find := sessions.NeedleOf(q.Get("find")); find != "" {
-			read = func(s sessions.Session) (sessions.Transcript, error) { return sessions.TranscriptAt(s, find) }
+			read = func(s sessions.Session) (sessions.Transcript, error) {
+				return sessions.TranscriptAtContext(r.Context(), s, find)
+			}
 		}
 		if sub := q.Get("sub"); sub != "" {
-			read = func(s sessions.Session) (sessions.Transcript, error) { return sessions.SubagentTranscript(s, sub) }
+			read = func(s sessions.Session) (sessions.Transcript, error) {
+				return sessions.SubagentTranscriptContext(r.Context(), s, sub)
+			}
 		}
 		t, err := read(s)
 		if err != nil {
@@ -358,7 +368,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 	// Downloads.
 	mux.HandleFunc("GET /api/sessions/markdown", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"))
+		stem, md, err := sessionMarkdownContext(r.Context(), q.Get("agent"), q.Get("id"))
 		if err != nil {
 			fail(rw, err)
 			return
@@ -369,7 +379,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 	})
 	mux.HandleFunc("POST /api/sessions/export", func(rw http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		stem, md, err := sessionMarkdown(q.Get("agent"), q.Get("id"))
+		stem, md, err := sessionMarkdownContext(r.Context(), q.Get("agent"), q.Get("id"))
 		if err != nil {
 			fail(rw, err)
 			return
@@ -511,7 +521,14 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 // remote magpie ran on another machine, so there is no file of it here, and
 // its download was a 400 "no such session" (akic404 on Discord).
 func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
-	s, ok := sessions.Find(agentID, id)
+	return sessionMarkdownContext(context.Background(), agentID, id)
+}
+
+func sessionMarkdownContext(ctx context.Context, agentID, id string) (stem string, md []byte, err error) {
+	s, ok := sessions.FindContext(ctx, agentID, id)
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	var t sessions.Transcript
 	if !ok {
 		g, found := usage.GatewaySessionByID(agentID, id, nil)
@@ -531,11 +548,14 @@ func sessionMarkdown(agentID, id string) (stem string, md []byte, err error) {
 	}
 	var b bytes.Buffer
 	if ok {
-		err = sessions.WriteMarkdown(&b, s, wslName(name, s))
+		err = sessions.WriteMarkdownContext(ctx, &b, s, wslName(name, s))
 	} else {
 		err = sessions.WriteGatewayMarkdown(&b, s, name, t)
 	}
 	if err != nil {
+		return "", nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
 	short := []rune(s.ID)

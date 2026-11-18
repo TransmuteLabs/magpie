@@ -33,11 +33,11 @@ function serve(lang, asked, answers) {
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings });
-    if (url.pathname.startsWith("/api/settings/")) {
-      asked.push(["write", url.pathname]);
+    if (url.pathname === "/api/settings" || url.pathname.startsWith("/api/settings/")) {
+      if (route.request().method() !== "GET") asked.push(["write", url.pathname]);
+      if (url.pathname === "/api/settings/https" && route.request().method() === "GET") return json({ on: false, served: false });
       return json(settings);
     }
-    if (url.pathname === "/api/settings") return json(settings);
     if (url.pathname === "/api/usage/checkin-account") {
       const b = route.request().postDataJSON();
       asked.push([b.by, b.key]);

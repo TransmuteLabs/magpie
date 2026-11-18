@@ -518,5 +518,8 @@ func Routings() []Routing {
 			}
 		}
 	}
+	for _, routing := range routes.Discovered() {
+		out = append(out, Routing{ID: routing.ID, Name: routing.Name, Plugin: routing.Plugin})
+	}
 	return out
 }

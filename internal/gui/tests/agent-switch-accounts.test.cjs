@@ -116,6 +116,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const st = page.locator(`${row("claude")} .ag-st`);
         const who = st.locator("button.ag-acc.ag-who");
         await who.waitFor();
+        assert.equal(await who.getAttribute("aria-expanded"), "false");
         assert.equal(await st.locator(".ag-st-t").textContent(), await tr(K.sub));
         assert.equal(await who.locator(".v").textContent(), "work@example.com");
         assert.equal(await who.getAttribute("title"), await tr(K.title, { ...cc, user: "work@example.com" }));
@@ -159,13 +160,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await menu.waitFor();
         assert.equal(await menu.locator(".pm-item", { hasText: await tr(K.only, cc) }).getAttribute("aria-checked"), "true");
         await page.keyboard.press("Escape");
+        assert.equal(await st.locator("button.ag-who").getAttribute("aria-expanded"), "false");
 
         // Codex, one account: its entry, with no toggle to offer
         const cx = page.locator(`${row("codex")} .ag-who`);
         assert.equal(await cx.locator(".v").textContent(), "me@example.com");
+        assert.equal(await cx.getAttribute("aria-expanded"), "false");
         await cx.click();
         await menu.waitFor();
+        assert.equal(await cx.getAttribute("aria-expanded"), "true");
         assert.deepEqual(await menu.locator(".pm-item .pm-name").allTextContents(), ["me@example.com", await tr(K.manage)]);
+        await page.keyboard.press("Escape");
+        assert.equal(await cx.getAttribute("aria-expanded"), "false");
+        await cx.click();
+        await menu.waitFor();
         await menu.locator(".pm-item", { hasText: await tr(K.manage) }).click();
         await page.waitForFunction(() => new URL(location.href).searchParams.get("edit") === "codex");
 

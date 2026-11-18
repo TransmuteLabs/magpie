@@ -41,12 +41,19 @@ window.wholeHint = function (q, short) {
     if (!q.isConnected) return fit.disconnect();
     due ||= requestAnimationFrame(() => {
       due = 0;
-      const cs = getComputedStyle(q), c = (window.wholeHint.c ||= document.createElement("canvas").getContext("2d"));
-      c.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-      const wide = (s) => Math.ceil(c.measureText(s).width + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) * 2) + 2;
+      const cs = getComputedStyle(q), meter = document.createElement("span");
+      meter.lang = q.closest("[lang]")?.lang || "";
+      meter.style.cssText = "position:fixed;visibility:hidden;white-space:pre;pointer-events:none";
+      for (const key of ["font", "letterSpacing", "wordSpacing", "fontKerning", "fontFeatureSettings", "fontVariationSettings", "fontOpticalSizing", "textAutospace", "textTransform"]) meter.style[key] = cs[key];
+      document.body.append(meter);
+      const wide = (text) => {
+        meter.textContent = text;
+        return Math.ceil(meter.getBoundingClientRect().width + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + parseFloat(cs.borderLeftWidth) * 2) + 2;
+      };
       const w = wide(long);
       q.style.setProperty("--hint-w", w + "px");
       q.style.setProperty("--hint-s", wide(short) + "px");
+      meter.remove();
       pick(w);
     });
   });

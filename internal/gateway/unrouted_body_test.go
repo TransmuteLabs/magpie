@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -199,42 +197,37 @@ func TestUnroutedChunkedBodyReadWholeHeld504(t *testing.T) {
 			srv := httptest.NewServer(s.Handler())
 			t.Cleanup(srv.Close)
 			sticks.Lock()
-			var once sync.Once
-			unlock := func() { once.Do(sticks.Unlock) }
-			t.Cleanup(unlock)
+			defer sticks.Unlock()
 
 			wire := encodedBody(t, []byte(unroutedHi), encoding)
-			// a reader of no known length is sent chunked
-			req, err := http.NewRequest("POST", srv.URL+"/v1/chat/completions", io.MultiReader(bytes.NewReader(wire)))
+			conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Content-Type", "application/json")
+			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			// Send headers, chunk and terminator together so the short hold
+			// starts with the whole upload already sent.
+			contentEncoding := ""
 			if encoding != "identity" {
-				req.Header.Set("Content-Encoding", encoding)
+				contentEncoding = "Content-Encoding: " + encoding + "\r\n"
 			}
-			got := make(chan unroutedReply, 1)
-			go func() {
-				res, err := srv.Client().Do(req)
-				if err != nil {
-					got <- unroutedReply{err: err}
-					return
-				}
-				b, err := io.ReadAll(res.Body)
-				res.Body.Close()
-				got <- unroutedReply{res.StatusCode, string(b), err}
-			}()
+			if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"+
+				"Content-Type: application/json\r\n%sTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n0\r\n\r\n",
+				contentEncoding, len(wire), wire); err != nil {
+				t.Fatal(err)
+			}
 			u := watchedHold(t, s)
-			var r unroutedReply
-			select {
-			case r = <-got:
-			case <-time.After(20 * time.Second):
-				unlock()
-				t.Fatal("a hold after a chunked body was not answered")
+			res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatal(err)
 			}
-			unlock()
-			if r.err != nil || r.code != http.StatusGatewayTimeout || !strings.Contains(r.body, "without routing it to any provider") {
-				t.Fatalf("a hold after a chunked body read whole: %d %q %v", r.code, r.body, r.err)
+			b, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil || res.StatusCode != http.StatusGatewayTimeout || !strings.Contains(string(b), "without routing it to any provider") {
+				t.Fatalf("a hold after a chunked body read whole: %d %q %v", res.StatusCode, b, err)
 			}
 			if u.r.ContentLength != -1 || !u.bodyEnded.Load() {
 				t.Fatalf("the body was sent with length %d, its end read %v; the test needs it chunked and read whole", u.r.ContentLength, u.bodyEnded.Load())

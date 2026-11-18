@@ -228,8 +228,16 @@ func hashRows(h hash.Hash, c *rowChunk) {
 	for i := range c.Rows {
 		p := &c.Rows[i]
 		b = binary.AppendVarint(b, p.Time().UnixNano())
-		for _, v := range p.Varied {
-			text(v)
+		for k, v := range p.Varied {
+			if k == rowResponseAt {
+				// This slot can name a side-table tuple, not a string.
+				// Hash the same execution evidence regardless of its storage.
+				for _, id := range c.executionTexts(p) {
+					text(id)
+				}
+			} else {
+				text(v)
+			}
 		}
 		if first, ok := shapes[p.Shape]; ok {
 			b = binary.AppendUvarint(b, uint64(first))

@@ -171,13 +171,6 @@ func runGiven(given map[string]runSpec) {
 // runSpecOf is the spec of the server called name: as the last sync gave
 // it, or, before a sync has, as the library has it.
 func runSpecOf(name string) (runSpec, bool) {
-	runs.Lock()
-	given := runs.given
-	runs.Unlock()
-	if given != nil {
-		spec, ok := given[name]
-		return spec, ok
-	}
 	mu.Lock()
 	l, err := load()
 	mu.Unlock()
@@ -187,6 +180,13 @@ func runSpecOf(name string) (runSpec, bool) {
 	s := l.server(name)
 	if s == nil || !slices.Contains(s.Agents, "codex") || s.Hub == HubDirect {
 		return runSpec{}, false
+	}
+	runs.Lock()
+	given := runs.given
+	runs.Unlock()
+	if given != nil {
+		spec, ok := given[name]
+		return spec, ok
 	}
 	return specOf(npxDirect(s))
 }
@@ -589,6 +589,10 @@ func ServeRun(w http.ResponseWriter, r *http.Request, name string) {
 		w.WriteHeader(http.StatusOK)
 		return
 	case http.MethodGet:
+		if _, ok := runSpecOf(name); !ok {
+			http.Error(w, "magpie gives Codex no server called "+name, http.StatusNotFound)
+			return
+		}
 		runStream(w, r, name, sid)
 		return
 	case http.MethodPost:

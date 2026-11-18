@@ -8,6 +8,92 @@ supported agent: where its config lives, which fields matter and which
 values to offer. It also records what magpie set, so a later change made by
 something else shows up as drift.
 
+## Executable SDK agents
+
+An enabled executable extension with `agent-wiring` can add an ordinary agent
+without a built-in switch or an `agent.js` sidecar. Its `AgentDescriptor`
+declares `id`, `name`, an optional executable basename `bin`, exact
+HOME-relative `configFiles`, and model picker `fields` (`key`, `label`).
+Paths are clean relative paths without traversal, expansion or globs.
+An ID/Name-only descriptor remains available through explicit action commands;
+it does not register an ordinary tile. SDK 1.5 also declares aliases, UA,
+structured launch metadata, explicit existing-agent profiles and typed Library
+locations. A launch-only declaration needs no invented config file. Rich descriptors negotiate both
+`agent.inspect` and `agent.plan`.
+
+[`All` and `local`](../../internal/agent/agents.go) append these descriptors
+after built-in and existing JS agents. Existing agent IDs and aliases cannot
+be replaced by an ordinary declaration. An explicit 1.5 profile may adopt a
+local base through a checked user action; until then the base remains.
+[`extension_actions.go`](../../internal/agent/extension_actions.go)
+adapts each descriptor to `Agent`, `Field` and `NativeConnection`, so the
+normal `Find`, `ConnectHow`, `Apply`, `Disconnect`, preview and catalog sync
+paths reach the module. Disabled modules disappear on the next discovery,
+except that an owned 1.5 binding retains a checked recovery row.
+`PluginErrors` reports discovery and ownership conflicts.
+
+Configuration-only descriptors may have no model fields. The ordinary CLI
+offers `magpie <agent> default` for their checked native disconnect, including
+an already disconnected enabled descriptor or a binding that needs recovery.
+Bare field values are refused before reading a first field. A disabled
+descriptor's recovery row disappears after successful disconnect; it does not
+become enabled again. Agents with model fields retain their existing field
+and default commands.
+
+`agent.inspect` receives `{id, options, settings}` and returns
+`{connected, values: {field: value}, detail?}`. `settings.files` contains host
+snapshots: `{path, body, beforeHash, mode, exists}`; `body` is base64 bytes,
+and a missing file has hash `"missing"`. Inspection does not write files.
+The ordinary adapter supplies `options.gateway` (gateway base URL),
+`key` (the agent-scoped credential), `models` (model options with `value`,
+`label` and `ref`), and, for a field change, `field` and `value`. Model
+values use `magpie/<reference>`; the module translates these into its own
+config schema. `options.previous` contains the snapshots before magpie's
+first successful adoption, for module-owned restoration of its keys.
+API 1.9 additionally supplies typed `options.decisionModels`, separately
+from conversation `models`, using the same decision catalog as upstream
+agent-plugin connect. It is an empty array when none are offered and is
+absent below API 1.9; see
+[SDK agent options](extension-agents-sessions.md) for its fields and owner.
+
+Connect, set, sync and disconnect prepare `agent.plan`, then the host action
+service validates and executes the file plan. A preview only prepares it.
+Exact config paths, hashes, root identity, private durable backups, a write
+lock and rollback constrain host writes; the worker remains a trusted local
+executable, not a filesystem sandbox. Parent scope is preserved by explicit
+action calls. The ordinary adapter uses bounded agent-operation scopes.
+
+The existing config adapter records adoption in its stash only after successful file application.
+A module reporting an existing connection alone does not transfer ownership:
+background sync and disconnect leave manually wired files alone. If saving
+ownership fails after application, the operation reports that distinction and
+the durable backup location. Modules own format-aware restoration and must
+preserve unrelated changes made by the user.
+
+[`extension_controller.go`](../../internal/agent/extension_controller.go)
+owns 1.5 launch/profile bindings in the private `sdk-agent-bindings.json`.
+It supplies typed binding snapshots to module plans and uses durable pending,
+owned and disconnected records, file/shell preimages, strict cross-process
+locks and captured module/config checks. Ordinary mutations, direct
+field/native callbacks and local atomic owners are fenced during a profile
+handoff. An off or replaced module cannot silently start its still-owned
+agent on its own account. Incomplete rollback keeps its recovery record;
+unknown user changes are refused. Legacy stash ownership must be released
+by its previous descriptor before a new launch/profile adoption.
+
+Launchers reuse `Starting`, the ordinary CLI run/env path and the existing
+shell-function owner. `Starting.Active` supports an environment-only agent
+without a selected model. Typed Library locations reuse the instructions,
+MCP and skills writers; active profiles inherit their base identity. The
+full state/compatibility contract is in
+[SDK agents and sessions](extension-agents-sessions.md#sdk-15-launch-profile-and-library-metadata)
+and [ADR 0016](../adr/0016-sdk-agent-profiles.md).
+
+`TestExtensionAgentOrdinaryLifecycle` installs a real executable fixture and
+exercises ordinary discovery, connect, apply, rediscovery, preview, stale-file
+refusal, disconnect and disable. Sibling tests protect manual wiring and
+built-in ID ownership.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

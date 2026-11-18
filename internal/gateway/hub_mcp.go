@@ -248,7 +248,14 @@ func FromRouter(ctx context.Context) bool {
 // ctx is given them.
 func hubServersOf(ctx context.Context, agent string) []HubServer {
 	// a copy: the hub's own list isn't cut
-	ss := slices.Clone(MCPHub.Servers(agent))
+	var ss []HubServer
+	if contextual, ok := MCPHub.(interface {
+		ServersFor(context.Context, string) []HubServer
+	}); ok {
+		ss = slices.Clone(contextual.ServersFor(ctx, agent))
+	} else {
+		ss = slices.Clone(MCPHub.Servers(agent))
+	}
 	if FromRouter(ctx) {
 		ss = slices.DeleteFunc(ss, func(s HubServer) bool { return s.Bridge })
 	}
@@ -605,6 +612,7 @@ func hubServersFor(ctx context.Context, agent string) []HubServer {
 }
 
 func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, map[string]any) {
+	r = r.WithContext(extensionToolHTTPContext(r))
 	switch m.Method {
 	case "initialize":
 		say := "The tools of the MCP servers in magpie's Library that are switched on for this agent, each named <server>__<tool>. Add servers, or switch them on for an agent, in magpie's Library → MCP."

@@ -56,8 +56,9 @@ function renderPort(s) {
     }
     if (p === (s.port || 3425)) { d.value = null; d.err = ""; return renderPort(s); }
     save.disabled = true;
-    writingPrefs(api("settings/port", { port: p }).then((res) => res.settings && (prefs = res.settings, res)))
+    writingPrefs(api("settings/port", { port: p }))
       .then((res) => {
+        if (res.settings) prefs = state.settings = res.settings;
         portDraft = { value: null, err: "" };
         const n = res.port?.moved?.length || 0;
         if (res.port?.error) status(res.port.error, "err");
@@ -144,12 +145,15 @@ function renderBusyLoad(s) {
 // renderContextCap: one longest context for every model (settings.ContextCap,
 // WJaunita45604 on X). A window a model or its provider has set itself wins;
 // empty or "off" takes the cap away.
+let contextCapPending = false, contextCapModePending = false;
 function renderContextCap(s) {
   const field = input(s.contextCap ? contextsText({ "*": s.contextCap }) : "", t("None"));
   field.className = "words context-cap";
+  field.disabled = contextCapPending;
   field.style.cssText = "width:96px;flex:none";
   field.setAttribute("aria-label", t("Longest context"));
   const save = () => {
+    if (contextCapPending) return;
     const v = field.value.trim().toLowerCase();
     let at = 0;
     if (v && v !== "off") {
@@ -158,7 +162,10 @@ function renderContextCap(s) {
       at = r.map["*"];
     }
     if (at === (s.contextCap || 0)) return renderContextCap(s);
-    writingPrefs(api("settings/context-cap", { at })).then((ns) => { prefs = state.settings = ns; renderSettings(); })
+    contextCapPending = true;
+    field.disabled = true;
+    writingPrefs(api("settings/context-cap", { at })).finally(() => { contextCapPending = false; })
+      .then(async (ns) => { prefs = state.settings = await prefDeliver(ns); renderSettings(); })
       .catch((e) => { status(t(e.message), "err"); renderSettings(); });
   };
   field.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") field.blur(); if (e.key === "Escape") { field.value = s.contextCap ? contextsText({ "*": s.contextCap }) : ""; field.blur(); } };
@@ -167,13 +174,22 @@ function renderContextCap(s) {
   // every model (the shorter of the two is told; settings.ContextCapAll)
   const mode = el("button", "proto pick context-cap-mode");
   mode.type = "button";
+  mode.disabled = contextCapModePending;
   mode.setAttribute("aria-label", t("Longest context holds"));
   mode.replaceChildren(el("span", "", t(s.contextCapAll ? "Every model" : "Models without their own")), svg(CHEV, 11, 1.6));
   mode.onclick = (e) => {
     e.stopPropagation();
+    if (contextCapModePending) return;
     if (mode.classList.contains("open")) return closeProtoMenu();
     openProtoMenu(mode, [{ v: "own", name: t("Models without their own") }, { v: "all", name: t("Every model") }], s.contextCapAll ? "all" : "own",
-      (v) => { if ((v === "all") === !!s.contextCapAll) return; writingPrefs(api("settings/context-cap-mode", { all: v === "all" })).then((ns) => { prefs = state.settings = ns; renderSettings(); }).catch((er) => { status(t(er.message), "err"); renderSettings(); }); },
+      (v) => {
+        if (contextCapModePending || (v === "all") === !!s.contextCapAll) return;
+        contextCapModePending = true;
+        mode.disabled = true;
+        writingPrefs(api("settings/context-cap-mode", { all: v === "all" })).finally(() => { contextCapModePending = false; })
+          .then(async (ns) => { prefs = state.settings = await prefDeliver(ns); renderSettings(); })
+          .catch((er) => { status(t(er.message), "err"); renderSettings(); });
+      },
       "Longest context holds", "context-cap-menu");
   };
   const box = el("div", "");

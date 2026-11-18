@@ -16,6 +16,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fresh = () => ({
@@ -105,15 +106,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const cur = (id) => row(id).locator(".abal-cur");
         const menu = page.locator(".proto-menu");
         const item = (name) => menu.locator(".pm-item", { has: page.locator(".pm-name", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }) });
-        const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
         const still = async (id) => {
           await row(id).hover();
           await page.waitForTimeout(150);
-          const before = await row(id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled();
+          const before = await row(id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
           await pill(id).click();
           await page.waitForTimeout(200);
           assert.equal(await row(id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), before, `${id}'s row moved`);
-          assert.equal(await scrolled(), sc, "a click scrolled");
+          assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         };
         const posted = async (n) => {
           for (let i = 0; i < 60 && posts.length === n; i++) await new Promise((r) => setTimeout(r, 50));

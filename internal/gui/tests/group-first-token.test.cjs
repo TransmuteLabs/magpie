@@ -149,14 +149,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await minutes.inputValue(), "5");
       assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("first-in")), true, "the box is focused to type in");
       assert((await row.locator(".hint").textContent()).includes(await secs(300)));
-      await minutes.fill("abc");
-      assert.equal(await minutes.getAttribute("aria-invalid"), "true");
-      assert((await row.locator(".hint").textContent()).includes("abc"), "the hint says what is wrong");
-      // Save refused while the box doesn't read: the editor stays open on it, nothing sent
-      await ed.locator("button.primary", { hasText: w.save }).click();
-      assert.equal(await ed.locator("button.primary", { hasText: w.save }).evaluate((b) => b.classList.contains("busy")), false, "a bad time is not saved");
-      assert.equal(await minutes.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
-      assert.equal(await page.locator(".rt-gedit").count(), 1);
+      for (const invalid of ["abc", "9".repeat(400), "153722868"]) {
+        await minutes.fill(invalid);
+        assert.equal(await minutes.getAttribute("aria-invalid"), "true");
+        assert((await row.locator(".hint").textContent()).includes(invalid), "the hint says what is wrong");
+        const postCount = posts.length;
+        await ed.locator("button.primary", { hasText: w.save }).click();
+        assert.equal(await minutes.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
+        assert.equal(posts.length, postCount, "invalid minutes do not send a save");
+        assert(!(await page.locator("#status").textContent()).includes(invalid), "the inline error is not repeated over the Save button");
+      }
       await minutes.fill("2.5");
       assert.equal(await minutes.getAttribute("aria-invalid"), "false");
       assert((await row.locator(".hint").textContent()).includes(await secs(150)));

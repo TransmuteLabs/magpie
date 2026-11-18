@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const base = { icon: "generic", chat: "", responses: "", anthropic: "", catalog: "", agents: [], fallback: [], headers: {}, keyList: [], proxy: "" };
@@ -110,14 +111,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       return { page, errors };
     };
     const chip = (page, id) => page.locator(".editor .mchips .mchip", { hasText: new RegExp(`^${id}`) });
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 
     test(`${engine} ${lang}: a signed-in account's model is tested from its chip`, async (t) => {
       const tests = [];
       const { page, errors } = await open(t, "Codex", tests);
       const c = chip(page, "gpt-6-mini");
       await c.scrollIntoViewIfNeeded();
-      const before = await c.evaluate((e) => e.getBoundingClientRect().top), sc = await scrolled(page);
+      const before = await c.evaluate((e) => e.getBoundingClientRect().top), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await rclick(c);
       const menu = page.locator(".pop.row-menu");
       await menu.waitFor();
@@ -129,7 +129,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await c.locator(".tdot.ok").waitFor();
       assert.equal(await page.locator("#status").textContent(), w.ok);
       assert.equal(await c.evaluate((e) => e.getBoundingClientRect().top), before, "the chip moved");
-      assert.equal(await scrolled(page), sc, "the page scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "the page scrolled");
       const all = page.locator(".editor .mfoot").getByRole("button", { name: w.all, exact: true });
       assert(await all.isEnabled(), "Test models is offered");
       assert.deepEqual(errors, []);
@@ -140,7 +140,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const { page, errors } = await open(t, "Kiro", tests);
       const c = chip(page, "claude-haiku-5");
       await c.scrollIntoViewIfNeeded();
-      const before = await c.evaluate((e) => e.getBoundingClientRect().top), sc = await scrolled(page);
+      const before = await c.evaluate((e) => e.getBoundingClientRect().top), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await rclick(c);
       const menu = page.locator(".pop.row-menu");
       await menu.waitFor();
@@ -162,7 +162,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.waitFor({ state: "detached" });
       assert(await page.locator(".editor").isVisible(), "Esc closed the menu, not the editor");
       assert.equal(await c.evaluate((e) => e.getBoundingClientRect().top), before, "the chip moved");
-      assert.equal(await scrolled(page), sc, "the page scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "the page scrolled");
       const all = page.locator(".editor .mfoot").getByRole("button", { name: w.all, exact: true });
       assert(await all.isDisabled(), "Test models is shown, off");
       assert.equal(await all.getAttribute("title"), w.own);

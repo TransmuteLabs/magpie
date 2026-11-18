@@ -6,6 +6,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
@@ -34,6 +35,15 @@ var ErrNoTranscript = errors.New("this agent's conversations can't be shown")
 // HasTranscript says whether an agent's sessions can be read as a
 // transcript.
 func HasTranscript(agent string) bool {
+	if extensionSourceAgent(agent) {
+		view := sourceView.Load()
+		for _, record := range view.records {
+			if record.grant.descriptor.Agent == agent && record.grant.descriptor.Transcript {
+				return true
+			}
+		}
+		return false
+	}
 	switch agent {
 	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "openmausbot", "liveagent":
 		return true
@@ -65,14 +75,29 @@ func (t *Transcript) add(_ bool, p Part) bool {
 
 // TranscriptOf reads a session's conversation from its (main) file.
 func TranscriptOf(s Session) (Transcript, error) {
-	if !Reads(s.Agent) {
-		return Transcript{Parts: []Part{}}, ErrNotRead
+	return TranscriptOfContext(context.Background(), s)
+}
+
+func TranscriptOfContext(ctx context.Context, s Session) (Transcript, error) {
+	owner, err := selectSessionHistoryOwner(ctx, s)
+	if err != nil {
+		if errors.Is(err, ErrNotRead) {
+			return Transcript{Parts: []Part{}}, err
+		}
+		return Transcript{}, err
+	}
+	if owner.mode == historyDelegated {
+		return extensionSourceTranscript(ctx, owner.session.source)
 	}
 	out := Transcript{Parts: []Part{}}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return out, ErrNoTranscript
 	}
-	return out, readTranscript(s, out.add)
+	err = readHistoryTranscript(ctx, owner, nil, out.add)
+	if changed := owner.check(ctx); changed != nil {
+		return Transcript{}, changed
+	}
+	return out, err
 }
 
 // transcriptLead is the parts kept before the one TranscriptAt finds,
@@ -85,19 +110,35 @@ const transcriptLead = 6
 // part, the parts before it are left out (but a few) and From says how
 // many were.
 func TranscriptAt(s Session, needle string) (Transcript, error) {
+	return TranscriptAtContext(context.Background(), s, needle)
+}
+
+func TranscriptAtContext(ctx context.Context, session Session, needle string) (out Transcript, err error) {
 	if needle == "" {
-		return TranscriptOf(s)
+		return TranscriptOfContext(ctx, session)
 	}
-	if !Reads(s.Agent) {
-		return Transcript{Parts: []Part{}}, ErrNotRead
+	owner, err := selectSessionHistoryOwner(ctx, session)
+	if err != nil {
+		if errors.Is(err, ErrNotRead) {
+			return Transcript{Parts: []Part{}}, err
+		}
+		return Transcript{}, err
 	}
-	if !HasTranscript(s.Agent) || s.Path == "" {
+	defer func() {
+		if changed := owner.check(ctx); changed != nil {
+			out, err = Transcript{}, changed
+		}
+	}()
+	if owner.mode == historyDelegated {
+		return extensionSourceTranscript(ctx, owner.session.source)
+	}
+	if !HasTranscript(session.Agent) || session.Path == "" {
 		return Transcript{Parts: []Part{}}, ErrNoTranscript
 	}
 	// the parts TranscriptOf keeps are counted as it keeps them, and the
 	// found one's place among them noted, and the characters before it
 	at, saidAt, n, size, sizeAt, saidSize := -1, -1, 0, 0, 0, 0
-	if err := readTranscript(s, func(_ bool, p Part) bool {
+	if err := readHistoryTranscript(ctx, owner, nil, func(_ bool, p Part) bool {
 		p, ok := keep(p)
 		if !ok {
 			return true
@@ -122,11 +163,13 @@ func TranscriptAt(s Session, needle string) (Transcript, error) {
 		at, sizeAt = saidAt, saidSize
 	}
 	if at < 0 || sizeAt < transcriptMax {
-		return TranscriptOf(s)
+		out = Transcript{Parts: []Part{}}
+		err = readHistoryTranscript(ctx, owner, nil, out.add)
+		return out, err
 	}
-	out := Transcript{Parts: []Part{}, From: max(0, at-transcriptLead)}
+	out = Transcript{Parts: []Part{}, From: max(0, at-transcriptLead)}
 	i := 0
-	return out, readTranscript(s, func(in bool, p Part) bool {
+	err = readHistoryTranscript(ctx, owner, nil, func(in bool, p Part) bool {
 		if _, ok := keep(p); !ok {
 			return true
 		}
@@ -136,18 +179,35 @@ func TranscriptAt(s Session, needle string) (Transcript, error) {
 		}
 		return out.add(in, p)
 	})
+	return out, err
 }
 
-// readTranscript tells add each part of a session's conversation, in order,
-// as its agent's file has it.
-func readTranscript(s Session, add func(bool, Part) bool) error {
-	return readTranscriptOf(s, nil, add)
-}
-
-// readTranscriptOf is readTranscript decoding only the lines keep says yes
-// to, where a line stands alone (Claude's, Codex's, Kimi's); Pi's lines are a tree,
-// read whole.
-func readTranscriptOf(s Session, keep func([]byte) bool, add func(bool, Part) bool) error {
+func readHistoryTranscript(ctx context.Context, owner sessionHistoryOwner, keep func([]byte) bool, add func(bool, Part) bool) (err error) {
+	if err := owner.check(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		if changed := owner.check(ctx); changed != nil {
+			err = changed
+		}
+	}()
+	s := owner.session
+	appendPart := add
+	add = func(user bool, part Part) bool {
+		return ctx.Err() == nil && appendPart(user, part)
+	}
+	if owner.mode == historyDelegated {
+		transcript, err := extensionSourceTranscript(ctx, s.source)
+		if err != nil {
+			return err
+		}
+		for _, part := range transcript.Parts {
+			if !add(part.Role == "user", part) {
+				break
+			}
+		}
+		return nil
+	}
 	whole := Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}
 	switch s.Agent {
 	case "opencode":
@@ -172,6 +232,24 @@ func readTranscriptOf(s Session, keep func([]byte) bool, add func(bool, Part) bo
 		}
 		return claudeContentOf(whole, keep, add)
 	}
+}
+
+// readTranscript tells add each part of a session's conversation, in order,
+// as its agent's file has it.
+func readTranscript(s Session, add func(bool, Part) bool) error {
+	return readTranscriptOf(s, nil, add)
+}
+
+// readTranscriptOf is readTranscript decoding only the lines keep says yes
+// to, where a line stands alone (Claude's, Codex's, Kimi's); Pi's lines are a tree,
+// read whole.
+func readTranscriptOf(s Session, keep func([]byte) bool, add func(bool, Part) bool) error {
+	ctx := context.Background()
+	owner, err := selectSessionHistoryOwner(ctx, s)
+	if err != nil {
+		return err
+	}
+	return readHistoryTranscript(ctx, owner, keep, add)
 }
 
 // branchTranscript reads a branch (ccFamily) as its conversation went: the

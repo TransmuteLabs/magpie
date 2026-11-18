@@ -23,6 +23,7 @@ const atPointer = async (page, target, menu) => {
   assert((m.y >= py - 2 && m.y <= py + 14) || (m.y + m.h >= py - 14 && m.y + m.h <= py + 2), `menu at y=${m.y}-${m.y + m.h}, pointer at ${py}`);
 };
 const { chromium, webkit } = require("playwright");
+const { showOtherModels } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 // by-hand/model-x is a pick the vendor's list doesn't have, which magpie
@@ -122,6 +123,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.evaluate(() => [...document.querySelectorAll("*")].map((e) => e.scrollTop).join()), scroll, "nothing scrolled");
         return copies.at(-1);
       };
+
+      await showOtherModels(page, page.locator("#modal:not([hidden]) .editor"), relay.chosen.map((id) => relay.models.find((m) => m.id === id).name));
+      assert.equal(await chip("gpt-5.1").evaluate((c) => c.classList.contains("on")), false, "catalog exposure leaves GPT unpicked");
 
       // the id, not the name it is shown by
       assert.equal(await copyOf("GLM 5.3 Flash"), "zai/glm-5.3-flash");

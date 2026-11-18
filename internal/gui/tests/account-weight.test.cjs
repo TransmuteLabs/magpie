@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(process.env.MAGPIE_ACC_ASSETS || path.resolve(__dirname, "../assets"));
 const claude = () => ({
@@ -80,7 +81,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".row.provider", { hasText: "Claude Code" }).first().click();
       await page.locator('.editor .acc[data-account-id="off@example.com"]').waitFor();
       const chip = (id) => page.locator(`.editor .acc[data-account-id="${id}"] .key-weight`);
-      const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 
       // Smart: no weights shown
       assert.equal(await chip("max@example.com").isVisible(), false, `${at}: a weight under Smart`);
@@ -119,12 +119,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // view first (By weight can be a screen below it on a phone), as the
       // click would, so what is measured is the click's own scrolling
       await chip("pro@example.com").scrollIntoViewIfNeeded();
-      const atChip = await scrolled();
+      const atChip = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await chip("pro@example.com").click();
       const box = page.locator('.editor .acc[data-account-id="pro@example.com"] .key-weight-in');
       await box.waitFor();
       assert.equal(await box.getAttribute("aria-label"), await say(page, lang, "Account weight"), at);
-      assert.equal(await scrolled(), atChip, `${at}: a click scrolled`);
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), atChip, `${at}: a click scrolled`);
       await box.fill("2");
       await box.press("Enter");
       for (let i = 0; i < 60 && !posts.length; i++) await new Promise((r) => setTimeout(r, 50));

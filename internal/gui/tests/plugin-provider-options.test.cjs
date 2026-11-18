@@ -30,7 +30,12 @@ function server(lang, pluginState) {
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
-    if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true }, plugins: [
+    if (url.pathname === "/api/providers") return json({
+      providers: [{
+        id: "devin", name: "Devin", icon: "generic", models: [], agents: [],
+        account: { agent: "devin", agentName: "Devin", user: "fixture@example.test", logins: [] },
+      }],
+      presets: [], excluded: [], gateway: { running: true, window: true }, onPlugins: ["devin"], plugins: [
       { id: "devin", pid: "devin", name: "Devin", spec: DEVIN, signedIn: true, methods: [], models: 0, options: [{ key: "fast", label: "Fast", on: false }] },
       { id: "plain", pid: "plain", name: "Plain", spec: PLAIN, signedIn: true, methods: [], models: 0 },
     ] });
@@ -106,14 +111,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await devin.locator(".pm-opts").waitFor({ state: "detached" });
           assert.deepEqual(posted[1], { spec: DEVIN, options: null });
           assert.equal(await view.locator("select").count(), 0);
-          // the switches Devin declares are in its editor: the link says
-          // so and opens it, and the JSON editor goes with the page
           await devin.getByRole("button", { name: w.options, exact: true }).click();
+          const unsaved = '{"cacheKeepaliveInterval": 125}';
+          await ta.fill(unsaved);
           const go = devin.locator(".pm-opts").getByRole("button", { name: w.switches, exact: true });
           await go.click();
-          await page.locator("#view-providers").waitFor();
-          await page.waitForFunction(() => /view=providers/.test(location.search) || document.querySelector("#view-providers")?.offsetParent);
-          assert.equal(await view.locator(".pm-opts").count(), 0);
+          await page.locator("#view-providers").waitFor({ state: "visible" });
+          const providerSwitch = page.locator('#modal .editor .plugin-option[data-key="fast"]');
+          await providerSwitch.waitFor();
+          assert.equal(await providerSwitch.locator(".n").textContent(), "Fast");
+          await page.locator("#modal .editor .ed-cancel").click();
+          await providerSwitch.waitFor({ state: "detached" });
+          await page.locator('#nav button[data-view="plugins"]').click();
+          await ta.waitFor();
+          assert.equal(await ta.inputValue(), unsaved);
+          assert.equal(posted.length, 2);
           assert.deepEqual(errors, []);
           await page.context().close();
         }

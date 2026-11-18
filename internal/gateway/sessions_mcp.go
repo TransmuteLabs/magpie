@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,7 +120,7 @@ func (s *Server) sessionsMCPCall(r *http.Request, m mcpMessage) (any, map[string
 		case sessionsSearchTool:
 			said, err = sessionsSearch(r, a)
 		case sessionsReadTool:
-			said, err = sessionsRead(a)
+			said, err = sessionsRead(r.Context(), a)
 		default:
 			return nil, map[string]any{"code": -32602, "message": "unknown tool " + p.Name + ": this server has " + sessionsSearchTool + " and " + sessionsReadTool}
 		}
@@ -160,7 +161,15 @@ func sessionsSearch(r *http.Request, a sessionsArgs) (string, error) {
 	return sessions.SaidText(found, needle, sessionsHow), nil
 }
 
-func sessionsRead(a sessionsArgs) (string, error) {
+func sessionsRead(ctx context.Context, a sessionsArgs) (text string, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	defer func() {
+		if canceled := ctx.Err(); canceled != nil {
+			text, err = "", canceled
+		}
+	}()
 	agent, id, ok := strings.Cut(strings.TrimSpace(a.Session), ":")
 	if !ok || agent == "" || id == "" {
 		return "", errors.New("session is agent:id, as " + sessionsSearchTool + " names it")
@@ -168,9 +177,12 @@ func sessionsRead(a sessionsArgs) (string, error) {
 	if !sessions.Reads(agent) {
 		return "", sessions.ErrNotRead
 	}
-	s, found := sessions.Find(agent, id)
+	s, found := sessions.FindContext(ctx, agent, id)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !found {
 		return "", fmt.Errorf("no session %s", a.Session)
 	}
-	return sessions.SessionText(s, sessions.ReadAsk{Find: a.Find, From: int(a.From), MaxChars: int(a.MaxChars)}, sessionsHow)
+	return sessions.SessionTextContext(ctx, s, sessions.ReadAsk{Find: a.Find, From: int(a.From), MaxChars: int(a.MaxChars)}, sessionsHow)
 }

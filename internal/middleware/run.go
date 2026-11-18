@@ -262,7 +262,14 @@ func (r *Run) Wrap(w http.ResponseWriter) (http.ResponseWriter, func()) {
 	if !ev && !resp {
 		return w, func() {}
 	}
-	rw := &writer{w: w, run: r, ev: ev, resp: resp, status: http.StatusOK}
+	hooks := ResponseHooks{}
+	if ev {
+		hooks.Event = r.eventData
+	}
+	if resp {
+		hooks.Response = r.responseBody
+	}
+	rw := &writer{w: w, hooks: hooks, ev: ev, resp: resp, status: http.StatusOK}
 	return rw, rw.finish
 }
 
@@ -275,7 +282,7 @@ const (
 
 type writer struct {
 	w        http.ResponseWriter
-	run      *Run
+	hooks    ResponseHooks
 	ev, resp bool
 	mode     int
 	status   int
@@ -326,7 +333,16 @@ func (rw *writer) Write(p []byte) (int, error) {
 	switch rw.mode {
 	case asIs:
 		return rw.w.Write(p)
-	case whole:
+	}
+	if rw.hooks.MaxBytes > 0 && rw.buf.Len()+len(p) > rw.hooks.MaxBytes {
+		rw.mode = asIs
+		if _, err := rw.w.Write(rw.buf.Bytes()); err != nil {
+			return 0, err
+		}
+		rw.buf.Reset()
+		return rw.w.Write(p)
+	}
+	if rw.mode == whole {
 		return rw.buf.Write(p)
 	}
 	rw.buf.Write(p)
@@ -372,20 +388,7 @@ func (rw *writer) finish() {
 	switch rw.mode {
 	case whole:
 		body := rw.buf.Bytes()
-		for i, m := range rw.run.set.list {
-			if !m.hasResp {
-				continue
-			}
-			out, err := rw.run.apply(i, m.onResp, requestLimit, body, &rw.status)
-			switch {
-			case errors.Is(err, errDropped):
-				m.fail("onResponse", errors.New("returned null; a whole reply can't be dropped"))
-			case err != nil:
-				m.fail("onResponse", err)
-			case out != nil:
-				body = out
-			}
-		}
+		body = rw.hooks.Response(body, rw.status)
 		rw.w.Write(body)
 	case stream:
 		if rw.buf.Len() > 0 {
@@ -403,22 +406,11 @@ func (rw *writer) event(ev []byte) error {
 		_, err := rw.w.Write(ev)
 		return err
 	}
-	changed := false
-	for i, m := range rw.run.set.list {
-		if !m.hasEv || m.events != nil && !m.events[name] {
-			continue
-		}
-		out, err := rw.run.apply(i, m.onEv, eventLimit, data, nil)
-		switch {
-		case errors.Is(err, errDropped):
-			return nil
-		case err != nil:
-			m.fail("onEvent", err)
-		case out != nil:
-			data, changed = out, true
-		}
+	data, dropped := rw.hooks.Event(name, data)
+	if dropped {
+		return nil
 	}
-	if !changed {
+	if data == nil {
 		_, err := rw.w.Write(ev)
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
@@ -30,12 +31,33 @@ var held struct {
 	// fgen is filememo's generation it was built in: a write that only
 	// tells filememo (settings.Save, an account's file) has it built again
 	fgen uint64
-	// roots is the providers' and the settings' files as last looked at
-	roots [2]rootStamp
+	// roots is the provider, settings and extension catalog files as last
+	// looked at.
+	roots [3]rootStamp
 	// stamp is StampNow's files as a request holding the catalog last
 	// looked at them, at stampAt (stampNowFiles)
-	stamp   [3]rootStamp
-	stampAt time.Time
+	stamp    [4]rootStamp
+	stampAt  time.Time
+	accounts extensionAccountFiles
+}
+
+type extensionAccountFiles uint64
+
+var extensionAccountObservations struct {
+	sync.Mutex
+	stamp    extensionhost.AccountFileStamp
+	revision extensionAccountFiles
+}
+
+func extensionAccountFilesNow() extensionAccountFiles {
+	extensionAccountObservations.Lock()
+	defer extensionAccountObservations.Unlock()
+	stamp, err := extensionhost.AccountStamp()
+	if err != nil || !stamp.Equal(extensionAccountObservations.stamp) {
+		extensionAccountObservations.stamp = stamp
+		extensionAccountObservations.revision++
+	}
+	return extensionAccountObservations.revision
 }
 
 // rootStamp is a file's time and size, or that it wasn't there.
@@ -54,9 +76,9 @@ func stampOf(path string) rootStamp {
 }
 
 // heldFreshLocked drops what is built when a file was written since, by
-// this process (filememo.Gen) or, for the providers' and the settings'
-// files, by another (the CLI's "magpie group add", seen by the next
-// request, not a second later). Called with held held.
+// this process (filememo.Gen) or, for the provider, settings and extension
+// catalog files, by another (the CLI's write, seen by the next request,
+// not a second later). Called with held held.
 func heldFreshLocked(look bool) {
 	if g := filememo.Gen(); g != held.fgen {
 		held.built, held.fgen = nil, g
@@ -64,7 +86,7 @@ func heldFreshLocked(look bool) {
 	if !look {
 		return
 	}
-	for i, path := range [2]string{Path(), settings.Path()} {
+	for i, path := range [3]string{Path(), settings.Path(), extensionhost.CatalogPath()} {
 		if st := stampOf(path); st != held.roots[i] {
 			held.roots[i] = st
 			held.built = nil
@@ -97,11 +119,12 @@ func init() {
 	// a plugin's sign-in saved or renewed, a plugin added, and the models
 	// a plugin lists once the host has answered: the catalog may be
 	// another, so the model lists agents keep in their own files follow,
-	// as for a provider saved (catalog.Changed). Dropping only what is
+	// as for a provider saved (catalog.Touched). Dropping only what is
 	// held left Pi's models.json without a plugin's models signed in to
 	// after it was written (#2373).
 	plugin.OnChange(catalog.Touched)
 	plugin.OnListed(catalog.Touched)
+	extensionhost.OnChange(catalog.Touched)
 	// and what a request holds goes at once: a SyncCatalog running holds
 	// the plugins as they were before a sign-in, and a look at the
 	// accounts right after it was given those for a second (#2449)
@@ -115,7 +138,18 @@ var heldFor = time.Second
 // Hold keeps the catalog built once until release is called, for a
 // request that only reads; a write meanwhile (Changed) drops it.
 func Hold() (release func()) {
+	return holdWithAccounts(extensionAccountFilesNow)
+}
+
+func holdWithAccounts(read func() extensionAccountFiles) (release func()) {
+	accounts := read()
 	held.Lock()
+	if accounts > held.accounts {
+		held.accounts = accounts
+		held.built = nil
+		held.gen++
+		held.stampAt = time.Time{}
+	}
 	if held.holds == 0 {
 		// what was built under another environment (a HOME or config
 		// folder of its own: a test's) isn't this one's
@@ -166,22 +200,27 @@ func dropHeld() {
 // Two equal stamps mean nothing magpie wrote or was told of came between
 // them: no Changed (a provider, an account, a setting saved), no plugin's
 // change, no catalog.Reset or Touched, no filememo.Forget, the same
-// environment, and the providers', the settings' and the catalog's own
-// files with the same time and size, as another process leaves them.
+// environment, and the provider, settings, model cache and extension
+// catalog files with the same time and size, as another process leaves them.
 // What it can't see — another app rewriting an account's file, a model
 // retired by its date — a caller that keeps what it built across stamps
 // builds again now and then all the same.
 type Stamp struct {
 	gen, fgen, env uint64
-	roots          [3]rootStamp
+	roots          [4]rootStamp
+	accounts       extensionAccountFiles
 }
 
 // StampNow is the Stamp as things are now.
 func StampNow() Stamp {
 	held.Lock()
 	gen := held.gen
+	accounts, holding := held.accounts, held.holds > 0
 	held.Unlock()
-	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(), roots: stampNowFiles()}
+	if !holding {
+		accounts = extensionAccountFilesNow()
+	}
+	return Stamp{gen: gen, fgen: filememo.Gen(), env: environSum(), roots: stampNowFiles(), accounts: accounts}
 }
 
 // stampLooks counts StampNow's looks at its files, for a test.
@@ -190,11 +229,11 @@ var stampLooks atomic.Int64
 // stampNowFiles is the files' part of StampNow: looked at once by a
 // request holding the catalog and its overlapping ones, for heldFor at
 // most, as what is held is. KeptListing takes a stamp for every
-// provider, and its three stats a provider were most of what a
+// provider, and its stats per provider were most of what a
 // Providers page poll spent (~600 of them a poll with 200 providers).
 // Another process's write is seen by the next request, as Hold's look
 // sees it.
-func stampNowFiles() [3]rootStamp {
+func stampNowFiles() [4]rootStamp {
 	held.Lock()
 	roots, fresh := held.stamp, held.holds > 0 && !held.stampAt.IsZero() && time.Since(held.stampAt) < heldFor
 	held.Unlock()
@@ -202,7 +241,7 @@ func stampNowFiles() [3]rootStamp {
 		return roots
 	}
 	stampLooks.Add(1)
-	roots = [3]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath())}
+	roots = [4]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath()), stampOf(extensionhost.CatalogPath())}
 	held.Lock()
 	if held.holds > 0 {
 		held.stamp, held.stampAt = roots, time.Now()
@@ -405,8 +444,10 @@ func keptFit[T any](key string, fits func(any) bool, build func() T) T {
 var staleFor struct {
 	sync.Mutex
 	held, kept time.Duration
-	next       time.Time
+	next       time.Duration
 }
+
+var staleEpoch = time.Now()
 
 // armStaleSweep arms the sweep, unless one is armed for as soon: what was
 // held or kept past its time was dropped only when the next request
@@ -423,8 +464,8 @@ func armStaleSweep() {
 // staleFor is held.
 func staleArmLocked(d time.Duration) {
 	d = max(d, 10*time.Millisecond)
-	at := time.Now().Add(d)
-	if !staleFor.next.IsZero() && !at.Before(staleFor.next) {
+	at := time.Since(staleEpoch) + d
+	if staleFor.next != 0 && at >= staleFor.next {
 		return
 	}
 	staleFor.next = at
@@ -437,7 +478,7 @@ func sweepStale() {
 	staleFor.Lock()
 	heldFor, keptFor := staleFor.held, staleFor.kept
 	// let go first: what is held or kept while this one looks arms its own
-	staleFor.next = time.Time{}
+	staleFor.next = 0
 	staleFor.Unlock()
 	next := time.Duration(-1)
 	soon := func(left time.Duration) {

@@ -97,10 +97,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             // scrolled to the foot, the bar is where it always was: after
             // the editor's last row
             {
-              const b = await ed.boundingBox();
-              await page.mouse.wheel(0, Math.round(b.y + b.height - 700 + 40));
+              const b = await ed.evaluate((editor) => ({
+                bottom: editor.getBoundingClientRect().bottom,
+                viewBottom: editor.closest(".view").getBoundingClientRect().bottom,
+              }));
+              await page.mouse.wheel(0, Math.ceil(b.bottom - b.viewBottom + 40));
             }
-            await page.waitForFunction(() => document.querySelector(".rt-gedit").getBoundingClientRect().bottom <= innerHeight);
+            await page.waitForFunction(() => {
+              const editor = document.querySelector(".rt-gedit");
+              return editor.getBoundingClientRect().bottom <= editor.closest(".view").getBoundingClientRect().bottom;
+            });
             const foot = await page.evaluate(() => {
               const ed = document.querySelector(".rt-gedit"), bar = ed.querySelector(":scope > .bar");
               const last = bar.previousElementSibling;

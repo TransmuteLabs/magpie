@@ -186,6 +186,9 @@ func glanceAll(fs []file) []*state {
 // spent, which only a whole read can count. Its last activity is the
 // file's time.
 func glance(f file) *state {
+	if source := f.m().source; source != nil {
+		return source.summary
+	}
 	p := parserFor(f.agent)
 	s := &state{}
 	var head func([]byte) bool
@@ -263,6 +266,13 @@ func savable() map[string]*state {
 		if c[p] == g {
 			delete(c, p)
 		}
+	}
+	for path, value := range c {
+		if value != nil && value.sourceOwned {
+			delete(c, path)
+			continue
+		}
+		c[path] = snapshotCacheState(value)
 	}
 	return c
 }

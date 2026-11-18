@@ -13,8 +13,14 @@ import (
 // provider says it takes (its auth hook's maxConcurrency, or its
 // package.json's magpie.maxConcurrency), else none.
 func (p Provider) Concurrency() int {
-	if p.MaxConcurrency != nil {
-		return max(*p.MaxConcurrency, 0)
+	limit := p.MaxConcurrency
+	if limit == nil && p.Account != nil {
+		if stored, ok := storedPicks(p.ID); ok {
+			limit = stored.MaxConcurrency
+		}
+	}
+	if limit != nil {
+		return max(*limit, 0)
 	}
 	return p.PluginConcurrency()
 }
@@ -23,6 +29,13 @@ func (p Provider) Concurrency() int {
 // at once, as it lists it now; 0 for none, or for a provider no plugin
 // gives.
 func (p Provider) PluginConcurrency() int {
+	if p.IsExtension() {
+		concurrency, _ := p.extensionDefaults()
+		if concurrency != nil {
+			return *concurrency
+		}
+		return 0
+	}
 	if !p.IsPlugin() {
 		return 0
 	}
@@ -55,6 +68,13 @@ func (p Provider) AtOnce() int {
 // says may take requests at the same time, as it lists it now; 0 for none,
 // or for a provider no plugin gives.
 func (p Provider) PluginAtOnce() int {
+	if p.IsExtension() {
+		_, accounts := p.extensionDefaults()
+		if accounts != nil {
+			return *accounts
+		}
+		return 0
+	}
 	if !p.IsPlugin() {
 		return 0
 	}

@@ -29,6 +29,10 @@ func home(t *testing.T) {
 // sample is a value of t that isn't was, as JSON carries it.
 func sample(t reflect.Type, key string, was reflect.Value) reflect.Value {
 	v := reflect.New(t).Elem()
+	if key == "requestPolicy" {
+		_ = json.Unmarshal([]byte(`{"defaults":{"maxRetries":7}}`), v.Addr().Interface())
+		return v
+	}
 	switch t.Kind() {
 	case reflect.Bool:
 		v.SetBool(!was.Bool())

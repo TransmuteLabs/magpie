@@ -18,13 +18,15 @@ function held() {
   return { promise, release };
 }
 
-async function openPage(t, engine, lang = "en", width = 1180, reducedMotion = "no-preference") {
+async function openPage(t, engine, lang = "en", width = 1180, reducedMotion = "no-preference", delayedControl = "") {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   const page = await browser.newPage({ viewport: { width, height: 1000 }, reducedMotion });
   page.setDefaultTimeout(8000);
   page.setDefaultNavigationTimeout(60000);
   const errors = [], settingsAsked = held(), settings = held(), compactAsked = held(), compact = held();
-  t.after(async () => { settings.release(); compact.release(); await browser.close(); });
+  const controlAsked = held(), control = held();
+  const settingsQueue = [], settingsHeld = [];
+  t.after(async () => { settings.release(); compact.release(); control.release(); settingsHeld.forEach((read) => read.answer.release()); await browser.close(); });
   let reads = 0, fail = false;
   page.on("pageerror", (e) => errors.push(e.message));
   await page.addInitScript(() => {
@@ -46,8 +48,9 @@ async function openPage(t, engine, lang = "en", width = 1180, reducedMotion = "n
     if (url.pathname === "/api/state") return json({ agents: [agentRow("codex", "Codex"), agentRow("claude", "Claude Code"), agentRow("grok", "Grok Build"), agentRow("goose", "Goose")], profiles: [], settings: { lang, theme: "light" } });
     if (url.pathname === "/api/settings") {
       reads++;
-      settingsAsked.release();
-      await settings.promise;
+      const pending = settingsQueue.shift() || { asked: settingsAsked, answer: settings };
+      pending.asked.release();
+      await pending.answer.promise;
       if (fail) return route.fulfill({ status: 500, body: "settings unavailable" });
       return json({ lang, theme: "light", tray: "panel", compactAt: 200000, codexAgentsV1: true, visionModels: [], imageGenModels: [], workbuddyCheckins: [], lanURLs: [], titleModels: [], redactWords: [] });
     }
@@ -57,6 +60,7 @@ async function openPage(t, engine, lang = "en", width = 1180, reducedMotion = "n
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
     if (url.pathname.startsWith("/api/")) return json({});
     if (url.pathname === "/agentcompact.js") { compactAsked.release(); await compact.promise; }
+    if (url.pathname === `/${delayedControl}.js`) { controlAsked.release(); await control.promise; }
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
     try { await route.fulfill({ body: await fs.readFile(file), contentType }); }
@@ -64,7 +68,13 @@ async function openPage(t, engine, lang = "en", width = 1180, reducedMotion = "n
   });
   await page.goto("http://magpie.test/?view=agents");
   await link(page, "codex").waitFor();
-  return { page, errors, settingsAsked, settings, compactAsked, compact, reads: () => reads, fail: (v) => { fail = v; } };
+  const holdSettingsRead = () => {
+    const pending = { asked: held(), answer: held() };
+    settingsQueue.push(pending);
+    settingsHeld.push(pending);
+    return pending;
+  };
+  return { page, errors, settingsAsked, settings, compactAsked, compact, controlAsked, control, holdSettingsRead, reads: () => reads, fail: (v) => { fail = v; } };
 }
 
 async function slideEndsWhole(page, id) {
@@ -173,17 +183,76 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
   test(`${engine}: a late settings read cannot replace the agent clicked next`, async (t) => {
     const f = await openPage(t, engine), { page } = f;
+    const firstButton = await link(page, "codex").elementHandle();
     await link(page, "codex").click();
     await f.settingsAsked.promise;
+    const next = f.holdSettingsRead();
     await link(page, "goose").click();
+    await next.asked.promise;
+    assert.equal(await page.locator(row("goose") + " .ag-exp").count(), 0, "the next agent waits for its own settings");
+    f.compact.release();
+    next.answer.release();
     await slideEndsWhole(page, "goose");
+    assert.equal(f.reads(), 2, "the next agent completes a separate settings read while the first is held");
     const answered = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/settings");
     f.settings.release(); f.compact.release();
     await answered;
-    await page.waitForFunction(() => !document.querySelector('.row.agent[data-id="codex"] .ag-link').hasAttribute("aria-busy"));
+    await page.waitForFunction((button) => !button.disabled, firstButton);
+    await page.evaluate(async () => {
+      for (let index = 0; index < detailSlides.length; index++) {
+        const run = detailSlides[index];
+        if (run.playState !== "finished") {
+          const ended = new Promise((resolve) => run.addEventListener("finish", resolve, { once: true }));
+          run.finish();
+          await ended;
+        }
+        await run.finished;
+      }
+    });
     assert.equal(await page.locator(row("codex") + " .ag-exp").count(), 0);
     assert.equal(await link(page, "goose").getAttribute("aria-expanded"), "true");
     assert.deepEqual(f.errors, []);
+  });
+
+  test(`${engine}: context-only Details waits for its controls module before measuring`, async (testContext) => {
+    const fixture = await openPage(testContext, engine, "en", 1180, "no-preference", "agentwindow"), { page } = fixture;
+    fixture.settings.release(); fixture.compact.release();
+    await link(page, "goose").click();
+    await fixture.controlAsked.promise;
+    assert.equal(await page.locator(row("goose") + " .ag-exp").count(), 0, "no partial Details while context controls are unread");
+    fixture.control.release();
+    await page.locator(row("goose") + " .agent-window").waitFor();
+    await slideEndsWhole(page, "goose");
+    assert.deepEqual(fixture.errors, []);
+  });
+
+  test(`${engine}: Details includes its own Advanced fold in the measured height`, async (testContext) => {
+    const fixture = await openPage(testContext, engine), { page } = fixture;
+    const agent = agentRow("codex", "Codex");
+    agent.own = [{ key: "approval_mode", label: "approval mode", value: "on-request", options: [{ value: "on-request", label: "On request" }] }];
+    await page.route("http://magpie.test/api/state", (route) => route.fulfill({ json: { agents: [agent], profiles: [], settings: { lang: "en", theme: "light" } } }));
+    await page.reload();
+    fixture.settings.release(); fixture.compact.release();
+    await link(page, "codex").click();
+    await page.locator(row("codex") + " .own-fields").waitFor();
+    await slideEndsWhole(page, "codex");
+    assert.deepEqual(fixture.errors, []);
+  });
+
+  test(`${engine}: OMP Details waits for its advisor controls before measuring`, async (testContext) => {
+    const fixture = await openPage(testContext, engine, "en", 1180, "no-preference", "ompadvisor"), { page } = fixture;
+    const agent = agentRow("omp", "OMP");
+    agent.fields.push(...["advisor_review", "advisor_wait", "advisor_wake"].map((key) => ({ key, label: key, value: "", options: [] })));
+    await page.route("http://magpie.test/api/state", (route) => route.fulfill({ json: { agents: [agent], profiles: [], settings: { lang: "en", theme: "light" } } }));
+    await page.reload();
+    fixture.settings.release(); fixture.compact.release();
+    await link(page, "omp").click();
+    await fixture.controlAsked.promise;
+    assert.equal(await page.locator(row("omp") + " .ag-exp").count(), 0, "no partial Details while advisor controls are unread");
+    fixture.control.release();
+    await page.locator(row("omp") + " .ag-advisor").first().waitFor();
+    await slideEndsWhole(page, "omp");
+    assert.deepEqual(fixture.errors, []);
   });
 
   test(`${engine}: reduced motion waits for real settings, then opens at once`, async (t) => {

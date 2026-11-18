@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 type fastUp struct {
 	mu                    sync.Mutex
 	host, path, beta, raw string
+	nonce                 string
 	// refuseTier turns service_tier away as OpenAI does on a model
 	// without it; refused counts the times
 	refuseTier bool
@@ -26,6 +28,10 @@ type fastUp struct {
 }
 
 func (u *fastUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.Header.Get("X-Fixture-Fast") != u.nonce {
+		http.NotFound(w, r)
+		return
+	}
 	b, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
 	u.path, u.beta, u.raw = r.URL.Path, r.Header.Get("anthropic-beta"), string(b)
@@ -92,7 +98,7 @@ func (u *fastUp) last(t *testing.T) (host, path, beta string, body map[string]an
 func fasted(t *testing.T) (*Server, *fastUp) {
 	t.Helper()
 	fresh(t)
-	up := &fastUp{}
+	up := &fastUp{nonce: rand.Text()}
 	srv := httptest.NewServer(up)
 	t.Cleanup(srv.Close)
 	to, _ := url.Parse(srv.URL)
@@ -107,9 +113,13 @@ func fasted(t *testing.T) (*Server, *fastUp) {
 	}
 	s := New()
 	s.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		up.mu.Lock()
-		up.host = r.URL.Host
-		up.mu.Unlock()
+		r = r.Clone(r.Context())
+		r.Header.Set("X-Fixture-Fast", up.nonce)
+		if r.Method == http.MethodPost {
+			up.mu.Lock()
+			up.host = r.URL.Host
+			up.mu.Unlock()
+		}
 		r.URL.Scheme, r.URL.Host = to.Scheme, to.Host
 		return http.DefaultTransport.RoundTrip(r)
 	})}
@@ -207,6 +217,11 @@ func TestFastMemberLeftAlone(t *testing.T) {
 		t.Helper()
 		for _, a := range fastAsks {
 			r := postProto(t, s, a.path, a.body)
+			unrelated := httptest.NewRequest(http.MethodGet, "/", nil)
+			unrelated.Header.Set("X-Fixture-Fast", up.nonce)
+			up.ServeHTTP(httptest.NewRecorder(), unrelated)
+			up.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, a.path,
+				strings.NewReader(`{"service_tier":"unrelated","speed":"fast"}`)))
 			_, _, beta, body := up.last(t)
 			if _, ok := body["service_tier"]; ok {
 				t.Errorf("%s %s: tier sent %v", what, a.name, body)

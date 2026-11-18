@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -97,14 +98,70 @@ func tuiWords(t *testing.T) (all []string, fmts map[string]bool) {
 	for _, s := range []string{allModels, allFolders, "models", "folders", "tokens", "cost", ruleHint, provider.TraeRefusedWords} {
 		add(s)
 	}
-	for _, a := range agent.All() {
-		for _, f := range a.Fields {
-			if !keepAsIs[f.Label] {
-				add(f.Label)
-			}
+	fields, err := nativeTUIFields(agent.All(), func() ([]agent.ExtensionAgent, error) {
+		return agent.ExtensionAgents(extension.Default())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range fields {
+		if !keepAsIs[field.Label] {
+			add(field.Label)
 		}
 	}
 	return all, fmts
+}
+
+func nativeTUIFields(all []*agent.Agent, read func() ([]agent.ExtensionAgent, error)) ([]agent.Field, error) {
+	declared, err := read()
+	if err != nil {
+		return nil, err
+	}
+	owners := map[string]map[string]string{}
+	for _, item := range declared {
+		if _, exists := owners[item.Agent.ID]; exists {
+			return nil, fmt.Errorf("duplicate declared agent %s", item.Agent.ID)
+		}
+		fields := map[string]string{}
+		for _, field := range item.Agent.Fields {
+			if _, exists := fields[field.Key]; exists {
+				return nil, fmt.Errorf("duplicate declared field %s/%s", item.Agent.ID, field.Key)
+			}
+			fields[field.Key] = field.Label
+		}
+		owners[item.Agent.ID] = fields
+	}
+	var fields []agent.Field
+	native := map[string]bool{}
+	appendNative := func(row *agent.Agent) {
+		if row.Plugin == "" && !native[row.ID] {
+			native[row.ID] = true
+			fields = append(fields, row.Fields...)
+		}
+	}
+	for _, row := range all {
+		if row.Plugin != "" {
+			continue
+		}
+		base, _, sdkOwned := row.SDKLibraryTarget()
+		if !sdkOwned {
+			appendNative(row)
+			continue
+		}
+		labels, exists := owners[row.ID]
+		if !exists || len(labels) != len(row.Fields) {
+			return nil, fmt.Errorf("SDK agent %s has no matching active declaration", row.ID)
+		}
+		for _, field := range row.Fields {
+			if label, exists := labels[field.Key]; !exists || label != field.Label {
+				return nil, fmt.Errorf("SDK field %s/%s has no matching declaration", row.ID, field.Key)
+			}
+		}
+		if base != nil && base != row {
+			appendNative(base)
+		}
+	}
+	return fields, nil
 }
 
 // keepAsIs are field labels that are names, not words: the same in any

@@ -69,6 +69,7 @@ func pluginCheckinLegacyKey(id string, a plugin.Account) string {
 type pluginCheckinProvider struct {
 	ID, Name string
 	accounts []pluginCheckinAcct
+	recheck  bool
 }
 
 // pluginCheckinProviders are the plugins' providers whose plugin checks
@@ -274,7 +275,7 @@ func PluginCheckinOn(s settings.Settings, id string) bool {
 func pluginRechecks(id string) bool { return id == "qoder" || id == QoderCNID || id == "zcode" }
 
 func (p pluginCheckinProvider) checkiner(now func() time.Time) checkiner {
-	return checkiner{path: pluginCheckinPath(), now: now, mu: &pluginCheckinMu, by: pluginCheckinBy(p.ID), label: p.ID, recheck: pluginRechecks(p.ID), accounts: func() []checkinAcct {
+	return checkiner{path: pluginCheckinPath(), now: now, mu: &pluginCheckinMu, by: pluginCheckinBy(p.ID), label: p.ID, recheck: p.recheck || pluginRechecks(p.ID), accounts: func() []checkinAcct {
 		var out []checkinAcct
 		for _, a := range p.accounts {
 			out = append(out, checkinAcct{User: a.User, On: a.On, key: a.key, provider: a.card, do: a.do})
@@ -297,7 +298,7 @@ func (c pluginCheckiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyC
 		return nil
 	}
 	var out []WorkBuddyCheckin
-	for _, p := range pluginCheckinProviders() {
+	for _, p := range allPluginCheckinProviders() {
 		if c.only != nil && !c.only(p.ID) {
 			continue
 		}
@@ -342,7 +343,7 @@ func PluginCheckins() []PluginCheckin {
 	st := shownCheckins(pluginCheckinPath())
 	s := settings.Load()
 	var out []PluginCheckin
-	for _, p := range pluginCheckinProviders() {
+	for _, p := range allPluginCheckinProviders() {
 		pc := PluginCheckin{ID: p.ID, Name: p.Name, On: PluginCheckinOn(s, p.ID)}
 		listed := map[string]bool{}
 		for _, a := range p.accounts {
@@ -359,12 +360,12 @@ func PluginCheckins() []PluginCheckin {
 }
 
 // HasPluginCheckin says whether a plugin that checks in is signed in.
-func HasPluginCheckin() bool { return len(pluginCheckinProviders()) > 0 }
+func HasPluginCheckin() bool { return len(allPluginCheckinProviders()) > 0 }
 
 // pluginCheckinMarks is qs with the cards of the plugins' accounts that
 // check in marked, as WithCheckins marks the built-ins'.
 func pluginCheckinMarks(qs []SubscriptionQuota) []SubscriptionQuota {
-	ps := pluginCheckinProviders()
+	ps := allPluginCheckinProviders()
 	if len(ps) == 0 {
 		return qs
 	}

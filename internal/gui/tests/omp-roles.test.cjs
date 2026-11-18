@@ -140,6 +140,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/");
       await page.locator(omp).waitFor();
       await page.locator(`${omp} .ag-link`).click();
+      await page.locator(`${omp} .ag-exp`).waitFor();
 
       // one square for the roles; the model and the session's thinking are the pickers
       const square = page.locator(`${omp} .extras-cell .field.extra[data-key="tiers"]`);

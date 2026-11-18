@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const until = new Date(Date.now() + 10 * 60e3).toISOString();
@@ -98,7 +99,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(posts.length, n);
     };
     const later = () => { let done; const p = new Promise((r) => { done = r; }); return { p, done }; };
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     const posted = async (posts) => {
       for (let i = 0; i < 60 && !posts.length; i++) await new Promise((r) => setTimeout(r, 50));
       return posts.at(-1);
@@ -110,11 +110,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(await page.locator('.acc[data-account-id="bbbbbbbbbb"] .key-rest').textContent(), w.rest);
       assert.equal(await page.locator('.acc[data-account-id="aaaaaaaaaa"] .key-rest').count(), 0);
       await page.getByRole("button", { name: w.another }).click();
-      const sc = await scrolled(page);
+      const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await page.locator(".acc.adding").getByRole("button", { name: w.several }).click();
       const box = page.locator(".acc.adding.bulk textarea");
       await box.waitFor();
-      assert.equal(await scrolled(page), sc, "a click scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
       await box.fill("sk-one\nsk-two, sk-three\n\nsk-two");
       assert.equal((await page.locator(".bulk-count").textContent()).trim(), w.three);
       await page.locator(".acc.adding.bulk").getByRole("button", { name: w.add, exact: true }).click();

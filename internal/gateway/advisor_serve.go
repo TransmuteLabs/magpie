@@ -254,6 +254,7 @@ func (e errAdvice) Error() string { return e.err.Error() }
 // advise asks the advisor model, model, about q, the model's request, and
 // what it said before calling the advisor.
 func (s *Server) advise(ctx context.Context, q *Request, said []Part, model string) (string, error) {
+	ctx = ownOperation(ctx)
 	body := buildAnthropic(adviceFor(q, said), model)
 	// the caller named the advisor's model, not magpie's settings, so it is
 	// asked as the caller: the key's models and limits hold it (no

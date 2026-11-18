@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,10 +27,13 @@ func (q quitSays) Quit() { q.quit <- struct{}{} }
 func TestRestartStartsMagpieAgain(t *testing.T) {
 	sandboxHome(t)
 	oldBundle, oldExe, oldRelaunch, oldHands := bundleOf, executable, relaunchBinary, handsOver
+	oldUpdates := updates
 	t.Cleanup(func() {
 		bundleOf, executable, relaunchBinary, handsOver = oldBundle, oldExe, oldRelaunch, oldHands
+		updates = oldUpdates
 		webReexec.Store(false)
 	})
+	updates = &updater{}
 	bundleOf = func() string { return "" }
 	executable = func() (string, error) { return "/opt/magpie/magpie", nil }
 	handsOver = func() bool { return false } // Windows': opened once this one has exited
@@ -73,6 +77,7 @@ func TestRestartStartsMagpieAgain(t *testing.T) {
 	if !quits(app) {
 		t.Fatal("the app didn't quit for the restart")
 	}
+	updates = &updater{}
 
 	got, fail = nil, errors.New("no helper to open it again")
 	if rec := post(app, `{}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "couldn't start again") {
@@ -95,6 +100,7 @@ func TestRestartStartsMagpieAgain(t *testing.T) {
 	if !quits(inner) {
 		t.Fatal("the app didn't quit for a browser's restart")
 	}
+	updates = &updater{}
 
 	// magpie web: run again in its place, nothing relaunched
 	got = nil
@@ -117,5 +123,62 @@ func TestRestartStartsMagpieAgain(t *testing.T) {
 func TestUpdateSaysItsRun(t *testing.T) {
 	if j := updates.json(); j.Run == 0 || j.Run != runStarted {
 		t.Fatalf("run %d, want %d", j.Run, runStarted)
+	}
+}
+
+func TestRestartRejectsConcurrentRelaunch(t *testing.T) {
+	sandboxHome(t)
+	oldBundle, oldExe, oldRelaunch, oldHands := bundleOf, executable, relaunchBinary, handsOver
+	oldUpdates := updates
+	t.Cleanup(func() {
+		bundleOf, executable, relaunchBinary, handsOver = oldBundle, oldExe, oldRelaunch, oldHands
+		updates = oldUpdates
+	})
+	updates = &updater{}
+	bundleOf = func() string { return "" }
+	executable = func() (string, error) { return "/opt/magpie/magpie", nil }
+	handsOver = func() bool { return false }
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	var relaunches atomic.Int32
+	relaunchBinary = func(string, string, bool, string) error {
+		if relaunches.Add(1) == 1 {
+			close(entered)
+			<-resume
+		}
+		return nil
+	}
+
+	app := quitSays{quit: make(chan struct{}, 3)}
+	mux := http.NewServeMux()
+	restartRoutes(mux, app)
+	post := func() int {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest("POST", "/api/restart", strings.NewReader("{}")))
+		return recorder.Code
+	}
+	first := make(chan int, 1)
+	go func() { first <- post() }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		close(resume)
+		<-first
+		t.Fatal("the first restart did not reach the relaunch")
+	}
+	second := post()
+	close(resume)
+	if status := <-first; status != http.StatusNoContent {
+		t.Fatalf("first restart returned %d", status)
+	}
+	third := post()
+	if second != http.StatusBadRequest || third != http.StatusBadRequest || relaunches.Load() != 1 {
+		t.Fatalf("duplicate restarts returned %d and %d with %d relaunches", second, third, relaunches.Load())
+	}
+	select {
+	case <-app.quit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the accepted restart did not request exit")
 	}
 }

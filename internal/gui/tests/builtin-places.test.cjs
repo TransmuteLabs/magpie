@@ -90,16 +90,19 @@ const past = (box) => box.evaluate((b) => {
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(engine + ": a built-in's switch, settings and page lead to each other", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
-    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const shots = [];
     t.after(async () => {
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
         for (const [name, buf] of shots) await fs.writeFile(path.join(process.env.ARTIFACT_DIR, `${engine}-builtin-places-${name}.png`), buf);
       }
-      await browser.close();
     });
-    const open = async (lang, width, where, opts) => {
+    const leaf = (name, body) => t.test(name, async (test) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      test.after(() => browser.close());
+      await body((...args) => open(browser, ...args));
+    });
+    const open = async (browser, lang, width, where, opts) => {
       const f = fixture(lang, opts);
       const context = await browser.newContext({ viewport: { width, height: 800 }, reducedMotion: "reduce" });
       const page = await context.newPage();
@@ -119,7 +122,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     for (const lang of LANGS) {
       const w = (s) => tr(lang, s);
       for (const width of [1100, 420]) {
-        await t.test(`${lang} at ${width}px: masking's Built-in row goes to its settings and its page`, async () => {
+        await leaf(`${lang} at ${width}px: masking's Built-in row goes to its settings and its page`, async (open) => {
           for (const link of [0, 1]) {
             const { page } = await open(lang, width, "?view=plugins");
             await builtinTab(page);
@@ -138,7 +141,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await page.context().close();
           }
         });
-        await t.test(`${lang} at ${width}px: on with nothing to mask, masking's Built-in row says so`, async () => {
+        await leaf(`${lang} at ${width}px: on with nothing to mask, masking's Built-in row says so`, async (open) => {
           const { page } = await open(lang, width, "?view=plugins", { masks: false });
           await builtinTab(page);
           const line = featRow(page, "redact").locator(".who .feat-go");
@@ -149,7 +152,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(page.errors, []);
           await page.context().close();
         });
-        await t.test(`${lang} at ${width}px: groups on with Routing off say their page went with it, and turn it on`, async () => {
+        await leaf(`${lang} at ${width}px: groups on with Routing off say their page went with it, and turn it on`, async (open) => {
           const { page, posts } = await open(lang, width, "?view=plugins", { routing: false });
           await builtinTab(page);
           const line = featRow(page, "groups").locator(".who .feat-go");
@@ -164,7 +167,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(page.errors, []);
           await page.context().close();
         });
-        await t.test(`${lang} at ${width}px: off, Built-in goes to its settings only, and they say it is off`, async () => {
+        await leaf(`${lang} at ${width}px: off, Built-in goes to its settings only, and they say it is off`, async (open) => {
           const { page, posts } = await open(lang, width, "?view=plugins", { redact: false, otel: false });
           await builtinTab(page);
           const line = featRow(page, "redact").locator(".who .feat-go");
@@ -186,14 +189,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(page.errors, []);
           await page.context().close();
         });
-        await t.test(`${lang} at ${width}px: on, Privacy has no off row`, async () => {
+        await leaf(`${lang} at ${width}px: on, Privacy has no off row`, async (open) => {
           const { page } = await open(lang, width, "?view=settings&tab=privacy");
           await page.locator("#redactList .row").first().waitFor();
           assert.equal(await page.locator("#redactList .row.feat-off").count(), 0);
           assert.deepEqual(page.errors, []);
           await page.context().close();
         });
-        await t.test(`${lang} at ${width}px: Masking's head goes back to Settings › Privacy`, async () => {
+        await leaf(`${lang} at ${width}px: Masking's head goes back to Settings › Privacy`, async (open) => {
           const { page } = await open(lang, width, "?view=masking");
           const head = page.locator("#maskCard .msk-head");
           const set = head.locator("button.link", { hasText: w("Settings") + " › " + w("Privacy") });

@@ -33,6 +33,7 @@ import (
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/redact"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/steady"
 )
 
@@ -544,6 +545,8 @@ type Settings struct {
 	// chain of its own waited that long before it moved on. The account
 	// rests as long either way. Unset, the wait goes out as it is.
 	RetryAfterCap *int `json:"retryAfterCap,omitempty"`
+	// RequestPolicy governs shared retry budgets and bounded response rules.
+	RequestPolicy *requestpolicy.Config `json:"requestPolicy,omitempty"`
 	// NoAccountDiscovery leaves every agent's sign-in unread (#1535,
 	// MaxHaiCom): no credential file, Keychain item or agent CLI is asked
 	// who is signed in, and no subscription is offered; API-key providers
@@ -2591,7 +2594,12 @@ func UseRedactModel(name string) error {
 }
 
 // save is called under fileMu. Only the consent setter may replace recording.
-func save(s Settings, recording bool) error { return saveOwn(s, recording, false) }
+func save(s Settings, recording bool) error {
+	if err := s.RequestPolicy.Validate(); err != nil {
+		return err
+	}
+	return saveOwn(s, recording, false)
+}
 
 // saveOwn is save; reads says s's SessionReads is the one to write, where
 // any other save keeps the file's.

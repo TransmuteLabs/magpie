@@ -11,7 +11,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { closeWithScreenshots } = require("./fixtures/browser-diagnostics.cjs");
+const { openPart, reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -71,13 +72,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const pages = [];
-    t.after(async () => {
-      if (process.env.ARTIFACT_DIR) {
-        await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-        for (const [i, p] of pages.entries()) await p.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-tray-usages-${i}.png`) });
-      }
-      await browser.close();
-    });
+    t.after(() => closeWithScreenshots(browser, pages, process.env.ARTIFACT_DIR, (index) => `${engine}-tray-usages-${index}.png`));
 
     for (const [lang, off, three, two] of [
       ["en", "Off", "3 subscriptions", "2 subscriptions"],
@@ -104,7 +99,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // scrolled down with a real wheel, the pill still in sight
         await pill.hover();
         for (let i = 0; i < 20 && !(await view(page)); i++) { await page.mouse.wheel(0, 20); await page.waitForTimeout(20); }
-        await pill.scrollIntoViewIfNeeded();
+        await reach(page, pill);
         const before = await view(page);
         assert(before > 0, "the settings list must be scrolled");
 

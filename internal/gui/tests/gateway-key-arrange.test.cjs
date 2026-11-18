@@ -50,9 +50,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // drag Work, by its masked key, above Laptop
       await clear();
+      await rows.nth(2).hover({ position: { x: 40, y: 10 } });
       const from = await rows.nth(2).locator(".plan").boundingBox(), to = await rows.nth(0).boundingBox();
       const fx = from.x + from.width / 2, fy = from.y + from.height / 2;
       await page.mouse.move(fx, fy);
+      assert(await rows.nth(2).locator(".plan").evaluate((element, [x, y]) =>
+        element.contains(document.elementFromPoint(x, y)), [fx, fy]), "the drag starts on Work's masked key");
+      assert(await rows.nth(0).evaluate((element, [x, y]) =>
+        element.contains(document.elementFromPoint(x, y)), [fx, to.y + 4]), "the drop point is on Laptop");
       await page.mouse.down();
       for (let i = 1; i <= 12; i++) await page.mouse.move(fx, fy + (to.y + 4 - fy) * i / 12);
       await page.mouse.up();

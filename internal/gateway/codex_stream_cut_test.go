@@ -6,12 +6,54 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
+
+func TestCodexQuietStreamRecordsOneTimeout(t *testing.T) {
+	codexSignedIn(t)
+	quietFast(t)
+	previous := translatedQuietLongest
+	t.Cleanup(func() { translatedQuietLongest = previous })
+	translatedQuietLongest = 250 * time.Millisecond
+	var requests atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, quietCreated+quietDelta("partial reply"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	t.Cleanup(up.Close)
+	base := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	t.Cleanup(func() { provider.CodexBase = base })
+	if err := provider.Save(provider.Provider{ID: "codex", Models: []string{"gpt-6-astra"}}); err != nil {
+		t.Fatal(err)
+	}
+	server := New()
+	t.Cleanup(server.idle.stop)
+	reply := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, CodexPath+"/responses",
+		strings.NewReader(`{"model":"gpt-6-astra","stream":true,"input":"continue"}`))
+	server.Handler().ServeHTTP(reply, req)
+	body := reply.Body.String()
+	if reply.Code != http.StatusOK || requests.Load() != 1 ||
+		!strings.Contains(body, "partial reply") || strings.Count(body, "event: response.failed\n") != 1 ||
+		!strings.Contains(body, "sent nothing for") || strings.Contains(body, "before its last event") ||
+		!strings.Contains(body[strings.Index(body, "event: response.failed"):], `"model":"gpt-6-astra"`) {
+		t.Errorf("Codex did not receive one idle timeout after its partial reply: status=%d requests=%d body=%s", reply.Code, requests.Load(), body)
+	}
+	rows := usage.Load(time.Time{})
+	if len(rows) != 1 || rows[0].Status != http.StatusGatewayTimeout || !strings.Contains(rows[0].Error, "sent nothing for") {
+		t.Fatalf("Codex idle timeout and ledger disagree: %+v", rows)
+	}
+	routeHasItsCall(t, server, http.StatusGatewayTimeout)
+}
 
 // TestCodexStreamCutToldTheClient (#3377): the ChatGPT backend closed every
 // relayed stream about two minutes into the reply, its deltas flowing to the

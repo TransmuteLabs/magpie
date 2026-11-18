@@ -59,7 +59,7 @@ function server(lang, posts) {
   };
 }
 
-const scrolled = (page) => page.evaluate(() => [window.scrollX, window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop || e.scrollLeft).map((e) => `${e.className}:${e.scrollTop},${e.scrollLeft}`)].join(" "));
+const { scrollPositions: scrolled } = require("./reader.cjs");
 const lit = (box) => box.locator(".lib-ag[data-agent]").evaluateAll((cs) => cs.filter((c) => c.getAttribute("aria-pressed") === "true").map((c) => c.dataset.agent));
 const pastSide = (page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 

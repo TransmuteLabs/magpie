@@ -1,5 +1,39 @@
 # Gateway Session Aggregation
 
+## Executable extension conversion
+
+An enabled `session-migration` extension can declare
+`SessionDescriptor{id, name, from, to, outputDir}`. `from` and `to` are
+distinct native format/agent IDs; `outputDir` is a clean HOME-relative
+create-only directory. An ID/Name-only descriptor remains available for
+explicit file conversion. Unknown file formats use that explicit path.
+
+[`carries`](../../internal/sessions/carry.go) offers declared SDK routes
+for eligible native sessions, and
+[`CarryOver`](../../internal/sessions/carry_convert.go) dispatches a selected
+route through [`ConvertExtension`](../../internal/sessions/extension_actions.go)
+and the host Actions service. Listing does not invoke the worker. Built-in
+conversions retain precedence; duplicate SDK routes are unavailable. The
+target must be available and already have a host-supported native resume
+command. No module-supplied shell command is executed.
+
+Read consent, source session identity, local writable provenance and bounded
+stable source-file checks run before conversion. The module receives the
+original document bytes, the source scope and `options.cwd`. It returns
+documents in the requested target format plus `SessionResult.id` for native
+resume. The host requires that ID before ordinary publication, confines new
+files below `outputDir`, rejects existing-file collisions, backs up and
+executes the plan with rollback, and leaves the source unchanged. Explicit
+file-conversion callers may omit a native resume ID.
+
+`TestSessionExtensionOrdinaryCarryOver` installs an executable converter,
+discovers it through the native session's normal `Carry` list, converts through
+`CarryOver`, checks original bytes/context and source preservation, and checks
+that disabling the module revokes dispatch. Its output is a fixture format,
+not evidence of a real vendor converter.
+
+## Native and gateway identities
+
 The Sessions API combines file-backed native sessions with a read-only
 projection of gateway usage records. A gateway session identity is exactly
 `AgentOf(record.Agent) + record.Session`, where the session is the one the
@@ -145,6 +179,21 @@ glance is never saved in the index (`savable`) nor taken by a refresh as a
 parse (`parsed`). See
 [`internal/sessions/manage_quick.go`](../../internal/sessions/manage_quick.go),
 `TestManageAnswersBeforeFirstReads` and `sessions-pending-fill.test.cjs`.
+Native parsed summaries are queued for asynchronous persistence from an
+owned snapshot (`savable`, `snapshotCacheState`, `saveCacheWithin`). The
+scheduling boundary runs under the cache mutex and detaches persisted
+states, identity, models/days, nested metadata collections, Claude revision
+windows, carry/tail data and the parser-version map. A later live correction,
+including lazy Codex provider discovery, cannot change an earlier save.
+Glances remain excluded and sparse/null entries retain their serialized
+form. Save coalescing, delay and the persisted schema remain unchanged.
+Encoding and file I/O stay outside the cache mutex. The writer does not
+acquire it: cache loading waits for saves while holding that same mutex.
+See [`cache_snapshot.go`](../../internal/sessions/cache_snapshot.go) and
+the queued-write/concurrent-mutation regressions in
+[`cache_snapshot_test.go`](../../internal/sessions/cache_snapshot_test.go).
+
+
 A file being written (changed within the hour, `workingRevision`) keeps
 what its reads have seen on disk with where they stopped, so after a
 restart the next line it gains is read on from there, not from its first
@@ -682,6 +731,14 @@ An agent magpie may not read (`Reads`, Settings › Sessions and gateway
 mode) is left out of every answer at once and out of the index on its next
 update; turning gateway mode on or off closes the index (`Reset` →
 `ForgetSaid`, which stops a refresh running at the next session).
+
+Incremental Claude/Codex reads use the shared selected history owner before
+opening a native file. Delegated sources retain their SDK path even when their
+agent has a native codec. Failed or unknown ownership/input reads preserve
+committed word rows and cursors; they do not replace the index with empty data.
+Search revalidates every collected hit before publication, including persisted
+module changes from another process. The Sessions MCP handler passes its caller
+context through lookup and transcript reads, including the `find` path.
 
 - `GET /api/sessions/said?q=&agent=&limit=` is the Sessions page's: under
   the agent's own list, the sessions of other agents that said the words

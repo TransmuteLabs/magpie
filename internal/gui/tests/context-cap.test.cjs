@@ -86,8 +86,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.getByText(w.bad).waitFor();
       assert.deepEqual(posted, []);
       await row.locator("input.context-cap").fill("272k");
+      const beforeSave = await field.elementHandle();
+      const saved = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/settings/context-cap" && response.request().method() === "POST");
       await row.locator("input.context-cap").press("Enter");
-      await page.waitForFunction(() => document.querySelector("#contextCapRow input")?.value === "272k" && !document.querySelector("#contextCapRow input:focus"));
+      assert.equal((await saved).status(), 200);
+      await page.waitForFunction((previous) => {
+        const current = document.querySelector("#contextCapRow input");
+        return current && current !== previous && current.value === "272k" && current !== document.activeElement;
+      }, beforeSave);
+      await beforeSave.dispose();
       assert.deepEqual(posted, [["context-cap", { at: 272000 }]]);
       await row.locator("input.context-cap").fill("off");
       await row.locator("input.context-cap").press("Enter");

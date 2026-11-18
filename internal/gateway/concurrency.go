@@ -111,6 +111,14 @@ func (l *lanes) signal() {
 // tryTake takes one of who's slots if one is free now and nobody waits
 // for it: no limit, or room. false takes none.
 func (l *lanes) tryTake(who string, limit int) (release func(), ok bool) {
+	claim, ok := l.tryClaim(who, limit)
+	if !ok {
+		return nil, false
+	}
+	return claim.complete, true
+}
+
+func (l *lanes) tryClaim(who string, limit int) (*laneClaim, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.m == nil {
@@ -127,7 +135,7 @@ func (l *lanes) tryTake(who string, limit int) (release func(), ok bool) {
 	}
 	ln.limit = max(limit, 0)
 	ln.busy++
-	return l.releaser(who, ln), true
+	return l.claim(who, ln), true
 }
 
 // lane is one key's or account's: how many are out, and who waits, first
@@ -200,6 +208,14 @@ func (l *lanes) acquire(ctx context.Context, who string, limit int) (release fun
 // whether the request goes to another key or account instead (waitMate,
 // which takes that one's slot): true leaves the queue with errMoved.
 func (l *lanes) take(ctx context.Context, who string, limit, queue int, wait time.Duration, move func() (bool, time.Time)) (release func(), waited time.Duration, err error) {
+	claim, waited, err := l.takeClaim(ctx, who, limit, queue, wait, move)
+	if err != nil {
+		return nil, waited, err
+	}
+	return claim.complete, waited, nil
+}
+
+func (l *lanes) takeClaim(ctx context.Context, who string, limit, queue int, wait time.Duration, move func() (bool, time.Time)) (claim *laneClaim, waited time.Duration, err error) {
 	l.mu.Lock()
 	if l.m == nil {
 		l.m = map[string]*lane{}
@@ -217,14 +233,14 @@ func (l *lanes) take(ctx context.Context, who string, limit, queue int, wait tim
 		ln.grant()
 		ln.busy++
 		l.mu.Unlock()
-		return l.releaser(who, ln), 0, nil
+		return l.claim(who, ln), 0, nil
 	}
 	ln.limit = limit
 	ln.grant() // a limit raised lets more of those waiting go
 	if ln.busy < limit && len(ln.queue) == 0 {
 		ln.busy++
 		l.mu.Unlock()
-		return l.releaser(who, ln), 0, nil
+		return l.claim(who, ln), 0, nil
 	}
 	if queue > 0 && len(ln.queue) >= queue {
 		l.mu.Unlock()
@@ -243,7 +259,7 @@ func (l *lanes) take(ctx context.Context, who string, limit, queue int, wait tim
 	}
 	err = l.await(ctx, ch, timeout, move)
 	if err == nil {
-		return l.releaser(who, ln), time.Since(queued), nil
+		return l.claim(who, ln), time.Since(queued), nil
 	}
 	waited = time.Since(queued)
 	l.mu.Lock()
@@ -386,7 +402,7 @@ func restedUntil(c candidate) (time.Time, bool) {
 // then when the soonest of those left out only for resting is back (zero
 // for none), for the request to look again then. A fallback provider is
 // never one, as with laneMate.
-func (s *Server) waitMate(cands []candidate, i int, group bool, gave map[string]bool, planned []candidate) (mate candidate, release func(), next time.Time, ok bool) {
+func (s *Server) waitMate(cands []candidate, i int, group bool, gave map[string]bool, planned []candidate) (mate candidate, claim *laneClaim, next time.Time, ok bool) {
 	c := cands[i]
 	who := c.who()
 	seat := func(m candidate) string { return m.who() + "|" + m.model }
@@ -439,9 +455,9 @@ func (s *Server) waitMate(cands []candidate, i int, group bool, gave map[string]
 		if reserveNow(m) || !s.rpms.free(m.who(), m.p.RPMLimit()) {
 			continue
 		}
-		if rel, took := s.lanes.tryTake(m.who(), m.p.LaneLimit()); took {
+		if claim, took := s.lanes.tryClaim(m.who(), m.p.LaneLimit()); took {
 			m.reserve = 0
-			return m, rel, time.Time{}, true
+			return m, claim, time.Time{}, true
 		}
 	}
 	return candidate{}, nil, next, false
@@ -486,27 +502,44 @@ func laneMessage(c candidate, err error, queued int64) string {
 	return fmt.Sprintf("%s: %d requests at once is its limit, and this one waited %.1fs for a free slot, as long as it may (%ds); try again shortly", c.label(), lim, float64(queued)/1000, c.p.QueueWait)
 }
 
-// releaser gives the slot back, once however often it is called.
-func (l *lanes) releaser(who string, ln *lane) func() {
+type laneClaim struct {
+	finish func(bool)
+}
+
+func (claim *laneClaim) unused() {
+	if claim != nil {
+		claim.finish(false)
+	}
+}
+
+func (claim *laneClaim) complete() {
+	if claim != nil {
+		claim.finish(true)
+	}
+}
+
+func (l *lanes) claim(who string, ln *lane) *laneClaim {
 	var once sync.Once
-	return func() {
+	return &laneClaim{finish: func(completed bool) {
 		once.Do(func() {
 			l.mu.Lock()
-			if l.ended == nil {
-				l.ended = map[string]time.Time{}
+			if completed {
+				if l.ended == nil {
+					l.ended = map[string]time.Time{}
+				}
+				l.ended[who] = time.Now()
+				if l.turns == nil {
+					l.turns = map[string]int{}
+				}
+				l.turns[who]++
 			}
-			l.ended[who] = time.Now()
-			if l.turns == nil {
-				l.turns = map[string]int{}
-			}
-			l.turns[who]++
 			ln.busy--
 			ln.grant()
 			l.drop(who, ln)
 			l.signalLocked()
 			l.mu.Unlock()
 		})
-	}
+	}}
 }
 
 // out is how many of who's turns are out at the vendor now, those found

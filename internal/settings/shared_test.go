@@ -127,42 +127,59 @@ func TestCloneSharesNothing(t *testing.T) {
 	apart(t, "Settings", reflect.ValueOf(s), reflect.ValueOf(c))
 }
 
-// fill sets every field of v, each map and slice with one entry.
+// fill sets every field, including one nested override of recursive settings.
+// Recursive schemas describe finite JSON trees, not infinitely populated maps.
 func fill(v reflect.Value) {
-	switch v.Kind() {
+	fillDepth(v, make(map[reflect.Type]int))
+}
+
+func fillDepth(value reflect.Value, depth map[reflect.Type]int) {
+	if depth[value.Type()] >= 2 {
+		return
+	}
+	depth[value.Type()]++
+	defer func() { depth[value.Type()]-- }()
+	switch value.Kind() {
 	case reflect.Map:
-		m := reflect.MakeMap(v.Type())
-		k, e := reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem()
-		fill(k)
-		fill(e)
+		m := reflect.MakeMap(value.Type())
+		k, e := reflect.New(value.Type().Key()).Elem(), reflect.New(value.Type().Elem()).Elem()
+		fillDepth(k, depth)
+		fillDepth(e, depth)
 		m.SetMapIndex(k, e)
-		v.Set(m)
+		value.Set(m)
 	case reflect.Slice:
-		s := reflect.MakeSlice(v.Type(), 1, 1)
-		fill(s.Index(0))
-		v.Set(s)
+		s := reflect.MakeSlice(value.Type(), 1, 1)
+		fillDepth(s.Index(0), depth)
+		value.Set(s)
 	case reflect.Pointer:
-		p := reflect.New(v.Type().Elem())
-		fill(p.Elem())
-		v.Set(p)
+		p := reflect.New(value.Type().Elem())
+		fillDepth(p.Elem(), depth)
+		value.Set(p)
 	case reflect.Struct:
-		for i := range v.NumField() {
-			fill(v.Field(i))
+		for i := range value.NumField() {
+			fillDepth(value.Field(i), depth)
 		}
 	case reflect.String:
-		v.SetString("x")
+		value.SetString("x")
 	case reflect.Bool:
-		v.SetBool(true)
+		value.SetBool(true)
 	case reflect.Int, reflect.Int64, reflect.Int32:
-		v.SetInt(1)
+		value.SetInt(1)
 	case reflect.Float64, reflect.Float32:
-		v.SetFloat(1)
+		value.SetFloat(1)
 	}
 }
 
 // apart fails when a and b share a map, slice or pointer anywhere.
 func apart(t *testing.T, path string, a, b reflect.Value) {
 	t.Helper()
+	// A finite recursive fixture ends in nil fields; those own no storage.
+	switch a.Kind() {
+	case reflect.Map, reflect.Slice, reflect.Pointer:
+		if a.IsNil() && b.IsNil() {
+			return
+		}
+	}
 	switch a.Kind() {
 	case reflect.Map:
 		if a.UnsafePointer() == b.UnsafePointer() {

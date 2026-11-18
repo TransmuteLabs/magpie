@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const codex = {
@@ -111,7 +112,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const mode = (page, user) => line(page, user).locator(".proxy-mode .opt.on").textContent();
     const addr = (page, user) => line(page, user).locator(".proxy-url");
     // what the page and the dialog's scrollers have scrolled
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     // a click on one of an account's options: it and the lines down to its
     // own left where they were, nothing scrolled (Custom's address, or its
     // going, moves the ones under it)
@@ -121,13 +121,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForTimeout(200);
       const n = await line(page, user).evaluate((l) => [...document.querySelectorAll(".editor .acct-proxy")].indexOf(l) + 1);
       const where = () => page.evaluate((n) => [...document.querySelectorAll(".editor .acct-proxy")].slice(0, n).map((e) => Math.round(e.getBoundingClientRect().top)), n);
-      const before = await b.evaluate((e) => e.getBoundingClientRect().top), lines = await where(), sc = await scrolled(page);
+      const before = await b.evaluate((e) => e.getBoundingClientRect().top), lines = await where(), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await b.click();
       await page.waitForTimeout(250);
       const after = await b.evaluate((e) => e.getBoundingClientRect().top);
       assert(Math.abs(after - before) <= 1, `${user} ${name} moved from ${before} to ${after}`);
       assert.deepEqual(await where(), lines, `a pick of ${name} moved the lines`);
-      assert.equal(await scrolled(page), sc, `a pick of ${name} scrolled`);
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, `a pick of ${name} scrolled`);
     };
     const save = async (page, posts) => {
       const n = posts.length;

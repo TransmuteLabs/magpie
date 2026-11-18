@@ -30,7 +30,11 @@ const RoutingGroups = "Routing groups"
 // provider. Built again only when provider.StampNow moved, or
 // magpieModelsFor after it was; each caller is given its own copy.
 func viaMagpie(agent, prefix string) []Option {
-	return slices.Clone(viaMagpieShared(agent, prefix))
+	options := slices.Clone(viaMagpieShared(agent, prefix))
+	for index := range options {
+		options[index].Efforts = slices.Clone(options[index].Efforts)
+	}
+	return options
 }
 
 // viaMagpieShared is viaMagpie without a copy of its own, for a caller
@@ -92,6 +96,8 @@ func sameOption(a, b Option) bool {
 		slices.Equal(a.Icons, b.Icons) && a.Group == b.Group && a.GroupIcon == b.GroupIcon &&
 		a.Ref == b.Ref && a.Free == b.Free && a.Zero == b.Zero && a.Rate == b.Rate && a.RateWas == b.RateWas &&
 		a.Context == b.Context && a.Takes == b.Takes && a.Direct == b.Direct && a.Via == b.Via &&
+		a.MaxOutput == b.MaxOutput && a.DefaultEffort == b.DefaultEffort &&
+		(a.Efforts == nil) == (b.Efforts == nil) && slices.Equal(a.Efforts, b.Efforts) &&
 		a.Same == b.Same && a.Served == b.Served && a.Alias == b.Alias && a.FastFor == b.FastFor &&
 		a.Fast == b.Fast && a.OwnFast == b.OwnFast && a.UltraOK == b.UltraOK && a.Ultra == b.Ultra &&
 		a.own == b.own && a.sub == b.sub
@@ -151,18 +157,26 @@ func buildVia(agent, prefix string) []Option {
 	set := settings.Shared()   // the prices the user set, read once for the list
 	var tiered map[string]bool // provider.UltraModels, read at the first fast model
 	for _, e := range shown {
+		o := Option{Value: prefix + e.ID, Label: e.Name, Ref: e.ID, Context: e.Context,
+			MaxOutput: max(0, e.PublishedOutput()), Efforts: slices.Clone(e.Efforts)}
+		if e.Reasonless {
+			o.Efforts = []string{}
+		}
+		if slices.Contains(o.Efforts, e.DefaultEffort) {
+			o.DefaultEffort = e.DefaultEffort
+		}
 		if e.Group != "" {
-			groups = append(groups, Option{Value: prefix + e.ID, Label: e.Name, Note: "routing group · via magpie",
-				Icon: e.Provider.Icon, Icons: e.Icons, Group: RoutingGroups, Ref: e.ID})
+			o.Note, o.Icon, o.Icons, o.Group = "routing group · via magpie", e.Provider.Icon, e.Icons, RoutingGroups
+			groups = append(groups, o)
 			continue
 		}
 		note := e.Provider.Name + " · via magpie"
 		if a := e.Provider.Account; a != nil {
 			note = firstUser(*e.Provider) + " · via magpie"
 		}
-		o := Option{Value: prefix + e.ID, Label: e.Name, Note: note,
-			Icon: e.Provider.Icon, Group: e.Provider.Name, Ref: e.ID, Free: e.Free, Rate: e.Rate, RateWas: e.RateWas, Context: e.Context, own: own[e.Provider.ID],
-			sub: e.Provider.Account != nil && (e.Provider.Account.Agent != "claude" || agent == "claude")}
+		o.Note, o.Icon, o.Group = note, e.Provider.Icon, e.Provider.Name
+		o.Free, o.Rate, o.RateWas, o.own = e.Free, e.Rate, e.RateWas, own[e.Provider.ID]
+		o.sub = e.Provider.Account != nil && (e.Provider.Account.Agent != "claude" || agent == "claude")
 		if !e.Free {
 			o.Zero = e.Provider.PricedFree(set, e.Model)
 		}

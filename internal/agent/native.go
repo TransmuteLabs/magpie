@@ -69,15 +69,19 @@ type PlannedSetting struct {
 type DisconnectPlan struct {
 	Files    []PlannedFile
 	Settings []PlannedSetting
+	// Executable extensions also bind confirmation to the host action's
+	// manifest, scope, existence and permission preconditions.
+	actionRevision string
 }
 
 // Revision binds confirmation to file preconditions and restoration values,
 // without accepting a serialized plan from the client.
 func (p *DisconnectPlan) Revision(agent string) string {
 	b, _ := json.Marshal(struct {
-		Agent string
-		Plan  *DisconnectPlan
-	}{agent, p})
+		Agent          string
+		Plan           *DisconnectPlan
+		ActionRevision string `json:",omitempty"`
+	}{agent, p, p.actionRevision})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

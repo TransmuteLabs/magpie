@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const relay = {
@@ -20,12 +21,14 @@ const relay = {
   balanceToken: { takes: false, set: false }, proxy: "",
 };
 
-function serve(lang, calls) {
+function serve(lang, calls, writes) {
   const providers = { providers: [relay], presets: [{ id: "relay", name: "Relay", icon: "generic", chat: relay.chat, added: true }], excluded: [], gateway: { running: true, window: true } };
   const state = { agents: [], profiles: [], settings: { lang, theme: "light" } };
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
+    if (route.request().method() === "POST" && !isPageLifecycleRequest(route.request())) writes.push({ path: url.pathname, body: route.request().postDataJSON() });
+    if (url.pathname === "/api/keys/replace") return json(providers);
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
@@ -60,26 +63,30 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      const calls = [];
-      await page.route("**/*", serve(lang, calls));
+      const calls = [], writes = [];
+      await page.route("**/*", serve(lang, calls, writes));
       await page.goto("http://magpie.test/?view=providers");
       const missing = await page.evaluate((w) => Object.values(w).filter((s) => /[a-z]/i.test(s) && !I18N.zh[s] && !["optional"].includes(s)), words.en);
       if (lang === "en") assert.deepEqual(missing, [], "every string has its Chinese");
       await page.locator(".row.provider", { hasText: "Relay" }).click();
       const ed = page.locator(".editor");
-      const key = ed.locator('input[type="password"]').first();
+      const account = ed.locator('.accts.keys .acc[data-account-id="k1"]');
+      await account.locator("button.key-edit").click();
+      const key = account.locator('input.key-value-in[type="password"]');
       await key.fill("sk-new-typed");
+      assert.deepEqual(writes, [], "opening and typing do not persist");
       const wait = async (n) => { for (let i = 0; i < 60 && calls.length < n; i++) await page.waitForTimeout(50); };
       const form = (b) => ({ typed: b.typed, key: b.key, chat: b.chat, headers: b.headers });
       const want = { typed: true, key: "sk-new-typed", chat: "https://relay.example.com/v1", headers: { "X-Team": "a" } };
 
       await ed.locator(".mfoot").getByRole("button", { name: w.refresh, exact: true }).click();
       await wait(1);
+      assert.deepEqual(writes.map((entry) => entry.path), ["/api/provider/models"], "Fetch sends only the preview");
       assert.equal(calls[0][0], "models");
       assert.deepEqual(form(calls[0][1]), want, "Fetch models asks with the form");
       await page.waitForTimeout(200);
       assert.ok(await ed.isVisible(), "the editor stays open");
-      assert.equal(await ed.locator('input[type="password"]').first().inputValue(), "sk-new-typed", "the key stays typed");
+      assert.equal(await key.inputValue(), "sk-new-typed", "the key stays typed");
 
       await ed.locator(".mfoot").getByRole("button", { name: w.all, exact: true }).click();
       await wait(2);
@@ -96,6 +103,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(calls[3][1].test, undefined);
       assert.deepEqual(form(calls[3][1]), want, "the endpoints' Test asks with the form");
       assert.deepEqual(calls.map((c) => c[0]), ["models", "test", "test", "test"], "nothing saved");
+      assert.deepEqual(writes.map((entry) => entry.path), ["/api/provider/models", "/api/provider/test", "/api/provider/test", "/api/provider/test"], "only the four unsaved previews");
       assert.ok(await ed.isVisible());
 
       // a provider's new key: the key is focused, the name is optional

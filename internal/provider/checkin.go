@@ -141,7 +141,7 @@ func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin
 		// usage is read (loginQuota), never the global one past them: a
 		// provider set to direct whose check-in went out through the
 		// global proxy was refused there (#2777)
-		r := a.do(ViaLogin(ctx, a.provider, a.User))
+		r := a.do(withCheckinDay(ViaLogin(ctx, a.provider, a.User), day))
 		r.Day, r.At = day, now
 		if r.Offline && seen && prev.Day == day && prev.Offline {
 			r.Tries = prev.Tries + 1
@@ -281,7 +281,7 @@ func namedCheckiners() ([]checkiner, []string) {
 		newQoderCheckiner(qoderCheckinAccounts, time.Now),
 	}
 	names := make([]string, len(cs))
-	for _, p := range pluginCheckinProviders() {
+	for _, p := range allPluginCheckinProviders() {
 		cs = append(cs, p.checkiner(time.Now))
 		names = append(names, p.Name)
 	}

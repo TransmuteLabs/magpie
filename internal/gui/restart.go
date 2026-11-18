@@ -26,12 +26,28 @@ var runStarted = time.Now().UnixNano()
 // as the updater's restart would. magpie web runs again in its own place
 // (Web.Wait). False when it can't: the caller runs on.
 func restartSelfNow(web, window bool, view string) bool {
-	if pending.Load() != nil {
-		return false // a handover under way restarts already
+	owner := updates
+	return owner.restartOnce(func() bool {
+		if owner.json().State == "ready" {
+			return owner.restartStaged(web, window, view, false)
+		}
+		return restartCurrent(web, window, view)
+	})
+}
+
+func (u *updater) restartOnce(restart func() bool) (started bool) {
+	if pending.Load() != nil || !u.restartClaimed.CompareAndSwap(false, true) {
+		return false
 	}
-	if updates.json().State == "ready" {
-		return restartToUpdate(web, window, view)
-	}
+	defer func() {
+		if !started {
+			u.restartClaimed.Store(false)
+		}
+	}()
+	return restart()
+}
+
+func restartCurrent(web, window bool, view string) bool {
 	unmarkQuietRestart() // one asked for comes to the front
 	if web {
 		webReexec.Store(true)

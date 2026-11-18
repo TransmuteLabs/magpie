@@ -28,6 +28,7 @@ function server(lang, arranged) {
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"dark",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ ...cur, settings });
+    if (req.method() === "GET" && url.pathname === "/api/settings") return json(settings);
     if (url.pathname === "/api/set") {
       const b = req.postDataJSON();
       cur = JSON.parse(JSON.stringify(cur));
@@ -42,7 +43,8 @@ function server(lang, arranged) {
       arranged.push(b);
       settings.agentOrder = b.order;
       settings.agentsHidden = b.hidden;
-      return json({ ...settings, agentsShown: b.shown });
+      settings.agentsShown = b.shown;
+      return json(settings);
     }
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);

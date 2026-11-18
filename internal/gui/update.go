@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
@@ -30,9 +31,10 @@ import (
 // restart asks for the administrator's password; only an app that can't be
 // replaced at all (run from its disk image, say) is sent to the release page.
 type updater struct {
-	mu     sync.Mutex
-	state  string // checking | latest | found | downloading | ready | available | source | error | blocked
-	latest *update.Release
+	restartClaimed atomic.Bool
+	mu             sync.Mutex
+	state          string // checking | latest | found | downloading | ready | available | source | error | blocked
+	latest         *update.Release
 	// behind: when the pill was dismissed, and whether a newer version is
 	// urgent; a dismissed pill waits for it (update.Behind)
 	behind update.Behind
@@ -92,6 +94,10 @@ type updater struct {
 	lang     string    // the pages' language, "" before one asked
 	notesIn  string    // the language latest's notes are in
 	relangAt time.Time // when they were last asked for in another
+	// Background note reads have their own lifetime: a settled check does
+	// not mean its urgency or language lookup has returned.
+	notesCtx context.Context // nil follows the backend's lifetime
+	notes    sync.WaitGroup
 	// A restart asked for while the gateway is busy waits until it is idle
 	// (#577): waiting since waitFrom, then whenIdle restarts, unless it ran
 	// waitMost first (gaveUp). onWait tells the tray what it waits on.
@@ -357,11 +363,18 @@ func (u *updater) supersede() {
 // checkByClock is check, by the clock rather than a click: a version this
 // computer wouldn't start is left as it is.
 func (u *updater) checkByClock() {
+	u.checkByClockIn(context.Background())
+}
+
+func (u *updater) checkByClockIn(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	if u.begin() {
 		u.mu.Lock()
 		u.byClock = true
 		u.mu.Unlock()
-		u.run()
+		u.runIn(ctx)
 	} else {
 		u.supersede()
 	}
@@ -534,7 +547,11 @@ func (u *updater) begin() bool {
 var checkWait = 10 * time.Minute
 
 func (u *updater) run() {
-	ctx := context.Background()
+	u.runIn(context.Background())
+}
+
+func (u *updater) runIn(ctx context.Context) {
+	installedVersion := Version
 	cctx, cancel := context.WithTimeout(ctx, checkWait)
 	defer cancel()
 	takeStable(cctx) // a fresh install of Stable's version stays on Stable
@@ -559,8 +576,8 @@ func (u *updater) run() {
 	// the app was installed again by hand each time (ylspcm on X). Asked
 	// before u.mu, which the pages' reads need.
 	newest := ""
-	if channel != "" && err == nil && !update.Newer(rel.Version, Version) {
-		if every, e := update.LatestEvery(cctx, lang); e == nil && update.Newer(every.Version, Version) {
+	if channel != "" && err == nil && !update.Newer(rel.Version, installedVersion) {
+		if every, e := update.LatestEvery(cctx, lang); e == nil && update.Newer(every.Version, installedVersion) {
 			newest = every.Version
 		}
 	}
@@ -574,7 +591,9 @@ func (u *updater) run() {
 			// (ssharpcc on X). What was downloaded from every version
 			// isn't put in, and the version found is the feed's again, as
 			// if never found.
-			u.staged, u.latest = "", nil
+			if !u.keep || u.staged == "" {
+				u.staged, u.latest = "", nil
+			}
 		} else {
 			// on the same channel it is the feed behind: the site, short
 			// of GitHub's API, answers from GitHub's latest redirect or
@@ -627,19 +646,20 @@ func (u *updater) run() {
 		return
 	}
 	u.latest, u.notesIn, u.channel = rel, lang, channel
-	if update.Released(Version) && update.Newer(rel.Version, Version) {
-		u.behind = update.NoteBehind(Version, rel.Version, update.UrgentIn(rel.Notes))
+	if update.Released(installedVersion) && update.Newer(rel.Version, installedVersion) {
+		u.behind = update.NoteBehind(installedVersion, rel.Version, update.UrgentIn(rel.Notes))
 		if u.behind.Urgent == "" {
 			// an urgent release between this one and the latest: its
 			// notes aren't the latest's
-			go u.urgentBetween(rel.Version, lang)
+			latest := rel.Version
+			u.lookUpNotes(func(ctx context.Context) { u.urgentBetween(ctx, installedVersion, latest, lang) })
 		}
 	}
 	switch {
-	case !update.Released(Version):
+	case !update.Released(installedVersion):
 		u.state = "source"
 		return
-	case !update.Newer(rel.Version, Version):
+	case !update.Newer(rel.Version, installedVersion):
 		u.state = "latest"
 		return
 	case u.bundle == "" && u.exe == "":
@@ -700,7 +720,7 @@ func (u *updater) run() {
 		go u.onReady(rel.Version)
 	}
 	if again {
-		go u.checkByClock() // a check came meanwhile (supersede)
+		u.lookUpNotes(u.checkByClockIn)
 	}
 }
 
@@ -800,7 +820,8 @@ func (u *updater) jsonIn(lang string) updateJSON {
 		u.lang = lang
 		if u.latest != nil && u.notesIn != lang && u.state != "checking" && time.Since(u.relangAt) >= time.Minute {
 			u.relangAt = time.Now()
-			go u.relang(u.latest.Version, lang)
+			version := u.latest.Version
+			u.lookUpNotes(func(ctx context.Context) { u.relang(ctx, version, lang) })
 		}
 	}
 	j := updateJSON{State: u.state, Current: Version, Run: runStarted, Error: u.err, Retry: u.retry}
@@ -861,22 +882,39 @@ func (u *updater) jsonIn(lang string) updateJSON {
 
 // urgentBetween notes it when a release after this one up to latest is
 // urgent: a security fix a few releases back isn't in the latest's notes.
-func (u *updater) urgentBetween(latest, lang string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func (u *updater) urgentBetween(ctx context.Context, installedVersion, latest, lang string) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	notes, err := update.NotesBetween(ctx, Version, latest, lang)
+	notes, err := update.NotesBetween(ctx, installedVersion, latest, lang)
 	if err != nil {
 		return
 	}
 	for _, n := range notes {
 		if update.UrgentIn(n.Notes) {
-			b := update.NoteUrgent(Version, n.Version)
+			b := update.NoteUrgent(installedVersion, n.Version)
 			u.mu.Lock()
 			u.behind = b
 			u.mu.Unlock()
 			return
 		}
 	}
+}
+
+// lookUpNotes registers the work before launching it, so its owner can cancel
+// the context and join every lookup before releasing its resources.
+func (u *updater) lookUpNotes(lookup func(context.Context)) {
+	ctx := u.notesCtx
+	if ctx == nil {
+		ctx = backendCtx
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	u.notes.Add(1)
+	go func() {
+		defer u.notes.Done()
+		lookup(ctx)
+	}()
 }
 
 // quietAgain starts the pill's quiet over: it was dismissed.
@@ -907,8 +945,9 @@ func (u *updater) inLang(lang string) {
 
 // relang asks the feed again for version's notes in lang, the pages'
 // language not being the one they were asked in.
-func (u *updater) relang(version, lang string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (u *updater) relang(ctx context.Context, version, lang string) {
+	owner := ctx
+	ctx, cancel := context.WithTimeout(owner, 30*time.Second)
 	defer cancel()
 	rel, err := update.LatestIn(ctx, lang)
 	if err != nil {
@@ -918,10 +957,13 @@ func (u *updater) relang(version, lang string) {
 	if u.latest == nil || u.latest.Version != version || rel.Version != version {
 		newer := u.latest != nil && update.Newer(rel.Version, u.latest.Version)
 		u.mu.Unlock()
-		if newer && !settings.Load().NoAutoUpdate {
-			// the feed names a newer version than the one held: it is
-			// checked for, and so downloaded, now (canlee886 on X)
-			u.checkByClock()
+		if newer && owner.Err() == nil && !settings.Load().NoAutoUpdate && u.begin() {
+			// A newer version is fetched with the lookup's lifetime;
+			// notes of an existing staged download leave that payload.
+			u.mu.Lock()
+			u.byClock, u.keep = true, true
+			u.mu.Unlock()
+			u.runIn(owner)
 		}
 		return // a check since has its own
 	}
@@ -1096,17 +1138,21 @@ func restartBySelf() bool { return restartInto(false, false, "", true) }
 // asked for. The new one, by itself, also takes no focus
 // (quiet_restart.go).
 func restartInto(web, window bool, view string, bySelf bool) bool {
-	if pending.Load() != nil {
-		return false // a handover under way restarts already
-	}
-	bundle, exe := updates.bundle, updates.exe
-	updates.mu.Lock()
+	owner := updates
+	return owner.restartOnce(func() bool {
+		return owner.restartStaged(web, window, view, bySelf)
+	})
+}
+
+func (u *updater) restartStaged(web, window bool, view string, bySelf bool) bool {
+	bundle, exe := u.bundle, u.exe
+	u.mu.Lock()
 	version := ""
-	if updates.latest != nil {
-		version = updates.latest.Version
+	if u.latest != nil {
+		version = u.latest.Version
 	}
-	updates.mu.Unlock()
-	if !updates.install(true) {
+	u.mu.Unlock()
+	if !u.install(true) {
 		return false
 	}
 	updatedInApp(version) // its first start leaves the notes to Settings (#525)
@@ -1129,9 +1175,9 @@ func restartInto(web, window bool, view string, bySelf bool) bool {
 	if bundle != "" {
 		err = update.Relaunch(bundle, window || !bySelf, bySelf)
 	} else {
-		updates.mu.Lock()
-		aside := updates.aside
-		updates.mu.Unlock()
+		u.mu.Lock()
+		aside := u.aside
+		u.mu.Unlock()
 		err = relaunchBinary(exe, aside, window, view)
 	}
 	if errors.As(err, new(*update.BlockedError)) {
@@ -1139,9 +1185,9 @@ func restartInto(web, window bool, view string, bySelf bool) bool {
 		// (#894): it runs on, and says why
 		os.Remove(filepath.Join(settings.Dir(), updatedInAppFile))
 		unmarkQuietRestart()
-		updates.mu.Lock()
-		updates.wontStart(err)
-		updates.mu.Unlock()
+		u.mu.Lock()
+		u.wontStart(err)
+		u.mu.Unlock()
 		return false
 	}
 	if err != nil {

@@ -57,6 +57,18 @@ func localRef(ref string) (string, bool) {
 // not found) stays a reference. The bridge is marked inlined so it knows
 // to fetch later loads through the window.
 func inlinePage(html []byte, dir string) (out []byte, hashes []string) {
+	return inlinePageWithReader(html, func(ref string) ([]byte, error) {
+		file, ok := plugin.FileIn(dir, ref)
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return os.ReadFile(file)
+	})
+}
+
+// inlinePageWithReader keeps SDK files on their revision-checked reader while
+// preserving the legacy page's document and CSP handling.
+func inlinePageWithReader(html []byte, readFile func(string) ([]byte, error)) (out []byte, hashes []string) {
 	var deferred []string
 	size := len(html)
 	hash := func(body string) string {
@@ -69,11 +81,7 @@ func inlinePage(html []byte, dir string) (out []byte, hashes []string) {
 		if ref == pluginBridgePath {
 			return "globalThis.__magpieInlined=1;\n" + string(pageBridgeJS), true
 		}
-		file, ok := plugin.FileIn(dir, ref)
-		if !ok {
-			return "", false
-		}
-		b, err := os.ReadFile(file)
+		b, err := readFile(ref)
 		if err != nil || size+len(b) > maxInlinePage {
 			return "", false
 		}

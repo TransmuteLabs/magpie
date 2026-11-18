@@ -264,6 +264,7 @@ type rowChunk struct {
 	// row of the period at once. 364k calls had 7300 shapes.
 	Shapes           [][rowTexts]uint32
 	shapeIDs         map[[rowTexts]uint32]uint32
+	executionText    [][3]uint32
 	codexActors      codexActors
 	codexCompactions map[int]*bool
 	codexIdentities  map[string]sessions.CodexIdentity
@@ -293,13 +294,17 @@ type rowChunk struct {
 // rowMsg is the Text of a row's Claude message id, after rowText's, and
 // rowError its error's
 const (
-	rowMsg   = 36
-	rowError = 9
+	rowMsg          = 37
+	rowError        = 9
+	rowReportedCost = 38
+	rowUpstreamID   = 36
+	rowResponseAt   = 3
+	rowExecutionTag = uint32(1 << 31)
 	// rowClient is the Text of the client's own name, when the user counts
 	// it as another agent (Row.Client, #1958)
 	rowClient = 33
 	// rowTexts is how many strings a row has: rowText's and the message id
-	rowTexts = 37
+	rowTexts = 39
 )
 
 // rowVaried are the strings that differ call by call: the error, the
@@ -320,6 +325,14 @@ var rowVariedAt = func() (at [rowTexts]int8) {
 
 // text is the string id of p's Text slot
 func (c *rowChunk) text(p *packedRow, slot int) uint32 {
+	switch slot {
+	case rowResponseID:
+		return c.executionTexts(p)[0]
+	case rowUpstreamID:
+		return c.executionTexts(p)[1]
+	case rowReportedCost:
+		return c.executionTexts(p)[2]
+	}
 	if k := rowVariedAt[slot]; k >= 0 {
 		return p.Varied[k]
 	}
@@ -332,13 +345,30 @@ func (c *rowChunk) texts(p *packedRow) [rowTexts]uint32 {
 	for k, slot := range rowVaried {
 		t[slot] = p.Varied[k]
 	}
+	execution := c.executionTexts(p)
+	t[rowResponseID], t[rowUpstreamID], t[rowReportedCost] = execution[0], execution[1], execution[2]
 	return t
+}
+
+func (c *rowChunk) executionTexts(p *packedRow) [3]uint32 {
+	id := p.Varied[rowResponseAt]
+	if id&rowExecutionTag != 0 {
+		return c.executionText[id&^rowExecutionTag]
+	}
+	return [3]uint32{id, 0, 0}
 }
 
 // setTexts keeps t, every string id of p by Text slot, in p and Shapes
 func (c *rowChunk) setTexts(p *packedRow, t [rowTexts]uint32) {
+	execution := [3]uint32{t[rowResponseID], t[rowUpstreamID], t[rowReportedCost]}
+	t[rowUpstreamID], t[rowReportedCost] = 0, 0
 	for k, slot := range rowVaried {
 		p.Varied[k], t[slot] = t[slot], 0
+	}
+	if execution[1] != 0 || execution[2] != 0 {
+		p.Varied[rowResponseAt] = uint32(len(c.executionText)) | rowExecutionTag
+		c.executionText = append(c.executionText, execution)
+		c.Bytes += int64(unsafe.Sizeof(execution))
 	}
 	p.Shape = c.shape(t)
 }
@@ -365,8 +395,8 @@ func (c *rowChunk) shape(t [rowTexts]uint32) uint32 {
 // reason ("Upstream stop reason", #1927) and the service tiers (#1784)
 // among them: a string left out comes back empty from the cache, in the
 // page and in /v1/magpie/usage/requests (TestRowTextHoldsEveryString)
-func rowText(r *Row) [36]*string {
-	return [36]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP}
+func rowText(r *Row) [37]*string {
+	return [37]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP, &r.UpstreamResponseID}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {
@@ -390,6 +420,7 @@ func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 		t[i] = intern(*s)
 	}
 	t[rowMsg] = intern(msg)
+	t[rowReportedCost] = intern(reportedCostText(r.ReportedCost))
 	c.setTexts(&p, t)
 	if r.Priced {
 		p.Flags |= 1
@@ -497,6 +528,7 @@ func (c *rowChunk) row(i int) Row {
 	for i, s := range rowText(&r) {
 		*s = c.Strings[t[i]]
 	}
+	r.ReportedCost = reportedCostFromText(c.Strings[t[rowReportedCost]])
 	if r.Swapped && p.Flags&swapKnown == 0 && (SameSpelled(r.Model, r.Served) || ServingName(r.Model, r.Served) || RelayRenamed(r.Model, r.Served) || VendorAlias(r.Model, r.Served)) {
 		r.Swapped = false // kept before a name spelled otherwise, a vendor's serving name, a relay's rename or the vendor's own alias was the same
 	} else if r.Swapped && (RegionTail(r.Model, r.Served) || ListedAs(r.Provider, r.Model, r.Served)) {
@@ -507,10 +539,10 @@ func (c *rowChunk) row(i int) Row {
 	}
 	if r.Source == SourceReported {
 		r.Record.Source = SourceReported
-		if p.Flags&rowOwnCost != 0 {
-			own := p.Cost
-			r.OwnCost = &own
-		}
+	}
+	if p.Flags&rowOwnCost != 0 {
+		own := p.Cost
+		r.OwnCost = &own
 	}
 	r.Computer = c.Computer
 	if c.codexIdentities != nil {

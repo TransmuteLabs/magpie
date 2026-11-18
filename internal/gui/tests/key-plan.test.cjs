@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const ark = "https://ark.cn-beijing.volces.com";
@@ -82,7 +83,6 @@ async function open(t, engine, lang, width, keys) {
 }
 
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
-const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 const three = () => [
   { id: "aaaaaaaaaa", name: "coding", masked: "sk-…one", on: true, active: true },
   { id: "bbbbbbbbbb", name: "payg", masked: "sk-…two", on: true, plan: "api" },
@@ -112,13 +112,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const c = row("aaaaaaaaaa").locator("button.proto").filter({ hasText: names.coding });
         await c.scrollIntoViewIfNeeded();
         await row("aaaaaaaaaa").hover();
-        const sc = await scrolled(page);
+        const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await c.click();
         const menu = page.locator(".proto-menu");
         await menu.waitFor();
         assert.equal((await menu.locator(".pm-head").textContent()).trim(), await say("Plan this key is for"));
         assert.equal(await menu.locator(".pm-item").count(), 3);
-        assert.equal(await scrolled(page), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         const mb = await menu.boundingBox();
         assert.ok(mb.x >= 0 && mb.x + mb.width <= width, `the menu runs off the window: ${JSON.stringify(mb)}`);
         await menu.locator(".pm-item", { hasText: names.agent }).click();

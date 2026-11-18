@@ -1,0 +1,14 @@
+[
+  {"value":{"id":"chosen","expectedGeneration":"1"},"valid":true},
+  {"value":{"id":"選択","expectedGeneration":"9007199254740993"},"valid":true},
+  {"value":{"id":"chosen","expectedGeneration":"18446744073709551615"},"valid":true},
+  {"value":{"id":"chosen","expectedGeneration":"18446744073709551616"},"valid":false},
+  {"value":{"id":"chosen","expectedGeneration":"01"},"valid":false},
+  {"value":{"id":"chosen","expectedGeneration":"0"},"valid":false},
+  {"value":{"id":"chosen","expectedGeneration":1},"valid":false},
+  {"value":{"id":"chosen","expectedGeneration":"1","auth":{}},"valid":false},
+  {"value":{"id":"chosen","expectedGeneration":"1","provider":"foreign"},"valid":false},
+  {"value":{"id":"","expectedGeneration":"1"},"valid":false},
+  {"value":{"id":"bad\u0000id","expectedGeneration":"1"},"valid":false},
+  {"value":null,"valid":false}
+]

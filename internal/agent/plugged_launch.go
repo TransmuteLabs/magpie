@@ -14,6 +14,7 @@ package agent
 // be read so), with the variables written in.
 
 import (
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -32,6 +33,9 @@ type launchSpec struct {
 	id, bin, flag string
 	env           map[string]string // templates (agentplug.Fill)
 	args, plain   []string
+	strict        bool
+	config        string
+	err           error
 }
 
 // newLaunch is d's launch, its config's path, as the agent names it,
@@ -40,9 +44,13 @@ func newLaunch(d agentplug.Desc, config string) *launchSpec {
 	if d.Launch == nil {
 		return nil
 	}
-	l := &launchSpec{id: d.ID, bin: d.Bin, flag: d.Launch.Model, env: d.Launch.Env, plain: slices.Clone(d.Launch.Plain)}
-	for _, f := range sortedKeys(d.Launch.Args) {
-		l.args = append(l.args, f, strings.ReplaceAll(d.Launch.Args[f], "{config}", config))
+	return declaredLaunch(d.ID, d.Bin, config, d.Launch.Model, d.Launch.Env, d.Launch.Args, d.Launch.Plain)
+}
+
+func declaredLaunch(id, bin, config, model string, env, args map[string]string, plain []string) *launchSpec {
+	l := &launchSpec{id: id, bin: bin, flag: model, env: maps.Clone(env), plain: slices.Clone(plain), config: config}
+	for _, flag := range sortedKeys(args) {
+		l.args = append(l.args, flag, strings.ReplaceAll(args[flag], "{config}", config))
 	}
 	return l
 }
@@ -65,7 +73,13 @@ func (l *launchSpec) plainCases() []string {
 func (l *launchSpec) vars(gw, key string) []string {
 	out := make([]string, 0, len(l.env))
 	for _, k := range sortedKeys(l.env) {
-		out = append(out, k+"="+agentplug.Fill(l.env[k], gw, gw+"/v1", key))
+		value := l.env[k]
+		if l.strict {
+			value = strings.NewReplacer("{url}", gw, "{v1}", gw+"/v1", "{key}", key, "{config}", l.config).Replace(value)
+		} else {
+			value = agentplug.Fill(value, gw, gw+"/v1", key)
+		}
+		out = append(out, k+"="+value)
 	}
 	return out
 }
@@ -139,7 +153,11 @@ func (l *launchSpec) function(kind, prog string) string {
 	switch kind {
 	case "fish":
 		q := fishQuote(prog)
-		return "function " + l.bin + "\n    if test -x " + q + "\n        " + q + " " + l.id + " run $argv\n    else\n        command " + l.bin + " $argv\n    end\nend"
+		missing := "command " + l.bin + " $argv"
+		if l.strict {
+			missing = "return 127"
+		}
+		return "function " + l.bin + "\n    if test -x " + q + "\n        " + q + " " + l.id + " run $argv\n    else\n        " + missing + "\n    end\nend"
 	case "powershell":
 		q := psQuote(prog)
 		names := make([]string, 0, len(l.env))
@@ -166,21 +184,35 @@ func (l *launchSpec) function(kind, prog string) string {
 			}
 			plain = " -or @($args | Where-Object { \"$_\" -match '^(" + strings.Join(alts, "|") + ")(=|$)' }).Count"
 		}
+		status := ""
+		inactive := "-not $start.model"
+		present := ""
+		if l.strict {
+			status = "        if ($LASTEXITCODE -ne 0) { return }\n"
+			inactive = "(-not $start.model -and -not $start.active)"
+			present = "    if (-not (Test-Path -LiteralPath " + q + ")) { Write-Error 'magpie is unavailable'; return }\n"
+		}
 		return "function " + l.bin + " {\n" +
 			"    $real = Get-Command " + l.bin + " -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1\n" +
 			"    if (-not $real) { Write-Error '" + l.bin + " is not installed'; return }\n" +
+			present +
 			"    $start = @{}\n" +
 			"    if (Test-Path -LiteralPath " + q + ") {\n" +
 			"        foreach ($l in @(& " + q + " " + l.id + " env)) { $k, $v = \"$l\" -split '=', 2; if ($v) { $start[$k] = $v } }\n" +
+			status +
 			"    }\n" +
-			"    if (-not $start.model" + plain + ") { & $real @args; return }\n" +
+			"    if (" + inactive + plain + ") { & $real @args; return }\n" +
 			set +
 			"    try {\n" + run +
 			"    } finally { foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $was[$n], 'Process') } }\n" +
 			"}"
 	}
 	q := posixQuote(prog)
-	return l.posixHead() + "  if [ -x " + q + " ]; then " + q + " " + l.id + ` run "$@"; else command ` + l.bin + ` "$@"; fi` + "\n}"
+	missing := "command " + l.bin + ` "$@"`
+	if l.strict {
+		missing = "return 127"
+	}
+	return l.posixHead() + "  if [ -x " + q + " ]; then " + q + " " + l.id + ` run "$@"; else ` + missing + `; fi` + "\n}"
 }
 
 // distroFunction is the function in a WSL distro's shell of kind: while
@@ -370,12 +402,14 @@ var (
 // magpie's, and it starts as it is. With one of Plain among the user's
 // arguments (alone or with "=value") it starts as it is too.
 type Starting struct {
-	Bin   string
-	Env   []string
-	Args  []string
-	Model string
-	Flag  string
-	Plain []string
+	Bin    string
+	Env    []string
+	Args   []string
+	Model  string
+	Flag   string
+	Plain  []string
+	Active bool
+	Err    error
 }
 
 // Plained says a is one of Plain, alone or with "=value".

@@ -3913,6 +3913,7 @@ application:
     - /chat/completions
     - /responses
     - /messages
+    - /deepseek-chat
     - /images
     - /embeddings
     - /rerank
@@ -3925,7 +3926,6 @@ application:
     - /alpha/search
     - /mcp
     - /me
-    - /deepseek-chat
     - /join
     - /magpie-ca.crt
 services:

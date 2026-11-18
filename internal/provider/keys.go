@@ -692,6 +692,18 @@ func ReplaceKey(id, keyRef, key string) (was, now string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	was, now, err = p.replaceKey(keyRef, key)
+	if err != nil || was == now {
+		return was, now, err
+	}
+	return was, now, Save(*p)
+}
+
+func (p *Provider) replaceKey(keyRef, key string) (was, now string, err error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", "", errors.New("paste the key's new value")
+	}
 	i, ok := findKey(p, keyRef)
 	if !ok {
 		return "", "", fmt.Errorf("%s has no such key", p.Name)
@@ -718,7 +730,38 @@ func ReplaceKey(id, keyRef, key string) (was, now string, err error) {
 	moveKeyed(p.AccountWindowAmounts, keyRef, now)
 	moveKeyed(p.KeyOwnBalances, keyRef, now)
 	moveKeyed(p.KeyPriceRates, keyRef, now)
-	return keyRef, now, Save(*p)
+	return keyRef, now, nil
+}
+
+type previewKeyAlias struct {
+	provider, key, original string
+}
+
+type previewKeyContext struct{}
+
+func PreviewKey(ctx context.Context, source Provider, ref, key string) (context.Context, Provider, string, error) {
+	if source.Account != nil {
+		return ctx, Provider{}, "", errors.New("a signed-in account has no preview key")
+	}
+	index, ok := findKey(&source, ref)
+	if !ok || index >= 0 && source.Keys[index].Off {
+		return ctx, Provider{}, "", errors.New("no such preview key that's on")
+	}
+	temporary := source.clone()
+	_, now, err := temporary.replaceKey(ref, key)
+	if err != nil {
+		return ctx, Provider{}, "", err
+	}
+	ctx = context.WithValue(ctx, previewKeyContext{}, previewKeyAlias{source.ID, now, ref})
+	return ctx, temporary, now, nil
+}
+
+func previewKeyID(ctx context.Context, providerID, key string) string {
+	id := keyID(key)
+	if alias, ok := ctx.Value(previewKeyContext{}).(previewKeyAlias); ok && alias.provider == providerID && alias.key == id {
+		return alias.original
+	}
+	return id
 }
 
 // moveKeyed moves m's entry for the key was, if it has one, to now.

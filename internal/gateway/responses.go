@@ -1697,6 +1697,8 @@ func (u Usage) responses() map[string]any {
 // the deltas that would make the arguments whole JSON wait for the call's
 // done events (jsonWhole), and the call is given what they add to it.
 type responsesDecoder struct {
+	decodeState *protocolDecodeState
+
 	started bool
 	called  bool            // a function call was streamed
 	calling bool            // a function call is open
@@ -1903,6 +1905,7 @@ func (d *responsesDecoder) decode(data string, emit func(Event)) error {
 		Message string `json:"message"`
 	}
 	if err := decodeJSON([]byte(data), &ev); err != nil {
+		d.decodeState.reject()
 		// an error in a shape of its own is still the reply's end (#1933)
 		if e, ok := carriedError(data); ok {
 			d.endCall(emit)

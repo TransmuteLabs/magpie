@@ -2,6 +2,7 @@ package netproxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -74,6 +75,24 @@ func holedTry(t *testing.T, pingAfter, pingWait time.Duration, tr *http.Transpor
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { shim.Close() })
+	preface := []byte(rand.Text())
+	originalDial := tr.DialContext
+	if originalDial == nil {
+		originalDial = (&net.Dialer{}).DialContext
+	}
+	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		connection, err := originalDial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if len(preface) > 0 {
+			if _, err := connection.Write(preface); err != nil {
+				connection.Close()
+				return nil, err
+			}
+		}
+		return connection, nil
+	}
 	var mu sync.Mutex
 	holed := map[net.Conn]bool{}
 	serverHits := 0
@@ -85,6 +104,18 @@ func holedTry(t *testing.T, pingAfter, pingWait time.Duration, tr *http.Transpor
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				if len(preface) > 0 {
+					if err := c.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+						return
+					}
+					received := make([]byte, len(preface))
+					if _, err := io.ReadFull(c, received); err != nil || string(received) != string(preface) {
+						return
+					}
+					if err := c.SetReadDeadline(time.Time{}); err != nil {
+						return
+					}
+				}
 				s, err := net.Dial("tcp", srv.Addr())
 				if err != nil {
 					return
@@ -147,6 +178,15 @@ func holedTry(t *testing.T, pingAfter, pingWait time.Duration, tr *http.Transpor
 		res.Body.Close()
 		return took, res.StatusCode, nil
 	}
+
+	probe, probeErr := net.DialTimeout("tcp", shim.Addr().String(), time.Second)
+	if probeErr != nil {
+		t.Fatal(probeErr)
+	}
+	probe.SetDeadline(time.Now().Add(time.Second))
+	io.WriteString(probe, "GET / HTTP/1.1\r\nHost: unrelated.invalid\r\nConnection: close\r\n\r\n")
+	io.Copy(io.Discard, probe)
+	probe.Close()
 
 	if took, code, err := post(); err != nil || code != 200 {
 		t.Fatalf("the first turn: %d in %v, %v", code, took, err)

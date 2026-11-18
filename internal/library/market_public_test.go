@@ -1,6 +1,7 @@
 package library
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -41,6 +42,91 @@ func TestPublicServers(t *testing.T) {
 				t.Errorf("%q carries %q", id, leak)
 			}
 		}
+	}
+}
+
+func TestPublicServersDistinguishBuiltinCommands(t *testing.T) {
+	listed := []MarketServer{memoryServer(), searchServer()}
+	library := Library{MCP: []*Server{
+		{Name: "private-helper", Command: "/opt/acme/internal-helper", Args: []string{"mcp", "memory"}, Agents: []string{"claude"}},
+		{Name: "search", Command: `C:\Tools\magpie-windows-amd64.exe`, Args: []string{"mcp", "search"}, Agents: []string{"codex"}},
+	}}
+	if got := library.publicServers(listed); !slices.Equal(got, []string{searchServerName}) {
+		t.Fatalf("named %q, want only %q", got, searchServerName)
+	}
+}
+
+func TestPublicServersKeepsCommandIdentityThroughSync(t *testing.T) {
+	for _, test := range []struct {
+		name, command string
+		present, want bool
+	}{
+		{name: "private helper present", command: "magpie-private-helper", present: true},
+		{name: "private helper missing", command: "magpie-private-helper"},
+		{name: "portable", command: "magpie", want: true},
+		{name: "macOS", command: "Magpie.app/Contents/MacOS/magpie", present: true, want: true},
+		{name: "Windows launcher", command: `C:\Tools\magpie.com`, want: true},
+		{name: "Windows download", command: `C:\Downloads\magpie-windows-amd64 (1).exe`, want: true},
+		{name: "Linux CLI", command: "/old/bin/magpie-cli-linux-arm64", want: true},
+		{name: "development build present", command: "magpie-dev", present: true, want: true},
+		{name: "development backend from another computer", command: "/old/magpie-dev-backend", want: true},
+		{name: "renamed current build", command: "team-proxy", present: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := sandbox(t)
+			exe := filepath.Join(home, "bin", "team-proxy")
+			write(t, exe, "")
+			thisMagpie(t, exe)
+			command := test.command
+			if test.present || test.name == "private helper missing" {
+				command = filepath.Join(home, test.command)
+			}
+			if test.name == "renamed current build" {
+				command = exe
+			}
+			if test.present {
+				write(t, command, "")
+			}
+			seedLibrary(t, Server{Name: memoryServerName, Transport: "stdio", Command: command, Args: []string{"mcp", "memory"}, Agents: []string{"claude"}})
+			if got := slices.Contains(PublicServers(), memoryServerName); got != test.want {
+				t.Errorf("counted as %s = %t, want %t", memoryServerName, got, test.want)
+			}
+			if got := storedCommand(t, memoryServerName); got != command {
+				t.Errorf("telemetry changed saved command to %q, want %q", got, command)
+			}
+			ok(t)(Sync())
+			if got := slices.Contains(PublicServers(), memoryServerName); got != test.want {
+				t.Errorf("after sync, counted as %s = %t, want %t", memoryServerName, got, test.want)
+			}
+			if got := storedCommand(t, memoryServerName); !test.want && got != command {
+				t.Errorf("sync changed the user's command to %q, want %q", got, command)
+			}
+			portable := command
+			if test.want {
+				portable = magpieCommand
+			}
+			bundle, err := Collect()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.MCP) != 1 {
+				t.Fatalf("carried %d servers, want one", len(bundle.MCP))
+			}
+			if got := bundle.MCP[0].Command; got != portable {
+				t.Errorf("carry named the command %q, want %q", got, portable)
+			}
+			otherExe := filepath.Join(home, "bin", "other-magpie-build")
+			write(t, otherExe, "")
+			thisMagpie(t, otherExe)
+			ok(t)(Put(bundle))
+			restored := command
+			if test.want {
+				restored = otherExe
+			}
+			if got := storedCommand(t, memoryServerName); got != restored {
+				t.Errorf("restored command %q, want %q", got, restored)
+			}
+		})
 	}
 }
 

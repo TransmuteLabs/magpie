@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 const assets = path.resolve(__dirname, "../assets");
 
 function fixture() {
@@ -32,6 +33,7 @@ function fixture() {
   f.route = async route => {
     const request = route.request(), url = new URL(request.url());
     const json = (data, status = 200) => route.fulfill({ json: data, status });
+    if (isPageLifecycleRequest(request)) return json({});
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs={lang:"en",theme:"light",web:true};' });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window={};" });
     if (url.pathname === "/api/state") return json(state);
@@ -64,6 +66,49 @@ function fixture() {
   };
   return f;
 }
+
+test("the account fixture separates page lifecycle notices from mutations", async () => {
+  const f = fixture();
+  const send = async (pathname, body, origin = "http://magpie.test") => {
+    const request = {
+      url: () => `${origin}${pathname}`,
+      method: () => "POST",
+      postDataJSON: () => body,
+    };
+    return f.route({ request: () => request, fulfill: async response => response });
+  };
+  await send("/api/page-away", null);
+  await send("/api/update/using", { open: true });
+  assert.deepEqual(f.posted, []);
+  const relay = f.providers.providers.find(p => p.id === "relay");
+  const mutations = [
+    { action: "/api/provider/arrange", body: { id: "relay", accountOrder: relay.keyList.map(item => item.id) } },
+    { action: "/api/provider/save", body: { id: "relay", routing: "order" } },
+    { action: "/api/keys/use", body: { id: "relay", ref: "key-2" } },
+    { action: "/api/login/switch", body: { agent: "antigravity", user: "account-02@example.test" } },
+    { action: "/api/agents/arrange", body: { order: ["beta", "alpha", "gamma"] } },
+    { action: "/api/provider/unknown-write", body: { id: "relay" } },
+  ];
+  for (const mutation of mutations) await send(mutation.action, mutation.body);
+  assert.deepEqual(f.posted, mutations);
+  await assert.rejects(send("/api/provider/arrange", null), TypeError);
+  await assert.rejects(send("/api/page-away", null, "http://foreign.test"), TypeError);
+  await assert.rejects(send("/api/update/using", null, "http://magpie.test:3425"), TypeError);
+});
+
+test("the page lifecycle fixture recognizes only established POST notices", () => {
+  for (const pathname of ["/api/update/using", "/api/page-away"]) {
+    assert.equal(isPageLifecycleRequest({ method: () => "POST", url: () => `http://magpie.test${pathname}` }), true);
+    assert.equal(isPageLifecycleRequest({ method: () => "GET", url: () => `http://magpie.test${pathname}` }), false);
+    assert.equal(isPageLifecycleRequest({ method: () => "POST", url: () => `http://magpie.test${pathname}/extra` }), false);
+    for (const origin of ["https://magpie.test", "http://magpie.test:3425", "http://foreign.test"]) {
+      assert.equal(isPageLifecycleRequest({ method: () => "POST", url: () => `${origin}${pathname}` }), false);
+    }
+  }
+  for (const pathname of ["/api/provider/arrange", "/api/provider/save", "/api/keys/use", "/api/login/switch", "/api/agents/arrange", "/api/provider/unknown-write"]) {
+    assert.equal(isPageLifecycleRequest({ method: () => "POST", url: () => `http://magpie.test${pathname}` }), false);
+  }
+});
 
 const rows = page => page.locator(".accts [data-account-id]");
 const ids = page => rows(page).evaluateAll(rs => rs.map(r => r.dataset.accountId));
@@ -183,7 +228,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     // A name remains editable, and a single account needs no sort affordance.
     await page.locator(".accts .rename").first().click();
     await page.locator(".rename-in").waitFor(); await page.keyboard.press("Escape");
-    await page.evaluate(() => { providers.providers.find(p => p.id === "relay").keyList.length = 1; renderProviders(); });
+    await page.evaluate(() => {
+      providers = {
+        ...providers,
+        providers: providers.providers.map(p => p.id === "relay" ? { ...p, keyList: p.keyList.slice(0, 1) } : p),
+      };
+      renderProviders();
+    });
     assert.equal(await page.locator(".accts").evaluate(r => r.classList.contains("reorderable")), false);
     // Account text selection must not turn into a drag.
     await open(page, "antigravity");
@@ -198,8 +249,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const a = await point(rows(page).first());
     const bounds = await page.locator(".ebody").boundingBox();
     await page.mouse.move(a.x, a.y); await page.mouse.down();
-    await page.mouse.move(a.x, bounds.y + bounds.height - 5, { steps: 20 });
+    await page.mouse.move(a.x, a.y + 8);
     await page.locator(".acc.dragging").waitFor();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.mouse.move(a.x, bounds.y + bounds.height - 5, { steps: 20 });
     await page.waitForFunction(() => document.querySelector(".ebody").scrollTop > 100);
     assert(await page.evaluate(() => { const row = document.querySelector(".acc.dragging"); renderProviders(); return row === document.querySelector(".acc.dragging") && accountRenderPending; }));
     await page.mouse.up(); await settled(page); await checkFirst(page, f, "antigravity");

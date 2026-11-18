@@ -22,9 +22,10 @@ func TestLiveSavedAgainSameTellsNoAgent(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	changed, forgot := 0, 0
-	oldC, oldF := Changed, Forget
-	Changed, Forget = func() { changed++ }, func() { forgot++ }
-	defer func() { Changed, Forget = oldC, oldF }()
+	oldC, oldF := ChangedHook(), Forget
+	SetChanged(func() { changed++ })
+	Forget = func() { forgot++ }
+	defer func() { SetChanged(oldC); Forget = oldF }()
 
 	a := []Model{{ID: "gpt-a", Context: 200000}, {ID: "gpt-b"}}
 	save := func(ms []Model, asked string) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -99,6 +100,8 @@ func (j *jsonRetrieval) forModel(model string) ([]byte, string, error) {
 // serveRetrieval routes a retrieval request for the model asked to its
 // provider, or over a group's members, and passes the answer back.
 func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, operation string, start time.Time, asked string, req retrieval) {
+	extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+	r = r.WithContext(extensionContext)
 	who := callerOf(r)
 	call := Call{Time: start, From: provider.Chat, Agent: who.agent, Via: who.via, Model: asked, headers: headerLogOf(r.Context())}
 	usage.Saw(agentOf(r))
@@ -249,7 +252,9 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 		side.masked(masked)
 		defer func() { noted(call.Provider, went) }()
 	}
-	for i, c := range tries {
+	for i := 0; i < len(tries); i++ {
+		c := tries[i]
+		r = r.WithContext(requestpolicy.WithSelection(r.Context(), c.restID(), c.p.OwnModelID(c.model)))
 		last := i == len(tries)-1
 		call.Provider, went = c.p.ID, c.model
 		base := strings.TrimRight(c.p.OpenAIBase(), "/")
@@ -321,13 +326,33 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 		} else {
 			defer cancel() // once the answer is copied
 		}
-		tried(code, err)
 		call.Millis = time.Since(start).Milliseconds()
-		if err != nil && !last && r.Context().Err() == nil {
+		noReplay := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400)
+		if noReplay != nil {
+			code, err = http.StatusConflict, noReplay
+		}
+		if refusal := extensionAttempt.FinalRefusal(); noReplay == nil && refusal != nil {
+			next := nextPolicyCandidate(r.Context(), tries, i+1)
+			decision := resolveFinalPolicy(r.Context(), c, refusal, next >= 0, nil)
+			code, err = policyStatus(refusal), errors.New(finalPolicyMessage(refusal))
+			if decision.Action == requestpolicy.ActionWait {
+				extensionAttempt.ClearFinalRefusal()
+				i--
+				continue
+			}
+			if decision.Action == requestpolicy.ActionNext {
+				extensionAttempt.ClearFinalRefusal()
+				i = next - 1
+				continue
+			}
+			policyFailureHeaders(w, decision)
+			noReplay = err
+		}
+		if err != nil && noReplay == nil && !last && r.Context().Err() == nil {
+			tried(code, err)
 			skipped = append(skipped, c.label()+": "+err.Error())
 			continue
 		}
-		call.Status = code
 		in, outTokens := retrievedTokens(b), answeredTokens(b)
 		if nat != nil {
 			in, outTokens = natIn, natOut
@@ -344,31 +369,41 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 			w.WriteHeader(code)
 			var cut error
 			in, outTokens, cut = copyAnswer(w, res.Body)
-			res.Body.Close()
+			cut = errors.Join(cut, res.Body.Close())
 			call.Millis = time.Since(start).Milliseconds()
 			if cut != nil {
-				call.Error = "the answer was cut off: " + cut.Error()
+				code, err = http.StatusBadGateway, fmt.Errorf("the answer was cut off: %w", cut)
+			}
+			if outcome := extensionSideOutcome(w, extensionAttempt, err != nil); outcome != nil {
+				code, err = http.StatusConflict, outcome
 			}
 		}
-		call.Usage.Input, call.Usage.Output = in, outTokens
-		call.Usage.CacheRead, call.Usage.CacheWrite = cached.CacheRead, cached.CacheWrite
+		tried(code, err)
+		call.Status = code
+		call.Usage = normalizedExtensionUsage(c.p, extensionAttempt, Usage{
+			Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite,
+		})
 		call.Fallback = strings.Join(skipped, "; ")
 		providerKeyID, providerKeyName := "", ""
 		if c.p.Account == nil && c.p.Key != "" {
 			providerKeyID, providerKeyName = provider.KeyID(c.p.Key), c.p.KeyName
 		}
-		side.end(c.p, c.model, code, err, Usage{Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite})
-		appendUsage(r, usage.Record{RouteID: side.id(), Operation: operation, Time: start, Agent: call.Agent, Via: call.Via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(c.p),
-			Input: in, Output: outTokens, CacheRead: cached.CacheRead, CacheWrite: cached.CacheWrite, Millis: call.Millis, Status: code, Session: sessionOf(r.Header)})
 		if err != nil {
 			call.Error = err.Error()
+		}
+		side.end(c.p, c.model, code, err, call.Usage)
+		appendUsage(r, accountedUsage(usage.Record{RouteID: side.id(), Operation: operation, Time: start, Agent: call.Agent, Via: call.Via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(c.p),
+			Millis: call.Millis, Status: code, Error: call.Error, Session: sessionOf(r.Header)}, call.Usage))
+		if err != nil {
 			s.record(call)
 			msg := err.Error()
 			if len(skipped) > 0 {
 				msg += " (tried first: " + call.Fallback + ")"
 			}
-			heard.into(w.Header())
-			writeError(w, provider.Chat, code, msg)
+			if res == nil {
+				heard.into(w.Header())
+				writeError(w, provider.Chat, code, msg)
+			}
 			return
 		}
 		s.record(call)

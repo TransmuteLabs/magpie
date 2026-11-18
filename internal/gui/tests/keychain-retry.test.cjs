@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const why = "1 account is saved in magpie, and they are only offered beside the account Codex is signed in to. Codex keeps its sign-in in the macOS keychain (cli_auth_credentials_store = \"auto\" in /Users/me/.codex/config.toml), and macOS's keychain prompt was denied or cancelled. Allow magpie when macOS asks for the keychain (\"Always Allow\" lets /usr/bin/security read that item from then on, so macOS stops asking each time Codex changes it), or set cli_auth_credentials_store = \"file\" there and sign in again (codex login).";
@@ -36,6 +37,7 @@ function serve(lang, posts, retry) {
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (route.request().method() === "POST") {
+      if (isPageLifecycleRequest(route.request())) return json({});
       posts.push({ path: url.pathname, body: route.request().postDataJSON() });
       if (url.pathname === "/api/provider/keychain-retry") read = true;
       return json(providers());

@@ -42,7 +42,8 @@ func sourceDigestsPath() string {
 	return filepath.Join(filepath.Dir(sessions.CachePath()), "heat-digests.bin")
 }
 
-const sourceDigestsMagic = "magpie-heat-digests-2\n"
+// Version 3 includes canonical response/upstream identity and reported cost.
+const sourceDigestsMagic = "magpie-heat-digests-3\n"
 
 // digestList is serials and their digests, each 8+32 bytes, in the
 // serials' order.

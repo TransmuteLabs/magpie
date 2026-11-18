@@ -1,0 +1,284 @@
+package extension
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+)
+
+type Stream struct {
+	server       *worker
+	state        *callState
+	emitGate     chan struct{}
+	hostGate     chan struct{}
+	processGates [ProcessLaneCount]chan struct{}
+	seq          uint64
+	actionEffect string
+}
+
+func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
+	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
+		err := &Error{Code: "invalid_params", Message: "session source reads are unary"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
+	if effect, hook := GatewayMethodEffect(stream.state.call.Method); hook && (effect != "write" || event != "accepted") {
+		err := &Error{Code: "invalid_params", Message: "gateway hooks are unary and permit only write acceptance receipts"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
+	taskUsage := false
+	if event == EventAccountTaskUsage && stream.state.call.Method == MethodModuleCall {
+		var request ModuleCallRequest
+		taskUsage = decodeParams(stream.state.call.Params, &request) == nil &&
+			stream.server.manifest.accountTaskAction(request.Action)
+	}
+	if stream.state.call.Method == MethodModuleCall && (stream.actionEffect != "write" || event != "accepted" && !taskUsage) {
+		err := &Error{Code: "invalid_params", Message: "module.call is unary and permits only a write acceptance receipt"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
+	if BusinessCancel(stream.server.manifest, stream.state.call.Method) && event != "accepted" {
+		err = &Error{Code: "invalid_params", Message: "business cancellation is unary"}
+		stream.server.mu.Lock()
+		stream.state.creditErr = err
+		stream.server.mu.Unlock()
+		return err
+	}
+	if ctx == nil || event == "" || len(event) > 128 {
+		return &Error{Code: "invalid_params", Message: "invalid extension event"}
+	}
+	ctx, cancel := stream.context(ctx)
+	defer cancel()
+	if err := stream.take(ctx, stream.emitGate); err != nil {
+		return err
+	}
+	defer func() { <-stream.emitGate }()
+	payload, err := marshalPayload(data)
+	if err != nil {
+		return err
+	}
+	if event == EventAccountTaskUsage {
+		var call OwnCall
+		if stream.state.call.Method != MethodModuleCall || !taskUsage ||
+			decodeParams(payload, &call) != nil || validateAccountTaskCall(stream.server.manifest, call) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid paid task usage snapshot"}
+		}
+	}
+	if event == "data" {
+		var chunk []byte
+		if json.Unmarshal(payload, &chunk) != nil || len(chunk) > MaxChunkBytes {
+			return &Error{Code: "resource_exhausted", Message: "extension data chunk exceeds its byte limit or is not base64"}
+		}
+	} else if len(payload) > MaxChunkBytes {
+		return &Error{Code: "resource_exhausted", Message: "extension event exceeds its byte limit"}
+	}
+	if event == "accepted" && (len(payload) == 0 || payload[0] != '{') {
+		return &Error{Code: "invalid_params", Message: "acceptance event requires a JSON object"}
+	}
+	if event == "usage" && stream.state.call.Method == MethodProviderExecute {
+		var totals Usage
+		if json.Unmarshal(payload, &totals) != nil || ValidateExecutionUsage(stream.server.manifest, &totals) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid provider execution usage"}
+		}
+	}
+	stream.server.mu.Lock()
+	if stream.state.finished || stream.state.ctx.Err() != nil {
+		stream.server.mu.Unlock()
+		return context.Canceled
+	}
+	if stream.state.creditErr != nil {
+		err := stream.state.creditErr
+		stream.server.mu.Unlock()
+		return err
+	}
+	stream.seq++
+	if stream.seq == 0 {
+		stream.server.mu.Unlock()
+		return &Error{Code: "resource_exhausted", Message: "extension event sequence exhausted"}
+	}
+	waiting := &ackWait{seq: stream.seq, done: make(chan struct{})}
+	stream.state.pending = waiting
+	stream.server.mu.Unlock()
+	defer func() {
+		stream.server.mu.Lock()
+		if stream.state.pending == waiting {
+			if err != nil {
+				stream.state.creditErr = err
+			} else {
+				stream.state.pending = nil
+			}
+		}
+		stream.server.mu.Unlock()
+	}()
+	if err := stream.server.send(ctx, Frame{
+		Kind: KindEvent, ID: stream.state.call.ID, Seq: waiting.seq, Event: event, Data: payload,
+	}); err != nil {
+		return err
+	}
+	select {
+	case <-waiting.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stream.state.ctx.Done():
+		return stream.state.ctx.Err()
+	case <-stream.server.ctx.Done():
+		return context.Cause(stream.server.ctx)
+	}
+}
+
+func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
+	if ctx == nil || method != MethodRequestRecover && method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) && !IsAccountTaskHostMethod(method) && !IsProcessHostMethod(method) {
+		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
+	}
+	if method == MethodRequestRecover && (stream.server.manifest.Contract.Version.Minor < 12 || !stream.server.manifest.Contract.Has(RequestPolicy)) {
+		return &Error{Code: "method_not_found", Message: "request policy was not negotiated"}
+	}
+	if IsStorageHostMethod(method) && !IsStorageMethod(stream.state.call.Method) {
+		return &Error{Code: "invalid_params", Message: "storage callbacks require a source parent"}
+	}
+	ctx, cancel := stream.context(ctx)
+	defer cancel()
+	payload, err := marshalPayload(params)
+	if err != nil {
+		return err
+	}
+	if len(payload) > MaxHostBytes {
+		return &Error{Code: "resource_exhausted", Message: "host service parameters exceed their byte limit"}
+	}
+	gate := stream.hostGate
+	if IsProcessHostMethod(method) {
+		lane, err := ProcessHostLane(method, payload)
+		if err != nil {
+			return err
+		}
+		stream.server.mu.Lock()
+		if stream.processGates[lane] == nil {
+			stream.processGates[lane] = make(chan struct{}, 1)
+		}
+		gate = stream.processGates[lane]
+		stream.server.mu.Unlock()
+	}
+	if err := stream.take(ctx, gate); err != nil {
+		return err
+	}
+	defer func() { <-gate }()
+	if method == MethodDiagnosticEmit {
+		var diagnostic Diagnostic
+		if decodeParams(payload, &diagnostic) != nil || ValidateDiagnostic(stream.server.manifest, diagnostic) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid structured diagnostic"}
+		}
+	}
+	if method == MethodUsageAppend {
+		var request OwnCallRequest
+		if decodeParams(payload, &request) != nil || ValidateOwnCall(stream.server.manifest, request.Call) != nil {
+			return &Error{Code: "invalid_params", Message: "invalid own-call usage"}
+		}
+	}
+	if method == MethodCatalogRead {
+		manifest := stream.server.manifest
+		var request CatalogReadRequest
+		scope := stream.state.call.Scope
+		if manifest.CatalogAccess == nil || ValidateCatalogAccess(manifest) != nil ||
+			decodeParams(payload, &request) != nil ||
+			manifest.CatalogAccess.Scope == "selected" && (scope.Account == "" || scope.Generation == 0) {
+			return &Error{Code: "invalid_params", Message: "catalog access requires its declared authority"}
+		}
+	}
+	stream.server.mu.Lock()
+	if stream.state.finished || stream.state.ctx.Err() != nil {
+		stream.server.mu.Unlock()
+		return context.Canceled
+	}
+	var id string
+	for {
+		stream.server.nextHost++
+		id = "host/" + strconv.FormatUint(stream.server.nextHost, 10)
+		if stream.server.calls[id] == nil && stream.server.host[id] == nil && stream.server.closedHosts.byID[id] == nil {
+			break
+		}
+	}
+	waiting := &hostWait{parent: stream.state, done: make(chan Frame, 1)}
+	stream.server.host[id] = waiting
+	stream.server.mu.Unlock()
+	defer func() {
+		stream.server.mu.Lock()
+		if stream.server.host[id] == waiting {
+			stream.server.closedHosts.remember(id, 0, waiting.parent.call.ID)
+			delete(stream.server.host, id)
+		}
+		stream.server.mu.Unlock()
+	}()
+	frame := Frame{
+		Kind: KindHostCall, ID: id, Parent: stream.state.call.ID, Method: method,
+		Params: payload, Scope: stream.state.call.Scope,
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		frame.Deadline = deadline.UnixMilli()
+	}
+	if err := stream.server.send(ctx, frame); err != nil {
+		return err
+	}
+	select {
+	case reply := <-waiting.done:
+		if reply.Error != nil {
+			return reply.Error
+		}
+		if len(reply.Result) > MaxHostBytes {
+			return &Error{Code: "resource_exhausted", Message: "host service result exceeds its byte limit"}
+		}
+		if out != nil {
+			if err := json.Unmarshal(reply.Result, out); err != nil {
+				return &Error{Code: "protocol_error", Message: "invalid host service result"}
+			}
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stream.state.ctx.Done():
+		return stream.state.ctx.Err()
+	case <-stream.server.ctx.Done():
+		return context.Cause(stream.server.ctx)
+	}
+}
+
+func (stream *Stream) context(ctx context.Context) (context.Context, context.CancelFunc) {
+	if deadline, ok := stream.state.ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline)
+		stop := context.AfterFunc(stream.state.ctx, cancel)
+		return ctx, func() { stop(); cancel() }
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(stream.state.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+func (stream *Stream) take(ctx context.Context, gate chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case gate <- struct{}{}:
+		select {
+		case <-stream.state.ctx.Done():
+			<-gate
+			return stream.state.ctx.Err()
+		default:
+			return nil
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-stream.state.ctx.Done():
+		return stream.state.ctx.Err()
+	case <-stream.server.ctx.Done():
+		return context.Cause(stream.server.ctx)
+	}
+}

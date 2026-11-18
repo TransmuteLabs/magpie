@@ -90,6 +90,16 @@ func keyCap(t *testing.T, id string, n int) {
 // up while it waits leaves the queue and never reaches the vendor; another
 // key isn't held by it; and the wait is the try's Queued.
 func TestKeyConcurrency(t *testing.T) {
+	t.Run("chat-completions", func(t *testing.T) {
+		testKeyConcurrency(t, "/v1/chat/completions", "[DONE]")
+	})
+	t.Run("chat-page", func(t *testing.T) {
+		testKeyConcurrency(t, ChatPagePath+"/anthropic/v1/messages", "event: message_stop")
+	})
+}
+
+func testKeyConcurrency(t *testing.T, requestPath, completion string) {
+	t.Helper()
 	fresh(t)
 	v := &slowVendor{release: map[string]chan struct{}{}, quit: make(chan struct{})}
 	up := httptest.NewServer(v)
@@ -113,7 +123,7 @@ func TestKeyConcurrency(t *testing.T) {
 	send := func(ctx context.Context, secret, tag string) {
 		body := `{"model":"slow/m","stream":true,"messages":[{"role":"user","content":"` + tag + `"}]}`
 		go func() {
-			req, _ := http.NewRequestWithContext(ctx, "POST", gw.URL+"/v1/chat/completions", strings.NewReader(body))
+			req, _ := http.NewRequestWithContext(ctx, "POST", gw.URL+requestPath, strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+secret)
 			res, err := http.DefaultClient.Do(req)
@@ -144,7 +154,7 @@ func TestKeyConcurrency(t *testing.T) {
 	send(context.Background(), secrets[1], "other")
 	within(t, "the other key's at the vendor", func() bool { return slices.Contains(v.seen(), "other") })
 	close(v.gate("other"))
-	if r := <-replies; r.tag != "other" || !strings.Contains(r.body, "[DONE]") {
+	if r := <-replies; r.tag != "other" || !strings.Contains(r.body, completion) {
 		t.Fatalf("the other key's reply = %+v", r)
 	}
 	if _, ok := s.KeyLanes()[other.ID]; ok {
@@ -168,7 +178,7 @@ func TestKeyConcurrency(t *testing.T) {
 		t.Fatal("c reached the vendor with two out")
 	}
 	close(v.gate("a"))
-	if r := <-replies; r.tag != "a" || !strings.Contains(r.body, "[DONE]") {
+	if r := <-replies; r.tag != "a" || !strings.Contains(r.body, completion) {
 		t.Fatalf("a = %+v", r)
 	}
 	within(t, "c at the vendor", func() bool { return slices.Contains(v.seen(), "c") })
@@ -177,7 +187,7 @@ func TestKeyConcurrency(t *testing.T) {
 	}
 	for _, tag := range []string{"b", "c"} {
 		close(v.gate(tag))
-		if r := <-replies; r.err != nil || !strings.Contains(r.body, "[DONE]") {
+		if r := <-replies; r.err != nil || !strings.Contains(r.body, completion) {
 			t.Fatalf("%s = %+v", tag, r)
 		}
 	}
@@ -196,6 +206,55 @@ func TestKeyConcurrency(t *testing.T) {
 	if queued < 40 {
 		t.Fatalf("the queued try's Queued = %dms, want its wait", queued)
 	}
+}
+
+func TestKeyConcurrencyChatPage(t *testing.T) {
+	fresh(t)
+	vendor := &slowVendor{release: map[string]chan struct{}{}, quit: make(chan struct{})}
+	upstream := httptest.NewServer(vendor)
+	t.Cleanup(upstream.Close)
+	if err := provider.Save(provider.Provider{ID: "slow", Name: "Slow", Key: "k", Models: []string{"m"}, Chat: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	keys, secrets := newCaller(t, "Team")
+	keyCap(t, keys[0].ID, 1)
+	server := New()
+	gateway := lanServer(t, server)
+	t.Cleanup(func() { close(vendor.quit) })
+	lane := func() Lane { return server.KeyLanes()[keys[0].ID] }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan struct{}, 2)
+	post := func(requestPath, body string) {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			request, _ := http.NewRequestWithContext(ctx, "POST", gateway.URL+requestPath, strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+secrets[0])
+			request.AddCookie(&http.Cookie{Name: chatModelCookie, Value: "slow/m"})
+			if response, err := http.DefaultClient.Do(request); err == nil {
+				io.Copy(io.Discard, response.Body)
+				response.Body.Close()
+			}
+		}()
+	}
+	post("/v1/chat/completions", `{"model":"slow/m","stream":true,"messages":[{"role":"user","content":"a"}]}`)
+	within(t, "a at the vendor", func() bool { return len(vendor.seen()) == 1 })
+	post(ChatPagePath+"/anthropic/v1/messages", `{"model":"deepseek-flash","messages":[{"role":"user","content":"hi"}]}`)
+	within(t, "the chat page's turn waits for the key's slot", func() bool { return lane().Waiting == 1 })
+	if len(vendor.seen()) != 1 {
+		t.Fatalf("the chat page reached the vendor with the key's one slot taken: %v", vendor.seen())
+	}
+	close(vendor.gate("a"))
+	within(t, "the chat page's turn at the vendor", func() bool { return len(vendor.seen()) == 2 })
+	if current := lane(); current.Busy != 1 || current.Waiting != 0 {
+		t.Fatalf("key lane while the chat page asks = %+v, want its one slot held", current)
+	}
+	cancel()
+	<-done
+	<-done
+	within(t, "every key slot given back", func() bool { return len(server.KeyLanes()) == 0 })
 }
 
 // A stream waiting for its key's slot past keepHeldAfter is sent its 200
@@ -325,56 +384,4 @@ func TestKeyConcurrencyEager(t *testing.T) {
 	if len(s.KeyLanes()) != 0 {
 		t.Fatal("a GET took a slot")
 	}
-}
-
-// DeepSeek's chat page asks a model through the Messages route's tries,
-// called in process (chatInner): a turn there waits for its key's slot as
-// an agent's request does, and holds it while it asks.
-func TestKeyConcurrencyChatPage(t *testing.T) {
-	fresh(t)
-	v := &slowVendor{release: map[string]chan struct{}{}, quit: make(chan struct{})}
-	up := httptest.NewServer(v)
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "slow", Name: "Slow", Key: "k", Models: []string{"m"}, Chat: up.URL + "/v1"}); err != nil {
-		t.Fatal(err)
-	}
-	keys, secrets := newCaller(t, "Team")
-	keyCap(t, keys[0].ID, 1)
-	s := New()
-	gw := lanServer(t, s)
-	t.Cleanup(func() { close(v.quit) })
-	lane := func() Lane { return s.KeyLanes()[keys[0].ID] }
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	done := make(chan struct{}, 2)
-	post := func(path, body string) {
-		go func() {
-			defer func() { done <- struct{}{} }()
-			req, _ := http.NewRequestWithContext(ctx, "POST", gw.URL+path, strings.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+secrets[0])
-			req.AddCookie(&http.Cookie{Name: chatModelCookie, Value: "slow/m"})
-			if res, err := http.DefaultClient.Do(req); err == nil {
-				io.Copy(io.Discard, res.Body)
-				res.Body.Close()
-			}
-		}()
-	}
-	post("/v1/chat/completions", `{"model":"slow/m","stream":true,"messages":[{"role":"user","content":"a"}]}`)
-	within(t, "a at the vendor", func() bool { return len(v.seen()) == 1 })
-	post(ChatPagePath+"/anthropic/v1/messages", `{"model":"deepseek-flash","messages":[{"role":"user","content":"hi"}]}`)
-	within(t, "the chat page's turn waits for the key's slot", func() bool { return lane().Waiting == 1 })
-	if n := len(v.seen()); n != 1 {
-		t.Fatalf("the chat page reached the vendor with the key's one slot taken: %v", v.seen())
-	}
-	close(v.gate("a"))
-	within(t, "the chat page's turn at the vendor", func() bool { return len(v.seen()) == 2 })
-	if l := lane(); l.Busy != 1 || l.Waiting != 0 {
-		t.Fatalf("key lane while the chat page asks = %+v, want its one slot held", l)
-	}
-	cancel()
-	<-done
-	<-done
-	within(t, "every key slot given back", func() bool { return len(s.KeyLanes()) == 0 })
 }

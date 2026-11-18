@@ -60,6 +60,7 @@ func TestSettingsSetGetReset(t *testing.T) {
 		{"checkinAt", "", `""`},
 		{"refusalRetries", "2", "2"},
 		{"otel", `{"enabled":true,"endpoint":"http://127.0.0.1:4318"}`, ""},
+		{"requestPolicy", `{"defaults":{"maxRetries":1,"shortWaitMs":45000,"maxDelayMs":60000}}`, ""},
 	} {
 		if _, err := runOut(t, "settings", "set", c.key, c.value); err != nil {
 			t.Fatalf("set %s %q: %v", c.key, c.value, err)
@@ -68,6 +69,9 @@ func TestSettingsSetGetReset(t *testing.T) {
 		if c.want != "" && strings.TrimSpace(out) != c.want {
 			t.Errorf("set %s %q, then get = %q, want %q", c.key, c.value, out, c.want)
 		}
+	}
+	if policy := settings.Load().RequestPolicy; policy == nil || policy.Defaults.ShortWaitMS == nil || *policy.Defaults.ShortWaitMS != 45000 {
+		t.Fatal("structured request policy was not saved through the CLI")
 	}
 	if _, err := runOut(t, "settings", "reset", "theme"); err != nil {
 		t.Fatal(err)

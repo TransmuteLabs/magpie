@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPage } = require("./reader.cjs");
 
 const assets = process.env.MAGPIE_RECENT_ASSETS || path.resolve(__dirname, "../assets");
 // the three calls share their agent and model, and two their second
@@ -62,7 +63,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/?view=providers");
       await page.locator("#providers .provider").first().waitFor();
       assert.equal(seen.length, 0, "Providers never fetches bodies");
-      await page.locator('[data-view="gateway"]').first().click();
+      await openPage(page, "gateway");
       const rows = page.locator("#activity .call-item");
       await rows.first().waitFor();
       assert.equal(seen.length, 0, "the recent list is metadata only");

@@ -101,17 +101,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await save()).compact, 0);
 
       await open();
-      await box.fill("abc");
-      assert.equal(await box.getAttribute("aria-invalid"), "true");
       const cmpHint = ed.locator("#groupCompactHint");
-      assert.equal(await cmpHint.isVisible(), true, "a bad length is said, not only marked");
-      assert((await cmpHint.textContent()).includes("abc"));
       assert.equal(await box.getAttribute("aria-describedby"), "groupCompactHint");
-      // Save refused while the box doesn't read: the editor stays open on it, nothing sent
-      await ed.locator("button.primary", { hasText: w.save }).click();
-      assert.equal(await ed.locator("button.primary", { hasText: w.save }).evaluate((b) => b.classList.contains("busy")), false, "a bad compact size is not saved");
-      assert.equal(await box.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
-      assert.equal(await page.locator(".rt-gedit").count(), 1);
+      for (const invalid of ["abc", "9".repeat(400), "9007199254740992"]) {
+        await box.fill(invalid);
+        assert.equal(await box.getAttribute("aria-invalid"), "true");
+        assert.equal(await cmpHint.isVisible(), true, "a bad length is said");
+        assert((await cmpHint.textContent()).includes(invalid));
+        const postCount = posts.length;
+        await ed.locator("button.primary", { hasText: w.save }).click();
+        assert.equal(await box.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
+        assert.equal(posts.length, postCount, "invalid compaction size does not send a save");
+      }
       await box.fill("");
       assert.equal(await cmpHint.isVisible(), false, "empty is none, not an error");
       await box.fill("abc");

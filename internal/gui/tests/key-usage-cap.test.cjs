@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fresh = () => ({
@@ -93,7 +94,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const pill = (id) => row(id).locator(".acap");
         const menu = page.locator(".proto-menu");
         const item = (name) => menu.locator(".pm-item", { has: page.locator(".pm-name", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }) });
-        const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
         const posted = async (n) => {
           for (let i = 0; i < 60 && posts.length === n; i++) await new Promise((r) => setTimeout(r, 50));
           assert(posts.length > n, "nothing posted");
@@ -118,12 +118,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // k3: capped at 80%
         await row("k3").hover();
         await page.waitForTimeout(150);
-        const before = await row("k3").evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled();
+        const before = await row("k3").evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await pill("k3").click();
         await menu.waitFor();
         await page.waitForTimeout(200);
         assert.equal(await row("k3").evaluate((e) => Math.round(e.getBoundingClientRect().top)), before, "the row moved");
-        assert.equal(await scrolled(), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         assert.equal(await menu.locator(".pm-head").textContent(), w.menu);
         let n = posts.length;
         await item("80%").click();

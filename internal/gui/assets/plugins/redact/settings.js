@@ -406,7 +406,10 @@ function ruleBulk(s, sel) {
       const sub = el("div", "sub wraps", t("A notification when masking swaps a value for the first time: its kind and how many, never the value itself"));
       // and why it wouldn't be seen, as Settings › Usage's alerts say it
       const warn = notifyWarn(s);
-      if (warn) sub.append(" · ", el("span", "warn", warn));
+      if (warn) {
+        sub.classList.add("warn-note");
+        sub.append(" · ", el("span", "warn", warn));
+      }
       who.append(el("div", "name", t("Masking alert")), sub);
       const v = el("div", "val");
       v.id = "maskAlertSegs";

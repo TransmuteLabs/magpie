@@ -74,10 +74,8 @@ func piProviderOn(agentID string, models []catalog.Model, gw, on string) map[str
 // serves the provider), so there is nothing to pick.
 func piProtocolField(at place, modelsPath string, write func() error, off func() bool) Field {
 	return protocolField(at, piProtocolKey(at), modelsPath, func() (string, bool) {
-		v, has := edit.GetJSON(modelsPath, "providers."+magpieID+".api")
-		if _, block := edit.GetJSON(modelsPath, "providers."+magpieID); !block {
-			has = false
-		}
+		v, _ := edit.GetJSON(modelsPath, "providers."+magpieID+".api")
+		_, has := edit.GetJSON(modelsPath, "providers."+magpieID)
 		return v, has
 	}, write, off)
 }

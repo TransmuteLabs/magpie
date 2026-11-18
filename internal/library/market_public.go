@@ -31,7 +31,7 @@ func (l *Library) publicServers(listed []MarketServer) []string {
 	}
 	out := []string{}
 	for _, s := range l.MCP {
-		if len(s.Agents) == 0 {
+		if s == nil || len(s.Agents) == 0 {
 			continue
 		}
 		if id := byKey[serverKey(s)]; id != "" && !slices.Contains(out, id) {

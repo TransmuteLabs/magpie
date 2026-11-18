@@ -21,6 +21,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
@@ -149,21 +150,23 @@ func keysApart(listed, on []string, at map[string]int) ([]string, int) {
 }
 
 type providerJSON struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Icon      string            `json:"icon"`
-	IconFrom  string            `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
-	Preset    string            `json:"preset"`
-	Host      string            `json:"host"`
-	Chat      string            `json:"chat"`
-	Responses string            `json:"responses"`
-	Anthropic string            `json:"anthropic"`
-	Gemini    string            `json:"gemini,omitempty"` // a Gemini API's base (#1346)
-	Decide    string            `json:"decide,omitempty"` // a decision API: it only routes groups
-	Catalog   string            `json:"catalog"`
-	Website   string            `json:"website"`
-	KeysURL   string            `json:"keysUrl"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	ExtensionOptions      *extension.ProviderOptionsSnapshot `json:"extensionOptions,omitempty"`
+	ExtensionOptionsError string                             `json:"extensionOptionsError,omitempty"`
+	ID                    string                             `json:"id"`
+	Name                  string                             `json:"name"`
+	Icon                  string                             `json:"icon"`
+	IconFrom              string                             `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
+	Preset                string                             `json:"preset"`
+	Host                  string                             `json:"host"`
+	Chat                  string                             `json:"chat"`
+	Responses             string                             `json:"responses"`
+	Anthropic             string                             `json:"anthropic"`
+	Gemini                string                             `json:"gemini,omitempty"` // a Gemini API's base (#1346)
+	Decide                string                             `json:"decide,omitempty"` // a decision API: it only routes groups
+	Catalog               string                             `json:"catalog"`
+	Website               string                             `json:"website"`
+	KeysURL               string                             `json:"keysUrl"`
+	Headers               map[string]string                  `json:"headers,omitempty"`
 	// JSON fields added to each request's body (provider.ExtraBody, #1604)
 	ExtraBody provider.ExtraBody `json:"extraBody,omitempty"`
 	// headers of the vendor's reply passed on (provider.ReplyHeaders, #4145)
@@ -993,6 +996,13 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		AccountConcurrency: p.AccountConcurrency, AccountWeights: p.AccountWeights, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, MaxImages: p.MaxImages,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
 	}
+	if scope, ok := p.ExtensionScope(); ok {
+		var err error
+		out.ExtensionOptions, err = extensionProviderOptions().ProviderOptions(context.Background(), scope.Plugin, scope.Provider)
+		if err != nil {
+			out.ExtensionOptionsError = err.Error()
+		}
+	}
 	if p.Account != nil && p.Account.Agent == p.ID {
 		out.SignInMoves = provider.SignInMovesOf(p.ID)
 	}
@@ -1670,6 +1680,7 @@ const sponsorMail = "mailto:yetoneful@gmail.com?subject=Sponsoring%20magpie"
 var appLink = agent.OpenAppLink
 
 func providerRoutes(mux *http.ServeMux, w Windows) {
+	extensionProviderOptionRoutes(mux)
 	importAppsRoutes(mux)
 	pluginRoutes(mux, w)
 	traceRoutes(mux)
@@ -2113,7 +2124,8 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			Alias string `json:"alias"`
 			// Typed, for test and models: the request carries the editor's
 			// form, which is tried as it stands before a Save (see typed)
-			Typed bool `json:"typed"`
+			Typed       bool    `json:"typed"`
+			TypedKeyRef *string `json:"typedKeyRef"`
 			// Base, for detect: the base URL typed, asked as each API
 			// takes it where the form has no URL of that API's own
 			Base string `json:"base"`
@@ -2132,6 +2144,37 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		in := req.Provider
+		action := r.PathValue("action")
+		if req.TypedKeyRef != nil && !slices.Contains([]string{"test", "models", "detect", "list", "peekcert"}, action) {
+			fail(rw, errors.New("a preview key is only accepted for a preview"))
+			return
+		}
+		preview := func(source provider.Provider) (context.Context, provider.Provider, string, error) {
+			ctx, account, form := r.Context(), req.Account, in
+			if req.TypedKeyRef != nil {
+				ref := strings.TrimSpace(*req.TypedKeyRef)
+				if !req.Typed || ref == "" || in.ID == "" || account != "" && account != ref {
+					return ctx, provider.Provider{}, "", errors.New("invalid preview key identity")
+				}
+				saved, err := provider.Find(in.ID)
+				if err != nil {
+					return ctx, provider.Provider{}, "", err
+				}
+				var current string
+				ctx, source, current, err = provider.PreviewKey(ctx, *saved, ref, in.Key)
+				if err != nil {
+					return ctx, provider.Provider{}, "", err
+				}
+				if account != "" {
+					account = current
+				}
+				form.Key = ""
+			}
+			if req.Typed || action != "test" && action != "models" {
+				source = withCerts(typed(source, form, req.Proxy, req.InsecureTLS, req.HTTP1), &source, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
+			}
+			return ctx, source, account, nil
+		}
 		if !provider.BillingOK(in.Billing) {
 			fail(rw, fmt.Errorf("billing is plan, payg or empty, not %q", in.Billing))
 			return
@@ -3075,20 +3118,22 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+			saved := *p
+			previewCtx, ask, account, err := preview(*p)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			p = &ask
 			// the account or key the test is pinned to (provider.TestOn;
 			// tmr11235 on X: "Test on account…" was posted but never read)
-			ctx := provider.TestOn(r.Context(), req.Account)
+			ctx := provider.TestOn(previewCtx, account)
 			if req.Run != "" {
 				var stop context.CancelFunc
 				ctx, stop = context.WithCancel(ctx)
 				defer stop()
 				testRuns.Store(req.Run, stop)
 				defer testRuns.Delete(req.Run)
-			}
-			saved := *p
-			if req.Typed {
-				q := withCerts(typed(*p, in, req.Proxy, req.InsecureTLS, req.HTTP1), p, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
-				p = &q
 			}
 			if len(req.Test) > 0 {
 				// an image model's test draws a picture, which takes longer
@@ -3124,11 +3169,15 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				}
 				p = *saved
 			}
-			p = withCerts(typed(p, in, req.Proxy, req.InsecureTLS, req.HTTP1), &p, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
+			previewCtx, p, _, err := preview(p)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
 			if strings.TrimSpace(in.Decide) != "" {
 				// a decision API is asked its smallest question, at
 				// POST …/systemone (#647)
-				ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+				ctx, cancel := context.WithTimeout(previewCtx, 25*time.Second)
 				defer cancel()
 				writeJSON(rw, map[string]any{"results": []provider.Detection{p.DetectDecide(ctx, req.Model)}})
 				return
@@ -3136,7 +3185,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			if len(req.DetectModels) > 0 {
 				// model by model, a few at a time (01huadalang: 应该能
 				// 看出来选择的模型支持情况)
-				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+				ctx, cancel := context.WithTimeout(previewCtx, 2*time.Minute)
 				defer cancel()
 				each, sum, err := p.DetectModels(ctx, req.Base, req.DetectModels)
 				if err != nil {
@@ -3146,7 +3195,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				writeJSON(rw, map[string]any{"results": sum, "models": each})
 				return
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+			ctx, cancel := context.WithTimeout(previewCtx, 25*time.Second)
 			defer cancel()
 			got, err := p.Detect(ctx, req.Base, req.Model, req.Picked...)
 			if err != nil {
@@ -3215,8 +3264,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			if old, err := provider.Find(in.ID); err == nil && in.ID != "" {
 				p = *old
 			}
-			p = withCerts(typed(p, in, req.Proxy, req.InsecureTLS, req.HTTP1), &p, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
-			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			previewCtx, p, _, err := preview(p)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			ctx, cancel := context.WithTimeout(previewCtx, 15*time.Second)
 			defer cancel()
 			seen, err := p.PeekServerCert(ctx)
 			if err != nil {
@@ -3236,8 +3289,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			if p.Name == "" {
 				p.Name = cmp.Or(strings.TrimSpace(in.Name), "the vendor")
 			}
-			p = withCerts(typed(p, in, req.Proxy, req.InsecureTLS, req.HTTP1), &p, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
-			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			previewCtx, p, _, err := preview(p)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			ctx, cancel := context.WithTimeout(previewCtx, 20*time.Second)
 			defer cancel()
 			all, err := p.ListAll(ctx)
 			if err != nil {
@@ -3273,15 +3330,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				fail(rw, err)
 				return
 			}
+			previewCtx, ask, _, err := preview(*p)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
 			// as long as the plugins' host bounds one providers RPC itself
 			// (30s, plugin.refreshDeadline): a plugin's Fetch models is one
 			// listing of every provider, which may spend all of it (#4065)
-			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(previewCtx, 30*time.Second)
 			defer cancel()
-			ask := *p
-			if req.Typed {
-				ask = withCerts(typed(*p, in, req.Proxy, req.InsecureTLS, req.HTTP1), p, req.ClientCert, req.ClientKey, req.ServerCA, req.ServerPin, req.Resolve)
-			}
 			ms, dropped, err := ask.Refetch(ctx)
 			if err != nil {
 				fail(rw, err)

@@ -12,6 +12,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const until = new Date(Date.now() + 10 * 60e3).toISOString();
@@ -44,6 +46,7 @@ function serve(lang, posts) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
+    if (isPageLifecycleRequest(route.request())) return json({});
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
@@ -67,6 +70,21 @@ function serve(lang, posts) {
     await route.fulfill({ body: await fs.readFile(file), contentType });
   };
 }
+
+test("the bulk-key fixture separates page lifecycle notices from mutations", async () => {
+  const posts = [], route = serve("en", posts);
+  const send = (pathname, body) => route({
+    request: () => ({ url: () => `http://magpie.test${pathname}`, method: () => "POST", postDataJSON: () => body }),
+    fulfill: async response => response,
+  });
+  await send("/api/page-away", null);
+  await send("/api/update/using", { open: true });
+  assert.deepEqual(posts, []);
+  const body = { id: "relay", refs: [idOf(10)] };
+  const response = await send("/api/keys/remove-many", body);
+  assert.equal(response.json.removed, 1);
+  assert.deepEqual(posts, [{ path: "/api/keys/remove-many", body }]);
+});
 
 const words = {
   en: { all: "All 300 keys", fewer: "Show fewer", more: "250 more — type to narrow them down", failing: "Remove 3 failing", off: "Remove 6 turned off", matching: /^Remove the \d+ matching$/, count: "3 keys", of: "1 of 300 keys" },
@@ -98,7 +116,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       return { page, errors, posts };
     };
     const rows = (page) => page.locator(".editor .accts .acc[data-account-id]");
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     const plain = (page) => page.evaluate(() => ({
       selects: document.querySelectorAll("select").length,
       leftBorders: [...document.querySelectorAll(".editor .accts, .editor .accts *")]

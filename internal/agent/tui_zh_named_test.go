@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -8,7 +9,7 @@ import (
 	"testing"
 )
 
-// Every agent field's label has its Chinese in internal/tui's zh map
+// Every built-in agent field's label has its Chinese in internal/tui's zh map
 // (i18n.go), which the TUI shows it through. internal/tui's
 // TestEveryWordHasZh checks it too, but a change that adds a field runs
 // this package, and a new label with no Chinese left that test red on
@@ -33,9 +34,21 @@ func TestEveryFieldLabelHasTUIZh(t *testing.T) {
 	for _, k := range regexp.MustCompile(`"([^"]*)":`).FindAllSubmatch(m[1], -1) {
 		keep[string(k[1])] = true
 	}
+	home, cfg := homes()
+	missing, n := untranslatedNativeAgentFields(builtins(home, cfg), keep, zh)
+	for _, message := range missing {
+		t.Error(message)
+	}
+	if n < 30 {
+		t.Fatalf("read %d labels", n)
+	}
+}
+
+func untranslatedNativeAgentFields(agents []*Agent, keep map[string]bool, zh []byte) ([]string, int) {
 	n := 0
+	var missing []string
 	seen := map[string]bool{}
-	for _, a := range All() {
+	for _, a := range agents {
 		for _, f := range a.Fields {
 			if keep[f.Label] || seen[f.Label] || strings.TrimSpace(f.Label) == "" {
 				continue
@@ -44,11 +57,9 @@ func TestEveryFieldLabelHasTUIZh(t *testing.T) {
 			n++
 			q := regexp.QuoteMeta(`"` + f.Label + `"`)
 			if !regexp.MustCompile(`(?m)^\s*` + q + `:\s*"`).Match(zh) {
-				t.Errorf("%s's field %q (label %q) has no Chinese in internal/tui/i18n.go's zh map", a.ID, f.Key, f.Label)
+				missing = append(missing, fmt.Sprintf("%s's field %q (label %q) has no Chinese in internal/tui/i18n.go's zh map", a.ID, f.Key, f.Label))
 			}
 		}
 	}
-	if n < 30 {
-		t.Fatalf("read %d labels", n)
-	}
+	return missing, n
 }

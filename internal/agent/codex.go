@@ -3046,6 +3046,7 @@ func init() { codexThreadsFor.Store(int64(12 * time.Hour)) }
 var (
 	codexThreadsMu      sync.Mutex
 	codexThreadsPending = map[string]bool{}
+	codexThreadsActive  int
 )
 
 // codexThreadsLater runs codexThreadsAgain once no thread of the Codex
@@ -3065,26 +3066,36 @@ var (
 func codexThreadsLater(dir, p string) {
 	key := dir + "\x00" + p
 	codexThreadsMu.Lock()
+	if codexThreadsFor.Load() <= 0 {
+		codexThreadsMu.Unlock()
+		return
+	}
 	if codexThreadsPending[key] {
 		codexThreadsMu.Unlock()
 		return
 	}
 	codexThreadsPending[key] = true
+	codexThreadsActive++
+	again, wait := codexThreadsAgain, codexThreadsWait
 	codexThreadsMu.Unlock()
 	done := func() {
 		codexThreadsMu.Lock()
 		delete(codexThreadsPending, key)
 		codexThreadsMu.Unlock()
 	}
-	wait := codexThreadsWait
 	go func() {
+		defer func() {
+			codexThreadsMu.Lock()
+			codexThreadsActive--
+			codexThreadsMu.Unlock()
+		}()
 		for start := time.Now(); time.Since(start) < time.Duration(codexThreadsFor.Load()); {
 			time.Sleep(wait)
 			if !sessions.CodexThreadsBusyOn(dir, p) {
 				// let go first: the Sync it asks for may find another
 				// thread busy and ask again
 				done()
-				codexThreadsAgain()
+				again()
 				return
 			}
 		}

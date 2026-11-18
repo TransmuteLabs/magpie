@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPart, reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 function server(lang, posts) {
@@ -21,6 +22,7 @@ function server(lang, posts) {
   };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
+    assert.equal(url.origin, "http://magpie.test", "every request belongs to the fixture");
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = ${JSON.stringify({ lang, theme: "light", web: true })};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
@@ -59,14 +61,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       test(`${engine} ${lang} ${width}px: the update source is picked from the app's menu`, async (t) => {
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         t.after(() => browser.close());
-        const context = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
+        const context = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce", serviceWorkers: "block" });
         const page = await context.newPage();
         page.setDefaultTimeout(4000);
         page.setDefaultNavigationTimeout(60000);
         const posts = [], errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", server(lang, posts));
+        await context.route("**/*", server(lang, posts));
+        await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=settings&tab=about");
+        await settingsDrawn(page);
         const row = page.locator("#about > #updateSourceRow");
         await row.getByText(l.row, { exact: true }).waitFor();
         assert.equal(await page.locator("#updateSourceRow").count(), 1, "one Update source row");
@@ -132,6 +136,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await pick.click();
         assert.equal(await page.locator(".proto-menu .pm-item.on").textContent(), l.auto);
         await page.keyboard.press("Escape");
+        await openPart(page, "about");
+        await page.locator("#about .update-mirror-row").waitFor();
         const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         assert(over <= 0, `the page scrolls sideways by ${over}px`);
         assert.deepEqual(errors, []);

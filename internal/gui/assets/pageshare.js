@@ -9,11 +9,11 @@
 // (a proxy that signs readers in by cookie turns its frame away,
 // pageinline.go); this request carries the window's cookie. page is the
 // page's own address, want the file's.
-window.pageAsset = async function (page, want) {
+window.pageAsset = async function (page, want, signal) {
   const dir = new URL(page.replace(/[^/]*$/, ""), location.href).href;
   const u = new URL(String(want || ""), location.href);
   if (!u.href.startsWith(dir) || u.hash) throw new Error(t("No such call: {what}", { what: "asset" }));
-  const res = await fetch(u.href, { credentials: "same-origin" });
+  const res = await fetch(u.href, { credentials: "same-origin", signal });
   if (!res.ok) throw new Error(String(res.status));
   return { type: res.headers.get("content-type") || "", data: await res.arrayBuffer() };
 };

@@ -580,6 +580,7 @@ const visionTries = 3
 // model out of its allowance isn't asked in another's place. A request
 // its agent canceled asks no other.
 func (s *Server) describeWith(ctx context.Context, model, src, system, text string) (said, by string, err error) {
+	ctx = ownOperation(ctx)
 	deadline := time.Now().Add(visionWaitMost)
 	tried := []string{model}
 	var fails []visionTry
@@ -661,7 +662,7 @@ func describingInstead(ctx context.Context, failed, first string, err error) con
 // askVision asks model through the gateway itself, as a client would, what
 // the image at src shows.
 func (s *Server) askVision(ctx context.Context, model, src string) (string, error) {
-	return s.askVisionWith(ctx, model, src, visionSystem, "Describe this image.", visionWaitMost)
+	return s.askVisionWith(ownOperation(ctx), model, src, visionSystem, "Describe this image.", visionWaitMost)
 }
 
 // askVisionWith asks model about the image at src: system, and the user's

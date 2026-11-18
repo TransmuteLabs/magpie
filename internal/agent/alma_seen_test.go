@@ -46,44 +46,49 @@ func TestAlmaProvidersSeenDecodeOnce(t *testing.T) {
 	if err != nil || len(ps) != 1 || ps[0].Name != "magpie" || len(ps[0].Known) != 400 || ps[0].Models[0] != "gpt-5.4" {
 		t.Fatalf("first look: %v %+v", err, ps)
 	}
-	if n := leastAllocs(20, func() {
-		if ps, err := almaProvidersSeen(); err != nil || len(ps) != 1 {
-			t.Fatal(err, ps)
+	sameAnswer := func() {
+		t.Helper()
+		next, err := almaProvidersSeen()
+		if err != nil || len(next) != len(ps) {
+			t.Fatalf("same answer: %v %+v", err, next)
 		}
-	}); n > 10 {
-		t.Errorf("a look at the answer kept allocates %v times", n)
+		if &next[0] != &ps[0] {
+			t.Fatal("the same answer was decoded into another provider slice")
+		}
+	}
+	for range 6 {
+		sameAnswer()
 	}
 	if g := asked(); g != 1 {
 		t.Fatalf("looks asked Alma %d times", g)
 	}
-	// the same answer asked for again, past the time one is kept, is not
-	// decoded again either
+	// A fresh HTTP response with the same bytes reuses the decoded providers.
+	// Checking their identity excludes the HTTP client's and fake server's
+	// allocations, which vary independently of provider decoding.
 	almaReadFor = 0
-	if n := leastAllocs(5, func() {
-		if ps, err := almaProvidersSeen(); err != nil || len(ps) != 1 {
-			t.Fatal(err, ps)
-		}
-	}); n > 400 {
-		t.Errorf("a look at the same answer asked again allocates %v times", n)
+	for range 6 {
+		sameAnswer()
 	}
-	if g := asked(); g < 6 {
+	if g := asked(); g != 7 {
 		t.Fatalf("Alma asked %d times with nothing kept", g)
 	}
 	almaReadFor = time.Minute
-	mu.Lock()
-	gets = 1
-	mu.Unlock()
 	mu.Lock()
 	model = "gpt-5.5"
 	mu.Unlock()
 	if err := almaDo("PUT", "/api/providers/mg", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if ps, err := almaProvidersSeen(); err != nil || ps[0].Models[0] != "gpt-5.5" || asked() != 2 {
-		t.Fatalf("after a change: %v, %v, %d asks", err, ps, asked())
+	next, err := almaProvidersSeen()
+	if err != nil || len(next) != 1 || next[0].Models[0] != "gpt-5.5" || asked() != 8 {
+		t.Fatalf("after a change: %v, %v, %d asks", err, next, asked())
+	}
+	if &next[0] == &ps[0] || ps[0].Models[0] != "gpt-5.4" {
+		t.Fatal("a changed answer reused or mutated the previous decoded providers")
 	}
 	// one that can't be read is an error, not the last good one
-	almaAPI = "http://127.0.0.1:1"
+	almaReadFor = 0
+	srv.Close()
 	if _, err := almaProvidersSeen(); err == nil {
 		t.Error("Alma gone: no error")
 	}

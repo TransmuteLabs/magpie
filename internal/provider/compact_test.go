@@ -25,8 +25,8 @@ func TestModelCompactsSetFromTheEditor(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	if err := SetModelCompacts("deepseek", map[string]int{"*": 500000, "deepseek-v4-flash": 272000}); err != nil {
 		t.Fatal(err)
@@ -118,8 +118,8 @@ func TestSetCompactAt(t *testing.T) {
 func TestOwnModelsSwitchTellsTheAgents(t *testing.T) {
 	limitsHome(t)
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	if err := SetOwnModelsHidden("claude", true); err != nil {
 		t.Fatal(err)
 	}
@@ -148,8 +148,8 @@ func TestOwnModelsSwitchTellsTheAgents(t *testing.T) {
 func TestSetAgentCompact(t *testing.T) {
 	limitsHome(t)
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	if err := SetCompactAt(400000); err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // TestDshMaxReachesOutputEffortModels: pi-ai asks a model on Messages for a
@@ -38,6 +39,25 @@ func TestDshMaxReachesOutputEffortModels(t *testing.T) {
 			if adaptive := got.Compat != nil && got.Compat.ForceAdaptiveThinking; adaptive != tc.want {
 				t.Errorf("%s on %s: forceAdaptiveThinking %v, want %v", tc.id, tc.route, adaptive, tc.want)
 			}
+		}
+	}
+}
+
+func TestDshMaxReachesAliasedModel(t *testing.T) {
+	dshRouteHome(t)
+	p := provider.Provider{ID: "custom", Name: "Custom", Key: "synthetic", Anthropic: "https://custom.invalid", Models: []string{"fast"}}
+	if err := provider.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetUpstreamName("custom/fast", "GLM-5.3-Flash"); err != nil {
+		t.Fatal(err)
+	}
+	m := catalog.Model{ID: "custom/fast", Efforts: []string{"low", "high", "max"}}
+	for _, api := range []string{"anthropic-messages", "openai-completions", "openai-responses"} {
+		got := dshKindConfig(dshKinds[2], []catalog.Model{m}, api, "http://127.0.0.1:3425").Models[0]
+		adaptive := got.Compat != nil && got.Compat.ForceAdaptiveThinking
+		if adaptive != (api == "anthropic-messages") {
+			t.Errorf("alias on %s: forceAdaptiveThinking %v", api, adaptive)
 		}
 	}
 }

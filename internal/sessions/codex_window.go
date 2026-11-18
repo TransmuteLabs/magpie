@@ -101,7 +101,7 @@ var codexWindowsWritten struct {
 // writeCodexWindows keeps the windows of files' rollouts on disk, and
 // takes away those of rollouts that have none now. The windows in the
 // cache are already only those trimSummaryRevisions keeps.
-func writeCodexWindows(files map[string]*state) {
+func writeCodexWindows(files map[string]*state, sources ...map[string]*state) {
 	codexWindowsWritten.Lock()
 	defer codexWindowsWritten.Unlock()
 	dir := codexWindowDir()
@@ -111,9 +111,13 @@ func writeCodexWindows(files map[string]*state) {
 		if s == nil || s.Agent != "codex" || s.Codex == nil || s.ContentHash == (digest{}) {
 			continue
 		}
+		origin := s
+		if len(sources) > 0 && sources[0][path] != nil {
+			origin = sources[0][path]
+		}
 		name := filepath.Base(codexWindowPath(path))
-		if codexWindowsWritten.files[path] == s {
-			keep[name], written[path] = true, s
+		if codexWindowsWritten.files[path] == origin {
+			keep[name], written[path] = true, origin
 			continue
 		}
 		var data bytes.Buffer
@@ -139,7 +143,7 @@ func writeCodexWindows(files map[string]*state) {
 			os.Remove(out.Name())
 			continue
 		}
-		keep[name], written[path] = true, s
+		keep[name], written[path] = true, origin
 	}
 	codexWindowsWritten.files = written
 	entries, _ := os.ReadDir(dir)

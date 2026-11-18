@@ -134,9 +134,7 @@ func TestMoveToAgyGoesThroughAntigravitysProxy(t *testing.T) {
 		"antigravity":   map[string]any{"type": "oauth", "refresh": "1//a|p", "accountId": "a@x.com"},
 		"antigravity#b": map[string]any{"type": "oauth", "refresh": "1//b|p", "accountId": "B@x.com"},
 	})
-	if err := store(file{Providers: []Provider{{ID: "antigravity", Proxy: "http://10.0.0.7:3128", AccountProxies: map[string]string{"b@x.com": "socks5://10.0.0.8:1080"}}}}); err != nil {
-		t.Fatal(err)
-	}
+	setProxies(t, "antigravity", "http://10.0.0.7:3128", map[string]string{"b@x.com": "socks5://10.0.0.8:1080"})
 	s := standInAgy(t, true)
 	agyCLIMissing = func(string) string { return "Antigravity CLI" }
 	if _, err := MoveToAgy(context.Background()); err != nil {
@@ -158,9 +156,8 @@ func TestMoveToAgyGoesThroughAntigravitysProxy(t *testing.T) {
 func TestMoveToAgyKeepsAgyCLIsOwnProxy(t *testing.T) {
 	signIn(t)
 	writePluginAuth(t, map[string]any{"antigravity": map[string]any{"type": "oauth", "refresh": "1//a|p", "accountId": "a@x.com"}})
-	if err := store(file{Providers: []Provider{{ID: "antigravity", Proxy: "http://10.0.0.7:3128"}, {ID: agyCLIID, Proxy: "direct"}}}); err != nil {
-		t.Fatal(err)
-	}
+	setProxies(t, "antigravity", "http://10.0.0.7:3128", nil)
+	setProxies(t, agyCLIID, "direct", nil)
 	s := standInAgy(t, true)
 	agyCLIMissing = func(string) string { return "Antigravity CLI" }
 	if _, err := MoveToAgy(context.Background()); err != nil {

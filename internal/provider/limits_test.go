@@ -35,8 +35,8 @@ func TestLimitsReachTheAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	// once, not twice: the two paths reach the agents differently — a reply
 	// limit saves the settings file and tells them itself, a window saves
@@ -414,8 +414,8 @@ func TestLimitsTellTheAgentsOnlyOfALimitThatMoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	told := 0
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 
 	key, dropped, err := DropModelOutput("relay/sol")
 	if err != nil {

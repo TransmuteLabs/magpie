@@ -113,6 +113,7 @@ func (o *observed) end(call Call, millis int64) {
 		return
 	}
 	rec := usage.Record{RouteID: o.routeID, Time: call.Time, Agent: call.Agent, Model: call.Model, Status: call.Status, Millis: millis, CallerKeyName: o.keyName}
+	rec.UpstreamFailure = call.UpstreamFailure
 	canceledAs(&rec, call.Status, call.Error)
 	for _, w := range o.watches {
 		w.End(rec)
@@ -127,13 +128,15 @@ func (o *observed) attempt(call Call, attempt Try, providerID, effort string, he
 	}
 	u := call.Usage.billed()
 	rec := usage.Record{RouteID: o.routeID, Time: attempt.Start, Agent: call.Agent,
-		Provider: providerID, Model: attempt.Model, Requested: call.Model, Served: u.Served, Effort: effort,
-		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheUnknown: u.cacheNotCounted(), Reasoning: u.Reasoning,
+		Provider: providerID, Model: attempt.Model, Requested: call.Model, Served: u.Served, Upstream: call.Usage.Upstream, Effort: effort,
+		Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h, CacheUnknown: u.cacheNotCounted(), Reasoning: u.Reasoning, Credits: call.Usage.Credits, TierServed: call.Usage.Tier,
 		Millis: time.Since(attempt.Start).Milliseconds(), Status: attempt.Status, TTFT: attempt.TTFT, FirstText: attempt.FirstText, FirstReasoning: attempt.FirstReasoning, ReasoningHidden: attempt.ReasoningHidden, CallerKeyName: o.keyName}
+	rec = accountedUsage(rec, call.Usage)
+	rec.UpstreamFailure = call.UpstreamFailure
 	canceledAs(&rec, attempt.Status, attempt.Error)
 	if wanted := usage.ObservedBodies(); wanted != usage.NoBodies {
 		reply, cut := capture.body.text(), capture.body.truncated
-		if !held.passing {
+		if !held.passing && call.Usage.ErrType != "extension_operation_terminal" {
 			data := held.held.Bytes()
 			cut = len(data) > callBodyLimit
 			reply = string(data[:min(len(data), callBodyLimit)])
@@ -144,7 +147,7 @@ func (o *observed) attempt(call Call, attempt Try, providerID, effort string, he
 		bodies := call
 		bodies.ResponseBody, bodies.ResponseTruncated = body.text(), cut || body.truncated
 		if wanted == usage.WholeBodies {
-			if !held.passing {
+			if !held.passing && call.Usage.ErrType != "extension_operation_terminal" {
 				bodies.wholeOut = held.held.Bytes()
 				bodies.wholeOutCut = false
 			} else if capture.whole != nil {

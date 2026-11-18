@@ -47,6 +47,33 @@ function serve(lang) {
 const pages = { library: 10, usage: 4, plugins: 3, settings: 8 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: a focused Settings tab accepts Enter after its icon loads`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 }, reducedMotion: "reduce" })).newPage();
+    page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
+    await page.route("**/*", serve("en"));
+    const iconsReady = Promise.withResolvers();
+    await page.route("**/navicons.js", async (route) => {
+      await iconsReady.promise;
+      await route.fallback();
+    });
+    try {
+      await page.goto("http://magpie.test/");
+      await page.locator("#prefs").click();
+      const about = page.locator('.nav-sub[data-view="settings"] .nav-s[data-of="setTab-about"]');
+      await about.focus();
+      iconsReady.resolve();
+      await about.locator("svg").waitFor();
+      await page.keyboard.press("Enter");
+      assert.equal(await page.locator("#setTab-about").getAttribute("aria-selected"), "true",
+        "Enter still reaches About after its sidebar row is redrawn");
+    } finally {
+      iconsReady.resolve();
+    }
+  });
+
   test(`${engine}: every row of the sidebar's tab lists has its own mark`, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());

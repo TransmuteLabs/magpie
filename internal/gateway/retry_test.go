@@ -69,6 +69,8 @@ func scriptedOn(t *testing.T, id string, proto provider.Protocol, s *scripted) {
 		p.Anthropic = up.URL
 	case provider.Responses:
 		p.Responses = up.URL
+	case provider.Gemini:
+		p.Gemini = up.URL + "/v1beta"
 	default:
 		p.Chat = up.URL + "/v1"
 	}

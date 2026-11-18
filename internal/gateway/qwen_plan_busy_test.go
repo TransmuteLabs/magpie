@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // The Qwen Token Plan's words for the 429 it answers under many requests
@@ -153,6 +155,41 @@ func TestOtherVendorsAllocatedQuotaUnchanged(t *testing.T) {
 		if code, body := postAs(t, New(), "", `{"model":"group/g","messages":[{"role":"user","content":"hi"}]}`); code != 200 || a.n != 1 || b.n != 1 {
 			t.Errorf("%s in a group: %d (a %d, b %d): %s", x.name, code, a.n, b.n, body)
 		}
+	}
+}
+
+func TestQwenPlanConcurrencyRespectsRequestPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name, policy string
+		status       int
+		sends, next  int
+	}{
+		{"provider disabled", `{"providers":{"qwen":{"maxRetries":0}}}`, 200, 1, 1},
+		{"root exhausted", `{"defaults":{"maxTotalRetries":0}}`, 429, 1, 0},
+		{"one provider repeat", `{"providers":{"qwen":{"maxRetries":1,"baseDelayMs":0}}}`, 200, 2, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fresh(t)
+			current := settings.Load()
+			if err := json.Unmarshal([]byte(`{"requestPolicy":`+test.policy+`}`), &current); err != nil {
+				t.Fatal(err)
+			}
+			if err := settings.Save(current); err != nil {
+				t.Fatal(err)
+			}
+			plan := qwenBusyTimes(2, qwenPlanBusyBodies[0])
+			next := &scripted{replies: []reply{{200, "", chatOK}}}
+			scriptedAs(t, "qwen", "Qwen Token Plan", "qwen-token-plan", plan)
+			scriptedOn(t, "next", provider.Chat, next)
+			if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"qwen/m", "next/m"}, Routing: provider.Ordered}); err != nil {
+				t.Fatal(err)
+			}
+			code, body := postAs(t, New(), "", `{"model":"group/g","messages":[{"role":"user","content":"hi"}]}`)
+			if code != test.status || plan.n != test.sends || next.n != test.next {
+				t.Fatalf("status %d (want %d), Qwen sends %d (want %d), fallback sends %d (want %d): %s",
+					code, test.status, plan.n, test.sends, next.n, test.next, body)
+			}
+		})
 	}
 }
 

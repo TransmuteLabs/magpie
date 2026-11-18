@@ -8,6 +8,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { inEditor } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -88,11 +89,23 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.match(hint, /max_tokens/, hint);
         assert.match(hint, /Anthropic/, hint);
         if (lang !== "en") assert.doesNotMatch(hint, /sent as max_tokens/, "translated: " + hint);
-        const over = await box.evaluate((b) => {
-          const h = document.getElementById(b.getAttribute("aria-describedby").split(" ").pop());
-          return h.scrollWidth - h.clientWidth + Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth);
-        });
-        assert.equal(over, 0, "the hint wraps inside the window");
+        await inEditor(page, box);
+        const description = await box.getAttribute("aria-describedby");
+        const source = page.locator("#" + description.split(" ").pop());
+        const hasCard = await source.evaluate((node) => getComputedStyle(node).getPropertyValue("--hint").trim() === "1");
+        let surface = source;
+        if (hasCard) {
+          await box.hover();
+          surface = page.locator(".set-hint.on");
+          await surface.waitFor();
+          assert.equal((await surface.textContent()).trim(), hint.trim(), "the visible card keeps the complete accessible description");
+        }
+        const bounds = await surface.boundingBox();
+        assert.ok(bounds && bounds.width > 0 && bounds.height > 0, "the explanation has a visible box");
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width, "the explanation fits the window horizontally: " + JSON.stringify(bounds));
+        assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 720, "the explanation fits the window vertically: " + JSON.stringify(bounds));
+        assert.equal(await surface.evaluate((node) => node.scrollWidth - node.clientWidth), 0, "the visible hint wraps inside its box");
+        assert.equal(await page.evaluate(() => Math.max(0, document.documentElement.scrollWidth - document.documentElement.clientWidth)), 0, "the page has no horizontal overflow");
         assert.deepEqual(errors, []);
       });
     }

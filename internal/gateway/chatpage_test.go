@@ -19,6 +19,56 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+func TestChatPageDefaultModel(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		models []string
+		want   string
+	}{
+		{name: "empty"},
+		{name: "ordinary fallback", models: []string{"other/first", "deepseek/pro"}, want: "other/first"},
+		{name: "case insensitive flash", models: []string{"other/first", "vendor/DeepSeek-4.1-FLASH"}, want: "vendor/DeepSeek-4.1-FLASH"},
+		{name: "first visible flash", models: []string{"vendor/deepseek-4.1-flash", "vendor/deepseek-4-flash"}, want: "vendor/deepseek-4.1-flash"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var shown []provider.Entry
+			for _, model := range test.models {
+				shown = append(shown, provider.Entry{ID: model})
+			}
+			if got := chatDefaultModel(shown); got != test.want {
+				t.Fatalf("default model = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestChatPageSpeechMarkdown(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "empty"},
+		{name: "ordinary text", input: " hello, world! ", want: "hello, world!"},
+		{name: "heading", input: "# **Title**", want: "Title"},
+		{name: "list", input: "- first\n2. second", want: "first\nsecond"},
+		{name: "link", input: "Read [manual](https://example.invalid).", want: "Read manual."},
+		{name: "image and quote", input: "> ![chart](https://example.invalid/chart.png)", want: "chart"},
+		{name: "fenced code", input: "```text\nhello\n```", want: "hello"},
+		{name: "inline marks", input: "`go` and ~~old~~", want: "go and old"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := plainOfMarkdown(test.input); got != test.want {
+				t.Fatalf("speech text = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // The page is DeepSeek's release, as published: its zip is the one
 // whose sha256 the release has, its one API origin is magpie's own path,
 // and magpie.js is loaded before its script.

@@ -1,0 +1,208 @@
+package extension
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+
+	"github.com/yetone/magpie/pkg/protocolext"
+)
+
+type Handler func(context.Context, Call, *Stream) (any, error)
+
+type Module struct {
+	Manifest Manifest
+	Handlers map[string]Handler
+	Inbounds []protocolext.Inbound
+	Actions  map[string]Handler
+	Start    StartFunc
+}
+
+func (module Module) Validate() error {
+	_, _, err := module.prepare()
+	return err
+}
+
+func (module Module) prepare() (map[string]Handler, *inboundModule, error) {
+	if err := module.Manifest.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if module.Start != nil && module.Manifest.Contract.Version.Minor < 1 {
+		return nil, nil, fmt.Errorf("module startup requires SDK API 1.1")
+	}
+	handlers := maps.Clone(module.Handlers)
+	if handlers == nil {
+		handlers = make(map[string]Handler)
+	}
+	if handler := handlers[MethodProviderExecute]; handler != nil {
+		handlers[MethodProviderExecute] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			result, err := handler(ctx, call, stream)
+			if err != nil {
+				return result, err
+			}
+			raw, err := json.Marshal(result)
+			var execution ExecuteResult
+			if err != nil || json.Unmarshal(raw, &execution) != nil ||
+				ValidateExecutionUsage(module.Manifest, execution.Usage) != nil {
+				return nil, &Error{Code: "invalid_result", Message: "invalid provider execution usage", Outcome: "uncertain"}
+			}
+			return result, nil
+		}
+	}
+	if handler := handlers[MethodProviderUsage]; handler != nil {
+		handlers[MethodProviderUsage] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			result, err := handler(ctx, call, stream)
+			if err == nil {
+				var raw json.RawMessage
+				raw, err = json.Marshal(result)
+				if err == nil {
+					_, _, err = ValidateUsageResult(module.Manifest, raw)
+				}
+			}
+			return result, err
+		}
+	}
+	if handler := handlers[MethodProviderCalls]; handler != nil {
+		handlers[MethodProviderCalls] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			request, err := DecodeOutsideCallsRequest(module.Manifest, call.Scope, call.Params)
+			if err != nil {
+				return nil, err
+			}
+			result, err := handler(ctx, call, stream)
+			if err != nil {
+				return nil, err
+			}
+			raw, err := json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+			return DecodeOutsideCallsResult(module.Manifest, request, raw)
+		}
+	}
+	for _, method := range []string{MethodAgentInspect, MethodAgentPlan} {
+		if handler := handlers[method]; handler != nil {
+			handlers[method] = agentBindingHandler(module.Manifest, method, handler)
+		}
+	}
+	if _, exists := handlers[MethodModuleCall]; exists {
+		return nil, nil, fmt.Errorf("module.call is owned by the SDK; register Module.Actions")
+	}
+	if handler := handlers[MethodSessionConvert]; handler != nil {
+		handlers[MethodSessionConvert] = sessionRelatedHandler(module.Manifest.Clone(), handler)
+	}
+	actions := maps.Clone(module.Actions)
+	declared := make(map[string]ActionDescriptor)
+	for _, action := range module.Manifest.Actions {
+		if actionOwner(action) == componentID(module.Manifest) {
+			declared[action.ID] = action
+			if actions[action.ID] == nil {
+				return nil, nil, fmt.Errorf("module action requires handler %q", action.ID)
+			}
+		}
+	}
+	for id, handler := range actions {
+		if _, found := declared[id]; !found || handler == nil {
+			return nil, nil, fmt.Errorf("undeclared or invalid module action handler %q", id)
+		}
+	}
+	if module.Manifest.Contract.Has(ModuleRPC) {
+		handlers[MethodModuleCall] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+			var request ModuleCallRequest
+			if decodeParams(call.Params, &request) != nil || !json.Valid(request.Input) {
+				return nil, &Error{Code: "invalid_params", Message: "module.call requires a declared action and JSON input"}
+			}
+			action, found := declared[request.Action]
+			if !found {
+				return nil, &Error{Code: "method_not_found", Message: "module action is not owned by this component"}
+			}
+			call.Action, call.Params = request.Action, slices.Clone(request.Input)
+			stream.actionEffect = action.Effect
+			return actions[request.Action](ctx, call, stream)
+		}
+	}
+	var inbounds *inboundModule
+	if len(module.Inbounds) > 0 {
+		var err error
+		inbounds, err = newInboundModule(module.Manifest, module.Inbounds)
+		if err != nil {
+			return nil, nil, err
+		}
+		for method, handler := range map[string]Handler{
+			MethodInboundDecode: inbounds.decode, MethodInboundResponse: inbounds.response,
+		} {
+			if _, exists := handlers[method]; exists {
+				return nil, nil, fmt.Errorf("inbound helpers conflict with handler %q", method)
+			}
+			handlers[method] = handler
+		}
+	}
+	required := RequiredMethods(module.Manifest)
+	for _, method := range required {
+		if handlers[method] == nil {
+			return nil, nil, fmt.Errorf("extension capability requires handler %q", method)
+		}
+	}
+	for method, handler := range handlers {
+		if handler == nil || !slices.Contains(required, method) {
+			return nil, nil, fmt.Errorf("unnegotiated or invalid extension handler %q", method)
+		}
+		if IsStorageMethod(method) {
+			handlers[method] = storageHandler(module.Manifest.Clone(), method, handler)
+		}
+		if method == MethodSessionSourceRead {
+			descriptor := module.Manifest.Clone()
+			handlers[method] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+				request, err := DecodeSessionSourceRequest(descriptor, call.Params)
+				if err != nil {
+					return nil, err
+				}
+				if call.Scope.Session != request.Locator.SessionID || call.Scope.Provider != "" ||
+					call.Scope.Account != "" || call.Scope.Generation != 0 || len(call.Auth) != 0 {
+					return nil, &Error{Code: "invalid_params", Message: "source read cannot borrow account or another session authority"}
+				}
+				result, err := handler(ctx, call, stream)
+				if err != nil {
+					return nil, err
+				}
+				raw, err := json.Marshal(result)
+				if err != nil {
+					return nil, err
+				}
+				return DecodeSessionSourceResult(request, raw)
+			}
+		}
+		if method == MethodProviderExecute || method == MethodProviderModels {
+			descriptor := module.Manifest.Clone()
+			handlers[method] = func(ctx context.Context, call Call, stream *Stream) (any, error) {
+				if err := ValidateInferenceProvider(descriptor, call.Scope); err != nil {
+					return nil, err
+				}
+				if method == MethodProviderExecute {
+					if err := ValidateExecuteOperation(descriptor, call.Scope, call.Params); err != nil {
+						return nil, err
+					}
+				}
+				return handler(ctx, call, stream)
+			}
+		}
+		if IsGatewayMethod(method) {
+			descriptor := *module.Manifest.Hooks
+			descriptor.Origins = slices.Clone(descriptor.Origins)
+			handlers[method] = gatewayHandler(method, handler, descriptor)
+		}
+		if IsMiddlewareMethod(method) {
+			descriptor := *module.Manifest.Clone().Middleware
+			handlers[method] = middlewareHandler(descriptor, method, handler)
+		}
+		if method == MethodLedgerObserve {
+			handlers[method] = ledgerHandler(handler)
+		}
+	}
+	snapshot := cloneManifest(module.Manifest)
+	handlers[MethodDescribe] = func(context.Context, Call, *Stream) (any, error) {
+		return snapshot.Public(), nil
+	}
+	return handlers, inbounds, nil
+}

@@ -47,7 +47,7 @@ function server(lang, posts) {
   };
 }
 
-const scrolled = (page) => page.evaluate(() => [window.scrollX, window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop || e.scrollLeft).map((e) => `${e.className}:${e.scrollTop},${e.scrollLeft}`)].join(" "));
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const rows = (page) => page.locator("#view-library .lib-list > .lib-row.lib-found");
 

@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPage } = require("./reader.cjs");
 
 const assets = path.resolve(process.env.MAGPIE_ASSETS || path.resolve(__dirname, "../assets"));
 
@@ -107,10 +108,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction(() => document.querySelector('#side .nav-sub:not(.leaving)')?.dataset.view === "usage");
       assert.ok(await usage.locator(".nav-fold").isVisible(), "Usage's row shows the chevron");
       assert.equal(await prefs.locator(".nav-fold").isVisible().catch(() => false), false, "Settings' went with its list");
-      await usage.click();
+      await openPage(page, "usage");
+      assert.equal(await usage.getAttribute("aria-expanded"), "false");
       await folded(page);
       assert.ok(await usage.evaluate((b) => b.classList.contains("on")), "Usage is still open");
-      assert.equal(await usage.getAttribute("aria-expanded"), "false");
       // from the keyboard too
       await usage.focus();
       await page.keyboard.press("Enter");

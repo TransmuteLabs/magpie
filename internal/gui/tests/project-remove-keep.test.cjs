@@ -56,7 +56,7 @@ function server(lang, posts) {
   };
 }
 
-const scrolled = (page) => page.evaluate(() => [window.scrollX, window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop || e.scrollLeft).map((e) => `${e.className}:${e.scrollTop},${e.scrollLeft}`)].join(" "));
+const { scrollPositions: scrolled } = require("./reader.cjs");
 // a click where the element is, as the reader's: Playwright's own click
 // first scrolls it into view
 // the dialog grows out of the button that opened it: it's pressed once

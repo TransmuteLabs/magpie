@@ -16,6 +16,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fresh = () => ({
@@ -113,18 +114,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const panel = (page, id) => row(page, id).locator(".acct-models");
     const chips = (page, id) => panel(page, id).locator(".mchip").evaluateAll((cs) => cs.map((c) => `${c.textContent}${c.classList.contains("on") ? "*" : ""}`));
     // what the page and its scrollers have scrolled
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     // a click that leaves the row where it was and scrolls nothing
     const still = async (page, id, b) => {
       await b.scrollIntoViewIfNeeded();
       await page.waitForTimeout(150);
-      const before = await row(page, id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page);
+      const before = await row(page, id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await b.click();
       await page.waitForTimeout(200);
       // the redraw's soft refresh starts 2px low; WebKit can hold it there past 200ms
       await page.evaluate(() => Promise.all(document.querySelector("#modal .dialog").getAnimations().map((a) => a.finished)));
       assert.equal(await row(page, id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), before, `${id}'s row moved`);
-      assert.equal(await scrolled(page), sc, "a click scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
     };
     // an unset badge waits under its row's ⋯
     const reveal = async (page, id) => {
@@ -142,7 +142,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // the one kept for gpt-6-mini says so, always; the other says All models under ⋯ only
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.one);
       assert.equal(await pill(page, "Spare@Example.com").getAttribute("title"), w.only);
-      assert.equal(await pill(page, "Spare@Example.com").evaluate((e) => getComputedStyle(e).opacity), "1");
+      assert.deepEqual(await pill(page, "Spare@Example.com").evaluateAll((es) => es.map((e) => getComputedStyle(e).opacity)), ["1"]);
       assert.equal(await pill(page, "me@example.com").textContent(), w.all);
       await page.mouse.move(0, 0);
       await page.waitForTimeout(250);

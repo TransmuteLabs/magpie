@@ -86,8 +86,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const e = ed.querySelector(":scope > .ebody") || ed, kids = [...e.children];
           const at = (x) => kids.findIndex((k) => k.contains(x));
           const label = (text) => kids.findIndex((k) => k.tagName === "LABEL" && k.textContent === text);
+          const routing = [...e.querySelectorAll(":scope > details.advanced > .inner > label")].filter((element) => element.textContent === w.routing);
           return {
-            accounts: at(e.querySelector(".accts")), routing: label(w.routing), models: label(w.models),
+            accounts: at(e.querySelector(".accts")), routing: at(routing[0]), routingCount: routing.length, models: label(w.models),
             blocks: [...e.querySelectorAll(".plugin-options")].map((b) => ({
               top: b.classList.contains("top"), at: at(b), label: kids[at(b) - 1].textContent,
               keys: [...b.querySelectorAll(".plugin-option")].map((o) => o.dataset.key),
@@ -96,15 +97,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             spill: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           };
         }, w);
-        assert.ok(seen.accounts >= 0 && seen.routing > seen.accounts && seen.models > seen.routing, JSON.stringify(seen));
+        assert.ok(seen.accounts >= 0 && seen.models > seen.accounts && seen.routing > seen.models && seen.routingCount === 1, JSON.stringify(seen));
         const shape = seen.blocks.map((b) => [b.top, b.label, b.keys, b.note]);
         if (which === "mixed") {
           assert.deepEqual(shape, [[true, w.field, ["panel"], true], [false, w.field, ["free_only"], false]]);
-          assert.ok(seen.blocks[0].at > seen.accounts && seen.blocks[0].at < seen.routing, "the top block sits between the accounts and Routing: " + JSON.stringify(seen));
+          assert.ok(seen.blocks[0].at > seen.accounts && seen.blocks[0].at < seen.models, "the top block sits between the accounts and Models, before Routing in Advanced: " + JSON.stringify(seen));
           assert.ok(seen.blocks[1].at > seen.models, "the rest stay under the models: " + JSON.stringify(seen));
         } else if (which === "top") {
           assert.deepEqual(shape, [[true, w.field, ["panel"], true]]);
-          assert.ok(seen.blocks[0].at > seen.accounts && seen.blocks[0].at < seen.routing, JSON.stringify(seen));
+          assert.ok(seen.blocks[0].at > seen.accounts && seen.blocks[0].at < seen.models, JSON.stringify(seen));
         } else {
           assert.deepEqual(shape, [[false, w.field, ["panel", "free_only"], true]]);
           assert.ok(seen.blocks[0].at > seen.models, "as before, under the models: " + JSON.stringify(seen));

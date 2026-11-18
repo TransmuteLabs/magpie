@@ -32,7 +32,7 @@ ifeq ($(shell go env GOOS),android)
   TAGS = nogui
 endif
 
-.PHONY: assets-pack conpty-pair build-release build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once
+.PHONY: assets-pack conpty-pair build-release build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once sdk-js-pack
 
 # A release build embeds the UI's files as one zip instead of the tree
 # (internal/gui/assets_packed.go): a Windows or Linux download is the raw
@@ -64,6 +64,12 @@ build-release: assets-pack
 
 install:
 	go install -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS)" .
+
+SDK_JS_DIST ?= dist
+sdk-js-pack: export MAGPIE_BUILD_VERSION := $(VERSION)
+sdk-js-pack: export MAGPIE_SDK_JS_OUT := $(SDK_JS_DIST)
+sdk-js-pack:
+	node build/sdk-js-pack.mjs --version "$$MAGPIE_BUILD_VERSION" --output "$$MAGPIE_SDK_JS_OUT"
 
 test:
 	go vet -tags "$(TAGS)" ./... && go test -tags "$(TAGS)" ./...

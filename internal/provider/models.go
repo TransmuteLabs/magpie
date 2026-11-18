@@ -1523,7 +1523,7 @@ func (p Provider) fetchPerKey(ctx context.Context, keys []KeyAccount) ([]catalog
 	var base string
 	var lastErr error
 	for _, k := range keys {
-		id := keyID(k.Key)
+		id := previewKeyID(ctx, p.ID, k.Key)
 		q := p.WithKey(k)
 		var l fetched
 		var err error
@@ -2282,7 +2282,7 @@ func (p Provider) Levelless(model string) bool {
 // model thinks and lists its family with levels (catalog's levels: a model
 // just added, gpt-6.1-sol).
 func effortsOf(m catalog.Model) []string {
-	if len(m.Efforts) > 0 || m.Provider != "" {
+	if m.Efforts != nil || m.Provider != "" {
 		return m.Efforts
 	}
 	return borrowedEfforts(m.ID)
@@ -2418,6 +2418,9 @@ func (p Provider) listPriceIn(c priceCats, model string) (catalog.Price, bool, i
 		if pr, ok, from := p.listPriceIn(c, own); ok {
 			return pr, true, from
 		}
+	}
+	if pr, ok := p.extensionListPrice(model); ok {
+		return pr, true, pricedOwn
 	}
 	if pr, ok := p.remotePrice(model); ok {
 		return pr, true, pricedOwn

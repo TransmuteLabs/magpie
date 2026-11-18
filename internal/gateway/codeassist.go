@@ -1625,6 +1625,8 @@ func distinctNames(vs []any) []any {
 // codeAssistDecoder reads Code Assist's stream: Gemini chunks, each wrapped
 // in {response}.
 type codeAssistDecoder struct {
+	decodeState *protocolDecodeState
+
 	started bool
 	tools   bool
 	stopped bool
@@ -1646,6 +1648,7 @@ func (d *codeAssistDecoder) decode(data string, emit func(Event)) error {
 		geminiChunk
 	}
 	if err := json.Unmarshal([]byte(data), &ch); err != nil {
+		d.decodeState.reject()
 		// an error in a shape of its own is still the reply's end (#1933)
 		if e, ok := carriedError(data); ok {
 			emit(e)

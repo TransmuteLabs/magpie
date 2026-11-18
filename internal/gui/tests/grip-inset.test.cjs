@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const prov = (id) => ({
@@ -143,10 +144,10 @@ const kinds = [
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(`${engine}: every row's grip stands inside its card's edge`, { timeout: 600000 }, async (t) => {
-    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-    t.after(() => browser.close());
     for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) for (const width of [980, 420]) for (const k of kinds) {
-      await t.test(`${lang} ${width}px: ${k.name}`, async () => {
+      await t.test(`${lang} ${width}px: ${k.name}`, async (t) => {
+        const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+        t.after(() => browser.close());
         // the window is no narrower than 560px (windowMinW); narrower, it
         // is the browser page (magpie web, a phone)
         const web = k.mode === "window" && width < 560;
@@ -170,29 +171,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const e = document.querySelector(r)?.querySelector(g);
             return e && getComputedStyle(e, e.classList.contains("grip") ? null : "::before").opacity === "0";
           }, [k.row, k.grip]);
-          // on the row's left padding, by the grip, which no other element
-          // covers; the page brought to it by the test, as the reader would
-          // the row brought into sight with the wheel, as the reader would (a
-          // scroll by code the page puts back); its box taken once it holds
-          // still
-          const still = () => row.evaluate((r) => new Promise((done) => {
-            let last = "", same = 0;
-            const look = () => {
-              const x = r.getBoundingClientRect(), now = [x.x, x.y, x.width, x.height].join();
-              same = now === last ? same + 1 : 0;
-              last = now;
-              if (same >= 5) return done({ x: x.x, y: x.y, width: x.width, height: x.height });
-              requestAnimationFrame(look);
-            };
-            look();
-          }));
-          let b = await still();
-          for (let i = 0; i < 6 && (b.y < 60 || b.y + b.height > viewport.height - 20); i++) {
-            await page.mouse.move(viewport.width / 2, viewport.height / 2);
-            await page.mouse.wheel(0, b.y + b.height / 2 - viewport.height / 2);
-            b = await still();
-          }
-          await page.mouse.move(b.x + 6, b.y + b.height / 2);
+          const handle = row.locator(k.grip);
+          await reach(page, handle);
+          const point = await handle.boundingBox();
+          await page.mouse.move(point.x + point.width / 2, point.y + point.height / 2);
           await page.waitForFunction(([r, g]) => {
             const e = document.querySelector(r)?.querySelector(g);
             return e && getComputedStyle(e, e.classList.contains("grip") ? null : "::before").opacity === "1";

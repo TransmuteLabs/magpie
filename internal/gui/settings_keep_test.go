@@ -13,6 +13,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/redact"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -243,6 +244,8 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 	was.BarkServer, was.BarkKey, was.BarkDaily = "https://bark.example.com", "kept", "21:30"
 	// the Routing groups page's defaults for every group (groups/defaults)
 	was.GroupSink, was.GroupFirstToken, was.GroupPatience = true, 30, 120
+	retries := 3
+	was.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxRetries: &retries}}
 	if err := settings.Save(was); err != nil {
 		t.Fatal(err)
 	}

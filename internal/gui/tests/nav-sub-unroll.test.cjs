@@ -49,6 +49,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width, height: 760 } });
       // the reader left Plugins on Installed
       await context.addInitScript(() => { try { localStorage.setItem("magpie.pluginTab", "installed"); } catch {} });
+      await context.addInitScript(() => {
+        const animate = Element.prototype.animate;
+        Element.prototype.animate = function (...args) {
+          const animation = animate.apply(this, args);
+          if (this.matches('.nav-sub[data-view="plugins"]:not(.leaving)')) {
+            animation.pause();
+            animation.currentTime = animation.effect.getTiming().duration / 2;
+            window.pluginsUnroll = animation;
+          }
+          return animation;
+        };
+      });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
       page.setDefaultNavigationTimeout(60000);
@@ -63,9 +75,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const box = page.locator("#side .nav-sub:not(.leaving)");
       await box.waitFor();
       // the plugins come in while the list is still unrolling
-      await page.waitForFunction(() => document.querySelector(".nav-sub:not(.leaving)")?.getAnimations().some((a) => a.playState === "running"));
+      await page.waitForFunction(() => window.pluginsUnroll?.playState === "paused");
       open();
       await page.waitForFunction((w) => document.querySelector(".nav-s.cur")?.textContent.startsWith(w) && /\d/.test(document.querySelector(".nav-s.cur").textContent), installedWord[lang]);
+      await page.evaluate(() => window.pluginsUnroll.finish());
       // every row, the list and its selection, done moving
       await page.waitForFunction(() => {
         const b = document.querySelector(".nav-sub:not(.leaving)");

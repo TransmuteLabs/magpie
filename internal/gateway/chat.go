@@ -1232,6 +1232,8 @@ func (u Usage) chat() map[string]any {
 // arguments aren't yet whole JSON is held, by its index, and given whole,
 // in index order, when the reply ends.
 type chatDecoder struct {
+	decodeState *protocolDecodeState
+
 	started   bool
 	tool      int       // index of the open tool call, -1 for none
 	toolID    string    // id of the open tool call, as some relays repeat it on every fragment
@@ -1477,6 +1479,7 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 		} `json:"error"`
 	}
 	if err := decodeJSON([]byte(data), &ch); err != nil {
+		d.decodeState.reject()
 		// an error in a shape of its own, {"error":"…"}, is still the
 		// reply's end, not a chunk to pass over (#1933)
 		if e, ok := carriedError(data); ok {

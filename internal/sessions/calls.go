@@ -318,15 +318,19 @@ func callFilesWith(codex []file) []file { return distinctOf(callFileLists(codex)
 // the callers that list more add theirs and keep each path once, over
 // all of them (distinctOf), instead of copying callFilesWith's again.
 func callFileLists(codex []file) [][]file {
-	lists := [][]file{claudeFiles()}
+	return [][]file{claudeFiles(), claudeDesktopFiles(), allowed(codex), wslFiles("claude", "codex")}
+}
+
+func claudeDesktopFiles() []file {
+	var out []file
 	for _, d := range desktopReadDirs() {
 		// Cowork keeps a Claude Code folder of its own for each session
 		homes, _ := SessionGlob(filepath.Join(d, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
 		for _, h := range homes {
-			lists = append(lists, ccFiles("claude-desktop", h))
+			out = append(out, ccFiles("claude-desktop", h)...)
 		}
 	}
-	return append(lists, allowed(codex), wslFiles("claude", "codex"))
+	return out
 }
 
 // callSources are callFiles and the other agents' session files. Most are

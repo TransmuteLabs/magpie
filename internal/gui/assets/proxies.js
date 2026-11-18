@@ -42,8 +42,13 @@ function testSavedProxy(id, draw = renderSettings) {
 // proxy is chosen. An editor opened before Settings was read draws its
 // picker again once the saved proxies are in, their names and Saved mode
 // with them.
-window.proxyPickTest = function (box, saved, hint) {
-  if (!prefs) return void loadSettings().then(() => box.isConnected && savedProxyList().length && box.replaceWith(proxyPicker()), () => {});
+window.proxyPickTest = function (box, saved, hint, needsSettings) {
+  if (needsSettings) {
+    const ready = prefs ? Promise.resolve() : loadSettings();
+    return void ready.then(() => {
+      if (box.isConnected && savedProxyList().length) box.replaceWith(proxyPicker());
+    }, () => {});
+  }
   if (!savedProxyList().length || saved.nextElementSibling?.classList.contains("proxy-test")) return;
   const test = el("button", "text proxy-test", t("Test"));
   test.type = "button";

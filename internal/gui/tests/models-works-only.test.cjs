@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { showOtherModels, scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -89,7 +90,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const bulk = (name) => editor.locator(".mbulk").getByRole("button", { name, exact: true });
         const works = bulk(w.works);
         const picks = () => editor.locator(".mchips .mchip.on").evaluateAll((cs) => cs.map((c) => c.querySelector("span").textContent).sort());
-        const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 
         // not offered before a test has answered
         await bulk(w.all).waitFor();
@@ -109,16 +109,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const fits = await works.evaluate((b) => { const r = b.getBoundingClientRect(), e = b.closest(".editor").getBoundingClientRect(); return r.right <= e.right + 1 && r.left >= e.left - 1; });
         assert(fits, "the button runs off the editor");
 
+        await showOtherModels(page, editor, relay.chosen);
+
         // a model picked after the test: not tested, so it stays
         await editor.locator(".mchips .mchip", { hasText: "minimax-m3" }).click();
 
         // the editor's body scrolled to the buttons; the click leaves it,
         // the page and the button where they are
         await editor.locator(".ebody").evaluate((b) => { b.scrollTop += b.querySelector(".mbulk").getBoundingClientRect().top - b.getBoundingClientRect().top - 8; });
-        const before = await scrolled(), at = await works.evaluate((e) => Math.round(e.getBoundingClientRect().top));
+        const before = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), at = await works.evaluate((e) => Math.round(e.getBoundingClientRect().top));
         await works.click();
         assert.deepEqual(await picks(), KEPT, "the failed picks unpicked, the rest kept");
-        assert.equal(await scrolled(), before, "the page moved");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), before, "the page moved");
         assert.equal(await works.evaluate((e) => Math.round(e.getBoundingClientRect().top)), at, "the button moved");
         assert.equal((await page.locator("#status").textContent()).trim(), w.done);
         assert(await works.isDisabled(), "nothing left to unpick, yet it is on");
@@ -129,6 +131,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const saved = posts.find((p) => p.path === "/api/provider/save");
         assert(saved, "nothing saved");
         assert.deepEqual([...saved.body.models].sort(), KEPT);
+        assert.deepEqual(posts.filter((p) => p.path === "/api/provider/test").map((p) => p.body.test), [ids.slice(0, 4)], "only the original four picks were tested");
         assert.deepEqual(errors, []);
       });
     }

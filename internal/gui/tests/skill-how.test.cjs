@@ -60,7 +60,7 @@ function server(lang, posts) {
   };
 }
 
-const scrolled = (page) => page.evaluate(() => [window.scrollX, window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop || e.scrollLeft).map((e) => `${e.className}:${e.scrollTop},${e.scrollLeft}`)].join(" "));
+const { scrollPositions: scrolled } = require("./reader.cjs");
 // A click at the middle of loc, as a mouse gives it. The dialog grows in from
 // a third of its size: a box read while it does is where the button was, not
 // where it is when the click lands (Library's way, left of Links), so the

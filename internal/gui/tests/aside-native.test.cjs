@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { test } = require('node:test');
 const { chromium, webkit } = require('playwright');
+const { isPageLifecycleRequest } = require('./fixtures/page-lifecycle.cjs');
 const assets = path.resolve(__dirname, '../assets');
 
 for (const engine of ['chromium', 'webkit']) {
@@ -24,6 +25,7 @@ for (const engine of ['chromium', 'webkit']) {
       const state = () => ({ agents: [a], profiles: [], settings: { lang, theme: 'light', guideHidden: true } });
       await page.route('**/*', async (route) => {
         const req = route.request(), url = new URL(req.url()), p = url.pathname;
+        if (isPageLifecycleRequest(req)) return route.fulfill({ json: {} });
         if (req.method() === 'POST') posts.push(p);
         if (p === '/boot.js') return route.fulfill({ contentType: 'text/javascript', body: `window.bootPrefs=${JSON.stringify({ lang, theme: 'light', web: true })}` });
         if (p === '/api/state') return route.fulfill({ json: state() });
@@ -84,6 +86,7 @@ for (const engine of ['chromium', 'webkit']) {
       const current = () => ({ agents: [a], profiles: [], settings: { lang, theme: 'light', guideHidden: true } });
       await page.route('**/*', async route => {
         const req = route.request(), p = new URL(req.url()).pathname;
+        if (isPageLifecycleRequest(req)) return route.fulfill({ json: {} });
         if (req.method() === 'POST') posts.push({ path: p, body: req.postDataJSON() });
         if (p === '/boot.js') return route.fulfill({ contentType: 'text/javascript', body: `window.bootPrefs=${JSON.stringify({ lang, theme: 'light', web: true })}` });
         if (p === '/api/state') return route.fulfill({ json: current() });

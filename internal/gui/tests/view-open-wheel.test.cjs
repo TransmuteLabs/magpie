@@ -22,6 +22,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPage } = require("./reader.cjs");
 
 const assets = process.env.MAGPIE_OPEN_WHEEL_ASSETS || path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -110,9 +111,15 @@ for (const engine of ["chromium", "webkit"]) {
     const browser = await (engine === "webkit" ? webkit : chromium).launch();
     t.after(() => browser.close());
     for (const heard of HEARD) for (const lang of LANGS) for (const width of [420, 1000]) for (const name of ["usage", "routing"]) for (const visit of ["opened", "opened again"]) {
-      await t.test(`${name}, ${visit}, wheels ${heard}, ${lang}, ${width}px`, async () => {
+      await t.test(`${name}, ${visit}, wheels ${heard}, ${lang}, ${width}px`, async (st) => {
         const ctx = await browser.newContext({ viewport: { width, height: 600 }, reducedMotion: "reduce" });
-        t.after(() => ctx.close());
+        let release = null;
+        const gate = { on: false };
+        st.after(async () => {
+          gate.on = false;
+          release?.();
+          await ctx.close();
+        });
         const p = await ctx.newPage();
         p.setDefaultTimeout(8000);
         p.setDefaultNavigationTimeout(60000);
@@ -120,7 +127,6 @@ for (const engine of ["chromium", "webkit"]) {
         p.on("pageerror", (e) => { if (!/^ResizeObserver loop/.test(e.message)) errors.push(e.message); });
         await p.addInitScript(heard === "late" ? LATE : DEAF);
         await p.addInitScript(UPS);
-        const gate = { on: false };
         await p.route("**/*", server(lang, gate));
         await p.goto("http://magpie.test/?view=agents");
         await p.locator("#view-agents .ag-lead").first().waitFor();
@@ -137,15 +143,14 @@ for (const engine of ["chromium", "webkit"]) {
         const view = p.locator("#view-" + name);
         // opened again: what it drew the first time is there while it reads again
         if (visit === "opened again") {
-          await p.locator(`#nav button[data-view="${name}"]`).click();
+          await openPage(p, name);
           await p.waitForTimeout(1000);
           await p.locator('#nav button[data-view="agents"]').click();
           await p.waitForTimeout(300);
         }
-        let release;
         gate.wait = new Promise((ok) => { release = ok; });
         gate.on = true;
-        await p.locator(`#nav button[data-view="${name}"]`).click();
+        await openPage(p, name);
         await view.waitFor();
         await p.waitForTimeout(150);
         // every frame's place, and how far what was under the pointer the

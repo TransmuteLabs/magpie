@@ -9,8 +9,8 @@ import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/middleware"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -46,6 +46,11 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	w, body, hooked := gatewayHooks(w, r, from, body)
 	defer hooked()
 	agents := gwmw.AgentsWanted(middlewareWanted)
+	origin := gatewayOrigin(r)
+	if hubFromPage(r) {
+		origin = "browser"
+	}
+	agents = append(agents, extensionMiddlewareAgent{ctx: r.Context(), origin: origin})
 	if len(agents) == 0 {
 		s.serve(w, r, from, body)
 		return
@@ -148,34 +153,20 @@ func ownAsk(ctx context.Context) context.Context {
 	return context.WithValue(context.WithValue(ctx, triedKey{}, mwRuns{}), agentTurnKey{}, false)
 }
 
+func ownOperation(ctx context.Context) context.Context {
+	return requestpolicy.WithChildOperation(withRequestPolicy(ctx))
+}
+
 // middlewareWanted: plugins.json has a JS middleware on, so plugins/middleware
 // is in use.
 func middlewareWanted() bool { return middleware.On() > 0 }
 
-// gatewayHooks runs the asynchronous request hooks (OpenCode plugins'
-// gateway entries, in the plugin host) on an agent's request: the body they
-// leave is the one served, and they see the reply the agent got once it is
+// gatewayHooks runs the asynchronous legacy and SDK hooks on an agent's
+// request: the body they leave is the one served, and they see the reply once it is
 // whole. Its writer wraps the middleware's, so what they see is what the
 // agent was given. With no hook it is the request as it came.
 func gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
-	if !plugin.HasGateway() {
-		return w, body, func() {}
-	}
-	info := plugin.GatewayContext{Origin: gatewayOrigin(r), Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r), Session: sessionOf(r.Header), Kind: hookKind(r, agentOf(r))}
-	if req, err := parse(from, body); err == nil {
-		info.Cwd = workDir(req)
-		info.Query = gatewayQuery(req)
-	}
-	// the plugin host, started for it if need be: a wait magpie knows of
-	// before a route is begun (unrouted.go)
-	waited := noteWait(r.Context(), "plugin hooks")
-	run := plugin.GatewayBegin(r.Context(), body, info)
-	waited()
-	if run == nil {
-		return w, body, func() {}
-	}
-	w, done := gatewayResponse(w, r, from, run.Body, run)
-	return w, run.Body, func() { done(); run.Close() }
+	return gatewayHookChain(w, r, from, body)
 }
 
 // gatewayQuery uses the same user-authored words as routing, excluding

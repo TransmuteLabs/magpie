@@ -16,6 +16,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const partners = [
@@ -100,10 +101,63 @@ const block = (page) => page.locator("#addSheet .kind").first().evaluate(async (
 async function open(page) {
   await page.locator("#addProvider").click();
   await page.locator("#addSheet .tile").first().waitFor();
+  await reach(page, page.locator("#addSheet .kind").first());
   await page.locator("#addSheet .kind.lit").first().waitFor();
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(engine + ": Partners uses the latest native intersection in a batch", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await (await browser.newContext({ viewport: { width: 440, height: 800 } })).newPage();
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      window.partnerBatch = { entries: [], delivered: false };
+      const animate = Element.prototype.animate;
+      Element.prototype.animate = function (frames, options) {
+        const animation = animate.call(this, frames, options);
+        if (this.id === "addSheet" && frames[0]?.height === "0px") {
+          animation.pause();
+          window.partnerEntrance = animation;
+        }
+        return animation;
+      };
+      const NativeObserver = IntersectionObserver;
+      window.IntersectionObserver = class extends NativeObserver {
+        constructor(callback, options) {
+          const pending = [];
+          super((entries, observer) => {
+            if (!entries[0]?.target.matches("#addSheet .kind")) return callback(entries, observer);
+            pending.push(...entries);
+            partnerBatch.entries.push(...entries.map((entry) => ({
+              inside: entry.isIntersecting, ratio: entry.intersectionRatio,
+            })));
+            if (!entries.at(-1).isIntersecting || entries.at(-1).intersectionRatio < 1) return;
+            callback(pending.splice(0), observer);
+            partnerBatch.delivered = true;
+          }, options);
+        }
+      };
+    });
+    await page.route("**/*", server("en"));
+    await page.goto("http://magpie.test/?view=providers");
+    await page.locator("#addProvider").click();
+    await page.waitForFunction(() => window.partnerEntrance &&
+      partnerBatch.entries.some((entry) => !entry.inside));
+    assert(!(await look(page)).lit, "a clipped entrance has not lit the heading");
+    await page.evaluate(() => partnerEntrance.finish());
+    await reach(page, page.locator("#addSheet .kind").first());
+    await page.waitForFunction(() => partnerBatch.delivered);
+    const entries = await page.evaluate(() => partnerBatch.entries);
+    assert.equal(entries[0].inside, false);
+    assert.equal(entries.at(-1).inside, true);
+    assert.equal(entries.at(-1).ratio, 1);
+    assert((await look(page)).lit, "the latest native entry puts the heading in view");
+    assert((await block(page)).lit, "the tiles light with the heading");
+    assert.deepEqual(errors, []);
+    await page.context().close();
+  });
   test(engine + ": the Partners heading lights once an opening", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));

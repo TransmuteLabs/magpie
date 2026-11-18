@@ -34,9 +34,9 @@ func modelsHome(t *testing.T) (catalogFile string) {
 		ref = `"magpie-models.json"`
 	}
 	write(t, filepath.Join(h, ".codex", "config.toml"), "model = \"relay/m1\"\nmodel_provider = \"magpie\"\nmodel_catalog_json = "+ref+"\n\n[model_providers.magpie]\nname = \"magpie\"\nbase_url = \"http://127.0.0.1:1/v1\"\nwire_api = \"responses\"\n")
-	was := catalog.Changed
-	catalog.Changed = agent.SyncCatalog
-	t.Cleanup(func() { catalog.Changed = was })
+	was := catalog.ChangedHook()
+	catalog.SetChanged(agent.SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(was) })
 	catalog.Touched()
 	return catalogFile
 }

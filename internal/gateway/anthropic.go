@@ -1366,6 +1366,8 @@ func resultSaid(b aBlock) []aBlock {
 // (蓝猫 on Discord), keeps that input; Anthropic's own start has an empty
 // one, its deltas after.
 type anthropicDecoder struct {
+	decodeState *protocolDecodeState
+
 	server map[int]bool
 	whole  map[int]bool // the tool_use blocks whose start carried their input
 }
@@ -1388,7 +1390,7 @@ func (d *anthropicDecoder) decode(data string, emit func(Event)) error {
 			d.server[ev.Index] = ev.ContentBlock.Type == "server_tool_use"
 			d.whole[ev.Index] = false
 			if ev.ContentBlock.Type == "tool_use" && fullInput(ev.ContentBlock.Input) {
-				if err := decodeAnthropic(data, emit); err != nil {
+				if err := decodeAnthropicWithState(data, emit, d.decodeState); err != nil {
 					return err
 				}
 				d.whole[ev.Index] = true
@@ -1403,8 +1405,10 @@ func (d *anthropicDecoder) decode(data string, emit func(Event)) error {
 				return nil // the input came whole already
 			}
 		}
+	} else {
+		d.decodeState.reject()
 	}
-	return decodeAnthropic(data, emit)
+	return decodeAnthropicWithState(data, emit, d.decodeState)
 }
 
 // fullInput says whether a tool_use start's input is the call's own: an
@@ -1416,6 +1420,10 @@ func fullInput(in json.RawMessage) bool {
 
 // decodeAnthropic turns an Anthropic event stream into events.
 func decodeAnthropic(data string, emit func(Event)) error {
+	return decodeAnthropicWithState(data, emit, nil)
+}
+
+func decodeAnthropicWithState(data string, emit func(Event), state *protocolDecodeState) error {
 	var ev struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -1452,6 +1460,7 @@ func decodeAnthropic(data string, emit func(Event)) error {
 		} `json:"error"`
 	}
 	if err := decodeJSON([]byte(data), &ev); err != nil {
+		state.reject()
 		// keep going: pings and unknown shapes are harmless, but an
 		// error in a shape of its own is still the reply's end (#1933)
 		if e, ok := carriedError(data); ok {

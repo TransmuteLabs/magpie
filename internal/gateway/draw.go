@@ -23,8 +23,10 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The gateway draws: /v1/images/generations and /v1/images/edits take
@@ -396,6 +398,17 @@ func DrawersOf(p provider.Provider, avail func() []catalog.Model) []catalog.Mode
 		}
 		return out
 	}
+	if p.IsExtension() {
+		var out []catalog.Model
+		for _, model := range avail() {
+			if (model.Draws || imagesOnly(model.OutputModalities)) &&
+				(p.ExtensionSupportsOperation(sdk.OperationImageGenerate) || extensionDrawsGemini(p, model.ID)) {
+				model.Provider = p.ID
+				out = append(out, model)
+			}
+		}
+		return out
+	}
 	if p.IsPlugin() {
 		// a plugin in front of an OpenAI-compatible API: the image models
 		// its list names that draw on the images API, sent through its
@@ -677,10 +690,13 @@ type drawn struct {
 	Revised string // the prompt as an images API rewrote it
 	Input   int
 	Output  int
+	usage   *Usage // normalized sum of independent extension drawings
 }
 
 func (s *Server) images(edit bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		extensionContext, extensionAttempt := provider.WithExtensionAttempt(r.Context())
+		r = r.WithContext(extensionContext)
 		inputBody, admitted := s.requestBody(w, r, provider.Chat)
 		if !admitted {
 			return
@@ -808,9 +824,33 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 			capBack time.Time
 			skipped []string
 		)
-		for i, m := range tries {
+		for i := 0; i < len(tries); i++ {
+			m := tries[i]
 			call.Provider, model = m.Provider.ID, m.Model
 			drew, out, code, capBack, err = s.drawOnAccounts(ctx, memberOn(r, g, m), m.Provider, m.Model, d)
+			if outcome := extensionSideOutcome(w, extensionAttempt, err != nil || code >= 400); outcome != nil {
+				code, err = http.StatusConflict, outcome
+				break
+			}
+			if refusal := extensionAttempt.FinalRefusal(); refusal != nil {
+				selected := candidateOf(drew, m.Model)
+				selectedContext := requestpolicy.WithSelection(ctx, selected.restID(), selected.p.OwnModelID(selected.model))
+				next := nextPolicyCandidate(ctx, policyMemberCandidates(tries), i+1)
+				decision := resolveFinalPolicy(selectedContext, selected, refusal, next >= 0, nil)
+				code, err = policyStatus(refusal), errors.New(finalPolicyMessage(refusal))
+				if decision.Action == requestpolicy.ActionWait {
+					extensionAttempt.ClearFinalRefusal()
+					i--
+					continue
+				}
+				if decision.Action == requestpolicy.ActionNext {
+					extensionAttempt.ClearFinalRefusal()
+					i = next - 1
+					continue
+				}
+				policyFailureHeaders(w, decision)
+				break
+			}
 			// a group's next member is asked as a chat's would be: while
 			// this one's vendor fails, is out of quota or doesn't serve the
 			// model; a refusal of the request itself is the request's
@@ -822,7 +862,11 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		p = drew
 		call.Fallback = strings.Join(skipped, "; ")
 		call.Millis = time.Since(start).Milliseconds()
-		call.Status, call.Usage.Input, call.Usage.Output = code, out.Input, out.Output
+		call.Status = code
+		call.Usage = normalizedExtensionUsage(p, extensionAttempt, Usage{Input: out.Input, Output: out.Output})
+		if out.usage != nil {
+			call.Usage = *out.usage
+		}
 		if err == nil && len(out.Images) == 0 {
 			code, err = 502, errors.New(model+" drew nothing"+vendorSaid(out.Text))
 			call.Status = code
@@ -831,11 +875,13 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		if p.Account == nil && p.Key != "" {
 			providerKeyID, providerKeyName = provider.KeyID(p.Key), p.KeyName
 		}
-		side.end(p, model, call.Status, err, Usage{Input: out.Input, Output: out.Output})
-		appendUsage(r, usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(p),
-			Input: out.Input, Output: out.Output, Millis: call.Millis, Status: call.Status, Session: sessionOf(r.Header)})
 		if err != nil {
 			call.Error = err.Error()
+		}
+		side.end(p, model, call.Status, err, call.Usage)
+		appendUsage(r, accountedUsage(usage.Record{RouteID: side.id(), Operation: "generate_content", Time: start, Agent: call.Agent, Via: call.Via, Provider: p.ID, Host: p.Where(), Model: model, Requested: call.Model, ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: accountOf(p),
+			Millis: call.Millis, Status: call.Status, Error: call.Error, Session: sessionOf(r.Header)}, call.Usage))
+		if err != nil {
 			s.record(call)
 			if d := time.Until(capBack); d > 0 {
 				w.Header().Set("Retry-After", strconv.Itoa(int(d.Seconds())+1))
@@ -1166,6 +1212,24 @@ func (v drawVia) String() string {
 	return [...]string{"images API", "chat completions", "generateContent"}[v]
 }
 
+// base keeps admission and dispatch on the protocol selected by viaFor.
+func (v drawVia) base(p provider.Provider) string {
+	base := strings.TrimRight(p.Base(provider.Chat), "/")
+	switch v {
+	case viaGemini:
+		if native := p.Base(provider.Gemini); native != "" {
+			return strings.TrimRight(native, "/")
+		}
+		// The original AI Studio image path also accepts its Chat-only base.
+		return strings.TrimSuffix(base, "/openai")
+	case viaImages:
+		if base == "" {
+			return strings.TrimRight(p.Base(provider.Responses), "/")
+		}
+	}
+	return base
+}
+
 func isGoogle(p provider.Provider) bool {
 	return provider.HostOf(p.Base(provider.Chat)) == "generativelanguage.googleapis.com"
 }
@@ -1186,6 +1250,10 @@ func viaFor(p provider.Provider, model string) drawVia {
 		return viaImages
 	case isGoogle(p) && strings.Contains(strings.ToLower(model), "gemini"):
 		return viaGemini
+	case extensionDrawsGemini(p, model):
+		return viaGemini
+	case p.ExtensionSupportsOperation(sdk.OperationImageGenerate):
+		return viaImages
 	case p.ModelKind(model) == provider.KindImage:
 		// one the user said is an image model is asked at the images API
 		// first, as the editor's Makes: Image model says (a relay's
@@ -1206,6 +1274,13 @@ func viaFor(p provider.Provider, model string) drawVia {
 // imagesOnly is whether a model's output modalities are images and no text.
 func imagesOnly(out []string) bool {
 	return slices.Contains(out, "image") && !slices.Contains(out, "text")
+}
+
+func extensionDrawsGemini(p provider.Provider, model string) bool {
+	return p.IsExtension() && slices.Contains(p.APIs(model), provider.Gemini) &&
+		slices.ContainsFunc(p.Available(), func(entry catalog.Model) bool {
+			return entry.ID == model && (entry.Draws || slices.Contains(entry.OutputModalities, "image"))
+		})
 }
 
 // pluginImagesOnly is whether p, a plugin, lists model as giving images
@@ -1295,11 +1370,28 @@ func (s *Server) drawOnAccounts(ctx context.Context, r *http.Request, p provider
 	var out drawn
 	var code int
 	var err error
-	for i, c := range cs {
+	for i := 0; i < len(cs); i++ {
+		c := cs[i]
+		ctx = requestpolicy.WithSelection(ctx, c.restID(), c.p.OwnModelID(c.model))
 		p = c.p
 		tried := sideOf(ctx).try(c)
 		out, code, err = s.draw(ctx, p, model, d)
 		tried(code, err)
+		if refusal := provider.FinalRequestRefusal(ctx); refusal != nil && provider.ExtensionOutcome(ctx, true) == nil {
+			next := nextPolicyCandidate(ctx, cs, i+1)
+			decision := resolveFinalPolicy(ctx, c, refusal, next >= 0, nil)
+			if decision.Action == requestpolicy.ActionWait {
+				provider.ClearFinalRequestRefusal(ctx)
+				i--
+				continue
+			}
+			if decision.Action == requestpolicy.ActionNext {
+				provider.ClearFinalRequestRefusal(ctx)
+				i = next - 1
+				continue
+			}
+			return p, out, policyStatus(refusal), decision.NextAllowed, errors.New(finalPolicyMessage(refusal))
+		}
 		if err != nil && ctx.Err() == nil {
 			restDrawer(c, code, err.Error())
 		}
@@ -1413,10 +1505,10 @@ func (s *Server) draw(ctx context.Context, p provider.Provider, model string, d 
 	if googleAccount(p) || pluginDrawsGemini(p, model) {
 		return s.drawCodeAssist(ctx, p, model, d)
 	}
-	if p.Base(provider.Chat) == "" && p.Base(provider.Responses) == "" {
-		return drawn{}, 400, fmt.Errorf("%s can't draw: magpie draws only through an OpenAI-compatible API, and %s has none", p.Name, p.Name)
-	}
 	via := viaFor(p, model)
+	if via.base(p) == "" {
+		return drawn{}, 400, fmt.Errorf("%s can't draw: it has no %s API for this model", p.Name, via)
+	}
 	out, code, err := s.drawOn(ctx, p, model, d, via)
 	if err != nil && via != viaGemini && (((code == 404 || code == 405) && !(isOpenRouter(p) && via == viaImages)) || pointsAway(via, code, err)) {
 		other := viaChat
@@ -1469,7 +1561,15 @@ func (s *Server) sendAs(ctx context.Context, p provider.Provider, method, url, c
 }
 
 // sendWith is sendAs with headers of the vendor's own besides.
-func (s *Server) sendWith(ctx context.Context, p provider.Provider, method, url, contentType string, body []byte, sign bool, extra http.Header) ([]byte, int, error) {
+func (s *Server) sendWith(ctx context.Context, p provider.Provider, method, url, contentType string, body []byte, sign bool, extra http.Header) (answer []byte, code int, failure error) {
+	// Run after the response body closes and its final receipt is known. All
+	// image/video protocol and account loops must retain this executing owner
+	// when the operation has become terminal, including a completed HTTP error.
+	defer func() {
+		if outcome := provider.ExtensionOutcome(ctx, failure != nil || code >= 400); outcome != nil {
+			code, failure = http.StatusConflict, errors.Join(failure, outcome)
+		}
+	}()
 	ctx = s.metered(p.Via(ctx), p, "") // counted against its MaxRPM (rpm.go)
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
@@ -1647,12 +1747,7 @@ func (s *Server) drawImages(ctx context.Context, p provider.Provider, model stri
 	if drawsMiniMax(p, model) {
 		return s.drawMiniMax(ctx, p, model, d)
 	}
-	base := strings.TrimRight(p.Base(provider.Chat), "/")
-	if base == "" {
-		// a Responses-only relay serves the images API under the same root
-		// as its Responses endpoint
-		base = strings.TrimRight(p.Base(provider.Responses), "/")
-	}
+	base := viaImages.base(p)
 	if drawsCodex(p) || drawsGrok(p) {
 		base = strings.TrimRight(p.Base(provider.Responses), "/")
 	}
@@ -2047,8 +2142,8 @@ func (s *Server) drawChat(ctx context.Context, p provider.Provider, model string
 		req["image_config"] = map[string]string{"aspect_ratio": r}
 	}
 	body, _ := json.Marshal(req)
-	url := strings.TrimRight(p.Base(provider.Chat), "/") + "/chat/completions"
-	return s.eachDrawing(d.N, func() (drawn, int, error) {
+	url := viaChat.base(p) + "/chat/completions"
+	return s.eachDrawing(ctx, p, d.N, func(ctx context.Context) (drawn, int, error) {
 		b, code, err := s.send(ctx, p, url, "application/json", p.Prepare(body), true)
 		if err != nil {
 			return drawn{}, code, err
@@ -2145,9 +2240,8 @@ func (s *Server) drawGemini(ctx context.Context, p provider.Provider, model stri
 		cfg["imageConfig"] = c
 	}
 	body, _ := json.Marshal(map[string]any{"contents": []map[string]any{{"role": "user", "parts": parts}}, "generationConfig": cfg})
-	base := strings.TrimSuffix(strings.TrimRight(p.Base(provider.Chat), "/"), "/openai")
-	url := base + "/models/" + provider.GeminiModelPath(model) + ":generateContent"
-	return s.eachDrawing(d.N, func() (drawn, int, error) {
+	url := viaGemini.base(p) + provider.GeminiPath(model, false)
+	return s.eachDrawing(ctx, p, d.N, func(ctx context.Context) (drawn, int, error) {
 		b, code, err := s.send(ctx, p, url, "application/json", body, false)
 		if err != nil {
 			return drawn{}, code, err
@@ -2225,7 +2319,7 @@ func (s *Server) drawCodeAssist(ctx context.Context, p provider.Provider, model 
 		b, _ := json.Marshal(c)
 		req.ImageConfig = b
 	}
-	return s.eachDrawing(d.N, func() (drawn, int, error) {
+	return s.eachDrawing(ctx, p, d.N, func(ctx context.Context) (drawn, int, error) {
 		// one each: the drawings are asked for at once
 		ask := s.askTranslated(p, provider.CodeAssist, model, http.Header{}, http.Header{})
 		events, code, msg := ask(ctx, req)
@@ -2262,7 +2356,10 @@ func (s *Server) drawCodeAssist(ctx context.Context, p provider.Provider, model 
 
 // eachDrawing asks once for each of n images, at once, for a vendor that
 // draws one image an answer; what they drew and cost is summed.
-func (s *Server) eachDrawing(n int, ask func() (drawn, int, error)) (drawn, int, error) {
+func (s *Server) eachDrawing(ctx context.Context, p provider.Provider, n int, ask func(context.Context) (drawn, int, error)) (drawn, int, error) {
+	if err := provider.ExtensionOutcome(ctx, true); err != nil {
+		return drawn{}, http.StatusConflict, err
+	}
 	type result struct {
 		out  drawn
 		code int
@@ -2274,7 +2371,13 @@ func (s *Server) eachDrawing(n int, ask func() (drawn, int, error)) (drawn, int,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o, c, e := ask()
+			childContext, child := provider.WithExtensionAttempt(ctx)
+			o, c, e := ask(childContext)
+			if p.IsExtension() {
+				totals := normalizedExtensionUsage(p, child, Usage{Input: o.Input, Output: o.Output})
+				o.usage = &totals
+			}
+			provider.MergeExtensionOutcome(ctx, child, e != nil || c >= 400)
 			results[i] = result{o, c, e}
 		}()
 	}
@@ -2282,7 +2385,49 @@ func (s *Server) eachDrawing(n int, ask func() (drawn, int, error)) (drawn, int,
 	var out drawn
 	code := 200
 	var firstErr error
+	var costsMixed bool
 	for _, r := range results {
+		if r.out.usage != nil {
+			v := *r.out.usage
+			if out.usage == nil {
+				out.usage = &v
+			} else {
+				u := out.usage
+				*u = u.plus(v, false)
+				if v.Deferred != nil {
+					deferred := Usage{}
+					if u.Deferred != nil {
+						deferred = *u.Deferred
+					}
+					deferred = deferred.plus(*v.Deferred, false)
+					u.Deferred = &deferred
+				}
+				u.cacheUnknown = u.cacheUnknown || v.cacheUnknown
+				if v.Credits != nil {
+					credits := *v.Credits
+					if u.Credits != nil {
+						credits += *u.Credits
+					}
+					u.Credits = &credits
+				}
+				if !costsMixed && v.ReportedCost != nil {
+					cost := *v.ReportedCost
+					if u.ReportedCost != nil {
+						if u.ReportedCost.Currency != cost.Currency {
+							costsMixed = true
+						} else {
+							cost.Amount += u.ReportedCost.Amount
+						}
+					}
+					u.ReportedCost = &cost
+				}
+				if costsMixed {
+					u.ReportedCost = nil
+				}
+				// A batch has no single upstream request/response identity.
+				u.RequestID, u.UpstreamResponseID = "", ""
+			}
+		}
 		out.Input += r.out.Input
 		out.Output += r.out.Output
 		out.Images = append(out.Images, r.out.Images...)
@@ -2292,6 +2437,10 @@ func (s *Server) eachDrawing(n int, ask func() (drawn, int, error)) (drawn, int,
 		if r.err != nil && firstErr == nil {
 			firstErr, code = r.err, r.code
 		}
+	}
+	// An accepted failed child fences the whole request even if a sibling drew.
+	if outcome := provider.ExtensionOutcome(ctx, firstErr != nil); outcome != nil {
+		return out, http.StatusConflict, outcome
 	}
 	// some images drawn is an answer; none, the first failure
 	if len(out.Images) == 0 && firstErr != nil {

@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const SEAT = "某某·GLM高级版", TEAM = "3141592636@qq.com", ME = "me@example.com";
@@ -82,7 +83,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       return browser;
     };
     const tr = (page, k, v) => page.evaluate(([k, v]) => t(k, v), [k, v]);
-    const scrolled = (page) => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
     const wide = (page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     const stripes = (page, sel) => page.evaluate((sel) => [...document.querySelectorAll(sel)].map((e) => getComputedStyle(e).borderLeftWidth).filter((b) => parseFloat(b) > 1), sel);
 
@@ -117,13 +117,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const b = team.locator(".n.rename");
         await b.scrollIntoViewIfNeeded();
         await page.waitForTimeout(150);
-        const top = await row(TEAM).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page);
+        const top = await row(TEAM).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await b.click();
         const typed = row(TEAM).locator("input.rename-in");
         await typed.waitFor();
         assert.equal(await typed.getAttribute("placeholder"), SEAT);
         assert.equal(await row(TEAM).evaluate((e) => Math.round(e.getBoundingClientRect().top)), top, "the row moved");
-        assert.equal(await scrolled(page), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         await typed.fill("  Team seat ");
         await typed.press("Enter");
         await page.waitForFunction((id) => document.querySelector(`.editor .acc[data-account-id="${id}"] .acct-who .n.rename`)?.textContent === "Team seat", TEAM);

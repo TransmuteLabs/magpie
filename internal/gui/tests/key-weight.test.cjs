@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const relay = () => ({
@@ -75,7 +76,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: "Relay" }).first().click();
       await page.locator(".editor .accts .acc.add").waitFor();
-      const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
       const chip = (id) => page.locator(`.acc[data-account-id="${id}"] .key-weight`);
 
       // smart: no weights shown
@@ -84,9 +84,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click(); }
       const by = page.locator(".editor").getByRole("button", { name: w.by, exact: true });
       await by.scrollIntoViewIfNeeded();
-      const sc = await scrolled();
+      const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await by.click();
-      assert.equal(await scrolled(), sc, "a click scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
       assert.equal((await chip("aaaaaaaaaa").textContent()).trim(), w.a);
       assert.equal((await chip("bbbbbbbbbb").textContent()).trim(), w.b);
       assert.equal(await chip("aaaaaaaaaa").isVisible(), true);
@@ -97,7 +97,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const box = page.locator('.acc[data-account-id="bbbbbbbbbb"] .key-weight-in');
       await box.waitFor();
       assert.equal(await box.getAttribute("aria-label"), lang === "zh" ? "密钥权重" : "Key weight");
-      assert.equal(await scrolled(), sc, "a click scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
       await box.fill("2");
       await box.press("Enter");
       for (let i = 0; i < 60 && !posts.length; i++) await new Promise((r) => setTimeout(r, 50));

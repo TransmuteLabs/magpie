@@ -108,16 +108,20 @@ func TestSignInDoneOnceTheAccountIsBack(t *testing.T) {
 			// what the sign-in reads as the moment its account is shown again
 			var mu sync.Mutex
 			id, back := "", ""
-			was := catalog.Changed
-			catalog.Changed = func() {
+			plugin.Settle()
+			was := catalog.ChangedHook()
+			catalog.SetChanged(func() {
 				mu.Lock()
 				defer mu.Unlock()
 				if id != "" && back == "" && !hiddenAccount(c.agent) {
 					st, _ := SignInStatus(id)
 					back = st.State
 				}
-			}
-			t.Cleanup(func() { catalog.Changed = was })
+			})
+			t.Cleanup(func() {
+				plugin.Settle()
+				catalog.SetChanged(was)
+			})
 
 			st := c.signIn(t)
 			mu.Lock()
@@ -155,16 +159,20 @@ func TestSignInCanceledWhileTheAccountComesBack(t *testing.T) {
 	}
 	var mu sync.Mutex
 	id, canceled := "", false
-	was := catalog.Changed
-	catalog.Changed = func() {
+	plugin.Settle()
+	was := catalog.ChangedHook()
+	catalog.SetChanged(func() {
 		mu.Lock()
 		defer mu.Unlock()
 		if id != "" && !canceled && !hiddenAccount("codex") {
 			canceled = true
 			CancelSignIn(id)
 		}
-	}
-	t.Cleanup(func() { catalog.Changed = was })
+	})
+	t.Cleanup(func() {
+		plugin.Settle()
+		catalog.SetChanged(was)
+	})
 
 	st, err := StartSignIn("codex")
 	if err != nil {

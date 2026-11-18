@@ -2337,45 +2337,7 @@ var retryPause = time.Second
 // An upstream that answered a stream request with a whole reply
 // (didNotStream) isn't one: it fails the same every time it is asked.
 func passing(status int, header http.Header, body []byte, again int) (time.Duration, bool) {
-	if routedThere(header) {
-		return 0, false
-	}
-	wait := retryPause << again
-	if d := retryAfter(header, time.Now()); d > 0 {
-		wait = d
-	}
-	switch {
-	case wait > longestPause:
-		return 0, false
-	case busyStatus(status):
-		if bodyHas(body, didNotStream) || bodyHas(body, cutVoidWords) {
-			// a void cut at its length fails the same every ask: the
-			// budget went to reasoning, and mostly would again — the same
-			// one asked again would burn it twice over before the error
-			// (#2972). A group's next member still is.
-			return 0, false
-		}
-		if bodyHas(body, emptyReply) {
-			// a model that answered nothing was asked again in place
-			// already (emptyRetries); asking the whole request again as
-			// often as a vendor's outage multiplied the two, nine asks of a
-			// minute each for one turn (fwxkogaia on X: 170 to 230s
-			// before the 502). Once more, for a try that was not.
-			return wait, again < 1
-		}
-		return wait, again < lastRetries
-	case status == 429:
-		// a relay's 429 often says nothing of when (#503: "负载已饱和，请稍
-		// 后再试"); a plan used up or no money left won't clear in seconds,
-		// nor an account's token wall (walled)
-		return wait, again < rateRetries && failure(status, body) == failRate && !creditWords.Match(wordsOf(body)) && !walled(body)
-	case regionRefused(status, wordsOf(body)):
-		// refused at the edge the connection reached, which a new
-		// connection a moment later may not be (#5182: answered 12s on);
-		// the try goes out on a new one (regionFresh)
-		return wait, again < lastRetries
-	}
-	return 0, false
+	return passingFor(context.Background(), "", status, header, body, again)
 }
 
 // wallCodes are the error codes a vendor gives a 429 for an account's
@@ -2617,12 +2579,13 @@ func matesLast(left []candidate, c candidate) {
 // before it (#248), and a reply that isn't streamed is held whole to read
 // for one.
 type holdWriter struct {
-	w       http.ResponseWriter
-	hold    bool
-	header  http.Header
-	status  int
-	passing bool
-	held    bytes.Buffer
+	w               http.ResponseWriter
+	hold            bool
+	header          http.Header
+	status          int
+	passing         bool
+	held            bytes.Buffer
+	upstreamFailure failureObservation
 
 	stream     bool      // a stream held until its first content
 	since      time.Time // when it began
@@ -2869,7 +2832,10 @@ func (h *holdWriter) Write(b []byte) (int, error) {
 	if h.slow {
 		return 0, errSlowStart
 	}
-	if h.looped != "" || h.relooped || h.stuck != "" {
+	if h.stuck != "" {
+		return 0, context.DeadlineExceeded
+	}
+	if h.looped != "" || h.relooped {
 		return 0, errLooped
 	}
 	if h.handedOver {
@@ -3903,11 +3869,8 @@ func (h *holdWriter) keepQuiet() {
 	}
 }
 
-// endStuck lets a try go whose vendor said nothing for quiet
-// (translatedQuietLongest), its agent kept alive all that time. Passing,
-// the agent's stream ends with the error as its own event, after a blank
-// line, as cutLoop ends one; held, the gateway tells it (stuck, failTo),
-// and nobody else is asked: the agent has waited that long already.
+// endStuck cancels the try. Its caller writes the terminal reply after
+// joining watch and collecting the provider's final outcome.
 func (h *holdWriter) endStuck(quiet time.Duration) {
 	name := h.name
 	if name == "" {
@@ -3918,20 +3881,26 @@ func (h *holdWriter) endStuck(quiet time.Duration) {
 		d = quiet.Round(time.Millisecond)
 	}
 	h.stuck = fmt.Sprintf("%s sent nothing for %s; the request was ended", name, d)
-	if h.passing && strings.HasPrefix(h.w.Header().Get("Content-Type"), "text/event-stream") {
-		proto := h.alive.proto
-		if h.atLine {
-			io.WriteString(h.w, "\n")
-		} else {
-			io.WriteString(h.w, "\n\n")
-		}
-		streamError(h.w, proto, "", http.StatusGatewayTimeout, h.stuck)
-		h.ended = true
-		h.flush()
-	}
 	if h.stop != nil {
 		h.stop()
 	}
+}
+
+func (h *holdWriter) separateStreamError() {
+	if h.atLine {
+		io.WriteString(h.w, "\n")
+	} else {
+		io.WriteString(h.w, "\n\n")
+	}
+}
+
+func (h *holdWriter) failStuck() {
+	if h.passing && strings.HasPrefix(h.w.Header().Get("Content-Type"), "text/event-stream") {
+		h.separateStreamError()
+		streamError(h.w, h.alive.proto, h.alive.model, http.StatusGatewayTimeout, h.stuck)
+		return
+	}
+	failTo(h.w, h.alive, h.alive.proto, http.StatusGatewayTimeout, h.stuck)
 }
 
 // started says whether the try has begun its reply, or ended, as far as
@@ -4351,8 +4320,7 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 		// beside it — so nothing of the try has reached the agent, and
 		// the failure is still held for the group's next candidate
 		return eventError, streamStatus(emptyCompleted), emptyCompleted
-	case typ == "response.completed" && v.Response.Status == "completed":
-		// a reply's end; read before anything was said, it said nothing
+	case typ == "response.completed" && v.Response.Status == "completed" && outputEmpty(v.Response.Output):
 		return eventEmptyEnd, 0, ""
 	case typ == "" && v.Candidates != nil:
 		// a Gemini chunk
@@ -4374,6 +4342,8 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 					return eventContent, 0, "" // text, or a call
 				}
 			}
+		}
+		for _, c := range *v.Candidates {
 			if r, ok := filterReasons[c.FinishReason]; ok {
 				return refusal(r)
 			}
@@ -4422,6 +4392,8 @@ func streamEvent(ev []byte) (kind, status int, msg string) {
 				}
 				thinks = true
 			}
+		}
+		for _, c := range *v.Choices {
 			if thinks && c.FinishReason == nil {
 				continue
 			}
@@ -4687,6 +4659,7 @@ func readWhole(b []byte) (msg string, refused, empty bool) {
 			Message      struct {
 				Content          any    `json:"content"`
 				ToolCalls        []any  `json:"tool_calls"`
+				FunctionCall     any    `json:"function_call"`
 				ReasoningContent string `json:"reasoning_content"`
 				Reasoning        string `json:"reasoning"`
 			} `json:"message"`
@@ -4717,8 +4690,14 @@ func readWhole(b []byte) (msg string, refused, empty bool) {
 	if r, ok := filterReasons[v.StopReason]; ok && r == "refusal" && none(v.Content) {
 		return refusedDetail(r, v.StopDetails), true, false
 	}
+	chatSaid := false
 	for _, c := range v.Choices {
-		if r, ok := filterReasons[c.FinishReason]; ok && (c.Message.Content == nil || c.Message.Content == "") && len(c.Message.ToolCalls) == 0 {
+		if c.Message.Content != nil && c.Message.Content != "" || len(c.Message.ToolCalls) > 0 || c.Message.FunctionCall != nil {
+			chatSaid = true
+		}
+	}
+	for _, c := range v.Choices {
+		if r, ok := filterReasons[c.FinishReason]; ok && !chatSaid {
 			return refusedNote(r), true, false
 		}
 	}
@@ -4730,8 +4709,14 @@ func readWhole(b []byte) (msg string, refused, empty bool) {
 	if r, ok := filterReasons[v.PromptFeedback.BlockReason]; ok {
 		return refusedNote(r), true, false
 	}
+	geminiSaid := false
 	for _, c := range v.Candidates {
-		if r, ok := filterReasons[c.FinishReason]; ok && len(c.Content.Parts) == 0 {
+		if len(c.Content.Parts) > 0 {
+			geminiSaid = true
+		}
+	}
+	for _, c := range v.Candidates {
+		if r, ok := filterReasons[c.FinishReason]; ok && !geminiSaid {
 			return refusedNote(r), true, false
 		}
 	}
@@ -4742,7 +4727,7 @@ func readWhole(b []byte) (msg string, refused, empty bool) {
 		empty = true
 		for _, c := range v.Choices {
 			m := c.Message
-			if !endsEmptyChat(c.FinishReason) || m.Content != nil && m.Content != "" || len(m.ToolCalls) > 0 || m.ReasoningContent != "" || m.Reasoning != "" {
+			if !endsEmptyChat(c.FinishReason) || m.Content != nil && m.Content != "" || len(m.ToolCalls) > 0 || m.FunctionCall != nil || m.ReasoningContent != "" || m.Reasoning != "" {
 				empty = false
 			}
 		}

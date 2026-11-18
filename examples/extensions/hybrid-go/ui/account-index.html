@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Selected account SDK example</title>
+<h1>Selected account SDK example</h1>
+<label for="account">Account</label>
+<select id="account"><option value="">Choose an account</option></select>
+<button id="refresh">Refresh accounts</button>
+<label for="text">Synthetic input</label>
+<input id="text" value="selected account action">
+<nav>
+  <button id="primary">Read native identity</button>
+  <button id="backend">Read service identity</button>
+  <button id="forward">Forward through controller</button>
+</nav>
+<pre aria-live="polite"></pre>
+<script src="_magpie/bridge.js"></script>
+<script src="account-app.js"></script>
+</html>

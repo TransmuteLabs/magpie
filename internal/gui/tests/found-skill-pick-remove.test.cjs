@@ -16,6 +16,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { strings } = require("./strings.cjs");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const HOME = "/Users/me";
@@ -80,33 +81,6 @@ function server(lang, state, posts) {
   };
 }
 
-// the reader scrolls (not a click) till what they'll press is out from
-// under the bar that stays in view at the list's foot
-const reach = async (page, loc) => {
-  for (let i = 0; i < 20; i++) {
-    const b = await loc.boundingBox();
-    if (b && await loc.evaluate((e, [x, y]) => e.contains(document.elementFromPoint(x, y)), [b.x + b.width / 2, b.y + b.height / 2])) {
-      // the wheel's scroll has come to rest before the reader clicks
-      await page.evaluate(() => new Promise((done) => {
-        const at = () => [...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => e.scrollTop).join(" ");
-        let last = at(), still = 0;
-        const tick = () => { const now = at(); still = now === last ? still + 1 : 0; last = now; still >= 5 ? done() : requestAnimationFrame(tick); };
-        requestAnimationFrame(tick);
-      }));
-      return;
-    }
-    // the wheel over the list beside the thing, inside the window: up to
-    // one under the tabs at the top, down to one below the fold or under
-    // the bar or a note at the foot
-    const vh = page.viewportSize().height, up = b.y + b.height / 2 < vh / 2;
-    await page.mouse.move(b.x + b.width / 2, Math.min(Math.max(up ? b.y + b.height + 20 : b.y - 40, 10), vh - 10));
-    await page.mouse.wheel(0, up ? -120 : 120);
-    await page.waitForTimeout(80);
-  }
-  const b = await loc.boundingBox();
-  const over = b && await page.evaluate(([x, y]) => { const e = document.elementFromPoint(x, y); return e ? e.outerHTML.slice(0, 160) : "nothing"; }, [b.x + b.width / 2, b.y + b.height / 2]);
-  assert.fail(`${loc} is never out from under the bar: ${JSON.stringify(b)} ${over}`);
-};
 // a click where the thing is; nothing scrolls, and what was clicked stays put
 const press = async (page, loc) => {
   await reach(page, loc);

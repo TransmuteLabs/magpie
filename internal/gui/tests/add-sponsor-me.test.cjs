@@ -9,6 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const MAIL = "mailto:yetoneful@gmail.com?subject=Sponsoring%20magpie";
@@ -69,6 +70,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.route("**/*", server(lang, opened));
         await page.goto("http://magpie.test/?view=providers");
         await page.locator("#addProvider").click();
+        await reach(page, page.locator("#addSheet .kind").first());
         await page.locator("#addSheet .kind.lit").first().waitFor();
 
         assert.equal(await page.locator("#addSheet .sponsor-me").count(), 1);
@@ -81,9 +83,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(w.clear, "clear of the heading's light");
         assert(w.gridNext, "the partners' tiles follow the heading's row");
 
-        const asked = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/open");
-        await page.locator("#addSheet .sponsor-me").click();
-        await asked;
+        const sponsor = page.locator("#addSheet .sponsor-me");
+        await reach(page, sponsor);
+        await Promise.all([
+          page.waitForResponse((r) => new URL(r.url()).pathname === "/api/open"),
+          sponsor.click(),
+        ]);
         assert.deepEqual(opened, [MAIL]);
         // the sheet stays open
         assert(await page.locator("#addSheet").isVisible());

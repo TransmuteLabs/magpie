@@ -36,8 +36,8 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
             const style = getComputedStyle(element, "::backdrop");
             return style.backdropFilter || style.webkitBackdropFilter;
           });
-          if (platform === "Win32" && !web) {
-            assert.equal(backdrop.filter, "none", "the Windows app must not filter the full-window backdrop");
+          if (!web && (platform === "Win32" || platform === "Linux x86_64")) {
+            assert.equal(backdrop.filter, "none", "native Windows and Linux windows must not filter the full-window backdrop");
             assert.equal(confirm, "none", "nor the confirmation's");
           } else {
             assert.match(backdrop.filter, /blur\(8px\)/, "other surfaces keep their existing blur");

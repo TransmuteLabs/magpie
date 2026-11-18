@@ -29,6 +29,7 @@ import (
 	"github.com/yetone/magpie/internal/codexsummary"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -991,6 +992,19 @@ func (s *Server) codexUpstream(w http.ResponseWriter, r *http.Request, rest stri
 // codexUpstreamOn is codexUpstream signed by the account on instead of
 // Codex's own sign-in, when on isn't nil (compactOn).
 func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest string, body []byte, on *provider.Provider) {
+	r = r.WithContext(withRequestPolicy(r.Context()))
+	policyProvider := "codex"
+	if on != nil {
+		policyProvider = on.ID
+	}
+	if !requestpolicy.HasSelection(r.Context()) {
+		selected := provider.Provider{ID: policyProvider}
+		if on != nil {
+			selected = *on
+		}
+		model := selected.OwnModelID(modelOf(body))
+		r = r.WithContext(requestpolicy.WithSelection(r.Context(), candidateOf(selected, model).restID(), model))
+	}
 	// a gateway key's turn on Codex's own sign-in waits for its key's slot
 	// here, outside serve (key_slots.go); its agent gone, nothing is sent
 	if _, err := keySlot(r.Context()); err != nil {
@@ -1193,6 +1207,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		}
 	}
 	var res *http.Response
+	var stuck *holdWriter
 	autoReset := false    // a Codex reset looked at, once
 	creditsAsked := false // asked again onto the account's credits, once (relayOnCredits)
 	resetNote := ""       // what spending it did, for the request log
@@ -1237,6 +1252,11 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 	// askAgain pauses wait, Codex kept alive meanwhile, for the turn to be
 	// asked again; false when Codex went away in it
 	askAgain := func(status int, msg string, wait time.Duration) bool {
+		if !admitRequestRetry(r.Context(), policyProvider, wait) {
+			failWith(status, msg)
+			end(status, msg, 0, 0)
+			return false
+		}
 		handOn(status, msg, wait)
 		busyAgain++
 		if !pauseAlive(r.Context(), w, kept, streams, start, wait, nil) {
@@ -1319,6 +1339,15 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 			sent = provider.CodexCompressed(req, body)
 			// counted for the request's ledger row, as forwardOnce's are (#4456)
 			sentUp(r.Context(), sent, len(body))
+			policy, policyErr := requestPolicy(req.Context(), policyProvider)
+			if policyErr == nil && !requestpolicy.ConsumeRoutePermit(req.Context()) {
+				policyErr = requestpolicy.FromContext(req.Context()).Dispatch(req.Context(), policy)
+			}
+			if policyErr != nil {
+				failWith(429, "Request retry budget exhausted")
+				end(429, "Request retry budget exhausted", 0, 0)
+				return
+			}
 			res, err = s.client.Do(req)
 			res = gotDown(r.Context(), res)
 			if err != nil {
@@ -1394,7 +1423,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				head, _ := io.ReadAll(io.LimitReader(res.Body, 4<<10))
 				res.Body.Close()
 				res.Body = io.NopCloser(bytes.NewReader(head))
-				if edgeSaidDrop(res.StatusCode, head) {
+				if edgeSaidDrop(res.StatusCode, head) && admitRequestRetry(r.Context(), policyProvider, retryPause<<resets) {
 					wait := retryPause << resets
 					resets++
 					select {
@@ -1410,7 +1439,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 				res.Body.Close()
 				res.Body = io.NopCloser(bytes.NewReader(msg))
 				if codexBusy(res.StatusCode, msg) {
-					if wait, ok := passing(res.StatusCode, res.Header, msg, busyAgain); ok {
+					if wait, ok := passingFor(r.Context(), policyProvider, res.StatusCode, res.Header, msg, busyAgain); ok {
 						if !askAgain(res.StatusCode, provider.APIError(msg, res.Status), wait) {
 							return
 						}
@@ -1522,6 +1551,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		if overload && streams && (busyAgain < lastRetries || kept.sent || s.codexFallsBack(r, body)) {
 			hw = newHoldWriter(w, true)
 			hw.alive, hw.streams, hw.ctx, hw.stop = kept, true, r.Context(), cancel
+			hw.name = "OpenAI"
 			// reasoning goes to Codex at once, as it always went
 			hw.thinkingShown = true
 			out = hw
@@ -1589,12 +1619,16 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		if hw == nil {
 			break
 		}
+		if hw.stuck != "" {
+			stuck = hw
+			break
+		}
 		hw.settle()
 		if hw.mayAskAgain() && hw.failure != 0 && !hw.refused && codexBusy(hw.failure, hw.errBody()) && r.Context().Err() == nil {
 			// the backend too busy for the turn, said on its stream before
 			// any of the reply (#1418)
 			said := "OpenAI: " + string(hw.errBody())
-			if wait, ok := passing(hw.failure, res.Header, hw.errBody(), busyAgain); ok {
+			if wait, ok := passingFor(r.Context(), policyProvider, hw.failure, res.Header, hw.errBody(), busyAgain); ok {
 				res.Body.Close()
 				if !askAgain(hw.failure, said, wait) {
 					return
@@ -1656,6 +1690,9 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		// failed, and the row says it was canceled, as a routed turn's
 		// does, not a clean 200 (#4866)
 		call.Status, call.Error = canceled(r.Context())
+	} else if stuck != nil {
+		call.Status, call.Error = http.StatusGatewayTimeout, stuck.stuck
+		stuck.failStuck()
 	} else if sniff.failed != "" {
 		// the backend's response.failed (or error event) under a 200:
 		// what it said, as serve tells a routed reply's (#4866)

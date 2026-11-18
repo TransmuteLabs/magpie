@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -116,15 +117,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // a click on a chip's rate is a click on the chip and moves nothing (the
       // chip brought into view first, as a reader's would be)
-      const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
       const badge = editor.locator(".mchip .badge.rate").first();
       await badge.scrollIntoViewIfNeeded();
-      const before = await scrolled();
+      const before = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
       await badge.click();
       // none picked, it was served: the click picks it alone (#681)
       assert.equal(await editor.locator(".mchips .mchip.on").count(), 1, "the chip picked alone");
       assert.equal(await editor.locator(".mchips .mchip.auto").count(), 0);
-      assert.equal(await scrolled(), before, "the page moved");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), before, "the page moved");
       await page.keyboard.press("Escape");
       await page.locator("dialog.action-confirm[open] button").last().click();
       await page.locator("#modal").waitFor({ state: "hidden" });

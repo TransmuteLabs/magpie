@@ -383,7 +383,7 @@ func TestKeptBodyIsOnlyItsCallers(t *testing.T) {
 	freshDicts(t)
 	reached := 0
 	var got []byte
-	h := keptBodyRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := (&Server{}).keptBodyRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached++
 		got, _ = io.ReadAll(r.Body)
 		if r.Header.Get(availableDictHeader) != "" || r.Header.Get(KeepBodyHeader) != "" || r.Header.Get("Content-Encoding") != "" {

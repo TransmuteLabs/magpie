@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,11 +26,11 @@ func TestServeFollowWaitsForIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var busy gateway.Busy
-	stops := 0
-	f := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return busy }, released: true, stop: func() { stops++ }}
+	var stops atomic.Int32
+	f := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return busy }, released: true, stop: func() { stops.Add(1) }}
 	now := time.Now()
 
-	if f.check(now) || stops != 0 || f.restartTo() != "" {
+	if f.check(now) || stops.Load() != 0 || f.restartTo() != "" {
 		t.Fatal("restarted with nothing put in")
 	}
 	if a := f.answer(""); a.State != "current" {
@@ -40,7 +41,7 @@ func TestServeFollowWaitsForIdle(t *testing.T) {
 		t.Fatal(err)
 	}
 	busy = gateway.Busy{Requests: 1}
-	if f.check(now) || stops != 0 {
+	if f.check(now) || stops.Load() != 0 {
 		t.Fatal("restarted with a request in flight")
 	}
 	// (its own follow: an ask starts the bound of TestServeFollowDrainIsBounded)
@@ -49,29 +50,29 @@ func TestServeFollowWaitsForIdle(t *testing.T) {
 		t.Fatalf("magpie update's ask while busy: %+v", a)
 	}
 	busy = gateway.Busy{Last: now.Add(-time.Second)}
-	if f.check(now) || stops != 0 {
+	if f.check(now) || stops.Load() != 0 {
 		t.Fatal("restarted in a tool chain's gap")
 	}
 	// past serveWaitMost, the gap no longer holds it, a request still does
 	busy = gateway.Busy{Requests: 1, Last: now}
-	if f.check(now.Add(serveWaitMost+time.Minute)) || stops != 0 {
+	if f.check(now.Add(serveWaitMost+time.Minute)) || stops.Load() != 0 {
 		t.Fatal("restarted with a request in flight, after waiting long")
 	}
 	busy = gateway.Busy{Last: now.Add(serveWaitMost)}
-	if !f.check(now.Add(serveWaitMost+time.Minute)) || stops != 1 || f.restartTo() != exe {
-		t.Fatalf("not restarted once nothing was in flight after waiting long: stops %d, restartTo %q", stops, f.restartTo())
+	if !f.check(now.Add(serveWaitMost+time.Minute)) || stops.Load() != 1 || f.restartTo() != exe {
+		t.Fatalf("not restarted once nothing was in flight after waiting long: stops %d, restartTo %q", stops.Load(), f.restartTo())
 	}
 
-	g := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return gateway.Busy{} }, released: true, stop: func() { stops++ }}
-	if !g.check(time.Now()) || stops != 2 || g.restartTo() != exe {
+	g := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return gateway.Busy{} }, released: true, stop: func() { stops.Add(1) }}
+	if !g.check(time.Now()) || stops.Load() != 2 || g.restartTo() != exe {
 		t.Fatal("not restarted when idle at once")
 	}
 
 	// a build of one's own: a rebuild in place isn't an update
-	d := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return gateway.Busy{} }, stop: func() { stops++ }}
+	d := &serveFollow{exe: exe, started: st, busy: func() gateway.Busy { return gateway.Busy{} }, stop: func() { stops.Add(1) }}
 	d.run(t.Context())
-	if a := d.answer(""); a.State != "unsupported" || stops != 2 || d.restartTo() != "" {
-		t.Fatalf("a build of one's own: %+v, stops %d", a, stops)
+	if a := d.answer(""); a.State != "unsupported" || stops.Load() != 2 || d.restartTo() != "" {
+		t.Fatalf("a build of one's own: %+v, stops %d", a, stops.Load())
 	}
 }
 
@@ -88,33 +89,33 @@ func TestServeFollowDrainIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	busy := func() gateway.Busy { return gateway.Busy{Requests: 2, Last: time.Now()} }
-	stops := 0
-	f := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops++ }}
+	var stops atomic.Int32
+	f := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops.Add(1) }}
 	a := f.answer("")
 	if a.State != "waiting" || a.Drain != int(serveDrainMost/time.Second) {
 		t.Fatalf("ask while busy: %+v", a)
 	}
-	if f.check(time.Now().Add(serveDrainMost-time.Minute)) || stops != 0 {
+	if f.check(time.Now().Add(serveDrainMost-time.Minute)) || stops.Load() != 0 {
 		t.Fatal("restarted before the bound")
 	}
-	if !f.check(time.Now().Add(serveDrainMost+time.Minute)) || stops != 1 {
+	if !f.check(time.Now().Add(serveDrainMost+time.Minute)) || stops.Load() != 1 {
 		t.Fatal("never restarted past the bound")
 	}
 
 	// no ask, no bound: the autonomous follow never cuts a request
-	g := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops++ }}
+	g := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops.Add(1) }}
 	if g.check(time.Now().Add(24 * time.Hour)) {
 		t.Fatal("an unasked follow cut a request")
 	}
-	h := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops++ }}
+	h := &serveFollow{exe: exe, started: st, busy: busy, released: true, stop: func() { stops.Add(1) }}
 	if a := h.answerNow(""); a.State != "restarting" || !a.Forced {
 		t.Fatalf("forced: %+v", a)
 	}
 	eventually := time.Now().Add(3 * time.Second)
-	for stops < 2 && time.Now().Before(eventually) {
+	for stops.Load() < 2 && time.Now().Before(eventually) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if stops != 2 {
+	if stops.Load() != 2 {
 		t.Fatal("--force didn't stop serve while busy")
 	}
 }

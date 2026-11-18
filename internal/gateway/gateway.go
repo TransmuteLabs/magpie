@@ -31,6 +31,7 @@ import (
 	"github.com/yetone/magpie/internal/awake"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexrelay"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/gwmw"
@@ -38,8 +39,10 @@ import (
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
+	"github.com/yetone/magpie/internal/protocolext"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/redact"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -487,13 +490,14 @@ type Call struct {
 	// For: the request a call of magpie's own (a web search) was made for
 	For *CallFor `json:"for,omitempty"`
 	// Masked: what masking swapped in it, nil for nothing
-	Masked   *Masked           `json:"masked,omitempty"`
-	Model    string            `json:"model"`
-	Provider string            `json:"provider"`
-	From     provider.Protocol `json:"from"`
-	To       provider.Protocol `json:"to"`
-	Status   int               `json:"status"`
-	Millis   int64             `json:"ms"`
+	Masked          *Masked               `json:"masked,omitempty"`
+	Model           string                `json:"model"`
+	Provider        string                `json:"provider"`
+	From            provider.Protocol     `json:"from"`
+	To              provider.Protocol     `json:"to"`
+	Status          int                   `json:"status"`
+	UpstreamFailure usage.UpstreamFailure `json:"upstream_failure,omitzero"`
+	Millis          int64                 `json:"ms"`
 	// TTFT: ms from the request to its reply's first content — text,
 	// reasoning or a tool call — and FirstText to its first text, when
 	// it was streamed (#196)
@@ -535,7 +539,9 @@ type Call struct {
 
 // Server is the gateway.
 type Server struct {
-	client *http.Client
+	client     *http.Client
+	protocols  *protocolext.Host
+	extensions *extension.Manager
 	// ending closes once the gateway stops serving, for a stream with no
 	// end of its own (routeEvents) to end before Shutdown, which would
 	// wait its whole drain for it (streamsEnding)
@@ -661,6 +667,7 @@ func New() *Server {
 		// redirect is followed to its own origin only, so its key goes
 		// nowhere else (provider.KeepsCredentials)
 		client:       &http.Client{Transport: rpmTransport{upstreamTransport()}, CheckRedirect: provider.KeepsCredentials},
+		extensions:   extension.Default(),
 		unfit:        make(map[string]bool),
 		subscription: newSubscriptionBridge(),
 		debug:        os.Getenv("MAGPIE_DEBUG") != "",
@@ -744,7 +751,8 @@ func failedCallLine(c Call, now time.Time) (string, bool) {
 	if r := []rune(said); len(r) > 300 {
 		said = string(r[:300]) + "…"
 	}
-	key := c.Agent + "|" + c.Provider + "|" + c.Model + "|" + strconv.Itoa(c.Status) + "|" + said
+	upstream := upstreamFailureLine(c.UpstreamFailure)
+	key := c.Agent + "|" + c.Provider + "|" + c.Model + "|" + strconv.Itoa(c.Status) + "|" + said + upstream
 	failedLog.Lock()
 	defer failedLog.Unlock()
 	if failedLog.last == nil {
@@ -768,6 +776,7 @@ func failedCallLine(c Call, now time.Time) (string, bool) {
 	line := fmt.Sprintf("gateway: %s's call to %s on %s failed: %d after %s: %s",
 		agent, cmp.Or(c.Model, "(no model)"), cmp.Or(c.Provider, "(none)"), c.Status,
 		(time.Duration(c.Millis) * time.Millisecond).Round(time.Millisecond), cmp.Or(said, "(nothing said)"))
+	line += upstream
 	if seen.skipped > 0 {
 		line += fmt.Sprintf(" (and %d times more like it since the last line)", seen.skipped)
 	}
@@ -839,12 +848,23 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 		return err
 	}
+	if s.extensions != nil {
+		defer func() {
+			drain, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.extensions.Close(drain)
+		}()
+	}
 	ClearHeld()
 	s.lnMu.Lock()
 	s.ln = ln
 	s.lnMu.Unlock()
 	recordListening(ln.Addr())
 	defer forgetListening()
+	stopExtensionActivation := s.activateExtensions(ctx)
+	defer stopExtensionActivation()
+	stopAccountTasks := s.activateAccountTasks(ctx)
+	defer stopAccountTasks()
 	// the keys out of credit a magpie before this one rested go on
 	// resting, and climb on from their rung (rest_store.go)
 	loadRests()
@@ -858,6 +878,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// `magpie plugin builtin`) come and go here too
 	stopObservers := usage.ServeObservers()
 	defer stopObservers()
+	stopExtensionObservers := usage.ServeExtensionLedgerObservers(context.WithoutCancel(ctx), s.extensions)
+	defer stopExtensionObservers()
 	// and the user's own routing groups are served while plugins/groups is
 	// on (provider.GateGroups); one made a moment ago turns it on as it is
 	// looked up, not on KeepFresh's next look
@@ -937,6 +959,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	go provider.KeepPluginsListed(ctx) // models a plugin's vendor drops or adds, while magpie runs
 	// and renews the plugins' sign-ins as they come due, used or not (#5080)
 	go provider.KeepPluginsSignedIn(ctx)
+	defer provider.KeepExtensionsSignedIn(ctx)()
 	// and those a signed-in account's vendor adds (a ChatGPT plan's new GPT)
 	go provider.KeepAccountsListed(ctx)
 	// and fetches the lists of the providers the user asked to keep fresh (#2135)
@@ -1034,7 +1057,7 @@ func (s *Server) Handler() http.Handler {
 	// on (dumpFirst)
 	// a socket's turns go through all of it again (socketEntry); the
 	// agent's Retry-After is bounded on the way out (retryCapped)
-	return socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keptBodyRequests(keyLimited(s.keySlots(mux, mux)))))))))))))
+	return s.withProtocolRegistry(socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(s.keptBodyRequests(s.accountTaskRequests(s.protocolEntry(keyLimited(s.keySlots(mux, mux))))))))))))))))
 }
 
 // routes are the client APIs, each by its pattern: readOnlyGuard reads
@@ -2117,9 +2140,6 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Anthropic, 400, err.Error())
 		return
 	}
-	// counted as it will be sent: its tool exchange mended where it
-	// doesn't pair (tool_blocks_paired.go)
-	body = toolBlocksPaired(body)
 	named := unprefixed(model)
 	if m := claudeTierStandIn(r, agentOf(r), model); m != "" {
 		model = m // counted on the model the request will go to
@@ -2192,6 +2212,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 
 // countOn counts body's tokens for model on p, resolved when ok.
 func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Provider, model string, ok bool, body []byte) {
+	if !ok || !p.IsExtension() {
+		body = toolBlocksPaired(body)
+	}
 	// the headers the user gave the model, on its count as on its turns
 	r = r.WithContext(provider.WithModel(r.Context(), p.ID, model))
 	// the model's own system prompt is counted as it is sent
@@ -2371,16 +2394,12 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 			body = keyTiered(r, body, model)
 		}
 		if from == provider.Chat {
-			body = thinkingEffort(body)
-			// OpenCode 1's promptCacheKey (#5468)
-			body = cacheKeyCamel(body)
-			// a tool Pi adds during a conversation, in a message of its
-			// own: in the request's tools for every route, the relay's
-			// and every check that reads them (#2322)
-			body = liftMessageTools(body)
-			// a tool in MCP's, Anthropic's or Responses' shape, which
-			// no Chat API takes, in the Chat shape for every route (#2622)
-			body = shapeChatTools(body)
+			decoded, err := (chatNormalizer{}).Decode(r.Context(), r.Header, body)
+			if err != nil {
+				writeError(w, from, http.StatusInternalServerError, "could not normalize Chat request")
+				return
+			}
+			body = decoded.Body
 		}
 		// Claude Code's headers, for a test asked as Claude Code to ask
 		// with (provider.TestAs), whatever serves this model: a
@@ -2533,7 +2552,9 @@ func estimate(req *Request) int {
 }
 
 // serve routes one parsed-enough request to its provider.
-func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) {
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (terminalOutcome error) {
+	extensionContext, extensionAttempt := provider.WithExtensionAttempt(withRequestPolicy(r.Context()))
+	r = r.WithContext(extensionContext)
 	start := time.Now()
 	// a client's "off" is magpie's none, for every route and check below
 	// that reads the body's effort (plugins#334)
@@ -3076,6 +3097,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	if ruleReq != nil && g.Ruled() {
 		hit = ruleFor(ruleAt, g, ms, ruleReq, agent, ask, "")
+		if hit != nil && hit.terminal != nil {
+			call.Status, call.Error = http.StatusConflict, hit.terminal.Error()
+			decisionFailureHeaders(w.Header(), hit.terminal)
+			writeError(w, from, call.Status, call.Error)
+			turnedAway()
+			return
+		}
 	}
 	// Some clients send images even when the selected model is known to
 	// accept text only. Reject a new image and omit images from history.
@@ -3243,6 +3271,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// every agent that has no pick of its own for it
 			fastPick(cands, pl, p.ID, model, tier == "ultrafast")
 		}
+	}
+	cands, pl = protocolExecutors(r.Context(), cands, pl)
+	if len(cands) == 0 && len(pl.held) == 0 && len(pl.capped) == 0 && len(pl.unlisted) == 0 && extension.ExecutorRequired(r.Context()) {
+		call.Status, call.Error = http.StatusConflict, "native request requires its original module executor"
+		writeError(w, from, call.Status, call.Error)
+		turnedAway()
+		return
 	}
 	agentPick := provider.AgentEffort(agent)
 	if sealedTask {
@@ -3447,6 +3482,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			picked = hit.Pick
 		}
 		nested, nestedAt, cands, pl = s.nestedRules(ruleAt, ruleReq, agent, ask, ruled, cands, pl, aff, picked)
+		for _, classified := range nested {
+			if classified.Rule != nil && classified.Rule.terminal != nil {
+				call.Status, call.Error = http.StatusConflict, classified.Rule.terminal.Error()
+				decisionFailureHeaders(w.Header(), classified.Rule.terminal)
+				writeError(w, from, call.Status, call.Error)
+				turnedAway()
+				return
+			}
+		}
 	}
 	// the effort a group's decision model picked for the turn: the
 	// outermost group's that did
@@ -3668,14 +3712,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// it went to instead (waitMate), for that one's try; given back if it
 	// isn't the one tried next, or when serve ends with it unused
 	var handed struct {
-		who     string
-		release func()
-		waited  time.Duration // how long it waited where it was, the first try's
+		who    string
+		claim  *laneClaim
+		waited time.Duration // how long it waited where it was, the first try's
 	}
 	defer func() {
-		if handed.release != nil {
-			handed.release()
-		}
+		handed.claim.unused()
 	}()
 	// a group's members that failed in a way that passes are asked again,
 	// once each has been, for up to its Patience (#1418): a member of a
@@ -3752,6 +3794,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			onWay()
 		}
 	}()
+	returnHanded := func() {
+		handed.claim.unused()
+		handed.claim = nil
+		nearInKey += handed.waited
+		handed.waited = 0
+	}
+	policyRejected := false
 	for i := 0; i < len(cands); i++ {
 		if failedRow != nil {
 			failedRow()
@@ -3761,18 +3810,58 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			nearDone()
 			nearDone = nil
 		}
+		if onWay != nil {
+			onWay()
+			onWay = nil
+		}
+		if outcome := extensionAttempt.Outcome(true); outcome != nil {
+			terminalOutcome = decisionFailure(outcome, extensionAttempt)
+			call.Status, call.Error = extensionOperationFailure(w, kept, from, askedFor, false, outcome, extensionAttempt)
+			call.Usage.ErrType = "extension_operation_terminal"
+			break
+		}
 		c := cands[i]
+		if handed.claim != nil && handed.who != c.who() {
+			returnHanded()
+		}
+		call.UpstreamFailure = usage.UpstreamFailure{}
+		r = r.WithContext(requestpolicy.WithSelection(r.Context(), c.restID(), c.p.OwnModelID(c.model)))
+		if refusal, blocked := c.p.ExtensionAvailability(c.model, time.Now()); blocked {
+			returnHanded()
+			next := nextPolicyCandidate(r.Context(), cands, i+1)
+			decision := resolveFinalPolicy(r.Context(), c, &refusal, next >= 0, nil)
+			if decision.Action == requestpolicy.ActionNext {
+				extensionAttempt.ClearFinalRefusal()
+				i = next - 1
+				continue
+			}
+			if decision.Action == requestpolicy.ActionWait {
+				extensionAttempt.ClearFinalRefusal()
+				i--
+				continue
+			}
+			call.Status, call.Error = policyStatus(&refusal), "Upstream window is unavailable ("+string(refusal.Class)+")"
+			policyFailureHeaders(w, decision)
+			failTo(w, kept, from, call.Status, call.Error)
+			policyRejected = true
+			break
+		}
 		if q, ok := provider.Readdressed(c.p); ok {
 			// a Remote magpie saved at another address since the
 			// request read it is asked there, a retry of it too
 			// (le13ure on X)
 			c.p = q
 		}
-		if handed.release != nil && handed.who != c.who() {
-			handed.release()
-			handed.release = nil
+		if err := c.p.CheckExecutor(r.Context()); err != nil {
+			returnHanded()
+			if i < len(cands)-1 {
+				continue
+			}
+			call.Status, call.Error = http.StatusConflict, err.Error()
+			failTo(w, kept, from, call.Status, call.Error)
+			break
 		}
-		if handed.release != nil {
+		if handed.claim != nil {
 			// it holds a slot of this one already: no giving way
 		} else if j := s.laneMate(cands, i, isGroup, gaveWay); j > i {
 			// its key or account is full, and another of its provider's,
@@ -3795,6 +3884,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 		}
 		if by := accountSkipped(r.Context(), c.p, c.model); by != "" {
+			returnHanded()
 			// a middleware's onAccount passed the account over for this
 			// request: the next is asked, as past one that can't be used,
 			// before anything of this try is done (no reset spent, no rest,
@@ -3818,10 +3908,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			failTo(w, kept, from, call.Status, cmp.Or(msg, call.Error))
 			break
 		}
-		if onWay != nil {
-			onWay()
-			onWay = nil
-		}
 		var nearUsed, nearAhead float64
 		var near bool
 		if _, _, watched := capWatched(c); watched {
@@ -3841,7 +3927,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			s.nearCap.check.Lock()
 			nearUsed, nearAhead, near = s.nearCapOf(c, time.Now())
-			if !near {
+			if !near && handed.claim == nil {
 				onWay = s.lanes.plan(c.who())
 			}
 			s.nearCap.check.Unlock()
@@ -3876,7 +3962,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// as it left another's queue (waitMate), is its own turn,
 			// not one out on the account
 			own := 0
-			if handed.release != nil && handed.who == c.who() {
+			if handed.claim != nil && handed.who == c.who() {
 				own = 1
 			}
 			out, _, _ := s.lanes.out(c.who())
@@ -3888,6 +3974,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				cands = append(slices.Delete(slices.Clone(cands), i, i+1), c)
 				i--
 				continue
+			}
+			if handed.claim != nil && (!ok || out > own) {
+				returnHanded()
+				own = 0
 			}
 			held := false
 			if !ok {
@@ -3976,7 +4066,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// a group member's reply that said nothing at all goes to the
 		// next member while one is left (emptyEnded, #6712); the last
 		// one's goes as it came
-		hw.emptyFails = isGroup && !last && !pass
+		multipleReplies := streams && (from == provider.Chat && gjson.GetBytes(body, "n").Int() > 1 ||
+			from == provider.Gemini && gjson.GetBytes(body, "generationConfig.candidateCount").Int() > 1)
+		hw.emptyFails = isGroup && !last && !pass && !multipleReplies
 		// Claude's and GPT's reasoning is held for a refusal after it only
 		// while another candidate could answer instead: the last one's
 		// refusal isn't asked again, so holding it only kept a lone relay's
@@ -4437,6 +4529,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// with the try's own, to the agent if it is the one it gets
 			// (#4145)
 			ctx = withReplySink(ctx, c.p.ID, hw.heardUpstream)
+			ctx = withFailureSink(ctx, c.p.ID, &hw.upstreamFailure)
 			if from != provider.Responses {
 				// the reasoning its calls carry that this one refused
 				// earlier in the conversation isn't sent to be refused
@@ -4455,29 +4548,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// machine)
 			// a streaming agent waiting is kept alive meanwhile
 			queuedAlive := hw.keepQueued()
-			var release func()
+			var claim *laneClaim
 			var inLane time.Duration
 			var mate candidate
 			// the slot of its gateway key's first, once for the request
 			// (key_slots.go): its agent gone meanwhile, nothing is sent
 			inKey, err := keySlot(ctx)
 			inKey, nearInKey = inKey+nearInKey, 0
-			if err == nil && handed.release != nil {
+			if err == nil && handed.claim != nil {
 				// it left a full lane's queue for this one, whose slot it
 				// took as it did (waitMate): the wait there is its queue
-				release, handed.release = handed.release, nil
+				claim, handed.claim = handed.claim, nil
 				inLane, handed.waited = handed.waited, 0
 			} else if err == nil {
 				// waiting, it goes to the first other key or account with
 				// room, not resting, once there is one (01huadalang on
 				// Discord: the requests already waiting for a third ZCode
 				// account waited on once the first two were back)
-				release, inLane, err = s.lanes.take(ctx, c.who(), c.p.LaneLimit(), c.p.QueueLimit, time.Duration(c.p.QueueWait)*time.Second, func() (bool, time.Time) {
-					m, rel, next, ok := s.waitMate(cands, i, isGroup, gaveWay, all)
+				claim, inLane, err = s.lanes.takeClaim(ctx, c.who(), c.p.LaneLimit(), c.p.QueueLimit, time.Duration(c.p.QueueWait)*time.Second, func() (bool, time.Time) {
+					m, nextClaim, next, ok := s.waitMate(cands, i, isGroup, gaveWay, all)
 					if !ok {
 						return false, next
 					}
-					mate, handed.who, handed.release = m, m.who(), rel
+					mate, handed.who, handed.claim = m, m.who(), nextClaim
 					return true, time.Time{}
 				})
 			}
@@ -4513,7 +4606,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				// goes counted in it; the requests it makes on the way
 				// count too (rpm.go)
 				if inMinute, err = s.rpms.wait(ctx, c.who(), c.p.RPMLimit(), rpmWait(c.p)); err != nil {
-					release()
+					claim.unused()
 				} else {
 					ctx = s.paidFor(ctx, c.p, c.who())
 				}
@@ -4531,19 +4624,105 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				func() {
 					// the slot is the vendor's until the reply is read to
 					// its end or the agent has gone: attempt returns then
-					defer release()
+					attempted := false
+					defer func() {
+						if attempted {
+							claim.complete()
+						} else {
+							claim.unused()
+						}
+					}()
 					defer hw.watch()()
 					defer notePhase(ctx, "upstream")()
-					call.Status, call.Error = s.attempt(hw, r.WithContext(ctx), from, c.p, c.model, attemptBody, &call)
+					policy, policyErr := requestPolicy(ctx, c.p.ID)
+					if policyErr == nil {
+						policyErr = requestpolicy.FromContext(ctx).Dispatch(ctx, policy)
+					}
+					if policyErr != nil {
+						call.Status, call.Error = http.StatusTooManyRequests, "Request retry budget exhausted"
+						policyRejected = true
+						writeError(hw, from, call.Status, call.Error)
+						return
+					}
+					attempted = true
+					call.Status, call.Error = s.attempt(hw, r.WithContext(requestpolicy.WithRoutePermit(ctx)), from, c.p, c.model, attemptBody, &call)
 				}()
 			}
 			stop()
 		}
-		if handed.release != nil && handed.who == c.who() {
+		if handed.claim != nil && handed.who == c.who() {
 			// answered without asking (verifyHeld, restrictedHeld,
 			// quotaHeld): the slot taken for it goes back
-			handed.release()
-			handed.release = nil
+			returnHanded()
+		}
+		hw.settle()
+		call.Usage = normalizedExtensionUsage(c.p, extensionAttempt, call.Usage)
+		if outcome := extensionAttempt.Outcome(call.Status >= 400 || hw.failure != 0 || hw.refused || hw.looped != "" || hw.slow || hw.stuck != ""); outcome != nil {
+			terminalOutcome = decisionFailure(outcome, extensionAttempt)
+			call.UpstreamFailure = hw.upstreamFailure.snapshot()
+			if hw.stuck != "" && hw.passing && streams {
+				hw.separateStreamError()
+			}
+			call.Status, call.Error = extensionOperationFailure(w, kept, from, askedFor, hw.passing && streams, outcome, extensionAttempt)
+			call.Usage.ErrType = "extension_operation_terminal"
+			watched.attempt(call, Try{Start: began, Model: c.model, Status: call.Status, Error: call.Error}, c.p.ID, sent, hw, capture)
+			s.trace.update(tr, func(t *Route) {
+				tt := &t.Tries[len(t.Tries)-1]
+				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Millis = true, call.Status, call.Error, failOther, time.Since(began).Milliseconds()
+				tt.UpstreamFailure = call.UpstreamFailure
+			})
+			break
+		}
+		if hw.stuck != "" {
+			call.Status, call.Error = http.StatusGatewayTimeout, hw.stuck
+			fail := failOther
+			if r.Context().Err() != nil {
+				call.Status, call.Error = canceled(r.Context())
+				fail = failCanceled
+			} else {
+				hw.failStuck()
+			}
+			watched.attempt(call, Try{Start: began, Model: c.model, Status: call.Status, Error: call.Error}, c.p.ID, sent, hw, capture)
+			s.trace.update(tr, func(t *Route) {
+				tt := &t.Tries[len(t.Tries)-1]
+				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Millis = true, call.Status, call.Error, fail, time.Since(began).Milliseconds()
+			})
+			break
+		}
+		if refusal := extensionAttempt.FinalRefusal(); refusal != nil {
+			call.UpstreamFailure = hw.upstreamFailure.snapshot()
+			next := nextPolicyCandidate(r.Context(), cands, i+1)
+			decision := resolveFinalPolicy(r.Context(), c, refusal, next >= 0, func(ctx context.Context, delay time.Duration) error {
+				if pauseAlive(ctx, w, kept, streams, start, delay, nil) {
+					return nil
+				}
+				return ctx.Err()
+			})
+			call.Status, call.Error = policyStatus(refusal), "Upstream refused the selected request ("+string(refusal.Class)+")"
+			s.trace.update(tr, func(route *Route) {
+				attempt := &route.Tries[len(route.Tries)-1]
+				attempt.Done = true
+				attempt.Status = call.Status
+				attempt.Error = call.Error
+				attempt.Fail = string(refusal.Class)
+				attempt.Again = decision.Delay.Milliseconds()
+				attempt.UpstreamFailure = call.UpstreamFailure
+			})
+			watched.attempt(call, Try{Start: began, Model: c.model, Status: call.Status, Error: call.Error}, c.p.ID, sent, hw, capture)
+			if decision.Action == requestpolicy.ActionWait {
+				extensionAttempt.ClearFinalRefusal()
+				i--
+				continue
+			}
+			if decision.Action == requestpolicy.ActionNext {
+				extensionAttempt.ClearFinalRefusal()
+				i = next - 1
+				continue
+			}
+			policyFailureHeaders(w, decision)
+			failTo(w, kept, from, call.Status, call.Error)
+			policyRejected = true
+			break
 		}
 		if laneErr != nil {
 			// its key's or account's queue was full, or it waited as long
@@ -4580,7 +4759,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			logged()
 			break
 		}
-		hw.settle()
 		if hw.handedOver {
 			// its refusal came after its reasoning went to the agent: the
 			// next try's stream follows it as the same reply
@@ -4690,6 +4868,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 				TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 				RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+			rec = accountedUsage(rec, call.Usage)
 			failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 			failed := &Call{RequestBody: call.RequestBody, RequestTruncated: call.RequestTruncated, ResponseBody: string(hw.errBody()), maskIn: call.maskIn}
 			if call.wholeIn != nil {
@@ -4709,19 +4888,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Status, try.Error, try.Fail = call.Status, call.Error, failCanceled
 			watched.attempt(call, try, c.p.ID, sent, hw, capture)
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			break
-		}
-		if hw.stuck != "" {
-			// the vendor said nothing for translatedQuietLongest while the
-			// agent was kept alive (keepQuiet): it is told so, and nobody
-			// else is asked after it has waited that long
-			call.Status, call.Error = http.StatusGatewayTimeout, hw.stuck
-			try.Status, try.Error = call.Status, call.Error
-			watched.attempt(call, try, c.p.ID, sent, hw, capture)
-			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
-			if !hw.ended {
-				failTo(w, kept, from, call.Status, hw.stuck)
-			}
 			break
 		}
 		if hw.slow {
@@ -4771,6 +4937,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			call.TTFT, call.FirstText, call.Flow, call.FirstReasoning = 0, 0, 0, 0
 			watched.attempt(call, try, c.p.ID, sent, hw, capture)
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			if !admitRequestRetry(r.Context(), c.p.ID, retryPause) {
+				call.Status = 502
+				failTo(w, kept, from, call.Status, call.Error)
+				break
+			}
 			select {
 			case <-time.After(retryPause):
 			case <-r.Context().Done():
@@ -4948,6 +5119,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+				rec = accountedUsage(rec, call.Usage)
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 				// what this account answered is its refusal, the reply
 				// captured so far being no one's yet
@@ -4993,6 +5165,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
 					TTFT: try.TTFT, FirstText: try.FirstText, FirstReasoning: try.FirstReasoning, ReasoningHidden: try.ReasoningHidden, Flow: try.Flow, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 					RequestID: call.Usage.RequestID, Endpoint: endpointOf(r, from, call.To, c.p, c.model), Archive: call.archiveName(), HandedOn: true}
+				rec = accountedUsage(rec, call.Usage)
 				failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
 				// what this account answered is its refusal, the reply
 				// captured so far being no one's yet
@@ -5219,7 +5392,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			small, smallW = elsewhereWeighed(small, smallW, c)
 			last = i == len(cands)-1
 		}
-		if wait, ok := passingFor(c, hw.code(), hw.header, hw.errBody(), planAgain); ok && !protected && !last && !hw.passing && !hw.turnedAway && hw.failed() && qwenPlanBusy(c.p, hw.code(), hw.errBody()) && !kept.tooQuiet(wait) && !kept.outlives(wait) {
+		if wait, ok := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), planAgain); ok && !protected && !last && !hw.passing && !hw.turnedAway && hw.failed() && qwenPlanBusy(c.p, hw.code(), hw.errBody()) && !kept.tooQuiet(wait) && !kept.outlives(wait) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// the Qwen Token Plan turned the request away for its
 			// concurrency, its quota far from used (pelikanade on X): the
 			// same account is asked again after a jittered moment, a few
@@ -5239,7 +5412,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		planAgain = 0
-		if wait, ok := passing(hw.code(), hw.header, hw.errBody(), again); ok && !protected && !last && hw.failed() && spentAfter(cands[i+1:]) {
+		if wait, ok := passingFor(r.Context(), c.p.ID, hw.code(), hw.header, hw.errBody(), again); ok && !protected && !last && hw.failed() && spentAfter(cands[i+1:]) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// the others left are out of their allowance (Discord, waroy: a
 			// Codex account run out, Grok busy a moment): this one is the
 			// last that may answer, and is tried again as the last is
@@ -5430,7 +5603,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
 			skipped = append(skipped, c.label()+": "+call.Error)
-			if cuts < cutReasks {
+			if cuts < cutReasks && admitRequestRetry(r.Context(), c.p.ID, retryPause) {
 				cuts++
 				select {
 				case <-time.After(retryPause):
@@ -5440,7 +5613,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			continue
 		}
-		if wait, ok := keptAgain(aff, c, hw, keptAsked); ok && !last && !kept.tooQuiet(wait) {
+		if wait, ok := keptAgainFor(r.Context(), aff, c, hw, keptAsked); ok && !last && !kept.tooQuiet(wait) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// the one the conversation is kept on, for what its vendor
 			// cached of it, failed a way that passes — overloaded, a 5xx,
 			// timed out, not a rate limit, quota or sign-in: it is asked
@@ -5495,7 +5668,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// (spentAfter) and the agent is told theirs
 		lastSpent := last && isGroup && len(busyNow) > 0 && !hw.passing && hw.failed() && !busyFor(c, hw.code(), hw.errBody()) &&
 			slices.Contains([]string{failQuota, failCredit}, failure(hw.code(), hw.errBody())) && !spentAfter([]candidate{c})
-		if _, same := passingFor(c, hw.code(), hw.header, hw.errBody(), again); last && patience > 0 && !protected && !sameRefusal && !hw.turnedAway && !hw.refused && hw.failed() && (busyFor(c, hw.code(), hw.errBody()) && (!routedThere(hw.header) || len(busyNow) > 0) || lastSpent) &&
+		if _, same := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); last && patience > 0 && !protected && !sameRefusal && !hw.turnedAway && !hw.refused && hw.failed() && (busyFor(c, hw.code(), hw.errBody()) && (!routedThere(hw.header) || len(busyNow) > 0) || lastSpent) &&
 			(isGroup || !codexReset(hw.code(), hw.errBody())) &&
 			(len(busyNow) > 0 || waitsOf(c.patience, patienceFallback) > 0 && !same) {
 			// every member has failed, each in a way that passes — busy,
@@ -5523,7 +5696,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if memberWait == 0 {
 				memberWait = patience
 			}
-			if next, wait, ok := replan(busyNow, rounds, waitFrom, patienceFallback); ok && !kept.tooQuiet(wait) && !kept.outlives(wait) {
+			next, wait, canReplan := replan(busyNow, rounds, waitFrom, patienceFallback)
+			if canReplan && !kept.tooQuiet(wait) && !kept.outlives(wait) {
+				next = admitReplannedRequests(r.Context(), next, wait)
+			} else {
+				next = nil
+			}
+			if len(next) > 0 {
 				try.Fail, try.Again = failureOf(c, hw.code(), hw.errBody()), wait.Milliseconds()
 				if lastSpent {
 					rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
@@ -5547,7 +5726,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				break
 			}
 		}
-		if wait, ok := passingFor(c, hw.code(), hw.header, hw.errBody(), again); ok && !protected && !sameRefusal && !hw.turnedAway && hw.failed() && waitFrom.IsZero() && !kept.tooQuiet(wait) && !kept.outlives(wait) {
+		if wait, ok := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); ok && !protected && !sameRefusal && !hw.turnedAway && hw.failed() && waitFrom.IsZero() && !kept.tooQuiet(wait) && !kept.outlives(wait) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// nobody else is left: the same one again, after a moment (not
 			// what Antigravity turned away: it turns it away again; nor
 			// once the group's patience is spent)
@@ -5850,6 +6029,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	tries := 0 // the request's tries, as its route lists them
 	s.trace.update(tr, func(t *Route) {
 		t.Done, t.Status, t.Error, t.Millis = true, call.Status, call.Error, call.Millis
+		t.UpstreamFailure = call.UpstreamFailure
 		// the id the agent reads beside the reply, so the session that
 		// keeps it can be found after the fact (dsh's replays)
 		t.ResponseID = call.Usage.ResponseID
@@ -5898,14 +6078,19 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			rec.DownBytes, rec.ImageFilesSaved, rec.ImageFiles = up.downOf(), up.saved, up.images
 			rec.UpParts = upParts(prompt, up)
 		}
+		rec = accountedUsage(rec, call.Usage)
 		failedWith(&rec, call.Status, call.Error, call.Usage.ErrType)
+		rec.UpstreamFailure = call.UpstreamFailure
 		withBodies(&rec, &call)
 		appendAdvised(r, rec, call.Usage)
 		if call.Status < 400 {
 			// what its model searched with its provider's own tool
 			logNativeSearches(r.Context(), call.Usage.searches, start, call.Agent, call.Provider, where, model)
 		}
+	} else if policyRejected {
+		logged()
 	}
+	return terminalOutcome
 }
 
 // refusedError is what the agent is told of a refusal by the vendor's
@@ -6600,7 +6785,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			}
 		}
 	}
-	if p.IsPlugin() {
+	if p.IsPlugin() || p.IsExtension() {
 		req.Header.Set(provider.ConversationHeader, conversationID(in, body))
 		// the session and subagent the agent named, for a plugin that
 		// keeps state per conversation (plugins#620)
@@ -6666,6 +6851,20 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	// a request asked again in the same ask (RetryOneAuth and the others
 	// below) goes on the wire again too, as long as it went
 	again := func(r *http.Request) (*http.Response, error) {
+		retryContext := r.Context()
+		if err := retryContext.Err(); err != nil {
+			return nil, err
+		}
+		if budget := requestpolicy.FromContext(retryContext); budget != nil {
+			policy, err := requestPolicy(retryContext, p.ID)
+			if err != nil {
+				return nil, err
+			}
+			if err := budget.Dispatch(retryContext, policy); err != nil {
+				return nil, err
+			}
+			r = r.WithContext(requestpolicy.WithRoutePermit(retryContext))
+		}
 		n := sent
 		if r.ContentLength > 0 {
 			n = int(r.ContentLength)
@@ -6975,7 +7174,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		// a call no tool message answers, or an answer to no call, which
 		// Kimi and OpenAI turn the whole request away for: what a fork
 		// at an earlier turn or a stopped reply leaves (Paidaixinbao on X)
-		body = toolPairsOut(body)
+		if !p.IsExtension() {
+			body = toolPairsOut(body)
+		}
 		if mistral := p.VendorPreset() == "mistral" || p.VendorHost() == "api.mistral.ai"; !mistral && (chatReplaysReasoning(buildHost(p), model) || chatReplaysReasoning(buildHost(p), upstream)) {
 			// a tool call the client kept no thinking for, which DeepSeek
 			// turns the whole request away for (#1462)
@@ -7038,11 +7239,16 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		// a call no result answers, or a result answering no call, which
 		// Anthropic turns the whole request away for, and every later
 		// one of the conversation with it (tool_blocks_paired.go)
-		body = toolBlocksPaired(body)
+		if !p.IsExtension() {
+			body = toolBlocksPaired(body)
+		}
 		// Claude Code's advisor, named by magpie's id (advisor.go); its
 		// calls' usage rows go by that id (advisorRows)
 		advisor = advisorKeyModel(advisorAsked(provider.Anthropic, body))
 		body = advisorTools(body, p, upstream, wiresOf(r.Context()), keyAllows(r, p))
+		if p.IsExtension() {
+			break
+		}
 		if p.IsBedrock() {
 			// Claude Code's metadata.user_id, a JSON string these days, is
 			// not the plain id Bedrock checks it against (#176)
@@ -9627,7 +9833,8 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		}
 		return writeVendorErrorFrom(w, from, actual, p, res, msg, b), msg
 	}
-	dec := carryReasoning(decoderFor(p, actual, request.Tools), from, actual)
+	var decoding protocolDecodeState
+	dec := carryReasoning(decoderFor(p, actual, request.Tools, &decoding), from, actual)
 	rd, sse := eventStream(res)
 	if !sse {
 		// the provider ignored stream:true; read the whole reply as one
@@ -9664,6 +9871,9 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 		ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
 		return dec(data, see)
 	})
+	if err == nil && !decoding.rejected && ended && col.err == "" && r.Context().Err() == nil {
+		provider.ExtensionResponseProtocolComplete(res)
+	}
 	if fin := tail.finish(); err == nil && !ended && actual == provider.Chat && fin != "" && saysItsEnd(p, actual, model) {
 		// Gemini's OpenAI-compatible API lost only the finish_reason
 		// after its generation was done (chatTail)
@@ -10003,6 +10213,16 @@ func build(proto provider.Protocol, r *Request, model, host string, rejectTemp b
 	return out, nil
 }
 
+type protocolDecodeState struct {
+	rejected bool
+}
+
+func (state *protocolDecodeState) reject() {
+	if state != nil {
+		state.rejected = true
+	}
+}
+
 // decoderFor is decoder for p's replies. A plugin's Chat text is read as
 // OpenCode reads it, as it came: the plugin knows its vendor and gives its
 // reasoning apart, so a <think> at the head of its text is the model's
@@ -10014,16 +10234,16 @@ func build(proto provider.Protocol, r *Request, model, host string, rejectTemp b
 //
 // Each Gemini thought signature the reply gives is noted as p's
 // (signersNoted), so it goes back to p alone (ownSignatures).
-func decoderFor(p provider.Provider, proto provider.Protocol, tools []Tool) func(data string, emit func(Event)) error {
-	return signersNoted(decoderOf(p, proto, tools), p.ID)
+func decoderFor(p provider.Provider, proto provider.Protocol, tools []Tool, state *protocolDecodeState) func(data string, emit func(Event)) error {
+	return signersNoted(decoderOf(p, proto, tools, state), p.ID)
 }
 
-func decoderOf(p provider.Provider, proto provider.Protocol, tools []Tool) func(data string, emit func(Event)) error {
+func decoderOf(p provider.Provider, proto provider.Protocol, tools []Tool, state *protocolDecodeState) func(data string, emit func(Event)) error {
 	if proto == provider.Chat && p.IsPlugin() {
-		d := &chatDecoder{past: true}
+		d := &chatDecoder{past: true, decodeState: state}
 		return d.decode
 	}
-	dec := decoder(proto)
+	dec := decoderWithState(proto, state)
 	if proto == provider.Responses && accountAgent(p) == "codex" {
 		if back := codexNamesBack(tools); back != nil {
 			return func(data string, emit func(Event)) error {
@@ -10040,20 +10260,24 @@ func decoderOf(p provider.Provider, proto provider.Protocol, tools []Tool) func(
 }
 
 func decoder(proto provider.Protocol) func(data string, emit func(Event)) error {
+	return decoderWithState(proto, nil)
+}
+
+func decoderWithState(proto provider.Protocol, state *protocolDecodeState) func(data string, emit func(Event)) error {
 	switch proto {
 	case provider.Chat:
-		d := &chatDecoder{}
+		d := &chatDecoder{decodeState: state}
 		return d.decode
 	case provider.Responses:
-		d := &responsesDecoder{}
+		d := &responsesDecoder{decodeState: state}
 		return d.decode
 	case provider.CodeAssist, provider.Gemini:
 		// Factory's generateContent is the same Gemini chunks, without
 		// Code Assist's {response} wrapper, which the decoder also reads.
-		d := &codeAssistDecoder{}
+		d := &codeAssistDecoder{decodeState: state}
 		return d.decode
 	}
-	d := &anthropicDecoder{server: map[int]bool{}, whole: map[int]bool{}}
+	d := &anthropicDecoder{server: map[int]bool{}, whole: map[int]bool{}, decodeState: state}
 	return d.decode
 }
 

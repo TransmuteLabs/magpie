@@ -3,6 +3,7 @@ package sessions
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -303,6 +304,13 @@ var ErrNoSubagent = errors.New("no such subagent in this session")
 
 // SubagentTranscript is the conversation of the session's subagent sub.
 func SubagentTranscript(s Session, sub string) (Transcript, error) {
+	return SubagentTranscriptContext(context.Background(), s, sub)
+}
+
+func SubagentTranscriptContext(ctx context.Context, s Session, sub string) (Transcript, error) {
+	if err := ctx.Err(); err != nil {
+		return Transcript{}, err
+	}
 	if !Reads(s.Agent) {
 		return Transcript{Parts: []Part{}}, ErrNotRead
 	}
@@ -311,7 +319,7 @@ func SubagentTranscript(s Session, sub string) (Transcript, error) {
 			continue
 		}
 		c := Session{Agent: s.Agent, ID: sa.ID, Path: sa.Path}
-		return TranscriptOf(c)
+		return TranscriptOfContext(ctx, c)
 	}
 	return Transcript{Parts: []Part{}}, ErrNoSubagent
 }

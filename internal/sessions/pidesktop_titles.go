@@ -46,13 +46,14 @@ var piDesktopTitlesHeld = time.Second
 // store.db is (openCursorStore). A database that can't be read leaves the
 // names last read standing: unknown, not untitled.
 func PIDesktopTitles(ids []string) map[string]string {
-	if !Reads("pi") {
+	if len(ids) == 0 {
 		return map[string]string{}
 	}
+	return publishNativeTitles("pi", func() map[string]string { return readPIDesktopTitles(ids) })
+}
+
+func readPIDesktopTitles(ids []string) map[string]string {
 	out := map[string]string{}
-	if len(ids) == 0 {
-		return out
-	}
 	piDesktopTitles.Lock()
 	defer piDesktopTitles.Unlock()
 	if piDesktopTitles.names == nil || time.Since(piDesktopTitles.at) >= piDesktopTitlesHeld {

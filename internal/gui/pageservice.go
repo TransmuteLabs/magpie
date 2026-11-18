@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 )
 
@@ -117,15 +118,30 @@ func (p *pluginPage) servicePort() int {
 // on this server, sends no Referer on (the address holds the token), and
 // streams as it comes (an event stream, a WebSocket).
 func servePageService(rw http.ResponseWriter, r *http.Request, p *pluginPage, tok string) {
+	if o, sent := r.Header["Origin"]; sent && (len(o) != 1 || o[0] != "null") {
+		http.Error(rw, "this is a plugin page's service: only its page asks it", http.StatusForbidden)
+		return
+	}
+	port := p.servicePort()
+	target := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port))}
+	root := pluginPagePrefix + tok + "/" + pageServicePath
+	if strings.TrimPrefix(r.URL.Path, root) == "" && p.hosted {
+		pageHost(r.Context())
+	}
+	servePageServiceTarget(rw, r, p.Name, target, root, nil)
+}
+
+// servePageServiceTarget shares the existing sandboxed streaming proxy with
+// generation-owned SDK services. The caller keeps the target's lease alive.
+func servePageServiceTarget(rw http.ResponseWriter, r *http.Request, name string, endpoint *url.URL, root string, proof *extension.WindowServiceTarget) {
 	// a sandboxed page's requests carry Origin: null, and a navigation
 	// none; another site's page has no business here
 	if o, sent := r.Header["Origin"]; sent && (len(o) != 1 || o[0] != "null") {
 		http.Error(rw, "this is a plugin page's service: only its page asks it", http.StatusForbidden)
 		return
 	}
-	port := p.servicePort()
-	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	root := pluginPagePrefix + tok + "/" + pageServicePath
+	port, _ := strconv.Atoi(endpoint.Port())
+	target := endpoint.Host
 	raw := strings.TrimPrefix(r.URL.EscapedPath(), root)
 	if raw == r.URL.EscapedPath() {
 		raw = strings.TrimPrefix(r.URL.Path, root)
@@ -135,31 +151,34 @@ func servePageService(rw http.ResponseWriter, r *http.Request, p *pluginPage, to
 		http.Error(rw, "bad path", http.StatusBadRequest)
 		return
 	}
-	// the page itself: its plugin's host, which runs the service, is up
-	// first, as for the page's HTML (pageHost)
-	if raw == "" && p.hosted {
-		pageHost(r.Context())
-	}
 	// how deep the request is under the service's root, for a redirect
 	// the service sends to one of its own paths
 	up := strings.Repeat("../", strings.Count(raw, "/"))
 	rp := &httputil.ReverseProxy{
 		Transport: pageServiceTransport,
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Scheme = endpoint.Scheme
 			pr.Out.URL.Host = target
-			pr.Out.URL.Path = upPath
+			pr.Out.URL.Path = strings.TrimSuffix(endpoint.Path, "/") + upPath
 			pr.Out.URL.RawPath = ""
-			if "/"+raw != upPath {
-				pr.Out.URL.RawPath = "/" + raw
+			if endpoint.RawPath != "" || "/"+raw != upPath {
+				pr.Out.URL.RawPath = strings.TrimSuffix(endpoint.EscapedPath(), "/") + "/" + raw
 			}
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
 			pr.Out.Host = target
 			pr.Out.Header.Del("Cookie")
+			if proof != nil {
+				stripWindowServiceProof(pr.Out.Header)
+			}
 		},
 		FlushInterval: -1,
 		ModifyResponse: func(res *http.Response) error {
 			h := res.Header
+			if proof != nil {
+				if err := verifyWindowServiceProof(res, proof); err != nil {
+					return err
+				}
+			}
 			h.Del("Set-Cookie")
 			// the service's own policy, its 'self' named for WebKit
 			// (serviceSelf); then magpie's sandbox
@@ -180,12 +199,17 @@ func servePageService(rw http.ResponseWriter, r *http.Request, p *pluginPage, to
 				h.Set("X-Accel-Buffering", "no")
 			}
 			if loc := h.Get("Location"); loc != "" {
+				// An SDK endpoint may have a path prefix. Its absolute
+				// redirects stay under that endpoint's public token root.
+				if proof != nil || endpoint.Path != "" && endpoint.Path != "/" {
+					loc = windowServiceLocation(loc, endpoint)
+				}
 				h.Set("Location", serviceLocation(loc, port, up))
 			}
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("plugin page: %s's service on %s: %v", p.Name, target, err)
+			log.Printf("plugin page: %s's service on %s: %v", name, target, err)
 			h := rw.Header()
 			h.Set("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'")
 			h.Set("Referrer-Policy", "no-referrer")

@@ -1,12 +1,20 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // Images the image MCP server draws are kept for an hour so a link can
@@ -15,6 +23,27 @@ import (
 // magpie's memory at 1 GB+ while drawing). They are kept on disk, and the
 // reply they came in is let go.
 func TestImageMCPKeepsDrawingsOffTheHeap(t *testing.T) {
+	if os.Getenv("MAGPIE_IMAGE_MCP_HEAP_CHILD") != "1" {
+		binary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(testenv.DeadlineContext(t, time.Second), 2*time.Minute)
+		defer cancel()
+		command := proc.CommandContext(ctx, binary,
+			"-test.run=^TestImageMCPKeepsDrawingsOffTheHeap$", "-test.count=1", "-test.timeout=2m")
+		command.Env = append(os.Environ(), "MAGPIE_IMAGE_MCP_HEAP_CHILD=1")
+		command.WaitDelay = time.Second
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("isolated image heap check: %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "image MCP heap child entered\n") {
+			t.Fatalf("isolated image heap check did not run:\n%s", output)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stdout, "image MCP heap child entered")
 	s, _ := easeled(t)
 	t.Setenv("MAGPIE_PUBLIC_URL", "")
 	heap := func() uint64 {

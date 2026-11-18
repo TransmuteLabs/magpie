@@ -1,6 +1,8 @@
 # Asynchronous gateway hooks
 
-Opt-in Bun hooks add external context before routing and observe completed replies.
+Opt-in hooks add external context before routing and observe completed replies.
+Legacy packages run in Bun; installed SDK API 1.2 modules use their declared
+native, exec or Bun primary.
 The gateway makes one model request per client request. Tool declarations, tool
 execution and subsequent inference rounds belong to the client.
 
@@ -18,6 +20,80 @@ sequenceDiagram
     Magpie--)Hook: onResponse(completedReply, ctx)
     Note over Hook: Bounded best-effort notification
 ```
+
+## Installable SDK contract
+
+SDK modules explicitly negotiate `gateway-hooks` and declare `hooks.request`,
+`hooks.response` and/or `hooks.signIn` in `magpie-plugin.json`. Their primary
+handlers implement `gateway.request`, `gateway.response` and `gateway.signin`.
+Public DTOs and validation live in
+[`pkg/extension/hooks.go`](../../pkg/extension/hooks.go), with matching JS
+contracts. These are separate from synchronous middleware, routing strategies,
+global usage observers and the built-in Memory owner.
+
+[`gatewayHookChain`](../../internal/gateway/extension_hooks.go) runs legacy
+hooks first, then SDK hooks on the last accepted body. Both reuse
+`gatewayResponse`/`gatewayReply` and observe the final client-facing bytes.
+Each chain retains its own accepted request. Ordinary agent turns and the
+existing Codex sign-in passthrough share this seam; gateway-owned classifier,
+title, search and compaction requests continue without hooks.
+
+The SDK context contains protocol/model/stream/path, agent/session/cwd/query/kind
+and host-derived origin, without HTTP headers, key names, peer addresses or
+provider credentials. SDK origins are `local`, `magpie-key`, `gateway-key`,
+`remote` and `browser`. Browser detection reuses `hubFromPage`, keeping a
+Node fetch request with Sec-Fetch-Mode alone distinct from a browser POST.
+The additional browser classification is SDK-only; legacy context values
+remain unchanged.
+
+Origins default to **local and magpie-key**. Unknown, remote, named-key and
+browser requests are skipped before module startup or input disclosure.
+Other origins require an explicit `hooks.origins` opt-in. This provenance is
+not an authenticated user identity; memory modules must not interpret a
+client-supplied agent/session/project string as one.
+
+Recall returns an optional JSON object body and at most 64 KiB of opaque JSON
+state. A request larger than 16 MiB skips SDK recall without copying its body
+or starting a runtime. The host retains the last accepted body on timeout,
+error, invalid state or unauthorized mutation. Model, streaming and client
+tools/choice, including config.tools/config.toolConfig, cannot change.
+Protected JSON comparison preserves integer precision. Failed recall gets no
+completion callback.
+
+`gateway.request` is read-only through host services: state reads and declared
+read helpers are available; persistent `state.cas` is refused, including
+through a helper whose immediate method is module.call. Module-owned external
+I/O remains the trusted author's responsibility. Request hooks cannot emit
+streaming events or acceptance receipts.
+
+Completion receives the accepted request, consolidated reply, success flag
+and the same state, on the same package/configuration generation. It may
+emit a durable acceptance receipt before a declared helper write. Completion
+and sign-in notifications use the ordinary operation journal without
+automatic replay; a domain result named outcome does not change provider
+execution state. These methods are unary, apart from write acceptance.
+
+[`GatewayRun`](../../internal/extension/gateway_hooks.go) owns callback
+lifetime independently of the client connection. Completed-response capture
+does not delay client EOF, and a client closing after a whole response does
+not cancel it. There are at most 128 active runs, each abandoned run expires
+after 15 minutes, and callbacks have bounded per-module and shared budgets.
+Normal finish retains leases until notification completes; shutdown cancels
+and joins owned notifications before closing their workers. Disabling or
+updating a module withdraws new work while an existing lease retains its
+original generation within the ordinary bounded drain policy.
+
+The existing sign-in loop also dispatches sanitized SDK notifications without
+starting a legacy Bun host for an SDK-only installation. `endsAt` is RFC3339.
+Delivery remains opt-in and best-effort.
+
+A memory module can combine these hooks with
+[local-owner SDK tools](plugin-tools.md#installable-sdk-tools-and-private-memory),
+its private persistent state or an external service, and a window.
+`TestGatewayHooksMemorySharesDurableStoreWithTools` exercises a tool saving
+memory, a different agent recalling it, completion capture and reading that
+capture after Manager restart. This does not register an alternative
+built-in Memory store, embedder, digest publisher or distillation job.
 
 ## Entry and request contract
 

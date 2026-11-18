@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"cmp"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -118,7 +119,9 @@ type CodexIdentity struct {
 
 // Session is one agent session.
 type Session struct {
-	ReadOnly bool `json:"read_only,omitempty"`
+	SourceStatus string `json:"source_status,omitempty"`
+	source       *sessionSourceRecord
+	ReadOnly     bool `json:"read_only,omitempty"`
 	// Gateway: seen only through magpie's gateway, with no file of the
 	// agent's on this computer (external.go)
 	Gateway       bool          `json:"gateway,omitempty"`
@@ -225,7 +228,8 @@ type state struct {
 	HeadSize int32 `json:"head_size,omitempty"`
 	// Claude Code: parsed by a magpie that reads /cd's relocated lines
 	// (ccRelocated), so Cwd is the folder the session was last moved to
-	CdRead        bool           `json:"cd_read,omitempty"`
+	CdRead        bool `json:"cd_read,omitempty"`
+	sourceOwned   bool
 	ContentHash   digest         `json:"content_hash,omitzero"`
 	Size          int64          `json:"size"`
 	Mod           int64          `json:"mod"` // unix nanoseconds
@@ -504,6 +508,9 @@ func (s *state) clone() *state {
 	c.Days = slices.Clone(s.Days)
 	for i, e := range c.Days {
 		v := e.v
+		if v == nil {
+			continue
+		}
 		d := &day{Active: v.Active, Models: slices.Clone(v.Models), Prompts: v.Prompts, Replies: v.Replies}
 		d.Hours = slices.Clone(v.Hours)
 		d.Tools, d.Skills = slices.Clone(v.Tools), slices.Clone(v.Skills)
@@ -567,6 +574,7 @@ func (s modTime) Compare(t modTime) int { return cmp.Compare(s, t) }
 
 // fileMore is what a file of some agents has besides.
 type fileMore struct {
+	source *sessionSourceRecord
 	// OpenCode and ZCode: the session, and where it is kept; parent is
 	// the session that started it, "" for one the user did
 	sid    string
@@ -1002,14 +1010,10 @@ func allFilesWith(kept *filesKept, zcode func() []file) []file {
 	if filesHook != nil {
 		filesHook()
 	}
-	lists := callFileLists(codexFiles())
-	lists = append(lists, openCodeFiles(), piFiles(), raftFiles(), cindyFiles(), wslFiles("pi", "raft", "omp", "kimi", "antigravity", "agy"), zcode())
-	lists = append(lists, dshFiles(), clineFiles(), ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")),
-		grokFiles(), workbuddyFiles(), workbuddyAIFiles(), codebuddyFiles(), droidFiles(), ompFiles(), cursorFiles(), hermesFiles(), almaFiles(), openmausbotFiles(), liveagentFiles(), kimiFiles(), agyFiles(),
-		antigravityFiles()) // #2190
+	lists := nativeHistoryLists(sourceView.Load(), nativeHistoryReaders(zcode), wslFiles)
 	// each lister asked Reads already; a file listed under another
 	// agent's name is held to that agent too
-	return allowed(kept.distinct(lists...))
+	return allowed(extensionSourceFiles(kept.distinct(lists...)))
 }
 
 // distinctOf is lists one after another with each path kept once, the
@@ -1530,16 +1534,24 @@ func loadCache() {
 
 // saveCache keeps the parses on disk. Writing the whole index (tens of MB
 // for a long history) takes a second or more, so it is done behind the
-// request: the parses in the cache are never changed once put there (a new
-// parse starts from a clone), so a copy of the map is a snapshot; saves in a
-// row are folded into the latest, and one is written saveGap after the
-// last at the soonest.
+// request: the queued save owns its persistent state, independent of later
+// cache updates. Saves in a row are folded into the latest, and one is
+// written saveGap after the last at the soonest.
 func saveCache() { saveCacheWithin(saveGap) }
 
 // saveCacheWithin is saveCache written gap after the last save at the
 // soonest; saves folded into one wait the shortest gap any of them asked.
 func saveCacheWithin(gap time.Duration) {
-	snap := save{cacheFile{Version: cacheVersion, Zone: zone(), Parsers: parseVersions, Files: savable()}, CachePath()}
+	snap := save{
+		cacheFile:    cacheFile{Version: cacheVersion, Zone: zone(), Parsers: maps.Clone(parseVersions), Files: savable()},
+		path:         CachePath(),
+		codexOrigins: map[string]*state{},
+	}
+	for path, value := range snap.Files {
+		if value != nil && value.Codex != nil {
+			snap.codexOrigins[path] = cache[path]
+		}
+	}
 	saving.Lock()
 	defer saving.Unlock()
 	if saving.next == nil || gap < saving.gap {
@@ -1631,7 +1643,8 @@ var saving struct {
 
 type save struct {
 	cacheFile
-	path string
+	path         string
+	codexOrigins map[string]*state
 }
 
 func init() { saving.Cond = sync.NewCond(&saving.Mutex) }
@@ -1691,7 +1704,7 @@ func writeCache(c *save) {
 		return
 	}
 	ok = true
-	writeCodexWindows(c.Files)
+	writeCodexWindows(c.Files, c.codexOrigins)
 }
 
 // refresh parses those of want that changed since their parse was kept, a
@@ -1703,6 +1716,12 @@ func refresh(want, all []file) {
 	var todo, waits []file
 	named := false
 	for _, f := range want {
+		if source := f.m().source; source != nil {
+			if source.summary != nil {
+				cache[f.path] = source.summary
+			}
+			continue
+		}
 		if f.cold {
 			continue // in a stopped WSL distro: what was read of it stands
 		}
@@ -2000,6 +2019,8 @@ func pricer() func(string) *catalog.Price {
 // Reset forgets the kept parses, in memory only, and closes the index of
 // what was said, so a test's HOME can go.
 func Reset() {
+	invalidateSessionSources()
+	sourceView.Store(nil)
 	ForgetSaid()
 	desktopTitles.Lock()
 	desktopTitles.names, desktopTitles.last = nil, nil
@@ -2057,6 +2078,23 @@ func listSessions(limit int) []Session {
 // listing is the listing at limit, kept or made now, and keptList.made
 // for it: none when the kept one is made, the number the caller had.
 func listing(limit, made int) ([]Session, int, bool) {
+	return listingContext(context.Background(), limit, made)
+}
+
+func listingContext(ctx context.Context, limit, made int) ([]Session, int, bool) {
+	type result struct {
+		rows []Session
+		made int
+		same bool
+	}
+	published := publishSourceReadContext(ctx, func() result {
+		rows, version, same := sourceListing(limit, made)
+		return result{rows, version, same}
+	})
+	return published.rows, published.made, published.same
+}
+
+func sourceListing(limit, made int) ([]Session, int, bool) {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	if limit <= 0 {
@@ -2160,6 +2198,9 @@ func sessionID(fs []file) string {
 // calls from the file. GatewayKeys keeps the gateway from counting them
 // a second time.
 func subIDs(fs []file, id string) []string {
+	if source := fs[0].m().source; source != nil {
+		return slices.Clone(source.subs)
+	}
 	var out []string
 	for _, f := range fs {
 		if f.main || !idInFile(f.agent) {
@@ -2177,6 +2218,11 @@ func assemble(fs []file, price func(string) *catalog.Price, codexTitle func(stri
 	s, ok := assembleListed(fs, price, codexTitle)
 	if !ok {
 		return s, false
+	}
+	if s.source != nil {
+		s.Resume = sourceResume(s.source)
+		s.Carry, s.Transcript = carries(s), s.source.grant.descriptor.Transcript && !s.source.stale
+		return s, true
 	}
 	if !s.ReadOnly {
 		s.Resume = resumeFor(s.WSL, s.Agent, s.ID, s.Cwd, s.Path)
@@ -2196,6 +2242,19 @@ func assemble(fs []file, price func(string) *catalog.Price, codexTitle func(stri
 func assembleListed(fs []file, price func(string) *catalog.Price, codexTitle func(string) string) (Session, bool) {
 	sortSessionFiles(fs)
 	s := Session{Agent: fs[0].agent, Path: fs[0].path, Models: []Model{}, WSL: fs[0].m().wsl}
+	s.source = fs[0].m().source
+	if s.source != nil {
+		s.ParentSession, s.RootSession = s.source.parentID, s.source.rootID
+	}
+	if s.source != nil && s.source.stale {
+		s.SourceStatus = "stale"
+	}
+	if s.source != nil && s.SourceStatus == "" {
+		s.SourceStatus = "ready"
+		if !s.source.usageKnown {
+			s.SourceStatus = "usage-unavailable"
+		}
+	}
 	for _, f := range fs {
 		s.ReadOnly = s.ReadOnly || f.readOnly
 	}
@@ -2306,6 +2365,9 @@ type sessionParser struct {
 }
 
 func parserFor(agent string) sessionParser {
+	if extensionSourceAgent(agent) {
+		return sessionParser{}
+	}
 	switch agent {
 	case "hermes":
 		return sessionParser{whole: parseHermes}
@@ -2358,6 +2420,18 @@ func parseWith(f file, old *state, calls *callsRide) *state {
 }
 
 func parseRead(f file, old *state, calls *callsRide) *state {
+	if source := f.m().source; source != nil {
+		if calls != nil {
+			calls.release()
+		}
+		return source.summary
+	}
+	if extensionSourceAgent(f.agent) && !nativeSourceOwner(f.agent) {
+		if calls != nil {
+			calls.release()
+		}
+		return &state{Agent: f.agent}
+	}
 	defer func() {
 		if calls != nil {
 			calls.release()
@@ -3092,21 +3166,29 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 // it: the Sessions page shows it, and its conversation, Markdown and
 // Terminal open from it as from any other (#2273).
 func Find(agent, id string) (Session, bool) {
+	return FindContext(context.Background(), agent, id)
+}
+
+func FindContext(ctx context.Context, agent, id string) (Session, bool) {
+	if ctx.Err() != nil {
+		return Session{}, false
+	}
 	alias := provider.UsageAlias()
-	s, ok := findListed(agent, id)
+	s, ok := findListed(ctx, agent, id)
 	if ok && alias != nil {
 		aliasSession(&s, alias)
 	}
 	return s, ok
 }
 
-func findListed(agent, id string) (Session, bool) {
-	for _, s := range listSessions(0) {
+func findListed(ctx context.Context, agent, id string) (Session, bool) {
+	all, _, _ := listingContext(ctx, 0, -1)
+	for _, s := range all {
 		if s.Agent == agent && s.ID == id {
 			return s, true
 		}
 	}
-	if s, ok, found := get(agent + ":" + id); found && s.ID == id {
+	if s, ok, found := getContext(ctx, agent+":"+id); found && s.ID == id {
 		if !ok {
 			listed(&s)
 		}
@@ -3123,6 +3205,10 @@ func findListed(agent, id string) (Session, bool) {
 // A ZCode request names its session without the sess_ prefix its database
 // gives it, so that id names the session too.
 func Titles(keys []string) map[string]string {
+	return publishSourceRead(func() map[string]string { return sourceTitles(keys) })
+}
+
+func sourceTitles(keys []string) map[string]string {
 	out := map[string]string{}
 	if len(keys) == 0 {
 		return out
@@ -3134,7 +3220,11 @@ func Titles(keys []string) map[string]string {
 			if out[k] != "" {
 				continue
 			}
-			if agent, id, ok := strings.Cut(k, ":"); ok && agent == "zcode" {
+			agent, id, ok := strings.Cut(k, ":")
+			if !ok || !nativeHistoryCanRead(sourceView.Load(), agent) {
+				continue
+			}
+			if agent == "zcode" {
 				if t, ok := zcodeTaskOf("sess_" + zcodeBareID(id)); ok && title(t.title) != "" && !ocDefaultTitle(title(t.title)) {
 					out[k] = t.title
 				}
@@ -3279,6 +3369,22 @@ func Get(key string) (Session, bool) {
 // get is Get, and whether key has files at all: ok is false for a session
 // nothing was said in, which found still says is there.
 func get(key string) (s Session, ok, found bool) {
+	return getContext(context.Background(), key)
+}
+
+func getContext(ctx context.Context, key string) (s Session, ok, found bool) {
+	type result struct {
+		session   Session
+		ok, found bool
+	}
+	published := publishSourceReadContext(ctx, func() result {
+		session, ok, found := sourceGet(key)
+		return result{session, ok, found}
+	})
+	return published.session, published.ok, published.found
+}
+
+func sourceGet(key string) (s Session, ok, found bool) {
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()

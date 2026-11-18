@@ -30,9 +30,9 @@ func TestHiddenModels(t *testing.T) {
 		}
 	}
 	told := 0
-	was := catalog.Changed
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = was })
+	was := catalog.ChangedHook()
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(was) })
 
 	all, _ := CatalogFor("codex")
 	if err := SetHiddenModels("Codex", []string{" relay/m2 ", "other/m1", "relay/m2", ""}); err != nil {
@@ -108,9 +108,9 @@ func TestOnlyPickedModels(t *testing.T) {
 	save("relay", "a1", "a2")
 	save("other", "b1", "b2")
 	told := 0
-	was := catalog.Changed
-	catalog.Changed = func() { told++ }
-	t.Cleanup(func() { catalog.Changed = was })
+	was := catalog.ChangedHook()
+	catalog.SetChanged(func() { told++ })
+	t.Cleanup(func() { catalog.SetChanged(was) })
 	shownIDs := func(agent string) []string {
 		shown, _ := CatalogFor(agent)
 		return slices.Sorted(slices.Values(ids(shown)))

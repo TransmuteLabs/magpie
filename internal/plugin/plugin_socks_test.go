@@ -120,12 +120,18 @@ func TestPluginSOCKSProxy(t *testing.T) {
 			t.Fatalf("%s through %s, which is down: %q, %v; want it to say %q", x.url, x.proxy, b, err, x.says)
 		}
 	}
-	// through a SOCKS proxy that is down, the bridge answers as Go's
-	// transport fails: a 502 saying "socks connect", which the gateway
-	// takes for the proxy's failure
-	for _, url := range []string{"http://vendor.invalid/v1/chat/completions", "https://vendor.invalid/v1/chat/completions"} {
-		if code, b, err := fetch(deadSOCKS, url); err != nil || code != 502 || !strings.HasPrefix(b, "socks connect tcp 127.0.0.1:") {
-			t.Fatalf("%s through a SOCKS proxy that is down: %d %q, %v", url, code, b, err)
-		}
+	// An HTTP request receives the bridge's 502. For HTTPS, Go's CONNECT
+	// transport returns that refusal as a proxyconnect error instead of a
+	// response. Both must identify the chosen SOCKS proxy, so the gateway
+	// treats the failure as the proxy's rather than resting an account.
+	failure := "socks connect tcp " + strings.TrimPrefix(deadSOCKS, "socks5://") + "->"
+	if code, b, err := fetch(deadSOCKS, "http://vendor.invalid/v1/chat/completions"); err != nil ||
+		code != 502 || !strings.HasPrefix(b, failure) {
+		t.Fatalf("HTTP through a SOCKS proxy that is down: %d %q, %v", code, b, err)
+	}
+	if code, b, err := fetch(deadSOCKS, "https://vendor.invalid/v1/chat/completions"); err == nil ||
+		code != 0 || b != "" || !strings.Contains(err.Error(), "proxyconnect tcp: 502 Bad Gateway:") ||
+		!strings.Contains(err.Error(), failure) {
+		t.Fatalf("HTTPS CONNECT through a SOCKS proxy that is down: %d %q, %v", code, b, err)
 	}
 }

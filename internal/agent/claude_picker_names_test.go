@@ -35,8 +35,8 @@ func TestClaudePickerFollowsSuffixMode(t *testing.T) {
 	if err := claude(home).Apply("model", "relay/glm-4.6"); err != nil {
 		t.Fatal(err)
 	}
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	rows := func() map[string][2]string {
 		t.Helper()
 		var p struct {
@@ -113,8 +113,8 @@ func TestClaudePickerSubscriptionSaysItsProvider(t *testing.T) {
 	if err := claude(home).Apply("model", "relay/glm-4.6"); err != nil {
 		t.Fatal(err)
 	}
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	for _, c := range []struct{ mode, label, note string }{
 		{provider.SuffixOn, "GPT-5.5 · Codex", "me@example.com · via magpie"},
 		{provider.SuffixOff, "GPT-5.5", "Codex · me@example.com · via magpie"},

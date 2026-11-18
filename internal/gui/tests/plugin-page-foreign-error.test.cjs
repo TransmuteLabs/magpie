@@ -77,17 +77,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       if (engine === "webkit" && v.masked) continue;
       const key = name.toLowerCase();
       await page.evaluate((k) => show("plugin-" + k), key);
+      if (v.broken) {
+        // A synchronous fixture bug can replace the iframe before Playwright
+        // observes its navigation. The error card is the required outcome.
+        await page.locator(`#view-plugin-${key} .slot-error`).waitFor();
+        assert.equal(await page.locator(`#view-plugin-${key} .slot-error`).count(), 1, `${name}: its own bug breaks the page`);
+        continue;
+      }
       const frame = () => page.frames().find((x) => x.url().includes(tok(v.c)));
       for (let i = 0; i < 100 && !frame(); i++) await page.waitForTimeout(50);
       assert.ok(frame(), name + ": the frame opened");
       await frame().waitForFunction(() => window.magpie?.theme).catch(() => {});
       // the window answers a frame's messages in order, so once this answer
       // is back, whatever the page raised before it has been heard
-      if (!v.broken) {
-        assert.ok(frame(), `${name}: the page's frame is still there`);
-        await frame().evaluate(() => window.done);
-      }
-      else await page.locator(`#view-plugin-${key} .slot-error`).waitFor();
+      assert.ok(frame(), `${name}: the page's frame is still there`);
+      await frame().evaluate(() => window.done);
       const broke = await page.locator(`#view-plugin-${key} .slot-error`).count();
       assert.equal(broke, v.broken ? 1 : 0, `${name}: ${v.broken ? "its own bug breaks the page" : "the page is not broken"}`);
     }

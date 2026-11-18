@@ -118,14 +118,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const box = row.locator("input");
       assert.equal(await box.getAttribute("aria-label"), w.label);
       assert.equal(await box.inputValue(), "128k", "custom starts at the smallest");
-      await box.fill("abc");
-      assert.equal(await box.getAttribute("aria-invalid"), "true");
-      assert((await hint()).includes(w.bad), await hint());
-      // Save refused while the box doesn't read: the editor stays open on it, nothing sent
-      await ed.locator("button.primary", { hasText: w.save }).click();
-      assert.equal(await ed.locator("button.primary", { hasText: w.save }).evaluate((b) => b.classList.contains("busy")), false, "a bad context is not saved");
-      assert.equal(await box.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
-      assert.equal(await page.locator(".rt-gedit").count(), 1);
+      for (const invalid of ["abc", "9".repeat(400), "9007199254740992"]) {
+        await box.fill(invalid);
+        assert.equal(await box.getAttribute("aria-invalid"), "true");
+        assert((await hint()).includes(w.bad), await hint());
+        const postCount = posts.length;
+        await ed.locator("button.primary", { hasText: w.save }).click();
+        assert.equal(await box.evaluate((x) => x === document.activeElement), true, "Save takes the reader to the bad box");
+        assert.equal(posts.length, postCount, "invalid context does not send a save");
+      }
       await box.fill("300k");
       assert.equal(await box.getAttribute("aria-invalid"), "false");
       assert.equal(await box.getAttribute("aria-describedby"), await row.locator(".hint").getAttribute("id"));

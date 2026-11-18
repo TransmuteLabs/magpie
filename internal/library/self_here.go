@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/update"
 )
 
@@ -31,16 +32,27 @@ var selfExe = update.Program
 // ownServer is whether s is magpie's own: `mcp …` run by a magpie binary,
 // this computer's or another's.
 func ownServer(s *Server) bool {
-	return !s.Remote() && len(s.Args) > 0 && s.Args[0] == "mcp" && magpieBinary(s.Command)
+	if s.Remote() || len(s.Args) == 0 || s.Args[0] != "mcp" {
+		return false
+	}
+	if magpieBinary(s.Command) {
+		return true
+	}
+	exe, err := selfExe()
+	return err == nil && exe != "" && s.Command == exe
 }
 
-// magpieBinary is whether cmd names a magpie program, by a path of any
-// system's: magpie, magpie.exe, magpie-windows-amd64.exe, the AppImage.
 func magpieBinary(cmd string) bool {
 	base := strings.ToLower(cmd[strings.LastIndexAny(cmd, `/\`)+1:])
-	base = strings.TrimSuffix(base, ".exe")
-	return base == magpieCommand || strings.HasPrefix(base, magpieCommand+"-")
+	switch base {
+	case magpieCommand, "magpie.exe", "magpie.com", "magpie-dev", "magpie-dev-backend":
+		return true
+	default:
+		return magpieReleaseName.MatchString(base)
+	}
 }
+
+var magpieReleaseName = lazyre.New(`^magpie-((cli-)?(darwin|linux)-(amd64|arm64)|(cli-)?windows-(amd64|arm64)( ?\([0-9]+\))?\.exe|cli-android-arm64)$`)
 
 // runsHere is whether cmd is a program by full path on this computer.
 func runsHere(cmd string) bool {

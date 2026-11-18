@@ -184,15 +184,8 @@ func TestServeWSLListensBesideLoopback(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done; srv.Close() })
 
 	at := "http://" + net.JoinHostPort("::1", Port()) + "/"
-	answers := func() bool {
-		c := &http.Client{Timeout: time.Second}
-		res, err := c.Get(at)
-		if err != nil {
-			return false
-		}
-		res.Body.Close()
-		return true
-	}
+	probe := wslListenerProbe(t)
+	answers := func() bool { return probe(at) }
 	waitFor := func(want bool, what string) {
 		t.Helper()
 		deadline := time.Now().Add(10 * time.Second)
@@ -222,6 +215,57 @@ func TestServeWSLListensBesideLoopback(t *testing.T) {
 	s.ln = all
 	s.lnMu.Unlock()
 	waitFor(false, "shared on every address")
+}
+
+// A successful request must prove the listener accepts a new connection.
+// Closing a listener leaves previously accepted keep-alive connections usable.
+func wslListenerProbe(t *testing.T) func(string) bool {
+	t.Helper()
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Timeout: time.Second, Transport: transport}
+	return func(at string) bool {
+		response, err := client.Get(at)
+		if err != nil {
+			return false
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		return true
+	}
+}
+
+func TestWSLListenerProbeRejectsClosedListenerWithLiveKeepAlive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	t.Cleanup(server.Close)
+	transport := &http.Transport{Proxy: nil}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Timeout: time.Second, Transport: transport}
+	keepAlive := func() {
+		t.Helper()
+		response, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatalf("keep-alive fixture failed: %v", err)
+		}
+		defer response.Body.Close()
+		if _, err := io.Copy(io.Discard, response.Body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keepAlive()
+	probe := wslListenerProbe(t)
+	if !probe(server.URL) {
+		t.Fatal("probe could not reach the open listener")
+	}
+	if err := server.Listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keepAlive()
+	if probe(server.URL) {
+		t.Fatal("probe reused an accepted connection after the listener closed")
+	}
 }
 
 // H1_B1_K1 on X: a firewall kept WSL off vEthernet (WSL), and the distro
@@ -337,14 +381,8 @@ func TestServeWSLListensAtVia(t *testing.T) {
 	t.Cleanup(func() { cancel(); <-done; srv.Close() })
 
 	at := "http://" + net.JoinHostPort("::1", Port()) + "/"
-	answers := func() bool {
-		res, err := (&http.Client{Timeout: time.Second}).Get(at)
-		if err != nil {
-			return false
-		}
-		res.Body.Close()
-		return true
-	}
+	probe := wslListenerProbe(t)
+	answers := func() bool { return probe(at) }
 	waitFor := func(want bool, what string) {
 		t.Helper()
 		for deadline := time.Now().Add(10 * time.Second); answers() != want; time.Sleep(10 * time.Millisecond) {

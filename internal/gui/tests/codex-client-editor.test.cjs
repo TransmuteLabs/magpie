@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { inEditor } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const codex = () => ({
@@ -23,8 +24,8 @@ const claude = () => ({
   account: { agent: "claude", agentName: "Claude Code", user: "me@example.com", plan: "MAX", logins: [{ user: "me@example.com", plan: "MAX", active: true, on: true }] },
 });
 
-function serve(lang, gateway, posted) {
-  let cur = { theme: "light", lang, version: "0.1.400", titleModels: [], codexClient: "", ...(gateway ? { web: true, gatewayOn: true } : {}) };
+function serve(lang, gateway, posted, initialClient = "") {
+  let cur = { theme: "light", lang, version: "0.1.400", titleModels: [], codexClient: initialClient, ...(gateway ? { web: true, gatewayOn: true } : {}) };
   const providers = { providers: [codex(), claude()], presets: [], excluded: [], gateway: { running: true, window: true } };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
@@ -67,6 +68,42 @@ const langs = process.env.LANGS ? process.env.LANGS.split(",") : Object.keys(W);
 const exact = (s) => new RegExp("^\\s*" + s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$");
 
 for (const engine of engines) {
+  test(`${engine}: the Codex editor waits for the saved client before allowing a change`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" });
+    page.setDefaultTimeout(10000);
+    page.setDefaultNavigationTimeout(60000);
+    const posted = [];
+    const fixture = serve("en", true, posted, "desktop");
+    const settings = Promise.withResolvers();
+    await page.route("**/*", (route) => {
+      if (new URL(route.request().url()).pathname !== "/api/settings") return fixture(route);
+      return settings.promise.then(() => fixture(route));
+    });
+    try {
+      await Promise.all([
+        page.waitForRequest("**/api/settings", { timeout: 60000 }),
+        page.goto("http://magpie.test/?view=providers&edit=codex"),
+      ]);
+      const advanced = page.locator(".editor details.advanced");
+      await advanced.waitFor({ timeout: 60000 });
+      if (!(await advanced.evaluate((details) => details.open))) await advanced.locator(":scope > summary").press("Enter");
+      const pick = advanced.locator(".codex-client button");
+      assert.equal(await pick.count(), 0, "an unread preference must not be offered as the default");
+      assert.deepEqual(posted, []);
+      settings.resolve();
+      await pick.filter({ hasText: exact(W.en.desktop) }).waitFor();
+      await inEditor(page, pick);
+      await pick.click();
+      const menu = page.locator(".proto-menu");
+      await menu.getByRole("menuitemradio", { name: W.en.cli, exact: true }).press("Enter");
+      await pick.filter({ hasText: exact(W.en.cli) }).waitFor();
+      assert.deepEqual(posted, [{ client: "" }]);
+    } finally {
+      settings.resolve();
+    }
+  });
   for (const lang of langs) {
     for (const gateway of [false, true]) {
       test(`${engine} ${lang}${gateway ? " gateway mode" : ""}: the Codex provider's Advanced picks the Codex client`, async (t) => {

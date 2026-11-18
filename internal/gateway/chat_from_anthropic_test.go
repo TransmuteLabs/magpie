@@ -27,6 +27,10 @@ type pacedMessages struct {
 }
 
 func (p *pacedMessages) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	p.mu.Lock()
 	p.paths = append(p.paths, r.URL.Path)
 	p.n++

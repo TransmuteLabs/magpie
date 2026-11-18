@@ -9,7 +9,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -61,11 +61,19 @@ func decisionGroupOf(asked string) (g provider.Group, ms []provider.Member, ok b
 // chat — with the models of it that answer no System One left out. left
 // and order are what the routing log shows of the plan.
 func (s *Server) decideTries(g provider.Group, ms []provider.Member) ([]candidate, planned, []provider.Member) {
-	ms = slices.DeleteFunc(slices.Clone(ms), func(m provider.Member) bool { return !m.Provider.DecidesModel(m.Model) })
+	ms = slices.DeleteFunc(slices.Clone(ms), func(m provider.Member) bool {
+		if m.Provider.IsExtension() {
+			return !m.Provider.ExtensionListsDecisionModel(m.Model)
+		}
+		return !m.Provider.DecidesModel(m.Model)
+	})
 	if len(ms) == 0 {
 		return nil, planned{}, nil
 	}
 	cs, pl := s.planGroup(g, ms, provider.Chat)
+	cs = slices.DeleteFunc(cs, func(c candidate) bool {
+		return c.p.IsExtension() && !c.p.DecidesModel(c.model)
+	})
 	return cs, pl, ms
 }
 
@@ -158,7 +166,12 @@ func (s *Server) decideKeys(p provider.Provider, model string) ([]candidate, pla
 	// a key on another of its preset's plans is asked at that plan's
 	// endpoints, where there may be no System One (Volcengine's Coding
 	// Plan beside its pay as you go): never there
-	cs = slices.DeleteFunc(cs, func(c candidate) bool { return !c.p.Decides() })
+	cs = slices.DeleteFunc(cs, func(c candidate) bool {
+		if c.p.IsExtension() {
+			return !c.p.DecidesModel(c.model)
+		}
+		return !c.p.Decides()
+	})
 	return cs, pl
 }
 
@@ -168,6 +181,7 @@ func (s *Server) decideKeys(p provider.Provider, model string) ([]candidate, pla
 // try would rests, and every try is a Try of one route (group is the
 // group it was asked by, nil for a provider).
 func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body []byte, asked string, start time.Time, cs []candidate, pl planned, group *GroupRef) {
+	r = r.WithContext(withRequestPolicy(r.Context()))
 	who := callerOf(r)
 	// the call is in Recent calls, and with the request archive on is kept
 	// there, as a chat's is (wangb on Discord: 请求存档开启, 但是 systemone
@@ -217,10 +231,43 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 		defer func() { noted(call.Provider, went) }()
 	}
 	var skipped []string
-	for i, c := range cs {
+	note := func(at time.Time, selected candidate, used Usage, status int, rejected bool) {
+		call.Usage = used
+		record := decisionUsageRecord(at, selected.p, selected.model, asked, used, status, call.archiveName())
+		record.RouteID, record.Agent, record.Via = tr.ID, who.agent, who.via
+		record.Rejected, record.UpstreamFailure = rejected, call.UpstreamFailure
+		if call.Error != "" {
+			failedWith(&record, status, call.Error, used.ErrType)
+		}
+		appendUsage(r, record)
+	}
+	for i := 0; i < len(cs); i++ {
+		c := cs[i]
 		last := i == len(cs)-1
 		at := time.Now()
 		went = c.model
+		call.Provider, call.UpstreamFailure = c.p.ID, usage.UpstreamFailure{}
+		ctx := requestpolicy.WithSelection(provider.WithClientHeaders(r.Context(), c.p.ID, r.Header), c.restID(), c.p.OwnModelID(c.model))
+		if refusal, blocked := c.p.ExtensionAvailability(c.model, time.Now()); blocked {
+			next := nextPolicyCandidate(ctx, cs, i+1)
+			decision := resolveFinalPolicy(ctx, c, &refusal, next >= 0, nil)
+			if decision.Action == requestpolicy.ActionNext {
+				i = next - 1
+				continue
+			}
+			if decision.Action == requestpolicy.ActionWait {
+				i--
+				continue
+			}
+			call.Status, call.Error = policyStatus(&refusal), finalPolicyMessage(&refusal)
+			s.trace.update(tr, func(route *Route) {
+				route.Done, route.Status, route.Error, route.Millis = true, call.Status, call.Error, time.Since(start).Milliseconds()
+			})
+			note(at, c, Usage{}, call.Status, true)
+			policyFailureHeaders(w, decision)
+			writeError(w, provider.Chat, call.Status, call.Error)
+			return
+		}
 		s.trace.update(tr, func(t *Route) {
 			t.Provider = c.p.ID
 			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Start: at})
@@ -231,19 +278,76 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 			s.trace.update(tr, func(t *Route) {
 				try := &t.Tries[len(t.Tries)-1]
 				try.Done, try.Status, try.Millis, try.Error, try.Fail, try.Rest = true, status, ms, msg, fail, rest
+				try.UpstreamFailure = call.UpstreamFailure
 				if status < 400 || last || r.Context().Err() != nil {
 					t.Done, t.Status, t.Error, t.Millis, t.Tokens = true, status, msg, time.Since(start).Milliseconds(), used.Input+used.Output
 					t.Usage = routeUsage(c.p.ID, c.model, used)
 				}
 			})
 		}
-		d, err := s.postDecideSent(r.Context(), c.p, c.model, withModel(body, c.model))
+		policy, policyErr := requestPolicy(ctx, c.p.ID)
+		if policyErr == nil {
+			policyErr = requestpolicy.FromContext(ctx).Dispatch(ctx, policy)
+		}
+		if policyErr != nil {
+			last = true
+			call.Status, call.Error = http.StatusTooManyRequests, "Request retry budget exhausted"
+			tried(call.Status, call.Error, failOther, nil, Usage{})
+			note(at, c, Usage{}, call.Status, true)
+			w.Header().Set("X-Should-Retry", "false")
+			writeError(w, provider.Chat, call.Status, call.Error)
+			return
+		}
+		d, err := s.postDecideSent(requestpolicy.WithRoutePermit(ctx), c.p, c.model, withModel(body, c.model))
+		if d.sent != nil {
+			ctx = d.sent.Context()
+		}
 		status, b, header := d.status, d.answer, d.header
+		if err == nil && status < 300 && c.p.IsExtension() {
+			if validate, ok := ctx.Value(decisionAnswerValidatorKey{}).(func([]byte) error); ok {
+				err = validate(b)
+			}
+		}
 		call.Provider = c.p.ID
+		used := d.counted()
+		var outcome error
+		if err != nil {
+			outcome = decisionFailure(err, d.attempt)
+		} else if status >= 400 {
+			outcome = decisionFailure(errors.New(provider.APIError(b, http.StatusText(status))), d.attempt)
+		}
+		terminal := terminalExtensionError(outcome)
+		if terminal {
+			status, err, last = http.StatusConflict, outcome, true
+		}
+		if refusal := d.attempt.FinalRefusal(); refusal != nil && !terminal {
+			call.UpstreamFailure = usage.UpstreamFailure(refusal.Observation)
+			next := nextPolicyCandidate(ctx, cs, i+1)
+			decision := resolveFinalPolicy(ctx, c, refusal, next >= 0, nil)
+			status, call.Error = policyStatus(refusal), finalPolicyMessage(refusal)
+			last = decision.Action == requestpolicy.ActionTerminal
+			tried(status, call.Error, string(refusal.Class), nil, used)
+			if decision.Action == requestpolicy.ActionWait {
+				d.attempt.ClearFinalRefusal()
+				i--
+				continue
+			}
+			if decision.Action == requestpolicy.ActionNext {
+				d.attempt.ClearFinalRefusal()
+				skipped = append(skipped, c.label()+": "+call.Error)
+				i = next - 1
+				continue
+			}
+			call.Status, call.Fallback = status, strings.Join(skipped, "; ")
+			note(at, c, used, status, false)
+			policyFailureHeaders(w, decision)
+			writeError(w, provider.Chat, status, call.Error)
+			return
+		}
 		if err != nil {
 			fail, rest := failOther, (*Rest)(nil)
 			var tooMany *errRPM
-			if r.Context().Err() == nil && !errors.As(err, &tooMany) {
+			if !terminal && r.Context().Err() == nil && !errors.As(err, &tooMany) {
 				// unreachable: it rests, as a chat's would
 				fail, rest = s.decideFailed(c, http.StatusBadGateway, nil, []byte(err.Error()))
 			}
@@ -253,24 +357,25 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 				continue
 			}
 			last = true
-			tried(http.StatusBadGateway, err.Error(), fail, rest, Usage{})
+			if !terminal {
+				status = http.StatusBadGateway
+			}
+			tried(status, err.Error(), fail, rest, used)
 			msg := err.Error()
 			if len(skipped) > 0 {
 				msg += " (tried first: " + strings.Join(skipped, "; ") + ")"
 			}
-			call.Status, call.Error = http.StatusBadGateway, msg
-			writeError(w, provider.Chat, http.StatusBadGateway, msg)
+			call.Status, call.Error, call.Fallback = status, msg, strings.Join(skipped, "; ")
+			if d.usage != nil || terminal {
+				note(at, c, used, status, false)
+			}
+			passReplyHeaders(w.Header(), c.p, &http.Response{Header: header})
+			if terminal {
+				decisionFailureHeaders(w.Header(), err)
+			}
+			writeError(w, provider.Chat, status, msg)
 			return
 		}
-		var use struct {
-			Model string `json:"model"` // the one that answered, when the reply says
-			Usage struct {
-				Input  int `json:"input_tokens"`
-				Output int `json:"output_tokens"`
-			} `json:"usage"`
-		}
-		_ = json.Unmarshal(b, &use)
-		used := Usage{Input: use.Usage.Input, Output: use.Usage.Output}
 		errMsg, fail := "", ""
 		var rest *Rest
 		if status >= 300 {
@@ -285,26 +390,26 @@ func (s *Server) serveDecideTries(w http.ResponseWriter, r *http.Request, body [
 			}
 		}
 		last = true
-		took := time.Since(start).Milliseconds() // before what magpie writes down of it (#1939)
 		tried(status, errMsg, fail, rest, used)
 		if status < 400 {
 			servedCandidate(c, used.Input+used.Output)
 		}
-		var keyID, keyName string
-		if c.p.Account == nil && c.p.Key != "" {
-			keyID, keyName = provider.KeyID(c.p.Key), c.p.KeyName
-		}
 		call.Status, call.Error, call.Fallback = status, errMsg, strings.Join(skipped, "; ")
-		call.Usage = Usage{Input: use.Usage.Input, Output: use.Usage.Output, Served: use.Model}
-		appendUsage(r, usage.Record{RouteID: tr.ID, Time: start, Agent: who.agent, Via: who.via, Provider: c.p.ID, Host: c.p.Where(), Model: c.model, Requested: asked, Served: use.Model,
-			ProviderKeyID: keyID, ProviderKeyName: keyName, ProviderAccount: accountOf(c.p),
-			Input: use.Usage.Input, Output: use.Usage.Output, Millis: took, Status: status, Archive: call.archiveName()})
+		note(at, c, used, status, false)
 		ctype := header.Get("Content-Type")
 		if ctype == "" || status < 300 {
 			ctype = "application/json"
 		}
 		if status >= 400 {
 			keepRetryOut(w.Header(), header, b)
+		}
+		passReplyHeaders(w.Header(), c.p, &http.Response{Header: header})
+		if c.p.IsExtension() && d.attempt != nil {
+			module, operation := d.attempt.Operation()
+			if operation != "" {
+				w.Header().Set("X-Magpie-Extension", module)
+				w.Header().Set("X-Magpie-Operation", operation)
+			}
 		}
 		w.Header().Set("Content-Type", ctype)
 		w.WriteHeader(status)
@@ -326,11 +431,22 @@ type decideRefused struct {
 func (e decideRefused) Error() string { return e.err.Error() }
 func (e decideRefused) Unwrap() error { return e.err }
 
+type decidePolicyRefused struct {
+	refusal     requestpolicy.Refusal
+	calibration bool
+}
+
+func (e *decidePolicyRefused) Error() string { return finalPolicyMessage(&e.refusal) }
+
 // askDecisionGroup is askClassifier for a decision group: its keys and
 // accounts in the group's order, each asked as Jev is (askJev) until one
 // answers, the one that failed resting as it would for a chat. ok is false
 // when model names no decision group.
 func (s *Server) askDecisionGroup(wait time.Duration, who access.Identity, model string, intents []string, prev before, effort bool, text string) (v verdict, ok bool, err error) {
+	return s.askDecisionGroupWithContext(access.WithIdentity(context.Background(), who), wait, model, intents, prev, effort, text)
+}
+
+func (s *Server) askDecisionGroupWithContext(ctx context.Context, wait time.Duration, model string, intents []string, prev before, effort bool, text string) (v verdict, ok bool, err error) {
 	if !provider.IsGroupRef(model) {
 		return verdict{}, false, nil
 	}
@@ -344,12 +460,14 @@ func (s *Server) askDecisionGroup(wait time.Duration, who access.Identity, model
 	// held to the group's own accounts, if it is: no request carries a
 	// caller here to hold (heldByGroup); and to who's, the accounts the
 	// group asking holds its classifier to
-	cs = slices.DeleteFunc(cs, func(c candidate) bool { return groupHeld(c, []provider.Group{g}) != "" || !accountAllowed(who, c) })
+	cs = slices.DeleteFunc(cs, func(c candidate) bool {
+		return groupHeld(c, []provider.Group{g}) != "" || !accountAllowed(access.Caller(ctx), c)
+	})
 	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
 		return verdict{}, true, fmt.Errorf("no decision model of the group %s can be asked now", g.Name)
 	}
-	v, err = s.askDecideTries(wait, cs, intents, prev, effort, text)
+	v, err = s.askDecideTriesWithContext(ctx, wait, cs, intents, prev, effort, text)
 	return v, true, err
 }
 
@@ -357,14 +475,18 @@ func (s *Server) askDecisionGroup(wait time.Duration, who access.Identity, model
 // or accounts in its routing's order (decideKeys), each asked until one
 // answers, as a decision group's are.
 func (s *Server) askDecider(wait time.Duration, who access.Identity, p provider.Provider, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+	return s.askDeciderWithContext(access.WithIdentity(context.Background(), who), wait, p, model, intents, prev, effort, text)
+}
+
+func (s *Server) askDeciderWithContext(ctx context.Context, wait time.Duration, p provider.Provider, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 	cs, _ := s.decideKeys(p, model)
 	// held to who's accounts: those the group asking holds it to
-	cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(who, c) })
+	cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(access.Caller(ctx), c) })
 	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
 		return verdict{}, fmt.Errorf("no key or account of %s may be asked %s now", p.Name, model)
 	}
-	return s.askDecideTries(wait, cs, intents, prev, effort, text)
+	return s.askDecideTriesWithContext(ctx, wait, cs, intents, prev, effort, text)
 }
 
 // askDecideTries asks each of cs as Jev is (askJev) until one answers, the
@@ -375,16 +497,52 @@ func (s *Server) askDecider(wait time.Duration, who access.Identity, p provider.
 // hold). wait is that wait, or what a request has left of it (askWaited):
 // a try cut off by less than the whole wait is not rested for it.
 func (s *Server) askDecideTries(wait time.Duration, cs []candidate, intents []string, prev before, effort bool, text string) (v verdict, err error) {
+	return s.askDecideTriesWithContext(context.Background(), wait, cs, intents, prev, effort, text)
+}
+
+func (s *Server) askDecideTriesWithContext(parent context.Context, wait time.Duration, cs []candidate, intents []string, prev before, effort bool, text string) (v verdict, err error) {
 	full := classifyTimeout()
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	ctx, cancel := context.WithTimeout(parent, wait)
 	defer cancel()
-	for _, c := range cs {
+	ctx = ownOperation(ctx)
+	calibration := ownOperation(ctx)
+	ctx = context.WithValue(ctx, decisionCalibrationKey{}, calibration)
+	for index := 0; index < len(cs); index++ {
+		c := cs[index]
 		if ctx.Err() != nil {
-			break // the wait is spent: the rest are not asked, nor rested
+			if err != nil {
+				return verdict{}, err
+			}
+			return verdict{}, ctx.Err()
 		}
 		if v, err = s.askJev(ctx, wait, c.p, c.model, intents, prev, effort, text); err == nil {
 			servedCandidate(c, 0)
 			return v, nil
+		}
+		if terminalExtensionError(err) || errors.Is(err, requestpolicy.ErrDenied) {
+			return verdict{}, err
+		}
+		var policyRefusal *decidePolicyRefused
+		if errors.As(err, &policyRefusal) {
+			if ctx.Err() != nil {
+				return verdict{}, err
+			}
+			operation := ctx
+			if policyRefusal.calibration {
+				operation = calibration
+			}
+			operation = requestpolicy.WithSelection(operation, c.restID(), c.p.OwnModelID(c.model))
+			next := nextPolicyCandidate(operation, cs, index+1)
+			decision := resolveFinalPolicy(operation, c, &policyRefusal.refusal, next >= 0, nil)
+			switch decision.Action {
+			case requestpolicy.ActionWait:
+				index--
+			case requestpolicy.ActionNext:
+				index = next - 1
+			default:
+				return verdict{}, err
+			}
+			continue
 		}
 		var refused decideRefused
 		var answer answerError

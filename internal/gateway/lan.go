@@ -834,7 +834,9 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 	if ok {
 		r = r.WithContext(access.WithIdentity(r.Context(), who))
 		// the names the key gives models, before any route reads one
-		r = aliasRequest(r, who)
+		if !registeredProtocolRequest(r) {
+			r = aliasRequest(r, who)
+		}
 	}
 	r = keepCodexListAuth(r, ok)
 	r.Header = r.Header.Clone()

@@ -16,6 +16,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const reader = require("./reader.cjs");
+const { openUsageRequests } = require("./usage-navigation.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = Date.now();
@@ -78,8 +79,7 @@ async function open(browser, lang, width, sent, storage) {
   p.on("pageerror", (e) => errors.push(e.message));
   await p.route("**/*", server(lang, sent));
   await p.goto("http://magpie.test/");
-  await p.locator('[data-view="usage"]').first().click();
-  await p.locator(":is(#usageTab .opt, .nav-s):visible").nth(1).click();
+  await openUsageRequests(p);
   await p.locator("#ledWrap .led tbody tr.led-row").first().waitFor();
   await p.locator("#ledKpi .blk").first().waitFor();
   return { ctx, p, errors };

@@ -568,7 +568,7 @@ func turnBody(q map[string]json.RawMessage, input []json.RawMessage) ([]byte, er
 		}
 		dst = append(dst, ':')
 		if k != "input" {
-			if dst, ok = appendRawJSON(dst, q[k], true); !ok {
+			if dst, ok = appendRawJSON(dst, q[k], true, 1); !ok {
 				break
 			}
 			continue
@@ -582,7 +582,7 @@ func turnBody(q map[string]json.RawMessage, input []json.RawMessage) ([]byte, er
 			if j > 0 {
 				dst = append(dst, ',')
 			}
-			if dst, ok = appendRawJSON(dst, raw, true); !ok {
+			if dst, ok = appendRawJSON(dst, raw, true, 2); !ok {
 				break
 			}
 		}

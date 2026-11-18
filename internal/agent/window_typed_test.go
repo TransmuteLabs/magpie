@@ -23,8 +23,8 @@ import (
 // Settings (Compact at) still comes before a typed window.
 func TestTypedWindowReachesCodexAndClaudeCode(t *testing.T) {
 	home := syncHome(t)
-	catalog.Changed = SyncCatalog
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(SyncCatalog)
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	must := func(err error) {
 		t.Helper()
 		if err != nil {

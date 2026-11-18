@@ -26,12 +26,12 @@ func StatuslineText(model string, qs []Quota, only []string, now time.Time) stri
 	return strings.Join(parts, " | ")
 }
 
-// StatuslineCards are the subscriptions and plans with windows to show:
+// StatuslineCards are subscriptions and plans with windows or a read status:
 // those named, else those that answered through magpie lately, else all.
 func StatuslineCards(qs []Quota, only []string) []Quota {
 	var withWindows, served []Quota
 	for _, q := range qs {
-		if q.Kind == "balance" || len(q.Windows) == 0 {
+		if q.Kind == "balance" || len(q.Windows) == 0 && q.Error == "" && q.AsOf == nil && !q.ReadDeferred {
 			continue
 		}
 		if len(only) > 0 && !StatuslineMatches(q, only) {
@@ -73,6 +73,15 @@ func StatuslineCard(q Quota, now time.Time) string {
 	}
 	short := strings.NewReplacer(" hours", "h", " hour", "h", " days", "d", " day", "d", " · ", " ")
 	cells := []string{name}
+	if q.Error != "" {
+		cells = append(cells, "[error: "+q.Error+"]")
+	}
+	if q.AsOf != nil {
+		cells = append(cells, "[as of "+q.AsOf.Local().Format("2006-01-02 15:04")+"]")
+	}
+	if q.ReadDeferred {
+		cells = append(cells, "[not refreshed]")
+	}
 	for _, w := range q.Windows {
 		n := short.Replace(w.Name)
 		switch {
@@ -84,7 +93,7 @@ func StatuslineCard(q Quota, now time.Time) string {
 		case w.Text:
 			// a row of text alone (a plugin's balance) has no share
 			cells = append(cells, n+" "+w.Display)
-		case w.ResetsAt != nil && !w.ResetsAt.After(now):
+		case q.AsOf == nil && !q.ReadDeferred && w.ResetsAt != nil && !w.ResetsAt.After(now):
 			// its window has started again since it was read
 			cells = append(cells, n+" 0%")
 		default:

@@ -241,7 +241,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           }, true);
         });
         await instrument();
-        const done = new Set(), missed = [];
+        const done = new Set();
         // inside: the boxes' container; in an editor the option is brought
         // into sight there, where the app lets a scroll stand
         const sweep = async (tab, inside = `#setPage-${tab}`) => {
@@ -261,10 +261,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             if (inside.startsWith(".editor")) await inEditor(page, opts.nth(i));
             await page.mouse.move(...mid(inside.startsWith(".editor") ? await opts.nth(i).boundingBox() : await reveal(page, opts.nth(i))));
             await page.evaluate(() => { optClicks.length = 0; });
-            await page.mouse.down();
-            const swapped = await box.evaluate((x) => { renderSettings(); return !x.isConnected; });
-            if (!swapped) { await page.mouse.up(); missed.push(place); continue; }
-            await page.mouse.up();
+            const before = await box.elementHandle();
+            const label = `${tab}: ${place} option ${i}`, failures = [];
+            assert.ok(before, `${label}: the control is missing before press`);
+            try {
+              await page.mouse.down();
+              await before.evaluate((node, label) => {
+                if (!node.isConnected) throw new Error(`${label}: the pressed control detached before redraw`);
+                renderSettings();
+              }, label);
+              await assert.doesNotReject(
+                page.waitForFunction((node) => !node.isConnected, before, { timeout: 5000 }),
+                `${label} was never replaced`,
+              );
+            } catch (error) { failures.push(error); }
+            const cleanup = await Promise.allSettled([page.mouse.up(), before.dispose()]);
+            for (const result of cleanup) if (result.status === "rejected") failures.push(result.reason);
+            if (failures.length === 1) throw failures[0];
+            if (failures.length > 1) throw new AggregateError(failures, `${label}: redraw and cleanup failed`);
             await settle(page);
             assert.deepEqual(await page.evaluate(() => optClicks), [{ place, i, live: true }], `${tab}: ${place} option ${i}`);
           }
@@ -287,7 +301,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await instrument();
           await sweep(id, ".editor .prov-prefs");
         }
-        assert.deepEqual(missed, [], "controls the redraw left in place");
         // Theme, Language, Text size, … each warm-up's and check-in's, Proxy, the local network's, Privacy's, OTel's, Sync's, About's
         assert(done.size >= 49, `only ${done.size} controls: ${[...done].join(", ")}`);
         assert.deepEqual(posted, [], "a stopped click saved something");

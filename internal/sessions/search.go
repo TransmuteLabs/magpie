@@ -222,9 +222,28 @@ func equalFoldASCII(a, lower []byte) bool {
 // SearchSession finds needle (from NeedleOf) in what a session said, read
 // from its agent's own file; ErrNoTranscript for an agent whose
 // conversations aren't read.
-func SearchSession(ctx context.Context, s Session, needle string) (Hit, bool, error) {
-	if !Reads(s.Agent) {
-		return Hit{}, false, ErrNotRead
+func SearchSession(ctx context.Context, s Session, needle string) (hit Hit, found bool, err error) {
+	owner, err := selectSessionHistoryOwner(ctx, s)
+	if err != nil {
+		return Hit{}, false, err
+	}
+	defer func() {
+		if changed := owner.check(ctx); changed != nil {
+			hit, found, err = Hit{}, false, changed
+		}
+	}()
+	if owner.mode == historyDelegated {
+		transcript, err := extensionSourceTranscript(ctx, owner.session.source)
+		if err != nil {
+			return Hit{}, false, err
+		}
+		match := matcher{needle: needle}
+		for _, part := range transcript.Parts {
+			if !match.add(part) {
+				break
+			}
+		}
+		return match.hit, match.found, ctx.Err()
 	}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return Hit{}, false, ErrNoTranscript
@@ -251,7 +270,7 @@ func SearchSession(ctx context.Context, s Session, needle string) (Hit, bool, er
 		}
 	}
 	m := matcher{needle: needle}
-	err := readTranscriptOf(s, keep, func(_ bool, p Part) bool {
+	err = readHistoryTranscript(ctx, owner, keep, func(_ bool, p Part) bool {
 		return ctx.Err() == nil && m.add(p)
 	})
 	if err == nil {

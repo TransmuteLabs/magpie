@@ -100,7 +100,13 @@ func TestSingleProviderWaitsOutAFrequencyLimit(t *testing.T) {
 		{code: 429, body: `{"type":"error","error":{"type":"rate_limit_error","message":"` + said + `"}}`},
 		{code: 200, body: anthropicAnswer},
 	}}
-	s := busyProvider(t, u)
+	fresh(t)
+	upstream := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", "m", u))
+	t.Cleanup(upstream.Close)
+	if err := provider.Save(provider.Provider{ID: "a", Name: "A", Key: "k", Models: []string{"m"}, Anthropic: upstream.URL}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
 	scaled(t, 5*time.Second)
 	gw := httptest.NewServer(s.Handler())
 	t.Cleanup(gw.Close)
@@ -119,10 +125,12 @@ func TestSingleProviderWaitsOutAFrequencyLimit(t *testing.T) {
 			break
 		}
 	}
+	took := time.Since(start)
+	probeInferenceFixture(t, upstream.URL, "/v1/models")
 	if res.StatusCode != 200 || !strings.Contains(body.String(), "message_stop") || u.asked() != 2 {
 		t.Fatalf("agent got %d %q, upstream asked %d times; want the answer on the second ask; %+v", res.StatusCode, body.String(), u.asked(), lastRoute(s).Tries)
 	}
-	if took := time.Since(start); took < 2*time.Second {
+	if took < 2*time.Second {
 		t.Errorf("asked again after %v, before the 2s it said", took)
 	}
 	if r := lastRoute(s); len(r.Tries) != 2 || r.Tries[0].Fail != failRate || r.Tries[0].Again < 1900 {

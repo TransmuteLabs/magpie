@@ -9,7 +9,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -114,19 +114,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // and back until the row is clear of the header, as a reader would
         // before clicking it: a button partly under the header is scrolled
         // into view by the browser as it takes focus
-        for (let i = 0; i < 40; i++) {
-          const box = await segs.nth(1).boundingBox();
-          if (box && box.y >= 60) break;
-          await page.mouse.wheel(0, -60);
-          await page.waitForTimeout(30);
-        }
+        await reach(page, segs.nth(1));
         const before = await view(page);
         assert(before > 0, "the settings list must be long enough to scroll");
         const tall = () => page.locator("#view-settings").evaluate((v) => v.getBoundingClientRect().height);
         const height = await tall();
-        // clicked where it is, as the reader's mouse does: in zh the wheel
-        // leaves the row a fraction of a pixel under the header, and
-        // Playwright's own scroll into view before its click moved the page
         const seg = await segs.nth(1).boundingBox();
         await page.mouse.click(seg.x + seg.width / 2, seg.y + seg.height / 2);
         await page.locator('#currencySegs .opt.on', { hasText: cny }).waitFor();

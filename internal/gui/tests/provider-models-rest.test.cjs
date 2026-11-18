@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { showOtherModels } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -68,6 +69,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // all ten picked are drawn, the three past 80 too; one unpicked is left out
       assert.deepEqual(await names(".mchip.on"), chosen);
+      assert.equal(await chips.locator(".mchip").count(), chosen.length);
+      await showOtherModels(page, editor, chosen);
       assert.equal(await chips.locator(".mchip").count(), 83);
       const more = chips.getByRole("button", { name: rest[lang], exact: true });
       await more.waitFor();

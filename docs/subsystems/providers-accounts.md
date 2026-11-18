@@ -1,10 +1,14 @@
 # Providers and accounts
 
-The gateway can send a request to three kinds of upstream:
+The gateway can send a request to these kinds of upstream:
 
 - A **provider** in `providers.json`: an endpoint with one or more API keys. Google Vertex AI's is signed with the user's Google credentials, or with one API key (express mode).
 - A **subscription account**: an agent's own sign-in (Codex, Claude Code, Copilot and others) that magpie reads from the agent's store, or an account signed in from magpie.
 - A **plugin's account**: a subscription served by an OpenCode plugin.
+- An **external extension provider**: an installed executable or Bun module,
+  with an explicitly scoped account or public access. Its catalog, normalized
+  transport and authentication boundary are described in
+  [External provider adapters](extension-providers.md).
 
 Package `internal/provider` holds all three, the routing groups built over
 them, and what is left of each one's allowance.
@@ -12,6 +16,13 @@ them, and what is left of each one's allowance.
 Plugin ownership of the deprecated built-in subscriptions is in
 [Provider and plugin ownership](provider-plugins.md). How the gateway orders
 keys and accounts per request is in [Gateway routing and fallback](gateway-routing.md).
+
+Catalog change notifications install their callback with `catalog.SetChanged`
+and read it through `catalog.ChangedHook`. `catalog.Touched` takes one callback
+snapshot after the provider's `Forget` hook and invokes it without holding
+synchronization. Replacing or clearing the callback is safe while a background
+plugin announces a catalog change. An invocation already holding an older
+snapshot may finish; installing another callback does not wait for it.
 
 ## Responsibilities and sources of truth
 
@@ -523,6 +534,36 @@ and `TestHistoricalWindowHoldsUsesEachWindowsOwnReading`.
   (the Library's MCP servers) don't take the lock yet (#4747).
   `TestClaudeSwitchWaitsForClaudeCodesRefresh`,
   `TestClaudeSwitchStaleAndHeldLocks`.
+
+### Unsaved replacement previews
+
+The saved-key replacement field can supply an unsaved value to a preview.
+`providerRoutes` in [`providers.go`](../../internal/gui/providers.go) admits
+`typedKeyRef` only for `models`, `test`, `detect`, `list` and `peekcert`, with
+the existing typed form. It validates the saved provider, enabled slot and
+explicit account before transport. An unknown, disabled, empty or duplicate
+replacement and a signed-in account provider are refused. A request naming a
+different explicit account cannot carry the edited slot's identity.
+
+`PreviewKey` in [`keys.go`](../../internal/provider/keys.go) uses the existing
+deep provider clone and key-replacement transform without saving credentials.
+The private copy retains the saved provider's per-key settings. A request-local
+context alias maps the temporary credential to its original saved fingerprint;
+`fetchPerKey` in [`models.go`](../../internal/provider/models.go) uses it before
+old-history lookup, aggregate union and the first catalogue publication.
+Failed-side history and the catalogue retain the original slot, without a
+persistent alias field or repair after a temporary fingerprint was written.
+Normal model-list catalogue and pick publication still occurs.
+
+An explicit preview on account B while editing A uses B's saved credential and
+omits A's replacement value and `typedKeyRef`. The GUI's transient field and
+commit ownership are described in [GUI app shell](gui-shell.md#provider-editor-preview-ownership).
+`TestPreviewKeyCopyOwnsSlotAndSettings`, `TestPreviewKeyRoutesInvalidEnvelope`,
+`TestPreviewKeySecondaryUnionKeepsOriginalFirstWriteMarks` and
+`TestPreviewKeyAggregateFailureKeepsOriginalSlots` cover private-copy admission,
+first publication and failed-side retention. `TestPreviewKeyRotatedSaveUsesActualSlotIdentity`
+covers the actual replacement reply and subsequent persisted picks and settings.
+
 
 ## Verification
 

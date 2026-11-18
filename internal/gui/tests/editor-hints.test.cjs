@@ -146,8 +146,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // a key reaching Certificate's box shows its card
       const box = cert.locator("input").first();
       await box.focus();
-      await page.keyboard.press("Shift+Tab");
-      await page.keyboard.press("Tab");
+      const tab = engine === "webkit" ? "Alt+Tab" : "Tab";
+      await page.keyboard.press("Shift+" + tab);
+      await page.keyboard.press(tab);
       assert.equal(await cert.evaluate((r) => r.contains(document.activeElement)), true, "Tab didn't come back to Certificate's box");
       await card.waitFor();
       assert.equal((await card.textContent()).includes(w[strings[3]]), true, "focus showed another field's card");

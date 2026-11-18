@@ -21,8 +21,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
-const { webkit } = require("playwright");
-const { babelParse } = require("playwright/lib/transform/babelBundle");
+const { chromium, webkit } = require("playwright");
+const { babelParse, traverse } = require("playwright/lib/transform/babelBundle");
 
 const assets = path.resolve(__dirname, "../assets");
 // the page's scripts, the built-in plugins' under plugins/ among them, as
@@ -91,12 +91,90 @@ const BUILTINS = [
   { name: "Object.groupBy/Map.groupBy", re: /\b(Object|Map)\.groupBy\(/, since: "17.4" },
   { name: "Promise.withResolvers", re: /\bPromise\.withResolvers\(/, since: "17.4" },
   { name: "Iterator helpers", re: /\bIterator\.from\(|\.(keys|values|entries)\(\)\.(map|filter|take|drop|toArray|reduce|some|every|find|forEach|flatMap)\(/, since: "18.4" },
-  { name: "checkVisibility", re: /\.checkVisibility\(/, since: "17.4" },
   { name: "popover", re: /\.(showPopover|hidePopover|togglePopover)\(|\.popover\s*=/, since: "17" },
   { name: "RegExp.escape", re: /\bRegExp\.escape\(/, since: "18.2" },
   { name: "Promise.try", re: /\bPromise\.try\(/, since: "18.2" },
 ];
 const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\"'`])\/\/.*$/gm, "$1");
+
+function missingVisibility(ast, file) {
+  const bad = [];
+  traverse(ast, {
+    "CallExpression|OptionalCallExpression"(call) {
+      const callee = call.node.callee;
+      if (!["MemberExpression", "OptionalMemberExpression"].includes(callee.type)) return;
+      const name = callee.computed ? callee.property.value : callee.property.name;
+      if (name !== "checkVisibility") return;
+      if (call.node.optional === true) return;
+      const receiver = callee.object;
+      const binding = receiver.type === "Identifier" ? call.scope.getBinding(receiver.name) : undefined;
+      const owner = binding?.scope?.path;
+      if (file === "extensionwindows.js" && binding?.kind === "param" && binding.constant &&
+          owner.isFunctionDeclaration() && owner.parentPath.isExportNamedDeclaration() &&
+          ["answerPluginPage", "checkPluginReply"].includes(owner.node.id.name) &&
+          binding.identifier === owner.node.params[0]) return;
+      bad.push(call.node.loc.start.line);
+    },
+  });
+  return bad;
+}
+
+function loadedScripts(entries, sources) {
+  const loaded = new Set();
+  const pending = entries.filter((file) => sources.has(file));
+  while (pending.length) {
+    const file = pending.pop();
+    if (loaded.has(file)) continue;
+    loaded.add(file);
+    const follow = (value, importer = file) => {
+      if (!value?.startsWith(".")) return;
+      const dependency = path.posix.normalize(path.posix.join(path.posix.dirname(importer), value.split(/[?#]/, 1)[0]));
+      assert.ok(sources.has(dependency), `${file} imports missing ${dependency}`);
+      pending.push(dependency);
+    };
+    traverse(babelParse(sources.get(file), file, false), {
+      ImportDeclaration(node) { follow(node.node.source.value); },
+      ExportNamedDeclaration(node) { follow(node.node.source?.value); },
+      ExportAllDeclaration(node) { follow(node.node.source.value); },
+      CallExpression(node) {
+        if (node.node.callee.type !== "Import") return;
+        const argument = node.node.arguments[0];
+        if (argument.type === "StringLiteral") return follow(argument.value);
+        if (argument.type === "TemplateLiteral") {
+          const prefix = argument.quasis[0].value.cooked;
+          assert.ok(/^\.\.?\/[^?#]+\?/.test(prefix), `${file}: unresolved lazy import template path`);
+          return follow(prefix);
+        }
+        if (argument.type === "MemberExpression" && argument.property.name === "href" &&
+            argument.object.type === "NewExpression" && argument.object.callee.name === "URL") {
+          const [relative, base] = argument.object.arguments;
+          assert.ok(relative.type === "StringLiteral" && !relative.value.startsWith("/") &&
+            !relative.value.includes(":") && base.type === "MemberExpression" &&
+            base.object.name === "document" && base.property.name === "baseURI", `${file}: unresolved lazy import URL`);
+          return follow("./" + relative.value, "index.html");
+        }
+        const binding = argument.type === "Identifier" && node.scope.getBinding(argument.name);
+        assert.ok(binding?.kind === "param" && binding.constant, `${file}: unresolved lazy import`);
+        const owner = binding.scope.path;
+        assert.ok(owner.isFunctionDeclaration(), `${file}: unresolved lazy import owner`);
+        const index = owner.node.params.findIndex((param) => (param.type === "AssignmentPattern" ? param.left : param) === binding.identifier);
+        const parameter = owner.node.params[index];
+        if (parameter.type === "AssignmentPattern") {
+          assert.equal(parameter.right.type, "StringLiteral");
+          follow(parameter.right.value);
+        }
+        for (const reference of owner.scope.parent.getBinding(owner.node.id.name).referencePaths) {
+          assert.ok(reference.parentPath.isCallExpression() && reference.parentPath.node.callee === reference.node, `${file}: unresolved lazy import caller`);
+          const supplied = reference.parentPath.node.arguments[index];
+          if (!supplied) continue;
+          assert.equal(supplied.type, "StringLiteral", `${file}: unresolved lazy import argument`);
+          follow(supplied.value);
+        }
+      },
+    });
+  }
+  return loaded;
+}
 
 test("every script parses with no syntax newer than Safari 15.0", async () => {
   const bad = [];
@@ -123,13 +201,76 @@ test("no built-in newer than Safari 15.0 unless compat.js fills it in", async ()
   const bad = [];
   for (const f of await scripts()) {
     if (f === "compat.js") continue;
-    const lines = stripComments(await read(f)).split("\n");
+    const source = await read(f);
+    const lines = stripComments(source).split("\n");
+    for (const line of missingVisibility(babelParse(source, f, false), f)) bad.push(`${f}:${line} Element.checkVisibility (Safari 17.4)`);
     for (const b of BUILTINS) {
       if (b.fill && compat.includes(`if (!${b.fill})`)) continue;
       lines.forEach((l, i) => { if (b.re.test(l)) bad.push(`${f}:${i + 1} ${b.name} (Safari ${b.since}): ${l.trim().slice(0, 100)}`); });
     }
   }
   assert.deepEqual(bad, []);
+});
+
+test("visibility checks distinguish renderer records from missing DOM methods", async () => {
+  const missing = (source, file = "extensionwindows.js") => missingVisibility(babelParse(source, file, false), file);
+  assert.deepEqual(missing("export function checkPluginReply(record) { record.checkVisibility(); }"), []);
+  for (const source of [
+    "export function checkPluginReply(record) { record.frame.checkVisibility(); }",
+    "export function checkPluginReply(record) { record.checkVisibility(); document.body.checkVisibility(); }",
+    "export function checkPluginReply(record) { { const record = document.body; record.checkVisibility(); } }",
+    "export function checkPluginReply(record) { record = document.body; record.checkVisibility(); }",
+    'document.body["checkVisibility"]();',
+    "document.body?.checkVisibility();",
+  ]) assert.equal(missing(source).length, 1, source);
+  assert.deepEqual(missing("document.body?.checkVisibility?.();"), [], "an optional method call tests availability before calling");
+  assert.equal(missing("export function checkPluginReply(record) { record.checkVisibility(); }", "another.js").length, 1);
+  let assignments = 0;
+  traverse(babelParse(await read("pluginpages.js"), "pluginpages.js", false), {
+    AssignmentExpression(node) {
+      const { left, right } = node.node;
+      if (left.type !== "MemberExpression" || left.property.name !== "checkVisibility") return;
+      assert.equal(left.object.type, "Identifier");
+      assert.equal(right.type, "ArrowFunctionExpression");
+      assert.equal(right.body.type, "CallExpression");
+      assert.equal(right.body.callee.name, "refreshVisibility");
+      assert.equal(right.body.arguments[0].name, left.object.name);
+      const init = node.scope.getBinding(left.object.name).path.node.init;
+      assert.ok(init.type === "ObjectExpression" || (init.type === "CallExpression" && init.callee.object?.name === "pages" && init.callee.property.name === "get"));
+      assignments++;
+    },
+  });
+  assert.equal(assignments, 2, "page and panel records receive the renderer-owned helper");
+  const bridge = await import("data:text/javascript," + encodeURIComponent(await read("extensionwindows.js")));
+  const record = { entry: {}, checkVisibility: () => true, visibilityVersion: 7 };
+  const result = await bridge.answerPluginPage(record, { method: "hello" }, () => ({}), () => "");
+  assert.equal(result.visible, true);
+  bridge.checkPluginReply(record, "hello", 7, result);
+  record.checkVisibility = () => false;
+  assert.throws(() => bridge.checkPluginReply(record, "history.read", 7, {}), /History window changed/);
+});
+
+test("lazy inventory follows reachable imports and rejects missing assets", () => {
+  const sources = new Map([
+    ["main.js", 'import("./lazy.js")'],
+    ["lazy.js", 'export { value } from "./nested.js"'],
+    ["nested.js", "export const value = 1;"],
+    ["orphan.js", "document.body.checkVisibility();"],
+  ]);
+  assert.deepEqual([...loadedScripts(["main.js"], sources)].sort(), ["lazy.js", "main.js", "nested.js"]);
+  sources.delete("nested.js");
+  assert.throws(() => loadedScripts(["main.js"], sources), /lazy.js imports missing nested.js/);
+  sources.set("nested.js", "export const value = 1;");
+  sources.set("main.js", 'async function load(file = "./lazy.js") { await import(file); } load("./nested.js");');
+  assert.deepEqual([...loadedScripts(["main.js"], sources)].sort(), ["lazy.js", "main.js", "nested.js"]);
+  sources.set("main.js", 'import(new URL("lazy.js", document.baseURI).href);');
+  assert.deepEqual([...loadedScripts(["main.js"], sources)].sort(), ["lazy.js", "main.js", "nested.js"]);
+  sources.set("main.js", 'import("./lazy.js?retry=1");');
+  assert.deepEqual([...loadedScripts(["main.js"], sources)].sort(), ["lazy.js", "main.js", "nested.js"]);
+  sources.set("main.js", 'import(`./lazy.js?retry=${attempt}`);');
+  assert.deepEqual([...loadedScripts(["main.js"], sources)].sort(), ["lazy.js", "main.js", "nested.js"]);
+  sources.set("main.js", 'import(`./${name}.js?retry=1`);');
+  assert.throws(() => loadedScripts(["main.js"], sources), /unresolved lazy import template path/);
 });
 
 test("compat.js is the first of the page's own scripts", async () => {
@@ -141,60 +282,11 @@ test("compat.js is the first of the page's own scripts", async () => {
   const all = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map((m) => m[1]);
   const srcs = all.filter((s) => s !== "boot.js" && s !== "theme.js" && s !== "omarchy.js");
   assert.equal(srcs[0], "compat.js", "loaded first: " + srcs.join(", "));
-  // webfonts.js is imported by app.js in a browser tab only, cfgblocked.js
-  // when magpie can't write its folder, signsheets.js when a sign-in asks a
-  // value first, ruleedit.js on a masking rule's Edit, ratewindows.js when
-  // a provider editor draws its rate windows, traywindows.js when the menu
-  // bar shows a card, autoresetown.js when Settings draws Codex's auto-use
-  // rows, registry.js when Plugins draws its npm registry, navlamp.js when
-  // the pointer comes over the sidebar, whatsnew.js when release notes
-  // open, claudemode.js when a Claude provider's editor opens, ctxtext.js
-  // when a context window part is opened, resetask.js when a Codex reset's
-  // Use is pressed, quotaall.js when a provider has two accounts, quotatable.js when the Usage page's table is picked,
-  // quitask.js when a Quit asks first, proxies.js when Settings draws its saved proxies, checkinnow.js when Settings' Check
-  // in now for one account is pressed, autobackup.js when Settings draws
-  // Sync, scrollends.js on the window's first scroll, profilerename.js
-  // when a saved profile's Rename is pressed, keyspend.js when the
-  // provider editor draws a key's row, syncfiles.js when Sync's server form,
-  // Export or Import opens, agentcompact.js when an agent sheet holds Long
-  // conversations, balfound.js when the editor draws a relay's balance
-  // with no Balance URL, passerrors.js when it draws a key provider's
-  // Errors, tlscerts.js when it draws the certificate rows,
-  // keybalance.js when it draws a key whose vendor tells no
-  // balance, modellimits.js when it draws a model's row, notices.js when
-  // About's Open-source licenses opens, videogen.js when Settings draws
-  // Image generation, provlinks.js when Settings' search first wants its
-  // provider links, pageshare.js when a plugin's page shares a picture,
-  // panelfirst.js when the panel's Usage tab's account count is pressed,
-  // panelarrange.js when its Allowances tab's Arrange is, modelfind.js
-  // when Model settings draws many models, agentsmanager.js when the
-  // Agents page's Manage is pressed, agentsuffix.js when an agent's Details
-  // open, phonetabs.js when magpie web is laid out for a phone,
-  // pluginmd.js (a README's renderer) once plugins.js has run;
-  // plugincounts.js (Discover's counts) when the Plugins page loads;
-  // navicons.js (the sidebar lists' marks) with the first list drawn;
-  // autoswitchtip.js when a provider's accounts draw their switch;
-  // codexprojects.js when the open Codex app shows fewer projects;
-  // pipecheck.js when Settings draws Models; relaycheck.js on Usage › Model
-  // speed's first Check… press;
-  // addfloat.js when the Providers page's add sheet first opens;
-  // plugingrid.js and plugininstalled.js when Plugins first draws;
-  // rotfig.js when a routing's In turn is first shown;
-  // ompadvisor.js when an omp's settings first show;
-  // kimisub.js when a Kimi Code row's Subagents line first shows;
-  // agentspeed.js when an agent row on a fast model draws its Speed;
-  // claudemagpie.js when Claude Desktop's twin button or Advanced fold first shows;
-  // keyrates.js when a provider with two or more keys opens;
-  // maximages.js when the provider editor draws Max output;
-  // appearance.js when Settings draws General or the look changes;
-  // navorder.js once a page order is kept, or Settings › Sidebar pages draws;
-  // the checks above
-  // still read them. A file some script imports (import("./x.js")) is
-  // loaded on demand too: headerpresets.js, navpages.js and pasteread.js
-  // were each left out of this list and turned it red on main (#6030)
-  const lazy = new Set();
-  for (const f of await scripts()) for (const m of (await read(f)).matchAll(/import\(\s*["']\.\/([\w.-]+\.js)["']\s*\)/g)) lazy.add(m[1]);
-  for (const f of await scripts()) if (!lazy.has(f) && !["webfonts.js", "cfgblocked.js", "signsheets.js", "ruleedit.js", "ratewindows.js", "traywindows.js", "autoresetown.js", "registry.js", "navlamp.js", "whatsnew.js", "claudemode.js", "ctxtext.js", "resetask.js", "quotaall.js", "quotatable.js", "quitask.js", "checkinnow.js", "proxies.js", "autobackup.js", "scrollends.js", "profilerename.js", "settingshints.js", "keyspend.js", "syncfiles.js", "agentcompact.js", "agentwindow.js", "balfound.js", "passerrors.js", "tlscerts.js", "keybalance.js", "modellimits.js", "notices.js", "videogen.js", "provlinks.js", "setfeats.js", "pageshare.js", "panelfirst.js", "panelarrange.js", "modelfind.js", "agentsmanager.js", "agentsuffix.js", "phonetabs.js", "pluginmd.js", "bark.js", "acctexport.js", "plugincounts.js", "navicons.js", "autoswitchtip.js", "codexprojects.js", "pipecheck.js", "relaycheck.js", "addfloat.js", "plugingrid.js", "plugininstalled.js", "rotfig.js", "ompadvisor.js", "kimisub.js", "agentspeed.js", "claudemagpie.js", "keyrates.js", "maximages.js", "qianwenplan.js", "qianfanplan.js", "agymove.js", "updatetrust.js", "currencyprefs.js", "appearance.js", "mirroredit.js", "navorder.js", "instancename.js"].includes(f)) assert(all.includes(f), f + " is not loaded by index.html, and no script imports it");
+  assert(all.includes("pluginpages.js"), "the SDK bridge loader is in index.html");
+  assert.match(stripComments(await read("pluginpages.js")), /\bimport\(\s*["']\.\/extensionwindows\.js["']\s*\)/, "pluginpages.js imports the SDK bridge");
+  const sources = new Map(await Promise.all((await scripts()).map(async (file) => [file, await read(file)])));
+  const loaded = loadedScripts(all, sources);
+  for (const file of sources.keys()) assert.ok(loaded.has(file), file + " is not loaded by index.html or a reachable lazy import");
 });
 
 test("the styles hold up in Safari 15.0", async () => {
@@ -240,6 +332,7 @@ test("the styles hold up in Safari 15.0", async () => {
 const TAKEN = `
   for (const k of ["at", "findLast", "findLastIndex", "toSorted", "toReversed", "toSpliced", "with"]) delete Array.prototype[k];
   delete Object.hasOwn; delete window.structuredClone; delete Promise.withResolvers; delete Object.groupBy;
+  delete Element.prototype.checkVisibility;
 `;
 const state = {
   agents: [{ id: "codex", name: "Codex", path: "/test/config.toml", fields: [{ key: "model", label: "model", value: "gpt-6", options: [{ value: "gpt-6", label: "gpt-6" }] }] }],
@@ -272,8 +365,9 @@ async function serve(route) {
   try { await route.fulfill({ body: await fs.readFile(file), contentType }); } catch { await route.fulfill({ status: 404 }); }
 }
 
-test("with Safari 15.0's built-ins, the panel and the window draw every page", async () => {
-  const browser = await webkit.launch();
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+test(`${engine}: with Safari 15.0's built-ins, the panel and the window draw every page`, async () => {
+  const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
   try {
     for (const mode of ["panel", "window"]) {
       const page = await browser.newPage({ viewport: mode === "panel" ? { width: 380, height: 640 } : { width: 1100, height: 760 } });
@@ -310,3 +404,4 @@ test("with Safari 15.0's built-ins, the panel and the window draw every page", a
     await browser.close();
   }
 });
+}

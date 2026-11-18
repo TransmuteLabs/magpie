@@ -1001,6 +1001,9 @@ func firstOf(ss ...string) string {
 // request log here, whichever way it goes: a plugin's fetch and a client
 // of the account's own pass no transport that would.
 func (p Provider) Do(client *http.Client, req *http.Request) (*http.Response, error) {
+	if err := p.CheckExecutor(req.Context()); err != nil {
+		return nil, err
+	}
 	if ctx := req.Context(); probelog.Pending(ctx) {
 		start := time.Now()
 		req = req.WithContext(probelog.Taken(ctx))

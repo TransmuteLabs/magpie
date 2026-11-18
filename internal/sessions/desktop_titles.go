@@ -46,10 +46,14 @@ var desktopTitlesHeld = time.Second
 // even when the CLI transcript is absent. Only IDs explicitly recorded there
 // are named; prior CLI runs keep their own usage identity and share the name.
 func DesktopTitles(ids []string) map[string]string {
-	out := map[string]string{}
 	if len(ids) == 0 {
-		return out
+		return map[string]string{}
 	}
+	return publishNativeTitles("claude-desktop", func() map[string]string { return readDesktopTitles(ids) })
+}
+
+func readDesktopTitles(ids []string) map[string]string {
+	out := map[string]string{}
 	desktopTitles.Lock()
 	defer desktopTitles.Unlock()
 	if desktopTitles.names == nil || time.Since(desktopTitles.at) >= desktopTitlesHeld {

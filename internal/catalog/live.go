@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
@@ -518,23 +519,37 @@ func liveSince(provider string, models []Model, now time.Time) map[string]time.T
 	return out
 }
 
-// Changed, when set, is told that the models magpie offers may be others
-// now: a provider added, edited or removed, a vendor's list fetched anew.
-// The agent package sets it, to bring the model lists agents keep in files
-// of their own up to date.
-var Changed func()
+var changed atomic.Pointer[func()]
+
+// SetChanged installs the callback for changes to the offered model list.
+// The agent package uses it to keep agents' model lists current.
+func SetChanged(hook func()) {
+	if hook == nil {
+		changed.Store(nil)
+		return
+	}
+	changed.Store(&hook)
+}
+
+// ChangedHook returns the current callback as one notification snapshot.
+func ChangedHook() func() {
+	if hook := changed.Load(); hook != nil {
+		return *hook
+	}
+	return nil
+}
 
 // Forget, when set, is told so first: the provider package drops the
 // catalog a request holds (provider.Hold).
 var Forget func()
 
-// Touched tells Forget and Changed, if set.
+// Touched tells Forget and the change hook, if set.
 func Touched() {
 	if Forget != nil {
 		Forget()
 	}
-	if Changed != nil {
-		Changed()
+	if hook := ChangedHook(); hook != nil {
+		hook()
 	}
 }
 

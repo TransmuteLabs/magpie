@@ -18,6 +18,7 @@ import (
 // leave it.
 func TestTuneKeepsWhatItPutIn(t *testing.T) {
 	sandboxHome(t)
+	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")
 	home := t.TempDir()
 	kept := func(cs []sessions.Call) []tuneAdvice {
 		t.Helper()

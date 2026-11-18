@@ -16,7 +16,7 @@ func TestContextCapHoldsEveryModelButTheOnesTheUserSet(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	long := catalog.Model{ID: "long", Context: 1_000_000}
 	short := catalog.Model{ID: "short", Context: 128_000}
 	none := catalog.Model{ID: "no-window-anywhere-xyz"}
@@ -72,7 +72,7 @@ func TestContextCapAllHoldsTheUsersOwnWindowsToo(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	catalog.Changed = nil
+	catalog.SetChanged(nil)
 	long := catalog.Model{ID: "long", Context: 1_000_000}
 	own := Provider{ID: "a", Contexts: map[string]int{"long": 500_000}}
 	wild := Provider{ID: "a", Contexts: map[string]int{"*": 400_000}}

@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { closeWithScreenshots } = require("./fixtures/browser-diagnostics.cjs");
 const { openPart, reach } = require("./reader.cjs"); // reach: wheeled to as a reader would, rows taller since their lines wrap whole (arculongus on Discord); a Playwright scroll is undone
 
 const assets = path.resolve(__dirname, "../assets");
@@ -80,13 +81,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const pages = [];
-    t.after(async () => {
-      if (process.env.ARTIFACT_DIR) {
-        await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-        for (const [i, p] of pages.entries()) await p.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-tray-cost-${i}.png`) });
-      }
-      await browser.close();
-    });
+    t.after(() => closeWithScreenshots(browser, pages, process.env.ARTIFACT_DIR, (index) => `${engine}-tray-cost-${index}.png`));
 
     for (const [lang, name, sub] of [
       ["en", "Menu bar cost", "What magpie's requests cost, beside their tokens in the menu bar and its tooltip; off, the tokens alone"],

@@ -269,9 +269,10 @@ func SetAffinity(id, affinity string) error {
 
 var usedCache struct {
 	sync.Mutex
-	m       map[string]map[string]Allowance // agent → user → allowance
-	at      map[string]time.Time
-	loading map[string]chan struct{} // closed when the fetch in flight is done
+	m          map[string]map[string]Allowance // agent → user → allowance
+	at         map[string]time.Time
+	loading    map[string]chan struct{} // closed when the fetch in flight is done
+	extensions map[string]map[string]string
 	// renewed: the generation when an account's windows were started
 	// again. Read/reset order cannot use the clock: two events can have
 	// the same timestamp, even with its monotonic part.
@@ -918,16 +919,21 @@ func Allowances(agent string) map[string]Allowance {
 
 // readAllowances is Allowances as agent's own readings tell it.
 func readAllowances(agent string) map[string]Allowance {
+	bindings, external := extensionUsageBindings(agent)
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
 		c.m, c.at, c.loading = map[string]map[string]Allowance{}, map[string]time.Time{}, map[string]chan struct{}{}
+	}
+	if external {
+		syncExtensionAllowanceBindings(agent, bindings)
 	}
 	done := c.loading[agent]
 	if done == nil && time.Since(c.at[agent]) > time.Minute {
 		done = make(chan struct{})
 		c.loading[agent] = done
 		began := c.generation
+		captured := maps.Clone(bindings)
 		goRead(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -942,7 +948,15 @@ func readAllowances(agent string) map[string]Allowance {
 					all[user] = a
 				}
 			}
+			current, _ := extensionUsageBindings(agent)
 			c.Lock()
+			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) {
+				c.at[agent] = time.Time{}
+				delete(c.loading, agent)
+				c.Unlock()
+				close(done)
+				return
+			}
 			now := time.Now()
 			// as old as its oldest reading: one the Usage page made 50s
 			// ago, taken here, is read again in 10s, not kept a minute
@@ -1034,6 +1048,12 @@ func readAllowances(agent string) map[string]Allowance {
 		case <-time.After(firstWait):
 		}
 	}
+	if external {
+		current, _ := extensionUsageBindings(agent)
+		c.Lock()
+		syncExtensionAllowanceBindings(agent, current)
+		c.Unlock()
+	}
 	c.Lock()
 	m, known := c.m[agent]
 	c.Unlock()
@@ -1050,6 +1070,11 @@ func readAllowances(agent string) map[string]Allowance {
 // an account whose reading is too old or failed (Provider.CapCareful).
 func UsageRead(agent, user string) (at time.Time, failed, ok bool) {
 	c := &usedCache
+	if bindings, external := extensionUsageBindings(agent); external {
+		c.Lock()
+		syncExtensionAllowanceBindings(agent, bindings)
+		c.Unlock()
+	}
 	c.Lock()
 	defer c.Unlock()
 	st, ok := c.read[agent+"/"+strings.ToLower(user)]
@@ -1229,7 +1254,7 @@ func forgetAllowance(agent, user string) {
 // now, asked before, comes back with: the account just answered that it
 // has run out.
 func StaleAllowance(agent, user string) {
-	key := agent + "/" + strings.ToLower(user)
+	key := loginReadingUserKey(agent, user)
 	if readsAsked() {
 		markStaleRead(agent, user) // read though allowances are read only when asked (#1518)
 	}
@@ -1267,6 +1292,16 @@ func (a Allowance) restartedBy(runsOut time.Time) Allowance {
 // (#3650): the account is then not known, as one never read, rather than
 // one with all of it left, ahead of the rest.
 func routedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Allowance, bool) {
+	if strings.HasPrefix(agent, "extension-") && q.extensionUsage == nil {
+		return nil, false
+	}
+	if q.extensionUsage != nil && !q.extensionUsage.current() {
+		return nil, false
+	}
+	if (q.extensionUsage == nil || !q.extensionUsage.fresh) &&
+		slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool { return window.Unknown || window.AsOf != nil }) {
+		return nil, false
+	}
 	a := allowanceOf(q.Windows, now)
 	if len(a) == 0 {
 		return nil, false
@@ -1313,6 +1348,9 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 			continue
 		}
 		l := Limit{Used: w.Used, Span: w.Span, Model: w.Model, Amount: w.Amount, Of: w.Limit, Unit: w.Unit, matches: w.matches, partial: w.partial, Name: w.Name, Credits: w.Credits, Resets: resets(w)}
+		if w.amountPresence == quotaAmountAbsent {
+			l.Amount, l.Of = 0, 0
+		}
 		if ids := families[w.Model]; ids != nil && w.Family != "" && w.matches == nil {
 			l.Model = ""
 			l.matches = func(model string) bool { return ids[model] }
@@ -1323,7 +1361,7 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		if w.RunsOutAt != nil {
 			l.RunsOut, l.RunsOutLeft = *w.RunsOutAt, w.RunsOut
 		}
-		if w.Balance != nil {
+		if w.Balance != nil && !w.balanceInformational {
 			// a wallet is known by its balance, with no share invented:
 			// one with nothing left is used up, as the vendor refuses it
 			b := *w.Balance
@@ -1358,6 +1396,9 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		// with its count, so a cap of an amount of its unit holds too
 		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true,
 			Amount: w.Amount, Of: w.Limit, Unit: w.Unit, extra: w.Extra}
+		if w.amountPresence == quotaAmountAbsent {
+			al.Amount, al.Of = 0, 0
+		}
 		for i := range a {
 			a[i].pool = append(a[i].pool, al)
 		}

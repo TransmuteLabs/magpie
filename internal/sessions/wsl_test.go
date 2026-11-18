@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -396,12 +397,17 @@ func TestWSLNoneWithoutHomes(t *testing.T) {
 func TestWSLFirstWaitIsWaitedOnce(t *testing.T) {
 	wslDistro(t)
 	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
 	homes := WSLHomes
 	WSLHomes = func() []WSLHome { <-release; return homes() } // wsl.exe hangs
-	t.Cleanup(func() { close(release); wslSettle() })
 	was := wslFirstWait
 	wslFirstWait = 500 * time.Millisecond
-	t.Cleanup(func() { wslFirstWait = was })
+	t.Cleanup(func() {
+		free()
+		wslSettle()
+		wslFirstWait = was
+	})
 
 	start := time.Now()
 	for range 4 {
@@ -412,8 +418,7 @@ func TestWSLFirstWaitIsWaitedOnce(t *testing.T) {
 		t.Fatalf("four reads took %v on a hung WSL", d)
 	}
 	// once the listing ends, what it found is read
-	close(release)
-	release = make(chan struct{})
+	free()
 	wslSettle()
 	if len(wslFiles("claude")) == 0 {
 		t.Fatal("the distro's sessions weren't read once listed")

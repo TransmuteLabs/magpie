@@ -31,6 +31,9 @@ func SetLoginOn(agent, user string, on bool) error {
 	if discoveryOff() {
 		return errAccountDiscoveryOff
 	}
+	if strings.HasPrefix(agent, "extension-") {
+		return setExtensionLoginOn(agent, user, on)
+	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return setPluginLoginOn(pp, user, on)
 	}
@@ -106,6 +109,9 @@ func pausedOwn(ls []savedLogin, agent, user string) bool {
 // logins.json under its lock: listed once a request, as Logins is (#5104),
 // and a write lists it anew.
 func (p Provider) OwnPaused() bool {
+	if p.IsExtension() {
+		return !extensionAccountOn(p.ID, p.Account.User)
+	}
 	if p.Account == nil || p.Account.token != nil && !p.Account.standIn || !slices.Contains(loginAgents, p.Account.Agent) {
 		return false
 	}
@@ -134,6 +140,9 @@ func (p Provider) AlsoOn() []Provider {
 // alsoOn is AlsoOn as each sign-in makes its accounts, without the
 // provider's settings.
 func (p Provider) alsoOn() []Provider {
+	if p.IsExtension() {
+		return p.extensionAlsoOn()
+	}
 	if p.IsPlugin() {
 		return pluginAlsoOn(*p.Account.plugin)
 	}

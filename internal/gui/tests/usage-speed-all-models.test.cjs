@@ -75,7 +75,7 @@ function server(lang, answered) {
   };
 }
 
-const PERIOD_AT = { today: 0, "7d": 1, "30d": 2 };
+const PERIOD_LABELS = { today: "Today", "7d": "7 days", "30d": "30 days" };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(engine + ": the speed chart draws every model timed at a point", async (t) => {
@@ -103,7 +103,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await p.locator(style === "lines" ? "#ledChart g.col.ln" : "#ledChart rect.col.mark").first().waitFor({ state: "attached" });
           }
           const asked = answered.length;
-          await p.locator("#period .opt").nth(PERIOD_AT[period]).evaluate((b) => b.click());
+          const label = await p.evaluate((key) => t(key), PERIOD_LABELS[period]);
+          await p.locator("#period").getByRole("button", { name: label, exact: true, includeHidden: true }).evaluate((b) => b.click());
           for (let i = 0; i < 100 && !answered.slice(asked).includes(period); i++) await p.waitForTimeout(50);
           assert(answered.includes(period), "asked for " + period + ": " + where);
           await p.waitForTimeout(300);

@@ -201,8 +201,30 @@ function ownFieldsFold(list, a) {
 }
 
 // Its own context windows come in the same sheet, last (agentwindow.js).
+window.agentDetailsLoaded = (agent) => (!agent.fields.length || window.agentWindowFill)
+  && (!ompAdvisorHas(agent) || window.ompAdvisorRows) && (agent.noNames || window.agentSuffixPick);
+window.agentDetailsReady = (agent) => Promise.all([
+  agent.fields.length && import("./agentwindow.js"),
+  ompAdvisorHas(agent) && import("./ompadvisor.js"),
+  !agent.noNames && import("./agentsuffix.js"),
+]);
+window.agentDetailsSheet = async (box, open, done) => {
+  await Promise.resolve();
+  if (!box || !box.animate || calm()) { done?.(); return; }
+  const cs = getComputedStyle(box);
+  const full = { height: box.offsetHeight + "px", paddingTop: cs.paddingTop, paddingBottom: cs.paddingBottom, marginTop: cs.marginTop, marginBottom: cs.marginBottom, borderTopWidth: cs.borderTopWidth, opacity: 1 };
+  const none = { height: "0px", paddingTop: "0px", paddingBottom: "0px", marginTop: "0px", marginBottom: "0px", borderTopWidth: "0px", opacity: 0 };
+  const ease = "cubic-bezier(.32, .72, 0, 1)";
+  box.style.overflow = "hidden";
+  const run = box.animate(open ? [none, full] : [full, none], { duration: open ? 320 : 220, easing: ease, fill: open ? "none" : "forwards" });
+  for (const child of box.children) child.animate(open ? [{ opacity: 0, transform: "translateY(-6px)" }, { opacity: 1, transform: "none" }] : [{ opacity: 1 }, { opacity: 0 }], { duration: open ? 280 : 150, delay: open ? 40 : 0, easing: open ? ease : "ease-out", fill: "backwards" });
+  run.onfinish = () => { if (open) box.style.overflow = ""; done?.(); };
+  run.oncancel = run.onfinish;
+};
 window.agentCompactFill = function (list, a, ids) {
   if (ids.includes("fullContextRow")) compactFill(list, a);
   ownFieldsFold(list, a);
-  if (a.fields.length) import("./agentwindow.js").then(() => agentWindowFill(list, a), () => {});
+  if (a.fields.length) {
+    window.agentWindowFill ? agentWindowFill(list, a) : import("./agentwindow.js").then(() => agentWindowFill(list, a), () => {});
+  }
 };

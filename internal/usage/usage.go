@@ -26,6 +26,16 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+// UpstreamFailure is a bounded machine-readable refusal observed before the
+// gateway replaces its client response with an operation replay fence. It is
+// evidence only: no message, headers, credentials or retry authority.
+// Values are copied with records so observers cannot mutate another view.
+type UpstreamFailure struct {
+	Status int    `json:"status"`
+	Code   string `json:"code,omitempty"`
+	Type   string `json:"type,omitempty"`
+}
+
 // Record is one call.
 type Record struct {
 	Operation       string    `json:"operation,omitempty"`
@@ -156,11 +166,13 @@ type Record struct {
 	// usage_limit_reached); RequestID the id the vendor gave the call; and
 	// Endpoint the path the agent called, with the one it was sent to when
 	// it went out in another protocol (/v1/messages → /v1/chat/completions)
-	Error     string `json:"err,omitempty"`
-	ErrType   string `json:"err_type,omitempty"`
-	RequestID string `json:"rid,omitempty"`
+	Error           string          `json:"err,omitempty"`
+	ErrType         string          `json:"err_type,omitempty"`
+	UpstreamFailure UpstreamFailure `json:"upstream_failure,omitzero"`
+	RequestID       string          `json:"rid,omitempty"`
 	// ResponseID is the response object ID actually sent to the client.
-	ResponseID string `json:"response_id,omitempty"`
+	ResponseID         string `json:"response_id,omitempty"`
+	UpstreamResponseID string `json:"upstream_response_id,omitempty"`
 	// MessageID is the id the agent's own session file gives the call's
 	// message (Claude Code's msg_…), on a call read from such a file. Not
 	// persisted: it is read back with the file, and told by the request
@@ -262,7 +274,8 @@ type Record struct {
 	// OwnCost is what such a client said the call cost, in USD. nil when it
 	// said nothing: the call is then priced at magpie's own prices, as the
 	// gateway's calls are, and priced again when those change.
-	OwnCost *float64 `json:"cost,omitempty"`
+	OwnCost      *float64      `json:"cost,omitempty"`
+	ReportedCost *ReportedCost `json:"reported_cost,omitempty"`
 	// Credits is what the vendor said the call cost in its plan's own
 	// credits (WorkBuddy's usage.credit, #2512), nil when it said none
 	Credits *float64 `json:"credits,omitempty"`

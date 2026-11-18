@@ -47,10 +47,15 @@ func (e loginUsageEntry) state() readState {
 	if !e.readAt.IsZero() {
 		at = e.readAt
 	}
+	for _, window := range e.read.Windows {
+		if window.Unknown || window.AsOf != nil {
+			return readState{failed: true}
+		}
+	}
 	switch {
 	case e.read.AsOf != nil:
 		return readState{at: *e.read.AsOf, failed: true}
-	case e.read.Error != "" || len(e.read.Windows) == 0:
+	case e.read.Error != "" || e.read.ReadDeferred || len(e.read.Windows) == 0:
 		return readState{failed: true}
 	}
 	return readState{at: at}
@@ -289,7 +294,13 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 
 // cachedLoginReading is loginReading as read or kept.
 func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingCacheKey(l)
+	if l.extension != nil {
+		if err := l.extension.check(ctx); err != nil {
+			q := SubscriptionQuota{Provider: l.Agent, User: l.User, Error: err.Error()}
+			return loginUsageEntry{at: time.Now(), q: q, read: q}
+		}
+	}
 	c := &loginUsageCache
 	// with allowances read only when asked, one nobody asked for is what
 	// was read last, however old, unless the vendor just turned the
@@ -305,17 +316,22 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	e, ok := c.m[key]
 	if ok && (held || time.Since(e.at) < time.Minute) {
 		c.Unlock()
-		if held {
-			if e.readAt.IsZero() {
-				e.readAt = e.at // as it really was: a careful provider counts its age
+		if !extensionUsageValid(l, e.q) {
+			c.Lock()
+			ok = false
+		} else {
+			if held {
+				if e.readAt.IsZero() {
+					e.readAt = e.at // as it really was: a careful provider counts its age
+				}
+				e.at = time.Now() // as good as it gets until asked: Allowances keeps it its minute
 			}
-			e.at = time.Now() // as good as it gets until asked: Allowances keeps it its minute
+			return e
 		}
-		return e
 	}
 	entry := func(read SubscriptionQuota) loginUsageEntry {
 		q := read
-		if q.Error != "" && ok && q.Provider != "claude" {
+		if q.Error != "" && ok && q.Provider != "claude" && extensionUsageValid(l, e.q) {
 			q = e.q // a hiccup keeps what was known
 		}
 		return loginUsageEntry{at: time.Now(), q: q, read: read}
@@ -350,7 +366,7 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 			// (AskClaudeUsage), as SubscriptionUsage reads it: neither is kept
 			if c.pending[key] == r {
 				delete(c.pending, key)
-				if l.Agent != "claude" || claudeAskGeneration.Load() == asked {
+				if (l.Agent != "claude" || claudeAskGeneration.Load() == asked) && extensionUsageValid(l, r.e.q) {
 					if c.m == nil {
 						c.m = map[string]loginUsageEntry{}
 					}
@@ -364,6 +380,10 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	c.Unlock()
 	select {
 	case <-r.done:
+		if !extensionUsageValid(l, r.e.q) {
+			return entry(SubscriptionQuota{Provider: l.Agent, User: l.User,
+				Error: "account usage was invalidated; refresh required", ReadDeferred: true})
+		}
 		return r.e
 	case <-ctx.Done():
 		// given up on: as a reading cut short would have said
@@ -377,6 +397,9 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 // False for an agent that tells none, and for the built-in Grok, read by
 // home.
 func usageLogins(agent string) (logins []Login, ok bool) {
+	if logins, ok := extensionLogins(agent); ok {
+		return logins, true
+	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return pluginUsageLogins(pp), true
 	}
@@ -416,6 +439,9 @@ func loginProvider(l Login) string {
 
 func loginQuota(ctx context.Context, l Login) SubscriptionQuota {
 	ctx = ViaLogin(ctx, loginProvider(l), l.User) // asked through the account's own proxy
+	if l.extension != nil {
+		return extensionQuota(ctx, l)
+	}
 	if strings.HasPrefix(l.Agent, "plugin:") {
 		return pluginLoginQuota(ctx, l)
 	}
@@ -655,7 +681,7 @@ func knownLoginUsage(agent string) map[string]SubscriptionQuota {
 // loginReading's cache alone, and none of its reading. False when the
 // cache has nothing at all for the account.
 func loginReadingKnown(l Login) (loginUsageEntry, bool) {
-	key := l.Agent + "/" + strings.ToLower(l.User)
+	key := loginReadingCacheKey(l)
 	c := &loginUsageCache
 	c.Lock()
 	defer c.Unlock()

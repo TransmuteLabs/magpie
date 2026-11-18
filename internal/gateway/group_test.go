@@ -68,6 +68,14 @@ func fresh(t *testing.T) {
 	provider.ForgetRemoteCardsForTest()
 	provider.ForgetKeptCardsForTest()
 	provider.ForgetCodexClientsForTest()
+	resetCodexTurnStates := func() {
+		codexTurnStates.Lock()
+		clear(codexTurnStates.byTurn)
+		clear(codexTurnStates.byState)
+		codexTurnStates.Unlock()
+	}
+	resetCodexTurnStates()
+	t.Cleanup(resetCodexTurnStates)
 	remoteRefreshes.Lock()
 	remoteRefreshes.at = map[string]time.Time{}
 	remoteRefreshes.Unlock()

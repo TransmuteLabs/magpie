@@ -17,12 +17,12 @@ function drawPin(pin, draft, peek, seen) {
     return;
   }
   if (!seen) {
-    const go = el("button", "text action pin-peek", t("Trust its certificate…"));
+    const go = previewControl(el("button", "text action pin-peek", t("Trust its certificate…")));
     go.onclick = async (e) => {
       e.preventDefault();
       go.classList.add("busy");
       go.disabled = true;
-      try { again(await peek()); } catch (err) {
+      try { again(await peek(go)); } catch (err) {
         again();
         pin.append(el("div", "hint err", err.message));
       } finally { go.classList.remove("busy"); }
@@ -117,7 +117,7 @@ function pinRow({ p, pr, draft, certTakes, addressOf, asTyped, show, save }) {
     return certTakes() ? us : us.filter((u) => host(u) && !own.has(host(u)));
   };
   const pin = el("div", "server-pin");
-  drawPin(pin, draft, () => api("provider/peekcert", { ...asTyped(), id: p?.id || "", preset: draft.preset || "" }));
+  drawPin(pin, draft, async (control) => api("provider/peekcert", { ...await asTyped(control), id: p?.id || "", preset: draft.preset || "" }));
   const row = field(t("Server certificate"), pin, t("For your own server with a self-signed certificate. Check the fingerprint against the server's before you trust it; a certificate renewed later has to be trusted again."));
   show(() => { for (const e of row) e.style.display = addrs().length || draft.serverPin ? "" : "none"; });
   save((body) => { if (addrs().length || draft.serverPin) body.serverPin = addrs().length ? (draft.serverPin || "").trim() : ""; });

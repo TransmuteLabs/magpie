@@ -5,13 +5,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
+const { sourceSection } = require("./fixtures/source-section.cjs");
 
 const source = fs.readFileSync(process.env.MAGPIE_APP_JS || path.resolve(__dirname, "../assets/app.js"), "utf8").replace(/\r\n/g, "\n");
-function section(start, end) {
-  const a = source.indexOf(start), b = source.indexOf(end, a);
-  assert(a >= 0 && b > a, `missing ${start}`);
-  return source.slice(a, b);
-}
 const plain = (x) => JSON.parse(JSON.stringify(x));
 const card = (user, used) => ({ provider: "claude", user, windows: [{ name: "7 days", used }] });
 
@@ -19,6 +15,7 @@ function page(m = "window") {
   const context = vm.createContext({ Date, performance, setTimeout });
   vm.runInContext(`
     let quotas = [], quotasAt = 0, quotasKept = false, quotaHist = [], quotasAskedAt = 0, view = "usage";
+    const state = null, panelAccts = null;
     const mode = ${JSON.stringify(m)}; // the tray panel ("panel") also keeps each reading (#3160)
     const saved = [], localStorage = { setItem: (k, v) => saved.push([k, v]), getItem: () => null };
     const requests = [], errors = [];
@@ -38,8 +35,8 @@ function page(m = "window") {
       if (path.includes("history")) return Promise.resolve([]);
       return new Promise((resolve, reject) => requests.push({ path, resolve, reject }));
     }
-    ${section("let quotasLoading =", "// A period of picked days is")}
-    ${section("const quotaRefreshing =", "// familyQuota:")}
+    ${sourceSection(source, "let quotasLoading =", "function periodDays(")}
+    ${sourceSection(source, "const quotaRefreshing =", "const everyModel =")}
     globalThis.p = {
       requests, errors,
       seed: x => { quotas = x; },

@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const USER = "me@x.ai";
@@ -41,6 +42,7 @@ function serve(lang, login, usage, posts) {
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [] });
     if (url.pathname === "/api/login/usage") return json(usage);
     if (route.request().method() === "POST") {
+      if (isPageLifecycleRequest(route.request())) return json({});
       const body = route.request().postDataJSON();
       posts.push({ path: url.pathname, body });
       if (url.pathname === "/api/plugin-signin/prompt") return json({ prompt: null, inputs: {} });

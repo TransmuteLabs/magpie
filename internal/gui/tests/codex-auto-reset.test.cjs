@@ -20,6 +20,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const later = new Date(Date.now() + 3 * 864e5).toISOString();
@@ -159,7 +160,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // and moves nothing on the page
       const flip = async (page, sel, posts, body, want, said) => {
         const b = page.locator(sel);
-        await b.scrollIntoViewIfNeeded();
+        await reach(page, b);
         const at = await b.evaluate((e) => [e.getBoundingClientRect().top, document.scrollingElement.scrollTop, ...[...document.querySelectorAll(".view")].map((v) => v.scrollTop)]);
         const n = posts.length;
         await b.click();

@@ -161,7 +161,7 @@ func TestClientsAskNoWSL(t *testing.T) {
 	syncHome(t)
 	t.Cleanup(FakeWSL(map[string]string{"Ubuntu": "home:/home/me\ndir:.codex\n"}, map[string]string{"Ubuntu": t.TempDir()}))
 	release := make(chan struct{})
-	t.Cleanup(func() { close(release); wslSettle() })
+	var callers sync.WaitGroup
 	var mu sync.Mutex
 	var asked []string
 	run := wslRun
@@ -172,33 +172,44 @@ func TestClientsAskNoWSL(t *testing.T) {
 		<-release // wsl.exe hangs
 		return run(d, args...)
 	}
-	t.Cleanup(func() { wslRun = run })
+	t.Cleanup(func() {
+		close(release)
+		callers.Wait()
+		wslSettle()
+		wslRun = run
+	})
 	forgetLooks()
-	done := make(chan struct{})
+	clientsDone := make(chan struct{})
+	callers.Add(1)
 	go func() {
-		defer close(done)
+		defer callers.Done()
+		defer close(clientsDone)
 		Clients()
 		Looks()
 	}()
 	select {
-	case <-done:
+	case <-clientsDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Clients() waited on a hung wsl.exe")
 	}
 	mu.Lock()
-	defer mu.Unlock()
-	if len(asked) != 0 {
-		t.Fatalf("Clients() asked wsl.exe %q", asked)
-	}
+	askedNow := append([]string(nil), asked...)
 	mu.Unlock()
+	if len(askedNow) != 0 {
+		t.Fatalf("Clients() asked wsl.exe %q", askedNow)
+	}
 	// whether this computer has agents (the Sessions page's own-sessions
 	// gate) has WSL's agents as last listed, without waiting
-	done = make(chan struct{})
-	go func() { defer close(done); AllKnown() }()
+	knownDone := make(chan struct{})
+	callers.Add(1)
+	go func() {
+		defer callers.Done()
+		defer close(knownDone)
+		AllKnown()
+	}()
 	select {
-	case <-done:
+	case <-knownDone:
 	case <-time.After(5 * time.Second):
 		t.Fatal("AllKnown() waited on a hung wsl.exe")
 	}
-	mu.Lock()
 }

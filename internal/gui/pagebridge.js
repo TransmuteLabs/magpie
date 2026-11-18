@@ -8,6 +8,9 @@
 //   magpie.onTheme(fn)            fn(theme) on each change of it
 //   await magpie.options.get()    the plugin's own options (plugins.json)
 //   await magpie.options.set(o)   sets them, and answers with them
+//   await magpie.backend.call(binding, input)  an SDK module's declared binding
+//   await magpie.config.get()    {version, values}, the SDK module's snapshot
+//   await magpie.config.cas(expected, values)  replaces it with an explicit CAS
 //   await magpie.read(name, p)    a read its package.json's
 //                                 magpie.permissions declares
 //   await magpie.image.copy(png)  puts a PNG (a Blob, as a canvas's
@@ -54,11 +57,14 @@
 (() => {
   const waiting = new Map();
   let next = 0;
+  let disposed = false;
+  let historyReady;
   const themed = [];
   const watched = [];
   let acting = null;
   const acted = [];
   function call(method, params) {
+    if (disposed) return Promise.reject(new Error("Module window disposed"));
     const id = ++next;
     return new Promise((resolve, reject) => {
       waiting.set(id, { resolve, reject });
@@ -109,6 +115,12 @@
     if (e.source !== parent) return;
     const m = e.data;
     if (!m || m.magpie !== 1) return;
+    if (m.event === "dispose") {
+      disposed = true;
+      for (const w of waiting.values()) w.reject(new Error("Module window disposed"));
+      waiting.clear();
+      return;
+    }
     if (m.event === "theme") {
       api.theme = m.data;
       paint(m.data);
@@ -175,6 +187,10 @@
   function act(data) {
     try { Promise.resolve(acting(data)).catch(report); } catch (err) { report(err); }
   }
+  const historyCall = async (method, params) => {
+    if (!await api.history.ready) throw new Error("Session history is unsupported by this host");
+    return call("history." + method, params);
+  };
   const api = {
     theme: null,
     context: {},
@@ -190,13 +206,38 @@
       get: () => call("options.get"),
       set: (options) => call("options.set", { options }),
     },
+    backend: {
+      call: (binding, input, options) => call("backend.call", { binding, input, ...(options === undefined ? {} : { options }) }),
+      accounts: (binding) => call("backend.accounts", { binding }),
+    },
+    auth: {
+      start: (binding, options) => call("auth.start", { binding, options }),
+      finish: (binding, flow) => call("auth.finish", { binding, flow }),
+      cancel: (binding, flow) => call("auth.cancel", { binding, flow }),
+    },
+    config: {
+      get: () => call("config.get"),
+      cas: (expected, values) => call("config.cas", { expected, values }),
+    },
+    history: {
+      get ready() {
+        return historyReady ||= call("hello", { features: ["session-history-v1"] })
+          .then(value => value?.features?.includes("session-history-v1") === true);
+      },
+      inspect: source => historyCall("inspect", { source }),
+      requestAccess: selection => historyCall("request", selection),
+      release: selection => historyCall("release", selection),
+      list: selection => historyCall("list", selection),
+      read: selection => historyCall("read", selection),
+      media: selection => historyCall("media", selection),
+    },
     read: (name, params) => call("read", { name, params }),
     image: {
       copy: (png) => call("image.copy", { png }),
       save: (png, name) => call("image.save", { png, name }),
     },
   };
-  api.ready = call("hello").then(({ context, service, visible, ...theme }) => {
+  api.ready = call("hello").then(({ context, service, visible, features, ...theme }) => {
     api.theme = theme;
     if (visible === false) api.visible = false;
     api.context = context || {};

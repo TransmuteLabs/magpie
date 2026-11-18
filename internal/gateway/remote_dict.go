@@ -503,7 +503,7 @@ func dictOf(ctx context.Context) []byte {
 // it, and decodes one sent "dcz" against a body it kept, before the
 // request's key limit and route read it. Its headers come off every
 // request, so nothing passes them on.
-func keptBodyRequests(next http.Handler) http.Handler {
+func (s *Server) keptBodyRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		offered := r.Header.Get(KeepBodyHeader) != ""
 		avail, digest := r.Header.Get(availableDictHeader), r.Header.Get(BodyDigestHeader)
@@ -535,11 +535,16 @@ func keptBodyRequests(next http.Handler) http.Handler {
 			}
 			r = r.WithContext(context.WithValue(r.Context(), dictCtx{}, dict))
 		}
-		var most int64
-		if strings.HasPrefix(r.URL.Path, CodexPath+"/") {
-			most = codexBodyLimit()
+		limits := s.requestLimits
+		if registeredProtocolRequest(r) {
+			if began, _ := r.Context().Value(protocolReadStartCtx{}).(time.Time); began.IsZero() {
+				r = r.WithContext(context.WithValue(r.Context(), protocolReadStartCtx{}, time.Now()))
+			}
+			limits = protocolRequestLimits(limits)
+		} else if strings.HasPrefix(r.URL.Path, CodexPath+"/") {
+			limits.body = s.codexLimitOf()
 		}
-		b, status, err := readBoundedRequestBody(w, r, requestLimits{body: most})
+		b, status, err := readBoundedRequestBody(w, r, limits)
 		if err != nil {
 			if dcz && status == http.StatusBadRequest {
 				miss(err.Error())

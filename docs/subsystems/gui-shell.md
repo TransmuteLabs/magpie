@@ -32,7 +32,7 @@ three.
 1. `magpie` with no arguments, `magpie app` or `magpie tray` calls `runGUI`, which starts the app's log (`startLog`, above) and calls `gui.Run`. A `nogui` build runs the TUI instead. A second launch hands over to the instance already running. On Windows, before any window is made, `webView2Check` asks Wails whether the WebView2 runtime is there (`Env.Info().PlatformInfo["WebView2"]`, "" when its lookup fails; a key Wails doesn't set counts as there). Without it Wails would exit on the first window with nothing on screen, so magpie logs it, shows a Windows message box in the reader's language naming the runtime, Microsoft's download page (`webView2Page`) and `magpie web` / `magpie tui`, opens the page on Yes, and `Run` ends (#1806, `webview2.go`, `TestWebView2MissingFromWails` on Windows). The box can't come from `ErrorHandler`, which runs on the thread Wails makes its windows on.
 2. `startBackend` brings up the gateway, or finds another magpie serving it.
 3. The panel and the window load `index.html` from `Handler`. `boot.js` passes the saved language, theme, colorblind mode, text size and desktop font choices before the first paint. It also puts in the look of the reader's own (`appearance.go`, CHENGJIAHEGOXIS on X): Settings › General's Accent color (`accent`, `#rrggbb`; `accentVars` darkens it on the light theme and lightens it on the dark one until it reads as text at 4.5:1; it also sets `--mark`, the ink of what is chosen: the open page's sidebar icon, a switch's or tab's chosen option, Library's switches and radios. `--mark` is `var(--fg)`, graphite, until the user picks an accent, so a picked colour shows on the page it is picked on. A picked colour also tints the theme's grounds, the window's and the tray panel's (`--bg`, `--card`, the pills, lines and the dark menus' `--pop-bg`; `tintVars`): each takes 5% (light) or 8% (dark) of the colour's hue, its own lightness kept, so a grey pick changes nothing and text keeps its contrast. A dark pick, one whose OKLab lightness is under 0.4 (Graphite and every preset are lighter), takes the dark grounds as far toward black as it is dark (`ground`, `darkness`), losing app.css's cool grey cast and taking more of the pick's hue as they go: black draws a #000000 page with its cards, pills, lines and menus the same neutral steps above it, and a deep navy a near-black navy page (`TestDarkPickDarkensPage`). Black's ink starts most of the way to white (`lifted`, by `depth`), so it is not Graphite's grey; on the light theme black is black ink, and white the light theme's dark ink (`TestBlackIsBlack`); with no accent, or under Omarchy, they are app.css's own. `TestTintBasesAreAppCSS` holds the Go bases to app.css, and `TestLookFixture` the GUI tests' `fixtures/look-accents.json` to `lookCSS`) and Background image (a PNG, JPEG, GIF or WebP of 16 MB at most, saved as `wallpaper` in magpie's folder by `POST /api/appearance/wallpaper` as base64 JSON, `{remove: true}` to take it away; `settings.Wallpaper` is its stamp), drawn behind the window's pages under a veil of the theme's background, never in the tray panel or under Omarchy. `bootPrefs.look` says which look was drawn; `applyPrefs` asks `/api/appearance/css` again only when the settings' look differs, and the rows are drawn by the lazy `appearance.js` (`appearance-look.test.cjs`, `appearance_test.go`).
-4. The page reads `GET /api/state` and writes through `POST` routes. Each write answers with the new state, built under `held`.
+4. The page reads `GET /api/state` and writes through `POST` routes. Each write answers with the new state, built under `held`. `stateSettings` omits named proxies, active and remembered proxy addresses, the legacy LAN key, the Bark key and the GitHub token from both the poll and `lastKnown`. Editors read proxy settings through `/api/settings`. The provider editor adds Saved mode when that read arrives during its lazy proxy module load.
 5. Closing the window hides it. On the Mac a full-screen window first leaves full screen (`closeStep`). The system's close on the panel (a title bar's X, Alt+F4, a window manager's close key) hides it as Escape does, so the tray icon opens it again; a panel lightweight mode let go, no longer `h.panel`, closes (`makePanel`, `TestPanelCloseHidesIt`). A hidden macOS window keeps its WKWebView's page marked visible, so `hideWebview` tells the page it is out of sight before `orderOut`; that makes `document.hidden` and `visibilityState` true, stops the page's polling and frame loops, and pauses CSS animations. `showWebview` tells it it is visible again (#4293). Lightweight mode lets go only of a window closed this way: one covered by another app's window, minimised, or open as magpie was hidden is still open (`windowUp`, not Wails' `IsVisible`, which is the occlusion state), and so is it for the Dock while the window is open and for a restart (#1381, `TestCoveredWindowStaysUp`). On the Mac the tray icon and a usage cell close an open panel by the same test (`windowOpen` in `togglePanelNow` and `trayCellClick`, not Wails' `ToggleWindow`), so under a window over the whole screen, such as a remote-desktop server's privacy curtain, the icon still closes the panel instead of showing it again (#1661, `TestTrayCellClickReleasedPanel`). On Windows a hidden window's WebView2 is put on its low memory target (`lowWhileHidden`, [`memtarget_windows.go`](../../internal/gui/memtarget_windows.go): `ICoreWebView2_19::put_MemoryUsageTargetLevel`, on each hide, on a page that comes while hidden, and back to normal on each show), so the panel and the window kept loaded in the tray stop holding what they last drew; the page stays loaded and running, unlike lightweight mode. In the tray the WebView2 processes' private working set went from ~170 MB to 20 to 40 MB, while their commit charge stayed where it was (molamaker11 on X). WKWebView and WebKitGTK have nothing magpie can set for it.
 6. The window opens as it was last left. Its settled size and whether it was maximised are kept in `settings.Window` and `settings.WindowMaximised` (`settle`; per machine, see `KeepOwn`). A maximised window keeps the size it restores to. `makeMain` opens it at that size (`openSize`). On its first show, `placeMain` maximises it again on the Mac and Windows (on Windows once the page has come). On Linux, `makeMain` makes it maximised with `StartState`. On Windows a size larger than the screen's work area is fitted and centred (`fitRoom`), and the larger size stays kept. Where it was left is kept too, in `settings.WindowAt` (its top left corner across every screen, in the system's coordinates), so after a restart or an update it opens there rather than in the middle (jorbenzhu on Discord). `keepAt` saves it once a move or resize has rested for half a second, unless the window is maximised, full screen, minimised or hidden; `settings.Save` writes through temp and rename, and a settings file that can't be read is left alone. On its first show `placeMain` puts it back (`putBack`): `openAt` takes the screen holding most of the window, moves the window fully onto that screen's work area, and leaves it centred when no screen holds any of it, such as a monitor that is gone, or when the screens or the file can't be read (`TestOpenAt`). Under Wayland a window can't place itself, so nothing is kept or put back there unless GDK_BACKEND is x11 (`keepsPlace`, `TestKeepsPlace`). The pin in the window's title bar, between Refresh and Settings (`#pin`, `renderOnTop`; NovaStudiosss on X, to watch Usage and Routing while working in another app), keeps the window above other apps' windows: `POST /api/window/ontop?on=1` (or `0`) saves `settings.OnTop` (`SetOnTop`, this computer's own, kept through a Settings save) and calls `SetAlwaysOnTop`, and `makeMain` opens the window pinned when it is set. boot.js says whether there is a pin (`pin`, `pinnable` in `ontop.go`) and whether it is pressed (`onTop`) before the first paint. There is none in the panel, in a browser page or `magpie web`, or under Wayland (the same `keepsPlace`: GTK's keep-above does nothing there), and the route refuses there with 400 and saves nothing (`TestPinKeepsWindowOnTop`, `TestPinRefusedWithoutAWindowToPin`, `window-pin.test.cjs`). The tray's panel isn't kept: on the Mac and Windows it opens under the tray icon, and on Linux where the click was.
 7. The page's header is the window's title bar. `plainTitlebar` sets it up once the app has started, and again on a window lightweight mode made again (`madeAgain`). On Linux it hides GTK's title bar and keeps the shadow and the resize edges; GTK 3 leaves the corners square. On the Mac the traffic lights are inset into the header (`MacTitleBarHiddenInset`). In the design of macOS 26 a window with a toolbar has larger corners than one with a plain title bar, so `insetLights` ([`titlebar_darwin.go`](../../internal/gui/titlebar_darwin.go)) takes the toolbar off, and `MagpieLights` keeps the lights and the title bar's height where the toolbar had them: after a resize, a new title, light or dark, more contrast or less transparency, and leaving full screen. A sheet, such as the folder chooser, still begins below the title bar. A first press while another app is in front still moves the window from anywhere in that title bar (`firstPress`), as AppKit moved it with the toolbar; AppKit itself now does so only in a plain title bar's top 32pt. AppKit gives a program that design from macOS 26 when the program is linked against the macOS 26 SDK or a later one and its Info.plist doesn't ask for the earlier design (`UIDesignRequiresCompatibility`); `designOf26` reads each at run time, as the SDK depends on the toolchain that built magpie. The toolbar stays where it doesn't change the corners: in the earlier design, and on macOS 27, which gives a window with a toolbar a plain title bar's 16pt corners (`toolbarRounder` holds the window's radius against a window of its style with no toolbar, never shown); with the lights on the right (a right-to-left language), or when the title bar isn't laid out as expected; this is decided once, when the window is set up. In full screen the title bar is AppKit's own. On Windows the main window is frameless (`mainFrameless` in [`mainwindow.go`](../../internal/gui/mainwindow.go)), so a wallpaper or the page's colour runs to its top instead of stopping under a separate strip (258a14 on X). Wails keeps the frame's styles, so it still has its shadow and Windows 11's rounded corners, and snaps with Win+arrows and by dragging to a screen's edge. Wails' frameless window has no frame left to resize from, only a band 4px wide inside the page, and the page's scrollbar covers it on the right (Puremilk_chun on X), so the main window keeps Windows' own resize border on its left, right and bottom, outside the page as on a framed window (`mainFrameCalc` in [`mainframe_windows.go`](../../internal/gui/mainframe_windows.go), asked first by `appWndProc`; `keepResizeFrame` names the window once Wails' runtime is ready; `TestMainWindowKeepsResizeBorder`). Its top is still the page's, resized by Wails' band; maximised or in full screen Wails sizes it as before. The page draws the caption buttons at the header's right (`#wincap`, shown by app.css under `html.win` from `layout.js` in the window and not on the web, run by `wincap.js`, which app.js imports in that window alone, Segoe Fluent Icons' glyphs, Close red on hover); they minimise, maximise or restore, and close (hide; the tray stays), and stay over a dialog's scrim (`wincap.js` undoes the `inert` that `modalBackground` sets on them). The header's own tools sit left of them. A double click on anything that drags the window maximises or restores it. The app tells the page whether the window is maximised (`captionJS`, on Wails' runtime ready and on a resize that changes it), which swaps maximise for restore and keeps Wails' resize edges inside the page off while maximised, so the top-right pixel is Close's (`TestCaptionKeepsEdgesOffWhileMaximised`, `win-caption.test.cjs`). Windows 11's snap layouts flyout over maximise isn't shown: it needs Wails' composition hosting (`--wails-non-client-region`), which forwards input by `SendMouseInput` only. The panel keeps its own window as before.
@@ -41,6 +41,105 @@ three.
 10. A click on the tray icon opens the quick panel, or the main window when Settings › General › Click the tray icon to says so. On the Mac the item takes its left clicks itself (`trayOwnClicks`, `mpOwnClicks`: a local monitor that sends the action and drops the mouse-down) from the moment the tray is made, not when the panel is: the panel is made the first time it is opened (`panelOnFirstOpen`), and that first click after each start, going through the button's own mouse-down tracking, showed the panel and hid it again (Refeccd on Discord, `TestTrayOwnsClicksBeforeThePanel`). The panel opens the main window from one control, on its edge nearest the tray (isaac_bai on Discord): hung below its icon (the Mac's menu bar, a taskbar or bar at the top) it is the header's icon (`#open`, named "Open the main window"); standing above it (Windows' taskbar at the bottom, a bottom panel on Linux) it is the foot's "Open the main window" left of Quit (`#openMain`), and the header has no icon. The two are never shown together (yogurt36 on Discord). Once `togglePanelNow` has placed and shown the panel, `tellPanelSide` reads the panel's bounds and its screen's and sends `magpiePanelOpenAt("foot")` when the panel is nearer the screen's bottom, `"head"` otherwise (`panelOpenAt`; the Mac is always `head`). Under Wayland a window can't read where the compositor put it, and until the app says, layout.js sets `body[data-open-at]` by the system: `foot` on Windows, `head` elsewhere ([`panelside.go`](../../internal/gui/panelside.go), `TestPanelOpensTheWindowFromTheEdgeNearestTheTray`, `panel-open-once.test.cjs`). On Windows a double-click on the icon opens the main window too (isaac_bai on Discord): Wails passes the icon's `WM_LBUTTONDBLCLK` on as `OnDoubleClick`, the panel its first click opened is hidden by `openMain`, and the `WM_LBUTTONUP` that ends the double-click is swallowed once (`trayDouble`, within `trayDoubleRelease`) so it does not open the panel over the window. The Mac's status item calls its action on each mouse-down with no click count, and Linux's StatusNotifierItem has only `Activate`, so there a double-click is two clicks and is left as such (`trayDoubleClicks`, `TestTrayDoubleClickOpensTheWindowOnWindowsOnly`, `TestTrayDoubleClickReleaseSwallowedOnce`; [`traydouble.go`](../../internal/gui/traydouble.go)).
 
 ## Constraints and failure behavior
+
+### Sidebar tab focus
+
+When a sidebar tab list is redrawn, `navSubs` restores keyboard focus to the
+same tab if it is still available. It matches the underlying tab by identity,
+stable ID or segment, and restores focus without scrolling. An Enter press
+therefore still opens the selected part after icons load or labels change.
+Folding the list or leaving the page does not transfer focus to a new list.
+
+### Settings publication across responses
+
+The common `api`/`prefDeliver` owner in
+[`app.js`](../../internal/gui/assets/app.js) keeps Settings authority across
+cached and fresh state reads and declared Settings mutations. A response that
+overlaps a local mutation uses a generation-validated Settings snapshot, or
+reads Settings when that snapshot is absent or invalid. Initial bootstrap
+without an intervening write accepts its incoming settings; a null cached state
+remains a cache miss. `prefs` and `state.settings` need not be the same object.
+
+Response declarations distinguish enriched Settings, enriched Settings
+envelopes and state envelopes containing raw `settings.Shared()`. A serial
+state mutation retains its original envelope without another read and
+invalidates the older enriched snapshot. An overlapping state response replaces
+only its settings through the authority owner, retaining its own agent fields,
+notices, connection result, changes and Library data. Raw state never replaces
+the enriched Settings snapshot. Refusal preserves the original error;
+authority failure after an accepted mutation sets `saved=true`. Cancellation
+reaches that read, and accepted POSTs are never replayed.
+
+The state declarations cover `set`, agent rescan and lifecycle actions, `sync`,
+profile actions and the two desktop-isolation settings. Enriched settings
+routes include the upstream `settings/codex-suggestions` writer. Its held
+response regression preserves both the selected model and a later theme
+change with one POST for each. These share one publisher with the existing
+typed optimistic owners and visibility fences.
+
+The Download source and Community rows render through the lazy
+`updatesource.js` module. Placeholders reserve their positions, and an import
+fills a row only while it remains attached.
+
+The session transcript route passes its request context to
+`TranscriptAtContext` for a `find=` hit, retaining the same history-owner
+checks as ordinary and subagent transcript reads.
+
+### Provider editor preview ownership
+
+`asTyped` in [`app.js`](../../internal/gui/assets/app.js) admits all preview
+controls through the editor's lazy
+[`providerPreview`](../../internal/gui/assets/providerpreview.js) owner.
+It holds the actual Accounts replacement field, saved slot, pending commit and
+continuation in one closure. The pending raw value is not put in the draft or
+browser storage. A preview-pointer activation avoids committing that field on
+blur; explicit Enter/Save and unrelated Tab/blur still commit exactly once.
+Arbitrary keyboard-only preview activation parity is not provided: ordinary
+Tab out of the field remains a commit. The backend admission and catalogue
+identity contract are in [Providers and accounts](providers-accounts.md#unsaved-replacement-previews).
+
+Save validates before committing the replacement, verifies the accepted
+ordered-slot transition, then rebuilds its maps and pending model picks using
+the current fingerprint. Duplicate Save activations while that commit is
+pending join one continuation. The same owner can reattach across an expected
+redraw of the same provider/draft. Closing A and opening B prevents A's later
+continuation from using B's editor; an already dispatched credential or Save
+mutation for A finishes once, without rollback or replay, and its response
+cannot clear B's editor or picker.
+
+A grid cell containing the currently focused nested text input uses the
+existing top-alignment rule (`textFirst`). This prevents WebKit's native
+baseline relayout from resetting the reader's scroll while the replacement
+field remains focused. It does not blur or commit the field or restore an
+offset. `provider-preview-owner.test.cjs` covers all preview callers, held
+responses, real fingerprint rotation, Stop, disabled controls and editor
+replacement in Chromium/WebKit and its authored languages.
+
+
+### Click position across redraws
+
+`hold` in [`app.js`](../../internal/gui/assets/app.js) preserves the reader's
+position using the clicked element and its neighboring ancestor chain. If
+the surviving anchor changes both height and screen position, its recorded
+DOM path identifies preceding siblings of its branch as independent
+references. A surviving, settled reference of unchanged height takes
+precedence over containing ancestors: a fixed-height outer box can hide
+real growth inside it. Following siblings do not establish movement above
+the anchor, because its own resize moves them too. Without a preceding
+reference, a settled containing ancestor of unchanged height is preferred,
+then the nearest settled containing ancestor even if its height changed.
+This separates internal relayout from movement above surviving content;
+whole-row replacement, user scrolling and the existing top-of-view rules
+retain their owners. The rendered `held-ancestor.test.cjs` regression covers
+stationary auto-height replacement and growth inside a fixed-height
+overflowing owner, as well as the existing shrink/growth cases, in both
+browser engines.
+
+The switch-account button uses the shared `menuOf` initialization, so its
+collapsed state is present before the first opening. The existing menu owner
+updates that state on opening and Escape, as for the other menu buttons.
+`agent-switch-accounts.test.cjs` checks those transitions with its original
+account, mutation and configuration assertions.
 
 ### First opening of an agent's Details
 
@@ -754,6 +853,12 @@ covers it in both engines, every language and a narrow window.
 
 ### Shared UI rules
 
+The shared anchor rule is described in
+[Click position across redraws](#click-position-across-redraws).
+`click-scroll.test.cjs` covers that replacement alongside intentional
+navigation and reader scrolling; `group-member-drag.test.cjs` covers
+the actual editor reorder that exposed it.
+
 - Windows desktop windows and tray panels keep the modal's dimming veil without backdrop blur or saturation: full-window filtering can stall WebView2 while a provider test or sign-in dialog is open. The existing `win` marker from [`layout.js`](../../internal/gui/assets/layout.js) scopes the rule in [`app.css`](../../internal/gui/assets/app.css) to the desktop app; browser pages and other platforms keep their existing effect. `modal-backdrop.test.cjs` checks the computed filter and veil in both engines and modes.
 
 - Settings → General is laid out as macOS System Settings is (1ooogle on X): a row says its name alone when that says enough (Appearance, Colorblind mode, Language, Text size, the fonts, the tray click, Open at login, Show in Dock), and keeps one short line where the setting isn't clear from its name or has a consequence (Lightweight mode, Prevent sleep, Session terminal). Codex's, Claude Code's and Grok Build's own settings (Codex subagents, Long conversations, which is all of Grok Build's, background compaction, thread titles and descriptions, composer predictions, the auto-review and memories models) aren't here: they are in the agent's opened row on the Agents page (`AGENT_PREFS`, `connectPanel`), the panel's row has a Settings line that opens them in a sheet (`openAgentPrefs`), as does the agent's menu, and Settings' search finds them with a row that opens that sheet (`#agentPrefLinks`). Each row is one element moved between its places, so its handlers and state go with it (the owner, 10-20; `agent-prefs.test.cjs`). Long conversations is the exception with no Codex, Claude Code or Grok Build here, in gateway mode or a magpie in Docker: it sets the windows the gateway serves, which agents on other computers read, so it stays in General (`renderAgentPrefLinks`, Linka on Discord). A font row's line shows only while its fonts load or fail; the text size keys are the choices' tooltip, and Colorblind mode's note is its Off/On control's (`#colorblindSegs`). Colorblind mode (`settings.Colorblind`, `data-colorblind="1"` on `:root`, #2073) switches the chart series (`--c1`…`--c7`) in both light and dark themes to an Okabe–Ito palette where adjacent series differ in hue and lightness. On a quota curve each window (`data-series`, its index mod 7, set by `drawQuotaPlot` and `quotaCurve`'s legend only) gets a dash of its own on `path.qc-line`, its legend key shows a sample of that line (`.qc-sample`) for the dot, and the even paces (`line.qc-even`) are dotted; the curve's tooltip says so. The balance curve sets no `data-series` and keeps its solid line, dashed fit and dot. The Context tab's "good" grade, which takes `--c2` as a colour rather than a series, keeps a blue (`--c1`). Language is one menu button showing the language picked, opened in the app's menu (`renderLangPick`). See `settings-general.test.cjs` and `quota-curve.test.cjs`. Open at login reads `autostart.Enabled`, which on macOS 13 and later also asks Background Task Management about magpie's launch agent (`SMAppService.statusForLegacyURL:`, matched by the plist's Label, not its path); a record the user switched off in System Settings › General › Login Items reads as needing allowing, and the row keeps On with one line saying so and a button that opens Login Items (`/api/open` allows that one `x-apple.systempreferences` URL). The status read again when the window comes back to the front clears the line. On macOS 12, in a build without cgo, or when the system can't be asked, the plist alone decides, as before (#2120, `login-allow.test.cjs`, `login_allow_test.go`). On Linux it reads the autostart entry the desktop starts: the user's own over a package's in `$XDG_CONFIG_DIRS` (/etc/xdg when unset), as the XDG Autostart spec has it. Off over a package's entry that starts magpie writes a Hidden entry of the user's over it, and on takes that away rather than writing this copy's path (#3372, `autostart_other.go`).
@@ -1089,6 +1194,13 @@ not at the next `UpdateEvery`. See `TestUpdateClockFetchesNewerThanWaiting`,
 `TestUpdateWaitingRestartKeepsItsDownload` and `TestUpdateFetchDue`.
 
 ### A restart to update hands the gateway over
+
+The tray, Settings and automatic update paths share one restart claim.
+The claim starts before a staged update is installed or a successor is
+launched. A failed attempt releases it. A successful attempt keeps it
+until this process exits, including while a gateway handover drains.
+`TestRestartRejectsConcurrentRelaunch` holds a relaunch in flight and
+checks that only one request starts a successor.
 
 On a Mac and on Linux, a restart into a downloaded update (the Update pill,
 Settings › Version, the tray's Restart to update, Restart automatically)

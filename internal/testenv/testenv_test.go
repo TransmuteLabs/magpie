@@ -129,3 +129,35 @@ func TestRemoveTouchesOnlyItsOwn(t *testing.T) {
 		t.Errorf("remove deleted a folder it didn't make: %v", err)
 	}
 }
+
+// A system proxy read can start gsettings even when the agent CLI itself
+// is a stand-in. Its desktop backend can create dconf files while reading.
+func TestIsolateStandsInForGsettings(t *testing.T) {
+	for _, k := range append(folderVars, "XDG_CONFIG_DIRS", "PATH", Marker) {
+		t.Setenv(k, os.Getenv(k))
+	}
+	installed := t.TempDir()
+	path, body := filepath.Join(installed, "gsettings"), "#!/bin/sh\necho installed-gsettings\n"
+	if runtime.GOOS == "windows" {
+		path, body = path+".cmd", "@echo installed-gsettings\r\n"
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", installed+string(os.PathListSeparator)+os.Getenv("PATH"))
+	home, err := Isolate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { remove(home) })
+	got, err := exec.LookPath("gsettings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !within(got, home) {
+		t.Errorf("gsettings is %q, outside the isolated home %s", got, home)
+	}
+	if out, err := exec.Command(got, "list-recursively", "org.gnome.system.proxy").Output(); err == nil || len(out) > 0 {
+		t.Fatalf("the installed desktop tool ran: %q, %v", out, err)
+	}
+}

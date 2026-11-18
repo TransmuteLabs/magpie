@@ -45,7 +45,10 @@ type Option struct {
 	RateWas float64 `json:"rateWas,omitempty"`
 	// Context is the tokens the model takes, when known; the picker marks
 	// the large ones
-	Context int `json:"context,omitempty"`
+	Context       int      `json:"context,omitempty"`
+	MaxOutput     int      `json:"maxOutput,omitempty"`
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"defaultEffort,omitempty"`
 	// Takes, on an effort field's default (Value ""), is the level the
 	// agent takes for the model with none set (Codex: the catalog entry's
 	// default_reasoning_level), shown beside "default"
@@ -135,9 +138,11 @@ type Agent struct {
 	Path    string // config file magpie edits
 	// Plugin is the spec of the plugin that adds this agent (plugged.go),
 	// "" for magpie's own
-	Plugin string
-	Fields []Field
-	Native *NativeConnection
+	Plugin            string
+	Fields            []Field
+	Native            *NativeConnection
+	extensionMetadata *extensionAgentMetadata
+	mutationGuard     func() (func(), error)
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.
 	Notice func() string
@@ -851,5 +856,6 @@ func atomic(a *Agent, paths ...string) *Agent {
 	if unwire := a.Unwire; unwire != nil {
 		a.Unwire = func() error { return edit.Atomically(unwire, paths...) }
 	}
+	extensionFenceLocalAtomic(a, paths)
 	return a
 }

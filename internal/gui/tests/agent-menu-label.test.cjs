@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach, settled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -108,6 +109,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await said(), all);
         assert.ok(!(await said()).includes("Never stuck"), "named the routing group as if picked");
 
+        await settled(page);
+        await reach(page, menu);
         await menu.click();
         const box = page.locator(".am-pop:not(.leaving)");
         await box.waitFor();

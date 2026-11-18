@@ -1497,7 +1497,7 @@
     const sw = subsOf(name(e.spec)).find((x) => x.signedIn && x.options?.length);
     if (sw) {
       const go = el("button", "text quiet pm-opts-switches", t("Its switches are in {name}'s editor", { name: subName(sw) }));
-      go.onclick = () => { editing = null; draw(); openProvider(sw.id); };
+      go.onclick = () => openProvider(sw.id).catch(statusErr);
       bar.append(go);
     }
     if (e.options) {

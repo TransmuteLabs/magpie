@@ -35,7 +35,7 @@ func ompSessionRoots() []string {
 	if d := appdir.Getenv("XDG_DATA_HOME"); d != "" && runtime.GOOS != "windows" {
 		roots = append(roots, filepath.Join(d, "omp", "sessions"))
 	}
-	return roots
+	return extensionOMPSessionRoots(roots)
 }
 
 // ompRootsIn are the sessions folders of an omp agent folder (~/.omp/agent):
@@ -76,6 +76,9 @@ func ompFilesIn(dir string) []file {
 // ompProfile identifies the profile owning a main session file. Default
 // and XDG stores have no profile component in their paths.
 func ompProfile(path string) string {
+	if profile := extensionOMPProfileForPath(path); profile != "" {
+		return profile
+	}
 	if path == "" {
 		return ""
 	}
@@ -132,5 +135,5 @@ func ompFilesUnder(out []file, seen map[string]bool, root string) []file {
 			return nil
 		})
 	}
-	return out
+	return extensionOMPSharedFiles(out, root)
 }

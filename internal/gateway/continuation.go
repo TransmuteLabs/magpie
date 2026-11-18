@@ -645,7 +645,8 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					return writeError(w, from, 502, failed), failed
 				}
 			} else {
-				dec := carryReasoning(decoderFor(p, actual, request.Tools), from, actual)
+				var decoding protocolDecodeState
+				dec := carryReasoning(decoderFor(p, actual, request.Tools, &decoding), from, actual)
 				attemptSee := see
 				if names := textCallNames(request.Tools); names != nil {
 					t := &textCallSee{names: names, see: see}
@@ -692,6 +693,10 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 					alive()
 				})
 				stopKeep()
+				if (serr == nil && ended || errors.Is(serr, errDoneSaid)) &&
+					!decoding.rejected && failed == "" && !cut && !relooped && r.Context().Err() == nil {
+					provider.ExtensionResponseProtocolComplete(res)
+				}
 				res.Body.Close()
 				if errors.Is(serr, errStreamCut) || errors.Is(serr, errDoneSaid) {
 					// a cut's error event is in hand; a [DONE] said

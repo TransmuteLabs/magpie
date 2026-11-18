@@ -91,7 +91,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // its rows: listed in the page's language only, one quiet line each
         // with no badge, the tagline in the title
-        const grid = sheet.locator(".kind").first().locator("xpath=following-sibling::div[1]");
+        const grid = sheet.locator(".kind-row").first().locator("xpath=following-sibling::div[1]");
         const rows = grid.locator(".tile");
         assert.deepEqual(await rows.locator(".n").allTextContents(), w.rows);
         const look = await rows.evaluateAll((rs) => rs.map((r) => ({ badge: r.querySelectorAll(".badge").length, over: r.scrollWidth > r.clientWidth + 1, h: r.getBoundingClientRect().height })));

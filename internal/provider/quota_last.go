@@ -59,6 +59,9 @@ func keyTag(kind, key string) string {
 // keepLast is q, or the last reading of its account when q failed in
 // passing; a good reading is kept for next time.
 func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
+	if strings.HasPrefix(q.Provider, "extension-") {
+		return q
+	}
 	if user == "" {
 		user = q.User
 	}
@@ -80,9 +83,6 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 		}
 		e := lastQuota{At: time.Now(), Q: q}
 		for _, w := range q.Windows {
-			if w.matches != nil {
-				return q // a pool that can't be written down isn't kept
-			}
 			e.Spans = append(e.Spans, lastWindow{w.Span, w.Model, w.Aside})
 		}
 		e.Q.Error = ""
@@ -92,10 +92,7 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 			c.m = map[string]lastQuota{}
 		}
 		c.m[key] = e
-		if b, err := json.Marshal(c.m); err == nil {
-			os.MkdirAll(filepath.Dir(lastQuotasPath()), 0o700)
-			writeFileAtomic(lastQuotasPath(), b)
-		}
+		c.save()
 		return q
 	}
 	if q.Provider == "claude" && claudeDenied(q.Error) {
@@ -119,6 +116,26 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 		out.Name, out.Icon = c.m[key].Q.Name, c.m[key].Q.Icon
 	}
 	return out
+}
+
+func (c *lastQuotasT) save() {
+	saved := make(map[string]lastQuota, len(c.m))
+	for key, entry := range c.m {
+		cacheable := true
+		for _, window := range entry.Q.Windows {
+			if window.matches != nil {
+				cacheable = false
+				break
+			}
+		}
+		if cacheable {
+			saved[key] = entry
+		}
+	}
+	if data, err := json.Marshal(saved); err == nil {
+		os.MkdirAll(filepath.Dir(lastQuotasPath()), 0o700)
+		writeFileAtomic(lastQuotasPath(), data)
+	}
 }
 
 // hadReading is whether a good reading of provider's account (or key

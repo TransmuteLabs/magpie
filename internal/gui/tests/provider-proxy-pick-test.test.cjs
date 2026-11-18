@@ -22,8 +22,8 @@ const proxies = [
   { id: "px2", name: "Down", url: "socks5://10.0.0.9:1080" },
 ];
 
-function serve(lang, posts) {
-  const providers = { providers: [relay], presets: [], excluded: [], gateway: { running: true, window: true } };
+function serve(lang, posts, provider = relay) {
+  const providers = { providers: [provider], presets: [], excluded: [], gateway: { running: true, window: true } };
   const settings = { theme: "light", lang, proxy: "", proxySource: "off", proxies, version: "test", dir: "/test", lanURLs: [] };
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
@@ -50,6 +50,37 @@ function serve(lang, posts) {
 const japan = { en: "Japan", zh: "日本", "zh-TW": "日本", ja: "日本", de: "Japan" };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: a first-open picker adds Saved when Settings wins the import race`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 900, height: 800 }, reducedMotion: "reduce" });
+    const posts = [];
+    const handlers = serve("en", posts, { ...relay, proxy: "" });
+    const pendingImport = Promise.withResolvers();
+    const releaseImport = Promise.withResolvers();
+    t.after(() => releaseImport.resolve());
+    await page.route("**/*", async (route) => {
+      if (new URL(route.request().url()).pathname === "/proxies.js") {
+        pendingImport.resolve();
+        await releaseImport.promise;
+      }
+      return handlers(route);
+    });
+    await page.goto("http://magpie.test/?view=providers");
+    await page.locator(".row.provider", { hasText: "Relay" }).click();
+    const adv = page.locator(".editor details.advanced");
+    await adv.waitFor({ state: "attached" });
+    if (!(await adv.evaluate((details) => details.open))) await adv.locator(":scope > summary").click();
+    await pendingImport.promise;
+    const savedMode = page.locator(".editor .proxy-mode").getByRole("button", { name: "Saved", exact: true });
+    assert.equal(await savedMode.count(), 0, "Settings has not populated the picker");
+    await page.evaluate(() => loadSettings());
+    releaseImport.resolve();
+    await savedMode.click({ timeout: 5000 });
+    await page.locator(".editor .proxy-saved").getByText("Tokyo", { exact: true }).waitFor();
+    assert.deepEqual(posts, []);
+  });
+
   for (const lang of Object.keys(japan)) {
     for (const width of [900, 420]) {
       test(`${engine} ${lang} ${width}px: a provider's saved proxy is tested from its editor`, async (t) => {

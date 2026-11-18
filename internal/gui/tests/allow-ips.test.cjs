@@ -15,7 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
+const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -204,13 +204,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // sat under the window's foot, where a click lands on the foot (a
         // scroll that isn't the reader's is put back, #1554)
         const remove = box.locator(".allow-ip-row").filter({ hasText: "10.0.0.0/8" }).locator("button", { hasText: w.remove });
-        const viewBox = await view.boundingBox();
-        for (let i = 0; i < 20; i++) {
-          const r = await remove.boundingBox();
-          if (r && r.y > viewBox.y && r.y + r.height < viewBox.y + viewBox.height) break;
-          await page.mouse.wheel(0, 40);
-          await scroll();
-        }
+        const diagnosticError = await page.locator("#status").textContent();
+        assert(diagnosticError, "the original refusal remains visible before reach");
+        await reach(page, remove);
+        assert.equal(await page.locator("#status").textContent(), diagnosticError, "reach never clears or waits away the refusal");
+        assert.match(await page.locator("#status").getAttribute("class"), /\berr\b/);
+        assert(await remove.evaluate((button) => { const box = button.getBoundingClientRect(); const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2); return hit === button || button.contains(hit); }), "the original click point is unoccluded");
         before = await scroll();
         await remove.click();
         await page.waitForFunction(() => document.querySelectorAll("#allowList .allow-ip-row").length === 2);

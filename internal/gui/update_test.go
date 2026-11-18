@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -41,13 +41,8 @@ func TestUpdateStagedGivesWayToNewer(t *testing.T) {
 	old := Version
 	Version = "0.1.10"
 	defer func() { Version = old }()
-	exe, err := update.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := &updater{exe: exe}
-	u.self, _ = os.Stat(exe)
-	defer os.Remove(exe + ".new")
+	u, stop := freshUpdater(t, true)
+	defer stop()
 
 	u.check()
 	if j := u.json(); j.State != "ready" || j.Latest != "0.1.11" || downloads.Load() != 1 {
@@ -114,13 +109,8 @@ func TestUpdateClockFetchesNewerThanWaiting(t *testing.T) {
 	old := Version
 	Version = "0.1.10"
 	defer func() { Version = old }()
-	exe, err := update.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := &updater{exe: exe}
-	u.self, _ = os.Stat(exe)
-	defer os.Remove(exe + ".new")
+	u, stop := freshUpdater(t, true)
+	defer stop()
 
 	// nothing waiting: the clock's check downloads what it finds
 	u.checkByClock()
@@ -189,6 +179,8 @@ func TestUpdateCheckDuringDownloadTakesNewer(t *testing.T) {
 	latest.Store("0.1.11")
 	var downloads, inFlight, most atomic.Int32
 	hold := make(chan struct{})
+	var released sync.Once
+	release := func() { released.Do(func() { close(hold) }) }
 	started := make(chan struct{}, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/asset" {
@@ -212,15 +204,18 @@ func TestUpdateCheckDuringDownloadTakesNewer(t *testing.T) {
 	old := Version
 	Version = "0.1.10"
 	defer func() { Version = old }()
-	exe, err := update.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := &updater{exe: exe}
-	u.self, _ = os.Stat(exe)
-	defer os.Remove(exe + ".new")
+	u, stop := freshUpdater(t, true)
+	defer stop()
 
-	go u.checkByClock()
+	checkDone := make(chan struct{})
+	go func() {
+		defer close(checkDone)
+		u.checkByClock()
+	}()
+	defer func() {
+		release()
+		<-checkDone
+	}()
 	<-started
 	if j := u.json(); j.State != "downloading" {
 		t.Fatalf("first download: %+v", j)
@@ -231,7 +226,8 @@ func TestUpdateCheckDuringDownloadTakesNewer(t *testing.T) {
 	if j := u.json(); j.State != "downloading" || downloads.Load() != 1 {
 		t.Fatalf("check mid-download: %+v, %d downloads", j, downloads.Load())
 	}
-	close(hold)
+	release()
+	<-checkDone
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if j := u.json(); j.State == "ready" && j.Latest == "0.1.12" {
@@ -272,13 +268,8 @@ func TestUpdateWaitingRestartKeepsItsDownload(t *testing.T) {
 	old := Version
 	Version = "0.1.10"
 	defer func() { Version = old }()
-	exe, err := update.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := &updater{exe: exe}
-	u.self, _ = os.Stat(exe)
-	defer os.Remove(exe + ".new")
+	u, stop := freshUpdater(t, true)
+	defer stop()
 
 	u.checkByClock()
 	if j := u.json(); j.State != "ready" || downloads.Load() != 1 {

@@ -1,0 +1,77 @@
+{
+  "name": "@magpie/extension-sdk",
+  "version": "0.0.0-alpha.0",
+  "description": "Dependency-free executable extension authoring SDK for Magpie",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./ui": {
+      "types": "./ui.d.ts",
+      "default": "./ui.js"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "account-operations.js",
+    "account-checkin.js",
+    "account-keepalive.js",
+    "account-keepalive.d.ts",
+    "account-tasks.js",
+    "account-tasks.d.ts",
+    "gateway-activation.js",
+    "account-selection.js",
+    "errors.js",
+    "window-auth.js",
+    "session-source.js",
+    "session-related.js",
+    "session-resume.js",
+    "process.js",
+    "storage-source.js",
+    "storage-source.d.ts",
+    "index.js",
+    "index.d.ts",
+    "manifest.js",
+    "agent-metadata.js",
+    "agent-model-metadata.js",
+    "agent-model-metadata.d.ts",
+    "agent-decision-models.js",
+    "agent-decision-models.d.ts",
+    "provider-policy.js",
+    "request-policy.js",
+    "provider-defaults.js",
+    "provider-options.js",
+    "bytes.js",
+    "worker.js",
+    "composite.js",
+    "lifecycle.js",
+    "hooks.js",
+    "catalog-projection.js",
+    "catalog-projection.d.ts",
+    "diagnostics.js",
+    "ledger.js",
+    "ledger.d.ts",
+    "middleware.js",
+    "middleware.d.ts",
+    "usage.js",
+    "rich-quota.js",
+    "usage-facts.js",
+    "own-calls.js",
+    "own-calls.d.ts",
+    "routing.js",
+    "search-sources.js",
+    "search-sources.d.ts",
+    "ui.js",
+    "ui.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "conformance": "node test/conformance.js"
+  }
+}

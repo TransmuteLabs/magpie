@@ -143,6 +143,15 @@ func codexDir() string { return appdir.CodexHomeIn(home()) }
 // targetOf is where a known agent keeps them, or nil for one magpie can't
 // give any of them to.
 func targetOf(a *agent.Agent) *Target {
+	if target, places, sdkOwned := a.SDKLibraryTarget(); sdkOwned {
+		if target == nil {
+			return nil
+		}
+		if places == nil {
+			return targetOf(target)
+		}
+		return extensionAgentTarget(target, places)
+	}
 	if a.WSL != "" {
 		return wslTargetOf(a)
 	}
@@ -999,19 +1008,46 @@ func targets(gone bool) []*Target {
 // starting the distro, but the page lists them (asleepView). Each running
 // one's places are kept for when it is stopped (keepShape).
 func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
-	var out []*Target
-	var asleep []*agent.Agent
+	out, asleep, _ := selectTargets(gone, nil)
+	return out, asleep
+}
+
+// selectTargets chooses each canonical location once for both active writes
+// and cleanup. A blocked selected location still excludes any alternative.
+// has, when set, identifies gone local targets that need cleanup only.
+func selectTargets(gone bool, has func(string) bool) (out []*Target, asleep []*agent.Agent, held []*Target) {
 	own := map[string]bool{}
-	for _, a := range apps() {
+	appTargets := apps()
+	for _, a := range appTargets {
 		own[a.ID] = true
+	}
+	selected := map[string]bool{}
+	add := func(a *agent.Agent, active bool) {
+		if !active && has == nil {
+			return
+		}
+		t := targetOf(a)
+		if t == nil || selected[t.Agent.ID] {
+			return
+		}
+		// Resolve profiles before deduplication. Even an unavailable custom
+		// location must not fall back to writing the base app's config.
+		selected[t.Agent.ID] = true
+		if !active && !has(t.Agent.ID) || !t.open() {
+			return
+		}
+		if active {
+			out = append(out, t)
+		} else {
+			t.Gone = true
+			held = append(held, t)
+		}
 	}
 	for _, a := range agent.All() {
 		// the agents here, and a folder an agent shares with its vendor's
 		// other app when only that app is here: the Cursor editor reads
 		// ~/.cursor's mcp.json and skills with no cursor-agent installed
-		if !a.Detected() && !a.SharedHere() {
-			continue
-		}
+		active := a.Detected() || a.SharedHere()
 		// an app magpie also sets up as an agent (Claude Desktop) keeps its
 		// MCP servers where apps says, once
 		if own[a.ID] {
@@ -1023,7 +1059,11 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 		// unless an app of its vendor's reads the folder too: VS Code's
 		// Copilot reads ~/.copilot's copilot-instructions.md with no
 		// Copilot CLI here
-		if !gone && a.CLIMissing() && !a.SharedRead() {
+		if active && !gone && a.CLIMissing() && !a.SharedRead() {
+			active = false
+		}
+		// Gone WSL targets are never opened by local cleanup.
+		if !active && a.WSL != "" {
 			continue
 		}
 		if isAsleep(a) {
@@ -1031,17 +1071,13 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 			noteUp(a.WSL, false)
 			continue
 		}
-		if t := targetOf(a); t != nil && t.open() {
-			out = append(out, t)
-		}
+		add(a, active)
 	}
-	for _, a := range apps() {
-		if !a.Detected() && !a.SharedHere() {
+	for _, a := range appTargets {
+		if selected[a.ID] {
 			continue
 		}
-		if t := targetOf(a); t != nil && t.open() {
-			out = append(out, t)
-		}
+		add(a, a.Detected() || a.SharedHere())
 	}
 	readsWith(out)
 	for _, t := range out {
@@ -1049,41 +1085,20 @@ func targetsAsleep(gone bool) ([]*Target, []*agent.Agent) {
 			keepShape(t)
 		}
 	}
-	return out, asleep
+	return out, asleep, held
 }
 
-// held are the agents not among have (Targets) — uninstalled, or gone for
-// their CLI — that the library still gives something, or that hold a skill,
-// server or hook magpie put there: each is listed on the rows of what it
-// has, for that to be unticked and taken out of it, and on no other row
-// (@jiahao_jayden on X: an agent that isn't installed was on every row). A
-// sync gives them nothing new (Gone).
-func (l *Library) held(have []*Target) []*Target {
-	in := map[string]bool{}
-	for _, t := range have {
-		in[t.Agent.ID] = true
+// hasTarget keeps a gone local target listed only while the Library gives it
+// something or remembers an applied resource. Selection is shared with active
+// targets; cleanup never rediscovers another location under the same ID.
+func (l *Library) hasTarget(id string) bool {
+	if a := l.Applied[id]; a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0 || len(a.Env) > 0 || a.Router || len(a.RouterRules) > 0) {
+		return true
 	}
-	has := func(id string) bool {
-		if a := l.Applied[id]; a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0 || len(a.Env) > 0 || a.Router || len(a.RouterRules) > 0) {
-			return true
-		}
-		return slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.gives(id) }) ||
-			slices.ContainsFunc(l.MCP, func(s *Server) bool { return slices.Contains(s.Agents, id) }) ||
-			slices.ContainsFunc(l.Hooks, func(h *Hook) bool { return slices.Contains(h.Agents, id) }) ||
-			slices.ContainsFunc(l.Env, func(e *EnvVar) bool { return slices.Contains(e.Agents, id) })
-	}
-	var out []*Target
-	for _, a := range append(apps(), agent.All()...) {
-		if in[a.ID] || a.WSL != "" || !has(a.ID) {
-			continue
-		}
-		in[a.ID] = true
-		if t := targetOf(a); t != nil && t.open() {
-			t.Gone = true
-			out = append(out, t)
-		}
-	}
-	return out
+	return slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.gives(id) }) ||
+		slices.ContainsFunc(l.MCP, func(s *Server) bool { return slices.Contains(s.Agents, id) }) ||
+		slices.ContainsFunc(l.Hooks, func(h *Hook) bool { return slices.Contains(h.Agents, id) }) ||
+		slices.ContainsFunc(l.Env, func(e *EnvVar) bool { return slices.Contains(e.Agents, id) })
 }
 
 // junctionBlind are the agents that, on Windows, skip a junction in a
@@ -1248,7 +1263,7 @@ func Takes(q, kind string) (string, error) {
 	if !has {
 		return "", fmt.Errorf("%s%s", noPlace(a, kind, what), takenBy(kind, what))
 	}
-	return a.ID, nil
+	return t.Agent.ID, nil
 }
 
 // noPlace says why an agent can't be given kind, and where it gets it

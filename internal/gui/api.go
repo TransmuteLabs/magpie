@@ -3379,11 +3379,13 @@ func held(h http.Handler) http.Handler {
 	})
 }
 
-// stateSettings is s without the credentials Settings' own read keeps on
-// disk (settingsState), for /api/state, which is polled, and the start's
-// read of the last one (lastKnown), which puts today's settings in it
+// stateSettings omits credential fields and proxy addresses from the
+// polled state and the startup state built by lastKnown.
 func stateSettings(s settings.Settings) settings.Settings {
 	s.Proxies, s.LANKey, s.BarkKey, s.GitHubToken = nil, "", "", ""
+	s.Proxy, s.ProxyCustom = "", ""
+	s.PluginProxy, s.PluginProxyCustom = "", ""
+	s.UpdateProxy, s.UpdateProxyCustom = "", ""
 	return s
 }
 

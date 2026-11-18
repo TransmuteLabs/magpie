@@ -4,7 +4,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { fixture, keyAction } = require("./fixtures/caller-keys.cjs");
-const { openPart } = require("./reader.cjs");
+const { openPart, watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
 
 async function palette(page, selectors) {
   return page.evaluate((selectors) => {
@@ -16,7 +16,9 @@ async function palette(page, selectors) {
     const colors = Object.fromEntries(["bg", "card", "card-2", "fg", "fg-2", "muted", "ctl-fg", "pill", "line", "accent", "accent-fg"]
       .map((name) => [name, rgb("--" + name)]));
     const elements = Object.fromEntries(Object.entries(selectors).map(([name, selector]) => {
-      const s = getComputedStyle(document.querySelector(selector));
+      const element = document.querySelector(selector);
+      if (!element) throw new Error(`Palette target missing: ${name} (${selector})`);
+      const s = getComputedStyle(element);
       return [name, { color: s.color, bg: s.backgroundColor, border: s.borderTopColor }];
     }));
     return { colors, elements };
@@ -36,6 +38,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const events = [], errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", fixture("en", theme, events, { lan: true }));
+      await watchSettingsReads(page);
       await page.goto("http://magpie.test/?view=gateway");
       await page.locator('#gatewayKeys .acc[data-key="server"] .dot').click();
       await page.locator('#gatewayKeys .acc.off[data-key="server"]').waitFor();
@@ -96,23 +99,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(events.filter((e) => e.action === "rotate-key").length, 0);
 
       await page.goto("http://magpie.test/?view=settings&tab=network");
+      await settingsDrawn(page);
       const on = page.locator("#lanList").getByRole("button", { name: "On", exact: true });
-      await on.waitFor();
-      // the settings are read twice as the page opens (its own read and the
-      // state's), each drawing #lanList again: where On is comes from one read
-      // in the page, since a box asked of a button already replaced is null
-      const y = await (await page.waitForFunction(() => [...document.querySelectorAll("#lanList button")]
-        .find((b) => b.textContent.trim() === "On")?.getBoundingClientRect().y)).jsonValue();
-      await page.mouse.move(500, 400);
-      await page.mouse.wheel(0, y - 250);
+      await reach(page, on);
       await on.click();
       await page.locator("#lanList .lan-url").waitFor();
       await page.mouse.move(500, 20);
       for (const scheme of ["light", "dark"]) {
         await page.emulateMedia({ colorScheme: scheme });
         await page.waitForTimeout(200);
-        const { colors: c, elements: e } = await palette(page, { card: "#lanList", text: "#lanList .row.pref:last-child .name",
-          key: "#lanList .lan-url", copy: "#lanList .row.pref:last-child .copy" });
+        const { colors: c, elements: e } = await palette(page, { card: "#lanList", text: "#lanList .lan-address-row .name",
+          key: "#lanList .lan-url", copy: "#lanList .lan-address-row .copy" });
         assert.equal(e.card.bg, c.card);
         assert.equal(e.text.color, c.fg);
         assert.equal(e.key.color, c["fg-2"]);

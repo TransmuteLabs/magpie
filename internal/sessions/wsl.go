@@ -91,9 +91,12 @@ var wslAgents = []struct{ agent, dir string }{
 }
 
 // wslScan lists the session files under a distro's home.
-func wslScan(h WSLHome) []file {
+func wslScan(h WSLHome, agents []string) []file {
 	var out []file
 	for _, a := range wslAgents {
+		if !slices.Contains(agents, a.agent) {
+			continue
+		}
 		dir := filepath.Join(h.Home, a.dir)
 		if h.Open != nil {
 			dir = h.Open(dir)
@@ -184,6 +187,8 @@ var wslSess struct {
 	first  time.Time              // when the first listing started: reads wait wslFirstWait from it, in all
 	done   chan struct{}          // the listing under way, nil when none
 	kept   []byte                 // what sessions-wsl.json holds
+	listed map[string]time.Time
+	queued []string
 }
 
 var (
@@ -227,16 +232,23 @@ func wslFilesAs(calls bool, agents ...string) []file {
 			}
 		}
 	}
-	if wslSess.done == nil && time.Since(wslSess.at) > wslRelist {
-		done := make(chan struct{})
-		wslSess.done, wslSess.at = done, time.Now()
-		if wslSess.first.IsZero() {
-			wslSess.first = wslSess.at
-		}
-		go wslList(wslSess.gen, done)
+	if wslSess.at.IsZero() {
+		wslSess.listed = map[string]time.Time{}
 	}
-	wait := wslSess.done
-	if len(wslSess.lists) > 0 {
+	var needed []string
+	ready := true
+	for _, agent := range agents {
+		if time.Since(wslSess.listed[agent]) > wslRelist {
+			needed = append(needed, agent)
+		}
+		cached := !wslSess.listed[agent].IsZero()
+		for _, listing := range wslSess.lists {
+			cached = cached || slices.ContainsFunc(listing.Files, func(entry wslEntry) bool { return entry.Agent == agent })
+		}
+		ready = ready && cached
+	}
+	wait := wslQueueLocked(needed)
+	if ready {
 		wait = nil // what was found before is read now; the new listing comes next time
 	}
 	left := wslFirstWait - time.Since(wslSess.first)
@@ -296,15 +308,61 @@ func wslFilesAs(calls bool, agents ...string) []file {
 	return out
 }
 
+func wslQueueLocked(agents []string) chan struct{} {
+	for _, agent := range agents {
+		if !slices.Contains(wslSess.queued, agent) {
+			wslSess.queued = append(wslSess.queued, agent)
+		}
+	}
+	if wslSess.done == nil && len(wslSess.queued) != 0 {
+		done := make(chan struct{})
+		wslSess.done, wslSess.at = done, time.Now()
+		if wslSess.first.IsZero() {
+			wslSess.first = wslSess.at
+		}
+		go wslList(wslSess.gen, done, slices.Clone(wslSess.queued))
+	}
+	return wslSess.done
+}
+
 // wslList lists the distros' files: a running one's afresh, a stopped
 // one's as they were. With no distros said at all (wsl.exe didn't answer)
 // every listing is kept, cold. A wsl.exe that answered with no distro an
 // agent is in (WSLListed) lets them all go.
-func wslList(gen uint64, done chan struct{}) {
+func wslList(gen uint64, done chan struct{}, agents []string) {
 	defer close(done)
+	for len(agents) != 0 {
+		wslListSelected(gen, agents)
+		wslSess.Lock()
+		if gen != wslSess.gen {
+			wslSess.Unlock()
+			return
+		}
+		wslSess.queued = slices.DeleteFunc(wslSess.queued, func(agent string) bool { return slices.Contains(agents, agent) })
+		agents = slices.Clone(wslSess.queued)
+		if len(agents) == 0 && wslSess.done == done {
+			wslSess.done = nil
+		} else {
+			wslSess.at = time.Now()
+		}
+		wslSess.Unlock()
+	}
+}
+
+func wslListSelected(gen uint64, agents []string) {
+	agents = slices.DeleteFunc(slices.Clone(agents), func(agent string) bool { return !Reads(agent) })
+	if len(agents) == 0 {
+		return
+	}
+	started := time.Now()
 	homes := WSLHomes()
 	wslSess.Lock()
-	old := wslSess.lists
+	old := make(map[string]*wslListing, len(wslSess.lists))
+	for name, listing := range wslSess.lists {
+		copy := *listing
+		copy.Files = slices.Clone(listing.Files)
+		old[name] = &copy
+	}
 	wslSess.Unlock()
 	lists := map[string]*wslListing{}
 	for _, h := range homes {
@@ -320,7 +378,7 @@ func wslList(gen uint64, done chan struct{}) {
 			continue
 		}
 		l := &wslListing{Home: h.Home, Running: true, Files: []wslEntry{}}
-		for _, f := range wslScan(h) {
+		for _, f := range wslScan(h, agents) {
 			l.Files = append(l.Files, wslEntryOf(f))
 		}
 		lists[h.Distro] = l
@@ -335,15 +393,34 @@ func wslList(gen uint64, done chan struct{}) {
 			lists[n] = &c
 		}
 	}
-	b, _ := json.Marshal(lists)
 	wslSess.Lock()
 	defer wslSess.Unlock()
 	if gen != wslSess.gen {
 		return
 	}
+	for name, listing := range lists {
+		if previous := wslSess.lists[name]; previous != nil && previous.Home == listing.Home {
+			if listing.Running {
+				for _, entry := range previous.Files {
+					if !slices.Contains(agents, entry.Agent) {
+						listing.Files = append(listing.Files, entry)
+					}
+				}
+			} else {
+				listing.Files = slices.Clone(previous.Files)
+			}
+		}
+		sort.Slice(listing.Files, func(left, right int) bool {
+			if listing.Files[left].Agent != listing.Files[right].Agent {
+				return listing.Files[left].Agent < listing.Files[right].Agent
+			}
+			return listing.Files[left].Path < listing.Files[right].Path
+		})
+	}
+	b, _ := json.Marshal(lists)
 	wslSess.lists = lists
-	if wslSess.done == done {
-		wslSess.done = nil
+	for _, agent := range agents {
+		wslSess.listed[agent] = started
 	}
 	if b != nil && !bytes.Equal(b, wslSess.kept) {
 		p := wslListPath()
@@ -460,24 +537,26 @@ func wslRelistNow(items []moved) {
 		return
 	}
 	wslSess.Lock()
-	in := false
+	var agents []string
 	for _, l := range wslSess.lists {
 		for _, m := range items {
-			in = in || under(m.From, l.Home)
+			for _, reader := range wslAgents {
+				if under(m.From, filepath.Join(l.Home, reader.dir)) && Reads(reader.agent) && !slices.Contains(agents, reader.agent) {
+					agents = append(agents, reader.agent)
+				}
+			}
 		}
 	}
 	busy := wslSess.done
 	wslSess.Unlock()
-	if !in {
+	if len(agents) == 0 {
 		return
 	}
 	if busy != nil {
 		<-busy
 	}
-	done := make(chan struct{})
 	wslSess.Lock()
-	wslSess.done, wslSess.at = done, time.Now()
-	go wslList(wslSess.gen, done)
+	done := wslQueueLocked(agents)
 	wslSess.Unlock()
 	select {
 	case <-done:
@@ -491,6 +570,7 @@ func wslReset() {
 	defer wslSess.Unlock()
 	wslSess.gen++
 	wslSess.loaded, wslSess.lists, wslSess.at, wslSess.first, wslSess.done, wslSess.kept = false, nil, time.Time{}, time.Time{}, nil, nil
+	wslSess.listed, wslSess.queued = nil, nil
 }
 
 // wslResume is the PowerShell line that resumes a session in a WSL distro

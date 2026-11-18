@@ -260,5 +260,10 @@ func Found() []string {
 		devin = append(devin, filepath.Join(d, "sessions.db"), filepath.Join(d, "sessions"))
 	}
 	add("devin", devin...)
+	for _, agent := range extensionSourceFound() {
+		if !slices.Contains(out, agent) {
+			out = append(out, agent)
+		}
+	}
 	return out
 }

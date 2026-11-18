@@ -17,6 +17,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { pickItem } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const DS = "magpie/deepseek/deepseek-v4.1-flash";
@@ -104,20 +105,25 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(heads.filter((h) => h.startsWith("OpenCode Go")), ["OpenCode Go", own], JSON.stringify(heads));
         const ownHead = order.findIndex((x) => x.trim() === own);
         assert.ok(at("MiniMax M2.7") < ownHead && ownHead < at("GLM-5.1"), `Pi's own heading over its own models: ${JSON.stringify(order)}`);
-        const head = page.locator("#pop #list li.group.own");
-        const look = await head.evaluate((li) => {
-          const s = li.querySelector(".own-sign"), cs = getComputedStyle(s), r = li.getBoundingClientRect(), list = li.closest("#pop").getBoundingClientRect();
-          return { transform: cs.textTransform, height: r.height, inside: r.right <= list.right + 0.5, border: getComputedStyle(li).borderLeftWidth, image: getComputedStyle(li).backgroundImage };
+        const look = await page.evaluate(() => {
+          const li = document.querySelector("#pop #list li.group.own");
+          const picker = li?.closest("#pop");
+          const sign = li?.querySelector(".own-sign");
+          const plain = picker && [...picker.querySelectorAll("#list li.group:not(.own)")].find((group) => group.textContent.trim() === "OpenCode Go");
+          if (!picker || !sign || !plain) return null;
+          const style = getComputedStyle(sign), rect = li.getBoundingClientRect(), list = picker.getBoundingClientRect();
+          return { transform: style.textTransform, height: rect.height, plainHeight: plain.getBoundingClientRect().height,
+            inside: rect.right <= list.right + 0.5, border: getComputedStyle(li).borderLeftWidth, image: getComputedStyle(li).backgroundImage };
         });
+        assert.ok(look, "both headings belong to the current picker");
         assert.equal(look.transform, "none", "the words read as written");
-        const plain = await page.locator("#pop #list li.group:not(.own)", { hasText: "OpenCode Go" }).evaluate((li) => li.getBoundingClientRect().height);
-        assert.equal(look.height, plain, "one line, as tall as magpie's OpenCode Go heading");
+        assert.equal(look.height, look.plainHeight, "one line, as tall as magpie's OpenCode Go heading");
         assert.ok(look.inside, `inside the picker at ${width}px`);
         assert.equal(look.border, "0px", "no stripe");
         assert.equal(look.image, "none", "no gradient");
 
         // the OpenCode Go model is asked first; Cancel leaves Pi connected
-        await item("GLM-5.1").click();
+        await pickItem(page, item("GLM-5.1"));
         const ask = page.locator("#modal .leave-ask");
         await ask.waitFor();
         assert.equal((await ask.locator(".ehead b").textContent()).trim(), await tr("Take {agent} off magpie?", { agent: "Pi" }));
@@ -132,7 +138,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // magpie's other model isn't asked, and Pi stays on
         await open();
-        await item("DeepSeek V4.1 Pro").click();
+        await pickItem(page, item("DeepSeek V4.1 Pro"));
         await page.waitForFunction((r) => document.querySelector(r + " > .field.ag-start")?.textContent.includes("Pro"), row);
         assert.equal(await page.locator("#modal:not([hidden]) .leave-ask").count(), 0);
         assert.deepEqual(posts, [{ agent: "pi", field: "model", value: "magpie/deepseek/deepseek-v4.1-pro" }]);
@@ -140,7 +146,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // confirmed, it is written, and 「接入」 goes off as it said
         await open();
-        await item("GLM-5.1").click();
+        await pickItem(page, item("GLM-5.1"));
         await ask.waitFor();
         await ask.locator("button", { hasText: await tr("Use {model}", { model: "opencode-go/glm-5.1" }) }).click();
         await page.waitForFunction(() => document.querySelector("#modal").hidden);

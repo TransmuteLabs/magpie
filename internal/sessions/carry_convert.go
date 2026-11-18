@@ -26,7 +26,9 @@ package sessions
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,6 +42,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yetone/magpie/internal/codexsummary"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -126,8 +129,11 @@ type carryKey struct {
 // CarryOver converts a session for the agent to (one carries offers it
 // with Convert), and says how to open the new one.
 func CarryOver(s Session, to string) (CarryResult, error) {
-	if !Reads(s.Agent) {
-		return CarryResult{}, ErrNotRead
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	owner, err := selectSessionHistoryOwner(ctx, s)
+	if err != nil {
+		return CarryResult{}, err
 	}
 	ok := false
 	for _, c := range carries(s) {
@@ -138,6 +144,14 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 	if !ok {
 		return CarryResult{}, fmt.Errorf("a %s session can't be carried over to %s", s.Agent, to)
 	}
+	for _, route := range extensionSessionRoutes(s.Agent) {
+		if route.Session.To == to {
+			return carryExtensionOwned(ctx, owner, route)
+		}
+	}
+	if convertsTo[s.Agent] != to {
+		return CarryResult{}, errors.New("session converter is no longer available")
+	}
 	st, err := os.Stat(s.Path)
 	if err != nil {
 		return CarryResult{}, err
@@ -145,8 +159,18 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 	key := carryKey{s.Path, to, st.Size(), st.ModTime()}
 	carriedMu.Lock()
 	defer carriedMu.Unlock()
+	check := func() error { return owner.check(ctx) }
+	if err := check(); err != nil {
+		return CarryResult{}, err
+	}
 	if r, ok := carried[key]; ok {
 		if _, err := os.Stat(r.Path); err == nil {
+			if sourceBeforePublish != nil {
+				sourceBeforePublish()
+			}
+			if err := check(); err != nil {
+				return CarryResult{}, err
+			}
 			return r, nil
 		}
 	}
@@ -167,9 +191,9 @@ func CarryOver(s Session, to string) (CarryResult, error) {
 	var r CarryResult
 	switch to {
 	case "claude":
-		r, err = writeClaudeCarry(s.Cwd, items, time.Now())
+		r, err = writeClaudeCarry(s.Cwd, items, time.Now(), check)
 	case "codex":
-		r, err = writeCodexCarry(CodexDir(), s.Cwd, items, time.Now())
+		r, err = writeCodexCarry(CodexDir(), s.Cwd, items, time.Now(), check)
 	}
 	if err != nil {
 		return CarryResult{}, err
@@ -593,8 +617,21 @@ func carryStamp(at, now time.Time) string {
 	return at.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
-// writeNew writes a new file through a temp file renamed into place.
-func writeNew(path string, lines [][]byte) error {
+// writeNew publishes a new file only while the selected history owner holds.
+// A hard link installs the complete temporary file without replacing a target
+// that another writer created. Late failure removes only our unchanged inode.
+func writeNew(path string, lines [][]byte, checks ...func() error) error {
+	check := func() error {
+		for _, check := range checks {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -606,7 +643,9 @@ func writeNew(path string, lines [][]byte) error {
 		return err
 	}
 	tmp := f.Name()
-	w := bufio.NewWriter(f)
+	defer os.Remove(tmp)
+	hash := sha256.New()
+	w := bufio.NewWriter(io.MultiWriter(f, hash))
 	for _, l := range lines {
 		w.Write(l)
 		w.WriteByte('\n')
@@ -615,16 +654,65 @@ func writeNew(path string, lines [][]byte) error {
 	if err == nil {
 		err = f.Sync()
 	}
+	info, statErr := f.Stat()
+	if err == nil {
+		err = statErr
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(tmp, path)
+		err = check()
+	}
+	if err == nil {
+		err = os.Link(tmp, path)
 	}
 	if err != nil {
-		os.Remove(tmp)
+		return err
 	}
-	return err
+	if len(checks) != 0 && sourceBeforePublish != nil {
+		sourceBeforePublish()
+	}
+	if err := check(); err != nil {
+		return errors.Join(err, removeUnchangedCarry(path, info, hash.Sum(nil)))
+	}
+	return nil
+}
+
+func removeUnchangedCarry(path string, expected os.FileInfo, digest []byte) error {
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || !os.SameFile(expected, before) || before.Size() != expected.Size() {
+		return extension.ErrActionChanged
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(expected, opened) {
+		return errors.Join(err, extension.ErrActionChanged)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, io.LimitReader(file, expected.Size()+1)); err != nil {
+		return err
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(expected, after) || after.Size() != expected.Size() ||
+		after.Mode() != expected.Mode() || !after.ModTime().Equal(expected.ModTime()) || !bytes.Equal(hash.Sum(nil), digest) {
+		return errors.Join(err, extension.ErrActionChanged)
+	}
+	// Close first: Windows does not unlink an open file.
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 // jsonLine is v as one line of JSON, <, > and & as they are, as the
@@ -688,7 +776,7 @@ func agentVersion(agent string) string {
 // cwd: <claude dir>/projects/<cwd as Claude names it>/<uuid>.jsonl, each
 // line naming the one before it as its parent, its fields in Claude Code's
 // order.
-func writeClaudeCarry(cwd string, items []carryItem, now time.Time) (CarryResult, error) {
+func writeClaudeCarry(cwd string, items []carryItem, now time.Time, checks ...func() error) (CarryResult, error) {
 	name, err := claudeProjectName(cwd)
 	if err != nil {
 		return CarryResult{}, err
@@ -761,7 +849,7 @@ func writeClaudeCarry(cwd string, items []carryItem, now time.Time) (CarryResult
 				"sourceToolAssistantUUID", by)
 		}
 	}
-	if err := writeNew(path, lines); err != nil {
+	if err := writeNew(path, lines, checks...); err != nil {
 		return CarryResult{}, err
 	}
 	return CarryResult{Agent: "claude", ID: id, Path: path}, nil
@@ -830,7 +918,7 @@ func splitDataURL(u string) (string, string, bool) {
 // gives its own. Each user message and answer is written as Codex's own
 // event too, which its TUI shows a resumed session's history from. Codex
 // adds the thread to its state database itself when it opens it.
-func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryResult, error) {
+func writeCodexCarry(home, cwd string, items []carryItem, now time.Time, checks ...func() error) (CarryResult, error) {
 	u, err := uuid.NewV7()
 	if err != nil {
 		return CarryResult{}, err
@@ -893,7 +981,7 @@ func writeCodexCarry(home, cwd string, items []carryItem, now time.Time) (CarryR
 			add(it.Time, "response_item", o("type", "function_call_output", "call_id", callID, "output", out))
 		}
 	}
-	if err := writeNew(path, lines); err != nil {
+	if err := writeNew(path, lines, checks...); err != nil {
 		return CarryResult{}, err
 	}
 	return CarryResult{Agent: "codex", ID: id, Path: path}, nil

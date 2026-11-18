@@ -155,7 +155,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await seg(page).isVisible(), false);
       const saved = await save(page, posts);
       assert.equal("authHeader" in saved.body, false);
-      await page.locator(".editor .bar").getByRole("button", { name: lang === "zh" ? "取消" : "Cancel", exact: true }).click().catch(() => {});
+      await page.locator(".editor").waitFor({ state: "detached" });
       await page.locator(".row.provider", { hasText: "Codex" }).first().click();
       await unfold(page);
       await page.locator(".editor .bar").waitFor();

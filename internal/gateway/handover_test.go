@@ -52,6 +52,10 @@ func TestHandedOverGatewayFinishesItsStream(t *testing.T) {
 	release := make(chan struct{})
 	var upstreamCalls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		upstreamCalls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		if !strings.Contains(string(body), `"stream":true`) {
@@ -73,6 +77,11 @@ func TestHandedOverGatewayFinishesItsStream(t *testing.T) {
 		f.Flush()
 	}))
 	defer up.Close()
+	unrelated, err := http.Get(up.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated.Body.Close()
 	defer close(release)
 	if err := provider.Save(provider.Provider{ID: "plan", Name: "Plan", Key: "upstream", Chat: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)

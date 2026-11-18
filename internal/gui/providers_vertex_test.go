@@ -31,6 +31,10 @@ func TestVertexProviderEditor(t *testing.T) {
 	var mu sync.Mutex
 	var asked []string
 	google := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/token" {
 			w.Write([]byte(`{"access_token":"ya29.typed","expires_in":3600}`))
@@ -46,6 +50,11 @@ func TestVertexProviderEditor(t *testing.T) {
 		w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`))
 	}))
 	defer google.Close()
+	unrelated, err := http.Get(google.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated.Body.Close()
 	defer provider.VertexForTest(google.URL, google.URL+"/token", google.URL+"/iam")()
 
 	mux := http.NewServeMux()
@@ -156,6 +165,10 @@ func TestVertexExpressEditor(t *testing.T) {
 	var keys []string
 	var tokens int
 	google := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/token" {
 			mu.Lock()
@@ -170,6 +183,11 @@ func TestVertexExpressEditor(t *testing.T) {
 		w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}]}`))
 	}))
 	defer google.Close()
+	unrelated, err := http.Get(google.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated.Body.Close()
 	defer provider.VertexForTest(google.URL, google.URL+"/token", google.URL+"/iam")()
 
 	mux := http.NewServeMux()

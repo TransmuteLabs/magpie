@@ -14,7 +14,7 @@ import (
 // and taken off again; one not on the list is said so.
 func TestModelDisableCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if _, err := refusedArgs(t, "disable"); err == nil {
 		t.Fatal("no model named")
 	}

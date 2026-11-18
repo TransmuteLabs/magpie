@@ -120,10 +120,11 @@ type Route struct {
 	Tries    []Try        `json:"tries"`
 	// Masked: what masking swapped in the request before it went, nil
 	// for nothing (noteMasked)
-	Masked *Masked `json:"masked,omitempty"`
-	Done   bool    `json:"done"`
-	Status int     `json:"status,omitempty"`
-	Error  string  `json:"error,omitempty"`
+	Masked          *Masked               `json:"masked,omitempty"`
+	Done            bool                  `json:"done"`
+	Status          int                   `json:"status,omitempty"`
+	UpstreamFailure usage.UpstreamFailure `json:"upstream_failure,omitzero"`
+	Error           string                `json:"error,omitempty"`
 	// Fail: why the failure the agent was told failed (toldFail), set
 	// when it was an earlier try's than the last (Try.Earlier, or every
 	// account after it passed over by a middleware): the request's row
@@ -216,26 +217,29 @@ type Route struct {
 // RouteUsage is one billable attempt's pricing inputs, kept in routing history.
 // Its JSON keys also read the earlier history that stored full usage records.
 type RouteUsage struct {
-	Provider   string `json:"provider"`
-	Model      string `json:"model"`
-	Input      int    `json:"in"`
-	Output     int    `json:"out"`
-	CacheRead  int    `json:"cache_read,omitempty"`
-	CacheWrite int    `json:"cache_write,omitempty"`
-	Reasoning  int    `json:"reasoning,omitempty"`
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Input        int    `json:"in"`
+	Output       int    `json:"out"`
+	CacheRead    int    `json:"cache_read,omitempty"`
+	CacheWrite   int    `json:"cache_write,omitempty"`
+	CacheWrite1h int    `json:"cache_write_1h,omitempty"`
+	Reasoning    int    `json:"reasoning,omitempty"`
 	// CacheUnknown: the vendor counted no cache tokens, so the Routing
 	// page shows no hit rate rather than 0% (Kiro, zeewell on X)
 	CacheUnknown bool `json:"cache_unknown,omitempty"`
 	// Credits is what the reply said the request cost in its plan's
 	// credits (WorkBuddy's usage.credit, #2512), the Routing page's as
 	// the Usage page's; nil when it said none (jiabubu on Discord)
-	Credits *float64 `json:"credits,omitempty"`
+	Credits      *float64            `json:"credits,omitempty"`
+	ReportedCost *usage.ReportedCost `json:"reported_cost,omitempty"`
 }
 
 // PricingRecord lets the routing view reuse the ledger's effective prices.
 func (u RouteUsage) PricingRecord() usage.Record {
 	return usage.Record{Provider: u.Provider, Model: u.Model, Input: u.Input,
-		Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning}
+		Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h,
+		Reasoning: u.Reasoning, ReportedCost: u.ReportedCost, OwnCost: u.ReportedCost.USD()}
 }
 
 // GroupRef is the routing group a request asked for.
@@ -493,12 +497,13 @@ type Try struct {
 	RuleEffort string `json:"ruleEffort,omitempty"`
 	// MappedFrom: the level asked for, which the group's member it went
 	// to sends Effort in place of (Group.EffortMaps)
-	MappedFrom string    `json:"mappedFrom,omitempty"`
-	Fast       bool      `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
-	Start      time.Time `json:"start"`
-	Done       bool      `json:"done"`
-	Status     int       `json:"status,omitempty"`
-	Millis     int64     `json:"ms,omitempty"`
+	MappedFrom      string                `json:"mappedFrom,omitempty"`
+	Fast            bool                  `json:"fast,omitempty"` // sent in its vendor's fast mode, as the group's member it went to is
+	Start           time.Time             `json:"start"`
+	Done            bool                  `json:"done"`
+	Status          int                   `json:"status,omitempty"`
+	UpstreamFailure usage.UpstreamFailure `json:"upstream_failure,omitzero"`
+	Millis          int64                 `json:"ms,omitempty"`
 	// TTFT: ms from Start to its reply's first content, FirstText to its
 	// first text, when it streamed any (#196)
 	TTFT      int64 `json:"ttft,omitempty"`
@@ -1178,13 +1183,16 @@ func swapped(sent, served string) bool { return usage.Swapped(sent, served) }
 func routeUsage(id, model string, u Usage) []RouteUsage {
 	out := advisorRouteUsage(id, u)
 	if d := u.Deferred; d != nil && d.Input+d.Output+d.CacheRead+d.CacheWrite > 0 {
-		out = append(out, RouteUsage{Provider: id, Model: model, Input: d.Input, Output: d.Output,
-			CacheRead: d.CacheRead, CacheWrite: d.CacheWrite, Reasoning: d.Reasoning})
+		out = append(out, routeUsageEntry(id, model, *d))
 	}
-	if u.Input+u.Output == 0 {
+	if u.Input+u.Output+u.CacheRead+u.CacheWrite == 0 && u.Credits == nil && u.ReportedCost == nil {
 		return out
 	}
-	return append(out, RouteUsage{Provider: id, Model: model, Input: u.Input, Output: u.Output,
-		CacheRead: u.CacheRead, CacheWrite: u.CacheWrite, Reasoning: u.Reasoning,
-		CacheUnknown: u.cacheNotCounted(), Credits: u.Credits})
+	return append(out, routeUsageEntry(id, model, u))
+}
+
+func routeUsageEntry(id, model string, totals Usage) RouteUsage {
+	return RouteUsage{Provider: id, Model: model, Input: totals.Input, Output: totals.Output,
+		CacheRead: totals.CacheRead, CacheWrite: totals.CacheWrite, CacheWrite1h: totals.CacheWrite1h, Reasoning: totals.Reasoning,
+		CacheUnknown: totals.cacheNotCounted(), Credits: totals.Credits, ReportedCost: totals.ReportedCost}
 }

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -68,6 +69,8 @@ type systemOneTarget struct {
 	model string
 }
 
+type decisionAnswerValidatorKey struct{}
+
 // takesImages is whether the model takes a System One request's images:
 // a Clef on Workers AI does, Google's gemini-decision-1 does (as image
 // blocks of its input), and another magpie passes them on.
@@ -107,7 +110,12 @@ func (s *Server) decideBySystemOne(w http.ResponseWriter, r *http.Request, req m
 		return
 	}
 	rec := httptest.NewRecorder()
-	s.serveSystemOneBody(rec, r, body)
+	validate := func(answer []byte) error {
+		_, err := systemOneAsDecision(answer, qs, asked)
+		return err
+	}
+	ctx := context.WithValue(r.Context(), decisionAnswerValidatorKey{}, validate)
+	s.serveSystemOneBody(rec, r.WithContext(ctx), body)
 	passTranslated(w, rec, func(b []byte) ([]byte, error) { return systemOneAsDecision(b, qs, asked) })
 }
 

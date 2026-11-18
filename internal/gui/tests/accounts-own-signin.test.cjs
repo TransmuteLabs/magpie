@@ -37,6 +37,71 @@ function serve(lang) {
   };
 }
 
+function waitForStartup(page) {
+  const paths = ["/autobackup.js", "/api/autobackup", "/api/datafolder"];
+  const requests = new Map();
+  const accepted = new Set();
+  const completed = new Set();
+  const seen = new Set();
+  let navigation = null;
+  let resolveStartup;
+  let rejectStartup;
+  const startup = new Promise((resolve, reject) => { resolveStartup = resolve; rejectStartup = reject; });
+  const own = (request) => {
+    if (request.frame() !== page.mainFrame()) return;
+    if (request.isNavigationRequest()) {
+      if (navigation) rejectStartup(new Error("document replaced before startup finished"));
+      else navigation = request;
+      return;
+    }
+    const url = new URL(request.url());
+    if (navigation && request.method() === "GET" && url.origin === "http://magpie.test" &&
+        paths.includes(url.pathname) && !seen.has(url.pathname)) {
+      seen.add(url.pathname);
+      requests.set(request, url.pathname);
+    }
+  };
+  const response = (value) => {
+    if (!requests.has(value.request())) return;
+    if (value.ok()) accepted.add(value.request());
+    else rejectStartup(new Error(`${requests.get(value.request())} startup response failed: ${value.status()}`));
+  };
+  const finished = (request) => {
+    if (!requests.has(request)) return;
+    if (!accepted.has(request)) {
+      rejectStartup(new Error(`${requests.get(request)} finished without a successful response`));
+      return;
+    }
+    completed.add(request);
+    if (completed.size === paths.length) resolveStartup();
+  };
+  const failed = (request) => {
+    if (requests.has(request)) rejectStartup(new Error(`${requests.get(request)} startup request failed: ${request.failure()?.errorText}`));
+  };
+  const closed = () => rejectStartup(new Error("document closed before startup finished"));
+  page.on("request", own);
+  page.on("response", response);
+  page.on("requestfinished", finished);
+  page.on("requestfailed", failed);
+  page.on("close", closed);
+  page.on("crash", closed);
+  const timer = setTimeout(() => rejectStartup(new Error("document startup did not finish within 5000ms")), 5000);
+  const joined = startup.finally(() => {
+    clearTimeout(timer);
+    page.off("request", own);
+    page.off("response", response);
+    page.off("requestfinished", finished);
+    page.off("requestfailed", failed);
+    page.off("close", closed);
+    page.off("crash", closed);
+  }).catch(async (error) => {
+    await page.close();
+    throw error;
+  });
+  joined.catch(() => {});
+  return joined;
+}
+
 const says = {
   en: ["Only requests through magpie use them; Antigravity itself stays signed in as it is.", "The gateway uses the first."],
   zh: ["只有经过 magpie 的请求会用这些账号；Antigravity 本身的登录不变。", "网关"],
@@ -52,16 +117,24 @@ for (const engine of engines) {
     for (const width of [1000, 560]) {
       test(`${engine} ${lang} ${width}px: Antigravity's Accounts say the app keeps its own sign-in`, async (t) => {
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-        t.after(() => browser.close());
+        let startup = Promise.resolve();
+        t.after(async () => {
+          try { await browser.close(); } finally { await startup.catch(() => {}); }
+        });
         const page = await browser.newPage({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
         page.setDefaultTimeout(5000);
         page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang));
+        const openProviders = async () => {
+          await startup;
+          startup = waitForStartup(page);
+          await page.goto("http://magpie.test/?view=providers");
+        };
         for (const routing of ["smart", ""]) {
           providers = [sub("antigravity", "Antigravity", "antigravity-color", "Antigravity", routing), sub("codex", "Codex", "openai", "Codex", "smart")];
-          await page.goto("http://magpie.test/?view=providers");
+          await openProviders();
           await page.locator(".row.provider", { hasText: "Antigravity" }).first().click();
           await page.locator(".editor .acc").first().waitFor();
           const text = await page.locator(".editor").innerText();
@@ -69,11 +142,12 @@ for (const engine of engines) {
           else assert.ok(text.includes(says[lang][1]), `without Routing, Antigravity's editor doesn't name the gateway:\n${text}`);
           if (signsIn[lang]) assert.ok(!text.includes(signsIn[lang]), "Antigravity's editor says the app signs in to the first");
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "the editor is wider than the window");
-          await page.goto("http://magpie.test/?view=providers");
+          await openProviders();
           await page.locator(".row.provider", { hasText: "Codex" }).first().click();
           await page.locator(".editor .acc").first().waitFor();
           assert.ok(!(await page.locator(".editor").innerText()).includes(says[lang][0].replace("Antigravity", "Codex")), "Codex's editor says its own sign-in stays");
         }
+        await startup;
         assert.deepEqual(errors, []);
       });
     }

@@ -32,6 +32,9 @@ type QuotaWindow struct {
 	Used      float64    `json:"used"`
 	ResetsAt  *time.Time `json:"resetsAt,omitempty"`
 	ResetSecs int64      `json:"resetSecs,omitempty"`
+	AsOf      *time.Time `json:"asOf,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Unknown   bool       `json:"unknown,omitempty"`
 	Display   string     `json:"display,omitempty"`
 	// Text is set on a window that is its Display alone, with no share
 	// to tell: a plugin's row of what an account holds or has done
@@ -162,20 +165,23 @@ type QuotaWindow struct {
 	// out: its Used is 0 for want of a share said, not a reading at 0, so
 	// quota history keeps no line for it (#4825). The card still tells
 	// the row's text and routing still sets it aside.
-	noShare bool
+	noShare              bool
+	amountPresence       uint8
+	balanceInformational bool
 }
 
 // SubscriptionQuota is provider-reported allowance usage. This is separate
 // from Dial's local token log: vendors expose percentages, not token totals.
 type SubscriptionQuota struct {
-	Provider  string        `json:"provider"`
-	Name      string        `json:"name"`
-	Icon      string        `json:"icon"`
-	Plan      string        `json:"plan,omitempty"`
-	AccessSKU string        `json:"accessSku,omitempty"`
-	User      string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
-	Windows   []QuotaWindow `json:"windows"`
-	Balance   string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
+	extensionUsage *extensionUsageProof
+	Provider       string        `json:"provider"`
+	Name           string        `json:"name"`
+	Icon           string        `json:"icon"`
+	Plan           string        `json:"plan,omitempty"`
+	AccessSKU      string        `json:"accessSku,omitempty"`
+	User           string        `json:"user,omitempty"` // the account, so two of one vendor tell apart
+	Windows        []QuotaWindow `json:"windows"`
+	Balance        string        `json:"balance,omitempty"` // what is left on an API key, instead of windows
 	// BalanceParts are the Balance's amounts each apart, when the balance
 	// field the user wrote has several or a percent (cardParts)
 	BalanceParts []BalancePart `json:"balanceParts,omitempty"`
@@ -414,6 +420,7 @@ func SubscriptionUsageReading() bool {
 
 // visibleQuotas drops accounts removed from magpie since the last refresh.
 func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
+	all = currentExtensionQuotas(slices.Clone(all))
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden || p.Off // switched off: not asked either
@@ -646,6 +653,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 	}
 	fetches = append(fetches, pluginUsageFetches(via, hidden, placed)...)
+	fetches = append(fetches, extensionUsageFetches(via, hidden)...)
 	// each fetch keeps what it read (keepLast) itself: an account's
 	// reading, shared with LoginUsage, is kept once
 	out := make([]SubscriptionQuota, len(fetches))
@@ -753,7 +761,7 @@ func claudeSubscriptionUsage(ctx context.Context, user string) SubscriptionQuota
 // readNow stamps a reading just made, one that doesn't say when it was
 // read itself, with the time.
 func readNow(q SubscriptionQuota) SubscriptionQuota {
-	if q.Error == "" && q.AsOf == nil && q.ReadAt == nil && (len(q.Windows) > 0 || q.Balance != "") {
+	if q.Error == "" && q.AsOf == nil && !q.ReadDeferred && q.ReadAt == nil && (len(q.Windows) > 0 || q.Balance != "") {
 		now := time.Now()
 		q.ReadAt = &now
 	}
@@ -1504,7 +1512,7 @@ func compactNumber(n float64) string {
 // "355 / 500 credits" used, or what is left of it when left (#659); the
 // vendor's Display when it doesn't count in amounts.
 func (w QuotaWindow) Count(left bool) string {
-	if w.Limit <= 0 {
+	if w.Limit <= 0 || w.amountPresence == quotaAmountAbsent {
 		return w.Display
 	}
 	n := w.Amount

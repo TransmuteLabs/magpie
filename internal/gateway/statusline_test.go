@@ -24,14 +24,15 @@ import (
 // never called) with a
 // key whose plan card is kept on disk with a 5 hours and a 7 days window,
 // as the status line reads it.
-func seedKeptPlan(t *testing.T, up string) {
+func seedKeptPlan(t *testing.T, up string) time.Time {
 	t.Helper()
 	if err := provider.Save(provider.Provider{ID: "alpha", Name: "Alpha", Key: "alpha-one", Chat: up + "/v1", Anthropic: "https://ollama.com", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("alpha-one"))
-	reset := time.Now().Add(2 * time.Hour)
-	kept := map[string]any{"alpha/plan " + hex.EncodeToString(sum[:8]): map[string]any{"at": time.Now().Add(-time.Minute), "quota": provider.SubscriptionQuota{
+	now := time.Now()
+	at, reset := now.Add(-3*time.Minute), now.Add(2*time.Hour)
+	kept := map[string]any{"alpha/plan " + hex.EncodeToString(sum[:8]): map[string]any{"at": at, "quota": provider.SubscriptionQuota{
 		Provider: "alpha",
 		Windows:  []provider.QuotaWindow{{Name: "5 hours", Used: 62, ResetsAt: &reset}, {Name: "7 days", Used: 41, ResetsAt: &reset}}}}}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(provider.Path()), "quotas.json"), mustJSON(kept), 0o600); err != nil {
@@ -40,6 +41,7 @@ func seedKeptPlan(t *testing.T, up string) {
 	provider.ForgetKeptCardsForTest()
 	provider.ForgetBalances()
 	provider.ForgetPlanQuotas()
+	return at
 }
 
 // Claude Code on another computer than the gateway (steven_4422: magpie in
@@ -54,7 +56,7 @@ func TestStatuslineEndpoint(t *testing.T) {
 		io.WriteString(w, `{"id":"ok","model":"m1","choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
 	}))
 	t.Cleanup(up.Close)
-	seedKeptPlan(t, up.URL)
+	at := seedKeptPlan(t, up.URL)
 	keys, secrets := newCaller(t, "Host", "Display", "Budget")
 	if _, err := access.Update("access-key", access.Change{Key: keys[1].ID, ReadOnly: true}); err != nil {
 		t.Fatal(err)
@@ -84,7 +86,7 @@ func TestStatuslineEndpoint(t *testing.T) {
 		t.Fatal("the session's turn failed")
 	}
 
-	const cards = "alpha* 5h 62% 7d 41%"
+	cards := "alpha* [as of " + at.Local().Format("2006-01-02 15:04") + "] 5h 62% 7d 41%"
 	const claudeCode = `{"cwd":"/home/me","session_id":"6f1d2c3a","version":"2.1.296"}`
 	// this computer: no key, as the CLI is
 	if c, b := do("POST", StatuslinePath, here, "", claudeCode); c != 200 || b != "→ alpha/m1 | "+cards+"\n" {
@@ -121,7 +123,7 @@ func TestStatuslineEndpoint(t *testing.T) {
 		t.Errorf("POST with a read-only key: %d %q", c, b)
 	}
 	// a key held to a budget is told none of the accounts
-	if c, b := do("POST", StatuslinePath, host, secrets[2], claudeCode); c != http.StatusForbidden || strings.Contains(b, "alpha 5h") {
+	if c, b := do("POST", StatuslinePath, host, secrets[2], claudeCode); c != http.StatusForbidden || strings.Contains(b, "alpha") {
 		t.Errorf("POST with a held key: %d %q", c, b)
 	}
 }
@@ -129,7 +131,7 @@ func TestStatuslineEndpoint(t *testing.T) {
 // seedKeptPlans saves alpha (keys One and Two, models m1 and m2) and beta
 // (one key, model o1), each key's plan card kept on disk with a 5 hours
 // and a 7 days window, as the status line reads them.
-func seedKeptPlans(t *testing.T) {
+func seedKeptPlans(t *testing.T) time.Time {
 	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -142,11 +144,13 @@ func seedKeptPlans(t *testing.T) {
 	if err := provider.Save(provider.Provider{ID: "beta", Name: "Beta", Key: "beta-key", Chat: up.URL + "/v1", Anthropic: "https://ollama.com", Models: []string{"o1"}}); err != nil {
 		t.Fatal(err)
 	}
-	soon, later := time.Now().Add(2*time.Hour), time.Now().Add(48*time.Hour)
+	now := time.Now()
+	at := now.Add(-time.Hour)
+	soon, later := now.Add(2*time.Hour), now.Add(48*time.Hour)
 	kept := map[string]any{}
 	for _, k := range []struct{ id, key, user string }{{"alpha", "alpha-one", "One"}, {"alpha", "alpha-two", "Two"}, {"beta", "beta-key", ""}} {
 		sum := sha256.Sum256([]byte(k.key))
-		kept[k.id+"/plan "+hex.EncodeToString(sum[:8])] = map[string]any{"at": time.Now().Add(-time.Hour), "quota": provider.SubscriptionQuota{
+		kept[k.id+"/plan "+hex.EncodeToString(sum[:8])] = map[string]any{"at": at, "quota": provider.SubscriptionQuota{
 			Provider: k.id, User: k.user,
 			Windows: []provider.QuotaWindow{{Name: "5 hours", Used: 62, ResetsAt: &soon}, {Name: "7 days", Used: 41, ResetsAt: &later}}}}
 	}
@@ -156,6 +160,7 @@ func seedKeptPlans(t *testing.T) {
 	provider.ForgetKeptCardsForTest()
 	provider.ForgetBalances()
 	provider.ForgetPlanQuotas()
+	return at
 }
 
 // steven_4422 (Discord): a key held to Claude's models got 403 from the
@@ -167,7 +172,7 @@ func seedKeptPlans(t *testing.T) {
 func TestStatuslineHeldKeyScope(t *testing.T) {
 	fresh(t)
 	t.Setenv("MAGPIE_ADDR", "")
-	seedKeptPlans(t)
+	at := seedKeptPlans(t)
 	p, err := provider.Find("alpha")
 	if err != nil {
 		t.Fatal(err)
@@ -212,20 +217,19 @@ func TestStatuslineHeldKeyScope(t *testing.T) {
 		return w.Code, w.Body.String()
 	}
 	const here, host = "127.0.0.1:5000", "192.168.1.9:5000"
-	// the cards a line names, by "provider user"
-	cards := func(line string) []string {
-		var out []string
-		for _, part := range strings.Split(strings.TrimSpace(line), " | ") {
-			if f := strings.Fields(part); len(f) > 0 && (f[0] == "alpha" || f[0] == "beta") {
-				name := f[0]
-				if len(f) > 1 && f[1] != "5h" {
-					name += " " + strings.TrimSuffix(f[1], "*")
-				}
-				out = append(out, name)
-			}
+	cardLines := func(line string) []string {
+		if strings.TrimSpace(line) == "" {
+			return nil
 		}
-		slices.Sort(out)
-		return out
+		lines := strings.Split(strings.TrimSpace(line), " | ")
+		slices.Sort(lines)
+		return lines
+	}
+	freshness := " [as of " + at.Local().Format("2006-01-02 15:04") + "] 5h 62% 7d 41%"
+	expectedCards := map[string]string{
+		"alpha One": "alpha One" + freshness,
+		"alpha Two": "alpha Two" + freshness,
+		"beta":      "beta" + freshness,
 	}
 	every := []string{"alpha One", "alpha Two", "beta"}
 	for _, c := range []struct {
@@ -239,12 +243,14 @@ func TestStatuslineHeldKeyScope(t *testing.T) {
 		// alpha/m2 spends alpha's windows too, and beta isn't its
 		{"a key held to some of alpha's models", host, secrets[4], nil},
 	} {
-		code, b := do(StatuslinePath, c.from, c.secret)
-		if code != 200 || !slices.Equal(cards(b), c.want) {
-			t.Errorf("%s: %d %q, want the cards %v", c.name, code, b, c.want)
+		wantCards := make([]string, len(c.want))
+		for index, name := range c.want {
+			wantCards[index] = expectedCards[name]
 		}
-		if c.want != nil && !strings.Contains(b, "5h 62% 7d 41%") {
-			t.Errorf("%s: %q has not the windows as read", c.name, b)
+		slices.Sort(wantCards)
+		code, b := do(StatuslinePath, c.from, c.secret)
+		if code != 200 || !slices.Equal(cardLines(b), wantCards) {
+			t.Errorf("%s: %d %q, want the cards %v", c.name, code, b, wantCards)
 		}
 		// the JSON tells the same cards, the line with them
 		code, b = do(StatuslinePath+"?format=json", c.from, c.secret)
@@ -259,12 +265,15 @@ func TestStatuslineHeldKeyScope(t *testing.T) {
 		var got []string
 		for _, q := range out.Accounts {
 			got = append(got, strings.TrimSpace(q.Provider+" "+q.User))
+			if q.AsOf == nil || !q.AsOf.Equal(at) {
+				t.Errorf("%s ?format=json: %s's asOf %v, want %v", c.name, q.Provider, q.AsOf, at)
+			}
 			if len(q.Windows) != 2 || q.Windows[0].Used != 62 || q.Windows[0].ResetsAt == nil || q.Windows[1].Used != 41 || q.Windows[1].ResetsAt == nil {
 				t.Errorf("%s ?format=json: %s's windows %+v", c.name, q.Provider, q.Windows)
 			}
 		}
 		slices.Sort(got)
-		if !slices.Equal(got, c.want) || !slices.Equal(cards(out.Text), c.want) {
+		if !slices.Equal(got, c.want) || !slices.Equal(cardLines(out.Text), wantCards) {
 			t.Errorf("%s ?format=json: %v and %q, want %v", c.name, got, out.Text, c.want)
 		}
 	}

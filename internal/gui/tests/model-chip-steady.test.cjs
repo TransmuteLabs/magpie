@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { showOtherModels } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -69,6 +70,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await page.locator(".row.provider", { hasText: "Relay" }).first().click();
           const chips = editor.locator(".mchips .mchip");
           await chips.first().waitFor();
+          if (chosen.length) await showOtherModels(page, editor, models.filter((m) => chosen.includes(m.id)).map((m) => m.name));
           // each chip's box within the list's own content, so that a scroll
           // of the page or the list (the click brings a chip into view at
           // 420px) is not counted as a chip moving

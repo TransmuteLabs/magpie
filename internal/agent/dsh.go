@@ -2304,6 +2304,10 @@ func dshRouteConfig(models []catalog.Model, api, gw string) dshPiRoute {
 func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute {
 	api = dshAPI(api, k.api)
 	r := dshPiRoute{DisplayName: k.name, APIKeyEnv: dshKeyRef, API: api, BaseURL: dshBaseURL(api, gw), Models: []dshPiModel{}, StreamIdleTimeoutMs: dshIdleWait}
+	var wires map[string]string
+	if api == "anthropic-messages" {
+		wires = provider.HeldSettings().Wires()
+	}
 	for _, m := range models {
 		e := dshPiModel{ID: m.ID, Name: m.Name, ContextWindow: m.Context}
 		if m.Output > 0 {
@@ -2324,8 +2328,14 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 		// a Gemini 3 or later: #6778) is asked adaptively too: pi-ai then
 		// sends the level itself, max as max (gateway.AsksAdaptively, the
 		// rule Pi's models.json is written by too)
-		case api == "anthropic-messages" && gateway.AsksAdaptively(m.ID):
-			e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
+		case api == "anthropic-messages":
+			wire := m.ID
+			if pid, model, ok := strings.Cut(m.ID, "/"); ok {
+				wire = provider.UpstreamNameIn(wires, pid, model)
+			}
+			if gateway.AsksAdaptively(m.ID) || gateway.AsksAdaptively(wire) {
+				e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
+			}
 		case api == "openai-responses":
 			// by the api the route stands on (the one the user picked in
 			// dsh's Models page kept), not by its name: a tool of a turn

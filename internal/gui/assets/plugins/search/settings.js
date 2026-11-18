@@ -494,6 +494,7 @@ function renderSearcher(s, keep, box) {
   const sub = el("div", "sub", off ? (s.searchAll ? t("When provider search is off, only configured Search APIs are used, for every model. Without a Search API, magpie does not add a search tool.") : t("When provider search is off, only configured Search APIs are used. Without a Search API, magpie does not add a search tool. Providers' native web search is unchanged.")) : t("When a model can't search the web directly, the selected provider searches for it and returns the results. Searches may use the service's quota or incur charges; if the provider magpie picks fails, it tries other available sources, and a provider you select here gives way to the ones you add after it, in their order, then, when it can't search at all (out of quota or rate-limited), to other available sources, then to your Search APIs."));
   if (!off && v && s.searchUnused) {
     const why = { gone: t("it is no longer in magpie"), off: t("it is turned off"), cant: t("it can't search the web by itself"), nomodel: t("it lists no model") }[s.searchUnused] || s.searchUnused;
+    sub.classList.add("warn-note");
     sub.append(" · ", el("span", "warn searcher-unused", t("{who} isn't used: {why}, so magpie picks one", { who: named(v), why })));
   }
   // the one named didn't search last time, and no other provider searched
@@ -506,6 +507,7 @@ function renderSearcher(s, keep, box) {
     const said = failed.instead ? t("{who} didn't search {when}: {why}. {next} searched in its place.", { who: named(failed.searcher), when: ago(failed.at), why, next: named(failed.instead) })
       : (s.searcherThen || []).length ? t("{who} didn't search {when}: {why}. The ones after it didn't search either; add another provider after it, or a Search API.", { who: named(v), when: ago(failed.at), why })
       : t("{who} didn't search {when}: {why}. No other provider searched in its place; pick Automatic or another provider, or add a Search API.", { who: named(v), when: ago(failed.at), why });
+    sub.classList.add("warn-note");
     sub.prepend(el("span", "warn searcher-failed", said), " · ");
   }
   const plans = choices.filter((c) => c.service).map((c) => c.name);

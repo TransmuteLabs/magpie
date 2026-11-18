@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { closeWithScreenshots } = require("./fixtures/browser-diagnostics.cjs");
 const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -101,13 +102,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     const pages = [];
-    t.after(async () => {
-      if (process.env.ARTIFACT_DIR) {
-        await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-        for (const [i, p] of pages.entries()) await p.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-usage-alert-${i}.png`) });
-      }
-      await browser.close();
-    });
+    t.after(() => closeWithScreenshots(browser, pages, process.env.ARTIFACT_DIR, (index) => `${engine}-usage-alert-${index}.png`));
 
     for (const lang of ["en", "zh"]) {
       const w = words[lang];

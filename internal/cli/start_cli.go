@@ -58,6 +58,9 @@ func startCmd(args []string) (ok bool, err error) {
 		return false, nil
 	}
 	s := a.Start()
+	if s.Err != nil {
+		return true, s.Err
+	}
 	if args[1] == "run" {
 		return true, startRun(s, args[2:])
 	}
@@ -68,8 +71,11 @@ func startCmd(args []string) (ok bool, err error) {
 		}
 		return true, fmt.Errorf("magpie %s env takes nothing after it, not %q", args[0], args[2])
 	}
-	if s.Model == "" {
+	if s.Model == "" && !s.Active {
 		return true, nil
+	}
+	if s.Active {
+		fmt.Println("active=1")
 	}
 	for _, kv := range s.Env {
 		fmt.Println(kv)
@@ -89,6 +95,13 @@ var startExec = startExecOS
 var startLook = proc.Look
 
 func startRun(s agent.Starting, args []string) error {
+	return startRunChecked(s, args, nil)
+}
+
+func startRunChecked(s agent.Starting, args []string, check func() error) error {
+	if s.Err != nil {
+		return s.Err
+	}
 	path, err := startLook(s.Bin)
 	if err != nil {
 		return fmt.Errorf("%s isn't installed, or isn't on your PATH", s.Bin)
@@ -99,18 +112,24 @@ func startRun(s agent.Starting, args []string) error {
 	env := os.Environ()
 	if slices.ContainsFunc(args, s.Plained) {
 		s.Model = ""
+		s.Active = false
 	}
-	if s.Model != "" {
+	if s.Model != "" || s.Active {
 		names := s.Names()
 		env = slices.DeleteFunc(env, func(kv string) bool {
 			k, _, _ := strings.Cut(kv, "=")
 			return slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(k, n) })
 		})
 		env = append(env, s.Env...)
-		if s.Flag != "" && !slices.ContainsFunc(args, s.Given) {
+		if s.Flag != "" && s.Model != "" && !slices.ContainsFunc(args, s.Given) {
 			args = append([]string{s.Flag, s.Model}, args...)
 		}
 		args = append(slices.Clone(s.Args), args...)
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	return startExec(path, s.Bin, args, env)
 }

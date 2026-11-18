@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -29,6 +31,13 @@ func TestDownloadRetriesAndReports(t *testing.T) {
 	sum := sha256.Sum256(body)
 	tries := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// only the file's own ask is counted: another process may ask
+		// this machine's addresses at any time, and that is not a try
+		// of this download.
+		if r.URL.Path != "/asset" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		tries++
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		if tries == 1 {
@@ -42,7 +51,7 @@ func TestDownloadRetriesAndReports(t *testing.T) {
 	var done, total int64
 	ctx := WithProgress(context.Background(), func(d, t int64) { done, total = d, t })
 	path := filepath.Join(t.TempDir(), "magpie.new")
-	if err := download(ctx, Asset{URL: srv.URL, SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
+	if err := download(ctx, Asset{URL: srv.URL + "/asset", SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
 		t.Fatal(err)
 	}
 	if tries != 2 {
@@ -196,9 +205,13 @@ func TestDownloadBadContentRangeIsFetchedWhole(t *testing.T) {
 // and the cause, not the signed address it was redirected to.
 func TestDownloadDroppedConnectionErrorKeepsAddressOut(t *testing.T) {
 	quickRetries(t)
-	tries := 0
+	var tries atomic.Int32
 	assets := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tries++
+		if r.Method != http.MethodGet || r.URL.Path != "/github-production-release-asset/1" {
+			http.NotFound(w, r)
+			return
+		}
+		tries.Add(1)
 		conn, _, _ := w.(http.Hijacker).Hijack()
 		conn.Close() // EOF, no answer at all
 	}))
@@ -213,8 +226,8 @@ func TestDownloadDroppedConnectionErrorKeepsAddressOut(t *testing.T) {
 	if err == nil || !Network(err) {
 		t.Fatalf("err = %v, want a network error", err)
 	}
-	if tries != len(retryWaits)+1 {
-		t.Fatalf("tries = %d, want %d", tries, len(retryWaits)+1)
+	if got := tries.Load(); got != int32(len(retryWaits)+1) {
+		t.Fatalf("tries = %d, want %d", got, len(retryWaits)+1)
 	}
 	if msg := err.Error(); strings.Contains(msg, "SECRET") || strings.Contains(msg, "http") || !strings.Contains(msg, "magpie.new") || !strings.Contains(msg, "EOF") {
 		t.Fatalf("error = %q", msg)
@@ -308,28 +321,43 @@ func TestDownloadStallIsTriedAgain(t *testing.T) {
 	}
 }
 
+type downloadTransport func(*http.Request) (*http.Response, error)
+
+func (transport downloadTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+type downloadReader func([]byte) (int, error)
+
+func (read downloadReader) Read(buffer []byte) (int, error) { return read(buffer) }
+
 // A stall that never ends is the network's, said so: tried every time
 // retryWaits allows, and the error names what happened.
 func TestDownloadStallEveryTimeSaysSo(t *testing.T) {
-	quickRetries(t)
-	old := stallAfter
-	stallAfter = 50 * time.Millisecond
-	t.Cleanup(func() { stallAfter = old })
-	var tries atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tries.Add(1)
-		<-r.Context().Done() // no answer at all
-	}))
-	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	err := download(ctx, Asset{URL: srv.URL, SHA256: "00"}, filepath.Join(t.TempDir(), "magpie.new"))
-	if err == nil || !Network(err) || !errors.Is(err, errStalled) || ctx.Err() != nil {
-		t.Fatalf("err = %v, want a stall", err)
-	}
-	if n := int(tries.Load()); n != len(retryWaits)+1 {
-		t.Fatalf("tries = %d, want %d", n, len(retryWaits)+1)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		quickRetries(t)
+		oldStall, oldClient := stallAfter, client
+		stallAfter = 50 * time.Millisecond
+		t.Cleanup(func() { stallAfter, client = oldStall, oldClient })
+		tries := 0
+		client = &http.Client{
+			Timeout: oldClient.Timeout,
+			Transport: downloadTransport(func(request *http.Request) (*http.Response, error) {
+				tries++
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		err := download(ctx, Asset{URL: "https://update.invalid/asset", SHA256: "00"}, filepath.Join(t.TempDir(), "magpie.new"))
+		if err == nil || !Network(err) || !errors.Is(err, errStalled) || ctx.Err() != nil {
+			t.Fatalf("err = %v, want a stall", err)
+		}
+		if tries != len(retryWaits)+1 {
+			t.Fatalf("tries = %d, want %d", tries, len(retryWaits)+1)
+		}
+	})
 }
 
 // A download still moving, however slowly, is never ended by a total time
@@ -338,43 +366,59 @@ func TestDownloadStallEveryTimeSaysSo(t *testing.T) {
 // takes ~1.2s, a byte every 100ms well inside the stall's while: one try
 // reads it whole, with no break and no retry.
 func TestDownloadSlowButMovingOutlastsTheClientTimeout(t *testing.T) {
-	quickRetries(t)
-	oldStall, oldClient := stallAfter, client
-	stallAfter = time.Second
-	client = &http.Client{Timeout: 300 * time.Millisecond, Transport: oldClient.Transport}
-	t.Cleanup(func() { stallAfter, client = oldStall, oldClient })
-	const chunk, chunks = 4 << 10, 12
-	body := make([]byte, chunk*chunks)
-	for i := range body {
-		body[i] = byte(i * 11)
-	}
-	sum := sha256.Sum256(body)
-	var tries atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tries.Add(1)
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		for i := 0; i < chunks; i++ {
-			if _, err := w.Write(body[i*chunk : (i+1)*chunk]); err != nil {
-				return
-			}
-			w.(http.Flusher).Flush()
-			time.Sleep(100 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		quickRetries(t)
+		oldStall, oldClient := stallAfter, client
+		stallAfter = time.Second
+		t.Cleanup(func() { stallAfter, client = oldStall, oldClient })
+		const chunk, chunks = 4 << 10, 12
+		const clientTimeout = 300 * time.Millisecond
+		body := make([]byte, chunk*chunks)
+		for index := range body {
+			body[index] = byte(index * 11)
 		}
-	}))
-	defer srv.Close()
-	var steps []string
-	ctx := WithStep(context.Background(), func(s string) { steps = append(steps, s) })
-	path := filepath.Join(t.TempDir(), "magpie.new")
-	if err := download(ctx, Asset{URL: srv.URL, Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
-		t.Fatalf("a moving download failed: %v", err)
-	}
-	if n := tries.Load(); n != 1 {
-		t.Fatalf("asked %d times, want one try that wasn't broken off", n)
-	}
-	if want := []string{StepDownload, StepVerify}; !slices.Equal(steps, want) {
-		t.Fatalf("steps = %q, want %q", steps, want)
-	}
-	if b, _ := os.ReadFile(path); !bytes.Equal(b, body) {
-		t.Fatalf("file has %d bytes, not the release's", len(b))
-	}
+		sum := sha256.Sum256(body)
+		tries := 0
+		client = &http.Client{
+			Timeout: clientTimeout,
+			Transport: downloadTransport(func(request *http.Request) (*http.Response, error) {
+				tries++
+				reader := bytes.NewReader(body)
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					ContentLength: int64(len(body)),
+					Body: io.NopCloser(downloadReader(func(buffer []byte) (int, error) {
+						if reader.Len() == 0 {
+							return 0, io.EOF
+						}
+						select {
+						case <-request.Context().Done():
+							return 0, request.Context().Err()
+						case <-time.After(100 * time.Millisecond):
+							return reader.Read(buffer[:min(len(buffer), chunk)])
+						}
+					})),
+				}, nil
+			}),
+		}
+		var steps []string
+		ctx := WithStep(context.Background(), func(step string) { steps = append(steps, step) })
+		path := filepath.Join(t.TempDir(), "magpie.new")
+		start := time.Now()
+		if err := download(ctx, Asset{URL: "https://update.invalid/asset", Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
+			t.Fatalf("a moving download failed: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed <= clientTimeout {
+			t.Fatalf("download took %s, want longer than the client's %s timeout", elapsed, clientTimeout)
+		}
+		if tries != 1 {
+			t.Fatalf("asked %d times, want one try that wasn't broken off", tries)
+		}
+		if want := []string{StepDownload, StepVerify}; !slices.Equal(steps, want) {
+			t.Fatalf("steps = %q, want %q", steps, want)
+		}
+		if got, _ := os.ReadFile(path); !bytes.Equal(got, body) {
+			t.Fatalf("file has %d bytes, not the release's", len(got))
+		}
+	})
 }

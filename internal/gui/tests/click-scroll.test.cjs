@@ -187,6 +187,38 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       }
     });
 
+    await t.test("replacing a control in a resized list keeps its stationary ancestor", async () => {
+      await reset();
+      await page.locator(view).evaluate((v) => {
+        const box = document.createElement("section");
+        box.id = "relayout-owner";
+        box.style.cssText = "flex:none;display:flex;flex-direction:column";
+        const list = document.createElement("div");
+        list.style.cssText = "height:139px;margin-top:12px;flex:none";
+        const button = document.createElement("button");
+        button.id = "relayout-control";
+        button.textContent = "Replace the list";
+        const after = document.createElement("button");
+        after.textContent = "Following control";
+        after.style.cssText = "height:28px;flex:none";
+        button.onclick = () => {
+          list.replaceChildren(button.cloneNode(true));
+          list.style.height = "180px";
+          list.style.marginTop = "0";
+        };
+        list.append(button);
+        box.append(list, after);
+        v.prepend(box);
+      });
+      const before = await top(page, "#relayout-owner");
+      await page.locator("#relayout-control").click();
+      await settle(page);
+      assert.equal(await page.locator(view).evaluate(v => v.scrollTop), 0,
+        "a following control must not pull the page away from its top");
+      assert.equal(await top(page, "#relayout-owner"), before,
+        "replacing list controls moved their stationary ancestor");
+    });
+
     // The browser tells of a scroll at the next frame. A scroll by code made
     // just before a click, and heard of only after it, was kept as where the
     // reader was (#1554: Playwright's click scrolled the skill picker's chip

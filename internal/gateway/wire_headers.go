@@ -86,7 +86,7 @@ func headerLogOf(ctx context.Context) *headerLog {
 func upstreamBegins(req *http.Request, plugin string) func(*http.Response, error) {
 	l := headerLogOf(req.Context())
 	if l == nil {
-		return func(*http.Response, error) {}
+		return func(res *http.Response, _ error) { observeUpstreamFailure(req.Context(), plugin, res) }
 	}
 	t := headerTry{method: req.Method, url: req.URL, sent: req.Header.Clone(), plugin: plugin, start: time.Now()}
 	if t.sent == nil {
@@ -96,6 +96,7 @@ func upstreamBegins(req *http.Request, plugin string) func(*http.Response, error
 		t.sent.Set("Host", req.Host)
 	}
 	return func(res *http.Response, err error) {
+		observeUpstreamFailure(req.Context(), plugin, res)
 		t.took = time.Since(t.start)
 		if err != nil {
 			t.err = err.Error()

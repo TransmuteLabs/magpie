@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -91,10 +92,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await chip.scrollIntoViewIfNeeded();
         const box = await chip.boundingBox();
         assert.ok(box && box.x >= 0 && box.x + box.width <= width, `the chip runs off the window: ${JSON.stringify(box)}`);
-        const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
-        const sc = await scrolled();
+        const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
         await chip.click();
-        assert.equal(await scrolled(), sc, "a click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
         assert.equal(await sideways(page), false, "the page scrolls sideways");
         assert.deepEqual(errors, []);
       });

@@ -89,7 +89,7 @@ while read -r line; do
     esac
     continue ;;
   esac
-  echo "told $line" >> $log
+  printf 'told %s\n' "$line" >> "$log"
   if [ -n "$file" ]; then printf '%s\n' "$line" >> "$file"; fi
   echo '{"type":"stream_event","event":{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}}'
   echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + strconv.Quote(reply) + `}}}'
@@ -137,6 +137,31 @@ func (h *resumeHarness) runs() map[string]string {
 		out[e.Name()] = string(b)
 	}
 	return out
+}
+
+func TestClaudeScriptHarnessLogsPromptVerbatim(t *testing.T) {
+	h := newResumeHarness(t)
+	h.ask("rules", "first\nsecond\tpath C:\\tmp\\literal")
+	files, err := filepath.Glob(filepath.Join(h.config, "projects", "*", "*.jsonl"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("expected one synthetic session: %v %v", files, err)
+	}
+	body, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(body), "\n") != 1 || !strings.Contains(string(body), `\n`) {
+		t.Fatalf("synthetic session lost its JSONL framing: %q", body)
+	}
+	logs := h.runs()
+	if len(logs) != 1 {
+		t.Fatalf("expected one synthetic process log: %v", logs)
+	}
+	for _, log := range logs {
+		if strings.Count(log, "told ") != 1 || !strings.Contains(log, "told "+string(body)) {
+			t.Fatalf("synthetic prompt log changed JSON bytes: %q", log)
+		}
+	}
 }
 
 // sessions is the session files there are.

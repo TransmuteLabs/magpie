@@ -149,7 +149,7 @@ test(`${engine}: the card's session line is the conversation's, as Usage's Conte
     assert.ok(lead, "the lead's card draws a session line");
     assert.equal(lead.n, 5, `the lead's line holds the lead's turns alone, got ${lead.n} (${lead.tip.join(", ")})`);
     assert.equal(lead.count, "5 requests", `the lead's line's count, got ${lead.count}`);
-    assert.deepEqual(lead.tip, ["Request 1: 96.1K tokens", "Request 2: 96.7K tokens", "Request 3: 98.9K tokens", "Request 4: 106K tokens", "Request 5: 108K tokens"],
+    assert.deepEqual(lead.tip, ["Request 1: 96.1K of 512K (19%)", "Request 2: 96.7K of 512K (19%)", "Request 3: 98.9K of 512K (19%)", "Request 4: 106K of 512K (21%)", "Request 5: 108K of 512K (21%)"],
       `the lead's line's points, got ${lead.tip.join(", ")}`);
 
     // a tool-less side call on its own card: its session's line, drawn by
@@ -160,7 +160,7 @@ test(`${engine}: the card's session line is the conversation's, as Usage's Conte
     assert.ok(side, "the side call's card draws");
     assert.equal(side.n, 5, `a side call is no turn of the conversation, got ${side.n} (${side.tip.join(", ")})`);
     assert.equal(side.count, "5 requests", `the side call's line's count, got ${side.count}`);
-    assert.deepEqual(side.tip, ["Request 1: 96.1K tokens", "Request 2: 96.7K tokens", "Request 3: 98.9K tokens", "Request 4: 106K tokens", "Request 5: 108K tokens"],
+    assert.deepEqual(side.tip, ["Request 1: 96.1K of 512K (19%)", "Request 2: 96.7K of 512K (19%)", "Request 3: 98.9K of 512K (19%)", "Request 4: 106K of 512K (21%)", "Request 5: 108K of 512K (21%)"],
       `the side call's card draws the session's own line, got ${side.tip.join(", ")}`);
     assert.equal(side.used, "7.2K", "the side call's own figure");
 

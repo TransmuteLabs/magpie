@@ -147,8 +147,17 @@ for (const [engine, browserType] of [["chromium", chromium], ["webkit", webkit]]
       await body.evaluate((b) => { b.scrollTop += 2000; });
       await page.waitForTimeout(150);
       const top = await d();
-      const pad = await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector("#modal")).paddingTop));
-      assert.ok(Math.abs(top.top - pad) <= 1, `${engine} ${at}: the sheet took the room above (top ${top.top}, padding ${pad})`);
+      const edge = await page.evaluate(() => {
+        const modal = document.querySelector("#modal"), dialog = modal.firstElementChild;
+        const body = dialog.querySelector(".ebody"), style = getComputedStyle(modal);
+        return {
+          top: modal.getBoundingClientRect().top + parseFloat(style.paddingTop),
+          room: modal.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+          need: dialog.offsetHeight + body.scrollHeight - body.clientHeight,
+        };
+      });
+      assert.ok(edge.need > edge.room, `${engine} ${at}: the grown accounts need the full available room`);
+      assert.ok(Math.abs(top.top - edge.top) <= 1, `${engine} ${at}: the sheet took the room above (top ${top.top}, edge ${edge.top})`);
       assert.deepEqual(errors, [], `${engine} ${at}: page errors`);
       await context.close();
     }

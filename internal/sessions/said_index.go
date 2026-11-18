@@ -44,6 +44,7 @@ import (
 	"unicode"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/extension"
 )
 
 // SaidHit is one session a search found, and the words round where.
@@ -118,13 +119,28 @@ func SaidPath() string { return filepath.Join(filepath.Dir(CachePath()), "said-v
 // SearchSaid finds needle (NeedleOf) in what was said in every agent's
 // sessions, or in agent's alone when it is given: at most limit hits.
 func SearchSaid(ctx context.Context, needle, agent string, limit int) (SaidFound, error) {
-	return saidIdx.search(ctx, needle, agent, limit)
+	return SearchSaidSince(ctx, needle, agent, time.Time{}, limit)
 }
 
 // SearchSaidSince is SearchSaid of the sessions last used at since or
 // after (`magpie sessions search --days`).
 func SearchSaidSince(ctx context.Context, needle, agent string, since time.Time, limit int) (SaidFound, error) {
+	if err := ctx.Err(); err != nil {
+		return SaidFound{Hits: []SaidHit{}}, err
+	}
+	if len(saidTerms(needle)) == 0 {
+		return SaidFound{Hits: []SaidHit{}}, ErrNoWords
+	}
+	if err := prepareSaidSources(ctx); err != nil {
+		return SaidFound{Hits: []SaidHit{}}, err
+	}
 	return saidIdx.searchSince(ctx, needle, agent, since, limit)
+}
+
+func prepareSaidSources(ctx context.Context) error {
+	preparing, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return PrepareSessionSources(preparing)
 }
 
 // SaidReady brings the index up to date as a search does, but waits for
@@ -132,6 +148,9 @@ func SearchSaidSince(ctx context.Context, needle, agent string, since time.Time,
 // search`) has no next search to find the rest by. progress, when
 // given, is told every second how far it got.
 func SaidReady(ctx context.Context, wait time.Duration, progress func(indexed, total int)) error {
+	if err := prepareSaidSources(ctx); err != nil {
+		return err
+	}
 	return saidIdx.ready(ctx, wait, progress)
 }
 
@@ -262,7 +281,15 @@ type saidRow struct {
 // refresh brings the index up to date with the sessions listed now: the
 // newest first, so a search while it is first made finds the latest.
 func (x *saidIndex) refresh(db *sql.DB) {
+	ctx := context.Background()
+	snapshot, err := inspectHistoryPublication(ctx)
+	if err != nil {
+		return
+	}
 	list := x.list()
+	if !snapshot.current(ctx) {
+		return
+	}
 	sort.SliceStable(list, func(i, j int) bool { return list[i].s.Last.After(list[j].s.Last) })
 	now := make(map[string]saidSession, len(list))
 	for _, ss := range list {
@@ -281,6 +308,9 @@ func (x *saidIndex) refresh(db *sql.DB) {
 	}
 	done := 0
 	for _, ss := range list {
+		if _, err := selectSessionHistoryOwner(ctx, ss.s); err != nil {
+			continue
+		}
 		if r, ok := rows[ss.s.Agent+":"+ss.s.ID]; ok && saidSame(ss, r) {
 			done++
 		}
@@ -300,6 +330,9 @@ func (x *saidIndex) refresh(db *sql.DB) {
 		}
 		k := ss.s.Agent + ":" + ss.s.ID
 		r, had := rows[k]
+		if _, err := selectSessionHistoryOwner(ctx, ss.s); err != nil {
+			continue
+		}
 		if had && saidSame(ss, r) {
 			continue
 		}
@@ -356,6 +389,11 @@ func saidDropIn(tx *sql.Tx, key string) error {
 // saidRead reads what was said in a session, from the byte from on when
 // it grows (else whole, its rows dropped first), into the index.
 func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) error {
+	ctx := context.Background()
+	owner, err := selectSessionHistoryOwner(ctx, ss.s)
+	if err != nil {
+		return err
+	}
 	var chunks []string
 	words := map[string]struct{}{}
 	flush := func() {
@@ -382,8 +420,7 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 		return true
 	}
 	upto := ss.size
-	var err error
-	if ss.grow {
+	if ss.grow && owner.mode == historyNative {
 		upto = lineEnd(ss.s.Path, ss.size)
 		if whole {
 			from = 0
@@ -395,9 +432,12 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 			err = claudeContentOf(c, claudeSaidLine, add)
 		}
 	} else {
-		err = readTranscriptOf(ss.s, nil, add)
+		err = readHistoryTranscript(ctx, owner, nil, add)
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if err := owner.check(ctx); err != nil {
 		return err
 	}
 	flush()
@@ -425,6 +465,9 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 		}
 	}
 	if _, err := tx.Exec(`INSERT INTO files(key, path, sig, upto) VALUES(?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET path = excluded.path, sig = excluded.sig, upto = excluded.upto`, key, ss.s.Path, ss.sig, upto); err != nil {
+		return err
+	}
+	if err := owner.check(ctx); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -588,12 +631,29 @@ func (x *saidIndex) search(ctx context.Context, needle, agent string, limit int)
 	return x.searchSince(ctx, needle, agent, time.Time{}, limit)
 }
 
-func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since time.Time, limit int) (SaidFound, error) {
-	out := SaidFound{Hits: []SaidHit{}}
+func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since time.Time, limit int) (out SaidFound, err error) {
+	out = SaidFound{Hits: []SaidHit{}}
 	terms := saidTerms(needle)
 	if len(terms) == 0 {
 		return out, ErrNoWords
 	}
+	snapshot, err := inspectHistoryPublication(ctx)
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		if canceled := ctx.Err(); canceled != nil {
+			out, err = SaidFound{Hits: []SaidHit{}}, canceled
+		} else if !snapshot.current(ctx) {
+			out, err = SaidFound{Hits: []SaidHit{}}, extension.ErrActionChanged
+		}
+		for _, hit := range out.Hits {
+			if _, changed := selectSessionHistoryOwner(ctx, hit.Session); changed != nil {
+				out, err = SaidFound{Hits: []SaidHit{}}, changed
+				return
+			}
+		}
+	}()
 	if limit <= 0 {
 		limit = 20
 	}
@@ -682,6 +742,9 @@ func saidSessions() []saidSession {
 
 // saidGrows: a session whose file is only added to, line by line.
 func saidGrows(s Session) bool {
+	if s.source != nil {
+		return false
+	}
 	switch s.Agent {
 	case "claude", "qoder", "qoder-cn", "codex":
 		return !packed(s.Path) && linesFile(s)

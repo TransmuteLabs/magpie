@@ -301,6 +301,7 @@ func quotaHistKey(provider, user string) string { return provider + "|" + string
 // Claude account's, kept until Claude Code tells it again) keeps its time
 // and so isn't taken for a new one.
 func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
+	qs = currentExtensionQuotas(slices.Clone(qs))
 	quotaHistMu.Lock()
 	defer quotaHistMu.Unlock()
 	path := quotaHistPath()
@@ -313,7 +314,7 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 	// not be read and parsed for that batch again (#1358).
 	skip := true
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil || q.Provider == "" {
+		if q.Error != "" || q.AsOf != nil || q.ReadDeferred || q.Provider == "" {
 			continue // a reading kept from before isn't a new one
 		}
 		at := now
@@ -332,7 +333,7 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 	var h quotaHist
 	changed := false
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil || q.Provider == "" {
+		if q.Error != "" || q.AsOf != nil || q.ReadDeferred || q.Provider == "" {
 			continue // a reading kept from before isn't a new one
 		}
 		at := now

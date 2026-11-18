@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,13 +19,14 @@ import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	extensionsdk "github.com/yetone/magpie/pkg/extension"
 	"golang.org/x/term"
 )
 
 const pluginUsage = `usage: magpie plugin [list] [--json]
        magpie plugin add <name | npm | git | path> install a community plugin by its name (workbuddy, think-tags, Qoder), an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts); npm:<name> is npm's package of a name a community plugin goes by
        magpie plugin rm <name>                     remove one
-       magpie plugin update                        install the newest version of each
+       magpie plugin update                        update legacy plugins and SDK modules; SDK release pins stay fixed
        magpie plugin on|off <name>                 turn one on or off
        magpie plugin options <name> [<json> | off] show or set what a plugin is handed: the switches it declares for its provider (as its editor's Plugin options), else a middleware's ctx.options
        magpie plugin use <name> <provider>         have this plugin serve a provider another plugin signs in to as well
@@ -34,6 +36,7 @@ const pluginUsage = `usage: magpie plugin [list] [--json]
        magpie plugin builtin [on|off <id>]         list magpie's built-in plugins (Sessions, Library, routing groups…), or turn one on or off
        magpie plugin preset essentials|all         start the built-in plugins from the Essentials preset, or from all of them
        magpie plugin registry [<url> | default]   show the npm registry plugins are installed from and npm is asked of, and where it comes from; or set one (an http:// or https:// address) before your .npmrc's, .bunfig.toml's and the 国内镜像 switch's, default to drop it
+       magpie plugin sdk <command>                 install and manage executable Go/Bun extensions (magpie plugin sdk --help)
        magpie plugin dump [--json]                 what plugins.yml comes to: each built-in plugin, its config, and the layer each value is from`
 
 // pluginCmd: `magpie plugin …` — OpenCode's provider plugins and pi's
@@ -48,11 +51,25 @@ func pluginCmd(args []string) error {
 	ctx, stop := interruptContext()
 	defer stop()
 	switch sub {
+	case "sdk", "extension":
+		return sdkPluginCmd(ctx, rest)
 	case "list", "ls", "--json":
 		return listPlugins(ctx, sub == "--json" || len(rest) > 0 && rest[0] == "--json")
 	case "add", "install":
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
+		}
+		if plugin.IsPath(rest[0]) {
+			info, err := os.Stat(rest[0])
+			if err == nil && info.IsDir() {
+				if _, err := os.Lstat(filepath.Join(rest[0], extensionsdk.ManifestFile)); err == nil {
+					return sdkPluginCmd(ctx, []string{"add", rest[0]})
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 		if !plugin.IsPath(rest[0]) && !plugin.HasBun() {
 			fmt.Println(muted.Render("Downloading Bun " + plugin.BunInUse() + ", which plugins run on…"))
@@ -86,12 +103,23 @@ func pluginCmd(args []string) error {
 		}
 		return nil
 	case "update", "upgrade":
-		if err := plugin.Update(ctx); err != nil {
-			return err
+		if len(rest) != 0 {
+			if len(rest) == 1 && (rest[0] == "--help" || rest[0] == "-h") {
+				fmt.Println(pluginUsage)
+				return nil
+			}
+			return errors.New(pluginUsage)
 		}
-		fmt.Println(green.Render("✓"), "plugins updated")
-		provider.HandOver(ctx, false)
-		return listPlugins(ctx, false)
+		return pluginUpdateAll(ctx, len(plugin.Load().Plugins) > 0, func(ctx context.Context) error {
+			if err := plugin.Update(ctx); err != nil {
+				return err
+			}
+			fmt.Println(green.Render("✓"), "legacy plugins updated")
+			provider.HandOver(ctx, false)
+			return listPlugins(ctx, false)
+		}, func(ctx context.Context) error {
+			return sdkPluginCmd(ctx, []string{"update"})
+		})
 	case "on", "off":
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
@@ -203,6 +231,14 @@ func pluginCmd(args []string) error {
 		return nil
 	}
 	return errors.New(pluginUsage)
+}
+
+func pluginUpdateAll(ctx context.Context, hasLegacy bool, updateLegacy, updateSDK func(context.Context) error) error {
+	var legacyErr error
+	if hasLegacy {
+		legacyErr = updateLegacy(ctx)
+	}
+	return errors.Join(legacyErr, updateSDK(ctx))
 }
 
 func listPlugins(ctx context.Context, asJSON bool) error {

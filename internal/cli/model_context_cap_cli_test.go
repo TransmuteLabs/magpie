@@ -12,7 +12,7 @@ import (
 // as it was (WJaunita45604 on X).
 func TestModelContextCapCmd(t *testing.T) {
 	groupsHome(t)
-	catalog.Changed = nil // no agent's files are rewritten here
+	catalog.SetChanged(nil) // no agent's files are rewritten here
 	if err := modelCmd([]string{"context-cap", "200k"}); err != nil || settings.Load().ContextCap != 200000 {
 		t.Fatal(err, settings.Load().ContextCap)
 	}

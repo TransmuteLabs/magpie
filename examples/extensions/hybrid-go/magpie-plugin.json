@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "sdk-hybrid-go",
+  "version": "1.0.0",
+  "runtime": "native",
+  "entry": "lib/primary.so",
+  "contract": {
+    "version": {"major": 1, "minor": 1},
+    "capabilities": ["module-rpc", "tool-provider", "model-discovery", "account-auth"]
+  },
+  "compatibility": {
+    "hostAPI": "^1.1",
+    "nativeABI": 1,
+    "platforms": ["darwin/arm64", "darwin/amd64", "linux/arm64", "linux/amd64", "windows/amd64", "windows/arm64", "freebsd/amd64"]
+  },
+  "providers": [{
+    "id": "hybrid-fixture",
+    "name": "Hybrid fixture (offline)",
+    "protocols": ["chat"],
+    "models": [{"id": "hybrid-fixture", "name": "Synthetic model"}]
+  }],
+  "tools": [
+    {"name": "stream", "description": "Stream fixture bytes", "inputSchema": {"type": "object"}},
+    {"name": "wait", "description": "Wait for cancellation", "inputSchema": {"type": "object"}},
+    {"name": "forward", "description": "Stream then forward", "inputSchema": {"type": "object"}}
+  ],
+  "actions": [
+    {"id": "pid", "inputSchema": {"type": "object"}, "effect": "read"},
+    {"id": "forward", "inputSchema": {"type": "object"}, "effect": "write"},
+    {"id": "backend.pid", "component": "backend", "inputSchema": {"type": "object"}, "effect": "read"},
+    {"id": "backend.run", "component": "backend", "inputSchema": {"type": "object"}, "effect": "write"}
+  ],
+  "services": [{
+    "id": "backend",
+    "runtime": "exec",
+    "entry": "bin/backend",
+    "contract": {"id": "hybrid-backend", "version": 1},
+    "methods": ["backend.pid", "backend.run"],
+    "start": "lazy",
+    "ready": {"timeoutMs": 10000, "httpEndpoints": ["ui"]}
+  }],
+  "window": {"metadata": "package.json"},
+  "bindings": [
+    {"id": "controller.run", "from": "primary", "action": "backend.run"},
+    {"id": "page.pid", "from": "window:page", "action": "pid"},
+    {"id": "page.forward", "from": "window:page", "action": "forward"},
+    {"id": "page.backend", "from": "window:page", "action": "backend.pid"},
+    {"id": "page.service", "from": "window:page", "service": "backend", "endpoint": "ui"}
+  ]
+}

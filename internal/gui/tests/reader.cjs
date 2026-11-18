@@ -1,3 +1,5 @@
+const assert = require("node:assert/strict");
+
 // The app deliberately undoes unsolicited scrollIntoView (including Playwright's
 // automatic scroll). Bring a control into sight with real wheel input first.
 // Wholly in sight: one cut off by a fraction of a pixel at the view's foot
@@ -176,6 +178,8 @@ const settingsDrawn = (page) => page.waitForFunction(() => load.done && __settin
 // test's whole timeout over a tab that isn't moving (#2150). Enter on the
 // focused button clicks it with no frame to wait for.
 async function openPart(page, id) {
+  const folded = page.locator('#prefs[aria-current="page"][aria-expanded="false"]');
+  if (await folded.count()) await folded.press("Enter");
   await page.locator(`:is(#setTab-${id}, .nav-s[data-of=setTab-${id}]):visible`).press("Enter");
 }
 
@@ -329,7 +333,7 @@ async function closeRequest(page) {
 // on a phone's tab bar where it is past the fifth, More and then its row in
 // More's menu (phonetabs.js).
 async function openPage(page, view) {
-  const tab = page.locator(`#nav [data-view="${view}"]`);
+  const tab = page.locator(`#nav button[data-view="${view}"]`);
   if (await tab.isVisible()) await tab.click();
   else {
     await page.locator("#nav .nav-more").click();
@@ -339,4 +343,32 @@ async function openPage(page, view) {
   await page.locator(`#view-${view}`).waitFor();
 }
 
-module.exports = { openPage, openRequest, closeRequest, provPrefsProviders, openProvPrefs, inEditor, settled, inView, reach, wheelTo, click, openPart, watchSettingsReads, settingsDrawn, agentRow, openAgentSettings, pickItem };
+async function showOtherModels(page, editor, expectedIds) {
+  const chosen = () => editor.locator(".mchips .mchip.on").evaluateAll((chips) => chips.map((chip) => chip.dataset.model || chip.querySelector("span").textContent).sort());
+  const expected = [...expectedIds].sort();
+  assert.deepEqual(await chosen(), expected, "original chosen IDs before catalog exposure");
+  const more = editor.locator(".mchips .mchips-rest");
+  await inEditor(page, more);
+  await more.click();
+  await settled(page);
+  assert.deepEqual(await chosen(), expected, "catalog exposure keeps the chosen IDs");
+}
+
+async function scrollPositions(page, { axes = "xy", windowAxes = "xy", positiveY = false, exclude = "" } = {}) {
+  return page.evaluate(({ axes, windowAxes, positiveY, exclude }) => {
+    const owner = (element) => {
+      if (element.id && document.querySelectorAll("#" + CSS.escape(element.id)).length === 1) return "#" + element.id;
+      const path = [];
+      for (let node = element; node.parentElement; node = node.parentElement) path.unshift([...node.parentElement.children].indexOf(node));
+      return path.join(".");
+    };
+    return JSON.stringify([
+      ...(windowAxes ? [windowAxes === "y" ? ["window", window.scrollY] : ["window", window.scrollX, window.scrollY]] : []),
+      ...[...document.querySelectorAll("*")]
+        .filter((element) => !(exclude && element.matches(exclude)) && (axes === "y" ? (positiveY ? element.scrollTop > 0 : !!element.scrollTop) : (element.scrollTop || element.scrollLeft)))
+        .map((element) => axes === "y" ? [owner(element), element.scrollTop] : [owner(element), element.scrollLeft, element.scrollTop]),
+    ]);
+  }, { axes, windowAxes, positiveY, exclude });
+}
+
+module.exports = { scrollPositions, showOtherModels, openPage, openRequest, closeRequest, provPrefsProviders, openProvPrefs, inEditor, settled, inView, reach, wheelTo, click, openPart, watchSettingsReads, settingsDrawn, agentRow, openAgentSettings, pickItem };

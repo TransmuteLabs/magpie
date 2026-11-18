@@ -1445,7 +1445,7 @@ func marshalRaw(v any, escapeHTML bool) (_ []byte, ok bool) {
 				return nil, false
 			}
 			dst = append(dst, ':')
-			if dst, ok = appendRawJSON(dst, v[k], escapeHTML); !ok {
+			if dst, ok = appendRawJSON(dst, v[k], escapeHTML, 1); !ok {
 				return nil, false
 			}
 		}
@@ -1464,7 +1464,7 @@ func marshalRaw(v any, escapeHTML bool) (_ []byte, ok bool) {
 			if i > 0 {
 				dst = append(dst, ',')
 			}
-			if dst, ok = appendRawJSON(dst, raw, escapeHTML); !ok {
+			if dst, ok = appendRawJSON(dst, raw, escapeHTML, 1); !ok {
 				return nil, false
 			}
 		}
@@ -1495,15 +1495,15 @@ func appendJSONKey(dst []byte, key string, escapeHTML bool) ([]byte, bool) {
 
 // appendRawJSON is what encoding/json writes of raw as a json.RawMessage:
 // null for nil, and otherwise raw compacted (appendCompactJSON); false
-// when raw isn't valid JSON.
-func appendRawJSON(dst []byte, raw json.RawMessage, escapeHTML bool) ([]byte, bool) {
+// when raw isn't valid JSON at the enclosing container's depth.
+func appendRawJSON(dst []byte, raw json.RawMessage, escapeHTML bool, depth int) ([]byte, bool) {
 	if raw == nil {
 		return append(dst, "null"...), true
 	}
 	if !jsonCheck(raw) {
 		return dst, false
 	}
-	return appendCompactJSON(dst, raw, escapeHTML), true
+	return appendCompactJSON(dst, raw, escapeHTML, depth)
 }
 
 // appendCompactJSON is encoding/json's appendCompact of src, a valid JSON
@@ -1511,7 +1511,11 @@ func appendRawJSON(dst []byte, raw json.RawMessage, escapeHTML bool) ([]byte, bo
 // U+2028, U+2029 escaped when escapeHTML, as json.Marshal writes them.
 // Those are only ever in a string, where a valid value's space is too, so
 // strings are copied whole, or looked through for those alone.
-func appendCompactJSON(dst, src []byte, escapeHTML bool) []byte {
+func appendCompactJSON(dst, src []byte, escapeHTML bool, depth int) ([]byte, bool) {
+	if !escapeHTML && (bytes.Contains(src, []byte("\u2028")) || bytes.Contains(src, []byte("\u2029"))) {
+		return appendEncodedRawJSON(dst, src, escapeHTML, depth)
+	}
+	initialDepth, initialSize := depth, len(dst)
 	start := 0
 	for i := 0; i < len(src); {
 		switch c := src[i]; {
@@ -1527,11 +1531,35 @@ func appendCompactJSON(dst, src []byte, escapeHTML bool) []byte {
 			dst = append(dst, src[start:i]...)
 			i++
 			start = i
+		case c == '{' || c == '[':
+			depth++
+			if depth > jsonMaxDepth {
+				return appendEncodedRawJSON(dst[:initialSize], src, escapeHTML, initialDepth)
+			}
+			i++
+		case c == '}' || c == ']':
+			depth--
+			i++
 		default:
 			i++
 		}
 	}
-	return append(dst, src[start:]...)
+	return append(dst, src[start:]...), true
+}
+
+func appendEncodedRawJSON(dst, src []byte, escapeHTML bool, depth int) ([]byte, bool) {
+	var value any = json.RawMessage(src)
+	for range depth {
+		value = []any{value}
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(escapeHTML)
+	if err := encoder.Encode(value); err != nil {
+		return dst, false
+	}
+	raw := bytes.TrimSuffix(encoded.Bytes(), []byte("\n"))
+	return append(dst, raw[depth:len(raw)-depth]...), true
 }
 
 // appendHTMLEscaped is s with <, >, & and U+2028, U+2029 as \u escapes.
@@ -1927,7 +1955,11 @@ func jsonStringSize(s string) int {
 			continue
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
-		if r == utf8.RuneError && size == 1 || r == '\u2028' || r == '\u2029' {
+		if r == utf8.RuneError && size == 1 {
+			encoded, _ := json.Marshal(s)
+			return len(encoded)
+		}
+		if r == '\u2028' || r == '\u2029' {
 			n += 6
 		} else {
 			n += size
@@ -1938,10 +1970,11 @@ func jsonStringSize(s string) int {
 }
 
 // appendJSONString appends s as encoding/json writes a string, its HTML
-// characters escaped: invalid UTF-8 as \ufffd, and U+2028 and U+2029
-// escaped.
+// characters and U+2028/U+2029 escaped, and invalid UTF-8 replaced by the
+// standard encoder.
 func appendJSONString(dst []byte, s string) []byte {
 	const hex = "0123456789abcdef"
+	base := len(dst)
 	dst = append(dst, '"')
 	start := 0
 	for i := 0; i < len(s); {
@@ -1974,11 +2007,8 @@ func appendJSONString(dst []byte, s string) []byte {
 		}
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
-			dst = append(dst, s[start:i]...)
-			dst = append(dst, `\ufffd`...)
-			i += size
-			start = i
-			continue
+			encoded, _ := json.Marshal(s)
+			return append(dst[:base], encoded...)
 		}
 		if r == '\u2028' || r == '\u2029' {
 			dst = append(dst, s[start:i]...)

@@ -203,7 +203,7 @@ func setClaudeEnvTokenLocked(token string) error {
 		return err
 	}
 	if has && cur == token {
-		return nil
+		return claudeSettingsPrivate(path)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

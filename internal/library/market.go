@@ -458,7 +458,7 @@ func serverKey(s *Server) string {
 	if s.Remote() {
 		return strings.TrimSuffix(strings.ToLower(s.URL), "/")
 	}
-	if len(s.Args) == 2 && s.Args[0] == "mcp" && (s.Args[1] == "image" || s.Args[1] == "browser" || s.Args[1] == "search" || s.Args[1] == "vision" || s.Args[1] == "memory" || s.Args[1] == "sessions") {
+	if len(s.Args) == 2 && ownServer(s) && (s.Args[1] == "image" || s.Args[1] == "browser" || s.Args[1] == "search" || s.Args[1] == "vision" || s.Args[1] == "memory" || s.Args[1] == "sessions") {
 		return "magpie mcp " + s.Args[1] // magpie's own, wherever its binary is
 	}
 	uv := progName(s.Command) == "uvx"

@@ -88,7 +88,7 @@ func piFilesIn(dir, sessionDir string) []file {
 	if d := piSubagentSessionDir(dir); d != "" {
 		out = piSubagentFiles(out, d)
 	}
-	return out
+	return extensionOMPFileOwners(out)
 }
 
 // piNamed are the Pi session files among paths, <time>_<id>.jsonl, each

@@ -92,11 +92,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await atPointer(page, page.locator(row), page.locator(".row-menu"));
         };
         const ticked = () => item().locator("path").getAttribute("d").then((d) => d === CHECK);
+        const toggleSync = async () => {
+          const saved = page.waitForResponse((response) =>
+            new URL(response.url()).pathname === "/api/agents/here" && response.request().method() === "POST"
+          );
+          await item().click();
+          assert.equal((await saved).status(), 200);
+          await page.waitForFunction(() => !document.querySelector(".row-menu"));
+        };
 
         await open();
         assert.equal(await ticked(), false, "ticked before it was turned on");
-        await item().click();
-        await page.waitForFunction(() => !document.querySelector(".row-menu"));
+        await toggleSync();
         assert.deepEqual(posts, [{ agent: "codex", on: true }]);
         const tag = page.locator(`${row} .ag-here`);
         if (where === "panel") assert.equal(await tag.count(), 0, "the panel's row has no room for it");
@@ -114,9 +121,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await ticked(), true, "not ticked once on");
 
         // off again: the tick and the words go
-        await item().click();
-        await page.waitForFunction(() => !document.querySelector(".row-menu"));
-        assert.deepEqual(posts.at(-1), { agent: "codex", on: false });
+        await toggleSync();
+        assert.deepEqual(posts, [{ agent: "codex", on: true }, { agent: "codex", on: false }]);
         await page.waitForFunction((sel) => !document.querySelector(sel), `${row} .ag-here`);
         await open();
         assert.equal(await ticked(), false, "still ticked once off");

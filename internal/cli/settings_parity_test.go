@@ -120,9 +120,15 @@ func TestSettingsCLISetsWhatTheWindowSaves(t *testing.T) {
 		}
 	}
 	for _, k := range settingsapi.Keys {
-		if _, own := ownRoute[k]; !own && !slices.Contains(gui, k) {
+		if _, own := ownRoute[k]; !own && !slices.Contains(gui, k) && k != "requestPolicy" {
 			t.Errorf("`magpie settings` sets %q, which no page sends", k)
 		}
+	}
+	// Request policy is structured operator configuration exposed by the shared
+	// settings API and CLI, without a page editor (subsystems/request-policy.md).
+	// Keep this explicit exception only until a page owns its editing contract.
+	if slices.Contains(gui, "requestPolicy") || !settingsapi.Known("requestPolicy") {
+		t.Fatal("update the structured requestPolicy CLI-only exception")
 	}
 }
 
@@ -180,6 +186,7 @@ const (
 
 // cliForRoute is the command that does what a route does, as `magpie …`.
 var cliForRoute = map[string]string{
+	"POST /api/provider/extension-options": "magpie plugin sdk provider-options",
 	"GET /api/agent-models/{id}":           "magpie models",
 	"GET /api/settings":                    "magpie settings list",
 	"POST /api/settings":                   "magpie settings set",
@@ -215,11 +222,16 @@ var cliForRoute = map[string]string{
 	"POST /api/library/{what}/{action}":    "magpie library",
 	"GET /api/plugins":                     "magpie plugin",
 	"POST /api/plugins/{op}":               "magpie plugin",
+	"POST /api/plugin-pages/call":          "magpie plugin sdk call", // module.call invokes the action named by the UI binding
+	"POST /api/plugin-pages/accounts":      "magpie plugin sdk accounts",
+	"POST /api/plugin-pages/auth":          "magpie plugin sdk auth",
+	"POST /api/plugin-pages/config":        "magpie plugin sdk config", // module configuration read/CAS
 	"GET /api/login/usage":                 "magpie quota",
 	"GET /api/providers":                   "magpie providers",
 	"POST /api/provider/{action}":          "magpie provider",
 	"POST /api/providers/delete":           "magpie provider rm",
 	"GET /api/sessions/reads":              "magpie sessions read",
+	"GET /api/sessions/sources":            "magpie sessions sources",
 	"POST /api/sessions/reads":             "magpie sessions read",
 	"GET /api/sessions":                    "magpie sessions",
 	"GET /api/sessions/said":               "magpie sessions search",
@@ -240,6 +252,10 @@ var cliForRoute = map[string]string{
 	"POST /api/update/install":             "magpie update",
 	"GET /api/model-price":                 "magpie model price",
 	"POST /api/model-price":                "magpie model price",
+
+	"GET /api/sessions/storage-sources":         "magpie sessions sources list",
+	"POST /api/sessions/storage-sources/bind":   "magpie sessions sources bind",
+	"POST /api/sessions/storage-sources/unbind": "magpie sessions sources unbind",
 }
 
 var notYet = map[string]string{
@@ -448,11 +464,13 @@ var notYet = map[string]string{
 	"GET /api/omarchy/widget":                    W,  // omarchy.go
 	"POST /api/omarchy/widget":                   W,  // omarchy.go
 	"GET /api/plugin-pages":                      W,  // pluginpage.go
+	"GET /api/plugin-pages/changes":              W,  // extension_window.go: the parent bridge waits for window revision changes
 	"GET /api/plugin-panels":                     W,  // pluginpage.go
 	"POST /api/plugin-pages/image":               W,  // pageimage.go
 	"POST /api/plugin-pages/arrange":             W,  // pluginpage.go: the sidebar's order of plugin pages, dragged
 	"POST /api/plugin-pages/options":             W,  // pluginpage.go
 	"POST /api/plugin-pages/read":                W,  // pluginpage.go
+	"POST /api/plugin-pages/history":             W,  // parent-frame history bridge; requires the selected window's consent/reference
 	"GET /api/plugins/agents":                    P,  // plugins.go
 	"GET /api/plugins/git":                       P,  // plugins.go
 	"GET /api/plugins/github":                    P,  // plugins.go
@@ -554,6 +572,8 @@ var notYet = map[string]string{
 	"GET /api/whatsnew":                          W,  // whatsnew.go
 	"POST /api/whatsnew/seen":                    W,  // whatsnew.go
 	"POST /api/whatsnew/today":                   W,  // whatsnew.go
+
+	"GET /api/sessions/storage-media": "selected storage media bytes have no CLI export command",
 }
 
 // guiRoutes are the /api routes internal/gui serves, as "METHOD /path".

@@ -74,6 +74,9 @@ func PluginErrors() map[string]string {
 	out := map[string]string{}
 	home, cfg := homes()
 	pluggedAgents(home, builtins(home, cfg), out)
+	all := builtins(home, cfg)
+	all = append(all, pluggedAgents(home, all, nil)...)
+	extensionAgents(home, all, out)
 	return out
 }
 

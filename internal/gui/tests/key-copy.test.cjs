@@ -10,6 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(process.env.ASSET_DIR || path.resolve(__dirname, "../assets"));
 const full = { aaaaaaaaaa: "sk-full-one", bbbbbbbbbb: "sk-full-two", cccccccccc: "sk-full-off" };
@@ -68,17 +69,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator(".editor .accts .acc.add").waitFor();
         const row = (id) => page.locator(`.editor .accts.keys .acc[data-account-id="${id}"]`);
         for (const id of Object.keys(full)) assert.equal(await row(id).locator("button.copy").count(), 1, `${id} has no Copy`);
-        const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
 
         for (const [id, say] of [["bbbbbbbbbb", words[lang].b], ["cccccccccc", words[lang].off]]) {
           const b = row(id).locator("button.copy");
           await b.scrollIntoViewIfNeeded();
           const box = await b.boundingBox();
           assert.ok(box && box.x >= 0 && box.x + box.width <= width, `${id}'s Copy off the row: ${JSON.stringify(box)}`);
-          const sc = await scrolled();
+          const sc = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true });
           await b.click();
           await page.waitForFunction((n) => document.querySelector("#status")?.textContent.includes(n), say);
-          assert.equal(await scrolled(), sc, "a click scrolled");
+          assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true }), sc, "a click scrolled");
           assert.equal(await row(id).locator(".rename-in").count(), 0, "the click renamed the key");
         }
         assert.deepEqual(asked, [{ id: "relay", account: "bbbbbbbbbb" }, { id: "relay", account: "cccccccccc" }]);

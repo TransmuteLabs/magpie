@@ -52,6 +52,9 @@ func helpFor(args []string) string {
 		}
 		return "  " + libraryUsage
 	case "plugin", "plugins":
+		if len(args) > 1 && (args[1] == "sdk" || args[1] == "extension") {
+			return sdkPluginUsage
+		}
 		return pluginUsage
 	case "quota", "quotas":
 		return quotaUsage
@@ -107,8 +110,9 @@ func helpFor(args []string) string {
 			return lines
 		}
 	}
-	if a, err := agent.Find(cmd); err == nil && cmd != "" {
-		return agentHelp(a)
+	all := agent.All()
+	if a, err := agent.FindIn(all, cmd); err == nil && cmd != "" {
+		return agentHelp(a, all)
 	}
 	return usage
 }
@@ -133,12 +137,15 @@ func usageLines(cmd string) string {
 
 // agentHelp is `magpie <agent> --help`: the forms that set it, and its
 // fields.
-func agentHelp(a *agent.Agent) string {
+func agentHelp(a *agent.Agent, agents ...[]*agent.Agent) string {
 	var b strings.Builder
 	id := a.ID
 	fmt.Fprintf(&b, "%s\n\n", a.Name)
 	fmt.Fprintf(&b, "  magpie %s                  show it\n", id)
 	if len(a.Fields) == 0 {
+		if a.Native != nil {
+			fmt.Fprintf(&b, "  magpie %s default          take magpie out: back on what it had before\n", id)
+		}
 		return b.String()
 	}
 	fmt.Fprintf(&b, "  magpie %s <model>          set its model   (magpie models %s lists them)\n", id, id)
@@ -147,7 +154,11 @@ func agentHelp(a *agent.Agent) string {
 	fmt.Fprintf(&b, "  magpie %s default          take magpie out: back on what it had before\n", id)
 	fmt.Fprintf(&b, "  magpie %s <field> default  that field back to its own default\n", id)
 	if a.Start != nil {
-		bin := a.Start().Bin
+		var all []*agent.Agent
+		if len(agents) != 0 {
+			all = agents[0]
+		}
+		bin := agent.HelpBin(a, all)
 		fmt.Fprintf(&b, "  magpie %s run [args…]      start %s, on magpie while its model is magpie's (what your shell's %s runs)\n", id, bin, bin)
 		fmt.Fprintf(&b, "  magpie %s env              the variables and model it is started with\n", id)
 	}

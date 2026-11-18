@@ -149,7 +149,7 @@ func (s *Server) drawArk(ctx context.Context, p provider.Provider, model string,
 		url = strings.TrimRight(p.Base(provider.Responses), "/")
 	}
 	url += "/images/generations"
-	return s.eachDrawing(max(d.N, 1), func() (drawn, int, error) {
+	return s.eachDrawing(ctx, p, max(d.N, 1), func(ctx context.Context) (drawn, int, error) {
 		b, code, err := s.send(ctx, p, url, "application/json", body, true)
 		if err != nil {
 			return drawn{}, code, err

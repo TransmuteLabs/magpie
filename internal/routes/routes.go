@@ -174,12 +174,14 @@ func Find(routing string) (Strategy, bool) {
 		return Smart, true
 	}
 	reg.RLock()
-	defer reg.RUnlock()
 	l := reg.m[routing]
 	if len(l) == 0 {
-		return Strategy{}, false
+		reg.RUnlock()
+		return discoveredStrategy(routing)
 	}
-	return *l[len(l)-1], true
+	strategy := *l[len(l)-1]
+	reg.RUnlock()
+	return strategy, true
 }
 
 // Served says whether routing is served now.

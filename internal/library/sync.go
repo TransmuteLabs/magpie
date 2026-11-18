@@ -93,8 +93,8 @@ func (l *Library) sync() *Result {
 	if b == nil {
 		b = newBackups()
 	}
-	all := Targets()
-	for _, step := range syncSteps(all, l.held(all), b, res) {
+	all, _, gone := selectTargets(false, l.hasTarget)
+	for _, step := range syncSteps(all, gone, b, res) {
 		step(l)
 	}
 	res.Backup = b.dir
@@ -193,7 +193,7 @@ func Sync() (*Result, error) {
 	}
 	// the agents are found under the lock, as a change finds them
 	var npxDirs map[string]bool
-	if err := step(func(l *Library) { all = Targets(); gone = l.held(all); npxDirs = l.npxDirs() }); err != nil {
+	if err := step(func(l *Library) { all, _, gone = selectTargets(false, l.hasTarget); npxDirs = l.npxDirs() }); err != nil {
 		return nil, err
 	}
 	for _, f := range syncSteps(all, gone, b, res) {
@@ -665,7 +665,7 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	}
 	// the agents are found once for the whole read: finding them looks
 	// through every agent's folders, in WSL too (#1624)
-	targets, asleep := targetsAsleep(false)
+	targets, asleep, gone := selectTargets(false, l.hasTarget)
 	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, Partial: glance}
 	for _, t := range targets {
 		av := AgentView{ID: t.Agent.ID, Name: t.Agent.Name, Icon: t.Agent.Icon, Instructions: t.Instructions, Skills: t.Skills,
@@ -714,7 +714,6 @@ func readView(problems []Problem, glance bool) (*View, error) {
 	}
 	// an agent gone from here that still has what magpie gave it: listed on
 	// the rows of what it has, for that to be taken out (held)
-	gone := l.held(targets)
 	for _, t := range gone {
 		av := AgentView{ID: t.Agent.ID, Name: t.Agent.Name, Icon: t.Agent.Icon, Skills: t.Skills, Gone: true}
 		if t.MCP != nil {

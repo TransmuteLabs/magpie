@@ -54,6 +54,7 @@ func TestRestartBySelfComesBackQuietly(t *testing.T) {
 	if quiet, _ := takeQuietRestart(); quiet {
 		t.Fatal("the start after a clicked restart is quiet")
 	}
+	updates.restartClaimed.Store(false)
 
 	// by itself: marked, read once, never minimised (no window asked for)
 	if !restartBySelf() {
@@ -65,6 +66,7 @@ func TestRestartBySelfComesBackQuietly(t *testing.T) {
 	if quiet, _ := takeQuietRestart(); quiet {
 		t.Fatal("the mark is read twice")
 	}
+	updates.restartClaimed.Store(false)
 
 	// magpie web restarts in place: nothing to mark
 	if !restartInto(true, false, "", true) {
@@ -74,6 +76,7 @@ func TestRestartBySelfComesBackQuietly(t *testing.T) {
 	if quiet, _ := takeQuietRestart(); quiet {
 		t.Fatal("a web restart marked the app's next start quiet")
 	}
+	updates.restartClaimed.Store(false)
 
 	// the new version refused (#894): this one runs on, unmarked
 	refuse = true
@@ -135,6 +138,7 @@ func TestRestartBySelfComesBackToTheTray(t *testing.T) {
 	if !restartBySelf() {
 		t.Fatal("restart by itself failed")
 	}
+	updates.restartClaimed.Store(false)
 	if !restartToUpdate(false, true, "") {
 		t.Fatal("restart to update failed")
 	}

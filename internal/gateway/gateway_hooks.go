@@ -6,13 +6,12 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 )
 
 // gatewayResponse observes the bytes delivered to the client without changing
 // them. The caller runs done after middleware has finished writing its reply.
-func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Protocol, body []byte, run *plugin.GatewayRun) (http.ResponseWriter, func()) {
+func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Protocol, body []byte, run gatewayHookRun) (http.ResponseWriter, func()) {
 	capture := &conversationWriter{captureResponseWriter: &captureResponseWriter{
 		ResponseWriter: w, full: &spool{limit: conversationBodyMax, pattern: "magpie-hook-*"},
 	}}

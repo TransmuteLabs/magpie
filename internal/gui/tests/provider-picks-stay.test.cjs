@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { showOtherModels } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -94,6 +95,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // or Forget, and the editor left for GPT Relay's before the list is in
       for (const [action, label] of [["models", w.refresh], ["unfetch", w.forget]]) {
         await open("Claude Relay");
+        await showOtherModels(page, editor, claude.chosen);
         await editor.locator(".mchips .mchip", { hasText: "claude-sonnet-4-6" }).click();
         assert.deepEqual(await picks(), ["claude-opus-4-6", "claude-sonnet-4-6"]);
         shut();
@@ -123,6 +125,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // Forget: one made before the Save, and an id its vendor doesn't
       // list, typed in, which stays picked as one added by hand
       await open("Claude Relay");
+      await showOtherModels(page, editor, claude.chosen);
       await editor.locator(".mchips .mchip", { hasText: "claude-haiku-4-5" }).click();
       const add = editor.locator(".mfoot input");
       await add.fill("claude-mine-1");

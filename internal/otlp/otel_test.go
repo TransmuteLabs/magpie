@@ -219,6 +219,10 @@ func TestOTelRetriesOnlyRetryableResponses(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var calls atomic.Int32
 			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				if calls.Add(1) == 1 {
 					w.WriteHeader(status)
 				} else {
@@ -226,6 +230,13 @@ func TestOTelRetriesOnlyRetryableResponses(t *testing.T) {
 				}
 			}))
 			defer collector.Close()
+			for range 2 {
+				unrelated, err := http.Get(collector.URL + "/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				unrelated.Body.Close()
+			}
 			otelConfig(t, settings.OTel{Endpoint: collector.URL})
 			e := newOTelExporter()
 			defer e.cancel()

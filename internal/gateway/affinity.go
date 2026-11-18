@@ -27,6 +27,7 @@ package gateway
 // it cached at the one before (vincentzhang on Discord).
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"net/http"
@@ -1549,13 +1550,17 @@ func withoutKinds(body []byte, kinds ...string) ([]byte, bool) {
 // first sealed; a moment's wait costs far less. Strict needs none of it:
 // its one is the last left, asked again as the last one is.
 func keptAgain(aff *Affinity, c candidate, hw *holdWriter, asked bool) (time.Duration, bool) {
+	return keptAgainFor(context.Background(), aff, c, hw, asked)
+}
+
+func keptAgainFor(ctx context.Context, aff *Affinity, c candidate, hw *holdWriter, asked bool) (time.Duration, bool) {
 	if asked || aff == nil || !aff.Kept || aff.Why == "strict" || c.rest != aff.Last {
 		return 0, false
 	}
 	if !hw.failed() || hw.turnedAway || hw.refused || hw.code() == http.StatusTooManyRequests || !busy(hw.code(), hw.errBody()) {
 		return 0, false
 	}
-	return passing(hw.code(), hw.header, hw.errBody(), 0)
+	return passingFor(ctx, c.p.ID, hw.code(), hw.header, hw.errBody(), 0)
 }
 
 // cacheHolds says whether what the conversation has cached would keep it

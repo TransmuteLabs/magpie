@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openPage } = require("./reader.cjs");
 
 const assets = path.resolve(process.env.ASSET_DIR || path.resolve(__dirname, "../assets"));
 const later = new Date(Date.now() + 3 * 864e5).toISOString();
@@ -73,13 +74,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.keyboard.press("Escape");
         await page.locator(".editor").waitFor({ state: "detached" });
 
-        await page.locator('button[data-view="usage"]').first().click();
+        await openPage(page, "usage");
         await page.locator(".quota-resets button", { hasText: w.use }).click();
         await page.locator(".reset-ask button.primary").click();
         await page.locator(".reset-ask").waitFor({ state: "detached" });
         await page.locator(".quota-resets", { hasText: w.two }).waitFor();
 
-        await page.locator('button[data-view="providers"]').first().click();
+        await openPage(page, "providers");
         await openEditor();
         await page.waitForFunction((two) => document.querySelector('.editor .acc[data-account-id="me@example.com"] .aq-resets')?.textContent.trim() === two, w.two, { timeout: 3000 })
           .catch(async () => assert.fail(`the editor still says ${(await resetsIn.textContent()).trim()} (login/usage asked: ${seen})`));

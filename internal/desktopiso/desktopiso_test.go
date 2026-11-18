@@ -2,6 +2,7 @@ package desktopiso
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"image"
@@ -154,10 +155,14 @@ func TestScriptFindsClaudeMoved(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	out := filepath.Join(home, "args")
-	fakeClaude(t, filepath.Join(home, "Applications"), out)
+	app := fakeClaude(t, filepath.Join(home, "Applications"), out)
+	exe := "magpie-test-" + rand.Text()
+	if err := os.Rename(filepath.Join(app, "Contents", "MacOS", "Claude"), filepath.Join(app, "Contents", "MacOS", exe)); err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(home, "iso-3p")
 	s := filepath.Join(home, "run.sh")
-	os.WriteFile(s, []byte(Script(filepath.Join(home, "Gone", "Claude.app"), "Claude", dir, "")), 0o755)
+	os.WriteFile(s, []byte(Script(filepath.Join(home, "Gone", "Claude.app"), exe, dir, "")), 0o755)
 	if b, err := exec.Command(s).CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, b)
 	}

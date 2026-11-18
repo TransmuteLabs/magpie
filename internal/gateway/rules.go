@@ -86,7 +86,8 @@ type RuleHit struct {
 	UseEffort string `json:"useEffort,omitempty"`
 	// members are the models of the member the rule names, as the group
 	// whose rule it is has them (ruleOver): who UseEffort is for
-	members []provider.Member
+	members  []provider.Member
+	terminal error
 }
 
 // Classified is what the classifier was asked as a turn began, and said.
@@ -353,10 +354,10 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			c.Error = "the message has no words to classify"
 		default:
 			t0 := time.Now()
-			v, cached, err := classify(ask, classifierHeld(g, ms), g.Classifier, intents, prev, effort, text)
+			v, err := ask(classifierHeld(g, ms), g.Classifier, intents, prev, effort, text)
 			classifiedFor(g.ID, g.Classifier, err)
 			v.Intent = intentOf(v, g) // the group's own sure of an intent (#5101)
-			c.Intent, c.Said, c.Cached, c.Ms = v.Intent, v.Said, cached, int(time.Since(t0).Milliseconds())
+			c.Intent, c.Said, c.Cached, c.Ms = v.Intent, v.Said, v.cached, int(time.Since(t0).Milliseconds())
 			if effort {
 				c.Effort, c.Score = v.Effort, v.Score
 			}
@@ -365,6 +366,10 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			}
 			if err != nil {
 				c.Error = err.Error()
+				if terminalExtensionError(err) {
+					hit.Classified, hit.terminal = c, err
+					return hit
+				}
 				if c.After != "" {
 					// timed out, failed or resting: the intent the turn
 					// before had, still one of this turn's, is a better
@@ -555,6 +560,9 @@ func (s *Server) nestedRules(at string, req *Request, agent string, ask classifi
 		h := ruleFor(at, sub, subMs, req, agent, ask, picked)
 		keys = append(keys, at)
 		out = append(out, NestedRule{Group: sub.ID, Name: sub.Name, Rule: h})
+		if h != nil && h.terminal != nil {
+			break
+		}
 		if h != nil && h.Pick != "" && picked == "" {
 			picked = h.Pick
 		}

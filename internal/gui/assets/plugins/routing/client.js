@@ -8435,8 +8435,9 @@ function routingPage(part) {
     firstIn.oninput = () => {
       const v = firstIn.value.trim().replace(",", ".");
       const n = /^\d+(?:\.\d+)?$/.test(v) ? Math.round(+v * 60) : 0;
-      firstErr = n > 0 ? "" : t("{v} is not a number of minutes", { v: firstIn.value.trim() });
-      if (n > 0) d.firstToken = n;
+      const valid = n > 0 && n <= Math.floor(2 ** 63 / 1e9);
+      firstErr = valid ? "" : t("{v} is not a number of minutes", { v: firstIn.value.trim() });
+      if (valid) d.firstToken = n;
       drawFirst();
     };
     advIn.append(el("label", "", t("Slow to start")), fw);
@@ -8492,8 +8493,9 @@ function routingPage(part) {
     ctxIn.oninput = () => {
       const m = ctxIn.value.trim().toLowerCase().replace(/_/g, "").match(/^(\d+(?:\.\d+)?)\s*([km]?)$/);
       const n = m ? Math.round(+m[1] * (m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1)) : 0;
-      ctxErr = n > 0 ? "" : t("{v} is not a length of tokens like 200k or 1m", { v: ctxIn.value.trim() });
-      if (n > 0) d.context = n;
+      const valid = Number.isSafeInteger(n) && n > 0;
+      ctxErr = valid ? "" : t("{v} is not a length of tokens like 200k or 1m", { v: ctxIn.value.trim() });
+      if (valid) d.context = n;
       drawCtx();
     };
     advIn.append(el("label", "", t("Context window")), ctxW);
@@ -8511,12 +8513,13 @@ function routingPage(part) {
     cmpIn.oninput = () => {
       const v = cmpIn.value.trim().toLowerCase().replace(/_/g, ""), m = v.match(/^(\d+(?:\.\d+)?)\s*([km]?)$/);
       const n = m ? Math.round(+m[1] * (m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1)) : 0;
-      cmpErr = !v || n > 0 ? "" : t("{v} is not a length of tokens like 200k or 1m", { v: cmpIn.value.trim() });
+      const valid = Number.isSafeInteger(n) && n > 0;
+      cmpErr = !v || valid ? "" : t("{v} is not a length of tokens like 200k or 1m", { v: cmpIn.value.trim() });
       cmpIn.setAttribute("aria-invalid", String(!!cmpErr));
       cmpHint.textContent = cmpErr;
       cmpHint.hidden = !cmpErr;
       if (!v) d.compact = 0;
-      else if (n > 0) d.compact = n;
+      else if (valid) d.compact = n;
     };
     cmpW.append(cmpIn, cmpHint);
     advIn.append(el("label", "", t("Compact at")), cmpW);
@@ -9356,7 +9359,7 @@ function routingPage(part) {
       if (addPattern() === null) return adv.open = true, pin.focus({ preventScroll: true }); // typed, not added: it is meant
       // a box under Advanced that doesn't read keeps its last good value: never saved as if it did
       const bad = [[firstErr, firstIn], [ctxErr, ctxIn], [cmpErr, cmpIn]].find(([e]) => e);
-      if (bad) { adv.open = true; bad[1].focus({ preventScroll: true }); return status(bad[0], "warn"); }
+      if (bad) { adv.open = true; bad[1].focus({ preventScroll: true }); return; }
       if (!d.members.length && !d.match.length) { addBtn.focus({ preventScroll: true }); return status(t("A group needs a model in it"), "warn"); }
       d.rules.forEach((r) => { r.intent = (r.intent || "").trim(); });
       // hours: both times, or none and no days; days alone are all day

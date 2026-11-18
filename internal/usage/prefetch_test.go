@@ -84,7 +84,10 @@ func TestPrefetchEachMakeIsAReadersOwn(t *testing.T) {
 		sources = append(sources, sessions.CallSource{Path: fmt.Sprint(i)})
 	}
 	var makes atomic.Int32
+	var makers sync.WaitGroup
+	makers.Add(5)
 	read := prefetchEach(sources, func(s sessions.CallSource) bool { return s.Path != "3" }, func() func(sessions.CallSource) string {
+		defer makers.Done()
 		makes.Add(1)
 		seen := map[string]bool{} // unlocked, as a reader's memo is
 		return func(s sessions.CallSource) string {
@@ -98,6 +101,7 @@ func TestPrefetchEachMakeIsAReadersOwn(t *testing.T) {
 			t.Fatalf("source %d: %q", i, got)
 		}
 	}
+	makers.Wait()
 	if n := makes.Load(); n != 5 { // 4 readers and the loop's own
 		t.Fatalf("%d makes, want 5", n)
 	}

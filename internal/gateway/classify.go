@@ -86,6 +86,7 @@ type verdict struct {
 	Effort string  // the reasoning the turn wants; "" when not asked
 	Score  float64 // how hard the classifier took the turn to be, from 0 (low) to 3 (xhigh)
 	Sure   float64 // how confident Jev was of the intent, from 0 to 1
+	cached bool
 }
 
 var classified = struct {
@@ -126,8 +127,9 @@ type classifiedAs struct {
 }
 
 type classifyFailure struct {
-	err string
-	at  time.Time
+	err   string
+	at    time.Time
+	cause error
 }
 
 // answerError is a classifier that answered, but not with one of the
@@ -158,35 +160,56 @@ func cutShort(model string, wait, full time.Duration) error {
 // on, so one account's limit rests the classifier for the groups held to
 // it alone.
 func classify(ask classifier, held access.Identity, model string, intents []string, prev before, effort bool, text string) (v verdict, cached bool, err error) {
+	return classifyContext(context.Background(), ask, held, model, intents, prev, effort, text)
+}
+
+func classifyContext(ctx context.Context, ask classifier, held access.Identity, model string, intents []string, prev before, effort bool, text string) (v verdict, cached bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return verdict{}, false, err
+	}
 	rest := model
 	if len(held.Accounts) > 0 {
-		rest += "\x00" + strings.Join(held.Accounts, "\x00")
+		accounts := slices.Clone(held.Accounts)
+		for index, account := range accounts {
+			accounts[index] = strings.ToLower(strings.TrimSpace(account))
+		}
+		slices.Sort(accounts)
+		scope, _ := json.Marshal(slices.Compact(accounts))
+		rest += "\x00" + string(scope)
 	}
 	h := sha256.New()
 	h.Write([]byte(model + "\x00" + strings.ToLower(strings.Join(intents, "\x00")) + "\x00" + prev.Intent + "\x00" + prev.Effort + "\x00" + prev.User + "\x00" + prev.Reply + "\x00" + strconv.FormatBool(effort) + "\x00" + text))
 	key := hex.EncodeToString(h.Sum(nil))
+	flight := key + "\x00" + rest
 	now := time.Now()
 	classified.Lock()
 	if c, ok := classified.m[key]; ok && now.Sub(c.at) < classifyKeep {
 		classified.Unlock()
 		return c.v, true, nil
 	}
-	if c, ok := classified.inflight[key]; ok {
+	if c, ok := classified.inflight[flight]; ok {
 		classified.Unlock()
-		<-c.done
-		return c.v, c.err == nil, c.err
+		select {
+		case <-c.done:
+			return c.v, c.err == nil, sharedClassifierError(c.err)
+		case <-ctx.Done():
+			return verdict{}, false, ctx.Err()
+		}
 	}
 	if f, ok := classified.failed[rest]; ok && now.Sub(f.at) < classifyRest {
 		classified.Unlock()
+		if f.cause != nil {
+			return verdict{}, false, fmt.Errorf("%s failed %s ago; not asked again for now: %w", model, now.Sub(f.at).Round(time.Second), f.cause)
+		}
 		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
 	}
 	c := &classifyCall{done: make(chan struct{}), err: errors.New("classifier did not finish")}
-	classified.inflight[key] = c
+	classified.inflight[flight] = c
 	classified.Unlock()
 	// Release waiters even if ask panics; its caller still sees the panic.
 	defer func() {
 		classified.Lock()
-		delete(classified.inflight, key)
+		delete(classified.inflight, flight)
 		close(c.done)
 		classified.Unlock()
 	}()
@@ -196,7 +219,11 @@ func classify(ask classifier, held access.Identity, model string, intents []stri
 	c.err = err
 	if err != nil {
 		f := classifyFailure{err: err.Error(), at: time.Now()}
-		if !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
+		terminal := terminalExtensionError(err)
+		if terminal {
+			f.cause = sharedClassifierError(err)
+		}
+		if (ctx.Err() == nil || terminal) && !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
 			classified.failed[rest] = f
 		}
 		if was, ok := classified.last[model]; !ok || was.err != f.err {
@@ -458,13 +485,15 @@ func classifierEffortField(model string) string { return "classifier effort\x00"
 // relay that knows no reasoning_effort, one that takes none of the
 // levels — is asked again without it, as before, and from then on: the
 // classifier answers wherever it did.
-func (s *Server) askLeast(wait time.Duration, held access.Identity, model string, body func(effort string) []byte) (string, error) {
+func (s *Server) askLeast(ctx context.Context, wait time.Duration, model string, body func(effort string) []byte) (string, error) {
+	ctx, cancel := context.WithTimeoutCause(ownAsk(ownOperation(ctx)), wait, sideTimedOut{"decision model", wait})
+	defer cancel()
 	effort := classifyEffort(model)
 	p, m, ok := provider.Resolve(model)
 	if effort != "" && ok && !s.fits(p.ID, classifierEffortField(m), provider.Chat) {
 		effort = ""
 	}
-	a, err := s.askChat(wait, held, model, body(effort))
+	a, err := s.askChat(ctx, wait, model, body(effort))
 	var f chatFailed
 	if effort == "" || !errors.As(err, &f) {
 		return a, err
@@ -473,7 +502,7 @@ func (s *Server) askLeast(wait time.Duration, held access.Identity, model string
 		return a, err
 	}
 	s.markUnfit(p.ID, classifierEffortField(m), provider.Chat)
-	return s.askChat(wait, held, model, body(""))
+	return s.askChat(ctx, wait, model, body(""))
 }
 
 // chatFailed is a classifier's answer that was an error, with its status
@@ -501,7 +530,7 @@ func (s *Server) askWaited(ctx context.Context) classifier {
 	// for it (accountHolds): only the accounts, not the key's models, as
 	// the classifier is the group's pick, not the caller's
 	caller := access.Caller(ctx)
-	return func(held access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+	ask := func(who access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 		mu.Lock()
 		now := time.Now()
 		if until.IsZero() {
@@ -513,8 +542,13 @@ func (s *Server) askWaited(ctx context.Context) classifier {
 			return verdict{}, waitSpent{fmt.Errorf("%s not asked: the request's classifier wait of %s was spent by the routing group above", model, classifyTimeout())}
 		}
 		defer noteWait(ctx, "decision model")()
+		return s.askClassifierWithContext(access.WithIdentity(ctx, who), left, model, intents, prev, effort, text)
+	}
+	return func(held access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 		who := access.Identity{Accounts: caller.Accounts, Group: caller.Group}.HeldToGroup(held.Group, held.Accounts)
-		return s.askClassifierIn(left, who, model, intents, prev, effort, text)
+		v, cached, err := classifyContext(ctx, ask, who, model, intents, prev, effort, text)
+		v.cached = cached
+		return v, err
 	}
 }
 
@@ -530,11 +564,16 @@ func (s *Server) askClassifier(model string, intents []string, prev before, effo
 // classifier's wait or what a request has left of it (askWaited), held
 // to who's accounts, when it names any.
 func (s *Server) askClassifierIn(wait time.Duration, who access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+	return s.askClassifierWithContext(access.WithIdentity(context.Background(), who), wait, model, intents, prev, effort, text)
+}
+
+func (s *Server) askClassifierWithContext(ctx context.Context, wait time.Duration, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+	ctx = withRequestPolicy(ctx)
 	if p, m, ok := provider.Resolve(model); ok && p.DecidesModel(m) {
-		return s.askDecider(wait, who, p, m, intents, prev, effort, text)
+		return s.askDeciderWithContext(ctx, wait, p, m, intents, prev, effort, text)
 	}
 	// a group of decision models: each in turn (decide_group.go)
-	if v, ok, err := s.askDecisionGroup(wait, who, model, intents, prev, effort, text); ok {
+	if v, ok, err := s.askDecisionGroupWithContext(ctx, wait, model, intents, prev, effort, text); ok {
 		return v, err
 	}
 	var v verdict
@@ -545,7 +584,7 @@ func (s *Server) askClassifierIn(wait time.Duration, who access.Identity, model 
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, ierr = s.askLeast(wait, who, model, func(effort string) []byte { return classifyBody(model, effort, intents, prev, text) }); ierr == nil {
+			if a, ierr = s.askLeast(ctx, wait, model, func(effort string) []byte { return classifyBody(model, effort, intents, prev, text) }); ierr == nil {
 				v.Intent, v.Said, ierr = readIntent(a, intents)
 			}
 		}()
@@ -555,13 +594,13 @@ func (s *Server) askClassifierIn(wait time.Duration, who access.Identity, model 
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, eerr = s.askLeast(wait, who, model, func(effort string) []byte { return effortBody(model, effort, prev, text) }); eerr == nil {
+			if a, eerr = s.askLeast(ctx, wait, model, func(effort string) []byte { return effortBody(model, effort, prev, text) }); eerr == nil {
 				v.Effort, v.Score, eerr = readEffort(a)
 			}
 		}()
 	}
 	wg.Wait()
-	if ierr != nil {
+	if ierr != nil && !terminalExtensionError(eerr) {
 		return verdict{}, ierr
 	}
 	return v, eerr
@@ -624,27 +663,19 @@ func readEffort(answer string) (string, float64, error) {
 
 // askChat sends a chat model body through the gateway and returns its
 // answer's text, if it comes in wait.
-// held, when it names accounts, holds it to them, as heldByGroup does a
-// request through a group.
-//
-// A call the wait ends is magpie's own limit running out, as an image's
-// description's is (sideTimedOut, #2318): the usage log said "the agent
-// canceled the request", a 499 no failure, though no agent had
-// (ESern29751 on X).
-func (s *Server) askChat(wait time.Duration, held access.Identity, model string, body []byte) (string, error) {
-	ctx, cancel := context.WithTimeoutCause(context.Background(), wait, sideTimedOut{"decision model", wait})
-	defer cancel()
+// The caller's accounts hold it as heldByGroup holds a request through a group.
+func (s *Server) askChat(ctx context.Context, wait time.Duration, model string, body []byte) (string, error) {
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://magpie/v1/chat/completions", nil)
 	if err != nil {
 		return "", err
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("User-Agent", RouterAgent)
-	if len(held.Accounts) > 0 {
-		r = r.WithContext(access.WithIdentity(r.Context(), held))
-	}
+	r = r.WithContext(context.WithValue(ctx, callerCtx{}, callerFrom(r)))
 	w := httptest.NewRecorder()
-	s.serve(w, r, provider.Chat, body)
+	if err := s.serve(w, r, provider.Chat, body); terminalExtensionError(err) {
+		return "", err
+	}
 	if ctx.Err() != nil {
 		if full := classifyTimeout(); wait < full {
 			return "", cutShort(model, wait, full)

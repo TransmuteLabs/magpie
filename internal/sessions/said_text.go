@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode"
@@ -91,16 +92,20 @@ type ReadAsk struct {
 // SessionText is s's conversation as text: the prompts, the replies and
 // the tools called, shortened, each message numbered.
 func SessionText(s Session, ask ReadAsk, how TextHow) (string, error) {
+	return SessionTextContext(context.Background(), s, ask, how)
+}
+
+func SessionTextContext(ctx context.Context, s Session, ask ReadAsk, how TextHow) (string, error) {
 	var tr Transcript
 	var err error
 	from := max(ask.From, 0)
 	if needle := NeedleOf(ask.Find); needle != "" && from == 0 {
-		tr, err = TranscriptAt(s, needle)
+		tr, err = TranscriptAtContext(ctx, s, needle)
 		if err == nil {
 			from = max(tr.From, textNear(tr, needle)-textLead)
 		}
 	} else {
-		tr, err = TranscriptOf(s)
+		tr, err = TranscriptOfContext(ctx, s)
 	}
 	if err != nil {
 		return "", err

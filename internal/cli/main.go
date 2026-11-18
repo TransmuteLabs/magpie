@@ -178,6 +178,8 @@ const usage = `magpie — one place to pick every agent's model
                                   every agent's sessions that said those words, newest first, with where
   magpie sessions show <agent:id> [--find <words>] [--from N] [--max-chars N] [--json]
                                   one session's conversation as text, from where the words were said
+  magpie sessions sources [--json]   SDK history source status and checked native bindings
+  magpie sessions sources list [--json]   storage roots and their checked read consent
   magpie quota [<provider>] [--json]  what is left of every subscription, plan and key balance
   magpie quota wait <provider|account> [--timeout <d>] [--quiet]
                                   block until that subscription (any of its accounts) or account has allowance again
@@ -285,7 +287,7 @@ var tuiRun = tui.Run
 // in files of their own are brought up to date behind the save, which
 // answers without waiting for every agent's files to be written (on
 // Windows, half a second for each one another program holds open).
-func syncAgentsOnChange() { catalog.Changed = agent.SyncCatalogSoon }
+func syncAgentsOnChange() { catalog.SetChanged(agent.SyncCatalogSoon) }
 
 // startUp brings the files magpie and its agents keep up to what this
 // magpie reads, before a command that may read them; a var so a test can
@@ -339,11 +341,11 @@ func servesPages(args []string) bool {
 func run(args []string) error {
 	// a command that saved a provider or a group ends with the agents'
 	// files written, which its save no longer waits for; and a test's run
-	// leaves catalog.Changed as it found it
-	was := catalog.Changed
+	// leaves the catalog change hook as it found it
+	was := catalog.ChangedHook()
 	defer func() {
 		agent.SyncCatalogSettled()
-		catalog.Changed = was
+		catalog.SetChanged(was)
 	}()
 	// claude-magpie (claude_launch_cli.go): every argument after run is
 	// claude's, --help too
@@ -719,10 +721,13 @@ func run(args []string) error {
 	case 2:
 		// default is magpie's word in any case, as an agent's name and a
 		// field's are: magpie codex DEFAULT wrote model = "DEFAULT"
+		if strings.EqualFold(args[1], "default") && (len(a.Fields) == 0 && a.Native != nil || a.Wired()) {
+			return disconnect(a)
+		}
+		if len(a.Fields) == 0 {
+			return fmt.Errorf("%s has no configurable fields\n\n%s", a.Name, strings.TrimRight(agentHelp(a), "\n"))
+		}
 		if strings.EqualFold(args[1], "default") {
-			if a.Wired() {
-				return disconnect(a)
-			}
 			return set(a, a.Fields[0].Key, "")
 		}
 		// `magpie codex model`: a field's name alone asks what it is set to,

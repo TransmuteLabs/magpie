@@ -123,8 +123,9 @@ func TestCacheBinaryRefusesBadFiles(t *testing.T) {
 	}
 }
 
-// Every field of a state the JSON form kept is in the binary form: a new
-// field fails here until appendBinary and reader.state carry it.
+// Every state, day and Tokens field is reviewed here, including the
+// runtime-only Codex, parsePath and sourceOwned fields. A new field needs
+// an explicit persistence decision and the corresponding roundtrip test.
 func TestCacheBinaryKnowsEveryField(t *testing.T) {
 	fields := func(v any) []string {
 		var out []string
@@ -138,13 +139,62 @@ func TestCacheBinaryKnowsEveryField(t *testing.T) {
 		v    any
 		want []string
 	}{
-		{state{}, []string{"Agent", "Codex", "parsePath", "Claude", "Head", "HeadSize", "CdRead", "ContentHash", "Size", "Mod", "Off", "ID", "CodexIdentity", "Cwd", "Title", "Start", "Last", "Models", "Days", "Entry", "Msg", "MsgModel", "MsgUse", "MsgDay", "Model", "Total", "Provider", "StateMore"}},
+		{state{}, []string{"Agent", "Codex", "parsePath", "Claude", "Head", "HeadSize", "CdRead", "sourceOwned", "ContentHash", "Size", "Mod", "Off", "ID", "CodexIdentity", "Cwd", "Title", "Start", "Last", "Models", "Days", "Entry", "Msg", "MsgModel", "MsgUse", "MsgDay", "Model", "Total", "Provider", "StateMore"}},
 		{day{}, []string{"Models", "Active", "Hours", "Prompts", "Replies", "Tools", "Skills"}},
 		{Tokens{}, []string{"Input", "Output", "CacheRead", "CacheWrite", "CacheWrite1h"}},
 	} {
 		if got := fields(c.v); !slices.Equal(got, c.want) {
-			t.Errorf("%T has fields %v; the binary cache (cache_binary.go) carries %v: add the new one there and here", c.v, got, c.want)
+			t.Errorf("%T has fields %v; the reviewed cache field census is %v: classify the new field and test its persistence or explicit omission", c.v, got, c.want)
 		}
+	}
+}
+
+func TestCacheRoundtripDoesNotRestoreSourceOwnership(t *testing.T) {
+	unraised(t)
+	value := &state{Agent: "claude", sourceOwned: true, ID: "owned", Title: "visible title", Cwd: "/saved", Total: &Tokens{Input: 7}}
+	input := cacheFile{Version: cacheVersion, Zone: "z", Parsers: map[string]int{}, Files: map[string]*state{"session": value}}
+	var binary bytes.Buffer
+	if err := encodeCache(&binary, input); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := *value
+	plain.sourceOwned = false
+	input.Files = map[string]*state{"session": &plain}
+	var plainBinary bytes.Buffer
+	if err := encodeCache(&plainBinary, input); err != nil {
+		t.Fatal(err)
+	}
+	plainLegacy, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(binary.Bytes(), plainBinary.Bytes()) || !bytes.Equal(legacy, plainLegacy) {
+		t.Fatal("runtime source authority affected the persisted representation")
+	}
+	for _, encoded := range []struct {
+		name string
+		body []byte
+	}{{"binary", binary.Bytes()}, {"legacy-json", legacy}} {
+		t.Run(encoded.name, func(t *testing.T) {
+			files, ok := decodeCache(encoded.body, "z")
+			got := files["session"]
+			if !ok || len(files) != 1 || got == nil {
+				t.Fatal("ordinary cache decoder did not restore the user data")
+			}
+			if got.sourceOwned {
+				t.Fatal("cache restored runtime source authority")
+			}
+			if !reflect.DeepEqual(got, &plain) {
+				t.Fatalf("runtime omission changed user data: got %+v want %+v", got, &plain)
+			}
+			if !value.sourceOwned {
+				t.Fatal("roundtrip changed the live source ownership")
+			}
+		})
 	}
 }
 

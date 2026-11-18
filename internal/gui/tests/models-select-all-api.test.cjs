@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 const { strings } = require("./strings.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -93,7 +94,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         };
         const bulk = (name) => editor.locator(".mbulk").getByRole("button", { name, exact: true });
         const chipsOf = (cls) => editor.locator(`.mchips .mchip${cls}`).evaluateAll((cs) => cs.map((c) => c.querySelector("span").textContent).sort());
-        const scrolled = () => page.evaluate(() => [window.scrollX, window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
         const save = async () => {
           await editor.locator(".bar").getByRole("button", { name: tr("Save"), exact: true }).click();
           for (let i = 0; i < 100 && !posts.some((p) => p.path === "/api/provider/save"); i++) await page.waitForTimeout(30);
@@ -121,9 +121,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Select all, the button scrolled into the editor's view first: the
         // click moves nothing, and the Claude models are left
         await editor.locator(".ebody").evaluate((b) => { b.scrollTop += b.querySelector(".mbulk").getBoundingClientRect().top - b.getBoundingClientRect().top - 8; });
-        const before = await scrolled();
+        const before = await scrolled(page, { axes: "y", windowAxes: "xy", positiveY: true });
         await bulk(tr("Select all")).click();
-        assert.equal(await scrolled(), before, "the click scrolled");
+        assert.equal(await scrolled(page, { axes: "y", windowAxes: "xy", positiveY: true }), before, "the click scrolled");
         const want = [...CHAT, "plain-model", "ling-3.1-flash:free"].sort();
         assert.deepEqual(await chipsOf(".on"), want);
         assert.deepEqual(await save(), want);

@@ -767,6 +767,7 @@ const searchSystem = "You are a web search tool. Search the web for what is aske
 // first (#928): the providers then search only when none of them answers.
 // With provider search off, only the search APIs are asked.
 func (s *Server) webSearch(ctx context.Context, query string) (string, []Hit, error) {
+	ctx = ownOperation(ctx)
 	// a search is magpie's own request, not the turn's provider's: the
 	// search APIs go through the global proxy and each searcher through
 	// its own (Provider.Via), never through the proxy the turn's provider
@@ -847,6 +848,7 @@ const searchersInTurn = 3
 // for Grok, picked, went to Codex's gpt-6-astra, a pricier model the user
 // hadn't picked, on every search (Gearclickist on Discord).
 func (s *Server) modelSearch(ctx context.Context, query string) (string, []Hit, error) {
+	ctx = withRequestPolicy(ctx)
 	p, model, ok := searcher()
 	if !ok {
 		return "", nil, errNoSearcher
@@ -1519,7 +1521,8 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 		go func() {
 			defer close(events)
 			defer res.Body.Close()
-			dec := decoderFor(p, actual, q.Tools)
+			var decoding protocolDecodeState
+			dec := decoderFor(p, actual, q.Tools, &decoding)
 			send := func(ev Event) error {
 				select {
 				case events <- ev:
@@ -1540,11 +1543,13 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 					told = time.Now()
 				}
 			})
+			ended, rejected := false, false
 			err := readSSEAlive(rd, func(_, data string) error {
 				mu.Lock()
 				defer mu.Unlock()
 				heard()
 				if err := dec(data, func(ev Event) {
+					rejected = rejected || ev.Kind == KError
 					if failed == nil {
 						failed = send(ev)
 						told = time.Now()
@@ -1552,6 +1557,7 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}); err != nil {
 					return err
 				}
+				ended = ended || replyEnds(actual, data, upstreamStop([]byte(data)))
 				return failed
 			}, func() {
 				mu.Lock()
@@ -1566,6 +1572,9 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}
 			})
 			stopKeep()
+			if err == nil && !decoding.rejected && failed == nil && ended && !rejected && ctx.Err() == nil {
+				provider.ExtensionResponseProtocolComplete(res)
+			}
 			if err != nil && failed == nil && ctx.Err() == nil {
 				send(Event{Kind: KError, Text: p.Name + ": " + err.Error()})
 			}

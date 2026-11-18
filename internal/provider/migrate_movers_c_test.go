@@ -120,8 +120,8 @@ func TestKiroMover(t *testing.T) {
 	// the key: back onto the provider once logins.json is let go, saving
 	// the provider syncing the agents, which read the accounts (back runs
 	// holding loginsMu: saving it there hung the move back)
-	catalog.Changed = func() { loginsMu.Lock(); loginsMu.Unlock() }
-	t.Cleanup(func() { catalog.Changed = nil })
+	catalog.SetChanged(func() { loginsMu.Lock(); loginsMu.Unlock() })
+	t.Cleanup(func() { catalog.SetChanged(nil) })
 	key := map[string]any{"type": "api", "key": "ksk_1"}
 	done := make(chan error, 1)
 	go func() {

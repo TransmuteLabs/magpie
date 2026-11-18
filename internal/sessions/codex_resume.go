@@ -68,6 +68,15 @@ func codexProviderKnown(home, p string) bool {
 // there, the only way Codex resumes it at all. Any other session, and a
 // Codex one in a WSL distro, is its Resume as listed.
 func ResumeNow(s Session) string {
+	if s.source != nil {
+		if checkSourceBeforeCarry(s) != nil {
+			return ""
+		}
+		return sourceResume(s.source)
+	}
+	if extensionSourceAgent(s.Agent) {
+		return ""
+	}
 	if s.Agent != "codex" || s.Resume == "" || s.WSL != "" || s.Path == "" || !safeID.MatchString(s.ID) {
 		return s.Resume
 	}

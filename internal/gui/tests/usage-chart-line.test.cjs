@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { openUsageRequests } = require("./usage-navigation.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const midnight = new Date();
@@ -121,8 +122,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       p.on("pageerror", (e) => errors.push(e.message));
       await p.route("**/*", serve(lang, theme, empty));
       await p.goto("http://magpie.test/");
-      await p.locator('[data-view="usage"]').first().click();
-      await p.locator(":is(#usageTab .opt, .nav-s):visible").nth(1).click();
+      await openUsageRequests(p);
       await p.locator("#ledStyle .opt").first().waitFor();
       await p.locator(empty ? "#ledChart .none" : "#ledChart svg").waitFor();
       return { p, errors };
@@ -164,8 +164,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
               // reloaded, lines are still picked and drawn
               await p.reload();
-              await p.locator('[data-view="usage"]').first().click();
-              await p.locator(":is(#usageTab .opt, .nav-s):visible").nth(1).click();
+              await openUsageRequests(p);
               await p.locator("#ledChart svg").waitFor();
               d = await drawn(p);
               assert.equal(d.on, "line", "lines kept across a reload");

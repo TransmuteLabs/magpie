@@ -251,7 +251,8 @@ func ClientsIn(all []*Agent) []*Agent {
 func All() []*Agent {
 	home, cfg := homes()
 	own := builtins(home, cfg)
-	return append(own, pluggedAgents(home, own, nil)...)
+	all := append(own, pluggedAgents(home, own, nil)...)
+	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
 }
 
 // AllKnown is All() with the agents in WSL's distros as they were last
@@ -264,7 +265,8 @@ func AllKnown() []*Agent {
 	if wslLooks() {
 		own = append(own, wslAgentsOf(wslDistrosWithin(0))...)
 	}
-	return append(own, pluggedAgents(home, own, nil)...)
+	all := append(own, pluggedAgents(home, own, nil)...)
+	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
 }
 
 func homes() (home, cfg string) {
@@ -288,7 +290,8 @@ func builtins(home, cfg string) []*Agent {
 func local() []*Agent {
 	home, cfg := homes()
 	own := onMachine(home, cfg)
-	return append(own, pluggedAgents(home, own, nil)...)
+	all := append(own, pluggedAgents(home, own, nil)...)
+	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
 }
 
 // Starter is the agent on this machine typed as q, by its id or an alias

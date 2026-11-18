@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { isPageLifecycleRequest } = require("./fixtures/page-lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const HOME = "/Users/me";
@@ -25,6 +26,7 @@ function server(lang, state, posts) {
     const req = route.request();
     const url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
+    if (isPageLifecycleRequest(req)) return json({});
     if (req.method() === "POST") posts.push(url.pathname);
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });

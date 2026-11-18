@@ -16,6 +16,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, process.env.MAGPIE_RULE_OPS_ASSETS || "../assets");
 const models = [
@@ -115,12 +116,12 @@ async function press(page, x, still) {
     await page.waitForTimeout(400);
   }
   await page.waitForTimeout(300); // the page settled (WebKit's folds)
-  const before = still && await scrolled(page);
+  const before = still && await scrolled(page, { axes: "y", windowAxes: "", positiveY: false });
   const b = await x.boundingBox();
   await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
   if (still) {
     await page.waitForTimeout(300);
-    assert.equal(await scrolled(page), before, "a click never moves the page");
+    assert.equal(await scrolled(page, { axes: "y", windowAxes: "", positiveY: false }), before, "a click never moves the page");
   }
 }
 const overrun = (page) => page.evaluate(() => {
@@ -133,7 +134,6 @@ const pick = async (page, label) => {
   await li.first().click();
 };
 // the scroll of every scroller, to tell that a click moved nothing
-const scrolled = (page) => page.evaluate(() => [...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => `${e.id || e.className}:${e.scrollTop}`).join(";"));
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {

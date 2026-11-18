@@ -123,6 +123,7 @@ type Account struct {
 	wasHost   string
 	moved     bool
 	transport func(req *http.Request) (*http.Response, error)
+	extension *extensionAccount
 	// clientFor is the client a request of the account's goes through in
 	// place of the one it was given, nil for that one (zcode_start.go).
 	clientFor func(req *http.Request) *http.Client
@@ -149,6 +150,9 @@ func (p Provider) apisAmong(speaks []Protocol, model string) []Protocol {
 // ListedAPIs are the APIs model is served on as its vendor says, whatever
 // the user set: what APIs gives with nothing set (the editor's Auto).
 func (p Provider) ListedAPIs(model string) []Protocol {
+	if p.IsExtension() {
+		return p.extensionAPIs(model)
+	}
 	if p.IsPlugin() {
 		return p.pluginAPIs(model)
 	}
@@ -215,6 +219,9 @@ func (p Provider) ListedAPIs(model string) []Protocol {
 // Sign authenticates a request to the provider, refreshing what needs it.
 // Plain providers get their key; accounts get the agent's tokens.
 func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, body []byte) error {
+	if err := p.CheckExecutor(ctx); err != nil {
+		return err
+	}
 	if p.Account != nil && settings.AccountDiscoveryOff() && !p.publicAccount() {
 		return errAccountDiscoveryOff
 	}
@@ -952,7 +959,7 @@ func refreshFailed(status int, agent, msg string) error {
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
 	if settings.AccountDiscoveryOff() {
-		return pluginAccounts() // the public plugins' alone (publicPlugin)
+		return append(pluginAccounts(), extensionAccounts()...)
 	}
 	rememberLogins(false)
 	home, _ := os.UserHomeDir()
@@ -980,7 +987,7 @@ func Accounts() []Provider {
 	}
 	// a built-in moved onto its plugin is the plugin's now (migrate.go)
 	out = slices.DeleteFunc(out, func(p Provider) bool { return PluginServes(p.ID) })
-	return placeMoved(out, pluginAccounts())
+	return append(placeMoved(out, pluginAccounts()), extensionAccounts()...)
 }
 
 // builtinOrder is the built-ins' ids in the order Accounts lists them.

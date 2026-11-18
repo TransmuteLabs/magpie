@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // magpie healthcheck, a container's HEALTHCHECK, passes only while a
@@ -89,6 +91,28 @@ func fakeServing(t *testing.T, pid int) string {
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MAGPIE_ADDR", "")
+	// The fallback must never discover or restart the developer's gateway.
+	quiet := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("isolation listener: %v", err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(quiet.Close)
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(quiet.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := settings.Load()
+	s.Port, err = strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
 	m := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			w.Write([]byte(`{"state":"restarting","version":"v9.9.9"}`))

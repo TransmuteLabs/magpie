@@ -28,7 +28,7 @@ const quotas = [
     windows: [{ name: "Weekly", used: 30, trayKind: "7d" }, { name: "Grok Bot", used: 64, trayKind: "7d:grok bot", trayExtra: true }, { name: "Total", used: 30, trayKind: "name:total", trayExtra: true }] },
 ];
 
-function server(lang, posts, over) {
+function server(lang, posts, over, data = quotas) {
   let cur = {
     theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd", dock: false, dockWindow: false, proxy: "",
     trayUsage: "claude|*", trayUsages: ["claude|*", "copilot", "usage:today"], trayUsageEvery: 3,
@@ -45,7 +45,7 @@ function server(lang, posts, over) {
       if (req.method() === "POST") { posts.push(req.postDataJSON()); cur = { ...cur, ...req.postDataJSON() }; }
       return json(cur);
     }
-    if (url.pathname === "/api/usage/quotas") return json(quotas);
+    if (url.pathname === "/api/usage/quotas") return json(data);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
@@ -54,7 +54,7 @@ function server(lang, posts, over) {
   };
 }
 
-async function open(browser, lang, posts, { platform = "MacIntel", width = 900, over = {} } = {}) {
+async function open(browser, lang, posts, { platform = "MacIntel", width = 900, over = {}, data = quotas } = {}) {
   const context = await browser.newContext({ viewport: { width, height: 560 }, reducedMotion: "reduce" });
   await context.addInitScript((p) => Object.defineProperty(Navigator.prototype, "platform", { get: () => p }), platform);
   const page = await context.newPage();
@@ -62,7 +62,7 @@ async function open(browser, lang, posts, { platform = "MacIntel", width = 900, 
   page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.route("**/*", server(lang, posts, over));
+  await page.route("**/*", server(lang, posts, over, data));
   await page.goto("http://magpie.test/?view=usage");
   await page.locator("#prefs").click();
   await openPart(page, "usage");
@@ -79,6 +79,77 @@ const LANGS = [
 ];
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: selected account windows and the in-use union`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const data = [
+      { provider: "sample", name: "Sample", user: "first@example.test", plan: "Pro",
+        windows: [{ name: "First short", used: 20, trayKind: "1h" }, { name: "First long", used: 30, trayKind: "1d" }] },
+      { provider: "sample", name: "Sample", user: "second@example.test", plan: "Pro",
+        windows: [{ name: "Second short", used: 40, trayKind: "5h" }, { name: "Second long", used: 50, trayKind: "7d" }] },
+      { provider: "sample", name: "Sample", user: "other@example.test", plan: "Pro",
+        windows: [{ name: "Other short", used: 60, trayKind: "15m" }, { name: "Other long", used: 70, trayKind: "month" }] },
+    ];
+    const first = "sample|first@example.test", second = "sample|second@example.test";
+    const headings = {
+      en: "Possible windows for the account in use",
+      zh: "当前使用的账号可能包含的窗口",
+      "zh-TW": "目前使用的帳號可能包含的視窗",
+      ja: "使用中のアカウントで利用可能な期間",
+      de: "Mögliche Zeitfenster für das verwendete Konto",
+    };
+    for (const [lang, , all] of LANGS) for (const scenario of [
+      { ids: [first], names: ["First short", "First long"], saved: ["7d"] },
+      { ids: [second], names: ["Second short", "Second long"] },
+      { ids: [first, second], names: ["First short", "First long", "Second short", "Second long"], notes: true },
+      { ids: ["sample|*"], names: ["First short", "First long", "Second short", "Second long", "Other short", "Other long"], notes: true, inUse: true },
+    ]) {
+      await t.test(lang + ": " + scenario.ids.join(", "), async () => {
+        const posts = [];
+        const { context, page, errors } = await open(browser, lang, posts, { over: { trayUsages: scenario.ids, trayUsage: scenario.ids[0],
+          ...(scenario.saved ? { trayWindows: { sample: scenario.saved } } : {}) }, data });
+        try {
+          const pill = page.locator("#trayWindowsPick button");
+          await pill.waitFor();
+          assert.equal(await pill.count(), 1, "window preferences remain provider-keyed");
+          await pill.click();
+          const menu = page.locator(".proto-menu"), items = menu.locator(".pm-item");
+          await items.first().waitFor();
+          assert.deepEqual((await items.locator(".pm-name").allTextContents()).map((s) => s.trim()), [all, ...scenario.names]);
+          if (scenario.notes) {
+            assert.match(await items.filter({ hasText: "First short" }).textContent(), /first@example\.test/);
+            assert.match(await items.filter({ hasText: "Second short" }).textContent(), /second@example\.test/);
+          }
+          if (scenario.inUse) {
+            assert.equal((await menu.locator(".pm-head").textContent()).trim(), headings[lang]);
+            assert.match(await items.filter({ hasText: "Other short" }).textContent(), /other@example\.test/);
+          }
+          await items.nth(1).click();
+          await page.keyboard.press("Escape");
+          await page.waitForFunction((name) => document.querySelector("#trayWindowsPick button")?.textContent.trim() === "Sample · " + name, scenario.names[0]);
+          assert.deepEqual(posts.at(-1).trayWindows, { sample: [...(scenario.saved || []), scenario.ids[0] === second ? "5h" : "1h"] });
+          if (scenario.saved) {
+            await pill.click();
+            await items.nth(2).click();
+            await page.keyboard.press("Escape");
+            await page.waitForFunction((label) => document.querySelector("#trayWindowsPick button")?.textContent.trim() === label, "Sample · " + all);
+            assert.deepEqual(posts.at(-1).trayWindows, { sample: scenario.saved });
+            await pill.click();
+            await items.nth(1).click();
+            await page.keyboard.press("Escape");
+            await page.waitForFunction(() => document.querySelector("#trayWindowsPick button")?.textContent.trim() === "Sample · First short");
+            await pill.click();
+            await items.first().click();
+            await page.waitForFunction(() => !Object.keys(prefs.trayWindows).length);
+            assert.deepEqual(posts.at(-1).trayWindows, {});
+          }
+          assert.deepEqual(errors, []);
+        } finally {
+          await context.close();
+        }
+      });
+    }
+  });
   test(engine + ": which windows a menu bar card shows", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));

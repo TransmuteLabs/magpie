@@ -92,8 +92,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const missing = await page.evaluate((ks) => ["zh", "zh-TW", "ja", "de"].flatMap((l) => ks.filter((k) => !I18N[l][k]).map((k) => `${l}: ${k}`)), strings);
           assert.deepEqual(missing, [], "every string has its translations");
         }
-        await only.scrollIntoViewIfNeeded();
-        const box = await only.boundingBox();
+        const box = await only.evaluate((element) => {
+          element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+          const { x, width } = element.getBoundingClientRect();
+          return { x, width };
+        });
         assert.ok(box.x >= 0 && box.x + box.width <= width, `the tick fits across ${width}`);
         const scrollers = () => page.evaluate(() => [...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => e.scrollTop).concat(document.scrollingElement.scrollTop));
         const before = await scrollers();

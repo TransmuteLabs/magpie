@@ -38,8 +38,19 @@ const chatStreamOK = `data: {"id":"b","choices":[{"index":0,"delta":{"role":"ass
 
 func slowOn(t *testing.T, id string, h http.Handler) {
 	t.Helper()
-	up := httptest.NewServer(h)
+	up := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			writer.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.ServeHTTP(writer, request)
+	}))
 	t.Cleanup(up.Close)
+	unrelated, err := http.Get(up.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated.Body.Close()
 	if err := provider.Save(provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Models: []string{"m"}, Chat: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +64,7 @@ func TestGroupFirstTokenFailsOver(t *testing.T) {
 	a := &slowStart{wait: 10 * time.Second}
 	b := &scripted{replies: []reply{{200, "text/event-stream", chatStreamOK}}}
 	slowOn(t, "a", a)
-	scriptedOn(t, "b", provider.Chat, b)
+	slowOn(t, "b", b)
 	if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered, FirstToken: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +105,7 @@ func TestGroupFirstTokenFailsOver(t *testing.T) {
 	a = &slowStart{wait: 100 * time.Millisecond}
 	b = &scripted{replies: []reply{{200, "text/event-stream", chatStreamOK}}}
 	slowOn(t, "a", a)
-	scriptedOn(t, "b", provider.Chat, b)
+	slowOn(t, "b", b)
 	provider.SaveGroup(provider.Group{Name: "G", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered, FirstToken: 1})
 	s = New()
 	if code, body := postAs(t, s, "", `{"model":"group/g","stream":true,"messages":[{"role":"user","content":"hi"}]}`); code != 200 || !strings.Contains(body, "slow answer") || b.n != 0 {
@@ -119,7 +130,7 @@ func TestNestedGroupFirstToken(t *testing.T) {
 			a := &slowStart{wait: 10 * time.Second}
 			b := &scripted{replies: []reply{{200, "text/event-stream", chatStreamOK}}}
 			slowOn(t, "a", a)
-			scriptedOn(t, "b", provider.Chat, b)
+			slowOn(t, "b", b)
 			if err := provider.SaveGroup(provider.Group{Name: "In", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered, FirstToken: c.inner}); err != nil {
 				t.Fatal(err)
 			}

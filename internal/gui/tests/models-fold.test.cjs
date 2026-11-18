@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { scrollPositions: scrolled } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const fetched = new Date(Date.now() - 3600e3).toISOString();
@@ -83,7 +84,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
       const fold = editor.locator(".mchips-fold");
       const box = () => editor.locator(".models > .mchips").evaluate((c) => ({ shown: c.clientHeight, all: c.scrollHeight }));
-      const scrolled = () => page.evaluate(() => [window.scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop > 0 && !e.classList.contains("mchips")).map((e) => `${e.className}:${e.scrollTop}`)].join(" "));
       const settle = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
       // a short list fits its box: nothing to let out
@@ -106,7 +106,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // editor's body scrolled to the button first, as a reader would)
       await editor.locator(".ebody").evaluate((b) => { b.scrollTop += b.querySelector(".mchips-fold").getBoundingClientRect().top - b.getBoundingClientRect().top - 120; });
       if (process.env.ARTIFACT_DIR) { await page.waitForTimeout(800); await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-models-fold-held.png`) }); }
-      const before = await scrolled(), at = await fold.evaluate((e) => Math.round(e.getBoundingClientRect().top));
+      const before = await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true, exclude: ".mchips" }), at = await fold.evaluate((e) => Math.round(e.getBoundingClientRect().top));
       await fold.click();
       await settle();
       const out = await box();
@@ -114,7 +114,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       if (process.env.ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-models-fold-open.png`) });
       assert.equal((await fold.textContent()).trim(), w.fold);
       assert.equal(await fold.getAttribute("aria-expanded"), "true");
-      assert.equal(await scrolled(), before, "the click scrolled");
+      assert.equal(await scrolled(page, { axes: "y", windowAxes: "y", positiveY: true, exclude: ".mchips" }), before, "the click scrolled");
       assert(await fold.evaluate((e) => Math.round(e.getBoundingClientRect().top)) > at, "the button goes down with the models it lets out");
       // a pick redraws the chips: still let out
       await editor.locator(".models > .mchips .mchip", { hasText: "a-rather-long-model-name-2" }).first().click();

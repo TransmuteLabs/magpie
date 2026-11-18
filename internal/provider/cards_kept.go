@@ -85,6 +85,9 @@ var cardAgents = []string{"claude", "codex", "copilot", "kiro", "zcode", "workbu
 // plugin's.
 func cardLogins() []Login {
 	agents := []string{}
+	for _, provider := range extensionAccounts() {
+		agents = append(agents, provider.ID)
+	}
 	for _, id := range cardAgents {
 		if PluginServes(id) || id == "kiro" && kiroKey() != "" {
 			continue

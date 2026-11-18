@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/settings"
@@ -56,7 +58,11 @@ func newFreshFeed(t *testing.T) *freshFeed {
 		hold := f.hold
 		f.mu.Unlock()
 		if hold != nil {
-			<-hold
+			select {
+			case <-hold:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		f.asked.Add(1)
 		v := f.latest.Load().(string)
@@ -66,6 +72,7 @@ func newFreshFeed(t *testing.T) *freshFeed {
 	}))
 	t.Cleanup(f.srv.Close)
 	t.Setenv("MAGPIE_UPDATE_FEED", f.srv.URL)
+	t.Setenv("MAGPIE_NOTES_FEED", f.srv.URL+"/notes")
 	old := Version
 	Version = "0.1.10"
 	t.Cleanup(func() { Version = old })
@@ -74,9 +81,11 @@ func newFreshFeed(t *testing.T) *freshFeed {
 
 // freshUpdater is updates for the test: replacing the test's binary when
 // exe is set, and never restarting (a handover stands in as under way).
-func freshUpdater(t *testing.T, exe bool) *updater {
+func freshUpdater(t *testing.T, exe bool) (*updater, func()) {
 	t.Helper()
-	u := &updater{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	u := &updater{notesCtx: ctx}
 	if exe {
 		p, err := update.Executable()
 		if err != nil {
@@ -93,7 +102,12 @@ func freshUpdater(t *testing.T, exe bool) *updater {
 		pending.Store(&handover{})
 		t.Cleanup(func() { pending.Store(nil) })
 	}
-	return u
+	return u, func() {
+		cancel()
+		u.cancelWait()
+		u.loops.Wait()
+		u.notes.Wait()
+	}
 }
 
 // downloadsOnClick turns Settings' Download updates automatically off,
@@ -154,7 +168,8 @@ func postInstall(t *testing.T, w Windows) updateJSON {
 func TestRestartClickTakesTheNewest(t *testing.T) {
 	f := newFreshFeed(t)
 	downloadsOnClick(t)
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop() // before Feed/env/Version cleanup, even when the feed was set later
 	u.check()
 	if j := u.json(); j.State != "found" || j.Latest != "0.1.11" {
 		t.Fatalf("the check: %+v", j)
@@ -175,7 +190,8 @@ func TestRestartClickTakesTheNewest(t *testing.T) {
 // downloaded.
 func TestRestartWaitsForTheFeed(t *testing.T) {
 	f := newFreshFeed(t)
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop()
 	oldTicks, oldTick := recheckTicks, recheckTick
 	recheckTicks, recheckTick = 3, time.Millisecond
 	t.Cleanup(func() { recheckTicks, recheckTick = oldTicks, oldTick })
@@ -205,7 +221,8 @@ func TestRestartWaitsForTheFeed(t *testing.T) {
 // the newest's, not the one an old check found.
 func TestAvailableOpensTheNewestPage(t *testing.T) {
 	f := newFreshFeed(t)
-	u := freshUpdater(t, false)
+	u, stop := freshUpdater(t, false)
+	defer stop()
 	u.check()
 	if j := u.json(); j.State != "available" || j.Latest != "0.1.11" {
 		t.Fatalf("the check: %+v", j)
@@ -225,17 +242,137 @@ func TestAvailableOpensTheNewestPage(t *testing.T) {
 	}
 }
 
-// char1es_lu on X: Restart to update put in the version downloaded a
-// while ago, and the new version's first check had them update again at
-// once. With downloads automatic, every restart asks the feed first, and a
-// newer version out is downloaded in place of the one waiting and is what
-// the restart goes into: the page's click, the tray's, and the restart
-// Settings' AutoRestart waits for. The page's restart once that download
-// is in doesn't ask again (elis_pina on X), and the dialog that shows the
-// update names the one waiting.
+func TestUpdaterUrgentLookupUsesInstalledVersion(t *testing.T) {
+	newFreshFeed(t)
+	u, stop := freshUpdater(t, false)
+	defer stop()
+	started, release := make(chan string, 1), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	notes := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- r.URL.Query().Get("after")
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"releases": []update.Note{
+			{Version: "0.1.11", Notes: "**Urgent release:** fixture security fix"},
+		}})
+	}))
+	t.Cleanup(notes.Close)
+	t.Setenv("MAGPIE_NOTES_FEED", notes.URL)
+	u.check()
+	select {
+	case after := <-started:
+		if after != "0.1.10" {
+			t.Fatalf("urgency lookup started from %q", after)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("background urgency lookup did not reach the fake feed")
+	}
+	// The request has started, but its answer is held: the lookup must use
+	// the launch's installed version when it records urgency as well.
+	Version = "0.1.99"
+	unblock()
+	u.notes.Wait()
+	u.mu.Lock()
+	behind := u.behind
+	u.mu.Unlock()
+	if behind.Base != "0.1.10" || behind.Urgent != "0.1.11" {
+		t.Fatalf("background lookup adopted a later global version: %+v", behind)
+	}
+}
+
+func TestUpdaterBackgroundLookupsCancelBeforeFixtureCleanup(t *testing.T) {
+	for _, kind := range []string{"urgent", "language"} {
+		t.Run(kind, func(t *testing.T) {
+			newFreshFeed(t)
+			u, stop := freshUpdater(t, false)
+			defer stop()
+			u.check()
+			u.notes.Wait()
+			started, canceled, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(exited)
+				close(started)
+				select {
+				case <-r.Context().Done():
+					close(canceled)
+				case <-release:
+				}
+			}))
+			t.Cleanup(feed.Close)
+			if kind == "urgent" {
+				t.Setenv("MAGPIE_NOTES_FEED", feed.URL)
+				u.check()
+			} else {
+				t.Setenv("MAGPIE_UPDATE_FEED", feed.URL)
+				u.jsonIn("de")
+			}
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("background lookup did not reach the blocking fake feed")
+			}
+			stop()
+			select {
+			case <-canceled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("stopping the updater did not cancel the in-flight fake feed request")
+			}
+			<-exited
+			// All test resources and globals are still installed here; stop
+			// has joined the lookup before any t.Setenv/Version cleanup.
+			if Version != "0.1.10" {
+				t.Fatal("fixture globals were restored before the lookup ended")
+			}
+		})
+	}
+}
+
+func TestUpdaterBackgroundLookupStopJoins(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		u, stop := freshUpdater(t, false)
+		defer stop()
+		canceled, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		u.lookUpNotes(func(ctx context.Context) {
+			<-ctx.Done()
+			close(canceled)
+			<-release // cancellation alone does not finish this lookup
+			close(finished)
+		})
+		stopped := make(chan struct{})
+		go func() { stop(); close(stopped) }()
+		<-canceled
+		synctest.Wait()
+		select {
+		case <-stopped:
+			t.Fatal("stop returned while a canceled lookup still owned resources")
+		default:
+		}
+		unblock()
+		<-stopped
+		select {
+		case <-finished:
+		default:
+			t.Fatal("stop did not join the canceled lookup")
+		}
+	})
+}
+
 func TestRestartTakesTheNewestOut(t *testing.T) {
 	busy := &fakeBusy{}
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop()
 	quick(t, busy, u)
 	waitRecheck = (*updater).recheck
 	f := newFreshFeed(t)
@@ -322,7 +459,8 @@ func TestRestartTakesTheNewestOut(t *testing.T) {
 func TestRestartAfterItsDownloadDoesNotAskAgain(t *testing.T) {
 	f := newFreshFeed(t)
 	downloadsOnClick(t)
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop()
 	u.check()
 	u.download() // the pill's "found": a click downloads, then restarts
 	if j := settled(t, u); j.State != "ready" || j.Latest != "0.1.11" || f.downloads.Load() != 1 {
@@ -350,7 +488,8 @@ func TestRestartAfterItsDownloadDoesNotAskAgain(t *testing.T) {
 // is what finds 0.1.12.
 func TestRestartPutsInTheClickedDownload(t *testing.T) {
 	busy := &fakeBusy{}
-	u := freshUpdater(t, true)
+	u, stop := freshUpdater(t, true)
+	defer stop()
 	quick(t, busy, u)
 	waitRecheck = (*updater).recheck
 	f := newFreshFeed(t)

@@ -75,7 +75,7 @@ func dueAlerts(qs []SubscriptionQuota, marks map[string]alertMark, pct int, bal 
 	var out []QuotaAlert
 	seen := map[string]bool{}
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil {
+		if q.Error != "" || q.AsOf != nil || q.ReadDeferred {
 			for k := range marks {
 				if strings.HasPrefix(k, alertPrefix(q)) {
 					seen[k] = true
@@ -164,7 +164,7 @@ func dueReminders(qs []SubscriptionQuota, marks map[string]alertMark, lead time.
 		return true
 	}
 	for _, q := range qs {
-		if q.Error != "" || q.AsOf != nil {
+		if q.Error != "" || q.AsOf != nil || q.ReadDeferred {
 			continue
 		}
 		for _, w := range PooledWindows(q.Windows) {
