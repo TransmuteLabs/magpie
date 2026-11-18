@@ -45,7 +45,7 @@ func HasTranscript(agent string) bool {
 		return false
 	}
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "openmausbot", "liveagent":
+	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "antigravity", "openmausbot", "liveagent":
 		return true
 	}
 	return false
@@ -222,6 +222,8 @@ func readHistoryTranscript(ctx context.Context, owner sessionHistoryOwner, keep 
 		return kimiTranscript(s.Path, keep, add)
 	case "agy":
 		return agyTranscript(s.Path, keep, add)
+	case "antigravity":
+		return antigravityTranscriptOf(s.Path, keep, add)
 	case "openmausbot":
 		return ombTranscript(s, add)
 	case "liveagent":
