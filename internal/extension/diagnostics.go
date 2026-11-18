@@ -9,6 +9,11 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+const (
+	moduleDiagnosticLimit        = 60
+	moduleDiagnosticErrorReserve = 10
+)
+
 type diagnosticWindow struct {
 	start time.Time
 	count int
@@ -40,7 +45,11 @@ func (m *Manager) emitDiagnostic(scope sdk.Scope, raw json.RawMessage, authority
 	if window.start.IsZero() || now.Sub(window.start) >= time.Minute {
 		window = diagnosticWindow{start: now}
 	}
-	if window.count >= 60 {
+	limit := moduleDiagnosticLimit
+	if value.Level != "error" {
+		limit -= moduleDiagnosticErrorReserve
+	}
+	if window.count >= limit {
 		m.mu.Unlock()
 		return sdk.DiagnosticResult{Recorded: false}, nil
 	}

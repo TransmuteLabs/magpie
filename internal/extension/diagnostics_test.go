@@ -47,14 +47,14 @@ func TestModuleDiagnosticsRejectForgedStaleCanceledAndExcessCalls(t *testing.T) 
 	recorded := 0
 	manager.diagnosticLog = func(moduleDiagnostic) { recorded++ }
 	raw := json.RawMessage(`{"level":"info","code":"request_started"}`)
-	for range 60 {
+	for range 50 {
 		result, err := manager.hostCall(ctx, scope, sdk.MethodDiagnosticEmit, raw)
 		if err != nil || !result.(sdk.DiagnosticResult).Recorded {
 			t.Fatal("bounded diagnostic call was lost", result, err)
 		}
 	}
 	result, err := manager.hostCall(ctx, scope, sdk.MethodDiagnosticEmit, raw)
-	if err != nil || result.(sdk.DiagnosticResult).Recorded || recorded != 60 {
+	if err != nil || result.(sdk.DiagnosticResult).Recorded || recorded != 50 {
 		t.Fatalf("diagnostics exceeded the module-wide log budget: %+v %v %d", result, err, recorded)
 	}
 	for _, invalid := range []json.RawMessage{
@@ -84,7 +84,43 @@ func TestModuleDiagnosticsRejectForgedStaleCanceledAndExcessCalls(t *testing.T) 
 	if _, err := manager.hostCall(t.Context(), scope, sdk.MethodDiagnosticEmit, raw); err == nil {
 		t.Fatal("unowned call emitted a diagnostic")
 	}
-	if recorded != 60 {
+	if recorded != 50 {
 		t.Fatal("refused callbacks reached the log", recorded)
+	}
+}
+
+func TestModuleDiagnosticNoiseLeavesRoomForAnotherAccountsError(t *testing.T) {
+	manager, scope := usageManagerVersion(t, 7)
+	failed := scope
+	failed.Account = "another-account"
+	storeTestAccount(t, manager.Store(), failed)
+	var records []moduleDiagnostic
+	manager.diagnosticLog = func(record moduleDiagnostic) { records = append(records, record) }
+	emit := func(selected sdk.Scope, level string) bool {
+		t.Helper()
+		var result sdk.DiagnosticResult
+		err := manager.Invoke(t.Context(), selected.Plugin, sdk.MethodToolCall, selected, sdk.ToolRequest{ID: "tool",
+			Arguments: json.RawMessage(`{"action":"diagnostic","value":{"code":"fixture_request","level":"` + level + `"}}`)},
+			&result, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Recorded
+	}
+	for range 60 {
+		emit(scope, "info")
+	}
+	if !emit(failed, "error") {
+		t.Fatal("successful requests exhausted the budget for another account's error")
+	}
+	last := records[len(records)-1]
+	if last.Account != failed.Account || last.Value.Level != "error" {
+		t.Fatalf("wrong account diagnostic recorded: %+v", last)
+	}
+	for range 60 {
+		emit(failed, "error")
+	}
+	if emit(failed, "error") || len(records) != 60 {
+		t.Fatalf("diagnostics exceeded the total module budget: %d", len(records))
 	}
 }
