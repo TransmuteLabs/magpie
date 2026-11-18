@@ -156,6 +156,25 @@ func TestSDKLedgerObserverOrdinaryAppendAndOutsideHistory(t *testing.T) {
 	if next := take(); next.row.Model != "sentinel" {
 		t.Fatal("outside-account history or an ended listener changed the remaining observer", next)
 	}
+	client := AgentOf(strings.Repeat("a", 601) + "/1")
+	Append(Record{Agent: client, Provider: "vendor", Model: "bounded", Status: 200, Input: 23,
+		Requested: strings.Repeat("b", 601), Served: "vendor-model"})
+	Append(Record{Agent: "agent", Provider: "vendor", Model: "after-bounded", Status: 200})
+	bounded := take().row
+	if bounded.Model != "bounded" || bounded.Agent != "other" || bounded.Requested != "" ||
+		bounded.Provider != "vendor" || bounded.Served != "vendor-model" || bounded.Status != 200 || bounded.Input != 23 {
+		t.Fatalf("ledger observer lost accounting for out-of-bounds metadata: %+v", bounded)
+	}
+	if next := take().row; next.Model != "after-bounded" || next.Agent != "agent" {
+		t.Fatalf("ordinary observer metadata changed: %+v", next)
+	}
+	var retained bool
+	for _, row := range Load(time.Time{}) {
+		retained = retained || row.Model == "bounded" && row.Agent == client && len(row.Requested) == 601
+	}
+	if !retained {
+		t.Fatal("SDK projection modified the saved ledger entry")
+	}
 	stop()
 	for _, registered := range Observers() {
 		if selected, isSDK := registered.(*extensionLedgerObserver); isSDK && selected.manager == manager {

@@ -106,8 +106,7 @@ func ValidateRequestObservationScope(scope Scope) error {
 }
 
 func ValidateRequestObservationResult(raw json.RawMessage) error {
-	var value map[string]json.RawMessage
-	if json.Unmarshal(raw, &value) != nil || len(value) != 0 {
+	if !emptyObservationResult(raw) {
 		return &Error{Code: "invalid_result", Message: "request observation cannot change the request or ledger"}
 	}
 	return nil

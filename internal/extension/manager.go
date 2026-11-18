@@ -1049,8 +1049,12 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			result = nil
 		}
 	}
-	if err == nil && method == sdk.MethodRequestObserve {
-		err = sdk.ValidateRequestObservationResult(result)
+	if err == nil && (method == sdk.MethodRequestObserve || method == sdk.MethodLedgerObserve) {
+		if method == sdk.MethodLedgerObserve {
+			err = sdk.ValidateLedgerObservationResult(result)
+		} else {
+			err = sdk.ValidateRequestObservationResult(result)
+		}
 		if err != nil {
 			result = nil
 		}

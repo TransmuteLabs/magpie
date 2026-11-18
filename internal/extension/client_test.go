@@ -25,7 +25,7 @@ import (
 	codec "github.com/yetone/magpie/pkg/protocolext"
 )
 
-func wedgedInputHelper() {
+func rawWorkerHelper(observations bool) {
 	body, err := os.ReadFile(sdk.ManifestFile)
 	if err != nil {
 		os.Exit(1)
@@ -65,8 +65,23 @@ func wedgedInputHelper() {
 		case sdk.MethodComponentStop:
 			ready = nil
 			result = struct{}{}
+		case sdk.MethodLedgerObserve, sdk.MethodRequestObserve:
+			if !observations || ready == nil {
+				os.Exit(1)
+			}
+			result = struct{}{}
+			var payload struct {
+				Model     string `json:"model"`
+				RequestID string `json:"requestId"`
+			}
+			if json.Unmarshal(frame.Params, &payload) != nil {
+				os.Exit(1)
+			}
+			if payload.Model == "bad" || payload.RequestID == "bad" {
+				result = map[string]int{"input": 999}
+			}
 		default:
-			if frame.Method != sdk.MethodToolCall || manifest.Contract.Version.Minor >= 1 && ready == nil {
+			if observations || frame.Method != sdk.MethodToolCall || manifest.Contract.Version.Minor >= 1 && ready == nil {
 				os.Exit(1)
 			}
 			// Complete control RPCs before simulating a payload handler that

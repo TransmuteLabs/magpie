@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	LedgerObserver      Capability = "ledger-observer"
-	MethodLedgerObserve            = "ledger.observe"
+	LedgerObserver                 Capability = "ledger-observer"
+	MethodLedgerObserve                       = "ledger.observe"
+	LedgerObservationMetadataLimit            = 600
 )
 
 type LedgerObservationDescriptor struct {
@@ -71,7 +72,7 @@ func ValidateLedgerObservation(row LedgerObservation) error {
 		}
 	}
 	for _, text := range []string{row.Operation, row.Agent, row.Provider, row.Model, row.Requested, row.Served, row.ErrorType, row.Kind} {
-		if !validExecutionText(text, 600) {
+		if !validExecutionText(text, LedgerObservationMetadataLimit) {
 			return errors.New("invalid ledger observation metadata")
 		}
 	}
@@ -85,6 +86,18 @@ func ValidateLedgerObservation(row LedgerObservation) error {
 		return errors.New("invalid ledger observation currency")
 	}
 	return nil
+}
+
+func ValidateLedgerObservationResult(raw json.RawMessage) error {
+	if !emptyObservationResult(raw) {
+		return &Error{Code: "invalid_result", Message: "ledger observation cannot modify its row"}
+	}
+	return nil
+}
+
+func emptyObservationResult(raw json.RawMessage) bool {
+	var value map[string]json.RawMessage
+	return json.Unmarshal(raw, &value) == nil && len(value) == 0
 }
 
 func ledgerHandler(handler Handler) Handler {
@@ -101,11 +114,10 @@ func ledgerHandler(handler Handler) Handler {
 		if err != nil {
 			return nil, err
 		}
-		var value map[string]json.RawMessage
 		raw, err := json.Marshal(result)
-		if err != nil || json.Unmarshal(raw, &value) != nil || len(value) != 0 {
+		if err != nil {
 			return nil, &Error{Code: "invalid_result", Message: "ledger observation cannot modify its row"}
 		}
-		return struct{}{}, nil
+		return struct{}{}, ValidateLedgerObservationResult(raw)
 	}
 }

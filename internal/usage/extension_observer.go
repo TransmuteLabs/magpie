@@ -3,8 +3,11 @@ package usage
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/beat"
 	extensionhost "github.com/yetone/magpie/internal/extension"
@@ -128,7 +131,9 @@ func (observer *extensionLedgerObserver) Ledger(record Record) {
 	}
 	row := extensionLedgerRow(record)
 	if sdk.ValidateLedgerObservation(row) != nil {
-		observer.failed.Add(1)
+		if failed := observer.failed.Add(1); failed%1000 == 1 {
+			log.Printf("SDK ledger observer: invalid projected record; failed=%d", failed)
+		}
 		return
 	}
 	for _, target := range *targets {
@@ -159,12 +164,18 @@ func (observer *extensionLedgerObserver) enqueue(serving *extensionLedgerServing
 
 func extensionLedgerRow(record Record) sdk.LedgerObservation {
 	row := sdk.LedgerObservation{
-		Time: record.Time.UnixMilli(), Operation: record.Operation, Agent: record.Agent, Provider: record.Provider,
-		Model: record.Model, Requested: record.Requested, Served: record.Served,
-		Input: int64(record.Input), Output: int64(record.Output), CacheRead: int64(record.CacheRead),
+		Time: record.Time.UnixMilli(), Operation: ledgerObservationMetadata(record.Operation),
+		Agent: ledgerObservationMetadata(record.Agent), Provider: ledgerObservationMetadata(record.Provider),
+		Model: ledgerObservationMetadata(record.Model), Requested: ledgerObservationMetadata(record.Requested),
+		Served: ledgerObservationMetadata(record.Served),
+		Input:  int64(record.Input), Output: int64(record.Output), CacheRead: int64(record.CacheRead),
 		CacheWrite: int64(record.CacheWrite), CacheWrite1h: int64(record.CacheWrite1h), CacheUnknown: record.CacheUnknown,
 		Reasoning: int64(record.Reasoning), Millis: record.Millis, TTFT: record.TTFT, Status: record.Status,
-		ErrorType: record.ErrType, Kind: record.Kind, Rejected: record.Rejected, HandedOn: record.HandedOn, Tries: record.Tries,
+		ErrorType: ledgerObservationMetadata(record.ErrType), Kind: ledgerObservationMetadata(record.Kind),
+		Rejected: record.Rejected, HandedOn: record.HandedOn, Tries: record.Tries,
+	}
+	if row.Agent == "" && record.Agent != "" {
+		row.Agent = "other"
 	}
 	if record.Credits != nil {
 		credits := *record.Credits
@@ -178,4 +189,11 @@ func extensionLedgerRow(record Record) sdk.LedgerObservation {
 		row.ReportedCost = &sdk.ExecutionCost{Amount: record.ReportedCost.Amount, Currency: record.ReportedCost.Currency}
 	}
 	return row
+}
+
+func ledgerObservationMetadata(value string) string {
+	if len(value) > sdk.LedgerObservationMetadataLimit || !utf8.ValidString(value) || strings.ContainsFunc(value, unicode.IsControl) {
+		return ""
+	}
+	return value
 }

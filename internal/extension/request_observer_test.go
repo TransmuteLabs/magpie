@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,64 @@ import (
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestSDKObserversRejectRawWorkerResult(t *testing.T) {
+	source := fixturePackage(t)
+	manifest := sdk.Manifest{
+		Schema: 1, ID: "raw-observer", Version: "1.0.0", Runtime: "exec", Entry: "worker",
+		Args: []string{"--sdk-raw-observer"},
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 12},
+			Capabilities: []sdk.Capability{sdk.LedgerObserver, sdk.RequestObserver}},
+		Ledger: &sdk.LedgerObservationDescriptor{}, RequestObserver: &sdk.RequestObservationDescriptor{},
+	}
+	if filepath.Ext(os.Args[0]) == ".exe" {
+		manifest.Entry += ".exe"
+	}
+	catalogTestWriteManifest(t, source, manifest)
+	manager := NewManager(t.TempDir())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := manager.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := manager.Install(t.Context(), source); err != nil {
+		t.Fatal(err)
+	}
+	for _, observer := range []struct {
+		name    string
+		list    func(*Manager) ([]LedgerTarget, error)
+		deliver func(LedgerTarget, string) error
+	}{
+		{"ledger", (*Manager).LedgerTargets, func(target LedgerTarget, value string) error {
+			return manager.ObserveLedger(t.Context(), target, sdk.LedgerObservation{Time: 1, Model: value})
+		}},
+		{"request", (*Manager).RequestObservationTargets, func(target LedgerTarget, value string) error {
+			return manager.ObserveRequest(t.Context(), target, sdk.RequestObservation{Phase: "start", RequestID: value, Time: 1})
+		}},
+	} {
+		t.Run(observer.name, func(t *testing.T) {
+			targets, err := observer.list(manager)
+			if err != nil || len(targets) != 1 {
+				t.Fatalf("observer discovery got %+v: %v", targets, err)
+			}
+			for _, sample := range []string{"abc", "bad", "def"} {
+				err := observer.deliver(targets[0], sample)
+				if sample != "bad" {
+					if err != nil {
+						t.Fatalf("valid acknowledgement: %v", err)
+					}
+				} else {
+					var fault *sdk.Error
+					if !errors.As(err, &fault) || fault.Code != "invalid_result" {
+						t.Errorf("nonempty acknowledgement must fail as invalid_result, got %v", err)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestRequestObserverHostAdmissionDeniesAllCallbacks(t *testing.T) {
 	manager := NewManager(t.TempDir())

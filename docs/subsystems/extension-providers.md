@@ -476,10 +476,14 @@ The separate API 1.8 `ledger-observer` capability and `ledger` descriptor use th
 ordinary `usage.Observer` entry point. Only the serving gateway consumes the
 bounded queue, with an allow-listed numeric/metadata projection. Bodies, sessions,
 request IDs, account names, key labels and raw error text are omitted. Enqueuing
-does not read a catalog or wait for a module. Each queued delivery pins the
+does not read a catalog or wait for a module. Oversized or malformed text
+labels are omitted from the SDK projection. An invalid agent label becomes
+`other`. Valid accounting fields and the saved ledger row retain their values.
+Each queued delivery pins the
 package/configuration target observed when the row was appended; replacement or
 disable cannot redirect old rows to a new target. Calls are unary and read-only,
-including delegated host callbacks. Overflow and failed delivery are counted and
+including delegated host callbacks. The host validates acknowledgements from
+every runtime. Overflow and failed delivery are counted and
 reported through the application log. Stopping the observer cancels and joins its
 processor. Imported outside-account history retains its deliberate observer
 bypass. This sink is not request capture or guaranteed durable export.
