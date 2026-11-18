@@ -15,6 +15,19 @@ export function releaseVersion(value) {
   return version;
 }
 
+export function packReceipt(metadata, name, version) {
+  let receipt;
+  if (Array.isArray(metadata) && metadata.length === 1) {
+    receipt = metadata[0];
+  } else if (metadata && typeof metadata === "object" && Object.keys(metadata).length === 1 && Object.hasOwn(metadata, name)) {
+    receipt = metadata[name];
+  }
+  if (receipt?.name !== name || receipt.version !== version) {
+    throw new Error("npm package identity differs from the requested application release");
+  }
+  return receipt;
+}
+
 export async function packSDK({ version: input, output }) {
   const version = releaseVersion(input);
   if (typeof output !== "string" || output.length === 0) throw new Error("an output directory is required");
@@ -30,20 +43,18 @@ export async function packSDK({ version: input, output }) {
     const npm = process.platform === "win32"
       ? join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js")
       : await realpath(join(dirname(process.execPath), "npm"));
-    const result = JSON.parse(execFileSync(process.execPath, [
+    const metadata = JSON.parse(execFileSync(process.execPath, [
       npm, "pack", "--offline", "--ignore-scripts", "--json", "--pack-destination", scratch,
     ], { cwd: stage, encoding: "utf8", timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }));
-    if (result.length !== 1 || result[0].name !== manifest.name || result[0].version !== version) {
-      throw new Error("npm package identity differs from the requested application release");
-    }
-    const filename = result[0].filename;
+    const receipt = packReceipt(metadata, manifest.name, version);
+    const filename = receipt.filename;
     if (typeof filename !== "string" || !/^[A-Za-z0-9._+-]+\.tgz$/.test(filename)) {
       throw new Error("unexpected npm package filename");
     }
     await mkdir(destination, { recursive: true });
     const artifact = join(destination, filename);
     await copyFile(join(scratch, filename), artifact, constants.COPYFILE_EXCL);
-    return { ...result[0], artifact };
+    return { ...receipt, artifact };
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

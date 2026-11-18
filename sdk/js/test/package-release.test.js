@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { releaseVersion } from "../../../build/sdk-js-pack.mjs";
+import { packReceipt, releaseVersion } from "../../../build/sdk-js-pack.mjs";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const sdk = join(root, "sdk/js");
@@ -30,6 +30,22 @@ test("release versions normalize tags without changing wire revision semantics",
     "1.2.03", "1.2.3-01", "1.2.3-a.01", "1.2.3-", "1.2.3+", "1.2.3\n", " 1.2.3",
     "../1.2.3", "1.2.3;touch marker", "vv1.2.3"]) {
     assert.throws(() => releaseVersion(version), /VERSION must be a SemVer/);
+  }
+});
+
+test("pack receipts identify exactly one SDK release in either npm format", () => {
+  const name = "@magpie/extension-sdk";
+  const version = "0.1.90001";
+  const receipt = { name, version, filename: "magpie-extension-sdk-0.1.90001.tgz" };
+  assert.deepEqual(packReceipt([receipt], name, version), receipt);
+  assert.deepEqual(packReceipt({ [name]: receipt }, name, version), receipt);
+  for (const invalid of [
+    null, receipt, [null], [receipt, receipt], { wrong: receipt },
+    { [name]: receipt, another: receipt },
+    { [name]: { ...receipt, version: "0.1.90002" } },
+    { [name]: { ...receipt, name: "other-package" } },
+  ]) {
+    assert.throws(() => packReceipt(invalid, name, version), /package identity differs/);
   }
 });
 
