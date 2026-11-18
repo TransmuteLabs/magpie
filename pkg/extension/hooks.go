@@ -103,6 +103,10 @@ func validGatewayOrigin(origin string) bool {
 
 func (manifest Manifest) validateHooks() error {
 	for _, tool := range manifest.Tools {
+		if tool.MemorySearch && (manifest.Contract.Version.Minor < memorySearchMinor || tool.Exposure != "local-owner" ||
+			!manifest.Contract.Has(ToolProvider) || manifest.Component != nil) {
+			return fmt.Errorf("scoped Memory search requires SDK API 1.14 and a declared local-owner tool on the primary component")
+		}
 		if tool.Exposure == "" {
 			continue
 		}

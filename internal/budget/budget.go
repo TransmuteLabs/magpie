@@ -95,6 +95,14 @@ func (s *sums) counts(r usage.Record) bool {
 	return s.scope == "" || access.ModelAllowed(s.models, r.Provider+"/"+r.Model)
 }
 
+// PolicyScopeMatches uses the same host-owned model resolution as Reserve.
+func PolicyScopeMatches(l *access.Limit, model string) bool {
+	return !l.Scoped() || scopeHas(l, servedAs(model))
+}
+
+// PolicyScopeModels returns the model aliases the native spender excludes.
+func PolicyScopeModels(l *access.Limit) []string { return scopeModels(l) }
+
 // scopeModels is the patterns l counts by: its own, and for a model the
 // user lists by an id of their own (provider.SetModelID) the provider's
 // id of it and back, as calls are recorded by the provider's.

@@ -667,6 +667,7 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 		if MCPHub == nil || !MCPHub.On() {
 			return toolResult(errHubOff, true), nil
 		}
+		r = withExtensionMemory(r)
 		ts := hubTools(r.Context(), agent)
 		// the two tools an agent given its tools on demand calls them by
 		// (hub_ondemand.go), taken whatever it was given: what it lists
@@ -755,7 +756,7 @@ func (s *Server) hubMCPRun(r *http.Request, agent string, t hubTool, args json.R
 	if who := access.Caller(r.Context()); !who.MCPAllows(t.Server, t.Tool) {
 		return toolResult(keyMCPToolRefused(who, t.Server, t.Tool), true)
 	}
-	release, err := reserveFor(access.Caller(r.Context()), int64(len(args)), "", limitClock())
+	release, err := reserveFor(r.Context(), access.Caller(r.Context()), int64(len(args)), "", limitClock())
 	if err != nil {
 		return toolResult(err.Error(), true)
 	}

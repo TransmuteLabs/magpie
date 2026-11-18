@@ -270,8 +270,10 @@ type Settings struct {
 	// default key, which rides the synced gateway-key store, so they follow
 	// the folder: turned on on another computer, sharing there takes up the
 	// same key.
-	LAN    bool   `json:"lan,omitempty"`
-	LANKey string `json:"lanKey,omitempty"`
+	LAN bool `json:"lan,omitempty"`
+	// GatewayBudgetPolicy selects an additional installed module/policy for limited gateway keys.
+	GatewayBudgetPolicy string `json:"gatewayBudgetPolicy,omitempty"`
+	LANKey              string `json:"lanKey,omitempty"`
 	// CORSOrigins are the web pages (scheme://host[:port]) and browser
 	// extensions (chrome-extension://<id>, moz-extension://<uuid>,
 	// safari-web-extension://<uuid>) whose scripts may call the gateway

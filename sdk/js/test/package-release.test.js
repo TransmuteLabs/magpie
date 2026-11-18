@@ -85,7 +85,7 @@ test("Make packs two application releases with real offline installable SDK expo
       import { createAuthLinkPresentation } from "@magpie/extension-sdk/ui";
       console.log(JSON.stringify({ wire: CONTRACT.version, serve: typeof serve, ui: typeof createAuthLinkPresentation }));
     `], { cwd: consumer, encoding: "utf8", timeout: 10_000 }));
-    assert.deepEqual(imported, { wire: { major: 1, minor: 12 }, serve: "function", ui: "function" });
+    assert.deepEqual(imported, { wire: { major: 1, minor: 14 }, serve: "function", ui: "function" });
     const artifactBefore = createHash("sha256").update(await readFile(packed.artifact)).digest("hex");
     const repeated = spawnSync("make", [
       "--no-print-directory", "sdk-js-pack", "VERSION=v" + version, "SDK_JS_DIST=" + output,

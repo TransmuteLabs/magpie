@@ -10,6 +10,8 @@ import type { LedgerObservationDescriptor } from "./ledger.js";
 export * from "./ledger.js";
 import type { RequestObservationDescriptor } from "./request-observer.js";
 export * from "./request-observer.js";
+import type { BudgetPolicyDescriptor } from "./budget-policy.js";
+export * from "./budget-policy.js";
 export * from "./catalog-projection.js";
 export * from "./own-calls.js";
 export * from "./storage-source.js";
@@ -39,14 +41,14 @@ export function validateAccountCheckinResult(value: unknown): AccountCheckinResu
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
-  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy";
+  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "budget-policy";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "provider.calls" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
-  | "gateway.request" | "gateway.response" | "gateway.signin" | "session.storage.list" | "session.storage.read" | "request.observe" | "ledger.observe"
+  | "gateway.request" | "gateway.response" | "gateway.signin" | "session.storage.list" | "session.storage.read" | "budget.reserve" | "budget.spent" | "request.observe" | "ledger.observe"
   | "middleware.request" | "middleware.account" | "middleware.provider" | "middleware.event" | "middleware.response";
 export type ComponentMethod = "component.configure" | "component.ready" | "component.stop";
-export type HostMethod = "request.recover" | "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate" | "usage.append" | "diagnostics.emit"
+export type HostMethod = "request.recover" | "state.get" | "state.cas" | "network.proxy" | "account.replace" | "component.call" | "usage.invalidate" | "usage.append" | "diagnostics.emit" | "memory.search"
   | "storage.native" | "storage.list" | "storage.read" | "storage.check" | "catalog.read"
   | "accountTasks.schedule" | "accountTasks.cancel" | ProcessHostMethod;
 export interface RequestFailureFacts {
@@ -92,7 +94,7 @@ export function requestWithPolicy(signal: AbortSignal, host: RequestPolicyHost, 
   classify: (response: Response) => RequestRecoveryRequest | null | Promise<RequestRecoveryRequest | null>
 ): Promise<{response: Response; decision: RequestRecoveryResult | null}>;
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -237,6 +239,7 @@ export interface RoutingResult { order: number[] }
 export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 interface ManifestFields {
+  budgetPolicies?: readonly BudgetPolicyDescriptor[];
   requestObserver?: RequestObservationDescriptor;
   ledger?: LedgerObservationDescriptor;
   schema: 1;
@@ -503,7 +506,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14"; nativeABI?: number; platforms?: string[] }
 export interface ProviderOption {
   key: string; label: string; description?: string; default?: boolean; confirm?: string;
   labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;
@@ -591,7 +594,11 @@ export interface ToolDescriptor {
   inputSchema: { [key: string]: JSONValue } | boolean;
   /** Omitted exposure retains legacy shared behavior. Host adapters enforce owner access. */
   exposure?: "local-owner" | "shared";
+  memorySearch?: boolean;
 }
+export interface MemorySearchRequest { query: string; limit?: number }
+export interface MemorySearchHit { kind: string; text: string }
+export interface MemorySearchResult { hits: MemorySearchHit[] }
 
 /** Classifies a provider with no inference surface; admission checks API 1.11 and account-auth separately. */
 export function isAccountOnlyProvider(provider: NonNullable<Manifest["providers"]>[number]): boolean;

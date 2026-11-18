@@ -111,6 +111,24 @@ away (`TestMemoryMCPGuarded`).
   (`TestMemoryMCPProjectArgumentAndContext`).
 - A save through MCP is active at once, origin `agent`.
 
+### SDK tool recall
+
+An installable SDK 1.14 tool can request scoped read-only recall through
+`memory.search` when it declares `memorySearch: true` and `exposure:
+local-owner`. The ordinary plugin MCP and Library hub entry points reuse
+Memory's caller resolution for the current local agent and project. The host
+resolves the project from the local client's working-directory header or a
+`roots/list` response. If neither provides a project, recall covers global
+and identified agent scopes. It ignores project selectors in tool arguments
+and call metadata, including Codex's turn workspaces and thread ID.
+The callback takes `query` and an optional `limit` only. It returns `kind` and
+`text` for up to ten active hits and 16 KiB of text and kind data, with up
+to four searches per call. Its ranking leaves usage counters alone.
+A changed package, configuration or disable/enable generation revokes
+the grant. Forwarded, delegated, browser and inter-router calls cannot
+use the callback. Memory writes and digest publication stay with their
+existing owners.
+
 ### Other memory services
 
 EverMe and Nowledge Mem are not built in: both publish an MCP server, so the

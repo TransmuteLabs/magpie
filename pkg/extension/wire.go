@@ -116,6 +116,8 @@ func MethodCapability(method string) (Capability, bool) {
 		return SessionSource, true
 	case MethodStorageList, MethodStorageRead:
 		return StorageSource, true
+	case MethodBudgetReserve, MethodBudgetSpent:
+		return BudgetPolicy, true
 	case MethodRequestObserve:
 		return RequestObserver, true
 	case MethodLedgerObserve:

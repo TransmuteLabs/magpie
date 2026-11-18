@@ -17,10 +17,12 @@ type Stream struct {
 }
 
 func (stream *Stream) Emit(ctx context.Context, event string, data any) (err error) {
-	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || stream.state.call.Method == MethodRequestObserve || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
+	if stream.state.call.Method == MethodSessionSourceRead || stream.state.call.Method == MethodProviderCalls || IsStorageMethod(stream.state.call.Method) || IsBudgetMethod(stream.state.call.Method) || stream.state.call.Method == MethodRequestObserve || stream.state.call.Method == MethodLedgerObserve || IsMiddlewareMethod(stream.state.call.Method) {
 		message := "session source reads are unary"
 		if stream.state.call.Method == MethodRequestObserve {
 			message = "request observation is unary"
+		} else if IsBudgetMethod(stream.state.call.Method) {
+			message = "budget policy is unary"
 		}
 		err := &Error{Code: "invalid_params", Message: message}
 		stream.server.mu.Lock()
@@ -139,10 +141,13 @@ func (stream *Stream) Emit(ctx context.Context, event string, data any) (err err
 }
 
 func (stream *Stream) HostCall(ctx context.Context, method string, params any, out any) error {
+	if IsBudgetMethod(stream.state.call.Method) {
+		return &Error{Code: "permission_denied", Message: "budget policy cannot call host services"}
+	}
 	if stream.state.call.Method == MethodRequestObserve {
 		return &Error{Code: "permission_denied", Message: "request observation cannot call host services"}
 	}
-	if ctx == nil || method != MethodRequestRecover && method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) && !IsAccountTaskHostMethod(method) && !IsProcessHostMethod(method) {
+	if ctx == nil || method != MethodRequestRecover && method != MethodCatalogRead && method != MethodDiagnosticEmit && method != MethodStateGet && method != MethodStateCAS && method != MethodNetworkProxy && method != MethodAccountReplace && method != MethodComponentCall && method != MethodUsageInvalidate && method != MethodMemorySearch && !IsStorageHostMethod(method) && !IsOwnCallHostMethod(method) && !IsAccountTaskHostMethod(method) && !IsProcessHostMethod(method) {
 		return &Error{Code: "method_not_found", Message: "host service method is not supported"}
 	}
 	if method == MethodRequestRecover && (stream.server.manifest.Contract.Version.Minor < 12 || !stream.server.manifest.Contract.Has(RequestPolicy)) {
@@ -197,6 +202,16 @@ func (stream *Stream) HostCall(ctx context.Context, method string, params any, o
 			decodeParams(payload, &request) != nil ||
 			manifest.CatalogAccess.Scope == "selected" && (scope.Account == "" || scope.Generation == 0) {
 			return &Error{Code: "invalid_params", Message: "catalog access requires its declared authority"}
+		}
+	}
+	if method == MethodMemorySearch {
+		var tool ToolRequest
+		call := stream.state.call
+		if call.Method != MethodToolCall || decodeParams(call.Params, &tool) != nil || !toolAllowsMemorySearch(stream.server.manifest, tool.ID) {
+			return &Error{Code: "permission_denied", Message: "scoped Memory search requires its declared local-owner tool"}
+		}
+		if _, err := DecodeMemorySearch(payload); err != nil {
+			return &Error{Code: "invalid_params", Message: "invalid scoped Memory search"}
 		}
 	}
 	stream.server.mu.Lock()

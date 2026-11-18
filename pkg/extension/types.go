@@ -216,10 +216,11 @@ type OperationResult struct {
 }
 
 type ToolDescriptor struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-	Exposure    string          `json:"exposure,omitempty"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	Exposure     string          `json:"exposure,omitempty"`
+	MemorySearch bool            `json:"memorySearch,omitempty"`
 }
 
 type ToolRequest struct {

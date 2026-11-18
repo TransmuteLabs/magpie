@@ -21,6 +21,7 @@ import { validateProviderDefaults } from "./provider-defaults.js";
 import { validateActivation } from "./gateway-activation.js";
 import { validateCatalogAccess } from "./catalog-projection.js";
 import { validateLedgerObserver, validateLedgerCall, validateLedgerResult } from "./ledger.js";
+import { isBudgetMethod, validateBudgetPolicies, validateBudgetPolicyCall, validateBudgetPolicyResult } from "./budget-policy.js";
 import { validateRequestObserver, validateRequestObservationCall, validateRequestObservationResult } from "./request-observer.js";
 import { validateAgentProcesses } from "./process.js";
 
@@ -42,13 +43,14 @@ const capabilities = {
   "gateway-hooks": ["gateway.request", "gateway.response", "gateway.signin"],
   "gateway-middleware": MIDDLEWARE_METHODS,
   "native-account-operations": [],
+  "budget-policy": ["budget.reserve", "budget.spent"],
   "request-observer": ["request.observe"],
   "ledger-observer": ["ledger.observe"],
   "request-policy": [],
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 12 }),
+  version: Object.freeze({ major: 1, minor: 14 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -283,6 +285,7 @@ export function validateManifest(value) {
   validateHooks(manifest);
   validateMiddleware(manifest);
   validateCatalogAccess(manifest);
+  validateBudgetPolicies(manifest, validID);
   validateRequestObserver(manifest);
   validateLedgerObserver(manifest);
   return freezeJSON(manifest);
@@ -383,6 +386,12 @@ export function validateModule(module) {
         if (method === "provider.execute")
           validateExecuteOperation(manifest, call, message => { throw new SDKError("invalid_params", message, "not-started"); });
         return handler(ctx, call, stream);
+      });
+    }
+    if (isBudgetMethod(method)) {
+      handlers.set(method, async (ctx, call, stream) => {
+        const request = validateBudgetPolicyCall(manifest, call);
+        return validateBudgetPolicyResult(method, request, jsonSnapshot(await handler(ctx, call, stream)));
       });
     }
     if (method === "request.observe") {

@@ -382,18 +382,11 @@ func (manifest Manifest) validateComposite() error {
 		bindings[binding.ID] = true
 	}
 	if compatibility := manifest.Compatibility; compatibility != nil {
-		if compatibility.HostAPI != "^1" && compatibility.HostAPI != "^1.1" && compatibility.HostAPI != "^1.2" && compatibility.HostAPI != "^1.3" && compatibility.HostAPI != "^1.4" && compatibility.HostAPI != "^1.5" && compatibility.HostAPI != "^1.6" && compatibility.HostAPI != "^1.7" && compatibility.HostAPI != "^1.8" && compatibility.HostAPI != "^1.9" && compatibility.HostAPI != "^1.10" && compatibility.HostAPI != "^1.11" && compatibility.HostAPI != "^1.12" ||
-			compatibility.HostAPI == "^1.2" && manifest.Contract.Version.Minor < 2 ||
-			compatibility.HostAPI == "^1.3" && manifest.Contract.Version.Minor < 3 ||
-			compatibility.HostAPI == "^1.4" && manifest.Contract.Version.Minor < 4 ||
-			compatibility.HostAPI == "^1.5" && manifest.Contract.Version.Minor < 5 ||
-			compatibility.HostAPI == "^1.6" && manifest.Contract.Version.Minor < 6 ||
-			compatibility.HostAPI == "^1.7" && manifest.Contract.Version.Minor < 7 ||
-			compatibility.HostAPI == "^1.8" && manifest.Contract.Version.Minor < 8 ||
-			compatibility.HostAPI == "^1.9" && manifest.Contract.Version.Minor < 9 ||
-			compatibility.HostAPI == "^1.10" && manifest.Contract.Version.Minor < 10 ||
-			compatibility.HostAPI == "^1.11" && manifest.Contract.Version.Minor < 11 ||
-			compatibility.HostAPI == "^1.12" && manifest.Contract.Version.Minor < 12 {
+		supported := compatibility.HostAPI == "^1" || compatibility.HostAPI == "^1.1"
+		for minor := 2; !supported && minor <= manifest.Contract.Version.Minor; minor++ {
+			supported = compatibility.HostAPI == fmt.Sprintf("^1.%d", minor)
+		}
+		if !supported {
 			return fmt.Errorf("unsupported host API requirement %q", compatibility.HostAPI)
 		}
 		if len(compatibility.Platforms) > 128 {

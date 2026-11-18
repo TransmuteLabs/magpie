@@ -334,7 +334,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 		req["images"] = images
 	}
 	who := access.Caller(r.Context())
-	release, err := reserveFor(who, int64(size), "", limitClock())
+	release, err := reserveFor(r.Context(), who, int64(size), "", limitClock())
 	if err != nil {
 		return toolResult(err.Error(), true)
 	}
@@ -520,7 +520,7 @@ func (s *Server) imageMCPFilm(r *http.Request, raw json.RawMessage) map[string]a
 		}
 		req["reference_images"] = refs
 	}
-	release, err := reserveFor(access.Caller(r.Context()), int64(size), "", limitClock())
+	release, err := reserveFor(r.Context(), access.Caller(r.Context()), int64(size), "", limitClock())
 	if err != nil {
 		return toolResult(err.Error(), true)
 	}

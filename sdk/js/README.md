@@ -17,7 +17,7 @@ It requires Node 22+ and npm. Untagged Git descriptions such as a bare commit or
 with the application built from the same checkout and version; this target
 does not publish or run as part of ordinary Go builds.
 
-Package release versions are separate from the wire contract revision API 1.12
+Package release versions are separate from the wire contract revision API 1.14
 and native ABI 1. Module manifest contract minima and capability gates keep
 those protocol numbers, irrespective of the package release version.
 Declare the minimum contract and capabilities your module needs. `CONTRACT` describes available
@@ -42,6 +42,8 @@ minor 0. No external module is required for Magpie startup.
 | Owned agent processes, agent-backed resume and related migration inputs | [API1.10 process contract](../../docs/subsystems/extension-processes.md) |
 | Account-only providers without inference | [API1.11 account-only declarations](#capability-specific-declarations) |
 | Bounded response recovery through existing host retry owners | [API1.12 request policy](../../docs/subsystems/request-policy.md) |
+| Selected budget policy | [API1.13 budget policy](../../docs/subsystems/plugin-runtime.md#executable-budget-policy) |
+| Scoped search of built-in Memory from local tools | [API1.14 tool recall](../../docs/subsystems/memory.md#sdk-tool-recall) |
 
 The [manifest validator](manifest.js) and capability-specific validators own
 author admission. Ordinary host adapters own selected accounts, permissions,
@@ -94,6 +96,18 @@ receives `ledger.observe`. This is a bounded, sanitized, read-only
 numeric/metadata sink, separate from body capture and memory hooks. The host
 retains original package and configuration authority, counts delivery drops
 and never waits for it while writing a ledger row.
+
+API 1.13 primaries can declare `budget-policy` and
+`budgetPolicies: [{ id: "policy" }]`. After owner selection, the host calls
+`budget.reserve` and `budget.spent` with bounded numeric policy facts.
+Use `validateBudgetPolicyCall` and return `{ restrictions: [] }` or one-based
+scope references and bounded retry intervals. The host retains native
+reservation and accounting and grants the handler no host callbacks.
+
+API 1.14 tools can declare `exposure: "local-owner"` and `memorySearch: true`.
+From the declared tool's `tool.call` handler, use
+`await stream.hostCall("memory.search", { query, limit: 5 })` to receive
+`{ hits: [{ kind, text }] }` within the caller's scope.
 
 A primary can use API 1.12's separate `request-observer` capability with
 `requestObserver: {}` to receive `request.observe`. Validate `call.params` with

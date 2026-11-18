@@ -84,7 +84,7 @@ func (catalog *Catalog) List() ([]Installed, error) {
 	}
 	for index := range entries {
 		entry := &entries[index]
-		if !entry.Disabled && observerCapable(entry.Manifest) {
+		if !entry.Disabled && tracksEnablement(entry.Manifest) {
 			entry.EnableGeneration, entry.observerEnablementErr = readObserverEnablement(root, entry.Manifest.ID)
 		}
 	}
@@ -310,7 +310,7 @@ func (catalog *Catalog) SetEnabled(ctx context.Context, id string, on bool) erro
 			return nil, nil
 		}
 		entry.Disabled = disabled
-		if on && observerCapable(entry.Manifest) {
+		if on && tracksEnablement(entry.Manifest) {
 			if err := catalogValidateEntries(entries); err != nil {
 				return nil, err
 			}

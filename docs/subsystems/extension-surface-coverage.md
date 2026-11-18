@@ -2,7 +2,7 @@
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. This census maps those surfaces to the current API1.12 SDK and the
+modules. This census maps those surfaces to the current API 1.14 SDK and the
 ordinary host owners. It distinguishes three layers:
 
 - **Contract:** public descriptors, DTOs, method negotiation and validation.
@@ -23,7 +23,7 @@ and transport matrix extends that inventory.
 
 ## Owner navigation and compatibility
 
-The advertised API1.12 ceiling does not change a module's negotiated minimum
+The advertised API 1.14 ceiling does not change a module's negotiated minimum
 or activate undeclared capabilities. Explicit API1.0 single-primary modules
 remain supported; components require API1.1, private-tool exposure API1.2 and
 later adapters retain the floors shown in their owning contracts.
@@ -72,8 +72,9 @@ together with the existing private store/services and UI, let our module
 implement its own memory: tool writes, recall for another agent, completed
 exchange capture and durable private storage. It does not need the built-in
 Memory API to be a memory module. Those hooks/tools plus the module's own
-store supply the external memory slice; built-in Memory owner access remains
-a proposed, optional integration.
+store supply the external memory slice. API 1.14 also offers optional
+[scoped recall from built-in Memory](memory.md#sdk-tool-recall) to local-owner
+SDK tools.
 
 ## Initial extension-family inventory
 
@@ -101,10 +102,10 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Asynchronous request / completed-response / sign-in hooks | [`GatewayBegin`, `GatewayRun`, `GatewaySignIn`](../../internal/plugin/gateway.go), [`hooks.go`](../../pkg/extension/hooks.go) | API 1.2 `gateway-hooks` enters ordinary request/completion/sign-in owners with origin, effect and lease checks | **Implemented 1.2, scoped host proof.** Recall is read-only; capture keeps the selected generation and durable effect policy. This is not synchronous middleware or built-in Memory access. |
 | Global request/attempt/ledger observation | [`Observer`, `Watch`](../../internal/usage/observe.go), [request and ledger adapters](gateway-request-hooks.md#sdk-request-lifecycle-observation) | API 1.8 `ledger-observer` joins ordinary `Append`. API 1.12 `request-observer` joins the gateway's start, attempt and end callbacks. Each uses a bounded asynchronous metadata queue. | **Implemented through 1.12.** Existing usage and OTLP owners retain delivery. The SDK observers receive no bodies and cannot modify requests or ledger rows. `usage-reporter` supplies provider-specific history. |
 | Routing strategy / seat ordering | [`RoutingStrategyDescriptor`](../../pkg/extension/routing.go), [`extensionrouting`](../../internal/extensionrouting/routing.go), [`Manager.OrderRouting`](../../internal/extension/routing.go) | Namespaced root READ actions, owned by the primary or a private service, enter ordinary provider/group ordering; component-filtered public handshakes retain full-root registration and lazy dispatch | **Implemented 1.4.** Selected revision/config leases, bounded permutations and identity fallback retain core guards. [Record](../adr/0012-sdk-routing-strategies.md), including hybrid regression; SDK checkpoint and application acceptance are separate. |
-| Budget limiter / spender | [`Limiter`, `Spender`](../../internal/gwbudget/gwbudget.go) | Host reserve/release/spent contract | **Remaining:** SDK adapter preserving the point's fail-closed policy. |
+| Budget limiter / spender | [`Limiter`, `Spender`](../../internal/gwbudget/gwbudget.go), [SDK budget policy](plugin-runtime.md#executable-budget-policy) | API 1.13 supplies selected `budget.reserve` and `budget.spent` policies with bounded metadata | **Implemented 1.13.** The built-in owner retains reservations, accounting and issuer constraints. Policy errors on budgeted calls fail closed. |
 | Reversible masking | [`Masker`](../../internal/gwmw/gwmw.go), [`plugins/redact`](../../plugins/redact/redact.go) | Dedicated host transformation point | **Remaining:** SDK adapter; ordinary request hooks are not this contract. |
 | Search source / gateway web search | [`searchesOf`](../../internal/plugin/host.js), [`SDK search sources`](extension-search.md), [`gwtool`](../../internal/gwtool/gwtool.go) | Legacy search hooks and the ordinary search owner, Settings selection, account order, proxy and search ledger | **Implemented 1.8:** explicit `searchSources` with declared primary read actions; a tool named search remains separate. Scoped synthetic source acceptance does not claim live community-package compatibility. |
-| Built-in shared Memory / scoped CRUD / digest | [`memoryMCPCall`](../../internal/gateway/memory_mcp.go), [`memory`](../../internal/memory/memory.go), [`Digest`](../../internal/memory/digest.go) | Separate Memory owner, local caller/project/agent resolution, MCP and Library instructions | **Remaining, optional:** SDK access to this built-in owner. An external memory module can instead use its own store/service with hooks/tools/UI. |
+| Built-in shared Memory / scoped CRUD / digest | [`memoryMCPCall`](../../internal/gateway/memory_mcp.go), [`memory`](../../internal/memory/memory.go), [`Digest`](../../internal/memory/digest.go) | API 1.14 local-owner tool recall uses the existing caller/project/agent resolver and read-only ranking | **Partial:** optional scoped search is implemented. Mutation and digest lifecycle remain with built-in owners. |
 | Semantic Memory / distillation / background indexing | [`Semantic`](../../internal/memory/search.go), [`memembed`](../../internal/memembed/memembed.go), [`memory_distill.go`](../../internal/gui/memory_distill.go) | Built-in search fusion, embedder and jobs | **Remaining:** SDK registration and ownership. This is separate from a generic module service being ready. |
 | Library resources and optional module contributions | [`Library`](../../internal/library/library.go), [`Hook`](../../internal/library/hooks.go), [`Subagent`](../../internal/library/subagents.go), [`EnvVar`](../../internal/library/env.go) | Instructions, skills, agent hooks, env and subagents already have apply/remove ownership | **Existing data/owner integration.** An SDK declaration/binding is a possible addition, not a missing runtime. Arbitrary file plans do not join regular Library reconciliation automatically. |
 | Library sources and imported packages | [`Source`](../../internal/library/skills.go), [`Claude bundles`](../../internal/library/plugin.go), [`Pi management`](../../internal/library/piext.go) | GitHub/Git/folder sources and imported resources retain their existing owners | **Existing import category.** Skills/bundles/Pi package management are not unimplemented SDK runtimes; automatic SDK package/resource lifecycle binding would be a separate feature. |
@@ -248,12 +249,12 @@ transports need their own checked readers.
    Existing agent Library targets and bounded JSONL sources do not provide
    these unrelated registration points.
 
-The implemented memory slice is gateway hooks, local-owner tools and
-module-owned storage. Explicit built-in Memory owner access is an optional follow-up,
-alongside module-owned Library resource contributions and additional session
-reader transports.
+The implemented memory slice includes gateway hooks, local-owner tools,
+module-owned storage and scoped recall from built-in Memory. Shared Memory
+mutation and digest lifecycle remain with their current owners.
 Routing, observation, budget and masking have different timing and failure
-contracts. Budget reservations and reversible masking still need SDK adapters.
+contracts. Budget policy enters the built-in reserve and spent owners.
+Reversible masking still needs an SDK adapter.
 
 ## Logging and collection boundaries
 

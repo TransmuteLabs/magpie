@@ -19,6 +19,7 @@ export { validateExecutionUsage } from "./usage-facts.js";
 export { MAX_OUTSIDE_CALLS, MAX_OUTSIDE_CALL_PAGES, validateOwnCall, validateOutsideCallsRequest, validateOutsideCallsResult, appendOwnCall } from "./own-calls.js";
 export { validateDiagnostic } from "./diagnostics.js";
 export { validateCatalogAccess, validateCatalogRead, validateCatalogProjection } from "./catalog-projection.js";
+export { isBudgetMethod, validateBudgetPolicyCall, validateBudgetPolicyResult } from "./budget-policy.js";
 export { validateRequestObserver, validateRequestObservation, validateRequestObservationCall, validateRequestObservationResult } from "./request-observer.js";
 export { validateLedgerObserver, validateLedgerObservation, validateLedgerCall, validateLedgerResult } from "./ledger.js";
 export { validateRoutingRequest, validateRoutingResult } from "./routing.js";

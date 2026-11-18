@@ -24,10 +24,10 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 12},
+		Version: APIVersion{Major: 1, Minor: 14},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration, SessionRelatedInputs, AgentProcess, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware, RequestPolicy, RequestObserver,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, SessionRelatedInputs, AgentProcess, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware, RequestPolicy, RequestObserver, BudgetPolicy,
 		},
 	}
 }
@@ -58,6 +58,7 @@ type Manifest struct {
 	Hooks             *GatewayHookDescriptor        `json:"hooks,omitempty"`
 	Middleware        *GatewayMiddlewareDescriptor  `json:"middleware,omitempty"`
 	CatalogAccess     *CatalogAccessDescriptor      `json:"catalogAccess,omitempty"`
+	BudgetPolicies    []BudgetPolicyDescriptor      `json:"budgetPolicies,omitempty"`
 	RequestObserver   *RequestObservationDescriptor `json:"requestObserver,omitempty"`
 	Ledger            *LedgerObservationDescriptor  `json:"ledger,omitempty"`
 	RoutingStrategies []RoutingStrategyDescriptor   `json:"routingStrategies,omitempty"`

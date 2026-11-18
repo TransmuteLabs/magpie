@@ -21,6 +21,11 @@ function allowsOrigin(descriptor, origin) {
 
 export function validateHooks(manifest) {
   for (const tool of manifest.tools ?? []) {
+    if (tool.memorySearch !== undefined && (typeof tool.memorySearch !== "boolean" ||
+      tool.memorySearch && (manifest.contract.version.minor < 14 || tool.exposure !== "local-owner" ||
+        !manifest.contract.capabilities.includes("tool-provider") || manifest.component != null))) {
+      fail("Scoped Memory search requires SDK API 1.14 and a declared local-owner tool on the primary component");
+    }
     if (tool.exposure == null || tool.exposure === "") continue;
     if (manifest.contract.version.minor < 2 || !["shared", "local-owner"].includes(tool.exposure)) {
       fail("Tool exposure requires SDK API 1.2 and shared or local-owner");

@@ -286,7 +286,7 @@ func (s *Server) searchMCPRun(r *http.Request, query string, count *int, scope *
 	if query == "" {
 		return "", searchMCPError("web_search needs a query")
 	}
-	release, err := reserveFor(access.Caller(r.Context()), int64(len(query)), "", limitClock())
+	release, err := reserveFor(r.Context(), access.Caller(r.Context()), int64(len(query)), "", limitClock())
 	if err != nil {
 		return "", err
 	}

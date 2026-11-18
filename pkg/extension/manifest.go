@@ -43,6 +43,7 @@ func (manifest Manifest) Clone() Manifest { return cloneManifest(manifest) }
 
 func cloneManifest(manifest Manifest) Manifest {
 	manifest.Activation = slices.Clone(manifest.Activation)
+	manifest.BudgetPolicies = slices.Clone(manifest.BudgetPolicies)
 	if manifest.RequestObserver != nil {
 		manifest.RequestObserver = new(*manifest.RequestObserver)
 	}
@@ -182,6 +183,9 @@ func (manifest Manifest) Validate() error {
 		return err
 	}
 	if err := manifest.validateMiddleware(); err != nil {
+		return err
+	}
+	if err := manifest.validateBudgetPolicies(); err != nil {
 		return err
 	}
 	if err := manifest.validateRequestObserver(); err != nil {
@@ -572,6 +576,8 @@ func RequiredMethods(manifest Manifest) []string {
 			methods = append(methods, MethodSessionSourceRead)
 		case StorageSource:
 			methods = append(methods, MethodStorageList, MethodStorageRead)
+		case BudgetPolicy:
+			methods = append(methods, MethodBudgetReserve, MethodBudgetSpent)
 		case RequestObserver:
 			methods = append(methods, MethodRequestObserve)
 		case LedgerObserver:

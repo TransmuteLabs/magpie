@@ -13,14 +13,14 @@ application repository at the matching application tag or commit; it has no
 separate SDK release tag. The JS release package is stamped from the same
 build's `VERSION` through `make sdk-js-pack`; its checked-in
 `0.0.0-alpha.0` version identifies development source. Application/package
-release versions do not renumber wire API 1.12, native ABI 1 or manifest
+release versions do not renumber wire API 1.14, native ABI 1 or manifest
 compatibility floors.
 
 Declare the minimum contract and only the capabilities used. The simple
 [Go](../../examples/extensions/echo-go/magpie-plugin.json) and
 [native](../../examples/extensions/echo-native/magpie-plugin.json) examples
 retain explicit SDK 1.0 single-primary manifests. `FullContract()` advertises
-the available API 1.12 ceiling; it is not a default manifest or a requirement
+the available API 1.14 ceiling; it is not a default manifest or a requirement
 to enable every capability. Composite configuration is negotiated separately.
 Magpie needs no external module to start; installing this SDK does not install
 or start a domain module.
@@ -119,7 +119,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.12; explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.14; explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
 contract is API 0.5, retaining the older 0.1 inbound, 0.2 catalog, 0.3 tool
 and 0.4 executor-binding contracts.
@@ -137,6 +137,14 @@ sessions, request IDs, account names, key labels and raw errors. Delivery uses
 the ordinary ledger observer with a bounded queue, deadline and original package
 and configuration identity. It is read-only, unary and best-effort; dropping or
 failing a delivery cannot delay the ledger writer or modify billing.
+
+API 1.13's `BudgetPolicy` and `Manifest.BudgetPolicies` declare optional
+gateway key restrictions through `MethodBudgetReserve` and
+`MethodBudgetSpent`. The host chooses the installed policy and the
+applicable limits. Return `BudgetPolicyResult{Restrictions: []BudgetRestriction{}}`
+to allow the native outcome, or return one-based references to host-supplied limits with
+bounded retry intervals. The module has no credential or host callback
+authority. See [Executable budget policy](../../docs/subsystems/plugin-runtime.md#executable-budget-policy).
 
 API 1.12's `RequestObserver` and `Manifest.RequestObserver` opt a primary into
 `MethodRequestObserve` for the ordinary gateway's start, attempts and end.
@@ -653,8 +661,11 @@ completion delivery, operation journaling and conversation-export opt-in.
 
 `ToolDescriptor.Exposure` omission preserves legacy shared behavior. Explicit
 `shared` or `local-owner` requires API 1.2; the host enforces it on discovery
-and execution. Memory can compose these tools, hooks and existing services,
-without implied access to the independent built-in memory store.
+and execution. API 1.14 tools can opt into scoped recall by declaring
+`MemorySearch: true` and `Exposure: "local-owner"`. Use
+`Stream.HostCall(ctx, MethodMemorySearch, MemorySearchRequest{Query: query}, &result)`
+with a `MemorySearchResult`. The ordinary MCP request supplies caller scope.
+See [SDK tool recall](../../docs/subsystems/memory.md#sdk-tool-recall).
 
 ## Stop and verification boundaries
 

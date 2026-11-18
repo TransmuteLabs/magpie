@@ -395,7 +395,7 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 	if c.hostCall == nil || frame.Method == "" || frame.Result != nil || frame.Error != nil ||
 		frame.Auth != nil ||
 		frame.Event != "" || frame.Data != nil || frame.Seq != 0 ||
-		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != sdk.MethodCatalogRead &&
+		(!strings.HasPrefix(frame.Method, "state.") && frame.Method != sdk.MethodCatalogRead && frame.Method != sdk.MethodMemorySearch &&
 			frame.Method != sdk.MethodDiagnosticEmit && frame.Method != sdk.MethodNetworkProxy &&
 			frame.Method != sdk.MethodAccountReplace && frame.Method != sdk.MethodComponentCall && frame.Method != sdk.MethodRequestRecover &&
 			frame.Method != sdk.MethodUsageInvalidate && !sdk.IsStorageHostMethod(frame.Method) &&

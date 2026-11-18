@@ -776,6 +776,19 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err := validateStorageScope(manifest, method, scope, params); err != nil {
 		return nil, err
 	}
+	var budgetRequest sdk.BudgetPolicyRequest
+	if sdk.IsBudgetMethod(method) {
+		raw, marshalErr := json.Marshal(params)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		request, err := sdk.DecodeBudgetRequest(manifest, method, raw)
+		if err != nil {
+			return nil, err
+		}
+		budgetRequest = request
+		params = json.RawMessage(raw)
+	}
 	if method == sdk.MethodRequestObserve {
 		raw, err := json.Marshal(params)
 		if err != nil {
@@ -852,7 +865,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		}
 	}
 	if method == sdk.MethodToolCall {
-		if err := checkLeasedTool(ctx, l, params); err != nil {
+		var err error
+		ctx, err = checkLeasedTool(ctx, l, params)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -952,6 +967,9 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
 			return errors.New("session source reads are unary")
 		}
+		if sdk.IsBudgetMethod(method) {
+			return errors.New("budget policy is unary")
+		}
 		if method == sdk.MethodRequestObserve {
 			return errors.New("request observation is unary")
 		}
@@ -1023,6 +1041,12 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if accountTask {
 		if flushErr := m.flushAccountTaskUsage(ctx, scope, err); err == nil {
 			err = flushErr
+		}
+	}
+	if err == nil && sdk.IsBudgetMethod(method) {
+		_, err = sdk.DecodeBudgetResult(method, budgetRequest, result)
+		if err != nil {
+			result = nil
 		}
 	}
 	if err == nil && method == sdk.MethodRequestObserve {
@@ -1107,6 +1131,9 @@ func (m *Manager) Invoke(ctx context.Context, id, method string, scope sdk.Scope
 }
 
 func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) error {
+	if sdk.IsBudgetMethod(method) {
+		return sdk.ValidateBudgetScope(scope)
+	}
 	if method == sdk.MethodRequestObserve {
 		return sdk.ValidateRequestObservationScope(scope)
 	}
@@ -1176,6 +1203,9 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	if _, err := m.authFor(scope); err != nil {
 		return nil, err
 	}
+	if sdk.IsBudgetMethod(authority.method) {
+		return nil, errors.New("budget policy cannot call host services")
+	}
 	if authority.method == sdk.MethodRequestObserve {
 		return nil, errors.New("request observation cannot call host services")
 	}
@@ -1192,6 +1222,8 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		return m.accountTaskHostCall(ctx, scope, method, raw, authority)
 	}
 	switch method {
+	case sdk.MethodMemorySearch:
+		return m.searchToolMemory(ctx, raw, authority)
 	case sdk.MethodRequestRecover:
 		return m.recoverRequest(ctx, scope, raw, authority)
 	case sdk.MethodCatalogRead:

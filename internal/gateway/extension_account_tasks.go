@@ -83,7 +83,18 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 		if _, resting := restedUntil(candidate); resting {
 			return extensionhost.AccountTaskAdmission{}, errors.New("paid account task account/model is resting")
 		}
-		releaseBudget, err := reserveFor(who, selection.Bytes, selected.ID+"/"+selection.Model, limitClock())
+		ctx = context.WithValue(ctx, budgetExtensionManagerKey{}, server.extensions)
+		now := limitClock()
+		if hasScopedBudget(who) {
+			spender, err := withSpentBudget(ctx, who, now)
+			if err != nil {
+				return extensionhost.AccountTaskAdmission{}, err
+			}
+			if spent, ok := spentFor(spender, selected, selection.Model); ok {
+				return extensionhost.AccountTaskAdmission{}, errors.New(spent.Why)
+			}
+		}
+		releaseBudget, err := reserveFor(ctx, who, selection.Bytes, selected.ID+"/"+selection.Model, now)
 		if err != nil {
 			return extensionhost.AccountTaskAdmission{}, err
 		}

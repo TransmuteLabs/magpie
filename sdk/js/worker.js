@@ -1,3 +1,4 @@
+import { isBudgetMethod } from "./budget-policy.js";
 import { Buffer } from "node:buffer";
 import { TextDecoder } from "node:util";
 import { MAX_CHUNK_BYTES, MAX_CONCURRENT, MAX_FRAME_BYTES, MAX_HOST_BYTES, SDKError, decodeBytes } from "./bytes.js";
@@ -350,6 +351,10 @@ export async function serve(module, { input = process.stdin, output = process.st
       const operation = (async () => {
         assertOpen();
         const hookEffect = gatewayMethodEffect(call.method);
+        if (isBudgetMethod(call.method)) {
+          record.creditError = new SDKError("invalid_params", "Budget policy is unary");
+          throw record.creditError;
+        }
         if (call.method === "session.source.read" || call.method === "provider.calls" || call.method === "request.observe" || call.method === "ledger.observe" || MIDDLEWARE_METHODS.includes(call.method)) {
           record.creditError = new SDKError("invalid_params", call.method === "request.observe" ? "Request observation is unary" : "Session source reads are unary");
           throw record.creditError;
@@ -391,6 +396,9 @@ export async function serve(module, { input = process.stdin, output = process.st
     const hostCall = (method, params = null) => {
       let lane = 4;
       try {
+        if (isBudgetMethod(call.method)) {
+          throw new SDKError("permission_denied", "Budget policy cannot call host services");
+        }
         if (call.method === "request.observe") {
           throw new SDKError("permission_denied", "Request observation cannot call host services");
         }
@@ -417,7 +425,7 @@ export async function serve(module, { input = process.stdin, output = process.st
         try {
           await Promise.race([previous, record.aborted.promise]);
           assertOpen();
-          if (!["state.get", "state.cas", "request.recover", "network.proxy", "account.replace", "component.call", "usage.invalidate", "usage.append", "diagnostics.emit", "catalog.read", "accountTasks.schedule", "accountTasks.cancel", ...STORAGE_HOST_METHODS, ...PROCESS_HOST_METHODS].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
+          if (!["state.get", "state.cas", "request.recover", "network.proxy", "account.replace", "component.call", "usage.invalidate", "usage.append", "diagnostics.emit", "catalog.read", "memory.search", "accountTasks.schedule", "accountTasks.cancel", ...STORAGE_HOST_METHODS, ...PROCESS_HOST_METHODS].includes(method)) throw new SDKError("method_not_found", "Host method not supported");
           if (method === "request.recover" && (manifest.contract.version.minor < 12 || !manifest.contract.capabilities.includes("request-policy"))) throw new SDKError("method_not_found", "Request policy was not negotiated");
           if (STORAGE_HOST_METHODS.includes(method) && !STORAGE_METHODS.includes(call.method)) throw new SDKError("invalid", "Storage callbacks require their selected source parent");
           if (method === "usage.append") validateOwnCall(manifest, params);
@@ -425,6 +433,17 @@ export async function serve(module, { input = process.stdin, output = process.st
           if (method === "accountTasks.cancel") validateAccountTaskCancel(params);
           if (method === "diagnostics.emit") validateDiagnostic(manifest, params);
           if (method === "catalog.read") validateCatalogRead(manifest, call.scope, params);
+          if (method === "memory.search") {
+            if (call.method !== "tool.call" || manifest.contract.version.minor < 14 ||
+              !manifest.tools?.some(tool => tool.name === call.params?.id && tool.memorySearch === true && tool.exposure === "local-owner")) {
+              throw new SDKError("permission_denied", "Scoped Memory search requires its declared local-owner tool");
+            }
+            if (!object(params) || Object.keys(params).some(key => key !== "query" && key !== "limit") ||
+              typeof params.query !== "string" || !params.query.trim() || Buffer.byteLength(params.query) > 1024 ||
+              params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 0 || params.limit > 10)) {
+              throw new SDKError("invalid_params", "Invalid scoped Memory search");
+            }
+          }
           const serializedParams = stringifyJSON(params);
           if (Buffer.byteLength(serializedParams) > MAX_HOST_BYTES) throw new SDKError("resource_exhausted", "Host parameters exceed the size limit");
           const payload = parseJSON(serializedParams);

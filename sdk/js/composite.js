@@ -138,19 +138,12 @@ export function validateComposite(manifest) {
   }
   if (manifest.compatibility != null) {
     const value = manifest.compatibility;
-    if (!object(value) || !["^1", "^1.1", "^1.2", "^1.3", "^1.4", "^1.5", "^1.6", "^1.7", "^1.8", "^1.9", "^1.10", "^1.11", "^1.12"].includes(value.hostAPI)
-      || value.hostAPI === "^1.3" && manifest.contract.version.minor < 3
-      || value.hostAPI === "^1.2" && manifest.contract.version.minor < 2
-      || value.hostAPI === "^1.4" && manifest.contract.version.minor < 4
-      || value.hostAPI === "^1.5" && manifest.contract.version.minor < 5
-      || value.hostAPI === "^1.6" && manifest.contract.version.minor < 6
-      || value.hostAPI === "^1.7" && manifest.contract.version.minor < 7
-      || value.hostAPI === "^1.8" && manifest.contract.version.minor < 8
-      || value.hostAPI === "^1.9" && manifest.contract.version.minor < 9
-      || value.hostAPI === "^1.10" && manifest.contract.version.minor < 10
-      || value.hostAPI === "^1.11" && manifest.contract.version.minor < 11
-      || value.hostAPI === "^1.12" && manifest.contract.version.minor < 12
-      || value.nativeABI !== undefined && !uint32(value.nativeABI)) fail("Unsupported host API requirement");
+    if (!object(value)) fail("Unsupported host API requirement");
+    let supported = value.hostAPI === "^1" || value.hostAPI === "^1.1";
+    for (let minor = 2; !supported && minor <= manifest.contract.version.minor; minor++) {
+      supported = value.hostAPI === `^1.${minor}`;
+    }
+    if (!supported || value.nativeABI !== undefined && !uint32(value.nativeABI)) fail("Unsupported host API requirement");
     const values = list(value.platforms, 128, "compatibility platforms");
     if (new Set(values).size !== values.length || values.some(value => !validPlatform(value))) fail("Invalid or duplicate compatibility platform");
   }

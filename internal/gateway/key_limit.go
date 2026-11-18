@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 	"github.com/yetone/magpie/internal/budget"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // limitClock is the time a gateway key's limit is checked at: the window
@@ -57,7 +60,13 @@ func keyLimited(next http.Handler) http.Handler {
 		scoped := slices.ContainsFunc(limits, (*access.Limit).Scoped)
 		if strings.HasSuffix(r.URL.Path, "/count_tokens") {
 			if scoped {
-				r = withSpent(r, who, limitClock())
+				var err error
+				now := limitClock()
+				r, err = withSpent(r, who, now)
+				if err != nil {
+					writeKeyLimitRefusal(w, r, "", now, err)
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 			return
@@ -86,26 +95,16 @@ func keyLimited(next http.Handler) http.Handler {
 		if scoped {
 			// before the request's own reservation, which would count it
 			// spent on the model it holds
-			r = withSpent(r, who, now)
-		}
-		release, err := reserveFor(who, size, model, now)
-		if err != nil {
-			status, errType := http.StatusServiceUnavailable, "gateway_key_limit_off"
-			var refused gwbudget.Refusal
-			if errors.As(err, &refused) {
-				status, errType = http.StatusTooManyRequests, "gateway_key_limit"
-				w.Header().Set("Retry-After", strconv.Itoa(refused.RetryAfter(now)))
-				// a limit of some models rests a remote's model, not its key
-				if refused.KeyWide() {
-					w.Header().Set(remoteKeyLimitHeader, refused.ResetAt().Format(time.RFC3339))
-				}
+			var err error
+			r, err = withSpent(r, who, now)
+			if err != nil {
+				writeKeyLimitRefusal(w, r, model, now, err)
+				return
 			}
-			// the Anthropic and OpenAI SDKs would otherwise retry a 429 or 503
-			w.Header().Set("X-Should-Retry", "false")
-			writeError(w, protoOfPath(r.URL.Path), status, err.Error())
-			c := callerOf(r)
-			appendUsage(r, usage.Record{Time: now, Agent: c.agent, Via: c.via, Requested: model, Status: status, Rejected: true,
-				Error: err.Error(), ErrType: errType, Endpoint: r.URL.Path, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header)})
+		}
+		release, err := reserveFor(r.Context(), who, size, model, now)
+		if err != nil {
+			writeKeyLimitRefusal(w, r, model, now, err)
 			return
 		}
 		defer release()
@@ -113,29 +112,65 @@ func keyLimited(next http.Handler) http.Handler {
 	})
 }
 
-// withSpent is r with its caller's spent limits of some models on it
-// (access.Identity.Spent), as the limiter serving who tells them; r as it
-// is when none serves (a request it holds is refused by reserveFor).
-func withSpent(r *http.Request, who access.Identity, now time.Time) *http.Request {
+func writeKeyLimitRefusal(w http.ResponseWriter, r *http.Request, model string, now time.Time, err error) {
+	status, errType := http.StatusServiceUnavailable, "gateway_key_limit_off"
+	var refused gwbudget.Refusal
+	if errors.As(err, &refused) {
+		status, errType = http.StatusTooManyRequests, "gateway_key_limit"
+		w.Header().Set("Retry-After", strconv.Itoa(refused.RetryAfter(now)))
+		// a limit of some models rests a remote's model, not its key
+		if refused.KeyWide() {
+			w.Header().Set(remoteKeyLimitHeader, refused.ResetAt().Format(time.RFC3339))
+		}
+	}
+	// the Anthropic and OpenAI SDKs would otherwise retry a 429 or 503
+	w.Header().Set("X-Should-Retry", "false")
+	writeError(w, protoOfPath(r.URL.Path), status, err.Error())
+	c := callerOf(r)
+	appendUsage(r, usage.Record{Time: now, Agent: c.agent, Via: c.via, Requested: model, Status: status, Rejected: true,
+		Error: err.Error(), ErrType: errType, Endpoint: r.URL.Path, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header)})
+}
+
+// withSpent attaches the host's current model restrictions to an ordinary request.
+func withSpent(r *http.Request, who access.Identity, now time.Time) (*http.Request, error) {
+	who, err := withSpentBudget(r.Context(), who, now)
+	if err != nil || len(who.Spent) == 0 {
+		return r, err
+	}
+	return r.WithContext(access.WithIdentity(r.Context(), who)), nil
+}
+
+// withSpentBudget serves the same scope check to inference, token counting
+// and paid tasks with a known selected model.
+func withSpentBudget(ctx context.Context, who access.Identity, now time.Time) (access.Identity, error) {
 	l, err := gwbudget.Limiting(who)
-	if err != nil || l == nil {
-		return r
+	if err != nil {
+		cfg, settingsErr := settings.SharedChecked()
+		if settingsErr != nil || cfg.GatewayBudgetPolicy != "" {
+			return who, err
+		}
+		// With no selected policy, preserve the old cost-free count path.
+		return who, nil
 	}
-	sp, ok := l.(gwbudget.Spender)
-	if !ok {
-		return r
+	if l == nil {
+		return who, nil
 	}
-	if who.Spent = sp.Spent(who, now); len(who.Spent) == 0 {
-		return r
+	if sp, ok := l.(gwbudget.Spender); ok {
+		who.Spent = sp.Spent(who, now)
 	}
-	return r.WithContext(access.WithIdentity(r.Context(), who))
+	extra, err := applyBudgetPolicy(ctx, who, sdk.MethodBudgetSpent, 0, "", now)
+	if err != nil {
+		return who, err
+	}
+	who.Spent = append(who.Spent, extra...)
+	return who, nil
 }
 
 // reserveFor holds a request of who's to its key's limits through the
 // gateway's budget point (gwbudget): its release, or why it isn't let in,
 // a gwbudget.Refusal or, for a key held to a limit while no limiter serves
 // it, gwbudget.ErrUnlimited. A request without a limit is let in as it is.
-func reserveFor(who access.Identity, size int64, model string, now time.Time) (release func(), err error) {
+func reserveFor(ctx context.Context, who access.Identity, size int64, model string, now time.Time) (release func(), err error) {
 	l, err := gwbudget.Limiting(who)
 	if err != nil {
 		return nil, err
@@ -146,6 +181,10 @@ func reserveFor(who access.Identity, size int64, model string, now time.Time) (r
 	release, refused := l.Reserve(who, size, model, now)
 	if refused != nil {
 		return nil, refused
+	}
+	if _, err := applyBudgetPolicy(ctx, who, sdk.MethodBudgetReserve, size, model, now); err != nil {
+		release()
+		return nil, err
 	}
 	return release, nil
 }

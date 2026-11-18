@@ -13,8 +13,16 @@ import (
 
 const observerEnablementLimit = 128
 
-func observerCapable(manifest sdk.Manifest) bool {
-	return manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver)
+func tracksEnablement(manifest sdk.Manifest) bool {
+	if manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver) || manifest.Contract.Has(sdk.BudgetPolicy) {
+		return true
+	}
+	for _, tool := range manifest.Tools {
+		if tool.MemorySearch {
+			return true
+		}
+	}
+	return false
 }
 
 func observerEnablementFile(id string) string {

@@ -304,7 +304,7 @@ func (s *Server) realtime(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if keyWho.Limited() {
-						release, err := reserveFor(keyWho, 0, asked, limitClock())
+						release, err := reserveFor(ctx, keyWho, 0, asked, limitClock())
 						if err != nil {
 							log.Printf("realtime: the gateway key %s can't spend more (%v), so its session to %s is closed", keyWho.KeyName, err, c.p.ID)
 							go up.Close(websocket.StatusPolicyViolation, "")

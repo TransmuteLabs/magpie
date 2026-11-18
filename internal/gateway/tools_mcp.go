@@ -286,6 +286,9 @@ func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, served
 		}
 		for _, t := range ts {
 			if t.name == p.Name {
+				if strings.HasPrefix(t.spec, plugin.ExtensionToolPrefix) {
+					r = withExtensionMemory(r)
+				}
 				said, err := s.toolsMCPRun(r, t, p.Arguments)
 				if err != nil {
 					return toolResult(err.Error(), true), nil
@@ -305,7 +308,7 @@ func (s *Server) toolsMCPServe(r *http.Request, m mcpMessage, one string, served
 // limit.
 func (s *Server) toolsMCPRun(r *http.Request, t mcpTool, args json.RawMessage) (map[string]any, error) {
 	r = r.WithContext(extensionToolHTTPContext(r))
-	release, err := reserveFor(access.Caller(r.Context()), int64(len(args)), "", limitClock())
+	release, err := reserveFor(r.Context(), access.Caller(r.Context()), int64(len(args)), "", limitClock())
 	if err != nil {
 		return nil, err
 	}

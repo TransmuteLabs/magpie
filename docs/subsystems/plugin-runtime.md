@@ -295,6 +295,46 @@ key-wide refusal carries `X-Magpie-Limit-Reset`.
 | `plugins/budget` | Requires `settings` and `gateway`, Essential. Apply serves `budget.Limiter`, `internal/budget`'s windows and reservations as before. `InUse` counts the gateway keys with a limit (`access.List`); a keys file that can't be read is an error, so it stays on. Since it is in use whenever a key has a limit, it can only be off while none has; the 503 is for a refresh not yet seen or a plugins.yml edited by hand. The gateway's `KeepFresh` watches the keys file too, so a limit set from the CLI or the window turns it on within 2s. | [`budget.go`](../../plugins/budget/budget.go) |
 | Stays in the core | What a key has used and has left (`budget.All`, `budget.Binding`) for `/v1/magpie/limit`, the Gateway page and the CLI, and `budget.Append`, so the usage ledger counts a key's use the same with the plugin on or off. The key editor's limit fields stay with the plugin off, since setting a limit is what turns it back on. | [`budget.go`](../../internal/budget/budget.go) |
 
+### Executable budget policy
+
+A gateway owner can set `gatewayBudgetPolicy` to `module-id/policy-id` in
+`settings.json`. The primary executable declares the API 1.13
+`budget-policy` capability and lists the selected ID in `budgetPolicies`.
+Installing it does not select it. Limited requests with no selection keep
+the native budget behavior. A missing built-in limiter continues to block
+spending even when an SDK policy is selected.
+
+[`reserveFor`](../../internal/gateway/key_limit.go) holds the native
+reservation before asking `budget.reserve`. A native refusal ends the
+check without asking the module. A policy refusal, bad reply, timeout,
+revocation or cancellation releases the native hold without forwarding
+the request. A successful request keeps its existing native hold until it
+ends. Workers have no separate reservation or release command, and the
+host does not retry their decisions.
+
+For scoped limits, `withSpent` asks `budget.spent` and adds its restrictions
+to the native spender's result. Token-count requests and paid account tasks
+also use the scoped check. With a selection, an unavailable native limiter
+blocks those checks. The native router still resolves scope
+patterns, aliases and routing groups. The module can restrict only
+positions within the host-projected list. The result cannot clear a native
+restriction or choose arbitrary models. A reserve refusal carries the
+policy's bounded 1–3600 second interval, with a key-wide reset header
+only when the selected host scope covers the whole key. The owner computes
+the reset timestamp and controls the public reason and retry headers.
+
+The [wire DTO](../../pkg/extension/budget_policy.go) contains the policy ID,
+timestamp, optional byte count, and at most ten limit positions with owner
+(`key` or `issuer`), scope type and caps. Token caps use decimal strings to
+retain 64-bit precision. The payload excludes identities,
+model strings, headers, bodies, accounts and credentials. The two unary
+methods have no host callbacks. [Admission](../../internal/extension/budget_policy.go)
+pins and rechecks package revision, configuration and enablement; dispatch
+uses a 250 ms default deadline, configurable from 10–1000 ms. Selection or
+availability failure on a limited request returns 503 before provider
+dispatch. Native accounting, reset handling, and reservation state remain
+with the host.
+
 ## P4: community plugins at every point
 
 P4 opens each extension point, the gateway's and the window's, to

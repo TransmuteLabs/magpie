@@ -123,7 +123,7 @@ func (s *Server) visionMCPRun(r *http.Request, image, prompt string) (string, er
 		}
 		return "", searchMCPError("magpie has no model that sees images: add a provider with one, or pick one in Settings → Models → Image recognition")
 	}
-	release, err := reserveFor(access.Caller(r.Context()), int64(len(src)+len(prompt)), "", limitClock())
+	release, err := reserveFor(r.Context(), access.Caller(r.Context()), int64(len(src)+len(prompt)), "", limitClock())
 	if err != nil {
 		return "", err
 	}
