@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"slices"
@@ -28,9 +29,9 @@ func TestOpenCodeModelsList(t *testing.T) {
 	was := OpenCodeModels
 	t.Cleanup(func() { OpenCodeModels = was })
 	var asked []bool
-	OpenCodeModels = func(two bool) []OpenCodeModel {
+	OpenCodeModels = func(_ context.Context, _ string, two bool) (string, []OpenCodeModel) {
 		asked = append(asked, two)
-		return []OpenCodeModel{
+		return "opencode", []OpenCodeModel{
 			{ID: "other/plain", Entry: map[string]any{"name": "Plain", "two": two}},
 			{ID: "ds/big", Entry: map[string]any{"name": "Big"}},
 			{ID: "nowhere/x", Entry: map[string]any{"name": "not in OpenCode's catalog"}},

@@ -60,7 +60,7 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 	return err
 }
 
-func acquireAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
+func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
 	entries, err := manager.List()
 	if err != nil {
 		return nil, err
@@ -82,11 +82,19 @@ func acquireAgentRuntime(ctx context.Context, manager *extension.Manager, plugin
 		if err != nil {
 			return nil, err
 		}
-		lease, err := manager.AcquireRevision(ctx, plugin, entry.Revision, config.Version)
-		if err != nil {
-			return nil, err
-		}
-		return &extensionAgentRuntime{manager: manager, lease: lease, entry: entry, config: config.Version}, nil
+		return &extensionAgentRuntime{manager: manager, entry: entry, config: config.Version}, nil
 	}
 	return nil, errors.New("agent module is disabled or unavailable")
+}
+
+func acquireAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
+	host, err := inspectAgentRuntime(ctx, manager, plugin, descriptor)
+	if err != nil {
+		return nil, err
+	}
+	host.lease, err = manager.AcquireRevision(ctx, plugin, host.entry.Revision, host.config)
+	if err != nil {
+		return nil, err
+	}
+	return host, nil
 }

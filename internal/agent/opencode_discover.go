@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -150,12 +151,13 @@ func openCodeModelList(block any) []gateway.OpenCodeModel {
 }
 
 func init() {
-	gateway.OpenCodeModels = func(two bool) []gateway.OpenCodeModel {
-		block := magpieProviderJSONAt("opencode", "opencode", gateway.URL())
+	gateway.OpenCodeModels = func(ctx context.Context, caller string, two bool) (string, []gateway.OpenCodeModel) {
+		catalog := extensionProfileCatalog(ctx, caller, "opencode")
+		block := magpieProviderJSONAt("opencode", catalog, gateway.URL())
 		if two {
 			block = openCodeNative(block)
 		}
-		return openCodeModelList(block)
+		return catalog, openCodeModelList(block)
 	}
 }
 

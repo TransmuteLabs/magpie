@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"context"
 	"strings"
 
 	"github.com/yetone/magpie/internal/agentplug"
+	"github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -40,6 +42,29 @@ type extensionAgentMetadata struct {
 	base         *Agent
 	owns         func() bool
 	disconnected func() bool
+}
+
+func extensionProfileCatalog(ctx context.Context, caller, target string) string {
+	if caller == "" || caller == target {
+		return target
+	}
+	ledger, err := extensionBindingRead()
+	if err != nil {
+		return target
+	}
+	home, _ := homes()
+	for _, claim := range ledger.Records {
+		if claim.Agent != caller || claim.Phase != "owned" || claim.Descriptor.Profile == nil ||
+			claim.Descriptor.Profile.Target != target || !extensionSameHome(claim.Home, home) {
+			continue
+		}
+		host, err := inspectAgentRuntime(ctx, extension.Default(), claim.Plugin, claim.Descriptor)
+		if err == nil && host.entry.Manifest.Contract.Has(sdk.AgentWiring) &&
+			host.entry.Revision == claim.PackageRevision && host.config == claim.ConfigVersion {
+			return caller
+		}
+	}
+	return target
 }
 
 func (a *Agent) SDKLibraryTarget() (*Agent, *sdk.AgentLibrary, bool) {

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -25,22 +26,24 @@ type OpenCodeModel struct {
 	Entry any    `json:"entry"`
 }
 
-// OpenCodeModels is magpie's models for OpenCode, in OpenCode 2's words
-// when two; set by the agent package, which writes OpenCode's config.
-var OpenCodeModels func(two bool) []OpenCodeModel
+// OpenCodeModels returns the catalog identity and magpie's models for
+// OpenCode, in OpenCode 2's words when two; set by the agent package,
+// which writes OpenCode's config.
+var OpenCodeModels func(ctx context.Context, caller string, two bool) (catalog string, models []OpenCodeModel)
 
 // openCodeModels answers /v1/models?format=opencode and =opencode2:
 // {"models": [{"id", "entry"}]}, a list so the order stays magpie's (a
 // JSON object's integer-like keys come first in JavaScript). Only the
 // models of OpenCode's catalog the key asking may use (keyListed).
 func openCodeModels(w http.ResponseWriter, r *http.Request, two bool) {
+	agent := "opencode"
 	list := []OpenCodeModel{}
 	if OpenCodeModels != nil {
-		list = OpenCodeModels(two)
+		agent, list = OpenCodeModels(r.Context(), agentOf(r), two)
 	}
-	shown, _ := provider.CatalogFor("opencode")
+	shown, _ := provider.CatalogFor(agent)
 	may := map[string]bool{}
-	for _, e := range keyListed(r, shown, provider.ModelOff("opencode")) {
+	for _, e := range keyListed(r, shown, provider.ModelOff(agent)) {
 		may[e.ID] = true
 	}
 	out := make([]OpenCodeModel, 0, len(list))

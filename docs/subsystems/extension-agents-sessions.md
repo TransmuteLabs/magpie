@@ -302,6 +302,14 @@ profile adds no duplicate Library target. See
 [`0016-sdk-agent-profiles.md`](../adr/0016-sdk-agent-profiles.md) for the
 contract and acceptance cases.
 
+OpenCode discovery (`/v1/models?format=opencode` and `opencode2`) uses the
+caller's own model catalog when its identity names an owned SDK profile of
+OpenCode and the installed module is enabled at the owning package and
+configuration revisions.
+Both formats use that same profile for model visibility, ordering, limits and
+the gateway key's model restrictions. Other callers receive the built-in
+OpenCode catalog through the same key checks.
+
 `extensionAgent` constructs `Agent`, its fields and `NativeConnection`:
 
 ```text
