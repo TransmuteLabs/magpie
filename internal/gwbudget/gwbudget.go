@@ -25,6 +25,8 @@ type Refusal interface {
 	RetryAfter(now time.Time) int
 	// ResetAt is when it resets.
 	ResetAt() time.Time
+	// KeyWide reports whether the refusal applies to every model on the key.
+	KeyWide() bool
 }
 
 // Limiter lets a key's request in, holding what it is expected to use

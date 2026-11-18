@@ -14,6 +14,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
+	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -54,6 +55,55 @@ func pinLimitClock(t *testing.T) time.Time {
 	limitClock = func() time.Time { return at }
 	t.Cleanup(func() { limitClock = time.Now })
 	return at
+}
+
+type keyLimitRefusalFixture struct {
+	keyWide bool
+	reset   time.Time
+}
+
+func (refusal keyLimitRefusalFixture) Error() string { return "fixture budget exhausted" }
+func (refusal keyLimitRefusalFixture) RetryAfter(now time.Time) int {
+	return int(refusal.reset.Sub(now).Seconds())
+}
+func (refusal keyLimitRefusalFixture) ResetAt() time.Time { return refusal.reset }
+func (refusal keyLimitRefusalFixture) KeyWide() bool      { return refusal.keyWide }
+func (refusal keyLimitRefusalFixture) Reserve(access.Identity, int64, string, time.Time) (func(), gwbudget.Refusal) {
+	return nil, refusal
+}
+
+func TestKeyLimitUsesRefusalScopeFromIndependentLimiter(t *testing.T) {
+	for _, keyWide := range []bool{false, true} {
+		t.Run("key-wide="+strconv.FormatBool(keyWide), func(t *testing.T) {
+			fresh(t)
+			now := pinLimitClock(t)
+			calls := limitedUpstream(t, 0)
+			keys, secrets := newCaller(t, "Capped")
+			limit := &access.Limit{Period: "day", Tokens: 100}
+			if !keyWide {
+				limit.Models = []string{"plan/m1"}
+			}
+			setLimit(t, keys[0].ID, limit)
+			refusal := keyLimitRefusalFixture{keyWide: keyWide, reset: now.Add(time.Minute)}
+			t.Cleanup(gwbudget.Limit(refusal))
+
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(chatReq))
+			request.Header.Set("Authorization", "Bearer "+secrets[0])
+			response := httptest.NewRecorder()
+			New().Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusTooManyRequests || calls.Load() != 0 || response.Header().Get("Retry-After") != "60" ||
+				response.Header().Get("X-Should-Retry") != "false" {
+				t.Fatalf("expected a terminal budget refusal with no dispatch, got status=%d calls=%d headers=%v", response.Code, calls.Load(), response.Header())
+			}
+			want := ""
+			if keyWide {
+				want = refusal.reset.Format(time.RFC3339)
+			}
+			if got := response.Header().Get(remoteKeyLimitHeader); got != want {
+				t.Errorf("remote key reset = %q, want %q", got, want)
+			}
+		})
+	}
 }
 
 // A key past its limit is refused before any provider is asked, with a

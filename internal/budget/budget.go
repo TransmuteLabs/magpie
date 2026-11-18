@@ -599,6 +599,8 @@ func (r *Refusal) ResetAt() time.Time {
 	return r.Reset
 }
 
+func (r *Refusal) KeyWide() bool { return len(r.Models) == 0 }
+
 // Limiter is Reserve as the gateway's budget point asks it
 // (gwbudget.Limiter); plugins/budget serves it.
 type Limiter struct{}
