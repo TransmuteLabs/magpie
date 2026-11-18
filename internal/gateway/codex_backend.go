@@ -1182,6 +1182,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 					return max(ms-before, 1)
 				}
 				try.TTFT, try.FirstText = fromTry(ttft), fromTry(text)
+				try.FirstReasoning = fromTry(first.reasoningMs())
 				try.Net = nt.timing(try.Start, 0)
 				t.ReasoningHidden = first.hidesReasoning(provider.Responses, uu.Reasoning)
 				try.ReasoningHidden = t.ReasoningHidden
@@ -1192,6 +1193,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 					t.TitleLink = &link
 				}
 				t.Output, t.Reasoning, t.TTFT, t.FirstText = out, uu.Reasoning, ttft, text
+				t.FirstReasoning = first.reasoningMs()
 				flow := first.flowFor(uu.Reasoning)
 				t.Flow, try.Flow = flow, flow
 				t.Usage = routeUsage("openai", model, uu)
@@ -1668,6 +1670,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		call.Fallback = strings.TrimSuffix(call.Fallback, "; ")
 	}
 	call.TTFT, call.FirstText = first.ms()
+	call.FirstReasoning = first.reasoningMs()
 	uu.add(sniff.usage())
 	call.ReasoningHidden = first.hidesReasoning(provider.Responses, uu.Reasoning)
 	uu.Tier = servedTierAt(provider.HostOf(base), uu.Tier)
@@ -1723,7 +1726,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 		Input: uu.Input, Output: uu.Output, CacheRead: uu.CacheRead, CacheWrite: uu.CacheWrite,
 		Reasoning: uu.Reasoning, Effort: effort, Millis: call.Millis, Masking: maskingMs(r.Context(), 0),
 		// Codex's own sign-in: the request goes as Codex sent it
-		TierAsked: bodyTier(provider.Responses, body), TierSent: bodyTier(provider.Responses, body), TierServed: uu.Tier, TTFT: call.TTFT, FirstText: call.FirstText, ReasoningHidden: call.ReasoningHidden, Flow: call.Flow, Status: call.Status, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
+		TierAsked: bodyTier(provider.Responses, body), TierSent: bodyTier(provider.Responses, body), TierServed: uu.Tier, TTFT: call.TTFT, FirstText: call.FirstText, FirstReasoning: call.FirstReasoning, ReasoningHidden: call.ReasoningHidden, Flow: call.Flow, Status: call.Status, Session: sessionOf(r.Header), NativeSession: nativeSessionOf(r.Header), Kind: call.Kind,
 		RequestID: requestID(res.Header), ResponseID: uu.ResponseID, Endpoint: r.URL.Path}
 	failedWith(&rec, call.Status, call.Error, errType)
 	if up := upBytesOf(r.Context()); up != nil {
