@@ -21,11 +21,16 @@ import (
 // after the client receives progress, so content cannot hide a lost heartbeat.
 func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 	keepFast(t, 10*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond)
-	held, quiet, watch, silent := keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest
-	keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest = 10*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond
-	t.Cleanup(func() { keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest = held, quiet, watch, silent })
+	held, quiet, watch := keepHeldAfter, agentQuietMost, watchEvery
+	keepHeldAfter, agentQuietMost, watchEvery = 10*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { keepHeldAfter, agentQuietMost, watchEvery = held, quiet, watch })
 	for _, mode := range []string{"comments", "progress", "cancel", "silent"} {
 		t.Run(mode, func(t *testing.T) {
+			if mode == "silent" {
+				previous := translatedQuietLongest
+				translatedQuietLongest = 40 * time.Millisecond
+				t.Cleanup(func() { translatedQuietLongest = previous })
+			}
 			fresh(t)
 			release, stopped := make(chan struct{}), make(chan struct{})
 			proceed := make(chan struct{})
@@ -126,11 +131,13 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 					idle.Stop()
 				}
 			}()
-			// Hold the queue's first event back past the fixed window the
-			// idle once started at headers with, so silent keeps a red if
-			// the window ever starts ahead of the state again.
+			// Hold the silent queue past the old client header-based idle
+			// window. The active queues also allow a late first write:
+			// borrowing the silent case's cutoff used to end them too.
 			if mode == "silent" {
 				time.Sleep(500 * time.Millisecond)
+			} else {
+				time.Sleep(120 * time.Millisecond)
 			}
 			goOn()
 			var body strings.Builder
