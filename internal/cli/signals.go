@@ -25,7 +25,7 @@ import (
 // same; the app and the TUI, which quit on SIGINT and SIGTERM their own way,
 // take those back (ownSignals). A signal magpie was started ignoring (nohup,
 // a background job) stays ignored: asking for it would undo that.
-func endProbesOnSignal(stopProfile func()) {
+func endProbesOnSignal(stopProfile func()) func() {
 	caught = nil
 	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
 		if !signal.Ignored(s) {
@@ -33,11 +33,14 @@ func endProbesOnSignal(stopProfile func()) {
 		}
 	}
 	if len(caught) == 0 {
-		return
+		return func() {}
 	}
-	onSignal = make(chan os.Signal, 1)
-	signal.Notify(onSignal, caught...)
-	go func(sigs chan os.Signal) {
+	sigs := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	onSignal = sigs
+	signal.Notify(sigs, caught...)
+	go func() {
+		defer close(done)
 		for s := range sigs {
 			// asked before the probes are ended, which can take a moment
 			// the command may spend finishing, and stop asking
@@ -48,7 +51,12 @@ func endProbesOnSignal(stopProfile func()) {
 				proc.EndProbes()
 			}
 		}
-	}(onSignal)
+	}()
+	return func() {
+		signal.Stop(sigs)
+		close(sigs)
+		<-done
+	}
 }
 
 func finishSignalGateway(s os.Signal, stopProfile func()) {

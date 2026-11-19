@@ -47,7 +47,7 @@ func TestHangupDrainsTheGatewayFirst(t *testing.T) {
 				close(stopped)
 			}
 			tuiStop, guiStop = stop, stop
-			endProbesOnSignal(nil)
+			t.Cleanup(endProbesOnSignal(nil))
 			err := open(func() error {
 				send(t, syscall.SIGHUP)
 				select {

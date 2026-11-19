@@ -1,12 +1,10 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
@@ -149,18 +147,14 @@ func parseSearchArgs(args []string, show bool) (searchOpts, error) {
 	return o, nil
 }
 
-// signalContext ends on Ctrl+C, so a long first index stops cleanly
-// (what was indexed is kept).
-func signalContext() (context.Context, func()) {
-	return signal.NotifyContext(context.Background(), os.Interrupt)
-}
-
 // sessionsSearchTo: `magpie sessions search <words…>`.
 func sessionsSearchTo(w io.Writer, args []string) error {
 	o, err := parseSearchArgs(args, false)
 	if err != nil {
 		return err
 	}
+	ctx, stop := interruptContext()
+	defer stop()
 	if !sessions.SettleReads().Asked {
 		return errNotAsked
 	}
@@ -173,8 +167,6 @@ func sessionsSearchTo(w io.Writer, args []string) error {
 			return fmt.Errorf("%w: magpie sessions read on %s allows it", sessions.ErrNotRead, o.agent)
 		}
 	}
-	ctx, stop := signalContext()
-	defer stop()
 	var progress func(int, int)
 	if isTerminal(os.Stderr) && !o.json {
 		shown := false

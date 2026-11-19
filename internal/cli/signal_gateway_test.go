@@ -24,7 +24,7 @@ func TestSignalWaitsForGatewayShutdown(t *testing.T) {
 			defer finish()
 			defer unhold()
 			profileStopped := make(chan struct{})
-			endProbesOnSignal(func() { close(profileStopped) })
+			t.Cleanup(endProbesOnSignal(func() { close(profileStopped) }))
 			send(t, sig)
 			select {
 			case got := <-entered:
