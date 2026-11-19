@@ -2,13 +2,16 @@ package sessions
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -44,6 +47,13 @@ func TestSaidTerms(t *testing.T) {
 // saidTestIndex is an index in a test's folder over the sessions list
 // gives.
 func saidTestIndex(t *testing.T, list func() []saidSession) *saidIndex {
+	t.Helper()
+	return saidTestIndexContext(t, func(context.Context) ([]saidSession, error) {
+		return list(), nil
+	})
+}
+
+func saidTestIndexContext(t *testing.T, list func(context.Context) ([]saidSession, error)) *saidIndex {
 	t.Helper()
 	file := filepath.Join(t.TempDir(), "said.db")
 	x := &saidIndex{where: func() string { return file }, list: list}
@@ -100,6 +110,201 @@ func saidAgents(f SaidFound) []string {
 		out = append(out, h.Session.Agent+":"+h.Session.ID)
 	}
 	return out
+}
+
+func TestSearchSaidReusesCompletedSlowRefresh(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		list := []saidSession{saidFile(t, t.TempDir(), "codex", "codex-session", time.Now(),
+			cxSaid("user", "codex оптими"))}
+		var listings atomic.Int32
+		index := saidTestIndex(t, func() []saidSession {
+			if listings.Add(1) == 1 {
+				time.Sleep(saidStale + time.Second)
+			}
+			return list
+		})
+		if err := index.ready(t.Context(), time.Minute, nil); err != nil {
+			t.Fatal(err)
+		}
+		search := func() {
+			t.Helper()
+			found, err := index.search(t.Context(), NeedleOf("codex оптими"), "", 10)
+			if err != nil || len(found.Hits) != 1 || found.Hits[0].Session.ID != "codex-session" {
+				t.Fatalf("search results: %+v, error: %v", found, err)
+			}
+		}
+		search()
+		if got := listings.Load(); got != 1 {
+			t.Fatalf("one CLI search listed sessions %d times, want 1", got)
+		}
+		time.Sleep(saidStale)
+		search()
+		if got := listings.Load(); got != 2 {
+			t.Fatalf("search after the refresh interval listed sessions %d times, want 2", got)
+		}
+	})
+}
+
+func TestSearchSaidOnceStopsItsRefresh(t *testing.T) {
+	for _, interrupt := range []bool{false, true} {
+		name := "deadline"
+		if interrupt {
+			name = "interrupt"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				session := saidFile(t, t.TempDir(), "codex", "kept", time.Now(),
+					cxSaid("user", "retained phrase"))
+				var listings int
+				var stopped bool
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				index := saidTestIndexContext(t, func(reading context.Context) ([]saidSession, error) {
+					listings++
+					if listings == 1 {
+						return []saidSession{session}, nil
+					}
+					if interrupt {
+						cancel()
+					}
+					<-reading.Done()
+					stopped = true
+					return nil, reading.Err()
+				})
+				find := func(ctx context.Context) (SaidFound, error) {
+					return index.searchOnce(ctx, "retained phrase", "", time.Time{}, 10, time.Second, nil)
+				}
+				if found, err := find(t.Context()); err != nil || len(found.Hits) != 1 {
+					t.Fatalf("initial search: %+v, %v", found, err)
+				}
+				index.stale()
+				found, err := find(ctx)
+				if !stopped || listings != 2 || index.running != nil || !index.at.IsZero() {
+					t.Fatalf("interrupted refresh: stopped=%t, listings=%d, running=%t, fresh=%t",
+						stopped, listings, index.running != nil, !index.at.IsZero())
+				}
+				if interrupt {
+					if !errors.Is(err, context.Canceled) || len(found.Hits) != 0 {
+						t.Fatalf("interrupted search: %+v, %v", found, err)
+					}
+				} else if err != nil || len(found.Hits) != 1 {
+					t.Fatalf("search lost committed rows: %+v, %v", found, err)
+				}
+				keys, err := saidKeys(t.Context(), index.db, saidTerms("retained phrase"))
+				if err != nil || !keys["codex:kept"] {
+					t.Fatalf("interrupted refresh changed persisted rows: %v, %v", keys, err)
+				}
+			})
+		})
+	}
+}
+
+func TestSearchSaidOMPLeavesActiveToolOutputOutOfIndex(t *testing.T) {
+	payload := strings.Repeat("tooloutputsentinel ", 36<<10)
+	dir := t.TempDir()
+	lines := []string{`{"type":"message","id":"root","message":{"role":"user","content":"Начало"}}`}
+	parent := "root"
+	for entry := range 32 {
+		id := "tool-" + strconv.Itoa(entry)
+		lines = append(lines, `{"type":"message","id":"`+id+`","parentId":"`+parent+`","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"`+payload+`"}]}}`)
+		parent = id
+	}
+	lines = append(lines, `{"type":"message","id":"answer","parentId":"`+parent+`","message":{"role":"assistant","content":"Искомое слово"}}`)
+	session := saidFile(t, dir, "omp", "omp-session", time.Now(), lines...)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(db, "omp:omp-session", session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes", indexBytes)
+	if indexBytes > 8<<20 {
+		t.Errorf("index allocated %d bytes for history with 21 MiB of tool output", indexBytes)
+	}
+	words, err := saidKeys(t.Context(), db, saidTerms(NeedleOf("искомое слово")))
+	if err != nil || len(words) != 1 {
+		t.Fatalf("spoken words: %v, error: %v", words, err)
+	}
+	words, err = saidKeys(t.Context(), db, saidTerms(NeedleOf("tooloutputsentinel")))
+	if err != nil || len(words) != 0 {
+		t.Fatalf("indexed tool output: %v, error: %v", words, err)
+	}
+	hit, found, err := SearchSession(t.Context(), session.s, NeedleOf("tooloutputsentinel"))
+	if err != nil || !found || hit.Kind != "tool_result" {
+		t.Fatalf("direct search for tool output: %+v, found %t, error %v", hit, found, err)
+	}
+}
+
+func TestSearchSaidClaudeKeepsTextBesideToolResult(t *testing.T) {
+	session := saidFile(t, t.TempDir(), "claude", "claude-mixed", time.Now(),
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool1","content":"discardedtooltext"},{"type":"text","text":"Keep the zebra"}]}}`)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO files(key, path, sig, upto) VALUES(?, ?, ?, ?)`,
+		"claude:claude-mixed", session.s.Path, session.sig, session.size); err != nil {
+		t.Fatal(err)
+	}
+	found, err := index.search(t.Context(), NeedleOf("the zebra"), "", 10)
+	if err != nil || len(found.Hits) != 1 || found.Hits[0].Hit.Match != "the zebra" {
+		t.Fatalf("spoken text beside tool result: %+v, error: %v", found, err)
+	}
+	found, err = index.search(t.Context(), NeedleOf("discardedtooltext"), "", 10)
+	if err != nil || len(found.Hits) != 0 {
+		t.Fatalf("tool result in spoken index: %+v, error: %v", found, err)
+	}
+	hit, ok, err := SearchSession(t.Context(), session.s, NeedleOf("discardedtooltext"))
+	if err != nil || !ok || hit.Kind != "tool_result" {
+		t.Fatalf("direct search for tool output: %+v, found %t, error %v", hit, ok, err)
+	}
+}
+
+func TestSearchSaidCodexSkipsToolOutputWithNestedMessage(t *testing.T) {
+	payload := strings.Repeat("toolnestedmessage ", 256<<10)
+	session := saidFile(t, t.TempDir(), "codex", "codex-nested", time.Now(),
+		cxSaid("user", "this is spoken"),
+		`{"type":"response_item","payload":{"type":"function_call_output","call_id":"tool1","output":{"type":"message","content":"`+payload+`"}}}`)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(db, "codex:codex-nested", session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes", indexBytes)
+	if indexBytes > 7<<20 {
+		t.Errorf("index allocated %d bytes for a nested tool message", indexBytes)
+	}
+	words, err := saidKeys(t.Context(), db, saidTerms(NeedleOf("this is spoken")))
+	if err != nil || len(words) != 1 {
+		t.Fatalf("spoken words: %v, error: %v", words, err)
+	}
+}
+
+func TestSearchSaidChecksThePhraseInConversation(t *testing.T) {
+	session := saidFile(t, t.TempDir(), "codex", "codex-phrase", time.Now(),
+		cxSaid("user", "codex"),
+		cxSaid("assistant", "оптими"),
+		`{"type":"response_item","payload":{"type":"function_call_output","output":"codex оптими"}}`)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	needle := NeedleOf("codex оптими")
+	found, err := index.search(t.Context(), needle, "", 10)
+	if err != nil || len(found.Hits) != 0 || found.Indexed != 1 {
+		t.Fatalf("global search matched a tool-only phrase: %+v, error: %v", found, err)
+	}
+	hit, ok, err := SearchSession(t.Context(), session.s, needle)
+	if err != nil || !ok || hit.Kind != "tool_result" {
+		t.Fatalf("direct search for tool output: %+v, found %t, error %v", hit, ok, err)
+	}
 }
 
 // cryingLiu on X: what was said in any agent's session is found from one
@@ -312,7 +517,11 @@ func TestSaidSessionsListsTheAgentsRead(t *testing.T) {
 	writeTwoAgents(t, d)
 	keys := func() map[string]bool {
 		out := map[string]bool{}
-		for _, ss := range saidSessions() {
+		list, err := saidSessions(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ss := range list {
 			out[ss.s.Agent] = true
 			if ss.size == 0 || ss.sig == "" || !ss.grow {
 				t.Errorf("%s: %+v", ss.s.Agent, ss)

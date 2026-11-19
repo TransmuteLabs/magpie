@@ -18,7 +18,7 @@ package sessions
 // read from where the last read ended, any other session again whole
 // when its files changed. A search asks the index which sessions hold
 // every word, then reads only those, the newest first, with
-// SearchSession, for the hit and the words round it; the index is never
+// searchSession, for the hit and the words round it; the index is never
 // the answer, only which files are worth reading.
 //
 // Words are a letter-or-digit run, matched by their start ("auth" finds
@@ -28,7 +28,6 @@ package sessions
 // is brought up to date, and out of every answer at once.
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -97,13 +96,13 @@ type saidSession struct {
 
 type saidIndex struct {
 	where func() string // the index's file
-	list  func() []saidSession
+	list  func(context.Context) ([]saidSession, error)
 
 	mu       sync.Mutex
 	db       *sql.DB
 	file     string
 	running  chan struct{} // closed when the refresh running ends
-	at       time.Time     // when the last refresh began
+	at       time.Time     // when the last refresh finished
 	sessions map[string]saidSession
 	indexed  int
 	total    int
@@ -134,7 +133,7 @@ func SearchSaidSince(ctx context.Context, needle, agent string, since time.Time,
 	if err := prepareSaidSources(ctx); err != nil {
 		return SaidFound{Hits: []SaidHit{}}, err
 	}
-	return saidIdx.searchSince(ctx, needle, agent, since, limit)
+	return saidIdx.searchSince(ctx, needle, agent, since, limit, true)
 }
 
 func prepareSaidSources(ctx context.Context) error {
@@ -143,18 +142,32 @@ func prepareSaidSources(ctx context.Context) error {
 	return PrepareSessionSources(preparing)
 }
 
-// SaidReady brings the index up to date as a search does, but waits for
-// it at most wait, not saidWait: a command run once (`magpie sessions
-// search`) has no next search to find the rest by. progress, when
-// given, is told every second how far it got.
-func SaidReady(ctx context.Context, wait time.Duration, progress func(indexed, total int)) error {
-	if err := prepareSaidSources(ctx); err != nil {
-		return err
+// SearchSaidOnce refreshes the index for a standalone command and then
+// searches the rows committed within its indexing window.
+func SearchSaidOnce(ctx context.Context, needle, agent string, since time.Time, limit int, wait time.Duration, progress func(indexed, total int)) (SaidFound, error) {
+	if err := ctx.Err(); err != nil {
+		return SaidFound{Hits: []SaidHit{}}, err
 	}
-	return saidIdx.ready(ctx, wait, progress)
+	if len(saidTerms(needle)) == 0 {
+		return SaidFound{Hits: []SaidHit{}}, ErrNoWords
+	}
+	if err := prepareSaidSources(ctx); err != nil {
+		return SaidFound{Hits: []SaidHit{}}, err
+	}
+	return saidIdx.searchOnce(ctx, needle, agent, since, limit, wait, progress)
+}
+
+func (x *saidIndex) searchOnce(ctx context.Context, needle, agent string, since time.Time, limit int, wait time.Duration, progress func(indexed, total int)) (SaidFound, error) {
+	if err := x.ready(ctx, wait, progress); err != nil {
+		return SaidFound{Hits: []SaidHit{}}, err
+	}
+	return x.searchSince(ctx, needle, agent, since, limit, false)
 }
 
 func (x *saidIndex) ready(ctx context.Context, wait time.Duration, progress func(indexed, total int)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	db, err := x.open()
 	if err != nil {
 		return err
@@ -182,8 +195,11 @@ func (x *saidIndex) ready(ctx context.Context, wait time.Duration, progress func
 			}
 		}()
 	}
-	x.fresh(ctx, db, wait)
-	return nil
+	if wait == 0 {
+		wait = saidWait
+	}
+	x.fresh(ctx, db, wait, true)
+	return ctx.Err()
 }
 
 // ForgetSaid closes the index, so a test's HOME can go: a refresh
@@ -243,32 +259,48 @@ func (x *saidIndex) open() (*sql.DB, error) {
 
 // fresh starts bringing the index up to date, unless it was a moment
 // ago, and waits for it at most wait.
-func (x *saidIndex) fresh(ctx context.Context, db *sql.DB, wait time.Duration) {
+func (x *saidIndex) fresh(ctx context.Context, db *sql.DB, wait time.Duration, standalone bool) {
+	waiting, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	if waiting.Err() != nil {
+		return
+	}
 	x.mu.Lock()
 	run := x.running
-	if run == nil && time.Since(x.at) >= saidStale {
+	if run == nil && !x.quit.Load() && time.Since(x.at) >= saidStale {
 		run = make(chan struct{})
-		x.running, x.at = run, time.Now()
-		go func() {
+		x.running = run
+		refresh := context.Background()
+		if standalone {
+			refresh = waiting
+		}
+		work := func() {
+			complete := false
 			defer func() {
 				x.mu.Lock()
 				x.running = nil
-				x.mu.Unlock()
+				if complete {
+					x.at = time.Now()
+				}
 				close(run)
+				x.mu.Unlock()
 			}()
-			x.refresh(db)
-		}()
+			complete = x.refresh(refresh, db)
+		}
+		if standalone {
+			x.mu.Unlock()
+			work()
+			return
+		}
+		go work()
 	}
 	x.mu.Unlock()
 	if run == nil {
 		return
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
 	select {
 	case <-run:
-	case <-t.C:
-	case <-ctx.Done():
+	case <-waiting.Done():
 	}
 }
 
@@ -280,15 +312,14 @@ type saidRow struct {
 
 // refresh brings the index up to date with the sessions listed now: the
 // newest first, so a search while it is first made finds the latest.
-func (x *saidIndex) refresh(db *sql.DB) {
-	ctx := context.Background()
+func (x *saidIndex) refresh(ctx context.Context, db *sql.DB) bool {
 	snapshot, err := inspectHistoryPublication(ctx)
 	if err != nil {
-		return
+		return false
 	}
-	list := x.list()
-	if !snapshot.current(ctx) {
-		return
+	list, err := x.list(ctx)
+	if err != nil || ctx.Err() != nil || !snapshot.current(ctx) {
+		return false
 	}
 	sort.SliceStable(list, func(i, j int) bool { return list[i].s.Last.After(list[j].s.Last) })
 	now := make(map[string]saidSession, len(list))
@@ -296,7 +327,7 @@ func (x *saidIndex) refresh(db *sql.DB) {
 		now[ss.s.Agent+":"+ss.s.ID] = ss
 	}
 	rows := map[string]saidRow{}
-	if rs, err := db.Query(`SELECT key, path, sig, upto FROM files`); err == nil {
+	if rs, err := db.QueryContext(ctx, `SELECT key, path, sig, upto FROM files`); err == nil {
 		for rs.Next() {
 			var k string
 			var r saidRow
@@ -308,11 +339,15 @@ func (x *saidIndex) refresh(db *sql.DB) {
 	}
 	done := 0
 	for _, ss := range list {
-		if _, err := selectSessionHistoryOwner(ctx, ss.s); err != nil {
-			continue
+		if ctx.Err() != nil {
+			return false
 		}
 		if r, ok := rows[ss.s.Agent+":"+ss.s.ID]; ok && saidSame(ss, r) {
-			done++
+			if ss.s.source == nil && snapshot.native(ss.s.Agent) {
+				done++
+			} else if _, err := selectSessionHistoryOwner(ctx, ss.s); err == nil {
+				done++
+			}
 		}
 	}
 	x.mu.Lock()
@@ -320,19 +355,19 @@ func (x *saidIndex) refresh(db *sql.DB) {
 	x.mu.Unlock()
 	// gone, or of an agent magpie may no longer read
 	for k := range rows {
+		if ctx.Err() != nil {
+			return false
+		}
 		if _, ok := now[k]; !ok {
-			saidDrop(db, k)
+			saidDrop(ctx, db, k)
 		}
 	}
 	for _, ss := range list {
-		if x.quit.Load() {
-			return
+		if x.quit.Load() || ctx.Err() != nil {
+			return false
 		}
 		k := ss.s.Agent + ":" + ss.s.ID
 		r, had := rows[k]
-		if _, err := selectSessionHistoryOwner(ctx, ss.s); err != nil {
-			continue
-		}
 		if had && saidSame(ss, r) {
 			continue
 		}
@@ -340,10 +375,10 @@ func (x *saidIndex) refresh(db *sql.DB) {
 			continue
 		}
 		var err error
-		if had && ss.grow && r.path == ss.s.Path && ss.size >= r.upto {
-			err = saidRead(db, k, ss, r.upto, false)
+		if had && ss.grow && r.path == ss.s.Path && strings.HasPrefix(r.sig, saidFormat(ss.s)) && ss.size >= r.upto {
+			err = saidReadContext(ctx, db, k, ss, r.upto, false)
 		} else {
-			err = saidRead(db, k, ss, 0, true)
+			err = saidReadContext(ctx, db, k, ss, 0, true)
 		}
 		if err == nil {
 			x.mu.Lock()
@@ -351,45 +386,62 @@ func (x *saidIndex) refresh(db *sql.DB) {
 			x.mu.Unlock()
 		}
 	}
+	return ctx.Err() == nil
 }
 
 // saidSame says whether the index holds a session as it is now.
 func saidSame(ss saidSession, r saidRow) bool {
-	if r.path != ss.s.Path {
+	format := saidFormat(ss.s)
+	if r.path != ss.s.Path || !strings.HasPrefix(r.sig, format) {
 		return false
 	}
 	if ss.grow {
 		return r.upto == ss.size || r.upto == lineEnd(ss.s.Path, ss.size)
 	}
-	return r.sig == ss.sig
+	return r.sig == format+ss.sig
 }
 
-func saidDrop(db *sql.DB, key string) {
-	tx, err := db.Begin()
+// saidFormat expires Claude-format rows made by the old line filter,
+// which missed text on lines that also held a tool result.
+func saidFormat(s Session) string {
+	if s.source == nil {
+		switch s.Agent {
+		case "claude", "qoder", "qoder-cn":
+			return "spoken-1/"
+		}
+	}
+	return ""
+}
+
+func saidDrop(ctx context.Context, db *sql.DB, key string) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return
 	}
 	defer tx.Rollback()
-	if saidDropIn(tx, key) == nil {
+	if saidDropIn(ctx, tx, key) == nil {
 		tx.Commit()
 	}
 }
 
-func saidDropIn(tx *sql.Tx, key string) error {
-	if _, err := tx.Exec(`DELETE FROM said WHERE rowid IN (SELECT rowid FROM chunks WHERE key = ?)`, key); err != nil {
+func saidDropIn(ctx context.Context, tx *sql.Tx, key string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM said WHERE rowid IN (SELECT rowid FROM chunks WHERE key = ?)`, key); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM chunks WHERE key = ?`, key); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE key = ?`, key); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`DELETE FROM files WHERE key = ?`, key)
+	_, err := tx.ExecContext(ctx, `DELETE FROM files WHERE key = ?`, key)
 	return err
 }
 
 // saidRead reads what was said in a session, from the byte from on when
 // it grows (else whole, its rows dropped first), into the index.
 func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) error {
-	ctx := context.Background()
+	return saidReadContext(context.Background(), db, key, ss, from, whole)
+}
+
+func saidReadContext(ctx context.Context, db *sql.DB, key string, ss saidSession, from int64, whole bool) error {
 	owner, err := selectSessionHistoryOwner(ctx, ss.s)
 	if err != nil {
 		return err
@@ -427,12 +479,12 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 		}
 		c := Call{Agent: ss.s.Agent, File: ss.s.Path, From: from, To: upto}
 		if ss.s.Agent == "codex" {
-			err = codexContentOf(c, codexSaidLine, add)
+			err = codexContentOf(ctx, c, nil, true, add)
 		} else {
-			err = claudeContentOf(c, claudeSaidLine, add)
+			err = claudeContentOf(ctx, c, nil, true, add)
 		}
 	} else {
-		err = readHistoryTranscript(ctx, owner, nil, add)
+		err = readHistoryParts(ctx, owner, nil, true, add)
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
@@ -441,18 +493,18 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 		return err
 	}
 	flush()
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if whole {
-		if err := saidDropIn(tx, key); err != nil {
+		if err := saidDropIn(ctx, tx, key); err != nil {
 			return err
 		}
 	}
 	for _, c := range chunks {
-		r, err := tx.Exec(`INSERT INTO chunks(key) VALUES(?)`, key)
+		r, err := tx.ExecContext(ctx, `INSERT INTO chunks(key) VALUES(?)`, key)
 		if err != nil {
 			return err
 		}
@@ -460,11 +512,11 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO said(rowid, t) VALUES(?, ?)`, id, c); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO said(rowid, t) VALUES(?, ?)`, id, c); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO files(key, path, sig, upto) VALUES(?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET path = excluded.path, sig = excluded.sig, upto = excluded.upto`, key, ss.s.Path, ss.sig, upto); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO files(key, path, sig, upto) VALUES(?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET path = excluded.path, sig = excluded.sig, upto = excluded.upto`, key, ss.s.Path, saidFormat(ss.s)+ss.sig, upto); err != nil {
 		return err
 	}
 	if err := owner.check(ctx); err != nil {
@@ -472,18 +524,6 @@ func saidRead(db *sql.DB, key string, ss saidSession, from int64, whole bool) er
 	}
 	return tx.Commit()
 }
-
-// claudeSaidLine: a line that may say something, not a tool's answer
-// (most of a session's bytes)
-func claudeSaidLine(b []byte) bool { return !bytes.Contains(b, ccToolAnswer) }
-
-var (
-	ccToolAnswer = []byte(`"tool_use_id":`)
-	cxMessage    = []byte(`"type":"message"`)
-)
-
-// codexSaidLine: a message, not a tool call, its output or reasoning
-func codexSaidLine(b []byte) bool { return bytes.Contains(b, cxMessage) }
 
 // lineEnd is where the last whole line of a file ends, at or before size:
 // a line still being written is read when it is whole.
@@ -628,10 +668,10 @@ func saidKeys(ctx context.Context, db *sql.DB, terms []string) (map[string]bool,
 const saidReadMost = 6 * time.Second
 
 func (x *saidIndex) search(ctx context.Context, needle, agent string, limit int) (SaidFound, error) {
-	return x.searchSince(ctx, needle, agent, time.Time{}, limit)
+	return x.searchSince(ctx, needle, agent, time.Time{}, limit, true)
 }
 
-func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since time.Time, limit int) (out SaidFound, err error) {
+func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since time.Time, limit int, refresh bool) (out SaidFound, err error) {
 	out = SaidFound{Hits: []SaidHit{}}
 	terms := saidTerms(needle)
 	if len(terms) == 0 {
@@ -661,7 +701,9 @@ func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since
 	if err != nil {
 		return out, err
 	}
-	x.fresh(ctx, db, saidWait)
+	if refresh {
+		x.fresh(ctx, db, saidWait, false)
+	}
 	keys, err := saidKeys(ctx, db, terms)
 	if err != nil {
 		return out, err
@@ -681,18 +723,20 @@ func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since
 		}
 		return found[i].s.ID < found[j].s.ID
 	})
-	until := time.Now().Add(saidReadMost)
+	reading, cancel := context.WithTimeout(ctx, saidReadMost)
+	defer cancel()
 	for _, ss := range found {
-		if len(out.Hits) == limit || time.Now().After(until) {
+		if len(out.Hits) == limit || reading.Err() != nil {
 			out.Cut = true
 			break
 		}
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		h, ok, err := SearchSession(ctx, ss.s, needle)
+		h, ok, err := searchSession(reading, ss.s, needle, true)
 		if err == nil && ok {
 			out.Hits = append(out.Hits, SaidHit{Session: ss.s, Hit: h})
+		}
+		if reading.Err() != nil {
+			out.Cut = true
+			break
 		}
 	}
 	return out, nil
@@ -700,21 +744,30 @@ func (x *saidIndex) searchSince(ctx context.Context, needle, agent string, since
 
 // saidSessions are every session whose conversation can be read, of the
 // agents magpie may read, as the Sessions page lists them.
-func saidSessions() []saidSession {
+func saidSessions(ctx context.Context) ([]saidSession, error) {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	mu.Lock()
 	defer mu.Unlock()
 	loadCache()
 	defer useDBs()()
-	files := allFiles()
-	refresh(files, files)
+	files, err := allFilesContext(ctx, &allKept[0], zcodeFiles)
+	if err != nil {
+		return nil, err
+	}
+	refreshContext(ctx, files, files)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	groups := byKey(files, nil)
 	copies, branches := ccFamily(files)
 	titles := codexTitleOf()
 	price := func(string) *catalog.Price { return nil }
 	out := make([]saidSession, 0, len(groups))
 	for k, fs := range groups {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if copies[k] != "" || len(fs) == 0 || !HasTranscript(fs[0].agent) || !Reads(fs[0].agent) {
 			continue
 		}
@@ -737,7 +790,7 @@ func saidSessions() []saidSession {
 		ss.grow = saidGrows(s)
 		out = append(out, ss)
 	}
-	return out
+	return out, ctx.Err()
 }
 
 // saidGrows: a session whose file is only added to, line by line.

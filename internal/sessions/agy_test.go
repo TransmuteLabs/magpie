@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // testdata/agy-sessions is agy's data folder after three conversations
@@ -187,6 +189,81 @@ func TestAgyTranscript(t *testing.T) {
 		if strings.Contains(p.Text, "SYSTEM_MESSAGE") {
 			t.Fatalf("a system notice: %+v", p)
 		}
+	}
+}
+
+func TestSearchSaidAgyAndAntigravitySkipToolPayloads(t *testing.T) {
+	setup(t)
+	payload := strings.Repeat(`tooloutputsentinel\n`, 32<<10)
+	lines := []string{
+		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_REQUEST>spokenstart</USER_REQUEST>"}`,
+		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","content":"obsoleteutterance"}`,
+		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","content":"validutterance"}`,
+		`{"step_index":1,"source":"MODEL","type":"GENERIC","content":"revisedtoolresult"}`,
+		`{"step_index":2,"source":"MODEL","type":"GENERIC","content":"badrevision","thinking":42}`,
+		`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","content":"finalutterance","thinking":"` + payload + `","tool_calls":[{"name":"read_file","args":{"data":"` + payload + `"}}]}`,
+	}
+	for step := 4; step < 36; step++ {
+		lines = append(lines,
+			`{"step_index":`+strconv.Itoa(step)+`,"source":"MODEL","type":"GENERIC","content":"`+payload+`"}`)
+	}
+	for _, agent := range []string{"agy", "antigravity"} {
+		t.Run(agent, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "transcript_full.jsonl")
+			session := Session{Agent: agent, ID: "fixture", Path: path, Last: time.Now()}
+			if agent == "antigravity" {
+				session.Path = filepath.Join(dir, "conversations", "fixture.db")
+				path = antigravityTranscript(session.Path)
+			}
+			writeLines(t, path, lines...)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexed := saidSession{s: session, size: info.Size(), sig: info.ModTime().String()}
+			index := saidTestIndex(t, func() []saidSession { return []saidSession{indexed} })
+			db, err := index.open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := agent + ":fixture"
+			indexBytes := allocated(3, func() {
+				if err := saidRead(db, key, indexed, 0, true); err != nil {
+					t.Fatal(err)
+				}
+			})
+			t.Logf("index allocated %d bytes", indexBytes)
+			if indexBytes > 6<<20 {
+				t.Errorf("index allocated %d bytes with %d bytes of tool output", indexBytes, info.Size())
+			}
+			for word, want := range map[string]bool{
+				"spokenstart": true, "validutterance": true, "finalutterance": true,
+				"obsoleteutterance": false, "revisedtoolresult": false, "tooloutputsentinel": false,
+			} {
+				keys, err := saidKeys(t.Context(), db, saidTerms(NeedleOf(word)))
+				if err != nil || keys[key] != want {
+					t.Errorf("indexed %q: %v, want %t; error %v", word, keys, want, err)
+				}
+			}
+			transcript, err := TranscriptOf(session)
+			if err != nil || len(transcript.Parts) < 6 {
+				t.Fatalf("full transcript: %d parts, %v", len(transcript.Parts), err)
+			}
+			if part := transcript.Parts[1]; part.Kind != "tool_result" || part.Text != "revisedtoolresult" {
+				t.Fatalf("revised step at its first position: %+v", part)
+			}
+			if part := transcript.Parts[2]; part.Kind != "text" || part.Text != "validutterance" {
+				t.Fatalf("malformed replacement displaced a valid step: %+v", part)
+			}
+			if part := transcript.Parts[4]; part.Kind != "text" || part.Text != "finalutterance" {
+				t.Fatalf("mixed step lost its text: %s %q", part.Kind, part.Text)
+			}
+			hit, found, err := SearchSession(t.Context(), session, NeedleOf("revisedtoolresult"))
+			if err != nil || !found || hit.Role != "tool" || hit.Match != "revisedtoolresult" {
+				t.Fatalf("direct search lost tool output: %+v, found %t, error %v", hit, found, err)
+			}
+		})
 	}
 }
 

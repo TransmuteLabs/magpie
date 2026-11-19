@@ -3,12 +3,14 @@ package sessions
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/appdir"
 )
 
@@ -125,18 +127,22 @@ type liveagentToolCall struct {
 	} `json:"function"`
 }
 
+type liveagentSpokenMessage struct {
+	Role     string          `json:"role"`
+	Content  json.RawMessage `json:"content"`
+	Authored bool            `json:"authored"`
+	Origin   string          `json:"origin"`
+	Model    string          `json:"model"`
+}
+
 type liveagentMessage struct {
-	Role       string              `json:"role"`
-	Content    json.RawMessage     `json:"content"`
+	liveagentSpokenMessage
 	Reasoning  string              `json:"reasoning"`
 	ToolCalls  []liveagentToolCall `json:"tool_calls"`
 	ToolCallID string              `json:"tool_call_id"`
 	Name       string              `json:"name"`
-	Authored   bool                `json:"authored"`
-	Origin     string              `json:"origin"`
 	SentAt     *time.Time          `json:"sent_at"`
 	Usage      *liveagentUsage     `json:"usage"`
-	Model      string              `json:"model"`
 }
 
 type liveagentLine struct {
@@ -381,17 +387,36 @@ var liveagentSaid = []byte(`{"type":"message"`)
 // liveagentTranscript tells add what a LiveAgent session said, by its
 // message lines; a fork's copies of its source's are read too, as the
 // conversation it goes on from.
-func liveagentTranscript(path string, add func(bool, Part) bool) error {
+func liveagentTranscript(ctx context.Context, path string, spokenOnly bool, add func(bool, Part) bool) error {
 	names := map[string]string{} // a tool call's name, by its id
-	_, err := scanAt(path, 0, nil, func(b []byte, _, _ int64) bool {
+	_, err := scanThinContext(ctx, path, 0, nil, nil, func(b []byte, _, _ int64) bool {
 		if !bytes.HasPrefix(b, liveagentSaid) {
 			return true
 		}
-		var l liveagentLine
-		if json.Unmarshal(b, &l) != nil || l.Type != "message" {
-			return true
+		var message liveagentMessage
+		if spokenOnly {
+			role := gjson.GetBytes(b, "payload.message.role").Str
+			if role != "user" && role != "assistant" {
+				return true
+			}
+			var line struct {
+				Type    string `json:"type"`
+				Payload struct {
+					Message liveagentSpokenMessage `json:"message"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(b, &line) != nil || line.Type != "message" {
+				return true
+			}
+			message.liveagentSpokenMessage = line.Payload.Message
+		} else {
+			var line liveagentLine
+			if json.Unmarshal(b, &line) != nil || line.Type != "message" {
+				return true
+			}
+			message = line.Payload.Message
 		}
-		for _, p := range liveagentParts(l.Payload.Message, names) {
+		for _, p := range liveagentParts(message, names) {
 			if !add(p.Role != "assistant", p) {
 				return false
 			}

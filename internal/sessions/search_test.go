@@ -2,8 +2,10 @@ package sessions
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +123,81 @@ func TestSearchSessionStopsWhenCancelled(t *testing.T) {
 	if _, ok, err := SearchSession(ctx, s, NeedleOf("login")); ok || err == nil {
 		t.Fatalf("a cancelled search went on: %v %v", ok, err)
 	}
+}
+
+func TestSearchOMPLargeAbandonedBranch(t *testing.T) {
+	session := largeOMPSearchFile(t)
+	alloc := allocated(3, func() {
+		hit, ok, err := SearchSession(context.Background(), session, NeedleOf("искомое слово"))
+		if err != nil || !ok || hit.Match != "Искомое слово" || hit.Role != "assistant" {
+			t.Fatalf("active branch hit: %+v, found %t, error %v", hit, ok, err)
+		}
+	})
+	t.Logf("search allocated %d bytes", alloc)
+	if alloc > 6<<20 {
+		t.Fatalf("search allocated %d bytes for a hit beside a 24 MiB abandoned branch", alloc)
+	}
+}
+
+func TestSearchOMPAfterMalformedCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	writeLines(t, path,
+		`{"type":"message","id":"root","message":{"role":"user","content":"Earlier branch"}}`,
+		`{"type":"compaction","id":"compact","parentId":"root","summary":42}`,
+		`{"type":"message","id":"answer","parentId":"compact","message":{"role":"assistant","content":"Current answer"}}`,
+	)
+	session := Session{Agent: "omp", ID: "fixture", Path: path}
+	ctx := context.Background()
+	hit, ok, err := SearchSession(ctx, session, NeedleOf("current answer"))
+	if err != nil || !ok || hit.Role != "assistant" || hit.Match != "Current answer" {
+		t.Fatalf("answer hit: %+v, found %t, error %v", hit, ok, err)
+	}
+	_, ok, err = SearchSession(ctx, session, NeedleOf("earlier branch"))
+	if err != nil || ok {
+		t.Errorf("search crossed the malformed parent: found %t, error %v", ok, err)
+	}
+	transcript, err := TranscriptOfContext(ctx, session)
+	if err != nil || len(transcript.Parts) != 1 || transcript.Parts[0].Text != "Current answer" {
+		t.Fatalf("transcript parts: %+v, error %v", transcript.Parts, err)
+	}
+}
+
+func TestSearchOMPStopsBeforeScanningAfterCancel(t *testing.T) {
+	session := largeOMPSearchFile(t)
+	alloc := allocated(3, func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		scanHook = func(path string, _ int64) {
+			if path == session.Path {
+				cancel()
+			}
+		}
+		defer func() { scanHook = nil }()
+		_, ok, err := SearchSession(ctx, session, NeedleOf("искомое слово"))
+		if ok || !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled search: found %t, error %v", ok, err)
+		}
+	})
+	t.Logf("cancelled search allocated %d bytes", alloc)
+	if alloc > 1<<20 {
+		t.Fatalf("cancelled search allocated %d bytes while scanning the session", alloc)
+	}
+}
+
+func largeOMPSearchFile(t *testing.T) Session {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "omp.jsonl")
+	payload := strings.Repeat("x", 768<<10)
+	lines := []string{`{"type":"message","id":"root","message":{"role":"user","content":"Начало"}}`}
+	parent := "root"
+	for index := range 32 {
+		id := "abandoned-" + strconv.Itoa(index)
+		lines = append(lines, `{"type":"message","id":"`+id+`","parentId":"`+parent+`","message":{"role":"toolResult","content":"`+payload+`"}}`)
+		parent = id
+	}
+	lines = append(lines, `{"type":"message","id":"answer","parentId":"root","message":{"role":"assistant","content":"Искомое слово"}}`)
+	writeLines(t, path, lines...)
+	return Session{Agent: "omp", ID: "fixture", Path: path}
 }
 
 func TestGatewayTitleAndSearch(t *testing.T) {

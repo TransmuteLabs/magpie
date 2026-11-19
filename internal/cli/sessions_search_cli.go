@@ -190,15 +190,12 @@ func sessionsSearchTo(w io.Writer, args []string) error {
 			}
 		}()
 	}
-	if err := sessions.SaidReady(ctx, o.wait, progress); err != nil {
-		return err
-	}
 	var since time.Time
 	if o.days > 0 {
 		y, m, d := time.Now().Date()
 		since = time.Date(y, m, d-(o.days-1), 0, 0, 0, 0, time.Local)
 	}
-	found, err := sessions.SearchSaidSince(ctx, needle, o.agent, since, o.limit)
+	found, err := sessions.SearchSaidOnce(ctx, needle, o.agent, since, o.limit, o.wait, progress)
 	if errors.Is(err, sessions.ErrNoWords) {
 		return fmt.Errorf("nothing to search for: the words need a letter or digit\n%s", sessionsSearchUsage)
 	}

@@ -6,12 +6,15 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/tidwall/gjson"
 )
 
 // Part is one thing said in a call.
@@ -129,18 +132,63 @@ type ccBlock struct {
 	Content  json.RawMessage `json:"content"`
 }
 
+type transcriptTextContent struct {
+	spokenOnly bool
+	raw        json.RawMessage
+	text       string
+	blocks     []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+}
+
+func (c *transcriptTextContent) UnmarshalJSON(raw []byte) error {
+	if !c.spokenOnly {
+		return c.raw.UnmarshalJSON(raw)
+	}
+	c.text, c.blocks = "", nil
+	if raw[0] == '[' {
+		if json.Unmarshal(raw, &c.blocks) != nil {
+			c.blocks = nil
+		}
+	} else if json.Unmarshal(raw, &c.text) != nil {
+		c.text = ""
+	}
+	return nil
+}
+
+func (c *transcriptTextContent) spokenParts(role string) []Part {
+	var parts []Part
+	if c.text != "" {
+		parts = append(parts, textPart(role, c.text))
+	}
+	for _, block := range c.blocks {
+		if block.Type == "text" {
+			parts = append(parts, textPart(role, block.Text))
+		}
+	}
+	return parts
+}
+
+func (c *transcriptTextContent) claudeParts(role string) []Part {
+	if c.spokenOnly {
+		return c.spokenParts(role)
+	}
+	return claudeParts(c.raw, role)
+}
+
 // claudeContent reads the lines from where the call was asked to where it ended:
 // the user lines — a prompt, a tool's result — are what it was given, and the
 // lines of its own message what it said. add is told each part, and says
 // whether to read on.
 func claudeContent(c Call, add func(input bool, p Part) bool) error {
-	return claudeContentOf(c, nil, add)
+	return claudeContentOf(context.Background(), c, nil, false, add)
 }
 
 // claudeContentOf is claudeContent reading only the lines keep (when given)
 // says yes to: a search's cheap test of a line's bytes before it is decoded.
-func claudeContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part) bool) error {
-	_, err := scanAt(c.File, c.From, nil, func(b []byte, start, end int64) bool {
+func claudeContentOf(ctx context.Context, c Call, keep func([]byte) bool, spokenOnly bool, add func(input bool, p Part) bool) error {
+	_, err := scanThinContext(ctx, c.File, c.From, nil, nil, func(b []byte, start, end int64) bool {
 		if start >= c.To {
 			return false
 		}
@@ -156,18 +204,19 @@ func claudeContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part
 			Type    string `json:"type"`
 			IsMeta  bool   `json:"isMeta"`
 			Message struct {
-				ID      string          `json:"id"`
-				Model   string          `json:"model"`
-				Content json.RawMessage `json:"content"`
+				ID      string                `json:"id"`
+				Model   string                `json:"model"`
+				Content transcriptTextContent `json:"content"`
 			} `json:"message"`
 		}
+		l.Message.Content.spokenOnly = spokenOnly
 		if json.Unmarshal(b, &l) != nil {
 			return true
 		}
 		more := true
 		switch {
 		case l.Type == "user" && !l.IsMeta:
-			for _, p := range claudeParts(l.Message.Content, "user") {
+			for _, p := range l.Message.Content.claudeParts("user") {
 				more = add(true, p) && more
 			}
 		case l.Type == "assistant" && (c.Msg == "" || l.Message.ID == c.Msg):
@@ -177,7 +226,7 @@ func claudeContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part
 			if model == "<synthetic>" {
 				model = ""
 			}
-			for _, p := range claudeParts(l.Message.Content, "assistant") {
+			for _, p := range l.Message.Content.claudeParts("assistant") {
 				if p.Role == "assistant" {
 					p.Model = model
 				}
@@ -268,18 +317,37 @@ func pretty(raw json.RawMessage) string {
 
 var cxItem = []byte(`"type":"response_item"`)
 
+type codexTranscriptMessage struct {
+	Type    string `json:"type"`
+	Role    string `json:"role"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func (m codexTranscriptMessage) add(add func(bool, Part) bool) bool {
+	if m.Role != "user" && m.Role != "assistant" {
+		return true
+	}
+	var words []string
+	for _, block := range m.Content {
+		words = append(words, block.Text)
+	}
+	return add(m.Role == "user", textPart(m.Role, strings.Join(words, "\n")))
+}
+
 // codexContent reads the items between the call before and this one: what the
 // model was given (the prompt, a tool's output) and what it said (words,
 // reasoning, a call of a tool). A rollout the Codex app has compressed (or
 // unpacked) since the call was read is read in its new form: its lines and
 // their places are the same. add is as claudeContent's.
 func codexContent(c Call, add func(input bool, p Part) bool) error {
-	return codexContentOf(c, nil, add)
+	return codexContentOf(context.Background(), c, nil, false, add)
 }
 
 // codexContentOf is codexContent reading only the lines keep (when given)
 // says yes to, as claudeContentOf.
-func codexContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part) bool) error {
+func codexContentOf(ctx context.Context, c Call, keep func([]byte) bool, spokenOnly bool, add func(input bool, p Part) bool) error {
 	path := c.File
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		if _, err := os.Stat(rolloutTwin(path)); err == nil {
@@ -295,7 +363,7 @@ func codexContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part)
 		}
 		return say(input, p)
 	}
-	_, err := scanAt(path, c.From, nil, func(b []byte, start, end int64) bool {
+	_, err := scanThinContext(ctx, path, c.From, nil, nil, func(b []byte, start, end int64) bool {
 		if start >= c.To {
 			return false
 		}
@@ -316,18 +384,26 @@ func codexContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part)
 		if keep != nil && !keep(b) {
 			return true
 		}
+		if spokenOnly {
+			if gjson.GetBytes(b, "payload.type").Str != "message" {
+				return true
+			}
+			var line struct {
+				Payload codexTranscriptMessage `json:"payload"`
+			}
+			if json.Unmarshal(b, &line) != nil || line.Payload.Type != "message" {
+				return true
+			}
+			return line.Payload.add(add)
+		}
 		var l struct {
 			Payload struct {
-				Type      string          `json:"type"`
-				Role      string          `json:"role"`
+				codexTranscriptMessage
 				Name      string          `json:"name"`
 				Arguments string          `json:"arguments"`
 				Input     string          `json:"input"`
 				Output    json.RawMessage `json:"output"`
-				Content   []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-				Summary []struct {
+				Summary   []struct {
 					Text string `json:"text"`
 				} `json:"summary"`
 				Action struct {
@@ -339,21 +415,9 @@ func codexContentOf(c Call, keep func([]byte) bool, add func(input bool, p Part)
 			return true
 		}
 		p := &l.Payload
-		words := func() string {
-			var s []string
-			for _, x := range p.Content {
-				s = append(s, x.Text)
-			}
-			return strings.Join(s, "\n")
-		}
 		switch p.Type {
 		case "message":
-			switch p.Role {
-			case "user":
-				return add(true, textPart("user", words()))
-			case "assistant":
-				return add(false, textPart("assistant", words()))
-			}
+			return p.codexTranscriptMessage.add(add)
 		case "reasoning", "magpie_reasoning": // magpie_reasoning: PortCodexRolloutsLeft
 			var s []string
 			for _, x := range p.Summary {

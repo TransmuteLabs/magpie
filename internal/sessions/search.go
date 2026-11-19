@@ -222,38 +222,27 @@ func equalFoldASCII(a, lower []byte) bool {
 // SearchSession finds needle (from NeedleOf) in what a session said, read
 // from its agent's own file; ErrNoTranscript for an agent whose
 // conversations aren't read.
-func SearchSession(ctx context.Context, s Session, needle string) (hit Hit, found bool, err error) {
+func SearchSession(ctx context.Context, s Session, needle string) (Hit, bool, error) {
+	return searchSession(ctx, s, needle, false)
+}
+
+func searchSession(ctx context.Context, s Session, needle string, spokenOnly bool) (Hit, bool, error) {
 	owner, err := selectSessionHistoryOwner(ctx, s)
 	if err != nil {
 		return Hit{}, false, err
 	}
-	defer func() {
+	if owner.mode == historyNative && (!HasTranscript(s.Agent) || s.Path == "") {
 		if changed := owner.check(ctx); changed != nil {
-			hit, found, err = Hit{}, false, changed
+			return Hit{}, false, changed
 		}
-	}()
-	if owner.mode == historyDelegated {
-		transcript, err := extensionSourceTranscript(ctx, owner.session.source)
-		if err != nil {
-			return Hit{}, false, err
-		}
-		match := matcher{needle: needle}
-		for _, part := range transcript.Parts {
-			if !match.add(part) {
-				break
-			}
-		}
-		return match.hit, match.found, ctx.Err()
-	}
-	if !HasTranscript(s.Agent) || s.Path == "" {
 		return Hit{}, false, ErrNoTranscript
 	}
 	raw := rawNeedle(needle)
-	if linesFile(s) && !mayHold(ctx, s.Path, raw) {
-		return Hit{}, false, nil
+	if owner.mode == historyNative && linesFile(s) && !mayHold(ctx, s.Path, raw) {
+		return Hit{}, false, owner.check(ctx)
 	}
 	var keep func([]byte) bool
-	if raw != "" {
+	if raw != "" && owner.mode == historyNative {
 		// only a line holding every word is decoded: in a long session
 		// most lines are tool output that doesn't, and a part is a line's
 		var words [][]byte
@@ -270,13 +259,13 @@ func SearchSession(ctx context.Context, s Session, needle string) (hit Hit, foun
 		}
 	}
 	m := matcher{needle: needle}
-	err = readHistoryTranscript(ctx, owner, keep, func(_ bool, p Part) bool {
-		return ctx.Err() == nil && m.add(p)
+	err = readHistoryParts(ctx, owner, keep, spokenOnly, func(_ bool, p Part) bool {
+		return (spokenOnly && !said(p)) || m.add(p)
 	})
-	if err == nil {
-		err = ctx.Err()
+	if err != nil {
+		return Hit{}, false, err
 	}
-	return m.hit, m.found, err
+	return m.hit, m.found, nil
 }
 
 // linesFile says whether s.Path is the file its conversation is written in,

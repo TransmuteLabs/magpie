@@ -2,8 +2,10 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -455,13 +457,13 @@ var agySaid = [][]byte{[]byte(`"USER_INPUT"`), []byte(`"MODEL"`)}
 // agyTranscript reads a conversation as it was said: what the user typed,
 // the model's thinking, text and tool calls, and the tools' results. A step
 // written again is said as it was written last, where it was first.
-func agyTranscript(path string, keep func([]byte) bool, add func(bool, Part) bool) error {
+func agyTranscript(ctx context.Context, path string, keep func([]byte) bool, spokenOnly bool, add func(bool, Part) bool) error {
 	if agyRowOnly(path) {
 		return nil
 	}
 	var order []int
 	steps := map[int]agyLine{}
-	_, err := scanAt(path, 0, nil, func(b []byte, _, _ int64) bool {
+	_, err := scanThinContext(ctx, path, 0, nil, nil, func(b []byte, _, _ int64) bool {
 		said := false
 		for _, k := range agySaid {
 			if bytes.Contains(b, k) {
@@ -472,8 +474,8 @@ func agyTranscript(path string, keep func([]byte) bool, add func(bool, Part) boo
 		if !said || (keep != nil && !keep(b)) {
 			return true
 		}
-		var l agyLine
-		if json.Unmarshal(b, &l) != nil || l.Step == nil {
+		l, ok := agyTranscriptLine(b, spokenOnly)
+		if !ok || l.Step == nil {
 			return true
 		}
 		if _, ok := steps[*l.Step]; !ok {
@@ -493,6 +495,51 @@ func agyTranscript(path string, keep func([]byte) bool, add func(bool, Part) boo
 		}
 	}
 	return nil
+}
+
+type agyDiscardString struct{}
+
+var errAgyTranscriptString = errors.New("expected a string in an agy transcript step")
+
+func (*agyDiscardString) UnmarshalJSON(raw []byte) error {
+	if raw[0] == '"' || raw[0] == 'n' {
+		return nil
+	}
+	return errAgyTranscriptString
+}
+
+// agyTranscriptLine still validates tool steps and keeps their indices:
+// a valid tool revision can replace an earlier spoken step.
+func agyTranscriptLine(b []byte, spokenOnly bool) (agyLine, bool) {
+	if !spokenOnly {
+		var line agyLine
+		err := json.Unmarshal(b, &line)
+		return line, err == nil
+	}
+	var head struct {
+		agyLine
+		CreatedAt agyDiscardString `json:"created_at"`
+		Content   agyDiscardString `json:"content"`
+		Thinking  agyDiscardString `json:"thinking"`
+		ToolCalls []struct {
+			Name agyDiscardString `json:"name"`
+		} `json:"tool_calls"`
+	}
+	if json.Unmarshal(b, &head) != nil {
+		return agyLine{}, false
+	}
+	line := head.agyLine
+	if line.Step != nil && (line.Source == "USER_EXPLICIT" && line.Type == "USER_INPUT" ||
+		line.Source == "MODEL" && line.Type == "PLANNER_RESPONSE") {
+		var spoken struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(b, &spoken) != nil {
+			return agyLine{}, false
+		}
+		line.Content = spoken.Content
+	}
+	return line, true
 }
 
 // agyParts are what one step said.

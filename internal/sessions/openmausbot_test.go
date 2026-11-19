@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -360,5 +361,55 @@ func TestOpenMausBotTranscriptToolsAndNotices(t *testing.T) {
 		if strings.Contains(p, "notice") {
 			t.Errorf("OpenMausBot's own notice was said: %q", p)
 		}
+	}
+}
+
+func TestSearchSaidOpenMausBotSkipsActivityPayloads(t *testing.T) {
+	setup(t)
+	dir := t.TempDir()
+	t.Setenv("OMB_DATA_DIR", dir)
+	ombFixture(t, dir)
+	path := filepath.Join(dir, "messages.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	payload := strings.Repeat("tooloutputsentinel ", 64<<10)
+	for activity := range 16 {
+		raw := `{"role":"bot","kind":"activity","tool":{"name":"read_file","itemId":"call","output":"` + payload + `"}}`
+		if _, err := db.Exec(`INSERT INTO messages (thread_id, id, at, role, kind, text, json) VALUES (?, ?, ?, 'bot', 'activity', NULL, ?)`,
+			ombTeam, strconv.Itoa(activity), 1794638536600+activity, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, ok := Find("openmausbot", ombTeam)
+	if !ok {
+		t.Fatal("team conversation was not listed")
+	}
+	session := saidSession{s: s, sig: "fixture"}
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	indexDB, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(indexDB, "openmausbot:"+s.ID, session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes", indexBytes)
+	if indexBytes > 8<<20 {
+		t.Errorf("index allocated %d bytes while reading activity-only rows", indexBytes)
+	}
+	for query, want := range map[string]int{"Checking the team": 1, "tooloutputsentinel": 0} {
+		keys, err := saidKeys(t.Context(), indexDB, saidTerms(NeedleOf(query)))
+		if err != nil || len(keys) != want {
+			t.Errorf("index %q: %v (%v), want %d sessions", query, keys, err, want)
+		}
+	}
+	hit, found, err := SearchSession(t.Context(), s, NeedleOf("tooloutputsentinel"))
+	if err != nil || !found || hit.Kind != "tool_result" {
+		t.Fatalf("direct tool output search: %+v, found %t, error %v", hit, found, err)
 	}
 }

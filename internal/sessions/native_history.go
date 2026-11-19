@@ -62,13 +62,21 @@ var nativeHistoryOwners = sync.OnceValue(func() []string {
 })
 
 func nativeHistoryLists(view *sessionSourceView, readers []nativeHistoryReader, readWSL func(...string) []file) [][]file {
-	authority, err := inspectHistoryPublication(context.Background())
+	lists, _ := nativeHistoryListsContext(context.Background(), view, readers, readWSL)
+	return lists
+}
+
+func nativeHistoryListsContext(ctx context.Context, view *sessionSourceView, readers []nativeHistoryReader, readWSL func(...string) []file) ([][]file, error) {
+	authority, err := inspectHistoryPublication(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	authority.view = view
 	lists := make([][]file, 0, len(readers))
 	for _, reader := range readers {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(reader.wsl) != 0 {
 			agents := slices.DeleteFunc(slices.Clone(reader.wsl), func(agent string) bool { return !authority.native(agent) })
 			if len(agents) != 0 {
@@ -78,7 +86,7 @@ func nativeHistoryLists(view *sessionSourceView, readers []nativeHistoryReader, 
 			lists = append(lists, reader.read())
 		}
 	}
-	return lists
+	return lists, ctx.Err()
 }
 
 func nativeHistoryCanRead(view *sessionSourceView, agent string) bool {

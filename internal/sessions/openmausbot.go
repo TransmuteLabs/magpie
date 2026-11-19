@@ -372,7 +372,7 @@ func parseOpenMausBot(f file) *state {
 // with what it was given and what it answered. A line OpenMausBot itself
 // adds (a notice, a queue or engine move) is an activity with no item of
 // a turn and isn't said; nor is a turn's digest, which repeats the reply.
-func ombTranscript(s Session, add func(bool, Part) bool) error {
+func ombTranscript(ctx context.Context, s Session, spokenOnly bool, add func(bool, Part) bool) error {
 	i := strings.LastIndex(s.Path, "#")
 	if i < 0 || s.ID == "" {
 		return ErrNoTranscript
@@ -382,12 +382,18 @@ func ombTranscript(s Session, add func(bool, Part) bool) error {
 		return err
 	}
 	defer db.Close()
-	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.Query("SELECT role, kind, COALESCE(text, ''), json FROM messages WHERE thread_id = ? ORDER BY at, rowid", s.ID)
+	query := "SELECT role, kind, COALESCE(text, ''), json FROM messages WHERE thread_id = ? ORDER BY at, rowid"
+	if spokenOnly {
+		query = `SELECT role, kind, COALESCE(text, ''), '' FROM messages WHERE thread_id = ?
+			AND ((role = 'user' AND kind = 'text') OR (role = 'bot' AND kind IN ('text', 'options')))
+			ORDER BY at, rowid`
+	}
+	rows, err := tx.QueryContext(ctx, query, s.ID)
 	if err != nil {
 		return err
 	}

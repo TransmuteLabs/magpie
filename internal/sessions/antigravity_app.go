@@ -163,12 +163,12 @@ func antigravityTranscript(db string) string {
 
 // antigravityTranscriptOf reads the conversation whose database is db from
 // its transcript, as agy's; ErrNoTranscript when the app wrote none.
-func antigravityTranscriptOf(db string, keep func([]byte) bool, add func(bool, Part) bool) error {
+func antigravityTranscriptOf(ctx context.Context, db string, keep func([]byte) bool, spokenOnly bool, add func(bool, Part) bool) error {
 	p := antigravityTranscript(db)
 	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 		return ErrNoTranscript
 	}
-	return agyTranscript(p, keep, add)
+	return agyTranscript(ctx, p, keep, spokenOnly, add)
 }
 
 // antigravityCallFiles are the same databases as call sources.

@@ -1007,13 +1007,21 @@ func allFiles() []file { return allFilesWith(&allKept[0], zcodeFiles) }
 func allFilesForTitles() []file { return allFilesWith(&allKept[1], zcodeTitleFiles) }
 
 func allFilesWith(kept *filesKept, zcode func() []file) []file {
+	files, _ := allFilesContext(context.Background(), kept, zcode)
+	return files
+}
+
+func allFilesContext(ctx context.Context, kept *filesKept, zcode func() []file) ([]file, error) {
 	if filesHook != nil {
 		filesHook()
 	}
-	lists := nativeHistoryLists(sourceView.Load(), nativeHistoryReaders(zcode), wslFiles)
+	lists, err := nativeHistoryListsContext(ctx, sourceView.Load(), nativeHistoryReaders(zcode), wslFiles)
+	if err != nil {
+		return nil, err
+	}
 	// each lister asked Reads already; a file listed under another
 	// agent's name is held to that agent too
-	return allowed(extensionSourceFiles(kept.distinct(lists...)))
+	return allowed(extensionSourceFiles(kept.distinct(lists...))), ctx.Err()
 }
 
 // distinctOf is lists one after another with each path kept once, the
@@ -1715,10 +1723,21 @@ func writeCache(c *save) {
 // (all of them), read by List or by Stats. With no all-set it leaves other
 // cached agents alone, for a Codex-only identity refresh.
 func refresh(want, all []file) {
+	refreshContext(context.Background(), want, all)
+}
+
+func refreshContext(ctx context.Context, want, all []file) {
 	defer func() { trimSummaryRevisions(time.Now()) }()
 	var todo, waits []file
 	named := false
 	for _, f := range want {
+		if ctx.Err() != nil {
+			for _, queued := range todo {
+				close(parsing[queued.path])
+				delete(parsing, queued.path)
+			}
+			return
+		}
 		if source := f.m().source; source != nil {
 			if source.summary != nil {
 				cache[f.path] = source.summary
@@ -1757,7 +1776,7 @@ func refresh(want, all []file) {
 		}
 	}
 	if len(waits) > 0 {
-		defer waitParsing(waits)
+		defer waitParsingContext(ctx, waits)
 	}
 	gone := false
 	if len(cache) > 0 && all != nil {
@@ -1810,6 +1829,10 @@ func refresh(want, all []file) {
 	for i := 0; i < min(scanReaders(), len(todo)); i++ {
 		go func() {
 			for i := range ch {
+				if ctx.Err() != nil {
+					finished <- i
+					continue
+				}
 				j := &jobs[i]
 				// its file's calls lock is taken before a read slot, as
 				// readCalls takes them
@@ -1850,7 +1873,7 @@ func refresh(want, all []file) {
 	publish := func(i int) {
 		j := &jobs[i]
 		// A concurrent read may already have published a newer parse.
-		if generation == cacheGeneration && parsed(j.f.path) == j.old {
+		if j.parsed != nil && generation == cacheGeneration && parsed(j.f.path) == j.old {
 			cache[j.f.path] = j.parsed
 		}
 		close(parsing[j.f.path])
@@ -1873,7 +1896,7 @@ func refresh(want, all []file) {
 			mu.Lock()
 			publish(i)
 			mu.Unlock()
-			unsaved = true
+			unsaved = unsaved || jobs[i].parsed != nil
 			n++
 		case <-tick.C:
 			if !unsaved {
@@ -1899,7 +1922,7 @@ func refresh(want, all []file) {
 // waitParsing waits, with mu let go, for the files other refreshes are
 // reading, and reads itself any of them that came to nothing (a Reset
 // dropped its parse).
-func waitParsing(fs []file) {
+func waitParsingContext(ctx context.Context, fs []file) {
 	for {
 		var chans []chan struct{}
 		for _, f := range fs {
@@ -1912,7 +1935,12 @@ func waitParsing(fs []file) {
 		}
 		mu.Unlock()
 		for _, ch := range chans {
-			<-ch
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				mu.Lock()
+				return
+			}
 		}
 		mu.Lock()
 	}
@@ -1923,7 +1951,7 @@ func waitParsing(fs []file) {
 		}
 	}
 	if len(missing) > 0 {
-		refresh(missing, nil)
+		refreshContext(ctx, missing, nil)
 	}
 }
 
@@ -2547,6 +2575,10 @@ func scanAt(path string, off int64, head func([]byte) bool, fn func(b []byte, st
 // what the line holds besides long strings is kept as it was, and the
 // line is never gathered whole. A nil thin thins nothing.
 func scanThin(path string, off int64, head func([]byte) bool, thin func([]byte) (thinner, bool), fn func(b []byte, start, end int64) bool) (int64, error) {
+	return scanThinContext(context.Background(), path, off, head, thin, fn)
+}
+
+func scanThinContext(ctx context.Context, path string, off int64, head func([]byte) bool, thin func([]byte) (thinner, bool), fn func(b []byte, start, end int64) bool) (int64, error) {
 	if scanHook != nil {
 		scanHook(path, off)
 	}
@@ -2555,6 +2587,13 @@ func scanThin(path string, off int64, head func([]byte) bool, thin func([]byte) 
 		return off, err
 	}
 	defer f.Close()
+	return scanLines(ctx, f, off, head, thin, fn)
+}
+
+func scanLines(ctx context.Context, f io.Reader, off int64, head func([]byte) bool, thin func([]byte) (thinner, bool), fn func(b []byte, start, end int64) bool) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return off, err
+	}
 	if s, ok := f.(io.Seeker); ok {
 		if _, err := s.Seek(off, io.SeekStart); err != nil {
 			return off, err
@@ -2583,6 +2622,9 @@ func scanThin(path string, off int64, head func([]byte) bool, thin func([]byte) 
 	var th thinner // the line's state while it is thinned
 	thinning := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return off, err
+		}
 		chunk, err := r.ReadSlice('\n')
 		first := n == 0
 		n += int64(len(chunk))

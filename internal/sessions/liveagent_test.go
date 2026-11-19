@@ -193,6 +193,44 @@ func TestLiveAgentTranscript(t *testing.T) {
 	}
 }
 
+func TestSearchSaidLiveAgentSkipsToolPayloads(t *testing.T) {
+	payload := strings.Repeat("tooloutputsentinel ", 64<<10)
+	tool := `{"type":"message","payload":{"seq":3,"message":{"role":"tool","content":"` + payload + `","tool_call_id":"c1"}}}`
+	lines := append([]string(nil), laParser[:3]...)
+	for range 16 {
+		lines = append(lines, tool)
+	}
+	lines = append(lines, laParser[5:]...)
+	session := saidFile(t, t.TempDir(), "liveagent", "liveagent-session", time.Now(), lines...)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(db, "liveagent:liveagent-session", session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes", indexBytes)
+	if indexBytes > 8<<20 {
+		t.Errorf("index allocated %d bytes while reading tool-only messages", indexBytes)
+	}
+	for query, want := range map[string]int{
+		"Fix the parser": 1, "Reading the skill": 1, "Done": 1,
+		"tooloutputsentinel": 0, "Task t1 finished": 0, "Need the skill": 0,
+	} {
+		keys, err := saidKeys(t.Context(), db, saidTerms(NeedleOf(query)))
+		if err != nil || len(keys) != want {
+			t.Errorf("index %q: %v (%v), want %d sessions", query, keys, err, want)
+		}
+	}
+	hit, found, err := SearchSession(t.Context(), session.s, NeedleOf("tooloutputsentinel"))
+	if err != nil || !found || hit.Kind != "tool_result" {
+		t.Fatalf("direct tool output search: %+v, found %t, error %v", hit, found, err)
+	}
+}
+
 // LiveAgent's root is K-brain's: $LIVEAGENT_HOME, then $K_BRAIN_HOME
 // (absolute only), then the folder ~/.liveagent/data-dir.json names.
 func TestLiveAgentRoot(t *testing.T) {

@@ -192,8 +192,8 @@ func TestSearchSaidUnknownAuthorityPreservesIndex(t *testing.T) {
 func TestSearchSaidCanceledDoesNotOpenIndex(t *testing.T) {
 	setup(t)
 	path := filepath.Join(t.TempDir(), "unused", "said.db")
-	index := &saidIndex{where: func() string { return path }, list: func() []saidSession {
-		return nil
+	index := &saidIndex{where: func() string { return path }, list: func(context.Context) ([]saidSession, error) {
+		return nil, nil
 	}}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

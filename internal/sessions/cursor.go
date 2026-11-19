@@ -1,11 +1,13 @@
 package sessions
 
 import (
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -362,42 +364,58 @@ type cursorPart struct {
 	ToolName string `json:"toolName"`
 }
 
-// cursorMessages are a chat's messages in order: those compactions summed
-// up first, then the conversation's own.
-func cursorMessages(db *sql.DB, root string) []cursorMessage {
+// cursorMessageBlobs are a chat's messages in order: those compactions
+// summed up first, then the conversation's own.
+func cursorMessageBlobs(ctx context.Context, db *sql.DB, root string) iter.Seq[[]byte] {
 	blob := func(id []byte) []byte {
 		var data []byte
-		if db.QueryRow(`SELECT data FROM blobs WHERE id = ?`, hex.EncodeToString(id)).Scan(&data) != nil {
+		if db.QueryRowContext(ctx, `SELECT data FROM blobs WHERE id = ?`, hex.EncodeToString(id)).Scan(&data) != nil {
 			return nil
 		}
 		return data
 	}
-	rootID, err := hex.DecodeString(root)
-	if err != nil || len(rootID) == 0 {
-		return nil
-	}
-	state := blob(rootID)
-	if state == nil {
-		return nil
-	}
-	var ids [][]byte
-	archives, _ := pbFields(state, 13, 0)
-	for _, a := range archives {
-		if data := blob(a); data != nil {
-			summed, _ := pbFields(data, 1, 0)
-			ids = append(ids, summed...)
+	return func(yield func([]byte) bool) {
+		rootID, err := hex.DecodeString(root)
+		if err != nil || len(rootID) == 0 {
+			return
+		}
+		state := blob(rootID)
+		if state == nil {
+			return
+		}
+		var ids [][]byte
+		archives, _ := pbFields(state, 13, 0)
+		for _, a := range archives {
+			if ctx.Err() != nil {
+				return
+			}
+			if data := blob(a); data != nil {
+				summed, _ := pbFields(data, 1, 0)
+				ids = append(ids, summed...)
+			}
+		}
+		own, _ := pbFields(state, 1, 0)
+		ids = append(ids, own...)
+		for _, id := range ids {
+			if ctx.Err() != nil {
+				return
+			}
+			if data := blob(id); data != nil && !yield(data) {
+				return
+			}
 		}
 	}
-	own, _ := pbFields(state, 1, 0)
-	ids = append(ids, own...)
-	var out []cursorMessage
-	for _, id := range ids {
-		var m cursorMessage
-		if data := blob(id); data != nil && json.Unmarshal(data, &m) == nil {
-			out = append(out, m)
+}
+
+func cursorMessages(ctx context.Context, db *sql.DB, root string) iter.Seq[cursorMessage] {
+	return func(yield func(cursorMessage) bool) {
+		for raw := range cursorMessageBlobs(ctx, db, root) {
+			var m cursorMessage
+			if json.Unmarshal(raw, &m) == nil && !yield(m) {
+				return
+			}
 		}
 	}
-	return out
 }
 
 // cursorStarted is when the conversation of a root blob started, if it says.
@@ -422,13 +440,18 @@ var (
 
 // cursorParts are a message's content as parts: words are one text part.
 func cursorParts(raw json.RawMessage) []cursorPart {
+	parts, _ := decodeCursorParts(raw)
+	return parts
+}
+
+func decodeCursorParts(raw []byte) ([]cursorPart, error) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		return []cursorPart{{Type: "text", Text: s}}
+		return []cursorPart{{Type: "text", Text: s}}, nil
 	}
 	var parts []cursorPart
-	json.Unmarshal(raw, &parts)
-	return parts
+	err := json.Unmarshal(raw, &parts)
+	return parts, err
 }
 
 // cursorTyped is what was typed in a user message: its <user_query>, else
@@ -494,7 +517,7 @@ func parseCursor(f file) *state {
 	// the messages carry no time of their own: they count on the day the
 	// chat was last at work
 	date := dateOf(s.Last)
-	for _, m := range cursorMessages(db, meta.Root) {
+	for m := range cursorMessages(context.Background(), db, meta.Root) {
 		parts := cursorParts(m.Content)
 		switch m.Role {
 		case "user":

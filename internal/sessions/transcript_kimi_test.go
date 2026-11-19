@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // kindsOf counts a transcript's parts by role and kind.
@@ -126,5 +127,49 @@ func TestKimiCodeTranscriptOrder(t *testing.T) {
 	h, found, err := SearchSession(context.Background(), s, NeedleOf("haystack"))
 	if err != nil || !found || h.Kind != "tool_result" || !strings.Contains(strings.ToLower(h.Match), "haystack") {
 		t.Fatalf("search: %+v %v %v", h, found, err)
+	}
+}
+
+func TestSearchSaidKimiSkipsToolPayloads(t *testing.T) {
+	payload := strings.Repeat("tooloutputsentinel ", 64<<10)
+	tool := `{"type":"context.append_loop_event","event":{"type":"tool.result","toolCallId":"call","result":{"output":"` + payload + `"}},"time":1784436254401}`
+	importedTool := `{"type":"context.append_message","message":{"role":"tool","content":[{"type":"text","text":"` + payload + `"}],"toolCallId":"old"}}`
+	lines := []string{
+		`{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"importedquestion"}]}}`,
+		`{"type":"turn.prompt","input":[{"type":"text","text":"delegatedquestion"}],"origin":{"kind":"system_trigger","name":"subagent"}}`,
+		`{"type":"turn.steer","input":[{"type":"text","text":"backgroundnotice"}],"origin":{"kind":"system_trigger","name":"background_task"}}`,
+		`{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"think","think":"privateanalysis"}}}`,
+	}
+	for range 8 {
+		lines = append(lines, tool, importedTool)
+	}
+	lines = append(lines, `{"type":"context.append_loop_event","event":{"type":"content.part","part":{"type":"text","text":"spokenanswer"}}}`)
+	session := saidFile(t, t.TempDir(), "kimi", "kimi-session", time.Now(), lines...)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(db, "kimi:kimi-session", session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes", indexBytes)
+	if indexBytes > 8<<20 {
+		t.Errorf("index allocated %d bytes while reading tool-only records", indexBytes)
+	}
+	for query, want := range map[string]int{
+		"importedquestion": 1, "delegatedquestion": 1, "spokenanswer": 1,
+		"tooloutputsentinel": 0, "backgroundnotice": 0, "privateanalysis": 0,
+	} {
+		keys, err := saidKeys(t.Context(), db, saidTerms(NeedleOf(query)))
+		if err != nil || len(keys) != want {
+			t.Errorf("index %q: %v (%v), want %d sessions", query, keys, err, want)
+		}
+	}
+	hit, found, err := SearchSession(t.Context(), session.s, NeedleOf("tooloutputsentinel"))
+	if err != nil || !found || hit.Kind != "tool_result" {
+		t.Fatalf("direct tool output search: %+v, found %t, error %v", hit, found, err)
 	}
 }

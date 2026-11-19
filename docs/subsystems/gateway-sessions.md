@@ -711,7 +711,10 @@ info file or database, a Cursor chat's SQLite store, whose newest pages sit in
 its `-wal`; `search_db_test.go`), then decoded only to
 the first match in what the user or the model said. Of a Claude or Codex file
 only the lines holding every word of the query are decoded (`readTranscriptOf`,
-a part being one line's); Pi's tree is read whole. Without that, one 1.3 GB
+a part being one line's). For plain Pi and OMP logs, `piTranscript` scans the
+tree for parent links and file offsets, then reads message content along the
+active branch. Cancellation is checked during the tree scan and branch read.
+Without the line filter, one 1.3 GB
 Claude session took the whole 8 seconds; with it, all 58 of the owner's (3 GB)
 are searched in 3–7 s on a loaded machine. Gateway sessions, and the native sessions of an agent whose files aren't
 read (then `unread: true`), are searched in their recorded transcript
@@ -743,10 +746,26 @@ only which words are in which session (`content=''`, `detail='none'`; the
 user's and the model's text, about 1% of the bytes). It is made the first
 time a search asks, in the background, the newest sessions first, from the
 sessions `sessions.json` already lists (`saidSessions`), and brought up to
-date by the next search more than 10 s on (`saidStale`): a Claude Code or
-Codex file that grew is read from where the last read ended (`upto`, at a
+date by the next search at least 10 s after the previous refresh finished
+(`saidStale`). The standalone CLI prepares the sources once and owns a
+single refresh bounded by `--wait` (60 s by default, 2 s for the short
+`--wait=0` path). On timeout or Ctrl+C it stops starting more summary
+reads and lets any current ones finish before returning. Transcript reads
+and index transactions observe cancellation. The CLI searches the
+committed rows after a timeout, and Ctrl+C cancels the search itself.
+The GUI and MCP share a background refresh. A Claude Code or Codex file that grew is read from
+where the last read ended (`upto`, at a
 line's end), any other session again whole when its files changed, and a
-session gone or rewritten is dropped. A search waits for that at most 2 s
+session gone or rewritten is dropped. Native readers select conversation
+text for the index. Pi-family trees follow parent links through tool results
+and summaries without decoding their contents. Claude-format readers keep
+text beside tool results, and the next refresh rebuilds affected old-format
+index rows. Codex checks the payload's own type before decoding a message.
+The SQLite readers skip decoding tool state, and Cursor walks stored blobs
+one message at a time. Full transcripts and search within a session also
+read tool parts. Delegated SDK readers still return a bounded transcript to
+the host, which selects conversation text after receiving it.
+A search waits for the index at most 2 s
 (`saidWait`) and is otherwise answered from what is indexed, saying
 `indexed` of `total`; while the first listing of the sessions is still
 running (about 50 s over a 29 GB Claude Code and 60 GB Codex history with
@@ -754,8 +773,11 @@ a cold `sessions.json`) it says `listing` instead, so neither the page nor
 the MCP server reads an empty first answer as "no session says it". Words are letter-or-digit runs matched by their start
 (`auth` finds `authentication`); Chinese, Japanese and Korean go as each
 two characters side by side (`saidWords`, `saidTerms`). The index only says
-which sessions are worth reading: those are read newest first with
-`SearchSession` for the hit and the words round it, to `limit` hits.
+which sessions are worth reading: those are read newest first for the hit
+and the words round it, to `limit` hits. Snippet reads use the same text
+selection as the index and verify that the full phrase was said. The
+snippet reads share a six-second context deadline. A deadline reached
+during a read returns the hits collected so far with `cut` set.
 An agent magpie may not read (`Reads`, Settings › Sessions and gateway
 mode) is left out of every answer at once and out of the index on its next
 update; turning gateway mode on or off closes the index (`Reset` →

@@ -3,8 +3,11 @@ package sessions
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"path/filepath"
+
+	"github.com/tidwall/gjson"
 )
 
 // Kimi Code's conversation, read from a session's main wire.jsonl (#2056,
@@ -78,11 +81,25 @@ type kimiLine struct {
 
 var kimiSaid = [][]byte{[]byte(`"turn.prompt"`), []byte(`"turn.steer"`), []byte(`"content.part"`), []byte(`"tool.call"`), []byte(`"tool.result"`), []byte(`"context.append_message"`)}
 
+func kimiSpokenLine(b []byte) bool {
+	switch gjson.GetBytes(b, "type").Str {
+	case "turn.prompt", "turn.steer":
+		return true
+	case "context.append_loop_event":
+		return gjson.GetBytes(b, "event.type").Str == "content.part" &&
+			gjson.GetBytes(b, "event.part.type").Str == "text"
+	case "context.append_message":
+		role := gjson.GetBytes(b, "message.role").Str
+		return gjson.GetBytes(b, "time").Int() == 0 && (role == "user" || role == "assistant")
+	}
+	return false
+}
+
 // kimiTranscript tells add what a Kimi Code session said, in the order of
 // its main wire file, decoding only the lines keep says yes to.
-func kimiTranscript(path string, keep func([]byte) bool, add func(bool, Part) bool) error {
+func kimiTranscript(ctx context.Context, path string, keep func([]byte) bool, spokenOnly bool, add func(bool, Part) bool) error {
 	names := map[string]string{} // a tool call's name, by its id
-	_, err := scanAt(path, 0, nil, func(b []byte, _, _ int64) bool {
+	_, err := scanThinContext(ctx, path, 0, nil, nil, func(b []byte, _, _ int64) bool {
 		said := false
 		for _, k := range kimiSaid {
 			if bytes.Contains(b, k) {
@@ -93,6 +110,9 @@ func kimiTranscript(path string, keep func([]byte) bool, add func(bool, Part) bo
 		if !said || (keep != nil && !keep(b)) {
 			return true
 		}
+		if spokenOnly && !kimiSpokenLine(b) {
+			return true
+		}
 		var l kimiLine
 		if json.Unmarshal(b, &l) != nil {
 			return true
@@ -100,7 +120,7 @@ func kimiTranscript(path string, keep func([]byte) bool, add func(bool, Part) bo
 		if kimiTask(path, l) {
 			l.Origin.Kind = "user"
 		}
-		for _, p := range kimiParts(l, names) {
+		for _, p := range kimiParts(l, names, spokenOnly) {
 			if !add(p.Role != "assistant", p) {
 				return false
 			}
@@ -120,7 +140,7 @@ func kimiTask(path string, l kimiLine) bool {
 }
 
 // kimiParts are what one line of a wire file said.
-func kimiParts(l kimiLine, names map[string]string) []Part {
+func kimiParts(l kimiLine, names map[string]string, spokenOnly bool) []Part {
 	switch l.Type {
 	case "turn.prompt", "turn.steer":
 		var parts []Part
@@ -156,13 +176,13 @@ func kimiParts(l kimiLine, names map[string]string) []Part {
 		if l.Time != 0 {
 			return nil
 		}
-		return kimiMessageParts(l, names)
+		return kimiMessageParts(l, names, spokenOnly)
 	}
 	return nil
 }
 
 // kimiMessageParts are what a message imported from kimi-cli said.
-func kimiMessageParts(l kimiLine, names map[string]string) []Part {
+func kimiMessageParts(l kimiLine, names map[string]string, spokenOnly bool) []Part {
 	m := l.Message
 	var parts []Part
 	switch m.Role {
@@ -172,8 +192,13 @@ func kimiMessageParts(l kimiLine, names map[string]string) []Part {
 			case "text":
 				parts = append(parts, textPart(m.Role, c.Text))
 			case "think":
-				parts = append(parts, Part{Role: m.Role, Kind: "thinking", Text: c.Think})
+				if !spokenOnly {
+					parts = append(parts, Part{Role: m.Role, Kind: "thinking", Text: c.Think})
+				}
 			}
+		}
+		if spokenOnly {
+			break
 		}
 		for _, c := range m.ToolCalls {
 			name := cmp.Or(c.Name, c.Function.Name)

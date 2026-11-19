@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,6 +173,66 @@ func makeCursorChats(t *testing.T, dir string) (main, sub, other, empty string) 
 	})
 	empty = makeCursorChat(t, dir, curChat{id: curEmpty, cwd: curCwd, meta: map[string]any{"createdAt": curT0}})
 	return
+}
+
+func TestSearchSaidCursorSkipsToolBlobs(t *testing.T) {
+	payload := strings.Repeat("cursortooloutput ", 64<<10)
+	folder := makeCursorChat(t, t.TempDir(), curChat{
+		id: curMain, cwd: curCwd,
+		archived: []string{
+			`{"role":"user","content":[{"type":"text","text":"<user_info>excludedcontext</user_info><user_query>archived prompt</user_query>"}]}`,
+			`{"role":"assistant","content":"archived reply"}`,
+		},
+		messages: []string{
+			`{"role":"assistant","content":[{"type":"text","text":"current reply"},{"type":"tool-call","toolName":"Shell","args":{"command":"` + payload + `"}},{"type":"reasoning","text":"excludedthought"}]}`,
+			`{"content":[{"type":"tool-result","toolName":"Shell","result":"` + payload + `"}],"role":"tool"}`,
+			`{"role":"assistant","content":[{"type":"text","text":"final reply"}]}`,
+		},
+	})
+	s := Session{Agent: "cursor", ID: curMain, Path: filepath.Join(folder, "store.db")}
+	session := saidOf(t, s)
+	index := saidTestIndex(t, func() []saidSession { return []saidSession{session} })
+	db, err := index.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexBytes := allocated(3, func() {
+		if err := saidRead(db, "cursor:"+s.ID, session, 0, true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var spoken []string
+	fullBytes := allocated(3, func() {
+		spoken = spoken[:0]
+		if err := readTranscript(s, func(_ bool, p Part) bool {
+			if said(p) {
+				spoken = append(spoken, p.Text)
+			}
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Logf("index allocated %d bytes, full decode %d bytes", indexBytes, fullBytes)
+	if indexBytes+uint64(len(payload)) >= fullBytes {
+		t.Errorf("index still allocates the tool blobs repeatedly")
+	}
+	if want := []string{"archived prompt", "archived reply", "current reply", "final reply"}; !slices.Equal(spoken, want) {
+		t.Errorf("conversation order = %q, want %q", spoken, want)
+	}
+	for needle, want := range map[string]int{
+		"archived prompt": 1, "archived reply": 1, "current reply": 1, "final reply": 1,
+		"cursortooloutput": 0, "excludedthought": 0, "excludedcontext": 0,
+	} {
+		got, err := saidKeys(t.Context(), db, saidTerms(NeedleOf(needle)))
+		if err != nil || len(got) != want {
+			t.Errorf("index %q: keys %v, want %d, error %v", needle, got, want, err)
+		}
+	}
+	hit, found, err := SearchSession(t.Context(), s, NeedleOf("cursortooloutput"))
+	if err != nil || !found || hit.Kind != "tool_use" {
+		t.Fatalf("direct tool search: %+v, found %t, error %v", hit, found, err)
+	}
 }
 
 // curOld is a time between the chat's start and its last word, days ago.

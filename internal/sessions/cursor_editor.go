@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -199,7 +200,7 @@ func parseCursorEditor(f file) *state {
 		return true
 	}
 	if _, _, ok := cursorEditorDatabasePath(f.path); ok && f.m().editor != nil && f.m().editor.db != nil {
-		_ = editorMessages(f.m().editor.db, f.m().sid, message)
+		_ = editorMessages(context.Background(), f.m().editor.db, f.m().sid, message)
 	} else {
 		_ = readCursorEditor(f.path, message)
 	}
@@ -211,9 +212,9 @@ func parseCursorEditor(f file) *state {
 	return s
 }
 
-func editorMessages(db *sql.DB, id string, add func(string, string, time.Time) bool) error {
+func editorMessages(ctx context.Context, db *sql.DB, id string, add func(string, string, time.Time) bool) error {
 	var raw []byte
-	if err := db.QueryRow("SELECT value FROM cursorDiskKV WHERE key = ?", "composerData:"+id).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT value FROM cursorDiskKV WHERE key = ?", "composerData:"+id).Scan(&raw); err != nil {
 		return err
 	}
 	var meta cursorEditorMeta
@@ -221,7 +222,7 @@ func editorMessages(db *sql.DB, id string, add func(string, string, time.Time) b
 		return err
 	}
 	for _, h := range meta.Headers {
-		if err := db.QueryRow("SELECT value FROM cursorDiskKV WHERE key = ?", "bubbleId:"+id+":"+h.ID).Scan(&raw); err != nil {
+		if err := db.QueryRowContext(ctx, "SELECT value FROM cursorDiskKV WHERE key = ?", "bubbleId:"+id+":"+h.ID).Scan(&raw); err != nil {
 			if err == sql.ErrNoRows {
 				continue
 			}
@@ -253,15 +254,19 @@ func editorMessages(db *sql.DB, id string, add func(string, string, time.Time) b
 }
 
 func readCursorEditor(path string, add func(string, string, time.Time) bool) error {
+	return readCursorEditorContext(context.Background(), path, add)
+}
+
+func readCursorEditorContext(ctx context.Context, path string, add func(string, string, time.Time) bool) error {
 	if dbPath, id, ok := cursorEditorDatabasePath(path); ok {
 		db, done, err := openCursorEditorStore(dbPath)
 		if err != nil {
 			return err
 		}
 		defer done()
-		return editorMessages(db, id, add)
+		return editorMessages(ctx, db, id, add)
 	}
-	_, err := scanAt(path, 0, nil, func(b []byte, _, _ int64) bool {
+	_, err := scanThinContext(ctx, path, 0, nil, nil, func(b []byte, _, _ int64) bool {
 		var m struct {
 			Role    string `json:"role"`
 			Message struct {
@@ -290,7 +295,7 @@ func cursorEditorDatabasePath(path string) (string, string, bool) {
 	return path[:i], path[i+1:], true
 }
 
-func cursorTranscript(path string, add func(bool, Part) bool) error {
+func cursorTranscript(ctx context.Context, path string, spokenOnly bool, add func(bool, Part) bool) error {
 	emit := func(role, text string, _ time.Time) bool {
 		if role == "user" {
 			text, _ = cursorTyped([]cursorPart{{Type: "text", Text: text}})
@@ -302,7 +307,7 @@ func cursorTranscript(path string, add func(bool, Part) bool) error {
 	}
 	_, _, editorDB := cursorEditorDatabasePath(path)
 	if strings.HasSuffix(path, ".jsonl") || editorDB {
-		return readCursorEditor(path, emit)
+		return readCursorEditorContext(ctx, path, emit)
 	}
 	db, done, err := openCursorStore(path)
 	if err != nil {
@@ -313,7 +318,15 @@ func cursorTranscript(path string, add func(bool, Part) bool) error {
 	if !ok {
 		return ErrNoTranscript
 	}
-	for _, m := range cursorMessages(db, meta.Root) {
+	if spokenOnly {
+		for raw := range cursorMessageBlobs(ctx, db, meta.Root) {
+			if !cursorSpokenMessage(raw, emit) {
+				break
+			}
+		}
+		return ctx.Err()
+	}
+	for m := range cursorMessages(ctx, db, meta.Root) {
 		if m.Role == "system" {
 			// the agent's own prompt, not said in the conversation
 			continue
@@ -331,7 +344,44 @@ func cursorTranscript(path string, add func(bool, Part) bool) error {
 			}
 		}
 	}
+	return ctx.Err()
+}
+
+type cursorSpokenContent struct {
+	parts []cursorPart
+	err   error
+}
+
+func (c *cursorSpokenContent) UnmarshalJSON(raw []byte) error {
+	c.parts, c.err = decodeCursorParts(raw)
 	return nil
+}
+
+func cursorSpokenMessage(raw []byte, emit func(string, string, time.Time) bool) bool {
+	var tag struct {
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(raw, &tag) != nil || (tag.Role != "user" && tag.Role != "assistant") {
+		return true
+	}
+	var m struct {
+		Content cursorSpokenContent `json:"content"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return true
+	}
+	if tag.Role == "user" {
+		typed, _ := cursorTyped(m.Content.parts)
+		return emit(tag.Role, typed, time.Time{})
+	}
+	if m.Content.err == nil {
+		for _, p := range m.Content.parts {
+			if p.Type == "text" && !emit(tag.Role, p.Text, time.Time{}) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func cursorTranscriptParts(m cursorMessage) []Part {
@@ -340,13 +390,11 @@ func cursorTranscriptParts(m cursorMessage) []Part {
 		return []Part{textPart(m.Role, text)}
 	}
 	var blocks []struct {
-		Type     string          `json:"type"`
-		Text     string          `json:"text"`
-		ToolName string          `json:"toolName"`
-		Input    json.RawMessage `json:"input"`
-		Args     json.RawMessage `json:"args"`
-		Result   json.RawMessage `json:"result"`
-		Output   json.RawMessage `json:"output"`
+		cursorPart
+		Input  json.RawMessage `json:"input"`
+		Args   json.RawMessage `json:"args"`
+		Result json.RawMessage `json:"result"`
+		Output json.RawMessage `json:"output"`
 	}
 	if json.Unmarshal(m.Content, &blocks) != nil {
 		return nil

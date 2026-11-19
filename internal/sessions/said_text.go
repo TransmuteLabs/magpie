@@ -44,7 +44,7 @@ func SessionRef(s Session) string { return s.Agent + ":" + s.ID }
 func SaidText(found SaidFound, needle string, how TextHow) string {
 	var b strings.Builder
 	still := found.Listing || found.Indexed < found.Total
-	if len(found.Hits) == 0 && still {
+	if len(found.Hits) == 0 && (still || found.Cut) {
 		fmt.Fprintf(&b, "No session searched so far says %q.", needle)
 	} else if len(found.Hits) == 0 {
 		fmt.Fprintf(&b, "No session says %q.", needle)
