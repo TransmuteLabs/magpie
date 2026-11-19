@@ -181,6 +181,10 @@ func TestClaudeUsageRows(t *testing.T) {
 		{"no meters", sub, `{"limits":[],"extra_usage":null}`, "\n" + provider.ClaudeNoLimitsLine},
 		{"no meters, credits", sub, `{"limits":[],"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":100,"currency":"USD"}}`, "\n" + provider.ClaudeNoLimitsLine + "\nExtra usage: 1.00 / 500.00 USD spent"},
 		{"a row of another shape", sub, `{"limits":[{"kind":"session","percent":"most"}],"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":100,"currency":"USD"}}`, "\nExtra usage: 1.00 / 500.00 USD spent"},
+		{"valid and malformed rows", sub,
+			`{"limits":[{"kind":"weekly_all","percent":"most"},{"kind":"session","percent":37.5,"resets_at":"2026-11-19T15:00:00.000Z"}],` +
+				`"extra_usage":{"is_enabled":true,"monthly_limit":50000,"used_credits":100,"currency":"USD"}}`,
+			"\nCurrent session: 37.5% used · resets 2026-11-19T15:00:00.000Z\nExtra usage: 1.00 / 500.00 USD spent"},
 		{"rows unknown", sub, `{"limits":null,"extra_usage":null}`, ""},
 		{"fetch failed", sub, `null`, ""},
 	} {

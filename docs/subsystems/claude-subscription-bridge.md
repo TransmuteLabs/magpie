@@ -766,9 +766,10 @@ and `seven_day` fields, and from `limits[]` only the rows of kind
 `weekly_scoped` with a model. The same `usage_report.rate_limits.limits`
 carries every row as the server sent it (`kind` `session`, `weekly_all`
 or `weekly_scoped`, `percent` 0-100, `resets_at` ISO 8601). When the text
-drew no window, `claudeExtraUsage` adds each such row as /usage's own
-line (the reset as written, which `claudeResetTime` reads), and an empty
-`limits` (the server reported no meters) as
+drew no window, `claudeExtraUsage` adds each valid row as /usage's own
+line (the reset as written, which `claudeResetTime` reads). An unreadable
+row leaves the other windows and extra usage available. An empty
+`limits` array (the server reported no meters) produces
 `provider.ClaudeNoLimitsLine`, read as a text row "5-hour and weekly
 limits: None on this plan". `limits: null`, or `rate_limits: null` (the
 fetch failed, or the token lacks the profile scope), adds nothing, and

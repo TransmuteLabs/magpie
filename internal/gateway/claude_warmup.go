@@ -256,8 +256,6 @@ func claudeExtraUsage(out []byte, text string) string {
 	var all []struct {
 		Report *struct {
 			Limits *struct {
-				// as written: a row of another shape costs its rows,
-				// never the extra usage beside them
 				Rows  json.RawMessage `json:"limits"`
 				Extra *struct {
 					On       bool     `json:"is_enabled"`
@@ -276,9 +274,13 @@ func claudeExtraUsage(out []byte, text string) string {
 			continue
 		}
 		var add strings.Builder
-		var rows []claudeLimitRow
+		var rows []json.RawMessage
 		if json.Unmarshal(m.Report.Limits.Rows, &rows) == nil && rows != nil && !claudeTextHasWindow(text) {
-			for _, row := range rows {
+			for _, raw := range rows {
+				var row claudeLimitRow
+				if json.Unmarshal(raw, &row) != nil {
+					continue
+				}
 				if line := row.line(); line != "" {
 					add.WriteString("\n" + line)
 				}
