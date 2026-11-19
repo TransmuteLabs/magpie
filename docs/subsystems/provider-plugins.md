@@ -58,6 +58,27 @@ A usage window's `used` (percent) may be left out when the plugin can't tell it:
 
 A window that leaves out `used` but tells its count, `amount` of `limit` with both above 0, has the count's share (370 of 1000 is 37 used): [`quotaOfPlugin`](../../internal/provider/plugin_usage.go) fills `Used` from it, so the window is neither `Text` nor, unless the plugin set it, `Aside`, and routing reads it ([magpie-community/plugins#468](https://github.com/magpie-community/plugins/issues/468)). Before, such a window was text alone, and an account whose windows all told counts so was unknown to routing. An `amount` of 0 is what a left-out amount reads as, so a `limit` alone still says nothing. `aside: true` keeps a window out of routing (`allowanceOf`) whatever its count; the card and `/v1/magpie/quotas` still show it. `TestAWindowsCountIsItsShare` in [`plugin_usage_absent_test.go`](../../internal/provider/plugin_usage_absent_test.go) covers it.
 
+## Credits after a window
+
+A window may say `credits: true` when the account can continue on credits
+after spending the window's allowance. Kiro 0.1.41 sends
+`{used: 100, credits: true, aside: true}` for a spent month when an active
+trial balance outlasts the monthly reset. The host passes `credits` through
+(`usageOf` in [`host.js`](../../internal/plugin/host.js)), and
+[`quotaOfPlugin`](../../internal/provider/plugin_usage.go) clears `Aside`
+and sets `QuotaWindow.Credits`. Older hosts use `aside` to route by the other
+windows.
+
+[`weigh`](../../internal/gateway/routing.go) uses its existing allowance
+snapshot to place those accounts after the provider's accounts with room
+and before spent accounts. The trace's `Weighed.CreditsLast` also informs
+affinity (`lastBehind`). Manual account selection and group member order
+are outside this partition. A plugin's quota refusal goes through ordinary
+`Retry-After` and fallback handling. ChatGPT alone has an immediate quota
+retry for its transition onto credits. `TestPluginCreditsAfterTheOthers`
+and `TestWeighDoesNotRereadAllowancesWithoutTrialCredits` cover the order,
+refusal and allowance reads.
+
 ## A wallet's balance
 
 A prepaid wallet (SuperMagic's points, [#3950](https://github.com/yetone/magpie/issues/3950)) has a balance and nothing it is a share of. A usage window may send `balance` (a number, in `unit`) and leave out `used`, `limit` and `aside`: `{name: "积分", balance: 6291, unit: "积分"}`. The host passes a finite number on, at least 0, and anything else as `null` (`usageOf` in [`host.js`](../../internal/plugin/host.js)); `plugin.UsageWindow.Balance` and `provider.QuotaWindow.Balance` are `*float64`. [`quotaOfPlugin`](../../internal/provider/plugin_usage.go) keeps the figure and does not make the window `Text` or `Aside`, so the account is known to routing with no `Used` invented. `allowanceOf` copies it into `Limit.Balance`, and an empty wallet (0) counts as used up. `Allowance.Left(model)` is the least balance of the windows that count the model, with its unit. `weighRouted` sets `routes.Seat.Left` to it and `Seat.LeftIn` to the account's provider and unit; Smart, `pace` and `usage` put the seat with more left first where they would otherwise tie (`byLeft` in [`strategies.go`](../../internal/routes/strategies.go)), and only among seats that share one `LeftIn`, so balances in two units or two providers are never weighed against each other: each kind is put in the places its own seats take (the pool's order, or what magpie sent each lately for `pace` and `usage`), and the other kinds keep theirs. Before, a pool with two kinds was weighed by no balance, so a group of SuperMagic's and WorkBuddy's accounts spent SuperMagic's smallest balances first (#4095). The card, the Routing page (`Weighed.Balance`) and the CLI show the figure ("6,291 积分 left", `provider.BalanceText`) and no meter. A wallet window's `runsOutAt`/`runsOut` (its soonest batch to lapse) and the rows set aside after it (`aside` text: SuperMagic's day's, timed and permanent points) are display only: the card says them, and the Routing page reads them from the same card (`cardOf` in the routing plugin's `client.js`, live requests only), its row saying the lapse after the figure ("6,291 积分 left · 185 积分 expire 23:59", `runsOutText`, #3964) and its tooltip, and the account list's figure on hover, each window (`winsOf`). Routing goes by the balance alone. Tests: `TestPluginWalletBalanceIsAReading`, `TestPluginHostPassesABalanceOn`, `TestWalletsGoByWhatTheyHaveLeft`, `TestWalletsOfSeveralProvidersEachGoByWhatTheyHaveLeft`, `TestWalletWithMoreLeftGoesFirst`, `TestGroupWalletsGoByWhatTheyHaveLeft`, `usage-wallet-balance.test.cjs`, `routing-wallet-balance.test.cjs`, `routing-wallet-lapse.test.cjs`.

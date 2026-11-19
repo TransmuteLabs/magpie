@@ -368,6 +368,7 @@ type Weighed struct {
 	LateTTFT float64           `json:"lateTtft,omitempty"` // speed first: its ms to the first token lately, 0 if not measured (speed.go)
 	LateTPS  float64           `json:"lateTps,omitempty"`  // speed first: its tokens a second lately, 0 if not told
 	Price    *SeatPrice        `json:"price,omitempty"`    // cheapest first: what its model costs on it now, nil if not known
+	Context  int               `json:"context,omitempty"`  // small context first: its model's context window there, 0 if not known
 	Turn     bool              `json:"turn,omitempty"`     // in turn: it was this one's turn
 	Fit      int               `json:"fit,omitempty"`      // keyFit
 	Speaks   provider.Protocol `json:"speaks,omitempty"`   // a key made for one protocol only
@@ -437,13 +438,15 @@ type Weighed struct {
 	Spent       float64    `json:"spent,omitempty"`
 	SpendPeriod string     `json:"spendPeriod,omitempty"`
 	SpendSince  *time.Time `json:"spendSince,omitempty"`
-	// Credits: a Codex account that goes on past its allowance on its
-	// credits, and is let spend them: all but used up, it still answers,
-	// and goes before those used up with nothing to go on with
+	// Credits: an account that goes on past its allowance on its credits
+	// (spendsCredits: a Codex account let spend them, a plugin's holding a
+	// trial's): all but used up, it still answers, and goes before those
+	// used up with nothing to go on with
 	Credits bool `json:"credits,omitempty"`
-	// CreditsLast: such an account, on its credits now, that the user set
-	// to spend them only after everything else: tried after every
-	// candidate not on its credits (restLast)
+	// CreditsLast: such an account, on its credits now, tried after every
+	// candidate not on its credits: a Codex account the user set to spend
+	// them only after everything else (restLast), or a plugin's, after its
+	// provider's other accounts (creditsBehind)
 	CreditsLast bool `json:"creditsLast,omitempty"`
 	// Busy: the load its plugin reported for the model, a percent over
 	// the user's settings.BusyLoad, so it was tried after every ready
@@ -645,6 +648,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	}
 	if l, ok := wg.lefts[c.allowanceKey()]; ok {
 		w.Known, w.Used, w.Renews, w.Pace, w.Credits, w.CreditsFirst = true, l.used, l.renews, l.pace, l.credits, l.first
+		w.CreditsLast = wg.behind[c.rest]
 		w.Unreached, w.Soon = l.unreached, l.soon
 		if !l.lapse.IsZero() {
 			lp := l.lapse
@@ -693,6 +697,9 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	}
 	if pr, ok := wg.price[c.restID()]; ok {
 		w.Price = &SeatPrice{Input: pr.in, Output: pr.out, CacheRead: pr.cache, Peak: pr.peak}
+	}
+	if n, ok := wg.window[c.restID()]; ok {
+		w.Context = n
 	}
 	if sinks(p.Sink, p.Routing) {
 		markSunk(&w, c)
