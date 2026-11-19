@@ -144,7 +144,10 @@ type updateJSON struct {
 	// magpie and updates it (pacman's magpie-bin from the AUR, say), and
 	// the command that does
 	Packaged *packagedJSON `json:"packaged,omitempty"`
-	Retry    bool          `json:"retry,omitempty"` // error: a click downloads it again
+	// available, stuck "container": the image of the version out, its
+	// own tag (update.Image)
+	Image string `json:"image,omitempty"`
+	Retry bool   `json:"retry,omitempty"` // error: a click downloads it again
 	// error: the download failed through this mirror (Settings' UpdateMirror),
 	// and GitHub itself may do (#893)
 	Mirror string `json:"mirror,omitempty"`
@@ -856,6 +859,9 @@ func (u *updater) jsonIn(lang string) updateJSON {
 		if u.stuck == "not-writable" {
 			j.StuckDir = u.exeDir
 		}
+		if u.stuck == "container" && u.latest != nil {
+			j.Image = update.Image(u.latest.Version)
+		}
 		if u.stuck == "package" && u.packaged != nil {
 			j.Packaged = &packagedJSON{Manager: u.packaged.Name(), Package: u.packaged.Package, Command: u.packaged.Command()}
 		}
@@ -1203,7 +1209,16 @@ func (u *updater) restartStaged(web, window bool, view string, bySelf bool) bool
 		return false
 	}
 	if err != nil {
+		// the new version is in place but nothing started it: quitting now
+		// would leave no magpie running at all (ShipInSand on X: it "often
+		// disappears by itself"). This one runs on and says so.
 		log.Println("update:", err)
+		os.Remove(filepath.Join(settings.Dir(), updatedInAppFile))
+		unmarkQuietRestart()
+		updates.mu.Lock()
+		updates.err = "the new version is installed but couldn't be started (" + err.Error() + "): quit magpie and open it again"
+		updates.mu.Unlock()
+		return false
 	}
 	return true
 }

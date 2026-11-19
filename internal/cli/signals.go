@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
@@ -85,6 +86,10 @@ func saveSessionsOnSignal() {
 	savedWithin(sessions.Saved, saveOnSignal)
 }
 
+// hostsOnSignal bounds how long a signal waits for the plugin hosts to
+// end: past the 15s EndHosts lets a host renewing a sign-in finish.
+var hostsOnSignal = 20 * time.Second
+
 // savedWithin runs save and waits for it up to d.
 func savedWithin(save func(), d time.Duration) {
 	done := make(chan struct{})
@@ -108,6 +113,10 @@ var (
 // oneself (Windows), it exits as a shell reports such a process. A var so
 // tests can see what a signal would do.
 var die = func(s os.Signal) {
+	// the plugin hosts it started end with it, as at any exit (#7146):
+	// one renewing a sign-in is given the time EndHosts gives it, and
+	// one past that is killed with what it started
+	savedWithin(plugin.EndHosts, hostsOnSignal)
 	raise(s)
 	code := 1
 	if n, ok := s.(syscall.Signal); ok {
