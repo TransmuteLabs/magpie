@@ -344,6 +344,12 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("GET /api/library/pi", func(rw http.ResponseWriter, r *http.Request) {
 		writeJSON(rw, library.ReadPiExtensions())
 	})
+	// What the agents' own plugins (Codex's marketplaces) and packages (Pi's)
+	// declare, read and never written (#7244). Asked for when the Library
+	// is opened, not part of the polled /api/library.
+	mux.HandleFunc("GET /api/library/native", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, library.ReadNative())
+	})
 	mux.HandleFunc("POST /api/library/pi", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Pi, Ext, Pkg string
@@ -946,6 +952,25 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.ProjectServer(in.Dir, in.Name, in.Agents)
 		case "projects/plugin":
 			res, err = library.ProjectPlugin(in.Dir, in.Name, in.Agents)
+		case "projects/hooks":
+			// some library hooks in this project, for these agents
+			res, err = library.ProjectHooks(in.Dir, oneOrMore(in.Name, in.Names), in.Agents)
+		case "projects/claude-plugin":
+			// a plugin Claude Code has installed, on for this project alone
+			// (agents ["claude"]) or taken out of its settings ([])
+			if len(in.Agents) > 1 || len(in.Agents) == 1 && in.Agents[0] != "claude" {
+				http.Error(rw, "only Claude Code reads a project's enabledPlugins", http.StatusBadRequest)
+				return
+			}
+			res, err = library.ProjectClaudePlugin(in.Dir, in.Name, len(in.Agents) == 1)
+		case "projects/pi":
+			// a Pi package of the project's .pi/settings.json: "on", "off"
+			// (kept, loads nothing), "removed", or "adopt" for one it declares
+			if in.How == "adopt" {
+				res, err = library.ProjectPiAdopt(in.Dir, in.Name)
+			} else {
+				res, err = library.ProjectPi(in.Dir, in.Name, in.How)
+			}
 		case "projects/server-off":
 			// a Library server turned off in this project only
 			res, err = library.ProjectServerOff(in.Dir, in.Name, in.Agents)
