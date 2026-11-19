@@ -4779,7 +4779,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				}
 				return ctx.Err()
 			})
-			call.Status, call.Error = policyStatus(refusal), "Upstream refused the selected request ("+string(refusal.Class)+")"
+			call.Status, call.Error = policyStatus(refusal), finalPolicyMessage(refusal)
 			s.trace.update(tr, func(route *Route) {
 				attempt := &route.Tries[len(route.Tries)-1]
 				attempt.Done = true

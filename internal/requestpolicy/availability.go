@@ -51,6 +51,7 @@ type Refusal struct {
 	Observation                          Observation
 	Model                                string
 	NoEffect                             bool
+	Handoff                              bool
 	ObservedAt                           time.Time
 	NextAllowed                          time.Time
 	Windows                              []Window

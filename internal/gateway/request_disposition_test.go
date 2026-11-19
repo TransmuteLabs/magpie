@@ -35,7 +35,7 @@ func main(){
  sdk.MethodProviderExecute:func(ctx context.Context,call sdk.Call,stream *sdk.Stream)(any,error){
   var request sdk.ExecuteRequest;if err:=json.Unmarshal(call.Params,&request);err!=nil{return nil,err}
   var auth struct{URL string};if err:=json.Unmarshal(call.Auth,&auth);err!=nil{return nil,err}
-  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"model":request.Model})
+  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"model":request.Model,"operation":call.Scope.Operation})
   req,_:=http.NewRequestWithContext(ctx,"POST",auth.URL,bytes.NewReader(body));res,err:=http.DefaultClient.Do(req);if err!=nil{return nil,err}
   raw,err:=io.ReadAll(res.Body);res.Body.Close();if err!=nil{return nil,err}
   var reply map[string]any;if err:=json.Unmarshal(raw,&reply);err!=nil{return nil,err}
@@ -55,7 +55,16 @@ func main(){
    return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed"}, nil
   }
   if reply["accepted"]==true {if err:=stream.Emit(ctx,"accepted",sdk.AcceptedEvent{OperationID:call.Scope.Operation});err!=nil{return nil,err};delete(reply,"accepted")}
-  if reply["refusal"]!=nil{return reply,nil}
+  if reply["refusal"]!=nil{
+   switch reply["handoffEvent"] {
+   case "headers":
+    if err:=stream.Emit(ctx,"headers",sdk.HeadersEvent{Status:http.StatusTooManyRequests});err!=nil{return nil,err}
+   case "usage":
+    if err:=stream.Emit(ctx,"usage",sdk.Usage{InputTokens:17});err!=nil{return nil,err}
+   }
+   delete(reply,"handoffEvent")
+   return reply,nil
+  }
   if err:=stream.Emit(ctx,"accepted",sdk.AcceptedEvent{OperationID:call.Scope.Operation});err!=nil{return nil,err}
   content,_:=json.Marshal(map[string]any{"id":"fixture","model":request.Model,"choices":[]any{map[string]any{"index":0,"message":map[string]string{"role":"assistant","content":call.Scope.Account},"finish_reason":"stop"}}})
   var usage *sdk.Usage
@@ -74,7 +83,9 @@ func installPolicyRouteFixture(t *testing.T, handler http.HandlerFunc, options .
 	fresh(t)
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	t.Setenv("MAGPIE_ADDR", "")
-	vendor := httptest.NewServer(handler)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /execute", handler)
+	vendor := httptest.NewServer(mux)
 	t.Cleanup(vendor.Close)
 	directory := t.TempDir()
 	entry := "worker"
@@ -113,7 +124,7 @@ func installPolicyRouteFixture(t *testing.T, handler http.HandlerFunc, options .
 	if _, err := manager.Install(ctx, directory); err != nil {
 		t.Fatal(err)
 	}
-	auth, _ := json.Marshal(map[string]string{"url": vendor.URL})
+	auth, _ := json.Marshal(map[string]string{"url": vendor.URL + "/execute"})
 	for _, account := range []string{"alice", "bob"} {
 		if _, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: manifest.ID, Provider: "vendor", ID: account, Auth: auth}, 0); err != nil {
 			t.Fatal(err)
@@ -162,6 +173,196 @@ func TestRequestDispositionInvalidRequestDoesNotEnumerateAccounts(t *testing.T) 
 	defer mutex.Unlock()
 	if response.Code != 403 || len(accounts) != 1 {
 		t.Fatalf("status=%d accounts=%v body=%s", response.Code, accounts, response.Body)
+	}
+}
+
+func TestRequestDispositionLocalQueueHandoff(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		single     bool
+		noRetries  bool
+		accepted   bool
+		undeclared bool
+		wantStatus int
+		wantCalls  string
+	}{
+		{name: "ready sibling", wantStatus: 200, wantCalls: "alice,bob"},
+		{name: "no eligible candidate", single: true, wantStatus: 429, wantCalls: "alice"},
+		{name: "exhausted dispatch budget", noRetries: true, wantStatus: 429, wantCalls: "alice"},
+		{name: "accepted workflow", accepted: true, wantStatus: 409, wantCalls: "alice"},
+		{name: "missing capability", undeclared: true, wantStatus: 409, wantCalls: "alice"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var mutex sync.Mutex
+			var calls []string
+			result := sdk.HandoffExecution("local-queue", "queue-timeout", "local queue exhausted", new(int64(5000)))
+			reply, err := json.Marshal(struct {
+				sdk.ExecuteResult
+				Accepted bool `json:"accepted,omitempty"`
+			}{result, scenario.accepted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := installPolicyRouteFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+				var input struct{ Account string }
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Error(err)
+					writer.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				mutex.Lock()
+				calls = append(calls, input.Account)
+				mutex.Unlock()
+				if input.Account == "alice" {
+					writer.Write(reply)
+					return
+				}
+				io.WriteString(writer, `{}`)
+			}, func(manifest *sdk.Manifest) {
+				if !scenario.undeclared {
+					manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.RequestHandoff)
+				}
+			})
+			if scenario.single {
+				if err := extensionhost.Default().Store().DeleteAccount("fixture.policy", "vendor", "bob", 1); err != nil {
+					t.Fatal(err)
+				}
+				provider.Changed()
+			}
+			if scenario.noRetries {
+				zero := 0
+				current := settings.Load()
+				current.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxTotalRetries: &zero}}
+				if err := settings.Save(current); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			server := New()
+			t.Cleanup(server.idle.stop)
+			body := `{"model":"` + id + `/free","messages":[{"role":"user","content":"local queue"}]}`
+			response := mediaFixtureCall(server.Front(), "POST", "/v1/chat/completions", body)
+			mutex.Lock()
+			gotCalls := strings.Join(calls, ",")
+			mutex.Unlock()
+			if response.Code != scenario.wantStatus || gotCalls != scenario.wantCalls {
+				t.Fatalf("status=%d calls=%s body=%s", response.Code, gotCalls, response.Body)
+			}
+			if scenario.wantStatus == http.StatusOK && !strings.Contains(response.Body.String(), `"content":"bob"`) {
+				t.Fatalf("ready sibling did not serve reply: %s", response.Body)
+			}
+			if scenario.wantStatus == 429 && (response.Header().Get("Retry-After") == "" || !strings.Contains(response.Body.String(), "local admission capacity")) {
+				t.Fatalf("missing local retry hint: headers=%v body=%s", response.Header(), response.Body)
+			}
+			if scenario.accepted || scenario.undeclared {
+				return
+			}
+			tries := lastRoute(server).Tries
+			if len(tries) != strings.Count(scenario.wantCalls, ",")+1 || tries[0].Status != 429 || tries[0].Again != 0 ||
+				tries[0].Rest != nil || tries[0].UpstreamFailure != (usage.UpstreamFailure{}) {
+				t.Fatalf("local handoff waited, rested, or looked like an upstream failure: %+v", tries)
+			}
+			records := decisionUsageRecords(t)
+			if len(records) != 1 || records[0].Status != scenario.wantStatus || records[0].UpstreamFailure != (usage.UpstreamFailure{}) {
+				t.Fatalf("request usage must keep final status without an upstream failure: %+v", records)
+			}
+			if scenario.single {
+				second := mediaFixtureCall(server.Front(), "POST", "/v1/chat/completions", body)
+				mutex.Lock()
+				gotCalls = strings.Join(calls, ",")
+				mutex.Unlock()
+				if second.Code != 429 || gotCalls != "alice,alice" {
+					t.Fatalf("independent request must reach local queue: status=%d calls=%s body=%s", second.Code, gotCalls, second.Body)
+				}
+			}
+		})
+	}
+}
+
+func TestRequestDispositionLocalHandoffReplayFence(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		event      string
+		usage      *sdk.Usage
+		undeclared bool
+		incomplete bool
+	}{
+		{name: "published headers", event: "headers"},
+		{name: "published usage", event: "usage"},
+		{name: "final usage", usage: &sdk.Usage{InputTokens: 17}},
+		{name: "undeclared capability", undeclared: true},
+		{name: "incomplete facts", incomplete: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			result := sdk.HandoffExecution("local-queue", "queue-timeout", "local queue exhausted", nil)
+			result.Usage = scenario.usage
+			result.Refusal.Facts.Complete = !scenario.incomplete
+			reply, err := json.Marshal(struct {
+				sdk.ExecuteResult
+				HandoffEvent string `json:"handoffEvent,omitempty"`
+			}{result, scenario.event})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var mutex sync.Mutex
+			var calls []struct{ Account, Operation string }
+			id := installPolicyRouteFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+				var call struct{ Account, Operation string }
+				if err := json.NewDecoder(request.Body).Decode(&call); err != nil {
+					t.Error(err)
+					writer.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				mutex.Lock()
+				calls = append(calls, call)
+				mutex.Unlock()
+				if call.Account == "alice" {
+					writer.Write(reply)
+				} else {
+					io.WriteString(writer, `{}`)
+				}
+			}, func(manifest *sdk.Manifest) {
+				if !scenario.undeclared {
+					manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.RequestHandoff)
+				}
+			})
+			server := New()
+			t.Cleanup(server.idle.stop)
+			ctx := extensionhost.WithRequestMetadata(t.Context(), extensionhost.RequestMetadata{
+				Plugin: "fixture.policy", RequestID: "stable-handoff-request", CallerID: "fixture-caller",
+			})
+			send := func() *httptest.ResponseRecorder {
+				body := `{"model":"` + id + `/free","messages":[{"role":"user","content":"handoff fence"}]}`
+				request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+				request.RemoteAddr = "127.0.0.1:12345"
+				response := httptest.NewRecorder()
+				server.Front().ServeHTTP(response, request)
+				return response
+			}
+			first := send()
+			if first.Code != http.StatusConflict || first.Header().Get("X-Should-Retry") != "false" {
+				t.Errorf("contradictory handoff reached fallback or lost the replay fence: status=%d body=%s", first.Code, first.Body)
+			}
+			mutex.Lock()
+			operation := ""
+			if len(calls) > 0 && calls[0].Account == "alice" {
+				operation = calls[0].Operation
+			}
+			mutex.Unlock()
+			receipt, err := extensionhost.Default().Store().Operation("fixture.policy", operation)
+			if err != nil || receipt.State != "uncertain" {
+				t.Errorf("contradictory handoff must persist an uncertain receipt: state=%q err=%v", receipt.State, err)
+			}
+			repeated := send()
+			if repeated.Code != http.StatusConflict {
+				t.Errorf("same request ID lost its durable replay fence: status=%d body=%s", repeated.Code, repeated.Body)
+			}
+			mutex.Lock()
+			defer mutex.Unlock()
+			if len(calls) != 1 {
+				t.Errorf("contradictory handoff reached a sibling or replayed the original account: %+v", calls)
+			}
+		})
 	}
 }
 

@@ -49,6 +49,7 @@ const capabilities = {
   "request-observer": ["request.observe"],
   "ledger-observer": ["ledger.observe"],
   "request-policy": [],
+  "request-handoff": [],
 };
 
 export const CONTRACT = Object.freeze({
@@ -192,6 +193,7 @@ export function validateManifest(value) {
     || contract.capabilities.some(capability => !Object.hasOwn(capabilities, capability))) fail("Unsupported extension contract or capabilities");
   const has = capability => contract.capabilities.includes(capability);
   if (has("request-policy") && contract.version.minor < 12) fail("Request policy requires SDK API 1.12");
+  if (has("request-handoff") && (!has("request-policy") || !has("outbound-executor"))) fail("Request handoff requires request policy and an outbound executor");
   const groups = ["inbounds", "providers", "agents", "sessions", "tools"];
   if (groups.some(key => manifest[key] !== undefined && !Array.isArray(manifest[key]))
     || groups.reduce((count, key) => count + (manifest[key]?.length || 0), 0) > 1024) fail("Invalid extension descriptor lists");

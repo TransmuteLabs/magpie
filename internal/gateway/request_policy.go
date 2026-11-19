@@ -324,7 +324,15 @@ func resolveFinalPolicy(ctx context.Context, selected candidate, refusal *reques
 	// Classification was resolved from the actual response before raw text was
 	// discarded. Scheduling must not reclassify a reconstructed empty message.
 	policy.Rules = nil
-	decision := budget.Disposition(policy, refusal.Facts(time.Now()), refusal.Classification, requestpolicy.Safety{NoEffect: refusal.NoEffect}, budget.Attempts(ctx, selected.p.ID))
+	decision := terminal
+	if refusal.Handoff {
+		if refusal.NoEffect {
+			decision.Action = requestpolicy.ActionNext
+			decision.Reason = "local-admission-exhausted"
+		}
+	} else {
+		decision = budget.Disposition(policy, refusal.Facts(time.Now()), refusal.Classification, requestpolicy.Safety{NoEffect: refusal.NoEffect}, budget.Attempts(ctx, selected.p.ID))
+	}
 	if deadline, bounded := ctx.Deadline(); bounded && decision.Action == requestpolicy.ActionWait && !time.Now().Add(decision.Delay).Before(deadline) {
 		// The selected account cannot become ready within this request. A ready
 		// sibling can still use the unspent permit without waiting for its reset.
@@ -381,5 +389,8 @@ func policyMemberCandidates(members []provider.Member) []candidate {
 	return candidates
 }
 func finalPolicyMessage(refusal *requestpolicy.Refusal) string {
+	if refusal.Handoff {
+		return "Selected route exhausted local admission capacity"
+	}
 	return "Upstream refused the selected request (" + string(refusal.Class) + ")"
 }

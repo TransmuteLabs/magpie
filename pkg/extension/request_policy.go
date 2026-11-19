@@ -9,6 +9,7 @@ import (
 )
 
 const RequestPolicy Capability = "request-policy"
+const RequestHandoff Capability = "request-handoff"
 const MethodRequestRecover = "request.recover"
 
 // RequestFailureFacts contains extracted response facts, never a raw body or
@@ -75,6 +76,19 @@ type RequestRefusal struct {
 // terminal result. The host still validates effect state and selected scope.
 func RefusedExecution(failure RequestRecoveryRequest, windows []RequestFailureWindow) ExecuteResult {
 	return ExecuteResult{Status: failure.Facts.Status, Outcome: "not-started", Refusal: &RequestRefusal{Step: failure.Step, Facts: failure.Facts, Rules: failure.Rules, Evidence: failure.Evidence, Windows: windows}}
+}
+
+// HandoffExecution reports exhausted local admission before business effects.
+// The host can try the next eligible route immediately. The optional retry
+// hint is for the caller when no route is ready.
+func HandoffExecution(step, code, message string, retryAfterMS *int64) ExecuteResult {
+	return RefusedExecution(RequestRecoveryRequest{
+		Step: step, Evidence: "rejected-before-effect",
+		Facts: RequestFailureFacts{
+			Status: http.StatusTooManyRequests, Code: code, Message: message, RetryAfterMS: retryAfterMS,
+			Operation: MethodProviderExecute, Phase: "admission", Complete: true,
+		},
+	}, nil)
 }
 
 type RequestRecoveryResult struct {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { requestWithPolicy, decideRequest, refusedExecution } from "../index.js";
-import { harness, moduleFor } from "./helpers.js";
+import { requestWithPolicy, decideRequest, refusedExecution, handoffExecution, validateManifest } from "../index.js";
+import { harness, manifest, moduleFor } from "./helpers.js";
 
 test("negotiated worker callback retains immutable scope and never sends account auth",async()=>{
   const module=moduleFor(async(ctx,_call,stream)=>decideRequest(ctx.signal,stream,{step:"read",facts:{status:401,operation:"tool.call",phase:"response",complete:true},rules:[],evidence:""}));
@@ -88,4 +88,25 @@ test("final refusal preserves fresh typed timing and window applicability on the
     assert.equal(reply.result.outcome,"not-started");
     assert.deepEqual(reply.result.refusal,{...failure,windows});
   } finally {await worker.close();}
+});
+
+test("local admission handoff declares the executor and keeps its response hint", () => {
+  const descriptor = manifest(["outbound-executor", "request-policy", "request-handoff"]);
+  descriptor.contract.version.minor = 12;
+  descriptor.providers = [{ id:"vendor", name:"Vendor", protocols:["chat"] }];
+  assert.deepEqual(validateManifest(descriptor).contract, descriptor.contract);
+  for (const capability of ["request-policy", "outbound-executor"]) {
+    const incomplete = structuredClone(descriptor);
+    incomplete.contract.capabilities = incomplete.contract.capabilities.filter(value => value !== capability);
+    assert.throws(() => validateManifest(incomplete), /Request handoff requires/);
+  }
+  const result = handoffExecution("local-queue", "queue-timeout", "capacity exhausted", 5000);
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    status:429, outcome:"not-started",
+    refusal:{
+      step:"local-queue", evidence:"rejected-before-effect", rules:[], windows:[],
+      facts:{status:429, code:"queue-timeout", message:"capacity exhausted", retryAfterMs:5000,
+        operation:"provider.execute", phase:"admission", complete:true},
+    },
+  });
 });

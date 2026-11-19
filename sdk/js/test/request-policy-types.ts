@@ -1,4 +1,4 @@
-import { decideRequest, requestWithPolicy, refusedExecution, type Stream, type RequestRecoveryRequest,
+import { decideRequest, requestWithPolicy, refusedExecution, handoffExecution, type Stream, type RequestRecoveryRequest,
   type RequestRecoveryResult, type RequestPolicyHost } from "../index.js";
 declare const stream: Stream;
 declare const signal: AbortSignal;
@@ -11,6 +11,12 @@ void requestWithPolicy(signal,stream,"asset",new Request("https://fixture.invali
 
 const finalRefusal = refusedExecution(refusal, [{id:"free", models:["free"], retryAfterMs:42000}]);
 void finalRefusal.refusal?.windows?.[0].models;
+
+const handoff = handoffExecution("local-queue", "queue-timeout", "capacity exhausted", 5000);
+if (handoff.refusal) {
+  // @ts-expect-error Admission handoff is only a final executor result.
+  void decideRequest(signal, stream, handoff.refusal);
+}
 
 const permit: RequestRecoveryResult = {
   step: "asset", action: "wait", retry: true, reason: "retry", class: "transient-rate",

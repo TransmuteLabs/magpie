@@ -29,4 +29,4 @@ export { validateAgentBindingSnapshot, validateAgentBindingChange } from "./agen
 export { validateAgentModelMetadata } from "./agent-model-metadata.js";
 export { validateAgentDecisionModels } from "./agent-decision-models.js";
 export { isAccountOnlyProvider } from "./provider-policy.js";
-export { decideRequest, requestWithPolicy, refusedExecution } from "./request-policy.js";
+export { decideRequest, handoffExecution, requestWithPolicy, refusedExecution } from "./request-policy.js";

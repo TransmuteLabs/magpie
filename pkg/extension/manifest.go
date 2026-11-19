@@ -246,6 +246,9 @@ func (manifest Manifest) Validate() error {
 	if manifest.Contract.Has(RequestPolicy) && manifest.Contract.Version.Minor < 12 {
 		return fmt.Errorf("request policy requires SDK API 1.12")
 	}
+	if manifest.Contract.Has(RequestHandoff) && (!manifest.Contract.Has(RequestPolicy) || !manifest.Contract.Has(OutboundExecutor)) {
+		return fmt.Errorf("request handoff requires request policy and an outbound executor")
+	}
 	if err := ValidateSessionRelatedContract(manifest); err != nil {
 		return err
 	}

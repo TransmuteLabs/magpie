@@ -756,6 +756,12 @@ fences and does not advertise reactive authentication recovery. The
 [request-policy reference](../../docs/subsystems/request-policy.md) defines timing, windows,
 settings, Go/JS helpers and remaining boundaries.
 
+Executors that declare `request-handoff` can return `HandoffExecution` after
+local admission is exhausted before effects. Return it before emitting any
+execution event, with usage omitted. Magpie can try the next eligible candidate
+immediately within the request budget. The optional retry hint is returned when
+no candidate can serve.
+
 `DecideRequest` validates a granted retry before returning it: `Step` must
 match the exact valid named request, `Action` must be `wait`, and the request
 must carry complete response facts for `provider.execute`, `tool.call` or

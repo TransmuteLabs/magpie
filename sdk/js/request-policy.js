@@ -91,3 +91,13 @@ export function refusedExecution(failure, windows = []) {
     evidence: failure.evidence, windows,
   }};
 }
+
+export function handoffExecution(step, code, message, retryAfterMs) {
+  return refusedExecution({
+    step, evidence: "rejected-before-effect", rules: [],
+    facts: {
+      status: 429, code, message, retryAfterMs, operation: "provider.execute",
+      phase: "admission", complete: true,
+    },
+  });
+}

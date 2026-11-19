@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"time"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -38,50 +38,29 @@ func (selected Provider) ExtensionAvailability(model string, now time.Time) (req
 	return extensionAvailability.Blocked(selected.Account.extension.cacheKey(), selected.OwnModelID(model), now)
 }
 
-func (binding *extensionAccount) finalRequestRefusal(ctx context.Context, scope sdk.Scope, model string, result sdk.ExecuteResult, raw json.RawMessage, seenHead bool) (*requestpolicy.Refusal, error) {
-	if result.Refusal == nil {
-		return nil, nil
-	}
-	if binding.manifest.Contract.Version.Minor < 12 || !binding.manifest.Contract.Has(sdk.RequestPolicy) || result.Outcome != "not-started" || seenHead || extensionAttemptOf(ctx).Outcome(true) != nil {
-		return nil, errors.New("final refusal contradicted the execution boundary")
-	}
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || len(fields["refusal"]) > 128*1024 {
-		return nil, errors.New("invalid final refusal")
-	}
-	var final struct {
-		Step     string                 `json:"step"`
-		Facts    requestpolicy.Facts    `json:"facts"`
-		Rules    []requestpolicy.Rule   `json:"rules"`
-		Evidence string                 `json:"evidence"`
-		Windows  []requestpolicy.Window `json:"windows"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(fields["refusal"]))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&final) != nil || !sdk.ValidID(final.Step) || len(final.Step) > 128 || final.Facts.Status != result.Status || final.Facts.Operation != sdk.MethodProviderExecute || final.Facts.Phase != "response" || len(final.Windows) > 64 || len(final.Rules) > 64 {
-		return nil, errors.New("invalid final refusal facts")
-	}
-	if final.Evidence != "" && final.Evidence != "rejected-before-effect" {
-		return nil, errors.New("final execution refusal requires whole-operation rejection evidence")
-	}
-	selectedPolicy, err := requestpolicy.FromContext(ctx).PolicyFor(ExtensionProviderID(scope.Plugin, scope.Provider), model, "", requestpolicy.Defaults())
-	if err != nil {
+func (binding *extensionAccount) finalRequestRefusal(ctx context.Context, scope sdk.Scope, model string, result sdk.ExecuteResult, raw json.RawMessage, published bool) (*requestpolicy.Refusal, error) {
+	final, err := extensionhost.DecodeFinalExecutionRefusal(binding.manifest, result, raw, model, published || extensionAttemptOf(ctx).Outcome(true) != nil)
+	if err != nil || final == nil {
 		return nil, err
 	}
-	classification := selectedPolicy.ClassifyVendor(final.Facts, final.Rules)
+	var classification requestpolicy.Classification
+	handoff := final.Facts.Phase == "admission"
+	if handoff {
+		classification = requestpolicy.Classification{Class: requestpolicy.Rate, Scope: "request", Rule: "local-admission"}
+	} else {
+		selectedPolicy, err := requestpolicy.FromContext(ctx).PolicyFor(ExtensionProviderID(scope.Plugin, scope.Provider), model, "", requestpolicy.Defaults())
+		if err != nil {
+			return nil, err
+		}
+		classification = selectedPolicy.ClassifyVendor(final.Facts, final.Rules)
+	}
 	observed := time.Now()
 	refusal := &requestpolicy.Refusal{Classification: classification, Step: final.Step, Module: scope.Plugin, Provider: scope.Provider, Account: scope.Account, Generation: scope.Generation, Operation: scope.Operation, Attempt: scope.Attempt, Status: result.Status, Model: model, ObservedAt: observed,
+		Handoff:  handoff,
+		Windows:  final.Windows,
 		NoEffect: final.Evidence == "rejected-before-effect" && final.Facts.Complete && final.Facts.Validate() == nil && classification.Class != requestpolicy.Unknown && classification.Scope != "unknown"}
-	if final.Facts.Complete && final.Facts.Validate() == nil {
+	if !handoff && final.Facts.Complete && final.Facts.Validate() == nil {
 		refusal.Observation = requestpolicy.ObserveResponse(final.Facts.Status, final.Facts.Code, final.Facts.Type)
-	}
-	seen := map[string]bool{}
-	for _, window := range final.Windows {
-		if window.Validate() != nil || seen[window.ID] || !window.Applies(model) {
-			return nil, errors.New("invalid final refusal window applicability")
-		}
-		seen[window.ID] = true
-		refusal.Windows = append(refusal.Windows, window)
 	}
 	refusal.SetTiming(final.Facts)
 	if refusal.NoEffect {
@@ -134,7 +113,11 @@ func refusalStatus(refusal *requestpolicy.Refusal) int {
 	}
 }
 func refusalResponseBody(refusal *requestpolicy.Refusal) []byte {
-	body, _ := json.Marshal(map[string]any{"error": map[string]string{"type": string(refusal.Class), "code": refusal.Rule, "message": "Upstream refused the selected request (" + string(refusal.Class) + ")"}})
+	message := "Upstream refused the selected request (" + string(refusal.Class) + ")"
+	if refusal.Handoff {
+		message = "Selected route exhausted local admission capacity"
+	}
+	body, _ := json.Marshal(map[string]any{"error": map[string]string{"type": string(refusal.Class), "code": refusal.Rule, "message": message}})
 	return body
 }
 

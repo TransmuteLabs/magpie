@@ -1092,9 +1092,13 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if effect {
 		state := "completed"
 		var declared struct {
-			Outcome string `json:"outcome"`
+			Outcome string          `json:"outcome"`
+			Refusal json.RawMessage `json:"refusal"`
 		}
 		if method != sdk.MethodModuleCall && !sdk.IsGatewayMethod(method) && err == nil && json.Unmarshal(result, &declared) == nil {
+			if method == sdk.MethodProviderExecute && len(declared.Refusal) > 0 && !bytes.Equal(declared.Refusal, []byte("null")) {
+				err = checkFinalExecutionRefusal(ctx, manifest, result)
+			}
 			switch declared.Outcome {
 			case "accepted", "uncertain":
 				err = &OutcomeError{Outcome: "uncertain", Cause: errors.New("extension left an operation unfinished")}

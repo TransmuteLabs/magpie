@@ -160,9 +160,20 @@ its effects, return `ExecuteResult.refusal` using
 `RefusedExecution`/`refusedExecution`, with fresh step/facts/rules/evidence and
 optional windows. The host checks API negotiation, the original selected scope,
 `outcome: not-started`, matching response status and absence of accepted/output
-publication. Invalid or contradictory final results fail closed. The existing
-accepted/uncertain/completed fence runs before the new routing decision; its
-409 and no-replay behavior are preserved.
+publication before recording `not-started` in the operation journal. An
+invalid or contradictory refusal leaves an `uncertain` receipt. A repeat that
+reaches the same operation identity stops at that receipt before fallback.
+The accepted/uncertain/completed fence returns 409 before routing can continue.
+
+An outbound executor can also negotiate `request-handoff` alongside
+`request-policy` to report exhausted local admission with
+`HandoffExecution`/`handoffExecution`. This final `429` has phase `admission`,
+whole-execution rejection evidence, and no usage, vendor rules or availability
+windows. The gateway tries the next eligible candidate immediately within the
+existing dispatch budget. When no candidate can be dispatched it returns the
+refusal and optional client retry hint. Local admission creates neither an
+upstream failure observation nor an account cooldown. Host versions that lack
+the capability reject modules that require it during manifest validation.
 
 The common selector distinguishes bounded same-account waiting, moving to the
 next already eligible candidate, and terminal refusal. Request/content refusal

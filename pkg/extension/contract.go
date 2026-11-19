@@ -27,7 +27,7 @@ func FullContract() Contract {
 		Version: APIVersion{Major: 1, Minor: 15},
 		Capabilities: []Capability{
 			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
-			UsageReporter, OperationControl, ToolProvider, SessionMigration, SessionRelatedInputs, AgentProcess, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware, RequestPolicy, RequestObserver, BudgetPolicy, MaskingRules,
+			UsageReporter, OperationControl, ToolProvider, SessionMigration, SessionRelatedInputs, AgentProcess, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware, RequestPolicy, RequestHandoff, RequestObserver, BudgetPolicy, MaskingRules,
 		},
 	}
 }

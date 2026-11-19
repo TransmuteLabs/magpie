@@ -240,6 +240,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	go func() {
 		defer close(responseBody.done)
 		seenHead := false
+		published := false
 		responseStatus := 0
 		finish := func(err error) {
 			extensionOutcome(ctx, err)
@@ -250,6 +251,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			_ = writer.CloseWithError(err)
 		}
 		raw, err := binding.host.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope, params, func(event extensionhost.Event) error {
+			published = true
 			switch event.Name {
 			case "headers":
 				var value sdk.HeadersEvent
@@ -297,7 +299,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			finish(&extensionhost.OutcomeError{Outcome: "uncertain", Cause: errors.New("invalid extension execution totals or status")})
 			return
 		}
-		refusal, refusalErr := binding.finalRequestRefusal(ctx, scope, model, result, raw, seenHead)
+		refusal, refusalErr := binding.finalRequestRefusal(ctx, scope, model, result, raw, published)
 		if refusalErr != nil {
 			finish(&extensionhost.OutcomeError{Outcome: "uncertain", Cause: refusalErr})
 			return

@@ -1,12 +1,14 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -63,6 +65,75 @@ func observeRequestOutput(ctx context.Context, event Event) {
 		invocation.output = true
 		invocation.mu.Unlock()
 	}
+}
+
+type ExecutionRefusal struct {
+	Step     string                 `json:"step"`
+	Facts    requestpolicy.Facts    `json:"facts"`
+	Rules    []requestpolicy.Rule   `json:"rules"`
+	Evidence string                 `json:"evidence"`
+	Windows  []requestpolicy.Window `json:"windows"`
+}
+
+func checkFinalExecutionRefusal(ctx context.Context, manifest sdk.Manifest, raw json.RawMessage) error {
+	var result sdk.ExecuteResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return errors.New("invalid final execution result")
+	}
+	var model string
+	var published bool
+	if invocation, ok := ctx.Value(requestPolicyKey{}).(*requestPolicyInvocation); ok {
+		invocation.mu.Lock()
+		model, published = invocation.model, invocation.output
+		invocation.mu.Unlock()
+	}
+	_, err := DecodeFinalExecutionRefusal(manifest, result, raw, model, published)
+	return err
+}
+
+// DecodeFinalExecutionRefusal checks the same boundary for journal completion
+// and route disposition. Classification and availability publication belong to
+// the provider bridge.
+func DecodeFinalExecutionRefusal(manifest sdk.Manifest, result sdk.ExecuteResult, raw json.RawMessage, model string, published bool) (*ExecutionRefusal, error) {
+	if result.Refusal == nil {
+		return nil, nil
+	}
+	if manifest.Contract.Version.Minor < 12 || !manifest.Contract.Has(sdk.RequestPolicy) || result.Outcome != "not-started" || published {
+		return nil, errors.New("final refusal contradicted the execution boundary")
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields["refusal"]) > 128*1024 {
+		return nil, errors.New("invalid final refusal")
+	}
+	var final ExecutionRefusal
+	decoder := json.NewDecoder(bytes.NewReader(fields["refusal"]))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&final) != nil || !sdk.ValidID(final.Step) || final.Facts.Status != result.Status ||
+		final.Facts.Operation != sdk.MethodProviderExecute || len(final.Windows) > 64 || len(final.Rules) > 64 {
+		return nil, errors.New("invalid final refusal facts")
+	}
+	if final.Evidence != "" && final.Evidence != "rejected-before-effect" {
+		return nil, errors.New("final execution refusal requires whole-operation rejection evidence")
+	}
+	switch final.Facts.Phase {
+	case "admission":
+		if !manifest.Contract.Has(sdk.RequestHandoff) || final.Facts.Status != http.StatusTooManyRequests ||
+			final.Evidence != "rejected-before-effect" || !final.Facts.Complete || final.Facts.Validate() != nil ||
+			len(final.Windows) != 0 || len(final.Rules) != 0 || result.Usage != nil {
+			return nil, errors.New("invalid local admission handoff")
+		}
+	case "response":
+	default:
+		return nil, errors.New("invalid final refusal phase")
+	}
+	seen := map[string]bool{}
+	for _, window := range final.Windows {
+		if window.Validate() != nil || seen[window.ID] || !window.Applies(model) {
+			return nil, errors.New("invalid final refusal window applicability")
+		}
+		seen[window.ID] = true
+	}
+	return &final, nil
 }
 
 func (m *Manager) checkRequestPolicy(ctx context.Context, invocation *requestPolicyInvocation) error {

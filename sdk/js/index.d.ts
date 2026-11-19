@@ -43,7 +43,7 @@ export function validateAccountCheckinResult(value: unknown): AccountCheckinResu
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
 export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
-  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "budget-policy" | "masking-rules";
+  | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "request-handoff" | "budget-policy" | "masking-rules";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
   | "provider.usage" | "provider.calls" | "auth.start" | "auth.finish" | "auth.refresh" | "auth.logout" | "operation.status"
   | "operation.cancel" | "tool.call" | "agent.plan" | "agent.inspect" | "session.convert" | "session.source.read" | "module.call"
@@ -74,8 +74,13 @@ export interface RequestRecoveryRequest {
 export interface RequestFailureWindow {
  id: string; models?: string[]; notModels?: string[]; retryAfterMs?: number; resetAt?: string;
 }
-export interface RequestRefusal extends RequestRecoveryRequest { windows?: RequestFailureWindow[] }
+export interface RequestRefusal extends Omit<RequestRecoveryRequest, "facts"> {
+  facts: RequestFailureFacts | (Omit<RequestFailureFacts, "phase"> & { phase: "admission" });
+  windows?: RequestFailureWindow[];
+}
 export function refusedExecution(failure: RequestRecoveryRequest, windows?: RequestFailureWindow[]): ExecuteResult;
+/** Report exhausted local admission before effects. The hint is returned only if no route is ready. */
+export function handoffExecution(step: string, code: string, message: string, retryAfterMs?: number): ExecuteResult;
 export interface RequestRecoveryResult {
  step: string; action: "wait" | "next-account" | "terminal";
  totalRetries: number; providerRetries: number;
