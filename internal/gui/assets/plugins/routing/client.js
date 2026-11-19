@@ -5614,9 +5614,11 @@ function routingPage(part) {
     + "</g></g>";
 
   function bird(kind) {
-    if (still() || !shown()) return null;
+    if (!shown()) return null;
     const g = document.createElementNS(NS, "g");
-    g.setAttribute("class", "rt-flier " + kind);
+    // with motion reduced the magpie doesn't fly or beat its wings: it fades
+    // in where the dot is put and fades out (routing.css .calm)
+    g.setAttribute("class", "rt-flier " + kind + (still() ? " calm" : ""));
     g.innerHTML = FLIER;
     sky.appendChild(g);
     return g;
@@ -5624,8 +5626,10 @@ function routingPage(part) {
   // off it goes, up and away, once it has let go of the dot
   function away(b) {
     if (!b) return;
-    b.classList.add("away");
-    setTimeout(() => b.remove(), 450);
+    // a calm one has been put down, not flown: it stays a while to be seen
+    const wait = b.classList.contains("calm") ? 700 : 0;
+    setTimeout(() => b.classList.add("away"), wait);
+    setTimeout(() => b.remove(), wait + 450);
   }
   function packet() {
     const dot = document.createElementNS(NS, "circle");
@@ -8733,7 +8737,9 @@ function routingPage(part) {
       // only what holds the rules back is said in a line: how they work is
       // under the ⓘ beside Add a rule
       rHint2.textContent = d.members.length < 2 ? t("With two models or more, a rule can send some turns to one of them first.")
-        : d.routing === "manual" ? t("The rules wait while you pick the model by hand.") : "";
+        : d.routing === "manual" ? t("The rules wait while you pick the model by hand.")
+        : none ? (d.routing ? t("No rules: the members go by the routing set under Advanced, {mode}; if one fails, the next takes over.", { mode: t((GROUP_ROUTE_OPTS.find((o) => o[0] === d.routing) || ["", d.routing])[1]) })
+          : t("No rules: Smart routing. The member whose allowance renews soonest goes first, ties in the listed order; if it fails, the next takes over.")) : "";
       rHint2.hidden = !rHint2.textContent;
       let focus = null;
       d.rules.forEach((r, i) => {
