@@ -177,7 +177,9 @@ clones retain independent policy; private service manifests gain no account
 renewal authority.
 
 [`KeepExtensionsSignedIn`](../../internal/provider/extension_keepalive.go)
-starts only after the ordinary gateway listener binds and joins on shutdown.
+starts after the ordinary gateway listener binds and acquires the config
+folder's serving lock. Shutdown joins the renewal worker before releasing
+that lock, while the listener drains separately.
 Catalog inspection starts no worker or Bun, including with empty catalogs.
 Only enabled providers and ordinarily listed, enabled, visible, nonpaused,
 nonlapsed accounts with known expiry are eligible. Discovery off and failed
