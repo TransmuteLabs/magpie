@@ -792,9 +792,12 @@ and summaries without decoding their contents. Claude-format readers keep
 text beside tool results, and the next refresh rebuilds affected old-format
 index rows. Codex checks the payload's own type before decoding a message.
 The SQLite readers skip decoding tool state, and Cursor walks stored blobs
-one message at a time. Full transcripts and search within a session also
-read tool parts. Delegated SDK readers still return a bounded transcript to
-the host, which selects conversation text after receiving it.
+one message at a time. WorkBuddy, WorkBuddy AI and CodeBuddy use the same
+selected history owner for transcripts, memory learning and indexing.
+Their native index reader reads conversation messages alone. Full transcripts
+and search within a session also read tool parts. Delegated SDK readers
+still return a bounded transcript to the host, which selects conversation
+text after receiving it.
 A search waits for the index at most 2 s
 (`saidWait`) and is otherwise answered from what is indexed, saying
 `indexed` of `total`; while the first listing of the sessions is still

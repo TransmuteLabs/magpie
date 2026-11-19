@@ -216,6 +216,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		RedactRouteTo:        "fake/m1",
 	}
 	was.RedactModelOff, was.RedactModelAuto = true, true
+	was.RedactModelDir = filepath.Join(h, "redact-models")
 	was.DesktopSubagentEffort = "high"
 	was.DesktopIsolatedClaude, was.DesktopIsolatedClaudeChosen = true, true
 	was.ReplyModel = settings.ReplyMember // memberModel, its mirror, is kept with it
