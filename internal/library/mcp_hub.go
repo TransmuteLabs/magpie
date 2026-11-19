@@ -169,13 +169,31 @@ func (l *Library) hubFor(t *Target, a *Applied, entries map[string]map[string]an
 	if l.server(HubEntry) != nil {
 		return nil, hubTaken
 	}
-	if _, ok := entries[HubEntry]; ok && !slices.Contains(a.MCP, HubEntry) {
+	if _, ok := entries[HubEntry]; ok && !slices.Contains(a.MCP, HubEntry) && !l.sharerWrote(t, HubEntry) {
 		return nil, hubOwn
 	}
 	if err := t.MCP.foreign(entries[HubEntry]); err != nil {
 		return nil, hubOwn
 	}
 	return hs, ""
+}
+
+// sharerWrote is whether another agent reading the very file t does has
+// name down as written by magpie: Antigravity and agy share
+// ~/.gemini/config/mcp_config.json, and the entry the one wrote there is
+// magpie's for the other too, not a server of the user's own
+// (izhidigua on X).
+func (l *Library) sharerWrote(t *Target, name string) bool {
+	id := t.Agent.ID
+	for other, a := range l.Applied {
+		if other == id || a == nil || !slices.Contains(a.MCP, name) {
+			continue
+		}
+		if o := targetByID(other); o != nil && o.MCP != nil && o.MCP.Path == t.MCP.Path {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- what the gateway asks -------------------------------------------------
@@ -208,8 +226,12 @@ func hubServers(agentID string) []*Server {
 func (l *Library) hubServers(agentID string) []*Server {
 	id, key, scoped := strings.Cut(agentID, gateway.HubProjectSep)
 	var p *Project
+	var given map[string][]string // the project's servers, its plugins' too
 	if scoped {
 		p = l.projectByKey(key)
+	}
+	if p != nil {
+		_, given, _ = l.withPlugins(p)
 	}
 	var out []*Server
 	for _, s := range l.MCP {
@@ -217,7 +239,7 @@ func (l *Library) hubServers(agentID string) []*Server {
 		if p != nil {
 			if slices.Contains(p.ServersOff[s.Name], id) {
 				on = false
-			} else if !s.Hidden && slices.Contains(p.Servers[s.Name], id) {
+			} else if !s.Hidden && slices.Contains(given[s.Name], id) {
 				on = true
 			}
 		}

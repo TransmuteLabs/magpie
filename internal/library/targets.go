@@ -1088,17 +1088,11 @@ func selectTargets(gone bool, has func(string) bool) (out []*Target, asleep []*a
 	return out, asleep, held
 }
 
-// hasTarget keeps a gone local target listed only while the Library gives it
-// something or remembers an applied resource. Selection is shared with active
-// targets; cleanup never rediscovers another location under the same ID.
+// hasTarget keeps a gone local target listed while the Library records
+// resources written here. Cleanup uses the same canonical target as writes.
 func (l *Library) hasTarget(id string) bool {
-	if a := l.Applied[id]; a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0 || len(a.Env) > 0 || a.Router || len(a.RouterRules) > 0) {
-		return true
-	}
-	return slices.ContainsFunc(l.Skills, func(s *Skill) bool { return s.gives(id) }) ||
-		slices.ContainsFunc(l.MCP, func(s *Server) bool { return slices.Contains(s.Agents, id) }) ||
-		slices.ContainsFunc(l.Hooks, func(h *Hook) bool { return slices.Contains(h.Agents, id) }) ||
-		slices.ContainsFunc(l.Env, func(e *EnvVar) bool { return slices.Contains(e.Agents, id) })
+	a := l.Applied[id]
+	return a != nil && (len(a.Skills) > 0 || len(a.MCP) > 0 || len(a.Hooks) > 0 || len(a.Env) > 0 || a.Router || len(a.RouterRules) > 0)
 }
 
 // junctionBlind are the agents that, on Windows, skip a junction in a
