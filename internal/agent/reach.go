@@ -200,12 +200,32 @@ func magpieAsked(base string) {
 
 var reach struct {
 	sync.Mutex
-	m map[string]reachAnswer
+	m    map[string]reachAnswer
+	next uint64
 }
 
 type reachAnswer struct {
-	at       time.Time // when the last probe finished; zero: none yet
-	ok, busy bool
+	at      time.Time // when the last probe finished; zero: none yet
+	ok      bool
+	pending uint64
+}
+
+func startReachProbe(key string, answer reachAnswer) uint64 {
+	if reach.m == nil {
+		reach.m = make(map[string]reachAnswer)
+	}
+	reach.next++
+	answer.pending = reach.next
+	reach.m[key] = answer
+	return answer.pending
+}
+
+func finishReachProbe(key string, pending uint64, ok bool) {
+	reach.Lock()
+	defer reach.Unlock()
+	if reach.m[key].pending == pending {
+		reach.m[key] = reachAnswer{at: time.Now(), ok: ok}
+	}
 }
 
 // reachable is what the last probe of base said, and whether there is one
@@ -222,19 +242,10 @@ func reachable(base string) (ok, known bool) {
 func probed(key string, probe func() bool) (ok, known bool) {
 	reach.Lock()
 	defer reach.Unlock()
-	if reach.m == nil {
-		reach.m = map[string]reachAnswer{}
-	}
 	a := reach.m[key]
-	if !a.busy && time.Since(a.at) > reachAge {
-		a.busy = true
-		reach.m[key] = a
-		go func() {
-			ok := probe()
-			reach.Lock()
-			reach.m[key] = reachAnswer{at: time.Now(), ok: ok}
-			reach.Unlock()
-		}()
+	if a.pending == 0 && time.Since(a.at) > reachAge {
+		pending := startReachProbe(key, a)
+		go func() { finishReachProbe(key, pending, probe()) }()
 	}
 	return a.ok, !a.at.IsZero()
 }
@@ -244,17 +255,14 @@ func probed(key string, probe func() bool) (ok, known bool) {
 func probedNow(key string, probe func() bool) bool {
 	reach.Lock()
 	a := reach.m[key]
-	reach.Unlock()
 	if !a.at.IsZero() && time.Since(a.at) <= reachAge {
+		reach.Unlock()
 		return a.ok
 	}
-	ok := probe()
-	reach.Lock()
-	if reach.m == nil {
-		reach.m = map[string]reachAnswer{}
-	}
-	reach.m[key] = reachAnswer{at: time.Now(), ok: ok}
+	pending := startReachProbe(key, a)
 	reach.Unlock()
+	ok := probe()
+	finishReachProbe(key, pending, ok)
 	return ok
 }
 

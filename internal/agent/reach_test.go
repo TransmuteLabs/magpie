@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -39,7 +40,7 @@ func reachForget() {
 		reach.Lock()
 		busy := false
 		for _, r := range reach.m {
-			busy = busy || r.busy
+			busy = busy || r.pending != 0
 		}
 		if !busy {
 			reach.m = nil
@@ -51,6 +52,48 @@ func reachForget() {
 	panic("a reach probe never answered")
 }
 
+func TestReachProbeDoesNotReplaceNewAnswer(t *testing.T) {
+	reachForget()
+	t.Cleanup(reachForget)
+	synctest.Test(t, func(t *testing.T) {
+		const key = "old reach probe"
+		release := make(chan struct{})
+		probed(key, func() bool { <-release; return false })
+		synctest.Wait()
+
+		if !probedNow(key, func() bool { return true }) {
+			t.Error("the waited probe did not answer")
+		}
+		close(release)
+		synctest.Wait()
+
+		if ok, known := probed(key, func() bool { return false }); !ok || !known {
+			t.Errorf("late background probe replaced the waited answer: ok=%t known=%t", ok, known)
+		}
+	})
+}
+
+func TestReachProbeDoesNotPublishAfterReset(t *testing.T) {
+	reachForget()
+	t.Cleanup(reachForget)
+	synctest.Test(t, func(t *testing.T) {
+		const key = "reset reach probe"
+		release := make(chan struct{})
+		probed(key, func() bool { <-release; return false })
+		synctest.Wait()
+
+		reach.Lock()
+		reach.m = nil
+		reach.Unlock()
+		close(release)
+		synctest.Wait()
+
+		if ok, known := probed(key, func() bool { return true }); known {
+			t.Errorf("a probe started before the reset answered the new cache: ok=%t", ok)
+		}
+	})
+}
+
 // driftSettled is the agent's drift once the probes it starts have
 // answered: the first ask only starts them.
 func driftSettled(t *testing.T, a *Agent) *Drift {
@@ -60,7 +103,7 @@ func driftSettled(t *testing.T, a *Agent) *Drift {
 		reach.Lock()
 		busy := false
 		for _, r := range reach.m {
-			busy = busy || r.busy
+			busy = busy || r.pending != 0
 		}
 		reach.Unlock()
 		if !busy {

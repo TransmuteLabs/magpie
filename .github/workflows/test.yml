@@ -77,6 +77,22 @@ jobs:
         with:
           bun-version: 1.4.2
 
+      - name: Prepare offline SDK integration builds
+        if: runner.os != 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PART: ${{ matrix.part }}
+        run: |
+          for key in GOPATH GOMODCACHE GOCACHE; do
+            echo "$key=$(go env "$key")" >> "$GITHUB_ENV"
+          done
+          go list -mod=readonly -tags nogui -deps . ./examples/extensions/echo-native ./examples/extensions/hybrid-go/... >/dev/null
+          if [ "$PART" != gateway ]; then
+            npm install --global --prefix "$RUNNER_TEMP/sdk-tools" --ignore-scripts --no-audit --no-fund typescript@7.0.2
+            echo "$RUNNER_TEMP/sdk-tools/bin" >> "$GITHUB_PATH"
+          fi
+
       # A step cap: on 0dbdc7481's macOS run internal/library printed
       # nothing for 44 minutes past go test's own -timeout 30m (no panic, no
       # stack, #5267), and main's later runs queued behind it until it was

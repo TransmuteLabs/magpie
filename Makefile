@@ -126,7 +126,7 @@ release: clean build-release
 	@cp magpie dist/magpie-$(shell go env GOOS)-$(shell go env GOARCH)
 	@$(MAKE) --no-print-directory release-cli
 
-release-cli: assets-pack conpty-pair
+release-cli: assets-pack $(if $(filter windows/%,$(TARGETS)),conpty-pair)
 	@mkdir -p dist
 	@$(OVERLAY) for t in $(TARGETS); do \
 		os=$${t%/*}; arch=$${t#*/}; ext=""; [ $$os = windows ] && ext=.exe; \

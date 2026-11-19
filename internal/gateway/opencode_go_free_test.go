@@ -1,9 +1,11 @@
 package gateway
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -164,11 +166,18 @@ func TestOpenCodeGoOwnFreeModelGetsNothingOfOpenCodes(t *testing.T) {
 			t.Fatalf("Go's own free model was sent %q: %s", not, a[0].body)
 		}
 	}
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("TMP", tmp)
+	preferred, _ := json.Marshal("Prefer " + filepath.Join(tmp, "opencode"))
 	if rec := goClaudeAsk(s, "go/glm-5-free"); rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	a = asked()
-	if len(a) != 3 || !strings.Contains(a[2].body, "Prefer /tmp/opencode") || !strings.Contains(a[2].body, provider.OpenCodeStub) {
+	if len(a) != 3 || !strings.Contains(a[2].body, string(preferred[1:len(preferred)-1])) || !strings.Contains(a[2].body, provider.OpenCodeStub) {
 		t.Fatalf("Zen's free model at Zen: %+v", a)
 	}
 }

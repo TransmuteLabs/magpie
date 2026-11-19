@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/testenv"
 	"github.com/yetone/magpie/internal/update"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -34,6 +35,9 @@ func launchAgentFixture(t *testing.T, descriptor sdk.AgentDescriptor) (*extensio
 	host := installAgentActionFixture(t, descriptor)
 	home, _ := os.UserHomeDir()
 	t.Setenv("SHELL", "/bin/bash")
+	if runtime.GOOS != "windows" {
+		testenv.Program(t, filepath.Join(home, ".local", "bin", "zsh"), "#!/bin/sh\nexit 1\n")
+	}
 	for _, name := range []string{".bashrc", ".bash_profile", ".zshrc"} {
 		if err := os.WriteFile(filepath.Join(home, name), []byte("# personal\n"), 0o600); err != nil {
 			t.Fatal(err)

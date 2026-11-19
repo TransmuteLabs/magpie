@@ -76,7 +76,7 @@ func closedPort(t *testing.T) string {
 
 // A plugin's request goes through a SOCKS5 proxy, as a built-in's does,
 // though Bun can't use one itself; and a proxy that is down, SOCKS or
-// HTTP, is said as Go's transport says it ("proxyconnect …"), so the
+// HTTP, is identified in the failure, so the
 // gateway asks the next account and rests none, as for a built-in's.
 func TestPluginSOCKSProxy(t *testing.T) {
 	sandbox(t)
@@ -120,18 +120,18 @@ func TestPluginSOCKSProxy(t *testing.T) {
 			t.Fatalf("%s through %s, which is down: %q, %v; want it to say %q", x.url, x.proxy, b, err, x.says)
 		}
 	}
-	// An HTTP request receives the bridge's 502. For HTTPS, Go's CONNECT
-	// transport returns that refusal as a proxyconnect error instead of a
-	// response. Both must identify the chosen SOCKS proxy, so the gateway
-	// treats the failure as the proxy's rather than resting an account.
+	// Bun can return the bridge's 502 after a failed CONNECT. The Go
+	// transport describes the same refusal as a proxyconnect error.
 	failure := "socks connect tcp " + strings.TrimPrefix(deadSOCKS, "socks5://") + "->"
 	if code, b, err := fetch(deadSOCKS, "http://vendor.invalid/v1/chat/completions"); err != nil ||
 		code != 502 || !strings.HasPrefix(b, failure) {
 		t.Fatalf("HTTP through a SOCKS proxy that is down: %d %q, %v", code, b, err)
 	}
-	if code, b, err := fetch(deadSOCKS, "https://vendor.invalid/v1/chat/completions"); err == nil ||
-		code != 0 || b != "" || !strings.Contains(err.Error(), "proxyconnect tcp: 502 Bad Gateway:") ||
-		!strings.Contains(err.Error(), failure) {
+	code, b, err := fetch(deadSOCKS, "https://vendor.invalid/v1/chat/completions")
+	bridgeRefusal := err == nil && code == http.StatusBadGateway && strings.HasPrefix(b, failure)
+	connectError := err != nil && code == 0 && b == "" &&
+		strings.Contains(err.Error(), "proxyconnect tcp: 502 Bad Gateway:") && strings.Contains(err.Error(), failure)
+	if !bridgeRefusal && !connectError {
 		t.Fatalf("HTTPS CONNECT through a SOCKS proxy that is down: %d %q, %v", code, b, err)
 	}
 }
