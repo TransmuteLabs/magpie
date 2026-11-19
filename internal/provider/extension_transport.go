@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/netproxy"
@@ -40,9 +41,19 @@ type extensionResponseBody struct {
 	closeErr         error
 	mu               sync.Mutex
 	usage            *sdk.Usage
+	sentModel        string
 }
 
 const extensionReceiptGrace = 2 * time.Second
+
+func ExtensionSentModel(response *http.Response) string {
+	if response.Request != nil {
+		if body, ok := response.Request.Context().Value(extensionResponseKey{}).(*extensionResponseBody); ok {
+			return body.sentModel
+		}
+	}
+	return ""
+}
 
 func (body *extensionResponseBody) ExtensionProtocolComplete() {
 	body.protocolComplete.Store(true)
@@ -293,7 +304,9 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		}
 		if refusal != nil {
 			seenHead = true
-			head <- extensionResponseHead{headers: sdk.HeadersEvent{Status: refusalStatus(refusal), Headers: http.Header{"Content-Type": {"application/json"}}}, observation: &refusal.Observation}
+			head <- extensionResponseHead{headers: sdk.HeadersEvent{
+				Status: refusalStatus(refusal), Headers: http.Header{"Content-Type": {"application/json"}}, SentModel: result.SentModel,
+			}, observation: &refusal.Observation}
 			_, writeErr := writer.Write(refusalResponseBody(refusal))
 			finish(writeErr)
 			return
@@ -314,7 +327,9 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 				return
 			}
 			seenHead = true
-			head <- extensionResponseHead{headers: sdk.HeadersEvent{Status: result.Status, Headers: result.Headers}}
+			head <- extensionResponseHead{headers: sdk.HeadersEvent{
+				Status: result.Status, Headers: result.Headers, SentModel: result.SentModel,
+			}}
 		}
 		finish(nil)
 	}()
@@ -330,6 +345,17 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		}
 		headers.Del("Content-Length")
 		headers.Del("Content-Encoding")
+		for name := range headers {
+			if strings.EqualFold(name, SentModelHeader) {
+				delete(headers, name)
+			}
+		}
+		if model := value.headers.SentModel; len(model) <= 200 &&
+			!strings.ContainsFunc(model, func(char rune) bool {
+				return unicode.IsSpace(char) || unicode.IsControl(char) || char == unicode.ReplacementChar
+			}) {
+			responseBody.sentModel = model
+		}
 		responseContext := context.WithValue(request.Context(), extensionResponseKey{}, responseBody)
 		if value.observation != nil {
 			responseContext = context.WithValue(responseContext, extensionRefusalResponseKey{}, *value.observation)

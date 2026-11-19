@@ -16,6 +16,7 @@ import (
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
 )
@@ -73,8 +74,20 @@ func main() {
 			if err != nil {
 				return nil, err
 			}
-			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: 200,
-				Headers: http.Header{"Content-Type": {"application/json"}}}); err != nil {
+			headers := sdk.HeadersEvent{Status: 200, Headers: http.Header{"Content-Type": {"application/json"}}}
+			switch request.Model {
+			case "wire-variant":
+				headers.SentModel = "vendor/wire-variant-high"
+			case "wire-matching":
+				headers.SentModel = request.Model
+			case "wire-invalid":
+				headers.SentModel = "invalid variant"
+			}
+			if request.Model == "wire-spoof" || request.Model == "wire-variant" {
+				headers.Headers.Set("X-Magpie-Sent-Model", "vendor-untrusted")
+				headers.Headers["x-magpie-sent-model"] = []string{"vendor-untrusted-lowercase"}
+			}
+			if err := stream.Emit(ctx, "headers", headers); err != nil {
 				return nil, err
 			}
 			if err := stream.Emit(ctx, "data", body); err != nil {
@@ -239,6 +252,48 @@ func TestSDKCanonicalCallerThroughFront(t *testing.T) {
 	if callers[0] != callers[1] || callers[0] != callers[2] || callers[0] == callers[3] ||
 		callers[4] != callers[5] || callers[4] == callers[0] || callers[4] == callers[3] {
 		t.Fatalf("trusted caller identity did not remain stable and isolated: %v", callers)
+	}
+}
+
+func TestSDKEffectiveModelReachesRouteAndLedger(t *testing.T) {
+	id := installCanonicalExtensionFixture(t, "wire-variant", "wire-matching", "wire-spoof", "wire-invalid")
+	server := New()
+	t.Cleanup(server.idle.stop)
+	handler := server.Front()
+	expected := map[string]string{
+		"wire-variant":  "vendor/wire-variant-high",
+		"wire-matching": "",
+		"wire-spoof":    "",
+		"wire-invalid":  "",
+	}
+	for model, wire := range expected {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+			`{"model":"`+id+`/`+model+`","messages":[{"role":"user","content":"hello"}]}`))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		execution := readCanonicalExecution(t, response)
+		if execution.Request.Model != model {
+			t.Errorf("the SDK received %q, want %q", execution.Request.Model, model)
+		}
+		for header := range response.Header() {
+			if strings.EqualFold(header, provider.SentModelHeader) {
+				t.Errorf("%s leaked an internal header: %s", model, header)
+			}
+		}
+		if tries := lastRoute(server).Tries; len(tries) != 1 || tries[0].Wire != wire {
+			t.Errorf("%s: routing trace should keep %q, got %+v", model, wire, tries)
+		}
+	}
+	rows := usage.Load(time.Time{})
+	if len(rows) != len(expected) {
+		t.Fatalf("have %d ledger records, want %d", len(rows), len(expected))
+	}
+	for _, row := range rows {
+		if wire, ok := expected[row.Model]; !ok || row.Wire != wire {
+			t.Errorf("unexpected ledger record model=%q wire=%q", row.Model, row.Wire)
+		}
 	}
 }
 

@@ -294,9 +294,9 @@ type rowChunk struct {
 // rowMsg is the Text of a row's Claude message id, after rowText's, and
 // rowError its error's
 const (
-	rowMsg          = 37
+	rowMsg          = 38
 	rowError        = 9
-	rowReportedCost = 38
+	rowReportedCost = 39
 	rowUpstreamID   = 36
 	rowResponseAt   = 3
 	rowExecutionTag = uint32(1 << 31)
@@ -304,7 +304,7 @@ const (
 	// it as another agent (Row.Client, #1958)
 	rowClient = 33
 	// rowTexts is how many strings a row has: rowText's and the message id
-	rowTexts = 39
+	rowTexts = 40
 )
 
 // rowVaried are the strings that differ call by call: the error, the
@@ -395,8 +395,8 @@ func (c *rowChunk) shape(t [rowTexts]uint32) uint32 {
 // reason ("Upstream stop reason", #1927) and the service tiers (#1784)
 // among them: a string left out comes back empty from the cache, in the
 // page and in /v1/magpie/usage/requests (TestRowTextHoldsEveryString)
-func rowText(r *Row) [37]*string {
-	return [37]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP, &r.UpstreamResponseID}
+func rowText(r *Row) [rowMsg]*string {
+	return [rowMsg]*string{&r.Agent, &r.Provider, &r.Host, &r.SessionProvider, &r.SessionAccount, &r.Model, &r.Requested, &r.Served, &r.Effort, &r.Error, &r.ErrType, &r.RequestID, &r.Endpoint, &r.Session, &r.NativeSession, &r.Kind, &r.Source, &r.Via, &r.ProviderKeyID, &r.ProviderKeyName, &r.CallerKeyID, &r.CallerKeyName, &r.Archive, &r.Operation, &r.ProviderAccount, &r.ResponseID, &r.Upstream, &r.Subagent, &r.ParentAgent, &r.Stop, &r.TierAsked, &r.TierSent, &r.TierServed, &r.Client, &r.CallerIssuerID, &r.ClientIP, &r.UpstreamResponseID, &r.Wire}
 }
 func (c *rowChunk) add(r Row, msg string, order int64, failed bool) {
 	if c.dict == nil {

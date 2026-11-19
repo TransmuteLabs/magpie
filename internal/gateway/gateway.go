@@ -3718,6 +3718,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	sent := ""       // the reasoning the last try's model was asked for
 	wentAt := ""     // and the level that went, once translated (wireEffort, #1636)
 	wentTier := ""   // the service tier the last try went out at (noteWireTier, #1784)
+	wentAs := ""     // the model id the last try went out under, when another than its model (wireName)
 	where := ""      // the last try's provider.Where, for the usage
 	again := 0       // times the last one left has been tried again
 	planAgain := 0   // times a group's member was asked again in place for the Qwen Token Plan's concurrency 429 (qwenPlanBusy)
@@ -4887,6 +4888,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Reset, resetFirst = resetFirst, nil
 		}
 		asName := provider.SentNameOnIn(wiresOf(r.Context()), c.p.ID, accountAgent(c.p), c.model, sent)
+		wentAs = wireName(c.model, at.model, asName)
+		try.Wire = wentAs
 		try.Entry, try.EntryWhy = entryOf()
 		try.Swapped, try.Routed = swapped(asName, call.Usage.Served) && !usage.ListedAs(c.p.ID, c.model, call.Usage.Served), usage.GroupRouted(asName, call.Usage.Served)
 		try.TTFT, try.FirstText = hw.first.ms()
@@ -4920,7 +4923,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
 				ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
-				Requested: call.Model, Served: call.Usage.Served, Upstream: call.Usage.Upstream,
+				Requested: call.Model, Served: call.Usage.Served, Wire: wentAs, Upstream: call.Usage.Upstream,
 				Input: u.Input, Output: u.Output, CacheRead: u.CacheRead,
 				CacheWrite: u.CacheWrite, CacheWrite1h: u.CacheWrite1h, CacheUnknown: u.cacheNotCounted(), Reasoning: u.Reasoning, Credits: call.Usage.Credits, Effort: wentAt, Millis: try.Millis, Status: call.Status,
 				TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
@@ -5171,7 +5174,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if call.To != "" {
 				rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
 					ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
-					Requested: call.Model, Served: call.Usage.Served, Upstream: call.Usage.Upstream,
+					Requested: call.Model, Served: call.Usage.Served, Wire: wentAs, Upstream: call.Usage.Upstream,
 					Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
 					CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, CacheUnknown: call.Usage.billed().cacheNotCounted(), Reasoning: call.Usage.billed().Reasoning, Credits: call.Usage.Credits, Effort: wentAt, Millis: try.Millis, Status: call.Status,
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
@@ -5217,7 +5220,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if call.To != "" {
 				rec := usage.Record{RouteID: tr.ID, Time: began, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: c.model,
 					ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
-					Requested: call.Model, Served: call.Usage.Served,
+					Requested: call.Model, Served: call.Usage.Served, Wire: wentAs,
 					Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
 					CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, CacheUnknown: call.Usage.billed().cacheNotCounted(), Reasoning: call.Usage.billed().Reasoning, Credits: call.Usage.Credits, Effort: wentAt, Millis: try.Millis, Status: call.Status,
 					TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
@@ -6120,7 +6123,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if call.To != "" {
 		rec := usage.Record{RouteID: tr.ID, Time: start, Agent: call.Agent, Via: call.Via, Provider: call.Provider, Host: where, Model: model,
 			ProviderKeyID: providerKeyID, ProviderKeyName: providerKeyName, ProviderAccount: providerAccount,
-			Requested: call.Model, Served: call.Usage.Served, Upstream: call.Usage.Upstream,
+			Requested: call.Model, Served: call.Usage.Served, Wire: wentAs, Upstream: call.Usage.Upstream,
 			Input: call.Usage.billed().Input, Output: call.Usage.billed().Output, CacheRead: call.Usage.billed().CacheRead,
 			CacheWrite: call.Usage.billed().CacheWrite, CacheWrite1h: call.Usage.billed().CacheWrite1h, CacheUnknown: call.Usage.billed().cacheNotCounted(), Reasoning: call.Usage.billed().Reasoning, Credits: call.Usage.Credits, Effort: wentAt, Millis: call.Millis, Status: call.Status,
 			TierAsked: tierAsked, TierSent: wentTier, TierServed: call.Usage.Tier,
@@ -6472,6 +6475,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	defer func() {
 		if err == nil {
 			heardReply(ctx, p, res)
+			noteWireModel(ctx, p, res)
 			heardNet() // the network is up (offline.go)
 		}
 	}()
@@ -8920,8 +8924,9 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		if to == provider.CodeAssist && p.Account != nil {
 			// the envelope is named in there, where the id it carries is
 			// known: on Antigravity that is the variant the effort picked,
-			// not the model magpie knows
-			body = codeAssistBody(p, req, model, wires)
+			// not the model magpie knows. It is built from what goes
+			// (sent), the billing line left out as for buildFor
+			body = codeAssistBody(p, sent, model, wires)
 		} else if wire != model {
 			// the vendor's own name for the model goes in the model field
 			// and nowhere else: everything above shaped the request from

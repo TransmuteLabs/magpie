@@ -209,6 +209,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(await page.locator("#setPage-plugins").isVisible(), where);
         assert.ok(await fits(page, "#view-settings"), `${where}: Settings fits`);
 
+        const search = page.locator("#setQ");
+        await search.fill("Provider notes");
+        await page.locator("#view-settings.set-searching").waitFor();
+        assert.ok(await page.locator("#setPage-plugins .plugin-panel").isVisible(), `${where}: search finds the settings panel by title`);
+        assert.ok(await page.locator("#setNone").isHidden(), `${where}: a matching panel counts as a result`);
+        await search.fill("");
+
         // a page that replaces Library: its tab in Library's place, and
         // Library opens it
         const lib = page.locator('#nav button[data-view="library"]:not([data-plugin-page])');

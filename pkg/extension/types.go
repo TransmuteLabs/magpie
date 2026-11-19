@@ -36,8 +36,9 @@ type ResponseEvent struct {
 }
 
 type HeadersEvent struct {
-	Status  int         `json:"status"`
-	Headers http.Header `json:"headers,omitempty"`
+	Status    int         `json:"status"`
+	Headers   http.Header `json:"headers,omitempty"`
+	SentModel string      `json:"sentModel,omitempty"`
 }
 
 type ExecuteRequest struct {
@@ -65,11 +66,12 @@ type ExecuteOptions struct {
 }
 
 type ExecuteResult struct {
-	Refusal *RequestRefusal `json:"refusal,omitempty"`
-	Status  int             `json:"status,omitempty"`
-	Headers http.Header     `json:"headers,omitempty"`
-	Usage   *Usage          `json:"usage,omitempty"`
-	Outcome string          `json:"outcome,omitempty"`
+	Refusal   *RequestRefusal `json:"refusal,omitempty"`
+	Status    int             `json:"status,omitempty"`
+	Headers   http.Header     `json:"headers,omitempty"`
+	SentModel string          `json:"sentModel,omitempty"`
+	Usage     *Usage          `json:"usage,omitempty"`
+	Outcome   string          `json:"outcome,omitempty"`
 }
 
 type AcceptedEvent struct {

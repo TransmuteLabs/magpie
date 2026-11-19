@@ -57,7 +57,7 @@ function imageResRow(s, keep) {
   const cur = tiers.find(([v]) => v === (s.imageResolution || "")) || tiers[0], b = el("button", "sess-pick image-resolution");
   b.type = "button";
   b.title = n;
-  menuOpener(b);
+  menuOf(b);
   b.append(el("span", "", t(cur[1])), svg(CHEV, 11, 1.6));
   b.onclick = (e) => {
     e.stopPropagation();

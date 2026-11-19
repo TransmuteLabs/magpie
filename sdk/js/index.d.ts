@@ -402,7 +402,7 @@ export interface ResponseEvent {
   id: string; responseId: string; action: "start" | "write" | "flush" | "finish" | "cancel";
   status?: number; headers?: Headers; body?: string; error?: RPCError;
 }
-export interface HeadersEvent { status: number; headers?: Headers }
+export interface HeadersEvent { status: number; headers?: Headers; sentModel?: string }
 export interface ExecuteRequest {
   protocol: Protocol | ""; operation?: ProviderOperation; body?: string; headers?: Headers; model: string; operationId?: string;
   credentials?: JSONValue; options?: JSONValue;
@@ -434,7 +434,7 @@ export interface ExecutionUsageFacts extends ExecutionCounts {
   credits?: number; cost?: ExecutionCost;
 }
 export function validateExecutionUsage(manifest: Manifest, value: Usage | null | undefined): void;
-export interface ExecuteResult { refusal?: RequestRefusal; status?: number; headers?: Headers; usage?: Usage; outcome?: string }
+export interface ExecuteResult { refusal?: RequestRefusal; status?: number; headers?: Headers; sentModel?: string; usage?: Usage; outcome?: string }
 export interface AcceptedEvent { operationId: string; reference?: JSONValue }
 export interface ModelsRequest { credentials?: JSONValue }
 export interface ModelsResult { models: Model[] }

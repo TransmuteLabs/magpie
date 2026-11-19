@@ -409,6 +409,15 @@ terminal status and never appends an error payload to already streamed audio.
 See [the accounting decision](../adr/0023-sdk-execution-observability.md) and
 [`extension_usage.go`](../../internal/gateway/extension_usage.go).
 
+An executor can report the model identifier it sent to its vendor with
+`HeadersEvent.sentModel`, or `ExecuteResult.sentModel` if no headers event
+was emitted. The gateway keeps a distinct identifier in the routing attempt
+and Usage row as `wire`. Missing identifiers fall back to the configured
+upstream model name. The host ignores identifiers longer than 200 bytes or
+containing whitespace or control characters. It also strips
+`X-Magpie-Sent-Model` from SDK responses so a vendor's response header cannot
+supply this metadata. Older modules can omit the field.
+
 When an accepted conversational execution returns an HTTP refusal, the
 gateway's terminal fence still returns client409 and `X-Should-Retry:false`.
 
