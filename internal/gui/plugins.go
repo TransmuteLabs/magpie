@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/ghtoken"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -102,10 +104,11 @@ func pluginSubs() []pluginSubJSON {
 // pluginEntryJSON is a plugin as the Plugins page lists it.
 type pluginEntryJSON struct {
 	plugin.Entry
-	Error     string   `json:"error,omitempty"`   // why it didn't load
-	Providers []string `json:"providers"`         // the names of those it signs in to
-	Version   string   `json:"version,omitempty"` // installed
-	Latest    string   `json:"latest,omitempty"`  // on npm, when the market asked
+	SDK       *sdkPluginJSON `json:"sdk,omitempty"`
+	Error     string         `json:"error,omitempty"`   // why it didn't load
+	Providers []string       `json:"providers"`         // the names of those it signs in to
+	Version   string         `json:"version,omitempty"` // installed
+	Latest    string         `json:"latest,omitempty"`  // on npm, when the market asked
 	// Icon is the picture its own package.json gives (magpie.icon), as
 	// the page can show it: the plugin's, which its row shows before any
 	// of its providers' own (#1775)
@@ -220,10 +223,11 @@ type pluginClashJSON struct {
 const autoUpdatedFor = 3 * 24 * time.Hour
 
 type pluginsJSON struct {
-	Plugins []pluginEntryJSON `json:"plugins"`
-	Bun     bool              `json:"bun"` // Bun is here; adding the first plugin downloads it otherwise
-	BunVer  string            `json:"bunVersion"`
-	Error   string            `json:"error,omitempty"` // the plugins couldn't be asked
+	Plugins  []pluginEntryJSON `json:"plugins"`
+	SDKError string            `json:"sdkError,omitempty"`
+	Bun      bool              `json:"bun"` // Bun is here; adding the first plugin downloads it otherwise
+	BunVer   string            `json:"bunVersion"`
+	Error    string            `json:"error,omitempty"` // the plugins couldn't be asked
 	// Picker is whether this magpie can show the system's folder picker:
 	// `magpie web` has none, and the page then offers no button for it
 	Picker bool `json:"picker"`
@@ -418,6 +422,15 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	for i, ic := range provider.RepoIcons(said, 0) {
 		s.Plugins[i].Icon = ic
 	}
+	host := extension.Default()
+	entries, err := host.List()
+	if err != nil {
+		s.SDKError = err.Error()
+	} else {
+		for _, entry := range entries {
+			s.Plugins = append(s.Plugins, sdkPluginRow(ctx, host, entry))
+		}
+	}
 	return s
 }
 
@@ -587,7 +600,7 @@ func pluginMarketState(ctx context.Context, w Windows) pluginMarketJSON {
 	}
 	listingIcons(m.Listings, 3*time.Second)
 	for i, e := range m.State.Plugins {
-		if !plugin.IsGit(e.Spec) {
+		if e.SDK == nil && !plugin.IsGit(e.Spec) {
 			m.State.Plugins[i].Latest = info[plugin.Name(e.Spec)].Version
 		}
 	}
@@ -608,7 +621,7 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 	pluginCountRoutes(mux)
 	// the updates waiting for the reader, which put a dot on Plugins
 	mux.HandleFunc("GET /api/plugins/updates", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, plugin.PendingUpdates())
+		writeJSON(rw, pendingPluginUpdates())
 	})
 	// the market in parts, as the page draws it (#488): the plugins
 	// suggested, at once, then what npm says of the packages named
@@ -720,13 +733,21 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		}
 		writeJSON(rw, map[string]string{"dir": dir})
 	})
-	// Check for updates: npm asked now for each plugin's newest version,
-	// with the list as it then stands; nothing installed
+	// Check each installed plugin's update source without installing anything.
 	mux.HandleFunc("POST /api/plugins/check", func(rw http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
+		var checks []plugin.VersionCheck
+		var checkErr error
+		var wait sync.WaitGroup
+		wait.Go(func() { checks, checkErr = checkSDKPlugins(ctx) })
 		c := plugin.CheckNow(ctx)
-		writeJSON(rw, map[string]any{"at": c.At, "plugins": c.Plugins, "state": pluginsState(ctx, w)})
+		wait.Wait()
+		out := map[string]any{"at": c.At, "plugins": append(c.Plugins, checks...), "state": pluginsState(ctx, w)}
+		if checkErr != nil {
+			out["sdkError"] = checkErr.Error()
+		}
+		writeJSON(rw, out)
 	})
 	// the 「国内镜像」 switch: what the page downloads (the list, npm's
 	// packages and answers, Bun) is asked of mirrors in China first
@@ -775,14 +796,27 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		// and bun stopped halfway leaves plugins/ half-written
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
 		defer cancel()
-		var err error
-		switch r.PathValue("op") {
+		op := r.PathValue("op")
+		handled, err := sdkPluginOperation(ctx, op, in.Spec, in.Off)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		if handled {
+			writeJSON(rw, pluginsState(ctx, w))
+			return
+		}
+		switch op {
 		case "add":
 			_, err = addPlugin(ctx, in.Spec)
 		case "remove":
 			err = removePlugin(ctx, in.Spec)
 		case "update":
 			err = updatePlugins(ctx)
+			if err == nil {
+				provider.HandOver(ctx, false)
+			}
+			err = errors.Join(err, updateSDKPlugins(ctx))
 		case "upgrade":
 			err = upgradePlugin(ctx, plugin.Name(in.Spec))
 		case "off":
@@ -804,7 +838,7 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		// a deprecated built-in the plugin now serves is the plugin's, so
 		// it isn't listed twice; one with accounts moves in the background
 		// loop (provider.KeepRetiringMoved)
-		if op := r.PathValue("op"); op == "add" || op == "update" || op == "upgrade" {
+		if op == "add" || op == "upgrade" {
 			provider.HandOver(ctx, false)
 		}
 		writeJSON(rw, pluginsState(ctx, w))

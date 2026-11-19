@@ -6,27 +6,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/agent"
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/plugininstall"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
-	extensionsdk "github.com/yetone/magpie/pkg/extension"
 	"golang.org/x/term"
 )
 
 const pluginUsage = `usage: magpie plugin [list] [--json]
        magpie plugin add <name | npm | git | path> install a community plugin by its name (workbuddy, think-tags, Qoder), an OpenCode provider plugin, a pi package or a gateway hook/middleware (opencode-gemini-auth, pi-antigravity, github:owner/repo, ./my-plugin.js, ./alias.middleware.js, ./recall.hooks.ts); npm:<name> is npm's package of a name a community plugin goes by
+       magpie plugin add github:owner/repo#module   install a plugin from its GitHub release
        magpie plugin rm <name>                     remove one
-       magpie plugin update                        update legacy plugins and SDK modules; SDK release pins stay fixed
+       magpie plugin update [module]               update plugins, or one SDK module; release pins stay fixed
        magpie plugin on|off <name>                 turn one on or off
        magpie plugin options <name> [<json> | off] show or set what a plugin is handed: the switches it declares for its provider (as its editor's Plugin options), else a middleware's ctx.options
        magpie plugin use <name> <provider>         have this plugin serve a provider another plugin signs in to as well
@@ -59,17 +60,12 @@ func pluginCmd(args []string) error {
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
 		}
-		if plugin.IsPath(rest[0]) {
-			info, err := os.Stat(rest[0])
-			if err == nil && info.IsDir() {
-				if _, err := os.Lstat(filepath.Join(rest[0], extensionsdk.ManifestFile)); err == nil {
-					return sdkPluginCmd(ctx, []string{"add", rest[0]})
-				} else if !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+		source, sdk, err := plugininstall.SDKSource(ctx, rest[0])
+		if err != nil {
+			return err
+		}
+		if sdk {
+			return sdkPluginCmd(ctx, []string{"add", source})
 		}
 		if !plugin.IsPath(rest[0]) && !plugin.HasBun() {
 			fmt.Println(muted.Render("Downloading Bun " + plugin.BunInUse() + ", which plugins run on…"))
@@ -90,6 +86,11 @@ func pluginCmd(args []string) error {
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
 		}
+		if entry, sdk, err := plugininstall.InstalledSDK(rest[0]); err != nil {
+			return err
+		} else if sdk {
+			return sdkPluginCmd(ctx, []string{"remove", entry.Manifest.ID})
+		}
 		rest[0] = installedName(rest[0])
 		moved := provider.MovedOnto(rest[0])
 		wired := wiredPluginAgent(rest[0])
@@ -108,6 +109,13 @@ func pluginCmd(args []string) error {
 				fmt.Println(pluginUsage)
 				return nil
 			}
+			if len(rest) == 1 {
+				if entry, sdk, err := plugininstall.InstalledSDK(rest[0]); err != nil {
+					return err
+				} else if sdk {
+					return sdkPluginCmd(ctx, []string{"update", entry.Manifest.ID})
+				}
+			}
 			return errors.New(pluginUsage)
 		}
 		return pluginUpdateAll(ctx, len(plugin.Load().Plugins) > 0, func(ctx context.Context) error {
@@ -116,13 +124,18 @@ func pluginCmd(args []string) error {
 			}
 			fmt.Println(green.Render("✓"), "legacy plugins updated")
 			provider.HandOver(ctx, false)
-			return listPlugins(ctx, false)
+			return listPluginsWith(ctx, false, nil)
 		}, func(ctx context.Context) error {
 			return sdkPluginCmd(ctx, []string{"update"})
 		})
 	case "on", "off":
 		if len(rest) != 1 {
 			return errors.New(pluginUsage)
+		}
+		if entry, sdk, err := plugininstall.InstalledSDK(rest[0]); err != nil {
+			return err
+		} else if sdk {
+			return sdkPluginCmd(ctx, []string{sub, entry.Manifest.ID})
 		}
 		rest[0] = installedName(rest[0])
 		var wired *agent.Agent
@@ -242,13 +255,29 @@ func pluginUpdateAll(ctx context.Context, hasLegacy bool, updateLegacy, updateSD
 }
 
 func listPlugins(ctx context.Context, asJSON bool) error {
+	host := extensionhost.Default()
+	installed, err := host.List()
+	if err != nil {
+		return errors.Join(listPluginsWith(ctx, asJSON, nil), err)
+	}
+	return listPluginsWith(ctx, asJSON, installed)
+}
+
+func listPluginsWith(ctx context.Context, asJSON bool, installed []extensionhost.Installed) error {
 	l := plugin.Load()
-	if len(l.Plugins) == 0 {
+	if len(l.Plugins) == 0 && len(installed) == 0 {
 		if asJSON {
 			fmt.Println("[]")
 			return nil
 		}
 		fmt.Println("No plugins. Add one: magpie plugin add <npm package | git repo | path>")
+		return nil
+	}
+	if len(l.Plugins) == 0 {
+		if asJSON {
+			return sdkCLIJSON(os.Stdout, map[string]any{"plugins": []plugin.Entry{}, "sdk": installed})
+		}
+		printInstalledExtensions(ctx, installed)
 		return nil
 	}
 	loaded, lerr := plugin.Plugins(ctx)
@@ -267,7 +296,11 @@ func listPlugins(ctx context.Context, asJSON bool) error {
 	}
 	toolNames := gateway.ToolNames(pts)
 	if asJSON {
-		b, _ := json.MarshalIndent(map[string]any{"plugins": l.Plugins, "loaded": loaded, "providers": ps, "middleware": mws}, "", "  ")
+		result := map[string]any{"plugins": l.Plugins, "loaded": loaded, "providers": ps, "middleware": mws}
+		if len(installed) > 0 {
+			result["sdk"] = installed
+		}
+		b, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(b))
 		return nil
 	}
@@ -345,10 +378,31 @@ func listPlugins(ctx context.Context, asJSON bool) error {
 			fmt.Printf("  %s  %s\n", provider.PluginID(c.ID), amber.Render("served by "+c.By+", which signs in to it too · magpie plugin use "+e.Spec+" "+c.ID))
 		}
 	}
+	printInstalledExtensions(ctx, installed)
 	if lerr != nil {
 		return lerr
 	}
 	return perr
+}
+
+func printInstalledExtensions(ctx context.Context, installed []extensionhost.Installed) {
+	if len(installed) == 0 {
+		return
+	}
+	host := extensionhost.Default()
+	for _, entry := range installed {
+		manifest := entry.Manifest
+		fmt.Printf("%s %s  %s\n", bold.Render(manifest.ID), manifest.Version, sdkCLIEnabled(entry))
+		capabilities := make([]string, 0, len(manifest.Contract.Capabilities))
+		for _, capability := range manifest.Contract.Capabilities {
+			capabilities = append(capabilities, string(capability))
+		}
+		fmt.Printf("  %s · API %d.%d · %s\n", manifest.Runtime, manifest.Contract.Version.Major,
+			manifest.Contract.Version.Minor, strings.Join(capabilities, ", "))
+		if description := host.PluginDescription(ctx, entry); description != "" {
+			fmt.Printf("  %s\n", description)
+		}
+	}
 }
 
 // pluginOptions prints a plugin's options, or sets them from a JSON

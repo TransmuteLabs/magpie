@@ -45,12 +45,12 @@ func TestIndependentModuleReleaseRecordShape(t *testing.T) {
 func TestIndependentModuleReleaseContinuation(t *testing.T) {
 	const endpoint = "https://api.github.com/repos/owner/mono/releases"
 	for _, test := range []string{
-		"short next", "private short next", "short next uppercase", "last page previous",
-		"foreign next", "skipped next", "duplicate next", "malformed link", "next beyond bound",
+		"short next", "private short next", "short next uppercase", "private short next canonical", "last page previous",
+		"foreign next", "foreign canonical next", "invalid canonical next", "skipped next", "duplicate next", "malformed link", "next beyond bound",
 	} {
 		t.Run(test, func(t *testing.T) {
 			fixture := newModuleReleaseServer(t)
-			fixture.private = test == "private short next"
+			fixture.private = strings.HasPrefix(test, "private ")
 			pages := []string{}
 			var pagesMu sync.Mutex
 			fixture.override = func(request *http.Request) (int, []byte, bool) {
@@ -82,8 +82,14 @@ func TestIndependentModuleReleaseContinuation(t *testing.T) {
 				switch test {
 				case "short next uppercase":
 					next = strings.Replace(next, `"next"`, `"NEXT"`, 1)
+				case "private short next canonical":
+					next = `<https://api.github.com/repositories/1451061746/releases?per_page=100&page=2>; rel="next"`
 				case "foreign next":
 					next = `<https://api.github.com/repos/other/repo/releases?per_page=100&page=2>; rel="next"`
+				case "foreign canonical next":
+					next = `<https://cdn.example.invalid/repositories/1451061746/releases?per_page=100&page=2>; rel="next"`
+				case "invalid canonical next":
+					next = `<https://api.github.com/repositories/01451061746/releases?per_page=100&page=2>; rel="next"`
 				case "skipped next":
 					next = `<` + endpoint + `?per_page=100&page=3>; rel="next"`
 				case "duplicate next":

@@ -11,17 +11,27 @@ window.pmInstalled = function ({ es, st, everything, entryOf, kindOf, srcOf, nam
   const card = new Map();
   for (const l of everything(() => true)) { const e = entryOf(l.package); if (e && !card.has(e)) card.set(e, l); }
   const sorted = es.map((e) => {
+    if (e.sdk) {
+      const kinds = [
+        e.providers?.length && "pv",
+        (e.isMiddleware || e.isGateway) && "mw",
+        e.isAgent && "ag",
+        e.sdk.capabilities?.includes("tool-provider") && "tl",
+        e.sdk.window && "pg",
+      ].filter(Boolean);
+      return { e, kinds, src: e.sdk.source ? "gh" : "third" };
+    }
     const l = card.get(e);
-    if (l) return { e, kind: kindOf(l), src: srcOf(l) };
+    if (l) return { e, kinds: [kindOf(l)], src: srcOf(l) };
     const kind = e.middleware || e.isMiddleware || e.gateway || e.isGateway ? "mw" : e.agent || e.isAgent ? "ag" : e.tools?.length && !e.providers?.length ? "tl" : e.page && !e.providers?.length ? "pg" : "pv";
-    return { e, kind, src: isGit(e.spec) ? "gh" : name(e.spec).startsWith("@magpie-community/") ? "ours" : "third" };
+    return { e, kinds: [kind], src: isGit(e.spec) ? "gh" : name(e.spec).startsWith("@magpie-community/") ? "ours" : "third" };
   });
-  const kinds = ORDER.filter((k) => sorted.some((x) => x.kind === k));
+  const kinds = ORDER.filter((k) => sorted.some((x) => x.kinds.includes(k)));
   const srcs = SOURCES.map(([v]) => v).filter((v) => v && sorted.some((x) => x.src === v));
   if (!kinds.includes(st.kind) || kinds.length < 2) st.kind = "";
   if (!srcs.includes(st.src) || srcs.length < 2) st.src = "";
   const base = sorted.filter((x) => !st.src || x.src === st.src);
-  const shown = base.filter((x) => !st.kind || x.kind === st.kind).map((x) => x.e);
+  const shown = base.filter((x) => !st.kind || x.kinds.includes(st.kind)).map((x) => x.e);
   let none = null;
   if (!shown.length) {
     // a pick that leaves nothing says so, with the way back
@@ -33,9 +43,39 @@ window.pmInstalled = function ({ es, st, everything, entryOf, kindOf, srcOf, nam
   }
   return {
     shown, none,
-    strip: kinds.length > 1 ? kindStrip(kinds, (k) => base.filter((x) => !k || x.kind === k).length, st.kind, (k) => { st.kind = k; drawBody(); }) : null,
+    strip: kinds.length > 1 ? kindStrip(kinds, (k) => base.filter((x) => !k || x.kinds.includes(k)).length, st.kind, (k) => { st.kind = k; drawBody(); }) : null,
     pop: srcs.length > 1 ? originButton(st.src, null, (v) => { st.src = v; drawBody(); }) : null,
   };
+};
+
+window.pmSDKDetails = function ({ sdk, providers }, gitWeb) {
+  const box = el("details", "sub pm-sdk");
+  box.append(el("summary", "", "SDK " + sdk.api + " · " + sdk.runtime));
+  if (sdk.description) box.append(el("div", "", sdk.description));
+  const line = (label, items) => {
+    if (!items?.length) return;
+    const row = el("div");
+    row.append(el("b", "", t(label)), document.createTextNode(" · " + items.join(t(", "))));
+    box.append(row);
+  };
+  line("Providers", providers);
+  line("Agents", sdk.agents);
+  line("Protocols", sdk.protocols);
+  line("Gateway", sdk.inbounds);
+  line("Sessions", sdk.sessions);
+  line("Capabilities", sdk.capabilities);
+  line("Compatibility", [sdk.hostAPI && "SDK " + sdk.hostAPI, sdk.nativeABI && "ABI " + sdk.nativeABI, ...(sdk.platforms || [])].filter(Boolean));
+  if (sdk.window) line("Interface", [t("Available")]);
+  if (sdk.source) {
+    const ref = el("a", "pm-link", sdk.source);
+    const href = gitWeb(sdk.source.replace(/@[^#]+/, ""));
+    ref.href = href;
+    ref.onclick = (ev) => { ev.preventDefault(); api("open", { url: href }).catch(statusErr); };
+    const row = el("div");
+    row.append(el("b", "", t("Source")), document.createTextNode(" · "), ref);
+    box.append(row);
+  }
+  return box;
 };
 
 // what a failed install left in plugins/ that no plugin is installed as:

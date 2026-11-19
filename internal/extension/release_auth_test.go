@@ -9,13 +9,44 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/proc"
 )
 
 const releaseAuthTestToken = "synthetic_github_release_token"
+
+func TestReleaseCredentialFindsDeveloperToolsOutsideDesktopPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture writes a POSIX helper")
+	}
+	if !proc.Isolated() {
+		t.Fatal("credential tool test requires testenv isolation")
+	}
+	t.Setenv("PATH", t.TempDir())
+	brew := proc.SystemDirs("/opt/homebrew/bin")[0]
+	if err := os.MkdirAll(brew, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(brew, "gh")
+	if err := os.WriteFile(name, []byte("#!/bin/sh\nprintf '%s\\n' '"+releaseAuthTestToken+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(name)
+		proc.Forget()
+	})
+	proc.Forget()
+	token, err := resolveReleaseToken(t.Context(), "owner/mono", func(string) string { return "" }, runReleaseCredential)
+	if err != nil || token != releaseAuthTestToken {
+		t.Fatalf("developer GitHub authentication did not work outside PATH: %v", err)
+	}
+}
 
 type releaseAuthRequest struct {
 	location string

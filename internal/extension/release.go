@@ -137,16 +137,16 @@ func PrepareRelease(ctx context.Context, client *http.Client, source string) (pr
 	return prepareRelease(ctx, client, source, defaultReleaseToken)
 }
 
-func prepareRelease(ctx context.Context, client *http.Client, source string, resolver releaseTokenResolver) (prepared ReleasePackage, cleanup func(), err error) {
+func resolveRelease(ctx context.Context, client *http.Client, source string, resolver releaseTokenResolver) (githubRelease, *releaseAuthorization, error) {
 	if ctx == nil || client == nil {
-		return ReleasePackage{}, nil, errors.New("release preparation requires a context and HTTP client")
+		return githubRelease{}, nil, errors.New("release preparation requires a context and HTTP client")
 	}
 	if err := ctx.Err(); err != nil {
-		return ReleasePackage{}, nil, err
+		return githubRelease{}, nil, err
 	}
 	endpoint, pinned, err := releaseSource(source)
 	if err != nil {
-		return ReleasePackage{}, nil, err
+		return githubRelease{}, nil, err
 	}
 	safe := *client
 	safe.Jar = nil
@@ -175,11 +175,11 @@ func prepareRelease(ctx context.Context, client *http.Client, source string, res
 	}
 	parts := strings.Split(strings.TrimPrefix(endpoint, "https://api.github.com/repos/"), "/")
 	repository := parts[0] + "/" + parts[1]
-	authorization := releaseAuthorization{client: &safe, repository: repository, resolver: resolver}
+	authorization := &releaseAuthorization{client: &safe, repository: repository, resolver: resolver}
 	module := releaseModule(source)
-	release, err := releaseResolve(ctx, &authorization, endpoint, pinned, module)
+	release, err := releaseResolve(ctx, authorization, endpoint, pinned, module)
 	if err != nil {
-		return ReleasePackage{}, nil, err
+		return githubRelease{}, nil, err
 	}
 	validTag := releaseTag(release.Tag)
 	if module != "" {
@@ -187,8 +187,17 @@ func prepareRelease(ctx context.Context, client *http.Client, source string, res
 		validTag = validTag && !release.Draft
 	}
 	if !validTag || pinned != "" && release.Tag != pinned {
-		return ReleasePackage{}, nil, errors.New("GitHub release tag is invalid or differs from the pinned tag")
+		return githubRelease{}, nil, errors.New("GitHub release tag is invalid or differs from the pinned tag")
 	}
+	return release, authorization, nil
+}
+
+func prepareRelease(ctx context.Context, client *http.Client, source string, resolver releaseTokenResolver) (prepared ReleasePackage, cleanup func(), err error) {
+	release, authorization, err := resolveRelease(ctx, client, source, resolver)
+	if err != nil {
+		return ReleasePackage{}, nil, err
+	}
+	module := releaseModule(source)
 	asset, sums, universal, err := releaseSelect(release.Assets, module)
 	if err != nil {
 		return ReleasePackage{}, nil, err

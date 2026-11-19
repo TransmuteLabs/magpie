@@ -163,4 +163,82 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
     }
   });
+
+  test(engine + ": SDK release uses the ordinary plugin controls", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 420, height: 850 } });
+    page.setDefaultTimeout(8000);
+    const source = "github:TransmuteLabs/magpie-sdk-community-plugins#opencode";
+    const spec = "sdk:opencode";
+    const fixture = {
+      spec, ownName: "OpenCode", providers: ["OpenCode Go"], version: "0.8.0", moved: [], isAgent: true,
+      sdk: { source, runtime: "native", api: "1.15", hostAPI: "^1", checkable: true, window: true,
+        description: "OpenCode provider and agent", agents: ["OpenCode SDK"], capabilities: ["agent-wiring", "outbound-executor"],
+        platforms: ["darwin/arm64"], nativeABI: 1, protocols: ["chat"], sessions: ["opencode-history"] },
+    };
+    let installed;
+    const apiCalls = [], npmNames = [], fetched = [], errors = [];
+    const base = server("en", fetched);
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.route("**/*", (route) => {
+      const url = new URL(route.request().url()), tail = url.pathname.replace(/^\/api\/plugins\/?/, "");
+      const state = () => ({ bun: false, plugins: [INSTALLED[0], installed].filter(Boolean), picker: false, movable: [] });
+      if (url.pathname === "/api/plugins") return route.fulfill({ json: state() });
+      if (tail === "npm") npmNames.push(...String(url.searchParams.get("names") || "").split(","));
+      if (!url.pathname.startsWith("/api/plugins/") || route.request().method() !== "POST") return base(route);
+      const body = route.request().postDataJSON();
+      apiCalls.push([tail, body]);
+      switch (tail) {
+        case "add": installed = structuredClone(fixture); break;
+        case "check":
+          installed.latest = "0.9.0";
+          installed.sdk.check = { spec, package: "opencode", version: installed.version, status: "update", latest: installed.latest };
+          return route.fulfill({ json: { at: new Date().toISOString(), plugins: [installed.sdk.check], state: state() } });
+        case "upgrade":
+          installed.version = installed.latest;
+          delete installed.latest;
+          delete installed.sdk.check;
+          break;
+        case "off": installed.off = body.off; break;
+        case "remove": installed = null; break;
+        default: return base(route);
+      }
+      return route.fulfill({ json: state() });
+    });
+
+    await page.goto("http://magpie.test/?view=plugins");
+    const view = page.locator("#view-plugins");
+    const manual = view.locator(".pm-manual");
+    await manual.getByRole("textbox").fill(source);
+    await manual.getByRole("button", { name: "Install", exact: true }).click();
+    await manual.getByRole("button", { name: "Install", exact: true }).waitFor();
+    await page.locator(":is(.lib-tabs .opt, .nav-s):visible", { hasText: "Installed" }).first().click();
+    const row = view.locator(".pm-row", { has: page.getByText("OpenCode", { exact: true }) });
+    await row.getByText("v0.8.0", { exact: true }).waitFor();
+    await row.locator("summary").click();
+    await row.getByText("OpenCode provider and agent", { exact: true }).waitFor();
+    const details = await row.locator("details").innerText();
+    for (const value of ["OpenCode Go", "OpenCode SDK", "opencode-history", "chat", "darwin/arm64", source]) assert(details.includes(value), value);
+    for (const label of ["Subscriptions", "Agents"]) {
+      await view.locator(".pm-listhead .pm-kinds .opt", { hasText: label }).click();
+      assert.equal(await row.count(), 1, "two-capability module belongs under " + label);
+    }
+    await view.getByRole("button", { name: "Check for updates" }).click();
+    await row.getByRole("button", { name: "Update", exact: true }).click();
+    await row.getByText("v0.9.0", { exact: true }).waitFor();
+    await row.getByRole("button", { name: "Switch off" }).click();
+    await row.getByRole("button", { name: "Switch on" }).click();
+    await row.getByRole("button", { name: "Switch off" }).waitFor();
+    await row.getByRole("button", { name: "Remove", exact: true }).click();
+    await page.getByRole("alertdialog").getByRole("button", { name: "Remove", exact: true }).click();
+    await row.waitFor({ state: "detached" });
+    assert.deepEqual(apiCalls, [
+      ["add", { spec: source }], ["check", {}], ["upgrade", { spec }], ["off", { spec, off: true }],
+      ["off", { spec, off: false }], ["remove", { spec }],
+    ]);
+    assert(!npmNames.includes("opencode") && !npmNames.includes(spec), "SDK release was sent to npm");
+    assert.deepEqual(errors, []);
+    assert.deepEqual(fetched, []);
+  });
 }

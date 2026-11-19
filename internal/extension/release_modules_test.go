@@ -502,12 +502,20 @@ func TestModuleReleaseManagerTracksIndependentVersions(t *testing.T) {
 	t.Cleanup(func() { managerReleaseClose(t, manager) })
 	firstDirectory := moduleReleaseWorker(t, "module_a__one", "1.0.0")
 	secondDirectory := moduleReleaseWorker(t, "module-b", "4.0.0")
+	const description = "A module from an independently versioned GitHub release"
+	catalogTestWrite(t, filepath.Join(firstDirectory, "package.json"), []byte(`{"description":"`+description+`"}`), 0o600)
 	firstArchive := managerReleaseArchive(t, firstDirectory)
 	secondArchive := managerReleaseArchive(t, secondDirectory)
 	fixture.publish(t, "v9.0.0", map[string][]byte{
 		moduleReleaseName("module_a__one"): firstArchive, moduleReleaseName("module-b"): secondArchive,
 	})
 	firstReference, secondReference := "github:owner/mono#module_a__one", "github:owner/mono#module-b"
+	if recognized, err := manager.ProbePluginRelease(t.Context(), firstReference); err != nil || !recognized {
+		t.Fatalf("private module not recognized through ordinary add: %t %v", recognized, err)
+	}
+	if recognized, err := manager.ProbePluginRelease(t.Context(), "github:owner/mono#git-branch"); err != nil || recognized {
+		t.Fatalf("ordinary Git branch mistaken for a module: %t %v", recognized, err)
+	}
 	first, err := manager.Install(t.Context(), firstReference)
 	if err != nil {
 		t.Fatal("real installer rejected first selected module:", err)
@@ -515,6 +523,17 @@ func TestModuleReleaseManagerTracksIndependentVersions(t *testing.T) {
 	second, err := manager.Install(t.Context(), secondReference)
 	if err != nil {
 		t.Fatal("real installer rejected second selected module:", err)
+	}
+	if text := manager.PluginDescription(t.Context(), first); text != description {
+		t.Fatalf("installed description = %q", text)
+	}
+	if text := manager.PluginDescription(t.Context(), second); text != "" {
+		t.Fatalf("old distribution claims a description: %q", text)
+	}
+	foreign := first
+	foreign.Files = map[string]string{"package.json": "old-revision"}
+	if text := manager.PluginDescription(t.Context(), foreign); text != "" {
+		t.Fatalf("unexpected description for a mismatched file hash: %q", text)
 	}
 	for _, entry := range []Installed{first, second} {
 		result, err := manager.Call(t.Context(), entry.Manifest.ID, sdk.MethodToolCall, sdk.Scope{},
@@ -547,6 +566,19 @@ func TestModuleReleaseManagerTracksIndependentVersions(t *testing.T) {
 		})
 	}
 	publish("v10.0.0", newArchive)
+	beforeCheck := fixture.count()
+	available, err := manager.CheckUpdate(t.Context(), first)
+	if err != nil || available != (ReleaseAvailability{Version: "2.0.0", Available: true}) {
+		t.Fatalf("check got %+v %v", available, err)
+	}
+	fixture.mu.Lock()
+	checked := append([]releaseAuthRequest(nil), fixture.requests[beforeCheck:]...)
+	fixture.mu.Unlock()
+	for _, request := range checked {
+		if strings.Contains(request.location, "/assets/") {
+			t.Fatal("checking for updates downloaded an asset:", request.location)
+		}
+	}
 	updated, err := manager.Update(t.Context(), first.Manifest.ID)
 	if err != nil || !updated.Disabled || updated.Manifest.Version != "2.0.0" ||
 		updated.Directory == first.Directory || updated.Source == nil || updated.Source.Reference != firstReference {

@@ -20,6 +20,8 @@ const (
 	releaseModulePages    = 10
 )
 
+var errNoModuleRelease = errors.New("GitHub releases contain no published stable version of the selected module")
+
 func releaseModuleVersion(tag, module string) (string, bool) {
 	version, matched := strings.CutPrefix(tag, module+"-v")
 	return version, matched && releaseVersion(version)
@@ -69,7 +71,7 @@ func releaseModuleNext(headers http.Header, endpoint string, page int) (bool, er
 				if !strings.EqualFold(relation, "next") {
 					continue
 				}
-				if next || page >= releaseModulePages || target != endpoint+"?per_page=100&page="+strconv.Itoa(page+1) {
+				if next || page >= releaseModulePages || !releaseModulePageTarget(target, endpoint, page+1) {
 					return false, errors.New("GitHub module continuation is not the next bounded repository page")
 				}
 				next = true
@@ -77,6 +79,20 @@ func releaseModuleNext(headers http.Header, endpoint string, page int) (bool, er
 		}
 	}
 	return next, nil
+}
+
+func releaseModulePageTarget(target, endpoint string, page int) bool {
+	location, query, _ := strings.Cut(target, "?")
+	if query != "per_page=100&page="+strconv.Itoa(page) {
+		return false
+	}
+	if location == endpoint {
+		return true
+	}
+	repository, canonical := strings.CutPrefix(location, "https://api.github.com/repositories/")
+	id, releaseList := strings.CutSuffix(repository, "/releases")
+	number, err := strconv.ParseUint(id, 10, 64)
+	return canonical && releaseList && err == nil && number != 0 && id == strconv.FormatUint(number, 10)
 }
 
 func releaseResolve(ctx context.Context, auth *releaseAuthorization, endpoint, pin, module string) (githubRelease, error) {
@@ -130,7 +146,7 @@ func releaseResolve(ctx context.Context, auth *releaseAuthorization, endpoint, p
 		}
 		if len(releases) < releaseModulePageSize && !next {
 			if selectedVersion == "" {
-				return githubRelease{}, errors.New("GitHub releases contain no published stable version of the selected module")
+				return githubRelease{}, errNoModuleRelease
 			}
 			return selected, nil
 		}

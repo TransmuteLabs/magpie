@@ -99,7 +99,7 @@ flowchart TD
     Local["plugin add: local directory"] --> Descriptor{"SDK descriptor present?"}
     Descriptor -->|absent| Legacy["Existing JS/TS plugin owner"]
     Descriptor -->|present| Validate["SDK manifest and compatibility validation"]
-    Explicit["plugin sdk add: directory or release"] --> Validate
+    Explicit["Plugins Add or plugin add: directory or release"] --> Validate
     Validate -->|invalid| Refuse["Refuse; no legacy fallback"]
     Validate -->|valid| Catalog["Hashed root installation authority"]
     Catalog --> Adapter["Ordinary host adapter and exact generation lease"]
@@ -138,6 +138,8 @@ Native libraries have no process arguments. A hybrid distribution includes
 every component and its window assets in the same hashed package.
 
 ```sh
+magpie plugin add 'github:owner/repository#minimax'
+magpie plugin update minimax
 magpie plugin sdk add ./distribution
 magpie plugin sdk add github:owner/repository
 magpie plugin sdk add github:owner/repository@v1.2.3
@@ -161,12 +163,27 @@ the preceding read returned version `"0"`; always use the version actually
 read. It replaces the complete JSON object rather than merging keys and
 does not start a worker just to read configuration.
 
+The ordinary Plugins page and `magpie plugin add` accept a directory with
+`magpie-plugin.json` or a scoped GitHub release source. An unpinned `#module`
+is recognized when its release exposes a matching SDK ZIP name. A Git reference
+without matching release evidence still goes to the JavaScript package
+installer. Prefix the source with `sdk:` or use `plugin sdk add` to require
+SDK installation and get SDK-specific errors. Unscoped `github:owner/repo`
+keeps its original Git-package meaning in the ordinary installer.
+
+Installed SDK modules appear alongside legacy packages. Their capabilities,
+agents, providers, protocols, session formats and compatibility come from the
+installed manifest. An optional `description` in the archive's root
+`package.json` supplies the display description. Reading Installed requires
+neither a module worker nor a GitHub request. Check for updates reads release
+metadata. Installing an update verifies the archive before switching generations.
+Use `sdk:<id>` to select an installed module explicitly if a legacy package
+uses the same name.
+
 Explicit SDK GitHub sources install prebuilt packages from public or private
-releases. The unscoped, unpinned form follows GitHub's latest published release;
-`@tag` selects and pins an
-exact semantic version tag, with or without a leading `v`. This syntax belongs
-to `plugin sdk add`: ordinary `plugin add github:...` keeps its existing
-JavaScript package behavior.
+releases. The unscoped, unpinned form follows GitHub's latest published release.
+`@tag` selects and pins an exact semantic version tag, with or without a
+leading `v`.
 
 Repositories publishing independently versioned SDK modules can opt in to
 `github:owner/repository#manifest-id[@manifest-id-vSEMVER]`. The selector is the
@@ -179,6 +196,8 @@ repository-latest lookup and asset behavior.
 credentials lazily after a direct repository release API 401/403/404:
 `GH_TOKEN` / `GITHUB_TOKEN`, then `gh auth token --hostname github.com`,
 then noninteractive HTTPS Git credential lookup for that repository.
+The desktop uses the same tool discovery as the rest of Magpie, including
+common developer bin directories when GitHub CLI is outside the app's PATH.
 SSH-only Git access cannot authenticate the Releases API. Credentials are
 attached to the selected repository's API metadata/asset requests and are
 not persisted in the catalog or module/provider
@@ -223,6 +242,9 @@ than repository latest or the first matching release. A later-published backport
 does not displace a higher version. Drafts, prerelease flags and semantic
 prereleases are excluded from unpinned updates. A full explicit pin can select a
 published prerelease, but never a draft.
+GitHub's numeric repository URLs in pagination links can indicate another
+page. Every request still uses the original named repository and the next
+bounded page number.
 
 Every decoded release record must identify a nonblank tag, including unrelated
 or draft rows; null or empty objects fail before archive download/publication.

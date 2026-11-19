@@ -49,6 +49,8 @@ type releaseHTTPStatusError struct {
 
 type releaseHTTPRequestError struct{ cause error }
 
+var errReleaseCredentials = errors.New(releaseCredentialPrompt)
+
 func (failure *releaseHTTPRequestError) Error() string { return "release HTTP request failed" }
 func (failure *releaseHTTPRequestError) Unwrap() error { return failure.cause }
 
@@ -84,7 +86,7 @@ func (auth *releaseAuthorization) metadata(ctx context.Context, endpoint string,
 		return headers, err
 	}
 	if auth.authenticated {
-		return nil, errors.New(releaseCredentialPrompt)
+		return nil, errReleaseCredentials
 	}
 	var failure *releaseHTTPStatusError
 	if !errors.As(err, &failure) || !failure.direct || !releaseAuthTarget(endpoint, auth.repository) {
@@ -94,20 +96,20 @@ func (auth *releaseAuthorization) metadata(ctx context.Context, endpoint string,
 		return nil, err
 	}
 	if auth.resolver == nil {
-		return nil, errors.New(releaseCredentialPrompt)
+		return nil, errReleaseCredentials
 	}
 	token, lookupErr := auth.resolver(ctx, auth.repository)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if lookupErr != nil || !releaseCredentialToken(token) {
-		return nil, errors.New(releaseCredentialPrompt)
+		return nil, errReleaseCredentials
 	}
 	auth.token, auth.authenticated = token, true
 	output.Reset()
 	_, headers, err = releaseDownloadResponse(ctx, auth.client, endpoint, output, releaseMetadataLimit, token, auth.repository, false)
 	if releaseAuthChallenge(err) {
-		return nil, errors.New(releaseCredentialPrompt)
+		return nil, errReleaseCredentials
 	}
 	return headers, err
 }
@@ -257,8 +259,12 @@ func releaseCredentialEnv(base, overrides []string) []string {
 func runReleaseCredential(ctx context.Context, command releaseCredentialCommand) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, releaseCredentialWait)
 	defer cancel()
+	executable := proc.FindTool(command.Name)
+	if executable == "" {
+		return nil, errors.New("GitHub credential helper is unavailable")
+	}
 	output := &releaseCredentialOutput{cancel: cancel}
-	child := proc.CommandContext(ctx, command.Name, command.Args...)
+	child := proc.CommandContext(ctx, executable, command.Args...)
 	child.Stdin = strings.NewReader(command.Input)
 	child.Stdout, child.Stderr = output, io.Discard
 	child.Env = releaseCredentialEnv(os.Environ(), command.Env)
