@@ -74,6 +74,15 @@ type urlGateway struct {
 func (g *urlGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var b bytes.Buffer
 	b.ReadFrom(r.Body)
+	switch r.URL.Path {
+	case gateway.ImageMCPPath:
+		modelsMCP(w, b.Bytes())
+		return
+	case "/v1/images/generations":
+	default:
+		http.NotFound(w, r)
+		return
+	}
 	g.mu.Lock()
 	g.body = append(g.body, b.String())
 	g.mu.Unlock()
@@ -162,8 +171,10 @@ func TestFourKImageByURLIsSaved(t *testing.T) {
 	if b, _ := os.ReadFile(saved); !bytes.Equal(b, big) {
 		t.Fatalf("saved %d bytes of %d", len(b), len(big))
 	}
-	if !strings.Contains(g.body[0], `"response_format":"b64_json"`) {
-		t.Fatalf("the gateway was asked %s", g.body[0])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.body) != 1 || !strings.Contains(g.body[0], `"response_format":"b64_json"`) {
+		t.Fatalf("image requests: %q", g.body)
 	}
 }
 
