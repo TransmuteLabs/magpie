@@ -464,3 +464,24 @@ func TestPromptOfPiMemory(t *testing.T) {
 		t.Fatal("a heading outside Pi's context was taken")
 	}
 }
+
+func TestPromptOfPiMemoryStaysInsideProjectContext(t *testing.T) {
+	const before = "Example configuration\n\n## /example/AGENTS.md\n\nKeep the example in the system prompt.\n\n"
+	const project = "## /project/AGENTS.md\n\nUse the project instructions.\n\n"
+	const after = "Current date: 2026-11-19\nCurrent working directory: /project\n\n## /other/CLAUDE.md\n\nKeep the closing notes."
+
+	builder := newPromptBuilder()
+	system := builder.splitMemory(before + piContext + project + after)
+	prompt := builder.prompt()
+	if _, ok := itemOf(prompt, PartMemory, "/project/AGENTS.md"); !ok {
+		t.Fatal("the project instructions were not counted as memory")
+	}
+	for _, path := range []string{"/example/AGENTS.md", "/other/CLAUDE.md"} {
+		if _, ok := itemOf(prompt, PartMemory, path); ok {
+			t.Errorf("%s was counted as memory outside Project Context", path)
+		}
+	}
+	if !strings.HasPrefix(system, before+piContext) || !strings.HasSuffix(system, after) {
+		t.Errorf("text outside Project Context moved: %q", system)
+	}
+}

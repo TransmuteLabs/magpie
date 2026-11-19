@@ -425,9 +425,10 @@ func (b *promptBuilder) splitMemory(text string) string {
 	for _, m := range instructionsFrom.FindAllStringSubmatchIndex(text, -1) {
 		ss = append(ss, section{at: m[0], body: m[1], path: text[m[2]:m[3]], openCodeish: true})
 	}
-	if strings.Contains(text, piContext) {
-		for _, m := range piFile.FindAllStringSubmatchIndex(text, -1) {
-			ss = append(ss, section{at: m[0], body: m[1], path: text[m[2]:m[3]], pi: true})
+	if _, project, found := strings.Cut(text, piContext); found {
+		start := len(text) - len(project)
+		for _, m := range piFile.FindAllStringSubmatchIndex(project[:piFileEnd(project)], -1) {
+			ss = append(ss, section{at: start + m[0], body: start + m[1], path: project[m[2]:m[3]], pi: true})
 		}
 	}
 	if len(ss) == 0 {
