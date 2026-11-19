@@ -21,7 +21,6 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/daemon"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/stats"
@@ -1732,7 +1731,7 @@ func advertisedURL() string {
 }
 
 // serve: `magpie serve` — the gateway alone, in the foreground.
-func serve() error {
+func serve(beforeRestart func()) error {
 	s := gateway.New()
 	go stats.Run(version, "serve")
 	catalog.Seed()         // the shipped copy, when models.dev can't be reached
@@ -1804,9 +1803,7 @@ func serve() error {
 	close(drained)
 	finish()
 	if exe := follow.restartTo(); exe != "" {
-		// the plugin hosts end, waited for, first, as magpie web's
-		// reexec does (#3285)
-		plugin.EndHosts()
+		beforeRestart()
 		log.Printf("magpie serve: restarting into %s", exe)
 		return serveReexec(exe, os.Args[1:], os.Environ())
 	}

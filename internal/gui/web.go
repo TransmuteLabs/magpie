@@ -22,7 +22,6 @@ import (
 	"github.com/klauspost/compress/gzhttp"
 
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -155,7 +154,7 @@ func (w *Web) ServesGateway() bool { return served.Load() != nil }
 // Wait returns once the page's Quit is used. After a restart to update it
 // runs the new version in this one's place, with the same arguments and
 // key, so the page open in the browser finds it where it was.
-func (w *Web) Wait() error {
+func (w *Web) Wait(beforeRestart func()) error {
 	<-w.quit
 	time.Sleep(200 * time.Millisecond) // the answer to the Quit gets out
 	w.Close()
@@ -166,8 +165,7 @@ func (w *Web) Wait() error {
 	if err != nil {
 		return err
 	}
-	// End and reap plugin hosts before replacing this process (#3285).
-	plugin.EndHosts()
+	beforeRestart()
 	return update.Reexec(exe, os.Args[1:], append(os.Environ(), webRunKey+"="+w.key))
 }
 

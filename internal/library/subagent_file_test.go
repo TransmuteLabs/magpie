@@ -200,3 +200,86 @@ func TestSubagentFileNotCarried(t *testing.T) {
 		t.Errorf("after put: %+v, file %q", s, read(t, mine))
 	}
 }
+
+func TestSubagentSourceSurvivesOutputRemoval(t *testing.T) {
+	for _, phase := range []string{"save", "assign", "old-claim-remove", "old-claim-rename"} {
+		t.Run(phase, func(t *testing.T) {
+			h := sandbox(t)
+			file := filepath.Join(h, ".claude/agents/reviewer.md")
+			const body = "---\nname: \"reviewer\"\ndescription: \"Reviews.\"\n---\n\nReview.\n"
+			write(t, file, body)
+			s := Subagent{Name: "reviewer", Description: "Reviews.", Prompt: "Review.", File: file}
+			if phase == "save" {
+				s.Agents = []string{"claude"}
+			}
+			res, err := SaveSubagent("", s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "assign" {
+				res, err = SubagentAgentsSet(s.Name, []string{"claude"})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "assign" || phase == "save" {
+				if len(res.Problems) != 1 || res.Problems[0].What != "subagent:reviewer" || !strings.Contains(res.Problems[0].Error, "source file") {
+					t.Errorf("missing source conflict: %+v", res.Problems)
+				}
+			}
+			if strings.HasPrefix(phase, "old-claim") {
+				l, err := load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				l.applied("claude").Subagents = []SubagentFile{{Name: s.Name, Path: file, Hash: subagentHash([]byte(body))}}
+				if err := l.save(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "old-claim-rename" {
+				s.Name, s.File = "checker", ""
+				ok(t)(SaveSubagent("reviewer", s))
+			} else {
+				ok(t)(RemoveSubagents([]string{s.Name}))
+			}
+			if got := read(t, file); got != body {
+				t.Errorf("source changed after %s: %q", phase, got)
+			}
+		})
+	}
+}
+
+func TestSubagentSourceSharedOutputOwner(t *testing.T) {
+	h := sandbox(t)
+	mine := filepath.Join(h, "repo", "reviewer.md")
+	const body = "---\nname: reviewer\ndescription: Reviews.\n---\n\nReview.\n"
+	write(t, mine, body)
+	ok(t)(SaveSubagent("", Subagent{Name: "reviewer", Description: "Reviews.", Prompt: "Review.", File: mine}))
+	alias := filepath.Join(h, "alias")
+	symlink(t, filepath.Dir(mine), alias)
+	for _, kind := range []string{"command", "rule"} {
+		t.Run(kind, func(t *testing.T) {
+			var result *Result
+			var err error
+			// The target appears after the source has been registered.
+			folder := filepath.Join(h, ".claude", kind+"s")
+			output := filepath.Join(folder, "reviewer.md")
+			symlink(t, filepath.Join(alias, "reviewer.md"), output)
+			if kind == "command" {
+				result, err = SaveCommand("", Command{Name: "reviewer", Prompt: "Another prompt", Agents: []string{"claude"}})
+			} else {
+				result, err = SaveRule("", Rule{Name: "reviewer", Body: "Another body", Agents: []string{"claude"}})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, problem := range result.Problems {
+				if problem.What == kind+":reviewer" && strings.Contains(problem.Error, "source file") && read(t, mine) == body {
+					return
+				}
+			}
+			t.Fatalf("missing conflict for %s at %s: %+v", kind, output, result.Problems)
+		})
+	}
+}

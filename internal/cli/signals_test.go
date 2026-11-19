@@ -67,7 +67,7 @@ func livesOn(t *testing.T, died chan os.Signal, why string) {
 // of the signal
 func TestSignalEndsMagpie(t *testing.T) {
 	died := deaths(t, syscall.SIGTERM)
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	send(t, syscall.SIGTERM)
 	diesOf(t, died, syscall.SIGTERM)
 }
@@ -77,7 +77,7 @@ func TestSignalEndsMagpie(t *testing.T) {
 // skipped the app's OnShutdown and left the terminal on the TUI's screen
 func TestOwnSignalsHandsThemBack(t *testing.T) {
 	died := deaths(t, syscall.SIGTERM)
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	ownSignals()
 	theirs := make(chan os.Signal, 1) // the app's or the TUI's own
 	signal.Notify(theirs, syscall.SIGTERM)
@@ -95,7 +95,7 @@ func TestOwnSignalsHandsThemBack(t *testing.T) {
 // closing under the app or the TUI still ends the probes before magpie
 func TestOwnSignalsKeepsHangUp(t *testing.T) {
 	died := deaths(t, syscall.SIGHUP)
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	ownSignals()
 	send(t, syscall.SIGHUP)
 	diesOf(t, died, syscall.SIGHUP)
@@ -109,7 +109,7 @@ func TestInterruptWhileEndingProbes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	proc.ProbeContext(ctx, "true") // never run: EndProbes waits a while on it
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	_, stop := interruptContext()
 	send(t, syscall.SIGINT)
 	time.Sleep(300 * time.Millisecond) // the handler is ending the probes
@@ -141,7 +141,7 @@ func TestTUIKeepsSignalsWhileLoading(t *testing.T) {
 		return nil
 	}
 	defer func() { tuiRun = old }()
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	if err := runTUI(); err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestSignalSavesTheSessionIndex(t *testing.T) {
 	t.Cleanup(func() { signalSaveSettings.Store(previous) })
 	saved := make(chan struct{}, 1)
 	signalSaveSettings.Store(&signalSaveConfig{save: func() { saved <- struct{}{} }, wait: saveOnSignal})
-	endProbesOnSignal()
+	endProbesOnSignal(nil)
 	send(t, syscall.SIGTERM)
 	diesOf(t, died, syscall.SIGTERM)
 	select {

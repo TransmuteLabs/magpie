@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,7 +94,7 @@ func runOut(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// runCommands are the commands run's switch dispatches on, read from
+// runCommands are the commands the CLI dispatcher handles, read from
 // main.go, so a command added there is covered without a list to keep.
 func runCommands(t *testing.T) []string {
 	t.Helper()
@@ -104,7 +105,7 @@ func runCommands(t *testing.T) []string {
 	var cmds []string
 	for _, d := range f.Decls {
 		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "run" {
+		if !ok || fn.Name.Name != "runWithRestart" {
 			continue
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -119,15 +120,17 @@ func runCommands(t *testing.T) []string {
 				for _, e := range s.(*ast.CaseClause).List {
 					if lit, ok := e.(*ast.BasicLit); ok {
 						v, _ := strconv.Unquote(lit.Value)
-						cmds = append(cmds, v)
+						if !slices.Contains(cmds, v) {
+							cmds = append(cmds, v)
+						}
 					}
 				}
 			}
-			return false
+			return true
 		})
 	}
 	if len(cmds) < 40 {
-		t.Fatalf("read %d commands from run's switch: %v", len(cmds), cmds)
+		t.Fatalf("read %d commands from the CLI dispatcher: %v", len(cmds), cmds)
 	}
 	return append(cmds, "healthcheck", "heap", "cpu", "goroutines", "mtls", "https")
 }

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"os"
 	"sync"
 	"syscall"
 	"testing"
@@ -13,16 +14,23 @@ func TestSignalWaitsForGatewayShutdown(t *testing.T) {
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run(sig.String(), func(t *testing.T) {
 			died := deaths(t, sig)
-			entered, release := make(chan struct{}), make(chan struct{})
+			entered, release := make(chan os.Signal, 1), make(chan struct{})
 			var once sync.Once
 			unhold := func() { once.Do(func() { close(release) }) }
-			finish := stopGatewayOnSignal(func() { close(entered); <-release })
+			finish := stopGatewayOnSignalAs(func(received os.Signal) {
+				entered <- received
+				<-release
+			})
 			defer finish()
 			defer unhold()
-			endProbesOnSignal()
+			profileStopped := make(chan struct{})
+			endProbesOnSignal(func() { close(profileStopped) })
 			send(t, sig)
 			select {
-			case <-entered:
+			case got := <-entered:
+				if got != sig {
+					t.Fatalf("gateway drained for %v, want %v", got, sig)
+				}
 			case got := <-died:
 				t.Fatalf("died of %v before draining the gateway and saving its sessions", got)
 			case <-time.After(5 * time.Second):
@@ -31,6 +39,8 @@ func TestSignalWaitsForGatewayShutdown(t *testing.T) {
 			select {
 			case got := <-died:
 				t.Fatalf("died of %v while gateway shutdown was held", got)
+			case <-profileStopped:
+				t.Fatal("profile stopped before the gateway drained")
 			default:
 			}
 
@@ -43,6 +53,11 @@ func TestSignalWaitsForGatewayShutdown(t *testing.T) {
 			}
 			unhold()
 			diesOf(t, died, sig)
+			select {
+			case <-profileStopped:
+			default:
+				t.Fatal("died before stopping the profile")
+			}
 			select {
 			case <-returned:
 			case <-time.After(5 * time.Second):

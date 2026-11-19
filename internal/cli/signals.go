@@ -25,7 +25,7 @@ import (
 // same; the app and the TUI, which quit on SIGINT and SIGTERM their own way,
 // take those back (ownSignals). A signal magpie was started ignoring (nohup,
 // a background job) stays ignored: asking for it would undo that.
-func endProbesOnSignal() {
+func endProbesOnSignal(stopProfile func()) {
 	caught = nil
 	for _, s := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
 		if !signal.Ignored(s) {
@@ -43,7 +43,7 @@ func endProbesOnSignal() {
 			// the command may spend finishing, and stop asking
 			handled := s == os.Interrupt && interrupts.Load() > 0
 			if !handled {
-				finishSignalGateway(s)
+				finishSignalGateway(s, stopProfile)
 			} else {
 				proc.EndProbes()
 			}
@@ -51,7 +51,7 @@ func endProbesOnSignal() {
 	}(onSignal)
 }
 
-func finishSignalGateway(s os.Signal) {
+func finishSignalGateway(s os.Signal, stopProfile func()) {
 	g := exitGateway.Swap(nil)
 	if g != nil {
 		defer close(g.done)
@@ -63,6 +63,9 @@ func finishSignalGateway(s os.Signal) {
 	// and the session index, or the next start reads every
 	// file a scan read since the last save again
 	saveSessionsOnSignal()
+	if stopProfile != nil {
+		savedWithin(stopProfile, 2*time.Second)
+	}
 	die(s)
 }
 
@@ -113,6 +116,7 @@ var (
 // oneself (Windows), it exits as a shell reports such a process. A var so
 // tests can see what a signal would do.
 var die = func(s os.Signal) {
+	stopSDKComponents()
 	// the plugin hosts it started end with it, as at any exit (#7146):
 	// one renewing a sign-in is given the time EndHosts gives it, and
 	// one past that is killed with what it started

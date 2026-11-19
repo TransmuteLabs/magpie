@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"sync"
 )
 
 const MaskingRules Capability = "masking-rules"
@@ -45,23 +46,29 @@ func (set *MaskingRuleSet) UnmarshalJSON(data []byte) error {
 }
 
 var (
-	maskingKind   = regexp.MustCompile(`^SDK_[A-Z](?:[A-Z0-9_]{0,18}[A-Z0-9])?$`)
-	maskingPrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_:/.-]{2,63}$`)
-	maskingRegex  = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_:/-]{2,63})\[([A-Za-z0-9_-]{1,64})\]\{([1-9][0-9]{0,2})(?:,([1-9][0-9]{0,2}))?\}$`)
+	maskingKind = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^SDK_[A-Z](?:[A-Z0-9_]{0,18}[A-Z0-9])?$`)
+	})
+	maskingPrefix = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_:/.-]{2,63}$`)
+	})
+	maskingRegex = sync.OnceValue(func() *regexp.Regexp {
+		return regexp.MustCompile(`^([A-Za-z][A-Za-z0-9_:/-]{2,63})\[([A-Za-z0-9_-]{1,64})\]\{([1-9][0-9]{0,2})(?:,([1-9][0-9]{0,2}))?\}$`)
+	})
 )
 
 func (rule MaskingRule) Compile() (*regexp.Regexp, error) {
 	invalid := errors.New("invalid declarative masking rule")
-	if !maskingKind.MatchString(rule.Kind) || (rule.Prefix == "") == (rule.Regex == "") {
+	if !maskingKind().MatchString(rule.Kind) || (rule.Prefix == "") == (rule.Regex == "") {
 		return nil, invalid
 	}
 	if rule.Prefix != "" {
-		if !maskingPrefix.MatchString(rule.Prefix) {
+		if !maskingPrefix().MatchString(rule.Prefix) {
 			return nil, invalid
 		}
 		return regexp.Compile(regexp.QuoteMeta(rule.Prefix) + `[A-Za-z0-9_-]{8,}`)
 	}
-	parts := maskingRegex.FindStringSubmatch(rule.Regex)
+	parts := maskingRegex().FindStringSubmatch(rule.Regex)
 	if len(parts) == 0 {
 		return nil, invalid
 	}

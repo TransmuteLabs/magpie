@@ -254,7 +254,7 @@ module-owned storage and scoped recall from built-in Memory. Shared Memory
 mutation and digest lifecycle remain with their current owners.
 Routing, observation, budget and masking have different timing and failure
 contracts. Budget policy enters the built-in reserve and spent owners.
-Reversible masking still needs an SDK adapter.
+The masking owner selects bounded declarative SDK rules under API 1.15.
 
 ## Logging and collection boundaries
 

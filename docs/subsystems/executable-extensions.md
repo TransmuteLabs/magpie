@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.12. Authors declare the minimum contract
+The available SDK contract is API 1.15. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -22,7 +22,7 @@ the same build `VERSION` via `make sdk-js-pack`, with a checked-in development
 placeholder of `0.0.0-alpha.0`; the release owner must pair both outputs from
 the same checkout. This packaging target does not publish or alter ordinary
 application build dependencies. Release versions are distinct from wire API
-1.12 and native ABI 1: manifest minima, negotiation and capability gates retain
+1.15 and native ABI 1. Manifest minima, negotiation and capability gates retain
 their protocol numbering. See the [JS packaging instructions](../../sdk/js/README.md).
 
 | Task or reader | Owning reference |
@@ -72,7 +72,7 @@ compatibility or an untested platform.
 | [`sdk_cli.go`](../../internal/cli/sdk_cli.go) | Installation, inspection, auth and explicit file-plan application |
 
 The public SDK imports no private Magpie package. `FullContract()` advertises
-SDK API `{major: 1, minor: 12}`. The finite operation
+SDK API `{major: 1, minor: 15}`. The finite operation
 registry adds no capability name. Explicit SDK 1.0 manifests
 without composite fields retain their original single-primary behavior and
 need no component configuration. The legacy Go codec interface has an
@@ -382,6 +382,12 @@ Runtime admission and retained refresh use the same manager-before-worker
 lock order. Startup is registered while the manager lock is held, so shutdown
 joins it; neither startup I/O nor waiting for another start holds those locks.
 Restarting a failed transport cannot deadlock a refresh retaining its old lease.
+At CLI exit, including signal exit, Magpie gives the existing default SDK
+manager up to ten seconds to stop and join its components. Exit closes
+admission for the process, including calls arriving after the last manager
+has closed or before a manager has been used.
+The `serve` and `web` restart paths apply the same process-wide fence before
+replacing the executable, including when another process serves the gateway.
 
 A Go-only package needs no Bun process, including a native primary with an
 exec Go service and prebuilt TS UI. Bun components use the app's existing

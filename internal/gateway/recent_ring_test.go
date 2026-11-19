@@ -52,3 +52,65 @@ func TestRecentRingKeepsNoDroppedBodies(t *testing.T) {
 	}
 	runtime.KeepAlive(s)
 }
+
+func TestRecentRingBoundsPreviewBytes(t *testing.T) {
+	server := &Server{}
+	const budget = 8 << 20
+	const withPreviews = budget / (2 * callBodyLimit)
+	for index := range recentMost + 1 {
+		server.record(Call{
+			Route:             int64(index + 1),
+			Status:            200,
+			RequestBody:       strings.Repeat("q", callBodyLimit),
+			ResponseBody:      strings.Repeat("a", callBodyLimit),
+			RequestTruncated:  true,
+			ResponseTruncated: true,
+		})
+	}
+	recent := server.Recent()
+	if len(recent) != recentMost {
+		t.Fatalf("got %d recent calls, want %d", len(recent), recentMost)
+	}
+	var keptBytes int
+	for _, call := range recent {
+		keptBytes += len(call.RequestBody) + len(call.ResponseBody)
+	}
+	if keptBytes != budget {
+		t.Fatalf("ring keeps %d preview bytes, want %d", keptBytes, budget)
+	}
+	for index, call := range recent {
+		wantID := uint64(recentMost + 1 - index)
+		byRoute, found := server.RouteCall(int64(wantID))
+		if !found || byRoute.ID != wantID || call.ID != wantID || call.Status != 200 {
+			t.Fatalf("metadata or route lookup lost for call %d", wantID)
+		}
+		wantSize := 0
+		if index < withPreviews {
+			wantSize = callBodyLimit
+		}
+		if len(byRoute.RequestBody) != wantSize || len(byRoute.ResponseBody) != wantSize {
+			t.Fatalf("wrong previews kept for call %d", wantID)
+		}
+		if want := wantSize != 0; byRoute.RequestTruncated != want || byRoute.ResponseTruncated != want {
+			t.Fatalf("wrong truncation flags for call %d", wantID)
+		}
+	}
+}
+
+func TestRecentRingDropsObserverInput(t *testing.T) {
+	server := &Server{}
+	observer := &laterMasked{plain: make([]byte, 2*callBodyLimit)}
+	call := Call{Status: 200, RequestBody: "preview", maskIn: observer}
+	server.record(call)
+
+	got, found := server.RecentCall(1)
+	if !found || got.RequestBody != call.RequestBody {
+		t.Fatal("recent call lost its request preview")
+	}
+	if got.maskIn != nil {
+		t.Fatal("recent call retains the observer's full request and context")
+	}
+	if call.maskIn != observer || len(observer.plain) != 2*callBodyLimit {
+		t.Fatal("record changed the observer's original request")
+	}
+}

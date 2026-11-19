@@ -733,13 +733,41 @@ sets the title again from every settings read. Only a browser page
 Settings save that leaves `name` out keeps it (`settingsapi.Merge`). See
 `TestInstanceName*` and `instance-name.test.cjs`.
 
+### Automatic process profiles
+
+`cli.Main` starts `gateway.StartAutoProfile` before app or gateway
+initialization when `MAGPIE_PROFILE_DIR` is set. CLI commands that inspect
+or configure a running gateway leave the recorder to that process. The
+recorder shares the CPU profiler reservation with `/v1/magpie/cpu`.
+
+[`autoprofile.go`](../../internal/gateway/autoprofile.go) samples the
+Magpie process and keeps the CPU history in memory. Native resident
+memory or Go heap growth can trigger a capture independently of CPU.
+Continued high usage is capped by a deadline and captures are spaced by
+a cooldown. The highest sampled CPU and memory during a capture are
+recorded separately from the trigger. The peak heap file is refreshed
+when sampled memory rises by another 128 MiB since the last capture of that
+file. Smaller increases still count toward the recorded peak. The final heap
+snapshot on normal completion follows a collection outside the saved CPU
+profile. `magpie serve` and `magpie web` finalize an active capture before
+replacing the executable. An abrupt process exit may leave a partial capture.
+
+CPU slices are individually limited to 1 MiB and heap profiles to 4 MiB.
+Files are published locally under a per-directory lock, with retention
+across launches. A file that exceeds its limit is dropped. See
+`TestAutoProfile*` and the launch and analysis commands in the
+[reference](../reference.md).
+
 ### Recent-call bodies
 
 `providersState` in [`providers.go`](../../internal/gui/providers.go) sends
 recent-call metadata without request or response bodies, including after
 provider writes (#1521: forty calls' bodies made `/api/providers` about
 20 MB). Each call in the gateway's 40-call ring has an `id`, numbered in
-`Server.record`. Opening a recent call on Gateway fetches its captured
+`Server.record`. The ring keeps up to 8 MiB of body previews in total.
+When new previews fill the budget, the oldest previews are released and
+their call rows and headers remain available until the ring evicts them.
+Opening a recent call on Gateway fetches its captured
 previews from `GET /api/gateway/call?id=…` (`Server.RecentCall`), sent
 `Cache-Control: no-store`. The route sits on the same mux as the rest of
 the API, so `magpie web`'s key guard covers it. The bodies are the ones the

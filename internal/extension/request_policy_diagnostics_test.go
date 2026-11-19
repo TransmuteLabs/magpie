@@ -28,9 +28,63 @@ func (current *requestPolicyDiagnosticContext) Done() <-chan struct{} {
 	return current.Context.Done()
 }
 
+func TestRequestPolicyWorkerRecordsRevocationBeforeRecovery(t *testing.T) {
+	for _, cause := range []string{"account", "window", "disable-and-enable"} {
+		t.Run(cause, func(t *testing.T) {
+			manager, scope := requestPolicyManager(t)
+			ctx := requestpolicy.WithConfig(t.Context(), nil)
+			var windowRevoked atomic.Bool
+			ctx = context.WithValue(ctx, windowAdmissionKey{}, func(context.Context) error {
+				if windowRevoked.Load() {
+					return errors.New("window revoked")
+				}
+				return nil
+			})
+			records := make(chan moduleDiagnostic, 2)
+			manager.diagnosticLog = func(record moduleDiagnostic) { records <- record }
+			accepted := 0
+			_, err := callRequestPolicy(ctx, manager, scope, []sdk.RequestRecoveryRequest{rateRecovery()}, false, func(event Event) error {
+				if event.Name != "accepted" {
+					return nil
+				}
+				accepted++
+				if cause == "window" {
+					windowRevoked.Store(true)
+					return nil
+				}
+				if cause == "disable-and-enable" {
+					catalog := NewCatalog(manager.root)
+					if err := catalog.SetEnabled(t.Context(), scope.Plugin, false); err != nil {
+						return err
+					}
+					return catalog.SetEnabled(t.Context(), scope.Plugin, true)
+				}
+				_, err := manager.Store().SaveAccount(Account{
+					Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: json.RawMessage(`{"token":"replacement"}`),
+				}, scope.Generation)
+				return err
+			})
+			if err == nil || accepted != 1 {
+				t.Fatalf("accepted=%d, recovery error=%v", accepted, err)
+			}
+			if len(records) != 1 {
+				t.Fatalf("got %d recovery diagnostics, want 1", len(records))
+			}
+			record := <-records
+			decision := record.RequestPolicy
+			if record.Plugin != scope.Plugin || record.Provider != scope.Provider || record.Account != scope.Account ||
+				record.Operation != scope.Operation || record.Attempt != scope.Attempt || decision == nil ||
+				decision.Step != "asset" || decision.Action != requestpolicy.ActionTerminal || decision.Reason != "revoked" || decision.Retry ||
+				decision.TotalRetries != 0 || decision.ProviderRetries != 0 {
+				t.Fatalf("incorrect revocation diagnostic: %+v decision=%+v", record, decision)
+			}
+		})
+	}
+}
+
 func TestRequestPolicyRevocationDiagnosticsUseCommonOwner(test *testing.T) {
 	for _, phase := range []string{"before-admission", "during-wait"} {
-		for _, cause := range []string{"disable", "configuration", "account", "lease", "network", "window", "canceled", "output"} {
+		for _, cause := range []string{"disable", "disable-and-enable", "configuration", "account", "lease", "network", "window", "canceled", "output"} {
 			test.Run(phase+"/"+cause, func(test *testing.T) {
 				manager, scope := requestPolicyManager(test)
 				lease, err := manager.Acquire(test.Context(), scope.Plugin)
@@ -54,9 +108,14 @@ func TestRequestPolicyRevocationDiagnosticsUseCommonOwner(test *testing.T) {
 				current := &requestPolicyDiagnosticContext{Context: ctx, budget: requestpolicy.FromContext(ctx)}
 				current.revoke = func() {
 					switch cause {
-					case "disable":
+					case "disable", "disable-and-enable":
 						if err := manager.SetEnabled(test.Context(), scope.Plugin, false); err != nil {
 							test.Fatal(err)
+						}
+						if cause == "disable-and-enable" {
+							if err := manager.SetEnabled(test.Context(), scope.Plugin, true); err != nil {
+								test.Fatal(err)
+							}
 						}
 					case "configuration":
 						if _, err := manager.CompareAndSwapModuleConfig(test.Context(), scope.Plugin, lease.ConfigVersion(), json.RawMessage(`{}`)); err != nil {
@@ -131,6 +190,20 @@ func TestRequestPolicyRevocationDiagnosticsUseCommonOwner(test *testing.T) {
 				}
 				if used, _ := current.budget.Counts(""); used != wantRetries {
 					test.Fatalf("diagnostic changed retry admission: %d want=%d", used, wantRetries)
+				}
+				if cause == "disable-and-enable" {
+					fresh, err := manager.Acquire(test.Context(), scope.Plugin)
+					if err != nil {
+						test.Fatal(err)
+					}
+					defer fresh.Close()
+					freshContext := beginRequestPolicy(requestpolicy.WithConfig(test.Context(), &requestpolicy.Config{
+						Defaults: requestpolicy.Options{BaseDelayMS: &zero},
+					}), fresh, scope, sdk.MethodToolCall, nil)
+					result, err := manager.recoverRequest(freshContext, scope, raw, hostAuthority{manifest: fresh.Manifest(), method: sdk.MethodToolCall})
+					if decision, ok := result.(sdk.RequestRecoveryResult); err != nil || !ok || !decision.Retry {
+						test.Fatalf("fresh enablement could not retry: result=%+v err=%v", result, err)
+					}
 				}
 			})
 		}

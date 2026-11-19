@@ -62,18 +62,23 @@ func isPixels(size string) bool {
 	return err1 == nil && err2 == nil && x > 0 && y > 0
 }
 
-// settleTier reads a drawing's tier: resolution as given, or a tier given
-// as size ("4K"; d.shape() leaves it out where the tier is sent). A
-// WIDTHxHEIGHT size is the size asked, and no tier goes beside it. A
-// resolution that isn't a tier (or auto) is an error.
+// settleTier reads a drawing's tier from resolution, or from a tier given
+// as size ("4K"; d.shape() leaves it out where the tier is sent). Explicit
+// auto discards a tier in size. A WIDTHxHEIGHT size is the size asked, and
+// no tier goes beside it. An unrecognized resolution is an error.
 func (d *drawing) settleTier(resolution string) error {
 	resolution = strings.TrimSpace(resolution)
 	t := tierOf(resolution)
-	if t == "" && resolution != "" && !strings.EqualFold(resolution, "auto") {
+	auto := strings.EqualFold(resolution, "auto")
+	if t == "" && resolution != "" && !auto {
 		return fmt.Errorf("resolution is 1K, 2K or 4K (or auto for the model's own), not %q", resolution)
 	}
-	if st := tierOf(d.Size); st != "" && t == "" && !strings.EqualFold(resolution, "auto") {
-		t = st
+	if st := tierOf(d.Size); st != "" {
+		if auto {
+			d.Size = ""
+		} else if t == "" {
+			t = st
+		}
 	}
 	if isPixels(d.Size) {
 		t = ""
@@ -83,14 +88,14 @@ func (d *drawing) settleTier(resolution string) error {
 }
 
 // ImageTier is the resolution the image MCP asks the images API for: the
-// one the agent named (arg: 1K, 2K, 4K, or auto for none), else, unless
-// the agent gave a size of its own (WIDTHxHEIGHT, or a tier as size),
-// Settings › Images › Resolution's. "" asks for none.
+// one the agent named (1K, 2K, 4K, or auto for the model default), else
+// Settings › Images › Resolution's unless the agent gave a size of its own
+// (WIDTHxHEIGHT, or a tier as size). "" omits resolution from the request.
 func ImageTier(arg, size string) (string, error) {
 	arg = strings.TrimSpace(arg)
 	switch {
 	case strings.EqualFold(arg, "auto"):
-		return "", nil
+		return "auto", nil
 	case tierOf(arg) != "":
 		return tierOf(arg), nil
 	case arg != "":
@@ -412,10 +417,12 @@ func PixelsSaid(sizes []string, tier string) string {
 }
 
 // AskedTier is the tier an image MCP asks a drawing at, for PixelsSaid:
-// the one sent as resolution, else one given as size ("4K").
-func AskedTier(tier, size string) string {
-	if tier != "" {
-		return tier
+// the one sent as resolution, else one given as size ("4K"). An explicit
+// auto asks for the model default.
+func AskedTier(resolution, size string) string {
+	drawing := drawing{Size: size}
+	if drawing.settleTier(resolution) != nil {
+		return ""
 	}
-	return tierOf(size)
+	return drawing.Tier
 }

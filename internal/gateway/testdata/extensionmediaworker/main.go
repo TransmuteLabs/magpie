@@ -87,7 +87,11 @@ func execute(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 	case sdk.OperationAudioTranscribe, sdk.OperationAudioTranslate:
 		body = []byte(`{"text":"fixture transcript"}`)
 	case sdk.OperationImageGenerate, sdk.OperationImageEdit:
-		body = []byte(`{"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=="}]}`)
+		image := map[string]string{"b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=="}
+		if strings.Contains(string(request.Body), "echo image request") {
+			image["revised_prompt"] = string(request.Body)
+		}
+		body, _ = json.Marshal(map[string]any{"data": []map[string]string{image}})
 	case sdk.OperationVideoCreate, sdk.OperationVideoGet, sdk.OperationVideoRemix:
 		body, _ = json.Marshal(map[string]any{"id": "same-video", "model": "fixture-movie", "status": "completed", "fixture_account": account})
 	case sdk.OperationVideoContent:

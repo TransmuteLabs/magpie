@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 var png = []byte("\x89PNG\r\n\x1a\n fake")
@@ -189,6 +191,40 @@ func TestGenerateSavesInTheProject(t *testing.T) {
 	r = c.call("tools/call", map[string]any{"name": "generate_image", "arguments": map[string]any{"prompt": "bluer", "path": "assets/hero.png"}})
 	if !strings.Contains(text(r), filepath.Join(project, "assets", "hero-2.png")) {
 		t.Fatalf("%v", r)
+	}
+}
+
+func TestGenerateForwardsAutoResolution(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	st := settings.Load()
+	st.ImageResolution = "2K"
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	g := &gw{}
+	c := initialized(t, g, t.TempDir())
+	for _, args := range []map[string]any{
+		{"prompt": "a magpie", "size": "4K", "resolution": " Auto "},
+		{"prompt": "a magpie"},
+	} {
+		r := c.call("tools/call", map[string]any{"name": "generate_image", "arguments": args})
+		if r["isError"] == true {
+			t.Fatalf("drawn: %v", r)
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.body) != 2 {
+		t.Fatalf("gateway got %v", g.body)
+	}
+	for i, expected := range []struct {
+		resolution string
+		size       any
+	}{{"auto", "4K"}, {"2K", nil}} {
+		var body map[string]any
+		if json.Unmarshal([]byte(g.body[i]), &body) != nil || body["size"] != expected.size || body["resolution"] != expected.resolution {
+			t.Fatalf("gateway got %s", g.body[i])
+		}
 	}
 }
 

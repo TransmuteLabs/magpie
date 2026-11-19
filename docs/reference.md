@@ -2933,6 +2933,41 @@ profile at a time, so a second `magpie cpu` while one records is refused
 409; one whose caller hangs up stops recording. The route answers the same
 callers as `/v1/magpie/heap`, and refuses the same ones 403.
 
+For intermittent spikes, start the app or `magpie serve` with
+`MAGPIE_PROFILE_DIR` set to a dedicated absolute directory. Quit the app
+first if it is already running. Run this from a terminal on macOS.
+
+```sh
+open --env "MAGPIE_PROFILE_DIR=$HOME/Library/Logs/magpie/profiles" -a /Applications/magpie.app
+```
+
+Magpie records 15-second Go CPU profiles from startup and holds the last
+eight completed slices in memory. It saves them locally when it samples
+at least 85% of one CPU core or 1.5 GiB of process resident memory or Go heap
+objects. Each capture contains the CPU slices leading up to the trigger
+and through the next 30 seconds, extended to as much as 90 seconds while
+the process remains above a threshold. It also saves `heap-before.pb.gz`,
+`heap-peak.pb.gz`, and `heap-after.pb.gz`. `incident.json` names the build,
+PID, trigger, sampled peaks, and whether the process recovered at the end.
+The directory keeps the newest three captures. Automatic recording owns
+Go's CPU profiler while active and `magpie cpu` reports that it is in use.
+The app reads the environment on each launch.
+
+From a capture's directory, use the CPU files covering the incident and
+compare the heap snapshots from that same process.
+
+```sh
+go tool pprof -top -cum cpu-*.pb.gz
+go tool pprof -top -inuse_space -base heap-before.pb.gz heap-after.pb.gz
+go tool pprof -top -alloc_space -base heap-before.pb.gz heap-peak.pb.gz
+```
+
+Use `-list 'Function'` for a report by source line. Heap profiles attribute
+memory to Go allocation stacks. The peak snapshot uses the samples
+available from Go's recent garbage-collection cycles. On normal capture
+completion Magpie collects garbage before taking the final snapshot,
+after the incident's CPU recording has been saved.
+
 `magpie goroutines [<file>]` is for a report of magpie stuck at something
 while it goes on running, such as an app that kept an old partner list for
 days (#3362): killing it to look would end what was stuck. It asks the same

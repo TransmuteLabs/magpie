@@ -29,6 +29,13 @@ release after the module is disabled. Listing and help never grant read consent.
 | File plan preparation and execution | [`actions.go`](../../internal/extension/actions.go), `Actions.AgentInspect`, `AgentPlan`, `SessionConvert`, `Execute`, `ActionPolicy`, `ActionPlan` |
 | Module lifecycle and scoped state | [`manager.go`](../../internal/extension/manager.go), `Default`, `Manifest`, `Invoke`, `Store`; [`store.go`](../../internal/extension/store.go), `Store.GetAccount` |
 
+The gateway resolves SDK client IDs, declared aliases and User-Agent prefixes
+from the same enabled agent discovery used by ordinary agent commands.
+[`extension_clients.go`](../../internal/agent/extension_clients.go) caches that
+projection against the catalog file identity. Install, replacement, disable
+and removal affect the next request after the catalog changes. Saved
+disconnection records remain available to agent commands for recovery.
+
 ## API 1.6 JSONL session sources
 
 The separate API 1.8 rooted storage authoring and adapter seam is described in
@@ -306,6 +313,8 @@ OpenCode discovery (`/v1/models?format=opencode` and `opencode2`) uses the
 caller's own model catalog when its identity names an owned SDK profile of
 OpenCode and the installed module is enabled at the owning package and
 configuration revisions.
+On the ordinary discovery URL, the profile ID comes from the agent-scoped
+token or the User-Agent product name, before usage's prefix matching.
 Both formats use that same profile for model visibility, ordering, limits and
 the gateway key's model restrictions. Other callers receive the built-in
 OpenCode catalog through the same key checks.

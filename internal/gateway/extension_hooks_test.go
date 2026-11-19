@@ -158,11 +158,41 @@ func sdkHookRequest(ctx context.Context, base string, stream bool) *http.Request
 
 func sdkHookProvider(t *testing.T, handler http.HandlerFunc) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(handler)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		handler(w, r)
+	}))
 	t.Cleanup(server.Close)
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "private-provider-value", Models: []string{"m1"}, Chat: server.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
+	return server
+}
+
+func sdkHookRecall(t *testing.T, requests chan<- sdkHookDelivery) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		var value sdkHookDelivery
+		if err := json.NewDecoder(r.Body).Decode(&value); err != nil || value.Actor != "sdk" || value.Request == nil {
+			http.Error(w, "invalid recall delivery", http.StatusBadRequest)
+			return
+		}
+		select {
+		case requests <- value:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Error("unexpected duplicate SDK recall")
+			w.WriteHeader(http.StatusConflict)
+		}
+	}))
+	t.Cleanup(server.Close)
 	return server
 }
 
@@ -425,13 +455,7 @@ export async function onResponse(reply,ctx) {
 func TestSDKGatewayRemoteOriginSkipsMemory(t *testing.T) {
 	fresh(t)
 	requests := make(chan sdkHookDelivery, 1)
-	recall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var value sdkHookDelivery
-		_ = json.NewDecoder(r.Body).Decode(&value)
-		requests <- value
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(recall.Close)
+	recall := sdkHookRecall(t, requests)
 	manager := installSDKGatewayHook(t, sdkHookConfig{Marker: "private memory", RequestURL: recall.URL}, sdk.GatewayHookDescriptor{Request: true})
 	_, secrets := newCaller(t, "SDK remote caller")
 	input := make(chan []byte, 1)
@@ -480,21 +504,32 @@ func TestSDKGatewayBrowserMemoryPermission(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh(t)
 			requests := make(chan sdkHookDelivery, 1)
-			recall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var value sdkHookDelivery
-				_ = json.NewDecoder(r.Body).Decode(&value)
-				requests <- value
-				w.WriteHeader(http.StatusNoContent)
-			}))
-			t.Cleanup(recall.Close)
+			recall := sdkHookRecall(t, requests)
 			manager := installSDKGatewayHook(t, sdkHookConfig{Marker: "browser policy", RequestURL: recall.URL},
 				sdk.GatewayHookDescriptor{Request: true, Origins: tc.origins})
 			input := make(chan []byte, 1)
-			sdkHookProvider(t, func(w http.ResponseWriter, r *http.Request) {
+			upstream := sdkHookProvider(t, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
-				input <- body
-				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]}`)
+				select {
+				case input <- body:
+					_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"answer"},"finish_reason":"stop"}]}`)
+				default:
+					t.Error("unexpected duplicate SDK fixture inference")
+					w.WriteHeader(http.StatusConflict)
+				}
 			})
+			for _, fixture := range []*httptest.Server{recall, upstream} {
+				client := fixture.Client()
+				client.Timeout = 2 * time.Second
+				probe, err := client.Get(fixture.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				probe.Body.Close()
+				if probe.StatusCode != http.StatusNotFound {
+					t.Fatalf("fixture GET probe got HTTP %d, want 404", probe.StatusCode)
+				}
+			}
 			gateway := httptest.NewServer(lanGuard(New().Handler()))
 			defer func() { gateway.CloseClientConnections(); gateway.Close() }()
 			request := sdkHookRequest(t.Context(), gateway.URL, false)

@@ -82,6 +82,10 @@ func webShutdownChild(t *testing.T, mode, phase, home string) {
 		if _, err := os.Stat(filepath.Join(settings.Dir(), "claude-shelf.json")); err != nil {
 			t.Fatalf("Web.Wait did not keep the idle Claude session before %s: %v", mode, err)
 		}
+		_, err := os.Stat(filepath.Join(home, "before-restart"))
+		if mode == "restart" && err != nil || mode == "quit" && !os.IsNotExist(err) {
+			t.Fatalf("pre-replacement cleanup on %s: %v", mode, err)
+		}
 	}
 	provider.ForgetAccounts()
 	gw := serveGateway()
@@ -121,7 +125,11 @@ func webShutdownChild(t *testing.T, mode, phase, home string) {
 	// Reexec passes these arguments to this test binary, now as the new
 	// magpie. No production process or installed binary is restarted.
 	os.Args[len(os.Args)-2] = "after"
-	if err := w.Wait(); err != nil {
+	if err := w.Wait(func() {
+		if err := os.WriteFile(filepath.Join(home, "before-restart"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if mode == "restart" {

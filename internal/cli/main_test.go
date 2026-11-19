@@ -2,8 +2,10 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"runtime/pprof"
 	"strings"
 	"testing"
 
@@ -23,12 +25,15 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		testenv.Offline()
-		version = "0.1.9999"
-		if err := serve(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		replace := serveReexec
+		serveReexec = func(exe string, args, env []string) error {
+			if err := pprof.StartCPUProfile(io.Discard); err != nil {
+				return fmt.Errorf("CPU recorder still active before exec: %w", err)
+			}
+			pprof.StopCPUProfile()
+			return replace(exe, args, env)
 		}
-		os.Exit(0)
+		Main("0.1.9999")
 	}
 	// With MAGPIE_CLI_TEST_HOST_EXIT set, it starts a plugin host and
 	// ends as magpie does (plugin_host_exit_cli_test.go).
@@ -38,6 +43,9 @@ func TestMain(m *testing.M) {
 		}
 		testenv.Offline()
 		hostThenExit(how)
+	}
+	if role := os.Getenv(sdkExitEnv); role != "" {
+		os.Exit(sdkExitChild(role))
 	}
 	os.Exit(testenv.RunIn(m, func(string) { testenv.Offline() }))
 }

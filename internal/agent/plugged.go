@@ -29,21 +29,7 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/update"
-	"github.com/yetone/magpie/internal/usage"
 )
-
-func init() {
-	// the agents plugins add come and go, unlike magpie's own; one whose
-	// id is a built-in's is the built-in's, which the gateway asks first
-	usage.PluginAgents = func() []usage.Known {
-		list, _ := agentplug.List()
-		out := make([]usage.Known, 0, len(list))
-		for _, p := range list {
-			out = append(out, usage.Known{ID: p.Desc.ID, Names: []string{p.Desc.ID}, UA: p.Desc.UA})
-		}
-		return out
-	}
-}
 
 // pluggedStash is what magpie keeps of an agent plugin's file while it is
 // wired: what was under each key it wrote (absent where there was nothing,

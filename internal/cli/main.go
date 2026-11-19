@@ -24,6 +24,7 @@ import (
 	"github.com/yetone/magpie/internal/claudetui"
 	"github.com/yetone/magpie/internal/codexrelay"
 	"github.com/yetone/magpie/internal/davsync"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/library"
@@ -259,13 +260,23 @@ func Main(v string) {
 		// Claude Code, signing in for magpie, handed over the page to open
 		return
 	}
-	endProbesOnSignal()
 	gateway.Version = version
+	var stopProfile func()
+	if dir := os.Getenv("MAGPIE_PROFILE_DIR"); dir != "" && servesPages(os.Args[1:]) {
+		stopProfile, err = gateway.StartAutoProfile(dir, version)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "magpie: auto profile:", err)
+		}
+	}
+	endProbesOnSignal(stopProfile)
 	netproxy.Install()
 	update.GUI = hasGUI
-	err = run(os.Args[1:])
+	err = runWithRestart(os.Args[1:], func() { prepareReexec(stopProfile) })
 	proc.EndProbes() // a CLI still being asked something isn't left to init
 	sessions.Saved() // the session index kept, for the next run
+	if stopProfile != nil {
+		stopProfile()
+	}
 	if err != nil {
 		// a command with exit codes of its own (quota wait) says which
 		code := 1
@@ -287,8 +298,25 @@ func Main(v string) {
 // models outlived the command that started it, its Chrome profiles held
 // (#7146).
 func exit(code int) {
+	stopSDKComponents()
 	plugin.EndHosts()
 	endProcess(code)
+}
+
+func stopSDKComponents() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := extension.EndDefault(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "magpie: stop SDK components:", err)
+	}
+}
+
+func prepareReexec(stopProfile func()) {
+	if stopProfile != nil {
+		stopProfile()
+	}
+	stopSDKComponents()
+	plugin.EndHosts()
 }
 
 // runTUI runs the TUI, which quits on Ctrl+C and SIGTERM itself once it
@@ -362,6 +390,10 @@ func servesPages(args []string) bool {
 }
 
 func run(args []string) error {
+	return runWithRestart(args, func() { prepareReexec(nil) })
+}
+
+func runWithRestart(args []string, beforeRestart func()) error {
 	// a command that saved a provider or a group ends with the agents'
 	// files written, which its save no longer waits for; and a test's run
 	// leaves the catalog change hook as it found it
@@ -612,7 +644,7 @@ func run(args []string) error {
 	case "tui":
 		return runTUI()
 	case "web":
-		return webCmd(args[1:])
+		return webCmd(args[1:], beforeRestart)
 	case "app", "gui":
 		// `magpie gui settings`: the window on that tab, as a restart to
 		// update from it comes back (update.RelaunchArgs)
@@ -674,7 +706,7 @@ func run(args []string) error {
 	case "group":
 		return groupCmd(args)
 	case "serve":
-		return serveCmd(args[1:])
+		return serveCmd(args[1:], beforeRestart)
 	case "gateway-key":
 		return gatewayKeys(args)
 	case "accounts", "account":

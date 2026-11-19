@@ -90,6 +90,10 @@ func (s *Server) cpuProfile(w http.ResponseWriter, r *http.Request) {
 		secs = n
 	}
 	if !cpuRecording.CompareAndSwap(false, true) {
+		if autoProfiling.Load() {
+			writeError(w, provider.Chat, http.StatusConflict, "magpie is recording automatically under MAGPIE_PROFILE_DIR")
+			return
+		}
 		writeError(w, provider.Chat, http.StatusConflict, "magpie is recording a CPU profile already: wait for that one to finish, then run magpie cpu again")
 		return
 	}

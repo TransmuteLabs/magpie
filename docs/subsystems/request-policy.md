@@ -148,6 +148,11 @@ cannot select a different model. Durable acceptance contradicts
 acceptance observed during the host wait. A separately named `read-only`
 download may still retry after an earlier paid step. Published output and
 revoked selection remain barriers for both kinds of recovery.
+When a valid recovery callback arrives after account or window access is
+revoked, the recovery owner records the terminal decision against the
+original scope before returning the refusal.
+Disabling a module revokes retry authority for its active calls. Re-enabling
+it gives retry authority to new calls in the new enablement generation.
 
 A callback result is an intermediate step diagnostic. It cannot become the
 final response's routing authority. For an entire execution refused before

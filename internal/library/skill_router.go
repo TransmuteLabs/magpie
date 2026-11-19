@@ -476,7 +476,7 @@ func (l *Library) routerCommands(t *Target, routed map[string]bool, a *Applied, 
 	if l.kept == nil {
 		l.kept = newBackups()
 	}
-	a.RouterCommands = syncOwnFiles(t, "command", a.RouterCommands, want, l.kept, res)
+	a.RouterCommands = l.syncOwnFiles(t, "command", a.RouterCommands, want, l.kept, res)
 }
 
 // routerCommandsDir is Claude Code's commands folder, beside the settings

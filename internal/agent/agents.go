@@ -32,11 +32,13 @@ import (
 func init() {
 	usage.Agents = func() []usage.Known {
 		var out []usage.Known
-		for _, a := range Clients() {
+		home, cfg := homes()
+		for _, a := range ClientsIn(onMachineAll(home, cfg)) {
 			out = append(out, usage.Known{ID: a.ID, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
 		}
 		return out
 	}
+	usage.PluginAgents = pluginClients
 	// the Sessions page reads the sessions of the agents in WSL distros
 	sessions.WSLHomes = wslHomes
 	sessions.WSLRunning = WSLRunning

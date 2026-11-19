@@ -239,7 +239,7 @@ func (l *Library) syncCommands(t *Target, b *backups, res *Result) {
 			a.RouterCommands = slices.Delete(a.RouterCommands, i, i+1)
 		}
 	}
-	a.Commands = syncOwnFiles(t, "command", had, files, b, res)
+	a.Commands = l.syncOwnFiles(t, "command", had, files, b, res)
 }
 
 // ---- changes ---------------------------------------------------------------

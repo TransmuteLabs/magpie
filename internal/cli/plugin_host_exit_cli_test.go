@@ -74,7 +74,7 @@ func hostThenExit(how string) {
 	version = "0.1.9999"
 	if how == "signal" {
 		// before any host starts, as in Main
-		endProbesOnSignal()
+		endProbesOnSignal(nil)
 	}
 	go plugin.AccountUsage(context.Background(), "stuckco", "")
 	for deadline := time.Now().Add(time.Minute); !strings.Contains(readString(os.Getenv("STUCK_TRACE")), `"signal"`); {

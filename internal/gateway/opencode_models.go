@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -31,6 +32,20 @@ type OpenCodeModel struct {
 // which writes OpenCode's config.
 var OpenCodeModels func(ctx context.Context, caller string, two bool) (catalog string, models []OpenCodeModel)
 
+// The agent adapter checks the exact caller against the current SDK binding.
+// A usage prefix such as opencode can hide a profile installed since startup.
+func openCodeCatalogCaller(r *http.Request) string {
+	if id := pathAgent(r); id != "" {
+		return id
+	}
+	if id, ok := strings.CutPrefix(callerKey(r), Token+"-"); ok && id != "" {
+		return id
+	}
+	name, _, _ := strings.Cut(strings.TrimSpace(r.UserAgent()), "/")
+	name, _, _ = strings.Cut(name, " ")
+	return strings.ToLower(name)
+}
+
 // openCodeModels answers /v1/models?format=opencode and =opencode2:
 // {"models": [{"id", "entry"}]}, a list so the order stays magpie's (a
 // JSON object's integer-like keys come first in JavaScript). Only the
@@ -39,7 +54,7 @@ func openCodeModels(w http.ResponseWriter, r *http.Request, two bool) {
 	agent := "opencode"
 	list := []OpenCodeModel{}
 	if OpenCodeModels != nil {
-		agent, list = OpenCodeModels(r.Context(), agentOf(r), two)
+		agent, list = OpenCodeModels(r.Context(), openCodeCatalogCaller(r), two)
 	}
 	shown, _ := provider.CatalogFor(agent)
 	may := map[string]bool{}

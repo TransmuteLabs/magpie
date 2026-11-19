@@ -155,7 +155,8 @@ func TestImageTierPrecedence(t *testing.T) {
 		{"", "1024x1024", ""},
 		{"", "4K", ""}, // the size's own tier, read by the gateway
 		{"4K", "", "4K"},
-		{"auto", "", ""},
+		{"auto", "", "auto"},
+		{" Auto ", "4K", "auto"},
 	} {
 		if got, err := ImageTier(c.arg, c.size); err != nil || got != c.want {
 			t.Errorf("resolution %q size %q: %q (%v), want %q", c.arg, c.size, got, err, c.want)
@@ -255,6 +256,52 @@ func TestImagesAPIResolution(t *testing.T) {
 
 	if code, _, raw := postImages(t, s, "/v1/images/generations", "application/json", `{"model":"relay/gpt-image-2","prompt":"a magpie","resolution":"8K"}`); code != 400 || !strings.Contains(raw, "1K, 2K or 4K") {
 		t.Fatalf("8K: %d %s", code, raw)
+	}
+}
+
+func TestImagesAPIAutoOverridesSizeTier(t *testing.T) {
+	s, e := tierEaseled(t, pngBytes)
+	for _, size := range []string{"4K", "1536x1024", "16:9"} {
+		body := `{"model":"relay/gpt-image-2","prompt":"a magpie","size":"` + size + `","resolution":"auto"}`
+		if code, _, raw := postImages(t, s, "/v1/images/generations", "application/json", body); code != http.StatusOK {
+			t.Fatalf("auto with %q: %d %s", size, code, raw)
+		}
+	}
+	sent := e.sent()
+	if len(sent) != 3 || sent[0]["size"] != nil || sent[1]["size"] != "1536x1024" || sent[2]["size"] != "16:9" {
+		t.Fatalf("auto lost a shape or forwarded a tier: %v", sent)
+	}
+	for _, body := range sent {
+		if body["resolution"] != nil {
+			t.Fatalf("model-default drawing sent %v", body)
+		}
+	}
+}
+
+func TestImageMCPTellsOnlyTheEffectiveTier(t *testing.T) {
+	s, e := tierEaseled(t, pngOf(1, 1))
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	t.Cleanup(s.imageStore.running.Wait)
+	st := settings.Load()
+	st.ImageResolution = "2K"
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	h := lanGuard(s.Handler())
+	for _, test := range []struct{ resolution, size string }{{"auto", "4K"}, {"4K", "1536x1024"}} {
+		m := readImageReply(t, imagePost(h, "127.0.0.1:5000", imageToolCall(GenerateImageTool, map[string]any{
+			"prompt": "a magpie", "model": "relay/gpt-image-2", "size": test.size, "resolution": test.resolution,
+		})))
+		if m.Result.IsError {
+			t.Fatalf("drawn: %+v", m)
+		}
+		if text := m.Result.Content[0].Text; !strings.Contains(text, "1x1 pixels") || strings.Contains(text, "asked") {
+			t.Fatalf("resolution %q size %q reported a requested tier: %q", test.resolution, test.size, text)
+		}
+	}
+	if sent := e.sent(); len(sent) != 2 || sent[0]["size"] != nil || sent[0]["resolution"] != nil ||
+		sent[1]["size"] != "1536x1024" || sent[1]["resolution"] != nil {
+		t.Fatalf("incorrect effective size: %v", sent)
 	}
 }
 

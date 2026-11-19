@@ -43,7 +43,10 @@ func TestServeRestartsIntoAnUpdate(t *testing.T) {
 	ln.Close()
 
 	cmd := exec.Command(bin, "serve")
-	cmd.Env = append(os.Environ(), "MAGPIE_CLI_TEST_SERVE=1", "MAGPIE_ADDR="+addr)
+	cmd.Env = append(os.Environ(), "MAGPIE_CLI_TEST_SERVE=1", "MAGPIE_ADDR="+addr,
+		"MAGPIE_PROFILE_DIR="+filepath.Join(dir, "profiles"))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -58,12 +61,20 @@ func TestServeRestartsIntoAnUpdate(t *testing.T) {
 		}
 		select {
 		case <-ended:
-			t.Fatal("serve ended before it served")
+			t.Fatalf("serve ended before it served: %s", stderr.String())
 		default:
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("serve didn't answer")
 		}
+	}
+	profile, err := c.Get("http://" + addr + "/v1/magpie/cpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.Body.Close()
+	if profile.StatusCode != http.StatusConflict {
+		t.Fatalf("serve started without the automatic CPU recorder: HTTP %d", profile.StatusCode)
 	}
 
 	// the update: a new program renamed over the old, as an update puts
@@ -88,7 +99,7 @@ func TestServeRestartsIntoAnUpdate(t *testing.T) {
 		}
 		select {
 		case <-ended:
-			t.Fatal("serve ended instead of running the update in its place")
+			t.Fatalf("serve ended instead of running the update in its place: %s", stderr.String())
 		default:
 		}
 		if time.Now().After(deadline) {

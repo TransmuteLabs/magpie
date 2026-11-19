@@ -86,10 +86,24 @@ func TestNativeImageHiddenSystemOwnershipFailsClosed(t *testing.T) {
 	if info.Sys().(*syscall.Stat_t).Uid == 0 {
 		t.Skip("requires an isolated user namespace that hides host root ownership")
 	}
-	distribution := nativeBuildExample(t)
+	// Hidden dependencies permit one opaque native image per process.
+	if *nativeExampleDistribution == "" {
+		distribution := nativeBuildExample(t)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		command := proc.CommandContext(ctx, os.Args[0],
+			"-test.run=^TestNativeImageHiddenSystemOwnershipFailsClosed$", "-test.v",
+			"-native-test-distribution="+distribution)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("hidden native system ownership child failed: %v\n%s", err, output)
+		} else {
+			t.Log(string(output))
+		}
+		return
+	}
 	manager := NewManager(filepath.Join(t.TempDir(), "catalog"))
 	defer managerReleaseClose(t, manager)
-	entry, err := manager.Install(t.Context(), distribution)
+	entry, err := manager.Install(t.Context(), *nativeExampleDistribution)
 	if err != nil {
 		t.Fatal(err)
 	}

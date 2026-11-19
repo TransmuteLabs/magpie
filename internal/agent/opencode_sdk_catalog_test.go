@@ -10,10 +10,16 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func TestOpenCodeDiscoveryUsesAdoptedSDKCatalog(t *testing.T) {
+	// Production can initialize usage's built-in UA table before the profile
+	// is installed. Discovery must still recognize the profile's exact ID.
+	if got := usage.AgentOf("opencode/2.0"); got != "opencode" {
+		t.Fatalf("built-in OpenCode user agent = %q", got)
+	}
 	descriptor := launchAgentDescriptor()
 	descriptor.ID = "opencode-sdk"
 	descriptor.Profile = &sdk.AgentProfile{Target: "opencode"}
@@ -104,7 +110,7 @@ func TestOpenCodeDiscoveryUsesAdoptedSDKCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("active-profile", profileToken, "", []string{"profile/two", "shared/common", "profile/one"}, 131072)
-	check("restricted-profile", secret, descriptor.ID, []string{"shared/common", "profile/one"}, 131072)
+	check("restricted-profile", secret, descriptor.ID+"/2.0", []string{"shared/common", "profile/one"}, 131072)
 	check("builtin-token", gateway.TokenFor("opencode"), "", builtin, 65536)
 	check("unidentified-client", gateway.Token, "curl/8", builtin, 65536)
 	config, err := host.ModuleConfig(t.Context(), "fixture.agent")

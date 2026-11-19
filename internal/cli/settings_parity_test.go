@@ -119,16 +119,16 @@ func TestSettingsCLISetsWhatTheWindowSaves(t *testing.T) {
 			t.Errorf("no page sends %q as %s to %s any more: send it in a save of POST /api/settings, or name the call that saves it", k, own.field, own.call)
 		}
 	}
+	operatorSettings := []string{"requestPolicy", "gatewayBudgetPolicy", "redactRuleSet"}
 	for _, k := range settingsapi.Keys {
-		if _, own := ownRoute[k]; !own && !slices.Contains(gui, k) && k != "requestPolicy" {
+		if _, own := ownRoute[k]; !own && !slices.Contains(gui, k) && !slices.Contains(operatorSettings, k) {
 			t.Errorf("`magpie settings` sets %q, which no page sends", k)
 		}
 	}
-	// Request policy is structured operator configuration exposed by the shared
-	// settings API and CLI, without a page editor (subsystems/request-policy.md).
-	// Keep this explicit exception only until a page owns its editing contract.
-	if slices.Contains(gui, "requestPolicy") || !settingsapi.Known("requestPolicy") {
-		t.Fatal("update the structured requestPolicy CLI-only exception")
+	for _, k := range operatorSettings {
+		if slices.Contains(gui, k) || !settingsapi.Known(k) {
+			t.Errorf("update the operator-only setting exception for %q", k)
+		}
 	}
 }
 

@@ -60,6 +60,37 @@ func PlanExtension(ctx context.Context, host extension.ActionRuntime, plugin str
 // Agent/NativeConnection API the UI and agent commands already use.
 func extensionAgents(home string, existing []*Agent, errs map[string]string) []*Agent {
 	host := extension.Default()
+	out := installedExtensionAgents(host, home, existing, errs)
+	if _, err := os.Lstat(extensionBindingPath()); os.IsNotExist(err) {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ledger, err := extensionBindingObserve(ctx)
+	if err != nil {
+		if errs != nil {
+			errs["sdk-ownership"] = err.Error()
+		}
+		return out
+	}
+	for _, record := range ledger.Records {
+		if !extensionSameHome(record.Home, home) || record.Phase == "disconnected" {
+			continue
+		}
+		if slices.ContainsFunc(out, func(a *Agent) bool {
+			return a.ID == record.Agent && a.extensionMetadata != nil && a.extensionMetadata.plugin == record.Plugin &&
+				extensionBindingSameDescriptor(a.extensionMetadata.descriptor, record.Descriptor)
+		}) {
+			continue
+		}
+		out = slices.DeleteFunc(out, func(a *Agent) bool { return a.ID == record.Agent })
+		base := extensionProfileBase(home, record.Descriptor, existing)
+		out = append(out, extensionControlledAgent(home, host, ExtensionAgent{Plugin: record.Plugin, Agent: record.Descriptor.Clone()}, base))
+	}
+	return out
+}
+
+func installedExtensionAgents(host *extension.Manager, home string, existing []*Agent, errs map[string]string) []*Agent {
 	list, err := ExtensionAgents(host)
 	if err != nil {
 		if errs != nil {
@@ -125,32 +156,6 @@ func extensionAgents(home string, existing []*Agent, errs map[string]string) []*
 		} else {
 			out = append(out, extensionAgent(home, host, item))
 		}
-	}
-	if _, err := os.Lstat(extensionBindingPath()); os.IsNotExist(err) {
-		return out
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	ledger, err := extensionBindingObserve(ctx)
-	if err != nil {
-		if errs != nil {
-			errs["sdk-ownership"] = err.Error()
-		}
-		return out
-	}
-	for _, record := range ledger.Records {
-		if !extensionSameHome(record.Home, home) || record.Phase == "disconnected" {
-			continue
-		}
-		if slices.ContainsFunc(out, func(a *Agent) bool {
-			return a.ID == record.Agent && a.extensionMetadata != nil && a.extensionMetadata.plugin == record.Plugin &&
-				extensionBindingSameDescriptor(a.extensionMetadata.descriptor, record.Descriptor)
-		}) {
-			continue
-		}
-		out = slices.DeleteFunc(out, func(a *Agent) bool { return a.ID == record.Agent })
-		base := extensionProfileBase(home, record.Descriptor, existing)
-		out = append(out, extensionControlledAgent(home, host, ExtensionAgent{Plugin: record.Plugin, Agent: record.Descriptor.Clone()}, base))
 	}
 	return out
 }

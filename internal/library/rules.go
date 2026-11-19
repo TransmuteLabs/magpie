@@ -195,7 +195,7 @@ func (l *Library) syncRules(t *Target, b *backups, res *Result) {
 		}
 		files = append(files, ownFile{name: r.Name, path: sp.path(r.Name), body: func() []byte { return sp.render(r) }})
 	}
-	a.Rules = syncOwnFiles(t, "rule", a.Rules, files, b, res)
+	a.Rules = l.syncOwnFiles(t, "rule", a.Rules, files, b, res)
 }
 
 // ---- changes ---------------------------------------------------------------

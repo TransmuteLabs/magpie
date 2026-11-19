@@ -314,7 +314,7 @@ func (l *Library) syncSubagents(t *Target, b *backups, res *Result) {
 	for i, s := range want {
 		files[i] = ownFile{name: s.Name, path: sp.path(s.Name), body: func() []byte { return l.renderSubagent(sp, s) }}
 	}
-	a.Subagents = syncOwnFiles(t, "subagent", a.Subagents, files, b, res)
+	a.Subagents = l.syncOwnFiles(t, "subagent", a.Subagents, files, b, res)
 }
 
 // ownFile is a file of its own magpie wants an agent to have, for the
@@ -331,8 +331,17 @@ type ownFile struct {
 // by that name magpie didn't write is never touched, and is a problem
 // under noun:name, unless it says what magpie would write, when it is
 // taken as magpie's. It returns what magpie wrote, sorted by path.
-func syncOwnFiles(t *Target, noun string, had []SubagentFile, want []ownFile, b *backups, res *Result) []SubagentFile {
+func (l *Library) syncOwnFiles(t *Target, noun string, had []SubagentFile, want []ownFile, b *backups, res *Result) []SubagentFile {
 	id := t.Agent.ID
+	sources := l.subagentSources()
+	had = slices.DeleteFunc(had, func(f SubagentFile) bool { return sources.contains(f.Path) })
+	want = slices.DeleteFunc(want, func(f ownFile) bool {
+		if !sources.contains(f.path) {
+			return false
+		}
+		res.fail(id, noun+":"+f.name, fmt.Errorf("%s is a subagent's source file", f.path))
+		return true
+	})
 	wanted := map[string]*ownFile{} // path → the file wanted there
 	for i := range want {
 		wanted[want[i].path] = &want[i]

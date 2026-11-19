@@ -34,10 +34,11 @@ func takeAgentPath(r *http.Request) *http.Request {
 		return r
 	}
 	id, rest, _ := strings.Cut(rest, "/")
-	if id == "" || !usage.IsAgent(id) {
+	agent := usage.KnownAgentID(id)
+	if agent == "" {
 		return r
 	}
-	r2 := r.Clone(context.WithValue(r.Context(), agentPathCtx{}, usage.AgentOf(id)))
+	r2 := r.Clone(context.WithValue(r.Context(), agentPathCtx{}, agent))
 	r2.URL.Path = "/" + rest
 	if raw := r2.URL.RawPath; raw != "" {
 		if rawRest, ok := strings.CutPrefix(raw, AgentPath+id); ok {

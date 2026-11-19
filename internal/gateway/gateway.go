@@ -721,9 +721,9 @@ func (s *Server) RecentCall(id uint64) (Call, bool) {
 }
 
 func (s *Server) record(c Call) {
-	// Whole bodies belong only to the export, never to the Recent-calls ring.
+	// Whole bodies and late masking belong only to the export.
 	// This is a copy: the serving call still needs them for withBodies.
-	c.wholeIn, c.wholeOut = nil, nil
+	c.wholeIn, c.wholeOut, c.maskIn = nil, nil, nil
 	c.Canceled = usage.CanceledBy(c.Status, c.Error)
 	if c.wire != nil {
 		c.Archive = c.wire.name
@@ -735,6 +735,7 @@ func (s *Server) record(c Call) {
 	s.calls++
 	c.ID = s.calls
 	s.recent = keepRecent(s.recent, c)
+	trimRecentPreviews(s.recent)
 	if s.debug {
 		log.Printf("%s %s → %s (%s→%s) %d %dms %s", c.Model, c.Provider, c.Provider, c.From, c.To, c.Status, c.Millis, c.Error)
 	} else if line, ok := failedCallLine(c, time.Now()); ok {
@@ -805,6 +806,25 @@ var failedLog struct {
 
 // recentMost is how many calls the Recent-calls ring keeps.
 const recentMost = 40
+
+const recentPreviewBudget = 8 << 20
+
+func trimRecentPreviews(ring []Call) {
+	remaining := recentPreviewBudget
+	for index := len(ring) - 1; index >= 0; index-- {
+		call := &ring[index]
+		remaining -= len(call.RequestBody) + len(call.ResponseBody)
+		if remaining < 0 {
+			for older := range ring[:index+1] {
+				ring[older].RequestBody = ""
+				ring[older].ResponseBody = ""
+				ring[older].RequestTruncated = false
+				ring[older].ResponseTruncated = false
+			}
+			return
+		}
+	}
+}
 
 // keepRecent appends c to the ring and drops the oldest past recentMost,
 // in place. Re-slicing the oldest off (ring[1:]) left it in the backing

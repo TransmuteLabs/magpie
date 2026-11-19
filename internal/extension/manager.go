@@ -100,6 +100,18 @@ var defaults struct {
 	sync.Mutex
 	manager *Manager
 	config  string
+	ended   bool
+}
+
+func EndDefault(ctx context.Context) error {
+	defaults.Lock()
+	defaults.ended = true
+	manager := defaults.manager
+	defaults.Unlock()
+	if manager == nil {
+		return nil
+	}
+	return manager.Close(ctx)
 }
 
 // Default follows appdir's already selected portable/installed configuration.
@@ -107,7 +119,7 @@ var defaults struct {
 func Default() *Manager {
 	config := appdir.Config()
 	defaults.Lock()
-	if defaults.config == config && defaults.manager != nil && !defaults.manager.isClosed() {
+	if !defaults.ended && defaults.config == config && defaults.manager != nil && !defaults.manager.isClosed() {
 		selected := defaults.manager
 		defaults.Unlock()
 		return selected
@@ -115,6 +127,12 @@ func Default() *Manager {
 	defaults.Unlock()
 	root := filepath.Join(canonicalConfigPath(config), "extensions")
 	defaults.Lock()
+	if defaults.ended {
+		defaults.Unlock()
+		selected := NewManager(root)
+		selected.closed = true
+		return selected
+	}
 	var old *Manager
 	if defaults.manager == nil || defaults.manager.root != root || defaults.manager.isClosed() {
 		old = defaults.manager
@@ -1194,15 +1212,18 @@ func (m *Manager) authFor(scope sdk.Scope) (json.RawMessage, error) {
 }
 
 func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, raw json.RawMessage) (any, error) {
+	authority, authorized := ctx.Value(hostAuthorityKey{}).(hostAuthority)
+	if !authorized || authority.manifest.ID != scope.Plugin {
+		return nil, errors.New("host services are unavailable during module handshake")
+	}
+	if method == sdk.MethodRequestRecover {
+		return m.recoverRequest(ctx, scope, raw, authority)
+	}
 	if err := checkWindowAdmission(ctx); err != nil {
 		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	authority, authorized := ctx.Value(hostAuthorityKey{}).(hostAuthority)
-	if !authorized || authority.manifest.ID != scope.Plugin {
-		return nil, errors.New("host services are unavailable during module handshake")
 	}
 	if _, err := m.authFor(scope); err != nil {
 		return nil, err
@@ -1228,8 +1249,6 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	switch method {
 	case sdk.MethodMemorySearch:
 		return m.searchToolMemory(ctx, raw, authority)
-	case sdk.MethodRequestRecover:
-		return m.recoverRequest(ctx, scope, raw, authority)
 	case sdk.MethodCatalogRead:
 		return m.readCatalogProjection(ctx, scope, raw, authority)
 	case sdk.MethodDiagnosticEmit:

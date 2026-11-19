@@ -488,7 +488,16 @@ func knownAgents() []Known {
 // IsAgent says whether id is an agent magpie knows, its own or a plugin's,
 // rather than the product name of some other client (Python-urllib).
 func IsAgent(id string) bool {
-	return slices.ContainsFunc(knownAgents(), func(k Known) bool { return k.ID == id || slices.Contains(k.Names, id) })
+	return KnownAgentID(id) != ""
+}
+
+func KnownAgentID(id string) string {
+	for _, agent := range knownAgents() {
+		if agent.ID == id || slices.Contains(agent.Names, id) {
+			return agent.ID
+		}
+	}
+	return ""
 }
 
 // libraries are the product names of HTTP libraries, runtimes and API
@@ -526,14 +535,15 @@ func AgentOf(ua string) string {
 	name, _, _ := strings.Cut(ua, "/")
 	name, _, _ = strings.Cut(name, " ")
 	l := strings.ToLower(name)
+	agents := knownAgents()
 	// a name first: cursor-local is its own, though Cursor's UA (cursor)
 	// begins it
-	for _, k := range knownAgents() {
+	for _, k := range agents {
 		if slices.Contains(k.Names, l) {
 			return k.ID
 		}
 	}
-	for _, k := range knownAgents() {
+	for _, k := range agents {
 		if slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
 			return k.ID
 		}

@@ -132,6 +132,35 @@ func TestExtensionMediaOperationsThroughOrdinaryGateway(t *testing.T) {
 	}
 }
 
+func TestExtensionImageWorkerReceivesEffectiveResolution(t *testing.T) {
+	_, _, id := installExtensionMediaFixture(t)
+	handler := New().Front()
+	for _, test := range []struct {
+		extra string
+		size  any
+	}{
+		{`"resolution":"auto","size":"4K"`, nil},
+		{`"resolution":"auto","size":"1536x1024"`, "1536x1024"},
+		{`"size":"4K"`, "4096x4096"},
+	} {
+		response := mediaFixtureCall(handler, http.MethodPost, "/v1/images/generations",
+			`{"model":"`+id+`/fixture-picture","prompt":"echo image request",`+test.extra+`}`)
+		var result struct {
+			Data []struct {
+				Revised string `json:"revised_prompt"`
+			} `json:"data"`
+		}
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil || len(result.Data) != 1 {
+			t.Fatalf("%s: %d %s", test.extra, response.Code, response.Body)
+		}
+		var payload map[string]any
+		if json.Unmarshal([]byte(result.Data[0].Revised), &payload) != nil ||
+			payload["size"] != test.size || payload["resolution"] != nil {
+			t.Fatalf("%s: SDK worker received %s, want size %v", test.extra, result.Data[0].Revised, test.size)
+		}
+	}
+}
+
 func TestExtensionMediaAcceptanceStopsGroupFallback(t *testing.T) {
 	_, _, id := installExtensionMediaFixture(t)
 	var fallbackCalls atomic.Int32

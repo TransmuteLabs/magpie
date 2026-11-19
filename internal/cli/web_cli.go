@@ -26,7 +26,7 @@ const webAddr = "127.0.0.1:3430"
 // --gateway shows it in gateway mode (gui.WebGateway) unless Settings says
 // otherwise; with a certificate the page and the gateway are HTTPS to
 // other computers.
-func webCmd(args []string) error {
+func webCmd(args []string, beforeRestart func()) error {
 	args, err := tlsFlags(args)
 	if err != nil {
 		return err
@@ -111,7 +111,7 @@ func webCmd(args []string) error {
 	if open {
 		openInBrowser(w.Link)
 	}
-	return w.Wait()
+	return w.Wait(beforeRestart)
 }
 
 // samePort: a and b (host:port) name one port.
@@ -222,7 +222,7 @@ func proxyLink(key string) string {
 // --web magpie web's page from the same process: what the service runs
 // (`magpie daemon install --web`), so the page shows the gateway that
 // serves the agents, its routing included (HuanCheng on Discord).
-func serveCmd(args []string) error {
+func serveCmd(args []string, beforeRestart func()) error {
 	args, err := tlsFlags(args)
 	if err != nil {
 		return err
@@ -244,7 +244,7 @@ func serveCmd(args []string) error {
 	proc.UserPath() // as magpie web's (#3803)
 	proc.KeepReaping(context.Background())
 	if web == "" {
-		return serve()
+		return serve(beforeRestart)
 	}
 	go stats.Run(version, "serve")
 	// the models a Remote magpie's agents are on, as the app follows them
@@ -269,5 +269,5 @@ func serveCmd(args []string) error {
 		fmt.Println(amber.Render("!"), "another magpie serves the gateway there: this one serves it once that one stops")
 	}
 	printWeb(w)
-	return w.Wait()
+	return w.Wait(beforeRestart)
 }

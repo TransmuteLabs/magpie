@@ -145,6 +145,39 @@ func (s *Subagent) takeFile() bool {
 	return changed
 }
 
+// Source files belong to the user even when an agent output has the same bytes.
+type subagentSources map[string]bool
+
+func (l *Library) subagentSources() subagentSources {
+	sources := subagentSources{}
+	for _, s := range l.Subagents {
+		if s.File != "" {
+			sources[realBelow(s.File)] = true
+		}
+	}
+	return sources
+}
+
+func (sources subagentSources) contains(path string) bool {
+	return len(sources) > 0 && sources[realBelow(path)]
+}
+
+// An older release could adopt a source as an agent output. Release that claim
+// before a removal, rename or restore can discard the source's declaration.
+func (l *Library) releaseSubagentSources() {
+	sources := l.subagentSources()
+	if len(sources) == 0 {
+		return
+	}
+	claimed := func(f SubagentFile) bool { return sources.contains(f.Path) }
+	for _, a := range l.Applied {
+		a.Subagents = slices.DeleteFunc(a.Subagents, claimed)
+		a.Commands = slices.DeleteFunc(a.Commands, claimed)
+		a.Rules = slices.DeleteFunc(a.Rules, claimed)
+		a.RouterCommands = slices.DeleteFunc(a.RouterCommands, claimed)
+	}
+}
+
 // followSubagentFiles takes into the library every edit made in a
 // subagent's file, before the agents are written from it.
 func (l *Library) followSubagentFiles() {
@@ -252,7 +285,7 @@ func (l *Library) ownSubagentPath(name, file string) (string, error) {
 		}
 	}
 	for _, a := range l.Applied {
-		for _, fs := range [][]SubagentFile{a.Subagents, a.Commands, a.Rules} {
+		for _, fs := range [][]SubagentFile{a.Subagents, a.Commands, a.Rules, a.RouterCommands} {
 			for _, f := range fs {
 				if realBelow(f.Path) == real {
 					return "", fmt.Errorf("magpie writes %s for an agent: a subagent can't be kept there", file)

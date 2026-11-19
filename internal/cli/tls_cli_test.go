@@ -96,8 +96,8 @@ func TestTLSFlags(t *testing.T) {
 func TestCommandsRefuseHalfAPair(t *testing.T) {
 	cert, _ := pemPair(t, t.TempDir())
 	for _, f := range []func() error{
-		func() error { return serveCmd([]string{"--tls-cert", cert}) },
-		func() error { return webCmd([]string{"--tls-cert", cert, "--no-open"}) },
+		func() error { return run([]string{"serve", "--tls-cert", cert}) },
+		func() error { return run([]string{"web", "--tls-cert", cert, "--no-open"}) },
 		func() error { return daemonCmd([]string{"install", "--tls-cert", cert}) },
 	} {
 		t.Setenv(gateway.TLSCertEnv, "")

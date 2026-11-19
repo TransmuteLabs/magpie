@@ -461,7 +461,7 @@ func (s *server) generate(raw json.RawMessage, used *string, c caller) (string, 
 	a.N = max(1, min(a.N, 4))
 	// the resolution the agent asks, else Settings › Images' unless the
 	// agent gave a size of its own
-	tier, err := gateway.ImageTier(a.Resolution, a.Size)
+	resolution, err := gateway.ImageTier(a.Resolution, a.Size)
 	if err != nil {
 		return "", err
 	}
@@ -477,7 +477,7 @@ func (s *server) generate(raw json.RawMessage, used *string, c caller) (string, 
 		}
 		req["model"] = m
 	}
-	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "complexity": a.Complexity, "background": a.Background, "resolution": tier} {
+	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "complexity": a.Complexity, "background": a.Background, "resolution": resolution} {
 		if v != "" {
 			req[k] = v
 		}
@@ -586,7 +586,7 @@ func (s *server) generate(raw json.RawMessage, used *string, c caller) (string, 
 	for _, p := range saved {
 		fmt.Fprintf(&b, "- %s\n", shownPath(p))
 	}
-	b.WriteString(gateway.PixelsSaid(pixels, gateway.AskedTier(tier, a.Size)))
+	b.WriteString(gateway.PixelsSaid(pixels, gateway.AskedTier(resolution, a.Size)))
 	for _, l := range lost {
 		fmt.Fprintf(&b, "Not saved: %s\n", l)
 	}

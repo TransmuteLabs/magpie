@@ -88,7 +88,8 @@ func (m *Manager) checkRequestPolicy(ctx context.Context, invocation *requestPol
 	}
 	entries, err := m.List()
 	if err != nil || !slices.ContainsFunc(entries, func(entry Installed) bool {
-		return entry.Manifest.ID == invocation.scope.Plugin && !entry.Disabled && entry.Revision == lease.Revision()
+		return entry.Manifest.ID == invocation.scope.Plugin && !entry.Disabled && entry.Revision == lease.Revision() &&
+			entry.observerEnablementErr == nil && entry.EnableGeneration == lease.worker.entry.EnableGeneration
 	}) {
 		return errors.New("request policy package changed")
 	}

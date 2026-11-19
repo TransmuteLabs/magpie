@@ -52,16 +52,24 @@ func (t *Tree) rss(cmd *exec.Cmd) (int64, bool) {
 		if err != nil {
 			continue
 		}
-		var c processMemoryCounters
-		c.cb = uint32(unsafe.Sizeof(c))
-		ok, _, _ := processMemoryInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&c)), uintptr(c.cb))
+		size, ok := workingSet(h)
 		_ = windows.CloseHandle(h)
-		if ok != 0 {
-			total += int64(c.workingSetSize)
+		if ok {
+			total += size
 			read = true
 		}
 	}
 	return total, read
+}
+
+// SelfRSS returns this process's working set in bytes.
+func SelfRSS() (int64, bool) { return workingSet(windows.CurrentProcess()) }
+
+func workingSet(process windows.Handle) (int64, bool) {
+	var counters processMemoryCounters
+	counters.cb = uint32(unsafe.Sizeof(counters))
+	ok, _, _ := processMemoryInfo.Call(uintptr(process), uintptr(unsafe.Pointer(&counters)), uintptr(counters.cb))
+	return int64(counters.workingSetSize), ok != 0
 }
 
 // memoryStatusEx is MEMORYSTATUSEX.

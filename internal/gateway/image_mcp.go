@@ -306,7 +306,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 	if strings.TrimSpace(a.Prompt) == "" {
 		return toolResult(GenerateImageTool+" needs a prompt", true)
 	}
-	tier, err := ImageTier(a.Resolution, a.Size)
+	resolution, err := ImageTier(a.Resolution, a.Size)
 	if err != nil {
 		return toolResult(err.Error(), true)
 	}
@@ -320,7 +320,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 		}
 		req["model"] = ref
 	}
-	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "complexity": a.Complexity, "background": a.Background, "resolution": tier} {
+	for k, v := range map[string]string{"size": a.Size, "quality": a.Quality, "complexity": a.Complexity, "background": a.Background, "resolution": resolution} {
 		if v != "" {
 			req[k] = v
 		}
@@ -359,7 +359,7 @@ func (s *Server) imageMCPDraw(r *http.Request, raw json.RawMessage) map[string]a
 		defer cancel()
 		rec := &replyRecorder{header: http.Header{}}
 		s.images(edit)(rec, in.WithContext(ctx))
-		return s.imageMCPDrawn(rec, who.KeyID, base, AskedTier(tier, a.Size))
+		return s.imageMCPDrawn(rec, who.KeyID, base, AskedTier(resolution, a.Size))
 	})
 	return s.imageMCPAwait(r, j)
 }
