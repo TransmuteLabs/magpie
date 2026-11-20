@@ -478,14 +478,19 @@ Execution rechecks the enabled manifest, generation, root identity, original
 contents, permissions and existence. A persistent `.magpie-extension.lock`
 serializes cooperating writers at that root. Originals and recovery metadata
 are durably backed up with status `prepared` before the batch writes targets.
-Each target is checked again before its write; file replacement uses an
-exclusive temporary file, file sync, rename and platform-appropriate directory
-sync. Success records backup status `applied`.
+For agent plans, the host checks the complete set of settings before each
+file change and before committing, including files the module only read.
+File replacement uses an exclusive temporary file, file sync, rename and
+platform-appropriate directory sync. The host retains the identity of each
+published file. The agent controller applies its shell wrappers before the
+final settings check, so a stale input during that step rejects the binding
+and rolls back the settings and wrappers. Success records backup status
+`applied`.
 
 Failure or cancellation rolls back applied effects in reverse order and
 removes newly created empty directories. Rollback restores a file only when
-it still matches the action's expected output; an independently changed file
-is preserved and recovery reports the retained originals. A completed
+its identity, bytes and permissions match the recorded publication. The
+host preserves independent edits and reports the retained originals. A completed
 rollback records `rolled_back`. This is a checked batch of per-file
 replacements, not an atomic filesystem-wide transaction or protection against
 every non-cooperating write between a check and a rename.

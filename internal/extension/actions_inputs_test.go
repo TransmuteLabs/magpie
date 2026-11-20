@@ -61,9 +61,9 @@ func TestActionsCancellationDuringAuthorityCheckCannotPublish(test *testing.T) {
 	defer cancel()
 	actions.host = &actionCancelManifestRuntime{actionTestRuntime: host, remaining: 3, cancel: cancel}
 	writes := 0
-	actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+	actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 		writes++
-		return actionWrite(root, name, body, mode)
+		return actionWriteChecked(root, name, body, mode, check)
 	}
 	if _, err := plan.Execute(ctx, plan.Preview().Revision); !errors.Is(err, context.Canceled) {
 		test.Fatal("authority cancellation was not returned", err)
@@ -127,13 +127,14 @@ func TestActionsSourceRevalidationBeforeEveryPublication(test *testing.T) {
 			}
 			plan := actionTestPlan(test, actions, policy)
 			writes := 0
-			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 				writes++
-				if err := actionWrite(root, name, body, mode); err != nil {
-					return err
+				info, err := actionWriteChecked(root, name, body, mode, check)
+				if err != nil {
+					return info, err
 				}
 				stale = true
-				return nil
+				return info, nil
 			}
 			if _, err := plan.Execute(test.Context(), plan.Preview().Revision); !errors.Is(err, ErrActionChanged) {
 				test.Fatal("changed source did not stop subsequent publication", err)

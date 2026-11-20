@@ -246,6 +246,58 @@ func TestActionsAgentReceivesHostSettingsSnapshots(test *testing.T) {
 	actionTestPlan(test, actions, policy)
 }
 
+func TestActionsAgentPlanPreservesOnDiskSettings(test *testing.T) {
+	actions, host, policy := actionFixture(test)
+	path := filepath.Join(policy.Root, "a.json")
+	before := []byte(`{"model":"original","personal":"keep"}`)
+	if err := os.WriteFile(path, before, 0o640); err != nil {
+		test.Fatal(err)
+	}
+	callerSettings, err := json.Marshal(ActionSettings{Files: []ActionSettingFile{{
+		Path: "a.json", Exists: true, Mode: 0o640,
+		Body:       []byte(`{"model":"original","personal":"forged"}`),
+		BeforeHash: actionHash(actionFile{Body: before, Exists: true}),
+	}}})
+	if err != nil {
+		test.Fatal(err)
+	}
+	host.invoke = func(_ context.Context, _ string, _ sdk.Scope, params any) (any, error) {
+		request := params.(sdk.AgentPlanRequest)
+		var settings ActionSettings
+		if err := json.Unmarshal(request.Settings, &settings); err != nil {
+			return nil, err
+		}
+		file := settings.Files[0]
+		var values map[string]string
+		if err := json.Unmarshal(file.Body, &values); err != nil {
+			return nil, err
+		}
+		var options struct{ Model string }
+		if err := json.Unmarshal(request.Options, &options); err != nil {
+			return nil, err
+		}
+		values["model"] = options.Model
+		body, err := json.Marshal(values)
+		if err != nil {
+			return nil, err
+		}
+		return sdk.AgentPlan{Files: []sdk.FileChange{{Path: file.Path, Body: body, BeforeHash: file.BeforeHash}}}, nil
+	}
+	plan, err := actions.AgentPlan(test.Context(), "sample", sdk.Scope{}, sdk.AgentPlanRequest{
+		ID: "editor", Action: "set", Options: json.RawMessage(`{"model":"selected"}`), Settings: callerSettings,
+	}, policy)
+	if err != nil {
+		test.Fatal(err)
+	}
+	result, err := plan.Execute(test.Context(), plan.Preview().Revision)
+	if err != nil || !result.Applied {
+		test.Fatalf("commit: %+v, %v", result, err)
+	}
+	if body := actionTestRead(test, path); string(body) != `{"model":"selected","personal":"keep"}` {
+		test.Fatalf("plan did not preserve on-disk settings: %s", body)
+	}
+}
+
 func TestActionsRejectUnauthorizedDispatch(test *testing.T) {
 	for _, scenario := range []string{"other-plugin", "undeclared-agent", "undeclared-capability", "generation-without-account", "account-without-generation", "cancelled"} {
 		test.Run(scenario, func(test *testing.T) {
@@ -360,16 +412,16 @@ func TestActionsRollbackAfterPartialFailure(test *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			writes := 0
-			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 				writes++
 				if !cancelAfterFirst && writes == 2 {
-					return errors.New("injected second write failure")
+					return nil, errors.New("injected second write failure")
 				}
-				err := actionWrite(root, name, body, mode)
+				info, err := actionWriteChecked(root, name, body, mode, check)
 				if cancelAfterFirst && writes == 1 {
 					cancel()
 				}
-				return err
+				return info, err
 			}
 			result, err := plan.Execute(ctx, plan.Preview().Revision)
 			if err == nil || result.Applied || result.Backup == "" {
@@ -398,20 +450,21 @@ func TestActionsPreserveConcurrentApplicationEdits(test *testing.T) {
 				return sdk.AgentPlan{Files: []sdk.FileChange{{Path: "a.json", Body: []byte("after-a")}, {Path: "b.json", Body: []byte("after-b")}}}, nil
 			}
 			plan := actionTestPlan(test, actions, policy)
-			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 				if duringRollback && name == "b.json" {
 					if err := root.WriteFile("a.json", []byte("application-edit"), 0o640); err != nil {
-						return err
+						return nil, err
 					}
-					return errors.New("injected later failure")
+					return nil, errors.New("injected later failure")
 				}
-				if err := actionWrite(root, name, body, mode); err != nil {
-					return err
+				info, err := actionWriteChecked(root, name, body, mode, check)
+				if err != nil {
+					return info, err
 				}
 				if !duringRollback && name == "a.json" {
-					return root.WriteFile("b.json", []byte("application-edit"), 0o640)
+					return info, root.WriteFile("b.json", []byte("application-edit"), 0o640)
 				}
-				return nil
+				return info, nil
 			}
 			result, err := plan.Execute(context.Background(), plan.Preview().Revision)
 			if !errors.Is(err, ErrActionChanged) || result.Backup == "" || result.Applied {
@@ -442,11 +495,11 @@ func TestActionsRollbackNewFilesAndRemovals(test *testing.T) {
 		}}, nil
 	}
 	plan := actionTestPlan(test, actions, policy)
-	actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+	actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 		if name == "c.json" {
-			return errors.New("injected final write failure")
+			return nil, errors.New("injected final write failure")
 		}
-		return actionWrite(root, name, body, mode)
+		return actionWriteChecked(root, name, body, mode, check)
 	}
 	result, err := plan.Execute(context.Background(), plan.Preview().Revision)
 	if err == nil || result.Applied {
@@ -462,6 +515,29 @@ func TestActionsRollbackNewFilesAndRemovals(test *testing.T) {
 	}
 	if string(actionTestRead(test, filepath.Join(result.Backup, "status"))) != "rolled_back\n" {
 		test.Fatal("rollback did not reach its terminal state")
+	}
+}
+
+func TestActionsRejectReadOnlyInputChangedByFinalWrite(test *testing.T) {
+	actions, _, policy := actionFixture(test)
+	plan := actionTestPlan(test, actions, policy)
+	actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
+		info, err := actionWriteChecked(root, name, body, mode, check)
+		if err != nil {
+			return info, err
+		}
+		return info, root.WriteFile("b.json", []byte("application edit"), 0o640)
+	}
+	result, err := plan.Execute(test.Context(), plan.Preview().Revision)
+	if !errors.Is(err, ErrActionChanged) || result.Applied || result.Backup == "" {
+		test.Fatalf("committed a plan with stale inputs: %+v, %v", result, err)
+	}
+	if string(actionTestRead(test, filepath.Join(policy.Root, "a.json"))) != "before-a.json" ||
+		string(actionTestRead(test, filepath.Join(policy.Root, "b.json"))) != "application edit" {
+		test.Fatal("rollback did not restore only the action's own write")
+	}
+	if string(actionTestRead(test, filepath.Join(result.Backup, "status"))) != "rolled_back\n" {
+		test.Fatal("backup journal did not record rollback")
 	}
 }
 

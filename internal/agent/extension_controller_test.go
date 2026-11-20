@@ -210,6 +210,43 @@ func TestExtensionAgentProfileExplicitOwnershipAndHeldBaseFence(t *testing.T) {
 	}
 }
 
+func TestExtensionAgentProfileFencesHeldHermesProxyChange(t *testing.T) {
+	descriptor := launchAgentDescriptor()
+	descriptor.Profile = &sdk.AgentProfile{Target: "hermes"}
+	_, home := launchAgentFixture(t, descriptor)
+	hermesHome := filepath.Join(home, ".hermes")
+	t.Setenv("HERMES_HOME", hermesHome)
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hermesHome, "config.yaml")
+	original := []byte("providers:\n  magpie:\n    base_url: http://127.0.0.1:3425/v1\n    api_mode: chat_completions\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base, err := Find("hermes")
+	if err != nil || base.ID != "hermes" || base.Path != path {
+		t.Fatalf("could not hold the built-in Hermes: %v", err)
+	}
+	profile, err := Find(descriptor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := profile.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := Find("hermes")
+	if err != nil || active.ID != descriptor.ID {
+		t.Fatalf("profile did not adopt Hermes: %v", err)
+	}
+	if err := HermesThrough(base, "http://127.0.0.1:8787/bili/"); err == nil || !strings.Contains(err.Error(), "owned by SDK profile") {
+		t.Fatalf("held Hermes did not consult the SDK owner: %v", err)
+	}
+	if raw, err := os.ReadFile(path); err != nil || !bytes.Equal(raw, original) {
+		t.Fatalf("held Hermes changed the adopted profile's settings: %q, %v", raw, err)
+	}
+}
+
 func TestExtensionAgentControllerStaleConcurrentPlanAndShellRollback(t *testing.T) {
 	descriptor := launchAgentDescriptor()
 	descriptor.ConfigFiles = []string{".fixture.json"}
@@ -481,6 +518,49 @@ func TestExtensionAgentLaunchCommandCannotReplaceBuiltinWithoutProfile(t *testin
 	}
 	if PluginErrors()["fixture.agent"] == "" {
 		t.Fatal("launch collision was not reported")
+	}
+}
+
+func TestExtensionAgentControllerRejectsReadOnlyInputChangedByShell(t *testing.T) {
+	descriptor := launchAgentDescriptor()
+	descriptor.ConfigFiles = []string{".fixture.json", ".fixture-models.json"}
+	host, home := launchAgentFixture(t, descriptor)
+	config := filepath.Join(home, ".fixture.json")
+	models := filepath.Join(home, ".fixture-models.json")
+	for _, file := range []string{config, models} {
+		if err := os.WriteFile(file, []byte(`{"note":"personal"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controller := &extensionController{home: home, host: host, item: ExtensionAgent{Plugin: "fixture.agent", Agent: descriptor}, bin: descriptor.Bin}
+	plan, err := controller.prepare(t.Context(), "connect", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.shell == nil || len(plan.shell.Snapshots()) == 0 || len(plan.action.Preview().Files) != 1 ||
+		plan.action.Preview().Files[0].Path != ".fixture.json" {
+		t.Fatal("fixture needs a shell change, one settings write and a read-only input")
+	}
+	plan.applyShell = func() error {
+		if _, err := plan.shell.Apply(plan.shell.Revision()); err != nil {
+			return err
+		}
+		return os.WriteFile(models, []byte(`{"note":"user edit"}`), 0o600)
+	}
+	if err := controller.apply(t.Context(), plan); !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("committed ownership with a stale read-only input: %v", err)
+	}
+	record, err := controller.read(t.Context())
+	if err != nil || record.Phase != "" {
+		t.Fatalf("failed initial connection left an ownership record: %+v, %v", record, err)
+	}
+	for file, want := range map[string]string{config: `{"note":"personal"}`, models: `{"note":"user edit"}`} {
+		if raw, err := os.ReadFile(file); err != nil || string(raw) != want {
+			t.Fatalf("%s after rollback: %q, %v", file, raw, err)
+		}
+	}
+	if err := update.ShellFunctionsMatch(plan.shell.Snapshots(), false); err != nil {
+		t.Fatalf("failed connection left its shell wrapper: %v", err)
 	}
 }
 

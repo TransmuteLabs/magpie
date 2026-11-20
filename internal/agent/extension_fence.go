@@ -127,16 +127,18 @@ func extensionFenceAgentAt(home string, a *Agent, checkRoot func() error) {
 		}
 		return func() error { return mutate(fn) }
 	}
-	for index := range a.Fields {
-		set := a.Fields[index].Set
-		if set != nil {
-			a.Fields[index].Set = func(value string) error {
-				return mutate(func() error { return set(value) })
-			}
+	fenceValue := func(fn func(string) error) func(string) error {
+		if fn == nil {
+			return nil
 		}
+		return func(value string) error { return mutate(func() error { return fn(value) }) }
+	}
+	for index := range a.Fields {
+		a.Fields[index].Set = fenceValue(a.Fields[index].Set)
 	}
 	a.Sync, a.Unwire, a.Restore = fence(a.Sync), fence(a.Unwire), fence(a.Restore)
 	a.Follow, a.EndFailover = fence(a.Follow), fence(a.EndFailover)
+	a.through = fenceValue(a.through)
 	if fn := a.Join; fn != nil {
 		a.Join = func() (value bool, err error) {
 			err = mutate(func() error { value, err = fn(); return err })
