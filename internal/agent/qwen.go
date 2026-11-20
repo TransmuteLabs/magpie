@@ -207,7 +207,7 @@ func qwenIn(at place) *Agent {
 	// models are the pick (skipping the /auth prompt), stashing the user's
 	// own; with=false puts it back, or takes the key out where it never
 	// was, pruning the empty security.auth and security it would leave.
-	setAuth := func(with bool) error {
+	setAuth := func(with, hadProviders bool) error {
 		if with {
 			// the user's own value is stashed once, whatever it is —
 			// "openai" of their own too, or it can't be told from
@@ -220,6 +220,13 @@ func qwenIn(at place) *Agent {
 				stash(kv)
 			}
 			return edit.SetJSON(path, edit.KV{Path: qwenAuth, Value: "openai"})
+		}
+		if !hadProviders && stashShared()[keyAuthSeen] == "" {
+			return nil
+		}
+		if current, _ := edit.GetJSON(path, qwenAuth); current != "openai" {
+			forget(keyAuthSeen, keyAuth)
+			return nil
 		}
 		forget(keyAuthSeen)
 		if was := unstash(keyAuth); was != "" {
@@ -251,7 +258,7 @@ func qwenIn(at place) *Agent {
 			if err := setEnvKey(true); err != nil {
 				return err
 			}
-			if err := setAuth(true); err != nil {
+			if err := setAuth(true, had); err != nil {
 				return err
 			}
 			for _, e := range entries() {
@@ -263,7 +270,7 @@ func qwenIn(at place) *Agent {
 			if err := setEnvKey(false); err != nil {
 				return err
 			}
-			return setAuth(false)
+			return setAuth(false, had)
 		}
 		if len(ms) > 0 {
 			if err := edit.SetJSON(path, edit.KV{Path: qwenModels, Value: ms}); err != nil {
@@ -276,7 +283,7 @@ func qwenIn(at place) *Agent {
 			if err := setEnvKey(false); err != nil {
 				return err
 			}
-			if err := setAuth(false); err != nil {
+			if err := setAuth(false, had); err != nil {
 				return err
 			}
 			return qwenPrune(path, "modelProviders")

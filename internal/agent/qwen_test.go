@@ -8,9 +8,25 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestQwenNativeModelKeepsNativeAuth(t *testing.T) {
+	home, path := qwenHome(t)
+	writeFile(t, path, `{"security":{"auth":{"selectedType":"qwen-oauth"}},"model":{"name":"original"}}`)
+	target := qwen(home)
+	if err := target.Apply("model", "qwen3.8-max"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := edit.GetJSON(path, "model.name"); got != "qwen3.8-max" {
+		t.Fatalf("model = %q", got)
+	}
+	if got, _ := edit.GetJSON(path, "security.auth.selectedType"); got != "qwen-oauth" {
+		t.Fatalf("native auth = %q, want qwen-oauth", got)
+	}
+}
 
 // qwenUser is a settings.json as Qwen Code leaves it for someone with a
 // custom model provider of their own, and settings magpie has nothing to
