@@ -65,6 +65,21 @@ func TestClientPathBuiltInDoesNotWaitForProtocolCatalog(t *testing.T) {
 			t.Fatalf("page-port LAN guard: %d %s", response.Code, response.Body)
 		}
 	})
+	t.Run("request owner", func(t *testing.T) {
+		ctx := context.WithValue(t.Context(), protocolRegistryCtx{}, protocolBinding{server: &Server{}})
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/models", nil)
+		handler := server.withProtocolRegistry(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			binding, _ := r.Context().Value(protocolRegistryCtx{}).(protocolBinding)
+			if binding.server != server {
+				t.Error("built-in request did not bind the serving gateway")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		response := protocolCallUnderCatalogLock(t, server, handler, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("built-in request: %d %s", response.Code, response.Body)
+		}
+	})
 }
 
 func TestClientPathProtocolsArePerServerAndExact(t *testing.T) {
