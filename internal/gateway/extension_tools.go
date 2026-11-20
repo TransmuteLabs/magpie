@@ -18,7 +18,7 @@ import (
 )
 
 type extensionToolAccountSource interface {
-	List() ([]extension.Installed, error)
+	ToolModules(context.Context) ([]extension.Installed, error)
 	Store() *extension.Store
 }
 
@@ -78,14 +78,16 @@ func extensionToolContext(ctx context.Context, spec string, args json.RawMessage
 			return ctx, nil, errors.New("extension account context needs an explicit provider and account")
 		}
 		manager := extensionToolAccounts()
-		entries, err := manager.List()
+		entries, err := manager.ToolModules(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx, nil, ctx.Err()
+			}
 			return ctx, nil, errors.New("extension account declarations could not be read")
 		}
 		declared := false
 		for _, entry := range entries {
-			if entry.Disabled || entry.Manifest.ID != id || !entry.Manifest.Contract.Has(sdk.AccountAuth) ||
-				!entry.Manifest.Contract.Has(sdk.ToolProvider) {
+			if entry.Manifest.ID != id || !entry.Manifest.Contract.Has(sdk.AccountAuth) {
 				continue
 			}
 			for _, provider := range entry.Manifest.Providers {
@@ -95,8 +97,11 @@ func extensionToolContext(ctx context.Context, spec string, args json.RawMessage
 		if !declared {
 			return ctx, nil, errors.New("extension does not declare authentication for this provider")
 		}
-		account, err := manager.Store().GetAccount(id, selection.Provider, selection.Account)
+		account, err := manager.Store().GetAccountContext(ctx, id, selection.Provider, selection.Account)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx, nil, ctx.Err()
+			}
 			return ctx, nil, errors.New("extension account is unavailable")
 		}
 		scope.Provider, scope.Account, scope.Generation = account.Provider, account.ID, account.Generation

@@ -79,6 +79,11 @@ the Library projection is in
 [`plugin_tools.go`](../../internal/library/plugin_tools.go).
 Scoped Memory callbacks check their running generation before and after
 search. Catalog and configuration reads use the tool call's context.
+The same SDK registry supplies enabled tool declarations for MCP discovery
+and execution. It also resolves tool account declarations. These reads and
+the selected account store use the caller's cancellation. The SDK tool
+timeout starts before its final declaration check. The installed inventory
+still includes disabled modules for the Plugins page.
 
 `TestExtensionToolExposureHTTPProvenance`,
 `TestExtensionToolExposureHTTPManifestTransition`,

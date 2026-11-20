@@ -33,7 +33,7 @@ func TestAccountSuccessorRequiresDurableRefreshReceipt(t *testing.T) {
 		selected := scope
 		selected.Generation = generation
 		unconfirmed := errors.New("fixture directory sync failed")
-		current, err := store.refreshedAccount(selected, func(*os.Root) error { return unconfirmed })
+		current, err := store.refreshedAccount(t.Context(), selected, func(*os.Root) error { return unconfirmed })
 		if !errors.Is(err, unconfirmed) || current.Generation != 0 || len(current.Auth) != 0 {
 			t.Fatalf("unconfirmed refresh publication was adopted from generation %d: %+v %v", generation, current, err)
 		}

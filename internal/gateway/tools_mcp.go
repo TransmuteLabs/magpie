@@ -77,7 +77,7 @@ func toolPrefix(spec string) string {
 // servedTools are the tools of the plugins that are on (namedTools). With
 // no plugin on, the plugin host isn't started for it.
 func servedTools(ctx context.Context) ([]mcpTool, error) {
-	if !gwtool.Served(gwtool.PluginTools) || !anyPluginOn() {
+	if !gwtool.Served(gwtool.PluginTools) {
 		return nil, nil
 	}
 	pts, err := pluginTools(ctx)
@@ -134,20 +134,6 @@ func ToolNames(pts []plugin.PluginTools) map[string]map[string]string {
 	return out
 }
 
-// anyPluginOn checks both installed catalogs without starting either runtime.
-var anyPluginOn = func() bool {
-	list, err := plugin.ReadList()
-	if err != nil {
-		return false
-	}
-	for _, e := range list.Plugins {
-		if !e.Off {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Server) toolsMCPCall(r *http.Request, m mcpMessage) (any, map[string]any) {
 	return s.toolsMCPServe(r, m, "", servedTools)
 }
@@ -181,7 +167,7 @@ func (s *Server) toolsMCPOne(w http.ResponseWriter, r *http.Request) {
 // picks, and its spec; none while Plugin tools is off, or no plugin that
 // is on is it. With no plugin on, the plugin host isn't started for it.
 func pluginToolsBy(ctx context.Context, is func(spec string) bool) (string, []plugin.Tool, error) {
-	if !gwtool.Served(gwtool.PluginTools) || !anyPluginOn() {
+	if !gwtool.Served(gwtool.PluginTools) {
 		return "", nil, nil
 	}
 	pts, err := pluginTools(ctx)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,6 +30,15 @@ type extensionToolsFake struct {
 
 func (fake *extensionToolsFake) List() ([]extension.Installed, error) {
 	return fake.entries, fake.listErr
+}
+
+func (fake *extensionToolsFake) ToolModules(ctx context.Context) ([]extension.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(fake.entries), func(entry extension.Installed) bool {
+		return entry.Disabled || !entry.Manifest.Contract.Has(sdk.ToolProvider) || len(entry.Manifest.Tools) == 0
+	}), fake.listErr
 }
 
 func (fake *extensionToolsFake) Call(ctx context.Context, module, method string, scope sdk.Scope, params any, consume func(extension.Event) error) (json.RawMessage, error) {

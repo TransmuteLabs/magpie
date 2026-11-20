@@ -30,6 +30,7 @@ import (
 type extensionProviderHost interface {
 	Namespace() string
 	List() ([]extensionhost.Installed, error)
+	ListContext(context.Context) ([]extensionhost.Installed, error)
 	Manifest(string) (sdk.Manifest, error)
 	Store() *extensionhost.Store
 	ModuleConfig(context.Context, string) (sdk.ConfigSnapshot, error)

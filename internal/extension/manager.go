@@ -202,6 +202,10 @@ func (m *Manager) Running(id string) bool {
 
 func (m *Manager) List() ([]Installed, error) { return m.catalog.List() }
 
+func (m *Manager) ListContext(ctx context.Context) ([]Installed, error) {
+	return m.catalog.list(ctx)
+}
+
 func (m *Manager) Manifest(id string) (sdk.Manifest, error) {
 	entries, err := m.List()
 	if err != nil {
@@ -1217,7 +1221,7 @@ func (m *Manager) authForContext(ctx context.Context, scope sdk.Scope) (json.Raw
 	if scope.Account == "" {
 		return nil, ctx.Err()
 	}
-	account, err := m.store.getAccount(ctx, scope.Plugin, scope.Provider, scope.Account)
+	account, err := m.store.GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

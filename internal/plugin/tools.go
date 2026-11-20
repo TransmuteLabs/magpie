@@ -43,7 +43,7 @@ func Tools(ctx context.Context) ([]PluginTools, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := extensionToolsRuntime().List()
+	entries, err := extensionToolsRuntime().ToolModules(ctx)
 	if err != nil {
 		return nil, err
 	}

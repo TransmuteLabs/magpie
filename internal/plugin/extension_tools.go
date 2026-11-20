@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 
@@ -17,6 +18,7 @@ const ExtensionToolPrefix = "extension:"
 
 type extensionToolRuntime interface {
 	List() ([]extension.Installed, error)
+	ToolModules(context.Context) ([]extension.Installed, error)
 	Call(context.Context, string, string, sdk.Scope, any, func(extension.Event) error) (json.RawMessage, error)
 }
 
@@ -148,24 +150,21 @@ func RunExtensionTool(ctx context.Context, spec, name string, args json.RawMessa
 		return result, errors.New("extension tool scope belongs to another module")
 	}
 	scope.Plugin = id
+	ctx, cancel := context.WithTimeout(ctx, ToolTimeout)
+	defer cancel()
 	manager := extensionToolsRuntime()
-	entries, err := manager.List()
+	entries, err := manager.ToolModules(ctx)
 	if err != nil {
 		return result, err
 	}
-	declared := false
-	for _, group := range callerExtensionTools(ctx, entries) {
-		if group.Spec == spec {
-			for _, tool := range group.Tools {
-				declared = declared || tool.Name == name
-			}
-		}
-	}
+	declared := slices.ContainsFunc(entries, func(entry extension.Installed) bool {
+		return entry.Manifest.ID == id && slices.ContainsFunc(entry.Manifest.Tools, func(tool sdk.ToolDescriptor) bool {
+			return tool.Name == name && extensionToolVisible(tool.Exposure, extension.LocalOwner(ctx))
+		})
+	})
 	if !declared {
 		return result, errors.New("extension is disabled, removed, or does not declare this tool")
 	}
-	ctx, cancel := context.WithTimeout(ctx, ToolTimeout)
-	defer cancel()
 	body, err := manager.Call(ctx, id, sdk.MethodToolCall, scope, sdk.ToolRequest{ID: name, Arguments: bytes.Clone(args)}, nil)
 	if err != nil {
 		return result, err

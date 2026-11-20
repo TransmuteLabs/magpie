@@ -204,10 +204,10 @@ func (s *Store) Accounts(plugin, provider string) ([]Account, error) {
 }
 
 func (s *Store) GetAccount(plugin, provider, id string) (Account, error) {
-	return s.getAccount(context.Background(), plugin, provider, id)
+	return s.GetAccountContext(context.Background(), plugin, provider, id)
 }
 
-func (s *Store) getAccount(ctx context.Context, plugin, provider, id string) (Account, error) {
+func (s *Store) GetAccountContext(ctx context.Context, plugin, provider, id string) (Account, error) {
 	var result Account
 	if !storeAccountID(plugin, provider, id) {
 		return result, storeInvalid()
