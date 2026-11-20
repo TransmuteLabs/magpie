@@ -2,8 +2,12 @@ package tui
 
 import (
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +44,7 @@ func TestTUIServesTheGatewayWhenNoneDoes(t *testing.T) {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	wait := serveGateway(ctx)
+	defer func() { stop(); wait() }()
 	waitFor(t, "no gateway while the terminal is open", gateway.Running)
 	if !gw.here.Load() {
 		t.Fatal("not marked as served here")
@@ -58,32 +63,34 @@ func TestTUIServesTheGatewayWhenNoneDoes(t *testing.T) {
 // A magpie that has the gateway keeps it; the terminal takes it up once
 // that one is gone.
 func TestTUILeavesTheGatewayToAnotherAndTakesItUp(t *testing.T) {
-	t.Setenv("MAGPIE_ADDR", freeAddr(t))
+	var probes atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"name":"magpie"}`)
+		probes.Add(1)
+	}))
+	defer other.Close()
+	t.Setenv("MAGPIE_ADDR", other.Listener.Addr().String())
 	old := gatewayWatch
 	gatewayWatch = 100 * time.Millisecond
 	defer func() { gatewayWatch = old }()
 
-	other, endOther := context.WithCancel(context.Background())
-	otherDone := make(chan struct{})
-	go func() {
-		defer close(otherDone)
-		gateway.New().ListenAndServe(other)
-	}()
-	waitFor(t, "the other magpie's gateway never answered", gateway.Running)
-
 	ctx, stop := context.WithCancel(context.Background())
-	defer stop()
 	wait := serveGateway(ctx)
-	time.Sleep(300 * time.Millisecond)
+	defer func() { stop(); wait() }()
+	waitFor(t, "the terminal did not look again while the other gateway was serving", func() bool {
+		return probes.Load() >= 2
+	})
 	if gw.here.Load() || gatewayStatus() != "" {
 		t.Fatalf("took the gateway another magpie serves: %q", gatewayStatus())
 	}
 
-	endOther()
-	<-otherDone
+	other.Close()
 	waitFor(t, "the terminal didn't take the gateway up once the other was gone", func() bool {
 		return gw.here.Load() && gateway.Running()
 	})
-	stop()
-	wait()
 }
