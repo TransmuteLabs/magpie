@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -14,6 +16,46 @@ import (
 type KV struct {
 	Path  string
 	Value any
+}
+
+// MergeJSONObjects fills omitted keys from have, including keys of shared objects.
+// Keys in whole use the entire value from want.
+func MergeJSONObjects(have, want map[string]json.RawMessage, whole []string) map[string]json.RawMessage {
+	out := make(map[string]json.RawMessage, len(have)+len(want))
+	for key, value := range want {
+		out[key] = value
+	}
+	for key, current := range have {
+		replacement, ok := want[key]
+		if !ok {
+			out[key] = current
+			continue
+		}
+		if slices.Contains(whole, key) {
+			continue
+		}
+		var left, right map[string]json.RawMessage
+		if json.Unmarshal(current, &left) != nil || left == nil || json.Unmarshal(replacement, &right) != nil || right == nil {
+			continue
+		}
+		if body, err := json.Marshal(MergeJSONObjects(left, right, nil)); err == nil {
+			out[key] = body
+		}
+	}
+	return out
+}
+
+// SameJSON reports whether raw JSON says what value marshals to.
+func SameJSON(raw string, value any) bool {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var current, replacement any
+	if json.Unmarshal([]byte(raw), &current) != nil || json.Unmarshal(body, &replacement) != nil {
+		return false
+	}
+	return reflect.DeepEqual(current, replacement)
 }
 
 // GetJSON reads a dot-separated key path from a JSON or JSONC file.

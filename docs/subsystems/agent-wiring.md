@@ -125,6 +125,13 @@ publishes the selected model with its provider catalog. Catalog sync touches
 only `providers.json`. Reasoning effort uses the model from the same
 `settings.json` snapshot as the effort map.
 
+OpenMausBot's [settings planner](../../internal/extension/builtin/openmausbot/settings.go)
+reads the engine and fleet from one checked snapshot. Connect, catalog sync
+and background repair preserve the selected model when it is still available
+and keep the user's engine fields. Off removes the owned engine and an
+unchanged Magpie-created default fleet in one publication. The host releases
+the fleet's recovery record after the publication succeeds.
+
 Per-agent telemetry and the global Privacy switch use the built-in
 telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
 restoration leaves its ownership record available for retry.

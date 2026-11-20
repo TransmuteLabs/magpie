@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinomb "github.com/yetone/magpie/internal/extension/builtin/openmausbot"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -140,7 +143,7 @@ func TestOpenMausBotEngine(t *testing.T) {
 	}
 	// every engine of the default fleet, as OpenMausBot runs it with none
 	var fleet map[string]json.RawMessage
-	json.Unmarshal([]byte(ombFleet), &fleet)
+	json.Unmarshal([]byte(builtinomb.DefaultFleet), &fleet)
 	if len(fleet) != 27 {
 		t.Errorf("default fleet of %d", len(fleet))
 	}
@@ -165,6 +168,12 @@ func TestOpenMausBotEngine(t *testing.T) {
 	if after, _ := os.Stat(path); readFile(path) != before || !after.ModTime().Equal(st.ModTime()) {
 		t.Error("a sync with nothing to change wrote the file")
 	}
+	truncated := strings.TrimSuffix(strings.TrimSpace(before), "}") + `,"truncated":`
+	writeFile(t, path, truncated)
+	if err := a.Apply("provider", magpieID); err == nil || readFile(path) != truncated {
+		t.Fatalf("unchanged engine made an incomplete settings document writable: %v", err)
+	}
+	writeFile(t, path, before)
 
 	// moved off the gateway, Check says so, and a sync brings it back
 	edit.SetJSON(path, edit.KV{Path: ombInstance + ".environment.ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:1"})
@@ -312,6 +321,77 @@ func TestOpenMausBotFleetChanged(t *testing.T) {
 	}
 }
 
+func TestOpenMausBotRejectsConcurrentSettingsEdit(t *testing.T) {
+	for _, action := range []string{"connect", "sync", "off"} {
+		t.Run(action, func(t *testing.T) {
+			home := syncHome(t)
+			stashHome(t)
+			ombRelay(t)
+			a := openMausBot(home)
+			writeFile(t, a.Path, `{"language":"de"}`)
+			if action != "connect" {
+				if err := a.Apply("provider", magpieID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if action == "sync" {
+				if err := edit.SetJSON(a.Path, edit.KV{Path: ombInstance + ".environment.ANTHROPIC_BASE_URL", Value: "http://127.0.0.1:1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mutate := func() error { return a.Apply("provider", magpieID) }
+			switch action {
+			case "sync":
+				mutate = a.Sync
+			case "off":
+				mutate = func() error { return a.Apply("provider", "") }
+			}
+			target, err := edit.Target(a.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := readFile(a.Path)
+			user := strings.Replace(input, `"de"`, `"fr"`, 1)
+			if user == input {
+				t.Fatal("fixture did not change the language")
+			}
+			before := peek(ombFleetKey)[ombFleetKey]
+			edited := false
+			err = edit.Filtered(func(path string, data []byte) []byte {
+				if path == target && !edited && (action != "off" || !bytes.Contains(data, []byte(`"instances"`))) {
+					writeFile(t, path, user)
+					edited = true
+				}
+				return data
+			}, mutate)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(a.Path) != user || peek(ombFleetKey)[ombFleetKey] != before {
+				t.Fatalf("concurrent edit=%t, error=%v, user retained=%t, fleet stash retained=%t",
+					edited, err, readFile(a.Path) == user, peek(ombFleetKey)[ombFleetKey] == before)
+			}
+			writes := 0
+			if err := edit.Filtered(func(path string, data []byte) []byte {
+				if path == target {
+					writes++
+				}
+				return data
+			}, mutate); err != nil {
+				t.Fatal(err)
+			}
+			if writes != 1 {
+				t.Fatal("retry did not publish one configuration change", writes)
+			}
+			if language, _ := edit.GetJSON(a.Path, "language"); language != "fr" {
+				t.Fatal("retry lost the user's language", language)
+			}
+			_, connected := edit.GetJSON(a.Path, ombInstance)
+			_, fleet := edit.GetJSON(a.Path, "instances")
+			if connected != (action != "off") || fleet != connected || t3Stashed(ombFleetKey) != connected {
+				t.Fatal("retry published inconsistent settings and fleet ownership", connected, fleet)
+			}
+		})
+	}
+}
+
 // A change is refused while OpenMausBot runs, as it writes its engines
 // back over magpie's; a file whose instances isn't a map of engines is
 // left alone.
@@ -334,6 +414,12 @@ func TestOpenMausBotRefuses(t *testing.T) {
 	writeFile(t, path, `{"instances":[1]}`)
 	if err := f.Set(magpieID); err == nil || readFile(path) != `{"instances":[1]}` {
 		t.Errorf("a list of instances: %v %s", err, readFile(path))
+	}
+	const truncated = `{"instances":`
+	writeFile(t, path, truncated)
+	stash(map[string]string{ombFleetKey: "1"})
+	if err := f.Set(""); err == nil || readFile(path) != truncated || !t3Stashed(ombFleetKey) {
+		t.Errorf("off lost fleet ownership with unreadable settings: %v", err)
 	}
 }
 
@@ -363,12 +449,12 @@ func TestOpenMausBotDir(t *testing.T) {
 // doesn't take, so magpie leaves such a model out.
 func TestOpenMausBotModelIDs(t *testing.T) {
 	for _, id := range []string{"relay/glm-4.6", "claude-opus-4-7[1m]", "or/x-ai/grok-4:free"} {
-		if !ombModelID.MatchString(id) {
+		if !builtinomb.AllowsModel(id) {
 			t.Errorf("refused %q", id)
 		}
 	}
 	for _, id := range []string{"relay/glm 4.6", "-x", "a@b", "m+1", ""} {
-		if ombModelID.MatchString(id) {
+		if builtinomb.AllowsModel(id) {
 			t.Errorf("taken %q", id)
 		}
 	}

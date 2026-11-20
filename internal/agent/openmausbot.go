@@ -54,66 +54,19 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/beat"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinomb "github.com/yetone/magpie/internal/extension/builtin/openmausbot"
 	"github.com/yetone/magpie/internal/gateway"
-	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // ombInstance is the key of magpie's engine in OpenMausBot's config.json.
-const ombInstance = "instances." + magpieID
+const ombInstance = builtinomb.InstanceKey
 
 // ombFleetKey is the stash key that says magpie wrote OpenMausBot's default
 // fleet into a file that had none.
 const ombFleetKey = "openmausbot.fleet"
-
-// ombFleet is OpenMausBot's DEFAULT_FLEET (server/instance-fleets.ts at
-// 516ca75, API_KEY_FLEET in its place), the engines it runs while its file
-// saves none.
-const ombFleet = `{
-  "grok": {"driver": "grokAgent"},
-  "kimi": {"driver": "kimiAgent"},
-  "droid": {"driver": "droidAgent"},
-  "cursor": {"driver": "cursorAgent"},
-  "githubCopilot": {"driver": "copilotAgent"},
-  "commandCode": {"driver": "commandCodeAgent"},
-  "claude": {"driver": "claudeAgent"},
-  "codex": {"driver": "codex"},
-  "chatgpt": {"driver": "codex", "displayName": "ChatGPT plan", "config": {"authMode": "chatgpt-plan"}},
-  "antigravity": {"driver": "antigravityAgent"},
-  "opencodeGo": {"driver": "opencodeGo"},
-  "openaiCompat": {"driver": "openai-compat"},
-  "mistral": {"driver": "mistral"},
-  "cerebras": {"driver": "cerebras"},
-  "groq": {"driver": "groq"},
-  "greenference": {"driver": "greenference"},
-  "meta": {"driver": "meta"},
-  "deepseek": {"driver": "deepseekAgent"},
-  "museCode": {"driver": "museCode"},
-  "openai": {"driver": "openai-compat", "displayName": "OpenAI", "access": "api", "icon": {"kind": "preset", "preset": "openai"},
-    "config": {"url": "https://api.openai.com/v1", "apiKeyEnv": "OMB_OPENAI_API_KEY", "catalog": "openai"}},
-  "claudeApi": {"driver": "claudeAgent", "displayName": "Claude (API key)", "access": "api", "icon": {"kind": "preset", "preset": "anthropic"},
-    "config": {"requireApiKey": true}},
-  "xaiApi": {"driver": "grok", "displayName": "xAI", "access": "api", "icon": {"kind": "preset", "preset": "xai"}},
-  "openrouter": {"driver": "openai-compat", "displayName": "OpenRouter", "access": "api", "icon": {"kind": "preset", "preset": "openrouter"},
-    "config": {"url": "https://openrouter.ai/api/v1", "apiKeyEnv": "OMB_OPENROUTER_API_KEY"}},
-  "qwen": {"driver": "qwenAgent"},
-  "hermes": {"driver": "hermesAgent"},
-  "cline": {"driver": "clineAgent"},
-  "pi": {"driver": "piAgent"}
-}`
-
-// ombModelID is the model id OpenMausBot takes for a Claude endpoint
-// (server/drivers/claude-model-extras.ts's CLAUDE_MODEL_ID); one other id
-// in the list makes it refuse the whole engine.
-var ombModelID = lazyre.New(`(?i)^[a-z0-9][a-z0-9._:/-]*(?:\[1m\])?$`)
-
-// ombRouting is the environment that picks Claude Code's endpoint and
-// sign-in (config.ts's CLAUDE_ROUTING_ENV): magpie's on its engine, so none
-// of the user's stays there.
-var ombRouting = []string{
-	"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS",
-	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-}
 
 // ombProc is OpenMausBot's app as ps lists it: the Mac bundle's
 // executable, the Linux one (electron-builder.yml's executableName).
@@ -135,9 +88,9 @@ var ombRunning = func() bool {
 
 func openMausBot(home string) *Agent {
 	dir := ombDir(home)
-	path := filepath.Join(dir, "config.json")
+	path := filepath.Join(dir, builtinomb.ConfigFile)
 	wired := func() bool { _, ok := edit.GetJSON(path, ombInstance); return ok }
-	return atomic(&Agent{
+	a := &Agent{
 		ID: "openmausbot", Name: "OpenMausBot", Icon: "openmausbot-color", Aliases: []string{"omb", "openmaus", "open-maus-bot"},
 		Dir: dir, Path: path,
 		detect: func() bool { return isDir(dir) || macBundle(ombApp) || ombWindowsApp() },
@@ -153,11 +106,7 @@ func openMausBot(home string) *Agent {
 			if !wired() {
 				return nil
 			}
-			want := ombMerged(path, dir, gateway.URL())
-			if want == nil {
-				return nil
-			}
-			return syncJSON(path, ombInstance, func() any { return want })
+			return ombChange(path, dir, builtinomb.Sync)
 		},
 		ListsModels: true,
 		Check: func() string {
@@ -179,15 +128,17 @@ func openMausBot(home string) *Agent {
 					return errOMBRunning
 				}
 				if v == "" {
-					return ombUnwire(path)
+					return ombChange(path, dir, builtinomb.Off)
 				}
-				return ombWire(path, dir, gateway.URL())
+				return ombChange(path, dir, builtinomb.Connect)
 			},
 			Options: func(map[string]string) []Option {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie", Note: "every magpie model under OpenMausBot's magpie engine; pick it for a bot"}}
 			},
 		}},
-	}, path)
+	}
+	extensionFenceLocalAtomic(a, []string{path})
+	return a
 }
 
 // ombDir is OpenMausBot's data folder: $OMB_DATA_DIR (only an absolute
@@ -218,114 +169,11 @@ func ombModels() []string {
 	out := []string{}
 	for _, m := range sharedModels("openmausbot") {
 		id := provider.ClaudeSpelled(mark(m.ID))
-		if ombModelID.MatchString(id) && !slices.Contains(out, id) {
+		if builtinomb.AllowsModel(id) && !slices.Contains(out, id) {
 			out = append(out, id)
 		}
 	}
 	return out
-}
-
-// ombInstanceJSON is magpie's engine in OpenMausBot's config.json at path,
-// in the folder dir, on the gateway at gw, in the shape OpenMausBot's own
-// Claude endpoint has; nil with no model it would take.
-func ombInstanceJSON(path, dir, gw string) map[string]any {
-	models := ombModels()
-	if len(models) == 0 {
-		return nil
-	}
-	config := map[string]any{
-		"configDir":      filepath.Join(dir, "providers", magpieID),
-		"requireApiKey":  true,
-		"endpointModels": models,
-	}
-	// the Claude Code the user gave OpenMausBot (inheritedCli): the first
-	// claudeAgent with a binary that is no endpoint
-	if raw, ok := edit.GetJSON(path, "instances"); ok {
-		var insts map[string]struct {
-			Driver string         `json:"driver"`
-			Config map[string]any `json:"config"`
-		}
-		json.Unmarshal([]byte(raw), &insts)
-		ids := make([]string, 0, len(insts))
-		for id := range insts {
-			ids = append(ids, id)
-		}
-		slices.Sort(ids)
-		for _, id := range ids {
-			e := insts[id]
-			if _, endpoint := e.Config["endpointModels"]; id == magpieID || e.Driver != "claudeAgent" || endpoint {
-				continue
-			}
-			if cli, _ := e.Config["cli"].(string); cli != "" {
-				config["cli"] = cli
-				break
-			}
-		}
-	}
-	// a key naming OpenMausBot: the Claude Code it runs sends nothing of
-	// OpenMausBot's own, so with the gateway's plain token its calls were
-	// counted as Claude Code's (huangfuyafei on X); the gateway still
-	// treats them as Claude Code's for its tiers (claudeCodeInside)
-	key := agentKeyAt("openmausbot", gw)
-	return map[string]any{
-		"driver": "claudeAgent", "displayName": "magpie", "access": "custom",
-		"config": config,
-		"environment": map[string]any{
-			"ANTHROPIC_BASE_URL":   gw,
-			"ANTHROPIC_AUTH_TOKEN": key,
-			// Claude Code's own sign-in check needs a key it knows, as on
-			// OpenMausBot's endpoints (endpointEnvironment)
-			"ANTHROPIC_API_KEY": key,
-			"ANTHROPIC_MODEL":   models[0],
-		},
-	}
-}
-
-// ombMerged is magpie's engine as ombInstanceJSON writes it, merged into
-// the one at path: its name, colour, icon, whether it is on or hidden, the
-// keys magpie doesn't write and the environment besides the routing are
-// the user's, and so is the model picked first while magpie still lists it.
-// The routing, the Claude home and the models are magpie's.
-func ombMerged(path, dir, gw string) any {
-	want := ombInstanceJSON(path, dir, gw)
-	if want == nil {
-		return nil
-	}
-	cur, ok := edit.GetJSON(path, ombInstance)
-	if !ok {
-		return want
-	}
-	var have map[string]json.RawMessage
-	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
-		return want
-	}
-	var theirs map[string]any
-	if json.Unmarshal(have["environment"], &theirs) == nil {
-		env := want["environment"].(map[string]any)
-		models := want["config"].(map[string]any)["endpointModels"].([]string)
-		for k, v := range theirs {
-			s, isText := v.(string)
-			switch {
-			case !isText || slices.Contains(ombRouting, k):
-			case k == "ANTHROPIC_MODEL":
-				if slices.Contains(models, s) {
-					env[k] = s
-				}
-			default:
-				env[k] = s
-			}
-		}
-	}
-	b, err := json.Marshal(want)
-	var w map[string]json.RawMessage
-	if err != nil || json.Unmarshal(b, &w) != nil {
-		return want
-	}
-	// displayName is the user's once they renamed it
-	if _, named := have["displayName"]; named {
-		delete(w, "displayName")
-	}
-	return mergeTheirs(have, w, []string{"environment"})
 }
 
 // ombSaved is the models magpie's engine at path lists in OpenMausBot's
@@ -413,51 +261,35 @@ func ombListedOnce() error {
 	return synced(a.Sync)
 }
 
-// ombWire writes magpie's engine into OpenMausBot's config.json at path,
-// with the default fleet beside it when the file saves no engines.
-func ombWire(path, dir, gw string) error {
-	v := ombMerged(path, dir, gw)
-	if v == nil {
-		return errors.New("no magpie model OpenMausBot can list: pick models for OpenMausBot first")
+func ombChange(path, dir string, intent builtinomb.SettingsIntent) error {
+	options := builtinomb.SettingsOptions{Intent: intent}
+	var saved map[string]string
+	if intent == builtinomb.Off {
+		saved = peek(ombFleetKey)
+		options.OwnsDefaultFleet = saved[ombFleetKey] != ""
+	} else {
+		options.Gateway = gateway.URL()
+		options.Key = agentKeyAt("openmausbot", options.Gateway)
+		options.ClaudeHome = filepath.Join(dir, "providers", magpieID)
+		options.Models = ombModels()
 	}
-	raw, ok := edit.GetJSON(path, "instances")
-	var insts map[string]json.RawMessage
-	if ok && (json.Unmarshal([]byte(raw), &insts) != nil || insts == nil) {
-		return errors.New(path + "'s instances isn't a map of engines, so magpie leaves it alone")
-	}
-	if len(insts) > 0 {
-		return edit.SetJSON(path, edit.KV{Path: ombInstance, Value: v})
-	}
-	var fleet map[string]json.RawMessage
-	json.Unmarshal([]byte(ombFleet), &fleet)
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	fleet[magpieID] = b
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := edit.SetJSON(path, edit.KV{Path: "instances", Value: fleet}); err != nil {
-		return err
-	}
-	stash(map[string]string{ombFleetKey: "1"})
-	return nil
-}
-
-// ombUnwire takes magpie's engine out of OpenMausBot's config.json at
-// path, and the default fleet magpie wrote with it while the rest is still
-// that fleet, so OpenMausBot runs its defaults again as they are then.
-func ombUnwire(path string) error {
-	if err := edit.DelJSON(path, ombInstance); err != nil {
-		return err
-	}
-	if !t3Stashed(ombFleetKey) {
+	var addedFleet bool
+	file := extension.LinkedActionFile{Name: builtinomb.ConfigFile, Path: path, BeforeWrite: func(string) error {
+		if addedFleet {
+			return os.MkdirAll(dir, 0o700)
+		}
 		return nil
+	}}
+	err := extension.ApplyLinkedAgentPlan(options, func(options builtinomb.SettingsOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, added, err := builtinomb.PlanSettings(options, snapshot)
+		addedFleet = added
+		return plan, err
+	}, file)
+	if err == nil {
+		if addedFleet {
+			stash(map[string]string{ombFleetKey: "1"})
+		}
+		forgetValues(saved)
 	}
-	forget(ombFleetKey)
-	if raw, ok := edit.GetJSON(path, "instances"); ok && sameJSON(raw, json.RawMessage(ombFleet)) {
-		return edit.DelJSON(path, "instances")
-	}
-	return nil
+	return err
 }
