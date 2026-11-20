@@ -293,6 +293,12 @@ settings flag, model flag, gateway variables and remote-control arguments.
 The host decides when the overlay applies and couples it to the user's
 current model. Shell profiles in a WSL distro still read its settings file
 locally when they run.
+The linked AgY settings plan checks `settings.json` and
+`magpie-settings.json` together. Sync and model selection rebuild the
+overlay from the same native snapshot used to restore legacy settings or
+keep a new `/model` pick. The host releases saved originals and updates
+shell profiles after successful publication. It removes its dedicated
+overlay when the user returns to native settings.
 
 Dim uses a linked `AgentLaunch` recipe for `magpie dim run`, `env` and
 shell commands. The host selects the configured daemon or an environment

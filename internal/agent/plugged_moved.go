@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/agentplug"
+	builtinagy "github.com/yetone/magpie/internal/extension/builtin/agy"
 	"github.com/yetone/magpie/internal/plugin"
 )
 
@@ -90,7 +91,7 @@ func handedOver(id string, at place, f pluggedFile, spec, key string) (pluggedSt
 // agyHandover is the built-in agy's wiring as the agent-agy plugin's,
 // whose config is magpie's own settings file too (agyOverride). A
 // settings.json an older built-in wired is given back first, as the
-// built-in's Sync does (migrate), its model moved into magpie's file;
+// built-in's Sync does, its model moved into magpie's file;
 // then, while that file's model is magpie's, the file is the plugin's:
 // every key it has was magpie's, so stepping out takes the file away.
 func agyHandover(at place, f pluggedFile) (pluggedStash, bool) {
@@ -108,7 +109,7 @@ func agyHandover(at place, f pluggedFile) (pluggedStash, bool) {
 		return pluggedStash{}, false
 	}
 	had := map[string]string{}
-	for _, k := range []string{"model", "modelProvider", agyModels} {
+	for _, k := range []string{"model", "modelProvider", builtinagy.ModelsKey} {
 		had[k] = "\x00"
 	}
 	return pluggedStash{

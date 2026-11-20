@@ -27,7 +27,7 @@ package agent
 //
 // A model that takes two or more of low, medium and high is listed once
 // more per level, "magpie/<ref>:<level>" with that thinkingLevel, the
-// thinking depth picked in agy's /model (agyLevels).
+// thinking depth picked in agy's /model.
 //
 // So that typing agy just works (bestony on Discord: the command was
 // copied at each start), magpie puts a function named agy in the profile
@@ -46,21 +46,19 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"sort"
 	"strings"
 
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/jsonc"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	builtinagy "github.com/yetone/magpie/internal/extension/builtin/agy"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/update"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
-
-const agyModels = "customModelsConfig.customModels"
 
 // AgyLaunch is the command that starts agy on magpie's gateway and one of
 // its custom models, in the shell of this system. Its key names agy: its
@@ -73,7 +71,7 @@ func AgyLaunch(model string) string {
 }
 
 // agyOverride is the name of magpie's settings file in agy's folder.
-const agyOverride = "magpie-settings.json"
+const agyOverride = builtinagy.OverlayFile
 
 // agySettingsFile is magpie's settings file for agy on this machine.
 func agySettingsFile() string {
@@ -216,16 +214,11 @@ func agyDistroFunction(kind, key, gw string) string {
 
 // agyCustom reads customModels as it is, raw JSON by key.
 func agyCustom(path string) map[string]json.RawMessage {
-	out := map[string]json.RawMessage{}
 	raw, err := edit.Read(path)
-	if err != nil || len(raw) == 0 {
-		return out
+	if err != nil {
+		return nil
 	}
-	gjson.GetBytes(jsonc.ToJSONInPlace(raw), agyModels).ForEach(func(k, v gjson.Result) bool {
-		out[k.String()] = json.RawMessage(v.Raw)
-		return true
-	})
-	return out
+	return builtinagy.CustomModels(raw)
 }
 
 func agy(home string) *Agent { return agyIn(here(home)) }
@@ -235,13 +228,13 @@ func agy(home string) *Agent { return agyIn(here(home)) }
 func agyIn(at place) *Agent {
 	home := at.home
 	dir := at.open(filepath.Join(home, ".gemini", "antigravity-cli"))
-	path := filepath.Join(dir, "settings.json")
+	path := filepath.Join(dir, builtinagy.SettingsFile)
 	over := filepath.Join(dir, agyOverride)
 	settingsModel, overModel := jsonGet(path, "model"), jsonGet(over, "model")
 	provider := jsonGet(over, "modelProvider")
 	// the model is magpie's while its own file names one; a settings.json
-	// still wired by an older magpie says so too, until migrate moves it.
-	// It is the custom model's key, a level's (agyLevelKey) too.
+	// still wired by an older magpie says so too, until Sync moves it.
+	// It is the custom model's key, including its thinking level.
 	get := func() string {
 		if m := overModel(); usesMagpie(m) {
 			return m
@@ -249,81 +242,37 @@ func agyIn(at place) *Agent {
 		return settingsModel()
 	}
 	stashModel, stashProvider := "agy:"+path+":model", "agy:"+path+":modelProvider"
-	// put sets key to v, or takes it out for ""
-	put := func(key, v string) error {
-		if v == "" {
-			return edit.DelJSON(path, key)
+	applySettings := func(model string, syncing, routed bool) (builtinagy.SettingsResult, error) {
+		var result builtinagy.SettingsResult
+		var saved map[string]string
+		options := builtinagy.SettingsOptions{
+			Sync: syncing, Routed: routed, Model: model,
+			Restore: func(legacy bool) (string, string) {
+				if legacy {
+					saved = peek(stashModel, stashProvider)
+					return saved[stashModel], saved[stashProvider]
+				}
+				return agyConnectWas(), ""
+			},
+			Catalog: func() []builtinagy.Model {
+				models := sharedModels("agy")
+				catalog := make([]builtinagy.Model, len(models))
+				for i, model := range models {
+					catalog[i] = builtinagy.Model{ID: model.ID, Efforts: model.Efforts}
+				}
+				return catalog
+			},
 		}
-		return edit.SetJSON(path, edit.KV{Path: key, Value: v})
-	}
-	// ownModels is the user's own custom models, as settings.json has them
-	ownModels := func() map[string]any {
-		ms := map[string]any{}
-		for k, v := range agyCustom(path) {
-			if !strings.HasPrefix(k, magpieID+"/") {
-				ms[k] = v
-			}
+		err := extension.ApplyLinkedAgentPlan(options, func(options builtinagy.SettingsOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+			plan, next, err := builtinagy.PlanSettings(options, snapshot)
+			result = next
+			return plan, err
+		}, extension.LinkedActionFile{Name: builtinagy.SettingsFile, Path: path},
+			extension.LinkedActionFile{Name: builtinagy.OverlayFile, Path: over})
+		if err == nil && result.Legacy {
+			forgetValues(saved)
 		}
-		return ms
-	}
-	// writeOver writes magpie's settings file: the provider, the model and
-	// every custom model, the user's own too, as agy takes the key whole
-	writeOver := func(model string) error {
-		ms := ownModels()
-		for _, m := range sharedModels("agy") {
-			ms[magpieID+"/"+m.ID] = map[string]string{"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "modelName": m.ID}
-			for _, l := range agyLevels(m.Efforts) {
-				ms[agyLevelKey(magpieID+"/"+m.ID, l)] = map[string]string{"apiProvider": "API_PROVIDER_GOOGLE_GEMINI", "modelName": m.ID, "thinkingLevel": l}
-			}
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-		return edit.SetJSON(over, edit.KV{Path: "modelProvider", Value: "gemini"}, edit.KV{Path: "model", Value: model}, edit.KV{Path: agyModels, Value: ms})
-	}
-	dropOver := func() error {
-		if err := os.Remove(over); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		return nil
-	}
-	// migrate takes what an older magpie wrote into settings.json out of
-	// it, the user's model and provider back; it returns the model that
-	// was magpie's there, "" when settings.json was never wired.
-	//
-	// While magpie's own file is on one of magpie's, a model of magpie's
-	// in settings.json is not an older magpie's: it is agy's /model, which
-	// writes the pick into settings.json, --settings or not. That pick is
-	// kept in magpie's file (it is what agy starts on next) and
-	// settings.json's model goes back to what it was when magpie was
-	// switched on (connect.was), or out of it. The old stash is never read
-	// for it: one left from an older magpie, or none, put a stale model and
-	// provider into settings.json or took the user's out of it
-	// (LolingVerse on X).
-	migrate := func() (string, error) {
-		m := settingsModel()
-		if !usesMagpie(m) {
-			return "", nil
-		}
-		if usesMagpie(overModel()) {
-			return m, put("model", agyConnectWas())
-		}
-		if err := put("modelProvider", unstash(stashProvider)); err != nil {
-			return m, err
-		}
-		if err := put("model", unstash(stashModel)); err != nil {
-			return m, err
-		}
-		if ms := ownModels(); len(ms) > 0 {
-			return m, edit.SetJSON(path, edit.KV{Path: agyModels, Value: ms})
-		}
-		if err := edit.DelJSON(path, agyModels); err != nil {
-			return m, err
-		}
-		if v, ok := edit.GetJSON(path, "customModelsConfig"); ok && strings.TrimSpace(v) == "{}" {
-			return m, edit.DelJSON(path, "customModelsConfig")
-		}
-		return m, nil
+		return result, err
 	}
 	// the function agy, in this machine's shells or the distro's
 	distro := at.sys != nil
@@ -377,19 +326,12 @@ func agyIn(at place) *Agent {
 			return s
 		},
 		Sync: func() error {
-			m, err := migrate()
+			next, err := applySettings("", true, false)
 			if err != nil {
 				return err
 			}
-			if m == "" {
-				m = overModel()
-			}
-			on := usesMagpie(m)
-			shell(on)
-			if !on {
-				return nil
-			}
-			return writeOver(m)
+			shell(next.Routed)
+			return nil
 		},
 		Notice: func() string {
 			v := get()
@@ -433,30 +375,23 @@ func agyIn(at place) *Agent {
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			// a level's custom model is its model's, the level agy's
-			Get: func() string { return agyLevelOf(get()) },
+			Get: func() string { return builtinagy.BaseModel(get()) },
 			Set: func(v string) error {
-				if _, err := migrate(); err != nil {
+				ref, prefixed := strings.CutPrefix(builtinagy.BaseModel(v), magpieID+"/")
+				next, err := applySettings(v, false, prefixed && isMagpie(ref))
+				if err != nil {
 					return err
 				}
-				cur := overModel()
-				if ref, ok := strings.CutPrefix(agyLevelOf(v), magpieID+"/"); ok && isMagpie(ref) {
-					if err := writeOver(v); err != nil {
-						return err
-					}
+				if next.Routed {
 					shell(true)
-					return nil
 				}
-				// back to the user's own: settings.json was never touched
-				if usesMagpie(cur) {
-					if err := dropOver(); err != nil {
+				if next.DropOverlay {
+					if err := os.Remove(over); err != nil && !os.IsNotExist(err) {
 						return err
 					}
 					shell(false)
 				}
-				if v == "" {
-					return nil
-				}
-				return put("model", v)
+				return nil
 			},
 			Options: func(cur map[string]string) []Option {
 				custom := agyCustom(path)
@@ -482,46 +417,6 @@ func agyIn(at place) *Agent {
 			},
 		}, agyEffortField(func() bool { return !at.cold && usesMagpie(get()) })},
 	}
-}
-
-// agyLevelNames are the levels a custom model of agy's takes as its
-// thinkingLevel, weakest first: agy 1.5.9 takes low, medium and high
-// ("customModels %q: ignoring thinkingLevel %q (want low, medium, or
-// high)") and asks the model at it (generationConfig.thinkingConfig.
-// thinkingLevel), which the gateway asks for over the row's
-// (agyLevelAsked).
-var agyLevelNames = []string{"low", "medium", "high"}
-
-// agyLevels are the levels of efforts agy's custom models can ask, weakest
-// first: none unless two or more, as one is no choice.
-func agyLevels(efforts []string) []string {
-	var out []string
-	for _, l := range agyLevelNames {
-		if slices.ContainsFunc(efforts, func(e string) bool { return strings.EqualFold(e, l) }) {
-			out = append(out, l)
-		}
-	}
-	if len(out) < 2 {
-		return nil
-	}
-	return out
-}
-
-// agyLevelKey is the key of the custom model that asks key's model at
-// level. agy's /effort is turned away for every custom model, one with a
-// thinkingLevel too ("Effort isn't adjustable for …", agy 1.5.9), and its
-// /model lists custom models by key, so each level is one of its own
-// there (LolingVerse on X: no thinking depth in agy).
-func agyLevelKey(key, level string) string { return key + ":" + level }
-
-// agyLevelOf is the key of the model a level's custom model asks: key
-// without its level; key as it is otherwise.
-func agyLevelOf(key string) string {
-	i := strings.LastIndex(key, ":")
-	if i < 0 || !slices.Contains(agyLevelNames, key[i+1:]) || !usesMagpie(key) {
-		return key
-	}
-	return key[:i]
 }
 
 // agyConnectWas is the model agy was on when magpie was switched on for
