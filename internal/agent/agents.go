@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -1569,10 +1570,12 @@ type beforeMagpie struct {
 
 // take copies each file aside, or notes it absent; a file that can't be
 // read is neither, and isn't put back.
-func (b beforeMagpie) take() {
+func (b beforeMagpie) take() { b.takeFrom(os.ReadFile) }
+
+func (b beforeMagpie) takeFrom(read func(string) ([]byte, error)) {
 	var gone []string
 	for _, f := range b.files {
-		raw, err := os.ReadFile(f)
+		raw, err := read(f)
 		switch {
 		case err == nil:
 			if edit.WriteAtomic(f+".before-magpie", raw) != nil {
@@ -1650,7 +1653,6 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	auth := filepath.Join(dir, "auth.json")
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
-	pair := pairSet(set, "defaultProvider", "defaultModel")
 	// the model a new session starts on, as the model field shows it
 	startup := func() string { return piStartup(path, pairGet(get, "defaultProvider", "defaultModel")()) }
 	block := func() map[string]any {
@@ -1677,33 +1679,60 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	// models.json block is not written and magpie's own stale one goes
 	// (pimagpie.go)
 	viaExt := func() bool { return id == "pi" && piMagpieInstalled(path) }
-	writeMagpie := func() error {
-		if viaExt() {
-			if err := dropPiBlock(modelsPath, func() string {
-				return wiringOff(name, modelsPath, func(k string) (string, bool) { return edit.GetJSON(modelsPath, "providers."+magpieID+"."+k) },
-					"baseUrl", at.v1(), "apiKey", key())
-			}); err != nil {
-				return err
-			}
-			return extension()
-		}
-		updates := map[string]string{}
-		err := applyJSONSync(modelsPath, func(config gjson.Result) []edit.KV {
-			const slot = "providers." + magpieID
-			current := config.Get(slot)
-			return jsonSyncChange(slot, current, refresh(current, updates))
-		})
-		if err != nil {
+	dropStaleBlock := func() error {
+		if err := dropPiBlock(modelsPath, func() string {
+			return wiringOff(name, modelsPath, func(k string) (string, bool) { return edit.GetJSON(modelsPath, "providers."+magpieID+"."+k) },
+				"baseUrl", at.v1(), "apiKey", key())
+		}); err != nil {
 			return err
-		}
-		if len(updates) != 0 {
-			stash(updates)
 		}
 		return extension()
 	}
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
 	before := beforeMagpie{at.key(id + ".before.absent"), []string{path, modelsPath}}
+	pickCatalog := func(value string, config wiringFileEdit) error {
+		original, err := readWiringFile(modelsPath)
+		if err != nil {
+			return edit.PreserveOnRollback(modelsPath, err)
+		}
+		catalog := wiringFileEdit{path: modelsPath, before: original}
+		const slot = "providers." + magpieID
+		updates := map[string]string{}
+		current := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(original.body)), slot)
+		if value == "" {
+			if len(bytes.TrimSpace(edit.TrimBOM(original.body))) != 0 {
+				catalog.body, err = edit.PatchJSON(original.body, nil, []string{slot})
+			}
+		} else if changes := jsonSyncChange(slot, current, refresh(current, updates)); len(changes) != 0 {
+			catalog.body, err = edit.PatchJSON(original.body, changes, nil)
+		}
+		if err != nil {
+			return original.preserveOnError(modelsPath, fmt.Errorf("%s: %w", modelsPath, err))
+		}
+		if value == "" {
+			return writeWiringFiles(config, catalog)
+		}
+		if err := writeWiringFiles(catalog, config); err != nil {
+			return err
+		}
+		if !current.Exists() && gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(config.before.body)), "defaultProvider").String() != magpieID {
+			before.takeFrom(func(file string) ([]byte, error) {
+				snapshot := config.before
+				if file == modelsPath {
+					snapshot = original
+				}
+				if snapshot.info == nil {
+					return nil, fs.ErrNotExist
+				}
+				return snapshot.body, nil
+			})
+		}
+		if len(updates) != 0 {
+			stash(updates)
+		}
+		return extension()
+	}
 	// the entries of enabledModels a sync took out (scope_gone.go)
 	gone := at.key(id + ".scope.gone")
 	var telemetry *Telemetry
@@ -1727,7 +1756,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		ListOnly: true,
 		Sync: func() error {
 			if viaExt() {
-				if err := writeMagpie(); err != nil { // drops the stale block
+				if err := dropStaleBlock(); err != nil {
 					return err
 				}
 				return piScopeSynced(path, modelsPath, gone, nil)
@@ -1754,34 +1783,34 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				// what a new session starts on, which enabledModels decides
 				Get: startup,
 				Set: func(v string) error {
+					config, err := piModelEdit(path, v)
+					if err != nil {
+						return err
+					}
 					if v == "" {
-						if err := edit.DelJSON(path, "defaultProvider", "defaultModel"); err != nil {
-							return err
-						}
-						if err := edit.DelJSON(modelsPath, "providers."+magpieID); err != nil {
+						if err := pickCatalog(v, config); err != nil {
 							return err
 						}
 						if err := extension(); err != nil {
 							return err
 						}
 						forget(gone)
-						return piScopeWithout(path)
+						return nil
 					}
 					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
+						if !viaExt() {
+							return pickCatalog(v, config)
+						}
 						if _, has := edit.GetJSON(modelsPath, "providers."+magpieID); !has {
 							if p, _ := get("defaultProvider"); p != magpieID {
 								before.take()
 							}
 						}
-						if err := writeMagpie(); err != nil {
+						if err := dropStaleBlock(); err != nil {
 							return err
 						}
 					}
-					if err := pair(v); err != nil {
-						return err
-					}
-					// a model outside the user's Ctrl+P list would never start
-					return piScopeWith(path, v)
+					return writeWiringFiles(config)
 				},
 				Options: func(cur map[string]string) []Option {
 					return withVia(ownOptionsFrom(piRegistry(id), auth, cur["model"]), id, magpieID+"/")
@@ -1829,7 +1858,25 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	}
 	// the protocol it asks magpie's models on (pi_protocol.go)
 	if id == "pi" {
-		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, writeMagpie, viaExt))
+		writeProtocol := func() error {
+			updates := map[string]string{}
+			err := applyJSONSync(modelsPath, func(config gjson.Result) []edit.KV {
+				const slot = "providers." + magpieID
+				current := config.Get(slot)
+				if !current.Exists() {
+					return nil
+				}
+				return jsonSyncChange(slot, current, refresh(current, updates))
+			})
+			if err != nil {
+				return err
+			}
+			if len(updates) != 0 {
+				stash(updates)
+			}
+			return extension()
+		}
+		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, writeProtocol, viaExt))
 	}
 	return a
 }

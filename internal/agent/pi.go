@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"path"
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -60,34 +64,52 @@ func piTakes(pattern, ref string) bool {
 	return false
 }
 
-// piScopeWith adds ref to Pi's enabledModels, when there is such a list and
-// nothing in it takes ref in; the user's entries stay as they are.
-func piScopeWith(settings, ref string) error {
-	pats := piScope(settings)
-	if pats == nil || slices.ContainsFunc(pats, func(p string) bool { return piTakes(p, ref) }) {
-		return nil
+func piModelEdit(path, ref string) (wiringFileEdit, error) {
+	before, err := readWiringFile(path)
+	change := wiringFileEdit{path: path, before: before}
+	if err != nil {
+		return change, edit.PreserveOnRollback(path, err)
 	}
-	return edit.SetJSON(settings, edit.KV{Path: "enabledModels", Value: append(pats, ref)})
-}
-
-// piScopeWithout takes magpie's models out of Pi's enabledModels once
-// magpie's provider is gone from models.json, where they would name nothing.
-// A list left with nothing is removed, never written empty.
-func piScopeWithout(settings string) error {
-	pats := piScope(settings)
-	if pats == nil {
-		return nil
+	var patterns []string
+	raw := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(before.body)), "enabledModels").Raw
+	if json.Unmarshal([]byte(raw), &patterns) != nil {
+		patterns = nil
 	}
-	kept := slices.DeleteFunc(slices.Clone(pats), func(p string) bool {
-		return !strings.ContainsAny(p, "*?[") && strings.HasPrefix(strings.ToLower(p), magpieID+"/")
-	})
-	switch {
-	case len(kept) == len(pats):
-		return nil
-	case len(kept) == 0:
-		return edit.DelJSON(settings, "enabledModels")
+	var set []edit.KV
+	var del []string
+	if ref == "" {
+		del = []string{"defaultProvider", "defaultModel"}
+		kept := slices.DeleteFunc(slices.Clone(patterns), func(pattern string) bool {
+			return !strings.ContainsAny(pattern, "*?[") && strings.HasPrefix(strings.ToLower(pattern), magpieID+"/")
+		})
+		if len(kept) != len(patterns) {
+			if len(kept) == 0 {
+				del = append(del, "enabledModels")
+			} else {
+				set = []edit.KV{{Path: "enabledModels", Value: kept}}
+			}
+		}
+	} else {
+		provider, model, ok := strings.Cut(ref, "/")
+		if !ok || provider == "" || model == "" {
+			return change, fmt.Errorf("expected provider/model, got %q", ref)
+		}
+		set = []edit.KV{{Path: "defaultProvider", Value: provider}, {Path: "defaultModel", Value: model}}
+		if len(patterns) != 0 && !slices.ContainsFunc(patterns, func(pattern string) bool { return piTakes(pattern, ref) }) {
+			set = append(set, edit.KV{Path: "enabledModels", Value: append(patterns, ref)})
+		}
 	}
-	return edit.SetJSON(settings, edit.KV{Path: "enabledModels", Value: kept})
+	if len(set) == 0 && len(bytes.TrimSpace(edit.TrimBOM(before.body))) == 0 {
+		return change, nil
+	}
+	body, err := edit.PatchJSON(before.body, set, del)
+	if err != nil {
+		return change, before.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
+	}
+	if !bytes.Equal(body, before.body) {
+		change.body = body
+	}
+	return change, nil
 }
 
 // piStartup is the model a new Pi session starts on, as the model field
