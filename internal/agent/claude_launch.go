@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
@@ -131,10 +133,17 @@ func claudeUserSettings(home string) string {
 // file gets its model back while magpie isn't wired into it: a plain
 // `claude` would ask Anthropic for a model only magpie serves. A Claude
 // model of its own (sonnet) is a pick plain claude can run, and stays.
+// The launch pick is saved first, and restoring the user's model is
+// conditional on the settings snapshot still being current.
 func ClaudeLaunchAfter(home string, was ClaudeModelMark) error {
 	user := claudeUserSettings(home)
-	now, has := edit.GetJSON(user, "model")
-	if now == was.model && has == was.has {
+	before, err := readWiringFile(user)
+	if err != nil {
+		return err
+	}
+	model := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(before.body)), "model")
+	now := model.String()
+	if now == was.model && model.Exists() == was.has {
 		return nil
 	}
 	if claudeRouted(here(home), user) {
@@ -154,10 +163,18 @@ func ClaudeLaunchAfter(home string, was ClaudeModelMark) error {
 			return err
 		}
 	}
+	var set []edit.KV
+	var del []string
 	if was.has {
-		return edit.SetJSON(user, edit.KV{Path: "model", Value: was.model})
+		set = []edit.KV{{Path: "model", Value: was.model}}
+	} else {
+		del = []string{"model"}
 	}
-	return edit.DelJSON(user, "model")
+	body, err := edit.PatchJSON(before.body, set, del)
+	if err != nil {
+		return err
+	}
+	return edit.WriteAtomicChecked(before.target, body, func() error { return before.check(user) })
 }
 
 // claudeLaunchRewrote says now is Claude Code's own rewrite of the user's
