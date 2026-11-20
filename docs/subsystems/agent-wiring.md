@@ -161,6 +161,12 @@ checks `config.yaml` and the custom provider catalog together for model
 selection and reset. Catalog refresh uses the same catalog planner. A
 rejected settings write leaves the previous catalog in place.
 
+Zed's [settings planner](../../internal/extension/builtin/zed/plan.go)
+uses one JSONC snapshot for model selection, reset, catalog refresh and the
+bili address. Magpie saves the credential for the selected address before
+publication. If Zed changes the settings meanwhile, the host refuses the
+plan and keeps the existing restore history.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

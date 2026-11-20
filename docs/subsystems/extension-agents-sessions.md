@@ -354,8 +354,9 @@ hardlink referents stay intact.
 Pi and its forks plan the legacy catalog and enabled-model scope together.
 Pi publishes its model API and output history after the plan succeeds.
 Aside checks provider ownership in the same catalog snapshot used by
-Connect and Sync. Zed and Qoder use the corresponding checked snapshot
-for the route or model that controls refresh and for preserved overrides.
+Connect and Sync. The linked Zed planner handles selection, reset, refresh
+and proxy changes. Qoder uses its checked snapshot for the model that
+controls refresh and for preserved overrides.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,
