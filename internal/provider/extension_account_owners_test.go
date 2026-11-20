@@ -38,7 +38,7 @@ func TestExtensionKeepAliveDiscoveryHonorsDeadline(t *testing.T) {
 	t.Run("catalog", func(t *testing.T) {
 		fixture := keepAliveOwnerFixture(t, nil)
 		err := whileExtensionAccountLockHeld(t, fixture.manager.Namespace(), "catalog.lock", func(ctx context.Context) error {
-			_, err := extensionSignInsKept(ctx)
+			_, err := extensionSignInsKept(ctx, fixture.manager)
 			return err
 		})
 		if !errors.Is(err, context.DeadlineExceeded) || fixture.calls.Load() != 0 || fixture.manager.Running(fixture.scope.Plugin) {
@@ -53,7 +53,7 @@ func TestExtensionKeepAliveDiscoveryHonorsDeadline(t *testing.T) {
 			t.Fatalf("ordinary account discovery: len=%d err=%v", len(providers), err)
 		}
 		err := whileExtensionAccountLockHeld(t, host.namespace, filepath.Join("private", ".lock"), func(ctx context.Context) error {
-			_, err := extensionSignInsKept(ctx)
+			_, err := extensionSignInsKept(ctx, host)
 			return err
 		})
 		if !errors.Is(err, context.DeadlineExceeded) {

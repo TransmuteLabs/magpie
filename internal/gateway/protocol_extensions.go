@@ -32,9 +32,8 @@ func NewWithProtocols(registry *sdk.Registry) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := New()
+	server := newServer(nil)
 	server.protocols = host
-	server.extensions = nil
 	return server, nil
 }
 

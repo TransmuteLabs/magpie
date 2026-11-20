@@ -25,7 +25,8 @@ func TestRevokedAccountToldToHooksOnce(t *testing.T) {
 	t.Cleanup(plugin.Settle)
 	access := codexAccessToken(t)
 	revokedUpstream(t, access)
-	if rec := codexPostTo(New(), `{"model":"gpt-5.5","stream":true,"input":"ping"}`); rec.Code != 200 {
+	server := New()
+	if rec := codexPostTo(server, `{"model":"gpt-5.5","stream":true,"input":"ping"}`); rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	if got := codexLapsed(t, "me@example.com"); got == "" {
@@ -35,16 +36,16 @@ func TestRevokedAccountToldToHooksOnce(t *testing.T) {
 	var mu sync.Mutex
 	var told []plugin.SignInEvent
 	was := signInToHooks
-	signInToHooks = func(ctx context.Context, ev plugin.SignInEvent) {
+	signInToHooks = func(s *Server, ctx context.Context, ev plugin.SignInEvent) {
 		mu.Lock()
 		told = append(told, ev)
 		mu.Unlock()
-		was(ctx, ev)
+		was(s, ctx, ev)
 	}
 	t.Cleanup(func() { signInToHooks = was })
 
 	// no hook yet: nothing looked at, nothing marked told
-	tellHooksOfSignIns(t.Context())
+	server.tellHooksOfSignIns(t.Context())
 	if len(told) != 0 {
 		t.Fatalf("told with no hook: %+v", told)
 	}
@@ -63,8 +64,8 @@ export function onSignIn(ev, ctx) { fs.appendFileSync(ctx.options.out, JSON.stri
 		t.Fatal(err)
 	}
 	provider.ForgetAccounts()
-	tellHooksOfSignIns(t.Context())
-	tellHooksOfSignIns(t.Context())
+	server.tellHooksOfSignIns(t.Context())
+	server.tellHooksOfSignIns(t.Context())
 	mu.Lock()
 	n := len(told)
 	var first plugin.SignInEvent

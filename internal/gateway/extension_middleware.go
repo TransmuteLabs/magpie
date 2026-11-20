@@ -12,8 +12,9 @@ import (
 )
 
 type extensionMiddlewareAgent struct {
-	ctx    context.Context
-	origin string
+	manager *extension.Manager
+	ctx     context.Context
+	origin  string
 }
 
 type extensionMiddlewareCall struct {
@@ -27,11 +28,7 @@ type extensionMiddlewareRun struct {
 }
 
 func (agent extensionMiddlewareAgent) Begin(info gwmw.Info) gwmw.Run {
-	manager := gatewayExtensionManager()
-	if manager == nil {
-		return nil
-	}
-	runs := manager.BeginMiddleware(agent.ctx, sdk.GatewayContext{Origin: agent.origin,
+	runs := agent.manager.BeginMiddleware(agent.ctx, sdk.GatewayContext{Origin: agent.origin,
 		Protocol: info.Protocol, Model: info.Model, Stream: info.Stream, Path: info.Path, Agent: info.Agent})
 	if len(runs) == 0 {
 		return nil

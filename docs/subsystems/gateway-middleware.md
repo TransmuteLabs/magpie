@@ -29,9 +29,10 @@ The Go contract is [`pkg/extension/middleware.go`](../../pkg/extension/middlewar
 the JS SDK implements the same descriptor and bounded unary methods.
 
 [`extensionMiddlewareAgent`](../../internal/gateway/extension_middleware.go)
-joins the ordinary `serveAgent` chain after legacy middleware. It uses the
-same account skip, per-provider try and response parser points described
-below. Each request keeps its own state and selected package/config lease;
+joins the ordinary `serveAgent` chain after legacy middleware. It selects
+installed modules from the serving gateway's manager and uses the same
+account skip, per-provider try and response parser points described below.
+Each request keeps its own state and selected package/config lease;
 each provider try starts from the accepted request body. Key tries clear
 the previous account context. The account DTO contains a per-module opaque
 reference and sanitized provider/kind/model metadata, without account

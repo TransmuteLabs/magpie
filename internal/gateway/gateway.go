@@ -691,6 +691,10 @@ type Server struct {
 
 // New makes a gateway.
 func New() *Server {
+	return newServer(extension.Default())
+}
+
+func newServer(manager *extension.Manager) *Server {
 	redact.SetKeyPath(filepath.Join(settings.Dir(), "redact.key"))
 	s := &Server{
 		// a request counted against a MaxRPM waits for room in its minute
@@ -699,7 +703,7 @@ func New() *Server {
 		// redirect is followed to its own origin only, so its key goes
 		// nowhere else (provider.KeepsCredentials)
 		client:        &http.Client{Transport: rpmTransport{upstreamTransport()}, CheckRedirect: provider.KeepsCredentials},
-		extensions:    extension.Default(),
+		extensions:    manager,
 		unfit:         make(map[string]bool),
 		subscription:  newSubscriptionBridge(),
 		sessionsSaved: make(chan struct{}),
@@ -985,7 +989,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		// signed in, so two never refresh one sign-in at once
 		go provider.KeepLoginsAlive(ctx)
 		// and tells the request hooks of an account to sign in again
-		go keepHooksToldOfSignIns(ctx)
+		go s.keepHooksToldOfSignIns(ctx)
 		// and signs Codex and Claude Code in to their next account when the
 		// one they are on is spent
 		go provider.KeepOnAnAccountWithRoom(ctx)
@@ -1031,7 +1035,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		for _, f := range WhileServing {
 			go f(ctx)
 		}
-		return provider.KeepExtensionsSignedIn(ctx)
+		return provider.KeepExtensionsSignedIn(ctx, s.extensions)
 	})
 	stopRelease := context.AfterFunc(ctx, releaseServing)
 	defer releaseServing()

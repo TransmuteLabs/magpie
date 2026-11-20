@@ -51,8 +51,14 @@ type GatewayRun struct {
 func (m *Manager) HasGateway(ctx context.Context) bool {
 	entries, err := m.catalog.list(ctx)
 	return err == nil && slices.ContainsFunc(entries, func(entry Installed) bool {
-		return !entry.Disabled && entry.observerEnablementErr == nil && entry.Manifest.Contract.Has(sdk.GatewayHooks) && entry.Manifest.Hooks != nil
+		hooks := entry.Manifest.Hooks
+		return !entry.Disabled && entry.observerEnablementErr == nil && entry.Manifest.Contract.Has(sdk.GatewayHooks) &&
+			hooks != nil && (hooks.Request || hooks.Response)
 	})
+}
+
+func (m *Manager) HasGatewaySignIn(ctx context.Context) bool {
+	return len(m.gatewayEntries(ctx, "local", true)) > 0
 }
 
 func gatewayHookTimeout(descriptor sdk.GatewayHookDescriptor) time.Duration {

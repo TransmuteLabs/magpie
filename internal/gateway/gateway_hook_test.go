@@ -371,7 +371,7 @@ export async function onResponse(reply,ctx){await fetch(ctx.options.url,{method:
 			}
 			w := httptest.NewRecorder()
 			lanGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w, b, done := gatewayHooks(w, r, provider.Chat, []byte(`{"model":"fake/m1","origin":"local","messages":[{"role":"user","content":"hello"}]}`))
+				w, b, done := (&Server{}).gatewayHooks(w, r, provider.Chat, []byte(`{"model":"fake/m1","origin":"local","messages":[{"role":"user","content":"hello"}]}`))
 				defer done()
 				var got map[string]any
 				json.Unmarshal(b, &got)
@@ -498,7 +498,7 @@ func TestGatewayHookSeesOptionsSavedFromItsPage(t *testing.T) {
 		req.RemoteAddr = "127.0.0.1:1234"
 		var got map[string]any
 		w := httptest.NewRecorder()
-		_, b, done := gatewayHooks(w, req, provider.Chat, []byte(`{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`))
+		_, b, done := (&Server{}).gatewayHooks(w, req, provider.Chat, []byte(`{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`))
 		done()
 		json.Unmarshal(b, &got)
 		return got["tag"]

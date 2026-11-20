@@ -182,8 +182,9 @@ renewal authority.
 
 [`KeepExtensionsSignedIn`](../../internal/provider/extension_keepalive.go)
 starts after the ordinary gateway listener binds and acquires the config
-folder's serving lock. Shutdown joins the renewal worker before releasing
-that lock, while the listener drains separately.
+folder's serving lock. It uses that listener's SDK manager and skips the
+renewal loop when the listener has no manager. Shutdown joins the renewal
+worker before releasing that lock, while the listener drains separately.
 Catalog inspection starts no worker or Bun, including with empty catalogs.
 Only enabled providers and ordinarily listed, enabled, visible, nonpaused,
 nonlapsed accounts with known expiry are eligible. Discovery off and failed

@@ -125,7 +125,7 @@ func TestExtensionKeepAliveUsesTransactionalRefresh(t *testing.T) {
 	if fixture.manager.Running(fixture.scope.Plugin) {
 		t.Fatal("account listing started an idle worker")
 	}
-	var keeper extensionSignInKeeper
+	keeper := extensionSignInKeeper{host: fixture.manager}
 	keeper.look(t.Context(), time.Now())
 	account, err := fixture.manager.Store().GetAccount(fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
 	if err != nil || account.Generation != 2 || account.ExpiresAt < time.Now().Add(time.Hour).UnixMilli() ||
@@ -153,7 +153,7 @@ func TestExtensionKeepAliveRejectsChangedSelectionBeforeDispatch(t *testing.T) {
 	for _, change := range []string{"account", "config", "disabled", "package", "account off", "provider off", "cancel", "network hold"} {
 		t.Run(change, func(t *testing.T) {
 			fixture := keepAliveOwnerFixture(t, nil)
-			selected, err := extensionSignInsKept(t.Context())
+			selected, err := extensionSignInsKept(t.Context(), fixture.manager)
 			if err != nil || len(selected) != 1 {
 				t.Fatalf("selected idle account: %d %v", len(selected), err)
 			}
@@ -223,7 +223,7 @@ func TestExtensionKeepAliveJoinsRefreshAndSharesForegroundOwner(t *testing.T) {
 	fixture := keepAliveOwnerFixture(t, func(http.ResponseWriter, *http.Request) { <-release })
 	t.Cleanup(unblock)
 	ctx, cancel := context.WithCancel(t.Context())
-	stop := KeepExtensionsSignedIn(ctx)
+	stop := KeepExtensionsSignedIn(ctx, fixture.manager)
 	t.Cleanup(func() { cancel(); unblock(); stop() })
 	select {
 	case <-fixture.exchanges:
@@ -285,7 +285,7 @@ func TestExtensionKeepAliveUsesSelectedAccountProxy(t *testing.T) {
 	if err := settings.Save(set); err != nil {
 		t.Fatal(err)
 	}
-	var keeper extensionSignInKeeper
+	keeper := extensionSignInKeeper{host: fixture.manager}
 	keeper.look(t.Context(), time.Now())
 	current, err := fixture.manager.Store().RefreshedAccount(fixture.scope)
 	if err != nil || current.Generation != fixture.scope.Generation+1 || fixture.calls.Load() != 1 {
@@ -306,7 +306,7 @@ func TestExtensionKeepAliveRechecksAfterDispatchedRefresh(t *testing.T) {
 			unblock := func() { once.Do(func() { close(release) }) }
 			fixture := keepAliveOwnerFixture(t, func(http.ResponseWriter, *http.Request) { <-release })
 			t.Cleanup(unblock)
-			selected, err := extensionSignInsKept(t.Context())
+			selected, err := extensionSignInsKept(t.Context(), fixture.manager)
 			if err != nil || len(selected) != 1 {
 				t.Fatalf("selected idle account: %d %v", len(selected), err)
 			}

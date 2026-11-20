@@ -32,20 +32,20 @@ func signInEvent(a provider.SignInAlert) plugin.SignInEvent {
 // tellHooksOfSignIns is one look: each alert due handed to the hooks. With
 // no hook installed nothing is looked at, nor marked told, so a hook
 // installed later hears of an account signed out before.
-func tellHooksOfSignIns(ctx context.Context) {
-	if !gatewayHooksAvailable(ctx) {
+func (s *Server) tellHooksOfSignIns(ctx context.Context) {
+	if !s.signInHooksAvailable(ctx) {
 		return
 	}
 	for _, a := range provider.SignInAlertsAt(provider.SignInHooksPath()) {
 		log.Printf("sign-in hook: %s %s %s", a.Kind, a.Name, a.User)
-		signInToHooks(ctx, signInEvent(a))
+		signInToHooks(s, ctx, signInEvent(a))
 	}
 }
 
 // keepHooksToldOfSignIns looks a minute after the gateway starts and every
 // two minutes after, as the app's alert does: a mark is set as a request is
 // refused, so a look reads magpie's own files and asks no vendor.
-func keepHooksToldOfSignIns(ctx context.Context) {
+func (s *Server) keepHooksToldOfSignIns(ctx context.Context) {
 	t := time.NewTimer(time.Minute)
 	defer t.Stop()
 	for {
@@ -54,10 +54,10 @@ func keepHooksToldOfSignIns(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		tellHooksOfSignIns(ctx)
+		s.tellHooksOfSignIns(ctx)
 		t.Reset(2 * time.Minute)
 	}
 }
 
 // signInToHooks hands an event to the hooks; a test counts the calls.
-var signInToHooks = gatewaySignIn
+var signInToHooks = (*Server).gatewaySignIn

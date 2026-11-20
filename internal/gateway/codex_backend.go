@@ -349,7 +349,7 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Codex's own sign-in: the request hooks, not the middleware
-		w, body, hooked = gatewayHooks(w, r, provider.Responses, body)
+		w, body, hooked = s.gatewayHooks(w, r, provider.Responses, body)
 		defer hooked()
 	}
 	s.codexUpstream(w, r, rest, body)
