@@ -1745,6 +1745,10 @@ func claudeIn(at place) *Agent {
 		if err := putClouds(); err != nil {
 			return "", err
 		}
+		gatewayKey := at.gwKey()
+		isGatewayCredential := func(token string) bool {
+			return token != "" && (ourKey(token) || keyHolds(token, gatewayKey))
+		}
 		if !routed() {
 			// magpie's, left at a gateway address since changed: its
 			// endpoint, key and models all go, as set("") takes them
@@ -1754,6 +1758,10 @@ func claudeIn(at place) *Agent {
 					keys[i] = "env." + k
 				}
 				if err := edit.DelJSON(path, keys...); err != nil {
+					return "", err
+				}
+			} else if isGatewayCredential(rawEnv("ANTHROPIC_AUTH_TOKEN")) {
+				if err := edit.DelJSON(path, "env.ANTHROPIC_AUTH_TOKEN"); err != nil {
 					return "", err
 				}
 			}
@@ -1818,7 +1826,7 @@ func claudeIn(at place) *Agent {
 		if u := peeked[at.key("claude.base_url")]; u != "" {
 			back = append(back, edit.KV{Path: "env.ANTHROPIC_BASE_URL", Value: u})
 		}
-		if t := peeked[at.key("claude.auth_token")]; t != "" {
+		if t := peeked[at.key("claude.auth_token")]; t != "" && !isGatewayCredential(t) {
 			back = append(back, edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: t})
 		}
 		if len(back) > 0 {
