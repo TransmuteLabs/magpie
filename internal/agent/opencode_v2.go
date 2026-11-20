@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -97,16 +98,7 @@ func (f ocFile) syncFound(put bool) error {
 // syncListed is sync with magpie's models as block has them.
 func (f ocFile) syncListed(put bool) error {
 	if !f.two {
-		v1 := openCodeKept(f.path, f.block)
-		var err error
-		if _, ok := edit.GetJSON(f.path, "provider."+magpieID); !ok && put {
-			err = edit.SetJSON(f.path, edit.KV{Path: "provider." + magpieID, Value: v1()})
-		} else {
-			err = syncJSONInOrder(f.path, "provider."+magpieID, v1)
-		}
-		// and where the file keeps it under providers too, which OpenCode
-		// 2 reads instead, there as well (#3883)
-		return errors.Join(err, syncOpenCodeNative(f.path, f.block))
+		return syncOpenCodeV1(f.path, f.block, put, true)
 	}
 	if err := f.moveProvider(); err != nil {
 		return err
@@ -119,6 +111,49 @@ func (f ocFile) syncListed(put bool) error {
 		return edit.SetJSON(f.path, edit.KV{Path: openCodeNativeKey, Value: native()})
 	}
 	return syncJSONInOrder(f.path, openCodeNativeKey, native)
+}
+
+func syncOpenCodeV1(path string, block func() any, put, mirror bool) error {
+	const legacy = "provider." + magpieID
+	historyKey := outputsWantedKey(path)
+	history := unstashPeek(historyKey)
+	nextHistory := history
+	err := applyJSONSync(path, func(config gjson.Result) []edit.KV {
+		get := openCodeSnapshotValues(config)
+		var changes []edit.KV
+		for _, key := range []string{legacy, openCodeNativeKey} {
+			if key == openCodeNativeKey && !mirror {
+				continue
+			}
+			current := config.Get(key)
+			if !current.Exists() && !(key == legacy && put) {
+				continue
+			}
+			var next any
+			if key == legacy {
+				next = openCodeKeptValue(block(), get, func(models orderedJSON) {
+					nextHistory = planOpenCodeOutputLimits(models, get, history)
+				})
+			} else {
+				next = openCodeNativeKeptValue(get, block())
+			}
+			if !current.Exists() || !sameOrder(current.Raw, next) {
+				changes = append(changes, edit.KV{Path: key, Value: next})
+			}
+		}
+		return changes
+	})
+	if err == nil && nextHistory != history {
+		stash(map[string]string{historyKey: nextHistory})
+	}
+	return err
+}
+
+func openCodeSnapshotValues(config gjson.Result) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		value := config.Get(key)
+		return value.String(), value.Exists()
+	}
 }
 
 // outputsKept is block with a limit.output the user typed into one of

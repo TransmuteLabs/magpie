@@ -239,7 +239,8 @@ func airAt(home string, a *Agent, path string, done notice) *Agent {
 	id := a.ID
 	// the IDE's agent reaches WSL projects too (air_wsl.go)
 	wsl := id == "air-ide"
-	provider := openCodeKept(ocPath, func() any { return magpieProviderJSONFor("opencode", id) })
+	block := func() any { return magpieProviderJSONFor("opencode", id) }
+	provider := openCodeKept(ocPath, block)
 	// ours: acp.json's Magpie is the agent magpie added, on its file
 	ours := func() bool {
 		v, _ := edit.GetJSON(path, entry+".env.OPENCODE_CONFIG")
@@ -280,7 +281,7 @@ func airAt(home string, a *Agent, path string, done notice) *Agent {
 		if wsl && ours() {
 			airWSLSync(path, id, model)
 		}
-		return syncJSONInOrder(ocPath, "provider."+magpieID, provider)
+		return syncOpenCodeV1(ocPath, block, false, false)
 	}
 	a.Fields = []Field{{
 		Key: "model", Label: "model",

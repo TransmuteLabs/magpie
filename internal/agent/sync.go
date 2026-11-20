@@ -3,12 +3,15 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"reflect"
 	"slices"
 	"strings"
 	"sync"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/provider"
@@ -126,15 +129,43 @@ func SyncCatalogSettled() {
 // there and it differs: an agent that watches its files isn't told of a
 // change that isn't one.
 func syncJSON(path, key string, value func() any) error {
-	cur, ok := edit.GetJSON(path, key)
-	if !ok {
-		return nil
+	return syncJSONFrom(path, key, false, func(gjson.Result) any { return value() })
+}
+
+func syncJSONFrom(path, key string, ordered bool, value func(gjson.Result) any) error {
+	return applyJSONSync(path, func(config gjson.Result) []edit.KV {
+		current := config.Get(key)
+		if !current.Exists() {
+			return nil
+		}
+		next := value(config)
+		if sameJSON(current.Raw, next) && (!ordered || sameOrder(current.Raw, next)) {
+			return nil
+		}
+		return []edit.KV{{Path: key, Value: next}}
+	})
+}
+
+func syncKeptJSON(path, key string, value func() any, whole ...string) error {
+	return syncJSONFrom(path, key, false, func(config gjson.Result) any {
+		return theirsKeptValue(config.Get(key).String(), value(), whole...)
+	})
+}
+
+func applyJSONSync(path string, plan func(gjson.Result) []edit.KV) error {
+	before, err := readWiringFile(path)
+	if err != nil {
+		return edit.PreserveOnRollback(path, err)
 	}
-	v := value()
-	if sameJSON(cur, v) {
-		return nil
+	changes := plan(gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(before.body))))
+	if len(changes) == 0 {
+		return before.check(path)
 	}
-	return edit.SetJSON(path, edit.KV{Path: key, Value: v})
+	body, err := edit.PatchJSON(before.body, changes, nil)
+	if err != nil {
+		return before.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
+	}
+	return edit.WriteAtomicChecked(before.target, body, func() error { return before.check(path) })
 }
 
 // theirsKept is value, magpie's provider block for the agent, with what
@@ -151,13 +182,17 @@ func theirsKept(path, key string, value func() any, whole ...string) func() any 
 		if !ok {
 			return v
 		}
-		var have, want map[string]json.RawMessage
-		b, err := json.Marshal(v)
-		if err != nil || json.Unmarshal([]byte(cur), &have) != nil || have == nil || json.Unmarshal(b, &want) != nil || want == nil {
-			return v
-		}
-		return mergeTheirs(have, want, whole)
+		return theirsKeptValue(cur, v, whole...)
 	}
+}
+
+func theirsKeptValue(current string, value any, whole ...string) any {
+	var have, want map[string]json.RawMessage
+	body, err := json.Marshal(value)
+	if err != nil || json.Unmarshal([]byte(current), &have) != nil || have == nil || json.Unmarshal(body, &want) != nil || want == nil {
+		return value
+	}
+	return mergeTheirs(have, want, whole)
 }
 
 // mergeTheirs is want with each key of have that want lacks, objects in
@@ -192,15 +227,7 @@ func mergeTheirs(have, want map[string]json.RawMessage, whole []string) map[stri
 // another order is rewritten too, as an older magpie wrote the variants
 // alphabetically (#713).
 func syncJSONInOrder(path, key string, value func() any) error {
-	cur, ok := edit.GetJSON(path, key)
-	if !ok {
-		return nil
-	}
-	v := value()
-	if sameJSON(cur, v) && sameOrder(cur, v) {
-		return nil
-	}
-	return edit.SetJSON(path, edit.KV{Path: key, Value: v})
+	return syncJSONFrom(path, key, true, func(gjson.Result) any { return value() })
 }
 
 // sameOrder reports whether raw JSON and what v marshals to read alike token

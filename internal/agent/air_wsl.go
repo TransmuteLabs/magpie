@@ -90,7 +90,11 @@ func (w airWSL) ours(acp string) bool {
 
 // provider is magpie's provider as the distro reaches the gateway.
 func (w airWSL) provider(id string) func() any {
-	return openCodeKept(w.cfg, func() any { return magpieProviderJSONAt("opencode", id, w.d.base()) })
+	return openCodeKept(w.cfg, w.block(id))
+}
+
+func (w airWSL) block(id string) func() any {
+	return func() any { return magpieProviderJSONAt("opencode", id, w.d.base()) }
 }
 
 // put writes the distro's OpenCode config for model v and its entry.
@@ -130,7 +134,7 @@ func airWSLSync(acp, id string, model func() string) {
 	for _, w := range airWSLs() {
 		switch {
 		case w.ours(acp):
-			if err := syncJSONInOrder(w.cfg, "provider."+magpieID, w.provider(id)); err != nil {
+			if err := syncOpenCodeV1(w.cfg, w.block(id), false, false); err != nil {
 				log.Printf("Air's Magpie agent for WSL %s: %v", w.d.Name, err)
 			}
 		default:

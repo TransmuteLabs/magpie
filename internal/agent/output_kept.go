@@ -39,8 +39,17 @@ const outputsRemembered = 8
 // It records want's values as wanted.
 func outputsKept(path string, want, have map[string]int) map[string]int {
 	key := outputsWantedKey(path)
+	history := stashShared()[key]
+	out, next := planOutputLimits(history, want, have)
+	if next != history {
+		stash(map[string]string{key: next})
+	}
+	return out
+}
+
+func planOutputLimits(history string, want, have map[string]int) (map[string]int, string) {
 	rec := map[string][]int{}
-	if v := stashShared()[key]; v != "" && json.Unmarshal([]byte(v), &rec) != nil {
+	if history != "" && json.Unmarshal([]byte(history), &rec) != nil {
 		rec = map[string][]int{}
 	}
 	out := make(map[string]int, len(want))
@@ -78,9 +87,9 @@ func outputsKept(path string, want, have map[string]int) map[string]int {
 		if len(next) == 0 {
 			b = nil
 		}
-		stash(map[string]string{key: string(b)})
+		history = string(b)
 	}
-	return out
+	return out, history
 }
 
 // outputSetIn says the user set a Max output in magpie for the model an
@@ -144,6 +153,15 @@ func piOutputsKept(path string, v any) {
 // models in an OpenCode config at path (outputsKept); ms are the models
 // magpie writes.
 func openCodeOutputsKept(path string, ms orderedJSON) {
+	key := outputsWantedKey(path)
+	history := stashShared()[key]
+	get := func(key string) (string, bool) { return edit.GetJSON(path, key) }
+	if next := planOpenCodeOutputLimits(ms, get, history); next != history {
+		stash(map[string]string{key: next})
+	}
+}
+
+func planOpenCodeOutputLimits(ms orderedJSON, get func(string) (string, bool), saved string) string {
 	want := map[string]int{}
 	for _, p := range ms {
 		e, _ := p.v.(map[string]any)
@@ -153,14 +171,14 @@ func openCodeOutputsKept(path string, ms orderedJSON) {
 		}
 	}
 	if len(want) == 0 {
-		return
+		return saved
 	}
 	have := map[string]int{}
 	// under providers where the file keeps it there alone: OpenCode 2's,
 	// whose limit is OpenCode 1's
-	raw, ok := edit.GetJSON(path, "provider."+magpieID+".models")
+	raw, ok := get("provider." + magpieID + ".models")
 	if !ok {
-		raw, ok = edit.GetJSON(path, openCodeNativeKey+".models")
+		raw, ok = get(openCodeNativeKey + ".models")
 	}
 	if ok {
 		var cur map[string]struct {
@@ -174,11 +192,12 @@ func openCodeOutputsKept(path string, ms orderedJSON) {
 			}
 		}
 	}
-	kept := outputsKept(path, want, have)
+	kept, next := planOutputLimits(saved, want, have)
 	for _, p := range ms {
 		e, _ := p.v.(map[string]any)
 		if l, _ := e["limit"].(map[string]any); l != nil && kept[p.k] > 0 {
 			l["output"] = kept[p.k]
 		}
 	}
+	return next
 }

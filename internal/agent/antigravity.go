@@ -241,7 +241,7 @@ func (f agyFile) leave(v string, always bool) error {
 // sync brings a wired file's gateway and catalog to the gateway's current
 // address, and the model it starts on to a level the catalog lists
 func (f agyFile) sync() error {
-	if err := syncJSON(f.path, "gateway", theirsKept(f.path, "gateway", func() any { return antigravityGateway() })); err != nil {
+	if err := syncKeptJSON(f.path, "gateway", func() any { return antigravityGateway() }); err != nil {
 		return err
 	}
 	// the catalog at the gateway's address, and on a file wired before

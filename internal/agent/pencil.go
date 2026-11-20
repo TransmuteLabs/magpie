@@ -51,7 +51,7 @@ func pencil(home string) *Agent {
 		},
 		ListOnly: true,
 		Sync: func() error {
-			return syncJSON(path, key, theirsKept(path, key, func() any { return pencilProviderJSON(gateway.URL()) }, "models"))
+			return syncKeptJSON(path, key, func() any { return pencilProviderJSON(gateway.URL()) }, "models")
 		},
 		// its picker lists the models picked for it (#1508)
 		ListsModels: true,
