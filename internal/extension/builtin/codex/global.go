@@ -78,6 +78,59 @@ type GlobalUnrouteResult struct {
 	FromProvider bool
 }
 
+var ErrJoinedModelRouteChanged = errors.New("Codex's joined model routing changed")
+
+type JoinedModelRoute struct {
+	Provider string `toml:"model_provider"`
+	BaseURL  string `toml:"openai_base_url"`
+	Catalog  string `toml:"model_catalog_json"`
+	Model    string `toml:"model"`
+}
+
+type JoinedModelOptions struct {
+	Current    JoinedModelRoute
+	Model      string
+	RestoreURL string
+	OwnCatalog func(string) bool
+}
+
+func PlanJoinedModel(options JoinedModelOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+	if len(settings.Files) != 1 || settings.Files[0].Path != GlobalConfigFile {
+		return sdk.AgentPlan{}, errors.New("Codex joined model action requires a config.toml snapshot")
+	}
+	config := settings.Files[0]
+	raw := edit.TrimBOM(config.Body)
+	var current JoinedModelRoute
+	if err := toml.Unmarshal(edit.TOMLWithout(raw, "projects"), &current); err != nil {
+		return sdk.AgentPlan{}, edit.AtFile(config.Path, err)
+	}
+	if current != options.Current {
+		return sdk.AgentPlan{}, ErrJoinedModelRouteChanged
+	}
+	body := raw
+	values := []edit.KV{{Path: "model", Value: options.Model}}
+	if options.RestoreURL != "" {
+		if current.Provider != "magpie" {
+			return sdk.AgentPlan{}, ErrJoinedModelRouteChanged
+		}
+		remove := []string{"model_provider"}
+		if options.OwnCatalog != nil && options.OwnCatalog(current.Catalog) {
+			remove = append(remove, "model_catalog_json")
+		}
+		var err error
+		body, err = edit.RewriteTOMLWithoutTop(config.Path, body, remove...)
+		if err != nil {
+			return sdk.AgentPlan{}, err
+		}
+		values = []edit.KV{{Path: "openai_base_url", Value: options.RestoreURL}, values[0]}
+	}
+	body, err := edit.RewriteTOMLTop(config.Path, body, values...)
+	if err != nil || bytes.Equal(body, raw) {
+		return sdk.AgentPlan{}, err
+	}
+	return sdk.AgentPlan{Files: []sdk.FileChange{{Path: config.Path, Body: body, BeforeHash: config.BeforeHash}}}, nil
+}
+
 func PlanGlobalUnroute(options GlobalUnrouteOptions, settings sdk.ActionSettings) (sdk.AgentPlan, GlobalUnrouteResult, error) {
 	var result GlobalUnrouteResult
 	if len(settings.Files) != 1 || settings.Files[0].Path != GlobalConfigFile {

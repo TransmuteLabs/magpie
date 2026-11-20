@@ -1794,6 +1794,26 @@ func codexGlobalIn(at place) *Agent {
 		maps.Copy(peeked, savedURLs)
 		return peeked, nil
 	}
+	outKey, outOwnKey, outStandKey := at.key("codex.out"), at.key("codex.out_own"), at.key("codex.out_stand")
+	joinedModelRoute := func() builtincodex.JoinedModelRoute {
+		return builtincodex.JoinedModelRoute{
+			Provider: get("model_provider"), BaseURL: get("openai_base_url"),
+			Catalog: get("model_catalog_json"), Model: get("model"),
+		}
+	}
+	publishJoinedModel := func(current builtincodex.JoinedModelRoute, model string, restore bool) error {
+		options := builtincodex.JoinedModelOptions{Current: current, Model: model}
+		if restore {
+			options.RestoreURL = at.codexURL()
+			options.OwnCatalog = ownCatalog
+		}
+		err := extension.ApplyLinkedAgentPlan(options, builtincodex.PlanJoinedModel,
+			extension.LinkedActionFile{Name: builtincodex.GlobalConfigFile, Path: path})
+		if errors.Is(err, builtincodex.ErrJoinedModelRouteChanged) {
+			return errors.Join(extension.ErrActionChanged, err)
+		}
+		return err
+	}
 	set := func(v string) error {
 		if v == "" {
 			restores, savedURLs := tableURLRestores()
@@ -1944,28 +1964,27 @@ func codexGlobalIn(at place) *Agent {
 		// joined, a model of Codex's own is picked beside magpie's, as in
 		// Codex's /model: it stays connected
 		if joined() && !api() && chatGPT() {
+			current := joinedModelRoute()
+			if !gatewayBase(current.BaseURL) {
+				return edit.PreserveOnRollback(path, extension.ErrActionChanged)
+			}
 			// magpie made its provider for a used-up account (codex.out)
 			// and that no longer holds (kept on ChatGPT, or room again):
 			// back on the sign-in as Join leaves it. Only the model set
 			// left magpie the provider of one of Codex's own for good
 			// (eddie.zhan on Discord, Always ChatGPT from the takeover)
-			if asProvider() && stashShared()[at.key("codex.out")] == "1" && !out() {
-				forget(at.key("codex.out"), at.key("codex.out_own"), at.key("codex.out_stand"))
-				if err := edit.DelTOMLTop(path, "model_provider", "model_catalog_json"); err != nil {
-					return err
-				}
-				if err := edit.SetTOMLTop(path,
-					edit.KV{Path: "openai_base_url", Value: at.codexURL()},
-					edit.KV{Path: "model", Value: v},
-				); err != nil {
-					return err
-				}
-				return settle()
-			}
-			if err := edit.SetTOMLTop(path, edit.KV{Path: "model", Value: v}); err != nil {
+			takeover := peek(outKey, outOwnKey, outStandKey)
+			restore := current.Provider == magpieID && takeover[outKey] == "1" && !outOn(current.Model)
+			if err := publishJoinedModel(current, v, restore); err != nil {
 				return err
 			}
-			return settle()
+			if err := settle(); err != nil {
+				return err
+			}
+			if restore {
+				forgetValues(takeover)
+			}
+			return nil
 		}
 		peeked, err := unroute(&v)
 		if err != nil {
@@ -2228,33 +2247,31 @@ func codexGlobalIn(at place) *Agent {
 			// codex/<model> for a magpie model picked beside the sign-in
 			// the takeover ends below once the account has room, unless a
 			// Codex still has a chat on magpie open (outStays)
-			ending := asProvider() && stashShared()[at.key("codex.out")] == "1" && !out()
+			takeover := stashShared()
+			ending := asProvider() && takeover[outKey] == "1" && !out()
 			if ending && outStays() {
 				ending = false
 			}
-			if own := stashShared()[at.key("codex.out_own")]; own != "" {
-				m := get("model")
+			if own := takeover[outOwnKey]; own != "" {
+				current := joinedModelRoute()
 				switch {
-				case stashShared()[at.key("codex.out")] != "1" || !asProvider() ||
-					codexOwnOf(m) != own && m != stashShared()[at.key("codex.out_stand")]:
+				case takeover[outKey] != "1" || current.Provider != magpieID ||
+					codexOwnOf(current.Model) != own && current.Model != takeover[outStandKey]:
 					// moved since (another model picked, magpie API, a
 					// disconnect): that stands
-					forget(at.key("codex.out_own"), at.key("codex.out_stand"))
-				case ending:
+					forgetValues(map[string]string{outOwnKey: own, outStandKey: takeover[outStandKey]})
+				case ending && !outOn(current.Model):
 					// back beside the sign-in on the one picked, as Join
 					// leaves it: Codex's own sign-in, magpie's models joined
-					forget(at.key("codex.out_own"), at.key("codex.out"), at.key("codex.out_stand"))
-					if err := edit.DelTOMLTop(path, "model_provider", "model_catalog_json"); err != nil {
-						return err
-					}
-					if err := edit.SetTOMLTop(path,
-						edit.KV{Path: "openai_base_url", Value: at.codexURL()},
-						edit.KV{Path: "model", Value: own},
-					); err != nil {
+					if err := publishJoinedModel(current, own, true); err != nil {
 						return err
 					}
 					stash(map[string]string{at.key("codex.joined"): "1"})
-					return settle()
+					if err := settle(); err != nil {
+						return err
+					}
+					forgetValues(map[string]string{outKey: takeover[outKey], outOwnKey: own, outStandKey: takeover[outStandKey]})
+					return nil
 				}
 			}
 			// the ChatGPT account ran out (of its allowance and its

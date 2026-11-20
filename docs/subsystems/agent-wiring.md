@@ -104,6 +104,10 @@ Codex's
 [status line plan](../../internal/extension/builtin/codex/status_line.go)
 checks and publishes the feature flag, MCP server and TUI selection together.
 The host updates its ownership record after the TOML change succeeds.
+The same checked contract publishes Codex's native model selection and
+recovery from a held account. It preserves independently configured
+provider tables and catalog references. The host retires takeover records
+after publication and settling.
 
 Gemini CLI's
 [gateway model plan](../../internal/extension/builtin/gemini/settings.go)
