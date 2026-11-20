@@ -36,7 +36,11 @@ func ServeExtensionLedgerObservers(ctx context.Context, manager *extensionhost.M
 		owner = extensionLedgerOwners.byManager[manager]
 		if owner != nil && owner.refs == 0 {
 			extensionLedgerOwners.Unlock()
-			<-owner.done
+			select {
+			case <-owner.done:
+			case <-ctx.Done():
+				return func() {}
+			}
 			continue
 		}
 		if owner == nil {
@@ -53,7 +57,6 @@ func ServeExtensionLedgerObservers(ctx context.Context, manager *extensionhost.M
 		extensionLedgerOwners.Unlock()
 		break
 	}
-	<-owner.ready
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
@@ -70,6 +73,11 @@ func ServeExtensionLedgerObservers(ctx context.Context, manager *extensionhost.M
 		})
 	}
 	detach := context.AfterFunc(ctx, release)
+	select {
+	case <-owner.ready:
+	case <-ctx.Done():
+		release()
+	}
 	return func() {
 		detach()
 		release()
@@ -105,13 +113,13 @@ func (owner *extensionLedgerOwner) run() {
 }
 
 func (owner *extensionLedgerOwner) reconcile() {
-	ledger, err := owner.manager.LedgerTargets()
+	ledger, err := owner.manager.LedgerTargets(owner.ctx)
 	reconcileObserver(&owner.remove, err == nil && len(ledger) > 0, func() Observer {
-		return &extensionLedgerObserver{manager: owner.manager}
+		return &extensionLedgerObserver{manager: owner.manager, owner: owner.ctx}
 	})
-	requests, err := owner.manager.RequestObservationTargets()
+	requests, err := owner.manager.RequestObservationTargets(owner.ctx)
 	reconcileObserver(&owner.removeRequest, err == nil && len(requests) > 0, func() Observer {
-		return &extensionRequestObserver{extensionLedgerObserver: extensionLedgerObserver{manager: owner.manager, request: true}}
+		return &extensionRequestObserver{extensionLedgerObserver: extensionLedgerObserver{manager: owner.manager, owner: owner.ctx, request: true}}
 	})
 }
 

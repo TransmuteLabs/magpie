@@ -1,7 +1,7 @@
 package extension
 
 import (
-	"strings"
+	"context"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -14,18 +14,13 @@ type SelectedMaskingRules struct {
 
 // MaskingRules reads declarative data from the frozen installed manifest.
 // No worker is acquired and no request data enters this lookup.
-func (m *Manager) MaskingRules(selection string) (SelectedMaskingRules, bool) {
-	module, id, ok := strings.Cut(selection, "/")
-	if !ok || !sdk.ValidID(module) || !sdk.ValidID(id) || m.isClosed() {
+func (m *Manager) MaskingRules(ctx context.Context, selection string) (SelectedMaskingRules, bool) {
+	module, id, ok := contributionName(selection)
+	if !ok {
 		return SelectedMaskingRules{}, false
 	}
-	entries, err := m.List()
-	if err != nil {
-		return SelectedMaskingRules{}, false
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != module || entry.Disabled || entry.observerEnablementErr != nil ||
-			!entry.Manifest.Contract.Has(sdk.MaskingRules) {
+	for _, entry := range m.contributionEntries(ctx) {
+		if entry.Manifest.ID != module || !entry.Manifest.Contract.Has(sdk.MaskingRules) {
 			continue
 		}
 		for _, set := range entry.Manifest.MaskingRuleSets {

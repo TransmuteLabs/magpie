@@ -30,27 +30,25 @@ type MiddlewareRun struct {
 }
 
 func (m *Manager) BeginMiddleware(ctx context.Context, info sdk.GatewayContext) []*MiddlewareRun {
-	if ctx == nil || ctx.Err() != nil || m.isClosed() {
-		return nil
-	}
-	entries, err := m.List()
-	if err != nil {
+	if ctx == nil || ctx.Err() != nil {
 		return nil
 	}
 	var runs []*MiddlewareRun
-	for _, entry := range entries {
+	for _, entry := range m.contributionEntries(ctx) {
 		descriptor := entry.Manifest.Middleware
-		if entry.Disabled || !entry.Manifest.Contract.Has(sdk.GatewayMiddleware) ||
-			descriptor == nil || !descriptor.AllowsOrigin(info.Origin) || len(runs) >= 32 {
+		if len(runs) == 32 {
+			break
+		}
+		if descriptor == nil || !descriptor.AllowsOrigin(info.Origin) {
 			continue
 		}
-		config, err := m.ModuleConfig(ctx, entry.Manifest.ID)
+		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err != nil {
 			continue
 		}
 		owned, cancel := context.WithCancel(ctx)
 		runs = append(runs, &MiddlewareRun{Module: entry.Manifest.ID, manager: m, entry: entry,
-			config: config.Version, descriptor: *entry.Manifest.Clone().Middleware,
+			config: config.Version, descriptor: *descriptor,
 			info: info, ctx: owned, cancel: cancel})
 	}
 	return runs
@@ -67,20 +65,13 @@ func (run *MiddlewareRun) check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if run.manager.isClosed() {
-		return errors.New("middleware host is closed")
-	}
-	entries, err := run.manager.List()
-	if err != nil {
-		return errors.New("middleware catalog is unavailable")
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != run.Module || entry.Disabled || entry.Revision != run.entry.Revision ||
-			!entry.Manifest.Contract.Has(sdk.GatewayMiddleware) ||
+	for _, entry := range run.manager.contributionEntries(ctx) {
+		if entry.Manifest.ID != run.Module || entry.Revision != run.entry.Revision ||
+			entry.EnableGeneration != run.entry.EnableGeneration ||
 			!reflect.DeepEqual(entry.Manifest.Middleware, &run.descriptor) {
 			continue
 		}
-		config, err := run.manager.ModuleConfig(ctx, run.Module)
+		config, err := run.manager.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err == nil && config.Version == run.config {
 			return nil
 		}
@@ -112,7 +103,7 @@ func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.Middleware
 	if run.lease == nil {
 		startup, cancel := context.WithTimeout(run.ctx, time.Second)
 		worker, client, err := run.manager.acquire(startup, run.Module, &expectedGeneration{
-			packageRevision: run.entry.Revision, configVersion: run.config,
+			packageRevision: run.entry.Revision, configVersion: run.config, enableGeneration: &run.entry.EnableGeneration,
 		})
 		cancel()
 		if err != nil {
@@ -128,15 +119,7 @@ func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.Middleware
 	}
 	ctx, cancel := context.WithTimeout(run.ctx, limit)
 	defer cancel()
-	previous, _ := ctx.Value(windowAdmissionKey{}).(func(context.Context) error)
-	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
-		if previous != nil {
-			if err := previous(current); err != nil {
-				return err
-			}
-		}
-		return run.check(current)
-	})
+	ctx = withContributionAdmission(ctx, run.check)
 	ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
 	output, err := run.lease.Call(ctx, method, sdk.Scope{}, request, nil)
 	if err != nil {

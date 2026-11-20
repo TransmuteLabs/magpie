@@ -46,8 +46,9 @@ Request and provider transforms cannot change the caller-authorized model,
 stream setting or client tool declarations/choice.
 
 [`MiddlewareRun`](../../internal/extension/middleware.go) rechecks the selected
-package revision and configuration before admission, on host callbacks and
-before accepting a result. Cancellation closes the request lease. Startup
+package revision, configuration and enablement before admission and before
+accepting a result. Disabling and re-enabling a module revokes previous
+selections. Cancellation closes the request lease. Startup
 has a one-second budget; hooks have 250 ms, or 50 ms per event. Hook failure
 retains the last accepted body/state. DTO bodies are limited to 1 MiB and
 request state to 64 KiB. Oversized or compressed replies pass through

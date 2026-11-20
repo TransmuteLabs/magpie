@@ -10,54 +10,32 @@ import (
 
 var ErrBudgetPolicyUnavailable = errors.New("the selected gateway budget policy is unavailable, so nothing was sent")
 
-type budgetPolicyBinding struct {
-	entry         Installed
-	descriptor    sdk.BudgetPolicyDescriptor
-	configVersion string
-}
-
-func (m *Manager) budgetPolicy(selection string) (budgetPolicyBinding, error) {
+func (m *Manager) EvaluateBudget(parent context.Context, selection, method string, request sdk.BudgetPolicyRequest) (sdk.BudgetPolicyResult, error) {
 	module, policy, valid := sdk.SplitBudgetPolicy(selection)
 	if !valid {
-		return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
+		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
-	entries, err := m.List()
-	if err != nil {
-		return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != module || entry.Disabled || entry.observerEnablementErr != nil {
-			continue
-		}
-		for _, descriptor := range entry.Manifest.BudgetPolicies {
-			if descriptor.ID != policy {
-				continue
+	declared := func(manifest sdk.Manifest) []sdk.BudgetPolicyDescriptor {
+		for _, descriptor := range manifest.BudgetPolicies {
+			if descriptor.ID == policy {
+				return []sdk.BudgetPolicyDescriptor{descriptor}
 			}
-			config, err := m.runtimeModuleConfig(entry.Manifest)
-			if err != nil {
-				return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
-			}
-			return budgetPolicyBinding{entry, descriptor, config.Version}, nil
 		}
+		return nil
 	}
-	return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
-}
-
-func (m *Manager) EvaluateBudget(parent context.Context, selection, method string, request sdk.BudgetPolicyRequest) (sdk.BudgetPolicyResult, error) {
-	binding, err := m.budgetPolicy(selection)
-	if err != nil {
-		return sdk.BudgetPolicyResult{}, err
+	bindings := registeredContributions(parent, m, module, declared)
+	if len(bindings) != 1 {
+		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
-	request.Policy = binding.descriptor.ID
-	timeout := binding.descriptor.TimeoutMs
+	binding := bindings[0]
+	request.Policy = binding.Descriptor.ID
+	timeout := binding.Descriptor.TimeoutMs
 	if timeout == 0 {
 		timeout = sdk.BudgetDefaultTimeoutMs
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
-	lease, err := m.acquireLease(ctx, binding.entry.Manifest.ID, &expectedGeneration{
-		packageRevision: binding.entry.Revision, configVersion: binding.configVersion, enableGeneration: &binding.entry.EnableGeneration,
-	})
+	lease, err := binding.acquire(ctx, m)
 	if err != nil {
 		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
@@ -66,9 +44,7 @@ func (m *Manager) EvaluateBudget(parent context.Context, selection, method strin
 	if err != nil {
 		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
-	current, err := m.budgetPolicy(selection)
-	if err != nil || ctx.Err() != nil || current.entry.Revision != binding.entry.Revision ||
-		current.entry.EnableGeneration != binding.entry.EnableGeneration || current.configVersion != binding.configVersion {
+	if err := checkContribution(ctx, m, binding, declared); err != nil {
 		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
 	return sdk.DecodeBudgetResult(method, request, raw)

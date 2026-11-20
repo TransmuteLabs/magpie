@@ -43,7 +43,7 @@ func extensionMaskingFor(ctx context.Context, selection string, m gwmw.Masker) (
 	if manager == nil {
 		return ctx, nil, errExtensionMasking
 	}
-	selected, ok := manager.MaskingRules(selection)
+	selected, ok := manager.MaskingRules(ctx, selection)
 	if !ok {
 		return ctx, nil, errExtensionMasking
 	}
@@ -74,7 +74,7 @@ func checkExtensionMasking(ctx context.Context) error {
 	if selected.selection == "" {
 		return nil
 	}
-	current, available := selected.manager.MaskingRules(selected.selection)
+	current, available := selected.manager.MaskingRules(ctx, selected.selection)
 	if ctx.Err() != nil || !available || current.Revision != selected.revision || current.EnableGeneration != selected.enableGeneration {
 		return errExtensionMasking
 	}

@@ -378,7 +378,9 @@ retain 64-bit precision. The payload excludes identities,
 model strings, headers, bodies, accounts and credentials. The two unary
 methods have no host callbacks. [Admission](../../internal/extension/budget_policy.go)
 pins and rechecks package revision, configuration and enablement; dispatch
-uses a 250 ms default deadline, configurable from 10–1000 ms. Selection or
+uses a 250 ms default deadline, configurable from 10–1000 ms. Catalog and
+configuration lookups observe cancellation, including while waiting for a lock.
+Selection or
 availability failure on a limited request returns 503 before provider
 dispatch. Native accounting, reset handling, and reservation state remain
 with the host.
@@ -394,7 +396,7 @@ Ordinary Settings saves keep the selection when they omit the field.
 A primary declares `masking-rules` and `maskingRuleSets` at API 1.15.
 The host reads the declarations from the frozen catalog and applies them
 through its own masking engine. The module process receives no request
-data and the lookup does not start it.
+data and the lookup does not start it. Catalog reads observe request cancellation.
 
 The Go and JavaScript validators allow up to eight sets of eight rules.
 Each rule has a canonical `SDK_` kind unique within the set. Literal

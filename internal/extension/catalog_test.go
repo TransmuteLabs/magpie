@@ -971,14 +971,14 @@ func TestSDKObserverEnablementPreservesLegacyCatalogAndIsolatesMalformedMarker(t
 	}
 
 	manager := NewManager(catalog.Root)
-	targets, err := manager.LedgerTargets()
+	targets, err := manager.LedgerTargets(t.Context())
 	if err != nil || len(targets) != 2 || targets[0].Module != broken || targets[0].EnableGeneration == "" {
 		t.Fatalf("expected a persisted generation for the enabled ledger module: %v, %v", targets, err)
 	}
 	marker := filepath.Join(catalog.Root, observerEnablementFile(broken))
 	const malformed = `{"invalid":"forensics"}`
 	catalogTestWrite(t, marker, []byte(malformed), 0o600)
-	isolated, err := manager.LedgerTargets()
+	isolated, err := manager.LedgerTargets(t.Context())
 	if err != nil || len(isolated) != 1 || isolated[0].Module != healthy {
 		t.Fatalf("corrupt marker denied an unrelated ledger module: %v, %v", isolated, err)
 	}

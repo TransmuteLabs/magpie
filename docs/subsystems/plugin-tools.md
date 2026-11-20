@@ -77,6 +77,8 @@ It is not an SDK argument or a module-supplied identity. The entry and call
 checks are in [`extension_tools.go`](../../internal/gateway/extension_tools.go);
 the Library projection is in
 [`plugin_tools.go`](../../internal/library/plugin_tools.go).
+Scoped Memory callbacks check their running generation before and after
+search. Catalog and configuration reads use the tool call's context.
 
 `TestExtensionToolExposureHTTPProvenance`,
 `TestExtensionToolExposureHTTPManifestTransition`,

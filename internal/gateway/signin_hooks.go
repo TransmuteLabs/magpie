@@ -33,7 +33,7 @@ func signInEvent(a provider.SignInAlert) plugin.SignInEvent {
 // no hook installed nothing is looked at, nor marked told, so a hook
 // installed later hears of an account signed out before.
 func tellHooksOfSignIns(ctx context.Context) {
-	if !gatewayHooksAvailable() {
+	if !gatewayHooksAvailable(ctx) {
 		return
 	}
 	for _, a := range provider.SignInAlertsAt(provider.SignInHooksPath()) {

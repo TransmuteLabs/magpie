@@ -153,14 +153,13 @@ func (m *Manager) checkRequestPolicy(ctx context.Context, invocation *requestPol
 	if _, err := m.authFor(invocation.scope); err != nil {
 		return err
 	}
-	current, err := m.readModuleConfig(invocation.scope.Plugin)
+	current, err := m.readModuleConfigContext(ctx, invocation.scope.Plugin)
 	if err != nil || current.Version != lease.ConfigVersion() {
 		return errors.New("request policy configuration changed")
 	}
-	entries, err := m.List()
-	if err != nil || !slices.ContainsFunc(entries, func(entry Installed) bool {
-		return entry.Manifest.ID == invocation.scope.Plugin && !entry.Disabled && entry.Revision == lease.Revision() &&
-			entry.observerEnablementErr == nil && entry.EnableGeneration == lease.worker.entry.EnableGeneration
+	if !slices.ContainsFunc(m.contributionEntries(ctx), func(entry Installed) bool {
+		return entry.Manifest.ID == invocation.scope.Plugin && entry.Revision == lease.Revision() &&
+			entry.EnableGeneration == lease.worker.entry.EnableGeneration
 	}) {
 		return errors.New("request policy package changed")
 	}

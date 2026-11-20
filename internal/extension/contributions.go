@@ -25,16 +25,21 @@ var (
 )
 
 func (m *Manager) contributionEntries(ctx context.Context) []Installed {
+	entries, _ := m.readContributionEntries(ctx)
+	return entries
+}
+
+func (m *Manager) readContributionEntries(ctx context.Context) ([]Installed, error) {
 	if m == nil || m.isClosed() {
-		return nil
+		return nil, errContributionRevoked
 	}
 	entries, err := m.catalog.list(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	return slices.DeleteFunc(entries, func(entry Installed) bool {
 		return entry.Disabled || entry.Manifest.Component != nil || entry.observerEnablementErr != nil
-	})
+	}), nil
 }
 
 func registeredContributions[T comparable](ctx context.Context, m *Manager, module string, declared func(sdk.Manifest) []T) []contributionBinding[T] {

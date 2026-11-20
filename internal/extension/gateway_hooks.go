@@ -48,10 +48,9 @@ type GatewayRun struct {
 	once    sync.Once
 }
 
-func (m *Manager) HasGateway() bool {
-	entries, err := m.List()
-	return err == nil && slices.ContainsFunc(entries, func(entry Installed) bool {
-		return !entry.Disabled && entry.Manifest.Contract.Has(sdk.GatewayHooks) && entry.Manifest.Hooks != nil
+func (m *Manager) HasGateway(ctx context.Context) bool {
+	return slices.ContainsFunc(m.contributionEntries(ctx), func(entry Installed) bool {
+		return entry.Manifest.Hooks != nil
 	})
 }
 
@@ -89,15 +88,10 @@ func gatewayHookOrigin(descriptor sdk.GatewayHookDescriptor, origin string) bool
 	return descriptor.AllowsOrigin(origin)
 }
 
-func (m *Manager) gatewayEntries(origin string, signin bool) []Installed {
-	entries, err := m.List()
-	if err != nil {
-		return nil
-	}
-	return slices.DeleteFunc(entries, func(entry Installed) bool {
+func (m *Manager) gatewayEntries(ctx context.Context, origin string, signin bool) []Installed {
+	return slices.DeleteFunc(m.contributionEntries(ctx), func(entry Installed) bool {
 		hooks := entry.Manifest.Hooks
-		return entry.Disabled || !entry.Manifest.Contract.Has(sdk.GatewayHooks) || hooks == nil ||
-			!gatewayHookOrigin(*hooks, origin) ||
+		return hooks == nil || !gatewayHookOrigin(*hooks, origin) ||
 			signin && !hooks.SignIn || !signin && !hooks.Request && !hooks.Response
 	})
 }
@@ -126,12 +120,12 @@ func (m *Manager) openGatewayRun(ctx context.Context, body []byte, info sdk.Gate
 // acquireGatewayLease uses the request's bounded startup context without
 // making the resulting lease depend on the client's connection lifetime.
 func (m *Manager) acquireGatewayLease(ctx, lifetime context.Context, entry Installed) (*Lease, error) {
-	config, err := m.runtimeModuleConfig(entry.Manifest)
+	config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 	if err != nil {
 		return nil, err
 	}
 	worker, client, err := m.acquire(ctx, entry.Manifest.ID, &expectedGeneration{
-		packageRevision: entry.Revision, configVersion: config.Version,
+		packageRevision: entry.Revision, configVersion: config.Version, enableGeneration: &entry.EnableGeneration,
 	})
 	if err != nil {
 		return nil, err
@@ -146,7 +140,7 @@ func (m *Manager) BeginGateway(ctx context.Context, body []byte, info sdk.Gatewa
 	if ctx == nil || ctx.Err() != nil || len(body) > gatewayBodyLimit || !gatewayObject(body) {
 		return nil
 	}
-	entries := m.gatewayEntries(info.Origin, false)
+	entries := m.gatewayEntries(ctx, info.Origin, false)
 	if len(entries) == 0 {
 		return nil
 	}
@@ -341,7 +335,7 @@ func (m *Manager) GatewaySignIn(ctx context.Context, event sdk.GatewaySignInEven
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	entries := m.gatewayEntries("local", true)
+	entries := m.gatewayEntries(ctx, "local", true)
 	if len(entries) == 0 {
 		return
 	}

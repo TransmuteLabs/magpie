@@ -3,11 +3,44 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestBudgetPolicyDiscoveryRespectsCancellation(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	root, err := manager.catalog.open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	unlock, err := catalogLock(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.EvaluateBudget(ctx, "fixture/policy", sdk.MethodBudgetReserve, sdk.BudgetPolicyRequest{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		unlock()
+		if !errors.Is(err, ErrBudgetPolicyUnavailable) {
+			t.Fatalf("canceled lookup returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		unlock()
+		<-done
+		t.Fatal("the canceled budget lookup waited for the catalog lock")
+	}
+}
 
 func TestBudgetPolicyHostRefusesCallbacksAndBorrowedScope(t *testing.T) {
 	manager := NewManager(t.TempDir())

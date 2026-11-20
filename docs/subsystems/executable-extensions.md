@@ -664,6 +664,17 @@ request, scope and result, checks the binding again before dispatch and
 publication, and applies its existing refusal or fallback policy.
 Routing's dispatch and publication catalog reads use the action deadline.
 
+Gateway hooks and middleware use the same enabled-root registry with
+their existing primary capability declarations. A selection made before
+a disable and re-enable expires even when the package and its settings
+are identical. Asynchronous capture keeps an already acquired lease.
+Synchronous middleware rechecks enablement before publishing a result.
+
+Budget policies use registered bindings for dispatch and publication.
+Declarative masking and provider request recovery use the same enabled-root
+lookup. A failed lookup leaves an explicitly selected policy unavailable.
+Masking reads manifest rules without acquiring a worker.
+
 ## Window integration
 
 `window.metadata` names a package-relative `package.json`. Its existing

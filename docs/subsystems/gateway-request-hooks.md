@@ -81,7 +81,8 @@ after 15 minutes, and callbacks have bounded per-module and shared budgets.
 Normal finish retains leases until notification completes; shutdown cancels
 and joins owned notifications before closing their workers. Disabling or
 updating a module withdraws new work while an existing lease retains its
-original generation within the ordinary bounded drain policy.
+original generation within the ordinary bounded drain policy. A selection
+that has yet to acquire a lease expires across disable and re-enable.
 
 The existing sign-in loop also dispatches sanitized SDK notifications without
 starting a legacy Bun host for an SDK-only installation. `endsAt` is RFC3339.
@@ -321,6 +322,10 @@ transitions between catalog reads. A failed catalog publication after marker
 publication can discard events conservatively. Disabling remains available
 when the marker is unreadable, and re-enabling preserves the evidence and
 fails closed until the marker is repaired.
+
+Observer discovery reads enabled SDK roots under the listener's lifetime.
+When the last listener releases ownership, cancellation ends catalog and
+configuration lock waits so the observer can shut down.
 
 The marker leaves the catalog schema and package revision compatible with
 older strict readers. Only versions with the marker fence can advance it.
