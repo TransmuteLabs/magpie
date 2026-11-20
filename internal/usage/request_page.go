@@ -931,6 +931,7 @@ func recordHash(path string, n int64) string {
 type requestState struct {
 	sources         []sessions.CallSource
 	codexIdentities map[string]sessions.CodexIdentity
+	history         sessions.CallHistory
 	cfg             settings.Settings
 	snapshot        *logSnapshot
 	days            []sharedSource
@@ -939,7 +940,11 @@ type requestState struct {
 }
 
 func readRequestState(now time.Time) requestState {
-	sources, codexIdentities := sessions.CallSourcesAndCodexIdentities()
+	return readRequestStateWithHistory(now, sessions.InspectCallHistory())
+}
+
+func readRequestStateWithHistory(now time.Time, history sessions.CallHistory) requestState {
+	sources, codexIdentities := history.SourcesAndCodexIdentities()
 	slices.SortFunc(sources, func(a, b sessions.CallSource) int {
 		if n := a.Modified.Compare(b.Modified); n != 0 {
 			return n
@@ -957,7 +962,7 @@ func readRequestState(now time.Time) requestState {
 		fmt.Fprintf(h, "%q:%q:%v:%t:%t:%t;", current.ID, current.Where(), current.Catalogs(), current.IsPlugin(), current.Account == nil, current.Key != "")
 		fmt.Fprint(h, liveListKey(current.ID))
 	}
-	for _, root := range sessions.DesktopDataDirs() {
+	for _, root := range history.DesktopDirs() {
 		for _, kind := range []string{"local-agent-mode-sessions", "claude-code-sessions"} {
 			files, _ := sessions.SessionGlob(filepath.Join(root, kind, "*", "*", "local_*.json"))
 			for _, path := range files {
@@ -968,19 +973,19 @@ func readRequestState(now time.Time) requestState {
 	meta += fmt.Sprintf("|%x|%s", h.Sum(nil), liveListKey("antigravity"))
 	// Group spellings also name chart shares and the model filter. A change
 	// must invalidate cells whose filter was judged under the old namespace.
-	meta += "|" + provider.UsageNamesKey()
+	meta += fmt.Sprintf("|%s|native-calls-v1:%t", provider.UsageNamesKey(), history.DesktopCalls())
 	h.Reset()
 	snapshot := readLogSnapshot()
 	fmt.Fprint(h, meta, snapshot.version, now.In(time.Local).Format("2006-01-02 MST"))
 	hashCodexIdentities(h, codexIdentities)
 	for _, s := range sources {
-		fmt.Fprintf(h, "%s:%d:%d;", s.Path, s.Size, s.Modified.UnixNano())
+		fmt.Fprintf(h, "%s:%s:%s:%d:%d;", s.Path, s.Agent, s.Key, s.Size, s.Modified.UnixNano())
 	}
 	days, someShared := sharedSources(time.Time{})
 	for _, s := range days {
 		fmt.Fprintf(h, "%s:%d:%d;", s.path, s.size, s.mod.UnixNano())
 	}
-	return requestState{sources: sources, codexIdentities: codexIdentities, cfg: cfg, snapshot: snapshot, days: days, someShared: someShared,
+	return requestState{sources: sources, codexIdentities: codexIdentities, history: history, cfg: cfg, snapshot: snapshot, days: days, someShared: someShared,
 		root: requestRoot(), meta: meta, key: fmt.Sprintf("%x", h.Sum(nil))}
 }
 
@@ -1013,19 +1018,27 @@ func hashCodexIdentities(h hash.Hash, ids map[string]sessions.CodexIdentity) {
 func requestRoot() string { return Path() + "|" + catalog.CachePath() }
 
 func QueryPage(p Period, f Filter, offset, limit int) RequestPage {
-	return queryPageOf(p, f, offset, limit, sessions.ReadCallSource, true)
+	for range 2 {
+		history := sessions.InspectCallHistory()
+		page := queryPageOf(p, f, offset, limit, history, history.ReadSource, true)
+		if history.Current() {
+			return page
+		}
+	}
+	history := sessions.CallHistory{}
+	return queryPageOf(p, f, offset, limit, history, history.ReadSource, true)
 }
 
 // queryPage is QueryPage of the session files as readSource reads them,
 // its chunks its own.
 func queryPage(p Period, f Filter, offset, limit int, readSource func(sessions.CallSource) []sessions.Call) RequestPage {
-	return queryPageOf(p, f, offset, limit, readSource, false)
+	return queryPageOf(p, f, offset, limit, sessions.InspectCallHistory(), readSource, false)
 }
 
 // queryPageOf is queryPage; share says readSource is the files' own
 // reader, so a chunk another query is making of a file is waited for
 // (sharedBuild).
-func queryPageOf(p Period, f Filter, offset, limit int, readSource func(sessions.CallSource) []sessions.Call, share bool) (page RequestPage) {
+func queryPageOf(p Period, f Filter, offset, limit int, history sessions.CallHistory, readSource func(sessions.CallSource) []sessions.Call, share bool) (page RequestPage) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -1046,7 +1059,7 @@ func queryPageOf(p Period, f Filter, offset, limit int, readSource func(sessions
 	if LogCalls != nil {
 		return pageFromLedgerAt(p, f, offset, limit, LedgerOfAt(p, Filter{}, now), now)
 	}
-	st := readRequestState(now)
+	st := readRequestStateWithHistory(now, history)
 	codexIdentities, snapshot, someShared := st.codexIdentities, st.snapshot, st.someShared
 	version, key := snapshot.version, st.key
 	idx := &requestCache
@@ -1176,7 +1189,7 @@ func codexEffortOfIndex(st requestState, p Period, now time.Time) map[string][]s
 	shared.adopt(st)
 	idx := shared.private()
 	shared.Unlock()
-	b := readRequestBlocks(idx, st, p, now, settledBefore(now), sessions.ReadCallSource, true)
+	b := readRequestBlocks(idx, st, p, now, settledBefore(now), st.history.ReadSource, true)
 	defer b.priced.release()
 	sums := effortSums{}
 	var next *pairMemo
@@ -1297,7 +1310,7 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 			return false
 		}
 		c := idx.chunks[s.Path]
-		return c == nil || c.Source.Size != s.Size || !c.Source.Modified.Equal(s.Modified)
+		return c == nil || !sameCallSource(c.Source, s)
 	}
 	want := map[string]sessions.CallSource{}
 	for _, s := range sources {
@@ -1322,7 +1335,7 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 			return build
 		}
 		return func(s sessions.CallSource) *rowChunk {
-			return sharedBuild(chunkBuildKey{meta, s.Path, s.Size, s.Modified.UnixNano()}, func() *rowChunk { return build(s) })
+			return sharedBuild(chunkBuildKey{meta, s.Path, s.Size, s.Modified.UnixNano(), s.Agent, s.Key}, func() *rowChunk { return build(s) })
 		}
 	}
 	read := prefetchEach(sources, stale, makeChunk)
@@ -1335,7 +1348,7 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 		// (chunkRows), not every file's at once
 		c := idx.chunks[s.Path]
 		put := false
-		if reused := c != nil && c.Source.Size == s.Size && c.Source.Modified.Equal(s.Modified); !reused {
+		if reused := c != nil && sameCallSource(c.Source, s); !reused {
 			c = read(i)
 			c.serial = sourceSerial(st.root, st.meta, s)
 			built++
@@ -1406,8 +1419,12 @@ func readRequestBlocks(idx *requestIndex, st requestState, p Period, now, settle
 // a counted one.
 func sourceSerial(root, meta string, s sessions.CallSource) uint64 {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%d\x00%d", root, meta, s.Path, s.Size, s.Modified.UnixNano())
+	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d", root, meta, s.Path, s.Agent, s.Key, s.Size, s.Modified.UnixNano())
 	return binary.BigEndian.Uint64(h.Sum(nil)) | 1<<63
+}
+
+func sameCallSource(a, b sessions.CallSource) bool {
+	return a.Path == b.Path && a.Agent == b.Agent && a.Key == b.Key && a.Size == b.Size && a.Modified.Equal(b.Modified)
 }
 
 // lastPairs is p's last pairing for read, idx's private copy, taken once

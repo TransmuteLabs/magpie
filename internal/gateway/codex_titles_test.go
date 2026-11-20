@@ -386,7 +386,8 @@ func TestCodexDescriptionFallbackOnMagpie(t *testing.T) {
 				`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Plain description"}}]}`,
 				`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`,
 				`data: [DONE]`)}
-			setup(t, provider.Chat, f)
+			upstream := setup(t, provider.Chat, f)
+			probeFixtureRoot(t, upstream)
 			s := New()
 			body := `{"model":"fake/m1","stream":true,"input":"Describe the thread",` +
 				`"text":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"description":{"type":"string","minLength":1}},"required":["description"]}}}}`

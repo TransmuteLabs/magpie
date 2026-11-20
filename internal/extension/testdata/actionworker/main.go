@@ -158,6 +158,20 @@ func main() {
 			}}, nil
 		}
 	}
+	if manifest.Contract.Has(sdk.SessionSource) {
+		module.Handlers[sdk.MethodSessionSourceRead] = func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			request, err := sdk.DecodeSessionSourceRequest(manifest, call.Params)
+			if err != nil {
+				return nil, err
+			}
+			if request.Mode != "summary" {
+				return nil, fmt.Errorf("unexpected fixture read mode %q", request.Mode)
+			}
+			return sdk.SessionSourceReadResult{Mode: request.Mode, SessionID: request.Locator.SessionID,
+				Summary: &sdk.SessionSourceSummary{Title: "Delegated fixture", Cwd: "/work",
+					Start: "2026-11-12T12:00:00Z", Last: "2026-11-12T12:00:00Z"}}, nil
+		}
+	}
 	if err := sdk.Serve(context.Background(), os.Stdin, os.Stdout, module); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

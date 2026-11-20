@@ -159,10 +159,3 @@ func extensionSourceTranscript(ctx context.Context, record *sessionSourceRecord)
 	}
 	return Transcript{}, errors.New("session source is disabled")
 }
-
-func checkSourceBeforeCarry(session Session) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := selectSessionHistoryOwner(ctx, session)
-	return err
-}

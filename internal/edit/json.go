@@ -298,6 +298,11 @@ func matchBrace(b []byte, open int) int {
 // DelJSON removes key paths from a JSON/JSONC file, preserving everything
 // else. Missing keys are ignored; an object left empty collapses to {}.
 func DelJSON(path string, keyPaths ...string) error {
+	return DelJSONChecked(path, nil, keyPaths...)
+}
+
+// DelJSONChecked runs check immediately before publishing the removal.
+func DelJSONChecked(path string, check func() error, keyPaths ...string) error {
 	raw, err := Read(path)
 	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
 		return err
@@ -321,7 +326,7 @@ func DelJSON(path string, keyPaths ...string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	return WriteAtomic(path, out)
+	return WriteAtomicChecked(path, out, check)
 }
 
 // pastLineEnd is i past the line end raw has at i, \n or \r\n, else i: a

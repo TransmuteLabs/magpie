@@ -1354,10 +1354,10 @@ func codexAtLimit(u codexUsage) bool {
 }
 
 type codexWindow struct {
-	UsedPercent     float64 `json:"used_percent"`
-	LimitWindowSecs int64   `json:"limit_window_seconds"`
-	ResetAt         int64   `json:"reset_at"`
-	ResetAfterSecs  int64   `json:"reset_after_seconds"`
+	UsedPercent     *float64 `json:"used_percent"`
+	LimitWindowSecs int64    `json:"limit_window_seconds"`
+	ResetAt         int64    `json:"reset_at"`
+	ResetAfterSecs  int64    `json:"reset_after_seconds"`
 }
 
 func quotaDurationName(seconds int64) string {
@@ -1371,8 +1371,14 @@ func quotaDurationName(seconds int64) string {
 }
 
 func (w codexWindow) window() QuotaWindow {
-	out := QuotaWindow{Name: quotaDurationName(w.LimitWindowSecs), Used: w.UsedPercent, ResetSecs: w.ResetAfterSecs,
+	out := QuotaWindow{Name: quotaDurationName(w.LimitWindowSecs), ResetSecs: w.ResetAfterSecs,
 		Span: time.Duration(w.LimitWindowSecs) * time.Second}
+	if w.UsedPercent == nil {
+		out.Unknown, out.Text, out.Aside, out.noShare = true, true, true, true
+		out.Display = "unknown"
+	} else {
+		out.Used = *w.UsedPercent
+	}
 	if w.ResetAt > 0 {
 		t := time.Unix(w.ResetAt, 0)
 		out.ResetsAt = &t

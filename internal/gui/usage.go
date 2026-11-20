@@ -85,12 +85,12 @@ func requestContent(agent, session string, from, to, at time.Time) contentJSON {
 	case agent != "claude" && agent != "claude-desktop" && agent != "codex":
 		out.Why = "agent"
 	default:
-		c, ok := sessions.FindCall(session, from, to, at)
+		c, ok := sessions.FindCall(agent, session, from, to, at)
 		if !ok {
 			out.Why = "missing"
 			break
 		}
-		content, err := sessions.ContentOf(c)
+		content, err := c.Content()
 		if err != nil {
 			out.Why = "read"
 			break

@@ -201,24 +201,24 @@ func TestFindCall(t *testing.T) {
 		claudeBlocks("b", 20, `{"type":"text","text":"b"}`),
 		claudeBlocks("c", 40, `{"type":"text","text":"c"}`))
 	at := func(s int) time.Time { return callT0.Add(time.Duration(s) * time.Second) }
-	if c, ok := FindCall("sess1", at(15), at(25), at(25)); !ok || c.Msg != "b" {
+	if c, ok := FindCall("claude", "sess1", at(15), at(25), at(25)); !ok || c.Msg != "b" {
 		t.Fatalf("in the window: %+v %v", c, ok)
 	}
 	// a gateway request that began at 5 s and took 5 s: its window, 5 s before
 	// to 30 s after, holds a and b; it ended nearest a's end
-	if c, ok := FindCall("sess1", at(0), at(40), at(10)); !ok || c.Msg != "a" {
+	if c, ok := FindCall("claude", "sess1", at(0), at(40), at(10)); !ok || c.Msg != "a" {
 		t.Fatalf("the one that ended nearest, not the newest: %+v", c)
 	}
-	if c, ok := FindCall("sess1", at(5), at(30), at(30)); !ok || c.Msg != "b" {
+	if c, ok := FindCall("claude", "sess1", at(5), at(30), at(30)); !ok || c.Msg != "b" {
 		t.Fatalf("the nearest of two: %+v", c)
 	}
-	if _, ok := FindCall("sess1", at(25), at(35), at(30)); ok {
+	if _, ok := FindCall("claude", "sess1", at(25), at(35), at(30)); ok {
 		t.Fatal("none in it")
 	}
-	if _, ok := FindCall("other", at(0), at(60), at(0)); ok {
+	if _, ok := FindCall("claude", "other", at(0), at(60), at(0)); ok {
 		t.Fatal("another session's")
 	}
-	if _, ok := FindCall("", at(0), at(60), at(0)); ok {
+	if _, ok := FindCall("claude", "", at(0), at(60), at(0)); ok {
 		t.Fatal("no session")
 	}
 }
@@ -238,7 +238,7 @@ func TestFindCallToolLoop(t *testing.T) {
 	)
 	for i, want := range []string{"m1", "m2", "m3"} {
 		start := callT0.Add(time.Duration(i*3) * time.Second) // each asked for as the last ended
-		c, ok := FindCall("sess1", start.Add(-5*time.Second), start.Add(32*time.Second), start.Add(2*time.Second))
+		c, ok := FindCall("claude", "sess1", start.Add(-5*time.Second), start.Add(32*time.Second), start.Add(2*time.Second))
 		if !ok || c.Msg != want {
 			t.Errorf("gateway row %d shows the content of %s, want %s", i, c.Msg, want)
 		}

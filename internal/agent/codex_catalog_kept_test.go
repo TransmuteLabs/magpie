@@ -2,13 +2,257 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestCodexSyncRefusesCatalogAliasedToConfig(t *testing.T) {
+	for _, scope := range []string{"global", "profile", "profile-global-config"} {
+		for _, link := range []struct {
+			name string
+			make func(string, string) error
+		}{
+			{name: "hard-link", make: os.Link},
+			{name: "symlink", make: os.Symlink},
+		} {
+			t.Run(scope+"/"+link.name, func(t *testing.T) {
+				home, _ := codexHome(t, "", "# the user's global config\n")
+				cx := codex(home)
+				if scope != "global" {
+					if err := cx.Field("scope").Set("profile"); err != nil {
+						t.Fatal(err)
+					}
+					cx = codex(home)
+				}
+				if err := cx.Apply("model", "fake/m1"); err != nil {
+					t.Fatal(err)
+				}
+				config := cx.Path
+				if scope == "profile-global-config" {
+					config = filepath.Join(cx.Dir, "config.toml")
+				}
+				catalogPath := filepath.Join(cx.Dir, "magpie-models.json")
+				if err := os.Remove(catalogPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := link.make(config, catalogPath); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("link unavailable: %v", err)
+					}
+					t.Fatal(err)
+				}
+				if err := os.Chmod(config, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				want := readFile(config)
+				before, err := os.Stat(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = cx.Sync()
+				after, statErr := os.Stat(catalogPath)
+				if !errors.Is(err, extension.ErrActionChanged) || !strings.Contains(err.Error(), "aliases") ||
+					readFile(config) != want || statErr != nil ||
+					!os.SameFile(before, after) || before.Mode() != after.Mode() {
+					t.Fatalf("sync did not preserve an aliased config: err=%v, stat=%v, config changed=%v", err, statErr, readFile(config) != want)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexSyncRefusesLateCatalogAlias(t *testing.T) {
+	home, _ := codexHome(t, "", "")
+	cx := codex(home)
+	if err := cx.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := filepath.Join(cx.Dir, "magpie-models.json")
+	writeFile(t, catalogPath, `{"models":[]}`)
+	target, err := edit.Target(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configAfter := readFile(cx.Path) + "\n# external edit while linking\n"
+	linked := false
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == target && !linked {
+			if err := os.Remove(catalogPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(cx.Path, catalogPath); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("link unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			writeFile(t, cx.Path, configAfter)
+			linked = true
+		}
+		return body
+	}, cx.Sync)
+	if !linked || !errors.Is(err, extension.ErrActionChanged) || !strings.Contains(err.Error(), "aliases") {
+		t.Fatalf("sync did not identify the late alias: linked=%v err=%v", linked, err)
+	}
+	if readFile(cx.Path) != configAfter || readFile(catalogPath) != configAfter {
+		t.Fatal("sync or rollback overwrote the config through the new alias")
+	}
+}
+
+func TestCodexSyncKeepsConcurrentCatalogEdit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile bool
+		link    func(string, string) error
+	}{
+		{name: "global"},
+		{name: "profile", profile: true},
+		{name: "global-hard-link", link: os.Link},
+		{name: "profile-symlink", profile: true, link: os.Symlink},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			cx := codex(home)
+			if tc.profile {
+				if err := cx.Field("scope").Set("profile"); err != nil {
+					t.Fatal(err)
+				}
+				cx = codex(home)
+			}
+			if err := cx.Apply("model", "fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			catalogPath := filepath.Join(cx.Dir, "magpie-models.json")
+			writeFile(t, catalogPath, `{"models":[]}`)
+			aliasTarget := ""
+			if tc.link != nil {
+				aliasTarget = filepath.Join(cx.Dir, "hand-managed-models.json")
+				if err := os.Rename(catalogPath, aliasTarget); err != nil {
+					t.Fatal(err)
+				}
+				if err := tc.link(aliasTarget, catalogPath); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("link unavailable: %v", err)
+					}
+					t.Fatal(err)
+				}
+			}
+			target, err := edit.Target(catalogPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const user = `{"models":[{"slug":"fake/m1","personal_setting":"concurrent"}]}`
+			var edited bool
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !edited {
+					writeFile(t, target, user)
+					if err := os.Chmod(target, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					edited = true
+				}
+				return body
+			}, cx.Sync)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) {
+				t.Fatalf("sync did not refuse the stale catalog: edited=%v, err=%v", edited, err)
+			}
+			if got := readFile(catalogPath); got != user {
+				t.Fatalf("sync overwrote a concurrent catalog edit: %q", got)
+			}
+			if err := cx.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(catalogPath); !strings.Contains(got, `"concurrent"`) ||
+				!strings.Contains(got, `"supports_parallel_tool_calls"`) {
+				t.Fatal("the next sync did not keep both the user setting and the generated catalog")
+			}
+			stamp, err := os.Stat(catalogPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runtime.GOOS != "windows" && stamp.Mode().Perm() != 0o600 {
+				t.Fatalf("changed catalog mode = %v", stamp.Mode().Perm())
+			}
+			if aliasTarget != "" {
+				linked, err := os.Stat(aliasTarget)
+				if err != nil || !os.SameFile(stamp, linked) {
+					t.Fatalf("sync split the catalog from its alias: %v", err)
+				}
+			}
+			if err := cx.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			same, err := os.Stat(catalogPath)
+			if err != nil || !os.SameFile(stamp, same) || !stamp.ModTime().Equal(same.ModTime()) {
+				t.Fatalf("unchanged sync rewrote the catalog: %v", err)
+			}
+		})
+	}
+}
+
+func TestCodexEffortCatalogConflictRollsBackOnlyItsOwnConfig(t *testing.T) {
+	for _, scope := range []string{"global", "profile"} {
+		for _, scenario := range []struct {
+			name       string
+			editConfig bool
+		}{
+			{name: "catalog-only"},
+			{name: "catalog-and-config", editConfig: true},
+		} {
+			t.Run(scope+"/"+scenario.name, func(t *testing.T) {
+				home, _ := codexHome(t, "", "")
+				cx := codex(home)
+				if scope == "profile" {
+					if err := cx.Field("scope").Set("profile"); err != nil {
+						t.Fatal(err)
+					}
+					cx = codex(home)
+				}
+				if err := cx.Apply("model", "fake/m1"); err != nil {
+					t.Fatal(err)
+				}
+				catalogPath := filepath.Join(cx.Dir, "magpie-models.json")
+				writeFile(t, catalogPath, `{"models":[]}`)
+				target, err := edit.Target(catalogPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				const catalogEdit = `{"models":[{"slug":"external"}]}`
+				wantConfig := readFile(cx.Path)
+				edited := false
+				err = edit.Filtered(func(path string, body []byte) []byte {
+					if path == target && !edited {
+						edited = true
+						withEffort := readFile(cx.Path)
+						if !strings.Contains(withEffort, `model_reasoning_effort = "medium"`) {
+							t.Fatal("effort was not written before catalog publication")
+						}
+						if scenario.editConfig {
+							wantConfig = withEffort + "\n# user edited config during catalog publication\n"
+							writeFile(t, cx.Path, wantConfig)
+						}
+						writeFile(t, path, catalogEdit)
+					}
+					return body
+				}, func() error { return cx.Apply("effort", "medium") })
+				if !edited || !errors.Is(err, extension.ErrActionChanged) {
+					t.Fatalf("apply did not reject the stale catalog: edited=%t err=%v", edited, err)
+				}
+				if readFile(cx.Path) != wantConfig || readFile(catalogPath) != catalogEdit {
+					t.Fatal("apply rollback failed to preserve the concurrent edit or restore its own config change")
+				}
+			})
+		}
+	}
+}
 
 // What the user adds by hand to the model list magpie writes for Codex
 // stays through the next model switch, sync and stepping out (#1450:

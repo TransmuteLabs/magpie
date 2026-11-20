@@ -57,20 +57,27 @@ func (owner sessionHistoryOwner) check(ctx context.Context) error {
 	if owner.mode == historyUnavailable {
 		return extension.ErrActionChanged
 	}
-	if err := checkHistoryRead(owner.session.Agent); err != nil {
-		return err
-	}
 	if owner.mode == historyDelegated {
+		if err := checkHistoryRead(owner.session.Agent); err != nil {
+			return err
+		}
 		if owner.session.source == nil || owner.session.source.grant.descriptor.Agent != owner.session.Agent {
 			return extension.ErrActionChanged
 		}
 		return checkSelectedSource(ctx, owner.session.source)
 	}
+	return checkNativeHistoryOwner(ctx, owner.session.Agent)
+}
+
+func checkNativeHistoryOwner(ctx context.Context, agent string) error {
+	if err := checkHistoryRead(agent); err != nil {
+		return err
+	}
 	claims, err := readHistoryClaims()
 	if err != nil {
 		return errors.Join(extension.ErrActionChanged, err)
 	}
-	if claims.owners[owner.session.Agent] || extensionSourceAgent(owner.session.Agent) {
+	if claims.owners[agent] || extensionSourceAgent(agent) {
 		return extension.ErrActionChanged
 	}
 	return ctx.Err()

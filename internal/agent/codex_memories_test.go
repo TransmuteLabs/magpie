@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/edit"
 )
 
 // Codex writes its memories with models of its own, gpt-6-luna for a
@@ -103,5 +106,29 @@ func TestCodexMemoriesUnwire(t *testing.T) {
 	}
 	if cfg := read(); strings.Contains(cfg, "fake/m1") {
 		t.Fatalf("magpie model kept after disconnecting:\n%s", cfg)
+	}
+}
+
+func TestCodexDisconnectKeepsIndependentMemoryModelPicks(t *testing.T) {
+	for _, own := range []string{"extract_model", "consolidation_model"} {
+		t.Run(own, func(t *testing.T) {
+			home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, "model = \"gpt-5.5\"\n")
+			cx := codex(home)
+			if err := cx.Fields[0].Set("fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			if err := cx.Field("memories").Set("fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			if err := edit.SetTOMLKey(filepath.Join(home, ".codex", "config.toml"), "memories", own, "own-memory-model"); err != nil {
+				t.Fatal(err)
+			}
+			if err := cx.Unwire(); err != nil {
+				t.Fatal(err)
+			}
+			if cfg := read(); !strings.Contains(cfg, own+` = "own-memory-model"`) || strings.Contains(cfg, "fake/m1") {
+				t.Fatalf("Disconnect should preserve only the independent memory model:\n%s", cfg)
+			}
+		})
 	}
 }

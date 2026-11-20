@@ -6,6 +6,7 @@ package sessions
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -86,10 +87,30 @@ func keep(p Part) (Part, bool) {
 
 // ContentOf reads what was said in a call from its file.
 func ContentOf(c Call) (Content, error) {
-	if !Reads(c.Agent) {
-		return Content{Input: []Part{}, Output: []Part{}}, ErrNotRead
-	}
+	return LocatedCall{Call: c, source: c.Agent, agent: c.Agent}.Content()
+}
+
+type LocatedCall struct {
+	Call
+	source, agent string
+}
+
+func (located LocatedCall) Content() (Content, error) {
+	c := located.Call
+	ctx := context.Background()
 	out := Content{Input: []Part{}, Output: []Part{}}
+	check := func() error {
+		if err := checkNativeHistoryOwner(ctx, located.agent); err != nil {
+			return err
+		}
+		if located.source != located.agent {
+			return checkNativeHistoryOwner(ctx, located.source)
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return out, err
+	}
 	if c.File == "" || c.Agent == "opencode" { // OpenCode's are rows, not lines of a file
 		return out, errNoPlace
 	}
@@ -99,6 +120,9 @@ func ContentOf(c Call) (Content, error) {
 	} else {
 		err = claudeContent(c, out.add)
 	}
+	if changed := check(); changed != nil {
+		return Content{Input: []Part{}, Output: []Part{}}, changed
+	}
 	return out, err
 }
 
@@ -106,19 +130,55 @@ func ContentOf(c Call) (Content, error) {
 // nearest at (a call's Time is its last line's), if the session files have
 // one. A gateway request's window can hold the next calls of a quick tool
 // loop too; the newest of them would be another request's.
-func FindCall(session string, from, to, at time.Time) (Call, bool) {
-	if session == "" {
-		return Call{}, false
+func FindCall(agent, session string, from, to, at time.Time) (LocatedCall, bool) {
+	ctx := context.Background()
+	if session == "" || checkNativeHistoryOwner(ctx, agent) != nil {
+		return LocatedCall{}, false
 	}
-	var best Call
-	found := false
-	dist := func(t time.Time) time.Duration { return max(t.Sub(at), at.Sub(t)) }
-	for _, c := range callsFor(from.Add(-time.Minute), session, "") {
-		if c.Session == session && !c.Time.Before(from) && !c.Time.After(to) && (!found || dist(c.Time) < dist(best.Time)) {
-			best, found = c, true
+	var files []file
+	switch agent {
+	case "claude":
+		files = distinctOf(claudeFiles(), wslFiles("claude"))
+	case "claude-desktop":
+		var code []file
+		var wsl []file
+		if checkNativeHistoryOwner(ctx, "claude") == nil {
+			code, wsl = claudeFiles(), wslFiles("claude")
 		}
+		files = distinctOf(claudeDesktopFiles(), code, wsl)
+	case "codex":
+		files = distinctOf(codexFiles(), wslFiles("codex"))
 	}
-	return best, found
+	var best, desktopFallback LocatedCall
+	dist := func(t time.Time) time.Duration { return max(t.Sub(at), at.Sub(t)) }
+	closer := func(candidate Call, current LocatedCall) bool {
+		return current.Agent == "" ||
+			cmp.Or(cmp.Compare(dist(current.Time), dist(candidate.Time)),
+				candidate.Time.Compare(current.Time), cmp.Compare(candidate.File, current.File),
+				cmp.Compare(candidate.To, current.To)) > 0
+	}
+	visitCalls(allowed(files), from.Add(-time.Minute), func(source string, c Call) {
+		if c.Session != session || c.Time.Before(from) || c.Time.After(to) {
+			return
+		}
+		switch {
+		case c.Agent == agent:
+			if closer(c, best) {
+				best = LocatedCall{Call: c, source: source, agent: agent}
+			}
+		case agent == "claude-desktop" && c.Agent == "claude":
+			if closer(c, desktopFallback) {
+				desktopFallback = LocatedCall{Call: c, source: source, agent: agent}
+			}
+		}
+	})
+	if best.Agent == "" {
+		best = desktopFallback
+	}
+	if best.Agent == "" || checkNativeHistoryOwner(ctx, best.source) != nil || checkNativeHistoryOwner(ctx, agent) != nil {
+		return LocatedCall{}, false
+	}
+	return best, true
 }
 
 // ---- Claude Code
@@ -213,11 +273,12 @@ func claudeContentOf(ctx context.Context, c Call, keep func([]byte) bool, spoken
 		if json.Unmarshal(b, &l) != nil {
 			return true
 		}
-		more := true
 		switch {
 		case l.Type == "user" && !l.IsMeta:
 			for _, p := range l.Message.Content.claudeParts("user") {
-				more = add(true, p) && more
+				if !add(true, p) {
+					return false
+				}
 			}
 		case l.Type == "assistant" && (c.Msg == "" || l.Message.ID == c.Msg):
 			// "<synthetic>" is Claude Code's own line (an error, a refusal
@@ -230,10 +291,12 @@ func claudeContentOf(ctx context.Context, c Call, keep func([]byte) bool, spoken
 				if p.Role == "assistant" {
 					p.Model = model
 				}
-				more = add(false, p) && more
+				if !add(false, p) {
+					return false
+				}
 			}
 		}
-		return more
+		return true
 	})
 	return err
 }

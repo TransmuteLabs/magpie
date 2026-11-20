@@ -3,6 +3,7 @@ package sessions
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -279,6 +280,12 @@ func readPagedProviders(path string) map[string]string {
 // <magpie dir>/trash/codex-provider/ before it is changed, and rewritten
 // whole into a file beside it that then takes its place, keeping its time.
 func MoveCodexProvider(id, to string) (CodexMove, error) {
+	return moveCodexProvider(id, to, func() error {
+		return checkNativeHistoryOwner(context.Background(), "codex")
+	})
+}
+
+func moveCodexProvider(id, to string, admit func() error) (CodexMove, error) {
 	if !safeID.MatchString(id) {
 		return CodexMove{}, errors.New("no such session")
 	}
@@ -289,6 +296,11 @@ func MoveCodexProvider(id, to string) (CodexMove, error) {
 	defer storeMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
+	if admit != nil {
+		if err := admit(); err != nil {
+			return CodexMove{}, err
+		}
+	}
 	loadCache()
 	defer useDBs()()
 	all := allFiles()
@@ -319,12 +331,12 @@ func MoveCodexProvider(id, to string) (CodexMove, error) {
 	if len(paths) == 0 {
 		return CodexMove{}, errors.New("no such session")
 	}
-	return moveCodexPaths(id, to, paths, time.Now())
+	return moveCodexPaths(id, to, paths, time.Now(), admit)
 }
 
 // moveCodexPaths moves one Codex thread, whose files are paths, to the
 // provider to, as MoveCodexProvider says; storeMu and mu are held.
-func moveCodexPaths(id, to string, paths []string, now time.Time) (CodexMove, error) {
+func moveCodexPaths(id, to string, paths []string, now time.Time, admit func() error) (CodexMove, error) {
 	for _, p := range paths {
 		if recent(p, now) {
 			return CodexMove{}, ErrActive
@@ -349,6 +361,11 @@ func moveCodexPaths(id, to string, paths []string, now time.Time) (CodexMove, er
 	for _, p := range paths {
 		if mv.From = codexMetaProvider(p); mv.From != "" {
 			break
+		}
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return CodexMove{}, err
 		}
 	}
 	// the files as they were, before any is changed
@@ -380,6 +397,11 @@ func moveCodexPaths(id, to string, paths []string, now time.Time) (CodexMove, er
 	if err := os.WriteFile(filepath.Join(dir, "move.json"), note, 0o600); err != nil {
 		os.RemoveAll(dir)
 		return CodexMove{}, err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return CodexMove{}, errors.Join(err, os.RemoveAll(dir))
+		}
 	}
 	mv.Backup = dir
 	// the files changed so far go back as they were
@@ -802,7 +824,7 @@ func moveCodexThreadIDs(home, from, to string, ids []string, budget int64) (move
 				spent += fi.Size()
 			}
 		}
-		mv, err := moveCodexPaths(id, to, files[id], now)
+		mv, err := moveCodexPaths(id, to, files[id], now, nil)
 		if err != nil {
 			if !errors.Is(err, ErrActive) && first == nil {
 				first = fmt.Errorf("thread %s: %w", id, err)

@@ -261,6 +261,7 @@ func TestUsageRequestContent(t *testing.T) {
 		{"claude", "", "session", call, call},
 		{"Bob", "sess1", "agent", call, call},
 		{"claude", "nobody", "missing", call, call},
+		{"codex", "sess1", "missing", call, call},
 		{"claude", "sess1", "missing", call.Add(time.Hour), call.Add(2 * time.Hour)},
 	} {
 		if c, _ = get(x.agent, x.session, x.from, x.to); c.Found || c.Why != x.why || c.Input == nil || c.Output == nil {

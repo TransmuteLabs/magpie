@@ -383,16 +383,21 @@ Routing's stage names the session an account is serving (connor_yang on
 Discord): a row answering, or that answered, the request shown adds that
 request's session title after its status, on one line cut short with the
 whole line under the pointer. The title is what the list's By session heads
-use, from the same `/api/gateway/session-titles`: `sessions.Titles` by
-agent:id for every agent but Codex, Codex's name index by thread id (its
-parent's, for a subagent Codex names one for). The page keeps both by session
+use, from the same `/api/gateway/session-titles`. The ordinary `sessions.Titles`
+lookup takes `agent:id`. `sessions.CodexTitles` takes the thread id (its
+parent's, for a subagent Codex names one for). Codex reads its append-only
+name index while native history is selected. A delegated source supplies its
+session summary title to Routing, Context and Sessions. An unavailable or stale
+delegated summary leaves the Codex name lookup unanswered, and native title
+write history is available only while native history is selected. Verification:
+`TestCodexTitlesUseSelectedHistorySource`. The page keeps both by session
 id (`otherTitles`, `codexNames` in
 [`client.js`](../../internal/gui/assets/plugins/routing/client.js)), since each
 trace update brings its routes anew; a session not seen yet is asked about
 once (`askUnnamed`, skipped when a read since has taken it), and the rest
 with the list's 15-second refresh, never on the stage's per-second passes. A
-names reply silent on a Codex session (unknown to the index, or the index
-unread) leaves the title the trace brought, and only a reply that names it
+names reply silent on a Codex session leaves the title the trace brought,
+and only a reply that names it
 changes it. A session with no title says nothing more, and
 neither does a Codex request whose parent was only matched by its prompt
 (`parentMatched`), since that match is a guess. Verification:
@@ -402,13 +407,13 @@ A By session head reads as its title (flandern1211_58540 on Discord: a
 folder and an id told nothing): the agent, then the session's title on one
 line (whitespace folded), then its folder in a quieter `.dir`; with no title
 the folder takes its place, and with neither the id. The tooltip keeps the
-title, the folder and the id. Where `sessions.Titles` and Codex's name index
+title, the folder and the id. Where `sessions.Titles` and `sessions.CodexTitles`
 find nothing, the same endpoint falls back to the first prompt the gateway
 recorded for that session (`sessions.GatewayTitler`, the title its list
 shows), looked up under the agent the page names and the one the gateway
 records it under (`usage.AgentOf`): `withGatewayTitles` and
 `codexReadableTitles` in [`trace.go`](../../internal/gui/trace.go). Codex
-ids the index doesn't name go to `sessions.Titles` as `codex:` keys first,
+ids `CodexTitles` doesn't name go to `sessions.Titles` as `codex:` keys first,
 so a rollout's own first prompt names it. Nothing is read that the page
 couldn't already show on the Sessions page, and nothing leaves the local
 GUI. Verification: `TestSessionTitlesFallBackToFirstPrompt`,
@@ -515,6 +520,13 @@ return `ErrNotRead`, so a cache from before a switch was turned off is
 read no further. So the Sessions page and list, stats, the overview, the
 call and trace indexes, Usage's agent-file calls and the Codex and Pi
 title readers all go through it.
+
+Native trace discovery and polling use the same durable history authority
+as session listing. Delegating an agent's store also stops its native
+trace reader, including OpenCode's SQLite reader. Poll rechecks authority
+before returning observations and discards cursor state for the revoked
+source. Request-side OTLP checks revalidate a positive cached identity or
+recent observation before suppressing a gateway trace.
 
 `SettleReads` decides once, for an install with no `SessionReads`: one
 that kept a sessions cache (`sessions.json`) or a call cache
@@ -944,6 +956,13 @@ window's `/api/usage` and `/api/usage/requests`
 ([`internal/usageapi`](../../internal/usageapi/usageapi.go)), read-only and
 without conversation text. They follow `/v1/magpie/quotas`' guard: this
 machine, or another with an enabled gateway key, behind the same Host check.
+Native call accounting, Codex thread metadata and Tune use the same
+history authority as Sessions. A batch takes one snapshot of consent and
+source ownership before discovering files and checks it before publishing.
+The Usage request page retries when that authority changes and can still
+show gateway and shared rows while native reads are unavailable. Source
+identity and Desktop classification participate in cache reuse.
+
 A key that is held (`heldKey`: a budget, models or accounts) is refused the
 summary and gets the ledger filtered to its own `CallerKey`, with its filter
 lists cut to its own rows (`usageapi.OwnPage`): the ledger's facets are drawn
@@ -1029,7 +1048,16 @@ reader on a 1.2 MB body.
 
 A call an agent made without magpie reaches Usage only when its own files
 are read (`sessions.Calls`, from `callSources` in
-[`calls.go`](../../internal/sessions/calls.go)). The readers are Claude
+[`calls.go`](../../internal/sessions/calls.go)). When a Usage request opens
+its preview, `FindCall` matches the agent and session before choosing the
+nearest call. Desktop can use its marked Code tab records in Claude Code's
+store and fall back to older unmarked Claude records when no Desktop
+record matches. The history owner checks the selected agent and the source
+store before and after reading the call's byte range.
+Native accounting keeps its result across a source refresh with the same
+read permissions, generation and native exclusions. A changed claim or a
+revoked permission discards the held result before publication.
+The readers are Claude
 Code's, Claude Desktop's and Cowork's, Codex's (and both in WSL), and,
 read a file at a time (`wholeCallReaders` in
 [`call_cache.go`](../../internal/sessions/call_cache.go)), OpenCode's
@@ -1559,7 +1587,19 @@ not listed is an error. See `TestClaudeSubagents`, `TestQoderSubagents`,
 
 A session's listed `resume` line is made on every listing and reads no more
 than the listing did. The line that runs when the user opens it, from the
-GUI's Terminal or the TUI, is `sessions.ResumeNow` ([`codex_resume.go`](../../internal/sessions/codex_resume.go)).
+GUI's Terminal or the TUI, is prepared by
+[`sessions.ResumeNowContext`](../../internal/sessions/resume.go). Resume
+uses the same owner check as history reads and Carry Over. A held native
+row loses its launch command when read consent is revoked or when a
+persisted source claim takes over its agent. An unreadable claim also
+blocks launch. Delegated rows keep their declared resume mode and, for
+agent recipes, the checked source identity used by the CLI at execution.
+
+The [native Codex adapter](../../internal/sessions/codex_resume.go) resolves
+the saved provider only at launch. A provider move rechecks authority after
+acquiring the writer locks and again before rewriting the rollout. A canceled
+move at that boundary discards its staged backup.
+
 Codex 0.166 resumes a thread only on the provider it was saved with (its
 state-database row, else its `session_meta`): on another, `codex resume`
 stops at `modelProviderMismatch`, and at `modelProviderNotConfigured` when

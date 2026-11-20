@@ -15,12 +15,39 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+func withoutAnonymousFixtureProbe(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if anonymousFixtureRoot(r.Method, r.URL.RequestURI(), r.Header, r.ContentLength != 0 || len(r.TransferEncoding) != 0) {
+			http.NotFound(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+}
+
+func probeFixtureRoot(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Close = true
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("fixture root probe returned %s, want 404", response.Status)
+	}
+}
+
 // listing is a relay that lists ids and answers each request with the
 // model it was asked for, recording it.
 func listing(t *testing.T, a *asked, ids ...string) *httptest.Server {
 	t.Helper()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/models") {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/models") {
 			var l struct {
 				Data []map[string]string `json:"data"`
 			}
@@ -29,6 +56,10 @@ func listing(t *testing.T, a *asked, ids ...string) *httptest.Server {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(l)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
 			return
 		}
 		var b struct {
@@ -135,6 +166,8 @@ func TestLocalModelIDOnEveryRoute(t *testing.T) {
 	messages := func(model string) *httptest.ResponseRecorder {
 		return do("", "POST", "/v1/messages", `{"model":"`+model+`","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 	}
+	probeFixtureRoot(t, a)
+	probeFixtureRoot(t, b)
 	for _, c := range []struct {
 		what  string
 		send  func() *httptest.ResponseRecorder

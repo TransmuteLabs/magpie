@@ -62,19 +62,15 @@ func TestConverterPublicationCleanupPreservesEditedPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(plan.Root())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plan.Execute(t.Context(), plan.Preview().Revision); err != nil {
-		t.Fatal(err)
-	}
 	first, second := filepath.Join(root, "sessions/one.jsonl"), filepath.Join(root, "sessions/two.jsonl")
-	if err := os.WriteFile(first, []byte("independent edit"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	delegateHistoryForTest(t, "claude")
-	if err := rollbackSessionConversion(plan, info); !errors.Is(err, extension.ErrActionChanged) {
+	result, err := plan.ExecuteCreateOnly(t.Context(), plan.Preview().Revision, func(map[string]fs.FileInfo) error {
+		if err := os.WriteFile(first, []byte("independent edit"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		delegateHistoryForTest(t, "claude")
+		return nil
+	})
+	if result.Applied || !errors.Is(err, extension.ErrActionChanged) {
 		t.Fatal("changed output was not reported", err)
 	}
 	if body, err := os.ReadFile(first); err != nil || string(body) != "independent edit" {

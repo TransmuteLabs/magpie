@@ -46,6 +46,19 @@ func sessionsHome(t *testing.T) {
 	sessions.Reset()
 }
 
+func TestResumeSessionReportsRevokedReadConsent(t *testing.T) {
+	sessionsHome(t)
+	session := sessions.Session{Agent: "codex", ID: "fixture", Resume: "codex resume fixture"}
+	if err := sessions.SetReads(nil, map[string]bool{"codex": false}); err != nil {
+		t.Fatal(err)
+	}
+	msg := resumeSession(session)()
+	flash, ok := msg.(flashMsg)
+	if !ok || flash.ok || flash.text != tr("this session can't be resumed from here") {
+		t.Fatalf("revoked resume did not report that it was unavailable: %#v", msg)
+	}
+}
+
 // The Sessions page shows a range's totals, a chart of its days and its
 // top models and folders; a model or a folder picked narrows them.
 func TestSessionsPage(t *testing.T) {

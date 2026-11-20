@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 )
 
 // Disconnect puts back only what magpie changed: a key the user edited by
@@ -62,6 +66,45 @@ func TestCodexDisconnectPutsBackWhatMagpieChanged(t *testing.T) {
 	}
 	if strings.Contains(cfg, "model_catalog_json") || strings.Contains(cfg, "model_provider =") {
 		t.Errorf("magpie's keys left:\n%s", cfg)
+	}
+}
+
+func TestCodexDisconnectPreservesEditDuringRestore(t *testing.T) {
+	home, read := codexHome(t, "", "model = \"gpt-5.5\"\nmodel_reasoning_effort = \"low\"\n")
+	cx := codex(home)
+	if err := cx.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cx.Apply("effort", "medium"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const before = `model_reasoning_effort = "medium"`
+	const restored = `model_reasoning_effort = "low"`
+	const external = `model_reasoning_effort = "xhigh"`
+	var user string
+	err = edit.Filtered(func(path string, proposed []byte) []byte {
+		if path == target && user == "" && strings.Contains(string(proposed), restored) {
+			current := read()
+			if !strings.Contains(current, before) {
+				t.Fatalf("restore started without the applied effort: %s", current)
+			}
+			user = strings.Replace(current, before, external, 1)
+			writeFile(t, path, user)
+		}
+		return proposed
+	}, cx.Disconnect)
+	if user == "" || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("Disconnect did not reject a stale restore: injected=%t error=%v", user != "", err)
+	}
+	if got := read(); got != user {
+		t.Fatalf("Disconnect changed the user's concurrent config:\n%s", got)
+	}
+	if got := stashLoad()["codex.effort"]; got != "low" {
+		t.Fatalf("Disconnect lost the saved effort after rejection: %q", got)
 	}
 }
 

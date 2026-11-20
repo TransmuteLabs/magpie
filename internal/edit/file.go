@@ -128,6 +128,11 @@ func Filtered(f func(path string, data []byte) []byte, fn func() error) error {
 // links is written in place, see writeInPlace. Once written, temp files
 // earlier writes of path left behind go, see steady.RemoveStaleTemps.
 func WriteAtomic(path string, data []byte) error {
+	return WriteAtomicChecked(path, data, nil)
+}
+
+// WriteAtomicChecked checks the caller's observed state just before publishing.
+func WriteAtomicChecked(path string, data []byte, check func() error) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -140,6 +145,9 @@ func WriteAtomic(path string, data []byte) error {
 	// wakes every watcher of it, and a rename swaps the file under an
 	// agent reading it, for nothing (#3870).
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		if check != nil {
+			return check()
+		}
 		return nil
 	}
 	// read again, where a request holds it; a file left alone above keeps
@@ -149,7 +157,7 @@ func WriteAtomic(path string, data []byte) error {
 	if hardLinked(path) {
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {
-			if err := writeInPlace(f, data); err != nil {
+			if err := writeInPlace(f, data, check); err != nil {
 				return err
 			}
 			steady.RemoveStaleTemps(path)
@@ -209,6 +217,12 @@ func WriteAtomic(path string, data []byte) error {
 		cleanup()
 		return err
 	}
+	if check != nil {
+		if err := check(); err != nil {
+			cleanup()
+			return err
+		}
+	}
 	if err := steady.Rename(tmpName, path); err != nil {
 		cleanup()
 		return err
@@ -231,7 +245,7 @@ func WriteAtomic(path string, data []byte) error {
 // leaves the whole new text in that temp file, and a write that fails part
 // way keeps it there and names it in the error. The file keeps its mode,
 // its owner and all its names.
-func writeInPlace(f *os.File, data []byte) error {
+func writeInPlace(f *os.File, data []byte, check func() error) error {
 	path := f.Name()
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
@@ -249,6 +263,13 @@ func writeInPlace(f *os.File, data []byte) error {
 		f.Close()
 		_ = os.Remove(tmp.Name())
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			f.Close()
+			_ = os.Remove(tmp.Name())
+			return err
+		}
 	}
 	// Written over and then cut to length, so while it is under way a
 	// reader can see the new text's head over the old text, or, when the
@@ -325,25 +346,59 @@ func Remove(path string) error {
 	return WriteAtomic(path, nil)
 }
 
+type preserveRollbackError struct {
+	path string
+	err  error
+}
+
+func (err *preserveRollbackError) Error() string { return err.err.Error() }
+func (err *preserveRollbackError) Unwrap() error { return err.err }
+
+// PreserveOnRollback marks a path whose newer contents must survive the error.
+func PreserveOnRollback(path string, err error) error {
+	return &preserveRollbackError{path: filepath.Clean(path), err: err}
+}
+
+func preserveOnRollback(err error, cleanPath string) bool {
+	switch err := err.(type) {
+	case nil:
+		return false
+	case *preserveRollbackError:
+		return err.path == cleanPath || preserveOnRollback(err.err, cleanPath)
+	case interface{ Unwrap() []error }:
+		for _, cause := range err.Unwrap() {
+			if preserveOnRollback(cause, cleanPath) {
+				return true
+			}
+		}
+		return false
+	default:
+		return preserveOnRollback(errors.Unwrap(err), cleanPath)
+	}
+}
+
 // Atomically runs fn, which may write the files at paths in several steps,
 // and puts each of them back as it was — its bytes and mode, or its absence
-// — when fn fails, so an edit that fails part way leaves no file half made.
+// — when fn fails. A checked edit can report a concurrently changed path
+// through PreserveOnRollback. That path's newer content is left in place.
 // A file that can't be read beforehand is left to fn as it is.
 func Atomically(fn func() error, paths ...string) error {
 	type saved struct {
 		path   string
+		name   string
 		data   []byte
 		mode   fs.FileMode
 		exists bool
 	}
 	var before []saved
-	for _, p := range paths {
+	for _, name := range paths {
+		p := name
 		st, err := os.Stat(p)
 		if errors.Is(err, fs.ErrNotExist) {
 			if t, err := Target(p); err == nil {
 				p = t // a link to nothing yet stays, only what fn made goes
 			}
-			before = append(before, saved{path: p})
+			before = append(before, saved{path: p, name: filepath.Clean(name)})
 			continue
 		}
 		if err != nil || !st.Mode().IsRegular() {
@@ -353,13 +408,16 @@ func Atomically(fn func() error, paths ...string) error {
 		if err != nil {
 			continue
 		}
-		before = append(before, saved{p, b, st.Mode().Perm(), true})
+		before = append(before, saved{path: p, name: filepath.Clean(name), data: b, mode: st.Mode().Perm(), exists: true})
 	}
 	err := fn()
 	if err == nil {
 		return nil
 	}
 	for _, s := range before {
+		if preserveOnRollback(err, s.name) {
+			continue
+		}
 		now, rerr := os.ReadFile(s.path)
 		switch {
 		case !s.exists:

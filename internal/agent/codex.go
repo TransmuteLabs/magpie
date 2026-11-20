@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/codexrelay"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/lastgood"
@@ -255,11 +257,70 @@ func catalogParses(b []byte) bool {
 // end the keys the user added by hand with no copy (#2263's rule for
 // magpie's state files, which this file had missed). An error stops the
 // write.
-func writeOwnList(path string, b []byte) error {
+func writeOwnList(configPath, path string, generated []byte) error {
+	_, err := updateOwnList(configPath, path, generated)
+	return err
+}
+
+func updateOwnList(configPath, path string, generated []byte) (bool, error) {
+	before, err := readWiringFile(path)
+	if err != nil {
+		return false, edit.PreserveOnRollback(path, err)
+	}
+	if err := checkCodexCatalogTarget(path); err != nil {
+		return false, err
+	}
+	current := edit.TrimBOM(before.body)
+	body := codexcat.Keep(current, generated)
+	if bytes.Equal(current, body) {
+		return false, nil
+	}
+	config, err := readWiringFile(configPath)
+	if err != nil {
+		return false, edit.PreserveOnRollback(configPath, err)
+	}
 	if err := lastgood.KeepUnparsed(path, catalogParses); err != nil {
+		return false, config.preserveOnError(configPath, edit.PreserveOnRollback(path, err))
+	}
+	err = writeCodexCatalog(path, before, body)
+	return err == nil, config.preserveOnError(configPath, err)
+}
+
+func writeCodexCatalog(path string, before wiringFile, body []byte) error {
+	return edit.WriteAtomicChecked(before.target, body, func() error {
+		if err := checkCodexCatalogTarget(path); err != nil {
+			return edit.PreserveOnRollback(path, err)
+		}
+		return before.check(path)
+	})
+}
+
+func checkCodexCatalogTarget(path string) error {
+	catalogPath, err := edit.Target(path)
+	if err != nil {
 		return err
 	}
-	return edit.WriteAtomic(path, b)
+	catalogInfo, err := os.Stat(catalogPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, name := range []string{"config.toml", codexProfileFile} {
+		config := filepath.Join(filepath.Dir(path), name)
+		target, err := edit.Target(config)
+		if err != nil {
+			return err
+		}
+		info, err := os.Stat(target)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if filepath.Clean(catalogPath) == filepath.Clean(target) ||
+			(catalogInfo != nil && info != nil && os.SameFile(catalogInfo, info)) {
+			conflict := fmt.Errorf("Codex model catalog %s aliases %s: %w", path, config, extension.ErrActionChanged)
+			return edit.PreserveOnRollback(config, edit.PreserveOnRollback(path, conflict))
+		}
+	}
+	return nil
 }
 
 func codexIn(at place) *Agent {
@@ -306,7 +367,7 @@ func codexIn(at place) *Agent {
 		}
 		return filepath.Clean(c) == filepath.Clean(catalogPath)
 	}
-	// ownList is magpie's model list for Codex as written to catalogPath:
+	// writeOwnList combines this model list with what the user put in catalogPath:
 	// what the user added by hand to the list there (a key magpie doesn't
 	// write, supports_reasoning_summaries on a model magpie gave none) is
 	// kept, not written over by the next model switch or sync (#1450).
@@ -316,10 +377,6 @@ func codexIn(at place) *Agent {
 	// first 100, which is all the Codex app reads (codexcat.Fit).
 	list := func() []byte {
 		return codexcat.CatalogUsed(magpieModels("codex"), get("model_reasoning_effort"), usage.CodexUsed())
-	}
-	ownList := func() []byte {
-		cur, _ := edit.Read(catalogPath)
-		return codexcat.Keep(cur, list())
 	}
 	// listGone: magpie's list is known not to be there; one that can't be
 	// looked at is not taken for gone
@@ -488,7 +545,7 @@ func codexIn(at place) *Agent {
 	// was, never an empty one; a key naming a file that is gone goes, as
 	// Codex loads no config then. A model_catalog_json of the user's own
 	// stands: theirs is what Codex reads.
-	deskList := func() error {
+	deskList := func() (result error) {
 		named := deskCatalog(get("model_catalog_json"))
 		if !deskWanted() {
 			// the list not wanted: the next one named is named anew
@@ -511,24 +568,60 @@ func codexIn(at place) *Agent {
 			}
 			return nil
 		}
+		staleRef := named && deskGone()
+		config, err := readWiringFile(path)
+		if err != nil {
+			return edit.PreserveOnRollback(path, err)
+		}
+		defer func() { result = config.preserveOnError(path, result) }()
 		var b []byte
 		ok := false
 		if CodexDesktopList != nil {
 			b, ok = CodexDesktopList()
 		}
 		if !ok {
-			if named && deskGone() {
-				return edit.DelTOMLTop(path, "model_catalog_json")
+			if staleRef && deskGone() {
+				return edit.DelTOMLTopChecked(path, func() error {
+					if err := config.check(path); err != nil {
+						return err
+					}
+					if !deskGone() {
+						return fmt.Errorf("Codex desktop catalog %s: %w", deskPath, extension.ErrActionChanged)
+					}
+					return nil
+				}, "model_catalog_json")
 			}
 			return nil
 		}
-		if cur, err := edit.Read(deskPath); err != nil || string(cur) != string(b) {
-			if err := edit.WriteAtomic(deskPath, b); err != nil {
+		if err := checkCodexCatalogTarget(deskPath); err != nil {
+			return err
+		}
+		before, err := readWiringFile(deskPath)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(edit.TrimBOM(before.body), b) {
+			if err := writeCodexCatalog(deskPath, before, b); err != nil {
 				return err
 			}
 		}
 		if !named {
-			if err := edit.SetTOMLTop(path, edit.KV{Path: "model_catalog_json", Value: deskRef}); err != nil {
+			published, err := readWiringFile(deskPath)
+			if err != nil {
+				return err
+			}
+			if published.info == nil || !bytes.Equal(edit.TrimBOM(published.body), b) {
+				return fmt.Errorf("Codex desktop catalog %s: %w", deskPath, extension.ErrActionChanged)
+			}
+			if err := edit.SetTOMLTopChecked(path, func() error {
+				if err := config.check(path); err != nil {
+					return err
+				}
+				if err := checkCodexCatalogTarget(deskPath); err != nil {
+					return err
+				}
+				return published.check(deskPath)
+			}, edit.KV{Path: "model_catalog_json", Value: deskRef}); err != nil {
 				return err
 			}
 			// when, for the Codex app's app-servers started before it,
@@ -562,9 +655,8 @@ func codexIn(at place) *Agent {
 	relist := func() error {
 		switch {
 		case asProvider() && ownCatalog(get("model_catalog_json")):
-			b := ownList()
-			if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
-				return writeOwnList(catalogPath, b)
+			if changed, err := updateOwnList(path, catalogPath, list()); changed || err != nil {
+				return err
 			}
 		case viaBase():
 			if err := codexStaleCache(filepath.Join(dir, "models_cache.json"), provider.CodexListTag()); err != nil {
@@ -1496,21 +1588,22 @@ func codexIn(at place) *Agent {
 	}
 	// one of magpie's goes too: Codex could no longer find it
 	dropSubagent := func() error {
-		if m, err := memories(); err != nil {
-			return err
-		} else if isMagpie(m) {
-			if err := dropMemories(); err != nil {
+		for _, pick := range []struct{ table, key string }{
+			{"memories", "extract_model"},
+			{"memories", "consolidation_model"},
+			{"agents", "default_subagent_model"},
+		} {
+			before, err := readWiringFile(path)
+			if err != nil {
+				return edit.PreserveOnRollback(path, err)
+			}
+			if err := edit.DelTOMLKeyChecked(path, pick.table, pick.key, isMagpie, func() error {
+				return before.check(path)
+			}); err != nil {
 				return err
 			}
 		}
-		model, err := subagent()
-		if err != nil {
-			return err
-		}
-		if !isMagpie(model) {
-			return nil
-		}
-		return edit.DelTOMLKey(path, "agents", "default_subagent_model")
+		return nil
 	}
 	// the effort spawned subagents start at, when not the parent's
 	// (core/src/agent/child_config.rs): checked against the model they run
@@ -1754,6 +1847,10 @@ func codexIn(at place) *Agent {
 		if err := dropProvider(); err != nil {
 			return "", err
 		}
+		config, err := readWiringFile(path)
+		if err != nil {
+			return "", err
+		}
 		// the originals are read and stay stashed until the write that puts
 		// them back has gone through: one that fails leaves them stashed
 		// for the next try (#4258). The model is the caller's to take out:
@@ -1790,7 +1887,7 @@ func codexIn(at place) *Agent {
 			back = append(back, edit.KV{Path: "model_reasoning_effort", Value: e})
 		}
 		if len(back) > 0 {
-			if err := edit.SetTOMLTop(path, back...); err != nil {
+			if err := edit.SetTOMLTopChecked(path, func() error { return config.check(path) }, back...); err != nil {
 				return "", err
 			}
 		}
@@ -1915,7 +2012,7 @@ func codexIn(at place) *Agent {
 			if err := putProvider(); err != nil {
 				return err
 			}
-			if err := writeOwnList(catalogPath, ownList()); err != nil {
+			if err := writeOwnList(path, catalogPath, list()); err != nil {
 				return err
 			}
 			// a thread started on Codex's built-in provider stays on it when
@@ -2128,6 +2225,11 @@ func codexIn(at place) *Agent {
 			return ""
 		},
 		Sync: func() error {
+			if asProvider() && ownCatalog(get("model_catalog_json")) {
+				if err := checkCodexCatalogTarget(catalogPath); err != nil {
+					return err
+				}
+			}
 			// a table an older magpie wrote for another app's provider
 			// goes, wired or not: Codex refuses its config with it
 			if err := tidyTables(); err != nil {
@@ -2149,7 +2251,7 @@ func codexIn(at place) *Agent {
 			// key goes, at the next start, with no reconnect.
 			if ownCatalog(get("model_catalog_json")) && listGone() {
 				if asProvider() {
-					if err := writeOwnList(catalogPath, ownList()); err != nil {
+					if err := writeOwnList(path, catalogPath, list()); err != nil {
 						return err
 					}
 				} else if err := unnameGoneList(); err != nil {
@@ -2309,11 +2411,8 @@ func codexIn(at place) *Agent {
 						return err
 					}
 				}
-				b := ownList()
-				if cur, _ := edit.Read(catalogPath); string(cur) != string(b) {
-					if err := writeOwnList(catalogPath, b); err != nil {
-						return err
-					}
+				if err := writeOwnList(path, catalogPath, list()); err != nil {
+					return err
 				}
 			case failingOver():
 				// the list the gateway hands a Codex there for failover

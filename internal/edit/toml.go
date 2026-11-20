@@ -281,6 +281,14 @@ func setTOMLKeyLines(lines []string, name, key, spelled string, value any) ([]st
 // DelTOMLKey removes one key of table `name`, and the table with it when
 // nothing else is left in it.
 func DelTOMLKey(path, name, key string) error {
+	return delTOMLKey(path, name, key, nil, nil)
+}
+
+func DelTOMLKeyChecked(path, name, key string, selected func(string) bool, check func() error) error {
+	return delTOMLKey(path, name, key, selected, check)
+}
+
+func delTOMLKey(path, name, key string, selected func(string) bool, check func() error) error {
 	raw, err := Read(path)
 	if err != nil || raw == nil {
 		return err
@@ -291,6 +299,9 @@ func DelTOMLKey(path, name, key string) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	if table.from < 0 {
+		return nil
+	}
+	if selected != nil && !selected((TOMLTable{&table}).Scalar(key)) {
 		return nil
 	}
 	out := append([]string{}, lines[:table.from+1]...)
@@ -305,10 +316,10 @@ func DelTOMLKey(path, name, key string) error {
 	for _, line := range out[table.from+1:] {
 		if strings.TrimSpace(line) != "" {
 			out = append(out, lines[table.to:]...)
-			return writeTOML(path, out)
+			return writeTOMLChecked(path, out, check)
 		}
 	}
-	return DelTOMLTable(path, name)
+	return writeTOMLChecked(path, tomlWithoutTable(lines, table), check)
 }
 
 // DelTOMLTable removes table `name` (header and body) if present.
@@ -323,10 +334,14 @@ func DelTOMLTable(path, name string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	from, to := table.from, table.to
-	if from < 0 {
+	if table.from < 0 {
 		return nil
 	}
+	return writeTOML(path, tomlWithoutTable(lines, table))
+}
+
+func tomlWithoutTable(lines []string, table tomlTableSpan) []string {
+	from, to := table.from, table.to
 	// Take the blank lines before the header with it so no gap is left.
 	for from > 0 && strings.TrimSpace(lines[from-1]) == "" {
 		from--
@@ -336,7 +351,7 @@ func DelTOMLTable(path, name string) error {
 		out = append(out, "")
 	}
 	out = append(out, lines[to:]...)
-	return writeTOML(path, out)
+	return out
 }
 
 // GetTOMLTop reads a top-level (pre-table) key from a TOML file. A string is
@@ -394,16 +409,21 @@ func getTOMLTopLines(path, key string) (string, bool) {
 // there is none. Every key is located in the file as it was read, so the
 // edit is one write that either happens entirely or not at all.
 func SetTOMLTop(path string, kvs ...KV) error {
-	return setTOMLTop(path, false, kvs...)
+	return setTOMLTop(path, false, nil, kvs...)
+}
+
+// SetTOMLTopChecked runs check immediately before publishing the top-level edit.
+func SetTOMLTopChecked(path string, check func() error, kvs ...KV) error {
+	return setTOMLTop(path, false, check, kvs...)
 }
 
 // SetTOMLTopPreserving is SetTOMLTop with an existing key's spacing and trailing
 // comment kept. New keys use the same spelling as SetTOMLTop.
 func SetTOMLTopPreserving(path string, kvs ...KV) error {
-	return setTOMLTop(path, true, kvs...)
+	return setTOMLTop(path, true, nil, kvs...)
 }
 
-func setTOMLTop(path string, preserve bool, kvs ...KV) error {
+func setTOMLTop(path string, preserve bool, check func() error, kvs ...KV) error {
 	raw, err := Read(path)
 	if err != nil {
 		return err
@@ -461,12 +481,17 @@ func setTOMLTop(path string, preserve bool, kvs ...KV) error {
 		i++
 	}
 	out = append(out, added...)
-	return writeTOML(path, out)
+	return writeTOMLChecked(path, out, check)
 }
 
 // DelTOMLTop removes top-level (pre-table) keys, each with every line of its
 // value.
 func DelTOMLTop(path string, keys ...string) error {
+	return DelTOMLTopChecked(path, nil, keys...)
+}
+
+// DelTOMLTopChecked runs check immediately before publishing the removal.
+func DelTOMLTopChecked(path string, check func() error, keys ...string) error {
 	raw, err := Read(path)
 	if err != nil || raw == nil {
 		return err
@@ -489,7 +514,7 @@ func DelTOMLTop(path string, keys ...string) error {
 		}
 	}
 	out = append(out, lines[at:]...)
-	return writeTOML(path, out)
+	return writeTOMLChecked(path, out, check)
 }
 
 type tomlTableSpan struct {
@@ -784,13 +809,17 @@ func tomlParseError(p *unstable.Parser, err error) error {
 // also checks duplicate keys and conflicting definitions; it never rewrites
 // the document, so comments and formatting survive validation unchanged.
 func writeTOML(path string, lines []string) error {
+	return writeTOMLChecked(path, lines, nil)
+}
+
+func writeTOMLChecked(path string, lines []string, check func() error) error {
 	orig, _ := Read(path)
 	lines = markTOML(lines, string(orig))
 	data := []byte(joinLinesLike(lines, string(orig)))
 	if err := validateTOML(data); err != nil {
 		return fmt.Errorf("%s: edited TOML is invalid: %w", path, err)
 	}
-	return WriteAtomic(path, data)
+	return WriteAtomicChecked(path, data, check)
 }
 
 // WriteTOMLFile writes lines back as a TOML file, validating the result first

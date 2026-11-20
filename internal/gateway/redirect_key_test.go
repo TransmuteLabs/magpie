@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -11,18 +12,36 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// stealHost is a host a vendor's redirect names: it records every request
-// that reaches it.
+// stealHost records requests to the redirect destination, except an
+// empty anonymous GET to the fixture root.
 type stealHost struct {
 	*httptest.Server
 	mu   sync.Mutex
 	seen []http.Header
 }
 
+func anonymousFixtureRoot(method, uri string, headers http.Header, hasBody bool) bool {
+	if method != http.MethodGet || uri != "/" || hasBody {
+		return false
+	}
+	for name := range headers {
+		switch name {
+		case "Accept-Encoding", "Connection", "User-Agent":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func newStealHost(t *testing.T) *stealHost {
 	t.Helper()
 	s := &stealHost{}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if anonymousFixtureRoot(r.Method, r.URL.RequestURI(), r.Header, r.ContentLength != 0 || len(r.TransferEncoding) != 0) {
+			http.NotFound(w, r)
+			return
+		}
 		s.mu.Lock()
 		s.seen = append(s.seen, r.Header.Clone())
 		s.mu.Unlock()
@@ -37,6 +56,38 @@ func (s *stealHost) reached() []http.Header {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]http.Header(nil), s.seen...)
+}
+
+func TestRedirectFixtureRecordsNonProbeRequests(t *testing.T) {
+	steal := newStealHost(t)
+	probeFixtureRoot(t, steal.Server)
+	for _, target := range []struct {
+		path string
+		key  string
+	}{
+		{"/", "fixture-secret"},
+		{"/steal", ""},
+	} {
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, steal.URL+target.path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target.key != "" {
+			request.Header.Set("X-Relay-Secret", target.key)
+		}
+		response, err := steal.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s returned %s, want 200", target.path, response.Status)
+		}
+	}
+	seen := steal.reached()
+	if len(seen) != 2 || seen[0].Get("X-Relay-Secret") != "fixture-secret" {
+		t.Fatalf("redirect fixture recorded %v, want the signed root request and the redirect target", seen)
+	}
 }
 
 // A vendor answering the native route with a redirect to another host
@@ -75,14 +126,17 @@ func TestNativeRedirectKeepsTheKey(t *testing.T) {
 		if rec.Code != 201 {
 			t.Fatalf("%s: a same-origin redirect: %d %s", id, rec.Code, rec.Body)
 		}
-		got := up.asked()[before:]
-		if len(got) != 2 || !strings.HasSuffix(got[1].uri, "/v1/landed") || got[1].body != `{"model":"m"}` || got[1].header.Get("X-Relay-Secret") != "relay-secret" {
+		got := slices.DeleteFunc(up.asked()[before:], func(call vendorSeen) bool {
+			return anonymousFixtureRoot(call.method, call.uri, call.header, call.body != "")
+		})
+		if len(got) != 2 || got[0].method != http.MethodPost || got[1].method != http.MethodPost || !strings.HasSuffix(got[1].uri, "/v1/landed") || got[1].body != `{"model":"m"}` || got[1].header.Get("X-Relay-Secret") != "relay-secret" {
 			t.Fatalf("%s: a same-origin redirect reached %+v", id, got)
 		}
 		if id == "gem" && got[1].header.Get("X-Goog-Api-Key") != "AIza-secret" || id == "claudeish" && got[1].header.Get("X-Api-Key") != "ak-secret" {
 			t.Errorf("%s: a same-origin redirect lost the key: %v", id, got[1].header)
 		}
 	}
+	probeFixtureRoot(t, steal.Server)
 	if seen := steal.reached(); len(seen) != 0 {
 		t.Fatalf("the redirect's host was sent %d requests, the first with %v", len(seen), seen[0])
 	}

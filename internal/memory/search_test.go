@@ -60,3 +60,18 @@ func TestSearch(t *testing.T) {
 		t.Fatal("a listing scored")
 	}
 }
+
+func TestSemanticScoresOutsideTheSearchDoNotHideMatches(t *testing.T) {
+	fresh(t)
+	eligible := save(t, "Releases happen on Tuesdays", Rule, Global)
+	excluded := save(t, "Private release calendar", Rule, "project:github.com/private/repo")
+	previous := Semantic
+	t.Cleanup(func() { Semantic = previous })
+	Semantic = func(_ string, _ []*Memory) map[string]float64 {
+		return map[string]float64{eligible.ID: 0.55, excluded.ID: 1}
+	}
+	hits, err := Rank(Query{Text: "部署", Scopes: []string{Global}})
+	if err != nil || len(hits) != 1 || hits[0].ID != eligible.ID {
+		t.Fatalf("scoped semantic match: %+v, %v", hits, err)
+	}
+}

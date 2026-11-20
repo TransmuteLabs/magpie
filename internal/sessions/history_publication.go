@@ -66,8 +66,35 @@ func inspectHistoryPublication(ctx context.Context) (historyPublication, error) 
 
 func (before historyPublication) current(ctx context.Context) bool {
 	after, err := inspectHistoryPublication(ctx)
-	return err == nil && before.view == after.view && before.epoch == after.epoch &&
+	return err == nil && before.same(after)
+}
+
+func (before historyPublication) same(after historyPublication) bool {
+	return before.view == after.view && before.samePermissions(after)
+}
+
+func (before historyPublication) sameNative(after historyPublication) bool {
+	if !before.samePermissions(after) {
+		return false
+	}
+	if before.view == after.view {
+		return true
+	}
+	beforeOwners, beforeAgents := before.view.nativeExclusions()
+	afterOwners, afterAgents := after.view.nativeExclusions()
+	return maps.Equal(beforeOwners, afterOwners) && maps.Equal(beforeAgents, afterAgents)
+}
+
+func (before historyPublication) samePermissions(after historyPublication) bool {
+	return before.epoch == after.epoch &&
 		reflect.DeepEqual(before.reads, after.reads) && maps.Equal(before.owners, after.owners)
+}
+
+func (view *sessionSourceView) nativeExclusions() (owners, agents map[string]bool) {
+	if view == nil {
+		return nil, nil
+	}
+	return view.owners, view.agents
 }
 
 func (snapshot historyPublication) native(agent string) bool {

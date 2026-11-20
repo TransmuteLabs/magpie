@@ -341,6 +341,9 @@ func readCalls(f file) *callFile {
 		old = loadKept(f)
 		owned = true
 	}
+	if old != nil && old.Agent != f.agent {
+		old = nil
+	}
 	if old != nil && old.Size == f.size && old.Mod == f.mod.UnixNano() {
 		if owned {
 			// a Claude session's calls a parse read along (callsRide) left

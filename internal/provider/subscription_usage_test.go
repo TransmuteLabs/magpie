@@ -21,7 +21,7 @@ func TestCodexQuotaUsesProviderWindowDuration(t *testing.T) {
 		}
 	}
 
-	w := codexWindow{UsedPercent: 16, LimitWindowSecs: 7 * 24 * 60 * 60}
+	w := codexWindow{UsedPercent: new(float64(16)), LimitWindowSecs: 7 * 24 * 60 * 60}
 	if got := w.window(); got.Name != "7 days" || got.Used != 16 {
 		t.Fatalf("Codex window = %+v", got)
 	}

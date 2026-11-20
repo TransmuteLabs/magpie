@@ -3,6 +3,7 @@ package sessions
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -68,14 +69,64 @@ func codexTitleOf() func(id string) string {
 	}
 }
 
-// CodexTitles reads only the append-only name index. It caches unchanged
-// files and reads newly appended complete lines from the previous offset.
+// CodexTitles reads the selected history owner's names. The native index
+// caches unchanged files and reads complete lines from the previous offset.
 func CodexTitles(ids []string) map[string]string {
-	if !Reads("codex") {
+	if len(ids) == 0 {
 		return map[string]string{}
 	}
-	return codexTitlesAt(codexTitleIndexPath(), ids)
+	ctx := context.Background()
+	authority, err := inspectHistoryPublication(ctx)
+	if err != nil || !authority.reads.Reads("codex") {
+		return map[string]string{}
+	}
+	if authority.native("codex") {
+		result := codexTitlesAt(codexTitleIndexPath(), ids)
+		if authority.current(ctx) {
+			return result
+		}
+		return map[string]string{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	result := publishSourceReadContext(ctx, func() map[string]string {
+		current, err := inspectHistoryPublication(ctx)
+		if err != nil || !current.reads.Reads("codex") {
+			return nil
+		}
+		if current.native("codex") {
+			return codexTitlesAt(codexTitleIndexPath(), ids)
+		}
+		return codexSourceTitles(ctx, current, ids)
+	})
+	if result == nil {
+		return map[string]string{}
+	}
+	return result
 }
+
+func codexSourceTitles(ctx context.Context, authority historyPublication, ids []string) map[string]string {
+	view := authority.view
+	if view == nil || view.epoch != authority.epoch || !authority.owners["codex"] {
+		return nil
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	out := map[string]string{}
+	for _, record := range view.records {
+		if record.grant.descriptor.Agent != "codex" || record.stale || record.summary.Title == "" {
+			continue
+		}
+		id := sourceRecordID(record)
+		if wanted[id] && (record.snapshot == nil || record.snapshot.check(ctx) == nil) {
+			out[id] = record.summary.Title
+		}
+	}
+	return out
+}
+
 func codexTitlesAt(path string, ids []string) map[string]string {
 	out := make(map[string]string)
 	if len(ids) == 0 {
@@ -98,18 +149,27 @@ func codexTitlesAt(path string, ids []string) map[string]string {
 // They still count as conflicting recipients of a generated title.
 func CodexTitleRecipients(digests []string) map[string][]TitleApplication {
 	out := map[string][]TitleApplication{}
-	if len(digests) == 0 || !Reads("codex") {
+	if len(digests) == 0 {
+		return out
+	}
+	ctx := context.Background()
+	authority, err := inspectHistoryPublication(ctx)
+	if err != nil || !authority.native("codex") {
 		return out
 	}
 	codexTitles.Lock()
-	defer codexTitles.Unlock()
 	if !loadCodexTitles(codexTitleIndexPath()) || codexTitles.overflow {
+		codexTitles.Unlock()
 		return out
 	}
 	for _, digest := range digests {
 		for _, recipient := range codexTitles.recipients[digest] {
 			out[recipient.ID] = append(out[recipient.ID], TitleApplication{digest, recipient.Updated})
 		}
+	}
+	codexTitles.Unlock()
+	if !authority.current(ctx) {
+		return map[string][]TitleApplication{}
 	}
 	return out
 }

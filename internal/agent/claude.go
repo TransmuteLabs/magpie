@@ -12,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
+
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/catalog"
@@ -219,6 +222,22 @@ var claudeTiers = []string{"opus", "sonnet", "haiku", "fable"}
 // claudeEfforts are the levels Claude Code starts with: settings.json
 // keeps the first four, max is claudeEffortEnv.
 var claudeEfforts = []string{"low", "medium", "high", "xhigh", "max"}
+
+func disconnectClaudeEffort(path, applied string) error {
+	if applied == "" {
+		return nil
+	}
+	before, err := readWiringFile(path)
+	if err != nil {
+		return err
+	}
+	key := "env." + claudeEffortEnv
+	effort := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(before.body)), key)
+	if effort.Type != gjson.String || effort.String() != applied {
+		return nil
+	}
+	return edit.DelJSONChecked(path, func() error { return before.check(path) }, key)
+}
 
 // claudeEffortEnv is the effort every Claude Code session asks for, max
 // among them. It outranks /effort, so only max, which settings.json can't
@@ -2571,10 +2590,8 @@ func claudeIn(at place) *Agent {
 			}
 			// magpie's level in the env goes alone: the effortLevel under
 			// it is the user's own, which Claude Code is back on
-			if e := env(claudeEffortEnv); e != "" && appliedOf(self.ID).Fields["effort"] == e {
-				if err := edit.DelJSON(path, "env."+claudeEffortEnv); err != nil {
-					return err
-				}
+			if err := disconnectClaudeEffort(path, appliedOf(self.ID).Fields["effort"]); err != nil {
+				return err
 			}
 			// the model left alone where magpie had none to take over
 			switch {

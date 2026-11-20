@@ -45,6 +45,10 @@ func installToolRefreshFixture(test *testing.T, beforeReply func(*toolRefreshFix
 	test.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	fixture := &toolRefreshFixture{manager: extension.Default(), scope: sdk.Scope{Plugin: "tool.refresh", Provider: "vendor", Account: "selected", Generation: 1}}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || (request.URL.Path != "/" && request.URL.Path != "/tool") {
+			http.NotFound(writer, request)
+			return
+		}
 		if request.URL.Path == "/tool" {
 			fixture.toolCalls.Add(1)
 			writer.WriteHeader(http.StatusOK)

@@ -197,8 +197,10 @@ func wordHits(pool []*Memory, text string) []Hit {
 // meaning: the first word hit may hold one common word of the search.
 func fuse(pool []*Memory, words []Hit, sims map[string]float64) []Hit {
 	bar := Near
-	for _, s := range sims {
-		bar = max(bar, s-Within)
+	for _, m := range pool {
+		if score, ok := sims[m.ID]; ok {
+			bar = max(bar, score-Within)
+		}
 	}
 	near := []*Memory{}
 	for _, m := range pool {

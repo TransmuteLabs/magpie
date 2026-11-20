@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -39,19 +40,29 @@ type ClaudeRelocationResult struct {
 // session-ID-keyed files (file-history, todos and session-env). IDs stay intact.
 // Clients must be closed: the in-process lock cannot exclude Claude itself.
 func RelocateClaudeProject(in ClaudeRelocation) (ClaudeRelocationResult, error) {
-	// gateway mode touches no agent's files here (OwnOff)
-	if ownOff() {
-		return ClaudeRelocationResult{}, ErrNotRead
-	}
 	storeMu.Lock()
 	defer storeMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
+	admit := func() error { return checkNativeHistoryOwner(context.Background(), "claude") }
+	if err := admit(); err != nil {
+		return ClaudeRelocationResult{}, err
+	}
 	root, target, err := claudeRelocationRoot(in)
 	if err != nil {
 		return ClaudeRelocationResult{}, err
 	}
-	out, err := relocateClaudeProject(root, target, in)
+	out, err := relocateClaudeProject(root, target, in, func() error {
+		if sourceBeforePublish != nil {
+			sourceBeforePublish()
+		}
+		return admit()
+	})
+	if out.Backup == "" {
+		if changed := admit(); changed != nil {
+			return ClaudeRelocationResult{}, errors.Join(err, changed)
+		}
+	}
 	if err == nil && out.Backup != "" {
 		// Discard both parses and directory listings after their paths change.
 		cache, loaded = nil, false
@@ -254,7 +265,7 @@ func relocateClaudeIndex(b []byte, source, dest, from, to string) ([]byte, error
 	return json.Marshal(index)
 }
 
-func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelocationResult, error) {
+func relocateClaudeProject(root, target string, in ClaudeRelocation, admit func() error) (ClaudeRelocationResult, error) {
 	out := ClaudeRelocationResult{From: in.From, To: in.To, WSL: in.WSL}
 	from, to, err := relocationPaths(in)
 	if err != nil {
@@ -401,7 +412,7 @@ func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelo
 	// Recheck after staging, before touching any originals.
 	check := in
 	check.Token = ""
-	fresh, err := relocateClaudeProject(root, target, check)
+	fresh, err := relocateClaudeProject(root, target, check, nil)
 	if err != nil {
 		return out, err
 	}
@@ -414,6 +425,11 @@ func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelo
 	}, "", "  ")
 	if err := os.WriteFile(filepath.Join(backup, "manifest.json"), manifest, 0o600); err != nil {
 		return out, err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return ClaudeRelocationResult{}, errors.Join(err, os.RemoveAll(backup))
+		}
 	}
 	if err := publishClaudeRelocation(source, dest, backup); err != nil {
 		return out, err

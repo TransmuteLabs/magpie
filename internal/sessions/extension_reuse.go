@@ -6,46 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	"github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
-
-// Ordinary conversion is create-only. Reuse the Actions recovery rule: remove
-// only outputs that still match the exact proposed bytes and mode, and never
-// follow a replaced target root. Preexisting/cached outputs are not rolled back.
-func rollbackSessionConversion(plan *extension.ActionPlan, rootInfo os.FileInfo) error {
-	current, err := os.Stat(plan.Root())
-	if err != nil || !os.SameFile(rootInfo, current) {
-		return errors.Join(err, extension.ErrActionChanged)
-	}
-	var applied []extension.ActionSettingFile
-	for _, effect := range plan.Preview().Files {
-		if effect.Remove {
-			return extension.ErrActionChanged
-		}
-		mode := effect.Mode
-		if mode == 0 {
-			mode = 0o600
-		}
-		digest := sha256.Sum256(effect.Body)
-		applied = append(applied, extension.ActionSettingFile{Path: effect.Path, Body: effect.Body,
-			Mode: mode, Exists: true, BeforeHash: hex.EncodeToString(digest[:])})
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	// One independently edited file must not strand the other new outputs.
-	// Each restore still takes the Actions lock and checks its own bytes.
-	var restored error
-	for _, before := range plan.Snapshots() {
-		restored = errors.Join(restored, extension.RestoreOwnedActionSnapshots(ctx, plan.Root(), []extension.ActionSettingFile{before}, applied))
-	}
-	return restored
-}
 
 type sessionMigrationReceipt struct {
 	result  CarryResult
@@ -167,7 +135,7 @@ func rememberSessionMigration(key string, receipt sessionMigrationReceipt) {
 	extensionMigrations.entries[key] = receipt
 }
 
-func captureMigrationOutputs(ctx context.Context, store *sessionTargetStore, plan *extension.ActionPlan) (*sessionInputSnapshot, error) {
+func captureMigrationOutputs(ctx context.Context, store *sessionTargetStore, plan *extension.ActionPlan, published map[string]fs.FileInfo) (*sessionInputSnapshot, error) {
 	root, err := os.OpenRoot(store.directory)
 	if err != nil {
 		return nil, err
@@ -193,7 +161,7 @@ func captureMigrationOutputs(ctx context.Context, store *sessionTargetStore, pla
 			return nil, err
 		}
 		digest := sha256.Sum256(effect.Body)
-		if current.hash != digest || !sessionStoreModeEqual(current.info.Mode(), 0o600) {
+		if !os.SameFile(published[effect.Path], current.info) || current.hash != digest || !sessionStoreModeEqual(current.info.Mode(), 0o600) {
 			return nil, extension.ErrActionChanged
 		}
 		total += len(body)

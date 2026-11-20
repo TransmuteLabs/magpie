@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -167,11 +168,20 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh(t)
+			var sentMu sync.Mutex
 			var sent string
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var calls int
+			endpoint := "/v1/chat/completions"
+			if tc.endpoint == "responses" {
+				endpoint = "/v1/responses"
+			}
+			up := httptest.NewServer(inferenceOnlyFixture(t, endpoint, "text", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
+				sentMu.Lock()
 				sent = string(body)
-				if strings.Contains(sent, `"stream":true`) {
+				calls++
+				sentMu.Unlock()
+				if strings.Contains(string(body), `"stream":true`) {
 					w.Header().Set("Content-Type", "text/event-stream")
 					io.WriteString(w, sse(
 						`data: {"id":"x","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}`,
@@ -182,7 +192,7 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				io.WriteString(w, `{"id":"x","output":[],"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
-			}))
+			})))
 			defer up.Close()
 			p := provider.Provider{ID: "probe", Key: "key", Models: []string{"text"}}
 			if tc.endpoint == "responses" {
@@ -198,17 +208,24 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 			}
 			rec := httptest.NewRecorder()
 			New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", tc.path, strings.NewReader(tc.body)))
-			if rec.Code != 200 || strings.Contains(sent, "aGVsbG8=") || !strings.Contains(sent, "Image omitted") {
-				t.Fatalf("tool image: %d %s; upstream %s", rec.Code, rec.Body.String(), sent)
+			probeFixtureRoot(t, up)
+			sentMu.Lock()
+			captured, count := sent, calls
+			sentMu.Unlock()
+			if count != 1 {
+				t.Fatalf("upstream got %d inference requests, want 1", count)
+			}
+			if rec.Code != 200 || strings.Contains(captured, "aGVsbG8=") || !strings.Contains(captured, "Image omitted") {
+				t.Fatalf("tool image: %d %s; upstream %s", rec.Code, rec.Body.String(), captured)
 			}
 			if tc.name == "responses-to-chat" {
 				// an orphaned tool result reaches a Chat upstream as a
 				// user message: no call pairs with it, no id is made up
-				if strings.Contains(sent, "call_1") || !strings.Contains(sent, "screenshot") {
-					t.Fatalf("orphaned tool result: %s", sent)
+				if strings.Contains(captured, "call_1") || !strings.Contains(captured, "screenshot") {
+					t.Fatalf("orphaned tool result: %s", captured)
 				}
-			} else if !strings.Contains(sent, "call_1") {
-				t.Fatalf("tool result lost its call id: %s", sent)
+			} else if !strings.Contains(captured, "call_1") {
+				t.Fatalf("tool result lost its call id: %s", captured)
 			}
 			if tc.endpoint == "responses" {
 				var request struct {
@@ -218,7 +235,7 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 						Output []struct{ Type, Text string }
 					}
 				}
-				if err := json.Unmarshal([]byte(sent), &request); err != nil {
+				if err := json.Unmarshal([]byte(captured), &request); err != nil {
 					t.Fatal(err)
 				}
 				found := false
@@ -232,7 +249,7 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Fatalf("Responses function_call_output missing: %s", sent)
+					t.Fatalf("Responses function_call_output missing: %s", captured)
 				}
 			}
 		})

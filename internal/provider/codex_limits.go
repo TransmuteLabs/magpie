@@ -120,12 +120,16 @@ func heardWindows(ws []QuotaWindow, heard []CodexLimit) []QuotaWindow {
 	out := make([]QuotaWindow, len(ws))
 	copy(out, ws)
 	for i, w := range out {
-		if w.Aside || w.Model != "" || w.Span == 0 {
+		if (w.Aside && !w.Unknown) || w.Model != "" || w.Span == 0 {
 			continue
 		}
 		for _, h := range heard {
 			if h.Span != w.Span {
 				continue
+			}
+			if w.Unknown {
+				w.Unknown, w.Aside, w.Text, w.noShare = false, false, false, false
+				w.Display, w.Error = "", ""
 			}
 			w.Used = h.Used
 			if !h.Resets.IsZero() {

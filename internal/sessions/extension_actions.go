@@ -83,7 +83,7 @@ func carryExtensionContext(parent context.Context, source Session, route Session
 	return carryExtensionOwned(ctx, owner, route)
 }
 
-func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route SessionExtension) (result CarryResult, err error) {
+func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route SessionExtension) (CarryResult, error) {
 	if err := owner.check(ctx); err != nil {
 		return CarryResult{}, err
 	}
@@ -203,38 +203,30 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 	if err := owner.check(ctx); err != nil {
 		return CarryResult{}, err
 	}
-	rootInfo, err := os.Stat(plan.Root())
-	if err != nil {
-		return CarryResult{}, err
-	}
-	if _, err := plan.Execute(ctx, preview.Revision); err != nil {
-		return CarryResult{}, err
-	}
-	// Execute rolls back failures inside its transaction. Final target/output
-	// capture can also fail; retain the same checked recovery until publication.
-	defer func() {
-		if err != nil {
-			err = errors.Join(err, rollbackSessionConversion(plan, rootInfo))
+	var post *sessionTargetStore
+	var outputs *sessionInputSnapshot
+	_, err = plan.ExecuteCreateOnly(ctx, preview.Revision, func(published map[string]fs.FileInfo) error {
+		if sourceBeforePublish != nil {
+			sourceBeforePublish()
 		}
-	}()
-	if sourceBeforePublish != nil {
-		sourceBeforePublish()
-	}
-	post, err := resolveSessionTargetStore(route.Session)
+		current, err := resolveSessionTargetStore(route.Session)
+		if err != nil {
+			return err
+		}
+		if current.selection() != store.selection() {
+			return extension.ErrActionChanged
+		}
+		captured, err := captureMigrationOutputs(ctx, current, plan, published)
+		if err != nil {
+			return err
+		}
+		post, outputs = current, captured
+		return nil
+	})
 	if err != nil {
 		return CarryResult{}, err
 	}
-	if post.selection() != store.selection() {
-		return CarryResult{}, extension.ErrActionChanged
-	}
-	outputs, err := captureMigrationOutputs(ctx, post, plan)
-	if err != nil {
-		return CarryResult{}, err
-	}
-	if err := owner.check(ctx); err != nil {
-		return CarryResult{}, err
-	}
-	result = CarryResult{Agent: target, ID: plan.SessionID(), Path: output, Command: command}
+	result := CarryResult{Agent: target, ID: plan.SessionID(), Path: output, Command: command}
 	rememberSessionMigration(key, sessionMigrationReceipt{result: result, source: snapshot, target: post, outputs: outputs})
 	return result, nil
 }

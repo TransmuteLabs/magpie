@@ -353,11 +353,21 @@ func noteCodexIdentity(s *state, identity CodexIdentity, conflict bool) {
 
 // CodexIdentities returns a snapshot of the native thread identities. It is
 // shared with every caller asking while no rollout changed: only read it.
-func CodexIdentities() map[string]CodexIdentity { return codexIdentitiesOf(codexFiles()) }
+func CodexIdentities() map[string]CodexIdentity {
+	history := InspectCallHistory()
+	identities := history.codexIdentities(history.codexFiles())
+	if !history.Current() {
+		return nil
+	}
+	return identities
+}
 
 // codexIdentitiesOf is CodexIdentities with codex the rollouts codexFiles
 // found.
-func codexIdentitiesOf(codex []file) map[string]CodexIdentity {
+func (history CallHistory) codexIdentities(codex []file) map[string]CodexIdentity {
+	if !history.known || !history.authority.native("codex") {
+		return nil
+	}
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	mu.Lock()

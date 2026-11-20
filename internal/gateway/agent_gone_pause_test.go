@@ -18,6 +18,10 @@ import (
 type unreachable struct{ n atomic.Int32 }
 
 func (u *unreachable) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
+		http.NotFound(w, r)
+		return
+	}
 	io.ReadAll(r.Body)
 	u.n.Add(1)
 	w.Header().Set("Content-Type", "application/json")

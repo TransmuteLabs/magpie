@@ -57,7 +57,7 @@ func ageRelocation(t *testing.T, root string) {
 func TestClaudeRelocationPreviewAndCommit(t *testing.T) {
 	root, source, in := relocationFixture(t)
 	before, _ := os.ReadFile(filepath.Join(source, mgCC+".jsonl"))
-	out, err := relocateClaudeProject(root, in.To, in)
+	out, err := relocateClaudeProject(root, in.To, in, nil)
 	if err != nil || out.Sessions != 1 || out.Files != 4 || out.Backup != "" || out.Token == "" {
 		t.Fatalf("preview %+v: %v", out, err)
 	}
@@ -65,7 +65,7 @@ func TestClaudeRelocationPreviewAndCommit(t *testing.T) {
 		t.Fatal("preview wrote to disk")
 	}
 	in.Token = out.Token
-	out, err = relocateClaudeProject(root, in.To, in)
+	out, err = relocateClaudeProject(root, in.To, in, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestClaudeRelocationRefusesUnsafeInputs(t *testing.T) {
 	for _, kind := range []string{"active", "conflict", "stale", "symlink", "malformed", "wrong-project", "same", "missing"} {
 		t.Run(kind, func(t *testing.T) {
 			root, source, in := relocationFixture(t)
-			preview, err := relocateClaudeProject(root, in.To, in)
+			preview, err := relocateClaudeProject(root, in.To, in, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,7 +163,7 @@ func TestClaudeRelocationRefusesUnsafeInputs(t *testing.T) {
 			case "missing":
 				in.To = filepath.Join(root, "missing")
 			}
-			if _, err := relocateClaudeProject(root, in.To, in); err == nil {
+			if _, err := relocateClaudeProject(root, in.To, in, nil); err == nil {
 				t.Fatal("unsafe relocation accepted")
 			}
 			if _, err := os.Stat(p); err != nil {

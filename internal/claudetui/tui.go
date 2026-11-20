@@ -506,8 +506,8 @@ var (
 	bypassRow = lazyre.New(`Yes,\s*I accept`)
 	trustAsk  = "trust this folder"
 	bypassAsk = "Bypass Permissions mode"
-	chromeAsk = "keep browser tools off"
-	themeAsk  = "Choose the text style"
+	chromeAsk = "No, keep browser tools off"
+	themeAsk  = "Choose the text style that looks best with your terminal"
 	// the most a dialog draws under its option rows: its footer
 	// ("Enter to confirm · Esc to cancel"). A resumed conversation that
 	// talks of the dialog has its prompt box and status line there.
@@ -594,7 +594,7 @@ var errUntrusted = errors.New(Untrusted + ", which only its user answers")
 // signIn is what Claude Code's interactive mode shows where it is not
 // signed in, as -p may be (CLAUDE_CODE_OAUTH_TOKEN, a container whose
 // ~/.claude.json has no onboarding done): nothing the helper may answer.
-var signIn = lazyre.New(`Select login method|Log in with your Claude account|claude\.ai/oauth/authorize`)
+var signIn = lazyre.New(`(?m)^[\t \r]*(?:Select login method:|Log in with your Claude account[.!]?|https://claude\.ai/oauth/authorize[^\s]*)[\t \r]*$`)
 
 // The screens Claude Code's interactive mode shows where its onboarding
 // isn't done (a config folder only -p was run in, or one signed in where
@@ -679,7 +679,7 @@ func (s *shim) ready() error {
 			return errUntrusted
 		case optionDialog(words, bypassAsk, bypassRow) && os.Getenv(BypassEnv) != "1":
 			return fmt.Errorf("Claude Code's interactive mode runs in Bypass Permissions mode and asks to accept it, which only its user answers: %s", s.lastScreen())
-		case signIn.MatchString(p) && lastMatchNear(signIn, words, dialogBody):
+		case lastMatchNear(signIn, p, dialogBody):
 			return fmt.Errorf("Claude Code's interactive mode asks to sign in: %s", s.lastScreen())
 		case lastMatchNear(firstRun, words, dialogFoot):
 			if err := onboard("notes", "\r"); err != nil {

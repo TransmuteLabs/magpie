@@ -2348,7 +2348,7 @@ func assembleListed(fs []file, price func(string) *catalog.Price, codexTitle fun
 	// the name the session goes by in its agent: one the user gave it, else
 	// Codex's thread name (session_index.jsonl), else the title the agent
 	// made, else the first prompt, else the first message
-	if s.Agent == "codex" && s.WSL == "" && custom == "" {
+	if s.source == nil && s.Agent == "codex" && s.WSL == "" && custom == "" {
 		custom = codexTitle(s.ID)
 	}
 	if s.Agent == "claude-desktop" && s.WSL == "" {
