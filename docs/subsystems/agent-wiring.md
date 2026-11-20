@@ -142,6 +142,14 @@ Per-agent telemetry and the global Privacy switch use the built-in
 telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
 restoration leaves its ownership record available for retry.
 
+Cline's built-in [settings planner](../../internal/extension/builtin/cline/settings.go)
+handles model selection, reset and catalog sync. Its
+[effort planner](../../internal/extension/builtin/cline/effort.go) selects the
+provider from the same checked `providers.json` snapshot that it edits.
+The host supplies admitted model identities, gateway access and local or WSL
+file locations. The planners return `AgentPlan` changes. The host checks the
+snapshots before publication and updates the restore stash after success.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

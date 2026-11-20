@@ -13,6 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/edit"
+	builtincline "github.com/yetone/magpie/internal/extension/builtin/cline"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -162,7 +163,7 @@ func TestMaxTokensWithinContextWindow(t *testing.T) {
 		os.WriteFile(catalog.CachePath(), []byte(`{"zai":{"models":{"glm-4.6":{"id":"glm-4.6","name":"GLM-4.6","limit":{`+limit+`}}}}}`), 0o644)
 		catalog.Reset()
 		pi, _ := json.Marshal(magpieProviderJSON("pi"))
-		cline, _ := json.Marshal(clineModels(""))
+		cline, _ := json.Marshal(builtincline.Catalog("", gatewayV1(), clineCatalogModels()))
 		omp, _ := yaml.Marshal(ompProvider())
 		dshRoute, _ := yaml.Marshal(dshRouteConfig(magpieModels("dsh"), "", gateway.URL()))
 		droid, _ := json.Marshal(droidEntries())

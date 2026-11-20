@@ -39,22 +39,17 @@ package agent
 // magpie, but which one it runs is picked there.
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
-	sdk "github.com/yetone/magpie/pkg/extension"
+	builtincline "github.com/yetone/magpie/internal/extension/builtin/cline"
 )
 
 // clineSlot is the provider magpie takes in Cline.
-const clineSlot = "openai-compatible"
+const clineSlot = builtincline.ProviderSlot
 
 func cline(home string) *Agent { return clineIn(here(home)) }
 
@@ -75,24 +70,16 @@ func clineIn(at place) *Agent {
 	models := filepath.Join(data, "settings", "models.json")
 	state, secrets := filepath.Join(data, "globalState.json"), filepath.Join(data, "secrets.json")
 	files := []extension.LinkedActionFile{
-		{Name: "providers.json", Path: path, Private: true},
-		{Name: "globalState.json", Path: state, Private: true},
-		{Name: "secrets.json", Path: secrets, Private: true},
-		{Name: "models.json", Path: models, Private: true},
+		{Name: builtincline.ProvidersFile, Path: path, Private: true},
+		{Name: builtincline.StateFile, Path: state, Private: true},
+		{Name: builtincline.SecretsFile, Path: secrets, Private: true},
+		{Name: builtincline.ModelsFile, Path: models, Private: true},
 	}
 	slot := "providers." + clineSlot
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
 	inUse := func() string { return get("lastUsedProvider") }
 	onMagpie := func() bool {
 		return inUse() == clineSlot && ourKey(get(slot+".settings.apiKey"))
-	}
-	// own is the provider a model or effort of Cline's own is set on: the
-	// one in use, else Cline's default
-	own := func() string {
-		if p := inUse(); p != "" {
-			return p
-		}
-		return "cline"
 	}
 	// the setting its CLI reads for every telemetry event; its env path wins
 	settingsPath := at.getenv("CLINE_GLOBAL_SETTINGS_PATH")
@@ -105,7 +92,7 @@ func clineIn(at place) *Agent {
 		UA:  []string{"cline"},
 		Bin: "cline", Dir: dir, Path: path,
 		Sync: func() error {
-			return extension.ApplyLinkedAgentPlan(at, clineSyncPlan, files...)
+			return extension.ApplyLinkedAgentPlan(clineGateway(at), builtincline.PlanSync, files...)
 		},
 		Notice: func() string {
 			if runtime.GOOS == "windows" {
@@ -155,14 +142,10 @@ func clineIn(at place) *Agent {
 				if p == "" {
 					return ""
 				}
-				return clineEffort(get("providers." + p + ".settings.reasoning"))
+				return builtincline.Effort(get("providers." + p + ".settings.reasoning"))
 			},
 			Set: func(v string) error {
-				k := "providers." + own() + ".settings.reasoning"
-				if v == "" {
-					return edit.DelJSON(path, k)
-				}
-				return clineWrite(path, providersEmpty, edit.KV{Path: k, Value: clineReasoning(v)})
+				return extension.ApplyLinkedAgentPlan(v, builtincline.PlanEffort, files[0])
 			},
 			Options: func(map[string]string) []Option {
 				return static("none", "low", "medium", "high", "xhigh")
@@ -171,172 +154,26 @@ func clineIn(at place) *Agent {
 	}
 }
 
-func clineSyncPlan(at place, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
-	var plan sdk.AgentPlan
-	providers, state, secrets, models := settings.Files[0], settings.Files[1], settings.Files[2], settings.Files[3]
-	const slot = "providers." + clineSlot
-	const prefix = slot + ".settings."
-	config := clineReadSettings(providers)
-	if config.Get("lastUsedProvider").String() != clineSlot || !ourKey(config.Get(prefix+"apiKey").String()) {
-		return plan, nil
-	}
-	update := func(file sdk.ActionSettingFile, key string, current gjson.Result, value any) error {
-		if !current.Exists() || sameJSON(current.Raw, value) {
-			return nil
-		}
-		body, err := edit.PatchJSON(file.Body, []edit.KV{{Path: key, Value: value}}, nil)
-		if err != nil {
-			return edit.AtFile(file.Path, err)
-		}
-		plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, BeforeHash: file.BeforeHash, Body: body})
-		return nil
-	}
-	v1 := at.v1()
-	if err := update(providers, prefix+"baseUrl", config.Get(prefix+"baseUrl"), v1); err != nil {
-		return plan, err
-	}
-	if ourKey(clineReadSettings(secrets).Get("openAiApiKey").String()) {
-		const stateURL = "openAiBaseUrl"
-		if err := update(state, stateURL, clineReadSettings(state).Get(stateURL), v1); err != nil {
-			return plan, err
-		}
-	}
-	if current := clineReadSettings(models).Get(slot); current.Exists() {
-		want := clineModelsAt(config.Get(prefix+"model").String(), v1)
-		if err := update(models, slot, current, clineKeptValue(current.String(), want)); err != nil {
-			return plan, err
-		}
-	}
-	return plan, nil
-}
-
-func clineReadSettings(file sdk.ActionSettingFile) gjson.Result {
-	return gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.Body)))
-}
-
 // cutMagpie is the model a magpie/<ref> value names, when it is magpie's.
 func cutMagpie(v string) (string, bool) {
 	ref, ok := strings.CutPrefix(v, magpieID+"/")
 	return ref, ok && isMagpie(ref)
 }
 
-// clineProvider is magpie's openai-compatible entry, asking model with
-// effort (none unset), for the Cline at a place.
-func clineProvider(model, effort string, at place) map[string]any {
-	s := map[string]any{
-		"provider": clineSlot, "apiKey": at.gwKey(), "model": model, "baseUrl": at.v1(),
-		"headers": map[string]string{"User-Agent": "cline"},
-	}
-	if effort != "" {
-		s["reasoning"] = clineReasoning(effort)
-	}
-	return map[string]any{"settings": s, "updatedAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), "tokenSource": "manual"}
+func clineGateway(at place) builtincline.GatewaySettings {
+	return builtincline.GatewaySettings{URL: at.v1, Key: at.gwKey, OwnKey: ourKey, Models: clineCatalogModels}
 }
 
-// clineReasoning is a provider's reasoning asking for effort, none for no
-// thinking.
-func clineReasoning(effort string) map[string]any {
-	if effort == "none" {
-		return map[string]any{"enabled": false}
-	}
-	return map[string]any{"enabled": true, "effort": effort}
-}
-
-// clineEffort is the effort a provider's reasoning asks for: none when it
-// is off, whatever effort is left beside that.
-func clineEffort(raw string) string {
-	var r struct {
-		Enabled *bool  `json:"enabled"`
-		Effort  string `json:"effort"`
-	}
-	if json.Unmarshal([]byte(raw), &r) != nil {
-		return ""
-	}
-	if r.Enabled != nil && !*r.Enabled {
-		return "none"
-	}
-	return r.Effort
-}
-
-// clineStateKeys are the keys of the extension's globalState.json magpie
-// sets.
-var clineStateKeys = []string{"actModeApiProvider", "planModeApiProvider", "actModeOpenAiModelId", "planModeOpenAiModelId",
-	"actModeOpenAiModelInfo", "planModeOpenAiModelInfo", "openAiBaseUrl", "openAiHeaders"}
-
-// clineModels is magpie's entry in models.json: every magpie model, model
-// the one the provider starts on.
-func clineModels(model string) map[string]any { return clineModelsAt(model, gatewayV1()) }
-
-// clineModelsAt is clineModels for a Cline reaching the gateway's /v1 at v1.
-func clineModelsAt(model, v1 string) map[string]any {
-	ms := map[string]any{}
-	for _, m := range sharedModels("cline") {
-		caps := []string{"streaming", "tools"}
-		if m.Images {
-			caps = append(caps, "images")
+func clineCatalogModels() []builtincline.Model {
+	models := sharedModels("cline")
+	out := make([]builtincline.Model, len(models))
+	for index, model := range models {
+		out[index] = builtincline.Model{
+			ID: model.ID, Name: model.Name, Context: model.Context, Output: maxTokens(model),
+			Images: model.Images, Reasoning: len(model.Efforts) > 0,
 		}
-		if len(m.Efforts) > 0 {
-			caps = append(caps, "reasoning")
-		}
-		e := map[string]any{"id": m.ID, "name": m.Name, "capabilities": caps}
-		if m.Context > 0 {
-			e["contextWindow"] = m.Context
-		}
-		if m.Output > 0 {
-			e["maxTokens"] = maxTokens(m)
-		}
-		ms[m.ID] = e
 	}
-	return map[string]any{
-		"provider": map[string]any{"name": "magpie", "baseUrl": v1, "defaultModelId": model},
-		"models":   ms,
-	}
-}
-
-// clineKeptValue is magpie's entry want laid over the one in Cline's models.json.
-// What the user set there stays (#2030): a key of the provider's
-// beside its name, address and default model (protocol, client,
-// capabilities, modelsSourceUrl), and on each of magpie's models what
-// magpie doesn't write, such as an override from the VS Code extension's
-// model editor (temperature, prices, apiFormat, supportsVision;
-// sdk/packages/core/src/services/providers/local-provider-registry.ts). A
-// model magpie no longer lists goes, with what was set on it.
-func clineKeptValue(cur string, want map[string]any) any {
-	var have map[string]any
-	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
-		return want
-	}
-	hm, _ := have["models"].(map[string]any)
-	wm, _ := want["models"].(map[string]any)
-	ms := make(map[string]any, len(wm))
-	for id, w := range wm {
-		h, _ := hm[id].(map[string]any)
-		if h == nil {
-			ms[id] = w
-			continue
-		}
-		ms[id] = mergeKept(h, w.(map[string]any), nil)
-	}
-	out := mergeKept(have, want, []string{"models"})
-	out["models"] = ms
 	return out
-}
-
-// providersEmpty is a providers.json with nothing in it.
-const providersEmpty = `{"version":1,"modes":{},"providers":{}}`
-
-// clineWrite sets kvs in a file of Cline's settings, which it keeps
-// private, made from empty when there is none.
-func clineWrite(path, empty string, kvs ...edit.KV) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, []byte(empty+"\n"), 0o600); err != nil {
-			return err
-		}
-	}
-	return edit.SetJSON(path, kvs...)
 }
 
 // what cline says after a change (notice.go)

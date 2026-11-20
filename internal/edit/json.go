@@ -18,6 +18,36 @@ type KV struct {
 	Value any
 }
 
+func MergeObjects(have, want map[string]any, own []string, keep func(string, string) bool) map[string]any {
+	out := make(map[string]any, len(have)+len(want))
+	for key, value := range want {
+		out[key] = value
+	}
+	for key, current := range have {
+		replacement, exists := want[key]
+		if slices.Contains(own, key) {
+			if keep != nil {
+				before, beforeOK := current.(string)
+				after, afterOK := replacement.(string)
+				if beforeOK && afterOK && before != after && keep(before, after) {
+					out[key] = before
+				}
+			}
+			continue
+		}
+		if !exists {
+			out[key] = current
+			continue
+		}
+		left, leftOK := current.(map[string]any)
+		right, rightOK := replacement.(map[string]any)
+		if leftOK && rightOK {
+			out[key] = MergeObjects(left, right, nil, nil)
+		}
+	}
+	return out
+}
+
 // MergeJSONObjects fills omitted keys from have, including keys of shared objects.
 // Keys in whole use the entire value from want.
 func MergeJSONObjects(have, want map[string]json.RawMessage, whole []string) map[string]json.RawMessage {

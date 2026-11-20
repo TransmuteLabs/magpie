@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 
@@ -269,33 +268,7 @@ func yamlKept(path, key string, value any, own ...string) any {
 // merged alike; a key named in own is want's, or gone. have and want are
 // decoded JSON or YAML.
 func mergeKept(have, want map[string]any, own []string) map[string]any {
-	out := make(map[string]any, len(have)+len(want))
-	for k, w := range want {
-		out[k] = w
-	}
-	for k, h := range have {
-		if slices.Contains(own, k) {
-			// magpie's key for the gateway, where the user put a key of
-			// the gateway's own instead: theirs stays (keyHolds)
-			if hs, ok := h.(string); ok {
-				if ws, ok := want[k].(string); ok && hs != ws && keyHolds(hs, ws) {
-					out[k] = hs
-				}
-			}
-			continue
-		}
-		w, ok := want[k]
-		if !ok {
-			out[k] = h
-			continue
-		}
-		hm, hok := h.(map[string]any)
-		wm, wok := w.(map[string]any)
-		if hok && wok {
-			out[k] = mergeKept(hm, wm, nil)
-		}
-	}
-	return out
+	return edit.MergeObjects(have, want, own, keyHolds)
 }
 
 // syncYAML is syncJSON for a YAML file.
