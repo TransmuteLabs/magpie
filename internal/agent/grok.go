@@ -16,6 +16,7 @@ package agent
 // gives them back.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -171,14 +172,18 @@ func grokWindowsIn(path string) (map[string]int, error) {
 // there has none; one that doesn't parse is an error, so a sync writes
 // nothing over it.
 func grokHadIn(path string) (grokHad, error) {
-	var had grokHad
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return had, nil
+		return grokHad{}, nil
 	}
 	if err != nil {
-		return had, err
+		return grokHad{}, err
 	}
+	return grokHadFrom(b)
+}
+
+func grokHadFrom(b []byte) (grokHad, error) {
+	var had grokHad
 	var doc struct {
 		Model   map[string]map[string]any `toml:"model"`
 		Session map[string]any            `toml:"session"`
@@ -235,27 +240,11 @@ func grokIn(at place) *Agent {
 		models, err := edit.GetTOMLTable(path, "models")
 		return models[k], err
 	}
-	wired := func() (bool, error) {
-		tables, err := edit.TOMLTables(path)
-		if err != nil {
-			return false, err
-		}
-		for _, t := range tables {
-			if strings.HasPrefix(t, grokModelTable) {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
 	// keyWindows and keyPercents are the context_window and
 	// auto_compact_threshold_percent magpie last gave each of its models, so
 	// one the user set by hand since is told from it and kept
 	keyWindows, keyPercents := "grok:"+path+":windows", "grok:"+path+":percents"
-	writeMagpie := func() error {
-		had, err := grokHadIn(path)
-		if err != nil {
-			return err
-		}
+	modelTables := func(had grokHad) ([]edit.Table, map[string]string) {
 		var wrote, wrotePct map[string]int
 		shared := stashShared()
 		saved, savedPct := shared[keyWindows], shared[keyPercents]
@@ -266,9 +255,6 @@ func grokIn(at place) *Agent {
 			json.Unmarshal([]byte(savedPct), &wrotePct)
 		}
 		tables, gave, gavePct := grokModelTables(at.v1(), had, wrote, wrotePct)
-		if err := edit.SetTOMLTables(path, []string{grokModelTable}, tables); err != nil {
-			return err
-		}
 		put := map[string]string{}
 		if !maps.Equal(gave, wrote) || saved == "" {
 			b, _ := json.Marshal(gave)
@@ -278,24 +264,7 @@ func grokIn(at place) *Agent {
 			b, _ := json.Marshal(gavePct)
 			put[keyPercents] = string(b)
 		}
-		if len(put) > 0 {
-			stash(put)
-		}
-		return nil
-	}
-	dropMagpie := func() error {
-		if err := edit.SetTOMLTables(path, []string{grokModelTable}, nil); err != nil {
-			return err
-		}
-		forget(keyWindows, keyPercents)
-		return nil
-	}
-	// the default model is the user's, not a campaign's
-	ownDefault := func(features map[string]string) error {
-		if features["campaigns"] == "false" {
-			return nil
-		}
-		return edit.SetTOMLKey(path, "features", "campaigns", false)
+		return tables, put
 	}
 	// the efforts of a model through magpie, as its catalog entry has them
 	efforts := func(model string) []string {
@@ -305,30 +274,115 @@ func grokIn(at place) *Agent {
 		}
 		return catalog.Efforts(sharedModels("grok"), ref) // only read
 	}
-	return atomic(&Agent{
+	writeSettings := func(field, value string) error {
+		before, err := readWiringFile(path)
+		if err != nil {
+			return err
+		}
+		original := edit.TrimBOM(before.body)
+		var put map[string]string
+		var drop bool
+		prepare := func(body []byte) ([]byte, error) {
+			if field == "effort" {
+				if value == "" {
+					return edit.RewriteTOMLWithoutKeyIf(path, body, "models", "default_reasoning_effort", nil)
+				}
+				return edit.RewriteTOMLKey(path, body, "models", "default_reasoning_effort", value)
+			}
+			syncing := field == ""
+			if syncing {
+				wired, err := edit.HasTOMLTablePrefix(path, body, grokModelTable)
+				if err != nil || !wired {
+					return body, err
+				}
+			}
+			models, err := edit.TOMLTableScalars(path, body, "models")
+			if err != nil {
+				return nil, err
+			}
+			model := value
+			if syncing {
+				model = models["default"]
+			}
+			var features map[string]string
+			if !syncing || model != "" {
+				features, err = edit.TOMLTableScalars(path, body, "features")
+				if err != nil {
+					return nil, err
+				}
+			}
+			ownDefault := func(raw []byte) ([]byte, error) {
+				if features["campaigns"] == "false" {
+					return raw, nil
+				}
+				return edit.RewriteTOMLKey(path, raw, "features", "campaigns", false)
+			}
+			ref, via := strings.CutPrefix(model, magpieID+"/")
+			drop = !syncing && !(via && isMagpie(ref))
+			var tables []edit.Table
+			if !drop {
+				had, err := grokHadFrom(before.body)
+				if err != nil {
+					return nil, err
+				}
+				tables, put = modelTables(had)
+			}
+			switch {
+			case syncing && model != "":
+				body, err = ownDefault(body)
+			case !syncing && model == "":
+				body, err = edit.RewriteTOMLWithoutKeyIf(path, body, "models", "default", nil)
+				if err == nil {
+					body, err = edit.RewriteTOMLWithoutKeyIf(path, body, "features", "campaigns", nil)
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
+			body, err = edit.RewriteTOMLTablesMatching(path, body, nil, []string{grokModelTable}, tables)
+			if err != nil || syncing || model == "" {
+				return body, err
+			}
+			if effort := models["default_reasoning_effort"]; effort != "" {
+				if available := efforts(model); available != nil && !contains(available, effort) {
+					if nearest := catalog.NearestEffort(effort, available); contains(available, nearest) {
+						body, err = edit.RewriteTOMLKey(path, body, "models", "default_reasoning_effort", nearest)
+					} else {
+						body, err = edit.RewriteTOMLWithoutKeyIf(path, body, "models", "default_reasoning_effort", nil)
+					}
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			body, err = ownDefault(body)
+			if err != nil {
+				return nil, err
+			}
+			return edit.RewriteTOMLKey(path, body, "models", "default", model)
+		}
+		body, err := prepare(original)
+		if err != nil {
+			return before.preserveOnError(path, err)
+		}
+		if bytes.Equal(original, body) {
+			body = nil
+		}
+		if err := writeWiringFiles(wiringFileEdit{path: path, before: before, body: body}); err != nil {
+			return err
+		}
+		if drop {
+			forget(keyWindows, keyPercents)
+		} else if len(put) > 0 {
+			stash(put)
+		}
+		return nil
+	}
+	a := &Agent{
 		ID: "grok", Name: "Grok Build", Icon: "xai", Aliases: []string{"grok-build", "grok-cli"}, Spelled: prefixed,
 		UA:  []string{"grok-shell", "grok-pager", "xai-grok-build"}, // grok-pager: its terminal front end
 		Dir: dir, Path: path,
-		Sync: func() error {
-			ok, err := wired()
-			if err != nil || !ok {
-				return err
-			}
-			model, err := get("default")
-			if err != nil {
-				return err
-			}
-			if model != "" {
-				features, err := edit.GetTOMLTable(path, "features")
-				if err != nil {
-					return err
-				}
-				if err := ownDefault(features); err != nil {
-					return err
-				}
-			}
-			return writeMagpie()
-		},
+		Sync: func() error { return writeSettings("", "") },
 		Notice: func() string {
 			if Running(`(^|/)grok( |$)`) {
 				return noticeGrok.String()
@@ -357,51 +411,7 @@ func grokIn(at place) *Agent {
 			{
 				Key: "model", Label: "model",
 				Get: func() string { v, _ := get("default"); return v },
-				Set: func(v string) error {
-					e, err := get("default_reasoning_effort")
-					if err != nil {
-						return err
-					}
-					features, err := edit.GetTOMLTable(path, "features")
-					if err != nil {
-						return err
-					}
-					if v == "" {
-						if err := edit.DelTOMLKey(path, "models", "default"); err != nil {
-							return err
-						}
-						if err := edit.DelTOMLKey(path, "features", "campaigns"); err != nil {
-							return err
-						}
-						return dropMagpie()
-					}
-					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-						if err := writeMagpie(); err != nil {
-							return err
-						}
-					} else if err := dropMagpie(); err != nil {
-						return err
-					}
-					if e != "" {
-						// a model without the chosen effort starts at its
-						// nearest one (a tie goes up), not at Grok's default:
-						// switching to a group of low/medium/high from xhigh
-						// keeps high (Creat.wu on Discord)
-						if es := efforts(v); es != nil && !contains(es, e) {
-							if n := catalog.NearestEffort(e, es); contains(es, n) {
-								if err := edit.SetTOMLKey(path, "models", "default_reasoning_effort", n); err != nil {
-									return err
-								}
-							} else if err := edit.DelTOMLKey(path, "models", "default_reasoning_effort"); err != nil {
-								return err
-							}
-						}
-					}
-					if err := ownDefault(features); err != nil {
-						return err
-					}
-					return edit.SetTOMLKey(path, "models", "default", v)
-				},
+				Set: func(v string) error { return writeSettings("model", v) },
 				Options: func(cur map[string]string) []Option {
 					// magpie's rows for the account Grok Build is signed in
 					// to are its own models a second time: they fold into
@@ -414,12 +424,7 @@ func grokIn(at place) *Agent {
 				// model that supports it and ignores it otherwise
 				Key: "effort", Label: "effort",
 				Get: func() string { v, _ := get("default_reasoning_effort"); return v },
-				Set: func(v string) error {
-					if v == "" {
-						return edit.DelTOMLKey(path, "models", "default_reasoning_effort")
-					}
-					return edit.SetTOMLKey(path, "models", "default_reasoning_effort", v)
-				},
+				Set: func(v string) error { return writeSettings("effort", v) },
 				Options: func(cur map[string]string) []Option {
 					if es := efforts(cur["model"]); es != nil {
 						return static(es...)
@@ -428,7 +433,9 @@ func grokIn(at place) *Agent {
 				},
 			},
 		},
-	}, path)
+	}
+	extensionFenceLocalAtomic(a, []string{path})
+	return a
 }
 
 // grokOwnOptions are the models Grok Build offers its signed-in account: as

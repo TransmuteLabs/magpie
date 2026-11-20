@@ -53,6 +53,19 @@ func TOMLTables(path string) ([]string, error) {
 	return doc.names, nil
 }
 
+func HasTOMLTablePrefix(path string, raw []byte, prefix string) (bool, error) {
+	tables, err := parseTOMLTables(splitLines(string(raw)))
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", path, err)
+	}
+	for _, table := range tables {
+		if !table.array && strings.HasPrefix(table.name, prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // TOMLTable is one ordinary table of a file EachTOMLTable read, shared
 // with the file's kept parse, so read only.
 type TOMLTable struct{ span *tomlTableSpan }
@@ -104,11 +117,24 @@ func GetTOMLTable(path, name string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	out, err := tomlScalars(path, tables, name)
+	if err == nil && a != nil {
+		a.setTable(name, out)
+	}
+	return out, err
+}
+
+func TOMLTableScalars(path string, raw []byte, name string) (map[string]string, error) {
+	tables, err := parseTOMLTables(splitLines(string(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return tomlScalars(path, tables, name)
+}
+
+func tomlScalars(path string, tables []tomlTableSpan, name string) (map[string]string, error) {
 	table, ok := tomlTableNamed(tables, name)
 	if !ok {
-		if a != nil {
-			a.setTable(name, nil)
-		}
 		return nil, nil
 	}
 	if table.array {
@@ -119,9 +145,6 @@ func GetTOMLTable(path, name string) (map[string]string, error) {
 		if kv.scalar {
 			out[kv.name] = kv.value
 		}
-	}
-	if a != nil {
-		a.setTable(name, out)
 	}
 	return out, nil
 }
@@ -249,6 +272,14 @@ func SetTOMLKey(path, name, key string, value any) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	return writeTOML(path, out)
+}
+
+func RewriteTOMLKey(path string, raw []byte, name, key string, value any) ([]byte, error) {
+	out, err := setTOMLKeyLines(splitLines(string(raw)), name, key, key, value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return renderTOML(path, out, raw)
 }
 
 // setTOMLKeyLines is SetTOMLKey on lines: the key named `key` (as the parser
@@ -1032,10 +1063,26 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 	if err != nil {
 		return err
 	}
+	out, err := tomlTablesMatchingLines(path, raw, names, prefixes, tables)
+	if err != nil || out == nil {
+		return err
+	}
+	return writeTOML(path, out)
+}
+
+func RewriteTOMLTablesMatching(path string, raw []byte, names, prefixes []string, tables []Table) ([]byte, error) {
+	out, err := tomlTablesMatchingLines(path, raw, names, prefixes, tables)
+	if err != nil || out == nil {
+		return raw, err
+	}
+	return renderTOML(path, out, raw)
+}
+
+func tomlTablesMatchingLines(path string, raw []byte, names, prefixes []string, tables []Table) ([]string, error) {
 	lines := splitLines(string(raw))
 	blocks, err := parseTOMLTables(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	owned := func(name string) bool {
 		for _, n := range names {
@@ -1070,7 +1117,7 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 		}
 	}
 	if !found && len(tables) == 0 {
-		return nil
+		return nil, nil
 	}
 	out = trimBlank(out)
 	for _, t := range tables {
@@ -1085,5 +1132,5 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 	if len(out) > 0 {
 		out = append(out, "")
 	}
-	return writeTOML(path, out)
+	return out, nil
 }
