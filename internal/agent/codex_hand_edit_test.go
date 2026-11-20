@@ -108,4 +108,53 @@ func TestCodexDisconnectPreservesEditDuringRestore(t *testing.T) {
 	}
 }
 
+func TestCodexDisconnectKeepsAuxiliaryModelsWhenRestoreRejects(t *testing.T) {
+	home, read := codexHome(t, "", "model = \"gpt-5.5\"\n")
+	cx := codex(home)
+	if err := cx.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cx.Field("memories").Set("fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const auxiliary = "\n[agents]\n'default_subagent_model' = '''\nfake/m1''' # routed pick\n"
+	const independent = `"consolidation_model" = 'own-memory-model' # keep`
+	routed := strings.Replace(read(), `consolidation_model = "fake/m1"`, independent, 1) + auxiliary
+	if !strings.Contains(routed, independent) || !strings.Contains(routed, `extract_model = "fake/m1"`) {
+		t.Fatalf("missing memory picks in setup:\n%s", routed)
+	}
+	writeFile(t, target, routed)
+
+	const lateEdit = "\n# saved by the user during Disconnect\n"
+	var user string
+	err = edit.Filtered(func(path string, proposed []byte) []byte {
+		if path == target && user == "" && strings.Contains(string(proposed), `model = "gpt-5.5"`) {
+			user = read() + lateEdit
+			writeFile(t, path, user)
+		}
+		return proposed
+	}, cx.Disconnect)
+	if user == "" || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("Disconnect did not reject a stale restore: injected=%t error=%v", user != "", err)
+	}
+	if got := read(); got != routed+lateEdit {
+		t.Fatalf("rejected Disconnect changed the routed config before restoration:\n%s", got)
+	}
+	if got := stashLoad()["codex.model"]; got != "gpt-5.5" {
+		t.Fatalf("Disconnect lost the saved model after rejection: %q", got)
+	}
+
+	if err := cx.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); strings.Contains(got, "fake/m1") || !strings.Contains(got, independent) ||
+		!strings.Contains(got, `model = "gpt-5.5"`) || !strings.HasSuffix(got, lateEdit) {
+		t.Fatalf("retry failed to restore the original model and preserve the independent edits:\n%s", got)
+	}
+}
+
 func quoteTOML(s string) string { return "\"" + strings.ReplaceAll(s, `\`, `\\`) + "\"" }

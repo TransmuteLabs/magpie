@@ -1587,23 +1587,31 @@ func codexIn(at place) *Agent {
 		return nil
 	}
 	// one of magpie's goes too: Codex could no longer find it
-	dropSubagent := func() error {
+	rewriteAuxiliaryModels := func(body []byte) ([]byte, error) {
 		for _, pick := range []struct{ table, key string }{
 			{"memories", "extract_model"},
 			{"memories", "consolidation_model"},
 			{"agents", "default_subagent_model"},
 		} {
-			before, err := readWiringFile(path)
+			next, err := edit.RewriteTOMLWithoutKeyIf(path, body, pick.table, pick.key, isMagpie)
 			if err != nil {
-				return edit.PreserveOnRollback(path, err)
+				return nil, err
 			}
-			if err := edit.DelTOMLKeyChecked(path, pick.table, pick.key, isMagpie, func() error {
-				return before.check(path)
-			}); err != nil {
-				return err
-			}
+			body = next
 		}
-		return nil
+		return body, nil
+	}
+	dropSubagent := func() error {
+		config, err := readWiringFile(path)
+		if err != nil {
+			return edit.PreserveOnRollback(path, err)
+		}
+		raw := edit.TrimBOM(config.body)
+		body, err := rewriteAuxiliaryModels(raw)
+		if err == nil && !bytes.Equal(body, raw) {
+			err = edit.WriteAtomicChecked(config.target, body, func() error { return config.check(path) })
+		}
+		return config.preserveOnError(path, err)
 	}
 	// the effort spawned subagents start at, when not the parent's
 	// (core/src/agent/child_config.rs): checked against the model they run
@@ -1831,11 +1839,6 @@ func codexIn(at place) *Agent {
 		if err := giveTables(); err != nil {
 			return err
 		}
-		if pick == nil || routed() {
-			if err := dropSubagent(); err != nil {
-				return err
-			}
-		}
 		config, err := readWiringFile(path)
 		if err != nil {
 			return edit.PreserveOnRollback(path, err)
@@ -1895,14 +1898,18 @@ func codexIn(at place) *Agent {
 				remove = append(remove, "model")
 			}
 		}
-		if len(remove) != 0 || len(back) != 0 {
-			body, err := edit.RewriteTOMLTopFields(path, raw, remove, back...)
-			if err == nil {
-				err = edit.WriteAtomicChecked(config.target, body, func() error { return config.check(path) })
-			}
-			if err != nil {
-				return config.preserveOnError(path, err)
-			}
+		body := raw
+		if pick == nil || wasRouted {
+			body, err = rewriteAuxiliaryModels(body)
+		}
+		if err == nil && (len(remove) != 0 || len(back) != 0) {
+			body, err = edit.RewriteTOMLTopFields(path, body, remove, back...)
+		}
+		if err == nil && !bytes.Equal(body, raw) {
+			err = edit.WriteAtomicChecked(config.target, body, func() error { return config.check(path) })
+		}
+		if err != nil {
+			return config.preserveOnError(path, err)
 		}
 		forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
 		if wasRouted {

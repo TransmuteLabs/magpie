@@ -281,28 +281,28 @@ func setTOMLKeyLines(lines []string, name, key, spelled string, value any) ([]st
 // DelTOMLKey removes one key of table `name`, and the table with it when
 // nothing else is left in it.
 func DelTOMLKey(path, name, key string) error {
-	return delTOMLKey(path, name, key, nil, nil)
-}
-
-func DelTOMLKeyChecked(path, name, key string, selected func(string) bool, check func() error) error {
-	return delTOMLKey(path, name, key, selected, check)
-}
-
-func delTOMLKey(path, name, key string, selected func(string) bool, check func() error) error {
 	raw, err := Read(path)
 	if err != nil || raw == nil {
 		return err
 	}
+	body, err := RewriteTOMLWithoutKeyIf(path, raw, name, key, nil)
+	if err != nil || bytes.Equal(body, raw) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteTOMLWithoutKeyIf(path string, raw []byte, name, key string, selected func(string) bool) ([]byte, error) {
 	lines := splitLines(string(raw))
 	table, err := parseTOMLTable(lines, name)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if table.from < 0 {
-		return nil
+		return raw, nil
 	}
 	if selected != nil && !selected((TOMLTable{&table}).Scalar(key)) {
-		return nil
+		return raw, nil
 	}
 	out := append([]string{}, lines[:table.from+1]...)
 	at := table.from + 1
@@ -316,10 +316,10 @@ func delTOMLKey(path, name, key string, selected func(string) bool, check func()
 	for _, line := range out[table.from+1:] {
 		if strings.TrimSpace(line) != "" {
 			out = append(out, lines[table.to:]...)
-			return writeTOMLChecked(path, out, check)
+			return renderTOML(path, out, raw)
 		}
 	}
-	return writeTOMLChecked(path, tomlWithoutTable(lines, table), check)
+	return renderTOML(path, tomlWithoutTable(lines, table), raw)
 }
 
 // DelTOMLTable removes table `name` (header and body) if present.
