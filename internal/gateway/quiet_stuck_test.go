@@ -27,9 +27,9 @@ const (
 // quiet, and then the rest of its reply. asked counts its requests.
 func quietClaude(t *testing.T, head string, noHead bool, quiet time.Duration) *atomic.Int32 {
 	t.Helper()
+	const model = "claude-fable-5-2"
 	asked := new(atomic.Int32)
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.ReadAll(r.Body)
+	infer := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		asked.Add(1)
 		if !noHead {
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -47,9 +47,11 @@ func quietClaude(t *testing.T, head string, noHead bool, quiet time.Duration) *a
 			io.WriteString(w, stuckStart)
 		}
 		io.WriteString(w, stuckRest)
-	}))
+	})
+	up := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", model, infer))
 	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Models: []string{"claude-fable-5-2"}, Anthropic: up.URL}); err != nil {
+	probeInferenceFixture(t, up.URL, "/v1/models")
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Models: []string{model}, Anthropic: up.URL}); err != nil {
 		t.Fatal(err)
 	}
 	return asked
