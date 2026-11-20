@@ -782,7 +782,10 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 					if err := ctx.Err(); err != nil {
 						return err
 					}
-					return checkActionFile(root, change.Path, expected[change.Path])
+					if err := actions.checkAuthority(plan); err != nil {
+						return err
+					}
+					return verify()
 				})
 				if published != nil {
 					changed = append(changed, actionEffect{change: change, parent: root, name: change.Path, created: published})

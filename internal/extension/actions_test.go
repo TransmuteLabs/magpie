@@ -518,6 +518,56 @@ func TestActionsRollbackNewFilesAndRemovals(test *testing.T) {
 	}
 }
 
+func TestActionsRefusePublicationAfterStagingLosesAuthority(test *testing.T) {
+	for _, changed := range []string{"read-only-input", "manifest"} {
+		test.Run(changed, func(test *testing.T) {
+			actions, host, policy := actionFixture(test)
+			plan := actionTestPlan(test, actions, policy)
+			target := filepath.Join(policy.Root, "a.json")
+			original, err := os.Stat(target)
+			if err != nil {
+				test.Fatal(err)
+			}
+			writes := 0
+			var published fs.FileInfo
+			actions.write = func(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
+				writes++
+				var err error
+				published, err = actionWriteChecked(root, name, body, mode, func() error {
+					switch changed {
+					case "read-only-input":
+						if err := root.WriteFile("b.json", []byte("user changed the input"), 0o640); err != nil {
+							return err
+						}
+					case "manifest":
+						host.mu.Lock()
+						host.manifest.Version = "2.0.0"
+						host.mu.Unlock()
+					}
+					return check()
+				})
+				return published, err
+			}
+			result, err := plan.Execute(test.Context(), plan.Preview().Revision)
+			if writes != 1 || !errors.Is(err, ErrActionChanged) || result.Applied || result.RollbackIncomplete {
+				test.Fatalf("stale staged transaction: %d writes, %+v, %v", writes, result, err)
+			}
+			current, err := os.Stat(target)
+			if published != nil || err != nil || !os.SameFile(current, original) {
+				test.Fatalf("stale plan published before rollback: received publication %v, stat %v", published != nil, err)
+			}
+			if got := string(actionTestRead(test, target)); got != "before-a.json" {
+				test.Fatalf("target was changed to %q", got)
+			}
+			if changed == "read-only-input" {
+				if got := string(actionTestRead(test, filepath.Join(policy.Root, "b.json"))); got != "user changed the input" {
+					test.Fatalf("independent input was changed to %q", got)
+				}
+			}
+		})
+	}
+}
+
 func TestActionsRejectReadOnlyInputChangedByFinalWrite(test *testing.T) {
 	actions, _, policy := actionFixture(test)
 	plan := actionTestPlan(test, actions, policy)
