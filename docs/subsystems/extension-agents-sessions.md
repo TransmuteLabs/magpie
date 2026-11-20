@@ -335,6 +335,9 @@ plan. OpenCode 1 refreshes its legacy provider and any existing native mirror
 in one file change. Air uses the same planner for its own legacy provider.
 The planner keeps custom settings from the checked file and saves model
 output history after successful publication.
+Cline Sync checks its provider, catalog, global state and secrets together.
+It uses the current provider's model and catalog overrides. The plan
+refreshes VS Code's stored address only while its key belongs to Magpie.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,

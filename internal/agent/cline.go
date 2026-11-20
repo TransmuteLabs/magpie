@@ -46,7 +46,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // clineSlot is the provider magpie takes in Cline.
@@ -172,18 +176,11 @@ func clineIn(at place) *Agent {
 		UA:  []string{"cline"},
 		Bin: "cline", Dir: dir, Path: path,
 		Sync: func() error {
-			if !onMagpie() {
-				return nil
-			}
-			if err := syncJSON(path, slot+".settings.baseUrl", func() any { return at.v1() }); err != nil {
-				return err
-			}
-			if k, _ := edit.GetJSON(secrets, "openAiApiKey"); ourKey(k) {
-				if err := syncJSON(state, "openAiBaseUrl", func() any { return at.v1() }); err != nil {
-					return err
-				}
-			}
-			return syncJSON(models, "providers."+clineSlot, func() any { return clineKept(models, clineModelsAt(get(slot+".settings.model"), at.v1())) })
+			return extension.ApplyLinkedAgentPlan(at, clineSyncPlan,
+				extension.LinkedActionFile{Name: "providers.json", Path: path},
+				extension.LinkedActionFile{Name: "globalState.json", Path: state},
+				extension.LinkedActionFile{Name: "secrets.json", Path: secrets},
+				extension.LinkedActionFile{Name: "models.json", Path: models})
 		},
 		Notice: func() string {
 			if runtime.GOOS == "windows" {
@@ -285,6 +282,48 @@ func clineIn(at place) *Agent {
 			},
 		}},
 	}
+}
+
+func clineSyncPlan(at place, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+	var plan sdk.AgentPlan
+	providers, state, secrets, models := settings.Files[0], settings.Files[1], settings.Files[2], settings.Files[3]
+	read := func(file sdk.ActionSettingFile) gjson.Result {
+		return gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.Body)))
+	}
+	const slot = "providers." + clineSlot
+	const prefix = slot + ".settings."
+	config := read(providers)
+	if config.Get("lastUsedProvider").String() != clineSlot || !ourKey(config.Get(prefix+"apiKey").String()) {
+		return plan, nil
+	}
+	update := func(file sdk.ActionSettingFile, key string, current gjson.Result, value any) error {
+		if !current.Exists() || sameJSON(current.Raw, value) {
+			return nil
+		}
+		body, err := edit.PatchJSON(file.Body, []edit.KV{{Path: key, Value: value}}, nil)
+		if err != nil {
+			return edit.AtFile(file.Path, err)
+		}
+		plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, BeforeHash: file.BeforeHash, Body: body})
+		return nil
+	}
+	v1 := at.v1()
+	if err := update(providers, prefix+"baseUrl", config.Get(prefix+"baseUrl"), v1); err != nil {
+		return plan, err
+	}
+	if ourKey(read(secrets).Get("openAiApiKey").String()) {
+		const stateURL = "openAiBaseUrl"
+		if err := update(state, stateURL, read(state).Get(stateURL), v1); err != nil {
+			return plan, err
+		}
+	}
+	if current := read(models).Get(slot); current.Exists() {
+		want := clineModelsAt(config.Get(prefix+"model").String(), v1)
+		if err := update(models, slot, current, clineKeptValue(current.String(), want)); err != nil {
+			return plan, err
+		}
+	}
+	return plan, nil
 }
 
 // cutMagpie is the model a magpie/<ref> value names, when it is magpie's.
@@ -417,6 +456,10 @@ func clineKept(path string, want map[string]any) any {
 	if !ok {
 		return want
 	}
+	return clineKeptValue(cur, want)
+}
+
+func clineKeptValue(cur string, want map[string]any) any {
 	var have map[string]any
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
 		return want
