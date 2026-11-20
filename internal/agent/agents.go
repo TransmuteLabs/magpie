@@ -2143,20 +2143,7 @@ func copilot(home, cfg string) *Agent {
 		Fields: []Field{{
 			Key: "model", Label: "model",
 			Get: jsonGet(path, "model"),
-			Set: func(v string) error {
-				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-					if err := copilotWrite(provs, gateway.URL()+"/v1", agentKey("copilot")); err != nil {
-						return err
-					}
-				}
-				if v == "" {
-					if err := edit.DelJSON(path, "model"); err != nil {
-						return err
-					}
-					return copilotUnwrite(provs)
-				}
-				return edit.SetJSON(path, edit.KV{Path: "model", Value: v})
-			},
+			Set: func(v string) error { return copilotSetModel(path, provs, v) },
 			Options: func(cur map[string]string) []Option {
 				return withVia(own(), "copilot", magpieID+"/")
 			},

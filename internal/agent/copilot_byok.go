@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/gateway"
 )
 
 // Copilot CLI takes its own model providers from providers.json (BYOK, `copilot
@@ -22,12 +24,9 @@ import (
 // copilotFile is providers.json at path, read as it is: its top-level keys
 // as they are, "providers" and "models" as lists. A file that does not parse
 // is an error, never an empty file to write over.
-func copilotFile(path string) (map[string]json.RawMessage, error) {
-	b, err := edit.Read(path)
-	if err != nil {
-		return nil, err
-	}
+func copilotFile(path string, b []byte) (map[string]json.RawMessage, error) {
 	top := map[string]json.RawMessage{}
+	b = edit.TrimBOM(b)
 	if len(bytes.TrimSpace(b)) == 0 {
 		return top, nil
 	}
@@ -63,7 +62,11 @@ func copilotOwn(entry json.RawMessage, key string) bool {
 // copilotProvider is magpie's provider entry in the file at path, empty
 // when there is none.
 func copilotProvider(path string) map[string]any {
-	top, err := copilotFile(path)
+	raw, err := edit.Read(path)
+	if err != nil {
+		return map[string]any{}
+	}
+	top, err := copilotFile(path, raw)
 	if err != nil {
 		return map[string]any{}
 	}
@@ -109,18 +112,14 @@ func copilotBlock(url, key string) (map[string]any, []map[string]any) {
 // copilotWrite puts magpie's provider and models into providers.json,
 // everything else in the file as it was. What the file already holds in
 // magpie's own provider entry under a key magpie doesn't write stays.
-func copilotWrite(path, url, key string) error {
-	top, err := copilotFile(path)
-	if err != nil {
-		return err
-	}
+func copilotWrite(top map[string]json.RawMessage, url, key string) ([]byte, error) {
 	provs, err := copilotList(top, "providers")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	models, err := copilotList(top, "models")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	prov, ms := copilotBlock(url, key)
 	want, _ := json.Marshal(prov)
@@ -170,27 +169,23 @@ func copilotWrite(path, url, key string) error {
 	outM = append(outM[:first], append(mine, outM[first:]...)...)
 	top["providers"], _ = json.Marshal(outP)
 	top["models"], _ = json.Marshal(outM)
-	return copilotSave(path, top)
+	return copilotCatalogBody(top)
 }
 
 // copilotUnwrite takes magpie's provider and models out of providers.json,
 // leaving the rest; a file left with nothing in it that magpie made is not
 // deleted, as it may be the user's.
-func copilotUnwrite(path string) error {
-	top, err := copilotFile(path)
-	if err != nil {
-		return err
-	}
+func copilotUnwrite(top map[string]json.RawMessage) ([]byte, error) {
 	if len(top) == 0 {
-		return nil
+		return nil, nil
 	}
 	provs, err := copilotList(top, "providers")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	models, err := copilotList(top, "models")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	keep := func(l []json.RawMessage, key string) []json.RawMessage {
 		out := []json.RawMessage{}
@@ -203,17 +198,65 @@ func copilotUnwrite(path string) error {
 	}
 	np, nm := keep(provs, "name"), keep(models, "provider")
 	if len(np) == len(provs) && len(nm) == len(models) {
-		return nil
+		return nil, nil
 	}
 	top["providers"], _ = json.Marshal(np)
 	top["models"], _ = json.Marshal(nm)
-	return copilotSave(path, top)
+	return copilotCatalogBody(top)
+}
+
+func copilotSetModel(path, catalog, model string) error {
+	ref, prefixed := strings.CutPrefix(model, magpieID+"/")
+	route := prefixed && isMagpie(ref)
+	if model != "" && !route {
+		return edit.SetJSON(path, edit.KV{Path: "model", Value: model})
+	}
+	config, err := readWiringFile(path)
+	if err != nil {
+		return err
+	}
+	providers, err := readWiringFile(catalog)
+	if err != nil {
+		return err
+	}
+	settingsEdit := wiringFileEdit{path: path, before: config}
+	catalogEdit := wiringFileEdit{path: catalog, before: providers}
+	top, err := copilotFile(catalog, providers.body)
+	if err != nil {
+		return err
+	}
+	if route {
+		settingsEdit.body, err = edit.PatchJSON(config.body, []edit.KV{{Path: "model", Value: model}}, nil)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		catalogEdit.body, err = copilotWrite(top, gateway.URL()+"/v1", agentKey("copilot"))
+		if err != nil {
+			return fmt.Errorf("%s: %w", catalog, err)
+		}
+		return writeWiringFiles(catalogEdit, settingsEdit)
+	}
+	if len(bytes.TrimSpace(edit.TrimBOM(config.body))) != 0 {
+		settingsEdit.body, err = edit.PatchJSON(config.body, nil, []string{"model"})
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	catalogEdit.body, err = copilotUnwrite(top)
+	if err != nil {
+		return fmt.Errorf("%s: %w", catalog, err)
+	}
+	return writeWiringFiles(settingsEdit, catalogEdit)
 }
 
 // copilotSync brings magpie's entries up to the catalog as it is now, when
 // the file has them; one that already says the same is not written.
 func copilotSync(path, url, key string) error {
-	top, err := copilotFile(path)
+	before, err := readWiringFile(path)
+	if err != nil {
+		return nil
+	}
+	top, err := copilotFile(path, before.body)
 	if err != nil {
 		return nil
 	}
@@ -225,13 +268,17 @@ func copilotSync(path, url, key string) error {
 	if !has {
 		return nil
 	}
-	return copilotWrite(path, url, key)
-}
-
-func copilotSave(path string, top map[string]json.RawMessage) error {
-	b, err := json.MarshalIndent(top, "", "  ")
+	body, err := copilotWrite(top, url, key)
 	if err != nil {
 		return err
 	}
-	return edit.WriteAtomic(path, append(b, '\n'))
+	return writeWiringFiles(wiringFileEdit{path: path, before: before, body: body})
+}
+
+func copilotCatalogBody(top map[string]json.RawMessage) ([]byte, error) {
+	b, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
 }
