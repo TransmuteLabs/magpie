@@ -67,6 +67,10 @@ func extensionProfileCatalog(ctx context.Context, caller, target string) string 
 	return target
 }
 
+func (a *Agent) HasSDKAgentDeclaration() bool {
+	return a.extensionMetadata != nil
+}
+
 func (a *Agent) SDKLibraryTarget() (*Agent, *sdk.AgentLibrary, bool) {
 	metadata := a.extensionMetadata
 	if metadata == nil {

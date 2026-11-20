@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/proc"
@@ -57,12 +59,23 @@ func startCmd(args []string) (ok bool, err error) {
 	if a == nil {
 		return false, nil
 	}
+	if args[1] == "run" {
+		if a.HasSDKAgentDeclaration() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			prepared, err := agent.PrepareExtensionStart(ctx, a)
+			if err != nil {
+				return true, err
+			}
+			if prepared != nil {
+				return true, startRunChecked(prepared.Starting, args[2:], func() error { return prepared.Recheck(ctx) })
+			}
+		}
+		return true, startRun(a.Start(), args[2:])
+	}
 	s := a.Start()
 	if s.Err != nil {
 		return true, s.Err
-	}
-	if args[1] == "run" {
-		return true, startRun(s, args[2:])
 	}
 	if len(args) > 2 {
 		if slices.Contains([]string{"-h", "--help", "help"}, args[2]) {

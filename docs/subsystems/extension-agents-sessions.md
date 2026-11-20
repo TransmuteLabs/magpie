@@ -231,6 +231,11 @@ plugin targets. A process inherits the same config path as ordinary Start;
 its foreground recipe, binding/lease checks and spawn lifetime remain separate.
 Legacy agentplug Env keeps its existing placeholder behavior.
 
+Ordinary `magpie <agent> run` rechecks the selected SDK launch after
+executable lookup, using the same launch admission as session resume. A
+changed binding, package or active configuration stops the launch. The
+final check reads host state without starting the module worker.
+
 [`extension_controller.go`](../../internal/agent/extension_controller.go)
 adapts these declarations to ordinary All/Find/Starter, NativeConnection and
 CLI run/env. Environment-only launches use `Starting.Active`. SDK shell

@@ -25,34 +25,58 @@ func PrepareExtensionResume(ctx context.Context, plugin, id string) (*ExtensionR
 		selected.extensionMetadata.plugin != plugin || selected.extensionMetadata.descriptor.Launch == nil {
 		return nil, errors.New("session resume requires its own SDK agent launch profile")
 	}
-	home, _ := homes()
+	prepared, err := PrepareExtensionStart(ctx, selected)
+	if err != nil {
+		return nil, err
+	}
+	if !prepared.Starting.Active {
+		return nil, errors.New("agent must be connected through its SDK profile")
+	}
+	return prepared, nil
+}
+
+func PrepareExtensionStart(ctx context.Context, selected *Agent) (*ExtensionResumeStart, error) {
 	metadata := selected.extensionMetadata
-	controller := newExtensionController(home, nil, ExtensionAgent{Plugin: plugin, Agent: metadata.descriptor.Clone()}, metadata.base)
+	if metadata == nil || metadata.descriptor.Launch == nil {
+		return nil, nil
+	}
+	home, _ := homes()
+	controller := newExtensionController(home, nil, ExtensionAgent{Plugin: metadata.plugin, Agent: metadata.descriptor.Clone()}, metadata.base)
 	controller.bin = selected.Bin
 	before, err := controller.read(ctx)
 	if err != nil {
 		return nil, err
 	}
+	plugin, id := metadata.plugin, metadata.descriptor.ID
 	start := selected.Start()
 	if start.Err != nil {
 		return nil, start.Err
 	}
-	if !start.Active || start.Bin == "" || start.Bin != selected.Bin || before.Phase != "owned" {
-		return nil, errors.New("session resume agent must be connected through its SDK profile")
+	if start.Bin == "" || start.Bin != selected.Bin ||
+		start.Active && (before.Phase != "owned" || before.Bin != start.Bin) ||
+		!start.Active && before.Phase != "" && before.Phase != "disconnected" {
+		return nil, extension.ErrActionChanged
 	}
-	address, key := gateway.URL(), agentKeyAt(id, gateway.URL())
+	var owner *extensionAgentRuntime
+	var address, key string
+	if start.Active {
+		address = gateway.URL()
+		key = agentKeyAt(id, address)
+		owner = &extensionAgentRuntime{manager: extension.Default(),
+			entry: extension.Installed{Revision: before.PackageRevision}, config: before.ConfigVersion}
+	}
 	prepared := &ExtensionResumeStart{Starting: start}
 	prepared.Starting.Env = slices.Clone(start.Env)
 	prepared.Starting.Args = slices.Clone(start.Args)
 	prepared.Starting.Plain = slices.Clone(start.Plain)
-	owner := &extensionAgentRuntime{manager: extension.Default(),
-		entry: extension.Installed{Revision: before.PackageRevision}, config: before.ConfigVersion}
 	prepared.check = func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := owner.check(ctx, plugin); err != nil {
-			return err
+		if owner != nil {
+			if err := owner.check(ctx, plugin); err != nil {
+				return err
+			}
 		}
 		actual := prepared.Starting
 		if actual.Err != nil || actual.Bin != start.Bin || actual.Active != start.Active ||
@@ -65,11 +89,14 @@ func PrepareExtensionResume(ctx context.Context, plugin, id string) (*ExtensionR
 		if err != nil {
 			return err
 		}
-		if current.Phase != "owned" || current.Revision != before.Revision ||
+		if current.Phase != before.Phase || current.Revision != before.Revision ||
 			current.PackageRevision != before.PackageRevision || current.ConfigVersion != before.ConfigVersion ||
 			current.Bin != before.Bin || !maps.Equal(current.Values, before.Values) ||
 			!extensionBindingSameDescriptor(current.Descriptor, before.Descriptor) {
 			return extension.ErrActionChanged
+		}
+		if !start.Active {
+			return ctx.Err()
 		}
 		if gateway.URL() != address || agentKeyAt(id, address) != key {
 			return extension.ErrActionChanged
