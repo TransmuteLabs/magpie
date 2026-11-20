@@ -45,12 +45,12 @@ func activeRoot(entry Installed) bool {
 }
 
 func (m *Manager) ActiveModule(ctx context.Context, id string) (Installed, error) {
-	entries, err := m.catalog.list(ctx)
+	entries, err := m.readContributionEntries(ctx)
 	if err != nil {
 		return Installed{}, err
 	}
 	for _, entry := range entries {
-		if entry.Manifest.ID == id && activeRoot(entry) {
+		if entry.Manifest.ID == id {
 			return entry, nil
 		}
 	}
