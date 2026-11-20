@@ -133,9 +133,13 @@ func TestSDKProfileTakesCanonicalIdentityAcrossLibraryFamilies(t *testing.T) {
 
 func TestSDKProfileLibrarySelectionWritesReadsAndRemovesRealResources(t *testing.T) {
 	worker := sdkProfileLibraryWorker(t)
-	for _, base := range []string{"opencode", "claude", "codex", "gemini"} {
+	for _, base := range []string{"opencode", "deveco", "mimocode", "omp", "claude", "codex", "gemini"} {
 		t.Run(base, func(t *testing.T) {
 			home := sandbox(t)
+			if base == "omp" {
+				holdCLI(t, home, "omp")
+				write(t, filepath.Join(home, ".omp", "agent", "config.yml"), "{}\n")
+			}
 			_, descriptor := sdkProfileLibraryInstall(t, home, base, worker)
 			target := sdkProfileLibraryAdopt(t, descriptor)
 			if target.Instructions == "" || target.MCP == nil || target.Skills == "" {

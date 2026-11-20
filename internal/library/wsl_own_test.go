@@ -21,9 +21,10 @@ func TestWSLOwnFolderTargets(t *testing.T) {
 	write(t, filepath.Join(h, ".omp", "agent", "config.yml"), "{}\n")
 	write(t, filepath.Join(h, ".factory", "settings.json"), "{}\n")
 	write(t, filepath.Join(h, ".config", "opencode", "opencode.json"), "{}\n")
+	write(t, filepath.Join(h, ".config", "mimocode", "mimocode.jsonc"), "{}\n")
 	write(t, filepath.Join(h, ".claude", "settings.json"), "{}\n")
 	t.Cleanup(agent.FakeWSL(map[string]string{
-		"Ubuntu": "home:/home/me\ndir:.hermes\nbin:hermes\ndir:.omp\nbin:omp\ndir:.factory\nbin:droid\ndir:.config/opencode\nbin:opencode\ndir:.claude\n",
+		"Ubuntu": "home:/home/me\ndir:.hermes\nbin:hermes\ndir:.omp\nbin:omp\ndir:.factory\nbin:droid\ndir:.config/opencode\nbin:opencode\ndir:.config/mimocode\nbin:mimo\ndir:.claude\n",
 	}, map[string]string{"Ubuntu": root}))
 
 	const hermes = "hermes@wsl:Ubuntu"
@@ -32,6 +33,7 @@ func TestWSLOwnFolderTargets(t *testing.T) {
 		"omp@wsl:Ubuntu":      {".omp/agent/mcp.json", ".omp/agent/skills"},
 		"droid@wsl:Ubuntu":    {".factory/mcp.json", ".factory/skills"},
 		"opencode@wsl:Ubuntu": {".config/opencode/opencode.json", ".config/opencode/skills"},
+		"mimocode@wsl:Ubuntu": {".config/mimocode/mimocode.jsonc", ".config/mimocode/skills"},
 	}
 	for id, w := range want {
 		tg := targetByID(id)
@@ -46,6 +48,16 @@ func TestWSLOwnFolderTargets(t *testing.T) {
 	// OpenCode there reads the distro's Claude Code skills, not this machine's
 	if tg := targetByID("opencode@wsl:Ubuntu"); tg != nil && (len(tg.SkillsAlso) != 1 || tg.SkillsAlso[0] != "claude@wsl:Ubuntu") {
 		t.Errorf("opencode@wsl reads skills of %v", tg.SkillsAlso)
+	}
+	for id, format := range map[string]mcpFormat{
+		"opencode@wsl:Ubuntu": fmtOpenCode,
+		"mimocode@wsl:Ubuntu": fmtOpenCode,
+		"omp@wsl:Ubuntu":      fmtOmp,
+	} {
+		if tg := targetByID(id); tg != nil && (tg.Instructions != filepath.Join(filepath.Dir(tg.Skills), "AGENTS.md") ||
+			tg.MCP == nil || tg.MCP.Format != format) {
+			t.Errorf("%s has wrong WSL instructions or MCP format: %+v", id, tg)
+		}
 	}
 
 	src := filepath.Join(home(), "src", "skills")

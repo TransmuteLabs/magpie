@@ -16,6 +16,8 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
+	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
+	builtinopencode "github.com/yetone/magpie/internal/extension/builtin/opencode"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -150,7 +152,7 @@ func targetOf(a *agent.Agent) *Target {
 		if places == nil {
 			return targetOf(target)
 		}
-		return extensionAgentTarget(target, places)
+		return extensionAgentTarget(&Target{Agent: target}, places)
 	}
 	if a.WSL != "" {
 		return wslTargetOf(a)
@@ -190,25 +192,20 @@ func targetOf(a *agent.Agent) *Target {
 		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp_config.json"), Format: fmtAntigravity}
 		t.Skills = filepath.Join(d, "skills")
 		t.Copy = skipsJunctions(a.ID)
-	case "opencode", "deveco":
+	case "opencode", "deveco", "mimocode":
 		// DevEco Code is OpenCode's fork and reads as it does: AGENTS.md
 		// in its config folder, else Claude Code's CLAUDE.md, skills there
 		// and under ~/.claude and ~/.agents (packages/opencode/src/session
 		// /instruction.ts, skill/index.ts)
-		d := filepath.Dir(a.Path)
-		t.Instructions = filepath.Join(d, "AGENTS.md")
-		t.Note = "opencode-claude"
-		t.MCP = &mcpFile{Path: a.Path, Format: fmtOpenCode}
-		t.Skills = filepath.Join(d, "skills")
-		t.SkillsAlso = []string{"claude"}
-	case "mimocode":
 		// MiMo Code is OpenCode's config shape; it reads Claude Code's
 		// CLAUDE.md but its own skills only (a flag opens .claude's), so the
 		// shared skills go into its own folder, not Claude Code's.
-		d := filepath.Dir(a.Path)
-		t.Instructions = filepath.Join(d, "AGENTS.md")
-		t.MCP = &mcpFile{Path: a.Path, Format: fmtOpenCode}
-		t.Skills = filepath.Join(d, "skills")
+		places := builtinopencode.Library(a.Path)
+		t = extensionAgentTarget(t, &places)
+		if t != nil && a.ID != "mimocode" {
+			t.Note = "opencode-claude"
+			t.SkillsAlso = []string{"claude"}
+		}
 	case "pi":
 		// PI_CODING_AGENT_DIR's, else ~/.pi/agent (agent.piDir). Pi reads
 		// AGENTS.override.md there when it is there, else the first there
@@ -260,13 +257,13 @@ func targetOf(a *agent.Agent) *Target {
 		t.Skills = filepath.Join(d, "skills")
 	case "omp":
 		// ~/.omp/agent, or where omp's variables move it (agent.ompDir)
-		d := a.Dir
-		t.Instructions = filepath.Join(d, "AGENTS.md")
 		// omp reads mcpServers from its agent folder's mcp.json
 		// (discovery/builtin.ts), type choosing the transport
-		t.MCP = &mcpFile{Path: filepath.Join(d, "mcp.json"), Format: fmtOmp}
-		t.Skills = filepath.Join(d, "skills")
-		t.SharedToo = since(ompVersion(a), ompSharedSince)
+		places := builtinomp.Library(a.Dir)
+		t = extensionAgentTarget(t, &places)
+		if t != nil {
+			t.SharedToo = since(ompVersion(a), ompSharedSince)
+		}
 	case "omo":
 		// OmO's engine (senpi, a fork of Pi) reads its agent folder's
 		// AGENTS.md, skills and mcp.json — mcpServers in the shape Pi 0.99's

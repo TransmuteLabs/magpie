@@ -1,18 +1,8 @@
 package library
 
-import (
-	"github.com/yetone/magpie/internal/agent"
-	sdk "github.com/yetone/magpie/pkg/extension"
-)
+import sdk "github.com/yetone/magpie/pkg/extension"
 
-func extensionAgentTarget(a *agent.Agent, places *sdk.AgentLibraryTarget) *Target {
-	target := &Target{
-		Agent:        a,
-		Instructions: places.Instructions,
-		Override:     places.Override,
-		Skills:       places.Skills,
-		Settings:     places.Settings,
-	}
+func extensionAgentTarget(target *Target, places *sdk.AgentLibraryTarget) *Target {
 	if places.MCP != "" {
 		format, exists := pluginMCP[places.MCPFormat]
 		if !exists {
@@ -20,5 +10,9 @@ func extensionAgentTarget(a *agent.Agent, places *sdk.AgentLibraryTarget) *Targe
 		}
 		target.MCP = &mcpFile{Path: places.MCP, Format: format}
 	}
+	target.Instructions = places.Instructions
+	target.Override = places.Override
+	target.Skills = places.Skills
+	target.Settings = places.Settings
 	return target
 }

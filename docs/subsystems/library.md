@@ -33,6 +33,11 @@ ownership and preservation of user content remain the Library's normal rules.
 stored selections and the ordinary writers use the same identity. The
 separate sleeping-WSL path retains its recorded agent identity.
 
+The linked OpenCode family and OMP modules declare their instructions,
+MCP format and skills paths as `AgentLibraryTarget` values. Native targets
+and installed profiles use the same Library mapper. The Library resolves
+WSL locations, version-dependent shared skills and ownership before writing.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

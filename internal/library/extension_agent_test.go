@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,53 @@ import (
 	"github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestLinkedAgentLibraryTargets(t *testing.T) {
+	home := sandbox(t)
+	opencode := filepath.Join(home, "open code")
+	deveco := filepath.Join(home, "dev eco")
+	mimo := filepath.Join(home, "mi mo")
+	omp := filepath.Join(home, ".omp", "profiles", "work", "agent")
+	t.Setenv("OPENCODE_CONFIG_DIR", opencode)
+	t.Setenv("DEVECO_CONFIG_DIR", deveco)
+	t.Setenv("MIMOCODE_HOME", mimo)
+	t.Setenv("OMP_PROFILE", "work")
+	holdCLI(t, home, "omp")
+	setOmpVersion(t, "11.0.0")
+	write(t, filepath.Join(omp, "config.yml"), "{}\n")
+
+	for _, fixture := range []struct {
+		id, directory, file, format, note string
+		claudeSkills, shared              bool
+	}{
+		{"opencode", opencode, "opencode.jsonc", "opencode", "opencode-claude", true, false},
+		{"deveco", deveco, "config.json", "opencode", "opencode-claude", true, false},
+		{"mimocode", filepath.Join(mimo, "config"), "mimocode.json", "opencode", "", false, false},
+		{"omp", omp, "mcp.json", "omp", "", false, true},
+	} {
+		t.Run(fixture.id, func(t *testing.T) {
+			mcp := filepath.Join(fixture.directory, fixture.file)
+			write(t, mcp, "{}\n")
+			target := targetByID(fixture.id)
+			if target == nil || target.Instructions != filepath.Join(fixture.directory, "AGENTS.md") ||
+				target.MCP == nil || target.MCP.Path != mcp || target.MCP.Format != pluginMCP[fixture.format] ||
+				target.Skills != filepath.Join(fixture.directory, "skills") {
+				t.Fatalf("wrong Library target for %s: %+v", fixture.id, target)
+			}
+			if target.Note != fixture.note || slices.Contains(target.SkillsAlso, "claude") != fixture.claudeSkills ||
+				target.SharedToo != fixture.shared || target.Copy || target.Store != "" {
+				t.Fatalf("wrong Library policy for %s: %+v", fixture.id, target)
+			}
+
+			format := pluginMCP[fixture.format]
+			delete(pluginMCP, fixture.format)
+			t.Cleanup(func() { pluginMCP[fixture.format] = format })
+			if target := targetByID(fixture.id); target != nil {
+				t.Fatalf("ordinary target bypassed the SDK's unknown MCP format rejection: %+v", target)
+			}
+		})
+	}
+}
 
 func TestSDKAgentLibraryTargetUsesOrdinaryOwners(t *testing.T) {
 	home := sandbox(t)
