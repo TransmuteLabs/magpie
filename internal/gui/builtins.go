@@ -64,16 +64,14 @@ type builtinJSON struct {
 // builtinsState composes plugins.yml again, brings the runtime to it, and
 // says every built-in plugin, in their order.
 func builtinsState() []builtinJSON {
-	cs, err := pluginrt.Refresh()
+	cs, statuses, err := pluginrt.RefreshState()
 	byID := map[string]pluginrt.Composed{}
 	for _, c := range cs {
 		byID[c.ID] = c
 	}
 	st := map[string]pluginrt.Status{}
-	if rt := pluginrt.Running(); rt != nil {
-		for _, s := range rt.Statuses() {
-			st[s.ID] = s
-		}
+	for _, s := range statuses {
+		st[s.ID] = s
 	}
 	out := []builtinJSON{}
 	for _, m := range pluginrt.Registered() {
@@ -86,7 +84,7 @@ func builtinsState() []builtinJSON {
 			}
 		}
 		if err != nil {
-			j.Broken, j.Chosen = err.Error(), j.On
+			j.Broken = err.Error()
 		}
 		if j.ID == "search" && j.On {
 			j.Searches = searchesNow()

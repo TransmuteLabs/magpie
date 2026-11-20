@@ -232,6 +232,108 @@ func TestBuiltinConfig(t *testing.T) {
 	}
 }
 
+func TestGatewayBuiltinDuplicateSettingsRows(t *testing.T) {
+	handler := builtinHome(t)
+	writeBuiltinYAML(t, `plugins:
+  - id: gateway
+    enabled: false
+    config: {callsPage: 10}
+  - id: library
+    enabled: false
+  - id: gateway
+    enabled: true
+    config: {callsPage: 50}
+`)
+	check := func(body string, on bool, callsPage float64) {
+		t.Helper()
+		feature := readGatewayBuiltin(t, handler, body)
+		if feature.On != on || feature.Chosen != on || feature.Config["callsPage"] != callsPage {
+			t.Errorf("after %q: on=%v chosen=%v config=%v, want on=%v callsPage=%v", body, feature.On, feature.Chosen, feature.Config, on, callsPage)
+		}
+	}
+	check("", true, 50)
+	check(`{"id":"gateway","on":false}`, false, 50)
+	check(`{"id":"gateway","config":{"callsPage":100}}`, false, 100)
+	check(`{"id":"gateway","on":true}`, true, 100)
+	file, _, err := pluginrt.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Plugins) != 3 || file.Plugins[0].Config["callsPage"] != 10 ||
+		file.Plugins[0].Enabled == nil || *file.Plugins[0].Enabled ||
+		file.Plugins[1].ID != "library" || file.Plugins[1].Enabled == nil || *file.Plugins[1].Enabled {
+		t.Fatalf("edit changed a shadowed or unrelated row: %+v", file.Plugins)
+	}
+}
+
+func TestGatewayBuiltinMalformedSettingsKeepAppliedConfig(t *testing.T) {
+	handler := builtinHome(t)
+	writeBuiltinYAML(t, "plugins: [{id: gateway, config: {callsPage: 100}}]\n")
+	config := readGatewayBuiltin(t, handler, "").Config
+	if config["callsPage"] != float64(100) {
+		t.Fatalf("initial callsPage: %v", config)
+	}
+	const malformed = "plugins: [\n"
+	writeBuiltinYAML(t, malformed)
+	feature := readGatewayBuiltin(t, handler, "")
+	if !feature.On || !feature.Chosen || feature.Broken == "" || feature.Config["callsPage"] != float64(100) {
+		t.Errorf("malformed file lost applied gateway settings: %+v", feature)
+	}
+	boot := httptest.NewRecorder()
+	handler.ServeHTTP(boot, httptest.NewRequest("GET", "/boot.js", nil))
+	if boot.Code != http.StatusOK || !strings.Contains(boot.Body.String(), `"pluginConfig":{"gateway":{"callsPage":100}}`) {
+		t.Errorf("boot.js lost the applied Gateway callsPage: HTTP %d", boot.Code)
+	}
+	for _, update := range []string{`{"id":"gateway","on":false}`, `{"id":"gateway","config":{"callsPage":50}}`} {
+		if response := postBuiltin(handler, update); response.Code != http.StatusBadRequest {
+			t.Errorf("accepted %s over malformed file: %d", update, response.Code)
+		}
+	}
+	if body, err := os.ReadFile(pluginrt.Path()); err != nil || string(body) != malformed {
+		t.Fatalf("malformed file was changed: %q, %v", body, err)
+	}
+	writeBuiltinYAML(t, "plugins: [{id: gateway, config: {callsPage: 50}}]\n")
+	feature = readGatewayBuiltin(t, handler, "")
+	if !feature.On || feature.Broken != "" || feature.Config["callsPage"] != float64(50) {
+		t.Fatalf("repaired file was not applied: %+v", feature)
+	}
+	writeBuiltinYAML(t, "plugins: []\n")
+	if feature := readGatewayBuiltin(t, handler, ""); feature.Broken != "" || feature.Config["callsPage"] != float64(20) {
+		t.Fatalf("removed setting did not return to its default: %+v", feature)
+	}
+}
+
+func writeBuiltinYAML(t *testing.T, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(pluginrt.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginrt.Path(), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readGatewayBuiltin(t *testing.T, handler http.Handler, body string) builtinJSON {
+	t.Helper()
+	response := httptest.NewRecorder()
+	if body == "" {
+		handler.ServeHTTP(response, httptest.NewRequest("GET", "/api/plugins/builtin", nil))
+	} else {
+		response = postBuiltin(handler, body)
+	}
+	var features []builtinJSON
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &features) != nil {
+		t.Fatalf("read built-ins: %d %s", response.Code, response.Body)
+	}
+	for _, feature := range features {
+		if feature.ID == "gateway" {
+			return feature
+		}
+	}
+	t.Fatal("missing Gateway built-in")
+	return builtinJSON{}
+}
+
 // Every file a built-in plugin says it has is on disk, loaded by the page
 // and named with its hash so a new one isn't read from the cache: a script
 // after the kernel and before app.js, which looks for its pages, a

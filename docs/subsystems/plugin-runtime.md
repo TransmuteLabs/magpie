@@ -560,6 +560,8 @@ remembering its layer (`Source`):
 
 `Composed.Chosen` is plugins.yml's say before step 4. `magpie plugin dump`
 (`--json`) prints the composed list with each plugin's state and why.
+When an ID is repeated in `plugins.yml`, the last row supplies the user's
+settings for that plugin. Switches and settings edits update that same row.
 
 ## Runtime paths
 
@@ -574,8 +576,8 @@ remembering its layer (`Source`):
   is printed and magpie starts.
 - **Every read**: `Refresh` loads plugins.yml again, composes it and
   reconciles. The window's `/api/state`, `/api/plugins/builtin` and boot.js
-  each call it (`builtinsState`), so a change made by the CLI shows on the
-  next read.
+  get the reconciled settings and status together through `RefreshState`
+  (`builtinsState`), so a change made by the CLI shows on the next read.
 - **Switch**: `Set(id, on)` (`POST /api/plugins/builtin`, `magpie plugin
   builtin on|off <id>`) writes the user's row; `SetPreset` the preset
   (`magpie plugin preset essentials|all`). Off is refused while the plugin
@@ -591,11 +593,12 @@ remembering its layer (`Source`):
 ## Failure and compatibility
 
 - A plugins.yml that can't be read or doesn't parse, or names another
-  preset, is an error, never an empty file. `Refresh` returns it and leaves
-  the runtime as it was; before the first good read every plugin is on, as
-  before plugins existed. `Set` and `SetPreset` refuse to write over it, the
-  window says it above the list and disables every switch, and the CLI exits
-  with it. The user fixes the file or removes it.
+  preset, is an error. `Refresh` returns the error with the settings from
+  the last reconciliation. On the first failed read, the runtime uses the
+  built-in defaults. The Built-in list and boot.js keep that configuration
+  until a successful read. `Set`, `SetConfig` and `SetPreset` refuse to
+  write over the file. The window shows the error and disables switches,
+  and the CLI exits with the error. The user fixes the file or removes it.
 - Writes hold `filelock.Mutex` (`plugins.yml.lock`) against other magpies
   and a mutex in the process, are written whole (temp file, sync, rename),
   and keep the file they replace as `plugins.yml.bak`.

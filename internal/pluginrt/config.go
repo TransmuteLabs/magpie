@@ -70,6 +70,22 @@ type Row struct {
 	Config  map[string]any `yaml:"config,omitempty"`
 }
 
+func (f File) effectiveRows() map[string]*Row {
+	rows := make(map[string]*Row, len(f.Plugins))
+	for i := range f.Plugins {
+		rows[f.Plugins[i].ID] = &f.Plugins[i]
+	}
+	return rows
+}
+
+func (f *File) editRow(id string) *Row {
+	if row := f.effectiveRows()[id]; row != nil {
+		return row
+	}
+	f.Plugins = append(f.Plugins, Row{ID: id})
+	return &f.Plugins[len(f.Plugins)-1]
+}
+
 // Path is plugins.yml, in magpie's folder.
 func Path() string { return filepath.Join(appdir.Config(), "plugins.yml") }
 
@@ -124,10 +140,7 @@ type Composed struct {
 
 // Compose layers f over the defaults for each manifest, in ms' order.
 func Compose(ms []Manifest, f File) []Composed {
-	rows := map[string]Row{}
-	for _, r := range f.Plugins {
-		rows[r.ID] = r
-	}
+	rows := f.effectiveRows()
 	out := make([]Composed, 0, len(ms))
 	for _, m := range ms {
 		c := Composed{ID: m.ID, Enabled: true, Source: FromDefault, Config: map[string]any{}, Sources: map[string]Source{}}
@@ -137,7 +150,7 @@ func Compose(ms []Manifest, f File) []Composed {
 		if f.Preset == PresetEssentials && !m.Essential {
 			c.Enabled, c.Source = false, FromPreset
 		}
-		if r, ok := rows[m.ID]; ok {
+		if r := rows[m.ID]; r != nil {
 			if r.Enabled != nil {
 				c.Enabled, c.Source = *r.Enabled, FromUser
 			}
@@ -168,6 +181,8 @@ func Compose(ms []Manifest, f File) []Composed {
 		}
 		if len(c.Config) == 0 {
 			c.Config, c.Sources = nil, nil
+		} else {
+			c.Config = cloneConfigMap(c.Config)
 		}
 		out = append(out, c)
 	}
@@ -185,6 +200,40 @@ func merge(under, over any) any {
 	out := maps.Clone(u)
 	for k, v := range o {
 		out[k] = merge(out[k], v)
+	}
+	return out
+}
+
+func cloneConfigMap[K comparable](config map[K]any) map[K]any {
+	out := maps.Clone(config)
+	for key, value := range out {
+		out[key] = cloneConfigValue(value)
+	}
+	return out
+}
+
+func cloneConfigValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneConfigMap(value)
+	case map[any]any:
+		return cloneConfigMap(value)
+	case []any:
+		out := slices.Clone(value)
+		for i, item := range out {
+			out[i] = cloneConfigValue(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func cloneComposed(composed []Composed) []Composed {
+	out := slices.Clone(composed)
+	for i := range out {
+		out[i].Config = cloneConfigMap(out[i].Config)
+		out[i].Sources = maps.Clone(out[i].Sources)
 	}
 	return out
 }
@@ -218,12 +267,7 @@ func Settle() (bool, error) {
 // written over: the user fixes it, or removes it.
 func Set(id string, on bool) error {
 	return update(func(f *File) {
-		i := slices.IndexFunc(f.Plugins, func(r Row) bool { return r.ID == id })
-		if i < 0 {
-			f.Plugins = append(f.Plugins, Row{ID: id})
-			i = len(f.Plugins) - 1
-		}
-		f.Plugins[i].Enabled = &on
+		f.editRow(id).Enabled = &on
 	})
 }
 
@@ -248,15 +292,11 @@ func SetConfig(id string, config map[string]any) error {
 		return err
 	}
 	return update(func(f *File) {
-		i := slices.IndexFunc(f.Plugins, func(r Row) bool { return r.ID == id })
-		if i < 0 {
-			f.Plugins = append(f.Plugins, Row{ID: id})
-			i = len(f.Plugins) - 1
+		row := f.editRow(id)
+		if row.Config == nil {
+			row.Config = map[string]any{}
 		}
-		if f.Plugins[i].Config == nil {
-			f.Plugins[i].Config = map[string]any{}
-		}
-		maps.Copy(f.Plugins[i].Config, ok)
+		maps.Copy(row.Config, ok)
 	})
 }
 
@@ -327,23 +367,33 @@ var (
 	def   *Runtime
 )
 
-// Refresh composes plugins.yml with the registered plugins and brings the
-// process's runtime to it, made on the first call. A plugins.yml that
-// can't be read leaves the runtime as it was (every plugin on, before the
-// first good read) and is returned.
+// Refresh reconciles the process's runtime with plugins.yml. On a read
+// error it returns the last reconciled settings with the error. If the
+// first read fails, it reconciles with the built-in defaults.
 func Refresh() ([]Composed, error) {
 	defMu.Lock()
 	defer defMu.Unlock()
+	rt, err := refreshRuntime()
+	return cloneComposed(rt.composed), err
+}
+
+// RefreshState returns the reconciled settings and runtime statuses from
+// the same refresh. It retains the last settings when plugins.yml fails.
+func RefreshState() ([]Composed, []Status, error) {
+	defMu.Lock()
+	defer defMu.Unlock()
+	rt, err := refreshRuntime()
+	return cloneComposed(rt.composed), rt.Statuses(), err
+}
+
+func refreshRuntime() (*Runtime, error) {
 	ms := Registered()
 	if def == nil {
 		def = New(ms)
 	}
 	f, _, err := Load()
-	if err != nil {
-		if !def.reconciled {
-			def.Reconcile(allOn(ms), nil)
-		}
-		return nil, err
+	if err != nil && def.composed != nil {
+		return def, err
 	}
 	cs := Compose(ms, f)
 	on, config := map[string]bool{}, map[string]map[string]any{}
@@ -351,7 +401,8 @@ func Refresh() ([]Composed, error) {
 		on[c.ID], config[c.ID] = c.Enabled, c.Config
 	}
 	def.Reconcile(on, config)
-	return cs, nil
+	def.composed = cs
+	return def, err
 }
 
 // KeepFresh refreshes the process's runtime (Refresh) as it starts and
@@ -392,14 +443,6 @@ func KeepFresh(ctx context.Context, every func() time.Duration, also ...string) 
 		case <-written:
 		}
 	}
-}
-
-func allOn(ms []Manifest) map[string]bool {
-	on := map[string]bool{}
-	for _, m := range ms {
-		on[m.ID] = true
-	}
-	return on
 }
 
 // Running is the process's runtime, nil before the first Refresh.
