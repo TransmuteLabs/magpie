@@ -822,17 +822,24 @@ func piBlockKept(path string, value func() any) func() any {
 // A setCacheKey the file has already is the user's, false too (#5468), and
 // so is a model's limit.output they typed there (openCodeOutputsKept).
 func openCodeKept(path string, value func() any) func() any {
-	return theirsKept(path, "provider."+magpieID, func() any {
-		v := value()
+	return func() any {
+		get := func(key string) (string, bool) { return edit.GetJSON(path, key) }
+		return openCodeKeptValue(value(), get, func(models orderedJSON) { openCodeOutputsKept(path, models, get) })
+	}
+}
+
+func openCodeKeptValue(v any, get func(string) (string, bool), keepOutputs func(orderedJSON)) any {
+	const key = "provider." + magpieID
+	keep := func() any {
 		if block, ok := v.(map[string]any); ok {
 			if ms, ok := block["models"].(orderedJSON); ok {
-				openCodeOutputsKept(path, ms, func(key string) (string, bool) { return edit.GetJSON(path, key) })
+				keepOutputs(ms)
 			}
 		}
-		if _, set := edit.GetJSON(path, "provider."+magpieID+".options.setCacheKey"); set {
+		if _, set := get(key + ".options.setCacheKey"); set {
 			v = withoutOption(v, "options", "setCacheKey")
 		}
-		raw, ok := edit.GetJSON(path, "provider."+magpieID+".models")
+		raw, ok := get(key + ".models")
 		if !ok {
 			return v
 		}
@@ -868,7 +875,10 @@ func openCodeKept(path string, value func() any) func() any {
 			e["variants"] = ours
 		}
 		return v
-	}, "models")
+	}
+	next := keep()
+	current, _ := get(key)
+	return theirsKeptValue(current, next, "models")
 }
 
 // withoutOption is magpie's provider block v without key in its object

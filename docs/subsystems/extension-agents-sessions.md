@@ -324,6 +324,12 @@ changes and Sync also include the picker and capabilities in the checked
 settings plan. Disconnect restores the route and removes the owned picker
 in one plan. A fingerprint of the written picker preserves a subsequent
 user edit even when its rows still say `via magpie`.
+The shared JSON catalog Sync publishes existing entries from checked SDK
+snapshots. A deleted entry or changed file cannot be restored from an older
+plan. OpenCode 1 refreshes its legacy provider and any existing native mirror
+in one file change. Air uses the same planner for its own legacy provider.
+The planner keeps custom settings from the checked file and saves model
+output history after successful publication.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,

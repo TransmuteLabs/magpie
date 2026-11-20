@@ -9,9 +9,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 	"gopkg.in/yaml.v3"
 )
 
@@ -126,15 +130,43 @@ func SyncCatalogSettled() {
 // there and it differs: an agent that watches its files isn't told of a
 // change that isn't one.
 func syncJSON(path, key string, value func() any) error {
-	cur, ok := edit.GetJSON(path, key)
-	if !ok {
-		return nil
-	}
-	v := value()
-	if sameJSON(cur, v) {
-		return nil
-	}
-	return edit.SetJSON(path, edit.KV{Path: key, Value: v})
+	return syncJSONFrom(path, key, func(gjson.Result) any { return value() })
+}
+
+func syncJSONFrom(path, key string, value func(gjson.Result) any) error {
+	return applyJSONSync(path, func(config gjson.Result) []edit.KV {
+		current := config.Get(key)
+		if !current.Exists() {
+			return nil
+		}
+		next := value(config)
+		if sameJSON(current.Raw, next) {
+			return nil
+		}
+		return []edit.KV{{Path: key, Value: next}}
+	})
+}
+
+func syncKeptJSON(path, key string, value func() any, whole ...string) error {
+	return syncJSONFrom(path, key, func(config gjson.Result) any {
+		return theirsKeptValue(config.Get(key).String(), value(), whole...)
+	})
+}
+
+func applyJSONSync(path string, plan func(gjson.Result) []edit.KV) error {
+	return extension.ApplyLinkedAgentPlan(plan, func(plan func(gjson.Result) []edit.KV, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		file := settings.Files[0]
+		config := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.Body)))
+		changes := plan(config)
+		if len(changes) == 0 {
+			return sdk.AgentPlan{}, nil
+		}
+		body, err := edit.PatchJSON(file.Body, changes, nil)
+		if err != nil {
+			return sdk.AgentPlan{}, edit.AtFile(file.Path, err)
+		}
+		return sdk.AgentPlan{Files: []sdk.FileChange{{Path: file.Path, Body: body, BeforeHash: file.BeforeHash}}}, nil
+	}, extension.LinkedActionFile{Name: "settings.json", Path: path})
 }
 
 // theirsKept is value, magpie's provider block for the agent, with what
@@ -168,22 +200,6 @@ func theirsKeptValue(current string, value any, whole ...string) any {
 // both merged alike; a key named in whole is want's as it is.
 func mergeTheirs(have, want map[string]json.RawMessage, whole []string) map[string]json.RawMessage {
 	return edit.MergeJSONObjects(have, want, whole)
-}
-
-// syncJSONInOrder is syncJSON for a block whose keys' order the agent reads
-// (OpenCode lists a model's variants in theirs): one that says the same in
-// another order is rewritten too, as an older magpie wrote the variants
-// alphabetically (#713).
-func syncJSONInOrder(path, key string, value func() any) error {
-	cur, ok := edit.GetJSON(path, key)
-	if !ok {
-		return nil
-	}
-	v := value()
-	if sameJSON(cur, v) && sameOrder(cur, v) {
-		return nil
-	}
-	return edit.SetJSON(path, edit.KV{Path: key, Value: v})
 }
 
 // sameOrder reports whether raw JSON and what v marshals to read alike token

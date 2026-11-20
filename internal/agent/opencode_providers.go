@@ -219,15 +219,6 @@ func openCodeOwnVariant(raw json.RawMessage) (string, bool) {
 	return id, err == nil && id != "" && sameJSON(string(b), openCodeVariant(id))
 }
 
-// syncOpenCodeNative brings magpie's provider under providers in the
-// OpenCode config at path up to block, magpie's provider in OpenCode 1's
-// words, where the file keeps it there.
-func syncOpenCodeNative(path string, block func() any) error {
-	return syncJSONInOrder(path, openCodeNativeKey, func() any {
-		return openCodeNativeKept(func(key string) (string, bool) { return edit.GetJSON(path, key) }, block())
-	})
-}
-
 // openCodeWiringOff is wiringOff for magpie's provider in the OpenCode
 // config at path: under provider, and under providers where the file keeps
 // it there, which OpenCode 2 reads instead; under providers alone in a file

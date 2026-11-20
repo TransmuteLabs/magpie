@@ -10,6 +10,7 @@ import (
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 const legacyOpenCodeConfig = `{
@@ -241,6 +242,67 @@ func TestOpenCodeLinkedCatalogSyncPreservesConcurrentEdit(t *testing.T) {
 	if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(oc.Path) != user {
 		t.Fatalf("edited = %t, error = %v, config = %q", edited, err, readFile(oc.Path))
 	}
+}
+
+func TestOpenCodeLegacySyncPlansBothProviderFormatsTogether(t *testing.T) {
+	const input = `{
+  "provider":{"magpie":{"name":"before v1","options":{"custom":"before"}}},
+  "providers":{"magpie":{"name":"before v2","settings":{"custom":"before"}}}
+}`
+	t.Run("held config", func(t *testing.T) {
+		oc := openCodeConfigFixture(t, "1.0.0", input)
+		reasonCatalog(t)
+		target, err := edit.Target(oc.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release := filememo.Hold()
+		defer release()
+		if _, ok := edit.GetJSON(oc.Path, "provider.magpie"); !ok {
+			t.Fatal("legacy provider missing from fixture")
+		}
+		writeFile(t, oc.Path, strings.ReplaceAll(input, `"custom":"before"`, `"custom":"mine"`))
+		var writes int
+		err = edit.Filtered(func(path string, data []byte) []byte {
+			if path == target {
+				writes++
+				if strings.Contains(string(data), "before v1") || strings.Contains(string(data), "before v2") {
+					t.Error("Sync published only one of the provider formats")
+				}
+			}
+			return data
+		}, oc.Sync)
+		if err != nil || writes != 1 {
+			t.Fatalf("Sync made %d writes: %v", writes, err)
+		}
+		for _, key := range []string{"provider.magpie.options.custom", "providers.magpie.settings.custom"} {
+			if got, _ := edit.GetJSON(oc.Path, key); got != "mine" {
+				t.Errorf("Sync lost the current value at %s: %q", key, got)
+			}
+		}
+	})
+	t.Run("concurrent edit", func(t *testing.T) {
+		oc := openCodeConfigFixture(t, "1.0.0", input)
+		reasonCatalog(t)
+		key := outputsWantedKey(oc.Path)
+		target, err := edit.Target(oc.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		user := strings.ReplaceAll(input, `"custom":"before"`, `"custom":"mine"`)
+		var edited bool
+		err = edit.Filtered(func(path string, data []byte) []byte {
+			if path == target && !edited {
+				writeFile(t, path, user)
+				edited = true
+			}
+			return data
+		}, oc.Sync)
+		if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(oc.Path) != user || unstashPeek(key) != "" {
+			t.Fatalf("Sync published over an edit or saved stale output limits: edited=%t, err=%v, config=%s, limits=%s",
+				edited, err, readFile(oc.Path), unstashPeek(key))
+		}
+	})
 }
 
 func TestOpenCodeLinkedConflictLeavesOutputHistory(t *testing.T) {
