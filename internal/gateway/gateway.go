@@ -6730,7 +6730,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	body = copilotGrokFlat(p, to, body)
 	body = kimiToolEnumTypes(p, to, body)
 	body = kimiToolRefTypes(p, to, body)
-	body = geminiTypes(body, copilotGemini(p, body))
+	body, free := geminiTypes(body, copilotGemini(p, body))
 	body = kimiLockedSampling(p, to, body)
 	body = clinePin(p, to, body)
 	body = codexImagesFit(p, to, body)
@@ -7129,6 +7129,10 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	heardCodexLimits(p, res)
 	heardCodexTurnState(turnAcct, turnOf, res)
 	noteSignIn(ctx, p.Account, req, res)
+	if len(free) != 0 {
+		sentRequest := cmp.Or(res.Request, req)
+		res.Request = sentRequest.WithContext(context.WithValue(sentRequest.Context(), freeReplyKey{}, free))
+	}
 	return res, nil
 }
 
@@ -8173,6 +8177,13 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if (proto == provider.Responses || proto == provider.Chat || proto == provider.Anthropic) && (glmFlash(model) || glmFlash(upstream)) {
 		crArgs = &crTidy{proto: proto, sse: sse}
 	}
+	// a Gemini model's objects of any fields, asked for as JSON text, read
+	// back in its calls (gemini_free_objects.go, #7363); after crArgs,
+	// which drops what would keep the text from parsing
+	var free *freeTidy
+	if tools := freeReplyPaths(res); len(tools) > 0 {
+		free = &freeTidy{proto: proto, sse: sse, tools: tools}
+	}
 	// a message the upstream gave no phase gets one, as OpenAI's own
 	// models' do (phase.go, #2437); it goes last, as it holds events back
 	var phases *phaseTidy
@@ -8359,6 +8370,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			if crArgs != nil {
 				out = crArgs.write(out)
 			}
+			if free != nil {
+				out = free.write(out)
+			}
 			if made != nil {
 				out = made.write(out)
 			}
@@ -8401,6 +8415,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if crArgs != nil {
 			b = crArgs.write(b)
 		}
+		if free != nil {
+			b = free.write(b)
+		}
 		if made != nil {
 			b = made.write(b)
 		}
@@ -8440,6 +8457,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	}
 	if crArgs != nil {
 		b := crArgs.flush()
+		if free != nil {
+			// free, after crArgs, holds what it can't say yet to its own
+			// drain below
+			b = free.write(b)
+		}
 		if made != nil {
 			// made holds a whole reply until its own drain below, as ints
 			// does: a reply crArgs held to its end goes through it too
@@ -8448,6 +8470,21 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if ints != nil {
 			// ints holds a whole reply until its own drain below, so the
 			// tail ints has not seen goes through it here first
+			b = ints.write(b)
+		}
+		if sigs != nil {
+			b = sigs.write(b)
+		}
+		write(out(b))
+	}
+	if free != nil {
+		// past crArgs, drained above: what free held goes on through the
+		// filters after it
+		b := free.flush()
+		if made != nil {
+			b = made.write(b)
+		}
+		if ints != nil {
 			b = ints.write(b)
 		}
 		if sigs != nil {
@@ -10219,6 +10256,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	res2 := col.finish()
 	u.add(res2.Usage)
 	u.add(Usage{Served: res2.Model})
+	request.Free = freeReplyPaths(res)
 	out := renderUsage(from, res2, request, u)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
@@ -10659,6 +10697,10 @@ func relayEvents(events <-chan Event, sw *sseWriter, enc streamEncoder, see func
 }
 
 func encoder(proto provider.Protocol, w *sseWriter, r *Request, usage ...*Usage) streamEncoder {
+	return replyEncoder(proto, w, r, nil, usage...)
+}
+
+func replyEncoder(proto provider.Protocol, w *sseWriter, r *Request, free *freeEncoder, usage ...*Usage) streamEncoder {
 	enc := makeEncoder(proto, w, r)
 	if len(usage) > 0 && usage[0] != nil {
 		enc = &usageEncoder{streamEncoder: enc, usage: usage[0]}
@@ -10667,6 +10709,13 @@ func encoder(proto provider.Protocol, w *sseWriter, r *Request, usage ...*Usage)
 	// integers (grok_integral.go, #1431, #3152), outside usageEncoder,
 	// which reads its encoder's reply id
 	enc = &wholeEncoder{streamEncoder: enc}
+	if free != nil {
+		// a Gemini model's objects of any fields, which it was asked for
+		// as JSON text, read back (gemini_free_objects.go, #7363); past
+		// crEncoder, which drops what would keep the text from parsing
+		free.streamEncoder = enc
+		enc = free
+	}
 	if r.CR {
 		enc = &crEncoder{streamEncoder: enc}
 	}
@@ -10699,6 +10748,7 @@ func render(proto provider.Protocol, res Result, r *Request) []byte {
 	if r.CR {
 		res = crResult(res)
 	}
+	res = freeResult(res, r.Free)
 	res = unfencedResult(res, r)
 	switch proto {
 	case provider.Chat:

@@ -450,6 +450,9 @@ type Request struct {
 	// arguments reach the client with the stitched CR dropped
 	// (tool_args_cr.go).
 	CR bool
+	// Free gives the tool argument paths rewritten in the request whose
+	// whole response is being rendered (gemini_free_objects.go, #7363).
+	Free map[string][][]string
 }
 
 // nsTool is a tool as a Responses client knows it: by its namespace and its

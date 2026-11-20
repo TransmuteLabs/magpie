@@ -35,6 +35,7 @@ import (
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -84,16 +85,15 @@ var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
 
 var (
 	now  = time.Now
-	list = func() []sessions.Session { return sessions.List(Listed) }
-	read = sessions.TranscriptOfContext
+	list = listed
+	read = transcriptOf
 	// running is held through a run in this process, and the file lock
 	// across magpies
 	running sync.Mutex
 	busy    atomic.Bool
-	// stop ends the run going (Stop), stopped says it was asked to
-	stopMu  sync.Mutex
-	stop    context.CancelFunc
-	stopped atomic.Bool
+	// stop ends the run going (Stop)
+	stopMu sync.Mutex
+	stop   context.CancelFunc
 	// doing and of are the run's progress: sessions gone through, of
 	// how many
 	doing, of atomic.Int64
@@ -113,13 +113,14 @@ func Stop() {
 	stopMu.Lock()
 	defer stopMu.Unlock()
 	if stop != nil {
-		stopped.Store(true)
 		stop()
 	}
 }
 
 // ErrRunning is a run asked for while one is going.
 var ErrRunning = errors.New("already reading conversations")
+
+var errStopped = errors.New("conversation reading stopped")
 
 // Load reads distill.json; a missing file is the default (off). One that
 // can't be read is an error, never the default: a run doesn't start, and
@@ -300,22 +301,58 @@ type Result struct {
 // when the state names no model. A model that fails stops the run: the
 // sessions not read yet are read next time.
 func Run(ctx context.Context, auto string, complete Complete) (Result, error) {
-	return runUpTo(ctx, auto, complete, PerRun)
+	return runUpTo(ctx, func() string { return auto }, complete, PerRun)
 }
 
 // ReadAll is Run over every session due, for a run the user asked for:
 // switched on, a model or a longer range picked, Read now. Stop ends it.
 func ReadAll(ctx context.Context, auto string, complete Complete) (Result, error) {
-	return runUpTo(ctx, auto, complete, Listed)
+	return runUpTo(ctx, func() string { return auto }, complete, Listed)
 }
 
-func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Result, error) {
-	if !running.TryLock() {
-		return Result{}, ErrRunning
+func runUpTo(ctx context.Context, auto func() string, complete Complete, limit int) (Result, error) {
+	read, err := prepareRead(ctx, auto, complete, limit)
+	if err != nil {
+		return Result{}, err
 	}
-	defer running.Unlock()
+	return read()
+}
+
+func prepareRead(ctx context.Context, auto func() string, complete Complete, limit int) (func() (Result, error), error) {
+	stopMu.Lock()
+	defer stopMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !running.TryLock() {
+		return nil, ErrRunning
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	stop = func() { cancel(errStopped) }
 	busy.Store(true)
-	defer busy.Store(false)
+	return func() (Result, error) {
+		defer func() {
+			cancel(nil)
+			stopMu.Lock()
+			stop = nil
+			doing.Store(0)
+			of.Store(0)
+			busy.Store(false)
+			running.Unlock()
+			stopMu.Unlock()
+		}()
+		result, err := readUpTo(ctx, auto, complete, limit)
+		if err == errStopped {
+			err = nil
+		}
+		return result, err
+	}, nil
+}
+
+func readUpTo(ctx context.Context, auto func() string, complete Complete, limit int) (Result, error) {
+	if ctx.Err() != nil {
+		return Result{}, context.Cause(ctx)
+	}
 	unlock, held := filelock.Lock(Path()+".run", 0)
 	if !held {
 		return Result{}, ErrRunning
@@ -325,22 +362,12 @@ func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Re
 	if err != nil || !st.On {
 		return Result{}, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	stopMu.Lock()
-	stop = cancel
-	stopped.Store(false)
-	stopMu.Unlock()
-	defer func() {
-		stopMu.Lock()
-		stop = nil
-		stopMu.Unlock()
-		cancel()
-		doing.Store(0)
-		of.Store(0)
-	}()
 	model := st.Model
-	if model == "" {
-		model = auto
+	if model == "" && ctx.Err() == nil {
+		model = auto()
+	}
+	if ctx.Err() != nil {
+		return Result{}, context.Cause(ctx)
 	}
 	var res ran
 	var runErr error
@@ -349,7 +376,7 @@ func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Re
 	} else {
 		res, runErr = run(ctx, st, model, st.Effort, complete, limit)
 	}
-	if stopped.Load() && errors.Is(runErr, context.Canceled) {
+	if context.Cause(ctx) == errStopped && errors.Is(runErr, context.Canceled) {
 		runErr = nil
 	}
 	_, err = change(func(s *State) {
@@ -382,6 +409,33 @@ type ran struct {
 	left int
 }
 
+// listed are the latest Listed conversations as the Sessions page lists
+// them: the agents' own files and the sessions only magpie's gateway
+// recorded (WorkBuddy's, an agent's on another computer), each once
+// (sessions.GatewayKeys). Reading only the files left every agent seen
+// only through the gateway out of memory (bxgz233 on X: 1000+ WorkBuddy
+// sessions, none read).
+func listed() []sessions.Session {
+	native := sessions.List(Listed)
+	keys := map[string]bool{}
+	for _, s := range native {
+		for _, k := range sessions.GatewayKeys(s) {
+			keys[k] = true
+		}
+	}
+	all := sessions.MergeExternal(native, usage.ListedGateway(keys, Listed))
+	return all[:min(len(all), Listed)]
+}
+
+// transcriptOf reads s where it is kept: a gateway-only session from what
+// the gateway recorded of it, any other from its agent's file.
+func transcriptOf(ctx context.Context, s sessions.Session) (sessions.Transcript, error) {
+	if s.Gateway {
+		return sessions.GatewayTranscriptContext(ctx, s.Agent, s.ID)
+	}
+	return sessions.TranscriptOfContext(ctx, s)
+}
+
 // forget says a read session's mark, its last turn at, can go: the
 // session is older than since, so it is never read again, or older than
 // keepMarks and than every session listed (oldest), so it was deleted or
@@ -402,7 +456,7 @@ func due(st State, t time.Time) ([]sessions.Session, time.Time) {
 			oldest = s.Last
 		}
 		switch {
-		case s.Agent == Agent, s.Gateway, s.ReadOnly, !s.Transcript,
+		case s.Agent == Agent, !s.Transcript,
 			s.ParentSession != "",
 			t.Sub(s.Last) < Quiet, s.Last.Before(st.Since):
 			continue
@@ -439,6 +493,10 @@ func run(ctx context.Context, st State, model, effort string, complete Complete,
 			return r, canceled
 		}
 		if err != nil {
+			if interruptedTranscript(err) {
+				r.left++
+				return r, err
+			}
 			// one that can't be read now is tried again when it changes
 			r.done[key(s)] = s.Last
 			continue
@@ -469,6 +527,14 @@ func run(ctx context.Context, st State, model, effort string, complete Complete,
 		r.Added += keep(codec.DistillationReply(reply), s, proj, said(tr))
 	}
 	return r, nil
+}
+
+func interruptedTranscript(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var reply *sdk.Error
+	return errors.As(err, &reply) && reply != nil && (reply.Code == "canceled" || reply.Code == "deadline")
 }
 
 // transcript is what was said, user and assistant text alone (no tool
@@ -611,7 +677,7 @@ func Keep(ctx context.Context, first, interval time.Duration, auto func() string
 		if st, err := Load(); err == nil && !st.On {
 			continue
 		}
-		if _, err := Run(ctx, auto(), complete); err != nil && !errors.Is(err, ErrRunning) {
+		if _, err := runUpTo(ctx, auto, complete, PerRun); err != nil && !errors.Is(err, ErrRunning) {
 			log.Println("memory: reading conversations:", err) // and in the Memory tab
 		}
 		if st, err := Load(); err == nil && Dreams(st, now()) {

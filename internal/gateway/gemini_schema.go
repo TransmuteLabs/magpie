@@ -38,7 +38,10 @@ import (
 // Google's own Gemini API and Code Assist are sent parametersJsonSchema,
 // which takes JSON Schema whole, and Antigravity its own cut-down schema
 // (plainSchema), so a Gemini-shaped body isn't walked.
-func geminiToolTypes(body []byte) []byte { return geminiTypes(body, false) }
+func geminiToolTypes(body []byte) []byte {
+	body, _ = geminiTypes(body, false)
+	return body
+}
 
 // geminiTypes is geminiToolTypes, with keepUnions leaving a union node
 // (anyOf or oneOf) without the type written beside it: Copilot's Gemini
@@ -46,14 +49,17 @@ func geminiToolTypes(body []byte) []byte { return geminiTypes(body, false) }
 // `anyOf: [string, null]` (#4374, isolated by one field in a live request),
 // whatever the union's branches say, so a union goes as its client wrote it.
 // Its branches are typed as ever.
-func geminiTypes(body []byte, keepUnions bool) []byte {
+func geminiTypes(body []byte, keepUnions bool) ([]byte, map[string][][]string) {
 	if !geminiNamed(gjson.GetBytes(body, "model").String()) {
-		return body
+		return body, nil
 	}
 	body = geminiSchemaShapes(body)
+	// an object of any fields, which Gemini's Schema can't say, as JSON
+	// text in a string (gemini_free_objects.go, #7363)
+	body, free := geminiFreeObjects(body)
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() || tools.Index <= 0 {
-		return body
+		return body, free
 	}
 	var ins []typeInsert
 	tools.ForEach(func(_, tool gjson.Result) bool {
@@ -64,7 +70,7 @@ func geminiTypes(body []byte, keepUnions bool) []byte {
 		}
 		return true
 	})
-	return withTypes(body, ins)
+	return withTypes(body, ins), free
 }
 
 // geminiNamed is whether a model id names a Gemini model: gemini-…, or

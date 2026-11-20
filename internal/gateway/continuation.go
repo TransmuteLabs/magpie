@@ -479,7 +479,8 @@ func (c *continuation) unecho(s string) string {
 // client's own protocol, as it used to.
 func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p provider.Provider, from, to provider.Protocol, request *Request, model string, zen *zenReply, u *Usage) (int, string) {
 	sw := newSSEWriter(w)
-	enc := encoder(from, sw, request, u)
+	var free freeEncoder
+	enc := replyEncoder(from, sw, request, &free, u)
 	cont := &continuation{mode: prefillHow(p, to, model)}
 	if !s.fits(p.ID, prefillRefused(model), to) {
 		// the model turned a prefill away before (prefill.go, #1447)
@@ -660,6 +661,8 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 			}
 		}
 		if err == nil && res.StatusCode < 400 {
+			free.release(free.streamEncoder.event)
+			free.tools = freeReplyPaths(res)
 			rd, sse := eventStream(res)
 			if !sse {
 				// the provider ignored stream:true; read the whole reply as

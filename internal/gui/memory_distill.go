@@ -173,7 +173,6 @@ func memoryDistillRoutes(mux *http.ServeMux, service sdk.MemoryDistillationServi
 			fail(rw, err)
 			return
 		}
-		v.Running = v.Running || read
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/run", func(rw http.ResponseWriter, r *http.Request) {
@@ -183,7 +182,6 @@ func memoryDistillRoutes(mux *http.ServeMux, service sdk.MemoryDistillationServi
 			fail(rw, err)
 			return
 		}
-		v.Running = true
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/stop", func(rw http.ResponseWriter, r *http.Request) {

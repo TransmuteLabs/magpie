@@ -16,7 +16,10 @@ func Bind(auto func() string, complete Complete) sdk.MemoryDistillationService {
 			return read, err
 		},
 		ReadNow: func(ctx context.Context) {
-			go ReadAll(ctx, auto(), complete)
+			read, err := prepareRead(ctx, auto, complete, Listed)
+			if err == nil {
+				go read()
+			}
 		},
 		Stop: Stop,
 		SetDream: func(on bool) error {

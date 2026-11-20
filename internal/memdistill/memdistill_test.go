@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/memory"
@@ -116,7 +117,6 @@ func TestReadsQuietSessionsOnce(t *testing.T) {
 	sb.session("going", 5*time.Minute, "going: one", "two")
 	sb.session("short", time.Hour, "short: hi")
 	sb.session("sub", time.Hour, "sub: one", "two").ParentSession = "quiet"
-	sb.session("gw", time.Hour, "gw: one", "two").Gateway = true
 	sb.session("old", 8*24*time.Hour, "old: one", "two")
 	sb.session("own", time.Hour, "own: one", "two").Agent = Agent
 	sb.session("unread", time.Hour).Transcript = false
@@ -524,6 +524,33 @@ func TestStopEndsTheRun(t *testing.T) {
 	if res, err := ReadAll(context.Background(), "a/m", sb.complete); err != nil || res.Read != 14 {
 		t.Fatalf("%+v %v", res, err)
 	}
+}
+
+func TestReadNowCanBeStoppedWhileChoosingModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sb := newSandbox(t)
+		on(t, "")
+		sb.session("pending", time.Hour, "we deploy on Tuesdays", "keep this preference")
+		var runningWhenChoosing bool
+		service := Bind(func() string {
+			runningWhenChoosing = Running()
+			Stop()
+			return "a/m"
+		}, sb.complete)
+
+		service.ReadNow(t.Context())
+		synctest.Wait()
+		if !runningWhenChoosing || len(sb.asked) != 0 {
+			t.Fatalf("Stop during selection was lost: active %v, model calls %v", runningWhenChoosing, sb.asked)
+		}
+		view, err := service.Status()
+		if err != nil || view.Running || view.Error != "" || !view.Last.IsZero() {
+			t.Fatalf("stopped preparation was recorded as a finished run: %+v %v", view, err)
+		}
+		if result, err := ReadAll(t.Context(), "a/m", sb.complete); err != nil || result.Read != 1 {
+			t.Fatalf("could not read the pending conversation later: %+v %v", result, err)
+		}
+	})
 }
 
 func TestReadAllDiscardsSuccessfulReplyAfterStop(t *testing.T) {

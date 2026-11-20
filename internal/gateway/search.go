@@ -1570,16 +1570,20 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}
 			})
 			ended, rejected := false, false
+			free := freeCallArgs{tools: freeReplyPaths(res)}
+			emit := func(ev Event) {
+				rejected = rejected || ev.Kind == KError
+				if failed == nil {
+					failed = send(ev)
+					told = time.Now()
+				}
+			}
 			err := readSSEAlive(rd, func(_, data string) error {
 				mu.Lock()
 				defer mu.Unlock()
 				heard()
 				if err := dec(data, func(ev Event) {
-					rejected = rejected || ev.Kind == KError
-					if failed == nil {
-						failed = send(ev)
-						told = time.Now()
-					}
+					free.event(ev, emit)
 				}); err != nil {
 					return err
 				}
@@ -1598,6 +1602,7 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 				}
 			})
 			stopKeep()
+			free.release(emit)
 			if err == nil && !decoding.rejected && failed == nil && ended && !rejected && ctx.Err() == nil {
 				provider.ExtensionResponseProtocolComplete(res)
 			}

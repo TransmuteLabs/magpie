@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/memdistill"
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Conversations are read into memory through the gateway this process
@@ -158,6 +159,11 @@ func TestDistillRangeAndEffortRoutes(t *testing.T) {
 	reads := 0
 	service := linkedDistillation
 	service.ReadNow = func(context.Context) { reads++ }
+	service.Status = func() (sdk.MemoryDistillationStatus, error) {
+		status, err := linkedDistillation.Status()
+		status.Running = reads != 0
+		return status, err
+	}
 	mux := http.NewServeMux()
 	memoryDistillRoutes(mux, service)
 	post := func(body string) (int, distillView) {
@@ -248,7 +254,7 @@ func TestDistillationManualRoutesUseTheLinkedService(t *testing.T) {
 		path              string
 		running, dreaming bool
 	}{
-		{path: "/api/memory/distill/run", running: true},
+		{path: "/api/memory/distill/run"},
 		{path: "/api/memory/dream/run", dreaming: true},
 	} {
 		recorder := httptest.NewRecorder()

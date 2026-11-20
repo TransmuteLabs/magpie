@@ -424,11 +424,11 @@ func TestGeminiTypesOtherVendorsKeepTheirs(t *testing.T) {
 	if copilotGemini(other, body) {
 		t.Fatal("another provider counted as Copilot")
 	}
-	if got := geminiTypes(body, copilotGemini(other, body)); !strings.Contains(string(got), `"p":{"type":"string","anyOf"`) {
+	if got, _ := geminiTypes(body, copilotGemini(other, body)); !strings.Contains(string(got), `"p":{"type":"string","anyOf"`) {
 		t.Errorf("another vendor's union lost its type: %s", got)
 	}
 	cp := provider.Provider{Account: &provider.Account{Agent: "copilot"}}
-	if got := geminiTypes(body, copilotGemini(cp, body)); strings.Contains(string(got), `"type":"string","anyOf"`) {
+	if got, _ := geminiTypes(body, copilotGemini(cp, body)); strings.Contains(string(got), `"type":"string","anyOf"`) {
 		t.Errorf("Copilot's union was typed: %s", got)
 	}
 }

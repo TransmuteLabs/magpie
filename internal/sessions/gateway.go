@@ -6,6 +6,7 @@ package sessions
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -313,7 +314,14 @@ func PruneGatewayConversations(now time.Time) error {
 // GatewayTranscript reads recent captured exchanges. Only a full matching
 // previous history prefix is removed, never equal text found elsewhere in a chat.
 func GatewayTranscript(agent, id string) (Transcript, error) {
+	return GatewayTranscriptContext(context.Background(), agent, id)
+}
+
+func GatewayTranscriptContext(ctx context.Context, agent, id string) (Transcript, error) {
 	out := Transcript{Parts: []Part{}, Source: "gateway"}
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
 	if agent == "" || id == "" {
 		return out, errors.New("no such session")
 	}
@@ -322,6 +330,9 @@ func GatewayTranscript(agent, id string) (Transcript, error) {
 	now := time.Now()
 	var paths []string
 	for d := 0; d <= 7; d++ {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
 		dir := filepath.Join(gatewayDir(), now.UTC().AddDate(0, 0, -d).Format(time.DateOnly), gatewayIdentity(agent, id))
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -349,6 +360,9 @@ func GatewayTranscript(agent, id string) (Transcript, error) {
 		}
 	}
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			return out, err
@@ -374,6 +388,10 @@ func GatewayTranscript(agent, id string) (Transcript, error) {
 			scan := bufio.NewScanner(io.LimitReader(f, end))
 			scan.Buffer(make([]byte, 64<<10), gatewayTurnMax+1)
 			for scan.Scan() {
+				if err := ctx.Err(); err != nil {
+					f.Close()
+					return out, err
+				}
 				var turn GatewayTurn
 				if json.Unmarshal(scan.Bytes(), &turn) != nil {
 					f.Close()
@@ -398,6 +416,9 @@ func GatewayTranscript(agent, id string) (Transcript, error) {
 		if err != nil {
 			return out, err
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return out, err
 	}
 	sort.SliceStable(turns, func(i, j int) bool { return turns[i].Time.Before(turns[j].Time) })
 	if len(turns) > gatewayReadMax {

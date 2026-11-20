@@ -10,6 +10,7 @@ type MemoryCompletion func(ctx context.Context, model, effort, system, user stri
 
 // MemoryDistillationService is the linked owner of conversation review and
 // nightly cleanup. Manual and scheduled jobs use the same host model callback.
+// ReadNow registers an admitted run with Status and Stop before returning.
 type MemoryDistillationService struct {
 	Status    func() (MemoryDistillationStatus, error)
 	Configure func(MemoryDistillationSettings) (readNow bool, err error)

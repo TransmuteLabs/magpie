@@ -35,7 +35,7 @@ func main(){
  sdk.MethodProviderExecute:func(ctx context.Context,call sdk.Call,stream *sdk.Stream)(any,error){
   var request sdk.ExecuteRequest;if err:=json.Unmarshal(call.Params,&request);err!=nil{return nil,err}
   var auth struct{URL string};if err:=json.Unmarshal(call.Auth,&auth);err!=nil{return nil,err}
-  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"model":request.Model,"operation":call.Scope.Operation})
+  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"model":request.Model,"operation":call.Scope.Operation,"protocol":request.Protocol,"body":request.Body})
   req,_:=http.NewRequestWithContext(ctx,"POST",auth.URL,bytes.NewReader(body));res,err:=http.DefaultClient.Do(req);if err!=nil{return nil,err}
   raw,err:=io.ReadAll(res.Body);res.Body.Close();if err!=nil{return nil,err}
   var reply map[string]any;if err:=json.Unmarshal(raw,&reply);err!=nil{return nil,err}

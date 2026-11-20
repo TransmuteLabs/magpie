@@ -275,10 +275,11 @@ linked `MemoryOwner`.
   It reads every conversation due, one request at a time, and the row
   shows how far it has gone (`Progress`, `doing` of `of` in the view)
   with a Stop (`Stop`, `POST /api/memory/distill/stop`; switching off
-  stops it too). A stop or a failure leaves the rest for the next run,
-  and the row says how many (`State.Left`) (`TestBacklogReadAtOnce`,
-  `TestStopEndsTheRun`). Before, every run read 10, and 400 took 40
-  hours (RealZeroP27 on X).
+  stops it too). The linked service registers the run before looking up
+  the model, and the GUI takes the running state from that service.
+  Stop is available during discovery and while reading one conversation.
+  A stop or a failure leaves the rest for the next run, and the row says
+  how many from the sessions discovered (`State.Left`).
 - State is `distill.json` beside the `memory` folder (`memdistill.Path`):
   the switch, the model, the reasoning level, the range, the
   conversations done, and the last run's time, counts, error and how
@@ -292,9 +293,17 @@ linked `MemoryOwner`.
 - `Keep` runs 5 minutes after the GUI backend starts, then hourly
   (`keepDistilling` in `internal/gui/memory_distill.go`). `Run` takes at
   most 30 conversations (`PerRun`, more than a busy hour brings) quiet for 30 minutes (`Quiet`) with at
-  least two turns, and skips the gateway's own records, read-only
-  agents, subagent sessions and its own agent (`memory`). One run at a
-  time, in this process and across processes (`.run` lock).
+  least two turns, and skips subagent sessions and its own agent
+  (`memory`). One run at a time, in this process and across processes
+  (`.run` lock).
+- The conversations are those the Sessions page lists (`listed`): the
+  agents' own files, read-only ones included (the Antigravity app's,
+  Cursor's editor's), and the sessions only the gateway recorded
+  (`usage.ListedGateway`, as the page lists them), each read where it is
+  kept (`transcriptOf`, `sessions.GatewayTranscriptContext` for a
+  gateway-only one). A gateway session with nothing recorded has no turns
+  and is passed over. Interrupted reads, including a delegated SDK
+  source's cancellation or deadline, leave the same conversation due.
 - What is sent: the conversation's user and assistant text only (no
   tools, no reasoning), cut to 24k characters keeping the head and the
   tail, plus the memories already kept for that project, under neutral
