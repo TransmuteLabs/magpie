@@ -243,7 +243,7 @@ further (`State.Since`), unless a range is picked.
 - A backlog is read at once when the user asks (`ReadAll`, through
   `distillNow`): switched on, a model or a longer range picked, Read now.
   It reads every conversation due, one request at a time, and the row
-  shows how far it has gone (`Progress`, `doing` of `of` in the view)
+  shows how far it has gone (`doing` of `of` in the view)
   with a Stop (`Stop`, `POST /api/memory/distill/stop`; switching off
   stops it too). Stop cancels discovery, transcript reads and model requests.
   Discovery checks between agent listings and queued file parses. A
@@ -269,6 +269,10 @@ further (`State.Since`), unless a range is picked.
   least two turns, and skips the gateway's own records, read-only
   agents, subagent sessions and its own agent (`memory`). One run at a
   time, in this process and across processes (`.run` lock).
+  The owner takes both locks before manual reads or tidies start. The
+  response reports the active operation and progress, including when
+  another operation keeps the requested one from starting. Model
+  selection for the admitted work happens in the background.
 - What is sent: the conversation's user and assistant text only (no
   tools, no reasoning), cut to 24k characters keeping the head and the
   tail, plus the memories already kept for that project, under neutral

@@ -38,14 +38,15 @@ type distillView struct {
 }
 
 func readDistill() (*distillView, error) {
+	reading, dreaming, doing, of := memdistill.ActiveRun()
 	st, err := memdistill.Load()
 	if err != nil {
 		return nil, err
 	}
 	st.Done = nil // the marks are the run's, not the page's
-	v := &distillView{State: st, Auto: distillAuto(), Models: []modelRef{}, Running: memdistill.Running() && !memdistill.Dreaming(), Dreaming: memdistill.Dreaming(), Ranges: memdistill.Ranges}
-	if v.Running {
-		v.Doing, v.Of = memdistill.Progress()
+	v := &distillView{
+		State: st, Auto: distillAuto(), Running: reading, Dreaming: dreaming,
+		Doing: doing, Of: of, Ranges: memdistill.Ranges,
 	}
 	inUse := st.Model
 	if inUse == "" {
@@ -151,7 +152,7 @@ func keepDistilling(ctx context.Context) {
 // button; the tab polls while it runs, and Stop ends it (RealZeroP27 on
 // X: the hourly 10 read 400 in 40 hours).
 var distillNow = func() {
-	go memdistill.ReadAll(backendCtx, distillAuto(), distillComplete)
+	memdistill.ReadNow(backendCtx, distillAuto, distillComplete)
 }
 
 // distillStop ends the run going.
@@ -193,7 +194,6 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		v.Running = v.Running || read
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/run", func(rw http.ResponseWriter, r *http.Request) {
@@ -203,7 +203,6 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		v.Running = true
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/stop", func(rw http.ResponseWriter, r *http.Request) {
@@ -236,13 +235,12 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/dream/run", func(rw http.ResponseWriter, r *http.Request) {
-		dreamNow()
+		memdistill.DreamNow(backendCtx, distillAuto, distillComplete)
 		v, err := readDistill()
 		if err != nil {
 			fail(rw, err)
 			return
 		}
-		v.Dreaming, v.Running = true, false
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/dream/undo", func(rw http.ResponseWriter, r *http.Request) {
@@ -257,9 +255,4 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(rw, v)
 	})
-}
-
-// dreamNow tidies memory in the background, for the Tidy now button.
-var dreamNow = func() {
-	go memdistill.Dream(backendCtx, distillAuto(), distillComplete)
 }

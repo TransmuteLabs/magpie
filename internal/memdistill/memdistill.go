@@ -115,6 +115,14 @@ type State struct {
 // Path is distill.json; a variable for tests.
 var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
 
+type runKind uint8
+
+const (
+	idleRun runKind = iota
+	readRun
+	dreamRun
+)
+
 var (
 	now  = time.Now
 	list = func(ctx context.Context) ([]sessions.Session, error) { return sessions.ListContext(ctx, Listed) }
@@ -122,23 +130,21 @@ var (
 	// running is held through a run in this process, and the file lock
 	// across magpies
 	running sync.Mutex
-	busy    atomic.Bool
-	// stop ends the run going (Stop), stopped says it was asked to
-	stopMu  sync.Mutex
-	stop    context.CancelFunc
-	stopped atomic.Bool
+	// stopMu guards the active run and its cancellation.
+	stopMu sync.Mutex
+	active runKind
+	stop   context.CancelFunc
 	// doing and of are the run's progress: sessions gone through, of
 	// how many
 	doing, of atomic.Int64
 )
 
-// Running says a run is going in this process.
-func Running() bool { return busy.Load() }
-
-// Progress is how many sessions the run going has gone through, of how
-// many it will, read or passed over; 0, 0 when none is going or it is
-// still listing them.
-func Progress() (int, int) { return int(doing.Load()), int(of.Load()) }
+// ActiveRun reports the operation and its progress in this process.
+func ActiveRun() (reading, dreaming bool, done, total int) {
+	stopMu.Lock()
+	defer stopMu.Unlock()
+	return active == readRun, active == dreamRun, int(doing.Load()), int(of.Load())
+}
 
 // Stop ends the run going in this process, if any: the request in flight
 // is dropped and its session read next time. It isn't an error.
@@ -146,13 +152,14 @@ func Stop() {
 	stopMu.Lock()
 	defer stopMu.Unlock()
 	if stop != nil {
-		stopped.Store(true)
 		stop()
 	}
 }
 
 // ErrRunning is a run asked for while one is going.
 var ErrRunning = errors.New("already reading conversations")
+
+var errStopped = errors.New("conversation reading stopped")
 
 // Load reads distill.json; a missing file is the default (off). One that
 // can't be read is an error, never the default: a run doesn't start, and
@@ -338,47 +345,99 @@ type Result struct {
 // when the state names no model. A model that fails stops the run: the
 // sessions not read yet are read next time.
 func Run(ctx context.Context, auto string, complete Complete) (Result, error) {
-	return runUpTo(ctx, auto, complete, PerRun)
+	return runUpTo(ctx, func() string { return auto }, complete, PerRun)
 }
 
 // ReadAll is Run over every session due, for a run the user asked for:
 // switched on, a model or a longer range picked, Read now. Stop ends it.
 func ReadAll(ctx context.Context, auto string, complete Complete) (Result, error) {
-	return runUpTo(ctx, auto, complete, Listed)
+	return runUpTo(ctx, func() string { return auto }, complete, Listed)
 }
 
-func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Result, error) {
-	if !running.TryLock() {
-		return Result{}, ErrRunning
+func ReadNow(ctx context.Context, auto func() string, complete Complete) {
+	read, err := prepareRead(ctx, auto, complete, Listed)
+	if err == nil {
+		go read()
 	}
-	defer running.Unlock()
-	busy.Store(true)
-	defer busy.Store(false)
+}
+
+func runUpTo(ctx context.Context, auto func() string, complete Complete, limit int) (Result, error) {
+	read, err := prepareRead(ctx, auto, complete, limit)
+	if err != nil {
+		return Result{}, err
+	}
+	return read()
+}
+
+func startRun(ctx context.Context, kind runKind) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if !running.TryLock() {
+		return nil, nil, ErrRunning
+	}
 	unlock, held := filelock.Lock(Path()+".run", 0)
 	if !held {
-		return Result{}, ErrRunning
+		running.Unlock()
+		return nil, nil, ErrRunning
 	}
-	defer unlock()
+	release := func() {
+		unlock()
+		running.Unlock()
+	}
+	stopMu.Lock()
+	if err := ctx.Err(); err != nil {
+		stopMu.Unlock()
+		release()
+		return nil, nil, err
+	}
+	active = kind
+	ctx, cancel := context.WithCancelCause(ctx)
+	if kind == readRun {
+		stop = func() { cancel(errStopped) }
+	}
+	stopMu.Unlock()
+	return ctx, func() {
+		cancel(nil)
+		stopMu.Lock()
+		stop = nil
+		doing.Store(0)
+		of.Store(0)
+		active = idleRun
+		release()
+		stopMu.Unlock()
+	}, nil
+}
+
+func prepareRead(ctx context.Context, auto func() string, complete Complete, limit int) (func() (Result, error), error) {
+	ctx, finish, err := startRun(ctx, readRun)
+	if err != nil {
+		return nil, err
+	}
+	return func() (Result, error) {
+		defer finish()
+		result, err := readUpTo(ctx, auto, complete, limit)
+		if err == errStopped {
+			err = nil
+		}
+		return result, err
+	}, nil
+}
+
+func readUpTo(ctx context.Context, auto func() string, complete Complete, limit int) (Result, error) {
+	if ctx.Err() != nil {
+		return Result{}, context.Cause(ctx)
+	}
 	st, err := Load()
 	if err != nil || !st.On {
 		return Result{}, err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	stopMu.Lock()
-	stop = cancel
-	stopped.Store(false)
-	stopMu.Unlock()
-	defer func() {
-		stopMu.Lock()
-		stop = nil
-		stopMu.Unlock()
-		cancel()
-		doing.Store(0)
-		of.Store(0)
-	}()
 	model := st.Model
-	if model == "" {
-		model = auto
+	if model == "" && ctx.Err() == nil {
+		model = auto()
+	}
+	if ctx.Err() != nil {
+		return Result{}, context.Cause(ctx)
 	}
 	var res ran
 	var runErr error
@@ -386,18 +445,15 @@ func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Re
 		runErr = errors.New("no model to read conversations with: pick one")
 	} else {
 		ss, oldest, err := due(ctx, st, now())
-		if canceled := ctx.Err(); canceled != nil {
-			if stopped.Load() && errors.Is(canceled, context.Canceled) {
-				return Result{}, nil
-			}
-			return Result{}, canceled
+		if ctx.Err() != nil {
+			return Result{}, context.Cause(ctx)
 		}
 		if err != nil {
 			return Result{}, err
 		}
 		res, runErr = run(ctx, ss, oldest, model, st.Effort, complete, limit)
 	}
-	if stopped.Load() && errors.Is(runErr, context.Canceled) {
+	if context.Cause(ctx) == errStopped && errors.Is(runErr, context.Canceled) {
 		runErr = nil
 	}
 	_, err = change(func(s *State) {
@@ -725,11 +781,11 @@ func Keep(ctx context.Context, first, interval time.Duration, auto func() string
 		if st, err := Load(); err == nil && !st.On {
 			continue
 		}
-		if _, err := Run(ctx, auto(), complete); err != nil && !errors.Is(err, ErrRunning) {
+		if _, err := runUpTo(ctx, auto, complete, PerRun); err != nil && !errors.Is(err, ErrRunning) {
 			log.Println("memory: reading conversations:", err) // and in the Memory tab
 		}
 		if st, err := Load(); err == nil && Dreams(st, now()) {
-			if _, err := Dream(ctx, auto(), complete); err != nil && !errors.Is(err, ErrRunning) {
+			if _, err := runDream(ctx, auto, complete); err != nil && !errors.Is(err, ErrRunning) {
 				log.Println("memory: tidying:", err)
 			}
 		}

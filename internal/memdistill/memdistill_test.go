@@ -459,7 +459,7 @@ func TestBacklogReadAtOnce(t *testing.T) {
 	}
 	var seen [][2]int
 	sb.reply = func(string) (string, error) {
-		n, m := Progress()
+		_, _, n, m := ActiveRun()
 		seen = append(seen, [2]int{n, m})
 		return "[]", nil
 	}
@@ -471,7 +471,7 @@ func TestBacklogReadAtOnce(t *testing.T) {
 	if seen[0] != [2]int{1, Listed - PerRun} || seen[len(seen)-1] != [2]int{Listed - PerRun, Listed - PerRun} {
 		t.Fatalf("progress %v … %v", seen[0], seen[len(seen)-1])
 	}
-	if n, m := Progress(); n != 0 || m != 0 || Running() {
+	if reading, dreaming, n, m := ActiveRun(); n != 0 || m != 0 || reading || dreaming {
 		t.Fatalf("after the run %d of %d", n, m)
 	}
 	if st, _ := Load(); st.Left != 0 || st.Error != "" {

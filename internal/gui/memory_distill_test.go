@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/memdistill"
 	"github.com/yetone/magpie/internal/memory"
@@ -172,7 +175,7 @@ func TestDistillRangeAndEffortRoutes(t *testing.T) {
 	if _, v := post(`{"on":true,"model":""}`); !v.On || v.Days != 0 || v.Effort != "" || reads != 1 || len(v.Ranges) != 5 {
 		t.Fatalf("on: %+v %d", v, reads)
 	}
-	if _, v := post(`{"on":true,"model":"","days":90,"effort":"high"}`); v.Days != 90 || v.Effort != "high" || reads != 2 || !v.Running {
+	if _, v := post(`{"on":true,"model":"","days":90,"effort":"high"}`); v.Days != 90 || v.Effort != "high" || reads != 2 || v.Running {
 		t.Fatalf("90 days, high: %+v %d", v.State, reads)
 	}
 	if _, v := post(`{"on":true,"model":""}`); v.Days != 90 || v.Effort != "high" || reads != 2 {
@@ -234,4 +237,72 @@ func TestDistillStopRoute(t *testing.T) {
 	if rec.Code != 200 || stops != 1 || v.Left != 37 || v.Running || v.Of != 0 {
 		t.Fatalf("%d %d %+v", rec.Code, stops, v)
 	}
+}
+
+func TestMemoryManualRoutesRespectOwner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+		mux := http.NewServeMux()
+		memoryDistillRoutes(mux)
+		check := func(path, body string, running, dreaming bool) {
+			t.Helper()
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
+			var view distillView
+			if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || rec.Code != 200 {
+				t.Fatalf("%s: %d %s (%v)", path, rec.Code, rec.Body, err)
+			}
+			if view.Running != running || view.Dreaming != dreaming {
+				t.Errorf("%s reported reading %v, tidying %v; want %v, %v", path, view.Running, view.Dreaming, running, dreaming)
+			}
+		}
+
+		func() {
+			unlock, held := filelock.Lock(memdistill.Path()+".run", 0)
+			if !held {
+				t.Fatal("could not hold the cross-process run lock")
+			}
+			defer unlock()
+			check("/api/memory/distill", `{"on":true,"model":"fixture/model"}`, false, false)
+			check("/api/memory/distill/run", `{}`, false, false)
+			check("/api/memory/dream/run", `{}`, false, false)
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}()
+		if state, err := memdistill.Load(); err != nil || !state.Last.IsZero() || !state.Dreamt.IsZero() {
+			t.Fatalf("blocked calls changed the last run: %+v, %v", state, err)
+		}
+
+		kind, scope, status := memory.Fact, memory.Global, memory.Candidate
+		for _, text := range []string{"Old", "Other"} {
+			if _, _, err := memory.Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope, Status: &status}, memory.FromInferred, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		go func() {
+			_, err := memdistill.Dream(t.Context(), "", func(context.Context, string, string, string, string) (string, error) {
+				close(entered)
+				<-release
+				return `{}`, nil
+			})
+			done <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-done:
+			t.Fatalf("tidy never reached the model: %v", err)
+		}
+		defer func() {
+			close(release)
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}()
+		check("/api/memory/distill", `{"on":true,"model":"fixture/replacement"}`, false, true)
+		check("/api/memory/distill/run", `{}`, false, true)
+		check("/api/memory/distill/stop", `{}`, false, true)
+		synctest.Wait()
+	})
 }

@@ -5,10 +5,34 @@ import (
 	"os"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/sessions"
 )
+
+func TestReadNowCanBeStoppedWhileChoosingModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sb := newSandbox(t)
+		on(t, "")
+		sb.session("pending", time.Hour, "we deploy on Tuesdays", "keep this preference")
+		var readingWhenChoosing bool
+		ReadNow(t.Context(), func() string {
+			readingWhenChoosing, _, _, _ = ActiveRun()
+			Stop()
+			return "a/m"
+		}, sb.complete)
+		synctest.Wait()
+		reading, dreaming, _, _ := ActiveRun()
+		state, err := Load()
+		if !readingWhenChoosing || reading || dreaming || len(sb.asked) != 0 || err != nil || !state.Last.IsZero() || state.Error != "" {
+			t.Fatalf("Stop during model selection was lost: active %v, %d requests, %+v, %v", readingWhenChoosing, len(sb.asked), state, err)
+		}
+		if result, err := ReadAll(t.Context(), "a/m", sb.complete); err != nil || result.Read != 1 {
+			t.Fatalf("could not read the pending conversation later: %+v, %v", result, err)
+		}
+	})
+}
 
 func TestReadAllCanBeStoppedWhileListing(t *testing.T) {
 	sb := newSandbox(t)
@@ -26,7 +50,7 @@ func TestReadAllCanBeStoppedWhileListing(t *testing.T) {
 	}
 	original := list
 	list = func(ctx context.Context) ([]sessions.Session, error) {
-		if !Running() {
+		if reading, _, _, _ := ActiveRun(); !reading {
 			t.Fatal("listing started before Stop was registered")
 		}
 		Stop()
@@ -36,7 +60,7 @@ func TestReadAllCanBeStoppedWhileListing(t *testing.T) {
 		return sb.list, ctx.Err()
 	}
 	result, err := ReadAll(t.Context(), "a/m", sb.complete)
-	if err != nil || result != (Result{}) || len(sb.asked) != 0 || Running() {
+	if reading, dreaming, _, _ := ActiveRun(); err != nil || result != (Result{}) || len(sb.asked) != 0 || reading || dreaming {
 		t.Fatalf("stopped discovery reached the model or kept running: %+v %v %v", result, err, sb.asked)
 	}
 	after, err := os.ReadFile(Path())
