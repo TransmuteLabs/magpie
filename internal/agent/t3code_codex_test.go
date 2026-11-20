@@ -164,7 +164,7 @@ func TestT3CodeCodexInstanceAddedOnce(t *testing.T) {
 	path := filepath.Join(home, ".t3", "userdata", "settings.json")
 	a := t3code(home)
 	os.MkdirAll(filepath.Dir(path), 0o755)
-	if err := edit.SetJSON(path, edit.KV{Path: t3Instance, Value: t3Merged(path, gateway.URL())}); err != nil {
+	if err := edit.SetJSON(path, edit.KV{Path: t3Instance, Value: t3InstanceJSON(path, gateway.URL())}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Sync(); err != nil {

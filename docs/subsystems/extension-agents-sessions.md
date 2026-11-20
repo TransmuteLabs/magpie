@@ -335,11 +335,16 @@ plan. OpenCode 1 refreshes its legacy provider and any existing native mirror
 in one file change. Air uses the same planner for its own legacy provider.
 The planner keeps custom settings from the checked file and saves model
 output history after successful publication.
-Cline Sync checks its provider, catalog, global state and secrets together.
-It uses the current provider's model and catalog overrides. The plan
-refreshes VS Code's stored address only while its key belongs to Magpie.
-T3 Code Sync publishes its provider settings and Codex model catalog in
-the same checked plan. An instance the user removed stays removed.
+Cline Connect, Sync, model selection and Disconnect check provider
+settings, catalog, global state and secrets together. The plan uses
+current model and catalog overrides and refreshes VS Code's stored
+address only while its key belongs to Magpie. New settings files created
+by Connect use owner-only permissions. Existing file permissions survive.
+T3 Code Connect, Sync, model selection and Disconnect publish its provider
+settings and Codex model catalog in the same checked plan. Sync leaves an
+instance the user removed alone. Disconnect releases the catalog name
+after validating the settings and catalog snapshots, so symlink and
+hardlink referents stay intact.
 Pi and its forks plan the legacy catalog and enabled-model scope together.
 Pi publishes its model API and output history after the plan succeeds.
 Aside checks provider ownership in the same catalog snapshot used by
@@ -359,11 +364,14 @@ pick retains the plan's starting settings for Disconnect. With pi-magpie
 installed, the linked plan checks the package declaration and the old
 provider's URL and key before dropping the provider. Its first backup
 and any model or scope changes are part of the same checked publication.
-Reset checks both
-`settings.json` and `models.json` before clearing the default, the explicit
-Magpie scope entries and Magpie's provider. Concurrent edits to either
-file survive a rejected or rolled-back reset. The thinking-level picker
-uses the same settings plan without rebuilding the catalog.
+Pi plans its managed `extensions/magpie.ts` from the final catalog in
+Sync, model selection, reset and protocol changes. A sidecar failure
+also rejects the settings and catalog changes. A user-owned sidecar
+survives, and removing a managed alias leaves its referent in place.
+Reset clears the default, the explicit Magpie scope entries and Magpie's
+provider. Concurrent edits survive a rejected or rolled-back reset. The
+thinking-level picker uses the same settings plan without rebuilding the
+catalog.
 Scope refresh reads the catalog and settings in one checked action.
 Rename edits the explicit scope entries with the same settings contract.
 The host records excluded and restored scope entries after publication.

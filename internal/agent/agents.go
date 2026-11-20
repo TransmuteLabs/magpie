@@ -1679,12 +1679,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		b["apiKey"] = key()
 		return b
 	}
-	// Pi's own: magpie's decision and image models, for codemode
-	// (pi_extension.go); a fork's extensions may not be Pi's
-	syncExtension := func() error { return nil }
-	if id == "pi" {
-		syncExtension = func() error { return piExtensionSynced(dir, modelsPath, at.v1(), key()) }
-	}
+	renderExtension := func() string { return piExtensionFor(at.v1(), key()) }
 	// the pi-magpie extension serves provider "magpie" live, so Pi's
 	// models.json block is not written and magpie's own stale one goes
 	// (pimagpie.go)
@@ -1714,7 +1709,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			files = append(files, backupFile)
 		}
 		var preimages []sdk.ActionSettingFile
-		err := extension.ApplyLinkedAgentPlan(value, func(model string, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		err := applyPiPlan(id, dir, renderExtension, value, func(model string, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
 			config, catalog := settings.Files[0], settings.Files[1]
 			if !gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(catalog.Body)), "providers."+magpieID).Exists() &&
 				gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(config.Body)), "defaultProvider").String() != magpieID {
@@ -1748,7 +1743,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		if len(updates) != 0 {
 			stash(updates)
 		}
-		return syncExtension()
+		return nil
 	}
 	// the entries of enabledModels a sync took out (scope_gone.go)
 	gone := at.key(id + ".scope.gone")
@@ -1775,11 +1770,11 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			update, remember := piScopeUpdate(gone)
 			if viaExt() {
 				options := builtinpi.LiveCatalog{Scope: update}
-				if err := extension.ApplyLinkedAgentPlan(options, livePlan, settingsFile, catalogFile, backupFile); err != nil {
+				if err := applyPiPlan(id, dir, renderExtension, options, livePlan, settingsFile, catalogFile, backupFile); err != nil {
 					return err
 				}
 				remember()
-				return syncExtension()
+				return nil
 			}
 			updates := map[string]string{}
 			refresh := func(current string) (any, error) {
@@ -1792,14 +1787,14 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				return builtinpi.PlanCatalogSync(options, settings)
 			}
 			options := builtinpi.CatalogSync{Refresh: refresh, Scope: update}
-			if err := extension.ApplyLinkedAgentPlan(options, plan, settingsFile, catalogFile); err != nil {
+			if err := applyPiPlan(id, dir, renderExtension, options, plan, settingsFile, catalogFile); err != nil {
 				return err
 			}
 			remember()
 			if len(updates) != 0 {
 				stash(updates)
 			}
-			return syncExtension()
+			return nil
 		},
 		// a provider renamed takes its magpie/<id>/ entries in enabledModels
 		// with it: an entry left on the old id names nothing, and Pi would
@@ -1824,10 +1819,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				Get: startup,
 				Set: func(v string) error {
 					if v == "" {
-						if err := extension.ApplyLinkedAgentPlan(v, builtinpi.PlanModel, settingsFile, catalogFile); err != nil {
-							return err
-						}
-						if err := syncExtension(); err != nil {
+						if err := applyPiPlan(id, dir, renderExtension, v, builtinpi.PlanModel, settingsFile, catalogFile); err != nil {
 							return err
 						}
 						forget(gone)
@@ -1878,7 +1870,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	// the protocol it asks magpie's models on (pi_protocol.go)
 	if id == "pi" {
 		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, func(chosen string) error {
-			return pickPiProtocol(at, modelsPath, key, viaExt, syncExtension, chosen)
+			return pickPiProtocol(at, dir, modelsPath, key, viaExt, renderExtension, chosen)
 		}, viaExt))
 	}
 	return a

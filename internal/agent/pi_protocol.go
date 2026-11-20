@@ -81,27 +81,22 @@ func piProtocolField(at place, modelsPath string, pick func(string) error, off f
 	}, pick, off)
 }
 
-func pickPiProtocol(at place, modelsPath string, key func() string, off func() bool, syncExtension func() error, chosen string) error {
+func pickPiProtocol(at place, dir, modelsPath string, key func() string, off func() bool, renderExtension func() string, chosen string) error {
 	updates := map[string]string{piProtocolKey(at): chosen}
 	if off() {
 		stash(updates)
 		return nil
 	}
-	found := false
 	prepare := func(current string) (any, error) {
-		found = true
 		block := piProviderOn("pi", magpieModels("pi"), at.gw(), chosen)
 		block["apiKey"] = key()
 		return piBlockKept(modelsPath, current, block, true, updates), nil
 	}
-	if err := extension.ApplyLinkedAgentPlan(prepare, builtinpi.PlanCatalogPick,
+	if err := applyPiPlan("pi", dir, renderExtension, prepare, builtinpi.PlanCatalogPick,
 		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath}); err != nil {
 		return err
 	}
 	stash(updates)
-	if found {
-		return syncExtension()
-	}
 	return nil
 }
 

@@ -1,19 +1,17 @@
 package agent
 
 import (
-	"bytes"
 	"cmp"
 	_ "embed"
 	"encoding/json"
-	"errors"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinpi "github.com/yetone/magpie/internal/extension/builtin/pi"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Pi's codemode calls classifier and image models (models.classify,
@@ -31,13 +29,9 @@ import (
 //go:embed pi_extension.ts
 var piExtensionSource string
 
-// piExtensionMark opens the file magpie writes. A file at that path
-// without it is the user's own, and is never written over or removed.
-const piExtensionMark = "// magpie: written by magpie"
-
 // piExtensionPath is magpie's extension in Pi's agent folder dir.
 func piExtensionPath(dir string) string {
-	return filepath.Join(dir, "extensions", "magpie.ts")
+	return filepath.Join(dir, builtinpi.SidecarFile)
 }
 
 // piExtensionModel is a model as the extension registers it.
@@ -77,36 +71,23 @@ func piExtensionFor(baseURL, key string) string {
 	return strings.Replace(piExtensionSource, "__MAGPIE__", string(data), 1)
 }
 
-// piExtensionSynced brings magpie's extension in Pi's agent folder dir
-// to what models.json says: written while it has providers.magpie and
-// magpie has models to list, else gone. A file there magpie didn't write
-// is left as it is.
-func piExtensionSynced(dir, modelsPath, baseURL, key string) error {
-	path := piExtensionPath(dir)
-	cur, err := os.ReadFile(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		cur = nil
-	case err != nil:
-		return err // unknown: neither written over nor removed
-	case !bytes.HasPrefix(edit.TrimBOM(cur), []byte(piExtensionMark)):
-		return nil // the user's own
+func applyPiPlan[Options any](id, dir string, render func() string, options Options, planner func(Options, sdk.ActionSettings) (sdk.AgentPlan, error), files ...extension.LinkedActionFile) error {
+	if id != "pi" {
+		return extension.ApplyLinkedAgentPlan(options, planner, files...)
 	}
-	want := ""
-	if _, on := edit.GetJSON(modelsPath, "providers."+magpieID); on {
-		want = piExtensionFor(baseURL, key)
-	}
-	if want == "" {
-		if cur == nil {
-			return nil
+	withSidecar := func(options Options, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		inputs := settings.Files[:len(files)]
+		plan, err := planner(options, sdk.ActionSettings{Files: inputs})
+		if err != nil {
+			return sdk.AgentPlan{}, err
 		}
-		return os.Remove(path)
+		for _, file := range inputs {
+			if file.Path == builtinpi.CatalogFile {
+				return builtinpi.WithSidecar(plan, file, settings.Files[len(files)], render)
+			}
+		}
+		return plan, nil
 	}
-	if string(cur) == want {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return edit.WriteAtomic(path, []byte(want))
+	sidecar := extension.LinkedActionFile{Name: builtinpi.SidecarFile, Path: piExtensionPath(dir), UnlinkName: true}
+	return extension.ApplyLinkedAgentPlan(options, withSidecar, append(files, sidecar)...)
 }

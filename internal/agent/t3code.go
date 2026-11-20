@@ -76,8 +76,9 @@ import (
 // t3Instance is the key of magpie's provider instance in T3 Code's
 // settings.json, and t3CodexInstance that of its Codex one.
 const (
-	t3Instance      = "providerInstances." + magpieID
-	t3CodexInstance = "providerInstances." + magpieID + "-codex"
+	t3Instance         = "providerInstances." + magpieID
+	t3CodexInstance    = "providerInstances." + magpieID + "-codex"
+	t3CodexCatalogName = "magpie-codex-models.json"
 )
 
 // t3CodexOffered is the stash key that says magpie has written its Codex
@@ -142,7 +143,7 @@ func t3code(home string) *Agent {
 		// found by its bundle. No command: `t3` is a common name.
 		detect:   func() bool { return isDir(base) || t3App(home) },
 		ListOnly: true,
-		Sync:     func() error { return t3Sync(path, gateway.URL()) },
+		Sync:     func() error { return t3Refresh(path, gateway.URL(), false) },
 		// its custom models are the models picked for it (#1508)
 		ListsModels: true,
 		// magpie's instance still on the gateway, as for every agent with
@@ -177,17 +178,9 @@ func t3code(home string) *Agent {
 			},
 			Set: func(v string) error {
 				if v == "" {
-					if err := edit.DelJSON(path, t3CodexInstance); err != nil {
-						return err
-					}
-					os.Remove(t3CodexCatalog(path))
-					forget(t3CodexOffered)
-					return edit.DelJSON(path, t3Instance)
+					return t3Disconnect(path)
 				}
-				if err := edit.SetJSON(path, edit.KV{Path: t3Instance, Value: t3Merged(path, gateway.URL())}); err != nil {
-					return err
-				}
-				return t3CodexPut(path, gateway.URL())
+				return t3Refresh(path, gateway.URL(), true)
 			},
 			Options: func(map[string]string) []Option {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie", Note: "every magpie model in T3 Code twice: magpie on Claude Code, magpie · Codex on Codex; pick one in T3's model picker"}}
@@ -217,14 +210,10 @@ func t3App(home string) bool {
 // every magpie model as a custom model, and the binary path and Claude
 // home of T3's own Claude when the user gave them one.
 func t3InstanceJSON(path, gw string) map[string]any {
-	return t3ClaudeJSON(gw, t3FileSettings(path))
-}
-
-func t3FileSettings(path string) func(string) string {
-	return func(key string) string {
+	return t3ClaudeJSON(gw, func(key string) string {
 		value, _ := edit.GetJSON(path, key)
 		return value
-	}
+	})
 }
 
 func t3CopyDriverPaths(config map[string]any, driver string, get func(string) string) {
@@ -298,8 +287,8 @@ func t3EnvOf(path, k string) (string, bool) {
 	return "", false
 }
 
-// t3Merged is magpie's instance as t3InstanceJSON writes it, merged into
-// the one at path: what the user set on it in T3 Code's own settings
+// t3KeepClaude merges magpie's instance into the current one: what the
+// user set on it in T3 Code's own settings
 // stays (#2030, Kanscape: its name and Auto-compact after were reset on
 // every start). Its name, whether it is on, and every key magpie doesn't
 // write (config.autoCompactWindow, config.launchArgs, accentColor) are
@@ -308,12 +297,6 @@ func t3EnvOf(path, k string) (string, bool) {
 // binary path or Claude home while T3's own Claude has one to carry over.
 // Only magpie's instance is read: another, such as T3's own Claude, lends
 // it nothing of the user's.
-func t3Merged(path, gw string) any {
-	want := t3InstanceJSON(path, gw)
-	cur, _ := edit.GetJSON(path, t3Instance)
-	return t3KeepClaude(want, cur)
-}
-
 func t3KeepClaude(want map[string]any, cur string) any {
 	var have map[string]json.RawMessage
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
@@ -393,7 +376,7 @@ func t3Capabilities(id string, efforts []string) map[string]any {
 // t3CodexCatalog is the model catalog of magpie's Codex instance in T3
 // Code, beside its settings.json at path.
 func t3CodexCatalog(path string) string {
-	return filepath.Join(filepath.Dir(path), "magpie-codex-models.json")
+	return filepath.Join(filepath.Dir(path), t3CodexCatalogName)
 }
 
 // t3TOML is s as a TOML basic string: JSON's quoting, which TOML reads
@@ -471,30 +454,6 @@ func t3CodexMerged(path, gw string, get func(string) string) any {
 	return mergeTheirs(have, w, nil)
 }
 
-// t3CodexPut writes magpie's Codex instance and its catalog into T3
-// Code's settings at path.
-func t3CodexPut(path, gw string) error {
-	if err := t3CodexCatalogPut(path); err != nil {
-		return err
-	}
-	if err := edit.SetJSON(path, edit.KV{Path: t3CodexInstance, Value: t3CodexMerged(path, gw, t3FileSettings(path))}); err != nil {
-		return err
-	}
-	stash(map[string]string{t3CodexOffered: "1"})
-	return nil
-}
-
-// t3CodexCatalogPut writes the models picked for T3 Code as Codex's
-// catalog for magpie's Codex instance, when it changed.
-func t3CodexCatalogPut(path string) error {
-	cat := t3CodexCatalog(path)
-	b := t3CodexModels()
-	if cur, err := os.ReadFile(cat); err == nil && bytes.Equal(cur, b) {
-		return nil
-	}
-	return edit.WriteAtomic(cat, b)
-}
-
 func t3CodexModels() []byte {
 	return codexcat.CatalogAt(magpieModels("t3code"), "")
 }
@@ -507,29 +466,34 @@ func t3NeedsCodex(settings gjson.Result, offered bool) bool {
 	return settings.Get(t3CodexInstance).Exists() || !offered && settings.Get(t3Instance).Exists()
 }
 
-// t3Sync brings magpie's instances up to the catalog and gateway. An older
-// Claude-only wiring gets Codex once, and one the user removed stays removed.
-func t3Sync(path, gw string) error {
-	raw, err := edit.Read(path)
-	if err != nil {
-		return err
+// t3Refresh brings magpie's instances up to the catalog and gateway.
+// Connect enables both instances. On Sync an older Claude-only wiring gets
+// Codex once, and one the user removed stays removed.
+func t3Refresh(path, gw string, connect bool) error {
+	withCodex := true
+	var offered bool
+	if !connect {
+		raw, err := edit.Read(path)
+		if err != nil {
+			return err
+		}
+		offered = t3Stashed(t3CodexOffered)
+		withCodex = t3NeedsCodex(t3ParseSettings(raw), offered)
 	}
-	offered := t3Stashed(t3CodexOffered)
-	withCodex := t3NeedsCodex(t3ParseSettings(raw), offered)
 	files := []extension.LinkedActionFile{{Name: "settings.json", Path: path}}
 	if withCodex {
-		files = append(files, extension.LinkedActionFile{Name: "magpie-codex-models.json", Path: t3CodexCatalog(path)})
+		files = append(files, extension.LinkedActionFile{Name: t3CodexCatalogName, Path: t3CodexCatalog(path)})
 	}
 	var addedCodex bool
-	err = extension.ApplyLinkedAgentPlan(gw, func(gw string, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+	err := extension.ApplyLinkedAgentPlan(gw, func(gw string, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
 		file := snapshot.Files[0]
 		config := t3ParseSettings(file.Body)
-		if t3NeedsCodex(config, offered) != withCodex {
+		if !connect && t3NeedsCodex(config, offered) != withCodex {
 			return sdk.AgentPlan{}, fmt.Errorf("%s: %w", path, extension.ErrActionChanged)
 		}
 		get := func(key string) string { return config.Get(key).String() }
 		var writes []edit.KV
-		if current := config.Get(t3Instance); current.Exists() {
+		if current := config.Get(t3Instance); connect || current.Exists() {
 			if next := t3KeepClaude(t3ClaudeJSON(gw, get), current.String()); !sameJSON(current.Raw, next) {
 				writes = append(writes, edit.KV{Path: t3Instance, Value: next})
 			}
@@ -555,8 +519,36 @@ func t3Sync(path, gw string) error {
 		}
 		return plan, nil
 	}, files...)
-	if err == nil && addedCodex {
+	if err == nil && (connect || addedCodex) {
 		stash(map[string]string{t3CodexOffered: "1"})
+	}
+	return err
+}
+
+func t3Disconnect(path string) error {
+	files := []extension.LinkedActionFile{
+		{Name: "settings.json", Path: path},
+		{Name: t3CodexCatalogName, Path: t3CodexCatalog(path), UnlinkLast: true},
+	}
+	err := extension.ApplyLinkedAgentPlan(struct{}{}, func(_ struct{}, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+		var plan sdk.AgentPlan
+		file, catalog := snapshot.Files[0], snapshot.Files[1]
+		if len(bytes.TrimSpace(edit.TrimBOM(file.Body))) > 0 {
+			body, err := edit.PatchJSON(file.Body, nil, []string{t3CodexInstance, t3Instance})
+			if err != nil {
+				return sdk.AgentPlan{}, edit.AtFile(file.Path, err)
+			}
+			if !bytes.Equal(body, file.Body) {
+				plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, Body: body, BeforeHash: file.BeforeHash})
+			}
+		}
+		if catalog.Exists {
+			plan.Files = append(plan.Files, sdk.FileChange{Path: catalog.Path, BeforeHash: catalog.BeforeHash, Remove: true})
+		}
+		return plan, nil
+	}, files...)
+	if err == nil {
+		forget(t3CodexOffered)
 	}
 	return err
 }

@@ -7,9 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -17,43 +20,99 @@ type LinkedActionFile struct {
 	Name        string
 	Path        string
 	BeforeWrite func(string) error
+	Private     bool
+	UnlinkLast  bool
+	UnlinkName  bool
 }
 
 type linkedActionSnapshot struct {
 	file   LinkedActionFile
 	target string
 	info   fs.FileInfo
+	name   fs.FileInfo
 	before actionFile
 }
 
 func readLinkedActionFile(file LinkedActionFile) (linkedActionSnapshot, error) {
 	snapshot, err := inspectLinkedActionFile(file)
-	if err == nil && snapshot.before.Exists {
+	if err == nil && file.UnlinkName {
+		snapshot.name, err = os.Lstat(file.Path)
+		if errors.Is(err, fs.ErrNotExist) {
+			err = nil
+		}
+	}
+	if err == nil && snapshot.before.Exists && snapshot.info.Mode().IsRegular() {
 		snapshot.before.Body, err = os.ReadFile(snapshot.target)
 	}
 	return snapshot, err
 }
 
+func (snapshot linkedActionSnapshot) checkName() error {
+	current, err := os.Lstat(snapshot.file.Path)
+	if errors.Is(err, fs.ErrNotExist) && snapshot.name == nil ||
+		err == nil && snapshot.name != nil && current.Mode() == snapshot.name.Mode() && os.SameFile(current, snapshot.name) {
+		return nil
+	}
+	conflict := fmt.Errorf("%s: %w", snapshot.file.Path, ErrActionChanged)
+	return edit.PreserveOnRollback(snapshot.file.Path, errors.Join(conflict, err))
+}
+
 func inspectLinkedActionFile(file LinkedActionFile) (linkedActionSnapshot, error) {
 	snapshot := linkedActionSnapshot{file: file}
-	target, err := edit.Target(file.Path)
+	path := file.Path
+	stat := os.Stat
+	if file.UnlinkLast {
+		path = filepath.Dir(path)
+		stat = os.Lstat
+	}
+	target, err := edit.Target(path)
 	if err != nil {
 		return snapshot, err
 	}
+	if file.UnlinkLast {
+		target = filepath.Join(target, filepath.Base(file.Path))
+	}
 	snapshot.target = target
-	info, err := os.Stat(target)
+	info, err := stat(target)
 	if errors.Is(err, fs.ErrNotExist) {
-		return snapshot, nil
+		snapshot.target, err = missingLinkedTarget(target)
+		return snapshot, err
 	}
 	if err != nil {
+		return snapshot, err
+	}
+	snapshot.info = info
+	snapshot.before = actionFile{Exists: true, Mode: info.Mode().Perm()}
+	if file.UnlinkLast && info.Mode()&fs.ModeSymlink != 0 {
+		name, err := os.Readlink(target)
+		snapshot.before.Body = []byte(name)
 		return snapshot, err
 	}
 	if !info.Mode().IsRegular() {
 		return snapshot, fmt.Errorf("%s is not a regular settings file", file.Path)
 	}
-	snapshot.info = info
-	snapshot.before = actionFile{Exists: true, Mode: info.Mode().Perm()}
 	return snapshot, nil
+}
+
+func missingLinkedTarget(path string) (string, error) {
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		return path, nil
+	}
+	parent, err := filepath.EvalSymlinks(dir)
+	if errors.Is(err, fs.ErrNotExist) && dir != path && os.IsPathSeparator(dir[len(dir)-1]) {
+		dir = dir[:len(dir)-1]
+		if _, statErr := os.Lstat(dir); errors.Is(statErr, fs.ErrNotExist) {
+			parent, err = missingLinkedTarget(dir)
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	if base == "." || base == ".." {
+		return "", fmt.Errorf("can't resolve missing linked settings path %q", path)
+	}
+	return filepath.Join(parent, base), nil
 }
 
 func (snapshot linkedActionSnapshot) check() error {
@@ -81,6 +140,9 @@ func (snapshot linkedActionSnapshot) matchesFile() (bool, error) {
 	}
 	if !os.SameFile(current.info, snapshot.info) {
 		return false, nil
+	}
+	if current.info.Mode()&fs.ModeSymlink != 0 {
+		return bytes.Equal(current.before.Body, snapshot.before.Body), nil
 	}
 	stream, err := os.Open(current.target)
 	if err != nil {
@@ -184,10 +246,14 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 		return check()
 	}
 	touched := make(map[string]bool, len(plan.Files))
-	for _, change := range plan.Files {
+	for index, change := range plan.Files {
 		snapshot, ok := snapshots[change.Path]
 		if !ok || touched[change.Path] || change.BeforeHash != actionHash(snapshot.before) || change.Remove && len(change.Body) != 0 || change.Mode != 0 {
 			return fmt.Errorf("invalid linked settings change for %q", change.Path)
+		}
+		if snapshot.file.UnlinkLast && !change.Remove ||
+			change.Remove && (snapshot.file.UnlinkLast || snapshot.file.UnlinkName) && index != len(plan.Files)-1 {
+			return fmt.Errorf("linked settings unlink for %q must be the final change", change.Path)
 		}
 		touched[change.Path] = true
 	}
@@ -201,10 +267,38 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 				return err
 			}
 		}
+		if snapshot.file.UnlinkLast || snapshot.file.UnlinkName && change.Remove {
+			if err := check(); err != nil {
+				return err
+			}
+			target := snapshot.target
+			if snapshot.file.UnlinkName {
+				if err := snapshot.checkName(); err != nil {
+					return err
+				}
+				target = snapshot.file.Path
+			}
+			if snapshot.before.Exists {
+				if err := os.Remove(target); err != nil {
+					return edit.AtFile(snapshot.file.Path, err)
+				}
+				filememo.Forget()
+			}
+			return nil
+		}
 		var written edit.AtomicPublication
 		var unlinked bool
 		if !change.Remove {
-			err = edit.WriteAtomicChecked(snapshot.target, change.Body, check, &written)
+			if !snapshot.before.Exists && snapshot.file.Path != snapshot.target {
+				if err := appdir.Gone(filepath.Dir(snapshot.file.Path)); err != nil {
+					return err
+				}
+			}
+			write := edit.WriteAtomicChecked
+			if snapshot.file.Private {
+				write = edit.WritePrivateAtomicChecked
+			}
+			err = write(snapshot.target, change.Body, check, &written)
 		} else if snapshot.before.Exists {
 			unlinked, err = edit.RemoveChecked(snapshot.file.Path, check, &written)
 		} else {

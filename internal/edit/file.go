@@ -156,6 +156,10 @@ type AtomicPublication struct {
 }
 
 func WriteAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication) error {
+	return writeAtomicChecked(path, data, check, published, false, nil)
+}
+
+func WritePrivateAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication) error {
 	return writeAtomicChecked(path, data, check, published, true, nil)
 }
 
@@ -163,15 +167,15 @@ func RestoreAtomicChecked(path string, data []byte, check func() error, original
 	return writeAtomicChecked(path, data, check, nil, false, original)
 }
 
-func writeAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication, inheritBOM bool, original fs.FileInfo) error {
+func writeAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication, private bool, original fs.FileInfo) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
 	}
-	if f := filter.Load(); f != nil {
-		data = (*f)(path, data)
-	}
-	if inheritBOM {
+	if original == nil {
+		if f := filter.Load(); f != nil {
+			data = (*f)(path, data)
+		}
 		data = keepBOM(path, data)
 	}
 	// A file that already holds these bytes is left alone: a new mtime
@@ -216,7 +220,10 @@ func writeAtomicChecked(path string, data []byte, check func() error, published 
 			return err
 		}
 	}
-	mode := fs.FileMode(0o644)
+	mode, dirMode := fs.FileMode(0o644), fs.FileMode(0o755)
+	if private {
+		mode, dirMode = 0o600, 0o700
+	}
 	st, statErr := os.Stat(path)
 	if original != nil {
 		st, statErr = original, nil
@@ -232,7 +239,7 @@ func writeAtomicChecked(path string, data []byte, check func() error, published 
 			return err
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
