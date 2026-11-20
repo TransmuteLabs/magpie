@@ -23,15 +23,16 @@ var qwenPlanBusyBodies = []string{
 
 // scriptedAs is scriptedOn for a provider of the preset given, named
 // name.
-func scriptedAs(t *testing.T, id, name, preset string, s *scripted) {
+func scriptedAs(t *testing.T, id, name, preset string, s *scripted) *httptest.Server {
 	t.Helper()
-	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
+	up := httptest.NewServer(inferenceOnlyFixture(t, "/compatible-mode/v1/chat/completions", "m", s))
 	t.Cleanup(up.Close)
 	probeFixtureRoot(t, up)
 	p := provider.Provider{ID: id, Name: name, Preset: preset, Key: "k", Models: []string{"m"}, Chat: up.URL + "/compatible-mode/v1"}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
+	return up
 }
 
 // qwenStreamOK is a whole reply streamed: magpie asks DashScope's Token
@@ -180,8 +181,14 @@ func TestQwenPlanConcurrencyRespectsRequestPolicy(t *testing.T) {
 			}
 			plan := qwenBusyTimes(2, qwenPlanBusyBodies[0])
 			next := &scripted{replies: []reply{{200, "", chatOK}}}
-			scriptedAs(t, "qwen", "Qwen Token Plan", "qwen-token-plan", plan)
-			scriptedOn(t, "next", provider.Chat, next)
+			qwen := scriptedAs(t, "qwen", "Qwen Token Plan", "qwen-token-plan", plan)
+			fallback := httptest.NewServer(inferenceOnlyFixture(t, "/v1/chat/completions", "m", next))
+			t.Cleanup(fallback.Close)
+			if err := provider.Save(provider.Provider{ID: "next", Name: "NEXT", Key: "k", Models: []string{"m"}, Chat: fallback.URL + "/v1"}); err != nil {
+				t.Fatal(err)
+			}
+			probeInferenceFixture(t, qwen.URL, "/compatible-mode/v1/models")
+			probeInferenceFixture(t, fallback.URL, "/v1/models")
 			if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"qwen/m", "next/m"}, Routing: provider.Ordered}); err != nil {
 				t.Fatal(err)
 			}
