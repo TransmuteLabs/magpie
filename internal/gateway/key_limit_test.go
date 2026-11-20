@@ -20,17 +20,19 @@ import (
 	"github.com/yetone/magpie/internal/usage"
 )
 
-// limitedUpstream is a provider whose every call uses 300 input and 50
-// output tokens, counting the calls it is sent.
+// limitedUpstream counts chat completion requests and reports 300 input
+// and 50 output tokens for each.
 func limitedUpstream(t *testing.T, delay time.Duration) *atomic.Int64 {
 	t.Helper()
 	var calls atomic.Int64
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		time.Sleep(delay)
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":300,"completion_tokens":50}}`)
-	}))
+	})
+	up := httptest.NewServer(mux)
 	t.Cleanup(up.Close)
 	if err := provider.Save(provider.Provider{ID: "plan", Name: "Plan", Key: "upstream-secret", Chat: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)
