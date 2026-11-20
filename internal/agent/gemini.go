@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -56,11 +57,11 @@ func geminiIn(at place) *Agent {
 		{Name: builtingemini.EnvFile, Path: envPath},
 		{Name: builtingemini.SettingsFile, Path: path},
 	}
-	restore := func(reset bool) error {
+	restore := func(options builtingemini.RestoreOptions, reset bool) error {
 		baseKey, keyKey := at.key("gemini.base_url"), at.key("gemini.api_key")
 		authKey, modelKey := at.key("gemini.auth"), at.key("gemini.model")
 		saved := peek(baseKey, keyKey, authKey, modelKey)
-		options := builtingemini.RestoreOptions{Gateway: at.gw(), OwnKey: ownKey}
+		options.Gateway, options.OwnKey = at.gw(), ownKey
 		if !reset {
 			options.Original = &builtingemini.OriginalSettings{
 				Base: saved[baseKey], Key: saved[keyKey], Auth: saved[authKey], Model: saved[modelKey],
@@ -75,12 +76,15 @@ func geminiIn(at place) *Agent {
 		if err == nil && retired {
 			forgetValues(saved)
 		}
+		if errors.Is(err, builtingemini.ErrCustomEndpoint) {
+			return fmt.Errorf("custom means whatever GOOGLE_GEMINI_BASE_URL is already in %s; set it there", envPath)
+		}
 		return err
 	}
-	unroute := func() error { return restore(false) }
+	unroute := func() error { return restore(builtingemini.RestoreOptions{}, false) }
 	setModel := func(v string) error {
 		if v == "" {
-			return restore(true)
+			return restore(builtingemini.RestoreOptions{}, true)
 		}
 		if isMagpie(v) {
 			options := builtingemini.RouteOptions{Gateway: at.gw(), Key: at.gwKey(), Model: v, OwnKey: ownKey}
@@ -98,10 +102,7 @@ func geminiIn(at place) *Agent {
 			}
 			return err
 		}
-		if err := unroute(); err != nil {
-			return err
-		}
-		return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
+		return restore(builtingemini.RestoreOptions{NativeModel: v}, false)
 	}
 
 	current := func() string {
@@ -134,46 +135,22 @@ func geminiIn(at place) *Agent {
 		// `magpie gemini <a model it has no option for>` comes here, and
 		// unrouted Gemini CLI first, as `magpie snow --help` took magpie
 		// out of Snow (#1457)
+		var options builtingemini.RestoreOptions
 		switch id {
-		case "", "custom", "google", "vertex", "api-key":
+		case "":
+			options.NativeAuth = builtingemini.AuthDefault
+		case "custom":
+			options.NativeAuth = builtingemini.AuthCustom
+		case "google":
+			options.NativeAuth = builtingemini.AuthGoogle
+		case "vertex":
+			options.NativeAuth = builtingemini.AuthVertex
+		case "api-key":
+			options.NativeAuth, options.ProviderKey = builtingemini.AuthAPIKey, magpieKey()
 		default:
 			return fmt.Errorf("%q is neither one of Gemini CLI's models nor an auth (google, api-key, vertex): nothing was changed", id)
 		}
-		if err := unroute(); err != nil {
-			return err
-		}
-		switch id {
-		case "":
-			// back to the CLI's own first-run choice
-			if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-				return err
-			}
-		case "custom":
-			if current() != "custom" {
-				return fmt.Errorf("custom means whatever GOOGLE_GEMINI_BASE_URL is already in %s; set it there", envPath)
-			}
-			return nil
-		case "google":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "oauth-personal"}); err != nil {
-				return err
-			}
-		case "vertex":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "vertex-ai"}); err != nil {
-				return err
-			}
-		case "api-key":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"}); err != nil {
-				return err
-			}
-			if k := magpieKey(); k != "" && envKey() != k {
-				if err := edit.SetEnvFile(envPath, edit.KV{Path: "GEMINI_API_KEY", Value: k}); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("unknown provider %q", id)
-		}
-		return edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL")
+		return restore(options, false)
 	}
 
 	return &Agent{

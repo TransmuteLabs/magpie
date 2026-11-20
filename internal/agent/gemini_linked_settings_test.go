@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -129,5 +130,81 @@ func TestGeminiDisconnectKeepsRouteAndRestoreValuesOnFailure(t *testing.T) {
 				t.Fatal("failed Disconnect overwrote the settings")
 			}
 		})
+	}
+}
+
+func TestGeminiNativeChoicePreservesActiveRouteOnRefusal(t *testing.T) {
+	for _, choice := range []struct {
+		name, field, value, match string
+	}{
+		{"custom without a saved URL", "provider", "custom", ""},
+		{"native model", "model", "gemini-3-pro", "gemini-3-pro"},
+		{"vertex auth", "provider", "vertex", "vertex-ai"},
+	} {
+		t.Run(choice.name, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			target := gemini(home)
+			env := filepath.Join(target.Dir, ".env")
+			const initial = `{"model":{"name":"gemini-3-flash"},"security":{"auth":{"selectedType":"oauth-personal"}}}`
+			writeFile(t, target.Path, initial)
+			writeFile(t, env, "GEMINI_API_KEY=own-key\nLOCAL_VALUE=keep\n")
+			if err := target.Apply("model", "fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			keys := []string{"gemini.base_url", "gemini.api_key", "gemini.auth", "gemini.model"}
+			saved, routedEnv := peek(keys...), readFile(env)
+			wantSettings := readFile(target.Path)
+			var err error
+			if choice.match == "" {
+				err = target.Apply(choice.field, choice.value)
+			} else {
+				config, targetErr := edit.Target(target.Path)
+				if targetErr != nil {
+					t.Fatal(targetErr)
+				}
+				wantSettings = `{"model":{"name":"fake/m1"},"manual":"keep"}`
+				injected := false
+				err = edit.Filtered(func(path string, body []byte) []byte {
+					if path == config && !injected && strings.Contains(string(body), choice.match) {
+						injected = true
+						writeFile(t, target.Path, wantSettings)
+					}
+					return body
+				}, func() error { return target.Apply(choice.field, choice.value) })
+				if !injected || !errors.Is(err, extension.ErrActionChanged) {
+					t.Errorf("Apply = %v, config edit injected = %t", err, injected)
+				}
+			}
+			if err == nil {
+				t.Error("expected the native choice to be refused")
+			}
+			if readFile(env) != routedEnv || !reflect.DeepEqual(peek(keys...), saved) {
+				t.Error("refused choice changed the active environment or consumed saved settings")
+			}
+			if readFile(target.Path) != wantSettings {
+				t.Error("refused choice replaced the settings")
+			}
+		})
+	}
+}
+
+func TestGeminiCustomChoiceRestoresSavedEndpoint(t *testing.T) {
+	home, _ := codexHome(t, "", "")
+	target := gemini(home)
+	env := filepath.Join(target.Dir, ".env")
+	const custom = "https://gemini.example.invalid"
+	writeFile(t, target.Path, `{"model":{"name":"gemini-3-flash"},"security":{"auth":{"selectedType":"gemini-api-key"}}}`)
+	writeFile(t, env, "GOOGLE_GEMINI_BASE_URL="+custom+"\nGEMINI_API_KEY=own-key\n")
+	if err := target.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Apply("provider", "custom"); err != nil {
+		t.Fatal(err)
+	}
+	base, _ := edit.GetEnvFile(env, "GOOGLE_GEMINI_BASE_URL")
+	key, _ := edit.GetEnvFile(env, "GEMINI_API_KEY")
+	model, _ := edit.GetJSON(target.Path, "model.name")
+	if base != custom || key != "own-key" || model != "gemini-3-flash" {
+		t.Fatal("custom choice did not restore the saved endpoint, credentials and model")
 	}
 }

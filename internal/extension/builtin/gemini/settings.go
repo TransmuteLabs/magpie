@@ -72,10 +72,25 @@ func PlanRoute(options RouteOptions, settings sdk.ActionSettings) (sdk.AgentPlan
 }
 
 type RestoreOptions struct {
-	Gateway  string
-	OwnKey   func(string) bool
-	Original *OriginalSettings
+	Gateway     string
+	OwnKey      func(string) bool
+	Original    *OriginalSettings
+	NativeModel string
+	NativeAuth  AuthChoice
+	ProviderKey string
 }
+
+type AuthChoice string
+
+const (
+	AuthDefault AuthChoice = "default"
+	AuthCustom  AuthChoice = "custom"
+	AuthGoogle  AuthChoice = "google"
+	AuthVertex  AuthChoice = "vertex"
+	AuthAPIKey  AuthChoice = "api-key"
+)
+
+var ErrCustomEndpoint = errors.New("no saved custom Gemini endpoint")
 
 func PlanRestore(options RestoreOptions, settings sdk.ActionSettings) (sdk.AgentPlan, bool, error) {
 	var plan sdk.AgentPlan
@@ -86,10 +101,10 @@ func PlanRestore(options RestoreOptions, settings sdk.ActionSettings) (sdk.Agent
 	base, _ := edit.GetEnv(env.Body, baseKey)
 	key, _ := edit.GetEnv(env.Body, apiKey)
 	routed := Routed(base, key, options.Gateway, options.OwnKey)
-	if !routed && options.Original != nil {
+	if !routed && options.Original != nil && options.NativeModel == "" && options.NativeAuth == "" {
 		return plan, false, nil
 	}
-	var putJSON, putEnv []edit.KV
+	var putJSON []edit.KV
 	var delJSON []string
 	put := func(path, value string) {
 		if value == "" {
@@ -98,34 +113,75 @@ func PlanRestore(options RestoreOptions, settings sdk.ActionSettings) (sdk.Agent
 			putJSON = append(putJSON, edit.KV{Path: path, Value: value})
 		}
 	}
+	var original OriginalSettings
+	if options.Original != nil {
+		original = *options.Original
+	}
+	nextBase, nextKey := base, key
 	if routed {
-		var original OriginalSettings
-		if options.Original != nil {
-			original = *options.Original
+		nextBase, nextKey = original.Base, original.Key
+	}
+	nextAuth := original.Auth
+	switch options.NativeAuth {
+	case "":
+	case AuthCustom:
+		if nextBase == "" || Routed(nextBase, nextKey, options.Gateway, options.OwnKey) {
+			return plan, false, ErrCustomEndpoint
 		}
-		put(authKey, original.Auth)
+	case AuthDefault:
+		nextBase, nextAuth = "", ""
+	case AuthGoogle:
+		nextBase, nextAuth = "", "oauth-personal"
+	case AuthVertex:
+		nextBase, nextAuth = "", "vertex-ai"
+	case AuthAPIKey:
+		nextBase, nextAuth = "", "gemini-api-key"
+		if options.ProviderKey != "" {
+			nextKey = options.ProviderKey
+		}
+	default:
+		return plan, false, errors.New("unknown Gemini CLI auth choice")
+	}
+	if routed || options.NativeAuth != "" && options.NativeAuth != AuthCustom {
+		put(authKey, nextAuth)
+	}
+	if options.NativeModel != "" {
+		put(modelKey, options.NativeModel)
+	} else if routed || options.Original == nil {
 		put(modelKey, original.Model)
-		if original.Base != "" {
-			putEnv = append(putEnv, edit.KV{Path: baseKey, Value: original.Base})
+	}
+	envBody := env.Body
+	var putEnv []edit.KV
+	if routed {
+		envBody, _ = edit.PatchEnvWithout(envBody, baseKey, apiKey)
+		if nextBase != "" {
+			putEnv = append(putEnv, edit.KV{Path: baseKey, Value: nextBase})
 		}
-		if original.Key != "" {
-			putEnv = append(putEnv, edit.KV{Path: apiKey, Value: original.Key})
-		}
-		body, changed := edit.PatchEnvWithout(env.Body, baseKey, apiKey)
-		if len(putEnv) > 0 {
-			body, changed = edit.PatchEnv(body, putEnv...), true
-		}
-		if changed {
-			plan.Files = append(plan.Files, sdk.FileChange{Path: env.Path, BeforeHash: env.BeforeHash, Body: body, Remove: body == nil})
+		if nextKey != "" {
+			putEnv = append(putEnv, edit.KV{Path: apiKey, Value: nextKey})
 		}
 	} else {
-		put(modelKey, "")
+		if options.NativeAuth != "" && options.NativeAuth != AuthCustom {
+			envBody, _ = edit.PatchEnvWithout(envBody, baseKey)
+		}
+		if nextKey != key {
+			putEnv = append(putEnv, edit.KV{Path: apiKey, Value: nextKey})
+		}
+	}
+	if len(putEnv) > 0 {
+		envBody = edit.PatchEnv(envBody, putEnv...)
+	}
+	if !bytes.Equal(env.Body, envBody) {
+		plan.Files = append(plan.Files, sdk.FileChange{Path: env.Path, BeforeHash: env.BeforeHash, Body: envBody, Remove: envBody == nil})
+	}
+	if len(putJSON) == 0 && len(delJSON) == 0 {
+		return plan, routed, nil
 	}
 	if len(bytes.TrimSpace(edit.TrimBOM(config.Body))) == 0 && len(putJSON) == 0 {
 		return plan, routed, nil
 	}
 	body, err := edit.PatchJSON(config.Body, putJSON, delJSON)
-	if err == nil {
+	if err == nil && (routed || options.Original == nil) {
 		model := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(body)), "model")
 		if model.IsObject() && len(model.Map()) == 0 {
 			body, err = edit.PatchJSON(body, nil, []string{"model"})

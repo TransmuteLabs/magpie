@@ -114,10 +114,11 @@ Gemini CLI's
 uses one snapshot of `.env` and `settings.json`. The host checks both files
 before publication, restores its own changes after a failed second write,
 and records the previous gateway, key, sign-in and model after success.
-Disconnect and model reset use the same linked publisher. Disconnect consumes
-saved values only after both files settle. Removing an empty dotenv file
-participates in rollback with its original contents and permissions, and
-linked files keep their existing alias behavior.
+Disconnect, model reset and native model or sign-in choices use the same
+linked publisher. A custom choice requires an existing or saved custom URL.
+The host consumes saved values after both files settle. Removing an empty
+dotenv file participates in rollback with its original contents and
+permissions, and linked files keep their existing alias behavior.
 
 Per-agent telemetry and the global Privacy switch use the built-in
 telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
