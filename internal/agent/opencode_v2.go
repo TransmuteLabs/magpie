@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
 	builtinopencode "github.com/yetone/magpie/internal/extension/builtin/opencode"
@@ -53,19 +55,14 @@ type ocFile struct {
 // Where the OpenCode finds magpie's models itself (discover), the file has
 // magpie's provider without them, and magpie's plugin beside it.
 func (f ocFile) sync(put bool) error {
-	var err error
 	if f.two {
-		options := builtinopencode.V2ConfigOptions{ConvertProvider: func(raw []byte) (json.Marshaler, bool) {
-			return openCodeFromV1(raw)
-		}}
-		err = extension.ApplyLinkedAgentPlan(options, builtinopencode.PlanV2Config, f.configSnapshot())
+		return f.applyV2(put, nil)
 	}
-	if err == nil {
-		if f.discover {
-			err = f.syncFound(put)
-		} else {
-			err = f.syncListed(put)
-		}
+	var err error
+	if f.discover {
+		err = f.syncFound(put)
+	} else {
+		err = f.syncListed(put)
 	}
 	if !f.discover && unstashPeek(openCodeDiscoverKey(f.path)) != "" {
 		stash(map[string]string{openCodeDiscoverKey(f.path): ""})
@@ -80,14 +77,10 @@ func (f ocFile) syncFound(put bool) error {
 	moved := unstashPeek(openCodeDiscoverKey(f.path)) != ""
 	listed := f
 	listed.block = withoutModels(f.block)
-	var err error
-	if !f.two {
-		err = f.modelsLeft("provider."+magpieID, openCodeKept(f.path, f.block)(), f.block(), moved)
-		if _, ok := edit.GetJSON(f.path, openCodeNativeKey); ok && err == nil {
-			err = f.modelsLeft(openCodeNativeKey, openCodeNativeKept(f.path, f.block)(), openCodeNative(f.block()), moved)
-		}
-	} else {
-		err = f.modelsLeft(openCodeNativeKey, openCodeNativeKept(f.path, f.outputsKept)(), openCodeNative(f.block()), moved)
+	get := func(key string) (string, bool) { return edit.GetJSON(f.path, key) }
+	err := f.modelsLeft("provider."+magpieID, openCodeKept(f.path, f.block)(), f.block(), moved)
+	if _, ok := get(openCodeNativeKey); ok && err == nil {
+		err = f.modelsLeft(openCodeNativeKey, openCodeNativeKept(get, f.block()), openCodeNative(f.block()), moved)
 	}
 	if err != nil {
 		return err
@@ -100,35 +93,106 @@ func (f ocFile) syncFound(put bool) error {
 
 // syncListed is sync with magpie's models as block has them.
 func (f ocFile) syncListed(put bool) error {
-	if !f.two {
-		v1 := openCodeKept(f.path, f.block)
-		var err error
-		if _, ok := edit.GetJSON(f.path, "provider."+magpieID); !ok && put {
-			err = edit.SetJSON(f.path, edit.KV{Path: "provider." + magpieID, Value: v1()})
-		} else {
-			err = syncJSONInOrder(f.path, "provider."+magpieID, v1)
-		}
-		// and where the file keeps it under providers too, which OpenCode
-		// 2 reads instead, there as well (#3883)
-		return errors.Join(err, syncOpenCodeNative(f.path, f.block))
+	v1 := openCodeKept(f.path, f.block)
+	var err error
+	if _, ok := edit.GetJSON(f.path, "provider."+magpieID); !ok && put {
+		err = edit.SetJSON(f.path, edit.KV{Path: "provider." + magpieID, Value: v1()})
+	} else {
+		err = syncJSONInOrder(f.path, "provider."+magpieID, v1)
 	}
-	native := openCodeNativeKept(f.path, f.outputsKept)
-	if _, ok := edit.GetJSON(f.path, openCodeNativeKey); !ok && put {
-		return edit.SetJSON(f.path, edit.KV{Path: openCodeNativeKey, Value: native()})
-	}
-	return syncJSONInOrder(f.path, openCodeNativeKey, native)
+	// and where the file keeps it under providers too, which OpenCode
+	// 2 reads instead, there as well (#3883)
+	return errors.Join(err, syncOpenCodeNative(f.path, f.block))
 }
 
-// outputsKept is block with a limit.output the user typed into one of
-// magpie's models kept (openCodeOutputsKept).
-func (f ocFile) outputsKept() any {
-	v := f.block()
-	if b, ok := v.(map[string]any); ok {
-		if ms, ok := b["models"].(orderedJSON); ok {
-			openCodeOutputsKept(f.path, ms)
+func (f ocFile) applyV2(put bool, primary *builtinopencode.PrimaryModelOptions) error {
+	saved := stashShared()
+	discoveryKey := openCodeDiscoverKey(f.path)
+	moved := saved[discoveryKey] != ""
+	outputKey := outputsWantedKey(f.path)
+	outputHistory := saved[outputKey]
+	keepOutputs := func(block any, get func(string) (string, bool)) any {
+		if provider, ok := block.(map[string]any); ok {
+			if models, ok := provider["models"].(orderedJSON); ok {
+				outputHistory = planOpenCodeOutputLimits(models, get, outputHistory)
+			}
+		}
+		return block
+	}
+	options := builtinopencode.V2ConfigOptions{
+		ConvertProvider: func(raw []byte) (json.Marshaler, bool) { return openCodeFromV1(raw) },
+		PutProvider:     put,
+		Primary:         primary,
+	}
+	block := f.block
+	if f.discover {
+		block = withoutModels(block)
+		options.DiscoverModels = func(config gjson.Result, raw string) (json.Marshaler, bool) {
+			get := openCodeSnapshotValues(config)
+			kept := openCodeNativeKept(get, keepOutputs(f.block(), get))
+			left, changed := openCodeModelsLeft(raw, kept, openCodeNative(f.block()), moved, true)
+			if len(left) == 0 {
+				return nil, changed
+			}
+			return left, changed
 		}
 	}
-	return v
+	var synced bool
+	options.RefreshProvider = func(config gjson.Result, put bool) any {
+		synced = true
+		get := openCodeSnapshotValues(config)
+		raw, has := get(openCodeNativeKey)
+		if !has && !put {
+			return nil
+		}
+		native := openCodeNativeKept(get, keepOutputs(block(), get))
+		if has && sameJSON(raw, native) && sameOrder(raw, native) {
+			return nil
+		}
+		return native
+	}
+	configFile := f.configSnapshot()
+	var pluginReady bool
+	if primary != nil && primary.Routed {
+		configFile.BeforeWrite = func(string) error {
+			if !synced {
+				return nil
+			}
+			err := f.syncPlugin(true)
+			pluginReady = err == nil
+			return err
+		}
+	}
+	if err := extension.ApplyLinkedAgentPlan(options, builtinopencode.PlanV2Config, configFile); err != nil {
+		return err
+	}
+	if !synced {
+		return nil
+	}
+	if outputHistory != saved[outputKey] || moved != f.discover {
+		metadata := map[string]string{}
+		if outputHistory != saved[outputKey] {
+			metadata[outputKey] = outputHistory
+		}
+		if moved != f.discover {
+			metadata[discoveryKey] = ""
+			if f.discover {
+				metadata[discoveryKey] = "1"
+			}
+		}
+		stash(metadata)
+	}
+	if pluginReady {
+		return nil
+	}
+	return f.pluginSynced()
+}
+
+func openCodeSnapshotValues(config gjson.Result) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		value := config.Get(key)
+		return value.String(), value.Exists()
+	}
 }
 
 func (f ocFile) configSnapshot() extension.LinkedActionFile {
@@ -152,6 +216,36 @@ func (f ocFile) small() string {
 func (f ocFile) setSmall(v string) error {
 	options := builtinopencode.SmallModelOptions{Two: f.two, Model: v}
 	return extension.ApplyLinkedAgentPlan(options, builtinopencode.PlanSmallModel, f.configSnapshot())
+}
+
+func (f ocFile) setPrimary(model, gateway string, checkChamber bool) error {
+	ref, prefixed := strings.CutPrefix(model, magpieID+"/")
+	var dropProvider bool
+	pick := builtinopencode.PrimaryModelOptions{
+		Model:  model,
+		Routed: prefixed && isMagpie(ref),
+		OwnModel: func(config gjson.Result) string {
+			if own := openCodeOwnGatewayProvider(ref, gateway, openCodeSnapshotValues(config)); own != "" {
+				return own + "/" + ref
+			}
+			return ""
+		},
+		KeepProvider: func(config gjson.Result) bool {
+			small := config.Get("small_model").String()
+			if title := config.Get(openCodeTitleKey); title.Exists() {
+				small = openCodeSelection(title.Raw)
+			}
+			dropProvider = !usesMagpie(small) && !(checkChamber && openChamberOnMagpie())
+			return !dropProvider
+		},
+	}
+	if err := f.applyV2(false, &pick); err != nil {
+		return err
+	}
+	if dropProvider {
+		return openCodePluginGone(f.path)
+	}
+	return nil
 }
 
 // openCodeSelection is a model as OpenCode 2 has one, raw: "provider/model"

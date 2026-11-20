@@ -826,7 +826,7 @@ func openCodeKept(path string, value func() any) func() any {
 		v := value()
 		if block, ok := v.(map[string]any); ok {
 			if ms, ok := block["models"].(orderedJSON); ok {
-				openCodeOutputsKept(path, ms)
+				openCodeOutputsKept(path, ms, func(key string) (string, bool) { return edit.GetJSON(path, key) })
 			}
 		}
 		if _, set := edit.GetJSON(path, "provider."+magpieID+".options.setCacheKey"); set {
@@ -1297,6 +1297,11 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 			return edit.SetJSON(path, edit.KV{Path: key, Value: v})
 		}
 		return func(v string) error {
+			if key == "model" {
+				if f := file(); f.two {
+					return f.setPrimary(v, at.v1(), at.spell == nil)
+				}
+			}
 			if v == "" {
 				if err := put(""); err != nil {
 					return err
@@ -1380,12 +1385,16 @@ func openCodeRefAt(at place, path, id, v string) (string, error) {
 // providers is read as OpenCode 2 reads it, before the same name under
 // provider (openCodeBaseURL).
 func ownGatewayProvider(path, ref, v1 string) string {
+	return openCodeOwnGatewayProvider(ref, v1, func(key string) (string, bool) { return edit.GetJSON(path, key) })
+}
+
+func openCodeOwnGatewayProvider(ref, v1 string, get func(string) (string, bool)) string {
 	type own struct {
 		base   string
 		models map[string]json.RawMessage
 	}
 	ps := map[string]own{}
-	if raw, ok := edit.GetJSON(path, "provider"); ok {
+	if raw, ok := get("provider"); ok {
 		var v1s map[string]struct {
 			Options struct {
 				BaseURL string `json:"baseURL"`
@@ -1398,7 +1407,7 @@ func ownGatewayProvider(path, ref, v1 string) string {
 			}
 		}
 	}
-	if raw, ok := edit.GetJSON(path, "providers"); ok {
+	if raw, ok := get("providers"); ok {
 		var v2s map[string]struct {
 			Settings struct {
 				BaseURL string `json:"baseURL"`

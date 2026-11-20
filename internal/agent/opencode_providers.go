@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/yetone/magpie/internal/edit"
+	builtinopencode "github.com/yetone/magpie/internal/extension/builtin/opencode"
 )
 
 // OpenCode 2 keeps a provider under providers, in words of its own, and
@@ -21,7 +22,7 @@ import (
 // added since was missing from OpenCode 2 and OpenChamber (#3883). Where
 // the file keeps magpie's provider under providers, magpie writes it there
 // too, in OpenCode 2's words; a file without one doesn't get one.
-const openCodeNativeKey = "providers." + magpieID
+const openCodeNativeKey = builtinopencode.NativeProvider
 
 // openCodeNative is magpie's provider block for an OpenCode config, in
 // OpenCode 1's words (magpieProviderJSONAt's "opencode" shape), as OpenCode
@@ -119,62 +120,68 @@ func openCodeNativeVariant(id string, opts any) orderedJSON {
 
 // openCodeNativeKept is openCodeKept for magpie's provider under providers:
 // magpie's models are its own, written whole, and what else the block holds
-// stays (theirsKept), as does a variant the user put on one of them, where
+// stays, as does a variant the user put on one of them, where
 // it is or after magpie's. A variant that says what magpie's of its name
 // says is magpie's (openCodeOwnVariant): one the model has no longer goes.
-func openCodeNativeKept(path string, block func() any) func() any {
-	return theirsKept(path, openCodeNativeKey, func() any {
-		v := openCodeNative(block())
-		// a supportsPromptCacheKey the file has already is the user's
-		// (#5468)
-		if _, set := edit.GetJSON(path, openCodeNativeKey+".compatibility.supportsPromptCacheKey"); set {
-			v = withoutOption(v, "compatibility", "supportsPromptCacheKey")
-		}
-		raw, ok := edit.GetJSON(path, openCodeNativeKey+".models")
-		if !ok {
-			return v
-		}
-		var have map[string]struct {
-			Variants []json.RawMessage `json:"variants"`
-		}
+func openCodeNativeKept(get func(string) (string, bool), block any) any {
+	v := openCodeNative(block)
+	if _, set := get(openCodeNativeKey + ".compatibility.supportsPromptCacheKey"); set {
+		v = withoutOption(v, "compatibility", "supportsPromptCacheKey")
+	}
+	if raw, ok := get(openCodeNativeKey + ".models"); ok {
 		ms, _ := v.(map[string]any)["models"].(orderedJSON)
-		if json.Unmarshal([]byte(raw), &have) != nil {
-			return v
-		}
-		idOf := func(x any) string {
-			var e struct {
-				ID string `json:"id"`
-			}
-			b, _ := json.Marshal(x)
-			json.Unmarshal(b, &e)
-			return e.ID
-		}
-		for i, p := range ms {
-			h, ok := have[p.k]
-			if !ok {
-				continue
-			}
-			e, _ := p.v.(map[string]any)
-			ours, ok := e["variants"].([]any)
-			if !ok {
-				continue
-			}
-			for _, rv := range h.Variants {
-				vid, own := openCodeOwnVariant(rv)
-				if own || vid == "" {
-					continue
-				}
-				if i := slices.IndexFunc(ours, func(o any) bool { return idOf(o) == vid }); i >= 0 {
-					ours[i] = rv
-				} else {
-					ours = append(ours, rv)
-				}
-			}
-			e["variants"] = ours
-			ms[i].v = e
-		}
+		keepOpenCodeNativeVariants(ms, raw)
+	}
+	cur, ok := get(openCodeNativeKey)
+	if !ok {
 		return v
-	}, "models")
+	}
+	var have, want map[string]json.RawMessage
+	raw, err := json.Marshal(v)
+	if err != nil || json.Unmarshal([]byte(cur), &have) != nil || have == nil || json.Unmarshal(raw, &want) != nil || want == nil {
+		return v
+	}
+	return mergeTheirs(have, want, []string{"models"})
+}
+
+func keepOpenCodeNativeVariants(models orderedJSON, raw string) {
+	var have map[string]struct {
+		Variants []json.RawMessage `json:"variants"`
+	}
+	if json.Unmarshal([]byte(raw), &have) != nil {
+		return
+	}
+	idOf := func(x any) string {
+		var e struct {
+			ID string `json:"id"`
+		}
+		b, _ := json.Marshal(x)
+		json.Unmarshal(b, &e)
+		return e.ID
+	}
+	for _, p := range models {
+		h, ok := have[p.k]
+		if !ok {
+			continue
+		}
+		e, _ := p.v.(map[string]any)
+		ours, ok := e["variants"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rv := range h.Variants {
+			vid, own := openCodeOwnVariant(rv)
+			if own || vid == "" {
+				continue
+			}
+			if i := slices.IndexFunc(ours, func(o any) bool { return idOf(o) == vid }); i >= 0 {
+				ours[i] = rv
+			} else {
+				ours = append(ours, rv)
+			}
+		}
+		e["variants"] = ours
+	}
 }
 
 // openCodeOwnVariant is the id of a variant under providers, and whether
@@ -216,7 +223,9 @@ func openCodeOwnVariant(raw json.RawMessage) (string, bool) {
 // OpenCode config at path up to block, magpie's provider in OpenCode 1's
 // words, where the file keeps it there.
 func syncOpenCodeNative(path string, block func() any) error {
-	return syncJSONInOrder(path, openCodeNativeKey, openCodeNativeKept(path, block))
+	return syncJSONInOrder(path, openCodeNativeKey, func() any {
+		return openCodeNativeKept(func(key string) (string, bool) { return edit.GetJSON(path, key) }, block())
+	})
 }
 
 // openCodeWiringOff is wiringOff for magpie's provider in the OpenCode

@@ -316,6 +316,11 @@ The host records excluded and restored scope entries after publication.
 The Pi and OMP Protocol fields pass the selected API into the checked
 catalog action. The host stores the preference and catalog metadata after
 the action succeeds.
+OpenCode v2 refreshes its provider from the same snapshot as the primary
+model selection. Sync updates provider format, catalog and discovery
+configuration in one checked write. Output limit history is published
+after the configuration accepts the plan. The discovery sidecar is prepared
+separately when a model selection needs it.
 The ordinary Codex subagent model and effort fields use the auxiliary model
 plan. A model change checks the saved effort against the new model and clears
 an incompatible effort in the same checked `config.toml` write. The gateway's

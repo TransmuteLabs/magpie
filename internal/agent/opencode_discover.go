@@ -178,6 +178,12 @@ func openCodePluginFor(block any) string {
 // says: there while the file has magpie's provider and its OpenCode
 // discovers, else gone. A file there magpie didn't write is left as it is.
 func (f ocFile) pluginSynced() error {
+	_, legacy := edit.GetJSON(f.path, "provider."+magpieID)
+	_, native := edit.GetJSON(f.path, openCodeNativeKey)
+	return f.syncPlugin(legacy || native)
+}
+
+func (f ocFile) syncPlugin(hasProvider bool) error {
 	path := openCodePluginPath(f.path)
 	cur, err := os.ReadFile(path)
 	switch {
@@ -188,9 +194,7 @@ func (f ocFile) pluginSynced() error {
 	case !bytes.HasPrefix(edit.TrimBOM(cur), []byte(openCodePluginMark)):
 		return nil // the user's own
 	}
-	_, legacy := edit.GetJSON(f.path, "provider."+magpieID)
-	_, native := edit.GetJSON(f.path, openCodeNativeKey)
-	if !f.discover || !legacy && !native {
+	if !f.discover || !hasProvider {
 		if cur == nil {
 			return nil
 		}
@@ -223,9 +227,20 @@ func (f ocFile) modelsLeft(key string, kept, pure any, moved bool) error {
 	if !ok {
 		return nil
 	}
+	out, ok := openCodeModelsLeft(raw, kept, pure, moved, key == openCodeNativeKey)
+	if !ok {
+		return nil
+	}
+	if len(out) == 0 {
+		return edit.DelJSON(f.path, key+".models")
+	}
+	return edit.SetJSON(f.path, edit.KV{Path: key + ".models", Value: out})
+}
+
+func openCodeModelsLeft(raw string, kept, pure any, moved, two bool) (orderedJSON, bool) {
 	have := objectPairs([]byte(raw))
 	if have == nil {
-		return nil // not an object: left as it is
+		return nil, false
 	}
 	ours, keptBy := modelsOf(pure), modelsOf(kept)
 	out := orderedJSON{}
@@ -260,7 +275,7 @@ func (f ocFile) modelsLeft(key string, kept, pure any, moved bool) error {
 				}
 			}
 		}
-		if key == openCodeNativeKey {
+		if two {
 			// with no variants to say, OpenCode 2 would make up its own
 			// for the model (Variant.resolve), where magpie's has none
 			if m, ok := d.(map[string]any); ok && m["variants"] == nil {
@@ -269,13 +284,7 @@ func (f ocFile) modelsLeft(key string, kept, pure any, moved bool) error {
 		}
 		out = append(out, jsonPair{p.k, d})
 	}
-	if len(out) == 0 {
-		return edit.DelJSON(f.path, key+".models")
-	}
-	if sameJSON(raw, out) && sameOrder(raw, out) {
-		return nil
-	}
-	return edit.SetJSON(f.path, edit.KV{Path: key + ".models", Value: out})
+	return out, len(out) == 0 || !sameJSON(raw, out) || !sameOrder(raw, out)
 }
 
 // modelsOf is the models of a provider block, by id, as JSON decodes them.

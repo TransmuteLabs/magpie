@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,5 +134,196 @@ func TestOpenCodeLinkedApplyUsesWSLDistroConfigAndVersion(t *testing.T) {
 	}
 	if _, ok := edit.GetJSON(distroPath, "small_model"); ok {
 		t.Fatal("the v2 distro kept the legacy small model")
+	}
+}
+
+func TestOpenCodeLinkedPrimaryPublishesProviderWithModel(t *testing.T) {
+	const input = "{\n  // keep my theme\n  \"theme\": \"mine\",\n}\n"
+	oc := openCodeConfigFixture(t, "2.0.4", input)
+	reasonCatalog(t)
+	target, err := edit.Target(oc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposals []string
+	observe := func(path string, data []byte) []byte {
+		if path == target {
+			proposals = append(proposals, string(data))
+		}
+		return data
+	}
+	if err := edit.Filtered(observe, func() error { return oc.Apply("model", "magpie/think/deep") }); err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || !strings.Contains(proposals[0], `"magpie/think/deep"`) ||
+		!strings.Contains(proposals[0], `"providers"`) || !strings.Contains(proposals[0], "// keep my theme") {
+		t.Fatalf("model and provider published separately or lost user settings: %q", proposals)
+	}
+	nativeOnly(t, oc.Path, "think/deep")
+}
+
+func TestOpenCodeLinkedDisconnectPublishesProviderAndModelTogether(t *testing.T) {
+	const input = "{\n  // keep my theme\n  \"theme\": \"mine\",\n}\n"
+	oc := openCodeConfigFixture(t, "2.0.4", input)
+	reasonCatalog(t)
+	if err := oc.Apply("model", "magpie/think/deep"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(oc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposals []string
+	if err := edit.Filtered(func(path string, data []byte) []byte {
+		if path == target {
+			proposals = append(proposals, string(data))
+		}
+		return data
+	}, oc.Disconnect); err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || strings.Contains(proposals[0], `"model"`) ||
+		strings.Contains(proposals[0], `"magpie"`) || !strings.Contains(proposals[0], "// keep my theme") {
+		t.Fatalf("model and provider disconnected separately or lost user settings: %q", proposals)
+	}
+}
+
+func TestOpenCodeLinkedPrimaryWaitsForDiscoverySidecar(t *testing.T) {
+	oc := openCodeConfigFixture(t, "2.2.6", `{"model":"mine/old"}`)
+	reasonCatalog(t)
+	path := openCodePluginPath(oc.Path)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := oc.Apply("model", "magpie/think/deep"); err == nil {
+		t.Fatal("expected a discovery sidecar error")
+	}
+	if model := oc.Values()["model"]; model != "mine/old" {
+		t.Fatalf("selected %q despite the sidecar failure", model)
+	}
+}
+
+func TestOpenCodeLinkedDiscoveryKeepsNewReplyLimit(t *testing.T) {
+	oc := openCodeConfigFixture(t, "2.2.6", `{}`)
+	reasonCatalog(t)
+	if err := oc.Apply("model", "magpie/rsn/plan"); err != nil {
+		t.Fatal(err)
+	}
+	key := openCodeNativeKey + ".models.rsn/plan.limit.output"
+	if err := edit.SetJSON(oc.Path, edit.KV{Path: key, Value: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	if err := oc.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if output, _ := edit.GetJSON(oc.Path, key); output != "1234" {
+		t.Fatalf("user reply limit = %q", output)
+	}
+}
+
+func TestOpenCodeLinkedCatalogSyncPreservesConcurrentEdit(t *testing.T) {
+	const input = `{"theme":"old","providers":{"magpie":{"settings":{"baseURL":"http://localhost:1/v1"}}}}`
+	oc := openCodeConfigFixture(t, "2.0.4", input)
+	reasonCatalog(t)
+	target, err := edit.Target(oc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := strings.Replace(input, `"old"`, `"mine"`, 1)
+	var edited bool
+	err = edit.Filtered(func(path string, data []byte) []byte {
+		if path == target && !edited {
+			writeFile(t, path, user)
+			edited = true
+		}
+		return data
+	}, oc.Sync)
+	if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(oc.Path) != user {
+		t.Fatalf("edited = %t, error = %v, config = %q", edited, err, readFile(oc.Path))
+	}
+}
+
+func TestOpenCodeLinkedConflictLeavesOutputHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version string
+		pick    bool
+	}{
+		{name: "listed_sync", version: "2.0.4"},
+		{name: "discovery_pick", version: "2.2.6", pick: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const input = `{"theme":"old","providers":{"magpie":{"settings":{"baseURL":"http://localhost:1/v1"}}}}`
+			oc := openCodeConfigFixture(t, tc.version, input)
+			reasonCatalog(t)
+			target, err := edit.Target(oc.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			apply := oc.Sync
+			if tc.pick {
+				apply = func() error { return oc.Apply("model", "magpie/rsn/plan") }
+			}
+			user := strings.Replace(input, `"old"`, `"mine"`, 1)
+			key := outputsWantedKey(oc.Path)
+			before := unstashPeek(key)
+			var edited bool
+			err = edit.Filtered(func(path string, data []byte) []byte {
+				if path == target && !edited {
+					writeFile(t, path, user)
+					edited = true
+				}
+				return data
+			}, apply)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(oc.Path) != user {
+				t.Fatalf("edited = %t, error = %v, config = %q", edited, err, readFile(oc.Path))
+			}
+			if after := unstashPeek(key); after != before {
+				t.Fatalf("conflicted action changed output history from %q to %q", before, after)
+			}
+			if err := apply(); err != nil {
+				t.Fatal(err)
+			}
+			var saved map[string][]int
+			after := unstashPeek(key)
+			if err := json.Unmarshal([]byte(after), &saved); err != nil || len(saved["rsn/plan"]) == 0 {
+				t.Fatalf("successful action did not record the output history: %q (%v)", after, err)
+			}
+		})
+	}
+}
+
+func TestOpenCodeLinkedDiscoveryPublishesProviderAndCatalogChangeTogether(t *testing.T) {
+	oc := openCodeConfigFixture(t, "2.0.4", `{}`)
+	reasonCatalog(t)
+	if err := oc.Apply("model", "magpie/think/deep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetJSON(oc.Path,
+		edit.KV{Path: openCodeNativeKey + ".settings.baseURL", Value: "http://localhost:1/v1"},
+		edit.KV{Path: openCodeNativeKey + ".settings.timeout", Value: 12348},
+	); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(oc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openCodeAt(t, "2.2.6")
+	var proposals []string
+	if err := edit.Filtered(func(path string, data []byte) []byte {
+		if path == target {
+			proposals = append(proposals, string(data))
+		}
+		return data
+	}, oc.Sync); err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || strings.Contains(proposals[0], `"models"`) ||
+		!strings.Contains(proposals[0], gatewayV1()) || !strings.Contains(proposals[0], "12348") {
+		t.Fatalf("provider and discovery catalog published separately or lost user settings: %q", proposals)
+	}
+	if !strings.HasPrefix(pluginOf(oc.Path), openCodePluginMark) {
+		t.Fatal("missing discovery sidecar")
 	}
 }

@@ -22,6 +22,17 @@ const (
 
 type V2ConfigOptions struct {
 	ConvertProvider func([]byte) (json.Marshaler, bool)
+	DiscoverModels  func(gjson.Result, string) (json.Marshaler, bool)
+	RefreshProvider func(config gjson.Result, put bool) any
+	PutProvider     bool
+	Primary         *PrimaryModelOptions
+}
+
+type PrimaryModelOptions struct {
+	Model        string
+	Routed       bool
+	OwnModel     func(gjson.Result) string
+	KeepProvider func(gjson.Result) bool
 }
 
 type SmallModelOptions struct {
@@ -33,33 +44,90 @@ func PlanV2Config(options V2ConfigOptions, settings sdk.ActionSettings) (sdk.Age
 	return planConfig(settings, func(body []byte) ([]byte, error) {
 		config := readConfig(body)
 		var set []edit.KV
-		var remove []string
-		legacy := config.Get(legacyProvider)
-		removeProvider := false
-		if legacy.Exists() {
-			if config.Get(NativeProvider).Exists() {
-				removeProvider = true
-			} else if provider, ok := options.ConvertProvider([]byte(legacy.Raw)); ok {
-				set = append(set, edit.KV{Path: NativeProvider, Value: provider})
-				removeProvider = true
+		put := options.PutProvider
+		if primary := options.Primary; primary != nil {
+			if primary.Model == "" {
+				remove := []string{"model"}
+				if !primary.KeepProvider(config) {
+					remove = append(remove, legacyProvider, NativeProvider)
+				}
+				for _, key := range remove {
+					if config.Get(key).Exists() {
+						return edit.PatchJSON(body, nil, remove)
+					}
+				}
+				return body, nil
 			}
-			if removeProvider {
-				remove = append(remove, legacyProvider)
+			model := primary.Model
+			if primary.Routed {
+				if own := primary.OwnModel(config); own != "" {
+					model = own
+				} else {
+					put = true
+				}
+			}
+			set = append(set, edit.KV{Path: "model", Value: model})
+			if !put {
+				return edit.PatchJSON(body, set, nil)
 			}
 		}
-		if small := config.Get(smallModelKey).String(); strings.HasPrefix(small, "magpie/") && !config.Get(TitleModelKey).Exists() {
-			set = append(set, edit.KV{Path: TitleModelKey, Value: small})
-			remove = append(remove, smallModelKey)
+		body, err := normalizeV2(body, config, options.ConvertProvider)
+		if err != nil {
+			return nil, err
 		}
-		if len(set) == 0 && len(remove) == 0 {
+		config = readConfig(body)
+		const models = NativeProvider + ".models"
+		if options.DiscoverModels != nil {
+			if left, changed := options.DiscoverModels(config, config.Get(models).Raw); changed {
+				if left == nil {
+					body, err = edit.PatchJSON(body, nil, []string{models})
+				} else {
+					body, err = edit.PatchJSON(body, []edit.KV{{Path: models, Value: left}}, nil)
+				}
+				if err != nil {
+					return nil, err
+				}
+				config = readConfig(body)
+			}
+		}
+		if provider := options.RefreshProvider(config, put); provider != nil {
+			set = append(set, edit.KV{Path: NativeProvider, Value: provider})
+		}
+		if len(set) == 0 {
 			return body, nil
 		}
-		body, err := edit.PatchJSON(body, set, remove)
-		if err != nil || !removeProvider {
-			return body, err
-		}
-		return dropEmpty(body, "provider")
+		return edit.PatchJSON(body, set, nil)
 	})
+}
+
+func normalizeV2(body []byte, config gjson.Result, convert func([]byte) (json.Marshaler, bool)) ([]byte, error) {
+	var set []edit.KV
+	var remove []string
+	legacy := config.Get(legacyProvider)
+	removeProvider := false
+	if legacy.Exists() {
+		if config.Get(NativeProvider).Exists() {
+			removeProvider = true
+		} else if provider, ok := convert([]byte(legacy.Raw)); ok {
+			set = append(set, edit.KV{Path: NativeProvider, Value: provider})
+			removeProvider = true
+		}
+		if removeProvider {
+			remove = append(remove, legacyProvider)
+		}
+	}
+	if small := config.Get(smallModelKey).String(); strings.HasPrefix(small, "magpie/") && !config.Get(TitleModelKey).Exists() {
+		set = append(set, edit.KV{Path: TitleModelKey, Value: small})
+		remove = append(remove, smallModelKey)
+	}
+	if len(set) == 0 && len(remove) == 0 {
+		return body, nil
+	}
+	body, err := edit.PatchJSON(body, set, remove)
+	if err != nil || !removeProvider {
+		return body, err
+	}
+	return dropEmpty(body, "provider")
 }
 
 func PlanSmallModel(options SmallModelOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
