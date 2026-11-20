@@ -161,9 +161,11 @@ func TestModuleRequiresEveryAdvertisedHandlerAndRefusesUnknownMethods(t *testing
 		t.Fatal("inbound model projection required provider.models")
 	}
 	legacy := protocolext.HostContract()
-	if legacy.Version.Major != 0 || legacy.Version.Minor != 5 || protocolext.CatalogContract().Version.Minor != 2 ||
-		FullContract().Version.Major != 1 || FullContract().Version.Minor != 16 {
+	if legacy.Version.Major != 0 || legacy.Version.Minor != 5 || protocolext.CatalogContract().Version.Minor != 2 {
 		t.Fatal("external version altered the legacy codec contract")
+	}
+	if version := FullContract().Version; version != (APIVersion{Major: 1, Minor: 17}) {
+		t.Fatalf("unexpected SDK ceiling: %+v", version)
 	}
 }
 
