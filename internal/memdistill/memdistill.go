@@ -117,7 +117,7 @@ var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
 
 var (
 	now  = time.Now
-	list = func() []sessions.Session { return sessions.List(Listed) }
+	list = func(ctx context.Context) ([]sessions.Session, error) { return sessions.ListContext(ctx, Listed) }
 	read = sessions.TranscriptOfContext
 	// running is held through a run in this process, and the file lock
 	// across magpies
@@ -385,7 +385,17 @@ func runUpTo(ctx context.Context, auto string, complete Complete, limit int) (Re
 	if model == "" {
 		runErr = errors.New("no model to read conversations with: pick one")
 	} else {
-		res, runErr = run(ctx, st, model, st.Effort, complete, limit)
+		ss, oldest, err := due(ctx, st, now())
+		if canceled := ctx.Err(); canceled != nil {
+			if stopped.Load() && errors.Is(canceled, context.Canceled) {
+				return Result{}, nil
+			}
+			return Result{}, canceled
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		res, runErr = run(ctx, ss, oldest, model, st.Effort, complete, limit)
 	}
 	if stopped.Load() && errors.Is(runErr, context.Canceled) {
 		runErr = nil
@@ -432,10 +442,17 @@ func forget(at, since, oldest time.Time) bool {
 
 // due are the sessions to read now, the latest first, and the last turn
 // of the oldest listed.
-func due(st State, t time.Time) ([]sessions.Session, time.Time) {
+func due(ctx context.Context, st State, t time.Time) ([]sessions.Session, time.Time, error) {
+	rows, err := list(ctx)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
 	var out []sessions.Session
 	var oldest time.Time
-	for _, s := range list() {
+	for _, s := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, time.Time{}, err
+		}
 		if oldest.IsZero() || s.Last.Before(oldest) {
 			oldest = s.Last
 		}
@@ -451,16 +468,16 @@ func due(st State, t time.Time) ([]sessions.Session, time.Time) {
 		out = append(out, s)
 	}
 	slices.SortStableFunc(out, func(a, b sessions.Session) int { return b.Last.Compare(a.Last) })
-	return out, oldest
+	if err := ctx.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return out, oldest, nil
 }
 
 func key(s sessions.Session) string { return s.Agent + "/" + s.ID }
 
-func run(ctx context.Context, st State, model, effort string, complete Complete, limit int) (ran, error) {
-	r := ran{done: map[string]time.Time{}}
-	ss, oldest := due(st, now())
-	r.oldest = oldest
-	r.left = len(ss)
+func run(ctx context.Context, ss []sessions.Session, oldest time.Time, model, effort string, complete Complete, limit int) (ran, error) {
+	r := ran{done: map[string]time.Time{}, oldest: oldest, left: len(ss)}
 	of.Store(int64(len(ss)))
 	for _, s := range ss {
 		if r.Read >= limit {

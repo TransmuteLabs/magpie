@@ -2092,6 +2092,13 @@ func List(limit int) []Session {
 	return out
 }
 
+// ListContext reads the same sessions as List and reports an interrupted or
+// unavailable listing as an error.
+func ListContext(ctx context.Context, limit int) ([]Session, error) {
+	out, _, _, err := listUnlessContext(ctx, limit, -1)
+	return out, err
+}
+
 // ListUnless is List, and a number for its listing that changes whenever
 // the listing is made again: at least once a listing has stood
 // listKeptFor. When that number is made, the listing is still the one
@@ -2099,15 +2106,29 @@ func List(limit int) []Session {
 // page asks for every session each 15 s, and an unchanged list was
 // copied, rowed, encoded and hashed again, only to answer X-Magpie-Same.
 func ListUnless(limit, made int) (out []Session, now int, same bool) {
+	out, now, same, _ = listUnlessContext(context.Background(), limit, made)
+	return out, now, same
+}
+
+func listUnlessContext(ctx context.Context, limit, made int) (out []Session, now int, same bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
 	// read before the locks: it reads settings.json
 	alias := provider.UsageAlias()
-	out, now, same = listing(limit, made)
+	out, now, same, err = listingContext(ctx, limit, made)
+	if err != nil {
+		return nil, 0, false, err
+	}
 	if alias != nil {
 		for i := range out {
 			aliasSession(&out[i], alias)
 		}
 	}
-	return out, now, same
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
+	return out, now, same, nil
 }
 
 func listSessions(limit int) []Session {
@@ -2118,23 +2139,34 @@ func listSessions(limit int) []Session {
 // listing is the listing at limit, kept or made now, and keptList.made
 // for it: none when the kept one is made, the number the caller had.
 func listing(limit, made int) ([]Session, int, bool) {
-	return listingContext(context.Background(), limit, made)
+	out, version, same, _ := listingContext(context.Background(), limit, made)
+	return out, version, same
 }
 
-func listingContext(ctx context.Context, limit, made int) ([]Session, int, bool) {
+var errListingUnavailable = errors.New("session listing unavailable")
+
+func listingContext(ctx context.Context, limit, made int) ([]Session, int, bool, error) {
 	type result struct {
-		rows []Session
-		made int
-		same bool
+		rows     []Session
+		made     int
+		same     bool
+		err      error
+		accepted bool
 	}
 	published := publishSourceReadContext(ctx, func() result {
-		rows, version, same := sourceListing(limit, made)
-		return result{rows, version, same}
+		rows, version, same, err := sourceListing(ctx, limit, made)
+		return result{rows, version, same, err, true}
 	})
-	return published.rows, published.made, published.same
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
+	if !published.accepted {
+		return nil, 0, false, errListingUnavailable
+	}
+	return published.rows, published.made, published.same, published.err
 }
 
-func sourceListing(limit, made int) ([]Session, int, bool) {
+func sourceListing(ctx context.Context, limit, made int) ([]Session, int, bool, error) {
 	storeMu.RLock()
 	defer storeMu.RUnlock()
 	if limit <= 0 {
@@ -2142,20 +2174,29 @@ func sourceListing(limit, made int) ([]Session, int, bool) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
 	loadCache()
 
 	defer useDBs()()
-	files := allFiles()
+	files, err := allFilesContext(ctx, &allKept[0], zcodeFiles)
+	if err != nil {
+		return nil, 0, false, err
+	}
 	// every changed file, not just the latest sessions': the first read
 	// indexes them all in one run the page can show, and the stats read
 	// after it has nothing left to do
-	refresh(files, files)
+	refreshContext(ctx, files, files)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
 	price, titles := pricer(), codexTitleOf()
 	if out, ok := keptListing(files, limit, price, titles); ok {
 		if keptList.made == made {
-			return nil, made, true
+			return nil, made, true, nil
 		}
-		return slices.Clone(out), keptList.made, false
+		return slices.Clone(out), keptList.made, false, nil
 	}
 	price, titles = keepListing(files, limit, price, titles)
 	groups := byKey(files, nil)
@@ -2187,6 +2228,9 @@ func sourceListing(limit, made int) ([]Session, int, bool) {
 	// made for the page at once, not grown an append at a time (#2278)
 	out := make([]Session, 0, min(limit, len(keys)))
 	for _, k := range keys {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, false, err
+		}
 		if copies[k] != "" {
 			continue
 		}
@@ -2202,8 +2246,11 @@ func sourceListing(limit, made int) ([]Session, int, bool) {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Last.After(out[j].Last) })
+	if err := ctx.Err(); err != nil {
+		return nil, 0, false, err
+	}
 	keepList(out)
-	return out, keptList.made, false
+	return out, keptList.made, false, nil
 }
 
 // sortSessionFiles puts a session's own file first; for Codex the earliest
@@ -3249,7 +3296,7 @@ func FindContext(ctx context.Context, agent, id string) (Session, bool) {
 }
 
 func findListed(ctx context.Context, agent, id string) (Session, bool) {
-	all, _, _ := listingContext(ctx, 0, -1)
+	all, _, _, _ := listingContext(ctx, 0, -1)
 	for _, s := range all {
 		if s.Agent == agent && s.ID == id {
 			return s, true

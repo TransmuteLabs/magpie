@@ -35,7 +35,7 @@ func newSandbox(t *testing.T) *sandbox {
 	Path = func() string { return filepath.Join(dir, "distill.json") }
 	memory.Path = func() string { return filepath.Join(dir, "memory.json") }
 	now = func() time.Time { return sb.at }
-	list = func() []sessions.Session { return sb.list }
+	list = func(context.Context) ([]sessions.Session, error) { return sb.list, nil }
 	read = func(_ context.Context, s sessions.Session) (sessions.Transcript, error) {
 		tr, ok := sb.trs[s.ID]
 		if !ok {
