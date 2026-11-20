@@ -26,6 +26,17 @@ func installAgentActionFixture(t *testing.T, descriptor sdk.AgentDescriptor) *ex
 
 func installAgentWorkerFixture(t *testing.T, descriptor sdk.AgentDescriptor, worker string, minor int) *extension.Manager {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	host, source := prepareAgentWorkerFixture(t, ctx, descriptor, worker, minor)
+	if _, err := host.Install(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	return host
+}
+
+func prepareAgentWorkerFixture(t *testing.T, ctx context.Context, descriptor sdk.AgentDescriptor, worker string, minor int) (*extension.Manager, string) {
+	t.Helper()
 	home := t.TempDir()
 	for _, env := range []string{"HOME", "USERPROFILE"} {
 		t.Setenv(env, home)
@@ -37,8 +48,6 @@ func installAgentWorkerFixture(t *testing.T, descriptor sdk.AgentDescriptor, wor
 	if runtime.GOOS == "windows" {
 		entry += ".exe"
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
-	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-mod=readonly", "-p=1", "-o",
 		filepath.Join(source, entry), worker)
 	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "CGO_ENABLED=0")
@@ -63,10 +72,7 @@ func installAgentWorkerFixture(t *testing.T, descriptor sdk.AgentDescriptor, wor
 			t.Error(err)
 		}
 	})
-	if _, err := host.Install(ctx, source); err != nil {
-		t.Fatal(err)
-	}
-	return host
+	return host, source
 }
 
 func TestExtensionAgentMetadataOrdinaryDiscovery(t *testing.T) {

@@ -1,10 +1,12 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/usage"
@@ -13,13 +15,20 @@ import (
 func TestExtensionClientRecognizedAfterGatewayStarts(t *testing.T) {
 	descriptor := launchAgentDescriptor()
 	descriptor.UA = []string{"launch-wire-fixture"}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	host, source := prepareAgentWorkerFixture(t, ctx, descriptor, "../extension/testdata/actionworker", 5)
 	if got := usage.AgentOf("codex/1.0"); got != "codex" {
 		t.Fatalf("built-in agent before installation = %q", got)
 	}
 	handler := gateway.New().Front()
 	check := func(id string, expected int) { checkAgentClientRoute(t, handler, id, expected) }
 
-	host := installAgentActionFixture(t, descriptor)
+	check(descriptor.ID, http.StatusNotFound)
+	check(descriptor.Aliases[0], http.StatusNotFound)
+	if _, err := host.Install(ctx, source); err != nil {
+		t.Fatal(err)
+	}
 	check(descriptor.ID, http.StatusOK)
 	check(descriptor.Aliases[0], http.StatusOK)
 	if got := usage.AgentOf("Launch-Wire-Fixture/2.0"); got != descriptor.ID {
