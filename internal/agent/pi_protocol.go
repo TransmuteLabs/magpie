@@ -72,12 +72,19 @@ func piProviderOn(agentID string, models []catalog.Model, gw, on string) map[str
 // models.json at modelsPath; write rewrites the block when it is there,
 // and off says magpie doesn't write the block (the pi-magpie extension
 // serves the provider), so there is nothing to pick.
-func piProtocolField(at place, modelsPath string, write func() error, off func() bool) Field {
-	return protocolField(at, piProtocolKey(at), modelsPath, func() (string, bool) {
+func piProtocolField(at place, modelsPath string, pick func(string) error, off func() bool) Field {
+	field := protocolFieldBase(at, piProtocolKey(at), modelsPath, func() (string, bool) {
 		v, _ := edit.GetJSON(modelsPath, "providers."+magpieID+".api")
 		_, has := edit.GetJSON(modelsPath, "providers."+magpieID)
 		return v, has
-	}, write, off)
+	}, off)
+	field.Set = func(value string) error {
+		if err := checkPiProtocol(value); err != nil {
+			return err
+		}
+		return pick(value)
+	}
+	return field
 }
 
 // protocolField is an agent's protocol, picked in its row and kept in the
@@ -87,6 +94,32 @@ func piProtocolField(at place, modelsPath string, write func() error, off func()
 // doesn't write it, so there is nothing to pick. Pi's (piProtocolField)
 // and omp's (omp_protocol.go).
 func protocolField(at place, key, modelsPath string, fileAPI func() (string, bool), write func() error, off func() bool) Field {
+	field := protocolFieldBase(at, key, modelsPath, fileAPI, off)
+	field.Set = func(value string) error {
+		if err := checkPiProtocol(value); err != nil {
+			return err
+		}
+		file, has := fileAPI()
+		if file != "" {
+			piAPIWanted(modelsPath, file)
+		}
+		stash(map[string]string{key: value})
+		if !has || off() {
+			return nil
+		}
+		return write()
+	}
+	return field
+}
+
+func checkPiProtocol(value string) error {
+	if value != "" && !slices.Contains(piProtocols, value) {
+		return fmt.Errorf("protocol is one of %v or empty (each model's own), not %q", piProtocols, value)
+	}
+	return nil
+}
+
+func protocolFieldBase(at place, key, modelsPath string, fileAPI func() (string, bool), off func() bool) Field {
 	picked := func() string {
 		if v := stashShared()[key]; slices.Contains(piProtocols, v) {
 			return v
@@ -114,22 +147,6 @@ func protocolField(at place, key, modelsPath string, fileAPI func() (string, boo
 				return file
 			}
 			return picked
-		},
-		Set: func(v string) error {
-			if v != "" && !slices.Contains(piProtocols, v) {
-				return fmt.Errorf("protocol is one of %v or empty (each model's own), not %q", piProtocols, v)
-			}
-			// the api in the file now, the user's own included, gives way
-			// to the pick
-			file, has := fileAPI()
-			if file != "" {
-				piAPIWanted(modelsPath, file)
-			}
-			stash(map[string]string{key: v})
-			if !has || off() {
-				return nil
-			}
-			return write()
 		},
 		Options: func(map[string]string) []Option {
 			if at.cold || off() {
@@ -165,12 +182,20 @@ func piAPIWanted(path, api string) {
 	stashMu.Lock()
 	defer stashMu.Unlock()
 	m := stashLoad()
+	key := apisWantedKey(path)
+	m[key] = piAPIWantedRecord(m[key], api)
+	stashWrite(m)
+}
+
+func piAPIWantedRecord(saved, api string) string {
+	if api == "" {
+		return saved
+	}
 	rec := map[string][]string{}
-	if s := m[apisWantedKey(path)]; s != "" && json.Unmarshal([]byte(s), &rec) != nil {
+	if saved != "" && (json.Unmarshal([]byte(saved), &rec) != nil || rec == nil) {
 		rec = map[string][]string{}
 	}
 	rec[piProviderAPI] = []string{api}
 	b, _ := json.Marshal(rec)
-	m[apisWantedKey(path)] = string(b)
-	stashWrite(m)
+	return string(b)
 }

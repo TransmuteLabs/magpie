@@ -140,7 +140,7 @@ func t3code(home string) *Agent {
 		// found by its bundle. No command: `t3` is a common name.
 		detect:   func() bool { return isDir(base) || t3App(home) },
 		ListOnly: true,
-		Sync:     func() error { return t3Sync(path, gateway.URL()) },
+		Sync:     func() error { return t3Refresh(path, gateway.URL(), false) },
 		// its custom models are the models picked for it (#1508)
 		ListsModels: true,
 		// magpie's instance still on the gateway, as for every agent with
@@ -175,17 +175,9 @@ func t3code(home string) *Agent {
 			},
 			Set: func(v string) error {
 				if v == "" {
-					if err := edit.DelJSON(path, t3CodexInstance); err != nil {
-						return err
-					}
-					os.Remove(t3CodexCatalog(path))
-					forget(t3CodexOffered)
-					return edit.DelJSON(path, t3Instance)
+					return t3Disconnect(path)
 				}
-				if err := edit.SetJSON(path, edit.KV{Path: t3Instance, Value: t3Merged(path, gateway.URL())}); err != nil {
-					return err
-				}
-				return t3CodexPut(path, gateway.URL())
+				return t3Refresh(path, gateway.URL(), true)
 			},
 			Options: func(map[string]string) []Option {
 				return []Option{{Value: magpieID, Label: "magpie", Icon: "magpie", Note: "every magpie model in T3 Code twice: magpie on Claude Code, magpie · Codex on Codex; pick one in T3's model picker"}}
@@ -215,14 +207,10 @@ func t3App(home string) bool {
 // every magpie model as a custom model, and the binary path and Claude
 // home of T3's own Claude when the user gave them one.
 func t3InstanceJSON(path, gw string) map[string]any {
-	return t3ClaudeJSON(gw, t3FileSettings(path))
-}
-
-func t3FileSettings(path string) func(string) string {
-	return func(key string) string {
+	return t3ClaudeJSON(gw, func(key string) string {
 		value, _ := edit.GetJSON(path, key)
 		return value
-	}
+	})
 }
 
 func t3CopyDriverPaths(config map[string]any, driver string, get func(string) string) {
@@ -296,8 +284,8 @@ func t3EnvOf(path, k string) (string, bool) {
 	return "", false
 }
 
-// t3Merged is magpie's instance as t3InstanceJSON writes it, merged into
-// the one at path: what the user set on it in T3 Code's own settings
+// t3KeepClaude merges magpie's instance into the current one: what the
+// user set on it in T3 Code's own settings
 // stays (#2030, Kanscape: its name and Auto-compact after were reset on
 // every start). Its name, whether it is on, and every key magpie doesn't
 // write (config.autoCompactWindow, config.launchArgs, accentColor) are
@@ -306,12 +294,6 @@ func t3EnvOf(path, k string) (string, bool) {
 // binary path or Claude home while T3's own Claude has one to carry over.
 // Only magpie's instance is read: another, such as T3's own Claude, lends
 // it nothing of the user's.
-func t3Merged(path, gw string) any {
-	want := t3InstanceJSON(path, gw)
-	cur, _ := edit.GetJSON(path, t3Instance)
-	return t3KeepClaude(want, cur)
-}
-
 func t3KeepClaude(want map[string]any, cur string) any {
 	var have map[string]json.RawMessage
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
@@ -469,37 +451,14 @@ func t3CodexMerged(path, gw string, get func(string) string) any {
 	return mergeTheirs(have, w, nil)
 }
 
-// t3CodexPut writes magpie's Codex instance and its catalog into T3
-// Code's settings at path.
-func t3CodexPut(path, gw string) error {
-	if err := t3CodexCatalogPut(path); err != nil {
-		return err
-	}
-	if err := edit.SetJSON(path, edit.KV{Path: t3CodexInstance, Value: t3CodexMerged(path, gw, t3FileSettings(path))}); err != nil {
-		return err
-	}
-	stash(map[string]string{t3CodexOffered: "1"})
-	return nil
-}
-
-// t3CodexCatalogPut writes the models picked for T3 Code as Codex's
-// catalog for magpie's Codex instance, when it changed.
-func t3CodexCatalogPut(path string) error {
-	cat := t3CodexCatalog(path)
-	b := t3CodexModels()
-	if cur, err := os.ReadFile(cat); err == nil && bytes.Equal(cur, b) {
-		return nil
-	}
-	return edit.WriteAtomic(cat, b)
-}
-
 func t3CodexModels() []byte {
 	return codexcat.CatalogAt(magpieModels("t3code"), "")
 }
 
-// t3Sync brings magpie's instances up to the catalog and gateway. An older
-// Claude-only wiring gets Codex once, and one the user removed stays removed.
-func t3Sync(path, gw string) error {
+// t3Refresh brings magpie's instances up to the catalog and gateway.
+// Connect enables both instances. On Sync an older Claude-only wiring gets
+// Codex once, and one the user removed stays removed.
+func t3Refresh(path, gw string, connect bool) error {
 	before, err := readWiringFile(path)
 	if err != nil {
 		return edit.PreserveOnRollback(path, err)
@@ -507,10 +466,10 @@ func t3Sync(path, gw string) error {
 	config := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(before.body)))
 	get := func(key string) string { return config.Get(key).String() }
 	claude, codex := config.Get(t3Instance), config.Get(t3CodexInstance)
-	addCodex := !codex.Exists() && claude.Exists() && !t3Stashed(t3CodexOffered)
+	addCodex := !codex.Exists() && (connect || claude.Exists() && !t3Stashed(t3CodexOffered))
 	var files []wiringFileEdit
 	var writes []edit.KV
-	if claude.Exists() {
+	if connect || claude.Exists() {
 		if next := t3KeepClaude(t3ClaudeJSON(gw, get), claude.String()); !sameJSON(claude.Raw, next) {
 			writes = append(writes, edit.KV{Path: t3Instance, Value: next})
 		}
@@ -541,9 +500,36 @@ func t3Sync(path, gw string) error {
 	if err := writeWiringFiles(files...); err != nil {
 		return err
 	}
-	if addCodex {
+	if connect || addCodex {
 		stash(map[string]string{t3CodexOffered: "1"})
 	}
+	return nil
+}
+
+func t3Disconnect(path string) error {
+	before, err := readWiringFile(path)
+	if err != nil {
+		return edit.PreserveOnRollback(path, err)
+	}
+	catalogPath := t3CodexCatalog(path)
+	catalog, err := readWiringName(catalogPath)
+	if err != nil {
+		return before.preserveOnError(path, edit.PreserveOnRollback(catalogPath, err))
+	}
+	settings := wiringFileEdit{path: path, before: before}
+	if len(bytes.TrimSpace(edit.TrimBOM(before.body))) > 0 {
+		body, err := edit.PatchJSON(before.body, nil, []string{t3CodexInstance, t3Instance})
+		if err != nil {
+			return before.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
+		}
+		if !bytes.Equal(body, before.body) {
+			settings.body = body
+		}
+	}
+	if err := writeWiringFiles(settings, wiringFileEdit{path: catalogPath, before: catalog, unlink: true}); err != nil {
+		return err
+	}
+	forget(t3CodexOffered)
 	return nil
 }
 

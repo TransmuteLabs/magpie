@@ -1,13 +1,72 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestPiMagpieTakeoverKeepsConcurrentEdits(t *testing.T) {
+	for _, action := range []string{"sync", "pick"} {
+		t.Run(action, func(t *testing.T) {
+			client := pi(syncHome(t))
+			models := filepath.Join(client.Dir, "models.json")
+			if err := client.Apply("model", "magpie/relay/glm-4.6"); err != nil {
+				t.Fatal(err)
+			}
+			catalog := readFile(models)
+			const config = `{"packages":["npm:pi-magpie"],"defaultProvider":"magpie","defaultModel":"relay/old","enabledModels":["magpie/relay/old"]}`
+			writeFile(t, client.Path, config)
+			conflict := models
+			user := `{"providers":{"magpie":{"baseUrl":"https://user.invalid/v1","apiKey":"user-set"}}}`
+			operate := client.Sync
+			if action == "pick" {
+				conflict = client.Path
+				user = strings.TrimSuffix(config, "}") + `,"theme":"dark"}`
+				operate = func() error { return client.Pick("model", "magpie/relay/glm-4.6") }
+			}
+			target, err := edit.Target(conflict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := false
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !edited {
+					edited = true
+					writeFile(t, path, user)
+				}
+				return body
+			}, operate)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(conflict) != user {
+				t.Errorf("takeover lost the current file: edited=%t, err=%v, contents=%s", edited, err, readFile(conflict))
+			}
+			if action == "pick" && readFile(models) != catalog {
+				t.Error("rejected pick removed the old catalog")
+			}
+			if _, err := os.Stat(models + ".before-pi-magpie"); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("rejected takeover left a backup: %v", err)
+			}
+			if err := operate(); err != nil {
+				t.Fatal(err)
+			}
+			if action == "sync" {
+				if readFile(models) != user {
+					t.Fatal("Sync removed the replacement provider on retry")
+				}
+			} else if readFile(models+".before-pi-magpie") != catalog ||
+				!strings.Contains(readFile(client.Path), `"theme":"dark"`) ||
+				strings.Contains(readFile(models), `"magpie"`) {
+				t.Fatal("the accepted pick did not retain the original catalog and the new settings")
+			}
+		})
+	}
+}
 
 // With the pi-magpie extension installed, magpie's own providers.magpie
 // block in models.json is taken out (a copy kept), the user's other

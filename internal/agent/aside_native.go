@@ -368,7 +368,7 @@ func (c *asideConnection) refreshProvider(connect bool) error {
 	const slot = "providers.magpie"
 	current := gjson.GetBytes(edit.TrimBOM(before.body), slot)
 	updates := map[string]string{}
-	next := piBlockKept(c.models, current.String(), c.block(), updates)
+	next := piBlockKept(c.models, current.String(), c.block(), false, updates)
 	if changes := jsonSyncChange(slot, current, next); len(changes) != 0 {
 		body, err := edit.PatchJSON(before.body, changes, nil)
 		if err != nil {

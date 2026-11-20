@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -61,6 +63,145 @@ func hasModel(ms []piExtensionModel, id string) (piExtensionModel, bool) {
 		}
 	}
 	return piExtensionModel{}, false
+}
+
+func TestPiExtensionFailureKeepsWiring(t *testing.T) {
+	for _, action := range []string{"sync", "pick", "reset", "protocol", "live-sync"} {
+		t.Run(action, func(t *testing.T) {
+			home := syncHome(t)
+			client := pi(home)
+			models := filepath.Join(client.Dir, "models.json")
+			settings := `{"defaultProvider":"magpie","defaultModel":"relay/old","enabledModels":["magpie/relay/old"]}`
+			catalog := `{"providers":{"magpie":{"models":[{"id":"relay/old"}]}}}`
+			if action == "live-sync" {
+				if err := client.Apply("model", "magpie/relay/glm-4.6"); err != nil {
+					t.Fatal(err)
+				}
+				catalog = readFile(models)
+				settings = strings.TrimSuffix(settings, "}") + `,"packages":["npm:pi-magpie"]}`
+			}
+			writeFile(t, client.Path, settings)
+			writeFile(t, models, catalog)
+			if err := os.MkdirAll(piExtensionPath(client.Dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			operate := client.Sync
+			switch action {
+			case "pick":
+				operate = func() error { return client.Pick("model", "magpie/relay/glm-4.6") }
+			case "reset":
+				operate = func() error { return client.Field("model").Set("") }
+			case "protocol":
+				operate = func() error { return client.Pick("protocol", "openai-responses") }
+			}
+			history := stashShared()
+			if err := operate(); err == nil {
+				t.Fatal("an invalid managed extension path was accepted")
+			}
+			if readFile(client.Path) != settings || readFile(models) != catalog {
+				t.Errorf("a failed extension operation updated Pi settings or catalog")
+			}
+			current := stashShared()
+			if current[apisWantedKey(models)] != history[apisWantedKey(models)] ||
+				current[outputsWantedKey(models)] != history[outputsWantedKey(models)] ||
+				current[piProtocolKey(here(home))] != history[piProtocolKey(here(home))] {
+				t.Error("a failed extension operation updated catalog history")
+			}
+			if _, err := os.Lstat(models + ".before-pi-magpie"); !os.IsNotExist(err) {
+				t.Errorf("a failed takeover left a backup: %v", err)
+			}
+		})
+	}
+}
+
+func TestPiExtensionRemovesOnlyTheManagedAlias(t *testing.T) {
+	for _, kind := range []string{"symlink", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			home := piExtensionHome(t)
+			client := pi(home)
+			path := piExtensionPath(client.Dir)
+			pick := func() error { return client.Pick("model", "magpie/mixed/deepseek-v4.1-flash") }
+			if err := pick(); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(client.Dir, "kept.ts")
+			if err := os.Rename(path, target); err != nil {
+				t.Fatal(err)
+			}
+			link := os.Symlink
+			if kind == "hardlink" {
+				link = os.Link
+			}
+			if err := link(target, path); err != nil {
+				t.Skipf("%s unavailable: %v", kind, err)
+			}
+			if err := provider.Delete("art"); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			left, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			right, err := os.Stat(target)
+			if err != nil || !os.SameFile(left, right) {
+				t.Fatalf("Sync changed the alias target: %v", err)
+			}
+			saved := readFile(target)
+			if extension := readPiExtension(t, target); len(extension.Images) != 0 {
+				t.Fatal("Sync did not update the extension through the alias")
+			}
+			if err := client.Field("model").Set(""); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(path); !os.IsNotExist(err) || readFile(target) != saved {
+				t.Errorf("reset did not remove only the managed alias: %v", err)
+			}
+		})
+	}
+}
+
+func TestPiExtensionResetKeepsReplacedAlias(t *testing.T) {
+	client := pi(piExtensionHome(t))
+	if err := client.Pick("model", "magpie/mixed/deepseek-v4.1-flash"); err != nil {
+		t.Fatal(err)
+	}
+	path := piExtensionPath(client.Dir)
+	target := filepath.Join(client.Dir, "kept.ts")
+	if err := os.Rename(path, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	replacement := path + ".replacement"
+	if err := os.Symlink(target, replacement); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := edit.Target(client.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models := filepath.Join(client.Dir, "models.json")
+	config, catalog, script := readFile(settings), readFile(models), readFile(target)
+	replaced := false
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == settings && !replaced {
+			if err := os.Rename(replacement, piExtensionPath(client.Dir)); err != nil {
+				t.Fatal(err)
+			}
+			replaced = true
+		}
+		return body
+	}, func() error { return client.Field("model").Set("") })
+	if !replaced || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("reset accepted a replaced alias: replaced=%t, err=%v", replaced, err)
+	}
+	if readFile(settings) != config || readFile(models) != catalog || readFile(target) != script || readFile(path) != script {
+		t.Fatal("reset changed wiring or removed the replacement")
+	}
 }
 
 // Pi's codemode reaches classifier and image models, which models.json

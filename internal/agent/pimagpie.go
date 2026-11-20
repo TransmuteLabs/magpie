@@ -19,9 +19,10 @@ var piMagpieExt = lazyre.New(`(^|[:/\\])pi-magpie(@[^/\\]*)?(#.*)?$`)
 // file that can't be read is unknown, so not installed.
 func piMagpieInstalled(settings string) bool {
 	raw, err := os.ReadFile(settings)
-	if err != nil {
-		return false
-	}
+	return err == nil && piMagpieSettings(raw)
+}
+
+func piMagpieSettings(raw []byte) bool {
 	var s struct {
 		Packages []json.RawMessage `json:"packages"`
 	}
@@ -44,23 +45,4 @@ func piMagpieInstalled(settings string) bool {
 		}
 	}
 	return false
-}
-
-// dropPiBlock takes magpie's own providers.magpie out of models.json, the
-// rest of the file as it was, after keeping a copy of the file beside it
-// (models.json.before-pi-magpie, the first one kept). off is wiringOff for
-// the block: "" says it points at this gateway with magpie's key, so it is
-// magpie's; any other block is the user's and stays.
-func dropPiBlock(modelsPath string, off func() string) error {
-	if _, has := edit.GetJSON(modelsPath, "providers."+magpieID); !has || off() != "" {
-		return nil
-	}
-	if raw, err := os.ReadFile(modelsPath); err == nil {
-		if _, e := os.Stat(modelsPath + ".before-pi-magpie"); e != nil {
-			if err := edit.WriteAtomic(modelsPath+".before-pi-magpie", raw); err != nil {
-				return err
-			}
-		}
-	}
-	return edit.DelJSON(modelsPath, "providers."+magpieID)
 }

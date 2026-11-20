@@ -792,13 +792,17 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 // user's own or pi-cache-optimizer's (#1103), stays as it is, as does a
 // model's maxTokens the user typed there and an api they set for the
 // provider or a model. The caller saves updates after publication.
-func piBlockKept(path, current string, block map[string]any, updates map[string]string) any {
+func piBlockKept(path, current string, block map[string]any, forceAPI bool, updates map[string]string) any {
 	known := stashShared()
 	apis, outputs := apisWantedKey(path), outputsWantedKey(path)
 	if next := piCatalogOutputs(block, gjson.Get(current, "models").Raw, known[outputs]); next != known[outputs] {
 		updates[outputs] = next
 	}
-	if next := piCatalogAPIs(block, current, known[apis]); next != known[apis] {
+	saved := known[apis]
+	if forceAPI {
+		saved = piAPIWantedRecord(saved, gjson.Get(current, "api").String())
+	}
+	if next := piCatalogAPIs(block, current, saved); next != known[apis] {
 		updates[apis] = next
 	}
 	if gjson.Get(current, "compat.sendSessionAffinityHeaders").Exists() {
@@ -1667,36 +1671,100 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		return b
 	}
 	refresh := func(current gjson.Result, updates map[string]string) any {
-		return piBlockKept(modelsPath, current.String(), block(), updates)
+		return piBlockKept(modelsPath, current.String(), block(), false, updates)
 	}
-	// Pi's own: magpie's decision and image models, for codemode
-	// (pi_extension.go); a fork's extensions may not be Pi's
-	extension := func() error { return nil }
-	if id == "pi" {
-		extension = func() error { return piExtensionSynced(dir, modelsPath, at.v1(), key()) }
+	writePiFiles := func(edits ...wiringFileEdit) error {
+		if id == "pi" {
+			for _, catalog := range edits {
+				if catalog.path == modelsPath {
+					sidecar, err := piExtensionEdit(dir, catalog, func() string { return piExtensionFor(at.v1(), key()) })
+					if err != nil {
+						return err
+					}
+					edits = append(edits, sidecar)
+					break
+				}
+			}
+		}
+		return writeWiringFiles(edits...)
 	}
 	// the pi-magpie extension serves provider "magpie" live, so Pi's
 	// models.json block is not written and magpie's own stale one goes
 	// (pimagpie.go)
 	viaExt := func() bool { return id == "pi" && piMagpieInstalled(path) }
-	dropStaleBlock := func() error {
-		if err := dropPiBlock(modelsPath, func() string {
-			return wiringOff(name, modelsPath, func(k string) (string, bool) { return edit.GetJSON(modelsPath, "providers."+magpieID+"."+k) },
-				"baseUrl", at.v1(), "apiKey", key())
-		}); err != nil {
-			return err
-		}
-		return extension()
-	}
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
 	before := beforeMagpie{at.key(id + ".before.absent"), []string{path, modelsPath}}
+	keepFirstPick := func(config, catalog wiringFile) {
+		if gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(catalog.body)), "providers."+magpieID).Exists() ||
+			gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(config.body)), "defaultProvider").String() == magpieID {
+			return
+		}
+		before.takeFrom(func(file string) ([]byte, error) {
+			snapshot := config
+			if file == modelsPath {
+				snapshot = catalog
+			}
+			if snapshot.info == nil {
+				return nil, fs.ErrNotExist
+			}
+			return snapshot.body, nil
+		})
+	}
+	gone := at.key(id + ".scope.gone")
+	syncScope := func(catalog, config wiringFileEdit, refresh func(gjson.Result, map[string]string) any) error {
+		plan, remember, err := planPiScope(catalog, config, gone, refresh)
+		if err != nil {
+			return err
+		}
+		if err := writePiFiles(plan...); err != nil {
+			return err
+		}
+		remember()
+		return nil
+	}
+	takeover := func(catalog, config wiringFileEdit, sync bool) error {
+		original := catalog.before
+		const slot = "providers." + magpieID
+		current := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(original.body)), slot)
+		owns := current.Exists() && wiringOff(name, modelsPath, func(key string) (string, bool) {
+			value := current.Get(key)
+			return value.String(), value.Exists()
+		}, "baseUrl", at.v1(), "apiKey", key()) == ""
+		if !owns {
+			if sync {
+				return syncScope(catalog, config, nil)
+			}
+			return writePiFiles(catalog, config)
+		}
+		backupPath := modelsPath + ".before-pi-magpie"
+		snapshot, err := readWiringFile(backupPath)
+		if err != nil {
+			return edit.PreserveOnRollback(backupPath, err)
+		}
+		backup := wiringFileEdit{path: backupPath, before: snapshot}
+		if snapshot.info == nil {
+			backup.body = original.body
+		}
+		catalog.body, err = edit.PatchJSON(original.body, nil, []string{slot})
+		if err != nil {
+			return original.preserveOnError(modelsPath, fmt.Errorf("%s: %w", modelsPath, err))
+		}
+		return writePiFiles(backup, catalog, config)
+	}
 	pickCatalog := func(value string, config wiringFileEdit) error {
 		original, err := readWiringFile(modelsPath)
 		if err != nil {
 			return edit.PreserveOnRollback(modelsPath, err)
 		}
 		catalog := wiringFileEdit{path: modelsPath, before: original}
+		if value != "" && id == "pi" && piMagpieSettings(config.before.body) {
+			if err := takeover(catalog, config, false); err != nil {
+				return err
+			}
+			keepFirstPick(config.before, original)
+			return nil
+		}
 		const slot = "providers." + magpieID
 		updates := map[string]string{}
 		current := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(original.body)), slot)
@@ -1711,30 +1779,17 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			return original.preserveOnError(modelsPath, fmt.Errorf("%s: %w", modelsPath, err))
 		}
 		if value == "" {
-			return writeWiringFiles(config, catalog)
+			return writePiFiles(config, catalog)
 		}
-		if err := writeWiringFiles(catalog, config); err != nil {
+		if err := writePiFiles(catalog, config); err != nil {
 			return err
 		}
-		if !current.Exists() && gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(config.before.body)), "defaultProvider").String() != magpieID {
-			before.takeFrom(func(file string) ([]byte, error) {
-				snapshot := config.before
-				if file == modelsPath {
-					snapshot = original
-				}
-				if snapshot.info == nil {
-					return nil, fs.ErrNotExist
-				}
-				return snapshot.body, nil
-			})
-		}
+		keepFirstPick(config.before, original)
 		if len(updates) != 0 {
 			stash(updates)
 		}
-		return extension()
+		return nil
 	}
-	// the entries of enabledModels a sync took out (scope_gone.go)
-	gone := at.key(id + ".scope.gone")
 	var telemetry *Telemetry
 	if id == "pi" {
 		telemetry = piTelemetry(at, path)
@@ -1755,16 +1810,19 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		},
 		ListOnly: true,
 		Sync: func() error {
-			if viaExt() {
-				if err := dropStaleBlock(); err != nil {
-					return err
-				}
-				return piScopeSynced(path, modelsPath, gone, nil)
+			models, err := readWiringFile(modelsPath)
+			if err != nil {
+				return edit.PreserveOnRollback(modelsPath, err)
 			}
-			if err := piScopeSynced(path, modelsPath, gone, refresh); err != nil {
-				return err
+			settings, err := readWiringFile(path)
+			if err != nil {
+				return edit.PreserveOnRollback(path, err)
 			}
-			return extension()
+			catalog, config := wiringFileEdit{path: modelsPath, before: models}, wiringFileEdit{path: path, before: settings}
+			if id == "pi" && piMagpieSettings(settings.body) {
+				return takeover(catalog, config, true)
+			}
+			return syncScope(catalog, config, refresh)
 		},
 		// a provider renamed takes its magpie/<id>/ entries in enabledModels
 		// with it: an entry left on the old id names nothing, and Pi would
@@ -1791,24 +1849,11 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 						if err := pickCatalog(v, config); err != nil {
 							return err
 						}
-						if err := extension(); err != nil {
-							return err
-						}
 						forget(gone)
 						return nil
 					}
 					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-						if !viaExt() {
-							return pickCatalog(v, config)
-						}
-						if _, has := edit.GetJSON(modelsPath, "providers."+magpieID); !has {
-							if p, _ := get("defaultProvider"); p != magpieID {
-								before.take()
-							}
-						}
-						if err := dropStaleBlock(); err != nil {
-							return err
-						}
+						return pickCatalog(v, config)
 					}
 					return writeWiringFiles(config)
 				},
@@ -1858,25 +1903,46 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	}
 	// the protocol it asks magpie's models on (pi_protocol.go)
 	if id == "pi" {
-		writeProtocol := func() error {
-			updates := map[string]string{}
-			err := applyJSONSync(modelsPath, func(config gjson.Result) []edit.KV {
-				const slot = "providers." + magpieID
-				current := config.Get(slot)
-				if !current.Exists() {
-					return nil
-				}
-				return jsonSyncChange(slot, current, refresh(current, updates))
-			})
+		pickProtocol := func(chosen string) error {
+			settings, err := readWiringFile(path)
 			if err != nil {
+				return edit.PreserveOnRollback(path, err)
+			}
+			updates := map[string]string{piProtocolKey(at): chosen}
+			if piMagpieSettings(settings.body) {
+				if err := settings.check(path); err != nil {
+					return err
+				}
+				stash(updates)
+				return nil
+			}
+			models, err := readWiringFile(modelsPath)
+			if err != nil {
+				return edit.PreserveOnRollback(modelsPath, err)
+			}
+			const slot = "providers." + magpieID
+			catalog, config := wiringFileEdit{path: modelsPath, before: models}, wiringFileEdit{path: path, before: settings}
+			current := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(models.body)), slot)
+			write := writeWiringFiles
+			if current.Exists() {
+				next := piProviderOn("pi", magpieModels("pi"), at.gw(), chosen)
+				next["apiKey"] = key()
+				want := piBlockKept(modelsPath, current.Raw, next, true, updates)
+				if changes := jsonSyncChange(slot, current, want); len(changes) != 0 {
+					catalog.body, err = edit.PatchJSON(models.body, changes, nil)
+					if err != nil {
+						return models.preserveOnError(modelsPath, err)
+					}
+				}
+				write = writePiFiles
+			}
+			if err := write(config, catalog); err != nil {
 				return err
 			}
-			if len(updates) != 0 {
-				stash(updates)
-			}
-			return extension()
+			stash(updates)
+			return nil
 		}
-		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, writeProtocol, viaExt))
+		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, pickProtocol, viaExt))
 	}
 	return a
 }

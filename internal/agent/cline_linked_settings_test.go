@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,7 +14,237 @@ import (
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestClineModelChangesKeepSettingsAndStashOnConflict(t *testing.T) {
+	for _, action := range []string{"connect", "pick", "native", "disconnect"} {
+		t.Run(action, func(t *testing.T) {
+			home := syncHome(t)
+			t.Setenv("CLINE_DIR", "")
+			t.Setenv("CLINE_DATA_DIR", "")
+			a := cline(home)
+			if action == "pick" {
+				if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"glm-4.6", "llama-4"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			data := filepath.Dir(filepath.Dir(a.Path))
+			models := filepath.Join(data, "settings", "models.json")
+			state := filepath.Join(data, "globalState.json")
+			secrets := filepath.Join(data, "secrets.json")
+			native := map[string]string{
+				a.Path:  `{"version":1,"lastUsedProvider":"anthropic","providers":{"anthropic":{"settings":{"apiKey":"native-key","model":"native-model","reasoning":{"enabled":false}}}}}`,
+				models:  `{"version":1,"providers":{"openai-compatible":{"provider":{"baseUrl":"https://own.invalid/v1"},"models":{"own":{"id":"own"}}}}}`,
+				state:   `{"actModeApiProvider":"anthropic","openAiBaseUrl":"https://own.invalid/v1","telemetrySetting":"disabled"}`,
+				secrets: `{"openAiApiKey":"own-key","anthropicApiKey":"native-key"}`,
+			}
+			for path, body := range native {
+				writeFile(t, path, body)
+			}
+			change := func() error { return a.Apply("model", "magpie/relay/glm-4.6") }
+			if action == "connect" {
+				change = a.Connect
+			} else {
+				if err := change(); err != nil {
+					t.Fatal(err)
+				}
+				switch action {
+				case "pick":
+					change = func() error { return a.Apply("model", "magpie/relay/llama-4") }
+				case "native":
+					change = func() error { return a.Apply("model", "native-new") }
+				case "disconnect":
+					change = a.Disconnect
+				}
+			}
+			before := map[string]string{}
+			for path := range native {
+				before[path] = readFile(path)
+			}
+			prefix := "cline:" + a.Path + ":"
+			stashKeys := []string{prefix + "entry", prefix + "lastUsedProvider", prefix + "models",
+				prefix + "state", prefix + "secret", prefix + "stated"}
+			stashed := peek(stashKeys...)
+			user := strings.Replace(before[a.Path], "native-key", "new-native-key", 1)
+			if user == before[a.Path] {
+				t.Fatal("native key was absent before the conflict")
+			}
+			target, err := edit.Target(a.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			modelTarget, err := edit.Target(models)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := false
+			filteredRestore := false
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !edited {
+					edited = true
+					writeFile(t, a.Path, user)
+				}
+				if path == modelTarget && edited {
+					filteredRestore = true
+					return []byte(`{}`)
+				}
+				return body
+			}, change)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) {
+				t.Errorf("model change accepted a modified provider file: edited=%t, error=%v", edited, err)
+			}
+			if filteredRestore {
+				t.Error("rollback ran the restored catalog through the publication filter")
+			}
+			for path, want := range before {
+				if path == a.Path {
+					want = user
+				}
+				if readFile(path) != want {
+					t.Errorf("rejected model change failed to preserve %s", filepath.Base(path))
+				}
+			}
+			if !maps.Equal(peek(stashKeys...), stashed) {
+				t.Error("rejected model change changed the saved Cline originals")
+			}
+			if t.Failed() {
+				return
+			}
+			if err := change(); err != nil {
+				t.Fatal("retry:", err)
+			}
+			if key, _ := edit.GetJSON(a.Path, "providers.anthropic.settings.apiKey"); key != "new-native-key" {
+				t.Error("retry overwrote the user's updated key")
+			}
+			switch action {
+			case "connect", "pick":
+				want := "magpie/relay/glm-4.6"
+				if action == "pick" {
+					want = "magpie/relay/llama-4"
+				}
+				if got := a.Field("model").Get(); got != want {
+					t.Errorf("after retry model = %q, want %q", got, want)
+				}
+			case "native":
+				if got := a.Field("model").Get(); got != "native-new" {
+					t.Errorf("after retry model = %q, want native-new", got)
+				}
+			case "disconnect":
+				if got := a.Field("model").Get(); got != "native-model" {
+					t.Errorf("after retry model = %q, want native-model", got)
+				}
+			}
+			if action == "native" || action == "disconnect" {
+				for path, field := range map[string]string{models: "providers.openai-compatible.provider.baseUrl", state: "openAiBaseUrl", secrets: "openAiApiKey"} {
+					want := "https://own.invalid/v1"
+					if path == secrets {
+						want = "own-key"
+					}
+					if value, _ := edit.GetJSON(path, field); value != want {
+						t.Errorf("retry did not restore %s", filepath.Base(path))
+					}
+				}
+				if len(peek(stashKeys...)) != 0 {
+					t.Error("successful restoration kept the saved Cline originals")
+				}
+			}
+		})
+	}
+}
+
+func TestClineConnectCreatesPrivateSettings(t *testing.T) {
+	t.Run("home", func(t *testing.T) { testClineConnectCreatesPrivateSettings(t, false) })
+	t.Run("symlinked-data", func(t *testing.T) { testClineConnectCreatesPrivateSettings(t, true) })
+}
+
+func testClineConnectCreatesPrivateSettings(t *testing.T, symlinked bool) {
+	t.Helper()
+	home := syncHome(t)
+	t.Setenv("CLINE_DIR", "")
+	t.Setenv("CLINE_DATA_DIR", "")
+	a := cline(home)
+	data := filepath.Dir(filepath.Dir(a.Path))
+	state := filepath.Join(data, "globalState.json")
+	secrets := filepath.Join(data, "secrets.json")
+	writeFile(t, state, `{"telemetrySetting":"disabled"}`)
+	if symlinked {
+		if runtime.GOOS == "windows" {
+			t.Skip("directory symlinks need Windows privileges")
+		}
+		alias := filepath.Join(home, "cline-data")
+		if err := os.Symlink(data, alias); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("CLINE_DATA_DIR", alias)
+		a = cline(home)
+		other := filepath.Join(home, "other-cline-data")
+		otherState := filepath.Join(other, "globalState.json")
+		writeFile(t, otherState, `{"openAiBaseUrl":"https://other.invalid/v1"}`)
+		target, err := filepath.EvalSymlinks(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retarget := func(next string) {
+			t.Helper()
+			if err := os.Remove(alias); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(next, alias); err != nil {
+				t.Fatal(err)
+			}
+		}
+		changed := false
+		err = edit.Filtered(func(path string, body []byte) []byte {
+			if path == filepath.Join(target, "settings", "models.json") && !changed {
+				changed = true
+				retarget(other)
+			}
+			return body
+		}, a.Connect)
+		if !changed || !errors.Is(err, extension.ErrActionChanged) {
+			t.Fatalf("connect did not reject a retargeted directory: changed=%t, err=%v", changed, err)
+		}
+		for _, root := range []string{data, other} {
+			if _, err := os.Stat(filepath.Join(root, "settings", "models.json")); !os.IsNotExist(err) {
+				t.Fatalf("rejected connect wrote to %s: %v", root, err)
+			}
+		}
+		if got := readFile(otherState); got != `{"openAiBaseUrl":"https://other.invalid/v1"}` {
+			t.Fatalf("rejected connect modified the new target: %s", got)
+		}
+		retarget(data)
+	}
+	dir := filepath.Dir(a.Path)
+	if err := a.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	if key, _ := edit.GetJSON(secrets, "openAiApiKey"); key != gateway.Token {
+		t.Fatal("first connection didn't provision the extension's gateway key")
+	}
+	if runtime.GOOS != "windows" {
+		for path, want := range map[string]os.FileMode{
+			dir: 0o700, state: 0o644, a.Path: 0o600, secrets: 0o600, filepath.Join(dir, "models.json"): 0o600,
+		} {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode := info.Mode().Perm(); mode != want {
+				t.Errorf("%s: got mode %o, want %o", filepath.Base(path), mode, want)
+			}
+		}
+	}
+	if err := a.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := edit.GetJSON(secrets, "openAiApiKey"); exists {
+		t.Error("disconnect left the gateway key in the extension's secrets")
+	}
+	if value, _ := edit.GetJSON(state, "telemetrySetting"); value != "disabled" {
+		t.Error("disconnect changed the user's telemetry setting")
+	}
+}
 
 func TestClineSyncUsesCurrentSettingsDuringCatalogHold(t *testing.T) {
 	home := syncHome(t)

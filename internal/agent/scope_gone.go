@@ -159,29 +159,18 @@ func offeredSet(n int, id func(int) string) map[string]bool {
 	return out
 }
 
-// piScopeSynced catches Pi's enabledModels (settings.json) up with the
-// models magpie's block in models.json gives it; mem is the stash key of
-// what was taken out.
-func piScopeSynced(settings, modelsPath, mem string, refresh func(gjson.Result, map[string]string) any) error {
-	models, err := readWiringFile(modelsPath)
-	if err != nil {
-		return edit.PreserveOnRollback(modelsPath, err)
-	}
-	config, err := readWiringFile(settings)
-	if err != nil {
-		return edit.PreserveOnRollback(settings, err)
-	}
-	catalog := wiringFileEdit{path: modelsPath, before: models}
-	scope := wiringFileEdit{path: settings, before: config}
+func planPiScope(catalog, scope wiringFileEdit, mem string, refresh func(gjson.Result, map[string]string) any) ([]wiringFileEdit, func(), error) {
 	const providerPath = "providers." + magpieID
+	models, config := catalog.before, scope.before
 	current := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(models.body)))
 	updates := map[string]string{}
 	if block := current.Get(providerPath); refresh != nil && block.Exists() {
 		if changes := jsonSyncChange(providerPath, block, refresh(block, updates)); len(changes) != 0 {
-			catalog.body, err = edit.PatchJSON(models.body, changes, nil)
+			patched, err := edit.PatchJSON(models.body, changes, nil)
 			if err != nil {
-				return models.preserveOnError(modelsPath, err)
+				return nil, nil, models.preserveOnError(catalog.path, err)
 			}
+			catalog.body = patched
 			current = gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(catalog.body)))
 		}
 	}
@@ -207,22 +196,21 @@ func piScopeSynced(settings, modelsPath, mem string, refresh func(gjson.Result, 
 			} else {
 				del = []string{"enabledModels"}
 			}
-			scope.body, err = edit.PatchJSON(config.body, set, del)
+			patched, err := edit.PatchJSON(config.body, set, del)
 			if err != nil {
-				return config.preserveOnError(settings, err)
+				return nil, nil, config.preserveOnError(scope.path, err)
 			}
+			scope.body = patched
 		}
 	}
-	if err := writeWiringFiles(catalog, scope); err != nil {
-		return err
-	}
-	if len(updates) != 0 {
-		stash(updates)
-	}
-	if remembered != nil {
-		scopeGoneSave(mem, *remembered)
-	}
-	return nil
+	return []wiringFileEdit{catalog, scope}, func() {
+		if len(updates) != 0 {
+			stash(updates)
+		}
+		if remembered != nil {
+			scopeGoneSave(mem, *remembered)
+		}
+	}, nil
 }
 
 // stepcodeScopeSynced is piScopeSynced for StepCode's enabledModels

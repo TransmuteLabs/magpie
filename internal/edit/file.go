@@ -143,14 +143,18 @@ type AtomicPublication struct {
 }
 
 func WriteAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication) error {
-	return writeAtomicRecording(path, data, check, published, nil)
+	return writeAtomicRecording(path, data, check, published, false, nil)
+}
+
+func WritePrivateAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication) error {
+	return writeAtomicRecording(path, data, check, published, true, nil)
 }
 
 func RestoreAtomicChecked(path string, data []byte, check func() error, original fs.FileInfo) error {
-	return writeAtomicRecording(path, data, check, nil, original)
+	return writeAtomicRecording(path, data, check, nil, false, original)
 }
 
-func writeAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication, original fs.FileInfo) error {
+func writeAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication, private bool, original fs.FileInfo) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -200,7 +204,10 @@ func writeAtomicRecording(path string, data []byte, check func() error, publishe
 			return err
 		}
 	}
-	mode := fs.FileMode(0o644)
+	mode, dirMode := fs.FileMode(0o644), fs.FileMode(0o755)
+	if private {
+		mode, dirMode = 0o600, 0o700
+	}
 	st, statErr := os.Stat(path)
 	if original != nil {
 		st, statErr = original, nil
@@ -216,7 +223,7 @@ func writeAtomicRecording(path string, data []byte, check func() error, publishe
 			return err
 		}
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")

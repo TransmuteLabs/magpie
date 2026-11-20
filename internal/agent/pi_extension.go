@@ -5,12 +5,11 @@ import (
 	"cmp"
 	_ "embed"
 	"encoding/json"
-	"errors"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
@@ -77,36 +76,32 @@ func piExtensionFor(baseURL, key string) string {
 	return strings.Replace(piExtensionSource, "__MAGPIE__", string(data), 1)
 }
 
-// piExtensionSynced brings magpie's extension in Pi's agent folder dir
-// to what models.json says: written while it has providers.magpie and
-// magpie has models to list, else gone. A file there magpie didn't write
-// is left as it is.
-func piExtensionSynced(dir, modelsPath, baseURL, key string) error {
+func piExtensionEdit(dir string, catalog wiringFileEdit, render func() string) (wiringFileEdit, error) {
 	path := piExtensionPath(dir)
-	cur, err := os.ReadFile(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		cur = nil
-	case err != nil:
-		return err // unknown: neither written over nor removed
-	case !bytes.HasPrefix(edit.TrimBOM(cur), []byte(piExtensionMark)):
-		return nil // the user's own
+	current, err := readWiringFile(path)
+	if err != nil {
+		return wiringFileEdit{}, edit.PreserveOnRollback(path, err)
 	}
-	want := ""
-	if _, on := edit.GetJSON(modelsPath, "providers."+magpieID); on {
-		want = piExtensionFor(baseURL, key)
+	sidecar := wiringFileEdit{path: path, before: current}
+	if current.info != nil && !bytes.HasPrefix(edit.TrimBOM(current.body), []byte(piExtensionMark)) {
+		return sidecar, nil
 	}
-	if want == "" {
-		if cur == nil {
-			return nil
+	body := catalog.body
+	if body == nil {
+		body = catalog.before.body
+	}
+	var want string
+	if gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(body)), "providers."+magpieID).Exists() {
+		want = render()
+	}
+	if want != "" && want != string(current.body) {
+		sidecar.body = []byte(want)
+	} else if want == "" && current.info != nil {
+		name, err := readWiringName(path)
+		if err != nil {
+			return wiringFileEdit{}, edit.PreserveOnRollback(path, err)
 		}
-		return os.Remove(path)
+		sidecar.unlink, sidecar.name = true, &name
 	}
-	if string(cur) == want {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return edit.WriteAtomic(path, []byte(want))
+	return sidecar, nil
 }
