@@ -103,6 +103,25 @@ func TestDreamFailureChangesNothing(t *testing.T) {
 	}
 }
 
+func TestDreamDiscardsSuccessfulReplyAfterCancel(t *testing.T) {
+	newSandbox(t)
+	first := note(t, "One", memory.Global, memory.FromInferred)
+	second := note(t, "Two", memory.Global, memory.FromInferred)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	changes, err := Dream(ctx, "a/m", func(context.Context, string, string, string, string) (string, error) {
+		cancel()
+		return `{"stale":[{"id":"n1","why":"expired"},{"id":"n2","why":"expired"}]}`, nil
+	})
+	if !errors.Is(err, context.Canceled) || len(changes) != 0 || status(t, first.ID) != memory.Candidate || status(t, second.ID) != memory.Candidate {
+		t.Fatalf("canceled tidy applied a late reply: %+v %v", changes, err)
+	}
+	st, err := Load()
+	if err != nil || !st.Dreamt.IsZero() || len(st.Changes) != 0 || st.DreamError != context.Canceled.Error() {
+		t.Fatalf("canceled tidy consumed the next run: %+v %v", st, err)
+	}
+}
+
 // A candidate distilled from a conversation and never reviewed is set
 // aside after Unreviewed, with no model asked when nothing else could
 // change.

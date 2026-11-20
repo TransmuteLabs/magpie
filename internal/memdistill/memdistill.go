@@ -421,11 +421,12 @@ func run(ctx context.Context, st State, model, effort string, complete Complete,
 		}
 		proj := memory.ProjectOf(s.Cwd)
 		reply, err := complete(ctx, model, effort, prompt, request(text, known(proj), proj))
+		if canceled := ctx.Err(); canceled != nil {
+			r.left++
+			return r, canceled
+		}
 		if err != nil {
 			r.left++ // read again next time
-			if ctx.Err() != nil {
-				return r, ctx.Err()
-			}
 			return r, fmt.Errorf("%s: %w", model, err)
 		}
 		r.Read++

@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/pii/guard"
@@ -19,6 +21,10 @@ func TestMain(m *testing.M) { testenv.Main(m) }
 // fake reads a text as the topics it names, in either language: what a
 // real model does for a search across languages, without its 135 MB.
 type fake struct{ calls atomic.Int32 }
+
+type embedFunc func(string) []float32
+
+func (embed embedFunc) Embed(text string) []float32 { return embed(text) }
 
 var topics = [][]string{
 	{"release", "ship", "上线", "发布"},
@@ -66,24 +72,29 @@ func sandbox(t *testing.T, installed bool) *fake {
 		store.mu.Unlock()
 	})
 	if installed {
-		if err := os.MkdirAll(dir(), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		for _, p := range files {
-			path := filepath.Join(dir(), filepath.Base(p.path))
-			if err := os.WriteFile(path, nil, 0o644); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Truncate(path, p.size); err != nil {
-				t.Fatal(err)
-			}
-		}
+		sparseModel(t)
 		b := []byte(`{"on":true}`)
 		if err := os.WriteFile(StatePath(), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return f
+}
+
+func sparseModel(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(dir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range files {
+		path := filepath.Join(dir(), filepath.Base(p.path))
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, p.size); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func save(t *testing.T, text, status string) *memory.Memory {
@@ -146,7 +157,7 @@ func TestSearchFindsByMeaning(t *testing.T) {
 func TestIndexReadsOnce(t *testing.T) {
 	f := sandbox(t, true)
 	a := save(t, "Releases go out on Tuesdays", memory.Active)
-	save(t, "Use tabs", memory.Candidate)
+	candidate := save(t, "Use tabs", memory.Candidate)
 	save(t, "Old port rule", memory.Archived)
 	if n, err := Index(context.Background()); err != nil || n != 2 {
 		t.Fatalf("%d %v", n, err)
@@ -168,12 +179,117 @@ func TestIndexReadsOnce(t *testing.T) {
 	if got := len(readVecs(path)); got != 2 {
 		t.Fatalf("on disk: %d", got)
 	}
+	if err := memory.Remove(candidate.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := Index(t.Context()); n != 0 || err != nil {
+		t.Fatalf("pruning indexed a passage: %d, %v", n, err)
+	}
+	if st, persisted := Now(), len(readVecs(path)); st.Read != 1 || st.Of != 1 || persisted != 1 {
+		t.Fatalf("removed candidate follows the index: %+v, %d on disk", st, persisted)
+	}
 	b, _ := os.ReadFile(path)
 	if err := os.WriteFile(path, b[:len(b)-1], 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := len(readVecs(path)); got != 0 {
 		t.Fatalf("cut short: %d", got)
+	}
+}
+
+func TestIndexCannotPublishAfterSwitchOff(t *testing.T) {
+	for _, mode := range []string{"off", "re-enabled"} {
+		t.Run(mode, func(t *testing.T) {
+			model := sandbox(t, true)
+			item := save(t, "Releases go out on Tuesdays", memory.Active)
+			entered, unblock := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(unblock) })
+			loadModel = func(string) (embedder, error) {
+				return embedFunc(func(text string) []float32 {
+					close(entered)
+					<-unblock
+					return model.Embed(text)
+				}), nil
+			}
+			done := make(chan struct{})
+			var indexed int
+			var indexErr error
+			t.Cleanup(func() { release(); <-done })
+			go func() {
+				defer close(done)
+				indexed, indexErr = Index(t.Context())
+			}()
+			select {
+			case <-entered:
+			case <-time.After(12 * time.Second):
+				t.Fatal("index never started embedding")
+			}
+			if err := Set(false); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(Root()); !os.IsNotExist(err) {
+				t.Fatalf("model directory remains after switching off: %v", err)
+			}
+			if mode == "re-enabled" {
+				sparseModel(t)
+				if err := Set(true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status := make(chan Status, 1)
+			go func() { status <- Now() }()
+			select {
+			case current := <-status:
+				on := mode == "re-enabled"
+				if current.On != on || current.Installed != on || current.Read != 0 {
+					t.Errorf("status after switching: %+v", current)
+				}
+			case <-time.After(4 * time.Second):
+				t.Error("status after switching waited for the previous embedding")
+				release()
+				<-status
+			}
+			release()
+			<-done
+			if _, err := os.Stat(filepath.Join(dir(), "vectors.bin")); !os.IsNotExist(err) {
+				t.Fatalf("old indexing run published after switching off: %v", err)
+			}
+			if indexErr != nil || indexed != 0 {
+				t.Fatalf("revoked index reported %d reads, %v", indexed, indexErr)
+			}
+			loadModel = func(string) (embedder, error) { return model, nil }
+			expected := 0
+			if mode == "re-enabled" {
+				expected = 1
+			}
+			if count, err := Index(t.Context()); err != nil || count != expected {
+				t.Fatalf("new index reported %d reads, %v; want %d reads", count, err, expected)
+			}
+			if got, err := memory.Get(item.ID); err != nil || got == nil || got.Text != item.Text {
+				t.Fatalf("switching off indexing changed Memory: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestIndexUsesTheCurrentCacheDirectory(t *testing.T) {
+	sandbox(t, true)
+	save(t, "Releases go out on Tuesdays", memory.Active)
+	if count, err := Index(t.Context()); err != nil || count != 1 {
+		t.Fatalf("initial index: %d, %v", count, err)
+	}
+	if err := os.Rename(Root(), Root()+"-previous"); err != nil {
+		t.Fatal(err)
+	}
+	sparseModel(t)
+	if st := Now(); st.Read != 0 || st.Of != 1 {
+		t.Fatalf("replaced directory kept previous vector state: %+v", st)
+	}
+	if count, err := Index(t.Context()); err != nil || count != 1 {
+		t.Fatalf("replacement index: %d, %v", count, err)
+	}
+	if got := len(readVecs(filepath.Join(dir(), "vectors.bin"))); got != 1 {
+		t.Fatalf("replacement index on disk: %d", got)
 	}
 }
 

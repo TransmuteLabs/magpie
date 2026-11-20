@@ -88,6 +88,9 @@ func Dream(ctx context.Context, auto string, complete Complete) ([]memory.Change
 		model = auto
 	}
 	plan, err := ask(ctx, model, st.Effort, complete)
+	if err == nil {
+		err = ctx.Err()
+	}
 	var cs []memory.Change
 	if err == nil {
 		plan.Before = now().Add(-Unreviewed)

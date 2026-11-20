@@ -393,6 +393,13 @@ meaning, since it downloads a model (~135 MB).
   `{on}` give the row its state: the download's progress, the memories
   read, and why either failed.
 
+Each indexing pass checks that its switch file and model directory are
+still current before publishing cache data. The check and publication
+hold the same lock as the switch. Switching off removes the model and
+cache and returns its status during an embedding. A revoked pass discards
+its result. After re-enabling, a fresh pass indexes the current records.
+Replacing the model directory invalidates its in-memory vectors.
+
 ### Backups and sync
 
 Memory goes to another computer in a backup file (the scheduled backups

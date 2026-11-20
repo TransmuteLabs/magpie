@@ -87,7 +87,9 @@ type state struct {
 	On bool `json:"on"`
 }
 
-var stateMu sync.Mutex
+var stateMu = filelock.Mutex{Path: func() string { return StatePath() + ".lock" }}
+
+var errStateLock = errors.New("cannot lock the Memory semantic switch")
 
 func load() (state, error) {
 	var s state
@@ -136,9 +138,9 @@ func Now() Status {
 		st.Done = st.Size
 	}
 	st.Reading = reading.Load()
-	idx.mu.Lock()
-	st.Failed = idx.failed
-	idx.mu.Unlock()
+	if failed := idx.failed.Load(); failed != nil {
+		st.Failed = *failed
+	}
 	if st.On && st.Installed {
 		if all, _, err := memory.All(); err == nil {
 			vs := vectors()
@@ -159,7 +161,9 @@ func Now() Status {
 // Set switches it on, fetching the model when it isn't on disk, or off,
 // stopping a download and deleting the model and what it read.
 func Set(on bool) error {
-	stateMu.Lock()
+	if !stateMu.LockChecked() {
+		return errStateLock
+	}
 	defer stateMu.Unlock()
 	p := StatePath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -345,7 +349,7 @@ var reading atomic.Bool
 
 var idx struct {
 	mu     sync.Mutex // one read at a time
-	failed string
+	failed atomic.Pointer[string]
 }
 
 // pokes wakes Keep for a read now.
@@ -367,9 +371,8 @@ func Keep(ctx context.Context, tick time.Duration) {
 	for {
 		if On() && Installed() {
 			if _, err := Index(ctx); err != nil && ctx.Err() == nil {
-				idx.mu.Lock()
-				idx.failed = err.Error()
-				idx.mu.Unlock()
+				failed := err.Error()
+				idx.failed.Store(&failed)
 			}
 		}
 		select {
@@ -385,18 +388,29 @@ func Keep(ctx context.Context, tick time.Duration) {
 // text yet, keeps the vectors (dropping those of texts gone) and says how
 // many it read. One goes at a time, in this magpie and across them.
 func Index(ctx context.Context) (int, error) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	unlock, held := filelock.Lock(filepath.Join(dir(), "vectors.lock"), 0)
-	if !held {
+	count, err := index(ctx)
+	if errors.Is(err, errIndexWithdrawn) {
 		return 0, nil
 	}
-	defer unlock()
+	return count, err
+}
+
+func index(ctx context.Context) (int, error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	run, err := openIndex()
+	if err != nil || run == nil {
+		return 0, err
+	}
+	defer run.unlock()
 	all, _, err := memory.All()
 	if err != nil {
 		return 0, err
 	}
-	vs := vectors()
+	vs := run.vectors
 	var todo []*memory.Memory
 	keep := map[[32]byte]bool{}
 	for _, m := range all {
@@ -411,13 +425,16 @@ func Index(ctx context.Context) (int, error) {
 	}
 	if len(todo) == 0 {
 		if vs.prune(keep) {
-			return 0, vs.save()
+			return 0, run.publish()
 		}
-		idx.failed = ""
+		idx.failed.Store(nil)
 		return 0, nil
 	}
 	reading.Store(true)
 	defer reading.Store(false)
+	if !run.current() {
+		return 0, errIndexWithdrawn
+	}
 	e, err := model()
 	if err != nil {
 		return 0, err
@@ -427,19 +444,22 @@ func Index(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			break
 		}
+		if !run.current() {
+			return n, errIndexWithdrawn
+		}
 		vs.put(key(m), e.Embed(passage(m)))
 		n++
 		if n%50 == 0 {
-			if err := vs.save(); err != nil {
+			if err := run.publish(); err != nil {
 				return n, err
 			}
 		}
 	}
 	vs.prune(keep)
-	if err := vs.save(); err != nil {
+	if err := run.publish(); err != nil {
 		return n, err
 	}
-	idx.failed = ""
+	idx.failed.Store(nil)
 	return n, ctx.Err()
 }
 

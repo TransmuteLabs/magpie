@@ -26,17 +26,24 @@ type vecs struct {
 }
 
 var store struct {
-	mu sync.Mutex
-	v  *vecs
+	mu         sync.Mutex
+	v          *vecs
+	generation indexGeneration
 }
 
-// vectors is what was read, from vectors.bin on the first call.
+// vectors is what was read for the current switch and cache directory.
 func vectors() *vecs {
+	generation, _ := readIndexGeneration()
+	return vectorsAt(generation)
+}
+
+func vectorsAt(generation indexGeneration) *vecs {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	path := filepath.Join(dir(), "vectors.bin")
-	if store.v == nil || store.v.path != path {
+	if store.v == nil || store.v.path != path || !store.generation.same(generation) {
 		store.v = &vecs{path: path, m: readVecs(path)}
+		store.generation = generation
 	}
 	return store.v
 }
