@@ -573,7 +573,9 @@ ordinary lookup now returns another legitimate session with the same ID.
 checks, migration waits, cached receipt reuse, source capture and publication.
 Native and SDK conversions recheck that owner and current consent before
 writing and before returning output. SDK input planning carries the same
-admission check; Actions revalidation rolls back a revocation during apply.
+admission check. After staging, Actions rechecks the inputs, module authority
+and pinned destination directories before linking the output under its final
+name. A refusal after publication triggers checked rollback.
 An ordinary SDK conversion retains checked recovery through final output
 capture as well. Previously published cached files are kept on revocation;
 only this operation's still-matching outputs are eligible for rollback.

@@ -714,11 +714,20 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 		}
 		return nil
 	}
-	for _, change := range plan.files {
-		if err = ctx.Err(); err == nil {
-			err = actions.checkAuthority(plan)
+	checkAuthority := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if err != nil {
+		return actions.checkAuthority(plan)
+	}
+	checkCreate := func() error {
+		if err := actions.revalidateInputs(ctx, plan); err != nil {
+			return err
+		}
+		return plan.checkCreateParents(parents)
+	}
+	for _, change := range plan.files {
+		if err = checkAuthority(); err != nil {
 			break
 		}
 		if createOnly {
@@ -728,16 +737,18 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			var parent *os.Root
 			parent, err = plan.pinCreateParent(root, path.Dir(change.Path), parents, &createdParents)
 			if err == nil {
-				err = actions.revalidateInputs(ctx, plan)
-			}
-			if err == nil {
-				err = plan.checkCreateParents(parents)
+				err = checkCreate()
 			}
 			if err != nil {
 				break
 			}
 			name := path.Base(change.Path)
-			temporary, info, createErr := actionCreate(parent, name, change.Body, actionMode(change, plan.before[change.Path]))
+			temporary, info, createErr := actionPublishChecked(parent, name, change.Body, actionMode(change, plan.before[change.Path]), true, func() error {
+				if err := checkAuthority(); err != nil {
+					return err
+				}
+				return checkCreate()
+			})
 			if info != nil {
 				changed = append(changed, actionEffect{change: change, parent: parent, name: name, temporary: temporary, created: info})
 			}
@@ -779,10 +790,7 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			if err == nil {
 				var published fs.FileInfo
 				published, err = actions.write(root, change.Path, change.Body, actionMode(change, plan.before[change.Path]), func() error {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					if err := actions.checkAuthority(plan); err != nil {
+					if err := checkAuthority(); err != nil {
 						return err
 					}
 					return verify()
@@ -1133,32 +1141,32 @@ func actionWrite(root *os.Root, name string, body []byte, mode fs.FileMode) erro
 }
 
 func actionWriteChecked(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
-	temporary, info, err := actionStage(root, name, body, mode)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Remove(temporary)
-	if check != nil {
-		if err := check(); err != nil {
-			return nil, err
-		}
-	}
-	if err := root.Rename(temporary, name); err != nil {
-		return nil, err
-	}
-	return info, actionSync(root, path.Dir(name))
+	_, info, err := actionPublishChecked(root, name, body, mode, false, check)
+	return info, err
 }
 
-func actionCreate(root *os.Root, name string, body []byte, mode fs.FileMode) (string, fs.FileInfo, error) {
+func actionPublishChecked(root *os.Root, name string, body []byte, mode fs.FileMode, create bool, check func() error) (string, fs.FileInfo, error) {
 	temporary, info, err := actionStage(root, name, body, mode)
 	if err != nil {
 		return "", nil, err
 	}
-	if err := root.Link(temporary, name); err != nil {
-		if errors.Is(err, fs.ErrExist) {
+	if check != nil {
+		if err := check(); err != nil {
+			return "", nil, errors.Join(err, actionRemoveOwned(root, temporary, info))
+		}
+	}
+	publish := root.Rename
+	if create {
+		publish = root.Link
+	}
+	if err := publish(temporary, name); err != nil {
+		if create && errors.Is(err, fs.ErrExist) {
 			err = fmt.Errorf("%s: %w", name, ErrActionChanged)
 		}
 		return "", nil, errors.Join(err, actionRemoveOwned(root, temporary, info))
+	}
+	if !create {
+		temporary = ""
 	}
 	return temporary, info, actionSync(root, path.Dir(name))
 }
