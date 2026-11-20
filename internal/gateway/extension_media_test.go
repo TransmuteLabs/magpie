@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -84,6 +85,110 @@ func mediaFixtureCall(handler http.Handler, method, path, body string) *httptest
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func TestExtensionRetrievalDiscoveryMatchesGateway(t *testing.T) {
+	_, _, id := installExtensionMediaFixture(t)
+	server := New()
+	t.Cleanup(server.idle.stop)
+	handler := server.Front()
+	const kinds = "/v1/models?kind=embedding,rerank"
+	vector, ranker := id+"/fixture-vector", id+"/fixture-ranker"
+	type row struct {
+		ID, Kind        string
+		NativeEndpoints []string `json:"native_endpoints"`
+	}
+	list := func(path, secret string) map[string]row {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.RemoteAddr = "127.0.0.1:12345"
+		if secret != "" {
+			request.Header.Set("Authorization", "Bearer "+secret)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		var result struct{ Data []row }
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+			t.Fatalf("%s: %d %s", path, response.Code, response.Body)
+		}
+		models := make(map[string]row, len(result.Data))
+		for _, entry := range result.Data {
+			if _, exists := models[entry.ID]; exists {
+				t.Errorf("%s listed %s twice", path, entry.ID)
+			}
+			models[entry.ID] = entry
+		}
+		return models
+	}
+	listed := list(kinds, "")
+	for _, check := range []struct{ ref, model, kind, path, input, want string }{
+		{vector, "fixture-vector", "embedding", "/v1/embeddings", `"input":"fixture"`, `"embedding":[0.25,0.5]`},
+		{ranker, "fixture-ranker", "rerank", "/v1/rerank", `"query":"fixture","documents":["fixture"]`, `"relevance_score":0.9`},
+	} {
+		model := listed[check.ref]
+		if model.Kind != check.kind || len(model.NativeEndpoints) != 1 || model.NativeEndpoints[0] != check.path {
+			t.Errorf("%s discovery: %#v", check.ref, model)
+		}
+		for _, ref := range []string{check.ref, check.model, "group/" + provider.KindGroupID(check.kind, check.model)} {
+			response := mediaFixtureCall(handler, http.MethodPost, check.path, `{"model":"`+ref+`",`+check.input+`}`)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), check.want) {
+				t.Errorf("%s through %s: %d %s", ref, check.path, response.Code, response.Body)
+			}
+		}
+	}
+	chat := list("/v1/models", "")
+	if chat[vector].ID != "" || chat[ranker].ID != "" {
+		t.Errorf("chat list includes a retrieval model: %v", chat)
+	}
+	if got := FirstServing("speech"); got != id+"/fixture-voice" {
+		t.Errorf("speech pipeline discovery = %q", got)
+	}
+	if got := FirstServing("transcription"); got != id+"/fixture-listen" {
+		t.Errorf("transcription pipeline discovery = %q", got)
+	}
+	secret, err := access.Update("add-key", access.Change{Name: "Retrieval fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := access.List()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("gateway keys: %v, %v", keys, err)
+	}
+	key := keys[0].ID
+	if _, err := access.Update("models-key", access.Change{Key: key, Models: []string{vector}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(kinds, secret); len(got) != 1 || got[vector].ID == "" {
+		t.Errorf("key-held discovery: %v", got)
+	}
+	if _, err := access.Update("accounts-key", access.Change{Key: key, Accounts: []string{id + "/" + provider.LoginID(id, "alice")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetAccountModels(id, "alice", []string{"fixture-ranker"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(kinds, secret); len(got) != 0 {
+		t.Errorf("held account doesn't serve the vector model: %v", got)
+	}
+	if err := provider.DisableModels(vector); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(kinds, ""); got[vector].ID != "" || got[ranker].ID == "" {
+		t.Errorf("disabled vector model: %v", got)
+	}
+}
+
+func TestExtensionRetrievalDiscoveryRequiresDeclaredOperation(t *testing.T) {
+	_, _, id := installExtensionMediaFixture(t, func(manifest *sdk.Manifest) {
+		manifest.Providers[0].Operations = []sdk.ProviderOperation{sdk.OperationEmbeddings}
+	})
+	server := New()
+	t.Cleanup(server.idle.stop)
+	response := mediaFixtureCall(server.Front(), http.MethodGet, "/v1/models?kind=embedding,rerank", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), id+"/fixture-vector") ||
+		strings.Contains(response.Body.String(), id+"/fixture-ranker") {
+		t.Fatalf("retrieval models for a module that only declared embeddings: %d %s", response.Code, response.Body)
+	}
 }
 
 func TestExtensionMediaOperationsThroughOrdinaryGateway(t *testing.T) {

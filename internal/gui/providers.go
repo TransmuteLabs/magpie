@@ -994,6 +994,9 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 // the newest of each family, as each read builds it whole.
 func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUse, desktop map[string]string) providerJSON {
 	avail := ls.Available
+	if p.IsExtension() {
+		avail = catalog.Chat(avail)
+	}
 	out := providerJSON{
 		ID: p.ID, Name: p.Name, Icon: p.Icon, IconFrom: p.IconFrom, Preset: p.Preset, Host: p.Host(),
 		Chat: p.Chat, Responses: p.Responses, Anthropic: p.Anthropic, Gemini: p.Gemini, Decide: p.Decide, BaseAPI: p.BaseAPI, ModelTest: p.ModelTest(), TestsAs: p.TestClients(), TestPicks: p.TestPicks(), DecideTest: p.AsksDecideModels(), MarksKinds: p.MarksKinds(),

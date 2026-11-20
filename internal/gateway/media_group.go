@@ -6,6 +6,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // mediaMembers is the routing group ref with its members ready now for
@@ -31,7 +32,13 @@ func mediaMembers(ref, kind string) (provider.Group, []provider.Member, bool) {
 		if g, ms, ok := provider.KindGroup(kind, ref, servesKind(kind)); ok {
 			return g, ms, true
 		}
-		return provider.FindGroupAlso(ref, offChatList)
+		serves := servesKind(kind)
+		return provider.FindGroupAlso(ref, func(p provider.Provider, model string) bool {
+			if p.IsExtension() {
+				return serves(p, model)
+			}
+			return offChatList(p, model)
+		})
 	}
 	if !bareRef(ref) {
 		return provider.Group{}, nil, false
@@ -70,6 +77,9 @@ func servesKind(kind string) func(p provider.Provider, model string) bool {
 		}
 	}
 	return func(p provider.Provider, model string) bool {
+		if p.IsExtension() {
+			return slices.ContainsFunc(extensionServing(p, kind), func(m catalog.Model) bool { return is(m, model) })
+		}
 		if slices.ContainsFunc(catalog.LiveServing(p.ID, kind), func(m catalog.Model) bool { return is(m, model) }) {
 			return true
 		}
@@ -80,12 +90,42 @@ func servesKind(kind string) func(p provider.Provider, model string) bool {
 	}
 }
 
+func extensionServing(p provider.Provider, kind string) []catalog.Model {
+	var operation sdk.ProviderOperation
+	switch kind {
+	case catalog.ServesEmbedding:
+		operation = sdk.OperationEmbeddings
+	case catalog.ServesRerank:
+		operation = sdk.OperationRerank
+	case catalog.ServesSpeech:
+		operation = sdk.OperationAudioSpeech
+	case catalog.ServesTranscription:
+		operation = sdk.OperationAudioTranscribe
+	default:
+		return nil
+	}
+	if p.ServesNone() || !p.ExtensionSupportsOperation(operation) &&
+		!(kind == catalog.ServesTranscription && p.ExtensionSupportsOperation(sdk.OperationAudioTranslate)) {
+		return nil
+	}
+	var out []catalog.Model
+	for _, model := range provider.KeptListing(p).Available {
+		if model.Serves == kind {
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
 // RetrievalModels are the embedding or rerank models, kind's, p serves
 // on /v1/embeddings or /v1/rerank by their own ids: those its fetched
 // list says are of that API (catalog.LiveServing), then those its preset
-// names (PlanRetrieval), each id once. They need no pick: the routes take
-// them as listed.
+// names (PlanRetrieval), each id once. SDK providers use their validated
+// account catalog and negotiated operations. They need no chat pick.
 func RetrievalModels(p provider.Provider, kind string) []catalog.Model {
+	if p.IsExtension() {
+		return extensionServing(p, kind)
+	}
 	ms := slices.Clone(catalog.LiveServing(p.ID, kind))
 	for _, m := range p.PlanRetrieval(kind) {
 		if !slices.ContainsFunc(ms, func(x catalog.Model) bool { return x.ID == m.ID }) {

@@ -16,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Pipelines magpie serves besides chat, each of which Settings › Models
@@ -71,21 +72,30 @@ func FirstServing(kind string) string {
 			continue
 		}
 		var ids []string
-		for _, id := range p.Models {
-			if catalog.ServesOf(id) == kind {
-				ids = append(ids, id)
+		if p.IsExtension() {
+			if kind == catalog.ServesTranscription && !p.ExtensionSupportsOperation(sdk.OperationAudioTranscribe) {
+				continue
 			}
-		}
-		for _, m := range catalog.LiveServing(p.ID, kind) {
-			ids = append(ids, m.ID)
-		}
-		for _, m := range provider.KeptListing(p).Available {
-			if catalog.ServesOf(m.ID) == kind {
+			for _, m := range extensionServing(p, kind) {
 				ids = append(ids, m.ID)
 			}
-		}
-		for _, m := range p.PlanRetrieval(kind) {
-			ids = append(ids, m.ID)
+		} else {
+			for _, id := range p.Models {
+				if catalog.ServesOf(id) == kind {
+					ids = append(ids, id)
+				}
+			}
+			for _, m := range catalog.LiveServing(p.ID, kind) {
+				ids = append(ids, m.ID)
+			}
+			for _, m := range provider.KeptListing(p).Available {
+				if catalog.ServesOf(m.ID) == kind {
+					ids = append(ids, m.ID)
+				}
+			}
+			for _, m := range p.PlanRetrieval(kind) {
+				ids = append(ids, m.ID)
+			}
 		}
 		for _, id := range ids {
 			if !slices.ContainsFunc(off, func(pat string) bool { return provider.DisabledBy(pat, p.ID, id) }) {

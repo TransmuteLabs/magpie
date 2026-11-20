@@ -569,6 +569,13 @@ Streaming data uses bounded chunks and synchronous pipe writes, preserving
 consumer backpressure. Usage events provide normalized token totals to the
 existing ledger.
 
+The gateway uses the SDK account catalog and declared operations for
+embedding and rerank discovery. `/v1/models?kind=embedding,rerank`,
+the Providers inventory and inferred retrieval groups share the same SDK
+model-kind check. The gateway listing applies the usual disabled-model and
+caller-key restrictions. Speech and transcription pipeline checks use the
+same operation-aware catalog.
+
 Translated readers confirm completion through
 [`ExtensionResponseProtocolComplete`](../../internal/provider/extension_transport.go)
 only after their real decoder accepted an explicit protocol terminal. Whole,

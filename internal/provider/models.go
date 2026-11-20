@@ -1850,7 +1850,11 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 	}
 	if len(picks) > 0 {
 		noAPI := p.NoAPI()
-		return slices.DeleteFunc(pick(p.withNewlyListed(picks, avail)), func(m catalog.Model) bool { return noAPI(m.ID) })
+		chosen := pick(p.withNewlyListed(picks, avail))
+		if p.IsExtension() {
+			chosen = catalog.Chat(chosen)
+		}
+		return slices.DeleteFunc(chosen, func(m catalog.Model) bool { return noAPI(m.ID) })
 	}
 	// a model listed on none of the APIs the provider has a URL for is
 	// left out before the first 24 are taken (#2094)
@@ -1869,10 +1873,15 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 	return avail[:manyModels]
 }
 
-// servable is avail less the models NoAPIFor leaves out.
+// servable is avail less the models the chat picker cannot offer.
 func (p Provider) servable(avail []catalog.Model) []catalog.Model {
+	if p.IsExtension() {
+		avail = catalog.Chat(avail)
+	} else {
+		avail = slices.Clone(avail)
+	}
 	noAPI := p.NoAPI()
-	return slices.DeleteFunc(slices.Clone(avail), func(m catalog.Model) bool { return noAPI(m.ID) })
+	return slices.DeleteFunc(avail, func(m catalog.Model) bool { return noAPI(m.ID) })
 }
 
 // NewestInFamily is the models Best in family would serve of avail, the
