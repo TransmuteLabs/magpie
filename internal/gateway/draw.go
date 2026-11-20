@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/requestpolicy"
@@ -797,7 +798,7 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 			if keyHeld {
 				keeps = groupKeeps(keyWho, g, ms)
 			}
-			t := s.drawingTries(g, ms, keeps, drawsModel)
+			t := s.drawingTries(keyRouted(access.Caller(r.Context()), g), ms, keeps, drawsModel)
 			if len(t) == 0 && keeps != nil {
 				fail(keyGroupRefusal(w, keyWho, d.Model, ms))
 				return

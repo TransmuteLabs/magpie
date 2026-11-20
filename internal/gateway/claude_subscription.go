@@ -937,7 +937,15 @@ func (b *subscriptionBridge) start(ctx context.Context, req *Request, model, con
 	var noStart *tuiNoStart
 	if errors.As(err, &noStart) {
 		// never tried again as -p (claudeTUIErr)
-		return nil, nil, claudeTUIErr("Claude Code's interactive mode didn't start: " + err.Error())
+		err := claudeTUIErr("Claude Code's interactive mode didn't start: " + err.Error())
+		if noStart.asked {
+			// a question Claude Code asks the same under every account:
+			// no account's fault, and the next isn't asked. A 502 was
+			// asked of each account in turn, each waiting out its 45s
+			// (@ahz2ygnhjmIJ0E0 on X)
+			return nil, nil, &tuiRefusal{err}
+		}
+		return nil, nil, err
 	}
 	var full *claudeFull
 	var refused *cliSchemaRefused
@@ -1346,6 +1354,9 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	if tui && !client {
 		// a saved account's run in magpie's folder is never asked (#4830)
 		trustWork(binary, configDir, work)
+	} else if tui {
+		// nor is one in the caller's folder (@ahz2ygnhjmIJ0E0 on X)
+		trustCaller(binary, configDir, work)
 	}
 	cmd.Env = binary.env(binary.asRoot(env), configDir)
 	if tui {
@@ -1454,7 +1465,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 			var unanswered *controlUnanswered
 			if tui && errors.As(err, &unanswered) {
 				// the helper hung: the turn fails (start)
-				return nil, nil, &tuiNoStart{err}
+				return nil, nil, &tuiNoStart{err: err}
 			}
 			if tui && run.saidOnEnd("claude-tui: ") && !run.saidOnEnd(claudetui.EndedEarly) {
 				// the helper ended saying why Claude Code didn't come up,
@@ -1462,7 +1473,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 				// load the session does: a new one told the whole
 				// conversation waited out the same 45s, and the turn was
 				// answered 502 after twice that (sowhynot)
-				return nil, nil, &tuiNoStart{err}
+				return nil, nil, &tuiNoStart{err: err, asked: run.saidOnEnd(claudetui.Unanswered)}
 			}
 			return nil, nil, err
 		}
@@ -1542,8 +1553,13 @@ type controlUnanswered struct{ what string }
 func (e *controlUnanswered) Error() string { return "Claude Code has not " + e.what }
 
 // tuiNoStart is a run whose interactive mode's helper never answered its
-// initialize request: start fails the turn, saying so.
-type tuiNoStart struct{ err error }
+// initialize request: start fails the turn, saying so. asked is that the
+// helper ended on a question of Claude Code's it couldn't get answered
+// (claudetui.Unanswered).
+type tuiNoStart struct {
+	err   error
+	asked bool
+}
 
 func (e *tuiNoStart) Error() string { return e.err.Error() }
 func (e *tuiNoStart) Unwrap() error { return e.err }
@@ -4147,6 +4163,10 @@ func cleanClaudeEnvTTL(env []string, ttl string) []string {
 		"CLAUDECODE": true, "CLAUDE_CODE_ENTRYPOINT": true, "CLAUDE_CODE_SSE_PORT": true,
 		"CLAUDE_CODE_OAUTH_TOKEN": true, "CLAUDE_CODE_PROMPT_CACHE_TTL": true, "FORCE_PROMPT_CACHING_5M": true,
 		"CLAUDE_CODE_EXTRA_BODY": true, "ANTHROPIC_BETAS": true,
+	}
+	// magpie's routing names, never Anthropic's (claudeModelEnv)
+	for _, k := range claudeModelEnv {
+		blocked[k] = true
 	}
 	out := make([]string, 0, len(env)+3)
 	for _, e := range env {

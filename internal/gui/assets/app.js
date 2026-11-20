@@ -3967,7 +3967,9 @@ function openAgentMenu(anchor, a, inFold, at) {
   // coolmantou, lileo0668
   // Codex's desktop app, by the setting Open Codex with (Yink88564391 on
   // X): in the menu, not on the row, so the row lines up with the others
-  const app = a.openApp && mode != "panel" && !web, o = a.terminal && mode != "panel" && !web, term = [...app ? [{ name: "Open the Codex app", icon: LAUNCH_GLYPH, sep: !0, run: () => api("agents/open", { agent: a.id }).catch(statusErr) }] : [], ...o ? [{ name: "Open in terminal", icon: LAUNCH_GLYPH, sep: !app, run: () => api("agents/open", { agent: a.id, terminal: !0 }).catch(statusErr) }] : [], ...a.command ? [{ name: "Copy launch command", icon: COPY_ICON, sep: !o && !app, run: () => copy(a.command, t("Launch command")) }] : []];
+  const app = a.openApp && mode != "panel" && !web, o = a.terminal && mode != "panel" && !web, term = [...app ? [{ name: "Open the Codex app", icon: LAUNCH_GLYPH, sep: !0, run: () => api("agents/open", { agent: a.id }).catch(statusErr) }] : [], ...o ? [{ name: "Open in terminal", icon: LAUNCH_GLYPH, sep: !app, run: () => api("agents/open", { agent: a.id, terminal: !0 }).catch(statusErr) }] : [], ...a.command ? [{ name: "Copy launch command", icon: COPY_ICON, sep: !o && !app, run: () => copy(a.command, t("Launch command")) }] : [],
+    // its whole file at hand, as CC Switch has it (InkCoalW on X)
+    ...a.path && mode != "panel" && !web ? [{ name: "Show settings file", icon: "M4.5 2.5h5l2.5 2.5v8.5h-7.5zM9.5 2.5V5H12", run: () => api("agents/reveal", { agent: a.id }).catch(statusErr) }] : []];
   const acts = inFold && isHidden(a)
     ? [{ name: "Show", icon: EYE, run: () => setAgentHidden(a, false) }]
     : inFold
@@ -8182,7 +8184,7 @@ const groupAdvanced = (box) => self.advGroups?.(box);
 function advancedSet(d, p) {
   return (d.headers || []).some(([k]) => (k || "").trim()) || !!(d.extraBody || "").trim() || !!(d.replyHeaders || d.passHeaders || "").trim() ||
     !!d.proxyMode || Object.values(d.accountProxies || {}).some((x) => x?.mode) || Object.values(d.keyPriceRates || {}).some((v) => String(v).trim()) ||
-    [d.concurrency, d.maxAccounts, d.queueLimit, d.queueWait, d.maxRPM, d.priceRate, d.contexts, d.outputs, d.compacts].some((v) => String(v ?? "").trim()) ||
+    [d.concurrency, d.maxAccounts, d.queueLimit, d.queueWait, d.maxRPM, d.priceRate, d.topUpRate ?? p?.topUpRate, d.contexts, d.outputs, d.compacts].some((v) => String(v ?? "").trim()) ||
     !!d.rateWindows?.length ||
     !!(d.searches || d.authHeader || d.passUserAgent === false || d.unredacted || d.countFree || d.billing || d.pinUpstream || d.nativeCompaction || d.balanceToken || d.limitRestOff || d.noBalanceProbe || d.http1 || d.socket || d.imageFilesOff || d.passErrors || d.clientCert || d.serverCA || d.serverPin || d.resolve) ||
     !!d.fallback?.length || !!(p?.balanceToken?.set || p?.connectAgents || p?.maxImages);
@@ -8386,7 +8388,9 @@ function accountProxiesOfDraft() {
 
 // a key's own price rate (@tnt12231 on X), in keyrates.js, and any other
 // part keyrates.js draws for a provider with two or more keys (f)
-const keyRateField = (p, f = "keyPriceRateField", at = el("span")) => p?.keyList?.length > 1 ? (import("./keyrates.js").then(() => at.isConnected && at.replaceWith(...window[f](p)), () => {}), [at]) : [];
+// (on: two keys or more, unless said); a relay's top-up rate
+// (@YIXIE233 on X) is drawn there too
+const keyRateField = (p, f = "keyPriceRateField", on = p?.keyList?.length > 1, at = el("span")) => on ? (import("./keyrates.js").then(() => at.isConnected && at.replaceWith(...window[f](p)), () => {}), [at]) : [];
 
 // headers as ordered [name, value, json?] rows that survive a redraw; headersOf folds them back
 function headerRows(obj) {
@@ -9831,6 +9835,7 @@ function drawEditor(p, presetID) {
     ed.append(...field(t("Models"), renderModels(p), pluginFilterNote(subOf(a.agent))));
     if (p.drawIds?.length) ed.append(...renderDrawers(p));
     if (p.filmIds?.length) ed.append(...renderVideomakers(p));
+    ed.append(...retrievalRows(p));
     // the subscription's own warm-up, check-in and resets first
     // and Advanced opened when one is on, as for Routing: the user who set
     // a warm-up finds it where it went (ChrisYagao on X: "我的预热去哪里了")
@@ -10126,7 +10131,7 @@ function drawEditor(p, presetID) {
   if (perKey) proxies.append(perKey);
   advIn.append(...field(t("Proxy"), proxies));
   advIn.append(...concurrencyField(p));
-  advIn.append(...priceRateField(), ...keyRateField(p), ...countFreeField(), ...billingField(), ...rateWindowsField());
+  advIn.append(...priceRateField(), ...keyRateField(p, "topUpRateField", custom || p?.topUpRate), ...keyRateField(p), ...countFreeField(), ...billingField(), ...rateWindowsField());
 
   if (p?.cline || (isNew && pr?.id === "clinepass")) advIn.append(...upstreamField());
 
@@ -10363,6 +10368,7 @@ function drawEditor(p, presetID) {
   else if (pr?.id === "azure") ed.append(...field(t("Models"), el("div", "hint azure-models", t("No need to type them: once added, magpie lists the deployments this key can call. Type a deployment's name as a model id only if that list can't be fetched.")), ""));
   if (p?.drawIds?.length) ed.append(...renderDrawers(p));
   if (p?.filmIds?.length) ed.append(...renderVideomakers(p));
+  ed.append(...retrievalRows(p));
   {
     // the window agents are told a model has, over what the vendor or
     // models.dev says: one for all of them, and model=size for one
@@ -10627,7 +10633,7 @@ function drawEditor(p, presetID) {
     Object.assign(body, queue);
     body.priceRate = priceRateOfDraft();
     if (body.priceRate === undefined) return priceRateError(ed);
-    if ((body.keyPriceRates = self.keyPriceRates?.(ed)) === null) return;
+    if ((body.keyPriceRates = self.keyPriceRates?.(ed, body)) === null) return;
     body.rateWindows = self.rateWindowsOfDraft?.();
     if (body.rateWindows === false) return rateWindowsError(ed);
     if (p && priceTypedError(ed)) return;
@@ -11540,7 +11546,9 @@ const typedIds = (v) => (v || "").split(/[,\n]/).map((id) => id.trim()).filter(B
 // a Save takes as if Enter had been pressed on them
 function chosenIds() {
   const typed = typedIds(draft.typed);
-  return [...draft.chosen, ...typed.filter((id) => !draft.chosen.includes(id))].filter((id, i, all) => all.indexOf(id) === i);
+  // ids typed join what the list serves, drawn dashed (none while some
+  // are picked), as a click on a chip it doesn't serve does
+  return [...typed[0] && draft.dashed || [], ...draft.chosen, ...typed].filter((id, i, all) => all.indexOf(id) === i);
 }
 
 // noneChosen: Select none kept, nothing picked or served (#1818)
@@ -11551,7 +11559,7 @@ const pickingNone = () => !!draft.picking && !chosenIds().length;
 const bestChosen = () => !!draft.best && !draft.none && !chosenIds().length;
 
 // servedIds: the picks; none after Select none; else the vendor's list's
-const servedIds = (p) => draft.chosen.length ? draft.chosen : draft.none || draft.picking ? [] : p.models.filter((m) => draft.best ? m.best : m.on).map((m) => m.id);
+const servedIds = (p) => draft.chosen[0] ? draft.chosen : draft.none || draft.picking ? [] : p.models.filter((m) => draft.best ? m.best : m.on).map((m) => m.id);
 
 // modelsOpen: models let out to full height (#833). MCHIPS_MAX: .mchips' max-height
 let modelsOpen = false;
@@ -11723,15 +11731,17 @@ function renderModels(p) {
   };
   const draw = () => {
     if (agentMenu && chips.contains(agentMenu.anchor)) closeAgentMenu();
-    if (draft.chosen.length) draft.picking = false;
+    if (draft.chosen[0]) draft.picking = false;
     chips.replaceChildren();
     const f = (q?.value || "").trim().toLowerCase();
     let shown = 0, hidden = 0, unpicked = 0;
     // Picked only, unfiltered: the picks alone (unpickedShown)
-    const picksOnly = draft.chosen.length && !f && unpickedShown !== p.id && !decideOnly(p);
+    const picksOnly = draft.chosen[0] && !f && unpickedShown !== p.id && !decideOnly(p);
     // none picked: what the vendor's list serves is drawn as served (#614,
     // #1818), none after Select none
-    const served = draft.chosen.length || draft.picking || decideOnly(p) || draft.none ? new Set() : new Set(dashed());
+    const served = draft.chosen[0] || draft.picking || decideOnly(p) || draft.none ? new Set() : new Set(dashed());
+    // an id added by hand joins them too (chosenIds)
+    draft.dashed = [...served];
     // models that would read alike say what tells them apart (modelTells)
     const tells = modelTells(p.models);
     // a filter is a search: what it doesn't match is left out
@@ -11779,9 +11789,13 @@ function renderModels(p) {
       if (kb.length) c.title = (c.title || m.id) + "\n" + t("Kept out of agents' lists by {groups}, a routing group listed alone", { groups: kb.join(", ") });
       tested(c, m.id);
       menu(c, m.id);
-      // a click picks it (#681); the last unpicked leaves none (#1831)
+      // a click picks it (#681); the last unpicked leaves none (#1831).
+      // With none picked, a served (dashed) one is picked alone (#681), and
+      // one the list doesn't serve joins those it does: a relay's 25th
+      // model clicked left the 24 served out (onkashiko on X), where the
+      // TUI's toggle adds it to them
       c.onclick = () => {
-        draft.chosen = on ? draft.chosen.filter((x) => x !== m.id) : [...draft.chosen, m.id];
+        draft.chosen = on ? draft.chosen.filter((x) => x !== m.id) : [...served.has(m.id) ? [] : served, ...draft.chosen, m.id];
         draft.none = true;
         unpickedShown = p.id;
         draw();
@@ -11800,7 +11814,7 @@ function renderModels(p) {
       chips.append(c);
     }
     if (hidden || unpicked) chips.append(showRest(hidden || unpicked, () => { if (unpicked) unpickedShown = p.id; else showAll = true; draw(); }));
-    if (!p.models.length && !draft.chosen.length) chips.append(el("span", "hint", t(emptyModelsHint(p))));
+    if (!p.models.length && !draft.chosen[0]) chips.append(el("span", "hint", t(emptyModelsHint(p))));
     // the list is of models agents chat with: image, embedding and speech
     // models are left out of it, and an image model is set in Settings
     else if (f && !chips.children.length) chips.append(el("span", "hint", t("No model here matches “{q}”. Image, embedding and speech models aren't listed, as agents can't chat with them: pick an image model in Settings › Models › Images.", { q: q.value.trim() })));
@@ -11809,11 +11823,11 @@ function renderModels(p) {
     drawWorkOn();
     drawServes();
     why.textContent = decideOnly(p) ? t("Agents never see them: a routing group picks one as its classifier.")
-      : !draft.chosen.length && draft.picking ? t("Pick a model first.")
-      : !draft.chosen.length && draft.none ? t("None selected: no agent or routing group uses its models. Its balance and usage still show. Click a model to pick it.")
+      : !draft.chosen[0] && draft.picking ? t("Pick a model first.")
+      : !draft.chosen[0] && draft.none ? t("None selected: no agent or routing group uses its models. Its balance and usage still show. Click a model to pick it.")
       : bestChosen() && !draft.unlisted ? t("Best in family: agents see the newest model of each family it lists (dashed), up to {n}. A newer one it lists later takes the old one's place.", { n: 24 })
-      : draft.unlisted ? t(draft.chosen.length ? "Agents don't see them: only the routing groups they are in use them." : "Vendor's list: agents don't see it, the routing groups its models are in use up to {n} of it (dashed). Click a model to pick just it.", { n: 24 })
-      : t(draft.chosen.length ? "Agents see the models picked." : "Vendor's list: agents see up to {n} of its models (dashed), and those it lists later. Click a model to pick just it.", { n: 24 });
+      : draft.unlisted ? t(draft.chosen[0] ? "Agents don't see them: only the routing groups they are in use them." : "Vendor's list: agents don't see it, the routing groups its models are in use up to {n} of it (dashed). Click a dashed one to pick just it.", { n: 24 })
+      : t(draft.chosen[0] ? "Agents see the models picked." : "Vendor's list: agents see up to {n} of its models (dashed), and those it lists later. Click a dashed one to pick just it.", { n: 24 });
     drawLost();
     drawHiders();
   };
@@ -12246,12 +12260,12 @@ function renderModels(p) {
     b.dataset.serves = v;
     b.title = t(tip, { n: 24 });
     b.onclick = () => {
-      if (v !== "picked" && draft.chosen.length) picksLeft = { id: p.id, picks: [...draft.chosen] };
+      if (v !== "picked" && draft.chosen[0]) picksLeft = { id: p.id, picks: [...draft.chosen] };
       if (v !== "picked") { draft.chosen = []; draft.typed = ""; draft.none = v === "none"; draft.best = v === "best"; draft.picking = false; }
       else {
-        if (!draft.chosen.length && picksLeft?.id === p.id) { draft.chosen = picksLeft.picks; draft.none = true; }
+        if (!draft.chosen[0] && picksLeft?.id === p.id) { draft.chosen = picksLeft.picks; draft.none = true; }
         // none picked: it picks none, not the first 24 (yuancjun)
-        draft.picking = !draft.chosen.length;
+        draft.picking = !draft.chosen[0];
         unpickedShown = null; draft.best = false;
       }
       draw();
@@ -12259,7 +12273,7 @@ function renderModels(p) {
     serves.append(b);
     return b;
   });
-  const servesMode = () => draft.chosen.length || draft.picking ? "picked" : draft.none ? "none" : draft.best ? "best" : "list";
+  const servesMode = () => draft.chosen[0] || draft.picking ? "picked" : draft.none ? "none" : draft.best ? "best" : "list";
   const drawServes = () => {
     const now = servesMode();
     for (const b of servesOpts) { b.classList.toggle("on", b.dataset.serves === now); b.setAttribute("aria-pressed", b.dataset.serves === now); }
@@ -12457,6 +12471,18 @@ function renderDrawers(p) {
 // renderVideomakers: its video models, ticked to be offered (axelburks on Discord)
 function renderVideomakers(p) {
   return field(t("Video models"), mediaChips("mchips videomakers", p.filmIds, "hiddenVideomakers", p), t("Only the ticked ones are offered when making a video. Agents don't chat with these, so they aren't among its models."));
+}
+
+// retrievalRows: its embedding and rerank models, which need no pick and
+// aren't among its models since agents don't chat with them: they were
+// nowhere to be seen (@rfiacne on X)
+function retrievalRows(p) {
+  return [["Embedding models", p?.embedIds], ["Rerank models", p?.rerankIds]].flatMap(([l, v]) => {
+    if (!v) return [];
+    const d = el("div", "mchips still");
+    d.append(...v.map((id) => el("span", "mchip", id)));
+    return field(t(l), d);
+  });
 }
 
 function mediaChips(cls, ids, key, p, names) {

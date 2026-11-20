@@ -91,6 +91,28 @@ func agentOf(r *http.Request) string {
 	return usage.AgentOf(ua)
 }
 
+// claudeCodeInside is whether r is Claude Code's own request (its
+// User-Agent) sent under a key or address naming another agent: an app
+// that runs the real Claude Code as its engine, given a key of its own so
+// its requests are counted as the app's. OpenMausBot runs Claude Code with
+// CLAUDE_CODE_ENTRYPOINT taken out and no header of its own
+// (server/drivers/claude.ts's claudeEnvironment), so with the gateway's
+// plain token its calls were listed as Claude Code's (huangfuyafei on X,
+// beside OpenBot's under its own name). What magpie does for Claude Code
+// alone still applies to it: its tiers (claudeTierStandIn) and its helper
+// calls (observedKind). Claude Desktop's Code tab, which has handling of
+// its own, is not one.
+func claudeCodeInside(r *http.Request, agent string) bool {
+	if agent == "claude" || agent == "claude-desktop" || !fromClaudeCode(r.Header) {
+		return false
+	}
+	if pathAgent(r) != "" {
+		return true
+	}
+	id, ok := strings.CutPrefix(callerKey(r), Token+"-")
+	return ok && id != ""
+}
+
 // codexForClaudeCode is a Codex turn that Claude Code started under its
 // own name. OpenAI's Codex plugin for Claude Code (/codex:review,
 // /codex:rescue) runs `codex app-server` with clientInfo named "Claude
@@ -267,12 +289,16 @@ var claudeFamily = lazyre.New(`^claude-(?:[0-9][0-9.-]*-)?(?:opus|sonnet|haiku|f
 // which went nowhere, a 404 (tbxark on X). It gets Claude Code's tier too.
 // An id the user does serve (a Claude account, an Anthropic key) goes
 // where it is served, and an agent magpie knows keeps its own models.
+//
+// Claude Code an app runs under a key naming the app (claudeCodeInside:
+// OpenMausBot's magpie engine) is Claude Code here, as it was while its
+// requests were counted as Claude Code's.
 func claudeTierStandIn(r *http.Request, agent, asked string) string {
 	if StandIn == nil || !claudeFamily.MatchString(strings.ToLower(strings.TrimSuffix(asked, "[1m]"))) {
 		return ""
 	}
 	if agent != "claude" {
-		if !startedByAgent(r, agent) || !unserved(asked) {
+		if !claudeCodeInside(r, agent) && (!startedByAgent(r, agent) || !unserved(asked)) {
 			return ""
 		}
 		agent = "claude"
@@ -997,6 +1023,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		go provider.KeepListsFresh(ctx)
 		// and follows a Remote magpie's list as it changes there (KaCli)
 		go provider.KeepRemoteListsFollowed(ctx)
+		// and reads the group rate of each key of a relay given a top-up rate (@YIXIE233 on X)
+		go provider.KeepKeyRatesRead(ctx)
 		// and keeps the community's plugins up to date, noting others' updates, and the Bun they run on
 		go plugin.KeepUpdated(ctx)
 		go plugin.KeepBunUpdated(ctx)
@@ -1768,6 +1796,48 @@ func videomakerObjects(r *http.Request) []map[string]any {
 	return out
 }
 
+// retrievalObjects are the embedding or rerank models, kind's, that
+// magpie serves on /v1/embeddings or /v1/rerank (RetrievalModels), as a
+// client asks for them (?kind=embedding,rerank, listKinds): "kind":
+// "embedding" or "rerank", each provider's by "provider/model", the id
+// either route takes. supported_endpoint_types is new-api's word for the
+// route, which Cherry Studio's new-api provider reads the model's kind
+// from (listModels.ts ENDPOINT_TYPE_ALIASES: "embeddings",
+// "jina-rerank"). Models disabled in magpie are left out, and a gateway
+// key held to some models or accounts is told of those alone, as its
+// chat list is (#2579).
+func retrievalObjects(r *http.Request, kind string) []map[string]any {
+	who, held := keyListHolds(r)
+	path, ends := "/v1/embeddings", []string{"embeddings"}
+	if kind == catalog.ServesRerank {
+		path, ends = "/v1/rerank", []string{"jina-rerank"}
+	}
+	var out []map[string]any
+	for _, p := range provider.All() {
+		if !p.On() || p.DecideOnly() {
+			continue
+		}
+		for _, m := range RetrievalModels(p, kind) {
+			if _, off := modelOff(p, m.ID, p.ID+"/"+m.ID); off {
+				continue
+			}
+			if held && (!modelAllowed(who, p, m.ID) || !accountServes(who, p, m.ID)) {
+				continue
+			}
+			name := cmp.Or(m.Name, m.ID)
+			o := map[string]any{"id": p.ID + "/" + m.ID, "object": "model", "type": "model", "kind": kind, "created": 0,
+				"owned_by": p.ID, "display_name": name, "magpie_label": name + " · " + p.Name,
+				"native_endpoints": []string{path}, "supported_endpoint_types": ends,
+				"magpie_via": catalog.ViaHere(m.Via)}
+			if m.Context > 0 {
+				o["context_window"] = m.Context
+			}
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
 // viaOf is the magpies e's model passes through after this one, as the
 // remote magpie serving it listed them; nil for a provider's own model.
 // A routing group's are its members' together: a group with a remote
@@ -1799,48 +1869,60 @@ func catalogFor(r *http.Request) []provider.Entry {
 
 // listKinds is which of magpie's models a /v1/models call lists: its chat
 // models alone, unless it names the kinds it wants in ?kind= (chat, image,
-// video, comma separated; all for the three). Image and video models are
-// listed only when asked for, each marked "kind" (drawerObjects,
-// videomakerObjects): OpenAI's own list puts gpt-image and sora among its
-// chat models with nothing to tell them apart, and the clients and agents
-// that offer every id this list gives as a model to chat with (OpenCode's,
-// Cherry Studio's, ZCode's pasted ?format=text) would offer an image model
-// in their chat pickers (axelburks on Discord asked for them here). A kind
-// it doesn't know is refused, not read as none.
+// video, embedding, rerank, comma separated; all for every one). The
+// others are listed only when asked for, each marked "kind"
+// (drawerObjects, videomakerObjects, retrievalObjects): OpenAI's own list
+// puts gpt-image and sora among its chat models with nothing to tell them
+// apart, and the clients and agents that offer every id this list gives
+// as a model to chat with (OpenCode's, Cherry Studio's, ZCode's pasted
+// ?format=text) would offer an image or embedding model in their chat
+// pickers (axelburks on Discord asked for image and video models here,
+// @rfiacne on X for embedding ones). A kind it doesn't know is refused,
+// not read as none.
 //
-// Cherry Studio is the exception: it can't ask, and it tells an image model
-// from a chat one itself. Its provider of magpie (an OpenAI-compatible one)
-// reads only each id, then looks the id's last segment up in its own model
-// registry (provider-registry's models.json, by normalizeModelId), which
-// marks gpt-image-2, dall-e-3, the gemini-*-image, imagen, seedream and
-// grok-imagine models as image generation: those go to its Paintings page,
-// not its chat picker (isNonChatModel). Without them listed, Paintings had
-// no model of magpie's (pingqipai3 on X). So it is listed every kind.
-func listKinds(r *http.Request) (chat, image, video bool, err error) {
+// Cherry Studio is the exception: it can't ask, and it tells an image
+// model from a chat one itself. Its provider of magpie (an
+// OpenAI-compatible one) reads only each id, then looks the id's last
+// segment up in its own model registry (provider-registry's models.json,
+// by normalizeModelId), which marks gpt-image-2, dall-e-3, the
+// gemini-*-image, imagen, seedream and grok-imagine models as image
+// generation: those go to its Paintings page, not its chat picker
+// (isNonChatModel), and its embedding and rerank models (text-embedding-3,
+// bge-m3, Qwen3-Embedding, bge-reranker) to its knowledge bases. Without
+// them listed, Paintings had no model of magpie's (pingqipai3 on X). So it
+// is listed every kind.
+func listKinds(r *http.Request) (k listKind, err error) {
 	q, ok := r.URL.Query()["kind"]
 	if !ok {
 		// a list of ids pasted somewhere (?format=text) stays chat models
 		media := cherryStudio(r) && r.URL.Query().Get("format") != "text"
-		return true, media, media, nil
+		return listKind{chat: true, image: media, video: media, embedding: media, rerank: media}, nil
 	}
 	for _, v := range q {
-		for k := range strings.SplitSeq(v, ",") {
-			switch strings.ToLower(strings.TrimSpace(k)) {
+		for kind := range strings.SplitSeq(v, ",") {
+			switch strings.ToLower(strings.TrimSpace(kind)) {
 			case "chat":
-				chat = true
+				k.chat = true
 			case "image":
-				image = true
+				k.image = true
 			case "video":
-				video = true
+				k.video = true
+			case "embedding":
+				k.embedding = true
+			case "rerank":
+				k.rerank = true
 			case "all":
-				chat, image, video = true, true, true
+				k = listKind{true, true, true, true, true}
 			default:
-				return false, false, false, fmt.Errorf("kind %q: /v1/models lists the kinds chat, image and video (or all), comma separated", k)
+				return listKind{}, fmt.Errorf("kind %q: /v1/models lists the kinds chat, image, video, embedding and rerank (or all), comma separated", kind)
 			}
 		}
 	}
-	return chat, image, video, nil
+	return k, nil
 }
+
+// listKind is which kinds of model a /v1/models call lists (listKinds).
+type listKind struct{ chat, image, video, embedding, rerank bool }
 
 // cherryStudio is a request of Cherry Studio's: with the key magpie's link
 // gives it (agentOf), or a key the user typed in by hand, by its User-Agent,
@@ -1871,7 +1953,8 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
-	chat, images, videos, err := listKinds(r)
+	kinds, err := listKinds(r)
+	chat, images, videos := kinds.chat, kinds.image, kinds.video
 	if err != nil {
 		writeError(w, provider.Chat, 400, err.Error())
 		return
@@ -2037,6 +2120,12 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if videos || r.Header.Get(provider.VideomakersHeader) != "" {
 		data = append(data, videomakerObjects(r)...)
+	}
+	if kinds.embedding {
+		data = append(data, retrievalObjects(r, catalog.ServesEmbedding)...)
+	}
+	if kinds.rerank {
+		data = append(data, retrievalObjects(r, catalog.ServesRerank)...)
 	}
 	if r.Header.Get(provider.DecidersHeader) != "" {
 		// the decision models its own pickers offer: of a provider with
@@ -2990,6 +3079,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// before any image is taken out of the request: one may be for images
 	g, ms, isGroup := provider.FindGroup(asked)
 	g = g.Live() // a manual group's rules wait
+	// routed as the calling key says, where it says (justforlxz on X)
+	g = keyRouted(access.Caller(r.Context()), g)
 	// a model on this machine or the local network that the user set to
 	// go unmasked gets the request as written (lc on Discord), and it
 	// isn't masked on its way, the request archive on or not: the archive
@@ -3019,7 +3110,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				log.Printf("gateway: %d value(s) masking would change, sent as written to %s (Settings › Privacy)", hits.n, to)
 				p, model, _ = provider.Resolve(to)
 				g, ms, isGroup = provider.FindGroup(to)
-				g = g.Live()
+				g = keyRouted(access.Caller(r.Context()), g.Live())
 				sentWhole = true
 				move(to, movedPrivacy)
 			} else {
@@ -5938,7 +6029,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// nobody is left: the agent is told it was refused, as a
 			// request it shouldn't send again as it is, not handed an empty
 			// reply it would ask again for, paying for each
-			failTo(w, kept, from, refusedStatus, call.Error)
+			// told with the vendor's own words first (refusalTold)
+			failTo(w, kept, from, refusedStatus, refusalTold(c.p, c.model, hw.status, call.Usage.RequestID, hw.failMsg, c.p.IsPlugin()))
 		} else if hw.turnedAway && hw.failed() {
 			// nobody is left to answer what Antigravity turned away: the
 			// agent is told why, at a status it doesn't retry, not the 429

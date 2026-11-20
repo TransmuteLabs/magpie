@@ -164,6 +164,9 @@ func revealable(v *library.View) []string {
 	for _, s := range v.FoundSkills {
 		out = append(out, s.Link, s.Shared)
 	}
+	for _, h := range v.FoundHooks {
+		out = append(out, h.File)
+	}
 	for _, s := range v.Subagents {
 		// the file it is kept in, to edit it in
 		if s.Path != "" {
@@ -751,6 +754,9 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			// Replace updates a skill changed here all the same, its
 			// changed version kept with the backups (#1449)
 			Replace bool
+			// NoBackup deletes a skill's folder on skills/remove… rather
+			// than moving it to the backups, as the reader picked
+			NoBackup bool `json:"noBackup"`
 			// a skill's file saved: its place in the skill, its new text,
 			// and what it held when the page opened it
 			File, Text, Was string
@@ -830,6 +836,13 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 			res, err = library.RemoveHooks([]string{in.Name})
 		case "hooks/remove-all":
 			res, err = library.RemoveHooks(in.Names)
+		case "hooks/import":
+			// hooks the agents run that magpie didn't give them, by
+			// their keys (@InkCoalW on X)
+			res, err = library.ImportHooks(in.Names)
+		case "hooks/remove-found":
+			// out of the agents' own files, each copied to the backups first
+			res, err = library.RemoveFoundHooks(in.Names)
 		case "plugins/install":
 			res, err = library.InstallPlugins(in.Source, in.Names, in.Agents)
 		case "plugins/agents":
@@ -874,7 +887,7 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 				res, err = &library.Result{Changed: []string{}, Problems: []library.Problem{}, Gone: []string{gone.Name}}, nil
 			}
 		case "skills/remove-gone":
-			res, err = library.RemoveGoneSkills(in.Names)
+			res, err = library.RemoveGoneSkillsHow(in.Names, !in.NoBackup)
 		case "skills/update-all":
 			res, err = library.UpdateSkills()
 		case "skills/update-some":
@@ -894,9 +907,9 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		case "skills/agents-some":
 			res, err = library.SomeSkillsAgents(in.Names, in.Agents, in.On)
 		case "skills/remove":
-			res, err = library.RemoveSkill(in.Name)
+			res, err = library.RemoveSkillsHow([]string{in.Name}, !in.NoBackup)
 		case "skills/remove-all":
-			res, err = library.RemoveSkills(in.Names)
+			res, err = library.RemoveSkillsHow(in.Names, !in.NoBackup)
 		case "skills/group":
 			res, err = library.GroupSkills(in.Old, in.Name, in.Names)
 		case "skills/ungroup":
@@ -910,9 +923,9 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		case "skills/import-all":
 			res, err = library.ImportSkills(in.Names)
 		case "skills/remove-found":
-			res, err = library.RemoveFoundSkill(in.Name)
+			res, err = library.RemoveFoundSkillsHow([]string{in.Name}, !in.NoBackup)
 		case "skills/remove-found-some":
-			res, err = library.RemoveFoundSkills(in.Names)
+			res, err = library.RemoveFoundSkillsHow(in.Names, !in.NoBackup)
 		case "skills/hand-over":
 			// out of ~/.agents/skills, into the library's own folder (tnt1223)
 			res, err = library.HandOverSkills(oneOrMore(in.Name, in.Names))
