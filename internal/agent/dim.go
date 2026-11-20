@@ -44,11 +44,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	builtindim "github.com/yetone/magpie/internal/extension/builtin/dim"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/update"
@@ -78,14 +78,7 @@ const (
 // subcommand, which Dim refuses).
 func dimLaunch(gw, key, model string) *launchSpec {
 	ctx, out := dimLimits(model)
-	return &launchSpec{id: "dim", bin: "dima", env: map[string]string{
-		"DIM_BASE_URL":           gw + "/v1",
-		"DIM_API_FORMAT":         "openai-compatible",
-		"DIM_API_KEY":            key,
-		"DIM_MODEL":              strings.TrimPrefix(model, magpieID+"/"),
-		"DIM_MAX_CONTEXT_TOKENS": strconv.Itoa(ctx),
-		"DIM_MAX_OUTPUT_TOKENS":  strconv.Itoa(out),
-	}}
+	return linkedEnvLaunch("dim", "dima", builtindim.GatewayLaunch(gw, key, strings.TrimPrefix(model, magpieID+"/"), ctx, out))
 }
 
 // dimLimits are the context and output limits of a magpie/<ref> model
@@ -108,20 +101,8 @@ func dimLimits(model string) (ctx, out int) {
 	return ctx, out
 }
 
-// dimCommand is what starts dima on magpie's model in the shell of this
-// system. The variables are put as they are (none needs quoting).
 func dimCommand(gw, key, model string, powershell bool) string {
-	l := dimLaunch(gw, key, model)
-	var b strings.Builder
-	for _, kv := range l.vars(gw, key) {
-		k, v, _ := strings.Cut(kv, "=")
-		if powershell {
-			b.WriteString(`$env:` + k + "=" + psQuote(v) + "; ")
-		} else {
-			b.WriteString(k + "=" + posixQuote(v) + " ")
-		}
-	}
-	return b.String() + "dima"
+	return dimLaunch(gw, key, model).command(gw, key, model, powershell)
 }
 
 func dim(home string) *Agent { return dimIn(here(home)) }
@@ -132,7 +113,7 @@ func dimIn(at place) *Agent {
 	model := jsonGet(file, "model")
 	gw, key := gateway.URL, func() string { return agentKey("dim") }
 	on := func() bool { return usesMagpie(model()) }
-	spec := func() *launchSpec { return dimLaunch(gw(), key(), model()) }
+	spec := func(picked string) *launchSpec { return dimLaunch(gw(), key(), picked) }
 	local := func() bool { h, _ := homes(); return h == at.home }
 	// wired: Dim's own Magpie provider is on magpie's model, so dima runs
 	// on it as it is
@@ -145,7 +126,7 @@ func dimIn(at place) *Agent {
 			return
 		}
 		if set {
-			update.ShellFunction("dima", spec().function)
+			update.ShellFunction("dima", spec(model()).function)
 		} else {
 			update.DropShellFunction("dima")
 		}
@@ -174,10 +155,10 @@ func dimIn(at place) *Agent {
 		},
 		Start: func() Starting {
 			s := Starting{Bin: "dima"}
-			if v := model(); on() {
+			if v := model(); usesMagpie(v) {
 				s.Model = v
 				if !wired() {
-					s.Env = spec().vars(gw(), key())
+					s.Env = spec(v).vars("", "")
 				}
 			}
 			return s

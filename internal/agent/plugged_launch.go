@@ -33,9 +33,10 @@ import (
 // magpie's settings file), and the arguments that start it as it is.
 type launchSpec struct {
 	id, bin, flag string
-	env           map[string]string // templates (agentplug.Fill)
+	env           map[string]string
 	args, plain   []string
 	strict        bool
+	literalEnv    bool
 	config        string
 	err           error
 }
@@ -62,6 +63,12 @@ func sdkLaunch(id, bin, config string, recipe sdk.AgentLaunch) *launchSpec {
 			}
 		}
 	}
+	return launch
+}
+
+func linkedEnvLaunch(id, bin string, recipe sdk.AgentLaunch) *launchSpec {
+	launch := declaredLaunch(id, bin, "", recipe.Model, recipe.Env, recipe.Args, recipe.Plain)
+	launch.literalEnv = true
 	return launch
 }
 
@@ -92,10 +99,12 @@ func (l *launchSpec) vars(gw, key string) []string {
 	out := make([]string, 0, len(l.env))
 	for _, k := range sortedKeys(l.env) {
 		value := l.env[k]
-		if l.strict {
-			value = strings.NewReplacer("{url}", gw, "{v1}", gw+"/v1", "{key}", key, "{config}", l.config).Replace(value)
-		} else {
-			value = agentplug.Fill(value, gw, gw+"/v1", key)
+		if !l.literalEnv {
+			if l.strict {
+				value = strings.NewReplacer("{url}", gw, "{v1}", gw+"/v1", "{key}", key, "{config}", l.config).Replace(value)
+			} else {
+				value = agentplug.Fill(value, gw, gw+"/v1", key)
+			}
 		}
 		out = append(out, k+"="+value)
 	}
@@ -134,20 +143,25 @@ func psQuote(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + 
 // command is what starts the agent on the gateway at gw with key and
 // model, in PowerShell or a POSIX shell.
 func (l *launchSpec) command(gw, key, model string, powershell bool) string {
+	quote := posixQuote
+	if powershell {
+		quote = psQuote
+	}
 	var b strings.Builder
 	for _, kv := range l.vars(gw, key) {
 		k, v, _ := strings.Cut(kv, "=")
+		if l.literalEnv {
+			v = quote(v)
+		} else if powershell {
+			v = `"` + v + `"`
+		}
 		if powershell {
-			b.WriteString(`$env:` + k + `="` + v + `"; `)
+			b.WriteString(`$env:` + k + "=" + v + "; ")
 		} else {
 			b.WriteString(k + "=" + v + " ")
 		}
 	}
 	b.WriteString(l.bin)
-	quote := posixQuote
-	if powershell {
-		quote = psQuote
-	}
 	for i := 0; i+1 < len(l.args); i += 2 {
 		b.WriteString(" " + l.args[i] + " " + quote(l.args[i+1]))
 	}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/update"
 )
@@ -157,5 +158,67 @@ func TestDimLimits(t *testing.T) {
 	ctx, out := dimLimits("magpie/nobody/none")
 	if ctx <= 0 || out <= 0 || out > ctx {
 		t.Fatalf("limits %d %d", ctx, out)
+	}
+}
+
+func TestDimLaunchKeepsRuntimeValuesLiteral(t *testing.T) {
+	home := dimSandbox(t)
+	model := `provider/model ' $HOME {key} {url} {v1} {config}`
+	if err := writeDimState(dimFile(), dimState{Model: "magpie/" + model}); err != nil {
+		t.Fatal(err)
+	}
+	start := dim(home).Start()
+	if !slices.Contains(start.Env, "DIM_MODEL="+model) {
+		t.Error("Start expanded placeholders in the stored model")
+	}
+
+	gw := `http://127.0.0.1:3425/{key}`
+	key := `fixture's $HOME {url} {v1} {config} {key}`
+	for _, shell := range []struct {
+		name       string
+		powershell bool
+		want       []string
+	}{
+		{"POSIX", false, []string{
+			`DIM_BASE_URL='http://127.0.0.1:3425/{key}/v1'`,
+			`DIM_API_KEY='fixture'\''s $HOME {url} {v1} {config} {key}'`,
+			`DIM_MODEL='provider/model '\'' $HOME {key} {url} {v1} {config}'`,
+		}},
+		{"PowerShell", true, []string{
+			`$env:DIM_BASE_URL='http://127.0.0.1:3425/{key}/v1';`,
+			`$env:DIM_API_KEY='fixture''s $HOME {url} {v1} {config} {key}';`,
+			`$env:DIM_MODEL='provider/model '' $HOME {key} {url} {v1} {config}';`,
+		}},
+	} {
+		t.Run(shell.name, func(t *testing.T) {
+			command := dimCommand(gw, key, start.Model, shell.powershell)
+			for _, assignment := range shell.want {
+				if !strings.Contains(command, assignment) {
+					t.Errorf("command %q missing %q", command, assignment)
+				}
+			}
+			if !strings.HasSuffix(command, " dima") {
+				t.Errorf("command %q does not end in dima", command)
+			}
+		})
+	}
+}
+
+func TestDimShellFallsBackWhenMagpieIsGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX shell")
+	}
+	home := t.TempDir()
+	fake := filepath.Join(home, "dima")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf '%s\\n' \"$DIM_API_KEY\" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := dimLaunch("http://127.0.0.1:3425", "magpie-fixture", "magpie/deepseek/pro")
+	function := spec.function("posix", filepath.Join(home, "absent 'magpie'"))
+	cmd := proc.Command("/bin/sh", "-c", function+"\ndima 'two words' 'literal $HOME'")
+	cmd.Env = []string{"HOME=" + home, "PATH=" + home, "DIM_API_KEY=user-fixture"}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "user-fixture\ntwo words\nliteral $HOME\n" {
+		t.Fatalf("plain dima: %q (%v)", out, err)
 	}
 }

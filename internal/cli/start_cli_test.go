@@ -164,6 +164,23 @@ func TestDimRun(t *testing.T) {
 		t.Fatalf("dim env: %q %v", out, err)
 	}
 
+	t.Run("literal_runtime_model", func(t *testing.T) {
+		const model = "deepseek/pro {url} {v1} {key} {config}"
+		if err := os.WriteFile(file, []byte(`{"model":"magpie/`+model+`"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runOut(t, "dim", "run", "exec"); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(envOf("DIM_MODEL"), []string{model}) {
+			t.Error("dim run expanded placeholders in the stored model")
+		}
+		out, err := runOut(t, "dim", "env")
+		if err != nil || !strings.Contains(out, "DIM_MODEL="+model+"\n") {
+			t.Errorf("dim env did not preserve the literal model (%v)", err)
+		}
+	})
+
 	// off magpie: dima as it is, with the user's own environment
 	os.Remove(file)
 	if _, err := runOut(t, "dim", "run", "exec", "-p", "hi"); err != nil {

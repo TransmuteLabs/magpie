@@ -294,6 +294,11 @@ The host decides when the overlay applies and couples it to the user's
 current model. Shell profiles in a WSL distro still read its settings file
 locally when they run.
 
+Dim uses a linked `AgentLaunch` recipe for `magpie dim run`, `env` and
+shell commands. The host selects the configured daemon or an environment
+overlay. Values from the selected model and gateway are inserted literally.
+The shell function still starts plain `dima` when Magpie is unavailable.
+
 Agent action settings snapshots use `sdk.ActionSettings` in Go and
 `ActionSettings` in TypeScript. The request's `settings` field keeps its
 existing JSON representation. Each file has a relative path, existence and
