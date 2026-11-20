@@ -27,7 +27,7 @@ func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount
 	if binding.scope.Account == "" || !binding.manifest.Contract.Has(sdk.AccountAuth) {
 		return binding, nil
 	}
-	account, err := binding.host.Store().GetAccount(binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
+	account, err := binding.host.Store().GetAccountContext(ctx, binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
 	if err != nil {
 		extensionSelectionFailure(ctx, binding.scope, err)
 		return nil, err
@@ -56,7 +56,7 @@ func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount
 	if _, err := owner.RefreshAccount(ctx, binding.scope.Plugin, binding.scope); err != nil {
 		return nil, err
 	}
-	current, err := binding.host.Store().GetAccount(binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
+	current, err := binding.host.Store().GetAccountContext(ctx, binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
 	if err != nil {
 		return nil, err
 	}

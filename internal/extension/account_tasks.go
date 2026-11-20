@@ -342,17 +342,23 @@ func (manager *Manager) checkAccountTaskPins(ctx context.Context, selection Acco
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err != nil || !slices.ContainsFunc(entries, func(entry Installed) bool {
 		return entry.Manifest.ID == selection.Scope.Plugin && !entry.Disabled && entry.Revision == selection.Revision
 	}) {
 		return ErrActionChanged
 	}
 	config, err := manager.ModuleConfig(ctx, selection.Scope.Plugin)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err != nil || config.Version != selection.Config {
 		return ErrActionChanged
 	}
-	_, err = manager.store.RefreshedAccount(selection.Scope)
+	_, err = manager.store.RefreshedAccountContext(ctx, selection.Scope)
 	return err
 }
 

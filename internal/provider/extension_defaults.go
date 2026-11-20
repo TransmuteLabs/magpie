@@ -16,10 +16,11 @@ func (p Provider) extensionDefaults() (*int, *int) {
 	if binding.manifest.Contract.Version.Minor < 9 || binding.check(ctx) != nil || binding.checkModelRevision(ctx) != nil {
 		return nil, nil
 	}
-	current, err := binding.host.Manifest(binding.scope.Plugin)
-	if err != nil || current.Contract.Version.Minor < 9 {
+	entry, err := enabledExtensionModule(ctx, binding.host, binding.scope.Plugin)
+	if err != nil || entry.Manifest.Contract.Version.Minor < 9 {
 		return nil, nil
 	}
+	current := entry.Manifest
 	index := slices.IndexFunc(current.Providers, func(provider sdk.ProviderDescriptor) bool {
 		return provider.ID == binding.scope.Provider
 	})

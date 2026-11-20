@@ -30,7 +30,7 @@ func (m *Manager) readModuleConfig(id string) (sdk.ConfigSnapshot, error) {
 }
 
 func (m *Manager) readModuleConfigContext(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
-	value, err := m.store.stateGet(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
+	value, err := m.store.StateGetContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}

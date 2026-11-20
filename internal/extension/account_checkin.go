@@ -11,6 +11,14 @@ import (
 )
 
 func (m *Manager) CheckinAccount(ctx context.Context, scope sdk.Scope, revision, config string, request sdk.AccountCheckinRequest) (CheckinExecution, error) {
+	return m.CheckinAccountWithAdmission(ctx, scope, revision, config, request, nil)
+}
+
+type checkinAdmissionKey struct{}
+
+func (m *Manager) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Scope, revision, config string, request sdk.AccountCheckinRequest,
+	admit func(context.Context) error,
+) (CheckinExecution, error) {
 	if request.Validate() != nil || scope.Account == "" || scope.Generation == 0 ||
 		scope.Operation != "" || scope.Attempt != 0 || scope.Session != "" ||
 		revision == "" || config == "" {
@@ -21,6 +29,12 @@ func (m *Manager) CheckinAccount(ctx context.Context, scope sdk.Scope, revision,
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if admit != nil {
+		if err := admit(ctx); err != nil {
+			return CheckinExecution{}, err
+		}
+		ctx = context.WithValue(ctx, checkinAdmissionKey{}, admit)
+	}
 	lease, err := m.AcquireRevision(ctx, scope.Plugin, revision, config)
 	if err != nil {
 		return CheckinExecution{}, err
@@ -34,11 +48,16 @@ func (m *Manager) CheckinAccount(ctx context.Context, scope sdk.Scope, revision,
 	if err := lease.CheckCurrent(ctx); err != nil {
 		return CheckinExecution{}, err
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return CheckinExecution{}, err
 	}
 	if err := netproxy.Held(ctx); err != nil {
 		return CheckinExecution{}, err
+	}
+	if admit != nil {
+		if err := admit(ctx); err != nil {
+			return CheckinExecution{}, err
+		}
 	}
 	record, dispatch, err := m.store.reserveCheckin(scope, request.Day)
 	if err != nil || !dispatch {
@@ -116,6 +135,11 @@ func checkLeasedCheckin(ctx context.Context, lease *Lease, method string, scope 
 	}
 	if err := netproxy.Held(ctx); err != nil {
 		return &OutcomeError{Outcome: "not-started", Cause: err}
+	}
+	if admit, ok := ctx.Value(checkinAdmissionKey{}).(func(context.Context) error); ok {
+		if err := admit(ctx); err != nil {
+			return &OutcomeError{Outcome: "not-started", Cause: err}
+		}
 	}
 	return nil
 }

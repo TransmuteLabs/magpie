@@ -29,7 +29,7 @@ func (m *Manager) providerOptionOwner(ctx context.Context, id, provider string) 
 	if err := ctx.Err(); err != nil {
 		return Installed{}, sdk.ProviderDescriptor{}, err
 	}
-	entries, err := m.List()
+	entries, err := m.ListContext(ctx)
 	if err != nil {
 		return Installed{}, sdk.ProviderDescriptor{}, err
 	}

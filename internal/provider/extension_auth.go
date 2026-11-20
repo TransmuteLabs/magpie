@@ -15,10 +15,11 @@ func extensionAuthCall(ctx context.Context, scope sdk.Scope, method string, para
 		return errAccountDiscoveryOff
 	}
 	host := providerExtensionHost()
-	manifest, err := host.Manifest(scope.Plugin)
+	entry, err := enabledExtensionModule(ctx, host, scope.Plugin)
 	if err != nil {
 		return err
 	}
+	manifest := entry.Manifest
 	if !manifest.Contract.Has(sdk.AccountAuth) {
 		return errors.New("extension provider does not declare account authentication")
 	}
@@ -30,7 +31,7 @@ func extensionAuthCall(ctx context.Context, scope sdk.Scope, method string, para
 		return errors.New("extension provider is unavailable")
 	}
 	if scope.Account != "" {
-		account, err := host.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+		account, err := host.Store().GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
 		if err != nil {
 			return err
 		}
@@ -74,10 +75,11 @@ func RefreshExtensionAuth(ctx context.Context, scope sdk.Scope) (sdk.AuthResult,
 		return sdk.AuthResult{}, errAccountDiscoveryOff
 	}
 	host := providerExtensionHost()
-	manifest, err := host.Manifest(scope.Plugin)
+	entry, err := enabledExtensionModule(ctx, host, scope.Plugin)
 	if err != nil {
 		return sdk.AuthResult{}, err
 	}
+	manifest := entry.Manifest
 	found := false
 	for _, provider := range manifest.Providers {
 		found = found || provider.ID == scope.Provider

@@ -16,10 +16,11 @@ func ExtensionNetworkContext(ctx context.Context, scope sdk.Scope) (context.Cont
 		return ctx, err
 	}
 	host := providerExtensionHost()
-	manifest, err := host.Manifest(scope.Plugin)
+	entry, err := enabledExtensionModule(ctx, host, scope.Plugin)
 	if err != nil {
 		return ctx, err
 	}
+	manifest := entry.Manifest
 	if manifest.ID != scope.Plugin {
 		return ctx, errors.New("extension network scope belongs to another module")
 	}
@@ -40,7 +41,7 @@ func ExtensionNetworkContext(ctx context.Context, scope sdk.Scope) (context.Cont
 		return ctx, errors.New("extension account generation is required")
 	}
 	if scope.Account != "" {
-		account, err := host.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+		account, err := host.Store().GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
 		if err != nil {
 			return ctx, err
 		}

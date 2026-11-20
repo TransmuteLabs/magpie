@@ -41,26 +41,18 @@ func extensionModelRevision(ctx context.Context, host extensionProviderHost, ent
 }
 
 func (binding *extensionAccount) checkModelRevision(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	entries, err := binding.host.List()
+	entry, err := enabledExtensionModule(ctx, binding.host, binding.manifest.ID)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.ID != binding.manifest.ID {
-			continue
-		}
-		revision, err := extensionModelRevision(ctx, binding.host, entry)
-		if err != nil {
-			return err
-		}
-		if revision == binding.modelKey {
-			return nil
-		}
+	revision, err := extensionModelRevision(ctx, binding.host, entry)
+	if err != nil {
+		return err
 	}
-	return errors.New("extension model catalog selection changed")
+	if revision != binding.modelKey {
+		return errors.New("extension model catalog selection changed")
+	}
+	return nil
 }
 
 func (binding *extensionAccount) validateModels(models []sdk.Model) error {
@@ -97,9 +89,9 @@ func extensionModelsJSON(body []byte, target any) error {
 	return nil
 }
 
-func (binding *extensionAccount) readModelCatalog() ([]sdk.Model, bool, error) {
+func (binding *extensionAccount) readModelCatalog(ctx context.Context) ([]sdk.Model, bool, error) {
 	scope := sdk.Scope{Plugin: binding.scope.Plugin}
-	value, err := binding.host.Store().StateGet(scope, binding.modelCatalogKey())
+	value, err := binding.host.Store().StateGetContext(ctx, scope, binding.modelCatalogKey())
 	if err != nil || value.Version == 0 {
 		return nil, false, err
 	}
@@ -114,7 +106,7 @@ func (binding *extensionAccount) readModelCatalog() ([]sdk.Model, bool, error) {
 		if !validExtensionModelHash(digest) {
 			return nil, false, errors.New("extension model catalog chunk identity is invalid")
 		}
-		value, err := binding.host.Store().StateGet(scope, "models.chunk.v1."+digest)
+		value, err := binding.host.Store().StateGetContext(ctx, scope, "models.chunk.v1."+digest)
 		if err != nil {
 			return nil, false, err
 		}
@@ -130,9 +122,6 @@ func (binding *extensionAccount) readModelCatalog() ([]sdk.Model, bool, error) {
 	if extensionModelHash(body) != record.SHA256 || extensionModelsJSON(body, &result) != nil ||
 		binding.validateModels(result.Models) != nil {
 		return nil, false, errors.New("extension model catalog content is invalid")
-	}
-	if err := binding.checkModelRevision(context.Background()); err != nil {
-		return nil, false, err
 	}
 	return result.Models, true, nil
 }
@@ -153,7 +142,7 @@ func (binding *extensionAccount) writeModelCatalog(ctx context.Context, result s
 		if err != nil {
 			return err
 		}
-		if err := binding.putModelState("models.chunk.v1."+digest, value); err != nil {
+		if err := binding.putModelState(ctx, "models.chunk.v1."+digest, value); err != nil {
 			return err
 		}
 		record.Chunks = append(record.Chunks, digest)
@@ -168,20 +157,20 @@ func (binding *extensionAccount) writeModelCatalog(ctx context.Context, result s
 	if err != nil {
 		return err
 	}
-	return binding.putModelState(binding.modelCatalogKey(), value)
+	return binding.putModelState(ctx, binding.modelCatalogKey(), value)
 }
 
-func (binding *extensionAccount) putModelState(key string, value json.RawMessage) error {
+func (binding *extensionAccount) putModelState(ctx context.Context, key string, value json.RawMessage) error {
 	scope := sdk.Scope{Plugin: binding.scope.Plugin}
 	for range 8 {
-		before, err := binding.host.Store().StateGet(scope, key)
+		before, err := binding.host.Store().StateGetContext(ctx, scope, key)
 		if err != nil {
 			return err
 		}
 		if bytes.Equal(before.Value, value) {
 			return nil
 		}
-		_, err = binding.host.Store().StateCAS(scope, key, before.Version, value)
+		_, err = binding.host.Store().StateCASContext(ctx, scope, key, before.Version, value)
 		if err == nil {
 			return nil
 		}

@@ -31,7 +31,6 @@ type extensionProviderHost interface {
 	Namespace() string
 	List() ([]extensionhost.Installed, error)
 	ListContext(context.Context) ([]extensionhost.Installed, error)
-	Manifest(string) (sdk.Manifest, error)
 	Store() *extensionhost.Store
 	ModuleConfig(context.Context, string) (sdk.ConfigSnapshot, error)
 	Call(context.Context, string, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error)
@@ -59,17 +58,18 @@ func ExtensionProviderID(module, provider string) string {
 // catalog or account policy errors make the entire result unavailable.
 func ExtensionProviders() ([]Provider, error) {
 	host := providerExtensionHost()
-	installed, err := host.List()
+	ctx := context.Background()
+	installed, err := activeProviderModules(ctx, host)
 	if err != nil {
 		return nil, err
 	}
 	out := []Provider{}
 	for _, entry := range installed {
-		if entry.Disabled || !entry.Manifest.Contract.Has(sdk.OutboundExecutor) &&
+		if !entry.Manifest.Contract.Has(sdk.OutboundExecutor) &&
 			!slices.ContainsFunc(entry.Manifest.Providers, func(provider sdk.ProviderDescriptor) bool { return provider.AccountOnly() }) {
 			continue
 		}
-		providers, err := discoverExtensionModule(host, entry)
+		providers, err := discoverExtensionModuleContext(ctx, host, entry)
 		if err != nil {
 			log.Printf("extension providers unavailable for %s: %v", entry.Manifest.ID, err)
 			continue
@@ -79,13 +79,26 @@ func ExtensionProviders() ([]Provider, error) {
 	return extensionPolicies(out)
 }
 
-func discoverExtensionModule(host extensionProviderHost, entry extensionhost.Installed) ([]Provider, error) {
+func enabledExtensionModule(ctx context.Context, host extensionProviderHost, id string) (extensionhost.Installed, error) {
+	entries, err := activeProviderModules(ctx, host)
+	if err != nil {
+		return extensionhost.Installed{}, err
+	}
+	for _, entry := range entries {
+		if entry.Manifest.ID == id {
+			return entry, nil
+		}
+	}
+	return extensionhost.Installed{}, errors.New("extension is not enabled")
+}
+
+func discoverExtensionModuleContext(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed) ([]Provider, error) {
 	manifest := entry.Manifest.Clone()
 	authenticated := manifest.Contract.Has(sdk.AccountAuth)
 	if authenticated && settings.AccountDiscoveryOff() {
 		return nil, nil
 	}
-	modelRevision, err := extensionModelRevision(context.Background(), host, entry)
+	modelRevision, err := extensionModelRevision(ctx, host, entry)
 	if err != nil {
 		return nil, fmt.Errorf("read module configuration: %w", err)
 	}
@@ -99,7 +112,7 @@ func discoverExtensionModule(host extensionProviderHost, entry extensionhost.Ins
 				scope: sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}, modelKey: modelRevision}))
 			continue
 		}
-		accounts, err := host.Store().Accounts(manifest.ID, descriptor.ID)
+		accounts, err := host.Store().AccountsContext(ctx, manifest.ID, descriptor.ID)
 		if err != nil {
 			return nil, fmt.Errorf("read accounts for %s: %w", descriptor.ID, err)
 		}
@@ -260,7 +273,7 @@ func (binding *extensionAccount) check(ctx context.Context) error {
 	}
 	scope := binding.currentScope()
 	if scope.Account != "" {
-		account, err := binding.host.Store().RefreshedAccount(scope)
+		account, err := binding.host.Store().RefreshedAccountContext(ctx, scope)
 		if err != nil {
 			extensionSelectionFailure(ctx, scope, err)
 			return err
@@ -281,10 +294,11 @@ func (binding *extensionAccount) checkAvailability(ctx context.Context) error {
 	if binding.manifest.Contract.Has(sdk.AccountAuth) && settings.AccountDiscoveryOff() {
 		return errAccountDiscoveryOff
 	}
-	current, err := binding.host.Manifest(binding.scope.Plugin)
+	entry, err := enabledExtensionModule(ctx, binding.host, binding.scope.Plugin)
 	if err != nil {
 		return err
 	}
+	current := entry.Manifest
 	found := slices.ContainsFunc(current.Providers, func(descriptor sdk.ProviderDescriptor) bool {
 		return descriptor.ID == binding.scope.Provider && descriptor.AccountOnly() == binding.descriptor.AccountOnly() &&
 			(current.Contract.Has(sdk.OutboundExecutor) || descriptor.AccountOnly() && current.Contract.Has(sdk.AccountAuth))
@@ -369,10 +383,13 @@ func syncExtensionAllowanceBindings(agent string, bindings map[string]string) {
 }
 
 func (binding *extensionAccount) models() ([]catalog.Model, error) {
+	return binding.modelsContext(context.Background())
+}
+
+func (binding *extensionAccount) modelsContext(ctx context.Context) ([]catalog.Model, error) {
 	snapshot := *binding
 	snapshot.scope, snapshot.generation = binding.currentScope(), nil
 	binding = &snapshot
-	ctx := context.Background()
 	if err := binding.check(ctx); err != nil {
 		return nil, err
 	}
@@ -391,7 +408,7 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 	if cached, ok := extensionModelCache.Load(key); ok {
 		models = cached.([]sdk.Model)
 		known = true
-	} else if cached, known, err := binding.readModelCatalog(); err != nil {
+	} else if cached, known, err := binding.readModelCatalog(ctx); err != nil {
 		return nil, err
 	} else if known {
 		models = cached
@@ -466,7 +483,7 @@ func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Mo
 
 func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Model, error) {
 	if binding.descriptor.AccountOnly() {
-		return binding.models()
+		return binding.modelsContext(ctx)
 	}
 	prepared, err := binding.prepare(ctx)
 	if err != nil {
@@ -474,7 +491,7 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	}
 	binding = prepared
 	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
-		return binding.models()
+		return binding.modelsContext(ctx)
 	}
 	if err := binding.checkModelRevision(ctx); err != nil {
 		return nil, err
@@ -502,7 +519,7 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	}
 	extensionModelCache.Store(binding.cacheKey(), cloneExtensionModels(result.Models))
 	Changed()
-	return binding.models()
+	return binding.modelsContext(ctx)
 }
 
 func (p Provider) IsExtension() bool { return p.Account != nil && p.Account.extension != nil }

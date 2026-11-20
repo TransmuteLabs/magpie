@@ -768,7 +768,7 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 		}
 		return json.Marshal(result)
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return nil, err
 	}
 	lease, err := m.Acquire(ctx, id)
@@ -898,7 +898,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			return nil, err
 		}
 	}
-	auth, err := m.authFor(scope)
+	auth, err := m.authForContext(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -932,7 +932,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	// A lazy service may have needed time to start. Account replacement
 	// during that wait revokes this generation before action dispatch.
-	auth, err = m.authFor(scope)
+	auth, err = m.authForContext(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -1003,7 +1003,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodProviderCalls {
 			return errors.New("outside-call history reads are unary")
 		}
-		if _, err := m.authFor(scope); err != nil {
+		if _, err := m.authForContext(ctx, scope); err != nil {
 			return err
 		}
 		if err := checkWindowAdmission(ctx); err != nil {
@@ -1095,7 +1095,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err == nil && outsideRead != nil {
 		_, err = sdk.DecodeOutsideCallsResult(manifest, *outsideRead, result)
 		if err == nil {
-			_, err = m.authFor(scope)
+			_, err = m.authForContext(ctx, scope)
 		}
 	}
 	if effect {
@@ -1214,10 +1214,17 @@ func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) er
 }
 
 func (m *Manager) authFor(scope sdk.Scope) (json.RawMessage, error) {
+	return m.authForContext(context.Background(), scope)
+}
+
+func (m *Manager) authForContext(ctx context.Context, scope sdk.Scope) (json.RawMessage, error) {
 	if scope.Account == "" {
-		return nil, nil
+		return nil, ctx.Err()
 	}
-	account, err := m.store.GetAccount(scope.Plugin, scope.Provider, scope.Account)
+	account, err := m.store.GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err != nil || account.Generation != scope.Generation {
 		return nil, errors.New("extension account scope was revoked")
 	}
@@ -1238,7 +1245,7 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return nil, err
 	}
 	if sdk.IsBudgetMethod(authority.method) {
@@ -1274,7 +1281,7 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		if !ok || component.group == nil || !decodeHostParams(raw, &request) {
 			return nil, errors.New("component call requires its parent module generation and declared binding")
 		}
-		auth, err := m.authFor(scope)
+		auth, err := m.authForContext(ctx, scope)
 		if err != nil {
 			return nil, err
 		}
