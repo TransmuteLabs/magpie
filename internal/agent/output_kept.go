@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -111,18 +110,6 @@ func numberOf(v any) int {
 		return int(i)
 	}
 	return 0
-}
-
-// piOutputsKept keeps a maxTokens the user typed into magpie's models in
-// Pi's models.json at path (outputsKept); v is the block magpie writes.
-func piOutputsKept(path string, v any) {
-	block, _ := v.(map[string]any)
-	raw, _ := edit.GetJSON(path, "providers."+magpieID+".models")
-	key := outputsWantedKey(path)
-	saved := stashShared()[key]
-	if next := piCatalogOutputs(block, raw, saved); next != saved {
-		stash(map[string]string{key: next})
-	}
 }
 
 func piCatalogOutputs(block map[string]any, raw, saved string) string {

@@ -139,12 +139,15 @@ func syncJSONFrom(path, key string, value func(gjson.Result) any) error {
 		if !current.Exists() {
 			return nil
 		}
-		next := value(config)
-		if sameJSON(current.Raw, next) {
-			return nil
-		}
-		return []edit.KV{{Path: key, Value: next}}
+		return jsonSyncChange(key, current, value(config))
 	})
+}
+
+func jsonSyncChange(key string, current gjson.Result, next any) []edit.KV {
+	if sameJSON(current.Raw, next) {
+		return nil
+	}
+	return []edit.KV{{Path: key, Value: next}}
 }
 
 func syncKeptJSON(path, key string, value func() any, whole ...string) error {

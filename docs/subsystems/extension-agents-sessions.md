@@ -338,6 +338,13 @@ output history after successful publication.
 Cline Sync checks its provider, catalog, global state and secrets together.
 It uses the current provider's model and catalog overrides. The plan
 refreshes VS Code's stored address only while its key belongs to Magpie.
+T3 Code Sync publishes its provider settings and Codex model catalog in
+the same checked plan. An instance the user removed stays removed.
+Pi and its forks plan the legacy catalog and enabled-model scope together.
+Pi publishes its model API and output history after the plan succeeds.
+Aside checks provider ownership in the same catalog snapshot used by
+Connect and Sync. Zed and Qoder use the corresponding checked snapshot
+for the route or model that controls refresh and for preserved overrides.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,

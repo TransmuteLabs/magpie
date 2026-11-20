@@ -34,6 +34,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 )
@@ -78,7 +79,8 @@ func qoderAt(at place, b qoderBuild) *Agent {
 	slot := "providers." + magpieID
 	// magpie's provider, with what the user set on it in Qoder kept
 	qoderProvider := func(agent, model string) any {
-		return qoderKept(path, slot, qoderProviderAt(agent, model, at.v1()))
+		current, _ := edit.GetJSON(path, slot)
+		return qoderKept(current, qoderProviderAt(agent, model, at.v1()))
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
 	// effort is what the model in use asks for: its preference, else
@@ -133,11 +135,14 @@ func qoderAt(at place, b qoderBuild) *Agent {
 		pathOwn:   func() bool { return !qoderPluginOnly(path) },
 		sign:      func() bool { return qoderApp(dir) },
 		Sync: func() error {
-			ref, ok := cutMagpie(get("model.name"))
-			if !ok {
-				return nil
-			}
-			return syncJSON(path, slot, func() any { return qoderProvider(b.id, ref) })
+			return applyJSONSync(path, func(config gjson.Result) []edit.KV {
+				ref, ok := cutMagpie(config.Get("model.name").String())
+				current := config.Get(slot)
+				if !ok || !current.Exists() {
+					return nil
+				}
+				return jsonSyncChange(slot, current, qoderKept(current.String(), qoderProviderAt(b.id, ref, at.v1())))
+			})
 		},
 		Notice: func() string {
 			if Running(b.procs...) {
@@ -270,18 +275,18 @@ func qoderPreferences(prefs, model, effort string) (out map[string]any, drop boo
 	return out, len(out) == 0
 }
 
-// qoderKept is want, magpie's provider in Qoder's settings.json at path,
-// with what the user set on the one at slot kept: Qoder (1.1.70) reads a
+// qoderKept is want, magpie's provider in Qoder's settings.json,
+// with what the user set on the current one kept: Qoder (1.1.70) reads a
 // provider's routing (the model for compact, summary, subagent …), its
 // firstPayloadTimeoutMs and streamIdleTimeoutMs, type, authType and
 // anthropic block, none of which magpie writes, and a sync wrote them away
 // on every start, as T3 Code's did (#2030). A name the user gave it is
 // theirs too. Its address, key, model and model list are magpie's.
-func qoderKept(path, slot string, want map[string]any) any {
-	if name, ok := edit.GetJSON(path, slot+".displayName"); ok && strings.TrimSpace(name) != "" {
+func qoderKept(current string, want map[string]any) any {
+	if name := gjson.Get(current, "displayName").String(); strings.TrimSpace(name) != "" {
 		want["displayName"] = name
 	}
-	return theirsKept(path, slot, func() any { return want }, "models")()
+	return theirsKeptValue(current, want, "models")
 }
 
 // qoderLevels are the efforts Qoder can ask for.

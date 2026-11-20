@@ -12,12 +12,15 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 var asideRead = func(account string) (map[string]json.RawMessage, error) {
@@ -294,11 +297,16 @@ func (c *asideConnection) provider() (string, string) {
 	if err != nil {
 		return "foreign", "Aside's provider configuration could not be read"
 	}
-	if len(bytes.TrimSpace(b)) != 0 && !json.Valid(b) {
+	return c.providerState(b)
+}
+
+func (c *asideConnection) providerState(body []byte) (string, string) {
+	body = edit.TrimBOM(body)
+	if len(bytes.TrimSpace(body)) != 0 && !json.Valid(body) {
 		return "foreign", "Aside's provider configuration could not be read"
 	}
-	raw, ok := edit.GetJSON(c.models, "providers.magpie")
-	if !ok {
+	current := gjson.GetBytes(body, "providers.magpie")
+	if !current.Exists() {
 		return "disconnected", ""
 	}
 	var p struct {
@@ -307,7 +315,7 @@ func (c *asideConnection) provider() (string, string) {
 		API    string          `json:"api"`
 		Models json.RawMessage `json:"models"`
 	}
-	if json.Unmarshal([]byte(raw), &p) != nil {
+	if json.Unmarshal([]byte(current.String()), &p) != nil {
 		return "invalid", "Aside's provider configuration could not be read"
 	}
 	if p.Key == "" || p.URL == "" {
@@ -325,7 +333,7 @@ func (c *asideConnection) provider() (string, string) {
 	return "connected", ""
 }
 
-func (c *asideConnection) block() any {
+func (c *asideConnection) block() map[string]any {
 	p := magpieProviderJSONAt("pi", "aside", c.at.gw()).(map[string]any)
 	p["apiKey"] = agentKeyAt("aside", c.at.gw())
 	return p
@@ -338,30 +346,46 @@ func (c *asideConnection) connect() error {
 }
 
 func (c *asideConnection) connectLocked() error {
-	status, detail := c.provider()
-	if status == "foreign" {
-		return fmt.Errorf("%s", detail)
-	}
-	if status == "connected" {
-		return syncJSON(c.models, "providers.magpie", c.kept())
-	}
-	return edit.SetJSON(c.models, edit.KV{Path: "providers.magpie", Value: c.kept()()})
+	return c.refreshProvider(true)
 }
 
 func (c *asideConnection) sync() error {
 	asideMu.Lock()
 	defer asideMu.Unlock()
-	status, _ := c.provider()
-	if status != "connected" {
-		return nil
-	}
-	return syncJSON(c.models, "providers.magpie", c.kept())
+	return c.refreshProvider(false)
 }
 
-// kept is the block with what else Aside's providers.magpie holds kept
-// (theirsKept).
-func (c *asideConnection) kept() func() any {
-	return piBlockKept(c.models, c.block)
+func (c *asideConnection) refreshProvider(connect bool) error {
+	updates := map[string]string{}
+	plan := func(connect bool, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		file := settings.Files[0]
+		status, detail := c.providerState(file.Body)
+		if status == "foreign" && connect {
+			return sdk.AgentPlan{}, fmt.Errorf("%s", detail)
+		}
+		if status != "connected" && !connect {
+			return sdk.AgentPlan{}, nil
+		}
+		const slot = "providers.magpie"
+		current := gjson.GetBytes(edit.TrimBOM(file.Body), slot)
+		next := piBlockKept(c.models, current.String(), c.block(), false, updates)
+		changes := jsonSyncChange(slot, current, next)
+		if len(changes) == 0 {
+			return sdk.AgentPlan{}, nil
+		}
+		body, err := edit.PatchJSON(file.Body, changes, nil)
+		if err != nil {
+			return sdk.AgentPlan{}, edit.AtFile(file.Path, err)
+		}
+		return sdk.AgentPlan{Files: []sdk.FileChange{{Path: file.Path, Body: body, BeforeHash: file.BeforeHash}}}, nil
+	}
+	if err := extension.ApplyLinkedAgentPlan(connect, plan, extension.LinkedActionFile{Name: "models.json", Path: c.models}); err != nil {
+		return err
+	}
+	if len(updates) != 0 {
+		stash(updates)
+	}
+	return nil
 }
 
 func (c *asideConnection) state() NativeState {

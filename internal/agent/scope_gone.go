@@ -134,7 +134,7 @@ func offeredSet(n int, id func(int) string) map[string]bool {
 // piScopeSynced catches Pi's enabledModels (settings.json) up with the
 // models magpie's block in models.json gives it; mem is the stash key of
 // what was taken out.
-func piScopeSynced(settings, modelsPath, mem string) error {
+func piScopeSynced(settings, modelsPath, mem string, refresh func(string) (any, error)) error {
 	saved := scopeGoneLoad(mem)
 	var remembered *scopeGone
 	update := func(state builtinpi.ScopeSettings) ([]string, bool) {
@@ -151,7 +151,8 @@ func piScopeSynced(settings, modelsPath, mem string) error {
 		remembered = &out
 		return next, changed
 	}
-	err := extension.ApplyLinkedAgentPlan(update, builtinpi.PlanScope,
+	options := builtinpi.CatalogSync{Refresh: refresh, Scope: update}
+	err := extension.ApplyLinkedAgentPlan(options, builtinpi.PlanCatalogSync,
 		extension.LinkedActionFile{Name: builtinpi.SettingsFile, Path: settings},
 		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath})
 	if err != nil {

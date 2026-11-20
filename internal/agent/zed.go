@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -68,11 +69,14 @@ func zedAtWith(dir, bin string, processes []string) *Agent {
 			return ""
 		},
 		Sync: func() error {
-			if !routed() {
-				return nil
-			}
-			return syncJSON(path, zedProvider+".available_models", func() any {
-				return zedProviderJSON(path, at())["available_models"]
+			return applyJSONSync(path, func(config gjson.Result) []edit.KV {
+				address := config.Get(zedProvider + ".api_url").String()
+				const key = zedProvider + ".available_models"
+				current := config.Get(key)
+				if !current.Exists() || address == "" || address != zedReachURL(address) {
+					return nil
+				}
+				return jsonSyncChange(key, current, zedAvailableModels(current.String()))
 			})
 		},
 		Check: func() string {
@@ -195,17 +199,20 @@ func zedEffort(m catalog.Model) string {
 // reasoning_effort already on a model there is kept: the user may have
 // picked another level, or "none" to keep it from thinking.
 func zedProviderJSON(path, url string) map[string]any {
+	raw, _ := edit.GetJSON(path, zedProvider+".available_models")
+	return map[string]any{"api_url": url, "available_models": zedAvailableModels(raw)}
+}
+
+func zedAvailableModels(raw string) []any {
 	kept := map[string]json.RawMessage{}
-	if raw, ok := edit.GetJSON(path, zedProvider+".available_models"); ok {
-		var cur []struct {
-			Name   string          `json:"name"`
-			Effort json.RawMessage `json:"reasoning_effort"`
-		}
-		if json.Unmarshal([]byte(raw), &cur) == nil {
-			for _, c := range cur {
-				if len(c.Effort) > 0 && string(c.Effort) != "null" {
-					kept[c.Name] = c.Effort
-				}
+	var cur []struct {
+		Name   string          `json:"name"`
+		Effort json.RawMessage `json:"reasoning_effort"`
+	}
+	if raw != "" && json.Unmarshal([]byte(raw), &cur) == nil {
+		for _, c := range cur {
+			if len(c.Effort) > 0 && string(c.Effort) != "null" {
+				kept[c.Name] = c.Effort
 			}
 		}
 	}
@@ -244,7 +251,7 @@ func zedProviderJSON(path, url string) map[string]any {
 		}
 		models = append(models, entry)
 	}
-	return map[string]any{"api_url": url, "available_models": models}
+	return models
 }
 
 // zedReach is the address Zed's magpie provider (settings.json at path)
@@ -254,16 +261,21 @@ func zedProviderJSON(path, url string) map[string]any {
 // gateway's own.
 func zedReach(path string) string {
 	u, _ := edit.GetJSON(path, zedProvider+".api_url")
-	if u == gatewayV1() {
+	return zedReachURL(u)
+}
+
+func zedReachURL(u string) string {
+	baseURL := gatewayV1()
+	if u == baseURL {
 		return u
 	}
-	if base, ok := proxyBase(u, gatewayV1()); ok {
+	if base, ok := proxyBase(u, baseURL); ok {
 		magpieAsked(base)
-		if surelyMagpie(u, gatewayV1()) {
+		if surelyMagpie(u, baseURL) {
 			return u
 		}
 	}
-	return gatewayV1()
+	return baseURL
 }
 
 // zedRouted says Zed's magpie provider sends to magpie (zedReach).

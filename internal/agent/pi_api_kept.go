@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
-
-	"github.com/yetone/magpie/internal/edit"
 )
 
 // The API Pi asks magpie's models on, set by hand in Pi's models.json,
@@ -33,22 +31,6 @@ func apisWantedKey(path string) string { return "api:" + path + ":wanted" }
 
 // piProviderAPI is the provider's own api in apisWantedKey's record.
 const piProviderAPI = "*"
-
-// piAPIsKept keeps in v, the block magpie writes for its provider in the
-// Pi models.json at path, an api the user set there for the provider or a
-// model, and records what v wants as wanted.
-func piAPIsKept(path string, v any) {
-	block, _ := v.(map[string]any)
-	if block == nil {
-		return
-	}
-	raw, _ := edit.GetJSON(path, "providers."+magpieID)
-	key := apisWantedKey(path)
-	saved := stashShared()[key]
-	if next := piCatalogAPIs(block, raw, saved, false); next != saved {
-		stash(map[string]string{key: next})
-	}
-}
 
 func piCatalogAPIs(block map[string]any, raw, saved string, pick bool) string {
 	ms, _ := block["models"].([]map[string]any)

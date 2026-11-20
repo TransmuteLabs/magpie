@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
@@ -93,28 +92,7 @@ func pickPiProtocol(at place, modelsPath string, key func() string, off func() b
 		found = true
 		block := piProviderOn("pi", magpieModels("pi"), at.gw(), chosen)
 		block["apiKey"] = key()
-		known := stashShared()
-		apis, outputs := apisWantedKey(modelsPath), outputsWantedKey(modelsPath)
-		updates[apis] = piCatalogAPIs(block, current, known[apis], true)
-		nextOutputs := piCatalogOutputs(block, gjson.Get(current, "models").Raw, known[outputs])
-		if nextOutputs != known[outputs] {
-			updates[outputs] = nextOutputs
-		}
-		if gjson.Get(current, "compat.sendSessionAffinityHeaders").Exists() {
-			delete(block, "compat")
-		}
-		var have, want map[string]json.RawMessage
-		if json.Unmarshal([]byte(current), &have) != nil || have == nil {
-			return block, nil
-		}
-		body, err := json.Marshal(block)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(body, &want); err != nil {
-			return nil, err
-		}
-		return mergeTheirs(have, want, []string{"models"}), nil
+		return piBlockKept(modelsPath, current, block, true, updates), nil
 	}
 	if err := extension.ApplyLinkedAgentPlan(prepare, builtinpi.PlanCatalogPick,
 		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath}); err != nil {
