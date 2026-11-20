@@ -28,14 +28,15 @@ package agent
 // ~/.qoder-cn by default.
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
-	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/edit"
+	builtinqoder "github.com/yetone/magpie/internal/extension/builtin/qoder"
 	"github.com/yetone/magpie/internal/gateway"
 )
 
@@ -74,49 +75,49 @@ func qoderAt(at place, b qoderBuild) *Agent {
 	if dir == "" {
 		dir = at.join(b.dir)
 	}
-	path := filepath.Join(dir, "settings.json")
-	key := b.id + ":" + path + ":"
-	slot := "providers." + magpieID
-	// magpie's provider, with what the user set on it in Qoder kept
-	qoderProvider := func(agent, model string) any {
-		current, _ := edit.GetJSON(path, slot)
-		return qoderKept(current, qoderProviderAt(agent, model, at.v1()))
-	}
+	path := filepath.Join(dir, builtinqoder.SettingsFile)
+	key := b.id + ":" + path + ":model"
+	const slot = builtinqoder.ProviderPath
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
-	// effort is what the model in use asks for: its preference, else
-	// reasoningEffort
 	effort := func() string {
-		if v := qoderEffort(get("model.preferences"), get("model.name")); v != "" {
-			return v
-		}
-		return get("model.reasoningEffort")
+		return builtinqoder.Effort(get("model.preferences"), get(builtinqoder.ModelPath), get("model.reasoningEffort"))
 	}
-	setEffort := func(model, v string) error {
-		kvs := []edit.KV{}
-		if model != "" {
-			prefs, drop := qoderPreferences(get("model.preferences"), model, v)
-			if drop {
-				if err := edit.DelJSON(path, "model.preferences"); err != nil {
-					return err
-				}
-			} else {
-				kvs = append(kvs, edit.KV{Path: "model.preferences", Value: prefs})
-			}
+	apply := func(action builtinqoder.Action, value string) error {
+		var saved map[string]string
+		if action == builtinqoder.SelectModel && value == "" {
+			saved = peek(key)
 		}
-		if v == "" {
-			if err := edit.DelJSON(path, "model.reasoningEffort"); err != nil {
-				return err
-			}
+		options := builtinqoder.Options{
+			Action: action, Value: value, Previous: saved[key], ModelRef: cutMagpie,
+			OwnKey:   func(token string) bool { return qoderKeyed(token, b.id) },
+			Provider: func(ref string) map[string]any { return qoderProviderAt(b.id, ref, at.v1()) },
+		}
+		before, err := readWiringFile(path)
+		if err != nil {
+			return err
+		}
+		body, recovery, err := builtinqoder.Patch(options, before.body)
+		if err != nil {
+			return before.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
+		}
+		if bytes.Equal(body, before.body) {
+			err = before.check(path)
 		} else {
-			kvs = append(kvs, edit.KV{Path: "model.reasoningEffort", Value: v})
+			err = edit.WriteAtomicChecked(before.target, body, func() error { return before.check(path) })
 		}
-		if len(kvs) == 0 {
-			return nil
+		if err != nil {
+			return err
 		}
-		return edit.SetJSON(path, kvs...)
+		if recovery.Save {
+			stash(map[string]string{key: recovery.Previous})
+		}
+		if recovery.Restored {
+			forgetValues(saved)
+		}
+		return nil
 	}
 	onMagpie := func() bool {
-		_, ok := cutMagpie(get("model.name"))
+		_, ok := cutMagpie(get(builtinqoder.ModelPath))
 		return ok && qoderKeyed(get(slot+".apiKey"), b.id)
 	}
 	return &Agent{
@@ -134,16 +135,7 @@ func qoderAt(at place, b qoderBuild) *Agent {
 		dirShared: true,
 		pathOwn:   func() bool { return !qoderPluginOnly(path) },
 		sign:      func() bool { return qoderApp(dir) },
-		Sync: func() error {
-			return applyJSONSync(path, func(config gjson.Result) []edit.KV {
-				ref, ok := cutMagpie(config.Get("model.name").String())
-				current := config.Get(slot)
-				if !ok || !current.Exists() {
-					return nil
-				}
-				return jsonSyncChange(slot, current, qoderKept(current.String(), qoderProviderAt(b.id, ref, at.v1())))
-			})
-		},
+		Sync:      func() error { return apply(builtinqoder.SyncCatalog, "") },
 		Notice: func() string {
 			if Running(b.procs...) {
 				return noticeQoder.say("agent", b.name)
@@ -159,40 +151,8 @@ func qoderAt(at place, b qoderBuild) *Agent {
 		},
 		Fields: []Field{{
 			Key: "model", Label: "model",
-			Get: func() string { return get("model.name") },
-			Set: func(v string) error {
-				if ref, ok := cutMagpie(v); ok {
-					if !onMagpie() {
-						stash(map[string]string{key + "model": get("model.name")})
-					}
-					// the effort in use goes with it to a model with none of
-					// its own
-					was := effort()
-					if err := edit.SetJSON(path,
-						edit.KV{Path: slot, Value: qoderProvider(b.id, ref)},
-						edit.KV{Path: "model.name", Value: v}); err != nil {
-						return err
-					}
-					if was == "" || qoderEffort(get("model.preferences"), v) != "" {
-						return nil
-					}
-					return setEffort(v, was)
-				}
-				// out of magpie: its provider goes, and the model the user
-				// had comes back when none is asked for
-				if onMagpie() || qoderKeyed(get(slot+".apiKey"), b.id) {
-					if err := edit.DelJSON(path, slot); err != nil {
-						return err
-					}
-					if v == "" {
-						v = unstash(key + "model")
-					}
-				}
-				if v == "" {
-					return edit.DelJSON(path, "model.name")
-				}
-				return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
-			},
+			Get: func() string { return get(builtinqoder.ModelPath) },
+			Set: func(v string) error { return apply(builtinqoder.SelectModel, v) },
 			Options: func(cur map[string]string) []Option {
 				return withVia(ownOptions("", cur["model"]), b.id, magpieID+"/")
 			},
@@ -200,93 +160,12 @@ func qoderAt(at place, b qoderBuild) *Agent {
 			// the effort of the model in use, in its model.preferences
 			Key: "effort", Label: "effort",
 			Get: effort,
-			Set: func(v string) error { return setEffort(get("model.name"), v) },
+			Set: func(v string) error { return apply(builtinqoder.SelectEffort, v) },
 			Options: func(map[string]string) []Option {
 				return static("low", "medium", "high", "xhigh", "max")
 			},
 		}},
 	}
-}
-
-// qoderEffort is the effort model's preference in prefs (model.preferences)
-// asks for, from its reasoning or an older generation.reasoning.
-func qoderEffort(prefs, model string) string {
-	var m map[string]struct {
-		Reasoning  *struct{ Effort string } `json:"reasoning"`
-		Generation struct {
-			Reasoning *struct{ Effort string } `json:"reasoning"`
-		} `json:"generation"`
-	}
-	if model == "" || json.Unmarshal([]byte(prefs), &m) != nil {
-		return ""
-	}
-	p := m[model]
-	if p.Reasoning != nil {
-		return p.Reasoning.Effort
-	}
-	if p.Generation.Reasoning != nil {
-		return p.Generation.Reasoning.Effort
-	}
-	return ""
-}
-
-// qoderPreferences is prefs (model.preferences) with model's effort set to
-// effort, or taken out when it is ""; drop when nothing is left.
-func qoderPreferences(prefs, model, effort string) (out map[string]any, drop bool) {
-	out = map[string]any{}
-	json.Unmarshal([]byte(prefs), &out)
-	if out == nil {
-		out = map[string]any{}
-	}
-	p, _ := out[model].(map[string]any)
-	if p == nil {
-		p = map[string]any{}
-	}
-	if g, ok := p["generation"].(map[string]any); ok {
-		// Qoder's own migration lifts generation's fields up; the effort
-		// set here is the one to keep
-		delete(g, "reasoning")
-		if len(g) == 0 {
-			delete(p, "generation")
-		}
-	}
-	r, _ := p["reasoning"].(map[string]any)
-	if r == nil {
-		r = map[string]any{}
-	}
-	if effort == "" {
-		delete(r, "effort")
-	} else {
-		r["effort"] = effort
-		if r["enabled"] == false {
-			delete(r, "enabled")
-		}
-	}
-	if len(r) == 0 {
-		delete(p, "reasoning")
-	} else {
-		p["reasoning"] = r
-	}
-	if len(p) == 0 {
-		delete(out, model)
-	} else {
-		out[model] = p
-	}
-	return out, len(out) == 0
-}
-
-// qoderKept is want, magpie's provider in Qoder's settings.json,
-// with what the user set on the current one kept: Qoder (1.1.70) reads a
-// provider's routing (the model for compact, summary, subagent …), its
-// firstPayloadTimeoutMs and streamIdleTimeoutMs, type, authType and
-// anthropic block, none of which magpie writes, and a sync wrote them away
-// on every start, as T3 Code's did (#2030). A name the user gave it is
-// theirs too. Its address, key, model and model list are magpie's.
-func qoderKept(current string, want map[string]any) any {
-	if name := gjson.Get(current, "displayName").String(); strings.TrimSpace(name) != "" {
-		want["displayName"] = name
-	}
-	return theirsKeptValue(current, want, "models")
 }
 
 // qoderLevels are the efforts Qoder can ask for.

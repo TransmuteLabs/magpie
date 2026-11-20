@@ -205,28 +205,7 @@ func theirsKeptValue(current string, value any, whole ...string) any {
 // mergeTheirs is want with each key of have that want lacks, objects in
 // both merged alike; a key named in whole is want's as it is.
 func mergeTheirs(have, want map[string]json.RawMessage, whole []string) map[string]json.RawMessage {
-	out := make(map[string]json.RawMessage, len(have)+len(want))
-	for k, w := range want {
-		out[k] = w
-	}
-	for k, h := range have {
-		w, ok := want[k]
-		if !ok {
-			out[k] = h
-			continue
-		}
-		if slices.Contains(whole, k) {
-			continue
-		}
-		var hm, wm map[string]json.RawMessage
-		if json.Unmarshal(h, &hm) != nil || hm == nil || json.Unmarshal(w, &wm) != nil || wm == nil {
-			continue
-		}
-		if b, err := json.Marshal(mergeTheirs(hm, wm, nil)); err == nil {
-			out[k] = b
-		}
-	}
-	return out
+	return edit.MergeJSONObjects(have, want, whole)
 }
 
 // syncJSONInOrder is syncJSON for a block whose keys' order the agent reads
@@ -261,15 +240,7 @@ func sameOrder(raw string, v any) bool {
 
 // sameJSON reports whether raw JSON says what v marshals to.
 func sameJSON(raw string, v any) bool {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return false
-	}
-	var x, y any
-	if json.Unmarshal([]byte(raw), &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
-	}
-	return reflect.DeepEqual(x, y)
+	return edit.SameJSON(raw, v)
 }
 
 // yamlKept is value laid over the mapping at key in a YAML file, as
