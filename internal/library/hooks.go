@@ -62,11 +62,13 @@ type Hook struct {
 }
 
 // HookEntry is one entry magpie wrote into an agent's hooks: the hook it
-// is of, the agent's event it is under, and the entry exactly as written.
+// is of, the agent's event it is under, the entry exactly as written and
+// its file when ownership is tied to a path.
 type HookEntry struct {
 	Name  string          `json:"name"`
 	Event string          `json:"event"`
 	Entry json.RawMessage `json:"entry"`
+	File  string          `json:"file,omitempty"`
 }
 
 // HookEvents are the portable events, in the order the page offers them.
@@ -204,6 +206,13 @@ type hookSpec struct {
 	toml   bool              // Grok: hooks are [[hooks.<Event>]] tables in config.toml, not JSON
 }
 
+func (sp *hookSpec) claims(rec HookEntry) bool {
+	if rec.File != "" {
+		return filepath.Clean(rec.File) == filepath.Clean(sp.path)
+	}
+	return sp.agent != "grok-app"
+}
+
 // hookAgents are the agents magpie can give hooks to.
 var hookAgents = []string{"claude", "codex", "cursor", "dsh", "gemini", "grok", "grok-app"}
 
@@ -326,9 +335,9 @@ func hookSpecFor(t *Target) (*hookSpec, string) {
 		// Grok Build: [[hooks.<Event>]] tables in ~/.grok/config.toml
 		return grokHookSpec(filepath.Join(grokDir(), "config.toml")), ""
 	case "grok-app":
-		// Grok App runs the same CLI, on a custom route reading
-		// agent-home/config.toml, the same [[hooks.<Event>]] shape
-		return grokHookSpec(t.MCP.Path), ""
+		if t.MCP != nil && t.MCP.Path != "" && t.MCP.Format == fmtGrok {
+			return grokHookSpec(t.MCP.Path), ""
+		}
 	case "dsh":
 		return dshHookSpec(t)
 	}
@@ -821,8 +830,14 @@ func (w *hookWrite) run() (recs []HookEntry, changed, ok bool) {
 	}
 	var kept []HookEntry
 	drop := map[string][]int{} // event → the entries to take out
-	var unread []HookEntry     // records of an event whose list can't be read now
+	var unread []HookEntry     // records outside this file or of a list that can't be read now
 	for _, rec := range w.recs {
+		if !sp.claims(rec) {
+			if rec.File != "" {
+				unread = append(unread, rec)
+			}
+			continue
+		}
 		if _, err := listOf(rec.Event); err != nil {
 			w.fail("hook:"+rec.Name, err)
 			unread = append(unread, rec)
@@ -856,7 +871,11 @@ func (w *hookWrite) run() (recs []HookEntry, changed, ok bool) {
 			continue
 		}
 		add[w.ev] = append(add[w.ev], w.entry)
-		added = append(added, HookEntry{Name: w.h.Name, Event: w.ev, Entry: w.entry})
+		rec := HookEntry{Name: w.h.Name, Event: w.ev, Entry: w.entry}
+		if id == "grok-app" {
+			rec.File = sp.path
+		}
+		added = append(added, rec)
 	}
 	if len(drop) == 0 && len(add) == 0 {
 		return append(kept, unread...), false, true

@@ -28,7 +28,7 @@ import (
 // FoundHook is one entry of an agent's hooks file that magpie didn't write.
 type FoundHook struct {
 	// Key names the entry for ImportHooks and RemoveFoundHooks: the agent,
-	// its event, the entry's text and which of the same entries it is
+	// its file, its event, the entry's text and which of the same entries it is
 	Key   string `json:"key"`
 	Agent string `json:"agent"`
 	// Event is the agent's own name for it ("PostToolUse")
@@ -54,6 +54,10 @@ type FoundHook struct {
 
 	entry json.RawMessage
 	canon string // the entry written one way, as the records compare it
+}
+
+func (f FoundHook) record(name string) HookEntry {
+	return HookEntry{Name: name, Event: f.Event, Entry: f.entry, File: f.File}
 }
 
 // foundOwner is the tool of magpie's another tab that writes a hook with
@@ -88,6 +92,9 @@ func foundHooksOf(l *Library, targets []*Target) []FoundHook {
 		}
 		claimed := map[string]map[int]bool{}
 		for _, rec := range l.applied(t.Agent.ID).Hooks {
+			if !sp.claims(rec) {
+				continue
+			}
 			c := canonical(rec.Entry)
 			for i, e := range lists[rec.Event] {
 				if !claimed[rec.Event][i] && canonical(e) == c {
@@ -109,7 +116,7 @@ func foundHooksOf(l *Library, targets []*Target) []FoundHook {
 				n := seen[c]
 				seen[c]++
 				f := foundHook(l, t.Agent.ID, sp, ev, e)
-				f.Key, f.canon = foundKey(t.Agent.ID, ev, c, n), c
+				f.Key, f.canon = foundKey(t.Agent.ID, sp.path, ev, c, n), c
 				out = append(out, f)
 			}
 		}
@@ -117,8 +124,8 @@ func foundHooksOf(l *Library, targets []*Target) []FoundHook {
 	return out
 }
 
-func foundKey(agent, ev, canon string, n int) string {
-	s := sha256.Sum256([]byte(agent + "\x00" + ev + "\x00" + canon + "\x00" + strconv.Itoa(n)))
+func foundKey(agent, file, ev, canon string, n int) string {
+	s := sha256.Sum256([]byte(agent + "\x00" + filepath.Clean(file) + "\x00" + ev + "\x00" + canon + "\x00" + strconv.Itoa(n)))
 	return hex.EncodeToString(s[:8])
 }
 
@@ -379,7 +386,7 @@ func ImportHooks(keys []string) (*Result, error) {
 			}
 			h.Agents = orNone(slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(h.Agents), f.Agent)))))
 			a := l.applied(f.Agent)
-			a.Hooks = append(a.Hooks, HookEntry{Name: h.Name, Event: f.Event, Entry: f.entry})
+			a.Hooks = append(a.Hooks, f.record(h.Name))
 		}
 		return nil
 	})
@@ -395,7 +402,8 @@ const foundSentinel = "\x00found"
 // with them.
 func RemoveFoundHooks(keys []string) (*Result, error) {
 	return change(func(l *Library) error {
-		all := foundHooksOf(l, Targets())
+		targets := Targets()
+		all := foundHooksOf(l, targets)
 		found, err := pickFound(all, keys)
 		if err != nil {
 			return err
@@ -416,10 +424,11 @@ func RemoveFoundHooks(keys []string) (*Result, error) {
 				}
 			}
 		}) {
-			t := targetByID(id)
-			if t == nil {
+			i := slices.IndexFunc(targets, func(t *Target) bool { return t.Agent.ID == id })
+			if i < 0 {
 				return fmt.Errorf("%s isn't here", id)
 			}
+			t := targets[i]
 			sp, why := hookSpecOf(t)
 			if sp == nil {
 				return errors.New(why)
@@ -433,7 +442,11 @@ func RemoveFoundHooks(keys []string) (*Result, error) {
 			}
 			recs := slices.Clone(a.Hooks)
 			for _, f := range byAgent[id] {
-				recs = append(recs, HookEntry{Name: foundSentinel, Event: f.Event, Entry: f.entry})
+				rec := f.record(foundSentinel)
+				if !sp.claims(rec) {
+					return fmt.Errorf("%s's hooks file changed since the page was drawn", t.Agent.Name)
+				}
+				recs = append(recs, rec)
 			}
 			// a failure of the found entries' own, or of the whole file,
 			// stops it; a library hook's own (an event the agent lacks) is
@@ -469,16 +482,17 @@ func RemoveFoundHooks(keys []string) (*Result, error) {
 		}
 		// read back: as many of each entry as there were, less those taken
 		// out, or the one left is said, not reported gone
-		count := func(fs []FoundHook) map[string]int {
-			m := map[string]int{}
+		type entry struct{ agent, file, event, canon string }
+		count := func(fs []FoundHook) map[entry]int {
+			m := map[entry]int{}
 			for _, f := range fs {
-				m[f.Agent+"\x00"+f.Event+"\x00"+f.canon]++
+				m[entry{f.Agent, f.File, f.Event, f.canon}]++
 			}
 			return m
 		}
-		before, after, gone := count(all), count(foundHooksOf(l, Targets())), count(found)
+		before, after, gone := count(all), count(foundHooksOf(l, targets)), count(found)
 		for _, f := range found {
-			k := f.Agent + "\x00" + f.Event + "\x00" + f.canon
+			k := entry{f.Agent, f.File, f.Event, f.canon}
 			if after[k] > before[k]-gone[k] {
 				return fmt.Errorf("the %s hook is still in %s", f.Event, f.File)
 			}
