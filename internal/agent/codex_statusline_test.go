@@ -1,12 +1,21 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+)
+
+const (
+	codexStatusServer  = "quota_line"
+	codexStatusFeature = "tui_extensions_statusline"
 )
 
 // codexStatusOf is what config.toml says of the footer: the flag, the
@@ -170,6 +179,75 @@ func TestCodexStatusLineGoesWithUnwire(t *testing.T) {
 	}
 	if got := read(); strings.Contains(got, "quota_line") || strings.Contains(got, codexStatusFeature) {
 		t.Fatalf("left after Disconnect:\n%s", got)
+	}
+}
+
+func TestCodexStatusLinePreservesConcurrentConfig(t *testing.T) {
+	codexReadersAre(t, "0.171.0-alpha.13")
+	claudeStatusAt(t, "/usr/local/bin/magpie")
+	for _, action := range []string{"on", "off"} {
+		t.Run(action, func(t *testing.T) {
+			home, read := codexHome(t, "", "model = 'gpt-5.5'\n")
+			agent := codex(home)
+			if action == "off" {
+				if err := agent.Apply("statusline", "on"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			flagKey := here(home).key(codexStatusFlagKey)
+			flag := peek(flagKey)[flagKey]
+			target, err := edit.Target(agent.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const userConfig = "model = 'gpt-5.5'\n\n" +
+				"[mcp_servers.quota_line]\ncommand = 'user-status'\n\n" +
+				"[tui]\nstatus_line_provider = { server = 'quota_line', tool = 'user-tool' }\n"
+			var changed bool
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !changed {
+					writeFile(t, target, userConfig)
+					changed = true
+				}
+				return body
+			}, func() error {
+				return agent.Apply("statusline", action)
+			})
+			if !changed || !errors.Is(err, extension.ErrActionChanged) || read() != userConfig {
+				t.Errorf("%s: error %v, user edit preserved = %t", action, err, changed && read() == userConfig)
+			}
+			if got := peek(flagKey)[flagKey]; got != flag {
+				t.Errorf("%s changed feature ownership from %q to %q", action, flag, got)
+			}
+		})
+	}
+}
+
+func TestCodexStatusLineRefusedInstallNeverPublishes(t *testing.T) {
+	codexReadersAre(t, "0.171.0-alpha.13")
+	claudeStatusAt(t, "/usr/local/bin/magpie")
+	const config = "mcp_servers = { custom = { command = 'user-server' } }\n"
+	home, read := codexHome(t, "", config)
+	agent := codex(home)
+	target, err := edit.Target(agent.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writes int
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == target {
+			writes++
+		}
+		return body
+	}, func() error {
+		return agent.Apply("statusline", "on")
+	})
+	flagKey := here(home).key(codexStatusFlagKey)
+	if err == nil || read() != config || peek(flagKey)[flagKey] != "" {
+		t.Fatalf("refused install: error %v, config %q, flag %q", err, read(), peek(flagKey)[flagKey])
+	}
+	if writes != 0 {
+		t.Fatalf("refused install attempted %d config publications", writes)
 	}
 }
 

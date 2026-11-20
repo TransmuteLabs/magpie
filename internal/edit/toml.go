@@ -423,15 +423,23 @@ func DelTOMLTable(path, name string) error {
 	if err != nil || raw == nil {
 		return err
 	}
+	body, err := RewriteTOMLWithoutTable(path, raw, name)
+	if err != nil || bytes.Equal(raw, body) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteTOMLWithoutTable(path string, raw []byte, name string) ([]byte, error) {
 	lines := splitLines(string(raw))
 	table, err := parseTOMLTable(lines, name)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	if table.from < 0 {
-		return nil
+		return raw, nil
 	}
-	return writeTOML(path, tomlWithoutTable(lines, table))
+	return renderTOML(path, tomlWithoutTable(lines, table), raw)
 }
 
 func tomlWithoutTable(lines []string, table tomlTableSpan) []string {

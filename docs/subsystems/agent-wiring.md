@@ -100,6 +100,11 @@ decides whether the command is owned and plans a single JSONC update.
 The host publishes it for the row and Disconnect. The restart notice
 settles only after an actual change is published.
 
+Codex's
+[status line plan](../../internal/extension/builtin/codex/status_line.go)
+checks and publishes the feature flag, MCP server and TUI selection together.
+The host updates its ownership record after the TOML change succeeds.
+
 Gemini CLI's
 [gateway model plan](../../internal/extension/builtin/gemini/settings.go)
 uses one snapshot of `.env` and `settings.json`. The host checks both files
