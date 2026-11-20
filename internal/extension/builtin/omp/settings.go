@@ -29,6 +29,12 @@ type SettingsOptions struct {
 	Catalog CatalogMode
 	Build   func(map[string]any) any
 	Role    *RoleOptions
+	Scope   *ScopeOptions
+}
+
+type SettingsResult struct {
+	RoleResult
+	ScopeSynced bool
 }
 
 type ConfigChange struct {
@@ -60,9 +66,9 @@ func PlanConfig(options ConfigChange, settings sdk.ActionSettings) (sdk.AgentPla
 	return plan, nil
 }
 
-func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, RoleResult, error) {
+func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, SettingsResult, error) {
 	var plan sdk.AgentPlan
-	var result RoleResult
+	var result SettingsResult
 	var config, catalog, legacy sdk.ActionSettingFile
 	for _, file := range settings.Files {
 		switch file.Path {
@@ -74,14 +80,14 @@ func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.Age
 			legacy = file
 		}
 	}
-	if catalog.Path == "" || options.Role != nil && config.Path == "" {
+	if catalog.Path == "" || (options.Role != nil || options.Scope != nil) && config.Path == "" {
 		return plan, result, errors.New("OMP settings action is missing a required snapshot")
 	}
 	var configBody []byte
 	var routed bool
 	if role := options.Role; role != nil {
 		var err error
-		configBody, options.Catalog, routed, result, err = rewriteRole(*role, config.Body)
+		configBody, options.Catalog, routed, result.RoleResult, err = rewriteRole(*role, config.Body)
 		if err != nil {
 			return plan, result, err
 		}
@@ -94,6 +100,13 @@ func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.Age
 		appendChange(&plan, config, configBody)
 	}
 	appendChange(&plan, catalog, catalogBody)
+	if options.Scope != nil {
+		configBody, result.ScopeSynced, err = rewriteScope(*options.Scope, config.Body, catalogBody)
+		if err != nil {
+			return sdk.AgentPlan{}, result, err
+		}
+		appendChange(&plan, config, configBody)
+	}
 	if options.Role != nil && routed {
 		appendChange(&plan, config, configBody)
 	}

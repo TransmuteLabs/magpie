@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
-	"gopkg.in/yaml.v3"
 )
 
 // An enabledModels list (Pi's and its forks', StepCode's, omp's) names
@@ -78,9 +77,6 @@ func piBare(p string) string {
 	}
 	return p
 }
-
-// ompBare is an omp entry without its thinking level.
-func ompBare(p string) string { m, _ := ompLevel(p); return m }
 
 // scopeSynced is an enabledModels list, has false when there is none, once
 // it has caught up with offered, the models magpie gives the agent as
@@ -239,90 +235,6 @@ func stepcodeScopeSynced(at place, path, modelsPath, mem string) error {
 			if err := stepcodeStoreState(at, state); err != nil {
 				return err
 			}
-		}
-	}
-	scopeGoneSave(mem, out)
-	return nil
-}
-
-// ompScopeSynced is piScopeSynced for omp's enabledModels (config.yml),
-// whose plain entries alone it reads; an entry scoped to folders is the
-// user's list for those projects and stays as it is. offered is what
-// models.yml's magpie provider gives omp.
-func ompScopeSynced(cfg, modelsYML, mem string) error {
-	var doc struct {
-		Providers map[string]struct {
-			Models []struct {
-				ID string `yaml:"id"`
-			} `yaml:"models"`
-		} `yaml:"providers"`
-	}
-	raw, err := edit.Read(modelsYML)
-	if err != nil || raw == nil || yaml.Unmarshal(raw, &doc) != nil {
-		return nil
-	}
-	ms := doc.Providers[magpieID].Models
-	offered := offeredSet(len(ms), func(i int) string { return ms[i].ID })
-	if offered == nil {
-		return nil
-	}
-	g := scopeGoneLoad(mem)
-	var out scopeGone
-	var made []string
-	err = edit.EditYAMLNode(cfg, "enabledModels", func(n *yaml.Node) (bool, bool) {
-		if n == nil {
-			if g.Emptied {
-				made, _, out, _ = scopeSynced(nil, false, offered, g, ompBare)
-			}
-			return false, false
-		}
-		if n.Kind != yaml.SequenceNode {
-			out = g
-			return false, false
-		}
-		plain := ompScopePlain(n)
-		if len(plain) == 0 && !g.Emptied {
-			// none holds a session to them (ompScopeTakes); one put here
-			// would, unless the sync took the plain entries there were
-			out = g
-			return false, false
-		}
-		next, _, o, changed := scopeSynced(plain, true, offered, g, ompBare)
-		out = o
-		if !changed {
-			return false, false
-		}
-		gone := map[string]bool{}
-		for _, p := range plain {
-			if !slices.Contains(next, p) {
-				gone[p] = true
-			}
-		}
-		kept := n.Content[:0:0]
-		for _, c := range n.Content {
-			if c.Kind == yaml.ScalarNode && c.ShortTag() == "!!str" && gone[c.Value] {
-				continue
-			}
-			kept = append(kept, c)
-		}
-		for _, p := range next {
-			if !slices.Contains(plain, p) {
-				kept = append(kept, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: p})
-			}
-		}
-		out.Emptied = !slices.ContainsFunc(kept, func(c *yaml.Node) bool { return c.Kind == yaml.ScalarNode && c.ShortTag() == "!!str" }) && len(out.Entries) > 0
-		if len(kept) == 0 {
-			return false, true
-		}
-		n.Content = kept
-		return true, false
-	})
-	if err != nil {
-		return err
-	}
-	if len(made) > 0 {
-		if err := edit.SetYAML(cfg, edit.KV{Path: "enabledModels", Value: made}); err != nil {
-			return err
 		}
 	}
 	scopeGoneSave(mem, out)

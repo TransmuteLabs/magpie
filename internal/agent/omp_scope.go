@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
+	sdk "github.com/yetone/magpie/pkg/extension"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,20 +26,6 @@ import (
 // and never makes a list where there is none or an empty one. Its plain
 // entries hold in every folder; an entry scoped to folders ({path, models})
 // is the user's list for those projects and left as it is.
-
-// ompScopePlain are the plain entries of an enabledModels node.
-func ompScopePlain(n *yaml.Node) []string {
-	if n == nil || n.Kind != yaml.SequenceNode {
-		return nil
-	}
-	var out []string
-	for _, c := range n.Content {
-		if c.Kind == yaml.ScalarNode && c.ShortTag() == "!!str" {
-			out = append(out, c.Value)
-		}
-	}
-	return out
-}
 
 // ompEvery is the entry magpie adds to enabledModels for its own models:
 // every model magpie writes into models.yml for omp, which are the ones its
@@ -97,7 +86,7 @@ func ompScopeOwnMagpie(plain []string, model string) bool {
 // itself.
 func ompScopeModel(model string) func(*yaml.Node) (bool, bool) {
 	return func(n *yaml.Node) (bool, bool) {
-		plain := ompScopePlain(n)
+		plain := builtinomp.PlainScope(n)
 		if len(plain) == 0 {
 			return false, false
 		}
@@ -128,32 +117,73 @@ func ompScopeMagpieOne(v string) bool {
 	return !strings.ContainsAny(v, "*?[") && strings.HasPrefix(strings.ToLower(v), magpieID+"/")
 }
 
-// ompScopeOnce drops a plain entry of enabledModels that an earlier one
-// spells the same: a provider renamed has the default role, set again under
-// the new id, join the list (ompScopeWith) before the old entry is renamed
-// to it.
-func ompScopeOnce(cfg string) error {
-	return edit.EditYAMLNode(cfg, "enabledModels", func(n *yaml.Node) (bool, bool) {
-		if n == nil || n.Kind != yaml.SequenceNode {
-			return false, false
+func ompRenameRefs(path, gone string, roles []string, from, to string) (bool, error) {
+	originals := peek(roles...)
+	priorScope := peek(gone)[gone]
+	saved := ompReadScope(priorScope)
+	options := builtinomp.RenameOptions{From: from, To: to, Originals: originals}
+	var moved bool
+	var updates map[string]string
+	err := extension.ApplyLinkedAgentPlan(options, func(options builtinomp.RenameOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, changed, next, err := builtinomp.PlanRename(options, snapshot)
+		moved, updates = changed, next
+		return plan, err
+	}, extension.LinkedActionFile{Name: builtinomp.ConfigFile, Path: path})
+	if err != nil {
+		return false, err
+	}
+	if entries, renamed := renameRefList(saved.Entries, from, to); renamed {
+		saved.Entries = entries
+		updates[gone] = ompScopeText(saved)
+	}
+	originals[gone] = priorScope
+	ompUpdateStash(originals, updates)
+	return moved, nil
+}
+
+func ompBare(value string) string {
+	model, _ := builtinomp.Level(value)
+	return model
+}
+
+func ompReadScope(raw string) scopeGone {
+	var state scopeGone
+	if raw != "" {
+		json.Unmarshal([]byte(raw), &state)
+	}
+	return state
+}
+
+func ompScopeText(state scopeGone) string {
+	if len(state.Entries) == 0 {
+		return ""
+	}
+	body, _ := json.Marshal(state)
+	return string(body)
+}
+
+func ompUpdateStash(before, updates map[string]string) {
+	if len(updates) == 0 {
+		return
+	}
+	stashMu.Lock()
+	defer stashMu.Unlock()
+	saved := stashLoad()
+	changed := false
+	for key, value := range updates {
+		if saved[key] != before[key] || saved[key] == value {
+			continue
 		}
-		seen := map[string]bool{}
-		kept := n.Content[:0:0]
-		for _, c := range n.Content {
-			if c.Kind == yaml.ScalarNode {
-				if seen[c.Value] {
-					continue
-				}
-				seen[c.Value] = true
-			}
-			kept = append(kept, c)
+		if value == "" {
+			delete(saved, key)
+		} else {
+			saved[key] = value
 		}
-		if len(kept) == len(n.Content) {
-			return false, false
-		}
-		n.Content = kept
-		return true, false
-	})
+		changed = true
+	}
+	if changed {
+		stashWrite(saved)
+	}
 }
 
 // ompScopeLeavesOut is the default role's model when enabledModels has

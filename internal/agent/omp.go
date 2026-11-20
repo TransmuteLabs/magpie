@@ -156,31 +156,31 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 	// the protocol picked in its row (omp_protocol.go)
 	protocol := ompProtocolKey(at, dir)
 	path := pick("config")
-	applySettings := func(models string, mode builtinomp.CatalogMode, role *builtinomp.RoleOptions) (builtinomp.RoleResult, error) {
+	applySettings := func(models string, options builtinomp.SettingsOptions) (builtinomp.SettingsResult, error) {
 		files := []extension.LinkedActionFile{{Name: builtinomp.CatalogFile, Path: models}}
-		if mode == builtinomp.WriteCatalog && !at.exists(models) {
+		if options.Catalog == builtinomp.WriteCatalog && !at.exists(models) {
 			files = append(files, extension.LinkedActionFile{Name: builtinomp.LegacyModelsFile, Path: filepath.Join(dir, "models.json")})
 		}
-		if role != nil {
+		if options.Role != nil || options.Scope != nil {
 			files = append(files, extension.LinkedActionFile{Name: builtinomp.ConfigFile, Path: path})
 		}
 		var want string
-		options := builtinomp.SettingsOptions{Catalog: mode, Role: role, Build: func(existing map[string]any) any {
+		options.Build = func(existing map[string]any) any {
 			provider := ompOn(entry(), ompProtocol(protocol))
 			want = provider.API
 			if api, _ := existing["api"].(string); api != "" && api != want && !slices.Contains(piAPIsWanted(models), api) {
 				provider.API = api
 			}
 			return ompKept(existing, provider)
-		}}
-		var result builtinomp.RoleResult
+		}
+		var result builtinomp.SettingsResult
 		err := extension.ApplyLinkedAgentPlan(options, func(options builtinomp.SettingsOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
 			plan, own, err := builtinomp.PlanSettings(options, snapshot)
 			result = own
 			return plan, err
 		}, files...)
 		if err != nil {
-			return builtinomp.RoleResult{}, err
+			return builtinomp.SettingsResult{}, err
 		}
 		if want != "" {
 			ompRememberAPI(models, want)
@@ -211,7 +211,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		return used, err
 	}
 	writeMagpie := func() error {
-		_, err := applySettings(pick("models"), builtinomp.WriteCatalog, nil)
+		_, err := applySettings(pick("models"), builtinomp.SettingsOptions{Catalog: builtinomp.WriteCatalog})
 		return err
 	}
 	// was are the stash's keys for the roles, one each
@@ -232,9 +232,12 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			Set: func(v string) error {
 				advisorMark := ompAdvisorTurnedOn(path)
 				kept := peek(w, gone, advisorMark)
-				result, err := applySettings(pick("models"), builtinomp.WriteCatalog, &builtinomp.RoleOptions{
+				role := &builtinomp.RoleOptions{
 					Name: name, Value: v, Original: kept[w], AdvisorOwned: kept[advisorMark] != "",
 					RoutedModel: isMagpie, UpdateEnabledModels: ompScopeModel,
+				}
+				result, err := applySettings(pick("models"), builtinomp.SettingsOptions{
+					Catalog: builtinomp.WriteCatalog, Role: role,
 				})
 				if err != nil {
 					return err
@@ -364,55 +367,34 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		SplitSuffix: builtinomp.SplitRole,
 		ListOnly:    true,
 		Sync: func() error {
-			models := pick("models")
-			if _, err := applySettings(models, builtinomp.SyncCatalog, nil); err != nil {
+			before := peek(gone)
+			saved := ompReadScope(before[gone])
+			var next scopeGone
+			scope := &builtinomp.ScopeOptions{
+				Emptied: saved.Emptied,
+				Next: func(plain []string, present bool, offered map[string]bool) ([]string, bool) {
+					entries, _, state, changed := scopeSynced(plain, present, offered, saved, ompBare)
+					next = state
+					return entries, changed
+				},
+			}
+			result, err := applySettings(pick("models"), builtinomp.SettingsOptions{
+				Catalog: builtinomp.SyncCatalog, Scope: scope,
+			})
+			if err != nil {
 				return err
 			}
-			// an entry on a model magpie no longer gives omp names nothing
-			// (#2055, scope_gone.go)
-			return ompScopeSynced(path, models, gone)
+			if result.ScopeSynced {
+				ompUpdateStash(before, map[string]string{gone: ompScopeText(next)})
+			}
+			return nil
 		},
 		// a provider renamed takes its models' ids in models.yml with it; a
 		// name left on the old one omp would pass over, with a warning. So
 		// does what a role had before magpie (a list may name magpie's
 		// models), which a reset puts back
 		RenameRefs: func(from, to string) (bool, error) {
-			old, now := magpieID+"/"+from+"/", magpieID+"/"+to+"/"
-			move := func(v string) string {
-				return builtinomp.MapReferences(v, func(m string) string {
-					if rest, ok := strings.CutPrefix(m, old); ok {
-						return now + rest
-					}
-					return m
-				})
-			}
-			moved := false
-			if err := edit.EditYAMLStrings(path, builtinomp.ModelReferenceKeys, func(v string) string {
-				nv := move(v)
-				moved = moved || nv != v
-				return nv
-			}); err != nil {
-				return moved, err
-			}
-			if err := ompScopeOnce(path); err != nil {
-				return moved, err
-			}
-			scopeGoneRename(gone, from, to)
-			for _, w := range was {
-				s := stashShared()[w]
-				ns := move(s)
-				if builtinomp.YAMLList(s) {
-					t, err := edit.EditYAMLTextStrings(edit.YAMLText(s), move)
-					if err != nil {
-						return moved, err
-					}
-					ns = string(t)
-				}
-				if ns != s {
-					stash(map[string]string{w: ns})
-				}
-			}
-			return moved, nil
+			return ompRenameRefs(path, gone, was, from, to)
 		},
 		Notice: func() string {
 			if Running(`(^|/)omp( |$)`, `@oh-my-pi/pi-coding-agent`) {
