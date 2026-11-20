@@ -313,6 +313,9 @@ uses the same settings plan without rebuilding the catalog.
 Scope refresh reads the catalog and settings in one checked action.
 Rename edits the explicit scope entries with the same settings contract.
 The host records excluded and restored scope entries after publication.
+The Pi and OMP Protocol fields pass the selected API into the checked
+catalog action. The host stores the preference and catalog metadata after
+the action succeeds.
 The ordinary Codex subagent model and effort fields use the auxiliary model
 plan. A model change checks the saved effort against the new model and clears
 an incompatible effort in the same checked `config.toml` write. The gateway's

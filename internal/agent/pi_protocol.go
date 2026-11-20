@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinpi "github.com/yetone/magpie/internal/extension/builtin/pi"
 )
 
 // The protocol Pi asks magpie's models on, picked in Pi's row
@@ -69,24 +72,68 @@ func piProviderOn(agentID string, models []catalog.Model, gw, on string) map[str
 }
 
 // piProtocolField is Pi's protocol, the api magpie's provider has in the
-// models.json at modelsPath; write rewrites the block when it is there,
+// models.json at modelsPath; pick rewrites the block when it is there,
 // and off says magpie doesn't write the block (the pi-magpie extension
 // serves the provider), so there is nothing to pick.
-func piProtocolField(at place, modelsPath string, write func() error, off func() bool) Field {
-	return protocolField(at, piProtocolKey(at), modelsPath, func() (string, bool) {
+func piProtocolField(at place, modelsPath string, pick func(string) error, off func() bool) Field {
+	return protocolField(at, piProtocolKey(at), modelsPath, func() string {
 		v, _ := edit.GetJSON(modelsPath, "providers."+magpieID+".api")
-		_, has := edit.GetJSON(modelsPath, "providers."+magpieID)
-		return v, has
-	}, write, off)
+		return v
+	}, pick, off)
+}
+
+func pickPiProtocol(at place, modelsPath string, key func() string, off func() bool, syncExtension func() error, chosen string) error {
+	updates := map[string]string{piProtocolKey(at): chosen}
+	if off() {
+		stash(updates)
+		return nil
+	}
+	found := false
+	prepare := func(current string) (any, error) {
+		found = true
+		block := piProviderOn("pi", magpieModels("pi"), at.gw(), chosen)
+		block["apiKey"] = key()
+		known := stashShared()
+		apis, outputs := apisWantedKey(modelsPath), outputsWantedKey(modelsPath)
+		updates[apis] = piCatalogAPIs(block, current, known[apis], true)
+		nextOutputs := piCatalogOutputs(block, gjson.Get(current, "models").Raw, known[outputs])
+		if nextOutputs != known[outputs] {
+			updates[outputs] = nextOutputs
+		}
+		if gjson.Get(current, "compat.sendSessionAffinityHeaders").Exists() {
+			delete(block, "compat")
+		}
+		var have, want map[string]json.RawMessage
+		if json.Unmarshal([]byte(current), &have) != nil || have == nil {
+			return block, nil
+		}
+		body, err := json.Marshal(block)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(body, &want); err != nil {
+			return nil, err
+		}
+		return mergeTheirs(have, want, []string{"models"}), nil
+	}
+	if err := extension.ApplyLinkedAgentPlan(prepare, builtinpi.PlanCatalogPick,
+		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath}); err != nil {
+		return err
+	}
+	stash(updates)
+	if found {
+		return syncExtension()
+	}
+	return nil
 }
 
 // protocolField is an agent's protocol, picked in its row and kept in the
 // stash at key: the api magpie's provider has in the models file at
 // modelsPath, which fileAPI reads (has: magpie's provider is in the file).
-// write rewrites the provider when it is there, and off says magpie
+// pick rewrites the provider when it is there, and off says magpie
 // doesn't write it, so there is nothing to pick. Pi's (piProtocolField)
 // and omp's (omp_protocol.go).
-func protocolField(at place, key, modelsPath string, fileAPI func() (string, bool), write func() error, off func() bool) Field {
+func protocolField(at place, key, modelsPath string, fileAPI func() string, pick func(string) error, off func() bool) Field {
 	picked := func() string {
 		if v := stashShared()[key]; slices.Contains(piProtocols, v) {
 			return v
@@ -101,7 +148,7 @@ func protocolField(at place, key, modelsPath string, fileAPI func() (string, boo
 				// a stopped distro's files start it (#3896)
 				return picked
 			}
-			file, _ := fileAPI()
+			file := fileAPI()
 			if file == "" {
 				return picked
 			}
@@ -119,17 +166,7 @@ func protocolField(at place, key, modelsPath string, fileAPI func() (string, boo
 			if v != "" && !slices.Contains(piProtocols, v) {
 				return fmt.Errorf("protocol is one of %v or empty (each model's own), not %q", piProtocols, v)
 			}
-			// the api in the file now, the user's own included, gives way
-			// to the pick
-			file, has := fileAPI()
-			if file != "" {
-				piAPIWanted(modelsPath, file)
-			}
-			stash(map[string]string{key: v})
-			if !has || off() {
-				return nil
-			}
-			return write()
+			return pick(v)
 		},
 		Options: func(map[string]string) []Option {
 			if at.cold || off() {
@@ -155,22 +192,4 @@ func piAPIsWanted(path string) []string {
 		return []string{"openai-completions"}
 	}
 	return rec[piProviderAPI]
-}
-
-// piAPIWanted takes api, the provider's in the Pi models.json at path
-// as a pick is made, for magpie's alone: the pick replaces it, the
-// user's own included, and an older value magpie wrote that the user
-// types there later is theirs again.
-func piAPIWanted(path, api string) {
-	stashMu.Lock()
-	defer stashMu.Unlock()
-	m := stashLoad()
-	rec := map[string][]string{}
-	if s := m[apisWantedKey(path)]; s != "" && json.Unmarshal([]byte(s), &rec) != nil {
-		rec = map[string][]string{}
-	}
-	rec[piProviderAPI] = []string{api}
-	b, _ := json.Marshal(rec)
-	m[apisWantedKey(path)] = string(b)
-	stashWrite(m)
 }

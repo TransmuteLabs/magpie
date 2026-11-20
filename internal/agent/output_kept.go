@@ -39,8 +39,17 @@ const outputsRemembered = 8
 // It records want's values as wanted.
 func outputsKept(path string, want, have map[string]int) map[string]int {
 	key := outputsWantedKey(path)
+	saved := stashShared()[key]
+	out, next := planOutputLimits(saved, want, have)
+	if saved != next {
+		stash(map[string]string{key: next})
+	}
+	return out
+}
+
+func planOutputLimits(saved string, want, have map[string]int) (map[string]int, string) {
 	rec := map[string][]int{}
-	if v := stashShared()[key]; v != "" && json.Unmarshal([]byte(v), &rec) != nil {
+	if saved != "" && json.Unmarshal([]byte(saved), &rec) != nil {
 		rec = map[string][]int{}
 	}
 	out := make(map[string]int, len(want))
@@ -78,9 +87,9 @@ func outputsKept(path string, want, have map[string]int) map[string]int {
 		if len(next) == 0 {
 			b = nil
 		}
-		stash(map[string]string{key: string(b)})
+		return out, string(b)
 	}
-	return out
+	return out, saved
 }
 
 // outputSetIn says the user set a Max output in magpie for the model an
@@ -108,6 +117,15 @@ func numberOf(v any) int {
 // Pi's models.json at path (outputsKept); v is the block magpie writes.
 func piOutputsKept(path string, v any) {
 	block, _ := v.(map[string]any)
+	raw, _ := edit.GetJSON(path, "providers."+magpieID+".models")
+	key := outputsWantedKey(path)
+	saved := stashShared()[key]
+	if next := piCatalogOutputs(block, raw, saved); next != saved {
+		stash(map[string]string{key: next})
+	}
+}
+
+func piCatalogOutputs(block map[string]any, raw, saved string) string {
 	ms, _ := block["models"].([]map[string]any)
 	want := map[string]int{}
 	for _, e := range ms {
@@ -118,10 +136,10 @@ func piOutputsKept(path string, v any) {
 		}
 	}
 	if len(want) == 0 {
-		return
+		return saved
 	}
 	have := map[string]int{}
-	if raw, ok := edit.GetJSON(path, "providers."+magpieID+".models"); ok {
+	if raw != "" {
 		var cur []struct {
 			ID        string `json:"id"`
 			MaxTokens int    `json:"maxTokens"`
@@ -132,12 +150,13 @@ func piOutputsKept(path string, v any) {
 			}
 		}
 	}
-	kept := outputsKept(path, want, have)
+	kept, next := planOutputLimits(saved, want, have)
 	for _, e := range ms {
 		if id, _ := e["id"].(string); kept[id] > 0 {
 			e["maxTokens"] = kept[id]
 		}
 	}
+	return next
 }
 
 // openCodeOutputsKept keeps a limit.output the user typed into magpie's

@@ -85,10 +85,10 @@ func TestPiProtocolColdReadUsesOnlyPreference(t *testing.T) {
 	at.cold = true
 	key := piProtocolKey(at)
 	stash(map[string]string{key: "openai-responses"})
-	field := protocolField(at, key, "unread-cold-models.json", func() (string, bool) {
+	field := protocolField(at, key, "unread-cold-models.json", func() string {
 		t.Fatal("cold read accessed provider file")
-		return "", false
-	}, func() error {
+		return ""
+	}, func(string) error {
 		t.Fatal("cold read invoked writer")
 		return nil
 	}, func() bool {

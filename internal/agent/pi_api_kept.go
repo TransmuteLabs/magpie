@@ -42,15 +42,21 @@ func piAPIsKept(path string, v any) {
 	if block == nil {
 		return
 	}
+	raw, _ := edit.GetJSON(path, "providers."+magpieID)
+	key := apisWantedKey(path)
+	saved := stashShared()[key]
+	if next := piCatalogAPIs(block, raw, saved, false); next != saved {
+		stash(map[string]string{key: next})
+	}
+}
+
+func piCatalogAPIs(block map[string]any, raw, saved string, pick bool) string {
 	ms, _ := block["models"].([]map[string]any)
 	var file struct {
 		API    *string                      `json:"api"`
 		Models []map[string]json.RawMessage `json:"models"`
 	}
-	raw, inFile := edit.GetJSON(path, "providers."+magpieID)
-	if !inFile || json.Unmarshal([]byte(raw), &file) != nil {
-		inFile = false
-	}
+	inFile := raw != "" && json.Unmarshal([]byte(raw), &file) == nil
 	have := map[string]map[string]json.RawMessage{}
 	for _, m := range file.Models {
 		var id string
@@ -60,7 +66,7 @@ func piAPIsKept(path string, v any) {
 	}
 
 	rec := map[string][]string{}
-	if s := stashShared()[apisWantedKey(path)]; s != "" && json.Unmarshal([]byte(s), &rec) != nil {
+	if saved != "" && (json.Unmarshal([]byte(saved), &rec) != nil || rec == nil) {
 		rec = map[string][]string{}
 	}
 	next := map[string][]string{}
@@ -78,6 +84,9 @@ func piAPIsKept(path string, v any) {
 	// the provider's
 	if _, known := rec[piProviderAPI]; !known {
 		rec[piProviderAPI] = []string{"openai-completions"}
+	}
+	if pick && inFile && file.API != nil && *file.API != "" {
+		rec[piProviderAPI] = []string{*file.API}
 	}
 	w, _ := block["api"].(string)
 	if inFile && file.API != nil && *file.API != "" && *file.API != w && !slices.Contains(rec[piProviderAPI], *file.API) {
@@ -127,7 +136,6 @@ func piAPIsKept(path string, v any) {
 		}
 	}
 
-	if b, _ := json.Marshal(next); string(b) != stashShared()[apisWantedKey(path)] {
-		stash(map[string]string{apisWantedKey(path): string(b)})
-	}
+	body, _ := json.Marshal(next)
+	return string(body)
 }

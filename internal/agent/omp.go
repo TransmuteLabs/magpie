@@ -156,7 +156,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 	// the protocol picked in its row (omp_protocol.go)
 	protocol := ompProtocolKey(at, dir)
 	path := pick("config")
-	applySettings := func(models string, options builtinomp.SettingsOptions) (builtinomp.SettingsResult, error) {
+	applySettings := func(models string, options builtinomp.SettingsOptions, selection *ompProtocolPick) (builtinomp.SettingsResult, error) {
 		files := []extension.LinkedActionFile{{Name: builtinomp.CatalogFile, Path: models}}
 		if options.Catalog == builtinomp.WriteCatalog && !at.exists(models) {
 			files = append(files, extension.LinkedActionFile{Name: builtinomp.LegacyModelsFile, Path: filepath.Join(dir, "models.json")})
@@ -166,10 +166,15 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		}
 		var want string
 		options.Build = func(existing map[string]any) any {
-			provider := ompOn(entry(), ompProtocol(protocol))
+			on := ompProtocol(protocol)
+			current, _ := existing["api"].(string)
+			if selection != nil {
+				on, selection.previous = selection.value, current
+			}
+			provider := ompOn(entry(), on)
 			want = provider.API
-			if api, _ := existing["api"].(string); api != "" && api != want && !slices.Contains(piAPIsWanted(models), api) {
-				provider.API = api
+			if selection == nil && current != "" && current != want && !slices.Contains(piAPIsWanted(models), current) {
+				provider.API = current
 			}
 			return ompKept(existing, provider)
 		}
@@ -182,9 +187,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		if err != nil {
 			return builtinomp.SettingsResult{}, err
 		}
-		if want != "" {
-			ompRememberAPI(models, want)
-		}
+		ompRememberAPI(models, want, selection)
 		return result, nil
 	}
 	// the entries of enabledModels a sync took out (scope_gone.go)
@@ -210,8 +213,9 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		})
 		return used, err
 	}
-	writeMagpie := func() error {
-		_, err := applySettings(pick("models"), builtinomp.SettingsOptions{Catalog: builtinomp.WriteCatalog})
+	writeProtocol := func(value string) error {
+		selection := &ompProtocolPick{key: protocol, value: value}
+		_, err := applySettings(pick("models"), builtinomp.SettingsOptions{Catalog: builtinomp.SyncCatalog}, selection)
 		return err
 	}
 	// was are the stash's keys for the roles, one each
@@ -238,7 +242,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				}
 				result, err := applySettings(pick("models"), builtinomp.SettingsOptions{
 					Catalog: builtinomp.WriteCatalog, Role: role,
-				})
+				}, nil)
 				if err != nil {
 					return err
 				}
@@ -380,7 +384,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			}
 			result, err := applySettings(pick("models"), builtinomp.SettingsOptions{
 				Catalog: builtinomp.SyncCatalog, Scope: scope,
-			})
+			}, nil)
 			if err != nil {
 				return err
 			}
@@ -437,12 +441,11 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				return ompApplyConfig(path, builtinomp.ConfigChange{Set: []edit.KV{{Path: "defaultThinkingLevel", Value: v}}})
 			},
 			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, builtinomp.Efforts...)...) },
-		}), append(ompAdvisorFields(path), protocolField(at, protocol, pick("models"), func() (string, bool) {
+		}), append(ompAdvisorFields(path), protocolField(at, protocol, pick("models"), func() string {
 			models := pick("models")
 			v, _ := edit.GetYAML(models, "providers."+magpieID+".api")
-			_, has := edit.GetYAMLText(models, "providers."+magpieID)
-			return v, has
-		}, writeMagpie, func() bool { return false }))...),
+			return v
+		}, writeProtocol, func() bool { return false }))...),
 	}
 }
 

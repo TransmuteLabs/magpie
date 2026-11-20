@@ -69,22 +69,45 @@ func ompOn(e ompProviderEntry, on string) ompProviderEntry {
 	return e
 }
 
-// ompRememberAPI records an API magpie generated for the provider. The
-// model APIs are replaced with the rest of magpie's generated model list.
-func ompRememberAPI(path, want string) {
+type ompProtocolPick struct {
+	key, value, previous string
+}
+
+// ompRememberAPI records an API magpie generated for the provider, with
+// an explicit protocol pick when there was one.
+func ompRememberAPI(path, want string, pick *ompProtocolPick) {
+	if want == "" && pick == nil {
+		return
+	}
 	stashMu.Lock()
 	defer stashMu.Unlock()
 	m := stashLoad()
+	changed := false
+	if pick != nil && m[pick.key] != pick.value {
+		changed = true
+		if pick.value == "" {
+			delete(m, pick.key)
+		} else {
+			m[pick.key] = pick.value
+		}
+	}
+	if want == "" {
+		if changed {
+			stashWrite(m)
+		}
+		return
+	}
 	rec := map[string][]string{}
-	if s := m[apisWantedKey(path)]; s != "" && json.Unmarshal([]byte(s), &rec) != nil {
+	key := apisWantedKey(path)
+	if s := m[key]; s != "" && (json.Unmarshal([]byte(s), &rec) != nil || rec == nil) {
 		rec = map[string][]string{}
 	}
 	was, known := rec[piProviderAPI]
 	if !known {
 		was = []string{"openai-completions"}
 	}
-	if slices.Contains(was, want) && known {
-		return
+	if pick != nil && pick.previous != "" {
+		was = []string{pick.previous}
 	}
 	if !slices.Contains(was, want) {
 		was = append(slices.Clone(was), want)
@@ -94,6 +117,8 @@ func ompRememberAPI(path, want string) {
 	}
 	rec[piProviderAPI] = was
 	b, _ := json.Marshal(rec)
-	m[apisWantedKey(path)] = string(b)
-	stashWrite(m)
+	if changed || m[key] != string(b) {
+		m[key] = string(b)
+		stashWrite(m)
+	}
 }

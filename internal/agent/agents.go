@@ -1802,7 +1802,9 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	}
 	// the protocol it asks magpie's models on (pi_protocol.go)
 	if id == "pi" {
-		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, writeMagpie, viaExt))
+		a.Fields = append(a.Fields, piProtocolField(at, modelsPath, func(chosen string) error {
+			return pickPiProtocol(at, modelsPath, key, viaExt, syncExtension, chosen)
+		}, viaExt))
 	}
 	return a
 }
