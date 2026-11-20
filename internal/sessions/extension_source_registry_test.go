@@ -3,11 +3,15 @@ package sessions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -72,5 +76,45 @@ func TestSourceRootSlotsRejectForeignOwners(t *testing.T) {
 			sdk.SessionSourceStore{Slot: "main", NativeRootSlot: slot}); err == nil {
 			t.Fatal("foreign native root was granted", slot)
 		}
+	}
+}
+
+func TestSourcePreparationDeadlineKeepsPublishedView(t *testing.T) {
+	setup(t)
+	catalog := extension.CatalogPath()
+	if err := os.MkdirAll(filepath.Dir(catalog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalog, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrepareSessionSources(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	before := sourceView.Load()
+	if before == nil {
+		t.Fatal("source preparation did not publish a view")
+	}
+	unlock, held := filelock.Lock(filepath.Join(filepath.Dir(catalog), "catalog.lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the SDK catalog lock")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- PrepareSessionSources(ctx) }()
+	select {
+	case err := <-done:
+		unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("source preparation returned %v instead of the deadline", err)
+		}
+	case <-time.After(3 * time.Second):
+		unlock()
+		<-done
+		t.Fatal("source preparation waited for the catalog after the deadline")
+	}
+	if sourceView.Load() != before {
+		t.Fatal("canceled discovery replaced the published source view")
 	}
 }

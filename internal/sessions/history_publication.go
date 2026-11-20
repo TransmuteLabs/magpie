@@ -71,7 +71,7 @@ func (snapshot historyPublication) jsonlAccounting(ctx context.Context) map[stri
 		return nil
 	}
 	manager := sourceManager()
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return nil
 	}

@@ -95,11 +95,11 @@ func readStorageConsents() ([]StorageSourceConsent, error) {
 }
 
 func selectedStorageRoot(ctx context.Context, manager *extension.Manager, plugin, source, slot string) (storageSourceRecord, error) {
-	manifest, identity, err := sessionMigrationIdentity(ctx, manager, plugin)
+	entry, identity, err := sessionMigrationSelection(ctx, manager, plugin)
 	if err != nil {
 		return storageSourceRecord{}, err
 	}
-	descriptor, found := manifest.ResolveStorageSource(source)
+	descriptor, found := entry.Manifest.ResolveStorageSource(source)
 	if !found {
 		return storageSourceRecord{}, errors.New("unknown storage source")
 	}
@@ -130,17 +130,10 @@ func selectedStorageRoot(ctx context.Context, manager *extension.Manager, plugin
 		return storageSourceRecord{}, err
 	}
 	hash := sha256.Sum256(body)
-	entries, err := manager.List()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return storageSourceRecord{}, err
 	}
-	entryIndex := slices.IndexFunc(entries, func(entry extension.Installed) bool {
-		return entry.Manifest.ID == plugin && !entry.Disabled
-	})
-	if entryIndex < 0 {
-		return storageSourceRecord{}, extension.ErrActionChanged
-	}
-	return storageSourceRecord{entry: entries[entryIndex], descriptor: descriptor, store: store,
+	return storageSourceRecord{entry: entry, descriptor: descriptor, store: store,
 		root: roots[0], rootRef: hex.EncodeToString(hash[:]), identity: identity, epoch: sourceEpoch.Load()}, nil
 }
 
@@ -236,7 +229,7 @@ func UnbindStorageSource(ctx context.Context, agent, expectedIdentity string) er
 
 func InspectStorageSources(ctx context.Context) ([]StorageSourceRoot, []StorageSourceConsent, error) {
 	manager := sourceManager()
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

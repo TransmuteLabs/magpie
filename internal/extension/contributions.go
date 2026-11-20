@@ -37,9 +37,24 @@ func (m *Manager) readContributionEntries(ctx context.Context) ([]Installed, err
 	if err != nil {
 		return nil, err
 	}
-	return slices.DeleteFunc(entries, func(entry Installed) bool {
-		return entry.Disabled || entry.Manifest.Component != nil || entry.observerEnablementErr != nil
-	}), nil
+	return slices.DeleteFunc(entries, func(entry Installed) bool { return !activeRoot(entry) }), nil
+}
+
+func activeRoot(entry Installed) bool {
+	return !entry.Disabled && entry.Manifest.Component == nil && entry.observerEnablementErr == nil
+}
+
+func (m *Manager) ActiveModule(ctx context.Context, id string) (Installed, error) {
+	entries, err := m.catalog.list(ctx)
+	if err != nil {
+		return Installed{}, err
+	}
+	for _, entry := range entries {
+		if entry.Manifest.ID == id && activeRoot(entry) {
+			return entry, nil
+		}
+	}
+	return Installed{}, errContributionRevoked
 }
 
 func registeredContributions[T comparable](ctx context.Context, m *Manager, module string, declared func(sdk.Manifest) []T) []contributionBinding[T] {

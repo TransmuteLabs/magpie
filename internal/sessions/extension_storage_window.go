@@ -123,7 +123,7 @@ func inspectWindowStorage(ctx context.Context, owner WindowStorageOwner, source 
 	if !found {
 		return nil, errors.New("window did not declare this storage source")
 	}
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return nil, err
 	}

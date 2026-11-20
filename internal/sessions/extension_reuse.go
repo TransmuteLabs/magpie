@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -72,30 +71,29 @@ func forgetSessionMigration(key string) {
 }
 
 func sessionMigrationIdentity(ctx context.Context, manager *extension.Manager, plugin string) (sdk.Manifest, string, error) {
-	entries, err := manager.List()
+	entry, identity, err := sessionMigrationSelection(ctx, manager, plugin)
+	return entry.Manifest, identity, err
+}
+
+func sessionMigrationSelection(ctx context.Context, manager *extension.Manager, plugin string) (extension.Installed, string, error) {
+	entry, err := manager.ActiveModule(ctx, plugin)
 	if err != nil {
-		return sdk.Manifest{}, "", err
+		return extension.Installed{}, "", err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != plugin || entry.Disabled {
-			continue
-		}
-		config := ""
-		if entry.Manifest.Contract.Version.Minor >= 1 {
-			value, err := manager.ModuleConfig(ctx, plugin)
-			if err != nil {
-				return sdk.Manifest{}, "", err
-			}
-			config = value.Version
-		}
-		body, err := json.Marshal([]string{manager.Namespace(), plugin, entry.Revision, config})
+	config := ""
+	if entry.Manifest.Contract.Version.Minor >= 1 {
+		value, err := manager.ModuleConfig(ctx, plugin)
 		if err != nil {
-			return sdk.Manifest{}, "", err
+			return extension.Installed{}, "", err
 		}
-		digest := sha256.Sum256(body)
-		return entry.Manifest, hex.EncodeToString(digest[:]), nil
+		config = value.Version
 	}
-	return sdk.Manifest{}, "", errors.New("session converter is not enabled")
+	body, err := json.Marshal([]string{manager.Namespace(), plugin, entry.Revision, config})
+	if err != nil {
+		return extension.Installed{}, "", err
+	}
+	digest := sha256.Sum256(body)
+	return entry, hex.EncodeToString(digest[:]), nil
 }
 
 func sessionMigrationKey(identity string, source Session, route SessionExtension, target *sessionTargetStore, options []byte) string {

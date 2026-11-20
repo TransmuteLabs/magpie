@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 func TestExtensionResumeUsesOwnedConnectedProfile(t *testing.T) {
@@ -160,5 +162,38 @@ func TestExtensionResumeRejectsEditedLaunch(t *testing.T) {
 	prepared.Starting = captured
 	if err := prepared.Recheck(t.Context()); err != nil {
 		t.Fatal("unchanged launch was invalidated", err)
+	}
+}
+
+func TestExtensionResumeOwnerStopsAtDeadline(t *testing.T) {
+	host, _ := launchAgentFixture(t, launchAgentDescriptor())
+	if _, err := Starter("fixture-launch").ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareExtensionResume(t.Context(), "fixture.agent", "fixture-launch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "catalog.lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the SDK catalog lock")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- prepared.Recheck(ctx) }()
+	select {
+	case err := <-done:
+		unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("prepared launch returned %v instead of the deadline", err)
+		}
+	case <-time.After(3 * time.Second):
+		unlock()
+		<-done
+		t.Fatal("prepared launch waited for the catalog after the deadline")
+	}
+	if err := prepared.Recheck(t.Context()); err != nil {
+		t.Fatal("a canceled check broke the existing launch binding", err)
 	}
 }

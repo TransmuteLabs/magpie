@@ -36,6 +36,11 @@ projection against the catalog file identity. Install, replacement, disable
 and removal affect the next request after the catalog changes. Saved
 disconnection records remain available to agent commands for recovery.
 
+Prepared launches and session migration identities select an enabled SDK
+module through the same catalog as request contributions. Package and
+configuration checks use the caller's context. Catalog metadata remains
+available for the final launch check after the helper shuts down.
+
 ## API 1.6 JSONL session sources
 
 The separate API 1.8 rooted storage authoring and adapter seam is described in
@@ -84,6 +89,7 @@ continues to use the gateway store.
 [`extension_source_adapter.go`](../../internal/sessions/extension_source_adapter.go)
 prepares summaries outside the session cache mutex, then exposes immutable
 records through ordinary discovery, `List`, `Find`, management and stats.
+Cancellation during catalog discovery preserves the last published view.
 `allFilesWith` and `parserFor` do not call workers. SDK summaries are not written
 into the persistent native path cache. Failed reads under unchanged authority
 retain detached last-good metadata as `source_status: stale`; revoked authority

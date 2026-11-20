@@ -107,7 +107,7 @@ func extensionSourceTranscript(ctx context.Context, record *sessionSourceRecord)
 		return Transcript{}, ErrNoTranscript
 	}
 	manager := sourceManager()
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return Transcript{}, err
 	}

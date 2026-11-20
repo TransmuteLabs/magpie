@@ -73,8 +73,11 @@ func PrepareSessionSources(ctx context.Context) error {
 		return nil
 	}
 	manager := sourceManager()
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		view.problems = []string{err.Error()}
 		sourceView.Store(view)
 		return err

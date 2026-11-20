@@ -27,24 +27,21 @@ func (host *extensionAgentRuntime) Manifest(plugin string) (sdk.Manifest, error)
 }
 
 func (host *extensionAgentRuntime) check(ctx context.Context, plugin string) error {
-	entries, err := host.manager.List()
+	entry, err := host.manager.ActiveModule(ctx, plugin)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != plugin || entry.Disabled {
-			continue
-		}
-		config, err := host.manager.ModuleConfig(ctx, plugin)
-		if err != nil {
-			return err
-		}
-		if entry.Revision != host.entry.Revision || config.Version != host.config {
-			return extension.ErrActionChanged
-		}
-		return nil
+	if entry.Revision != host.entry.Revision {
+		return extension.ErrActionChanged
 	}
-	return errors.New("agent module is disabled or unavailable")
+	config, err := host.manager.ModuleConfig(ctx, plugin)
+	if err != nil {
+		return err
+	}
+	if config.Version != host.config {
+		return extension.ErrActionChanged
+	}
+	return nil
 }
 
 func (host *extensionAgentRuntime) Store() *extension.Store { return host.manager.Store() }
@@ -61,22 +58,13 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 }
 
 func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
-	entries, err := manager.List()
+	entry, err := manager.ActiveModule(ctx, plugin)
 	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != plugin || entry.Disabled {
+	for _, actual := range entry.Manifest.Agents {
+		if actual.ID != descriptor.ID || !extensionBindingSameDescriptor(actual, descriptor) {
 			continue
-		}
-		found := false
-		for _, actual := range entry.Manifest.Agents {
-			if actual.ID == descriptor.ID && extensionBindingSameDescriptor(actual, descriptor) {
-				found = true
-			}
-		}
-		if !found {
-			return nil, errors.New("agent module definition changed; rediscover the agent")
 		}
 		config, err := manager.ModuleConfig(ctx, plugin)
 		if err != nil {
@@ -84,7 +72,7 @@ func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin
 		}
 		return &extensionAgentRuntime{manager: manager, entry: entry, config: config.Version}, nil
 	}
-	return nil, errors.New("agent module is disabled or unavailable")
+	return nil, errors.New("agent module definition changed; rediscover the agent")
 }
 
 func acquireAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
