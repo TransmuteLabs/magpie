@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/coderun"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -14,6 +15,9 @@ import (
 // a temp dir of their own: what they leave in it is theirs, and a skill's
 // download left there fails the run (#2321).
 func TestMain(m *testing.M) {
+	if coderun.Helping() {
+		os.Exit(coderun.Main())
+	}
 	// started as magpie's own image, browser or memory server (Args mcp
 	// image, mcp browser, mcp memory): the fake server, for the hub to
 	// take it for that one
