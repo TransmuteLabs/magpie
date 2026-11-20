@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
@@ -99,9 +100,10 @@ func fx(home string) *Agent { return fxIn(here(home)) }
 func fxIn(at place) *Agent {
 	dir := at.join(".fx")
 	path := filepath.Join(dir, "settings.json")
+	const slot = "providers." + magpieID
 	// magpie's provider, with what the user set on it in fx kept
-	fxProvider := func(cur string) any {
-		return fxKept(path, fxProviderAt(cur, at.v1(), fxTakesEfforts(at.fxVersion())))
+	fxProvider := func(current, model string) any {
+		return fxKept(current, fxProviderAt(model, at.v1(), fxTakesEfforts(at.fxVersion())))
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
 	// the provider fx talks to; unset, it is Vercel's AI Gateway
@@ -134,7 +136,10 @@ func fxIn(at place) *Agent {
 		detect:   func() bool { return agentDir(dir) },
 		ListOnly: true,
 		Sync: func() error {
-			return syncJSON(path, "providers."+magpieID, func() any { return fxProvider(fxModels(path)[magpieID]) })
+			return syncJSONFrom(path, slot, func(config gjson.Result) any {
+				model := config.Get("models." + magpieID)
+				return fxProvider(config.Get(slot).String(), model.Str)
+			})
 		},
 		Notice: func() string {
 			if Running(`(^|/)fx( |$)`) {
@@ -163,7 +168,7 @@ func fxIn(at place) *Agent {
 			Set: func(v string) error {
 				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
 					return edit.SetJSON(path,
-						edit.KV{Path: "providers." + magpieID, Value: fxProvider(ref)},
+						edit.KV{Path: slot, Value: fxProvider(get(slot), ref)},
 						edit.KV{Path: "provider", Value: magpieID},
 						edit.KV{Path: "models." + magpieID, Value: ref})
 				}
@@ -253,7 +258,7 @@ func fxProviderAt(cur, v1 string, efforts bool) map[string]any {
 	}
 }
 
-// fxKept is want, magpie's provider in fx's settings.json at path, with
+// fxKept is want, magpie's provider in fx's settings.json, with
 // what the user set on the one there kept: fx takes a reviewer_model on a
 // provider (the model its auto permission mode asks), which magpie doesn't
 // write, and a tool_choice_mode, which magpie writes "send" and the user
@@ -261,12 +266,11 @@ func fxProviderAt(cur, v1 string, efforts bool) map[string]any {
 // both away on every start, as T3 Code's did (#2030). Its protocol,
 // address, auth and model_metadata are magpie's; auth is written whole, as
 // fx refuses an env beside type none.
-func fxKept(path string, want map[string]any) any {
-	key := "providers." + magpieID
-	if mode, ok := edit.GetJSON(path, key+".tool_choice_mode"); ok && (mode == "omit" || mode == "send") {
+func fxKept(current string, want map[string]any) any {
+	if mode := gjson.Get(current, "tool_choice_mode").String(); mode == "omit" || mode == "send" {
 		want["tool_choice_mode"] = mode
 	}
-	return theirsKept(path, key, func() any { return want }, "model_metadata", "auth")()
+	return theirsKeptValue(current, want, "model_metadata", "auth")
 }
 
 // what fx says after a change (notice.go)

@@ -113,7 +113,8 @@ func anteAt(at place) *Agent {
 	}
 	// entry is magpie's catalog entry, the user's own keys in it kept and
 	// preferred_models — magpie's list alone — replaced
-	entry := theirsKept(path, anteProvider, func() any { return anteProviderJSON(gatewayV1()) }, "preferred_models")
+	block := func() any { return anteProviderJSON(gatewayV1()) }
+	entry := theirsKept(path, anteProvider, block, "preferred_models")
 	// ours is whether Ante starts on magpie. Its settings name the provider
 	// and the model apart, so magpie's provider is what makes the pair
 	// magpie's; with no model named Ante takes the default of
@@ -235,7 +236,7 @@ func anteAt(at place) *Agent {
 			// the user's own keys in magpie's entry stay, preferred_models
 			// is magpie's list, and a file that says the same as it does is
 			// not written again (syncJSON, theirsKept)
-			return syncJSON(path, anteProvider, entry)
+			return syncKeptJSON(path, anteProvider, block, "preferred_models")
 		},
 		Fields: []Field{{
 			// This field is magpie's models in Ante's picker: its entry in

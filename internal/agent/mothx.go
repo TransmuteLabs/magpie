@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -51,13 +52,15 @@ func mothx(home string) *Agent { return mothxIn(here(home)) }
 func mothxIn(at place) *Agent {
 	dir := mothxDir(at)
 	path := filepath.Join(dir, "settings.json")
+	const slot = "providers." + magpieID
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
 	pair := pairSet(set, "defaultProvider", "defaultModel")
 	key := func() string { return agentKeyAt("mothx", at.gw()) }
-	block := mothxBlockKept(path, func() any { return mothxProvider(at, key()) })
+	block := func(current string) any { return mothxBlockKept(current, mothxProvider(at, key())) }
 	writeMagpie := func() error {
-		return set(edit.KV{Path: "providers." + magpieID, Value: block()})
+		current, _ := get(slot)
+		return set(edit.KV{Path: slot, Value: block(current)})
 	}
 	// the file as it was before magpie's first write, put back byte for
 	// byte by Disconnect where it leaves it saying the same
@@ -78,7 +81,9 @@ func mothxIn(at place) *Agent {
 				"baseUrl", at.v1(), "apiKey", key())
 		},
 		ListOnly: true,
-		Sync:     func() error { return syncJSON(path, "providers."+magpieID, block) },
+		Sync: func() error {
+			return syncJSONFrom(path, slot, func(config gjson.Result) any { return block(config.Get(slot).String()) })
+		},
 		Notice: func() string {
 			if p, _ := get("defaultProvider"); p == magpieID && Running(`(^|/)mothx( |$)`, `(^|/)vibecoding( |$)`) {
 				return noticeMothx.String()
@@ -164,16 +169,11 @@ func mothxDir(at place) string {
 // mothxBlockKept is theirsKept for magpie's provider in MothX's
 // settings.json: what else the user put in it (headers, httpProxy) stays,
 // and so does a thinkingFormat already there, which may be theirs.
-func mothxBlockKept(path string, value func() any) func() any {
-	return theirsKept(path, "providers."+magpieID, func() any {
-		v := value()
-		if _, set := edit.GetJSON(path, "providers."+magpieID+".thinkingFormat"); set {
-			if m, ok := v.(map[string]any); ok {
-				delete(m, "thinkingFormat")
-			}
-		}
-		return v
-	}, "models")
+func mothxBlockKept(current string, value map[string]any) any {
+	if gjson.Get(current, "thinkingFormat").Exists() {
+		delete(value, "thinkingFormat")
+	}
+	return theirsKeptValue(current, value, "models")
 }
 
 // mothxProvider is magpie as MothX's provider: the gateway's Chat
@@ -186,7 +186,7 @@ func mothxBlockKept(path string, value func() any) func() any {
 // (thinkingFormatForModel): a magpie model named qwen3.7… got Qwen's
 // enable_thinking and thinking_budget, a deepseek-v4.1… only
 // thinking:{type:enabled}, whatever served it.
-func mothxProvider(at place, key string) any {
+func mothxProvider(at place, key string) map[string]any {
 	ms := []map[string]any{}
 	for _, m := range sharedModels("mothx") {
 		ms = append(ms, mothxModelJSON(m))
