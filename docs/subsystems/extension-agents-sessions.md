@@ -326,7 +326,14 @@ The shell function still starts plain `dima` when Magpie is unavailable.
 Agent action settings snapshots use `sdk.ActionSettings` in Go and
 `ActionSettings` in TypeScript. The request's `settings` field keeps its
 existing JSON representation. Each file has a relative path, existence and
-mode, raw bytes encoded as base64, and a `beforeHash`. Linked Codex profile,
+mode, raw bytes encoded as base64, and a `beforeHash`. The host captures these
+inputs for both inspection and planning, including explicit action calls.
+Installed and linked plans share file-change shape and output budget checks.
+Publication policy remains with the host. Installed actions are confined to
+the declared root and refuse linked paths. Built-in planners can use exact
+host-selected files, including existing configuration aliases. Linked plans
+require an explicit matching `beforeHash` and preserve host-selected modes.
+Linked Codex profile,
 global provider, saved provider/catalog/effort restoration, auxiliary
 models, effort and background compaction edits pass the same typed snapshot in process and
 return an `AgentPlan`. Claude effort and routing-related environment flags
@@ -357,6 +364,9 @@ Aside checks provider ownership in the same catalog snapshot used by
 Connect and Sync. The linked Zed planner handles selection, reset, refresh
 and proxy changes. Qoder uses its checked snapshot for the model that
 controls refresh and for preserved overrides.
+Held Hermes and DeepSeek Harness rows use the same mutation guard for the
+Bili adapter as for model changes. An adopted target's old row cannot rewrite
+the settings behind its current owner.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,
@@ -693,14 +703,20 @@ Execution rechecks the enabled manifest, generation, root identity, original
 contents, permissions and existence. A persistent `.magpie-extension.lock`
 serializes cooperating writers at that root. Originals and recovery metadata
 are durably backed up with status `prepared` before the batch writes targets.
-Each target is checked again before its write; file replacement uses an
-exclusive temporary file, file sync, rename and platform-appropriate directory
-sync. Success records backup status `applied`.
+For agent plans, the host checks the complete set of settings before each
+file change and before committing, including files the module only read.
+File replacement uses an exclusive temporary file, file sync, rename and
+platform-appropriate directory sync. The host retains the identity of each
+published file. The agent controller applies its shell wrappers before the
+final settings check, so a stale input during that step rejects the binding
+and rolls back the settings and wrappers. Success records backup status
+`applied`. The same SDK plan rules apply to built-in modules using linked
+settings. Their file adapter preserves existing aliases and hard links.
 
 Failure or cancellation rolls back applied effects in reverse order and
 removes newly created empty directories. Rollback restores a file only when
-it still matches the action's expected output; an independently changed file
-is preserved and recovery reports the retained originals. A completed
+its identity, bytes and permissions match the recorded publication. The
+host preserves independent edits and reports the retained originals. A completed
 rollback records `rolled_back`. This is a checked batch of per-file
 replacements, not an atomic filesystem-wide transaction or protection against
 every non-cooperating write between a check and a rename.

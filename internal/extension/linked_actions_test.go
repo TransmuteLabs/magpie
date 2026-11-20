@@ -31,6 +31,34 @@ func TestLinkedAgentPlanReportsTheRejectedFile(t *testing.T) {
 	}
 }
 
+func TestLinkedAgentPlanRejectsOversizedOutputBeforePublishing(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "settings.json")
+	catalog := filepath.Join(dir, "models.json")
+	if err := os.WriteFile(config, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oversized := make([]byte, MaxActionBytes)
+	planner := func(_ struct{}, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		return sdk.AgentPlan{Files: []sdk.FileChange{
+			{Path: "settings.json", BeforeHash: settings.Files[0].BeforeHash, Body: []byte("updated")},
+			{Path: "models.json", BeforeHash: settings.Files[1].BeforeHash, Body: oversized},
+		}}, nil
+	}
+	err := ApplyLinkedAgentPlan(struct{}{}, planner,
+		LinkedActionFile{Name: "settings.json", Path: config},
+		LinkedActionFile{Name: "models.json", Path: catalog})
+	if err == nil || !strings.Contains(err.Error(), "output exceeds its byte budget") {
+		t.Fatalf("oversized plan was not rejected: %v", err)
+	}
+	if body, err := os.ReadFile(config); err != nil || string(body) != "original" {
+		t.Fatalf("rejected plan changed settings: %q, %v", body, err)
+	}
+	if _, err := os.Stat(catalog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected plan created a catalog: %v", err)
+	}
+}
+
 func TestLinkedAgentPlanRejectsChangedInputBeforePublishing(t *testing.T) {
 	for _, replace := range []bool{false, true} {
 		name := "edited"

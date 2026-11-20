@@ -70,15 +70,16 @@ func TestActionsModuleReplacementDuringWriteRollsBackBeforeNextFile(t *testing.T
 	}
 	plan := actionTestPlan(t, actions, policy)
 	written := []string{}
-	actions.write = func(root *os.Root, name string, raw []byte, mode fs.FileMode) error {
+	actions.write = func(root *os.Root, name string, raw []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
 		written = append(written, name)
-		if err := actionWrite(root, name, raw, mode); err != nil {
-			return err
+		info, err := actionWriteChecked(root, name, raw, mode, check)
+		if err != nil {
+			return info, err
 		}
 		host.mu.Lock()
 		host.manifest.Version = "2.0.0"
 		host.mu.Unlock()
-		return nil
+		return info, nil
 	}
 	if _, err := plan.Execute(t.Context(), plan.Preview().Revision); !errors.Is(err, ErrActionChanged) {
 		t.Fatal("module replacement during action was ignored", err)

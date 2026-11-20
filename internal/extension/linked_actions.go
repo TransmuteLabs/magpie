@@ -225,10 +225,7 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			}
 		}
 		snapshots[file.Name] = snapshot
-		before := snapshot.before
-		settings.Files = append(settings.Files, sdk.ActionSettingFile{
-			Path: file.Name, Body: bytes.Clone(before.Body), Exists: before.Exists, Mode: uint32(before.Mode), BeforeHash: actionHash(before),
-		})
+		settings.Files = append(settings.Files, snapshot.before.setting(file.Name))
 	}
 	plan, err := planner(options, settings)
 	if err != nil {
@@ -245,17 +242,18 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 	if len(plan.Files) == 0 {
 		return check()
 	}
-	touched := make(map[string]bool, len(plan.Files))
+	if err := validateActionOutput(plan.Files); err != nil {
+		return err
+	}
 	for index, change := range plan.Files {
 		snapshot, ok := snapshots[change.Path]
-		if !ok || touched[change.Path] || change.BeforeHash != actionHash(snapshot.before) || change.Remove && len(change.Body) != 0 || change.Mode != 0 {
+		if !ok || change.BeforeHash != actionHash(snapshot.before) || change.Mode != 0 {
 			return fmt.Errorf("invalid linked settings change for %q", change.Path)
 		}
 		if snapshot.file.UnlinkLast && !change.Remove ||
 			change.Remove && (snapshot.file.UnlinkLast || snapshot.file.UnlinkName) && index != len(plan.Files)-1 {
 			return fmt.Errorf("linked settings unlink for %q must be the final change", change.Path)
 		}
-		touched[change.Path] = true
 	}
 	if err := check(); err != nil {
 		return err
@@ -323,5 +321,5 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			return err
 		}
 	}
-	return nil
+	return check()
 }

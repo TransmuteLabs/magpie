@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -202,31 +200,6 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 	return &extensionAgentPlan{runtime: host, action: action, before: record, shell: shell, intent: intent, modelOptions: catalog.Models}, nil
 }
 
-func extensionAppliedSnapshots(plan *extension.ActionPlan) []extension.ActionSettingFile {
-	snapshots := plan.Snapshots()
-	for _, change := range plan.Preview().Files {
-		for index := range snapshots {
-			if snapshots[index].Path != change.Path {
-				continue
-			}
-			file := &snapshots[index]
-			file.Body, file.Exists = slices.Clone(change.Body), !change.Remove
-			if !file.Exists {
-				file.Mode, file.BeforeHash = 0, extension.MissingActionHash
-			} else {
-				if change.Mode != 0 {
-					file.Mode = change.Mode
-				} else if file.Mode == 0 {
-					file.Mode = 0o600
-				}
-				digest := sha256.Sum256(file.Body)
-				file.BeforeHash = hex.EncodeToString(digest[:])
-			}
-		}
-	}
-	return snapshots
-}
-
 func (controller *extensionController) apply(ctx context.Context, plan *extensionAgentPlan) error {
 	if err := controller.checkRoot(); err != nil {
 		return err
@@ -282,7 +255,7 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 		PackageRevision: plan.runtime.entry.Revision, ConfigVersion: plan.runtime.config,
 		Values: maps.Clone(plan.action.Preview().Binding.Values), Before: plan.action.Snapshots(),
 		ModelOptions: append(json.RawMessage(nil), plan.modelOptions...),
-		Applied:      extensionAppliedSnapshots(plan.action), RecoverySafe: true,
+		Applied:      plan.action.PlannedSnapshots(), RecoverySafe: true,
 	}
 	if prior.Phase == "owned" {
 		record.Before, record.PriorApplied = extension.CloneActionSnapshots(prior.Before), extension.CloneActionSnapshots(prior.Applied)
@@ -305,29 +278,38 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 	if err := extensionBindingWrite(ledger); err != nil {
 		return err
 	}
-	result, err := plan.action.Execute(ctx, plan.action.Preview().Revision)
 	shellApplied := false
-	if err == nil && plan.shell != nil {
-		err = plan.runtime.check(ctx, controller.item.Plugin)
-		if err == nil && plan.applyShell != nil {
+	result, err := plan.action.ExecuteAgent(ctx, plan.action.Preview().Revision, func() error {
+		if err := plan.runtime.check(ctx, controller.item.Plugin); err != nil {
+			return err
+		}
+		if plan.shell == nil {
+			return nil
+		}
+		var err error
+		if plan.applyShell != nil {
 			err = plan.applyShell()
-		} else if err == nil {
+		} else {
 			_, err = plan.shell.Apply(plan.shell.Revision())
 		}
 		shellApplied = err == nil
-	}
-	if err == nil {
-		err = plan.runtime.check(ctx, controller.item.Plugin)
-	}
+		if err != nil {
+			return err
+		}
+		if err := update.ShellFunctionsMatch(plan.shell.Snapshots(), true); err != nil {
+			return err
+		}
+		return plan.runtime.check(ctx, controller.item.Plugin)
+	})
 	if err != nil {
-		restore := extension.RestoreOwnedActionSnapshots(context.WithoutCancel(ctx), controller.home, plan.action.Snapshots(), record.Applied)
+		var restore error
 		if plan.shell != nil {
 			if shellApplied {
 				restore = errors.Join(restore, update.RestoreShellFunctions(plan.shell.Snapshots()))
 			}
 			restore = errors.Join(restore, update.ShellFunctionsMatch(plan.shell.Snapshots(), false))
 		}
-		if restore != nil {
+		if result.RollbackIncomplete || restore != nil {
 			return fmt.Errorf("agent rollback is incomplete; ownership remains pending for explicit disconnect recovery: %w", errors.Join(err, restore))
 		}
 		if prior.Revision == 0 {

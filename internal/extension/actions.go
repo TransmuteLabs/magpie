@@ -61,19 +61,20 @@ type ActionPreview struct {
 }
 
 type ActionResult struct {
-	Applied  bool   `json:"applied"`
-	Revision string `json:"revision"`
-	Backup   string `json:"backup,omitempty"`
+	Applied            bool   `json:"applied"`
+	Revision           string `json:"revision"`
+	Backup             string `json:"backup,omitempty"`
+	RollbackIncomplete bool   `json:"-"`
 }
 
 type Actions struct {
 	host  ActionRuntime
 	mu    sync.Mutex
-	write func(*os.Root, string, []byte, fs.FileMode) error
+	write func(*os.Root, string, []byte, fs.FileMode, func() error) (fs.FileInfo, error)
 }
 
 func NewActions(host ActionRuntime) *Actions {
-	return &Actions{host: host, write: actionWrite}
+	return &Actions{host: host, write: actionWriteChecked}
 }
 
 type actionFile struct {
@@ -81,6 +82,12 @@ type actionFile struct {
 	Mode   fs.FileMode
 	Exists bool
 	info   fs.FileInfo
+}
+
+func (file actionFile) setting(name string) sdk.ActionSettingFile {
+	return sdk.ActionSettingFile{
+		Path: name, Body: bytes.Clone(file.Body), BeforeHash: actionHash(file), Mode: uint32(file.Mode), Exists: file.Exists,
+	}
 }
 
 type ActionPlan struct {
@@ -116,10 +123,23 @@ func (plan *ActionPlan) Preview() ActionPreview {
 func (plan *ActionPlan) Snapshots() []ActionSettingFile {
 	files := make([]ActionSettingFile, 0, len(plan.policy.Paths))
 	for _, name := range plan.policy.Paths {
-		before := plan.before[name]
-		files = append(files, ActionSettingFile{
-			Path: name, Body: bytes.Clone(before.Body), BeforeHash: actionHash(before), Mode: uint32(before.Mode), Exists: before.Exists,
-		})
+		files = append(files, plan.before[name].setting(name))
+	}
+	return files
+}
+
+func (plan *ActionPlan) PlannedSnapshots() []ActionSettingFile {
+	expected := maps.Clone(plan.before)
+	for _, change := range plan.files {
+		if change.Remove {
+			expected[change.Path] = actionFile{}
+		} else {
+			expected[change.Path] = actionFile{Body: change.Body, Mode: actionMode(change, expected[change.Path]), Exists: true}
+		}
+	}
+	files := make([]ActionSettingFile, 0, len(plan.policy.Paths))
+	for _, name := range plan.policy.Paths {
+		files = append(files, expected[name].setting(name))
 	}
 	return files
 }
@@ -132,6 +152,13 @@ func (plan *ActionPlan) Execute(ctx context.Context, revision string) (ActionRes
 		return ActionResult{}, ErrActionChanged
 	}
 	return plan.owner.Execute(ctx, plan, revision)
+}
+
+func (plan *ActionPlan) ExecuteAgent(ctx context.Context, revision string, beforeCommit func() error) (ActionResult, error) {
+	if plan == nil || plan.owner == nil || plan.method != sdk.MethodAgentPlan || beforeCommit == nil {
+		return ActionResult{}, ErrActionChanged
+	}
+	return plan.owner.execute(ctx, plan, revision, func(map[string]fs.FileInfo) error { return beforeCommit() })
 }
 
 func (plan *ActionPlan) ExecuteCreateOnly(ctx context.Context, revision string, check func(map[string]fs.FileInfo) error) (ActionResult, error) {
@@ -181,12 +208,10 @@ func (actions *Actions) AgentPlan(ctx context.Context, plugin string, scope sdk.
 	}
 	plan.intent = request.Action
 	request.Binding = plan.policy.Binding.Clone()
-	request.Options, request.Settings = bytes.Clone(request.Options), bytes.Clone(request.Settings)
-	if len(request.Settings) == 0 {
-		request.Settings, err = json.Marshal(ActionSettings{Files: plan.Snapshots()})
-		if err != nil {
-			return nil, err
-		}
+	request.Options = bytes.Clone(request.Options)
+	request.Settings, err = json.Marshal(ActionSettings{Files: plan.Snapshots()})
+	if err != nil {
+		return nil, err
 	}
 	if err := actionRequest(request); err != nil {
 		return nil, err
@@ -400,15 +425,32 @@ func (actions *Actions) generation(scope sdk.Scope) error {
 	return nil
 }
 
+func validateActionOutput(files []sdk.FileChange) error {
+	if len(files) > MaxActionFiles {
+		return errors.New("extension action file count is out of bounds")
+	}
+	seen := make(map[string]bool, len(files))
+	total := 0
+	for _, change := range files {
+		if seen[change.Path] || change.Mode & ^uint32(0o777) != 0 || change.Remove && (len(change.Body) != 0 || change.Mode != 0) {
+			return errors.New("extension returned an unauthorized or invalid file change")
+		}
+		seen[change.Path] = true
+		if len(change.Body) > MaxActionBytes-total {
+			return errors.New("extension action output exceeds its byte budget")
+		}
+		total += len(change.Body)
+	}
+	return nil
+}
+
 func (actions *Actions) finish(ctx context.Context, plan *ActionPlan, files []sdk.FileChange) (*ActionPlan, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(files) > MaxActionFiles {
-		return nil, errors.New("extension action file count is out of bounds")
+	if err := validateActionOutput(files); err != nil {
+		return nil, err
 	}
-	seen := map[string]bool{}
-	total := 0
 	plan.files = slices.Clone(files)
 	var root *os.Root
 	if plan.policy.CreateUnder != "" {
@@ -430,9 +472,6 @@ func (actions *Actions) finish(ctx context.Context, plan *ActionPlan, files []sd
 				return nil, errors.New("session output must create a file under its approved prefix")
 			}
 			change.Path = path.Join(plan.policy.CreateUnder, change.Path)
-			if seen[change.Path] {
-				return nil, errors.New("duplicate session output path")
-			}
 			before, err := actionRead(root, change.Path)
 			if err != nil {
 				return nil, err
@@ -444,16 +483,11 @@ func (actions *Actions) finish(ctx context.Context, plan *ActionPlan, files []sd
 			plan.policy.Paths = append(plan.policy.Paths, change.Path)
 		}
 		before, allowed := plan.before[change.Path]
-		if !allowed || seen[change.Path] || change.Mode & ^uint32(0o777) != 0 || change.Remove && (len(change.Body) != 0 || change.Mode != 0) {
+		if !allowed {
 			return nil, errors.New("extension returned an unauthorized or invalid file change")
 		}
-		seen[change.Path] = true
 		if change.BeforeHash != "" && change.BeforeHash != actionHash(before) {
 			return nil, ErrActionChanged
-		}
-		total += len(change.Body)
-		if total > MaxActionBytes {
-			return nil, errors.New("extension action output exceeds its byte budget")
 		}
 		change.BeforeHash = actionHash(before)
 		change.Body = bytes.Clone(change.Body)
@@ -591,17 +625,46 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 		return result, err
 	}
 	defer unlock()
+	checkRoot := func() error {
+		info, err := os.Stat(plan.policy.Root)
+		if err != nil || !os.SameFile(plan.rootInfo, info) {
+			return ErrActionChanged
+		}
+		return nil
+	}
 	if err := actions.checkAuthority(plan); err != nil {
 		return result, err
 	}
 	if err := actions.revalidateInputs(ctx, plan); err != nil {
 		return result, err
 	}
-	if err := plan.check(root); err != nil {
+	expected := maps.Clone(plan.before)
+	verify := func() error {
+		if err := actions.revalidateInputs(ctx, plan); err != nil {
+			return err
+		}
+		if err := checkRoot(); err != nil {
+			return err
+		}
+		return checkActionFiles(root, expected)
+	}
+	if err := checkActionFiles(root, expected); err != nil {
 		return result, err
 	}
 	if len(plan.files) == 0 {
-		plan.used, result.Applied = true, true
+		plan.used = true
+		if check != nil {
+			if err := check(nil); err != nil {
+				return result, err
+			}
+			if err := actions.checkAuthority(plan); err != nil {
+				return result, err
+			}
+			if err := verify(); err != nil {
+				return result, err
+			}
+		}
+		result.Applied = true
 		return result, nil
 	}
 	backup, err := plan.backup()
@@ -609,7 +672,7 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 		return result, err
 	}
 	result.Backup = backup
-	if err := plan.check(root); err != nil {
+	if err := checkActionFiles(root, expected); err != nil {
 		return result, err
 	}
 	plan.used = true
@@ -655,13 +718,13 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 		if err = ctx.Err(); err == nil {
 			err = actions.checkAuthority(plan)
 		}
-		if err == nil {
-			err = plan.checkFile(root, change.Path)
-		}
 		if err != nil {
 			break
 		}
 		if createOnly {
+			if err = checkActionFile(root, change.Path, expected[change.Path]); err != nil {
+				break
+			}
 			var parent *os.Root
 			parent, err = plan.pinCreateParent(root, path.Dir(change.Path), parents, &createdParents)
 			if err == nil {
@@ -683,14 +746,15 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			}
 			continue
 		}
-		changed = append(changed, actionEffect{change: change, parent: root, name: change.Path})
 		if change.Remove {
-			err = actions.revalidateInputs(ctx, plan)
-			if err == nil {
+			err = verify()
+			if err == nil && expected[change.Path].Exists {
 				err = root.Remove(change.Path)
 				if errors.Is(err, fs.ErrNotExist) {
-					err = nil
+					err = ErrActionChanged
 				} else if err == nil {
+					changed = append(changed, actionEffect{change: change, parent: root, name: change.Path})
+					expected[change.Path] = actionFile{}
 					err = actionSync(root, path.Dir(change.Path))
 				}
 			}
@@ -710,10 +774,20 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 				plan.createdDirs[directory] = info
 			}
 			if err == nil {
-				err = actions.revalidateInputs(ctx, plan)
+				err = verify()
 			}
 			if err == nil {
-				err = actions.write(root, change.Path, change.Body, actionMode(change, plan.before[change.Path]))
+				var published fs.FileInfo
+				published, err = actions.write(root, change.Path, change.Body, actionMode(change, plan.before[change.Path]), func() error {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					return checkActionFile(root, change.Path, expected[change.Path])
+				})
+				if published != nil {
+					changed = append(changed, actionEffect{change: change, parent: root, name: change.Path, created: published})
+					expected[change.Path] = actionFile{Body: change.Body, Mode: published.Mode().Perm(), Exists: true, info: published}
+				}
 			}
 		}
 		if err != nil {
@@ -729,8 +803,13 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 	if err == nil {
 		err = actions.revalidateInputs(ctx, plan)
 	}
+	if err == nil {
+		err = checkRoot()
+	}
 	if err == nil && createOnly {
 		err = verifyCreated()
+	} else if err == nil {
+		err = checkActionFiles(root, expected)
 	}
 	if err == nil && check != nil {
 		published := make(map[string]fs.FileInfo, len(changed))
@@ -744,7 +823,12 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			err = actions.revalidateInputs(ctx, plan)
 		}
 		if err == nil {
+			err = checkRoot()
+		}
+		if err == nil && createOnly {
 			err = verifyCreated()
+		} else if err == nil {
+			err = checkActionFiles(root, expected)
 		}
 	}
 	if err == nil && createOnly {
@@ -772,8 +856,8 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			if actionEqual(before, current) {
 				continue
 			}
-			after := actionFile{}
-			if !change.Remove {
+			after := expected[name]
+			if createOnly {
 				after = actionFile{Body: change.Body, Mode: actionMode(change, before), Exists: true}
 			}
 			if !actionEqual(after, current) || effect.created != nil && !os.SameFile(effect.created, current.info) {
@@ -808,13 +892,13 @@ func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision 
 			}
 		}
 		for index := len(directories) - 1; index >= 0; index-- {
-			if removeErr := root.Remove(directories[index]); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-				rollbackErr = errors.Join(rollbackErr, removeErr)
-			}
+			directory := directories[index]
+			rollbackErr = errors.Join(rollbackErr, actionRemoveOwned(root, directory, plan.createdDirs[directory]))
 		}
 		if rollbackErr == nil {
 			rollbackErr = actionBackupStatus(backup, "rolled_back")
 		}
+		result.RollbackIncomplete = rollbackErr != nil
 		return result, fmt.Errorf("extension action failed; originals retained in %s: %w", backup, errors.Join(err, rollbackErr))
 	}
 	result.Applied = true
@@ -922,22 +1006,22 @@ func (actions *Actions) revalidateInputs(ctx context.Context, plan *ActionPlan) 
 	return ctx.Err()
 }
 
-func (plan *ActionPlan) check(root *os.Root) error {
-	for name := range plan.before {
-		if err := plan.checkFile(root, name); err != nil {
+func checkActionFiles(root *os.Root, expected map[string]actionFile) error {
+	for name, before := range expected {
+		if err := checkActionFile(root, name, before); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (plan *ActionPlan) checkFile(root *os.Root, name string) error {
+func checkActionFile(root *os.Root, name string, expected actionFile) error {
 	current, err := actionRead(root, name)
 	if err != nil {
 		return err
 	}
-	if !actionEqual(current, plan.before[name]) {
-		return ErrActionChanged
+	if !actionEqual(current, expected) || expected.Exists && !os.SameFile(current.info, expected.info) {
+		return fmt.Errorf("%s: %w", name, ErrActionChanged)
 	}
 	return nil
 }
@@ -1041,15 +1125,25 @@ func actionParents(root *os.Root, name string) ([]string, error) {
 }
 
 func actionWrite(root *os.Root, name string, body []byte, mode fs.FileMode) error {
-	temporary, _, err := actionStage(root, name, body, mode)
+	_, err := actionWriteChecked(root, name, body, mode, nil)
+	return err
+}
+
+func actionWriteChecked(root *os.Root, name string, body []byte, mode fs.FileMode, check func() error) (fs.FileInfo, error) {
+	temporary, info, err := actionStage(root, name, body, mode)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer root.Remove(temporary)
-	if err := root.Rename(temporary, name); err != nil {
-		return err
+	if check != nil {
+		if err := check(); err != nil {
+			return nil, err
+		}
 	}
-	return actionSync(root, path.Dir(name))
+	if err := root.Rename(temporary, name); err != nil {
+		return nil, err
+	}
+	return info, actionSync(root, path.Dir(name))
 }
 
 func actionCreate(root *os.Root, name string, body []byte, mode fs.FileMode) (string, fs.FileInfo, error) {
