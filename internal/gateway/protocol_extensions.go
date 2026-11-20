@@ -76,16 +76,15 @@ func (server *Server) withProtocolRegistry(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if ClientPath(request.URL.Path) {
-			next.ServeHTTP(writer, request)
-			return
-		}
 		if pinned, ok := request.Context().Value(protocolRegistryCtx{}).(protocolBinding); ok && pinned.server == server {
 			next.ServeHTTP(writer, request)
 			return
 		}
-		host, err := server.protocolHost(request.Context())
-		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, protocolBinding{server: server, host: host, err: err})
+		binding := protocolBinding{server: server}
+		if !ClientPath(request.URL.Path) {
+			binding.host, binding.err = server.protocolHost(request.Context())
+		}
+		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, binding)
 		next.ServeHTTP(writer, request.WithContext(ctx))
 	})
 }
