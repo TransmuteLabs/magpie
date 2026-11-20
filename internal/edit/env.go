@@ -16,9 +16,14 @@ func GetEnvFile(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	return GetEnv(raw, key)
+}
+
+// GetEnv reads one key from a dotenv snapshot.
+func GetEnv(raw []byte, key string) (string, bool) {
 	// A key set twice takes its last value: dotenv readers, Gemini CLI's among
 	// them, let a later line override an earlier one.
-	lines := splitLines(string(raw))
+	lines := splitLines(string(TrimBOM(raw)))
 	for i := len(lines) - 1; i >= 0; i-- {
 		if m := envLine.FindStringSubmatch(lines[i]); m != nil && m[1] == key {
 			if v, ok := unquote(m[2]); ok {
@@ -41,7 +46,14 @@ func SetEnvFile(path string, kvs ...KV) error {
 	if err != nil {
 		return err
 	}
-	lines := splitLines(string(raw))
+	return WriteAtomic(path, PatchEnv(raw, kvs...))
+}
+
+// PatchEnv sets keys in a dotenv snapshot, preserving its encoding and line endings.
+func PatchEnv(raw []byte, kvs ...KV) []byte {
+	unmarked := TrimBOM(raw)
+	orig := string(unmarked)
+	lines := splitLines(orig)
 	for _, kv := range kvs {
 		v := toString(kv.Value)
 		if strings.ContainsAny(v, " #\"'$\r\n") {
@@ -59,8 +71,8 @@ func SetEnvFile(path string, kvs ...KV) error {
 			return "", false
 		})
 	}
-	lines = markEnv(lines, string(raw))
-	return WriteAtomic(path, []byte(joinLinesLike(lines, string(raw))))
+	lines = markEnv(lines, orig)
+	return append(append([]byte(nil), raw[:len(raw)-len(unmarked)]...), joinLinesLike(lines, orig)...)
 }
 
 // DelEnvFile removes keys from a dotenv file, and the file when they were

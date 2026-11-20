@@ -100,6 +100,12 @@ decides whether the command is owned and plans a single JSONC update.
 The host publishes it for the row and Disconnect. The restart notice
 settles only after an actual change is published.
 
+Gemini CLI's
+[gateway model plan](../../internal/extension/builtin/gemini/settings.go)
+uses one snapshot of `.env` and `settings.json`. The host checks both files
+before publication, restores its own changes after a failed second write,
+and records the previous gateway, key, sign-in and model after success.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

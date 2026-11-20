@@ -7,8 +7,11 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtingemini "github.com/yetone/magpie/internal/extension/builtin/gemini"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Gemini CLI only speaks Google's own API, so "provider" here is how it
@@ -33,13 +36,13 @@ func geminiIn(at place) *Agent {
 	model := jsonGet(path, "model.name")
 	base := func() string { v, _ := edit.GetEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL"); return v }
 	envKey := func() string { v, _ := edit.GetEnvFile(envPath, "GEMINI_API_KEY"); return v }
+	ownKey := func(key string) bool { return ourKey(key) || key == at.gwKey() }
 	// routed: the .env names the gateway, or names it at an address it
 	// no longer has (a WSL distro's under NAT changes as WSL restarts) with
 	// magpie's key: either way what is there is magpie's, never stashed as
 	// the user's own
 	routed := func() bool {
-		b, k := base(), envKey()
-		return b == at.gw() || b != "" && (ourKey(k) || k == at.gwKey())
+		return builtingemini.Routed(base(), envKey(), at.gw(), ownKey)
 	}
 	magpieKey := func() string {
 		for _, id := range []string{"google", "gemini"} {
@@ -95,13 +98,21 @@ func geminiIn(at place) *Agent {
 			return delModelName(path)
 		}
 		if isMagpie(v) {
-			if !routed() {
-				stash(map[string]string{at.key("gemini.base_url"): base(), at.key("gemini.api_key"): envKey(), at.key("gemini.auth"): auth(), at.key("gemini.model"): model()})
+			options := builtingemini.RouteOptions{Gateway: at.gw(), Key: at.gwKey(), Model: v, OwnKey: ownKey}
+			var original *builtingemini.OriginalSettings
+			err := extension.ApplyLinkedAgentPlan(options, func(options builtingemini.RouteOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+				plan, before, err := builtingemini.PlanRoute(options, snapshot)
+				original = before
+				return plan, err
+			}, extension.LinkedActionFile{Name: builtingemini.EnvFile, Path: envPath},
+				extension.LinkedActionFile{Name: builtingemini.SettingsFile, Path: path})
+			if err == nil && original != nil {
+				stash(map[string]string{
+					at.key("gemini.base_url"): original.Base, at.key("gemini.api_key"): original.Key,
+					at.key("gemini.auth"): original.Auth, at.key("gemini.model"): original.Model,
+				})
 			}
-			if err := edit.SetEnvFile(envPath, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: at.gw()}, edit.KV{Path: "GEMINI_API_KEY", Value: at.gwKey()}); err != nil {
-				return err
-			}
-			return edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"}, edit.KV{Path: "model.name", Value: v})
+			return err
 		}
 		if err := unroute(); err != nil {
 			return err
