@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -155,6 +157,101 @@ func TestLinkedAgentPlanRechecksInputsBeforeAcceptingNoWrite(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "user settings" {
 		t.Fatalf("user settings changed: %q, %v", got, err)
+	}
+}
+
+func TestLinkedAgentPlanRechecksFileBytesAndPresence(t *testing.T) {
+	body := strings.Repeat("setting\n", 12289)
+	for _, fixture := range []struct {
+		name   string
+		before string
+		after  string
+		exists bool
+		mutate bool
+		mode   bool
+	}{
+		{name: "large unchanged", exists: true, before: body},
+		{name: "last byte changed", exists: true, before: body, after: body[:len(body)-1] + "!", mutate: true},
+		{name: "prefix truncated", exists: true, before: body, after: body[:len(body)-1], mutate: true},
+		{name: "prefix extended", exists: true, before: body, after: body + "!", mutate: true},
+		{name: "empty unchanged", exists: true},
+		{name: "empty extended", exists: true, after: "!", mutate: true},
+		{name: "absent unchanged"},
+		{name: "empty file created", mutate: true},
+		{name: "same bytes different mode", exists: true, before: body, after: body, mutate: true, mode: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			if fixture.mode && runtime.GOOS == "windows" {
+				t.Skip("Windows does not distinguish these file modes")
+			}
+			path := filepath.Join(t.TempDir(), "settings.json")
+			if fixture.exists {
+				if err := os.WriteFile(path, []byte(fixture.before), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ApplyLinkedAgentPlan(struct{}{}, func(_ struct{}, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+				file := settings.Files[0]
+				if file.Exists != fixture.exists || string(file.Body) != fixture.before {
+					t.Fatal("unexpected settings snapshot")
+				}
+				if fixture.mode {
+					return sdk.AgentPlan{}, os.Chmod(path, 0o640)
+				}
+				if fixture.mutate {
+					return sdk.AgentPlan{}, os.WriteFile(path, []byte(fixture.after), 0o600)
+				}
+				return sdk.AgentPlan{}, nil
+			}, LinkedActionFile{Name: "settings.json", Path: path})
+			if !fixture.mutate {
+				if err != nil {
+					t.Fatalf("unchanged input: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrActionChanged) {
+				t.Fatalf("accepted changed input: %v", err)
+			}
+			if got, err := os.ReadFile(path); err != nil || string(got) != fixture.after {
+				t.Fatalf("user file was not preserved: %d bytes, %v", len(got), err)
+			}
+			if fixture.mode {
+				info, err := os.Stat(path)
+				if err != nil || info.Mode().Perm() != 0o640 {
+					t.Fatalf("user file mode was not preserved: %v, %v", info, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLinkedAgentPlanRechecksRetargetedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	original := filepath.Join(dir, "original")
+	replacement := filepath.Join(dir, "replacement")
+	for _, target := range []string{original, replacement} {
+		if err := os.WriteFile(target, []byte("same body"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(original, path); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	err := ApplyLinkedAgentPlan(struct{}{}, func(_ struct{}, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		if string(settings.Files[0].Body) != "same body" {
+			t.Fatal("original target was not read")
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		return sdk.AgentPlan{}, os.Symlink(replacement, path)
+	}, LinkedActionFile{Name: "settings.json", Path: path})
+	if !errors.Is(err, ErrActionChanged) {
+		t.Fatalf("accepted changed symlink target: %v", err)
+	}
+	if target, err := os.Readlink(path); err != nil || target != replacement {
+		t.Fatalf("user symlink was not preserved: %q, %v", target, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"slices"
@@ -26,6 +27,14 @@ type linkedActionSnapshot struct {
 }
 
 func readLinkedActionFile(file LinkedActionFile) (linkedActionSnapshot, error) {
+	snapshot, err := inspectLinkedActionFile(file)
+	if err == nil && snapshot.before.Exists {
+		snapshot.before.Body, err = os.ReadFile(snapshot.target)
+	}
+	return snapshot, err
+}
+
+func inspectLinkedActionFile(file LinkedActionFile) (linkedActionSnapshot, error) {
 	snapshot := linkedActionSnapshot{file: file}
 	target, err := edit.Target(file.Path)
 	if err != nil {
@@ -42,26 +51,68 @@ func readLinkedActionFile(file LinkedActionFile) (linkedActionSnapshot, error) {
 	if !info.Mode().IsRegular() {
 		return snapshot, fmt.Errorf("%s is not a regular settings file", file.Path)
 	}
-	body, err := os.ReadFile(target)
-	if err != nil {
-		return snapshot, err
-	}
 	snapshot.info = info
-	snapshot.before = actionFile{Exists: true, Body: body, Mode: info.Mode().Perm()}
+	snapshot.before = actionFile{Exists: true, Mode: info.Mode().Perm()}
 	return snapshot, nil
 }
 
 func (snapshot linkedActionSnapshot) check() error {
-	current, err := readLinkedActionFile(snapshot.file)
+	same, err := snapshot.matchesFile()
 	if err != nil {
 		return edit.PreserveOnRollback(snapshot.file.Path, errors.Join(ErrActionChanged, err))
 	}
-	if current.target != snapshot.target || current.before.Exists != snapshot.before.Exists ||
-		current.before.Mode != snapshot.before.Mode || !bytes.Equal(current.before.Body, snapshot.before.Body) ||
-		current.info != nil && !os.SameFile(current.info, snapshot.info) {
+	if !same {
 		return edit.PreserveOnRollback(snapshot.file.Path, fmt.Errorf("%s: %w", snapshot.file.Path, ErrActionChanged))
 	}
 	return nil
+}
+
+func (snapshot linkedActionSnapshot) matchesFile() (bool, error) {
+	current, err := inspectLinkedActionFile(snapshot.file)
+	if err != nil {
+		return false, err
+	}
+	if current.target != snapshot.target || current.before.Exists != snapshot.before.Exists ||
+		current.before.Mode != snapshot.before.Mode {
+		return false, nil
+	}
+	if current.info == nil {
+		return true, nil
+	}
+	if !os.SameFile(current.info, snapshot.info) {
+		return false, nil
+	}
+	stream, err := os.Open(current.target)
+	if err != nil {
+		return false, err
+	}
+	defer stream.Close()
+	info, err := stream.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != snapshot.before.Mode || !os.SameFile(info, snapshot.info) {
+		return false, nil
+	}
+	var buffer [16 * 1024]byte
+	for remaining := snapshot.before.Body; len(remaining) > 0; {
+		block := buffer[:min(len(buffer), len(remaining))]
+		if _, err := io.ReadFull(stream, block); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				return false, nil
+			}
+			return false, err
+		}
+		if !bytes.Equal(block, remaining[:len(block)]) {
+			return false, nil
+		}
+		remaining = remaining[len(block):]
+	}
+	count, err := stream.Read(buffer[:1])
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	return count == 0 && err == io.EOF, nil
 }
 
 func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sdk.ActionSettings) (sdk.AgentPlan, error), files ...LinkedActionFile) (err error) {
