@@ -11,6 +11,13 @@ calls `gateway.NewWithProtocols(registry)`. Both constructors return errors
 for invalid declarations. Explicit construction loads only that registry.
 Ordinary `gateway.New()` additionally discovers installed executable modules.
 
+The gateway and browser page classify installed routes from enabled SDK
+declarations using the request's context. Catalog waits end at cancellation
+or the request's deadline. Built-in client prefixes go through the usual
+gateway guards without entering installed-codec discovery. A lookup error
+leaves the page's rules in force on the web port and rejects an unclassified
+request at the gateway's protocol entry.
+
 `gateway` remains internal. An external package can implement public SDK
 interfaces, while a composition root permitted by Go's internal import rules
 must link it. Installed native, executable and Bun modules use the public

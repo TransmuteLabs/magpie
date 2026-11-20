@@ -60,11 +60,11 @@ type protocolBinding struct {
 	err    error
 }
 
-func (server *Server) protocolHost() (*protocolext.Host, error) {
+func (server *Server) protocolHost(ctx context.Context) (*protocolext.Host, error) {
 	if server.protocols != nil || server.extensions == nil {
 		return server.protocols, nil
 	}
-	registry, err := server.extensions.Protocols()
+	registry, err := server.extensions.ProtocolsContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -76,11 +76,15 @@ func (server *Server) withProtocolRegistry(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if ClientPath(request.URL.Path) {
+			next.ServeHTTP(writer, request)
+			return
+		}
 		if pinned, ok := request.Context().Value(protocolRegistryCtx{}).(protocolBinding); ok && pinned.server == server {
 			next.ServeHTTP(writer, request)
 			return
 		}
-		host, err := server.protocolHost()
+		host, err := server.protocolHost(request.Context())
 		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, protocolBinding{server: server, host: host, err: err})
 		next.ServeHTTP(writer, request.WithContext(ctx))
 	})
@@ -96,12 +100,16 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if ClientPath(request.URL.Path) {
+			next.ServeHTTP(writer, request)
+			return
+		}
 		binding, _ := request.Context().Value(protocolRegistryCtx{}).(protocolBinding)
 		if binding.server != server {
-			host, err := server.protocolHost()
+			host, err := server.protocolHost(request.Context())
 			binding = protocolBinding{server: server, host: host, err: err}
 		}
-		if binding.err != nil && !ClientPath(request.URL.Path) {
+		if binding.err != nil {
 			writeError(writer, provider.Chat, http.StatusServiceUnavailable, "extension catalog is unavailable")
 			return
 		}

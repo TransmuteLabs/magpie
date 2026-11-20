@@ -325,6 +325,18 @@ func TestInstalledGoSDKUsesOrdinaryGateway(t *testing.T) {
 	if !server.ClientPath("/sdk-echo/rpc") {
 		t.Fatal("ordinary Server did not discover the installed native endpoint")
 	}
+	t.Run("catalog deadline", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/sdk-echo/rpc", strings.NewReader(`{"prompt":"expired"}`))
+		request.RemoteAddr = "127.0.0.1:50001"
+		response := protocolCallUnderCatalogLock(t, server, server.Front(), request)
+		if ctx.Err() != context.DeadlineExceeded || response.Code != http.StatusServiceUnavailable ||
+			!strings.Contains(response.Body.String(), "extension catalog is unavailable") || manager.Running("sdk-echo") {
+			t.Fatalf("expired native discovery: context=%v, HTTP %d, worker=%v: %s",
+				ctx.Err(), response.Code, manager.Running("sdk-echo"), response.Body)
+		}
+	})
 	denied := httptest.NewRequest(http.MethodPost, "/sdk-echo/rpc", strings.NewReader(`{"prompt":"forbidden"}`))
 	denied.RemoteAddr = "192.0.2.44:1234"
 	w := httptest.NewRecorder()

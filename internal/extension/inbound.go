@@ -34,15 +34,16 @@ func MetadataFrom(ctx context.Context) RequestMetadata {
 }
 
 func (m *Manager) Protocols() (*codec.Registry, error) {
-	entries, err := m.List()
+	return m.ProtocolsContext(context.Background())
+}
+
+func (m *Manager) ProtocolsContext(ctx context.Context) (*codec.Registry, error) {
+	entries, err := m.readContributionEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var adapters []codec.Inbound
 	for _, entry := range entries {
-		if entry.Disabled {
-			continue
-		}
 		for _, inbound := range entry.Manifest.Inbounds {
 			adapters = append(adapters, &remoteInbound{
 				manager: m, module: entry.Manifest.ID, revision: entry.Revision,

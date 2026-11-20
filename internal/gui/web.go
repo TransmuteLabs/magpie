@@ -555,11 +555,11 @@ func ownWeb(w Windows) bool { _, ok := w.(webHost); return ok }
 func onePort(page http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		server := served.Load()
-		clientPath := gateway.ClientPath(r.URL.Path)
+		var clientPath bool
 		if server != nil {
-			clientPath = server.ClientPath(r.URL.Path)
+			clientPath = server.ClientPathContext(r.Context(), r.URL.Path)
 		} else {
-			clientPath = gateway.InstalledClientPath(r.URL.Path)
+			clientPath = gateway.InstalledClientPathContext(r.Context(), r.URL.Path)
 		}
 		if !clientPath {
 			page.ServeHTTP(rw, r)
