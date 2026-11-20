@@ -247,11 +247,12 @@ type subscriptionRun struct {
 	// takeNamedOwner), and idleKey and idleAt say it is waiting for one.
 	// convKey is the conversation it has had, whatever the model
 	// (conversationKeys).
-	stdin   io.WriteCloser
-	owner   atomic.Pointer[string]
-	idleKey string
-	idleAt  time.Time
-	convKey string
+	stdin     io.WriteCloser
+	inputTurn chan struct{} // initialized under mu
+	owner     atomic.Pointer[string]
+	idleKey   string
+	idleAt    time.Time
+	convKey   string
 	// convPrev is the boundary before convKey's (conversationKeys): the
 	// conversation as the client has it, when the run went on with a side
 	// question after its last turn — a prompt suggestion — whose exchange
@@ -1466,7 +1467,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 			return nil, nil, err
 		}
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(ctx, req); err != nil {
 		run.abort()
 		return nil, nil, err
 	}
@@ -1480,7 +1481,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		run.mu.Unlock()
 	}
 	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}})
-	if err := run.tell(line); err != nil {
+	if err := run.tellWithin(ctx, line); err != nil {
 		run.abort()
 		return nil, nil, err
 	}
@@ -1525,7 +1526,7 @@ func tuiStartTurn(ctx context.Context, what string) (func(), error) {
 	}
 }
 
-// controlWait is how long Claude Code may take to answer a control
+// controlWait is how long Claude Code may take to read and answer a control
 // request; tuiInitWait the interactive mode's helper its initialize: as
 // long as Claude Code may take to show its prompt, with controlWait's
 // room twice over.
@@ -1764,7 +1765,7 @@ func safeguardsKept(raw json.RawMessage) []byte {
 // A CLI unable to acknowledge the update is discarded by the caller; its old
 // context must never be used for another turn. The client's approval still
 // decides whether the tool runs, including a server verdict that is unavailable.
-func (r *subscriptionRun) setSafeguards(req *Request) error {
+func (r *subscriptionRun) setSafeguards(ctx context.Context, req *Request) error {
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
 	tail := req.cacheTail()
@@ -1807,8 +1808,8 @@ func (r *subscriptionRun) setSafeguards(req *Request) error {
 		}
 		return errors.New("safeguards changed; restart Claude Code's interactive mode")
 	}
-	err := r.cliControl(map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{
-		"env": map[string]string{"CLAUDE_CODE_EXTRA_BODY": claudeExtraBody(req.Safeguards, tail)}}})
+	err := r.cliControlWithin(ctx, map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{
+		"env": map[string]string{"CLAUDE_CODE_EXTRA_BODY": claudeExtraBody(req.Safeguards, tail)}}}, controlWait)
 	if err == nil {
 		r.cacheTail = tail
 		r.safeguards = bytes.Clone(req.Safeguards)
@@ -1955,19 +1956,17 @@ type tuiRefusal struct{ error }
 
 func (e *tuiRefusal) Unwrap() error { return e.error }
 
-// cliControl shares the SDK reply dispatcher with rewind, so unrelated or
-// late control responses cannot acknowledge a safety-context update.
-func (r *subscriptionRun) cliControl(request map[string]any) error {
-	return r.cliControlWithin(context.Background(), request, controlWait)
-}
-
-// cliControlWithin is cliControl, answered within wait, while ctx lasts.
+// cliControlWithin shares the reply dispatcher with rewind. Its budget
+// includes the write and the reply.
 func (r *subscriptionRun) cliControlWithin(ctx context.Context, request map[string]any, wait time.Duration) error {
 	id := randomToken()
 	ch := make(chan controlReply, 1)
 	// one that ended says how, and the last it wrote to stderr: "Claude
 	// Code ended" alone left the user nothing to act on
 	what := fmt.Sprintf("answered magpie's %v request", request["subtype"])
+	timeout := &controlUnanswered{fmt.Sprintf("%s in %s", what, wait)}
+	ctx, cancel := context.WithTimeoutCause(ctx, wait, timeout)
+	defer cancel()
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -1984,11 +1983,12 @@ func (r *subscriptionRun) cliControlWithin(ctx context.Context, request map[stri
 		r.mu.Unlock()
 	}()
 	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": id, "request": request})
-	if err := r.tell(line); err != nil {
+	if err := r.tellWithin(ctx, line); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && context.Cause(ctx) == timeout {
+			return timeout
+		}
 		return err
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
 	select {
 	case reply, ok := <-ch:
 		if !ok {
@@ -1999,9 +1999,10 @@ func (r *subscriptionRun) cliControlWithin(ctx context.Context, request map[stri
 		}
 		return nil
 	case <-ctx.Done():
+		if context.Cause(ctx) == timeout {
+			return timeout
+		}
 		return ctx.Err()
-	case <-t.C:
-		return &controlUnanswered{fmt.Sprintf("%s in %s", what, wait)}
 	}
 }
 
@@ -2116,7 +2117,7 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	if rewinding != nil {
 		<-rewinding
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(context.Background(), req); err != nil {
 		run.abortFor("its safeguards could not be set for the next turn: " + err.Error())
 		return nil, nil
 	}
@@ -2369,9 +2370,11 @@ func callsTool(m Message) bool {
 // turn, as its SDK's applyFlagSettings does: a control request, answered
 // with a control_response its output is read past.
 func (r *subscriptionRun) setEffort(effort string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), controlWait)
+	defer cancel()
 	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": "effort-" + randomToken()[:12],
 		"request": map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{"effortLevel": effort}}})
-	if err := r.tell(line); err != nil {
+	if err := r.tellWithin(ctx, line); err != nil {
 		return err
 	}
 	r.effort = effort
@@ -3641,6 +3644,8 @@ func (r *subscriptionRun) letGo() {
 // before the user message turn, stopping a reply under way, as its SDK's
 // rewindConversation does.
 func (r *subscriptionRun) rewind(turn string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), rewindLongest)
+	defer cancel()
 	id := "rewind-" + randomToken()[:12]
 	ch := make(chan controlReply, 1)
 	r.mu.Lock()
@@ -3660,11 +3665,13 @@ func (r *subscriptionRun) rewind(turn string) error {
 	}()
 	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": id,
 		"request": map[string]any{"subtype": "rewind_conversation", "target_message_uuid": turn, "interrupt_if_running": true}})
-	if err := r.tell(line); err != nil {
+	timeout := errors.New("Claude Code did not answer in " + rewindLongest.String())
+	if err := r.tellWithin(ctx, line); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return timeout
+		}
 		return err
 	}
-	t := time.NewTimer(rewindLongest)
-	defer t.Stop()
 	select {
 	case reply, ok := <-ch:
 		switch {
@@ -3676,8 +3683,8 @@ func (r *subscriptionRun) rewind(turn string) error {
 			return errors.New("Claude Code did not rewind")
 		}
 		return nil
-	case <-t.C:
-		return errors.New("Claude Code did not answer in " + rewindLongest.String())
+	case <-ctx.Done():
+		return timeout
 	}
 }
 
@@ -6701,6 +6708,9 @@ func (r *subscriptionRun) finish() {
 	for _, waiter := range controls {
 		close(waiter)
 	}
+	if r.stdin != nil {
+		_ = r.stdin.Close()
+	}
 	if ch != nil {
 		r.closeSegment(ch)
 	}
@@ -6764,6 +6774,25 @@ func (r *subscriptionRun) launch() error {
 // how it ended, or that magpie ended it, and the last it wrote to stderr —
 // the cause comes last, after any warnings before it.
 func (r *subscriptionRun) tell(line []byte) error {
+	return r.tellWithin(context.Background(), line)
+}
+
+func (r *subscriptionRun) tellWithin(ctx context.Context, line []byte) error {
+	r.mu.Lock()
+	if r.inputTurn == nil {
+		r.inputTurn = make(chan struct{}, 1)
+	}
+	turn := r.inputTurn
+	r.mu.Unlock()
+	select {
+	case turn <- struct{}{}:
+		defer func() { <-turn }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// one magpie ended is not written to: until Wait has reaped it, its
 	// input still takes a write, which no one will read
 	r.mu.Lock()
@@ -6772,7 +6801,20 @@ func (r *subscriptionRun) tell(line []byte) error {
 	if killed {
 		return r.whyEnded()
 	}
+	var interrupted chan struct{}
+	var stop func() bool
+	if ctx.Done() != nil {
+		interrupted = make(chan struct{})
+		stop = context.AfterFunc(ctx, func() {
+			_ = r.stdin.Close()
+			close(interrupted)
+		})
+	}
 	_, err := r.stdin.Write(append(line, '\n'))
+	if stop != nil && !stop() {
+		<-interrupted
+		return ctx.Err()
+	}
 	if err == nil {
 		return nil
 	}
@@ -6784,6 +6826,8 @@ func (r *subscriptionRun) tell(line []byte) error {
 	}
 	select {
 	case <-exited:
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(outputDrain + time.Second):
 		return err
 	}
@@ -7560,7 +7604,7 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	if run != nil {
 		req.clientCache.selected(false)
 		if name == "Claude Code" {
-			err = run.setSafeguards(req)
+			err = run.setSafeguards(r.Context(), req)
 		}
 		// the tools are the run's before its agent is handed them: from
 		// then on it may answer, finish the turn and be shelved, or be

@@ -814,7 +814,7 @@ func TestClaudeBridgeSafeguardConcurrentHandoff(t *testing.T) {
 	if found != run || !found.claimResume() {
 		t.Fatal("first claim failed")
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
 	run.endSegment() // a late end with no attached segment cannot release A

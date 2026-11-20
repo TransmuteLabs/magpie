@@ -1357,6 +1357,8 @@ A Claude Code that ends before it answers a control request
 exit status and the end of its stderr (`endedBefore`), as one that ends
 before it reads its input is (`whyEnded`). The tool-results path and
 `resume` already start a new run when the one they found has ended.
+The deadline covers the stdin write and the reply. Cancellation during
+a write closes that run's stdin so no later frame follows partial JSON.
 
 A Claude Code whose output ends after its reply began (a `KStart` on the
 segment) and before the reply ended (its stop, a refusal, a result or an

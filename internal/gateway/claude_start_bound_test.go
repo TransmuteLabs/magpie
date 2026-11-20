@@ -2,12 +2,15 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -138,6 +141,98 @@ func TestClaudePrintStartBounded(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("no run's initialize has the schema")
+	}
+}
+
+func TestClaudePrintStartInterruptsBlockedInitialize(t *testing.T) {
+	for _, useCancel := range []bool{false, true} {
+		name := "deadline"
+		if useCancel {
+			name = "canceled"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newScriptHarness(t, "unused", `
+dd bs=1 count=1 >/dev/null 2>/dev/null || exit 17
+echo 'read one byte' >> "$log"
+exec sleep 30
+`)
+			oldWait := controlWait
+			controlWait = time.Second
+			if useCancel {
+				controlWait = 10 * time.Second
+			}
+			t.Cleanup(func() { controlWait = oldWait })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			runReady := make(chan *subscriptionRun, 1)
+			done := make(chan error, 1)
+			schema := `{"type":"object","description":"` + strings.Repeat("s", 2<<20) + `"}`
+			req := &Request{
+				Messages: []Message{{Role: "user", Parts: []Part{{Kind: Text, Text: "hi"}}}},
+				Format:   &Format{Type: "json_schema", Schema: json.RawMessage(schema)},
+				runTold:  func(run *subscriptionRun) { runReady <- run },
+			}
+			go func() {
+				_, _, err := h.s.subscription.start(ctx, req, "claude-sonnet-5", "", "", nil)
+				done <- err
+				close(done)
+			}()
+			var run *subscriptionRun
+			t.Cleanup(func() {
+				cancel()
+				if run != nil {
+					select {
+					case <-run.abort():
+					case <-time.After(6 * time.Second):
+						t.Error("the Claude stand-in did not stop")
+					}
+				}
+				select {
+				case <-done:
+				case <-time.After(6 * time.Second):
+					t.Error("the start caller did not return after cleanup")
+				}
+			})
+			select {
+			case run = <-runReady:
+			case err := <-done:
+				t.Fatalf("the run did not reach initialize: %v", err)
+			case <-time.After(6 * time.Second):
+				t.Fatal("the run was not registered")
+			}
+			poll := time.NewTicker(10 * time.Millisecond)
+			defer poll.Stop()
+			limit := time.After(3 * time.Second)
+			read := false
+			for !read {
+				select {
+				case <-poll.C:
+					for _, log := range h.runs() {
+						read = read || strings.Contains(log, "read one byte")
+					}
+				case <-limit:
+					t.Fatal("the Claude stand-in did not begin reading the initialize frame")
+				}
+			}
+			if useCancel {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if useCancel {
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("initialize after cancellation: %v", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "answered magpie's initialize request in 1s") {
+					t.Fatalf("initialize after its deadline: %v", err)
+				}
+				if _, err := run.stdin.Write([]byte("another frame\n")); err == nil {
+					t.Fatal("the interrupted stdin still accepts frames")
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("initialize stayed blocked in the subprocess stdin write")
+			}
+		})
 	}
 }
 
