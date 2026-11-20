@@ -322,15 +322,28 @@ func (l *Library) syncSubagents(t *Target, b *backups, res *Result) {
 type ownFile struct {
 	name, path string
 	body       func() []byte
+	take       bool
+}
+
+var errOwnOutputType = errors.New("library output is no longer a regular file")
+
+func readOwnOutput(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errOwnOutputType
+	}
+	return os.ReadFile(path)
 }
 
 // syncOwnFiles writes each file wanted, and takes out every one magpie
 // wrote before (had) that is wanted no more, for subagents and slash
 // commands alike. A file still as magpie wrote it (its hash) is magpie's
-// to rewrite or remove; one the user changed is theirs from then on; one
-// by that name magpie didn't write is never touched, and is a problem
-// under noun:name, unless it says what magpie would write, when it is
-// taken as magpie's. It returns what magpie wrote, sorted by path.
+// to rewrite or remove; a changed file or symbolic link is the user's.
+// An existing file stays user-owned even when its bytes match, except
+// for an explicit command import. It returns owned files sorted by path.
 func (l *Library) syncOwnFiles(t *Target, noun string, had []SubagentFile, want []ownFile, b *backups, res *Result) []SubagentFile {
 	id := t.Agent.ID
 	sources := l.subagentSources()
@@ -365,10 +378,12 @@ func (l *Library) syncOwnFiles(t *Target, noun string, had []SubagentFile, want 
 		return true
 	}
 	for _, f := range had {
-		cur, err := os.ReadFile(f.Path)
+		cur, err := readOwnOutput(f.Path)
 		switch {
 		case os.IsNotExist(err):
 			// gone: written again below if it is still wanted
+			continue
+		case errors.Is(err, errOwnOutputType):
 			continue
 		case err != nil:
 			// can't tell whether it is still magpie's: left, and kept on
@@ -409,12 +424,16 @@ func (l *Library) syncOwnFiles(t *Target, noun string, had []SubagentFile, want 
 		if done[w.path] {
 			continue
 		}
+		_, err := os.Lstat(w.path)
 		body := w.body()
-		cur, err := os.ReadFile(w.path)
 		switch {
-		case err == nil && bytes.Equal(cur, body):
-			// the same as magpie would write: taken as magpie's
 		case err == nil:
+			if w.take {
+				if cur, err := readOwnOutput(w.path); err == nil && bytes.Equal(cur, body) {
+					kept = append(kept, SubagentFile{Name: w.name, Path: w.path, Hash: subagentHash(body)})
+					continue
+				}
+			}
 			res.fail(id, noun+":"+w.name, fmt.Errorf("%s has a %s of its own at %s, which magpie leaves as it is", t.Agent.Name, ownNoun[noun], w.path))
 			continue
 		case !os.IsNotExist(err):

@@ -464,11 +464,7 @@ func (l *Library) routerCommands(t *Target, routed map[string]bool, a *Applied, 
 			at := routedAt(rdir, t.Skills, n)
 			body := routerCommand(n, at)
 			if _, err := os.Lstat(path); err == nil && !had[path] {
-				// the user's own command by that name, unless it is what
-				// magpie would write
-				if cur, err := os.ReadFile(path); err != nil || !slices.Equal(cur, body) {
-					continue
-				}
+				continue
 			}
 			want = append(want, ownFile{name: n, path: path, body: func() []byte { return body }})
 		}

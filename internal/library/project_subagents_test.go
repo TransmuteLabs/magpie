@@ -132,6 +132,55 @@ func TestProjectSubagentsLeaveTheUsersFiles(t *testing.T) {
 	}
 }
 
+func TestProjectSubagentOutputsRequireLibraryOwnership(t *testing.T) {
+	for _, state := range []string{"existing-equal", "existing-symlink", "replaced-by-symlink"} {
+		t.Run(state, func(t *testing.T) {
+			_, project, _ := subagentProjects(t)
+			path := filepath.Join(project, projectAgentFiles["claude"])
+			source := filepath.Join(project, "source.md")
+			names, agents := []string{"reviewer"}, []string{"claude"}
+			ok(t)(ProjectSubagents(project, names, agents))
+			body := read(t, path)
+			if state == "replaced-by-symlink" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				ok(t)(ProjectSubagents(project, names, nil))
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("Library-created file survived removal: %v", err)
+				}
+			}
+
+			if state == "existing-equal" {
+				write(t, path, body)
+			} else {
+				write(t, source, body)
+				symlink(t, source, path)
+			}
+			if state != "replaced-by-symlink" {
+				result, err := ProjectSubagents(project, names, agents)
+				expectMarkdownOwnershipConflict(t, projectAgentFiles["claude"], result, err)
+			}
+			result, err := Sync()
+			expectMarkdownOwnershipConflict(t, projectAgentFiles["claude"], result, err)
+			if files := loaded(t).project(project).AgentFiles; len(files) != 0 {
+				t.Errorf("Library claimed the project's %s: %+v", state, files)
+			}
+			ok(t)(RemoveSubagents(names))
+			if state != "existing-equal" {
+				if dest, err := os.Readlink(path); err != nil || dest != source {
+					t.Errorf("the project's link changed or disappeared: %q, %v", dest, err)
+				}
+				path = source
+			}
+			if got := read(t, path); got != body {
+				t.Errorf("the project's file changed: %q", got)
+			}
+		})
+	}
+}
+
 // Taking the library's subagent out, or renaming it, follows in projects;
 // removing the project takes its files; an agent magpie knows no folder
 // of is refused.
