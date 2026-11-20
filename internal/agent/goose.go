@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,21 +152,17 @@ func gooseProviderJSON(at place) map[string]any {
 // in Usage (#1083).
 func gooseKey(at place) string { return agentKeyAt("goose", at.gw()) }
 
-// gooseProviderKept is magpie's custom provider laid over the file at path.
+// gooseProviderKept is magpie's custom provider laid over the saved catalog.
 // Goose's own editor (update_custom_provider, crates/goose/src/config/
 // declarative_providers.rs) carries the keys it doesn't show into the file it
 // writes, and the user sets timeout_seconds, toolshim, supports_streaming,
 // preserves_thinking, a header or a name there (DeclarativeProviderConfig).
 // Each stays (#2030); what reaches the gateway, its key and the model list
 // are magpie's.
-func gooseProviderKept(path string, at place) map[string]any {
+func gooseProviderKept(raw []byte, at place) map[string]any {
 	want := gooseProviderJSON(at)
-	raw, err := edit.Read(path)
-	if err != nil || raw == nil {
-		return want
-	}
 	var have map[string]any
-	if json.Unmarshal(raw, &have) != nil || have == nil {
+	if json.Unmarshal(edit.TrimBOM(raw), &have) != nil || have == nil {
 		return want
 	}
 	if name, _ := have["display_name"].(string); strings.TrimSpace(name) != "" {
@@ -178,29 +175,22 @@ func gooseProviderKept(path string, at place) map[string]any {
 	return mergeKept(have, want, []string{"name", "engine", "api_key_env", "base_url", "requires_auth", "dynamic_models", "models", "headers"})
 }
 
-// writeGooseProvider writes magpie's custom provider file for Goose.
-func writeGooseProvider(path string, at place) error {
-	b, err := json.MarshalIndent(gooseProviderKept(path, at), "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return edit.WriteAtomic(path, append(b, '\n'))
-}
-
 // syncGooseProvider rewrites magpie's custom provider file for Goose with
 // the catalog as it is now, where magpie wrote one and it differs.
 func syncGooseProvider(path string, at place) error {
-	raw, err := edit.Read(path)
-	if err != nil || raw == nil {
+	before, err := readWiringFile(path)
+	if err != nil || before.info == nil {
 		return nil
 	}
-	if sameJSON(string(raw), gooseProviderKept(path, at)) {
+	want := gooseProviderKept(before.body, at)
+	if sameJSON(string(edit.TrimBOM(before.body)), want) {
 		return nil
 	}
-	return writeGooseProvider(path, at)
+	body, err := json.MarshalIndent(want, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeWiringFiles(wiringFileEdit{path: path, before: before, body: append(body, '\n')})
 }
 
 // removeGooseProvider takes magpie's custom provider file away once Goose's
@@ -231,15 +221,11 @@ func removeGooseProvider(path string) error {
 // write (cleanup_legacy_provider_keys). So a model set with the flat keys
 // alone on a migrated config is never used, and lost.
 
-// gooseNewLayout reports whether the Goose config at cfg is in the new
+// gooseNewLayout reports whether a saved Goose config is in the new
 // layout: it has a providers map or an active_provider.
-func gooseNewLayout(cfg string) bool {
-	b, err := edit.Read(cfg)
-	if err != nil || b == nil {
-		return false
-	}
+func gooseNewLayout(raw []byte) bool {
 	var c map[string]any
-	if yaml.Unmarshal(b, &c) != nil {
+	if yaml.Unmarshal(raw, &c) != nil {
 		return false
 	}
 	_, providers := c["providers"]
@@ -275,32 +261,61 @@ func gooseModel(cfg string) string {
 	return p + "/" + m
 }
 
-// setGooseModel makes v, a provider/model, the model the Goose config at
+// rewriteGooseModel makes v, a provider/model, the model the Goose config at
 // cfg uses, in the layout the config is in: on a new one as goose's own
 // set_active_provider writes it, other providers' entries kept; on an old
 // one the flat keys, which an old goose reads and a new one migrates.
-func setGooseModel(cfg, v string) error {
+func rewriteGooseModel(cfg string, raw []byte, v string) ([]byte, error) {
 	p, m, ok := strings.Cut(v, "/")
 	if !ok || p == "" || m == "" {
-		return fmt.Errorf("expected provider/model, got %q", v)
+		return nil, fmt.Errorf("expected provider/model, got %q", v)
 	}
-	if !gooseNewLayout(cfg) {
-		return edit.SetYAMLTop(cfg, edit.KV{Path: "GOOSE_PROVIDER", Value: p}, edit.KV{Path: "GOOSE_MODEL", Value: m})
+	if !gooseNewLayout(raw) {
+		return edit.RewriteYAMLTop(cfg, raw, edit.KV{Path: "GOOSE_PROVIDER", Value: p}, edit.KV{Path: "GOOSE_MODEL", Value: m})
 	}
 	if strings.Contains(p, ".") {
-		return fmt.Errorf("goose provider %q: a dot can't be written into its providers map", p)
+		return nil, fmt.Errorf("goose provider %q: a dot can't be written into its providers map", p)
 	}
-	if err := edit.SetYAML(cfg,
+	body, err := edit.RewriteYAML(cfg, raw,
 		edit.KV{Path: "active_provider", Value: p},
 		edit.KV{Path: "providers." + p + ".enabled", Value: true},
 		edit.KV{Path: "providers." + p + ".model", Value: m},
 		edit.KV{Path: "providers." + p + ".configured", Value: true},
-	); err != nil {
-		return err
+	)
+	if err != nil {
+		return nil, err
 	}
 	// flat keys left beside the map would be read by no goose that reads
 	// the map, and deleted by the next one that writes
-	return edit.DelYAMLTop(cfg, "GOOSE_PROVIDER", "GOOSE_MODEL")
+	return edit.RewriteYAMLWithoutTop(cfg, body, "GOOSE_PROVIDER", "GOOSE_MODEL")
+}
+
+func applyGooseModel(config, catalog, selection string, at place) error {
+	before, err := readWiringFile(config)
+	if err != nil {
+		return err
+	}
+	raw := edit.TrimBOM(before.body)
+	body, err := rewriteGooseModel(config, raw, selection)
+	if err != nil {
+		return before.preserveOnError(config, err)
+	}
+	change := wiringFileEdit{path: config, before: before}
+	if !bytes.Equal(body, raw) {
+		change.body = body
+	}
+	if ref, ok := strings.CutPrefix(selection, gooseProviderID+"/"); ok && isMagpie(ref) {
+		provider, err := readWiringFile(catalog)
+		if err != nil {
+			return err
+		}
+		body, err := json.MarshalIndent(gooseProviderKept(provider.body, at), "", "  ")
+		if err != nil {
+			return err
+		}
+		return writeWiringFiles(wiringFileEdit{path: catalog, before: provider, body: append(body, '\n')}, change)
+	}
+	return writeWiringFiles(change)
 }
 
 // clearGooseModel takes the Goose config at cfg off any model, as goose's

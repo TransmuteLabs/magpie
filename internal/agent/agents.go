@@ -2009,15 +2009,7 @@ func gooseIn(at place, cfg string) *Agent {
 					}
 					return removeGooseProvider(provider)
 				}
-				// a model of magpie's: magpie as a custom provider of
-				// Goose's, each model with its window and whether Goose
-				// can send it a thinking level (see goose.go)
-				if ref, ok := strings.CutPrefix(v, gooseProviderID+"/"); ok && isMagpie(ref) {
-					if err := writeGooseProvider(provider, at); err != nil {
-						return err
-					}
-				}
-				return setGooseModel(path, v)
+				return applyGooseModel(path, provider, v, at)
 			},
 			Options: func(cur map[string]string) []Option {
 				// only the native providers this goose is set up with (#987:
