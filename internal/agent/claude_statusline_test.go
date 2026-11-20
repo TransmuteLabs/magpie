@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 )
 
 // claudeStatusAt makes the status line written run exe.
@@ -51,8 +54,13 @@ func TestClaudeStatusLineSwitch(t *testing.T) {
 		t.Fatalf("Get after on: %q", f.Get())
 	}
 	// on again writes nothing new
+	installed := readFile(path)
+	claudeStatusAt(t, "/opt/another/magpie")
 	if err := f.Set("on"); err != nil {
 		t.Fatal(err)
+	}
+	if readFile(path) != installed {
+		t.Fatal("repeated enable changed the installed command")
 	}
 	if err := f.Set(""); err != nil {
 		t.Fatal(err)
@@ -112,6 +120,68 @@ func TestClaudeStatusLineGoesOnDisconnect(t *testing.T) {
 	}
 }
 
+func TestClaudeStatusLineRejectsConcurrentChanges(t *testing.T) {
+	for _, operation := range []string{"on", "off", "disconnect"} {
+		t.Run(operation, func(t *testing.T) {
+			home, path := claudeSettings(t, `{"model":"claude-opus-5-5"}`)
+			claudeStatusAt(t, "/usr/local/bin/magpie")
+			oldRunning := claudeRunning
+			claudeRunning = func() bool { return true }
+			t.Cleanup(func() { claudeRunning = oldRunning })
+			agent := claude(home)
+			if operation == "disconnect" {
+				saveDeepseek(t)
+				if err := agent.Apply("model", "deepseek/pro"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if operation != "on" {
+				if err := agent.Apply("statusline", "on"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if operation != "disconnect" {
+				if err := agent.Apply("effort", "high"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			notice := agent.Notice()
+			if operation != "disconnect" && !strings.Contains(notice, "restart") {
+				t.Fatalf("missing pending effort notice: %q", notice)
+			}
+			target, err := edit.Target(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var external string
+			err = edit.Filtered(func(name string, proposed []byte) []byte {
+				if name == target && external == "" {
+					body, err := edit.PatchJSON([]byte(readFile(name)), []edit.KV{{Path: "statusLine", Value: map[string]any{
+						"type": "command", "command": "~/.claude/statusline.sh", "padding": 0,
+					}}}, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					external = string(body)
+					writeFile(t, name, external)
+				}
+				return proposed
+			}, func() error {
+				if operation == "disconnect" {
+					return agent.Disconnect()
+				}
+				return agent.Apply("statusline", operation)
+			})
+			if external == "" || !errors.Is(err, extension.ErrActionChanged) || readFile(path) != external {
+				t.Errorf("%s = %v, concurrent status line preserved = %t", operation, err, external != "" && readFile(path) == external)
+			}
+			if got := agent.Notice(); got != notice {
+				t.Errorf("rejected operation changed restart notice from %q to %q", notice, got)
+			}
+		})
+	}
+}
+
 // settings.json that can't be read is unknown, not "no status line": on
 // writes nothing over it.
 func TestClaudeStatusLineUnreadable(t *testing.T) {
@@ -129,6 +199,7 @@ func TestClaudeStatusCommand(t *testing.T) {
 	for _, c := range []struct{ exe, goos, want string }{
 		{"/Applications/Magpie.app/Contents/MacOS/magpie", "darwin", "/Applications/Magpie.app/Contents/MacOS/magpie statusline"},
 		{"/home/me/Jo's Apps/Magpie-x86_64.AppImage", "linux", `'/home/me/Jo'\''s Apps/Magpie-x86_64.AppImage' statusline`},
+		{"/home/me/Line\nBreak/magpie", "linux", "'/home/me/Line\nBreak/magpie' statusline"},
 		{`C:\Users\Me Too\AppData\Local\Programs\magpie\magpie.exe`, "windows", `'C:/Users/Me Too/AppData/Local/Programs/magpie/magpie.exe' statusline`},
 		{`C:\Users\me\magpie.exe`, "windows", `C:/Users/me/magpie.exe statusline`},
 	} {
@@ -136,7 +207,7 @@ func TestClaudeStatusCommand(t *testing.T) {
 		if got != c.want {
 			t.Errorf("claudeStatusCommand(%q, %s) = %q, want %q", c.exe, c.goos, got, c.want)
 		}
-		if !claudeStatusOurs(got) {
+		if !builtinclaude.StatusLineOurs(got) {
 			t.Errorf("%q, written by magpie, isn't read as magpie's", got)
 		}
 	}
@@ -158,11 +229,12 @@ func TestClaudeStatusCommand(t *testing.T) {
 		"magpie;statusline":              false,
 		"magpie statusline && echo hi":   false,
 		"magpie statusline | tr a b":     false,
+		"magpie statusline\nmy-status":   false,
 		"$(which magpie) statusline":     false,
 		"'/x/magpie' 'statusline'":       true,
 	} {
-		if got := claudeStatusOurs(cmd); got != want {
-			t.Errorf("claudeStatusOurs(%q) = %v, want %v", cmd, got, want)
+		if got := builtinclaude.StatusLineOurs(cmd); got != want {
+			t.Errorf("StatusLineOurs(%q) = %v, want %v", cmd, got, want)
 		}
 	}
 }
