@@ -304,6 +304,49 @@ func RewriteTOMLWithoutKeyIf(path string, raw []byte, name, key string, selected
 	if selected != nil && !selected((TOMLTable{&table}).Scalar(key)) {
 		return raw, nil
 	}
+	return renderTOML(path, withoutTOMLKeyLines(lines, table, key), raw)
+}
+
+func RewriteTOMLScalarIf(path string, raw []byte, name, key, expected string, value *string) ([]byte, error) {
+	return RewriteTOMLScalarMatching(path, raw, name, key, func(_ TOMLTable, current string) (*string, bool) {
+		return value, current == expected
+	})
+}
+
+func RewriteTOMLScalarMatching(path string, raw []byte, name, key string, replace func(TOMLTable, string) (*string, bool)) ([]byte, error) {
+	lines := splitLines(string(raw))
+	document, err := parseTOMLFile(lines)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	table := document.root
+	if name != "" {
+		var ok bool
+		table, ok = tomlTableNamed(document.tables, name)
+		if !ok || table.array {
+			return raw, nil
+		}
+	}
+	current := tomlKeyNamed(table, key)
+	if !current.scalar {
+		return raw, nil
+	}
+	value, matched := replace(TOMLTable{&table}, current.value)
+	if !matched {
+		return raw, nil
+	}
+	if value == nil {
+		if name == "" {
+			return renderTOML(path, append(append([]string{}, lines[:current.from]...), lines[current.to:]...), raw)
+		}
+		return renderTOML(path, withoutTOMLKeyLines(lines, table, key), raw)
+	}
+	replacement := current.prefix + tomlLiteral(*value) + current.suffix
+	out := append(append(append([]string{}, lines[:current.from]...), replacement), lines[current.to:]...)
+	return renderTOML(path, out, raw)
+}
+
+func withoutTOMLKeyLines(lines []string, table tomlTableSpan, key string) []string {
 	out := append([]string{}, lines[:table.from+1]...)
 	at := table.from + 1
 	for _, kv := range table.keys {
@@ -315,11 +358,10 @@ func RewriteTOMLWithoutKeyIf(path string, raw []byte, name, key string, selected
 	out = append(out, lines[at:table.to]...)
 	for _, line := range out[table.from+1:] {
 		if strings.TrimSpace(line) != "" {
-			out = append(out, lines[table.to:]...)
-			return renderTOML(path, out, raw)
+			return append(out, lines[table.to:]...)
 		}
 	}
-	return renderTOML(path, tomlWithoutTable(lines, table), raw)
+	return tomlWithoutTable(lines, table)
 }
 
 // DelTOMLTable removes table `name` (header and body) if present.

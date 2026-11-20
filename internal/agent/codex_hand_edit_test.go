@@ -157,4 +157,70 @@ func TestCodexDisconnectKeepsAuxiliaryModelsWhenRestoreRejects(t *testing.T) {
 	}
 }
 
+func TestCodexDisconnectKeepsProviderURLsWhenRestoreRejects(t *testing.T) {
+	const mirror = "\n[model_providers.cc-switch-3]\nname = \"OpenAI\"\nrequires_openai_auth = true\nwire_api = \"responses\"\n"
+	home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, ccSwitchCodex+mirror)
+	cx := codex(home)
+	if err := cx.Apply("model", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := here(home)
+	keys := []string{at.key("codex.tables"), at.key("codex.mirrors")}
+	saved := peek(keys...)
+	for _, key := range keys {
+		if saved[key] == "" {
+			t.Fatalf("missing saved provider URL ownership %q", key)
+		}
+	}
+	routed := read()
+	const lateEdit = "\n# saved by CC Switch during Disconnect\n"
+	var injected bool
+	err = edit.Filtered(func(path string, proposed []byte) []byte {
+		if path == target && !injected && strings.Contains(string(proposed), `model = "gpt-5.4"`) {
+			injected = true
+			writeFile(t, path, read()+lateEdit)
+		}
+		return proposed
+	}, cx.Disconnect)
+	if !injected || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("Disconnect did not reject a stale restore: injected=%t error=%v", injected, err)
+	}
+	if got := read(); got != routed+lateEdit {
+		t.Errorf("rejected Disconnect changed provider URLs:\n%s", got)
+	}
+	for _, key := range keys {
+		if got := stashLoad()[key]; got != saved[key] {
+			t.Errorf("rejected Disconnect forgot %q: got %q, want %q", key, got, saved[key])
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	if err := cx.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{
+		"custom": "https://relay.example/v1", "cc-switch-3": "", "cc-switch-2": "https://old.example/v1", "mine": "https://mine.example/v1",
+	} {
+		table, err := edit.GetTOMLTable(target, "model_providers."+id)
+		if err != nil || table["base_url"] != want {
+			t.Errorf("retry did not restore %q: got %q, want %q, error=%v", id, table["base_url"], want, err)
+		}
+	}
+	for _, key := range keys {
+		if got := stashLoad()[key]; got != "" {
+			t.Errorf("successful Disconnect kept %q: %q", key, got)
+		}
+	}
+	if got := read(); strings.Contains(got, "fake/m1") || !strings.Contains(got, `model_provider = "custom"`) ||
+		!strings.Contains(got, `model = "gpt-5.4"`) || !strings.HasSuffix(got, lateEdit) {
+		t.Fatalf("retry did not restore the original route and preserve the user's edit:\n%s", got)
+	}
+}
+
 func quoteTOML(s string) string { return "\"" + strings.ReplaceAll(s, `\`, `\\`) + "\"" }
