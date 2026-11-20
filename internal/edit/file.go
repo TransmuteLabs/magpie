@@ -143,14 +143,24 @@ type AtomicPublication struct {
 }
 
 func WriteAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication) error {
+	return writeAtomicRecording(path, data, check, published, nil)
+}
+
+func RestoreAtomicChecked(path string, data []byte, check func() error, original fs.FileInfo) error {
+	return writeAtomicRecording(path, data, check, nil, original)
+}
+
+func writeAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication, original fs.FileInfo) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
 	}
-	if f := filter.Load(); f != nil {
-		data = (*f)(path, data)
+	if original == nil {
+		if f := filter.Load(); f != nil {
+			data = (*f)(path, data)
+		}
+		data = keepBOM(path, data)
 	}
-	data = keepBOM(path, data)
 	// A file that already holds these bytes is left alone: a new mtime
 	// wakes every watcher of it, and a rename swaps the file under an
 	// agent reading it, for nothing (#3870).
@@ -192,6 +202,9 @@ func WriteAtomicRecording(path string, data []byte, check func() error, publishe
 	}
 	mode := fs.FileMode(0o644)
 	st, statErr := os.Stat(path)
+	if original != nil {
+		st, statErr = original, nil
+	}
 	if statErr == nil {
 		mode = st.Mode().Perm()
 	}

@@ -40,12 +40,15 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 )
 
@@ -172,18 +175,7 @@ func clineIn(at place) *Agent {
 		UA:  []string{"cline"},
 		Bin: "cline", Dir: dir, Path: path,
 		Sync: func() error {
-			if !onMagpie() {
-				return nil
-			}
-			if err := syncJSON(path, slot+".settings.baseUrl", func() any { return at.v1() }); err != nil {
-				return err
-			}
-			if k, _ := edit.GetJSON(secrets, "openAiApiKey"); ourKey(k) {
-				if err := syncJSON(state, "openAiBaseUrl", func() any { return at.v1() }); err != nil {
-					return err
-				}
-			}
-			return syncJSON(models, "providers."+clineSlot, func() any { return clineKept(models, clineModelsAt(get(slot+".settings.model"), at.v1())) })
+			return clineSync(at, path, state, secrets, models)
 		},
 		Notice: func() string {
 			if runtime.GOOS == "windows" {
@@ -285,6 +277,57 @@ func clineIn(at place) *Agent {
 			},
 		}},
 	}
+}
+
+func clineSync(at place, providersPath, statePath, secretsPath, modelsPath string) error {
+	providers := wiringFileEdit{path: providersPath}
+	state := wiringFileEdit{path: statePath}
+	secrets := wiringFileEdit{path: secretsPath}
+	models := wiringFileEdit{path: modelsPath}
+	for _, file := range []*wiringFileEdit{&providers, &state, &secrets, &models} {
+		before, err := readWiringFile(file.path)
+		if err != nil {
+			return edit.PreserveOnRollback(file.path, err)
+		}
+		file.before = before
+	}
+	read := func(file wiringFileEdit) gjson.Result {
+		return gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.before.body)))
+	}
+	const slot = "providers." + clineSlot
+	const prefix = slot + ".settings."
+	config := read(providers)
+	if config.Get("lastUsedProvider").String() != clineSlot || !ourKey(config.Get(prefix+"apiKey").String()) {
+		return nil
+	}
+	update := func(file *wiringFileEdit, key string, current gjson.Result, value any) error {
+		if !current.Exists() || sameJSON(current.Raw, value) {
+			return nil
+		}
+		body, err := edit.PatchJSON(file.before.body, []edit.KV{{Path: key, Value: value}}, nil)
+		if err != nil {
+			return file.before.preserveOnError(file.path, fmt.Errorf("%s: %w", file.path, err))
+		}
+		file.body = body
+		return nil
+	}
+	v1 := at.v1()
+	if err := update(&providers, prefix+"baseUrl", config.Get(prefix+"baseUrl"), v1); err != nil {
+		return err
+	}
+	if ourKey(read(secrets).Get("openAiApiKey").String()) {
+		const stateURL = "openAiBaseUrl"
+		if err := update(&state, stateURL, read(state).Get(stateURL), v1); err != nil {
+			return err
+		}
+	}
+	if current := read(models).Get(slot); current.Exists() {
+		want := clineModelsAt(config.Get(prefix+"model").String(), v1)
+		if err := update(&models, slot, current, clineKeptValue(current.String(), want)); err != nil {
+			return err
+		}
+	}
+	return writeWiringFiles(providers, state, secrets, models)
 }
 
 // cutMagpie is the model a magpie/<ref> value names, when it is magpie's.
@@ -417,6 +460,10 @@ func clineKept(path string, want map[string]any) any {
 	if !ok {
 		return want
 	}
+	return clineKeptValue(cur, want)
+}
+
+func clineKeptValue(cur string, want map[string]any) any {
 	var have map[string]any
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
 		return want
