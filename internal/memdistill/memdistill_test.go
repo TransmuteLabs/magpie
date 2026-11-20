@@ -36,7 +36,7 @@ func newSandbox(t *testing.T) *sandbox {
 	memory.Path = func() string { return filepath.Join(dir, "memory.json") }
 	now = func() time.Time { return sb.at }
 	list = func() []sessions.Session { return sb.list }
-	read = func(s sessions.Session) (sessions.Transcript, error) {
+	read = func(_ context.Context, s sessions.Session) (sessions.Transcript, error) {
 		tr, ok := sb.trs[s.ID]
 		if !ok {
 			return tr, sessions.ErrNoTranscript
@@ -546,6 +546,33 @@ func TestReadAllDiscardsSuccessfulReplyAfterStop(t *testing.T) {
 	res, err := ReadAll(context.Background(), "a/m", sb.complete)
 	if err != nil || res != (Result{Read: 1, Added: 1}) || len(sb.asked) != 1 {
 		t.Fatalf("did not offer the pending session again: %+v %v %v", res, err, sb.asked)
+	}
+}
+
+func TestReadAllLeavesInterruptedTranscriptPending(t *testing.T) {
+	sb := newSandbox(t)
+	on(t, "")
+	sb.session("pending", time.Hour, "we deploy on Tuesdays", "keep this preference")
+	readBefore := read
+	read = func(ctx context.Context, _ sessions.Session) (sessions.Transcript, error) {
+		Stop()
+		if ctx.Err() != context.Canceled {
+			t.Fatal("stop did not cancel the transcript reader")
+		}
+		return sessions.Transcript{}, ctx.Err()
+	}
+	result, err := ReadAll(t.Context(), "a/m", sb.complete)
+	if err != nil || result != (Result{}) || len(sb.asked) != 0 {
+		t.Fatalf("interrupted transcript reached the model: %+v %v %v", result, err, sb.asked)
+	}
+	state, err := Load()
+	if err != nil || len(state.Done) != 0 || state.Left != 1 || state.Error != "" {
+		t.Fatalf("interrupted transcript was not left pending: %+v %v", state, err)
+	}
+	read = readBefore
+	result, err = ReadAll(t.Context(), "a/m", sb.complete)
+	if err != nil || result.Read != 1 || len(sb.asked) != 1 {
+		t.Fatalf("did not read the pending transcript again: %+v %v %v", result, err, sb.asked)
 	}
 }
 

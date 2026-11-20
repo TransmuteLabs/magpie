@@ -245,7 +245,8 @@ further (`State.Since`), unless a range is picked.
   It reads every conversation due, one request at a time, and the row
   shows how far it has gone (`Progress`, `doing` of `of` in the view)
   with a Stop (`Stop`, `POST /api/memory/distill/stop`; switching off
-  stops it too). A stop or a failure leaves the rest for the next run,
+  stops it too). Stop cancels the active transcript reader or model request
+  and leaves that conversation pending. A failure also leaves the rest for the next run,
   and the row says how many (`State.Left`) (`TestBacklogReadAtOnce`,
   `TestStopEndsTheRun`). Before, every run read 10, and 400 took 40
   hours (RealZeroP27 on X).
