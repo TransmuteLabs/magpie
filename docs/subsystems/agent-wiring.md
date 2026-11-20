@@ -150,6 +150,12 @@ The host supplies admitted model identities, gateway access and local or WSL
 file locations. The planners return `AgentPlan` changes. The host checks the
 snapshots before publication and updates the restore stash after success.
 
+Qoder and Qoder CN use one [settings planner](../../internal/extension/builtin/qoder/plan.go)
+for model selection, effort, reset and catalog refresh. A model pick updates
+the provider, selected model and inherited effort from one settings snapshot.
+The host supplies the gateway address, key ownership and visible model
+catalog, then updates the restore stash after the checked write succeeds.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |
