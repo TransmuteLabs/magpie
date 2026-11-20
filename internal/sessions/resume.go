@@ -8,6 +8,7 @@ import (
 	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
+	"github.com/yetone/magpie/internal/extension/builtin/pisession"
 	"github.com/yetone/magpie/internal/lazyre"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -15,6 +16,7 @@ import (
 var linkedSessionResumeRecipes = map[string]sdk.SessionResumeRecipe{
 	"claude": builtinclaude.ResumeSession(),
 	"codex":  builtincodex.ResumeSession(""),
+	"pi":     pisession.ResumeSession(),
 }
 
 var plainResumeArg = lazyre.New(`^[0-9A-Za-z_.=-]+$`)

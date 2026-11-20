@@ -48,6 +48,7 @@ func wslDistro(t *testing.T) (home string, running *bool) {
 // with the distro, resumed there through wsl.exe; their calls count in usage.
 func TestWSLSessionsListed(t *testing.T) {
 	home, _ := wslDistro(t)
+	t.Cleanup(ForceCLIGone("pi"))
 	ss := List(0)
 	got := map[string]Session{}
 	for _, s := range ss {
@@ -71,6 +72,14 @@ func TestWSLSessionsListed(t *testing.T) {
 	}
 	if r := got["codex"].Resume; !strings.HasPrefix(r, "wsl.exe -d 'Ubuntu' ") || !strings.Contains(r, "''codex resume ") {
 		t.Fatalf("codex resume %q", r)
+	}
+	pi := find(t, ss, "pi", piFirst)
+	wantPi := `wsl.exe -d 'Ubuntu' --cd '/work/pi' -e sh -lc 'exec ${SHELL:-sh} -lic ''pi --session ` + piFirst + `'''`
+	if pi.Resume != wantPi {
+		t.Fatalf("Pi resume\n got %s\nwant %s", pi.Resume, wantPi)
+	}
+	if opened := ResumeNow(pi); opened != wantPi {
+		t.Fatalf("opening the WSL Pi session gave %q, want %q", opened, wantPi)
 	}
 	omp := got["omp"]
 	if omp.ID != "019a0000-0000-7000-8000-00000000000a" || omp.Cwd != "/work/omp" || omp.Title != "Port the parser to omp" || omp.Tokens.zero() {

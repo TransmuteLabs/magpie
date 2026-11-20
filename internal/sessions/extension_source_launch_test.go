@@ -75,3 +75,34 @@ func TestSourceResumeCommandQuotesFiniteArguments(t *testing.T) {
 		t.Fatal("resume command survived a missing executable or identity")
 	}
 }
+
+func TestSourceNativePiResumeUsesLinkedRecipe(t *testing.T) {
+	previous, registered := linkedSessionResumeRecipes["pi"]
+	if !registered {
+		t.Fatal("Pi has no linked resume recipe")
+	}
+	t.Cleanup(func() { linkedSessionResumeRecipes["pi"] = previous })
+	linkedSessionResumeRecipes["pi"] = sdk.SessionResumeRecipe{
+		Agent: "pi", Args: []string{"--linked-pi-fixture", "{sessionId}"},
+	}
+	session := Session{
+		Agent: "pi", ID: "listed-id",
+		source: &sessionSourceRecord{
+			grant: sourceGrant{descriptor: sdk.SessionSourceDescriptor{Agent: "pi", Resume: "native"}},
+			request: sdk.SessionSourceReadRequest{
+				Locator: sdk.SessionSourceLocator{SessionID: "source-id", Path: "source-id.jsonl"},
+			},
+			summary: &state{},
+		},
+	}
+	listed(&session)
+	if session.Resume != "pi --linked-pi-fixture source-id" {
+		t.Fatalf("source-backed Pi resume = %q", session.Resume)
+	}
+
+	t.Cleanup(ForceCLIGone("pi"))
+	listed(&session)
+	if session.Resume != "" {
+		t.Fatalf("source-backed Pi resume offered with pi gone: %q", session.Resume)
+	}
+}

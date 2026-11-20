@@ -233,6 +233,9 @@ func TestPi(t *testing.T) {
 	if p.Resume != want {
 		t.Fatalf("resume %q", p.Resume)
 	}
+	if got := ResumeNow(p); got != want {
+		t.Fatalf("opening the Pi session gave %q, want %q", got, want)
+	}
 
 	// the fork: what it copied counted in the session it came from
 	f := find(t, ss, "pi", piFork)
@@ -249,6 +252,12 @@ func TestPi(t *testing.T) {
 	}
 	if got, sec := usageOn(s, "2026-09-25", "/work/pi"); got != (Tokens{7, 3, 0, 0, 0}) || sec != 20 {
 		t.Fatalf("pi on the 25th: %+v, %ds active", got, sec)
+	}
+
+	t.Cleanup(ForceCLIGone("pi"))
+	Reset()
+	if got := find(t, List(0), "pi", piFirst).Resume; got != "" {
+		t.Fatalf("resume offered with pi gone: %q", got)
 	}
 }
 

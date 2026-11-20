@@ -3162,8 +3162,6 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 	switch agent {
 	case "opencode":
 		run = "opencode --session " + id
-	case "pi":
-		run = "pi --session " + id
 	case "cline":
 		run = "cline --id " + id
 	case "qoder":

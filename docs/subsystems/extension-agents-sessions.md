@@ -164,8 +164,11 @@ must own the source's agent ID or explicitly profile that native target.
 Source data does not supply a command, executable path or environment.
 Existing `none` and `native` resume declarations keep their behavior.
 
-Built-in Claude Code, Codex and OMP contribute the same `SessionResumeRecipe`
-type from their linked modules. The host resolves OMP's profile from the
+Built-in Claude Code, Codex, OMP and Pi contribute the same
+`SessionResumeRecipe` type from their linked modules. Pi uses its recipe for
+native transcripts and SDK sources that declare native Pi resume. The host
+also uses the recipe's agent to check whether Pi's executable is available.
+The host resolves OMP's profile from the
 selected session store and validates its name before asking the module for
 arguments. The native command renderer rejects flag-like session IDs, admits
 only shell-safe atoms and owns the working-directory and WSL wrappers.

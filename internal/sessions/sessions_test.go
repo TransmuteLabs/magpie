@@ -228,10 +228,17 @@ func TestResumeCommand(t *testing.T) {
 	if ResumeCommand("claude", "x; rm -rf /", "/tmp") != "" {
 		t.Fatal("an id that isn't plain must give no command")
 	}
-	for _, agent := range []string{"claude", "codex"} {
+	for _, agent := range []string{"claude", "codex", "pi"} {
 		if ResumeCommand(agent, "--help", "/tmp") != "" {
 			t.Fatalf("%s accepted a flag as a session identity", agent)
 		}
+	}
+	piID := strings.Repeat("p", 128)
+	if got := ResumeCommand("pi", piID, ""); got != "pi --session "+piID {
+		t.Fatalf("Pi rejected an ID at the SDK length limit: %q", got)
+	}
+	if got := ResumeCommand("pi", piID+"p", ""); got != "" {
+		t.Fatalf("Pi accepted an ID above the SDK length limit: %q", got)
 	}
 	if got := ResumeCommand("codex", "abc", ""); got != "codex resume abc" {
 		t.Fatalf("no folder: %q", got)
@@ -245,10 +252,13 @@ func TestResumeCommand(t *testing.T) {
 }
 
 func TestResumeUsesLinkedAgentRecipe(t *testing.T) {
-	manageSetup(t)
-	targets := []struct{ agent, id string }{{"claude", mgCC}, {"codex", mgCX}}
+	setupMore(t)
+	targets := []struct{ agent, id string }{{"claude", mgCC}, {"codex", mgCX}, {"pi", piFirst}}
 	for _, target := range targets {
-		previous := linkedSessionResumeRecipes[target.agent]
+		previous, registered := linkedSessionResumeRecipes[target.agent]
+		if !registered {
+			t.Fatalf("%s has no linked resume recipe", target.agent)
+		}
 		t.Cleanup(func() { linkedSessionResumeRecipes[target.agent] = previous })
 		recipe := *previous.Clone()
 		recipe.Args = append([]string{"--sdk-recipe"}, recipe.Args...)

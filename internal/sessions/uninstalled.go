@@ -21,8 +21,8 @@ import (
 // cliOf is the command each agent's sessions are resumed with, for the
 // agents magpie can't move to the trash (Deletable) as well.
 var cliOf = map[string]string{
-	"opencode": "opencode", "pi": "pi",
-	"cline": "cline", "qoder": "qodercli", "qoder-cn": "qoderclicn",
+	"opencode": "opencode",
+	"cline":    "cline", "qoder": "qodercli", "qoder-cn": "qoderclicn",
 	"grok": "grok", "codebuddy": "codebuddy", "omp": "omp", "droid": "droid",
 	"kimi": "kimi", "agy": "agy", "cursor": "cursor-agent", "hermes": "hermes",
 }
