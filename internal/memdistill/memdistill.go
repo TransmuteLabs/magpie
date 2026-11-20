@@ -193,6 +193,10 @@ func save(s State) error {
 
 // change applies fn to distill.json under its lock.
 func change(fn func(*State)) (State, error) {
+	return changeState(fn, false)
+}
+
+func changeState(fn func(*State), stopAfter bool) (State, error) {
 	unlock, held := filelock.Lock(Path()+".lock", 10*time.Second)
 	if !held {
 		return State{}, errors.New("distill.json is held by another magpie")
@@ -203,7 +207,13 @@ func change(fn func(*State)) (State, error) {
 		return s, err
 	}
 	fn(&s)
-	return s, save(s)
+	if err := save(s); err != nil {
+		return s, err
+	}
+	if stopAfter {
+		Stop()
+	}
+	return s, nil
 }
 
 // Ranges are the ranges, in days, reading can be set to look back: Back's
@@ -225,41 +235,94 @@ func since(days int, t time.Time) time.Time {
 // Switched on from off, it looks back the range picked (Back by default)
 // from now; switched off, the run going stops.
 func Set(on bool, model string) (State, error) {
-	if !on {
-		Stop()
+	state, _, err := Configure(SettingsChange{On: on, Model: model})
+	return state, err
+}
+
+type SettingsChange struct {
+	On     bool    `json:"on"`
+	Model  string  `json:"model"`
+	Effort *string `json:"effort"`
+	Days   *int    `json:"days"`
+}
+
+func Configure(in SettingsChange) (State, bool, error) {
+	var effort string
+	if in.Effort != nil {
+		level, err := normalizedEffort(*in.Effort)
+		if err != nil {
+			return State{}, false, err
+		}
+		effort = level
 	}
-	return change(func(s *State) {
-		if on && !s.On {
+	var days int
+	if in.Days != nil {
+		rangeDays, err := normalizedRange(*in.Days)
+		if err != nil {
+			return State{}, false, err
+		}
+		days = rangeDays
+	}
+	model := strings.TrimSpace(in.Model)
+	read := false
+	state, err := changeState(func(s *State) {
+		longer := false
+		if in.Days != nil {
+			lookback := since(days, now())
+			longer = lookback.Before(s.Since)
+			s.Days, s.Since = days, lookback
+		} else if in.On && !s.On {
 			s.Since = since(s.Days, now())
 		}
-		s.On, s.Model = on, strings.TrimSpace(model)
-	})
+		if in.Effort != nil {
+			s.Effort = effort
+		}
+		read = in.On && (!s.On || s.Model != model || longer)
+		s.On, s.Model = in.On, model
+	}, !in.On)
+	return state, read && err == nil, err
 }
 
 // SetRange picks how far back reading looks: one of Ranges, from now. A
 // conversation read already isn't read again for a longer range; one
 // older than a shorter range isn't read.
 func SetRange(days int) (State, error) {
-	if !slices.Contains(Ranges, days) {
-		return State{}, fmt.Errorf("a range of %v days, not %d", Ranges, days)
+	days, err := normalizedRange(days)
+	if err != nil {
+		return State{}, err
 	}
 	return change(func(s *State) {
-		if days == 7 {
-			days = 0 // Back, kept as before a range could be picked
-		}
 		s.Days, s.Since = days, since(days, now())
 	})
+}
+
+func normalizedRange(days int) (int, error) {
+	if !slices.Contains(Ranges, days) {
+		return 0, fmt.Errorf("a range of %v days, not %d", Ranges, days)
+	}
+	if days == 7 {
+		days = 0 // Back, kept as before a range could be picked
+	}
+	return days, nil
 }
 
 // SetEffort picks the reasoning level the model is asked at, "" for its
 // own default. A level the model doesn't have is fitted to the nearest it
 // has when sent.
 func SetEffort(effort string) (State, error) {
-	effort = strings.ToLower(strings.TrimSpace(effort))
-	if effort != "" && !slices.Contains(efforts, effort) {
-		return State{}, fmt.Errorf("a reasoning level of %v, not %q", efforts, effort)
+	effort, err := normalizedEffort(effort)
+	if err != nil {
+		return State{}, err
 	}
 	return change(func(s *State) { s.Effort = effort })
+}
+
+func normalizedEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort != "" && !slices.Contains(efforts, effort) {
+		return "", fmt.Errorf("a reasoning level of %v, not %q", efforts, effort)
+	}
+	return effort, nil
 }
 
 // efforts are the levels SetEffort takes (gateway's effortRank).
