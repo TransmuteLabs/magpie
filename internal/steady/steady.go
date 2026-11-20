@@ -50,12 +50,22 @@ var (
 )
 
 func retry(f func() error) error {
-	err := f()
-	for i := 0; err != nil && windows && !errors.Is(err, fs.ErrNotExist) && i < tries; i++ {
+	return retryChecked(nil, f)
+}
+
+func retryChecked(check, f func() error) error {
+	for attempt := 0; ; attempt++ {
+		if check != nil {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		err := f()
+		if err == nil || !windows || errors.Is(err, fs.ErrNotExist) || attempt == tries {
+			return err
+		}
 		time.Sleep(pause)
-		err = f()
 	}
-	return err
 }
 
 // retryGone is retry, waiting out a moment of the file not there too,
@@ -142,7 +152,11 @@ func ReadFile(p string) ([]byte, error) {
 
 // Rename is os.Rename, waiting out a reader holding newpath open.
 func Rename(oldpath, newpath string) error {
-	return retry(func() error { return os.Rename(oldpath, newpath) })
+	return RenameChecked(oldpath, newpath, nil)
+}
+
+func RenameChecked(oldpath, newpath string, check func() error) error {
+	return retryChecked(check, func() error { return os.Rename(oldpath, newpath) })
 }
 
 // Sync is (*os.File).Sync; a test stands in for it to make a flush fail.

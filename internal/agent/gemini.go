@@ -29,18 +29,15 @@ func geminiIn(at place) *Agent {
 	dir := at.join(".gemini")
 	path := filepath.Join(dir, "settings.json")
 	envPath := filepath.Join(dir, ".env")
-	auth := jsonGet(path, "security.auth.selectedType")
-	model := jsonGet(path, "model.name")
-	base := func() string { v, _ := edit.GetEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL"); return v }
-	envKey := func() string { v, _ := edit.GetEnvFile(envPath, "GEMINI_API_KEY"); return v }
+	auth := jsonGet(path, geminiAuthPath)
+	model := jsonGet(path, geminiModel)
+	base := func() string { v, _ := edit.GetEnvFile(envPath, geminiBaseKey); return v }
+	envKey := func() string { v, _ := edit.GetEnvFile(envPath, geminiAPIKey); return v }
 	// routed: the .env names the gateway, or names it at an address it
 	// no longer has (a WSL distro's under NAT changes as WSL restarts) with
 	// magpie's key: either way what is there is magpie's, never stashed as
 	// the user's own
-	routed := func() bool {
-		b, k := base(), envKey()
-		return b == at.gw() || b != "" && (ourKey(k) || k == at.gwKey())
-	}
+	routed := func() bool { return geminiRouted(base(), envKey(), at.gw()) }
 	magpieKey := func() string {
 		for _, id := range []string{"google", "gemini"} {
 			if p, err := provider.Find(id); err == nil && p.Key != "" {
@@ -49,65 +46,11 @@ func geminiIn(at place) *Agent {
 		}
 		return ""
 	}
-	// unroute puts back what routing through the gateway replaced
-	unroute := func() error {
-		if !routed() {
-			return nil
-		}
-		if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-			return err
-		}
-		var env []edit.KV
-		if u := unstash(at.key("gemini.base_url")); u != "" {
-			env = append(env, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: u})
-		}
-		if k := unstash(at.key("gemini.api_key")); k != "" {
-			env = append(env, edit.KV{Path: "GEMINI_API_KEY", Value: k})
-		}
-		if len(env) > 0 {
-			if err := edit.SetEnvFile(envPath, env...); err != nil {
-				return err
-			}
-		}
-		if a := unstash(at.key("gemini.auth")); a != "" {
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: a}); err != nil {
-				return err
-			}
-		} else if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-			return err
-		}
-		if m := unstash(at.key("gemini.model")); m != "" {
-			return edit.SetJSON(path, edit.KV{Path: "model.name", Value: m})
-		}
-		return delModelName(path)
+	change := func(choice geminiChoice) error {
+		return changeGeminiSettings(at, path, envPath, choice)
 	}
-	setModel := func(v string) error {
-		if v == "" {
-			if routed() {
-				forget(at.key("gemini.base_url"), at.key("gemini.api_key"), at.key("gemini.auth"), at.key("gemini.model"))
-				if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-					return err
-				}
-				if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-					return err
-				}
-			}
-			return delModelName(path)
-		}
-		if isMagpie(v) {
-			if !routed() {
-				stash(map[string]string{at.key("gemini.base_url"): base(), at.key("gemini.api_key"): envKey(), at.key("gemini.auth"): auth(), at.key("gemini.model"): model()})
-			}
-			if err := edit.SetEnvFile(envPath, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: at.gw()}, edit.KV{Path: "GEMINI_API_KEY", Value: at.gwKey()}); err != nil {
-				return err
-			}
-			return edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"}, edit.KV{Path: "model.name", Value: v})
-		}
-		if err := unroute(); err != nil {
-			return err
-		}
-		return edit.SetJSON(path, edit.KV{Path: "model.name", Value: v})
-	}
+	unroute := func() error { return change(geminiChoice{}) }
+	setModel := func(v string) error { return change(geminiChoice{model: v, reset: v == ""}) }
 
 	current := func() string {
 		if routed() {
@@ -140,45 +83,19 @@ func geminiIn(at place) *Agent {
 		// unrouted Gemini CLI first, as `magpie snow --help` took magpie
 		// out of Snow (#1457)
 		switch id {
-		case "", "custom", "google", "vertex", "api-key":
+		case "":
+			return change(geminiChoice{auth: "default"})
+		case "custom":
+			return change(geminiChoice{auth: "custom"})
+		case "google":
+			return change(geminiChoice{auth: "oauth-personal"})
+		case "vertex":
+			return change(geminiChoice{auth: "vertex-ai"})
+		case "api-key":
+			return change(geminiChoice{auth: "gemini-api-key", apiKey: magpieKey()})
 		default:
 			return fmt.Errorf("%q is neither one of Gemini CLI's models nor an auth (google, api-key, vertex): nothing was changed", id)
 		}
-		if err := unroute(); err != nil {
-			return err
-		}
-		switch id {
-		case "":
-			// back to the CLI's own first-run choice
-			if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-				return err
-			}
-		case "custom":
-			if current() != "custom" {
-				return fmt.Errorf("custom means whatever GOOGLE_GEMINI_BASE_URL is already in %s; set it there", envPath)
-			}
-			return nil
-		case "google":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "oauth-personal"}); err != nil {
-				return err
-			}
-		case "vertex":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "vertex-ai"}); err != nil {
-				return err
-			}
-		case "api-key":
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: "gemini-api-key"}); err != nil {
-				return err
-			}
-			if k := magpieKey(); k != "" && envKey() != k {
-				if err := edit.SetEnvFile(envPath, edit.KV{Path: "GEMINI_API_KEY", Value: k}); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("unknown provider %q", id)
-		}
-		return edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL")
 	}
 
 	return &Agent{
@@ -207,7 +124,7 @@ func geminiIn(at place) *Agent {
 				return ""
 			}
 			if d := wiringOff("Gemini CLI", envPath, func(k string) (string, bool) { return edit.GetEnvFile(envPath, k) },
-				"GOOGLE_GEMINI_BASE_URL", at.gw(), "GEMINI_API_KEY", at.gwKey()); d != "" {
+				geminiBaseKey, at.gw(), geminiAPIKey, at.gwKey()); d != "" {
 				return d
 			}
 			if a := auth(); a != "gemini-api-key" {
@@ -267,19 +184,6 @@ func geminiIn(at place) *Agent {
 			},
 		},
 	}
-}
-
-// delModelName takes model.name out of Gemini CLI's settings.json, and the
-// model it was in once nothing else is there: the "model": {} it would
-// leave was never the user's.
-func delModelName(path string) error {
-	if err := edit.DelJSON(path, "model.name"); err != nil {
-		return err
-	}
-	if v, _ := edit.GetJSON(path, "model"); strings.TrimSpace(strings.Trim(strings.TrimSpace(v), "{}")) == "" && strings.HasPrefix(strings.TrimSpace(v), "{") {
-		return edit.DelJSON(path, "model")
-	}
-	return nil
 }
 
 // what gemini says after a change (notice.go)

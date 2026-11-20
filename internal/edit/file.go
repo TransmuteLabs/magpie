@@ -133,6 +133,16 @@ func WriteAtomic(path string, data []byte) error {
 
 // WriteAtomicChecked checks the caller's observed state just before publishing.
 func WriteAtomicChecked(path string, data []byte, check func() error) error {
+	return WriteAtomicRecording(path, data, check, nil)
+}
+
+type AtomicPublication struct {
+	Info         fs.FileInfo
+	Body         []byte
+	RetainedTail bool
+}
+
+func WriteAtomicRecording(path string, data []byte, check func() error, published *AtomicPublication) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -157,7 +167,16 @@ func WriteAtomicChecked(path string, data []byte, check func() error) error {
 	if hardLinked(path) {
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {
-			if err := writeInPlace(f, data, check); err != nil {
+			var info fs.FileInfo
+			if published != nil {
+				info, err = f.Stat()
+				if err != nil {
+					f.Close()
+					return err
+				}
+			}
+			err = writeInPlace(f, data, check, info, published)
+			if err != nil {
 				return err
 			}
 			steady.RemoveStaleTemps(path)
@@ -213,19 +232,25 @@ func WriteAtomicChecked(path string, data []byte, check func() error) error {
 		cleanup()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if check != nil {
-		if err := check(); err != nil {
+	var publishedInfo fs.FileInfo
+	if published != nil {
+		publishedInfo, err = tmp.Stat()
+		if err != nil {
+			tmp.Close()
 			cleanup()
 			return err
 		}
 	}
-	if err := steady.Rename(tmpName, path); err != nil {
+	if err := tmp.Close(); err != nil {
 		cleanup()
 		return err
+	}
+	if err := steady.RenameChecked(tmpName, path, check); err != nil {
+		cleanup()
+		return err
+	}
+	if published != nil {
+		*published = AtomicPublication{Info: publishedInfo, Body: data}
 	}
 	steady.RemoveStaleTemps(path)
 	return nil
@@ -245,7 +270,7 @@ func WriteAtomicChecked(path string, data []byte, check func() error) error {
 // leaves the whole new text in that temp file, and a write that fails part
 // way keeps it there and names it in the error. The file keeps its mode,
 // its owner and all its names.
-func writeInPlace(f *os.File, data []byte, check func() error) error {
+func writeInPlace(f *os.File, data []byte, check func() error, info fs.FileInfo, published *AtomicPublication) error {
 	path := f.Name()
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
@@ -279,9 +304,14 @@ func writeInPlace(f *os.File, data []byte, check func() error) error {
 	// may load as a config with nothing set and act on, where a mangled one
 	// fails to parse. Written over, a text no longer than the old also
 	// needs no more room on the disk.
-	_, err = f.Write(data)
+	written, err := f.Write(data)
+	var truncated bool
 	if err == nil {
 		err = f.Truncate(int64(len(data)))
+		truncated = err == nil
+	}
+	if published != nil && (written > 0 || truncated) {
+		*published = AtomicPublication{Info: info, Body: data[:written], RetainedTail: !truncated}
 	}
 	if err == nil {
 		err = f.Sync()
@@ -337,13 +367,29 @@ func IsLink(path string) bool {
 // AGENTS.md empties CLAUDE.md too, where deleting the one name would leave
 // the text magpie is taking back under the other.
 func Remove(path string) error {
+	return RemoveChecked(path, nil, nil)
+}
+
+func RemoveChecked(path string, check func() error, published *AtomicPublication) error {
 	if !IsLink(path) && !hardLinked(path) {
-		return os.Remove(path)
+		if check != nil {
+			if err := check(); err != nil {
+				return err
+			}
+		}
+		err := os.Remove(path)
+		if err == nil {
+			filememo.Forget()
+		}
+		return err
 	}
 	if _, err := os.Stat(path); err != nil {
+		if check != nil {
+			return errors.Join(err, check())
+		}
 		return nil // points at nothing: nothing to empty
 	}
-	return WriteAtomic(path, nil)
+	return WriteAtomicRecording(path, nil, check, published)
 }
 
 type preserveRollbackError struct {

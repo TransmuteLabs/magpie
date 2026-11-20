@@ -16,9 +16,13 @@ func GetEnvFile(path, key string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	return GetEnv(raw, key)
+}
+
+func GetEnv(raw []byte, key string) (string, bool) {
 	// A key set twice takes its last value: dotenv readers, Gemini CLI's among
 	// them, let a later line override an earlier one.
-	lines := splitLines(string(raw))
+	lines := splitLines(string(TrimBOM(raw)))
 	for i := len(lines) - 1; i >= 0; i-- {
 		if m := envLine.FindStringSubmatch(lines[i]); m != nil && m[1] == key {
 			if v, ok := unquote(m[2]); ok {
@@ -41,6 +45,11 @@ func SetEnvFile(path string, kvs ...KV) error {
 	if err != nil {
 		return err
 	}
+	return WriteAtomic(path, PatchEnv(raw, kvs...))
+}
+
+func PatchEnv(raw []byte, kvs ...KV) []byte {
+	raw = TrimBOM(raw)
 	lines := splitLines(string(raw))
 	for _, kv := range kvs {
 		v := toString(kv.Value)
@@ -60,7 +69,7 @@ func SetEnvFile(path string, kvs ...KV) error {
 		})
 	}
 	lines = markEnv(lines, string(raw))
-	return WriteAtomic(path, []byte(joinLinesLike(lines, string(raw))))
+	return []byte(joinLinesLike(lines, string(raw)))
 }
 
 // DelEnvFile removes keys from a dotenv file, and the file when they were
@@ -70,6 +79,18 @@ func DelEnvFile(path string, keys ...string) error {
 	if err != nil || len(raw) == 0 {
 		return err
 	}
+	body, changed := PatchEnvWithout(raw, keys...)
+	if !changed {
+		return nil
+	}
+	if body == nil {
+		return Remove(path)
+	}
+	return WriteAtomic(path, body)
+}
+
+func PatchEnvWithout(raw []byte, keys ...string) ([]byte, bool) {
+	raw = TrimBOM(raw)
 	drop := map[string]bool{}
 	for _, k := range keys {
 		drop[k] = true
@@ -84,12 +105,12 @@ func DelEnvFile(path string, keys ...string) error {
 		out = append(out, l)
 	}
 	if !changed {
-		return nil
+		return raw, false
 	}
 	// a note magpie put above a key goes with it
 	out = markEnv(out, string(raw))
 	if strings.TrimSpace(strings.Join(withoutNotes(out), "")) == "" {
-		return Remove(path)
+		return nil, true
 	}
-	return WriteAtomic(path, []byte(joinLines(out)))
+	return []byte(joinLines(out)), true
 }
