@@ -108,6 +108,48 @@ func TestZedCredentialFailureLeavesSettings(t *testing.T) {
 	}
 }
 
+func TestZedCredentialDoesNotOverwriteConcurrentSettings(t *testing.T) {
+	for _, name := range []string{"select model", "change proxy"} {
+		t.Run(name, func(t *testing.T) {
+			home := syncHome(t)
+			a := zedAt(filepath.Join(home, "zed"))
+			credential := zedCredential
+			t.Cleanup(func() { zedCredential = credential })
+			zedCredential = func(string) error { return nil }
+			writeFile(t, a.Path, `{"agent":{"default_model":{"provider":"openai","model":"original"}}}`)
+			apply := func() error { return a.Apply("model", "magpie/relay/glm-4.6") }
+			if name == "change proxy" {
+				if err := apply(); err != nil {
+					t.Fatal(err)
+				}
+				apply = func() error { return ZedThrough(a, "http://127.0.0.1:8787/bili/") }
+			}
+			recovery := stashLoad()
+			const updated = `{
+  // Zed wrote a new settings file while the key store was open.
+  "agent":{"default_model":{"provider":"openai","model":"new"}},
+  "language_models":{"openai_compatible":{"magpie":{"api_url":"https://custom.example/v1"}}}
+}`
+			zedCredential = func(string) error {
+				writeFile(t, a.Path, updated)
+				return nil
+			}
+			if err := apply(); err == nil {
+				t.Error("accepted a plan for settings that changed during credential storage")
+			}
+			if got := readFile(a.Path); got != updated {
+				t.Errorf("concurrent settings were overwritten: %s", got)
+			}
+			for _, field := range []string{"model", "provider"} {
+				key := "zed:" + a.Path + ":" + field
+				if got := stashLoad()[key]; got != recovery[key] {
+					t.Errorf("restore entry %q changed from %q to %q", field, recovery[key], got)
+				}
+			}
+		})
+	}
+}
+
 func TestZedFreshAndOwn(t *testing.T) {
 	home := syncHome(t)
 	a := zedAt(filepath.Join(home, "zed"))

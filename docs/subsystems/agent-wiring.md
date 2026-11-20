@@ -94,6 +94,10 @@ exercises ordinary discovery, connect, apply, rediscovery, preview, stale-file
 refusal, disconnect and disable. Sibling tests protect manual wiring and
 built-in ID ownership.
 
+Zed's model, catalog and proxy edits share a checked JSONC snapshot.
+If Zed changes its settings while the credential store is open, Magpie
+refuses the edit and keeps the existing restore history.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |
