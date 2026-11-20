@@ -56,7 +56,7 @@ func pluginClients() []usage.Known {
 func clientNames(agents []*Agent) []usage.Known {
 	var names []usage.Known
 	for _, agent := range agents {
-		names = append(names, usage.Known{ID: agent.ID, Names: append([]string{agent.ID}, agent.Aliases...), UA: agent.UA})
+		names = append(names, usage.Known{ID: agent.ID, Name: agent.Name, Names: append([]string{agent.ID}, agent.Aliases...), UA: agent.UA})
 	}
 	return names
 }

@@ -36,12 +36,8 @@ import (
 // The gateway knows each agent's requests by what this package says of it.
 func init() {
 	usage.Agents = func() []usage.Known {
-		var out []usage.Known
 		home, cfg := homes()
-		for _, a := range ClientsIn(onMachineAll(home, cfg)) {
-			out = append(out, usage.Known{ID: a.ID, Names: append([]string{a.ID}, a.Aliases...), UA: a.UA})
-		}
-		return out
+		return clientNames(ClientsIn(onMachineAll(home, cfg)))
 	}
 	usage.PluginAgents = pluginClients
 	// the Sessions page reads the sessions of the agents in WSL distros
