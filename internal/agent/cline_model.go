@@ -25,6 +25,29 @@ func clineReadSettings(file wiringFileEdit) gjson.Result {
 	return gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.before.body)))
 }
 
+func clineSetEffort(path, effort string) error {
+	file := wiringFileEdit{path: path, private: true}
+	if err := readClineFiles(&file); err != nil {
+		return err
+	}
+	provider := clineReadSettings(file).Get("lastUsedProvider").String()
+	if provider == "" {
+		provider = "cline"
+	}
+	key := "providers." + provider + ".settings.reasoning"
+	var set []edit.KV
+	var remove []string
+	if effort == "" {
+		remove = []string{key}
+	} else {
+		set = []edit.KV{{Path: key, Value: clineReasoning(effort)}}
+	}
+	if err := patchClineFile(&file, providersEmpty, set, remove); err != nil {
+		return err
+	}
+	return writeWiringFiles(file)
+}
+
 func patchClineFile(file *wiringFileEdit, seed string, set []edit.KV, del []string) error {
 	body := file.body
 	if body == nil {

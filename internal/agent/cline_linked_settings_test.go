@@ -17,6 +17,110 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
+func TestClineEffortUsesCurrentProviderDuringCatalogHold(t *testing.T) {
+	home := syncHome(t)
+	t.Setenv("CLINE_DIR", "")
+	t.Setenv("CLINE_DATA_DIR", "")
+	a := cline(home)
+	native := `{"lastUsedProvider":"anthropic","providers":{"anthropic":{"settings":{"reasoning":{"enabled":false}}},"openai-compatible":{"settings":{"model":"existing"}}}}`
+	writeFile(t, a.Path, native)
+	settled := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(a.Path, settled, settled); err != nil {
+		t.Fatal(err)
+	}
+	release := filememo.Hold()
+	defer release()
+	if current, _ := edit.GetJSON(a.Path, "lastUsedProvider"); current != "anthropic" {
+		t.Fatal("provider fixture was not read", current)
+	}
+	writeFile(t, a.Path, strings.Replace(native, `"lastUsedProvider":"anthropic"`, `"lastUsedProvider":"openai-compatible"`, 1))
+	if err := a.Apply("effort", "high"); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	for key, want := range map[string]string{
+		"providers.anthropic.settings.reasoning.enabled":        "false",
+		"providers.openai-compatible.settings.reasoning.effort": "high",
+		"providers.openai-compatible.settings.model":            "existing",
+	} {
+		if value, _ := edit.GetJSON(a.Path, key); value != want {
+			t.Errorf("%s = %q, want %q", key, value, want)
+		}
+	}
+}
+
+func TestClineEffortPreservesUserEditDuringPublication(t *testing.T) {
+	for _, effort := range []string{"high", ""} {
+		t.Run("effort="+effort, func(t *testing.T) {
+			home := syncHome(t)
+			t.Setenv("CLINE_DIR", "")
+			t.Setenv("CLINE_DATA_DIR", "")
+			a := cline(home)
+			before := `{"lastUsedProvider":"anthropic","providers":{"anthropic":{"settings":{"model":"before","reasoning":{"enabled":false}}}}}`
+			writeFile(t, a.Path, before)
+			target, err := edit.Target(a.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := strings.Replace(readFile(a.Path), `"before"`, `"after"`, 1)
+			edited := false
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !edited {
+					edited = true
+					writeFile(t, a.Path, user)
+				}
+				return body
+			}, func() error { return a.Apply("effort", effort) })
+			if !edited || !errors.Is(err, extension.ErrActionChanged) {
+				t.Errorf("effort accepted a stale settings file: edited=%t, error=%v", edited, err)
+			}
+			if readFile(a.Path) != user {
+				t.Error("effort overwrote the concurrent edit")
+			}
+		})
+	}
+}
+
+func TestClineEffortDefaultsAndClears(t *testing.T) {
+	home := syncHome(t)
+	t.Setenv("CLINE_DIR", "")
+	t.Setenv("CLINE_DATA_DIR", "")
+	a := cline(home)
+	if err := a.Apply("effort", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(a.Path); !os.IsNotExist(err) {
+		t.Fatalf("clearing effort on a missing file: %v", err)
+	}
+	if err := a.Apply("effort", "none"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("provider settings permissions = %o", info.Mode().Perm())
+	}
+	const reasoning = "providers.cline.settings.reasoning"
+	if enabled, _ := edit.GetJSON(a.Path, reasoning+".enabled"); enabled != "false" {
+		t.Fatalf("default provider reasoning.enabled = %q", enabled)
+	}
+	const existing = "\ufeff{\r\n  // Keep this comment\r\n  \"providers\": {\"cline\": {\"settings\": {\"model\": \"retained\", \"reasoning\": {\"enabled\": false}}}}\r\n}\r\n"
+	if err := os.WriteFile(a.Path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply("effort", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := edit.GetJSON(a.Path, reasoning); exists {
+		t.Fatal("reasoning survived reset")
+	}
+	if output := readFile(a.Path); !strings.HasPrefix(output, "\ufeff{\r\n  // Keep this comment\r\n") || !strings.Contains(output, `"model": "retained"`) {
+		t.Fatal("clearing effort lost the existing JSONC layout or model")
+	}
+}
+
 func TestClineModelChangesKeepSettingsAndStashOnConflict(t *testing.T) {
 	for _, action := range []string{"connect", "pick", "native", "disconnect"} {
 		t.Run(action, func(t *testing.T) {

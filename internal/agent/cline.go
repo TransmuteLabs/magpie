@@ -41,7 +41,6 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -77,14 +76,6 @@ func clineIn(at place) *Agent {
 	inUse := func() string { return get("lastUsedProvider") }
 	onMagpie := func() bool {
 		return inUse() == clineSlot && ourKey(get(slot+".settings.apiKey"))
-	}
-	// own is the provider a model or effort of Cline's own is set on: the
-	// one in use, else Cline's default
-	own := func() string {
-		if p := inUse(); p != "" {
-			return p
-		}
-		return "cline"
 	}
 	// the setting its CLI reads for every telemetry event; its env path wins
 	settingsPath := at.getenv("CLINE_GLOBAL_SETTINGS_PATH")
@@ -150,11 +141,7 @@ func clineIn(at place) *Agent {
 				return clineEffort(get("providers." + p + ".settings.reasoning"))
 			},
 			Set: func(v string) error {
-				k := "providers." + own() + ".settings.reasoning"
-				if v == "" {
-					return edit.DelJSON(path, k)
-				}
-				return clineWrite(path, providersEmpty, edit.KV{Path: k, Value: clineReasoning(v)})
+				return clineSetEffort(path, v)
 			},
 			Options: func(map[string]string) []Option {
 				return static("none", "low", "medium", "high", "xhigh")
@@ -317,20 +304,6 @@ func clineKeptValue(cur string, want map[string]any) any {
 
 // providersEmpty is a providers.json with nothing in it.
 const providersEmpty = `{"version":1,"modes":{},"providers":{}}`
-
-// clineWrite sets kvs in a file of Cline's settings, which it keeps
-// private, made from empty when there is none.
-func clineWrite(path, empty string, kvs ...edit.KV) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, []byte(empty+"\n"), 0o600); err != nil {
-			return err
-		}
-	}
-	return edit.SetJSON(path, kvs...)
-}
 
 // what cline says after a change (notice.go)
 var (
