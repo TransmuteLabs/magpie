@@ -52,20 +52,17 @@ package agent
 // each look, which would start a stopped distro (#3896).
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 
-	toml "github.com/pelletier/go-toml/v2"
-	"github.com/tidwall/jsonc"
-	"gopkg.in/yaml.v3"
-
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtintelemetry "github.com/yetone/magpie/internal/extension/builtin/telemetry"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // TelemetryState is an agent's telemetry as its config has it.
@@ -96,23 +93,20 @@ type Telemetry struct {
 	all string
 }
 
+var errTelemetryUserOff = errors.New("magpie leaves a value of yours as it is (take it out there)")
+
 // telemetryKey is one key of a switch: name as the file spells it (a
 // dotted path in JSON; "table.key" in TOML), value what magpie writes, off
 // whether a value the file has keeps telemetry off.
-type telemetryKey struct {
-	name  string
-	value any
-	off   func(v any) bool
-}
+type telemetryKey = builtintelemetry.Key
 
 // telemetryFile reads and writes one key of the agent's config. get says
 // whether the key is there, and fails on a file that doesn't parse (which
 // is unknown, never "not there").
 type telemetryFile struct {
-	path string
-	get  func(k telemetryKey) (v any, has bool, err error)
-	set  func(k telemetryKey) error
-	del  func(k telemetryKey) error
+	path   string
+	format builtintelemetry.Format
+	get    func(name string) (v any, has bool, err error)
 }
 
 func isFalse(v any) bool { return v == false }
@@ -136,112 +130,52 @@ func telemetrySwitch(at place, f telemetryFile, stashKey string, keys ...telemet
 		return nil
 	}
 	names := make([]string, len(keys))
-	for i, k := range keys {
-		names[i] = k.name
-	}
-	wrote := func() map[string]bool {
-		out := map[string]bool{}
-		for _, n := range strings.Split(stashShared()[stashKey], ",") {
-			if n != "" {
-				out[n] = true
-			}
-		}
-		return out
-	}
-	keep := func(m map[string]bool) {
-		var out []string
-		for _, n := range names {
-			if m[n] {
-				out = append(out, n)
-			}
-		}
-		stash(map[string]string{stashKey: strings.Join(out, ",")})
-	}
-	ours := func(k telemetryKey, v any) bool {
-		a, _ := json.Marshal(v)
-		b, _ := json.Marshal(k.value)
-		return string(a) == string(b)
+	for index, key := range keys {
+		names[index] = key.Name
 	}
 	get := func() (TelemetryState, error) {
 		st := TelemetryState{Off: true, Keys: names, File: at.native(f.path)}
-		mine := wrote()
-		for _, k := range keys {
-			v, has, err := f.get(k)
+		mine := strings.Split(stashShared()[stashKey], ",")
+		for _, key := range keys {
+			value, has, err := f.get(key.Name)
 			if err != nil {
 				return TelemetryState{Keys: names, File: st.File}, err
 			}
-			if !has || !k.off(v) {
+			if !has || !key.Off(value) {
 				st.Off = false
 				continue
 			}
-			if !(mine[k.name] && ours(k, v)) {
-				st.Own = append(st.Own, k.name)
+			if !slices.Contains(mine, key.Name) || !key.Matches(value) {
+				st.Own = append(st.Own, key.Name)
 			}
 		}
 		return st, nil
 	}
-	set := func(off bool) error {
-		mine := wrote()
-		if off {
-			// every key read first: one the user set on stops it before
-			// anything is written
-			var missing []telemetryKey
-			for _, k := range keys {
-				v, has, err := f.get(k)
-				if err != nil {
-					return err
-				}
-				switch {
-				case !has:
-					missing = append(missing, k)
-				case !k.off(v):
-					b, _ := json.Marshal(v)
-					return fmt.Errorf("%s sets %s to %s; magpie leaves a value of yours as it is (change it there)", at.native(f.path), k.name, b)
-				case !ours(k, v):
-					delete(mine, k.name) // the user's, as it is now
-				}
-			}
-			for _, k := range missing {
-				if err := f.set(k); err != nil {
-					keep(mine)
-					return err
-				}
-				mine[k.name] = true
-			}
-			keep(mine)
-			return nil
-		}
-		for _, k := range keys {
-			if !mine[k.name] {
-				continue
-			}
-			v, has, err := f.get(k)
-			if err != nil {
-				return err
-			}
-			// changed since: the user's now
-			if has && ours(k, v) {
-				if err := f.del(k); err != nil {
-					keep(mine)
-					return err
-				}
-			}
-			delete(mine, k.name)
-		}
-		keep(mine)
-		return nil
-	}
-	// a change that fails part way puts the file back as it was
 	write := func(off bool) error {
-		if err := edit.Atomically(func() error { return set(off) }, f.path); err != nil || off {
+		options := builtintelemetry.SettingsOptions{
+			Format: f.format, Off: off, Keys: keys, Previous: stashShared()[stashKey], DisplayPath: at.native(f.path),
+		}
+		var owned string
+		err := extension.ApplyLinkedAgentPlan(options, func(options builtintelemetry.SettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+			plan, next, err := builtintelemetry.PlanSettings(options, settings)
+			owned = next
+			return plan, err
+		}, extension.LinkedActionFile{Name: "config", Path: f.path})
+		if err != nil {
 			return err
+		}
+		if owned != options.Previous {
+			stash(map[string]string{stashKey: owned})
+		}
+		if off {
+			return nil
 		}
 		st, err := get()
 		if err != nil {
 			return err
 		}
 		if st.Off {
-			return fmt.Errorf("%s turns it off itself (%s); magpie leaves a value of yours as it is (take it out there)", at.native(f.path), strings.Join(st.Own, ", "))
+			return fmt.Errorf("%s turns it off itself (%s); %w", at.native(f.path), strings.Join(st.Own, ", "), errTelemetryUserOff)
 		}
 		return nil
 	}
@@ -250,183 +184,89 @@ func telemetrySwitch(at place, f telemetryFile, stashKey string, keys ...telemet
 
 // jsonTelemetryFile is a JSON or JSONC config's keys, by dotted path.
 func jsonTelemetryFile(path string) telemetryFile {
+	return cachedTelemetryFile(path, "telemetry json", builtintelemetry.JSON)
+}
+
+func cachedTelemetryFile(path, tag string, format builtintelemetry.Format) telemetryFile {
 	return telemetryFile{
-		path: path,
-		get: func(k telemetryKey) (any, bool, error) {
-			// read again only once the file changes: the Agents page asks
-			// on each poll
-			doc, err := filememo.ReadNow("telemetry json", path, func(raw []byte) (any, error) {
-				b := jsonc.ToJSON(edit.TrimBOM(raw))
-				if len(strings.TrimSpace(string(b))) == 0 {
-					return nil, nil
-				}
-				var doc any
-				err := json.Unmarshal(b, &doc)
-				return doc, err
-			})
+		path: path, format: format,
+		get: func(name string) (any, bool, error) {
+			lookup, err := filememo.ReadNow(tag, path, format.Decode)
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil, false, nil
 			}
 			if err != nil {
 				return nil, false, fmt.Errorf("%s: %w", path, err)
 			}
-			for _, part := range strings.Split(k.name, ".") {
-				m, ok := doc.(map[string]any)
-				if !ok {
-					return nil, false, nil
-				}
-				if doc, ok = m[part]; !ok {
-					return nil, false, nil
-				}
-			}
-			return doc, true, nil
+			value, has := lookup(name)
+			return value, has, nil
 		},
-		set: func(k telemetryKey) error { return edit.SetJSON(path, edit.KV{Path: k.name, Value: k.value}) },
-		del: func(k telemetryKey) error { return edit.DelJSON(path, k.name) },
 	}
-}
-
-// topTelemetryFile is a file whose keys sit at the top level, TOML or
-// YAML (the Kimi and Goose switches): parse reads it strictly, so a file
-// that doesn't parse is unknown and nothing is written to it.
-func topTelemetryFile(path, tag string, parse func([]byte, *map[string]any) error,
-	set func(path string, k telemetryKey) error, del func(path, name string) error) telemetryFile {
-	return telemetryFile{
-		path: path,
-		get: func(k telemetryKey) (any, bool, error) {
-			m, err := filememo.ReadNow(tag, path, func(raw []byte) (map[string]any, error) {
-				m := map[string]any{}
-				if len(bytes.TrimSpace(edit.TrimBOM(raw))) == 0 {
-					return m, nil
-				}
-				if err := parse(edit.TrimBOM(raw), &m); err != nil {
-					return nil, err
-				}
-				return m, nil
-			})
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil, false, nil
-			}
-			if err != nil {
-				return nil, false, fmt.Errorf("%s: %w", path, err)
-			}
-			v, has := m[k.name]
-			return v, has, nil
-		},
-		set: func(k telemetryKey) error { return set(path, k) },
-		del: func(k telemetryKey) error { return del(path, k.name) },
-	}
-}
-
-// tomlTopTelemetryFile is a TOML config's top-level keys.
-func tomlTopTelemetryFile(path string) telemetryFile {
-	return topTelemetryFile(path, "telemetry toml",
-		func(b []byte, m *map[string]any) error { return toml.Unmarshal(b, m) },
-		func(path string, k telemetryKey) error {
-			return edit.SetTOMLTop(path, edit.KV{Path: k.name, Value: k.value})
-		},
-		func(path, name string) error { return edit.DelTOMLTop(path, name) })
-}
-
-// yamlTopTelemetryFile is a YAML config's top-level keys.
-func yamlTopTelemetryFile(path string) telemetryFile {
-	return topTelemetryFile(path, "telemetry yaml",
-		func(b []byte, m *map[string]any) error { return yaml.Unmarshal(b, m) },
-		func(path string, k telemetryKey) error {
-			return edit.SetYAMLTop(path, edit.KV{Path: k.name, Value: k.value})
-		},
-		func(path, name string) error { return edit.DelYAMLTop(path, name) })
 }
 
 // codexTelemetry is Codex's: [analytics] enabled = false in config.toml.
 func codexTelemetry(at place, path string) *Telemetry {
 	f := telemetryFile{
-		path: path,
-		get: func(k telemetryKey) (any, bool, error) {
+		path: path, format: builtintelemetry.CodexTOML,
+		get: func(name string) (any, bool, error) {
 			doc, err := codexTopOf(path)
 			if err != nil {
 				return nil, false, fmt.Errorf("%s: %w", path, err)
 			}
-			table, key, _ := strings.Cut(k.name, ".")
-			var m map[string]any
-			switch table {
-			case "analytics":
-				if doc.Analytics == nil {
-					return nil, false, nil
-				}
-				var ok bool
-				if m, ok = doc.Analytics.(map[string]any); !ok {
-					return nil, false, fmt.Errorf("%s: analytics is not a table", path)
-				}
+			lookup, err := builtintelemetry.Analytics(doc.Analytics)
+			if err != nil {
+				return nil, false, fmt.Errorf("%s: %w", path, err)
 			}
-			v, has := m[key]
-			return v, has, nil
-		},
-		set: func(k telemetryKey) error {
-			table, key, _ := strings.Cut(k.name, ".")
-			// written inline or as dotted keys, the table is the user's
-			// spelling, where a [analytics] of magpie's would define it
-			// twice
-			if doc, err := codexTopOf(path); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
-			} else if t, err := edit.GetTOMLTable(path, table); err != nil {
-				return err
-			} else if t == nil && doc.Analytics != nil {
-				return fmt.Errorf("%s has %s written in a way magpie doesn't add to; set %s there", at.native(path), table, k.name)
-			}
-			return edit.SetTOMLKey(path, table, key, k.value)
-		},
-		del: func(k telemetryKey) error {
-			table, key, _ := strings.Cut(k.name, ".")
-			return edit.DelTOMLKey(path, table, key)
+			value, has := lookup(name)
+			return value, has, nil
 		},
 	}
-	return telemetrySwitch(at, f, at.key("codex.telemetry"), telemetryKey{name: "analytics.enabled", value: false, off: isFalse})
+	return telemetrySwitch(at, f, at.key("codex.telemetry"), telemetryKey{Name: "analytics.enabled", Value: false, Off: isFalse})
 }
 
 // claudeTelemetry is Claude Code's: its telemetry and error reports off in
 // settings.json's env.
 func claudeTelemetry(at place, path string) *Telemetry {
 	return telemetrySwitch(at, jsonTelemetryFile(path), at.key("claude.telemetry"),
-		telemetryKey{name: "env.DISABLE_TELEMETRY", value: "1", off: anyValue},
-		telemetryKey{name: "env.DISABLE_ERROR_REPORTING", value: "1", off: anyValue})
+		telemetryKey{Name: "env.DISABLE_TELEMETRY", Value: "1", Off: anyValue},
+		telemetryKey{Name: "env.DISABLE_ERROR_REPORTING", Value: "1", Off: anyValue})
 }
 
 // usageStatsTelemetry is Gemini CLI's and Qwen Code's: their usage
 // statistics off in settings.json.
 func usageStatsTelemetry(at place, path, id string) *Telemetry {
 	return telemetrySwitch(at, jsonTelemetryFile(path), at.key(id+".telemetry"),
-		telemetryKey{name: "privacy.usageStatisticsEnabled", value: false, off: isFalse})
+		telemetryKey{Name: "privacy.usageStatisticsEnabled", Value: false, Off: isFalse})
 }
 
 // crushTelemetry is Crush's: options.disable_metrics in crush.json.
 func crushTelemetry(at place, path string) *Telemetry {
 	return telemetrySwitch(at, jsonTelemetryFile(path), at.key("crush.telemetry"),
-		telemetryKey{name: "options.disable_metrics", value: true, off: isTrue})
+		telemetryKey{Name: "options.disable_metrics", Value: true, Off: isTrue})
 }
 
 // kimiTelemetry is Kimi Code's: telemetry in config.toml.
 func kimiTelemetry(at place, path string) *Telemetry {
-	return telemetrySwitch(at, tomlTopTelemetryFile(path), at.key("kimi.telemetry"),
-		telemetryKey{name: "telemetry", value: false, off: isFalse})
+	return telemetrySwitch(at, cachedTelemetryFile(path, "telemetry toml", builtintelemetry.TOMLTop), at.key("kimi.telemetry"),
+		telemetryKey{Name: "telemetry", Value: false, Off: isFalse})
 }
 
 // gooseTelemetry is Goose's: GOOSE_TELEMETRY_ENABLED in config.yaml.
 func gooseTelemetry(at place, path string) *Telemetry {
-	return telemetrySwitch(at, yamlTopTelemetryFile(path), at.key("goose.telemetry"),
-		telemetryKey{name: "GOOSE_TELEMETRY_ENABLED", value: false, off: isFalse})
+	return telemetrySwitch(at, cachedTelemetryFile(path, "telemetry yaml", builtintelemetry.YAMLTop), at.key("goose.telemetry"),
+		telemetryKey{Name: "GOOSE_TELEMETRY_ENABLED", Value: false, Off: isFalse})
 }
 
 // piTelemetry is Pi's: its install and update reporting in settings.json.
 func piTelemetry(at place, path string) *Telemetry {
 	return telemetrySwitch(at, jsonTelemetryFile(path), at.key("pi.telemetry"),
-		telemetryKey{name: "enableInstallTelemetry", value: false, off: isFalse})
+		telemetryKey{Name: "enableInstallTelemetry", Value: false, Off: isFalse})
 }
 
 // clineTelemetry is Cline CLI's: telemetryOptOut in its global settings.
 func clineTelemetry(at place, path string) *Telemetry {
 	return telemetrySwitch(at, jsonTelemetryFile(path), at.key("cline.telemetry"),
-		telemetryKey{name: "telemetryOptOut", value: true, off: isTrue})
+		telemetryKey{Name: "telemetryOptOut", Value: true, Off: isTrue})
 }
 
 // ErrNoTelemetry: the agent has no telemetry switch magpie knows.

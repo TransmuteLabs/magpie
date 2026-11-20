@@ -119,6 +119,10 @@ saved values only after both files settle. Removing an empty dotenv file
 participates in rollback with its original contents and permissions, and
 linked files keep their existing alias behavior.
 
+Per-agent telemetry and the global Privacy switch use the built-in
+telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
+restoration leaves its ownership record available for retry.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 	"strconv"
@@ -38,11 +39,19 @@ func SetYAMLTop(path string, kvs ...KV) error {
 	if err != nil {
 		return err
 	}
+	body, err := RewriteYAMLTop(path, raw, kvs...)
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteYAMLTop(path string, raw []byte, kvs ...KV) ([]byte, error) {
 	lines := splitLines(string(raw))
 	for _, kv := range kvs {
 		entries, at, indent, err := yamlTopEntries(lines)
 		if err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return nil, AtFile(path, err)
 		}
 		from, to := at, at
 		for _, entry := range entries {
@@ -55,7 +64,7 @@ func SetYAMLTop(path string, kvs ...KV) error {
 		out := append(lines[:from:from], line)
 		lines = append(out, lines[to:]...)
 	}
-	return writeYAMLTop(path, lines)
+	return renderYAMLTop(path, raw, lines)
 }
 
 // DelYAMLTop removes whole top-level entries from a single block mapping.
@@ -65,10 +74,18 @@ func DelYAMLTop(path string, keys ...string) error {
 	if err != nil || raw == nil {
 		return err
 	}
+	body, err := RewriteYAMLWithoutTop(path, raw, keys...)
+	if err != nil || bytes.Equal(body, raw) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteYAMLWithoutTop(path string, raw []byte, keys ...string) ([]byte, error) {
 	lines := splitLines(string(raw))
 	entries, _, _, err := yamlTopEntries(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	drop := map[string]bool{}
 	for _, key := range keys {
@@ -83,10 +100,10 @@ func DelYAMLTop(path string, keys ...string) error {
 		}
 	}
 	if at == 0 {
-		return nil
+		return raw, nil
 	}
 	out = append(out, lines[at:]...)
-	return writeYAMLTop(path, out)
+	return renderYAMLTop(path, raw, out)
 }
 
 var yamlPlain = lazyre.New(`^[A-Za-z0-9._/-]+$`)
@@ -217,12 +234,11 @@ func sameYAMLValue(a, b *yaml.Node) bool {
 	return true
 }
 
-func writeYAMLTop(path string, lines []string) error {
-	orig, _ := Read(path)
+func renderYAMLTop(path string, orig []byte, lines []string) ([]byte, error) {
 	lines = MarkYAMLLines(lines, string(orig))
 	raw := []byte(joinLinesLike(lines, string(orig)))
 	if _, _, err := parseYAMLTop(raw); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
-	return WriteAtomic(path, raw)
+	return raw, nil
 }
