@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -785,29 +786,29 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 	return nil
 }
 
-// piBlockKept is theirsKept for magpie's provider in a Pi models.json at
-// path, where a sendSessionAffinityHeaders the file already has, the
+// piBlockKept is theirsKept for magpie's provider in a Pi models.json,
+// where a sendSessionAffinityHeaders the file already has, the
 // user's own or pi-cache-optimizer's (#1103), stays as it is, as does a
-// model's maxTokens the user typed there (piOutputsKept), and an api they
-// set for the provider or a model (piAPIsKept).
-func piBlockKept(path string, value func() any) func() any {
-	return theirsKept(path, "providers."+magpieID, func() any {
-		v := value()
-		piOutputsKept(path, v)
-		piAPIsKept(path, v)
-		if _, set := edit.GetJSON(path, "providers."+magpieID+".compat.sendSessionAffinityHeaders"); !set {
-			return v
-		}
-		if m, ok := v.(map[string]any); ok {
-			if c, ok := m["compat"].(map[string]any); ok {
-				delete(c, "sendSessionAffinityHeaders")
-				if len(c) == 0 {
-					delete(m, "compat")
-				}
+// model's maxTokens the user typed there and an api they set for the
+// provider or a model. The caller saves updates after publication.
+func piBlockKept(path, current string, block map[string]any, updates map[string]string) any {
+	known := stashShared()
+	apis, outputs := apisWantedKey(path), outputsWantedKey(path)
+	if next := piCatalogOutputs(block, gjson.Get(current, "models").Raw, known[outputs]); next != known[outputs] {
+		updates[outputs] = next
+	}
+	if next := piCatalogAPIs(block, current, known[apis]); next != known[apis] {
+		updates[apis] = next
+	}
+	if gjson.Get(current, "compat.sendSessionAffinityHeaders").Exists() {
+		if compat, ok := block["compat"].(map[string]any); ok {
+			delete(compat, "sendSessionAffinityHeaders")
+			if len(compat) == 0 {
+				delete(block, "compat")
 			}
 		}
-		return v
-	}, "models")
+	}
+	return theirsKeptValue(current, block, "models")
 }
 
 // openCodeKept is theirsKept for magpie's provider in an OpenCode config at
@@ -1652,7 +1653,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	pair := pairSet(set, "defaultProvider", "defaultModel")
 	// the model a new session starts on, as the model field shows it
 	startup := func() string { return piStartup(path, pairGet(get, "defaultProvider", "defaultModel")()) }
-	block := piBlockKept(modelsPath, func() any {
+	block := func() map[string]any {
 		b := magpieProviderJSONAt("pi", id, at.gw()).(map[string]any)
 		if id == "pi" {
 			// the protocol picked in its row (pi_protocol.go)
@@ -1662,7 +1663,10 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		}
 		b["apiKey"] = key()
 		return b
-	})
+	}
+	refresh := func(current gjson.Result, updates map[string]string) any {
+		return piBlockKept(modelsPath, current.String(), block(), updates)
+	}
 	// Pi's own: magpie's decision and image models, for codemode
 	// (pi_extension.go); a fork's extensions may not be Pi's
 	extension := func() error { return nil }
@@ -1683,8 +1687,17 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			}
 			return extension()
 		}
-		if err := edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: block()}); err != nil {
+		updates := map[string]string{}
+		err := applyJSONSync(modelsPath, func(config gjson.Result) []edit.KV {
+			const slot = "providers." + magpieID
+			current := config.Get(slot)
+			return jsonSyncChange(slot, current, refresh(current, updates))
+		})
+		if err != nil {
 			return err
+		}
+		if len(updates) != 0 {
+			stash(updates)
 		}
 		return extension()
 	}
@@ -1717,15 +1730,12 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				if err := writeMagpie(); err != nil { // drops the stale block
 					return err
 				}
-			} else if err := syncJSON(modelsPath, "providers."+magpieID, block); err != nil {
+				return piScopeSynced(path, modelsPath, gone, nil)
+			}
+			if err := piScopeSynced(path, modelsPath, gone, refresh); err != nil {
 				return err
 			}
-			if err := extension(); err != nil {
-				return err
-			}
-			// an entry on a model magpie no longer gives Pi names nothing
-			// (#2055, scope_gone.go)
-			return piScopeSynced(path, modelsPath, gone)
+			return extension()
 		},
 		// a provider renamed takes its magpie/<id>/ entries in enabledModels
 		// with it: an entry left on the old id names nothing, and Pi would

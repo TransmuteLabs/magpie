@@ -152,6 +152,13 @@ func syncKeptJSON(path, key string, value func() any, whole ...string) error {
 	})
 }
 
+func jsonSyncChange(key string, current gjson.Result, next any) []edit.KV {
+	if sameJSON(current.Raw, next) {
+		return nil
+	}
+	return []edit.KV{{Path: key, Value: next}}
+}
+
 func applyJSONSync(path string, plan func(gjson.Result) []edit.KV) error {
 	before, err := readWiringFile(path)
 	if err != nil {

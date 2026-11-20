@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/edit"
 	"gopkg.in/yaml.v3"
 )
@@ -131,6 +133,10 @@ func magpieOffered(modelsPath string) map[string]bool {
 	if !ok {
 		return nil
 	}
+	return offeredFromJSON(raw)
+}
+
+func offeredFromJSON(raw string) map[string]bool {
 	var ms []struct {
 		ID string `json:"id"`
 	}
@@ -156,42 +162,66 @@ func offeredSet(n int, id func(int) string) map[string]bool {
 // piScopeSynced catches Pi's enabledModels (settings.json) up with the
 // models magpie's block in models.json gives it; mem is the stash key of
 // what was taken out.
-func piScopeSynced(settings, modelsPath, mem string) error {
-	offered := magpieOffered(modelsPath)
-	if offered == nil {
-		return nil
+func piScopeSynced(settings, modelsPath, mem string, refresh func(gjson.Result, map[string]string) any) error {
+	models, err := readWiringFile(modelsPath)
+	if err != nil {
+		return edit.PreserveOnRollback(modelsPath, err)
 	}
-	raw, has := edit.GetJSON(settings, "enabledModels")
+	config, err := readWiringFile(settings)
+	if err != nil {
+		return edit.PreserveOnRollback(settings, err)
+	}
+	catalog := wiringFileEdit{path: modelsPath, before: models}
+	scope := wiringFileEdit{path: settings, before: config}
+	const providerPath = "providers." + magpieID
+	current := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(models.body)))
+	updates := map[string]string{}
+	if block := current.Get(providerPath); refresh != nil && block.Exists() {
+		if changes := jsonSyncChange(providerPath, block, refresh(block, updates)); len(changes) != 0 {
+			catalog.body, err = edit.PatchJSON(models.body, changes, nil)
+			if err != nil {
+				return models.preserveOnError(modelsPath, err)
+			}
+			current = gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(catalog.body)))
+		}
+	}
+	offered := offeredFromJSON(current.Get(providerPath + ".models").Raw)
+	doc := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(config.body)))
+	list := doc.Get("enabledModels")
+	has := list.Exists()
 	var cur []string
-	if has && (json.Unmarshal([]byte(raw), &cur) != nil || len(cur) == 0) {
-		// not a list of names, or an empty one: Pi's own reading of it
-		// (piScope) holds nothing to, so neither does this
-		return nil
-	}
-	next, nextHas, out, changed := scopeSynced(cur, has, offered, scopeGoneLoad(mem), piBare)
-	if changed {
-		var err error
-		if nextHas {
-			err = edit.SetJSON(settings, edit.KV{Path: "enabledModels", Value: next})
-		} else {
-			err = edit.DelJSON(settings, "enabledModels")
-		}
-		if err != nil {
-			return err
-		}
-		// a list made again takes the model picked while there was none,
-		// as piScopeWith would have had it
-		if !has && nextHas {
-			p, _ := edit.GetJSON(settings, "defaultProvider")
-			m, _ := edit.GetJSON(settings, "defaultModel")
-			if p != "" && m != "" {
-				if err := piScopeWith(settings, p+"/"+m); err != nil {
-					return err
+	var remembered *scopeGone
+	if offered != nil && (!has || json.Unmarshal([]byte(list.Raw), &cur) == nil && len(cur) != 0) {
+		next, nextHas, out, changed := scopeSynced(cur, has, offered, scopeGoneLoad(mem), piBare)
+		remembered = &out
+		if changed {
+			var set []edit.KV
+			var del []string
+			if nextHas {
+				provider, model := doc.Get("defaultProvider").String(), doc.Get("defaultModel").String()
+				if ref := provider + "/" + model; !has && provider != "" && model != "" &&
+					!slices.ContainsFunc(next, func(pattern string) bool { return piTakes(pattern, ref) }) {
+					next = append(next, ref)
 				}
+				set = []edit.KV{{Path: "enabledModels", Value: next}}
+			} else {
+				del = []string{"enabledModels"}
+			}
+			scope.body, err = edit.PatchJSON(config.body, set, del)
+			if err != nil {
+				return config.preserveOnError(settings, err)
 			}
 		}
 	}
-	scopeGoneSave(mem, out)
+	if err := writeWiringFiles(catalog, scope); err != nil {
+		return err
+	}
+	if len(updates) != 0 {
+		stash(updates)
+	}
+	if remembered != nil {
+		scopeGoneSave(mem, *remembered)
+	}
 	return nil
 }
 

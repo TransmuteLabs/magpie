@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filememo"
@@ -294,11 +295,16 @@ func (c *asideConnection) provider() (string, string) {
 	if err != nil {
 		return "foreign", "Aside's provider configuration could not be read"
 	}
-	if len(bytes.TrimSpace(b)) != 0 && !json.Valid(b) {
+	return c.providerState(b)
+}
+
+func (c *asideConnection) providerState(body []byte) (string, string) {
+	body = edit.TrimBOM(body)
+	if len(bytes.TrimSpace(body)) != 0 && !json.Valid(body) {
 		return "foreign", "Aside's provider configuration could not be read"
 	}
-	raw, ok := edit.GetJSON(c.models, "providers.magpie")
-	if !ok {
+	current := gjson.GetBytes(body, "providers.magpie")
+	if !current.Exists() {
 		return "disconnected", ""
 	}
 	var p struct {
@@ -307,7 +313,7 @@ func (c *asideConnection) provider() (string, string) {
 		API    string          `json:"api"`
 		Models json.RawMessage `json:"models"`
 	}
-	if json.Unmarshal([]byte(raw), &p) != nil {
+	if json.Unmarshal([]byte(current.String()), &p) != nil {
 		return "invalid", "Aside's provider configuration could not be read"
 	}
 	if p.Key == "" || p.URL == "" {
@@ -325,7 +331,7 @@ func (c *asideConnection) provider() (string, string) {
 	return "connected", ""
 }
 
-func (c *asideConnection) block() any {
+func (c *asideConnection) block() map[string]any {
 	p := magpieProviderJSONAt("pi", "aside", c.at.gw()).(map[string]any)
 	p["apiKey"] = agentKeyAt("aside", c.at.gw())
 	return p
@@ -338,30 +344,46 @@ func (c *asideConnection) connect() error {
 }
 
 func (c *asideConnection) connectLocked() error {
-	status, detail := c.provider()
-	if status == "foreign" {
-		return fmt.Errorf("%s", detail)
-	}
-	if status == "connected" {
-		return syncJSON(c.models, "providers.magpie", c.kept())
-	}
-	return edit.SetJSON(c.models, edit.KV{Path: "providers.magpie", Value: c.kept()()})
+	return c.refreshProvider(true)
 }
 
 func (c *asideConnection) sync() error {
 	asideMu.Lock()
 	defer asideMu.Unlock()
-	status, _ := c.provider()
-	if status != "connected" {
-		return nil
-	}
-	return syncJSON(c.models, "providers.magpie", c.kept())
+	return c.refreshProvider(false)
 }
 
-// kept is the block with what else Aside's providers.magpie holds kept
-// (theirsKept).
-func (c *asideConnection) kept() func() any {
-	return piBlockKept(c.models, c.block)
+func (c *asideConnection) refreshProvider(connect bool) error {
+	before, err := readWiringFile(c.models)
+	if err != nil {
+		return edit.PreserveOnRollback(c.models, err)
+	}
+	status, detail := c.providerState(before.body)
+	if status == "foreign" && connect {
+		return fmt.Errorf("%s", detail)
+	}
+	if status != "connected" && !connect {
+		return nil
+	}
+	const slot = "providers.magpie"
+	current := gjson.GetBytes(edit.TrimBOM(before.body), slot)
+	updates := map[string]string{}
+	next := piBlockKept(c.models, current.String(), c.block(), updates)
+	if changes := jsonSyncChange(slot, current, next); len(changes) != 0 {
+		body, err := edit.PatchJSON(before.body, changes, nil)
+		if err != nil {
+			return before.preserveOnError(c.models, err)
+		}
+		if err := edit.WriteAtomicChecked(before.target, body, func() error { return before.check(c.models) }); err != nil {
+			return err
+		}
+	} else if err := before.check(c.models); err != nil {
+		return err
+	}
+	if len(updates) != 0 {
+		stash(updates)
+	}
+	return nil
 }
 
 func (c *asideConnection) state() NativeState {

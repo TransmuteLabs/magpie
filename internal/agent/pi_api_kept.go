@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"maps"
 	"slices"
-
-	"github.com/yetone/magpie/internal/edit"
 )
 
 // The API Pi asks magpie's models on, set by hand in Pi's models.json,
@@ -34,23 +32,13 @@ func apisWantedKey(path string) string { return "api:" + path + ":wanted" }
 // piProviderAPI is the provider's own api in apisWantedKey's record.
 const piProviderAPI = "*"
 
-// piAPIsKept keeps in v, the block magpie writes for its provider in the
-// Pi models.json at path, an api the user set there for the provider or a
-// model, and records what v wants as wanted.
-func piAPIsKept(path string, v any) {
-	block, _ := v.(map[string]any)
-	if block == nil {
-		return
-	}
+func piCatalogAPIs(block map[string]any, raw, saved string) string {
 	ms, _ := block["models"].([]map[string]any)
 	var file struct {
 		API    *string                      `json:"api"`
 		Models []map[string]json.RawMessage `json:"models"`
 	}
-	raw, inFile := edit.GetJSON(path, "providers."+magpieID)
-	if !inFile || json.Unmarshal([]byte(raw), &file) != nil {
-		inFile = false
-	}
+	inFile := raw != "" && json.Unmarshal([]byte(raw), &file) == nil
 	have := map[string]map[string]json.RawMessage{}
 	for _, m := range file.Models {
 		var id string
@@ -60,7 +48,7 @@ func piAPIsKept(path string, v any) {
 	}
 
 	rec := map[string][]string{}
-	if s := stashShared()[apisWantedKey(path)]; s != "" && json.Unmarshal([]byte(s), &rec) != nil {
+	if saved != "" && (json.Unmarshal([]byte(saved), &rec) != nil || rec == nil) {
 		rec = map[string][]string{}
 	}
 	next := map[string][]string{}
@@ -127,7 +115,6 @@ func piAPIsKept(path string, v any) {
 		}
 	}
 
-	if b, _ := json.Marshal(next); string(b) != stashShared()[apisWantedKey(path)] {
-		stash(map[string]string{apisWantedKey(path): string(b)})
-	}
+	body, _ := json.Marshal(next)
+	return string(body)
 }
