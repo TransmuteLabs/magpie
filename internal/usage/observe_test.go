@@ -80,6 +80,37 @@ func TestObserverServesWithTheGateway(t *testing.T) {
 	}
 }
 
+type failedObserverStart struct{ fakeObserver }
+
+func (*failedObserverStart) Serve() func() { panic("observer start failed") }
+
+func TestObserverStartPanicLeavesRegistrationAvailable(t *testing.T) {
+	stop := ServeObservers()
+	t.Cleanup(stop)
+	func() {
+		defer func() {
+			if got := recover(); got != "observer start failed" {
+				t.Errorf("observer start panic = %v", got)
+			}
+		}()
+		Observe(&failedObserverStart{})
+	}()
+	if !obsMu.TryLock() {
+		obsMu.Unlock()
+		t.Fatal("observer startup panic left the registry locked")
+	}
+	obsMu.Unlock()
+	observer := &fakeObserver{bodies: CapturedBodies}
+	remove := Observe(observer)
+	t.Cleanup(remove)
+	if got := Observers(); len(got) != 1 || got[0] != observer {
+		t.Fatalf("observer registry after failing activation = %v", got)
+	}
+	if starts, _, _ := observer.counts(); starts != 1 || ObservedBodies() != CapturedBodies {
+		t.Fatalf("next observer started %d times and requests %v", starts, ObservedBodies())
+	}
+}
+
 // Every ledger row reaches each observer; the bodies wanted are the most any
 // one wants, and none registered wants none.
 func TestObserverLedgerAndBodies(t *testing.T) {
