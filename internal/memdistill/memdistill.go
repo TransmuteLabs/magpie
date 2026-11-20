@@ -85,7 +85,7 @@ var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
 var (
 	now  = time.Now
 	list = func() []sessions.Session { return sessions.List(Listed) }
-	read = sessions.TranscriptOf
+	read = sessions.TranscriptOfContext
 	// running is held through a run in this process, and the file lock
 	// across magpies
 	running sync.Mutex
@@ -433,7 +433,11 @@ func run(ctx context.Context, st State, model, effort string, complete Complete,
 		}
 		r.left--
 		doing.Add(1)
-		tr, err := read(s)
+		tr, err := read(ctx, s)
+		if canceled := ctx.Err(); canceled != nil {
+			r.left++
+			return r, canceled
+		}
 		if err != nil {
 			// one that can't be read now is tried again when it changes
 			r.done[key(s)] = s.Last

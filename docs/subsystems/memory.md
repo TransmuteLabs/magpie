@@ -320,9 +320,11 @@ linked `MemoryOwner`.
 - A failed request stops the run, records the error for the row, and
   leaves the conversation to be read again next time
   (`TestFailureAndCap`).
-- Stop discards a reply that returns after cancellation, even when the
-  completion reports success. A discarded reply leaves the conversation
-  pending and creates no candidates (`TestReadAllDiscardsSuccessfulReplyAfterStop`).
+- Stop cancels the active transcript reader or model request. A conversation
+  interrupted during either operation stays pending and creates no candidates,
+  even when the operation returns success after cancellation
+  (`TestReadAllLeavesInterruptedTranscriptPending`,
+  `TestReadAllDiscardsSuccessfulReplyAfterStop`).
 - Routes: `GET /api/memory/distill`, `POST /api/memory/distill`
   `{on, model, effort?, days?}` (switching on, a new model, or a longer
   range reads at once; a bad level or range is a 400,
