@@ -24,6 +24,7 @@ import (
 
 	"github.com/yetone/magpie/internal/probelog"
 	"github.com/yetone/magpie/internal/settings"
+	"golang.org/x/net/http/httpproxy"
 )
 
 // Install routes http.DefaultTransport (and so http.DefaultClient) through
@@ -399,7 +400,7 @@ func For(u *url.URL) (*url.URL, error) {
 	default:
 		return Parse(s)
 	}
-	if p, err := fromEnv(u); p != nil || err != nil {
+	if p, bypass, err := fromEnv(u); p != nil || bypass || err != nil {
 		return p, err
 	}
 	sys, _ := liveSystem()
@@ -534,7 +535,7 @@ func Describe() (proxy, source string) {
 		return s, "settings"
 	}
 	u, _ := url.Parse("https://chatgpt.com")
-	if p, _ := fromEnv(u); p != nil {
+	if p, _, _ := fromEnv(u); p != nil {
 		return p.String(), "environment"
 	}
 	sys, dead := liveSystem()
@@ -594,20 +595,41 @@ func sshShown(ref string) string {
 	return ""
 }
 
-// fromEnv is the proxy the environment names for u: HTTPS_PROXY or
-// HTTP_PROXY as Go reads them, else ALL_PROXY (curl's, which Go doesn't
-// read: a shell with only ALL_PROXY=socks5://… set has curl go through it,
-// and magpie, its updates among its requests, too). NO_PROXY is kept for
-// it as well.
-func fromEnv(u *url.URL) (*url.URL, error) {
-	if p, err := http.ProxyFromEnvironment(&http.Request{URL: u}); p != nil || err != nil {
-		return p, err
+var schemeProxies = sync.OnceValues(func() (
+	withBypass func(*url.URL) (*url.URL, error),
+	withoutBypass func(*url.URL) (*url.URL, error),
+) {
+	config := httpproxy.FromEnvironment()
+	withBypass = config.ProxyFunc()
+	if config.NoProxy != "" {
+		config.NoProxy = ""
+		withoutBypass = config.ProxyFunc()
+	}
+	return withBypass, withoutBypass
+})
+
+// fromEnv reads HTTPS_PROXY and HTTP_PROXY using Go's first-use snapshot
+// and matching rules, then falls back to ALL_PROXY. A NO_PROXY match for
+// a configured proxy selects the direct route.
+func fromEnv(u *url.URL) (proxy *url.URL, bypass bool, err error) {
+	withBypass, withoutBypass := schemeProxies()
+	if p, err := withBypass(u); p != nil || err != nil {
+		return p, false, err
+	}
+	if withoutBypass != nil {
+		if p, _ := withoutBypass(u); p != nil {
+			return nil, true, nil
+		}
 	}
 	all := envOf("ALL_PROXY", "all_proxy")
-	if all == "" || noProxy(u.Hostname(), envOf("NO_PROXY", "no_proxy")) {
-		return nil, nil
+	if all == "" {
+		return nil, false, nil
 	}
-	return Parse(all)
+	if noProxy(u.Hostname(), envOf("NO_PROXY", "no_proxy")) {
+		return nil, true, nil
+	}
+	p, err := Parse(all)
+	return p, false, err
 }
 
 func envOf(keys ...string) string {
