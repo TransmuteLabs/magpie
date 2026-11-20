@@ -3,11 +3,16 @@ package davsync
 import (
 	"context"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/memory"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Memory in sync: what one computer's agents learned is known on the
@@ -116,4 +121,57 @@ func TestSyncMemory(t *testing.T) {
 	b.use(t)
 	now(t)
 	want(t, "Builds run on mote", "Only on b") // off: nothing comes either
+}
+
+func TestSyncSkipsExcludedUnreadableMemory(t *testing.T) {
+	newComputer(t).use(t)
+	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	config := Config{URL: server.URL + "/dav/", User: "me", Password: "pw", Passphrase: "correct horse"}
+	text, kind, scope := "Keep this on the server", memory.Preference, memory.Global
+	if _, _, err := memory.Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope}, memory.FromUser, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := Now(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(memory.Dir(), "meta.json")
+	if err := os.WriteFile(meta, []byte(`{"projects":{"p`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lastgood.Bak(meta)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := Now(t.Context()); err == nil || !strings.Contains(err.Error(), "memory:") {
+		t.Fatalf("sync with unreadable included Memory: %v", err)
+	}
+	config.Memory = new(false)
+	if err := Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	local := settings.Load()
+	local.Theme = "dark"
+	if err := settings.Save(local); err != nil {
+		t.Fatal(err)
+	}
+	if err := Now(t.Context()); err != nil {
+		t.Fatalf("sync with Memory off: %v", err)
+	}
+	fake.mu.Lock()
+	data := slices.Clone(fake.files["/dav/magpie/magpie.magpie-backup"])
+	fake.mu.Unlock()
+	bundle, err := backup.Open(data, config.Passphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Settings == nil || bundle.Settings.Theme != "dark" {
+		t.Fatalf("enabled settings did not sync: %v", bundle.Settings)
+	}
+	if bundle.Memory == nil || len(bundle.Memory.Memories) != 1 || bundle.Memory.Memories[0].Text != text {
+		t.Fatalf("server's Memory changed: %v", bundle.Memory)
+	}
 }

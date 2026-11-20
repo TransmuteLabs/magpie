@@ -920,7 +920,7 @@ func run(ctx context.Context, first time.Duration) {
 }
 
 func collect(c Config) (backup.Bundle, error) {
-	b, err := backup.Collect(c.Keys, "magpie")
+	b, err := backup.CollectWithMemory(c.Keys, "magpie", c.memoryOn())
 	if b.Settings == nil {
 		s := settings.Load()
 		b.Settings = &s
@@ -932,9 +932,6 @@ func collect(c Config) (backup.Bundle, error) {
 	}
 	if !c.library() {
 		b.Library = nil
-	}
-	if !c.memoryOn() {
-		b.Memory = nil
 	}
 	if err == nil && c.SignIns {
 		if serr := backup.WithSignIns(&b); serr != nil {

@@ -248,6 +248,10 @@ func (b Bundle) scopedKeys(part string) bool {
 // header that looks like one, and the library's servers no environment
 // variable or header that looks like one (their names stay).
 func Collect(keys bool, app string) (Bundle, error) {
+	return CollectWithMemory(keys, app, true)
+}
+
+func CollectWithMemory(keys bool, app string, includeMemory bool) (Bundle, error) {
 	b := Bundle{Version: 1, Created: time.Now().UTC(), App: app, Keys: keys}
 	// a providers.json that can't be read stops the backup: carried as no
 	// providers, it would take them all away where it is put back, or where
@@ -357,9 +361,11 @@ func Collect(keys bool, app string) (Bundle, error) {
 	if !keys && b.Library != nil {
 		b.Library.WithoutSecrets(Secret)
 	}
-	// memory that can't be read stops it too: unknown, not none
-	if b.Memory, err = memory.Collect(); err != nil {
-		return b, fmt.Errorf("memory: %w", err)
+	if includeMemory {
+		// memory that can't be read stops it too: unknown, not none
+		if b.Memory, err = memory.Collect(); err != nil {
+			return b, fmt.Errorf("memory: %w", err)
+		}
 	}
 	return b, nil
 }

@@ -428,8 +428,10 @@ computer's memory over the other's.
 - Switches: sync's **Memory** tick (`davsync.Config.Memory`, on unless
   turned off, since a sync file is always sealed with a passphrase), and
   Export's **With memory** and Import's **Bring in memory too**, both on.
-  A computer with the tick off sends none and takes none, and leaves the
-  server's copy as it was (`TestSyncMemory`, `TestBackupMergesMemory`).
+  With Memory off, export and sync skip reading the local memory store.
+  Sync leaves the server's copy as it was (`TestSyncMemory`,
+  `TestBackupMergesMemory`, `TestExportSkipsExcludedUnreadableMemory`,
+  `TestSyncSkipsExcludedUnreadableMemory`).
 - After a sync or restore changes memory, `library.PublishMemory` writes the
   digests again.
 

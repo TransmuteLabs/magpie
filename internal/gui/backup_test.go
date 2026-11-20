@@ -12,7 +12,10 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
+	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/memory"
 )
 
 // folderOnly is the app's windows as far as an export needs them.
@@ -90,6 +93,52 @@ func TestBackupLibraryRoundTrip(t *testing.T) {
 	}
 	if iv, _ := library.ReadInstructions(); iv.Shared != "Be brief." {
 		t.Fatalf("instructions: %q", iv.Shared)
+	}
+}
+
+func TestExportSkipsExcludedUnreadableMemory(t *testing.T) {
+	home := sandboxHome(t)
+	if err := os.MkdirAll(memory.Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(memory.Dir(), "meta.json")
+	if err := os.WriteFile(meta, []byte(`{"projects":{"p`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(lastgood.Bak(meta)); !os.IsNotExist(err) {
+		t.Fatalf("unexpected last-good memory metadata: %v", err)
+	}
+	mux := http.NewServeMux()
+	backupRoutes(mux, folderOnly{})
+	export := func(body string) *httptest.ResponseRecorder {
+		reply := httptest.NewRecorder()
+		mux.ServeHTTP(reply, httptest.NewRequest("POST", "/api/backup/export", strings.NewReader(body)))
+		return reply
+	}
+	for _, body := range []string{
+		`{"pass":"pw","usage":false}`,
+		`{"pass":"pw","usage":false,"memory":true}`,
+	} {
+		reply := export(body)
+		if reply.Code != http.StatusBadRequest || !strings.Contains(reply.Body.String(), "memory:") {
+			t.Fatalf("export with unreadable included Memory: %d %s", reply.Code, reply.Body)
+		}
+	}
+	reply := export(`{"pass":"pw","usage":false,"memory":false}`)
+	if reply.Code != http.StatusOK {
+		t.Fatalf("export with Memory off: %d %s", reply.Code, reply.Body)
+	}
+	var out struct{ Path string }
+	if err := json.Unmarshal(reply.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, strings.TrimPrefix(out.Path, "~")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := backup.Open(data, "pw")
+	if err != nil || bundle.Memory != nil {
+		t.Fatalf("exported Memory: %v, open error: %v", bundle.Memory, err)
 	}
 }
 
