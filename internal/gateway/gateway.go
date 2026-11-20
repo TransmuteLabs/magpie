@@ -1101,6 +1101,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		// the MCP servers the hub started end with the gateway
 		StopHub()
 	}()
+	defer s.idle.start(ctx)()
 	for {
 		err := srv.Serve(ln)
 		// or stopAccepting closed it: what this one took finishes once ctx ends
