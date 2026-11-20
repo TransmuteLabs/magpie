@@ -19,6 +19,8 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinpi "github.com/yetone/magpie/internal/extension/builtin/pi"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
@@ -1638,8 +1640,8 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	modelsPath := filepath.Join(dir, "models.json")
 	auth := filepath.Join(dir, "auth.json")
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
-	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
-	pair := pairSet(set, "defaultProvider", "defaultModel")
+	settingsFile := extension.LinkedActionFile{Name: builtinpi.SettingsFile, Path: path}
+	catalogFile := extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath}
 	// the model a new session starts on, as the model field shows it
 	startup := func() string { return piStartup(path, pairGet(get, "defaultProvider", "defaultModel")()) }
 	block := piBlockKept(modelsPath, func() any {
@@ -1655,9 +1657,9 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	})
 	// Pi's own: magpie's decision and image models, for codemode
 	// (pi_extension.go); a fork's extensions may not be Pi's
-	extension := func() error { return nil }
+	syncExtension := func() error { return nil }
 	if id == "pi" {
-		extension = func() error { return piExtensionSynced(dir, modelsPath, at.v1(), key()) }
+		syncExtension = func() error { return piExtensionSynced(dir, modelsPath, at.v1(), key()) }
 	}
 	// the pi-magpie extension serves provider "magpie" live, so Pi's
 	// models.json block is not written and magpie's own stale one goes
@@ -1671,12 +1673,12 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			}); err != nil {
 				return err
 			}
-			return extension()
+			return syncExtension()
 		}
 		if err := edit.SetJSON(modelsPath, edit.KV{Path: "providers." + magpieID, Value: block()}); err != nil {
 			return err
 		}
-		return extension()
+		return syncExtension()
 	}
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
@@ -1710,7 +1712,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 			} else if err := syncJSON(modelsPath, "providers."+magpieID, block); err != nil {
 				return err
 			}
-			if err := extension(); err != nil {
+			if err := syncExtension(); err != nil {
 				return err
 			}
 			// an entry on a model magpie no longer gives Pi names nothing
@@ -1735,17 +1737,14 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 				Get: startup,
 				Set: func(v string) error {
 					if v == "" {
-						if err := edit.DelJSON(path, "defaultProvider", "defaultModel"); err != nil {
+						if err := extension.ApplyLinkedAgentPlan(v, builtinpi.PlanModel, settingsFile, catalogFile); err != nil {
 							return err
 						}
-						if err := edit.DelJSON(modelsPath, "providers."+magpieID); err != nil {
-							return err
-						}
-						if err := extension(); err != nil {
+						if err := syncExtension(); err != nil {
 							return err
 						}
 						forget(gone)
-						return piScopeWithout(path)
+						return nil
 					}
 					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
 						if _, has := edit.GetJSON(modelsPath, "providers."+magpieID); !has {
@@ -1757,11 +1756,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 							return err
 						}
 					}
-					if err := pair(v); err != nil {
-						return err
-					}
-					// a model outside the user's Ctrl+P list would never start
-					return piScopeWith(path, v)
+					return extension.ApplyLinkedAgentPlan(v, builtinpi.PlanModel, settingsFile)
 				},
 				Options: func(cur map[string]string) []Option {
 					return withVia(ownOptionsFrom(piRegistry(id), auth, cur["model"]), id, magpieID+"/")
@@ -1789,14 +1784,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 					return v
 				},
 				Set: func(v string) error {
-					cur, _ := get("defaultThinkingLevel")
-					if v == cur {
-						return nil
-					}
-					if v == "" {
-						return edit.DelJSON(path, "defaultThinkingLevel")
-					}
-					return set(edit.KV{Path: "defaultThinkingLevel", Value: v})
+					return extension.ApplyLinkedAgentPlan(v, builtinpi.PlanEffort, settingsFile)
 				},
 				Options: func(cur map[string]string) []Option {
 					if offered := piOffered(id, cur["model"]); offered != nil {

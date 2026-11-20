@@ -297,6 +297,12 @@ checks the catalog and config snapshots, and remembers its API only after
 publication. The plan preserves a configured provider API and user agent
 header and can read a legacy `models.json` when creating the YAML catalog.
 Catalog refresh and removal use the same checked publication.
+Pi and its forks use a linked settings plan to publish the selected default
+model and its `enabledModels` entry in one write. Reset checks both
+`settings.json` and `models.json` before clearing the default, the explicit
+Magpie scope entries and Magpie's provider. Concurrent edits to either
+file survive a rejected or rolled-back reset. The thinking-level picker
+uses the same settings plan without rebuilding the catalog.
 The ordinary Codex subagent model and effort fields use the auxiliary model
 plan. A model change checks the saved effort against the new model and clears
 an incompatible effort in the same checked `config.toml` write. The gateway's
