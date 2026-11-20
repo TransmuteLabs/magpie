@@ -35,16 +35,6 @@ func piTakes(pattern, ref string) bool {
 	return builtinpi.Takes(pattern, ref)
 }
 
-// piScopeWith adds ref to Pi's enabledModels, when there is such a list and
-// nothing in it takes ref in; the user's entries stay as they are.
-func piScopeWith(settings, ref string) error {
-	pats := piScope(settings)
-	if pats == nil || slices.ContainsFunc(pats, func(p string) bool { return piTakes(p, ref) }) {
-		return nil
-	}
-	return edit.SetJSON(settings, edit.KV{Path: "enabledModels", Value: append(pats, ref)})
-}
-
 // piStartup is the model a new Pi session starts on, as the model field
 // shows it: the default when enabledModels takes it in (or there is no such
 // list), else the list's first entry when that names one model outright.

@@ -124,6 +124,57 @@ func PlanEffort(level string, settings sdk.ActionSettings) (sdk.AgentPlan, error
 	return plan, err
 }
 
+type ScopeSettings struct {
+	Patterns []string
+	Present  bool
+	Default  string
+	Offered  []string
+}
+
+func PlanScope(update func(ScopeSettings) ([]string, bool), settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+	files := settings.Files
+	if len(files) < 1 || len(files) > 2 || files[0].Path != SettingsFile ||
+		len(files) == 2 && files[1].Path != CatalogFile {
+		return sdk.AgentPlan{}, errors.New("Pi scope action requires settings and an optional catalog")
+	}
+	file := files[0]
+	current := parseSettings(file.Body)
+	scope := current.Get("enabledModels")
+	state := ScopeSettings{Patterns: Scope(scope.Raw), Present: scope.Exists()}
+	if state.Present && state.Patterns == nil {
+		return sdk.AgentPlan{}, nil
+	}
+	if provider, model := current.Get("defaultProvider").String(), current.Get("defaultModel").String(); provider != "" && model != "" {
+		state.Default = provider + "/" + model
+	}
+	if len(files) == 2 {
+		var models []struct {
+			ID string `json:"id"`
+		}
+		catalog := parseSettings(files[1].Body).Get("providers.magpie.models")
+		if json.Unmarshal([]byte(catalog.Raw), &models) != nil {
+			return sdk.AgentPlan{}, nil
+		}
+		for _, model := range models {
+			if model.ID != "" {
+				state.Offered = append(state.Offered, model.ID)
+			}
+		}
+	}
+	patterns, changed := update(state)
+	if !changed {
+		return sdk.AgentPlan{}, nil
+	}
+	var plan sdk.AgentPlan
+	var err error
+	if len(patterns) == 0 {
+		err = patch(&plan, file, nil, []string{"enabledModels"})
+	} else {
+		err = patch(&plan, file, []edit.KV{{Path: "enabledModels", Value: patterns}}, nil)
+	}
+	return plan, err
+}
+
 func parseSettings(body []byte) gjson.Result {
 	return gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(body)))
 }

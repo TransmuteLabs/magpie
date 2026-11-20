@@ -1723,12 +1723,17 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		// with it: an entry left on the old id names nothing, and Pi would
 		// leave that model out of Ctrl+P (#1919, #1828)
 		RenameRefs: func(from, to string) (bool, error) {
-			scopeGoneRename(gone, from, to)
-			next, ok := renameRefList(piScope(path), from, to)
-			if !ok {
-				return false, nil
+			renamed := false
+			update := func(state builtinpi.ScopeSettings) ([]string, bool) {
+				next, changed := renameRefList(state.Patterns, from, to)
+				renamed = changed
+				return next, changed
 			}
-			return true, edit.SetJSON(path, edit.KV{Path: "enabledModels", Value: next})
+			if err := extension.ApplyLinkedAgentPlan(update, builtinpi.PlanScope, settingsFile); err != nil {
+				return false, err
+			}
+			scopeGoneRename(gone, from, to)
+			return renamed, nil
 		},
 		Fields: []Field{
 			{

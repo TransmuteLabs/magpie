@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinpi "github.com/yetone/magpie/internal/extension/builtin/pi"
 )
 
 // An enabledModels list (Pi's and its forks', StepCode's, omp's) names
@@ -72,10 +74,7 @@ func scopeMagpieOne(p string, bare func(string) string) string {
 
 // piBare is a Pi entry without its thinking level.
 func piBare(p string) string {
-	if i := strings.LastIndex(p, ":"); i >= 0 && slices.Contains(piLevels, p[i+1:]) {
-		return p[:i]
-	}
-	return p
+	return builtinpi.Bare(p)
 }
 
 // scopeSynced is an enabledModels list, has false when there is none, once
@@ -153,41 +152,31 @@ func offeredSet(n int, id func(int) string) map[string]bool {
 // models magpie's block in models.json gives it; mem is the stash key of
 // what was taken out.
 func piScopeSynced(settings, modelsPath, mem string) error {
-	offered := magpieOffered(modelsPath)
-	if offered == nil {
-		return nil
-	}
-	raw, has := edit.GetJSON(settings, "enabledModels")
-	var cur []string
-	if has && (json.Unmarshal([]byte(raw), &cur) != nil || len(cur) == 0) {
-		// not a list of names, or an empty one: Pi's own reading of it
-		// (piScope) holds nothing to, so neither does this
-		return nil
-	}
-	next, nextHas, out, changed := scopeSynced(cur, has, offered, scopeGoneLoad(mem), piBare)
-	if changed {
-		var err error
-		if nextHas {
-			err = edit.SetJSON(settings, edit.KV{Path: "enabledModels", Value: next})
-		} else {
-			err = edit.DelJSON(settings, "enabledModels")
+	saved := scopeGoneLoad(mem)
+	var remembered *scopeGone
+	update := func(state builtinpi.ScopeSettings) ([]string, bool) {
+		offered := offeredSet(len(state.Offered), func(index int) string { return state.Offered[index] })
+		if offered == nil {
+			return nil, false
 		}
-		if err != nil {
-			return err
+		next, nextHas, out, changed := scopeSynced(state.Patterns, state.Present, offered, saved, piBare)
+		if !state.Present && nextHas && state.Default != "" && !slices.ContainsFunc(next, func(pattern string) bool {
+			return piTakes(pattern, state.Default)
+		}) {
+			next = append(next, state.Default)
 		}
-		// a list made again takes the model picked while there was none,
-		// as piScopeWith would have had it
-		if !has && nextHas {
-			p, _ := edit.GetJSON(settings, "defaultProvider")
-			m, _ := edit.GetJSON(settings, "defaultModel")
-			if p != "" && m != "" {
-				if err := piScopeWith(settings, p+"/"+m); err != nil {
-					return err
-				}
-			}
-		}
+		remembered = &out
+		return next, changed
 	}
-	scopeGoneSave(mem, out)
+	err := extension.ApplyLinkedAgentPlan(update, builtinpi.PlanScope,
+		extension.LinkedActionFile{Name: builtinpi.SettingsFile, Path: settings},
+		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath})
+	if err != nil {
+		return err
+	}
+	if remembered != nil {
+		scopeGoneSave(mem, *remembered)
+	}
 	return nil
 }
 
