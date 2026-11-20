@@ -11,6 +11,67 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+func TestActionsSessionCreateOnlyRefusesStagedOutputBeforePublishing(test *testing.T) {
+	actions, host, policy := actionFixture(test)
+	policy.Paths, policy.CreateUnder = nil, "sessions"
+	directory := filepath.Join(policy.Root, "sessions")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		test.Fatal(err)
+	}
+	source := filepath.Join(policy.Root, "source.jsonl")
+	if err := os.WriteFile(source, []byte("before"), 0o600); err != nil {
+		test.Fatal(err)
+	}
+	output := filepath.Join(directory, "converted.jsonl")
+	host.invoke = func(context.Context, string, sdk.Scope, any) (any, error) {
+		return sdk.SessionResult{Files: []sdk.SessionDocument{
+			{Path: "converted.jsonl", Format: "target", Body: []byte("converted")},
+		}}, nil
+	}
+	var staged, published bool
+	policy.RevalidateInputs = func(_ context.Context, _ map[string]fs.FileInfo) error {
+		files, err := filepath.Glob(filepath.Join(directory, ".magpie-extension-*.tmp"))
+		if err != nil || len(files) == 0 {
+			return err
+		}
+		if body := string(actionTestRead(test, files[0])); body != "converted" {
+			test.Fatalf("unexpected staged output %q", body)
+		}
+		staged = true
+		if err := os.WriteFile(source, []byte("user changed the source"), 0o600); err != nil {
+			return err
+		}
+		if _, err := os.Stat(output); err == nil {
+			published = true
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return ErrActionChanged
+	}
+	request := sdk.SessionRequest{ID: "conversation", From: "source", To: "target",
+		Files: []sdk.SessionDocument{{Path: "source.jsonl", Format: "source", Body: []byte("before")}}}
+	plan, err := actions.SessionConvert(test.Context(), "sample", sdk.Scope{}, request, policy)
+	if err != nil {
+		test.Fatal(err)
+	}
+	result, err := plan.ExecuteCreateOnly(test.Context(), plan.Preview().Revision, func(map[string]fs.FileInfo) error {
+		test.Fatal("stale conversion reached commit")
+		return nil
+	})
+	if !staged || result.Applied || result.RollbackIncomplete || !errors.Is(err, ErrActionChanged) {
+		test.Fatalf("staged conversion: %+v, %v, entered check %v", result, err, staged)
+	}
+	if published {
+		test.Fatal("stale conversion published its final name before being rejected")
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 0 {
+		test.Fatalf("refusal left staged or published files: %v, %v", entries, err)
+	}
+	if body := string(actionTestRead(test, source)); body != "user changed the source" {
+		test.Fatalf("source edit was lost: %q", body)
+	}
+}
+
 func TestActionsSessionCreateOnlyPreservesIndependentFiles(test *testing.T) {
 	for _, scenario := range []string{"publish-collision", "input-refusal", "rollback-replacement", "commit-replacement"} {
 		test.Run(scenario, func(test *testing.T) {

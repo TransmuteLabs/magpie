@@ -705,6 +705,8 @@ serializes cooperating writers at that root. Originals and recovery metadata
 are durably backed up with status `prepared` before the batch writes targets.
 For agent plans, the host checks the complete set of settings before each
 file change and before committing, including files the module only read.
+Immediately before publishing a replacement, it rechecks the complete
+input set and the module's authority after syncing the temporary file.
 File replacement uses an exclusive temporary file, file sync, rename and
 platform-appropriate directory sync. The host retains the identity of each
 published file. The agent controller applies its shell wrappers before the
@@ -815,7 +817,9 @@ session with the same ID.
 checks, migration waits, cached receipt reuse, source capture and publication.
 Linked and installed conversions recheck that owner and current consent before
 writing and before returning output. Installed input planning carries the same
-admission check; Actions revalidation rolls back a revocation during apply.
+admission check. After staging, Actions rechecks the inputs, module authority
+and pinned destination directories before linking the output under its final
+name. A refusal after publication triggers checked rollback.
 An ordinary SDK conversion retains checked recovery through final output
 capture as well. The installed converter's action holds its output
 directories open and verifies their location and the published files at
