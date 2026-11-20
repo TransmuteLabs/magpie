@@ -601,15 +601,19 @@ func codexGlobalIn(at place) *Agent {
 	// read only (each model's efforts, on every poll of the effort
 	// field): the list kept, not a copy of it each time, 5 MB a minute on
 	// a live magpie
-	models := func() []catalog.Model {
+	modelsFor := func(asProvider, viaBase bool) []catalog.Model {
 		switch {
-		case asProvider():
+		case asProvider:
 			return sharedModels("codex")
-		case viaBase():
+		case viaBase:
 			own, more := catalog.CodexShared(), sharedModels("codex")
 			return append(append(make([]catalog.Model, 0, len(own)+len(more)), own...), more...)
 		}
 		return catalog.CodexShared()
+	}
+	models := func() []catalog.Model {
+		magpie := asProvider()
+		return modelsFor(magpie, !magpie && viaBase())
 	}
 	// Changing the effort updates the dedicated catalog in the same plan.
 	// Beside the sign-in, the gateway's list tag carries the effort.
@@ -1505,9 +1509,12 @@ func codexGlobalIn(at place) *Agent {
 		m, err := edit.GetTOMLTable(path, "memories")
 		return cmp.Or(m["consolidation_model"], m["extract_model"]), err
 	}
-	auxiliaryModels := func(options builtincodex.AuxiliaryModelOptions) error {
+	applyAuxiliaryModels := func(options builtincodex.AuxiliaryModelOptions, beforeWrite func(string) error) error {
 		return extension.ApplyLinkedAgentPlan(options, builtincodex.PlanAuxiliaryModels,
-			extension.LinkedActionFile{Name: builtincodex.GlobalConfigFile, Path: path})
+			extension.LinkedActionFile{Name: builtincodex.GlobalConfigFile, Path: path, BeforeWrite: beforeWrite})
+	}
+	auxiliaryModels := func(options builtincodex.AuxiliaryModelOptions) error {
+		return applyAuxiliaryModels(options, nil)
 	}
 	// one of magpie's goes too: Codex could no longer find it
 	dropSubagent := func() error {
@@ -1528,15 +1535,18 @@ func codexGlobalIn(at place) *Agent {
 		return get("model")
 	}
 	subEfforts := func() []string { return catalog.Efforts(models(), subModel()) }
+	applySubagent := func(options builtincodex.SubagentOptions, beforeWrite func(string) error) error {
+		options.IsMagpie, options.GatewayBase = isMagpie, gatewayBase
+		options.Efforts = func(model string, asProvider, viaBase bool) []string {
+			return catalog.Efforts(modelsFor(asProvider, viaBase), model)
+		}
+		return applyAuxiliaryModels(builtincodex.AuxiliaryModelOptions{Subagent: &options}, beforeWrite)
+	}
 	dropSubEffort = func() error {
-		e, err := subEffort()
-		if err != nil || e == "" {
+		if effort, err := subEffort(); err != nil || effort == "" {
 			return err
 		}
-		if l := subEfforts(); len(l) > 0 && !contains(l, e) {
-			return edit.DelTOMLKey(path, "agents", "default_subagent_reasoning_effort")
-		}
-		return nil
+		return applySubagent(builtincodex.SubagentOptions{}, nil)
 	}
 	// the user disconnected Codex and hasn't connected it since: magpie
 	// writes nothing of its own back (paynezhuang on Discord: the base URL
@@ -2424,16 +2434,7 @@ func codexGlobalIn(at place) *Agent {
 				Key: "subagent", Label: "subagents", Quiet: true,
 				Get: func() string { v, _ := subagent(); return v },
 				Set: func(v string) error {
-					if v == "" {
-						return edit.DelTOMLKey(path, "agents", "default_subagent_model")
-					}
-					if isMagpie(v) && !routed() {
-						return fmt.Errorf("pick a model through magpie for Codex first; its subagents can then have one of their own")
-					}
-					if err := edit.SetTOMLKey(path, "agents", "default_subagent_model", v); err != nil {
-						return err
-					}
-					return dropSubEffort()
+					return applySubagent(builtincodex.SubagentOptions{Model: &v}, nil)
 				},
 				Options: func(map[string]string) []Option { return modelOptions(routed()) },
 			},
@@ -2458,17 +2459,15 @@ func codexGlobalIn(at place) *Agent {
 				Key: "subagent_model", Label: "subagent model", Quiet: true,
 				Get: provider.CodexSubagentModel,
 				Set: func(v string) error {
-					m, err := subagent()
-					if err != nil {
+					var saved bool
+					err := applySubagent(builtincodex.SubagentOptions{DropModel: true}, func(string) error {
+						saved = true
+						return provider.SetCodexSubagentModel(v)
+					})
+					if err != nil || saved {
 						return err
 					}
-					if err := provider.SetCodexSubagentModel(v); err != nil || m == "" {
-						return err
-					}
-					if err := edit.DelTOMLKey(path, "agents", "default_subagent_model"); err != nil {
-						return err
-					}
-					return dropSubEffort()
+					return provider.SetCodexSubagentModel(v)
 				},
 				Options: func(map[string]string) []Option {
 					var out, groups []Option
@@ -2523,13 +2522,7 @@ func codexGlobalIn(at place) *Agent {
 				Key: "subagent_effort", Label: "subagent effort", Quiet: true,
 				Get: func() string { v, _ := subEffort(); return v },
 				Set: func(v string) error {
-					if v == "" {
-						return edit.DelTOMLKey(path, "agents", "default_subagent_reasoning_effort")
-					}
-					if l := subEfforts(); len(l) > 0 && !contains(l, v) {
-						return fmt.Errorf("Codex runs %s at %s, not %q: it would refuse to start a subagent", subModel(), strings.Join(l, ", "), v)
-					}
-					return edit.SetTOMLKey(path, "agents", "default_subagent_reasoning_effort", v)
+					return applySubagent(builtincodex.SubagentOptions{Effort: &v}, nil)
 				},
 				Options: func(map[string]string) []Option {
 					if e := subEfforts(); len(e) > 0 {

@@ -71,6 +71,25 @@ func (t TOMLTable) Scalar(key string) string {
 	return ""
 }
 
+func ReadTOMLTableSnapshot(path string, raw []byte, name string) (func(string) string, TOMLTable, error) {
+	doc, err := parseTOMLSource(raw, splitLines(string(raw)))
+	if err != nil {
+		return nil, TOMLTable{}, AtFile(path, err)
+	}
+	span, err := ordinaryTOMLTable(doc.tables, name)
+	if err != nil {
+		return nil, TOMLTable{}, AtFile(path, err)
+	}
+	root := doc.root
+	return func(key string) string {
+		value := tomlKeyNamed(root, key)
+		if value.scalar {
+			return value.value
+		}
+		return value.text
+	}, TOMLTable{&span}, nil
+}
+
 // EachTOMLTable calls fn with each ordinary table, in the order
 // TOMLTables lists them, from one look at the file and nothing built: an
 // agent listing its config's tables asked GetTOMLTable for each, a stat

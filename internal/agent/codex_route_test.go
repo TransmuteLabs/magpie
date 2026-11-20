@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -348,6 +351,137 @@ func TestCodexSubagentReadErrorStopsChanges(t *testing.T) {
 				t.Fatalf("changed config after a subagent read error:\n%s", got)
 			}
 		})
+	}
+}
+
+func TestCodexSubagentApplyPublishesModelAndEffortTogether(t *testing.T) {
+	const input = "model = \"gpt-a\"\n\n[agents]\nmax_threads = 6\ndefault_subagent_reasoning_effort = \"xhigh\"\n"
+	const want = "model = \"gpt-a\"\n\n[agents]\nmax_threads = 6\ndefault_subagent_model = \"gpt-mini\"\n"
+	home, read := codexHome(t, "", input)
+	writeFile(t, filepath.Join(home, ".codex", "models_cache.json"), `{"models":[
+		{"slug":"gpt-mini","display_name":"Mini","priority":2,"supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}]}]}`)
+	cx := codex(home)
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposals []string
+	err = edit.Filtered(func(path string, data []byte) []byte {
+		if path == target {
+			proposals = append(proposals, string(data))
+		}
+		return data
+	}, func() error { return cx.Apply("subagent", "gpt-mini") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposals) != 1 || proposals[0] != want || read() != want {
+		t.Fatalf("published proposals = %q, saved = %q, want one %q", proposals, read(), want)
+	}
+}
+
+func TestCodexSubagentApplyKeepsConcurrentEdit(t *testing.T) {
+	const input = "model = \"gpt-a\"\n\n[agents]\nmax_threads = 6\n"
+	const user = "model = \"gpt-a\"\n\n[agents]\nmax_threads = 9\n"
+	home, read := codexHome(t, "", input)
+	cx := codex(home)
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited bool
+	err = edit.Filtered(func(path string, data []byte) []byte {
+		if path == target && !edited {
+			writeFile(t, cx.Path, user)
+			edited = true
+		}
+		return data
+	}, func() error { return cx.Apply("subagent_effort", "low") })
+	if !edited || !errors.Is(err, extension.ErrActionChanged) || read() != user {
+		t.Fatalf("edited = %t, error = %v, saved = %q", edited, err, read())
+	}
+}
+
+func TestCodexSubagentApplyResets(t *testing.T) {
+	const lead = "model = \"gpt-mini\"\n\n[agents]\nmax_threads = 6\n"
+	const native = "default_subagent_model = \"gpt-a\"\n"
+	const effort = "default_subagent_reasoning_effort = \"xhigh\"\n"
+	for _, tc := range []struct {
+		name, field, input, value, want, override string
+	}{
+		{"native model", "subagent", lead + native + effort, "", lead + effort, "fake/m1"},
+		{"native effort", "subagent_effort", lead + native + effort, "", lead + native, "fake/m1"},
+		{"override", "subagent_model", lead + native + effort, provider.CodexSubagentLead, lead, provider.CodexSubagentLead},
+		{"override reset", "subagent_model", lead + native + effort, "", lead, ""},
+		{"override without native model", "subagent_model", lead + effort, "", lead + effort, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, read := codexHome(t, "", tc.input)
+			writeFile(t, filepath.Join(home, ".codex", "models_cache.json"), `{"models":[
+				{"slug":"gpt-mini","display_name":"Mini","priority":2,"supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}]}]}`)
+			if err := provider.SetCodexSubagentModel("fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			if err := codex(home).Apply(tc.field, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			if read() != tc.want || provider.CodexSubagentModel() != tc.override {
+				t.Fatalf("config = %q, gateway override = %q, want %q and %q", read(), provider.CodexSubagentModel(), tc.want, tc.override)
+			}
+		})
+	}
+}
+
+func TestCodexSubagentApplyOverrideRejectsUnreadableConfig(t *testing.T) {
+	const input = "model = \"gpt-a\"\n\n[[agents]]\ndefault_subagent_model = \"gpt-a\"\n"
+	home, read := codexHome(t, "", input)
+	cx := codex(home)
+	err := cx.Apply("subagent_model", "fake/m1")
+	if err == nil || !strings.Contains(err.Error(), cx.Path+": line ") ||
+		provider.CodexSubagentModel() != "" || read() != input {
+		t.Fatalf("error = %v, gateway override = %q, config = %q", err, provider.CodexSubagentModel(), read())
+	}
+}
+
+func TestCodexSubagentApplyOverrideLeavesAbsentNativeTable(t *testing.T) {
+	for _, input := range []string{"", "agents = true\n"} {
+		home, read := codexHome(t, "", input)
+		cx := codex(home)
+		if input == "" {
+			if err := os.Remove(cx.Path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := cx.Apply("subagent_model", "fake/m1"); err != nil {
+			t.Fatal(err)
+		}
+		if provider.CodexSubagentModel() != "fake/m1" || read() != input {
+			t.Fatalf("gateway override = %q, config changed from %q to %q", provider.CodexSubagentModel(), input, read())
+		}
+		if input == "" {
+			if _, err := os.Stat(cx.Path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("override created missing config, stat = %v", err)
+			}
+		}
+	}
+}
+
+func TestCodexSubagentApplyUsesWSLGateway(t *testing.T) {
+	const base = "http://172.28.96.1:3425"
+	input := "model = \"gpt-a\"\nopenai_base_url = \"" + base + gateway.CodexPath + "\"\n"
+	home, read := codexHome(t, "", input)
+	cx := codexGlobalIn(place{
+		home: home, id: "codex@wsl:Ubuntu",
+		base: func() string { return base },
+		spell: func(path string) string {
+			return "/home/test/.codex/" + filepath.Base(path)
+		},
+	})
+	if err := cx.Apply("subagent", "fake/m1"); err != nil {
+		t.Fatal(err)
+	}
+	if want := input + "\n[agents]\ndefault_subagent_model = \"fake/m1\"\n"; read() != want {
+		t.Fatalf("config = %q, want %q", read(), want)
 	}
 }
 

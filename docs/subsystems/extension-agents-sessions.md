@@ -288,6 +288,11 @@ global provider, saved provider/catalog/effort restoration, auxiliary
 models, effort and background compaction edits pass the same typed snapshot in process and
 return an `AgentPlan`. Claude effort and routing-related environment
 flags use that contract on their ordinary configuration paths.
+The ordinary Codex subagent model and effort fields use the auxiliary model
+plan. A model change checks the saved effort against the new model and clears
+an incompatible effort in the same checked `config.toml` write. The gateway's
+subagent model override still belongs to Magpie settings. Saving that override
+and clearing Codex's native override are separate file operations.
 Codex compaction combines feature, threshold and provider capability changes
 in one config write. The host records compaction ownership after the write
 succeeds. Codex catalog refresh uses the same catalog merge as profile
