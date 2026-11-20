@@ -5,9 +5,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
 	builtinpi "github.com/yetone/magpie/internal/extension/builtin/pi"
+	builtinstepcode "github.com/yetone/magpie/internal/extension/builtin/stepcode"
 )
 
 // An enabledModels list (Pi's and its forks', StepCode's, omp's) names
@@ -118,23 +118,6 @@ func scopeSynced(cur []string, has bool, offered map[string]bool, mem scopeGone,
 	return next, nextHas, out, changed
 }
 
-// magpieOffered is the models of magpie's provider block in a Pi-style
-// models.json, as magpie/<id> lowercased; nil when the block or its list
-// isn't there or can't be read, which says nothing about what is offered.
-func magpieOffered(modelsPath string) map[string]bool {
-	raw, ok := edit.GetJSON(modelsPath, "providers."+magpieID+".models")
-	if !ok {
-		return nil
-	}
-	var ms []struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal([]byte(raw), &ms) != nil {
-		return nil
-	}
-	return offeredSet(len(ms), func(i int) string { return ms[i].ID })
-}
-
 func offeredSet(n int, id func(int) string) map[string]bool {
 	out := map[string]bool{}
 	for i := range n {
@@ -184,48 +167,54 @@ func piScopeSynced(settings, modelsPath, mem string) error {
 // (config.toml). The wiring state's last list follows when the list was
 // still the one magpie last wrote, so a disconnect still knows it as
 // magpie's and puts back the user's own.
-func stepcodeScopeSynced(at place, path, modelsPath, mem string) error {
-	offered := magpieOffered(modelsPath)
-	if offered == nil {
-		return nil
-	}
-	cfg, err := readStepcodeTOML(path)
-	if err != nil {
-		return nil
-	}
-	var cur []string
-	has := cfg.Scope != nil
-	if has {
-		if cur = *cfg.Scope; len(cur) == 0 {
-			return nil
-		}
-	}
-	next, nextHas, out, changed := scopeSynced(cur, has, offered, scopeGoneLoad(mem), piBare)
-	if changed {
-		if nextHas {
-			if !has {
-				if def := stepcodeStartup(cfg); def != "" && !slices.ContainsFunc(next, func(p string) bool { return piTakes(p, def) }) {
+func stepcodeScopeSynced(at place, path, modelsPath, mem string, state *stepcodeState) error {
+	saved := scopeGoneLoad(mem)
+	var remembered *scopeGone
+	stateChanged := false
+	options := builtinstepcode.ScopeOptions{
+		Catalog: func(current string) (any, bool) {
+			next := theirsKeptValue(current, stepcodeProvider(at), "models")
+			return next, !sameJSON(current, next)
+		},
+		Update: func(cfg builtinstepcode.Settings, ids []string) ([]string, bool) {
+			offered := offeredSet(len(ids), func(index int) string { return ids[index] })
+			if offered == nil {
+				return nil, false
+			}
+			var cur []string
+			has := cfg.Scope != nil
+			if has {
+				cur = *cfg.Scope
+				if len(cur) == 0 {
+					return nil, false
+				}
+			}
+			next, nextHas, out, changed := scopeSynced(cur, has, offered, saved, piBare)
+			if !has && nextHas {
+				if def := cfg.Startup(); def != "" && !slices.ContainsFunc(next, func(pattern string) bool { return piTakes(pattern, def) }) {
 					next = append(next, def)
 				}
 			}
-			raw, err := stepcodeScopeRaw(next)
-			if err != nil {
-				return err
+			remembered = &out
+			if changed && state.LastHasScope == has && slices.Equal(state.LastScope, cur) {
+				state.LastHasScope, state.LastScope = nextHas, slices.Clone(next)
+				stateChanged = true
 			}
-			err = edit.SetTOMLTopPreserving(path, edit.KV{Path: "enabledModels", Value: raw})
-			if err != nil {
-				return err
-			}
-		} else if err := edit.DelTOMLTop(path, "enabledModels"); err != nil {
+			return next, changed
+		},
+	}
+	if err := extension.ApplyLinkedAgentPlan(options, builtinstepcode.PlanScope,
+		extension.LinkedActionFile{Name: builtinstepcode.ConfigFile, Path: path},
+		extension.LinkedActionFile{Name: builtinstepcode.CatalogFile, Path: modelsPath}); err != nil {
+		return err
+	}
+	if stateChanged {
+		if err := stepcodeStoreState(at, state); err != nil {
 			return err
 		}
-		if state, err := loadStepcodeState(at); err == nil && state != nil && state.LastHasScope == has && slices.Equal(state.LastScope, cur) {
-			state.LastHasScope, state.LastScope = nextHas, slices.Clone(next)
-			if err := stepcodeStoreState(at, state); err != nil {
-				return err
-			}
-		}
 	}
-	scopeGoneSave(mem, out)
+	if remembered != nil {
+		scopeGoneSave(mem, *remembered)
+	}
 	return nil
 }

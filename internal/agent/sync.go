@@ -151,13 +151,17 @@ func theirsKept(path, key string, value func() any, whole ...string) func() any 
 		if !ok {
 			return v
 		}
-		var have, want map[string]json.RawMessage
-		b, err := json.Marshal(v)
-		if err != nil || json.Unmarshal([]byte(cur), &have) != nil || have == nil || json.Unmarshal(b, &want) != nil || want == nil {
-			return v
-		}
-		return mergeTheirs(have, want, whole)
+		return theirsKeptValue(cur, v, whole...)
 	}
+}
+
+func theirsKeptValue(current string, value any, whole ...string) any {
+	var have, want map[string]json.RawMessage
+	body, err := json.Marshal(value)
+	if err != nil || json.Unmarshal([]byte(current), &have) != nil || have == nil || json.Unmarshal(body, &want) != nil || want == nil {
+		return value
+	}
+	return mergeTheirs(have, want, whole)
 }
 
 // mergeTheirs is want with each key of have that want lacks, objects in

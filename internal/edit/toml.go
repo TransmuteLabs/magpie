@@ -524,7 +524,15 @@ func setTOMLTop(path string, preserve bool, kvs ...KV) error {
 }
 
 func RewriteTOMLTop(path string, raw []byte, kvs ...KV) ([]byte, error) {
-	out, err := tomlTopLines(path, raw, false, kvs)
+	return rewriteTOMLTop(path, raw, false, kvs)
+}
+
+func RewriteTOMLTopPreserving(path string, raw []byte, kvs ...KV) ([]byte, error) {
+	return rewriteTOMLTop(path, raw, true, kvs)
+}
+
+func rewriteTOMLTop(path string, raw []byte, preserve bool, kvs []KV) ([]byte, error) {
+	out, err := tomlTopLines(path, raw, preserve, kvs)
 	if err != nil {
 		return nil, err
 	}

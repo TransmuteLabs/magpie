@@ -11,11 +11,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/pelletier/go-toml/v2"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/jsonc"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinstepcode "github.com/yetone/magpie/internal/extension/builtin/stepcode"
 )
 
 // StepCode keeps its configuration in ~/.stepcode/config.toml (or
@@ -53,28 +54,16 @@ func stepcodeProvider(at place) any {
 	}
 }
 
-type stepcodeTOML struct {
-	Provider *string   `toml:"defaultProvider"`
-	Model    *string   `toml:"defaultModel"`
-	Scope    *[]string `toml:"enabledModels"`
-}
-
-func readStepcodeTOML(path string) (stepcodeTOML, error) {
-	var out stepcodeTOML
+func readStepcodeTOML(path string) (builtinstepcode.Settings, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return out, nil
+			return builtinstepcode.Settings{}, nil
 		}
-		return out, err
+		return builtinstepcode.Settings{}, err
 	}
-	if len(bytes.TrimSpace(b)) == 0 {
-		return out, nil
-	}
-	if err := toml.Unmarshal(b, &out); err != nil {
-		return out, fmt.Errorf("%s: %w", path, err)
-	}
-	return out, nil
+	settings, err := builtinstepcode.ReadSettings(b)
+	return settings, edit.AtFile(path, err)
 }
 
 func stepcodeValue(s *string) string {
@@ -91,18 +80,6 @@ func stepcodeSetString(path, key string, val *string) error {
 	return edit.SetTOMLTopPreserving(path, edit.KV{Path: key, Value: *val})
 }
 
-func stepcodeScopeRaw(pats []string) (edit.Raw, error) {
-	b, err := toml.Marshal(map[string]any{"enabledModels": pats})
-	if err != nil {
-		return "", err
-	}
-	_, rhs, ok := strings.Cut(string(b), "=")
-	if !ok {
-		return "", fmt.Errorf("unexpected toml output for enabledModels: %s", string(b))
-	}
-	return edit.Raw(strings.TrimSpace(rhs)), nil
-}
-
 func stepcodeValidateModels(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -111,28 +88,8 @@ func stepcodeValidateModels(path string) error {
 		}
 		return err
 	}
-	if len(bytes.TrimSpace(b)) == 0 {
-		return nil
-	}
-	normalized := jsonc.ToJSON(b)
-	if !gjson.ValidBytes(normalized) {
-		return fmt.Errorf("%s: invalid JSON", path)
-	}
-	root := gjson.ParseBytes(normalized)
-	if !root.IsObject() {
-		return fmt.Errorf("%s: root must be a JSON object", path)
-	}
-	if prov := root.Get("providers"); prov.Exists() {
-		if !prov.IsObject() {
-			return fmt.Errorf("%s: 'providers' must be a JSON object", path)
-		}
-		if mag := prov.Get(magpieID); mag.Exists() {
-			if !mag.IsObject() {
-				return fmt.Errorf("%s: 'providers.%s' must be a JSON object", path, magpieID)
-			}
-		}
-	}
-	return nil
+	_, err = builtinstepcode.ReadCatalog(b)
+	return edit.AtFile(path, err)
 }
 
 func stepcodeJSONEmpty(b []byte) bool {
@@ -226,62 +183,30 @@ func stepcodeStoreState(at place, state *stepcodeState) error {
 	return stashWrite(m)
 }
 
-func stepcodeStartup(cfg stepcodeTOML) string {
-	p := stepcodeValue(cfg.Provider)
-	m := stepcodeValue(cfg.Model)
-	def := ""
-	switch {
-	case m == "":
-		def = ""
-	case p == "":
-		def = m
-	default:
-		def = p + "/" + m
-	}
-	if cfg.Scope == nil || len(*cfg.Scope) == 0 {
-		return def
-	}
-	scope := *cfg.Scope
-	if def != "" && slices.ContainsFunc(scope, func(pat string) bool { return piTakes(pat, def) }) {
-		return def
-	}
-	first := strings.TrimSpace(scope[0])
-	if i := strings.LastIndex(first, ":"); i >= 0 && slices.Contains(piLevels, first[i+1:]) {
-		first = first[:i]
-	}
-	if strings.ContainsAny(first, "*?[") || !strings.Contains(first, "/") {
-		return def
-	}
-	return first
-}
-
 // stepcodeRenameRefs moves enabledModels off a renamed provider, in the
 // file and in the scope disconnect remembers, so a reset does not put the
 // old id back and still takes out only what magpie appended.
-func stepcodeRenameRefs(at place, path, from, to string) (bool, error) {
-	cur, err := readStepcodeTOML(path)
+func stepcodeRenameRefs(at place, path, gone, from, to string) (bool, error) {
+	state, err := loadStepcodeState(at)
 	if err != nil {
 		return false, err
 	}
 	moved := false
-	if cur.Scope != nil {
-		next, ok := renameRefList(*cur.Scope, from, to)
-		if ok {
-			raw, err := stepcodeScopeRaw(next)
-			if err != nil {
-				return false, err
-			}
-			if err := edit.SetTOMLTopPreserving(path, edit.KV{Path: "enabledModels", Value: raw}); err != nil {
-				return false, err
-			}
-			moved = true
+	update := func(current builtinstepcode.Settings, _ []string) ([]string, bool) {
+		if current.Scope == nil {
+			return nil, false
 		}
+		next, changed := renameRefList(*current.Scope, from, to)
+		moved = changed
+		return next, changed
 	}
-	state, err := loadStepcodeState(at)
+	err = extension.ApplyLinkedAgentPlan(builtinstepcode.ScopeOptions{Update: update}, builtinstepcode.PlanScope,
+		extension.LinkedActionFile{Name: builtinstepcode.ConfigFile, Path: path})
 	if err != nil {
-		return moved, err
+		return false, err
 	}
 	if state == nil {
+		scopeGoneRename(gone, from, to)
 		return moved, nil
 	}
 	changed := false
@@ -297,13 +222,13 @@ func stepcodeRenameRefs(at place, path, from, to string) (bool, error) {
 		state.AppendedScope = next
 		changed = true
 	}
-	if !changed {
-		return moved, nil
+	if changed {
+		if err := stepcodeStoreState(at, state); err != nil {
+			return moved, err
+		}
 	}
-	if err := stepcodeStoreState(at, state); err != nil {
-		return moved, err
-	}
-	return true, nil
+	scopeGoneRename(gone, from, to)
+	return moved || changed, nil
 }
 
 func stepcodeIn(at place) *Agent {
@@ -321,7 +246,7 @@ func stepcodeIn(at place) *Agent {
 		if err != nil {
 			return ""
 		}
-		return stepcodeStartup(curTOML)
+		return curTOML.Startup()
 	}
 
 	unwire := func() error {
@@ -361,7 +286,7 @@ func stepcodeIn(at place) *Agent {
 
 		if curHasScope == state.LastHasScope && slices.Equal(curList, state.LastScope) {
 			if state.OrigHasScope {
-				raw, err := stepcodeScopeRaw(state.OrigScope)
+				raw, err := builtinstepcode.ScopeValue(state.OrigScope)
 				if err != nil {
 					return err
 				}
@@ -378,7 +303,7 @@ func stepcodeIn(at place) *Agent {
 				return slices.Contains(state.AppendedScope, p)
 			})
 			if !slices.Equal(kept, curList) {
-				raw, err := stepcodeScopeRaw(kept)
+				raw, err := builtinstepcode.ScopeValue(kept)
 				if err != nil {
 					return err
 				}
@@ -469,21 +394,12 @@ func stepcodeIn(at place) *Agent {
 			if state == nil {
 				return nil
 			}
-			if err := stepcodeValidateModels(modelsPath); err != nil {
-				return err
-			}
-			if err := syncJSON(modelsPath, "providers."+magpieID, block); err != nil {
-				return err
-			}
-			// an entry on a model magpie no longer gives StepCode names
-			// nothing (#2055, scope_gone.go)
-			return stepcodeScopeSynced(at, path, modelsPath, gone)
+			return stepcodeScopeSynced(at, path, modelsPath, gone, state)
 		},
 		// enabledModels names models beyond the one field, as omp's list
 		// does: a provider renamed has to take those entries with it
 		RenameRefs: func(from, to string) (bool, error) {
-			scopeGoneRename(gone, from, to)
-			return stepcodeRenameRefs(at, path, from, to)
+			return stepcodeRenameRefs(at, path, gone, from, to)
 		},
 		Fields: []Field{
 			{
@@ -513,7 +429,7 @@ func stepcodeIn(at place) *Agent {
 						if cur.Scope != nil && len(*cur.Scope) > 0 {
 							if !slices.ContainsFunc(*cur.Scope, func(pat string) bool { return piTakes(pat, v) }) {
 								newScope := append(*cur.Scope, v)
-								raw, err := stepcodeScopeRaw(newScope)
+								raw, err := builtinstepcode.ScopeValue(newScope)
 								if err != nil {
 									return err
 								}
@@ -614,7 +530,7 @@ func stepcodeIn(at place) *Agent {
 						return err
 					}
 					if state.LastHasScope && (curTOML.Scope == nil || !slices.Equal(*curTOML.Scope, state.LastScope)) {
-						raw, err := stepcodeScopeRaw(state.LastScope)
+						raw, err := builtinstepcode.ScopeValue(state.LastScope)
 						if err != nil {
 							return err
 						}

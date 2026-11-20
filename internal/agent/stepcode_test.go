@@ -19,6 +19,7 @@ import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	builtinstepcode "github.com/yetone/magpie/internal/extension/builtin/stepcode"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -222,7 +223,7 @@ enabledModels = ["native/one"]
 
 	// 2. user adds native/two
 	userScope := append(*cfg.Scope, "native/two")
-	raw, err := stepcodeScopeRaw(userScope)
+	raw, err := builtinstepcode.ScopeValue(userScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ enabledModels = ["native/one"]
 		t.Fatal(err)
 	}
 	userScope2 := append(*cfg2.Scope, "native/three")
-	raw2, err := stepcodeScopeRaw(userScope2)
+	raw2, err := builtinstepcode.ScopeValue(userScope2)
 	if err != nil {
 		t.Fatal(err)
 	}

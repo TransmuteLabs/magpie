@@ -325,6 +325,10 @@ The host records excluded and restored scope entries after publication.
 The Pi and OMP Protocol fields pass the selected API into the checked
 catalog action. The host stores the preference and catalog metadata after
 the action succeeds.
+StepCode Sync plans its provider catalog and selected model against the same
+`models.json` and `config.toml` snapshots. Model-reference rename uses the
+checked TOML publisher. Saved scope entries change after publication
+succeeds, so a rejected write leaves them available for the next Sync.
 OpenCode v2 refreshes its provider from the same snapshot as the primary
 model selection. Sync updates provider format, catalog and discovery
 configuration in one checked write. Output limit history is published
