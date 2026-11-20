@@ -2153,7 +2153,8 @@ func crushIn(at place) *Agent {
 // crushAt is Crush with its config at path and its data file at data,
 // reaching the gateway as at does.
 func crushAt(at place, path, data string) *Agent {
-	provider := theirsKept(path, "providers."+magpieID, func() any { return magpieProviderJSONAt("crush", "crush", at.gw()) }, "models")
+	block := func() any { return magpieProviderJSONAt("crush", "crush", at.gw()) }
+	provider := theirsKept(path, "providers."+magpieID, block, "models")
 	get := func(k string) (string, bool) { return edit.GetJSON(path, k) }
 	set := func(kvs ...edit.KV) error { return edit.SetJSON(path, kvs...) }
 	pick := func(k string) (string, bool) {
@@ -2259,7 +2260,7 @@ func crushAt(at place, path, data string) *Agent {
 		},
 		ListOnly: true,
 		Sync: func() error {
-			return syncJSON(path, "providers."+magpieID, provider)
+			return syncKeptJSON(path, "providers."+magpieID, block, "models")
 		},
 		Fields: []Field{
 			{Key: "model", Label: "large", Get: pairGet(pick, "models.large.provider", "models.large.model"), Set: setter("models.large.provider", "models.large.model"), Options: opts("model")},
