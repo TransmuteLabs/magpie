@@ -16,211 +16,20 @@ package agent
 // gives them back.
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io/fs"
-	"maps"
-	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
-	toml "github.com/pelletier/go-toml/v2"
 	"github.com/tidwall/gjson"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtingrok "github.com/yetone/magpie/internal/extension/builtin/grok"
 	"github.com/yetone/magpie/internal/filememo"
-	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
-
-// grokEfforts are the reasoning efforts Grok knows.
-var grokEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-
-// grokModelTable is the header prefix of every table magpie writes.
-var grokModelTable = `model."` + magpieID + "/"
-
-// grokModelTables are magpie's model tables for agent (Grok Build, or Kigi,
-// which reads the same tables), for one that reaches the
-// gateway's /v1 at v1, with the context_window and the
-// auto_compact_threshold_percent magpie gives each model (by its catalog
-// id), which the caller stashes. A value the user set in a table themselves
-// (grokOwnWindow, grokOwnPercent: had is what the tables hold now, wrote and
-// wrotePct what magpie last gave them) stays as they set it.
-func grokModelTables(agent, v1 string, had grokHad, wrote, wrotePct map[string]int) ([]edit.Table, map[string]int, map[string]int) {
-	var out []edit.Table
-	st, gave, gavePct := settings.Load().ForAgent(agent), map[string]int{}, map[string]int{}
-	for _, m := range sharedModels(agent) {
-		kvs := []edit.KV{
-			{Path: "model", Value: m.ID},
-			{Path: "name", Value: m.Name},
-			{Path: "base_url", Value: v1},
-			{Path: "api_key", Value: keyAt(v1)},
-			{Path: "api_backend", Value: grokBackend(m)},
-		}
-		window := 0
-		if c := m.Context; c > 0 {
-			gave[m.ID], window = c, c
-			if n, ok := grokOwnWindow(m, c, had.windows, wrote); ok {
-				window = n
-			}
-			kvs = append(kvs, edit.KV{Path: "context_window", Value: window})
-		}
-		if p, ok := grokOwnPercent(m, had.percents, wrotePct); ok {
-			kvs = append(kvs, edit.KV{Path: "auto_compact_threshold_percent", Value: p})
-		} else if p := grokPercent(grokCompactAt(st, m), window); p > 0 && !had.sessionPercent {
-			gavePct[m.ID] = p
-			kvs = append(kvs, edit.KV{Path: "auto_compact_threshold_percent", Value: p})
-		}
-		var efforts []string
-		for _, e := range grokEfforts { // in Grok's order
-			if contains(m.Efforts, e) {
-				efforts = append(efforts, strconv.Quote(e))
-			}
-		}
-		if len(efforts) > 0 {
-			kvs = append(kvs, edit.KV{Path: "reasoning_efforts", Value: edit.Raw("[" + strings.Join(efforts, ", ") + "]")})
-		}
-		out = append(out, edit.Table{Name: "model." + strconv.Quote(magpieID+"/"+m.ID), KVs: kvs})
-	}
-	return out, gave, gavePct
-}
-
-// grokCompactAt is where Long conversations has Grok Build compact m, as
-// it has Codex and Claude Code (codexcat's rule): the threshold set on the
-// model or its provider, else settings' working window on a longer one,
-// and the whole window under Full window (uk.jent on Discord: dozens of
-// models told 1M, each set to 300K by hand). 0 when m's window isn't
-// known.
-func grokCompactAt(st settings.Settings, m catalog.Model) int {
-	c := m.Context
-	if c <= 0 {
-		return 0
-	}
-	if m.Compact > 0 {
-		return min(c, m.Compact)
-	}
-	return st.Working(c)
-}
-
-// grokPercent is the auto_compact_threshold_percent that has Grok Build
-// compact at tokens on a window of window: 0 (Grok's own default) when it
-// compacts at none of it. Grok Build's context_window is the model's
-// window, sent to the model and shown as such, and it compacts at a
-// percent of it, 85 unless [model.<id>] or [session]
-// auto_compact_threshold_percent says otherwise (grok-build's
-// resolve_auto_compact_threshold_percent). magpie once wrote the
-// threshold as the window, so a 1M model told 300K compacted at 255K and
-// never reached 300K (@xiancrong on X). Rounded down, so it never
-// compacts later than tokens.
-func grokPercent(tokens, window int) int {
-	if tokens <= 0 || window <= 0 || tokens >= window {
-		return 0
-	}
-	return max(1, tokens*100/window)
-}
-
-// grokOwnWindow is a context_window the user set in magpie's table for m
-// themselves, which a sync keeps: one other than magpie last gave it. With
-// no record of magpie's (wrote nil, a config an older magpie wrote, or a
-// model new to the record), one other than the model's whole window, which
-// an older magpie wrote, and other than w, which magpie gives it now.
-func grokOwnWindow(m catalog.Model, w int, had, wrote map[string]int) (int, bool) {
-	n, ok := had[m.ID]
-	if !ok || n <= 0 || n == w {
-		return 0, false
-	}
-	if prev, ok := wrote[m.ID]; ok {
-		return n, n != prev
-	}
-	return n, n != m.Context
-}
-
-// grokOwnPercent is an auto_compact_threshold_percent the user set in
-// magpie's table for m themselves: one other than magpie last gave it, or
-// one magpie gave none (a magpie before this one never wrote the key).
-func grokOwnPercent(m catalog.Model, had, wrote map[string]int) (int, bool) {
-	n, ok := had[m.ID]
-	if !ok || n < 0 || n > 100 {
-		return 0, false
-	}
-	if prev, ok := wrote[m.ID]; ok && prev == n {
-		return 0, false
-	}
-	return n, true
-}
-
-// grokHad is what the config holds now: each of magpie's model tables'
-// context_window and auto_compact_threshold_percent by catalog id, and
-// whether [session] sets auto_compact_threshold_percent, the user's for
-// every model, which magpie's per-model one would win over.
-type grokHad struct {
-	windows, percents map[string]int
-	sessionPercent    bool
-}
-
-// grokWindowsIn is the context_window of each of magpie's model tables in
-// the config at path, by catalog id.
-func grokWindowsIn(path string) (map[string]int, error) {
-	had, err := grokHadIn(path)
-	return had.windows, err
-}
-
-// grokHadIn reads grokHad from the config at path. A config that isn't
-// there has none; one that doesn't parse is an error, so a sync writes
-// nothing over it.
-func grokHadIn(path string) (grokHad, error) {
-	var had grokHad
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return had, nil
-	}
-	if err != nil {
-		return had, err
-	}
-	var doc struct {
-		Model   map[string]map[string]any `toml:"model"`
-		Session map[string]any            `toml:"session"`
-	}
-	if err := toml.Unmarshal(b, &doc); err != nil {
-		return had, err
-	}
-	_, had.sessionPercent = doc.Session["auto_compact_threshold_percent"]
-	had.windows, had.percents = map[string]int{}, map[string]int{}
-	for name, t := range doc.Model {
-		id, ok := strings.CutPrefix(name, magpieID+"/")
-		if !ok {
-			continue
-		}
-		if n, ok := t["context_window"].(int64); ok {
-			had.windows[id] = int(n)
-		}
-		if n, ok := t["auto_compact_threshold_percent"].(int64); ok {
-			had.percents[id] = int(n)
-		}
-	}
-	return had, nil
-}
-
-// grokBackend is the api_backend a model of magpie's is asked on: the API
-// its provider serves it on natively, so the gateway relays what Grok sent
-// as it is instead of translating Chat Completions. Grok Build takes
-// "chat_completions" (its default), "responses" and "messages" (Anthropic
-// Messages) on each [model.*] table, and sends each to base_url's
-// /chat/completions, /responses or /messages, so the one /v1 serves all
-// three. A model whose native API is Chat or not known stays on Chat.
-func grokBackend(m catalog.Model) string {
-	switch {
-	case slices.Contains(m.APIs, string(provider.Responses)):
-		return "responses"
-	case slices.Contains(m.APIs, string(provider.Anthropic)):
-		return "messages"
-	}
-	return "chat_completions"
-}
 
 func grok(home string) *Agent { return grokIn(here(home)) }
 
@@ -266,72 +75,54 @@ func grokLikeIn(k grokKind, at place) *Agent {
 	if dir == "" {
 		dir = at.join(k.dir)
 	}
-	path := filepath.Join(dir, "config.toml")
-	get := func(k string) (string, error) {
+	path := filepath.Join(dir, builtingrok.SettingsFile)
+	get := func(key string) (string, error) {
 		models, err := edit.GetTOMLTable(path, "models")
-		return models[k], err
+		return models[key], err
 	}
-	wired := func() (bool, error) {
-		tables, err := edit.TOMLTables(path)
-		if err != nil {
-			return false, err
+	keyWindows, keyPercents := k.id+":"+path+":windows", k.id+":"+path+":percents"
+	apply := func(action builtingrok.Action, value string) error {
+		options := builtingrok.Options{
+			Action: action, Name: k.name, Value: value,
 		}
-		for _, t := range tables {
-			if strings.HasPrefix(t, grokModelTable) {
-				return true, nil
+		if action == builtingrok.SelectModel {
+			if ref, ok := cutMagpie(value); ok {
+				options.GatewayModel = ref
 			}
 		}
-		return false, nil
-	}
-	// keyWindows and keyPercents are the context_window and
-	// auto_compact_threshold_percent magpie last gave each of its models, so
-	// one the user set by hand since is told from it and kept
-	keyWindows, keyPercents := k.id+":"+path+":windows", k.id+":"+path+":percents"
-	writeMagpie := func() error {
-		had, err := grokHadIn(path)
+		if options.GatewayModel != "" || action == builtingrok.SyncCatalog {
+			saved := stashShared()
+			options.Windows, options.Percents = saved[keyWindows], saved[keyPercents]
+			options.Catalog = func() builtingrok.Catalog {
+				url := at.v1()
+				return builtingrok.Catalog{
+					URL: url, Key: keyAt(url), Models: sharedModels(k.id),
+					Working: settings.Load().ForAgent(k.id).Working,
+				}
+			}
+		}
+		var recovery builtingrok.Recovery
+		err := extension.ApplyLinkedAgentPlan(options, func(options builtingrok.Options, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+			plan, pending, err := builtingrok.Plan(options, settings)
+			recovery = pending
+			return plan, err
+		}, extension.LinkedActionFile{Name: builtingrok.SettingsFile, Path: path})
 		if err != nil {
 			return err
 		}
-		var wrote, wrotePct map[string]int
-		shared := stashShared()
-		saved, savedPct := shared[keyWindows], shared[keyPercents]
-		if saved != "" {
-			json.Unmarshal([]byte(saved), &wrote)
-		}
-		if savedPct != "" {
-			json.Unmarshal([]byte(savedPct), &wrotePct)
-		}
-		tables, gave, gavePct := grokModelTables(k.id, at.v1(), had, wrote, wrotePct)
-		if err := edit.SetTOMLTables(path, []string{grokModelTable}, tables); err != nil {
-			return err
-		}
-		put := map[string]string{}
-		if !maps.Equal(gave, wrote) || saved == "" {
-			b, _ := json.Marshal(gave)
-			put[keyWindows] = string(b)
-		}
-		if !maps.Equal(gavePct, wrotePct) || savedPct == "" {
-			b, _ := json.Marshal(gavePct)
-			put[keyPercents] = string(b)
-		}
-		if len(put) > 0 {
+		if recovery.Forget {
+			forget(keyWindows, keyPercents)
+		} else if recovery.Windows != "" || recovery.Percents != "" {
+			put := map[string]string{}
+			if recovery.Windows != "" {
+				put[keyWindows] = recovery.Windows
+			}
+			if recovery.Percents != "" {
+				put[keyPercents] = recovery.Percents
+			}
 			stash(put)
 		}
 		return nil
-	}
-	dropMagpie := func() error {
-		if err := edit.SetTOMLTables(path, []string{grokModelTable}, nil); err != nil {
-			return err
-		}
-		forget(keyWindows, keyPercents)
-		return nil
-	}
-	// the default model is the user's, not a campaign's
-	ownDefault := func(features map[string]string) error {
-		if features["campaigns"] == "false" {
-			return nil
-		}
-		return edit.SetTOMLKey(path, "features", "campaigns", false)
 	}
 	// the efforts of a model through magpie, as its catalog entry has them
 	efforts := func(model string) []string {
@@ -341,30 +132,11 @@ func grokLikeIn(k grokKind, at place) *Agent {
 		}
 		return catalog.Efforts(sharedModels(k.id), ref) // only read
 	}
-	return atomic(&Agent{
+	agent := &Agent{
 		ID: k.id, Name: k.name, Icon: k.icon, Aliases: k.aliases, Spelled: prefixed,
 		UA:  k.ua,
 		Dir: dir, Path: path,
-		Sync: func() error {
-			ok, err := wired()
-			if err != nil || !ok {
-				return err
-			}
-			model, err := get("default")
-			if err != nil {
-				return err
-			}
-			if model != "" {
-				features, err := edit.GetTOMLTable(path, "features")
-				if err != nil {
-					return err
-				}
-				if err := ownDefault(features); err != nil {
-					return err
-				}
-			}
-			return writeMagpie()
-		},
+		Sync: func() error { return apply(builtingrok.SyncCatalog, "") },
 		Notice: func() string {
 			if Running(k.proc) {
 				return k.notice.String()
@@ -393,51 +165,7 @@ func grokLikeIn(k grokKind, at place) *Agent {
 			{
 				Key: "model", Label: "model",
 				Get: func() string { v, _ := get("default"); return v },
-				Set: func(v string) error {
-					e, err := get("default_reasoning_effort")
-					if err != nil {
-						return err
-					}
-					features, err := edit.GetTOMLTable(path, "features")
-					if err != nil {
-						return err
-					}
-					if v == "" {
-						if err := edit.DelTOMLKey(path, "models", "default"); err != nil {
-							return err
-						}
-						if err := edit.DelTOMLKey(path, "features", "campaigns"); err != nil {
-							return err
-						}
-						return dropMagpie()
-					}
-					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-						if err := writeMagpie(); err != nil {
-							return err
-						}
-					} else if err := dropMagpie(); err != nil {
-						return err
-					}
-					if e != "" {
-						// a model without the chosen effort starts at its
-						// nearest one (a tie goes up), not at Grok's default:
-						// switching to a group of low/medium/high from xhigh
-						// keeps high (Creat.wu on Discord)
-						if es := efforts(v); es != nil && !contains(es, e) {
-							if n := catalog.NearestEffort(e, es); contains(es, n) {
-								if err := edit.SetTOMLKey(path, "models", "default_reasoning_effort", n); err != nil {
-									return err
-								}
-							} else if err := edit.DelTOMLKey(path, "models", "default_reasoning_effort"); err != nil {
-								return err
-							}
-						}
-					}
-					if err := ownDefault(features); err != nil {
-						return err
-					}
-					return edit.SetTOMLKey(path, "models", "default", v)
-				},
+				Set: func(v string) error { return apply(builtingrok.SelectModel, v) },
 				Options: func(cur map[string]string) []Option {
 					return k.options(dir, path, cur["model"])
 				},
@@ -447,18 +175,7 @@ func grokLikeIn(k grokKind, at place) *Agent {
 				// model that supports it and ignores it otherwise
 				Key: "effort", Label: "effort",
 				Get: func() string { v, _ := get("default_reasoning_effort"); return v },
-				Set: func(v string) error {
-					if v == "" {
-						return edit.DelTOMLKey(path, "models", "default_reasoning_effort")
-					}
-					// any other word stops the agent at start-up ("invalid
-					// reasoning effort", kigi 0.1.22 on `magpie kigi effort
-					// ultra`), so it is refused here instead
-					if !slices.Contains(grokEfforts, v) {
-						return fmt.Errorf("%s takes no effort %q: %s", k.name, v, strings.Join(grokEfforts, ", "))
-					}
-					return edit.SetTOMLKey(path, "models", "default_reasoning_effort", v)
-				},
+				Set: func(v string) error { return apply(builtingrok.SetEffort, v) },
 				Options: func(cur map[string]string) []Option {
 					if es := efforts(cur["model"]); es != nil {
 						return static(es...)
@@ -467,7 +184,9 @@ func grokLikeIn(k grokKind, at place) *Agent {
 				},
 			},
 		},
-	}, path)
+	}
+	extensionFenceLocalAtomic(agent, []string{path})
+	return agent
 }
 
 // grokOwnOptions are the models Grok Build offers its signed-in account: as

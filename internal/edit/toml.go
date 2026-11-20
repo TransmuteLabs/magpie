@@ -53,6 +53,19 @@ func TOMLTables(path string) ([]string, error) {
 	return doc.names, nil
 }
 
+func HasTOMLTablePrefix(path string, raw []byte, prefix string) (bool, error) {
+	doc, err := parseTOMLSource(raw, splitLines(string(raw)))
+	if err != nil {
+		return false, AtFile(path, err)
+	}
+	for _, table := range doc.tables {
+		if !table.array && strings.HasPrefix(table.name, prefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // TOMLTable is one ordinary table of a file EachTOMLTable read, shared
 // with the file's kept parse, so read only.
 type TOMLTable struct{ span *tomlTableSpan }
@@ -1095,10 +1108,18 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 	if err != nil {
 		return err
 	}
+	body, err := RewriteTOMLTablesMatching(path, raw, names, prefixes, tables)
+	if err != nil || bytes.Equal(body, raw) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteTOMLTablesMatching(path string, raw []byte, names, prefixes []string, tables []Table) ([]byte, error) {
 	lines := splitLines(string(raw))
 	blocks, err := parseTOMLTables(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	owned := func(name string) bool {
 		for _, n := range names {
@@ -1133,7 +1154,7 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 		}
 	}
 	if !found && len(tables) == 0 {
-		return nil
+		return raw, nil
 	}
 	out = trimBlank(out)
 	for _, t := range tables {
@@ -1148,5 +1169,5 @@ func SetTOMLTablesMatching(path string, names, prefixes []string, tables []Table
 	if len(out) > 0 {
 		out = append(out, "")
 	}
-	return writeTOML(path, out)
+	return renderTOML(path, out, raw)
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	builtingrok "github.com/yetone/magpie/internal/extension/builtin/grok"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -348,23 +349,30 @@ func grokSandbox(t *testing.T) (string, string) {
 // grokWindows is the context_window of magpie's tables for pro and flash.
 func grokWindows(t *testing.T, path string) (int, int) {
 	t.Helper()
-	got, err := grokWindowsIn(path)
+	got := grokSettings(t, path).Windows
+	return got["deepseek/pro"], got["deepseek/flash"]
+}
+
+func grokSettings(t *testing.T, path string) builtingrok.ModelSettings {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return got["deepseek/pro"], got["deepseek/flash"]
+	had, err := builtingrok.ReadModelSettings(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return had
 }
 
 // grokPercents is the auto_compact_threshold_percent of magpie's tables for
 // pro and flash, -1 for none.
 func grokPercents(t *testing.T, path string) (int, int) {
 	t.Helper()
-	had, err := grokHadIn(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	had := grokSettings(t, path)
 	get := func(id string) int {
-		if n, ok := had.percents[id]; ok {
+		if n, ok := had.Percents[id]; ok {
 			return n
 		}
 		return -1
@@ -482,7 +490,7 @@ func TestGrokWindowIsTheModelsAndCompactsAtThePercent(t *testing.T) {
 	}
 	check("new")
 	// what the old magpie left: the threshold as pro's window, on record
-	if err := edit.SetTOMLTables(path, []string{grokModelTable}, nil); err != nil {
+	if err := edit.SetTOMLTables(path, []string{builtingrok.ModelTablePrefix}, nil); err != nil {
 		t.Fatal(err)
 	}
 	old := "[model.\"magpie/deepseek/pro\"]\nmodel = \"deepseek/pro\"\ncontext_window = 300000\n\n" +
@@ -610,12 +618,9 @@ func TestGrokCompactsAtItsOwnPercentByDefault(t *testing.T) {
 	}
 	percents := func() (int, int) {
 		t.Helper()
-		had, err := grokHadIn(path)
-		if err != nil {
-			t.Fatal(err)
-		}
+		had := grokSettings(t, path)
 		get := func(id string) int {
-			if n, ok := had.percents[id]; ok {
+			if n, ok := had.Percents[id]; ok {
 				return n
 			}
 			return -1
@@ -648,7 +653,7 @@ func TestGrokCompactsAtItsOwnPercentByDefault(t *testing.T) {
 		raw, _ := os.ReadFile(path)
 		t.Fatalf("magpie's default: big %d%%, mid %d%%, want none (Grok Build's own 85)\n%s", big, mid, raw)
 	}
-	if w, _ := grokWindowsIn(path); w["v/big"] != 1000000 || w["v/mid"] != 524288 {
+	if w := grokSettings(t, path).Windows; w["v/big"] != 1000000 || w["v/mid"] != 524288 {
 		t.Fatalf("windows %v", w)
 	}
 	// 272K picked for Grok Build itself is the user's

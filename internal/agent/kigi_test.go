@@ -148,11 +148,7 @@ func TestKigiCompactsAtItsOwnPercentByDefault(t *testing.T) {
 	}
 	percent := func() int {
 		t.Helper()
-		had, err := grokHadIn(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if n, ok := had.percents["v/big"]; ok {
+		if n, ok := grokSettings(t, path).Percents["v/big"]; ok {
 			return n
 		}
 		return -1
