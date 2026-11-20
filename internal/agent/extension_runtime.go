@@ -58,17 +58,13 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 }
 
 func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
-	entry, err := manager.ActiveModule(ctx, plugin)
+	entry, config, err := manager.ActiveModuleConfig(ctx, plugin)
 	if err != nil {
 		return nil, err
 	}
 	for _, actual := range entry.Manifest.Agents {
 		if actual.ID != descriptor.ID || !extensionBindingSameDescriptor(actual, descriptor) {
 			continue
-		}
-		config, err := manager.ModuleConfig(ctx, plugin)
-		if err != nil {
-			return nil, err
 		}
 		return &extensionAgentRuntime{manager: manager, entry: entry, config: config.Version}, nil
 	}

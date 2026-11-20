@@ -61,7 +61,7 @@ func TestExtensionResumeUsesOwnedConnectedProfile(t *testing.T) {
 }
 
 func TestExtensionResumeRechecksCurrentOwnerAfterHelpersStop(t *testing.T) {
-	for _, change := range []string{"off", "config", "package", "remove"} {
+	for _, change := range []string{"off", "off-on", "config", "package", "remove"} {
 		t.Run(change, func(t *testing.T) {
 			host, _ := launchAgentFixture(t, launchAgentDescriptor())
 			if _, err := Starter("fixture-launch").ConnectHow(); err != nil {
@@ -86,9 +86,14 @@ func TestExtensionResumeRechecksCurrentOwnerAfterHelpersStop(t *testing.T) {
 				}
 			})
 			switch change {
-			case "off":
+			case "off", "off-on":
 				if err := host.SetEnabled(t.Context(), "fixture.agent", false); err != nil {
 					t.Fatal(err)
+				}
+				if change == "off-on" {
+					if err := host.SetEnabled(t.Context(), "fixture.agent", true); err != nil {
+						t.Fatal(err)
+					}
 				}
 			case "config":
 				config, err := host.ModuleConfig(t.Context(), "fixture.agent")
@@ -105,12 +110,16 @@ func TestExtensionResumeRechecksCurrentOwnerAfterHelpersStop(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := prepared.Recheck(t.Context()); err == nil {
+			err = prepared.Recheck(t.Context())
+			if err == nil {
 				t.Fatal("resume retained authority after current SDK owner changed", change)
 			}
-			if change == "config" || change == "package" {
-				if err := prepared.Recheck(t.Context()); !errors.Is(err, extension.ErrActionChanged) {
-					t.Fatal("replacement did not report stale launch authority", err)
+			if (change == "config" || change == "package" || change == "off-on") && !errors.Is(err, extension.ErrActionChanged) {
+				t.Fatal("replacement did not report stale launch authority", err)
+			}
+			if change == "off-on" {
+				if _, err := PrepareExtensionResume(t.Context(), "fixture.agent", "fixture-launch"); err != nil {
+					t.Fatal("re-enabled owner could not prepare a fresh launch", err)
 				}
 			}
 		})

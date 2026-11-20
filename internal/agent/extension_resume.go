@@ -99,13 +99,19 @@ func prepareExtensionStart(ctx context.Context, selected *Agent, controller *ext
 		!start.Active && before.Phase != "" && before.Phase != "disconnected" {
 		return nil, extension.ErrActionChanged
 	}
-	var owner *extensionAgentRuntime
-	var address, key string
+	var namespace, enableGeneration, address, key string
 	if start.Active {
+		manager := extension.Default()
+		owner, err := inspectAgentRuntime(ctx, manager, plugin, controller.item.Agent)
+		if err != nil {
+			return nil, err
+		}
+		if owner.entry.Revision != before.PackageRevision || owner.config != before.ConfigVersion {
+			return nil, extension.ErrActionChanged
+		}
+		namespace, enableGeneration = manager.Namespace(), owner.entry.EnableGeneration
 		address = gateway.URL()
 		key = agentKeyAt(id, address)
-		owner = &extensionAgentRuntime{manager: extension.Default(),
-			entry: extension.Installed{Revision: before.PackageRevision}, config: before.ConfigVersion}
 	}
 	prepared := &ExtensionResumeStart{Starting: start}
 	prepared.Starting.Env = slices.Clone(start.Env)
@@ -114,11 +120,6 @@ func prepareExtensionStart(ctx context.Context, selected *Agent, controller *ext
 	prepared.check = func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if owner != nil {
-			if err := owner.check(ctx, plugin); err != nil {
-				return err
-			}
 		}
 		actual := prepared.Starting
 		if actual.Err != nil || actual.Bin != start.Bin || actual.Active != start.Active ||
@@ -152,6 +153,18 @@ func prepareExtensionStart(ctx context.Context, selected *Agent, controller *ext
 		spec := controller.spec()
 		if spec == nil || spec.err != nil || !slices.Equal(spec.vars(address, key), start.Env) ||
 			!slices.Equal(spec.args, start.Args) || spec.flag != start.Flag || current.Values["model"] != start.Model {
+			return extension.ErrActionChanged
+		}
+		manager := extension.Default()
+		if manager.Namespace() != namespace {
+			return extension.ErrActionChanged
+		}
+		owner, err := inspectAgentRuntime(ctx, manager, plugin, controller.item.Agent)
+		if err != nil {
+			return err
+		}
+		if owner.entry.Revision != before.PackageRevision || owner.config != before.ConfigVersion ||
+			owner.entry.EnableGeneration != enableGeneration {
 			return extension.ErrActionChanged
 		}
 		return ctx.Err()
