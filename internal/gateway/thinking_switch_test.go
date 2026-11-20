@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -49,6 +50,12 @@ func (d *switchDeepSeek) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		act, stop = `{"type":"text","text":"Read it."}`, "end_turn"
 	}
 	answerMessages(w, b, fmt.Sprintf(`{"id":%q,"type":"message","role":"assistant","model":"deepseek-v4-pro","content":[{"type":"thinking","thinking":"We need to read f%d.go.","signature":%q},%s],"stop_reason":%q,"stop_sequence":null,"usage":{"input_tokens":85,"output_tokens":18}}`, id, n, id, act, stop))
+}
+
+func (d *switchDeepSeek) sent() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.bodies)
 }
 
 // answerMessages writes msg whole, or as the Messages stream when body asks for
@@ -171,6 +178,12 @@ func (c *switchClaude) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	answerMessages(w, b, fmt.Sprintf(`{"id":"msg_011Cgf%d","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"thinking","thinking":"Go on.","signature":%q},{"type":"text","text":"Done."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`, c.n, sig))
 }
 
+func (c *switchClaude) sent() ([]string, int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.bodies), c.refused
+}
+
 // switchTurn posts a Claude Code turn to the group and gives back the
 // conversation with the reply added, as Claude Code keeps it.
 func switchTurn(t *testing.T, s *Server, stream bool, msgs []json.RawMessage) ([]json.RawMessage, int, string) {
@@ -203,7 +216,8 @@ func TestDeepSeekThinkingThenClaude(t *testing.T) {
 func deepSeekThenClaude(t *testing.T, stream bool) {
 	fresh(t)
 	ds, cl := &switchDeepSeek{}, &switchClaude{}
-	dsu, clu := httptest.NewServer(ds), httptest.NewServer(cl)
+	dsu := httptest.NewServer(inferenceOnlyFixture(t, "/anthropic/v1/messages", "deepseek-v4-pro", ds))
+	clu := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", "claude-opus-5-5", cl))
 	t.Cleanup(dsu.Close)
 	t.Cleanup(clu.Close)
 	for _, p := range []provider.Provider{
@@ -241,8 +255,8 @@ func deepSeekThenClaude(t *testing.T, stream bool) {
 			t.Fatalf("DeepSeek turn %d's result: %d %s", i, code, said)
 		}
 	}
-	if len(cl.bodies) != 0 {
-		t.Fatalf("Claude asked %d times while DeepSeek answered", len(cl.bodies))
+	if bodies, _ := cl.sent(); len(bodies) != 0 {
+		t.Fatalf("Claude asked %d times while DeepSeek answered", len(bodies))
 	}
 	// DeepSeek unticked: the next turn goes to Claude
 	g.Off = []string{"deepseek/deepseek-v4-pro"}
@@ -259,10 +273,11 @@ func deepSeekThenClaude(t *testing.T, stream bool) {
 	}
 	// Claude was never sent a block it didn't sign, so never refused one,
 	// and was sent its own blocks as it signed them
-	if cl.refused != 0 {
-		t.Errorf("Claude refused %d of its %d requests: %s", cl.refused, len(cl.bodies), cl.bodies[0])
+	bodies, refused := cl.sent()
+	if refused != 0 || len(bodies) != 3 {
+		t.Fatalf("Claude refused %d requests and received %d, want 0 refusals and 3 requests: %v", refused, len(bodies), bodies)
 	}
-	last := cl.bodies[len(cl.bodies)-1]
+	last := bodies[len(bodies)-1]
 	if strings.Contains(last, "49e144b6-") {
 		t.Errorf("DeepSeek's thinking went to Claude: %s", last)
 	}
@@ -279,15 +294,16 @@ func deepSeekThenClaude(t *testing.T, stream bool) {
 	if err := provider.SaveGroup(g); err != nil {
 		t.Fatal(err)
 	}
-	asked := len(ds.bodies)
+	asked := len(ds.sent())
 	msgs = append(msgs, user("back on DeepSeek"))
 	if _, code, said := switchTurn(t, s, stream, msgs); code != 200 {
 		t.Fatalf("DeepSeek again: %d %s", code, said)
 	}
-	if len(ds.bodies) != asked+1 {
-		t.Fatalf("DeepSeek asked %d times, want 1", len(ds.bodies)-asked)
+	bodies = ds.sent()
+	if len(bodies) != asked+1 {
+		t.Fatalf("DeepSeek asked %d times, want 1", len(bodies)-asked)
 	}
-	sent := ds.bodies[asked]
+	sent := bodies[asked]
 	for _, m := range msgs {
 		for _, b := range gjson.GetBytes(m, "content").Array() {
 			if b.Get("type").String() == "thinking" && !strings.Contains(sent, b.Get("signature").Raw) {
@@ -363,7 +379,8 @@ func TestWithoutForeignThinking(t *testing.T) {
 func TestDeepSeekThinkingThenClaudeResponses(t *testing.T) {
 	fresh(t)
 	ds, cl := &switchDeepSeek{}, &switchClaude{}
-	dsu, clu := httptest.NewServer(ds), httptest.NewServer(cl)
+	dsu := httptest.NewServer(inferenceOnlyFixture(t, "/anthropic/v1/messages", "deepseek-v4-pro", ds))
+	clu := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", "claude-opus-5-5", cl))
 	t.Cleanup(dsu.Close)
 	t.Cleanup(clu.Close)
 	for _, p := range []provider.Provider{
@@ -418,10 +435,11 @@ func TestDeepSeekThinkingThenClaudeResponses(t *testing.T) {
 		input = append(input, user(fmt.Sprintf("now on Claude, %d", i)))
 		turn("Claude")
 	}
-	if cl.refused != 0 {
-		t.Errorf("Claude refused %d of its %d requests: %s", cl.refused, len(cl.bodies), cl.bodies[0])
+	bodies, refused := cl.sent()
+	if refused != 0 || len(bodies) != 2 {
+		t.Fatalf("Claude refused %d requests and received %d, want 0 refusals and 2 requests: %v", refused, len(bodies), bodies)
 	}
-	if last := cl.bodies[len(cl.bodies)-1]; !strings.Contains(last, "EqQBCkgIBxABGAIiQL1") {
+	if last := bodies[len(bodies)-1]; !strings.Contains(last, "EqQBCkgIBxABGAIiQL1") {
 		t.Errorf("Claude's own thinking didn't go back to it: %s", last)
 	}
 }

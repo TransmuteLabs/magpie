@@ -99,7 +99,7 @@ func TestUnsignedThinkingNotSentToClaude(t *testing.T) {
 	t.Run("relayed", func(t *testing.T) {
 		fresh(t)
 		up := &kiroClaude{}
-		srv := httptest.NewServer(up)
+		srv := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", "claude-opus-5-5", up))
 		t.Cleanup(srv.Close)
 		if err := provider.Save(provider.Provider{ID: "kiro-relay", Name: "Kiro relay", Key: "k", Anthropic: srv.URL, Models: []string{"claude-opus-5-5"}}); err != nil {
 			t.Fatal(err)
@@ -178,9 +178,12 @@ func (g *switchGrok) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func TestGrokThinkingThenClaude(t *testing.T) {
 	fresh(t)
 	gk, cl := &switchGrok{}, &switchClaude{}
-	gku, clu := httptest.NewServer(gk), httptest.NewServer(cl)
+	gku := httptest.NewServer(inferenceOnlyFixture(t, "/v1/chat/completions", "grok-4.7", gk))
+	clu := httptest.NewServer(inferenceOnlyFixture(t, "/v1/messages", "claude-opus-5-5", cl))
 	t.Cleanup(gku.Close)
 	t.Cleanup(clu.Close)
+	probeFixtureRoot(t, gku)
+	probeFixtureRoot(t, clu)
 	for _, p := range []provider.Provider{
 		{ID: "grokco", Name: "Grok", Key: "sk-gk", Chat: gku.URL + "/v1", Models: []string{"grok-4.7"}},
 		{ID: "claude-api", Name: "Claude API", Key: "sk-ant", Anthropic: clu.URL, Models: []string{"claude-opus-5-5"}},
@@ -188,6 +191,14 @@ func TestGrokThinkingThenClaude(t *testing.T) {
 		if err := provider.Save(p); err != nil {
 			t.Fatal(err)
 		}
+	}
+	claude, err := provider.Find("claude-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := claude.Fetch(t.Context())
+	if err != nil || len(models) != 1 || models[0].ID != "claude-opus-5-5" {
+		t.Fatalf("Claude discovery listed %v: %v", models, err)
 	}
 	g := provider.Group{ID: "dc", Name: "Smart split", Members: []string{"grokco/grok-4.7", "claude-api/claude-opus-5-5"}}
 	if err := provider.SaveGroup(g); err != nil {
@@ -215,10 +226,11 @@ func TestGrokThinkingThenClaude(t *testing.T) {
 	if _, code, said = switchTurn(t, s, false, msgs); code != 200 {
 		t.Fatalf("Claude's turn: %d %s", code, said)
 	}
-	if cl.refused != 0 || len(cl.bodies) != 1 {
-		t.Fatalf("Claude refused %d of %d requests: %s", cl.refused, len(cl.bodies), cl.bodies[0])
+	bodies, refused := cl.sent()
+	if refused != 0 || len(bodies) != 1 {
+		t.Fatalf("Claude refused %d of %d requests: %v", refused, len(bodies), bodies)
 	}
-	sent := cl.bodies[0]
+	sent := bodies[0]
 	if strings.Contains(sent, "split logic") {
 		t.Errorf("Grok's thinking went to Claude: %s", sent)
 	}
