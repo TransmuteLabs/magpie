@@ -53,6 +53,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -60,6 +61,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/codexcat"
@@ -137,12 +140,7 @@ func t3code(home string) *Agent {
 		// found by its bundle. No command: `t3` is a common name.
 		detect:   func() bool { return isDir(base) || t3App(home) },
 		ListOnly: true,
-		Sync: func() error {
-			if err := syncJSON(path, t3Instance, func() any { return t3Merged(path, gateway.URL()) }); err != nil {
-				return err
-			}
-			return t3CodexSync(path, gateway.URL())
-		},
+		Sync:     func() error { return t3Sync(path, gateway.URL()) },
 		// its custom models are the models picked for it (#1508)
 		ListsModels: true,
 		// magpie's instance still on the gateway, as for every agent with
@@ -217,6 +215,29 @@ func t3App(home string) bool {
 // every magpie model as a custom model, and the binary path and Claude
 // home of T3's own Claude when the user gave them one.
 func t3InstanceJSON(path, gw string) map[string]any {
+	return t3ClaudeJSON(gw, t3FileSettings(path))
+}
+
+func t3FileSettings(path string) func(string) string {
+	return func(key string) string {
+		value, _ := edit.GetJSON(path, key)
+		return value
+	}
+}
+
+func t3CopyDriverPaths(config map[string]any, driver string, get func(string) string) {
+	for _, key := range []string{"binaryPath", "homePath"} {
+		value := get("providerInstances." + driver + ".config." + key)
+		if value == "" {
+			value = get("providers." + driver + "." + key)
+		}
+		if value = strings.TrimSpace(value); value != "" {
+			config[key] = value
+		}
+	}
+}
+
+func t3ClaudeJSON(gw string, get func(string) string) map[string]any {
 	mark := claude1MFor("t3code")
 	models := []map[string]any{}
 	for _, m := range sharedModels("t3code") {
@@ -228,17 +249,7 @@ func t3InstanceJSON(path, gw string) map[string]any {
 		models = append(models, e)
 	}
 	config := map[string]any{"customModels": models}
-	for _, k := range []string{"binaryPath", "homePath"} {
-		// the user's Claude instance, else the setting it was before T3
-		// had instances
-		v, _ := edit.GetJSON(path, "providerInstances.claudeAgent.config."+k)
-		if v == "" {
-			v, _ = edit.GetJSON(path, "providers.claudeAgent."+k)
-		}
-		if v = strings.TrimSpace(v); v != "" {
-			config[k] = v
-		}
-	}
+	t3CopyDriverPaths(config, "claudeAgent", get)
 	environment := []map[string]any{
 		{"name": "ANTHROPIC_BASE_URL", "value": gw, "sensitive": false},
 		{"name": "ANTHROPIC_AUTH_TOKEN", "value": keyAt(gw), "sensitive": false},
@@ -297,10 +308,11 @@ func t3EnvOf(path, k string) (string, bool) {
 // it nothing of the user's.
 func t3Merged(path, gw string) any {
 	want := t3InstanceJSON(path, gw)
-	cur, ok := edit.GetJSON(path, t3Instance)
-	if !ok {
-		return want
-	}
+	cur, _ := edit.GetJSON(path, t3Instance)
+	return t3KeepClaude(want, cur)
+}
+
+func t3KeepClaude(want map[string]any, cur string) any {
 	var have map[string]json.RawMessage
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
 		return want
@@ -426,28 +438,17 @@ func t3CodexArgs(path, gw string) string {
 // t3CodexJSON is magpie's Codex instance in T3 Code's settings.json at
 // path, with the binary path and Codex home of T3's own Codex when the
 // user gave them one.
-func t3CodexJSON(path, gw string) map[string]any {
+func t3CodexJSON(path, gw string, get func(string) string) map[string]any {
 	config := map[string]any{"launchArgs": t3CodexArgs(path, gw)}
-	for _, k := range []string{"binaryPath", "homePath"} {
-		v, _ := edit.GetJSON(path, "providerInstances.codex.config."+k)
-		if v == "" {
-			v, _ = edit.GetJSON(path, "providers.codex."+k)
-		}
-		if v = strings.TrimSpace(v); v != "" {
-			config[k] = v
-		}
-	}
+	t3CopyDriverPaths(config, "codex", get)
 	return map[string]any{"driver": "codex", "displayName": "magpie · Codex", "enabled": true, "config": config}
 }
 
 // t3CodexMerged is t3CodexJSON merged into the instance at path: the
 // user's name, whether it is on, and keys magpie doesn't write stay.
-func t3CodexMerged(path, gw string) any {
-	want := t3CodexJSON(path, gw)
-	cur, ok := edit.GetJSON(path, t3CodexInstance)
-	if !ok {
-		return want
-	}
+func t3CodexMerged(path, gw string, get func(string) string) any {
+	want := t3CodexJSON(path, gw, get)
+	cur := get(t3CodexInstance)
 	var have map[string]json.RawMessage
 	if json.Unmarshal([]byte(cur), &have) != nil || have == nil {
 		return want
@@ -474,7 +475,7 @@ func t3CodexPut(path, gw string) error {
 	if err := t3CodexCatalogPut(path); err != nil {
 		return err
 	}
-	if err := edit.SetJSON(path, edit.KV{Path: t3CodexInstance, Value: t3CodexMerged(path, gw)}); err != nil {
+	if err := edit.SetJSON(path, edit.KV{Path: t3CodexInstance, Value: t3CodexMerged(path, gw, t3FileSettings(path))}); err != nil {
 		return err
 	}
 	stash(map[string]string{t3CodexOffered: "1"})
@@ -485,27 +486,65 @@ func t3CodexPut(path, gw string) error {
 // catalog for magpie's Codex instance, when it changed.
 func t3CodexCatalogPut(path string) error {
 	cat := t3CodexCatalog(path)
-	b := codexcat.CatalogAt(magpieModels("t3code"), "")
+	b := t3CodexModels()
 	if cur, err := os.ReadFile(cat); err == nil && bytes.Equal(cur, b) {
 		return nil
 	}
 	return edit.WriteAtomic(cat, b)
 }
 
-// t3CodexSync brings magpie's Codex instance up to the catalog and the
-// gateway, and writes it beside magpie's Claude Code instance an older
-// magpie wrote alone. One the user removed stays removed.
-func t3CodexSync(path, gw string) error {
-	if _, ok := edit.GetJSON(path, t3CodexInstance); !ok {
-		if _, mine := edit.GetJSON(path, t3Instance); !mine || t3Stashed(t3CodexOffered) {
-			return nil
-		}
-		return t3CodexPut(path, gw)
+func t3CodexModels() []byte {
+	return codexcat.CatalogAt(magpieModels("t3code"), "")
+}
+
+// t3Sync brings magpie's instances up to the catalog and gateway. An older
+// Claude-only wiring gets Codex once, and one the user removed stays removed.
+func t3Sync(path, gw string) error {
+	before, err := readWiringFile(path)
+	if err != nil {
+		return edit.PreserveOnRollback(path, err)
 	}
-	if err := t3CodexCatalogPut(path); err != nil {
+	config := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(before.body)))
+	get := func(key string) string { return config.Get(key).String() }
+	claude, codex := config.Get(t3Instance), config.Get(t3CodexInstance)
+	addCodex := !codex.Exists() && claude.Exists() && !t3Stashed(t3CodexOffered)
+	var files []wiringFileEdit
+	var writes []edit.KV
+	if claude.Exists() {
+		if next := t3KeepClaude(t3ClaudeJSON(gw, get), claude.String()); !sameJSON(claude.Raw, next) {
+			writes = append(writes, edit.KV{Path: t3Instance, Value: next})
+		}
+	}
+	if addCodex || codex.Exists() {
+		catalogPath := t3CodexCatalog(path)
+		catalogBefore, err := readWiringFile(catalogPath)
+		if err != nil {
+			return before.preserveOnError(path, edit.PreserveOnRollback(catalogPath, err))
+		}
+		catalog := wiringFileEdit{path: catalogPath, before: catalogBefore}
+		if body := t3CodexModels(); !bytes.Equal(catalogBefore.body, body) {
+			catalog.body = body
+		}
+		files = append(files, catalog)
+		if next := t3CodexMerged(path, gw, get); addCodex || !sameJSON(codex.Raw, next) {
+			writes = append(writes, edit.KV{Path: t3CodexInstance, Value: next})
+		}
+	}
+	settings := wiringFileEdit{path: path, before: before}
+	if len(writes) != 0 {
+		settings.body, err = edit.PatchJSON(before.body, writes, nil)
+		if err != nil {
+			return before.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
+		}
+	}
+	files = append(files, settings)
+	if err := writeWiringFiles(files...); err != nil {
 		return err
 	}
-	return syncJSON(path, t3CodexInstance, func() any { return t3CodexMerged(path, gw) })
+	if addCodex {
+		stash(map[string]string{t3CodexOffered: "1"})
+	}
+	return nil
 }
 
 // t3CodexOff says when magpie's Codex instance no longer reaches the
