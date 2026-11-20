@@ -48,6 +48,10 @@ credential generations. The validated SDK catalog is also persisted in the
 existing private Store, so a fresh CLI can select dynamically discovered
 models without starting another worker or vendor request. A measured empty
 catalog remains distinct from a list that has never been fetched.
+The in-process cache keeps up to 64 snapshots and 32 MiB of their encoded
+catalog size. An evicted snapshot can be reopened from the private Store.
+Account eligibility uses the result and its known/unknown state from the
+same read, including when another caller evicts the snapshot.
 
 Catalog bytes are split into bounded content-addressed chunks. The root
 record is published only after all chunks, validation and the selected
