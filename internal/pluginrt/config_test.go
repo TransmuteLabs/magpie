@@ -240,3 +240,76 @@ func TestKeepFreshFollowsPluginsYml(t *testing.T) {
 	}
 	wait(1)
 }
+
+func TestRefreshRetainsAnIsolatedConfiguration(t *testing.T) {
+	home(t)
+	const id = "settings-snapshot-test"
+	defaults := map[string]any{"tree": map[string]any{"label": "default"}}
+	var active map[string]any
+	register(Manifest{
+		ID: id, Defaults: defaults,
+		Apply: func(ctx *Ctx) error {
+			active = ctx.Config
+			return nil
+		},
+	})
+	defMu.Lock()
+	previous := def
+	def = nil
+	defMu.Unlock()
+	t.Cleanup(func() {
+		defMu.Lock()
+		defer defMu.Unlock()
+		if def != nil {
+			def.Stop()
+		}
+		def = previous
+		regMu.Lock()
+		defer regMu.Unlock()
+		delete(registry, id)
+	})
+	const broken = "plugins: ["
+	save := func(body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(Path()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(Path(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(broken)
+	initial, err := Refresh()
+	if got := byID(initial)[id]; err == nil || !got.Enabled || !reflect.DeepEqual(got.Config, defaults) || !reflect.DeepEqual(active, defaults) {
+		t.Fatalf("initial malformed file: composed=%+v active=%v error=%v", got, active, err)
+	}
+	save("plugins:\n  - id: " + id + "\n    enabled: false\n")
+	if _, err := Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	save("plugins:\n  - id: " + id + "\n    config:\n      tree:\n        labels: [{name: kept}]\n")
+	composed, err := Refresh()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := byID(composed)[id]
+	tree := config.Config["tree"].(map[string]any)
+	tree["label"] = "changed by reader"
+	tree["labels"].([]any)[0].(map[string]any)["name"] = "changed by reader"
+	config.Sources["tree"] = FromPreset
+	active["tree"].(map[string]any)["label"] = "changed by runtime callback"
+	save(broken)
+	retained, err := Refresh()
+	actual := byID(retained)[id]
+	expected := map[string]any{"tree": map[string]any{
+		"label": "default", "labels": []any{map[string]any{"name": "kept"}},
+	}}
+	if err == nil || !actual.Enabled || !reflect.DeepEqual(actual.Config, expected) || actual.Sources["tree"] != FromUser {
+		t.Fatalf("retained configuration: %+v, %v, want %v", actual, err, expected)
+	}
+	actual.Config["tree"].(map[string]any)["label"] = "changed by error reader"
+	retained, err = Refresh()
+	if got := byID(retained)[id]; err == nil || !reflect.DeepEqual(got.Config, expected) {
+		t.Fatalf("error reader changed the runtime snapshot: %+v, %v", got, err)
+	}
+}

@@ -196,8 +196,7 @@ type Runtime struct {
 	order    []string // applied order, for disposing in reverse
 	services map[string]any
 	routing  *routes.Catalog
-	// reconciled is set once Reconcile has run
-	reconciled bool
+	composed []Composed
 }
 
 // New is a runtime of the registered plugins, none applied yet.
@@ -222,7 +221,6 @@ func (rt *Runtime) RoutingCatalog() *routes.Catalog { return rt.routing }
 func (rt *Runtime) Reconcile(on map[string]bool, config map[string]map[string]any) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	rt.reconciled = true
 	for id, p := range rt.plugins {
 		p.wanted = on[id]
 	}
@@ -317,7 +315,7 @@ func (rt *Runtime) satisfied(m Manifest) bool { return len(rt.missing(m)) == 0 }
 // apply runs a plugin's Apply, called with rt.mu held. A panic is a
 // failure of that plugin alone; what it registered before it is undone.
 func (rt *Runtime) apply(p *running, config map[string]any) {
-	ctx := &Ctx{ID: p.m.ID, Config: config, rt: rt}
+	ctx := &Ctx{ID: p.m.ID, Config: cloneConfigMap(config), rt: rt}
 	ctx.parts = append(ctx.parts, p.m.Parts...)
 	err := func() (err error) {
 		defer func() {
