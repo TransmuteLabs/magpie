@@ -1931,23 +1931,7 @@ func gooseIn(at place, cfg string) *Agent {
 			Key: "model", Label: "model",
 			// the layout goose keeps it in, old or new (see goose.go)
 			Get: func() string { return gooseModel(path) },
-			Set: func(v string) error {
-				if v == "" {
-					if err := clearGooseModel(path); err != nil {
-						return err
-					}
-					return removeGooseProvider(provider)
-				}
-				// a model of magpie's: magpie as a custom provider of
-				// Goose's, each model with its window and whether Goose
-				// can send it a thinking level (see goose.go)
-				if ref, ok := strings.CutPrefix(v, gooseProviderID+"/"); ok && isMagpie(ref) {
-					if err := writeGooseProvider(provider, at); err != nil {
-						return err
-					}
-				}
-				return setGooseModel(path, v)
-			},
+			Set: func(v string) error { return applyGooseModel(path, provider, v, at) },
 			Options: func(cur map[string]string) []Option {
 				// only the native providers this goose is set up with (#987:
 				// every one of four was listed, OpenRouter's hundreds of

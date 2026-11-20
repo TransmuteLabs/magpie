@@ -156,6 +156,11 @@ the provider, selected model and inherited effort from one settings snapshot.
 The host supplies the gateway address, key ownership and visible model
 catalog, then updates the restore stash after the checked write succeeds.
 
+Goose's [settings planner](../../internal/extension/builtin/goose/settings.go)
+checks `config.yaml` and the custom provider catalog together for model
+selection and reset. Catalog refresh uses the same catalog planner. A
+rejected settings write leaves the previous catalog in place.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

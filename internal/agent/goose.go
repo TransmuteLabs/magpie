@@ -1,10 +1,6 @@
 package agent
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,7 +9,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yetone/magpie/internal/edit"
-	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/extension"
+	builtingoose "github.com/yetone/magpie/internal/extension/builtin/goose"
 )
 
 // Goose (Block's goose, its CLI and desktop app alike) reaches magpie as a
@@ -39,16 +36,7 @@ import (
 
 // gooseProviderID is magpie's file in Goose's custom_providers and the
 // provider GOOSE_PROVIDER names.
-const gooseProviderID = magpieID
-
-// gooseThinks matches the model names goose sends its thinking level for on
-// an OpenAI-compatible provider: OpenAI's reasoning models, as goose's
-// is_openai_responses_model tells them (crates/goose-provider-types/src/
-// formats/openai.rs). For any other model goose keeps the level to itself —
-// thinking_effort is one of its own request params, never sent — so a
-// level offered for it would change nothing; it is declared without
-// reasoning rather than shown a picker that does nothing.
-var gooseThinks = lazyre.New(`(?i)(?:^|[-/])(?:o\d+(?:$|-)|gpt-(?:5|6)(?:$|[-.]))`)
+const gooseProviderID = builtingoose.ProviderID
 
 // gooseKeys are the secrets goose reads for the native providers whose
 // models magpie can list, and which goose takes from the environment before
@@ -111,37 +99,16 @@ func gooseConfigured(cfg string, getenv func(string) string) []string {
 // gooseProviderPath is magpie's custom provider file for the Goose whose
 // config.yaml is at cfg.
 func gooseProviderPath(cfg string) string {
-	return filepath.Join(filepath.Dir(cfg), "custom_providers", gooseProviderID+".json")
+	return filepath.Join(filepath.Dir(cfg), filepath.FromSlash(builtingoose.CatalogFile))
 }
 
-// gooseProviderJSON is magpie as a custom provider of the Goose at a
-// place, its models the catalog as Goose is shown it.
-func gooseProviderJSON(at place) map[string]any {
-	models := []map[string]any{}
-	for _, m := range sharedModels("goose") {
-		e := map[string]any{"name": m.ID, "reasoning": gooseThinks.MatchString(m.ID)}
-		if m.Context > 0 {
-			e["context_limit"] = m.Context
-		}
-		models = append(models, e)
+func gooseCatalog(at place) builtingoose.CatalogOptions {
+	current := sharedModels("goose")
+	models := make([]builtingoose.Model, 0, len(current))
+	for _, model := range current {
+		models = append(models, builtingoose.Model{ID: model.ID, Context: model.Context})
 	}
-	p := map[string]any{
-		"name":                     gooseProviderID,
-		"engine":                   "openai",
-		"display_name":             "magpie",
-		"description":              "Every model magpie has, through its local gateway",
-		"api_key_env":              "",
-		"base_url":                 at.v1(),
-		"headers":                  map[string]any{"Authorization": "Bearer " + gooseKey(at)},
-		"requires_auth":            false,
-		"skip_canonical_filtering": true,
-		"models":                   models,
-	}
-	// goose refuses a provider whose static list is empty
-	if len(models) > 0 {
-		p["dynamic_models"] = false
-	}
-	return p
+	return builtingoose.CatalogOptions{URL: at.v1(), Key: gooseKey(at), Models: models}
 }
 
 // gooseKey is the key magpie's custom provider hands the Goose at a place:
@@ -151,65 +118,25 @@ func gooseProviderJSON(at place) map[string]any {
 // in Usage (#1083).
 func gooseKey(at place) string { return agentKeyAt("goose", at.gw()) }
 
-// gooseProviderKept is magpie's custom provider laid over the file at path.
-// Goose's own editor (update_custom_provider, crates/goose/src/config/
-// declarative_providers.rs) carries the keys it doesn't show into the file it
-// writes, and the user sets timeout_seconds, toolshim, supports_streaming,
-// preserves_thinking, a header or a name there (DeclarativeProviderConfig).
-// Each stays (#2030); what reaches the gateway, its key and the model list
-// are magpie's.
-func gooseProviderKept(path string, at place) map[string]any {
-	want := gooseProviderJSON(at)
-	raw, err := edit.Read(path)
-	if err != nil || raw == nil {
-		return want
-	}
-	var have map[string]any
-	if json.Unmarshal(raw, &have) != nil || have == nil {
-		return want
-	}
-	if name, _ := have["display_name"].(string); strings.TrimSpace(name) != "" {
-		want["display_name"] = name
-	}
-	if h, _ := have["headers"].(map[string]any); h != nil {
-		// a header of the user's, beside magpie's Authorization
-		want["headers"] = mergeKept(h, want["headers"].(map[string]any), nil)
-	}
-	return mergeKept(have, want, []string{"name", "engine", "api_key_env", "base_url", "requires_auth", "dynamic_models", "models", "headers"})
-}
-
-// writeGooseProvider writes magpie's custom provider file for Goose.
-func writeGooseProvider(path string, at place) error {
-	b, err := json.MarshalIndent(gooseProviderKept(path, at), "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return edit.WriteAtomic(path, append(b, '\n'))
-}
-
-// syncGooseProvider rewrites magpie's custom provider file for Goose with
-// the catalog as it is now, where magpie wrote one and it differs.
 func syncGooseProvider(path string, at place) error {
 	raw, err := edit.Read(path)
 	if err != nil || raw == nil {
 		return nil
 	}
-	if sameJSON(string(raw), gooseProviderKept(path, at)) {
-		return nil
-	}
-	return writeGooseProvider(path, at)
+	return extension.ApplyLinkedAgentPlan(func() builtingoose.CatalogOptions { return gooseCatalog(at) },
+		builtingoose.PlanSync, extension.LinkedActionFile{Name: builtingoose.CatalogFile, Path: path})
 }
 
-// removeGooseProvider takes magpie's custom provider file away once Goose's
-// model is no longer one of magpie's.
-func removeGooseProvider(path string) error {
-	if err := edit.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+func applyGooseModel(config, catalog, selection string, at place) error {
+	options := builtingoose.ModelOptions{Selection: selection}
+	if ref, ok := strings.CutPrefix(selection, gooseProviderID+"/"); ok && isMagpie(ref) {
+		options.Catalog = func() builtingoose.CatalogOptions { return gooseCatalog(at) }
 	}
-	return nil
+	files := []extension.LinkedActionFile{{Name: builtingoose.SettingsFile, Path: config}}
+	if selection == "" || options.Catalog != nil {
+		files = append(files, extension.LinkedActionFile{Name: builtingoose.CatalogFile, Path: catalog})
+	}
+	return extension.ApplyLinkedAgentPlan(options, builtingoose.PlanModel, files...)
 }
 
 // Goose keeps the provider and model it uses in one of two layouts of its
@@ -230,22 +157,6 @@ func removeGooseProvider(path string) error {
 // providers map is there its migration deletes the flat keys on the next
 // write (cleanup_legacy_provider_keys). So a model set with the flat keys
 // alone on a migrated config is never used, and lost.
-
-// gooseNewLayout reports whether the Goose config at cfg is in the new
-// layout: it has a providers map or an active_provider.
-func gooseNewLayout(cfg string) bool {
-	b, err := edit.Read(cfg)
-	if err != nil || b == nil {
-		return false
-	}
-	var c map[string]any
-	if yaml.Unmarshal(b, &c) != nil {
-		return false
-	}
-	_, providers := c["providers"]
-	_, active := c["active_provider"]
-	return providers || active
-}
 
 // gooseActive is the provider and model the Goose config at cfg uses, read
 // as goose reads them (the environment aside).
@@ -273,42 +184,4 @@ func gooseModel(cfg string) string {
 		return m
 	}
 	return p + "/" + m
-}
-
-// setGooseModel makes v, a provider/model, the model the Goose config at
-// cfg uses, in the layout the config is in: on a new one as goose's own
-// set_active_provider writes it, other providers' entries kept; on an old
-// one the flat keys, which an old goose reads and a new one migrates.
-func setGooseModel(cfg, v string) error {
-	p, m, ok := strings.Cut(v, "/")
-	if !ok || p == "" || m == "" {
-		return fmt.Errorf("expected provider/model, got %q", v)
-	}
-	if !gooseNewLayout(cfg) {
-		return edit.SetYAMLTop(cfg, edit.KV{Path: "GOOSE_PROVIDER", Value: p}, edit.KV{Path: "GOOSE_MODEL", Value: m})
-	}
-	if strings.Contains(p, ".") {
-		return fmt.Errorf("goose provider %q: a dot can't be written into its providers map", p)
-	}
-	if err := edit.SetYAML(cfg,
-		edit.KV{Path: "active_provider", Value: p},
-		edit.KV{Path: "providers." + p + ".enabled", Value: true},
-		edit.KV{Path: "providers." + p + ".model", Value: m},
-		edit.KV{Path: "providers." + p + ".configured", Value: true},
-	); err != nil {
-		return err
-	}
-	// flat keys left beside the map would be read by no goose that reads
-	// the map, and deleted by the next one that writes
-	return edit.DelYAMLTop(cfg, "GOOSE_PROVIDER", "GOOSE_MODEL")
-}
-
-// clearGooseModel takes the Goose config at cfg off any model, as goose's
-// clear_active_provider does, and drops magpie's own providers entry, as
-// magpie's custom provider goes with it; other providers' entries are kept.
-func clearGooseModel(cfg string) error {
-	if err := edit.DelYAMLTop(cfg, "active_provider", "GOOSE_PROVIDER", "GOOSE_MODEL"); err != nil {
-		return err
-	}
-	return edit.DelYAML(cfg, "providers."+gooseProviderID)
 }
