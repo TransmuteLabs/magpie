@@ -105,6 +105,40 @@ func TestExtensionKnownEmptyModelsSurviveColdLookup(t *testing.T) {
 	}
 }
 
+func TestExtensionModelCacheEvictsOldSnapshotsWithoutLosingEntitlements(t *testing.T) {
+	host := fixtureExtensionProvider(t, false)
+	host.manifest.Providers[0].Models = nil
+	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+		return json.RawMessage(`{"models":[]}`), nil
+	}
+	account := extensionAccounts()[0].Account
+	if _, err := account.extension.fetchModels(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	key := account.extension.cacheKey()
+	keys := make([]string, 64)
+	for index := range keys {
+		keys[index] = fmt.Sprintf("%s-eviction-%d", key, index)
+		extensionModelCache.Store(keys[index], nil)
+	}
+	t.Cleanup(func() {
+		for _, filler := range keys {
+			extensionModelCache.Delete(filler)
+		}
+		extensionModelCache.Delete(key)
+	})
+	if _, found := extensionModelCache.Load(key); found {
+		t.Fatal("an old model snapshot survived more than 64 newer snapshots")
+	}
+	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+		t.Error("evicted snapshot triggered another provider request")
+		return nil, errors.New("unexpected provider request")
+	}
+	if account.Lists("not-entitled") {
+		t.Fatal("evicting the empty snapshot widened the account's entitlements")
+	}
+}
+
 func TestExtensionModelCacheSeparatesConfigurationVersions(t *testing.T) {
 	host := fixtureExtensionProvider(t, false)
 	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {

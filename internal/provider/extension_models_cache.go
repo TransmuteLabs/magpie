@@ -2,6 +2,7 @@ package provider
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,12 +10,86 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"sync"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const extensionModelChunkBytes = 512 << 10
+
+const (
+	extensionModelCacheEntries = 64
+	extensionModelCacheBytes   = 32 << 20
+)
+
+var extensionModelCache extensionModelMemo
+
+type extensionModelMemo struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   list.List
+	bytes   int
+}
+
+type extensionModelSnapshot struct {
+	key    string
+	models []sdk.Model
+	bytes  int
+}
+
+func (memo *extensionModelMemo) Load(key string) ([]sdk.Model, bool) {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	element := memo.entries[key]
+	if element == nil {
+		return nil, false
+	}
+	memo.order.MoveToFront(element)
+	return element.Value.(extensionModelSnapshot).models, true
+}
+
+func (memo *extensionModelMemo) Store(key string, models []sdk.Model) {
+	body, err := json.Marshal(sdk.ModelsResult{Models: models})
+	size := len(body)
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	memo.remove(memo.entries[key])
+	if err != nil || size > extensionModelCacheBytes {
+		return
+	}
+	if memo.entries == nil {
+		memo.entries = make(map[string]*list.Element)
+	}
+	for len(memo.entries) >= extensionModelCacheEntries || memo.bytes+size > extensionModelCacheBytes {
+		memo.remove(memo.order.Back())
+	}
+	memo.entries[key] = memo.order.PushFront(extensionModelSnapshot{key: key, models: models, bytes: size})
+	memo.bytes += size
+}
+
+func (memo *extensionModelMemo) remove(element *list.Element) {
+	if element == nil {
+		return
+	}
+	snapshot := memo.order.Remove(element).(extensionModelSnapshot)
+	delete(memo.entries, snapshot.key)
+	memo.bytes -= snapshot.bytes
+}
+
+func (memo *extensionModelMemo) Delete(key string) {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	memo.remove(memo.entries[key])
+}
+
+func (memo *extensionModelMemo) Clear() {
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	memo.entries = nil
+	memo.order.Init()
+	memo.bytes = 0
+}
 
 func cloneExtensionModels(models []sdk.Model) []sdk.Model {
 	return (sdk.Manifest{Providers: []sdk.ProviderDescriptor{{Models: models}}}).Clone().Providers[0].Models

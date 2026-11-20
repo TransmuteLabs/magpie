@@ -399,12 +399,11 @@ func (a *Account) Lists(model string) bool {
 		return true
 	}
 	if a.extension != nil {
-		models, err := a.extension.models()
+		models, known, err := a.extension.selectedModels(context.Background())
 		if err != nil {
 			return false
 		}
 		if len(models) == 0 {
-			_, known := extensionModelCache.Load(a.extension.cacheKey())
 			return !known
 		}
 		return slices.ContainsFunc(models, func(entry catalog.Model) bool { return entry.ID == model })

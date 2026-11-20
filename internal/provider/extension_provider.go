@@ -15,7 +15,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -37,8 +36,6 @@ type extensionProviderHost interface {
 }
 
 var providerExtensionHost = func() extensionProviderHost { return extensionhost.Default() }
-
-var extensionModelCache sync.Map
 
 type extensionAccount struct {
 	host       extensionProviderHost
@@ -387,38 +384,44 @@ func (binding *extensionAccount) models() ([]catalog.Model, error) {
 }
 
 func (binding *extensionAccount) modelsContext(ctx context.Context) ([]catalog.Model, error) {
+	models, _, err := binding.selectedModels(ctx)
+	return models, err
+}
+
+func (binding *extensionAccount) selectedModels(ctx context.Context) ([]catalog.Model, bool, error) {
 	snapshot := *binding
 	snapshot.scope, snapshot.generation = binding.currentScope(), nil
 	binding = &snapshot
 	if err := binding.check(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if binding.descriptor.AccountOnly() {
-		return nil, binding.checkModelRevision(ctx)
+		return nil, false, binding.checkModelRevision(ctx)
 	}
 	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
-		return binding.projectModels(binding.descriptor.Models)
+		models, err := binding.projectModels(binding.descriptor.Models)
+		return models, false, err
 	}
 	if err := binding.checkModelRevision(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	key := binding.cacheKey()
 	models := binding.descriptor.Models
 	publish, known := false, false
 	if cached, ok := extensionModelCache.Load(key); ok {
-		models = cached.([]sdk.Model)
+		models = cached
 		known = true
 	} else if cached, known, err := binding.readModelCatalog(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if known {
 		models = cached
 		publish = true
 	}
 	if err := binding.checkModelRevision(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := binding.check(ctx); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if publish {
 		extensionModelCache.Store(key, cloneExtensionModels(models))
@@ -427,7 +430,8 @@ func (binding *extensionAccount) modelsContext(ctx context.Context) ([]catalog.M
 	if !known {
 		models = slices.DeleteFunc(slices.Clone(models), func(model sdk.Model) bool { return model.Kind == "decision" })
 	}
-	return binding.projectModels(models)
+	projected, err := binding.projectModels(models)
+	return projected, known, err
 }
 
 func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Model, error) {
