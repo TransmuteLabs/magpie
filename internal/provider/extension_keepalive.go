@@ -103,7 +103,7 @@ func (policy extensionKeepAlivePolicy) allowsSelection(selected extensionSignIn,
 	return false
 }
 
-var extensionSignInsKept = func(ctx context.Context) ([]extensionSignIn, error) {
+var extensionSignInsKept = func(ctx context.Context, host extensionProviderHost) ([]extensionSignIn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -114,7 +114,6 @@ var extensionSignInsKept = func(ctx context.Context) ([]extensionSignIn, error) 
 	if err != nil || settings.AccountDiscoveryOffIn(set) {
 		return nil, err
 	}
-	host := providerExtensionHost()
 	entries, err := activeProviderModules(ctx, host)
 	if err != nil {
 		return nil, err
@@ -272,11 +271,12 @@ var keepExtensionSignedIn = func(ctx context.Context, selected extensionSignIn) 
 }
 
 type extensionSignInKeeper struct {
+	host extensionProviderHost
 	held map[extensionSignInDue]keptFailure
 }
 
 func (keeper *extensionSignInKeeper) look(ctx context.Context, now time.Time) time.Duration {
-	selected, err := extensionSignInsKept(ctx)
+	selected, err := extensionSignInsKept(ctx, keeper.host)
 	if err != nil {
 		return extensionKeepAliveLookMost
 	}
@@ -324,12 +324,15 @@ func (keeper *extensionSignInKeeper) look(ctx context.Context, now time.Time) ti
 	return min(max(next.Sub(now), keepAliveLookLeast), extensionKeepAliveLookMost)
 }
 
-func KeepExtensionsSignedIn(ctx context.Context) func() {
+func KeepExtensionsSignedIn(ctx context.Context, manager *extensionhost.Manager) func() {
+	if manager == nil {
+		return func() {}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		var keeper extensionSignInKeeper
+		keeper := extensionSignInKeeper{host: manager}
 		timer := time.NewTimer(0)
 		defer timer.Stop()
 		for {

@@ -43,14 +43,16 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	if s.stoppedToolLoop(w, r, from, body) {
 		return
 	}
-	w, body, hooked := gatewayHooks(w, r, from, body)
+	w, body, hooked := s.gatewayHooks(w, r, from, body)
 	defer hooked()
 	agents := gwmw.AgentsWanted(middlewareWanted)
-	origin := gatewayOrigin(r)
-	if hubFromPage(r) {
-		origin = "browser"
+	if s.extensions != nil {
+		origin := gatewayOrigin(r)
+		if hubFromPage(r) {
+			origin = "browser"
+		}
+		agents = append(agents, extensionMiddlewareAgent{manager: s.extensions, ctx: r.Context(), origin: origin})
 	}
-	agents = append(agents, extensionMiddlewareAgent{ctx: r.Context(), origin: origin})
 	if len(agents) == 0 {
 		s.serve(w, r, from, body)
 		return
@@ -160,14 +162,6 @@ func ownOperation(ctx context.Context) context.Context {
 // middlewareWanted: plugins.json has a JS middleware on, so plugins/middleware
 // is in use.
 func middlewareWanted() bool { return middleware.On() > 0 }
-
-// gatewayHooks runs the asynchronous legacy and SDK hooks on an agent's
-// request: the body they leave is the one served, and they see the reply once it is
-// whole. Its writer wraps the middleware's, so what they see is what the
-// agent was given. With no hook it is the request as it came.
-func gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
-	return gatewayHookChain(w, r, from, body)
-}
 
 // gatewayQuery uses the same user-authored words as routing, excluding
 // agent context, tool results and images. Tool-only increments have none.

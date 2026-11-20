@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -19,11 +18,9 @@ type gatewayHookRun interface {
 	Close()
 }
 
-var gatewayExtensionManager = extension.Default
-
-func gatewayHookChain(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
+func (s *Server) gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
 	legacy := plugin.HasGateway()
-	manager := gatewayExtensionManager()
+	manager := s.extensions
 	sdkHooks := manager != nil && manager.HasGateway(r.Context())
 	if !legacy && !sdkHooks {
 		return w, body, func() {}
@@ -82,19 +79,19 @@ func gatewayHookChain(w http.ResponseWriter, r *http.Request, from provider.Prot
 	}
 }
 
-func gatewayHooksAvailable(ctx context.Context) bool {
+func (s *Server) signInHooksAvailable(ctx context.Context) bool {
 	if plugin.HasGateway() {
 		return true
 	}
-	manager := gatewayExtensionManager()
-	return manager != nil && manager.HasGateway(ctx)
+	manager := s.extensions
+	return manager != nil && manager.HasGatewaySignIn(ctx)
 }
 
-func gatewaySignIn(ctx context.Context, event plugin.SignInEvent) {
+func (s *Server) gatewaySignIn(ctx context.Context, event plugin.SignInEvent) {
 	if plugin.HasGateway() {
 		plugin.GatewaySignIn(ctx, event)
 	}
-	if manager := gatewayExtensionManager(); manager != nil && manager.HasGateway(ctx) {
+	if manager := s.extensions; manager != nil {
 		signIn := sdk.GatewaySignInEvent{
 			Provider: event.Provider, ProviderName: event.ProviderName, Account: event.Account,
 			State: event.State,

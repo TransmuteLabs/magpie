@@ -18,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
@@ -41,9 +42,15 @@ func serveKeepAliveGateway(t *testing.T, server *Server) (context.CancelFunc, <-
 }
 
 func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
+	t.Run("process catalog", func(t *testing.T) { testExtensionKeepAliveGateway(t, false) })
+	t.Run("serving catalog", func(t *testing.T) { testExtensionKeepAliveGateway(t, true) })
+}
+
+func testExtensionKeepAliveGateway(t *testing.T, isolated bool) {
 	fresh(t)
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	release, dispatched := make(chan struct{}), make(chan sdk.Scope, 1)
+	catalog := make(chan string, 1)
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	var calls atomic.Int32
@@ -62,7 +69,8 @@ func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
 		}
 		calls.Add(1)
 		select {
-		case dispatched <- exchange.Scope:
+		case catalog <- request.URL.Query().Get("catalog"):
+			dispatched <- exchange.Scope
 		default:
 			t.Error("idle gateway refreshed more than once")
 		}
@@ -73,14 +81,8 @@ func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
 		})
 	}))
 	t.Cleanup(upstream.Close)
-	manager := extensionhost.Default()
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := manager.Close(ctx); err != nil {
-			t.Error(err)
-		}
-	})
+	process := extensionhost.Default()
+	t.Cleanup(func() { closeSDKGatewayHook(t, process) })
 	directory, entry := t.TempDir(), "worker"
 	if runtime.GOOS == "windows" {
 		entry += ".exe"
@@ -102,21 +104,33 @@ func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Install(t.Context(), directory); err != nil {
-		t.Fatal(err)
-	}
 	scope := sdk.Scope{Plugin: manifest.ID, Provider: "vendor", Account: "selected", Generation: 1}
-	auth, _ := json.Marshal(map[string]string{"url": upstream.URL + "/sdk-auth-renew", "token": "synthetic-original"})
-	if _, err := manager.Store().SaveAccount(extensionhost.Account{
-		Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: auth,
-		ExpiresAt: time.Now().Add(30 * time.Second).UnixMilli(),
-	}, 0); err != nil {
-		t.Fatal(err)
+	install := func(manager *extensionhost.Manager, owner string) {
+		t.Helper()
+		if _, err := manager.Install(t.Context(), directory); err != nil {
+			t.Fatal(err)
+		}
+		auth, _ := json.Marshal(map[string]string{"url": upstream.URL + "/sdk-auth-renew?catalog=" + owner, "token": "synthetic-original"})
+		if _, err := manager.Store().SaveAccount(extensionhost.Account{
+			Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: auth,
+			ExpiresAt: time.Now().Add(30 * time.Second).UnixMilli(),
+		}, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
+	install(process, "process")
 	if providers, err := provider.ExtensionProviders(); err != nil || len(providers) != 1 {
 		t.Fatalf("ordinary gateway account discovery: %v %v", providers, err)
 	}
 	server := New()
+	manager, owner := process, "process"
+	if isolated {
+		owner = "serving"
+		manager = extensionhost.NewManager(t.TempDir())
+		t.Cleanup(func() { closeSDKGatewayHook(t, manager) })
+		install(manager, owner)
+		server = newServer(manager, routes.NewCatalog())
+	}
 	t.Cleanup(server.idle.stop)
 	web := httptest.NewServer(server.Front())
 	response, err := web.Client().Get(web.URL + "/v1/models")
@@ -146,6 +160,9 @@ func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
 		if actual.Plugin != scope.Plugin || actual.Account != scope.Account || actual.Generation != scope.Generation {
 			t.Fatalf("gateway renewed the wrong account: %+v", actual)
 		}
+		if actualOwner := <-catalog; actualOwner != owner {
+			t.Fatalf("gateway renewed the %s catalog, want %s", actualOwner, owner)
+		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("ordinary gateway did not renew the due SDK account")
 	}
@@ -168,6 +185,12 @@ func TestExtensionKeepAliveFollowsOrdinaryGatewayLifecycle(t *testing.T) {
 	if err != nil || current.Generation != 2 || calls.Load() != 1 {
 		t.Fatalf("gateway idle renewal lacked a single proven successor: generation=%d calls=%d err=%v",
 			current.Generation, calls.Load(), err)
+	}
+	if isolated {
+		account, err := process.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+		if err != nil || account.Generation != scope.Generation {
+			t.Fatalf("idle gateway changed the process catalog: generation=%d err=%v", account.Generation, err)
+		}
 	}
 }
 

@@ -990,7 +990,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		// signed in, so two never refresh one sign-in at once
 		go provider.KeepLoginsAlive(ctx)
 		// and tells the request hooks of an account to sign in again
-		go keepHooksToldOfSignIns(ctx)
+		go s.keepHooksToldOfSignIns(ctx)
 		// and signs Codex and Claude Code in to their next account when the
 		// one they are on is spent
 		go provider.KeepOnAnAccountWithRoom(ctx)
@@ -1036,7 +1036,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		for _, f := range WhileServing {
 			go f(ctx)
 		}
-		return provider.KeepExtensionsSignedIn(ctx)
+		return provider.KeepExtensionsSignedIn(ctx, s.extensions)
 	})
 	stopRelease := context.AfterFunc(ctx, releaseServing)
 	defer releaseServing()

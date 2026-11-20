@@ -224,7 +224,7 @@ func TestExtensionUsageAuthKeepAliveUsesCurrentSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	extensionAuthUsage(t, host, nil, &sdk.Error{Code: "unauthenticated", Message: "refused"})
-	selected, err := extensionSignInsKept(context.Background())
+	selected, err := extensionSignInsKept(context.Background(), host)
 	if err != nil || len(selected) != 0 {
 		t.Fatalf("idle keepalive renewed a proven refused sign-in: selected=%d err=%v", len(selected), err)
 	}
@@ -232,7 +232,7 @@ func TestExtensionUsageAuthKeepAliveUsesCurrentSelection(t *testing.T) {
 	if _, err := host.store.SaveAccount(account, account.Generation); err != nil {
 		t.Fatal(err)
 	}
-	selected, err = extensionSignInsKept(context.Background())
+	selected, err = extensionSignInsKept(context.Background(), host)
 	if err != nil || len(selected) != 1 || selected[0].scope.Generation != account.Generation+1 {
 		t.Fatalf("idle keepalive inherited an old credential refusal: selected=%+v err=%v", selected, err)
 	}
@@ -271,7 +271,7 @@ func TestExtensionUsageAuthMalformedMarkKeepsKnownRefusal(t *testing.T) {
 	if extensionLapseFor(t, host, "alice") == "" {
 		t.Fatal("malformed metadata silently cleared a known sign-in refusal")
 	}
-	selected, err := extensionSignInsKept(context.Background())
+	selected, err := extensionSignInsKept(context.Background(), host)
 	if err != nil || len(selected) != 0 {
 		t.Fatalf("malformed metadata authorized idle authentication: %d %v", len(selected), err)
 	}

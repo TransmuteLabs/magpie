@@ -22,6 +22,7 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -46,6 +47,13 @@ type sdkHookDelivery struct {
 }
 
 func installSDKGatewayHook(t *testing.T, config sdkHookConfig, descriptor sdk.GatewayHookDescriptor) *extension.Manager {
+	t.Helper()
+	manager := extension.Default()
+	installSDKGatewayHookOn(t, manager, config, descriptor)
+	return manager
+}
+
+func installSDKGatewayHookOn(t *testing.T, manager *extension.Manager, config sdkHookConfig, descriptor sdk.GatewayHookDescriptor) {
 	t.Helper()
 	// A successful SDK-only request with this path cannot have loaded Bun.
 	t.Setenv("MAGPIE_BUN", filepath.Join(t.TempDir(), "no-bun"))
@@ -86,7 +94,6 @@ func installSDKGatewayHook(t *testing.T, config sdkHookConfig, descriptor sdk.Ga
 	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	manager := extension.Default()
 	t.Cleanup(func() { closeSDKGatewayHook(t, manager) })
 	if _, err := manager.Install(ctx, source); err != nil {
 		t.Fatal(err)
@@ -98,7 +105,71 @@ func installSDKGatewayHook(t *testing.T, config sdkHookConfig, descriptor sdk.Ga
 	if _, err := manager.CompareAndSwapModuleConfig(ctx, manifest.ID, "0", values); err != nil {
 		t.Fatal(err)
 	}
-	return manager
+}
+
+func TestSDKGatewayUsesServingManager(t *testing.T) {
+	fresh(t)
+	hooks := sdk.GatewayHookDescriptor{Request: true}
+	process := installSDKGatewayHook(t, sdkHookConfig{Marker: "process"}, hooks)
+	isolated := extension.NewManager(t.TempDir())
+	installSDKGatewayHookOn(t, isolated, sdkHookConfig{Marker: "isolated"}, hooks)
+
+	directory := buildSDKMiddleware(t)
+	processTrace := filepath.Join(t.TempDir(), "process.jsonl")
+	isolatedTrace := filepath.Join(t.TempDir(), "isolated.jsonl")
+	middleware := sdk.GatewayMiddlewareDescriptor{Request: true}
+	installSDKMiddleware(t, process, directory, "1.0.0", middleware)
+	configureSDKMiddleware(t, process, map[string]any{"trace": processTrace})
+	installSDKMiddleware(t, isolated, directory, "1.0.0", middleware)
+	configureSDKMiddleware(t, isolated, map[string]any{"trace": isolatedTrace})
+
+	calls := make(chan []byte, 3)
+	sdkHookProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		select {
+		case calls <- body:
+		default:
+			t.Error("extra inference request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	})
+
+	for _, check := range []struct {
+		name, marker                string
+		server                      *Server
+		processCalls, isolatedCalls int
+	}{
+		{name: "process", marker: "sdk recall: process", server: New(), processCalls: 1},
+		{name: "isolated", marker: "sdk recall: isolated", server: newServer(isolated, routes.NewCatalog()), processCalls: 1, isolatedCalls: 1},
+		{name: "explicit codecs only", server: protocolServer(t), processCalls: 1, isolatedCalls: 1},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			const body = `{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`
+			response := sdkMiddlewareFront(check.server, body, "magpie")
+			if response.Code != http.StatusOK {
+				t.Fatalf("expected an ordinary inference response, got %d: %s", response.Code, response.Body)
+			}
+			select {
+			case received := <-calls:
+				if check.marker != "" && !bytes.Contains(received, []byte(check.marker)) ||
+					check.marker == "" && bytes.Contains(received, []byte("sdk recall: ")) {
+					t.Errorf("received hooks from the wrong manager: %s", received)
+				}
+			default:
+				t.Fatal("inference was not attempted")
+			}
+			if got := len(readSDKMiddlewareTrace(t, processTrace)); got != check.processCalls {
+				t.Errorf("process middleware calls = %d, want %d", got, check.processCalls)
+			}
+			if got := len(readSDKMiddlewareTrace(t, isolatedTrace)); got != check.isolatedCalls {
+				t.Errorf("isolated middleware calls = %d, want %d", got, check.isolatedCalls)
+			}
+		})
+	}
 }
 
 func closeSDKGatewayHook(t *testing.T, manager *extension.Manager) {
@@ -657,14 +728,24 @@ func TestSDKGatewaySignInLoopWithoutLegacyHost(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(observer.Close)
-	manager := installSDKGatewayHook(t, sdkHookConfig{SignInURL: observer.URL}, sdk.GatewayHookDescriptor{SignIn: true})
+	manager := extension.NewManager(t.TempDir())
+	installSDKGatewayHookOn(t, manager, sdkHookConfig{SignInURL: observer.URL}, sdk.GatewayHookDescriptor{SignIn: true})
+	server := newServer(manager, routes.NewCatalog())
 	access := codexAccessToken(t)
 	revokedUpstream(t, access)
-	if response := codexPostTo(New(), `{"model":"gpt-5.5","stream":true,"input":"ping"}`); response.Code != 200 {
+	if response := codexPostTo(server, `{"model":"gpt-5.5","stream":true,"input":"ping"}`); response.Code != 200 {
 		t.Fatalf("HTTP %d: %s", response.Code, response.Body)
 	}
-	tellHooksOfSignIns(t.Context())
-	tellHooksOfSignIns(t.Context())
+	process := installSDKGatewayHook(t, sdkHookConfig{}, sdk.GatewayHookDescriptor{Request: true})
+	New().tellHooksOfSignIns(t.Context())
+	if _, err := os.Stat(provider.SignInHooksPath()); !os.IsNotExist(err) {
+		t.Fatalf("the request-only hook marked a pending sign-in: %v", err)
+	}
+	if process.Running("sdk-gateway-hook") {
+		t.Fatal("checking sign-in availability started a request-only hook")
+	}
+	server.tellHooksOfSignIns(t.Context())
+	server.tellHooksOfSignIns(t.Context())
 	event := receiveSDKHook(t, deliveries)
 	if event.SignIn == nil || event.SignIn.Event.Provider != "codex" || event.SignIn.Event.Account != "me@example.com" || event.SignIn.Event.State != "signed-out" {
 		t.Fatalf("sign-in loop did not reach SDK-only notification: %+v", event)
@@ -676,7 +757,7 @@ func TestSDKGatewaySignInLoopWithoutLegacyHost(t *testing.T) {
 		}
 	}
 	expires := time.Date(2026, 11, 20, 12, 30, 0, 0, time.FixedZone("fixture", 3*60*60))
-	gatewaySignIn(t.Context(), plugin.SignInEvent{Provider: "claude", ProviderName: "Claude", Account: "owner@example.com", State: "ending", EndsAt: &expires})
+	server.gatewaySignIn(t.Context(), plugin.SignInEvent{Provider: "claude", ProviderName: "Claude", Account: "owner@example.com", State: "ending", EndsAt: &expires})
 	ending := receiveSDKHook(t, deliveries)
 	if ending.SignIn == nil || ending.SignIn.Event.EndsAt != expires.Format(time.RFC3339) {
 		t.Fatalf("legacy sign-in expiry did not retain RFC3339 semantics: %+v", ending.SignIn)

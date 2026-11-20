@@ -31,8 +31,9 @@ Public DTOs and validation live in
 contracts. These are separate from synchronous middleware, routing strategies,
 global usage observers and the built-in Memory owner.
 
-[`gatewayHookChain`](../../internal/gateway/extension_hooks.go) runs legacy
-hooks first, then SDK hooks on the last accepted body. Both reuse
+[`Server.gatewayHooks`](../../internal/gateway/extension_hooks.go) runs legacy
+hooks first, then the serving gateway's SDK hooks on the last accepted body.
+The same manager supplies sign-in hooks for that gateway. Both runtimes reuse
 `gatewayResponse`/`gatewayReply` and observe the final client-facing bytes.
 Each chain retains its own accepted request. Ordinary agent turns and the
 existing Codex sign-in passthrough share this seam; gateway-owned classifier,
@@ -84,9 +85,10 @@ updating a module withdraws new work while an existing lease retains its
 original generation within the ordinary bounded drain policy. A selection
 that has yet to acquire a lease expires across disable and re-enable.
 
-The existing sign-in loop also dispatches sanitized SDK notifications without
-starting a legacy Bun host for an SDK-only installation. `endsAt` is RFC3339.
-Delivery remains opt-in and best-effort.
+The sign-in loop checks for an enabled SDK sign-in hook that accepts local
+events, or an installed legacy hook, before marking an alert. An SDK-only
+installation dispatches sanitized notifications through its own runtime.
+`endsAt` is RFC3339. Delivery remains opt-in and best-effort.
 
 A memory module can combine these hooks with
 [local-owner SDK tools](plugin-tools.md#installable-sdk-tools-and-private-memory),

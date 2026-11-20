@@ -123,7 +123,7 @@ func TestExtensionKeepAliveEligibilityAndUnknownReads(t *testing.T) {
 				t.Fatal("eligibility inspection invoked a module")
 				return nil, nil
 			}
-			selected, err := extensionSignInsKept(t.Context())
+			selected, err := extensionSignInsKept(t.Context(), host)
 			if len(selected) != want || (err != nil) != unknown {
 				t.Fatalf("idle policy %s: selected=%d err=%v; want=%d unknown=%t", condition, len(selected), err, want, unknown)
 			}
@@ -131,7 +131,7 @@ func TestExtensionKeepAliveEligibilityAndUnknownReads(t *testing.T) {
 				if !selected[0].at.After(time.Now().Add(time.Hour)) {
 					t.Fatal("future expiry was made due")
 				}
-				var keeper extensionSignInKeeper
+				keeper := extensionSignInKeeper{host: host}
 				if wait := keeper.look(t.Context(), time.Now()); wait != extensionKeepAliveLookMost {
 					t.Fatal("not-due account changed the bounded idle wait", wait)
 				}
@@ -150,13 +150,13 @@ func TestExtensionKeepAliveBackoffAndReplacement(t *testing.T) {
 	}}
 	beforeList, beforeKeep := extensionSignInsKept, keepExtensionSignedIn
 	t.Cleanup(func() { extensionSignInsKept, keepExtensionSignedIn = beforeList, beforeKeep })
-	extensionSignInsKept = func(context.Context) ([]extensionSignIn, error) { return selected, nil }
+	extensionSignInsKept = func(context.Context, extensionProviderHost) ([]extensionSignIn, error) { return selected, nil }
 	calls := 0
 	keepExtensionSignedIn = func(context.Context, extensionSignIn) error {
 		calls++
 		return errors.New("synthetic transient hold")
 	}
-	var keeper extensionSignInKeeper
+	keeper := extensionSignInKeeper{host: host}
 	keeper.look(t.Context(), now)
 	keeper.look(t.Context(), now.Add(30*time.Second))
 	if calls != 1 {
@@ -172,31 +172,18 @@ func TestExtensionKeepAliveBackoffAndReplacement(t *testing.T) {
 	if calls != 3 || len(keeper.held) != 1 {
 		t.Fatal("a replacement inherited the old generation's backoff", calls, keeper.held)
 	}
-	extensionSignInsKept = func(context.Context) ([]extensionSignIn, error) { return nil, errors.New("unknown catalog") }
+	extensionSignInsKept = func(context.Context, extensionProviderHost) ([]extensionSignIn, error) {
+		return nil, errors.New("unknown catalog")
+	}
 	keeper.look(t.Context(), now.Add(3*time.Minute))
 	if calls != 3 || len(keeper.held) != 1 {
 		t.Fatal("an unknown catalog erased backoff or dispatched work")
 	}
-	extensionSignInsKept = func(context.Context) ([]extensionSignIn, error) { return nil, nil }
+	extensionSignInsKept = func(context.Context, extensionProviderHost) ([]extensionSignIn, error) { return nil, nil }
 	keeper.look(t.Context(), now.Add(4*time.Minute))
 	if len(keeper.held) != 0 {
 		t.Fatal("removed account retained idle backoff")
 	}
-}
-
-type emptyKeepAliveHost struct {
-	extensionProviderHost
-	catalog *extensionhost.Manager
-	listed  chan struct{}
-}
-
-func (host emptyKeepAliveHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
-	entries, err := host.catalog.ListContext(ctx)
-	select {
-	case host.listed <- struct{}{}:
-	default:
-	}
-	return entries, err
 }
 
 func TestExtensionKeepAliveEmptyCatalogLifecycleIsInert(t *testing.T) {
@@ -211,12 +198,25 @@ func TestExtensionKeepAliveEmptyCatalogLifecycleIsInert(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	before := providerExtensionHost
-	providerExtensionHost = func() extensionProviderHost {
-		return emptyKeepAliveHost{catalog: catalog, listed: listed}
+	before := extensionSignInsKept
+	extensionSignInsKept = func(ctx context.Context, host extensionProviderHost) ([]extensionSignIn, error) {
+		entries, err := before(ctx, host)
+		select {
+		case listed <- struct{}{}:
+		default:
+		}
+		return entries, err
 	}
-	t.Cleanup(func() { providerExtensionHost = before })
-	stop := KeepExtensionsSignedIn(t.Context())
+	t.Cleanup(func() { extensionSignInsKept = before })
+	stop := KeepExtensionsSignedIn(t.Context(), nil)
+	stop()
+	stop()
+	select {
+	case <-listed:
+		t.Fatal("gateway without an extension manager inspected a catalog")
+	default:
+	}
+	stop = KeepExtensionsSignedIn(t.Context(), catalog)
 	t.Cleanup(stop)
 	select {
 	case <-listed:

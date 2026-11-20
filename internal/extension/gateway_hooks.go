@@ -50,8 +50,13 @@ type GatewayRun struct {
 
 func (m *Manager) HasGateway(ctx context.Context) bool {
 	return slices.ContainsFunc(m.contributionEntries(ctx), func(entry Installed) bool {
-		return entry.Manifest.Hooks != nil
+		hooks := entry.Manifest.Hooks
+		return hooks != nil && (hooks.Request || hooks.Response)
 	})
+}
+
+func (m *Manager) HasGatewaySignIn(ctx context.Context) bool {
+	return len(m.gatewayEntries(ctx, "local", true)) > 0
 }
 
 func gatewayHookTimeout(descriptor sdk.GatewayHookDescriptor) time.Duration {
