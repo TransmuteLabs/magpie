@@ -130,7 +130,7 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 		return errors.New("linked settings plan returned a binding change")
 	}
 	if len(plan.Files) == 0 {
-		return nil
+		return check()
 	}
 	touched := make(map[string]bool, len(plan.Files))
 	for _, change := range plan.Files {

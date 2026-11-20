@@ -137,3 +137,23 @@ func TestLinkedAgentPlanRollsBackOnlyItsOwnPublication(t *testing.T) {
 		})
 	}
 }
+
+func TestLinkedAgentPlanRechecksInputsBeforeAcceptingNoWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte("initial settings"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := func(_ struct{}, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		if string(settings.Files[0].Body) != "initial settings" {
+			t.Fatalf("unexpected snapshot: %q", settings.Files[0].Body)
+		}
+		return sdk.AgentPlan{}, os.WriteFile(path, []byte("user settings"), 0o600)
+	}
+	err := ApplyLinkedAgentPlan(struct{}{}, plan, LinkedActionFile{Name: "settings.json", Path: path})
+	if !errors.Is(err, ErrActionChanged) {
+		t.Fatalf("accepted a no-write plan based on stale settings: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "user settings" {
+		t.Fatalf("user settings changed: %q, %v", got, err)
+	}
+}
