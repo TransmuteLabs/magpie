@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
@@ -27,15 +26,6 @@ import (
 const standInsEnv = "MAGPIE_GATEWAY_TEST_STAND_INS"
 
 func TestMain(m *testing.M) {
-	manifests := slices.DeleteFunc(pluginrt.Registered(), func(manifest pluginrt.Manifest) bool {
-		return manifest.ID != "rotation"
-	})
-	if len(manifests) != 1 {
-		fmt.Fprintln(os.Stderr, "rotation manifest missing")
-		os.Exit(1)
-	}
-	rotation = pluginrt.New(manifests)
-	serveRotation()
 	groupsServed = provider.ServeGroups()
 	serveMiddleware()
 	searchOn = gwtool.Serve(gwtool.WebSearch)
@@ -46,7 +36,6 @@ func TestMain(m *testing.M) {
 	// then this magpie itself (remote_self_test.go turns it on again)
 	provider.LeaveOutSelf = false
 	code, err := isolatedTests(m)
-	rotation.Stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
@@ -133,6 +122,11 @@ func isolatedTests(m *testing.M) (int, error) {
 	// key would, in the background (a plan key's windows, #1016), and a
 	// plugin host's first start fetched models.dev
 	testenv.Offline()
+	if _, err := pluginrt.Refresh(); err != nil {
+		return 1, err
+	}
+	rotation = pluginrt.Running()
+	defer rotation.Stop()
 	// and no rest waits on a reading in the background: it would ask a
 	// test's fake upstream after the test ended (#2036, CodeAlex52)
 	awaitAllowance = func(context.Context, string, string) bool { return false }

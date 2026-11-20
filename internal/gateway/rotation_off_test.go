@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
 )
@@ -14,6 +15,10 @@ import (
 // listed order — every conversation goes to the first — and no request is
 // marked as one's turn. Smart is the core's and serves either way.
 func TestRotationOnAndOff(t *testing.T) {
+	fresh(t)
+	if _, err := pluginrt.Refresh(); err != nil {
+		t.Fatal(err)
+	}
 	firsts := func(routing string) ([]string, bool) {
 		t.Helper()
 		fresh(t)
