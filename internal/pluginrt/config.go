@@ -397,17 +397,27 @@ func Refresh() ([]Composed, error) {
 
 // RefreshState returns the reconciled settings and runtime statuses from
 // the same refresh. It retains the last settings when plugins.yml fails.
-func RefreshState() ([]Composed, []Status, error) {
+func RefreshState() (AppliedState, error) {
 	defMu.Lock()
 	defer defMu.Unlock()
 	rt, err := refreshRuntime()
-	return cloneComposed(rt.composed), rt.Statuses(), err
+	return AppliedState{
+		Configuration: cloneComposed(rt.composed), Statuses: rt.Statuses(),
+		Preset: rt.preset, FilePresent: rt.filePresent,
+	}, err
+}
+
+type AppliedState struct {
+	Configuration []Composed
+	Statuses      []Status
+	Preset        string
+	FilePresent   bool
 }
 
 func refreshRuntime() (*Runtime, error) {
 	ms := Registered()
 	rt := processRuntime(ms)
-	f, _, err := Load()
+	f, present, err := Load()
 	if err != nil && rt.composed != nil {
 		return rt, err
 	}
@@ -418,6 +428,7 @@ func refreshRuntime() (*Runtime, error) {
 	}
 	rt.Reconcile(on, config)
 	rt.composed = cs
+	rt.preset, rt.filePresent = f.Preset, present
 	return rt, err
 }
 

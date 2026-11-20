@@ -83,6 +83,14 @@ type State = sdk.MemoryDistillationState
 // Path is distill.json; a variable for tests.
 var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
 
+type runKind uint8
+
+const (
+	idleRun runKind = iota
+	readRun
+	dreamRun
+)
+
 var (
 	now  = time.Now
 	list = listed
@@ -90,22 +98,20 @@ var (
 	// running is held through a run in this process, and the file lock
 	// across magpies
 	running sync.Mutex
-	busy    atomic.Bool
-	// stop ends the run going (Stop)
+	// stopMu guards the active run and its cancellation.
 	stopMu sync.Mutex
+	active runKind
 	stop   context.CancelFunc
 	// doing and of are the run's progress: sessions gone through, of
 	// how many
 	doing, of atomic.Int64
 )
 
-// Running says a run is going in this process.
-func Running() bool { return busy.Load() }
-
-// Progress is how many sessions the run going has gone through, of how
-// many it will, read or passed over; 0, 0 when none is going or it is
-// still listing them.
-func Progress() (int, int) { return int(doing.Load()), int(of.Load()) }
+func activeRun() (reading, dreaming bool, done, total int) {
+	stopMu.Lock()
+	defer stopMu.Unlock()
+	return active == readRun, active == dreamRun, int(doing.Load()), int(of.Load())
+}
 
 // Stop ends the run going in this process, if any: the request in flight
 // is dropped and its session read next time. It isn't an error.
@@ -318,29 +324,53 @@ func runUpTo(ctx context.Context, auto func() string, complete Complete, limit i
 	return read()
 }
 
-func prepareRead(ctx context.Context, auto func() string, complete Complete, limit int) (func() (Result, error), error) {
-	stopMu.Lock()
-	defer stopMu.Unlock()
+func startRun(ctx context.Context, kind runKind) (context.Context, func(), error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !running.TryLock() {
-		return nil, ErrRunning
+		return nil, nil, ErrRunning
 	}
+	unlock, held := filelock.Lock(Path()+".run", 0)
+	if !held {
+		running.Unlock()
+		return nil, nil, ErrRunning
+	}
+	release := func() {
+		unlock()
+		running.Unlock()
+	}
+	stopMu.Lock()
+	if err := ctx.Err(); err != nil {
+		stopMu.Unlock()
+		release()
+		return nil, nil, err
+	}
+	active = kind
 	ctx, cancel := context.WithCancelCause(ctx)
-	stop = func() { cancel(errStopped) }
-	busy.Store(true)
+	if kind == readRun {
+		stop = func() { cancel(errStopped) }
+	}
+	stopMu.Unlock()
+	return ctx, func() {
+		cancel(nil)
+		stopMu.Lock()
+		stop = nil
+		doing.Store(0)
+		of.Store(0)
+		active = idleRun
+		release()
+		stopMu.Unlock()
+	}, nil
+}
+
+func prepareRead(ctx context.Context, auto func() string, complete Complete, limit int) (func() (Result, error), error) {
+	ctx, finish, err := startRun(ctx, readRun)
+	if err != nil {
+		return nil, err
+	}
 	return func() (Result, error) {
-		defer func() {
-			cancel(nil)
-			stopMu.Lock()
-			stop = nil
-			doing.Store(0)
-			of.Store(0)
-			busy.Store(false)
-			running.Unlock()
-			stopMu.Unlock()
-		}()
+		defer finish()
 		result, err := readUpTo(ctx, auto, complete, limit)
 		if err == errStopped {
 			err = nil
@@ -353,11 +383,6 @@ func readUpTo(ctx context.Context, auto func() string, complete Complete, limit 
 	if ctx.Err() != nil {
 		return Result{}, context.Cause(ctx)
 	}
-	unlock, held := filelock.Lock(Path()+".run", 0)
-	if !held {
-		return Result{}, ErrRunning
-	}
-	defer unlock()
 	st, err := Load()
 	if err != nil || !st.On {
 		return Result{}, err
@@ -708,7 +733,7 @@ func Keep(ctx context.Context, first, interval time.Duration, auto func() string
 			log.Println("memory: reading conversations:", err) // and in the Memory tab
 		}
 		if st, err := Load(); err == nil && Dreams(st, now()) {
-			if _, err := Dream(ctx, auto(), complete); err != nil && !errors.Is(err, ErrRunning) {
+			if _, err := runDream(ctx, auto, complete); err != nil && !errors.Is(err, ErrRunning) {
 				log.Println("memory: tidying:", err)
 			}
 		}

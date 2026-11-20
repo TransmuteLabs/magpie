@@ -22,11 +22,19 @@ type FeatureContribution struct {
 	OpenPage      string
 }
 
-// FeatureLifetime receives cleanup for registrations made during activation.
+// FeatureLifetime provides one activation's settings and cleanup.
 // Register cleanup as each step succeeds. The host runs it in reverse order
-// on failed activation, disable, or shutdown.
+// on failed activation, reconfiguration, disable, or shutdown.
 type FeatureLifetime interface {
 	OnDispose(func())
+}
+
+// FeatureSettingValue reads a setting from the host's activation snapshot.
+func FeatureSettingValue(lifetime FeatureLifetime, name string) (any, bool) {
+	if settings, ok := lifetime.(interface{ Setting(string) (any, bool) }); ok {
+		return settings.Setting(name)
+	}
+	return nil, false
 }
 
 // FeatureSettingsLocation names a Settings tab and the HTML id of its row.

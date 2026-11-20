@@ -7,10 +7,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
-	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/memory"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -32,11 +30,6 @@ const (
 	// perAsk caps the memories one request is shown
 	perAsk = 120
 )
-
-var dreaming atomic.Bool
-
-// Dreaming says a tidy is going in this process (Running says so too).
-func Dreaming() bool { return dreaming.Load() }
 
 // SetDream switches the nightly tidy on or off. Switched on, the first is
 // due at the next DreamHour; Tidy now does one at once.
@@ -67,28 +60,41 @@ func Dreams(s State, t time.Time) bool {
 // auto. A request that fails changes nothing; the error is kept and the
 // tidy is tried again on the next tick.
 func Dream(ctx context.Context, auto string, complete Complete) ([]memory.Change, error) {
-	if !running.TryLock() {
-		return nil, ErrRunning
+	return runDream(ctx, func() string { return auto }, complete)
+}
+
+func runDream(ctx context.Context, auto func() string, complete Complete) ([]memory.Change, error) {
+	dream, err := prepareDream(ctx, auto, complete)
+	if err != nil {
+		return nil, err
 	}
-	defer running.Unlock()
-	busy.Store(true)
-	defer busy.Store(false)
-	dreaming.Store(true)
-	defer dreaming.Store(false)
-	unlock, held := filelock.Lock(Path()+".run", 0)
-	if !held {
-		return nil, ErrRunning
+	return dream()
+}
+
+func prepareDream(ctx context.Context, auto func() string, complete Complete) (func() ([]memory.Change, error), error) {
+	ctx, finish, err := startRun(ctx, dreamRun)
+	if err != nil {
+		return nil, err
 	}
-	defer unlock()
+	return func() ([]memory.Change, error) {
+		defer finish()
+		return dreamOnce(ctx, auto, complete)
+	}, nil
+}
+
+func dreamOnce(ctx context.Context, auto func() string, complete Complete) ([]memory.Change, error) {
 	st, err := Load()
 	if err != nil {
 		return nil, err
 	}
 	model := st.Model
-	if model == "" {
-		model = auto
+	if model == "" && ctx.Err() == nil {
+		model = auto()
 	}
-	plan, err := ask(ctx, model, st.Effort, complete)
+	var plan memory.Plan
+	if err = ctx.Err(); err == nil {
+		plan, err = ask(ctx, model, st.Effort, complete)
+	}
 	if err == nil {
 		err = ctx.Err()
 	}

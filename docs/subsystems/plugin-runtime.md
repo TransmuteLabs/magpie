@@ -71,9 +71,14 @@ each other only through services.
 
 Every package in `plugins/` declares its identity, dependencies and
 activation through [`extension.FeatureContribution`](../../pkg/extension/feature_contribution.go).
-An activation callback receives `FeatureLifetime` and attaches cleanup to
-the host's reconciliation. Disabling a feature, shutting down, or failing
-partway through activation runs those callbacks once in reverse order.
+An activation callback receives `FeatureLifetime`. It reads the effective
+values with `FeatureSettingValue` and attaches cleanup to the host's reconciliation.
+When those values change, the runtime disposes affected activations and
+their dependents in reverse order before applying the new settings.
+A correction to settings or replacement of a required service can retry
+failed activation. Reapplying identical values leaves existing activations
+in place. Disabling a feature,
+shutting down or failing partway through activation also runs cleanup once.
 Gateway, Library, Routing, Sessions, Usage and Masking also declare their pages.
 Observability declares its Settings section. Groups, Rotation and Warm-up
 declare their inline parts. A feature can declare static strategies in
@@ -621,7 +626,9 @@ remembering its layer (`Source`):
    `InUse` error counts as in use.
 
 `Composed.Chosen` is plugins.yml's say before step 4. `magpie plugin dump`
-(`--json`) prints the composed list with each plugin's state and why.
+(`--json`) prints the composed list, preset and each plugin's state and why
+from one applied snapshot. `magpie plugin builtin list` uses the same
+activation state, including pending dependencies and failed activation.
 When an ID is repeated in `plugins.yml`, the last row supplies the user's
 settings for that plugin. Switches and settings edits update that same row.
 
@@ -640,6 +647,8 @@ settings for that plugin. Switches and settings edits update that same row.
   reconciles. The window's `/api/state`, `/api/plugins/builtin` and boot.js
   get the reconciled settings and status together through `RefreshState`
   (`builtinsState`), so a change made by the CLI shows on the next read.
+  The installed SDK list also reads enablement from its current catalog
+  entry when projecting cached release-check results.
 - **Switch**: `Set(id, on)` (`POST /api/plugins/builtin`, `magpie plugin
   builtin on|off <id>`) writes the user's row; `SetPreset` the preset
   (`magpie plugin preset essentials|all`). Off is refused while the plugin

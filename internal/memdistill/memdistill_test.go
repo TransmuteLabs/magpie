@@ -459,7 +459,7 @@ func TestBacklogReadAtOnce(t *testing.T) {
 	}
 	var seen [][2]int
 	sb.reply = func(string) (string, error) {
-		n, m := Progress()
+		_, _, n, m := activeRun()
 		seen = append(seen, [2]int{n, m})
 		return "[]", nil
 	}
@@ -471,7 +471,7 @@ func TestBacklogReadAtOnce(t *testing.T) {
 	if seen[0] != [2]int{1, Listed - PerRun} || seen[len(seen)-1] != [2]int{Listed - PerRun, Listed - PerRun} {
 		t.Fatalf("progress %v … %v", seen[0], seen[len(seen)-1])
 	}
-	if n, m := Progress(); n != 0 || m != 0 || Running() {
+	if reading, dreaming, n, m := activeRun(); n != 0 || m != 0 || reading || dreaming {
 		t.Fatalf("after the run %d of %d", n, m)
 	}
 	if st, _ := Load(); st.Left != 0 || st.Error != "" {
@@ -533,7 +533,7 @@ func TestReadNowCanBeStoppedWhileChoosingModel(t *testing.T) {
 		sb.session("pending", time.Hour, "we deploy on Tuesdays", "keep this preference")
 		var runningWhenChoosing bool
 		service := Bind(func() string {
-			runningWhenChoosing = Running()
+			runningWhenChoosing, _, _, _ = activeRun()
 			Stop()
 			return "a/m"
 		}, sb.complete)
@@ -569,7 +569,7 @@ func TestReadAllCanBeStoppedWhileListing(t *testing.T) {
 	}
 	original := list
 	list = func(ctx context.Context) ([]sessions.Session, error) {
-		if !Running() {
+		if reading, _, _, _ := activeRun(); !reading {
 			t.Fatal("listing started before Stop was registered")
 		}
 		Stop()
@@ -579,7 +579,7 @@ func TestReadAllCanBeStoppedWhileListing(t *testing.T) {
 		return sb.list, ctx.Err()
 	}
 	result, err := ReadAll(t.Context(), "a/m", sb.complete)
-	if err != nil || result != (Result{}) || len(sb.asked) != 0 || Running() {
+	if reading, dreaming, _, _ := activeRun(); err != nil || result != (Result{}) || len(sb.asked) != 0 || reading || dreaming {
 		t.Fatalf("stopped discovery reached the model or kept running: %+v %v %v", result, err, sb.asked)
 	}
 	after, err := os.ReadFile(Path())

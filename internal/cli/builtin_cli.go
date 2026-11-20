@@ -17,21 +17,33 @@ import (
 // One in use is refused off, as the window refuses it.
 func builtinCmd(rest []string) error {
 	if len(rest) == 0 || rest[0] == "list" {
-		cs, err := pluginrt.Refresh()
+		snapshot, err := pluginrt.RefreshState()
 		if err != nil {
 			return err
 		}
 		for _, m := range pluginrt.Registered() {
-			i := slices.IndexFunc(cs, func(c pluginrt.Composed) bool { return c.ID == m.ID })
-			c := cs[i]
+			index := slices.IndexFunc(snapshot.Statuses, func(status pluginrt.Status) bool { return status.ID == m.ID })
+			if index < 0 {
+				continue
+			}
+			status := snapshot.Statuses[index]
 			mark, how := muted.Render("○"), "off"
-			if c.Enabled {
+			switch status.State {
+			case pluginrt.Active:
 				mark, how = green.Render("●"), "on"
+				if slices.ContainsFunc(snapshot.Configuration, func(c pluginrt.Composed) bool {
+					return c.ID == m.ID && c.Source == pluginrt.FromInUse
+				}) {
+					how = "on, in use"
+				}
+			case pluginrt.Failed, pluginrt.Pending:
+				how = string(status.State)
 			}
-			if c.Source == pluginrt.FromInUse {
-				how = "on, in use"
+			name := m.Name
+			if status.Why != "" {
+				name += " (" + status.Why + ")"
 			}
-			fmt.Printf("%s %-10s %-12s %s\n", mark, m.ID, how, muted.Render(m.Name))
+			fmt.Printf("%s %-10s %-12s %s\n", mark, m.ID, how, muted.Render(name))
 		}
 		fmt.Println(muted.Render("in " + tildePath(pluginrt.Path())))
 		return nil
@@ -62,11 +74,7 @@ func builtinCmd(rest []string) error {
 // layers: each built-in plugin, on or off and why, its config and the
 // layer each value is from, and how it runs in this process.
 func dumpPlugins(asJSON bool) error {
-	f, there, err := pluginrt.Load()
-	if err != nil {
-		return err
-	}
-	cs, err := pluginrt.Refresh()
+	snapshot, err := pluginrt.RefreshState()
 	if err != nil {
 		return err
 	}
@@ -76,7 +84,7 @@ func dumpPlugins(asJSON bool) error {
 		Why               string         `json:"why,omitempty" yaml:"why,omitempty"`
 	}
 	st := map[string]pluginrt.Status{}
-	for _, s := range pluginrt.Running().Statuses() {
+	for _, s := range snapshot.Statuses {
 		st[s.ID] = s
 	}
 	out := struct {
@@ -85,11 +93,11 @@ func dumpPlugins(asJSON bool) error {
 		Preset  string `json:"preset" yaml:"preset"`
 		API     string `json:"api" yaml:"api"`
 		Plugins []plug `json:"plugins" yaml:"plugins"`
-	}{File: pluginrt.Path(), There: there, Preset: f.Preset, API: pluginrt.API}
+	}{File: pluginrt.Path(), There: snapshot.FilePresent, Preset: snapshot.Preset, API: pluginrt.API}
 	if out.Preset == "" {
 		out.Preset = pluginrt.PresetAll
 	}
-	for _, c := range cs {
+	for _, c := range snapshot.Configuration {
 		out.Plugins = append(out.Plugins, plug{Composed: c, State: st[c.ID].State, Why: st[c.ID].Why})
 	}
 	if asJSON {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/memory"
@@ -120,6 +121,54 @@ func TestDreamDiscardsSuccessfulReplyAfterCancel(t *testing.T) {
 	if err != nil || !st.Dreamt.IsZero() || len(st.Changes) != 0 || st.DreamError != context.Canceled.Error() {
 		t.Fatalf("canceled tidy consumed the next run: %+v %v", st, err)
 	}
+}
+
+func TestDreamNowAdmitsBeforeChoosingModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sb := newSandbox(t)
+		first := note(t, "One", memory.Global, memory.FromInferred)
+		note(t, "Two", memory.Global, memory.FromInferred)
+		release := make(chan struct{})
+		choices, requests := 0, 0
+		service := Bind(func() string {
+			view, err := distillationStatus()
+			if err != nil || !view.Dreaming || view.Running {
+				t.Errorf("choosing a model outside an admitted tidy: %+v, %v", view, err)
+			}
+			choices++
+			return "a/m"
+		}, func(context.Context, string, string, string, string) (string, error) {
+			requests++
+			<-release
+			return `{"stale":[{"id":"n1"}]}`, nil
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		service.DreamNow(ctx)
+		synctest.Wait()
+		view, err := service.Status()
+		if err != nil || view.Dreaming || !view.Dreamt.IsZero() || view.DreamError != "" || choices != 0 || requests != 0 {
+			t.Errorf("canceled admission ran work: %+v, %v, %d choices, %d requests", view, err, choices, requests)
+		}
+
+		service.DreamNow(t.Context())
+		view, err = service.Status()
+		if err != nil || !view.Dreaming || view.Running {
+			t.Errorf("manual tidy was not admitted before returning: %+v, %v", view, err)
+		}
+		synctest.Wait()
+		service.DreamNow(t.Context())
+		synctest.Wait()
+		if choices != 1 || requests != 1 {
+			t.Errorf("conflicting tidy repeated work: %d choices, %d requests", choices, requests)
+		}
+		close(release)
+		synctest.Wait()
+		view, err = service.Status()
+		if err != nil || view.Dreaming || view.Running || !view.Dreamt.Equal(sb.at) || view.DreamModel != "a/m" || status(t, first.ID) != memory.Archived {
+			t.Fatalf("completed tidy lost its result: %+v, %v", view, err)
+		}
+	})
 }
 
 // A candidate distilled from a conversation and never reviewed is set

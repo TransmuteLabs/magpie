@@ -270,10 +270,10 @@ linked `MemoryOwner`.
   the picker keeps its own `Since` until a range is picked
   (`TestRangePicked`). Every range reads from the latest 400 conversations
   (`Listed`).
-- A backlog is read at once when the user asks (`ReadAll`, through
-  `distillNow`): switched on, a model or a longer range picked, Read now.
+- A backlog is read at once when the user asks (`ReadNow` on the linked
+  service): switched on, a model or a longer range picked, Read now.
   It reads every conversation due, one request at a time, and the row
-  shows how far it has gone (`Progress`, `doing` of `of` in the view)
+  shows how far it has gone (`doing` of `of` in the view)
   with a Stop (`Stop`, `POST /api/memory/distill/stop`; switching off
   stops it too). The linked service registers the run before looking up
   the model, and the GUI takes the running state from that service.
@@ -370,6 +370,12 @@ Its status omits processed-session marks from the window. The host binds
 manual reads, manual tidies and periodic work to its ordinary gateway
 callback, with the same model selection, caller identity and usage accounting.
 
+The owner takes the process lock and the `.run` file lock before a
+manual read or tidy starts. The response reports the owner's active
+operation and progress, including when another operation keeps the
+requested one from starting. Model selection for the admitted work
+happens in the background.
+
 - Due once a day from 03:00 local (`DreamHour`), never before the first
   03:00 after it was switched on (`Dreams`, `TestDreamsOnceANight`). `Keep`
   runs it after the hourly distill run; Tidy now runs it at once. It
@@ -400,8 +406,8 @@ callback, with the same model selection, caller identity and usage accounting.
   whose member was removed since: it is all that is left of it
   (`TestUntidyKeepsAMergeWhoseMemberWasPruned`).
 - A failed request changes nothing and is kept to show
-  (`TestDreamFailureChangesNothing`). Stop also discards a successful reply
-  that returns after cancellation, before a tidy plan reaches the store
+  (`TestDreamFailureChangesNothing`). A reply that returns after backend
+  cancellation is discarded before a tidy plan reaches the store
   (`TestDreamDiscardsSuccessfulReplyAfterCancel`).
 - What the last tidy did is kept in `distill.json` (`changes`). Undo puts
   it back once (`Untidy`), leaving what the user changed since: a memory

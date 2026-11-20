@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/memdistill"
 	"github.com/yetone/magpie/internal/memory"
@@ -247,25 +250,90 @@ func TestDistillationManualRoutesUseTheLinkedService(t *testing.T) {
 	reads, dreams := 0, 0
 	service.ReadNow = func(context.Context) { reads++ }
 	service.DreamNow = func(context.Context) { dreams++ }
+	service.Status = func() (sdk.MemoryDistillationStatus, error) {
+		return sdk.MemoryDistillationStatus{Running: true, Doing: 3, Of: 8}, nil
+	}
 	mux := http.NewServeMux()
 	memoryDistillRoutes(mux, service)
 
-	for _, task := range []struct {
-		path              string
-		running, dreaming bool
-	}{
-		{path: "/api/memory/distill/run"},
-		{path: "/api/memory/dream/run", dreaming: true},
-	} {
+	for _, path := range []string{"/api/memory/distill/run", "/api/memory/dream/run"} {
 		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), http.MethodPost, task.path, nil))
+		mux.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, nil))
 		var status distillView
 		err := json.Unmarshal(recorder.Body.Bytes(), &status)
-		if recorder.Code != http.StatusOK || err != nil || status.Running != task.running || status.Dreaming != task.dreaming {
-			t.Fatalf("%s: %d %s (%v)", task.path, recorder.Code, recorder.Body.String(), err)
+		if recorder.Code != http.StatusOK || err != nil || !status.Running || status.Dreaming || status.Doing != 3 || status.Of != 8 {
+			t.Fatalf("%s changed the owner's active read: %d %s (%v)", path, recorder.Code, recorder.Body.String(), err)
 		}
 	}
 	if reads != 1 || dreams != 1 {
 		t.Fatalf("manual operations used the wrong service: read %d, dream %d", reads, dreams)
 	}
+}
+
+func TestMemoryManualRoutesRespectOwner(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("XDG_CACHE_HOME", t.TempDir())
+		mux := http.NewServeMux()
+		memoryDistillRoutes(mux, linkedDistillation)
+		check := func(path, body string, running, dreaming bool) {
+			t.Helper()
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(body)))
+			var view distillView
+			if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil || rec.Code != 200 {
+				t.Fatalf("%s: %d %s (%v)", path, rec.Code, rec.Body, err)
+			}
+			if view.Running != running || view.Dreaming != dreaming {
+				t.Errorf("%s reported reading %v, tidying %v; want %v, %v", path, view.Running, view.Dreaming, running, dreaming)
+			}
+		}
+
+		func() {
+			unlock, held := filelock.Lock(memdistill.Path()+".run", 0)
+			if !held {
+				t.Fatal("could not hold the cross-process run lock")
+			}
+			defer unlock()
+			check("/api/memory/distill", `{"on":true,"model":"fixture/model"}`, false, false)
+			check("/api/memory/distill/run", `{}`, false, false)
+			check("/api/memory/dream/run", `{}`, false, false)
+			time.Sleep(time.Second)
+			synctest.Wait()
+		}()
+		if state, err := memdistill.Load(); err != nil || !state.Last.IsZero() || !state.Dreamt.IsZero() {
+			t.Fatalf("blocked calls changed the last run: %+v, %v", state, err)
+		}
+
+		kind, scope, status := memory.Fact, memory.Global, memory.Candidate
+		for _, text := range []string{"Old", "Other"} {
+			if _, _, err := memory.Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope, Status: &status}, memory.FromInferred, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		go func() {
+			_, err := memdistill.Dream(t.Context(), "", func(context.Context, string, string, string, string) (string, error) {
+				close(entered)
+				<-release
+				return `{}`, nil
+			})
+			done <- err
+		}()
+		select {
+		case <-entered:
+		case err := <-done:
+			t.Fatalf("tidy never reached the model: %v", err)
+		}
+		defer func() {
+			close(release)
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}()
+		check("/api/memory/distill", `{"on":true,"model":"fixture/replacement"}`, false, true)
+		check("/api/memory/distill/run", `{}`, false, true)
+		check("/api/memory/distill/stop", `{}`, false, true)
+		synctest.Wait()
+	})
 }

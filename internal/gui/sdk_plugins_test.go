@@ -340,10 +340,24 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 	if !state.Plugins[0].Off || state.Plugins[0].Latest != version || len(updates.Waiting) != 0 {
 		t.Fatalf("Off did not hide SDK update badge while preserving row: %+v %+v", state, updates)
 	}
+	readCachedCheck := func(off bool) {
+		t.Helper()
+		beforeRead := metadataRequests
+		call("GET", "", "", &state)
+		row := state.Plugins[0]
+		if row.Off != off || row.SDK.Check == nil || row.SDK.Check.Off != off ||
+			row.SDK.Check.Latest != version || metadataRequests != beforeRead {
+			t.Fatalf("installed row changed without projecting its cached check: off=%v, check=%+v, metadata requests=%d", row.Off, row.SDK.Check, metadataRequests-beforeRead)
+		}
+	}
+	readCachedCheck(true)
 	call("POST", "/check", "{}", &checked)
 	if len(checked.Plugins) != 1 || !checked.Plugins[0].Off || checked.Plugins[0].Status != "update" {
 		t.Fatalf("manual check skipped disabled SDK plugin: %+v", checked.Plugins)
 	}
+	call("POST", "/off", idJSON, &state)
+	readCachedCheck(false)
+	call("POST", "/off", `{"spec":"sdk:`+sdkGUIFixture+`","off":true}`, &state)
 	call("POST", "/upgrade", idJSON, &state)
 	if state.Plugins[0].Version != version || !state.Plugins[0].Off || state.Plugins[0].Latest != "" || state.Plugins[0].SDK.Check != nil {
 		t.Fatalf("Upgrade did not replace revision, preserve Off and clear prior check: %+v", state.Plugins[0])

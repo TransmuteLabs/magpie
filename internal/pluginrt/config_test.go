@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -312,4 +313,60 @@ func TestRefreshRetainsAnIsolatedConfiguration(t *testing.T) {
 	if got := byID(retained)[id]; err == nil || !reflect.DeepEqual(got.Config, expected) {
 		t.Fatalf("error reader changed the runtime snapshot: %+v, %v", got, err)
 	}
+}
+
+func TestRefreshAppliesSettingsToAnActiveFeature(t *testing.T) {
+	home(t)
+	const id = "settings-activation-test"
+	var applied, disposed []int64
+	RegisterFeature(sdk.FeatureContribution{
+		ID: id, Settings: testFeatureSettings(),
+		Activate: func(lifetime sdk.FeatureLifetime) error {
+			value, _ := sdk.FeatureSettingValue(lifetime, "page")
+			page := value.(int64)
+			applied = append(applied, page)
+			lifetime.OnDispose(func() { disposed = append(disposed, page) })
+			return nil
+		},
+	})
+	defMu.Lock()
+	previous := def
+	def = nil
+	defMu.Unlock()
+	t.Cleanup(func() {
+		defMu.Lock()
+		defer defMu.Unlock()
+		if def != nil {
+			def.Stop()
+		}
+		def = previous
+		regMu.Lock()
+		defer regMu.Unlock()
+		delete(registry, id)
+	})
+	check := func(page int64, wantApplied, wantDisposed []int64) {
+		t.Helper()
+		snapshot, err := RefreshState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		config := byID(snapshot.Configuration)[id]
+		index := slices.IndexFunc(snapshot.Statuses, func(status Status) bool { return status.ID == id })
+		if index < 0 || snapshot.Statuses[index].State != Active || config.Config["page"] != page {
+			t.Fatalf("page %d: configuration=%+v statuses=%+v", page, config, snapshot.Statuses)
+		}
+		if !slices.Equal(applied, wantApplied) || !slices.Equal(disposed, wantDisposed) {
+			t.Fatalf("page %d: applied %v, disposed %v, want %v and %v", page, applied, disposed, wantApplied, wantDisposed)
+		}
+	}
+	check(20, []int64{20}, nil)
+	if err := SetConfig(id, map[string]any{"page": 20}); err != nil {
+		t.Fatal(err)
+	}
+	check(20, []int64{20}, nil)
+	if err := SetConfig(id, map[string]any{"page": 50}); err != nil {
+		t.Fatal(err)
+	}
+	check(50, []int64{20, 50}, []int64{20})
+	check(50, []int64{20, 50}, []int64{20})
 }

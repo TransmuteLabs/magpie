@@ -27,7 +27,10 @@ func Bind(auto func() string, complete Complete) sdk.MemoryDistillationService {
 			return err
 		},
 		DreamNow: func(ctx context.Context) {
-			go Dream(ctx, auto(), complete)
+			dream, err := prepareDream(ctx, auto, complete)
+			if err == nil {
+				go dream()
+			}
 		},
 		Undo: func() error {
 			_, err := Undo()
@@ -40,20 +43,18 @@ func Bind(auto func() string, complete Complete) sdk.MemoryDistillationService {
 }
 
 func distillationStatus() (sdk.MemoryDistillationStatus, error) {
+	reading, dreaming, doing, of := activeRun()
 	state, err := Load()
 	if err != nil {
 		return sdk.MemoryDistillationStatus{}, err
 	}
 	state.Done = nil
-	dreaming := Dreaming()
-	view := sdk.MemoryDistillationStatus{
+	return sdk.MemoryDistillationStatus{
 		MemoryDistillationState: state,
-		Running:                 Running() && !dreaming,
+		Running:                 reading,
 		Dreaming:                dreaming,
+		Doing:                   doing,
+		Of:                      of,
 		Ranges:                  slices.Clone(Ranges),
-	}
-	if view.Running {
-		view.Doing, view.Of = Progress()
-	}
-	return view, nil
+	}, nil
 }

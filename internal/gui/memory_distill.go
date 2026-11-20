@@ -220,7 +220,6 @@ func memoryDistillRoutes(mux *http.ServeMux, service sdk.MemoryDistillationServi
 			fail(rw, err)
 			return
 		}
-		v.Dreaming, v.Running = true, false
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/dream/undo", func(rw http.ResponseWriter, r *http.Request) {
