@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,94 @@ const deepSeekCustomRefusal = `{"error":{"message":"Unsupported custom tool: 'ex
 // tool, nothing called yet.
 const customExecRequest = `{"model":%q,"stream":%t,"input":[{"role":"user","content":"Return ok."}],` +
 	`"tools":[{"type":"custom","name":"exec","description":"Execute source text.","format":{"type":"text"}}]}`
+
+func TestResponsesNamedCustomToolTranslation(t *testing.T) {
+	const customTool = `{"type":"custom","name":"echo","format":{"type":"text"}}`
+	const functionTool = `{"type":"function","name":"echo","parameters":{"type":"object"}}`
+	const otherTool = `{"type":"function","name":"other","parameters":{"type":"object"}}`
+	for _, upstream := range []struct {
+		protocol                     provider.Protocol
+		path, reply, named, required string
+	}{
+		{provider.Chat, "/v1/chat/completions",
+			sse(`data: {"id":"chat_1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"input\":\"hello world\"}"}}]}}]}`,
+				`data: {"id":"chat_1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`, `data: [DONE]`),
+			`{"type":"function","function":{"name":"echo"}}`, `"required"`},
+		{provider.Anthropic, "/v1/messages",
+			sse(`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"usage":{"input_tokens":2,"output_tokens":0}}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"echo","input":{}}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"input\":\"hello world\"}"}}`,
+				`data: {"type":"content_block_stop","index":0}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":3}}`,
+				`data: {"type":"message_stop"}`),
+			`{"type":"tool","name":"echo"}`, `{"type":"any"}`},
+	} {
+		t.Run(string(upstream.protocol), func(t *testing.T) {
+			for _, tc := range []struct {
+				name, declaration, selection, wantChoice, wantKind string
+				wantNames                                          []string
+			}{
+				{"named custom", customTool, `{"type":"custom","name":"echo"}`, upstream.named, "custom_tool_call", []string{"echo", "other"}},
+				{"named function", functionTool, `{"type":"function","name":"echo"}`, upstream.named, "function_call", []string{"echo", "other"}},
+				{"custom choice for function", functionTool, `{"type":"custom","name":"echo"}`, "", "function_call", []string{"echo", "other"}},
+				{"unknown custom", customTool, `{"type":"custom","name":"absent"}`, "", "custom_tool_call", []string{"echo", "other"}},
+				{"allowed custom", customTool, `{"type":"allowed_tools","mode":"required","tools":[{"type":"custom","name":"echo"}]}`, upstream.required, "custom_tool_call", []string{"echo"}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					vendor := &fake{t: t, reply: upstream.reply}
+					setup(t, upstream.protocol, vendor)
+					body := `{"model":"fake/m1","input":"say hello","tools":[` + tc.declaration + `,` + otherTool + `],"tool_choice":` + tc.selection + `}`
+					rec := httptest.NewRecorder()
+					New().Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body)))
+					if rec.Code != 200 || vendor.calls != 1 || vendor.path != upstream.path {
+						t.Fatalf("translated call: status=%d calls=%d path=%s body=%s", rec.Code, vendor.calls, vendor.path, rec.Body)
+					}
+					var sent struct {
+						Choice json.RawMessage `json:"tool_choice"`
+						Tools  []struct {
+							Name     string
+							Function struct{ Name string }
+						}
+					}
+					if err := json.Unmarshal(vendor.got, &sent); err != nil {
+						t.Fatal(err)
+					}
+					var names []string
+					for _, tool := range sent.Tools {
+						if upstream.protocol == provider.Chat {
+							names = append(names, tool.Function.Name)
+						} else {
+							names = append(names, tool.Name)
+						}
+					}
+					choiceOK := string(sent.Choice) == tc.wantChoice || sameJSONText(string(sent.Choice), tc.wantChoice)
+					if !choiceOK || !slices.Equal(names, tc.wantNames) {
+						t.Errorf("vendor choice=%s tools=%v, want choice=%s tools=%v", sent.Choice, names, tc.wantChoice, tc.wantNames)
+					}
+					var result struct {
+						Output []struct{ Type, Name, Input, Arguments string }
+					}
+					if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					if len(result.Output) != 1 {
+						t.Fatalf("unexpected response items: %+v", result.Output)
+					}
+					call := result.Output[0]
+					if call.Type != tc.wantKind || call.Name != "echo" {
+						t.Fatalf("wrong response tool: %+v", call)
+					}
+					if tc.wantKind == "custom_tool_call" && call.Input != "hello world" {
+						t.Errorf("custom input lost: %+v", call)
+					}
+					if tc.wantKind == "function_call" && !sameJSONText(call.Arguments, `{"input":"hello world"}`) {
+						t.Errorf("function arguments lost: %+v", call)
+					}
+				})
+			}
+		})
+	}
+}
 
 // customUpstream is a Responses API that, like DeepSeek's, takes no custom
 // tool but apply_patch, and calls exec when it is offered as a function.
