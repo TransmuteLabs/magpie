@@ -62,20 +62,24 @@ func ClientPath(p string) bool {
 }
 
 func (s *Server) ClientPath(p string) bool {
+	return s.ClientPathContext(context.Background(), p)
+}
+
+func (s *Server) ClientPathContext(ctx context.Context, p string) bool {
 	if ClientPath(p) {
 		return true
 	}
-	host, err := s.protocolHost()
+	host, err := s.protocolHost(ctx)
 	return err == nil && host.ClientPath(p)
 }
 
-// InstalledClientPath forwards an installed extension when the page proxies
+// InstalledClientPathContext classifies an installed route when the page proxies
 // to another local gateway process rather than owning a Server itself.
-func InstalledClientPath(p string) bool {
+func InstalledClientPathContext(ctx context.Context, p string) bool {
 	if ClientPath(p) {
 		return true
 	}
-	registry, err := extension.Default().Protocols()
+	registry, err := extension.Default().ProtocolsContext(ctx)
 	if err != nil {
 		return false
 	}

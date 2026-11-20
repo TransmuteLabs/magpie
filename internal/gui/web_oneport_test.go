@@ -1,14 +1,19 @@
 package gui
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -211,6 +216,55 @@ func TestWebOnePortServedElsewhere(t *testing.T) {
 	t.Cleanup(func() { served.Store(prev) })
 	var reached bool
 	onePortCases(t, onePortPage(&reached), &reached)
+}
+
+func TestWebOnePortCatalogRespectsRequestDeadline(t *testing.T) {
+	for _, ownGateway := range []bool{true, false} {
+		name := "gateway elsewhere"
+		if ownGateway {
+			name = "gateway here"
+		}
+		t.Run(name, func(t *testing.T) {
+			onePortHome(t)
+			var server *gateway.Server
+			if ownGateway {
+				server = gateway.New()
+			}
+			prev := served.Swap(server)
+			t.Cleanup(func() { served.Store(prev) })
+			unlock, held := filelock.Lock(filepath.Join(extension.Default().Namespace(), "catalog.lock"), 0)
+			if !held {
+				t.Fatal("could not hold the extension catalog")
+			}
+			done := make(chan struct{})
+			defer func() {
+				unlock()
+				<-done
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			page := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Context().Err() != context.DeadlineExceeded {
+					t.Error("page reached before the catalog lookup finished")
+				}
+				w.WriteHeader(http.StatusTeapot)
+			})
+			request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/test-native/rpc", nil)
+			response := httptest.NewRecorder()
+			go func() {
+				defer close(done)
+				onePort(page).ServeHTTP(response, request)
+			}()
+			select {
+			case <-done:
+				if response.Code != http.StatusTeapot {
+					t.Fatalf("unclassified native path escaped the page handler: %d", response.Code)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("one-port routing waited for the extension catalog lock past the request deadline")
+			}
+		})
+	}
 }
 
 // No file of the page is at a client route, where the gateway would

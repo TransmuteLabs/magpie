@@ -9,10 +9,63 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/protocolext"
 )
+
+func protocolCallUnderCatalogLock(t *testing.T, server *Server, handler http.Handler, request *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	unlock, held := filelock.Lock(filepath.Join(server.extensions.Namespace(), "catalog.lock"), 0)
+	if !held {
+		t.Fatal("could not hold the extension catalog")
+	}
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	defer func() {
+		unlock()
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(recorder, request)
+	}()
+	select {
+	case <-done:
+		return recorder
+	case <-time.After(2 * time.Second):
+		t.Fatal("request waited for the extension catalog lock")
+		return nil
+	}
+}
+
+func TestClientPathBuiltInDoesNotWaitForProtocolCatalog(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3425")
+	server := New()
+	server.extensions = extension.NewManager(t.TempDir())
+	t.Cleanup(server.idle.stop)
+
+	t.Run("handler", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{"))
+		request.RemoteAddr = "127.0.0.1:50001"
+		response := protocolCallUnderCatalogLock(t, server, server.Handler(), request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("built-in response: %d %s", response.Code, response.Body)
+		}
+	})
+	t.Run("front", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		request.RemoteAddr = "127.0.0.1:50001"
+		response := protocolCallUnderCatalogLock(t, server, server.Front(), FromPagePort(request))
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("page-port LAN guard: %d %s", response.Code, response.Body)
+		}
+	})
+}
 
 func TestClientPathProtocolsArePerServerAndExact(t *testing.T) {
 	fresh(t)

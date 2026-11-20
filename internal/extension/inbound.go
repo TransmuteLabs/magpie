@@ -34,7 +34,11 @@ func MetadataFrom(ctx context.Context) RequestMetadata {
 }
 
 func (m *Manager) Protocols() (*codec.Registry, error) {
-	entries, err := m.List()
+	return m.ProtocolsContext(context.Background())
+}
+
+func (m *Manager) ProtocolsContext(ctx context.Context) (*codec.Registry, error) {
+	entries, err := m.ListContext(ctx)
 	if err != nil {
 		return nil, err
 	}
