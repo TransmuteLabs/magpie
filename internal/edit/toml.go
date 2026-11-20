@@ -428,10 +428,26 @@ func setTOMLTop(path string, preserve bool, check func() error, kvs ...KV) error
 	if err != nil {
 		return err
 	}
+	out, err := tomlTopFields(path, raw, preserve, nil, kvs)
+	if err != nil {
+		return err
+	}
+	return writeTOMLChecked(path, out, check)
+}
+
+func RewriteTOMLTopFields(path string, raw []byte, remove []string, kvs ...KV) ([]byte, error) {
+	out, err := tomlTopFields(path, raw, false, remove, kvs)
+	if err != nil {
+		return nil, err
+	}
+	return renderTOML(path, out, raw)
+}
+
+func tomlTopFields(path string, raw []byte, preserve bool, remove []string, kvs []KV) ([]string, error) {
 	lines := splitLines(string(raw))
 	doc, err := parseTOMLFile(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	type span struct {
 		to   int
@@ -443,6 +459,13 @@ func setTOMLTop(path string, preserve bool, check func() error, kvs ...KV) error
 	at := 0
 	if n := len(doc.root.keys); n > 0 {
 		at = doc.root.keys[n-1].to
+	}
+	if len(remove) > 0 {
+		for _, key := range doc.root.keys {
+			if slices.Contains(remove, key.name) {
+				replace[key.from] = span{to: key.to}
+			}
+		}
 	}
 	for _, kv := range kvs {
 		line := kv.Path + " = " + tomlLiteral(kv.Value)
@@ -473,7 +496,9 @@ func setTOMLTop(path string, preserve bool, check func() error, kvs ...KV) error
 			added = nil
 		}
 		if r, ok := replace[i]; ok {
-			out = append(out, r.line)
+			if r.line != "" {
+				out = append(out, r.line)
+			}
 			i = r.to
 			continue
 		}
@@ -481,7 +506,7 @@ func setTOMLTop(path string, preserve bool, check func() error, kvs ...KV) error
 		i++
 	}
 	out = append(out, added...)
-	return writeTOMLChecked(path, out, check)
+	return out, nil
 }
 
 // DelTOMLTop removes top-level (pre-table) keys, each with every line of its
@@ -814,12 +839,20 @@ func writeTOML(path string, lines []string) error {
 
 func writeTOMLChecked(path string, lines []string, check func() error) error {
 	orig, _ := Read(path)
+	data, err := renderTOML(path, lines, orig)
+	if err != nil {
+		return err
+	}
+	return WriteAtomicChecked(path, data, check)
+}
+
+func renderTOML(path string, lines []string, orig []byte) ([]byte, error) {
 	lines = markTOML(lines, string(orig))
 	data := []byte(joinLinesLike(lines, string(orig)))
 	if err := validateTOML(data); err != nil {
-		return fmt.Errorf("%s: edited TOML is invalid: %w", path, err)
+		return nil, fmt.Errorf("%s: edited TOML is invalid: %w", path, err)
 	}
-	return WriteAtomicChecked(path, data, check)
+	return data, nil
 }
 
 // WriteTOMLFile writes lines back as a TOML file, validating the result first

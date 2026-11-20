@@ -435,10 +435,10 @@ func codexIn(at place) *Agent {
 		}
 	}
 	asProvider := func() bool { return get("model_provider") == magpieID }
-	viaBase := func() bool {
-		u := get("openai_base_url")
+	gatewayBase := func(u string) bool {
 		return isCodexGatewayOn(u, at.host()) || strings.TrimSuffix(u, "/") == at.codexURL()
 	}
+	viaBase := func() bool { return gatewayBase(get("openai_base_url")) }
 	routed := func() bool { return asProvider() || viaBase() }
 	// joined: connected by Join, on a model of Codex's own (its last pick)
 	// with magpie's beside it, by the base URL
@@ -1826,81 +1826,93 @@ func codexIn(at place) *Agent {
 		}
 		return append(own, codexViaMagpieFor(own)...)
 	}
-	// unroute takes magpie out as the way Codex reaches its models and puts
-	// back what the stash kept from before magpie was wired in (its
-	// provider, catalog and effort); it answers the model Codex was on
-	// then, for Unwire to go back to
-	unroute := func() (string, error) {
-		forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
+	// unroute publishes the route withdrawal and the restored settings together.
+	unroute := func(pick *string) error {
 		if err := giveTables(); err != nil {
-			return "", err
+			return err
 		}
-		if !routed() {
-			return "", nil
-		}
-		if err := dropSubagent(); err != nil {
-			return "", err
-		}
-		if err := dropBase(); err != nil {
-			return "", err
-		}
-		if err := dropProvider(); err != nil {
-			return "", err
+		if pick == nil || routed() {
+			if err := dropSubagent(); err != nil {
+				return err
+			}
 		}
 		config, err := readWiringFile(path)
 		if err != nil {
-			return "", err
+			return edit.PreserveOnRollback(path, err)
 		}
-		// the originals are read and stay stashed until the write that puts
-		// them back has gone through: one that fails leaves them stashed
-		// for the next try (#4258). The model is the caller's to take out:
-		// its write, where there is one, comes after unroute.
+		raw := edit.TrimBOM(config.body)
+		var current struct {
+			Provider string `toml:"model_provider"`
+			BaseURL  string `toml:"openai_base_url"`
+			Catalog  string `toml:"model_catalog_json"`
+			Effort   string `toml:"model_reasoning_effort"`
+			Model    string `toml:"model"`
+		}
+		if err := toml.Unmarshal(edit.TOMLWithout(raw, "projects"), &current); err != nil {
+			return config.preserveOnError(path, err)
+		}
+		base := gatewayBase(current.BaseURL)
+		fromProvider := current.Provider == magpieID
+		wasRouted := base || fromProvider
 		peeked := peek(at.key("codex.model"), at.key("codex.provider"), at.key("codex.catalog"), at.key("codex.effort_set"), at.key("codex.effort"))
-		was := peeked[at.key("codex.model")]
+		var remove []string
+		if base {
+			remove = append(remove, "openai_base_url")
+		}
 		// what was there before magpie is put back only where magpie's
 		// change still stands: a key the user set by hand since keeps
 		// theirs (yhwangl on X)
 		var back []edit.KV
-		if p := peeked[at.key("codex.provider")]; p != "" && p != magpieID && get("model_provider") == "" {
-			back = append(back, edit.KV{Path: "model_provider", Value: p})
-		}
-		// the catalog of the user's own put back while its file is there:
-		// one removed since would keep Codex from loading its config
-		if c := peeked[at.key("codex.catalog")]; c != "" && !ownCatalog(c) && !deskCatalog(c) && !theirListGone(c) && (get("model_catalog_json") == "" || deskCatalog(get("model_catalog_json"))) {
-			back = append(back, edit.KV{Path: "model_catalog_json", Value: c})
-		}
-		// the effort, where it is still one magpie set: picked on the
-		// Agents page, or moved to one its model has. One taken out
-		// reads the same however it was, and comes back.
-		id := at.id
-		if id == "" {
-			id = "codex"
-		}
-		ours := map[string]bool{"": true}
-		if set := peeked[at.key("codex.effort_set")]; set != "" {
-			ours[set] = true
-		}
-		if r := appliedOf(id).Fields["effort"]; r != "" {
-			ours[r] = true
-		}
-		if e := peeked[at.key("codex.effort")]; e != "" && ours[get("model_reasoning_effort")] {
-			back = append(back, edit.KV{Path: "model_reasoning_effort", Value: e})
-		}
-		if len(back) > 0 {
-			if err := edit.SetTOMLTopChecked(path, func() error { return config.check(path) }, back...); err != nil {
-				return "", err
+		if wasRouted {
+			if saved := peeked[at.key("codex.provider")]; saved != "" && saved != magpieID && (current.Provider == "" || fromProvider) {
+				back = append(back, edit.KV{Path: "model_provider", Value: saved})
+			} else if fromProvider {
+				remove = append(remove, "model_provider")
+			}
+			// the catalog of the user's own put back while its file is there
+			ownedCatalog := fromProvider && ownCatalog(current.Catalog)
+			if saved := peeked[at.key("codex.catalog")]; saved != "" && !ownCatalog(saved) && !deskCatalog(saved) && !theirListGone(saved) &&
+				(current.Catalog == "" || ownedCatalog || deskCatalog(current.Catalog)) {
+				back = append(back, edit.KV{Path: "model_catalog_json", Value: saved})
+			} else if ownedCatalog {
+				remove = append(remove, "model_catalog_json")
+			}
+			id := at.id
+			if id == "" {
+				id = "codex"
+			}
+			if saved := peeked[at.key("codex.effort")]; saved != "" &&
+				(current.Effort == "" || current.Effort == peeked[at.key("codex.effort_set")] || current.Effort == appliedOf(id).Fields["effort"]) {
+				back = append(back, edit.KV{Path: "model_reasoning_effort", Value: saved})
 			}
 		}
-		// what was put back is taken out of the stash; the model stays for
-		// the caller's write
-		taken := make(map[string]string, len(peeked))
-		for k, v := range peeked {
-			if k != at.key("codex.model") {
-				taken[k] = v
+		if pick != nil {
+			back = append(back, edit.KV{Path: "model", Value: *pick})
+		} else if current.Model == "" || isMagpie(current.Model) {
+			if saved := peeked[at.key("codex.model")]; wasRouted && saved != "" && !isMagpie(saved) {
+				back = append(back, edit.KV{Path: "model", Value: saved})
+			} else if current.Model != "" {
+				remove = append(remove, "model")
 			}
 		}
-		forgetValues(taken)
-		return was, nil
+		if len(remove) != 0 || len(back) != 0 {
+			body, err := edit.RewriteTOMLTopFields(path, raw, remove, back...)
+			if err == nil {
+				err = edit.WriteAtomicChecked(config.target, body, func() error { return config.check(path) })
+			}
+			if err != nil {
+				return config.preserveOnError(path, err)
+			}
+		}
+		forget(at.key("codex.out"), at.key("codex.joined"), at.key("codex.beside"))
+		if wasRouted {
+			forget(at.key("codex.failover"))
+			forgetValues(peeked)
+		}
+		if fromProvider {
+			dropList()
+		}
+		return nil
 	}
 	set := func(v string) error {
 		if v == "" {
@@ -2065,10 +2077,7 @@ func codexIn(at place) *Agent {
 			}
 			return settle()
 		}
-		if _, err := unroute(); err != nil {
-			return err
-		}
-		if err := edit.SetTOMLTop(path, edit.KV{Path: "model", Value: v}); err != nil {
+		if err := unroute(&v); err != nil {
 			return err
 		}
 		// the user's pick replaces the model the stash kept: given up once
@@ -2088,24 +2097,7 @@ func codexIn(at place) *Agent {
 		// installed, OpenAI and its default model, where this brings back
 		// the provider and model the user had
 		Unwire: func() error {
-			now := get("model")
-			was, err := unroute()
-			if err != nil {
-				return err
-			}
-			if err := dropSubagent(); err != nil {
-				return err
-			}
-			// the model left alone where magpie had none to take over; a
-			// model of Codex's own picked while joined stays, its last pick
-			switch {
-			case now != "" && !isMagpie(now):
-			case was != "" && !isMagpie(was):
-				err = edit.SetTOMLTop(path, edit.KV{Path: "model", Value: was})
-			case isMagpie(get("model")):
-				err = edit.DelTOMLTop(path, "model")
-			}
-			if err != nil {
+			if err := unroute(nil); err != nil {
 				return err
 			}
 			dropList()
