@@ -18,15 +18,13 @@ import (
 func fakePluginTools(t *testing.T, pts []plugin.PluginTools) *[]string {
 	t.Helper()
 	var ran []string
-	listed := 0
-	oldList, oldRun, oldOn := pluginTools, runPluginTool, anyPluginOn
-	pluginTools = func(context.Context) ([]plugin.PluginTools, error) { listed++; return pts, nil }
+	oldList, oldRun := pluginTools, runPluginTool
+	pluginTools = func(context.Context) ([]plugin.PluginTools, error) { return pts, nil }
 	runPluginTool = func(_ context.Context, spec, name string, args json.RawMessage, agent string) (string, error) {
 		ran = append(ran, spec+" "+name+" "+string(args)+" "+agent)
 		return "ran " + name, nil
 	}
-	anyPluginOn = func() bool { return true }
-	t.Cleanup(func() { pluginTools, runPluginTool, anyPluginOn = oldList, oldRun, oldOn })
+	t.Cleanup(func() { pluginTools, runPluginTool = oldList, oldRun })
 	return &ran
 }
 
@@ -123,10 +121,9 @@ func TestToolsMCPOff(t *testing.T) {
 	if m := readMCP(t, toolsPost(h, toolsList)); len(m.Result.Tools) != 1 {
 		t.Errorf("on again, listed %+v", m)
 	}
-	anyPluginOn = func() bool { return false }
-	asked = 0
-	if m := readMCP(t, toolsPost(h, toolsList)); len(m.Result.Tools) != 0 || asked != 0 {
-		t.Errorf("no plugin on: listed %+v, the host asked %d times", m, asked)
+	pluginTools = plugin.Tools
+	if m := readMCP(t, toolsPost(h, toolsList)); len(m.Result.Tools) != 0 || m.Error != nil {
+		t.Errorf("empty catalogs: listed %+v", m)
 	}
 	on()
 }

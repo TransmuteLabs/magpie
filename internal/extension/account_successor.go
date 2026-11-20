@@ -1,21 +1,26 @@
 package extension
 
 import (
+	"context"
 	"os"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func (s *Store) RefreshedAccount(scope sdk.Scope) (Account, error) {
-	return s.refreshedAccount(scope, storeSync)
+	return s.RefreshedAccountContext(context.Background(), scope)
 }
 
-func (s *Store) refreshedAccount(scope sdk.Scope, confirm func(*os.Root) error) (Account, error) {
+func (s *Store) RefreshedAccountContext(ctx context.Context, scope sdk.Scope) (Account, error) {
+	return s.refreshedAccount(ctx, scope, storeSync)
+}
+
+func (s *Store) refreshedAccount(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error) (Account, error) {
 	if !storeValidScope(scope) || scope.Account == "" {
 		return Account{}, storeInvalid()
 	}
 	var current Account
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, scope.Plugin)
 		if err != nil {
 			return err

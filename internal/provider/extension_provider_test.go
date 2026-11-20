@@ -33,6 +33,13 @@ func (host *fixtureExtensionProviderHost) List() ([]extensionhost.Installed, err
 	return []extensionhost.Installed{{Manifest: host.manifest, Disabled: host.disabled, Revision: "fixture"}}, nil
 }
 
+func (host *fixtureExtensionProviderHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return host.List()
+}
+
 func (host *fixtureExtensionProviderHost) Manifest(id string) (sdk.Manifest, error) {
 	if host.disabled || id != host.manifest.ID {
 		return sdk.Manifest{}, errors.New("extension is not enabled")

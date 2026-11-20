@@ -24,6 +24,13 @@ func (host *toolAuthPolicyHost) List() ([]extensionhost.Installed, error) {
 	return entries, err
 }
 
+func (host *toolAuthPolicyHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return host.List()
+}
+
 func TestExtensionToolAuthPolicyUsesSelectedBinding(test *testing.T) {
 	for _, scenario := range []string{
 		"same generation", "new credentials", "stale configuration", "stale package",

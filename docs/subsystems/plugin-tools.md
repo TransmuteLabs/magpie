@@ -28,6 +28,11 @@ installation. The ordinary MCP, Library/hub, key and budget owners still
 dispatch the call. SDK authors validate their tool's domain arguments; this
 path does not execute the legacy host's zod hooks.
 
+SDK tool and account discovery use the caller's cancellation through the
+catalog and selected account store. The SDK tool timeout starts before its
+final declaration check. Installed inventory includes disabled modules for
+the Plugins page.
+
 An explicit `_magpie: {provider, account}` selection goes through
 [`PrepareExtensionAccountScope`](../../internal/provider/extension_tool_account.go)
 at the shared MCP and Library entry. An account expiring within one minute

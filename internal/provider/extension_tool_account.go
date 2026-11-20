@@ -19,7 +19,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	}
 	fail := func(err error) (context.Context, sdk.Scope, error) { return ctx, scope, err }
 	host := providerExtensionHost()
-	entries, err := host.List()
+	entries, err := host.ListContext(ctx)
 	if err != nil {
 		return fail(err)
 	}
@@ -63,7 +63,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 				return errors.New("extension account is off, paused or unavailable")
 			}
 		}
-		entries, err := host.List()
+		entries, err := host.ListContext(current)
 		if err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		return fail(err)
 	}
 	choice, networkSelected = netproxy.Choice(ctx), true
-	account, err := host.Store().RefreshedAccount(scope)
+	account, err := host.Store().RefreshedAccountContext(ctx, scope)
 	if err != nil {
 		return fail(err)
 	}
@@ -130,7 +130,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		if _, err := lease.Call(ctx, sdk.MethodAuthRefresh, scope, sdk.AuthRefreshRequest{}, nil); err != nil {
 			return fail(err)
 		}
-		account, err = host.Store().RefreshedAccount(scope)
+		account, err = host.Store().RefreshedAccountContext(ctx, scope)
 		if err != nil {
 			return fail(err)
 		}
@@ -144,7 +144,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		if err := check(current); err != nil {
 			return err
 		}
-		account, err := host.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+		account, err := host.Store().GetAccountContext(current, scope.Plugin, scope.Provider, scope.Account)
 		if err != nil {
 			return err
 		}

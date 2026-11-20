@@ -200,11 +200,15 @@ func (s *Store) Accounts(plugin, provider string) ([]Account, error) {
 }
 
 func (s *Store) GetAccount(plugin, provider, id string) (Account, error) {
+	return s.GetAccountContext(context.Background(), plugin, provider, id)
+}
+
+func (s *Store) GetAccountContext(ctx context.Context, plugin, provider, id string) (Account, error) {
 	var result Account
 	if !storeAccountID(plugin, provider, id) {
 		return result, storeInvalid()
 	}
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
 		if err != nil {
 			return err

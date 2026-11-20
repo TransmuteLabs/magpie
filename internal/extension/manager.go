@@ -202,6 +202,10 @@ func (m *Manager) Running(id string) bool {
 
 func (m *Manager) List() ([]Installed, error) { return m.catalog.List() }
 
+func (m *Manager) ListContext(ctx context.Context) ([]Installed, error) {
+	return m.catalog.list(ctx)
+}
+
 func (m *Manager) Manifest(id string) (sdk.Manifest, error) {
 	entries, err := m.List()
 	if err != nil {

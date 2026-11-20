@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/gwtool"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
@@ -33,9 +35,14 @@ type extensionToolAccountFake struct {
 	stop    func()
 }
 
-func (fake *extensionToolAccountFake) List() ([]extension.Installed, error) {
+func (fake *extensionToolAccountFake) ToolModules(ctx context.Context) ([]extension.Installed, error) {
 	fake.listed++
-	return fake.entries, fake.err
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(fake.entries), func(entry extension.Installed) bool {
+		return entry.Disabled || !entry.Manifest.Contract.Has(sdk.ToolProvider)
+	}), fake.err
 }
 
 func (fake *extensionToolAccountFake) Store() *extension.Store { return fake.store }
@@ -589,7 +596,7 @@ func TestExtensionToolsCatalogLifecycleWithoutBun(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if tools, err := servedTools(t.Context()); err != nil || len(tools) != 1 || !anyPluginOn() {
+	if tools, err := servedTools(t.Context()); err != nil || len(tools) != 1 {
 		t.Fatalf("Go-only tools = %+v, %v", tools, err)
 	}
 	if count, err := plugin.ToolsOn(); err != nil || count != 1 {
@@ -607,7 +614,67 @@ func TestExtensionToolsCatalogLifecycleWithoutBun(t *testing.T) {
 	if err := manager.Remove(t.Context(), manifest.ID); err != nil {
 		t.Fatal(err)
 	}
-	if list, err := plugin.ReadList(); err != nil || len(list.Plugins) != 0 || anyPluginOn() {
+	if list, err := plugin.ReadList(); err != nil || len(list.Plugins) != 0 {
 		t.Fatalf("removed server presence = %+v, %v", list, err)
+	}
+}
+
+func TestExtensionToolDiscoveryRespectsCancellation(t *testing.T) {
+	extensionToolGatewayFixture(t)
+	manager := extension.Default()
+	previous := extensionToolAccounts
+	extensionToolAccounts = func() extensionToolAccountSource { return manager }
+	defer func() { extensionToolAccounts = previous }()
+	bound := json.RawMessage(`{"_magpie":{"provider":"vendor","account":"selected"}}`)
+	for _, scenario := range []struct {
+		name, lock string
+		run        func(context.Context) error
+	}{
+		{"MCP tools/list", "catalog.lock", func(ctx context.Context) error {
+			request := httptest.NewRequestWithContext(ctx, http.MethodPost, ToolsMCPPath, nil)
+			_, rpcErr := New().toolsMCPCall(request, mcpMessage{Method: "tools/list"})
+			if rpcErr != nil && strings.Contains(rpcErr["message"].(string), context.DeadlineExceeded.Error()) {
+				return context.DeadlineExceeded
+			}
+			return errors.New("MCP listing did not report the discovery deadline")
+		}},
+		{"Library tool listing", "catalog.lock", func(ctx context.Context) error {
+			_, err := PluginToolsOf(ctx, "extension:tool.module")
+			return err
+		}},
+		{"direct SDK call", "catalog.lock", func(ctx context.Context) error {
+			_, err := plugin.RunExtensionTool(ctx, "extension:tool.module", "echo", nil)
+			return err
+		}},
+		{"bound tool declaration", "catalog.lock", func(ctx context.Context) error {
+			_, _, err := extensionToolContext(ctx, "extension:tool.module", bound)
+			return err
+		}},
+		{"bound tool account", filepath.Join("private", ".lock"), func(ctx context.Context) error {
+			_, _, err := extensionToolContext(ctx, "extension:tool.module", bound)
+			return err
+		}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			unlock, held := filelock.Lock(filepath.Join(manager.Namespace(), scenario.lock), time.Second)
+			if !held {
+				t.Fatal("could not hold extension lock")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- scenario.run(ctx) }()
+			select {
+			case err := <-done:
+				unlock()
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("discovery error = %v, want the request deadline", err)
+				}
+			case <-time.After(3 * time.Second):
+				unlock()
+				<-done
+				t.Fatal("discovery waited for the extension lock after the request deadline")
+			}
+		})
 	}
 }
