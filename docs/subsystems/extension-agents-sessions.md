@@ -282,6 +282,13 @@ linked Claude module supplies the `AgentLaunch` overlay. The host resolves
 the settings path using the shared launch compiler and fences the overlay
 write and the model restoration against changes in target ownership.
 
+Built-in Antigravity CLI supplies its `AgentLaunch` overlay for `magpie agy
+run`, `env` and the command shown on the agent row. The recipe declares the
+settings flag, model flag, gateway variables and remote-control arguments.
+The host decides when the overlay applies and couples it to the user's
+current model. Shell profiles in a WSL distro still read its settings file
+locally when they run.
+
 Agent action settings snapshots use `sdk.ActionSettings` in Go and
 `ActionSettings` in TypeScript. The request's `settings` field keeps its
 existing JSON representation. Each file has a relative path, existence and
@@ -303,6 +310,9 @@ model and its `enabledModels` entry in one write. Reset checks both
 Magpie scope entries and Magpie's provider. Concurrent edits to either
 file survive a rejected or rolled-back reset. The thinking-level picker
 uses the same settings plan without rebuilding the catalog.
+Scope refresh reads the catalog and settings in one checked action.
+Rename edits the explicit scope entries with the same settings contract.
+The host records excluded and restored scope entries after publication.
 The ordinary Codex subagent model and effort fields use the auxiliary model
 plan. A model change checks the saved effort against the new model and clears
 an incompatible effort in the same checked `config.toml` write. The gateway's

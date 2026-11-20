@@ -54,6 +54,7 @@ import (
 	"github.com/tidwall/jsonc"
 
 	"github.com/yetone/magpie/internal/edit"
+	builtinagy "github.com/yetone/magpie/internal/extension/builtin/agy"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/update"
@@ -80,18 +81,14 @@ func agySettingsFile() string {
 	return filepath.Join(home, ".gemini", "antigravity-cli", agyOverride)
 }
 
-// agyPlain are what ask agy for its remote control, which only a Google
-// sign-in has, never an API key's session: agy runs plain with one of
-// them (alone or with "=value").
-var agyPlain = []string{"remote-control", "--remote-control", "-remote-control"}
+func agyLaunchSpec(settings string) *launchSpec {
+	return sdkLaunch("agy", "agy", settings, builtinagy.GatewayLaunch())
+}
 
 // agyLaunchAt is AgyLaunch for agy reaching the gateway at gw with key and
 // magpie's settings file, in PowerShell or a POSIX shell.
 func agyLaunchAt(gw, key, settings, model string, powershell bool) string {
-	if powershell {
-		return `$env:GEMINI_API_KEY="` + key + `"; $env:GOOGLE_GEMINI_BASE_URL="` + gw + `"; agy --settings '` + strings.ReplaceAll(settings, "'", "''") + `' --model '` + strings.ReplaceAll(model, "'", "''") + `'`
-	}
-	return "GEMINI_API_KEY=" + key + " GOOGLE_GEMINI_BASE_URL=" + gw + " agy --settings '" + strings.ReplaceAll(settings, "'", `'\''`) + "' --model '" + strings.ReplaceAll(model, "'", `'\''`) + "'"
+	return agyLaunchSpec(settings).command(gw, key, model, powershell)
 }
 
 // agyShell gives the user's shells the function agy, or takes it out of
@@ -371,10 +368,11 @@ func agyIn(at place) *Agent {
 			return "agy"
 		},
 		Start: func() Starting {
-			s := Starting{Bin: "agy", Flag: "--model", Plain: agyPlain}
+			launch := agyLaunchSpec(at.native(over))
+			s := Starting{Bin: launch.bin, Flag: launch.flag, Plain: launch.plain}
 			if v := overModel(); usesMagpie(v) {
-				s.Env, s.Model = []string{"GEMINI_API_KEY=" + key(), "GOOGLE_GEMINI_BASE_URL=" + gw()}, v
-				s.Args = []string{"--settings", at.native(over)}
+				s.Env, s.Model = launch.vars(gw(), key()), v
+				s.Args = launch.args
 			}
 			return s
 		},
