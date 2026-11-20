@@ -2,9 +2,11 @@ package pluginrt
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/routes"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -21,8 +23,23 @@ func featureManifest(contribution sdk.FeatureContribution) Manifest {
 		Name: contribution.Name, Sub: contribution.Sub, One: contribution.One, Many: contribution.Many,
 		InUse: contribution.InUse, Client: slices.Clone(contribution.Client),
 	}
-	if activate := contribution.Activate; activate != nil {
-		m.Apply = func(ctx *Ctx) error { return activate(ctx) }
+	routing := maps.Clone(contribution.Routing)
+	routingIDs := slices.Sorted(maps.Keys(routing))
+	for _, id := range routingIDs {
+		if err := routing[id].Validate(id); err != nil {
+			panic(fmt.Errorf("pluginrt: %s routing: %w", m.ID, err))
+		}
+	}
+	if activate := contribution.Activate; activate != nil || len(routingIDs) != 0 {
+		m.Apply = func(ctx *Ctx) error {
+			for _, id := range routingIDs {
+				ctx.OnDispose(routes.Register(id, routing[id]))
+			}
+			if activate != nil {
+				return activate(ctx)
+			}
+			return nil
+		}
 	}
 	if len(contribution.Parts) != 0 {
 		parts, err := featureParts(contribution.Parts)

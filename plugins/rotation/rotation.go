@@ -22,13 +22,8 @@ func init() {
 		ID: "rotation", API: "^1", Requires: []string{"providers", "gateway"}, Essential: true,
 		Name: "Routing strategies", Sub: "The routings besides Quota first: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first",
 		One: "1 provider or group routed so", Many: "{n} providers and groups routed so",
-		InUse: inUse,
-		Activate: func(c sdk.FeatureLifetime) error {
-			for name, s := range routes.Builtin {
-				c.OnDispose(routes.Register(name, s))
-			}
-			return nil
-		},
+		InUse:    inUse,
+		Routing:  routes.Builtin,
 		Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "rotation"}},
 		OpenPage: "providers",
 	})

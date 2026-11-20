@@ -76,7 +76,12 @@ the host's reconciliation. Disabling a feature, shutting down, or failing
 partway through activation runs those callbacks once in reverse order.
 Gateway, Library, Routing, Sessions, Usage and Masking also declare their pages.
 Observability declares its Settings section. Groups, Rotation and Warm-up
-declare their inline parts. Gateway declares its ordered `callsPage` setting
+declare their inline parts. Rotation also declares its strategies through
+`FeatureContribution.Routing`. The runtime validates and snapshots that map
+at registration and attaches each strategy to the existing routing owner
+for the feature's active lifetime. Disable or failed activation withdraws
+its entries and exposes any previous registrations. Smart remains the
+default owned by the gateway. Gateway declares its ordered `callsPage` setting
 through the same contract. The Built-in rows declare `SettingsAt` with a
 tab and row ID, and `OpenPage` when the row links to an existing view.
 [`RegisterFeature`](../../internal/pluginrt/feature.go) validates the

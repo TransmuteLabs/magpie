@@ -13,6 +13,7 @@ type FeatureContribution struct {
 	Client     []string
 	Parts      []FeaturePart
 	Settings   []FeatureSetting
+	Routing    map[string]LinkedRoutingStrategy
 	SettingsAt *FeatureSettingsLocation
 	OpenPage   string
 }

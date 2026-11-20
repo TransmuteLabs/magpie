@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
@@ -15,9 +16,10 @@ import (
 	"github.com/yetone/magpie/internal/gwtool"
 	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/middleware"
+	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/testenv"
+	_ "github.com/yetone/magpie/plugins/rotation"
 )
 
 // standInsEnv names the folder of a test binary's stand-in CLIs, for a
@@ -25,6 +27,14 @@ import (
 const standInsEnv = "MAGPIE_GATEWAY_TEST_STAND_INS"
 
 func TestMain(m *testing.M) {
+	manifests := slices.DeleteFunc(pluginrt.Registered(), func(manifest pluginrt.Manifest) bool {
+		return manifest.ID != "rotation"
+	})
+	if len(manifests) != 1 {
+		fmt.Fprintln(os.Stderr, "rotation manifest missing")
+		os.Exit(1)
+	}
+	rotation = pluginrt.New(manifests)
 	serveRotation()
 	groupsServed = provider.ServeGroups()
 	serveMiddleware()
@@ -36,6 +46,7 @@ func TestMain(m *testing.M) {
 	// then this magpie itself (remote_self_test.go turns it on again)
 	provider.LeaveOutSelf = false
 	code, err := isolatedTests(m)
+	rotation.Stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
@@ -138,9 +149,7 @@ func TestRunsAsAnIsolatedTestBinary(t *testing.T) {
 	}
 }
 
-// rotation is what serveRotation registered: the routings plugins/rotation
-// serves, which the gateway's tests route by as a user with it on does.
-var rotation []func()
+var rotation *pluginrt.Runtime
 
 // masked and chained are the gateway's middleware point as
 // plugins/redact and plugins/middleware serve it, on in every test but
@@ -166,17 +175,12 @@ func withoutMiddleware(t *testing.T) {
 }
 
 func serveRotation() {
-	for name, s := range routes.Builtin {
-		rotation = append(rotation, routes.Register(name, s))
-	}
+	rotation.Reconcile(map[string]bool{"rotation": true}, nil)
 }
 
 // withoutRotation takes them away for t, as plugins/rotation off does.
 func withoutRotation(t *testing.T) {
-	for _, remove := range rotation {
-		remove()
-	}
-	rotation = nil
+	rotation.Reconcile(nil, nil)
 	t.Cleanup(serveRotation)
 }
 

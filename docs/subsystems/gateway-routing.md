@@ -29,6 +29,15 @@ select-all Remove) also turns found groups off (`SetAutoGroups(false)`,
 xwang_sh on X), so a model a provider lists later brings no new one; the
 removed records stay and turning them on again restores the groups as they were.
 
+Rotation's strategies enter the routing owner through the linked SDK
+[`FeatureContribution.Routing`](../../pkg/extension/feature_contribution.go)
+declaration. The owner applies the same permutation check to linked
+strategies and installed SDK strategy results. Linked strategies run in
+process with `time.Time` renewal data and context windows. The installed
+path projects seats to the bounded, opaque-key [`RoutingRequest`](../../pkg/extension/routing.go)
+wire format. Both paths leave candidate eligibility, affinity and retries
+with the gateway.
+
 A found group can go without the user removing it: one of its two providers
 is removed, or its list no longer has the model. `Reseat` moves an agent's
 config off it, but a conversation saved on it (a Codex thread names its

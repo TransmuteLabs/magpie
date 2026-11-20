@@ -6,8 +6,94 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/yetone/magpie/internal/routes"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestFeatureRoutingOwnsRegistration(t *testing.T) {
+	const id = "fixture-order"
+	seats := []routes.Seat{{Key: "first"}, {Key: "second"}}
+	previous := routes.Register(id, routes.Strategy{Order: func(string, []routes.Seat) []int { return []int{0, 1} }})
+	t.Cleanup(previous)
+	for _, state := range []string{"active", "error", "panic"} {
+		t.Run(state, func(t *testing.T) {
+			declared := map[string]sdk.LinkedRoutingStrategy{
+				id: {
+					ByWindow: true,
+					Order: func(pool string, inputs []sdk.LinkedRoutingSeat) []int {
+						if pool != "group/fixture" || !slices.EqualFunc(inputs, seats, func(left, right routes.Seat) bool {
+							return left.Key == right.Key
+						}) {
+							t.Errorf("unexpected pool or seats: %q %+v", pool, inputs)
+						}
+						return []int{1, 0}
+					},
+				},
+			}
+			check := func(owned bool) {
+				t.Helper()
+				strategy, found := routes.Find(id)
+				if !found || strategy.ByWindow != owned {
+					t.Errorf("route found %v, ByWindow %v, want owned %v", found, strategy.ByWindow, owned)
+					return
+				}
+				want := []int{0, 1}
+				if owned {
+					want = []int{1, 0}
+				}
+				if got := routes.Apply(strategy, "group/fixture", seats); !slices.Equal(got, want) {
+					t.Errorf("route order %v, want %v", got, want)
+				}
+			}
+			feature := featureManifest(sdk.FeatureContribution{
+				ID: "fixture", Routing: declared,
+				Activate: func(sdk.FeatureLifetime) error {
+					check(true)
+					switch state {
+					case "error":
+						return errors.New("activation failed")
+					case "panic":
+						panic("activation failed")
+					default:
+						return nil
+					}
+				},
+			})
+			delete(declared, id)
+			runtime := New([]Manifest{feature})
+			t.Cleanup(runtime.Stop)
+			check(false)
+			runtime.Reconcile(map[string]bool{"fixture": true}, nil)
+			wantState := Active
+			if state != "active" {
+				wantState = Failed
+			}
+			if got := runtime.Statuses()[0].State; got != wantState {
+				t.Errorf("feature state = %s, want %s", got, wantState)
+			}
+			check(state == "active")
+			runtime.Reconcile(nil, nil)
+			check(false)
+		})
+	}
+}
+
+func TestFeatureRoutingRejectsInvalidDeclarations(t *testing.T) {
+	for _, id := range []string{"", "installed/module", "missing-order"} {
+		t.Run(id, func(t *testing.T) {
+			strategy := sdk.LinkedRoutingStrategy{Order: func(string, []sdk.LinkedRoutingSeat) []int { return nil }}
+			if id == "missing-order" {
+				strategy.Order = nil
+			}
+			defer func() {
+				if recover() == nil {
+					t.Fatal("accepted invalid routing declaration")
+				}
+			}()
+			featureManifest(sdk.FeatureContribution{ID: "fixture", Routing: map[string]sdk.LinkedRoutingStrategy{id: strategy}})
+		})
+	}
+}
 
 func TestFeatureActivationDisposesOwnedRegistrations(t *testing.T) {
 	for _, state := range []string{"active", "error", "panic"} {

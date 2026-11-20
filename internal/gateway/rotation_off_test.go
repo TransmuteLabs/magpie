@@ -46,4 +46,9 @@ func TestRotationOnAndOff(t *testing.T) {
 	if got, _ := firsts(""); len(got) != 3 {
 		t.Fatalf("off, Smart: %v", got)
 	}
+
+	serveRotation()
+	if got, turn := firsts(provider.Rotate); !slices.Equal(got, []string{"k1", "k2", "k3"}) || !turn {
+		t.Fatalf("on again, in turn: %v, turn marked %v", got, turn)
+	}
 }
