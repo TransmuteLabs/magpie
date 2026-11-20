@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Query is what a search asks for. Scopes are the scopes searched (none:
@@ -25,11 +27,28 @@ type Hit struct {
 	Score float64 `json:"score"`
 }
 
-// Semantic, when set (memembed, with search by meaning switched on), is
-// how near in meaning each memory of pool is to text, a cosine, for the
-// ones it has read; nil when it can't say (switched off, the model not
-// there, or failing), and the search is by words alone.
-var Semantic func(text string, pool []*Memory) map[string]float64
+// SemanticRanker is the linked ranker registered by memembed.
+var SemanticRanker sdk.MemorySemanticRanker
+
+// SemanticIndexSnapshot returns the Memory records eligible for background
+// indexing, newest first.
+func SemanticIndexSnapshot() ([]sdk.MemorySemanticRecord, error) {
+	all, _, err := All()
+	if err != nil {
+		return nil, err
+	}
+	var records []sdk.MemorySemanticRecord
+	for _, item := range all {
+		if item.Status == Active || item.Status == Candidate {
+			records = append(records, semanticRecord(item))
+		}
+	}
+	return records, nil
+}
+
+func semanticRecord(item *Memory) sdk.MemorySemanticRecord {
+	return sdk.MemorySemanticRecord{ID: item.ID, Text: item.Text, Why: item.Why}
+}
 
 // A memory counts as meaning what was searched for at a cosine of Near
 // or more, and Within of the nearest. Over 97 real memories and 16
@@ -50,7 +69,7 @@ const rrfK = 20
 // Search finds memories matching q, best first: every word of the text
 // counted by how rare it is among the memories, a memory holding the whole
 // text ahead, pinned ones and a project's or agent's own a little ahead of
-// the rest; with search by meaning on (Semantic), the ones that mean the
+// the rest; with search by meaning on, the ones that mean the
 // same in other words too, the two rankings fused. With no text, it lists
 // them by kind and newest change. The hits are noted as used.
 func Search(q Query) ([]Hit, error) {
@@ -119,12 +138,14 @@ func search(all []*Memory, q Query) []Hit {
 		return out
 	}
 	out := wordHits(pool, text)
-	var sims map[string]float64
-	if Semantic != nil {
-		sims = Semantic(text, pool)
-	}
-	if sims != nil {
-		out = fuse(pool, out, sims)
+	if ranker := SemanticRanker; len(pool) != 0 && ranker.Rank != nil && ranker.Ready != nil && ranker.Ready() {
+		records := make([]sdk.MemorySemanticRecord, len(pool))
+		for index, item := range pool {
+			records[index] = semanticRecord(item)
+		}
+		if scores := ranker.Rank(sdk.MemorySemanticRequest{Query: text, Records: records}); scores != nil {
+			out = fuse(pool, out, scores)
+		}
 	}
 	return out[:min(limit, len(out))]
 }
@@ -197,8 +218,10 @@ func wordHits(pool []*Memory, text string) []Hit {
 // meaning: the first word hit may hold one common word of the search.
 func fuse(pool []*Memory, words []Hit, sims map[string]float64) []Hit {
 	bar := Near
-	for _, s := range sims {
-		bar = max(bar, s-Within)
+	for _, m := range pool {
+		if score, ok := sims[m.ID]; ok {
+			bar = max(bar, score-Within)
+		}
 	}
 	near := []*Memory{}
 	for _, m := range pool {

@@ -25,8 +25,9 @@ var qwenPlanBusyBodies = []string{
 // name.
 func scriptedAs(t *testing.T, id, name, preset string, s *scripted) {
 	t.Helper()
-	up := httptest.NewServer(s)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	p := provider.Provider{ID: id, Name: name, Preset: preset, Key: "k", Models: []string{"m"}, Chat: up.URL + "/compatible-mode/v1"}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)

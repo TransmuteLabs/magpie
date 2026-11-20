@@ -1,5 +1,17 @@
 // Parent-side page calls, shared by legacy windows and SDK-installed modules.
 // The frame supplies payloads; its parent supplies the immutable owner ref.
+const THEME_TOKENS = ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"];
+
+export function pluginTheme() {
+  const root = document.documentElement;
+  const css = getComputedStyle(root);
+  const tokens = {};
+  for (const key of THEME_TOKENS) tokens[key] = css.getPropertyValue("--" + key).trim();
+  const dark = root.dataset.theme === "dark"
+    || (root.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+  return { dark, lang: locale, tokens };
+}
+
 export async function answerPluginPage(p, m, theme, titled) {
   const e = p.entry;
   const signal = p.abort?.signal;
@@ -154,8 +166,16 @@ export function checkPluginReply(p, method, visibilityVersion, result) {
 }
 
 // Ancestor visibility belongs to the renderer's page and panel records.
-export function watchPluginVisibility(pages, panels, refresh, dispose) {
+export function watchPluginFrames(pages, panels, refresh, dispose, post) {
   const all = () => [...pages.values(), ...panels.values()];
+  const pushTheme = () => {
+    const data = pluginTheme();
+    for (const p of all()) if (p.hello) post(p.frame?.contentWindow, { event: "theme", data });
+  };
+  const themeObserver = new MutationObserver(pushTheme);
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "lang", "class", "style"] });
+  const colorScheme = matchMedia("(prefers-color-scheme: dark)");
+  colorScheme.addEventListener?.("change", pushTheme);
   const resize = () => { for (const p of all()) refresh(p); };
   const observer = new MutationObserver(changes => {
     for (const [f, p] of panels) if (!f.isConnected) { panels.delete(f); dispose(p); }
@@ -166,7 +186,12 @@ export function watchPluginVisibility(pages, panels, refresh, dispose) {
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "class", "style"] });
   addEventListener("resize", resize);
   resize();
-  return () => { observer.disconnect(); removeEventListener("resize", resize); };
+  return () => {
+    themeObserver.disconnect();
+    colorScheme.removeEventListener?.("change", pushTheme);
+    observer.disconnect();
+    removeEventListener("resize", resize);
+  };
 }
 
 // Catalog/config notifications do not start a worker or poll providers. A

@@ -1,6 +1,6 @@
 // Package pluginrt runs magpie's built-in plugins: the parts of magpie not
 // everyone needs (Lxxyx on X: "功能太多了"), each one a package under
-// plugins/ that registers a Manifest. The runtime applies the ones the user
+// plugins/ that registers a linked SDK feature. The runtime applies the ones the user
 // has on (plugins.yml, see config.go) in the order their Requires and
 // Provides make, and disposes of what each registered, in reverse, when it
 // is turned off. One that fails or panics is FAILED and the rest run on.
@@ -69,10 +69,6 @@ type Manifest struct {
 	Opens string
 	// Defaults is its config before plugins.yml's preset and rows
 	Defaults map[string]any
-	// Settings is a struct of its settings, their defaults its values
-	// (schema.go): the window draws their form, and SetConfig takes only
-	// what it allows. Register adds them to Defaults.
-	Settings any
 	// Client are its files in the window, under assets/plugins/<id>/: its
 	// scripts register its parts with the window's kernel (kernel.js), its
 	// i18n.js says its words in each language, and a .css is its styles.
@@ -133,9 +129,9 @@ var (
 	registry = map[string]Manifest{}
 )
 
-// Register adds a built-in plugin; plugins call it from init. Two with one
+// register adds a built-in plugin. Two with one
 // id is a programming error.
-func Register(m Manifest) {
+func register(m Manifest) {
 	regMu.Lock()
 	defer regMu.Unlock()
 	if m.ID == "" {
@@ -144,16 +140,14 @@ func Register(m Manifest) {
 	if _, dup := registry[m.ID]; dup {
 		panic("pluginrt: two plugins " + m.ID)
 	}
-	if m.Settings != nil {
-		var defs map[string]any
-		m.schema, defs = SchemaOf(m.Settings)
+	if m.schema != nil {
 		d := maps.Clone(m.Defaults)
 		if d == nil {
 			d = map[string]any{}
 		}
-		for k, v := range defs {
+		for k, p := range m.schema.Properties {
 			if _, set := d[k]; !set {
-				d[k] = v
+				d[k] = p.Default
 			}
 		}
 		m.Defaults = d

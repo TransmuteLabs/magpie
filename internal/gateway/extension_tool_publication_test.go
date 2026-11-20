@@ -26,7 +26,11 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 					var releaseOnce sync.Once
 					defer releaseOnce.Do(func() { close(release) })
 					server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-						if request.URL.Path != "/tool" {
+						if request.Method != http.MethodPost || (request.URL.Path != "/" && request.URL.Path != "/tool") {
+							http.NotFound(writer, request)
+							return
+						}
+						if request.URL.Path == "/" {
 							test.Error("fresh tool unexpectedly attempted credential refresh")
 							writer.WriteHeader(http.StatusBadRequest)
 							return
@@ -43,6 +47,19 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 						}
 					}))
 					test.Cleanup(server.Close)
+					if mode == "module off" {
+						client := &http.Client{Timeout: 5 * time.Second}
+						for _, endpoint := range []string{fixture.server.URL, server.URL} {
+							probe, err := client.Get(endpoint + "/")
+							if err != nil {
+								test.Fatal(err)
+							}
+							probe.Body.Close()
+							if probe.StatusCode != http.StatusNotFound {
+								test.Errorf("listener probe status = %d, want 404", probe.StatusCode)
+							}
+						}
+					}
 					account, err := fixture.manager.Store().GetAccount(fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
 					if err != nil {
 						test.Fatal(err)

@@ -67,9 +67,17 @@ func extensionProfileCatalog(ctx context.Context, caller, target string) string 
 	return target
 }
 
-func (a *Agent) SDKLibraryTarget() (*Agent, *sdk.AgentLibrary, bool) {
+func (a *Agent) HasSDKAgentDeclaration() bool {
+	return a.extensionMetadata != nil
+}
+
+func (a *Agent) SDKLibraryTarget() (*Agent, *sdk.AgentLibraryTarget, bool) {
 	metadata := a.extensionMetadata
 	if metadata == nil {
+		if a.coreLibrary != nil {
+			library := *a.coreLibrary
+			return a, &library, true
+		}
 		return nil, nil, false
 	}
 	if metadata.descriptor.Profile != nil && (metadata.owns == nil || !metadata.owns()) {
@@ -80,7 +88,8 @@ func (a *Agent) SDKLibraryTarget() (*Agent, *sdk.AgentLibrary, bool) {
 		target = metadata.base
 	}
 	if metadata.descriptor.Library != nil {
-		library := *metadata.descriptor.Library
+		home, _ := homes()
+		library := metadata.descriptor.Library.Resolve(home)
 		return target, &library, true
 	}
 	if metadata.base != nil {

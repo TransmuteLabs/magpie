@@ -7,10 +7,11 @@ package sessions
 import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "sessions", API: "^1", Requires: []string{"window"},
 		Name: "Sessions", Sub: "Your agents' past conversations: read, search, resume and export them",
 		One: "Recording gateway conversations", Many: "Recording gateway conversations",
@@ -24,7 +25,7 @@ func init() {
 			}
 			return 0, nil
 		},
-		Parts:  []pluginrt.Part{{Slot: "nav.page", Key: "sessions"}},
 		Client: []string{"i18n.js", "sessions.css", "client.js"},
+		Parts:  []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "sessions"}},
 	})
 }

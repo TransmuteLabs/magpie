@@ -91,8 +91,9 @@ func (u *studioUp) count() int {
 
 func studioServe(t *testing.T, u *studioUp) {
 	t.Helper()
-	up := httptest.NewServer(u)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(u))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	if err := provider.Save(provider.Provider{ID: "google-aistudio-paid", Name: "AI Studio", Key: "k",
 		Chat: up.URL + "/v1beta/openai", Models: []string{"gemini-3.8-flash"}}); err != nil {
 		t.Fatal(err)

@@ -680,14 +680,14 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 	}
 	for index, window := range result.Windows {
 		used := bytes.TrimSpace(presence.Windows[index].Used)
-		unknown := window.Unknown || len(used) == 0 || bytes.Equal(used, []byte("null")) || window.Error != ""
-		if window.Name == "" || !unknown && (math.IsNaN(window.Used) || math.IsInf(window.Used, 0) || window.Used < 0 || window.Used > 100) {
+		window.Unknown = window.Unknown || len(used) == 0 || bytes.Equal(used, []byte("null")) || window.Error != ""
+		if window.Name == "" || !window.Unknown && (math.IsNaN(window.Used) || math.IsInf(window.Used, 0) || window.Used < 0 || window.Used > 100) {
 			quota.Windows, quota.Error = nil, "extension provider returned an invalid quota window"
 			return quota
 		}
-		entry := QuotaWindow{Name: window.Name, Used: window.Used, Error: extensionUsageError(window.Error), Aside: window.Aside,
-			Limit: window.Limit, Display: window.Display, Unit: window.Unit, Span: time.Duration(window.Span) * time.Second,
-			amountPresence: quotaAmountAbsent, balanceInformational: true}
+		window.Error = extensionUsageError(window.Error)
+		entry := projectUsageWindow(window)
+		entry.amountPresence, entry.balanceInformational = quotaAmountAbsent, true
 		if window.Amount != nil {
 			entry.Amount, entry.amountPresence = *window.Amount, quotaAmountPresent
 		}
@@ -706,15 +706,6 @@ func extensionQuota(ctx context.Context, login Login) SubscriptionQuota {
 		if err != nil {
 			quota.Windows, quota.Error = nil, err.Error()
 			return quota
-		}
-		if unknown {
-			entry.Used, entry.Text, entry.Aside, entry.noShare, entry.Unknown = 0, true, true, true, true
-			if entry.Error != "" {
-				entry.Display = entry.Error
-			}
-			if entry.Display == "" {
-				entry.Display = "unknown"
-			}
 		}
 		if entry.AsOf != nil {
 			if !entry.Text {

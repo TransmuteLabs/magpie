@@ -59,9 +59,9 @@ func (s *scripted) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 const chatOK = `{"id":"ok","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`
 
-func scriptedOn(t *testing.T, id string, proto provider.Protocol, s *scripted) {
+func scriptedOn(t *testing.T, id string, proto provider.Protocol, s *scripted) *httptest.Server {
 	t.Helper()
-	up := httptest.NewServer(s)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
 	t.Cleanup(up.Close)
 	p := provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Models: []string{"m"}}
 	switch proto {
@@ -77,6 +77,7 @@ func scriptedOn(t *testing.T, id string, proto provider.Protocol, s *scripted) {
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
+	return up
 }
 
 // A provider that can't serve the model — turned away, not the request at

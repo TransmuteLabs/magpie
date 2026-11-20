@@ -102,11 +102,12 @@ func TestExtensionTerminalKeepsSeparateUpstreamFailure(t *testing.T) {
 				return done
 			}
 			t.Cleanup(func() { provider.SendsThroughPlugin = original })
-			vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			vendor := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				fallbacks.Add(1)
 				http.Error(w, "unexpected fallback", 500)
-			}))
+			})))
 			t.Cleanup(vendor.Close)
+			probeFixtureRoot(t, vendor)
 			if err := provider.Save(provider.Provider{ID: "fallback", Name: "Fallback", Chat: vendor.URL + "/v1", Key: "fixture", Models: []string{"m1"}}); err != nil {
 				t.Fatal(err)
 			}

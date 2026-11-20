@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/claudecode"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/proc"
@@ -25,7 +28,8 @@ const claudeRunUsage = `magpie claude run [args…]      start Claude Code throu
 magpie claude launcher [add|remove]
                                the claude-magpie command, which runs this
 
-claude starts with --settings and a settings file magpie keeps for it, wired
+An SDK profile that owns Claude Code supplies its launch settings.
+With the built-in owner, claude starts with --settings and a file wired
 to magpie's gateway, key and models; your own ~/.claude/settings.json and a
 plain claude stay as they are. Every argument after run is claude's.
 `
@@ -73,6 +77,29 @@ var claudeLetGo = func() {
 }
 
 func claudeRun(args []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	prepared, err := agent.PrepareExtensionProfileLaunch(ctx, "claude")
+	if err != nil {
+		return err
+	}
+	if prepared != nil {
+		shutdown, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		err := extension.Default().Close(shutdown)
+		stop()
+		if err != nil {
+			return fmt.Errorf("stop SDK helpers before Claude launch: %w", err)
+		}
+		return startRunChecked(prepared.Starting, args, func() error {
+			claudeLetGo()
+			return prepared.Recheck(ctx)
+		})
+	}
+	cancel()
+	return claudeRunBuiltin(args)
+}
+
+func claudeRunBuiltin(args []string) error {
 	bin := claudeFind()
 	if bin == "" {
 		return errors.New("Claude Code isn't installed: install it from https://claude.com/claude-code, " + claudecode.InstallHint)
@@ -83,17 +110,31 @@ func claudeRun(args []string) error {
 	home, _ := os.UserHomeDir()
 	plugin.ServePages(false)
 	startUp()
-	path, err := agent.ClaudeLaunch(home)
-	if err != nil {
-		return fmt.Errorf("writing claude-magpie's settings: %w", err)
+	var launchArgs []string
+	var mark agent.ClaudeModelMark
+	if err := agent.WithUnownedLocalAgent(home, "claude", func() error {
+		path, err := agent.ClaudeLaunch(home)
+		if err != nil {
+			return fmt.Errorf("writing claude-magpie's settings: %w", err)
+		}
+		launchArgs, err = agent.ClaudeLaunchArgs(path)
+		if err != nil {
+			return fmt.Errorf("preparing claude-magpie's launch: %w", err)
+		}
+		mark = agent.ClaudeLaunchBefore(home)
+		return nil
+	}); err != nil {
+		return err
 	}
 	if !claudeGatewayUp() {
 		fmt.Fprintln(os.Stderr, "magpie: the gateway isn't running, so Claude Code's requests will fail: open magpie, or run `magpie serve`")
 	}
-	mark := agent.ClaudeLaunchBefore(home)
 	claudeLetGo()
-	runErr := claudeRunExec(bin, append([]string{"--settings", path}, args...), os.Environ())
-	if err := agent.ClaudeLaunchAfter(home, mark); err != nil {
+	if err := agent.WithUnownedLocalAgent(home, "claude", func() error { return nil }); err != nil {
+		return err
+	}
+	runErr := claudeRunExec(bin, append(launchArgs, args...), os.Environ())
+	if err := agent.WithUnownedLocalAgent(home, "claude", func() error { return agent.ClaudeLaunchAfter(home, mark) }); err != nil {
 		fmt.Fprintln(os.Stderr, "magpie: putting your settings.json's model back:", err)
 	}
 	return runErr

@@ -8,6 +8,30 @@ import (
 	"testing"
 )
 
+func TestCheckedRetryProtectsAnEditDuringTheWindowsDelay(t *testing.T) {
+	previousWindows := windows
+	windows = true
+	t.Cleanup(func() { windows = previousWindows })
+	stale := errors.New("replacement is stale")
+	attempts, checks := 0, 0
+	err := retryChecked(func() error {
+		checks++
+		if attempts != 0 {
+			return stale
+		}
+		return nil
+	}, func() error {
+		attempts++
+		if attempts == 1 {
+			return fs.ErrPermission
+		}
+		return nil
+	})
+	if !errors.Is(err, stale) || attempts != 1 || checks != 2 {
+		t.Fatalf("stale replacement attempted: error=%v attempts=%d checks=%d", err, attempts, checks)
+	}
+}
+
 // as Windows has it: a file being renamed over is, for a moment, not there
 func TestStatWaitsOutAReplace(t *testing.T) {
 	windows = true

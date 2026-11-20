@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
@@ -1366,25 +1367,15 @@ func codexAtLimit(u codexUsage) bool {
 }
 
 type codexWindow struct {
-	UsedPercent     float64 `json:"used_percent"`
-	LimitWindowSecs int64   `json:"limit_window_seconds"`
-	ResetAt         int64   `json:"reset_at"`
-	ResetAfterSecs  int64   `json:"reset_after_seconds"`
-}
-
-func quotaDurationName(seconds int64) string {
-	if seconds > 0 && seconds%(24*60*60) == 0 {
-		return fmt.Sprintf("%d days", seconds/(24*60*60))
-	}
-	if seconds > 0 && seconds%(60*60) == 0 {
-		return fmt.Sprintf("%d hours", seconds/(60*60))
-	}
-	return "Allowance"
+	UsedPercent     *float64 `json:"used_percent"`
+	LimitWindowSecs int64    `json:"limit_window_seconds"`
+	ResetAt         int64    `json:"reset_at"`
+	ResetAfterSecs  int64    `json:"reset_after_seconds"`
 }
 
 func (w codexWindow) window() QuotaWindow {
-	out := QuotaWindow{Name: quotaDurationName(w.LimitWindowSecs), Used: w.UsedPercent, ResetSecs: w.ResetAfterSecs,
-		Span: time.Duration(w.LimitWindowSecs) * time.Second}
+	out := projectUsageWindow(builtincodex.UsageWindow(w.LimitWindowSecs, w.UsedPercent))
+	out.ResetSecs = w.ResetAfterSecs
 	if w.ResetAt > 0 {
 		t := time.Unix(w.ResetAt, 0)
 		out.ResetsAt = &t

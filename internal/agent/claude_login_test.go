@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -314,8 +315,12 @@ func TestClaudeAtAnOlderGatewayAddress(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := `{"ANTHROPIC_AUTH_TOKEN":"sk-relay","ANTHROPIC_BASE_URL":"https://relay.example"}`
-			if got := readFile(path); !strings.Contains(strings.Join(strings.Fields(got), ""), `"env":`+want) {
+			got := readFile(path)
+			var restored struct {
+				Env map[string]string `json:"env"`
+			}
+			if json.Unmarshal([]byte(got), &restored) != nil || len(restored.Env) != 2 ||
+				restored.Env["ANTHROPIC_AUTH_TOKEN"] != "sk-relay" || restored.Env["ANTHROPIC_BASE_URL"] != "https://relay.example" {
 				t.Fatalf("%q %s: want the relay back alone, got\n%s", login, off, got)
 			}
 		}

@@ -21,7 +21,7 @@ import (
 // cliOf is the command each agent's sessions are resumed with, for the
 // agents magpie can't move to the trash (Deletable) as well.
 var cliOf = map[string]string{
-	"claude": "claude", "codex": "codex", "opencode": "opencode", "pi": "pi",
+	"opencode": "opencode", "pi": "pi",
 	"cline": "cline", "qoder": "qodercli", "qoder-cn": "qoderclicn",
 	"grok": "grok", "codebuddy": "codebuddy", "omp": "omp", "droid": "droid",
 	"kimi": "kimi", "agy": "agy", "cursor": "cursor-agent", "hermes": "hermes",
@@ -32,6 +32,9 @@ var cliOf = map[string]string{
 // A var so tests can say; a test run answers false.
 var cliGone = func(agent string) bool {
 	bin := cliOf[agent]
+	if recipe, ok := linkedSessionResumeRecipes[agent]; ok {
+		bin = recipe.Agent
+	}
 	return bin != "" && !testing.Testing() && !lookOK(bin)
 }
 

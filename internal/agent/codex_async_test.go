@@ -4,11 +4,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -60,6 +62,48 @@ func asyncOf(t *testing.T, config string) (feature any, capability any) {
 	p, _ := providers[magpieID].(map[string]any)
 	caps, _ := p["capabilities"].(map[string]any)
 	return features["async_compaction"], caps["remote_compaction"]
+}
+
+func TestCodexAsyncCompactionSyncPublishesOneEdit(t *testing.T) {
+	quietCodex(t, false, provider.CodexDaemonCheck{})
+	codexReadersAre(t, "0.164.0")
+	home, read := codexHome(t, "", "model = \"gpt-5.5\"\n")
+	setAsyncCompact(t, false, 0)
+	cx := codex(home)
+	route(t, cx, read)
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, on := range []bool{true, false} {
+		setAsyncCompact(t, on, 70)
+		var changes int
+		err := edit.Filtered(func(path string, body []byte) []byte {
+			if path == target {
+				oldFeature, oldCap := asyncOf(t, read())
+				newFeature, newCap := asyncOf(t, string(body))
+				if !reflect.DeepEqual(oldFeature, newFeature) || oldCap != newCap {
+					changes++
+				}
+			}
+			return body
+		}, cx.Sync)
+		if err != nil {
+			t.Fatal(err)
+		}
+		feature, capability := asyncOf(t, read())
+		if on {
+			table, _ := feature.(map[string]any)
+			if table["enabled"] != true || table[codexAsyncPercent] != int64(70) || capability != "v2" {
+				t.Fatalf("enabled compaction was incomplete: %v, %v", feature, capability)
+			}
+		} else if feature != nil || capability != nil {
+			t.Fatalf("disabled compaction left settings behind: %v, %v", feature, capability)
+		}
+		if changes != 1 {
+			t.Errorf("Sync published %d compaction edits with on=%v, want 1", changes, on)
+		}
+	}
 }
 
 // The switch on, Codex routed through magpie as its provider (no ChatGPT

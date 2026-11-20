@@ -859,7 +859,7 @@ func older(a, b string) bool {
 func TestCodexPoolKeepsUltrafast(t *testing.T) {
 	codexSignedIn(t, "spare@example.com")
 	var tiers []any
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var m map[string]any
 		json.Unmarshal(b, &m)
@@ -868,8 +868,9 @@ func TestCodexPoolKeepsUltrafast(t *testing.T) {
 			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
 			`data: {"type":"response.output_text.delta","delta":"pong"}`,
 			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
 	t.Cleanup(func() { provider.CodexBase = was })

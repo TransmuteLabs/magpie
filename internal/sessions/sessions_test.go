@@ -228,11 +228,41 @@ func TestResumeCommand(t *testing.T) {
 	if ResumeCommand("claude", "x; rm -rf /", "/tmp") != "" {
 		t.Fatal("an id that isn't plain must give no command")
 	}
+	for _, agent := range []string{"claude", "codex"} {
+		if ResumeCommand(agent, "--help", "/tmp") != "" {
+			t.Fatalf("%s accepted a flag as a session identity", agent)
+		}
+	}
 	if got := ResumeCommand("codex", "abc", ""); got != "codex resume abc" {
+		t.Fatalf("no folder: %q", got)
+	}
+	if got := ResumeCommand("claude", "abc", ""); got != "claude --resume abc" {
 		t.Fatalf("no folder: %q", got)
 	}
 	if ResumeCommand("goose", "abc", "/tmp") != "" {
 		t.Fatal("unknown agent")
+	}
+}
+
+func TestResumeUsesLinkedAgentRecipe(t *testing.T) {
+	manageSetup(t)
+	targets := []struct{ agent, id string }{{"claude", mgCC}, {"codex", mgCX}}
+	for _, target := range targets {
+		previous := linkedSessionResumeRecipes[target.agent]
+		t.Cleanup(func() { linkedSessionResumeRecipes[target.agent] = previous })
+		recipe := *previous.Clone()
+		recipe.Args = append([]string{"--sdk-recipe"}, recipe.Args...)
+		linkedSessionResumeRecipes[target.agent] = recipe
+	}
+	for _, target := range targets {
+		session, ok := Find(target.agent, target.id)
+		prefix := target.agent + " --sdk-recipe "
+		if !ok || !strings.Contains(session.Resume, prefix) {
+			t.Fatalf("%s listing ignored the selected recipe: %q", target.agent, session.Resume)
+		}
+		if got := ResumeNow(session); got != session.Resume {
+			t.Fatalf("%s resume = %q, want %q", target.agent, got, session.Resume)
+		}
 	}
 }
 

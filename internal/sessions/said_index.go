@@ -477,12 +477,7 @@ func saidReadContext(ctx context.Context, db *sql.DB, key string, ss saidSession
 		if whole {
 			from = 0
 		}
-		c := Call{Agent: ss.s.Agent, File: ss.s.Path, From: from, To: upto}
-		if ss.s.Agent == "codex" {
-			err = codexContentOf(ctx, c, nil, true, add)
-		} else {
-			err = claudeContentOf(ctx, c, nil, true, add)
-		}
+		err = owner.readParts(ctx, historyRead{spokenOnly: true, span: &historySpan{from: from, to: upto}}, add)
 	} else {
 		err = readHistoryParts(ctx, owner, nil, true, add)
 	}

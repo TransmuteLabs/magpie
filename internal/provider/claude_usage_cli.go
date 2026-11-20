@@ -22,6 +22,7 @@ import (
 	// and without one a reset was read in the machine's own zone
 	_ "time/tzdata"
 
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 	"github.com/yetone/magpie/internal/lazyre"
 )
 
@@ -235,7 +236,6 @@ func parseClaudeUsage(text string, now time.Time) ([]QuotaWindow, error) {
 			return out, errors.New("Claude Code's /usage told no allowance: " + clipLine(strings.TrimSpace(line)))
 		}
 	}
-	const week = 7 * 24 * time.Hour
 	for _, line := range lines {
 		m := claudeUsageLineRE.FindStringSubmatch(strings.TrimSpace(line))
 		if m == nil {
@@ -245,21 +245,25 @@ func parseClaudeUsage(text string, now time.Time) ([]QuotaWindow, error) {
 		if err != nil {
 			continue
 		}
-		w := QuotaWindow{Name: "5 hours", Used: used, Span: 5 * time.Hour}
-		if m[1] != "session" {
-			w.Name, w.Span = "7 days", week
+		currentSession := m[1] == "session"
+		var scope string
+		if !currentSession {
 			// "Sonnet only" (Claude Code 2.1.316's week of Sonnet) is the
 			// Sonnet week: "7 days · Sonnet", counting sonnet, the window
 			// its seven_day_sonnet header keeps (claudeKinds). Read whole,
 			// it counted models named "sonnet-only", which none is, so
 			// routing never saw the Sonnet week used up (StringKe, #4532)
-			scope := strings.TrimSpace(m[2])
+			scope = strings.TrimSpace(m[2])
 			if s, ok := strings.CutSuffix(strings.ToLower(scope), " only"); ok && s != "" {
 				scope = strings.TrimSpace(scope[:len(s)])
 			}
-			if scope != "" && !strings.EqualFold(scope, "all models") {
-				w.Name, w.Model = "7 days · "+scope, claudeScopeModel(scope)
+			if strings.EqualFold(scope, "all models") {
+				scope = ""
 			}
+		}
+		w := projectUsageWindow(builtinclaude.UsageWindow(currentSession, scope, used))
+		if scope != "" {
+			w.Model = claudeScopeModel(scope)
 		}
 		if slices.ContainsFunc(out, func(x QuotaWindow) bool { return x.Name == w.Name }) {
 			continue

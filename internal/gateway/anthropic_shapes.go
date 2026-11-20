@@ -262,6 +262,31 @@ func hasTurnEffort(body []byte) bool {
 	return found
 }
 
+func withTurnEffortUpdated(body []byte, effort string) []byte {
+	if !bodyHas(body, `"output_config"`) {
+		return body
+	}
+	var last gjson.Result
+	getIn(body, "messages").ForEach(func(_, message gjson.Result) bool {
+		if message.Get("role").Str == "system" {
+			level := message.Get("output_config.effort")
+			if level.Type == gjson.String && effortOf(level.Str) != "" {
+				last = level
+			}
+		}
+		return true
+	})
+	end := last.Index + len(last.Raw)
+	if last.Str == effort || last.Index <= 0 || end > len(body) || string(body[last.Index:end]) != last.Raw {
+		return body
+	}
+	encoded, _ := json.Marshal(effort)
+	out := make([]byte, 0, len(body)-len(last.Raw)+len(encoded))
+	out = append(out, body[:last.Index]...)
+	out = append(out, encoded...)
+	return append(out, body[end:]...)
+}
+
 // withoutTurnEffort is body without the per-turn effort on its messages, as
 // Claude Code sends it once refused: a system message that carried nothing
 // else goes with it. The request's own output_config, the effort of the

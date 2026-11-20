@@ -15,19 +15,20 @@ import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "search", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
 		Name: "Web search", Sub: "Models that can't search the web search with a provider that can, or a search API",
 		One: "1 search source set up", Many: "{n} search sources set up",
 		InUse: InUse,
-		SetAt: "models #searchList",
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(gwtool.Serve(gwtool.WebSearch))
 			return nil
 		},
+		SettingsAt: &sdk.FeatureSettingsLocation{Tab: "models", RowID: "searchList"},
 	})
 }
 

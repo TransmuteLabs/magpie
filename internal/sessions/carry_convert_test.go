@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/extension"
 )
 
 // The fixtures are real sessions of the same project, made in a sandbox
@@ -46,7 +48,7 @@ func carrySetup(t *testing.T) (claudeSrc, codexSrc string) {
 	t.Cleanup(func() {
 		agentThere = old
 		carriedMu.Lock()
-		carried = map[carryKey]CarryResult{}
+		carried = map[carryKey]carriedSession{}
 		carriedMu.Unlock()
 	})
 	Reset()
@@ -153,6 +155,9 @@ func TestCarryClaudeToCodex(t *testing.T) {
 	if !ok || c.Cwd != carryCwd || !strings.HasPrefix(c.Title, "My dog is called Biscuit") || len(c.Models) != 0 {
 		t.Fatalf("listed %+v (found %v)", c, ok)
 	}
+	if resumed := ResumeNow(c); resumed != r.Command {
+		t.Fatalf("resume %q, want %q", resumed, r.Command)
+	}
 	// asked again for the same file, the same session
 	again, err := CarryOver(s, "codex")
 	if err != nil || again != r {
@@ -245,6 +250,9 @@ func TestCarryCodexToClaude(t *testing.T) {
 	if !ok || c.Cwd != carryCwd || !strings.HasPrefix(c.Title, "My favourite colour is teal") || len(c.Models) != 0 || c.Cost != 0 {
 		t.Fatalf("listed %+v (found %v)", c, ok)
 	}
+	if resumed := ResumeNow(c); resumed != r.Command {
+		t.Fatalf("resume %q, want %q", resumed, r.Command)
+	}
 	// and it is carried back the way it came
 	if len(c.Carry) != 1 || c.Carry[0].Agent != "codex" {
 		t.Fatalf("carry back %+v", c.Carry)
@@ -284,43 +292,75 @@ func TestCarryConvertOffered(t *testing.T) {
 // A pasted image goes over as the target's own image, and a compaction
 // stands for what came before it: the history Codex kept in its place.
 func TestCarryImagesAndCompaction(t *testing.T) {
+	carrySetup(t)
 	dir := t.TempDir()
 	img := "iVBORw0KGgo="
 	cc := filepath.Join(dir, "c.jsonl")
 	os.WriteFile(cc, []byte(`{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`+img+`"}}]},"uuid":"a","timestamp":"2026-10-25T03:50:25.170Z"}`+"\n"+
 		`{"parentUuid":"a","isSidechain":false,"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"text","text":"a cat"}]},"uuid":"b","timestamp":"2026-10-25T03:50:26.170Z"}`+"\n"+
 		`{"parentUuid":"b","isSidechain":true,"type":"user","message":{"role":"user","content":"side"},"uuid":"s","timestamp":"2026-10-25T03:50:27.170Z"}`+"\n"), 0o644)
-	items, err := claudeCarryItems(cc)
+	r, err := CarryOver(Session{Agent: "claude", ID: "image", Path: cc, Cwd: "/w"}, "codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 2 || items[0].Text != "what is this?" || len(items[0].Images) != 1 || items[0].Images[0] != "data:image/png;base64,"+img || items[1].Text != "a cat" {
-		t.Fatalf("items %+v", items)
-	}
-	r, err := writeCodexCarry(dir, "/w", items, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := codexCarryItems(r.Path)
-	if err != nil || len(got) != 2 || len(got[0].Images) != 1 || got[0].Images[0] != items[0].Images[0] || got[1].Text != "a cat" {
-		t.Fatalf("codex read back %+v %v", got, err)
+	raw := sum(t, r.Path)
+	if strings.Count(raw, `"type":"user_message"`) != 1 || strings.Count(raw, `"type":"agent_message"`) != 1 ||
+		!strings.Contains(raw, `"text":"what is this?"`) || !strings.Contains(raw, `"text":"a cat"`) ||
+		!strings.Contains(raw, `"image_url":"data:image/png;base64,`+img+`"`) || strings.Contains(raw, `"text":"side"`) ||
+		strings.Contains(raw, `"signature"`) {
+		t.Fatalf("Codex image conversion %s", raw)
 	}
 
 	cx := filepath.Join(dir, "x.jsonl")
 	os.WriteFile(cx, []byte(`{"timestamp":"2026-10-25T03:48:11.208Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first, long ago"}]}}`+"\n"+
 		`{"timestamp":"2026-10-25T03:48:12.208Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}]},{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,`+img+`"}]}]}}`+"\n"+
 		`{"timestamp":"2026-10-25T03:48:13.208Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}}`+"\n"), 0o644)
-	got, err = codexCarryItems(cx)
-	if err != nil || len(got) != 3 || got[0].Text != "kept" || len(got[1].Images) != 1 || got[2].Text != "after" {
-		t.Fatalf("compacted %+v %v", got, err)
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", dir)
-	r, err = writeClaudeCarry("/w", got, time.Now())
+	r, err = CarryOver(Session{Agent: "codex", ID: "compact", Path: cx, Cwd: "/w"}, "claude")
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, err := claudeCarryItems(r.Path)
-	if err != nil || len(back) != 3 || back[0].Text != "kept" || len(back[1].Images) != 1 || back[1].Images[0] != "data:image/png;base64,"+img || back[2].Text != "after" {
-		t.Fatalf("claude read back %+v %v", back, err)
+	raw = sum(t, r.Path)
+	kept := strings.Index(raw, `"content":"kept"`)
+	image := strings.Index(raw, `"media_type":"image/png","data":"`+img+`"`)
+	answer := strings.Index(raw, `"text":"after"`)
+	if strings.Count(raw, `"type":"user"`) != 2 || strings.Count(raw, `"type":"assistant"`) != 1 ||
+		kept < 0 || image < kept || answer < image || strings.Contains(raw, "first, long ago") {
+		t.Fatalf("Claude image and compaction conversion %s", raw)
+	}
+}
+
+func TestCarryPackedSourceBeyondWireLimit(t *testing.T) {
+	_, path := carrySetup(t)
+	prompt := strings.Repeat("ordinary conversation\n", extension.MaxActionBytes/20+1) + "end of carried prompt"
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeErr := json.NewEncoder(file).Encode(map[string]any{
+		"type": "response_item", "timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]string{{"type": "input_text", "text": prompt}},
+		},
+	})
+	if closeErr := file.Close(); writeErr != nil || closeErr != nil {
+		t.Fatal(writeErr, closeErr)
+	}
+	packedPath := pack(t, path, false)
+	source, ok := Find("codex", carryCodex)
+	if !ok || source.Path != packedPath {
+		t.Fatal("packed session not found", source.Path)
+	}
+	result, err := CarryOver(source, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := sum(t, result.Path)
+	if len(published) <= extension.MaxActionBytes || !strings.Contains(published, "end of carried prompt") {
+		t.Fatal("conversion truncated the packed session", len(published))
+	}
+	source.Path = path
+	if repeated, err := CarryOver(source, "claude"); err != nil || repeated != result {
+		t.Fatal("stale plain path did not reuse the packed conversion", repeated, err)
 	}
 }

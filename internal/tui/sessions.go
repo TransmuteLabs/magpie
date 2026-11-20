@@ -150,6 +150,9 @@ func resumeSession(s sessions.Session) tea.Cmd {
 		return func() tea.Msg { return flashMsg{text: trf("its folder %s isn't there any more", tildePath(s.Cwd))} }
 	}
 	run := sessions.ResumeNow(s)
+	if run == "" {
+		return func() tea.Msg { return flashMsg{text: tr("this session can't be resumed from here")} }
+	}
 	c := proc.Command("sh", "-c", run)
 	if runtime.GOOS == "windows" {
 		c = proc.Command("powershell", "-NoProfile", "-Command", run)

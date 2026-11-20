@@ -10,6 +10,8 @@ type chunkBuildKey struct {
 	path     string
 	size     int64
 	modified int64
+	agent    string
+	key      string
 }
 
 type chunkBuild struct {

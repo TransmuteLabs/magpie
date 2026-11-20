@@ -2,13 +2,104 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestCodexSyncKeepsConcurrentCatalogEdit(t *testing.T) {
+	for _, scope := range []string{"global", "profile"} {
+		t.Run(scope, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			cx := codex(home)
+			if scope == "profile" {
+				if err := cx.Field("scope").Set(scope); err != nil {
+					t.Fatal(err)
+				}
+				cx = codex(home)
+			}
+			if err := cx.Apply("model", "fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			catalogPath := filepath.Join(cx.Dir, "magpie-models.json")
+			writeFile(t, catalogPath, `{"models":[]}`)
+			target, err := edit.Target(catalogPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const user = `{"models":[{"slug":"fake/m1","personal_setting":"concurrent"}]}`
+			var edited bool
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && !edited {
+					writeFile(t, target, user)
+					edited = true
+				}
+				return body
+			}, cx.Sync)
+			if !edited || !errors.Is(err, extension.ErrActionChanged) {
+				t.Fatalf("sync did not refuse the stale catalog: edited=%v, err=%v", edited, err)
+			}
+			if got := readFile(catalogPath); got != user {
+				t.Fatalf("sync overwrote a concurrent catalog edit: %q", got)
+			}
+			if err := cx.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if got := readFile(catalogPath); !strings.Contains(got, `"concurrent"`) ||
+				!strings.Contains(got, `"supports_parallel_tool_calls"`) {
+				t.Fatal("the next sync did not keep both the user setting and the generated catalog")
+			}
+		})
+	}
+}
+
+func TestCodexSyncRejectsAliasedCatalog(t *testing.T) {
+	for _, scope := range []string{"global", "profile"} {
+		for _, link := range []struct {
+			name string
+			make func(string, string) error
+		}{{"symlink", os.Symlink}, {"hardlink", os.Link}} {
+			t.Run(scope+"/"+link.name, func(t *testing.T) {
+				home, _ := codexHome(t, "", "")
+				cx := codex(home)
+				if scope == "profile" {
+					if err := cx.Field("scope").Set(scope); err != nil {
+						t.Fatal(err)
+					}
+					cx = codex(home)
+				}
+				if err := cx.Apply("model", "fake/m1"); err != nil {
+					t.Fatal(err)
+				}
+				config := readFile(cx.Path)
+				catalog := filepath.Join(cx.Dir, "magpie-models.json")
+				if err := os.Remove(catalog); err != nil {
+					t.Fatal(err)
+				}
+				if err := link.make(cx.Path, catalog); err != nil {
+					t.Skip(err)
+				}
+				if err := cx.Sync(); err == nil || !strings.Contains(err.Error(), "name the same file") {
+					t.Fatalf("sync accepted a catalog alias: %v", err)
+				}
+				if got := readFile(cx.Path); got != config || readFile(catalog) != config {
+					t.Fatalf("sync changed the aliased config: %q", got)
+				}
+				settings, settingsErr := os.Stat(cx.Path)
+				catalogInfo, catalogErr := os.Stat(catalog)
+				if settingsErr != nil || catalogErr != nil || !os.SameFile(settings, catalogInfo) {
+					t.Fatalf("sync broke the alias: config error=%v catalog error=%v", settingsErr, catalogErr)
+				}
+			})
+		}
+	}
+}
 
 // What the user adds by hand to the model list magpie writes for Codex
 // stays through the next model switch, sync and stepping out (#1450:

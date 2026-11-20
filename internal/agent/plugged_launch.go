@@ -14,6 +14,7 @@ package agent
 // be read so), with the variables written in.
 
 import (
+	"errors"
 	"maps"
 	"os"
 	"regexp"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/agentplug"
 	"github.com/yetone/magpie/internal/update"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // launchSpec is how a plugin's agent is started: its id, which `magpie
@@ -45,6 +47,22 @@ func newLaunch(d agentplug.Desc, config string) *launchSpec {
 		return nil
 	}
 	return declaredLaunch(d.ID, d.Bin, config, d.Launch.Model, d.Launch.Env, d.Launch.Args, d.Launch.Plain)
+}
+
+func sdkLaunch(id, bin, config string, recipe sdk.AgentLaunch) *launchSpec {
+	launch := declaredLaunch(id, bin, config, recipe.Model, recipe.Env, recipe.Args, recipe.Plain)
+	launch.strict = true
+	if config == "" {
+		for _, templates := range []map[string]string{recipe.Env, recipe.Args} {
+			for _, value := range templates {
+				if strings.Contains(value, "{config}") {
+					launch.err = errors.New("declared agent launch requires an available configuration path")
+					return launch
+				}
+			}
+		}
+	}
+	return launch
 }
 
 func declaredLaunch(id, bin, config, model string, env, args map[string]string, plain []string) *launchSpec {

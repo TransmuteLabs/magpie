@@ -41,6 +41,11 @@ func codexVendorProxy(t *testing.T) (*httptest.Server, func() []string) {
 	var mu sync.Mutex
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.RequestURI == "/" && r.ContentLength == 0 &&
+			len(r.TransferEncoding) == 0 && r.Header.Get("Authorization") == "" && r.Header.Get("Proxy-Authorization") == "" {
+			http.NotFound(w, r)
+			return
+		}
 		mu.Lock()
 		seen = append(seen, r.URL.String())
 		mu.Unlock()

@@ -34,8 +34,13 @@ func TestMemoryDigestInInstructions(t *testing.T) {
 	}
 
 	memSave(t, "Answer in Chinese.", memory.Preference, memory.Global)
+	memSave(t, "Release steps:\n1. tag the commit\n2. verify the assets", memory.Procedure, memory.Global)
 	memSave(t, "Codex runs tests on mote.", memory.Rule, "agent:codex")
 	memSave(t, "Claude keeps notes short.", memory.Rule, "agent:claude")
+	archivedText, kind, scope, status := "An obsolete convention.", memory.Rule, memory.Global, memory.Archived
+	if _, _, err := memory.Save(memory.Input{Text: &archivedText, Kind: &kind, Scope: &scope, Status: &status}, memory.FromUser, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	if s := read(t, codex); strings.Contains(s, "Answer in Chinese.") {
 		t.Fatalf("written before it was published:\n%s", s)
 	}
@@ -46,6 +51,11 @@ func TestMemoryDigestInInstructions(t *testing.T) {
 	}
 	if strings.Index(s, "Be brief.") > strings.Index(s, "Answer in Chinese.") {
 		t.Errorf("the digest before the shared text:\n%s", s)
+	}
+	_, digest, found := strings.Cut(s, "\n\nPreferences:\n")
+	const want = "- Answer in Chinese.\n\nHow things are done:\n- Release steps:\n  1. tag the commit\n  2. verify the assets\n\nOnly for you:\nRules:\n- Codex runs tests on mote.\n" + blockEnd + "\n"
+	if !found || digest != want {
+		t.Fatalf("published digest bytes:\n%q\nwant:\n%q", digest, want)
 	}
 	if c := filepath.Join(h, ".claude/CLAUDE.md"); strings.Contains(readMaybe(c), "Answer in Chinese.") {
 		t.Errorf("claude isn't ticked, but was given memory:\n%s", readMaybe(c))

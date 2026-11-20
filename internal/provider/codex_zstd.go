@@ -4,9 +4,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 
-	"github.com/klauspost/compress/zstd"
+	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 )
 
 // Codex's own client sends a ChatGPT account's turns to the backend
@@ -23,43 +22,10 @@ import (
 // and through magpie, which decoded Codex's zstd and sent the backend
 // plain JSON, 503 again.
 
-// codexZstd is level 3 (klauspost's SpeedDefault, "roughly equivalent to
-// the default Zstandard mode (level 3)"), without the frame checksum,
-// which libzstd leaves off by default. EncodeAll is safe to share.
-// Codex's codex-rs/http-client/src/request.rs uses
-// zstd::stream::encode_all(.., 3), whose unknown-size stream has a 2 MiB
-// window. Keep turns within that client envelope too.
-//
-// The encoder keeps one coder per concurrent EncodeAll, GOMAXPROCS by
-// default, and each keeps its history (4 MiB at a 2 MiB window) for the
-// life of the process: 74 MB of a live gateway's 288 MB heap on a 14-core
-// Mac. A 1 MiB turn encodes in about half a millisecond, so two coders in
-// low-memory mode keep up with dozens of agents and hold ~9 MB. Neither
-// option changes the bytes sent.
-var codexZstd = newCodexZstd()
-
-func newCodexZstd() *zstd.Encoder {
-	z, _ := zstd.NewWriter(nil,
-		zstd.WithEncoderLevel(zstd.SpeedDefault),
-		zstd.WithEncoderCRC(false),
-		zstd.WithWindowSize(2<<20),
-		zstd.WithEncoderConcurrency(2),
-		zstd.WithLowerEncoderMem(true),
-	)
-	return z
-}
-
-// codexZstdOff leaves turns plain, for tests alone: the fake backends of
-// most of the gateway's and provider's tests read the body as it comes, so
-// those packages' TestMain sets it (CodexZstdForTests(false)), and the
-// tests of the compression clear it again.
-var codexZstdOff atomic.Bool
-
 // CodexZstdForTests sets whether turns to the ChatGPT backend go
 // compressed, for a test, and returns what puts it back.
 func CodexZstdForTests(on bool) (restore func()) {
-	was := codexZstdOff.Swap(!on)
-	return func() { codexZstdOff.Store(was) }
+	return builtincodex.ResponsesZstdForTests(on)
 }
 
 // CodexCompressed sends req's body, body, zstd-compressed as Codex's own
@@ -68,25 +34,34 @@ func CodexZstdForTests(on bool) (restore func()) {
 // body is final and signed, and returns the bytes that go on the wire. The
 // body is still the plain body everywhere magpie keeps or shows it.
 func CodexCompressed(req *http.Request, body []byte) int {
-	if req.Method != http.MethodPost || codexZstdOff.Load() || !codexTurnURL(req.URL) {
+	if req.Method != http.MethodPost || !codexTurnURL(req.URL) {
 		return len(body)
 	}
-	if enc := req.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
-		return len(body) // already encoded: as Codex, never twice
+	if zstdBody := builtincodex.EncodeResponsesZstd(body, req.Header.Get("Content-Encoding")); zstdBody != nil {
+		SetCodexZstdBody(req, zstdBody)
+		return len(zstdBody)
 	}
-	z := codexZstd.EncodeAll(body, make([]byte, 0, len(body)/8+64))
+	return len(body)
+}
+
+func SetCodexZstdBody(req *http.Request, z []byte) {
 	SetBody(req, z)
 	req.Header.Del("Content-Length")
 	req.Header.Set("Content-Encoding", "zstd")
-	return len(z)
 }
 
 // codexTurnURL is CodexBase's /responses, where Codex sends a turn.
 func codexTurnURL(u *url.URL) bool {
-	base, err := url.Parse(CodexBase)
-	return err == nil && u != nil && strings.EqualFold(u.Host, base.Host) && u.Path == base.Path+"/responses"
+	return codexEndpointURL(u, "/responses")
 }
 
 // CodexTurnURL says whether u is CodexBase's /responses, where Codex sends
 // a turn.
 func CodexTurnURL(u *url.URL) bool { return codexTurnURL(u) }
+
+func CodexCompactURL(u *url.URL) bool { return codexEndpointURL(u, "/responses/compact") }
+
+func codexEndpointURL(u *url.URL, endpoint string) bool {
+	base, err := url.Parse(CodexBase)
+	return err == nil && u != nil && strings.EqualFold(u.Host, base.Host) && u.Path == base.Path+endpoint
+}

@@ -31,7 +31,7 @@ func (b *spentBackend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func spentAccount(t *testing.T, b *spentBackend, fallback bool) *scripted {
 	t.Helper()
 	codexSignedIn(t)
-	up := httptest.NewServer(b)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(b))
 	t.Cleanup(up.Close)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"

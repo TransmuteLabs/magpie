@@ -1,11 +1,11 @@
 package sessions
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/url"
 	"path/filepath"
-	"strings"
 )
 
 // Codex 0.166 resumes a thread only on the provider it was started on:
@@ -28,8 +28,11 @@ var codexBuiltinProviders = []string{"openai", "amazon-bedrock", "amazon-bedrock
 // folder on: its row's in the state databases, else its rollout's
 // session_meta's, as Codex's thread/resume reads them; "" when neither
 // names one.
-func codexSavedProvider(home, id, path string) string {
+func codexSavedProvider(ctx context.Context, home, id, path string) string {
 	for _, p := range codexStateDBs(home) {
+		if ctx.Err() != nil {
+			return ""
+		}
 		u := url.URL{Scheme: "file", Path: filepath.ToSlash(p), RawQuery: "mode=ro&_pragma=busy_timeout(2000)"}
 		if len(u.Path) >= 2 && u.Path[1] == ':' {
 			u.Path = "/" + u.Path
@@ -39,11 +42,14 @@ func codexSavedProvider(home, id, path string) string {
 			continue
 		}
 		var s sql.NullString
-		err = db.QueryRow(`SELECT model_provider FROM threads WHERE id = ?`, id).Scan(&s)
+		err = db.QueryRowContext(ctx, `SELECT model_provider FROM threads WHERE id = ?`, id).Scan(&s)
 		db.Close()
 		if err == nil && s.String != "" {
 			return s.String
 		}
+	}
+	if ctx.Err() != nil {
+		return ""
 	}
 	return codexMetaProvider(path)
 }
@@ -58,26 +64,15 @@ func codexProviderKnown(home, p string) bool {
 	return ok
 }
 
-// ResumeNow is the line that resumes a session as its agent takes it now,
-// made when the user opens it, not on each listing. For a Codex session
+// resumeCodex prepares the native Codex command at launch time. For a session
 // started on a provider other than the one Codex is on now, that is
 // `codex resume -c model_provider=<its provider> <id>` while config.toml
 // still has that provider, so it goes on where it was made; when the
 // provider is gone the thread is moved to the one Codex is on
 // (MoveCodexProvider, its files kept in magpie's trash first) and resumed
-// there, the only way Codex resumes it at all. Any other session, and a
-// Codex one in a WSL distro, is its Resume as listed.
-func ResumeNow(s Session) string {
-	if s.source != nil {
-		if checkSourceBeforeCarry(s) != nil {
-			return ""
-		}
-		return sourceResume(s.source)
-	}
-	if extensionSourceAgent(s.Agent) {
-		return ""
-	}
-	if s.Agent != "codex" || s.Resume == "" || s.WSL != "" || s.Path == "" || !safeID.MatchString(s.ID) {
+// there, the only way Codex resumes it at all. A WSL session resumes as listed.
+func resumeCodex(ctx context.Context, s Session, admit func() error) string {
+	if s.Resume == "" || s.WSL != "" || s.Path == "" || !safeID.MatchString(s.ID) {
 		return s.Resume
 	}
 	home := codexHomeOf(s.Path)
@@ -85,18 +80,14 @@ func ResumeNow(s Session) string {
 		return s.Resume
 	}
 	now := CodexProviderIn(home)
-	was := codexSavedProvider(home, s.ID, s.Path)
+	was := codexSavedProvider(ctx, home, s.ID, s.Path)
 	if was == "" || was == now || !codexProviderRe.MatchString(was) {
 		return s.Resume
 	}
 	if codexProviderKnown(home, was) {
-		run := "codex resume " + s.ID
-		if i := strings.LastIndex(s.Resume, run); i >= 0 {
-			return s.Resume[:i] + "codex resume -c model_provider=" + was + " " + s.ID + s.Resume[i+len(run):]
-		}
-		return s.Resume
+		return codexResumeOnProvider(s.Resume, s.ID, was)
 	}
-	if _, err := MoveCodexProvider(s.ID, now); err != nil {
+	if _, err := moveCodexProvider(s.ID, now, admit); err != nil {
 		log.Printf("sessions: resuming Codex thread %s, started on %s, which config.toml no longer has: moving it to %s: %v", s.ID, was, now, err)
 	}
 	return s.Resume

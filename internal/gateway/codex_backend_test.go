@@ -28,7 +28,7 @@ func chatgpt(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	setHome(t, t.TempDir()) // no sign-ins but the test's
 	forgetCodexLists(t)
-	up := httptest.NewServer(h)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(h))
 	t.Cleanup(up.Close)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"

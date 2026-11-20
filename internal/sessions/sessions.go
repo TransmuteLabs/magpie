@@ -2259,13 +2259,10 @@ func assemble(fs []file, price func(string) *catalog.Price, codexTitle func(stri
 	if !ok {
 		return s, false
 	}
+	s.Resume = listedResume(s)
 	if s.source != nil {
-		s.Resume = sourceResume(s.source)
 		s.Carry, s.Transcript = carries(s), s.source.grant.descriptor.Transcript && !s.source.stale
 		return s, true
-	}
-	if !s.ReadOnly {
-		s.Resume = resumeFor(s.WSL, s.Agent, s.ID, s.Cwd, s.Path)
 	}
 	s.Carry, s.Transcript = carries(s), readable(s)
 	if s.Transcript {
@@ -2355,7 +2352,7 @@ func assembleListed(fs []file, price func(string) *catalog.Price, codexTitle fun
 	// the name the session goes by in its agent: one the user gave it, else
 	// Codex's thread name (session_index.jsonl), else the title the agent
 	// made, else the first prompt, else the first message
-	if s.Agent == "codex" && s.WSL == "" && custom == "" {
+	if s.source == nil && s.Agent == "codex" && s.WSL == "" && custom == "" {
 		custom = codexTitle(s.ID)
 	}
 	if s.Agent == "claude-desktop" && s.WSL == "" {
@@ -3158,12 +3155,11 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 	if !safeID.MatchString(id) {
 		return ""
 	}
+	if recipe, ok := linkedSessionResumeRecipes[agent]; ok {
+		return resumeLine(distro, cwd, linkedResumeCommand(recipe, id))
+	}
 	var run string
 	switch agent {
-	case "claude":
-		run = "claude --resume " + id
-	case "codex":
-		run = "codex resume " + id
 	case "opencode":
 		run = "opencode --session " + id
 	case "pi":
@@ -3181,13 +3177,7 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 		// three (codebuddy, cbc, codebuddy-code)
 		run = "codebuddy --resume " + id
 	case "omp":
-		run = "omp --resume " + id
-		if profile := ompProfile(path); profile != "" {
-			if !safeOmpProfile.MatchString(profile) {
-				return ""
-			}
-			run = "omp --profile " + profile + " --resume " + id
-		}
+		run = ompResumeCommand(path, id)
 	case "droid":
 		run = "droid --resume " + id
 	case "kimi":
@@ -3209,6 +3199,13 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 		}
 		run = "cursor-agent --resume " + id
 	default:
+		return ""
+	}
+	return resumeLine(distro, cwd, run)
+}
+
+func resumeLine(distro, cwd, run string) string {
+	if run == "" {
 		return ""
 	}
 	if distro != "" {

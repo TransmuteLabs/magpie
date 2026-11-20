@@ -2,12 +2,108 @@ package sessions
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/settings"
 )
+
+func TestResumeRejectsHeldNativeSession(t *testing.T) {
+	for _, change := range []string{"delegated", "unreadable", "revoked"} {
+		t.Run(change, func(t *testing.T) {
+			_, codex := manageSetup(t)
+			session, ok := Find("codex", mgCX)
+			if !ok || session.Resume == "" {
+				t.Fatal("fixture did not expose a native resume command")
+			}
+			original, err := os.ReadFile(session.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db := codexStateDB(t, codex, mgCX, "disconnected")
+			switch change {
+			case "delegated":
+				body, err := json.Marshal([]SessionSourceBinding{{
+					Plugin: "fixture", Source: "history", Agent: "codex", Identity: strings.Repeat("a", 64),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeHistoryAuthority(t, sourceBindingsPath(), body)
+			case "unreadable":
+				writeHistoryAuthority(t, sourceBindingsPath(), []byte("{invalid"))
+			case "revoked":
+				if err := SetReads(nil, map[string]bool{"codex": false}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if run := ResumeNow(session); run != "" {
+				t.Errorf("held session returned a launch command: %q", run)
+			}
+			after, err := os.ReadFile(session.Path)
+			if err != nil || !bytes.Equal(after, original) {
+				t.Errorf("held session changed the rollout: %v", err)
+			}
+			if got, _, _ := threadProvider(t, db, mgCX); got != "disconnected" {
+				t.Errorf("held session changed the provider to %q", got)
+			}
+		})
+	}
+}
+
+func TestResumeProviderMoveChecksAuthorityBeforeRewrite(t *testing.T) {
+	_, codex := manageSetup(t)
+	session, ok := Find("codex", mgCX)
+	if !ok || session.Resume == "" {
+		t.Fatal("fixture did not expose a native resume command")
+	}
+	original, err := os.ReadFile(session.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := codexStateDB(t, codex, mgCX, "disconnected")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	owner, err := selectSessionHistoryOwner(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trash := filepath.Join(settings.Dir(), "trash", "codex-provider")
+	staged := false
+	_, err = moveCodexProvider(session.ID, "magpie", func() error {
+		notes, err := filepath.Glob(filepath.Join(trash, "*", "move.json"))
+		if err != nil {
+			return err
+		}
+		if len(notes) > 0 {
+			staged = true
+			cancel()
+		}
+		return owner.check(ctx)
+	})
+	if !staged || !errors.Is(err, context.Canceled) {
+		t.Fatalf("the move did not stop after preparing a backup: %v", err)
+	}
+	after, err := os.ReadFile(session.Path)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatalf("canceled move changed the rollout: %v", err)
+	}
+	if got, _, _ := threadProvider(t, db, mgCX); got != "disconnected" {
+		t.Fatalf("canceled move changed the provider to %q", got)
+	}
+	if entries, err := os.ReadDir(trash); err != nil || len(entries) != 0 {
+		t.Fatalf("canceled move left a backup: %v, %v", entries, err)
+	}
+	if run := ResumeNowContext(ctx, session); run != "" {
+		t.Fatalf("canceled resume returned a launch command: %q", run)
+	}
+}
 
 // Codex 0.166 resumes a thread only on the provider it was saved with:
 // `codex resume <id>` of a session CC Switch's "custom" made, with Codex

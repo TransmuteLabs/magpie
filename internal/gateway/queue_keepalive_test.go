@@ -122,7 +122,7 @@ func queueGateway(t *testing.T, v *streamVendor, set func(*provider.Provider)) s
 	k, w := keepHeldAfter, watchEvery
 	keepHeldAfter, watchEvery = 80*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() { keepHeldAfter, watchEvery = k, w })
-	up := httptest.NewServer(v)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(v))
 	t.Cleanup(up.Close)
 	p := provider.Provider{ID: "q", Name: "Queued", Key: "k", Models: []string{"m"}, Chat: up.URL + "/v1", Responses: up.URL + "/v1", Anthropic: up.URL}
 	set(&p)

@@ -60,10 +60,10 @@ func (o *overloadedBackend) asked() int {
 // nothing else on in magpie, the ChatGPT backend o: a turn on one of
 // Codex's own models is relayed as it came (codexAccounts), nobody else
 // to ask.
-func oneCodexAccount(t *testing.T, o *overloadedBackend) {
+func oneCodexAccount(t *testing.T, o *overloadedBackend) *httptest.Server {
 	t.Helper()
 	codexSignedIn(t)
-	up := httptest.NewServer(o)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(o))
 	t.Cleanup(up.Close)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
@@ -74,6 +74,7 @@ func oneCodexAccount(t *testing.T, o *overloadedBackend) {
 	if id, routed := codexAccounts(httptest.NewRequest("POST", CodexPath+"/responses", nil), "gpt-5.5"); routed {
 		t.Fatalf("one account goes through routing as %s", id)
 	}
+	return up
 }
 
 const oneAccountTurn = `{"model":"gpt-5.5","stream":true,"input":"ping"}`
@@ -119,7 +120,8 @@ func TestCodexOneAccountOverloadAskedAgain(t *testing.T) {
 func TestCodexOneAccountStreamOverloadAskedAgain(t *testing.T) {
 	failed := reply{200, "", sse(append(slices.Clone(overloadedLead), overloadedFailed)...)}
 	o := &overloadedBackend{replies: []reply{failed, {200, "", codexAnswer}}}
-	oneCodexAccount(t, o)
+	upstream := oneCodexAccount(t, o)
+	probeFixtureRoot(t, upstream)
 	code, body := codexPost(t, oneAccountTurn)
 	if code != 200 || !strings.Contains(body, "hello") || strings.Contains(body, "server_is_overloaded") || o.asked() != 2 {
 		t.Fatalf("%d %q, asked %d times", code, body, o.asked())

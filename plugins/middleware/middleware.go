@@ -17,19 +17,20 @@ import (
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "middleware", API: "^1", Requires: []string{"gateway"}, Essential: true,
 		Name: "JS gateway plugins", Sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers",
-		Opens: "plugins",
-		One:   "1 gateway plugin on", Many: "{n} gateway plugins on",
+		One: "1 gateway plugin on", Many: "{n} gateway plugins on",
 		InUse: func() (int, error) { return middleware.On(), nil },
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(gwmw.Use(middleware.Chain{}))
 			c.OnDispose(usage.Observe(middleware.Points()))
 			return nil
 		},
+		OpenPage: "plugins",
 	})
 }

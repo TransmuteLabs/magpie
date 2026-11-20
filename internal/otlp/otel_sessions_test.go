@@ -1,6 +1,7 @@
 package otlp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
@@ -112,11 +114,20 @@ func TestOTelSessionWatcherExportsNewInteractionWithoutGatewayDuplicates(t *test
 	}
 	received := make(chan []byte, 4)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/traces" {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		received <- b
 		io.WriteString(w, `{}`)
 	}))
 	defer collector.Close()
+	probe, err := collector.Client().Get(collector.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Body.Close()
 	otelConfig(t, settings.OTel{Endpoint: collector.URL})
 	t.Setenv("MAGPIE_OTEL_SESSIONS", "true")
 	t.Setenv("MAGPIE_OTEL_BODIES", "false")
@@ -194,6 +205,10 @@ func TestOTelSessionWatcherExportsNewInteractionWithoutGatewayDuplicates(t *test
 func TestSessionTracingRetainsRemoteGatewayTraces(t *testing.T) {
 	received := make(chan []byte, 1)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/traces" {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		received <- b
 		io.WriteString(w, `{}`)
@@ -225,8 +240,9 @@ func TestSessionTracingSuppressesSupportedLocalClientsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ready := &sessionAvailability{config: cfg, agents: map[string]time.Time{}}
-	for _, agent := range []string{"codex", "pi", "omp", "opencode", "gemini", "claude", "claude-desktop"} {
+	ready := testSessionAvailability(cfg, time.Now())
+	supported := []string{"codex", "pi", "omp", "opencode", "gemini", "claude", "claude-desktop"}
+	for _, agent := range supported {
 		if OTelSessionAgent(agent) {
 			t.Fatal("unreadable store suppressed gateway")
 		}
@@ -235,10 +251,10 @@ func TestSessionTracingSuppressesSupportedLocalClientsOnly(t *testing.T) {
 			t.Fatal("fallback gateway record lost")
 		}
 		<-e.queue
-		ready.agents[agent] = time.Now()
+		ready.observe(observedSession{agent: agent}, agent, time.Now())
 	}
 	e.sessions.Store(ready)
-	for agent := range ready.agents {
+	for _, agent := range supported {
 		if !OTelSessionAgent(agent) {
 			t.Fatalf("adapter not enabled: %s", agent)
 		}
@@ -265,15 +281,150 @@ func TestSessionTracingSuppressesSupportedLocalClientsOnly(t *testing.T) {
 	if len(e.queue) != 6 {
 		t.Fatal("in-flight gateway span suppressed")
 	}
-	stale := &sessionAvailability{config: cfg, agents: map[string]time.Time{"codex": time.Now().Add(-6 * time.Minute)}}
+	stale := testSessionAvailability(cfg, time.Now().Add(-6*time.Minute), observedSession{agent: "codex"})
 	e.sessions.Store(stale)
 	if OTelSessionAgent("codex") {
 		t.Fatal("stale availability suppressed gateway")
 	}
 	cfg.Bodies = !cfg.Bodies
-	e.sessions.Store(&sessionAvailability{config: cfg, agents: map[string]time.Time{"codex": time.Now()}})
+	e.sessions.Store(testSessionAvailability(cfg, time.Now(), observedSession{agent: "codex"}))
 	if OTelSessionAgent("codex") {
 		t.Fatal("availability survived changed config")
+	}
+}
+
+func TestSessionTracingRestoresGatewayAfterReadRevocation(t *testing.T) {
+	otelConfig(t, settings.OTel{Endpoint: "http://localhost:4318"})
+	t.Setenv("MAGPIE_OTEL_SESSIONS", "true")
+	e := newOTelExporter()
+	t.Cleanup(e.cancel)
+	cfg, err := settings.OTelExport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	e.sessions.Store(testSessionAvailability(cfg, now, observedSession{agent: "codex"}, observedSession{"codex", "session"}))
+	if !e.sessionObserved("codex", "", cfg) || !e.sessionObserved("codex", "session", cfg) {
+		t.Fatal("recent native trace did not suppress a gateway duplicate")
+	}
+	if err := settings.SetSessionReads(func(*settings.SessionReads) *settings.SessionReads {
+		return &settings.SessionReads{Asked: true, All: true, Agents: map[string]bool{"codex": false}}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"", "session"} {
+		if e.sessionObserved("codex", id, cfg) {
+			t.Fatalf("cached observation for %q suppressed a gateway trace after revocation", id)
+		}
+	}
+}
+
+func TestSessionTracingRechecksWarmClaudeStorageOwner(t *testing.T) {
+	testenv.SetHome(t, t.TempDir())
+	claude := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	otelConfig(t, settings.OTel{Endpoint: "http://localhost:4318"})
+	t.Setenv("MAGPIE_OTEL_SESSIONS", "true")
+	setReads := func(code, desktop bool) {
+		t.Helper()
+		if err := settings.SetSessionReads(func(*settings.SessionReads) *settings.SessionReads {
+			return &settings.SessionReads{Asked: true, Agents: map[string]bool{"claude": code, "claude-desktop": desktop}}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setReads(true, true)
+	desktop := filepath.Join(desktopdir.Here().Data, "local-agent-mode-sessions", "acct", "org", "local_fixture", ".claude")
+	now := time.Now().Add(-time.Second)
+	fixtures := []struct {
+		root, session, model string
+		at                   time.Time
+	}{
+		{claude, "code-tab", "code-tab-model", now},
+		{desktop, "desktop", "desktop-model", now},
+		{desktop, "shared", "shared-desktop-model", now},
+		{claude, "shared", "shared-code-model", now.Add(10 * time.Millisecond)},
+	}
+	for _, fixture := range fixtures {
+		path := filepath.Join(fixture.root, "projects", "fixture", fixture.session+".jsonl")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		var lines strings.Builder
+		encoder := json.NewEncoder(&lines)
+		for _, event := range []map[string]any{
+			{"type": "user", "uuid": fixture.model + "-user", "entrypoint": "claude-desktop-3p", "timestamp": fixture.at, "message": map[string]string{"content": "fixture prompt"}},
+			{"type": "assistant", "timestamp": fixture.at.Add(time.Millisecond), "message": map[string]any{"id": fixture.model + "-message", "model": fixture.model, "stop_reason": "end_turn", "content": []map[string]string{{"type": "text", "text": "fixture response"}}, "usage": map[string]int{"input_tokens": 10, "output_tokens": 5}}},
+			{"type": "system", "subtype": "turn_duration", "timestamp": fixture.at.Add(2 * time.Millisecond)},
+		} {
+			if err := encoder.Encode(event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(path, []byte(lines.String()), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exporter := New()
+	e := newOTelExporter()
+	exporter.running.Store(e)
+	t.Cleanup(e.cancel)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.watchSessions(ctx, now.Add(-time.Second), 10*time.Millisecond)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	observed := make(map[string]bool)
+	deadline := time.After(6 * time.Second)
+	for len(observed) < len(fixtures) {
+		select {
+		case item := <-e.queue:
+			if item.span != nil && item.span.Session && item.record.Model != "" {
+				observed[item.record.Model] = true
+			}
+		case <-deadline:
+			t.Fatalf("native traces were not exported for every source: %v", observed)
+		}
+	}
+	cancel()
+	<-done
+	for len(e.queue) > 0 {
+		<-e.queue
+	}
+	for _, fixture := range fixtures {
+		if !observed[fixture.model] || !exporter.Session("claude-desktop", fixture.session) {
+			t.Fatalf("missing native observation: %+v", fixture)
+		}
+	}
+
+	setReads(false, true)
+	if exporter.Session("claude-desktop", "code-tab") || exporter.SessionFresh("claude-desktop", "code-tab") {
+		t.Error("warm Desktop Code tab observation survived revoking its Claude store")
+	}
+	for _, session := range []string{"code-tab", "desktop", "shared", ""} {
+		exporter.Ledger(Record{Agent: "claude-desktop", Local: true, Session: session, Model: "gateway-" + session, Time: time.Now(), Status: 200})
+		want := 0
+		if session == "code-tab" {
+			want = 1
+		}
+		if len(e.queue) != want {
+			t.Fatalf("gateway rows for %q: got %d, want %d", session, len(e.queue), want)
+		}
+		if want == 1 {
+			item := <-e.queue
+			if item.record.Model != "gateway-code-tab" || item.span != nil {
+				t.Fatalf("fallback gateway row changed: %+v", item)
+			}
+		}
+	}
+	setReads(true, false)
+	if exporter.Session("claude-desktop", "code-tab") || exporter.SessionAgent("claude-desktop") {
+		t.Fatal("backing store permission bypassed the Desktop agent's revocation")
 	}
 }
 
@@ -315,14 +466,9 @@ func TestSessionTracingMatchesNativeConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	e.sessions.Store(&sessionAvailability{config: cfg,
-		agents: map[string]time.Time{"codex": now},
-		seen: map[observedSession]time.Time{
-			{"codex", "local"}:    now,
-			{"codex", "stale"}:    now.Add(-6 * time.Minute),
-			{"pi", "other-agent"}: now,
-		},
-	})
+	ready := testSessionAvailability(cfg, now, observedSession{agent: "codex"}, observedSession{"codex", "local"}, observedSession{"pi", "other-agent"})
+	ready.observe(observedSession{"codex", "stale"}, "codex", now.Add(-6*time.Minute))
+	e.sessions.Store(ready)
 	for _, tc := range []struct {
 		name, session, native string
 		dedup                 bool
@@ -351,7 +497,7 @@ func TestSessionTracingMatchesNativeConversation(t *testing.T) {
 		})
 	}
 	cfg.Bodies = !cfg.Bodies
-	e.sessions.Store(&sessionAvailability{config: cfg, seen: map[observedSession]time.Time{{"codex", "local"}: now}})
+	e.sessions.Store(testSessionAvailability(cfg, now, observedSession{"codex", "local"}))
 	if OTelSession("codex", "local") {
 		t.Fatal("session readiness survived changed config")
 	}
@@ -368,7 +514,7 @@ func TestSessionTracingRetainsUnrepresentedCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	e.sessions.Store(&sessionAvailability{config: cfg, agents: map[string]time.Time{"claude": now, "claude-desktop": now, "codex": now}, seen: map[observedSession]time.Time{{"claude", "parent"}: now, {"claude-desktop", "parent"}: now, {"codex", "parent"}: now}})
+	e.sessions.Store(testSessionAvailability(cfg, now, observedSession{"claude", "parent"}, observedSession{"claude-desktop", "parent"}, observedSession{"codex", "parent"}))
 	for _, tc := range []struct{ agent, kind string }{
 		{"claude", "title_generation"},
 		{"claude-desktop", "title_generation"}, {"codex", "thread_title"}, {"codex", "review"},
@@ -379,6 +525,14 @@ func TestSessionTracingRetainsUnrepresentedCalls(t *testing.T) {
 		}
 		<-e.queue
 	}
+}
+
+func testSessionAvailability(config settings.OTel, at time.Time, keys ...observedSession) *sessionAvailability {
+	availability := &sessionAvailability{config: config, seen: map[observedSession][]sourceObservation{}}
+	for _, key := range keys {
+		availability.observe(key, key.agent, at)
+	}
+	return availability
 }
 
 func sessionItems(cfg settings.OTel, spans ...sessions.TraceSpan) []otelItem {

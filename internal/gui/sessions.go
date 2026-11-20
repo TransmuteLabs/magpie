@@ -404,10 +404,10 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, errors.New("opening a terminal is only for the desktop app"))
 			return
 		}
-		s, ok := sessions.Find(in.Agent, in.ID)
+		s, ok := sessions.FindContext(r.Context(), in.Agent, in.ID)
 		run := s.Resume
 		if ok && in.In == "" {
-			run = sessions.ResumeNow(s)
+			run = sessions.ResumeNowContext(r.Context(), s)
 		}
 		if in.In != "" {
 			run = ""
@@ -419,6 +419,10 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		}
 		if !ok || run == "" {
 			fail(rw, errors.New("no such session"))
+			return
+		}
+		if err := r.Context().Err(); err != nil {
+			fail(rw, err)
 			return
 		}
 		if err := openTerminal(run, s.Title, settings.Shared().SessionTerminal); err != nil {

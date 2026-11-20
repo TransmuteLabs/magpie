@@ -151,18 +151,11 @@ func extensionSourceTranscript(ctx context.Context, record *sessionSourceRecord)
 		}
 		transcript := Transcript{Parts: []Part{}, Cut: result.Cut}
 		for _, part := range result.Parts {
-			if !transcript.add(false, Part{Role: part.Role, Kind: part.Kind, Name: part.Name, Text: part.Text, Model: part.Model, Cut: part.Cut}) {
+			if !transcript.add(false, part) {
 				break
 			}
 		}
 		return transcript, nil
 	}
 	return Transcript{}, errors.New("session source is disabled")
-}
-
-func checkSourceBeforeCarry(session Session) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := selectSessionHistoryOwner(ctx, session)
-	return err
 }

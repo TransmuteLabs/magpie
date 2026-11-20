@@ -5,6 +5,7 @@ package sessions
 // or completed conversations. They don't send data themselves.
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,16 @@ type TraceSpan struct {
 	Error, Inferred                                                       bool
 	Update                                                                bool
 	Pending                                                               bool // ancestry only; export the root when the interaction finishes
+	source                                                                string
+}
+
+// SourceAgent names the backing store, which can differ from Agent when
+// Claude Desktop's Code tab writes to Claude Code's transcript directory.
+func (s TraceSpan) SourceAgent() string {
+	if s.source != "" {
+		return s.source
+	}
+	return s.Agent
 }
 
 type traceTurn struct {
@@ -49,6 +60,7 @@ type traceCursor struct {
 	size                     int64
 	mod                      time.Time
 	agent, session, provider string
+	source                   string
 	scope                    string
 	turns                    map[string]*traceTurn
 	current                  string
@@ -86,40 +98,67 @@ func TraceAgent(agent string) bool {
 	return false
 }
 
+func NativeTraceAllowed(agent string) bool {
+	return TraceAgent(agent) && checkNativeHistoryOwner(context.Background(), agent) == nil
+}
+
+// NativeTraceSourceAllowed checks the logical agent and the backing store of
+// an observation against the current history authority.
+func NativeTraceSourceAllowed(agent, source string) bool {
+	if agent == source {
+		return NativeTraceAllowed(agent)
+	}
+	authority, err := inspectHistoryPublication(context.Background())
+	return err == nil && TraceAgent(agent) && TraceAgent(source) && authority.native(agent) && authority.native(source) &&
+		!extensionSourceAgent(agent) && !extensionSourceAgent(source)
+}
+
 // Claude child transcripts are discovered alongside their parent stores.
 func traceLineFiles() []file {
+	authority, err := inspectHistoryPublication(context.Background())
+	if err != nil {
+		return nil
+	}
+	return nativeTraceFiles(authority)
+}
+
+func nativeTraceFiles(authority historyPublication) []file {
 	// a slice of its own: traceRecentFiles sorts it, and Codex's listing
 	// is shared (heldFiles)
-	files := slices.Concat(codexFiles(), piFiles())
-	claude := func(agent, dir string) { files = append(files, ccFiles(agent, dir)...) }
-	for _, d := range ClaudeDirs() {
-		claude("claude", d)
+	var files []file
+	if authority.native("codex") {
+		files = append(files, codexFiles()...)
 	}
-	for _, dir := range desktopReadDirs() {
-		homes, _ := SessionGlob(filepath.Join(dir, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
-		for _, home := range homes {
-			claude("claude-desktop", home)
-		}
-	}
-	seen := map[string]bool{}
-	var ompRoots []string
-	if Reads("omp") {
-		ompRoots = ompSessionRoots()
-	}
-	for _, root := range ompRoots {
-		paths, _ := SessionGlob(filepath.Join(root, "*", "*.jsonl"))
-		for _, path := range paths {
-			if seen[path] {
-				continue
-			}
-			seen[path] = true
-			f := file{agent: "omp", path: path, main: true}
-			if stat(&f) {
+	if authority.native("pi") {
+		for _, f := range piFiles() {
+			if f.agent == "pi" {
 				files = append(files, f)
 			}
 		}
 	}
-	return allowed(append(files, geminiTraceFiles()...))
+	if authority.native("claude") {
+		for _, dir := range ClaudeDirs() {
+			files = append(files, ccFiles("claude", dir)...)
+		}
+	}
+	if authority.native("claude-desktop") {
+		for _, dir := range desktopReadDirs() {
+			homes, _ := SessionGlob(filepath.Join(dir, "local-agent-mode-sessions", "*", "*", "local_*", ".claude"))
+			for _, home := range homes {
+				files = append(files, ccFiles("claude-desktop", home)...)
+			}
+		}
+	}
+	if authority.native("omp") {
+		seen := map[string]bool{}
+		for _, root := range ompSessionRoots() {
+			files = append(files, ompMainFilesUnder(seen, root)...)
+		}
+	}
+	if authority.native("gemini") {
+		files = append(files, geminiTraceFiles()...)
+	}
+	return slices.DeleteFunc(files, func(file file) bool { return !authority.native(file.agent) })
 }
 
 func TraceID(parts ...string) string {
@@ -143,7 +182,7 @@ func traceTime(raw json.RawMessage, millis bool) time.Time {
 	return time.Time{}
 }
 func (c *traceCursor) span(turn, id, name, kind string, start, end time.Time) TraceSpan {
-	return TraceSpan{Agent: c.agent, Session: c.session, Turn: turn, ID: traceSpanID(c.agent, c.session, turn, id), Parent: traceSpanID(c.agent, c.session, turn, "root"), Name: name, Kind: kind, Start: start, End: end}
+	return TraceSpan{Agent: c.agent, Session: c.session, Turn: turn, ID: traceSpanID(c.agent, c.session, turn, id), Parent: traceSpanID(c.agent, c.session, turn, "root"), Name: name, Kind: kind, Start: start, End: end, source: c.source}
 }
 func (c *traceCursor) root(t *traceTurn, end time.Time, failed bool) TraceSpan {
 	s := c.span(t.id, "root", c.agent+" interaction", "span", t.start, end)
@@ -175,7 +214,14 @@ func (c *traceCursor) turn(id string, at time.Time) *traceTurn {
 // Poll reads appended complete lines only. It limits watched files to the most
 // recent sessions; a partial last line remains for the following poll.
 func (r *TraceReader) Poll(bodies bool) []TraceSpan {
-	files := traceRecentFiles(traceLineFiles())
+	ctx := context.Background()
+	authority, err := inspectHistoryPublication(ctx)
+	if err != nil {
+		r.identities.poll(nil)
+		r.retainNativeTraces(historyPublication{})
+		return nil
+	}
+	files := traceRecentFiles(nativeTraceFiles(authority))
 	r.visible = r.identities.poll(files)
 	var result []TraceSpan
 	budget := int64(8 << 20)
@@ -190,7 +236,7 @@ func (r *TraceReader) Poll(bodies bool) []TraceSpan {
 			continue
 		}
 		c := r.files[f.path]
-		if c == nil || f.size < c.offset {
+		if c == nil || c.source != f.agent || f.size < c.offset {
 			c = newTraceCursor(f)
 			r.files[f.path] = c
 		}
@@ -275,13 +321,45 @@ func (r *TraceReader) Poll(bodies bool) []TraceSpan {
 			delete(r.files, path)
 		}
 	}
-	result = append(result, r.pollOpenCode(bodies, &budget)...)
+	if authority.native("opencode") {
+		result = append(result, r.pollOpenCode(bodies, &budget)...)
+	}
 	for path := range r.snapshots {
 		if !seen[path] && !strings.HasPrefix(path, "opencode:") {
 			delete(r.snapshots, path)
 		}
 	}
-	return result
+	current, err := inspectHistoryPublication(ctx)
+	if err != nil {
+		current = historyPublication{}
+	}
+	r.retainNativeTraces(current)
+	return slices.DeleteFunc(result, func(span TraceSpan) bool {
+		return !current.native(span.Agent) || span.source != "" && !current.native(span.source)
+	})
+}
+
+func (r *TraceReader) retainNativeTraces(authority historyPublication) {
+	r.visible = slices.DeleteFunc(r.visible, func(session TraceSession) bool { return !authority.native(session.Agent) })
+	for path, cursor := range r.files {
+		if !authority.native(cursor.source) {
+			delete(r.files, path)
+			delete(r.snapshots, path)
+		} else if !authority.native(cursor.agent) {
+			reset := newTraceCursor(file{agent: cursor.source, path: path, main: cursor.scope == ""})
+			reset.agent = cursor.agent
+			reset.info, reset.offset, reset.size, reset.mod = cursor.info, cursor.offset, cursor.size, cursor.mod
+			r.files[path] = reset
+		}
+	}
+	if !authority.native("opencode") {
+		r.ocInfo, r.ocStamp, r.ocPending, r.ocNext = nil, [4]int64{}, false, 0
+		for path := range r.snapshots {
+			if strings.HasPrefix(path, "opencode:") {
+				delete(r.snapshots, path)
+			}
+		}
+	}
 }
 
 // nextTraceLine is the next line of f, at off, read through b: the line with
@@ -322,7 +400,7 @@ func nextTraceLine(b *bufio.Reader, f *os.File, off int64, long []byte) (line, k
 }
 
 func newTraceCursor(f file) *traceCursor {
-	c := &traceCursor{agent: f.agent, turns: map[string]*traceTurn{}, tools: map[string]TraceSpan{}, parents: map[string]string{}}
+	c := &traceCursor{agent: f.agent, source: f.agent, turns: map[string]*traceTurn{}, tools: map[string]TraceSpan{}, parents: map[string]string{}}
 	if f.agent == "claude" || f.agent == "claude-desktop" {
 		c.session = sessionOfPath(f.path)
 		if !f.main {

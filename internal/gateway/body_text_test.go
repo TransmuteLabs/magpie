@@ -104,8 +104,9 @@ func (u *strictUp) last() []byte {
 func strictOn(t *testing.T, proto provider.Protocol) *strictUp {
 	t.Helper()
 	u := &strictUp{}
-	srv := httptest.NewServer(u)
+	srv := httptest.NewServer(withoutAnonymousFixtureProbe(u))
 	t.Cleanup(srv.Close)
+	probeFixtureRoot(t, srv)
 	p := provider.Provider{ID: "up", Name: "Up", Key: "k", Models: []string{"m"}}
 	switch proto {
 	case provider.Anthropic:

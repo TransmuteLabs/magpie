@@ -9,11 +9,23 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func home(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("MAGPIE_PORTABLE", "")
+}
+
+func registerTestFeature(t *testing.T, feature sdk.FeatureContribution) {
+	t.Helper()
+	RegisterFeature(feature)
+	t.Cleanup(func() {
+		regMu.Lock()
+		delete(registry, feature.ID)
+		regMu.Unlock()
+	})
 }
 
 var three = []Manifest{
@@ -172,7 +184,7 @@ func TestBrokenFileIsKept(t *testing.T) {
 func TestKeepFreshFollowsPluginsYml(t *testing.T) {
 	home(t)
 	var applied atomic.Int32
-	Register(Manifest{ID: "fresh-test", Apply: func(c *Ctx) error {
+	registerTestFeature(t, sdk.FeatureContribution{ID: "fresh-test", Activate: func(c sdk.FeatureLifetime) error {
 		applied.Add(1)
 		c.OnDispose(func() { applied.Add(-1) })
 		return nil
@@ -184,7 +196,15 @@ func TestKeepFreshFollowsPluginsYml(t *testing.T) {
 		return func() { cancel(); <-done }
 	}
 	stop := keep(10 * time.Millisecond)
-	defer func() { stop(); Set("fresh-test", false); Refresh() }()
+	defer func() {
+		stop()
+		defMu.Lock()
+		defer defMu.Unlock()
+		if def != nil {
+			def.Stop()
+			def = nil
+		}
+	}()
 	wait := func(want int32) {
 		t.Helper()
 		deadline := time.Now().Add(5 * time.Second)

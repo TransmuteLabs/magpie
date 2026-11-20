@@ -4,6 +4,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Claude Code tells what an account has left as it answers (its
@@ -24,24 +27,24 @@ type ClaudeLimit struct {
 // claudeKinds are the windows Claude Code names, as the usage endpoint's
 // are kept, in that order.
 var claudeKinds = []struct {
-	kind, name, model string
-	span              time.Duration
+	kind, model string
+	window      sdk.UsageWindow
 }{
-	{"five_hour", "5 hours", "", 5 * time.Hour},
-	{"seven_day", "7 days", "", 7 * 24 * time.Hour},
-	{"seven_day_opus", "7 days · Opus", "opus", 7 * 24 * time.Hour},
-	{"seven_day_sonnet", "7 days · Sonnet", "sonnet", 7 * 24 * time.Hour},
+	{"five_hour", "", builtinclaude.UsageWindow(true, "", 0)},
+	{"seven_day", "", builtinclaude.UsageWindow(false, "", 0)},
+	{"seven_day_opus", "opus", builtinclaude.UsageWindow(false, "Opus", 0)},
+	{"seven_day_sonnet", "sonnet", builtinclaude.UsageWindow(false, "Sonnet", 0)},
 	// the week's allowance of the models Claude Code lists as taking
 	// usage credits past it ("Fable", "Fable 5", "Fable 5.1"), which it
 	// calls the Fable limit: the usage endpoint's weekly_scoped Fable
-	{"seven_day_overage_included", "7 days · Fable", "fable", 7 * 24 * time.Hour},
+	{"seven_day_overage_included", "fable", builtinclaude.UsageWindow(false, "Fable", 0)},
 }
 
 // claudeKindOrder is w's place among claudeKinds, the windows Claude Code
 // names, as a reading orders them; one it doesn't name goes last.
 func claudeKindOrder(w QuotaWindow) int {
 	for i, k := range claudeKinds {
-		if k.name == w.Name {
+		if k.window.Name == w.Name {
 			return i
 		}
 	}
@@ -108,25 +111,7 @@ const claudeHeard = time.Hour
 // read, after a restart as kept on disk (quotas.json), so the week isn't
 // lost to an answer that didn't name it (ifccod7391564 on X).
 func NoteClaudeLimits(user string, ls []ClaudeLimit) {
-	var heard []QuotaWindow
-	for _, l := range ls {
-		i := slices.IndexFunc(claudeKinds, func(k struct {
-			kind, name, model string
-			span              time.Duration
-		}) bool {
-			return k.kind == l.Kind
-		})
-		if i < 0 {
-			continue
-		}
-		k := claudeKinds[i]
-		w := QuotaWindow{Name: k.name, Used: l.Used * 100, Span: k.span, Model: k.model}
-		if l.ResetsAt > 0 {
-			t := time.Unix(l.ResetsAt, 0)
-			w.ResetsAt = &t
-		}
-		heard = append(heard, w)
-	}
+	heard := claudeObservedWindows(ls)
 	if len(heard) == 0 {
 		return
 	}
@@ -175,7 +160,7 @@ func KeptClaudeLimits(user string) []ClaudeLimit {
 			continue // a window that renews when nobody knows says nothing of its own
 		}
 		for _, k := range claudeKinds {
-			if k.name == w.Name {
+			if k.window.Name == w.Name {
 				out = append(out, ClaudeLimit{Kind: k.kind, Used: w.Used / 100, ResetsAt: w.ResetsAt.Unix()})
 				break
 			}
@@ -201,22 +186,30 @@ func keptClaudeWindows(key string) []QuotaWindow {
 	return out
 }
 
-// ClaudeAllowanceForTest is the allowance routing weighs for limits as
-// Claude Code told them, for the gateway's tests.
-func ClaudeAllowanceForTest(ls []ClaudeLimit, now time.Time) Allowance {
+func claudeObservedWindows(ls []ClaudeLimit) []QuotaWindow {
 	var ws []QuotaWindow
 	for _, l := range ls {
 		for _, k := range claudeKinds {
 			if k.kind != l.Kind {
 				continue
 			}
-			w := QuotaWindow{Name: k.name, Used: l.Used * 100, Span: k.span, Model: k.model}
+			window := k.window
+			window.Used = l.Used * 100
+			w := projectUsageWindow(window)
+			w.Model = k.model
 			if l.ResetsAt > 0 {
 				t := time.Unix(l.ResetsAt, 0)
 				w.ResetsAt = &t
 			}
 			ws = append(ws, w)
+			break
 		}
 	}
-	return allowanceOf(ws, now)
+	return ws
+}
+
+// ClaudeAllowanceForTest is the allowance routing weighs for limits as
+// Claude Code told them, for the gateway's tests.
+func ClaudeAllowanceForTest(ls []ClaudeLimit, now time.Time) Allowance {
+	return allowanceOf(claudeObservedWindows(ls), now)
 }

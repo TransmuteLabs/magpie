@@ -138,7 +138,7 @@ func TestClaudeTierEffort(t *testing.T) {
 	set("subagent", "")
 	// back to Claude Code as installed: nothing of magpie's left
 	set("model", "")
-	for _, k := range claudeEnv {
+	for _, k := range append([]string{"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}, claudeOwnEnv...) {
 		if env(k) != "" {
 			t.Fatalf("%s left: %s", k, env(k))
 		}

@@ -27,6 +27,7 @@ or start a domain module.
 
 | Author task | Contract and host owner |
 | --- | --- |
+| Feature linked into the Magpie build | [`FeatureContribution`](feature_contribution.go) and [built-in activation](../../docs/subsystems/plugin-runtime.md#linked-sdk-activation-slots-and-settings) |
 | Frame handlers, streaming, scoped callbacks and accounting | [Shared contract](#shared-contract-and-transport) |
 | Native, executable or Bun entry point | Runtime table below and [host owner selection](../../docs/subsystems/executable-extensions.md#selection-and-authoring) |
 | Private actions, helper services and instance state | [Composite contract](#composite-api-11) and [host lifecycle diagram](../../docs/subsystems/executable-extensions.md#transport-lifetime-and-replacement) |

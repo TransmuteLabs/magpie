@@ -19,6 +19,14 @@ import (
 func TestCodexSignInGoesOnWithItsPortTaken(t *testing.T) {
 	home := claudeHome(t)
 	trades := fakeCodexTokens(t, nil)
+	probe, err := http.Get(codexTokenURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Body.Close()
+	if probe.StatusCode != http.StatusNotFound || trades.Load() != 0 {
+		t.Fatalf("probe counted as token exchange: status %d, %d trades", probe.StatusCode, trades.Load())
+	}
 	// another program on the port, which isn't a Codex sign-in: it doesn't
 	// stop when asked to. Its port is the callback's (fakeCodexTokens put
 	// the old one back when the test ends)

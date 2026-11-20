@@ -28,7 +28,7 @@ import (
 const (
 	MaxActionFiles    = 128
 	MaxActionBytes    = 16 << 20
-	MissingActionHash = "missing"
+	MissingActionHash = sdk.MissingActionHash
 )
 
 var ErrActionChanged = errors.New("extension action changed; prepare it again")
@@ -51,17 +51,8 @@ type ActionPolicy struct {
 	RevalidateInputs func(context.Context, map[string]fs.FileInfo) error
 }
 
-type ActionSettings struct {
-	Files []ActionSettingFile `json:"files"`
-}
-
-type ActionSettingFile struct {
-	Path       string `json:"path"`
-	Body       []byte `json:"body"`
-	BeforeHash string `json:"beforeHash"`
-	Mode       uint32 `json:"mode"`
-	Exists     bool   `json:"exists"`
-}
+type ActionSettings = sdk.ActionSettings
+type ActionSettingFile = sdk.ActionSettingFile
 
 type ActionPreview struct {
 	Revision string                  `json:"revision"`
@@ -89,6 +80,7 @@ type actionFile struct {
 	Body   []byte
 	Mode   fs.FileMode
 	Exists bool
+	info   fs.FileInfo
 }
 
 type ActionPlan struct {
@@ -140,6 +132,13 @@ func (plan *ActionPlan) Execute(ctx context.Context, revision string) (ActionRes
 		return ActionResult{}, ErrActionChanged
 	}
 	return plan.owner.Execute(ctx, plan, revision)
+}
+
+func (plan *ActionPlan) ExecuteCreateOnly(ctx context.Context, revision string, check func(map[string]fs.FileInfo) error) (ActionResult, error) {
+	if plan == nil || plan.owner == nil || plan.policy.CreateUnder == "" || check == nil {
+		return ActionResult{}, ErrActionChanged
+	}
+	return plan.owner.execute(ctx, plan, revision, check)
 }
 
 func (actions *Actions) AgentInspect(ctx context.Context, plugin string, scope sdk.Scope, request sdk.AgentInspectRequest, policy ActionPolicy) (sdk.AgentInspectResult, error) {
@@ -555,10 +554,14 @@ func actionRead(root *os.Root, name string) (actionFile, error) {
 	if err != nil || len(body) > MaxActionBytes || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
 		return actionFile{}, ErrActionChanged
 	}
-	return actionFile{Body: body, Mode: opened.Mode().Perm(), Exists: true}, nil
+	return actionFile{Body: body, Mode: opened.Mode().Perm(), Exists: true, info: opened}, nil
 }
 
 func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision string) (ActionResult, error) {
+	return actions.execute(ctx, plan, revision, nil)
+}
+
+func (actions *Actions) execute(ctx context.Context, plan *ActionPlan, revision string, check func(map[string]fs.FileInfo) error) (ActionResult, error) {
 	actions.mu.Lock()
 	defer actions.mu.Unlock()
 	if plan == nil || plan.owner != actions || plan.used || revision == "" || revision != plan.revision {
@@ -610,8 +613,44 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 		return result, err
 	}
 	plan.used = true
-	var changed []sdk.FileChange
-	var directories []string
+	type actionEffect struct {
+		change    sdk.FileChange
+		parent    *os.Root
+		name      string
+		temporary string
+		created   fs.FileInfo
+	}
+	createOnly := plan.policy.CreateUnder != ""
+	var changed []actionEffect
+	var directories, createdParents []string
+	var parents map[string]actionParent
+	if createOnly {
+		parents = make(map[string]actionParent)
+		plan.createdDirs = make(map[string]fs.FileInfo)
+		defer func() {
+			for _, parent := range parents {
+				if parent.handle != nil {
+					parent.handle.Close()
+				}
+			}
+		}()
+	}
+	verifyCreated := func() error {
+		if err := plan.checkCreateParents(parents); err != nil {
+			return err
+		}
+		for _, effect := range changed {
+			current, err := actionRead(effect.parent, effect.name)
+			if err != nil {
+				return err
+			}
+			expected := actionFile{Body: effect.change.Body, Mode: actionMode(effect.change, plan.before[effect.change.Path]), Exists: true}
+			if !actionEqual(expected, current) || !os.SameFile(effect.created, current.info) {
+				return fmt.Errorf("%s changed before commit: %w", effect.change.Path, ErrActionChanged)
+			}
+		}
+		return nil
+	}
 	for _, change := range plan.files {
 		if err = ctx.Err(); err == nil {
 			err = actions.checkAuthority(plan)
@@ -622,7 +661,29 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 		if err != nil {
 			break
 		}
-		changed = append(changed, change)
+		if createOnly {
+			var parent *os.Root
+			parent, err = plan.pinCreateParent(root, path.Dir(change.Path), parents, &createdParents)
+			if err == nil {
+				err = actions.revalidateInputs(ctx, plan)
+			}
+			if err == nil {
+				err = plan.checkCreateParents(parents)
+			}
+			if err != nil {
+				break
+			}
+			name := path.Base(change.Path)
+			temporary, info, createErr := actionCreate(parent, name, change.Body, actionMode(change, plan.before[change.Path]))
+			if info != nil {
+				changed = append(changed, actionEffect{change: change, parent: parent, name: name, temporary: temporary, created: info})
+			}
+			if err = createErr; err != nil {
+				break
+			}
+			continue
+		}
+		changed = append(changed, actionEffect{change: change, parent: root, name: change.Path})
 		if change.Remove {
 			err = actions.revalidateInputs(ctx, plan)
 			if err == nil {
@@ -668,16 +729,42 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 	if err == nil {
 		err = actions.revalidateInputs(ctx, plan)
 	}
+	if err == nil && createOnly {
+		err = verifyCreated()
+	}
+	if err == nil && check != nil {
+		published := make(map[string]fs.FileInfo, len(changed))
+		for _, effect := range changed {
+			published[effect.change.Path] = effect.created
+		}
+		if err = check(published); err == nil {
+			err = actions.checkAuthority(plan)
+		}
+		if err == nil {
+			err = actions.revalidateInputs(ctx, plan)
+		}
+		if err == nil {
+			err = verifyCreated()
+		}
+	}
+	if err == nil && createOnly {
+		for _, effect := range changed {
+			if err = actionRemoveOwned(effect.parent, effect.temporary, effect.created); err != nil {
+				break
+			}
+		}
+	}
 	if err == nil {
 		err = actionBackupStatus(backup, "applied")
 	}
+	var rollbackErr error
 	if err != nil {
-		var rollbackErr error
 		for index := len(changed) - 1; index >= 0; index-- {
-			change := changed[index]
+			effect := changed[index]
+			change := effect.change
 			name := change.Path
 			before := plan.before[name]
-			current, readErr := actionRead(root, name)
+			current, readErr := actionRead(effect.parent, effect.name)
 			if readErr != nil {
 				rollbackErr = errors.Join(rollbackErr, readErr)
 				continue
@@ -689,13 +776,15 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 			if !change.Remove {
 				after = actionFile{Body: change.Body, Mode: actionMode(change, before), Exists: true}
 			}
-			if !actionEqual(after, current) {
+			if !actionEqual(after, current) || effect.created != nil && !os.SameFile(effect.created, current.info) {
 				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("%s changed before rollback: %w", name, ErrActionChanged))
 				continue
 			}
 			var restoreErr error
 			if before.Exists {
 				restoreErr = actionWrite(root, name, before.Body, before.Mode)
+			} else if effect.created != nil {
+				restoreErr = actionRemoveOwned(effect.parent, effect.name, effect.created)
 			} else {
 				restoreErr = root.Remove(name)
 				if errors.Is(restoreErr, fs.ErrNotExist) {
@@ -703,6 +792,20 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 				}
 			}
 			rollbackErr = errors.Join(rollbackErr, restoreErr)
+		}
+		if createOnly {
+			for _, effect := range changed {
+				rollbackErr = errors.Join(rollbackErr, actionRemoveOwned(effect.parent, effect.temporary, effect.created))
+			}
+			for index := len(createdParents) - 1; index >= 0; index-- {
+				directory := createdParents[index]
+				parent := parents[directory]
+				if parent.handle != nil {
+					parent.handle.Close()
+				}
+				delete(parents, directory)
+				rollbackErr = errors.Join(rollbackErr, actionRemoveOwned(parent.owner, parent.name, parent.info))
+			}
 		}
 		for index := len(directories) - 1; index >= 0; index-- {
 			if removeErr := root.Remove(directories[index]); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
@@ -716,6 +819,84 @@ func (actions *Actions) Execute(ctx context.Context, plan *ActionPlan, revision 
 	}
 	result.Applied = true
 	return result, nil
+}
+
+type actionParent struct {
+	handle *os.Root
+	owner  *os.Root
+	name   string
+	info   fs.FileInfo
+}
+
+func (plan *ActionPlan) pinCreateParent(root *os.Root, directory string, parents map[string]actionParent, created *[]string) (*os.Root, error) {
+	owner, prefix := root, "."
+	for name := range strings.SplitSeq(directory, "/") {
+		prefix = path.Join(prefix, name)
+		if parent, ok := parents[prefix]; ok {
+			owner = parent.handle
+			continue
+		}
+		info, err := owner.Lstat(name)
+		made := errors.Is(err, fs.ErrNotExist)
+		if made {
+			if err := owner.Mkdir(name, 0o700); err != nil {
+				return nil, err
+			}
+			info, err = owner.Lstat(name)
+		}
+		if err != nil || !info.IsDir() {
+			return nil, fmt.Errorf("%s: %w", prefix, ErrActionChanged)
+		}
+		parent := actionParent{owner: owner, name: name, info: info}
+		if made {
+			*created = append(*created, prefix)
+			parents[prefix] = parent
+			plan.createdDirs[prefix] = info
+		}
+		next, err := owner.OpenRoot(name)
+		if err != nil {
+			return nil, err
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(info, opened) {
+			next.Close()
+			return nil, fmt.Errorf("%s: %w", prefix, ErrActionChanged)
+		}
+		parent.handle = next
+		parents[prefix], owner = parent, next
+	}
+	return owner, nil
+}
+
+func (plan *ActionPlan) checkCreateParents(parents map[string]actionParent) error {
+	info, err := os.Lstat(plan.policy.Root)
+	if err != nil || !os.SameFile(plan.rootInfo, info) {
+		return ErrActionChanged
+	}
+	for directory, parent := range parents {
+		info, err := parent.owner.Lstat(parent.name)
+		if err != nil || !os.SameFile(parent.info, info) {
+			return fmt.Errorf("%s: %w", directory, ErrActionChanged)
+		}
+	}
+	return nil
+}
+
+func actionRemoveOwned(root *os.Root, name string, expected fs.FileInfo) error {
+	info, err := root.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(expected, info) {
+		return fmt.Errorf("%s changed before cleanup: %w", name, ErrActionChanged)
+	}
+	if err := root.Remove(name); !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func (actions *Actions) checkAuthority(plan *ActionPlan) error {
@@ -860,30 +1041,64 @@ func actionParents(root *os.Root, name string) ([]string, error) {
 }
 
 func actionWrite(root *os.Root, name string, body []byte, mode fs.FileMode) error {
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return err
-	}
-	temporary := path.Join(path.Dir(name), ".magpie-extension-"+hex.EncodeToString(nonce[:])+".tmp")
-	file, err := root.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	temporary, _, err := actionStage(root, name, body, mode)
 	if err != nil {
 		return err
 	}
 	defer root.Remove(temporary)
-	if _, err = file.Write(body); err == nil {
+	if err := root.Rename(temporary, name); err != nil {
+		return err
+	}
+	return actionSync(root, path.Dir(name))
+}
+
+func actionCreate(root *os.Root, name string, body []byte, mode fs.FileMode) (string, fs.FileInfo, error) {
+	temporary, info, err := actionStage(root, name, body, mode)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := root.Link(temporary, name); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			err = fmt.Errorf("%s: %w", name, ErrActionChanged)
+		}
+		return "", nil, errors.Join(err, actionRemoveOwned(root, temporary, info))
+	}
+	return temporary, info, actionSync(root, path.Dir(name))
+}
+
+func actionStage(root *os.Root, name string, body []byte, mode fs.FileMode) (string, fs.FileInfo, error) {
+	return actionStageWriter(root, name, mode, func(writer io.Writer) error {
+		_, err := writer.Write(body)
+		return err
+	})
+}
+
+func actionStageWriter(root *os.Root, name string, mode fs.FileMode, write func(io.Writer) error) (string, fs.FileInfo, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", nil, err
+	}
+	temporary := path.Join(path.Dir(name), ".magpie-extension-"+hex.EncodeToString(nonce[:])+".tmp")
+	file, err := root.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", nil, err
+	}
+	if err = write(file); err == nil {
 		err = file.Chmod(mode)
 	}
 	if err == nil {
 		err = file.Sync()
 	}
+	var info fs.FileInfo
+	if err == nil {
+		info, err = file.Stat()
+	}
 	err = errors.Join(err, file.Close())
 	if err != nil {
-		return err
+		root.Remove(temporary)
+		return "", nil, err
 	}
-	if err := root.Rename(temporary, name); err != nil {
-		return err
-	}
-	return actionSync(root, path.Dir(name))
+	return temporary, info, nil
 }
 
 func actionSync(root *os.Root, name string) error {

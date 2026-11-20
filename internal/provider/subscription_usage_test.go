@@ -16,14 +16,10 @@ func TestCodexQuotaUsesProviderWindowDuration(t *testing.T) {
 		seconds int64
 		want    string
 	}{{5 * 60 * 60, "5 hours"}, {7 * 24 * 60 * 60, "7 days"}, {0, "Allowance"}} {
-		if got := quotaDurationName(tt.seconds); got != tt.want {
-			t.Errorf("quotaDurationName(%d) = %q, want %q", tt.seconds, got, tt.want)
+		window := codexWindow{UsedPercent: new(float64(16)), LimitWindowSecs: tt.seconds}
+		if got := window.window(); got.Name != tt.want || got.Used != 16 {
+			t.Errorf("Codex window for %d seconds = %+v, want %q at 16%%", tt.seconds, got, tt.want)
 		}
-	}
-
-	w := codexWindow{UsedPercent: 16, LimitWindowSecs: 7 * 24 * 60 * 60}
-	if got := w.window(); got.Name != "7 days" || got.Used != 16 {
-		t.Fatalf("Codex window = %+v", got)
 	}
 }
 

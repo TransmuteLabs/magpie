@@ -74,6 +74,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/wslrun"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 type subscriptionBridge struct {
@@ -247,11 +248,12 @@ type subscriptionRun struct {
 	// takeNamedOwner), and idleKey and idleAt say it is waiting for one.
 	// convKey is the conversation it has had, whatever the model
 	// (conversationKeys).
-	stdin   io.WriteCloser
-	owner   atomic.Pointer[string]
-	idleKey string
-	idleAt  time.Time
-	convKey string
+	stdin     io.WriteCloser
+	inputTurn chan struct{} // initialized under mu
+	owner     atomic.Pointer[string]
+	idleKey   string
+	idleAt    time.Time
+	convKey   string
 	// convPrev is the boundary before convKey's (conversationKeys): the
 	// conversation as the client has it, when the run went on with a side
 	// question after its last turn — a prompt suggestion — whose exchange
@@ -273,7 +275,7 @@ type subscriptionRun struct {
 	turnUUID  string
 	backKey   string
 	rewinding chan struct{}
-	controls  map[string]chan controlReply
+	control   sdk.AgentRunControl
 	// behindKey and behindTurn are backKey and turnUUID of the turn it
 	// last answered whole, while it waits for the next (b.mu): a request
 	// that goes on from before that turn takes it back to there (resume).
@@ -1373,6 +1375,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 
 	run := &subscriptionRun{bridge: b, token: token, model: model, cmd: cmd, tmp: tmp, schema: len(req.Format.schema()) > 0, pending: map[string]chan mcpToolResult{}, stdin: stdin, effort: req.Effort, sessions: sessions, started: time.Now()}
+	run.control = linkedClaudeRunControl(sdk.AgentRunControlIO{Send: run.tellWithin, NewID: randomToken, Ended: run.endedBefore})
 	run.owner.Store(&owner)
 	run.names = bridgeNames(req.Tools)
 	run.safeguardBeta = req.SafeguardBeta
@@ -1440,18 +1443,13 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		if tui {
 			wait = tuiInitWait
 		}
-		hello := map[string]any{"subtype": "initialize"}
-		if initSchema != nil {
-			hello["jsonSchema"] = initSchema
-		}
-		if err := run.cliControlWithin(ctx, hello, wait); err != nil {
+		if err := run.control.Initialize(ctx, initSchema, wait); err != nil {
 			run.abort()
 			if tui && client && configDir == "" && run.saidOnEnd(claudetui.Untrusted) {
 				kept = true
 				return nil, nil, &tuiUntrusted{key: configDir + "\x00" + work, dir: work, err: err}
 			}
-			var unanswered *controlUnanswered
-			if tui && errors.As(err, &unanswered) {
+			if tui && errors.Is(err, sdk.ErrAgentRunControlTimeout) {
 				// the helper hung: the turn fails (start)
 				return nil, nil, &tuiNoStart{err}
 			}
@@ -1466,7 +1464,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 			return nil, nil, err
 		}
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(ctx, req); err != nil {
 		run.abort()
 		return nil, nil, err
 	}
@@ -1480,7 +1478,7 @@ func (b *subscriptionBridge) startRun(ctx context.Context, req *Request, model, 
 		run.mu.Unlock()
 	}
 	line, _ := json.Marshal(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}})
-	if err := run.tell(line); err != nil {
+	if err := run.tellWithin(ctx, line); err != nil {
 		run.abort()
 		return nil, nil, err
 	}
@@ -1525,7 +1523,7 @@ func tuiStartTurn(ctx context.Context, what string) (func(), error) {
 	}
 }
 
-// controlWait is how long Claude Code may take to answer a control
+// controlWait is how long Claude Code may take to read and answer a control
 // request; tuiInitWait the interactive mode's helper its initialize: as
 // long as Claude Code may take to show its prompt, with controlWait's
 // room twice over.
@@ -1533,12 +1531,6 @@ var (
 	controlWait = 10 * time.Second
 	tuiInitWait = claudetui.ReadyWait + 2*controlWait
 )
-
-// controlUnanswered is a control request Claude Code took and didn't
-// answer in time.
-type controlUnanswered struct{ what string }
-
-func (e *controlUnanswered) Error() string { return "Claude Code has not " + e.what }
 
 // tuiNoStart is a run whose interactive mode's helper never answered its
 // initialize request: start fails the turn, saying so.
@@ -1764,7 +1756,7 @@ func safeguardsKept(raw json.RawMessage) []byte {
 // A CLI unable to acknowledge the update is discarded by the caller; its old
 // context must never be used for another turn. The client's approval still
 // decides whether the tool runs, including a server verdict that is unavailable.
-func (r *subscriptionRun) setSafeguards(req *Request) error {
+func (r *subscriptionRun) setSafeguards(ctx context.Context, req *Request) error {
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
 	tail := req.cacheTail()
@@ -1807,8 +1799,8 @@ func (r *subscriptionRun) setSafeguards(req *Request) error {
 		}
 		return errors.New("safeguards changed; restart Claude Code's interactive mode")
 	}
-	err := r.cliControl(map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{
-		"env": map[string]string{"CLAUDE_CODE_EXTRA_BODY": claudeExtraBody(req.Safeguards, tail)}}})
+	err := r.control.ApplyEnvironment(ctx,
+		map[string]string{"CLAUDE_CODE_EXTRA_BODY": claudeExtraBody(req.Safeguards, tail)}, controlWait)
 	if err == nil {
 		r.cacheTail = tail
 		r.safeguards = bytes.Clone(req.Safeguards)
@@ -1955,56 +1947,6 @@ type tuiRefusal struct{ error }
 
 func (e *tuiRefusal) Unwrap() error { return e.error }
 
-// cliControl shares the SDK reply dispatcher with rewind, so unrelated or
-// late control responses cannot acknowledge a safety-context update.
-func (r *subscriptionRun) cliControl(request map[string]any) error {
-	return r.cliControlWithin(context.Background(), request, controlWait)
-}
-
-// cliControlWithin is cliControl, answered within wait, while ctx lasts.
-func (r *subscriptionRun) cliControlWithin(ctx context.Context, request map[string]any, wait time.Duration) error {
-	id := randomToken()
-	ch := make(chan controlReply, 1)
-	// one that ended says how, and the last it wrote to stderr: "Claude
-	// Code ended" alone left the user nothing to act on
-	what := fmt.Sprintf("answered magpie's %v request", request["subtype"])
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return r.endedBefore(what)
-	}
-	if r.controls == nil {
-		r.controls = map[string]chan controlReply{}
-	}
-	r.controls[id] = ch
-	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		delete(r.controls, id)
-		r.mu.Unlock()
-	}()
-	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": id, "request": request})
-	if err := r.tell(line); err != nil {
-		return err
-	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
-	select {
-	case reply, ok := <-ch:
-		if !ok {
-			return r.endedBefore(what)
-		}
-		if reply.Subtype != "success" {
-			return fmt.Errorf("Claude settings: %s", reply.Error)
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return &controlUnanswered{fmt.Sprintf("%s in %s", what, wait)}
-	}
-}
-
 // claimResume holds a tool-result handoff across its context update and reply.
 func (r *subscriptionRun) claimResume() bool {
 	r.mu.Lock()
@@ -2031,7 +1973,10 @@ func (r *subscriptionRun) released() {
 
 // resume hands a conversation's next turn to the run that had its last
 // one, when one is waiting: the user's messages since, and nothing else.
-func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRun, <-chan Event) {
+func (b *subscriptionBridge) resume(ctx context.Context, req *Request, owner string) (*subscriptionRun, <-chan Event) {
+	if ctx.Err() != nil {
+		return nil, nil
+	}
 	key, since := nextTurn(req, owner)
 	if key == "" {
 		return nil, nil
@@ -2090,7 +2035,7 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 		return nil, nil
 	}
 	if back != "" {
-		if err := run.rewind(back); err != nil {
+		if err := run.control.Rewind(back, rewindLongest); err != nil {
 			log.Printf("claude: a run that went on with a side question could not be taken back to the conversation's turn, let go: %v", err)
 			run.abortFor("it could not be taken back from a side question: " + err.Error())
 			return nil, nil
@@ -2114,9 +2059,14 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	rewinding := run.rewinding
 	run.mu.Unlock()
 	if rewinding != nil {
-		<-rewinding
+		select {
+		case <-rewinding:
+		case <-ctx.Done():
+			run.abortFor("the next turn was canceled while waiting for its rewind")
+			return nil, nil
+		}
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(ctx, req); err != nil {
 		run.abortFor("its safeguards could not be set for the next turn: " + err.Error())
 		return nil, nil
 	}
@@ -2153,7 +2103,7 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 			return nil, nil
 		}
 	}
-	if err := run.tell(line); err != nil {
+	if err := run.tellWithin(ctx, line); err != nil {
 		run.abortFor("it could not be told the next turn: " + err.Error())
 		return nil, nil
 	}
@@ -2369,9 +2319,7 @@ func callsTool(m Message) bool {
 // turn, as its SDK's applyFlagSettings does: a control request, answered
 // with a control_response its output is read past.
 func (r *subscriptionRun) setEffort(effort string) error {
-	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": "effort-" + randomToken()[:12],
-		"request": map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{"effortLevel": effort}}})
-	if err := r.tell(line); err != nil {
+	if err := r.control.SetEffort(effort, controlWait); err != nil {
 		return err
 	}
 	r.effort = effort
@@ -3574,16 +3522,6 @@ func (b *subscriptionBridge) sweepSessions(dirs []string) {
 // before its run is let go.
 var rewindLongest = 10 * time.Second
 
-// controlReply is Claude Code's control_response to a control request.
-type controlReply struct {
-	Subtype   string `json:"subtype"`
-	RequestID string `json:"request_id"`
-	Error     string `json:"error"`
-	Response  struct {
-		Rewound bool `json:"rewound"`
-	} `json:"response"`
-}
-
 // letGo is told the client went away mid-reply (#780). A turn resumed in
 // a run kept for it is taken back: Claude Code is told to rewind to the
 // turn's message, which stops the reply and leaves its conversation as it
@@ -3624,7 +3562,7 @@ func (r *subscriptionRun) letGo() {
 	if !r.bridge.keepIdle(r, back, "") {
 		return // it ended since (#1667): there is nothing to take back
 	}
-	if err := r.rewind(turn); err != nil {
+	if err := r.control.Rewind(turn, rewindLongest); err != nil {
 		log.Printf("claude: a turn the client gave up on could not be taken back, its run let go: %v", err)
 		r.abortFor("a turn the client gave up on could not be taken back: " + err.Error())
 		return
@@ -3635,65 +3573,6 @@ func (r *subscriptionRun) letGo() {
 	r.mu.Unlock()
 	r.endIn(idleLongest)
 	log.Printf("claude: the turn the client gave up on was taken back; its run waits for the conversation's next turn")
-}
-
-// rewind tells the run's Claude Code to take its conversation back to
-// before the user message turn, stopping a reply under way, as its SDK's
-// rewindConversation does.
-func (r *subscriptionRun) rewind(turn string) error {
-	id := "rewind-" + randomToken()[:12]
-	ch := make(chan controlReply, 1)
-	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return errors.New("the run ended")
-	}
-	if r.controls == nil {
-		r.controls = map[string]chan controlReply{}
-	}
-	r.controls[id] = ch
-	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		delete(r.controls, id)
-		r.mu.Unlock()
-	}()
-	line, _ := json.Marshal(map[string]any{"type": "control_request", "request_id": id,
-		"request": map[string]any{"subtype": "rewind_conversation", "target_message_uuid": turn, "interrupt_if_running": true}})
-	if err := r.tell(line); err != nil {
-		return err
-	}
-	t := time.NewTimer(rewindLongest)
-	defer t.Stop()
-	select {
-	case reply, ok := <-ch:
-		switch {
-		case !ok:
-			return errors.New("the run ended")
-		case reply.Subtype != "success":
-			return fmt.Errorf("Claude Code refused it: %s", reply.Error)
-		case !reply.Response.Rewound:
-			return errors.New("Claude Code did not rewind")
-		}
-		return nil
-	case <-t.C:
-		return errors.New("Claude Code did not answer in " + rewindLongest.String())
-	}
-}
-
-// answered hands a control_response to the request waiting on it.
-func (r *subscriptionRun) answered(raw json.RawMessage) {
-	var reply controlReply
-	if json.Unmarshal(raw, &reply) != nil {
-		return
-	}
-	r.mu.Lock()
-	ch := r.controls[reply.RequestID]
-	delete(r.controls, reply.RequestID)
-	r.mu.Unlock()
-	if ch != nil {
-		ch <- reply
-	}
 }
 
 // park leaves the run waiting on its reply's tool calls: parkLongest for
@@ -4735,7 +4614,9 @@ func (r *subscriptionRun) readOutput(rd io.Reader) {
 			settle()
 		}
 		if envelope.Type == "control_response" {
-			r.answered(envelope.Response)
+			if r.control != nil {
+				r.control.Receive(envelope.Response)
+			}
 			return
 		}
 		if envelope.Type == "command_lifecycle" {
@@ -6690,15 +6571,16 @@ func (r *subscriptionRun) finish() {
 	}
 	pending := r.pending
 	r.pending = map[string]chan mcpToolResult{}
-	controls := r.controls
-	r.controls = nil
 	ch := r.segment
 	r.segment = nil
 	r.mu.Unlock()
-	for _, waiter := range pending {
-		close(waiter)
+	if r.control != nil {
+		r.control.Close()
 	}
-	for _, waiter := range controls {
+	if r.stdin != nil {
+		_ = r.stdin.Close()
+	}
+	for _, waiter := range pending {
 		close(waiter)
 	}
 	if ch != nil {
@@ -6764,6 +6646,25 @@ func (r *subscriptionRun) launch() error {
 // how it ended, or that magpie ended it, and the last it wrote to stderr —
 // the cause comes last, after any warnings before it.
 func (r *subscriptionRun) tell(line []byte) error {
+	return r.tellWithin(context.Background(), line)
+}
+
+func (r *subscriptionRun) tellWithin(ctx context.Context, line []byte) error {
+	r.mu.Lock()
+	if r.inputTurn == nil {
+		r.inputTurn = make(chan struct{}, 1)
+	}
+	turn := r.inputTurn
+	r.mu.Unlock()
+	select {
+	case turn <- struct{}{}:
+		defer func() { <-turn }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// one magpie ended is not written to: until Wait has reaped it, its
 	// input still takes a write, which no one will read
 	r.mu.Lock()
@@ -6772,7 +6673,20 @@ func (r *subscriptionRun) tell(line []byte) error {
 	if killed {
 		return r.whyEnded()
 	}
+	var interrupted chan struct{}
+	var stop func() bool
+	if ctx.Done() != nil {
+		interrupted = make(chan struct{})
+		stop = context.AfterFunc(ctx, func() {
+			_ = r.stdin.Close()
+			close(interrupted)
+		})
+	}
 	_, err := r.stdin.Write(append(line, '\n'))
+	if stop != nil && !stop() {
+		<-interrupted
+		return ctx.Err()
+	}
 	if err == nil {
 		return nil
 	}
@@ -6784,6 +6698,8 @@ func (r *subscriptionRun) tell(line []byte) error {
 	}
 	select {
 	case <-exited:
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(outputDrain + time.Second):
 		return err
 	}
@@ -7265,8 +7181,14 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
 		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
-		if run, events := s.subscription.resume(req, owner); run != nil {
+		if run, events := s.subscription.resume(ctx, req, owner); run != nil {
 			return run, events, nil
+		}
+		if err := ctx.Err(); err != nil {
+			if req.branch != nil {
+				req.branch.discard()
+			}
+			return nil, nil, err
 		}
 		// a run let go past idleMost left its session for this turn, or
 		// the run whose calls another request answered first has it
@@ -7560,7 +7482,7 @@ func (s *Server) serveSubscriptionAs(w http.ResponseWriter, r *http.Request, fro
 	if run != nil {
 		req.clientCache.selected(false)
 		if name == "Claude Code" {
-			err = run.setSafeguards(req)
+			err = run.setSafeguards(r.Context(), req)
 		}
 		// the tools are the run's before its agent is handed them: from
 		// then on it may answer, finish the turn and be shelved, or be

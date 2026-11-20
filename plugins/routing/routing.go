@@ -8,15 +8,16 @@ package routing
 import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "routing", API: "^1", Requires: []string{"window", "gateway"}, Essential: true,
 		Name: "Routing", Sub: "Each request as the gateway routes it, the accounts it weighed and what each answered, and your routing groups",
 		One: "1 group in use", Many: "{n} groups in use",
 		InUse:  provider.NamedGroups,
-		Parts:  []pluginrt.Part{{Slot: "nav.page", Key: "routing"}},
 		Client: []string{"i18n.js", "routing.css", "client.js"},
+		Parts:  []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "routing"}},
 	})
 }

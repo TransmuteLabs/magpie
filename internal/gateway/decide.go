@@ -998,7 +998,11 @@ func withFixedEffort(proto provider.Protocol, body []byte, effort string) []byte
 		}
 		level := effortOf(effort) // in Anthropic's words: minimal is low
 		if v.Thinking != nil && (v.Thinking.Type == "enabled" || v.Thinking.Type == "adaptive") {
-			return withEffort(proto, body, level)
+			out := withEffort(proto, body, level)
+			if &out[0] == &body[0] {
+				return body
+			}
+			return withTurnEffortUpdated(out, level)
 		}
 		// asked to think, with room left for the answer
 		budget := budgetOf(level)
@@ -1008,7 +1012,8 @@ func withFixedEffort(proto provider.Protocol, body []byte, effort string) []byte
 		if budget < 1024 {
 			return body
 		}
-		return withFields(body, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": budget}})
+		out := withFields(body, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": budget}})
+		return withTurnEffortUpdated(out, level)
 	case provider.Gemini:
 		var v struct {
 			Model string `json:"model"`

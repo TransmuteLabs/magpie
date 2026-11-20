@@ -138,10 +138,14 @@ func endClaudeSignIns(t *testing.T) {
 	})
 }
 
-// noAnthropic fails the test if anything is asked of claudeBase.
+// noAnthropic fails the test on vendor calls to claudeBase, excluding a bare listener probe.
 func noAnthropic(t *testing.T) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.RequestURI == "/" && r.ContentLength == 0 {
+			http.NotFound(w, r)
+			return
+		}
 		t.Errorf("asked Anthropic: %s %s", r.Method, r.URL)
 		w.WriteHeader(500)
 	}))
@@ -157,6 +161,14 @@ func noAnthropic(t *testing.T) {
 func TestClaudeSignInByPaste(t *testing.T) {
 	claudeHome(t)
 	noAnthropic(t)
+	probe, err := (&http.Client{Timeout: signInDeadline}).Get(claudeBase + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Body.Close()
+	if probe.StatusCode != http.StatusNotFound {
+		t.Fatalf("listener probe status = %d, want 404", probe.StatusCode)
+	}
 	fakeClaudeLogin(t, fakeClaudeAccount{email: "paste@example.com", plan: "pro", refresh: "sk-ant-ort01-paste"}, "", false)
 
 	st, err := StartSignIn("claude")

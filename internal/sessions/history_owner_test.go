@@ -62,6 +62,43 @@ func TestHistoryOwnerPublicationHonorsCallerCancellation(t *testing.T) {
 	}
 }
 
+func TestHistoryPartsStopWithinRecord(t *testing.T) {
+	setup(t)
+	for _, fixture := range []struct {
+		name       string
+		agent      string
+		record     string
+		first      string
+		wholeParts int
+	}{
+		{"codex", "codex", `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"},{"type":"input_text","text":"second prompt"}]}}`, "first prompt\nsecond prompt", 2},
+		{"claude/user", "claude", `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first prompt"},{"type":"text","text":"second prompt"}]}}`, "first prompt", 4},
+		{"claude/assistant", "claude", `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first prompt"},{"type":"text","text":"second prompt"}]}}`, "first prompt", 4},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			writeLines(t, path, fixture.record, fixture.record)
+			session := Session{Agent: fixture.agent, ID: "session", Path: path}
+			transcript, err := TranscriptOf(session)
+			if err != nil || len(transcript.Parts) != fixture.wholeParts || transcript.Parts[0].Text != fixture.first {
+				t.Fatalf("whole transcript lost parts: %+v, %v", transcript, err)
+			}
+			hit, found, err := SearchSession(t.Context(), session, "prompt")
+			if err != nil || !found || hit.Before != "first " {
+				t.Errorf("search lost the first spoken match: %+v, %v, %v", hit, found, err)
+			}
+			var parts []string
+			err = readTranscript(session, func(_ bool, part Part) bool {
+				parts = append(parts, part.Text)
+				return false
+			})
+			if err != nil || len(parts) != 1 || parts[0] != fixture.first {
+				t.Fatalf("stopped reader returned %q, %v", parts, err)
+			}
+		})
+	}
+}
+
 func TestHistoryOwnerUnreadableClaimsBlockColdNativeReaders(t *testing.T) {
 	for _, path := range []func() string{sourceBindingsPath, storageConsentsPath} {
 		t.Run(filepath.Base(path()), func(t *testing.T) {
@@ -107,7 +144,7 @@ func TestHistoryOwnerRejectsHeldNativeReadsAfterDelegation(t *testing.T) {
 	}); err == nil {
 		t.Fatal("direct native transcript path accepted a delegated owner")
 	}
-	if err := checkSourceBeforeCarry(held); err == nil {
+	if _, err := CarryOver(held, "codex"); !errors.Is(err, extension.ErrActionChanged) {
 		t.Fatal("held conversion source bypassed its delegated owner")
 	}
 }

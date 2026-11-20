@@ -663,6 +663,9 @@ func claudeFirstWriteAsksTheProxy(t *testing.T, proxy string) {
 		if h := env(tierEnv("haiku")); h != "" {
 			t.Errorf("magpie's haiku tier stayed: %q", h)
 		}
+		if h := env("ANTHROPIC_SMALL_FAST_MODEL"); h != "" {
+			t.Errorf("magpie's fast model stayed: %q", h)
+		}
 		askedOnce(t, probed())
 	})
 }

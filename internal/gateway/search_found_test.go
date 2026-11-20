@@ -39,7 +39,7 @@ const deepSeekNative = `{"id":"m","type":"message","role":"assistant","model":"d
 
 func newFakeDeepSeek(t *testing.T) *fakeDeepSeek {
 	f := &fakeDeepSeek{}
-	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.Server = httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		if strings.HasSuffix(r.URL.Path, "/models") {
 			io.WriteString(w, `{"data":[{"id":"deepseek-flash"}]}`)
@@ -81,8 +81,9 @@ func newFakeDeepSeek(t *testing.T) *fakeDeepSeek {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	t.Cleanup(f.Close)
+	probeFixtureRoot(t, f.Server)
 	return f
 }
 

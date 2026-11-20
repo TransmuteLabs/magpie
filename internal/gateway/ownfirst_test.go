@@ -19,14 +19,14 @@ func ownFirstHome(t *testing.T) (codexTried func() []string, relayHits func() in
 	t.Helper()
 	tried := tierAccounts(t, nil, nil)
 	var hits atomic.Int64
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		hits.Add(1)
 		io.WriteString(w, sse(
 			`data: {"type":"response.created","response":{"id":"r2","model":"gpt-6-luna"}}`,
 			`data: {"type":"response.output_text.delta","delta":"relay"}`,
 			`data: {"type":"response.completed","response":{"id":"r2","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
 	for _, p := range []provider.Provider{
 		{ID: "relay", Name: "Relay", Key: "k", Responses: up.URL + "/v1", Models: []string{"gpt-6-luna", "glm-6"}},

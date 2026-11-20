@@ -7,7 +7,6 @@ package sessions
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -187,43 +186,44 @@ func readHistoryTranscript(ctx context.Context, owner sessionHistoryOwner, keep 
 	return readHistoryParts(ctx, owner, keep, false, add)
 }
 
-func readHistoryParts(ctx context.Context, owner sessionHistoryOwner, keep func([]byte) bool, spokenOnly bool, add func(bool, Part) bool) (err error) {
-	if err := owner.check(ctx); err != nil {
+func readHistoryParts(ctx context.Context, owner sessionHistoryOwner, keep func([]byte) bool, spokenOnly bool, add func(bool, Part) bool) error {
+	return owner.readParts(ctx, historyRead{keep: keep, spokenOnly: spokenOnly}, add)
+}
+
+func readDelegatedHistoryParts(ctx context.Context, session Session, read historyRead, add func(bool, Part) bool) error {
+	transcript, err := extensionSourceTranscript(ctx, session.source)
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if changed := owner.check(ctx); changed != nil {
-			err = changed
+	for _, part := range transcript.Parts {
+		if read.spokenOnly && !said(part) {
+			continue
 		}
-	}()
-	s := owner.session
-	appendPart := add
-	add = func(user bool, part Part) bool {
-		return ctx.Err() == nil && appendPart(user, part)
+		if !add(part.Role == "user", part) {
+			break
+		}
 	}
-	if owner.mode == historyDelegated {
-		transcript, err := extensionSourceTranscript(ctx, s.source)
-		if err != nil {
-			return err
-		}
-		for _, part := range transcript.Parts {
-			if spokenOnly && !said(part) {
-				continue
-			}
-			if !add(part.Role == "user", part) {
-				break
-			}
-		}
-		return nil
+	return nil
+}
+
+func readCodexHistoryParts(ctx context.Context, session Session, read historyRead, add func(bool, Part) bool) error {
+	return codexContentOf(ctx, read.call(session), read.keep, read.spokenOnly, add)
+}
+
+func readClaudeHistoryParts(ctx context.Context, session Session, read historyRead, add func(bool, Part) bool) error {
+	if session.BranchOf != "" && read.keep == nil && read.span == nil {
+		return branchTranscript(ctx, session, read.spokenOnly, add)
 	}
-	whole := Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}
+	return claudeContentOf(ctx, read.call(session), read.keep, read.spokenOnly, add)
+}
+
+func readNativeHistoryParts(ctx context.Context, s Session, read historyRead, add func(bool, Part) bool) error {
+	keep, spokenOnly := read.keep, read.spokenOnly
 	switch s.Agent {
 	case "opencode":
 		return openCodeTranscript(ctx, s, spokenOnly, add)
 	case "cursor":
 		return cursorTranscript(ctx, s.Path, spokenOnly, add)
-	case "codex":
-		return codexContentOf(ctx, whole, keep, spokenOnly, add)
 	case "pi", "raft", "cindy", "omp":
 		return piTranscript(ctx, s.Path, spokenOnly, add)
 	case "kimi":
@@ -239,10 +239,7 @@ func readHistoryParts(ctx context.Context, owner sessionHistoryOwner, keep func(
 	case "workbuddy", "workbuddy-ai", "codebuddy":
 		return wbTranscript(ctx, s.Path, spokenOnly, add)
 	default:
-		if s.BranchOf != "" && keep == nil {
-			return branchTranscript(ctx, s, spokenOnly, add)
-		}
-		return claudeContentOf(ctx, whole, keep, spokenOnly, add)
+		return readClaudeHistoryParts(ctx, s, read, add)
 	}
 }
 
@@ -320,54 +317,10 @@ func ccMessageUUID(b []byte) string {
 	return ""
 }
 
-// piTreeLine is a line of a Pi (or oh-my-pi) session: an entry of its tree.
-type piTreeLine[Message any] struct {
-	Type     string   `json:"type"`
-	ID       string   `json:"id"`
-	ParentID string   `json:"parentId"`
-	Message  *Message `json:"message"`
-}
-
-type piMessageHead struct {
-	Role     string `json:"role"`
-	ToolName string `json:"toolName"`
-	Model    string `json:"model"` // an assistant's: the one it was answered by (#2253)
-}
-
-type piTranscriptMessage struct {
-	piMessageHead
-	Content transcriptTextContent `json:"content"`
-}
-
-type piEntry struct {
-	piTreeLine[piTranscriptMessage]
-	Summary string `json:"summary"`
-}
-
-type piSummaryHead struct{}
-
-func (*piSummaryHead) UnmarshalJSON(raw []byte) error {
-	if raw[0] == '"' || bytes.Equal(raw, []byte("null")) {
-		return nil
-	}
-	return errors.New("Pi summary must be a string")
-}
-
-func decodePiEntry(line []byte, spokenOnly bool) (*piEntry, error) {
-	entry := new(piEntry)
-	if spokenOnly {
-		entry.Message = &piTranscriptMessage{Content: transcriptTextContent{spokenOnly: true}}
-	}
-	if err := json.Unmarshal(line, entry); err != nil {
-		return nil, err
-	}
-	return entry, nil
-}
-
 type piPosition struct {
 	parent     string
 	start, end int64
-	packed     *piEntry
+	parts      func() []Part
 }
 
 // piTranscript reads the branch the session is on: a Pi session is a tree,
@@ -386,32 +339,26 @@ func piTranscript(ctx context.Context, path string, spokenOnly bool, add func(bo
 	}
 	defer source.Close()
 	plain, seekable := source.(*os.File)
+	codec := piTranscriptCodec
 	byID := map[string]piPosition{}
 	last := ""
 	_, err = scanLines(ctx, source, 0, nil, nil, func(b []byte, start, end int64) bool {
-		var e struct {
-			piTreeLine[piMessageHead]
-			Summary piSummaryHead `json:"summary"`
-		}
-		if json.Unmarshal(b, &e) != nil || e.ID == "" || e.Type == "session" || e.Type == "title" {
+		node, ok := codec.Inspect(b, spokenOnly)
+		if !ok {
 			return true
 		}
-		position := piPosition{parent: e.ParentID}
-		hasContent := e.Type == "message" || e.Type == "compaction" || e.Type == "branch_summary"
-		if spokenOnly {
-			hasContent = e.Type == "message" && e.Message != nil && (e.Message.Role == "user" || e.Message.Role == "assistant")
-		}
-		if hasContent {
+		position := piPosition{parent: node.ParentID}
+		if node.HasContent {
 			position.start, position.end = start, end
 			if !seekable {
-				entry, err := decodePiEntry(b, spokenOnly)
+				record, err := codec.Decode(b, spokenOnly)
 				if err != nil {
 					return true
 				}
-				position.packed = entry
+				position.parts = record.Parts
 			}
 		}
-		byID[e.ID], last = position, e.ID
+		byID[node.ID], last = position, node.ID
 		return true
 	})
 	if err != nil {
@@ -438,7 +385,7 @@ func piTranscript(ctx context.Context, path string, spokenOnly bool, add func(bo
 		}
 		id := branch[i]
 		position := byID[id]
-		entry := position.packed
+		parts := position.parts
 		if seekable {
 			size := int(position.end - position.start)
 			if cap(buf) < size {
@@ -448,79 +395,20 @@ func piTranscript(ctx context.Context, path string, spokenOnly bool, add func(bo
 			if _, err := plain.ReadAt(buf, position.start); err != nil {
 				return err
 			}
-			entry, err = decodePiEntry(buf, spokenOnly)
+			record, err := codec.Decode(buf, spokenOnly)
 			if err != nil {
 				return err
 			}
-			if entry.ID != id || entry.ParentID != position.parent {
+			if record.ID != id || record.ParentID != position.parent {
 				return errors.New("the Pi session tree changed while reading")
 			}
+			parts = record.Parts
 		}
-		for _, p := range piParts(*entry) {
-			if p.Role == "assistant" && entry.Message != nil {
-				p.Model = entry.Message.Model
-			}
+		for _, p := range parts() {
 			if !add(p.Role != "assistant", p) {
 				return nil
 			}
 		}
 	}
 	return nil
-}
-
-// piParts are what an entry said.
-func piParts(e piEntry) []Part {
-	switch e.Type {
-	case "compaction", "branch_summary":
-		return []Part{{Role: "user", Kind: "context", Text: e.Summary}}
-	case "message":
-	default:
-		return nil
-	}
-	if e.Message == nil {
-		return nil
-	}
-	m := e.Message
-	var role string
-	switch m.Role {
-	case "user":
-		role = "user"
-	case "assistant":
-		role = "assistant"
-	case "toolResult":
-		return []Part{{Role: "tool", Kind: "tool_result", Name: m.ToolName, Text: resultText(m.Content.raw)}}
-	default:
-		return nil
-	}
-	if m.Content.spokenOnly {
-		return m.Content.spokenParts(role)
-	}
-	var s string
-	if json.Unmarshal(m.Content.raw, &s) == nil {
-		return []Part{textPart(role, s)}
-	}
-	var blocks []struct {
-		Type      string          `json:"type"`
-		Text      string          `json:"text"`
-		Thinking  string          `json:"thinking"`
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if json.Unmarshal(m.Content.raw, &blocks) != nil {
-		return nil
-	}
-	var parts []Part
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			parts = append(parts, textPart(role, b.Text))
-		case "thinking":
-			parts = append(parts, Part{Role: role, Kind: "thinking", Text: b.Thinking})
-		case "toolCall":
-			parts = append(parts, Part{Role: role, Kind: "tool_use", Name: b.Name, Text: pretty(b.Arguments)})
-		case "image":
-			parts = append(parts, Part{Role: role, Kind: "image", Text: "[image]"})
-		}
-	}
-	return parts
 }

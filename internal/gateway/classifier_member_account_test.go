@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 
@@ -26,11 +25,15 @@ func lunaBackendRefusing(t *testing.T, refuse string) func() []string {
 	var mu sync.Mutex
 	var asked []string
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.Copy(io.Discard, r.Body)
-		if strings.HasSuffix(r.URL.Path, "/models") {
+		if r.Method == http.MethodGet && r.URL.Path == "/backend-api/codex/models" {
 			io.WriteString(w, `{"models":[{"slug":"gpt-6-luna","visibility":"list"}]}`)
 			return
 		}
+		if r.Method != http.MethodPost || r.URL.Path != "/backend-api/codex/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		io.Copy(io.Discard, r.Body)
 		mu.Lock()
 		asked = append(asked, r.Header.Get("chatgpt-account-id"))
 		mu.Unlock()
@@ -66,6 +69,18 @@ func lunaBackendRefusing(t *testing.T, refuse string) func() []string {
 	}
 }
 
+func unaskedClassifierRelay(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("relay was asked at %s", r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	up := httptest.NewServer(mux)
+	t.Cleanup(up.Close)
+	return up
+}
+
 // A routing group's member pinned to one ChatGPT account (AWilsonPeng on
 // X: GPT-6-luna on one of two accounts, picked as a group's intent
 // classifier) is asked on that account alone when the group classifies a
@@ -93,11 +108,7 @@ func TestClassifierGroupKeepsItsMembersAccount(t *testing.T) {
 			tc.user = provider.LoginID("codex", tc.user)
 			ref := "group/luna"
 			if tc.found {
-				other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					t.Errorf("the relay was asked")
-					w.WriteHeader(500)
-				}))
-				t.Cleanup(other.Close)
+				other := unaskedClassifierRelay(t)
 				if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: other.URL + "/v1", Key: "sk-r", Models: []string{"gpt-6-luna"}}); err != nil {
 					t.Fatal(err)
 				}
@@ -290,8 +301,7 @@ func TestClassifierGroupPinnedEveryRouting(t *testing.T) {
 				codexSignedIn(t, "spare@example.com")
 				asked := lunaBackend(t)
 				user := provider.LoginID("codex", "spare@example.com")
-				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Errorf("relay asked"); w.WriteHeader(500) }))
-				t.Cleanup(up.Close)
+				up := unaskedClassifierRelay(t)
 				if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: up.URL + "/v1", Key: "sk-r", Models: []string{"gpt-6-luna"}}); err != nil {
 					t.Fatal(err)
 				}
@@ -313,7 +323,11 @@ func TestClassifierGroupPinnedEveryRouting(t *testing.T) {
 					if err != nil || v.Intent != "feature" {
 						t.Fatalf("ask %d: %+v %v", i, v, err)
 					}
-					for _, a := range asked() {
+					accounts := asked()
+					if len(accounts) != 2 {
+						t.Fatalf("ask %d: got %v, want two classifier requests", i, accounts)
+					}
+					for _, a := range accounts {
 						if a != "acct-2" {
 							t.Fatalf("ask %d: sent on %q", i, a)
 						}

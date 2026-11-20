@@ -278,12 +278,16 @@ func TestCallerUsageWithRequestArchive(t *testing.T) {
 	for _, header := range []string{"Authorization", "x-api-key", "query"} {
 		t.Run(header, func(t *testing.T) {
 			fresh(t)
-			serveOn(t, "fake", "provider-secret", []string{"m1"}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer provider-secret" {
-					t.Error("caller credential reached archived request upstream")
+			upstream := serveOn(t, "fake", "provider-secret", []string{"m1"}, withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected archived upstream request: %s %s", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("Authorization") != "Bearer provider-secret" || r.Header.Get("x-api-key") != "" || r.URL.Query().Has("key") {
+					t.Error("archived request reached upstream with incorrect credentials")
 				}
 				archiveVendor{}.ServeHTTP(w, r)
-			}))
+			})))
+			probeFixtureRoot(t, upstream)
 			keys, secrets := newCaller(t, "Archived client")
 			shared := settings.Load()
 			shared.RequestArchive = true

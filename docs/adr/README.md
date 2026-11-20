@@ -39,6 +39,7 @@ source and environment.
 | [0024: check-in and activation](0024-sdk-account-checkin-gateway-activation.md) | Ordinary check-in and gateway component lifetime |
 | [0025: own calls and history](0025-sdk-own-calls-and-outside-history.md) | Separate live accounting and outside-history ingestion |
 | [0028: request recovery](0028-shared-request-recovery-policy.md) | Shared retry authority, response facts and final refusal disposition |
+| [0030: linked core SDK contracts](0030-linked-core-sdk-contracts.md) | Shared owner contracts, linked implementations and rollout with empty catalogs |
 
 These records explain why an owner or fence exists. Current minimum API
 versions, descriptors, ordinary entry paths and failure behavior remain in

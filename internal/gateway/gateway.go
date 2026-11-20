@@ -6947,14 +6947,22 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	if dict != nil {
 		sent = dsent
 	}
-	if p.Account != nil && p.Account.Agent == "codex" {
-		// a turn goes zstd-compressed, as Codex's own client sends it;
-		// sent plain, ChatGPT answered a 1.1 MB one 503 (ylorn on X)
-		sent = provider.CodexCompressed(req, body)
+	codexAccount := p.Account != nil && p.Account.Agent == "codex"
+	linkedCodex := codexAccount && to == provider.Responses && dict == nil && provider.CodexTurnURL(req.URL)
+	var res *http.Response
+	if linkedCodex {
+		res, sent, err = s.sendLinkedCodexResponses(p, req, body)
+	} else {
+		if codexAccount {
+			sent = provider.CodexCompressed(req, body)
+		}
+		// the bytes go on the wire whether the vendor answers or not, counted
+		// for the request's ledger row (#4456)
+		sentUp(ctx, sent, len(body))
+		res, err = p.Do(s.client, req)
+		// what comes back is counted as it is read, as what went is (#4456)
+		res = gotDown(ctx, res)
 	}
-	// the bytes go on the wire whether the vendor answers or not, counted
-	// for the request's ledger row (#4456)
-	sentUp(ctx, sent, len(body))
 	// a request asked again in the same ask (RetryOneAuth and the others
 	// below) goes on the wire again too, as long as it went
 	again := func(r *http.Request) (*http.Response, error) {
@@ -6980,9 +6988,6 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		res, err := p.Do(s.client, r)
 		return gotDown(ctx, res), err
 	}
-	res, err := p.Do(s.client, req)
-	// what comes back is counted as it is read, as what went is (#4456)
-	res = gotDown(ctx, res)
 	if dict != nil {
 		// a body the other magpie couldn't decode goes again whole
 		res, err = dict.after(req, res, err, again)
@@ -7021,7 +7026,7 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 	// envelope: the 401 (or 429 …) it stands for, so the next key or
 	// member is asked and the agent told why (@xanahopper on X)
 	res = notAnAPIReply(clineUnwrapped(p, provider.ZhipuEnveloped(req, openCodeBareRefusal(req, res))), "")
-	if p.Account != nil && p.Account.Agent == "codex" {
+	if codexAccount && !linkedCodex {
 		// a large request ChatGPT closed the connection on: asked again,
 		// nobody resting for it, and said what may help (#1628)
 		res = codexDropped(res, sent)

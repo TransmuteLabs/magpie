@@ -96,7 +96,33 @@ func ompProfile(path string) string {
 // ompFilesUnder adds the sessions under one sessions folder: each
 // <time>_<id>.jsonl, and its subagents' and advisor's beside it.
 func ompFilesUnder(out []file, seen map[string]bool, root string) []file {
+	for _, main := range ompMainFilesUnder(seen, root) {
+		out = append(out, main)
+		filepath.WalkDir(strings.TrimSuffix(main.path, ".jsonl"), func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				if entry.Name() == "btw-history" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, ".jsonl") {
+				sub := file{agent: "omp", key: main.key, path: path}
+				if stat(&sub) {
+					out = append(out, sub)
+				}
+			}
+			return nil
+		})
+	}
+	return out
+}
+
+func ompMainFilesUnder(seen map[string]bool, root string) []file {
 	paths, _ := filepath.Glob(filepath.Join(root, "*", "*.jsonl"))
+	var out []file
 	for _, p := range paths {
 		if seen[p] {
 			continue
@@ -109,31 +135,9 @@ func ompFilesUnder(out []file, seen map[string]bool, root string) []file {
 		}
 		key := "omp:" + id
 		f := file{agent: "omp", key: key, path: p, main: true}
-		if !stat(&f) {
-			continue
+		if stat(&f) {
+			out = append(out, f)
 		}
-		out = append(out, f)
-		// its subagents and advisor, at any depth
-		filepath.WalkDir(strings.TrimSuffix(p, ".jsonl"), func(q string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				// side questions (/btw) are kept apart, as .json
-				if d.Name() == "btw-history" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if !strings.HasSuffix(q, ".jsonl") {
-				return nil
-			}
-			sub := file{agent: "omp", key: key, path: q}
-			if stat(&sub) {
-				out = append(out, sub)
-			}
-			return nil
-		})
 	}
 	return extensionOMPSharedFiles(out, root)
 }

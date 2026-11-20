@@ -4,54 +4,26 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-type testSettings struct {
-	Page  int     `json:"page" title:"Rows at a time" description:"How many" enum:"10,20,50"`
-	Ratio float64 `json:"ratio" title:"Ratio" min:"0" max:"1"`
-	Shown bool    `json:"shown" title:"Shown"`
-	Name  string  `json:"name" title:"Name"`
-	skip  int
-	Not   int `json:"-"`
-}
-
-// A settings struct is its schema, in its fields' order, and its values
-// are the defaults.
-func TestSchemaOf(t *testing.T) {
-	s, defs := SchemaOf(testSettings{Page: 20, Ratio: 0.5, Name: "x"})
-	if !reflect.DeepEqual(s.Order, []string{"page", "ratio", "shown", "name"}) {
-		t.Fatalf("order: %v", s.Order)
-	}
-	if p := s.Properties["page"]; p.Type != "integer" || !reflect.DeepEqual(p.Enum, []any{int64(10), int64(20), int64(50)}) || p.Default != int64(20) || p.Title != "Rows at a time" {
-		t.Fatalf("page: %+v", p)
-	}
-	if p := s.Properties["ratio"]; p.Type != "number" || *p.Minimum != 0 || *p.Maximum != 1 {
-		t.Fatalf("ratio: %+v", p)
-	}
-	if !reflect.DeepEqual(defs, map[string]any{"page": int64(20), "ratio": 0.5, "shown": false, "name": "x"}) {
-		t.Fatalf("defaults: %v", defs)
-	}
-	for _, bad := range []any{struct {
-		A int `json:"a"`
-	}{}, struct {
-		A []int `json:"a" title:"A"`
-	}{}, struct {
-		A int `json:"a" title:"A" enum:"1,2"`
-	}{A: 3}} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("%T: no panic", bad)
-				}
-			}()
-			SchemaOf(bad)
-		}()
+func testFeatureSettings() []sdk.FeatureSetting {
+	minimum, maximum := 0.0, 1.0
+	return []sdk.FeatureSetting{
+		{Name: "page", Title: "Rows at a time", Kind: sdk.FeatureSettingInteger, Default: 20, Enum: []any{10, 20, 50}},
+		{Name: "ratio", Title: "Ratio", Kind: sdk.FeatureSettingNumber, Default: 0.0, Minimum: &minimum, Maximum: &maximum},
+		{Name: "shown", Title: "Shown", Kind: sdk.FeatureSettingBoolean, Default: false},
+		{Name: "name", Title: "Name", Kind: sdk.FeatureSettingString, Default: ""},
 	}
 }
 
 // Only what the schema allows is taken, as JSON and YAML give it.
 func TestValidate(t *testing.T) {
-	s, _ := SchemaOf(testSettings{Page: 20})
+	s, err := SchemaOf(testFeatureSettings())
+	if err != nil {
+		t.Fatal(err)
+	}
 	ok, err := s.Validate(map[string]any{"page": float64(50), "ratio": 1, "shown": true, "name": "y"})
 	if err != nil || !reflect.DeepEqual(ok, map[string]any{"page": int64(50), "ratio": 1.0, "shown": true, "name": "y"}) {
 		t.Fatalf("good: %v %v", ok, err)
@@ -70,7 +42,7 @@ func TestValidate(t *testing.T) {
 // value edited in by hand that it doesn't allow.
 func TestSetConfig(t *testing.T) {
 	home(t)
-	Register(Manifest{ID: "schema-test", Settings: testSettings{Page: 20}})
+	registerTestFeature(t, sdk.FeatureContribution{ID: "schema-test", Settings: testFeatureSettings()})
 	m := Registered()[slicesIndex(Registered(), "schema-test")]
 	if m.Defaults["page"] != int64(20) || m.Schema() == nil {
 		t.Fatalf("registered: %+v", m)

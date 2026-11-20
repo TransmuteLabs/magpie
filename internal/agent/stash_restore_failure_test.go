@@ -112,11 +112,6 @@ func TestDisconnectFailureKeepsStashedOriginals(t *testing.T) {
 		if err := cx.Connect(); err != nil {
 			t.Fatal(err)
 		}
-		wired, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-
 		injected, err := failRestoreOnce(t, path, "native-provider", cx.Disconnect)
 		if !injected {
 			t.Fatal("no write carried the original provider back")
@@ -126,9 +121,6 @@ func TestDisconnectFailureKeepsStashedOriginals(t *testing.T) {
 		}
 		stashHolds(t, "native-original", "native-provider")
 
-		if err := os.WriteFile(path, wired, 0o644); err != nil {
-			t.Fatal(err)
-		}
 		stash(map[string]string{"concurrent.probe": "keep"})
 		if err := cx.Disconnect(); err != nil {
 			t.Fatalf("the retry: %v", err)
@@ -146,4 +138,41 @@ func TestDisconnectFailureKeepsStashedOriginals(t *testing.T) {
 			t.Fatalf("the concurrent key went with the retry: %q", stashShared()["concurrent.probe"])
 		}
 	})
+}
+
+func TestCodexDisconnectRetriesAfterLateConfigEdit(t *testing.T) {
+	home, read := codexHome(t, "", "model = \"native-original\"\nmodel_provider = \"native-provider\"\n")
+	cx := codex(home)
+	if err := cx.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const userEdit = "\n[user_preferences]\nprobe = \"leave this edit alone\"\n"
+	var edited string
+	err = edit.Filtered(func(path string, proposed []byte) []byte {
+		if path == target && edited == "" && bytes.Contains(proposed, []byte(`model_provider = "native-provider"`)) {
+			edited = read() + userEdit
+			writeFile(t, path, edited)
+		}
+		return proposed
+	}, cx.Disconnect)
+	if edited == "" || err == nil {
+		t.Fatalf("expected stale config refusal: injected=%t, error=%v", edited != "", err)
+	}
+	if body := read(); body != edited {
+		t.Fatalf("disconnect rewrote the late edit:\n%s", body)
+	}
+	stashHolds(t, "native-original", "native-provider")
+	if err := cx.Disconnect(); err != nil {
+		t.Fatalf("retry after the edit: %v", err)
+	}
+	body := read()
+	for _, want := range []string{`model_provider = "native-provider"`, `model = "native-original"`, `probe = "leave this edit alone"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("retry lost %q:\n%s", want, body)
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"crypto/rand"
 	"fmt"
 	"net/http/httptest"
 	"os"
@@ -247,14 +248,15 @@ func (h *quotaHarness) runSince(before map[string]string) string {
 func TestQuotaShelfFor(t *testing.T) {
 	testenv.SetHome(t, t.TempDir())
 	now := time.Now()
-	owner := "claude\x00quota-shelf-user"
+	user := "quota-shelf-" + rand.Text()
+	owner := "claude\x00" + user
 	if got := quotaShelfFor(owner, "You've hit your limit", now); got != quotaShelfUnsaid+quotaShelfMargin {
 		t.Fatalf("unsaid: %v", got)
 	}
 	if got := quotaShelfFor(owner, fmt.Sprintf("usage limit reached|%d", now.Add(2*time.Hour).Unix()), now); got < 3*time.Hour-time.Minute || got > 3*time.Hour+time.Minute {
 		t.Fatalf("said in the refusal: %v", got)
 	}
-	provider.NoteClaudeLimits("quota-shelf-user", []provider.ClaudeLimit{
+	provider.NoteClaudeLimits(user, []provider.ClaudeLimit{
 		{Kind: "five_hour", Used: 1, ResetsAt: now.Add(90 * time.Minute).Unix()},
 		{Kind: "seven_day", Used: 0.4, ResetsAt: now.Add(100 * time.Hour).Unix()},
 	})

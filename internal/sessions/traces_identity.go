@@ -63,7 +63,7 @@ func (x *TraceSessionIndex) Visible(agent, id string) bool {
 			x.refresh.Unlock()
 		}
 	}
-	return snapshot != nil && snapshot.sessions[TraceSession{agent, id}]
+	return snapshot != nil && snapshot.sessions[TraceSession{agent, id}] && NativeTraceAllowed(agent)
 }
 
 // VisibleFresh bypasses the discovery TTL for the one check before exporting
@@ -76,7 +76,7 @@ func (x *TraceSessionIndex) VisibleFresh(agent, id string) bool {
 	x.refresh.Lock()
 	snapshot := x.update(traceRecentFiles(traceLineFiles()))
 	x.refresh.Unlock()
-	return snapshot.sessions[TraceSession{agent, id}]
+	return snapshot.sessions[TraceSession{agent, id}] && NativeTraceAllowed(agent)
 }
 
 func (x *TraceSessionIndex) poll(files []file) []TraceSession {

@@ -473,6 +473,8 @@ export function validateAgentBindingChange(manifest: Manifest, descriptor: Agent
 export interface AgentInspectRequest { id: string; options?: JSONValue; settings?: JSONValue; binding?: AgentBindingSnapshot }
 export interface AgentInspectResult { connected: boolean; values: Record<string, string>; detail?: string }
 export interface AgentPlanRequest { id: string; action: string; options?: JSONValue; settings?: JSONValue; binding?: AgentBindingSnapshot }
+export type ActionSettingFile = { path: string; body: string | null; beforeHash: string; mode: number; exists: boolean };
+export type ActionSettings = { files: ActionSettingFile[] };
 export interface FileChange { path: string; body?: string; beforeHash?: string; mode?: number; remove?: boolean }
 export interface AgentPlan { files: FileChange[]; binding?: AgentBindingChange }
 export interface SessionDocument { path: string; format: string; body: string }

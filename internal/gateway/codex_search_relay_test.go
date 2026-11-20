@@ -28,6 +28,10 @@ func newSearchingRelay(t *testing.T) *searchingRelay {
 	t.Helper()
 	f := &searchingRelay{status: 200}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if anonymousFixtureRoot(r.Method, r.URL.RequestURI(), r.Header, r.ContentLength != 0 || len(r.TransferEncoding) != 0) {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		var q map[string]any
 		json.Unmarshal(b, &q)
@@ -60,6 +64,7 @@ func newSearchingRelay(t *testing.T) *searchingRelay {
 		}
 	}))
 	t.Cleanup(f.Close)
+	probeFixtureRoot(t, f.Server)
 	return f
 }
 

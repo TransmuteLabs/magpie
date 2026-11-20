@@ -13,10 +13,11 @@ import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "otel", API: "^1", Requires: []string{"window", "settings", "gateway"},
 		Name: "Observability", Sub: "Send each request's traces and metrics to an OpenTelemetry collector, such as Langfuse",
 		One: "Sending to a collector", Many: "Sending to a collector",
@@ -35,12 +36,12 @@ func init() {
 			}
 			return 0, nil
 		},
-		SetAt:  "otel #otelList",
-		Parts:  []pluginrt.Part{{Slot: "settings.section", Key: "otel"}},
 		Client: []string{"i18n.js", "page.js"},
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(usage.Observe(otlp.New()))
 			return nil
 		},
+		Parts:      []sdk.FeaturePart{{Slot: sdk.FeatureSettingsSection, Key: "otel"}},
+		SettingsAt: &sdk.FeatureSettingsLocation{Tab: "otel", RowID: "otelList"},
 	})
 }

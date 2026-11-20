@@ -30,11 +30,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/extension/builtin/memorydistillation"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/sessions"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+var linkedDistillationCodec = memorydistillation.Codec()
 
 // Complete sends one request to model, asked to reason at effort ("" the
 // model's own default): a system text and one user message, and returns
@@ -420,17 +424,24 @@ func run(ctx context.Context, st State, model, effort string, complete Complete,
 			continue
 		}
 		proj := memory.ProjectOf(s.Cwd)
-		reply, err := complete(ctx, model, effort, prompt, request(text, known(proj), proj))
+		codec := linkedDistillationCodec
+		request := sdk.MemoryDistillationRequest{Conversation: text, Known: known(proj)}
+		if proj != nil {
+			request.ProjectName = proj.Name
+		}
+		prompt := codec.DistillationPrompt(request)
+		reply, err := complete(ctx, model, effort, prompt.System, prompt.User)
+		if canceled := ctx.Err(); canceled != nil {
+			r.left++
+			return r, canceled
+		}
 		if err != nil {
 			r.left++ // read again next time
-			if ctx.Err() != nil {
-				return r, ctx.Err()
-			}
 			return r, fmt.Errorf("%s: %w", model, err)
 		}
 		r.Read++
 		r.done[key(s)] = s.Last
-		r.Added += keep(parse(reply), s, proj, said(tr))
+		r.Added += keep(codec.DistillationReply(reply), s, proj, said(tr))
 	}
 	return r, nil
 }
@@ -483,7 +494,7 @@ func known(proj *memory.Project) []string {
 			continue
 		}
 		if m.Scope == memory.Global || proj != nil && m.Scope == "project:"+proj.Key {
-			out = append(out, "- "+oneLine(m.Text))
+			out = append(out, m.Text)
 		}
 	}
 	if len(out) > 80 {
@@ -514,77 +525,12 @@ func bare(s string) string {
 	}, s)
 }
 
-func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
-
-// prompt names neither the app reading nor any vendor: it goes to the
-// model's vendor as written.
-const prompt = `You read a conversation between a user and a coding assistant and write down what is worth remembering in later conversations, with this user or in this project.
-
-Keep only what stays true beyond this conversation and that a later assistant couldn't learn by reading the code:
-- profile: who the user is (role, languages they speak, what they know)
-- preference: how the user wants things done, stated or shown by a correction
-- rule: a rule learned from a mistake the user corrected, with why
-- fact: something true of the project that the code doesn't say
-- reference: where something is (a host, a dashboard, a URL, a document)
-- procedure: steps that worked for a task likely to come again
-- episode: a decision that was made, and why
-
-Each item rests on words the user wrote in this conversation: quote them exactly. Leave out what only the assistant said, such as rules it follows from its own instructions or notes.
-
-A rule or convention of one project belongs in the project's own instruction files and docs, which the user keeps up to date, not here: leave it out unless it is about how this user works everywhere. Never keep an item that disagrees with what the project's files say in the conversation.
-
-Leave out: the task itself and its progress, anything about this conversation alone, code details visible in the repository, what the project's instruction files or docs say, secrets (keys, tokens, passwords), and anything already in "Already known". When nothing is worth keeping, answer [].
-
-Answer with a JSON array alone, at most 5 items:
-[{"text": "one short sentence, in the language the user wrote in", "kind": "preference", "scope": "global or project", "why": "what in the conversation shows it", "quote": "the user's own words that show it, copied exactly, short"}]
-scope is "project" when it holds only in this project, "global" when it holds for the user everywhere.`
-
-func request(text string, known []string, proj *memory.Project) string {
-	var b strings.Builder
-	if proj != nil {
-		fmt.Fprintf(&b, "Project: %s\n\n", proj.Name)
-	}
-	b.WriteString("Already known:\n")
-	if len(known) == 0 {
-		b.WriteString("(nothing)\n")
-	}
-	for _, k := range known {
-		b.WriteString(k + "\n")
-	}
-	b.WriteString("\nConversation:\n\n")
-	b.WriteString(text)
-	return b.String()
-}
-
-// found is one memory the model proposed.
-type found struct {
-	Text  string `json:"text"`
-	Kind  string `json:"kind"`
-	Scope string `json:"scope"`
-	Why   string `json:"why"`
-	Quote string `json:"quote"`
-}
-
-// parse reads the reply's JSON array, in a code fence or after words; a
-// reply without one is nothing found.
-func parse(reply string) []found {
-	i, j := strings.Index(reply, "["), strings.LastIndex(reply, "]")
-	if i < 0 || j < i {
-		return nil
-	}
-	var out []found
-	if json.Unmarshal([]byte(reply[i:j+1]), &out) != nil {
-		return nil
-	}
-	return out
-}
-
 // keep saves what was found as candidates, each from s, and counts the
 // new ones. Each rests on words the user wrote (in their, as bare gives
 // it): one without is the assistant's own instructions or notes said back,
 // or made up, and is dropped. A kind not known is a fact; a project scope
 // without a project is everyone's.
-func keep(fs []found, s sessions.Session, proj *memory.Project, their string) int {
+func keep(fs []sdk.MemoryDistillationProposal, s sessions.Session, proj *memory.Project, their string) int {
 	n := 0
 	for i, f := range fs {
 		if i >= MaxPerSession {

@@ -1,10 +1,14 @@
 package memory
 
 import (
+	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // What agents save reaches the digest when it is published, never at the
@@ -39,6 +43,94 @@ func TestDigestChangesOnlyWhenPublished(t *testing.T) {
 	}
 	if changed, _ := Publish(); changed {
 		t.Fatal("an unchanged publish said it changed")
+	}
+}
+
+func TestPublishUsesLinkedDigestRenderer(t *testing.T) {
+	at := fresh(t)
+	active := save(t, "Release with a signed tag", Rule, Global)
+	archived := save(t, "The previous process", Fact, Global)
+	if _, err := Forget(archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	original := linkedDigestRenderer
+	t.Cleanup(func() { linkedDigestRenderer = original })
+	calls := 0
+	renderErr := errors.New("renderer refused the snapshot")
+	const rendered = "Rules:\n- Rendered through the linked contract"
+	linkedDigestRenderer = sdk.MemoryDigestRenderer{
+		Source:  "test:linked-memory-digest",
+		Compose: original.Compose,
+		Render: func(request sdk.MemoryDigestRequest) (sdk.MemoryDigestResult, error) {
+			calls++
+			if calls > 1 {
+				return sdk.MemoryDigestResult{}, renderErr
+			}
+			want := sdk.MemoryDigestRecord{Text: active.Text, Kind: Rule, Scope: Global, Updated: active.Updated}
+			if !slices.Equal(request.Records, []sdk.MemoryDigestRecord{want}) ||
+				!slices.Equal(request.KindOrder, Kinds) || request.GlobalBudget != globalBudget ||
+				request.ProjectBudget != projectBudget || request.AgentBudget != agentBudget {
+				t.Fatalf("linked request: %+v", request)
+			}
+			return sdk.MemoryDigestResult{ByScope: map[string]string{Global: rendered}}, nil
+		},
+	}
+	if changed, err := Publish(); err != nil || !changed {
+		t.Fatalf("publish: changed %v, error %v", changed, err)
+	}
+	digest, err := Digest("codex")
+	if err != nil || !strings.HasSuffix(digest, rendered) || calls != 1 {
+		t.Fatalf("linked digest: %q (%v), render calls %d", digest, err, calls)
+	}
+	metadata, err := os.ReadFile(in(metaName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	*at = at.Add(25 * time.Hour)
+	if changed, err := PublishDue(); changed || !errors.Is(err, renderErr) || !strings.Contains(err.Error(), linkedDigestRenderer.Source) {
+		t.Fatalf("failed due publish: changed %v, error %v", changed, err)
+	}
+	if after, err := os.ReadFile(in(metaName)); err != nil || string(after) != string(metadata) {
+		t.Fatalf("failed publish changed metadata: %v", err)
+	}
+	if after, err := Digest("codex"); err != nil || after != digest || calls != 2 {
+		t.Fatalf("digest after failure: %q (%v), render calls %d", after, err, calls)
+	}
+}
+
+func TestDigestUsesLinkedComposer(t *testing.T) {
+	fresh(t)
+	save(t, "Use the shared build", Rule, Global)
+	save(t, "Use the Codex runner", Rule, "agent:codex")
+	save(t, "Use the Claude runner", Rule, "agent:claude")
+	project := save(t, "Run project checks", Rule, "project:fixture")
+	if err := NoteProject(&Project{Key: "fixture", Name: "Fixture", Roots: []string{"/fixture"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(); err != nil {
+		t.Fatal(err)
+	}
+	original := linkedDigestRenderer
+	t.Cleanup(func() { linkedDigestRenderer = original })
+	linkedDigestRenderer.Compose = func(request sdk.MemoryDigestDeliveryRequest) (string, error) {
+		want := sdk.MemoryDigestProject{
+			Scope: "project:fixture", Location: "/fixture", Markdown: "Rules:\n- Run project checks", Updated: project.Updated,
+		}
+		if request.Agent != "Rules:\n- Use the Codex runner" || request.Global != "Rules:\n- Use the shared build" ||
+			request.Budget != allBudget || !slices.Equal(request.Projects, []sdk.MemoryDigestProject{want}) {
+			t.Fatalf("unexpected delivery projection: %+v", request)
+		}
+		return "linked instructions", nil
+	}
+	if got, err := Digest("codex"); got != "linked instructions" || err != nil {
+		t.Fatalf("ordinary digest bypassed the linked composer: %q (%v)", got, err)
+	}
+	refused := errors.New("compose failed")
+	linkedDigestRenderer.Compose = func(sdk.MemoryDigestDeliveryRequest) (string, error) {
+		return "partial", refused
+	}
+	if got, err := Digest("codex"); got != "" || !errors.Is(err, refused) {
+		t.Fatalf("failed compose returned %q (%v)", got, err)
 	}
 }
 

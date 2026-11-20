@@ -12,20 +12,21 @@ package groups
 import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "groups", API: "^1", Requires: []string{"window", "providers"},
 		Name: "Routing groups", Sub: "Several models agents pick as one: each request goes to the right one, and to the next when one fails",
-		Opens: "groups",
-		One:   "1 group in use", Many: "{n} groups in use",
+		One: "1 group in use", Many: "{n} groups in use",
 		// a providers.json that can't be read is not known, so it stays on
 		InUse: provider.NamedGroups,
-		Parts: []pluginrt.Part{{Slot: "part", Key: "groups"}},
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(provider.ServeGroups())
 			return nil
 		},
+		Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "groups"}},
+		OpenPage: "groups",
 	})
 }

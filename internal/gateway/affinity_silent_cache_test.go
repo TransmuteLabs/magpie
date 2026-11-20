@@ -158,8 +158,9 @@ func TestAffinitySilentCacheGeminiRestartAndSmall(t *testing.T) {
 	} {
 		fresh(t)
 		v := &silentVendor{gemini: c.gemini, prompt: c.prompt}
-		up := httptest.NewServer(v)
+		up := httptest.NewServer(withoutAnonymousFixtureProbe(v))
 		t.Cleanup(up.Close)
+		probeFixtureRoot(t, up)
 		p := provider.Provider{ID: "silent", Name: "Silent", Key: "k1", Models: []string{"m"}, Keys: []provider.KeyAccount{{Key: "k2"}}}
 		if c.gemini {
 			p.Gemini = up.URL + "/v1beta"

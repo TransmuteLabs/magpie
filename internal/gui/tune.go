@@ -457,10 +457,11 @@ var tuneKept = struct {
 }{files: map[string]tuneFile{}}
 
 type tuneFile struct {
-	size  int64
-	mod   time.Time
-	agent string
-	calls []tune.Call
+	size    int64
+	mod     time.Time
+	agent   string
+	desktop bool
+	calls   []tune.Call
 	// msgs: each of its calls' message, hashed, the failed ones too; at
 	// is where calls[i]'s own is
 	msgs []uint64
@@ -473,20 +474,28 @@ type tuneFile struct {
 // stands for ctxAgain, and a setting tune changes lets it go at once.
 var tuneAnswer struct {
 	sync.Mutex
-	days int
-	at   time.Time
-	out  tuneState
+	days    int
+	at      time.Time
+	out     tuneState
+	history sessions.CallHistory
 }
 
 // tuneFor is the advice over the last days.
 func tuneFor(days int) tuneState {
+	history := sessions.InspectCallHistory()
 	tuneAnswer.Lock()
 	defer tuneAnswer.Unlock()
-	if tuneAnswer.days == days && time.Since(tuneAnswer.at) < ctxAgain {
+	if tuneAnswer.history.Same(history) && tuneAnswer.days == days && time.Since(tuneAnswer.at) < ctxAgain {
+		if !history.Current() {
+			return adviseOf(nil, days, "")
+		}
 		return tuneAnswer.out
 	}
-	out := adviseOf(tuneCallsSince(time.Now().AddDate(0, 0, -days)), days, "")
-	tuneAnswer.days, tuneAnswer.at, tuneAnswer.out = days, time.Now(), out
+	out := adviseOf(tuneCallsWithHistory(history, time.Now().AddDate(0, 0, -days)), days, "")
+	if !history.Current() {
+		return adviseOf(nil, days, "")
+	}
+	tuneAnswer.days, tuneAnswer.at, tuneAnswer.out, tuneAnswer.history = days, time.Now(), out, history
 	return out
 }
 
@@ -511,8 +520,17 @@ func msgHash(s string) uint64 {
 // tuneCallsSince is each agent's calls since, as sessions.Calls has them:
 // a message a resumed Claude Code session copied is the earlier file's.
 func tuneCallsSince(since time.Time) map[string][]tune.Call {
+	history := sessions.InspectCallHistory()
+	calls := tuneCallsWithHistory(history, since)
+	if !history.Current() {
+		return nil
+	}
+	return calls
+}
+
+func tuneCallsWithHistory(history sessions.CallHistory, since time.Time) map[string][]tune.Call {
 	var srcs []sessions.CallSource
-	for _, s := range sessions.CallSources() {
+	for _, s := range history.Sources() {
 		if (s.Agent == "claude" || s.Agent == "codex") && !s.Modified.Before(since) {
 			srcs = append(srcs, s)
 		}
@@ -529,14 +547,15 @@ func tuneCallsSince(since time.Time) map[string][]tune.Call {
 	on := make(map[string]bool, len(srcs))
 	for _, s := range srcs {
 		on[s.Path] = true
-		if f, ok := tuneKept.files[s.Path]; ok && f.size == s.Size && f.mod.Equal(s.Modified) && f.agent == s.Agent {
+		desktop := s.Agent == "claude" && history.DesktopCalls()
+		if f, ok := tuneKept.files[s.Path]; ok && f.size == s.Size && f.mod.Equal(s.Modified) && f.agent == s.Agent && f.desktop == desktop {
 			continue
 		}
 		if tuneRead != nil {
 			tuneRead(s.Path)
 		}
-		f := tuneFile{size: s.Size, mod: s.Modified, agent: s.Agent}
-		cs := sessions.ReadCallSource(s)
+		f := tuneFile{size: s.Size, mod: s.Modified, agent: s.Agent, desktop: desktop}
+		cs := history.ReadSource(s)
 		f.msgs = make([]uint64, len(cs))
 		for i, c := range cs {
 			f.msgs[i] = msgHash(c.Msg)

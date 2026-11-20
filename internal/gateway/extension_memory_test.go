@@ -209,19 +209,22 @@ func TestExtensionMemoryOrdinaryMCP(t *testing.T) {
 			t.Fatalf("scoped recall touched Memory use: %+v %v", saved, err)
 		}
 	}
-	oldRanking := memory.Semantic
+	oldRanking := memory.SemanticRanker
 	var revocationErr error
-	memory.Semantic = func(string, []*memory.Memory) map[string]float64 {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if revocationErr = manager.SetEnabled(ctx, id, false); revocationErr == nil {
-			revocationErr = manager.SetEnabled(ctx, id, true)
-		}
-		return nil
+	memory.SemanticRanker = sdk.MemorySemanticRanker{
+		Ready: func() bool { return true },
+		Rank: func(sdk.MemorySemanticRequest) map[string]float64 {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if revocationErr = manager.SetEnabled(ctx, id, false); revocationErr == nil {
+				revocationErr = manager.SetEnabled(ctx, id, true)
+			}
+			return nil
+		},
 	}
-	t.Cleanup(func() { memory.Semantic = oldRanking })
+	t.Cleanup(func() { memory.SemanticRanker = oldRanking })
 	reply = post(ToolsMCPOne+ToolPrefix(spec), "recall", 1, 0)
-	memory.Semantic = oldRanking
+	memory.SemanticRanker = oldRanking
 	if revocationErr != nil || reply.Error == nil && !reply.Result.IsError {
 		t.Fatalf("previous enablement returned Memory after disable/enable: %+v %v", reply, revocationErr)
 	}

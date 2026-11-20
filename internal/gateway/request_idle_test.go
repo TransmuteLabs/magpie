@@ -29,17 +29,18 @@ func TestRequestBodyProgressRenewsIdleDeadline(t *testing.T) {
 			idle := time.Second
 			gap := idle / 10
 			s.requestLimits.readTimeout = idle
-			gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gw := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, ok := s.readRequestBody(w, r, provider.Responses, 0)
 				if !ok {
 					return
 				}
 				if !bytes.Equal(body, payload) {
-					t.Error("body changed")
+					t.Errorf("body changed for %s %s: got %d bytes, want %d", r.Method, r.URL.Path, len(body), len(payload))
 				}
 				io.WriteString(w, "ok")
-			}))
+			})))
 			defer gw.Close()
+			probeFixtureRoot(t, gw)
 			conn, err := net.Dial("tcp", strings.TrimPrefix(gw.URL, "http://"))
 			if err != nil {
 				t.Fatal(err)

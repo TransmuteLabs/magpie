@@ -55,10 +55,15 @@ func normalizationServer(t *testing.T, answer http.HandlerFunc) (*Server, *norma
 	fresh(t)
 	requests := &normalizationRequests{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if anonymousFixtureRoot(request.Method, request.URL.RequestURI(), request.Header, request.ContentLength != 0 || len(request.TransferEncoding) != 0) {
+			http.NotFound(writer, request)
+			return
+		}
 		requests.record(t, request)
 		answer(writer, request)
 	}))
 	t.Cleanup(upstream.Close)
+	probeFixtureRoot(t, upstream)
 	if err := provider.Save(provider.Provider{
 		ID: "proofchat", Name: "Proof Chat", Key: "proof-provider-secret", Chat: upstream.URL + "/v1", Models: []string{"m1"},
 		Headers: map[string]string{"X-Route": "fixed-route"}, PassHeaders: []string{"X-Tenant", "X-Route"},
@@ -191,10 +196,15 @@ func TestBuiltinChatNormalizationStreamCancelAccounting(t *testing.T) {
 			keyCap(t, keys[0].ID, 1)
 			frontDone := make(chan struct{})
 			front := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if anonymousFixtureRoot(request.Method, request.URL.RequestURI(), request.Header, request.ContentLength != 0 || len(request.TransferEncoding) != 0) {
+					http.NotFound(writer, request)
+					return
+				}
 				defer close(frontDone)
 				server.Front().ServeHTTP(writer, request)
 			}))
 			t.Cleanup(front.Close)
+			probeFixtureRoot(t, front)
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			t.Cleanup(func() {
 				cancel()

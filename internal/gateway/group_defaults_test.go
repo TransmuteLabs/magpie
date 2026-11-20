@@ -27,7 +27,7 @@ func TestGroupFirstTokenFollowsTheDefault(t *testing.T) {
 	a := &slowStart{wait: 10 * time.Second}
 	b := &scripted{replies: []reply{{200, "text/event-stream", chatStreamOK}}}
 	slowOn(t, "a", a)
-	scriptedOn(t, "b", provider.Chat, b)
+	probeFixtureRoot(t, scriptedOn(t, "b", provider.Chat, b))
 	if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered}); err != nil {
 		t.Fatal(err)
 	}

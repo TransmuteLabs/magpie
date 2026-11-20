@@ -13,8 +13,9 @@ import (
 // window tokens (0: not known).
 func roomyMember(t *testing.T, id string, window int, s *scripted) {
 	t.Helper()
-	up := httptest.NewServer(s)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	p := provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Chat: up.URL + "/v1", Models: []string{"m"}}
 	if window > 0 {
 		p.Contexts = map[string]int{"m": window}

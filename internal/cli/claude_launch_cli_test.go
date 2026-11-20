@@ -21,6 +21,7 @@ import (
 // launch file, and claude's exit code is magpie's.
 func TestClaudeRun(t *testing.T) {
 	home := helpHome(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config 'space' {config}"))
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Anthropic: "https://example.test", Key: "k",
 		Models: []string{"claude-opus-4-6", "claude-haiku-4-5", "glm-4.6"}}); err != nil {
@@ -35,6 +36,7 @@ func TestClaudeRun(t *testing.T) {
 	var args []string
 	pick := ""
 	exit := error(nil)
+	childExited := false
 	oldExec, oldFind, oldUp, oldStart, oldGo := claudeRunExec, claudeFind, claudeGatewayUp, startUp, claudeLetGo
 	t.Cleanup(func() {
 		claudeRunExec, claudeFind, claudeGatewayUp, startUp, claudeLetGo = oldExec, oldFind, oldUp, oldStart, oldGo
@@ -49,13 +51,16 @@ func TestClaudeRun(t *testing.T) {
 	claudeRunExec = func(b string, a, _ []string) error {
 		bin, args = b, a
 		if pick != "" { // what /model leaves in the user's file
-			edit.SetJSON(user, edit.KV{Path: "model", Value: pick})
+			if err := edit.SetJSON(user, edit.KV{Path: "model", Value: pick}); err != nil {
+				return err
+			}
 		}
+		childExited = true
 		return exit
 	}
 
 	launch := agent.ClaudeLaunchPath()
-	for _, in := range [][]string{nil, {"--help"}, {"-p", "hi", "--model", "sonnet"}} {
+	for _, in := range [][]string{nil, {"--help"}, {"-p", "keep 'quotes' and {config}", "--model", "sonnet"}} {
 		if _, err := runOut(t, append([]string{"claude", "run"}, in...)...); err != nil {
 			t.Fatal(err)
 		}
@@ -86,6 +91,48 @@ func TestClaudeRun(t *testing.T) {
 	}
 	if v, _ := edit.GetJSON(launch, "model"); v != "relay/glm-4.6" {
 		t.Fatalf("the launch file's model after the pick: %q", v)
+	}
+
+	for _, scenario := range []struct {
+		name, before, target, picked string
+	}{
+		{"late edit during overlay", own, launch, "relay/claude-haiku-4-5"},
+		{"late edit during restore", own, user, "relay/glm-4.6"},
+		{"late edit during removal", `{}`, user, "relay/glm-4.6"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			if err := os.WriteFile(user, []byte(scenario.before), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			pick, childExited = scenario.picked, false
+			const changed = `{"model":"haiku","theme":"light"}`
+			edited := false
+			target, err := edit.Target(scenario.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = edit.Filtered(func(path string, body []byte) []byte {
+				if path == target && childExited && !edited {
+					edited = true
+					if err := os.WriteFile(user, []byte(changed), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return body
+			}, func() error {
+				_, err := runOut(t, "claude", "run")
+				return err
+			})
+			if err != nil || !edited {
+				t.Fatalf("concurrent edit fixture: injected=%v err=%v", edited, err)
+			}
+			if body, err := os.ReadFile(user); err != nil || string(body) != changed {
+				t.Fatalf("the user's edit was overwritten: %q (%v)", body, err)
+			}
+			if picked, _ := edit.GetJSON(launch, "model"); picked != scenario.picked {
+				t.Fatalf("the launch file did not keep the child's pick: %q, want %q", picked, scenario.picked)
+			}
+		})
 	}
 
 	pick = ""

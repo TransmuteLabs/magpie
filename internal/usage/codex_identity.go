@@ -561,6 +561,7 @@ const effortPeriodsKept = 8
 
 type effortEntry struct {
 	key      string
+	history  sessions.CallHistory
 	root     string // the logs it was read from: another home's is no answer
 	value    map[string][]sessions.ModelEffort
 	have     bool
@@ -625,13 +626,19 @@ func namedModelEffort(in map[string][]sessions.ModelEffort, alias func(string) s
 	return in
 }
 
-func keptCodexModelEffort(p Period) map[string][]sessions.ModelEffort {
+func keptCodexModelEffort(p Period) (result map[string][]sessions.ModelEffort) {
 	if LogCalls != nil { // synthetic logs carry no state to key on
 		return codexModelEffort(codexEffortRows(p, localNow(), LogCalls))
 	}
 	derivedUsed() // the kept answers go with the chunks' caches when idle
+	history := sessions.InspectCallHistory()
+	defer func() {
+		if len(result) > 0 && !history.Current() {
+			result = nil
+		}
+	}()
 	codexEffort.Lock()
-	if e := codexEffort.periods[p]; e != nil && e.have && e.root == requestRoot() && time.Since(e.at) < effortFresh {
+	if e := codexEffort.periods[p]; e != nil && e.have && e.history.Same(history) && e.root == requestRoot() && time.Since(e.at) < effortFresh {
 		codexEffort.built++
 		e.used = codexEffort.built
 		value := e.value
@@ -640,7 +647,7 @@ func keptCodexModelEffort(p Period) map[string][]sessions.ModelEffort {
 	}
 	codexEffort.Unlock()
 	now := localNow()
-	st := readRequestState(now)
+	st := readRequestStateWithHistory(now, history)
 	codexEffort.Lock()
 	e := codexEffort.periods[p]
 	if e == nil {
@@ -650,7 +657,7 @@ func keptCodexModelEffort(p Period) map[string][]sessions.ModelEffort {
 	}
 	codexEffort.built++
 	e.used = codexEffort.built
-	if e.have && (e.key == st.key || e.building != nil && e.root == st.root) {
+	if e.have && e.history.Same(history) && (e.key == st.key || e.building != nil && e.root == st.root) {
 		value := e.value // current, or the last one while the next is built
 		codexEffort.Unlock()
 		return value
@@ -659,13 +666,16 @@ func keptCodexModelEffort(p Period) map[string][]sessions.ModelEffort {
 		codexEffort.Unlock()
 		<-wait
 		codexEffort.Lock()
-		value := e.value
+		var value map[string][]sessions.ModelEffort
+		if e.history.Same(history) {
+			value = e.value
+		}
 		codexEffort.Unlock()
 		return value
 	}
 	done := make(chan struct{})
 	e.building = done
-	if effortBehind && e.have && e.root == st.root {
+	if effortBehind && e.have && e.history.Same(history) && e.root == st.root {
 		value := e.value
 		codexEffort.Unlock()
 		go buildEffort(e, st, p, now, done)
@@ -685,7 +695,7 @@ func buildEffort(e *effortEntry, st requestState, p Period, now time.Time, done 
 		if value != nil {
 			// kept under the state read before the build: a call written
 			// while it ran changes the state, and the next ask builds again
-			e.key, e.root, e.value, e.have, e.at = st.key, st.root, value, true, began
+			e.key, e.root, e.history, e.value, e.have, e.at = st.key, st.root, st.history, value, true, began
 		}
 		codexEffort.Unlock()
 		close(done)
@@ -695,7 +705,11 @@ func buildEffort(e *effortEntry, st requestState, p Period, now time.Time, done 
 	if effortBuilt != nil {
 		effortBuilt()
 	}
-	return codexEffortOfIndex(st, p, now)
+	value = codexEffortOfIndex(st, p, now)
+	if !st.history.Current() {
+		return nil
+	}
+	return value
 }
 
 // codexEffortRows are the rows of ledgerOfAt(p, Filter{}, now, reader) that

@@ -256,6 +256,22 @@ type AgentPlanRequest struct {
 	Binding  *AgentBindingSnapshot `json:"binding,omitempty"`
 }
 
+// MissingActionHash is the precondition for creating a configuration file.
+const MissingActionHash = "missing"
+
+// ActionSettings is the host-provided snapshot in an agent action's Settings.
+type ActionSettings struct {
+	Files []ActionSettingFile `json:"files"`
+}
+
+type ActionSettingFile struct {
+	Path       string `json:"path"`
+	Body       []byte `json:"body"`
+	BeforeHash string `json:"beforeHash"`
+	Mode       uint32 `json:"mode"`
+	Exists     bool   `json:"exists"`
+}
+
 type FileChange struct {
 	Path       string `json:"path"`
 	Body       []byte `json:"body,omitempty"`

@@ -3,6 +3,7 @@ package extension
 import (
 	"errors"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"unicode"
@@ -24,6 +25,30 @@ type AgentLibrary struct {
 	MCP          string `json:"mcp,omitempty"`
 	MCPFormat    string `json:"mcpFormat,omitempty"`
 	Skills       string `json:"skills,omitempty"`
+}
+
+type AgentLibraryTarget struct {
+	Instructions string
+	Override     string
+	MCP          string
+	MCPFormat    string
+	Skills       string
+	Settings     string
+}
+
+func (library AgentLibrary) Resolve(home string) AgentLibraryTarget {
+	at := func(name string) string {
+		if name == "" {
+			return ""
+		}
+		return filepath.Join(home, filepath.FromSlash(name))
+	}
+	return AgentLibraryTarget{
+		Instructions: at(library.Instructions),
+		MCP:          at(library.MCP),
+		MCPFormat:    library.MCPFormat,
+		Skills:       at(library.Skills),
+	}
 }
 
 func (agent AgentDescriptor) Clone() AgentDescriptor {

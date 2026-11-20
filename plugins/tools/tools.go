@@ -13,18 +13,19 @@ import (
 	"github.com/yetone/magpie/internal/gwtool"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "tools", API: "^1", Requires: []string{"gateway"}, Essential: true,
 		Name: "Plugin tools", Sub: "Offer the tools your plugins give to every agent, as an MCP server",
-		Opens: "plugins",
-		One:   "1 plugin gives tools", Many: "{n} plugins give tools",
+		One: "1 plugin gives tools", Many: "{n} plugins give tools",
 		InUse: plugin.ToolsOn,
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(gwtool.Serve(gwtool.PluginTools))
 			return nil
 		},
+		OpenPage: "plugins",
 	})
 }

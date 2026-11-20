@@ -1,11 +1,15 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 )
 
 // codexAppReads has the Codex app (and a CLI) read every config when app
@@ -34,6 +38,208 @@ func deskListIs(t *testing.T, list *string) {
 			return nil, false
 		}
 		return []byte(*list), true
+	}
+}
+
+func TestCodexDesktopSyncKeepsAConcurrentlyChosenCatalog(t *testing.T) {
+	home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, "model = \"gpt-5.5\"\n")
+	app := false
+	codexAppReads(t, &app)
+	list := `{"models":[{"slug":"gpt-6-sol"}]}`
+	deskListIs(t, &list)
+	cx := codex(home)
+	if joined, err := cx.Join(); err != nil || !joined {
+		t.Fatalf("join: %v %v", joined, err)
+	}
+	app = true
+	desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
+	target, err := edit.Target(desktop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cx.Dir, "mine.json"), list)
+	user := "model_catalog_json = \"mine.json\"\n" + read()
+	var edited bool
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == target && !edited {
+			writeFile(t, cx.Path, user)
+			edited = true
+		}
+		return body
+	}, cx.Sync)
+	if !edited || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("sync did not refuse the newer config: edited=%v, err=%v", edited, err)
+	}
+	if got := read(); got != user {
+		t.Fatalf("sync replaced the user's catalog choice:\n%s", got)
+	}
+	if _, err := os.Stat(desktop); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the generated catalog was not rolled back: %v", err)
+	}
+	if err := cx.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got != user {
+		t.Fatalf("the next sync replaced the user's catalog choice:\n%s", got)
+	}
+}
+
+func TestCodexDesktopSyncNeverNamesAConcurrentlyRemovedCatalog(t *testing.T) {
+	home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, "model = \"gpt-5.5\"\n")
+	app := false
+	codexAppReads(t, &app)
+	list := `{"models":[{"slug":"gpt-6-sol"}]}`
+	deskListIs(t, &list)
+	cx := codex(home)
+	if joined, err := cx.Join(); err != nil || !joined {
+		t.Fatalf("join: %v %v", joined, err)
+	}
+	app = true
+	desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
+	writeFile(t, desktop, list)
+	config, err := edit.Target(cx.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var removed bool
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == config && !removed && strings.Contains(string(body), "magpie-desktop-models.json") {
+			if err := os.Remove(desktop); err != nil {
+				t.Fatal(err)
+			}
+			removed = true
+		}
+		return body
+	}, cx.Sync)
+	if !removed || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("sync accepted the vanished catalog: removed=%v, err=%v", removed, err)
+	}
+	if strings.Contains(read(), "model_catalog_json") {
+		t.Fatalf("config references a missing catalog:\n%s", read())
+	}
+	if _, err := os.Stat(desktop); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the user's removal was rolled back: %v", err)
+	}
+}
+
+func TestCodexDesktopSyncKeepsEditsBeforeTheLinkedPlan(t *testing.T) {
+	home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, "model = \"gpt-5.5\"\n")
+	app := false
+	codexAppReads(t, &app)
+	const list = `{"models":[{"slug":"gpt-6-sol"}]}`
+	deskListIs(t, nil)
+	cx := codex(home)
+	if joined, err := cx.Join(); err != nil || !joined {
+		t.Fatalf("join: %v %v", joined, err)
+	}
+	app = true
+	desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
+	target, err := edit.Target(desktop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var userConfig string
+	CodexDesktopList = func() ([]byte, bool) {
+		if userConfig == "" {
+			userConfig = read() + "\n# edited while reading the catalog\n"
+			writeFile(t, cx.Path, userConfig)
+		}
+		return []byte(list), true
+	}
+	const userCatalog = `{"models":[]}`
+	var created bool
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == target && !created {
+			writeFile(t, desktop, userCatalog)
+			created = true
+		}
+		return body
+	}, cx.Sync)
+	if !created || userConfig == "" || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("Sync did not detect the new catalog: created=%v, configured=%v, error=%v", created, userConfig != "", err)
+	}
+	if got := read(); got != userConfig {
+		t.Errorf("Sync rolled back an earlier user edit:\n%s", got)
+	}
+	if got := readFile(desktop); got != userCatalog {
+		t.Errorf("Sync removed the user catalog: %s", got)
+	}
+}
+
+func TestCodexDesktopSyncKeepsAChoiceMadeDuringCleanup(t *testing.T) {
+	for _, scenario := range []string{"unknown list", "malformed concurrent edit", "desktop unavailable", "catalog newly referenced"} {
+		t.Run(scenario, func(t *testing.T) {
+			home, read := codexHome(t, `{"tokens":{"access_token":"x","id_token":"x.e30.x"}}`, "model = \"gpt-5.5\"\n")
+			app := true
+			codexAppReads(t, &app)
+			list := `{"models":[{"slug":"gpt-6-sol"}]}`
+			deskListIs(t, &list)
+			cx := codex(home)
+			if joined, err := cx.Join(); err != nil || !joined {
+				t.Fatalf("join: %v %v", joined, err)
+			}
+			desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
+			ownRef, _ := edit.GetTOMLTop(cx.Path, "model_catalog_json")
+			if ownRef == "" {
+				t.Fatal("join did not name the Desktop catalog")
+			}
+			writeFile(t, filepath.Join(cx.Dir, "mine.json"), list)
+			setReference := func(ref string) {
+				t.Helper()
+				if err := edit.SetTOMLTop(cx.Path, edit.KV{Path: "model_catalog_json", Value: ref}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var user string
+			changeChoice := func(ref string) {
+				if user == "" {
+					setReference(ref)
+					user = read()
+				}
+			}
+			catalogMissing := scenario == "unknown list" || scenario == "malformed concurrent edit"
+			switch scenario {
+			case "unknown list", "malformed concurrent edit":
+				if err := os.Remove(desktop); err != nil {
+					t.Fatal(err)
+				}
+				CodexDesktopList = func() ([]byte, bool) {
+					if scenario == "malformed concurrent edit" && user == "" {
+						user = "model_catalog_json = \"mine.json\"\nbroken = {"
+						writeFile(t, cx.Path, user)
+					} else {
+						changeChoice("mine.json")
+					}
+					return nil, false
+				}
+			case "desktop unavailable":
+				codexReaders = func(place) []CodexReader {
+					changeChoice("mine.json")
+					return []CodexReader{{Kind: "cli", Version: "0.163.0"}}
+				}
+			case "catalog newly referenced":
+				setReference("mine.json")
+				codexReaders = func(place) []CodexReader {
+					changeChoice(ownRef)
+					return []CodexReader{{Kind: "cli", Version: "0.163.0"}}
+				}
+			}
+			err := cx.Sync()
+			if user == "" {
+				t.Fatal("the user edit did not reach the cleanup")
+			}
+			if got := read(); got != user {
+				t.Fatalf("cleanup overwrote the user's catalog choice:\n%s", got)
+			}
+			if !catalogMissing {
+				if got := readFile(desktop); got != list {
+					t.Fatalf("cleanup removed the Desktop catalog: %q", got)
+				}
+			}
+			if !errors.Is(err, extension.ErrActionChanged) {
+				t.Fatalf("cleanup did not reject the changed input: %v", err)
+			}
+		})
 	}
 }
 

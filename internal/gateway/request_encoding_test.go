@@ -47,18 +47,19 @@ func postEncoded(t *testing.T, gw *httptest.Server, path string, body []byte, en
 func TestEncodedBodiesOnEveryRoute(t *testing.T) {
 	const payload = `{"model":"fake/m1","input":"END!","messages":[{"role":"user","content":"END!"}],"contents":[{"role":"user","parts":[{"text":"END!"}]}]}`
 	for _, tc := range []struct {
-		path  string
-		proto provider.Protocol
-		count bool
+		path     string
+		proto    provider.Protocol
+		upstream string
+		count    bool
 	}{
-		{"/v1/responses", provider.Responses, false},
-		{"/responses", provider.Responses, false},
-		{"/v1/chat/completions", provider.Chat, false},
-		{"/v1/messages", provider.Anthropic, false},
-		{"/v1/messages/count_tokens", provider.Anthropic, true},
-		{"/v1beta/models/fake/m1:generateContent", provider.Chat, false},
-		{"/v1beta/models/fake/m1:countTokens", provider.Chat, true},
-		{CodexPath + "/responses", provider.Responses, false},
+		{"/v1/responses", provider.Responses, "/v1/responses", false},
+		{"/responses", provider.Responses, "/v1/responses", false},
+		{"/v1/chat/completions", provider.Chat, "/v1/chat/completions", false},
+		{"/v1/messages", provider.Anthropic, "/v1/messages", false},
+		{"/v1/messages/count_tokens", provider.Anthropic, "/v1/messages/count_tokens", true},
+		{"/v1beta/models/fake/m1:generateContent", provider.Chat, "/v1/chat/completions", false},
+		{"/v1beta/models/fake/m1:countTokens", provider.Chat, "/v1/chat/completions", true},
+		{CodexPath + "/responses", provider.Responses, "/v1/responses", false},
 	} {
 		for _, enc := range []string{"", "identity", "gzip", "zstd"} {
 			t.Run(tc.path+"/"+enc, func(t *testing.T) {
@@ -67,7 +68,7 @@ func TestEncodedBodiesOnEveryRoute(t *testing.T) {
 					f.ctype = "text/event-stream"
 					f.reply = sse(`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`, `data: [DONE]`)
 				}
-				setup(t, tc.proto, f)
+				up := setup(t, tc.proto, inferenceOnlyFixture(t, tc.upstream, "m1", f))
 				gw := httptest.NewServer(New().Handler())
 				defer gw.Close()
 				control, want := postEncoded(t, gw, tc.path, []byte(payload), "", nil)
@@ -85,6 +86,7 @@ func TestEncodedBodiesOnEveryRoute(t *testing.T) {
 					}
 					return
 				}
+				probeFixtureRoot(t, up)
 				if f.calls != 1 || !bytes.Contains(f.got, []byte("END!")) || !bytes.HasPrefix(bytes.TrimSpace(f.got), []byte("{")) {
 					t.Fatalf("provider got %d calls, body %q", f.calls, f.got)
 				}

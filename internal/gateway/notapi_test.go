@@ -17,7 +17,7 @@ const cloudflarePage = `<!DOCTYPE html><html lang="en-US"><head><title>Just a mo
 // notAPIOn saves a provider speaking proto at s, its only model m.
 func notAPIOn(t *testing.T, id string, proto provider.Protocol, s *scripted) *httptest.Server {
 	t.Helper()
-	up := httptest.NewServer(s)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
 	t.Cleanup(up.Close)
 	p := provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Models: []string{"m"}}
 	switch proto {
@@ -109,8 +109,12 @@ func TestNotAnAPIReplyFailsOver(t *testing.T) {
 					fresh(t)
 					a := &scripted{replies: []reply{x.r}}
 					b := &scripted{replies: []reply{goodReply(proto, stream)}}
-					notAPIOn(t, "a", proto, a)
-					notAPIOn(t, "b", proto, b)
+					first := notAPIOn(t, "a", proto, a)
+					second := notAPIOn(t, "b", proto, b)
+					if proto == provider.Anthropic && stream && x.name == "empty" {
+						probeFixtureRoot(t, first)
+						probeFixtureRoot(t, second)
+					}
 					if err := provider.SaveGroup(provider.Group{Name: "G", Members: []string{"a/m", "b/m"}, Routing: provider.Ordered}); err != nil {
 						t.Fatal(err)
 					}

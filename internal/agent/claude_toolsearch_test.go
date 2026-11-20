@@ -2,12 +2,63 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestClaudeSyncPreservesConcurrentToolSearchEdit(t *testing.T) {
+	home := syncHome(t)
+	path := filepath.Join(home, ".claude", "settings.json")
+	writeFile(t, path, `{"env":{"ENABLE_TOOL_SEARCH":"false"},"theme":"dark"}`)
+	agent := claude(home)
+	if err := agent.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	key := "env." + claudeSearchEnv
+	if got, _ := edit.GetJSON(path, key); got != "false" || stashLoad()["claude.tool_search"] != "" {
+		t.Fatalf("Connect took ownership of the user's search value: %q", got)
+	}
+	if err := edit.DelJSON(path, key); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var userSettings string
+	err = edit.Filtered(func(name string, proposed []byte) []byte {
+		if name == target && userSettings == "" && strings.Contains(string(proposed), `"`+claudeSearchEnv+`"`) {
+			body, err := edit.PatchJSON([]byte(readFile(name)), []edit.KV{{Path: key, Value: "auto:7"}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			userSettings = string(body)
+			writeFile(t, name, userSettings)
+		}
+		return proposed
+	}, agent.Sync)
+	if userSettings == "" || !errors.Is(err, extension.ErrActionChanged) {
+		t.Errorf("expected stale search plan, edit injected=%v, error=%v", userSettings != "", err)
+	}
+	if got := readFile(path); got != userSettings {
+		t.Errorf("Sync changed the user's settings: got %q, want %q", got, userSettings)
+	}
+	if got := stashLoad()["claude.tool_search"]; got != "" {
+		t.Errorf("failed Sync took ownership of search: %q", got)
+	}
+	if err := agent.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := edit.GetJSON(path, key); got != "auto:7" {
+		t.Errorf("Disconnect changed the user's search value: %q", got)
+	}
+}
 
 // TestClaudeToolSearchOn: Claude Code before 2.1.304 keeps tool search off
 // behind an ANTHROPIC_BASE_URL other than Anthropic's, so every MCP tool's

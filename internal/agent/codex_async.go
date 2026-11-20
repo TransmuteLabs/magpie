@@ -28,22 +28,22 @@ package agent
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	"github.com/yetone/magpie/internal/lazyre"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const (
-	codexAsyncTable   = "features.async_compaction"
-	codexAsyncPercent = "model_async_compact_threshold_percent"
+	codexAsyncTable   = builtincodex.AsyncCompactionTable
+	codexAsyncPercent = builtincodex.AsyncCompactionPercent
 	// codexAsyncTableFrom is the first Codex whose [features] takes
 	// async_compaction as a table (FeatureToml<AsyncCompactionConfigToml>
 	// in codex-rs/features, rust-v0.163.0-alpha.8; alpha.5 has none)
@@ -210,12 +210,7 @@ func codexAsyncTableOK(at place) bool {
 }
 
 // codexAsyncStash is what magpie wrote.
-type codexAsyncStash struct {
-	Enabled bool `json:"enabled,omitempty"` // enabled = true
-	Percent int  `json:"percent,omitempty"` // the threshold
-	Cap     bool `json:"cap,omitempty"`     // capabilities = { remote_compaction = "v2" }
-	Bool    bool `json:"bool,omitempty"`    // [features] async_compaction = true
-}
+type codexAsyncStash = builtincodex.AsyncCompactionState
 
 // codexAsyncNow is how the config has them: the async_compaction value
 // (nil, a bool, or a table) and magpie's provider table, nil when absent.
@@ -239,173 +234,27 @@ func codexAsyncNow(path string) (feature any, provider map[string]any, err error
 // themselves too: on magpie's provider it would never run without it
 // (#2493).
 func codexAsyncSync(path, key string, routed, on bool, percent int, tableOK bool) error {
-	feature, provider, err := codexAsyncNow(path)
-	var bad *toml.DecodeError
-	if errors.As(err, &bad) {
-		return nil // one that doesn't parse is told by Check, and written to by nothing
-	}
-	if err != nil {
-		return err
-	}
-	var st codexAsyncStash
+	var prior codexAsyncStash
 	if raw := stashShared()[key]; raw != "" {
-		json.Unmarshal([]byte(raw), &st)
+		json.Unmarshal([]byte(raw), &prior)
 	}
-	// what was written is stashed however the sync ends: a write after
-	// it that fails never leaves magpie's threshold or table in the file
-	// unstashed, where it would read as the user's and lock the setting
-	was := st
-	defer func() {
-		if st != was {
-			if st == (codexAsyncStash{}) {
-				forget(key)
-			} else {
-				b, _ := json.Marshal(st)
-				stash(map[string]string{key: string(b)})
-			}
-		}
-	}()
-	want := routed && on
-	useTable := want && tableOK
-	if !useTable {
-		percent = 0
-	}
-
-	// the bare async_compaction = true magpie wrote, where the table is
-	// to go instead or nothing is: still as written, it goes; changed, it
-	// is the user's
-	if st.Bool && (!want || useTable) {
-		if feature == true {
-			if err := edit.DelTOMLKey(path, "features", "async_compaction"); err != nil {
-				return err
-			}
-			if feature, _, err = codexAsyncNow(path); err != nil {
-				return err
-			}
-		}
-		st.Bool = false
-	}
-
-	// [features.async_compaction]: written only as that table, which a
-	// config without the feature, or with the table, has. The bare
-	// async_compaction = true, or the table spelled inline or as dotted
-	// keys, is the user's, as written.
-	table, _ := feature.(map[string]any)
-	asTable := feature == nil
-	if table != nil {
-		t, err := edit.GetTOMLTable(path, codexAsyncTable)
-		if err != nil {
-			return err
-		}
-		asTable = t != nil
-	}
-	if asTable {
-		enabled, hasEnabled := table["enabled"].(bool)
-		if table["enabled"] != nil && !(hasEnabled && st.Enabled && enabled) {
-			st.Enabled = false // set, or changed since, by the user
-		}
-		switch {
-		case useTable && !hasEnabled && table["enabled"] == nil:
-			if err := edit.SetTOMLKey(path, codexAsyncTable, "enabled", true); err != nil {
-				return err
-			}
-			st.Enabled = true
-		case !useTable && st.Enabled:
-			// off, or a Codex here too old for the table: the table magpie
-			// wrote goes (a table left with nothing of the user's goes
-			// whole, so an old Codex loads its config again)
-			if err := edit.DelTOMLKey(path, codexAsyncTable, "enabled"); err != nil {
-				return err
-			}
-			st.Enabled = false
-		}
-		cur, hasPercent := table[codexAsyncPercent].(int64)
-		if table[codexAsyncPercent] != nil && !(hasPercent && int64(st.Percent) == cur) {
-			st.Percent = 0
-		}
-		switch {
-		case percent > 0 && (table[codexAsyncPercent] == nil || st.Percent != 0):
-			if st.Percent != percent {
-				if err := edit.SetTOMLKey(path, codexAsyncTable, codexAsyncPercent, percent); err != nil {
-					return err
-				}
-			}
-			st.Percent = percent
-		case percent == 0 && st.Percent != 0:
-			if err := edit.DelTOMLKey(path, codexAsyncTable, codexAsyncPercent); err != nil {
-				return err
-			}
-			st.Percent = 0
-		}
-	} else {
-		st.Enabled, st.Percent = false, 0
-	}
-
-	// the bare key, where a Codex here can't take the table: every Codex
-	// reads it, and only one new enough acts on it
-	if feature, _, err = codexAsyncNow(path); err != nil {
+	options := builtincodex.AsyncCompactionOptions{Routed: routed, On: on, Percent: percent, TableOK: tableOK, Prior: prior}
+	var next codexAsyncStash
+	err := extension.ApplyLinkedAgentPlan(options, func(options builtincodex.AsyncCompactionOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, state, err := builtincodex.PlanAsyncCompaction(options, settings)
+		next = state
+		return plan, err
+	}, extension.LinkedActionFile{Name: builtincodex.GlobalConfigFile, Path: path})
+	if err != nil || next == prior {
 		return err
 	}
-	switch {
-	case want && !useTable && feature == nil:
-		if err := edit.SetTOMLKey(path, "features", "async_compaction", true); err != nil {
-			return err
-		}
-		st.Bool = true
-	case st.Bool && feature != true:
-		st.Bool = false // changed since by the user
-	}
-
-	// capabilities on magpie's provider table, when there is one: one the
-	// user gave it, whatever it says, stays as it is
-	if feature, _, err = codexAsyncNow(path); err != nil {
-		return err
-	}
-	table, _ = feature.(map[string]any)
-	if feature == true || table["enabled"] == true {
-		want = routed
-	}
-	if provider == nil {
-		st.Cap = false
+	if next == (codexAsyncStash{}) {
+		forget(key)
 	} else {
-		caps, has := provider["capabilities"].(map[string]any)
-		if has && !(st.Cap && len(caps) == 1 && caps["remote_compaction"] == "v2") {
-			st.Cap = false
-		}
-		switch {
-		case want && provider["capabilities"] == nil:
-			if err := edit.SetTOMLKey(path, "model_providers."+magpieID, "capabilities", edit.Inline{{Path: "remote_compaction", Value: "v2"}}); err != nil {
-				return err
-			}
-			st.Cap = true
-		case !want && st.Cap:
-			if err := edit.DelTOMLKey(path, "model_providers."+magpieID, "capabilities"); err != nil {
-				return err
-			}
-			st.Cap = false
-		}
+		body, _ := json.Marshal(next)
+		stash(map[string]string{key: string(body)})
 	}
-
 	return nil
-}
-
-// codexProviderCaps is the capabilities magpie's provider table has, as an
-// Inline to write it back with when the table is written again: one the
-// user gave it, or magpie's for the background compaction, isn't lost.
-func codexProviderCaps(path string) edit.Inline {
-	_, provider, err := codexAsyncNow(path)
-	if err != nil {
-		return nil
-	}
-	caps, _ := provider["capabilities"].(map[string]any)
-	var out edit.Inline
-	for _, k := range sortedKeys(caps) {
-		switch v := caps[k].(type) {
-		case string, bool, int64, float64:
-			out = append(out, edit.KV{Path: k, Value: v})
-		}
-	}
-	return out
 }
 
 // CodexAsyncHeldHere is the Codexes on this machine that would keep the

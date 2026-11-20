@@ -182,6 +182,76 @@ func TestSessionExtensionOrdinaryCarryOver(test *testing.T) {
 			}
 		}
 	}
+	for _, scenario := range []string{"capture-replacement", "rollback-replacement", "backing-root-replacement"} {
+		test.Run(scenario, func(test *testing.T) {
+			if err := os.Remove(output); err != nil {
+				test.Fatal(err)
+			}
+			var independent os.FileInfo
+			var expected []byte
+			sourceBeforePublish = func() {
+				var err error
+				expected, err = os.ReadFile(output)
+				if err != nil {
+					test.Fatal(err)
+				}
+				if scenario == "backing-root-replacement" {
+					root := filepath.Dir(filepath.Dir(output))
+					moved := root + "-moved"
+					if err := os.Rename(root, moved); err != nil {
+						test.Fatal(err)
+					}
+					if err := os.MkdirAll(filepath.Dir(output), 0o700); err != nil {
+						test.Fatal(err)
+					}
+					original := filepath.Join(moved, "sessions", filepath.Base(output))
+					if err := os.Link(original, output); err != nil {
+						test.Fatal(err)
+					}
+					independent, err = os.Stat(output)
+					if err != nil {
+						test.Fatal(err)
+					}
+					return
+				}
+				competitor := filepath.Join(test.TempDir(), "independent.jsonl")
+				if err = os.WriteFile(competitor, expected, 0o600); err != nil {
+					test.Fatal(err)
+				}
+				independent, err = os.Stat(competitor)
+				if err != nil {
+					test.Fatal(err)
+				}
+				if err = os.Rename(competitor, output); err != nil {
+					test.Fatal(err)
+				}
+				if scenario == "rollback-replacement" {
+					delegateHistoryForTest(test, "claude")
+				}
+			}
+			test.Cleanup(func() { sourceBeforePublish = nil })
+			result, err := CarryOver(session, "omp")
+			sourceBeforePublish = nil
+			if independent == nil {
+				test.Fatal("fixture did not reach the late publication callback", result, err)
+			}
+			if result != (CarryResult{}) || !errors.Is(err, extension.ErrActionChanged) {
+				test.Error("conversion published an independent replacement", result, err)
+			}
+			if info, err := os.Stat(output); err != nil || !os.SameFile(info, independent) {
+				test.Error("late rollback removed the independent file", err)
+			} else if after, err := os.ReadFile(output); err != nil || !bytes.Equal(after, expected) {
+				test.Error("late rollback changed the independent file", err)
+			}
+			if scenario == "rollback-replacement" {
+				if err := os.Remove(sourceBindingsPath()); err != nil {
+					test.Fatal(err)
+				}
+			} else if cached, err := CarryOver(session, "omp"); err == nil || cached != (CarryResult{}) {
+				test.Error("conversion remembered a replacement as its output", cached, err)
+			}
+		})
+	}
 	// Publishing a second owner for the route must revoke ordinary dispatch.
 	manifest.Version = "1.0.1"
 	manifest.Sessions = append(manifest.Sessions, sdk.SessionDescriptor{ID: "ambiguous", Name: "Ambiguous",

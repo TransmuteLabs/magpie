@@ -101,7 +101,7 @@ func setHome(t *testing.T, dir string) {
 	t.Setenv("USERPROFILE", dir)
 }
 
-func serveOn(t *testing.T, id, key string, models []string, v http.Handler, keys ...string) {
+func serveOn(t *testing.T, id, key string, models []string, v http.Handler, keys ...string) *httptest.Server {
 	t.Helper()
 	up := httptest.NewServer(v)
 	t.Cleanup(up.Close)
@@ -112,6 +112,7 @@ func serveOn(t *testing.T, id, key string, models []string, v http.Handler, keys
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
 	}
+	return up
 }
 
 func postAs(t *testing.T, s *Server, session, body string) (int, string) {

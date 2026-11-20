@@ -1,5 +1,5 @@
 // Package rotation is the routings a provider or group can be set to
-// besides Smart: In order, Until used up, In turn, Least used first,
+// besides Quota first: In order, Until used up, In turn, Least used first,
 // Use before expiry, By weight, Free first, Speed first, and a group's
 // Cheapest first, Free quota by expiry and Small context first. While a
 // provider or group is routed by one, it stays on.
@@ -7,29 +7,30 @@
 // It is the first consumer of the gateway's router strategy point (P3 of
 // docs/subsystems/plugin-runtime.md): Apply registers internal/routes'
 // strategies, and off, a pool set to one of them is tried in its listed
-// order and the window offers Smart alone.
+// order and the window offers Quota first alone.
 package rotation
 
 import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "rotation", API: "^1", Requires: []string{"providers", "gateway"}, Essential: true,
-		Name: "Routing strategies", Sub: "The routings besides Smart: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first",
-		Opens: "providers",
-		One:   "1 provider or group routed so", Many: "{n} providers and groups routed so",
+		Name: "Routing strategies", Sub: "The routings besides Quota first: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first",
+		One: "1 provider or group routed so", Many: "{n} providers and groups routed so",
 		InUse: inUse,
-		Parts: []pluginrt.Part{{Slot: "part", Key: "rotation"}},
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			for name, s := range routes.Builtin {
 				c.OnDispose(routes.Register(name, s))
 			}
 			return nil
 		},
+		Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "rotation"}},
+		OpenPage: "providers",
 	})
 }
 

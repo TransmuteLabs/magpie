@@ -19,6 +19,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Option is one value the picker offers for a field.
@@ -142,6 +143,7 @@ type Agent struct {
 	Fields            []Field
 	Native            *NativeConnection
 	extensionMetadata *extensionAgentMetadata
+	coreLibrary       *sdk.AgentLibraryTarget
 	mutationGuard     func() (func(), error)
 	// Notice, if set, is advice worth showing after a change: agents that
 	// read their config once at start-up need a restart to see it.

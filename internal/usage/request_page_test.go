@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
@@ -191,6 +192,60 @@ func TestRequestPageModelRankingKeepsAlternatives(t *testing.T) {
 				if shares := page.By[dimension]; len(shares) != 1 || shares[0].Calls != 1 {
 					t.Fatalf("%s ranking ignored the model filter: %+v", dimension, shares)
 				}
+			}
+		})
+	}
+}
+
+func TestQueryPagePublishesOnlyCurrentCallHistory(t *testing.T) {
+	for _, stage := range []string{"warm", "during-build"} {
+		t.Run(stage, func(t *testing.T) {
+			pageHome(t)
+			now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
+			const thread = "native-thread"
+			path := filepath.Join(sessions.CodexDir(), "sessions", "rollout-2026-09-30T10-00-00-"+thread+".jsonl")
+			writeCodexCall(t, path, thread, thread, `"cli"`, "native-response", "native-model", "high", now.Add(-time.Minute), 40, 4)
+			Append(Record{Time: now, Agent: "codex", Provider: "openai", Model: "gateway-model", Input: 10, Output: 2,
+				Status: 200, Session: "gateway-session", ResponseID: "gateway-response"})
+			delegate := func() {
+				t.Helper()
+				binding := filepath.Join(appdir.Config(), "session-source-bindings.json")
+				body, err := json.Marshal([]sessions.SessionSourceBinding{
+					{Plugin: "new-owner", Source: "history", Agent: "codex", Identity: strings.Repeat("a", 64)},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(binding), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(binding, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stage == "warm" {
+				if page := QueryPage(All, Filter{}, 0, 100); page.Total != 2 ||
+					len(CodexModelEffort(All)[thread]) == 0 {
+					t.Fatalf("native fixture did not warm the Usage page and effort: %+v", page.Rows)
+				}
+				delegate()
+			} else {
+				previous := building
+				t.Cleanup(func() { building = previous })
+				building = func() {
+					building = previous
+					delegate()
+				}
+			}
+			page := QueryPage(All, Filter{}, 0, 100)
+			if page.Total != 1 || len(page.Rows) != 1 || page.Rows[0].ResponseID != "gateway-response" {
+				t.Fatalf("Usage kept revoked native rows or lost gateway accounting: %+v", page.Rows)
+			}
+			if effort := CodexModelEffort(All)[thread]; len(effort) != 0 {
+				t.Fatalf("revoked thread retained effort: %+v", effort)
+			}
+			if !sessions.Reads("codex") {
+				t.Fatal("test changed read consent instead of delegating the source")
 			}
 		})
 	}

@@ -1214,7 +1214,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 	creditsAsked := false // asked again onto the account's credits, once (relayOnCredits)
 	resetNote := ""       // what spending it did, for the request log
 	resets := 0           // times a large request ChatGPT closed on was asked again (#1628)
-	sent := len(body)     // the bytes that went, compressed (provider.CodexCompressed)
+	sent := len(body)     // the bytes that went, compressed on a ChatGPT turn
 	began := start        // when the try now going began
 	// failWith tells Codex of a failure before any reply: as the stream's
 	// error once it was sent the stream's headers while it waited
@@ -1336,22 +1336,25 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 			}
 			// left to the transport, the reply comes back plain for the usage in it
 			req.Header.Del("Accept-Encoding")
-			// a turn to ChatGPT goes zstd-compressed again, as Codex sent it
-			// before magpie read it (ylorn on X); an API key's goes plain
-			sent = provider.CodexCompressed(req, body)
-			// counted for the request's ledger row, as forwardOnce's are (#4456)
-			sentUp(r.Context(), sent, len(body))
-			policy, policyErr := requestPolicy(req.Context(), policyProvider)
-			if policyErr == nil && !requestpolicy.ConsumeRoutePermit(req.Context()) {
-				policyErr = requestpolicy.FromContext(req.Context()).Dispatch(req.Context(), policy)
-			}
+			var policyErr error
+			res, sent, err = sendCodexRelay(req, body, func(wire int) (*http.Response, error) {
+				sentUp(r.Context(), wire, len(body))
+				policy, err := requestPolicy(req.Context(), policyProvider)
+				if err == nil && !requestpolicy.ConsumeRoutePermit(req.Context()) {
+					err = requestpolicy.FromContext(req.Context()).Dispatch(req.Context(), policy)
+				}
+				if err != nil {
+					policyErr = err
+					return nil, err
+				}
+				response, err := s.client.Do(req)
+				return gotDown(r.Context(), response), err
+			})
 			if policyErr != nil {
 				failWith(429, "Request retry budget exhausted")
 				end(429, "Request retry budget exhausted", 0, 0)
 				return
 			}
-			res, err = s.client.Do(req)
-			res = gotDown(r.Context(), res)
 			if err != nil {
 				msg := "OpenAI: " + err.Error()
 				if overload && busyAgain < lastRetries && droppedUnanswered(r.Context(), err) {

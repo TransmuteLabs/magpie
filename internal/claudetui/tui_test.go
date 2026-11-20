@@ -355,6 +355,10 @@ func fakeClaude(args []string) {
 			"  Enter to confirm · Esc to skip, keep browser tools off\r\n" +
 			strings.Repeat("  and more history of that conversation, long past the dialogs' words\r\n", 40))
 	}
+	if os.Getenv("FAKE_SHORT_HISTORY") != "" {
+		fmt.Print("\r\n> The help text said Select login method: then use your account.\r\n" +
+			"  Choose the text style or keep browser tools off as needed.\r\n")
+	}
 	fmt.Print("\r\n❯ ")
 	// the prompt's words, and the prompt as drawn, again as a paste
 	// starts and as one is taken in. As Claude Code 2.1.318 does, it draws
@@ -1196,9 +1200,13 @@ func TestShimAcceptsBypassDisclaimer(t *testing.T) {
 // goes on, with no BypassEnv or TrustEnv to answer one (@alisenray on X:
 // every --resume failed at 45s, "not answered", no dialog on screen).
 func TestShimIgnoresDialogWordsInHistory(t *testing.T) {
-	out := runShim(t, []string{"FAKE_HISTORY=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
-	if out[0]["subtype"] != "init" || out[1]["type"] != "assistant" {
-		t.Fatalf("got %v, want an interactive turn", out)
+	for _, fixture := range []string{"FAKE_HISTORY", "FAKE_SHORT_HISTORY"} {
+		t.Run(fixture, func(t *testing.T) {
+			out := runShim(t, []string{fixture + "=1"}, append([]string{fakePath(t)}, pArgs...), []string{"hello"}, 3)
+			if out[0]["subtype"] != "init" || out[1]["type"] != "assistant" {
+				t.Fatalf("got %v, want an interactive turn", out)
+			}
+		})
 	}
 }
 

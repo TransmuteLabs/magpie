@@ -4,10 +4,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/jsonc"
 	"github.com/yetone/magpie/internal/agentenv"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // claude-magpie (baranwang on X): Claude Code started through magpie while
@@ -34,6 +39,11 @@ var claudeLaunchDir = func() string { return filepath.Join(appdir.Config(), "cla
 
 // ClaudeLaunchPath is the settings file `magpie claude run` hands claude.
 func ClaudeLaunchPath() string { return filepath.Join(claudeLaunchDir(), "settings.json") }
+
+func ClaudeLaunchArgs(path string) ([]string, error) {
+	launch := sdkLaunch(ClaudeLaunchID, "", path, builtinclaude.GatewayLaunch())
+	return launch.args, launch.err
+}
 
 // claudeLaunch is the launch file as an agent: Claude Code at this home,
 // its settings.json the launch file. It is listed nowhere, so the Agents
@@ -131,33 +141,55 @@ func claudeUserSettings(home string) string {
 // file gets its model back while magpie isn't wired into it: a plain
 // `claude` would ask Anthropic for a model only magpie serves. A Claude
 // model of its own (sonnet) is a pick plain claude can run, and stays.
+// The launch pick is saved first, and restoring the user's model is
+// conditional on the settings snapshot still being current.
 func ClaudeLaunchAfter(home string, was ClaudeModelMark) error {
 	user := claudeUserSettings(home)
-	now, has := edit.GetJSON(user, "model")
-	if now == was.model && has == was.has {
-		return nil
-	}
-	if claudeRouted(here(home), user) {
-		read := provider.ClaudeRead(now)
-		if m, _ := tierAt(read); isMagpie(strings.TrimSuffix(m, "[1m]")) {
-			return claudeLaunch(home).Apply("model", read)
-		}
-		return nil
-	}
-	if !claudeLaunchRewrote(was, now) {
-		read := provider.ClaudeRead(now)
-		m, _ := tierAt(read)
-		if !isMagpie(strings.TrimSuffix(m, "[1m]")) {
+	var overlayPick string
+	var overlayOnly bool
+	savePick := func() error {
+		if overlayPick == "" {
 			return nil
 		}
-		if err := claudeLaunch(home).Apply("model", read); err != nil {
-			return err
+		return claudeLaunch(home).Apply("model", overlayPick)
+	}
+	err := extension.ApplyLinkedAgentPlan(was, func(was ClaudeModelMark, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		file := settings.Files[0]
+		model := gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(file.Body)), "model")
+		now := model.String()
+		if now == was.model && model.Exists() == was.has {
+			return sdk.AgentPlan{}, nil
 		}
+		routed := claudeRouted(here(home), user)
+		if routed || !claudeLaunchRewrote(was, now) {
+			read := provider.ClaudeRead(now)
+			base, _ := tierAt(read)
+			if !isMagpie(strings.TrimSuffix(base, "[1m]")) {
+				return sdk.AgentPlan{}, nil
+			}
+			overlayPick = read
+		}
+		if routed {
+			overlayOnly = true
+			return sdk.AgentPlan{}, nil
+		}
+		var set []edit.KV
+		var del []string
+		if was.has {
+			set = []edit.KV{{Path: "model", Value: was.model}}
+		} else {
+			del = []string{"model"}
+		}
+		body, err := edit.PatchJSON(file.Body, set, del)
+		if err != nil {
+			return sdk.AgentPlan{}, edit.AtFile(file.Path, err)
+		}
+		return sdk.AgentPlan{Files: []sdk.FileChange{{Path: file.Path, BeforeHash: file.BeforeHash, Body: body}}}, nil
+	}, extension.LinkedActionFile{Name: "settings.json", Path: user, BeforeWrite: func(string) error { return savePick() }})
+	if err == nil && overlayOnly {
+		return savePick()
 	}
-	if was.has {
-		return edit.SetJSON(user, edit.KV{Path: "model", Value: was.model})
-	}
-	return edit.DelJSON(user, "model")
+	return err
 }
 
 // claudeLaunchRewrote says now is Claude Code's own rewrite of the user's

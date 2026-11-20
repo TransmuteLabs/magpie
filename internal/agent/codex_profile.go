@@ -9,6 +9,8 @@ import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	"github.com/yetone/magpie/internal/lastgood"
 )
 
@@ -28,31 +30,7 @@ import (
 const codexScopeKey = "codex.scope"
 
 // codexProfileFile is the file `codex -p magpie` reads.
-const codexProfileFile = magpieID + ".config.toml"
-
-// codexProviderTable is magpie's [model_providers.magpie], with token as
-// the bearer key.
-func codexProviderTable(v1, token string) []edit.KV {
-	return []edit.KV{
-		{Path: "name", Value: "magpie"},
-		{Path: "base_url", Value: v1},
-		{Path: "wire_api", Value: "responses"},
-		{Path: "experimental_bearer_token", Value: token},
-		// Codex offers its built-in image tool (image_gen.imagegen) and
-		// the other OpenAI-provider tools only to a provider it reads as
-		// the OpenAI actor: one that does not require OpenAI auth but
-		// carries x-openai-actor-authorization. Without this header the
-		// model is never given the tool, so a Codex on magpie can't draw
-		// (the request that names model/draws never happens at all).
-		// uses_openai_actor_authorization() is exactly this check.
-		// An Inline table: a config that holds the headers as their own
-		// [model_providers.magpie.http_headers] table, or as dotted keys,
-		// gets the header set there, the user's others kept; written
-		// inline beside that table it defined http_headers twice and
-		// every model switch failed (wztlink1013 on Discord).
-		{Path: "http_headers", Value: edit.Inline{{Path: "x-openai-actor-authorization", Value: "magpie"}}},
-	}
-}
+const codexProfileFile = builtincodex.ProfileConfigFile
 
 // codexKeptToken is table's bearer token in path when it is one the gateway
 // takes, else tok: see keptBearerToken's note in codexIn.
@@ -101,16 +79,12 @@ func codexScopeField(at place, connected func() bool) Field {
 func codexProfileIn(at place) *Agent {
 	dir := at.codexHome()
 	path := filepath.Join(dir, codexProfileFile)
-	catalogPath := filepath.Join(dir, "magpie-models.json")
-	table := "model_providers." + magpieID
+	catalogPath := filepath.Join(dir, builtincodex.ProfileCatalogFile)
+	table := builtincodex.ProviderTablePath
 	get := func(k string) string { v, _ := edit.GetTOMLTop(path, k); return v }
 	// the catalog as Codex reads it from this file: beside it, so by name
 	catalogRef := filepath.Base(catalogPath)
 	list := func() []byte { return codexcat.CatalogAt(magpieModels("codex"), get("model_reasoning_effort")) }
-	ownList := func() []byte {
-		cur, _ := edit.Read(catalogPath)
-		return codexcat.Keep(cur, list())
-	}
 	// the list goes with the profile, unless the user added to it
 	dropList := func() {
 		cur, err := edit.Read(catalogPath)
@@ -128,17 +102,9 @@ func codexProfileIn(at place) *Agent {
 	wired := func() bool { return get("model_provider") == magpieID && isMagpie(get("model")) }
 	// put writes the profile as it should be, touching nothing else
 	put := func(model string) error {
-		if err := edit.SetTOMLTable(path, table, codexProviderTable(at.v1(), codexKeptToken(path, table, at.gwKey()))...); err != nil {
-			return err
-		}
-		if err := writeOwnList(catalogPath, ownList()); err != nil {
-			return err
-		}
-		return edit.SetTOMLTop(path,
-			edit.KV{Path: "model_provider", Value: magpieID},
-			edit.KV{Path: "model_catalog_json", Value: catalogRef},
-			edit.KV{Path: "model", Value: model},
-		)
+		return planCodexProfile(path, catalogPath, builtincodex.ProfilePlanOptions{
+			Model: model, BaseURL: at.v1(), Token: codexKeptToken(path, table, at.gwKey()), Catalog: list(),
+		})
 	}
 	// drop removes magpie's profile and its list: these two files only
 	drop := func() error {
@@ -160,11 +126,7 @@ func codexProfileIn(at place) *Agent {
 				// to was deleted): the list is still magpie's, and Codex
 				// would keep offering the models it had (JNDliuliuM on X)
 				if get("model_provider") == magpieID && get("model_catalog_json") == catalogRef {
-					if cur, err := edit.Read(catalogPath); err == nil {
-						if b := ownList(); string(b) != string(cur) {
-							return writeOwnList(catalogPath, b)
-						}
-					}
+					return writeOwnList(path, catalogPath, list())
 				}
 				return nil
 			}
@@ -176,10 +138,7 @@ func codexProfileIn(at place) *Agent {
 			if t["base_url"] != at.v1() || t["experimental_bearer_token"] != codexKeptToken(path, table, at.gwKey()) {
 				return put(get("model"))
 			}
-			if b := ownList(); string(b) != string(fileBytes(catalogPath)) {
-				return writeOwnList(catalogPath, b)
-			}
-			return nil
+			return writeOwnList(path, catalogPath, list())
 		},
 		Check: func() string {
 			if !wired() {
@@ -217,16 +176,11 @@ func codexProfileIn(at place) *Agent {
 				Key: "effort", Label: "effort",
 				Get: func() string { return get("model_reasoning_effort") },
 				Set: func(v string) error {
-					var err error
-					if v == "" {
-						err = edit.DelTOMLTop(path, "model_reasoning_effort")
-					} else {
-						err = edit.SetTOMLTop(path, edit.KV{Path: "model_reasoning_effort", Value: v})
+					options := builtincodex.EffortPlanOptions{Level: v}
+					if wired() {
+						options.Catalog = codexcat.CatalogAt(magpieModels("codex"), v)
 					}
-					if err != nil || !wired() {
-						return err
-					}
-					return writeOwnList(catalogPath, ownList())
+					return setCodexEffort(path, catalogPath, options)
 				},
 				Options: func(cur map[string]string) []Option { return codexEfforts(magpieModels("codex"), cur["model"]) },
 			},
@@ -235,6 +189,14 @@ func codexProfileIn(at place) *Agent {
 	}, path, catalogPath)
 }
 
-var noticeCodexProfile = newNotice("Start Codex with codex -p magpie; plain codex keeps its own provider.")
+func planCodexProfile(profilePath, catalogPath string, options builtincodex.ProfilePlanOptions) error {
+	err := extension.ApplyLinkedAgentPlan(options, builtincodex.PlanProfile,
+		extension.LinkedActionFile{Name: builtincodex.ProfileConfigFile, Path: profilePath},
+		codexCatalogActionFile(catalogPath))
+	if err != nil {
+		return fmt.Errorf("configure Codex profile in %s: %w", filepath.Dir(profilePath), err)
+	}
+	return nil
+}
 
-func fileBytes(path string) []byte { b, _ := edit.Read(path); return b }
+var noticeCodexProfile = newNotice("Start Codex with codex -p magpie; plain codex keeps its own provider.")

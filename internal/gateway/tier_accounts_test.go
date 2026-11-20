@@ -60,7 +60,7 @@ func tierAccounts(t *testing.T, proOut, echo *bool, said ...func(asked string) (
 
 	var mu sync.Mutex
 	var tried []string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		acct := r.Header.Get("chatgpt-account-id")
 		if strings.HasSuffix(r.URL.Path, "/models") {
@@ -95,8 +95,9 @@ func tierAccounts(t *testing.T, proOut, echo *bool, said ...func(asked string) (
 			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-6-luna"`+began+`}}`,
 			`data: {"type":"response.output_text.delta","delta":"pong"}`,
 			`data: {"type":"response.completed","response":{"id":"r1"`+ended+`,"usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	old := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
 	t.Cleanup(func() { provider.CodexBase = old })

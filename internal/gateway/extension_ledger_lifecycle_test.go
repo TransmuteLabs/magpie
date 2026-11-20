@@ -51,7 +51,7 @@ func extensionLedgerObserverCount() int {
 func TestExtensionLedgerObserverSurvivesListenerDrain(t *testing.T) {
 	fresh(t)
 	rows := make(chan sdk.LedgerObservation, 8)
-	collector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	collector := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/ledger" {
 			t.Errorf("unexpected collector request: %s %s", request.Method, request.URL.Path)
 			http.NotFound(writer, request)
@@ -65,8 +65,9 @@ func TestExtensionLedgerObserverSurvivesListenerDrain(t *testing.T) {
 		}
 		rows <- row
 		writer.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	t.Cleanup(collector.Close)
+	probeFixtureRoot(t, collector)
 	manager := extensionhost.Default()
 	directory, entry := t.TempDir(), "worker"
 	if runtime.GOOS == "windows" {

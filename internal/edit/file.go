@@ -20,6 +20,24 @@ import (
 	"github.com/yetone/magpie/internal/steady"
 )
 
+type FileError struct {
+	Path string
+	Err  error
+}
+
+func (e *FileError) Error() string { return e.Path + ": " + e.Err.Error() }
+func (e *FileError) Unwrap() error { return e.Err }
+
+func AtFile(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if existing, ok := err.(*FileError); ok && existing.Path == path {
+		return err
+	}
+	return &FileError{Path: path, Err: err}
+}
+
 // Read returns the file contents, or (nil, nil) when the file does not exist.
 // A file unchanged since it was last read is not read again (the Agents
 // page looks at each agent's files many times over), and what is returned
@@ -128,6 +146,24 @@ func Filtered(f func(path string, data []byte) []byte, fn func() error) error {
 // links is written in place, see writeInPlace. Once written, temp files
 // earlier writes of path left behind go, see steady.RemoveStaleTemps.
 func WriteAtomic(path string, data []byte) error {
+	return WriteAtomicChecked(path, data, nil, nil)
+}
+
+type AtomicPublication struct {
+	Info         fs.FileInfo
+	Body         []byte
+	RetainedTail bool
+}
+
+func WriteAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication) error {
+	return writeAtomicChecked(path, data, check, published, true)
+}
+
+func RestoreAtomicChecked(path string, data []byte, check func() error) error {
+	return writeAtomicChecked(path, data, check, nil, false)
+}
+
+func writeAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication, inheritBOM bool) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -135,11 +171,16 @@ func WriteAtomic(path string, data []byte) error {
 	if f := filter.Load(); f != nil {
 		data = (*f)(path, data)
 	}
-	data = keepBOM(path, data)
+	if inheritBOM {
+		data = keepBOM(path, data)
+	}
 	// A file that already holds these bytes is left alone: a new mtime
 	// wakes every watcher of it, and a rename swaps the file under an
 	// agent reading it, for nothing (#3870).
 	if cur, err := os.ReadFile(path); err == nil && bytes.Equal(cur, data) {
+		if check != nil {
+			return check()
+		}
 		return nil
 	}
 	// read again, where a request holds it; a file left alone above keeps
@@ -149,7 +190,19 @@ func WriteAtomic(path string, data []byte) error {
 	if hardLinked(path) {
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err == nil {
-			if err := writeInPlace(f, data); err != nil {
+			var info fs.FileInfo
+			if published != nil {
+				info, err = f.Stat()
+				if err != nil {
+					f.Close()
+					return err
+				}
+			}
+			written, truncated, err := writeInPlace(f, data, check)
+			if published != nil && (written > 0 || truncated) {
+				*published = AtomicPublication{Info: info, Body: data[:written], RetainedTail: !truncated}
+			}
+			if err != nil {
 				return err
 			}
 			steady.RemoveStaleTemps(path)
@@ -205,13 +258,25 @@ func WriteAtomic(path string, data []byte) error {
 		cleanup()
 		return err
 	}
+	var publishedInfo fs.FileInfo
+	if published != nil {
+		publishedInfo, err = tmp.Stat()
+		if err != nil {
+			tmp.Close()
+			cleanup()
+			return err
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		cleanup()
 		return err
 	}
-	if err := steady.Rename(tmpName, path); err != nil {
+	if err := steady.RenameChecked(tmpName, path, check); err != nil {
 		cleanup()
 		return err
+	}
+	if published != nil {
+		*published = AtomicPublication{Info: publishedInfo, Body: data}
 	}
 	steady.RemoveStaleTemps(path)
 	return nil
@@ -231,12 +296,12 @@ func WriteAtomic(path string, data []byte) error {
 // leaves the whole new text in that temp file, and a write that fails part
 // way keeps it there and names it in the error. The file keeps its mode,
 // its owner and all its names.
-func writeInPlace(f *os.File, data []byte) error {
+func writeInPlace(f *os.File, data []byte, check func() error) (int, bool, error) {
 	path := f.Name()
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		f.Close()
-		return err
+		return 0, false, err
 	}
 	_, err = tmp.Write(data)
 	if err == nil {
@@ -248,7 +313,14 @@ func writeInPlace(f *os.File, data []byte) error {
 	if err != nil {
 		f.Close()
 		_ = os.Remove(tmp.Name())
-		return err
+		return 0, false, err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			f.Close()
+			_ = os.Remove(tmp.Name())
+			return 0, false, err
+		}
 	}
 	// Written over and then cut to length, so while it is under way a
 	// reader can see the new text's head over the old text, or, when the
@@ -258,9 +330,11 @@ func writeInPlace(f *os.File, data []byte) error {
 	// may load as a config with nothing set and act on, where a mangled one
 	// fails to parse. Written over, a text no longer than the old also
 	// needs no more room on the disk.
-	_, err = f.Write(data)
+	written, err := f.Write(data)
+	var truncated bool
 	if err == nil {
 		err = f.Truncate(int64(len(data)))
+		truncated = err == nil
 	}
 	if err == nil {
 		err = f.Sync()
@@ -269,10 +343,10 @@ func writeInPlace(f *os.File, data []byte) error {
 		err = e
 	}
 	if err != nil {
-		return fmt.Errorf("%w; the new text is kept in %s", err, tmp.Name())
+		return written, truncated, fmt.Errorf("%w; the new text is kept in %s", err, tmp.Name())
 	}
 	_ = os.Remove(tmp.Name())
-	return nil
+	return written, truncated, nil
 }
 
 // Target is the file a write to path should replace: path itself, or,
@@ -325,25 +399,58 @@ func Remove(path string) error {
 	return WriteAtomic(path, nil)
 }
 
+type preserveRollbackError struct {
+	path string
+	err  error
+}
+
+func (err *preserveRollbackError) Error() string { return err.err.Error() }
+func (err *preserveRollbackError) Unwrap() error { return err.err }
+
+func PreserveOnRollback(path string, err error) error {
+	return &preserveRollbackError{path: filepath.Clean(path), err: err}
+}
+
+func preserveOnRollback(err error, cleanPath string) bool {
+	switch err := err.(type) {
+	case nil:
+		return false
+	case *preserveRollbackError:
+		return err.path == cleanPath || preserveOnRollback(err.err, cleanPath)
+	case interface{ Unwrap() []error }:
+		for _, cause := range err.Unwrap() {
+			if preserveOnRollback(cause, cleanPath) {
+				return true
+			}
+		}
+		return false
+	default:
+		return preserveOnRollback(errors.Unwrap(err), cleanPath)
+	}
+}
+
 // Atomically runs fn, which may write the files at paths in several steps,
 // and puts each of them back as it was — its bytes and mode, or its absence
-// — when fn fails, so an edit that fails part way leaves no file half made.
+// — when fn fails. A checked edit can report a concurrently changed path
+// through PreserveOnRollback. That path's newer content is left in place.
 // A file that can't be read beforehand is left to fn as it is.
 func Atomically(fn func() error, paths ...string) error {
 	type saved struct {
 		path   string
+		name   string
 		data   []byte
 		mode   fs.FileMode
 		exists bool
 	}
 	var before []saved
-	for _, p := range paths {
+	for _, name := range paths {
+		p := name
 		st, err := os.Stat(p)
 		if errors.Is(err, fs.ErrNotExist) {
 			if t, err := Target(p); err == nil {
 				p = t // a link to nothing yet stays, only what fn made goes
 			}
-			before = append(before, saved{path: p})
+			before = append(before, saved{path: p, name: filepath.Clean(name)})
 			continue
 		}
 		if err != nil || !st.Mode().IsRegular() {
@@ -353,13 +460,16 @@ func Atomically(fn func() error, paths ...string) error {
 		if err != nil {
 			continue
 		}
-		before = append(before, saved{p, b, st.Mode().Perm(), true})
+		before = append(before, saved{path: p, name: filepath.Clean(name), data: b, mode: st.Mode().Perm(), exists: true})
 	}
 	err := fn()
 	if err == nil {
 		return nil
 	}
 	for _, s := range before {
+		if preserveOnRollback(err, s.name) {
+			continue
+		}
 		now, rerr := os.ReadFile(s.path)
 		switch {
 		case !s.exists:
@@ -369,7 +479,25 @@ func Atomically(fn func() error, paths ...string) error {
 				}
 			}
 		case rerr != nil || !bytes.Equal(now, s.data):
-			if e := WriteAtomic(s.path, s.data); e != nil {
+			if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+				err = errors.Join(err, fmt.Errorf("read %s before rollback: %w", s.path, rerr))
+				continue
+			}
+			info, statErr := os.Stat(s.path)
+			check := func() error {
+				current, readErr := os.ReadFile(s.path)
+				currentInfo, currentStatErr := os.Stat(s.path)
+				if errors.Is(rerr, fs.ErrNotExist) && errors.Is(statErr, fs.ErrNotExist) &&
+					errors.Is(readErr, fs.ErrNotExist) && errors.Is(currentStatErr, fs.ErrNotExist) {
+					return nil
+				}
+				if rerr == nil && statErr == nil && readErr == nil && currentStatErr == nil &&
+					os.SameFile(info, currentInfo) && info.Mode() == currentInfo.Mode() && bytes.Equal(now, current) {
+					return nil
+				}
+				return PreserveOnRollback(s.name, fmt.Errorf("%s changed during rollback", s.path))
+			}
+			if e := WriteAtomicChecked(s.path, s.data, check, nil); e != nil {
 				err = errors.Join(err, fmt.Errorf("put %s back: %w", s.path, e))
 			} else if e := os.Chmod(s.path, s.mode); e != nil {
 				err = errors.Join(err, fmt.Errorf("put %s back: %w", s.path, e))

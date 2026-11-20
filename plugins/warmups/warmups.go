@@ -6,14 +6,14 @@ package warmups
 import (
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "warmups", API: "^1", Requires: []string{"window", "settings"},
 		Name: "Warm-up and check-in", Sub: "Start a subscription's usage window at a time you pick, and claim vendors' daily check-in credits",
-		Opens: "providers",
-		One:   "1 warm-up or check-in on", Many: "{n} warm-ups and check-ins on",
+		One: "1 warm-up or check-in on", Many: "{n} warm-ups and check-ins on",
 		InUse: func() (int, error) {
 			s, err := settings.LoadChecked()
 			if err != nil {
@@ -27,7 +27,8 @@ func init() {
 			}
 			return n, nil
 		},
-		Parts: []pluginrt.Part{{Slot: "part", Key: "warmups"}},
+		Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "warmups"}},
+		OpenPage: "providers",
 	})
 }
 

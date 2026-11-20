@@ -76,13 +76,13 @@ func sse(lines ...string) string {
 // one a test rested (out of its allowance, held without asking since
 // #1772) is lifted before and after it, or a later test's request would be
 // answered from it, its fake never asked (#1840).
-func setup(t *testing.T, proto provider.Protocol, f *fake) *httptest.Server {
+func setup(t *testing.T, proto provider.Protocol, handler http.Handler) *httptest.Server {
 	t.Helper()
 	noRests()
 	t.Cleanup(noRests)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	up := httptest.NewServer(f)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(handler))
 	t.Cleanup(up.Close)
 	p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}}
 	switch proto {

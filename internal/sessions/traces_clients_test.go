@@ -95,6 +95,8 @@ func TestOmpTraceMainAndAuxiliaryModels(t *testing.T) {
 func TestOpenCodeTraceSQLiteIDsAndUpdates(t *testing.T) {
 	for _, v2 := range []bool{false, true} {
 		t.Run(map[bool]string{false: "v1", true: "v2"}[v2], func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("APPDATA", t.TempDir())
 			path := filepath.Join(t.TempDir(), "opencode.db")
 			t.Setenv("OPENCODE_DB", path)
 			db, err := sql.Open("sqlite", path)
@@ -170,6 +172,13 @@ func TestOpenCodeTraceSQLiteIDsAndUpdates(t *testing.T) {
 					if s.Parent != "" && !s.Update {
 						t.Fatal("terminal observation recounted")
 					}
+				}
+			}
+			delegateHistoryForTest(t, "opencode")
+			cold := NewTraceReader(ms(now).Add(-time.Second))
+			for _, span := range cold.Poll(false) {
+				if span.Agent == "opencode" {
+					t.Fatalf("OpenCode database contributed a trace without verified history authority: %+v", span)
 				}
 			}
 		})

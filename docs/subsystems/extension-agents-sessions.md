@@ -50,12 +50,36 @@ store slots and one finite JSONL layout. The host extracts the selected ID;
 The public DTOs and validation live in
 [`session_source.go`](../../pkg/extension/session_source.go).
 
+Ordinary Claude Code and Codex transcript, search and call-content reads use
+the linked [Claude](../../internal/extension/builtin/claude/transcript.go) and
+[Codex](../../internal/extension/builtin/codex/transcript.go) record decoders.
+They emit the same `SessionSourcePart` type as an installed source.
+The host selects the history owner, opens the file, limits the read and checks
+consent before returning content. The Codex decoder observes turn metadata
+before applying the host's candidate-line filter, so a matched response keeps
+the model named by its turn. Call previews use native byte offsets. If the
+native owner changes, the host drops the preview.
+
+Pi, OMP, Raft and Cindy use the linked
+[`SessionTreeCodec`](../../pkg/extension/session_tree.go) for transcript and
+said-index records. The [Pi family module](../../internal/extension/builtin/pisession/tree.go)
+projects node identity and decodes content. The host keeps branch selection,
+seek offsets and the read permission checks. Compressed input keeps decoded
+records until the active branch is known and renders only that branch's
+parts.
+
 [`extension_source_registry.go`](../../internal/sessions/extension_source_registry.go)
 resolves current native stores or frozen HOME-relative declarations.
 Native readers stay default until an explicit checked host binding delegates
 their ownership. Disable/removal/revocation hides delegated data; it does not
 silently fall through to another parser. Unknown SDK formats never use Claude's
 default decoder.
+
+Native trash and restore hold the same file locks as source bindings and
+storage consent while moving files. They check current ownership under those
+locks. If ownership has transferred or cannot be determined, the original
+session or its trash entry stays in place. Gateway-only conversation trash
+continues to use the gateway store.
 
 [`extension_source_adapter.go`](../../internal/sessions/extension_source_adapter.go)
 prepares summaries outside the session cache mutex, then exposes immutable
@@ -75,8 +99,12 @@ captures effective read consent from checked settings bytes, durable native
 delegations, the view and its epoch on both sides of publication. A warm
 settings memo, unchanged listing response or absent SDK catalog cannot stand
 in for that check. Native enumeration shares one authority snapshot across its
-registered readers, including WSL groups. Independent call accounting keeps
-its existing consent rules and is not delegated by a history binding.
+registered readers, including WSL groups. A checked, active JSONL binding
+selects the history reader while permitted native call accounting still
+supplies measured requests. Accounting checks the exact package and config
+generation without starting the decoder. Rooted storage claims exclude native
+accounting too, since read-only SQLite can create sidecars. An unresolved
+binding or unreadable claim cannot grant another reader.
 Direct `DesktopTitles` and `PIDesktopTitles` use the same publication snapshot
 without preparing workers or taking the session-cache mutex, so gateway title
 lookups and session assembly have the same ownership boundary.
@@ -135,6 +163,16 @@ elements, with exactly one whole `{sessionId}` argument. The declared agent
 must own the source's agent ID or explicitly profile that native target.
 Source data does not supply a command, executable path or environment.
 Existing `none` and `native` resume declarations keep their behavior.
+
+Built-in Claude Code, Codex and OMP contribute the same `SessionResumeRecipe`
+type from their linked modules. The host resolves OMP's profile from the
+selected session store and validates its name before asking the module for
+arguments. The native command renderer rejects flag-like session IDs, admits
+only shell-safe atoms and owns the working-directory and WSL wrappers.
+Opening a Codex session checks its saved provider at launch time. When
+the provider still exists and differs from the current choice, the Codex
+module supplies the structured override recipe. The host keeps ownership
+of the checked move when the saved provider no longer exists.
 
 Listings render a quoted command through the current Magpie executable:
 `magpie sessions resume <source-agent> <session-id> --expected <identity>`.
@@ -230,6 +268,63 @@ controller construction and local profile-base resolution, including legacy
 plugin targets. A process inherits the same config path as ordinary Start;
 its foreground recipe, binding/lease checks and spawn lifetime remain separate.
 Legacy agentplug Env keeps its existing placeholder behavior.
+
+`magpie claude run` and `claude-magpie` resolve the existing Claude target's
+SDK binding before preparing a launch. An installed owner uses the same
+binding and launch checks as resume. An unavailable binding or a bound
+profile without a launch recipe stops the launch. With a free target, the
+linked Claude module supplies the `AgentLaunch` overlay. The host resolves
+the settings path using the shared launch compiler and fences the overlay
+write and the model restoration against changes in target ownership.
+
+Agent action settings snapshots use `sdk.ActionSettings` in Go and
+`ActionSettings` in TypeScript. The request's `settings` field keeps its
+existing JSON representation. Each file has a relative path, existence and
+mode, raw bytes encoded as base64, and a `beforeHash`. Linked Codex profile,
+global provider, saved provider/catalog/effort restoration, auxiliary
+models, effort and background compaction edits pass the same typed snapshot in process and
+return an `AgentPlan`. Claude effort and routing-related environment
+flags use that contract on their ordinary configuration paths.
+Codex compaction combines feature, threshold and provider capability changes
+in one config write. The host records compaction ownership after the write
+succeeds. Codex catalog refresh uses the same catalog merge as profile
+configuration. It retains user fields from the host's snapshot, skips an
+unchanged catalog and leaves a concurrent edit for the next sync.
+Changing the Codex memories model updates extraction and consolidation
+together. Disconnect removes the routed memory and subagent picks in the
+same checked config write that restores the top-level route settings and
+managed provider URLs. The plan preserves independent model picks and URLs
+edited since Magpie set them. The host releases saved URL values after the
+plan succeeds.
+The Claude effort plan combines environment, per-model and top-level changes
+into one settings-file edit. On Connect, model picks and Sync repairs, the
+route settings plan publishes the gateway address and key, main model, tiers,
+subagent model and managed output limit together. It removes the old
+`ANTHROPIC_MODEL` override in the same write. The host authorizes caller keys
+against the settings snapshot and records field fingerprints after publication.
+Disconnect compares those fingerprints against its own snapshot. It restores
+the original route and removes its effort override in one plan. It preserves
+hand-edited values and deletions. When the current endpoint is confirmed as
+Magpie, it also clears tiers still naming a Magpie model, including tiers
+selected by hand against that endpoint. The same plan applies a native or default
+model when the user picks one. Originals stay in the stash if publication
+conflicts. Settings from earlier versions use the recognized gateway, model
+and key when no fingerprint record exists. The route flags plan publishes
+Tool Search, Auto Mode Review and Desktop Explore together.
+[`ApplyLinkedAgentPlan`](../../internal/extension/linked_actions.go) checks
+the declared destinations, input hashes and current files before publishing.
+Linked file errors name the logical input. The host reports the matching
+local path and preserves the original cause.
+The host follows native config links, rejects plans whose files alias one
+another, and keeps the existing malformed-catalog backup paths. The host
+rechecks the declared inputs at each publication, including retries after
+a Windows sharing failure. For linked Codex Desktop publication, the
+catalog is checked again before the configuration can reference it. On
+failure the plan rolls back only files it published, using its own
+snapshots and comparing its publication to the current file. The outer
+agent operation leaves those plan inputs alone during rollback, including
+user edits made before the plan started. A process that edits a file independently can still
+race the interval between a final comparison and the filesystem operation.
 
 [`extension_controller.go`](../../internal/agent/extension_controller.go)
 adapts these declarations to ordinary All/Find/Starter, NativeConnection and
@@ -529,48 +624,69 @@ A normal conversion route declares, for example:
 
 `from` and `to` must be distinct IDs and `outputDir` a clean HOME-relative
 directory. ID/Name-only converters remain usable by explicit file workflows.
-Ordinary routing selects enabled descriptors by source and target, suppresses
-ambiguous SDK routes, retains built-in conversion precedence, and does not
-duplicate a target already offered by a native carry operation. Target
-availability uses the existing availability check or executable lookup;
-`resumeCommand` must already support that target.
+Ordinary routing selects enabled descriptors by source and target and suppresses
+ambiguous SDK routes. A native history offers one choice per target. An eligible
+installed converter takes that choice when available, with the linked converter
+as its default. The direct Pi-to-OMP fork retains precedence for native Pi
+history. Delegated JSONL history uses an installed converter for the selected
+journal, including when its descriptor disables transcript presentation. An
+opaque storage locator offers no raw journal conversion. Target availability
+uses the existing availability check or executable lookup. `resumeCommand`
+must already support that target.
 
 ```text
-native session assembly -> carries -> enabled descriptor route -> Carry
-CarryOver -> read consent + offered Convert route
-          -> extensionSessionRoutes -> carryExtension
-          -> convertExtensionSource(selected Session)
-          -> optional session.inputs.v1 -> checked source files
-             (planner and converter share one Manager lease)
-          -> Actions.SessionConvert -> ActionPlan
-          -> validate native ID/resume command -> Actions.Execute
-          -> CarryResult {agent, id, path, command}
+session assembly -> eachCarry -> offered Carry choices
+CarryOver -> selectSessionHistoryOwner -> eachCarry -> selected Convert route
+  linked -> convertLinkedSession -> checked publication
+  installed -> carryExtensionOwned -> checked source files
+            -> optional session.inputs.v1 (shared Manager lease)
+            -> Actions.SessionConvert -> ActionPlan
+            -> validate native ID/resume command -> ExecuteCreateOnly
+  result -> CarryResult {agent, id, path, command}
 ```
 
 Listing routes does not invoke the converter. Dispatch refuses a route that
 has disappeared instead of falling through to an unrelated native converter.
 The ordinary conversion context is bounded at 30 seconds.
 
-Public `ConvertExtension` checks read consent and resolves the native session
-once by agent/ID, then calls `convertExtensionSource`. Ordinary
-`carryExtension` passes its already selected `Session` directly to that
-helper; it does not re-resolve the ID and substitute another store's path.
-The selected path and working directory therefore stay together even when
-ordinary lookup now returns another legitimate session with the same ID.
+The linked Claude Code and Codex modules declare their routes with the same
+`SessionDescriptor`. On Carry Over the host opens the selected native
+history, decompresses packed rollouts, and calls
+[`SessionConverter.Convert`](../../pkg/extension/session_conversion.go)
+with a borrowed reader and the target settings. The converter returns the
+new native ID, a path relative to the declared store, and a writer for the
+document. The host validates the result, stages the writer's output and
+publishes the file through the selected target root. It rechecks the
+target profile and store identity before and after linking the file,
+and reuses a cached result only for the same target selection and file
+identity. Linked conversion has no IPC document size limit.
+Installed modules continue to use the `SessionRequest` and `SessionResult`
+wire forms of `session.convert`.
+
+Public `ConvertExtension` checks read consent and resolves the session once
+by agent/ID. Both explicit conversion and ordinary Carry Over hand the
+selected owner to `convertHistorySource`. The selected path and working
+directory stay together even when a new lookup returns another legitimate
+session with the same ID.
 
 `CarryOver` retains the selected `sessionHistoryOwner` through availability
 checks, migration waits, cached receipt reuse, source capture and publication.
-Native and SDK conversions recheck that owner and current consent before
-writing and before returning output. SDK input planning carries the same
+Linked and installed conversions recheck that owner and current consent before
+writing and before returning output. Installed input planning carries the same
 admission check; Actions revalidation rolls back a revocation during apply.
 An ordinary SDK conversion retains checked recovery through final output
-capture as well. Previously published cached files are kept on revocation;
+capture as well. The installed converter's action holds its output
+directories open and verifies their location and the published files at
+commit. Rollback uses those same directories if one moved. Previously
+published cached files are kept on revocation;
 only this operation's still-matching outputs are eligible for rollback.
 
 Native carry writes a private temporary file, checks authority, and links it
-into its new name without replacing a competing file. It checks authority
-again before returning. Late revocation removes that output only if its
-identity, metadata and content still match the created file. Independent
+into its new name without replacing a competing file. It holds the open
+destination directory through publication and rechecks that it is still at
+the selected path. On late revocation it rolls back in that same directory,
+even if renamed, and removes the output only if its identity, metadata and
+content still match the created file. Independent
 edits/replacements are preserved and the operation returns an error. A
 filesystem without hard-link support fails the conversion without publishing
 a result. These checks do not make filesystem effects and external consent

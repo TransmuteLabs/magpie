@@ -526,6 +526,29 @@ func TestStopEndsTheRun(t *testing.T) {
 	}
 }
 
+func TestReadAllDiscardsSuccessfulReplyAfterStop(t *testing.T) {
+	sb := newSandbox(t)
+	on(t, "")
+	sb.session("late", time.Hour, "we deploy on Tuesdays", "keep this preference")
+	const reply = `[{"text":"Deploys on Tuesdays","kind":"fact","scope":"global","quote":"we deploy on Tuesdays"}]`
+	stoppedEarly, err := ReadAll(context.Background(), "a/m", func(context.Context, string, string, string, string) (string, error) {
+		Stop()
+		return reply, nil
+	})
+	if err != nil || stoppedEarly != (Result{}) || len(memories(t)) != 0 {
+		t.Fatalf("stopped run published a completed reply: %+v %v", stoppedEarly, err)
+	}
+	st, err := Load()
+	if err != nil || len(st.Done) != 0 || st.Left != 1 || st.Error != "" {
+		t.Fatalf("canceled session was not left pending: %+v %v", st, err)
+	}
+	sb.reply = func(string) (string, error) { return reply, nil }
+	res, err := ReadAll(context.Background(), "a/m", sb.complete)
+	if err != nil || res != (Result{Read: 1, Added: 1}) || len(sb.asked) != 1 {
+		t.Fatalf("did not offer the pending session again: %+v %v %v", res, err, sb.asked)
+	}
+}
+
 // Switched off, the background reads ask no model: picking one loads
 // every provider's models, the whole catalog. Switched on, they do.
 func TestKeepOffAsksNoModel(t *testing.T) {

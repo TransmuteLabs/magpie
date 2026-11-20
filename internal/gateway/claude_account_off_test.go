@@ -126,11 +126,11 @@ func TestClaudeOrgDisabledGroupMovesOn(t *testing.T) {
 		for _, ask := range asks {
 			t.Run(name+ask.path+map[bool]string{true: "/stream", false: "/whole"}[strings.Contains(ask.body, `"stream":true`)], func(t *testing.T) {
 				fresh(t)
-				var asked []string
+				var calls asked
 				up := func(id string) string {
-					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					srv := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						b, _ := io.ReadAll(r.Body)
-						asked = append(asked, id)
+						calls.add(id)
 						stream := gjson.GetBytes(b, "stream").Bool()
 						if id == "a" {
 							refuse(w, stream)
@@ -143,8 +143,9 @@ func TestClaudeOrgDisabledGroupMovesOn(t *testing.T) {
 						}
 						w.Header().Set("Content-Type", "application/json")
 						io.WriteString(w, `{"id":"m2","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"from b"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
-					}))
+					})))
 					t.Cleanup(srv.Close)
+					probeFixtureRoot(t, srv)
 					return srv.URL
 				}
 				for _, id := range []string{"a", "b"} {
@@ -157,7 +158,7 @@ func TestClaudeOrgDisabledGroupMovesOn(t *testing.T) {
 				}
 				s := New()
 				code, body := sendTo(s, ask.path, ask.body)
-				if code != 200 || !strings.Contains(body, "from b") || strings.Join(asked, ",") != "a,b" {
+				if asked := calls.all(); code != 200 || !strings.Contains(body, "from b") || strings.Join(asked, ",") != "a,b" {
 					t.Fatalf("status %d: %.400s (asked %v)", code, body, asked)
 				}
 				// these members are relays (not api.anthropic.com): the

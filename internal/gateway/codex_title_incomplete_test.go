@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -48,11 +51,18 @@ func TestCodexTitleIncompleteStaysIncomplete(t *testing.T) {
 		`data: {"type":"response.created","response":{"id":"resp_ok","object":"response","status":"in_progress","output":[]}}`,
 		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"{\"title\":\"Virtual presenter looks\",\"description\":\"Ways to choose a virtual clothing presenter's appearance\"}"}]}}`,
 		`data: {"type":"response.completed","response":{"id":"resp_ok","object":"response","status":"completed","output":[],"usage":{"input_tokens":60,"output_tokens":40,"total_tokens":100}}}`)
-	f := &fake{t: t, ctype: "text/event-stream"}
-	setup(t, provider.Responses, f)
+	var complete atomic.Bool
+	upstream := setup(t, provider.Responses, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if complete.Load() {
+			io.WriteString(w, whole)
+			return
+		}
+		io.WriteString(w, cut)
+	}))
+	probeFixtureRoot(t, upstream)
 	s := New()
 
-	f.reply = cut
 	rec := codexTitleTwoFields(t, s)
 	ends := terminals(rec.Body.String())
 	if rec.Code != 200 || len(ends) != 1 || ends[0]["type"] != "response.incomplete" {
@@ -66,7 +76,7 @@ func TestCodexTitleIncompleteStaysIncomplete(t *testing.T) {
 		t.Errorf("cut short: %v", resp)
 	}
 
-	f.reply = whole
+	complete.Store(true)
 	rec = codexTitleTwoFields(t, s)
 	ends = terminals(rec.Body.String())
 	if text, _ := outputText(t, rec.Body.String()); rec.Code != 200 || len(ends) != 1 ||

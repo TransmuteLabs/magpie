@@ -143,8 +143,7 @@ func nativeTUIFields(all []*agent.Agent, read func() ([]agent.ExtensionAgent, er
 		if row.Plugin != "" {
 			continue
 		}
-		base, _, sdkOwned := row.SDKLibraryTarget()
-		if !sdkOwned {
+		if !row.HasSDKAgentDeclaration() {
 			appendNative(row)
 			continue
 		}
@@ -157,7 +156,7 @@ func nativeTUIFields(all []*agent.Agent, read func() ([]agent.ExtensionAgent, er
 				return nil, fmt.Errorf("SDK field %s/%s has no matching declaration", row.ID, field.Key)
 			}
 		}
-		if base != nil && base != row {
+		if base, _, _ := row.SDKLibraryTarget(); base != nil && base != row {
 			appendNative(base)
 		}
 	}

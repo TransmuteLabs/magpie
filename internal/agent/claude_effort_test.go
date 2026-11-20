@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -101,6 +103,85 @@ func TestClaudeEffortModelSettings(t *testing.T) {
 	}
 	if get("effortLevel") != "medium" || strings.Contains(readFile(path), "modelSettings") || a.Field("effort").Get() != "medium" {
 		t.Fatalf("routed:\n%s", readFile(path))
+	}
+}
+
+func TestClaudeEffortPublishesOneChange(t *testing.T) {
+	for _, level := range []string{"low", ""} {
+		t.Run(level, func(t *testing.T) {
+			home, path := claudeSettings(t, `{
+  // Preserve the user's settings around the effort.
+  "model": "claude-opus-5-5",
+  "env": {"CLAUDE_CODE_EFFORT_LEVEL": "max", "OTHER_SETTING": "keep"},
+  "effortLevel": "high",
+  "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}
+}`)
+			writes := 0
+			if err := edit.Filtered(func(name string, body []byte) []byte {
+				if name == path {
+					writes++
+				}
+				return body
+			}, func() error {
+				return claude(home).Apply("effort", level)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if writes != 1 {
+				t.Errorf("one effort change published %d settings writes", writes)
+			}
+			if value, ok := edit.GetJSON(path, "effortLevel"); value != level || ok != (level != "") {
+				t.Errorf("top effort = %q (%v), want %q", value, ok, level)
+			}
+			if value, ok := edit.GetJSON(path, "modelSettings.claude-opus-5-5.effortLevel"); value != level || ok != (level != "") {
+				t.Errorf("model effort = %q (%v), want %q", value, ok, level)
+			}
+			if _, ok := edit.GetJSON(path, "env.CLAUDE_CODE_EFFORT_LEVEL"); ok {
+				t.Error("the max override survived")
+			}
+			if value, _ := edit.GetJSON(path, "env.OTHER_SETTING"); value != "keep" ||
+				!strings.Contains(readFile(path), "// Preserve the user's settings") {
+				t.Error("unrelated settings changed")
+			}
+		})
+	}
+}
+
+func TestClaudeEffortLeavesConcurrentSettingsEdit(t *testing.T) {
+	for _, linked := range []bool{false, true} {
+		name := "ordinary"
+		if linked {
+			name = "hard link"
+		}
+		t.Run(name, func(t *testing.T) {
+			home, path := claudeSettings(t, `{"model":"claude-opus-5-5","effortLevel":"high"}`)
+			target, err := edit.Target(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			userPath := path
+			if linked {
+				userPath = filepath.Join(home, "other-settings.json")
+				if err := os.Link(path, userPath); err != nil {
+					t.Skip(err)
+				}
+			}
+			const user = `{"model":"claude-opus-5-5","effortLevel":"high","userEdit":true}`
+			var edited bool
+			err = edit.Filtered(func(name string, body []byte) []byte {
+				if name == target && !edited {
+					edited = true
+					writeFile(t, userPath, user)
+				}
+				return body
+			}, func() error { return claude(home).Apply("effort", "low") })
+			if !edited || !errors.Is(err, extension.ErrActionChanged) {
+				t.Fatalf("expected stale settings error, edit injected=%v, error=%v", edited, err)
+			}
+			if got := readFile(path); got != user {
+				t.Fatalf("Apply overwrote the user's settings: %q", got)
+			}
+		})
 	}
 }
 

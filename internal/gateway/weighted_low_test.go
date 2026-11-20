@@ -23,13 +23,14 @@ func TestWeightedGroupGivesALowGroupItsShare(t *testing.T) {
 	b := newResetBackend(t)
 	capUsage(t, map[string]float64{"me@example.com": 91, "spare@example.com": 92})
 	var keyed atomic.Int32
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		keyed.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, grokAnswer)
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	if err := provider.Save(provider.Provider{ID: "xai", Name: "X", Key: "k", Models: []string{"gpt-5.5"}, Chat: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}

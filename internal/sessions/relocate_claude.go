@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -12,7 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf16"
+
+	"github.com/yetone/magpie/internal/sessionformat"
 )
 
 // ClaudeRelocation moves an entire project within one Claude Code config
@@ -39,19 +41,29 @@ type ClaudeRelocationResult struct {
 // session-ID-keyed files (file-history, todos and session-env). IDs stay intact.
 // Clients must be closed: the in-process lock cannot exclude Claude itself.
 func RelocateClaudeProject(in ClaudeRelocation) (ClaudeRelocationResult, error) {
-	// gateway mode touches no agent's files here (OwnOff)
-	if ownOff() {
-		return ClaudeRelocationResult{}, ErrNotRead
-	}
 	storeMu.Lock()
 	defer storeMu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
+	admit := func() error { return checkNativeHistoryOwner(context.Background(), "claude") }
+	if err := admit(); err != nil {
+		return ClaudeRelocationResult{}, err
+	}
 	root, target, err := claudeRelocationRoot(in)
 	if err != nil {
 		return ClaudeRelocationResult{}, err
 	}
-	out, err := relocateClaudeProject(root, target, in)
+	out, err := relocateClaudeProject(root, target, in, func() error {
+		if sourceBeforePublish != nil {
+			sourceBeforePublish()
+		}
+		return admit()
+	})
+	if out.Backup == "" {
+		if changed := admit(); changed != nil {
+			return ClaudeRelocationResult{}, errors.Join(err, changed)
+		}
+	}
 	if err == nil && out.Backup != "" {
 		// Discard both parses and directory listings after their paths change.
 		cache, loaded = nil, false
@@ -89,27 +101,9 @@ func claudeRelocationRoot(in ClaudeRelocation) (string, string, error) {
 	return "", "", errors.New("unknown WSL distribution")
 }
 
-func claudeProjectName(p string) (string, error) {
-	n := claudeSlug(p)
-	if len(n) > 200 {
-		return "", errors.New("long hashed Claude project paths are not supported yet")
-	}
-	return n, nil
-}
+func claudeProjectName(p string) (string, error) { return sessionformat.ProjectName(p) }
 
-// claudeSlug is p as Claude Code names a project folder after it, before it
-// cuts a long one: each UTF-16 unit that isn't a letter or digit is "-".
-func claudeSlug(p string) string {
-	var b strings.Builder
-	for _, c := range utf16.Encode([]rune(p)) {
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
-			b.WriteByte(byte(c))
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	return b.String()
-}
+func claudeSlug(p string) string { return sessionformat.ProjectSlug(p) }
 
 func relocationPaths(in ClaudeRelocation) (string, string, error) {
 	for _, p := range []string{in.From, in.To} {
@@ -254,7 +248,7 @@ func relocateClaudeIndex(b []byte, source, dest, from, to string) ([]byte, error
 	return json.Marshal(index)
 }
 
-func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelocationResult, error) {
+func relocateClaudeProject(root, target string, in ClaudeRelocation, admit func() error) (ClaudeRelocationResult, error) {
 	out := ClaudeRelocationResult{From: in.From, To: in.To, WSL: in.WSL}
 	from, to, err := relocationPaths(in)
 	if err != nil {
@@ -401,7 +395,7 @@ func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelo
 	// Recheck after staging, before touching any originals.
 	check := in
 	check.Token = ""
-	fresh, err := relocateClaudeProject(root, target, check)
+	fresh, err := relocateClaudeProject(root, target, check, nil)
 	if err != nil {
 		return out, err
 	}
@@ -414,6 +408,11 @@ func relocateClaudeProject(root, target string, in ClaudeRelocation) (ClaudeRelo
 	}, "", "  ")
 	if err := os.WriteFile(filepath.Join(backup, "manifest.json"), manifest, 0o600); err != nil {
 		return out, err
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			return ClaudeRelocationResult{}, errors.Join(err, os.RemoveAll(backup))
+		}
 	}
 	if err := publishClaudeRelocation(source, dest, backup); err != nil {
 		return out, err

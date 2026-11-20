@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -16,6 +17,10 @@ func CodexThreadCwd(id string) string {
 	if id == "" {
 		return ""
 	}
+	ctx := context.Background()
+	if checkNativeHistoryOwner(ctx, "codex") != nil {
+		return ""
+	}
 	var path string
 	var mod time.Time
 	for _, f := range codexFiles() {
@@ -29,6 +34,9 @@ func CodexThreadCwd(id string) string {
 	}
 	var l cxLine
 	if json.Unmarshal(firstLine(path), &l) != nil || l.Type != "session_meta" {
+		return ""
+	}
+	if checkNativeHistoryOwner(ctx, "codex") != nil {
 		return ""
 	}
 	return l.Payload.Cwd

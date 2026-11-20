@@ -214,14 +214,15 @@ func TestLegacyCallerWithReadOnlyConfiguration(t *testing.T) {
 
 func TestCallerUsageSystemOne(t *testing.T) {
 	fresh(t)
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer upstream" {
 			t.Error("caller key reached System One upstream")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"model":"jev","usage":{"input_tokens":120,"output_tokens":2}}`)
-	}))
+	})))
 	defer up.Close()
+	probeFixtureRoot(t, up)
 	if err := provider.Save(provider.Provider{ID: "jev", Name: "Jev", Key: "upstream", Decide: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}

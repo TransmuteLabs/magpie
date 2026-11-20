@@ -1,11 +1,14 @@
 package memory
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
+
+	"github.com/yetone/magpie/internal/extension/builtin/memorydigest"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The digest is the part of memory an agent is given in its instructions,
@@ -27,109 +30,28 @@ var (
 	allBudget     = 8000
 )
 
-var kindTitles = map[string]string{
-	Profile:    "About the user",
-	Preference: "Preferences",
-	Rule:       "Rules",
-	Reference:  "References",
-	Fact:       "Facts",
-	Procedure:  "How things are done",
-	Episode:    "Recent decisions",
-}
+var linkedDigestRenderer = memorydigest.Renderer()
 
-// render is the digest of one scope's memories within budget characters:
-// a heading per kind, an item per memory (its own lines kept), pinned and newer ones first, and
-// none cut in the middle. "" when the scope has none.
-func render(ms []*Memory, scope string, budget int) string {
-	pool := []*Memory{}
-	for _, m := range ms {
-		if m.Scope == scope && m.Status == Active {
-			pool = append(pool, m)
-		}
-	}
-	slices.SortStableFunc(pool, func(a, b *Memory) int {
-		if a.Pinned != b.Pinned {
-			if a.Pinned {
-				return -1
-			}
-			return 1
-		}
-		if d := kindRank(a.Kind) - kindRank(b.Kind); d != 0 {
-			return d
-		}
-		return b.Updated.Compare(a.Updated)
-	})
-	// the lines picked within budget, then put back in kind order
-	picked := map[string][]string{}
-	used := 0
-	for _, m := range pool {
-		line := "- " + Indented(m.Text, "  ")
-		if m.Why != "" {
-			line += " (why: " + oneLine(m.Why) + ")"
-		}
-		n := utf8.RuneCountInString(line) + 1
-		if used+n > budget {
-			continue
-		}
-		used += n
-		picked[m.Kind] = append(picked[m.Kind], line)
-	}
-	var b strings.Builder
-	for _, k := range Kinds {
-		if len(picked[k]) == 0 {
-			continue
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(kindTitles[k] + ":\n")
-		b.WriteString(strings.Join(picked[k], "\n"))
-		b.WriteString("\n")
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
-
-// Indented is a memory's text with its line breaks kept, each line after
-// the first led by pad, so a memory the user wrote in several lines reads
-// as they wrote it and stays one item of a list. Spaces closing a line and
-// blank lines' pads are left out.
 func Indented(s, pad string) string {
-	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n")), "\n")
-	for i, l := range lines {
-		l = strings.TrimRight(l, " \t\r")
-		if i > 0 && l != "" {
-			l = pad + l
-		}
-		lines[i] = l
-	}
-	return strings.Join(lines, "\n")
+	return memorydigest.Indented(s, pad)
 }
 
-// publish renders every scope's digest into f.
-func publish(f *file) {
-	scopes := map[string]bool{}
+func digestRequest(f *file) sdk.MemoryDigestRequest {
+	request := sdk.MemoryDigestRequest{
+		Records:       make([]sdk.MemoryDigestRecord, 0, len(f.Memories)),
+		KindOrder:     slices.Clone(Kinds),
+		GlobalBudget:  globalBudget,
+		ProjectBudget: projectBudget,
+		AgentBudget:   agentBudget,
+	}
 	for _, m := range f.Memories {
 		if m.Status == Active {
-			scopes[m.Scope] = true
+			request.Records = append(request.Records, sdk.MemoryDigestRecord{
+				Text: m.Text, Why: m.Why, Kind: m.Kind, Scope: m.Scope, Pinned: m.Pinned, Updated: m.Updated,
+			})
 		}
 	}
-	d := map[string]string{}
-	for s := range scopes {
-		budget := globalBudget
-		switch {
-		case strings.HasPrefix(s, "project:"):
-			budget = projectBudget
-		case strings.HasPrefix(s, "agent:"):
-			budget = agentBudget
-		}
-		if t := render(f.Memories, s, budget); t != "" {
-			d[s] = t
-		}
-	}
-	f.Digest = d
-	f.Published = now()
+	return request
 }
 
 // Publish makes what memory holds now the digest agents are given. It
@@ -137,9 +59,14 @@ func publish(f *file) {
 // agents' instructions.
 func Publish() (changed bool, err error) {
 	err = change(func(f *file) error {
-		old := f.Digest
-		publish(f)
-		changed = !maps.Equal(old, f.Digest)
+		renderer := linkedDigestRenderer
+		result, err := renderer.Render(digestRequest(f))
+		if err != nil {
+			return fmt.Errorf("render Memory digest with %s: %w", renderer.Source, err)
+		}
+		changed = !maps.Equal(f.Digest, result.ByScope)
+		f.Digest = result.ByScope
+		f.Published = now()
 		return nil
 	})
 	return changed, err
@@ -170,60 +97,40 @@ func Digest(agent string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return digestOf(f, agent), nil
+	if len(f.Digest) == 0 {
+		return "", nil
+	}
+	renderer := linkedDigestRenderer
+	content, err := renderer.Compose(digestDelivery(f, agent))
+	if err != nil {
+		return "", fmt.Errorf("compose Memory digest with %s: %w", renderer.Source, err)
+	}
+	return content, nil
 }
 
-func digestOf(f *file, agent string) string {
-	if len(f.Digest) == 0 {
-		return ""
+func digestDelivery(f *file, agent string) sdk.MemoryDigestDeliveryRequest {
+	request := sdk.MemoryDigestDeliveryRequest{Global: f.Digest[Global], Budget: allBudget}
+	if agent != "" {
+		request.Agent = f.Digest["agent:"+agent]
 	}
-	parts := []string{}
-	used := 0
-	add := func(s string) bool {
-		n := utf8.RuneCountInString(s)
-		if used+n > allBudget {
-			return false
-		}
-		used += n
-		parts = append(parts, s)
-		return true
-	}
-	if g := f.Digest[Global]; g != "" {
-		add(g)
-	}
-	if a := f.Digest["agent:"+agent]; agent != "" && a != "" {
-		add("Only for you:\n" + a)
-	}
-	// projects, newest change first
 	latest := map[string]time.Time{}
-	for _, m := range f.Memories {
-		if m.Status == Active && strings.HasPrefix(m.Scope, "project:") && m.Updated.After(latest[m.Scope]) {
-			latest[m.Scope] = m.Updated
+	for _, memory := range f.Memories {
+		if memory.Status == Active && strings.HasPrefix(memory.Scope, "project:") && memory.Updated.After(latest[memory.Scope]) {
+			latest[memory.Scope] = memory.Updated
 		}
 	}
-	scopes := []string{}
-	for s := range f.Digest {
-		if strings.HasPrefix(s, "project:") {
-			scopes = append(scopes, s)
+	for scope, markdown := range f.Digest {
+		key, project := strings.CutPrefix(scope, "project:")
+		if !project {
+			continue
 		}
-	}
-	slices.SortFunc(scopes, func(a, b string) int {
-		if c := latest[b].Compare(latest[a]); c != 0 {
-			return c
+		location := key
+		if entry := f.Projects[key]; entry != nil && len(entry.Roots) > 0 {
+			location = strings.Join(entry.Roots, ", ")
 		}
-		return strings.Compare(a, b)
-	})
-	for _, s := range scopes {
-		key := strings.TrimPrefix(s, "project:")
-		where := key
-		if p := f.Projects[key]; p != nil && len(p.Roots) > 0 {
-			where = strings.Join(p.Roots, ", ")
-		}
-		add("When working in " + where + ":\n" + f.Digest[s])
+		request.Projects = append(request.Projects, sdk.MemoryDigestProject{
+			Scope: scope, Location: location, Markdown: markdown, Updated: latest[scope],
+		})
 	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "## Memory\n\nWhat is known from earlier conversations with the user. Follow it unless the user says otherwise now. The project's own instruction files (AGENTS.md and the like) and docs come first: where a memory disagrees with them, follow the project's files and tell the user which memory is out of date. A rule or fact of one project belongs in that project's files; memory keeps what holds for the user across projects. When a memory_search tool is at hand, search it for more before asking the user again, and save what they ask to be remembered with memory_save.\n\n" +
-		strings.Join(parts, "\n\n")
+	return request
 }

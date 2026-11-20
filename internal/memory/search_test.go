@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func TestWordsSplitsCJK(t *testing.T) {
@@ -58,5 +60,42 @@ func TestSearch(t *testing.T) {
 	}
 	if slices.ContainsFunc(all, func(h Hit) bool { return h.Score != 0 }) {
 		t.Fatal("a listing scored")
+	}
+}
+
+func TestSemanticRankingKeepsTheSearchSnapshot(t *testing.T) {
+	fresh(t)
+	eligible, _, err := Save(Input{
+		Text: new("Releases happen on Tuesdays"), Why: new("The support team is available"),
+		Kind: new(Rule), Scope: new(Global), Tags: &[]string{"publish"},
+	}, FromUser, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	excluded := save(t, "Private release calendar", Rule, "project:github.com/private/repo", "publish")
+	archived := save(t, "Historical calendar", Rule, Global, "publish")
+	if _, err := SetStatus(Archived, archived.ID); err != nil {
+		t.Fatal(err)
+	}
+	save(t, "Treatment of weekends", Fact, Global, "publish")
+	save(t, "Proposed workdays", Rule, Global, "draft")
+
+	oldRanking := SemanticRanker
+	t.Cleanup(func() { SemanticRanker = oldRanking })
+	SemanticRanker = sdk.MemorySemanticRanker{
+		Ready: func() bool { return true },
+		Rank: func(request sdk.MemorySemanticRequest) map[string]float64 {
+			expected := sdk.MemorySemanticRecord{ID: eligible.ID, Text: eligible.Text, Why: eligible.Why}
+			if request.Query != "部署" || !slices.Equal(request.Records, []sdk.MemorySemanticRecord{expected}) {
+				t.Fatalf("semantic ranker received the wrong query or scope: %+v", request)
+			}
+			request.Records[0].Text = "Changed by the ranker"
+			return map[string]float64{eligible.ID: 0.55, excluded.ID: 1}
+		},
+	}
+
+	hits, err := Rank(Query{Text: " 部署 ", Scopes: []string{Global}, Kinds: []string{Rule}, Tags: []string{"publish"}})
+	if err != nil || len(hits) != 1 || hits[0].ID != eligible.ID || hits[0].Text != eligible.Text {
+		t.Fatalf("ranker changed the scoped match: %+v, %v", hits, err)
 	}
 }

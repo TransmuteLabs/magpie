@@ -256,7 +256,7 @@ func TestChatPageSearchesAndReadsLinks(t *testing.T) {
 
 	var mu sync.Mutex
 	var asked []string
-	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	model := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		asked = append(asked, string(b))
@@ -277,8 +277,9 @@ func TestChatPageSearchesAndReadsLinks(t *testing.T) {
 				`data: {"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":2}}`,
 				`data: [DONE]`))
 		}
-	}))
+	})))
 	defer model.Close()
+	probeFixtureRoot(t, model)
 	hosts := searchHosts[provider.Anthropic]
 	searchHosts[provider.Anthropic] = append(hosts, provider.HostOf(search.URL))
 	defer func() { searchHosts[provider.Anthropic] = hosts }()

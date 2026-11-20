@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -26,9 +27,18 @@ func delegateHistoryForTest(t *testing.T, agent string) {
 }
 
 func TestCarryPublicationPreservesCompetingOutput(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "converted.jsonl")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "converted.jsonl")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 	checks := 0
-	err := writeNew(path, [][]byte{[]byte("private conversion")}, func() error {
+	_, err = extension.PublishSessionDocument(root, filepath.Base(path), func(writer io.Writer) error {
+		_, err := io.WriteString(writer, "private conversion\n")
+		return err
+	}, func(map[string]fs.FileInfo, bool) error {
 		checks++
 		if checks == 2 {
 			return os.WriteFile(path, []byte("independent output"), 0o600)
@@ -41,6 +51,160 @@ func TestCarryPublicationPreservesCompetingOutput(t *testing.T) {
 	body, err := os.ReadFile(path)
 	if err != nil || string(body) != "independent output" {
 		t.Fatal("conversion damaged competing output", string(body), err)
+	}
+}
+
+func TestCarryLinkedContractUsesDeclaredStore(t *testing.T) {
+	carrySetup(t)
+	source, ok := Find("claude", carryClaude)
+	if !ok {
+		t.Fatal("missing source session")
+	}
+	original := linkedSessionConverters[0]
+	t.Cleanup(func() { linkedSessionConverters[0] = original })
+	linkedSessionConverters[0].Descriptor.OutputDir = "alternate-rollouts"
+	result, err := CarryOver(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.Path, filepath.Join(os.Getenv("HOME"), "alternate-rollouts")+string(filepath.Separator)) {
+		t.Fatal("conversion ignored the selected descriptor output directory", result.Path)
+	}
+	if body := sum(t, result.Path); !strings.Contains(body, result.ID) {
+		t.Fatal("missing converted session identity")
+	}
+}
+
+func TestCarryLinkedContractFencesChangedCodexProfile(t *testing.T) {
+	carrySetup(t)
+	source, ok := Find("claude", carryClaude)
+	if !ok {
+		t.Fatal("missing source session")
+	}
+	original := linkedSessionConverters[0]
+	t.Cleanup(func() { linkedSessionConverters[0] = original })
+	linkedSessionConverters[0].Convert = func(ctx context.Context, input sdk.SessionConversionInput) (sdk.SessionConversionOutput, error) {
+		if input.TargetProvider != "magpie" {
+			t.Fatal("unexpected original provider", input.TargetProvider)
+		}
+		path := filepath.Join(CodexDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("profile = \"new\"\n[profiles.new]\nmodel_provider = \"second\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return original.Convert(ctx, input)
+	}
+	before := rollouts(t, CodexDir())
+	if result, err := CarryOver(source, "codex"); !errors.Is(err, extension.ErrActionChanged) || result != (CarryResult{}) {
+		t.Fatal("published using a superseded provider", result, err)
+	}
+	if after := rollouts(t, CodexDir()); !slices.Equal(after, before) {
+		t.Fatal("rejected conversion left a rollout", after)
+	}
+	linkedSessionConverters[0] = original
+	result, err := CarryOver(source, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := readLines(t, result.Path)[0]["payload"].(map[string]any)
+	if meta["model_provider"] != "second" {
+		t.Fatal("retry did not use the current profile", meta)
+	}
+}
+
+func TestCarryLinkedPublicationRejectsSameBytesReplacement(t *testing.T) {
+	carrySetup(t)
+	source, ok := Find("claude", carryClaude)
+	if !ok {
+		t.Fatal("missing source session")
+	}
+	before := rollouts(t, CodexDir())
+	var replaced string
+	var independent fs.FileInfo
+	sourceBeforePublish = func() {
+		paths := slices.DeleteFunc(rollouts(t, CodexDir()), func(name string) bool { return slices.Contains(before, name) })
+		if len(paths) == 0 {
+			return
+		}
+		if len(paths) != 1 {
+			t.Fatal("unexpected new rollouts", paths)
+		}
+		replaced = paths[0]
+		temp, err := os.CreateTemp(filepath.Dir(replaced), "independent-*.tmp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.WriteString(temp, sum(t, replaced))
+		if err := errors.Join(err, temp.Close()); err != nil {
+			t.Fatal(err)
+		}
+		independent, err = os.Stat(temp.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(temp.Name(), replaced); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { sourceBeforePublish = nil })
+	if result, err := CarryOver(source, "codex"); !errors.Is(err, extension.ErrActionChanged) || result != (CarryResult{}) || replaced == "" {
+		t.Fatal("reported an independent file as its result", result, err, replaced)
+	}
+	sourceBeforePublish = nil
+	success, err := CarryOver(source, "codex")
+	if err != nil || success.Path == replaced {
+		t.Fatal("rejected output was cached", success, err)
+	}
+	if after, err := os.Stat(replaced); err != nil || !os.SameFile(independent, after) {
+		t.Fatal("independent file was removed or changed", err)
+	}
+}
+
+func TestCarryLinkedContractRejectsFailedDocument(t *testing.T) {
+	carrySetup(t)
+	source, ok := Find("claude", carryClaude)
+	if !ok {
+		t.Fatal("missing source session")
+	}
+	original := linkedSessionConverters[0]
+	t.Cleanup(func() { linkedSessionConverters[0] = original })
+	failure := errors.New("converter ran out of output")
+	calls, writes := 0, 0
+	linkedSessionConverters[0].Convert = func(ctx context.Context, input sdk.SessionConversionInput) (sdk.SessionConversionOutput, error) {
+		calls++
+		if _, ok := ctx.Deadline(); !ok || input.Cwd != carryCwd || input.TargetProvider != "magpie" {
+			t.Fatal("missing conversion context or selected target metadata")
+		}
+		body, err := io.ReadAll(input.Source)
+		if err != nil || !strings.Contains(string(body), carryClaude) {
+			t.Fatal("converter did not receive selected source", err)
+		}
+		return sdk.SessionConversionOutput{
+			ID: "0190aaaa-1111-7222-8333-444455556666", Path: "private-output.jsonl",
+			Write: func(_ context.Context, writer io.Writer) error {
+				writes++
+				_, err := io.WriteString(writer, "partial document")
+				return errors.Join(err, failure)
+			},
+		}, nil
+	}
+	if len(carries(source)) != 1 || calls != 0 {
+		t.Fatal("listing invoked the converter")
+	}
+	root := filepath.Join(CodexDir(), "sessions")
+	before, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := CarryOver(source, "codex"); !errors.Is(err, failure) || result != (CarryResult{}) || calls != 1 || writes != 1 {
+		t.Fatalf("CarryOver returned %+v, %v after %d calls and %d writes", result, err, calls, writes)
+	}
+	after, err := os.ReadDir(root)
+	if err != nil || len(after) != len(before) {
+		t.Fatal("partial document or temporary file remains in the target store", err)
+	}
+	linkedSessionConverters[0] = original
+	if result, err := CarryOver(source, "codex"); err != nil || result.ID == "" {
+		t.Fatal("failed document prevented a successful retry", result, err)
 	}
 }
 
@@ -62,19 +226,15 @@ func TestConverterPublicationCleanupPreservesEditedPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(plan.Root())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := plan.Execute(t.Context(), plan.Preview().Revision); err != nil {
-		t.Fatal(err)
-	}
 	first, second := filepath.Join(root, "sessions/one.jsonl"), filepath.Join(root, "sessions/two.jsonl")
-	if err := os.WriteFile(first, []byte("independent edit"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	delegateHistoryForTest(t, "claude")
-	if err := rollbackSessionConversion(plan, info); !errors.Is(err, extension.ErrActionChanged) {
+	result, err := plan.ExecuteCreateOnly(t.Context(), plan.Preview().Revision, func(map[string]fs.FileInfo) error {
+		if err := os.WriteFile(first, []byte("independent edit"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		delegateHistoryForTest(t, "claude")
+		return nil
+	})
+	if result.Applied || !errors.Is(err, extension.ErrActionChanged) {
 		t.Fatal("changed output was not reported", err)
 	}
 	if body, err := os.ReadFile(first); err != nil || string(body) != "independent edit" {
@@ -86,7 +246,7 @@ func TestConverterPublicationCleanupPreservesEditedPeer(t *testing.T) {
 }
 
 func TestCarryPublicationRevocationCleansOnlyNewOutput(t *testing.T) {
-	for _, mutation := range []string{"owner", "consent", "edited", "replaced"} {
+	for _, mutation := range []string{"owner", "consent", "edited", "replaced", "moved-parent", "moved-parent-revoked"} {
 		t.Run(mutation, func(t *testing.T) {
 			d := consentHome(t)
 			path := writeTwoAgents(t, d)
@@ -108,6 +268,7 @@ func TestCarryPublicationRevocationCleansOnlyNewOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 			var output string
+			var sentinel string
 			sourceBeforePublish = func() {
 				files, err := filepath.Glob(pattern)
 				files = slices.DeleteFunc(files, func(path string) bool { return slices.Contains(existing, path) })
@@ -119,9 +280,23 @@ func TestCarryPublicationRevocationCleansOnlyNewOutput(t *testing.T) {
 					t.Fatal("conversion publication did not produce exactly one new output", files, err)
 				}
 				output = files[0]
-				if mutation == "consent" {
+				if mutation == "moved-parent" || mutation == "moved-parent-revoked" {
+					parent := filepath.Dir(output)
+					moved := parent + ".moved"
+					sentinel = filepath.Join(parent, "independent.txt")
+					if err := os.WriteFile(sentinel, []byte("independent output"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Rename(parent, moved); err != nil {
+						t.Fatal(err)
+					}
+					output = filepath.Join(moved, filepath.Base(output))
+					sentinel = filepath.Join(moved, filepath.Base(sentinel))
+				}
+				switch mutation {
+				case "consent", "moved-parent-revoked":
 					foreignHistoryConsentOff(t)
-				} else {
+				case "owner", "edited", "replaced":
 					delegateHistoryForTest(t, "claude")
 				}
 				if mutation == "replaced" {
@@ -145,11 +320,16 @@ func TestCarryPublicationRevocationCleansOnlyNewOutput(t *testing.T) {
 					t.Fatal("rollback deleted independent output", string(body), err)
 				}
 			} else if !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("revoked carry left private output", string(body), err)
+				t.Fatal("revoked carry left private output", output, err)
 			}
-			temporary, _ := filepath.Glob(filepath.Join(filepath.Dir(output), ".rollout-*"))
-			if len(temporary) != 0 {
-				t.Fatal("revoked carry left temporary output", temporary)
+			temporary, err := filepath.Glob(filepath.Join(filepath.Dir(output), ".magpie-extension-*.tmp"))
+			if err != nil || len(temporary) != 0 {
+				t.Fatal("revoked carry left temporary output", temporary, err)
+			}
+			if sentinel != "" {
+				if body, err := os.ReadFile(sentinel); err != nil || string(body) != "independent output" {
+					t.Fatal("rollback changed an unrelated file", string(body), err)
+				}
 			}
 		})
 	}

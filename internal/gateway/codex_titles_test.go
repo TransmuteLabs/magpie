@@ -72,12 +72,13 @@ func TestCodexTitlesSetting(t *testing.T) {
 		`data: [DONE]`)}
 	setup(t, provider.Chat, f)
 	chatgptCalls := 0
-	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+	upstream := chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		chatgptCalls++
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"r1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"title\":\"From ChatGPT\"}"}]}],"usage":{"input_tokens":9,"output_tokens":2}}}`))
 	})
+	probeFixtureRoot(t, upstream)
 	save := func(v string) {
 		t.Helper()
 		st := settings.Load()
@@ -386,7 +387,8 @@ func TestCodexDescriptionFallbackOnMagpie(t *testing.T) {
 				`data: {"id":"c1","choices":[{"index":0,"delta":{"content":"Plain description"}}]}`,
 				`data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`,
 				`data: [DONE]`)}
-			setup(t, provider.Chat, f)
+			upstream := setup(t, provider.Chat, f)
+			probeFixtureRoot(t, upstream)
 			s := New()
 			body := `{"model":"fake/m1","stream":true,"input":"Describe the thread",` +
 				`"text":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"description":{"type":"string","minLength":1}},"required":["description"]}}}}`

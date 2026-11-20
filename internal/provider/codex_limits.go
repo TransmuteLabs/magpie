@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The ChatGPT backend tells what a Codex account has used as it answers:
@@ -120,14 +122,18 @@ func heardWindows(ws []QuotaWindow, heard []CodexLimit) []QuotaWindow {
 	out := make([]QuotaWindow, len(ws))
 	copy(out, ws)
 	for i, w := range out {
-		if w.Aside || w.Model != "" || w.Span == 0 {
+		if (w.Aside && !w.Unknown) || w.Model != "" || w.Span == 0 {
 			continue
 		}
 		for _, h := range heard {
 			if h.Span != w.Span {
 				continue
 			}
-			w.Used = h.Used
+			if w.Unknown {
+				w.setUsageShare(sdk.UsageWindow{Used: h.Used})
+			} else {
+				w.Used = h.Used
+			}
 			if !h.Resets.IsZero() {
 				t := h.Resets
 				w.ResetsAt, w.ResetSecs = &t, 0

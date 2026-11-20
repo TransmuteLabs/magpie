@@ -444,13 +444,10 @@ func orphanSubagents(parents map[string]string) map[string]bool {
 // in, as ListAgent lists it and Find finds it: how to resume it, and
 // whether its conversation can be read.
 func listed(s *Session) {
+	s.Resume = listedResume(*s)
 	if s.source != nil {
-		s.Resume = sourceResume(s.source)
 		s.Carry, s.Transcript = carries(*s), s.source.grant.descriptor.Transcript && !s.source.stale
 		return
-	}
-	if s.Resume == "" && !s.ReadOnly {
-		s.Resume = resumeFor(s.WSL, s.Agent, s.ID, s.Cwd, s.Path)
 	}
 	if s.Carry == nil {
 		s.Carry = carries(*s)
@@ -570,6 +567,14 @@ func Delete(agent, id string) (Trashed, error) {
 	// for longer than a minute too
 	if agent == "agy" && agyHeld(filepath.Join(agyDataDir(fs), "presence", id+".lock")) {
 		return Trashed{}, ErrActive
+	}
+	unlockOwner, err := lockNativeHistoryMutation(agent)
+	if err != nil {
+		return Trashed{}, err
+	}
+	defer unlockOwner()
+	if err := checkHistoryRead(agent); err != nil {
+		return Trashed{}, err
 	}
 	// Grok Build's search index keeps a copy of the text of every session
 	// going, a subagent's under its own id: those rows go before a file
@@ -982,6 +987,13 @@ func Restore(key string) (Trashed, error) {
 		if m.Name != filepath.Base(m.Name) || m.Name == "" {
 			return Trashed{}, errors.New("the trash note is damaged")
 		}
+	}
+	if !t.Forgot {
+		unlockOwner, err := lockNativeHistoryMutation(t.Agent)
+		if err != nil {
+			return Trashed{}, err
+		}
+		defer unlockOwner()
 	}
 	for i, m := range t.Items {
 		if err := move(filepath.Join(dir, "files", m.Name), m.From); err != nil {

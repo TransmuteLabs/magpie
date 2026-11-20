@@ -54,18 +54,49 @@ vendor implementation or alternate UI framework.
 
 | Part | What it does | Source |
 | --- | --- | --- |
-| Registry | A plugin calls `pluginrt.Register(Manifest)` from `init`. `Registered` lists them by id; two with one id panic. `plugins/all` imports every plugin, and only `main.go` imports `plugins/all`, so core code and its tests run without any. | [`pluginrt.go`](../../internal/pluginrt/pluginrt.go), [`plugins/all/all.go`](../../plugins/all/all.go) |
-| Manifest | `ID`, `API` (a caret range of the host API, `"^1"`; `pluginrt.API` is `"1.0"`), `Requires` and `Provides` (services), `Essential`, `Name`/`Sub` (English; the window translates them), `One`/`Many` (what is in use, of 1 or `{n}`), `InUse`, `Apply`, `Parts` (`{Slot, Key}`: the window's parts it is), `SetAt` (where Settings has its settings, a tab and the row they start at, `"privacy #redactList"`: its Plugins › Built-in row links there and to its `nav.page` while it is on (`featGo`), a link to settings hidden while it is off left out, and its settings, while it is off, say so first with a Turn on (`featOff`); `redact`, `search`, `gateway` and `otel` have one; netube99 on X), `Defaults` (its config), `Settings` (a struct of its settings, made into `Defaults` and a schema at `Register`) and `Client` (its files in the window, under `internal/gui/assets/plugins/<id>/`: scripts, its `i18n.js` and a `.css`). | [`pluginrt.go`](../../internal/pluginrt/pluginrt.go) |
+| Registry | A built-in calls `pluginrt.RegisterFeature` from `init`, which projects its SDK declaration and registers the manifest. Registration rejects duplicate ids. `Registered` lists built-ins by id. `plugins/all` imports every plugin, and only `main.go` imports `plugins/all`, so core code and its tests can run without any. | [`feature.go`](../../internal/pluginrt/feature.go), [`pluginrt.go`](../../internal/pluginrt/pluginrt.go), [`plugins/all/all.go`](../../plugins/all/all.go) |
+| Manifest | The host projects `FeatureContribution` into the manifest used by reconciliation. It carries identity, the compatible host API range, service dependencies, Essential and in-use state, activation, UI parts and navigation links, defaults and the settings schema, and client files from `internal/gui/assets/plugins/<id>/`. | [`feature.go`](../../internal/pluginrt/feature.go), [`pluginrt.go`](../../internal/pluginrt/pluginrt.go) |
 | Lifecycle | `Runtime.Reconcile(on, config)`. Off first: every plugin no longer wanted, and every one requiring a service one of those provided, is disposed newest first. Then on: each wanted plugin whose requirements are provided (by `Core`, `settings`, `providers`, `gateway`, `window`, or an active plugin) is applied, again and again until no more can be. States: `off`, `pending` (waiting for a service, logged), `active`, `failed` (Apply returned an error or panicked, or the API range doesn't match; what it registered before is undone), `disposed`. A failed plugin never stops the others. | [`pluginrt.go`](../../internal/pluginrt/pluginrt.go) |
 | Ctx | What `Apply` gets: `OnDispose(f)`, `Contribute(slot, key)`, `Provide(name, v)` (withdrawn when it goes), `Service(name)`, and its composed `Config`. Disposers run in reverse, each one's panic logged and the rest still run. | [`pluginrt.go`](../../internal/pluginrt/pluginrt.go) |
 | plugins.yml | `appdir.Config()/plugins.yml`: `preset` (`essentials` or `all`; `all` unless the user picks Essentials), `settled` (the defaults the file was last brought up to) and `plugins`, rows of `{id, enabled, config}` holding only what the user set. | [`config.go`](../../internal/pluginrt/config.go) |
-| Settings schema | `SchemaOf(Settings)` makes a JSON Schema object of the struct, in its fields' order (`x-order`): each exported field with a json name is a setting, of `bool`, an int, `float64` or `string`, with tags `title` (English; the window translates it), `description`, `enum` (comma separated) and `min`/`max`. Its values are the defaults. A field a form can't draw, or a tag that doesn't parse, panics at `Register`. `Schema.Validate` takes a value only as the schema allows it (a JSON float64 or a YAML int for an integer); `SetConfig(id, config)` writes the user's row through it, and `Compose` leaves out a value edited into plugins.yml by hand that it doesn't allow, so the default stands. | [`schema.go`](../../internal/pluginrt/schema.go), [`config.go`](../../internal/pluginrt/config.go) |
+| Settings schema | `SchemaOf` projects the SDK's ordered `FeatureSetting` declarations into JSON Schema for the window, retaining the declaration order in `x-order`. The same validator checks defaults, enum members and saved values. Integer settings accept values from `−(2^53−1)` through `2^53−1` so they survive a round trip through JavaScript exactly. An invalid declaration fails registration. `SetConfig` rejects invalid edits, and `Compose` uses the declared default when a saved value is invalid. | [`feature.go`](../../internal/pluginrt/feature.go), [`schema.go`](../../internal/pluginrt/schema.go), [`config.go`](../../internal/pluginrt/config.go) |
 | Built-in plugins | `groups`, `library`, `otel`, `sessions`, `warmups` (P0), `gateway` (P1), the Gateway page, which is Essential and in use while a gateway key is there (`access.List`), and `routing` (P2), the Routing and Routing groups pages, Essential and in use while the user has a routing group, since the second page is where groups are made and changed. `rotation` (P3), the routings besides Smart, is Essential and in use while a provider or group is routed by one of them. `middleware` (P3), the JS gateway middleware, is Essential and in use while plugins.json has a middleware on (`middleware.On`). `redact` (P3), privacy masking, is Essential and in use while Settings → Privacy asks for any masking (`masking.Wanted`). `search` (P3), magpie's web search, is Essential and in use while a search API is set up or a searcher is picked. `budget` (P3), key limits, is Essential and in use while a gateway key has a limit. `usage` (P2), the Usage page, is Essential too, with no `InUse`: what it shows the gateway counts anyway, and the tray panel's Usage tab still shows the allowances with it off. The Gateway page's one setting, `callsPage` (10, 20, 50 or 100; 20), is how many recent calls the page shows at a time. The other five aren't Essential. Each one's `InUse` counts what the user made with it: routing groups not Auto and not hidden, library items given to agents, a collector sent to, gateway conversations recorded, warm-ups and check-ins on. | [`plugins/`](../../plugins) |
 
 The boundary is checked by `TestPluginsImportOnlyCore`: no package outside
 `plugins/` imports one (but `main.go`, through `plugins/all`), a plugin never
 imports another, and `plugins/all` imports every plugin folder. Plugins reach
 each other only through services.
+
+## Linked SDK activation, slots and settings
+
+Every package in `plugins/` declares its identity, dependencies and
+activation through [`extension.FeatureContribution`](../../pkg/extension/feature_contribution.go).
+An activation callback receives `FeatureLifetime` and attaches cleanup to
+the host's reconciliation. Disabling a feature, shutting down, or failing
+partway through activation runs those callbacks once in reverse order.
+Gateway, Library, Routing, Sessions, Usage and Masking also declare their pages.
+Observability declares its Settings section. Groups, Rotation and Warm-up
+declare their inline parts. Gateway declares its ordered `callsPage` setting
+through the same contract. The Built-in rows declare `SettingsAt` with a
+tab and row ID, and `OpenPage` when the row links to an existing view.
+[`RegisterFeature`](../../internal/pluginrt/feature.go) validates the
+slot, setting and link declarations and projects the feature into one built-in
+manifest. Unknown slots, duplicate slot/key pairs and multiple navigation
+pages fail at registration. `/api/plugins/builtin` sends the same
+`setAt` (`tab #rowID`) and `opens` strings to the window. The existing schema
+validator handles saved values and edits through that route.
+
+The normal `pluginrt` reconciliation publishes active UI parts.
+Turning a feature off withdraws its active parts and removes its settings
+from `boot.js`. Its Plugins row still describes the feature and
+`plugins.yml` retains the user's values for the next enable. Keys in use,
+preset defaults, client assets and disposal follow the existing manifest.
+The window offers a page link when the feature and view are visible. A
+visible Settings row keeps its link even with the feature off, so Web
+search can be turned on from Settings.
+This Go declaration is for linked features. Installable SDK windows use
+the package descriptor, frame permissions and configuration described
+above. Built-in services keep their existing registration.
 
 ## The window's kernel (P1)
 
@@ -617,7 +648,7 @@ remembering its layer (`Source`):
 - `go test ./internal/pluginrt/` (`TestReconcile`, `TestCompatible`,
   `TestPluginsImportOnlyCore`, `TestCompose`, `TestSettleAndSet`,
   `TestSettleBringsUpAnEssentialsInstall`, `TestBrokenFileIsKept`).
-- `go test ./internal/pluginrt/ -run 'TestSchemaOf|TestValidate|TestSetConfig'`.
+- `go test ./internal/pluginrt/ -run 'TestFeatureSchema|TestFeatureIntegerSettings|TestValidate|TestSetConfig'`.
 - `go test ./internal/gui/ -run 'TestBuiltin|TestBootSaysBuiltinsOff'`
   (`TestBuiltinConfig`, `TestBuiltinClientsLoaded`).
 - `i18n-keys`, `gui-de`, `gui-ja`, `gui-zh-tw`, and a moved page's own

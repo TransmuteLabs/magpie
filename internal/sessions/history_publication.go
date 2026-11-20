@@ -14,10 +14,10 @@ import (
 // It needs no catalog, worker or session-cache lock, so direct title readers
 // and background callers use the same boundary as ordinary listings.
 type historyPublication struct {
-	view   *sessionSourceView
-	epoch  uint64
-	reads  *settings.SessionReads
-	owners map[string]bool
+	historyClaims
+	view  *sessionSourceView
+	epoch uint64
+	reads *settings.SessionReads
 }
 
 func inspectHistoryReads() (*settings.SessionReads, error) {
@@ -61,13 +61,88 @@ func inspectHistoryPublication(ctx context.Context) (historyPublication, error) 
 	if err != nil {
 		return historyPublication{}, err
 	}
-	return historyPublication{view: view, epoch: epoch, reads: reads, owners: claims.owners}, ctx.Err()
+	return historyPublication{view: view, epoch: epoch, reads: reads, historyClaims: claims}, ctx.Err()
+}
+
+// JSONL owns discovery and the transcript. A rooted store can prevent native
+// access altogether: even a read-only SQLite connection can create sidecars.
+func (snapshot historyPublication) jsonlAccounting(ctx context.Context) map[string]bool {
+	if len(snapshot.bindings) == 0 {
+		return nil
+	}
+	manager := sourceManager()
+	entries, err := manager.List()
+	if err != nil {
+		return nil
+	}
+	sources := map[string]int{}
+	for _, entry := range entries {
+		if !entry.Disabled {
+			for _, descriptor := range entry.Manifest.SessionSources {
+				sources[descriptor.Agent]++
+			}
+			for _, descriptor := range entry.Manifest.StorageSources {
+				sources[descriptor.Agent]++
+			}
+		}
+	}
+	rooted := map[string]bool{}
+	for _, consent := range snapshot.consents {
+		rooted[consent.Agent] = true
+	}
+	var allowed map[string]bool
+	for _, binding := range snapshot.bindings {
+		agent := binding.Agent
+		if !snapshot.reads.Reads(agent) || rooted[agent] || sources[agent] != 1 ||
+			snapshot.view != nil && snapshot.view.agents[agent] {
+			continue
+		}
+		manifest, identity, err := sessionMigrationIdentity(ctx, manager, binding.Plugin)
+		if err != nil || identity != binding.Identity {
+			continue
+		}
+		descriptor, ok := manifest.ResolveSessionSource(binding.Source)
+		if ok && descriptor.Agent == agent && descriptor.Container == "jsonl" {
+			if allowed == nil {
+				allowed = map[string]bool{}
+			}
+			allowed[agent] = true
+		}
+	}
+	return allowed
 }
 
 func (before historyPublication) current(ctx context.Context) bool {
 	after, err := inspectHistoryPublication(ctx)
-	return err == nil && before.view == after.view && before.epoch == after.epoch &&
+	return err == nil && before.same(after)
+}
+
+func (before historyPublication) same(after historyPublication) bool {
+	return before.view == after.view && before.samePermissions(after)
+}
+
+func (before historyPublication) sameNative(after historyPublication) bool {
+	if !before.samePermissions(after) {
+		return false
+	}
+	if before.view == after.view {
+		return true
+	}
+	beforeOwners, beforeAgents := before.view.nativeExclusions()
+	afterOwners, afterAgents := after.view.nativeExclusions()
+	return maps.Equal(beforeOwners, afterOwners) && maps.Equal(beforeAgents, afterAgents)
+}
+
+func (before historyPublication) samePermissions(after historyPublication) bool {
+	return before.epoch == after.epoch &&
 		reflect.DeepEqual(before.reads, after.reads) && maps.Equal(before.owners, after.owners)
+}
+
+func (view *sessionSourceView) nativeExclusions() (owners, agents map[string]bool) {
+	if view == nil {
+		return nil, nil
+	}
+	return view.owners, view.agents
 }
 
 func (snapshot historyPublication) native(agent string) bool {

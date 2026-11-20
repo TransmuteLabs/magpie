@@ -17,13 +17,13 @@ func TestUsageNamesTheKeyThatAnswered(t *testing.T) {
 	for _, proto := range provider.Protocols {
 		t.Run(string(proto), func(t *testing.T) {
 			fresh(t)
-			var tried []string
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var tried asked
+			up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 				if key == "" {
 					key = r.Header.Get("x-api-key")
 				}
-				tried = append(tried, key)
+				tried.add(key)
 				w.Header().Set("Content-Type", "application/json")
 				if key == "personal-secret" {
 					w.WriteHeader(429)
@@ -38,8 +38,9 @@ func TestUsageNamesTheKeyThatAnswered(t *testing.T) {
 				case provider.Anthropic:
 					io.WriteString(w, `{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":20,"output_tokens":5,"cache_read_input_tokens":10}}`)
 				}
-			}))
+			})))
 			defer up.Close()
+			probeFixtureRoot(t, up)
 			p := provider.Provider{ID: "plan", Name: "Plan", Key: "personal-secret", KeyName: "Personal", Models: []string{"m1"},
 				Keys: []provider.KeyAccount{{Name: "Off", Key: "off-secret", Off: true}, {Name: "Team", Key: "team-secret"}}}
 			path, body := "/v1/chat/completions", chatReq
@@ -61,9 +62,10 @@ func TestUsageNamesTheKeyThatAnswered(t *testing.T) {
 				t.Fatalf("reply: %d %s", code, reply)
 			}
 			r := lastUsage(t)
+			keys := tried.all()
 			if r.ProviderKeyID != provider.KeyID("team-secret") || r.ProviderKeyName != "Team" || r.Input != 20 || r.Output != 5 || r.CacheRead != 10 ||
-				strings.Join(tried, ",") != "personal-secret,team-secret" {
-				t.Fatalf("usage: %+v; tried %v", r, tried)
+				strings.Join(keys, ",") != "personal-secret,team-secret" {
+				t.Fatalf("usage: %+v; tried %v", r, keys)
 			}
 			if err := provider.RenameKey("plan", r.ProviderKeyID, "Renamed team"); err != nil {
 				t.Fatal(err)

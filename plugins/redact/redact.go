@@ -17,22 +17,22 @@ import (
 	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "redact", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
 		Name: "Privacy masking", Sub: "Secrets, personal data and your own words go to vendors as placeholders, and come back as they were",
 		One: "Masking is on", Many: "Masking is on",
-		InUse: InUse,
-		SetAt: "privacy #redactList",
-		// Insights › Masking: what masking did, request by request
-		Parts:  []pluginrt.Part{{Slot: "nav.page", Key: "masking"}},
+		InUse:  InUse,
 		Client: []string{"i18n.js", "redact.css", "client.js", "page.js"},
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(gwmw.Mask(masking.Masker{}))
 			return nil
 		},
+		Parts:      []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "masking"}},
+		SettingsAt: &sdk.FeatureSettingsLocation{Tab: "privacy", RowID: "redactList"},
 	})
 }
 

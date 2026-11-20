@@ -386,7 +386,7 @@ func (idx *requestIndex) fromDisk(want map[string]sessions.CallSource) {
 		}
 		c.mapped = m
 		s, ok := want[c.Source.Path]
-		if !ok || s.Size != c.Source.Size || !s.Modified.Equal(c.Source.Modified) {
+		if !ok || !sameCallSource(s, c.Source) {
 			return true
 		}
 		c.Source = s

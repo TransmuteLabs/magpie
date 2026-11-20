@@ -1,0 +1,156 @@
+package pluginrt
+
+import (
+	"errors"
+	"maps"
+	"slices"
+	"testing"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
+)
+
+func TestFeatureActivationDisposesOwnedRegistrations(t *testing.T) {
+	for _, state := range []string{"active", "error", "panic"} {
+		t.Run(state, func(t *testing.T) {
+			var events []string
+			feature := featureManifest(sdk.FeatureContribution{
+				ID: "fixture", Requires: []string{"gateway"},
+				Parts: []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "fixture"}},
+				Activate: func(scope sdk.FeatureLifetime) error {
+					events = append(events, "start")
+					scope.OnDispose(func() { events = append(events, "first cleanup") })
+					scope.OnDispose(func() { events = append(events, "second cleanup") })
+					switch state {
+					case "error":
+						return errors.New("activation failed")
+					case "panic":
+						panic("activation failed")
+					default:
+						return nil
+					}
+				},
+			})
+			runtime := New([]Manifest{feature})
+			t.Cleanup(runtime.Stop)
+			runtime.Reconcile(map[string]bool{"fixture": true}, nil)
+			status := runtime.Statuses()[0]
+			if state == "active" {
+				if status.State != Active || !slices.Equal(status.Parts, []Part{{"nav.page", "fixture"}}) {
+					t.Fatalf("active feature: %+v", status)
+				}
+				if !slices.Equal(events, []string{"start"}) {
+					t.Fatalf("before disable: %v", events)
+				}
+				runtime.Reconcile(nil, nil)
+				status = runtime.Statuses()[0]
+				if status.State != Disposed || len(status.Parts) != 0 {
+					t.Fatalf("disabled feature: %+v", status)
+				}
+			} else if status.State != Failed || len(status.Parts) != 0 {
+				t.Fatalf("failed feature: %+v", status)
+			}
+			runtime.Stop()
+			if !slices.Equal(events, []string{"start", "second cleanup", "first cleanup"}) {
+				t.Fatalf("activation and disposal: %v", events)
+			}
+		})
+	}
+}
+
+func TestFeaturePartsRejectAmbiguousDeclarations(t *testing.T) {
+	for name, declarations := range map[string][]sdk.FeaturePart{
+		"unknown slot": {{Slot: "unknown", Key: "page"}},
+		"empty key":    {{Slot: sdk.FeatureInlinePart}},
+		"repeated part": {
+			{Slot: sdk.FeatureInlinePart, Key: "tools"},
+			{Slot: sdk.FeatureInlinePart, Key: "tools"},
+		},
+		"multiple pages": {
+			{Slot: sdk.FeatureNavigationPage, Key: "alpha"},
+			{Slot: sdk.FeatureNavigationPage, Key: "beta"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if parts, err := featureParts(declarations); err == nil || len(parts) != 0 {
+				t.Fatalf("accepted parts %v with error %v", parts, err)
+			}
+		})
+	}
+}
+
+func TestFeatureSchemaValidatesConfigAndOwnsItsValues(t *testing.T) {
+	minimum := 1.0
+	settings := []sdk.FeatureSetting{
+		{Name: "page", Kind: sdk.FeatureSettingInteger, Title: "Page size", Default: 20, Enum: []any{10, 20}},
+		{Name: "enabled", Kind: sdk.FeatureSettingBoolean, Title: "Enabled", Default: true},
+		{Name: "interval", Kind: sdk.FeatureSettingNumber, Title: "Interval", Default: 1.5, Minimum: &minimum},
+		{Name: "label", Kind: sdk.FeatureSettingString, Title: "Label", Default: ""},
+	}
+	schema, err := SchemaOf(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings[0].Enum[0] = 50
+	minimum = 2.0
+	if !slices.Equal(schema.Order, []string{"page", "enabled", "interval", "label"}) ||
+		!slices.Equal(schema.Properties["page"].Enum, []any{int64(10), int64(20)}) ||
+		schema.Properties["page"].Default != int64(20) {
+		t.Fatalf("projected settings: %+v, page: %+v", schema, schema.Properties["page"])
+	}
+	got, err := schema.Validate(map[string]any{"page": 10.0, "enabled": false, "interval": 1.25, "label": "local"})
+	want := map[string]any{"page": int64(10), "enabled": false, "interval": 1.25, "label": "local"}
+	if err != nil || !maps.Equal(got, want) {
+		t.Fatalf("config = %v, %v, want %v", got, err, want)
+	}
+}
+
+func TestFeatureSchemaRejectsMalformedDeclarations(t *testing.T) {
+	valid := sdk.FeatureSetting{Name: "page", Kind: sdk.FeatureSettingInteger, Title: "Page size", Default: 20, Enum: []any{10, 20}}
+	for name, mutate := range map[string]func(*sdk.FeatureSetting){
+		"missing title": func(setting *sdk.FeatureSetting) { setting.Title = "" },
+		"unknown kind":  func(setting *sdk.FeatureSetting) { setting.Kind = "object" },
+		"invalid enum":  func(setting *sdk.FeatureSetting) { setting.Enum = []any{map[string]any{}} },
+		"default":       func(setting *sdk.FeatureSetting) { setting.Default = 30 },
+		"inverted bounds": func(setting *sdk.FeatureSetting) {
+			minimum, maximum := 20.0, 10.0
+			setting.Minimum, setting.Maximum = &minimum, &maximum
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := valid
+			mutate(&invalid)
+			if _, err := SchemaOf([]sdk.FeatureSetting{invalid}); err == nil {
+				t.Fatalf("accepted malformed setting: %+v", invalid)
+			}
+		})
+	}
+	if _, err := SchemaOf([]sdk.FeatureSetting{valid, valid}); err == nil {
+		t.Fatal("accepted duplicate setting")
+	}
+}
+
+func TestFeatureIntegerSettingsKeepExactValues(t *testing.T) {
+	setting := sdk.FeatureSetting{
+		Name: "limit", Title: "Limit", Kind: sdk.FeatureSettingInteger,
+		Default: int64(9007199254740991),
+	}
+	schema, err := SchemaOf([]sdk.FeatureSetting{setting})
+	if err != nil || schema.Properties["limit"].Default != setting.Default {
+		t.Fatalf("exact default: %+v, %v", schema, err)
+	}
+	for _, value := range []any{int64(9007199254740993), int64(-9007199254740993), float64(9007199254740992)} {
+		if got, err := schema.Validate(map[string]any{"limit": value}); err == nil {
+			t.Errorf("accepted unsafe saved integer %v as %v", value, got)
+		}
+		invalid := setting
+		invalid.Default = value
+		if _, err := SchemaOf([]sdk.FeatureSetting{invalid}); err == nil {
+			t.Errorf("accepted unsafe default %v", value)
+		}
+		invalid = setting
+		invalid.Enum = []any{setting.Default, value}
+		if _, err := SchemaOf([]sdk.FeatureSetting{invalid}); err == nil {
+			t.Errorf("accepted unsafe enum %v", value)
+		}
+	}
+}

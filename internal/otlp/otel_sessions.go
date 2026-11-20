@@ -13,14 +13,33 @@ import (
 	"github.com/yetone/magpie/internal/usage"
 )
 
-type sessionAvailability struct {
-	config settings.OTel
-	agents map[string]time.Time
-	seen   map[observedSession]time.Time
-}
+const sessionObservationTTL = 5 * time.Minute
 
 type observedSession struct {
 	agent, id string
+}
+
+type sourceObservation struct {
+	source string
+	at     time.Time
+}
+
+type sessionAvailability struct {
+	config settings.OTel
+	seen   map[observedSession][]sourceObservation
+}
+
+func (a *sessionAvailability) observe(key observedSession, source string, at time.Time) {
+	observations := a.seen[key]
+	for index, observation := range observations {
+		if observation.source == source {
+			if at.After(observation.at) {
+				observations[index].at = at
+			}
+			return
+		}
+	}
+	a.seen[key] = append(observations, sourceObservation{source: source, at: at})
 }
 
 // SessionAgent reports recent observations for callers without a session ID.
@@ -58,12 +77,11 @@ func (e *otelExporter) sessionObserved(agent, session string, config settings.OT
 	}
 	a := e.sessions.Load()
 	if a != nil && reflect.DeepEqual(a.config, config) {
-		at := a.agents[agent]
-		if session != "" {
-			at = a.seen[observedSession{agent, session}]
-		}
-		if time.Since(at) < 5*time.Minute {
-			return true
+		for _, observation := range a.seen[observedSession{agent, session}] {
+			if time.Since(observation.at) < sessionObservationTTL &&
+				sessions.NativeTraceSourceAllowed(agent, observation.source) {
+				return true
+			}
 		}
 	}
 	if session == "" {
@@ -146,29 +164,25 @@ func (e *otelExporter) watchSessions(ctx context.Context, started time.Time, eve
 			e.sessions.Store(nil)
 		}
 		spans := reader.Poll(config.Bodies)
-		available := &sessionAvailability{config: config, agents: map[string]time.Time{}, seen: map[observedSession]time.Time{}}
+		available := &sessionAvailability{config: config, seen: map[observedSession][]sourceObservation{}}
+		now := time.Now()
 		if previous := e.sessions.Load(); previous != nil {
-			for agent, at := range previous.agents {
-				if time.Since(at) < 5*time.Minute {
-					available.agents[agent] = at
-				}
-			}
-			for key, at := range previous.seen {
-				if time.Since(at) < 5*time.Minute {
-					available.seen[key] = at
+			for key, observations := range previous.seen {
+				for _, observation := range observations {
+					if now.Sub(observation.at) < sessionObservationTTL {
+						available.observe(key, observation.source, observation.at)
+					}
 				}
 			}
 		}
 		for _, identity := range reader.VisibleSessions() {
-			available.seen[observedSession{identity.Agent, identity.ID}] = time.Now()
+			available.observe(observedSession{identity.Agent, identity.ID}, identity.Agent, now)
 		}
 		for _, s := range spans {
-			if s.End.After(available.agents[s.Agent]) {
-				available.agents[s.Agent] = s.End
-			}
-			key := observedSession{s.Agent, s.Session}
-			if s.Session != "" && s.End.After(available.seen[key]) {
-				available.seen[key] = s.End
+			source := s.SourceAgent()
+			available.observe(observedSession{agent: s.Agent}, source, s.End)
+			if s.Session != "" {
+				available.observe(observedSession{s.Agent, s.Session}, source, s.End)
 			}
 		}
 		e.sessions.Store(available)

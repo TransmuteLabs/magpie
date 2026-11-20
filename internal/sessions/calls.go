@@ -3,6 +3,7 @@ package sessions
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -158,7 +159,7 @@ type cxCallUsage = cxUsage
 var callDesktopDirs = desktopDataDirs
 
 // DesktopDataDirs are the folders whose session metadata belongs to this index.
-func DesktopDataDirs() []string { return desktopReadDirs() }
+func DesktopDataDirs() []string { return InspectCallHistory().DesktopDirs() }
 
 // desktopReadDirs are callDesktopDirs, or none when Claude Desktop's
 // sessions are not to be read (Reads): its local_*.json and Cowork's
@@ -195,6 +196,7 @@ type callsFlight struct {
 	done    chan struct{}
 	calls   []Call
 	waiters int
+	history CallHistory
 }
 
 var (
@@ -208,16 +210,29 @@ var (
 	readingCalls func()
 )
 
-func sharedCalls(since time.Time, agent string) []Call {
+func sharedCalls(since time.Time, agent string) (calls []Call) {
+	history := InspectCallHistory()
+	if !history.known || agent != "" && !history.allows(agent) {
+		return nil
+	}
+	defer func() {
+		if !history.Current() {
+			calls = nil
+		}
+	}()
 	key := callsKey{since.UnixNano(), since.IsZero(), agent}
 	callsFlights.Lock()
 	if fl := callsFlights.on[key]; fl != nil {
+		if !history.Same(fl.history) {
+			callsFlights.Unlock()
+			return nil
+		}
 		fl.waiters++
 		callsFlights.Unlock()
 		<-fl.done
 		return slices.Clone(fl.calls)
 	}
-	fl := &callsFlight{done: make(chan struct{})}
+	fl := &callsFlight{done: make(chan struct{}), history: history}
 	callsFlights.on[key] = fl
 	callsFlights.Unlock()
 	// Whatever happens to the read, the flight ends and its waiters go on.
@@ -235,7 +250,7 @@ func sharedCalls(since time.Time, agent string) []Call {
 		if readingCalls != nil {
 			readingCalls()
 		}
-		fl.calls = callsFor(since, "", agent)
+		fl.calls = callsFor(history, since, agent)
 	}()
 	// none joins once the flight is out of the map, so the count read with
 	// that is every waiter
@@ -251,21 +266,13 @@ func sharedCalls(since time.Time, agent string) []Call {
 	return fl.calls
 }
 
-func callsFor(since time.Time, session, agent string) []Call {
-	all := callSources()
+func callsFor(history CallHistory, since time.Time, agent string) []Call {
+	all := history.callFiles(nil, history.codexCallFiles())
 	pruneCalls(all)
 	files := all
 	if agent != "" {
 		files = slices.DeleteFunc(slices.Clone(all), func(f file) bool { return f.agent != agent })
 	}
-	// Earlier files own messages copied into a resumed Claude session.
-	sort.Slice(files, func(i, j int) bool {
-		if !files[i].mod.Equal(files[j].mod) {
-			return files[i].mod.Before(files[j].mod)
-		}
-		return files[i].path < files[j].path
-	})
-	seen := map[string]bool{}
 	capacity := 0
 	callsMu.Lock()
 	for _, f := range files {
@@ -274,27 +281,12 @@ func callsFor(since time.Time, session, agent string) []Call {
 		}
 	}
 	callsMu.Unlock()
-	if session != "" {
-		capacity = 0
-	}
 	out := make([]Call, 0, capacity)
-	for _, f := range files {
-		if !since.IsZero() && f.mod.Before(modOf(since)) {
-			continue
+	visitCalls(files, since, func(_ string, call Call) {
+		if history.allows(call.Agent) {
+			out = append(out, call)
 		}
-		st := readCalls(f)
-		for _, c := range st.Calls {
-			if c.Msg != "" {
-				if seen[c.Msg] {
-					continue
-				}
-				seen[c.Msg] = true
-			}
-			if (since.IsZero() || !c.Time.Before(since)) && (session == "" || c.Session == session) {
-				out = append(out, c)
-			}
-		}
-	}
+	})
 	sort.SliceStable(out, func(i, j int) bool {
 		if !out[i].Time.Equal(out[j].Time) {
 			return out[i].Time.After(out[j].Time)
@@ -307,18 +299,32 @@ func callsFor(since time.Time, session, agent string) []Call {
 	return out
 }
 
-// callFiles are the session files that hold calls: Claude Code's, Cowork's
-// and Desktop's own, and Codex's.
-func callFiles() []file { return callFilesWith(codexFiles()) }
-
-// callFilesWith is callFiles with codex the rollouts codexFiles found.
-func callFilesWith(codex []file) []file { return distinctOf(callFileLists(codex)...) }
-
-// callFileLists are callFilesWith's lists, each path not yet kept once:
-// the callers that list more add theirs and keep each path once, over
-// all of them (distinctOf), instead of copying callFilesWith's again.
-func callFileLists(codex []file) [][]file {
-	return [][]file{claudeFiles(), claudeDesktopFiles(), allowed(codex), wslFiles("claude", "codex")}
+func visitCalls(files []file, since time.Time, visit func(source string, call Call)) {
+	// Earlier files own messages copied into a resumed Claude session.
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].mod.Equal(files[j].mod) {
+			return files[i].mod.Before(files[j].mod)
+		}
+		return files[i].path < files[j].path
+	})
+	seen := map[string]bool{}
+	for _, f := range files {
+		if !since.IsZero() && f.mod.Before(modOf(since)) {
+			continue
+		}
+		st := readCalls(f)
+		for _, c := range st.Calls {
+			if c.Msg != "" {
+				if seen[c.Msg] {
+					continue
+				}
+				seen[c.Msg] = true
+			}
+			if since.IsZero() || !c.Time.Before(since) {
+				visit(f.agent, c)
+			}
+		}
+	}
 }
 
 func claudeDesktopFiles() []file {
@@ -346,27 +352,59 @@ func claudeDesktopFiles() []file {
 // entry in wholeCallReaders, lineCallReaders or resumeCallReaders, but
 // Qoder's and Qoder CN's (qoder.go), whose files are Claude Code's and read
 // as Claude Code's are (ccCallAgent).
-func callSources() []file { return callSourcesWith(codexFiles()) }
+func callSources() []file {
+	history := InspectCallHistory()
+	return history.callFiles(nil, history.codexCallFiles())
+}
 
-// callSourcesWith is callSources with codex the rollouts codexFiles found.
-func callSourcesWith(codex []file) []file { return callSourcesInto(nil, codex) }
-
-// callSourcesInto is callSourcesWith appended to out.
-func callSourcesInto(out []file, codex []file) []file {
-	lists := append(callFileLists(codex), openCodeCallFiles(), zcodeCallFiles(), dshCallFiles(),
-		minimaxCallFiles(), kimiCallFiles(), wslFiles("kimi"), piCallFiles(), codebuddyCallFiles(), workbuddyAIFiles(),
-		agyCallFiles(),                               // #2097
-		antigravityCallFiles(),                       // #2190
-		wslFiles("antigravity"), wslCallFiles("agy"), // @guyng35955 on X
-		devinCallFiles(),                      // aohan0905 on X
-		droidFiles(),                          // _meouwu on X: its settings' totals (calls_droid.go)
-		workbuddyCallFiles(), grokCallFiles(), // #4423
-		// Claude Code's lines, read by claudeCallLine (eating_dream on X)
-		ccFiles("qoder", QoderDir("qoder")), ccFiles("qoder-cn", QoderDir("qoder-cn")))
-	if out == nil {
-		return allowed(distinctOf(lists...))
+func (history CallHistory) callFiles(out []file, codex []file) []file {
+	if !history.known {
+		return out
 	}
-	return allowed(distinctInto(out, lists...))
+	var lists [][]file
+	add := func(id string, list func() []file) {
+		if history.allows(id) {
+			lists = append(lists, list())
+		}
+	}
+	wsl := func(list func(...string) []file, agents ...string) []file {
+		agents = slices.DeleteFunc(agents, func(id string) bool { return !history.allows(id) })
+		if len(agents) == 0 {
+			return nil
+		}
+		return list(agents...)
+	}
+	add("claude", claudeFiles)
+	add("claude-desktop", claudeDesktopFiles)
+	lists = append(lists, codex, wsl(wslFiles, "claude", "codex"))
+	add("opencode", openCodeCallFiles)
+	add("zcode", zcodeCallFiles)
+	add("dsh", dshCallFiles)
+	add("minimax-code", minimaxCallFiles)
+	add("kimi", kimiCallFiles)
+	lists = append(lists, wsl(wslFiles, "kimi"))
+	add("pi", piFiles)
+	add("raft", raftFiles)
+	add("cindy", cindyFiles)
+	add("omp", ompFiles)
+	lists = append(lists, wsl(wslFiles, "pi", "raft", "omp"))
+	add("codebuddy", codebuddyCallFiles)
+	add("workbuddy-ai", workbuddyAIFiles)
+	add("agy", agyCallFiles)
+	add("antigravity", antigravityCallFiles)
+	lists = append(lists, wsl(wslFiles, "antigravity"), wsl(wslCallFiles, "agy"))
+	add("devin", devinCallFiles)
+	add("droid", droidFiles)
+	add("workbuddy", workbuddyCallFiles)
+	add("grok", grokCallFiles)
+	add("qoder", func() []file { return ccFiles("qoder", QoderDir("qoder")) })
+	add("qoder-cn", func() []file { return ccFiles("qoder-cn", QoderDir("qoder-cn")) })
+	if out == nil {
+		out = distinctOf(lists...)
+	} else {
+		out = distinctInto(out, lists...)
+	}
+	return slices.DeleteFunc(out, func(f file) bool { return !history.allows(f.agent) })
 }
 
 // desktopDataDirs are Claude Desktop's folders on this computer that
@@ -1393,20 +1431,100 @@ type CallSource struct {
 	Modified         time.Time
 }
 
-func CallSources() []CallSource { return callSourcesOf(callSources()) }
+// CallHistory is the native ownership snapshot used by one accounting read.
+type CallHistory struct {
+	authority historyPublication
+	jsonl     map[string]bool
+	known     bool
+}
+
+func InspectCallHistory() CallHistory {
+	ctx := context.Background()
+	authority, err := inspectHistoryPublication(ctx)
+	if err != nil {
+		return CallHistory{}
+	}
+	return CallHistory{authority: authority, jsonl: authority.jsonlAccounting(ctx), known: true}
+}
+
+func (history CallHistory) allows(agent string) bool {
+	return history.known && (history.authority.native(agent) || history.jsonl[agent])
+}
+
+func (history CallHistory) Current() bool {
+	return history.Same(InspectCallHistory())
+}
+
+func (history CallHistory) Same(other CallHistory) bool {
+	return history.known == other.known &&
+		(!history.known || history.authority.sameNative(other.authority) && maps.Equal(history.jsonl, other.jsonl))
+}
+
+func (history CallHistory) DesktopCalls() bool {
+	return history.allows("claude-desktop")
+}
+
+func (history CallHistory) DesktopDirs() []string {
+	if !history.known || !history.authority.native("claude-desktop") {
+		return nil
+	}
+	return desktopReadDirs()
+}
+
+func (history CallHistory) codexFiles() []file {
+	if history.known && history.authority.native("codex") {
+		return codexFiles()
+	}
+	return nil
+}
+
+func (history CallHistory) codexCallFiles() []file {
+	if history.allows("codex") {
+		return codexFiles()
+	}
+	return nil
+}
+
+func CallSources() []CallSource {
+	history := InspectCallHistory()
+	sources := history.Sources()
+	if !history.Current() {
+		return nil
+	}
+	return sources
+}
+
+func (history CallHistory) Sources() []CallSource {
+	if !history.known {
+		return nil
+	}
+	return callSourcesOf(history.callFiles(nil, history.codexCallFiles()))
+}
 
 // CallSourcesAndCodexIdentities is CallSources and CodexIdentities from one
 // walk of the Codex folders. The Requests page asks for both on every
 // rebuild, and the walk lstat()s each rollout: twice over 12k rollouts was
 // ~150ms of each rebuild.
 func CallSourcesAndCodexIdentities() ([]CallSource, map[string]CodexIdentity) {
-	codex := codexFiles()
+	history := InspectCallHistory()
+	sources, identities := history.SourcesAndCodexIdentities()
+	if !history.Current() {
+		return nil, nil
+	}
+	return sources, identities
+}
+
+func (history CallHistory) SourcesAndCodexIdentities() ([]CallSource, map[string]CodexIdentity) {
+	if !history.known {
+		return nil, nil
+	}
+	codex := history.codexCallFiles()
 	// the listing is let go once its sources are taken: made new on each
 	// Requests and effort ask, it was ~100 MB of a minute of polls (#2278)
-	fs := callSourcesInto(listingBuf(), codex)
+	fs := history.callFiles(listingBuf(), codex)
 	sources := callSourcesOf(fs)
 	putListingBuf(fs)
-	return sources, codexIdentitiesOf(codex)
+	return sources, history.codexIdentities(codex)
 }
 
 // listingBufs are listings a read takes and lets go of before it ends,
@@ -1438,7 +1556,16 @@ func callSourcesOf(fs []file) []CallSource {
 // ReadCallSource returns immutable calls for one source. Independent files can
 // be read concurrently; disk IO never holds callsMu.
 func ReadCallSource(s CallSource) []Call {
-	if !Reads(s.Agent) {
+	history := InspectCallHistory()
+	calls := history.ReadSource(s)
+	if !history.Current() {
+		return nil
+	}
+	return calls
+}
+
+func (history CallHistory) ReadSource(s CallSource) []Call {
+	if !history.allows(s.Agent) {
 		return nil
 	}
 	st := readCalls(file{path: s.Path, key: s.Key, agent: s.Agent, size: s.Size, mod: modOf(s.Modified)})
@@ -1460,7 +1587,21 @@ func ReadCallSource(s CallSource) []Call {
 		}
 	}
 	callsMu.Unlock()
-	return st.Calls
+	if s.Agent != "claude" || history.DesktopCalls() {
+		return st.Calls
+	}
+	first := slices.IndexFunc(st.Calls, func(call Call) bool { return call.Agent == "claude-desktop" })
+	if first < 0 {
+		return st.Calls
+	}
+	calls := make([]Call, 0, len(st.Calls)-1)
+	calls = append(calls, st.Calls[:first]...)
+	for _, call := range st.Calls[first+1:] {
+		if call.Agent != "claude-desktop" {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }
 
 // desktopEntrypoint is a Claude Code transcript's entrypoint when Claude

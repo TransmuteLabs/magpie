@@ -42,6 +42,32 @@ func TestCodexTitlesRenameAndIsolation(t *testing.T) {
 	}
 }
 
+func TestCodexTitlesReplaceSameStamp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "session_index.jsonl")
+	const first = "{\"id\":\"main\",\"thread_name\":\"first\"}\n"
+	const later = "{\"id\":\"main\",\"thread_name\":\"later\"}\n"
+	writeHistoryAuthority(t, path, []byte(first))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := codexTitlesAt(path, []string{"main"})["main"]; got != "first" {
+		t.Fatal(got)
+	}
+	replacement := path + ".new"
+	writeHistoryAuthority(t, replacement, []byte(later))
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := codexTitlesAt(path, []string{"main"})["main"]; got != "later" {
+		t.Fatalf("same-stamp replacement returned %q", got)
+	}
+}
+
 func TestCodexTitlesIncrementalApplications(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()

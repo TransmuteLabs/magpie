@@ -13,11 +13,14 @@ package sessions
 // Codex's sessions are converted for each other (carry_convert.go).
 
 import (
+	"context"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/proc"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Carry is another agent a session can be carried on in, and the shell
@@ -41,34 +44,72 @@ var ompThere = func() bool {
 }
 
 // carries are the other agents a session can be carried on in.
-func carries(s Session) []Carry {
-	if s.source != nil && s.source.stale {
-		return nil
+func carries(s Session) (out []Carry) {
+	eachCarry(s, func(option carryOption) bool {
+		out = append(out, option.Carry)
+		return true
+	})
+	return out
+}
+
+type carryOption struct {
+	Carry
+	linked    *sdk.SessionConverter
+	installed SessionExtension
+}
+
+func (option carryOption) convert(ctx context.Context, owner sessionHistoryOwner) (CarryResult, error) {
+	if option.linked != nil {
+		return convertLinkedSession(ctx, owner, *option.linked)
+	}
+	return carryExtensionOwned(ctx, owner, option.installed)
+}
+
+func eachCarry(s Session, offer func(carryOption) bool) {
+	native := s.source == nil
+	if !native && (s.source.stale || s.source.storage != nil) {
+		return
 	}
 	if s.ReadOnly || s.WSL != "" || s.Path == "" || s.Cwd == "" {
-		return nil
+		return
 	}
-	var out []Carry
-	switch s.Agent {
-	case "pi":
-		if ompThere() {
-			out = append(out, Carry{Agent: "omp", Command: inFolder(s.Cwd, "omp --fork "+argQuote(s.Path))})
+	directOMP := native && s.Agent == "pi" && ompThere()
+	if directOMP {
+		if !offer(carryOption{Carry: Carry{Agent: "omp", Command: inFolder(s.Cwd, "omp --fork "+argQuote(s.Path))}}) {
+			return
 		}
 	}
-	if to := convertsTo[s.Agent]; to != "" && agentThere(to) {
-		out = append(out, Carry{Agent: to, Convert: true})
-	}
-	taken := map[string]bool{}
-	for _, carry := range out {
-		taken[carry.Agent] = true
-	}
-	for _, route := range extensionSessionRoutes(s.Agent) {
-		if !taken[route.Session.To] {
-			out = append(out, Carry{Agent: route.Session.To, Convert: true})
-			taken[route.Session.To] = true
+	routes := extensionSessionRoutes(s.Agent)
+	if native {
+		for index := range linkedSessionConverters {
+			converter := &linkedSessionConverters[index]
+			if converter.Descriptor.From != s.Agent {
+				continue
+			}
+			target := converter.Descriptor.To
+			choice := carryOption{Carry: Carry{Agent: target, Convert: true}}
+			installed := slices.IndexFunc(routes, func(route SessionExtension) bool { return route.Session.To == target })
+			if installed >= 0 {
+				choice.installed = routes[installed]
+				routes = slices.Delete(routes, installed, installed+1)
+			} else if agentThere(target) {
+				choice.linked = converter
+			} else {
+				continue
+			}
+			if !offer(choice) {
+				return
+			}
 		}
 	}
-	return out
+	for _, route := range routes {
+		if directOMP && route.Session.To == "omp" {
+			continue
+		}
+		if !offer(carryOption{Carry: Carry{Agent: route.Session.To, Convert: true}, installed: route}) {
+			return
+		}
+	}
 }
 
 // inFolder is a shell line running run in the folder cwd.

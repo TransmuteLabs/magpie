@@ -165,21 +165,6 @@ func targetOf(a *agent.Agent) *Target {
 		t.Skills = filepath.Join(a.Dir, "skills")
 		return t
 	}
-	if strings.HasPrefix(a.ID, "claude#") {
-		// another Claude Code config folder (agent.claudeDirAgents), the
-		// isolated Desktop's Code tab's among them (xMopf7RF on X): Claude
-		// Code run with CLAUDE_CONFIG_DIR there reads CLAUDE.md and skills
-		// in it, and its MCP servers from the .claude.json in it; the
-		// default ~/.claude's are in ~/.claude.json beside it
-		t.Instructions = filepath.Join(a.Dir, "CLAUDE.md")
-		t.Skills = filepath.Join(a.Dir, "skills")
-		mcp := filepath.Join(a.Dir, ".claude.json")
-		if filepath.Clean(a.Dir) == filepath.Join(h, ".claude") {
-			mcp = filepath.Join(h, ".claude.json")
-		}
-		t.MCP = &mcpFile{Path: mcp, Format: fmtClaude}
-		return t
-	}
 	if n := a.SharedName(); n != a.Name {
 		// the files are another app's too (the Cursor editor's ~/.cursor):
 		// named for both, not for the CLI alone
@@ -188,18 +173,6 @@ func targetOf(a *agent.Agent) *Target {
 		t.Agent = &named
 	}
 	switch a.ID {
-	case "claude":
-		d := claudeDir()
-		t.Instructions = filepath.Join(d, "CLAUDE.md")
-		t.MCP = &mcpFile{Path: claudeJSON(), Format: fmtClaude}
-		t.Skills = filepath.Join(d, "skills")
-		t.Settings = filepath.Join(d, "settings.json")
-	case "codex":
-		d := codexDir()
-		t.Instructions = filepath.Join(d, "AGENTS.md")
-		t.Override = filepath.Join(d, "AGENTS.override.md")
-		t.MCP = &mcpFile{Path: filepath.Join(d, "config.toml"), Format: fmtCodex}
-		t.Skills = filepath.Join(d, "skills")
 	case "gemini":
 		d := filepath.Join(h, ".gemini")
 		t.Instructions = filepath.Join(d, "GEMINI.md")

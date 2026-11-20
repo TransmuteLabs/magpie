@@ -638,8 +638,8 @@ func readResponsesFor(body []byte, facts, keepInstructions bool) (*Request, erro
 						delete(r.Namespaced, name)
 					}
 				}
-			case "function":
-				if o.Name != "" {
+			case "function", "custom":
+				if o.Name != "" && (o.Type == "function" || r.Namespaced[o.Name].Custom) {
 					r.ToolChoice = "name:" + o.Name
 				}
 			}

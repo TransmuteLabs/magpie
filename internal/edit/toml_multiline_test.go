@@ -200,3 +200,37 @@ func TestAtomically(t *testing.T) {
 		t.Fatalf("model = %q", v)
 	}
 }
+
+func TestAtomicallyKeepsEditMadeDuringRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	target, err := Target(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const original = "model = \"original\"\n"
+	const user = "model = \"user\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("later step failed")
+	var edited bool
+	err = Filtered(func(name string, data []byte) []byte {
+		if name == target && string(data) == original {
+			edited = true
+			if err := os.WriteFile(path, []byte(user), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return data
+	}, func() error {
+		return Atomically(func() error {
+			if err := SetTOMLTop(path, KV{Path: "model", Value: "temporary"}); err != nil {
+				return err
+			}
+			return failure
+		}, path)
+	})
+	if !edited || !errors.Is(err, failure) || read(t, path) != user {
+		t.Fatalf("rollback discarded the concurrent edit: edited=%t error=%v config=%q", edited, err, read(t, path))
+	}
+}

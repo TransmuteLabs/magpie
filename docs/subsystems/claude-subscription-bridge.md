@@ -1261,6 +1261,17 @@ history to the 1h cache at 2×.
 
 ## Runtime path for a new turn
 
+Each run creates its linked [`AgentRunControl`](../../pkg/extension/agent_run_control.go)
+module. The [Claude Code implementation](../../internal/extension/builtin/claude/run_control.go)
+owns the JSON control frames for initialization, flag settings, effort and
+rewind, and matches replies to requests from that run. The gateway selects
+the process and closes the module when the process ends. One deadline
+covers writing a control frame to stdin and waiting for its reply. If a
+canceled write may have left a partial frame, the gateway closes that run's
+input before any further write. Rewind and settings errors retain their
+different restart policies. The gateway still manages conversation reuse,
+tool ownership, stream rendering and accounting.
+
 `serveClaudeSubscription`'s `start` tries, in order:
 
 1. `subscriptionBridge.resume`: an idle run waiting at the conversation the
@@ -1352,8 +1363,8 @@ history to the 1h cache at 2×.
    (a Discord report, v0.1.2862). A turn told to a saved session says the
    same (`renderClaudeTurn`).
 
-A Claude Code that ends before it answers a control request
-(`cliControl`: `initialize`, the safety context) is reported with its
+A Claude Code that ends before it answers a linked control request
+(`initialize`, the safety context) is reported with its
 exit status and the end of its stderr (`endedBefore`), as one that ends
 before it reads its input is (`whyEnded`). The tool-results path and
 `resume` already start a new run when the one they found has ended.

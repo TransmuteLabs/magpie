@@ -23,6 +23,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/testenv"
 	"github.com/yetone/magpie/internal/wslrun"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // autoModeAsk is Claude Code's auto mode classifier's first stage as it
@@ -673,9 +674,31 @@ func TestClaudeBridgeSafeguardResults(t *testing.T) {
 
 // Exercise the actual subprocess/control wire: changed and removed contexts
 // reach an existing run; a rejected update restarts it with the new context.
+type observedClaudeRunControl struct {
+	sdk.AgentRunControl
+	initializes *atomic.Int32
+	updates     *atomic.Int32
+}
+
+func (c observedClaudeRunControl) Initialize(ctx context.Context, schema json.RawMessage, wait time.Duration) error {
+	c.initializes.Add(1)
+	return c.AgentRunControl.Initialize(ctx, schema, wait)
+}
+
+func (c observedClaudeRunControl) ApplyEnvironment(ctx context.Context, env map[string]string, wait time.Duration) error {
+	c.updates.Add(1)
+	return c.AgentRunControl.ApplyEnvironment(ctx, env, wait)
+}
+
 func TestClaudeBridgeSafeguardContextUpdates(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a Python script stands in for Claude Code")
+	}
+	var initializes, updates atomic.Int32
+	builtin := linkedClaudeRunControl
+	t.Cleanup(func() { linkedClaudeRunControl = builtin })
+	linkedClaudeRunControl = func(io sdk.AgentRunControlIO) sdk.AgentRunControl {
+		return observedClaudeRunControl{builtin(io), &initializes, &updates}
 	}
 	t.Setenv("TMPDIR", t.TempDir())
 	dir := t.TempDir()
@@ -771,6 +794,9 @@ for line in sys.stdin:
 		}
 		messages = append(messages, map[string]any{"role": "assistant", "content": text}, map[string]any{"role": "user", "content": "next"})
 	}
+	if starts, applied := initializes.Load(), updates.Load(); starts != 2 || applied != 6 {
+		t.Fatalf("the linked control module saw %d starts and %d updates, want 2 and 6", starts, applied)
+	}
 }
 
 // The beta must reach a Claude Code running in WSL as well as a native run.
@@ -794,6 +820,7 @@ func TestClaudeBridgeSafeguardConcurrentHandoff(t *testing.T) {
 	stdout, output := io.Pipe()
 	run := &subscriptionRun{bridge: b, token: "tok", stdin: stdin, safeguardBeta: "dangerous-tool-use-2026-09-03",
 		pending: map[string]chan mcpToolResult{"a": make(chan mcpToolResult, 1), "b": make(chan mcpToolResult, 1)}}
+	run.control = linkedClaudeRunControl(sdk.AgentRunControlIO{Send: run.tellWithin, NewID: randomToken, Ended: run.endedBefore})
 	b.runs[run.token], b.calls["a"], b.calls["b"] = run, run, run
 	t.Cleanup(func() { b.abortAll(); stdin.Close(); input.Close(); output.Close(); stdout.Close() })
 	go run.readOutput(stdout)
@@ -814,7 +841,7 @@ func TestClaudeBridgeSafeguardConcurrentHandoff(t *testing.T) {
 	if found != run || !found.claimResume() {
 		t.Fatal("first claim failed")
 	}
-	if err := run.setSafeguards(req); err != nil {
+	if err := run.setSafeguards(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
 	run.endSegment() // a late end with no attached segment cannot release A

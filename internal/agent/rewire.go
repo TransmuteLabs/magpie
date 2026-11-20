@@ -80,9 +80,9 @@ func setAgain(as []*Agent) (moved []string, errs []error) {
 		// for switching it off to put back
 		was := stashLoad()
 		e := reset(a)
-		// the address magpie wrote follows it (wiredAt)
+		// The address and ownership claims follow the newly written config.
 		for k, v := range stashLoad() {
-			if strings.HasSuffix(k, wiredAt) {
+			if strings.HasSuffix(k, wiredAt) || strings.HasSuffix(k, wireClaims) {
 				was[k] = v
 			}
 		}
@@ -128,6 +128,8 @@ func reset(a *Agent) error {
 // wiredAt ends a stash key holding the gateway address magpie last wrote
 // into an agent's config, which a move of the gateway updates.
 const wiredAt = ".wired_at"
+
+const wireClaims = ".wire_claims"
 
 // stashPut writes the stash as m has it.
 func stashPut(m map[string]string) {

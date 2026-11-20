@@ -79,8 +79,9 @@ func ruled(t *testing.T, rules ...provider.Rule) (*Server, *ruleUp, *ruleUp) {
 		{"a", "small", a, catalog.Model{ID: "small", Context: 64000, ImageInput: &no}},
 		{"b", "big", b, catalog.Model{ID: "big", Context: 1000000, Images: true, ImageInput: &yes}},
 	} {
-		srv := httptest.NewServer(x.up)
+		srv := httptest.NewServer(withoutAnonymousFixtureProbe(x.up))
 		t.Cleanup(srv.Close)
+		probeFixtureRoot(t, srv)
 		if err := provider.Save(provider.Provider{ID: x.id, Name: strings.ToUpper(x.id), Key: "k" + x.id, Models: []string{x.model}, Chat: srv.URL + "/v1"}); err != nil {
 			t.Fatal(err)
 		}

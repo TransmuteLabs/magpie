@@ -186,6 +186,17 @@ them the agent follows the files and says which memory is out of date, and
 a project's rule or fact belongs in its files, memory keeping what holds
 across projects (flying_crp on X, `TestDigestDefersToTheProjectsFiles`).
 
+Memory publication and digest assembly call the linked Go
+[`MemoryDigestRenderer`](../../pkg/extension/memory_digest.go), registered
+by the built-in [`memorydigest`](../../internal/extension/builtin/memorydigest/digest.go)
+module. Publication passes the active records' rendering fields and scope
+budgets, then persists Markdown by scope and the publication time under
+the existing store lock and journal. A renderer error preserves the
+previous publication. For assembly, Memory supplies the global, selected
+agent, and project sections. The module orders those project sections and
+applies the combined budget. Library selects the target instructions and
+reconciles their files. The contract is registered at build time.
+
 The digest changes only when published, so an agent's instructions — and
 the prompt cache built on them — change mid-session only then
 (`TestDigestChangesOnlyWhenPublished`):
@@ -234,6 +245,13 @@ filter unpicks what it hides (RealZeroP27 on X,
 memories. It is off until switched on under Memory → Learn from
 conversations; switched on, it looks back seven days (`Back`) and no
 further (`State.Since`), unless a range is picked.
+
+Distillation and Dream use the linked
+[`MemoryDistillationCodec`](../../pkg/extension/memory_distillation.go) to
+format model requests and decode suggestions. The host selects the input
+and model, sends the request through the gateway, validates evidence or
+resolves the request's short note labels, and applies changes through
+Memory's store.
 
 - How far back (`State.Days`, `SetRange`): 7, 30, 90 or 365 days, or All
   (`memdistill.All`, -1); 0 is the 7-day default, so a state from before
@@ -290,6 +308,9 @@ further (`State.Since`), unless a range is picked.
 - A failed request stops the run, records the error for the row, and
   leaves the conversation to be read again next time
   (`TestFailureAndCap`).
+- Stop discards a reply that returns after cancellation, even when the
+  completion reports success. A discarded reply leaves the conversation
+  pending and creates no candidates (`TestReadAllDiscardsSuccessfulReplyAfterStop`).
 - Routes: `GET /api/memory/distill`, `POST /api/memory/distill`
   `{on, model, effort?, days?}` (switching on, a new model, or a longer
   range reads at once; a bad level or range is a 400,
@@ -341,7 +362,9 @@ off until switched on under Memory → Tidy up every night.
   whose member was removed since: it is all that is left of it
   (`TestUntidyKeepsAMergeWhoseMemberWasPruned`).
 - A failed request changes nothing and is kept to show
-  (`TestDreamFailureChangesNothing`).
+  (`TestDreamFailureChangesNothing`). Stop also discards a successful reply
+  that returns after cancellation, before a tidy plan reaches the store
+  (`TestDreamDiscardsSuccessfulReplyAfterCancel`).
 - What the last tidy did is kept in `distill.json` (`changes`). Undo puts
   it back once (`Untidy`), leaving what the user changed since: a memory
   they brought back or archived, or a merged one they edited
@@ -378,20 +401,41 @@ meaning, since it downloads a model (~135 MB).
   on a nudge (`Poke`); a search reads up to 16 missing ones itself, and
   with none read yet it is by words while Keep reads. The model is let go
   after 10 minutes unused.
-- Ranking (`memory.Semantic`, `fuse` in
-  [search.go](../../internal/memory/search.go)): the memories whose
-  cosine with the query passes `Near` (0.30) and is within `Within` (0.15)
-  of the best are fused with the word hits by reciprocal rank (`rrfK` 20),
+- Memory selects records by scope, status, kind and tags before calling the
+  linked [`MemorySemanticRanker`](../../pkg/extension/memory_semantic.go).
+  It receives the query and a snapshot containing each selected record's
+  ID, text and why. When the model is unavailable, the host skips
+  snapshot construction and uses the word ranking. The built-in `memembed`
+  module owns the model and the indexing schedule.
+- Ranking (`fuse` in [search.go](../../internal/memory/search.go)): the
+  memories whose cosine with the query passes `Near` (0.30) and is within
+  `Within` (0.15) of the best selected record are fused with the word hits
+  by reciprocal rank (`rrfK` 20),
   pinned ×1.2 and non-global ×1.1. Calibrated on 97 real memories and 16
   queries, half in Chinese for English memories: the one sought scored a
   median 0.47, the rest a median 0.16; 12 of 16 found with ~4 others each
   (`TestSearchFindsByMeaning`).
-- Every search goes through it: the MCP server's `memory_search` and the
-  Memory tab, which asks `POST /api/memory/rank` `{q, status}` (ids, best
+- The MCP server's `memory_search`, SDK tool recall and the Memory tab use
+  this ranking. The tab asks `POST /api/memory/rank` `{q, status}` (ids, best
   first, not noted as used; null while off) and lists what it ranked
   first, then what holds the words. `GET`/`POST /api/memory/semantic`
   `{on}` give the row its state: the download's progress, the memories
   read, and why either failed.
+
+#### Semantic index input and publication
+
+Memory supplies a [`MemorySemanticIndexSource`](../../pkg/extension/memory_semantic.go)
+to background indexing and uses the same snapshot for the progress count.
+The snapshot contains active and candidate records, newest first, with
+their ID, text and why. Memory owns status, edits and removals. An
+unreadable store leaves the cache intact for a later pass.
+
+Each indexing pass uses the switch file and model directory it opened.
+Cache publication checks both under the switch lock shared with `Set`.
+Switching off removes the model and cache and returns its status while an
+embedding is running. The revoked pass discards its result. A fresh pass
+indexes the current snapshot after re-enabling. Replacing the cache
+directory also invalidates this instance's in-memory vector cache.
 
 ### Backups and sync
 

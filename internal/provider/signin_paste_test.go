@@ -21,6 +21,10 @@ func fakeCodexTokens(t *testing.T, hold chan struct{}) *atomic.Int32 {
 	t.Helper()
 	var trades atomic.Int32
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
 		r.ParseForm()
 		trades.Add(1)
 		if hold != nil {

@@ -5,7 +5,7 @@ package sessions
 // the call has in it (Call.File, From, To); magpie keeps no copy.
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,22 +14,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/tidwall/gjson"
+	"github.com/yetone/magpie/internal/extension/builtin/claude"
+	"github.com/yetone/magpie/internal/extension/builtin/codex"
+	"github.com/yetone/magpie/internal/sessionformat"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Part is one thing said in a call.
-type Part struct {
-	Role string `json:"role"`           // user, assistant or tool
-	Kind string `json:"kind"`           // text, thinking, tool_use, tool_result, context or image
-	Name string `json:"name,omitempty"` // the tool's, of its call
-	Text string `json:"text"`
-	Cut  int    `json:"cut,omitempty"` // the characters left off its end
-	// Model is the model an assistant part's own line names (#2253):
-	// Claude Code's message.model, the model the reply came back from,
-	// and Codex's turn_context.model, the one its turn was sent to. ""
-	// where the file names none; never one guessed from elsewhere.
-	Model string `json:"model,omitempty"`
-}
+type Part = sdk.SessionSourcePart
 
 // Content is what a call was given and what it said, in the order of the file.
 type Content struct {
@@ -86,107 +78,97 @@ func keep(p Part) (Part, bool) {
 
 // ContentOf reads what was said in a call from its file.
 func ContentOf(c Call) (Content, error) {
-	if !Reads(c.Agent) {
-		return Content{Input: []Part{}, Output: []Part{}}, ErrNotRead
-	}
+	return LocatedCall{Call: c, source: c.Agent, agent: c.Agent}.Content()
+}
+
+type LocatedCall struct {
+	Call
+	source, agent string
+}
+
+func (located LocatedCall) Content() (Content, error) {
+	c := located.Call
+	ctx := context.Background()
 	out := Content{Input: []Part{}, Output: []Part{}}
+	if located.source != located.agent {
+		if err := checkNativeHistoryOwner(ctx, located.agent); err != nil {
+			return out, err
+		}
+	}
+	owner, err := selectSessionHistoryOwner(ctx, Session{Agent: located.source, Path: c.File})
+	if err != nil {
+		return out, err
+	}
 	if c.File == "" || c.Agent == "opencode" { // OpenCode's are rows, not lines of a file
 		return out, errNoPlace
 	}
-	var err error
-	if c.Agent == "codex" {
-		err = codexContent(c, out.add)
-	} else {
-		err = claudeContent(c, out.add)
+	err = owner.readParts(ctx, historyRead{span: &historySpan{from: c.From, to: c.To, message: c.Msg}}, out.add)
+	if located.source != located.agent {
+		err = errors.Join(err, checkNativeHistoryOwner(ctx, located.agent))
 	}
-	return out, err
+	if err != nil {
+		return Content{Input: []Part{}, Output: []Part{}}, err
+	}
+	return out, nil
 }
 
 // FindCall is the call of a session made between two times that ended
 // nearest at (a call's Time is its last line's), if the session files have
 // one. A gateway request's window can hold the next calls of a quick tool
 // loop too; the newest of them would be another request's.
-func FindCall(session string, from, to, at time.Time) (Call, bool) {
-	if session == "" {
-		return Call{}, false
+func FindCall(agent, session string, from, to, at time.Time) (LocatedCall, bool) {
+	ctx := context.Background()
+	if session == "" || checkNativeHistoryOwner(ctx, agent) != nil {
+		return LocatedCall{}, false
 	}
-	var best Call
-	found := false
+	var files []file
+	switch agent {
+	case "claude":
+		files = distinctOf(claudeFiles(), wslFiles("claude"))
+	case "claude-desktop":
+		var code []file
+		var wsl []file
+		if checkNativeHistoryOwner(ctx, "claude") == nil {
+			code, wsl = claudeFiles(), wslFiles("claude")
+		}
+		files = distinctOf(claudeDesktopFiles(), code, wsl)
+	case "codex":
+		files = distinctOf(codexFiles(), wslFiles("codex"))
+	}
+	var best, desktopFallback LocatedCall
 	dist := func(t time.Time) time.Duration { return max(t.Sub(at), at.Sub(t)) }
-	for _, c := range callsFor(from.Add(-time.Minute), session, "") {
-		if c.Session == session && !c.Time.Before(from) && !c.Time.After(to) && (!found || dist(c.Time) < dist(best.Time)) {
-			best, found = c, true
+	closer := func(candidate Call, current LocatedCall) bool {
+		return current.Agent == "" ||
+			cmp.Or(cmp.Compare(dist(current.Time), dist(candidate.Time)),
+				candidate.Time.Compare(current.Time), cmp.Compare(candidate.File, current.File),
+				cmp.Compare(candidate.To, current.To)) > 0
+	}
+	visitCalls(allowed(files), from.Add(-time.Minute), func(source string, c Call) {
+		if c.Session != session || c.Time.Before(from) || c.Time.After(to) {
+			return
 		}
-	}
-	return best, found
-}
-
-// ---- Claude Code
-
-type ccBlock struct {
-	Type     string          `json:"type"`
-	Text     string          `json:"text"`
-	Thinking string          `json:"thinking"`
-	Name     string          `json:"name"`
-	Input    json.RawMessage `json:"input"`
-	Content  json.RawMessage `json:"content"`
-}
-
-type transcriptTextContent struct {
-	spokenOnly bool
-	raw        json.RawMessage
-	text       string
-	blocks     []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-}
-
-func (c *transcriptTextContent) UnmarshalJSON(raw []byte) error {
-	if !c.spokenOnly {
-		return c.raw.UnmarshalJSON(raw)
-	}
-	c.text, c.blocks = "", nil
-	if raw[0] == '[' {
-		if json.Unmarshal(raw, &c.blocks) != nil {
-			c.blocks = nil
+		switch {
+		case c.Agent == agent:
+			if closer(c, best) {
+				best = LocatedCall{Call: c, source: source, agent: agent}
+			}
+		case agent == "claude-desktop" && c.Agent == "claude":
+			if closer(c, desktopFallback) {
+				desktopFallback = LocatedCall{Call: c, source: source, agent: agent}
+			}
 		}
-	} else if json.Unmarshal(raw, &c.text) != nil {
-		c.text = ""
+	})
+	if best.Agent == "" {
+		best = desktopFallback
 	}
-	return nil
+	if best.Agent == "" || checkNativeHistoryOwner(ctx, best.source) != nil || checkNativeHistoryOwner(ctx, agent) != nil {
+		return LocatedCall{}, false
+	}
+	return best, true
 }
 
-func (c *transcriptTextContent) spokenParts(role string) []Part {
-	var parts []Part
-	if c.text != "" {
-		parts = append(parts, textPart(role, c.text))
-	}
-	for _, block := range c.blocks {
-		if block.Type == "text" {
-			parts = append(parts, textPart(role, block.Text))
-		}
-	}
-	return parts
-}
-
-func (c *transcriptTextContent) claudeParts(role string) []Part {
-	if c.spokenOnly {
-		return c.spokenParts(role)
-	}
-	return claudeParts(c.raw, role)
-}
-
-// claudeContent reads the lines from where the call was asked to where it ended:
-// the user lines — a prompt, a tool's result — are what it was given, and the
-// lines of its own message what it said. add is told each part, and says
-// whether to read on.
-func claudeContent(c Call, add func(input bool, p Part) bool) error {
-	return claudeContentOf(context.Background(), c, nil, false, add)
-}
-
-// claudeContentOf is claudeContent reading only the lines keep (when given)
-// says yes to: a search's cheap test of a line's bytes before it is decoded.
+// claudeContentOf reads the lines in a call or transcript, optionally
+// applying a search's cheap test of a line before decoding it.
 func claudeContentOf(ctx context.Context, c Call, keep func([]byte) bool, spokenOnly bool, add func(input bool, p Part) bool) error {
 	_, err := scanThinContext(ctx, c.File, c.From, nil, nil, func(b []byte, start, end int64) bool {
 		if start >= c.To {
@@ -195,158 +177,22 @@ func claudeContentOf(ctx context.Context, c Call, keep func([]byte) bool, spoken
 		if keep != nil && !keep(b) {
 			return true
 		}
-		user := bytes.Contains(b, ccUserLine)
-		asst := bytes.Contains(b, ccAssistant)
-		if !user && !asst {
-			return true
-		}
-		var l struct {
-			Type    string `json:"type"`
-			IsMeta  bool   `json:"isMeta"`
-			Message struct {
-				ID      string                `json:"id"`
-				Model   string                `json:"model"`
-				Content transcriptTextContent `json:"content"`
-			} `json:"message"`
-		}
-		l.Message.Content.spokenOnly = spokenOnly
-		if json.Unmarshal(b, &l) != nil {
-			return true
-		}
-		more := true
-		switch {
-		case l.Type == "user" && !l.IsMeta:
-			for _, p := range l.Message.Content.claudeParts("user") {
-				more = add(true, p) && more
-			}
-		case l.Type == "assistant" && (c.Msg == "" || l.Message.ID == c.Msg):
-			// "<synthetic>" is Claude Code's own line (an error, a refusal
-			// it says), which no model wrote
-			model := l.Message.Model
-			if model == "<synthetic>" {
-				model = ""
-			}
-			for _, p := range l.Message.Content.claudeParts("assistant") {
-				if p.Role == "assistant" {
-					p.Model = model
-				}
-				more = add(false, p) && more
-			}
-		}
-		return more
+		return claude.TranscriptRecord(b, c.Msg, spokenOnly, add)
 	})
 	return err
 }
 
-// claudeParts are the parts of a message's content, which is words, or blocks.
-func claudeParts(raw json.RawMessage, role string) []Part {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return []Part{textPart(role, text)}
-	}
-	var blocks []ccBlock
-	if json.Unmarshal(raw, &blocks) != nil {
-		return nil
-	}
-	var parts []Part
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			parts = append(parts, textPart(role, b.Text))
-		case "thinking":
-			parts = append(parts, Part{Role: role, Kind: "thinking", Text: b.Thinking})
-		case "tool_use":
-			parts = append(parts, Part{Role: role, Kind: "tool_use", Name: b.Name, Text: pretty(b.Input)})
-		case "tool_result":
-			parts = append(parts, Part{Role: "tool", Kind: "tool_result", Text: resultText(b.Content)})
-		case "image":
-			parts = append(parts, Part{Role: role, Kind: "image", Text: "[image]"})
-		}
-	}
-	return parts
-}
+func textPart(role, text string) Part { return sessionformat.TextPart(role, text) }
 
-// textPart is words said, or, of what the agent put in itself (a reminder, a
-// command's note), its context.
-func textPart(role, text string) Part {
-	t := strings.TrimSpace(text)
-	if strings.HasPrefix(t, "<") || strings.HasPrefix(t, "# AGENTS.md") {
-		return Part{Role: role, Kind: "context", Text: text}
-	}
-	return Part{Role: role, Kind: "text", Text: text}
-}
+func resultText(raw json.RawMessage) string { return sessionformat.ResultText(raw) }
 
-// resultText is what a tool answered: words, or blocks of them.
-func resultText(raw json.RawMessage) string {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return string(raw)
-	}
-	var out []string
-	for _, b := range blocks {
-		switch b.Type {
-		case "text":
-			out = append(out, b.Text)
-		case "image":
-			out = append(out, "[image]")
-		}
-	}
-	return strings.Join(out, "\n")
-}
+func pretty(raw json.RawMessage) string { return sessionformat.Pretty(raw) }
 
-// pretty is JSON laid out for reading, when it is short.
-func pretty(raw json.RawMessage) string {
-	if len(raw) == 0 || len(raw) > 4000 {
-		return string(raw)
-	}
-	var b bytes.Buffer
-	if json.Indent(&b, raw, "", "  ") != nil {
-		return string(raw)
-	}
-	return b.String()
-}
-
-// ---- Codex
-
-var cxItem = []byte(`"type":"response_item"`)
-
-type codexTranscriptMessage struct {
-	Type    string `json:"type"`
-	Role    string `json:"role"`
-	Content []struct {
-		Text string `json:"text"`
-	} `json:"content"`
-}
-
-func (m codexTranscriptMessage) add(add func(bool, Part) bool) bool {
-	if m.Role != "user" && m.Role != "assistant" {
-		return true
-	}
-	var words []string
-	for _, block := range m.Content {
-		words = append(words, block.Text)
-	}
-	return add(m.Role == "user", textPart(m.Role, strings.Join(words, "\n")))
-}
-
-// codexContent reads the items between the call before and this one: what the
+// codexContentOf reads the items between the call before and this one: what the
 // model was given (the prompt, a tool's output) and what it said (words,
 // reasoning, a call of a tool). A rollout the Codex app has compressed (or
 // unpacked) since the call was read is read in its new form: its lines and
 // their places are the same. add is as claudeContent's.
-func codexContent(c Call, add func(input bool, p Part) bool) error {
-	return codexContentOf(context.Background(), c, nil, false, add)
-}
-
-// codexContentOf is codexContent reading only the lines keep (when given)
-// says yes to, as claudeContentOf.
 func codexContentOf(ctx context.Context, c Call, keep func([]byte) bool, spokenOnly bool, add func(input bool, p Part) bool) error {
 	path := c.File
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
@@ -354,105 +200,12 @@ func codexContentOf(ctx context.Context, c Call, keep func([]byte) bool, spokenO
 			path = rolloutTwin(path)
 		}
 	}
-	// the model the turn was sent to, as its turn_context line names it
-	// (#2253): each of the turn's assistant parts is said with it
-	model, say := "", add
-	add = func(input bool, p Part) bool {
-		if p.Role == "assistant" {
-			p.Model = model
-		}
-		return say(input, p)
-	}
+	var decoder codex.TranscriptDecoder
 	_, err := scanThinContext(ctx, path, c.From, nil, nil, func(b []byte, start, end int64) bool {
 		if start >= c.To {
 			return false
 		}
-		if !bytes.Contains(b, cxItem) {
-			if bytes.Contains(b, cxTurn) {
-				var l struct {
-					Type    string `json:"type"`
-					Payload struct {
-						Model string `json:"model"`
-					} `json:"payload"`
-				}
-				if json.Unmarshal(b, &l) == nil && l.Type == "turn_context" {
-					model = l.Payload.Model
-				}
-			}
-			return true
-		}
-		if keep != nil && !keep(b) {
-			return true
-		}
-		if spokenOnly {
-			if gjson.GetBytes(b, "payload.type").Str != "message" {
-				return true
-			}
-			var line struct {
-				Payload codexTranscriptMessage `json:"payload"`
-			}
-			if json.Unmarshal(b, &line) != nil || line.Payload.Type != "message" {
-				return true
-			}
-			return line.Payload.add(add)
-		}
-		var l struct {
-			Payload struct {
-				codexTranscriptMessage
-				Name      string          `json:"name"`
-				Arguments string          `json:"arguments"`
-				Input     string          `json:"input"`
-				Output    json.RawMessage `json:"output"`
-				Summary   []struct {
-					Text string `json:"text"`
-				} `json:"summary"`
-				Action struct {
-					Command []string `json:"command"`
-				} `json:"action"`
-			} `json:"payload"`
-		}
-		if json.Unmarshal(b, &l) != nil {
-			return true
-		}
-		p := &l.Payload
-		switch p.Type {
-		case "message":
-			return p.codexTranscriptMessage.add(add)
-		case "reasoning", "magpie_reasoning": // magpie_reasoning: PortCodexRolloutsLeft
-			var s []string
-			for _, x := range p.Summary {
-				s = append(s, x.Text)
-			}
-			return add(false, Part{Role: "assistant", Kind: "thinking", Text: strings.Join(s, "\n\n")})
-		case "function_call":
-			return add(false, Part{Role: "assistant", Kind: "tool_use", Name: p.Name, Text: pretty(json.RawMessage(p.Arguments))})
-		case "custom_tool_call":
-			return add(false, Part{Role: "assistant", Kind: "tool_use", Name: p.Name, Text: p.Input})
-		case "local_shell_call":
-			return add(false, Part{Role: "assistant", Kind: "tool_use", Name: "shell", Text: strings.Join(p.Action.Command, " ")})
-		case "function_call_output", "custom_tool_call_output":
-			return add(true, Part{Role: "tool", Kind: "tool_result", Text: codexOutput(p.Output)})
-		}
-		return true
+		return decoder.Record(b, keep, spokenOnly, add)
 	})
 	return err
-}
-
-// codexOutput is what a tool answered: words, or an object with them in.
-func codexOutput(raw json.RawMessage) string {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var o struct {
-		Content string `json:"content"`
-		Output  string `json:"output"`
-	}
-	if json.Unmarshal(raw, &o) == nil && (o.Content != "" || o.Output != "") {
-		if o.Content != "" {
-			return o.Content
-		}
-		return o.Output
-	}
-	return string(raw)
 }

@@ -88,12 +88,13 @@ func TestExtensionAgentMetadataOrdinaryDiscovery(t *testing.T) {
 		t.Fatalf("ordinary identity metadata was lost: %+v %v", a, err)
 	}
 	target, places, sdkOwned := a.SDKLibraryTarget()
-	if !sdkOwned || target != a || places == nil || places.MCP != ".fixture/mcp.json" {
+	mcp := filepath.Join(home, ".fixture", "mcp.json")
+	if !sdkOwned || target != a || places == nil || places.MCP != mcp {
 		t.Fatal("ordinary agent did not expose typed Library metadata")
 	}
 	places.MCP = "changed"
 	_, fresh, _ := a.SDKLibraryTarget()
-	if fresh.MCP != ".fixture/mcp.json" {
+	if fresh.MCP != mcp {
 		t.Fatal("Library caller mutated the agent's installed declaration")
 	}
 }

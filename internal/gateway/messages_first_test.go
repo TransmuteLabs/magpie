@@ -13,12 +13,16 @@ import (
 
 // relayOfEvery is a relay that answers on Chat, Responses and Anthropic's
 // Messages alike, streamed when asked, and records the path and body of
-// each request.
+// each POST.
 func relayOfEvery(t *testing.T) (*httptest.Server, func() (paths []string, bodies []string)) {
 	t.Helper()
 	var mu sync.Mutex
 	var paths, bodies []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		paths, bodies = append(paths, r.URL.Path), append(bodies, string(b))

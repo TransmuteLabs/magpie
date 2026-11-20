@@ -141,14 +141,30 @@ func SetTOMLTable(path, name string, kvs ...KV) error {
 	if err != nil {
 		return err
 	}
+	out, err := tomlTableLines(path, raw, name, func(TOMLTable) []KV { return kvs })
+	if err != nil {
+		return err
+	}
+	return writeTOML(path, out)
+}
+
+func RewriteTOMLTable(path string, raw []byte, name string, values func(TOMLTable) []KV) ([]byte, error) {
+	out, err := tomlTableLines(path, raw, name, values)
+	if err != nil {
+		return nil, err
+	}
+	return renderTOML(path, out, raw)
+}
+
+func tomlTableLines(path string, raw []byte, name string, values func(TOMLTable) []KV) ([]string, error) {
 	lines := splitLines(string(raw))
 	tables, err := parseTOMLTables(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
-	table, err := parseTOMLTable(lines, name)
+	table, err := ordinaryTOMLTable(tables, name)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	type subtable struct {
 		name    string
@@ -156,7 +172,7 @@ func SetTOMLTable(path, name string, kvs ...KV) error {
 	}
 	var subs []subtable
 	block := []string{"[" + name + "]"}
-	for _, kv := range kvs {
+	for _, kv := range values(TOMLTable{&table}) {
 		if in, ok := kv.Value.(Inline); ok {
 			if _, ok := tomlTableNamed(tables, name+"."+kv.Path); ok {
 				subs = append(subs, subtable{name + "." + kv.Path, in})
@@ -189,11 +205,11 @@ func SetTOMLTable(path, name string, kvs ...KV) error {
 	for _, sub := range subs {
 		for _, e := range sub.entries {
 			if out, err = setTOMLKeyLines(out, sub.name, e.Path, tomlString(e.Path), e.Value); err != nil {
-				return fmt.Errorf("%s: %w", path, err)
+				return nil, AtFile(path, err)
 			}
 		}
 	}
-	return writeTOML(path, out)
+	return out, nil
 }
 
 // tomlDotted is the lines of table's dotted keys under key (key."x" = …),
@@ -251,6 +267,19 @@ func SetTOMLKey(path, name, key string, value any) error {
 	return writeTOML(path, out)
 }
 
+func RewriteTOMLKey(path string, raw []byte, name, key string, value any) ([]byte, error) {
+	out, err := setTOMLKeyLines(splitLines(string(raw)), name, key, key, value)
+	if err != nil {
+		return nil, AtFile(path, err)
+	}
+	return renderTOML(path, out, raw)
+}
+
+func HasTOMLTable(raw []byte, name string) (bool, error) {
+	table, err := parseTOMLTable(splitLines(string(raw)), name)
+	return table.from >= 0 && err == nil, err
+}
+
 // setTOMLKeyLines is SetTOMLKey on lines: the key named `key` (as the parser
 // names it, quotes taken off) is set, and a new one is written as `spelled`.
 func setTOMLKeyLines(lines []string, name, key, spelled string, value any) ([]string, error) {
@@ -285,14 +314,72 @@ func DelTOMLKey(path, name, key string) error {
 	if err != nil || raw == nil {
 		return err
 	}
+	body, err := RewriteTOMLWithoutKey(path, raw, name, key)
+	if err != nil || bytes.Equal(raw, body) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteTOMLWithoutKey(path string, raw []byte, name, key string) ([]byte, error) {
+	return RewriteTOMLWithoutKeyIf(path, raw, name, key, nil)
+}
+
+func RewriteTOMLWithoutKeyIf(path string, raw []byte, name, key string, selected func(string) bool) ([]byte, error) {
 	lines := splitLines(string(raw))
 	table, err := parseTOMLTable(lines, name)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	if table.from < 0 {
-		return nil
+		return raw, nil
 	}
+	if selected != nil && !selected((TOMLTable{&table}).Scalar(key)) {
+		return raw, nil
+	}
+	return renderTOML(path, withoutTOMLKeyLines(lines, table, key), raw)
+}
+
+func RewriteTOMLScalarIf(path string, raw []byte, name, key, expected string, value *string) ([]byte, error) {
+	return RewriteTOMLScalarMatching(path, raw, name, key, func(_ TOMLTable, current string) (*string, bool) {
+		return value, current == expected
+	})
+}
+
+func RewriteTOMLScalarMatching(path string, raw []byte, name, key string, replace func(TOMLTable, string) (*string, bool)) ([]byte, error) {
+	lines := splitLines(string(raw))
+	document, err := parseTOMLFile(lines)
+	if err != nil {
+		return nil, AtFile(path, err)
+	}
+	table := document.root
+	if name != "" {
+		var ok bool
+		table, ok = tomlTableNamed(document.tables, name)
+		if !ok || table.array {
+			return raw, nil
+		}
+	}
+	current := tomlKeyNamed(table, key)
+	if !current.scalar {
+		return raw, nil
+	}
+	value, matched := replace(TOMLTable{&table}, current.value)
+	if !matched {
+		return raw, nil
+	}
+	if value == nil {
+		if name == "" {
+			return renderTOML(path, append(append([]string{}, lines[:current.from]...), lines[current.to:]...), raw)
+		}
+		return renderTOML(path, withoutTOMLKeyLines(lines, table, key), raw)
+	}
+	replacement := current.prefix + tomlLiteral(*value) + current.suffix
+	out := append(append(append([]string{}, lines[:current.from]...), replacement), lines[current.to:]...)
+	return renderTOML(path, out, raw)
+}
+
+func withoutTOMLKeyLines(lines []string, table tomlTableSpan, key string) []string {
 	out := append([]string{}, lines[:table.from+1]...)
 	at := table.from + 1
 	for _, kv := range table.keys {
@@ -304,11 +391,10 @@ func DelTOMLKey(path, name, key string) error {
 	out = append(out, lines[at:table.to]...)
 	for _, line := range out[table.from+1:] {
 		if strings.TrimSpace(line) != "" {
-			out = append(out, lines[table.to:]...)
-			return writeTOML(path, out)
+			return append(out, lines[table.to:]...)
 		}
 	}
-	return DelTOMLTable(path, name)
+	return tomlWithoutTable(lines, table)
 }
 
 // DelTOMLTable removes table `name` (header and body) if present.
@@ -323,10 +409,14 @@ func DelTOMLTable(path, name string) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	from, to := table.from, table.to
-	if from < 0 {
+	if table.from < 0 {
 		return nil
 	}
+	return writeTOML(path, tomlWithoutTable(lines, table))
+}
+
+func tomlWithoutTable(lines []string, table tomlTableSpan) []string {
+	from, to := table.from, table.to
 	// Take the blank lines before the header with it so no gap is left.
 	for from > 0 && strings.TrimSpace(lines[from-1]) == "" {
 		from--
@@ -335,8 +425,7 @@ func DelTOMLTable(path, name string) error {
 	if to < len(lines) && len(out) > 0 && strings.TrimSpace(lines[to]) != "" {
 		out = append(out, "")
 	}
-	out = append(out, lines[to:]...)
-	return writeTOML(path, out)
+	return append(out, lines[to:]...)
 }
 
 // GetTOMLTop reads a top-level (pre-table) key from a TOML file. A string is
@@ -408,10 +497,26 @@ func setTOMLTop(path string, preserve bool, kvs ...KV) error {
 	if err != nil {
 		return err
 	}
+	out, err := tomlTopLines(path, raw, preserve, kvs)
+	if err != nil {
+		return err
+	}
+	return writeTOML(path, out)
+}
+
+func RewriteTOMLTop(path string, raw []byte, kvs ...KV) ([]byte, error) {
+	out, err := tomlTopLines(path, raw, false, kvs)
+	if err != nil {
+		return nil, err
+	}
+	return renderTOML(path, out, raw)
+}
+
+func tomlTopLines(path string, raw []byte, preserve bool, kvs []KV) ([]string, error) {
 	lines := splitLines(string(raw))
 	doc, err := parseTOMLFile(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	type span struct {
 		to   int
@@ -461,7 +566,7 @@ func setTOMLTop(path string, preserve bool, kvs ...KV) error {
 		i++
 	}
 	out = append(out, added...)
-	return writeTOML(path, out)
+	return out, nil
 }
 
 // DelTOMLTop removes top-level (pre-table) keys, each with every line of its
@@ -471,10 +576,26 @@ func DelTOMLTop(path string, keys ...string) error {
 	if err != nil || raw == nil {
 		return err
 	}
+	out, err := tomlWithoutTopLines(path, raw, keys)
+	if err != nil {
+		return err
+	}
+	return writeTOML(path, out)
+}
+
+func RewriteTOMLWithoutTop(path string, raw []byte, keys ...string) ([]byte, error) {
+	out, err := tomlWithoutTopLines(path, raw, keys)
+	if err != nil {
+		return nil, err
+	}
+	return renderTOML(path, out, raw)
+}
+
+func tomlWithoutTopLines(path string, raw []byte, keys []string) ([]string, error) {
 	lines := splitLines(string(raw))
 	doc, err := parseTOMLFile(lines)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	drop := map[string]bool{}
 	for _, k := range keys {
@@ -488,8 +609,7 @@ func DelTOMLTop(path string, keys ...string) error {
 			at = kv.to
 		}
 	}
-	out = append(out, lines[at:]...)
-	return writeTOML(path, out)
+	return append(out, lines[at:]...), nil
 }
 
 type tomlTableSpan struct {
@@ -519,6 +639,10 @@ func parseTOMLTable(lines []string, name string) (tomlTableSpan, error) {
 	if err != nil {
 		return tomlTableSpan{}, err
 	}
+	return ordinaryTOMLTable(tables, name)
+}
+
+func ordinaryTOMLTable(tables []tomlTableSpan, name string) (tomlTableSpan, error) {
 	if table, ok := tomlTableNamed(tables, name); ok {
 		if table.array {
 			return tomlTableSpan{}, fmt.Errorf("line %d, column %d: %q is an array table, expected an ordinary table", table.from+1, table.column, name)
@@ -785,12 +909,20 @@ func tomlParseError(p *unstable.Parser, err error) error {
 // the document, so comments and formatting survive validation unchanged.
 func writeTOML(path string, lines []string) error {
 	orig, _ := Read(path)
+	data, err := renderTOML(path, lines, orig)
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(path, data)
+}
+
+func renderTOML(path string, lines []string, orig []byte) ([]byte, error) {
 	lines = markTOML(lines, string(orig))
 	data := []byte(joinLinesLike(lines, string(orig)))
 	if err := validateTOML(data); err != nil {
-		return fmt.Errorf("%s: edited TOML is invalid: %w", path, err)
+		return nil, AtFile(path, fmt.Errorf("edited TOML is invalid: %w", err))
 	}
-	return WriteAtomic(path, data)
+	return data, nil
 }
 
 // WriteTOMLFile writes lines back as a TOML file, validating the result first

@@ -15,19 +15,20 @@ import (
 	"github.com/yetone/magpie/internal/budget"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/pluginrt"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.Register(pluginrt.Manifest{
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
 		ID: "budget", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
 		Name: "Key limits", Sub: "Hold each gateway key to the tokens or estimated cost you set for it",
-		Opens: "gateway",
-		One:   "1 key with a limit", Many: "{n} keys with a limit",
+		One: "1 key with a limit", Many: "{n} keys with a limit",
 		InUse: InUse,
-		Apply: func(c *pluginrt.Ctx) error {
+		Activate: func(c sdk.FeatureLifetime) error {
 			c.OnDispose(gwbudget.Limit(budget.Limiter{}))
 			return nil
 		},
+		OpenPage: "gateway",
 	})
 }
 

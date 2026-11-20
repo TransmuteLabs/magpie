@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -33,12 +34,54 @@ func PrepareExtensionResume(ctx context.Context, plugin, id string) (*ExtensionR
 	if err != nil {
 		return nil, err
 	}
+	return prepareExtensionStart(ctx, selected, controller, before)
+}
+
+// PrepareExtensionProfileLaunch selects the durable SDK owner of a local
+// agent's special launch command. A nil result permits the built-in launcher.
+func PrepareExtensionProfileLaunch(ctx context.Context, target string) (*ExtensionResumeStart, error) {
+	home, _ := homes()
+	ledger, err := extensionBindingObserve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, claim := range ledger.Records {
+		if claim.Phase == "disconnected" || extensionBindingTarget(claim) != target || !extensionSameHome(claim.Home, home) {
+			continue
+		}
+		if claim.Phase != "owned" {
+			return nil, errors.New("agent binding transition is incomplete")
+		}
+		if claim.Descriptor.Launch == nil {
+			return nil, fmt.Errorf("SDK profile %s owns %s and does not declare a launch", claim.Agent, target)
+		}
+		item := ExtensionAgent{Plugin: claim.Plugin, Agent: claim.Descriptor.Clone()}
+		base := extensionProfileBase(home, item.Agent, nil)
+		if base == nil {
+			return nil, fmt.Errorf("SDK profile %s's agent target is unavailable", claim.Agent)
+		}
+		host := extension.Default()
+		selected := extensionControlledAgent(home, host, item, base)
+		controller := newExtensionController(home, host, item, base)
+		return prepareExtensionStart(ctx, selected, controller, claim)
+	}
+	return nil, nil
+}
+
+// WithUnownedLocalAgent holds the ordinary ownership fence for a built-in
+// launch's short configuration changes.
+func WithUnownedLocalAgent(home, target string, run func() error) error {
+	return extensionBaseMutation(home, target, run)
+}
+
+func prepareExtensionStart(ctx context.Context, selected *Agent, controller *extensionController, before extensionBindingRecord) (*ExtensionResumeStart, error) {
+	home, plugin, id := controller.home, controller.item.Plugin, controller.item.Agent.ID
 	start := selected.Start()
 	if start.Err != nil {
 		return nil, start.Err
 	}
-	if !start.Active || start.Bin == "" || start.Bin != selected.Bin || before.Phase != "owned" {
-		return nil, errors.New("session resume agent must be connected through its SDK profile")
+	if !start.Active || start.Bin == "" || start.Bin != selected.Bin || before.Bin != start.Bin || before.Phase != "owned" {
+		return nil, errors.New("agent must be connected through its SDK profile")
 	}
 	address, key := gateway.URL(), agentKeyAt(id, gateway.URL())
 	prepared := &ExtensionResumeStart{Starting: start}

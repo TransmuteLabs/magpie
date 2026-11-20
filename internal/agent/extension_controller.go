@@ -134,18 +134,7 @@ func (controller *extensionController) spec() *launchSpec {
 	} else if controller.base != nil {
 		config = controller.base.Path
 	}
-	launch := declaredLaunch(desc.ID, controller.bin, config, desc.Launch.Model, desc.Launch.Env, desc.Launch.Args, desc.Launch.Plain)
-	launch.strict = true
-	if config == "" {
-		for _, templates := range []map[string]string{desc.Launch.Env, desc.Launch.Args} {
-			for _, value := range templates {
-				if strings.Contains(value, "{config}") {
-					launch.err = errors.New("declared agent launch requires an available configuration path")
-				}
-			}
-		}
-	}
-	return launch
+	return sdkLaunch(desc.ID, controller.bin, config, *desc.Launch)
 }
 
 func (controller *extensionController) prepare(ctx context.Context, intent, field, value string) (*extensionAgentPlan, error) {

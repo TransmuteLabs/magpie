@@ -232,6 +232,120 @@ func TestBuiltinConfig(t *testing.T) {
 	}
 }
 
+func TestBuiltinSectionAndInlinePartLifecycle(t *testing.T) {
+	handler := builtinHome(t)
+	if _, err := pluginrt.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	read := func(t *testing.T, id string) builtinJSON {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("GET", "/api/plugins/builtin", nil))
+		var features []builtinJSON
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &features) != nil {
+			t.Fatalf("read built-ins: %d %s", response.Code, response.Body)
+		}
+		for _, feature := range features {
+			if feature.ID == id {
+				return feature
+			}
+		}
+		t.Fatalf("missing built-in %s", id)
+		return builtinJSON{}
+	}
+	for _, expected := range []pluginrt.Part{
+		{Slot: "settings.section", Key: "otel"},
+		{Slot: "part", Key: "groups"},
+		{Slot: "part", Key: "rotation"},
+		{Slot: "part", Key: "warmups"},
+	} {
+		t.Run(expected.Key, func(t *testing.T) {
+			if initial := read(t, expected.Key); !initial.On || !slices.Equal(initial.Parts, []pluginrt.Part{expected}) {
+				t.Fatalf("active: %+v, want %v", initial, expected)
+			}
+			off := postBuiltin(handler, `{"id":"`+expected.Key+`","on":false}`)
+			if actual := read(t, expected.Key); off.Code != http.StatusOK || actual.On || len(actual.Parts) != 0 {
+				t.Fatalf("off: %d %s, %+v", off.Code, off.Body, actual)
+			}
+			on := postBuiltin(handler, `{"id":"`+expected.Key+`","on":true}`)
+			if actual := read(t, expected.Key); on.Code != http.StatusOK || !actual.On || !slices.Equal(actual.Parts, []pluginrt.Part{expected}) {
+				t.Fatalf("restored: %d %s, %+v", on.Code, on.Body, actual)
+			}
+		})
+	}
+}
+
+func TestGatewayBuiltinContributionLifecycle(t *testing.T) {
+	handler := builtinHome(t)
+	if _, err := pluginrt.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path, body string) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(method, path, strings.NewReader(body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s %s: %d %s", method, path, response.Code, response.Body)
+		}
+		return response.Body.String()
+	}
+	check := func(reply string, state pluginrt.State, callsPage float64) {
+		t.Helper()
+		var features []builtinJSON
+		if err := json.Unmarshal([]byte(reply), &features); err != nil {
+			t.Fatal(err)
+		}
+		pages := map[string]string{
+			"gateway": "gateway", "library": "library", "redact": "masking",
+			"routing": "routing", "sessions": "sessions", "usage": "usage",
+		}
+		for _, feature := range features {
+			if expected, ok := pages[feature.ID]; ok {
+				if feature.Page != expected {
+					t.Fatalf("%s page: %q, want %q", feature.ID, feature.Page, expected)
+				}
+				delete(pages, feature.ID)
+			}
+			if feature.ID != "gateway" {
+				continue
+			}
+			on := state == pluginrt.Active
+			if feature.State != state || feature.On != on || feature.Config["callsPage"] != callsPage {
+				t.Fatalf("Gateway contribution: %+v", feature)
+			}
+			var parts []pluginrt.Part
+			if on {
+				parts = []pluginrt.Part{{Slot: "nav.page", Key: "gateway"}}
+			}
+			if !slices.Equal(feature.Parts, parts) {
+				t.Fatalf("Gateway active contributions: %v, want %v", feature.Parts, parts)
+			}
+			if feature.Schema == nil || !slices.Equal(feature.Schema.Order, []string{"callsPage"}) {
+				t.Fatalf("Gateway settings order: %+v", feature.Schema)
+			}
+			property := feature.Schema.Properties["callsPage"]
+			if property == nil || property.Type != "integer" || property.Default != float64(20) ||
+				!slices.Equal(property.Enum, []any{float64(10), float64(20), float64(50), float64(100)}) {
+				t.Fatalf("Gateway callsPage schema: %+v", property)
+			}
+		}
+		if len(pages) > 0 {
+			t.Fatalf("missing Built-in pages: %v", pages)
+		}
+	}
+	check(request("GET", "/api/plugins/builtin", ""), pluginrt.Active, 20)
+	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","config":{"callsPage":100}}`), pluginrt.Active, 100)
+	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","on":false}`), pluginrt.Disposed, 100)
+	if boot := request("GET", "/boot.js", ""); !strings.Contains(boot, `"featuresOff":["gateway"]`) ||
+		strings.Contains(boot, `"callsPage":100`) {
+		t.Fatalf("boot.js after retirement: %s", boot)
+	}
+	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","on":true}`), pluginrt.Active, 100)
+	if boot := request("GET", "/boot.js", ""); !strings.Contains(boot, `"pluginConfig":{"gateway":{"callsPage":100}}`) {
+		t.Fatalf("boot.js after re-enable: %s", boot)
+	}
+}
+
 // Every file a built-in plugin says it has is on disk, loaded by the page
 // and named with its hash so a new one isn't read from the cache: a script
 // after the kernel and before app.js, which looks for its pages, a
@@ -363,39 +477,85 @@ func TestBuiltinSearchSaysWhatSearches(t *testing.T) {
 // for its row to go to both (netube99 on X: masking's switch, settings and
 // page didn't name each other)
 func TestBuiltinSaysWhereItsSettingsAre(t *testing.T) {
-	builtinHome(t)
+	handler := builtinHome(t)
 	if _, err := pluginrt.Settle(); err != nil {
 		t.Fatal(err)
 	}
-	if err := pluginrt.Set("redact", false); err != nil {
-		t.Fatal(err)
-	}
 	want := map[string][3]string{
-		"redact":   {"privacy #redactList", "masking", ""},
-		"search":   {"models #searchList", "", ""},
-		"otel":     {"otel #otelList", "", ""},
-		"gateway":  {"network #portList", "gateway", ""},
-		"library":  {"", "library", ""},
-		"groups":   {"", "", "groups"},
-		"budget":   {"", "", "gateway"},
-		"rotation": {"", "", "providers"},
-		"warmups":  {"", "", "providers"},
-		"tools":    {"", "", "plugins"},
+		"budget":     {"", "", "gateway"},
+		"gateway":    {"network #portList", "gateway", ""},
+		"groups":     {"", "", "groups"},
+		"library":    {"", "library", ""},
+		"middleware": {"", "", "plugins"},
+		"otel":       {"otel #otelList", "", ""},
+		"redact":     {"privacy #redactList", "masking", ""},
+		"rotation":   {"", "", "providers"},
+		"routing":    {"", "routing", ""},
+		"search":     {"models #searchList", "", ""},
+		"sessions":   {"", "sessions", ""},
+		"tools":      {"", "", "plugins"},
+		"usage":      {"", "usage", ""},
+		"warmups":    {"", "", "providers"},
 	}
-	for _, b := range builtinsState() {
-		w, ok := want[b.ID]
-		if !ok {
-			continue
+	read := func(path string) string {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("GET", path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, response.Code, response.Body)
 		}
-		delete(want, b.ID)
-		if got := [3]string{b.SetAt, b.Page, b.Opens}; got != w {
-			t.Errorf("%s (on %v): %q, want %q", b.ID, b.On, got, w)
+		return response.Body.String()
+	}
+	check := func(disabled ...string) {
+		t.Helper()
+		var features []builtinJSON
+		if err := json.Unmarshal([]byte(read("/api/plugins/builtin")), &features); err != nil {
+			t.Fatal(err)
 		}
-		if b.ID == "redact" && b.On {
-			t.Error("redact stayed on")
+		destinations := make(map[string][3]string, len(features))
+		for _, feature := range features {
+			destinations[feature.ID] = [3]string{feature.SetAt, feature.Page, feature.Opens}
+			state := pluginrt.Active
+			if slices.Contains(disabled, feature.ID) {
+				state = pluginrt.Disposed
+			}
+			if feature.State != state || feature.On != (state == pluginrt.Active) {
+				t.Errorf("%s: state %q, on %t, want %q", feature.ID, feature.State, feature.On, state)
+			}
+		}
+		for id, expected := range want {
+			actual, exists := destinations[id]
+			if !exists || actual != expected {
+				t.Errorf("%s destinations: %q, want %q", id, actual, expected)
+			}
+			delete(destinations, id)
+		}
+		if len(destinations) != 0 {
+			t.Errorf("unexpected built-ins: %v", destinations)
+		}
+		if len(disabled) == 0 {
+			disabled = []string{}
+		}
+		off, err := json.Marshal(disabled)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if boot := read("/boot.js"); !strings.Contains(boot, `"featuresOff":`+string(off)) {
+			t.Fatalf("boot.js off list, want %s: %s", off, boot)
 		}
 	}
-	if len(want) > 0 {
-		t.Errorf("not listed: %v", want)
+	check()
+	disabled := []string{"otel", "redact", "rotation", "search"}
+	for _, id := range disabled {
+		if response := postBuiltin(handler, `{"id":"`+id+`","on":false}`); response.Code != http.StatusOK {
+			t.Fatalf("%s off: %d %s", id, response.Code, response.Body)
+		}
 	}
+	check(disabled...)
+	for _, id := range disabled {
+		if response := postBuiltin(handler, `{"id":"`+id+`","on":true}`); response.Code != http.StatusOK {
+			t.Fatalf("%s on: %d %s", id, response.Code, response.Body)
+		}
+	}
+	check()
 }

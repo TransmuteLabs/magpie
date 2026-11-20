@@ -131,6 +131,7 @@ func TestPiAddedToolReachesEveryRoute(t *testing.T) {
 			if code, b := post(t, "/v1/chat/completions", piAsking("pi/"+c.model)); code != 200 {
 				t.Fatalf("%d %s", code, b)
 			}
+			probeFixtureRoot(t, srv)
 			paths, bodies := seen()
 			if len(paths) != 1 || paths[0] != c.path {
 				t.Fatalf("went to %v, want %s", paths, c.path)

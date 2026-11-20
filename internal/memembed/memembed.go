@@ -3,9 +3,8 @@
 // 2.0; Xenova's int8 ONNX of it), run in magpie's own process by
 // internal/pii/guard, gives each memory a place in a space where texts
 // that say the same are near, in any of 50 languages and across them,
-// and memory.Search
-// fuses how near each is to what was searched with its word ranking
-// (memory.Semantic).
+// and memory.Search fuses how near each is to what was searched with its
+// word ranking.
 //
 // It is off until switched on, since the model is a 135 MB download.
 // Switched on, the files are fetched from Hugging Face at the revision
@@ -35,6 +34,7 @@ import (
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/pii/guard"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // rev is the repo's revision the files below were hashed at.
@@ -87,7 +87,9 @@ type state struct {
 	On bool `json:"on"`
 }
 
-var stateMu sync.Mutex
+var stateMu = filelock.Mutex{Path: func() string { return StatePath() + ".lock" }}
+
+var errStateLock = errors.New("cannot lock the Memory semantic switch")
 
 func load() (state, error) {
 	var s state
@@ -136,18 +138,15 @@ func Now() Status {
 		st.Done = st.Size
 	}
 	st.Reading = reading.Load()
-	idx.mu.Lock()
-	st.Failed = idx.failed
-	idx.mu.Unlock()
+	if failed := idx.failed.Load(); failed != nil {
+		st.Failed = *failed
+	}
 	if st.On && st.Installed {
-		if all, _, err := memory.All(); err == nil {
+		if records, err := memory.SemanticIndexSnapshot(); err == nil {
 			vs := vectors()
-			for _, m := range all {
-				if !searched(m) {
-					continue
-				}
-				st.Of++
-				if _, ok := vs.get(key(m)); ok {
+			st.Of = len(records)
+			for _, record := range records {
+				if _, ok := vs.get(key(record.Text, record.Why)); ok {
 					st.Read++
 				}
 			}
@@ -159,7 +158,9 @@ func Now() Status {
 // Set switches it on, fetching the model when it isn't on disk, or off,
 // stopping a download and deleting the model and what it read.
 func Set(on bool) error {
-	stateMu.Lock()
+	if !stateMu.LockChecked() {
+		return errStateLock
+	}
 	defer stateMu.Unlock()
 	p := StatePath()
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -326,26 +327,21 @@ func unload() {
 
 // ---------- what was read ----------
 
-// searched says m is one a search can return, and is read.
-func searched(m *memory.Memory) bool {
-	return m.Status == memory.Active || m.Status == memory.Candidate
-}
-
 // passage is what is read of m: its text, and why when it says.
-func passage(m *memory.Memory) string {
-	if m.Why == "" {
-		return m.Text
+func passage(text, why string) string {
+	if why == "" {
+		return text
 	}
-	return m.Text + "\n" + m.Why
+	return text + "\n" + why
 }
 
-func key(m *memory.Memory) [32]byte { return sha256.Sum256([]byte(passage(m))) }
+func key(text, why string) [32]byte { return sha256.Sum256([]byte(passage(text, why))) }
 
 var reading atomic.Bool
 
 var idx struct {
 	mu     sync.Mutex // one read at a time
-	failed string
+	failed atomic.Pointer[string]
 }
 
 // pokes wakes Keep for a read now.
@@ -367,9 +363,8 @@ func Keep(ctx context.Context, tick time.Duration) {
 	for {
 		if On() && Installed() {
 			if _, err := Index(ctx); err != nil && ctx.Err() == nil {
-				idx.mu.Lock()
-				idx.failed = err.Error()
-				idx.mu.Unlock()
+				failed := err.Error()
+				idx.failed.Store(&failed)
 			}
 		}
 		select {
@@ -385,79 +380,89 @@ func Keep(ctx context.Context, tick time.Duration) {
 // text yet, keeps the vectors (dropping those of texts gone) and says how
 // many it read. One goes at a time, in this magpie and across them.
 func Index(ctx context.Context) (int, error) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	unlock, held := filelock.Lock(filepath.Join(dir(), "vectors.lock"), 0)
-	if !held {
+	count, err := index(ctx, memory.SemanticIndexSnapshot)
+	if errors.Is(err, errIndexWithdrawn) {
 		return 0, nil
 	}
-	defer unlock()
-	all, _, err := memory.All()
+	return count, err
+}
+
+func index(ctx context.Context, source sdk.MemorySemanticIndexSource) (int, error) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	run, err := openIndex()
+	if err != nil || run == nil {
+		return 0, err
+	}
+	defer run.unlock()
+	records, err := source()
 	if err != nil {
 		return 0, err
 	}
-	vs := vectors()
-	var todo []*memory.Memory
+	vs := run.vectors
+	var todo []sdk.MemorySemanticRecord
 	keep := map[[32]byte]bool{}
-	for _, m := range all {
-		if !searched(m) {
-			continue
-		}
-		k := key(m)
+	for _, record := range records {
+		k := key(record.Text, record.Why)
 		keep[k] = true
 		if _, ok := vs.get(k); !ok {
-			todo = append(todo, m)
+			todo = append(todo, record)
 		}
 	}
 	if len(todo) == 0 {
 		if vs.prune(keep) {
-			return 0, vs.save()
+			return 0, run.publish()
 		}
-		idx.failed = ""
+		idx.failed.Store(nil)
 		return 0, nil
 	}
 	reading.Store(true)
 	defer reading.Store(false)
+	if !run.current() {
+		return 0, errIndexWithdrawn
+	}
 	e, err := model()
 	if err != nil {
 		return 0, err
 	}
 	n := 0
-	for _, m := range todo {
+	for _, record := range todo {
 		if ctx.Err() != nil {
 			break
 		}
-		vs.put(key(m), e.Embed(passage(m)))
+		if !run.current() {
+			return n, errIndexWithdrawn
+		}
+		vs.put(key(record.Text, record.Why), e.Embed(passage(record.Text, record.Why)))
 		n++
 		if n%50 == 0 {
-			if err := vs.save(); err != nil {
+			if err := run.publish(); err != nil {
 				return n, err
 			}
 		}
 	}
 	vs.prune(keep)
-	if err := vs.save(); err != nil {
+	if err := run.publish(); err != nil {
 		return n, err
 	}
-	idx.failed = ""
+	idx.failed.Store(nil)
 	return n, ctx.Err()
 }
 
-// similar is memory.Semantic: each memory of pool with a vector, and its
-// cosine to text. A memory read since the last Index (a
-// few at most) is read here, for a search right after it was saved.
-func similar(text string, pool []*memory.Memory) map[string]float64 {
-	if len(pool) == 0 || !On() || !Installed() {
-		return nil
-	}
+// similar scores the selected snapshot. It reads a few missing passages
+// inline so that a search can find a memory right after it was saved.
+func similar(request sdk.MemorySemanticRequest) map[string]float64 {
 	vs := vectors()
-	var missing []*memory.Memory
-	for _, m := range pool {
-		if _, ok := vs.get(key(m)); !ok {
-			missing = append(missing, m)
+	var missing []int
+	for index, record := range request.Records {
+		if _, ok := vs.get(key(record.Text, record.Why)); !ok {
+			missing = append(missing, index)
 		}
 	}
-	if len(missing) == len(pool) && len(pool) > inline {
+	if len(missing) == len(request.Records) && len(request.Records) > inline {
 		// nothing read yet: words alone, while Keep reads them
 		Poke()
 		return nil
@@ -470,13 +475,14 @@ func similar(text string, pool []*memory.Memory) map[string]float64 {
 		Poke()
 		missing = missing[:inline]
 	}
-	for _, m := range missing {
-		vs.put(key(m), e.Embed(passage(m)))
+	for _, index := range missing {
+		record := request.Records[index]
+		vs.put(key(record.Text, record.Why), e.Embed(passage(record.Text, record.Why)))
 	}
-	q := e.Embed(text)
+	q := e.Embed(request.Query)
 	out := map[string]float64{}
-	for _, m := range pool {
-		v, ok := vs.get(key(m))
+	for _, record := range request.Records {
+		v, ok := vs.get(key(record.Text, record.Why))
 		if !ok {
 			continue
 		}
@@ -484,7 +490,7 @@ func similar(text string, pool []*memory.Memory) map[string]float64 {
 		for i := range q {
 			dot += float64(q[i]) * float64(v[i])
 		}
-		out[m.ID] = dot
+		out[record.ID] = dot
 	}
 	return out
 }
@@ -492,4 +498,9 @@ func similar(text string, pool []*memory.Memory) map[string]float64 {
 // inline is how many memories not read yet a search reads itself.
 const inline = 16
 
-func init() { memory.Semantic = similar }
+func init() {
+	memory.SemanticRanker = sdk.MemorySemanticRanker{
+		Ready: func() bool { return On() && Installed() },
+		Rank:  similar,
+	}
+}
