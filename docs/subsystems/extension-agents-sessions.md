@@ -374,6 +374,10 @@ model when the user picks one. Originals stay in the stash if publication
 conflicts. Settings from earlier versions use the recognized gateway, model
 and key when no fingerprint record exists. The route flags plan publishes
 Tool Search, Auto Mode Review and Desktop Explore together.
+The Auto Mode classifier and advisor pickers use checked plans for selection
+and reset. Connect captures the previous classifier in the same settings
+snapshot as the route. Sync uses a checked plan to clear obsolete model
+references. The host updates restoration state after publication.
 [`ApplyLinkedAgentPlan`](../../internal/extension/linked_actions.go) checks
 the declared destinations, input hashes and current files before publishing.
 Linked file errors name the logical input. The host reports the matching

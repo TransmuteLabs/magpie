@@ -58,6 +58,9 @@ func claudeRouteEnvUpdates(at place, saved map[string]string, result builtinclau
 	if result.CheckedLabels {
 		updates[at.key("claude.tier_about")] = "1"
 	}
+	if result.OriginalClassifier != nil {
+		updates[at.key("claude.env."+claudeAutoModeEnv)] = *result.OriginalClassifier
+	}
 	return updates
 }
 
@@ -89,7 +92,7 @@ func applyClaudeRouteLogin(path, token string) (string, error) {
 
 func restoreClaudeRoute(at place, path string, nextModel *string, effort string, modelSettings builtinclaude.ModelSettingsOptions) error {
 	metadata := []string{"claude" + wireClaims, "claude.main", "claude" + wiredAt, "claude.tier_about",
-		"claude.auto_mode_model", "claude.advisor_env", "claude.output_tokens"}
+		claudeAutoModeKey, claudeAdvisorKey, "claude.output_tokens"}
 	originals := map[string]string{
 		"model": "claude.model", "env.ANTHROPIC_BASE_URL": "claude.base_url", "env.ANTHROPIC_AUTH_TOKEN": "claude.auth_token",
 	}
@@ -117,8 +120,8 @@ func restoreClaudeRoute(at place, path string, nextModel *string, effort string,
 	options := builtinclaude.RouteRestoreOptions{
 		Claims: claims, Original: make(map[string]string, len(originals)),
 		ModelEnv: claudeModelEnv, TierLabels: claudeAboutEnv, NextModel: nextModel,
-		AutoEnv: claudeAutoModeEnv, AutoWritten: value("claude.auto_mode_model"),
-		AdvisorEnv: claudeAdvisorEnv, AdvisorWritten: value("claude.advisor_env"),
+		AutoEnv: claudeAutoModeEnv, AutoWritten: value(claudeAutoModeKey),
+		AdvisorEnv: claudeAdvisorEnv, AdvisorWritten: value(claudeAdvisorKey),
 		OutputWritten: value("claude.output_tokens"), EffortWritten: effort,
 		MainWritten: strings.TrimSuffix(value("claude.main"), "[1m]"), LocalAliases: at.id == "",
 		ModelSettings: modelSettings,

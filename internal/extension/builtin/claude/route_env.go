@@ -42,6 +42,7 @@ type RouteEnvOptions struct {
 	ReplaceOriginalLabels bool
 	NextTiers             map[string]string
 	MatchesTierModel      func(current, next string) bool
+	AdoptClassifier       func(current string) (original string, remove bool)
 }
 
 type RouteEnvResult struct {
@@ -49,6 +50,7 @@ type RouteEnvResult struct {
 	OriginalLabels        map[string]string
 	CheckedLabels         bool
 	ReplaceOriginalLabels bool
+	OriginalClassifier    *string
 }
 
 func PlanRouteEnv(options RouteEnvOptions, settings sdk.ActionSettings) (sdk.AgentPlan, RouteEnvResult, error) {
@@ -72,6 +74,14 @@ func routeEnvChanges(options RouteEnvOptions, current gjson.Result) ([]string, R
 	var remove []string
 	result := RouteEnvResult{
 		CheckedLabels: options.FirstTierPass, ReplaceOriginalLabels: options.ReplaceOriginalLabels,
+	}
+	if options.AdoptClassifier != nil {
+		const path = "env." + AutoModeEnv
+		original, drop := options.AdoptClassifier(current.Get(path).String())
+		result.OriginalClassifier = &original
+		if drop {
+			remove = append(remove, path)
+		}
 	}
 	for _, name := range agentenv.ClaudeProviders {
 		path := "env." + name
