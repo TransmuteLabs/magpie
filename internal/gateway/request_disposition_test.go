@@ -39,6 +39,14 @@ func main(){
   req,_:=http.NewRequestWithContext(ctx,"POST",auth.URL,bytes.NewReader(body));res,err:=http.DefaultClient.Do(req);if err!=nil{return nil,err}
   raw,err:=io.ReadAll(res.Body);res.Body.Close();if err!=nil{return nil,err}
   var reply map[string]any;if err:=json.Unmarshal(raw,&reply);err!=nil{return nil,err}
+  if body,ok:=reply["wireBody"].(string);ok{
+   status:=int(reply["status"].(float64))
+   contentType:="application/json"
+   if status==http.StatusOK {contentType="text/event-stream"}
+   if err:=stream.Emit(ctx,"headers",sdk.HeadersEvent{Status:status,Headers:http.Header{"Content-Type":{contentType}}});err!=nil{return nil,err}
+   if err:=stream.Emit(ctx,"data",[]byte(body));err!=nil{return nil,err}
+   return sdk.ExecuteResult{Status:status,Outcome:"completed"},nil
+  }
   if chunk, ok := reply["chatStream"].(string); ok {
    if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
     return nil, err
@@ -155,6 +163,81 @@ func policyFixtureRefusal(class, scope string, windows []any, statuses ...int) m
 		"step": "inference", "evidence": "rejected-before-effect",
 		"facts": map[string]any{"status": status, "code": "denied", "message": "fixture refusal", "operation": "provider.execute", "phase": "response", "complete": true},
 		"rules": []any{map[string]any{"id": "fixture.rule", "status": []int{status}, "code": "denied", "class": class, "scope": scope}}, "windows": windows}}
+}
+
+func TestSDKTerminalResponseKeepsEndpointEligible(t *testing.T) {
+	for _, scenario := range []struct {
+		name, path, payload string
+	}{
+		{"relay", "/v1/messages", `"messages":[{"role":"user","content":"hi"}],"max_tokens":10`},
+		{"translate", "/v1/responses", `"input":"hi"`},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var attempts []string
+			id := installPolicyRouteFixture(t, func(w http.ResponseWriter, request *http.Request) {
+				var input struct{ Protocol string }
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				attempts = append(attempts, input.Protocol)
+				first := len(attempts) == 1
+				mu.Unlock()
+				status := http.StatusOK
+				var body string
+				switch {
+				case first:
+					status = http.StatusBadRequest
+					body = `{"error":{"message":"model does not support this protocol"}}`
+				case input.Protocol == "anthropic":
+					body = sse(
+						"event: message_start\n"+`data: {"type":"message_start","message":{"id":"msg","model":"free","content":[],"usage":{"input_tokens":1}}}`,
+						"event: content_block_start\n"+`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+						"event: content_block_delta\n"+`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"fixture reply"}}`,
+						"event: content_block_stop\n"+`data: {"type":"content_block_stop","index":0}`,
+						"event: message_delta\n"+`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+						"event: message_stop\n"+`data: {"type":"message_stop"}`)
+				default:
+					body = sse(
+						`data: {"id":"fixture","model":"free","choices":[{"index":0,"delta":{"role":"assistant","content":"fixture reply"}}]}`,
+						`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+						`data: [DONE]`)
+				}
+				json.NewEncoder(w).Encode(map[string]any{"wireBody": body, "status": status})
+			}, func(manifest *sdk.Manifest) {
+				protocols := []protocolext.Protocol{"messages", "chat"}
+				manifest.Providers[0].Protocols = protocols
+				manifest.Providers[0].Models[0].Protocols = protocols
+			})
+			server := New()
+			t.Cleanup(server.idle.stop)
+			handler := server.Front()
+			call := func() *httptest.ResponseRecorder {
+				request := httptest.NewRequest(http.MethodPost, scenario.path,
+					strings.NewReader(`{"model":"`+id+`/free","stream":true,`+scenario.payload+`}`))
+				request.RemoteAddr = "127.0.0.1:12345"
+				request.Header.Set("Content-Type", "application/json")
+				reply := httptest.NewRecorder()
+				handler.ServeHTTP(reply, request)
+				return reply
+			}
+			first := call()
+			if first.Code != http.StatusConflict || !strings.Contains(first.Body.String(), "automatic replay stopped") {
+				t.Errorf("terminal response was %d: %s", first.Code, first.Body)
+			}
+			second := call()
+			if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), "fixture reply") {
+				t.Errorf("next request was %d: %s", second.Code, second.Body)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(attempts) != 2 || attempts[0] != attempts[1] {
+				t.Errorf("terminal result changed endpoint eligibility: %v", attempts)
+			}
+		})
+	}
 }
 
 func TestRequestDispositionInvalidRequestDoesNotEnumerateAccounts(t *testing.T) {

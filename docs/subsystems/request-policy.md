@@ -164,6 +164,9 @@ publication before recording `not-started` in the operation journal. An
 invalid or contradictory refusal leaves an `uncertain` receipt. A repeat that
 reaches the same operation identity stops at that receipt before fallback.
 The accepted/uncertain/completed fence returns 409 before routing can continue.
+Relayed and translated replies cross this fence before an error can mark a
+model's API unavailable. A typed final refusal goes to the outer request
+policy so the endpoint adapter leaves eligibility decisions to that owner.
 
 An outbound executor can also negotiate `request-handoff` alongside
 `request-policy` to report exhausted local admission with

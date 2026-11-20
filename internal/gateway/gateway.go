@@ -8041,17 +8041,18 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 		}
 	}
-	defer res.Body.Close()
 	u.RequestID = requestID(res.Header)
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		res.Body.Close()
 		msg := explained(p, model, res, b)
-		if s.noChannelElsewhere(p, model, proto, res.StatusCode, b) {
+		canReplay := provider.ExtensionOutcome(r.Context(), true) == nil && provider.FinalRequestRefusal(r.Context()) == nil
+		if canReplay && s.noChannelElsewhere(p, model, proto, res.StatusCode, b) {
 			s.markUnfit(p.ID, model, proto)
 			u.RequestID = ""
 			return res.StatusCode, msg, false
 		}
-		if wrongEndpoint(res.StatusCode, b) {
+		if canReplay && wrongEndpoint(res.StatusCode, b) {
 			s.markUnfit(p.ID, model, proto)
 			if len(s.usable(p, model)) > 0 {
 				u.RequestID = "" // another endpoint answers, with its own id
@@ -8069,6 +8070,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 		return writeVendorErrorFrom(w, proto, proto, p, res, msg, b), msg, true
 	}
+	defer res.Body.Close()
 	if remote != nil && res.Header.Get(KeptTurnHeader) != "" {
 		// the other magpie kept the turn: what it answered is kept here
 		// once relayed, for the next turn's delta (remote_delta.go)
@@ -9148,6 +9150,9 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
+		if provider.ExtensionOutcome(ctx, true) != nil || provider.FinalRequestRefusal(ctx) != nil {
+			return res, to, nil
+		}
 		if filledOutput && outputFieldRefused(res.StatusCode, b) {
 			// the model's own limit, filled in, turned away (a list or
 			// models.dev saying more than the vendor takes): asked again
