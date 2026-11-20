@@ -1,6 +1,6 @@
 import { type Compatibility, type Contract, type ExecuteRequest, type Manifest, type Model } from "../index.js";
 
-for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] as const) {
+for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const) {
   const contract: Contract = { version: { major: 1, minor }, capabilities: ["module-rpc"] };
   const manifest: Manifest = {
     schema: 1, id: "typed-contract", version: "1.0.0", runtime: "bun", entry: "worker.js", contract,
@@ -9,9 +9,9 @@ for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] a
 }
 
 type AssertFalse<Value extends false> = Value;
-type UnsupportedMinorRejected = AssertFalse<17 extends Contract["version"]["minor"] ? true : false>;
+type UnsupportedMinorRejected = AssertFalse<18 extends Contract["version"]["minor"] ? true : false>;
 type UnsupportedMajorRejected = AssertFalse<2 extends Contract["version"]["major"] ? true : false>;
-type UnsupportedHostAPIRejected = AssertFalse<"^1.17" extends Compatibility["hostAPI"] ? true : false>;
+type UnsupportedHostAPIRejected = AssertFalse<"^1.18" extends Compatibility["hostAPI"] ? true : false>;
 const compatibility: Compatibility = { hostAPI: "^1.8", nativeABI: 1 };
 void compatibility;
 const decisionCompatibility: Compatibility = { hostAPI: "^1.7", nativeABI: 1 };
@@ -26,8 +26,8 @@ const legacyContracts: Contract[] = [
   { version: { major: 1, minor: 5 }, capabilities: ["module-rpc"] },
 ];
 const future: Contract = {
-  // @ts-expect-error SDK API 1.17 is outside the negotiated range.
-  version: { major: 1, minor: 17 },
+  // @ts-expect-error SDK API 1.18 is outside the negotiated range.
+  version: { major: 1, minor: 18 },
   capabilities: ["session-source"],
 };
 void sourcePreview;

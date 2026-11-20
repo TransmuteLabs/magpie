@@ -27,7 +27,7 @@ const call = (worker, id, method, input = params(method), extra = {}) =>
   worker.send({ kind: "call", id, method, params: input, scope: { plugin: "hooks", session: "session", operation: id }, ...extra });
 
 test("SDK 1.2 advertises gateway hooks and accepts explicit host compatibility", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 16 });
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 17 });
   assert.equal(new Set(SDK.CONTRACT.capabilities).size, SDK.CONTRACT.capabilities.length);
   for (const capability of ["gateway-hooks", "native-account-operations", "session-source", "session-storage-source"]) {
     assert.equal(SDK.CONTRACT.capabilities.includes(capability), true);

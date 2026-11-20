@@ -2,6 +2,7 @@ package extension
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,39 @@ func TestVersionedOwnerContributions(test *testing.T) {
 			change(&invalid)
 			if err := invalid.Validate(); err == nil {
 				test.Fatal("accepted invalid contribution")
+			}
+		})
+	}
+}
+
+func TestLibraryRuleContribution(test *testing.T) {
+	manifest := testManifest(ModuleRPC)
+	manifest.Contract.Version.Minor = 17
+	manifest.Contributions = []ContributionDescriptor{{
+		Point: ContributionLibraryRule, Version: 1,
+		LibraryRule: &LibraryRuleDescriptor{ID: "style", Body: "# Style", Paths: []string{"src/**"}},
+	}}
+	if err := manifest.Validate(); err != nil {
+		test.Fatal(err)
+	}
+	clone := manifest.Clone()
+	clone.Contributions[0].LibraryRule.Paths[0] = "changed"
+	if manifest.Contributions[0].LibraryRule.Paths[0] != "src/**" || len(manifest.Public().Contributions) != 0 {
+		test.Fatal("Library rule escaped installation metadata")
+	}
+	for name, change := range map[string]func(*Manifest){
+		"older API":    func(value *Manifest) { value.Contract.Version.Minor = 16 },
+		"duplicate":    func(value *Manifest) { value.Contributions = append(value.Contributions, value.Contributions[0]) },
+		"empty":        func(value *Manifest) { value.Contributions[0].LibraryRule.Body = "\u0085" },
+		"body size":    func(value *Manifest) { value.Contributions[0].LibraryRule.Body = strings.Repeat("市", 33_334) },
+		"glob newline": func(value *Manifest) { value.Contributions[0].LibraryRule.Paths[0] = "bad\npath" },
+		"mixed owners": func(value *Manifest) { value.Contributions[0].Search = &SearchSourceDescriptor{ID: "search"} },
+	} {
+		test.Run(name, func(test *testing.T) {
+			invalid := manifest.Clone()
+			change(&invalid)
+			if err := invalid.Validate(); err == nil {
+				test.Fatal("accepted invalid Library rule")
 			}
 		})
 	}

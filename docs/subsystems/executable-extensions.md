@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.16. Authors declare the minimum contract
+The available SDK contract is API 1.17. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -641,19 +641,20 @@ HTTP request context, so this seam uses a bounded background context.
 See [ADR 0012](../adr/0012-sdk-routing-strategies.md) for a tested descriptor,
 the decision rationale and its historical verification limits.
 
-## Owner contribution registry (API 1.16)
+## Owner contribution registry
 
-A root `module-rpc` package may use `contributions` to register an action at
-a versioned extension point. The host accepts these two contracts:
+A root `module-rpc` package may use `contributions` to register an action or
+resource at a versioned extension point.
 
 | Point and version | Descriptor | Consumer |
 | --- | --- | --- |
-| `routing`, `1` | `routing` with `id`, `name`, `action`, optional `flags` and `timeoutMs` | Provider and group ordering |
-| `search`, `1` | `search` with `id`, `name`, `action` and optional `provider` | Ordinary [web search](extension-search.md) |
+| `routing`, `1` | API 1.16. `routing` with `id`, `name`, `action`, optional `flags` and `timeoutMs` | Provider and group ordering |
+| `search`, `1` | API 1.16. `search` with `id`, `name`, `action` and optional `provider` | Ordinary [web search](extension-search.md) |
+| `library-rule`, `1` | API 1.17. `libraryRule` with `id`, Markdown `body` and optional `paths` | Explicit [Library import](library.md#sdk-rule-import) |
 
 Exactly one descriptor matches the point. Each descriptor uses the existing
-owner's validation, including action ownership, readonly effect and per-point
-limits. IDs are unique within a package and point, across both forms of
+owner's validation and per-point limits. Search and routing also check action
+ownership and readonly effect. IDs are unique within a package and point, across both forms of
 declaration. For example, a `searchSources` ID cannot be reused in the package's
 `search` contributions. Unknown points or versions fail package admission.
 Old `routingStrategies` and `searchSources` entries go through the same
@@ -661,7 +662,7 @@ registry.
 
 [`registeredContributions`](../../internal/extension/contributions.go)
 derives available bindings from enabled root packages without starting them.
-Each binding names its package, configuration and enablement generation.
+Each action binding names its package, configuration and enablement generation.
 The action runs on that generation's SDK lease. Each owner validates its
 request, scope and result, checks the binding again before dispatch and
 publication, and applies its existing refusal or fallback policy.

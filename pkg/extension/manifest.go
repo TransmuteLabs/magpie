@@ -127,6 +127,10 @@ func cloneManifest(manifest Manifest) Manifest {
 		if contribution.Search != nil {
 			contribution.Search = new(*contribution.Search)
 		}
+		if contribution.LibraryRule != nil {
+			contribution.LibraryRule = new(*contribution.LibraryRule)
+			contribution.LibraryRule.Paths = slices.Clone(contribution.LibraryRule.Paths)
+		}
 	}
 	manifest.Settings = cloneFeatureSettings(manifest.Settings)
 	manifest.Tools = slices.Clone(manifest.Tools)

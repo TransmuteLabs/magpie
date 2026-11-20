@@ -34,7 +34,7 @@ test("SDK distribution includes every reachable runtime and type dependency", as
       await cp(join(root, relative), join(distribution, relative), { recursive: true });
     }
     const imported = await import(pathToFileURL(join(distribution, "index.js")).href);
-    assert.equal(imported.CONTRACT.version.minor, 16);
+    assert.equal(imported.CONTRACT.version.minor, 17);
     assert.equal(typeof imported.validateLedgerObservation, "function");
     assert.equal(typeof imported.validateCatalogProjection, "function");
     assert.equal(typeof imported.validateStorageRequest, "function");

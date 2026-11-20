@@ -56,6 +56,8 @@ const libraryUsage = `magpie library                     what the library gives 
   magpie library skill keep-own <name> <agent>      …or keep the agent's, and take the agent off the library's
   magpie library project …           a project folder's own skills (Library › Projects): magpie library project help
   magpie library native              what plugins Codex and Claude Code and packages Pi installed themselves declare (read only; the agent loads them)
+  magpie library rules available     show rules offered by enabled SDK plugins, with their revisions, as JSON
+  magpie library rules import <module/id> <name> <a,b…|none> --expected <revision>   copy a rule into the Library
   magpie library rtk                 which agents run their shell commands through RTK (rtk-ai.app), to save tokens
   magpie library rtk on|off <agent>  switch it (on with RTK's own installer; off works with RTK gone)
   magpie library rtk install         install RTK (Homebrew, winget, or RTK's own script)
@@ -283,6 +285,8 @@ func libraryCmd(args []string) error {
 		}
 	case "native":
 		return libraryNativeCmd(rest)
+	case "rules":
+		return libraryRulesCmd(rest)
 	case "rtk":
 		return rtkCmd(rest)
 	case "project", "projects":

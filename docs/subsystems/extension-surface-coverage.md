@@ -2,7 +2,7 @@
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. This census maps those surfaces to the current API 1.16 SDK and the
+modules. This census maps those surfaces to the current API 1.17 SDK and the
 ordinary host owners. It distinguishes three layers:
 
 - **Contract:** public descriptors, DTOs, method negotiation and validation.
@@ -23,7 +23,7 @@ and transport matrix extends that inventory.
 
 ## Owner navigation and compatibility
 
-The advertised API 1.16 ceiling does not change a module's negotiated minimum
+The advertised API 1.17 ceiling does not change a module's negotiated minimum
 or activate undeclared capabilities. Explicit API1.0 single-primary modules
 remain supported; components require API1.1, private-tool exposure API1.2 and
 later adapters retain the floors shown in their owning contracts.
@@ -252,12 +252,13 @@ lifecycles keep their own adapters; they do not supply these other grants.
 Agent/profile collisions still require explicit adoption. Additional history
 transports need their own checked readers.
 
-The [owner contribution registry](executable-extensions.md#owner-contribution-registry-api-116)
+The [owner contribution registry](executable-extensions.md#owner-contribution-registry)
 resolves versioned search and routing actions and their earlier declarations.
+The Library consumes static rule declarations through explicit import.
 Additional action points require a typed owner adapter. Original primary
 capability methods retain their owners and ModuleRPC remains unary.
 
-Additional history transports, declarative Library resources and arbitrary
+Additional history transports, other declarative Library resources and arbitrary
 app-wide jobs need their own checked adapters. Declared gateway activation,
 auth renewal and paid tasks retain their finite owners.
 

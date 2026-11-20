@@ -40,3 +40,23 @@ test("versioned owner registrations and settings stay in the installation manife
   ];
   for (const conflict of invalid) assert.throws(() => validateManifest({ ...manifest, ...conflict }));
 });
+
+test("Library rules are bounded SDK 1.17 declarations without runtime authority", () => {
+  const rule = { id: "style", body: "# Style", paths: ["src/**"] };
+  const declaration = { point: "library-rule", version: 1, libraryRule: rule };
+  const withRules = {
+    ...manifest,
+    contract: { ...manifest.contract, version: { major: 1, minor: 17 } },
+    contributions: [...manifest.contributions, declaration],
+  };
+  assert.equal(validateManifest(withRules).contributions.length, 3);
+  assert.equal(publicManifest(withRules).contributions, undefined);
+  assert.throws(() => validateManifest({ ...withRules, contract: manifest.contract }));
+  assert.throws(() => validateManifest({ ...withRules, contributions: [declaration, declaration] }));
+  for (const invalid of [{ body: "\u0085" }, { body: "市".repeat(33_334) }, { paths: ["bad\npath"] },
+    { paths: ["src/**\0"] }, { paths: Array(51).fill("src/**") }, { agents: ["claude"] }]) {
+    assert.throws(() => validateManifest({
+      ...withRules, contributions: [{ ...declaration, libraryRule: { ...rule, ...invalid } }],
+    }));
+  }
+});

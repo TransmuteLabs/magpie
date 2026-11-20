@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/agent"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Rules are Markdown files of guidance kept once and given to the agents
@@ -46,9 +47,9 @@ type Rule struct {
 }
 
 const (
-	maxRuleBody  = 100_000
-	maxRulePaths = 50
-	maxRulePath  = 500
+	maxRuleBody  = sdk.MaxLibraryRuleBody
+	maxRulePaths = sdk.MaxLibraryRulePaths
+	maxRulePath  = sdk.MaxLibraryRulePath
 )
 
 // RuleAgents are the agents a rule can be given, in the order the page
@@ -217,27 +218,33 @@ func cleanPaths(ps []string) []string {
 // SaveRule adds a rule, or replaces the one called old (renaming it: the
 // files magpie wrote by the old name go).
 func SaveRule(old string, r Rule) (*Result, error) {
+	if err := prepareRule(&r); err != nil {
+		return nil, err
+	}
+	return change(func(l *Library) error { return l.putRule(old, r) })
+}
+
+func prepareRule(r *Rule) error {
 	r.Name = strings.TrimSpace(r.Name)
 	r.Paths = cleanPaths(r.Paths)
 	r.Body = strings.TrimRight(strings.ReplaceAll(r.Body, "\r\n", "\n"), " \n\t")
-	if err := r.check(); err != nil {
-		return nil, err
+	return r.check()
+}
+
+func (l *Library) putRule(old string, r Rule) error {
+	if r.Name != old && l.rule(r.Name) != nil {
+		return fmt.Errorf("the library already has a rule called %s", r.Name)
 	}
-	return change(func(l *Library) error {
-		if r.Name != old && l.rule(r.Name) != nil {
-			return fmt.Errorf("the library already has a rule called %s", r.Name)
+	if old != "" {
+		index := slices.IndexFunc(l.Rules, func(x *Rule) bool { return x.Name == old })
+		if index < 0 {
+			return fmt.Errorf("no rule called %s", old)
 		}
-		if old != "" {
-			i := slices.IndexFunc(l.Rules, func(x *Rule) bool { return x.Name == old })
-			if i < 0 {
-				return fmt.Errorf("no rule called %s", old)
-			}
-			l.Rules = slices.Delete(l.Rules, i, i+1)
-		}
-		r.Agents = orNone(slices.Compact(slices.Sorted(slices.Values(r.Agents))))
-		l.Rules = append(l.Rules, &r)
-		return nil
-	})
+		l.Rules = slices.Delete(l.Rules, index, index+1)
+	}
+	r.Agents = orNone(slices.Compact(slices.Sorted(slices.Values(r.Agents))))
+	l.Rules = append(l.Rules, &r)
+	return nil
 }
 
 // RuleAgentsSet sets which agents get a rule.

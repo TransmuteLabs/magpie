@@ -53,7 +53,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 16 }),
+  version: Object.freeze({ major: 1, minor: 17 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -275,7 +275,7 @@ export function validateManifest(value) {
   validateComposite(manifest);
   validateAgentProcesses(manifest);
   validateWindowAuthBindings(manifest);
-  validateContributions(manifest, fail);
+  validateContributions(manifest, fail, validID);
   validateSessionSources(manifest);
   validateSessionRelatedContract(manifest);
   validateStorageSources(manifest);

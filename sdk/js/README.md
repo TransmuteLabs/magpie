@@ -17,7 +17,7 @@ It requires Node 22+ and npm. Untagged Git descriptions such as a bare commit or
 with the application built from the same checkout and version; this target
 does not publish or run as part of ordinary Go builds.
 
-Package release versions are separate from the wire contract revision API 1.16
+Package release versions are separate from the wire contract revision API 1.17
 and native ABI 1. Module manifest contract minima and capability gates keep
 those protocol numbers, irrespective of the package release version.
 Declare the minimum contract and capabilities your module needs. `CONTRACT` describes available
