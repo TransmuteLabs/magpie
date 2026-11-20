@@ -13,46 +13,37 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/memdistill"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+var linkedDistillation = memdistill.Bind(distillAuto, distillComplete)
 
 // distillView is the Memory tab's "learn from conversations" row: the
 // switch, the model picked and the automatic one, the models to pick
 // from, the last run, and whether one is going.
 type distillView struct {
-	memdistill.State
-	Auto    string     `json:"auto"`
-	Models  []modelRef `json:"models"`
-	Running bool       `json:"running"`
-	// Dreaming is a tidy going (Running is conversations being read)
-	Dreaming bool `json:"dreaming"`
+	sdk.MemoryDistillationStatus
+	Auto   string     `json:"auto"`
+	Models []modelRef `json:"models"`
 	// Efforts are the reasoning levels of the model in use (picked or
 	// automatic), weakest first, none when they aren't known; EffortNow
 	// the picked Effort fitted to them
 	Efforts   []string `json:"efforts,omitempty"`
 	EffortNow string   `json:"effortNow,omitempty"`
-	// Ranges are the ranges, in days, reading can look back (All -1)
-	Ranges []int `json:"ranges"`
-	// Doing of Of are the run going's progress, 0 of 0 with none
-	Doing int `json:"doing,omitempty"`
-	Of    int `json:"of,omitempty"`
 }
 
-func readDistill() (*distillView, error) {
-	st, err := memdistill.Load()
+func readDistill(service sdk.MemoryDistillationService) (*distillView, error) {
+	status, err := service.Status()
 	if err != nil {
 		return nil, err
 	}
-	st.Done = nil // the marks are the run's, not the page's
-	v := &distillView{State: st, Auto: distillAuto(), Models: []modelRef{}, Running: memdistill.Running() && !memdistill.Dreaming(), Dreaming: memdistill.Dreaming(), Ranges: memdistill.Ranges}
-	if v.Running {
-		v.Doing, v.Of = memdistill.Progress()
-	}
-	inUse := st.Model
+	v := &distillView{MemoryDistillationStatus: status, Auto: distillAuto()}
+	inUse := status.Model
 	if inUse == "" {
 		inUse = v.Auto
 	}
 	if inUse != "" {
-		v.Efforts, v.EffortNow = gateway.ModelEfforts(inUse), gateway.SideEffort(inUse, st.Effort)
+		v.Efforts, v.EffortNow = gateway.ModelEfforts(inUse), gateway.SideEffort(inUse, status.Effort)
 	}
 	v.Models = servedModels()
 	return v, nil
@@ -143,23 +134,12 @@ func distillComplete(ctx context.Context, model, effort, system, user string) (s
 // keepDistilling reads conversations into memory while the backend runs:
 // a few minutes after start, then every hour.
 func keepDistilling(ctx context.Context) {
-	memdistill.Keep(ctx, 5*time.Minute, time.Hour, distillAuto, distillComplete)
+	linkedDistillation.Keep(ctx, 5*time.Minute, time.Hour)
 }
 
-// distillNow reads every conversation due in the background, for the
-// switch turned on, a model or a longer range picked, and the Read now
-// button; the tab polls while it runs, and Stop ends it (RealZeroP27 on
-// X: the hourly 10 read 400 in 40 hours).
-var distillNow = func() {
-	go memdistill.ReadAll(backendCtx, distillAuto(), distillComplete)
-}
-
-// distillStop ends the run going.
-var distillStop = memdistill.Stop
-
-func memoryDistillRoutes(mux *http.ServeMux) {
+func memoryDistillRoutes(mux *http.ServeMux, service sdk.MemoryDistillationService) {
 	mux.HandleFunc("GET /api/memory/distill", func(rw http.ResponseWriter, r *http.Request) {
-		v, err := readDistill()
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -171,7 +151,7 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 	// reasoning level and how far back it reads; a longer range reads at
 	// once too
 	mux.HandleFunc("POST /api/memory/distill", func(rw http.ResponseWriter, r *http.Request) {
-		var in memdistill.SettingsChange
+		var in sdk.MemoryDistillationSettings
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
@@ -180,15 +160,15 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 			fail(rw, fmt.Errorf("a model's id such as codex/gpt-5.5, not %q", in.Model))
 			return
 		}
-		_, read, err := memdistill.Configure(in)
+		read, err := service.Configure(in)
 		if err != nil {
 			fail(rw, err)
 			return
 		}
 		if read {
-			distillNow()
+			service.ReadNow(backendCtx)
 		}
-		v, err := readDistill()
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -197,8 +177,8 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/run", func(rw http.ResponseWriter, r *http.Request) {
-		distillNow()
-		v, err := readDistill()
+		service.ReadNow(backendCtx)
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -207,8 +187,8 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/distill/stop", func(rw http.ResponseWriter, r *http.Request) {
-		distillStop()
-		v, err := readDistill()
+		service.Stop()
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -224,11 +204,11 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		if _, err := memdistill.SetDream(in.On); err != nil {
+		if err := service.SetDream(in.On); err != nil {
 			fail(rw, err)
 			return
 		}
-		v, err := readDistill()
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -236,8 +216,8 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/dream/run", func(rw http.ResponseWriter, r *http.Request) {
-		dreamNow()
-		v, err := readDistill()
+		service.DreamNow(backendCtx)
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
@@ -246,20 +226,15 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 		writeJSON(rw, v)
 	})
 	mux.HandleFunc("POST /api/memory/dream/undo", func(rw http.ResponseWriter, r *http.Request) {
-		if _, err := memdistill.Undo(); err != nil {
+		if err := service.Undo(); err != nil {
 			fail(rw, err)
 			return
 		}
-		v, err := readDistill()
+		v, err := readDistill(service)
 		if err != nil {
 			fail(rw, err)
 			return
 		}
 		writeJSON(rw, v)
 	})
-}
-
-// dreamNow tidies memory in the background, for the Tidy now button.
-var dreamNow = func() {
-	go memdistill.Dream(backendCtx, distillAuto(), distillComplete)
 }

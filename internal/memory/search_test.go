@@ -80,9 +80,9 @@ func TestSemanticRankingKeepsTheSearchSnapshot(t *testing.T) {
 	save(t, "Treatment of weekends", Fact, Global, "publish")
 	save(t, "Proposed workdays", Rule, Global, "draft")
 
-	oldRanking := SemanticRanker
-	t.Cleanup(func() { SemanticRanker = oldRanking })
-	SemanticRanker = sdk.MemorySemanticRanker{
+	oldRanking := linkedSemantic.Ranker
+	t.Cleanup(func() { linkedSemantic.Ranker = oldRanking })
+	linkedSemantic.Ranker = sdk.MemorySemanticRanker{
 		Ready: func() bool { return true },
 		Rank: func(request sdk.MemorySemanticRequest) map[string]float64 {
 			expected := sdk.MemorySemanticRecord{ID: eligible.ID, Text: eligible.Text, Why: eligible.Why}

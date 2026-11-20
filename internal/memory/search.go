@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/yetone/magpie/internal/memembed"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -18,8 +19,9 @@ type Query = sdk.MemoryQuery
 // Hit is a memory a search found, with how well it matched.
 type Hit = sdk.MemoryHit
 
-// SemanticRanker is the linked ranker registered by memembed.
-var SemanticRanker sdk.MemorySemanticRanker
+var linkedSemantic = memembed.Bind(SemanticIndexSnapshot)
+
+func Semantic() sdk.MemorySemanticService { return linkedSemantic }
 
 // SemanticIndexSnapshot returns the Memory records eligible for background
 // indexing, newest first.
@@ -134,7 +136,7 @@ func search(all []*Memory, q Query) []Hit {
 		return out
 	}
 	out := wordHits(pool, text)
-	if ranker := SemanticRanker; len(pool) != 0 && ranker.Rank != nil && ranker.Ready != nil && ranker.Ready() {
+	if ranker := linkedSemantic.Ranker; len(pool) != 0 && ranker.Ready() {
 		records := make([]sdk.MemorySemanticRecord, len(pool))
 		for index, item := range pool {
 			records[index] = semanticRecord(item)

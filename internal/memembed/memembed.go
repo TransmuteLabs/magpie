@@ -31,7 +31,6 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filelock"
-	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/pii"
 	"github.com/yetone/magpie/internal/pii/guard"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -110,26 +109,21 @@ func On() bool {
 	return err == nil && s.On
 }
 
-// Status is what the Memory tab shows of it.
-type Status struct {
-	On          bool   `json:"on"`
-	Installed   bool   `json:"installed"`
-	Size        int64  `json:"size"`
-	Downloading bool   `json:"downloading"`
-	Done        int64  `json:"done"`
-	Error       string `json:"error,omitempty"`
-	// Read of Of are the memories read (with a vector), of all there are
-	Read int `json:"read"`
-	Of   int `json:"of"`
-	// Reading is a background read going
-	Reading bool `json:"reading"`
-	// Failed is why the last read failed, "" when it worked
-	Failed string `json:"failed,omitempty"`
+func Bind(source sdk.MemorySemanticIndexSource) sdk.MemorySemanticService {
+	return sdk.MemorySemanticService{
+		Ranker: sdk.MemorySemanticRanker{
+			Ready: func() bool { return On() && Installed() },
+			Rank:  similar,
+		},
+		On:     On,
+		Status: func() sdk.MemorySemanticStatus { return status(source) },
+		Set:    Set,
+		Keep:   func(ctx context.Context, tick time.Duration) { keep(ctx, tick, source) },
+	}
 }
 
-// Now is its status.
-func Now() Status {
-	st := Status{On: On(), Installed: Installed(), Size: Size()}
+func status(source sdk.MemorySemanticIndexSource) sdk.MemorySemanticStatus {
+	st := sdk.MemorySemanticStatus{On: On(), Installed: Installed(), Size: Size()}
 	dl.mu.Lock()
 	st.Downloading, st.Error = dl.cancel != nil, dl.err
 	dl.mu.Unlock()
@@ -142,7 +136,7 @@ func Now() Status {
 		st.Failed = *failed
 	}
 	if st.On && st.Installed {
-		if records, err := memory.SemanticIndexSnapshot(); err == nil {
+		if records, err := source(); err == nil {
 			vs := vectors()
 			st.Of = len(records)
 			for _, record := range records {
@@ -355,14 +349,14 @@ func Poke() {
 	}
 }
 
-// Keep reads memories not read yet while ctx lasts: every tick and when
+// keep reads memories not read yet while ctx lasts: every tick and when
 // poked, while switched on with the model on disk.
-func Keep(ctx context.Context, tick time.Duration) {
+func keep(ctx context.Context, tick time.Duration, source sdk.MemorySemanticIndexSource) {
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	for {
 		if On() && Installed() {
-			if _, err := Index(ctx); err != nil && ctx.Err() == nil {
+			if _, err := index(ctx, source); err != nil && ctx.Err() == nil {
 				failed := err.Error()
 				idx.failed.Store(&failed)
 			}
@@ -376,18 +370,18 @@ func Keep(ctx context.Context, tick time.Duration) {
 	}
 }
 
-// Index reads every memory a search can return that has no vector for its
+// index reads every memory a search can return that has no vector for its
 // text yet, keeps the vectors (dropping those of texts gone) and says how
 // many it read. One goes at a time, in this magpie and across them.
-func Index(ctx context.Context) (int, error) {
-	count, err := index(ctx, memory.SemanticIndexSnapshot)
+func index(ctx context.Context, source sdk.MemorySemanticIndexSource) (int, error) {
+	count, err := indexOnce(ctx, source)
 	if errors.Is(err, errIndexWithdrawn) {
 		return 0, nil
 	}
 	return count, err
 }
 
-func index(ctx context.Context, source sdk.MemorySemanticIndexSource) (int, error) {
+func indexOnce(ctx context.Context, source sdk.MemorySemanticIndexSource) (int, error) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -497,10 +491,3 @@ func similar(request sdk.MemorySemanticRequest) map[string]float64 {
 
 // inline is how many memories not read yet a search reads itself.
 const inline = 16
-
-func init() {
-	memory.SemanticRanker = sdk.MemorySemanticRanker{
-		Ready: func() bool { return On() && Installed() },
-		Rank:  similar,
-	}
-}

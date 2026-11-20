@@ -344,6 +344,12 @@ a model is shown each scope's memories and names the ones that say the
 same thing, merged into one, and the ones no longer true, set aside. It is
 off until switched on under Memory → Tidy up every night.
 
+The Memory window and the backend keeper share a linked
+[`MemoryDistillationService`](../../pkg/extension/memory_distillation.go).
+Its status omits processed-session marks from the window. The host binds
+manual reads, manual tidies and periodic work to its ordinary gateway
+callback, with the same model selection, caller identity and usage accounting.
+
 - Due once a day from 03:00 local (`DreamHour`), never before the first
   03:00 after it was switched on (`Dreams`, `TestDreamsOnceANight`). `Keep`
   runs it after the hourly distill run; Tidy now runs it at once. It
@@ -413,8 +419,11 @@ meaning, since it downloads a model (~135 MB).
   on a nudge (`Poke`); a search reads up to 16 missing ones itself, and
   with none read yet it is by words while Keep reads. The model is let go
   after 10 minutes unused.
-- Memory selects records by scope, status, kind and tags before calling the
-  linked [`MemorySemanticRanker`](../../pkg/extension/memory_semantic.go).
+- Memory binds the built-in embedder through
+  [`MemorySemanticService`](../../pkg/extension/memory_semantic.go). The
+  window's switch, progress status and backend keeper use that binding.
+  Memory selects records by scope, status, kind and tags before calling
+  its ranker.
   It receives the query and a snapshot containing each selected record's
   ID, text and why. When the model is unavailable, the host skips
   snapshot construction and uses the word ranking. The built-in `memembed`

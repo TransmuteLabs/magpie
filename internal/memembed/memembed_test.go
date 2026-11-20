@@ -1,4 +1,4 @@
-package memembed
+package memembed_test
 
 import (
 	"context"
@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/memembed"
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/pii/guard"
 	"github.com/yetone/magpie/internal/testenv"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func TestMain(m *testing.M) { testenv.Main(m) }
@@ -21,10 +23,6 @@ func TestMain(m *testing.M) { testenv.Main(m) }
 // fake reads a text as the topics it names, in either language: what a
 // real model does for a search across languages, without its 135 MB.
 type fake struct{ calls atomic.Int32 }
-
-type embedFunc func(string) []float32
-
-func (embed embedFunc) Embed(text string) []float32 { return embed(text) }
 
 var topics = [][]string{
 	{"release", "ship", "上线", "发布"},
@@ -58,43 +56,24 @@ func (f *fake) Embed(text string) []float32 {
 func sandbox(t *testing.T, installed bool) *fake {
 	t.Helper()
 	d := t.TempDir()
-	oldRoot, oldState, oldMem, oldLoad := Root, StatePath, memory.Path, loadModel
-	Root = func() string { return filepath.Join(d, "model") }
-	StatePath = func() string { return filepath.Join(d, "memory-semantic.json") }
+	oldMem := memory.Path
 	memory.Path = func() string { return filepath.Join(d, "memory.json") }
+	t.Cleanup(func() { memory.Path = oldMem })
+	memembed.ModelHomeForTest(t, d)
 	f := &fake{}
-	loadModel = func(string) (embedder, error) { return f, nil }
-	t.Cleanup(func() {
-		Root, StatePath, memory.Path, loadModel = oldRoot, oldState, oldMem, oldLoad
-		unload()
-		store.mu.Lock()
-		store.v = nil
-		store.mu.Unlock()
-	})
+	memembed.UseEmbedderForTest(f.Embed)
 	if installed {
-		sparseModel(t)
+		memembed.SparseModelForTest(t)
 		b := []byte(`{"on":true}`)
-		if err := os.WriteFile(StatePath(), b, 0o600); err != nil {
+		if err := os.WriteFile(memembed.StatePath(), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return f
 }
 
-func sparseModel(t *testing.T) {
-	t.Helper()
-	if err := os.MkdirAll(dir(), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, p := range files {
-		path := filepath.Join(dir(), filepath.Base(p.path))
-		if err := os.WriteFile(path, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Truncate(path, p.size); err != nil {
-			t.Fatal(err)
-		}
-	}
+func index(ctx context.Context) (int, error) {
+	return memembed.IndexForTest(ctx, memory.SemanticIndexSnapshot)
 }
 
 func save(t *testing.T, text, status string) *memory.Memory {
@@ -140,10 +119,10 @@ func TestSearchFindsByMeaning(t *testing.T) {
 	if got := ids(hits); len(got) != 2 || got[0] != "Releases go out on Tuesdays" {
 		t.Fatalf("%v", got)
 	}
-	if err := Set(false); err != nil {
+	if err := memory.Semantic().Set(false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(Root()); !os.IsNotExist(err) {
+	if _, err := os.Stat(memembed.Root()); !os.IsNotExist(err) {
 		t.Fatalf("the model is still there: %v", err)
 	}
 	if hits, _ := memory.Search(memory.Query{Text: "什么时候上线"}); len(hits) != 0 {
@@ -159,40 +138,40 @@ func TestIndexReadsOnce(t *testing.T) {
 	a := save(t, "Releases go out on Tuesdays", memory.Active)
 	candidate := save(t, "Use tabs", memory.Candidate)
 	save(t, "Old port rule", memory.Archived)
-	if n, err := Index(context.Background()); err != nil || n != 2 {
+	if n, err := index(context.Background()); err != nil || n != 2 {
 		t.Fatalf("%d %v", n, err)
 	}
-	if n, _ := Index(context.Background()); n != 0 || f.calls.Load() != 2 {
+	if n, _ := index(context.Background()); n != 0 || f.calls.Load() != 2 {
 		t.Fatalf("read again: %d, %d calls", n, f.calls.Load())
 	}
 	text := "Releases go out on Wednesdays"
 	if _, err := memory.Edit(a.ID, memory.Input{Text: &text}, true); err != nil {
 		t.Fatal(err)
 	}
-	if n, _ := Index(context.Background()); n != 1 {
+	if n, _ := index(context.Background()); n != 1 {
 		t.Fatalf("edited: %d", n)
 	}
-	if st := Now(); st.Read != 2 || st.Of != 2 || !st.On || !st.Installed {
+	if st := memory.Semantic().Status(); st.Read != 2 || st.Of != 2 || !st.On || !st.Installed {
 		t.Fatalf("%+v", st)
 	}
-	path := filepath.Join(dir(), "vectors.bin")
-	if got := len(readVecs(path)); got != 2 {
+	path := filepath.Join(memembed.CacheDirForTest(), "vectors.bin")
+	if got := memembed.VectorCountForTest(path); got != 2 {
 		t.Fatalf("on disk: %d", got)
 	}
 	if err := memory.Remove(candidate.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := Index(t.Context()); n != 0 || err != nil {
+	if n, err := index(t.Context()); n != 0 || err != nil {
 		t.Fatalf("pruning indexed a passage: %d, %v", n, err)
 	}
-	if st, persisted := Now(), len(readVecs(path)); st.Read != 1 || st.Of != 1 || persisted != 1 {
+	if st, persisted := memory.Semantic().Status(), memembed.VectorCountForTest(path); st.Read != 1 || st.Of != 1 || persisted != 1 {
 		t.Fatalf("removed candidate follows the index: %+v, %d on disk", st, persisted)
 	}
 	b, _ := os.ReadFile(path)
 	if err := os.WriteFile(path, b[:len(b)-1], 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(readVecs(path)); got != 0 {
+	if got := memembed.VectorCountForTest(path); got != 0 {
 		t.Fatalf("cut short: %d", got)
 	}
 }
@@ -200,10 +179,10 @@ func TestIndexReadsOnce(t *testing.T) {
 func TestUnknownMemoryRecordDoesNotPruneSemanticIndex(t *testing.T) {
 	model := sandbox(t, true)
 	item := save(t, "Known indexed passage", memory.Active)
-	if count, err := Index(t.Context()); err != nil || count != 1 {
+	if count, err := index(t.Context()); err != nil || count != 1 {
 		t.Fatalf("initial index: %d (%v)", count, err)
 	}
-	vectorsFile := filepath.Join(dir(), "vectors.bin")
+	vectorsFile := filepath.Join(memembed.CacheDirForTest(), "vectors.bin")
 	previous, err := os.ReadFile(vectorsFile)
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +195,7 @@ func TestUnknownMemoryRecordDoesNotPruneSemanticIndex(t *testing.T) {
 	if err := os.WriteFile(path, []byte("---\nsomething: [\n---\nBroken Memory fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := Index(t.Context()); err == nil || count != 0 {
+	if count, err := index(t.Context()); err == nil || count != 0 {
 		t.Errorf("index treated an unreadable record as absent: %d (%v)", count, err)
 	}
 	if body, err := os.ReadFile(vectorsFile); err != nil || string(body) != string(previous) {
@@ -225,10 +204,10 @@ func TestUnknownMemoryRecordDoesNotPruneSemanticIndex(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := Index(t.Context()); err != nil || count != 0 || model.calls.Load() != 1 {
+	if count, err := index(t.Context()); err != nil || count != 0 || model.calls.Load() != 1 {
 		t.Fatalf("restored record was indexed again: %d (%v), model calls %d", count, err, model.calls.Load())
 	}
-	if status := Now(); status.Of != 1 || status.Read != 1 {
+	if status := memory.Semantic().Status(); status.Of != 1 || status.Read != 1 {
 		t.Fatalf("restored index not reported: %+v", status)
 	}
 }
@@ -240,40 +219,38 @@ func TestIndexCannotPublishAfterSwitchOff(t *testing.T) {
 			item := save(t, "Releases go out on Tuesdays", memory.Active)
 			entered, unblock := make(chan struct{}), make(chan struct{})
 			release := sync.OnceFunc(func() { close(unblock) })
-			loadModel = func(string) (embedder, error) {
-				return embedFunc(func(text string) []float32 {
-					close(entered)
-					<-unblock
-					return model.Embed(text)
-				}), nil
-			}
+			memembed.UseEmbedderForTest(func(text string) []float32 {
+				close(entered)
+				<-unblock
+				return model.Embed(text)
+			})
 			done := make(chan struct{})
 			var indexed int
 			var indexErr error
 			t.Cleanup(func() { release(); <-done })
 			go func() {
 				defer close(done)
-				indexed, indexErr = Index(t.Context())
+				indexed, indexErr = index(t.Context())
 			}()
 			select {
 			case <-entered:
 			case <-time.After(12 * time.Second):
 				t.Fatal("index never started embedding")
 			}
-			if err := Set(false); err != nil {
+			if err := memory.Semantic().Set(false); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(Root()); !os.IsNotExist(err) {
+			if _, err := os.Stat(memembed.Root()); !os.IsNotExist(err) {
 				t.Fatalf("model directory remains after switching off: %v", err)
 			}
 			if mode == "re-enabled" {
-				sparseModel(t)
-				if err := Set(true); err != nil {
+				memembed.SparseModelForTest(t)
+				if err := memory.Semantic().Set(true); err != nil {
 					t.Fatal(err)
 				}
 			}
-			status := make(chan Status, 1)
-			go func() { status <- Now() }()
+			status := make(chan sdk.MemorySemanticStatus, 1)
+			go func() { status <- memory.Semantic().Status() }()
 			select {
 			case current := <-status:
 				on := mode == "re-enabled"
@@ -287,18 +264,18 @@ func TestIndexCannotPublishAfterSwitchOff(t *testing.T) {
 			}
 			release()
 			<-done
-			if _, err := os.Stat(filepath.Join(dir(), "vectors.bin")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(memembed.CacheDirForTest(), "vectors.bin")); !os.IsNotExist(err) {
 				t.Fatalf("old indexing run published after switching off: %v", err)
 			}
 			if indexErr != nil || indexed != 0 {
 				t.Fatalf("revoked index reported %d reads, %v", indexed, indexErr)
 			}
-			loadModel = func(string) (embedder, error) { return model, nil }
+			memembed.UseEmbedderForTest(model.Embed)
 			expected := 0
 			if mode == "re-enabled" {
 				expected = 1
 			}
-			if count, err := Index(t.Context()); err != nil || count != expected {
+			if count, err := index(t.Context()); err != nil || count != expected {
 				t.Fatalf("new index reported %d reads, %v; want %d reads", count, err, expected)
 			}
 			if got, err := memory.Get(item.ID); err != nil || got == nil || got.Text != item.Text {
@@ -311,21 +288,51 @@ func TestIndexCannotPublishAfterSwitchOff(t *testing.T) {
 func TestIndexUsesTheCurrentCacheDirectory(t *testing.T) {
 	sandbox(t, true)
 	save(t, "Releases go out on Tuesdays", memory.Active)
-	if count, err := Index(t.Context()); err != nil || count != 1 {
+	if count, err := index(t.Context()); err != nil || count != 1 {
 		t.Fatalf("initial index: %d, %v", count, err)
 	}
-	if err := os.Rename(Root(), Root()+"-previous"); err != nil {
+	if err := os.Rename(memembed.Root(), memembed.Root()+"-previous"); err != nil {
 		t.Fatal(err)
 	}
-	sparseModel(t)
-	if st := Now(); st.Read != 0 || st.Of != 1 {
+	memembed.SparseModelForTest(t)
+	if st := memory.Semantic().Status(); st.Read != 0 || st.Of != 1 {
 		t.Fatalf("replaced directory kept previous vector state: %+v", st)
 	}
-	if count, err := Index(t.Context()); err != nil || count != 1 {
+	if count, err := index(t.Context()); err != nil || count != 1 {
 		t.Fatalf("replacement index: %d, %v", count, err)
 	}
-	if got := len(readVecs(filepath.Join(dir(), "vectors.bin"))); got != 1 {
+	if got := memembed.VectorCountForTest(filepath.Join(memembed.CacheDirForTest(), "vectors.bin")); got != 1 {
 		t.Fatalf("replacement index on disk: %d", got)
+	}
+}
+
+func TestLinkedMemoryKeepsTheSemanticIndex(t *testing.T) {
+	sandbox(t, true)
+	save(t, "Releases go out on Tuesdays", memory.Active)
+	save(t, "An archived port rule", memory.Archived)
+	semantic := memory.Semantic()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		semantic.Keep(ctx, time.Hour)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	path := filepath.Join(memembed.CacheDirForTest(), "vectors.bin")
+	for memembed.VectorCountForTest(path) != 1 {
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			t.Fatalf("linked keeper did not index Memory: %+v", semantic.Status())
+		}
+	}
+	if status := semantic.Status(); status.Of != 1 || status.Read != 1 {
+		t.Fatalf("linked keeper and status read different snapshots: %+v", status)
 	}
 }
 
@@ -337,10 +344,10 @@ func TestNotThereIsWords(t *testing.T) {
 	if hits, _ := memory.Search(memory.Query{Text: "上线"}); len(hits) != 0 || f.calls.Load() != 0 {
 		t.Fatalf("%v, %d calls", ids(hits), f.calls.Load())
 	}
-	if err := os.WriteFile(StatePath(), []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(memembed.StatePath(), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if On() {
+	if memory.Semantic().On() {
 		t.Fatal("a broken switch file is on")
 	}
 }

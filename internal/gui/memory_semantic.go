@@ -7,17 +7,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yetone/magpie/internal/memembed"
 	"github.com/yetone/magpie/internal/memory"
 )
 
 // keepEmbedding reads new memories for search by meaning while the
-// backend runs, when it is switched on (memembed.Keep).
-func keepEmbedding(ctx context.Context) { memembed.Keep(ctx, time.Minute) }
+// backend runs, when it is switched on.
+func keepEmbedding(ctx context.Context) { memory.Semantic().Keep(ctx, time.Minute) }
 
 func memorySemanticRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/memory/semantic", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, memembed.Now())
+		writeJSON(rw, memory.Semantic().Status())
 	})
 	// {on}: switched on, the model is fetched when it isn't on disk;
 	// switched off, it is deleted
@@ -29,11 +28,12 @@ func memorySemanticRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		if err := memembed.Set(in.On); err != nil {
+		semantic := memory.Semantic()
+		if err := semantic.Set(in.On); err != nil {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, memembed.Now())
+		writeJSON(rw, semantic.Status())
 	})
 	// {q, status}: the Memory tab's search, as an agent's: the ids found,
 	// best first, without noting them as used. None when search by
@@ -50,7 +50,7 @@ func memorySemanticRoutes(mux *http.ServeMux) {
 		out := struct {
 			IDs []string `json:"ids"`
 		}{}
-		if strings.TrimSpace(in.Q) == "" || !memembed.On() {
+		if strings.TrimSpace(in.Q) == "" || !memory.Semantic().On() {
 			writeJSON(rw, out)
 			return
 		}

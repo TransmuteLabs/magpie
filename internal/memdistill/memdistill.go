@@ -43,7 +43,7 @@ var linkedDistillationCodec = memorydistillation.Codec()
 // Complete sends one request to model, asked to reason at effort ("" the
 // model's own default): a system text and one user message, and returns
 // the reply's text.
-type Complete func(ctx context.Context, model, effort, system, user string) (string, error)
+type Complete = sdk.MemoryCompletion
 
 const (
 	// Quiet is how long a session has had no turn before it is read: one
@@ -77,44 +77,7 @@ const (
 const Agent = "memory"
 
 // State is distill.json.
-type State struct {
-	On bool `json:"on,omitempty"`
-	// Model is the model picked; "" is the automatic choice
-	Model string `json:"model,omitempty"`
-	// Days is how far back reading looks, in days, from when it was
-	// switched on or the range was picked: 0 is Back, All every
-	// conversation listed (Ranges)
-	Days int `json:"days,omitempty"`
-	// Effort is the reasoning level the model is asked at, reading and
-	// tidying, fitted to its own levels as it is sent; "" its default
-	Effort string `json:"effort,omitempty"`
-	// Since is when it was switched on or the range picked, less the
-	// range: older sessions aren't read. Zero with All
-	Since time.Time `json:"since,omitzero"`
-	// Done is each read session's last turn when it was read, by
-	// agent/id
-	Done map[string]time.Time `json:"done,omitempty"`
-	// the last run: when, with which model, how many sessions read, how
-	// many memories proposed, and what stopped it
-	Last      time.Time `json:"last,omitzero"`
-	LastModel string    `json:"lastModel,omitempty"`
-	Read      int       `json:"read,omitempty"`
-	Added     int       `json:"added,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	// Left is how many were due and not read when the last run ended:
-	// stopped, failed or past PerRun
-	Left int `json:"left,omitempty"`
-	// Dream is the nightly tidy switched on (dream.go), DreamSince when
-	Dream      bool      `json:"dream,omitempty"`
-	DreamSince time.Time `json:"dreamSince,omitzero"`
-	// the last tidy that went through: when, with which model, and what it
-	// changed, undone or not; DreamError is what stopped the last one tried
-	Dreamt     time.Time       `json:"dreamt,omitzero"`
-	DreamModel string          `json:"dreamModel,omitempty"`
-	DreamError string          `json:"dreamError,omitempty"`
-	Changes    []memory.Change `json:"changes,omitempty"`
-	Undone     bool            `json:"undone,omitempty"`
-}
+type State = sdk.MemoryDistillationState
 
 // Path is distill.json; a variable for tests.
 var Path = func() string { return appdir.Join(appdir.Config(), "distill.json") }
@@ -243,12 +206,7 @@ func Set(on bool, model string) (State, error) {
 	return state, err
 }
 
-type SettingsChange struct {
-	On     bool    `json:"on"`
-	Model  string  `json:"model"`
-	Effort *string `json:"effort"`
-	Days   *int    `json:"days"`
-}
+type SettingsChange = sdk.MemoryDistillationSettings
 
 func Configure(in SettingsChange) (State, bool, error) {
 	var effort string

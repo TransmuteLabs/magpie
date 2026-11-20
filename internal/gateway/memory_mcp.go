@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
-	// search by meaning, when switched on (memory.SemanticRanker)
-	_ "github.com/yetone/magpie/internal/memembed"
 	"github.com/yetone/magpie/internal/memory"
 	"github.com/yetone/magpie/internal/usage"
 )

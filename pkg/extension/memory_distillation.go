@@ -1,6 +1,63 @@
 package extension
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// MemoryCompletion sends model work through the host's selected gateway.
+type MemoryCompletion func(ctx context.Context, model, effort, system, user string) (string, error)
+
+// MemoryDistillationService is the linked owner of conversation review and
+// nightly cleanup. Manual and scheduled jobs use the same host model callback.
+type MemoryDistillationService struct {
+	Status    func() (MemoryDistillationStatus, error)
+	Configure func(MemoryDistillationSettings) (readNow bool, err error)
+	ReadNow   func(context.Context)
+	Stop      func()
+	SetDream  func(bool) error
+	DreamNow  func(context.Context)
+	Undo      func() error
+	Keep      func(context.Context, time.Duration, time.Duration)
+}
+
+type MemoryDistillationSettings struct {
+	On     bool    `json:"on"`
+	Model  string  `json:"model"`
+	Effort *string `json:"effort"`
+	Days   *int    `json:"days"`
+}
+
+type MemoryDistillationStatus struct {
+	MemoryDistillationState
+	Running  bool  `json:"running"`
+	Dreaming bool  `json:"dreaming"`
+	Ranges   []int `json:"ranges"`
+	Doing    int   `json:"doing,omitempty"`
+	Of       int   `json:"of,omitempty"`
+}
+
+type MemoryDistillationState struct {
+	On         bool                 `json:"on,omitempty"`
+	Model      string               `json:"model,omitempty"`
+	Days       int                  `json:"days,omitempty"`
+	Effort     string               `json:"effort,omitempty"`
+	Since      time.Time            `json:"since,omitzero"`
+	Done       map[string]time.Time `json:"done,omitempty"`
+	Last       time.Time            `json:"last,omitzero"`
+	LastModel  string               `json:"lastModel,omitempty"`
+	Read       int                  `json:"read,omitempty"`
+	Added      int                  `json:"added,omitempty"`
+	Error      string               `json:"error,omitempty"`
+	Left       int                  `json:"left,omitempty"`
+	Dream      bool                 `json:"dream,omitempty"`
+	DreamSince time.Time            `json:"dreamSince,omitzero"`
+	Dreamt     time.Time            `json:"dreamt,omitzero"`
+	DreamModel string               `json:"dreamModel,omitempty"`
+	DreamError string               `json:"dreamError,omitempty"`
+	Changes    []MemoryTidyChange   `json:"changes,omitempty"`
+	Undone     bool                 `json:"undone,omitempty"`
+}
 
 // MemoryDistillationCodec is a linked Go module for formatting model
 // requests and decoding proposals. The host selects their inputs, sends

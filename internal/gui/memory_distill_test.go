@@ -104,7 +104,7 @@ func TestDreamRoutes(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	mux := http.NewServeMux()
-	memoryDistillRoutes(mux)
+	memoryDistillRoutes(mux, linkedDistillation)
 	post := func(path, body string) distillView {
 		t.Helper()
 		rec := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestDreamRoutes(t *testing.T) {
 		return v
 	}
 	if v := post("/api/memory/dream", `{"on":true}`); !v.Dream || v.On {
-		t.Fatalf("on: %+v", v.State)
+		t.Fatalf("on: %+v", v.MemoryDistillationState)
 	}
 	text, kind, scope, st := "Old", memory.Fact, memory.Global, memory.Candidate
 	m, _, err := memory.Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope, Status: &st}, memory.FromInferred, nil, nil)
@@ -137,13 +137,13 @@ func TestDreamRoutes(t *testing.T) {
 		t.Fatalf("not set aside: %s", got.Status)
 	}
 	if v := post("/api/memory/dream/undo", `{}`); !v.Undone {
-		t.Fatalf("undo: %+v", v.State)
+		t.Fatalf("undo: %+v", v.MemoryDistillationState)
 	}
 	if got, _ := memory.Get(m.ID); got.Status != memory.Candidate {
 		t.Fatalf("not back: %s", got.Status)
 	}
 	if v := post("/api/memory/dream", `{"on":false}`); v.Dream {
-		t.Fatalf("off: %+v", v.State)
+		t.Fatalf("off: %+v", v.MemoryDistillationState)
 	}
 }
 
@@ -156,11 +156,10 @@ func TestDistillRangeAndEffortRoutes(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	reads := 0
-	prev := distillNow
-	distillNow = func() { reads++ }
-	t.Cleanup(func() { distillNow = prev })
+	service := linkedDistillation
+	service.ReadNow = func(context.Context) { reads++ }
 	mux := http.NewServeMux()
-	memoryDistillRoutes(mux)
+	memoryDistillRoutes(mux, service)
 	post := func(body string) (int, distillView) {
 		t.Helper()
 		rec := httptest.NewRecorder()
@@ -173,16 +172,16 @@ func TestDistillRangeAndEffortRoutes(t *testing.T) {
 		t.Fatalf("on: %+v %d", v, reads)
 	}
 	if _, v := post(`{"on":true,"model":"","days":90,"effort":"high"}`); v.Days != 90 || v.Effort != "high" || reads != 2 || !v.Running {
-		t.Fatalf("90 days, high: %+v %d", v.State, reads)
+		t.Fatalf("90 days, high: %+v %d", v.MemoryDistillationState, reads)
 	}
 	if _, v := post(`{"on":true,"model":""}`); v.Days != 90 || v.Effort != "high" || reads != 2 {
-		t.Fatalf("the switch's body changed them: %+v %d", v.State, reads)
+		t.Fatalf("the switch's body changed them: %+v %d", v.MemoryDistillationState, reads)
 	}
 	if _, v := post(`{"on":true,"model":"","days":30}`); v.Days != 30 || reads != 2 {
-		t.Fatalf("a shorter range read again: %+v %d", v.State, reads)
+		t.Fatalf("a shorter range read again: %+v %d", v.MemoryDistillationState, reads)
 	}
 	if _, v := post(`{"on":true,"model":"","effort":""}`); v.Effort != "" {
-		t.Fatalf("default: %+v", v.State)
+		t.Fatalf("default: %+v", v.MemoryDistillationState)
 	}
 	for _, bad := range []string{`{"on":true,"days":12}`, `{"on":true,"effort":"hard"}`} {
 		if code, _ := post(bad); code == 200 {
@@ -218,11 +217,10 @@ func TestDistillStopRoute(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	stops := 0
-	prev := distillStop
-	distillStop = func() { stops++ }
-	t.Cleanup(func() { distillStop = prev })
+	service := linkedDistillation
+	service.Stop = func() { stops++ }
 	mux := http.NewServeMux()
-	memoryDistillRoutes(mux)
+	memoryDistillRoutes(mux, service)
 	os.MkdirAll(filepath.Dir(memdistill.Path()), 0o700)
 	if err := os.WriteFile(memdistill.Path(), []byte(`{"on":true,"left":37}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -233,5 +231,35 @@ func TestDistillStopRoute(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &v)
 	if rec.Code != 200 || stops != 1 || v.Left != 37 || v.Running || v.Of != 0 {
 		t.Fatalf("%d %d %+v", rec.Code, stops, v)
+	}
+}
+
+func TestDistillationManualRoutesUseTheLinkedService(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	service := linkedDistillation
+	reads, dreams := 0, 0
+	service.ReadNow = func(context.Context) { reads++ }
+	service.DreamNow = func(context.Context) { dreams++ }
+	mux := http.NewServeMux()
+	memoryDistillRoutes(mux, service)
+
+	for _, task := range []struct {
+		path              string
+		running, dreaming bool
+	}{
+		{path: "/api/memory/distill/run", running: true},
+		{path: "/api/memory/dream/run", dreaming: true},
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequestWithContext(t.Context(), http.MethodPost, task.path, nil))
+		var status distillView
+		err := json.Unmarshal(recorder.Body.Bytes(), &status)
+		if recorder.Code != http.StatusOK || err != nil || status.Running != task.running || status.Dreaming != task.dreaming {
+			t.Fatalf("%s: %d %s (%v)", task.path, recorder.Code, recorder.Body.String(), err)
+		}
+	}
+	if reads != 1 || dreams != 1 {
+		t.Fatalf("manual operations used the wrong service: read %d, dream %d", reads, dreams)
 	}
 }

@@ -12,6 +12,8 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+var rankExtensionMemory = memory.Owner().Rank
+
 func withExtensionMemory(request *http.Request) *http.Request {
 	if !extension.LocalOwner(request.Context()) || FromRouter(request.Context()) || request.Header.Get(RouterHeader) != "" {
 		return request
@@ -40,7 +42,7 @@ func searchExtensionMemory(ctx context.Context, caller memoryCaller, request sdk
 	if limit == 0 {
 		limit = sdk.MaxMemorySearchHits
 	}
-	hits, err := memory.Owner().Rank(memory.Query{Text: request.Query, Scopes: scopes, Limit: limit})
+	hits, err := rankExtensionMemory(memory.Query{Text: request.Query, Scopes: scopes, Limit: limit})
 	if err != nil {
 		return sdk.MemorySearchResult{}, errors.New("scoped Memory could not be read")
 	}
