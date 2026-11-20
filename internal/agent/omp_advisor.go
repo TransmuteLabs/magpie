@@ -5,6 +5,8 @@ import (
 	"slices"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
 )
 
 // omp's advisor (src/advisor in @oh-my-pi/pi-coding-agent): a second model,
@@ -35,6 +37,11 @@ func ompAdvisorOn(path string) string {
 // off again, and the user setting it themselves takes the mark away
 func ompAdvisorTurnedOn(path string) string { return "omp:" + path + ":advisor.enabled" }
 
+func ompApplyConfig(path string, change builtinomp.ConfigChange) error {
+	return extension.ApplyLinkedAgentPlan(change, builtinomp.PlanConfig,
+		extension.LinkedActionFile{Name: builtinomp.ConfigFile, Path: path})
+}
+
 // ompAdvisorFields are the advisor's settings in the config.yml at path.
 // Each is Quiet: a row lists none of them until set.
 func ompAdvisorFields(path string) []Field {
@@ -44,12 +51,12 @@ func ompAdvisorFields(path string) []Field {
 			Get: func() string { v, _ := edit.GetYAML(path, setting); return v },
 			Set: func(v string) error {
 				if v == "" {
-					return edit.DelYAML(path, setting)
+					return ompApplyConfig(path, builtinomp.ConfigChange{Drop: []string{setting}})
 				}
 				if !slices.Contains(values, v) {
 					return fmt.Errorf("%q is not one of omp's values for %s: %v", v, setting, values)
 				}
-				return edit.SetYAML(path, edit.KV{Path: setting, Value: v})
+				return ompApplyConfig(path, builtinomp.ConfigChange{Set: []edit.KV{{Path: setting, Value: v}}})
 			},
 			Options: func(map[string]string) []Option { return static(values...) },
 		}
@@ -73,16 +80,23 @@ func ompAdvisorFields(path string) []Field {
 				return "off"
 			},
 			Set: func(v string) error {
-				forget(ompAdvisorTurnedOn(path))
+				var change builtinomp.ConfigChange
 				switch v {
 				case "":
-					return edit.DelYAML(path, "advisor.enabled")
+					change.Drop = []string{"advisor.enabled"}
 				case "off":
-					return edit.SetYAML(path, edit.KV{Path: "advisor.enabled", Value: false})
+					change.Set = []edit.KV{{Path: "advisor.enabled", Value: false}}
 				case "turn", "agent-end":
-					return edit.SetYAML(path, edit.KV{Path: "advisor.enabled", Value: true}, edit.KV{Path: "advisor.reviewMode", Value: v})
+					change.Set = []edit.KV{{Path: "advisor.enabled", Value: true}, {Path: "advisor.reviewMode", Value: v}}
+				default:
+					return fmt.Errorf("%q is not one of omp's advisor reviews: %v", v, ompAdvisorReviews)
 				}
-				return fmt.Errorf("%q is not one of omp's advisor reviews: %v", v, ompAdvisorReviews)
+				owned := peek(ompAdvisorTurnedOn(path))
+				if err := ompApplyConfig(path, change); err != nil {
+					return err
+				}
+				forgetValues(owned)
+				return nil
 			},
 			Options: func(map[string]string) []Option { return static(ompAdvisorReviews...) },
 		},

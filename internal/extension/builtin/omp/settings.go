@@ -25,20 +25,44 @@ const (
 	DropCatalog
 )
 
-type RoleChange struct {
-	Name                string
-	Value               string
-	UpdateEnabledModels func(*yaml.Node) (bool, bool)
-}
-
 type SettingsOptions struct {
 	Catalog CatalogMode
 	Build   func(map[string]any) any
-	Role    *RoleChange
+	Role    *RoleOptions
 }
 
-func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+type ConfigChange struct {
+	Set  []edit.KV
+	Drop []string
+}
+
+func PlanConfig(options ConfigChange, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
 	var plan sdk.AgentPlan
+	if len(settings.Files) != 1 || settings.Files[0].Path != ConfigFile {
+		return plan, errors.New("OMP config action requires a config.yml snapshot")
+	}
+	file := settings.Files[0]
+	body := file.Body
+	var err error
+	if len(options.Set) != 0 {
+		body, err = edit.RewriteYAML(file.Path, body, options.Set...)
+		if err != nil {
+			return plan, err
+		}
+	}
+	if len(options.Drop) != 0 {
+		body, err = edit.RewriteYAMLWithout(file.Path, body, options.Drop...)
+		if err != nil {
+			return plan, err
+		}
+	}
+	appendChange(&plan, file, body)
+	return plan, nil
+}
+
+func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, RoleResult, error) {
+	var plan sdk.AgentPlan
+	var result RoleResult
 	var config, catalog, legacy sdk.ActionSettingFile
 	for _, file := range settings.Files {
 		switch file.Path {
@@ -51,32 +75,35 @@ func PlanSettings(options SettingsOptions, settings sdk.ActionSettings) (sdk.Age
 		}
 	}
 	if catalog.Path == "" || options.Role != nil && config.Path == "" {
-		return plan, errors.New("OMP settings action is missing a required snapshot")
+		return plan, result, errors.New("OMP settings action is missing a required snapshot")
 	}
-	changed := func(file sdk.ActionSettingFile, body []byte) {
-		if !bytes.Equal(edit.TrimBOM(file.Body), edit.TrimBOM(body)) {
-			plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, Body: body, BeforeHash: file.BeforeHash})
-		}
-	}
-	body, err := rewriteCatalog(options, catalog, legacy)
-	if err != nil {
-		return sdk.AgentPlan{}, err
-	}
-	changed(catalog, body)
+	var configBody []byte
+	var routed bool
 	if role := options.Role; role != nil {
-		body, err := edit.RewriteYAML(config.Path, config.Body, edit.KV{Path: "modelRoles." + role.Name, Value: role.Value})
+		var err error
+		configBody, options.Catalog, routed, result, err = rewriteRole(*role, config.Body)
 		if err != nil {
-			return sdk.AgentPlan{}, err
+			return plan, result, err
 		}
-		if role.UpdateEnabledModels != nil {
-			body, err = edit.RewriteYAMLNode(config.Path, body, "enabledModels", role.UpdateEnabledModels)
-			if err != nil {
-				return sdk.AgentPlan{}, err
-			}
-		}
-		changed(config, body)
 	}
-	return plan, nil
+	catalogBody, err := rewriteCatalog(options, catalog, legacy)
+	if err != nil {
+		return plan, result, err
+	}
+	if options.Role != nil && !routed {
+		appendChange(&plan, config, configBody)
+	}
+	appendChange(&plan, catalog, catalogBody)
+	if options.Role != nil && routed {
+		appendChange(&plan, config, configBody)
+	}
+	return plan, result, nil
+}
+
+func appendChange(plan *sdk.AgentPlan, file sdk.ActionSettingFile, body []byte) {
+	if !bytes.Equal(edit.TrimBOM(file.Body), edit.TrimBOM(body)) {
+		plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, Body: body, BeforeHash: file.BeforeHash})
+	}
 }
 
 func rewriteCatalog(options SettingsOptions, catalog, legacy sdk.ActionSettingFile) ([]byte, error) {

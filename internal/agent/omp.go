@@ -7,7 +7,7 @@ package agent
 // provider "magpie", keyless (auth: none) on loopback, with the catalog as its models; a
 // model through magpie is "magpie/<provider>/<model>", which omp matches
 // whole against provider/id. The other roles, the fallback chains and the
-// like may name them as well (ompRefKeys); magpie stays while any does.
+// like may name them as well; magpie stays while any does.
 
 import (
 	"fmt"
@@ -27,68 +27,11 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 	"gopkg.in/yaml.v3"
 )
 
-// ompEfforts are the thinking levels omp knows.
-var ompEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
-
-// ompRefKeys are where omp's config names models: each role (a list to try
-// in order, "a,b" or a sequence), the retry fallback chains (a list of
-// models under each key; the key is a role's name, the only kind omp 16
-// takes (agent-session.ts), or from omp 18 a model selector as well
-// (retry-fallback-chains.ts) — a role's name read with them is no model of
-// magpie's and is passed over), the models it cycles through (enabledModels,
-// also scoped to paths) and the models of task agents. An entry may end in a
-// thinking level ("magpie/deepseek/pro:max").
-var ompRefKeys = []string{"modelRoles", "retry.fallbackChains", "enabledModels", "task.agentModelOverrides"}
-
-// ompRefs calls fn on each model of a value under ompRefKeys, the spaces
-// after a comma kept, and answers the value with fn's answers in place.
-func ompRefs(v string, fn func(string) string) string {
-	parts := strings.Split(v, ",")
-	for i, p := range parts {
-		lead := len(p) - len(strings.TrimLeft(p, " \t"))
-		parts[i] = p[:lead] + fn(p[lead:])
-	}
-	return strings.Join(parts, ",")
-}
-
-// ompLevel splits a role's model from the thinking level omp reads off its
-// end, "provider/model:level" (model-resolver.ts), the level returned with
-// its colon: one of the efforts, off, or auto, omp's own pick each turn.
-// Anything else after a colon is part of the model id (ollama's qwen3:8b),
-// and a list of models omp falls back through ("a,b:high") has no level of
-// its own, each of its models its own.
-func ompLevel(v string) (model, level string) {
-	if i := strings.LastIndexByte(v, ':'); i > 0 && !strings.Contains(v, ",") {
-		if l := v[i+1:]; l == "off" || l == "auto" || slices.Contains(ompEfforts, l) {
-			return v[:i], v[i:]
-		}
-	}
-	return v, ""
-}
-
-// ompSplit is omp's SplitSuffix: a role's model and its thinking level
-// (ompLevel), one false for a list of models omp falls back through ("a,b",
-// or a YAML list, read as one), which is the user's own whatever it names.
-func ompSplit(v string) (model, level string, one bool) {
-	if strings.Contains(v, ",") {
-		return v, "", false
-	}
-	model, level = ompLevel(v)
-	return model, level, true
-}
-
-// ompOnMagpie: a role's value is one of magpie's models, at a level or not.
-func ompOnMagpie(v string) bool {
-	_, _, one := ompSplit(v)
-	return one && usesMagpie(v)
-}
-
-// ompYAMLList: a value the stash keeps is a list as the YAML it was written
-// in ("[a, b]", "- a"), which no model reads as.
-func ompYAMLList(v string) bool { return strings.HasPrefix(v, "[") || strings.HasPrefix(v, "- ") }
+func ompLevel(value string) (string, string) { return builtinomp.Level(value) }
 
 // ompProfileName is a profile name omp takes (pi-utils dirs.ts,
 // normalizeProfileName); it refuses any other.
@@ -213,7 +156,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 	// the protocol picked in its row (omp_protocol.go)
 	protocol := ompProtocolKey(at, dir)
 	path := pick("config")
-	applySettings := func(models string, mode builtinomp.CatalogMode, role *builtinomp.RoleChange) error {
+	applySettings := func(models string, mode builtinomp.CatalogMode, role *builtinomp.RoleOptions) (builtinomp.RoleResult, error) {
 		files := []extension.LinkedActionFile{{Name: builtinomp.CatalogFile, Path: models}}
 		if mode == builtinomp.WriteCatalog && !at.exists(models) {
 			files = append(files, extension.LinkedActionFile{Name: builtinomp.LegacyModelsFile, Path: filepath.Join(dir, "models.json")})
@@ -230,13 +173,19 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			}
 			return ompKept(existing, provider)
 		}}
-		if err := extension.ApplyLinkedAgentPlan(options, builtinomp.PlanSettings, files...); err != nil {
-			return err
+		var result builtinomp.RoleResult
+		err := extension.ApplyLinkedAgentPlan(options, func(options builtinomp.SettingsOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+			plan, own, err := builtinomp.PlanSettings(options, snapshot)
+			result = own
+			return plan, err
+		}, files...)
+		if err != nil {
+			return builtinomp.RoleResult{}, err
 		}
 		if want != "" {
 			ompRememberAPI(models, want)
 		}
-		return nil
+		return result, nil
 	}
 	// the entries of enabledModels a sync took out (scope_gone.go)
 	gone := at.key("omp.scope.gone")
@@ -252,46 +201,18 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			return strings.Join(edit.GetYAMLList(path, k), ",")
 		}
 	}
-	// onMagpie: a role, a fallback chain, … (ompRefKeys) still names one of
+	// onMagpie: a role, a fallback chain, … still names one of
 	// magpie's models
 	onMagpie := func() (used bool, err error) {
-		err = edit.EditYAMLStrings(path, ompRefKeys, func(v string) string {
-			ompRefs(v, func(m string) string { used = used || usesMagpie(m); return m })
+		err = edit.EditYAMLStrings(path, builtinomp.ModelReferenceKeys, func(v string) string {
+			builtinomp.MapReferences(v, func(m string) string { used = used || usesMagpie(m); return m })
 			return v
 		})
 		return used, err
 	}
 	writeMagpie := func() error {
-		return applySettings(pick("models"), builtinomp.WriteCatalog, nil)
-	}
-	// dropMagpie takes magpie's provider out of models.yml once nothing in
-	// the config is on magpie; while something is (a fallback chain, another
-	// role), it writes it afresh instead, so a role set off magpie — applying
-	// again what Check found — mends the wiring that is left.
-	// The plain entries of enabledModels on magpie, which magpie adds there
-	// (omp_scope.go), don't count: once nothing else is on magpie they go
-	// with its provider (#1769). Those scoped to folders are the user's, and
-	// count.
-	dropMagpie := func() error {
-		used := false
-		err := edit.EditYAMLStrings(path, slices.DeleteFunc(slices.Clone(ompRefKeys), func(k string) bool { return k == "enabledModels" }), func(v string) string {
-			ompRefs(v, func(m string) string { used = used || usesMagpie(m); return m })
-			return v
-		})
-		if err == nil && !used {
-			used, err = ompScopeFoldersOnMagpie(path)
-		}
-		switch {
-		case err != nil:
-			return err
-		case used:
-			return writeMagpie()
-		}
-		if err := ompScopeWithout(path); err != nil {
-			return err
-		}
-		forget(gone)
-		return applySettings(pick("models"), builtinomp.DropCatalog, nil)
+		_, err := applySettings(pick("models"), builtinomp.WriteCatalog, nil)
+		return err
 	}
 	// was are the stash's keys for the roles, one each
 	var was []string
@@ -305,74 +226,38 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		get := roleGet(name)
 		w := "omp:" + path + ":" + k
 		was = append(was, w)
-		kept := func() string {
-			if v, ok := edit.GetYAML(path, k); ok {
-				return v
-			}
-			v, _ := edit.GetYAMLText(path, k)
-			return v
-		}
 		return Field{
 			Key: key, Label: label, Quiet: quiet,
 			Get: get,
 			Set: func(v string) error {
-				picked := v != ""
-				cur := get()
-				if v == "" {
-					if ompOnMagpie(cur) {
-						v = unstash(w)
-					}
-					if v == "" {
-						if err := edit.DelYAML(path, k); err != nil {
-							return err
-						}
-						return dropMagpie()
-					}
-					if ompYAMLList(v) {
-						if err := edit.SetYAML(path, edit.KV{Path: k, Value: edit.YAMLText(v)}); err != nil {
-							return err
-						}
-						return dropMagpie()
-					}
-				} else if _, level, one := ompSplit(v); one && level == "" {
-					// another model keeps the role's thinking level; omp
-					// clamps one the model lacks to the highest it has below
-					// it (its lowest when none is) and drops it for a model
-					// that doesn't reason (pi-catalog model-thinking.ts),
-					// never fails.
-					// The same model picked without one is the way to have
-					// none: its option with the level beside it keeps it
-					if model, level := ompLevel(cur); level != "" && model != v {
-						v += level
-					}
-				}
-				model, _, one := ompSplit(v)
-				if ref, ok := strings.CutPrefix(model, magpieID+"/"); one && ok && isMagpie(ref) {
-					var previous string
-					if !ompOnMagpie(cur) {
-						previous = kept()
-					}
-					change := &builtinomp.RoleChange{Name: name, Value: v}
-					if name == "default" && picked {
-						change.UpdateEnabledModels = ompScopeModel(model)
-					}
-					if err := applySettings(pick("models"), builtinomp.WriteCatalog, change); err != nil {
-						return err
-					}
-					if !ompOnMagpie(cur) {
-						stash(map[string]string{w: previous})
-					}
-					return nil
-				}
-				forget(w)
-				if err := edit.SetYAML(path, edit.KV{Path: k, Value: v}); err != nil {
+				advisorMark := ompAdvisorTurnedOn(path)
+				kept := peek(w, gone, advisorMark)
+				result, err := applySettings(pick("models"), builtinomp.WriteCatalog, &builtinomp.RoleOptions{
+					Name: name, Value: v, Original: kept[w], AdvisorOwned: kept[advisorMark] != "",
+					RoutedModel: isMagpie, UpdateEnabledModels: ompScopeModel,
+				})
+				if err != nil {
 					return err
 				}
-				if err := dropMagpie(); err != nil {
-					return err
+				if !result.Forget {
+					delete(kept, w)
 				}
-				if name == "default" && picked && one && model != "" {
-					return ompScopeWith(path, model)
+				if !result.ClearedScope {
+					delete(kept, gone)
+				}
+				if !result.AdvisorReset {
+					delete(kept, advisorMark)
+				}
+				forgetValues(kept)
+				if result.Remember || result.AdvisorEnabled {
+					values := map[string]string{}
+					if result.Remember {
+						values[w] = result.Original
+					}
+					if result.AdvisorEnabled {
+						values[advisorMark] = "1"
+					}
+					stash(values)
 				}
 				return nil
 			},
@@ -427,31 +312,6 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		role("tiny", "tiny", "tiny", true),
 		role("memory", "memory", "memory", true),
 	}
-	// a model picked for the advisor is one the user wants reviewing: omp
-	// runs none while advisor.enabled is unset (its default is off), so the
-	// pick turns it on then (#6408, #5019), and the role reset takes back
-	// what the pick turned on. One the user set either way stays theirs
-	advisor := slices.IndexFunc(roles, func(f Field) bool { return f.Key == "advisor" })
-	setAdvisor := roles[advisor].Set
-	roles[advisor].Set = func(v string) error {
-		if err := setAdvisor(v); err != nil {
-			return err
-		}
-		if v == "" {
-			if unstash(ompAdvisorTurnedOn(path)) != "" && ompAdvisorOn(path) == "true" {
-				return edit.DelYAML(path, "advisor.enabled")
-			}
-			return nil
-		}
-		if ompAdvisorOn(path) != "" {
-			return nil
-		}
-		if err := edit.SetYAML(path, edit.KV{Path: "advisor.enabled", Value: true}); err != nil {
-			return err
-		}
-		stash(map[string]string{ompAdvisorTurnedOn(path): "1"})
-		return nil
-	}
 	// each role but the default one has a thinking level of its own, the
 	// ":level" omp reads off the end of the role's model
 	// (splitThinkingSuffix, resolveModelRoleValue): #1397, the slow role at
@@ -465,21 +325,21 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		fields = append(fields, r, Field{
 			Key: r.Key + "_thinking", Label: r.Label + " thinking", Quiet: true,
 			Get: func() string {
-				if _, level, one := ompSplit(r.Get()); one {
+				if _, level, one := builtinomp.SplitRole(r.Get()); one {
 					return strings.TrimPrefix(level, ":")
 				}
 				return ""
 			},
 			Set: func(v string) error {
 				cur := r.Get()
-				model, _, one := ompSplit(cur)
+				model, _, one := builtinomp.SplitRole(cur)
 				if cur == "" || !one {
 					if v == "" {
 						return nil
 					}
 					return fmt.Errorf("omp's %s role is not on one model: pick its model first", r.Label)
 				}
-				if v != "" && v != "off" && v != "auto" && !slices.Contains(ompEfforts, v) {
+				if v != "" && v != "off" && v != "auto" && !slices.Contains(builtinomp.Efforts, v) {
 					return fmt.Errorf("%q is not one of omp's thinking levels", v)
 				}
 				if v != "" {
@@ -488,10 +348,10 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				return r.Set(model)
 			},
 			Options: func(cur map[string]string) []Option {
-				if _, _, one := ompSplit(cur[r.Key]); cur[r.Key] == "" || !one {
+				if _, _, one := builtinomp.SplitRole(cur[r.Key]); cur[r.Key] == "" || !one {
 					return nil
 				}
-				return static(append([]string{"auto", "off"}, ompEfforts...)...)
+				return static(append([]string{"auto", "off"}, builtinomp.Efforts...)...)
 			},
 		})
 	}
@@ -501,11 +361,11 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		Bin: "omp", Dir: dir, Path: path,
 		// a role's thinking level is omp's, after whichever model it is on;
 		// a list of models is the user's own
-		SplitSuffix: ompSplit,
+		SplitSuffix: builtinomp.SplitRole,
 		ListOnly:    true,
 		Sync: func() error {
 			models := pick("models")
-			if err := applySettings(models, builtinomp.SyncCatalog, nil); err != nil {
+			if _, err := applySettings(models, builtinomp.SyncCatalog, nil); err != nil {
 				return err
 			}
 			// an entry on a model magpie no longer gives omp names nothing
@@ -519,7 +379,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		RenameRefs: func(from, to string) (bool, error) {
 			old, now := magpieID+"/"+from+"/", magpieID+"/"+to+"/"
 			move := func(v string) string {
-				return ompRefs(v, func(m string) string {
+				return builtinomp.MapReferences(v, func(m string) string {
 					if rest, ok := strings.CutPrefix(m, old); ok {
 						return now + rest
 					}
@@ -527,7 +387,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				})
 			}
 			moved := false
-			if err := edit.EditYAMLStrings(path, ompRefKeys, func(v string) string {
+			if err := edit.EditYAMLStrings(path, builtinomp.ModelReferenceKeys, func(v string) string {
 				nv := move(v)
 				moved = moved || nv != v
 				return nv
@@ -541,7 +401,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			for _, w := range was {
 				s := stashShared()[w]
 				ns := move(s)
-				if ompYAMLList(s) {
+				if builtinomp.YAMLList(s) {
 					t, err := edit.EditYAMLTextStrings(edit.YAMLText(s), move)
 					if err != nil {
 						return moved, err
@@ -573,7 +433,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			}
 			// a default role on magpie that enabledModels leaves out never
 			// starts; setting it again adds it there (#1769)
-			if def := roleGet("default")(); ompOnMagpie(def) {
+			if def := roleGet("default")(); builtinomp.RoleOnMagpie(def) {
 				if m := ompScopeLeavesOut(path, def); m != "" {
 					return "omp's enabledModels (" + filepath.Base(path) + ") leaves out " + m + ", so new sessions start on another of its models"
 				}
@@ -584,17 +444,17 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			// the thinking level sessions start with, as omp's settings save
 			// it; unset omp takes high. auto has omp pick a level each turn:
 			// not a level a model lists, so it is offered here and kept out of
-			// ompEfforts, which a model's thinking levels are filtered by. First,
+			// the model's thinking levels offered by the catalog. First,
 			// as omp's own picker has it (16.3.5 and 18.4.4 alike)
 			Key: "effort", Label: "thinking",
 			Get: func() string { v, _ := edit.GetYAML(path, "defaultThinkingLevel"); return v },
 			Set: func(v string) error {
 				if v == "" {
-					return edit.DelYAML(path, "defaultThinkingLevel")
+					return ompApplyConfig(path, builtinomp.ConfigChange{Drop: []string{"defaultThinkingLevel"}})
 				}
-				return edit.SetYAML(path, edit.KV{Path: "defaultThinkingLevel", Value: v})
+				return ompApplyConfig(path, builtinomp.ConfigChange{Set: []edit.KV{{Path: "defaultThinkingLevel", Value: v}}})
 			},
-			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, ompEfforts...)...) },
+			Options: func(map[string]string) []Option { return static(append([]string{"auto"}, builtinomp.Efforts...)...) },
 		}), append(ompAdvisorFields(path), protocolField(at, protocol, pick("models"), func() (string, bool) {
 			models := pick("models")
 			v, _ := edit.GetYAML(models, "providers."+magpieID+".api")
@@ -781,7 +641,7 @@ func ompProviderAt(gw, version string) ompProviderEntry {
 			e.Input = []string{"text"}
 		}
 		var efforts []string
-		for _, x := range ompEfforts { // in omp's order
+		for _, x := range builtinomp.Efforts { // in omp's order
 			// before omp 16.4.0 a model's efforts stop at xhigh (16.3.5
 			// turns the whole file away over a max): a model whose top is
 			// max offers xhigh, which the gateway fits to max when the

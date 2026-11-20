@@ -98,3 +98,80 @@ func TestOmpSyncRetainsConcurrentCatalogEdit(t *testing.T) {
 		t.Fatalf("edited = %t, error = %v, models = %q", edited, err, readFile(models))
 	}
 }
+
+func TestOmpResetPreservesRoleAndScopeWhenCatalogChanged(t *testing.T) {
+	a := omp(syncHome(t))
+	models := filepath.Join(a.Dir, "models.yml")
+	const original = "modelRoles:\n  default: [anthropic/claude-opus-5, openai/gpt-6] # fallback order\n" +
+		"enabledModels:\n  - openai/gpt-6 # retained\n"
+	writeFile(t, a.Path, original)
+	writeFile(t, models, "providers:\n  mine:\n    api: openai-completions\n")
+	if err := a.Apply("model", "magpie/relay/glm-4.6"); err != nil {
+		t.Fatal(err)
+	}
+	stashKey := "omp:" + a.Path + ":modelRoles.default"
+	stashed := peek(stashKey)[stashKey]
+	if stashed == "" {
+		t.Fatal("the original fallback was not stashed")
+	}
+	prior := readFile(a.Path)
+	edited := false
+	user := readFile(models) + "# catalog owner was here\n"
+	target, err := edit.Target(models)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = edit.Filtered(func(path string, data []byte) []byte {
+		if path == target && !edited {
+			writeFile(t, models, user)
+			edited = true
+		}
+		return data
+	}, func() error { return a.Apply("model", "") })
+	if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(a.Path) != prior ||
+		readFile(models) != user || peek(stashKey)[stashKey] != stashed {
+		t.Fatalf("edited = %t, error = %v, config = %q, catalog = %q, stash = %q",
+			edited, err, readFile(a.Path), readFile(models), peek(stashKey)[stashKey])
+	}
+	if err := a.Apply("model", ""); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(a.Path) != original || strings.Contains(readFile(models), "  magpie:") ||
+		!strings.Contains(readFile(models), "# catalog owner was here") || peek(stashKey)[stashKey] != "" {
+		t.Fatalf("retry: config = %q, catalog = %q, stash = %q", readFile(a.Path), readFile(models), peek(stashKey)[stashKey])
+	}
+}
+
+func TestOmpAdvisorReviewRetainsOwnershipWhenConfigChanged(t *testing.T) {
+	a := omp(syncHome(t))
+	writeFile(t, a.Path, "theme: dark\n")
+	if err := a.Apply("advisor", "magpie/relay/glm-4.6"); err != nil {
+		t.Fatal(err)
+	}
+	marker := ompAdvisorTurnedOn(a.Path)
+	if peek(marker)[marker] != "1" {
+		t.Fatal("advisor pick did not record ownership")
+	}
+	edited := false
+	user := strings.Replace(readFile(a.Path), "theme: dark", "theme: light", 1)
+	target, err := edit.Target(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = edit.Filtered(func(path string, data []byte) []byte {
+		if path == target && !edited {
+			writeFile(t, a.Path, user)
+			edited = true
+		}
+		return data
+	}, func() error { return a.Apply("advisor_review", "agent-end") })
+	if !edited || !errors.Is(err, extension.ErrActionChanged) || readFile(a.Path) != user || peek(marker)[marker] != "1" {
+		t.Fatalf("edited = %t, error = %v, config = %q, ownership = %q", edited, err, readFile(a.Path), peek(marker)[marker])
+	}
+	if err := a.Apply("advisor", ""); err != nil {
+		t.Fatal(err)
+	}
+	if ompAdvisorOn(a.Path) != "" || peek(marker)[marker] != "" || !strings.Contains(readFile(a.Path), "theme: light") {
+		t.Fatalf("advisor reset: config = %q, ownership = %q", readFile(a.Path), peek(marker)[marker])
+	}
+}

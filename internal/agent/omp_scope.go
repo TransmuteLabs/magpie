@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -43,7 +44,7 @@ func ompScopePlain(n *yaml.Node) []string {
 // slash, and a model of magpie's is magpie/<provider>/<model>, so it takes
 // **. With the default role's model alone there, omp's picker and Ctrl+P
 // left out every other model magpie gives it (#1769, real-jacket).
-const ompEvery = magpieID + "/**"
+const ompEvery = builtinomp.AllGatewayModels
 
 // ompTakes reports whether an enabledModels entry surely takes in model, a
 // provider/model with no level: Pi's rules (piTakes), with the levels omp
@@ -86,7 +87,7 @@ func ompScopeOwnMagpie(plain []string, model string) bool {
 	return false
 }
 
-// ompScopeWith lets a session start on model, a provider/model, when
+// ompScopeModel lets a session start on model, a provider/model, when
 // config.yml's enabledModels has plain entries and none takes it in. For
 // one of magpie's it is ompEvery that joins the end, in place of the
 // models of magpie's the list names one by one (what magpie added before),
@@ -94,10 +95,6 @@ func ompScopeOwnMagpie(plain []string, model string) bool {
 // unless the user picked which of magpie's the list holds
 // (ompScopeOwnMagpie), when only model joins it. Another model joins as
 // itself.
-func ompScopeWith(cfg, model string) error {
-	return edit.EditYAMLNode(cfg, "enabledModels", ompScopeModel(model))
-}
-
 func ompScopeModel(model string) func(*yaml.Node) (bool, bool) {
 	return func(n *yaml.Node) (bool, bool) {
 		plain := ompScopePlain(n)
@@ -131,34 +128,6 @@ func ompScopeMagpieOne(v string) bool {
 	return !strings.ContainsAny(v, "*?[") && strings.HasPrefix(strings.ToLower(v), magpieID+"/")
 }
 
-// ompScopeWithout takes magpie's models out of enabledModels's plain
-// entries, ompEvery among them, once nothing else in config.yml is on
-// magpie, and its provider leaves models.yml: there they would name
-// nothing. A list left empty is removed, never written as [].
-func ompScopeWithout(cfg string) error {
-	return edit.EditYAMLNode(cfg, "enabledModels", func(n *yaml.Node) (bool, bool) {
-		if n == nil || n.Kind != yaml.SequenceNode {
-			return false, false
-		}
-		kept := n.Content[:0:0]
-		for _, c := range n.Content {
-			if c.Kind == yaml.ScalarNode && (strings.EqualFold(strings.TrimSpace(c.Value), ompEvery) ||
-				!strings.ContainsAny(c.Value, "*?[") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.Value)), magpieID+"/")) {
-				continue
-			}
-			kept = append(kept, c)
-		}
-		if len(kept) == len(n.Content) {
-			return false, false
-		}
-		if len(kept) == 0 {
-			return false, true
-		}
-		n.Content = kept
-		return true, false
-	})
-}
-
 // ompScopeOnce drops a plain entry of enabledModels that an earlier one
 // spells the same: a provider renamed has the default role, set again under
 // the new id, join the list (ompScopeWith) before the old entry is renamed
@@ -187,38 +156,10 @@ func ompScopeOnce(cfg string) error {
 	})
 }
 
-// ompScopeFoldersOnMagpie says whether an entry of enabledModels scoped to
-// folders names one of magpie's models: the user's own, which keeps
-// magpie's provider as a role on it does.
-func ompScopeFoldersOnMagpie(cfg string) (used bool, err error) {
-	err = edit.EditYAMLNode(cfg, "enabledModels", func(n *yaml.Node) (bool, bool) {
-		if n == nil || n.Kind != yaml.SequenceNode {
-			return false, false
-		}
-		for _, c := range n.Content {
-			if c.Kind != yaml.MappingNode {
-				continue
-			}
-			var walk func(*yaml.Node)
-			walk = func(n *yaml.Node) {
-				if n.Kind == yaml.ScalarNode {
-					ompRefs(n.Value, func(m string) string { used = used || usesMagpie(m); return m })
-				}
-				for _, c := range n.Content {
-					walk(c)
-				}
-			}
-			walk(c)
-		}
-		return false, false
-	})
-	return used, err
-}
-
 // ompScopeLeavesOut is the default role's model when enabledModels has
 // plain entries and none takes it in: a new session would start on another.
 func ompScopeLeavesOut(cfg, role string) string {
-	model, _, one := ompSplit(role)
+	model, _, one := builtinomp.SplitRole(role)
 	if !one || model == "" || ompScopeTakes(edit.GetYAMLList(cfg, "enabledModels"), model) {
 		return ""
 	}

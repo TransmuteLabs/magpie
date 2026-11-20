@@ -269,14 +269,34 @@ func RewriteYAMLNode(path string, raw []byte, keyPath string, fn func(*yaml.Node
 	}
 }
 
+func ReadYAMLNode(path string, raw []byte, keyPath string) (*yaml.Node, error) {
+	root, _, err := parseYAMLTop(TrimBOM(raw))
+	if err != nil || root == nil {
+		return nil, AtFile(path, err)
+	}
+	return lookupYAML(root, strings.Split(keyPath, ".")), nil
+}
+
 // EditYAMLStrings calls fn on every string under the key paths — mapping
 // keys and values, sequence items, at any depth — and puts fn's answer in
 // its place, comments and quoting kept. The file is written only when an
 // answer differs, so an fn that answers what it is given only reads.
 func EditYAMLStrings(path string, keyPaths []string, fn func(string) string) error {
-	root, err := loadYAMLForEdit(path)
-	if err != nil || root == nil {
+	raw, err := Read(path)
+	if err != nil {
 		return err
+	}
+	body, err := RewriteYAMLStrings(path, raw, keyPaths, fn)
+	if err != nil || bytes.Equal(body, raw) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteYAMLStrings(path string, raw []byte, keyPaths []string, fn func(string) string) ([]byte, error) {
+	root, _, err := parseYAMLTop(TrimBOM(raw))
+	if err != nil || root == nil {
+		return raw, AtFile(path, err)
 	}
 	changed := false
 	for _, kp := range keyPaths {
@@ -285,9 +305,9 @@ func EditYAMLStrings(path string, keyPaths []string, fn func(string) string) err
 		}
 	}
 	if !changed {
-		return nil
+		return raw, nil
 	}
-	return writeYAML(path, root)
+	return renderYAML(path, raw, root)
 }
 
 // mapStrings puts fn's answer in place of every string under n, and says
