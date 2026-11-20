@@ -3422,7 +3422,7 @@ func state() stateJSON {
 		}
 		vals := a.Values()
 		now[a.ID] = vals
-		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.Path), Fields: agentFields(a, vals), Own: ownFields(a, vals)}
+		aj := agentJSON{ID: a.ID, Name: a.Name, Icon: a.Icon, Path: tilde(a.SettingsPath()), Fields: agentFields(a, vals), Own: ownFields(a, vals)}
 		aj.Models = agentModelCount(a, aj.Fields)
 		aj.Menu = a.ListsModels
 		aj.NoNames = a.NoNames

@@ -274,6 +274,10 @@ plugin targets. A process inherits the same config path as ordinary Start;
 its foreground recipe, binding/lease checks and spawn lifetime remain separate.
 Legacy agentplug Env keeps its existing placeholder behavior.
 
+For an adopted launch-only profile using `{config}`, the Agents row's Reveal
+action opens that same inherited file or its directory. Adoption for launch
+does not add the inherited path to the module's settings write targets.
+
 Ordinary `magpie <agent> run` rechecks the selected SDK launch after
 executable lookup, using the same launch admission as session resume. A
 changed binding, package or active configuration stops the launch. The

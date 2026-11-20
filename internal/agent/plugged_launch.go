@@ -53,17 +53,21 @@ func newLaunch(d agentplug.Desc, config string) *launchSpec {
 func sdkLaunch(id, bin, config string, recipe sdk.AgentLaunch) *launchSpec {
 	launch := declaredLaunch(id, bin, config, recipe.Model, recipe.Env, recipe.Args, recipe.Plain)
 	launch.strict = true
-	if config == "" {
-		for _, templates := range []map[string]string{recipe.Env, recipe.Args} {
-			for _, value := range templates {
-				if strings.Contains(value, "{config}") {
-					launch.err = errors.New("declared agent launch requires an available configuration path")
-					return launch
-				}
+	if config == "" && sdkLaunchUsesConfig(recipe) {
+		launch.err = errors.New("declared agent launch requires an available configuration path")
+	}
+	return launch
+}
+
+func sdkLaunchUsesConfig(recipe sdk.AgentLaunch) bool {
+	for _, templates := range []map[string]string{recipe.Env, recipe.Args} {
+		for _, value := range templates {
+			if strings.Contains(value, "{config}") {
+				return true
 			}
 		}
 	}
-	return launch
+	return false
 }
 
 func linkedEnvLaunch(id, bin string, recipe sdk.AgentLaunch) *launchSpec {

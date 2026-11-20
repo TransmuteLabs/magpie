@@ -131,7 +131,7 @@ func (controller *extensionController) spec() *launchSpec {
 	config := ""
 	if len(desc.ConfigFiles) != 0 {
 		config = filepath.Join(controller.home, filepath.FromSlash(desc.ConfigFiles[0]))
-	} else if controller.base != nil {
+	} else if controller.base != nil && sdkLaunchUsesConfig(*desc.Launch) {
 		config = controller.base.Path
 	}
 	return sdkLaunch(desc.ID, controller.bin, config, *desc.Launch)
@@ -558,6 +558,9 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 		})
 	}
 	if launch := controller.spec(); launch != nil {
+		if a.Path == "" {
+			a.extensionMetadata.inheritedLaunchConfig = launch.config
+		}
 		a.Start = func() Starting {
 			if launch.err != nil {
 				return Starting{Bin: controller.bin, Err: launch.err}

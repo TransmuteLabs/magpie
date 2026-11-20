@@ -478,7 +478,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
-	// agents/reveal shows an agent's settings file, the one magpie writes,
+	// agents/reveal shows an agent's settings file,
 	// in the file manager, from its row's menu (InkCoalW on X: its whole
 	// file at hand, as CC Switch has it). The page sends only the agent's
 	// id; the path is the agent's as detected, never one the page names.
@@ -495,7 +495,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		path := ""
 		for _, a := range agent.Detected() {
 			if a.ID == in.Agent {
-				path = a.Path
+				path = a.SettingsPath()
 			}
 		}
 		if path == "" {

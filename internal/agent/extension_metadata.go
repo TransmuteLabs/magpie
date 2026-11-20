@@ -37,11 +37,23 @@ func HelpBin(a *Agent, all []*Agent) string {
 }
 
 type extensionAgentMetadata struct {
-	plugin       string
-	descriptor   sdk.AgentDescriptor
-	base         *Agent
-	owns         func() bool
-	disconnected func() bool
+	plugin                string
+	descriptor            sdk.AgentDescriptor
+	base                  *Agent
+	inheritedLaunchConfig string
+	owns                  func() bool
+	disconnected          func() bool
+}
+
+func (a *Agent) SettingsPath() string {
+	if a.Path != "" {
+		return a.Path
+	}
+	if metadata := a.extensionMetadata; metadata != nil && metadata.inheritedLaunchConfig != "" &&
+		metadata.owns != nil && metadata.owns() {
+		return metadata.inheritedLaunchConfig
+	}
+	return ""
 }
 
 func extensionProfileCatalog(ctx context.Context, caller, target string) string {
