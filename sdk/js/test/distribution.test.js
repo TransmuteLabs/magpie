@@ -4,6 +4,7 @@ import { cp, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CONTRACT } from "../index.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
@@ -34,7 +35,7 @@ test("SDK distribution includes every reachable runtime and type dependency", as
       await cp(join(root, relative), join(distribution, relative), { recursive: true });
     }
     const imported = await import(pathToFileURL(join(distribution, "index.js")).href);
-    assert.equal(imported.CONTRACT.version.minor, 17);
+    assert.deepEqual(imported.CONTRACT.version, CONTRACT.version);
     assert.equal(typeof imported.validateLedgerObservation, "function");
     assert.equal(typeof imported.validateCatalogProjection, "function");
     assert.equal(typeof imported.validateStorageRequest, "function");

@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.17. Authors declare the minimum contract
+The available SDK contract is API 1.18. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -651,6 +651,7 @@ resource at a versioned extension point.
 | `routing`, `1` | API 1.16. `routing` with `id`, `name`, `action`, optional `flags` and `timeoutMs` | Provider and group ordering |
 | `search`, `1` | API 1.16. `search` with `id`, `name`, `action` and optional `provider` | Ordinary [web search](extension-search.md) |
 | `library-rule`, `1` | API 1.17. `libraryRule` with `id`, Markdown `body` and optional `paths` | Explicit [Library import](library.md#sdk-rule-import) |
+| `library-command`, `1` | API 1.18. `libraryCommand` with `id`, `prompt` and optional `description` | Explicit [Library import](library.md#sdk-slash-command-import) |
 
 Exactly one descriptor matches the point. Each descriptor uses the existing
 owner's validation and per-point limits. Search and routing also check action

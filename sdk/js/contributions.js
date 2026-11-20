@@ -1,7 +1,13 @@
 import { validateRouting } from "./routing.js";
 import { validateSearchSources } from "./search-sources.js";
 
-const descriptorKeys = ["routing", "search", "libraryRule"];
+const descriptorFields = new Map([
+  ["routing", "routing"],
+  ["search", "search"],
+  ["library-rule", "libraryRule"],
+  ["library-command", "libraryCommand"],
+]);
+const descriptorKeys = [...descriptorFields.values()];
 const hasContent = value => typeof value === "string" && /\P{White_Space}/u.test(value);
 
 export function validateContributions(manifest, reject, validID) {
@@ -9,17 +15,18 @@ export function validateContributions(manifest, reject, validID) {
   validateSearchSources(manifest, reject);
   const contributions = manifest.contributions;
   if (contributions == null || Array.isArray(contributions) && contributions.length === 0) return;
-  if (!Array.isArray(contributions) || contributions.length > 144 || manifest.component != null ||
+  if (!Array.isArray(contributions) || contributions.length > 160 || manifest.component != null ||
     manifest.contract.version.minor < 16 || !manifest.contract.capabilities.includes("module-rpc")) {
     reject("Contributions require root SDK API 1.16 module-rpc within descriptor limits");
   }
   const routingStrategies = [...(manifest.routingStrategies ?? [])];
   const searchSources = [...(manifest.searchSources ?? [])];
   const rules = new Set();
+  const commands = new Set();
   for (const declaration of contributions) {
-    const field = declaration?.point === "library-rule" ? "libraryRule" : declaration?.point;
+    const field = descriptorFields.get(declaration?.point);
     if (declaration == null || typeof declaration !== "object" || Array.isArray(declaration) ||
-      declaration.version !== 1 || !["search", "routing", "library-rule"].includes(declaration.point) ||
+      declaration.version !== 1 || !field ||
       declaration[field] == null ||
       descriptorKeys.some(key => key !== field && declaration[key] != null) ||
       Object.keys(declaration).some(key => key !== "point" && key !== "version" && !descriptorKeys.includes(key))) {
@@ -36,6 +43,17 @@ export function validateContributions(manifest, reject, validID) {
         reject("Invalid Library rule contribution");
       }
       rules.add(rule.id);
+    } else if (field === "libraryCommand") {
+      const command = declaration.libraryCommand;
+      if (manifest.contract.version.minor < 18 || typeof command !== "object" || Array.isArray(command) ||
+        Object.keys(command).some(key => !["id", "description", "prompt"].includes(key)) ||
+        !validID(command.id) || commands.has(command.id) || commands.size >= 16 ||
+        (command.description != null && (typeof command.description !== "string" ||
+          [...command.description].length > 1000 || command.description.includes("\0"))) ||
+        !hasContent(command.prompt) || Buffer.byteLength(command.prompt) > 100000 || command.prompt.includes("\0")) {
+        reject("Invalid Library command contribution");
+      }
+      commands.add(command.id);
     } else {
       (field === "search" ? searchSources : routingStrategies).push(declaration[field]);
     }

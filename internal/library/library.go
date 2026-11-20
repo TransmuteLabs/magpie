@@ -241,6 +241,10 @@ func load() (*Library, error) {
 }
 
 func (l *Library) save() error {
+	return l.saveWithPublication(nil)
+}
+
+func (l *Library) saveWithPublication(lockPublication func() (func(), error)) error {
 	sort.Slice(l.MCP, func(i, j int) bool { return l.MCP[i].Name < l.MCP[j].Name })
 	// a paused server given an agent, however, is on again
 	for _, s := range l.MCP {
@@ -299,7 +303,24 @@ func (l *Library) save() error {
 	if err := l.reshapedCopy(); err != nil {
 		return fmt.Errorf("keeping %s before writing it in magpie's shape: %w", path(), err)
 	}
-	return edit.WriteAtomic(path(), append(b, '\n'))
+	var check func() error
+	if lockPublication != nil {
+		var release func()
+		defer func() {
+			if release != nil {
+				release()
+			}
+		}()
+		check = func() error {
+			if release != nil {
+				return nil
+			}
+			var err error
+			release, err = lockPublication()
+			return err
+		}
+	}
+	return edit.WriteAtomicChecked(path(), append(b, '\n'), check, nil)
 }
 
 func (l *Library) applied(agent string) *Applied {
@@ -383,14 +404,18 @@ func set(list []string, id string, on bool) []string {
 // changed into the agents. The processes of a server taken out are ended
 // after, with the lock let go (mcp_reap.go).
 func change(f func(l *Library) error) (*Result, error) {
-	res, err := changeLocked(f)
+	return changeWithPublication(f, nil)
+}
+
+func changeWithPublication(f func(l *Library) error, lockPublication func() (func(), error)) (*Result, error) {
+	res, err := changeLocked(f, lockPublication)
 	if res != nil && len(res.dropped) > 0 {
 		ending(res.dropped)
 	}
 	return res, err
 }
 
-func changeLocked(f func(l *Library) error) (*Result, error) {
+func changeLocked(f func(l *Library) error, lockPublication func() (func(), error)) (*Result, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	l, err := load()
@@ -403,11 +428,16 @@ func changeLocked(f func(l *Library) error) (*Result, error) {
 	if err := f(l); err != nil {
 		return nil, err
 	}
-	l.foldBeside() // a skill that went in beside itself (skill_beside.go)
+	if lockPublication == nil {
+		l.foldBeside() // a skill that went in beside itself (skill_beside.go)
+	}
 	l.settleAway()
 	l.heal() // a server f brought in, from another computer too
-	if err := l.save(); err != nil {
+	if err := l.saveWithPublication(lockPublication); err != nil {
 		return nil, err
+	}
+	if lockPublication != nil {
+		l.foldBeside()
 	}
 	res := l.sync()
 	return res, l.save()

@@ -2,6 +2,7 @@ package extension
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -75,6 +76,59 @@ func TestLibraryRuleContribution(test *testing.T) {
 			change(&invalid)
 			if err := invalid.Validate(); err == nil {
 				test.Fatal("accepted invalid Library rule")
+			}
+		})
+	}
+}
+
+func TestLibraryCommandContribution(test *testing.T) {
+	manifest := testManifest(ModuleRPC)
+	manifest.Contract.Version.Minor = 18
+	manifest.Compatibility = &Compatibility{HostAPI: "^1.18"}
+	manifest.Contributions = []ContributionDescriptor{{
+		Point: ContributionLibraryCommand, Version: 1,
+		LibraryCommand: &LibraryCommandDescriptor{
+			ID: "review", Description: strings.Repeat("市", MaxLibraryCommandDescription), Prompt: "Review $1",
+		},
+	}}
+	if err := manifest.Validate(); err != nil {
+		test.Fatal(err)
+	}
+	clone := manifest.Clone()
+	clone.Contributions[0].LibraryCommand.Prompt = "changed"
+	if manifest.Contributions[0].LibraryCommand.Prompt != "Review $1" || len(manifest.Public().Contributions) != 0 {
+		test.Fatal("Library command escaped installation metadata")
+	}
+	for name, change := range map[string]func(*Manifest){
+		"older API": func(value *Manifest) {
+			value.Contract.Version.Minor = 17
+			value.Compatibility = nil
+		},
+		"duplicate": func(value *Manifest) {
+			value.Contributions = append(value.Contributions, value.Contributions[0])
+		},
+		"too many": func(value *Manifest) {
+			for index := range MaxLibraryCommands {
+				descriptor := LibraryCommandDescriptor{ID: fmt.Sprintf("command-%d", index), Prompt: "Review"}
+				value.Contributions = append(value.Contributions, ContributionDescriptor{
+					Point: ContributionLibraryCommand, Version: 1, LibraryCommand: &descriptor,
+				})
+			}
+		},
+		"empty prompt": func(value *Manifest) { value.Contributions[0].LibraryCommand.Prompt = "\u0085" },
+		"prompt size":  func(value *Manifest) { value.Contributions[0].LibraryCommand.Prompt = strings.Repeat("市", 33_334) },
+		"prompt NUL":   func(value *Manifest) { value.Contributions[0].LibraryCommand.Prompt = "bad\x00prompt" },
+		"description size": func(value *Manifest) {
+			value.Contributions[0].LibraryCommand.Description += "市"
+		},
+		"description NUL": func(value *Manifest) { value.Contributions[0].LibraryCommand.Description = "bad\x00description" },
+		"mixed points":    func(value *Manifest) { value.Contributions[0].LibraryRule = &LibraryRuleDescriptor{ID: "review"} },
+	} {
+		test.Run(name, func(test *testing.T) {
+			invalid := manifest.Clone()
+			change(&invalid)
+			if err := invalid.Validate(); err == nil {
+				test.Fatal("accepted invalid Library command")
 			}
 		})
 	}

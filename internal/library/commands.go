@@ -12,6 +12,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/lazyre"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Slash commands are prompts kept once and typed as /name in the agents
@@ -54,8 +55,8 @@ type Command struct {
 var commandNameRe = lazyre.New(`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`)
 
 const (
-	maxCommandDescription = 1000
-	maxCommandPrompt      = 100_000
+	maxCommandDescription = sdk.MaxLibraryCommandDescription
+	maxCommandPrompt      = sdk.MaxLibraryCommandPrompt
 )
 
 // CommandAgents are the agents a slash command can be given, in the order
@@ -247,33 +248,39 @@ func (l *Library) syncCommands(t *Target, b *backups, res *Result) {
 // SaveCommand adds a slash command, or replaces the one called old
 // (renaming it: the files magpie wrote by the old name go).
 func SaveCommand(old string, c Command) (*Result, error) {
+	if err := prepareCommand(&c); err != nil {
+		return nil, err
+	}
+	return change(func(l *Library) error { return l.putCommand(old, c) })
+}
+
+func prepareCommand(c *Command) error {
 	c.Name = strings.TrimSpace(c.Name)
 	c.Description = strings.Join(strings.Fields(c.Description), " ")
 	c.Prompt = strings.TrimRight(strings.ReplaceAll(c.Prompt, "\r\n", "\n"), " \n\t")
-	if err := c.check(); err != nil {
-		return nil, err
+	return c.check()
+}
+
+func (l *Library) putCommand(old string, c Command) error {
+	if c.Name != old && l.command(c.Name) != nil {
+		return fmt.Errorf("the library already has a slash command called %s", c.Name)
 	}
-	return change(func(l *Library) error {
-		if c.Name != old && l.command(c.Name) != nil {
-			return fmt.Errorf("the library already has a slash command called %s", c.Name)
+	c.Taken = nil
+	if old != "" {
+		i := slices.IndexFunc(l.Commands, func(x *Command) bool { return x.Name == old })
+		if i < 0 {
+			return fmt.Errorf("no slash command called %s", old)
 		}
-		c.Taken = nil
-		if old != "" {
-			i := slices.IndexFunc(l.Commands, func(x *Command) bool { return x.Name == old })
-			if i < 0 {
-				return fmt.Errorf("no slash command called %s", old)
-			}
-			if c.Name == old {
-				// the files it was imported from stay where they are,
-				// as they were while it says what it did
-				c.Taken = l.Commands[i].Taken
-			}
-			l.Commands = slices.Delete(l.Commands, i, i+1)
+		if c.Name == old {
+			// the files it was imported from stay where they are,
+			// as they were while it says what it did
+			c.Taken = l.Commands[i].Taken
 		}
-		c.Agents = orNone(slices.Compact(slices.Sorted(slices.Values(c.Agents))))
-		l.Commands = append(l.Commands, &c)
-		return nil
-	})
+		l.Commands = slices.Delete(l.Commands, i, i+1)
+	}
+	c.Agents = orNone(slices.Compact(slices.Sorted(slices.Values(c.Agents))))
+	l.Commands = append(l.Commands, &c)
+	return nil
 }
 
 // CommandAgentsSet sets which agents get a slash command.

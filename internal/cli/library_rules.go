@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
@@ -20,10 +21,11 @@ func libraryRulesCmd(args []string) error {
 		}
 		return printJSON(rules)
 	case len(args) == 6 && args[0] == "import" && args[4] == "--expected":
-		if args[3] == "" {
-			return fmt.Errorf("give agent IDs or none")
+		agents, err := libraryContributionAgents(args[3])
+		if err != nil {
+			return err
 		}
-		result, err := library.ImportExtensionRule(ctx, args[1], args[5], args[2], agentList(args[3]))
+		result, err := library.ImportExtensionRule(ctx, args[1], args[5], args[2], agents)
 		if err != nil {
 			return err
 		}
@@ -32,4 +34,12 @@ func libraryRulesCmd(args []string) error {
 	default:
 		return fmt.Errorf("usage:\n  %s", libraryUsage)
 	}
+}
+
+func libraryContributionAgents(value string) ([]string, error) {
+	agents := agentList(value)
+	if len(agents) == 0 && strings.TrimSpace(value) != "none" {
+		return nil, fmt.Errorf("give agent IDs or none")
+	}
+	return agents, nil
 }

@@ -131,6 +131,9 @@ func cloneManifest(manifest Manifest) Manifest {
 			contribution.LibraryRule = new(*contribution.LibraryRule)
 			contribution.LibraryRule.Paths = slices.Clone(contribution.LibraryRule.Paths)
 		}
+		if contribution.LibraryCommand != nil {
+			contribution.LibraryCommand = new(*contribution.LibraryCommand)
+		}
 	}
 	manifest.Settings = cloneFeatureSettings(manifest.Settings)
 	manifest.Tools = slices.Clone(manifest.Tools)

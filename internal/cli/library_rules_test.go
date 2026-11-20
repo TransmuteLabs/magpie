@@ -109,6 +109,14 @@ func TestLibrarySDKRuleImport(t *testing.T) {
 	}
 	expectAbsent()
 	selection = selectRule()
+	for _, agents := range []string{" ", ","} {
+		if _, err := runOut(t, "library", "rules", "import", selection.Name, "unassigned", agents, "--expected", selection.Revision); err == nil {
+			t.Fatalf("rule accepted missing agent selection %q", agents)
+		}
+	}
+	if _, err := runOut(t, "library", "rules", "import", selection.Name, "unassigned", "none", "--expected", selection.Revision); err != nil {
+		t.Fatal(err)
+	}
 	if err := importRule(selection); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +130,7 @@ func TestLibrarySDKRuleImport(t *testing.T) {
 		!strings.Contains(string(data), "src/**") || !strings.HasSuffix(string(data), "\nRevised style\n") {
 		t.Fatalf("agent's saved rule: %q (%v)", data, err)
 	}
-	if _, err := library.RemoveRules([]string{"team-style"}); err != nil {
+	if _, err := library.RemoveRules([]string{"team-style", "unassigned"}); err != nil {
 		t.Fatal(err)
 	}
 	expectAbsent()

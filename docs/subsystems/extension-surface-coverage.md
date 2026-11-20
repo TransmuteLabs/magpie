@@ -2,7 +2,7 @@
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. This census maps those surfaces to the current API 1.17 SDK and the
+modules. This census maps those surfaces to the current API 1.18 SDK and the
 ordinary host owners. It distinguishes three layers:
 
 - **Contract:** public descriptors, DTOs, method negotiation and validation.
@@ -23,7 +23,7 @@ and transport matrix extends that inventory.
 
 ## Owner navigation and compatibility
 
-The advertised API 1.17 ceiling does not change a module's negotiated minimum
+The advertised API 1.18 ceiling does not change a module's negotiated minimum
 or activate undeclared capabilities. Explicit API1.0 single-primary modules
 remain supported; components require API1.1, private-tool exposure API1.2 and
 later adapters retain the floors shown in their owning contracts.
@@ -125,7 +125,7 @@ an optional SDK ownership binding is not a missing extension runtime.
 | Search source / gateway web search | [`searchesOf`](../../internal/plugin/host.js), [`SDK search sources`](extension-search.md), [`gwtool`](../../internal/gwtool/gwtool.go) | Legacy search hooks and the ordinary search owner, Settings selection, account order, proxy and search ledger | **Implemented 1.8:** explicit `searchSources` with declared primary read actions; a tool named search remains separate. Scoped synthetic source acceptance does not claim live community-package compatibility. |
 | Built-in shared Memory / scoped CRUD / digest | [`memoryMCPCall`](../../internal/gateway/memory_mcp.go), [`MemoryOwner`](../../pkg/extension/memory_owner.go), [`Digest`](../../internal/memory/digest.go) | Ordinary GUI, MCP and maintenance paths use the linked Memory contracts. API 1.14 local-owner tool recall uses the caller/project/agent resolver and read-only ranking. | **Linked Go operations and installable scoped recall.** Memory owns checked writes and digest publication. Library owns instruction files. Installed modules have no built-in Memory write grant. |
 | Semantic Memory / Distillation / Dream | [`MemorySemanticService`](../../pkg/extension/memory_semantic.go), [`MemoryDistillationService`](../../pkg/extension/memory_distillation.go) | Window controls and backend keepers use the linked services. Semantic ranking receives scoped records. Its progress and index use the same Memory snapshot. Distillation and Dream use the bound gateway callback and linked prompt/reply codec. | **Linked Go contracts.** The host resolves model access and accounting. Memory and the linked services keep cancellation, suggestion validation and checked publication. |
-| Library resources and optional module contributions | [`Library`](../../internal/library/library.go), [`Hook`](../../internal/library/hooks.go), [`Subagent`](../../internal/library/subagents.go), [`EnvVar`](../../internal/library/env.go) | Instructions, skills, agent hooks, env and subagents already have apply/remove ownership | **Existing data/owner integration.** An SDK declaration/binding is a possible addition, not a missing runtime. Arbitrary file plans do not join regular Library reconciliation automatically. |
+| Library resources and optional module contributions | [`Library`](../../internal/library/library.go), [SDK rules and commands](library.md#sdk-rule-import), [`Hook`](../../internal/library/hooks.go), [`Subagent`](../../internal/library/subagents.go), [`EnvVar`](../../internal/library/env.go) | Instructions, skills, agent hooks, env and subagents have apply/remove owners. Rules and slash commands can also be imported explicitly from enabled SDK modules. | **SDK 1.17 rules and 1.18 commands.** Imports copy the selected revision into the user's Library. The Library retains reconciliation and file ownership. |
 | Library sources and imported packages | [`Source`](../../internal/library/skills.go), [`Claude bundles`](../../internal/library/plugin.go), [`Pi management`](../../internal/library/piext.go) | GitHub/Git/folder sources and imported resources retain their existing owners | **Existing import category.** Skills/bundles/Pi package management are not unimplemented SDK runtimes; automatic SDK package/resource lifecycle binding would be a separate feature. |
 | Window pages / panels / replacements / row actions | [`windowmeta`](../../internal/windowmeta/window.go), [`extension_window.go`](../../internal/gui/extension_window.go), [`window_auth.go`](../../internal/extension/window_auth.go) | Existing renderer and metadata; named action/service bindings; API 1.5 adds exact selected-account action grants and independent host-owned polling authentication grants | **Implemented 1.1 / scoped 1.5.** Combined acceptance remains separate; callbacks, key import and account-bound tools are not supplied by this window adapter. Adjacent assets alone do not register a window. |
 | Other browser bridge functions | [`pagebridge.js`](../../internal/gui/pagebridge.js), [`ui.d.ts`](../../sdk/js/ui.d.ts) | Browser-only typed entry delegates theme/context/visibility events, actions, permission-checked reads and PNG operations as well as ready/service/backend/config | **Implemented facade.** Actual page bridge exercised in a VM fixture; native clipboard/download and the full browser matrix remain separate verification. |
@@ -254,7 +254,7 @@ transports need their own checked readers.
 
 The [owner contribution registry](executable-extensions.md#owner-contribution-registry)
 resolves versioned search and routing actions and their earlier declarations.
-The Library consumes static rule declarations through explicit import.
+The Library consumes static rule and command declarations through explicit import.
 Additional action points require a typed owner adapter. Original primary
 capability methods retain their owners and ModuleRPC remains unary.
 

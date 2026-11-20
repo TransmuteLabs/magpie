@@ -101,7 +101,7 @@ export function requestWithPolicy(signal: AbortSignal, host: RequestPolicyHost, 
   classify: (response: Response) => RequestRecoveryRequest | null | Promise<RequestRecoveryRequest | null>
 ): Promise<{response: Response; decision: RequestRecoveryResult | null}>;
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -246,10 +246,12 @@ export interface RoutingResult { order: number[] }
 export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
 export interface LibraryRuleDescriptor { id: string; body: string; paths?: readonly string[] }
+export interface LibraryCommandDescriptor { id: string; description?: string; prompt: string }
 export type ContributionDescriptor =
-  | { point: "routing"; version: 1; routing: RoutingStrategyDescriptor; search?: never; libraryRule?: never }
-  | { point: "search"; version: 1; search: SearchSourceDescriptor; routing?: never; libraryRule?: never }
-  | { point: "library-rule"; version: 1; libraryRule: LibraryRuleDescriptor; routing?: never; search?: never };
+  | { point: "routing"; version: 1; routing: RoutingStrategyDescriptor; search?: never; libraryRule?: never; libraryCommand?: never }
+  | { point: "search"; version: 1; search: SearchSourceDescriptor; routing?: never; libraryRule?: never; libraryCommand?: never }
+  | { point: "library-rule"; version: 1; libraryRule: LibraryRuleDescriptor; routing?: never; search?: never; libraryCommand?: never }
+  | { point: "library-command"; version: 1; libraryCommand: LibraryCommandDescriptor; routing?: never; search?: never; libraryRule?: never };
 
 export type FeatureSetting = {
   name: string;
@@ -534,7 +536,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15" | "^1.16" | "^1.17"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15" | "^1.16" | "^1.17" | "^1.18"; nativeABI?: number; platforms?: string[] }
 export interface ProviderOption {
   key: string; label: string; description?: string; default?: boolean; confirm?: string;
   labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;

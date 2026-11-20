@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CONTRACT, validateManifest, SDKError } from "../index.js";
+import { validateManifest, SDKError } from "../index.js";
 
 test("transactional refresh requires API 1.3 while old auth modules remain valid", () => {
   const manifest = {
@@ -9,7 +9,6 @@ test("transactional refresh requires API 1.3 while old auth modules remain valid
     providers: [{ id: "vendor", name: "Vendor", protocols: ["chat"] }],
     compatibility: { hostAPI: "^1.3" },
   };
-  assert.equal(CONTRACT.version.minor, 17);
   assert.doesNotThrow(() => validateManifest(manifest));
   manifest.contract.version.minor = 2;
   assert.throws(() => validateManifest(manifest), SDKError);

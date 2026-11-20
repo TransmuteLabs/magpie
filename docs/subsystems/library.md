@@ -58,6 +58,25 @@ It remains in the Library when the module changes or goes away. Agent
 format restrictions and protection of existing local files apply as for
 rules created in the editor.
 
+## SDK slash command import
+
+API 1.18 packages can supply up to 16 `library-command` contributions. Each
+`libraryCommand` contains an `id`, a `prompt` up to 100,000 bytes and an
+optional `description` up to 1,000 characters.
+
+```sh
+magpie library commands available
+magpie library commands import <module/id> <name> <agents-or-none> --expected <revision>
+```
+
+The list reads enabled package descriptors. On import, Library resolves the
+listed contribution and checks its package and enablement generation.
+Give the copy a local name and choose its agents, or pass `none` to save
+it without publishing it to an agent. The normal command writer handles
+argument syntax and file ownership. The copy stays in Library if the module
+is disabled, updated or removed. Listing and importing command text require
+no plugin runtime.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

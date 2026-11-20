@@ -60,3 +60,31 @@ test("Library rules are bounded SDK 1.17 declarations without runtime authority"
     }));
   }
 });
+
+test("Library commands are bounded SDK 1.18 declarations without file or agent authority", () => {
+  const command = { id: "review", description: "市".repeat(1000), prompt: "Review $1" };
+  const declaration = { point: "library-command", version: 1, libraryCommand: command };
+  const withCommands = {
+    ...manifest,
+    contract: { ...manifest.contract, version: { major: 1, minor: 18 } },
+    compatibility: { hostAPI: "^1.18" },
+    contributions: [...manifest.contributions, declaration],
+  };
+  assert.equal(validateManifest(withCommands).contributions.length, 3);
+  assert.equal(publicManifest(withCommands).contributions, undefined);
+  assert.throws(() => validateManifest({
+    ...withCommands, compatibility: undefined, contract: { ...manifest.contract, version: { major: 1, minor: 17 } },
+  }));
+  for (const declarations of [[declaration, declaration], Array.from({ length: 17 }, (_, index) => ({
+    ...declaration, libraryCommand: { ...command, id: `command-${index}` },
+  })), [{ ...declaration, libraryRule: { id: "review", body: "A rule" } }]]) {
+    assert.throws(() => validateManifest({ ...withCommands, contributions: declarations }));
+  }
+  for (const invalid of [{ prompt: "\u0085" }, { prompt: "市".repeat(33_334) }, { prompt: "bad\0prompt" },
+    { description: "市".repeat(1001) }, { description: "bad\0description" },
+    { agents: ["claude"] }, { taken: {} }, { file: "custom.md" }]) {
+    assert.throws(() => validateManifest({
+      ...withCommands, contributions: [{ ...declaration, libraryCommand: { ...command, ...invalid } }],
+    }));
+  }
+});

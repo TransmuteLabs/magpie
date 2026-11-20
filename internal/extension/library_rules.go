@@ -29,25 +29,25 @@ func (m *Manager) LibraryRules(ctx context.Context) ([]LibraryRule, error) {
 	return rules, nil
 }
 
-func (m *Manager) LibraryRule(ctx context.Context, name, expected string) (LibraryRule, error) {
+func (m *Manager) LibraryRule(ctx context.Context, name, expected string) (LibraryRule, LibraryPublication, error) {
 	module, id, valid := contributionName(name)
 	if !valid || !catalogDigest(expected) {
-		return LibraryRule{}, fmt.Errorf("select a Library rule by module/id and its listed revision")
+		return LibraryRule{}, LibraryPublication{}, fmt.Errorf("select a Library rule by module/id and its listed revision")
 	}
 	entry, err := m.ActiveModule(ctx, module)
 	if err != nil {
-		return LibraryRule{}, err
+		return LibraryRule{}, LibraryPublication{}, err
 	}
 	for _, contribution := range entry.Manifest.Contributions {
 		if contribution.Point == sdk.ContributionLibraryRule && contribution.Version == 1 && contribution.LibraryRule.ID == id {
 			rule := m.libraryRule(entry, *contribution.LibraryRule)
 			if rule.Revision == expected {
-				return rule, nil
+				return rule, m.libraryPublication(entry), nil
 			}
 			break
 		}
 	}
-	return LibraryRule{}, errContributionRevoked
+	return LibraryRule{}, LibraryPublication{}, errContributionRevoked
 }
 
 func (m *Manager) libraryRule(entry Installed, descriptor sdk.LibraryRuleDescriptor) LibraryRule {

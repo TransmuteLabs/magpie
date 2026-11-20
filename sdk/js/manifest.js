@@ -53,7 +53,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 17 }),
+  version: Object.freeze({ major: 1, minor: 18 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
