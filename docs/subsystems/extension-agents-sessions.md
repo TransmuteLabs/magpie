@@ -274,6 +274,11 @@ plugin targets. A process inherits the same config path as ordinary Start;
 its foreground recipe, binding/lease checks and spawn lifetime remain separate.
 Legacy agentplug Env keeps its existing placeholder behavior.
 
+Ordinary `magpie <agent> run` rechecks the selected SDK launch after
+executable lookup, using the same launch admission as session resume. A
+changed binding, package or active configuration stops the launch. The
+final check reads host state without starting the module worker.
+
 `magpie claude run` and `claude-magpie` resolve the existing Claude target's
 SDK binding before preparing a launch. An installed owner uses the same
 binding and launch checks as resume. An unavailable binding or a bound
