@@ -382,6 +382,13 @@ Declare root `authBindings` with `id`, exact `from`, same-root `provider` and
 The root needs `account-auth`. This grant is separate from action bindings:
 an existing `binding.provider` does not grant sign-in.
 
+For the standard Providers → Add → Subscriptions form, declare
+`provider-signin` alongside `account-auth` and set the binding's `from` to
+`provider:signin`. Each polling method supplies a `label` and can declare
+`text`, `secret` or `select` fields. The host passes the collected values
+to `auth.start` and uses the same polling broker as the window flow.
+`window:page` bindings continue to open their plugin page.
+
 ```ts
 const started = await ui.auth.start("signin", {method: "device"});
 const progress = await ui.auth.finish("signin", started.flow);

@@ -36,3 +36,16 @@ void future;
 const decision: Model = { id: "decision", kind: "decision", protocols: null, operations: ["systemone"] };
 const request: ExecuteRequest = { protocol: "", operation: "systemone", model: decision.id };
 void request;
+
+const providerSignIn: Manifest = {
+  schema: 1, id: "typed-provider", version: "1.0.0", runtime: "bun", entry: "worker.js",
+  contract: { version: { major: 1, minor: 15 }, capabilities: ["account-auth", "provider-signin"] },
+  providers: [{ id: "test", name: "Test", protocols: [] }],
+  authBindings: [{
+    id: "signin", from: "provider:signin", provider: "test",
+    methods: [{ id: "device", mode: "poll", label: "Device sign-in", fields: [
+      { key: "site", label: "Site", type: "select", choices: [{ value: "main", label: "Main" }] },
+    ] }],
+  }],
+};
+void providerSignIn;

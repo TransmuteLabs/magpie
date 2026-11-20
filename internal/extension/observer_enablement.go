@@ -25,6 +25,11 @@ func tracksEnablement(manifest sdk.Manifest) bool {
 			return true
 		}
 	}
+	for _, binding := range manifest.AuthBindings {
+		if binding.From == sdk.ProviderSignInPart {
+			return true
+		}
+	}
 	return false
 }
 

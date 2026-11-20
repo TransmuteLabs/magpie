@@ -31,6 +31,7 @@ const capabilities = {
   "outbound-executor": ["provider.execute"],
   "agent-wiring": ["agent.plan"],
   "account-auth": ["auth.start", "auth.finish", "auth.refresh", "auth.logout"],
+  "provider-signin": [],
   "model-discovery": ["provider.models"],
   "usage-reporter": ["provider.usage"],
   "operation-control": ["operation.status", "operation.cancel"],

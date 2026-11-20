@@ -692,6 +692,16 @@ file without rewriting it. See
 [ADR 0017](../adr/0017-window-auth-broker.md) for compatibility, lock ordering,
 corrected review findings and separately tracked acceptance.
 
+Providers → Add → Subscriptions offers sign-in for active SDK modules before
+they have an account. A root with `account-auth` and `provider-signin` uses
+`authBindings` from `provider:signin` to declare a form with labeled polling
+methods and bounded text, secret and select fields. The catalog provides this
+metadata without starting the module. The host validates the selected method
+and input, then uses the same authentication broker and account Store as a
+plugin page. Replacing the package or configuration or re-enabling the module
+expires the old form selection. A provider with a `window:page` sign-in
+binding and no root form opens its existing page from the subscription tile.
+
 Named loopback services use the existing HTTP/SSE proxy. It strips cookies,
 holds the root lease for the entire response and verifies three exact response
 headers before forwarding body bytes: `X-Magpie-Component-Instance`,

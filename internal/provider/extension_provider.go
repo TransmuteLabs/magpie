@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -598,7 +599,8 @@ func listExtensionLogins(agent string) []Login {
 		if binding.scope.Account == "" || agent != "" && provider.ID != agent {
 			continue
 		}
-		login := Login{Agent: provider.ID, User: provider.Account.User, On: true, extension: binding}
+		login := Login{Agent: provider.ID, User: provider.Account.User, On: true, extension: binding,
+			ExtensionGeneration: strconv.FormatUint(binding.currentScope().Generation, 10)}
 		if record, exists := records[accountKey{login.Agent, login.User}]; exists {
 			login.On = record.On && record.Hidden == ""
 			login.Lapsed = extensionAuthLapse(binding, record)

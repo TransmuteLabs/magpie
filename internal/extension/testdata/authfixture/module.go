@@ -51,7 +51,7 @@ func Module() sdk.Module {
 	unsupported := func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 		return nil, &sdk.Error{Code: "unsupported", Message: "Not used by this fixture"}
 	}
-	return sdk.Module{
+	module := sdk.Module{
 		Manifest: manifest,
 		Start: func(context.Context, sdk.ModuleContext) (sdk.ModuleReady, func(), error) {
 			return sdk.ModuleReady{}, nil, nil
@@ -123,6 +123,27 @@ func Module() sdk.Module {
 			},
 		},
 	}
+	if manifest.Contract.Has(sdk.OutboundExecutor) {
+		module.Handlers[sdk.MethodProviderExecute] = unsupported
+	}
+	if manifest.Contract.Has(sdk.UsageReporter) {
+		module.Handlers[sdk.MethodProviderUsage] = func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			var request sdk.UsageRequest
+			if err := json.Unmarshal(call.Params, &request); err != nil {
+				return nil, err
+			}
+			if call.Scope.Account != "chosen" || string(call.Auth) != `{"token":"PRIVATE-CREDENTIAL"}` {
+				return nil, errors.New("usage lacks the selected account")
+			}
+			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "Weekly", Used: 17}}}, nil
+		}
+	}
+	if manifest.Contract.Has(sdk.ProviderSignIn) {
+		module.Handlers[sdk.MethodProviderModels] = func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+			return sdk.ModelsResult{Models: manifest.Providers[0].Models}, nil
+		}
+	}
+	return module
 }
 
 func Manifest() sdk.Manifest {

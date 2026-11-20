@@ -89,6 +89,58 @@ func TestWindowAuthTransportModeIsNotMethodName(t *testing.T) {
 	}
 }
 
+func TestProviderSignInIsExplicitAndIndependentOfWindow(t *testing.T) {
+	manifest := Manifest{
+		Schema: 1, ID: "normal-signin", Version: "0.1.0", Runtime: "exec", Entry: "worker",
+		Contract:  Contract{Version: APIVersion{Major: 1, Minor: 11}, Capabilities: []Capability{AccountAuth, ProviderSignIn}},
+		Providers: []ProviderDescriptor{{ID: "test", Name: "Test"}},
+		AuthBindings: []WindowAuthBindingDescriptor{{
+			ID: "connect", From: ProviderSignInPart, Provider: "test",
+			Methods: []WindowAuthMethod{{ID: "one", Mode: "poll", Label: "Connect", Fields: []AuthInputField{
+				{Key: "key", Label: "Key", Type: "secret"},
+				{Key: "site", Label: "Site", Type: "select", Choices: []AuthInputChoice{{Value: "main", Label: "Main"}}},
+			}}},
+		}},
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Public().AuthBindings) != 0 {
+		t.Fatal("worker handshake carries form grants")
+	}
+	copy := manifest.Clone()
+	copy.AuthBindings[0].Methods[0].Fields[1].Choices[0].Value = "changed"
+	binding, _ := manifest.ResolveAuthBinding("connect")
+	binding.Methods[0].Fields[1].Choices[0].Value = "also changed"
+	if manifest.AuthBindings[0].Methods[0].Fields[1].Choices[0].Value != "main" {
+		t.Fatal("sign-in field choices alias the installed manifest")
+	}
+	for name, edit := range map[string]func(*Manifest){
+		"implicit": func(value *Manifest) { value.Contract.Capabilities = []Capability{AccountAuth} },
+		"no auth":  func(value *Manifest) { value.Contract.Capabilities = []Capability{ProviderSignIn} },
+		"no label": func(value *Manifest) { value.AuthBindings[0].Methods[0].Label = "" },
+		"window":   func(value *Manifest) { value.AuthBindings[0].From = "window:page" },
+		"two grants": func(value *Manifest) {
+			second := value.AuthBindings[0]
+			second.ID = "other"
+			value.AuthBindings = append(value.AuthBindings, second)
+		},
+		"ambiguous select": func(value *Manifest) {
+			field := &value.AuthBindings[0].Methods[0].Fields[1]
+			field.Choices = append(field.Choices, field.Choices[0])
+		},
+		"prototype key": func(value *Manifest) { value.AuthBindings[0].Methods[0].Fields[0].Key = "constructor" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := manifest.Clone()
+			edit(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid provider sign-in accepted")
+			}
+		})
+	}
+}
+
 func TestWindowAuthBindingsDeclareProviderMethodAndExactPart(t *testing.T) {
 	source := accountBindingManifest()
 	source.AuthBindings = []WindowAuthBindingDescriptor{{

@@ -322,6 +322,15 @@ and account actions without an inference endpoint. Inference grants in a mixed
 module remain limited to its inference providers. Older minors retain their
 admission rules; see [`Manifest.Validate`](manifest.go).
 
+To expose a provider in Providers → Add → Subscriptions, opt in with
+`AccountAuth` and `ProviderSignIn` and declare one root `AuthBindings` entry
+per provider with `From: ProviderSignInPart`. Use labeled polling methods
+and `AuthInputField` to describe text, secret or select inputs for
+`auth.start`. The host renders the form, polls `auth.finish` and saves the
+account. For reauthorization, set `Reauthorize` to grant use of the
+selected account generation. Modules with a `window:page` sign-in binding
+can keep their existing page.
+
 ### Host-owned credential renewal
 
 Require API 1.3 and `Compatibility.HostAPI: "^1.3"` when a module relies on

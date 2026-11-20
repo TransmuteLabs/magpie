@@ -580,6 +580,9 @@ settings for that plugin. Switches and settings edits update that same row.
   reconciles. The window's `/api/state`, `/api/plugins/builtin` and boot.js
   get the reconciled settings and status together through `RefreshState`
   (`builtinsState`), so a change made by the CLI shows on the next read.
+  Changed effective settings also reapply the plugin and restart its
+  dependents in dependency order. Identical values keep it running.
+  Corrected settings or a replaced service can recover a failed activation.
   The installed SDK list also reads enablement from its current catalog
   entry when projecting cached release-check results.
 - **Switch**: `Set(id, on)` (`POST /api/plugins/builtin`, `magpie plugin

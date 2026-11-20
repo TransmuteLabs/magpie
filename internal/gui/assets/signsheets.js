@@ -1,6 +1,33 @@
 // Sign-ins that ask one value before they start. app.js imports this only
 // when one is asked for (signAsk), so it weighs nothing on the core.
 
+export async function startBuiltinSignIn(flow, site, options) {
+  const { agent } = flow;
+  const keep = { site, forUser: options.user, picked: options.proxy };
+  Object.assign(flow, keep, { proxy: options.proxy ?? signInProxyOf(agent, options.user) });
+  renderProviders();
+  try {
+    const body = { agent };
+    if (site) body.site = site;
+    if (options.user) body.user = options.user;
+    if (options.proxy != null) body.proxy = options.proxy;
+    if (options.linkOnly) body.linkOnly = true;
+    const issued = await api("signin", body);
+    if (signing !== flow) {
+      if (issued.id) api("signin/" + issued.id + "/cancel", {}).catch(() => {});
+      return;
+    }
+    signing = { ...issued, ...keep };
+    if (web && signing.url && !signing.linkOnly) signInPage(signing.url);
+    renderProviders();
+    followSignIn(signing.id);
+  } catch (error) {
+    if (signing !== flow) return;
+    Object.assign(flow, { state: "failed", error: error.message });
+    renderProviders();
+  }
+}
+
 // Copilot's enterprise on GHE.com: its host, asked before its sign-in starts
 window.copilotGHESheet = function () {
   const box = el("div", "signing copilot-ghe");

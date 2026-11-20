@@ -41,7 +41,7 @@ export interface AccountCheckinResult {
 export function validateAccountCheckinRequest(value: unknown): AccountCheckinRequest;
 export function validateAccountCheckinResult(value: unknown): AccountCheckinResult;
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
-export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth"
+export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth" | "provider-signin"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
   | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "request-handoff" | "budget-policy" | "masking-rules";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
@@ -527,7 +527,9 @@ export interface BindingDescriptor { id: string; from: string; action?: string; 
 export interface AccountSelection { id: string; expectedGeneration: string }
 export interface AccountSummary { id: string; generation: string; expiresAt?: number }
 export interface WindowCallOptions { account?: AccountSelection }
-export interface WindowAuthMethod { id: string; mode: "poll" }
+export interface AuthInputChoice { value: string; label: string }
+export interface AuthInputField { key: string; label: string; type: "text" | "secret" | "select"; optional?: boolean; choices?: AuthInputChoice[] }
+export interface WindowAuthMethod { id: string; mode: "poll"; label?: string; fields?: AuthInputField[] }
 export interface WindowAuthBindingDescriptor { id: string; from: string; provider: string; methods: WindowAuthMethod[]; reauthorize?: boolean }
 export interface WindowAuthStartOptions { method: string; input?: JSONValue; account?: AccountSelection }
 export interface WindowAuthFlowView {
