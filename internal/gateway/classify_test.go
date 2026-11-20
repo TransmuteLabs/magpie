@@ -30,6 +30,10 @@ type clsUp struct {
 }
 
 func (u *clsUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
 	b, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
 	u.asked = append(u.asked, string(b))
@@ -76,6 +80,7 @@ func intented(t *testing.T, rules ...provider.Rule) (*Server, *ruleUp, *ruleUp, 
 	c := &clsUp{answer: "0"}
 	srv := httptest.NewServer(c)
 	t.Cleanup(srv.Close)
+	probeFixtureRoot(t, srv)
 	if err := provider.Save(provider.Provider{ID: "c", Name: "C", Key: "kc", Models: []string{"cls"}, Chat: srv.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
