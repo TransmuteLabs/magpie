@@ -14,6 +14,7 @@ var linkedOwner = sdk.MemoryOwner{
 	Suggest: Suggest, Promote: Promote, Decline: Decline, MadeSkill: MadeSkill,
 	Tidy: Tidy, Untidy: Untidy, Prune: Prune,
 	Publish: Publish, PublishDue: PublishDue, Digest: Digest,
+	CollectBundle: Collect, MergeBundles: Combine, ApplyBundle: Put,
 }
 
 func Owner() sdk.MemoryOwner { return linkedOwner }

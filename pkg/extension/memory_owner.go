@@ -88,24 +88,27 @@ type MemoryAgentWriter interface {
 // maintenance. It keeps validation, locking and persistence with Memory.
 // Installable module handlers do not receive this contract.
 type MemoryOwner struct {
-	All        func() ([]*MemoryRecord, map[string]*MemoryProject, error)
-	Get        func(string) (*MemoryRecord, error)
-	Rank       func(MemoryQuery) ([]MemoryHit, error)
-	Search     func(MemoryQuery) ([]MemoryHit, error)
-	Save       func(MemoryInput, string, *MemorySource, *MemoryProject) (*MemoryRecord, bool, error)
-	Edit       func(string, MemoryInput, bool) (*MemoryRecord, error)
-	Remove     func(...string) error
-	SetStatus  func(string, ...string) (int, error)
-	Promote    func([]string) (*MemoryRecord, error)
-	Suggest    func() ([]MemorySuggestion, error)
-	Decline    func(string) error
-	MadeSkill  func(string, string) error
-	Tidy       func(MemoryTidyPlan) ([]MemoryTidyChange, error)
-	Untidy     func([]MemoryTidyChange) (int, error)
-	Prune      func() (MemoryPruned, error)
-	Publish    func() (bool, error)
-	PublishDue func() (bool, error)
-	Digest     func(string) (string, error)
+	All           func() ([]*MemoryRecord, map[string]*MemoryProject, error)
+	Get           func(string) (*MemoryRecord, error)
+	Rank          func(MemoryQuery) ([]MemoryHit, error)
+	Search        func(MemoryQuery) ([]MemoryHit, error)
+	Save          func(MemoryInput, string, *MemorySource, *MemoryProject) (*MemoryRecord, bool, error)
+	Edit          func(string, MemoryInput, bool) (*MemoryRecord, error)
+	Remove        func(...string) error
+	SetStatus     func(string, ...string) (int, error)
+	Promote       func([]string) (*MemoryRecord, error)
+	Suggest       func() ([]MemorySuggestion, error)
+	Decline       func(string) error
+	MadeSkill     func(string, string) error
+	Tidy          func(MemoryTidyPlan) ([]MemoryTidyChange, error)
+	Untidy        func([]MemoryTidyChange) (int, error)
+	Prune         func() (MemoryPruned, error)
+	Publish       func() (bool, error)
+	PublishDue    func() (bool, error)
+	Digest        func(string) (string, error)
+	CollectBundle func() (*MemoryBundle, error)
+	MergeBundles  func(*MemoryBundle, *MemoryBundle) *MemoryBundle
+	ApplyBundle   func(*MemoryBundle) (bool, error)
 }
 
 type MemorySuggestion struct {

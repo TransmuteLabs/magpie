@@ -920,7 +920,7 @@ func run(ctx context.Context, first time.Duration) {
 }
 
 func collect(c Config) (backup.Bundle, error) {
-	b, err := backup.Collect(c.Keys, "magpie")
+	b, err := backup.CollectWithMemory(c.Keys, "magpie", c.memoryOn())
 	if b.Settings == nil {
 		s := settings.Load()
 		b.Settings = &s
@@ -932,9 +932,6 @@ func collect(c Config) (backup.Bundle, error) {
 	}
 	if !c.library() {
 		b.Library = nil
-	}
-	if !c.memoryOn() {
-		b.Memory = nil
 	}
 	if err == nil && c.SignIns {
 		if serr := backup.WithSignIns(&b); serr != nil {
@@ -1775,8 +1772,9 @@ func syncOnce(ctx context.Context, c Config, st *state, pv *Plan) error {
 	// memory, when it goes: merged memory by memory (memory.Combine),
 	// what the server has put in here, and both sides' going up
 	if c.memoryOn() && (local.Memory != nil || remote.Memory != nil) {
-		merged.Memory = memory.Combine(local.Memory, remote.Memory)
-		changed, err := memory.Put(remote.Memory)
+		owner := memory.Owner()
+		merged.Memory = owner.MergeBundles(local.Memory, remote.Memory)
+		changed, err := owner.ApplyBundle(remote.Memory)
 		if err != nil {
 			return fmt.Errorf("bringing in memory: %w", err)
 		}

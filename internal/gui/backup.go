@@ -35,16 +35,13 @@ func backupRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		b, err := backup.Collect(in.Keys, Version)
+		b, err := backup.CollectWithMemory(in.Keys, Version, in.Memory == nil || *in.Memory)
 		if err != nil {
 			fail(rw, err)
 			return
 		}
 		if in.Library != nil && !*in.Library {
 			b.Library = nil
-		}
-		if in.Memory != nil && !*in.Memory {
-			b.Memory = nil
 		}
 		if in.Usage == nil || *in.Usage {
 			if err := backup.WithUsage(&b); err != nil {

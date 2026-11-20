@@ -3,10 +3,14 @@ package davsync
 import (
 	"context"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/backup"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/memory"
 )
 
@@ -116,4 +120,55 @@ func TestSyncMemory(t *testing.T) {
 	b.use(t)
 	now(t)
 	want(t, "Builds run on mote", "Only on b") // off: nothing comes either
+}
+
+func TestSyncSkipsDisabledMemory(t *testing.T) {
+	fake := &fakeDAV{files: map[string][]byte{}, etags: map[string]string{}, dirs: map[string]bool{"/dav": true}}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	newComputer(t).use(t)
+	config := Config{URL: server.URL + "/dav/", User: "me", Password: "pw", Passphrase: "correct horse"}
+	if err := Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	text, kind := "Keep the remote memory", memory.Preference
+	saved, _, err := memory.Save(memory.Input{Text: &text, Kind: &kind}, memory.FromUser, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Now(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(memory.Dir(), "meta.json")
+	broken := []byte(`{"projects":{"bad`)
+	if err := os.WriteFile(meta, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lastgood.Bak(meta)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := Now(context.Background()); err == nil || !strings.Contains(err.Error(), "memory") {
+		t.Fatalf("default sync with unreadable memory: %v", err)
+	}
+	off := false
+	config.Memory = &off
+	if err := Configure(config); err != nil {
+		t.Fatal(err)
+	}
+	if err := Now(context.Background()); err != nil {
+		t.Fatalf("sync with memory disabled: %v", err)
+	}
+	fake.mu.Lock()
+	sealed := slices.Clone(fake.files["/dav/magpie/magpie.magpie-backup"])
+	fake.mu.Unlock()
+	bundle, err := backup.Open(sealed, config.Passphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Memory == nil || len(bundle.Memory.Memories) != 1 || bundle.Memory.Memories[0].ID != saved.ID {
+		t.Fatal("disabled sync removed remote memory")
+	}
+	if local, err := os.ReadFile(meta); err != nil || string(local) != string(broken) {
+		t.Fatalf("sync changed unreadable memory: %v", err)
+	}
 }

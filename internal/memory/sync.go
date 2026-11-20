@@ -2,8 +2,6 @@ package memory
 
 import (
 	"cmp"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -11,6 +9,8 @@ import (
 	"os"
 	"slices"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // keepRemoved is how long a deletion is remembered: a computer that
@@ -31,13 +31,7 @@ func removed(f *file, id string) {
 // distilled texts the user threw away and the memories deleted. The
 // published digests and the vectors (memembed) are this computer's own,
 // made again from the memories here.
-type Bundle struct {
-	Memories  []*Memory            `json:"memories"`
-	Projects  map[string]*Project  `json:"projects,omitempty"`
-	Dismissed []string             `json:"dismissed,omitempty"`
-	Removed   map[string]time.Time `json:"removed,omitempty"`
-	Declined  []string             `json:"declined,omitempty"`
-}
+type Bundle = sdk.MemoryBundle
 
 // Collect is this computer's memory, to carry: nil when there is none (no
 // Dir, no memory.json to move in), an error when it can't be read (a failed read is
@@ -60,26 +54,6 @@ func Collect() (*Bundle, error) {
 func bundleOf(f *file) *Bundle {
 	b := &Bundle{Memories: f.Memories, Projects: f.Projects, Dismissed: f.Dismissed, Removed: f.Removed, Declined: f.Declined}
 	return Combine(b, nil) // in order, the old deletions dropped
-}
-
-// Hash is what tells a change in b: the memories, projects, dismissed
-// texts and deletions, but not when a search last returned a memory nor
-// how often (Used, Uses), which an agent's search changes and which
-// alone is no change worth a sync. A nil b hashes as "".
-func (b *Bundle) Hash() string {
-	if b == nil {
-		return ""
-	}
-	c := *b
-	c.Memories = make([]*Memory, len(b.Memories))
-	for i, m := range b.Memories {
-		k := *m
-		k.Used, k.Uses = time.Time{}, 0
-		c.Memories[i] = &k
-	}
-	j, _ := json.Marshal(c)
-	s := sha256.Sum256(j)
-	return hex.EncodeToString(s[:])
 }
 
 // Combine is a and b together, either nil, each memory once:

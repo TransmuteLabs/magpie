@@ -187,8 +187,9 @@ defaults. `backup.Collect` stops on an unreadable providers.json (with its group
 and order), settings.json (`settings.LoadChecked`: unreadable, or
 not parsing with no good `.bak`), library.json or memory (its meta.json, see
 [Memory](memory.md#source-of-truth)), and on a gateway key
-store that fails to export. A backup, an export and a sync all end with that
-error, nothing sealed or pushed; the sync's status shows it. A missing or
+store that fails to export. A failed read of an included part stops
+sealing and pushing. Export and sync with Memory off skip its local
+store, and sync leaves the server's Memory intact. A missing or
 empty settings.json is still none (`TestCollectStopsOnUnreadableSettings`,
 `TestSyncStopsOnUnreadableProviders`, `TestSyncStopsOnUnreadableSettings`,
 #2269).

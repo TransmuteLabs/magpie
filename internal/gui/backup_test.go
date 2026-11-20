@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/agentenv"
+	"github.com/yetone/magpie/internal/backup"
 	"github.com/yetone/magpie/internal/library"
+	"github.com/yetone/magpie/internal/memory"
 )
 
 // folderOnly is the app's windows as far as an export needs them.
@@ -90,6 +92,51 @@ func TestBackupLibraryRoundTrip(t *testing.T) {
 	}
 	if iv, _ := library.ReadInstructions(); iv.Shared != "Be brief." {
 		t.Fatalf("instructions: %q", iv.Shared)
+	}
+}
+
+func TestExportSkipsDisabledMemory(t *testing.T) {
+	home := sandboxHome(t)
+	meta := filepath.Join(memory.Dir(), "meta.json")
+	if err := os.MkdirAll(filepath.Dir(meta), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	broken := []byte(`{"projects":{"bad`)
+	if err := os.WriteFile(meta, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	backupRoutes(mux, folderOnly{})
+	export := func(body string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, httptest.NewRequest("POST", "/api/backup/export", strings.NewReader(body)))
+		return response
+	}
+	if response := export(`{"pass":"pw","usage":false}`); response.Code == http.StatusOK || !strings.Contains(response.Body.String(), "memory") {
+		t.Fatalf("default export with unreadable memory: %d %s", response.Code, response.Body)
+	}
+	response := export(`{"pass":"pw","memory":false,"usage":false}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("export with memory disabled: %d %s", response.Code, response.Body)
+	}
+	var result struct{ Path string }
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	path := result.Path
+	if after, ok := strings.CutPrefix(path, "~"); ok {
+		path = filepath.Join(home, after)
+	}
+	sealed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := backup.Open(sealed, "pw")
+	if err != nil || bundle.Memory != nil {
+		t.Fatalf("excluded memory reached the exported bundle: %v", err)
+	}
+	if saved, err := os.ReadFile(meta); err != nil || string(saved) != string(broken) {
+		t.Fatalf("export changed unreadable memory: %v", err)
 	}
 }
 

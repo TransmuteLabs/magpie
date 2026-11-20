@@ -454,7 +454,10 @@ directory also invalidates this instance's in-memory vector cache.
 Memory goes to another computer in a backup file (the scheduled backups
 too) and in sync (WebDAV, S3, GitHub), merged memory by memory, never one
 computer's memory over the other's.
-[sync.go](../../internal/memory/sync.go) owns it.
+[sync.go](../../internal/memory/sync.go) owns the bundle operations.
+Backup, restore, sync and sync preview use the linked SDK
+[`MemoryOwner`](../../pkg/extension/memory_owner.go) with the existing
+[`MemoryBundle`](../../pkg/extension/memory_bundle.go) format.
 
 - What goes (`memory.Bundle`, `Collect`): the memories in every state, the
   projects, the dismissed distilled texts, the suggestions turned down and
@@ -477,8 +480,9 @@ computer's memory over the other's.
 - Switches: sync's **Memory** tick (`davsync.Config.Memory`, on unless
   turned off, since a sync file is always sealed with a passphrase), and
   Export's **With memory** and Import's **Bring in memory too**, both on.
-  A computer with the tick off sends none and takes none, and leaves the
-  server's copy as it was (`TestSyncMemory`, `TestBackupMergesMemory`).
+  Export and sync skip local Memory collection when the tick is off. Sync
+  leaves the server's copy in place (`TestExportSkipsDisabledMemory`,
+  `TestSyncSkipsDisabledMemory`, `TestSyncMemory`, `TestBackupMergesMemory`).
 - After a sync or restore changes memory, `library.PublishMemory` writes the
   digests again.
 

@@ -167,7 +167,7 @@ func previewed(pv *Plan, c Config, local, remote, merged backup.Bundle, bringIn,
 	}
 	pv.PluginsGone = slices.Clone(goneThere)
 	if c.memoryOn() && (local.Memory != nil || remote.Memory != nil) {
-		both := memory.Combine(local.Memory, remote.Memory)
+		both := memory.Owner().MergeBundles(local.Memory, remote.Memory)
 		in, up := memoryDiff(local.Memory, both), memoryDiff(remote.Memory, both)
 		if c.FollowServer {
 			up = 0
