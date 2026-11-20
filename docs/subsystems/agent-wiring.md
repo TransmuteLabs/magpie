@@ -120,6 +120,11 @@ The host consumes saved values after both files settle. Removing an empty
 dotenv file participates in rollback with its original contents and
 permissions, and linked files keep their existing alias behavior.
 
+Command Code's [settings planner](../../internal/extension/builtin/commandcode/settings.go)
+publishes the selected model with its provider catalog. Catalog sync touches
+only `providers.json`. Reasoning effort uses the model from the same
+`settings.json` snapshot as the effort map.
+
 Per-agent telemetry and the global Privacy switch use the built-in
 telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
 restoration leaves its ownership record available for retry.

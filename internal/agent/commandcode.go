@@ -9,13 +9,13 @@ package agent
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtincommandcode "github.com/yetone/magpie/internal/extension/builtin/commandcode"
 )
 
 // ccEfforts are the reasoning levels Command Code knows.
@@ -27,24 +27,23 @@ func commandCode(home string) *Agent { return commandCodeIn(here(home)) }
 // distro's (see wsl.go), its provider naming the gateway as the distro
 // reaches it.
 func commandCodeIn(at place) *Agent {
-	ccProviderJSON := func() any { return ccProviderJSONAt(at.v1()) }
 	dir := at.join(".commandcode")
 	path := filepath.Join(dir, "settings.json")
 	providers := filepath.Join(dir, "providers.json")
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
-	dropMagpie := func() error {
-		if _, err := os.Stat(providers); err != nil {
-			return nil
-		}
-		return edit.DelJSON(providers, "provider."+magpieID)
-	}
+	configFile := extension.LinkedActionFile{Name: builtincommandcode.SettingsFile, Path: path}
+	catalogFile := extension.LinkedActionFile{Name: builtincommandcode.CatalogFile, Path: providers}
+	catalog := builtincommandcode.CatalogOptions{Value: func(current string) (any, bool) {
+		value := theirsKeptValue(current, ccProviderJSONAt(at.v1()), "models")
+		return value, !sameJSON(current, value)
+	}}
 	return &Agent{
 		ID: "commandcode", Name: "Command Code", Icon: "commandcode", Aliases: []string{"command-code", "cmd"}, Spelled: prefixed,
 		UA:  []string{"command-code", "commandcode"},
 		Bin: "command-code", Dir: dir, Path: path,
 		ListOnly: true,
 		Sync: func() error {
-			return syncJSON(providers, "provider."+magpieID, theirsKept(providers, "provider."+magpieID, ccProviderJSON, "models"))
+			return extension.ApplyLinkedAgentPlan(catalog, builtincommandcode.PlanSync, catalogFile)
 		},
 		Notice: func() string {
 			notes := []string{noticeCommandcode1.String()}
@@ -67,31 +66,11 @@ func commandCodeIn(at place) *Agent {
 			Key: "model", Label: "model",
 			Get: func() string { return get("model") },
 			Set: func(v string) error {
-				if v == "" {
-					keys := []string{"model"}
-					if get("modelProvider") == magpieID {
-						keys = append(keys, "modelProvider")
-					}
-					if err := edit.DelJSON(path, keys...); err != nil {
-						return err
-					}
-					return dropMagpie()
-				}
+				options := builtincommandcode.ModelOptions{Model: v}
 				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-					if err := edit.SetJSON(providers, edit.KV{Path: "provider." + magpieID, Value: theirsKept(providers, "provider."+magpieID, ccProviderJSON, "models")()}); err != nil {
-						return err
-					}
-					return edit.SetJSON(path, edit.KV{Path: "model", Value: v}, edit.KV{Path: "modelProvider", Value: magpieID})
+					options.Catalog = catalog
 				}
-				if get("modelProvider") == magpieID {
-					if err := edit.DelJSON(path, "modelProvider"); err != nil {
-						return err
-					}
-				}
-				if err := edit.SetJSON(path, edit.KV{Path: "model", Value: v}); err != nil {
-					return err
-				}
-				return dropMagpie()
+				return extension.ApplyLinkedAgentPlan(options, builtincommandcode.PlanModel, configFile, catalogFile)
 			},
 			Options: func(cur map[string]string) []Option {
 				var out []Option
@@ -106,21 +85,7 @@ func commandCodeIn(at place) *Agent {
 			Key: "effort", Label: "effort",
 			Get: func() string { return ccEffortMap(path)[get("model")] },
 			Set: func(v string) error {
-				model := get("model")
-				if model == "" {
-					return fmt.Errorf("pick Command Code's model first; it keeps an effort for each model")
-				}
-				efforts := ccEffortMap(path)
-				if v == "" {
-					delete(efforts, model)
-				} else {
-					efforts[model] = v
-				}
-				if len(efforts) == 0 {
-					return edit.DelJSON(path, "reasoningEffort")
-				}
-				// written whole, as model ids hold dots
-				return edit.SetJSON(path, edit.KV{Path: "reasoningEffort", Value: efforts})
+				return extension.ApplyLinkedAgentPlan(v, builtincommandcode.PlanEffort, configFile)
 			},
 			Options: func(cur map[string]string) []Option {
 				if ref, ok := strings.CutPrefix(cur["model"], magpieID+"/"); ok {
@@ -189,17 +154,12 @@ func ccProviderJSONAt(v1 string) any {
 // ccEffortMap is settings.json's reasoningEffort, model id to effort.
 func ccEffortMap(path string) map[string]string {
 	out := map[string]string{}
-	b, err := os.ReadFile(path)
-	if err != nil {
+	raw, _ := edit.GetJSON(path, "reasoningEffort")
+	var values map[string]any
+	if json.Unmarshal([]byte(raw), &values) != nil {
 		return out
 	}
-	var c struct {
-		Efforts map[string]any `json:"reasoningEffort"`
-	}
-	if json.Unmarshal(b, &c) != nil {
-		return out
-	}
-	for k, v := range c.Efforts {
+	for k, v := range values {
 		if s, ok := v.(string); ok {
 			out[k] = s
 		}

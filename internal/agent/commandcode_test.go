@@ -2,13 +2,64 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestCommandCodeRejectsConcurrentSettingsChanges(t *testing.T) {
+	for _, action := range []string{"model", "sync", "effort"} {
+		t.Run(action, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			target := commandCode(home)
+			providers := filepath.Join(target.Dir, "providers.json")
+			writeFile(t, target.Path, `{"model":"native/gpt","modelProvider":"native"}`)
+			writeFile(t, providers, `{"provider":{"native":{"name":"Mine"},"magpie":{"models":{"old":{}}}}}`)
+			path := target.Path
+			change := func() error { return target.Apply("model", "magpie/fake/m1") }
+			switch action {
+			case "sync":
+				path, change = providers, target.Sync
+			case "effort":
+				change = func() error { return target.Apply("effort", "high") }
+			}
+			want := `{"model":"native/changed","manual":"keep"}`
+			other := providers
+			if action == "sync" {
+				want = `{"provider":{"native":{"name":"Edited outside Magpie"}}}`
+				other = target.Path
+			}
+			before := readFile(other)
+			resolved, err := edit.Target(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := false
+			err = edit.Filtered(func(writing string, body []byte) []byte {
+				if writing == resolved && !injected {
+					injected = true
+					writeFile(t, path, want)
+				}
+				return body
+			}, change)
+			if !injected || !errors.Is(err, extension.ErrActionChanged) {
+				t.Errorf("%s: %v, external change injected: %t", action, err, injected)
+			}
+			if got := readFile(path); got != want {
+				t.Errorf("overwrote the external change: %s", got)
+			}
+			if got := readFile(other); got != before {
+				t.Errorf("left a partial settings change: %s", got)
+			}
+		})
+	}
+}
 
 func TestCommandCode(t *testing.T) {
 	home := t.TempDir()
