@@ -363,6 +363,10 @@ checks the catalog and config snapshots, and remembers its API only after
 publication. The plan preserves a configured provider API and user agent
 header and can read a legacy `models.json` when creating the YAML catalog.
 Catalog refresh and removal use the same checked publication.
+Copilot CLI uses the linked [BYOK planner](../../internal/extension/builtin/copilot/settings.go)
+for model selection, reset and catalog sync. Selecting or resetting a
+Magpie model checks both `settings.json` and `providers.json`. The publisher
+rolls back its first write if a concurrent edit blocks the second.
 Pi and its forks use a linked settings plan to publish the selected default
 model and its `enabledModels` entry. A pick that writes `providers.magpie`
 also checks and publishes its catalog in this plan. The first accepted
