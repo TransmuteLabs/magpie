@@ -20,6 +20,7 @@ import (
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -58,6 +59,16 @@ func installBudgetPolicyFixture(t *testing.T, manager *extensionhost.Manager, si
 	return manifest.ID
 }
 
+func budgetPolicyCollector(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /"+sdk.MethodBudgetReserve, handler)
+	mux.HandleFunc("POST /"+sdk.MethodBudgetSpent, handler)
+	collector := httptest.NewServer(mux)
+	t.Cleanup(collector.Close)
+	return collector
+}
+
 func TestSDKBudgetPolicyOrdinaryGatewayAndRevocation(t *testing.T) {
 	fresh(t)
 	budget.Forget()
@@ -83,7 +94,7 @@ func TestSDKBudgetPolicyOrdinaryGatewayAndRevocation(t *testing.T) {
 		replied chan bool
 	}
 	entered := make(chan decisionGate, 1)
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	collector := budgetPolicyCollector(t, func(w http.ResponseWriter, r *http.Request) {
 		callbacks.Add(1)
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -136,8 +147,7 @@ func TestSDKBudgetPolicyOrdinaryGatewayAndRevocation(t *testing.T) {
 			return
 		}
 		io.WriteString(w, `{"restrictions":[]}`)
-	}))
-	t.Cleanup(collector.Close)
+	})
 	server := New()
 	t.Cleanup(server.idle.stop)
 	manager := server.extensions
@@ -221,6 +231,13 @@ func TestSDKBudgetPolicyOrdinaryGatewayAndRevocation(t *testing.T) {
 	if usage == nil || usage.InFlight != 0 || usage.Tokens != 350 {
 		t.Fatal("successful reservation did not settle at the native usage owner", usage)
 	}
+
+	plan, err := provider.Find("plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeInferenceFixture(t, strings.TrimSuffix(plan.Chat, "/v1"), "/v1/models")
+	probeInferenceFixture(t, collector.URL, "/v1/models")
 
 	mode.Store(1)
 	assert(call(t.Context(), child.Key), http.StatusTooManyRequests, "37", "")
@@ -320,7 +337,7 @@ func TestSDKBudgetPolicySpenderHoldsPaidTaskToDelegatedScope(t *testing.T) {
 	}
 
 	var spentCalls, reserveCalls atomic.Int32
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	collector := budgetPolicyCollector(t, func(w http.ResponseWriter, r *http.Request) {
 		var req sdk.BudgetPolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Scopes) != 1 ||
 			req.Scopes[0] != (sdk.BudgetScope{Owner: "issuer", Scoped: true, Tokens: "1000"}) {
@@ -335,8 +352,7 @@ func TestSDKBudgetPolicySpenderHoldsPaidTaskToDelegatedScope(t *testing.T) {
 			reserveCalls.Add(1)
 		}
 		io.WriteString(w, `{"restrictions":[]}`)
-	}))
-	t.Cleanup(collector.Close)
+	})
 	module := installBudgetPolicyFixture(t, manager, collector.URL)
 	cfg := settings.Load()
 	cfg.GatewayBudgetPolicy = module + "/extra"
