@@ -3181,6 +3181,9 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 		// three (codebuddy, cbc, codebuddy-code)
 		run = "codebuddy --resume " + id
 	case "omp":
+		if strings.HasPrefix(id, "-") {
+			return ""
+		}
 		run = "omp --resume " + id
 		if profile := ompProfile(path); profile != "" {
 			if !safeOmpProfile.MatchString(profile) {
