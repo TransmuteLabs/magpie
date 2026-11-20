@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"context"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,17 +24,32 @@ const idleRelease = 30 * time.Second
 // and counts its releases.
 type idleMemory struct {
 	mu      sync.Mutex
-	due     *time.Timer   // the release to come, or nil
+	serving context.Context
+	due     *idleMemoryTimer
 	rest    time.Duration // idleRelease when zero
 	release func()        // debug.FreeOSMemory when nil
+}
+
+type idleMemoryTimer struct {
+	timer  *time.Timer
+	server atomic.Pointer[Server]
+}
+
+func (m *idleMemory) start(ctx context.Context) func() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serving = ctx
+	return m.stop
 }
 
 // stop calls off the release to come.
 func (m *idleMemory) stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.serving = nil
 	if m.due != nil {
-		m.due.Stop()
+		m.due.server.Store(nil)
+		m.due.timer.Stop()
 		m.due = nil
 	}
 }
@@ -44,31 +61,55 @@ func (m *idleMemory) restFor() time.Duration {
 	return idleRelease
 }
 
-// armRelease has releaseIfResting run after d, unless it is due already.
-func (s *Server) armRelease(d time.Duration) {
+// armRelease schedules a release for the listening gateway after its rest.
+func (s *Server) armRelease() {
 	s.idle.mu.Lock()
 	defer s.idle.mu.Unlock()
-	if s.idle.due == nil {
-		s.idle.due = time.AfterFunc(d, s.releaseIfResting)
+	if s.idle.due == nil && s.idleServing() {
+		s.scheduleIdleRelease(s.idle.restFor())
+	}
+}
+
+func (s *Server) idleServing() bool {
+	return s.idle.serving != nil && s.idle.serving.Err() == nil && !s.notAccepting.Load()
+}
+
+func (s *Server) scheduleIdleRelease(delay time.Duration) {
+	due := &idleMemoryTimer{}
+	due.server.Store(s)
+	due.timer = time.AfterFunc(delay, due.run)
+	s.idle.due = due
+}
+
+func (due *idleMemoryTimer) run() {
+	if server := due.server.Swap(nil); server != nil {
+		server.releaseIfResting(due)
 	}
 }
 
 // releaseIfResting hands memory back when nothing has been in flight for
 // idleRelease. A request in flight now arms it again when it ends, and a
 // rest not long enough yet waits out the rest of it.
-func (s *Server) releaseIfResting() {
+func (s *Server) releaseIfResting(due *idleMemoryTimer) {
 	s.idle.mu.Lock()
+	if s.idle.due != due {
+		s.idle.mu.Unlock()
+		return
+	}
 	s.idle.due = nil
-	s.idle.mu.Unlock()
-	if s.inFlight.Load() != 0 {
+	if !s.idleServing() || s.inFlight.Load() != 0 {
+		s.idle.mu.Unlock()
 		return
 	}
 	if wait := s.idle.restFor() - time.Since(time.Unix(0, s.lastDone.Load())); wait > 0 {
-		s.armRelease(wait)
+		s.scheduleIdleRelease(wait)
+		s.idle.mu.Unlock()
 		return
 	}
-	if s.idle.release != nil {
-		s.idle.release()
+	release := s.idle.release
+	s.idle.mu.Unlock()
+	if release != nil {
+		release()
 		return
 	}
 	debug.FreeOSMemory()

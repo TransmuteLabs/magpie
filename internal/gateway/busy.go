@@ -111,7 +111,7 @@ func (s *Server) counted(h http.Handler) http.Handler {
 				s.codexDone.Store(time.Now().UnixNano())
 			}
 			if s.inFlight.Add(-1) == 0 {
-				s.armRelease(s.idle.restFor())
+				s.armRelease()
 			}
 		}()
 		h.ServeHTTP(w, r)
