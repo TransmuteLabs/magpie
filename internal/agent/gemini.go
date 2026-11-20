@@ -52,50 +52,35 @@ func geminiIn(at place) *Agent {
 		}
 		return ""
 	}
-	// unroute puts back what routing through the gateway replaced
-	unroute := func() error {
-		if !routed() {
-			return nil
-		}
-		if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-			return err
-		}
-		var env []edit.KV
-		if u := unstash(at.key("gemini.base_url")); u != "" {
-			env = append(env, edit.KV{Path: "GOOGLE_GEMINI_BASE_URL", Value: u})
-		}
-		if k := unstash(at.key("gemini.api_key")); k != "" {
-			env = append(env, edit.KV{Path: "GEMINI_API_KEY", Value: k})
-		}
-		if len(env) > 0 {
-			if err := edit.SetEnvFile(envPath, env...); err != nil {
-				return err
-			}
-		}
-		if a := unstash(at.key("gemini.auth")); a != "" {
-			if err := edit.SetJSON(path, edit.KV{Path: "security.auth.selectedType", Value: a}); err != nil {
-				return err
-			}
-		} else if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-			return err
-		}
-		if m := unstash(at.key("gemini.model")); m != "" {
-			return edit.SetJSON(path, edit.KV{Path: "model.name", Value: m})
-		}
-		return delModelName(path)
+	files := []extension.LinkedActionFile{
+		{Name: builtingemini.EnvFile, Path: envPath},
+		{Name: builtingemini.SettingsFile, Path: path},
 	}
+	restore := func(reset bool) error {
+		baseKey, keyKey := at.key("gemini.base_url"), at.key("gemini.api_key")
+		authKey, modelKey := at.key("gemini.auth"), at.key("gemini.model")
+		saved := peek(baseKey, keyKey, authKey, modelKey)
+		options := builtingemini.RestoreOptions{Gateway: at.gw(), OwnKey: ownKey}
+		if !reset {
+			options.Original = &builtingemini.OriginalSettings{
+				Base: saved[baseKey], Key: saved[keyKey], Auth: saved[authKey], Model: saved[modelKey],
+			}
+		}
+		var retired bool
+		err := extension.ApplyLinkedAgentPlan(options, func(options builtingemini.RestoreOptions, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+			plan, wasRouted, err := builtingemini.PlanRestore(options, snapshot)
+			retired = wasRouted
+			return plan, err
+		}, files...)
+		if err == nil && retired {
+			forgetValues(saved)
+		}
+		return err
+	}
+	unroute := func() error { return restore(false) }
 	setModel := func(v string) error {
 		if v == "" {
-			if routed() {
-				forget(at.key("gemini.base_url"), at.key("gemini.api_key"), at.key("gemini.auth"), at.key("gemini.model"))
-				if err := edit.DelEnvFile(envPath, "GOOGLE_GEMINI_BASE_URL", "GEMINI_API_KEY"); err != nil {
-					return err
-				}
-				if err := edit.DelJSON(path, "security.auth.selectedType"); err != nil {
-					return err
-				}
-			}
-			return delModelName(path)
+			return restore(true)
 		}
 		if isMagpie(v) {
 			options := builtingemini.RouteOptions{Gateway: at.gw(), Key: at.gwKey(), Model: v, OwnKey: ownKey}
@@ -104,8 +89,7 @@ func geminiIn(at place) *Agent {
 				plan, before, err := builtingemini.PlanRoute(options, snapshot)
 				original = before
 				return plan, err
-			}, extension.LinkedActionFile{Name: builtingemini.EnvFile, Path: envPath},
-				extension.LinkedActionFile{Name: builtingemini.SettingsFile, Path: path})
+			}, files...)
 			if err == nil && original != nil {
 				stash(map[string]string{
 					at.key("gemini.base_url"): original.Base, at.key("gemini.api_key"): original.Key,
@@ -278,19 +262,6 @@ func geminiIn(at place) *Agent {
 			},
 		},
 	}
-}
-
-// delModelName takes model.name out of Gemini CLI's settings.json, and the
-// model it was in once nothing else is there: the "model": {} it would
-// leave was never the user's.
-func delModelName(path string) error {
-	if err := edit.DelJSON(path, "model.name"); err != nil {
-		return err
-	}
-	if v, _ := edit.GetJSON(path, "model"); strings.TrimSpace(strings.Trim(strings.TrimSpace(v), "{}")) == "" && strings.HasPrefix(strings.TrimSpace(v), "{") {
-		return edit.DelJSON(path, "model")
-	}
-	return nil
 }
 
 // what gemini says after a change (notice.go)

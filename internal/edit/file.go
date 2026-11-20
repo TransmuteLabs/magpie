@@ -156,14 +156,14 @@ type AtomicPublication struct {
 }
 
 func WriteAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication) error {
-	return writeAtomicChecked(path, data, check, published, true)
+	return writeAtomicChecked(path, data, check, published, true, nil)
 }
 
-func RestoreAtomicChecked(path string, data []byte, check func() error) error {
-	return writeAtomicChecked(path, data, check, nil, false)
+func RestoreAtomicChecked(path string, data []byte, check func() error, original fs.FileInfo) error {
+	return writeAtomicChecked(path, data, check, nil, false, original)
 }
 
-func writeAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication, inheritBOM bool) error {
+func writeAtomicChecked(path string, data []byte, check func() error, published *AtomicPublication, inheritBOM bool, original fs.FileInfo) error {
 	path, err := Target(path)
 	if err != nil {
 		return err
@@ -218,6 +218,9 @@ func writeAtomicChecked(path string, data []byte, check func() error, published 
 	}
 	mode := fs.FileMode(0o644)
 	st, statErr := os.Stat(path)
+	if original != nil {
+		st, statErr = original, nil
+	}
 	if statErr == nil {
 		mode = st.Mode().Perm()
 	}
@@ -390,13 +393,30 @@ func IsLink(path string) bool {
 // AGENTS.md empties CLAUDE.md too, where deleting the one name would leave
 // the text magpie is taking back under the other.
 func Remove(path string) error {
+	_, err := RemoveChecked(path, nil, nil)
+	return err
+}
+
+func RemoveChecked(path string, check func() error, published *AtomicPublication) (bool, error) {
 	if !IsLink(path) && !hardLinked(path) {
-		return os.Remove(path)
+		if check != nil {
+			if err := check(); err != nil {
+				return false, err
+			}
+		}
+		if err := os.Remove(path); err != nil {
+			return false, err
+		}
+		filememo.Forget()
+		return true, nil
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil // points at nothing: nothing to empty
+		if check != nil {
+			return false, errors.Join(err, check())
+		}
+		return false, nil // points at nothing: nothing to empty
 	}
-	return WriteAtomic(path, nil)
+	return false, WriteAtomicChecked(path, nil, check, published)
 }
 
 type preserveRollbackError struct {

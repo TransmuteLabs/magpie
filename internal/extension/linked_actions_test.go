@@ -157,3 +157,74 @@ func TestLinkedAgentPlanRechecksInputsBeforeAcceptingNoWrite(t *testing.T) {
 		t.Fatalf("user settings changed: %q, %v", got, err)
 	}
 }
+
+func TestLinkedAgentPlanRestoresRemovedFileAfterRefusal(t *testing.T) {
+	for _, kind := range []string{"regular", "symlink", "hardlink", "user recreated"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			dotenv := filepath.Join(dir, ".env")
+			config := filepath.Join(dir, "settings.json")
+			original := dotenv
+			if kind == "symlink" || kind == "hardlink" {
+				original = filepath.Join(dir, "original")
+			}
+			if err := os.WriteFile(original, []byte("TOKEN=test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "symlink":
+				if err := os.Symlink(original, dotenv); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+			case "hardlink":
+				if err := os.Link(original, dotenv); err != nil {
+					t.Skipf("hard link: %v", err)
+				}
+			}
+			refused := errors.New("settings write refused")
+			plan := func(_ struct{}, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+				env, config := settings.Files[0], settings.Files[1]
+				return sdk.AgentPlan{Files: []sdk.FileChange{
+					{Path: env.Path, BeforeHash: env.BeforeHash, Remove: true},
+					{Path: config.Path, BeforeHash: config.BeforeHash, Body: []byte("new settings")},
+				}}, nil
+			}
+			err := ApplyLinkedAgentPlan(struct{}{}, plan,
+				LinkedActionFile{Name: ".env", Path: dotenv},
+				LinkedActionFile{Name: "settings.json", Path: config, BeforeWrite: func(string) error {
+					body, err := os.ReadFile(dotenv)
+					if kind == "hardlink" || kind == "symlink" {
+						if err != nil || len(body) != 0 {
+							t.Fatalf("linked file was not cleared: %q, %v", body, err)
+						}
+					} else if !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("environment file was not removed: %v", err)
+					}
+					if kind == "user recreated" {
+						if err := os.WriteFile(dotenv, []byte("user change\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return refused
+				}})
+			if !errors.Is(err, refused) {
+				t.Fatalf("expected refusal after removing the dotenv file: %v", err)
+			}
+			want := "TOKEN=test\n"
+			if kind == "user recreated" {
+				want = "user change\n"
+				if !errors.Is(err, ErrActionChanged) {
+					t.Fatalf("missed the user's new file: %v", err)
+				}
+			}
+			if got, err := os.ReadFile(dotenv); err != nil || string(got) != want {
+				t.Fatalf("after rollback: %q, %v", got, err)
+			}
+			info, err := os.Stat(dotenv)
+			peer, peerErr := os.Stat(original)
+			if err != nil || peerErr != nil || !os.SameFile(info, peer) || info.Mode().Perm() != 0o600 {
+				t.Fatalf("rollback did not restore mode or link: %v, %v", err, peerErr)
+			}
+		})
+	}
+}

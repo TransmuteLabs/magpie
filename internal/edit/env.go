@@ -82,13 +82,27 @@ func DelEnvFile(path string, keys ...string) error {
 	if err != nil || len(raw) == 0 {
 		return err
 	}
+	body, changed := PatchEnvWithout(raw, keys...)
+	if !changed {
+		return nil
+	}
+	if body == nil {
+		return Remove(path)
+	}
+	return WriteAtomic(path, body)
+}
+
+// PatchEnvWithout removes dotenv keys from a snapshot. A changed nil result
+// means the file has no remaining entries or user comments.
+func PatchEnvWithout(raw []byte, keys ...string) ([]byte, bool) {
 	drop := map[string]bool{}
 	for _, k := range keys {
 		drop[k] = true
 	}
 	var out []string
 	changed := false
-	for _, l := range splitLines(string(raw)) {
+	unmarked := TrimBOM(raw)
+	for _, l := range splitLines(string(unmarked)) {
 		if m := envLine.FindStringSubmatch(l); m != nil && drop[m[1]] {
 			changed = true
 			continue
@@ -96,12 +110,12 @@ func DelEnvFile(path string, keys ...string) error {
 		out = append(out, l)
 	}
 	if !changed {
-		return nil
+		return raw, false
 	}
 	// a note magpie put above a key goes with it
-	out = markEnv(out, string(raw))
+	out = markEnv(out, string(unmarked))
 	if strings.TrimSpace(strings.Join(withoutNotes(out), "")) == "" {
-		return Remove(path)
+		return nil, true
 	}
-	return WriteAtomic(path, []byte(joinLines(out)))
+	return append(append([]byte(nil), raw[:len(raw)-len(unmarked)]...), joinLines(out)...), true
 }

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -67,5 +69,65 @@ func TestGeminiRouteRollsBackEnvWhenSettingsChange(t *testing.T) {
 	key, _ := edit.GetEnvFile(env, "GEMINI_API_KEY")
 	if model != "gemini-3-pro" || auth != "vertex-ai" || key != "own-key" {
 		t.Fatal("Disconnect did not restore the settings captured on retry")
+	}
+}
+
+func TestGeminiDisconnectKeepsRouteAndRestoreValuesOnFailure(t *testing.T) {
+	for _, concurrent := range []bool{false, true} {
+		name := "malformed"
+		if concurrent {
+			name = "external edit"
+		}
+		t.Run(name, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			target := gemini(home)
+			env := filepath.Join(target.Dir, ".env")
+			writeFile(t, target.Path, `{"model":{"name":"gemini-3-flash"},"security":{"auth":{"selectedType":"oauth-personal"}}}`)
+			if err := target.Apply("model", "fake/m1"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(env, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			routedEnv := readFile(env)
+			keys := []string{"gemini.base_url", "gemini.api_key", "gemini.auth", "gemini.model"}
+			saved := peek(keys...)
+			var err error
+			changed := `{"model":[`
+			if concurrent {
+				changed = `{"model":{"name":"fake/m1"},"manual":true}`
+				config, targetErr := edit.Target(target.Path)
+				if targetErr != nil {
+					t.Fatal(targetErr)
+				}
+				injected := false
+				err = edit.Filtered(func(path string, body []byte) []byte {
+					if path == config && !injected {
+						injected = true
+						writeFile(t, target.Path, changed)
+					}
+					return body
+				}, target.Disconnect)
+				if !injected || !errors.Is(err, extension.ErrActionChanged) {
+					t.Fatalf("Disconnect = %v, config edit injected = %t", err, injected)
+				}
+			} else {
+				writeFile(t, target.Path, changed)
+				err = target.Disconnect()
+				if err == nil {
+					t.Fatal("Disconnect accepted malformed settings")
+				}
+			}
+			body, readErr := os.ReadFile(env)
+			if readErr != nil || string(body) != routedEnv || !reflect.DeepEqual(peek(keys...), saved) {
+				t.Fatal("failed Disconnect removed the routed environment or consumed restoration values")
+			}
+			if info, statErr := os.Stat(env); statErr != nil || info.Mode().Perm() != 0o600 {
+				t.Fatal("failed Disconnect changed the key file's permissions")
+			}
+			if readFile(target.Path) != changed {
+				t.Fatal("failed Disconnect overwrote the settings")
+			}
+		})
 	}
 }

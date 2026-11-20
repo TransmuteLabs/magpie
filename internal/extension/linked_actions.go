@@ -85,7 +85,7 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			current := snapshots[original.file.Name]
 			var restoreErr error
 			if original.before.Exists {
-				restoreErr = edit.RestoreAtomicChecked(current.target, original.before.Body, current.check)
+				restoreErr = edit.RestoreAtomicChecked(current.target, original.before.Body, current.check, original.info)
 			} else if restoreErr = current.check(); restoreErr == nil {
 				restoreErr = os.Remove(current.target)
 			}
@@ -135,7 +135,7 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 	touched := make(map[string]bool, len(plan.Files))
 	for _, change := range plan.Files {
 		snapshot, ok := snapshots[change.Path]
-		if !ok || touched[change.Path] || change.BeforeHash != actionHash(snapshot.before) || change.Remove || change.Mode != 0 {
+		if !ok || touched[change.Path] || change.BeforeHash != actionHash(snapshot.before) || change.Remove && len(change.Body) != 0 || change.Mode != 0 {
 			return fmt.Errorf("invalid linked settings change for %q", change.Path)
 		}
 		touched[change.Path] = true
@@ -151,8 +151,20 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			}
 		}
 		var written edit.AtomicPublication
-		err := edit.WriteAtomicChecked(snapshot.target, change.Body, check, &written)
-		if written.Info != nil {
+		var unlinked bool
+		if !change.Remove {
+			err = edit.WriteAtomicChecked(snapshot.target, change.Body, check, &written)
+		} else if snapshot.before.Exists {
+			unlinked, err = edit.RemoveChecked(snapshot.file.Path, check, &written)
+		} else {
+			err = check()
+		}
+		if unlinked {
+			originals = append(originals, snapshot)
+			snapshot.info = nil
+			snapshot.before = actionFile{}
+			snapshots[change.Path] = snapshot
+		} else if written.Info != nil {
 			originals = append(originals, snapshot)
 			body := written.Body
 			if written.RetainedTail && len(body) < len(snapshot.before.Body) {
