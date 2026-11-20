@@ -73,7 +73,7 @@ func toolSearchTurn(model string) string {
 func TestToolReferenceRefusedGoesAsText(t *testing.T) {
 	fresh(t)
 	ds := &textOnlyResults{said: deepseekV41RefsRefused}
-	dsSrv := httptest.NewServer(ds)
+	dsSrv := httptest.NewServer(withoutAnonymousFixtureProbe(ds))
 	t.Cleanup(dsSrv.Close)
 	takes := &openDesignVendor{takes: true}
 	tkSrv := httptest.NewServer(takes)
@@ -181,8 +181,9 @@ func TestToolReferenceNamedOtherwiseLearnsNothing(t *testing.T) {
 
 	fresh(t)
 	ds := &textOnlyResults{said: "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"unknown variant `tool_definition`, expected `tool_reference`\"}}"}
-	srv := httptest.NewServer(ds)
+	srv := httptest.NewServer(withoutAnonymousFixtureProbe(ds))
 	t.Cleanup(srv.Close)
+	probeFixtureRoot(t, srv)
 	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Anthropic: srv.URL, Models: []string{"deepseek-v4.1"}}); err != nil {
 		t.Fatal(err)
 	}

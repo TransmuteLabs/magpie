@@ -350,7 +350,7 @@ func TestBedrockGPTOnResponses(t *testing.T) {
 func TestToolsEffortRefusedOnChat(t *testing.T) {
 	fresh(t)
 	up := &gptBedrock{}
-	srv := httptest.NewServer(up)
+	srv := httptest.NewServer(withoutAnonymousFixtureProbe(up))
 	t.Cleanup(srv.Close)
 	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Key: "k", Chat: srv.URL + "/v1",
 		Models: []string{"gpt-6-luna"}}); err != nil {
@@ -364,6 +364,7 @@ func TestToolsEffortRefusedOnChat(t *testing.T) {
 			up.mu.Lock()
 			up.calls = nil
 			up.mu.Unlock()
+			probeFixtureRoot(t, srv)
 			code, body := post(t, tc.path, tc.body)
 			if code != 200 || !strings.Contains(body, "from chat") {
 				t.Fatalf("status %d: %s", code, body)

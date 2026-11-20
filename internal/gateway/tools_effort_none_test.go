@@ -68,8 +68,9 @@ func (c *toolsEffortChat) asked() []string {
 // toolsEffortOn saves a Chat-only provider id serving model from up.
 func toolsEffortOn(t *testing.T, id, model string, up http.Handler) {
 	t.Helper()
-	srv := httptest.NewServer(up)
+	srv := httptest.NewServer(withoutAnonymousFixtureProbe(up))
 	t.Cleanup(srv.Close)
+	probeFixtureRoot(t, srv)
 	if err := provider.Save(provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Chat: srv.URL + "/v1", Models: []string{model}}); err != nil {
 		t.Fatal(err)
 	}

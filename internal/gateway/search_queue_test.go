@@ -40,7 +40,7 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 			// runner) must not leave the handler on proceed, or up.Close
 			// waits for it until the package alarm.
 			goOn := func() { onceGo.Do(func() { close(proceed) }) }
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer close(stopped)
 				var q struct{ Tools []struct{ Type, Name string } }
 				if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
@@ -91,10 +91,11 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 						return
 					}
 				}
-			}))
+			})))
 			defer up.Close()
 			defer finish()
 			defer goOn()
+			probeFixtureRoot(t, up)
 			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "fixture", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
 				t.Fatal(err)
 			}
