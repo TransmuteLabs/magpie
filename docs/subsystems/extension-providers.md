@@ -38,6 +38,31 @@ module and cause. Discovery fails if the shared installed catalog or core
 account policy cannot be read. The aggregate login list discovers SDK
 providers once and marks the first enabled account active for each provider.
 
+### Sign-in before the first account
+
+Providers → Add → Subscriptions reads sign-in grants from the active SDK
+catalog, without starting the module. A provider can appear here before it
+has an account or routable models. Providers with an existing `window:page`
+grant open their own sign-in page until the package declares a
+`provider:signin` binding.
+
+A root manifest requests `provider-signin` alongside `account-auth` and
+declares one `authBindings` grant with `from: "provider:signin"` per provider
+it offers. Its polling methods declare labels and any text, secret or
+selection fields the core form needs. The form sends only those fields.
+Reauthorization also requires a grant and the selected account generation.
+Both the form and the window bridge use the same credential broker. The form
+has its own flow authority, bound to the selected package, configuration and
+enablement generation. A flow cannot cross between the form and a plugin
+window. The journal retains its existing on-disk schema and numeric config
+version.
+
+After completion, the account appears in the existing provider catalog,
+model list and Usage. Accounts disabled globally suppress SDK sign-in choices
+and their operations. See [`ProviderSignIns`](../../internal/extension/provider_signin.go),
+the [Providers route](../../internal/gui/providers_extension_signin.go) and
+the [HTTP regression](../../internal/gui/providers_extension_signin_test.go).
+
 `ListedAPIs` uses declared model protocols. The provider exposes the union
 of models available to its enabled accounts; `Account.Lists` retains each
 account's own restriction. `Account.fetch` invokes `provider.models` and

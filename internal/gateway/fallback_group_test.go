@@ -104,8 +104,14 @@ func TestFallbackGroupPauseHolds(t *testing.T) {
 	t.Cleanup(func() { ruleClock = time.Now })
 	_, a, b := fallbackToGroup(t, provider.Group{Members: []string{"a/x", "b/x"}, Routing: provider.Ordered,
 		Rules: []provider.Rule{{Use: "a/x", Pause: true, Time: peak}}})
+	paused, err := provider.Find("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeInferenceFixture(t, strings.TrimSuffix(paused.Chat, "/v1"), "/v1/models")
 	code, body := postAs(t, New(), "", `{"model":"plan/m","messages":[{"role":"user","content":"hi"}]}`)
-	if code != 200 || !strings.Contains(body, "from kb") || len(a.tried) != 0 {
+	if code != 200 || !strings.Contains(body, "from kb") || len(a.tried) != 0 ||
+		len(b.tried) != 1 || b.tried[0] != "kb" {
 		t.Fatalf("a/x paused: %d %s, a %v, b %v", code, body, a.tried, b.tried)
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // tellCaller tells a plugin's fetch the agent its request came from, as
@@ -22,21 +24,29 @@ func tellCaller(ctx context.Context, h http.Header) {
 	h.Del(provider.CallerAgentHeader)
 	h.Del(provider.CallerNameHeader)
 	h.Del(provider.CallerViaHeader)
-	c, ok := ctx.Value(callerCtx{}).(caller)
-	if !ok || c.agent == "" {
+	info := pluginCaller(ctx)
+	if info == nil {
 		return
 	}
-	h.Set(provider.CallerAgentHeader, url.PathEscape(c.agent))
-	h.Set(provider.CallerNameHeader, url.PathEscape(usage.AgentName(c.agent)))
-	chain := c.chain
-	if len(chain) == 0 && c.via != "" {
-		chain = []string{c.via}
-	}
-	if len(chain) > 0 {
-		via := make([]string, len(chain))
-		for i, v := range chain {
+	h.Set(provider.CallerAgentHeader, url.PathEscape(info.Agent))
+	h.Set(provider.CallerNameHeader, url.PathEscape(info.Name))
+	if len(info.Via) > 0 {
+		via := make([]string, len(info.Via))
+		for i, v := range info.Via {
 			via[i] = url.PathEscape(v)
 		}
 		h.Set(provider.CallerViaHeader, strings.Join(via, ","))
 	}
+}
+
+func pluginCaller(ctx context.Context) *sdk.ExecuteCaller {
+	c, ok := ctx.Value(callerCtx{}).(caller)
+	if !ok || c.agent == "" {
+		return nil
+	}
+	via := slices.Clone(c.chain)
+	if len(via) == 0 && c.via != "" {
+		via = []string{c.via}
+	}
+	return &sdk.ExecuteCaller{Agent: c.agent, Name: usage.AgentName(c.agent), Via: via}
 }

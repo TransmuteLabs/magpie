@@ -155,7 +155,7 @@ func cloneManifest(manifest Manifest) Manifest {
 	manifest.Bindings = slices.Clone(manifest.Bindings)
 	manifest.AuthBindings = slices.Clone(manifest.AuthBindings)
 	for index := range manifest.AuthBindings {
-		manifest.AuthBindings[index].Methods = slices.Clone(manifest.AuthBindings[index].Methods)
+		manifest.AuthBindings[index].Methods = cloneAuthMethods(manifest.AuthBindings[index].Methods)
 	}
 	if manifest.Compatibility != nil {
 		value := *manifest.Compatibility

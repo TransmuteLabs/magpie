@@ -13,6 +13,7 @@ const (
 	OutboundExecutor                   = protocolext.OutboundExecutor
 	AgentWiring                        = protocolext.AgentWiring
 	AccountAuth                        = protocolext.AccountAuth
+	ProviderSignIn          Capability = "provider-signin"
 	ModelDiscovery                     = protocolext.ModelDiscovery
 	UsageReporter                      = protocolext.UsageReporter
 	OperationControl                   = protocolext.OperationControl
@@ -24,9 +25,9 @@ const (
 
 func FullContract() Contract {
 	return Contract{
-		Version: APIVersion{Major: 1, Minor: 18},
+		Version: APIVersion{Major: 1, Minor: 19},
 		Capabilities: []Capability{
-			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ModelDiscovery,
+			InboundCodec, OutboundExecutor, AgentWiring, AccountAuth, ProviderSignIn, ModelDiscovery,
 			UsageReporter, OperationControl, ToolProvider, SessionMigration, SessionRelatedInputs, AgentProcess, ModuleRPC, GatewayHooks, SessionSource, NativeAccountOperations, StorageSource, LedgerObserver, GatewayMiddleware, RequestPolicy, RequestHandoff, RequestObserver, BudgetPolicy, MaskingRules,
 		},
 	}

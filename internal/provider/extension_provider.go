@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -38,12 +39,13 @@ type extensionProviderHost interface {
 var providerExtensionHost = func() extensionProviderHost { return extensionhost.Default() }
 
 type extensionAccount struct {
-	host       extensionProviderHost
-	manifest   sdk.Manifest
-	descriptor sdk.ProviderDescriptor
-	scope      sdk.Scope
-	modelKey   string
-	generation *atomic.Uint64
+	host             extensionProviderHost
+	manifest         sdk.Manifest
+	descriptor       sdk.ProviderDescriptor
+	scope            sdk.Scope
+	modelKey         string
+	enableGeneration string
+	generation       *atomic.Uint64
 }
 
 func ExtensionProviderID(module, provider string) string {
@@ -106,7 +108,7 @@ func discoverExtensionModuleContext(ctx context.Context, host extensionProviderH
 		}
 		if !authenticated {
 			out = append(out, extensionProvider(&extensionAccount{host: host, manifest: manifest, descriptor: descriptor,
-				scope: sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}, modelKey: modelRevision}))
+				scope: sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}, modelKey: modelRevision, enableGeneration: entry.EnableGeneration}))
 			continue
 		}
 		accounts, err := host.Store().AccountsContext(ctx, manifest.ID, descriptor.ID)
@@ -122,7 +124,7 @@ func discoverExtensionModuleContext(ctx context.Context, host extensionProviderH
 			identities[identity] = true
 			out = append(out, extensionProvider(&extensionAccount{host: host, manifest: manifest, descriptor: descriptor,
 				scope:    sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID, Account: account.ID, Generation: account.Generation},
-				modelKey: modelRevision}))
+				modelKey: modelRevision, enableGeneration: entry.EnableGeneration}))
 		}
 	}
 	return out, nil
@@ -598,7 +600,8 @@ func listExtensionLogins(agent string) []Login {
 		if binding.scope.Account == "" || agent != "" && provider.ID != agent {
 			continue
 		}
-		login := Login{Agent: provider.ID, User: provider.Account.User, On: true, extension: binding}
+		login := Login{Agent: provider.ID, User: provider.Account.User, On: true, extension: binding,
+			ExtensionGeneration: strconv.FormatUint(binding.currentScope().Generation, 10)}
 		if record, exists := records[accountKey{login.Agent, login.User}]; exists {
 			login.On = record.On && record.Hidden == ""
 			login.Lapsed = extensionAuthLapse(binding, record)

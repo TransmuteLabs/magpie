@@ -35,10 +35,22 @@ func main(){
  sdk.MethodProviderExecute:func(ctx context.Context,call sdk.Call,stream *sdk.Stream)(any,error){
   var request sdk.ExecuteRequest;if err:=json.Unmarshal(call.Params,&request);err!=nil{return nil,err}
   var auth struct{URL string};if err:=json.Unmarshal(call.Auth,&auth);err!=nil{return nil,err}
-  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"model":request.Model,"operation":call.Scope.Operation,"protocol":request.Protocol,"body":request.Body})
+  body,_:=json.Marshal(map[string]any{"account":call.Scope.Account,"generation":call.Scope.Generation,"model":request.Model,"operation":call.Scope.Operation,"protocol":request.Protocol,"body":request.Body})
   req,_:=http.NewRequestWithContext(ctx,"POST",auth.URL,bytes.NewReader(body));res,err:=http.DefaultClient.Do(req);if err!=nil{return nil,err}
   raw,err:=io.ReadAll(res.Body);res.Body.Close();if err!=nil{return nil,err}
   var reply map[string]any;if err:=json.Unmarshal(raw,&reply);err!=nil{return nil,err}
+  if data,ok:=reply["wireBody"].(string);ok{
+   status:=int(reply["status"].(float64));outcome:=reply["outcome"].(string)
+   if outcome=="accepted" {
+    if err:=stream.Emit(ctx,"accepted",sdk.AcceptedEvent{OperationID:call.Scope.Operation});err!=nil{return nil,err}
+    outcome="completed"
+   }
+   contentType:="application/json"
+   if status==http.StatusOK {contentType="text/event-stream"}
+   if err:=stream.Emit(ctx,"headers",sdk.HeadersEvent{Status:status,Headers:http.Header{"Content-Type":{contentType}}});err!=nil{return nil,err}
+   if err:=stream.Emit(ctx,"data",[]byte(data));err!=nil{return nil,err}
+   return sdk.ExecuteResult{Status:status,Outcome:outcome},nil
+  }
   if chunk, ok := reply["chatStream"].(string); ok {
    if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
     return nil, err
@@ -155,6 +167,118 @@ func policyFixtureRefusal(class, scope string, windows []any, statuses ...int) m
 		"step": "inference", "evidence": "rejected-before-effect",
 		"facts": map[string]any{"status": status, "code": "denied", "message": "fixture refusal", "operation": "provider.execute", "phase": "response", "complete": true},
 		"rules": []any{map[string]any{"id": "fixture.rule", "status": []int{status}, "code": "denied", "class": class, "scope": scope}}, "windows": windows}}
+}
+
+func TestMessagesDispatchRefusalFollowsExtensionExecution(t *testing.T) {
+	for _, outcome := range []string{"not-started", "completed", "accepted"} {
+		t.Run(outcome, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls []string
+			refuse := true
+			id := installPolicyRouteFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+				var input struct {
+					Account, Protocol string
+					Generation        uint64
+				}
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				calls = append(calls, input.Account+":"+input.Protocol)
+				denied := refuse && input.Account == "alice" && input.Generation == 1
+				mu.Unlock()
+				wireBody, status, finish := sub2apiMessagesReply(), 200, "completed"
+				if input.Protocol == "chat" {
+					wireBody = sub2apiChatReply()
+				} else if denied {
+					wireBody, status, finish = sub2apiNoDispatch, 403, outcome
+				}
+				json.NewEncoder(writer).Encode(map[string]any{"wireBody": wireBody, "status": status, "outcome": finish})
+			}, func(manifest *sdk.Manifest) {
+				protocols := []protocolext.Protocol{"messages", "chat"}
+				manifest.Providers[0].Protocols = protocols
+				for index := range manifest.Providers[0].Models {
+					manifest.Providers[0].Models[index].Protocols = protocols
+				}
+			})
+			for _, group := range []struct{ name, account, model string }{
+				{"Alice first", "alice", "free"},
+				{"Alice second", "alice", "paid"},
+				{"Bob first", "bob", "free"},
+			} {
+				if err := provider.SaveGroup(provider.Group{Name: group.name, Members: []string{id + "/" + group.model},
+					Accounts: []string{id + "/" + group.account}, Routing: provider.Ordered}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := New().Handler()
+			check := func(model string, status int, reply, want string) {
+				t.Helper()
+				answer := sub2apiCall(handler, "/v1/messages", "group/"+model)
+				mu.Lock()
+				hits := strings.Join(calls, " ")
+				calls = nil
+				mu.Unlock()
+				if answer.Code != status || !strings.Contains(answer.Body.String(), reply) || hits != want {
+					t.Errorf("%s: status %d want %d, calls %q want %q: %s", model, answer.Code, status, hits, want, answer.Body)
+				}
+			}
+			if outcome != "not-started" {
+				check("alice-first", 409, "automatic replay stopped", "alice:anthropic")
+				mu.Lock()
+				refuse = false
+				mu.Unlock()
+				check("alice-first", 200, "messages reply", "alice:anthropic")
+				return
+			}
+			check("alice-first", 200, "chat fallback", "alice:anthropic alice:chat")
+			check("alice-second", 200, "chat fallback", "alice:chat")
+			check("bob-first", 200, "messages reply", "bob:anthropic")
+			manager := extensionhost.Default()
+			if _, err := manager.CompareAndSwapModuleConfig(t.Context(), "fixture.policy", "0", json.RawMessage(`{"revision":"new"}`)); err != nil {
+				t.Fatal(err)
+			}
+			provider.Changed()
+			check("alice-first", 200, "chat fallback", "alice:anthropic alice:chat")
+			installed, err := manager.List()
+			if err != nil || len(installed) != 1 {
+				t.Fatalf("installed modules %d: %v", len(installed), err)
+			}
+			source := t.TempDir()
+			manifest := installed[0].Manifest
+			manifest.Version = "1.0.1"
+			entry, err := os.ReadFile(filepath.Join(filepath.Dir(extensionhost.CatalogPath()), installed[0].Directory, manifest.Entry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, manifest.Entry), entry, 0700); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Install(t.Context(), source); err != nil {
+				t.Fatal(err)
+			}
+			provider.Changed()
+			check("alice-first", 200, "chat fallback", "alice:anthropic alice:chat")
+			store := manager.Store()
+			account, err := store.GetAccount("fixture.policy", "vendor", "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.SaveAccount(account, account.Generation); err != nil {
+				t.Fatal(err)
+			}
+			provider.Changed()
+			check("alice-first", 200, "messages reply", "alice:anthropic")
+		})
+	}
 }
 
 func TestRequestDispositionInvalidRequestDoesNotEnumerateAccounts(t *testing.T) {

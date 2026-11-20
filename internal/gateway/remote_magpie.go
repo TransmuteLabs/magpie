@@ -122,7 +122,7 @@ func withCaller(next http.Handler) http.Handler {
 			principal = "key:" + who.KeyID
 		}
 		sum := sha256.Sum256([]byte(principal))
-		ctx = extension.WithCallerID(ctx, hex.EncodeToString(sum[:16]))
+		ctx = extension.WithCaller(ctx, hex.EncodeToString(sum[:16]), pluginCaller)
 		if searchingFrom(r) {
 			// another magpie's search: only the model itself searches
 			ctx = context.WithValue(ctx, searchingKey{}, true)

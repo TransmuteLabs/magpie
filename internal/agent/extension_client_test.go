@@ -34,6 +34,9 @@ func TestExtensionClientRecognizedAfterGatewayStarts(t *testing.T) {
 	if got := usage.AgentOf("Launch-Wire-Fixture/2.0"); got != descriptor.ID {
 		t.Errorf("SDK User-Agent resolved to %q, want %q", got, descriptor.ID)
 	}
+	if got := usage.AgentName(descriptor.ID); got != descriptor.Name {
+		t.Errorf("SDK agent name = %q, want %q", got, descriptor.Name)
+	}
 	if err := host.SetEnabled(t.Context(), "fixture.agent", false); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +45,9 @@ func TestExtensionClientRecognizedAfterGatewayStarts(t *testing.T) {
 	if got := usage.AgentOf("Launch-Wire-Fixture/2.0"); got == descriptor.ID {
 		t.Errorf("disabled SDK module still owns its User-Agent")
 	}
+	if got := usage.AgentName(descriptor.ID); got != descriptor.ID {
+		t.Errorf("disabled SDK module still supplies name %q", got)
+	}
 	if err := host.SetEnabled(t.Context(), "fixture.agent", true); err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +55,7 @@ func TestExtensionClientRecognizedAfterGatewayStarts(t *testing.T) {
 	oldAlias := descriptor.Aliases[0]
 	descriptor.Aliases = []string{"fixture-new"}
 	descriptor.UA = []string{"fixture-wire-new"}
+	descriptor.Name = "Replacement agent fixture"
 	replaceAgentFixture(t, host, descriptor, "1.0.1", 5)
 	check(oldAlias, http.StatusNotFound)
 	check(descriptor.Aliases[0], http.StatusOK)
@@ -57,6 +64,9 @@ func TestExtensionClientRecognizedAfterGatewayStarts(t *testing.T) {
 	}
 	if got := usage.AgentOf("Launch-Wire-Fixture/2.0"); got == descriptor.ID {
 		t.Errorf("old User-Agent still names the replacement")
+	}
+	if got := usage.AgentName(descriptor.ID); got != descriptor.Name {
+		t.Errorf("replacement SDK agent name = %q, want %q", got, descriptor.Name)
 	}
 	if err := host.Remove(t.Context(), "fixture.agent"); err != nil {
 		t.Fatal(err)

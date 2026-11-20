@@ -48,6 +48,10 @@ type extensionWindowPart struct {
 	config                  sdk.ConfigSnapshot
 }
 
+func extensionPageKey(module string) string {
+	return "extension-" + hex.EncodeToString([]byte(module))
+}
+
 func extensionWindowParts(ctx context.Context) ([]pluginPage, []pluginPanel, error) {
 	host := extensionWindows()
 	modules, err := host.Windows(ctx)
@@ -71,7 +75,7 @@ func extensionWindowParts(ctx context.Context) ([]pluginPage, []pluginPanel, err
 		if window == nil {
 			return nil, nil, fmt.Errorf("module %s has no readable window parts", module.ID)
 		}
-		key := "extension-" + hex.EncodeToString([]byte(module.ID))
+		key := extensionPageKey(module.ID)
 		specID := "sdk:" + module.ID + "@" + module.PackageRevision + ":" + module.ConfigVersion
 		reads := window.Reads
 		if reads == nil {

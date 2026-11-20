@@ -8052,20 +8052,19 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 		}
 	}
-	defer res.Body.Close()
 	u.RequestID = requestID(res.Header)
 	if res.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		res.Body.Close()
 		msg := explained(p, model, res, b)
-		if s.noChannelElsewhere(p, model, proto, res.StatusCode, b) {
-			s.markUnfit(p.ID, model, proto)
+		canReplay := provider.ExtensionOutcome(r.Context(), true) == nil && provider.FinalRequestRefusal(r.Context()) == nil
+		if canReplay && s.noChannelElsewhere(p, model, proto, res.StatusCode, b) &&
+			s.markEndpointRefusal(p, model, proto, res, b) {
 			u.RequestID = ""
 			return res.StatusCode, msg, false
 		}
 		if wrongEndpoint(res.StatusCode, b) {
-			s.markUnfit(p.ID, model, proto)
-			s.markAPI(p.ID, proto, res.StatusCode, b)
-			if len(s.usable(p, model)) > 0 {
+			if canReplay && s.markEndpointRefusal(p, model, proto, res, b) && len(s.usable(p, model)) > 0 {
 				u.RequestID = "" // another endpoint answers, with its own id
 				return res.StatusCode, msg, false
 			}
@@ -8081,6 +8080,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		}
 		return writeVendorErrorFrom(w, proto, proto, p, res, msg, b), msg, true
 	}
+	defer res.Body.Close()
 	if remote != nil && res.Header.Get(KeptTurnHeader) != "" {
 		// the other magpie kept the turn: what it answered is kept here
 		// once relayed, for the next turn's delta (remote_delta.go)
@@ -8795,16 +8795,45 @@ func eventStream(res *http.Response) (io.Reader, bool) {
 	return br, false
 }
 
-// apiRefused is the unfit mark of an API a provider refused whatever the
-// model (catalog.APIRefused): no model of it is asked there again.
+// apiRefused is the unfit mark of Messages for one upstream credential and
+// endpoint, whatever the model asked (catalog.APIRefused).
 const apiRefused = "\x01api"
 
-// markAPI marks proto unfit for every model of p when its refusal was of
-// the API itself, not of model on it.
-func (s *Server) markAPI(providerID string, proto provider.Protocol, status int, body []byte) {
-	if catalog.APIRefused(status, body) {
-		s.markUnfit(providerID, apiRefused, proto)
+func apiRefusalScope(p provider.Provider, response *http.Response) string {
+	endpoint := p.Base(provider.Anthropic) + pathOf(provider.Anthropic)
+	identity := ""
+	switch {
+	case p.IsExtension():
+		identity = p.ExtensionBindingIdentity()
+		if response != nil {
+			identity = provider.ExtensionResponseBindingIdentity(response)
+			if identity == "" {
+				return ""
+			}
+		}
+	case p.Account != nil:
+		identity = p.Account.Agent + "\x00" + p.Account.User
+	default:
+		if response != nil && (response.Request == nil || response.Request.URL == nil ||
+			response.Request.Method != http.MethodPost || response.Request.URL.String() != endpoint) {
+			return ""
+		}
+		identity = fmt.Sprintf("%x", sha256.Sum256([]byte(p.Key)))
 	}
+	return p.ID + "\x00" + endpoint + "\x00" + identity
+}
+
+func (s *Server) markEndpointRefusal(p provider.Provider, model string, proto provider.Protocol, response *http.Response, body []byte) bool {
+	if proto != provider.Anthropic || !catalog.APIRefused(response.StatusCode, body) {
+		s.markUnfit(p.ID, model, proto)
+		return true
+	}
+	scope := apiRefusalScope(p, response)
+	if scope == "" {
+		return false
+	}
+	s.markUnfit(scope, apiRefused, proto)
+	return scope == apiRefusalScope(p, nil)
 }
 
 // fits reports whether the provider hasn't turned model away from proto.
@@ -8831,7 +8860,8 @@ func (s *Server) usable(p provider.Provider, model string) []provider.Protocol {
 	apis := p.APIs(model)
 	var out []provider.Protocol
 	for _, proto := range p.Speaks() {
-		if s.fits(p.ID, model, proto) && s.fits(p.ID, apiRefused, proto) && (apis == nil && !p.NamedOnlyOn(proto) || slices.Contains(apis, proto)) {
+		if s.fits(p.ID, model, proto) && (proto != provider.Anthropic || s.fits(apiRefusalScope(p, nil), apiRefused, proto)) &&
+			(apis == nil && !p.NamedOnlyOn(proto) || slices.Contains(apis, proto)) {
 			out = append(out, proto)
 		}
 	}
@@ -9205,6 +9235,9 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 		res.Body.Close()
 		res.Body = io.NopCloser(bytes.NewReader(b))
+		if provider.ExtensionOutcome(fctx, true) != nil || provider.FinalRequestRefusal(fctx) != nil {
+			return res, to, nil
+		}
 		if filledOutput && outputFieldRefused(res.StatusCode, b) {
 			// the model's own limit, filled in, turned away (a list or
 			// models.dev saying more than the vendor takes): asked again
@@ -9472,8 +9505,9 @@ func (s *Server) forwardTranslated(ctx context.Context, p provider.Provider, to 
 		if !cacheOnly && !wrongEndpoint(res.StatusCode, b) && !s.noChannelElsewhere(p, model, to, res.StatusCode, b) {
 			return res, to, nil
 		}
-		s.markUnfit(p.ID, model, to)
-		s.markAPI(p.ID, to, res.StatusCode, b)
+		if !s.markEndpointRefusal(p, model, to, res, b) {
+			return res, to, nil
+		}
 		next := s.usable(p, model)
 		if len(next) == 0 {
 			return res, to, nil

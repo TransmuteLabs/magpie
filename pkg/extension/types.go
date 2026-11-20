@@ -50,9 +50,18 @@ type ExecuteRequest struct {
 	OperationID string            `json:"operationId,omitempty"`
 	Credentials json.RawMessage   `json:"credentials,omitempty"`
 	Options     json.RawMessage   `json:"options,omitempty"`
+	Caller      *ExecuteCaller    `json:"caller,omitempty"`
 }
 
 type ProviderRequest = ExecuteRequest
+
+const ExecuteCallerAPIMinor = 19
+
+type ExecuteCaller struct {
+	Agent string   `json:"agent"`
+	Name  string   `json:"name"`
+	Via   []string `json:"via,omitempty"`
+}
 
 type ExecuteOptions struct {
 	Method      string          `json:"method"`

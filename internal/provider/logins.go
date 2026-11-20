@@ -75,7 +75,8 @@ type Login struct {
 	// AccessOnly is a ChatGPT account kept access token only
 	// (codex_access_only.go): magpie never renews its sign-in, nor signs
 	// Codex in to it.
-	AccessOnly bool `json:"accessOnly,omitempty"`
+	AccessOnly          bool   `json:"accessOnly,omitempty"`
+	ExtensionGeneration string `json:"extensionGeneration,omitempty"`
 
 	// first is the saved Claude account served in the place of Claude
 	// Code's own while it is signed out (claudeStandIn).

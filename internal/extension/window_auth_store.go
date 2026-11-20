@@ -368,7 +368,7 @@ func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (w
 		var generation uint64
 		if record.Scope.Account != "" {
 			if record.Scope.Account != result.ID || index < 0 || records.Accounts[index].Deleted ||
-				records.Accounts[index].Generation != record.Scope.Generation || record.Scope.Generation == ^uint64(0) {
+				records.Accounts[index].Generation != record.Scope.Generation {
 				return errors.New("window authentication selected account changed")
 			}
 			if refresh := records.Accounts[index].Refresh; refresh != nil && refresh.Scope.Generation == record.Scope.Generation && refresh.State == "dispatched" {
@@ -376,7 +376,14 @@ func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (w
 			}
 			generation = record.Scope.Generation
 		} else if index >= 0 {
-			return errors.New("window authentication cannot replace an existing account")
+			previous := records.Accounts[index]
+			if !previous.Deleted {
+				return errors.New("window authentication cannot replace an existing account")
+			}
+			generation = previous.Generation
+		}
+		if generation == ^uint64(0) {
+			return errors.New("window authentication account generation is exhausted")
 		}
 		account := storeAccount{
 			Account: Account{

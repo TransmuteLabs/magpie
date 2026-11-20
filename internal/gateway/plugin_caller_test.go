@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -15,7 +16,72 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestExtensionProviderCallerThroughRetrieval(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		minor int
+	}{
+		{"negotiated", sdk.ExecuteCallerAPIMinor},
+		{"previous", sdk.ExecuteCallerAPIMinor - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, id := installExtensionMediaFixture(t, func(manifest *sdk.Manifest) {
+				manifest.Contract.Version.Minor = test.minor
+			})
+			previous := usage.PluginAgents
+			usage.PluginAgents = func() []usage.Known {
+				return []usage.Known{{ID: "fixture-agent", Name: "Fixture Agent", UA: []string{"fixture-client"}}}
+			}
+			t.Cleanup(func() { usage.PluginAgents = previous })
+			server := New()
+			t.Cleanup(server.idle.stop)
+			handler := server.Front()
+			for _, sample := range []struct {
+				name, ua string
+				extra    map[string]string
+				want     *sdk.ExecuteCaller
+			}{
+				{"local", "fixture-client/1.0",
+					map[string]string{provider.CallerAgentHeader: "other", provider.CallerNameHeader: "Other", provider.CallerViaHeader: "other"},
+					&sdk.ExecuteCaller{Agent: "fixture-agent", Name: "Fixture Agent"}},
+				{"remote", "magpie/0.1.0",
+					map[string]string{AgentHeader: "fixture-agent", ViaHeader: "笔记本", ViaChainHeader: "笔记本,relay", HopsHeader: "2"},
+					&sdk.ExecuteCaller{Agent: "fixture-agent", Name: "Fixture Agent", Via: []string{"笔记本", "relay"}}},
+				{"unnamed", "", nil, &sdk.ExecuteCaller{Agent: "other", Name: "other"}},
+			} {
+				t.Run(sample.name, func(t *testing.T) {
+					body := `{"model":"` + id + `/fixture-vector","input":"fixture caller label"}`
+					request := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(body))
+					request.RemoteAddr = "127.0.0.1:12345"
+					request.Header.Set("Content-Type", "application/json")
+					request.Header.Set("User-Agent", sample.ua)
+					for name, value := range sample.extra {
+						request.Header.Set(name, value)
+					}
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					var got struct {
+						Caller  *sdk.ExecuteCaller `json:"fixture_caller"`
+						Headers *bool              `json:"fixture_caller_headers"`
+					}
+					if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &got) != nil || got.Headers == nil {
+						t.Fatalf("retrieval worker did not answer the probe: %d %s", response.Code, response.Body)
+					}
+					want := sample.want
+					if test.minor < sdk.ExecuteCallerAPIMinor {
+						want = nil
+					}
+					if *got.Headers || !reflect.DeepEqual(got.Caller, want) {
+						t.Errorf("SDK caller = %+v, want %+v, HTTP caller headers = %v", got.Caller, want, *got.Headers)
+					}
+				})
+			}
+		})
+	}
+}
 
 // A plugin is told the agent its request came from (@febsincos on X): its
 // fetch by magpie's x-magpie-caller-* headers, its chat.headers hook as

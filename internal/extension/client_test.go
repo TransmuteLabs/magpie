@@ -123,6 +123,9 @@ func helperModule() sdk.Module {
 			if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
 				return nil, err
 			}
+			if request.Model == "report-caller" {
+				return map[string]any{"outcome": "completed", "params": call.Params}, nil
+			}
 			if request.Model == "crash" {
 				os.Exit(23)
 			}

@@ -31,6 +31,7 @@ const capabilities = {
   "outbound-executor": ["provider.execute"],
   "agent-wiring": ["agent.plan"],
   "account-auth": ["auth.start", "auth.finish", "auth.refresh", "auth.logout"],
+  "provider-signin": [],
   "model-discovery": ["provider.models"],
   "usage-reporter": ["provider.usage"],
   "operation-control": ["operation.status", "operation.cancel"],
@@ -53,7 +54,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 18 }),
+  version: Object.freeze({ major: 1, minor: 19 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 

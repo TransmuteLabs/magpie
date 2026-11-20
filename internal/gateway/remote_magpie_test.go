@@ -25,7 +25,7 @@ import (
 func TestRemoteMagpieNativeAPI(t *testing.T) {
 	var mu sync.Mutex
 	var vendor, hops []string // paths the vendor, and the remote magpie, were asked on
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		vendor = append(vendor, r.URL.Path+" "+gjsonModel(b))
@@ -43,8 +43,9 @@ func TestRemoteMagpieNativeAPI(t *testing.T) {
 			`data: {"type":"content_block_stop","index":0}`,
 			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
 			`data: {"type":"message_stop"}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Anthropic: up.URL}); err != nil {

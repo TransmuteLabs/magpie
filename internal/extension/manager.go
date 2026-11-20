@@ -845,13 +845,14 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	defer finishStorage()
 	if method == sdk.MethodProviderExecute {
-		raw, err := json.Marshal(params)
+		raw, err := providerExecutionParams(ctx, manifest.Contract.Version.Minor, params)
 		if err != nil {
 			return nil, err
 		}
 		if err := sdk.ValidateExecuteOperation(manifest, scope, raw); err != nil {
 			return nil, err
 		}
+		params = raw
 	}
 	taskCompleted := false
 	if method == sdk.MethodProviderExecute {
@@ -1051,6 +1052,14 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			return consume(event)
 		}
 		return nil
+	}
+	if method == sdk.MethodProviderExecute {
+		if record, ok := ctx.Value(providerExecutionBindingKey{}).(func(ProviderExecutionBinding)); ok && record != nil {
+			record(ProviderExecutionBinding{
+				Namespace: l.Namespace(), PackageRevision: l.Revision(), ConfigVersion: l.ConfigVersion(),
+				EnableGeneration: l.worker.entry.EnableGeneration, Scope: scope,
+			})
+		}
 	}
 	result, err := client.call(ctx, method, scope, auth, params, onEvent)
 	if err == nil {

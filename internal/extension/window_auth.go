@@ -52,16 +52,16 @@ func windowAuthIdentity(ctx context.Context, intent bool) (string, string, error
 	return parent, request, nil
 }
 
-func (m *Manager) windowAuthGrant(ctx context.Context, id, revision, part, binding string) (Installed, sdk.WindowAuthBindingDescriptor, error) {
-	entry, _, err := m.windowEntry(ctx, id, revision)
+func (m *Manager) windowAuthGrant(ctx context.Context, id, revision, part, binding string) (Installed, sdk.ConfigSnapshot, sdk.WindowAuthBindingDescriptor, error) {
+	entry, config, err := m.authEntry(ctx, id, revision, part)
 	if err != nil {
-		return entry, sdk.WindowAuthBindingDescriptor{}, errors.New("window authentication view changed or is unavailable")
+		return entry, config, sdk.WindowAuthBindingDescriptor{}, errors.New("authentication view changed or is unavailable")
 	}
 	grant, found := entry.Manifest.ResolveAuthBinding(binding)
 	if !found || grant.From != part {
-		return entry, grant, errors.New("window authentication binding is not granted")
+		return entry, config, grant, errors.New("authentication binding is not granted")
 	}
-	return entry, grant, nil
+	return entry, config, grant, nil
 }
 
 func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding string, options sdk.WindowAuthStartOptions) (sdk.WindowAuthFlowView, error) {
@@ -69,14 +69,18 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
 	}
-	entry, grant, err := m.windowAuthGrant(ctx, id, revision, part, binding)
+	entry, config, grant, err := m.windowAuthGrant(ctx, id, revision, part, binding)
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
 	}
-	if options.Validate() != nil || !slices.ContainsFunc(grant.Methods, func(method sdk.WindowAuthMethod) bool {
+	method := slices.IndexFunc(grant.Methods, func(method sdk.WindowAuthMethod) bool {
 		return method.ID == options.Method && method.Mode == "poll"
-	}) {
+	})
+	if options.Validate() != nil || method < 0 {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication method is not granted")
+	}
+	if part == sdk.ProviderSignInPart && !providerSignInInput(grant.Methods[method], options.Input) {
+		return sdk.WindowAuthFlowView{}, errors.New("provider sign-in input does not match its declared fields")
 	}
 	scope := sdk.Scope{Plugin: id, Provider: grant.Provider}
 	if options.Account != nil {
@@ -102,7 +106,9 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	expires := time.Now().Add(10 * time.Minute)
 	owned, cancel := context.WithDeadline(context.WithoutCancel(ctx), expires)
 	stopCaller := context.AfterFunc(ctx, cancel)
-	lease, _, err := m.windowLease(owned, id, revision)
+	lease, err := m.acquireLease(owned, id, &expectedGeneration{
+		packageRevision: entry.Revision, configVersion: config.Version, enableGeneration: &entry.EnableGeneration,
+	})
 	stopCaller()
 	if err != nil {
 		cancel()
@@ -130,11 +136,12 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication identity is unavailable")
 	}
+	journalPart, journalRevision := windowAuthJournalSelection(entry, config.Version, part)
 	record := windowAuthRecord{
 		Flow: storeHash(nonce), Intent: storeHash(id, revision, part, parent, request),
 		Fingerprint: storeHash(binding, options.Method, string(selected), compact.String()),
-		Parent:      parent, Revision: entry.Revision, Config: lease.ConfigVersion(),
-		Part: part, Binding: binding, Method: options.Method, Scope: scope,
+		Parent:      parent, Revision: journalRevision, Config: config.Version,
+		Part: journalPart, Binding: binding, Method: options.Method, Scope: scope,
 		Phase: "reserved", Created: expires.Add(-10 * time.Minute).UnixMilli(), Expires: expires.UnixMilli(),
 	}
 	options.Input = input
@@ -183,7 +190,7 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 	if err != nil {
 		return windowAuthRecord{}, nil, err
 	}
-	entry, grant, err := m.windowAuthGrant(ctx, id, revision, part, binding)
+	entry, config, grant, err := m.windowAuthGrant(ctx, id, revision, part, binding)
 	if err != nil {
 		return windowAuthRecord{}, nil, err
 	}
@@ -195,8 +202,9 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 		return windowAuthRecord{}, nil, errors.New("window authentication policy refuses this operation")
 	}
 	record, err := m.store.windowAuthRecord(id, flow)
-	if err != nil || record.Parent != parent || record.Part != part || record.Binding != binding ||
-		record.Revision != entry.Revision || windowRevision(record.Revision, record.Config) != revision {
+	journalPart, journalRevision := windowAuthJournalSelection(entry, config.Version, part)
+	if err != nil || record.Parent != parent || record.Part != journalPart || record.Binding != binding ||
+		record.Revision != journalRevision || record.Config != config.Version || record.Scope.Provider != grant.Provider {
 		return windowAuthRecord{}, nil, errors.New("window authentication flow does not belong to this view")
 	}
 	if _, err := policy(ctx, record.Scope); err != nil {
@@ -459,8 +467,14 @@ func (m *Manager) revokeWindowAuthOwners(current map[string]Installed, configs m
 	m.mu.Unlock()
 	for _, owner := range owners {
 		entry, found := current[owner.record.Scope.Plugin]
-		if found && entry.Revision == owner.record.Revision && configs[entry.Manifest.ID] == owner.record.Config {
-			continue
+		config := configs[entry.Manifest.ID]
+		if found && config == owner.record.Config {
+			if grant, ok := entry.Manifest.ResolveAuthBinding(owner.record.Binding); ok && grant.Provider == owner.record.Scope.Provider {
+				part, revision := windowAuthJournalSelection(entry, config, grant.From)
+				if part == owner.record.Part && revision == owner.record.Revision {
+					continue
+				}
+			}
 		}
 		record, err := m.store.updateWindowAuth(owner.record.Scope.Plugin, owner.record.Flow, func(record *windowAuthRecord, _ *storeAccounts) error {
 			if record.Phase == "complete" || record.Phase == "uncertain" {
@@ -502,15 +516,26 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Manifest.ID != record.Scope.Plugin || entry.Disabled || entry.Revision != record.Revision {
+		if entry.Manifest.ID != record.Scope.Plugin || entry.Disabled {
 			continue
+		}
+		grant, found := entry.Manifest.ResolveAuthBinding(record.Binding)
+		if !found || grant.Provider != record.Scope.Provider {
+			return errors.New("authentication grant changed")
+		}
+		if grant.From == sdk.ProviderSignInPart {
+			entry.EnableGeneration, err = readObserverEnablement(root, record.Scope.Plugin)
+			if err != nil {
+				return errors.New("authentication enablement changed")
+			}
 		}
 		config, err := m.readModuleConfigContext(ctx, record.Scope.Plugin)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err != nil || config.Version != record.Config {
-			return errors.New("window authentication configuration changed")
+		part, revision := windowAuthJournalSelection(entry, config.Version, grant.From)
+		if err != nil || part != record.Part || revision != record.Revision || config.Version != record.Config {
+			return errors.New("window authentication selection changed")
 		}
 		return action()
 	}

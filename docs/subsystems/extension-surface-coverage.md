@@ -2,7 +2,7 @@
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. This census maps those surfaces to the current API 1.18 SDK and the
+modules. This census maps those surfaces to the current API 1.19 SDK and the
 ordinary host owners. It distinguishes three layers:
 
 - **Contract:** public descriptors, DTOs, method negotiation and validation.
@@ -23,7 +23,7 @@ and transport matrix extends that inventory.
 
 ## Owner navigation and compatibility
 
-The advertised API 1.18 ceiling does not change a module's negotiated minimum
+The advertised API 1.19 ceiling does not change a module's negotiated minimum
 or activate undeclared capabilities. Explicit API1.0 single-primary modules
 remain supported; components require API1.1, private-tool exposure API1.2 and
 later adapters retain the floors shown in their owning contracts.
@@ -104,7 +104,7 @@ an optional SDK ownership binding is not a missing extension runtime.
 | --- | --- | --- | --- |
 | Native / exec / Bun installation and distribution | [`native.Register`](../../pkg/extension/native/native.go), [`release.go`](../../internal/extension/release.go), [`release_auth.go`](../../internal/extension/release_auth.go), [explicit SDK1.0 native manifest](../../examples/extensions/echo-native/magpie-plugin.json) | Real native C ABI without author C glue; executable/Bun options; full-package hashes, private developer auth, pins/updates | **Implemented:** explicit API1.0 single-primary packages remain supported; composition requires API1.1. Runtime conformance does not imply vendor migration or identical platform proof. |
 | Composite components, readiness, config and disposal | [`composite.go`](../../pkg/extension/composite.go), [`components.go`](../../internal/extension/components.go) | Primary + private exec/Bun services, DAG, readiness, root CAS snapshot, opaque local State, same-generation leases | **Implemented 1.1.** Services are private components, not cross-module pluginrt services. |
-| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary owners use declared capabilities; API 1.3 supplies finite operations/models/refresh; API 1.4 adds quota model filters, durable usage invalidation/read barriers and separate cancellation intents | **Implemented through 1.4** for the declared registry; scoped records are separate from combined acceptance. Arbitrary operations and full legacy-provider metadata parity remain outside it. |
+| Provider execution, models, account auth, quota/usage, operations | [`extension_provider.go`](../../internal/provider/extension_provider.go), [`extension_auth.go`](../../internal/provider/extension_auth.go), [`extension_transport.go`](../../internal/provider/extension_transport.go) | Ordinary owners use declared capabilities for execution, model discovery, refresh, usage and cancellation. API 1.19 adds the gateway's caller label and Remote Magpie hops. | **Implemented for declared operations.** The executing lease supplies caller metadata and scope. Arbitrary operations and full legacy-provider metadata parity remain outside it. |
 | Legacy provider extras | [`Provider`](../../internal/plugin/providers.go), [`extension_calls.go`](../../internal/usage/extension_calls.go), [SDK provider adapters](extension-providers.md) | API 1.8 supplies check-in, idle auth renewal and distinct own-call/outside-history readers; API 1.9 adds declared provider switches and paid selected-account tasks with ordinary policy/accounting owners | **Implemented finite adapters through 1.9.** Auth renewal and paid cache work have separate declarations and accounting. Outside calls do not enter `Append` or notify live observers a second time. |
 | Incoming protocols and response codecs | [`protocol_extensions.go`](../../internal/gateway/protocol_extensions.go), [`inbound.go`](../../pkg/extension/inbound.go) | Installed codecs enter ordinary guards/canonical dispatch and retain the primary lease; API 1.4 can require that exact lease's module for native-only execution | **Implemented through 1.4** for negotiated canonical operations; not arbitrary gateway route registration or vendor receipt validation. |
 | Plugin tools / MCP tools | [`extension_tools.go`](../../internal/plugin/extension_tools.go), [`extension_tools.go`](../../internal/gateway/extension_tools.go) | `tool-provider` enters ordinary plugin-tools MCP/hub; API 1.2 adds shared/local-owner exposure | **Implemented through 1.2.** Discovery and actual leased invocation enforce local-owner authority, including after package replacement. |

@@ -42,9 +42,32 @@ type extensionResponseBody struct {
 	mu               sync.Mutex
 	usage            *sdk.Usage
 	sentModel        string
+	bindingIdentity  string
 }
 
 const extensionReceiptGrace = 2 * time.Second
+
+func (p Provider) ExtensionBindingIdentity() string {
+	if p.IsExtension() {
+		binding := p.Account.extension
+		return extensionBindingIdentity(binding.host.Namespace(), binding.currentScope(), binding.modelKey, binding.enableGeneration)
+	}
+	return ""
+}
+
+func extensionBindingIdentity(namespace string, scope sdk.Scope, revision, enableGeneration string) string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", namespace, scope.Plugin, scope.Provider,
+		scope.Account, scope.Generation, revision, enableGeneration)
+}
+
+func ExtensionResponseBindingIdentity(response *http.Response) string {
+	if response.Request != nil {
+		if body, ok := response.Request.Context().Value(extensionResponseKey{}).(*extensionResponseBody); ok {
+			return body.bindingIdentity
+		}
+	}
+	return ""
+}
 
 func ExtensionSentModel(response *http.Response) string {
 	if response.Request != nil {
@@ -173,7 +196,8 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	headers := request.Header.Clone()
 	for name := range headers {
 		switch strings.ToLower(name) {
-		case "authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "cookie2":
+		case "authorization", "x-api-key", "x-goog-api-key", "proxy-authorization", "cookie", "cookie2",
+			"x-magpie-caller-agent", "x-magpie-caller-name", "x-magpie-caller-via":
 			delete(headers, name)
 		}
 	}
@@ -211,11 +235,12 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			scope.Operation = "request-" + hex.EncodeToString(digest[:])
 		}
 	}
-	if refusal, blocked := extensionAvailability.Blocked(binding.cacheKey(), model, time.Now()); blocked {
+	bindingIdentity := binding.cacheKey()
+	if refusal, blocked := extensionAvailability.Blocked(bindingIdentity, model, time.Now()); blocked {
 		return cachedRefusalResponse(ctx, request, scope, refusal), nil
 	}
 	if !requestpolicy.HasSelection(ctx) {
-		ctx = requestpolicy.WithSelection(ctx, binding.cacheKey()+"\x00"+model, model)
+		ctx = requestpolicy.WithSelection(ctx, bindingIdentity+"\x00"+model, model)
 	}
 	selectedPolicy, policyErr := requestpolicy.FromContext(ctx).PolicyFor(ExtensionProviderID(scope.Plugin, scope.Provider), model, "", requestpolicy.Defaults())
 	if policyErr != nil {
@@ -235,7 +260,9 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		OperationID: scope.Operation, Options: options}
 	ctx, cancel := context.WithCancel(ctx)
 	reader, writer := io.Pipe()
-	responseBody := &extensionResponseBody{PipeReader: reader, cancel: cancel, ctx: ctx, done: make(chan struct{})}
+	responseBody := &extensionResponseBody{
+		PipeReader: reader, cancel: cancel, ctx: ctx, done: make(chan struct{}),
+	}
 	head := make(chan extensionResponseHead, 1)
 	go func() {
 		defer close(responseBody.done)
@@ -250,7 +277,13 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			}
 			_ = writer.CloseWithError(err)
 		}
-		raw, err := binding.host.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope, params, func(event extensionhost.Event) error {
+		callCtx := extensionhost.WithProviderExecutionBinding(ctx, func(actual extensionhost.ProviderExecutionBinding) {
+			if actual.Scope == scope && actual.Namespace == binding.host.Namespace() && actual.PackageRevision != "" && actual.ConfigVersion != "" {
+				responseBody.bindingIdentity = extensionBindingIdentity(actual.Namespace, actual.Scope,
+					actual.PackageRevision+"\x00"+actual.ConfigVersion, actual.EnableGeneration)
+			}
+		})
+		raw, err := binding.host.Call(callCtx, scope.Plugin, sdk.MethodProviderExecute, scope, params, func(event extensionhost.Event) error {
 			published = true
 			switch event.Name {
 			case "headers":

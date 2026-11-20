@@ -862,7 +862,8 @@ type providersJSON struct {
 	// Codex's accounts have, after a switch (provider.CodexAppProjectsShort)
 	CodexProjects bool `json:"codexProjects,omitempty"`
 	// Plugins are the providers the plugins sign in to, for the add sheet
-	Plugins []pluginSubJSON `json:"plugins"`
+	Plugins          []pluginSubJSON             `json:"plugins"`
+	SDKSubscriptions []extensionSubscriptionJSON `json:"sdkSubscriptions,omitempty"`
 	// OnPlugins are the built-in subscriptions moved onto their plugins,
 	// which the add sheet offers as the plugin's alone
 	OnPlugins []string `json:"onPlugins,omitempty"`
@@ -1711,6 +1712,7 @@ func providersState() providersJSON {
 	s.CodexApp = provider.CodexAppStale()
 	s.CodexProjects = provider.CodexAppProjectsShort()
 	s.Plugins = pluginSubs()
+	s.SDKSubscriptions = extensionSubscriptions()
 	s.Fetching = provider.FetchingNew()
 	return s
 }
@@ -1753,6 +1755,7 @@ var appLink = agent.OpenAppLink
 
 func providerRoutes(mux *http.ServeMux, w Windows) {
 	extensionProviderOptionRoutes(mux)
+	extensionProviderSignInRoute(mux)
 	importAppsRoutes(mux)
 	pluginRoutes(mux, w)
 	traceRoutes(mux)

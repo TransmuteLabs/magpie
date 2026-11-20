@@ -51,8 +51,9 @@ func refusalGroup(t *testing.T, members ...string) {
 
 func responsesOn(t *testing.T, id string, s *scripted) {
 	t.Helper()
-	up := httptest.NewServer(s)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(s))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	if err := provider.Save(provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "k", Models: []string{"m"}, Responses: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}

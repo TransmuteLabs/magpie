@@ -322,6 +322,19 @@ observers.
 
 ## Constraints and failure behavior
 
+When an upstream says its key's group cannot dispatch Messages, the gateway
+uses another available API for a retryable request. It remembers the refusal
+for that upstream key or account at its Messages endpoint across models. The
+SDK host supplies the account generation, package revision, configuration and
+enablement of the worker lease that executed the request. A sibling account
+or updated binding can still use Messages. Learning requires a verified
+execution identity. A refusal from a different lease generation is recorded
+for that generation, and the current request ends with the refusal.
+Completed, accepted or uncertain SDK executions end the current request
+without recording an API refusal.
+If no usable API remains, the existing explicit model API or the provider's
+first configured API remains eligible on the next request.
+
 - A fallback happens only while none of the reply has been sent. An agent never gets half a reply from one upstream and the rest from another.
 - Empty-reply fallback requires an explicitly empty reply. A Responses completion can carry its answer only in its terminal `output`; an absent `output` remains unknown. Chat legacy `function_call` is content, as `tool_calls` is. Chat and Gemini chunks are checked for content across all choices before any finish marker is classified. For streamed Chat requests with `n > 1` or Gemini requests with `generationConfig.candidateCount > 1`, one choice finishing empty does not trigger empty-reply fallback while another choice can still answer; a whole reply still checks all choices. A filtered choice does not discard another choice's whole answer. These cases are covered in `nonempty_end_test.go`, with ordinary gateway checks for terminal Responses output, legacy calls and single-event or split multi-answer streams.
 - A refusal that comes as an error (#2400, Jichao). An error whose own `message` is, whole, `The request was rejected because it was considered high risk` is a refusal with no code beside it (`highRiskRefusal` in `policyRefusal`): in an HTTP error body or a stream's error event, never in an answer's text, which may quote it. The vendor that sends it isn't known; it says the request was turned away, so it goes to the next candidate under `RefusalRetries` like any refusal and rests nobody. A refusal error event before any content ends the try at once (`eventRefusalError`, `stop` as for any error), so an upstream that keeps the stream open doesn't hold the next candidate back; a refusal's stop or finish marker is still read to the end for the usage and terminator after it. After content, every write is read for a late refusal (`refusalAfter`), so one whose `event: error` name and data come in separate writes is still noted, and nothing is replayed. `TestHighRisk*`, `TestRefusalErrorDoesNotWaitForEOF` in [`refusal_error_test.go`](../../internal/gateway/refusal_error_test.go).

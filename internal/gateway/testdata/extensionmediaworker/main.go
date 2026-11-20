@@ -80,6 +80,20 @@ func execute(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 		body = []byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg=="}}]}}]}`)
 	case sdk.OperationEmbeddings:
 		body = []byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.25,0.5]}],"usage":{"prompt_tokens":2}}`)
+		if strings.Contains(string(request.Body), "fixture caller label") {
+			var result map[string]any
+			if err := json.Unmarshal(body, &result); err != nil {
+				return nil, err
+			}
+			result["fixture_caller"] = request.Caller
+			result["fixture_caller_headers"] = request.Headers.Get("X-Magpie-Caller-Agent") != "" ||
+				request.Headers.Get("X-Magpie-Caller-Name") != "" || request.Headers.Get("X-Magpie-Caller-Via") != ""
+			var err error
+			body, err = json.Marshal(result)
+			if err != nil {
+				return nil, err
+			}
+		}
 	case sdk.OperationRerank:
 		body = []byte(`{"results":[{"index":0,"relevance_score":0.9}]}`)
 	case sdk.OperationAudioSpeech:

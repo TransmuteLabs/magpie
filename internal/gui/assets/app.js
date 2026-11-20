@@ -7421,7 +7421,7 @@ function renderAdd() {
     // a deprecated one whose plugin is installed is that plugin's row alone
     // (ARNO on Discord: Qoder CN twice), and one with no account isn't
     const named = (x) => !f || x.name.toLowerCase().includes(f) || x.agent.includes(f) || "subscription".includes(f);
-    const subs = SUBS.filter((x) => !(replacedSub(x.agent) || unusedSub(x.agent)) || signing?.agent === x.agent).map((x) => subOf(x.agent)).filter(named);
+    const subs = SUBS.filter((x) => !(replacedSub(x.agent) || unusedSub(x.agent)) || signing?.agent === x.agent).map((x) => subOf(x.agent)).concat(sdkSubs()).filter(named);
     const inPlugins = f && SUBS.some((x) => unusedSub(x.agent) && signing?.agent !== x.agent && named(subOf(x.agent)));
     // partners pay to be listed first, under a heading that says so; who
     // they are comes from usemagpie.ai (internal/provider/partners.go), and
@@ -7581,6 +7581,7 @@ async function openProvider(id) {
   if (view === "providers" && !await leaveDraft()) return;
   if (!await show("providers")) return;
   closeModal();
+  dropSDKSignIn();
   adding = false; editing = id; draft = null; presetQuery = "";
   // the list not in yet (the tab not opened before), show's load draws it
   // with this one open
@@ -7635,7 +7636,7 @@ function subTile(x) {
   const have = providers.providers.find((p) => p.account?.agent === x.agent);
   const n = have ? (have.account.logins?.length || 1) : 0;
   const b = pickRow(x.icon, shortName(x.name), signing?.agent === x.agent ? " on" : "");
-  b.title = t("{name} subscription", { name: x.name }) + " · " + x.plans;
+  b.title = t("{name} subscription", { name: x.name }) + (x.plans ? " · " + x.plans : "");
   if (x.hint) b.title += "\n" + t(x.hint);
   // deprecated: badged (one with no account isn't offered here)
   if (!x.plugin && deprecatedSub(x.agent) && n) {
@@ -7897,7 +7898,7 @@ function confirmDiscard() {
   return confirmAction(t("Discard"), t("Discard unsaved changes? Your changes will be lost."), t("Discard"));
 }
 // opens x's editor (a provider id, { preset } or { custom }) with a new draft
-function reEdit(x) { editing = x; draft = null; renderProviders(); }
+function reEdit(x) { dropSDKSignIn(); editing = x; draft = null; renderProviders(); }
 // true when the open provider draft has nothing to lose, or the reader lets it go
 const leaveDraft = async () => !providerDirty() || await confirmDiscard();
 async function cancelEdit(keep) {
@@ -12863,8 +12864,9 @@ const subOf = (agent) => {
     // a moved Factory's imported API keys go to its plugin (factory_key.go)
     return { ...pl, name, icon, plans, risk, riskNote, hint, sites, importable: importable || pl.importable, moved: true };
   }
-  return own || pl;
+  return own || pl || sdkSubs().find((x) => x.agent === agent);
 };
+const sdkSubs = () => ((providers || panelAccts)?.sdkSubscriptions || []).map((x) => ({ ...x, agent: x.id, own: true }));
 // subNames: subscriptions by id, as the Add sheet names them; the Settings
 // page can be open before the providers are read (providers is null then)
 const subNames = (ids) => ids.map((id) => SUBS.find((x) => x.agent === id)?.name
@@ -12936,7 +12938,11 @@ function importSay(agent) {
 // the sign-in under way: { id, agent, url, state, installing, error }
 let signing = null;
 // stopSignIn tells the server the sign-in under way is given up
-const stopSignIn = () => { if (signing?.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {}); };
+const stopSignIn = () => {
+  signing?.cancel?.();
+  if (signing?.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+};
+const dropSDKSignIn = () => { if (signing?.sdk) { stopSignIn(); signing = null; } };
 const signingOpen = () => signing?.state === "waiting" || signing?.state === "installing";
 let justAdded = ""; // the account that just came in, to greet it
 const accountToolsOpen = new Set(); // rows whose ⋯ is open
@@ -12945,7 +12951,7 @@ const accountToolsOpen = new Set(); // rows whose ⋯ is open
 const hasLogins = (agent) => (providers?.providers || []).some((p) => p.account?.agent === agent && p.account.logins?.length);
 
 async function startSignIn(agent, risky, site, o = {}) {
-  if (signingOpen()) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+  if (signingOpen() || signing?.sdk) stopSignIn();
   if (signing?.behind) api("signin/" + signing.behind + "/cancel", {}).catch(() => {});
   if (subOf(agent)?.risk && !risky && !o.user && !hasLogins(agent)) {
     signing = { agent, state: "risk", forUser: o.user, picked: o.proxy };
@@ -12959,24 +12965,11 @@ async function startSignIn(agent, risky, site, o = {}) {
     renderProviders();
     return;
   }
-  if (subOf(agent)?.plugin) return startPluginSignIn(subOf(agent), pluginMethod(subOf(agent), site), {}, o);
-  const keep = { site, forUser: o.user, picked: o.proxy };
-  signing = { agent, ...keep, proxy: o.proxy ?? signInProxyOf(agent, o.user), state: "starting" };
-  renderProviders();
-  try {
-    const body = { agent };
-    if (site) body.site = site;
-    if (o.user) body.user = o.user;
-    if (o.proxy != null) body.proxy = o.proxy;
-    if (o.linkOnly) body.linkOnly = true;
-    signing = { ...(await api("signin", body)), ...keep };
-    if (web && signing.url && !signing.linkOnly) signInPage(signing.url);
-    renderProviders();
-    followSignIn(signing.id);
-  } catch (e) {
-    signing = { agent, ...keep, proxy: o.proxy ?? signInProxyOf(agent, o.user), state: "failed", error: e.message };
-    renderProviders();
-  }
+  const sub = subOf(agent);
+  if (sub?.plugin) return startPluginSignIn(sub, pluginMethod(sub, site), {}, o);
+  const flow = signing = { agent, state: "starting", sdk: !!(sub?.page || sub?.revision) };
+  return (flow.sdk ? import("./sdk-signin.js").then((m) => signing === flow && m.start(sub, flow, o))
+    : import("./signsheets.js").then((m) => signing === flow && m.startBuiltinSignIn(flow, site, o))).catch(statusErr);
 }
 
 // openSignInPage: in magpie web a new tab the browser may block, then Open
@@ -13048,7 +13041,7 @@ async function signedIn(st) {
   // an account listed already is said to be, not added (#413)
   else if (st.again) status(t("{user} is already listed — its sign-in was renewed", { user: who }), "ok");
   else if (st.token) status(t("{user} added; requests through magpie use it beside your other accounts", { user: who }), "ok");
-  else status(st.using ? t("Signed in as {user}", { user: who }) : t("{user} added — switch to it any time", { user: who }), "ok");
+  else status((st.using ?? p.account.user === st.user) ? t("Signed in as {user}", { user: who }) : t("{user} added — switch to it any time", { user: who }), "ok");
   state = await api("state");
   renderAgents();
   setTimeout(() => { justAdded = ""; }, 2000);
@@ -13057,6 +13050,7 @@ async function signedIn(st) {
 // startPluginSignIn: as OpenCode's `auth login`: way, questions, then the
 // browser (its code pasted back) or a key.
 async function startPluginSignIn(sub, method, inputs = {}, o = {}) {
+  dropSDKSignIn();
   const ms = sub.plugin.methods || [];
   if (!ms.length) {
     signing = { agent: sub.agent, state: "failed", error: t("The plugin has no way to sign in to {name}", { name: sub.name }) };
@@ -13411,7 +13405,7 @@ const startExport = (agent) => signAsk({ agent, state: "export", format: "sub2ap
 function dropSigningIn(id) {
   const p = typeof id === "string" && providers?.providers?.find((x) => x.id === id);
   if (!p?.account || !signing || signing.agent !== p.account.agent || signing.state === "importing") return;
-  if (signing.id) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
+  stopSignIn();
   signing = null;
 }
 
@@ -13426,6 +13420,7 @@ function codexWay(sub, device, o) {
   return b;
 }
 function renderSigning(sub) {
+  if (signing.draw) return signing.draw();
   const box = el("div", "signing" + (signing.state === "failed" ? " failed" : ""));
   const tt = el("span", "tt");
   if (signing.state === "risk") {
@@ -13917,9 +13912,12 @@ function renderAccounts(a, p) {
     } else if (signedOut(l)) {
       row.classList.add("signed-out");
       line.append(el("span", "using", t("Sign-in required")));
-      const again = el("button", "text", t("Sign in again"));
-      again.onclick = () => startSignIn(a.agent, false, againSite(l), { user: l.user });
-      line.append(again, forgetOf(true));
+      if (!l.extensionGeneration || sub?.reauthorize) {
+        const again = el("button", "text", t("Sign in again"));
+        again.onclick = () => startSignIn(a.agent, false, againSite(l), { user: l.user, generation: l.extensionGeneration });
+        line.append(again);
+      }
+      line.append(forgetOf(true));
     } else if (l.active && kept && l.user !== firstUser) {
       // signed in to, kept so, and tried at its place in the order
       const signed = el("span", "using", l.paused ? t("Paused") : t("Signed in"));
@@ -16210,6 +16208,7 @@ new IntersectionObserver(([en]) => {
 function closeAddSheet() {
   const view = $("#view-providers"), sheet = $("#addSheet");
   if (!adding) return;
+  dropSDKSignIn();
   if (held?.v === view) held = null;
   setRoom(view, 0);
   addReturnPick = null;
@@ -23446,6 +23445,7 @@ async function show(v) {
       if (!(await confirmDiscard())) return false;
       magpie.call("library", "discard");
     }
+    if (view === "providers") dropSDKSignIn();
     // the page left lets go of what was only for this visit
     magpie.call(view, "leave");
   }

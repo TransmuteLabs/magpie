@@ -103,9 +103,8 @@ type extensionModelCatalog struct {
 }
 
 func extensionModelRevision(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed) (string, error) {
-	version := ""
-	if entry.Manifest.Contract.Version.Minor >= 9 ||
-		entry.Manifest.Contract.Version.Minor >= 1 && entry.Manifest.Contract.Has(sdk.ModelDiscovery) {
+	version := "0"
+	if entry.Manifest.Contract.Version.Minor >= 1 {
 		config, err := host.ModuleConfig(ctx, entry.Manifest.ID)
 		if err != nil {
 			return "", err

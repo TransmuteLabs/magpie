@@ -75,7 +75,7 @@
   // nothing until it is looked at
   function open(key) {
     const p = pages.get(key);
-    if (!p) return undefined;
+    if (!p || p.gone) return undefined;
     clearTimeout(p.idle);
     if (p.frame?.isConnected) { refreshVisibility(p); return p.ready; }
     const main = $("#view-" + key);
@@ -219,7 +219,7 @@
     document.addEventListener("pointercancel", stop);
   }
 
-  async function load() {
+  async function load(forPage = "") {
     const id = ++loadID;
     const panelReady = loadPanels(id);
     let list;
@@ -290,8 +290,9 @@
       opened = true;
       let want = params.get("view") || "";
       if (!want) { try { want = localStorage.getItem("magpie.lastView") || ""; } catch { /* none kept */ } }
-      if (pages.has(want)) show(want);
+      if (keys.has(want)) show(want);
     }
+    if (forPage) return id === loadID && keys.has(forPage);
     return await panelReady && id === loadID;
   }
   let opened = false;

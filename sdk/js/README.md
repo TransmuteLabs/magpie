@@ -17,7 +17,7 @@ It requires Node 22+ and npm. Untagged Git descriptions such as a bare commit or
 with the application built from the same checkout and version; this target
 does not publish or run as part of ordinary Go builds.
 
-Package release versions are separate from the wire contract revision API 1.18
+Package release versions are separate from the wire contract revision API 1.19
 and native ABI 1. Module manifest contract minima and capability gates keep
 those protocol numbers, irrespective of the package release version.
 Declare the minimum contract and capabilities your module needs. `CONTRACT` describes available
@@ -414,6 +414,17 @@ occurs during metadata/configuration discovery.
 
 `poll` is a transport mode, independent of a vendor method's name. The broker
 owns start/finish timing, selection, continuation and credential publication.
+
+For a core form under **Providers → Add → Subscriptions**, request
+`provider-signin` alongside `account-auth` and declare one `authBindings`
+entry with `from: "provider:signin"` for each offered provider. Set `label`
+on its polling methods and describe inputs with `fields`. A field has `key`,
+`label` and `type` (`text`, `secret` or `select`), with optional `optional`.
+Select fields also declare `choices` entries with `value` and `label`.
+The same auth handlers receive these values through `input`. A separate
+`window:page` binding still serves a page's own UI. The host lists eligible
+grants before an account exists and uses its account store to publish a
+completed sign-in.
 It does not provide a callback receiver. A module can own that receiver in
 its [component lifecycle](#sdk-11-modules-and-components), retaining private
 instance State and releasing resources in its disposer. Polling alone does

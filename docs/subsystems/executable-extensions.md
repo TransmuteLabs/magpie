@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.18. Authors declare the minimum contract
+The available SDK contract is API 1.19. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -584,6 +584,15 @@ actual leased descriptor and author SDK validate an operation before
 authorization/effect dispatch; catalog modalities alone grant no operation.
 Ordinary retrieval/media owners preserve accepted-operation fallback fences
 and video module/provider/account affinity across credential renewal.
+
+API 1.19 `provider.execute` may carry `caller` with the agent ID, display
+name, and optional ordered `via` list for Remote Magpie hops. The gateway
+derives it from the same caller record used by Usage and legacy plugins.
+The lease supplies it for inference and retrieval calls on API 1.19 and
+later. The lease owns this field for typed and raw requests. It uses the
+admitted gateway caller and omits the field for earlier contracts and
+direct SDK calls without gateway caller metadata. Account and replay
+authority still use the selected scope and `ExecuteOptions.callerId`.
 
 API 1.3 models describe kind, input/output modalities, default/maximum context,
 release, temperature, service tiers, subscription rates and reasoning
