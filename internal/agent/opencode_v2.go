@@ -6,6 +6,8 @@ import (
 	"maps"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinopencode "github.com/yetone/magpie/internal/extension/builtin/opencode"
 )
 
 // OpenCode 2 reads OpenCode 1's config and turns it into its own words as
@@ -31,7 +33,7 @@ func openCodeTwo(at place) bool {
 
 // openCodeTitleKey is where OpenCode 2 keeps the model it titles sessions
 // with, which OpenCode 1's small_model became.
-const openCodeTitleKey = "agents.title.model"
+const openCodeTitleKey = builtinopencode.TitleModelKey
 
 // ocFile is an OpenCode config magpie writes its provider into: two when
 // the OpenCode reading it is 2.x, block magpie's provider in OpenCode 1's
@@ -52,13 +54,21 @@ type ocFile struct {
 // magpie's provider without them, and magpie's plugin beside it.
 func (f ocFile) sync(put bool) error {
 	var err error
-	if f.discover {
-		err = f.syncFound(put)
-	} else {
-		err = f.syncListed(put)
-		if unstashPeek(openCodeDiscoverKey(f.path)) != "" {
-			stash(map[string]string{openCodeDiscoverKey(f.path): ""})
+	if f.two {
+		options := builtinopencode.V2ConfigOptions{ConvertProvider: func(raw []byte) (json.Marshaler, bool) {
+			return openCodeFromV1(raw)
+		}}
+		err = extension.ApplyLinkedAgentPlan(options, builtinopencode.PlanV2Config, f.configSnapshot())
+	}
+	if err == nil {
+		if f.discover {
+			err = f.syncFound(put)
+		} else {
+			err = f.syncListed(put)
 		}
+	}
+	if !f.discover && unstashPeek(openCodeDiscoverKey(f.path)) != "" {
+		stash(map[string]string{openCodeDiscoverKey(f.path): ""})
 	}
 	return errors.Join(err, f.pluginSynced())
 }
@@ -77,12 +87,6 @@ func (f ocFile) syncFound(put bool) error {
 			err = f.modelsLeft(openCodeNativeKey, openCodeNativeKept(f.path, f.block)(), openCodeNative(f.block()), moved)
 		}
 	} else {
-		if err := f.moveProvider(); err != nil {
-			return err
-		}
-		if err := f.moveSmall(); err != nil {
-			return err
-		}
 		err = f.modelsLeft(openCodeNativeKey, openCodeNativeKept(f.path, f.outputsKept)(), openCodeNative(f.block()), moved)
 	}
 	if err != nil {
@@ -108,12 +112,6 @@ func (f ocFile) syncListed(put bool) error {
 		// 2 reads instead, there as well (#3883)
 		return errors.Join(err, syncOpenCodeNative(f.path, f.block))
 	}
-	if err := f.moveProvider(); err != nil {
-		return err
-	}
-	if err := f.moveSmall(); err != nil {
-		return err
-	}
 	native := openCodeNativeKept(f.path, f.outputsKept)
 	if _, ok := edit.GetJSON(f.path, openCodeNativeKey); !ok && put {
 		return edit.SetJSON(f.path, edit.KV{Path: openCodeNativeKey, Value: native()})
@@ -133,48 +131,8 @@ func (f ocFile) outputsKept() any {
 	return v
 }
 
-// moveProvider moves magpie's provider under provider to providers, in
-// OpenCode 2's words, as OpenCode 2 itself reads it (openCodeFromV1): what
-// the user added to it goes along. Where providers has magpie's already,
-// OpenCode 2 reads that one whole and not the other (mergeMaps), so the
-// other goes.
-func (f ocFile) moveProvider() error {
-	raw, ok := edit.GetJSONRaw(f.path, "provider."+magpieID)
-	if !ok {
-		return nil
-	}
-	if _, has := edit.GetJSON(f.path, openCodeNativeKey); !has {
-		v, ok := openCodeFromV1([]byte(raw))
-		if !ok {
-			// not a provider OpenCode reads: left as it is
-			return nil
-		}
-		if err := edit.SetJSON(f.path, edit.KV{Path: openCodeNativeKey, Value: v}); err != nil {
-			return err
-		}
-	}
-	if err := edit.DelJSON(f.path, "provider."+magpieID); err != nil {
-		return err
-	}
-	// and a provider left with nothing in it
-	return f.dropEmpty("provider")
-}
-
-// moveSmall moves a small_model of magpie's to agents.title.model, where
-// OpenCode 2 reads it, unless the title agent has a model of its own
-// already, which OpenCode 2 reads instead.
-func (f ocFile) moveSmall() error {
-	sm, ok := edit.GetJSON(f.path, "small_model")
-	if !ok || !usesMagpie(sm) {
-		return nil
-	}
-	if _, has := edit.GetJSON(f.path, openCodeTitleKey); has {
-		return nil
-	}
-	if err := edit.SetJSON(f.path, edit.KV{Path: openCodeTitleKey, Value: sm}); err != nil {
-		return err
-	}
-	return edit.DelJSON(f.path, "small_model")
+func (f ocFile) configSnapshot() extension.LinkedActionFile {
+	return extension.LinkedActionFile{Name: builtinopencode.ConfigFile, Path: f.path}
 }
 
 // small is the file's small model as the OpenCode reading it takes it:
@@ -192,37 +150,8 @@ func (f ocFile) small() string {
 // setSmall sets the file's small model: for OpenCode 2 its title agent's,
 // with a small_model, which it would read only without one, gone.
 func (f ocFile) setSmall(v string) error {
-	if !f.two {
-		if v == "" {
-			return edit.DelJSON(f.path, "small_model")
-		}
-		return edit.SetJSON(f.path, edit.KV{Path: "small_model", Value: v})
-	}
-	if v == "" {
-		if err := edit.DelJSON(f.path, "small_model", openCodeTitleKey); err != nil {
-			return err
-		}
-		return f.dropEmpty("agents.title", "agents")
-	}
-	if err := edit.SetJSON(f.path, edit.KV{Path: openCodeTitleKey, Value: v}); err != nil {
-		return err
-	}
-	return edit.DelJSON(f.path, "small_model")
-}
-
-// dropEmpty takes out each of keys, in order, that is an empty object.
-func (f ocFile) dropEmpty(keys ...string) error {
-	for _, k := range keys {
-		if raw, ok := edit.GetJSONRaw(f.path, k); ok {
-			var m map[string]json.RawMessage
-			if json.Unmarshal([]byte(raw), &m) == nil && m != nil && len(m) == 0 {
-				if err := edit.DelJSON(f.path, k); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
+	options := builtinopencode.SmallModelOptions{Two: f.two, Model: v}
+	return extension.ApplyLinkedAgentPlan(options, builtinopencode.PlanSmallModel, f.configSnapshot())
 }
 
 // openCodeSelection is a model as OpenCode 2 has one, raw: "provider/model"
