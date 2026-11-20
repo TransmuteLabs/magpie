@@ -193,11 +193,13 @@ type running struct {
 
 // Runtime applies the plugins that are on and keeps what each registered.
 type Runtime struct {
-	mu       sync.Mutex
-	plugins  map[string]*running
-	order    []string // applied order, for disposing in reverse
-	services map[string]any
-	composed []Composed
+	mu          sync.Mutex
+	plugins     map[string]*running
+	order       []string // applied order, for disposing in reverse
+	services    map[string]any
+	composed    []Composed
+	preset      string
+	filePresent bool
 }
 
 // New is a runtime of the registered plugins, none applied yet.

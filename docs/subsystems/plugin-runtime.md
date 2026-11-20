@@ -559,7 +559,9 @@ remembering its layer (`Source`):
    `InUse` error counts as in use.
 
 `Composed.Chosen` is plugins.yml's say before step 4. `magpie plugin dump`
-(`--json`) prints the composed list with each plugin's state and why.
+(`--json`) prints the composed list, preset and each plugin's state and why
+from one applied snapshot. `magpie plugin builtin list` uses the same
+activation state, including pending dependencies and failed activation.
 When an ID is repeated in `plugins.yml`, the last row supplies the user's
 settings for that plugin. Switches and settings edits update that same row.
 
@@ -578,6 +580,8 @@ settings for that plugin. Switches and settings edits update that same row.
   reconciles. The window's `/api/state`, `/api/plugins/builtin` and boot.js
   get the reconciled settings and status together through `RefreshState`
   (`builtinsState`), so a change made by the CLI shows on the next read.
+  The installed SDK list also reads enablement from its current catalog
+  entry when projecting cached release-check results.
 - **Switch**: `Set(id, on)` (`POST /api/plugins/builtin`, `magpie plugin
   builtin on|off <id>`) writes the user's row; `SetPreset` the preset
   (`magpie plugin preset essentials|all`). Off is refused while the plugin

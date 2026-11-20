@@ -110,11 +110,19 @@ func cachedSDKPluginCheck(host *extension.Manager, entry extension.Installed) (p
 	sdkPluginChecks.Lock()
 	defer sdkPluginChecks.Unlock()
 	saved, ok := sdkPluginChecks.byID[entry.Manifest.ID]
-	return saved.check, ok && sdkPluginChecks.root == host.Namespace() && matchesSDKPluginCheck(saved, entry)
+	if !ok || sdkPluginChecks.root != host.Namespace() {
+		return plugin.VersionCheck{}, false
+	}
+	return saved.checkFor(entry)
 }
 
-func matchesSDKPluginCheck(saved sdkPluginCheck, entry extension.Installed) bool {
-	return entry.Source != nil && saved.revision == entry.Revision && saved.source == *entry.Source
+func (saved sdkPluginCheck) checkFor(entry extension.Installed) (plugin.VersionCheck, bool) {
+	if entry.Source == nil || saved.revision != entry.Revision || saved.source != *entry.Source {
+		return plugin.VersionCheck{}, false
+	}
+	check := saved.check
+	check.Off = entry.Disabled
+	return check, true
 }
 
 func checkSDKPlugins(ctx context.Context) ([]plugin.VersionCheck, error) {
@@ -132,7 +140,7 @@ func checkSDKPlugins(ctx context.Context) ([]plugin.VersionCheck, error) {
 			for index := range queue {
 				entry := entries[index]
 				id := entry.Manifest.ID
-				check := plugin.VersionCheck{Spec: "sdk:" + id, Package: id, Version: entry.Manifest.Version, Status: "current", Off: entry.Disabled}
+				check := plugin.VersionCheck{Spec: "sdk:" + id, Package: id, Version: entry.Manifest.Version, Status: "current"}
 				latest, err := host.CheckUpdate(ctx, entry)
 				if err != nil {
 					check.Status, check.Error = "unknown", err.Error()
@@ -158,9 +166,8 @@ func checkSDKPlugins(ctx context.Context) ([]plugin.VersionCheck, error) {
 	}
 	checks = checks[:0]
 	for _, entry := range current {
-		if saved, found := byID[entry.Manifest.ID]; found && matchesSDKPluginCheck(saved, entry) {
-			saved.check.Off = entry.Disabled
-			checks = append(checks, saved.check)
+		if check, valid := byID[entry.Manifest.ID].checkFor(entry); valid {
+			checks = append(checks, check)
 		}
 	}
 	sdkPluginChecks.Lock()
@@ -178,7 +185,7 @@ func pendingPluginUpdates() plugin.Updates {
 		return updates
 	}
 	for _, entry := range entries {
-		if check, ok := cachedSDKPluginCheck(host, entry); !entry.Disabled && ok && check.Status == "update" {
+		if check, ok := cachedSDKPluginCheck(host, entry); ok && !check.Off && check.Status == "update" {
 			updates.Waiting = append(updates.Waiting, plugin.Waiting{
 				Spec: check.Spec, Package: check.Package, Version: check.Version, Latest: check.Latest,
 			})

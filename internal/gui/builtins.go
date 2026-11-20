@@ -64,13 +64,13 @@ type builtinJSON struct {
 // builtinsState composes plugins.yml again, brings the runtime to it, and
 // says every built-in plugin, in their order.
 func builtinsState() []builtinJSON {
-	cs, statuses, err := pluginrt.RefreshState()
+	snapshot, err := pluginrt.RefreshState()
 	byID := map[string]pluginrt.Composed{}
-	for _, c := range cs {
+	for _, c := range snapshot.Configuration {
 		byID[c.ID] = c
 	}
 	st := map[string]pluginrt.Status{}
-	for _, s := range statuses {
+	for _, s := range snapshot.Statuses {
 		st[s.ID] = s
 	}
 	out := []builtinJSON{}
