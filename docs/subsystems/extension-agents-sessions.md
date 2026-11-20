@@ -353,7 +353,9 @@ publication. The plan preserves a configured provider API and user agent
 header and can read a legacy `models.json` when creating the YAML catalog.
 Catalog refresh and removal use the same checked publication.
 Pi and its forks use a linked settings plan to publish the selected default
-model and its `enabledModels` entry in one write. Reset checks both
+model and its `enabledModels` entry. A pick that writes `providers.magpie`
+also checks and publishes its catalog in this plan. The first accepted
+pick retains the plan's starting settings for Disconnect. Reset checks both
 `settings.json` and `models.json` before clearing the default, the explicit
 Magpie scope entries and Magpie's provider. Concurrent edits to either
 file survive a rejected or rolled-back reset. The thinking-level picker

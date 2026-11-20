@@ -7,6 +7,34 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+type CatalogSelection struct {
+	Model   string
+	Refresh func(current string) any
+}
+
+func PlanCatalogSelection(options CatalogSelection, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+	if options.Model == "" || options.Refresh == nil || len(settings.Files) != 2 ||
+		settings.Files[0].Path != SettingsFile || settings.Files[1].Path != CatalogFile {
+		return sdk.AgentPlan{}, errors.New("Pi catalog selection requires a model, settings and catalog")
+	}
+	model, err := PlanModel(options.Model, sdk.ActionSettings{Files: settings.Files[:1]})
+	if err != nil {
+		return sdk.AgentPlan{}, err
+	}
+	const key = "providers.magpie"
+	file := settings.Files[1]
+	current := parseSettings(file.Body).Get(key)
+	value := options.Refresh(current.Raw)
+	var plan sdk.AgentPlan
+	if !edit.SameJSON(current.Raw, value) {
+		if err := patch(&plan, file, []edit.KV{{Path: key, Value: value}}, nil); err != nil {
+			return sdk.AgentPlan{}, err
+		}
+	}
+	plan.Files = append(plan.Files, model.Files...)
+	return plan, nil
+}
+
 func PlanCatalogPick(build func(current string) (any, error), settings sdk.ActionSettings) (sdk.AgentPlan, error) {
 	var plan sdk.AgentPlan
 	if len(settings.Files) != 1 || settings.Files[0].Path != CatalogFile {

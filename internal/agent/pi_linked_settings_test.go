@@ -31,6 +31,46 @@ func TestPiLinkedModelPickKeepsConcurrentScopeEdit(t *testing.T) {
 	}
 }
 
+func TestPiMagpiePickRollsBackCatalogWhenScopeChanges(t *testing.T) {
+	client := pi(syncHome(t))
+	catalog := filepath.Join(client.Dir, "models.json")
+	const initial = `{"defaultProvider":"magpie","defaultModel":"relay/old","enabledModels":["magpie/relay/old"]}`
+	const user = `{"defaultProvider":"magpie","defaultModel":"relay/old","enabledModels":["magpie/relay/old","mine/another"]}`
+	const originalCatalog = `{"providers":{"magpie":{"models":[{"id":"relay/old"}]}}}`
+	writeFile(t, client.Path, initial)
+	writeFile(t, catalog, originalCatalog)
+	target, err := edit.Target(client.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := false
+	err = edit.Filtered(func(path string, body []byte) []byte {
+		if path == target && !edited {
+			edited = true
+			writeFile(t, path, user)
+		}
+		return body
+	}, func() error { return client.Apply("model", "magpie/relay/glm-4.6") })
+	if !edited || !errors.Is(err, extension.ErrActionChanged) {
+		t.Fatalf("Pi accepted the changed scope: edited=%t err=%v", edited, err)
+	}
+	if readFile(client.Path) != user || readFile(catalog) != originalCatalog {
+		t.Errorf("Pi left a partial pick: settings=%s catalog=%s", readFile(client.Path), readFile(catalog))
+	}
+	if stashShared()[apisWantedKey(catalog)] != "" || stashShared()[outputsWantedKey(catalog)] != "" {
+		t.Error("Pi saved catalog history for a rejected pick")
+	}
+	if err := client.Apply("model", "magpie/relay/glm-4.6"); err != nil {
+		t.Fatal(err)
+	}
+	if model, _ := edit.GetJSON(client.Path, "defaultModel"); model != "relay/glm-4.6" {
+		t.Errorf("the retry picked %q", model)
+	}
+	if scope := piScope(client.Path); len(scope) != 3 || scope[1] != "mine/another" || scope[2] != "magpie/relay/glm-4.6" {
+		t.Errorf("the retry did not keep the user's scope: %v", scope)
+	}
+}
+
 func TestPiLinkedModelResetKeepsSettingsWhenCatalogIsUnreadable(t *testing.T) {
 	client := pi(syncHome(t))
 	const settings = `{"defaultProvider":"magpie","defaultModel":"relay/old","enabledModels":["magpie/relay/old","mine/first"]}`
