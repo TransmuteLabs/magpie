@@ -285,6 +285,11 @@ Ordinary `magpie <agent> run` rechecks the selected SDK launch after
 executable lookup, using the same launch admission as session resume. A
 changed binding, package or active configuration stops the launch. The
 final check reads host state without starting the module worker.
+The strict PowerShell shell function uses this same command. It starts the
+saved Magpie executable with the user's arguments, working directory and
+inherited standard handles, then reports its exit code. Output goes to those
+handles instead of becoming PowerShell pipeline objects. Legacy shell
+functions retain their existing launch behavior.
 
 `magpie claude run` and `claude-magpie` resolve the existing Claude target's
 SDK binding before preparing a launch. An installed owner uses the same

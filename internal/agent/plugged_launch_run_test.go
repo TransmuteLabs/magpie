@@ -1,14 +1,20 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/agentplug"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // agyLaunchDesc is agent-agy's launch: the gateway in env, magpie's own
@@ -124,5 +130,126 @@ func TestPluggedPowerShellFunctionArgsAndPlain(t *testing.T) {
 		if got := run(args); got != strings.Join(strings.Fields(want), " ") {
 			t.Errorf("agy %s:\n got %s\nwant %s", args, got, want)
 		}
+	}
+}
+
+func TestSDKPowerShellFunctionUsesCheckedRun(t *testing.T) {
+	launch := sdkLaunch("sdk-profile", "native-agent", "", sdk.AgentLaunch{
+		Env:   map[string]string{"SDK_GATEWAY": "{url}"},
+		Args:  map[string]string{"--mode": "sdk"},
+		Model: "--model",
+		Plain: []string{"login"},
+	})
+	got := launch.function("powershell", `C:\program's path\magpie.exe`)
+	want := `function native-agent {
+    $magpie = 'C:\program''s path\magpie.exe'
+    if (-not (Test-Path -LiteralPath $magpie -PathType Leaf)) {
+        $global:LASTEXITCODE = 127
+        Write-Error 'magpie is unavailable'
+        return
+    }
+    $arguments = @('sdk-profile', 'run') + $args
+    $commandLine = @(foreach ($argument in $arguments) {
+        '"' + (([string]$argument -replace '(\\*)"', '$1$1\"') -replace '(\\+)\z', '$1$1') + '"'
+    }) -join ' '
+    $global:LASTEXITCODE = 127
+    $start = [System.Diagnostics.ProcessStartInfo]::new($magpie, $commandLine)
+    $start.UseShellExecute = $false
+    $start.WorkingDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $process.WaitForExit()
+        $global:LASTEXITCODE = $process.ExitCode
+    } finally { $process.Dispose() }
+}`
+	if got != want {
+		t.Fatalf("SDK PowerShell function must leave arguments, launch policy and exit status to checked run:\n%s", got)
+	}
+}
+
+type sdkPowerShellLaunchResult struct {
+	Path      string
+	Directory string
+	Arguments []string
+}
+
+func init() {
+	if os.Getenv("MAGPIE_TEST_POWERSHELL_LAUNCH") == "1" && len(os.Args) >= 3 &&
+		os.Args[1] == "sdk-profile" && os.Args[2] == "run" {
+		path, pathErr := os.Executable()
+		directory, directoryErr := os.Getwd()
+		if pathErr != nil || directoryErr != nil {
+			os.Exit(38)
+		}
+		report := sdkPowerShellLaunchResult{Path: path, Directory: directory, Arguments: os.Args[1:]}
+		if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+			os.Exit(38)
+		}
+		os.Exit(37)
+	}
+}
+
+func TestSDKPowerShellFunctionForwardsWindowsArgumentsAndExit(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the Windows process launcher")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	magpie := filepath.Join(dir, "magpie [a]'s path.exe")
+	if err := os.WriteFile(magpie, bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "magpie a's path.exe"), bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workdir := t.TempDir()
+	launch := sdkLaunch("sdk-profile", "sdk-launch-fixture-powershell-agent", "", sdk.AgentLaunch{
+		Args:  map[string]string{"--mode": "sdk"},
+		Plain: []string{"login"},
+	})
+	userArgs := []string{"login=personal", "", "blanc espace", `a"b`, `x\\"y`, `C:\with space\`, "$value", ";|&", "line\nend\\"}
+	want := append([]string{"sdk-profile", "run"}, userArgs...)
+	script := launch.function("powershell", magpie) + "\nSet-Location -LiteralPath " + psQuote(workdir) + "\n" + launch.bin
+	for _, arg := range userArgs {
+		script += " " + psQuote(arg)
+	}
+	script += "\nexit $global:LASTEXITCODE\n"
+	fn := filepath.Join(dir, "fixture.ps1")
+	writeFile(t, fn, script)
+	t.Setenv("MAGPIE_TEST_POWERSHELL_LAUNCH", "1")
+	haveShell := false
+	for _, shell := range []string{"pwsh", "powershell"} {
+		path, err := exec.LookPath(shell)
+		if err != nil {
+			continue
+		}
+		haveShell = true
+		t.Run(shell, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fn)
+			var callErr *exec.ExitError
+			output, err := command.CombinedOutput()
+			if !errors.As(err, &callErr) || callErr.ExitCode() != 37 {
+				t.Fatalf("launch exit = %v, want 37\n%s", err, output)
+			}
+			var got sdkPowerShellLaunchResult
+			if err := json.Unmarshal(output, &got); err != nil || !slices.Equal(got.Arguments, want) {
+				t.Fatalf("launch arguments = %q, want %q, decode %v\n%s", got.Arguments, want, err, output)
+			}
+			if !strings.EqualFold(got.Path, magpie) || !strings.EqualFold(got.Directory, workdir) {
+				t.Fatalf("launched executable %q in %q, want %q in %q", got.Path, got.Directory, magpie, workdir)
+			}
+		})
+	}
+	if !haveShell {
+		t.Skip("no PowerShell")
 	}
 }

@@ -8,8 +8,8 @@ package agent
 // each shell the user has while it is on one of magpie's models. On this
 // machine the function runs `magpie <id> run` (cli/agy_cli.go), which
 // starts the real one with the variables and the model while its file's
-// model is magpie's, and as it is otherwise; PowerShell's asks `magpie
-// <id> env` for them. A WSL distro has no magpie to ask, so its function
+// model is magpie's, and as it is otherwise. Legacy PowerShell functions
+// ask `magpie <id> env` for them. A WSL distro has no magpie to ask, so its function
 // reads the model from the file itself (or holds it, where the file can't
 // be read so), with the variables written in.
 
@@ -196,6 +196,30 @@ func (l *launchSpec) function(kind, prog string) string {
 		return "function " + l.bin + "\n    if test -x " + q + "\n        " + q + " " + l.id + " run $argv\n    else\n        " + missing + "\n    end\nend"
 	case "powershell":
 		q := psQuote(prog)
+		if l.strict {
+			return "function " + l.bin + " {\n" +
+				"    $magpie = " + q + "\n" +
+				`    if (-not (Test-Path -LiteralPath $magpie -PathType Leaf)) {
+        $global:LASTEXITCODE = 127
+        Write-Error 'magpie is unavailable'
+        return
+    }
+    $arguments = @(` + psQuote(l.id) + `, 'run') + $args
+    $commandLine = @(foreach ($argument in $arguments) {
+        '"' + (([string]$argument -replace '(\\*)"', '$1$1\"') -replace '(\\+)\z', '$1$1') + '"'
+    }) -join ' '
+    $global:LASTEXITCODE = 127
+    $start = [System.Diagnostics.ProcessStartInfo]::new($magpie, $commandLine)
+    $start.UseShellExecute = $false
+    $start.WorkingDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+    $process = [System.Diagnostics.Process]::Start($start)
+    try {
+        $process.WaitForExit()
+        $global:LASTEXITCODE = $process.ExitCode
+    } finally { $process.Dispose() }
+` +
+				"}"
+		}
 		names := make([]string, 0, len(l.env))
 		for _, n := range l.names() {
 			names = append(names, psQuote(n))
@@ -220,24 +244,14 @@ func (l *launchSpec) function(kind, prog string) string {
 			}
 			plain = " -or @($args | Where-Object { \"$_\" -match '^(" + strings.Join(alts, "|") + ")(=|$)' }).Count"
 		}
-		status := ""
-		inactive := "-not $start.model"
-		present := ""
-		if l.strict {
-			status = "        if ($LASTEXITCODE -ne 0) { return }\n"
-			inactive = "(-not $start.model -and -not $start.active)"
-			present = "    if (-not (Test-Path -LiteralPath " + q + ")) { Write-Error 'magpie is unavailable'; return }\n"
-		}
 		return "function " + l.bin + " {\n" +
 			"    $real = Get-Command " + l.bin + " -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1\n" +
 			"    if (-not $real) { Write-Error '" + l.bin + " is not installed'; return }\n" +
-			present +
 			"    $start = @{}\n" +
 			"    if (Test-Path -LiteralPath " + q + ") {\n" +
 			"        foreach ($l in @(& " + q + " " + l.id + " env)) { $k, $v = \"$l\" -split '=', 2; if ($v) { $start[$k] = $v } }\n" +
-			status +
 			"    }\n" +
-			"    if (" + inactive + plain + ") { & $real @args; return }\n" +
+			"    if (-not $start.model" + plain + ") { & $real @args; return }\n" +
 			set +
 			"    try {\n" + run +
 			"    } finally { foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $was[$n], 'Process') } }\n" +
