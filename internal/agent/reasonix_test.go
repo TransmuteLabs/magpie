@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"debug/buildinfo"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +18,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -518,7 +522,7 @@ func TestReasonixBuiltinDefaultCanBeReselected(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg, err := readReasonix(a.Path)
-		if err != nil || cfg.DefaultModel == nil || *cfg.DefaultModel != "deepseek-flash" || cfg.magpie().Name != "" {
+		if err != nil || cfg.DefaultModel == nil || *cfg.DefaultModel != "deepseek-flash" || cfg.Magpie().Name != "" {
 			t.Fatalf("native default was not restored: %+v %v", cfg, err)
 		}
 		if _, exists := edit.GetEnvFile(env, reasonixKey); exists {
@@ -545,6 +549,81 @@ func TestReasonixRestoreRemovesAccessAddedLater(t *testing.T) {
 	cfg, err := readReasonix(a.Path)
 	if err != nil || !reflect.DeepEqual(cfg.Desktop.Access, []string{"native", "later"}) {
 		t.Fatalf("restore kept access that magpie added after initial setup: %v %v", cfg.Desktop.Access, err)
+	}
+}
+
+func TestReasonixSelectionPreservesConcurrentRestoreRecord(t *testing.T) {
+	for _, field := range []string{"model", "planner"} {
+		t.Run(field, func(t *testing.T) {
+			original, env := reasonixFixture(t, reasonixNativeConfig)
+			stateDir := filepath.Dir(provider.Path())
+			sum := sha256.Sum256([]byte(filepath.Clean(original.Dir)))
+			journal := filepath.Join(stateDir, fmt.Sprintf("reasonix-%x.json", sum[:8]))
+			later := `{"version":1,"default_model":"native/other","new_config":false,"new_env":false,"added_access":false}`
+			at := here(filepath.Dir(original.Dir))
+			fired := false
+			at.base = func() string {
+				if !fired {
+					fired = true
+					if err := os.WriteFile(journal, []byte(later), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return gateway.URL()
+			}
+			a := reasonixIn(at)
+			beforeConfig, _ := os.ReadFile(a.Path)
+			beforeEnv, _ := os.ReadFile(env)
+			err := a.Apply(field, "magpie/a/pro")
+			if !fired {
+				t.Fatal("selection did not reach the gateway configuration")
+			}
+			if !errors.Is(err, extension.ErrActionChanged) {
+				t.Errorf("selection should report the stale restore record: %v", err)
+			}
+			for path, want := range map[string]string{a.Path: string(beforeConfig), env: string(beforeEnv), journal: later} {
+				if got, err := os.ReadFile(path); err != nil || string(got) != want {
+					t.Errorf("failed selection changed %s (read error: %v)", filepath.Base(path), err)
+				}
+			}
+		})
+	}
+}
+
+func TestReasonixSyncPreservesConcurrentCredentialEdit(t *testing.T) {
+	original, env := reasonixFixture(t, reasonixNativeConfig)
+	if err := original.Apply("model", "magpie/a/pro"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "b", Chat: "http://127.0.0.1:1/v1", Key: "k", Models: []string{"new"}}); err != nil {
+		t.Fatal(err)
+	}
+	at := here(filepath.Dir(original.Dir))
+	later := reasonixKey + "=user-edit\n" + reasonixKey + "=another-user-edit\n"
+	fired := false
+	at.base = func() string {
+		if !fired {
+			fired = true
+			if err := os.WriteFile(env, []byte(later), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return gateway.URL()
+	}
+	a := reasonixIn(at)
+	before, _ := os.ReadFile(a.Path)
+	err := a.Sync()
+	if !fired {
+		t.Fatal("Sync did not reach the gateway configuration")
+	}
+	if !errors.Is(err, extension.ErrActionChanged) {
+		t.Errorf("Sync should report the stale credential file: %v", err)
+	}
+	if after, err := os.ReadFile(a.Path); err != nil || string(after) != string(before) {
+		t.Errorf("rejected Sync changed config.toml (read error: %v)", err)
+	}
+	if after, err := os.ReadFile(env); err != nil || string(after) != later {
+		t.Errorf("rejected Sync changed .env (read error: %v)", err)
 	}
 }
 
@@ -581,7 +660,7 @@ func TestReasonixConcurrentEditsAndSync(t *testing.T) {
 		break
 	}
 	cfg, err := readReasonix(a.Path)
-	if err != nil || cfg.DefaultModel == nil || *cfg.DefaultModel != "magpie/"+cfg.magpie().Default {
+	if err != nil || cfg.DefaultModel == nil || *cfg.DefaultModel != "magpie/"+cfg.Magpie().Default {
 		t.Fatalf("concurrent edits split the selected model and provider: %+v %v", cfg, err)
 	}
 	if drift := a.Check(); drift != "" {

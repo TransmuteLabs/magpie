@@ -167,6 +167,16 @@ bili address. Magpie saves the credential for the selected address before
 publication. If Zed changes the settings meanwhile, the host refuses the
 plan and keeps the existing restore history.
 
+The linked [Hermes proxy plan](../../internal/extension/builtin/hermes/settings.go)
+changes the Chat and Messages gateway addresses across the active config and
+its other profiles in one checked publication. It reads each provider's
+transport from the snapshot it edits. An uneditable profile prevents a
+partial proxy change.
+
+Reasonix's [settings planner](../../internal/extension/builtin/reasonix/settings.go)
+uses one checked plan for executor, planner, effort and catalog sync.
+The host checks `config.toml`, `.env` and the restore record together.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |

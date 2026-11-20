@@ -296,3 +296,26 @@ func TestHermesThroughBili(t *testing.T) {
 	}
 	through("off", "")
 }
+
+func TestHermesThroughRejectsPartiallyEditableProfiles(t *testing.T) {
+	home, path := hermesAnthropicHome(t)
+	bot := filepath.Join(filepath.Dir(path), "profiles", "coder", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(bot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	valid := "providers:\n  magpie:\n    base_url: " + gateway.URL() + "/v1\n"
+	invalid := valid + "---\nother: user settings\n"
+	for name, body := range map[string]string{path: valid, bot: invalid} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := HermesThrough(hermes(home), "http://127.0.0.1:8787/bili/"); err == nil || !strings.Contains(err.Error(), bot) {
+		t.Fatalf("expected the uneditable profile's path, got %v", err)
+	}
+	for name, want := range map[string]string{path: valid, bot: invalid} {
+		if body, err := os.ReadFile(name); err != nil || string(body) != want {
+			t.Fatalf("failed route change modified %s: %q, %v", name, body, err)
+		}
+	}
+}

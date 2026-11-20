@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 
@@ -24,52 +25,62 @@ func editTOMLArrayTable(path, name, key, value, block string) error {
 	if err != nil {
 		return err
 	}
+	body, err := RewriteTOMLArrayTable(path, raw, name, key, value, block)
+	if err != nil || bytes.Equal(raw, body) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+// RewriteTOMLArrayTable edits one named entry in a TOML snapshot. An empty
+// replacement removes the entry.
+func RewriteTOMLArrayTable(path string, raw []byte, name, key, value, block string) ([]byte, error) {
 	if err := validateTOML(raw); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	lines := splitLines(string(raw))
 	doc, err := parseTOMLFile(lines)
 	if err != nil {
-		return err
+		return nil, AtFile(path, err)
 	}
 	spans, err := namedTOMLArray(doc, name, key, value, false)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	var replacement []string
 	if block != "" {
 		if err := validateTOML([]byte(block)); err != nil {
-			return fmt.Errorf("replacement: %w", err)
+			return nil, fmt.Errorf("replacement: %w", err)
 		}
 		replacement = splitLines(block)
 		newDoc, err := parseTOMLFile(replacement)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		matches, err := namedTOMLArray(newDoc, name, key, value, false)
 		if err != nil || len(matches) == 0 || len(newDoc.root.keys) > 0 {
-			return fmt.Errorf("replacement must declare one %s entry with %s = %q", name, key, value)
+			return nil, fmt.Errorf("replacement must declare one %s entry with %s = %q", name, key, value)
 		}
 		// All headers must belong to this entry, including child array tables.
 		want := tomlHeaderParts(name)
 		for _, table := range newDoc.tables {
 			parts := tomlHeaderParts(table.name)
 			if !tomlDescendant(parts, want) && table.from != matches[0].from {
-				return fmt.Errorf("replacement contains another table")
+				return nil, fmt.Errorf("replacement contains another table")
 			}
 		}
 		replacement = trimBlank(replacement)
 	}
 	if len(spans) == 0 {
 		if block == "" {
-			return nil
+			return raw, nil
 		}
 		out := trimBlank(lines)
 		if len(out) > 0 {
 			out = append(out, "")
 		}
 		out = append(out, replacement...)
-		return writeTOML(path, out)
+		return renderTOML(path, out, raw)
 	}
 	var out []string
 	at := 0
@@ -81,7 +92,7 @@ func editTOMLArrayTable(path, name, key, value, block string) error {
 		at = span.to
 	}
 	out = append(out, lines[at:]...)
-	return writeTOML(path, out)
+	return renderTOML(path, out, raw)
 }
 
 // SetTOMLArrayTables replaces every entry of the array table name whose key

@@ -45,6 +45,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/dirent"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinhermes "github.com/yetone/magpie/internal/extension/builtin/hermes"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"gopkg.in/yaml.v3"
@@ -299,24 +301,12 @@ func hermesPrefix(at place, path string) string {
 // config at path (in dir): magpie's entries there and in every other
 // profile's config that has them go to the gateway through prefix.
 func hermesThrough(at place, dir, path, prefix string) error {
-	if edit.GetYAMLMap(path, "providers."+magpieID) == nil {
-		return fmt.Errorf("connect Hermes to magpie first: pick one of magpie's models for it on the Agents page")
+	paths := append([]string{path}, hermesOthers(at, dir)...)
+	files := make([]extension.LinkedActionFile, 0, len(paths))
+	for index, profile := range paths {
+		files = append(files, extension.LinkedActionFile{Name: fmt.Sprintf("profile-%d/config.yaml", index), Path: profile})
 	}
-	var errs []error
-	for _, p := range append([]string{path}, hermesOthers(at, dir)...) {
-		var kvs []edit.KV
-		for _, name := range []string{magpieID, hermesAnthropicID} {
-			if edit.GetYAMLMap(p, "providers."+name) == nil {
-				continue
-			}
-			mode, _ := hermesModeIn(p, name)
-			kvs = append(kvs, edit.KV{Path: "providers." + name + ".base_url", Value: prefix + hermesBase(at.gw(), mode)})
-		}
-		if len(kvs) > 0 {
-			errs = append(errs, edit.SetYAML(p, kvs...))
-		}
-	}
-	return errors.Join(errs...)
+	return extension.ApplyLinkedAgentPlan(prefix+at.gw(), builtinhermes.ProxyPlan, files...)
 }
 
 // hermesProfileKey begins the key of a profile's model field
@@ -790,23 +780,10 @@ type hermesProviderEntry struct {
 // Claude model's prompt itself, an hour when asked
 // (agent_runtime_helpers.anthropic_prompt_cache_policy, "third-party
 // Anthropic-compatible gateway").
-const hermesAnthropicID = magpieID + "-anthropic"
+const hermesAnthropicID = builtinhermes.AnthropicProvider
 
 // hermesOurs is whether a model.provider is one of magpie's entries
 func hermesOurs(p string) bool { return p == magpieID || p == hermesAnthropicID }
-
-// hermesMode is each entry's api_mode as magpie writes it
-var hermesMode = map[string]string{magpieID: "chat_completions", hermesAnthropicID: "anthropic_messages"}
-
-// hermesModeAliases are the spellings of an api_mode Hermes takes for its
-// canonical ones (hermes_cli/config_providers.py _API_MODE_ALIASES)
-var hermesModeAliases = map[string]string{
-	"openai": "chat_completions", "openai_chat": "chat_completions", "openai-chat": "chat_completions",
-	"chat-completions": "chat_completions", "chatcompletions": "chat_completions",
-	"responses": "codex_responses", "openai_responses": "codex_responses", "openai-responses": "codex_responses",
-	"anthropic": "anthropic_messages", "anthropic-messages": "anthropic_messages", "messages": "anthropic_messages",
-	"bedrock": "bedrock_converse", "bedrock-converse": "bedrock_converse",
-}
 
 // hermesModeIn is the api_mode of magpie's entry name in the config at
 // path, as Hermes reads it: api_mode, else transport (which its own
@@ -817,18 +794,12 @@ var hermesModeAliases = map[string]string{
 // (cherish_onlyy, #5315: an anthropic_messages put in by hand was made
 // chat_completions again on the next update).
 func hermesModeIn(path, name string) (mode string, mine bool) {
-	v, _ := edit.GetYAML(path, "providers."+name+".api_mode")
-	if strings.TrimSpace(v) == "" {
-		v, _ = edit.GetYAML(path, "providers."+name+".transport")
+	apiMode, _ := edit.GetYAML(path, "providers."+name+".api_mode")
+	var transport string
+	if strings.TrimSpace(apiMode) == "" {
+		transport, _ = edit.GetYAML(path, "providers."+name+".transport")
 	}
-	v = strings.TrimSpace(v)
-	if c, ok := hermesModeAliases[strings.ToLower(v)]; ok {
-		v = c
-	}
-	if v == "" || v == hermesMode[name] {
-		return hermesMode[name], false
-	}
-	return v, true
+	return builtinhermes.Mode(name, apiMode, transport)
 }
 
 // hermesBase is the gateway's address at gw for an entry on mode: the
@@ -836,10 +807,7 @@ func hermesModeIn(path, name string) (mode string, mine bool) {
 // Hermes before its adapter took a /v1 off asked /v1/v1/messages), else
 // /v1.
 func hermesBase(gw, mode string) string {
-	if mode == "anthropic_messages" {
-		return gw
-	}
-	return gw + "/v1"
+	return builtinhermes.Base(gw, mode)
 }
 
 // hermesOnMessages is whether the catalog model m is served best on
