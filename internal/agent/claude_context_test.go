@@ -1,14 +1,118 @@
 package agent
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
+
+func TestClaudeModelPickPublishesContextWithRoute(t *testing.T) {
+	home, path := desktopWindowSandbox(t)
+	agent := claude(home)
+	target, err := edit.Target(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var earlyContext, sawRoute, completeRoute bool
+	err = edit.Filtered(func(name string, proposed []byte) []byte {
+		if name != target {
+			return proposed
+		}
+		body := string(proposed)
+		window := strings.Contains(body, claudeContextEnv)
+		compact := strings.Contains(body, claudeCompactEnv)
+		if !strings.Contains(body, `"ANTHROPIC_BASE_URL"`) {
+			earlyContext = earlyContext || window || compact
+		} else if !sawRoute {
+			sawRoute = true
+			completeRoute = window && compact
+		}
+		return proposed
+	}, func() error { return agent.Apply("model", "v/gpt") })
+	if err != nil || earlyContext || !completeRoute {
+		t.Fatalf("Apply = %v, context published before route = %t, route contained both windows = %t", err, earlyContext, completeRoute)
+	}
+	if got, _ := edit.GetJSON(path, "env."+claudeContextEnv); got != "272000" {
+		t.Fatalf("context window = %q", got)
+	}
+	if err := edit.SetJSON(path, edit.KV{Path: "env." + claudeCompactEnv, Value: "222000"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := edit.GetJSON(path, "env."+claudeContextEnv); present {
+		t.Error("Disconnect kept its own context window")
+	}
+	if got, _ := edit.GetJSON(path, "env."+claudeCompactEnv); got != "222000" {
+		t.Errorf("Disconnect changed the user's compaction window to %q", got)
+	}
+}
+
+func TestClaudeSyncPreservesConcurrentContextEdit(t *testing.T) {
+	home, path := desktopWindowSandbox(t)
+	agent := claude(home)
+	if err := agent.Apply("model", "v/gpt"); err != nil {
+		t.Fatal(err)
+	}
+	before := stashLoad()
+	vendor, err := provider.Find("v")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetContext(*vendor, "gpt", 355000); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetCompactAt(210000); err != nil {
+		t.Fatal(err)
+	}
+	target, err := edit.Target(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var external string
+	err = edit.Filtered(func(name string, proposed []byte) []byte {
+		if name == target && external == "" && strings.Contains(string(proposed), "355000") {
+			body, err := edit.PatchJSON([]byte(readFile(name)), []edit.KV{
+				{Path: "env." + claudeContextEnv, Value: "233000"},
+				{Path: "env." + claudeCompactEnv, Value: "144000"},
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			external = string(body)
+			writeFile(t, name, external)
+		}
+		return proposed
+	}, agent.Sync)
+	if external == "" || !errors.Is(err, extension.ErrActionChanged) || readFile(path) != external {
+		t.Errorf("Sync = %v, concurrent settings preserved = %t", err, external != "" && readFile(path) == external)
+	}
+	after := stashLoad()
+	for _, key := range []string{"claude.context_tokens", "claude.compact_window", "claude.compact_long"} {
+		if after[key] != before[key] {
+			t.Errorf("rejected Sync changed %s from %q to %q", key, before[key], after[key])
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if err := agent.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{claudeContextEnv: "233000", claudeCompactEnv: "144000"} {
+		if got, _ := edit.GetJSON(path, "env."+name); got != want {
+			t.Errorf("retry changed %s to %q, want %q", name, got, want)
+		}
+	}
+}
 
 // TestClaudeContextWindow: Claude Code takes a model it doesn't know for a
 // 200K one, so magpie tells it the window of the model it switches it to

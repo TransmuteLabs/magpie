@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -271,7 +272,7 @@ var claudeAliases = []string{"default", "best", "opus", "sonnet", "haiku", "fabl
 // is 1M whatever it says. It is the one window Claude Code knows for any
 // such model (2.1.293: none is taken from a gateway), Claude Desktop's Code
 // tab's too, which runs on this settings.json (claudeDesktopWindow).
-const claudeContextEnv = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+const claudeContextEnv = builtinclaude.ContextEnv
 
 // claudeCompactEnv is where Claude Code compacts a conversation, the smaller
 // of it and the model's window, a [1m] one's too. magpie sets it to
@@ -279,7 +280,7 @@ const claudeContextEnv = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 // sending all of it (X: Chen, turns of ~550K tokens waiting 70–90s for a
 // first token); settings.FullContext leaves it out, and so does a Claude
 // model, which Anthropic runs to its whole window.
-const claudeCompactEnv = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+const claudeCompactEnv = builtinclaude.CompactEnv
 
 // claudeOutputEnv is the longest reply Claude Code asks a model for. One it
 // doesn't know (any but Claude's own names) it asks for 32000 at most
@@ -804,111 +805,6 @@ func claudeIn(at place) *Agent {
 		}
 		return model()
 	}
-	// the context window magpie last wrote, so a value the user wrote is
-	// never taken for magpie's: that one is left as it is
-	windowKey := at.key("claude.context_tokens")
-	windowOurs := func() bool {
-		cur := env(claudeContextEnv)
-		return cur != "" && cur == stashShared()[windowKey]
-	}
-	// the modelSettings windows magpie last wrote while Claude Desktop is
-	// on magpie (claudePlan, #2025), as JSON {id: window}, and the
-	// top-level autoCompactWindow it wrote beside them: each is magpie's
-	// only while it still says what magpie wrote, so the user's own, an
-	// /autocompact among them, is never taken for magpie's
-	budgetsKey := at.key("claude.model_budgets")
-	defaultKey := at.key("claude.compact_default")
-	budgetsOurs := func() map[string]int {
-		var m map[string]int
-		_ = json.Unmarshal([]byte(stashShared()[budgetsKey]), &m)
-		return m
-	}
-	defaultOurs := func() bool {
-		cur, ok := edit.GetJSON(path, "autoCompactWindow")
-		return ok && cur != "" && cur == stashShared()[defaultKey]
-	}
-	// writeBudgets puts in entries and the default (0 for none), and takes
-	// out what magpie wrote before that they no longer have
-	writeBudgets := func(def int, entries map[string]int) error {
-		raw, _ := edit.GetJSON(path, "modelSettings")
-		cur := budgetsRead(raw)
-		var del []string
-		for id, v := range budgetsOurs() {
-			if _, keep := entries[id]; keep || cur[id] != strconv.Itoa(v) {
-				continue
-			}
-			del = append(del, budgetPath(id))
-		}
-		if len(del) > 0 {
-			if err := edit.DelJSON(path, del...); err != nil {
-				return err
-			}
-			// an id's object magpie emptied goes too
-			raw, _ = edit.GetJSON(path, "modelSettings")
-			var per map[string]map[string]json.RawMessage
-			if json.Unmarshal([]byte(raw), &per) == nil {
-				var empty []string
-				for _, p := range del {
-					id := strings.TrimSuffix(strings.TrimPrefix(p, "modelSettings."), ".autoCompactWindow")
-					if o, ok := per[strings.ReplaceAll(id, `\.`, ".")]; ok && len(o) == 0 {
-						empty = append(empty, "modelSettings."+id)
-					}
-				}
-				if len(empty) > 0 && len(empty) == len(per) {
-					empty = []string{"modelSettings"}
-				}
-				if len(empty) > 0 {
-					if err := edit.DelJSON(path, empty...); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		var kvs []edit.KV
-		for id, v := range entries {
-			if cur[id] != strconv.Itoa(v) {
-				kvs = append(kvs, edit.KV{Path: budgetPath(id), Value: v})
-			}
-		}
-		if len(entries) > 0 {
-			b, _ := json.Marshal(entries)
-			stash(map[string]string{budgetsKey: string(b)})
-		} else {
-			forget(budgetsKey)
-		}
-		top, has := edit.GetJSON(path, "autoCompactWindow")
-		switch {
-		case def > 0 && (!has || defaultOurs()):
-			stash(map[string]string{defaultKey: strconv.Itoa(def)})
-			if top != strconv.Itoa(def) {
-				kvs = append(kvs, edit.KV{Path: "autoCompactWindow", Value: def})
-			}
-		case def > 0:
-			forget(defaultKey)
-		default:
-			if defaultOurs() {
-				if err := edit.DelJSON(path, "autoCompactWindow"); err != nil {
-					return err
-				}
-			}
-			forget(defaultKey)
-		}
-		if len(kvs) == 0 {
-			return nil
-		}
-		return edit.SetJSON(path, kvs...)
-	}
-	dropBudgets := func() error { return writeBudgets(0, nil) }
-	dropWindow := func() error {
-		defer forget(windowKey)
-		if err := dropBudgets(); err != nil {
-			return err
-		}
-		if windowOurs() {
-			return edit.DelJSON(path, "env."+claudeContextEnv)
-		}
-		return nil
-	}
 	// the reply length magpie last wrote, kept apart from the user's own
 	// in the same way
 	outputKey := at.key("claude.output_tokens")
@@ -926,77 +822,6 @@ func claudeIn(at place) *Agent {
 			return edit.DelJSON(path, "env."+claudeCapsEnv)
 		}
 		return nil
-	}
-	// the auto-compact window magpie last wrote, kept apart from the
-	// user's own in the same way
-	compactKey := at.key("claude.compact_window")
-	compactOurs := func() bool {
-		cur := env(claudeCompactEnv)
-		return cur != "" && cur == stashShared()[compactKey]
-	}
-	// set while the window magpie wrote is Long conversations' (not a
-	// provider's Compact at): tune's card reads it as that one value
-	compactLongKey := at.key("claude.compact_long")
-	dropCompact := func() error {
-		defer forget(compactKey, compactLongKey)
-		if compactOurs() {
-			return edit.DelJSON(path, "env."+claudeCompactEnv)
-		}
-		return nil
-	}
-	// budgeted is set by writeWindow, which runs before writeCompact,
-	// while each model has its own window under modelSettings (claudePlan):
-	// the variable would take precedence over them, so it goes
-	budgeted := false
-	// writeCompact has Claude Code compact at the working window
-	// (settings.WorkingWindow) on magpie, unless settings.FullContext or the
-	// main model is one of Anthropic's Claude models: Anthropic runs a [1m]
-	// one to its whole 1M, so it gets its own window (Max on Discord: a
-	// [1m] model stopped at 272K), or a routing group made only of
-	// them (provider.ClaudeGroup, #1741)
-	writeCompact := func() error {
-		if env(claudeCompactEnv) != "" && !compactOurs() {
-			forget(compactKey)
-			return nil
-		}
-		if budgeted {
-			return dropCompact()
-		}
-		// a threshold the user set on the main model or its provider comes
-		// first (#876), a Claude model's included; then the one for every
-		// model (settings.Compact), none under Full window
-		main := mainModel()
-		n := provider.CompactSet(main)
-		long := false
-		if s := settings.Load().ForAgent("claude"); n == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
-			n, long = s.Compact(), true
-			// magpie's default gives way to an autoCompactWindow the user
-			// set in Claude Code (/autocompact, its settings), which the env
-			// would take precedence over; one typed in magpie doesn't (#876).
-			// So does it to a window the user typed for the main model, on
-			// its group or its provider: Claude Code then runs to the window
-			// it is told (claudeContextEnv), as Codex is (provider.CompactFor,
-			// #1809)
-			if s.CompactAt == 0 && (claudeOwnCompact(path, main) || provider.WindowTyped(main)) {
-				n = 0
-			}
-		}
-		if n == 0 {
-			return dropCompact()
-		}
-		// Claude Code takes the variable as 1000000 at most
-		// (claudeCompactCap), and so it is written
-		w := strconv.Itoa(claudeCompactCap(n))
-		stash(map[string]string{compactKey: w})
-		if long {
-			stash(map[string]string{compactLongKey: "1"})
-		} else {
-			forget(compactLongKey)
-		}
-		if env(claudeCompactEnv) == w {
-			return nil
-		}
-		return edit.SetJSON(path, edit.KV{Path: "env." + claudeCompactEnv, Value: w})
 	}
 	// Claude Code's /model lists what modelPicker says (2.1.287): while it
 	// runs on magpie, that is every one of magpie's models, the routing
@@ -1167,18 +992,15 @@ func claudeIn(at place) *Agent {
 			Routed: true, Desktop: desktop, SuppressReview: !claudeReviewed(catalogs, models...),
 		})
 	}
-	// desktopPlan is what writeWindow writes while Claude Desktop is on
+	// desktopPlan supplies the budgets while Claude Desktop is on
 	// magpie (claudePlan, #2025): the models its Code tab runs Claude Code
 	// on, and while Claude Code itself is on magpie (main set) its main
 	// model's, tiers' and those /model offers (pickerRefs), each with its
 	// own window under the largest. A model Claude Code knows as Claude's has its own window.
-	desktopPlan := func(main string, tiers map[string]string) (top, def int, entries map[string]int) {
+	desktopPlan := func(main string, tiers map[string]string, desktop bool, current builtinclaude.WindowState) (top, def int, entries map[string]int) {
 		s := settings.Load().ForAgent("claude")
-		// the user's own top-level autoCompactWindow
-		cur, userTop := edit.GetJSON(path, "autoCompactWindow")
-		userTop = userTop && !defaultOurs()
 		// the window each model of magpie's compacts at (claudeBudget's
-		// compact), as writeCompact gives the main model: the user's
+		// compact), as for the main model: the user's
 		// threshold for it first (#876); a Claude model, or a group of them,
 		// runs to its own (#1741), as does one whose window the user typed
 		// (#1809); the user's autoCompactWindow, unless they gave magpie a
@@ -1193,7 +1015,7 @@ func claudeIn(at place) *Agent {
 			if claudeModel(ref) || provider.ClaudeGroup(ref) {
 				return -1
 			}
-			if s.CompactAt == 0 && userTop {
+			if s.CompactAt == 0 && current.UserDefault {
 				return 0
 			}
 			if s.CompactAt == 0 && provider.WindowTyped(ref) {
@@ -1209,7 +1031,7 @@ func claudeIn(at place) *Agent {
 			return cmp.Or(s.Compact(), -1)
 		}
 		var models []claudeBudget
-		if desktopOn() {
+		if desktop {
 			shown, _ := provider.CatalogFor("claude-desktop")
 			behaves, _ := gateway.DesktopBehavesAs()
 			again := gateway.DesktopTierAliases()
@@ -1253,20 +1075,11 @@ func claudeIn(at place) *Agent {
 		// entry runs at ("auto": the one Claude Code is told), in place of
 		// magpie's
 		base := def
-		if userTop {
+		if current.UserDefault {
 			def = 0
-			base, _ = strconv.Atoi(cur)
+			base, _ = strconv.Atoi(current.Default)
 		}
-		raw, _ := edit.GetJSON(path, "modelSettings")
-		ours := budgetsOurs()
-		theirs := map[string]string{}
-		for k, v := range budgetsRead(raw) {
-			if n, ok := ours[k]; ok && v == strconv.Itoa(n) {
-				continue
-			}
-			theirs[budgetKey(k)] = v
-		}
-		top, entries = claudePlan(models, base, theirs)
+		top, entries = claudePlan(models, base, current.UserBudgets)
 		return top, def, entries
 	}
 	// pickerApart says the main is one of Claude's own models (or a group
@@ -1299,7 +1112,7 @@ func claudeIn(at place) *Agent {
 		}
 		return false
 	}
-	// writeWindow tells Claude Code the window of the models it runs on
+	// windowOptions tells Claude Code the window of the models it runs on
 	// (claudeWindow). While Claude Desktop runs on magpie too, it is the
 	// largest of theirs and each model below it gets its own
 	// (desktopPlan), and so while the main model is a [1m] one beside a
@@ -1311,46 +1124,38 @@ func claudeIn(at place) *Agent {
 	// CLAUDE_CODE_AUTO_COMPACT_WINDOW of the user's, which takes
 	// precedence over those, the least of them, as one value serves them
 	// all. One the user set is theirs.
-	writeWindow := func(main string, tiers map[string]string) error {
-		budgeted = false
-		if env(claudeContextEnv) != "" && !windowOurs() {
-			forget(windowKey)
-			return dropBudgets()
-		}
-		if (desktopOn() || claudeLongMain(main) && claudeWindow(main, tiers) > 0 || pickerApart(main, tiers)) && (env(claudeCompactEnv) == "" || compactOurs()) {
-			top, def, entries := desktopPlan(main, tiers)
-			if top <= 0 {
-				return dropWindow()
+	windowOptions := func(main string, tiers map[string]string, desktop bool, mode claudeWindowMode) builtinclaude.WindowOptions {
+		options := claudeWindowOptions(at, main, mode)
+		options.Choose = func(current builtinclaude.WindowState) builtinclaude.WindowChoice {
+			var choice builtinclaude.WindowChoice
+			if !current.UserContext && (desktop || mode == claudeRouteWindows) {
+				if !current.UserCompact && (desktop || claudeLongMain(main) && claudeWindow(main, tiers) > 0 || pickerApart(main, tiers)) {
+					top, def, entries := desktopPlan(main, tiers, desktop, current)
+					if top > 0 {
+						return builtinclaude.WindowChoice{Context: top, Default: def, Budgets: entries}
+					}
+				} else {
+					choice.Context = claudeWindow(main, tiers)
+					if desktop {
+						if window := claudeDesktopWindow(); window > 0 && (choice.Context == 0 || window < choice.Context) {
+							choice.Context = window
+						}
+					}
+				}
 			}
-			if err := writeBudgets(def, entries); err != nil {
-				return err
+			if mode == claudeRouteWindows && !current.UserCompact {
+				choice.Compact = provider.CompactSet(main)
+				if s := settings.Load().ForAgent("claude"); choice.Compact == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
+					choice.Compact, choice.Long = s.Compact(), true
+					if s.CompactAt == 0 && (current.UserCompactSetting || provider.WindowTyped(main)) {
+						choice.Compact = 0
+					}
+				}
+				choice.Compact = claudeCompactCap(choice.Compact)
 			}
-			budgeted = true
-			v := strconv.Itoa(top)
-			stash(map[string]string{windowKey: v})
-			if v == env(claudeContextEnv) {
-				return nil
-			}
-			return edit.SetJSON(path, edit.KV{Path: "env." + claudeContextEnv, Value: v})
+			return choice
 		}
-		if err := dropBudgets(); err != nil {
-			return err
-		}
-		w := claudeWindow(main, tiers)
-		if desktopOn() {
-			if d := claudeDesktopWindow(); d > 0 && (w == 0 || d < w) {
-				w = d
-			}
-		}
-		if w <= 0 {
-			return dropWindow()
-		}
-		v := strconv.Itoa(w)
-		stash(map[string]string{windowKey: v})
-		if v == env(claudeContextEnv) {
-			return nil
-		}
-		return edit.SetJSON(path, edit.KV{Path: "env." + claudeContextEnv, Value: v})
+		return options
 	}
 	// dropStray takes magpie's model names out of a Claude Code on
 	// Anthropic's own endpoint, where each is a 404 ("There's an issue
@@ -1383,19 +1188,17 @@ func claudeIn(at place) *Agent {
 	// Desktop's models alone; none at all when Desktop isn't either. Only
 	// Claude Code's being wired in wrote them before, so a user who wired
 	// in Desktop alone had 200K for every Desktop model (#1458).
-	desktopOnly := func() error {
-		desktop := desktopOn()
+	desktopOnly := func(desktop, windows bool) error {
 		if err := applyClaudeRouteFlags(path, at, builtinclaude.RouteFlagsOptions{Desktop: desktop}); err != nil {
 			return err
 		}
-		if !desktop {
-			if err := dropWindow(); err != nil {
+		if windows {
+			if err := applyClaudeWindowSettings(at, path, windowOptions("", nil, desktop, claudeDesktopWindows)); err != nil {
 				return err
 			}
-			return dropCaps()
 		}
-		if err := writeWindow("", nil); err != nil {
-			return err
+		if !desktop {
+			return dropCaps()
 		}
 		return putCaps(false)
 	}
@@ -1457,18 +1260,16 @@ func claudeIn(at place) *Agent {
 	}
 	unroute := func(nextModel *string, effort string) error {
 		unonboard()
-		if err := dropCompact(); err != nil {
-			return err
-		}
+		desktop := desktopOn()
 		// the window and capabilities stay as Claude Desktop's Code tab
 		// needs them while Desktop is on magpie (#1458)
-		if err := desktopOnly(); err != nil {
+		if err := desktopOnly(desktop, false); err != nil {
 			return err
 		}
 		if err := dropPicker(); err != nil {
 			return err
 		}
-		return restoreClaudeRoute(at, path, nextModel, effort)
+		return restoreClaudeRoute(at, path, nextModel, effort, windowOptions("", nil, desktop, claudeRestoreWindows))
 	}
 	var writeTiers func(main string, tiers map[string]string) error
 	set := func(v string) error {
@@ -1606,11 +1407,7 @@ func claudeIn(at place) *Agent {
 		}
 		gw := gwAt()
 		tok := wiredKey()
-		// the new model's window replaces the old one's, when magpie knows
-		// it; one the user set is theirs
-		if err := writeWindow(main, tiers); err != nil {
-			return err
-		}
+		window := windowOptions(main, tiers, desktopOn(), claudeRouteWindows)
 		models := []string{main}
 		for _, t := range claudeTiers {
 			m, _ := tierAt(tiers[t])
@@ -1638,6 +1435,7 @@ func claudeIn(at place) *Agent {
 			PreviousOutput: saved[outputKey],
 			Previous:       claims,
 			Env:            routeEnv,
+			Window:         &window,
 		})
 		if err != nil {
 			return err
@@ -1645,11 +1443,9 @@ func claudeIn(at place) *Agent {
 		owned, _ := json.Marshal(result.Claims)
 		updates := claudeRouteEnvUpdates(at, saved, result.Env)
 		updates[mainKey], updates[wroteAt], updates[outputKey], updates[routeClaimsKey] = main, gw, result.Output, string(owned)
+		maps.Copy(updates, claudeWindowUpdates(at, result.Window))
 		stash(updates)
 		onboard()
-		if err := writeCompact(); err != nil {
-			return err
-		}
 		if err := writePicker(); err != nil {
 			return err
 		}
@@ -2114,7 +1910,7 @@ func claudeIn(at place) *Agent {
 				if err := dropStray(); err != nil {
 					return err
 				}
-				return desktopOnly()
+				return desktopOnly(desktopOn(), true)
 			}
 			// connected before magpie marked the first run done
 			onboard()
@@ -2156,10 +1952,7 @@ func claudeIn(at place) *Agent {
 			}
 			// the windows of the models as they are now, Claude Desktop's
 			// among them (#1458)
-			if err := writeWindow(mainModel(), tiers); err != nil {
-				return err
-			}
-			if err := writeCompact(); err != nil {
+			if err := applyClaudeWindowSettings(at, path, windowOptions(mainModel(), tiers, desktopOn(), claudeRouteWindows)); err != nil {
 				return err
 			}
 			if err := writePicker(); err != nil {
@@ -2499,34 +2292,6 @@ func claude1MFor(agent string) func(ref string) string {
 // working window (划船不靠桨 on Discord).
 func claudeModel(ref string) bool {
 	return provider.ClaudeModel(strings.TrimSuffix(ref, "[1m]"))
-}
-
-// claudeOwnCompact says the settings.json at path has an auto-compact
-// window of the user's for model: autoCompactWindow, or one under
-// modelSettings for it (as /autocompact saves it), a number or "auto".
-// Claude Code takes CLAUDE_CODE_AUTO_COMPACT_WINDOW before either.
-func claudeOwnCompact(path, model string) bool {
-	if _, ok := edit.GetJSON(path, "autoCompactWindow"); ok {
-		return true
-	}
-	raw, ok := edit.GetJSON(path, "modelSettings")
-	if !ok {
-		return false
-	}
-	var per map[string]struct {
-		Window any `json:"autoCompactWindow"`
-	}
-	if json.Unmarshal([]byte(raw), &per) != nil {
-		return false
-	}
-	// Claude Code keys it by the model as it was given it (ClaudeSpelled)
-	model = strings.ToLower(provider.ClaudeDashed(strings.TrimSuffix(strings.TrimPrefix(model, "magpie/"), "[1m]")))
-	for k, v := range per {
-		if v.Window != nil && strings.ToLower(provider.ClaudeDashed(strings.TrimSuffix(k, "[1m]"))) == model {
-			return true
-		}
-	}
-	return false
 }
 
 // claudeLongMain says main is a model of magpie's Claude Code takes for 1M

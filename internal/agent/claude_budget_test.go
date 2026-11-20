@@ -3,7 +3,12 @@ package agent
 import (
 	"reflect"
 	"testing"
+
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func budgetPath(id string) string { return builtinclaude.BudgetPath(id) }
 
 // TestClaudePlan (#2025): the largest window of the models is the one
 // Claude Code is told, and each model whose own differs from the one it
@@ -89,7 +94,18 @@ func TestBudgetPath(t *testing.T) {
 	if p := budgetPath("magpie/v/gpt-6.1-sol[1m]"); p != `modelSettings.magpie/v/gpt-6\.1-sol.autoCompactWindow` {
 		t.Fatal(p)
 	}
-	if got := budgetsRead(`{"a.b":{"autoCompactWindow":5},"c":{"autoCompactWindow":"auto"},"d":{"effortLevel":"high"}}`); !reflect.DeepEqual(got, map[string]string{"a.b": "5", "c": "auto"}) {
-		t.Fatal(got)
+	input := []byte(`{"modelSettings":{"a.b":{"autoCompactWindow":5},"c":{"autoCompactWindow":"auto"},"d":{"effortLevel":"high"}}}`)
+	options := builtinclaude.WindowOptions{
+		Choose: func(state builtinclaude.WindowState) builtinclaude.WindowChoice {
+			if !reflect.DeepEqual(state.UserBudgets, map[string]string{"a.b": "5", "c": "auto"}) {
+				t.Error(state.UserBudgets)
+			}
+			return builtinclaude.WindowChoice{}
+		},
+	}
+	if plan, _, err := builtinclaude.PlanWindowSettings(options, sdk.ActionSettings{
+		Files: []sdk.ActionSettingFile{{Path: "settings.json", Body: input, Exists: true}},
+	}); err != nil || len(plan.Files) != 0 {
+		t.Fatalf("unexpected settings edit: %v, %v", plan, err)
 	}
 }

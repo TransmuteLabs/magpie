@@ -49,6 +49,7 @@ type RouteSettingsOptions struct {
 	PreviousOutput           string
 	Previous                 RouteClaims
 	Env                      RouteEnvOptions
+	Window                   *WindowOptions
 }
 
 type RouteClaims map[string]string
@@ -57,6 +58,7 @@ type RouteSettingsResult struct {
 	Output string
 	Claims RouteClaims
 	Env    RouteEnvResult
+	Window WindowClaims
 }
 
 const (
@@ -115,9 +117,10 @@ func PlanRouteSettings(options RouteSettingsOptions, settings sdk.ActionSettings
 		}
 	}
 	envRemove, envResult := routeEnvChanges(options.Env, before)
-	body, err := edit.PatchJSON(file.Body, nil, append(envRemove, remove...))
+	windowSet, windowRemove, windowClaims := windowChanges(before, options.Window)
+	body, err := edit.PatchJSON(file.Body, nil, append(append(envRemove, remove...), windowRemove...))
 	if err == nil {
-		body, err = edit.PatchJSON(body, set, nil)
+		body, err = edit.PatchJSON(body, append(set, windowSet...), nil)
 	}
 	if err != nil {
 		return sdk.AgentPlan{}, RouteSettingsResult{}, edit.AtFile(file.Path, err)
@@ -139,7 +142,7 @@ func PlanRouteSettings(options RouteSettingsOptions, settings sdk.ActionSettings
 	for _, path := range remove {
 		record(path)
 	}
-	return routeSettingsPlan(file, body), RouteSettingsResult{Output: output, Claims: claims, Env: envResult}, nil
+	return routeSettingsPlan(file, body), RouteSettingsResult{Output: output, Claims: claims, Env: envResult, Window: windowClaims}, nil
 }
 
 func PlanRouteLogin(token string, settings sdk.ActionSettings) (sdk.AgentPlan, string, error) {

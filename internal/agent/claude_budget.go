@@ -2,9 +2,10 @@ package agent
 
 import (
 	"cmp"
-	"encoding/json"
 	"strconv"
 	"strings"
+
+	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 )
 
 // While Claude Desktop is on magpie, its Code tab runs Claude Code on
@@ -54,21 +55,6 @@ const claudeCompactMax = 1000000
 // typed it; only what goes into Claude Code's settings is held.
 func claudeCompactCap(n int) int { return min(n, claudeCompactMax) }
 
-// budgetKey is a modelSettings key as Claude Code matches it.
-func budgetKey(id string) string { return strings.ToLower(strings.TrimSuffix(id, "[1m]")) }
-
-// budgetKeyOK says id can go under modelSettings as a key path magpie's
-// JSON editor writes: a dot is escaped, gjson's other path characters
-// aren't, so a model whose id has one gets no entry.
-func budgetKeyOK(id string) bool {
-	return id != "" && !strings.ContainsAny(id, `*?|#@\"`)
-}
-
-// budgetPath is the key path of id's auto-compact window.
-func budgetPath(id string) string {
-	return "modelSettings." + strings.ReplaceAll(strings.TrimSuffix(id, "[1m]"), ".", `\.`) + ".autoCompactWindow"
-}
-
 // claudePlan is the window to tell Claude Code (top) and the
 // auto-compact window to give each model whose own differs from what it
 // would run at without one (entries, by id without "[1m]"). base is the
@@ -93,7 +79,7 @@ func claudePlan(models []claudeBudget, base int, theirs map[string]string) (top 
 		}
 	}
 	for _, m := range models {
-		v, ok := theirs[budgetKey(m.id)]
+		v, ok := theirs[builtinclaude.BudgetKey(m.id)]
 		if !ok || m.long || m.window <= 0 {
 			continue
 		}
@@ -107,8 +93,8 @@ func claudePlan(models []claudeBudget, base int, theirs map[string]string) (top 
 	entries = map[string]int{}
 	seen := map[string]string{}
 	for _, m := range models {
-		k := budgetKey(m.id)
-		if _, own := theirs[k]; own || !budgetKeyOK(m.id) {
+		k := builtinclaude.BudgetKey(m.id)
+		if _, own := theirs[k]; own || !builtinclaude.BudgetKeyOK(m.id) {
 			continue
 		}
 		assumed := top
@@ -153,26 +139,4 @@ func claudePlan(models []claudeBudget, base int, theirs map[string]string) (top 
 		entries[id] = want
 	}
 	return top, entries
-}
-
-// budgetsRead is the modelSettings entries' autoCompactWindow in raw, by
-// key as written: a number's digits, a string's text.
-func budgetsRead(raw string) map[string]string {
-	var per map[string]map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &per) != nil {
-		return nil
-	}
-	out := map[string]string{}
-	for k, v := range per {
-		w, ok := v["autoCompactWindow"]
-		if !ok {
-			continue
-		}
-		var s string
-		if json.Unmarshal(w, &s) != nil {
-			s = string(w)
-		}
-		out[k] = s
-	}
-	return out
 }

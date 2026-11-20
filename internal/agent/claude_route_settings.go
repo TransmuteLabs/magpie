@@ -87,7 +87,7 @@ func applyClaudeRouteLogin(path, token string) (string, error) {
 	return fingerprint, err
 }
 
-func restoreClaudeRoute(at place, path string, nextModel *string, effort string) error {
+func restoreClaudeRoute(at place, path string, nextModel *string, effort string, window builtinclaude.WindowOptions) error {
 	metadata := []string{"claude" + wireClaims, "claude.main", "claude" + wiredAt, "claude.tier_about",
 		"claude.auto_mode_model", "claude.advisor_env", "claude.output_tokens"}
 	originals := map[string]string{
@@ -121,6 +121,7 @@ func restoreClaudeRoute(at place, path string, nextModel *string, effort string)
 		AdvisorEnv: claudeAdvisorEnv, AdvisorWritten: value("claude.advisor_env"),
 		OutputWritten: value("claude.output_tokens"), EffortWritten: effort,
 		MainWritten: strings.TrimSuffix(value("claude.main"), "[1m]"), LocalAliases: at.id == "",
+		Window: &window,
 	}
 	for path, key := range originals {
 		options.Original[path] = value(key)
@@ -150,12 +151,16 @@ func restoreClaudeRoute(at place, path string, nextModel *string, effort string)
 		ReadRoutedModel: readRoutedModel,
 		IsRoutedModel:   func(value string) bool { return isMagpie(readRoutedModel(value)) },
 	}
+	var windowClaims builtinclaude.WindowClaims
 	err = extension.ApplyLinkedAgentPlan(options, func(options builtinclaude.RouteRestoreOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
-		return builtinclaude.PlanRouteRestore(options, settings, ownership)
+		plan, next, err := builtinclaude.PlanRouteRestore(options, settings, ownership)
+		windowClaims = next
+		return plan, err
 	}, extension.LinkedActionFile{Name: "settings.json", Path: path})
 	if err == nil {
 		delete(saved, login)
 		forgetValues(saved)
+		keepClaudeWindowUpdates(at, windowClaims)
 	}
 	return err
 }
