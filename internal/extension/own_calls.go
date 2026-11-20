@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
 	"sync"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -69,17 +68,16 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 		return nil, err
 	}
 	group := component.group
-	config, err := m.readModuleConfig(scope.Plugin)
-	if err != nil || config.Version != group.config.Version || group.ctx.Err() != nil {
+	if group.ctx.Err() != nil {
 		return nil, ErrActionChanged
 	}
-	entries, err := m.List()
-	if err != nil || !slices.ContainsFunc(entries, func(entry Installed) bool {
-		return entry.Manifest.ID == scope.Plugin && !entry.Disabled && entry.Revision == group.entry.Revision
-	}) {
+	if err := m.checkActiveGeneration(ctx, group.entry, group.config.Version); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, ErrActionChanged
 	}
-	if err := group.accepted(scope); err != nil {
+	if err := group.accepted(ctx, scope); err != nil {
 		return nil, err
 	}
 	task, scheduled := ctx.Value(accountTaskExecutionKey{}).(*accountTaskExecution)
@@ -95,7 +93,9 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 	if handler == nil {
 		return nil, errors.New("ordinary usage accounting is unavailable")
 	}
-	parent.mu.Lock()
+	if err := lockContext(ctx, &parent.mu); err != nil {
+		return nil, err
+	}
 	if parent.appended || scheduled && parent.reported && !snapshot {
 		parent.mu.Unlock()
 		return sdk.OwnCallResult{Accepted: false}, nil
@@ -104,7 +104,7 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 		parent.mu.Unlock()
 		return nil, err
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		parent.mu.Unlock()
 		return nil, err
 	}

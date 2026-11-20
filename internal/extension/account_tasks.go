@@ -231,7 +231,10 @@ func (manager *Manager) accountTaskHostCall(ctx context.Context, scope sdk.Scope
 		if err := manager.checkAccountTaskPins(ctx, parent.selection); err != nil {
 			return nil, err
 		}
-		receipt, err := manager.store.Operation(scope.Plugin, scope.Operation)
+		receipt, err := manager.store.OperationContext(ctx, scope.Plugin, scope.Operation)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err != nil || receipt.Scope != scope || receipt.State != "dispatched" && receipt.State != "accepted" {
 			return nil, errors.New("account task cancellation requires its live foreground or tick")
 		}
@@ -273,7 +276,7 @@ func (manager *Manager) accountTaskHostCall(ctx context.Context, scope sdk.Scope
 		}
 		return sdk.AccountTaskCancelResult{Canceled: canceled}, nil
 	}
-	if err := component.group.accepted(scope); err != nil {
+	if err := component.group.accepted(ctx, scope); err != nil {
 		return nil, err
 	}
 	request, err := sdk.DecodeAccountTaskSchedule(raw)

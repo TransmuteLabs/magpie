@@ -3,8 +3,13 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -66,5 +71,58 @@ func TestOwnCallAuthorityRejectsRecallInferenceAndChangedConfiguration(t *testin
 	}
 	if recorded != 0 {
 		t.Fatal("rejected callbacks reached ordinary usage", recorded)
+	}
+}
+
+func TestOwnCallCatalogWaitUsesParentDeadline(t *testing.T) {
+	manager, scope := usageManagerVersion(t, 8)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	scope.Operation, scope.Attempt = "own-catalog-deadline", 1
+	for _, state := range []string{"dispatched", "accepted"} {
+		if _, err := manager.Store().Journal(scope, state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recorded := 0
+	defer OnOwnCall(func(sdk.Scope, sdk.OwnCall) { recorded++ })()
+	authority := hostAuthority{manifest: lease.Manifest(), method: sdk.MethodModuleCall}
+	parent := withOwnCallParent(lease.group.withAuthority(t.Context(), sdk.PrimaryComponent, "write"), sdk.MethodModuleCall)
+	raw := json.RawMessage(`{"call":{"kind":"cache_keepalive","model":"model","usage":{"inputTokens":3}}}`)
+	lock, err := os.OpenFile(filepath.Join(manager.catalog.Root, "catalog.lock"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	held, err := filelock.TryLock(lock)
+	if err != nil || !held {
+		t.Fatalf("hold catalog lock: %v %v", held, err)
+	}
+	ctx, cancel := context.WithTimeout(parent, 250*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.recordOwnCall(ctx, scope, raw, authority, false)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		filelock.Unlock(lock)
+		if !errors.Is(err, context.DeadlineExceeded) || recorded != 0 {
+			t.Fatalf("own-call result = %v, ledger appends = %d", err, recorded)
+		}
+	case <-time.After(900 * time.Millisecond):
+		filelock.Unlock(lock)
+		<-result
+		t.Fatal("own-call callback waited for catalog lock past its deadline")
+	}
+	if entry, err := manager.Store().Operation(scope.Plugin, scope.Operation); err != nil || entry.State != "accepted" {
+		t.Fatalf("canceling the callback changed work already accepted: %+v, %v", entry, err)
+	}
+	if _, err := manager.recordOwnCall(parent, scope, raw, authority, false); err != nil || recorded != 1 {
+		t.Fatalf("ordinary ledger callback after releasing the lock: %v, appends=%d", err, recorded)
 	}
 }

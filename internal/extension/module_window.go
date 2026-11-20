@@ -53,19 +53,19 @@ func (m *Manager) Windows(ctx context.Context) ([]WindowModule, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entries, err := m.List()
+	entries, err := m.readContributionEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]WindowModule, 0)
 	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.Window == nil {
+		if entry.Manifest.Window == nil {
 			continue
 		}
 		if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
 			return nil, err
 		}
-		config, err := m.readModuleConfig(entry.Manifest.ID)
+		config, err := m.readModuleConfigContext(ctx, entry.Manifest.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -77,34 +77,28 @@ func (m *Manager) Windows(ctx context.Context) ([]WindowModule, error) {
 			Metadata:  entry.Manifest.Window.Metadata, Manifest: entry.Manifest.Clone(),
 		})
 	}
-	return out, nil
+	return out, ctx.Err()
 }
 
 func (m *Manager) windowEntry(ctx context.Context, id, revision string) (Installed, sdk.ConfigSnapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return Installed{}, sdk.ConfigSnapshot{}, err
-	}
-	entries, err := m.List()
+	entry, err := m.ActiveModule(ctx, id)
 	if err != nil {
 		return Installed{}, sdk.ConfigSnapshot{}, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != id || entry.Disabled || entry.Manifest.Window == nil {
-			continue
-		}
-		if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
-			return Installed{}, sdk.ConfigSnapshot{}, err
-		}
-		config, err := m.readModuleConfig(id)
-		if err != nil {
-			return Installed{}, sdk.ConfigSnapshot{}, err
-		}
-		if revision != windowRevision(entry.Revision, config.Version) {
-			return Installed{}, sdk.ConfigSnapshot{}, errors.New("module window generation changed")
-		}
-		return entry, config, nil
+	if entry.Manifest.Window == nil {
+		return Installed{}, sdk.ConfigSnapshot{}, errors.New("module window is not enabled")
 	}
-	return Installed{}, sdk.ConfigSnapshot{}, errors.New("module window is not enabled")
+	if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
+		return Installed{}, sdk.ConfigSnapshot{}, err
+	}
+	config, err := m.readModuleConfigContext(ctx, entry.Manifest.ID)
+	if err != nil {
+		return Installed{}, sdk.ConfigSnapshot{}, err
+	}
+	if revision != windowRevision(entry.Revision, config.Version) {
+		return Installed{}, sdk.ConfigSnapshot{}, errors.New("module window generation changed")
+	}
+	return entry, config, ctx.Err()
 }
 
 func (m *Manager) ReadWindowFile(ctx context.Context, id, revision, filename string) ([]byte, error) {
@@ -184,7 +178,9 @@ func (m *Manager) windowLease(ctx context.Context, id, revision string) (*Lease,
 	if err != nil {
 		return nil, Installed{}, err
 	}
-	lease, err := m.AcquireRevision(ctx, id, entry.Revision, config.Version)
+	lease, err := m.acquireLease(ctx, id, &expectedGeneration{
+		packageRevision: entry.Revision, configVersion: config.Version, enableGeneration: &entry.EnableGeneration,
+	})
 	if err != nil {
 		return nil, Installed{}, err
 	}
@@ -223,7 +219,7 @@ func (m *Manager) CallWindowBindingWithOptions(ctx context.Context, id, revision
 	if request != "" && (len(request) > 256 || strings.TrimSpace(request) == "" || strings.ContainsFunc(request, unicode.IsControl)) {
 		return nil, errors.New("module window request identity is invalid")
 	}
-	scope, err := m.selectedWindowScope(entry.Manifest, binding, options.Account)
+	scope, err := m.selectedWindowScope(ctx, entry.Manifest, binding, options.Account)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +248,7 @@ func (m *Manager) CallWindowBindingWithOptions(ctx context.Context, id, revision
 			scope.Operation = hex.EncodeToString(sum[:])
 			scope.Attempt = 1
 			if binding.Provider != "" {
-				if err := m.store.bindWindowIntent(scope, bindingID, input); err != nil {
+				if err := m.store.bindWindowIntent(ctx, scope, bindingID, input); err != nil {
 					return nil, err
 				}
 			}

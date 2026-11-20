@@ -401,7 +401,10 @@ func (parent *ownedProcess) write(ctx context.Context, request sdk.ProcessWriteR
 		return sdk.ProcessWriteResult{}, err
 	}
 	defer parent.ioWG.Done()
-	operation, err := parent.lease.manager.store.Operation(parent.scope.Plugin, parent.scope.Operation)
+	operation, err := parent.lease.manager.store.OperationContext(ctx, parent.scope.Plugin, parent.scope.Operation)
+	if ctx.Err() != nil {
+		return sdk.ProcessWriteResult{}, ctx.Err()
+	}
 	if err != nil || operation.Scope != parent.scope || operation.State != "accepted" {
 		return sdk.ProcessWriteResult{}, errors.New("owned process write requires durable foreground acceptance")
 	}

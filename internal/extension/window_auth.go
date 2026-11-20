@@ -86,7 +86,10 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 		}
 		scope.Account, scope.Generation = options.Account.ID, generation
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
+		if ctx.Err() != nil {
+			return sdk.WindowAuthFlowView{}, ctx.Err()
+		}
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication selected account changed")
 	}
 	policy, supported := ctx.Value(windowAuthPolicyKey{}).(WindowAuthPolicy)
@@ -502,7 +505,10 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 		if entry.Manifest.ID != record.Scope.Plugin || entry.Disabled || entry.Revision != record.Revision {
 			continue
 		}
-		config, err := m.readModuleConfig(record.Scope.Plugin)
+		config, err := m.readModuleConfigContext(ctx, record.Scope.Plugin)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if err != nil || config.Version != record.Config {
 			return errors.New("window authentication configuration changed")
 		}

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
 
@@ -150,18 +149,11 @@ func (m *Manager) checkRequestPolicy(ctx context.Context, invocation *requestPol
 	if lease.closed.Load() || lease.ctx.Err() != nil {
 		return errors.New("request policy lease was revoked")
 	}
-	if _, err := m.authFor(invocation.scope); err != nil {
+	if _, err := m.authForContext(ctx, invocation.scope); err != nil {
 		return err
 	}
-	current, err := m.readModuleConfigContext(ctx, invocation.scope.Plugin)
-	if err != nil || current.Version != lease.ConfigVersion() {
-		return errors.New("request policy configuration changed")
-	}
-	if !slices.ContainsFunc(m.contributionEntries(ctx), func(entry Installed) bool {
-		return entry.Manifest.ID == invocation.scope.Plugin && entry.Revision == lease.Revision() &&
-			entry.EnableGeneration == lease.worker.entry.EnableGeneration
-	}) {
-		return errors.New("request policy package changed")
+	if err := m.checkActiveGeneration(ctx, lease.worker.entry, lease.ConfigVersion()); err != nil {
+		return err
 	}
 	invocation.mu.Lock()
 	defer invocation.mu.Unlock()
@@ -181,7 +173,7 @@ func requestPolicyFailureReason(ctx context.Context, err error) string {
 	return "revoked"
 }
 
-func (manager *Manager) requestSafety(invocation *requestPolicyInvocation, evidence string, complete bool) requestpolicy.Safety {
+func (manager *Manager) requestSafety(ctx context.Context, invocation *requestPolicyInvocation, evidence string, complete bool) requestpolicy.Safety {
 	safety := requestpolicy.Safety{NoEffect: complete && evidence != ""}
 	invocation.mu.Lock()
 	safety.OutputStarted = invocation.output
@@ -189,7 +181,7 @@ func (manager *Manager) requestSafety(invocation *requestPolicyInvocation, evide
 	if evidence != "rejected-before-effect" {
 		return safety
 	}
-	operation, err := manager.store.Operation(invocation.scope.Plugin, invocation.scope.Operation)
+	operation, err := manager.store.OperationContext(ctx, invocation.scope.Plugin, invocation.scope.Operation)
 	if err != nil || operation.Scope != invocation.scope {
 		safety.Uncertain = true
 		return safety
@@ -260,7 +252,12 @@ func (m *Manager) recoverRequest(ctx context.Context, scope sdk.Scope, raw json.
 	invocation.mu.Unlock()
 	// Classification is not evidence. Unknown/incomplete envelopes cannot
 	// authorize a repeat, regardless of an operator's configured retry count.
-	decision := budget.Disposition(policy, request.Facts, classification, m.requestSafety(invocation, request.Evidence, request.Facts.Complete), attempt)
+	safety := m.requestSafety(ctx, invocation, request.Evidence, request.Facts.Complete)
+	if ctx.Err() != nil {
+		result.Reason = "canceled"
+		return nil, ctx.Err()
+	}
+	decision := budget.Disposition(policy, request.Facts, classification, safety, attempt)
 	if classification.Class == requestpolicy.Auth {
 		decision.Reason = "auth-recovery-unavailable"
 	}
@@ -289,7 +286,13 @@ func (m *Manager) recoverRequest(ctx context.Context, scope sdk.Scope, raw json.
 		result.Reason = requestPolicyFailureReason(ctx, err)
 		return nil, err
 	}
-	if safety := m.requestSafety(invocation, request.Evidence, request.Facts.Complete); safety.Accepted || safety.Uncertain || safety.OutputStarted {
+	safety = m.requestSafety(ctx, invocation, request.Evidence, request.Facts.Complete)
+	if ctx.Err() != nil {
+		result.Action = requestpolicy.ActionTerminal
+		result.Reason = "canceled"
+		return nil, ctx.Err()
+	}
+	if safety.Accepted || safety.Uncertain || safety.OutputStarted {
 		result.Action = requestpolicy.ActionTerminal
 		result.Reason = "unsafe"
 		return finishResult(), nil

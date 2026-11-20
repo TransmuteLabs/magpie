@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,57 @@ func TestUsageEpochFencesInferenceUntilMatchedFreshAcknowledgment(t *testing.T) 
 	if _, err := manager.Call(context.Background(), scope.Plugin, sdk.MethodProviderExecute, scope,
 		sdk.ExecuteRequest{Protocol: "chat", Model: "model", Body: []byte(`{}`)}, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUsageInvalidationReceiptReadRespectsCallbackDeadline(t *testing.T) {
+	manager, scope := usageManager(t)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	scope.Operation, scope.Attempt = "usage-invalidation-deadline", 1
+	store := manager.Store()
+	if _, err := store.Journal(scope, "dispatched"); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Journal(scope, "accepted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := hostAuthority{manifest: lease.worker.entry.Manifest, method: sdk.MethodToolCall}
+	call := lease.group.withAuthority(t.Context(), sdk.PrimaryComponent, "write")
+	ctx, cancel := context.WithTimeout(call, 200*time.Millisecond)
+	defer cancel()
+	store.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.invalidateUsage(ctx, scope, json.RawMessage(`{}`), authority)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		store.mu.Unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("receipt lookup returned %v, want deadline", err)
+		}
+	case <-time.After(1200 * time.Millisecond):
+		store.mu.Unlock()
+		<-done
+		t.Fatal("receipt lookup waited for the Store after callback deadline")
+	}
+	if current, err := store.Operation(scope.Plugin, scope.Operation); err != nil || current != receipt {
+		t.Fatalf("canceled callback changed the durable receipt: %+v, %v", current, err)
+	}
+	if stamp, err := store.UsageStamp(scope); err != nil || stamp.Revision != 0 || stamp.Dirty {
+		t.Fatalf("canceled callback changed usage: %+v, %v", stamp, err)
+	}
+	if _, err := manager.invalidateUsage(call, scope, json.RawMessage(`{}`), authority); err != nil {
+		t.Fatal(err)
+	}
+	if stamp, err := store.UsageStamp(scope); err != nil || stamp.Revision != 1 || !stamp.Dirty {
+		t.Fatalf("live callback did not invalidate usage: %+v, %v", stamp, err)
 	}
 }
 

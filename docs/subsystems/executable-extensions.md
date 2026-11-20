@@ -312,8 +312,9 @@ continue to need no module, native library, executable worker or Bun.
 
 After successful bind, [`extension_activation.go`](../../internal/gateway/extension_activation.go)
 attaches [`Manager.BeginGatewayActivation`](../../internal/extension/gateway_activation.go).
-Its handle pins package and configuration identity, reconciles local and
-external catalog changes, and joins its removable change subscription.
+Its handle resolves active root modules under the gateway lifetime, pins
+package, enablement and configuration identity, reconciles local and external
+catalog changes, and joins its removable change subscription.
 Disable, removal, configuration replacement and shutdown release the lease
 and retire the cached generation through the existing bounded drain and
 disposer before replacement. Startup failure is logged and the ordinary
@@ -527,6 +528,8 @@ Account replacement requires account-auth authority and an accepted receipt
 for the exact selected account. It returns only ID/generation; the handler
 then returns its terminal result, since the old generation is revoked.
 
+Callbacks use their request deadline when reading an operation receipt.
+Final receipt collection and journal writes remain with the operation owner.
 The host persists acceptance before acknowledging it. Unexplained dispatched
 worker death is uncertain. Accepted, uncertain and completed operations are
 not automatically replayed or sent to a fallback. A known unsent call may be
@@ -690,6 +693,9 @@ kernel. SDK packages do not enter `plugins.json`, and a static UI does not
 start a Bun provider host. Opaque refs bind the module, package revision,
 config version and exact part (`window:page` or `window:panel:<index>`).
 Old refs fail after update/config change/off rather than selecting new code.
+Window discovery and reference validation resolve enabled root modules
+through the same registry used by other SDK owners. Metadata reads, frozen
+assets, configuration access and account selection use the caller's deadline.
 
 Settings search matches a panel's displayed title, default title and package
 name. Each matching panel keeps its own frame visible and sibling panels
