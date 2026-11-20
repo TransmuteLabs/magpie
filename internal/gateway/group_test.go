@@ -20,6 +20,10 @@ type keyed struct {
 }
 
 func (k *keyed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
 	io.ReadAll(r.Body)
 	key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	k.tried = append(k.tried, key)
@@ -31,6 +35,17 @@ func (k *keyed) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	io.WriteString(w, `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"from `+key+`"},"finish_reason":"stop"}],`+
 		`"usage":{"prompt_tokens":3000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":2500}}}`)
+}
+
+func TestKeyedCountsUnauthenticatedInference(t *testing.T) {
+	upstream := &keyed{}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	response := httptest.NewRecorder()
+	upstream.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(upstream.tried) != 1 || upstream.tried[0] != "" {
+		t.Fatalf("unauthenticated inference: status %d, keys %q", response.Code, upstream.tried)
+	}
 }
 
 func fresh(t *testing.T) {
