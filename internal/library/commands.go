@@ -217,7 +217,7 @@ func (l *Library) syncCommands(t *Target, b *backups, res *Result) {
 		path, body, taken := takenFor(c, id, sp)
 		if body != nil {
 			// the user's own file it was imported from, as it was
-			files = append(files, ownFile{name: c.Name, path: path, body: func() []byte { return body }})
+			files = append(files, ownFile{name: c.Name, path: path, body: func() []byte { return body }, take: true})
 			continue
 		}
 		if !sp.args && usesArgs(c.Prompt) {

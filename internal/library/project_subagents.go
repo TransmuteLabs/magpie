@@ -101,10 +101,12 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			done[f.Path] = true
 			continue
 		}
-		cur, err := os.ReadFile(abs)
+		cur, err := readOwnOutput(abs)
 		switch {
 		case os.IsNotExist(err):
 			continue // gone: written again below if it is still wanted
+		case errors.Is(err, errOwnOutputType):
+			continue
 		case err != nil:
 			fail("subagent:"+f.Name, err)
 			kept = append(kept, f)
@@ -148,26 +150,21 @@ func (l *Library) syncProjectSubagents(p *Project, fail func(what string, err er
 			fail("subagent:"+w.s.Name, err)
 			continue
 		}
-		body := l.renderSubagent(w.sp, w.s)
-		cur, err := os.ReadFile(abs)
-		switch {
-		case err == nil && bytes.Equal(cur, body):
-			// the same as magpie would write: taken as magpie's
-		case err == nil:
+		if _, err := os.Lstat(abs); err == nil {
 			fail("subagent:"+w.s.Name, fmt.Errorf("%s is in the project already and isn't magpie's: it's left as it is", rel))
 			continue
-		case !os.IsNotExist(err):
+		} else if !os.IsNotExist(err) {
 			fail("subagent:"+w.s.Name, err)
 			continue
-		default:
-			if err := p.mkdirs(filepath.Dir(abs)); err != nil {
-				fail("subagent:"+w.s.Name, err)
-				continue
-			}
-			if err := edit.WriteAtomic(abs, body); err != nil {
-				fail("subagent:"+w.s.Name, err)
-				continue
-			}
+		}
+		body := l.renderSubagent(w.sp, w.s)
+		if err := p.mkdirs(filepath.Dir(abs)); err != nil {
+			fail("subagent:"+w.s.Name, err)
+			continue
+		}
+		if err := edit.WriteAtomic(abs, body); err != nil {
+			fail("subagent:"+w.s.Name, err)
+			continue
 		}
 		kept = append(kept, SubagentFile{Name: w.s.Name, Path: rel, Hash: subagentHash(body)})
 	}

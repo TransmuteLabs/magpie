@@ -199,8 +199,7 @@ func TestCommandsWordsByPlace(t *testing.T) {
 
 // A command file of the user's own by the same name is never written
 // over, nor taken away; one magpie wrote that the user edited is theirs
-// from then on; one that says what magpie would write is taken as
-// magpie's.
+// from then on, even when a pre-existing file matches what magpie would write.
 func TestCommandsLeaveTheUsersFiles(t *testing.T) {
 	h := sandbox(t)
 	files := commandAgents(t, h, "review")
@@ -213,7 +212,9 @@ func TestCommandsLeaveTheUsersFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p := commandProblems(res); len(p) != 1 || !strings.Contains(p["claude"], "has a slash command of its own at "+files["claude"]) {
+	if p := commandProblems(res); len(p) != 2 ||
+		!strings.Contains(p["claude"], "has a slash command of its own at "+files["claude"]) ||
+		!strings.Contains(p["pi"], "has a slash command of its own at "+files["pi"]) {
 		t.Fatalf("problems: %+v", res.Problems)
 	}
 	if read(t, files["claude"]) != mine {
@@ -235,18 +236,19 @@ func TestCommandsLeaveTheUsersFiles(t *testing.T) {
 	if !strings.Contains(commandProblems(res)["droid"], "of its own") {
 		t.Errorf("problems: %+v", res.Problems)
 	}
-	if read(t, files["opencode"]) != "Review $ARGUMENTS, twice.\n" || read(t, files["pi"]) != "Review $ARGUMENTS, twice.\n" {
-		t.Errorf("magpie's files weren't updated: %q %q", read(t, files["opencode"]), read(t, files["pi"]))
+	if read(t, files["opencode"]) != "Review $ARGUMENTS, twice.\n" {
+		t.Errorf("magpie's OpenCode file wasn't updated: %q", read(t, files["opencode"]))
+	}
+	if read(t, files["pi"]) != same {
+		t.Error("the user's matching Pi file was overwritten")
 	}
 
 	// removed: magpie's own files go, the user's stay
 	ok(t)(RemoveCommands([]string{"review"}))
-	for _, id := range []string{"opencode", "pi"} {
-		if _, err := os.Stat(files[id]); !os.IsNotExist(err) {
-			t.Errorf("magpie's %s file stayed: %v", id, err)
-		}
+	if _, err := os.Stat(files["opencode"]); !os.IsNotExist(err) {
+		t.Errorf("magpie's OpenCode file stayed: %v", err)
 	}
-	if read(t, files["droid"]) != edited || read(t, files["claude"]) != mine {
+	if read(t, files["droid"]) != edited || read(t, files["claude"]) != mine || read(t, files["pi"]) != same {
 		t.Error("removing took the user's files")
 	}
 	l, _ := load()
