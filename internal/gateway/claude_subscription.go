@@ -2032,7 +2032,10 @@ func (r *subscriptionRun) released() {
 
 // resume hands a conversation's next turn to the run that had its last
 // one, when one is waiting: the user's messages since, and nothing else.
-func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRun, <-chan Event) {
+func (b *subscriptionBridge) resume(ctx context.Context, req *Request, owner string) (*subscriptionRun, <-chan Event) {
+	if ctx.Err() != nil {
+		return nil, nil
+	}
 	key, since := nextTurn(req, owner)
 	if key == "" {
 		return nil, nil
@@ -2115,9 +2118,14 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 	rewinding := run.rewinding
 	run.mu.Unlock()
 	if rewinding != nil {
-		<-rewinding
+		select {
+		case <-rewinding:
+		case <-ctx.Done():
+			run.abortFor("the next turn was canceled while waiting for its rewind")
+			return nil, nil
+		}
 	}
-	if err := run.setSafeguards(context.Background(), req); err != nil {
+	if err := run.setSafeguards(ctx, req); err != nil {
 		run.abortFor("its safeguards could not be set for the next turn: " + err.Error())
 		return nil, nil
 	}
@@ -2154,7 +2162,7 @@ func (b *subscriptionBridge) resume(req *Request, owner string) (*subscriptionRu
 			return nil, nil
 		}
 	}
-	if err := run.tell(line); err != nil {
+	if err := run.tellWithin(ctx, line); err != nil {
 		run.abortFor("it could not be told the next turn: " + err.Error())
 		return nil, nil
 	}
@@ -7309,8 +7317,14 @@ func (s *Server) serveClaudeSubscription(w http.ResponseWriter, r *http.Request,
 	}
 	start := func(ctx context.Context, req *Request) (*subscriptionRun, <-chan Event, error) {
 		ctx = p.Via(ctx) // the account's own proxy, its CLI run's too
-		if run, events := s.subscription.resume(req, owner); run != nil {
+		if run, events := s.subscription.resume(ctx, req, owner); run != nil {
 			return run, events, nil
+		}
+		if err := ctx.Err(); err != nil {
+			if req.branch != nil {
+				req.branch.discard()
+			}
+			return nil, nil, err
 		}
 		// a run let go past idleMost left its session for this turn, or
 		// the run whose calls another request answered first has it
