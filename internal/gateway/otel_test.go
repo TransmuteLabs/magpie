@@ -890,11 +890,11 @@ func TestOTelClaudeMainAndChildDedupRetainsHelper(t *testing.T) {
 			t.Setenv("PI_CODING_AGENT_DIR", t.TempDir())
 			t.Setenv("PI_CODING_AGENT_SESSION_DIR", "")
 			received := make(chan []byte, 16)
-			collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			collector := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				b, _ := io.ReadAll(r.Body)
 				received <- b
 				io.WriteString(w, `{}`)
-			}))
+			})))
 			defer collector.Close()
 			t.Setenv("MAGPIE_OTEL_ENABLED", "true")
 			t.Setenv("MAGPIE_OTEL_ENDPOINT", collector.URL)
@@ -976,6 +976,7 @@ func TestOTelClaudeMainAndChildDedupRetainsHelper(t *testing.T) {
 				}
 			}
 			stop()
+			probeFixtureRoot(t, collector)
 			counts := map[string]int{}
 			tokens := 0
 			for len(received) > 0 {

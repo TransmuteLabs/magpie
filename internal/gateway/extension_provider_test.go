@@ -97,12 +97,13 @@ func TestExtensionProviderNeverFallsBackAfterAcceptance(t *testing.T) {
 			}
 			provider.Changed()
 			var fallbacks atomic.Int32
-			vendor := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			vendor := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				fallbacks.Add(1)
 				writer.Header().Set("Content-Type", "application/json")
 				io.WriteString(writer, `{"id":"fallback","choices":[{"message":{"role":"assistant","content":"fallback answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
-			}))
+			})))
 			t.Cleanup(vendor.Close)
+			probeFixtureRoot(t, vendor)
 			if err := provider.Save(provider.Provider{ID: "fallback", Name: "Fallback", Chat: vendor.URL + "/v1", Key: "fixture", Models: []string{"m1"}}); err != nil {
 				t.Fatal(err)
 			}

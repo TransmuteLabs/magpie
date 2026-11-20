@@ -75,7 +75,7 @@ func (a *azureUp) last() bedrockCall {
 func TestAzureRoutes(t *testing.T) {
 	fresh(t)
 	up := &azureUp{}
-	srv := httptest.NewServer(up)
+	srv := httptest.NewServer(withoutAnonymousFixtureProbe(up))
 	t.Cleanup(srv.Close)
 	p, err := provider.FromPreset(provider.AzurePreset)
 	if err != nil {
@@ -114,6 +114,7 @@ func TestAzureRoutes(t *testing.T) {
 			if code != 200 || !strings.Contains(body, tc.reply) {
 				t.Fatalf("status %d: %s", code, body)
 			}
+			probeFixtureRoot(t, srv)
 			c := up.last()
 			if c.path != tc.upstream || c.model != tc.model {
 				t.Fatalf("upstream: %s %q", c.path, c.model)
