@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -188,6 +189,7 @@ type running struct {
 	state  State
 	why    string
 	ctx    *Ctx
+	config map[string]any
 	wanted bool
 }
 
@@ -215,20 +217,27 @@ func New(ms []Manifest) *Runtime {
 }
 
 // Reconcile brings the runtime to on: each plugin wanted and not active is
-// applied, once what it requires is provided; each active one no longer
-// wanted is disposed, with whatever requires a service it provided. on
-// says, by id, whether a plugin is wanted; config is each one's composed
-// config.
+// applied, once what it requires is provided. A change to a running
+// plugin's settings withdraws it and its dependents before reactivation.
 func (rt *Runtime) Reconcile(on map[string]bool, config map[string]map[string]any) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	going := map[string]bool{}
 	for id, p := range rt.plugins {
 		p.wanted = on[id]
+		changed := p.m.Apply != nil && !maps.EqualFunc(p.config, config[id], reflect.DeepEqual)
+		switch p.state {
+		case Active:
+			if !p.wanted || changed {
+				going[id] = true
+			}
+		case Failed:
+			if changed && Compatible(p.m.API) {
+				p.state, p.why = Off, ""
+			}
+		}
 	}
-	// off first: each one no longer wanted, and each that requires a
-	// service one of those provided, newest first, so a service is
-	// withdrawn after its users
-	going := map[string]bool{}
+	// Withdraw each departing service after its users.
 	for {
 		more := false
 		for _, id := range rt.order {
@@ -236,12 +245,17 @@ func (rt *Runtime) Reconcile(on map[string]bool, config map[string]map[string]an
 			if going[id] {
 				continue
 			}
-			if !p.wanted || rt.needsGoing(p, going) {
+			if rt.needsGoing(p, going) {
 				going[id], more = true, true
 			}
 		}
 		if !more {
 			break
+		}
+	}
+	for _, p := range rt.plugins {
+		if p.state == Failed && Compatible(p.m.API) && rt.needsGoing(p, going) {
+			p.state, p.why = Off, ""
 		}
 	}
 	for i := len(rt.order) - 1; i >= 0; i-- {
@@ -316,7 +330,8 @@ func (rt *Runtime) satisfied(m Manifest) bool { return len(rt.missing(m)) == 0 }
 // apply runs a plugin's Apply, called with rt.mu held. A panic is a
 // failure of that plugin alone; what it registered before it is undone.
 func (rt *Runtime) apply(p *running, config map[string]any) {
-	ctx := &Ctx{ID: p.m.ID, Config: cloneConfigMap(config), rt: rt}
+	p.config = cloneConfigMap(config)
+	ctx := &Ctx{ID: p.m.ID, Config: cloneConfigMap(p.config), rt: rt}
 	ctx.parts = append(ctx.parts, p.m.Parts...)
 	err := func() (err error) {
 		defer func() {
@@ -345,7 +360,7 @@ func (rt *Runtime) dispose(p *running) {
 	if p.ctx != nil {
 		undo(p.ctx)
 	}
-	p.ctx, p.state, p.why = nil, Disposed, ""
+	p.ctx, p.config, p.state, p.why = nil, nil, Disposed, ""
 	rt.order = slices.DeleteFunc(rt.order, func(id string) bool { return id == p.m.ID })
 }
 

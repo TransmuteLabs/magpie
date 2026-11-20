@@ -88,6 +88,61 @@ func TestCompatible(t *testing.T) {
 	}
 }
 
+func TestReconcileAppliesSettingsBeforeDependents(t *testing.T) {
+	var events []string
+	const service = "fixture.settings"
+	recorder := func(c *Ctx, name string) {
+		events = append(events, "start "+name)
+		c.OnDispose(func() { events = append(events, "stop "+name) })
+	}
+	rt := New([]Manifest{
+		{ID: "consumer", Requires: []string{service}, Apply: func(ctx *Ctx) error {
+			value := ctx.Service(service).(string)
+			recorder(ctx, "consumer "+value)
+			if value == "unsupported" {
+				return errors.New("unsupported service")
+			}
+			return nil
+		}},
+		{ID: "producer", Provides: []string{service}, Apply: func(ctx *Ctx) error {
+			value := ctx.Config["value"].(string)
+			ctx.Provide(service, value)
+			recorder(ctx, "producer "+value)
+			if value == "bad" {
+				return errors.New("invalid settings")
+			}
+			return nil
+		}},
+	})
+	t.Cleanup(rt.Stop)
+	wanted := map[string]bool{"producer": true, "consumer": true}
+	apply := func(value string, want ...string) {
+		t.Helper()
+		events = nil
+		rt.Reconcile(wanted, map[string]map[string]any{"producer": {"value": value}})
+		if !slices.Equal(events, want) {
+			t.Fatalf("settings %q: got %q, want %q", value, events, want)
+		}
+	}
+	apply("first", "start producer first", "start consumer first")
+	apply("next", "stop consumer first", "stop producer first", "start producer next", "start consumer next")
+	apply("bad", "stop consumer next", "stop producer next", "start producer bad", "stop producer bad")
+	apply("bad")
+	statuses := rt.Statuses()
+	if statuses[0].State != Pending || statuses[1].State != Failed {
+		t.Fatalf("after invalid settings: %+v", statuses)
+	}
+	apply("valid", "start producer valid", "start consumer valid")
+	apply("valid")
+	apply("unsupported", "stop consumer valid", "stop producer valid",
+		"start producer unsupported", "start consumer unsupported", "stop consumer unsupported")
+	apply("unsupported")
+	if statuses := rt.Statuses(); statuses[0].State != Failed || statuses[1].State != Active {
+		t.Fatalf("after unsupported service: %+v", statuses)
+	}
+	apply("repaired", "stop producer unsupported", "start producer repaired", "start consumer repaired")
+}
+
 // Core never imports a plugin, and a plugin never imports another: they
 // reach each other through services. main.go and plugins/all alone gather
 // them; a test may too.
