@@ -102,7 +102,8 @@ func historyCalls(proto provider.Protocol, b []byte) bool {
 func deepseekUpstream(t *testing.T, proto provider.Protocol, stubborn bool) (*httptest.Server, func() [][]byte) {
 	var mu sync.Mutex
 	var got [][]byte
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		got = append(got, b)
@@ -113,7 +114,8 @@ func deepseekUpstream(t *testing.T, proto provider.Protocol, stubborn bool) (*ht
 			return
 		}
 		io.WriteString(w, deepseekSummary(proto))
-	}))
+	})
+	up := httptest.NewServer(mux)
 	t.Cleanup(up.Close)
 	return up, func() [][]byte {
 		mu.Lock()
@@ -155,6 +157,7 @@ func TestCodexCompactToolCallAsksAgainAsText(t *testing.T) {
 			t.Run(string(proto)+"/"+model, func(t *testing.T) {
 				up, got := deepseekUpstream(t, proto, false)
 				saveDeepSeek(t, proto, up.URL)
+				probeInferenceFixture(t, up.URL, "/v1/models")
 				code, body := codexPost(t, strings.Replace(compactExecRequest, "MODEL", model, 1))
 				if code != 200 {
 					t.Fatalf("%d %s", code, body)
