@@ -2,6 +2,7 @@ package extension
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -121,11 +122,15 @@ func NewStore(root string) *Store {
 }
 
 func (s *Store) StateGet(scope sdk.Scope, key string) (VersionedValue, error) {
+	return s.stateGet(context.Background(), scope, key)
+}
+
+func (s *Store) stateGet(ctx context.Context, scope sdk.Scope, key string) (VersionedValue, error) {
 	var result VersionedValue
 	if !storeValidScope(scope) || !storeToken(key) {
 		return result, storeInvalid()
 	}
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		if err := storeCheckGeneration(root, scope); err != nil {
 			return err
 		}
@@ -526,10 +531,16 @@ func storeReadOperation(root *os.Root, plugin, operation string) (JournalEntry, 
 }
 
 func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
+	return s.withStoreContext(context.Background(), plugin, action)
+}
+
+func (s *Store) withStoreContext(ctx context.Context, plugin string, action func(*os.Root) error) error {
 	if s == nil || s.root == "" {
 		return storeInvalid()
 	}
-	s.mu.Lock()
+	if err := lockContext(ctx, &s.mu); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	root, err := storeOpenRoot(s.root)
 	if err != nil {
@@ -546,8 +557,11 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		return err
 	}
 	defer lock.Close()
-	started := time.Now()
+	due := time.Now().Add(filelock.Wait)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		held, err := filelock.TryLock(lock)
 		if err != nil {
 			return storeError("store_locked", "Extension store lock is unavailable.")
@@ -555,10 +569,14 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		if held {
 			break
 		}
-		if time.Since(started) >= filelock.Wait {
+		if time.Now().After(due) {
 			return storeError("store_locked", "Extension store lock is unavailable.")
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	defer filelock.Unlock(lock)
 	namespace, err := storeDirectory(private, plugin)
@@ -566,7 +584,30 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		return err
 	}
 	defer namespace.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return action(namespace)
+}
+
+func lockContext(ctx context.Context, mutex *sync.Mutex) error {
+	if ctx.Done() == nil {
+		mutex.Lock()
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if mutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 func storeOpenRoot(path string) (*os.Root, error) {

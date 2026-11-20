@@ -203,7 +203,9 @@ func TestSDKGatewayHooksObserveStreaming(t *testing.T) {
 	var releaseOnce sync.Once
 	releaseObserver := func() { releaseOnce.Do(func() { close(observeRelease) }) }
 	defer releaseObserver()
-	observer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const observePath = "/observe"
+	observerRoutes := http.NewServeMux()
+	observerRoutes.HandleFunc("POST "+observePath, func(w http.ResponseWriter, r *http.Request) {
 		var value sdkHookDelivery
 		if err := json.NewDecoder(r.Body).Decode(&value); err != nil {
 			t.Error(err)
@@ -215,9 +217,10 @@ func TestSDKGatewayHooksObserveStreaming(t *testing.T) {
 		case <-r.Context().Done():
 		}
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})
+	observer := httptest.NewServer(observerRoutes)
 	t.Cleanup(observer.Close)
-	manager := installSDKGatewayHook(t, sdkHookConfig{Marker: "stream", ResponseURL: observer.URL}, sdk.GatewayHookDescriptor{Request: true, Response: true})
+	manager := installSDKGatewayHook(t, sdkHookConfig{Marker: "stream", ResponseURL: observer.URL + observePath}, sdk.GatewayHookDescriptor{Request: true, Response: true})
 	generated := make(chan struct{})
 	var generatedOnce sync.Once
 	finishGeneration := func() { generatedOnce.Do(func() { close(generated) }) }

@@ -40,7 +40,7 @@ func TestSDKObserversRejectRawWorkerResult(t *testing.T) {
 	}
 	for _, observer := range []struct {
 		name    string
-		list    func(*Manager) ([]LedgerTarget, error)
+		list    func(*Manager, context.Context) ([]LedgerTarget, error)
 		deliver func(LedgerTarget, string) error
 	}{
 		{"ledger", (*Manager).LedgerTargets, func(target LedgerTarget, value string) error {
@@ -51,7 +51,7 @@ func TestSDKObserversRejectRawWorkerResult(t *testing.T) {
 		}},
 	} {
 		t.Run(observer.name, func(t *testing.T) {
-			targets, err := observer.list(manager)
+			targets, err := observer.list(manager, t.Context())
 			if err != nil || len(targets) != 1 {
 				t.Fatalf("observer discovery got %+v: %v", targets, err)
 			}
@@ -138,7 +138,7 @@ func TestSDKObserverAdmissionIsolatesBrokenConfigAndRejectsPreviousEnablement(t 
 	}
 	for _, observer := range []struct {
 		name    string
-		list    func(*Manager) ([]LedgerTarget, error)
+		list    func(*Manager, context.Context) ([]LedgerTarget, error)
 		deliver func(*Manager, context.Context, LedgerTarget) error
 	}{
 		{"ledger", (*Manager).LedgerTargets, func(m *Manager, ctx context.Context, target LedgerTarget) error {
@@ -151,7 +151,7 @@ func TestSDKObserverAdmissionIsolatesBrokenConfigAndRejectsPreviousEnablement(t 
 		t.Run(observer.name, func(t *testing.T) {
 			wantTarget := func(m *Manager) LedgerTarget {
 				t.Helper()
-				targets, err := observer.list(m)
+				targets, err := observer.list(m, t.Context())
 				if err != nil || len(targets) != 1 || targets[0].Module != healthy {
 					t.Fatalf("discovery must retain only the healthy observer: %v, %v", targets, err)
 				}

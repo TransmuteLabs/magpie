@@ -24,7 +24,7 @@ var gatewayExtensionManager = extension.Default
 func gatewayHookChain(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
 	legacy := plugin.HasGateway()
 	manager := gatewayExtensionManager()
-	sdkHooks := manager != nil && manager.HasGateway()
+	sdkHooks := manager != nil && manager.HasGateway(r.Context())
 	if !legacy && !sdkHooks {
 		return w, body, func() {}
 	}
@@ -82,19 +82,19 @@ func gatewayHookChain(w http.ResponseWriter, r *http.Request, from provider.Prot
 	}
 }
 
-func gatewayHooksAvailable() bool {
+func gatewayHooksAvailable(ctx context.Context) bool {
 	if plugin.HasGateway() {
 		return true
 	}
 	manager := gatewayExtensionManager()
-	return manager != nil && manager.HasGateway()
+	return manager != nil && manager.HasGateway(ctx)
 }
 
 func gatewaySignIn(ctx context.Context, event plugin.SignInEvent) {
 	if plugin.HasGateway() {
 		plugin.GatewaySignIn(ctx, event)
 	}
-	if manager := gatewayExtensionManager(); manager != nil && manager.HasGateway() {
+	if manager := gatewayExtensionManager(); manager != nil && manager.HasGateway(ctx) {
 		signIn := sdk.GatewaySignInEvent{
 			Provider: event.Provider, ProviderName: event.ProviderName, Account: event.Account,
 			State: event.State,

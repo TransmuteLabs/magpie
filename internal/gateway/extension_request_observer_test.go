@@ -71,7 +71,7 @@ func TestExtensionRequestObserverOrdinaryFallback(t *testing.T) {
 		}
 	})
 
-	targets, err := manager.RequestObservationTargets()
+	targets, err := manager.RequestObservationTargets(t.Context())
 	if err != nil || len(targets) != 1 {
 		t.Fatal("request observer discovery", targets, err)
 	}
@@ -100,7 +100,7 @@ func TestExtensionRequestObserverOrdinaryFallback(t *testing.T) {
 	if err := manager.ObserveRequest(ctx, targets[0], probe); err == nil {
 		t.Fatal("stale request event acquired the replacement generation")
 	}
-	current, err := manager.RequestObservationTargets()
+	current, err := manager.RequestObservationTargets(t.Context())
 	if err != nil || len(current) != 1 || current[0] == targets[0] {
 		t.Fatal("replacement request observer discovery", current, err)
 	}

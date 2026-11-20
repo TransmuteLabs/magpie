@@ -16,12 +16,12 @@ type budgetPolicyBinding struct {
 	configVersion string
 }
 
-func (m *Manager) budgetPolicy(selection string) (budgetPolicyBinding, error) {
+func (m *Manager) budgetPolicy(ctx context.Context, selection string) (budgetPolicyBinding, error) {
 	module, policy, valid := sdk.SplitBudgetPolicy(selection)
 	if !valid {
 		return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
 	}
@@ -33,7 +33,7 @@ func (m *Manager) budgetPolicy(selection string) (budgetPolicyBinding, error) {
 			if descriptor.ID != policy {
 				continue
 			}
-			config, err := m.runtimeModuleConfig(entry.Manifest)
+			config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 			if err != nil {
 				return budgetPolicyBinding{}, ErrBudgetPolicyUnavailable
 			}
@@ -44,7 +44,7 @@ func (m *Manager) budgetPolicy(selection string) (budgetPolicyBinding, error) {
 }
 
 func (m *Manager) EvaluateBudget(parent context.Context, selection, method string, request sdk.BudgetPolicyRequest) (sdk.BudgetPolicyResult, error) {
-	binding, err := m.budgetPolicy(selection)
+	binding, err := m.budgetPolicy(parent, selection)
 	if err != nil {
 		return sdk.BudgetPolicyResult{}, err
 	}
@@ -66,7 +66,7 @@ func (m *Manager) EvaluateBudget(parent context.Context, selection, method strin
 	if err != nil {
 		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable
 	}
-	current, err := m.budgetPolicy(selection)
+	current, err := m.budgetPolicy(ctx, selection)
 	if err != nil || ctx.Err() != nil || current.entry.Revision != binding.entry.Revision ||
 		current.entry.EnableGeneration != binding.entry.EnableGeneration || current.configVersion != binding.configVersion {
 		return sdk.BudgetPolicyResult{}, ErrBudgetPolicyUnavailable

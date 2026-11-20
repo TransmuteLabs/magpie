@@ -22,11 +22,15 @@ func (m *Manager) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapsh
 	if err := m.moduleConfigOwner(ctx, id); err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
-	return m.readModuleConfig(id)
+	return m.readModuleConfigContext(ctx, id)
 }
 
 func (m *Manager) readModuleConfig(id string) (sdk.ConfigSnapshot, error) {
-	value, err := m.store.StateGet(sdk.Scope{Plugin: id}, moduleConfigKey)
+	return m.readModuleConfigContext(context.Background(), id)
+}
+
+func (m *Manager) readModuleConfigContext(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
+	value, err := m.store.stateGet(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
@@ -118,7 +122,7 @@ func (m *Manager) moduleConfigOwner(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return err
 	}

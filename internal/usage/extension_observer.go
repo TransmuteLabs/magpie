@@ -20,6 +20,7 @@ const extensionLedgerQueue = 256
 type extensionLedgerObserver struct {
 	mu      sync.RWMutex
 	manager *extensionhost.Manager
+	owner   context.Context
 	request bool
 	active  *extensionLedgerServing
 	dropped atomic.Uint64
@@ -53,7 +54,11 @@ func (observer *extensionLedgerObserver) Serve() func() {
 	if manager == nil {
 		manager = extensionhost.Default()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	owner := observer.owner
+	if owner == nil {
+		owner = context.Background()
+	}
+	ctx, cancel := context.WithCancel(owner)
 	serving := &extensionLedgerServing{ctx: ctx, cancel: cancel, done: make(chan struct{}),
 		queue: make(chan extensionLedgerDelivery, extensionLedgerQueue)}
 	observer.active = serving
@@ -78,9 +83,9 @@ func (observer *extensionLedgerObserver) refresh(serving *extensionLedgerServing
 	var targets []extensionhost.LedgerTarget
 	var err error
 	if observer.request {
-		targets, err = manager.RequestObservationTargets()
+		targets, err = manager.RequestObservationTargets(serving.ctx)
 	} else {
-		targets, err = manager.LedgerTargets()
+		targets, err = manager.LedgerTargets(serving.ctx)
 	}
 	if err != nil {
 		targets = nil

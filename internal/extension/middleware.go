@@ -33,18 +33,18 @@ func (m *Manager) BeginMiddleware(ctx context.Context, info sdk.GatewayContext) 
 	if ctx == nil || ctx.Err() != nil || m.isClosed() {
 		return nil
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return nil
 	}
 	var runs []*MiddlewareRun
 	for _, entry := range entries {
 		descriptor := entry.Manifest.Middleware
-		if entry.Disabled || !entry.Manifest.Contract.Has(sdk.GatewayMiddleware) ||
+		if entry.Disabled || entry.observerEnablementErr != nil || !entry.Manifest.Contract.Has(sdk.GatewayMiddleware) ||
 			descriptor == nil || !descriptor.AllowsOrigin(info.Origin) || len(runs) >= 32 {
 			continue
 		}
-		config, err := m.ModuleConfig(ctx, entry.Manifest.ID)
+		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err != nil {
 			continue
 		}
@@ -70,17 +70,18 @@ func (run *MiddlewareRun) check(ctx context.Context) error {
 	if run.manager.isClosed() {
 		return errors.New("middleware host is closed")
 	}
-	entries, err := run.manager.List()
+	entries, err := run.manager.catalog.list(ctx)
 	if err != nil {
 		return errors.New("middleware catalog is unavailable")
 	}
 	for _, entry := range entries {
 		if entry.Manifest.ID != run.Module || entry.Disabled || entry.Revision != run.entry.Revision ||
+			entry.observerEnablementErr != nil || entry.EnableGeneration != run.entry.EnableGeneration ||
 			!entry.Manifest.Contract.Has(sdk.GatewayMiddleware) ||
 			!reflect.DeepEqual(entry.Manifest.Middleware, &run.descriptor) {
 			continue
 		}
-		config, err := run.manager.ModuleConfig(ctx, run.Module)
+		config, err := run.manager.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err == nil && config.Version == run.config {
 			return nil
 		}
@@ -112,7 +113,7 @@ func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.Middleware
 	if run.lease == nil {
 		startup, cancel := context.WithTimeout(run.ctx, time.Second)
 		worker, client, err := run.manager.acquire(startup, run.Module, &expectedGeneration{
-			packageRevision: run.entry.Revision, configVersion: run.config,
+			packageRevision: run.entry.Revision, configVersion: run.config, enableGeneration: &run.entry.EnableGeneration,
 		})
 		cancel()
 		if err != nil {

@@ -344,6 +344,38 @@ func TestGatewayHooksKeepStateInTheOriginalGeneration(t *testing.T) {
 	}
 }
 
+func TestGatewayHooksRejectAnUnstartedPreviousEnablement(t *testing.T) {
+	manager, trace := gatewayFixtureManager(t, sdk.GatewayHookDescriptor{Request: true})
+	info := sdk.GatewayContext{Origin: "local", Protocol: "chat", Model: "m"}
+	entries := manager.gatewayEntries(t.Context(), info.Origin, false)
+	if len(entries) != 1 {
+		t.Fatalf("selected %d gateway hooks", len(entries))
+	}
+	peer := NewManager(manager.Namespace())
+	defer peer.Close(t.Context())
+	if err := peer.SetEnabled(t.Context(), entries[0].Manifest.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetEnabled(t.Context(), entries[0].Manifest.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if lease, err := manager.acquireGatewayLease(t.Context(), t.Context(), entries[0]); err == nil {
+		lease.Close()
+		t.Fatal("unstarted hook acquired the re-enabled generation")
+	}
+	if manager.Running(entries[0].Manifest.ID) {
+		t.Fatal("revoked selection warmed the module")
+	}
+	run := manager.BeginGateway(t.Context(), []byte(`{"model":"m","messages":[]}`), info)
+	if run == nil {
+		t.Fatal("current enablement did not start")
+	}
+	defer run.Close()
+	if events := gatewayTrace(t, trace); len(events) != 1 || events[0].Method != sdk.MethodGatewayRequest {
+		t.Fatalf("expected one request on the current generation: %+v", events)
+	}
+}
+
 func TestGatewayHooksSkipUnknownAndRemoteOriginsWithoutStarting(t *testing.T) {
 	manager, trace := gatewayFixtureManager(t, sdk.GatewayHookDescriptor{Request: true, Response: true})
 	for _, origin := range []string{"", "remote", "gateway-key", "local-owner-from-client"} {

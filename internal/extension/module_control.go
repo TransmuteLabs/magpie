@@ -8,10 +8,14 @@ import (
 )
 
 func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
+	return m.runtimeModuleConfigContext(context.Background(), manifest)
+}
+
+func (m *Manager) runtimeModuleConfigContext(ctx context.Context, manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
 	if manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	config, err := m.readModuleConfig(manifest.ID)
+	config, err := m.readModuleConfigContext(ctx, manifest.ID)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}

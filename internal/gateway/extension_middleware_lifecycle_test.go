@@ -19,7 +19,7 @@ import (
 
 func TestSDKMiddlewarePeerPublicationAndCancellation(test *testing.T) {
 	directory := buildSDKMiddleware(test)
-	for _, mutation := range []string{"disable", "config", "replacement", "replacement after timeout", "cancel"} {
+	for _, mutation := range []string{"disable", "re-enable", "config", "replacement", "replacement after timeout", "cancel"} {
 		test.Run(mutation, func(test *testing.T) {
 			fresh(test)
 			started := filepath.Join(test.TempDir(), "started")
@@ -60,9 +60,14 @@ func TestSDKMiddlewarePeerPublicationAndCancellation(test *testing.T) {
 				waitSDKSearchMarker(test, started+".cancelled")
 			}
 			switch mutation {
-			case "disable":
+			case "disable", "re-enable":
 				if err := peer.SetEnabled(test.Context(), "middleware.fixture", false); err != nil {
 					test.Fatal(err)
+				}
+				if mutation == "re-enable" {
+					if err := peer.SetEnabled(test.Context(), "middleware.fixture", true); err != nil {
+						test.Fatal(err)
+					}
 				}
 			case "config":
 				configureSDKMiddleware(test, peer, map[string]any{})

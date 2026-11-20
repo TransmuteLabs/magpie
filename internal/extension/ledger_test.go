@@ -62,7 +62,7 @@ func TestLedgerObserverRetainsGenerationAndCannotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	targets, err := manager.LedgerTargets()
+	targets, err := manager.LedgerTargets(t.Context())
 	if err != nil || len(targets) != 1 {
 		t.Fatal("ordinary discovery lost the declared ledger observer", targets, err)
 	}
@@ -90,7 +90,7 @@ func TestLedgerObserverRetainsGenerationAndCannotWrite(t *testing.T) {
 	if _, err := os.Stat(next); !os.IsNotExist(err) {
 		t.Fatal("replacement configuration received an old queued row", err)
 	}
-	current, err := manager.LedgerTargets()
+	current, err := manager.LedgerTargets(t.Context())
 	if err != nil || len(current) != 1 {
 		t.Fatal(current, err)
 	}

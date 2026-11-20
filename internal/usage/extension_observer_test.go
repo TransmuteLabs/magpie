@@ -26,12 +26,17 @@ func TestSDKLedgerObserverOrdinaryAppendAndOutsideHistory(t *testing.T) {
 		raw string
 	}
 	rows := make(chan received, 8)
-	collector := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	const ledgerPath = "/ledger"
+	collectorRoutes := http.NewServeMux()
+	collectorRoutes.HandleFunc("POST "+ledgerPath, func(writer http.ResponseWriter, request *http.Request) {
 		raw, err := io.ReadAll(request.Body)
 		var row sdk.LedgerObservation
-		if err != nil || json.Unmarshal(raw, &row) != nil {
+		if err == nil {
+			err = json.Unmarshal(raw, &row)
+		}
+		if err != nil {
 			t.Error("invalid delivered ledger evidence", err)
-			writer.WriteHeader(400)
+			writer.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		select {
@@ -39,9 +44,18 @@ func TestSDKLedgerObserverOrdinaryAppendAndOutsideHistory(t *testing.T) {
 		case <-request.Context().Done():
 			return
 		}
-		writer.WriteHeader(204)
-	}))
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	collector := httptest.NewServer(collectorRoutes)
 	t.Cleanup(collector.Close)
+	probe, err := collector.Client().Get(collector.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Body.Close()
+	if probe.StatusCode != http.StatusNotFound {
+		t.Fatalf("collector root probe returned %s, want 404", probe.Status)
+	}
 	directory := t.TempDir()
 	entry := "worker"
 	if runtime.GOOS == "windows" {
@@ -85,7 +99,7 @@ func TestSDKLedgerObserverOrdinaryAppendAndOutsideHistory(t *testing.T) {
 	if _, err := manager.Install(t.Context(), directory); err != nil {
 		t.Fatal(err)
 	}
-	config, _ := json.Marshal(map[string]string{"sink": collector.URL})
+	config, _ := json.Marshal(map[string]string{"sink": collector.URL + ledgerPath})
 	configured, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", config)
 	if err != nil {
 		t.Fatal(err)

@@ -17,12 +17,12 @@ type LedgerTarget struct {
 	Timeout          time.Duration
 }
 
-func (manager *Manager) LedgerTargets() ([]LedgerTarget, error) {
-	return manager.observationTargets(sdk.LedgerObserver)
+func (manager *Manager) LedgerTargets(ctx context.Context) ([]LedgerTarget, error) {
+	return manager.observationTargets(ctx, sdk.LedgerObserver)
 }
 
-func (manager *Manager) RequestObservationTargets() ([]LedgerTarget, error) {
-	return manager.observationTargets(sdk.RequestObserver)
+func (manager *Manager) RequestObservationTargets(ctx context.Context) ([]LedgerTarget, error) {
+	return manager.observationTargets(ctx, sdk.RequestObserver)
 }
 
 func observerTimeout(manifest sdk.Manifest, capability sdk.Capability) (int, bool) {
@@ -42,8 +42,8 @@ func observerTimeout(manifest sdk.Manifest, capability sdk.Capability) (int, boo
 	return 0, false
 }
 
-func (manager *Manager) observationTargets(capability sdk.Capability) ([]LedgerTarget, error) {
-	entries, err := manager.List()
+func (manager *Manager) observationTargets(ctx context.Context, capability sdk.Capability) ([]LedgerTarget, error) {
+	entries, err := manager.catalog.list(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +53,7 @@ func (manager *Manager) observationTargets(capability sdk.Capability) ([]LedgerT
 		if entry.Disabled || !declared || entry.observerEnablementErr != nil {
 			continue
 		}
-		config, err := manager.runtimeModuleConfig(entry.Manifest)
+		config, err := manager.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err != nil {
 			// An unreadable configuration revokes only that module.
 			continue
@@ -64,6 +64,9 @@ func (manager *Manager) observationTargets(capability sdk.Capability) ([]LedgerT
 		}
 		targets = append(targets, LedgerTarget{Module: entry.Manifest.ID, Revision: entry.Revision,
 			Directory: entry.Directory, ConfigVersion: config.Version, EnableGeneration: entry.EnableGeneration, Timeout: timeout})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return targets, nil
 }

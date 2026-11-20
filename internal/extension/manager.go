@@ -421,12 +421,14 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 }
 
 func (m *Manager) Reload(ctx context.Context) error {
-	m.reloadMu.Lock()
+	if err := lockContext(ctx, &m.reloadMu); err != nil {
+		return err
+	}
 	defer m.reloadMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return err
 	}
@@ -436,7 +438,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 		if entry.Disabled {
 			continue
 		}
-		config, err := m.runtimeModuleConfig(entry.Manifest)
+		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err != nil {
 			// Revoke the unreadable generation without denying unrelated modules.
 			// Direct acquisition of this module still returns the config error.
@@ -444,6 +446,9 @@ func (m *Manager) Reload(ctx context.Context) error {
 		}
 		current[entry.Manifest.ID] = entry
 		configs[entry.Manifest.ID] = config.Version
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -521,7 +526,7 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if err := m.Reload(ctx); err != nil {
 		return nil, nil, err
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -535,7 +540,7 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if selected == nil {
 		return nil, nil, errors.New("extension is not enabled")
 	}
-	config, err := m.runtimeModuleConfig(selected.Manifest)
+	config, err := m.runtimeModuleConfigContext(ctx, selected.Manifest)
 	if err != nil {
 		return nil, nil, err
 	}
