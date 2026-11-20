@@ -42,3 +42,28 @@ func TestModuleSettingsProjectionPinsOwner(t *testing.T) {
 		t.Fatalf("stale settings descriptor projected replacement configuration: %+v, %v", projection, err)
 	}
 }
+
+func TestClosedModuleOwnerCannotProjectOrPublishSettings(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	manifest := componentFixtureManifest()
+	manifest.Contract.Version.Minor = sdk.ModuleSettingsAPIMinor
+	manifest.Settings = []sdk.FeatureSetting{{Name: "label", Title: "Label", Kind: sdk.FeatureSettingString, Default: "public"}}
+	entry := installComponentFixture(t, manager, manifest)
+	selection, err := manager.ModuleSettings(t.Context(), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ModuleSettings(t.Context(), entry); err == nil {
+		t.Error("closed module owner projected settings")
+	}
+	if err := manager.CompareAndSwapModuleSettings(t.Context(), manifest.ID, selection.ModuleSettingsRevision, json.RawMessage(`{"label":"closed"}`)); err == nil {
+		t.Error("closed module owner accepted a settings write")
+	}
+	current, err := NewManager(manager.root).ModuleSettings(t.Context(), entry)
+	if err != nil || current.ConfigVersion != "0" || string(current.Values["label"]) != `"public"` {
+		t.Fatalf("closed module owner changed durable settings: %+v, %v", current, err)
+	}
+}

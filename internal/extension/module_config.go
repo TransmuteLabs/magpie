@@ -19,6 +19,8 @@ const (
 	moduleConfigReloadTimeout = 10 * time.Second
 )
 
+var errModuleConfigClosed = errors.New("extension manager is closed")
+
 func (m *Manager) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
 	if err := m.moduleConfigOwner(ctx, id); err != nil {
 		return sdk.ConfigSnapshot{}, err
@@ -55,6 +57,9 @@ func (m *Manager) compareAndSwapModuleConfig(ctx context.Context, id, packageRev
 func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected expectedGeneration, values json.RawMessage) (sdk.ConfigSnapshot, error) {
 	if ctx == nil || m == nil || m.catalog == nil || m.store == nil || !sdk.ValidID(id) {
 		return sdk.ConfigSnapshot{}, errors.New("module configuration requires its installed root owner")
+	}
+	if m.isClosed() {
+		return sdk.ConfigSnapshot{}, errModuleConfigClosed
 	}
 	version, err := strconv.ParseUint(expected.configVersion, 10, 64)
 	if err != nil || strconv.FormatUint(version, 10) != expected.configVersion {
@@ -93,6 +98,9 @@ func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected ex
 		}
 		if err := ctx.Err(); err != nil {
 			return VersionedValue{}, err
+		}
+		if m.isClosed() {
+			return VersionedValue{}, errModuleConfigClosed
 		}
 		return m.store.StateCASContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey, version, config)
 	}()
@@ -144,6 +152,9 @@ func moduleConfigEntry(root *os.Root, id string, expected expectedGeneration) (I
 func (m *Manager) moduleConfigOwner(ctx context.Context, id string) error {
 	if ctx == nil || m == nil || m.store == nil || !sdk.ValidID(id) {
 		return errors.New("module configuration requires a manager, context and module identity")
+	}
+	if m.isClosed() {
+		return errModuleConfigClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return err

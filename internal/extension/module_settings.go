@@ -21,6 +21,9 @@ type ModuleSettingsSnapshot struct {
 }
 
 func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSettingsSnapshot, error) {
+	if m == nil || m.isClosed() {
+		return ModuleSettingsSnapshot{}, errModuleConfigClosed
+	}
 	if entry.Disabled || entry.Manifest.Component != nil || len(entry.Manifest.Settings) == 0 || entry.Revision == "" {
 		return ModuleSettingsSnapshot{}, errors.New("settings require an enabled root module with declared settings")
 	}
@@ -37,6 +40,9 @@ func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSe
 		return ModuleSettingsSnapshot{}, err
 	}
 	defer unlock()
+	if m.isClosed() {
+		return ModuleSettingsSnapshot{}, errModuleConfigClosed
+	}
 	current, err := moduleConfigEntry(root, entry.Manifest.ID, expectedGeneration{
 		packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
 	})

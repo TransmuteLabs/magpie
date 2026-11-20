@@ -95,6 +95,25 @@ func TestModuleConfigCASAndModuleIsolation(t *testing.T) {
 	}
 }
 
+func TestClosedModuleOwnerCannotReadOrPublishConfig(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	manifest := componentFixtureManifest()
+	installComponentFixture(t, manager, manifest)
+	if err := manager.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ModuleConfig(t.Context(), manifest.ID); err == nil {
+		t.Error("closed module owner read configuration")
+	}
+	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", json.RawMessage(`{"label":"closed"}`)); err == nil {
+		t.Error("closed module owner accepted a configuration write")
+	}
+	current, err := NewManager(manager.root).ModuleConfig(t.Context(), manifest.ID)
+	if err != nil || current.Version != "0" || string(current.Values) != "{}" {
+		t.Fatalf("closed module owner changed durable configuration: %+v, %v", current, err)
+	}
+}
+
 func TestModuleConfigCASRetiresIdleGroupWithoutAnotherAcquire(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	manifest := componentFixtureManifest()
