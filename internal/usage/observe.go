@@ -83,12 +83,12 @@ type observing struct {
 // the gateway it is started at once.
 func Observe(o Observer) (remove func()) {
 	obsMu.Lock()
+	defer obsMu.Unlock()
 	ob := &observing{o: o}
 	if serving > 0 {
 		ob.stop = o.Serve()
 	}
 	observers = append(observers, ob)
-	obsMu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
