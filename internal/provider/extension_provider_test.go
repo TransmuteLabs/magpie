@@ -565,6 +565,13 @@ func (host *discoveryExtensionHost) List() ([]extensionhost.Installed, error) {
 	return host.entries, host.catalogErr
 }
 
+func (host *discoveryExtensionHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return host.List()
+}
+
 func (host *discoveryExtensionHost) ModuleConfig(_ context.Context, id string) (sdk.ConfigSnapshot, error) {
 	if id == host.configError {
 		return sdk.ConfigSnapshot{}, errors.New("bad configuration")

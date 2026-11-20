@@ -122,10 +122,10 @@ func NewStore(root string) *Store {
 }
 
 func (s *Store) StateGet(scope sdk.Scope, key string) (VersionedValue, error) {
-	return s.stateGet(context.Background(), scope, key)
+	return s.StateGetContext(context.Background(), scope, key)
 }
 
-func (s *Store) stateGet(ctx context.Context, scope sdk.Scope, key string) (VersionedValue, error) {
+func (s *Store) StateGetContext(ctx context.Context, scope sdk.Scope, key string) (VersionedValue, error) {
 	var result VersionedValue
 	if !storeValidScope(scope) || !storeToken(key) {
 		return result, storeInvalid()
@@ -142,10 +142,10 @@ func (s *Store) stateGet(ctx context.Context, scope sdk.Scope, key string) (Vers
 }
 
 func (s *Store) StateCAS(scope sdk.Scope, key string, expected uint64, value json.RawMessage) (VersionedValue, error) {
-	return s.stateCAS(context.Background(), scope, key, expected, value)
+	return s.StateCASContext(context.Background(), scope, key, expected, value)
 }
 
-func (s *Store) stateCAS(ctx context.Context, scope sdk.Scope, key string, expected uint64, value json.RawMessage) (VersionedValue, error) {
+func (s *Store) StateCASContext(ctx context.Context, scope sdk.Scope, key string, expected uint64, value json.RawMessage) (VersionedValue, error) {
 	var result VersionedValue
 	if !storeValidScope(scope) || !storeToken(key) {
 		return result, storeInvalid()
@@ -183,11 +183,15 @@ func (s *Store) stateCAS(ctx context.Context, scope sdk.Scope, key string, expec
 }
 
 func (s *Store) Accounts(plugin, provider string) ([]Account, error) {
+	return s.AccountsContext(context.Background(), plugin, provider)
+}
+
+func (s *Store) AccountsContext(ctx context.Context, plugin, provider string) ([]Account, error) {
 	var result []Account
 	if !storePluginID(plugin) || !storeToken(provider) {
 		return nil, storeInvalid()
 	}
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
 		if err != nil {
 			return err

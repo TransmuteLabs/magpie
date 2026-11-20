@@ -187,7 +187,8 @@ policy/store reads suppress renewal. The timer uses the selected account's
 network hold/proxy policy and pins its package, configuration and generation
 before calling the existing leased `auth.refresh` transaction. It verifies an
 actual refresh-successor receipt, rechecks policy and binding, and never
-adopts a manual credential replacement. Startup is cancellable; an already
+adopts a manual credential replacement. Catalog and private account reads
+follow the renewal owner's cancellation. Startup is cancellable; an already
 dispatched rotating-token exchange finishes under the bounded refresh owner
 before shutdown returns. Failures use the existing exponential backoff per
 binding, capped at thirty minutes, without marking the account lapsed.
@@ -325,6 +326,10 @@ appends exact account IDs to the ordinary check-in runner, Settings and
 quota cards. Automatic execution defaults to off. Provider/account Off,
 account exclusion, manual policy, the ordinary owner's day and retry gates
 keep their existing owners. Identical display names never merge accounts.
+Discovery uses the check-in caller's deadline for catalog and private
+account reads. The runner rechecks the account's current On and visibility
+before refresh and after primary or private service startup, before a write
+can dispatch. A manual press remains available while the provider is Off.
 
 [`Manager.CheckinAccount`](../../internal/extension/account_checkin.go)
 pins package/configuration and selected account generation, rechecks after

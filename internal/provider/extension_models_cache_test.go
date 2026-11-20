@@ -3,13 +3,63 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestExtensionModelRefreshStopsAtStoreDeadline(t *testing.T) {
+	host := fixtureExtensionProvider(t, false)
+	binding := extensionAccounts()[0].Account.extension
+	if _, err := host.store.StateGet(sdk.Scope{Plugin: binding.scope.Plugin}, binding.modelCatalogKey()); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(host.namespace, "private", ".lock")
+	lockReady := make(chan func(), 1)
+	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+		unlock, held := filelock.Lock(lockPath, time.Second)
+		if !held {
+			return nil, errors.New("fixture could not hold the SDK store lock")
+		}
+		lockReady <- unlock
+		return json.RawMessage(`{"models":[{"id":"late-model"}]}`), nil
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := binding.fetchModels(ctx)
+		done <- err
+	}()
+	var unlock func()
+	select {
+	case unlock = <-lockReady:
+	case err := <-done:
+		t.Fatalf("model refresh ended before its cache write: %v", err)
+	}
+	select {
+	case err := <-done:
+		unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("model refresh returned %v instead of the deadline", err)
+		}
+	case <-time.After(3 * time.Second):
+		unlock()
+		<-done
+		t.Fatal("model refresh waited for the store after the deadline")
+	}
+	root, err := host.store.StateGet(sdk.Scope{Plugin: binding.scope.Plugin}, binding.modelCatalogKey())
+	if err != nil || root.Version != 0 {
+		t.Fatalf("canceled refresh published a cache root: %+v %v", root, err)
+	}
+}
 
 func TestExtensionModelsSurviveColdCatalogLookup(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)

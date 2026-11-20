@@ -21,6 +21,11 @@ import (
 
 func checkinOwnerFixture(t *testing.T, modes ...string) (*extensionhost.Manager, string, string) {
 	t.Helper()
+	return checkinOwnerFixtureWithService(t, "", "", modes...)
+}
+
+func checkinOwnerFixtureWithService(t *testing.T, started, release string, modes ...string) (*extensionhost.Manager, string, string) {
+	t.Helper()
 	claudeHome(t)
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	manager := extensionhost.Default()
@@ -47,13 +52,20 @@ func checkinOwnerFixture(t *testing.T, modes ...string) (*extensionhost.Manager,
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build checkin fixture: %v\n%s", err, output)
 	}
+	action := map[string]any{"id": "daily.claim", "effect": "write", "inputSchema": map[string]any{"type": "object"}}
 	manifest := map[string]any{
 		"schema": 1, "id": "checkin.fixture", "version": "1.0.0", "runtime": "exec", "entry": entry,
 		"contract": map[string]any{"version": map[string]int{"major": 1, "minor": 8},
 			"capabilities": []string{"outbound-executor", "account-auth", "module-rpc"}},
 		"providers": []any{map[string]any{"id": "vendor", "name": "Fixture", "protocols": []string{"chat"},
 			"checkin": map[string]any{"action": "daily.claim", "recheck": true}}},
-		"actions": []any{map[string]any{"id": "daily.claim", "effect": "write", "inputSchema": map[string]any{"type": "object"}}},
+		"actions": []any{action},
+	}
+	if started != "" {
+		action["component"] = "helper"
+		manifest["services"] = []sdk.ServiceDescriptor{{ID: "helper", Runtime: "exec", Entry: entry,
+			Args: []string{"--checkin-helper"}, Contract: sdk.ServiceContract{ID: "checkin.helper", Version: 1},
+			Methods: []string{"daily.claim"}, Start: "lazy"}}
 	}
 	raw, _ := json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0600); err != nil {
@@ -63,7 +75,11 @@ func checkinOwnerFixture(t *testing.T, modes ...string) (*extensionhost.Manager,
 		t.Fatal(err)
 	}
 	trace := filepath.Join(t.TempDir(), "events.jsonl")
-	raw, _ = json.Marshal(map[string]any{"trace": trace})
+	config := map[string]any{"trace": trace}
+	if started != "" {
+		config["mode"], config["started"], config["release"] = "hold-service", started, release
+	}
+	raw, _ = json.Marshal(config)
 	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), "checkin.fixture", "0", raw); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +208,7 @@ func TestExtensionCheckinRechecksKnownNonclaimsWithDistinctIntents(t *testing.T)
 func TestExtensionCheckinPreservesSelectedPolicyAndOwnerDay(t *testing.T) {
 	manager, id, trace := checkinOwnerFixture(t, "", "")
 	setProxies(t, id, "http://127.0.0.1:18880", map[string]string{"first": "direct", "second": "http://127.0.0.1:18881"})
-	projections := extensionCheckinProviders()
+	projections := extensionCheckinProviders(t.Context())
 	if len(projections) != 1 {
 		t.Fatalf("check-in projection: %+v", projections)
 	}
@@ -205,13 +221,25 @@ func TestExtensionCheckinPreservesSelectedPolicyAndOwnerDay(t *testing.T) {
 	if err := SetOff(id, true); err != nil {
 		t.Fatal(err)
 	}
+	logins, err := readLoginsFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range logins {
+		if logins[index].Agent == id && logins[index].User == "first" {
+			logins[index].Paused = true
+		}
+	}
+	if err := writeLogins(logins); err != nil {
+		t.Fatal(err)
+	}
 	runner := projections[0].checkiner(func() time.Time { return now })
 	if results := runner.checkinNow(t.Context(), false); len(results) != 0 || checkinClaims(t, trace) != 0 {
 		t.Fatalf("automatic check-in ignored provider Off: %+v", results)
 	}
 	results := runner.checkinNow(t.Context(), true)
 	if len(results) != 2 || results[0].Outcome != CheckinClaimed || results[1].Outcome != CheckinClaimed {
-		t.Fatalf("manual check-in while Off: %+v", results)
+		t.Fatalf("manual check-in with provider Off and routing pause: %+v", results)
 	}
 	raw, err := os.ReadFile(trace)
 	if err != nil {
@@ -241,7 +269,7 @@ func TestExtensionCheckinRefusesCapturedReplacedAuthority(t *testing.T) {
 	for _, change := range []string{"configuration", "account", "disabled"} {
 		t.Run(change, func(t *testing.T) {
 			manager, _, trace := checkinOwnerFixture(t, "")
-			captured := extensionCheckinProviders()
+			captured := extensionCheckinProviders(t.Context())
 			if len(captured) != 1 {
 				t.Fatal("check-in owner missing")
 			}

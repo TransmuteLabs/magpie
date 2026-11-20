@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
@@ -75,5 +77,55 @@ func TestProviderOptionsUseCheckedRootConfigWithoutWorkers(test *testing.T) {
 	}
 	if manager.startCtx != nil || len(manager.workers) != 0 {
 		test.Fatal("metadata and configuration started a plugin worker")
+	}
+}
+
+func TestProviderOptionsStopAtCatalogDeadline(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	entry := installOptionsFixture(t, manager)
+	root, err := manager.catalog.open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, action := range []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"read", func(ctx context.Context) error {
+			_, err := manager.ProviderOptions(ctx, entry.Manifest.ID, "vendor")
+			return err
+		}},
+		{"write", func(ctx context.Context) error {
+			_, err := manager.CompareAndSwapProviderOptions(ctx, entry.Manifest.ID, "vendor", entry.Revision, "0",
+				map[string]bool{"defaultOn": false}, nil)
+			return err
+		}},
+	} {
+		t.Run(action.name, func(t *testing.T) {
+			unlock, err := catalogLock(t.Context(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- action.run(ctx) }()
+			select {
+			case err := <-done:
+				unlock()
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("provider option %s returned %v instead of the deadline", action.name, err)
+				}
+			case <-time.After(2 * time.Second):
+				unlock()
+				<-done
+				t.Fatalf("provider option %s waited for the catalog after the deadline", action.name)
+			}
+		})
+	}
+	config, err := manager.ModuleConfig(t.Context(), entry.Manifest.ID)
+	if err != nil || config.Version != "0" {
+		t.Fatalf("canceled provider option write changed config: %+v %v", config, err)
 	}
 }

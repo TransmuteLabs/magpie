@@ -29,18 +29,16 @@ func (m *Manager) providerOptionOwner(ctx context.Context, id, provider string) 
 	if err := ctx.Err(); err != nil {
 		return Installed{}, sdk.ProviderDescriptor{}, err
 	}
-	entries, err := m.List()
+	entry, err := m.ActiveModule(ctx, id)
+	if errors.Is(err, errContributionRevoked) {
+		return Installed{}, sdk.ProviderDescriptor{}, errors.New("provider options require an enabled installed provider")
+	}
 	if err != nil {
 		return Installed{}, sdk.ProviderDescriptor{}, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != id || entry.Disabled || entry.Manifest.Component != nil {
-			continue
-		}
-		for _, descriptor := range entry.Manifest.Providers {
-			if descriptor.ID == provider {
-				return entry, descriptor, nil
-			}
+	for _, descriptor := range entry.Manifest.Providers {
+		if descriptor.ID == provider {
+			return entry, descriptor, nil
 		}
 	}
 	return Installed{}, sdk.ProviderDescriptor{}, errors.New("provider options require an enabled installed provider")

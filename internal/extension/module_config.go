@@ -31,7 +31,7 @@ func (m *Manager) readModuleConfig(id string) (sdk.ConfigSnapshot, error) {
 }
 
 func (m *Manager) readModuleConfigContext(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
-	value, err := m.store.stateGet(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
+	value, err := m.store.StateGetContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
@@ -94,7 +94,7 @@ func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected ex
 		if err := ctx.Err(); err != nil {
 			return VersionedValue{}, err
 		}
-		return m.store.stateCAS(ctx, sdk.Scope{Plugin: id}, moduleConfigKey, version, config)
+		return m.store.StateCASContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey, version, config)
 	}()
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err

@@ -269,11 +269,11 @@ func CheckinAccounts() []CheckinAccount {
 // Code's, Qoder's and each plugin's that checks in itself, with its name
 // (a plugin's provider's, for WorkBuddyCheckin.Vendor; "" for a built-in).
 func checkiners() []checkiner {
-	cs, _ := namedCheckiners()
+	cs, _ := namedCheckiners(context.Background())
 	return cs
 }
 
-func namedCheckiners() ([]checkiner, []string) {
+func namedCheckiners(ctx context.Context) ([]checkiner, []string) {
 	cs := []checkiner{
 		newWBCheckiner().checkiner(),
 		newTraeCheckiner(traeCheckinAccounts),
@@ -281,7 +281,7 @@ func namedCheckiners() ([]checkiner, []string) {
 		newQoderCheckiner(qoderCheckinAccounts, time.Now),
 	}
 	names := make([]string, len(cs))
-	for _, p := range allPluginCheckinProviders() {
+	for _, p := range allPluginCheckinProviders(ctx) {
 		cs = append(cs, p.checkiner(time.Now))
 		names = append(names, p.Name)
 	}
@@ -294,10 +294,13 @@ func namedCheckiners() ([]checkiner, []string) {
 // no switch changed (xiaowu_95660: 手动签到一次). It says how the account
 // stands, or nothing for an account no check-in reaches.
 func CheckInAccount(ctx context.Context, by, key string) []WorkBuddyCheckin {
-	if key == "" {
+	if key == "" || ctx.Err() != nil {
 		return nil
 	}
-	cs, names := namedCheckiners()
+	cs, names := namedCheckiners(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 	for i, c := range cs {
 		if c.by != by {
 			continue

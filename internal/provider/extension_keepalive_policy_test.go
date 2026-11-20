@@ -190,8 +190,8 @@ type emptyKeepAliveHost struct {
 	listed  chan struct{}
 }
 
-func (host emptyKeepAliveHost) List() ([]extensionhost.Installed, error) {
-	entries, err := host.catalog.List()
+func (host emptyKeepAliveHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
+	entries, err := host.catalog.ListContext(ctx)
 	select {
 	case host.listed <- struct{}{}:
 	default:

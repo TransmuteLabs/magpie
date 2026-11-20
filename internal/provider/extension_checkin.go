@@ -3,10 +3,13 @@ package provider
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log"
+	"slices"
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -23,47 +26,76 @@ func withCheckinDay(ctx context.Context, day string) context.Context {
 	return context.WithValue(ctx, checkinDayKey{}, day)
 }
 
-func allPluginCheckinProviders() []pluginCheckinProvider {
-	return append(pluginCheckinProviders(), extensionCheckinProviders()...)
+func allPluginCheckinProviders(ctx context.Context) []pluginCheckinProvider {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return append(pluginCheckinProviders(), extensionCheckinProviders(ctx)...)
 }
 
-func extensionCheckinProviders() []pluginCheckinProvider {
-	if settings.AccountDiscoveryOff() {
+func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
+	if ctx.Err() != nil || settings.AccountDiscoveryOff() {
 		return nil
 	}
 	host := providerExtensionHost()
 	owner, ok := host.(interface {
-		CheckinAccount(context.Context, sdk.Scope, string, string, sdk.AccountCheckinRequest) (extensionhost.CheckinExecution, error)
+		CheckinAccountWithAdmission(context.Context, sdk.Scope, string, string, sdk.AccountCheckinRequest, func(context.Context) error) (extensionhost.CheckinExecution, error)
 	})
 	if !ok {
 		return nil
 	}
-	installed, err := host.List()
+	installed, err := activeProviderModules(ctx, host)
 	if err != nil {
-		log.Printf("extension check-ins unavailable: %v", err)
+		if ctx.Err() == nil {
+			log.Printf("extension check-ins unavailable: %v", err)
+		}
 		return nil
 	}
-	providers, err := ExtensionProviders()
-	if err != nil {
-		log.Printf("extension check-ins unavailable: %v", err)
-		return nil
-	}
+	var providers []Provider
 	revisions := map[string]string{}
 	for _, entry := range installed {
-		if !entry.Disabled {
-			revisions[entry.Manifest.ID] = entry.Revision
+		manifest := entry.Manifest
+		if manifest.Contract.Version.Minor < 8 || !manifest.Contract.Has(sdk.AccountAuth) ||
+			!manifest.Contract.Has(sdk.ModuleRPC) {
+			continue
 		}
+		if !slices.ContainsFunc(manifest.Providers, func(descriptor sdk.ProviderDescriptor) bool {
+			return descriptor.Checkin != nil
+		}) {
+			continue
+		}
+		discovered, err := discoverExtensionModuleContext(ctx, host, entry)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			log.Printf("extension check-ins unavailable for %s: %v", manifest.ID, err)
+			continue
+		}
+		providers = append(providers, discovered...)
+		revisions[manifest.ID] = entry.Revision
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+	providers, err = extensionPolicies(providers)
+	if err != nil {
+		log.Printf("extension check-ins unavailable: %v", err)
+		return nil
 	}
 	out := []pluginCheckinProvider{}
 	positions := map[string]int{}
 	for _, selected := range providers {
 		binding := selected.Account.extension
 		descriptor := binding.descriptor.Checkin
-		if descriptor == nil || binding.manifest.Contract.Version.Minor < 8 || binding.scope.Account == "" {
+		if descriptor == nil || binding.scope.Account == "" {
 			continue
 		}
 		revision := revisions[binding.scope.Plugin]
-		config, err := host.ModuleConfig(context.Background(), binding.scope.Plugin)
+		config, err := host.ModuleConfig(ctx, binding.scope.Plugin)
+		if ctx.Err() != nil {
+			return nil
+		}
 		if err != nil || revision == "" {
 			continue
 		}
@@ -77,8 +109,11 @@ func extensionCheckinProviders() []pluginCheckinProvider {
 			User: selected.Account.User, On: extensionAccountOn(selected.ID, selected.Account.User),
 			key: pluginCheckinKey(selected.ID, binding.scope.Account), card: selected.ID,
 			do: func(ctx context.Context) WorkBuddyCheckin {
-				if settings.AccountDiscoveryOff() {
-					return wbCheckinFailed(errAccountDiscoveryOff)
+				admit := func(current context.Context) error {
+					return extensionCheckinAccountCurrent(current, selected.ID, binding.scope.Account)
+				}
+				if err := admit(ctx); err != nil {
+					return wbCheckinFailed(err)
 				}
 				prepared, err := binding.prepare(ctx)
 				if err != nil {
@@ -93,8 +128,8 @@ func extensionCheckinProviders() []pluginCheckinProvider {
 				if day == "" {
 					return wbCheckinFailed(errors.New("check-in requires the ordinary owner's day"))
 				}
-				execution, err := owner.CheckinAccount(ctx, scope, revision, config.Version,
-					sdk.AccountCheckinRequest{Day: day, Proxy: netproxy.Choice(ctx)})
+				execution, err := owner.CheckinAccountWithAdmission(ctx, scope, revision, config.Version,
+					sdk.AccountCheckinRequest{Day: day, Proxy: netproxy.Choice(ctx)}, admit)
 				result := WorkBuddyCheckin{}
 				if err != nil {
 					result = wbCheckinFailed(err)
@@ -119,4 +154,30 @@ func extensionCheckinProviders() []pluginCheckinProvider {
 		})
 	}
 	return out
+}
+
+func extensionCheckinAccountCurrent(ctx context.Context, provider, account string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	set, err := settings.LoadChecked()
+	if err != nil {
+		return err
+	}
+	if settings.AccountDiscoveryOffIn(set) {
+		return errAccountDiscoveryOff
+	}
+	logins, err := filememo.ReadNow("logins", loginsPath(), parseLogins)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, login := range logins {
+		if login.Agent == provider && login.User == account {
+			if login.On && login.Hidden == "" {
+				return nil
+			}
+			break
+		}
+	}
+	return errors.New("extension check-in account is off, hidden or unavailable")
 }

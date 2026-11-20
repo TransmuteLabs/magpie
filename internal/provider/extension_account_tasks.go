@@ -17,6 +17,9 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	fail := func(err error) (context.Context, Provider, sdk.Scope, func(context.Context) error, error) {
 		return ctx, Provider{}, sdk.Scope{}, nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
 	if manager == nil || manager.Namespace() != providerExtensionHost().Namespace() {
 		return fail(errors.New("paid task belongs to another provider host"))
 	}
@@ -28,19 +31,21 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if _, disabled := ModelDisabled(id, selection.Model); disabled || DisabledUnknown() {
 		return fail(errors.New("paid task model is disabled or its policy is unreadable"))
 	}
-	entries, err := manager.List()
-	position := slices.IndexFunc(entries, func(entry extensionhost.Installed) bool {
-		return entry.Manifest.ID == selection.Scope.Plugin && !entry.Disabled && entry.Revision == selection.Revision
-	})
-	if err != nil || position < 0 {
+	entry, err := enabledExtensionModule(ctx, manager, selection.Scope.Plugin)
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
+	if err != nil || entry.Revision != selection.Revision {
 		return fail(errors.New("paid task package changed"))
 	}
-	entry := entries[position]
 	config, err := manager.ModuleConfig(ctx, entry.Manifest.ID)
+	if err := ctx.Err(); err != nil {
+		return fail(err)
+	}
 	if err != nil || config.Version != selection.Config {
 		return fail(errors.New("paid task configuration changed"))
 	}
-	account, err := manager.Store().RefreshedAccount(selection.Scope)
+	account, err := manager.Store().RefreshedAccountContext(ctx, selection.Scope)
 	if err != nil {
 		return fail(err)
 	}
@@ -121,7 +126,10 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 		if _, disabled := ModelDisabled(id, selection.Model); disabled || DisabledUnknown() {
 			return errors.New("paid task model was disabled during admission")
 		}
-		account, err := manager.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+		account, err := manager.Store().GetAccountContext(current, scope.Plugin, scope.Provider, scope.Account)
+		if err := current.Err(); err != nil {
+			return err
+		}
 		if err != nil || account.Generation != scope.Generation {
 			return errors.New("paid task account generation changed during admission")
 		}

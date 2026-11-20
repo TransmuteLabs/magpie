@@ -115,12 +115,12 @@ var extensionSignInsKept = func(ctx context.Context) ([]extensionSignIn, error) 
 		return nil, err
 	}
 	host := providerExtensionHost()
-	entries, err := host.List()
+	entries, err := activeProviderModules(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	entries = slices.DeleteFunc(slices.Clone(entries), func(entry extensionhost.Installed) bool {
-		return entry.Disabled || entry.Manifest.Contract.Version.Minor < 8 ||
+	entries = slices.DeleteFunc(entries, func(entry extensionhost.Installed) bool {
+		return entry.Manifest.Contract.Version.Minor < 8 ||
 			!entry.Manifest.Contract.Has(sdk.AccountAuth) ||
 			!slices.ContainsFunc(entry.Manifest.Providers, func(provider sdk.ProviderDescriptor) bool {
 				return provider.KeepAlive.Lead() != 0
@@ -151,7 +151,7 @@ var extensionSignInsKept = func(ctx context.Context) ([]extensionSignIn, error) 
 			}) {
 				continue
 			}
-			accounts, err := host.Store().Accounts(entry.Manifest.ID, descriptor.ID)
+			accounts, err := host.Store().AccountsContext(ctx, entry.Manifest.ID, descriptor.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -194,17 +194,21 @@ func (selected extensionSignIn) current(ctx context.Context, generation uint64) 
 	if !policy.allowsSelection(selected, generation) {
 		return errors.New("extension account is not enabled and listed for idle renewal")
 	}
-	entries, err := selected.host.List()
-	if err != nil || !slices.ContainsFunc(entries, func(entry extensionhost.Installed) bool {
-		return entry.Manifest.ID == selected.scope.Plugin && !entry.Disabled && entry.Revision == selected.entry.Revision
-	}) {
+	entry, err := enabledExtensionModule(ctx, selected.host, selected.scope.Plugin)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err != nil || entry.Revision != selected.entry.Revision {
 		return extensionhost.ErrActionChanged
 	}
 	config, err := selected.host.ModuleConfig(ctx, selected.scope.Plugin)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err != nil || config.Version != selected.config {
 		return extensionhost.ErrActionChanged
 	}
-	account, err := selected.host.Store().GetAccount(selected.scope.Plugin, selected.scope.Provider, selected.scope.Account)
+	account, err := selected.host.Store().GetAccountContext(ctx, selected.scope.Plugin, selected.scope.Provider, selected.scope.Account)
 	if err != nil {
 		return err
 	}

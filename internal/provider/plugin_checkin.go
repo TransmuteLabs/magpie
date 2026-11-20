@@ -298,7 +298,11 @@ func (c pluginCheckiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyC
 		return nil
 	}
 	var out []WorkBuddyCheckin
-	for _, p := range allPluginCheckinProviders() {
+	providers := allPluginCheckinProviders(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	for _, p := range providers {
 		if c.only != nil && !c.only(p.ID) {
 			continue
 		}
@@ -343,7 +347,7 @@ func PluginCheckins() []PluginCheckin {
 	st := shownCheckins(pluginCheckinPath())
 	s := settings.Load()
 	var out []PluginCheckin
-	for _, p := range allPluginCheckinProviders() {
+	for _, p := range allPluginCheckinProviders(context.Background()) {
 		pc := PluginCheckin{ID: p.ID, Name: p.Name, On: PluginCheckinOn(s, p.ID)}
 		listed := map[string]bool{}
 		for _, a := range p.accounts {
@@ -360,12 +364,12 @@ func PluginCheckins() []PluginCheckin {
 }
 
 // HasPluginCheckin says whether a plugin that checks in is signed in.
-func HasPluginCheckin() bool { return len(allPluginCheckinProviders()) > 0 }
+func HasPluginCheckin() bool { return len(allPluginCheckinProviders(context.Background())) > 0 }
 
 // pluginCheckinMarks is qs with the cards of the plugins' accounts that
 // check in marked, as WithCheckins marks the built-ins'.
 func pluginCheckinMarks(qs []SubscriptionQuota) []SubscriptionQuota {
-	ps := allPluginCheckinProviders()
+	ps := allPluginCheckinProviders(context.Background())
 	if len(ps) == 0 {
 		return qs
 	}
