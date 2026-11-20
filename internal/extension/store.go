@@ -305,6 +305,20 @@ func (s *Store) DeleteAccount(plugin, provider, id string, expectedGeneration ui
 			record.ExpiresAt = 0
 			record.Deleted = true
 			records.Accounts[index] = record
+			for flowIndex := range records.AuthFlows {
+				flow := &records.AuthFlows[flowIndex]
+				if flow.Scope.Provider != provider || flow.Scope.Account != "" {
+					continue
+				}
+				switch flow.Phase {
+				case "reserved", "waiting":
+					flow.Phase, flow.Continuation = "canceled", nil
+				case "starting", "polling":
+				default:
+					continue
+				}
+				flow.Canceled = true
+			}
 			return storeWrite(root, "accounts.json", records, storeFileLimit)
 		}
 		return storeError("not_found", "Extension account is unavailable.")
