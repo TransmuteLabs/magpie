@@ -295,8 +295,12 @@ existing JSON representation. Each file has a relative path, existence and
 mode, raw bytes encoded as base64, and a `beforeHash`. Linked Codex profile,
 global provider, saved provider/catalog/effort restoration, auxiliary
 models, effort and background compaction edits pass the same typed snapshot in process and
-return an `AgentPlan`. Claude effort and routing-related environment
-flags use that contract on their ordinary configuration paths.
+return an `AgentPlan`. Claude effort and routing-related environment flags
+use that contract on their ordinary configuration paths. Connect, model
+changes and Sync also include the picker and capabilities in the checked
+settings plan. Disconnect restores the route and removes the owned picker
+in one plan. A fingerprint of the written picker preserves a subsequent
+user edit even when its rows still say `via magpie`.
 OMP uses it to update its provider catalog and set a Magpie model on a
 role. Picking that model for the default role also updates `enabledModels`
 in the same plan. The host resolves the profile's actual YAML paths,

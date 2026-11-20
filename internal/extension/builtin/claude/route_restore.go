@@ -23,7 +23,7 @@ type RouteRestoreOptions struct {
 	MainWritten                  string
 	LocalAliases                 bool
 	NextModel                    *string
-	Window                       *WindowOptions
+	ModelSettings                ModelSettingsOptions
 }
 
 type CloudSwitch struct {
@@ -39,15 +39,15 @@ type RouteRestoreOwnership struct {
 	IsRoutedModel     func(string) bool
 }
 
-func PlanRouteRestore(options RouteRestoreOptions, settings sdk.ActionSettings, ownership RouteRestoreOwnership) (sdk.AgentPlan, WindowClaims, error) {
+func PlanRouteRestore(options RouteRestoreOptions, settings sdk.ActionSettings, ownership RouteRestoreOwnership) (sdk.AgentPlan, ModelSettingsClaims, error) {
 	if len(settings.Files) != 1 || settings.Files[0].Path != "settings.json" {
-		return sdk.AgentPlan{}, WindowClaims{}, errors.New("Claude restore action requires a settings.json snapshot")
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, errors.New("Claude restore action requires a settings.json snapshot")
 	}
 	file := settings.Files[0]
 	plain := jsonc.ToJSON(edit.TrimBOM(file.Body))
 	current := gjson.ParseBytes(plain)
 	if len(bytes.TrimSpace(plain)) > 0 && (!json.Valid(plain) || !current.IsObject()) {
-		return sdk.AgentPlan{}, WindowClaims{}, edit.AtFile(file.Path, errors.New("invalid Claude settings JSON/JSONC"))
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, edit.AtFile(file.Path, errors.New("invalid Claude settings JSON/JSONC"))
 	}
 	var set []edit.KV
 	var remove []string
@@ -156,14 +156,17 @@ func PlanRouteRestore(options RouteRestoreOptions, settings sdk.ActionSettings, 
 			replace(path, cloud.Original)
 		}
 	}
-	windowSet, windowRemove, claims := windowChanges(current, options.Window)
-	set, remove = append(set, windowSet...), append(remove, windowRemove...)
+	modelSet, modelRemove, claims, err := modelSettingsChanges(current, options.ModelSettings)
+	if err != nil {
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, edit.AtFile(file.Path, err)
+	}
+	set, remove = append(set, modelSet...), append(remove, modelRemove...)
 	if len(set) == 0 && len(remove) == 0 {
 		return sdk.AgentPlan{}, claims, nil
 	}
 	body, err := edit.PatchJSON(file.Body, set, remove)
 	if err != nil {
-		return sdk.AgentPlan{}, WindowClaims{}, edit.AtFile(file.Path, err)
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, edit.AtFile(file.Path, err)
 	}
 	return routeSettingsPlan(file, body), claims, nil
 }

@@ -18,6 +18,11 @@ const (
 	claudeRestoreWindows
 )
 
+const (
+	claudePickerKey = "claude.model_picker"
+	claudeCapsKey   = "claude.capabilities"
+)
+
 func claudeWindowOptions(at place, main string, mode claudeWindowMode) builtinclaude.WindowOptions {
 	saved := stashShared()
 	previous := builtinclaude.WindowClaims{
@@ -36,7 +41,18 @@ func claudeWindowOptions(at place, main string, mode claudeWindowMode) builtincl
 	}
 }
 
-func claudeWindowUpdates(at place, claims builtinclaude.WindowClaims) map[string]string {
+func claudeCatalogOptions(at place, managePicker bool) builtinclaude.CatalogOptions {
+	saved := stashShared()
+	return builtinclaude.CatalogOptions{
+		Previous: builtinclaude.CatalogClaims{
+			Picker: saved[at.key(claudePickerKey)], Capabilities: saved[at.key(claudeCapsKey)],
+		},
+		ManagePicker: managePicker,
+	}
+}
+
+func claudeModelSettingsUpdates(at place, settings builtinclaude.ModelSettingsClaims) map[string]string {
+	claims := settings.Window
 	var budgets, long string
 	if len(claims.Budgets) > 0 {
 		encoded, _ := json.Marshal(claims.Budgets)
@@ -51,12 +67,14 @@ func claudeWindowUpdates(at place, claims builtinclaude.WindowClaims) map[string
 		at.key("claude.compact_window"):  claims.Compact,
 		at.key("claude.compact_long"):    long,
 		at.key("claude.model_budgets"):   budgets,
+		at.key(claudePickerKey):          settings.Catalog.Picker,
+		at.key(claudeCapsKey):            settings.Catalog.Capabilities,
 	}
 }
 
-func keepClaudeWindowUpdates(at place, claims builtinclaude.WindowClaims) {
+func keepClaudeModelSettingsUpdates(at place, claims builtinclaude.ModelSettingsClaims) {
 	saved := stashShared()
-	updates := claudeWindowUpdates(at, claims)
+	updates := claudeModelSettingsUpdates(at, claims)
 	for key, value := range updates {
 		if saved[key] == value {
 			delete(updates, key)
@@ -67,15 +85,15 @@ func keepClaudeWindowUpdates(at place, claims builtinclaude.WindowClaims) {
 	}
 }
 
-func applyClaudeWindowSettings(at place, path string, options builtinclaude.WindowOptions) error {
-	var claims builtinclaude.WindowClaims
-	err := extension.ApplyLinkedAgentPlan(options, func(options builtinclaude.WindowOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
-		plan, next, err := builtinclaude.PlanWindowSettings(options, settings)
+func applyClaudeModelSettings(at place, path string, options builtinclaude.ModelSettingsOptions) error {
+	var claims builtinclaude.ModelSettingsClaims
+	err := extension.ApplyLinkedAgentPlan(options, func(options builtinclaude.ModelSettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, next, err := builtinclaude.PlanModelSettings(options, settings)
 		claims = next
 		return plan, err
 	}, extension.LinkedActionFile{Name: "settings.json", Path: path})
 	if err == nil {
-		keepClaudeWindowUpdates(at, claims)
+		keepClaudeModelSettingsUpdates(at, claims)
 	}
 	return err
 }

@@ -45,19 +45,38 @@ type WindowOptions struct {
 	Choose        func(WindowState) WindowChoice
 }
 
-func PlanWindowSettings(options WindowOptions, settings sdk.ActionSettings) (sdk.AgentPlan, WindowClaims, error) {
+type ModelSettingsOptions struct {
+	Window  *WindowOptions
+	Catalog *CatalogOptions
+}
+
+type ModelSettingsClaims struct {
+	Window  WindowClaims
+	Catalog CatalogClaims
+}
+
+func modelSettingsChanges(current gjson.Result, options ModelSettingsOptions) ([]edit.KV, []string, ModelSettingsClaims, error) {
+	set, remove, window := windowChanges(current, options.Window)
+	catalogSet, catalogRemove, catalog, err := catalogChanges(current, options.Catalog)
+	return append(set, catalogSet...), append(remove, catalogRemove...), ModelSettingsClaims{Window: window, Catalog: catalog}, err
+}
+
+func PlanModelSettings(options ModelSettingsOptions, settings sdk.ActionSettings) (sdk.AgentPlan, ModelSettingsClaims, error) {
 	if len(settings.Files) != 1 || settings.Files[0].Path != "settings.json" {
-		return sdk.AgentPlan{}, WindowClaims{}, errors.New("Claude window action requires a settings.json snapshot")
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, errors.New("Claude model settings action requires a settings.json snapshot")
 	}
 	file := settings.Files[0]
 	current := gjson.ParseBytes(jsonc.ToJSON(edit.TrimBOM(file.Body)))
-	set, remove, claims := windowChanges(current, &options)
+	set, remove, claims, err := modelSettingsChanges(current, options)
+	if err != nil {
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, edit.AtFile(file.Path, err)
+	}
 	if len(set) == 0 && len(remove) == 0 {
 		return sdk.AgentPlan{}, claims, nil
 	}
 	body, err := edit.PatchJSON(file.Body, set, remove)
 	if err != nil {
-		return sdk.AgentPlan{}, WindowClaims{}, edit.AtFile(file.Path, err)
+		return sdk.AgentPlan{}, ModelSettingsClaims{}, edit.AtFile(file.Path, err)
 	}
 	return routeSettingsPlan(file, body), claims, nil
 }

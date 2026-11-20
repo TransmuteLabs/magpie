@@ -103,7 +103,7 @@ func TestBudgetPath(t *testing.T) {
 			return builtinclaude.WindowChoice{}
 		},
 	}
-	if plan, _, err := builtinclaude.PlanWindowSettings(options, sdk.ActionSettings{
+	if plan, _, err := builtinclaude.PlanModelSettings(builtinclaude.ModelSettingsOptions{Window: &options}, sdk.ActionSettings{
 		Files: []sdk.ActionSettingFile{{Path: "settings.json", Body: input, Exists: true}},
 	}); err != nil || len(plan.Files) != 0 {
 		t.Fatalf("unexpected settings edit: %v, %v", plan, err)
