@@ -12,6 +12,48 @@ type CatalogSelection struct {
 	Refresh func(current string) any
 }
 
+const CatalogBackupFile = "models.json.before-pi-magpie"
+
+type LiveCatalog struct {
+	Model string
+	Owns  func(current string) bool
+	Scope func(ScopeSettings) ([]string, bool)
+}
+
+func PlanLiveCatalog(options LiveCatalog, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+	files := settings.Files
+	if len(files) != 3 || files[0].Path != SettingsFile || files[1].Path != CatalogFile ||
+		files[2].Path != CatalogBackupFile || options.Owns == nil {
+		return sdk.AgentPlan{}, errors.New("Pi live catalog requires settings, catalog and backup snapshots")
+	}
+	const key = "providers.magpie"
+	current := parseSettings(files[1].Body).Get(key)
+	drop := current.Exists() && options.Owns(current.Raw)
+	var plan sdk.AgentPlan
+	if drop {
+		backup := files[2]
+		if !backup.Exists {
+			plan.Files = append(plan.Files, sdk.FileChange{Path: backup.Path, BeforeHash: backup.BeforeHash, Body: files[1].Body})
+		}
+		if err := patch(&plan, files[1], nil, []string{key}); err != nil {
+			return sdk.AgentPlan{}, err
+		}
+	}
+	var config sdk.AgentPlan
+	var err error
+	switch {
+	case options.Model != "":
+		config, err = PlanModel(options.Model, sdk.ActionSettings{Files: files[:1]})
+	case options.Scope != nil && !drop:
+		config, err = PlanScope(options.Scope, sdk.ActionSettings{Files: files[:2]})
+	}
+	if err != nil {
+		return sdk.AgentPlan{}, err
+	}
+	plan.Files = append(plan.Files, config.Files...)
+	return plan, nil
+}
+
 func PlanCatalogSelection(options CatalogSelection, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
 	if options.Model == "" || options.Refresh == nil || len(settings.Files) != 2 ||
 		settings.Files[0].Path != SettingsFile || settings.Files[1].Path != CatalogFile {

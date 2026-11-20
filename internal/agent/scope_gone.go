@@ -131,10 +131,7 @@ func offeredSet(n int, id func(int) string) map[string]bool {
 	return out
 }
 
-// piScopeSynced catches Pi's enabledModels (settings.json) up with the
-// models magpie's block in models.json gives it; mem is the stash key of
-// what was taken out.
-func piScopeSynced(settings, modelsPath, mem string, refresh func(string) (any, error)) error {
+func piScopeUpdate(mem string) (func(builtinpi.ScopeSettings) ([]string, bool), func()) {
 	saved := scopeGoneLoad(mem)
 	var remembered *scopeGone
 	update := func(state builtinpi.ScopeSettings) ([]string, bool) {
@@ -151,17 +148,11 @@ func piScopeSynced(settings, modelsPath, mem string, refresh func(string) (any, 
 		remembered = &out
 		return next, changed
 	}
-	options := builtinpi.CatalogSync{Refresh: refresh, Scope: update}
-	err := extension.ApplyLinkedAgentPlan(options, builtinpi.PlanCatalogSync,
-		extension.LinkedActionFile{Name: builtinpi.SettingsFile, Path: settings},
-		extension.LinkedActionFile{Name: builtinpi.CatalogFile, Path: modelsPath})
-	if err != nil {
-		return err
+	return update, func() {
+		if remembered != nil {
+			scopeGoneSave(mem, *remembered)
+		}
 	}
-	if remembered != nil {
-		scopeGoneSave(mem, *remembered)
-	}
-	return nil
 }
 
 // stepcodeScopeSynced is piScopeSynced for StepCode's enabledModels

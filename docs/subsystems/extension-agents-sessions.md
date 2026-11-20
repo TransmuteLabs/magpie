@@ -355,7 +355,11 @@ Catalog refresh and removal use the same checked publication.
 Pi and its forks use a linked settings plan to publish the selected default
 model and its `enabledModels` entry. A pick that writes `providers.magpie`
 also checks and publishes its catalog in this plan. The first accepted
-pick retains the plan's starting settings for Disconnect. Reset checks both
+pick retains the plan's starting settings for Disconnect. With pi-magpie
+installed, the linked plan checks the package declaration and the old
+provider's URL and key before dropping the provider. Its first backup
+and any model or scope changes are part of the same checked publication.
+Reset checks both
 `settings.json` and `models.json` before clearing the default, the explicit
 Magpie scope entries and Magpie's provider. Concurrent edits to either
 file survive a rejected or rolled-back reset. The thinking-level picker

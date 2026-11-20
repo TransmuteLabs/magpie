@@ -1689,32 +1689,47 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 	// models.json block is not written and magpie's own stale one goes
 	// (pimagpie.go)
 	viaExt := func() bool { return id == "pi" && piMagpieInstalled(path) }
-	dropStaleBlock := func() error {
-		if err := dropPiBlock(modelsPath, func() string {
-			return wiringOff(name, modelsPath, func(k string) (string, bool) { return edit.GetJSON(modelsPath, "providers."+magpieID+"."+k) },
-				"baseUrl", at.v1(), "apiKey", key())
-		}); err != nil {
-			return err
+	livePlan := func(options builtinpi.LiveCatalog, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		if !piMagpieSettings(settings.Files[0].Body) {
+			return sdk.AgentPlan{}, extension.ErrActionChanged
 		}
-		return syncExtension()
+		options.Owns = func(raw string) bool {
+			current := gjson.Parse(raw)
+			return wiringOff(name, modelsPath, func(key string) (string, bool) {
+				value := current.Get(key)
+				return value.String(), value.Exists()
+			}, "baseUrl", at.v1(), "apiKey", key()) == ""
+		}
+		return builtinpi.PlanLiveCatalog(options, settings)
 	}
+	backupFile := extension.LinkedActionFile{Name: builtinpi.CatalogBackupFile, Path: modelsPath + ".before-pi-magpie"}
 	// the user's two files as they were before magpie's first write, put
 	// back byte for byte by Disconnect where it leaves them saying the same
 	before := beforeMagpie{at.key(id + ".before.absent"), []string{path, modelsPath}}
 	pickCatalog := func(value string) error {
 		updates := map[string]string{}
-		options := builtinpi.CatalogSelection{Model: value, Refresh: func(current string) any {
-			return piBlockKept(modelsPath, current, block(), false, updates)
-		}}
+		live := viaExt()
+		files := []extension.LinkedActionFile{settingsFile, catalogFile}
+		if live {
+			files = append(files, backupFile)
+		}
 		var preimages []sdk.ActionSettingFile
-		err := extension.ApplyLinkedAgentPlan(options, func(options builtinpi.CatalogSelection, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		err := extension.ApplyLinkedAgentPlan(value, func(model string, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
 			config, catalog := settings.Files[0], settings.Files[1]
 			if !gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(catalog.Body)), "providers."+magpieID).Exists() &&
 				gjson.GetBytes(jsonc.ToJSON(edit.TrimBOM(config.Body)), "defaultProvider").String() != magpieID {
 				preimages = settings.Files
 			}
-			return builtinpi.PlanCatalogSelection(options, settings)
-		}, settingsFile, catalogFile)
+			if live {
+				return livePlan(builtinpi.LiveCatalog{Model: model}, settings)
+			}
+			if id == "pi" && piMagpieSettings(config.Body) {
+				return sdk.AgentPlan{}, extension.ErrActionChanged
+			}
+			return builtinpi.PlanCatalogSelection(builtinpi.CatalogSelection{Model: model, Refresh: func(current string) any {
+				return piBlockKept(modelsPath, current, block(), false, updates)
+			}}, settings)
+		}, files...)
 		if err != nil {
 			return err
 		}
@@ -1757,19 +1772,30 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 		},
 		ListOnly: true,
 		Sync: func() error {
+			update, remember := piScopeUpdate(gone)
 			if viaExt() {
-				if err := dropStaleBlock(); err != nil {
+				options := builtinpi.LiveCatalog{Scope: update}
+				if err := extension.ApplyLinkedAgentPlan(options, livePlan, settingsFile, catalogFile, backupFile); err != nil {
 					return err
 				}
-				return piScopeSynced(path, modelsPath, gone, nil)
+				remember()
+				return syncExtension()
 			}
 			updates := map[string]string{}
 			refresh := func(current string) (any, error) {
 				return piBlockKept(modelsPath, current, block(), false, updates), nil
 			}
-			if err := piScopeSynced(path, modelsPath, gone, refresh); err != nil {
+			plan := func(options builtinpi.CatalogSync, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+				if id == "pi" && piMagpieSettings(settings.Files[0].Body) {
+					return sdk.AgentPlan{}, extension.ErrActionChanged
+				}
+				return builtinpi.PlanCatalogSync(options, settings)
+			}
+			options := builtinpi.CatalogSync{Refresh: refresh, Scope: update}
+			if err := extension.ApplyLinkedAgentPlan(options, plan, settingsFile, catalogFile); err != nil {
 				return err
 			}
+			remember()
 			if len(updates) != 0 {
 				stash(updates)
 			}
@@ -1808,17 +1834,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 						return nil
 					}
 					if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
-						if !viaExt() {
-							return pickCatalog(v)
-						}
-						if _, has := edit.GetJSON(modelsPath, "providers."+magpieID); !has {
-							if p, _ := get("defaultProvider"); p != magpieID {
-								before.take()
-							}
-						}
-						if err := dropStaleBlock(); err != nil {
-							return err
-						}
+						return pickCatalog(v)
 					}
 					return extension.ApplyLinkedAgentPlan(v, builtinpi.PlanModel, settingsFile)
 				},
