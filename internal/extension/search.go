@@ -6,49 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"reflect"
-	"strings"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-type SearchBinding struct {
-	Namespace     string
-	Module        string
-	Revision      string
-	ConfigVersion string
-	Descriptor    sdk.SearchSourceDescriptor
-}
+type SearchBinding = contributionBinding[sdk.SearchSourceDescriptor]
 
 func (m *Manager) SearchSources() []SearchBinding {
-	entries, err := m.List()
-	if err != nil || m.isClosed() {
-		return nil
-	}
-	out := []SearchBinding{}
-	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.Contract.Version.Minor < 8 || !entry.Manifest.Contract.Has(sdk.ModuleRPC) {
-			continue
-		}
-		config, err := m.ModuleConfig(context.Background(), entry.Manifest.ID)
-		if err != nil {
-			continue
-		}
-		for _, descriptor := range entry.Manifest.SearchSources {
-			out = append(out, SearchBinding{Namespace: m.Namespace(), Module: entry.Manifest.ID,
-				Revision: entry.Revision, ConfigVersion: config.Version, Descriptor: descriptor})
-		}
-	}
-	return out
+	return registeredContributions(context.Background(), m, "", sdk.Manifest.DeclaredSearchSources)
 }
 
-func (m *Manager) SearchSource(name string) (SearchBinding, bool) {
-	module, id, found := strings.Cut(name, "/")
-	if !found || !sdk.ValidID(module) || !sdk.ValidID(id) {
+func (m *Manager) SearchSource(ctx context.Context, name string) (SearchBinding, bool) {
+	module, id, found := contributionName(name)
+	if !found {
 		return SearchBinding{}, false
 	}
-	for _, binding := range m.SearchSources() {
-		if binding.Module == module && binding.Descriptor.ID == id {
+	for _, binding := range registeredContributions(ctx, m, module, sdk.Manifest.DeclaredSearchSources) {
+		if binding.Descriptor.ID == id {
 			return binding, true
 		}
 	}
@@ -56,12 +30,8 @@ func (m *Manager) SearchSource(name string) (SearchBinding, bool) {
 }
 
 func (m *Manager) checkSearch(ctx context.Context, binding SearchBinding, scope sdk.Scope) error {
-	if err := ctx.Err(); err != nil {
+	if err := checkContribution(ctx, m, binding, sdk.Manifest.DeclaredSearchSources); err != nil {
 		return err
-	}
-	current, found := m.SearchSource(binding.Module + "/" + binding.Descriptor.ID)
-	if !found || binding.Namespace != m.Namespace() || !reflect.DeepEqual(current, binding) {
-		return errors.New("extension search source or configuration changed")
 	}
 	if scope.Plugin != binding.Module || scope.Provider != binding.Descriptor.Provider ||
 		scope.Operation != "" || scope.Session != "" ||
@@ -69,10 +39,10 @@ func (m *Manager) checkSearch(ctx context.Context, binding SearchBinding, scope 
 		scope.Provider != "" && (scope.Account == "" || scope.Generation == 0) {
 		return errors.New("extension search requires its declared account authority")
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return err
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (m *Manager) RunSearch(ctx context.Context, binding SearchBinding, scope sdk.Scope, request sdk.SearchRequest) (sdk.SearchResult, error) {
@@ -85,17 +55,14 @@ func (m *Manager) RunSearch(ctx context.Context, binding SearchBinding, scope sd
 	if err := m.checkSearch(ctx, binding, scope); err != nil {
 		return sdk.SearchResult{}, err
 	}
-	previous, _ := ctx.Value(windowAdmissionKey{}).(func(context.Context) error)
-	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(admission context.Context) error {
-		if previous != nil {
-			if err := previous(admission); err != nil {
-				return err
-			}
-		}
+	ctx = withContributionAdmission(ctx, func(admission context.Context) error {
 		return m.checkSearch(admission, binding, scope)
 	})
-	lease, err := m.AcquireRevision(ctx, binding.Module, binding.Revision, binding.ConfigVersion)
+	lease, err := binding.acquire(ctx, m)
 	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return sdk.SearchResult{}, err
+		}
 		return sdk.SearchResult{}, errors.New("extension search source is unavailable")
 	}
 	defer lease.Close()
@@ -111,6 +78,12 @@ func (m *Manager) RunSearch(ctx context.Context, binding SearchBinding, scope sd
 	}, func(Event) error {
 		return errors.New("extension search must return one unary result")
 	})
+	if err := ctx.Err(); err != nil {
+		return sdk.SearchResult{}, err
+	}
+	if errors.Is(err, errContributionRevoked) || errors.Is(err, errContributionConfig) {
+		return sdk.SearchResult{}, err
+	}
 	if err != nil || len(output) > sdk.MaxSearchBytes {
 		return sdk.SearchResult{}, errors.New("extension search failed to return a bounded result")
 	}

@@ -101,7 +101,7 @@ export function requestWithPolicy(signal: AbortSignal, host: RequestPolicyHost, 
   classify: (response: Response) => RequestRecoveryRequest | null | Promise<RequestRecoveryRequest | null>
 ): Promise<{response: Response; decision: RequestRecoveryResult | null}>;
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -245,6 +245,20 @@ export interface RoutingRequest { strategy: string; pool: string; seats: Routing
 export interface RoutingResult { order: number[] }
 export function validateRoutingRequest(request: unknown): RoutingRequest;
 export function validateRoutingResult(result: unknown, seats: number): RoutingResult;
+export type ContributionDescriptor =
+  | { point: "routing"; version: 1; routing: RoutingStrategyDescriptor; search?: never }
+  | { point: "search"; version: 1; search: SearchSourceDescriptor; routing?: never };
+
+export type FeatureSetting = {
+  name: string;
+  title: string;
+  description?: string;
+} & (
+  | { kind: "boolean"; default: boolean; enum?: readonly boolean[] }
+  | { kind: "string"; default: string; enum?: readonly string[] }
+  | { kind: "integer" | "number"; default: number; enum?: readonly number[]; minimum?: number; maximum?: number }
+);
+
 interface ManifestFields {
   budgetPolicies?: readonly BudgetPolicyDescriptor[];
   maskingRuleSets?: readonly MaskingRuleSet[];
@@ -276,6 +290,8 @@ interface ManifestFields {
   catalogAccess?: CatalogAccessDescriptor;
   routingStrategies?: RoutingStrategyDescriptor[];
   searchSources?: SearchSourceDescriptor[];
+  contributions?: readonly ContributionDescriptor[];
+  settings?: readonly FeatureSetting[];
   accountOperations?: AccountOperationDescriptor[];
 }
 export type Manifest = ManifestFields & (
@@ -516,7 +532,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15" | "^1.16"; nativeABI?: number; platforms?: string[] }
 export interface ProviderOption {
   key: string; label: string; description?: string; default?: boolean; confirm?: string;
   labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;

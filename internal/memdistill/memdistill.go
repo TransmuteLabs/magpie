@@ -484,7 +484,7 @@ func cutBytes(s string) string { return strings.ToValidUTF8(s, "") }
 // known are the memories the model is shown, so it proposes none of them
 // again: the active and waiting ones everyone has, and the project's.
 func known(proj *memory.Project) []string {
-	ms, _, err := memory.All()
+	ms, _, err := memory.Owner().All()
 	if err != nil {
 		return nil
 	}
@@ -553,7 +553,7 @@ func keep(fs []sdk.MemoryDistillationProposal, s sessions.Session, proj *memory.
 		}
 		why, status := cut(strings.TrimSpace(f.Why), 300), memory.Candidate
 		src := &memory.Source{Agent: s.Agent, Session: s.ID, Dir: s.Cwd, Quote: cut(strings.TrimSpace(f.Quote), 300)}
-		_, added, err := memory.Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope, Why: &why, Status: &status}, memory.FromInferred, src, p)
+		_, added, err := memory.Owner().Save(memory.Input{Text: &text, Kind: &kind, Scope: &scope, Why: &why, Status: &status}, memory.FromInferred, src, p)
 		if err == nil && added {
 			n++
 		}
@@ -577,7 +577,7 @@ func Keep(ctx context.Context, first, interval time.Duration, auto func() string
 		t.Reset(interval)
 		// retention holds whether distilling is on or not: memories saved
 		// by agents leave candidates and archived ones too
-		if _, err := memory.Prune(); err != nil {
+		if _, err := memory.Owner().Prune(); err != nil {
 			log.Println("memory: retention:", err)
 		}
 		// switched off (the default): nothing to read, nor a model to

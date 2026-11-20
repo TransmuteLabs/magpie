@@ -98,6 +98,56 @@ func TestPublishUsesLinkedDigestRenderer(t *testing.T) {
 	}
 }
 
+func TestPublishRejectsScopesOutsideTheLinkedRequest(t *testing.T) {
+	fresh(t)
+	save(t, "Owner approved digest", Rule, Global)
+	if _, err := Publish(); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := Digest("claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := linkedDigestRenderer
+	t.Cleanup(func() { linkedDigestRenderer = original })
+	linkedDigestRenderer.Render = func(sdk.MemoryDigestRequest) (sdk.MemoryDigestResult, error) {
+		return sdk.MemoryDigestResult{
+			ByScope: map[string]string{"agent:claude": "Rules:\n- Scope absent from the publication snapshot"},
+		}, nil
+	}
+	if changed, err := Publish(); err == nil || changed {
+		t.Errorf("unselected scope published: changed %v, error %v", changed, err)
+	}
+	if current, err := Digest("claude"); err != nil || current != previous {
+		t.Fatalf("prior digest was replaced: %q (%v)", current, err)
+	}
+}
+
+func TestPublishKeepsDigestWhenARecordCannotBeRead(t *testing.T) {
+	at := fresh(t)
+	record := save(t, "Keep the published instruction", Rule, Global)
+	if _, err := Publish(); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := Digest("codex")
+	if err != nil || !strings.Contains(previous, record.Text) {
+		t.Fatalf("published digest: %q (%v)", previous, err)
+	}
+	if err := os.WriteFile(in(record.ID+".md"), []byte("---\nmissing closing separator"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	*at = at.Add(25 * time.Hour)
+	if changed, err := PublishDue(); changed || err == nil {
+		t.Errorf("unreadable snapshot: changed %v, error %v", changed, err)
+	}
+	if changed, err := Publish(); changed || err == nil {
+		t.Errorf("unreadable manual publication: changed %v, error %v", changed, err)
+	}
+	if current, err := Digest("codex"); err != nil || current != previous {
+		t.Fatalf("prior digest replaced: %q (%v)", current, err)
+	}
+}
+
 func TestDigestUsesLinkedComposer(t *testing.T) {
 	fresh(t)
 	save(t, "Use the shared build", Rule, Global)

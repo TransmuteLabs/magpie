@@ -6,66 +6,32 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"reflect"
-	"strings"
 	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-type RoutingBinding struct {
-	Module     string
-	Revision   string
-	Descriptor sdk.RoutingStrategyDescriptor
-}
+type RoutingBinding = contributionBinding[sdk.RoutingStrategyDescriptor]
+
+var errRoutingRevoked = errors.New("routing strategy was revoked during ordering")
 
 func (m *Manager) RoutingStrategies() []RoutingBinding {
-	entries, err := m.List()
-	if err != nil || m.isClosed() {
-		return nil
-	}
-	out := []RoutingBinding{}
-	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.Contract.Version.Minor < 4 || !entry.Manifest.Contract.Has(sdk.ModuleRPC) {
-			continue
-		}
-		for _, descriptor := range entry.Manifest.RoutingStrategies {
-			out = append(out, RoutingBinding{Module: entry.Manifest.ID, Revision: entry.Revision, Descriptor: descriptor})
-		}
-	}
-	return out
-}
-
-func (m *Manager) routingEntry(name string) (Installed, sdk.RoutingStrategyDescriptor, bool) {
-	module, id, found := strings.Cut(name, "/")
-	if !found || !sdk.ValidID(module) || !sdk.ValidID(id) || m.isClosed() {
-		return Installed{}, sdk.RoutingStrategyDescriptor{}, false
-	}
-	entries, err := m.List()
-	if err != nil {
-		return Installed{}, sdk.RoutingStrategyDescriptor{}, false
-	}
-	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.ID != module || entry.Manifest.Contract.Version.Minor < 4 ||
-			!entry.Manifest.Contract.Has(sdk.ModuleRPC) || entry.Manifest.Component != nil {
-			continue
-		}
-		for _, descriptor := range entry.Manifest.RoutingStrategies {
-			action, declared := entry.Manifest.ResolveAction(descriptor.Action)
-			if descriptor.ID == id && declared && action.Effect == "read" {
-				return entry, descriptor, true
-			}
-		}
-	}
-	return Installed{}, sdk.RoutingStrategyDescriptor{}, false
+	return registeredContributions(context.Background(), m, "", sdk.Manifest.DeclaredRoutingStrategies)
 }
 
 func (m *Manager) RoutingStrategy(name string) (RoutingBinding, bool) {
-	entry, descriptor, found := m.routingEntry(name)
+	module, id, found := contributionName(name)
 	if !found {
 		return RoutingBinding{}, false
 	}
-	return RoutingBinding{Module: entry.Manifest.ID, Revision: entry.Revision, Descriptor: descriptor}, true
+	ctx, cancel := context.WithTimeout(context.Background(), sdk.MaxRoutingTimeoutMs*time.Millisecond)
+	defer cancel()
+	for _, binding := range registeredContributions(ctx, m, module, sdk.Manifest.DeclaredRoutingStrategies) {
+		if binding.Descriptor.ID == id {
+			return binding, true
+		}
+	}
+	return RoutingBinding{}, false
 }
 
 func (m *Manager) OrderRouting(parent context.Context, binding RoutingBinding, request sdk.RoutingRequest) (sdk.RoutingResult, error) {
@@ -86,27 +52,33 @@ func (m *Manager) OrderRouting(parent context.Context, binding RoutingBinding, r
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Millisecond)
 	defer cancel()
-	name := binding.Module + "/" + descriptor.ID
-	current, selected, available := m.routingEntry(name)
-	if !available || current.Revision != binding.Revision || !reflect.DeepEqual(selected, descriptor) {
-		return sdk.RoutingResult{}, errors.New("routing strategy changed before dispatch")
+	check := func(admission context.Context) error {
+		err := checkContribution(admission, m, binding, sdk.Manifest.DeclaredRoutingStrategies)
+		if errors.Is(err, errContributionRevoked) {
+			return errRoutingRevoked
+		}
+		return err
 	}
-	config, err := m.ModuleConfig(ctx, binding.Module)
-	if err != nil {
+	if err := check(ctx); err != nil {
 		return sdk.RoutingResult{}, err
 	}
-	lease, err := m.AcquireRevision(ctx, binding.Module, binding.Revision, config.Version)
+	ctx = withContributionAdmission(ctx, check)
+	lease, err := binding.acquire(ctx, m)
 	if err != nil {
 		return sdk.RoutingResult{}, err
 	}
 	defer lease.Close()
-	if !reflect.DeepEqual(lease.Manifest().RoutingStrategies, current.Manifest.Public().RoutingStrategies) {
-		return sdk.RoutingResult{}, errors.New("routing strategy leased descriptor changed")
+	if err := ctx.Err(); err != nil {
+		return sdk.RoutingResult{}, err
 	}
 	output, err := lease.Call(ctx, sdk.MethodModuleCall, sdk.Scope{Plugin: binding.Module},
 		sdk.ModuleCallRequest{Action: descriptor.Action, Input: input}, func(Event) error {
 			return errors.New("routing strategy must return one unary order")
 		})
+	if errors.Is(err, errRoutingRevoked) || errors.Is(err, errContributionConfig) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return sdk.RoutingResult{}, err
+	}
 	if err != nil || len(output) > sdk.MaxRoutingBytes {
 		return sdk.RoutingResult{}, errors.New("routing strategy failed to return a bounded order")
 	}
@@ -116,13 +88,8 @@ func (m *Manager) OrderRouting(parent context.Context, binding RoutingBinding, r
 	if decoder.Decode(&result) != nil || decoder.Decode(new(any)) != io.EOF || result.Validate(len(request.Seats)) != nil {
 		return sdk.RoutingResult{}, errors.New("routing strategy returned an invalid permutation")
 	}
-	current, selected, available = m.routingEntry(name)
-	if !available || current.Revision != binding.Revision || !reflect.DeepEqual(selected, descriptor) {
-		return sdk.RoutingResult{}, errors.New("routing strategy was revoked during ordering")
-	}
-	final, err := m.ModuleConfig(ctx, binding.Module)
-	if err != nil || final.Version != lease.ConfigVersion() || ctx.Err() != nil {
-		return sdk.RoutingResult{}, errors.New("routing strategy configuration changed or expired")
+	if err := check(ctx); err != nil {
+		return sdk.RoutingResult{}, err
 	}
 	return sdk.RoutingResult{Order: append([]int(nil), result.Order...)}, nil
 }

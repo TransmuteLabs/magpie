@@ -9,7 +9,7 @@ test("transactional refresh requires API 1.3 while old auth modules remain valid
     providers: [{ id: "vendor", name: "Vendor", protocols: ["chat"] }],
     compatibility: { hostAPI: "^1.3" },
   };
-  assert.equal(CONTRACT.version.minor, 15);
+  assert.equal(CONTRACT.version.minor, 16);
   assert.doesNotThrow(() => validateManifest(manifest));
   manifest.contract.version.minor = 2;
   assert.throws(() => validateManifest(manifest), SDKError);

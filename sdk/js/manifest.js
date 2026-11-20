@@ -4,8 +4,8 @@ import { MAX_CHUNK_BYTES, MAX_FRAME_BYTES, SDKError } from "./bytes.js";
 import { actionOwner, componentID, validateComposite, checkHostCompatibility } from "./composite.js";
 import { gatewayMethodEffect, validateGatewayCall, validateGatewayResult, validateHooks } from "./hooks.js";
 import { isAccountOnlyProvider, validateInferenceProvider, validateExtendedModel, validateProviderPolicy, validateExecuteOperation, validateModelOperations } from "./provider-policy.js";
-import { validateRouting } from "./routing.js";
-import { validateSearchSources } from "./search-sources.js";
+import { validateContributions } from "./contributions.js";
+import { validateModuleSettings } from "./module-settings.js";
 import { MIDDLEWARE_METHODS, middlewareMethods, validateMiddleware, validateMiddlewareCall, validateMiddlewareResult } from "./middleware.js";
 import { validateWindowAuthBindings } from "./window-auth.js";
 import { validateAgentMetadata, validateAgentBindingSnapshot, validateAgentBindingChange } from "./agent-metadata.js";
@@ -53,7 +53,7 @@ const capabilities = {
 };
 
 export const CONTRACT = Object.freeze({
-  version: Object.freeze({ major: 1, minor: 15 }),
+  version: Object.freeze({ major: 1, minor: 16 }),
   capabilities: Object.freeze(Object.keys(capabilities)),
 });
 
@@ -275,8 +275,7 @@ export function validateManifest(value) {
   validateComposite(manifest);
   validateAgentProcesses(manifest);
   validateWindowAuthBindings(manifest);
-  validateRouting(manifest, fail);
-  validateSearchSources(manifest, fail);
+  validateContributions(manifest, fail);
   validateSessionSources(manifest);
   validateSessionRelatedContract(manifest);
   validateStorageSources(manifest);
@@ -284,6 +283,7 @@ export function validateManifest(value) {
   validateAccountCheckins(manifest);
   validateAccountKeepAlives(manifest);
   validateProviderOptions(manifest);
+  validateModuleSettings(manifest, fail);
   validateAccountTasks(manifest);
   validateActivation(manifest);
   validateHooks(manifest);
@@ -301,7 +301,7 @@ export function publicManifest(manifest) {
   delete result.runtime;
   delete result.entry;
   delete result.args;
-  for (const key of ["services", "window", "bindings", "authBindings", "compatibility"]) delete result[key];
+  for (const key of ["services", "window", "bindings", "authBindings", "compatibility", "contributions", "settings"]) delete result[key];
   if (result.actions != null) result.actions = result.actions.filter(action => actionOwner(action) === componentID(manifest));
   if (result.routingStrategies != null) {
     result.routingStrategies = result.routingStrategies.filter(strategy => result.actions?.some(action => action.id === strategy.action));

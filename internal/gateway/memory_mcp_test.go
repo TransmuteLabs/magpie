@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -123,6 +124,60 @@ func TestMemoryMCPSharedAcrossAgents(t *testing.T) {
 	m, _ := memory.Get(hits[0].ID)
 	if len(m.Sources) != 2 || m.Sources[1].Agent != "codex" {
 		t.Fatalf("sources %+v", m.Sources)
+	}
+}
+
+func TestMemoryMCPWriteScopesFollowTheResolvedCaller(t *testing.T) {
+	fresh(t)
+	handler := lanGuard(New().Handler())
+	dir := t.TempDir()
+	ours := gitRepo(t, filepath.Join(dir, "ours"), "https://github.com/acme/ours")
+	theirs := gitRepo(t, filepath.Join(dir, "theirs"), "https://github.com/acme/theirs")
+	caller := []string{MemoryClientHeader, "codex-mcp-client", MemoryCwdHeader, ours}
+	peer := []string{MemoryClientHeader, "claude-code", MemoryCwdHeader, theirs}
+
+	if reply, failed := memPost(t, handler, memorySaveTool, `{"text":"Project release fixture","scope":"project"}`, peer...); failed {
+		t.Fatalf("seed project: %s", reply)
+	}
+	if reply, failed := memPost(t, handler, memorySaveTool, `{"text":"Claude-only fixture","scope":"agent"}`, peer...); failed {
+		t.Fatalf("seed agent: %s", reply)
+	}
+	all, _, err := memory.All()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("seeded memories: %v (%v)", all, err)
+	}
+	var projectID string
+	for _, record := range all {
+		if strings.HasPrefix(record.Scope, "project:") {
+			projectID = record.ID
+		}
+		edited, editFailed := memPost(t, handler, memorySaveTool,
+			fmt.Sprintf(`{"id":%q,"text":"Outside the selected scope","scope":"project"}`, record.ID), caller...)
+		forgotten, forgetFailed := memPost(t, handler, memoryForgetTool, fmt.Sprintf(`{"id":%q}`, record.ID), caller...)
+		if !editFailed || !forgetFailed {
+			t.Errorf("foreign scope %q: edit %q, forget %q", record.Scope, edited, forgotten)
+		}
+		current, err := memory.Get(record.ID)
+		if err != nil || current == nil || current.Text != record.Text || current.Scope != record.Scope || current.Status != memory.Active {
+			t.Errorf("rejected operations did not preserve %q: %+v (%v)", record.Text, current, err)
+		}
+	}
+	_, projects, err := memory.All()
+	if err != nil || len(projects) != 1 {
+		t.Fatalf("rejected edit registered an unrelated project: %+v (%v)", projects, err)
+	}
+	edited, failed := memPost(t, handler, memorySaveTool,
+		fmt.Sprintf(`{"id":%q,"text":"Changed in the selected project","project":"github.com/acme/theirs"}`, projectID), caller...)
+	if failed || !strings.HasPrefix(edited, "Changed: ") {
+		t.Fatalf("explicit project edit: %s", edited)
+	}
+	forgotten, failed := memPost(t, handler, memoryForgetTool,
+		fmt.Sprintf(`{"id":%q,"project":"github.com/acme/theirs"}`, projectID), caller...)
+	if failed || !strings.Contains(forgotten, "Changed in the selected project") {
+		t.Fatalf("explicit project archive: %s", forgotten)
+	}
+	if current, err := memory.Get(projectID); err != nil || current == nil || current.Status != memory.Archived {
+		t.Fatalf("selected project record was not archived: %+v (%v)", current, err)
 	}
 }
 
@@ -479,10 +534,33 @@ func TestMemoryMCPProjectArgumentAndContext(t *testing.T) {
 	if said, bad := memPost(t, h, memoryContextTool, `{}`, "User-Agent", "curl/8"); bad || !strings.Contains(said, "Agent: unknown") || !strings.Contains(said, "Project: none") {
 		t.Fatalf("context of no one: %s", said)
 	}
-	// the tool is listed, read-only
 	w = mcpPostTo(h, MemoryMCPPath, "127.0.0.1:50000", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "Accept", "application/json")
-	if !strings.Contains(w.Body.String(), `"name":"memory_context"`) || strings.Count(w.Body.String(), `"project":{`) != 3 {
-		t.Fatalf("tools: %s", w.Body.String())
+	var list struct {
+		Result struct {
+			Tools []struct {
+				Name        string
+				InputSchema struct {
+					Properties map[string]json.RawMessage
+				}
+				Annotations struct{ ReadOnlyHint bool }
+			}
+		}
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("tools/list: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, tool := range list.Result.Tools {
+		if len(tool.InputSchema.Properties["project"]) != 0 {
+			got[tool.Name] = tool.Annotations.ReadOnlyHint
+		}
+	}
+	for name, readOnly := range map[string]bool{
+		memorySearchTool: true, memoryContextTool: true, memorySaveTool: false, memoryForgetTool: false,
+	} {
+		if hint, present := got[name]; !present || hint != readOnly {
+			t.Errorf("%s does not advertise the expected project selector and read-only hint: %+v", name, got)
+		}
 	}
 }
 

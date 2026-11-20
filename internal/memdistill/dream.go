@@ -95,7 +95,7 @@ func Dream(ctx context.Context, auto string, complete Complete) ([]memory.Change
 	var cs []memory.Change
 	if err == nil {
 		plan.Before = now().Add(-Unreviewed)
-		cs, err = memory.Tidy(plan)
+		cs, err = memory.Owner().Tidy(plan)
 	}
 	_, serr := change(func(s *State) {
 		if err != nil {
@@ -118,7 +118,7 @@ func Undo() (int, error) {
 	if err != nil || st.Undone || len(st.Changes) == 0 {
 		return 0, err
 	}
-	n, err := memory.Untidy(st.Changes)
+	n, err := memory.Owner().Untidy(st.Changes)
 	if err != nil {
 		return n, err
 	}
@@ -132,7 +132,7 @@ func Undo() (int, error) {
 func ask(ctx context.Context, model, effort string, complete Complete) (memory.Plan, error) {
 	var p memory.Plan
 	codec := linkedDistillationCodec
-	all, _, err := memory.All()
+	all, _, err := memory.Owner().All()
 	if err != nil {
 		return p, err
 	}

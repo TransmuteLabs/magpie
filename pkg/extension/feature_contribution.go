@@ -56,12 +56,12 @@ const (
 // have the declared Kind. Integer values must fit the exact JSON integer range
 // (-2^53+1 through 2^53-1). Minimum and Maximum apply to numeric kinds.
 type FeatureSetting struct {
-	Name        string
-	Kind        FeatureSettingKind
-	Title       string
-	Description string
-	Default     any
-	Enum        []any
-	Minimum     *float64
-	Maximum     *float64
+	Name        string             `json:"name"`
+	Kind        FeatureSettingKind `json:"kind"`
+	Title       string             `json:"title"`
+	Description string             `json:"description,omitempty"`
+	Default     any                `json:"default"`
+	Enum        []any              `json:"enum,omitempty"`
+	Minimum     *float64           `json:"minimum,omitempty"`
+	Maximum     *float64           `json:"maximum,omitempty"`
 }

@@ -14,6 +14,7 @@
 package memory
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -22,6 +23,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The kinds of memory. A kind decides how long a memory stays true and
@@ -62,51 +65,10 @@ const Global = "global"
 // MaxText is the longest a memory's text may be: one fact, not a document.
 const MaxText = 2000
 
-// Memory is one thing known.
-type Memory struct {
-	ID    string   `json:"id"`
-	Text  string   `json:"text"`
-	Kind  string   `json:"kind"`
-	Scope string   `json:"scope"`
-	Tags  []string `json:"tags,omitempty"`
-	// Why is the reason behind a rule or preference, when one was given
-	Why          string    `json:"why,omitempty"`
-	Origin       string    `json:"origin"`
-	Status       string    `json:"status"`
-	SupersededBy string    `json:"supersededBy,omitempty"`
-	Pinned       bool      `json:"pinned,omitempty"`
-	Sources      []Source  `json:"sources,omitempty"`
-	Created      time.Time `json:"created"`
-	Updated      time.Time `json:"updated"`
-	// Edited is when the user last changed it (Edit by the user, Save
-	// of what they typed): a change made then is theirs, which a sync
-	// from another computer tells apart from an agent's or a tidy's
-	// (Combine)
-	Edited time.Time `json:"edited,omitzero"`
-	// Used is when a search last returned it, Uses how many times
-	Used time.Time `json:"used,omitzero"`
-	Uses int       `json:"uses,omitempty"`
-	// Skill is the Library skill this procedure was made (MadeSkill)
-	Skill string `json:"skill,omitempty"`
-}
-
-// Source is where a memory was said or found.
-type Source struct {
-	Agent   string    `json:"agent,omitempty"`
-	Session string    `json:"session,omitempty"`
-	Dir     string    `json:"dir,omitempty"`  // the folder the agent worked in
-	File    string    `json:"file,omitempty"` // an imported memory's file
-	Quote   string    `json:"quote,omitempty"`
-	At      time.Time `json:"at"`
-}
-
-// Project is a project memories are kept for: a git repository by its
-// remote, or a folder, with the folders it was seen in.
-type Project struct {
-	Key   string   `json:"key"`
-	Name  string   `json:"name"`
-	Roots []string `json:"roots,omitempty"`
-}
+type Memory = sdk.MemoryRecord
+type Source = sdk.MemorySource
+type Project = sdk.MemoryProject
+type Input = sdk.MemoryInput
 
 // file is all of memory as read from Dir (store.go).
 type file struct {
@@ -208,18 +170,6 @@ func newID() string {
 	return "m_" + hex.EncodeToString(b)
 }
 
-// Input is a memory as a caller gives it: to Save a new one, or to Edit
-// one (where a nil field is left as it is).
-type Input struct {
-	Text   *string   `json:"text,omitempty"`
-	Kind   *string   `json:"kind,omitempty"`
-	Scope  *string   `json:"scope,omitempty"`
-	Tags   *[]string `json:"tags,omitempty"`
-	Why    *string   `json:"why,omitempty"`
-	Status *string   `json:"status,omitempty"`
-	Pinned *bool     `json:"pinned,omitempty"`
-}
-
 // Check says what is wrong with a memory's fields, nil when nothing.
 func check(m *Memory) error {
 	switch {
@@ -306,7 +256,11 @@ func norm(s string) string {
 // One distilled from a conversation (FromInferred) is not added when the
 // user threw the same text away before (dismissed), or set it aside in
 // that scope: m is nil then, or the one set aside, and added false.
-func Save(in Input, origin string, src *Source, proj *Project) (m *Memory, added bool, err error) {
+func Save(in Input, origin string, src *Source, proj *Project) (*Memory, bool, error) {
+	return saveRecord(context.Background(), in, origin, src, proj)
+}
+
+func saveRecord(ctx context.Context, in Input, origin string, src *Source, proj *Project) (m *Memory, added bool, err error) {
 	t := now()
 	m = &Memory{Kind: Fact, Scope: Global, Origin: origin, Status: Active, Created: t, Updated: t}
 	if origin == FromUser {
@@ -323,7 +277,7 @@ func Save(in Input, origin string, src *Source, proj *Project) (m *Memory, added
 		}
 		m.Sources = []Source{s}
 	}
-	err = change(func(f *file) error {
+	err = changeContext(ctx, func(f *file) error {
 		if origin == FromInferred {
 			n := norm(m.Text)
 			if slices.Contains(f.Dismissed, n) {
@@ -425,14 +379,24 @@ func NoteProject(p *Project) error {
 // Edit changes the memory with id. An edit by the user (byUser) makes it
 // the user's: what is distilled or saved later never changes it.
 func Edit(id string, in Input, byUser bool) (*Memory, error) {
+	return editRecord(context.Background(), id, in, byUser, nil, nil)
+}
+
+func editRecord(ctx context.Context, id string, in Input, byUser bool, scopes []string, project *Project) (*Memory, error) {
 	var out *Memory
-	err := change(func(f *file) error {
+	err := changeContext(ctx, func(f *file) error {
 		m := find(f, id)
-		if m == nil {
+		if m == nil || scopes != nil && !slices.Contains(scopes, m.Scope) {
 			return ErrNotFound
 		}
 		out = m
-		return editIn(f, m, in, byUser)
+		if err := editIn(f, m, in, byUser); err != nil {
+			return err
+		}
+		if project != nil && in.Scope != nil && ScopeOf(project) == m.Scope {
+			notePro(f, project)
+		}
+		return nil
 	})
 	return out, err
 }

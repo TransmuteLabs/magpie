@@ -2,8 +2,8 @@ package pluginrt
 
 import (
 	"fmt"
-	"math"
-	"slices"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Schema is a plugin's settings as JSON Schema says an object: the window
@@ -27,54 +27,10 @@ type Property struct {
 }
 
 func (p *Property) value(v any) (any, error) {
-	var out any
-	switch p.Type {
-	case "boolean":
-		b, ok := v.(bool)
-		if !ok {
-			return nil, fmt.Errorf("%v is not true or false", v)
-		}
-		out = b
-	case "string":
-		s, ok := v.(string)
-		if !ok {
-			return nil, fmt.Errorf("%v is not text", v)
-		}
-		out = s
-	case "integer", "number":
-		var f float64
-		switch n := v.(type) {
-		case int:
-			f = float64(n)
-		case int64:
-			f = float64(n)
-		case float64:
-			f = n
-		default:
-			return nil, fmt.Errorf("%v is not a number", v)
-		}
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return nil, fmt.Errorf("%v is not a number", v)
-		}
-		if p.Minimum != nil && f < *p.Minimum || p.Maximum != nil && f > *p.Maximum {
-			return nil, fmt.Errorf("%v is out of range", v)
-		}
-		if p.Type == "integer" {
-			if f != math.Trunc(f) {
-				return nil, fmt.Errorf("%v is not a whole number", v)
-			}
-			if math.Abs(f) > 1<<53-1 {
-				return nil, fmt.Errorf("%v is outside the exact JSON integer range", v)
-			}
-			out = int64(f)
-		} else {
-			out = f
-		}
+	setting := sdk.FeatureSetting{
+		Kind: sdk.FeatureSettingKind(p.Type), Enum: p.Enum, Minimum: p.Minimum, Maximum: p.Maximum,
 	}
-	if len(p.Enum) > 0 && !slices.Contains(p.Enum, out) {
-		return nil, fmt.Errorf("%v is not one of %v", v, p.Enum)
-	}
-	return out, nil
+	return setting.Value(v)
 }
 
 // Validate gives config as the schema's types, or says the first key or

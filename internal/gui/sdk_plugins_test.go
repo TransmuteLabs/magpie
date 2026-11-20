@@ -26,13 +26,23 @@ import (
 const sdkGUIFixture = "gui-opencode"
 
 func sdkGUIManifest(version string) sdk.Manifest {
-	return sdk.Manifest{
+	manifest := sdk.Manifest{
 		Schema: sdk.ManifestSchema, ID: sdkGUIFixture, Version: version, Runtime: "exec", Entry: "worker",
-		Contract:      sdk.Contract{Version: sdk.FullContract().Version, Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.AgentWiring}},
+		Contract:      sdk.Contract{Version: sdk.FullContract().Version, Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.AgentWiring, sdk.ModuleRPC}},
 		Providers:     []sdk.ProviderDescriptor{{ID: "gui-opencode-go", Name: "Fixture OpenCode Go", Protocols: []protocolext.Protocol{"chat"}}},
 		Agents:        []sdk.AgentDescriptor{{ID: "gui-opencode-agent", Name: "Fixture OpenCode Agent"}},
 		Compatibility: &sdk.Compatibility{HostAPI: "^1", Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}},
+		Actions:       []sdk.ActionDescriptor{{ID: "config-fixture", InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "read"}},
+		Settings: []sdk.FeatureSetting{
+			{Name: "recordUsage", Title: "Record usage", Kind: sdk.FeatureSettingBoolean, Default: true},
+			{Name: "mode", Title: "Mode", Kind: sdk.FeatureSettingString, Default: "balanced", Enum: []any{"balanced", "fast"}},
+			{Name: "attempts", Title: "Attempts", Kind: sdk.FeatureSettingInteger, Default: 2, Minimum: new(float64(1)), Maximum: new(float64(4))},
+		},
 	}
+	if version == "1.3.0" {
+		manifest.Settings[1].Enum = []any{"balanced", "slow"}
+	}
+	return manifest
 }
 
 func TestSDKGUIFixtureWorker(t *testing.T) {
@@ -42,9 +52,28 @@ func TestSDKGUIFixtureWorker(t *testing.T) {
 	manifest := sdkGUIManifest(os.Args[3])
 	handlers := map[string]sdk.Handler{}
 	for _, method := range sdk.RequiredMethods(manifest) {
+		if method == sdk.MethodModuleCall {
+			continue
+		}
 		handlers[method] = func(context.Context, sdk.Call, *sdk.Stream) (any, error) { return struct{}{}, nil }
 	}
-	if err := sdk.Serve(t.Context(), os.Stdin, os.Stdout, sdk.Module{Manifest: manifest, Handlers: handlers}); err != nil {
+	worker := sdk.Module{
+		Manifest: manifest, Handlers: handlers,
+		Start: func(_ context.Context, configuration sdk.ModuleContext) (sdk.ModuleReady, func(), error) {
+			return sdk.ModuleReady{State: configuration.Config}, nil, nil
+		},
+		Actions: map[string]sdk.Handler{
+			"config-fixture": func(ctx context.Context, _ sdk.Call, _ *sdk.Stream) (any, error) {
+				current, found := sdk.ModuleContextFrom(ctx)
+				start, valid := current.State.(sdk.ConfigSnapshot)
+				if !found || !valid || start.Version != current.Config.Version || !bytes.Equal(start.Values, current.Config.Values) {
+					return nil, fmt.Errorf("startup and handler observed different configuration snapshots")
+				}
+				return current.Config, nil
+			},
+		},
+	}
+	if err := sdk.Serve(t.Context(), os.Stdin, os.Stdout, worker); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -179,9 +208,60 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 	row := state.Plugins[0]
 	if row.SDK == nil || row.SDK.Source != source || row.Spec != "sdk:"+sdkGUIFixture || row.Version != version ||
 		row.Error != "" || !row.SDK.Checkable || len(row.Providers) != 1 || len(row.SDK.Agents) != 1 ||
-		row.SDK.HostAPI != "^1" || len(row.SDK.Protocols) != 1 || len(row.SDK.Capabilities) != 2 {
+		row.SDK.HostAPI != "^1" || len(row.SDK.Protocols) != 1 || len(row.SDK.Capabilities) != 3 {
 		t.Fatalf("incorrect installed SDK metadata: %+v %+v", row, row.SDK)
 	}
+	checkWorkerConfig := func(version, values string) {
+		t.Helper()
+		body, err := host.Call(t.Context(), sdkGUIFixture, sdk.MethodModuleCall, sdk.Scope{},
+			sdk.ModuleCallRequest{Action: "config-fixture", Input: json.RawMessage(`{}`)}, nil)
+		var config sdk.ConfigSnapshot
+		if err != nil || json.Unmarshal(body, &config) != nil || config.Version != version || string(config.Values) != values {
+			t.Fatalf("worker did not receive effective configuration %s %s: %s %v", version, values, body, err)
+		}
+	}
+	checkWorkerConfig("0", `{"attempts":2,"mode":"balanced","recordUsage":true}`)
+	raw, err := host.ModuleConfig(t.Context(), sdkGUIFixture)
+	if err != nil || raw.Version != "0" || string(raw.Values) != "{}" {
+		t.Fatalf("defaults were written to disk: %+v %v", raw, err)
+	}
+	if _, err := host.CompareAndSwapModuleConfig(t.Context(), sdkGUIFixture, "0", json.RawMessage(`{"private":{"token":"kept-secret"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	shown := call("GET", "", "", &state)
+	form := state.Plugins[0].SDK.Settings
+	if form == nil || form.ConfigVersion != "1" || form.PackageRevision == "" ||
+		!reflect.DeepEqual(form.Schema.Order, []string{"recordUsage", "mode", "attempts"}) ||
+		string(form.Values["mode"]) != `"balanced"` || strings.Contains(shown.Body.String(), "kept-secret") {
+		t.Fatalf("ordinary listing has wrong settings or leaked unrelated config: %s", shown.Body)
+	}
+	change := func(revision extension.ModuleSettingsRevision, values string) string {
+		t.Helper()
+		raw, err := json.Marshal(struct {
+			extension.ModuleSettingsRevision
+			Spec   string          `json:"spec"`
+			Values json.RawMessage `json:"values"`
+		}{revision, "sdk:" + sdkGUIFixture, json.RawMessage(values)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	for _, values := range []string{`{"private":false}`, `{"recordUsage":null}`, `{"attempts":5}`, `{"attempts":2,"attempts":3}`, `{"mode":"unknown"}`} {
+		if got := call("POST", "/settings", change(form.ModuleSettingsRevision, values), nil); got.Code == http.StatusOK {
+			t.Fatalf("settings accepted invalid patch %s: %s", values, got.Body)
+		}
+	}
+	call("POST", "/settings", change(form.ModuleSettingsRevision, `{"mode":"fast"}`), new(struct{}))
+	if got := call("POST", "/settings", change(form.ModuleSettingsRevision, `{"mode":"balanced"}`), nil); got.Code == http.StatusOK {
+		t.Fatal("stale config revision rewrote saved settings")
+	}
+	if _, err := host.CompareAndSwapModuleConfig(t.Context(), sdkGUIFixture, "2", json.RawMessage(`{"attempts":"three"}`)); err == nil {
+		t.Fatal("raw module configuration writer bypassed declared type checking")
+	}
+	checkWorkerConfig("2", `{"attempts":2,"mode":"fast","private":{"token":"kept-secret"},"recordUsage":true}`)
+	call("GET", "", "", &state)
+	form = state.Plugins[0].SDK.Settings
 	if assetRequests != 2 {
 		t.Fatalf("installation did not fetch the archive and checksum once: %d", assetRequests)
 	}
@@ -208,6 +288,17 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 		t.Fatalf("SDK update missing from ordinary badge: %+v", updates)
 	}
 	call("POST", "/off", `{"spec":"sdk:`+sdkGUIFixture+`","off":true}`, &state)
+	if state.Plugins[0].SDK.Settings != nil {
+		t.Fatal("disabled module exposes an active settings form")
+	}
+	if got := call("POST", "/settings", change(form.ModuleSettingsRevision, `{"mode":"balanced"}`), nil); got.Code == http.StatusOK {
+		t.Fatal("disabled module accepted a settings patch")
+	}
+	call("POST", "/off", idJSON, &state)
+	if got := call("POST", "/settings", change(form.ModuleSettingsRevision, `{"mode":"balanced"}`), nil); got.Code == http.StatusOK {
+		t.Fatal("old settings form survived disable and re-enable")
+	}
+	call("POST", "/off", `{"spec":"sdk:`+sdkGUIFixture+`","off":true}`, &state)
 	call("GET", "/updates", "", &updates)
 	if !state.Plugins[0].Off || state.Plugins[0].Latest != version || len(updates.Waiting) != 0 {
 		t.Fatalf("Off did not hide SDK update badge while preserving row: %+v %+v", state, updates)
@@ -224,12 +315,28 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 	if state.Plugins[0].Off {
 		t.Fatal("ordinary on switch left SDK plugin disabled")
 	}
+	stalePackage := state.Plugins[0].SDK.Settings.ModuleSettingsRevision
+	stalePackage.PackageRevision = form.PackageRevision
+	if got := call("POST", "/settings", change(stalePackage, `{"mode":"balanced"}`), nil); got.Code == http.StatusOK {
+		t.Fatal("configuration form from an old package survived an update")
+	}
+	checkWorkerConfig("2", `{"attempts":2,"mode":"fast","private":{"token":"kept-secret"},"recordUsage":true}`)
 	version = "1.2.0"
 	archive = sdkGUIRelease(t, version)
 	call("POST", "/update", "{}", &state)
 	if state.Plugins[0].Version != version || legacyUpdates != 1 {
 		t.Fatalf("Update all did not go through both paths: %+v, %d", state.Plugins[0], legacyUpdates)
 	}
+	version = "1.3.0"
+	archive = sdkGUIRelease(t, version)
+	if got := call("POST", "/upgrade", idJSON, nil); got.Code == http.StatusOK || !strings.Contains(got.Body.String(), `module setting \"mode\"`) {
+		t.Fatalf("incompatible configuration update was not refused: %d %s", got.Code, got.Body)
+	}
+	call("GET", "", "", &state)
+	if state.Plugins[0].Version != "1.2.0" {
+		t.Fatalf("incompatible update replaced the current package: %+v", state.Plugins[0])
+	}
+	checkWorkerConfig("2", `{"attempts":2,"mode":"fast","private":{"token":"kept-secret"},"recordUsage":true}`)
 	call("POST", "/remove", idJSON, &state)
 	if len(state.Plugins) != 0 {
 		t.Fatalf("ordinary remove left the SDK row: %+v", state.Plugins)

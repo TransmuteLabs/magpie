@@ -115,16 +115,24 @@ one Settings lists, are turned away (`TestMemoryMCPGuarded`).
 - Without a folder the server can't name the project, nor the agent without
   a client name: such a save says so instead of guessing, and a save with
   no scope is kept for everyone (`TestMemoryMCPSaysWhatItCantKnow`).
-- A search or save may name another project (`project`: a folder,
+- A search, save or forget may name another project (`project`: a folder,
   absolute or under the caller's, or a key memory knows;
   `memoryCaller.inProject`), so a migration run from one project keeps
-  memories for another. A project named goes with scope project (or a
-  search's all). Every answer names what it used: a memory's line says
+  memories for another. An explicit project selects that project for the
+  call. For a search its scope is `project` or `all`. Every answer names
+  what it used: a memory's line says
   `this project (<key>)` and `only for you (<agent>)`, and a search ends
   `(looked in: …)`. `memory_context` says who the caller is taken for,
   the project, and how each was found, as text and `structuredContent`
   (`TestMemoryMCPProjectArgumentAndContext`).
 - A save through MCP is active at once, origin `agent`.
+- The gateway binds a linked
+  [`MemoryAgentWriter`](../../pkg/extension/memory_owner.go) to the
+  admitted caller. An edit or forget looks up the existing record within
+  the caller's global, selected project and identified agent scopes
+  under the store lock. Edits can move a record within those scopes.
+  Knowing a record ID alone gives no write access. An edit that selects
+  a project stores its name and roots in the same transaction.
 - A project's rules go to the project's files: `memory_save`'s description
   says a project's rule, convention or fact belongs in its instruction
   files or docs when it keeps them, and a new save of the caller's project
@@ -191,9 +199,10 @@ Memory publication and digest assembly call the linked Go
 by the built-in [`memorydigest`](../../internal/extension/builtin/memorydigest/digest.go)
 module. Publication passes the active records' rendering fields and scope
 budgets, then persists Markdown by scope and the publication time under
-the existing store lock and journal. A renderer error preserves the
-previous publication. For assembly, Memory supplies the global, selected
-agent, and project sections. The module orders those project sections and
+the existing store lock and journal. It checks the daily deadline under
+the same lock. A renderer error, an unexpected output scope or an unreadable
+record preserves the previous publication. For assembly, Memory supplies the
+global, selected agent, and project sections. The module orders those sections and
 applies the combined budget. Library selects the target instructions and
 reconciles their files. The contract is registered at build time.
 
@@ -204,7 +213,7 @@ the prompt cache built on them — change mid-session only then
 - a change the user makes in the GUI publishes at once
   (`library.PublishMemory(false)` from [internal/gui/memory.go](../../internal/gui/memory.go));
 - `KeepLinked`'s loop publishes once a day for what agents saved meanwhile
-  (`PublishMemory(true)` → `memory.PublishDue`, which writes nothing while
+  (`PublishMemory(true)` → `MemoryOwner.PublishDue`, which writes nothing while
   memory has never held anything).
 
 `Library.memoryDigest` adds the agent's digest (global, its own, and each
@@ -224,6 +233,9 @@ agents ticked under Instructions, unless `Instructions.NoMemory`
 | `POST /api/memory/status` | `{ids, status}`: `SetStatus`, in one write, as `Edit` by the user per memory (`TestSetStatusOfSome`, `TestMemoryStatusRouteActsOnSome`) |
 | `POST /api/memory/digest` | `{on}` |
 
+The GUI, Library and local maintenance use the linked
+[`MemoryOwner`](../../pkg/extension/memory_owner.go) for records and changes.
+Memory validates and persists them. Library reconciles instructions and skills.
 A reply after a change carries `problem` when publishing the digest
 failed. The tab is in [plugins/library/client.js](../../internal/gui/assets/plugins/library/client.js)
 (`renderMemory`), tested by `internal/gui/tests/library-memory.test.cjs`.
@@ -250,8 +262,8 @@ Distillation and Dream use the linked
 [`MemoryDistillationCodec`](../../pkg/extension/memory_distillation.go) to
 format model requests and decode suggestions. The host selects the input
 and model, sends the request through the gateway, validates evidence or
-resolves the request's short note labels, and applies changes through
-Memory's store.
+resolves the request's short note labels, and applies changes through the
+linked `MemoryOwner`.
 
 - How far back (`State.Days`, `SetRange`): 7, 30, 90 or 365 days, or All
   (`memdistill.All`, -1); 0 is the 7-day default, so a state from before
@@ -427,8 +439,8 @@ meaning, since it downloads a model (~135 MB).
 Memory supplies a [`MemorySemanticIndexSource`](../../pkg/extension/memory_semantic.go)
 to background indexing and uses the same snapshot for the progress count.
 The snapshot contains active and candidate records, newest first, with
-their ID, text and why. Memory owns status, edits and removals. An
-unreadable store leaves the cache intact for a later pass.
+their ID, text and why. Memory owns status, edits and removals. An unreadable
+store or record leaves the cache intact for a later pass.
 
 Each indexing pass uses the switch file and model directory it opened.
 Cache publication checks both under the switch lock shared with `Set`.

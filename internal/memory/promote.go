@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // What memory suggests the user make more of (Suggest): a memory learned
@@ -32,16 +34,7 @@ const (
 // maxDeclined is how many suggestions turned down are kept.
 const maxDeclined = 500
 
-// Suggestion is one thing memory suggests.
-type Suggestion struct {
-	Key  string   `json:"key"`  // what Decline takes
-	To   string   `json:"to"`   // ToGlobal or ToSkill
-	IDs  []string `json:"ids"`  // the memories it is about, the one kept first
-	Text string   `json:"text"` // the text kept
-	// Projects are the projects' keys a ToGlobal one was learned in
-	Projects []string `json:"projects,omitempty"`
-	Uses     int      `json:"uses,omitempty"` // a ToSkill one's
-}
+type Suggestion = sdk.MemorySuggestion
 
 // Suggest is what memory suggests now, none the user turned down: the
 // project memories that say the same in two or more projects, or one

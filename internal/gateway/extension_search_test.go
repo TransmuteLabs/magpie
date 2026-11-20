@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -47,6 +48,11 @@ func buildSDKSearch(test *testing.T) string {
 
 func installSDKSearch(test *testing.T, manager *extension.Manager, directory, version string, authenticated bool) {
 	test.Helper()
+	installSDKSearchDeclaration(test, manager, directory, version, authenticated, false)
+}
+
+func installSDKSearchDeclaration(test *testing.T, manager *extension.Manager, directory, version string, authenticated, registry bool) {
+	test.Helper()
 	entry := "worker"
 	if runtime.GOOS == "windows" {
 		entry += ".exe"
@@ -59,6 +65,13 @@ func installSDKSearch(test *testing.T, manager *extension.Manager, directory, ve
 		manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.OutboundExecutor, sdk.AccountAuth)
 		manifest.Providers = []sdk.ProviderDescriptor{{ID: "vendor", Name: "Search account", Protocols: []protocolext.Protocol{"chat"}}}
 		manifest.SearchSources[0].Provider = "vendor"
+	}
+	if registry {
+		manifest.Contract.Version.Minor = 16
+		manifest.Contributions = []sdk.ContributionDescriptor{{
+			Point: sdk.ContributionSearch, Version: 1, Search: &manifest.SearchSources[0],
+		}}
+		manifest.SearchSources = nil
 	}
 	raw, _ := json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0600); err != nil {
@@ -83,6 +96,11 @@ func configureSDKSearch(test *testing.T, manager *extension.Manager, options map
 
 func setupSDKSearch(test *testing.T, directory string, authenticated bool) *extension.Manager {
 	test.Helper()
+	return setupSDKSearchDeclaration(test, directory, authenticated, false)
+}
+
+func setupSDKSearchDeclaration(test *testing.T, directory string, authenticated, registry bool) *extension.Manager {
+	test.Helper()
 	fresh(test)
 	forgetSearchKeys()
 	test.Cleanup(forgetSearchKeys)
@@ -91,7 +109,7 @@ func setupSDKSearch(test *testing.T, directory string, authenticated bool) *exte
 	test.Setenv("MAGPIE_ADDR", "")
 	manager := extension.Default()
 	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
-	installSDKSearch(test, manager, directory, "1.0.0", authenticated)
+	installSDKSearchDeclaration(test, manager, directory, "1.0.0", authenticated, registry)
 	if authenticated {
 		saveSDKSearchAccount(test, manager, "alice", "", 0, 0)
 		saveSDKSearchAccount(test, manager, "bob", "", 0, 0)
@@ -150,7 +168,81 @@ func readSDKSearchTrace(test *testing.T, path string) []sdkSearchTrace {
 
 func TestSDKSearchOrdinaryFrontAndLedger(test *testing.T) {
 	directory := buildSDKSearch(test)
-	manager := setupSDKSearch(test, directory, false)
+	test.Run("legacy", func(test *testing.T) { sdkSearchOrdinaryFrontAndLedger(test, directory, false) })
+	test.Run("registry", func(test *testing.T) { sdkSearchOrdinaryFrontAndLedger(test, directory, true) })
+}
+
+func TestSDKSearchDiscoveryRespectsRequestDeadline(test *testing.T) {
+	manager := setupSDKSearchDeclaration(test, buildSDKSearch(test), false, true)
+	if err := settings.Save(settings.Settings{Searcher: "off"}); err != nil {
+		test.Fatal(err)
+	}
+	server := New()
+	lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "catalog.lock"), os.O_RDWR, 0600)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer lock.Close()
+	for name, search := range map[string]func(context.Context, string) (string, []Hit, error){
+		"web": server.webSearch,
+		"api": server.apiSearch,
+	} {
+		test.Run(name, func(test *testing.T) {
+			if held, err := filelock.TryLock(lock); err != nil || !held {
+				test.Fatalf("hold SDK catalog: %t, %v", held, err)
+			}
+			ctx, cancel := context.WithTimeout(test.Context(), 100*time.Millisecond)
+			defer cancel()
+			finished := make(chan error, 1)
+			go func() {
+				_, _, err := search(ctx, "query")
+				finished <- err
+			}()
+			select {
+			case err := <-finished:
+				filelock.Unlock(lock)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					test.Fatalf("search returned %v under the locked catalog", err)
+				}
+			case <-time.After(2 * time.Second):
+				filelock.Unlock(lock)
+				<-finished
+				test.Fatal("search discovery was still waiting for the SDK catalog after the deadline")
+			}
+		})
+	}
+}
+
+func TestSDKSearchDispatchKeepsTheSelectedRevision(test *testing.T) {
+	directory := buildSDKSearch(test)
+	manager := setupSDKSearchDeclaration(test, directory, false, true)
+	selected, found := provider.SearchVendorFor(test.Context(), sdkSearchVendor)
+	if !found {
+		test.Fatal("source not selected")
+	}
+	peer := extension.NewManager(manager.Namespace())
+	test.Cleanup(func() { closeSDKGatewayHook(test, peer) })
+	installSDKSearchDeclaration(test, peer, directory, "2.0.0", false, true)
+	trace := filepath.Join(test.TempDir(), "trace")
+	configureSDKSearch(test, peer, map[string]any{"trace": trace})
+	if _, err := provider.RunExtensionSearch(test.Context(), selected, nil, "stale", 2); err == nil {
+		test.Error("a stale selection dispatched to the replacement module")
+	}
+	if entries := readSDKSearchTrace(test, trace); len(entries) != 0 {
+		test.Errorf("replacement received a stale query: %+v", entries)
+	}
+	_, hits, err := New().apiSearch(test.Context(), "current")
+	if err != nil || len(hits) == 0 {
+		test.Fatalf("fresh search did not use the replacement: %v, %v", hits, err)
+	}
+	if entries := readSDKSearchTrace(test, trace); len(entries) != 1 || entries[0].Version != "2.0.0" ||
+		entries[0].Request.Query != "current" {
+		test.Fatalf("unexpected dispatches to replacement: %+v", entries)
+	}
+}
+
+func sdkSearchOrdinaryFrontAndLedger(test *testing.T, directory string, registry bool) {
+	manager := setupSDKSearchDeclaration(test, directory, false, registry)
 	trace := filepath.Join(test.TempDir(), "trace")
 	configureSDKSearch(test, manager, map[string]any{"trace": trace, "mode": "state-write"})
 	vendor, found := provider.SearchVendorOf(sdkSearchVendor)
@@ -351,7 +443,7 @@ func TestSDKSearchLeaseRejectsRevokedPublication(test *testing.T) {
 			started := filepath.Join(test.TempDir(), "started")
 			release := filepath.Join(test.TempDir(), "release")
 			configureSDKSearch(test, manager, map[string]any{"mode": "hold", "started": started, "release": release})
-			binding, found := manager.SearchSource("search.fixture/specstream")
+			binding, found := manager.SearchSource(test.Context(), "search.fixture/specstream")
 			if !found {
 				test.Fatal("source not discovered")
 			}

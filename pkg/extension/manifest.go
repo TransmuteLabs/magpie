@@ -16,6 +16,7 @@ func (manifest Manifest) Public() Manifest {
 	snapshot.Runtime, snapshot.Entry, snapshot.Args = "", "", nil
 	snapshot.Services, snapshot.Window, snapshot.Bindings, snapshot.Compatibility = nil, nil, nil, nil
 	snapshot.AuthBindings = nil
+	snapshot.Contributions, snapshot.Settings = nil, nil
 	snapshot.Actions = slices.DeleteFunc(snapshot.Actions, func(action ActionDescriptor) bool {
 		return actionOwner(action) != componentID(manifest)
 	})
@@ -117,6 +118,17 @@ func cloneManifest(manifest Manifest) Manifest {
 	}
 	manifest.RoutingStrategies = slices.Clone(manifest.RoutingStrategies)
 	manifest.SearchSources = slices.Clone(manifest.SearchSources)
+	manifest.Contributions = slices.Clone(manifest.Contributions)
+	for index := range manifest.Contributions {
+		contribution := &manifest.Contributions[index]
+		if contribution.Routing != nil {
+			contribution.Routing = new(*contribution.Routing)
+		}
+		if contribution.Search != nil {
+			contribution.Search = new(*contribution.Search)
+		}
+	}
+	manifest.Settings = cloneFeatureSettings(manifest.Settings)
 	manifest.Tools = slices.Clone(manifest.Tools)
 	for index := range manifest.Tools {
 		manifest.Tools[index].InputSchema = slices.Clone(manifest.Tools[index].InputSchema)
@@ -252,7 +264,7 @@ func (manifest Manifest) Validate() error {
 	if err := ValidateSessionRelatedContract(manifest); err != nil {
 		return err
 	}
-	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools)+len(manifest.RoutingStrategies)+len(manifest.SearchSources) > 1024 {
+	if len(manifest.Inbounds)+len(manifest.Providers)+len(manifest.Agents)+len(manifest.Sessions)+len(manifest.Tools)+len(manifest.RoutingStrategies)+len(manifest.SearchSources)+len(manifest.Contributions) > 1024 {
 		return fmt.Errorf("too many extension descriptors")
 	}
 	paths := map[string]bool{}
@@ -443,10 +455,10 @@ func (manifest Manifest) Validate() error {
 	if err := ValidateAgentProcesses(manifest); err != nil {
 		return err
 	}
-	if err := manifest.validateRouting(); err != nil {
+	if err := manifest.validateContributions(); err != nil {
 		return err
 	}
-	if err := manifest.validateSearchSources(); err != nil {
+	if err := manifest.validateModuleSettings(); err != nil {
 		return err
 	}
 	return manifest.validateHooks()

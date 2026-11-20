@@ -146,7 +146,10 @@ func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, er
 		return "", nil, err
 	}
 	var errs []error
-	apis := provider.SearchAPIs()
+	apis := provider.SearchAPIsFor(ctx)
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	if mixed := slices.DeleteFunc(slices.Clone(apis), func(a provider.SearchAPI) bool { return !a.Mix }); len(mixed) > 1 {
 		pages, err := s.askSearchAPIsTogether(ctx, mixed, query)
 		if len(pages) > 0 {
@@ -158,12 +161,15 @@ func (s *Server) apiSearch(ctx context.Context, query string) (string, []Hit, er
 	}
 	for _, a := range apis {
 		pages, err := s.askSearchAPIKeys(ctx, a, query)
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", a.Name(), err))
+			errs = append(errs, fmt.Errorf("%s: %w", a.NameFor(ctx), err))
 			continue
 		}
 		if len(pages) == 0 {
-			errs = append(errs, fmt.Errorf("%s found nothing", a.Name()))
+			errs = append(errs, fmt.Errorf("%s found nothing", a.NameFor(ctx)))
 			continue
 		}
 		said, hits := pagesSaid(pages)
@@ -195,9 +201,9 @@ func (s *Server) askSearchAPIsTogether(ctx context.Context, apis []provider.Sear
 			pages, err := s.askSearchAPIKeys(ctx, a, query)
 			switch {
 			case err != nil:
-				errs[i] = fmt.Errorf("%s: %w", a.Name(), err)
+				errs[i] = fmt.Errorf("%s: %w", a.NameFor(ctx), err)
 			case len(pages) == 0:
-				errs[i] = fmt.Errorf("%s found nothing", a.Name())
+				errs[i] = fmt.Errorf("%s found nothing", a.NameFor(ctx))
 			}
 			found[i] = pages
 		}()
@@ -249,8 +255,12 @@ func pageKey(raw string) string {
 // turned away; #1477), which then rests (searchRestFor). Anything else, such as
 // no answer in time, isn't about the key, and the next isn't tried.
 func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
-	if v, ok := provider.SearchVendorOf(a.Vendor); ok && (v.Plugin != "" || v.Extension != "") && v.Auth != "" {
-		return s.askSearchSignedIn(ctx, a, v, query)
+	vendor, found := provider.SearchVendorFor(ctx, a.Vendor)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if found && (vendor.Plugin != "" || vendor.Extension != "") && vendor.Auth != "" {
+		return s.askSearchSignedIn(ctx, a, vendor, query)
 	}
 	keys := a.Keys()
 	if len(keys) == 0 {
@@ -263,9 +273,17 @@ func (s *Server) askSearchAPIKeys(ctx context.Context, a provider.SearchAPI, que
 		ctx, _ := withSearchWire(ctx, one.Key)
 		ctx, cancel := context.WithTimeout(ctx, searchTimeout/4)
 		start := time.Now()
-		pages, err := s.askSearchAPI(ctx, one, query)
+		pages, err := s.askSearchVendor(ctx, one, vendor, query)
 		cancel()
-		s.logSearchAPI(ctx, one, query, start, len(pages), err)
+		if strings.HasPrefix(one.Vendor, "sdk:") {
+			name := vendor.Name
+			if name == "" {
+				name = one.Vendor
+			}
+			s.logSearch(ctx, usage.Record{Requested: name}, query, start, len(pages), err)
+		} else {
+			s.logSearchAPI(ctx, one, query, start, len(pages), err)
+		}
 		if err == nil {
 			wakeSearchKey(a.Vendor, keys[i])
 			return pages, nil
@@ -381,10 +399,18 @@ func pagesSaid(pages []foundPage) (string, []Hit) {
 
 // askSearchAPI asks one search API for the query.
 func (s *Server) askSearchAPI(ctx context.Context, a provider.SearchAPI, query string) ([]foundPage, error) {
-	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Extension != "" {
+	v, _ := provider.SearchVendorFor(ctx, a.Vendor)
+	return s.askSearchVendor(ctx, a, v, query)
+}
+
+func (s *Server) askSearchVendor(ctx context.Context, a provider.SearchAPI, v provider.SearchVendor, query string) ([]foundPage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if v.Extension != "" {
 		return s.askExtensionSearch(ctx, v, nil, query)
 	}
-	if v, ok := provider.SearchVendorOf(a.Vendor); ok && v.Plugin != "" {
+	if v.Plugin != "" {
 		return s.askPluginSearch(ctx, a, v, query)
 	}
 	n := searchCount(ctx)

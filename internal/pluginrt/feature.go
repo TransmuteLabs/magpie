@@ -2,7 +2,6 @@ package pluginrt
 
 import (
 	"fmt"
-	"math"
 	"slices"
 	"strings"
 
@@ -96,62 +95,18 @@ func featureParts(declarations []sdk.FeaturePart) ([]Part, error) {
 func SchemaOf(settings []sdk.FeatureSetting) (*Schema, error) {
 	schema := &Schema{Type: "object", Properties: make(map[string]*Property, len(settings))}
 	for _, setting := range settings {
-		if setting.Name == "" || strings.TrimSpace(setting.Name) != setting.Name || strings.TrimSpace(setting.Title) == "" {
-			return nil, fmt.Errorf("invalid name or title for %q", setting.Name)
-		}
 		if schema.Properties[setting.Name] != nil {
 			return nil, fmt.Errorf("duplicate setting %q", setting.Name)
 		}
-		property, err := featureProperty(setting)
+		normalized, err := setting.Normalize()
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", setting.Name, err)
 		}
 		schema.Order = append(schema.Order, setting.Name)
-		schema.Properties[setting.Name] = property
+		schema.Properties[setting.Name] = &Property{
+			Type: string(normalized.Kind), Title: normalized.Title, Description: normalized.Description,
+			Default: normalized.Default, Enum: normalized.Enum, Minimum: normalized.Minimum, Maximum: normalized.Maximum,
+		}
 	}
 	return schema, nil
-}
-
-func featureProperty(setting sdk.FeatureSetting) (*Property, error) {
-	switch setting.Kind {
-	case sdk.FeatureSettingBoolean, sdk.FeatureSettingString:
-		if setting.Minimum != nil || setting.Maximum != nil {
-			return nil, fmt.Errorf("bounds require a numeric setting")
-		}
-	case sdk.FeatureSettingInteger, sdk.FeatureSettingNumber:
-	default:
-		return nil, fmt.Errorf("unsupported kind %q", setting.Kind)
-	}
-	property := &Property{
-		Type: string(setting.Kind), Title: setting.Title, Description: setting.Description,
-	}
-	if setting.Minimum != nil {
-		minimum := *setting.Minimum
-		if math.IsNaN(minimum) || math.IsInf(minimum, 0) {
-			return nil, fmt.Errorf("minimum must be finite")
-		}
-		property.Minimum = &minimum
-	}
-	if setting.Maximum != nil {
-		maximum := *setting.Maximum
-		if math.IsNaN(maximum) || math.IsInf(maximum, 0) || property.Minimum != nil && maximum < *property.Minimum {
-			return nil, fmt.Errorf("invalid maximum")
-		}
-		property.Maximum = &maximum
-	}
-	var enum []any
-	for _, value := range setting.Enum {
-		normalized, err := property.value(value)
-		if err != nil {
-			return nil, fmt.Errorf("enum: %w", err)
-		}
-		enum = append(enum, normalized)
-	}
-	property.Enum = enum
-	var err error
-	property.Default, err = property.value(setting.Default)
-	if err != nil {
-		return nil, fmt.Errorf("default: %w", err)
-	}
-	return property, nil
 }

@@ -7,6 +7,7 @@ package provider
 // with theirs.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -72,6 +73,7 @@ type SearchVendor struct {
 	// plugin asks it (plugin.RunSearch); ID is plugin.PluginSearch.VendorID.
 	Plugin, PluginID       string
 	Extension, ExtensionID string
+	extensionBinding       extensionSearchBinding
 	// NeedURL: a plugin's API the user gives an address for, as a SearXNG
 	NeedURL bool
 	// Auth: a plugin's API that signs in as the same plugin's provider of
@@ -117,17 +119,28 @@ var SearchVendors = []SearchVendor{
 // are on give (their search hook), after them. A plugin note that can't be
 // read adds none.
 func AllSearchVendors() []SearchVendor {
+	return append(searchVendorsWithoutSDK(), extensionSearchVendors()...)
+}
+
+func searchVendorsWithoutSDK() []SearchVendor {
 	out := slices.Clone(SearchVendors)
 	ps, _ := plugin.NotedSearches()
 	for _, p := range ps {
 		out = append(out, SearchVendor{ID: p.VendorID(), Name: p.Name, KeysURL: p.KeysURL, KeyOptional: p.KeyOptional,
 			Plugin: p.Spec, PluginID: p.ID, NeedURL: p.NeedURL, Auth: p.Auth})
 	}
-	return append(out, extensionSearchVendors()...)
+	return out
 }
 
 // SearchVendorOf is the vendor by its id: one of magpie's, or a plugin's.
 func SearchVendorOf(id string) (SearchVendor, bool) {
+	return SearchVendorFor(context.Background(), id)
+}
+
+func SearchVendorFor(ctx context.Context, id string) (SearchVendor, bool) {
+	if strings.HasPrefix(id, "sdk:") {
+		return extensionSearchVendorFor(ctx, id)
+	}
 	i := slices.IndexFunc(SearchVendors, func(v SearchVendor) bool { return v.ID == id })
 	if i >= 0 {
 		return SearchVendors[i], true
@@ -135,7 +148,7 @@ func SearchVendorOf(id string) (SearchVendor, bool) {
 	if !strings.Contains(id, ":") {
 		return SearchVendor{}, false
 	}
-	all := AllSearchVendors()
+	all := searchVendorsWithoutSDK()
 	if i := slices.IndexFunc(all[len(SearchVendors):], func(v SearchVendor) bool { return v.ID == id }); i >= 0 {
 		return all[len(SearchVendors)+i], true
 	}
@@ -258,7 +271,11 @@ func MaskSearchKey(k string) string {
 
 // Name is the vendor's name.
 func (a SearchAPI) Name() string {
-	if v, ok := SearchVendorOf(a.Vendor); ok {
+	return a.NameFor(context.Background())
+}
+
+func (a SearchAPI) NameFor(ctx context.Context) string {
+	if v, ok := SearchVendorFor(ctx, a.Vendor); ok {
 		return v.Name
 	}
 	return a.Vendor
@@ -293,7 +310,11 @@ func (a SearchAPI) ownBase() string {
 // signs in never does: signed out, a search says so and the next API is
 // asked).
 func (a SearchAPI) Ready() bool {
-	v, known := SearchVendorOf(a.Vendor)
+	return a.readyFor(context.Background())
+}
+
+func (a SearchAPI) readyFor(ctx context.Context) bool {
+	v, known := SearchVendorFor(ctx, a.Vendor)
 	if v.Extension != "" {
 		return known && a.Key == "" && len(a.KeyList) == 0 && a.URL == ""
 	}
@@ -342,7 +363,13 @@ func (a SearchAPI) check() error {
 // SearchAPIs are the search APIs that can be asked, in the order they are
 // tried: ready, and not switched off.
 func SearchAPIs() []SearchAPI {
-	return slices.DeleteFunc(slices.Clone(load().Searches), func(a SearchAPI) bool { return !a.Ready() || a.Off })
+	return SearchAPIsFor(context.Background())
+}
+
+func SearchAPIsFor(ctx context.Context) []SearchAPI {
+	return slices.DeleteFunc(slices.Clone(load().Searches), func(a SearchAPI) bool {
+		return a.Off || ctx.Err() != nil || !a.readyFor(ctx)
+	})
 }
 
 // SearchAPIsSet counts the search APIs that can be asked; a

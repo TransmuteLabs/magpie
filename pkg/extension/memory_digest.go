@@ -12,8 +12,9 @@ type MemoryDigestRenderer struct {
 	Compose func(MemoryDigestDeliveryRequest) (string, error)
 }
 
-// MemoryDigestRequest contains active records in store order. Budgets are
-// expressed in characters, and KindOrder specifies the digest's kind order.
+// MemoryDigestRequest contains active records in store order. Budgets count
+// the characters in item lines and their line breaks. Section headings are
+// additional. KindOrder specifies the digest's kind order.
 type MemoryDigestRequest struct {
 	Records       []MemoryDigestRecord
 	KindOrder     []string
@@ -33,7 +34,7 @@ type MemoryDigestRecord struct {
 	Updated time.Time
 }
 
-// MemoryDigestResult transfers the rendered Markdown by scope to the host.
+// MemoryDigestResult transfers rendered Markdown for selected scopes only.
 type MemoryDigestResult struct {
 	ByScope map[string]string
 }

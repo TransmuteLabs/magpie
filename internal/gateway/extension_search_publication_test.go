@@ -13,7 +13,7 @@ import (
 
 func TestSDKSearchCrossManagerPublicationFence(test *testing.T) {
 	directory := buildSDKSearch(test)
-	for _, mutation := range []string{"disable", "config", "replacement"} {
+	for _, mutation := range []string{"disable", "reenable", "config", "replacement"} {
 		test.Run(mutation, func(test *testing.T) {
 			manager := setupSDKSearch(test, directory, false)
 			other := extension.NewManager(manager.Namespace())
@@ -21,7 +21,7 @@ func TestSDKSearchCrossManagerPublicationFence(test *testing.T) {
 			started := filepath.Join(test.TempDir(), "started")
 			release := filepath.Join(test.TempDir(), "release")
 			configureSDKSearch(test, manager, map[string]any{"mode": "hold", "started": started, "release": release})
-			binding, found := manager.SearchSource("search.fixture/specstream")
+			binding, found := manager.SearchSource(test.Context(), "search.fixture/specstream")
 			if !found {
 				test.Fatal("source not discovered")
 			}
@@ -45,9 +45,14 @@ func TestSDKSearchCrossManagerPublicationFence(test *testing.T) {
 			})
 			waitSDKSearchMarker(test, started)
 			switch mutation {
-			case "disable":
+			case "disable", "reenable":
 				if err := other.SetEnabled(test.Context(), "search.fixture", false); err != nil {
 					test.Fatal(err)
+				}
+				if mutation == "reenable" {
+					if err := other.SetEnabled(test.Context(), "search.fixture", true); err != nil {
+						test.Fatal(err)
+					}
 				}
 			case "config":
 				configureSDKSearch(test, other, map[string]any{})

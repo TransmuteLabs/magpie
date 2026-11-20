@@ -1314,8 +1314,6 @@
     const mw = e.middleware;
     const gw = e.gateway;
     const ag = e.agent;
-    // a provider's or agent's options (plugins#592)
-    const ownOpts = !e.isMiddleware && !e.isGateway && !!(e.options || e.optionsExample);
     if (mw || e.isMiddleware) nm.append(kindChip("mw"));
     if (gw || e.isGateway) nm.append(kindChip("mw", "Request hook"));
     if (ag || e.isAgent) nm.append(kindChip("ag"));
@@ -1336,6 +1334,12 @@
     const clashes = e.off || e.error ? [] : e.clashes || [];
     const nameOfSpec = (spec) => { const o = (mine?.plugins || []).find((x) => x.spec === spec); return o ? shownName(o) : label(spec); };
     const ask = asking?.pkg === pkg && !busy.size && (asking.op === "move" ? cands.length : moved.length) ? asking.op : "";
+    const draft = editing?.pkg === pkg ? editing : null;
+    const opts = !e.off && !ask && window.pmPluginOptions?.(e, draft, {
+      busy: busy.size > 0, name: shownName(e), subName, switches: () => subsOf(pkg).find((x) => x.signedIn && x.options?.length),
+      edit(next) { if (next || editing === draft) { editing = next && { pkg, ...next }; draw(); } },
+      save(op, values, done) { act(pkg, op, { spec: e.spec, ...values }, done); },
+    });
     if (ask === "move") {
       sub.textContent = t("{names} can run on it again, with the same accounts.", { names: cands.map((c) => c.name).join(t(", ")) });
       sub.classList.add("ask");
@@ -1377,7 +1381,7 @@
     if (e.page && !ask) who.append(pageLine(e.page));
     if (e.panels?.length && !ask) who.append(panelsLine(e.panels, e.panelReads));
     if (e.actions?.length && !ask) who.append(actionsLine(e.actions));
-    if ((mw || e.isGateway || ownOpts) && !e.off && !ask && editing?.pkg === pkg) who.append(optionsEditor(e));
+    if (opts?.editor) who.append(opts.editor);
     // the plugin's own picture (package.json's magpie.icon) before its
     // first provider's, which a plugin of several gives each its own (#1775)
     r.append(logo(l?.icon || l?.npm?.icon || e.icon || subs[0]?.icon || ag?.icon, false, e.middlewareOnly ? "mw" : e.isAgent && !e.isMiddleware && !e.providers.length ? "ag" : e.inMagpieOnly && (e.page || e.panels?.length) && !e.isAgent && !e.isMiddleware ? "pg" : toolsOnly && !e.page && !mw && !ag ? "tl" : ""), who);
@@ -1430,18 +1434,7 @@
     }
     const flip = e.tools?.length && !e.off && toolsFlip(e);
     if (flip) val.append(flip);
-    if ((e.isGateway || (mw && !mw.error) || ownOpts) && !e.off && editing?.pkg !== pkg) {
-      const o = el("button", "text", t("Options"));
-      o.title = e.options ? t("The options it runs with") : t("It runs with no options; its package suggests some");
-      o.disabled = !!b;
-      o.onclick = () => {
-        editing = { pkg, text: JSON.stringify(e.options || e.optionsExample || {}, null, 2), error: "" };
-        draw();
-        // the field the click opened takes the keys, where it is
-        page.querySelector(".pm-opts textarea")?.focus(NO_SCROLL);
-      };
-      val.append(o);
-    }
+    if (opts?.button) val.append(opts.button);
     const onoff = el("button", "text", t(e.off ? "Switch on" : "Switch off"));
     onoff.disabled = !!b;
     onoff.onclick = () => { if (!e.off && moved.length) { asking = { pkg, op: "off" }; draw(); } else off(); };
@@ -1460,64 +1453,6 @@
     r.append(val);
     if (!e.sdk) r.onclick = (ev) => { if (!ev.target.closest("button, .pm-opts")) detail(l || (isGit(e.spec) ? { package: e.spec, name: shownName(e), icon: e.icon, npm: { version: e.version, repository: gitWeb(e.spec) } } : { package: pkg, name: shownName(e), icon: e.icon, npm: { version: e.latest } })); };
     return r;
-  }
-
-  // optionsEditor is a plugin's options as JSON, in its row: what it
-  // runs with, or what its package suggests when it has none. The draft is
-  // kept in editing, so a redraw while typing doesn't lose it.
-  function optionsEditor(e) {
-    const box = el("div", "pm-opts");
-    const ta = document.createElement("textarea");
-    ta.setAttribute("aria-label", t("Options"));
-    ta.setAttribute("aria-describedby", "pluginOptionsNote pluginOptionsError");
-    ta.setAttribute("aria-invalid", String(!!editing.error));
-    ta.spellcheck = false;
-    ta.value = editing.text;
-    ta.rows = Math.min(14, Math.max(4, editing.text.split("\n").length + 1));
-    ta.oninput = () => { editing.text = ta.value; };
-    ta.onkeydown = (ev) => {
-      if (ev.key === "Escape") { editing = null; draw(); }
-      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); save(); }
-    };
-    const err = el("div", "pm-opts-err", editing.error);
-    err.id = "pluginOptionsError";
-    err.setAttribute("role", "alert");
-    const bar = el("div", "pm-opts-bar");
-    const note = el("span", "", e.options ? t("Applied to the next request") : t("Not set: these are its package's example"));
-    note.id = "pluginOptionsNote";
-    const save = () => {
-      let v;
-      try { v = JSON.parse(editing.text || "{}"); } catch (x) { editing.error = t("Not JSON: {error}", { error: x.message }); return draw(); }
-      if (!v || typeof v !== "object" || Array.isArray(v)) { editing.error = t("Options are a JSON object"); return draw(); }
-      editing = null;
-      act(name(e.spec), "options", { spec: e.spec, options: v }, () => status(t("{name}'s options saved", { name: shownName(e) }), "ok"));
-    };
-    const ok = el("button", "text primary", t("Save"));
-    ok.onclick = save;
-    const no = el("button", "text", t("Cancel"));
-    no.onclick = () => { editing = null; draw(); };
-    bar.append(note);
-    // its declared switches are its provider's, kept in that editor: one
-    // place each, and this one points there
-    const sw = subsOf(name(e.spec)).find((x) => x.signedIn && x.options?.length);
-    if (sw) {
-      const go = el("button", "text quiet pm-opts-switches", t("Its switches are in {name}'s editor", { name: subName(sw) }));
-      go.onclick = () => openProvider(sw.id).catch(statusErr);
-      bar.append(go);
-    }
-    if (e.options) {
-      const clr = el("button", "text quiet", t("Clear"));
-      clr.title = t("Runs it with no options");
-      clr.onclick = async () => {
-        if (!await confirmAction(t("Clear"), t("Saved options will be removed. The plugin will run with no options."), t("Clear"))) return;
-        editing = null;
-        act(name(e.spec), "options", { spec: e.spec, options: null }, () => status(t("{name}'s options cleared", { name: shownName(e) }), "ok"));
-      };
-      bar.append(clr);
-    }
-    bar.append(no, ok);
-    box.append(ta, err, bar);
-    return box;
   }
 
   // clashGroups are a row's clashes, one per other plugin and side: a

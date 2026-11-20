@@ -2,8 +2,11 @@ package gui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/plugininstall"
+	"github.com/yetone/magpie/internal/pluginrt"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -30,6 +34,12 @@ type sdkPluginJSON struct {
 	Window       bool                 `json:"window,omitempty"`
 	Checkable    bool                 `json:"checkable,omitempty"`
 	Check        *plugin.VersionCheck `json:"check,omitempty"`
+	Settings     *sdkPluginSettings   `json:"settings,omitempty"`
+}
+
+type sdkPluginSettings struct {
+	extension.ModuleSettingsSnapshot
+	Schema *pluginrt.Schema `json:"schema"`
 }
 
 type sdkPluginCheck struct {
@@ -62,6 +72,13 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 	}
 	if err := sdk.CheckCompatibility(manifest); err != nil {
 		row.Error = err.Error()
+	} else if !entry.Disabled && len(manifest.Settings) != 0 {
+		settings, err := sdkSettingsOf(ctx, host, entry)
+		if err != nil {
+			row.Error = err.Error()
+		} else {
+			info.Settings = settings
+		}
 	}
 	if entry.Source != nil {
 		info.Source = entry.Source.Reference
@@ -97,6 +114,42 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 		row.Latest = check.Latest
 	}
 	return row
+}
+
+func sdkSettingsOf(ctx context.Context, host *extension.Manager, entry extension.Installed) (*sdkPluginSettings, error) {
+	snapshot, err := host.ModuleSettings(ctx, entry)
+	if err != nil {
+		return nil, err
+	}
+	schema, err := pluginrt.SchemaOf(entry.Manifest.Settings)
+	if err != nil {
+		return nil, err
+	}
+	return &sdkPluginSettings{ModuleSettingsSnapshot: snapshot, Schema: schema}, nil
+}
+
+func saveSDKPluginSettings(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Spec string `json:"spec"`
+		extension.ModuleSettingsRevision
+		Values json.RawMessage `json:"values"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		fail(w, err)
+		return
+	}
+	id, sdkSpec := strings.CutPrefix(input.Spec, "sdk:")
+	if decoder.Decode(new(any)) != io.EOF || !sdkSpec || !sdk.ValidID(id) {
+		fail(w, errors.New("plugin settings update requires its exact SDK owner"))
+		return
+	}
+	if err := extension.Default().CompareAndSwapModuleSettings(r.Context(), id, input.ModuleSettingsRevision, input.Values); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, struct{}{})
 }
 
 func sdkPluginCheckable(entry extension.Installed) bool {

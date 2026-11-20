@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -218,6 +220,17 @@ func TestRoutingReadActionFailureAndCatalogLifecycle(test *testing.T) {
 	if err := other.SetEnabled(test.Context(), entry.Manifest.ID, true); err != nil {
 		test.Fatal(err)
 	}
+	if _, err := manager.OrderRouting(test.Context(), old, request); err == nil {
+		test.Fatal("routing snapshot survived disable followed by enable")
+	}
+	enabled, found := manager.RoutingStrategy("routing.fixture/reverse")
+	if !found {
+		test.Fatal("re-enabled routing was not discoverable")
+	}
+	setRoutingConfig(test, manager, map[string]any{"mode": "state-write"})
+	if _, err := manager.OrderRouting(test.Context(), enabled, request); err == nil {
+		test.Fatal("routing snapshot borrowed new configuration")
+	}
 	installRoutingFixture(test, other, "2.0.0")
 	if _, err := manager.OrderRouting(test.Context(), old, request); err == nil {
 		test.Fatal("old routing snapshot borrowed a replacement generation")
@@ -232,6 +245,109 @@ func TestRoutingReadActionFailureAndCatalogLifecycle(test *testing.T) {
 func routingFixtureRequest() sdk.RoutingRequest {
 	return sdk.RoutingRequest{Strategy: "reverse", Pool: "group/test",
 		Seats: []sdk.RoutingSeat{{Key: "opaque-a", Weight: 1}, {Key: "opaque-b", Weight: 1}}}
+}
+
+func TestRoutingAdmissionRespectsDeadlineWhileOwnerIsLocked(test *testing.T) {
+	manager := NewManager(test.TempDir())
+	closeRoutingManager(test, manager)
+	installRoutingFixture(test, manager, "1.0.0")
+	binding, found := manager.RoutingStrategy("routing.fixture/reverse")
+	if !found {
+		test.Fatal("fixture did not register")
+	}
+	root, err := manager.catalog.open(false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer root.Close()
+	private, err := storeDirectory(root, "private")
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer private.Close()
+	stateLock, err := storeOpenLock(private)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer stateLock.Close()
+	for _, owner := range []string{"catalog", "private state", "local state", "reload"} {
+		test.Run(owner, func(test *testing.T) {
+			var unlock func()
+			switch owner {
+			case "catalog":
+				unlock, err = catalogLock(test.Context(), root)
+				if err != nil {
+					test.Fatal(err)
+				}
+			case "private state":
+				if held, err := filelock.TryLock(stateLock); err != nil || !held {
+					test.Fatalf("private lock: held=%v, err=%v", held, err)
+				}
+				unlock = func() { filelock.Unlock(stateLock) }
+			case "local state":
+				manager.store.mu.Lock()
+				unlock = manager.store.mu.Unlock
+			case "reload":
+				manager.reloadMu.Lock()
+				unlock = manager.reloadMu.Unlock
+			}
+			defer func() {
+				if unlock != nil {
+					unlock()
+				}
+			}()
+			ctx, cancel := context.WithTimeout(test.Context(), 100*time.Millisecond)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				_, err := manager.OrderRouting(ctx, binding, routingFixtureRequest())
+				result <- err
+			}()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					test.Fatalf("owner did not report the expired request: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				unlock()
+				unlock = nil
+				<-result
+				test.Fatal("owner waited for lock release past the request deadline")
+			}
+		})
+	}
+}
+
+func TestContributionAccountPublicationRespectsDeadline(test *testing.T) {
+	manager := NewManager(test.TempDir())
+	closeRoutingManager(test, manager)
+	account, err := manager.store.SaveAccount(Account{
+		Plugin: "search.fixture", Provider: "search", ID: "account", Auth: json.RawMessage(`{"key":"fixture"}`),
+	}, 0)
+	if err != nil {
+		test.Fatal(err)
+	}
+	scope := sdk.Scope{Plugin: account.Plugin, Provider: account.Provider, Account: account.ID, Generation: account.Generation}
+	invocation := &invocationAuthority{scope: scope}
+	if err := manager.checkResultPublication(test.Context(), invocation); err != nil {
+		test.Fatal(err)
+	}
+	manager.store.mu.Lock()
+	ctx, cancel := context.WithTimeout(test.Context(), 100*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- manager.checkResultPublication(ctx, invocation) }()
+	select {
+	case err := <-result:
+		manager.store.mu.Unlock()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			test.Fatalf("expired publication returned %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		manager.store.mu.Unlock()
+		<-result
+		test.Fatal("result waited for account authority after the deadline")
+	}
 }
 
 func routingCatalogChild() {

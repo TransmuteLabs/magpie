@@ -189,7 +189,7 @@
         const value = values?.[key] ?? p.default;
         const title = t(p.title), say = p.description ? t(p.description) : "";
         let control;
-        if (p.type === "boolean") control = ui.toggle(!!value, title, (v) => onChange({ [key]: v }));
+        if (p.type === "boolean" && p.enum?.length !== 1) control = ui.toggle(!!value, title, (v) => onChange({ [key]: v }));
         else if (p.enum?.length) {
           control = ui.menu(p.enum.map((v) => ({ v, name: typeof v === "number" ? v.toLocaleString(locale) : t(String(v)) })), value, p.title, (v) => onChange({ [key]: v }));
         } else {

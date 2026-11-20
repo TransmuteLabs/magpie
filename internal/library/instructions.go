@@ -168,7 +168,7 @@ func (l *Library) memoryDigest(id string) string {
 	if l.Instructions.NoMemory {
 		return ""
 	}
-	d, _ := memory.Digest(memoryAgent(id))
+	d, _ := memory.Owner().Digest(memoryAgent(id))
 	return d
 }
 
@@ -186,9 +186,10 @@ func memoryAgent(id string) string {
 // when the last was a day ago (memory.PublishDue), for what agents saved
 // meanwhile. nil, nil when nothing changed.
 func PublishMemory(due bool) (*Result, error) {
-	publish := memory.Publish
+	owner := memory.Owner()
+	publish := owner.Publish
 	if due {
-		publish = memory.PublishDue
+		publish = owner.PublishDue
 	}
 	changed, err := publish()
 	if err != nil || !changed {
@@ -374,7 +375,7 @@ func (l *Library) syncInstructions(t *Target, all []*Target, b *backups, res *Re
 			}
 		}
 		if !l.Instructions.NoMemory {
-			if _, err := memory.Digest(memoryAgent(id)); err != nil {
+			if _, err := memory.Owner().Digest(memoryAgent(id)); err != nil {
 				res.fail(id, "instructions", fmt.Errorf("memory: %w", err))
 				return
 			}

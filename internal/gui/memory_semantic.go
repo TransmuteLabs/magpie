@@ -60,7 +60,7 @@ func memorySemanticRoutes(mux *http.ServeMux) {
 		}
 		out.IDs = []string{}
 		for _, st := range statuses {
-			hits, err := memory.Rank(memory.Query{Text: in.Q, Status: st, Limit: 200})
+			hits, err := memory.Owner().Rank(memory.Query{Text: in.Q, Status: st, Limit: 200})
 			if err != nil {
 				fail(rw, err)
 				return

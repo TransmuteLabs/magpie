@@ -1,8 +1,9 @@
 # SDK search sources
 
-SDK API 1.8 modules can contribute sources to the ordinary Settings › Web
-search list. A `searchSources` descriptor names an id, display name and
-declared primary `read` action. This registration is separate from a tool
+SDK modules contribute sources to Settings › Web search through the
+`search` contribution point. The registry also projects API 1.8
+`searchSources` declarations to that point. A descriptor names an id,
+display name and declared primary `read` action. This registration is separate from a tool
 named `web_search`. It uses `module-rpc`; it grants neither write effects
 nor private services the primary module's account authority.
 
@@ -40,9 +41,11 @@ selected credentials travel in the existing scoped SDK call authority.
 The caller's model provider, proxy and credentials cannot substitute for
 the descriptor's declared account.
 
-[`search.go`](../../internal/extension/search.go) pins the installation
-namespace, package revision, configuration version and descriptor before
-dispatch. It calls through that lease and rejects publication after
+Search discovery uses the request deadline. The selected vendor keeps its
+registry binding through account selection and dispatch.
+[`search.go`](../../internal/extension/search.go) calls through the
+binding's namespace, package revision, configuration version, enable
+generation and descriptor, and rejects publication after
 disable, replacement, configuration change, account replacement or
 cancellation. Host callbacks recheck the same admission. Results are unary,
 bounded and decoded with unknown fields rejected; pages require HTTP(S)

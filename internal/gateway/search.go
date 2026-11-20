@@ -795,13 +795,20 @@ func (s *Server) webSearch(ctx context.Context, query string) (string, []Hit, er
 		return "", nil, errSearchOff
 	}
 	if settings.Shared().Searcher == "off" {
-		if len(provider.SearchAPIs()) == 0 {
+		apis := provider.SearchAPIsFor(ctx)
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		if len(apis) == 0 {
 			return "", nil, errNoSearcher
 		}
 		return s.apiSearch(ctx, query)
 	}
 	var errs []error
-	apiFirst := settings.Shared().SearchFirst == settings.SearchFirstAPI && len(provider.SearchAPIs()) > 0
+	apiFirst := settings.Shared().SearchFirst == settings.SearchFirstAPI && len(provider.SearchAPIsFor(ctx)) > 0
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	if apiFirst {
 		said, hits, err := s.apiSearch(ctx, query)
 		if err == nil {
@@ -820,7 +827,10 @@ func (s *Server) webSearch(ctx context.Context, query string) (string, []Hit, er
 	if err == nil {
 		return said, hits, nil
 	}
-	apis := len(provider.SearchAPIs()) > 0
+	apis := len(provider.SearchAPIsFor(ctx)) > 0
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	// that no provider searches is news only when nothing else was tried
 	if !errors.Is(err, errNoSearcher) || len(errs) == 0 && !apis {
 		errs = append(errs, err)

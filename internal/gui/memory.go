@@ -23,7 +23,8 @@ type memoryView struct {
 }
 
 func readMemory() (*memoryView, error) {
-	ms, ps, err := memory.All()
+	owner := memory.Owner()
+	ms, ps, err := owner.All()
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +38,7 @@ func readMemory() (*memoryView, error) {
 	if ps == nil {
 		ps = map[string]*memory.Project{}
 	}
-	sg, err := memory.Suggest()
+	sg, err := owner.Suggest()
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +89,9 @@ func memoryRoutes(mux *http.ServeMux) {
 		}
 		var err error
 		if in.ID != "" {
-			_, err = memory.Edit(in.ID, in.Input, true)
+			_, err = memory.Owner().Edit(in.ID, in.Input, true)
 		} else {
-			_, _, err = memory.Save(in.Input, memory.FromUser, nil, nil)
+			_, _, err = memory.Owner().Save(in.Input, memory.FromUser, nil, nil)
 		}
 		if err != nil {
 			fail(rw, err)
@@ -110,7 +111,7 @@ func memoryRoutes(mux *http.ServeMux) {
 			fail(rw, errors.New("name the memories to remove"))
 			return
 		}
-		if err := memory.Remove(in.IDs...); err != nil {
+		if err := memory.Owner().Remove(in.IDs...); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -131,7 +132,7 @@ func memoryRoutes(mux *http.ServeMux) {
 			fail(rw, errors.New("name the memories to change"))
 			return
 		}
-		if _, err := memory.SetStatus(in.Status, in.IDs...); err != nil {
+		if _, err := memory.Owner().SetStatus(in.Status, in.IDs...); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -147,7 +148,7 @@ func memoryRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		if _, err := memory.Promote(in.IDs); err != nil {
+		if _, err := memory.Owner().Promote(in.IDs); err != nil {
 			fail(rw, err)
 			return
 		}
@@ -175,7 +176,7 @@ func memoryRoutes(mux *http.ServeMux) {
 			fail(rw, err)
 			return
 		}
-		if err := memory.Decline(in.Key); err != nil {
+		if err := memory.Owner().Decline(in.Key); err != nil {
 			fail(rw, err)
 			return
 		}

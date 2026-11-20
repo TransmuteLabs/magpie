@@ -24,6 +24,7 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -548,13 +549,28 @@ func migrate() (*file, error) {
 // change reads memory, lets fn change it and writes what changed, one
 // magpie at a time. Memory that can't be read is never written over.
 func change(fn func(f *file) error) error {
-	mu.Lock()
+	return changeContext(context.Background(), fn)
+}
+
+func changeContext(ctx context.Context, fn func(f *file) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !mu.LockChecked() {
+		return errors.New("cannot lock the Memory store")
+	}
 	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := read()
 	if err != nil {
 		return err
 	}
 	if err := fn(f); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return write(f)

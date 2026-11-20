@@ -24,7 +24,7 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func installSDKRouting(test *testing.T, manager *extension.Manager, version string, timeout int) {
+func installSDKRouting(test *testing.T, manager *extension.Manager, version string, timeout int, registry bool) {
 	test.Helper()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -51,6 +51,13 @@ func installSDKRouting(test *testing.T, manager *extension.Manager, version stri
 		RoutingStrategies: []sdk.RoutingStrategyDescriptor{{ID: "reverse", Name: "Reverse fixture", Action: "rank", TimeoutMs: timeout,
 			Flags: sdk.RoutingFlags{Exact: true}}},
 	}
+	if registry {
+		manifest.Contract.Version.Minor = 16
+		manifest.Contributions = []sdk.ContributionDescriptor{{
+			Point: sdk.ContributionRouting, Version: 1, Routing: &manifest.RoutingStrategies[0],
+		}}
+		manifest.RoutingStrategies = nil
+	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {
 		test.Fatal(err)
@@ -76,11 +83,16 @@ func configureSDKRouting(test *testing.T, manager *extension.Manager, options ma
 }
 
 func TestSDKRoutingOrdersOrdinaryProviderAndGroup(test *testing.T) {
+	test.Run("legacy", func(test *testing.T) { sdkRoutingOrdersOrdinaryProviderAndGroup(test, false) })
+	test.Run("registry", func(test *testing.T) { sdkRoutingOrdersOrdinaryProviderAndGroup(test, true) })
+}
+
+func sdkRoutingOrdersOrdinaryProviderAndGroup(test *testing.T, registry bool) {
 	fresh(test)
 	test.Setenv("MAGPIE_BUN", filepath.Join(test.TempDir(), "absent"))
 	manager := extension.Default()
 	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
-	installSDKRouting(test, manager, "1.0.0", 2000)
+	installSDKRouting(test, manager, "1.0.0", 2000, registry)
 	var lock sync.Mutex
 	var tried []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -176,7 +188,7 @@ func TestSDKRoutingOrdersOrdinaryProviderAndGroup(test *testing.T) {
 		test.Fatal(err)
 	}
 	configureSDKRouting(test, other, map[string]any{})
-	installSDKRouting(test, other, "2.0.0", 2000)
+	installSDKRouting(test, other, "2.0.0", 2000, registry)
 	ask("relay/m", "key-a")
 }
 
@@ -184,7 +196,7 @@ func TestSDKRoutingTimeoutIncludesColdStartupAndFailsOpen(test *testing.T) {
 	fresh(test)
 	manager := extension.Default()
 	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
-	installSDKRouting(test, manager, "1.0.0", 100)
+	installSDKRouting(test, manager, "1.0.0", 100, false)
 	configureSDKRouting(test, manager, map[string]any{"startupDelay": 30000})
 	strategy, found := routes.Find("routing.fixture/reverse")
 	if !found {

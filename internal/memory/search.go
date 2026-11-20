@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"math"
 	"slices"
 	"strings"
@@ -12,20 +13,10 @@ import (
 // Query is what a search asks for. Scopes are the scopes searched (none:
 // every scope), Kinds and Tags narrow it (a memory has one of the kinds
 // and every tag), Status is the state looked in ("": active).
-type Query struct {
-	Text   string
-	Scopes []string
-	Kinds  []string
-	Tags   []string
-	Status string
-	Limit  int
-}
+type Query = sdk.MemoryQuery
 
 // Hit is a memory a search found, with how well it matched.
-type Hit struct {
-	*Memory
-	Score float64 `json:"score"`
-}
+type Hit = sdk.MemoryHit
 
 // SemanticRanker is the linked ranker registered by memembed.
 var SemanticRanker sdk.MemorySemanticRanker
@@ -33,10 +24,15 @@ var SemanticRanker sdk.MemorySemanticRanker
 // SemanticIndexSnapshot returns the Memory records eligible for background
 // indexing, newest first.
 func SemanticIndexSnapshot() ([]sdk.MemorySemanticRecord, error) {
-	all, _, err := All()
+	snapshot, err := view()
 	if err != nil {
 		return nil, err
 	}
+	if len(snapshot.broken) != 0 {
+		return nil, errors.New("Memory semantic index snapshot has unreadable records")
+	}
+	all := snapshot.Memories
+	slices.SortStableFunc(all, func(a, b *Memory) int { return b.Updated.Compare(a.Updated) })
 	var records []sdk.MemorySemanticRecord
 	for _, item := range all {
 		if item.Status == Active || item.Status == Candidate {
@@ -133,7 +129,7 @@ func search(all []*Memory, q Query) []Hit {
 		})
 		out := []Hit{}
 		for _, m := range pool[:min(limit, len(pool))] {
-			out = append(out, Hit{Memory: m})
+			out = append(out, Hit{MemoryRecord: m})
 		}
 		return out
 	}
@@ -196,7 +192,7 @@ func wordHits(pool []*Memory, text string) []Hit {
 		if m.Scope != Global {
 			score *= 1.1
 		}
-		out = append(out, Hit{Memory: m, Score: math.Round(score*100) / 100})
+		out = append(out, Hit{MemoryRecord: m, Score: math.Round(score*100) / 100})
 	}
 	slices.SortStableFunc(out, func(a, b Hit) int {
 		if a.Score != b.Score {
@@ -242,7 +238,7 @@ func fuse(pool []*Memory, words []Hit, sims map[string]float64) []Hit {
 	byID := map[string]*Memory{}
 	for i, h := range words {
 		score[h.ID] += 1 / float64(rrfK+i+1)
-		byID[h.ID] = h.Memory
+		byID[h.ID] = h.MemoryRecord
 	}
 	for i, m := range near {
 		score[m.ID] += 1 / float64(rrfK+i+1)
@@ -257,7 +253,7 @@ func fuse(pool []*Memory, words []Hit, sims map[string]float64) []Hit {
 		if m.Scope != Global {
 			s *= 1.1
 		}
-		out = append(out, Hit{Memory: m, Score: math.Round(s*rrfK*100) / 100})
+		out = append(out, Hit{MemoryRecord: m, Score: math.Round(s*rrfK*100) / 100})
 	}
 	slices.SortStableFunc(out, func(a, b Hit) int {
 		if a.Score != b.Score {

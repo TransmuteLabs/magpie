@@ -46,6 +46,8 @@
     "bytes.js",
     "worker.js",
     "composite.js",
+    "contributions.js",
+    "module-settings.js",
     "lifecycle.js",
     "hooks.js",
     "catalog-projection.js",

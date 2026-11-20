@@ -723,6 +723,7 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 		defer cancel()
 		writeJSON(rw, pluginsState(ctx, w))
 	})
+	mux.HandleFunc("POST /api/plugins/settings", saveSDKPluginSettings)
 	// a folder on this computer, from the system's picker; "" when the
 	// user cancels it
 	mux.HandleFunc("POST /api/plugins/choose", func(rw http.ResponseWriter, r *http.Request) {

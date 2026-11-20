@@ -280,7 +280,7 @@ func (m *Manager) install(ctx context.Context, source string, options installOpt
 		if checkedConfig == nil {
 			return nil
 		}
-		config, err := m.readModuleConfig(checkedModuleID)
+		config, err := m.readModuleConfigContext(ctx, checkedModuleID)
 		if err != nil {
 			return err
 		}
@@ -299,7 +299,7 @@ func (m *Manager) install(ctx context.Context, source string, options installOpt
 		}
 		handshake, done := context.WithTimeout(ctx, 10*time.Second)
 		defer done()
-		config, err := m.runtimeModuleConfig(candidate.Manifest)
+		config, err := m.runtimeModuleConfigContext(handshake, candidate.Manifest)
 		if err != nil {
 			return err
 		}
@@ -421,12 +421,14 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 }
 
 func (m *Manager) Reload(ctx context.Context) error {
-	m.reloadMu.Lock()
+	if err := lockContext(ctx, &m.reloadMu); err != nil {
+		return err
+	}
 	defer m.reloadMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return err
 	}
@@ -436,7 +438,7 @@ func (m *Manager) Reload(ctx context.Context) error {
 		if entry.Disabled {
 			continue
 		}
-		config, err := m.runtimeModuleConfig(entry.Manifest)
+		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
 		if err != nil {
 			// Revoke the unreadable generation without denying unrelated modules.
 			// Direct acquisition of this module still returns the config error.
@@ -444,6 +446,9 @@ func (m *Manager) Reload(ctx context.Context) error {
 		}
 		current[entry.Manifest.ID] = entry
 		configs[entry.Manifest.ID] = config.Version
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -521,7 +526,7 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if err := m.Reload(ctx); err != nil {
 		return nil, nil, err
 	}
-	entries, err := m.List()
+	entries, err := m.catalog.list(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -535,7 +540,7 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if selected == nil {
 		return nil, nil, errors.New("extension is not enabled")
 	}
-	config, err := m.runtimeModuleConfig(selected.Manifest)
+	config, err := m.runtimeModuleConfigContext(ctx, selected.Manifest)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -759,7 +764,7 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 		}
 		return json.Marshal(result)
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return nil, err
 	}
 	lease, err := m.Acquire(ctx, id)
@@ -889,7 +894,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			return nil, err
 		}
 	}
-	auth, err := m.authFor(scope)
+	auth, err := m.authForContext(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -923,7 +928,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	// A lazy service may have needed time to start. Account replacement
 	// during that wait revokes this generation before action dispatch.
-	auth, err = m.authFor(scope)
+	auth, err = m.authForContext(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -994,7 +999,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodProviderCalls {
 			return errors.New("outside-call history reads are unary")
 		}
-		if _, err := m.authFor(scope); err != nil {
+		if _, err := m.authForContext(ctx, scope); err != nil {
 			return err
 		}
 		if err := checkWindowAdmission(ctx); err != nil {
@@ -1086,7 +1091,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err == nil && outsideRead != nil {
 		_, err = sdk.DecodeOutsideCallsResult(manifest, *outsideRead, result)
 		if err == nil {
-			_, err = m.authFor(scope)
+			_, err = m.authForContext(ctx, scope)
 		}
 	}
 	if effect {
@@ -1205,10 +1210,17 @@ func validateCallScope(manifest sdk.Manifest, method string, scope sdk.Scope) er
 }
 
 func (m *Manager) authFor(scope sdk.Scope) (json.RawMessage, error) {
+	return m.authForContext(context.Background(), scope)
+}
+
+func (m *Manager) authForContext(ctx context.Context, scope sdk.Scope) (json.RawMessage, error) {
 	if scope.Account == "" {
-		return nil, nil
+		return nil, ctx.Err()
 	}
-	account, err := m.store.GetAccount(scope.Plugin, scope.Provider, scope.Account)
+	account, err := m.store.getAccount(ctx, scope.Plugin, scope.Provider, scope.Account)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err != nil || account.Generation != scope.Generation {
 		return nil, errors.New("extension account scope was revoked")
 	}
@@ -1229,7 +1241,7 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := m.authFor(scope); err != nil {
+	if _, err := m.authForContext(ctx, scope); err != nil {
 		return nil, err
 	}
 	if sdk.IsBudgetMethod(authority.method) {
@@ -1265,7 +1277,7 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		if !ok || component.group == nil || !decodeHostParams(raw, &request) {
 			return nil, errors.New("component call requires its parent module generation and declared binding")
 		}
-		auth, err := m.authFor(scope)
+		auth, err := m.authForContext(ctx, scope)
 		if err != nil {
 			return nil, err
 		}

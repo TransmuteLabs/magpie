@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.15. Authors declare the minimum contract
+The available SDK contract is API 1.16. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -343,7 +343,8 @@ process working directory. The [hybrid layout](../../examples/extensions/hybrid-
 keeps the primary in `lib/`, the helper in `bin/` and static assets in `ui/`.
 
 `Manifest.Public()` is only the component handshake: it removes packaging,
-compatibility, services, window, bindings and actions owned elsewhere.
+compatibility, services, window, bindings, owner registrations, settings
+declarations and actions owned elsewhere.
 `ServiceManifest(root,id)` derives the helper's root identity/version,
 component contract and owned actions without delegating the nine primary
 capabilities. Host authorization retains the complete root descriptor.
@@ -367,6 +368,22 @@ one immutable snapshot for the group. Updating configuration creates a new
 root runtime generation. An old lease keeps its old code/configuration,
 including a lazy helper first started after the update. Account generation
 is a separate counter and is inherited unchanged by a nested helper call.
+
+Root packages using API 1.16 can declare `settings`, an ordered array of up to
+32 `FeatureSetting` fields. Each declares a `name`, `kind`, `title` and `default`.
+Types are `boolean`, `string`, `integer` and `number`. Fields may have a
+`description`, up to 32 distinct `enum` choices, and `minimum` and `maximum`
+for numbers. Integers must be within JavaScript's exact integer range. A
+setting key must be unique and cannot also name a provider switch.
+
+**Plugins → Installed → Options** uses the same schema renderer as linked
+features. It shows only declared fields and saves only edited keys. The
+package revision, enablement generation and config version must still
+match when the save takes the catalog lock. Sibling keys survive the patch.
+Raw configuration writes from the CLI, window and provider owners share
+validation with the form. Module startup and handler snapshots get missing
+defaults in memory. Defaults alone create no saved keys, and an update whose
+settings reject saved values fails validation without changing them.
 
 `ModuleReady.State` / `ModuleContext.State` is opaque instance-local state
 for clients or pools; it stays in the runtime, outside JSON and the C ABI.
@@ -620,6 +637,32 @@ retain their owners. The default context deadline is 500 ms, or an explicit
 HTTP request context, so this seam uses a bounded background context.
 See [ADR 0012](../adr/0012-sdk-routing-strategies.md) for a tested descriptor,
 the decision rationale and its historical verification limits.
+
+## Owner contribution registry (API 1.16)
+
+A root `module-rpc` package may use `contributions` to register an action at
+a versioned extension point. The host accepts these two contracts:
+
+| Point and version | Descriptor | Consumer |
+| --- | --- | --- |
+| `routing`, `1` | `routing` with `id`, `name`, `action`, optional `flags` and `timeoutMs` | Provider and group ordering |
+| `search`, `1` | `search` with `id`, `name`, `action` and optional `provider` | Ordinary [web search](extension-search.md) |
+
+Exactly one descriptor matches the point. Each descriptor uses the existing
+owner's validation, including action ownership, readonly effect and per-point
+limits. IDs are unique within a package and point, across both forms of
+declaration. For example, a `searchSources` ID cannot be reused in the package's
+`search` contributions. Unknown points or versions fail package admission.
+Old `routingStrategies` and `searchSources` entries go through the same
+registry.
+
+[`registeredContributions`](../../internal/extension/contributions.go)
+derives available bindings from enabled root packages without starting them.
+Each binding names its package, configuration and enablement generation.
+The action runs on that generation's SDK lease. Each owner validates its
+request, scope and result, checks the binding again before dispatch and
+publication, and applies its existing refusal or fallback policy.
+Routing's dispatch and publication catalog reads use the action deadline.
 
 ## Window integration
 

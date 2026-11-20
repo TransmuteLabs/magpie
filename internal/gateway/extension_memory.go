@@ -40,7 +40,7 @@ func searchExtensionMemory(ctx context.Context, caller memoryCaller, request sdk
 	if limit == 0 {
 		limit = sdk.MaxMemorySearchHits
 	}
-	hits, err := memory.Rank(memory.Query{Text: request.Query, Scopes: scopes, Limit: limit})
+	hits, err := memory.Owner().Rank(memory.Query{Text: request.Query, Scopes: scopes, Limit: limit})
 	if err != nil {
 		return sdk.MemorySearchResult{}, errors.New("scoped Memory could not be read")
 	}

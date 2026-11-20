@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -58,33 +59,52 @@ func digestRequest(f *file) sdk.MemoryDigestRequest {
 // reports whether any digest changed, for the caller to write it into the
 // agents' instructions.
 func Publish() (changed bool, err error) {
-	err = change(func(f *file) error {
-		renderer := linkedDigestRenderer
-		result, err := renderer.Render(digestRequest(f))
-		if err != nil {
-			return fmt.Errorf("render Memory digest with %s: %w", renderer.Source, err)
-		}
-		changed = !maps.Equal(f.Digest, result.ByScope)
-		f.Digest = result.ByScope
-		f.Published = now()
-		return nil
-	})
-	return changed, err
+	return publish(false)
 }
 
 // PublishDue publishes when the digest was last published more than a day
 // ago, and memory holds something or held something then. It reports
 // whether any digest changed.
 func PublishDue() (bool, error) {
-	f, err := view()
-	if err != nil {
-		return false, err
-	}
-	if now().Sub(f.Published) < 24*time.Hour || (len(f.Memories) == 0 && len(f.Digest) == 0) {
-		// nothing kept yet: no file written for it
+	return publish(true)
+}
+
+func publish(due bool) (changed bool, err error) {
+	err = change(func(f *file) error {
+		at := now()
+		if due && at.Sub(f.Published) < 24*time.Hour {
+			return errSkip
+		}
+		if len(f.broken) != 0 {
+			return errors.New("Memory digest snapshot has unreadable records")
+		}
+		if due && len(f.Memories) == 0 && len(f.Digest) == 0 {
+			return errSkip
+		}
+		renderer := linkedDigestRenderer
+		request := digestRequest(f)
+		scopes := make(map[string]bool)
+		for _, record := range request.Records {
+			scopes[record.Scope] = true
+		}
+		result, err := renderer.Render(request)
+		if err != nil {
+			return fmt.Errorf("render Memory digest with %s: %w", renderer.Source, err)
+		}
+		for scope := range result.ByScope {
+			if !scopes[scope] {
+				return fmt.Errorf("render Memory digest with %s: unselected scope %q", renderer.Source, scope)
+			}
+		}
+		changed = !maps.Equal(f.Digest, result.ByScope)
+		f.Digest = result.ByScope
+		f.Published = at
+		return nil
+	})
+	if errors.Is(err, errSkip) {
 		return false, nil
 	}
-	return Publish()
+	return changed && err == nil, err
 }
 
 // Digest is the published digest an agent is given: the global part, the

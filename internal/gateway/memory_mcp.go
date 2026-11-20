@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -129,9 +130,12 @@ func memoryMCPTools() []any {
 			"title":       "Forget memory",
 			"description": "Sets a memory aside when the user says it is wrong or no longer holds. It is kept for the user to look at, but no longer searched or given to agents.",
 			"inputSchema": map[string]any{
-				"type":       "object",
-				"properties": map[string]any{"id": map[string]any{"type": "string", "description": "The memory's id, from memory_search"}},
-				"required":   []string{"id"},
+				"type": "object",
+				"properties": map[string]any{
+					"id":      map[string]any{"type": "string", "description": "The memory's id, from memory_search"},
+					"project": map[string]any{"type": "string", "description": "Another project than the one you work in, as in memory_search"},
+				},
+				"required": []string{"id"},
 			},
 			"annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false},
 		},
@@ -182,7 +186,7 @@ func (s *Server) memoryMCPCall(r *http.Request, m mcpMessage) (any, map[string]a
 		var said string
 		var err error
 		switch p.Name {
-		case memorySearchTool, memorySaveTool, memoryContextTool:
+		case memorySearchTool, memorySaveTool, memoryForgetTool, memoryContextTool:
 			if c, err = c.inProject(a.Project); err != nil {
 				return toolResult(err.Error(), true), nil
 			}
@@ -191,9 +195,9 @@ func (s *Server) memoryMCPCall(r *http.Request, m mcpMessage) (any, map[string]a
 		case memorySearchTool:
 			said, err = memorySearch(c, a)
 		case memorySaveTool:
-			said, err = memorySave(c, a)
+			said, err = memorySave(r.Context(), c, a)
 		case memoryForgetTool:
-			said, err = memoryForget(a)
+			said, err = memoryForget(r.Context(), c, a)
 		case memoryContextTool:
 			said, ctx := memoryContext(c)
 			res := toolResult(said, false)
@@ -384,7 +388,7 @@ func (c memoryCaller) inProject(arg string) (memoryCaller, error) {
 		}
 		return c, searchMCPError(fmt.Sprintf("project %q isn't a folder on this computer", arg))
 	}
-	_, known, err := memory.All()
+	_, known, err := memory.Owner().All()
 	if err != nil {
 		return c, fmt.Errorf("memory can't be read now: %v", err)
 	}
@@ -485,18 +489,7 @@ func (c memoryCaller) scopes(which string) ([]string, error) {
 	proj := memory.ScopeOf(c.project)
 	switch strings.ToLower(strings.TrimSpace(which)) {
 	case "", "all":
-		out := []string{memory.Global}
-		if proj != "" {
-			out = append(out, proj)
-		}
-		if c.agent != "" {
-			out = append(out, "agent:"+c.agent)
-			if c.agent == "codex" {
-				// kept under Codex's MCP client name before it was Codex
-				out = append(out, "agent:codex-mcp-client")
-			}
-		}
-		return out, nil
+		return memory.AgentScopes(c.agent, c.project), nil
 	case "global":
 		if c.asked {
 			return nil, searchMCPError("a project goes with scope project or all, not global")
@@ -530,7 +523,7 @@ func memorySearch(c memoryCaller, a memoryArgs) (string, error) {
 		}
 		q.Kinds = []string{k}
 	}
-	hits, err := memory.Search(q)
+	hits, err := memory.Owner().Search(q)
 	if err != nil {
 		return "", fmt.Errorf("memory can't be read now: %v", err)
 	}
@@ -542,7 +535,7 @@ func memorySearch(c memoryCaller, a memoryArgs) (string, error) {
 	}
 	var b strings.Builder
 	for _, h := range hits {
-		b.WriteString(memoryLine(h.Memory, c))
+		b.WriteString(memoryLine(h.MemoryRecord, c))
 		b.WriteString("\n")
 	}
 	b.WriteString(c.whereSaid(scopes))
@@ -578,7 +571,7 @@ func memoryLine(m *memory.Memory, c memoryCaller) string {
 
 func quotedQuery(s string) string { b, _ := json.Marshal(strings.TrimSpace(s)); return string(b) }
 
-func memorySave(c memoryCaller, a memoryArgs) (string, error) {
+func memorySave(ctx context.Context, c memoryCaller, a memoryArgs) (string, error) {
 	in := memory.Input{}
 	text := strings.TrimSpace(a.Text)
 	if text == "" && a.ID == "" {
@@ -635,14 +628,9 @@ func memorySave(c memoryCaller, a memoryArgs) (string, error) {
 	if scope != "" {
 		in.Scope = &scope
 	}
+	writer := memory.AgentWriter(memory.Source{Agent: c.agent, Dir: c.dir}, c.project)
 	if id := strings.TrimSpace(a.ID); id != "" {
-		if scope != "" && scope == memory.ScopeOf(c.project) {
-			// its name and folders, for the Memory tab
-			if err := memory.NoteProject(c.project); err != nil {
-				return "", err
-			}
-		}
-		m, err := memory.Edit(id, in, false)
+		m, err := writer.Edit(ctx, id, in)
 		if err != nil {
 			return "", err
 		}
@@ -652,12 +640,7 @@ func memorySave(c memoryCaller, a memoryArgs) (string, error) {
 		k := memory.Fact
 		in.Kind = &k
 	}
-	src := &memory.Source{Agent: c.agent, Dir: c.dir}
-	var proj *memory.Project
-	if scope == memory.ScopeOf(c.project) {
-		proj = c.project
-	}
-	m, added, err := memory.Save(in, memory.FromAgent, src, proj)
+	m, added, err := writer.Save(ctx, in)
 	if err != nil {
 		return "", err
 	}
@@ -709,12 +692,12 @@ func projectFilesNote(c memoryCaller, m *memory.Memory) string {
 	return "\nIf this holds only in this project, it belongs in the project's own " + files + " rather than in memory: offer the user to add it there, and forget this memory once it is."
 }
 
-func memoryForget(a memoryArgs) (string, error) {
+func memoryForget(ctx context.Context, c memoryCaller, a memoryArgs) (string, error) {
 	id := strings.TrimSpace(a.ID)
 	if id == "" {
 		return "", searchMCPError("memory_forget needs the memory's id, from memory_search")
 	}
-	m, err := memory.Forget(id)
+	m, err := memory.AgentWriter(memory.Source{Agent: c.agent, Dir: c.dir}, c.project).Forget(ctx, id)
 	if err != nil {
 		return "", err
 	}

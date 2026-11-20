@@ -3,22 +3,39 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
+	return m.runtimeModuleConfigContext(context.Background(), manifest)
+}
+
+func (m *Manager) runtimeModuleConfigContext(ctx context.Context, manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
 	if manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	config, err := m.readModuleConfig(manifest.ID)
+	config, err := m.readModuleConfigContext(ctx, manifest.ID)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
-	if err := manifest.ValidateProviderOptionValues(config.Values); err != nil {
+	config.Values, err = effectiveModuleConfig(manifest, config.Values)
+	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
 	return config, nil
+}
+
+func effectiveModuleConfig(manifest sdk.Manifest, values json.RawMessage) (json.RawMessage, error) {
+	effective, err := manifest.EffectiveModuleConfig(values)
+	if err != nil {
+		return nil, err
+	}
+	if len(effective) > storeStateLimit {
+		return nil, errors.New("effective module configuration exceeds its size limit")
+	}
+	return effective, nil
 }
 
 func closeModuleClient(client *workerClient) error {

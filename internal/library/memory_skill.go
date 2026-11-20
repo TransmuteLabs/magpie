@@ -20,7 +20,8 @@ import (
 // then, noted as that skill's (memory.MadeSkill). It answers with the
 // skill's name.
 func MemorySkill(id string) (*Result, string, error) {
-	m, err := memory.Get(id)
+	owner := memory.Owner()
+	m, err := owner.Get(id)
 	if err != nil {
 		return nil, "", err
 	}
@@ -47,7 +48,7 @@ func MemorySkill(id string) (*Result, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if err := memory.MadeSkill(id, name); err != nil {
+	if err := owner.MadeSkill(id, name); err != nil {
 		return res, name, fmt.Errorf("the skill %s is made, but the memory couldn't be set aside: %w", name, err)
 	}
 	return res, name, nil

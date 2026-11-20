@@ -3,16 +3,19 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/netproxy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+type extensionSearchBinding = extensionhost.SearchBinding
+
 type extensionSearchHost interface {
 	Namespace() string
 	SearchSources() []extensionhost.SearchBinding
-	SearchSource(string) (extensionhost.SearchBinding, bool)
+	SearchSource(context.Context, string) (extensionhost.SearchBinding, bool)
 	RunSearch(context.Context, extensionhost.SearchBinding, sdk.Scope, sdk.SearchRequest) (sdk.SearchResult, error)
 }
 
@@ -23,11 +26,28 @@ func extensionSearchVendors() []SearchVendor {
 	}
 	out := []SearchVendor{}
 	for _, binding := range host.SearchSources() {
-		out = append(out, SearchVendor{ID: "sdk:" + binding.Module + ":" + binding.Descriptor.ID,
-			Name: binding.Descriptor.Name, Extension: binding.Module, ExtensionID: binding.Descriptor.ID,
-			KeyOptional: true, Auth: binding.Descriptor.Provider})
+		out = append(out, extensionSearchVendor(binding))
 	}
 	return out
+}
+
+func extensionSearchVendor(binding extensionhost.SearchBinding) SearchVendor {
+	return SearchVendor{ID: "sdk:" + binding.Module + ":" + binding.Descriptor.ID,
+		Name: binding.Descriptor.Name, Extension: binding.Module, ExtensionID: binding.Descriptor.ID,
+		KeyOptional: true, Auth: binding.Descriptor.Provider, extensionBinding: binding}
+}
+
+func extensionSearchVendorFor(ctx context.Context, id string) (SearchVendor, bool) {
+	module, source, found := strings.Cut(strings.TrimPrefix(id, "sdk:"), ":")
+	host, available := providerExtensionHost().(extensionSearchHost)
+	if !found || !available {
+		return SearchVendor{}, false
+	}
+	binding, found := host.SearchSource(ctx, module+"/"+source)
+	if !found {
+		return SearchVendor{}, false
+	}
+	return extensionSearchVendor(binding), true
 }
 
 func extensionSearchSignIn(v SearchVendor) (string, *Provider) {
@@ -42,12 +62,16 @@ func extensionSearchSignIn(v SearchVendor) (string, *Provider) {
 }
 
 func RunExtensionSearch(ctx context.Context, vendor SearchVendor, selected *Provider, query string, count int) (sdk.SearchResult, error) {
+	if err := ctx.Err(); err != nil {
+		return sdk.SearchResult{}, err
+	}
 	host, ok := providerExtensionHost().(extensionSearchHost)
 	if !ok || vendor.Extension == "" || vendor.ID != "sdk:"+vendor.Extension+":"+vendor.ExtensionID {
 		return sdk.SearchResult{}, errors.New("extension search host is unavailable")
 	}
-	binding, found := host.SearchSource(vendor.Extension + "/" + vendor.ExtensionID)
-	if !found || binding.Descriptor.Provider != vendor.Auth {
+	binding := vendor.extensionBinding
+	if binding.Namespace != host.Namespace() || binding.Module != vendor.Extension ||
+		binding.Descriptor.ID != vendor.ExtensionID || binding.Descriptor.Provider != vendor.Auth {
 		return sdk.SearchResult{}, errors.New("extension search source changed")
 	}
 	if err := netproxy.Held(ctx); err != nil {

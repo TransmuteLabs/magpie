@@ -58,6 +58,71 @@ const W = {
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(engine + ": a declared SDK settings form sends a fenced patch", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    for (const [lang, words] of Object.entries(W)) {
+      await t.test(lang, async (subtest) => {
+        const page = await (await browser.newContext({ viewport: { width: 420, height: 820 } })).newPage();
+        page.setDefaultTimeout(5000);
+        subtest.after(() => page.context().close());
+        const errors = [], posted = [];
+        page.on("pageerror", (err) => errors.push(err.message));
+        const spec = "sdk:settings-fixture";
+        const configuration = {
+          packageRevision: "fixture-package", configVersion: "0", enableGeneration: "",
+          schema: {
+            type: "object", "x-order": ["attempts", "active", "mode"],
+            properties: {
+              active: { type: "boolean", title: "Active", default: true },
+              attempts: { type: "integer", title: "Attempts", minimum: 1, maximum: 4, default: 2 },
+              mode: { type: "string", title: "Mode", enum: ["normal", "fast"], default: "normal" },
+            },
+          },
+          values: { attempts: 2, active: true, mode: "normal" },
+        };
+        const pluginState = { plugins: [{ spec, ownName: "Settings Fixture", providers: [], moved: [],
+          sdk: { api: "1.16", runtime: "exec", settings: configuration } }] };
+        await page.route("**/*", server(lang, pluginState));
+        await page.route("**/api/plugins/settings", (route) => {
+          const patch = route.request().postDataJSON();
+          posted.push(patch);
+          configuration.configVersion = "1";
+          Object.assign(configuration.values, patch.values);
+          return route.fulfill({ json: {} });
+        });
+        await page.goto("http://magpie.test/?view=plugins");
+        await page.locator(":is(.lib-tabs .opt, .nav-s):visible", { hasText: words.installed }).click();
+        const row = page.locator("#view-plugins .pm-row").filter({ hasText: "Settings Fixture" });
+        await row.getByRole("button", { name: words.options, exact: true }).click();
+        const form = row.locator(".pm-sdk-opts");
+        const attempts = form.getByRole("spinbutton", { name: "Attempts" });
+        const save = form.getByRole("button", { name: words.save, exact: true });
+        assert.deepEqual(await form.locator("[data-setting]").evaluateAll((rows) => rows.map((item) => item.dataset.setting)), ["attempts", "active", "mode"]);
+        assert.equal(await form.locator("textarea, select").count(), 0);
+        assert.equal(await page.evaluate(() => document.scrollingElement.scrollWidth <= innerWidth), true, "no sideways scroll");
+        assert.equal(await attempts.inputValue(), "2");
+        assert.equal(await save.isDisabled(), true);
+        await attempts.fill("9");
+        await attempts.blur();
+        assert.equal(await attempts.getAttribute("aria-invalid"), "true");
+        assert.equal(await save.isDisabled(), true);
+        await attempts.fill("3");
+        await attempts.blur();
+        await save.click();
+        await form.waitFor({ state: "detached" });
+        assert.deepEqual(posted, [{ spec, packageRevision: "fixture-package", configVersion: "0", enableGeneration: "", values: { attempts: 3 } }]);
+        await row.getByRole("button", { name: words.options, exact: true }).click();
+        assert.equal(await attempts.inputValue(), "3");
+        await attempts.fill("4");
+        await form.getByRole("button", { name: words.cancel, exact: true }).click();
+        await form.waitFor({ state: "detached" });
+        assert.equal(posted.length, 1);
+        assert.deepEqual(errors, []);
+      });
+    }
+  });
+
   test(engine + ": a provider plugin's options in its row", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());

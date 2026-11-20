@@ -32,7 +32,7 @@ const configure = (id = "configure", extra = {}) => ({
 });
 
 test("current SDK preserves API 1.1 primary and service authority projections", () => {
-  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 15 });
+  assert.deepEqual(SDK.CONTRACT.version, { major: 1, minor: 16 });
   assert.equal(new Set(SDK.CONTRACT.capabilities).size, SDK.CONTRACT.capabilities.length);
   assert.equal(SDK.CONTRACT.capabilities.includes("module-rpc"), true);
   assert.equal(SDK.CONTRACT.capabilities.includes("session-storage-source"), true);

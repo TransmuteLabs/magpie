@@ -3,7 +3,8 @@ package memory
 import (
 	"slices"
 	"strings"
-	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Tidying is memory's nightly pass (memdistill's Dream): memories that
@@ -13,27 +14,9 @@ import (
 // never changed: it can be the one others are merged into, nothing more.
 // Every change is recorded so the whole pass can be undone (Untidy).
 
-// Merge is memories to merge: IDs into one that says Text.
-type Merge struct {
-	IDs  []string
-	Text string
-	Kind string
-}
-
-// Stale is a memory to set aside, and why.
-type Stale struct {
-	ID  string
-	Why string
-}
-
-// Plan is what a tidy does: the merges, the memories to set aside, and
-// Before, when an unreviewed candidate distilled from a conversation is
-// set aside if it hasn't changed since (zero: none).
-type Plan struct {
-	Merges []Merge
-	Stale  []Stale
-	Before time.Time
-}
+type Merge = sdk.MemoryTidyMerge
+type Stale = sdk.MemoryTidyStale
+type Plan = sdk.MemoryTidyPlan
 
 // What a Change did.
 const (
@@ -42,20 +25,7 @@ const (
 	Unreviewed = "unreviewed" // Why of a candidate set aside for its age
 )
 
-// Change is one thing a tidy did, with what it takes to undo it.
-type Change struct {
-	Action string `json:"action"`
-	// Into is the memory merged into; New when the merge made it
-	Into string `json:"into,omitempty"`
-	New  bool   `json:"new,omitempty"`
-	// IDs are the memories superseded or set aside, Was their states
-	// before
-	IDs []string `json:"ids"`
-	Was []string `json:"was"`
-	// Text is what Into says, or what was set aside
-	Text string `json:"text"`
-	Why  string `json:"why,omitempty"`
-}
+type Change = sdk.MemoryTidyChange
 
 // Fixed is a memory a tidy never changes: the user's own, or pinned.
 func Fixed(m *Memory) bool { return m.Pinned || m.Origin == FromUser }

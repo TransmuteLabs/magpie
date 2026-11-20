@@ -197,6 +197,42 @@ func TestIndexReadsOnce(t *testing.T) {
 	}
 }
 
+func TestUnknownMemoryRecordDoesNotPruneSemanticIndex(t *testing.T) {
+	model := sandbox(t, true)
+	item := save(t, "Known indexed passage", memory.Active)
+	if count, err := Index(t.Context()); err != nil || count != 1 {
+		t.Fatalf("initial index: %d (%v)", count, err)
+	}
+	vectorsFile := filepath.Join(dir(), "vectors.bin")
+	previous, err := os.ReadFile(vectorsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(memory.Dir(), item.ID+".md")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nsomething: [\n---\nBroken Memory fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := Index(t.Context()); err == nil || count != 0 {
+		t.Errorf("index treated an unreadable record as absent: %d (%v)", count, err)
+	}
+	if body, err := os.ReadFile(vectorsFile); err != nil || string(body) != string(previous) {
+		t.Fatalf("unknown record changed the durable index: %v", err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := Index(t.Context()); err != nil || count != 0 || model.calls.Load() != 1 {
+		t.Fatalf("restored record was indexed again: %d (%v), model calls %d", count, err, model.calls.Load())
+	}
+	if status := Now(); status.Of != 1 || status.Read != 1 {
+		t.Fatalf("restored index not reported: %+v", status)
+	}
+}
+
 func TestIndexCannotPublishAfterSwitchOff(t *testing.T) {
 	for _, mode := range []string{"off", "re-enabled"} {
 		t.Run(mode, func(t *testing.T) {

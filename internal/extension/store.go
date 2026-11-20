@@ -2,6 +2,7 @@ package extension
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -121,11 +122,15 @@ func NewStore(root string) *Store {
 }
 
 func (s *Store) StateGet(scope sdk.Scope, key string) (VersionedValue, error) {
+	return s.stateGet(context.Background(), scope, key)
+}
+
+func (s *Store) stateGet(ctx context.Context, scope sdk.Scope, key string) (VersionedValue, error) {
 	var result VersionedValue
 	if !storeValidScope(scope) || !storeToken(key) {
 		return result, storeInvalid()
 	}
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		if err := storeCheckGeneration(root, scope); err != nil {
 			return err
 		}
@@ -137,6 +142,10 @@ func (s *Store) StateGet(scope sdk.Scope, key string) (VersionedValue, error) {
 }
 
 func (s *Store) StateCAS(scope sdk.Scope, key string, expected uint64, value json.RawMessage) (VersionedValue, error) {
+	return s.stateCAS(context.Background(), scope, key, expected, value)
+}
+
+func (s *Store) stateCAS(ctx context.Context, scope sdk.Scope, key string, expected uint64, value json.RawMessage) (VersionedValue, error) {
 	var result VersionedValue
 	if !storeValidScope(scope) || !storeToken(key) {
 		return result, storeInvalid()
@@ -144,7 +153,7 @@ func (s *Store) StateCAS(scope sdk.Scope, key string, expected uint64, value jso
 	if len(value) > storeStateLimit || !json.Valid(value) {
 		return result, storeError("invalid_state", "Extension state must be bounded JSON.")
 	}
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		if err := storeCheckGeneration(root, scope); err != nil {
 			return err
 		}
@@ -195,11 +204,15 @@ func (s *Store) Accounts(plugin, provider string) ([]Account, error) {
 }
 
 func (s *Store) GetAccount(plugin, provider, id string) (Account, error) {
+	return s.getAccount(context.Background(), plugin, provider, id)
+}
+
+func (s *Store) getAccount(ctx context.Context, plugin, provider, id string) (Account, error) {
 	var result Account
 	if !storeAccountID(plugin, provider, id) {
 		return result, storeInvalid()
 	}
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
 		if err != nil {
 			return err
@@ -526,10 +539,16 @@ func storeReadOperation(root *os.Root, plugin, operation string) (JournalEntry, 
 }
 
 func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
+	return s.withStoreContext(context.Background(), plugin, action)
+}
+
+func (s *Store) withStoreContext(ctx context.Context, plugin string, action func(*os.Root) error) error {
 	if s == nil || s.root == "" {
 		return storeInvalid()
 	}
-	s.mu.Lock()
+	if err := lockContext(ctx, &s.mu); err != nil {
+		return err
+	}
 	defer s.mu.Unlock()
 	root, err := storeOpenRoot(s.root)
 	if err != nil {
@@ -546,8 +565,11 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		return err
 	}
 	defer lock.Close()
-	started := time.Now()
+	due := time.Now().Add(filelock.Wait)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		held, err := filelock.TryLock(lock)
 		if err != nil {
 			return storeError("store_locked", "Extension store lock is unavailable.")
@@ -555,10 +577,14 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		if held {
 			break
 		}
-		if time.Since(started) >= filelock.Wait {
+		if time.Now().After(due) {
 			return storeError("store_locked", "Extension store lock is unavailable.")
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	defer filelock.Unlock(lock)
 	namespace, err := storeDirectory(private, plugin)
@@ -566,7 +592,30 @@ func (s *Store) withStore(plugin string, action func(*os.Root) error) error {
 		return err
 	}
 	defer namespace.Close()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return action(namespace)
+}
+
+func lockContext(ctx context.Context, mutex *sync.Mutex) error {
+	if ctx.Done() == nil {
+		mutex.Lock()
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if mutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }
 
 func storeOpenRoot(path string) (*os.Root, error) {

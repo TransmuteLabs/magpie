@@ -45,7 +45,7 @@ func (s *Server) askSearchSignedIn(ctx context.Context, a provider.SearchAPI, v 
 		if p != nil {
 			err = fmt.Errorf("no account of %s is on", name)
 		}
-		s.logSearch(ctx, usage.Record{Requested: a.Name()}, query, time.Now(), 0, err)
+		s.logSearch(ctx, usage.Record{Requested: v.Name}, query, time.Now(), 0, err)
 		return nil, err
 	}
 	ids := make([]string, len(cs))
@@ -62,7 +62,7 @@ func (s *Server) askSearchSignedIn(ctx context.Context, a provider.SearchAPI, v 
 		start := time.Now()
 		pages, err := s.askPluginSearchAs(ctx, v, q, query)
 		cancel()
-		rec := usage.Record{Requested: a.Name(), ProviderKeyID: searchKeyID(a.Vendor, ids[i]), ProviderKeyName: q.Account.User}
+		rec := usage.Record{Requested: v.Name, ProviderKeyID: searchKeyID(a.Vendor, ids[i]), ProviderKeyName: q.Account.User}
 		s.logSearch(ctx, rec, query, start, len(pages), err)
 		if err == nil {
 			wakeSearchKey(a.Vendor, ids[i])

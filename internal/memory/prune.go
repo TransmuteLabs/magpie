@@ -3,6 +3,8 @@ package memory
 import (
 	"slices"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Retention: what nobody acted on doesn't stay forever. A candidate left
@@ -17,10 +19,7 @@ import (
 const Keep = 30 * 24 * time.Hour
 
 // Pruned is what one Prune did.
-type Pruned struct {
-	Archived int // candidates set aside
-	Removed  int // archived or superseded memories removed
-}
+type Pruned = sdk.MemoryPruned
 
 // Prune applies retention now. It writes nothing when nothing is due.
 func Prune() (Pruned, error) {

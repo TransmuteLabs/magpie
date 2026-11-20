@@ -65,6 +65,13 @@ func NewCatalog(root string) *Catalog {
 }
 
 func (catalog *Catalog) List() ([]Installed, error) {
+	return catalog.list(context.Background())
+}
+
+func (catalog *Catalog) list(ctx context.Context) ([]Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	root, err := catalog.open(false)
 	if errors.Is(err, errCatalogRootMissing) {
 		return []Installed{}, nil
@@ -73,7 +80,7 @@ func (catalog *Catalog) List() ([]Installed, error) {
 		return nil, err
 	}
 	defer root.Close()
-	unlock, err := catalogLock(context.Background(), root)
+	unlock, err := catalogLock(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +95,7 @@ func (catalog *Catalog) List() ([]Installed, error) {
 			entry.EnableGeneration, entry.observerEnablementErr = readObserverEnablement(root, entry.Manifest.ID)
 		}
 	}
-	return entries, nil
+	return entries, ctx.Err()
 }
 
 func (catalog *Catalog) Install(ctx context.Context, source string, check func(context.Context, Installed) error) (Installed, error) {
