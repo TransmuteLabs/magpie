@@ -29,25 +29,7 @@
   magpie.replacing = (v) => replaced.get(v) || v;
   magpie.plugin("plugin-pages", (c) => { ctx = c; });
 
-  const TOKENS = ["bg", "card", "fg", "fg-2", "muted", "faint", "line", "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code"];
-  function theme() {
-    const css = getComputedStyle(document.documentElement);
-    const tokens = {};
-    for (const k of TOKENS) tokens[k] = css.getPropertyValue("--" + k).trim();
-    const dark = document.documentElement.dataset.theme === "dark"
-      || (document.documentElement.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
-    return { dark, lang: locale, tokens };
-  }
-
   function post(win, msg) { win?.postMessage({ magpie: 1, ...msg }, "*"); }
-
-  // the theme or the language changed: every page open is told
-  function pushTheme() {
-    const data = theme();
-    for (const p of [...pages.values(), ...panels.values()]) if (p.hello) post(p.frame?.contentWindow, { event: "theme", data });
-  }
-  new MutationObserver(pushTheme).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "lang", "class", "style"] });
-  matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", pushTheme);
 
   function broke(key, why) { ctx?.broke(key, new Error(why)); }
 
@@ -170,7 +152,7 @@
     try {
       const handler = await bridge;
       if (p.frame?.contentWindow !== src) return;
-      const result = await handler.answerPluginPage(p, m, theme, titled);
+      const result = await handler.answerPluginPage(p, m, handler.pluginTheme, titled);
       handler.checkPluginReply(p, m.method, visibilityVersion, result);
       if (p.frame?.contentWindow === src) post(src, { id: m.id, result });
     } catch (err) {
@@ -441,8 +423,8 @@
   }
 
   window.loadPluginPages = load;
-  bridge.then(({ watchExtensionWindows, watchPluginVisibility }) => {
-    ctx.onDispose(watchPluginVisibility(pages, panels, refreshVisibility, dispose));
+  bridge.then(({ watchExtensionWindows, watchPluginFrames }) => {
+    ctx.onDispose(watchPluginFrames(pages, panels, refreshVisibility, dispose, post));
     ctx.onDispose(watchExtensionWindows(load));
   });
   load();
