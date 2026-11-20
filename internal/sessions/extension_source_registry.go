@@ -104,7 +104,7 @@ func BindSessionSourceNative(ctx context.Context, plugin, source, expectedRevisi
 	if !ok || !nativeSourceOwner(descriptor.Agent) || expectedRevision == "" {
 		return errors.New("native source binding requires an existing owner and exact package revision")
 	}
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil || !slices.ContainsFunc(entries, func(entry extension.Installed) bool {
 		return !entry.Disabled && entry.Manifest.ID == plugin && entry.Revision == expectedRevision
 	}) {

@@ -130,7 +130,7 @@ func selectedStorageRoot(ctx context.Context, manager *extension.Manager, plugin
 		return storageSourceRecord{}, err
 	}
 	hash := sha256.Sum256(body)
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return storageSourceRecord{}, err
 	}
@@ -236,7 +236,7 @@ func UnbindStorageSource(ctx context.Context, agent, expectedIdentity string) er
 
 func InspectStorageSources(ctx context.Context) ([]StorageSourceRoot, []StorageSourceConsent, error) {
 	manager := sourceManager()
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

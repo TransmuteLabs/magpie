@@ -72,7 +72,7 @@ func forgetSessionMigration(key string) {
 }
 
 func sessionMigrationIdentity(ctx context.Context, manager *extension.Manager, plugin string) (sdk.Manifest, string, error) {
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return sdk.Manifest{}, "", err
 	}

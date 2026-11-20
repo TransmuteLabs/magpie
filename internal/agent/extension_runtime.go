@@ -27,7 +27,7 @@ func (host *extensionAgentRuntime) Manifest(plugin string) (sdk.Manifest, error)
 }
 
 func (host *extensionAgentRuntime) check(ctx context.Context, plugin string) error {
-	entries, err := host.manager.List()
+	entries, err := host.manager.ListContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 }
 
 func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
-	entries, err := manager.List()
+	entries, err := manager.ListContext(ctx)
 	if err != nil {
 		return nil, err
 	}

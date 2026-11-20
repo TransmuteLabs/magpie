@@ -60,6 +60,7 @@ default decoder.
 [`extension_source_adapter.go`](../../internal/sessions/extension_source_adapter.go)
 prepares summaries outside the session cache mutex, then exposes immutable
 records through ordinary discovery, `List`, `Find`, management and stats.
+Cancellation during catalog discovery preserves the last published view.
 `allFilesWith` and `parserFor` do not call workers. SDK summaries are not written
 into the persistent native path cache. Failed reads under unchanged authority
 retain detached last-good metadata as `source_status: stale`; revoked authority
