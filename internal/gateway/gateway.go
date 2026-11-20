@@ -2717,7 +2717,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// the only place it is counted, and as a plain turn it read as no
 	// compaction at all (shangyuan0818 on Discord), the OTel export left
 	// it to that transcript, and its reply ended the agent's turn
-	if call.Kind == "" && factsOf(from, plain).compact {
+	if call.Kind == "" && (factsOf(from, plain).compact || unaryCompact(r)) {
 		call.Kind = KindCompact
 	}
 	// Claude Code's auto mode classifier and AgentSummary name themselves
@@ -3402,6 +3402,17 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				return
 			}
 		}
+		// /responses/compact goes only where it is the provider's own
+		// route (responses_compact.go, #7281)
+		if unaryCompact(r) {
+			var left bool
+			if cands, pl, left = s.unaryCompactCarriers(cands, pl); !left {
+				call.Status, call.Error = 400, "unary compaction not served"
+				writeError(w, from, 400, unaryCompactError(call.Model))
+				turnedAway()
+				return
+			}
+		}
 	}
 	var accountHeld bool // every candidate was an account or key the calling key may not use
 	if keyHeld || accHeld {
@@ -3837,7 +3848,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// (#1099)
 	var sealedBy *candidate
 	wantWhole := wantsWhole(r.Context())
-	if from == provider.Responses && compactionTriggerIn(body) {
+	if from == provider.Responses && (compactionTriggerIn(body) || unaryCompact(r)) {
 		watch := &compactionWatch{w: w}
 		w = watch
 		defer func() {
@@ -6329,6 +6340,13 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// compaction is on, goes as it came: a translation would leave it out
 	// (#1099)
 	keep := s.keepsCompaction(from, p, model, body)
+	// /responses/compact goes as it came, and only to a provider that
+	// has the route (responses_compact.go)
+	compact := from == provider.Responses && unaryCompact(r)
+	if compact {
+		keep, relayable = true, s.compactsUnary(p, model)
+		relay = relayable
+	}
 	// Codex's custom tools, to a model that turned them away before
 	// (custom_tool.go, #2656): translated on the client's own API, which
 	// offers them as functions
@@ -6395,6 +6413,9 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	}
 	if keep {
 		msg := fmt.Sprintf("%s doesn't serve %s on the Responses API, so Codex's native compaction can't be asked of it", p.Name, model)
+		if compact {
+			msg = unaryCompactError(model)
+		}
 		return writeError(w, from, 400, msg), msg
 	}
 	to := s.usable(p, model)
@@ -7399,6 +7420,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		body = withBodyEffort(proto, body, effort)
 	}
 	path := upstreamPath(p, proto, upstream)
+	if proto == provider.Responses && unaryCompact(r) {
+		path += "/compact" // responses_compact.go
+	}
 	if proto == provider.Gemini && p.IsVertex() && geminiWhole {
 		path = provider.VertexWholePath(upstream) // answered as one JSON body
 	}

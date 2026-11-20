@@ -100,27 +100,31 @@ func (s *Server) compactsNatively(p provider.Provider, model string) bool {
 // vendor lists the model only to keys that speak no Responses there, as
 // with native compaction off, where the trigger was refused before.
 func (s *Server) nativeCompactionFor(asked string) bool {
+	return s.nativeCompactionForWire(asked, s.carriesCompaction)
+}
+
+func (s *Server) nativeCompactionForWire(asked string, carries func(provider.Provider, string) bool) bool {
 	if _, ms, ok := provider.FindGroup(asked); ok {
 		if len(ms) == 0 {
 			return false
 		}
 		for _, m := range ms {
-			if !s.compactsNatively(m.Provider, m.Model) {
+			if !m.Provider.CompactsOn(m.Model) || !carries(m.Provider, m.Model) {
 				return false
 			}
 		}
-		return slices.ContainsFunc(ms, func(m provider.Member) bool { return s.plannedCarrier(m.Provider, m.Model) })
+		return slices.ContainsFunc(ms, func(m provider.Member) bool { return plannedCarrier(m.Provider, m.Model, carries) })
 	}
 	p, model, ok := provider.Resolve(asked)
-	if !ok || !s.compactsNatively(p, model) {
+	if !ok || !p.CompactsOn(model) || !carries(p, model) {
 		return false
 	}
 	// the request goes over the provider's keys, then its fallbacks' (plan)
-	if s.plannedCarrier(p, model) {
+	if plannedCarrier(p, model, carries) {
 		return true
 	}
 	for _, m := range provider.FallbackModels(p) {
-		if (m.Provider.ID != p.ID || m.Model != model) && s.plannedCarrier(m.Provider, m.Model) {
+		if (m.Provider.ID != p.ID || m.Model != model) && plannedCarrier(m.Provider, m.Model, carries) {
 			return true
 		}
 	}
@@ -134,10 +138,10 @@ func (s *Server) nativeCompactionFor(asked string) bool {
 // compactionCarriers keeps them. It reads perKeyBarred alone, not plan:
 // a plan weighs the keys, and a provider routed in turn would move its
 // turn along for a request that never went (every Codex turn is decided).
-func (s *Server) plannedCarrier(p provider.Provider, model string) bool {
+func plannedCarrier(p provider.Provider, model string, carries func(provider.Provider, string) bool) bool {
 	cs, aside, _, barred := perKeyBarred(p, model, provider.Responses)
 	for _, l := range [][]candidate{cs, aside, creditsHeld(barred), capHeldOnly(barred)} {
-		if slices.ContainsFunc(l, func(c candidate) bool { return s.carriesCompaction(c.p, c.model) }) {
+		if slices.ContainsFunc(l, func(c candidate) bool { return carries(c.p, c.model) }) {
 			return true
 		}
 	}
