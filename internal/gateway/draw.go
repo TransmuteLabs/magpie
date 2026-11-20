@@ -830,7 +830,7 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 		// member asked a try of its one route (sideRoute)
 		var grp *GroupRef
 		if isGroup {
-			grp = groupRef(g, ms)
+			grp = s.groupRef(g, ms)
 		}
 		side := s.beginSide(r, start, call.Model, p.ID, grp)
 		side.masked(noteMasked(r, "image", hits, d.Prompt, side.id(), p.ID, call.Model))
@@ -1386,12 +1386,12 @@ func (s *Server) drawOnAccounts(ctx context.Context, r *http.Request, p provider
 	}
 	if len(cs) == 0 && slices.ContainsFunc(barred, func(c candidate) bool { return c.capped != nil }) {
 		// every account is held at its usage cap
-		msg, back := cappedError(model, barredOf(barred, q, false, provider.Chat, nil), time.Now())
+		msg, back := cappedError(model, s.barredOf(barred, q, false, provider.Chat, nil), time.Now())
 		return p, drawn{}, http.StatusTooManyRequests, back, errors.New(msg)
 	}
 	if len(cs) == 0 && len(barred) > 0 {
 		// every key or account is set not to serve the model (#474)
-		return p, drawn{}, http.StatusForbidden, time.Time{}, errors.New(barredError(d.Model, barredOf(barred, q, false, provider.Chat, nil)))
+		return p, drawn{}, http.StatusForbidden, time.Time{}, errors.New(barredError(d.Model, s.barredOf(barred, q, false, provider.Chat, nil)))
 	}
 	if len(cs) == 0 {
 		cs = []candidate{{p: p, model: model, rest: p.ID}}

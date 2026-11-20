@@ -40,8 +40,10 @@ function serve(lang, posts, off = []) {
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:${JSON.stringify(lang)},theme:"light",web:true,featuresOff:${JSON.stringify(off)}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json(state);
-    if (url.pathname === "/api/providers") return json(providers);
+    const active = off.includes("rotation") ? [""] : ["", "order", "drain", "rotate", "usage", "pace", "weight", "free", "fast"];
+    const routingOptions = active.map((id) => ({ id }));
+    if (url.pathname === "/api/state") return json({ ...state, routingOptions });
+    if (url.pathname === "/api/providers") return json({ ...providers, routingOptions });
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (route.request().method() === "POST" && url.pathname.startsWith("/api/provider")) {
@@ -150,7 +152,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
-          await page.route("**/*", serve(lang, [], ["rotation"]));
+          const off = ["rotation"];
+          await page.route("**/*", serve(lang, [], off));
           await page.goto("http://magpie.test/?view=providers");
           await page.locator(".row.provider", { hasText: p.name }).first().click();
           await page.locator(".editor .accts").first().waitFor();
@@ -159,8 +162,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(shown, [zh ? "额度优先" : "Quota first"], `${where}: Smart alone`);
           assert.match(await field.locator(".segs .opt").first().getAttribute("class"), /\bon\b/, `${where}: Smart picked`);
           assert.ok(await page.evaluate(() => document.scrollingElement.scrollWidth <= innerWidth + 1), `${where}: fits`);
-          // on again, every routing is back
-          await page.evaluate(() => applyFeatures([{ id: "rotation", on: true }]));
+          // A new state read reflects reactivation without resetting an open form.
+          off.length = 0;
+          await page.evaluate(() => load(true));
+          await page.locator(".editor .ed-cancel").click();
+          await page.locator(".row.provider", { hasText: p.name }).first().click();
           const back = await field.locator(".segs").first().evaluate((box) => [...box.querySelectorAll(".opt")].filter((b) => getComputedStyle(b).display !== "none").length);
           // By weight is offered for accounts as for keys (rubbzha on X)
           assert.equal(back, 9, `${where}: every routing back`);

@@ -46,13 +46,13 @@ import (
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/mcpauth"
-	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/notices"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/profile"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/redact"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/settingsapi"
@@ -325,8 +325,9 @@ type stateJSON struct {
 	// ConfigBlocked is the folder this user can't write that keeps magpie
 	// from saving its files (a ~/.config sudo left root's), which the
 	// window offers to make theirs again; "" when magpie can save
-	ConfigBlocked string            `json:"configBlocked,omitempty"`
-	Settings      settings.Settings `json:"settings"`
+	ConfigBlocked  string            `json:"configBlocked,omitempty"`
+	Settings       settings.Settings `json:"settings"`
+	RoutingOptions []routes.Option   `json:"routingOptions,omitempty"`
 	// FX is the dollar-to-yuan rate the cny currency choice shows costs at,
 	// here too (not only in settingsJSON) so a cost drawn before the reader
 	// ever opens Settings already converts, if cny was chosen last time.
@@ -435,10 +436,10 @@ type settingsJSON struct {
 	Builtins []builtinJSON `json:"builtins"`
 	// PanelKeys is whether the quick panel's shortcut can be set here
 	// (panelkey.go)
-	PanelKeys panelKeysJSON `json:"panelKeys"`
-	// JSRoutings are the routings JS gateway plugins serve now
-	// ("<plugin>/<name>"), for the routing pickers
-	JSRoutings []middleware.Routing `json:"jsRoutings"`
+	PanelKeys      panelKeysJSON   `json:"panelKeys"`
+	RoutingOptions []routes.Option `json:"routingOptions"`
+	// JSRoutings is the compatibility view of the active plugin strategies.
+	JSRoutings []routes.Option `json:"jsRoutings"`
 	// PublicURL is MAGPIE_PUBLIC_URL while other machines are let in
 	// (shared, or MAGPIE_ADDR on the network): where they reach the
 	// gateway, shown beside the local address agents here are pointed at
@@ -866,6 +867,13 @@ func codexWindowUnder(st settings.Settings, model string) *codexRunWindow {
 	return &codexRunWindow{Model: model, Window: e.Context, Size: tokensSize(e.Context)}
 }
 
+func routingOptions() []routes.Option {
+	if server := served.Load(); server != nil {
+		return server.RoutingOptions()
+	}
+	return gateway.RoutingOptions()
+}
+
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
@@ -873,7 +881,13 @@ func settingsState() settingsJSON {
 	s.Log = tilde(applog.Current())
 	s.Builtins = builtinsState()
 	s.PanelKeys = panelKeysState()
-	s.JSRoutings = middleware.Routings()
+	s.RoutingOptions = routingOptions()
+	s.JSRoutings = []routes.Option{}
+	for _, option := range s.RoutingOptions {
+		if strings.Contains(option.ID, "/") {
+			s.JSRoutings = append(s.JSRoutings, option)
+		}
+	}
 	s.OnNetwork = gateway.OnNetwork()
 	if list, env := gateway.AllowIPs(); env {
 		s.AllowIPsEnv, s.AllowIPsFromEnv = os.Getenv(gateway.AllowIPsEnv), list
@@ -3392,6 +3406,7 @@ func stateSettings(s settings.Settings) settings.Settings {
 func state() stateJSON {
 	s := stateJSON{Agents: []agentJSON{}, Profiles: []profileJSON{}, Catalog: catalog.Source(), Settings: settings.Shared()} // only encoded, never changed
 	s.Settings = stateSettings(s.Settings)
+	s.RoutingOptions = routingOptions()
 	// state() is asked for after nearly every click, so the rate — a
 	// network fetch once every TTL — is only worth its rare latency when
 	// cny is actually chosen; usd never looks at it

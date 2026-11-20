@@ -18,8 +18,14 @@ import (
 
 // RegisterFeature registers a linked SDK contribution under the existing
 // built-in manifest's identity and lifecycle.
-func RegisterFeature(contribution sdk.FeatureContribution) {
-	register(featureManifest(contribution))
+func RegisterFeature(contribution sdk.FeatureContribution, bind ...func(*Ctx)) {
+	register(featureManifest(contribution, bind...))
+}
+
+type RoutingFeature = sdk.LinkedRoutingFeature[*routes.Catalog]
+
+func RegisterRoutingFeature(contribution RoutingFeature) {
+	register(featureManifestWithRouting(contribution.FeatureContribution, contribution.Strategies))
 }
 
 type GatewayFeature = sdk.LinkedGatewayFeature[access.Identity, usage.Record]
@@ -52,19 +58,24 @@ func gatewayFeatureManifest(contribution GatewayFeature) Manifest {
 	return featureManifest(feature)
 }
 
-func featureManifest(contribution sdk.FeatureContribution) Manifest {
+func featureManifest(contribution sdk.FeatureContribution, bind ...func(*Ctx)) Manifest {
+	return featureManifestWithRouting(contribution, nil, bind...)
+}
+
+func featureManifestWithRouting(contribution sdk.FeatureContribution, strategies func(*routes.Catalog) []sdk.LinkedRoutingRegistration, bind ...func(*Ctx)) Manifest {
 	m := Manifest{
 		ID: contribution.ID, API: contribution.API,
 		Requires: slices.Clone(contribution.Requires), Essential: contribution.Essential,
 		Name: contribution.Name, Sub: contribution.Sub, One: contribution.One, Many: contribution.Many,
 		InUse: contribution.InUse, Client: slices.Clone(contribution.Client),
 	}
-	routing := maps.Clone(contribution.Routing)
-	routingIDs := slices.Sorted(maps.Keys(routing))
-	for _, id := range routingIDs {
-		if err := routing[id].Validate(id); err != nil {
+	routing := make([]sdk.LinkedRoutingRegistration, 0, len(contribution.Routing))
+	for _, id := range slices.Sorted(maps.Keys(contribution.Routing)) {
+		strategy := contribution.Routing[id]
+		if err := strategy.Validate(id); err != nil {
 			panic(fmt.Errorf("pluginrt: %s routing: %w", m.ID, err))
 		}
+		routing = append(routing, sdk.LinkedRoutingRegistration{ID: id, Name: id, Strategy: strategy})
 	}
 	tools := slices.Clone(contribution.Tools)
 	seenTools := make(map[sdk.LinkedGatewayTool]bool, len(tools))
@@ -79,10 +90,19 @@ func featureManifest(contribution sdk.FeatureContribution) Manifest {
 	}
 	middleware, masker := contribution.Middleware, contribution.Masker
 	groups := contribution.RoutingGroups
-	if activate := contribution.Activate; activate != nil || len(routingIDs) != 0 || groups || middleware != nil || masker != nil || len(tools) != 0 {
+	if activate := contribution.Activate; activate != nil || len(bind) != 0 || len(routing) != 0 || strategies != nil || groups || middleware != nil || masker != nil || len(tools) != 0 {
 		m.Apply = func(ctx *Ctx) error {
-			for _, id := range routingIDs {
-				ctx.OnDispose(routes.Register(id, routing[id]))
+			catalog := ctx.RoutingCatalog()
+			declared := routing
+			if strategies != nil {
+				declared = append(slices.Clone(routing), strategies(catalog)...)
+			}
+			if len(declared) != 0 {
+				remove, err := catalog.RegisterLinked(declared)
+				if err != nil {
+					return fmt.Errorf("pluginrt: %s routing: %w", m.ID, err)
+				}
+				ctx.OnDispose(remove)
 			}
 			if groups {
 				ctx.OnDispose(provider.ServeGroups())
@@ -95,6 +115,9 @@ func featureManifest(contribution sdk.FeatureContribution) Manifest {
 			}
 			for _, tool := range tools {
 				ctx.OnDispose(gwtool.Serve(string(tool)))
+			}
+			for _, configure := range bind {
+				configure(ctx)
 			}
 			if activate != nil {
 				return activate(ctx)

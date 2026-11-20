@@ -29,7 +29,10 @@ func TestCheapestOrdersByPriceNow(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("Cheapest first ordered %v, want %v", got, want)
 	}
-	if !Cheapest.ByPrice || Builtin["cheap"].Order == nil {
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	strategy, found := catalog.Find("cheap")
+	if !found || !strategy.ByPrice {
 		t.Fatal("Cheapest first isn't priced or registered as cheap")
 	}
 }

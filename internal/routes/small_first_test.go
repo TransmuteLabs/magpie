@@ -31,7 +31,10 @@ func TestSmallFirstOrdersByWindow(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("Small context first ordered %v, want %v", got, want)
 	}
-	if !SmallFirst.ByWindow || Builtin["fit"].Order == nil {
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	strategy, found := catalog.Find("fit")
+	if !found || !strategy.ByWindow {
 		t.Fatal("Small context first doesn't weigh windows or isn't registered as fit")
 	}
 }

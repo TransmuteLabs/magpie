@@ -41,12 +41,13 @@ func TestOnServesOffDoesNot(t *testing.T) {
 	defer rt.Stop()
 	served := func(want bool) {
 		t.Helper()
-		for name := range routes.Builtin {
-			if routes.Served(name) != want {
+		for _, option := range routes.RotationOptions() {
+			name := option.ID
+			if rt.RoutingCatalog().Served(name) != want {
 				t.Fatalf("%s served: %v, want %v (%+v)", name, !want, want, rt.Statuses())
 			}
 		}
-		if !routes.Served("") {
+		if !rt.RoutingCatalog().Served("") {
 			t.Fatal("Smart isn't served")
 		}
 	}

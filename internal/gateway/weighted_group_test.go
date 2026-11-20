@@ -10,6 +10,31 @@ import (
 	"github.com/yetone/magpie/internal/routes"
 )
 
+func TestWeightedGroupUsesItsCatalogStrategy(t *testing.T) {
+	fresh(t)
+	serveOn(t, "first", "key-a", []string{"m"}, &keyed{})
+	serveOn(t, "second", "key-b", []string{"m"}, &keyed{})
+	if err := provider.SaveGroup(provider.Group{
+		Name: "Weighted choice", Members: []string{"first/m", "second/m"}, Routing: provider.Weighted,
+		Weights: map[string]int{"first/m": 3, "second/m": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := New()
+	t.Cleanup(server.idle.stop)
+	remove := server.routingCatalog().Register(routes.Option{ID: provider.Weighted, Name: "Fixture"},
+		routes.Strategy{Order: func(pool string, seats []routes.Seat) []int {
+			if pool != "group/weighted-choice" || len(seats) != 2 ||
+				seats[0].Key != "first/m" || seats[0].Weight != 3 ||
+				seats[1].Key != "second/m" || seats[1].Weight != 1 {
+				t.Errorf("unexpected weighted group input: %q %+v", pool, seats)
+			}
+			return []int{1, 0}
+		}})
+	t.Cleanup(remove)
+	expectSDKRoutingReply(t, sdkRoutingRequest(t.Context(), server, "group/weighted-choice"), "key-b")
+}
+
 // A group routed by weight (#1910, DD on Discord): members weighing 3, 1
 // and 4 take three, one and four of every eight requests, each tried
 // whole — a member's keys in its provider's order, a group in it in its
@@ -34,7 +59,7 @@ func TestWeightedGroup(t *testing.T) {
 		{ID: "group/wsub", Path: []string{"group/wsub", "wd/m"}, Via: []provider.Group{sub}, Provider: d, Model: "m"},
 	}
 	t.Cleanup(func() {
-		routes.Forget(provider.GroupPrefix + g.ID)
+		rotation.RoutingCatalog().Forget(provider.GroupPrefix + g.ID)
 	})
 	unitOf := map[string]string{"wa": "a", "wb": "b", "wc": "sub", "wd": "sub"}
 	plan := func() []candidate {
@@ -97,7 +122,7 @@ func TestWeightedGroup(t *testing.T) {
 	if cs := plan(); cs[len(cs)-1].p.ID != "wa" {
 		t.Fatalf("the resting member isn't last: %s", restsOf(cs))
 	}
-	routes.Forget(provider.GroupPrefix + g.ID)
+	rotation.RoutingCatalog().Forget(provider.GroupPrefix + g.ID)
 	if got := counts(5*20, nil); got["a"] != 0 || got["b"] != 20 || got["sub"] != 80 {
 		t.Fatalf("with wa resting, 1:4 over 100: %v", got)
 	}
@@ -105,7 +130,7 @@ func TestWeightedGroup(t *testing.T) {
 
 	// a conversation kept on wb each round of eight: the round counts it
 	// against wb
-	routes.Forget(provider.GroupPrefix + g.ID)
+	rotation.RoutingCatalog().Forget(provider.GroupPrefix + g.ID)
 	got := counts(8*10, func(i int, cs []candidate) candidate {
 		if i%8 != 0 || cs[0].p.ID == "wb" {
 			return cs[0]

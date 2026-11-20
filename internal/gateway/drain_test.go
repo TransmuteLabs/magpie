@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // drained answers each key, or refuses it with its status and body.
@@ -83,7 +82,7 @@ func TestDrainKeepsTheOneThatTookOver(t *testing.T) {
 			if err := provider.SetAffinity("dr", provider.AffinityOff); err != nil {
 				t.Fatal(err)
 			}
-			routes.Forget("dr")
+			rotation.RoutingCatalog().Forget("dr")
 			s := New()
 			ask := func(n int) string {
 				t.Helper()
@@ -125,7 +124,7 @@ func TestDrainComesBackAfterARateLimit(t *testing.T) {
 	if err := provider.SetAffinity("dl", provider.AffinityOff); err != nil {
 		t.Fatal(err)
 	}
-	routes.Forget("dl")
+	rotation.RoutingCatalog().Forget("dl")
 	s := New()
 	ask := func(n int) string {
 		t.Helper()

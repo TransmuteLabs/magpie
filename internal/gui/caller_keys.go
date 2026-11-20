@@ -75,7 +75,10 @@ func callerKeyRoutes(mux *http.ServeMux) {
 			fail(w, err)
 			return
 		}
-		writeJSON(w, map[string]any{"keys": withLimits(keys), "accountNames": provider.AccountNames(), "accountGroups": accountGroupsJSON()})
+		writeJSON(w, map[string]any{
+			"keys": withLimits(keys), "accountNames": provider.AccountNames(),
+			"accountGroups": accountGroupsJSON(), "routingOptions": routingOptions(),
+		})
 	})
 	// the subscription accounts' windows a key's limit can follow
 	// (ljayic on X): each one's 5 hours, week or month, from the cards as

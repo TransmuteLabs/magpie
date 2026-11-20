@@ -284,8 +284,8 @@ type NestedRule struct {
 }
 
 // groupRef is the trace's g, with its models ms.
-func groupRef(g provider.Group, ms []provider.Member) *GroupRef {
-	ref := &GroupRef{ID: g.ID, Ref: g.Ref(), Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto, Sink: sinks(g.Sinks(), g.Routing)}
+func (s *Server) groupRef(g provider.Group, ms []provider.Member) *GroupRef {
+	ref := &GroupRef{ID: g.ID, Ref: g.Ref(), Name: g.Name, Routing: g.Routing, Affinity: g.Affinity, Auto: g.Auto, Sink: s.sinks(g.Sinks(), g.Routing)}
 	seen := map[string]bool{}
 	for _, m := range ms {
 		ref.Members = append(ref.Members, m.Spelled())
@@ -630,7 +630,7 @@ type planned struct {
 	grouped bool
 }
 
-func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
+func (s *Server) weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from provider.Protocol) Weighed {
 	w := Weighed{ID: c.rest, Provider: p.ID, Name: p.Name, Icon: p.Icon, Preset: p.Preset, Model: c.model, Fixed: c.effort, Fast: c.fast, Ultra: c.fast && c.ultra,
 		Routing: p.Routing, Fallback: fallback, Shared: c.rest != p.ID, Rank: c.rank, NoURL: c.noURL, Reserve: c.reserve, UseFirst: c.p.UseFirst}
 	switch {
@@ -658,7 +658,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 			lp := l.lapse
 			w.Lapse = &lp
 		}
-		w.WeekLow = l.weekLow && keepsWeek(p.Routing)
+		w.WeekLow = l.weekLow && s.keepsWeek(p.Routing)
 		if !l.fullest.IsZero() {
 			ur := l.fullest
 			w.UsedRenews = &ur
@@ -705,7 +705,7 @@ func weighed(c candidate, p provider.Provider, wg weighing, fallback bool, from 
 	if n, ok := wg.window[c.restID()]; ok {
 		w.Context = n
 	}
-	if sinks(p.Sink, p.Routing) {
+	if s.sinks(p.Sink, p.Routing) {
 		markSunk(&w, c)
 	}
 	return w

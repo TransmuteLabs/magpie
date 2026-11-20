@@ -166,6 +166,36 @@ func TestRoutingMetadataSynctestDoesNotStartRuntime(test *testing.T) {
 	}
 }
 
+func TestRoutingMetadataHasABoundedCatalogWait(test *testing.T) {
+	manager := NewManager(test.TempDir())
+	closeRoutingManager(test, manager)
+	installRoutingFixture(test, manager, "1.0.0")
+	root, err := manager.catalog.open(false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer root.Close()
+	func() {
+		unlock, err := catalogLock(test.Context(), root)
+		if err != nil {
+			test.Fatal(err)
+		}
+		defer unlock()
+		synctest.Test(test, func(bubble *testing.T) {
+			begin := time.Now()
+			if len(manager.RoutingStrategies()) != 0 {
+				bubble.Fatal("locked catalog unexpectedly returned routing metadata")
+			}
+			if elapsed := time.Since(begin); elapsed > sdk.MaxRoutingTimeoutMs*time.Millisecond {
+				bubble.Fatalf("routing list waited %s on the catalog lock", elapsed)
+			}
+		})
+	}()
+	if len(manager.RoutingStrategies()) != 1 || manager.Running("routing.fixture") {
+		test.Fatal("routing metadata did not recover cold")
+	}
+}
+
 func TestRoutingReadActionFailureAndCatalogLifecycle(test *testing.T) {
 	manager := NewManager(test.TempDir())
 	closeRoutingManager(test, manager)

@@ -15,19 +15,19 @@ package middleware
 import (
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/pluginrt"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.RegisterGatewayFeature(pluginrt.GatewayFeature{
-		FeatureContribution: sdk.FeatureContribution{
-			ID: "middleware", API: "^1", Requires: []string{"gateway"}, Essential: true,
-			Name: "JS gateway plugins", Sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers",
-			One: "1 gateway plugin on", Many: "{n} gateway plugins on",
-			InUse:      func() (int, error) { return middleware.On(), nil },
-			Middleware: middleware.Chain{},
-			OpenPage:   "plugins",
-		},
-		Observer: middleware.Points,
+	pluginrt.RegisterFeature(sdk.FeatureContribution{
+		ID: "middleware", API: "^1", Requires: []string{"gateway"}, Essential: true,
+		Name: "JS gateway plugins", Sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers",
+		One: "1 gateway plugin on", Many: "{n} gateway plugins on",
+		InUse:      func() (int, error) { return middleware.On(), nil },
+		Middleware: middleware.Chain{},
+		OpenPage:   "plugins",
+	}, func(ctx *pluginrt.Ctx) {
+		ctx.OnDispose(usage.Observe(middleware.Points(ctx.RoutingCatalog())))
 	})
 }

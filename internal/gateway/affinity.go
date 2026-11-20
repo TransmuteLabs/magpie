@@ -567,7 +567,7 @@ func stickKey(scope string, in http.Header, body []byte) string {
 // more for each 4 MB Codex request in flight. inOrder: the request is to
 // a routing group, or a provider's keys or accounts, set to In order,
 // whose order the user chose (backToFirst).
-func affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http.Header, from provider.Protocol, body, written []byte, cs []candidate, pl planned) ([]candidate, planned, *Affinity, string) {
+func (s *Server) affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http.Header, from provider.Protocol, body, written []byte, cs []candidate, pl planned) ([]candidate, planned, *Affinity, string) {
 	key := stickKey(scope, in, body)
 	a := &Affinity{Mode: mode}
 	a.Turn, a.Within = turnOf(from, written)
@@ -720,7 +720,7 @@ func affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http
 	case "session", "turn", "cache":
 		a.Kept = true
 		if at > 0 {
-			weightedKept(cs[0], cs[at])
+			s.weightedKept(cs[0], cs[at])
 			cs = append(append([]candidate{cs[at]}, cs[:at]...), cs[at+1:]...)
 			order := append(append([]Weighed{pl.order[at]}, pl.order[:at]...), pl.order[at+1:]...)
 			pl.order = order
@@ -731,7 +731,7 @@ func affine(scope, mode string, rotate, spread, inOrder, hoursOver bool, in http
 	case "strict":
 		a.Kept = true
 		if at > 0 {
-			weightedKept(cs[0], cs[at])
+			s.weightedKept(cs[0], cs[at])
 		}
 		cs, pl = strictOnly(cs, pl, at)
 	case "new-turn":
@@ -1086,7 +1086,7 @@ func spreadsSessions(mode, routing string) bool {
 	if mode != provider.AffinitySession && mode != provider.AffinityStrict {
 		return false
 	}
-	switch routingOf(routing) {
+	switch routing {
 	case "", provider.LeastUsed, provider.Pace:
 		return true
 	}

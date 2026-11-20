@@ -68,7 +68,7 @@ func (sr *sideRoute) tryAt(c candidate, at time.Time) func(status int, err error
 	sr.s.trace.update(sr.tr, func(t *Route) {
 		t.Provider = c.p.ID
 		if !slices.ContainsFunc(t.Order, func(w Weighed) bool { return w.ID == c.rest && w.Model == c.model }) {
-			t.Order = append(t.Order, weighed(c, c.p, weighing{}, false, provider.Chat))
+			t.Order = append(t.Order, sr.s.weighed(c, c.p, weighing{}, false, provider.Chat))
 		}
 		t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Start: at})
 	})

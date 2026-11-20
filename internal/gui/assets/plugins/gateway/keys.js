@@ -1072,14 +1072,11 @@ const KEY_ROUTINGS = [
 ];
 function gatewayRoutingBadge(k) {
   const own = k.routing || "";
-  const opts = KEY_ROUTINGS.filter(([v]) => v === own || !(ROTATION.has(v) && featuresOff.has("rotation")))
-    .map(([v, name]) => ({ v, name }))
-    .concat(jsRoutings(own).filter(([v]) => !KEY_ROUTINGS.some(([id]) => id === v)).map(([v, name]) => ({ v, name, literalName: true })));
-  const cur = opts.find((o) => o.v === own) || opts[0];
   const word = (o) => o.literalName ? o.name : t(o.name);
   const b = el("button", "amodels key-routing" + (own ? " set" : ""));
   b.type = "button";
-  b.textContent = own ? word(cur) : t("Group routing");
+  const builtin = KEY_ROUTINGS.find(([id]) => id === own);
+  b.textContent = own ? (builtin ? t(builtin[1]) : own) : t("Group routing");
   b.title = t(own ? "Routing groups this key asks for route its requests this way, not by their own" : "Routing groups route this key's requests by their own routing");
   b.setAttribute("aria-label", t("Group routing"));
   b.setAttribute("aria-haspopup", "menu");
@@ -1087,8 +1084,9 @@ function gatewayRoutingBadge(k) {
   b.onclick = (e) => {
     e.stopPropagation();
     if (b.classList.contains("open")) return closeProtoMenu();
-    openProtoMenu(b, opts, cur.v, async (v) => {
-      if (v === cur.v) return;
+    const opts = routeChoices(KEY_ROUTINGS, own).map(([v, name]) => ({ v, name, literalName: v === name }));
+    openProtoMenu(b, opts, own, async (v) => {
+      if (v === own) return;
       const out = await gatewayKeyAction("routing-key", { key: k.id, routing: v });
       if (out) status(t("{who}: group routing {routing}", { who: k.name, routing: word(opts.find((o) => o.v === v)) }), "ok");
     }, "Group routing", "sess-menu");

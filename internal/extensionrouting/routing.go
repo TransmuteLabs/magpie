@@ -13,21 +13,20 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func Lookup(manager func() *extension.Manager) routes.Lookup {
-	return routes.Lookup{
+func Source(manager *extension.Manager) routes.Source {
+	return routes.Source{
 		Find: func(name string) (routes.Strategy, bool) {
-			owner := manager()
-			binding, found := owner.RoutingStrategy(name)
+			binding, found := manager.RoutingStrategy(name)
 			if !found {
 				return routes.Strategy{}, false
 			}
-			return Strategy(owner, binding), true
+			return Strategy(manager, binding), true
 		},
-		List: func() []routes.DiscoveredRouting {
-			bindings := manager().RoutingStrategies()
-			out := make([]routes.DiscoveredRouting, len(bindings))
+		List: func() []routes.Option {
+			bindings := manager.RoutingStrategies()
+			out := make([]routes.Option, len(bindings))
 			for index, binding := range bindings {
-				out[index] = routes.DiscoveredRouting{
+				out[index] = routes.Option{
 					ID:   binding.Module + "/" + binding.Descriptor.ID,
 					Name: binding.Descriptor.Name, Plugin: binding.Module,
 				}

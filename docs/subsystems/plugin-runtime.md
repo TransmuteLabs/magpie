@@ -76,11 +76,11 @@ the host's reconciliation. Disabling a feature, shutting down, or failing
 partway through activation runs those callbacks once in reverse order.
 Gateway, Library, Routing, Sessions, Usage and Masking also declare their pages.
 Observability declares its Settings section. Groups, Rotation and Warm-up
-declare their inline parts. Rotation also declares its strategies through
-`FeatureContribution.Routing`. The runtime validates and snapshots that map
-at registration and attaches each strategy to the existing routing owner
-for the feature's active lifetime. Disable or failed activation withdraws
-its entries and exposes any previous registrations. Smart remains the
+declare their inline parts. A feature can declare static strategies in
+`FeatureContribution.Routing`. Rotation uses `LinkedRoutingFeature` to bind
+named strategies to its runtime's state. The catalog validates the complete
+set before publishing it. Disable or failed activation withdraws its
+entries and exposes any previous registrations. Smart remains the
 default owned by the gateway. Gateway declares its ordered `callsPage` setting
 through the same contract. The Built-in rows declare `SettingsAt` with a
 tab and row ID, and `OpenPage` when the row links to an existing view.
@@ -269,17 +269,33 @@ plugin off the gateway does no observing work.
 The router strategy point says the order a pool of routes is tried in: a
 provider's accounts or keys, or the heads of a group's members. The gateway
 still lists the pool, and keeps rests, affinity, rules, pins and the walk
-over the order itself; a strategy only orders. Smart, the default, stays in
-the core. The seven other routings are the built-in plugin `rotation`'s.
+over the order itself; a strategy only orders. Every runtime's catalog
+starts with Smart. The linked `rotation` feature adds the other built-in
+strategies, and the legacy observer registers its strategies while serving.
+
+```mermaid
+flowchart LR
+    Linked["Linked features and legacy observer"] --> Catalog["Runtime routing catalog"]
+    Manager["Application's extension Manager"] --> Catalog
+    Catalog --> Gateway["Gateway planning and ordering"]
+    Catalog --> Pickers["GUI and TUI routing choices"]
+```
+
+The gateway binds the runtime catalog to its application manager at
+construction. Direct registrations take precedence. Installed strategies
+are discovered from that manager's current metadata and acquire a checked
+lease when they order a pool. The GUI reads the serving gateway's catalog
+when it has one. The TUI can also select a built-in Rotation strategy before
+it is enabled because saving it makes the feature `InUse`.
 
 | Part | What it does | Source |
 | --- | --- | --- |
 | `routes.Strategy` | `Order(pool, seats) []int`: a permutation of the seats' indexes. `pool` is a provider's id or `group/<id>`, for a strategy that keeps a round per pool. `Exact` keeps the order as given; otherwise a provider's API keys that fit the request better go first, each in its order. `ByUse` puts each seat's recent tokens in the trace; `ByFree` has the gateway fill `Seat.Free`, and `BySpeed` `Seat.TTFT` and `TPS` (its speed lately, gateway `speed.go`), each only for a strategy that asks. | [`routes.go`](../../internal/routes/routes.go) |
 | `routes.Seat` | What a strategy weighs, read by `weighRouted` under the routing state's lock: its rest key, whether it is an account, whether its allowance is known or it learns it as it answers, the share used, when its windows renew, its weekly pace, its key's weight, whether it rests now, its tokens of the last hours, a prepaid wallet's balance and the provider and unit it is in (`Left`, `LeftIn`, #3950), and, when the strategy asks, whether its model is free, whether its account's plan is free (`FreePlan`, `ByPlan`) and its ms to the first token and tokens a second lately. | [`routes.go`](../../internal/routes/routes.go), [`routing.go`](../../internal/gateway/routing.go) |
-| `Register`, `Find`, `Apply` | `Register(routing, s)` serves a routing until its remove; registering again stacks, and the last one serves. `Find("")` is `Smart` always. `Apply` fails open: a strategy that panics, or answers what isn't a permutation, leaves the pool in its listed order, logged. Every route is still tried. | [`routes.go`](../../internal/routes/routes.go) |
-| Strategies | `Smart` (core), and `Ordered`, `Rotate`, `LeastUsed`, `Pace`, `Weighted`, `FreeFirst`, `Fastest`, `Cheapest` (a group's only: `provider.normalize` drops `cheap` from a provider), `Drain`, `FreeExpiring` (a group's only too: free quota first, the soonest lost first, then the paid as `Smart` orders them) and `SmallFirst` (a group's only too, `fit`: Smart's order sorted by each seat's context window, `Seat.Window`, the smallest first, filled only for a strategy with `ByWindow`) in `routes.Builtin`. `Drain` remembers the seat each pool is on (`drains`). `Rotate` keeps a turn per pool and `Weighted` a smooth weighted round (`Round`, `MoveRound`), both moved out of the gateway, and `Fastest` a probe count per pool, so a seat not measured lately gets one request in `ProbeEvery`; `Forget` clears them, `Drain`'s too. | [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
+| `Catalog`, `Apply` | `RegisterLinked` publishes a validated set for a linked feature. `Register` serves a legacy strategy until its remove. Registrations of an ID stack, and the last one serves. `Find("")` is Smart. `Find` and `List` release the registration lock before asking the installed source. `Apply` keeps listed order when a strategy panics or returns an invalid permutation. | [`routes.go`](../../internal/routes/routes.go) |
+| Strategies | `RotationStrategies` binds the built-in orders to the catalog. Cheapest, Free quota by expiry and Small context first are group choices. The catalog owns each pool's In turn position, weighted round, Until used up seat and Speed first probe count. A weighted group passes one seat per member to the registered strategy and keeps the member's fallback order. | [`rotation.go`](../../internal/routes/rotation.go), [`strategies.go`](../../internal/routes/strategies.go), [`round.go`](../../internal/routes/round.go) |
 | Off | A routing no strategy serves is its listed order. `routingOf` in the gateway reads it as `order` wherever the core asks about a routing (a turn's mark, `sinks`, a rotate group's sessions, a group's heads), so nothing of the routing is left half on. | [`routing.go`](../../internal/gateway/routing.go) |
-| `plugins/rotation` | Requires `providers` and `gateway`, `Essential`. Apply registers every `routes.Builtin` and removes them when turned off. `InUse` counts the providers and groups providers.json routes by one of them (`provider.Routings`, the file alone, not the catalog); an unreadable providers.json is an error, so it stays on. The gateway's `KeepFresh` watches providers.json too, so a routing set from the CLI or the TUI turns it on within 2s. Off, the window's routing pickers (the provider editor, the Routing groups page's pools and groups) offer Smart alone: their options are marked `data-feature="rotation"` (`routingSegs`). | [`rotation.go`](../../plugins/rotation/rotation.go), [`provider.go`](../../internal/provider/provider.go), [`app.js`](../../internal/gui/assets/app.js) |
+| `plugins/rotation` | Requires `providers` and `gateway`, `Essential`. Activation registers the built-in orders in the runtime's catalog and disposal removes them. `InUse` counts saved provider and group selections via `provider.Routings`. An unreadable providers.json keeps the feature on. `KeepFresh` watches providers.json so a routing set in the CLI or TUI can activate Rotation. The GUI offers the catalog's serving choices that fit each editor and preserves the current saved selection. | [`rotation.go`](../../plugins/rotation/rotation.go), [`provider.go`](../../internal/provider/provider.go), [`app.js`](../../internal/gui/assets/app.js) |
 
 The user's own routing groups are the `groups` plugin's on this point. The
 groups magpie finds (a model two providers serve, `auto/<model>`) stay the
@@ -433,7 +449,7 @@ still means off; a page is its own plugin's to turn on and off.
 
 | Point | What a community plugin gives | Served by | Reference |
 | --- | --- | --- | --- |
-| Router strategy | A module's `export const strategies = {name: (pool, seats, options) => order}` (or `{order}` objects) are routings `<short name>/<name>`, registered with `routes.Register` while the gateway serves `middleware.Points()` and the plugin is on and loaded; off or reloaded, they are removed. 20ms each, fail open: an error, a timeout or what isn't an order of the seats is the listed order, counted on the Plugins page. The routing pickers offer the served ones (`jsRoutings` in the settings state); a routing saved whose plugin is gone shows as it is and is the listed order. providers.json keeps such a routing as saved (`provider.PluginRouting`), so a plugin turned off and on again routes its groups again. | `plugins/middleware` ("JS gateway plugins", from the same module as its [middleware](gateway-middleware.md)) | [`points.go`](../../internal/middleware/points.go), [`app.js`](../../internal/gui/assets/app.js), [`client.js`](../../internal/gui/assets/plugins/routing/client.js), [`groups_cli.go`](../../internal/cli/groups_cli.go), [`routing.go`](../../internal/provider/routing.go) |
+| Router strategy | A module's `export const strategies = {name: (pool, seats, options) => order}` (or `{order}` objects) gives routings `<short name>/<name>`. The gateway observer registers them in the runtime catalog while the plugin is enabled and loaded, and removes them on disable or reload. Errors, invalid orders and the 20 ms deadline leave listed order. Pickers read `routingOptions`. Settings also gives the namespaced choices as `jsRoutings` for compatibility. A saved route whose plugin is gone remains selected and uses listed order. | `plugins/middleware` ("JS gateway plugins", from the same module as its [middleware](gateway-middleware.md)) | [`points.go`](../../internal/middleware/points.go), [`app.js`](../../internal/gui/assets/app.js), [`client.js`](../../internal/gui/assets/plugins/routing/client.js), [`routing.go`](../../internal/provider/routing.go) |
 | Usage observer | `export function onUsage(row, options)` gets each usage row of an allow-list (no bodies, prompts or ids), from a bounded queue off the request path: a full queue drops and counts, and a request never waits. 250ms each, fail open. | `plugins/middleware` ("JS gateway plugins", from the same module as its [middleware](gateway-middleware.md)) | [`points.go`](../../internal/middleware/points.go) |
 | Search API | Its `search` hook's entries, each a web search API in Settings › Models › Web search (`<plugin>:<id>`), asked in the search APIs' order with a quarter of a search's time. An entry with a key, none (`keyOptional`) or the user's address (`url`), or one with `auth` naming a provider the plugin's own `auth` hook signs in to: it takes no key, asks that provider's accounts that are on in the order its model requests take them, and its `ctx.getAuth()` is the one account chosen, renewed first within the search's time; a refusal rests the account for search only. Off, no search asks it. | `plugins/search` (Web search, Essential) | [Plugin tools](plugin-tools.md) ("Search APIs from a plugin"), [provider plugins](provider-plugins.md) |
 | Tool | Its OpenCode `tool` hook's tools, offered to every agent by magpie's MCP server at `/mcp/magpie/tools`, each named `<plugin>_<tool>`, each call held to the calling key's limit and run in the host within 55s. Off, no tool is listed and a call says the plugin is off. | `plugins/tools` ("Plugin tools", Essential; `InUse` counts the plugins on that give tools, from `plugin-tools.json`), `gwtool.PluginTools` | [Plugin tools](plugin-tools.md) |

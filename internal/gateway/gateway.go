@@ -43,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/redact"
 	"github.com/yetone/magpie/internal/requestpolicy"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -565,9 +566,11 @@ type Call struct {
 
 // Server is the gateway.
 type Server struct {
-	client     *http.Client
-	protocols  *protocolext.Host
-	extensions *extension.Manager
+	client          *http.Client
+	protocols       *protocolext.Host
+	extensions      *extension.Manager
+	strategyCatalog *routes.Catalog
+	burst           burstSeats
 	// ending closes once the gateway stops serving, for a stream with no
 	// end of its own (routeEvents) to end before Shutdown, which would
 	// wait its whole drain for it (streamsEnding)
@@ -689,8 +692,13 @@ type Server struct {
 	thoughtClean map[string]int
 }
 
-// New makes a gateway.
+// New makes a gateway with the application's extension manager and routing
+// registrations. The process owns the manager across listener restarts.
 func New() *Server {
+	return newServer(extension.Default(), pluginrt.ProcessRuntime().RoutingCatalog())
+}
+
+func newServer(manager *extension.Manager, strategies *routes.Catalog) *Server {
 	redact.SetKeyPath(filepath.Join(settings.Dir(), "redact.key"))
 	s := &Server{
 		// a request counted against a MaxRPM waits for room in its minute
@@ -698,13 +706,14 @@ func New() *Server {
 		// (netproxy.HTTP1, which provider/codex_http1.go sets); a vendor's
 		// redirect is followed to its own origin only, so its key goes
 		// nowhere else (provider.KeepsCredentials)
-		client:        &http.Client{Transport: rpmTransport{upstreamTransport()}, CheckRedirect: provider.KeepsCredentials},
-		extensions:    extension.Default(),
-		unfit:         make(map[string]bool),
-		subscription:  newSubscriptionBridge(),
-		sessionsSaved: make(chan struct{}),
-		debug:         os.Getenv("MAGPIE_DEBUG") != "",
-		sightFile:     sightsPath(),
+		client:          &http.Client{Transport: rpmTransport{upstreamTransport()}, CheckRedirect: provider.KeepsCredentials},
+		extensions:      manager,
+		strategyCatalog: routingWithExtensions(strategies, manager),
+		unfit:           make(map[string]bool),
+		subscription:    newSubscriptionBridge(),
+		sessionsSaved:   make(chan struct{}),
+		debug:           os.Getenv("MAGPIE_DEBUG") != "",
+		sightFile:       sightsPath(),
 	}
 	s.loadSights()
 	return s
@@ -901,13 +910,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 		}
 		return err
-	}
-	if s.extensions != nil {
-		defer func() {
-			drain, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.extensions.Close(drain)
-		}()
 	}
 	ClearHeld()
 	s.lnMu.Lock()
@@ -3378,16 +3380,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// a conversation's affinity is to one model: another's cache is its
 	// own, and an agent's side requests (a title, a summary) to a smaller
 	// model leave the conversation where it is
-	scope, mode, rotate := p.ID+"/"+model, p.Affinity, routingOf(p.Routing) == provider.Rotate
-	spread := spreadsSessions(mode, p.Routing)
+	scope, mode := p.ID+"/"+model, p.Affinity
+	effectiveRouting := s.routingOf(p.Routing)
 	leadScope := scope // where the lead of a subagent is kept
 	if isGroup {
 		// a routing group: every member's keys or accounts weighed together
 		cands, pl = s.planGroup(g, ms, from)
-		group = groupRef(g, ms)
+		group = s.groupRef(g, ms)
 		group.Paused = paused
-		scope, mode, rotate = provider.GroupPrefix+g.ID, g.Affinity, routingOf(g.Routing) == provider.Rotate
-		spread = spreadsSessions(mode, g.Routing)
+		scope, mode = provider.GroupPrefix+g.ID, g.Affinity
+		effectiveRouting = s.routingOf(g.Routing)
 		leadScope = scope
 		if words != "" {
 			// a subagent a rule sends elsewhere mustn't take its agent's
@@ -3624,11 +3626,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// (#63): its reasoning, sealed by the account that wrote it, is refused
 	// by another.
 	before := len(cands)
-	inOrder := routingOf(p.Routing) == provider.Ordered
-	if isGroup {
-		inOrder = routingOf(g.Routing) == provider.Ordered
-	}
-	cands, pl, aff, stuck := affine(scope, mode, rotate, spread, inOrder, hit != nil && hit.Ended > 0, r.Header, from, body, plain, cands, pl)
+	inOrder := effectiveRouting == provider.Ordered
+	rotate, spread := effectiveRouting == provider.Rotate, spreadsSessions(mode, effectiveRouting)
+	cands, pl, aff, stuck := s.affine(scope, mode, rotate, spread, inOrder, hit != nil && hit.Ended > 0, r.Header, from, body, plain, cands, pl)
 	// a strict conversation left with its own account of several: its
 	// failure rests the account as it would with the others still there,
 	// for new conversations to go elsewhere meanwhile (#1797)
@@ -3789,7 +3789,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	}
 	leastHeldIt := aff.Why == "first" && (rotate || spread)
 	reorder := !aff.Kept && aff.Why != "strict" && pin == "" && leadAccount == "" && checkpoint == nil && !leastHeldIt
-	cands, pl, unburst := burstSpread(poolRouting, poolGroup, hit != nil && hit.Use != "", reorder, cands, pl)
+	cands, pl, unburst := s.burstSpread(poolRouting, poolGroup, hit != nil && hit.Use != "", reorder, cands, pl)
 	defer unburst()
 	// of those resting, only the one back soonest is asked (#1799); the
 	// whole list still finds a Codex account to spend a reset on
@@ -4198,7 +4198,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				nearDone()
 				nearDone = nil
 				c.capped = h
-				ws := barredOf([]candidate{c}, c.p, false, from, nil)
+				ws := s.barredOf([]candidate{c}, c.p, false, from, nil)
 				msg, back := cappedError(call.Model, ws, time.Now())
 				skipped = append(skipped, c.label()+": "+msg)
 				if i < len(cands)-1 {

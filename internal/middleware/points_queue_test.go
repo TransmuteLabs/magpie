@@ -3,13 +3,15 @@ package middleware
 import (
 	"reflect"
 	"testing"
+
+	"github.com/yetone/magpie/internal/routes"
 )
 
 // The onUsage queue is made when the gateway starts, for every user, with
 // or without a module that has onUsage: its slots stay small (a 1024-row
 // queue of whole Records held ~1 MB from the start).
 func TestOnUsageQueueIsSmall(t *testing.T) {
-	o := Points().(*observer)
+	o := Points(routes.NewCatalog()).(*observer)
 	stop := o.Serve()
 	defer stop()
 	o.mu.Lock()

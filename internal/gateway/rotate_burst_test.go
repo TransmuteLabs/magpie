@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // held answers once `want` requests are in at once (or after a while), so
@@ -54,7 +53,7 @@ func TestRotateSpreadsABurstOfNewConversations(t *testing.T) {
 	if err := provider.SetRouting("ag", provider.Rotate); err != nil {
 		t.Fatal(err)
 	}
-	routes.Forget("ag")
+	rotation.RoutingCatalog().Forget("ag")
 	s := New()
 	// a conversation from before, answered and held on one key
 	if code, out := postAs(t, s, "", `{"model":"ag/m1","messages":[{"role":"user","content":"earlier"}]}`); code != 200 {

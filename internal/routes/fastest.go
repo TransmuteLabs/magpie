@@ -1,9 +1,6 @@
 package routes
 
-import (
-	"sort"
-	"sync"
-)
+import "sort"
 
 // Speed first: of the same model on several providers, or of a
 // provider's keys, the one that has answered fastest lately goes first
@@ -51,13 +48,8 @@ type probe struct {
 	turns int // probes given: whose turn the next is
 }
 
-var probes = struct {
-	sync.Mutex
-	m map[string]probe // pool → its probes
-}{m: map[string]probe{}}
-
 // Fastest orders a pool by speed lately, as above.
-var Fastest = Strategy{BySpeed: true, Order: func(pool string, seats []Seat) []int {
+func (c *Catalog) fastest(pool string, seats []Seat) []int {
 	var fast, unmeasured, resting, spent []int
 	for i, s := range seats {
 		switch {
@@ -110,19 +102,20 @@ var Fastest = Strategy{BySpeed: true, Order: func(pool string, seats []Seat) []i
 	})
 	awake := append(fast, unmeasured...)
 	if len(fast) > 0 && len(unmeasured) > 0 {
-		probes.Lock()
-		p := probes.m[pool]
+		state := &c.registered.rotation
+		state.Lock()
+		p := state.probes[pool]
 		p.n++
 		if p.n >= ProbeEvery {
 			k := unmeasured[p.turns%len(unmeasured)]
 			p.n, p.turns = 0, p.turns+1
 			awake = append([]int{k}, deleted(awake, k)...)
 		}
-		probes.m[pool] = p
-		probes.Unlock()
+		state.probes[pool] = p
+		state.Unlock()
 	}
 	return append(append(awake, resting...), spent...)
-}}
+}
 
 // Estimate is the ms to a reply of RefTokens at ttft and tps; a tps of 0
 // counts as mid, and with mid 0 too the first token alone counts.

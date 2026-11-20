@@ -52,9 +52,12 @@ func TestFastestOrdersBySpeedLately(t *testing.T) {
 			want:  []int{0, 1, 2},
 		},
 	}
+	catalog := NewCatalog()
+	t.Cleanup(catalog.ServeRotation())
+	fastest, _ := catalog.Find("fast")
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := Fastest.Order("order:"+c.name, c.seats)
+			got := fastest.Order("order:"+c.name, c.seats)
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
@@ -66,11 +69,14 @@ func TestFastestOrdersBySpeedLately(t *testing.T) {
 // request in ProbeEvery puts it first, so its answer measures it, and the
 // turn goes round those not measured.
 func TestFastestGivesTheUnmeasuredATurn(t *testing.T) {
+	catalog := NewCatalog()
+	t.Cleanup(catalog.ServeRotation())
+	fastest, _ := catalog.Find("fast")
 	seats := []Seat{{Key: "a", TTFT: 500}, {Key: "b"}, {Key: "c"}}
 	firsts := map[int]int{}
 	var probesAt []int
 	for n := 1; n <= 4*ProbeEvery; n++ {
-		got := Fastest.Order("probe-pool", seats)
+		got := fastest.Order("probe-pool", seats)
 		if len(got) != 3 {
 			t.Fatalf("request %d: %v", n, got)
 		}
@@ -86,20 +92,22 @@ func TestFastestGivesTheUnmeasuredATurn(t *testing.T) {
 		t.Fatalf("the probe's turn didn't go round b and c: %v", firsts)
 	}
 	// another pool counts its own requests
-	if got := Fastest.Order("probe-other", seats); got[0] != 0 {
+	if got := fastest.Order("probe-other", seats); got[0] != 0 {
 		t.Fatalf("a fresh pool probed on its first request: %v", got)
 	}
 	// a resting seat never gets a probe's turn
 	rest := []Seat{{Key: "a", TTFT: 500}, {Key: "b", Resting: true}}
 	for n := 0; n < 2*ProbeEvery; n++ {
-		if got := Fastest.Order("probe-rest", rest); got[0] != 0 {
+		if got := fastest.Order("probe-rest", rest); got[0] != 0 {
 			t.Fatalf("request %d put the resting seat first: %v", n, got)
 		}
 	}
 }
 
 func TestFastestIsBuiltinFast(t *testing.T) {
-	st, ok := Builtin["fast"]
+	catalog := NewCatalog()
+	t.Cleanup(catalog.ServeRotation())
+	st, ok := catalog.Find("fast")
 	if !ok || !st.BySpeed || st.Exact {
 		t.Fatalf("fast: %+v %v", st, ok)
 	}

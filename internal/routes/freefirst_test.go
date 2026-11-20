@@ -57,23 +57,29 @@ func TestFreeFirstIsByFree(t *testing.T) {
 	if !FreeFirst.ByFree || !FreeExpiring.ByFree {
 		t.Fatal("FreeFirst or FreeExpiring doesn't ask the gateway for Free")
 	}
-	for name, s := range Builtin {
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	for _, option := range RotationOptions() {
+		name := option.ID
 		if name == "free" || name == "expiring" {
 			continue
 		}
+		s, _ := catalog.Find(name)
 		if s.ByFree {
 			t.Fatalf("%s weighs by Free too, and would read every model list", name)
 		}
 	}
 }
 
-// The routing a provider or group is saved with is the one routes.Find
-// knows: "free" is in Builtin, so plugins/rotation serves it and a saved
+// The routing a provider or group is saved with is the one Catalog.Find
+// knows: plugins/rotation serves "free" and a saved
 // one isn't read as an unknown routing (tried in its listed order).
 func TestFreeFirstIsABuiltin(t *testing.T) {
-	s, ok := Builtin["free"]
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	s, ok := catalog.Find("free")
 	if !ok {
-		t.Fatal("\"free\" is not among Builtin")
+		t.Fatal("\"free\" is not registered by Rotation")
 	}
 	if s.Order == nil {
 		t.Fatal("\"free\" has no order")

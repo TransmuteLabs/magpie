@@ -221,7 +221,7 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 	// member asked a try of its one route (sideRoute)
 	var grp *GroupRef
 	if isGroup {
-		grp = groupRef(g, ms)
+		grp = s.groupRef(g, ms)
 	}
 	side := s.beginSide(r, start, asked, tries[0].p.ID, grp)
 	// unless every try is on this machine or the local network, set

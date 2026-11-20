@@ -92,13 +92,16 @@ func WithAccountTaskAdmission(ctx context.Context, caller string, admit AccountT
 }
 
 func (manager *Manager) BeginAccountTasks(ctx context.Context) (*AccountTasks, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	if manager.closed || manager.accountTasks != nil {
-		return nil, errors.New("account tasks require an unowned live gateway")
+	if manager.closed {
+		return nil, errors.New("account tasks require a live manager")
+	}
+	if previous := manager.accountTasks; previous != nil {
+		return nil, listenerOwnerConflict(previous.ctx, previous.done)
 	}
 	manager.startLifecycleLocked()
 	lifetime, cancel := context.WithCancel(ctx)

@@ -10,7 +10,6 @@ import (
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
-	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 	"github.com/yetone/magpie/internal/usage"
@@ -97,19 +96,20 @@ func TestOnServesStrategies(t *testing.T) {
 	defer stop()
 	rt := pluginrt.New([]pluginrt.Manifest{manifest(t)})
 	defer rt.Stop()
-	if routes.Served("a/x") {
+	catalog := rt.RoutingCatalog()
+	if catalog.Served("a/x") {
 		t.Fatal("served before the plugin is on")
 	}
 	rt.Reconcile(map[string]bool{"middleware": true}, nil)
-	if !routes.Served("a/x") || len(usage.Observers()) != 1 {
-		t.Fatalf("on: served %v, observers %d", routes.Served("a/x"), len(usage.Observers()))
+	if !catalog.Served("a/x") || len(usage.Observers()) != 1 {
+		t.Fatalf("on: served %v, observers %d", catalog.Served("a/x"), len(usage.Observers()))
 	}
 	rt.Reconcile(map[string]bool{"middleware": false}, nil)
-	if routes.Served("a/x") || len(usage.Observers()) != 0 {
+	if catalog.Served("a/x") || len(usage.Observers()) != 0 {
 		t.Fatal("off: still served")
 	}
 	rt.Reconcile(map[string]bool{"middleware": true}, nil)
-	if !routes.Served("a/x") {
+	if !catalog.Served("a/x") {
 		t.Fatal("on again: not served")
 	}
 }

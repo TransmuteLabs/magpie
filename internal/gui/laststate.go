@@ -83,6 +83,7 @@ func keptFile(s stateJSON) stateFile {
 	// kept as it is sent, each option list once
 	s = shareOptions(s)
 	s.Settings = settings.Settings{}
+	s.RoutingOptions = nil
 	// and what is told once: a notice, a file recovered after a crash
 	s.Notice, s.Connected, s.Recovered = "", nil, nil
 	// and the magpie serving the gateway now, which the next start asks
@@ -131,6 +132,7 @@ func lastKnown() (stateJSON, bool) {
 		return stateJSON{}, false
 	}
 	f.State.Settings = stateSettings(settings.Load())
+	f.State.RoutingOptions = routingOptions()
 	f.State.Last = true
 	return f.State, true
 }

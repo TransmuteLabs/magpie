@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -21,9 +22,10 @@ import (
 // models they can be made of, and each provider with several keys or
 // accounts on — which any of its models routes over already.
 type groupsJSON struct {
-	Groups []groupJSON `json:"groups"`
-	Models []modelRef  `json:"models"`
-	Pools  []poolJSON  `json:"pools"`
+	Groups         []groupJSON     `json:"groups"`
+	Models         []modelRef      `json:"models"`
+	Pools          []poolJSON      `json:"pools"`
+	RoutingOptions []routes.Option `json:"routingOptions"`
 	// Deciders: the decision providers' models (Jev), which may only be a
 	// group's classifier
 	Deciders []modelRef `json:"deciders"`
@@ -355,7 +357,7 @@ func groupAccounts(gs []provider.Group) map[string][]keyModelJSON {
 func groupsState() groupsJSON {
 	_, offset := time.Now().Zone()
 	out := groupsJSON{Groups: []groupJSON{}, Models: []modelRef{}, Pools: []poolJSON{}, Deciders: []modelRef{}, Drawers: []modelRef{}, Found: provider.AutoGroupsOn(), Templates: provider.Templates(),
-		Clock: clockJSON{Zone: provider.LocalZone(), Offset: offset}}
+		Clock: clockJSON{Zone: provider.LocalZone(), Offset: offset}, RoutingOptions: routingOptions()}
 	def := settings.Load()
 	out.Defaults = groupDefaultsJSON{Sink: def.GroupSink, FirstToken: def.GroupFirstToken, Patience: def.GroupPatience}
 	for i := range out.Templates {

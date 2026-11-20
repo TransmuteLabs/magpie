@@ -49,6 +49,7 @@ func keepProviders(s providersJSON) {
 
 // keptProviders is what keepProviders keeps of s.
 func keptProviders(s providersJSON) providersFile {
+	s.RoutingOptions = nil
 	s.Gateway.Calls, s.Gateway.Lanes = nil, nil
 	s.Moved, s.Added, s.Had, s.Removed, s.Fetching = nil, 0, 0, 0, false
 	ps := make([]providerJSON, len(s.Providers))

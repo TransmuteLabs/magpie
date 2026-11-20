@@ -89,10 +89,9 @@ gets module scope only. API 1.4 read authority refuses persistent
 
 ## Host boundary and lifecycle
 
-[`routes.Find`](../../internal/routes/routes.go) tries lazy lookup only
-after its registered lookup misses, with the registry lock released.
-[`middleware.Routings`](../../internal/middleware/points.go) appends current
-SDK metadata to the existing selector's entries.
+[`routes.Catalog`](../../internal/routes/routes.go) tries lazy lookup after
+its registered lookup misses, with the registry lock released. The same
+catalog lists built-in, legacy and installed strategies for the selectors.
 
 The package boundary avoids an existing dependency cycle:
 
@@ -100,8 +99,9 @@ The package boundary avoids an existing dependency cycle:
   catalog bindings, selected revision acquisition, RPC and result validation.
 - [`extensionrouting`](../../internal/extensionrouting/routing.go) projects
   core seats and adapts a binding to `routes.Strategy`.
-- [`gateway`](../../internal/gateway/extension_routing.go) registers lazy
-  function pointers. Registration performs no catalog read or worker startup.
+- [`gateway`](../../internal/gateway/extension_routing.go) binds the source
+  to the manager selected at construction. The binding performs no catalog
+  read or worker startup.
 
 Metadata reads reflect the current enabled catalog. Pure discovery, List
 and synctest do not start workers, lifecycle channels, timers or warmers.

@@ -9,17 +9,17 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// inFlight counts, for each key or account (candidate.who), the requests
+// burstSeats counts, for each key or account (candidate.who), the requests
 // routed to it that haven't ended. Routing weighs what each has served
 // (Tokens) and its allowance, both of which move only once a reply ends,
 // and a key's lane counts a request only once its try begins: requests
 // that came together were all planned on the same figures and all went to
 // the one first (#5242, Moody-Sin and Tericerice: four at once to one of
 // three Antigravity accounts, In turn and By pace alike).
-var inFlight = struct {
+type burstSeats struct {
 	sync.Mutex
 	m map[string]int
-}{m: map[string]int{}}
+}
 
 // burstSpread puts first, of those alike to cs[0] under routing (burstAlike),
 // the one with the fewest requests in flight, the order kept between those
@@ -29,23 +29,40 @@ var inFlight = struct {
 // the request ends. reorder false counts it where it is: a conversation
 // kept on its account, a request pinned to one, a new conversation that
 // leastHeld spread. sameMember keeps a group's rule's member first.
-func burstSpread(routing string, g *provider.Group, sameMember, reorder bool, cs []candidate, pl planned) ([]candidate, planned, func()) {
+func (s *Server) burstSpread(routing string, g *provider.Group, sameMember, reorder bool, cs []candidate, pl planned) ([]candidate, planned, func()) {
 	if len(cs) == 0 {
 		return cs, pl, func() {}
 	}
-	inFlight.Lock()
-	defer inFlight.Unlock()
-	if reorder && len(cs) > 1 && len(pl.order) >= len(cs) {
+	reorder = reorder && len(cs) > 1 && len(pl.order) >= len(cs)
+	own := routing
+	if reorder {
+		effective := func(id string) string {
+			switch id {
+			case provider.Rotate, provider.Pace, provider.LeastUsed:
+				return s.routingOf(id)
+			default:
+				return id
+			}
+		}
+		routing = effective(routing)
+		if g != nil {
+			own = effective(cs[0].p.Routing)
+		}
+	}
+	counts := &s.burst
+	counts.Lock()
+	defer counts.Unlock()
+	if reorder {
 		best := 0
 		for i := 1; i < len(cs); i++ {
-			if burstAlike(routing, g, sameMember, cs, pl.order, i) && inFlight.m[cs[i].who()] < inFlight.m[cs[best].who()] {
+			if burstAlike(routing, own, g, sameMember, cs, pl.order, i) && counts.m[cs[i].who()] < counts.m[cs[best].who()] {
 				best = i
 			}
 		}
 		if best > 0 {
 			cs = append(append([]candidate{cs[best]}, cs[:best]...), cs[best+1:]...)
 			pl.order = append(append([]Weighed{pl.order[best]}, pl.order[:best]...), pl.order[best+1:]...)
-			if routingOf(routing) == provider.Rotate {
+			if routing == provider.Rotate {
 				for j := range pl.order {
 					pl.order[j].Turn = j == 0
 				}
@@ -53,15 +70,18 @@ func burstSpread(routing string, g *provider.Group, sameMember, reorder bool, cs
 		}
 	}
 	who := cs[0].who()
-	inFlight.m[who]++
+	if counts.m == nil {
+		counts.m = make(map[string]int)
+	}
+	counts.m[who]++
 	var once sync.Once
 	return cs, pl, func() {
 		once.Do(func() {
-			inFlight.Lock()
-			if inFlight.m[who]--; inFlight.m[who] <= 0 {
-				delete(inFlight.m, who)
+			counts.Lock()
+			if counts.m[who]--; counts.m[who] <= 0 {
+				delete(counts.m, who)
 			}
-			inFlight.Unlock()
+			counts.Unlock()
 		})
 	}
 }
@@ -76,7 +96,7 @@ func burstSpread(routing string, g *provider.Group, sameMember, reorder bool, cs
 // group, one of a provider routed its own way is alike only to its own
 // provider's, by its provider's routing; a group in the group keeps its
 // own order.
-func burstAlike(routing string, g *provider.Group, sameMember bool, cs []candidate, order []Weighed, i int) bool {
+func burstAlike(routing, own string, g *provider.Group, sameMember bool, cs []candidate, order []Weighed, i int) bool {
 	a, b := order[0], order[i]
 	c0, ci := cs[0], cs[i]
 	if a.Rest != nil || a.Aside || a.Reserve > 0 || c0.capped != nil || ci.capped != nil {
@@ -99,10 +119,10 @@ func burstAlike(routing string, g *provider.Group, sameMember bool, cs []candida
 			if c0.p.ID != ci.p.ID {
 				return false
 			}
-			routing = c0.p.Routing
+			routing = own
 		}
 	}
-	switch routingOf(routing) {
+	switch routing {
 	case provider.Rotate:
 		return true
 	case provider.Pace:

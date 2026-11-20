@@ -176,6 +176,75 @@ func TestExtensionGatewayActivationFollowsActualListener(t *testing.T) {
 	}
 }
 
+func TestExtensionGatewayReacquiresActivationAfterDrain(t *testing.T) {
+	manager, trace, _ := activationFixture(t)
+	server := New()
+	t.Cleanup(server.idle.stop)
+	stop, done := serveKeepAliveGateway(t, server)
+	activationEvents(t, trace, 1)
+	held, err := manager.Acquire(t.Context(), "activation.fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("listener shutdown waited for the independent lease")
+	}
+
+	checkHTTP := func(listener *Server) {
+		t.Helper()
+		waitFor(t, "replacement gateway listener", func() bool { return listener.Addr() != "" })
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.Addr()+"/v1/models", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("HTTP unavailable during extension drain: %d", response.StatusCode)
+		}
+	}
+
+	canceled := New()
+	t.Cleanup(canceled.idle.stop)
+	stopCanceled, canceledDone := serveKeepAliveGateway(t, canceled)
+	checkHTTP(canceled)
+	stopCanceled()
+	select {
+	case err := <-canceledDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("canceled successor kept waiting for the previous activation")
+	}
+
+	replacement := New()
+	t.Cleanup(replacement.idle.stop)
+	serveKeepAliveGateway(t, replacement)
+	checkHTTP(replacement)
+	held.Close()
+
+	events := activationEvents(t, trace, 3)
+	lines := strings.Split(strings.TrimSpace(events), "\n")
+	if !strings.Contains(lines[0], `"event":"start"`) || !strings.Contains(lines[1], `"event":"stop"`) ||
+		!strings.Contains(lines[2], `"event":"start"`) {
+		t.Fatalf("replacement did not activate after the predecessor stopped: %s", events)
+	}
+}
+
 func TestExtensionGatewayActivationFailureKeepsOrdinaryHTTP(t *testing.T) {
 	manager, trace, _ := activationFixture(t)
 	config, err := manager.ModuleConfig(t.Context(), "activation.fixture")

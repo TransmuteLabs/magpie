@@ -18,7 +18,6 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/extension"
-	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -82,6 +81,36 @@ func configureSDKRouting(test *testing.T, manager *extension.Manager, options ma
 	}
 }
 
+func sdkRoutingRequest(ctx context.Context, server *Server, model string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hello"}]}`))
+	request.RemoteAddr = "127.0.0.1:12345"
+	server.Front().ServeHTTP(recorder, request)
+	return recorder
+}
+
+func expectSDKRoutingReply(test *testing.T, recorder *httptest.ResponseRecorder, want string) {
+	test.Helper()
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"content":"from `+want+`"`) {
+		test.Fatalf("ordinary inference: %d %s, wanted %s", recorder.Code, recorder.Body.String(), want)
+	}
+}
+
+func TestExplicitProtocolGatewayDoesNotUseDefaultRouting(test *testing.T) {
+	fresh(test)
+	manager := extension.Default()
+	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
+	installSDKRouting(test, manager, "1.0.0", 2000, true)
+	upstream := serveOn(test, "relay", "key-a", []string{"m"}, &keyed{}, "key-b")
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: upstream.URL + "/v1",
+		Models: []string{"m"}, Key: "key-a", Keys: []provider.KeyAccount{{Key: "key-b"}}, Routing: "routing.fixture/reverse"}); err != nil {
+		test.Fatal(err)
+	}
+	expectSDKRoutingReply(test, sdkRoutingRequest(test.Context(), New(), "relay/m"), "key-b")
+	expectSDKRoutingReply(test, sdkRoutingRequest(test.Context(), protocolServer(test), "relay/m"), "key-a")
+}
+
 func TestSDKRoutingOrdersOrdinaryProviderAndGroup(test *testing.T) {
 	test.Run("legacy", func(test *testing.T) { sdkRoutingOrdersOrdinaryProviderAndGroup(test, false) })
 	test.Run("registry", func(test *testing.T) { sdkRoutingOrdersOrdinaryProviderAndGroup(test, true) })
@@ -90,9 +119,25 @@ func TestSDKRoutingOrdersOrdinaryProviderAndGroup(test *testing.T) {
 func sdkRoutingOrdersOrdinaryProviderAndGroup(test *testing.T, registry bool) {
 	fresh(test)
 	test.Setenv("MAGPIE_BUN", filepath.Join(test.TempDir(), "absent"))
-	manager := extension.Default()
-	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
-	installSDKRouting(test, manager, "1.0.0", 2000, registry)
+	const routing = "routing.fixture/reverse"
+	first := extension.NewManager(test.TempDir())
+	second := extension.NewManager(test.TempDir())
+	trace := filepath.Join(test.TempDir(), "rank.jsonl")
+	for index, manager := range []*extension.Manager{first, second} {
+		test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
+		installSDKRouting(test, manager, []string{"1.0.0", "2.0.0"}[index], 2000, registry)
+	}
+	configureSDKRouting(test, second, map[string]any{"trace": trace})
+	server := newServer(first, routes.NewCatalog())
+	listed := newServer(second, routes.NewCatalog())
+	hasRouting := func(server *Server) bool {
+		return slices.ContainsFunc(server.RoutingOptions(), func(option routes.Option) bool {
+			return option.ID == routing && option.Name == "Reverse fixture"
+		})
+	}
+	if !hasRouting(server) || !hasRouting(listed) || first.Running("routing.fixture") || second.Running("routing.fixture") {
+		test.Fatal("listing each gateway's catalog did not remain cold")
+	}
 	var lock sync.Mutex
 	var tried []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -115,7 +160,7 @@ func sdkRoutingOrdersOrdinaryProviderAndGroup(test *testing.T, registry bool) {
 	}))
 	defer upstream.Close()
 	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: upstream.URL + "/v1", Models: []string{"m"}, Key: "key-a",
-		Keys: []provider.KeyAccount{{Key: "key-b"}, {Key: "key-off", Off: true}}, Routing: "routing.fixture/reverse"}); err != nil {
+		Keys: []provider.KeyAccount{{Key: "key-b"}, {Key: "key-off", Off: true}}, Routing: routing}); err != nil {
 		test.Fatal(err)
 	}
 	for _, id := range []string{"first", "second"} {
@@ -124,31 +169,44 @@ func sdkRoutingOrdersOrdinaryProviderAndGroup(test *testing.T, registry bool) {
 		}
 	}
 	if err := provider.SaveGroup(provider.Group{ID: "sdk-pair", Name: "SDK Pair", Members: []string{"first/m", "second/m"},
-		Routing: "routing.fixture/reverse"}); err != nil {
+		Routing: routing}); err != nil {
 		test.Fatal(err)
 	}
-	if !slices.ContainsFunc(middleware.Routings(), func(item middleware.Routing) bool {
-		return item.ID == "routing.fixture/reverse"
-	}) || manager.Running("routing.fixture") {
-		test.Fatal("metadata discovery did not remain cold")
+	if err := provider.SaveGroup(provider.Group{ID: "sdk-nested", Name: "SDK Nested", Members: []string{"group/sdk-pair"},
+		Routing: provider.Ordered}); err != nil {
+		test.Fatal(err)
 	}
-	server := New()
-	ask := func(model, want string) {
+	ask := func(server *Server, model, want string) {
 		test.Helper()
 		forgetRouting()
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-			strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hello"}]}`))
-		request.RemoteAddr = "127.0.0.1:12345"
-		server.Front().ServeHTTP(recorder, request)
-		if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"content":"from `+want+`"`) {
-			test.Fatalf("ordinary %s: %d %s, wanted %s", model, recorder.Code, recorder.Body.String(), want)
+		expectSDKRoutingReply(test, sdkRoutingRequest(test.Context(), server, model), want)
+	}
+	ask(server, "relay/m", "key-b")
+	ask(server, "group/sdk-pair", "second")
+	ask(server, "group/sdk-nested", "second")
+	ask(listed, "relay/m", "key-a")
+	ask(listed, "group/sdk-nested", "first")
+	checkTrace := func(minimum int) {
+		test.Helper()
+		raw, err := os.ReadFile(trace)
+		if err != nil {
+			test.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(lines) < minimum {
+			test.Fatalf("second gateway did not order its pools: %s", raw)
+		}
+		for _, line := range lines {
+			var event struct{ Version string }
+			if err := json.Unmarshal([]byte(line), &event); err != nil || event.Version != "2.0.0" {
+				test.Fatalf("second gateway invoked a different worker: %q (%v)", line, err)
+			}
 		}
 	}
-	ask("relay/m", "key-b")
-	ask("group/sdk-pair", "second")
+	checkTrace(2)
+	wantAttempts := []string{"key-b", "second", "second", "key-a", "first"}
 	lock.Lock()
-	if !slices.Equal(tried, []string{"key-b", "second"}) {
+	if !slices.Equal(tried, wantAttempts) {
 		test.Errorf("strategy added or skipped inference attempts: %v", tried)
 	}
 	lock.Unlock()
@@ -166,30 +224,82 @@ func sdkRoutingOrdersOrdinaryProviderAndGroup(test *testing.T, registry bool) {
 		test.Fatalf("strategy bypassed gateway model hold: %d %s", recorder.Code, recorder.Body.String())
 	}
 	lock.Lock()
-	if len(tried) != 2 {
+	if len(tried) != len(wantAttempts) {
 		test.Errorf("denied call reached inference: %v", tried)
 	}
 	lock.Unlock()
 
 	for _, mode := range []string{"invalid", "error"} {
-		configureSDKRouting(test, manager, map[string]any{"mode": mode})
-		ask("relay/m", "key-a")
+		configureSDKRouting(test, first, map[string]any{"mode": mode})
+		ask(server, "relay/m", "key-a")
 	}
-	other := extension.NewManager(manager.Namespace())
-	defer closeSDKGatewayHook(test, other)
-	if err := other.SetEnabled(test.Context(), "routing.fixture", false); err != nil {
+	directory := test.TempDir()
+	started, release := filepath.Join(directory, "started"), filepath.Join(directory, "release")
+	configureSDKRouting(test, first, map[string]any{"mode": "hold", "started": started, "release": release})
+	forgetRouting()
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	requestCtx, cancel := context.WithCancel(test.Context())
+	go func() {
+		defer close(finished)
+		finished <- sdkRoutingRequest(requestCtx, server, "relay/m")
+	}()
+	defer func() { cancel(); <-finished }()
+	waitFor(test, "SDK routing reached rank", func() bool {
+		raw, _ := os.ReadFile(started)
+		return string(raw) == "ordering"
+	})
+	editor := extension.NewCatalog(first.Namespace())
+	if err := editor.SetEnabled(test.Context(), "routing.fixture", false); err != nil {
 		test.Fatal(err)
 	}
-	if routes.Served("routing.fixture/reverse") {
-		test.Fatal("disabled routing remained discoverable")
-	}
-	ask("relay/m", "key-a")
-	if err := other.SetEnabled(test.Context(), "routing.fixture", true); err != nil {
+	if err := os.WriteFile(release, nil, 0600); err != nil {
 		test.Fatal(err)
 	}
-	configureSDKRouting(test, other, map[string]any{})
-	installSDKRouting(test, other, "2.0.0", 2000, registry)
-	ask("relay/m", "key-a")
+	expectSDKRoutingReply(test, <-finished, "key-a")
+	if hasRouting(server) || !hasRouting(listed) {
+		test.Fatal("disabling one gateway's rule changed the wrong catalog")
+	}
+	ask(server, "relay/m", "key-a")
+	if err := editor.SetEnabled(test.Context(), "routing.fixture", true); err != nil {
+		test.Fatal(err)
+	}
+	configureSDKRouting(test, first, map[string]any{})
+	ask(server, "relay/m", "key-b")
+	installSDKRouting(test, first, "2.0.0", 2000, registry)
+	ask(server, "relay/m", "key-a")
+	closeSDKGatewayHook(test, first)
+	ask(listed, "group/sdk-nested", "first")
+	checkTrace(3)
+}
+
+func TestSDKRoutingSurvivesListenerRestart(test *testing.T) {
+	fresh(test)
+	manager := extension.Default()
+	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
+	installSDKRouting(test, manager, "1.0.0", 2000, true)
+	upstream := serveOn(test, "relay", "key-a", []string{"m"}, &keyed{}, "key-b")
+	if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: upstream.URL + "/v1", Models: []string{"m"},
+		Key: "key-a", Keys: []provider.KeyAccount{{Key: "key-b"}}, Routing: "routing.fixture/reverse"}); err != nil {
+		test.Fatal(err)
+	}
+	server := New()
+	cancel, done := serveKeepAliveGateway(test, server)
+	waitFor(test, "gateway listener", func() bool { return server.Addr() != "" })
+	expectSDKRoutingReply(test, sdkRoutingRequest(test.Context(), server, "relay/m"), "key-b")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			test.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		test.Fatal("gateway did not stop")
+	}
+	replacement := New()
+	if replacement.extensions != manager || !manager.Running("routing.fixture") {
+		test.Fatal("stopping the listener closed the application's routing manager")
+	}
+	expectSDKRoutingReply(test, sdkRoutingRequest(test.Context(), replacement, "relay/m"), "key-b")
 }
 
 func TestSDKRoutingTimeoutIncludesColdStartupAndFailsOpen(test *testing.T) {
@@ -198,7 +308,7 @@ func TestSDKRoutingTimeoutIncludesColdStartupAndFailsOpen(test *testing.T) {
 	test.Cleanup(func() { closeSDKGatewayHook(test, manager) })
 	installSDKRouting(test, manager, "1.0.0", 100, false)
 	configureSDKRouting(test, manager, map[string]any{"startupDelay": 30000})
-	strategy, found := routes.Find("routing.fixture/reverse")
+	strategy, found := New().routingCatalog().Find("routing.fixture/reverse")
 	if !found {
 		test.Fatal("routing descriptor unavailable")
 	}

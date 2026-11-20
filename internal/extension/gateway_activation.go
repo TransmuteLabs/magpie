@@ -20,14 +20,43 @@ type GatewayActivation struct {
 	failed      map[string]string
 }
 
+// ListenerOwnerDraining identifies a canceled listener that still holds an
+// SDK owner. A successor can wait for it outside the HTTP startup path.
+type ListenerOwnerDraining struct {
+	done <-chan struct{}
+}
+
+func (*ListenerOwnerDraining) Error() string { return "extension listener owner is draining" }
+
+func (drain *ListenerOwnerDraining) Wait(ctx context.Context) error {
+	select {
+	case <-drain.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func listenerOwnerConflict(ctx context.Context, done <-chan struct{}) error {
+	if ctx.Err() != nil {
+		return &ListenerOwnerDraining{done: done}
+	}
+	return errors.New("extension owner already has a live listener")
+}
+
 func (m *Manager) BeginGatewayActivation(ctx context.Context) (*GatewayActivation, error) {
+	m.mu.Lock()
 	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
 		return nil, err
 	}
-	m.mu.Lock()
-	if m.closed || m.gatewayActivation != nil {
+	if m.closed {
 		m.mu.Unlock()
-		return nil, errors.New("gateway activation needs an unowned live manager")
+		return nil, errors.New("gateway activation needs a live manager")
+	}
+	if previous := m.gatewayActivation; previous != nil {
+		m.mu.Unlock()
+		return nil, listenerOwnerConflict(previous.ctx, previous.done)
 	}
 	m.startLifecycleLocked()
 	lifetime, cancel := context.WithCancel(ctx)

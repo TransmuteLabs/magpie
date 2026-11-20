@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,6 +34,9 @@ func sdkGUIManifest(version string) sdk.Manifest {
 		Agents:        []sdk.AgentDescriptor{{ID: "gui-opencode-agent", Name: "Fixture OpenCode Agent"}},
 		Compatibility: &sdk.Compatibility{HostAPI: "^1", Platforms: []string{runtime.GOOS + "/" + runtime.GOARCH}},
 		Actions:       []sdk.ActionDescriptor{{ID: "config-fixture", InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "read"}},
+		RoutingStrategies: []sdk.RoutingStrategyDescriptor{{
+			ID: "reverse", Name: "Reverse", Action: "config-fixture", TimeoutMs: 100,
+		}},
 		Settings: []sdk.FeatureSetting{
 			{Name: "recordUsage", Title: "Record usage", Kind: sdk.FeatureSettingBoolean, Default: true},
 			{Name: "mode", Title: "Mode", Kind: sdk.FeatureSettingString, Default: "balanced", Enum: []any{"balanced", "fast"}},
@@ -205,6 +209,39 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 	if legacyAdd != "" || len(state.Plugins) != 1 {
 		t.Fatalf("SDK install reached legacy or omitted installed SDK row: %q %+v", legacyAdd, state.Plugins)
 	}
+	previousServer := served.Swap(nil)
+	t.Cleanup(func() { served.Store(previousServer) })
+	gui := Handler(nil, nil)
+	if response := postBuiltin(gui, `{"id":"middleware","on":false}`); response.Code != http.StatusOK {
+		t.Fatalf("turn off JS gateway middleware: %d %s", response.Code, response.Body)
+	}
+	type routingOption struct{ ID, Name, Plugin string }
+	want := routingOption{sdkGUIFixture + "/reverse", "Reverse", sdkGUIFixture}
+	checkRoutingOptions := func(active bool) {
+		t.Helper()
+		for _, endpoint := range []string{"/api/state", "/api/state?last=1", "/api/settings", "/api/providers", "/api/groups", "/api/caller-keys"} {
+			response := httptest.NewRecorder()
+			gui.ServeHTTP(response, httptest.NewRequest("GET", endpoint, nil).WithContext(t.Context()))
+			var data struct{ RoutingOptions, JSRoutings []routingOption }
+			if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil || response.Code != http.StatusOK {
+				t.Fatalf("%s: %v HTTP %d %s", endpoint, err, response.Code, response.Body)
+			}
+			if len(data.RoutingOptions) == 0 || data.RoutingOptions[0].ID != "" || slices.Contains(data.RoutingOptions, want) != active {
+				t.Fatalf("%s: active = %v, options = %+v", endpoint, active, data.RoutingOptions)
+			}
+			if endpoint == "/api/settings" && (data.JSRoutings == nil || slices.Contains(data.JSRoutings, want) != active) {
+				t.Fatalf("%s: active = %v, legacy projection = %+v", endpoint, active, data.JSRoutings)
+			}
+		}
+		if host.Running(sdkGUIFixture) {
+			t.Fatal("listing routing choices started the SDK module")
+		}
+	}
+	checkRoutingOptions(true)
+	call("POST", "/off", `{"spec":"sdk:`+sdkGUIFixture+`","off":true}`, &state)
+	checkRoutingOptions(false)
+	call("POST", "/off", idJSON, &state)
+	checkRoutingOptions(true)
 	row := state.Plugins[0]
 	if row.SDK == nil || row.SDK.Source != source || row.Spec != "sdk:"+sdkGUIFixture || row.Version != version ||
 		row.Error != "" || !row.SDK.Checkable || len(row.Providers) != 1 || len(row.SDK.Agents) != 1 ||
@@ -341,6 +378,7 @@ func TestOrdinaryPluginRoutesManageSDKRelease(t *testing.T) {
 	if len(state.Plugins) != 0 {
 		t.Fatalf("ordinary remove left the SDK row: %+v", state.Plugins)
 	}
+	checkRoutingOptions(false)
 
 	folder := t.TempDir()
 	if err := os.WriteFile(filepath.Join(folder, sdk.ManifestFile), []byte(`{`), 0o600); err != nil {

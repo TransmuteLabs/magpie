@@ -358,9 +358,10 @@ func (m *mw) use(row []byte) {
 // process serving the gateway serves them (Serve); a strategy is
 // registered while its plugin is on and loaded, and onUsage is given each
 // row from then.
-func Points() usage.Observer { return &observer{} }
+func Points(catalog *routes.Catalog) usage.Observer { return &observer{routes: catalog} }
 
 type observer struct {
+	routes  *routes.Catalog
 	mu      sync.Mutex
 	queue   chan *usage.Record // a pointer each: a 1024-row queue of Records held ~1 MB from the start, for every user, with or without an onUsage
 	using   atomic.Bool        // the set served has an onUsage
@@ -489,37 +490,11 @@ func (o *observer) swap(s *set) {
 	if s != nil {
 		for _, m := range s.list {
 			for _, st := range m.strats {
-				o.removes = append(o.removes, routes.Register(m.routing(st.name), m.strategy(st)))
+				option := routes.Option{ID: m.routing(st.name), Name: st.name, Plugin: m.name}
+				o.removes = append(o.removes, o.routes.Register(option, m.strategy(st)))
 			}
 			using = using || m.hasUse
 		}
 	}
 	o.using.Store(using)
-}
-
-// Routing is a strategy a gateway module serves, as the routing pickers
-// list it.
-type Routing struct {
-	ID     string `json:"id"`     // what a provider or group is routed by
-	Name   string `json:"name"`   // the strategy's own name
-	Plugin string `json:"plugin"` // the plugin it is of
-}
-
-// Routings are the strategies of the modules loaded that this process's
-// router serves now: none while plugins/middleware is off or the gateway
-// isn't served here.
-func Routings() []Routing {
-	out := []Routing{}
-	for _, m := range current().list {
-		for _, st := range m.strats {
-			id := m.routing(st.name)
-			if routes.Served(id) {
-				out = append(out, Routing{ID: id, Name: st.name, Plugin: m.name})
-			}
-		}
-	}
-	for _, routing := range routes.Discovered() {
-		out = append(out, Routing{ID: routing.ID, Name: routing.Name, Plugin: routing.Plugin})
-	}
-	return out
 }

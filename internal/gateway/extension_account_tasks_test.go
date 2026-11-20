@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -517,6 +518,69 @@ func TestExtensionAccountTaskOrdinaryLifecycleAndAppendOnce(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExtensionAccountTasksReacquireAfterDrain(t *testing.T) {
+	server, manager, id, _, count := taskGatewayFixture(t, "")
+	previousCtx, stopPrevious := context.WithCancel(t.Context())
+	defer stopPrevious()
+	previous, err := manager.BeginAccountTasks(previousCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := previous.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	barrier := &extensionLedgerDrainBarrier{rows: make(chan usage.Record, 4), release: release, kind: "cache_keepalive"}
+	t.Cleanup(usage.Observe(barrier))
+	operation := scheduleGatewayTask(t, server, id, t.Context())
+	select {
+	case row := <-barrier.rows:
+		if row.Operation != operation {
+			t.Fatalf("another task reached the ledger: %+v", row)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("accepted task did not reach ledger")
+	}
+	stopPrevious()
+
+	ready := make(chan struct{})
+	stop := serveExtensionOwner(t.Context(), "account tasks", func(ctx context.Context) (*extensionhost.AccountTasks, error) {
+		owner, err := manager.BeginAccountTasks(ctx)
+		if err == nil {
+			close(ready)
+		}
+		return owner, err
+	})
+	t.Cleanup(stop)
+	select {
+	case <-ready:
+		t.Fatal("successor took ownership while the previous task held accounting")
+	default:
+	}
+	unblock()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("successor did not take ownership after ledger drain")
+	}
+	next := New()
+	t.Cleanup(next.idle.stop)
+	second := scheduleGatewayTask(t, next, id, t.Context(), "schedule:other")
+	if operation == second {
+		t.Fatal("new request reused the predecessor's task")
+	}
+	taskReceipt(t, manager, second, "completed")
+	if count.Load() != 2 {
+		t.Fatalf("expected one paid request per listener owner, got %d", count.Load())
 	}
 }
 

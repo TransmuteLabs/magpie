@@ -15,7 +15,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 )
 
 func (m *model) reloadGroups() {
@@ -68,8 +70,6 @@ func (m model) listedMembers(g provider.Group) ([]string, int) {
 	return on, len(g.Members) - len(on)
 }
 
-var routings = []string{"", provider.Ordered, provider.Rotate, provider.LeastUsed, provider.Pace, provider.Weighted, provider.FreeFirst, provider.Fastest, provider.Cheapest, provider.Drain, provider.FreeExpiring, provider.SmallFirst, provider.Manual}
-
 func routingName(v string) string {
 	switch v {
 	case provider.Ordered:
@@ -96,6 +96,9 @@ func routingName(v string) string {
 		return tr("small context first")
 	case provider.Manual:
 		return tr("manual")
+	}
+	if provider.PluginRouting(v) {
+		return v
 	}
 	return tr("smart")
 }
@@ -151,6 +154,16 @@ func findGroup(id string) (provider.Group, bool) {
 }
 
 func nextRouting(g *provider.Group) error {
+	routings := []string{""}
+	for _, option := range routes.RotationOptions() {
+		routings = append(routings, option.ID)
+	}
+	routings = append(routings, provider.Manual)
+	for _, option := range gateway.RoutingOptions() {
+		if option.Plugin != "" {
+			routings = append(routings, option.ID)
+		}
+	}
 	i := max(0, slices.Index(routings, g.Routing))
 	g.Routing = routings[(i+1)%len(routings)]
 	return nil

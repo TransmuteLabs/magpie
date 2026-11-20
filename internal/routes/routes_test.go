@@ -4,7 +4,17 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/provider"
 )
+
+func (c *Catalog) ServeRotation() func() {
+	remove, err := c.RegisterLinked(c.RotationStrategies())
+	if err != nil {
+		panic(err)
+	}
+	return remove
+}
 
 func seats(n int) []Seat {
 	out := make([]Seat, n)
@@ -18,24 +28,28 @@ func seats(n int) []Seat {
 // under it serves again; removing twice removes once. Smart is served with
 // nothing registered, and a routing with none registered is not.
 func TestRegisterStacks(t *testing.T) {
-	if s, ok := Find(""); !ok || s.Order == nil {
+	catalog := NewCatalog()
+	if s, ok := catalog.Find(""); !ok || s.Order == nil {
 		t.Fatal("Smart isn't served")
 	}
-	if Served("t-stack") {
+	if catalog.Served("t-stack") {
 		t.Fatal("served with none registered")
 	}
-	first := Register("t-stack", Strategy{Order: func(string, []Seat) []int { return []int{1, 0} }})
-	second := Register("t-stack", Strategy{Order: func(string, []Seat) []int { return []int{0, 1} }, Exact: true})
-	if s, _ := Find("t-stack"); !s.Exact {
+	first := catalog.Register(Option{ID: "t-stack", Name: "First"}, Strategy{Order: func(string, []Seat) []int { return []int{1, 0} }})
+	second := catalog.Register(Option{ID: "t-stack", Name: "Second"}, Ordered)
+	if s, _ := catalog.Find("t-stack"); !s.Exact {
 		t.Fatal("the last registered doesn't serve")
+	}
+	if options := catalog.List(); len(options) != 2 || options[1].Name != "Second" {
+		t.Fatalf("the last registered isn't listed: %+v", options)
 	}
 	second()
 	second()
-	if s, ok := Find("t-stack"); !ok || s.Exact {
+	if s, ok := catalog.Find("t-stack"); !ok || s.Exact {
 		t.Fatalf("after removing the last, the first doesn't serve: %v", ok)
 	}
 	first()
-	if Served("t-stack") {
+	if catalog.Served("t-stack") {
 		t.Fatal("still served after both were removed")
 	}
 }
@@ -112,11 +126,13 @@ func keys(s []Seat, order []int) []string {
 
 // In turn starts one further along each time, per pool.
 func TestRotate(t *testing.T) {
-	Forget("r1", "r2")
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	rotate, _ := catalog.Find(provider.Rotate)
 	s := seats(3)
 	var got [][]string
 	for range 4 {
-		got = append(got, keys(s, Apply(Rotate, "r1", s)))
+		got = append(got, keys(s, Apply(rotate, "r1", s)))
 	}
 	want := [][]string{{"a", "b", "c"}, {"b", "c", "a"}, {"c", "a", "b"}, {"a", "b", "c"}}
 	for i := range want {
@@ -124,11 +140,17 @@ func TestRotate(t *testing.T) {
 			t.Fatalf("turn %d: %v, want %v", i, got[i], want[i])
 		}
 	}
-	if g := keys(s, Apply(Rotate, "r2", s)); g[0] != "a" {
+	if g := keys(s, Apply(rotate, "r2", s)); g[0] != "a" {
 		t.Fatalf("another pool shares the turn: %v", g)
 	}
-	Forget("r1")
-	if g := keys(s, Apply(Rotate, "r1", s)); g[0] != "a" {
+	independent := NewCatalog()
+	independent.ServeRotation()
+	otherRotate, _ := independent.Find(provider.Rotate)
+	if g := keys(s, Apply(otherRotate, "r1", s)); g[0] != "a" {
+		t.Fatalf("another catalog shares the turn: %v", g)
+	}
+	catalog.Forget("r1")
+	if g := keys(s, Apply(rotate, "r1", s)); g[0] != "a" {
 		t.Fatalf("Forget kept the turn: %v", g)
 	}
 }
@@ -226,11 +248,13 @@ func TestWeekLowKeepsItsPlace(t *testing.T) {
 // By weight: over six requests a seat weighing 2 goes first twice as often
 // as each weighing 1, and the others follow the one picked in their order.
 func TestWeighted(t *testing.T) {
-	Forget("w")
+	catalog := NewCatalog()
+	catalog.ServeRotation()
+	weighted, _ := catalog.Find(provider.Weighted)
 	s := []Seat{{Key: "a", Weight: 2}, {Key: "b", Weight: 1}, {Key: "c", Weight: 1}}
 	firsts := map[string]int{}
 	for range 8 {
-		order := keys(s, Apply(Weighted, "w", s))
+		order := keys(s, Apply(weighted, "w", s))
 		firsts[order[0]]++
 		rest := slices.DeleteFunc(slices.Clone([]string{"a", "b", "c"}), func(k string) bool { return k == order[0] })
 		if !slices.Equal(order[1:], rest) {

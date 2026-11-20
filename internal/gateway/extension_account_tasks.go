@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"log"
 	"net/http"
 	"reflect"
 	"sync"
@@ -20,18 +19,7 @@ func (server *Server) activateAccountTasks(ctx context.Context) func() {
 	if server.extensions == nil {
 		return func() {}
 	}
-	owner, err := server.extensions.BeginAccountTasks(ctx)
-	if err != nil {
-		log.Printf("extension account tasks: %v", err)
-		return func() {}
-	}
-	return func() {
-		drain, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := owner.Close(drain); err != nil {
-			log.Printf("extension account tasks shutdown: %v", err)
-		}
-	}
+	return serveExtensionOwner(ctx, "account tasks", server.extensions.BeginAccountTasks)
 }
 
 func (server *Server) accountTaskRequests(next http.Handler) http.Handler {

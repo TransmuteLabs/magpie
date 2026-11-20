@@ -13,6 +13,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/protocolext"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/protocolext"
@@ -32,9 +33,8 @@ func NewWithProtocols(registry *sdk.Registry) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := New()
+	server := newServer(nil, pluginrt.ProcessRuntime().RoutingCatalog())
 	server.protocols = host
-	server.extensions = nil
 	return server, nil
 }
 

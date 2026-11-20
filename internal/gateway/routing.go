@@ -1981,7 +1981,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		// a pool routed Until used up goes on from it, though it renews
 		// before the pool's next request (dzxx0496); one model of it
 		// refused leaves the account in use for the others
-		routes.Drained(c.rest)
+		s.routingCatalog().Drained(c.rest)
 	}
 	if kept {
 		saveRests() // a magpie started again rests it out, and climbs on
@@ -2578,12 +2578,6 @@ const (
 	usedShare = routes.UsedShare
 )
 
-// route orders one provider's candidates as its routing says.
-func route(p provider.Provider, cs []candidate, model string, from provider.Protocol) []candidate {
-	cs, _ = weigh(p, cs, model, from)
-	return cs
-}
-
 // weighing is what one provider's candidates were ordered by: the share of
 // its allowance each account has used and when that renews, and the tokens
 // each served lately. The routing trace shows the same.
@@ -2712,24 +2706,24 @@ func learns(c candidate, lefts map[allowanceKey]left) bool {
 // account; with Sink on, those rate limited with quota left behind the
 // others (sink.go). A group's heads keep the group's order: a member's
 // trial is spent before the next member.
-func weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
-	cs, wg := weighRouted(p, cs, model, from)
+func (s *Server) weigh(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+	cs, wg := s.weighRouted(p, cs, model, from)
 	if p.Routing != provider.Manual && !strings.HasPrefix(p.ID, provider.GroupPrefix) {
 		cs, wg.behind = behindOthers(cs, wg.lefts)
 	}
-	if sinks(p.Sink, p.Routing) {
+	if s.sinks(p.Sink, p.Routing) {
 		cs = sinkLast(cs)
 	}
 	return cs, wg
 }
 
 // routingOf is how a pool routed so is routed now. A routing no strategy
-// serves (routes.Find: plugins/rotation off) is its listed order, In
+// serves (plugins/rotation off, for example) is its listed order, In
 // order's, and so is what the core does for one besides ordering it: a
 // turn's mark, spreading a group's sessions, sending the rate limited back
 // and a group's heads.
-func routingOf(routing string) string {
-	if routing == "" || routing == provider.Manual || routes.Served(routing) {
+func (s *Server) routingOf(routing string) string {
+	if routing == "" || routing == provider.Manual || s.routingCatalog().Served(routing) {
 		return routing
 	}
 	return provider.Ordered
@@ -2738,21 +2732,19 @@ func routingOf(routing string) string {
 // keepsWeek: routed so, a pool keeps an account running low on its week
 // alone with those that have room (routes.Seat.WeekLow): Smart and Use
 // before expiry, which spend what a reset would lose.
-func keepsWeek(routing string) bool {
-	r := routingOf(routing)
-	return r == "" || r == provider.Pace
+func (s *Server) keepsWeek(routing string) bool {
+	return routing == "" || routing == provider.Pace && s.routingCatalog().Served(routing)
 }
 
 // goesRound: routed so, a pool goes round by itself (in turn, by weight),
 // so its first is marked as the turn's and the rate limited aren't sent
 // back.
-func goesRound(routing string) bool {
-	r := routingOf(routing)
-	return r == provider.Rotate || r == provider.Weighted
+func (s *Server) goesRound(routing string) bool {
+	return (routing == provider.Rotate || routing == provider.Weighted) && s.routingCatalog().Served(routing)
 }
 
 // weighRouted is weigh by the routing alone.
-func weighRouted(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
+func (s *Server) weighRouted(p provider.Provider, cs []candidate, model string, from provider.Protocol) ([]candidate, weighing) {
 	var wg weighing
 	if len(cs) == 0 {
 		return cs, wg
@@ -2815,7 +2807,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 	}
 	// the routing's strategy orders them (internal/routes): Smart, or one
 	// a plugin registered; one not registered leaves them in their order
-	st, ok := routes.Find(p.Routing)
+	st, ok := s.routingCatalog().Find(p.Routing)
 	if !ok {
 		return cs, wg
 	}

@@ -1219,7 +1219,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	// same video, and add none
 	var grp *GroupRef
 	if isGroup {
-		grp = groupRef(g, ms)
+		grp = s.groupRef(g, ms)
 	}
 	side := s.beginSide(r, start, call.Model, p.ID, grp)
 	masked, noted := noteMaskedUntil(r, "video", hits, sent, side.id(), cmp.Or(call.Provider, p.ID), call.Model)

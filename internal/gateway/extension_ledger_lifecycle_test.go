@@ -26,13 +26,14 @@ import (
 type extensionLedgerDrainBarrier struct {
 	rows    chan usage.Record
 	release <-chan struct{}
+	kind    string
 }
 
 func (*extensionLedgerDrainBarrier) Serve() func()                   { return func() {} }
 func (*extensionLedgerDrainBarrier) Bodies() usage.Bodies            { return usage.NoBodies }
 func (*extensionLedgerDrainBarrier) Begin(usage.Request) usage.Watch { return nil }
 func (barrier *extensionLedgerDrainBarrier) Ledger(record usage.Record) {
-	if record.Model == "m1" {
+	if record.Model == "m1" && (barrier.kind == "" || record.Kind == barrier.kind) {
 		barrier.rows <- record
 		<-barrier.release
 	}

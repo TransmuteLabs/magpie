@@ -803,10 +803,6 @@ function routingPage(part) {
   // modeOf: a routing's name and what it does, a JS gateway plugin's
   // ("<plugin>/<name>", app.js jsRoutings) as it is named, served or not
   const modeOf = (r) => MODES[r] || (r && jsRoutings(r).find(([id]) => id === r)?.slice(1, 3)) || MODES[""];
-  // withJS: routing options and the JS gateway plugins' after them, with
-  // saved when none serves it now; one of opts' own (a group's Manual) is
-  // not a plugin's
-  const withJS = (opts, saved) => [...opts, ...jsRoutings(saved || "").filter(([id]) => !opts.some(([o]) => o === id)).map(([id, n, , js]) => [id, n, js])];
   const GROUP_ORDER = "In order: member by member, the first model the group names until it can't answer, each over its own accounts or keys as its provider routes them.";
   // a group routed by weight (#1910): its members, not its keys
   const GROUP_WEIGHT = "By weight: each model takes its share of the requests by the weight set beside it — one weighing 3 three for every one a model weighing 1 takes, spread out rather than in bursts. One resting after a failure leaves the round and the others share its requests; the next model is the fallback when one fails.";
@@ -7566,7 +7562,7 @@ function routingPage(part) {
       line.title = t("{by} couldn't say which intent or effort a turn is the last time it was asked: {error}. Until it answers, no rule with an intent matches and turns reason as the agent asked. Each request's details say what it was asked.", { by: g.classifier || t("the classifier"), error: cf.error });
       main.append(line);
     }
-    const m = withJS(GROUP_ROUTE_OPTS, g.routing).find(([id]) => id === (g.routing || "")) || ROUTE_OPTS[0];
+    const m = routeChoices(GROUP_ROUTE_OPTS, g.routing).find(([id]) => id === (g.routing || "")) || ROUTE_OPTS[0];
     const tags = el("span", "tags");
     tags.append(routeTag(g, m));
     if (g.affinity) tags.append(el("span", "tag", t(AFF_OPTS.find(([id]) => id === g.affinity)?.[1] || "")));
@@ -7651,7 +7647,7 @@ function routingPage(part) {
     b.onclick = (e) => {
       e.stopPropagation(); // the card opens the editor; this its routing
       if (b.classList.contains("open")) return closeProtoMenu();
-      const opts = withJS(GROUP_ROUTE_OPTS, cur);
+      const opts = routeChoices(GROUP_ROUTE_OPTS, cur);
       openProtoMenu(b, opts.map(([id, n]) => ({ v: id, name: n, note: "", title: GROUP_HINT[id] ? t(GROUP_HINT[id]) : modeOf(id)[1] })), cur, async (v) => {
         closeProtoMenu();
         if (v === cur || (groupDirty() && !(await confirmDiscard()))) return b.focus({ preventScroll: true });
@@ -8446,7 +8442,7 @@ function routingPage(part) {
     const drawFig = () => drawRotFig(rFig, d.routing === "rotate", d.affinity || "");
     drawFig();
     const rw = el("div");
-    rw.append(routingSegs(withJS(GROUP_ROUTE_OPTS, d.routing).map(([id, n, js]) => [id, t(n), , js]), d.routing, (v) => { d.routing = v; rHint.textContent = gHint(v); drawFig(); draw(); drawRules(); drawSink(); }), rHint, rFig);
+    rw.append(segs(routeChoices(GROUP_ROUTE_OPTS, d.routing).map(([id, n]) => [id, t(n)]), d.routing, (v) => { d.routing = v; rHint.textContent = gHint(v); drawFig(); draw(); drawRules(); drawSink(); }), rHint, rFig);
     rw.append(el("div", "hint", t(GROUP_NEST)));
     advIn.append(el("label", "", t("Routing")), rw);
     // one rate limited with quota left: its place, or the back
@@ -9498,9 +9494,9 @@ function routingPage(part) {
       };
       const lab = (s, c) => { const w = el("span", "lab"); w.append(el("small", "", s), c); return w; };
       // by weight: each key's or account's share (#841), set beside it in the provider's editor
-      const opts = withJS([...ROUTE_OPTS, ["weight", "By weight"]], p.routing);
+      const opts = routeChoices([...ROUTE_OPTS, ["weight", "By weight"]], p.routing);
       ctl.append(
-        lab(t("Routing"), routingSegs(opts.map(([id, n, js]) => [id, t(n), , js]), p.routing || "", (v) => set("route", { id: p.provider, routing: v }, t("{name}: {routing}", { name: p.name, routing: t(opts.find(([id]) => id === v)[1]) })))),
+        lab(t("Routing"), segs(opts.map(([id, n]) => [id, t(n)]), p.routing || "", (v) => set("route", { id: p.provider, routing: v }, t("{name}: {routing}", { name: p.name, routing: t(opts.find(([id]) => id === v)[1]) })))),
         lab(t("Stays"), segs(AFF_OPTS.map(([id, n]) => [id, t(n)]), p.affinity || "", (v) => set("affinity", { id: p.provider, affinity: v }, t("{name}: {routing}", { name: p.name, routing: t(AFF_OPTS.find(([id]) => id === v)[1]) })))));
       if (sinkable(p.routing || "")) {
         const k = lab(t("Rate limited"), segs(SINK_OPTS.map(([id, n]) => [id, t(n)]), p.sink ? "sink" : "", (v) => set("sink", { id: p.provider, sink: v === "sink" }, t("{name}: {routing}", { name: p.name, routing: t(SINK_OPTS.find(([id]) => id === v)[1]) }))));

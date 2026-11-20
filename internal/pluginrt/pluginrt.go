@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/yetone/magpie/internal/routes"
 )
 
 // API is the host API plugins are written against. A plugin's
@@ -108,6 +110,8 @@ type Ctx struct {
 // OnDispose runs f when the plugin is turned off or magpie stops.
 func (c *Ctx) OnDispose(f func()) { c.disposes = append(c.disposes, f) }
 
+func (c *Ctx) RoutingCatalog() *routes.Catalog { return c.rt.routing }
+
 // Contribute puts a part in the window while the plugin is active.
 func (c *Ctx) Contribute(slot, key string) {
 	c.parts = append(c.parts, Part{slot, key})
@@ -191,13 +195,14 @@ type Runtime struct {
 	plugins  map[string]*running
 	order    []string // applied order, for disposing in reverse
 	services map[string]any
+	routing  *routes.Catalog
 	// reconciled is set once Reconcile has run
 	reconciled bool
 }
 
 // New is a runtime of the registered plugins, none applied yet.
 func New(ms []Manifest) *Runtime {
-	rt := &Runtime{plugins: map[string]*running{}, services: map[string]any{}}
+	rt := &Runtime{plugins: map[string]*running{}, services: map[string]any{}, routing: routes.NewCatalog()}
 	for _, s := range Core {
 		rt.services[s] = struct{}{}
 	}
@@ -206,6 +211,8 @@ func New(ms []Manifest) *Runtime {
 	}
 	return rt
 }
+
+func (rt *Runtime) RoutingCatalog() *routes.Catalog { return rt.routing }
 
 // Reconcile brings the runtime to on: each plugin wanted and not active is
 // applied, once what it requires is provided; each active one no longer

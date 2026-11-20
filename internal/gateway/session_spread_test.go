@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // connor_yang on Discord: three sessions on a provider with three accounts,
@@ -26,7 +25,7 @@ func TestWholeSessionSpreadsNewSessions(t *testing.T) {
 			if err := provider.SetAffinity("sp", mode); err != nil {
 				t.Fatal(err)
 			}
-			routes.Forget("sp")
+			rotation.RoutingCatalog().Forget("sp")
 			s := New()
 			post := func(session, sub, msgs string) string {
 				t.Helper()
@@ -81,7 +80,7 @@ func TestInOrderKeepsNewSessionsOnTheFirst(t *testing.T) {
 	if err := provider.SetRouting("so", provider.Ordered); err != nil {
 		t.Fatal(err)
 	}
-	routes.Forget("so")
+	rotation.RoutingCatalog().Forget("so")
 	s := New()
 	for _, ses := range []string{"s1", "s2", "s3"} {
 		if code, out := postAs(t, s, ses, `{"model":"so/m1","messages":[{"role":"user","content":"start `+ses+`"}]}`); code != 200 {

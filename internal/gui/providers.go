@@ -26,6 +26,7 @@ import (
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
 	"github.com/yetone/magpie/internal/upstream"
@@ -841,8 +842,9 @@ type excludedJSON struct {
 }
 
 type providersJSON struct {
-	Providers []providerJSON `json:"providers"`
-	Presets   []presetJSON   `json:"presets"`
+	Providers      []providerJSON  `json:"providers"`
+	Presets        []presetJSON    `json:"presets"`
+	RoutingOptions []routes.Option `json:"routingOptions,omitempty"`
 	// PluginPartners are the partners whose product is a plugin: the
 	// Plugins page lists them first in Discover
 	PluginPartners []pluginPartnerJSON `json:"pluginPartners,omitempty"`
@@ -1529,6 +1531,7 @@ func providersState() providersJSON {
 	provider.FetchNewBehind(8 * time.Second)
 	agents := agent.DetectedIn(heldAgents())
 	s := providersJSON{Providers: []providerJSON{}, Presets: []presetJSON{}, Excluded: []excludedJSON{}}
+	s.RoutingOptions = routingOptions()
 	s.OnPlugins = provider.OnPlugins()
 	s.Movable = provider.MovableIDs()
 	// a retired built-in whose plugin is installed is the plugin's, moved

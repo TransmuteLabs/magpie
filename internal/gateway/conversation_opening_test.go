@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // keeyangyy (#3938): a client that sends no session header and opens every
@@ -356,7 +355,7 @@ func TestNewConversationsInOneFolderAreRoutedApart(t *testing.T) {
 	if err := provider.SetAffinity("aff", provider.AffinitySession); err != nil {
 		t.Fatal(err)
 	}
-	routes.Forget("aff")
+	rotation.RoutingCatalog().Forget("aff")
 	s := New()
 	routed := func(path, body string) string {
 		if code, out := postTo(t, s, path, body); code != http.StatusOK {

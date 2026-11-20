@@ -128,10 +128,9 @@ func TestFeatureGatewayRejectsUnknownAndDuplicateTools(t *testing.T) {
 func TestFeatureRoutingOwnsRegistration(t *testing.T) {
 	const id = "fixture-order"
 	seats := []routes.Seat{{Key: "first"}, {Key: "second"}}
-	previous := routes.Register(id, routes.Strategy{Order: func(string, []routes.Seat) []int { return []int{0, 1} }})
-	t.Cleanup(previous)
 	for _, state := range []string{"active", "error", "panic"} {
 		t.Run(state, func(t *testing.T) {
+			var catalog *routes.Catalog
 			declared := map[string]sdk.LinkedRoutingStrategy{
 				id: {
 					ByWindow: true,
@@ -147,7 +146,7 @@ func TestFeatureRoutingOwnsRegistration(t *testing.T) {
 			}
 			check := func(owned bool) {
 				t.Helper()
-				strategy, found := routes.Find(id)
+				strategy, found := catalog.Find(id)
 				if !found || strategy.ByWindow != owned {
 					t.Errorf("route found %v, ByWindow %v, want owned %v", found, strategy.ByWindow, owned)
 					return
@@ -177,6 +176,9 @@ func TestFeatureRoutingOwnsRegistration(t *testing.T) {
 			delete(declared, id)
 			runtime := New([]Manifest{feature})
 			t.Cleanup(runtime.Stop)
+			catalog = runtime.RoutingCatalog()
+			previous := catalog.Register(routes.Option{ID: id, Name: "Previous"}, routes.Ordered)
+			t.Cleanup(previous)
 			check(false)
 			runtime.Reconcile(map[string]bool{"fixture": true}, nil)
 			wantState := Active
@@ -206,6 +208,51 @@ func TestFeatureRoutingRejectsInvalidDeclarations(t *testing.T) {
 				}
 			}()
 			featureManifest(sdk.FeatureContribution{ID: "fixture", Routing: map[string]sdk.LinkedRoutingStrategy{id: strategy}})
+		})
+	}
+}
+
+func TestLinkedRoutingFactoryUsesTheFeatureLifetime(t *testing.T) {
+	const id = "dynamic-route"
+	for _, variant := range []string{"active", "invalid", "duplicate"} {
+		t.Run(variant, func(t *testing.T) {
+			feature := featureManifestWithRouting(sdk.FeatureContribution{ID: "fixture"}, func(*routes.Catalog) []sdk.LinkedRoutingRegistration {
+				declared := []sdk.LinkedRoutingRegistration{{ID: id, Name: "Dynamic route", Strategy: routes.Ordered}}
+				switch variant {
+				case "invalid":
+					declared = append(declared, sdk.LinkedRoutingRegistration{ID: "missing-order"})
+				case "duplicate":
+					declared = append(declared, declared[0])
+				}
+				return declared
+			})
+			rt := New([]Manifest{feature})
+			t.Cleanup(rt.Stop)
+			catalog := rt.RoutingCatalog()
+			t.Cleanup(catalog.Register(routes.Option{ID: id, Name: "Previous route"}, routes.Ordered))
+			visible := func(name string) {
+				t.Helper()
+				for _, option := range catalog.List() {
+					if option.ID == id && option.Name == name {
+						return
+					}
+				}
+				t.Fatalf("wanted %q in %v", name, catalog.List())
+			}
+			rt.Reconcile(map[string]bool{"fixture": true}, nil)
+			if variant == "active" {
+				if state := rt.Statuses()[0].State; state != Active {
+					t.Fatalf("valid linked factory state: %s", state)
+				}
+				visible("Dynamic route")
+			} else {
+				if state := rt.Statuses()[0].State; state != Failed {
+					t.Fatalf("invalid linked factory state: %s", state)
+				}
+				visible("Previous route")
+			}
+			rt.Reconcile(nil, nil)
+			visible("Previous route")
 		})
 	}
 }

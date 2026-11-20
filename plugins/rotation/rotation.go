@@ -18,14 +18,16 @@ import (
 )
 
 func init() {
-	pluginrt.RegisterFeature(sdk.FeatureContribution{
-		ID: "rotation", API: "^1", Requires: []string{"providers", "gateway"}, Essential: true,
-		Name: "Routing strategies", Sub: "The routings besides Quota first: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first",
-		One: "1 provider or group routed so", Many: "{n} providers and groups routed so",
-		InUse:    inUse,
-		Routing:  routes.Builtin,
-		Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "rotation"}},
-		OpenPage: "providers",
+	pluginrt.RegisterRoutingFeature(pluginrt.RoutingFeature{
+		FeatureContribution: sdk.FeatureContribution{
+			ID: "rotation", API: "^1", Requires: []string{"providers", "gateway"}, Essential: true,
+			Name: "Routing strategies", Sub: "The routings besides Quota first: In order, Until used up, In turn, Least used first, Use before expiry, By weight, Free first, Speed first and Cheapest first",
+			One: "1 provider or group routed so", Many: "{n} providers and groups routed so",
+			InUse:    inUse,
+			Parts:    []sdk.FeaturePart{{Slot: sdk.FeatureInlinePart, Key: "rotation"}},
+			OpenPage: "providers",
+		},
+		Strategies: (*routes.Catalog).RotationStrategies,
 	})
 }
 
@@ -37,9 +39,13 @@ func inUse() (int, error) {
 		return 0, err
 	}
 	n := 0
+	options := routes.RotationOptions()
 	for _, r := range routings {
-		if _, ok := routes.Builtin[r]; ok {
-			n++
+		for _, option := range options {
+			if option.ID == r {
+				n++
+				break
+			}
 		}
 	}
 	return n, nil

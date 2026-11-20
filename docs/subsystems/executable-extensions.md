@@ -317,8 +317,10 @@ package, enablement and configuration identity, reconciles local and external
 catalog changes, and joins its removable change subscription.
 Disable, removal, configuration replacement and shutdown release the lease
 and retire the cached generation through the existing bounded drain and
-disposer before replacement. Startup failure is logged and the ordinary
-listener continues serving.
+disposer before replacement. A replacement listener can serve HTTP during
+the predecessor's drain. Gateway activation and account tasks take ownership
+as their previous owners release it, unless the replacement listener stops
+first. Startup failure is logged and the ordinary listener continues serving.
 
 Private service manifests inherit no activation. Public component
 handshakes also omit a provider's check-in declaration when its referenced
@@ -618,12 +620,12 @@ still resolve through the root binding and lazily start that component.
 [`Manager.OrderRouting`](../../internal/extension/routing.go) calls the
 selected package/configuration lease.
 [`extensionrouting`](../../internal/extensionrouting/routing.go) projects
-seats and bridges into the existing `routes.Strategy` point.
-[`gateway`](../../internal/gateway/extension_routing.go) registers only lazy
-callbacks; metadata and synctest start no workers or lifecycle resources.
-The existing routing selector discovers enabled descriptors through
-`middleware.Routings`. Off/update/config changes and cross-process catalog
-changes are checked again before accepting an in-flight result.
+seats and binds a lazy source backed by one manager to the
+[routing catalog](plugin-runtime.md#gateway-extension-points-p3-router-strategy).
+Discovery for the gateway and the routing pickers uses this catalog.
+Metadata reads have a bounded wait and start no workers. Disable,
+replacement and configuration changes are checked again before accepting
+an in-flight result, including changes from other processes.
 
 The action receives `RoutingRequest` and returns one unary `RoutingResult`
 whose `order` is a complete seat-index permutation. Go and JS validate

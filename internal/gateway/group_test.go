@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // keyed is a vendor that says which key each request came with, and
@@ -91,7 +90,7 @@ func forgetRouting() {
 	routed.Lock()
 	routed.used, routed.failures, routed.slow, routed.answered = map[string]tokenUse{}, map[string]int{}, map[string]slowRun{}, map[string]time.Time{}
 	routed.Unlock()
-	routes.Forget()
+	rotation.RoutingCatalog().Forget()
 }
 
 // setHome makes dir the home, where Windows (USERPROFILE) finds it too.
@@ -354,7 +353,7 @@ func TestAffinity(t *testing.T) {
 		serveOn(t, "aff", "k1", []string{"m"}, v, "k2")
 		provider.SetRouting("aff", c.routing)
 		provider.SetAffinity("aff", c.affinity)
-		routes.Forget("aff")
+		rotation.RoutingCatalog().Forget("aff")
 		s := New()
 		postAs(t, s, "s1", first)
 		postAs(t, s, "s1", c.body)
@@ -498,7 +497,7 @@ func TestRotateSpreadsSessions(t *testing.T) {
 		if err := provider.SaveGroup(provider.Group{Name: "Pair", Members: []string{"ga/m1", "gb/m2"}, Routing: provider.Rotate, Affinity: provider.AffinitySession}); err != nil {
 			t.Fatal(err)
 		}
-		routes.Forget(provider.GroupPrefix + "pair")
+		rotation.RoutingCatalog().Forget(provider.GroupPrefix + "pair")
 		return a, b, New()
 	}
 	// which of the two the request went to

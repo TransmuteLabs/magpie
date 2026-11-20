@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // Weighted routing (#841): a provider's keys weighing 3 and 1 take three
@@ -19,7 +18,7 @@ func TestWeightedKeys(t *testing.T) {
 		Routing: provider.Weighted}
 	a, b, c := "wk#"+provider.KeyID("ka"), "wk#"+provider.KeyID("kb"), "wk#"+provider.KeyID("kc")
 	t.Cleanup(func() {
-		routes.Forget(p.ID)
+		rotation.RoutingCatalog().Forget(p.ID)
 		restingUntil.Lock()
 		delete(restingUntil.m, c)
 		restingUntil.Unlock()
@@ -77,7 +76,7 @@ func TestWeightedKeys(t *testing.T) {
 	restingUntil.Lock()
 	delete(restingUntil.m, c)
 	restingUntil.Unlock()
-	routes.Forget(p.ID)
+	rotation.RoutingCatalog().Forget(p.ID)
 	got = map[string]int{}
 	for i := range 8 * 10 {
 		cs := route(p, perKey(p, "m", provider.Chat), "m", provider.Chat)

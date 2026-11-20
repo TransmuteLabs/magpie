@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // #5655 (jerrychoi; iamnil on Discord): two accounts, one session. Claude
@@ -25,7 +24,7 @@ func TestSessionSideCallGoesWithItsMainAccount(t *testing.T) {
 	if err := provider.SetAffinity("sl", provider.AffinitySession); err != nil {
 		t.Fatal(err)
 	}
-	routes.Forget("sl")
+	rotation.RoutingCatalog().Forget("sl")
 	s := New()
 	post := func(session, model, msgs string) string {
 		t.Helper()

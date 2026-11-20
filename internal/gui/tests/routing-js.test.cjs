@@ -1,19 +1,21 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // A JS gateway plugin's strategies are routings "<plugin>/<name>"
 // (internal/middleware/points.go). The ones the gateway serves now
-// (jsRoutings in the settings state) are offered in a provider's editor
+// (routingOptions in each ordinary state read) are offered in a provider's editor
 // beside the built-in ones, say which plugin routes, and are saved as
 // picked. A routing saved whose plugin serves it no more shows as it is,
-// saying its accounts go in their listed order. With the JS gateway
-// plugins off (plugins/middleware), none is offered. In English and
-// Chinese, Chromium and WebKit, at a phone's width too.
+// saying its accounts go in their listed order. Installed SDK strategies
+// are independent of JS gateway middleware.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
-const assets = path.resolve(__dirname, "../assets");
+const assets = process.env.MAGPIE_ROUTING_ASSETS || path.resolve(__dirname, "../assets");
+const legacy = { id: "spread/fewest-tokens", name: "fewest-tokens", plugin: "spread" };
+const installed = { id: "sdk-spread/reverse", name: "Reverse", plugin: "sdk-spread" };
+const builtins = ["", "order", "drain", "rotate", "usage", "pace", "weight", "free", "fast"].map((id) => ({ id }));
 const base = { icon: "generic", catalog: "", models: [{ id: "glm-5", name: "GLM-5", on: true }], agents: [], fallback: [], headers: {}, routing: "", affinity: "", ready: true };
 const sub = {
   ...base, id: "workbuddy-ai", name: "WorkBuddy AI", chat: "", responses: "", anthropic: "", keyList: [],
@@ -27,19 +29,20 @@ const relay = {
   keyList: [1, 2].map((i) => ({ id: `key-${i}`, name: `Key ${i}`, masked: `sk-…000${i}`, active: i === 1, on: true })),
 };
 
-function serve(lang, posts, off = []) {
-  const state = { agents: [], profiles: [], settings: { lang, theme: "light", jsRoutings: [{ id: "spread/fewest-tokens", name: "fewest-tokens", plugin: "spread" }] } };
+function serve(lang, posts, off = [], active = () => [legacy], stateReply = (json, data) => json(data)) {
+  const settings = { lang, theme: "light" };
   const providers = { providers: [sub, relay], presets: [], excluded: [], gateway: { running: true, window: true } };
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:${JSON.stringify(lang)},theme:"light",web:true,featuresOff:${JSON.stringify(off)}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json(state);
+    const routingOptions = [...builtins, ...active()];
+    if (url.pathname === "/api/state") return stateReply(json, { agents: [], profiles: [], settings, routingOptions });
     // what the real one answers: the state's settings (a provider's editor
     // reads them for its own warm-ups and check-ins)
-    if (url.pathname === "/api/settings" && route.request().method() === "GET") return json(state.settings);
-    if (url.pathname === "/api/providers") return json(providers);
+    if (url.pathname === "/api/settings" && route.request().method() === "GET") return json({ ...settings, jsRoutings: active(), routingOptions });
+    if (url.pathname === "/api/providers") return json({ ...providers, routingOptions });
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (route.request().method() === "POST" && url.pathname.startsWith("/api/provider")) {
@@ -101,20 +104,59 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.context().close();
       }
     });
-    test(`${engine} ${lang}: with the JS gateway plugins off, no JS routing is offered`, async (t) => {
+    test(`${engine} ${lang}: SDK routing survives middleware off and refreshes on the ordinary state read`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 900, height: 720 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
       page.setDefaultNavigationTimeout(60000);
-      await page.route("**/*", serve(lang, [], ["middleware"]));
+      let active = [installed];
+      let waitForState, omitCatalog;
+      const entered = Promise.withResolvers();
+      const release = Promise.withResolvers();
+      t.after(() => release.resolve());
+      await page.route("**/*", serve(lang, [], ["middleware"], () => active, async (json, data) => {
+        if (waitForState) {
+          waitForState = false;
+          entered.resolve();
+          await release.promise;
+        }
+        if (omitCatalog) delete data.routingOptions;
+        return json(data);
+      }));
       await page.goto("http://magpie.test/?view=providers");
-      await page.locator(".row.provider", { hasText: sub.name }).first().click();
-      await page.locator(".editor .accts").first().waitFor();
       const field = page.locator(".editor label", { hasText: new RegExp(`^${L.routing}$`) }).locator("xpath=following-sibling::div[1]");
-      const names = await field.locator(".segs").first().evaluate((box) => [...box.querySelectorAll(".opt")].filter((b) => getComputedStyle(b).display !== "none").map((b) => b.textContent));
-      assert.ok(!names.includes("spread/fewest-tokens"), JSON.stringify(names));
-      assert.ok(names.length >= 5, JSON.stringify(names));
+      const names = () => field.locator(".segs").first().evaluate((box) => [...box.querySelectorAll(".opt")].filter((b) => getComputedStyle(b).display !== "none").map((b) => b.textContent));
+      const open = async () => {
+        await page.locator(".row.provider", { hasText: relay.name }).first().click();
+        await page.locator(".editor .accts").first().waitFor();
+      };
+      const close = () => page.locator(".editor .ed-cancel").click();
+      await open();
+      assert.ok((await names()).includes(installed.id), "the installed strategy is visible with middleware off");
+      assert.ok(!(await names()).includes(legacy.id), "the inactive legacy strategy is absent");
+      await close();
+      omitCatalog = true;
+      await page.evaluate(() => api("state"));
+      omitCatalog = false;
+      await open();
+      assert.ok((await names()).includes(installed.id), "a read without catalog data leaves the previous catalog");
+      await close();
+      waitForState = true;
+      const older = page.evaluate(() => api("state"));
+      await entered.promise;
+      active = [];
+      await page.evaluate(() => load(true));
+      release.resolve();
+      await older;
+      await open();
+      assert.ok(!(await names()).includes(installed.id), "a late state read cannot bring back a disabled strategy");
+      assert.equal((await names()).at(-1), "gone/old", "the stored strategy remains visible");
+      await close();
+      active = [installed];
+      await page.evaluate(() => api("state?last=1"));
+      await open();
+      assert.ok(!(await names()).includes(installed.id), "the startup snapshot cannot replace a live catalog");
     });
   }
 }

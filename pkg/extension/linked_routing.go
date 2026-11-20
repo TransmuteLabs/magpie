@@ -106,12 +106,23 @@ type LinkedRoutingSeat struct {
 	Window int
 }
 
+// LinkedRoutingFeature binds a feature's strategy declarations to one
+// runtime's state. The host validates and withdraws them with the feature.
+type LinkedRoutingFeature[Runtime any] struct {
+	FeatureContribution
+	Strategies func(Runtime) []LinkedRoutingRegistration
+}
+
+type LinkedRoutingRegistration struct {
+	ID, Name string
+	Strategy LinkedRoutingStrategy
+}
+
 // LinkedRoutingStrategy orders a pool.
 type LinkedRoutingStrategy struct {
 	// Order is the order to try seats in: a permutation of their indexes.
 	// pool names the pool (a provider's id, or "group/<id>"), for a
-	// strategy that keeps a round per pool. It is asked with two seats or
-	// more.
+	// strategy that keeps a round per pool.
 	Order func(pool string, seats []LinkedRoutingSeat) []int
 	// Exact: its order stands as it says. Otherwise, of a provider's API
 	// keys, those that fit the request better go first, each kept in its

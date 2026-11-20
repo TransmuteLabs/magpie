@@ -327,6 +327,24 @@ var (
 	def   *Runtime
 )
 
+func processRuntime(ms []Manifest) *Runtime {
+	if def == nil {
+		def = New(ms)
+	}
+	return def
+}
+
+// ProcessRuntime is the built-in runtime shared by the application's entry
+// points. Refresh activates its features from configuration.
+func ProcessRuntime() *Runtime {
+	defMu.Lock()
+	defer defMu.Unlock()
+	if def != nil {
+		return def
+	}
+	return processRuntime(Registered())
+}
+
 // Refresh composes plugins.yml with the registered plugins and brings the
 // process's runtime to it, made on the first call. A plugins.yml that
 // can't be read leaves the runtime as it was (every plugin on, before the
@@ -335,13 +353,11 @@ func Refresh() ([]Composed, error) {
 	defMu.Lock()
 	defer defMu.Unlock()
 	ms := Registered()
-	if def == nil {
-		def = New(ms)
-	}
+	rt := processRuntime(ms)
 	f, _, err := Load()
 	if err != nil {
-		if !def.reconciled {
-			def.Reconcile(allOn(ms), nil)
+		if !rt.reconciled {
+			rt.Reconcile(allOn(ms), nil)
 		}
 		return nil, err
 	}
@@ -350,7 +366,7 @@ func Refresh() ([]Composed, error) {
 	for _, c := range cs {
 		on[c.ID], config[c.ID] = c.Enabled, c.Config
 	}
-	def.Reconcile(on, config)
+	rt.Reconcile(on, config)
 	return cs, nil
 }
 

@@ -6,7 +6,6 @@ import (
 
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 )
 
 // The router strategy point with plugins/rotation on and off: a provider
@@ -27,7 +26,7 @@ func TestRotationOnAndOff(t *testing.T) {
 		if err := provider.SetRouting("ra", routing); err != nil {
 			t.Fatal(err)
 		}
-		routes.Forget("ra")
+		rotation.RoutingCatalog().Forget("ra")
 		s := New()
 		turn := false
 		for _, sess := range []string{"s1", "s2", "s3"} {

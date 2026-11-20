@@ -26,7 +26,7 @@ func serve(t *testing.T) *observer {
 	// past until's 10s at load 80–100: a test about the queue doesn't wait
 	// for it (TestOnUsageNeverBlocks went red so in a full run).
 	warmPrices.Do(func() { usage.NewCoster()(usage.Record{Provider: "p"}) })
-	o := Points().(*observer)
+	o := Points(routes.NewCatalog()).(*observer)
 	stop := o.Serve()
 	t.Cleanup(stop)
 	return o
@@ -40,9 +40,9 @@ func seats(n int) []routes.Seat {
 	return out
 }
 
-func order(t *testing.T, routing string, n int) []int {
+func order(t *testing.T, catalog *routes.Catalog, routing string, n int) []int {
 	t.Helper()
-	s, ok := routes.Find(routing)
+	s, ok := catalog.Find(routing)
 	if !ok {
 		t.Fatalf("%s isn't served", routing)
 	}
@@ -75,21 +75,22 @@ func TestStrategiesServedWhileOn(t *testing.T) {
 	};`)
 	e.Options = map[string]any{"first": 2}
 	use(t, e)
-	if routes.Served("x/reverse") {
+	o := Points(routes.NewCatalog()).(*observer)
+	if o.routes.Served("x/reverse") {
 		t.Fatal("served before the gateway serves it")
 	}
-	o := serve(t)
-	if got := order(t, "x/reverse", 3); !slices.Equal(got, []int{2, 1, 0}) {
+	t.Cleanup(o.Serve())
+	if got := order(t, o.routes, "x/reverse", 3); !slices.Equal(got, []int{2, 1, 0}) {
 		t.Fatal("reverse:", got)
 	}
-	if got := order(t, "x/keyed", 3); !slices.Equal(got, []int{2, 0, 1}) {
+	if got := order(t, o.routes, "x/keyed", 3); !slices.Equal(got, []int{2, 0, 1}) {
 		t.Fatal("keyed:", got, States()[e.Spec])
 	}
 	st := States()[e.Spec]
 	if !slices.Equal(st.Strategies, []string{"x/keyed", "x/reverse"}) || st.Orders != 2 || st.Failures != 0 || len(st.Hooks) != 0 {
 		t.Fatalf("state %+v", st)
 	}
-	if r := Routings(); len(r) != 2 || r[0].ID != "x/keyed" || r[0].Plugin != e.Spec {
+	if r := o.routes.List()[1:]; len(r) != 2 || r[0].ID != "x/keyed" || r[0].Plugin != e.Spec {
 		t.Fatalf("routings %+v", r)
 	}
 	if Begin(info()) != nil {
@@ -100,13 +101,13 @@ func TestStrategiesServedWhileOn(t *testing.T) {
 	e.Off = true
 	use(t, e)
 	o.refresh()
-	if routes.Served("x/reverse") || len(Routings()) != 0 {
+	if o.routes.Served("x/reverse") || len(o.routes.List()) != 1 {
 		t.Fatal("served while off")
 	}
 	e.Off = false
 	use(t, e)
 	o.refresh()
-	if !routes.Served("x/reverse") {
+	if !o.routes.Served("x/reverse") {
 		t.Fatal("not served on again")
 	}
 
@@ -114,7 +115,7 @@ func TestStrategiesServedWhileOn(t *testing.T) {
 	os.WriteFile(e.Spec, []byte(`export const strategies = { other: (p, s) => s.map((_, i) => i) };`), 0o644)
 	Reload()
 	o.refresh()
-	if routes.Served("x/reverse") || !routes.Served("x/other") {
+	if o.routes.Served("x/reverse") || !o.routes.Served("x/other") {
 		t.Fatal("a reload kept the old strategies")
 	}
 }
@@ -125,14 +126,14 @@ func TestStrategiesServedWhileOn(t *testing.T) {
 func TestStrategiesFollowOwnWrite(t *testing.T) {
 	e := file(t, `export const strategies = { a: (p, s) => s.map((_, i) => i) };`)
 	use(t, e)
-	serve(t)
-	if !routes.Served("x/a") {
+	o := serve(t)
+	if !o.routes.Served("x/a") {
 		t.Fatal("not served")
 	}
 	if err := plugin.SetOff(plugin.Name(e.Spec), true); err != nil {
 		t.Fatal(err)
 	}
-	for end := time.Now().Add(2 * time.Second); routes.Served("x/a"); {
+	for end := time.Now().Add(2 * time.Second); o.routes.Served("x/a"); {
 		if time.Now().After(end) {
 			t.Fatal("still served 2s after it was turned off here")
 		}
@@ -143,13 +144,13 @@ func TestStrategiesFollowOwnWrite(t *testing.T) {
 // Not served (plugins/middleware off), nothing is registered.
 func TestStrategiesStopWithServe(t *testing.T) {
 	use(t, file(t, `export const strategies = { a: (p, s) => s.map((_, i) => i) };`))
-	o := Points().(*observer)
+	o := Points(routes.NewCatalog()).(*observer)
 	stop := o.Serve()
-	if !routes.Served("x/a") {
+	if !o.routes.Served("x/a") {
 		t.Fatal("not served")
 	}
 	stop()
-	if routes.Served("x/a") || len(Routings()) != 0 {
+	if o.routes.Served("x/a") || len(o.routes.List()) != 1 {
 		t.Fatal("served after stop")
 	}
 }
@@ -169,10 +170,10 @@ func TestStrategyFailsOpen(t *testing.T) {
 		pending: () => new Promise(() => {}),
 	};`)
 	use(t, e)
-	serve(t)
+	o := serve(t)
 	for _, name := range []string{"throws", "slow", "twice", "short", "fraction", "text", "nulls", "pending"} {
 		start := time.Now()
-		if got := order(t, "x/"+name, 3); !slices.Equal(got, []int{0, 1, 2}) {
+		if got := order(t, o.routes, "x/"+name, 3); !slices.Equal(got, []int{0, 1, 2}) {
 			t.Fatal(name, got)
 		}
 		if d := time.Since(start); d > time.Second {
@@ -188,7 +189,7 @@ func TestStrategyFailsOpen(t *testing.T) {
 	m := current().list[0]
 	m.pt.take(0)
 	start := time.Now()
-	if got := order(t, "x/twice", 3); !slices.Equal(got, []int{0, 1, 2}) {
+	if got := order(t, o.routes, "x/twice", 3); !slices.Equal(got, []int{0, 1, 2}) {
 		t.Fatal("busy:", got)
 	}
 	m.pt.give()
@@ -215,7 +216,7 @@ func TestOnUsageRows(t *testing.T) {
 	o.Ledger(usage.Record{Time: time.Now(), Provider: "p1", Model: "m", Input: 10, Output: 5, Status: 200,
 		Error: "secret error", RequestID: "rid", Session: "sess", Endpoint: "/v1/messages", OwnCost: &cost, CallerKeyName: "k"})
 	until(t, "the row given", func() bool { return States()[e.Spec].Rows == 1 })
-	order(t, "x/seen", 2)
+	order(t, o.routes, "x/seen", 2)
 	last := States()[e.Spec].Last
 	i := strings.Index(last, "[[")
 	if i < 0 {
@@ -279,7 +280,7 @@ func TestOnUsageNeverBlocks(t *testing.T) {
 func TestOnUsageOnlyWhileServed(t *testing.T) {
 	e := file(t, `export function onUsage() {}`)
 	use(t, e)
-	o := Points().(*observer)
+	o := Points(routes.NewCatalog()).(*observer)
 	o.Ledger(usage.Record{Provider: "p"})
 	stop := o.Serve()
 	stop()
@@ -296,8 +297,8 @@ func TestPointsHaveNoNetwork(t *testing.T) {
 		const names = ["fetch", "XMLHttpRequest", "WebSocket", "require", "process", "Bun", "Deno", "navigator", "importScripts"];
 		export const strategies = { probe: () => { const has = names.filter(n => typeof globalThis[n] !== "undefined"); if (has.length) throw new Error("has " + has.join(",")); return [0, 1]; } };`)
 	use(t, e)
-	serve(t)
-	order(t, "x/probe", 2)
+	o := serve(t)
+	order(t, o.routes, "x/probe", 2)
 	if st := States()[e.Spec]; st.Failures != 0 {
 		t.Fatal(st.Last)
 	}
@@ -361,7 +362,7 @@ func TestDocsExample(t *testing.T) {
 	s := seats(4)
 	s[0].Tokens, s[1].Tokens, s[2].Tokens, s[3].Tokens = 30, 10, 20, 1
 	s[3].Resting = true
-	r, ok := routes.Find("spread/fewest-tokens")
+	r, ok := o.routes.Find("spread/fewest-tokens")
 	if !ok {
 		t.Fatal("not served", States()[p])
 	}
@@ -381,8 +382,8 @@ func TestRoutingFromFileName(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "my plügin (2).gateway.js")
 	os.WriteFile(p, []byte(`export const strategies = { x: (p, s) => s.map((_, i) => i) };`), 0o644)
 	use(t, plugin.Entry{Spec: p})
-	serve(t)
-	if r := Routings(); len(r) != 1 || r[0].ID != "my-pl-gin-2/x" || !provider.PluginRouting(r[0].ID) {
+	o := serve(t)
+	if r := o.routes.List()[1:]; len(r) != 1 || r[0].ID != "my-pl-gin-2/x" || !provider.PluginRouting(r[0].ID) {
 		t.Fatalf("%+v", r)
 	}
 }

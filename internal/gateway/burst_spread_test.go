@@ -17,7 +17,6 @@ import (
 
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -41,7 +40,7 @@ func TestABurstSpreadsOverAccounts(t *testing.T) {
 						if err := provider.SetAffinity("ag", aff); err != nil {
 							t.Fatal(err)
 						}
-						routes.Forget("ag")
+						rotation.RoutingCatalog().Forget("ag")
 						s := New()
 						if warm {
 							// the reporters' rounds: the same request answered
@@ -332,14 +331,12 @@ func TestBurstSpreadsOnlyOverAlikePaces(t *testing.T) {
 		paces  [2]float64
 		spread bool
 	}{{[2]float64{10, 9.5}, true}, {[2]float64{10, 5}, false}, {[2]float64{0, 0}, true}} {
-		inFlight.Lock()
-		inFlight.m = map[string]int{}
-		inFlight.Unlock()
+		var server Server
 		pl := planned{order: []Weighed{{Pace: tc.paces[0]}, {Pace: tc.paces[1]}}}
 		var gone []string
 		var releases []func()
 		for range 2 {
-			got, _, release := burstSpread(provider.Pace, nil, false, true, slices.Clone(cs), pl)
+			got, _, release := server.burstSpread(provider.Pace, nil, false, true, slices.Clone(cs), pl)
 			gone, releases = append(gone, got[0].who()), append(releases, release)
 		}
 		for _, r := range releases {
@@ -348,9 +345,7 @@ func TestBurstSpreadsOnlyOverAlikePaces(t *testing.T) {
 		if spread := gone[0] != gone[1]; spread != tc.spread {
 			t.Errorf("paces %v: went to %v, spread %v, want %v", tc.paces, gone, spread, tc.spread)
 		}
-		inFlight.Lock()
-		left := len(inFlight.m)
-		inFlight.Unlock()
+		left := len(server.burst.m)
 		if left != 0 {
 			t.Errorf("%d still counted in flight after each ended", left)
 		}

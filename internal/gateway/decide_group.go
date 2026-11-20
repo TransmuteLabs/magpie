@@ -151,7 +151,7 @@ func (s *Server) serveDecisionGroup(w http.ResponseWriter, r *http.Request, body
 		writeError(w, provider.Chat, http.StatusServiceUnavailable, fmt.Sprintf("no key or account of the group %s's decision models may serve them now", g.Name))
 		return
 	}
-	s.serveDecideTries(w, r, body, asked, start, cs, pl, groupRef(g, ms))
+	s.serveDecideTries(w, r, body, asked, start, cs, pl, s.groupRef(g, ms))
 }
 
 // decideKeys are a decision provider's keys or accounts that may be asked

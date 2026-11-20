@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"slices"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -234,11 +233,6 @@ func spentBefore(a, b Seat) bool {
 // Ordered tries a pool in its order: the first until it can't answer.
 var Ordered = Strategy{Exact: true, Order: func(_ string, seats []Seat) []int { return identity(len(seats)) }}
 
-var drains = struct {
-	sync.Mutex
-	m map[string]drainAt // pool → the seat it is on
-}{m: map[string]drainAt{}}
-
 // drainAt is the seat a pool routed Until used up is on: its Key, and past
 // once it was refused for its quota or credit (Drained), so the pool goes
 // on from it even if it renews before the pool's next request.
@@ -252,12 +246,13 @@ type drainAt struct {
 // request, though key renews before then. The gateway's failover has
 // already tried the next for the request refused; without this, a pool
 // asked again only after key renewed went back to it.
-func Drained(key string) {
-	drains.Lock()
-	defer drains.Unlock()
-	for pool, at := range drains.m {
+func (c *Catalog) Drained(key string) {
+	state := &c.registered.rotation
+	state.Lock()
+	defer state.Unlock()
+	for pool, at := range state.drains {
 		if at.key == key {
-			drains.m[pool] = drainAt{key, true}
+			state.drains[pool] = drainAt{key, true}
 		}
 	}
 }
@@ -275,13 +270,14 @@ func Drained(key string) {
 // is. A seat it is on that leaves the pool (turned off, removed) leaves
 // it on the first not used up, in the listed order. Asking again with
 // nothing changed gives the same order, so a preview moves nothing.
-var Drain = Strategy{Exact: true, Order: func(pool string, seats []Seat) []int {
+func (c *Catalog) drain(pool string, seats []Seat) []int {
 	spent := func(s Seat) bool {
 		return s.Spent || !s.First && s.Known && s.Used >= provider.SpentShareOf(provider.Drain)
 	}
-	drains.Lock()
-	defer drains.Unlock()
-	on := drains.m[pool]
+	state := &c.registered.rotation
+	state.Lock()
+	defer state.Unlock()
+	on := state.drains[pool]
 	at := slices.IndexFunc(seats, func(s Seat) bool { return s.Key != "" && s.Key == on.key })
 	if at < 0 {
 		at = max(0, slices.IndexFunc(seats, func(s Seat) bool { return !spent(s) }))
@@ -293,23 +289,19 @@ var Drain = Strategy{Exact: true, Order: func(pool string, seats []Seat) []int {
 			}
 		}
 	}
-	drains.m[pool] = drainAt{key: seats[at].Key}
+	state.drains[pool] = drainAt{key: seats[at].Key}
 	return append(identity(len(seats))[at:], identity(at)...)
-}}
-
-var turns = struct {
-	sync.Mutex
-	m map[string]int // pool → requests routed in turn
-}{m: map[string]int{}}
+}
 
 // Rotate starts each request one further along the pool.
-var Rotate = Strategy{Order: func(pool string, seats []Seat) []int {
-	turns.Lock()
-	n := turns.m[pool] % len(seats)
-	turns.m[pool]++
-	turns.Unlock()
+func (c *Catalog) rotate(pool string, seats []Seat) []int {
+	state := &c.registered.rotation
+	state.Lock()
+	n := state.turns[pool] % len(seats)
+	state.turns[pool]++
+	state.Unlock()
 	return append(identity(len(seats))[n:], identity(n)...)
-}}
+}
 
 // LeastUsed puts a subscription, or a key that reads its own windows, by the
 // share of its allowance used, as the vendor says; then, and for other
@@ -470,13 +462,13 @@ var Pace = Strategy{ByUse: true, Order: func(_ string, seats []Seat) []int {
 // Weighted spreads a pool's requests over its seats by each one's weight,
 // smoothly (Round): the one the pool's round picks now first, the others
 // after it in their order, for failover.
-var Weighted = Strategy{Order: func(pool string, seats []Seat) []int {
+func (c *Catalog) weighted(pool string, seats []Seat) []int {
 	keys, weights, rests := make([]string, len(seats)), make([]int, len(seats)), make([]bool, len(seats))
 	for i, s := range seats {
 		keys[i], weights[i], rests[i] = s.Key, max(s.Weight, 1), s.Resting
 	}
-	return First(Round(pool, keys, weights, rests), len(seats))
-}}
+	return First(c.Round(pool, keys, weights, rests), len(seats))
+}
 
 // First is the order of n with best first and the others after it in their
 // order; best below 1 leaves it as it is.
@@ -663,20 +655,4 @@ func sameCost(a, b float64) bool {
 		d = -d
 	}
 	return d <= 1e-6 || d <= 1e-6*max(a, b)
-}
-
-// Builtin are the routings besides Smart and their strategies, as
-// plugins/rotation registers them.
-var Builtin = map[string]Strategy{
-	provider.Ordered:      Ordered,
-	provider.Rotate:       Rotate,
-	provider.LeastUsed:    LeastUsed,
-	provider.Pace:         Pace,
-	provider.Weighted:     Weighted,
-	provider.FreeFirst:    FreeFirst,
-	provider.Fastest:      Fastest,
-	provider.Cheapest:     Cheapest,
-	provider.Drain:        Drain,
-	provider.FreeExpiring: FreeExpiring,
-	provider.SmallFirst:   SmallFirst,
 }
