@@ -101,9 +101,15 @@ func main() {
 				reply = "data: {\"id\":\"quiet\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial reply\"}}]}\n\n"
 			case "empty whole":
 				reply = "{\"id\":\"empty\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":\"stop\"}]}"
-			case "empty stream":
+			case "empty stream", "void stream":
 				contentType = "text/event-stream"
-				reply = "data: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\ndata: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+				reply = "data: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"
+				if mode == "empty stream" {
+					reply += "data: {\"id\":\"empty\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+				} else {
+					reply += "data: {\"id\":\"empty\",\"choices\":[],\"usage\":{\"prompt_tokens\":41,\"completion_tokens\":3,\"total_tokens\":44}}\n\n"
+				}
+				reply += "data: [DONE]\n\n"
 			}
 			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusOK,
 				Headers: http.Header{"Content-Type": {contentType}}}); err != nil {
@@ -202,7 +208,7 @@ func TestExtensionTerminalAttemptsReachWatchAndLedger(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"accepted", "uncertain", "read failure", "close failure", "completed", "not-started", "rich", "rich accepted", "empty whole", "empty stream", "quiet held", "quiet passing"} {
+	for _, mode := range []string{"accepted", "uncertain", "read failure", "close failure", "completed", "not-started", "rich", "rich accepted", "empty whole", "empty stream", "void stream", "quiet held", "quiet passing"} {
 		t.Run(mode, func(t *testing.T) {
 			fresh(t)
 			quiet := strings.HasPrefix(mode, "quiet ")
@@ -299,7 +305,7 @@ func TestExtensionTerminalAttemptsReachWatchAndLedger(t *testing.T) {
 					Body: io.NopCloser(strings.NewReader(`{"id":"fallback","choices":[{"message":{"role":"assistant","content":"fallback"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2}}`))}, nil
 			})}
 			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
-				strings.NewReader(`{"model":"group/watched","stream":`+strconv.FormatBool(mode == "empty stream" || quiet)+`,"messages":[{"role":"user","content":"`+mode+`"}]}`))
+				strings.NewReader(`{"model":"group/watched","stream":`+strconv.FormatBool(strings.HasSuffix(mode, " stream") || quiet)+`,"messages":[{"role":"user","content":"`+mode+`"}]}`))
 			request.RemoteAddr = "127.0.0.1:12345"
 			reply := httptest.NewRecorder()
 			server.Front().ServeHTTP(reply, request)
