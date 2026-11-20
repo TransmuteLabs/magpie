@@ -19,15 +19,16 @@ func twoAccounts(t *testing.T) *[]http.Header {
 	t.Helper()
 	codexSignedIn(t, "spare@example.com")
 	var heads []http.Header
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
 		heads = append(heads, r.Header.Clone())
 		io.WriteString(w, sse(
 			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
 			`data: {"type":"response.output_text.delta","delta":"from `+r.Header.Get("chatgpt-account-id")+`"}`,
 			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
 	t.Cleanup(func() { provider.CodexBase = was })

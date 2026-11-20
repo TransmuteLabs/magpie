@@ -75,8 +75,9 @@ func minimaxDrawing(t *testing.T, preset string) (*Server, *minimaxImages, provi
 	t.Helper()
 	fresh(t)
 	f := &minimaxImages{}
-	up := httptest.NewServer(f)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(f))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	was := isMiniMaxHost
 	t.Cleanup(func() { isMiniMaxHost = was })
 	host := strings.TrimPrefix(up.URL, "http://")

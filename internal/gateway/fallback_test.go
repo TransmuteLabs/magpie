@@ -35,8 +35,9 @@ func twoProviders(t *testing.T, plan, spare *fake) {
 		{provider.Provider{ID: "plan", Name: "Plan", Key: "k", Models: []string{"m1"}, Fallback: []string{"spare/m2", "nowhere/x"}}, plan},
 		{provider.Provider{ID: "spare", Name: "Spare", Key: "k", Models: []string{"m2"}}, spare},
 	} {
-		up := httptest.NewServer(x.f)
+		up := httptest.NewServer(withoutAnonymousFixtureProbe(x.f))
 		t.Cleanup(up.Close)
+		probeFixtureRoot(t, up)
 		x.p.Chat = up.URL + "/v1"
 		if err := provider.Save(x.p); err != nil {
 			t.Fatal(err)
