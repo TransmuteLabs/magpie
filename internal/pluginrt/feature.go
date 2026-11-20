@@ -6,7 +6,13 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/gwbudget"
+	"github.com/yetone/magpie/internal/gwmw"
+	"github.com/yetone/magpie/internal/gwtool"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -14,6 +20,36 @@ import (
 // built-in manifest's identity and lifecycle.
 func RegisterFeature(contribution sdk.FeatureContribution) {
 	register(featureManifest(contribution))
+}
+
+type GatewayFeature = sdk.LinkedGatewayFeature[access.Identity, usage.Record]
+
+func RegisterGatewayFeature(contribution GatewayFeature) {
+	register(gatewayFeatureManifest(contribution))
+}
+
+func gatewayFeatureManifest(contribution GatewayFeature) Manifest {
+	feature := contribution.FeatureContribution
+	if contribution.Budget != nil || contribution.Observer != nil {
+		activate := feature.Activate
+		feature.Activate = func(lifetime sdk.FeatureLifetime) error {
+			if contribution.Budget != nil {
+				lifetime.OnDispose(gwbudget.Limit(contribution.Budget))
+			}
+			if contribution.Observer != nil {
+				observer := contribution.Observer()
+				if observer == nil {
+					return fmt.Errorf("pluginrt: %s returned no usage observer", feature.ID)
+				}
+				lifetime.OnDispose(usage.Observe(observer))
+			}
+			if activate != nil {
+				return activate(lifetime)
+			}
+			return nil
+		}
+	}
+	return featureManifest(feature)
 }
 
 func featureManifest(contribution sdk.FeatureContribution) Manifest {
@@ -30,10 +66,35 @@ func featureManifest(contribution sdk.FeatureContribution) Manifest {
 			panic(fmt.Errorf("pluginrt: %s routing: %w", m.ID, err))
 		}
 	}
-	if activate := contribution.Activate; activate != nil || len(routingIDs) != 0 {
+	tools := slices.Clone(contribution.Tools)
+	seenTools := make(map[sdk.LinkedGatewayTool]bool, len(tools))
+	for _, tool := range tools {
+		if tool != sdk.LinkedWebSearch && tool != sdk.LinkedPluginTools {
+			panic(fmt.Errorf("pluginrt: %s unknown gateway tool %q", m.ID, tool))
+		}
+		if seenTools[tool] {
+			panic(fmt.Errorf("pluginrt: %s duplicate gateway tool %q", m.ID, tool))
+		}
+		seenTools[tool] = true
+	}
+	middleware, masker := contribution.Middleware, contribution.Masker
+	groups := contribution.RoutingGroups
+	if activate := contribution.Activate; activate != nil || len(routingIDs) != 0 || groups || middleware != nil || masker != nil || len(tools) != 0 {
 		m.Apply = func(ctx *Ctx) error {
 			for _, id := range routingIDs {
 				ctx.OnDispose(routes.Register(id, routing[id]))
+			}
+			if groups {
+				ctx.OnDispose(provider.ServeGroups())
+			}
+			if middleware != nil {
+				ctx.OnDispose(gwmw.Use(middleware))
+			}
+			if masker != nil {
+				ctx.OnDispose(gwmw.Mask(masker))
+			}
+			for _, tool := range tools {
+				ctx.OnDispose(gwtool.Serve(string(tool)))
 			}
 			if activate != nil {
 				return activate(ctx)

@@ -3,19 +3,23 @@ package extension
 // FeatureContribution declares a linked Go feature. The host owns activation,
 // rendering and saved settings. This declaration is local to the linked host.
 type FeatureContribution struct {
-	ID, API    string
-	Requires   []string
-	Essential  bool
-	Name, Sub  string
-	One, Many  string
-	InUse      func() (int, error)
-	Activate   func(FeatureLifetime) error
-	Client     []string
-	Parts      []FeaturePart
-	Settings   []FeatureSetting
-	Routing    map[string]LinkedRoutingStrategy
-	SettingsAt *FeatureSettingsLocation
-	OpenPage   string
+	ID, API       string
+	Requires      []string
+	Essential     bool
+	Name, Sub     string
+	One, Many     string
+	InUse         func() (int, error)
+	Activate      func(FeatureLifetime) error
+	Client        []string
+	Parts         []FeaturePart
+	Settings      []FeatureSetting
+	Routing       map[string]LinkedRoutingStrategy
+	RoutingGroups bool
+	Middleware    LinkedAgentMiddleware
+	Masker        LinkedMasker
+	Tools         []LinkedGatewayTool
+	SettingsAt    *FeatureSettingsLocation
+	OpenPage      string
 }
 
 // FeatureLifetime receives cleanup for registrations made during activation.

@@ -18,24 +18,18 @@ import (
 // is what Forget does. The agent's own files are never touched, and Restore
 // in the trash lists the session again.
 
-// cliOf is the command each agent's sessions are resumed with, for the
-// agents magpie can't move to the trash (Deletable) as well.
-var cliOf = map[string]string{
-	"opencode": "opencode",
-	"cline":    "cline", "qoder": "qodercli", "qoder-cn": "qoderclicn",
-	"grok": "grok", "codebuddy": "codebuddy", "omp": "omp", "droid": "droid",
-	"kimi": "kimi", "agy": "agy", "cursor": "cursor-agent", "hermes": "hermes",
-}
-
 // cliGone says whether an agent's command is not installed on this
 // computer. An agent with no command of its own (an app) is never gone.
 // A var so tests can say; a test run answers false.
 var cliGone = func(agent string) bool {
-	bin := cliOf[agent]
-	if recipe, ok := linkedSessionResumeRecipes[agent]; ok {
-		bin = recipe.Agent
+	if testing.Testing() {
+		return false
 	}
-	return bin != "" && !testing.Testing() && !lookOK(bin)
+	if agent == "hermes" {
+		return !lookOK("hermes")
+	}
+	recipe, found := linkedSessionResumeRecipes[agent]
+	return found && !lookOK(recipe.Agent)
 }
 
 // Forgettable says whether magpie can stop listing an agent's sessions: its

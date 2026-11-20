@@ -16,32 +16,14 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-// Refusal is why a key's request was turned away, as the client is told.
-type Refusal interface {
-	error
-	// RetryAfter is how long until the limit resets, in whole seconds.
-	RetryAfter(now time.Time) int
-	// ResetAt is when it resets.
-	ResetAt() time.Time
-	// KeyWide reports whether the refusal applies to every model on the key.
-	KeyWide() bool
-}
-
-// Limiter lets a key's request in, holding what it is expected to use
-// until release, or refuses it. body is the request's size in bytes (-1
-// unknown) and model the model it named.
-type Limiter interface {
-	Reserve(who access.Identity, body int64, model string, now time.Time) (release func(), refused Refusal)
-}
-
-// Spender is a Limiter that can tell which of a key's limits of some
-// models (access.Limit.Models) have nothing left: the gateway leaves
-// their models out of the request's candidates (access.Identity.Spent).
-type Spender interface {
-	Spent(who access.Identity, now time.Time) []access.SpentScope
-}
+type (
+	Refusal = sdk.LinkedBudgetRefusal
+	Limiter = sdk.LinkedBudgetLimiter[access.Identity]
+	Spender = sdk.LinkedBudgetSpender[access.Identity, access.SpentScope]
+)
 
 var (
 	mu       sync.Mutex

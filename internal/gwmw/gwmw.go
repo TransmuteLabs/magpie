@@ -17,106 +17,29 @@
 package gwmw
 
 import (
-	"context"
 	"fmt"
-	"net/http"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-// Info is what an agent middleware is told of a request.
-type Info struct {
-	Protocol string `json:"protocol"` // the agent's API: anthropic, chat, responses, gemini
-	Model    string `json:"model"`
-	Stream   bool   `json:"stream"`
-	Path     string `json:"path"`
-	Agent    string `json:"agent,omitempty"`
-}
-
-// Reject is a request a middleware turned away: the agent gets Status with
-// Message in its API's error shape.
-type Reject struct {
-	Status  int
-	Message string
-}
-
-// Agent is a middleware on agents' requests.
-type Agent interface {
-	// Begin is asked as a request starts; nil leaves it alone
-	Begin(Info) Run
-}
-
-// Run is an agent middleware on one request.
-type Run interface {
-	// Request is the body the gateway, or the next middleware, gets; a
-	// Reject ends the request there
-	Request(body []byte) ([]byte, *Reject)
-	// Wrap is the writer the reply goes through; done writes what it holds
-	Wrap(w http.ResponseWriter) (http.ResponseWriter, func())
-	// End is the request's end, after done
-	End()
-}
-
-// To is the provider a request is tried on, as a middleware is told it.
-type To struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Account string `json:"account,omitempty"` // the subscription's kind (claude, antigravity, …); empty for a key
-	Model   string `json:"model"`             // the model asked of it, by its id there
-}
-
-// Tried is a Run that also changes the body each provider the request is
-// tried on is sent: Tried is that try's body, in the agent's API, and
-// changes no other try's.
-type Tried interface {
-	Tried(body []byte, to To) []byte
-}
-
-// Account is the subscription account a request is about to be tried on,
-// as the gateway knows it. Agent, User and Plan are who it is
-// (provider.Account) and never reach a middleware: a middleware is told a
-// ref made from them (internal/middleware's accountRef). A zero Agent is
-// a try on a key, no account.
-type Account struct {
-	Agent, User, Plan string
-	ID, Name, Model   string // the provider, and the model asked of it there
-}
-
-// Accounts is a Run asked, before each try, whether the account it goes
-// to may be used for this request: skip says it may not, and the gateway
-// goes on to the next as it does past an account that can't be used,
-// resting nothing. by names the middleware that said so.
-type Accounts interface {
-	Account(a Account) (skip bool, by string)
-}
-
-// Masker masks what magpie sends to a vendor and puts the values back in
-// what comes back. It reads its settings itself; Wanted is the core's
-// reading of whether any are asked for.
-type Masker interface {
-	// JSON is body masked, and how many values it swapped
-	JSON(body []byte) ([]byte, int)
-	// Text is s masked, and how many values it swapped
-	Text(s string) (string, int)
-	// Restore is s with the values masked before back
-	Restore(s string, escaped bool) string
-	// Writer wraps w so what is written has the values back; done writes
-	// what it still holds
-	Writer(w http.ResponseWriter) (http.ResponseWriter, func())
-}
-
-// Hit is one value a masker found, told without the value: its kind,
-// the finder that found it (rule, yours, word, model or known), its
-// placeholder, what was done with it (Action: "" masked, "warn" sent as
-// written, "block" masked and the request to be held back), and as much
-// of it as may be kept where it may not (Head, its first character or a
-// key's prefix, and Len, how many it has).
-type Hit struct {
-	Kind, By, Placeholder, Action, Head string
-	Len                                 int
-}
+type (
+	Info          = sdk.LinkedMiddlewareInfo
+	Reject        = sdk.LinkedMiddlewareReject
+	Agent         = sdk.LinkedAgentMiddleware
+	Run           = sdk.LinkedMiddlewareRun
+	To            = sdk.LinkedMiddlewareTarget
+	Tried         = sdk.LinkedMiddlewareTried
+	Account       = sdk.LinkedMiddlewareAccount
+	Accounts      = sdk.LinkedMiddlewareAccounts
+	Masker        = sdk.LinkedMasker
+	Hit           = sdk.LinkedMaskHit
+	Teller        = sdk.LinkedMaskTeller
+	ContextTeller = sdk.LinkedMaskContextTeller
+)
 
 // Blocks says hits have a value the user asked to hold a request back
 // for.
@@ -127,27 +50,6 @@ func Blocks(hits []Hit) bool {
 		}
 	}
 	return false
-}
-
-// Teller is a Masker that says what it masked too, for the record of
-// what was masked; one that doesn't is counted only.
-type Teller interface {
-	// JSONHits is JSON, with each value it swapped, once for each place
-	JSONHits(body []byte) ([]byte, []Hit)
-	// TextHits is Text, with each value it swapped
-	TextHits(s string) (string, []Hit)
-	// Value is the value behind a placeholder, while the masker remembers
-	// it
-	Value(placeholder string) (string, bool)
-}
-
-// ContextTeller is a Teller whose masking can wait (for a local model's
-// turn) and stops waiting when ctx ends: the client went away, or the
-// gateway gave up on the request. It then fails, as a masker that can't
-// mask does, and nothing is sent.
-type ContextTeller interface {
-	JSONHitsContext(ctx context.Context, body []byte) ([]byte, []Hit)
-	TextHitsContext(ctx context.Context, s string) (string, []Hit)
 }
 
 var (

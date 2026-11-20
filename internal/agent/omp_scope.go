@@ -95,7 +95,11 @@ func ompScopeOwnMagpie(plain []string, model string) bool {
 // (ompScopeOwnMagpie), when only model joins it. Another model joins as
 // itself.
 func ompScopeWith(cfg, model string) error {
-	return edit.EditYAMLNode(cfg, "enabledModels", func(n *yaml.Node) (bool, bool) {
+	return edit.EditYAMLNode(cfg, "enabledModels", ompScopeModel(model))
+}
+
+func ompScopeModel(model string) func(*yaml.Node) (bool, bool) {
+	return func(n *yaml.Node) (bool, bool) {
 		plain := ompScopePlain(n)
 		if len(plain) == 0 {
 			return false, false
@@ -117,7 +121,7 @@ func ompScopeWith(cfg, model string) error {
 		}
 		n.Content = append(kept, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: ompEvery})
 		return true, false
-	})
+	}
 }
 
 // ompScopeMagpieOne is a plain entry naming one of magpie's models, with

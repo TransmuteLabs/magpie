@@ -28,6 +28,16 @@ type sessionActionHost struct {
 }
 
 func TestSessionExtensionOrdinaryCarryOver(test *testing.T) {
+	test.Run("custom destination", func(test *testing.T) {
+		testSessionExtensionOrdinaryCarryOver(test, "")
+	})
+	test.Run("selected OMP profile", func(test *testing.T) {
+		testSessionExtensionOrdinaryCarryOver(test, "work")
+	})
+}
+
+func testSessionExtensionOrdinaryCarryOver(test *testing.T, profile string) {
+	test.Helper()
 	claude, _ := setup(test)
 	home, _ := os.UserHomeDir()
 	if err := os.MkdirAll(home, 0o700); err != nil {
@@ -36,6 +46,15 @@ func TestSessionExtensionOrdinaryCarryOver(test *testing.T) {
 	home, err := filepath.EvalSymlinks(home)
 	if err != nil {
 		test.Fatal(err)
+	}
+	dir := ".fixture/sessions"
+	destination := filepath.Join(home, filepath.FromSlash(dir))
+	resume := "omp --resume converted-session"
+	if profile != "" {
+		test.Setenv("OMP_PROFILE", profile)
+		dir = ".omp/agent/sessions"
+		destination = filepath.Join(home, ".omp", "profiles", profile, "agent", "sessions")
+		resume = "omp --profile " + profile + " --resume converted-session"
 	}
 	// Route discovery uses the ordinary availability seam.
 	previous := agentThere
@@ -64,7 +83,7 @@ func TestSessionExtensionOrdinaryCarryOver(test *testing.T) {
 	}
 	manifest := sdk.Manifest{Schema: 1, ID: "fixture.sessions", Version: "1.0.0", Runtime: "exec", Entry: entry,
 		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1}, Capabilities: []sdk.Capability{sdk.SessionMigration}},
-		Sessions: []sdk.SessionDescriptor{{ID: "conversation", Name: "Conversation", From: "claude", To: "omp", OutputDir: ".fixture/sessions"}}}
+		Sessions: []sdk.SessionDescriptor{{ID: "conversation", Name: "Conversation", From: "claude", To: "omp", OutputDir: dir}}}
 	raw, _ := json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0o600); err != nil {
 		test.Fatal(err)
@@ -103,14 +122,14 @@ func TestSessionExtensionOrdinaryCarryOver(test *testing.T) {
 	if !exists || current.Path != otherPath || current.Cwd != "/different-work" {
 		test.Fatalf("fixture did not change native lookup: %+v", current)
 	}
-	output := filepath.Join(home, ".fixture", "sessions", "converted-session.jsonl")
+	output := filepath.Join(destination, "converted-session.jsonl")
 	if _, err := os.Stat(output); !errors.Is(err, os.ErrNotExist) {
 		test.Fatal("listing executed converter")
 	}
 	result, err := CarryOver(session, "omp")
-	command := "cd '/work' && omp --resume converted-session"
+	command := "cd '/work' && " + resume
 	if runtime.GOOS == "windows" {
-		command = "Set-Location -LiteralPath '/work'; omp --resume converted-session"
+		command = "Set-Location -LiteralPath '/work'; " + resume
 	}
 	if err != nil || result.ID != "converted-session" || result.Path != output || result.Command != command {
 		test.Fatalf("ordinary SDK CarryOver: %+v %v", result, err)

@@ -101,7 +101,17 @@ visible Settings row keeps its link even with the feature off, so Web
 search can be turned on from Settings.
 This Go declaration is for linked features. Installable SDK windows use
 the package descriptor, frame permissions and configuration described
-above. Built-in services keep their existing registration.
+above.
+
+Linked gateway features declare user routing group service, routing
+strategies, middleware, masking and tool service in `FeatureContribution`.
+[`LinkedGatewayFeature`](../../pkg/extension/linked_gateway.go) adds a
+budget limiter and an observer factory. The host binds their caller and
+ledger types without projecting them onto the installed extension protocol.
+The same reconciliation attaches them to the existing gateway owners and
+withdraws the registrations on disable, shutdown or activation failure.
+The usage owner starts and stops observers as the gateway serves. The
+budget owner retains reservations, caller scope and refusal policy.
 
 ## The window's kernel (P1)
 

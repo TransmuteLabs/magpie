@@ -1,42 +1,18 @@
 package usage
 
 import (
-	"net/http"
 	"slices"
 	"sync"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-// Observer is the gateway's observer point (P3 of
-// docs/subsystems/plugin-runtime.md): it watches what the gateway serves
-// and what the ledger is written, and never changes either. A plugin
-// registers one with Observe while it is on (plugins/otel registers
-// internal/otlp's exporter); with none registered the gateway does no
-// observing work at all, not even keeping a reply's whole body.
-//
-// It lives here, not in the gateway, because every row it sees is a usage
-// Record and the ledger's other writers (budget, routing decisions) reach
-// it too.
-type Observer interface {
-	// Serve runs it while this process serves the gateway; stop ends it,
-	// after the calls in flight have finished
-	Serve() (stop func())
-	// Bodies is how much of a request's bodies it wants now
-	Bodies() Bodies
-	// Begin is asked as each gateway request starts; nil leaves the
-	// request unwatched by it
-	Begin(Request) Watch
-	// Ledger is each row Append writes. A row covered by a request watch has Watched set.
-	Ledger(Record)
-}
-
-// Watch is one request an Observer watches.
-type Watch interface {
-	// Attempt is each routing attempt, unbilled failures and retries
-	// included, timed as the attempt and not the whole request
-	Attempt(Record)
-	// End is the request's end: its time, agent, model, status and length
-	End(Record)
-}
+type (
+	Observer = sdk.LinkedUsageObserver[Record]
+	Watch    = sdk.LinkedUsageWatch[Record]
+	Request  = sdk.LinkedUsageRequest
+	Bodies   = sdk.LinkedUsageBodies
+)
 
 // CoversLedger reports whether the watch replaces this request's ordinary
 // ledger observation. SDK request events use an independent delivery path.
@@ -45,27 +21,10 @@ func CoversLedger(w Watch) bool {
 	return !sdkRequest
 }
 
-// Request is what an Observer is told of a request as it starts.
-type Request struct {
-	Header http.Header
-	// Agent the agent that sent it, Session its native session when it
-	// names one, else magpie's
-	Agent, Session string
-	// Kind its call kind ("web_search", "vision", …), "auxiliary" for
-	// Claude's tool-less small helper calls, "" for an agent's own turn
-	Kind string
-	// Plain is a loopback request with no gateway key, not passed on from
-	// another magpie: one the agent's own transcript can hold
-	Plain bool
-}
-
-// Bodies is how much of a request's and reply's bodies an observer wants.
-type Bodies int
-
 const (
-	NoBodies       Bodies = iota
-	CapturedBodies        // the first 256 KiB Recent calls keeps
-	WholeBodies           // uncut: the reply is spooled as it streams
+	NoBodies       = sdk.LinkedNoBodies
+	CapturedBodies = sdk.LinkedCapturedBodies
+	WholeBodies    = sdk.LinkedWholeBodies
 )
 
 var (

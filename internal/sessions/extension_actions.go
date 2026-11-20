@@ -171,9 +171,13 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 		return CarryResult{}, errors.New("ordinary session conversion requires a native session id and output file")
 	}
 	output := filepath.Join(plan.Root(), filepath.FromSlash(preview.Files[0].Path))
-	command := resumeCommand("", target, plan.SessionID(), source.Cwd, output)
-	if target == "omp" && store.profile != "" && command != "" {
-		command = inFolder(source.Cwd, "omp --profile "+store.profile+" --resume "+plan.SessionID())
+	var command string
+	if target == "omp" && store.profile != "" {
+		if run := namedOMPResumeCommand(plan.SessionID(), store.profile); run != "" {
+			command = inFolder(source.Cwd, run)
+		}
+	} else {
+		command = resumeCommand("", target, plan.SessionID(), source.Cwd, output)
 	}
 	if command == "" {
 		return CarryResult{}, errors.New("converted session has no safe native resume command")

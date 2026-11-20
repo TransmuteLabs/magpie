@@ -6,9 +6,124 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/gwbudget"
+	"github.com/yetone/magpie/internal/gwmw"
+	"github.com/yetone/magpie/internal/gwtool"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/routes"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestFeatureGatewayOwnsRegistrations(t *testing.T) {
+	t.Cleanup(gwtool.Gate())
+	t.Cleanup(provider.GateGroups(nil))
+	t.Cleanup(usage.ServeObservers())
+	middleware := &struct{ sdk.LinkedAgentMiddleware }{}
+	previous := &struct{ sdk.LinkedMasker }{}
+	masker := &struct{ sdk.LinkedMasker }{}
+	previousBudget := &struct {
+		gwbudget.Limiter
+		name string
+	}{name: "previous"}
+	budget := &struct {
+		gwbudget.Limiter
+		name string
+	}{name: "current"}
+	who := access.Identity{KeyID: "limited", Limit: &access.Limit{Period: "day", Tokens: 1}}
+	t.Cleanup(gwmw.Mask(previous))
+	t.Cleanup(gwbudget.Limit(previousBudget))
+	observer := &featureGatewayObserver{}
+	check := func(t *testing.T, active bool) {
+		t.Helper()
+		wantMasker := previous
+		wantBudget := previousBudget
+		wantBodies := usage.NoBodies
+		var wantMiddleware []gwmw.Agent
+		if active {
+			wantMasker = masker
+			wantBudget = budget
+			wantBodies = usage.WholeBodies
+			wantMiddleware = []gwmw.Agent{middleware}
+		}
+		if got := gwmw.Agents(); !slices.Equal(got, wantMiddleware) {
+			t.Errorf("middleware not owned by active feature: %v, active %v", got, active)
+		}
+		if got, _ := gwmw.Served(); got != wantMasker {
+			t.Errorf("masker not owned by active feature: %p, want %p", got, wantMasker)
+		}
+		if search, plugins := gwtool.Served(gwtool.WebSearch), gwtool.Served(gwtool.PluginTools); search != active || plugins != active {
+			t.Errorf("search served %v, plugin tools served %v, want both %v", search, plugins, active)
+		}
+		if groups := provider.GroupsServed(); groups != active {
+			t.Errorf("routing groups served %v, want %v", groups, active)
+		}
+		if got, err := gwbudget.Limiting(who); got != wantBudget || err != nil {
+			t.Errorf("budget limiter %p, %v, want %p", got, err, wantBudget)
+		}
+		if bodies := usage.ObservedBodies(); bodies != wantBodies || observer.running != active {
+			t.Errorf("observer bodies %v, running %v, want %v, %v", bodies, observer.running, wantBodies, active)
+		}
+	}
+	for _, state := range []string{"active", "error", "panic"} {
+		t.Run(state, func(t *testing.T) {
+			tools := []sdk.LinkedGatewayTool{sdk.LinkedWebSearch, sdk.LinkedPluginTools}
+			manifest := gatewayFeatureManifest(GatewayFeature{
+				FeatureContribution: sdk.FeatureContribution{
+					ID: "gateway-fixture", Middleware: middleware, Masker: masker, Tools: tools, RoutingGroups: true,
+					Activate: func(sdk.FeatureLifetime) error {
+						check(t, true)
+						switch state {
+						case "error":
+							return errors.New("activation failed")
+						case "panic":
+							panic("activation failed")
+						default:
+							return nil
+						}
+					},
+				},
+				Budget:   budget,
+				Observer: func() usage.Observer { return observer },
+			})
+			tools[0] = ""
+			runtime := New([]Manifest{manifest})
+			t.Cleanup(runtime.Stop)
+			check(t, false)
+			runtime.Reconcile(map[string]bool{"gateway-fixture": true}, nil)
+			check(t, state == "active")
+			runtime.Reconcile(nil, nil)
+			check(t, false)
+		})
+	}
+}
+
+type featureGatewayObserver struct {
+	running bool
+}
+
+func (observer *featureGatewayObserver) Serve() func() {
+	observer.running = true
+	return func() { observer.running = false }
+}
+
+func (*featureGatewayObserver) Bodies() usage.Bodies            { return usage.WholeBodies }
+func (*featureGatewayObserver) Begin(usage.Request) usage.Watch { return nil }
+func (*featureGatewayObserver) Ledger(usage.Record)             {}
+
+func TestFeatureGatewayRejectsUnknownAndDuplicateTools(t *testing.T) {
+	for _, tools := range [][]sdk.LinkedGatewayTool{{"unknown"}, {sdk.LinkedWebSearch, sdk.LinkedWebSearch}} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("accepted invalid gateway tools %v", tools)
+				}
+			}()
+			featureManifest(sdk.FeatureContribution{ID: "gateway-fixture", Tools: tools})
+		}()
+	}
+}
 
 func TestFeatureRoutingOwnsRegistration(t *testing.T) {
 	const id = "fixture-order"

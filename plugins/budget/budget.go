@@ -3,7 +3,7 @@
 // has a limit, it stays on.
 //
 // It is the limiter of the gateway's budget point (P3 of
-// docs/subsystems/plugin-runtime.md): Apply serves internal/budget's, and
+// docs/subsystems/plugin-runtime.md): its SDK declaration serves the limiter, and
 // the point fails closed: a request of a key held to a limit is not sent
 // while no limiter serves it. What a key has used is the core's, read
 // from the usage records, so the Settings page, `magpie keys` and
@@ -13,22 +13,19 @@ package budget
 import (
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/budget"
-	"github.com/yetone/magpie/internal/gwbudget"
 	"github.com/yetone/magpie/internal/pluginrt"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.RegisterFeature(sdk.FeatureContribution{
-		ID: "budget", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
-		Name: "Key limits", Sub: "Hold each gateway key to the tokens or estimated cost you set for it",
-		One: "1 key with a limit", Many: "{n} keys with a limit",
-		InUse: InUse,
-		Activate: func(c sdk.FeatureLifetime) error {
-			c.OnDispose(gwbudget.Limit(budget.Limiter{}))
-			return nil
+	pluginrt.RegisterGatewayFeature(pluginrt.GatewayFeature{
+		FeatureContribution: sdk.FeatureContribution{
+			ID: "budget", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
+			Name: "Key limits", Sub: "Hold each gateway key to the tokens or estimated cost you set for it",
+			One: "1 key with a limit", Many: "{n} keys with a limit",
+			InUse: InUse, OpenPage: "gateway",
 		},
-		OpenPage: "gateway",
+		Budget: budget.Limiter{},
 	})
 }
 

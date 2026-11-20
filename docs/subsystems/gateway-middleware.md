@@ -74,7 +74,14 @@ Only requests agents send go through `serveAgent`. magpie's own requests (thread
 
 ## Routings and usage rows
 
-`Points()` is the gateway's observer for both (`plugins/middleware` registers it with `usage.Observe`; only the gateway process serves it). While served it looks at the loaded modules once a second and registers each strategy as `<short name>/<name>`: the package's short name, or a file's base name less `.middleware`/`.gateway` and its extension. A reload or the module going off removes them, and a pool routed by one no plugin serves is tried in its listed order (`routingOf`).
+`Points()` is the gateway's observer for both. `plugins/middleware` declares
+it as the observer factory in its linked SDK feature. The feature runtime
+registers it with `usage.Observe` and only the gateway process serves it.
+While served it looks at the loaded modules once a second and registers
+each strategy as `<short name>/<name>`: the package's short name, or a
+file's base name less `.middleware`/`.gateway` and its extension. A reload
+or the module going off removes them, and a pool routed by one no plugin
+serves is tried in its listed order (`routingOf`).
 
 - A strategy is `strategies[name]`, a function `(pool, seats, options)` or an object with `order`. `seats` are `routes.Seat` in camelCase JSON (`key`, `account`, `known`, `learns`, `used`, `soon` in unix ms, `pace`, `weight`, `resting`, `tokens`). It returns an order of the seat indexes.
 - Each module has one runtime for its strategies and `onUsage`, so they share module state; one call runs at a time.

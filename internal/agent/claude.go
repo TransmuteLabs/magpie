@@ -28,25 +28,7 @@ import (
 // its model (and in the variables the aliases opus/sonnet/haiku resolve
 // through) is all it takes to run it on any provider.
 
-// claudeAbout are what Claude Code's env says about a tier's model, after its
-// ANTHROPIC_DEFAULT_<TIER>_MODEL: _NAME and _DESCRIPTION, the label and
-// description /model shows for the tier, and _SUPPORTED_CAPABILITIES, what
-// it takes the model to do (2.1.293). Each is about the model it was written
-// beside, so one written for the user's own model, or for a model of
-// magpie's the tier has left, names a model the tier no longer runs (#1227:
-// every tier on deepseek-flash, shown as grok-4.5).
-var claudeAbout = []string{"_NAME", "_DESCRIPTION", "_SUPPORTED_CAPABILITIES"}
-
-// claudeAboutEnv are claudeAbout's keys for every tier.
-var claudeAboutEnv = func() []string {
-	var out []string
-	for _, t := range claudeTiers {
-		for _, s := range claudeAbout {
-			out = append(out, tierEnv(t)+s)
-		}
-	}
-	return out
-}()
+var claudeAboutEnv = builtinclaude.TierLabelKeys(claudeTiers)
 
 // claudeOwnEnv are the models a user may have set for their
 // own endpoint, which magpie's take the place of while it is wired in and
@@ -55,13 +37,7 @@ var claudeAboutEnv = func() []string {
 // out while wired in (writeTiers), and it was lost for good. So is their
 // auto mode classifier's model (claudeAutoModeEnv): one set while magpie
 // is wired in is left to the user.
-var claudeOwnEnv = append([]string{
-	"ANTHROPIC_MODEL",
-	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
-	"ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
-	claudeAutoModeEnv,
-}, claudeAboutEnv...)
+var claudeOwnEnv = slices.Concat(claudeModelEnv, claudeAboutEnv)
 
 // claudeAutoModeEnv is the model Claude Code's client-side auto mode
 // classifier runs on, the one that judges each action before it runs
@@ -100,17 +76,6 @@ var claudeClouds = map[string]string{
 	"CLAUDE_CODE_USE_MANTLE":                 "Amazon Bedrock (Mantle)",
 }
 
-// claudeSwitchOn is whether Claude Code reads a switch's value as on: 1,
-// true, yes or on, in any case, spaces around it taken off (2.1.300). "0",
-// "false" or "" is off, and stays as the user wrote it.
-func claudeSwitchOn(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 // claudeShellEnv is a variable as a Claude Code started in a terminal has
 // it: the login shell's, else magpie's own; a var so tests can say.
 var claudeShellEnv = func(k string) string {
@@ -140,14 +105,14 @@ func claudeCloud(at place, path string) string {
 			if !has {
 				continue
 			}
-			if claudeSwitchOn(v) {
+			if builtinclaude.CloudSwitchOn(v) {
 				return noticeClaudeCloudFile.say("file", at.native(f), "var", k, "cloud", claudeClouds[k])
 			}
 			set = true
 			break
 		}
 		// a distro's environment magpie can't read
-		if !set && at.spell == nil && claudeSwitchOn(claudeShellEnv(k)) {
+		if !set && at.spell == nil && builtinclaude.CloudSwitchOn(claudeShellEnv(k)) {
 			return noticeClaudeCloudShell.say("var", k, "cloud", claudeClouds[k])
 		}
 	}
@@ -599,7 +564,7 @@ func claudeLight(main string) string {
 	return best
 }
 
-func tierEnv(tier string) string { return "ANTHROPIC_DEFAULT_" + strings.ToUpper(tier) + "_MODEL" }
+func tierEnv(tier string) string { return builtinclaude.TierModelEnv(tier) }
 
 // claudeModelEnv are the keys of Claude Code's env that name a model, each
 // written as Claude Code is given it (provider.ClaudeSpelled).
@@ -805,50 +770,6 @@ func claudeIn(at place) *Agent {
 	advisorOurs := func() bool {
 		v := rawEnv(claudeAdvisorEnv)
 		return v != "" && v == stashShared()[advisorKey]
-	}
-	// set once magpie has taken what the env said about each tier's model
-	// from before it routed Claude Code (claudeAbout): what is there after
-	// that the user wrote about magpie's model, and stays while the tier
-	// is on it
-	aboutKey := at.key("claude.tier_about")
-	// staleAbout is what the env says about a tier's model that the model
-	// it goes on (tiers, nil for each staying) isn't: all of it before
-	// magpie has looked, kept to give back when magpie steps out (an older
-	// magpie routed Claude Code without taking it), else a tier's whose
-	// model changes
-	staleAbout := func(tiers map[string]string) []string {
-		before := stashShared()[aboutKey] == ""
-		keep := map[string]string{}
-		var keys []string
-		for _, t := range claudeTiers {
-			if !before && (tiers == nil || claudeSameModel(env(tierEnv(t)), tiers[t])) {
-				continue
-			}
-			for _, s := range claudeAbout {
-				k := tierEnv(t) + s
-				v, has := edit.GetJSON(path, "env."+k)
-				if !has {
-					continue
-				}
-				if before && v != "" && stashShared()[at.key("claude.env."+k)] == "" {
-					keep[at.key("claude.env."+k)] = v
-				}
-				keys = append(keys, "env."+k)
-			}
-		}
-		if len(keep) > 0 {
-			stash(keep)
-		}
-		return keys
-	}
-	dropAbout := func(tiers map[string]string) error {
-		if keys := staleAbout(tiers); len(keys) > 0 {
-			if err := edit.DelJSON(path, keys...); err != nil {
-				return err
-			}
-		}
-		stash(map[string]string{aboutKey: "1"})
-		return nil
 	}
 	// follows says a tier on model m (its effort apart) follows the main
 	// model: on none, on the main model magpie last wrote, or on the model
@@ -1534,32 +1455,6 @@ func claudeIn(at place) *Agent {
 		}
 		return main, tiers
 	}
-	// a provider switch the env has on (claudeClouds) sends Claude Code to
-	// that cloud, past ANTHROPIC_BASE_URL, so routing it through magpie
-	// takes the switch out, its value kept in the stash as the user wrote
-	// it (a string or JSON's true), and magpie stepping out puts it back
-	// (jw1dev on X: CLAUDE_CODE_USE_BEDROCK=1 beside magpie's wiring, and
-	// Bedrock refused magpie's model). The cloud's own variables (AWS_*,
-	// ANTHROPIC_VERTEX_PROJECT_ID, …) stay: without the switch Claude Code
-	// doesn't read them. One that is off stays as it is.
-	cloudKey := func(k string) string { return at.key("claude.cloud." + k) }
-	dropClouds := func() error {
-		var gone []string
-		kept := map[string]string{}
-		for _, k := range agentenv.ClaudeProviders {
-			raw, has := edit.GetJSONRaw(path, "env."+k)
-			if v, _ := edit.GetJSON(path, "env."+k); !has || !claudeSwitchOn(v) {
-				continue
-			}
-			kept[cloudKey(k)] = raw
-			gone = append(gone, "env."+k)
-		}
-		if len(gone) == 0 {
-			return nil
-		}
-		stash(kept)
-		return edit.DelJSON(path, gone...)
-	}
 	unroute := func(nextModel *string, effort string) error {
 		unonboard()
 		if err := dropCompact(); err != nil {
@@ -1598,13 +1493,13 @@ func claudeIn(at place) *Agent {
 						at.key("claude.base_url"):   env("ANTHROPIC_BASE_URL"),
 						at.key("claude.auth_token"): env("ANTHROPIC_AUTH_TOKEN"),
 					}
-					for _, k := range claudeOwnEnv {
+					for _, k := range claudeModelEnv {
 						// as the user wrote it, never respelled; one of
 						// magpie's own left there is not theirs to get back
 						// (roswellcsy on X: it came back as their
 						// ANTHROPIC_MODEL with every Disconnect)
 						v := rawEnv(k)
-						if contains(claudeModelEnv, k) && claudeMagpieModel(v) {
+						if claudeMagpieModel(v) {
 							v = ""
 						}
 						kept[at.key("claude.env."+k)] = v
@@ -1697,13 +1592,6 @@ func claudeIn(at place) *Agent {
 		for t, v := range tiers {
 			tiers[t] = mark(v)
 		}
-		// what the env says about a tier's model goes with the model
-		if err := dropAbout(tiers); err != nil {
-			return err
-		}
-		if err := dropClouds(); err != nil {
-			return err
-		}
 		// subagents given a model of their own keep it; the others run on
 		// the session's, whatever /model picked, or on the tier they ask for.
 		// An older magpie's effort on the main model goes out, kept unwritten.
@@ -1736,6 +1624,8 @@ func claudeIn(at place) *Agent {
 			subagentModel = spell(mark(sub))
 		}
 		saved := stashShared()
+		routeEnv := claudeRouteEnvOptions(at, saved, tiers)
+		routeEnv.ReplaceOriginalLabels = !routed() && !keyOurs()
 		claims, err := claudeRouteClaims(saved[routeClaimsKey])
 		if err != nil {
 			return err
@@ -1747,12 +1637,15 @@ func claudeIn(at place) *Agent {
 			OutputTokens:   claudeOutput(outModels...),
 			PreviousOutput: saved[outputKey],
 			Previous:       claims,
+			Env:            routeEnv,
 		})
 		if err != nil {
 			return err
 		}
 		owned, _ := json.Marshal(result.Claims)
-		stash(map[string]string{mainKey: main, wroteAt: gw, outputKey: result.Output, routeClaimsKey: string(owned)})
+		updates := claudeRouteEnvUpdates(at, saved, result.Env)
+		updates[mainKey], updates[wroteAt], updates[outputKey], updates[routeClaimsKey] = main, gw, result.Output, string(owned)
+		stash(updates)
 		onboard()
 		if err := writeCompact(); err != nil {
 			return err
@@ -2225,17 +2118,6 @@ func claudeIn(at place) *Agent {
 			}
 			// connected before magpie marked the first run done
 			onboard()
-			// a switch turned on since, or left by an older magpie
-			if err := dropClouds(); err != nil {
-				return err
-			}
-			// routed by an older magpie: what was said about the models
-			// before it is taken out as it is now when magpie is wired in
-			if stashShared()[aboutKey] == "" {
-				if err := dropAbout(nil); err != nil {
-					return err
-				}
-			}
 			// subagents an older magpie pinned to the main model at an
 			// effort of theirs follow it again, the effort kept unwritten
 			if subagentFollowing() != "" {
@@ -2262,6 +2144,9 @@ func claudeIn(at place) *Agent {
 						return writeTiers(m, ts)
 					}
 				}
+			}
+			if err := repairClaudeRouteEnv(at, path); err != nil {
+				return err
 			}
 			models := []string{mainModel()}
 			tiers := map[string]string{}

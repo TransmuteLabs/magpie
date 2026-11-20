@@ -4,8 +4,8 @@
 // it stays on.
 //
 // It serves them at three of the gateway's points (P3 and P4 of
-// docs/subsystems/plugin-runtime.md): Apply registers internal/middleware's
-// chain as the agent middleware of the middleware point, and its Points as
+// docs/subsystems/plugin-runtime.md): its SDK declaration supplies
+// internal/middleware's chain as the agent middleware and its Points as
 // an observer that registers each module's strategies on the router
 // strategy point and gives its onUsage the ledger's rows. Off, agents'
 // requests go through no middleware, a pool routed by a module's strategy
@@ -13,24 +13,21 @@
 package middleware
 
 import (
-	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/middleware"
 	"github.com/yetone/magpie/internal/pluginrt"
-	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func init() {
-	pluginrt.RegisterFeature(sdk.FeatureContribution{
-		ID: "middleware", API: "^1", Requires: []string{"gateway"}, Essential: true,
-		Name: "JS gateway plugins", Sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers",
-		One: "1 gateway plugin on", Many: "{n} gateway plugins on",
-		InUse: func() (int, error) { return middleware.On(), nil },
-		Activate: func(c sdk.FeatureLifetime) error {
-			c.OnDispose(gwmw.Use(middleware.Chain{}))
-			c.OnDispose(usage.Observe(middleware.Points()))
-			return nil
+	pluginrt.RegisterGatewayFeature(pluginrt.GatewayFeature{
+		FeatureContribution: sdk.FeatureContribution{
+			ID: "middleware", API: "^1", Requires: []string{"gateway"}, Essential: true,
+			Name: "JS gateway plugins", Sub: "Run the JavaScript gateway plugins: middleware on agents' requests and replies, routings and usage observers",
+			One: "1 gateway plugin on", Many: "{n} gateway plugins on",
+			InUse:      func() (int, error) { return middleware.On(), nil },
+			Middleware: middleware.Chain{},
+			OpenPage:   "plugins",
 		},
-		OpenPage: "plugins",
+		Observer: middleware.Points,
 	})
 }

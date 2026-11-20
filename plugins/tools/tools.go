@@ -10,7 +10,6 @@
 package tools
 
 import (
-	"github.com/yetone/magpie/internal/gwtool"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/pluginrt"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -21,11 +20,8 @@ func init() {
 		ID: "tools", API: "^1", Requires: []string{"gateway"}, Essential: true,
 		Name: "Plugin tools", Sub: "Offer the tools your plugins give to every agent, as an MCP server",
 		One: "1 plugin gives tools", Many: "{n} plugins give tools",
-		InUse: plugin.ToolsOn,
-		Activate: func(c sdk.FeatureLifetime) error {
-			c.OnDispose(gwtool.Serve(gwtool.PluginTools))
-			return nil
-		},
+		InUse:    plugin.ToolsOn,
+		Tools:    []sdk.LinkedGatewayTool{sdk.LinkedPluginTools},
 		OpenPage: "plugins",
 	})
 }

@@ -35,6 +35,48 @@ func applyClaudeRouteSettings(path string, options builtinclaude.RouteSettingsOp
 	return result, err
 }
 
+func claudeRouteEnvOptions(at place, saved map[string]string, tiers map[string]string) builtinclaude.RouteEnvOptions {
+	return builtinclaude.RouteEnvOptions{
+		Tiers: claudeTiers, FirstTierPass: saved[at.key("claude.tier_about")] == "", NextTiers: tiers,
+		MatchesTierModel: func(current, next string) bool {
+			return claudeSameModel(claudeReadOwn(current), next)
+		},
+	}
+}
+
+func claudeRouteEnvUpdates(at place, saved map[string]string, result builtinclaude.RouteEnvResult) map[string]string {
+	updates := map[string]string{}
+	for _, cloud := range result.CloudSwitches {
+		updates[at.key("claude.cloud."+cloud.Name)] = string(cloud.Original)
+	}
+	for name, value := range result.OriginalLabels {
+		key := at.key("claude.env." + name)
+		if result.ReplaceOriginalLabels || saved[key] == "" {
+			updates[key] = value
+		}
+	}
+	if result.CheckedLabels {
+		updates[at.key("claude.tier_about")] = "1"
+	}
+	return updates
+}
+
+func repairClaudeRouteEnv(at place, path string) error {
+	saved := stashShared()
+	var result builtinclaude.RouteEnvResult
+	err := extension.ApplyLinkedAgentPlan(claudeRouteEnvOptions(at, saved, nil), func(options builtinclaude.RouteEnvOptions, settings sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, cleanup, err := builtinclaude.PlanRouteEnv(options, settings)
+		result = cleanup
+		return plan, err
+	}, extension.LinkedActionFile{Name: "settings.json", Path: path})
+	if err == nil {
+		if updates := claudeRouteEnvUpdates(at, saved, result); len(updates) > 0 {
+			stash(updates)
+		}
+	}
+	return err
+}
+
 func applyClaudeRouteLogin(path, token string) (string, error) {
 	var fingerprint string
 	err := extension.ApplyLinkedAgentPlan(token, func(token string, settings sdk.ActionSettings) (sdk.AgentPlan, error) {

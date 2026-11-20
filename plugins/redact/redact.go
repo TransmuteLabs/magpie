@@ -3,7 +3,7 @@
 // as they were. While the settings ask for any of it, it stays on.
 //
 // It is the masker of the gateway's middleware point (P3 of
-// docs/subsystems/plugin-runtime.md): Apply serves masking.Masker, and the point
+// docs/subsystems/plugin-runtime.md): its SDK declaration serves masking.Masker, and the point
 // fails closed: a request the settings say to mask is not sent while no
 // masker serves it. The logs' and archives' scrubbing (redact.Scrub) is
 // the core's, whatever the settings say.
@@ -13,7 +13,6 @@ import (
 	"slices"
 
 	"github.com/yetone/magpie/internal/access"
-	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/settings"
@@ -25,12 +24,9 @@ func init() {
 		ID: "redact", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
 		Name: "Privacy masking", Sub: "Secrets, personal data and your own words go to vendors as placeholders, and come back as they were",
 		One: "Masking is on", Many: "Masking is on",
-		InUse:  InUse,
-		Client: []string{"i18n.js", "redact.css", "client.js", "page.js"},
-		Activate: func(c sdk.FeatureLifetime) error {
-			c.OnDispose(gwmw.Mask(masking.Masker{}))
-			return nil
-		},
+		InUse:      InUse,
+		Client:     []string{"i18n.js", "redact.css", "client.js", "page.js"},
+		Masker:     masking.Masker{},
 		Parts:      []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "masking"}},
 		SettingsAt: &sdk.FeatureSettingsLocation{Tab: "privacy", RowID: "redactList"},
 	})

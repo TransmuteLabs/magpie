@@ -5,7 +5,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
 )
 
@@ -70,17 +69,9 @@ func ompOn(e ompProviderEntry, on string) ompProviderEntry {
 	return e
 }
 
-// ompAPIKept is e with the provider's api the user typed into the
-// models.yml at path in place of magpie's, as Pi's (pi_api_kept.go): one
-// that is none of the APIs magpie has written there (piAPIsWanted, only
-// ever openai-completions before there was a record) is theirs. What e
-// wants is recorded as magpie's. A model's api is magpie's, the list being
-// magpie's whole.
-func ompAPIKept(path string, e ompProviderEntry) ompProviderEntry {
-	want := e.API
-	if file, _ := edit.GetYAML(path, "providers."+magpieID+".api"); file != "" && file != want && !slices.Contains(piAPIsWanted(path), file) {
-		e.API = file
-	}
+// ompRememberAPI records an API magpie generated for the provider. The
+// model APIs are replaced with the rest of magpie's generated model list.
+func ompRememberAPI(path, want string) {
 	stashMu.Lock()
 	defer stashMu.Unlock()
 	m := stashLoad()
@@ -93,7 +84,7 @@ func ompAPIKept(path string, e ompProviderEntry) ompProviderEntry {
 		was = []string{"openai-completions"}
 	}
 	if slices.Contains(was, want) && known {
-		return e
+		return
 	}
 	if !slices.Contains(was, want) {
 		was = append(slices.Clone(was), want)
@@ -105,5 +96,4 @@ func ompAPIKept(path string, e ompProviderEntry) ompProviderEntry {
 	b, _ := json.Marshal(rec)
 	m[apisWantedKey(path)] = string(b)
 	stashWrite(m)
-	return e
 }

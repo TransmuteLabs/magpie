@@ -22,6 +22,8 @@ import (
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/dirent"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
+	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
@@ -210,12 +212,32 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 	}
 	// the protocol picked in its row (omp_protocol.go)
 	protocol := ompProtocolKey(at, dir)
-	// magpie's entry, on the protocol picked, laid over the one in the
-	// models file at path (ompKept), an api the user typed there kept
-	ompProvider := func(path string) any {
-		return ompKept(path, ompAPIKept(path, ompOn(entry(), ompProtocol(protocol))))
-	}
 	path := pick("config")
+	applySettings := func(models string, mode builtinomp.CatalogMode, role *builtinomp.RoleChange) error {
+		files := []extension.LinkedActionFile{{Name: builtinomp.CatalogFile, Path: models}}
+		if mode == builtinomp.WriteCatalog && !at.exists(models) {
+			files = append(files, extension.LinkedActionFile{Name: builtinomp.LegacyModelsFile, Path: filepath.Join(dir, "models.json")})
+		}
+		if role != nil {
+			files = append(files, extension.LinkedActionFile{Name: builtinomp.ConfigFile, Path: path})
+		}
+		var want string
+		options := builtinomp.SettingsOptions{Catalog: mode, Role: role, Build: func(existing map[string]any) any {
+			provider := ompOn(entry(), ompProtocol(protocol))
+			want = provider.API
+			if api, _ := existing["api"].(string); api != "" && api != want && !slices.Contains(piAPIsWanted(models), api) {
+				provider.API = api
+			}
+			return ompKept(existing, provider)
+		}}
+		if err := extension.ApplyLinkedAgentPlan(options, builtinomp.PlanSettings, files...); err != nil {
+			return err
+		}
+		if want != "" {
+			ompRememberAPI(models, want)
+		}
+		return nil
+	}
 	// the entries of enabledModels a sync took out (scope_gone.go)
 	gone := at.key("omp.scope.gone")
 	roleGet := func(name string) func() string {
@@ -240,15 +262,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		return used, err
 	}
 	writeMagpie := func() error {
-		models := pick("models")
-		if _, err := os.Stat(models); err != nil {
-			// omp moves an older models.json to models.yml only while there is
-			// no models.yml, so one magpie writes first has to carry it over
-			if err := edit.JSONToYAML(filepath.Join(dir, "models.json"), models); err != nil {
-				return err
-			}
-		}
-		return edit.SetYAML(models, edit.KV{Path: "providers." + magpieID, Value: ompProvider(models)})
+		return applySettings(pick("models"), builtinomp.WriteCatalog, nil)
 	}
 	// dropMagpie takes magpie's provider out of models.yml once nothing in
 	// the config is on magpie; while something is (a fallback chain, another
@@ -277,7 +291,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			return err
 		}
 		forget(gone)
-		return edit.DelYAML(pick("models"), "providers."+magpieID)
+		return applySettings(pick("models"), builtinomp.DropCatalog, nil)
 	}
 	// was are the stash's keys for the roles, one each
 	var was []string
@@ -302,6 +316,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 			Key: key, Label: label, Quiet: quiet,
 			Get: get,
 			Set: func(v string) error {
+				picked := v != ""
 				cur := get()
 				if v == "" {
 					if ompOnMagpie(cur) {
@@ -333,19 +348,33 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 				}
 				model, _, one := ompSplit(v)
 				if ref, ok := strings.CutPrefix(model, magpieID+"/"); one && ok && isMagpie(ref) {
+					var previous string
 					if !ompOnMagpie(cur) {
-						stash(map[string]string{w: kept()})
+						previous = kept()
 					}
-					if err := writeMagpie(); err != nil {
+					change := &builtinomp.RoleChange{Name: name, Value: v}
+					if name == "default" && picked {
+						change.UpdateEnabledModels = ompScopeModel(model)
+					}
+					if err := applySettings(pick("models"), builtinomp.WriteCatalog, change); err != nil {
 						return err
 					}
-					return edit.SetYAML(path, edit.KV{Path: k, Value: v})
+					if !ompOnMagpie(cur) {
+						stash(map[string]string{w: previous})
+					}
+					return nil
 				}
 				forget(w)
 				if err := edit.SetYAML(path, edit.KV{Path: k, Value: v}); err != nil {
 					return err
 				}
-				return dropMagpie()
+				if err := dropMagpie(); err != nil {
+					return err
+				}
+				if name == "default" && picked && one && model != "" {
+					return ompScopeWith(path, model)
+				}
+				return nil
 			},
 			Options: func(cur map[string]string) []Option {
 				opts := append(ompOwnOptions(pick("models"), cur[key]), viaMagpieShared("omp", magpieID+"/")...)
@@ -397,20 +426,6 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		role("commit", "commit", "commit", true),
 		role("tiny", "tiny", "tiny", true),
 		role("memory", "memory", "memory", true),
-	}
-	// the default role's model is what a new session starts on only while
-	// enabledModels takes it in, so a model picked for it joins the list
-	// there is (omp_scope.go, #1769); a reset puts back what the user had,
-	// which is theirs to have scoped or not
-	setDefault := roles[0].Set
-	roles[0].Set = func(v string) error {
-		if err := setDefault(v); err != nil || v == "" {
-			return err
-		}
-		if model, _, one := ompSplit(roleGet("default")()); one && model != "" {
-			return ompScopeWith(path, model)
-		}
-		return nil
 	}
 	// a model picked for the advisor is one the user wants reviewing: omp
 	// runs none while advisor.enabled is unset (its default is off), so the
@@ -490,7 +505,7 @@ func ompAt(at place, dir string, entry func() ompProviderEntry) *Agent {
 		ListOnly:    true,
 		Sync: func() error {
 			models := pick("models")
-			if err := syncYAML(models, "providers."+magpieID, func() any { return ompProvider(models) }); err != nil {
+			if err := applySettings(models, builtinomp.SyncCatalog, nil); err != nil {
 				return err
 			}
 			// an entry on a model magpie no longer gives omp names nothing
@@ -869,23 +884,17 @@ func ompGeminiMode(id string) string {
 // (ompOwnUserAgent): the one it writes now takes its place, or none, so an
 // omp that names itself is no longer named plain omp by an older magpie's
 // header. Any other is the user's and stays, in place of magpie's.
-func ompKept(path string, e ompProviderEntry) any {
-	kept := yamlKept(path, "providers."+magpieID, e, "baseUrl", "api", "auth", "apiKey", "models")
-	out, ok := kept.(map[string]any)
-	if !ok {
-		return kept
+func ompKept(existing map[string]any, e ompProviderEntry) any {
+	if existing == nil {
+		return e
 	}
-	var have map[string]any
-	if raw, err := edit.Read(path); err == nil {
-		var doc struct {
-			Providers map[string]struct {
-				Headers map[string]any `yaml:"headers"`
-			} `yaml:"providers"`
-		}
-		if yaml.Unmarshal(raw, &doc) == nil {
-			have = doc.Providers[magpieID].Headers
-		}
+	var want map[string]any
+	b, err := yaml.Marshal(e)
+	if err != nil || yaml.Unmarshal(b, &want) != nil || want == nil {
+		return e
 	}
+	out := mergeKept(existing, want, []string{"baseUrl", "api", "auth", "apiKey", "models"})
+	have, _ := existing["headers"].(map[string]any)
 	theirs := map[string]any{}
 	for k, v := range have {
 		if s, _ := v.(string); strings.EqualFold(k, "User-Agent") && !ompOwnUserAgent(s) {
@@ -893,6 +902,7 @@ func ompKept(path string, e ompProviderEntry) any {
 		}
 	}
 	headers, _ := out["headers"].(map[string]any)
+	headers = maps.Clone(headers)
 	for k := range headers {
 		if strings.EqualFold(k, "User-Agent") {
 			delete(headers, k)

@@ -11,7 +11,6 @@
 package search
 
 import (
-	"github.com/yetone/magpie/internal/gwtool"
 	"github.com/yetone/magpie/internal/pluginrt"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
@@ -23,11 +22,8 @@ func init() {
 		ID: "search", API: "^1", Requires: []string{"settings", "gateway"}, Essential: true,
 		Name: "Web search", Sub: "Models that can't search the web search with a provider that can, or a search API",
 		One: "1 search source set up", Many: "{n} search sources set up",
-		InUse: InUse,
-		Activate: func(c sdk.FeatureLifetime) error {
-			c.OnDispose(gwtool.Serve(gwtool.WebSearch))
-			return nil
-		},
+		InUse:      InUse,
+		Tools:      []sdk.LinkedGatewayTool{sdk.LinkedWebSearch},
 		SettingsAt: &sdk.FeatureSettingsLocation{Tab: "models", RowID: "searchList"},
 	})
 }

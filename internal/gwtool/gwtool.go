@@ -13,15 +13,19 @@
 // the server lists none and runs none.
 package gwtool
 
-import "sync"
+import (
+	"sync"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
+)
 
 // WebSearch is magpie's web search: the stand-in web_search tool, the
 // search MCP server and Codex's search when ChatGPT can't answer it.
-const WebSearch = "web_search"
+const WebSearch = string(sdk.LinkedWebSearch)
 
 // PluginTools are the tools the user's plugins give (their OpenCode tool
 // hook), served over magpie's plugin tools MCP server.
-const PluginTools = "plugin_tools"
+const PluginTools = string(sdk.LinkedPluginTools)
 
 var gate struct {
 	sync.Mutex

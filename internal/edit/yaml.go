@@ -119,9 +119,21 @@ func EditYAMLTextStrings(text YAMLText, fn func(string) string) (YAMLText, error
 // null trailing documents allowed; invalid input or output leaves the file
 // untouched.
 func SetYAML(path string, kvs ...KV) error {
-	root, err := loadYAMLForEdit(path)
+	raw, err := Read(path)
 	if err != nil {
 		return err
+	}
+	body, err := RewriteYAML(path, raw, kvs...)
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteYAML(path string, raw []byte, kvs ...KV) ([]byte, error) {
+	root, _, err := parseYAMLTop(TrimBOM(raw))
+	if err != nil {
+		return nil, AtFile(path, err)
 	}
 	if root == nil {
 		root = &yaml.Node{Kind: yaml.MappingNode}
@@ -131,24 +143,24 @@ func SetYAML(path string, kvs ...KV) error {
 		if t, ok := kv.Value.(YAMLText); ok {
 			n, err := parseYAMLDocument([]byte(t))
 			if err != nil {
-				return fmt.Errorf("%s: %s: %w", path, kv.Path, err)
+				return nil, AtFile(path, fmt.Errorf("%s: %w", kv.Path, err))
 			}
 			if n == nil {
-				return fmt.Errorf("%s: %s: not YAML: %q", path, kv.Path, string(t))
+				return nil, AtFile(path, fmt.Errorf("%s: not YAML: %q", kv.Path, string(t)))
 			}
 			v = *n
 		} else if r, ok := kv.Value.(json.RawMessage); ok {
 			n, err := yamlOfJSON(r)
 			if err != nil {
-				return fmt.Errorf("%s: %s: %w", path, kv.Path, err)
+				return nil, AtFile(path, fmt.Errorf("%s: %w", kv.Path, err))
 			}
 			v = *n
 		} else if err := v.Encode(kv.Value); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return nil, AtFile(path, err)
 		}
 		setYAML(root, strings.Split(kv.Path, "."), &v)
 	}
-	return writeYAML(path, root)
+	return renderYAML(path, raw, root)
 }
 
 // yamlOfJSON is JSON text as a YAML node in block style, its object keys in
@@ -180,9 +192,21 @@ func yamlOfJSON(r json.RawMessage) (*yaml.Node, error) {
 
 // DelYAML removes key paths from a YAML file. A missing file stays missing.
 func DelYAML(path string, keyPaths ...string) error {
-	root, err := loadYAMLForEdit(path)
-	if err != nil || root == nil {
+	raw, err := Read(path)
+	if err != nil {
 		return err
+	}
+	body, err := RewriteYAMLWithout(path, raw, keyPaths...)
+	if err != nil || bytes.Equal(body, raw) {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func RewriteYAMLWithout(path string, raw []byte, keyPaths ...string) ([]byte, error) {
+	root, _, err := parseYAMLTop(TrimBOM(raw))
+	if err != nil || root == nil {
+		return raw, AtFile(path, err)
 	}
 	changed := false
 	for _, kp := range keyPaths {
@@ -204,9 +228,9 @@ func DelYAML(path string, keyPaths ...string) error {
 		}
 	}
 	if !changed {
-		return nil
+		return raw, nil
 	}
-	return writeYAML(path, root)
+	return renderYAML(path, raw, root)
 }
 
 // EditYAMLNode hands fn the node at a key path, nil when there is none, to
@@ -227,6 +251,22 @@ func EditYAMLNode(path, keyPath string, fn func(n *yaml.Node) (changed, remove b
 		return writeYAML(path, root)
 	}
 	return nil
+}
+
+func RewriteYAMLNode(path string, raw []byte, keyPath string, fn func(*yaml.Node) (changed, remove bool)) ([]byte, error) {
+	root, _, err := parseYAMLTop(TrimBOM(raw))
+	if err != nil || root == nil {
+		return raw, AtFile(path, err)
+	}
+	changed, remove := fn(lookupYAML(root, strings.Split(keyPath, ".")))
+	switch {
+	case remove:
+		return RewriteYAMLWithout(path, raw, keyPath)
+	case changed:
+		return renderYAML(path, raw, root)
+	default:
+		return raw, nil
+	}
 }
 
 // EditYAMLStrings calls fn on every string under the key paths — mapping
@@ -272,19 +312,28 @@ func JSONToYAML(src, dst string) error {
 	if err != nil || raw == nil {
 		return err
 	}
+	orig, _ := Read(dst)
+	body, err := JSONAsYAML(src, dst, raw, orig)
+	if err != nil || body == nil {
+		return err
+	}
+	return WriteAtomic(dst, body)
+}
+
+func JSONAsYAML(src, dst string, raw, orig []byte) ([]byte, error) {
 	var doc yaml.Node
-	if err := yaml.Unmarshal(jsonc.ToJSON(raw), &doc); err != nil {
-		return fmt.Errorf("%s: %w", src, err)
+	if err := yaml.Unmarshal(jsonc.ToJSON(TrimBOM(raw)), &doc); err != nil {
+		return nil, AtFile(src, err)
 	}
 	if len(doc.Content) == 0 {
-		return nil
+		return nil, nil
 	}
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
-		return fmt.Errorf("%s: top level is not an object", src)
+		return nil, AtFile(src, errors.New("top level is not an object"))
 	}
 	blockStyle(root)
-	return writeYAML(dst, root)
+	return renderYAML(dst, orig, root)
 }
 
 // loadYAML reads the first document's mapping without decoding its values.
@@ -459,27 +508,35 @@ func parseYAMLDocuments(raw []byte) (root *yaml.Node, nextLine int, err error) {
 }
 
 func writeYAML(path string, root *yaml.Node) error {
+	orig, _ := Read(path)
+	body, err := renderYAML(path, orig, root)
+	if err != nil {
+		return err
+	}
+	return WriteAtomic(path, body)
+}
+
+func renderYAML(path string, orig []byte, root *yaml.Node) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(root); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	if err := enc.Close(); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
 	// Reparse the rendered text: replacing or removing a node can leave a
 	// dangling alias even though the original node tree was valid.
 	if _, err := parseYAMLDocument(buf.Bytes()); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, AtFile(path, err)
 	}
-	orig, _ := Read(path)
 	out := buf.Bytes()
 	if Mark != nil {
 		lines := splitLines(string(out))
-		out = []byte(strings.Join(MarkYAMLLines(lines, string(orig)), "\n"))
+		out = []byte(strings.Join(MarkYAMLLines(lines, string(TrimBOM(orig))), "\n"))
 	}
-	return WriteAtomic(path, keepCRLF(out, orig))
+	return keepCRLF(out, orig), nil
 }
 
 func lookupYAML(n *yaml.Node, parts []string) *yaml.Node {

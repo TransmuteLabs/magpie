@@ -76,33 +76,37 @@ func TestSourceResumeCommandQuotesFiniteArguments(t *testing.T) {
 	}
 }
 
-func TestSourceNativePiResumeUsesLinkedRecipe(t *testing.T) {
-	previous, registered := linkedSessionResumeRecipes["pi"]
-	if !registered {
-		t.Fatal("Pi has no linked resume recipe")
-	}
-	t.Cleanup(func() { linkedSessionResumeRecipes["pi"] = previous })
-	linkedSessionResumeRecipes["pi"] = sdk.SessionResumeRecipe{
-		Agent: "pi", Args: []string{"--linked-pi-fixture", "{sessionId}"},
-	}
-	session := Session{
-		Agent: "pi", ID: "listed-id",
-		source: &sessionSourceRecord{
-			grant: sourceGrant{descriptor: sdk.SessionSourceDescriptor{Agent: "pi", Resume: "native"}},
-			request: sdk.SessionSourceReadRequest{
-				Locator: sdk.SessionSourceLocator{SessionID: "source-id", Path: "source-id.jsonl"},
-			},
-			summary: &state{},
-		},
-	}
-	listed(&session)
-	if session.Resume != "pi --linked-pi-fixture source-id" {
-		t.Fatalf("source-backed Pi resume = %q", session.Resume)
-	}
+func TestSourceNativeResumeUsesLinkedRecipe(t *testing.T) {
+	for _, agent := range []string{"pi", "opencode", "qoder-cn"} {
+		t.Run(agent, func(t *testing.T) {
+			previous, registered := linkedSessionResumeRecipes[agent]
+			if !registered {
+				t.Fatal("agent has no linked resume recipe")
+			}
+			t.Cleanup(func() { linkedSessionResumeRecipes[agent] = previous })
+			linkedSessionResumeRecipes[agent] = sdk.SessionResumeRecipe{
+				Agent: "linked-fixture", Args: []string{"--linked-fixture", "{sessionId}"},
+			}
+			session := Session{
+				Agent: agent, ID: "listed-id",
+				source: &sessionSourceRecord{
+					grant: sourceGrant{descriptor: sdk.SessionSourceDescriptor{Agent: agent, Resume: "native"}},
+					request: sdk.SessionSourceReadRequest{
+						Locator: sdk.SessionSourceLocator{SessionID: "source-id", Path: "source-id.jsonl"},
+					},
+					summary: &state{},
+				},
+			}
+			listed(&session)
+			if session.Resume != "linked-fixture --linked-fixture source-id" {
+				t.Fatalf("source-backed resume = %q", session.Resume)
+			}
 
-	t.Cleanup(ForceCLIGone("pi"))
-	listed(&session)
-	if session.Resume != "" {
-		t.Fatalf("source-backed Pi resume offered with pi gone: %q", session.Resume)
+			t.Cleanup(ForceCLIGone(agent))
+			listed(&session)
+			if session.Resume != "" {
+				t.Fatalf("source-backed resume offered with executable gone: %q", session.Resume)
+			}
+		})
 	}
 }

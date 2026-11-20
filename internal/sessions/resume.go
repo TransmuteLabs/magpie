@@ -1,27 +1,28 @@
 package sessions
 
 import (
+	"cmp"
 	"context"
+	"runtime"
 	"strings"
 	"time"
 
-	builtinclaude "github.com/yetone/magpie/internal/extension/builtin/claude"
 	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	builtinomp "github.com/yetone/magpie/internal/extension/builtin/omp"
-	"github.com/yetone/magpie/internal/extension/builtin/pisession"
+	"github.com/yetone/magpie/internal/extension/builtin/sessionresume"
 	"github.com/yetone/magpie/internal/lazyre"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-var linkedSessionResumeRecipes = map[string]sdk.SessionResumeRecipe{
-	"claude": builtinclaude.ResumeSession(),
-	"codex":  builtincodex.ResumeSession(""),
-	"pi":     pisession.ResumeSession(),
-}
+var linkedSessionResumeRecipes = sessionresume.Recipes()
 
 var plainResumeArg = lazyre.New(`^[0-9A-Za-z_.=-]+$`)
+var safeOmpProfile = lazyre.New(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-func linkedResumeCommand(recipe sdk.SessionResumeRecipe, id string) string {
+func linkedResumeCommand(recipe sdk.SessionResumeRecipe, id string, launch func() string) string {
+	if !safeID.MatchString(id) {
+		return ""
+	}
 	argv, err := recipe.Arguments(id)
 	if err != nil || !sdk.ValidID(recipe.Agent) {
 		return ""
@@ -31,20 +32,70 @@ func linkedResumeCommand(recipe sdk.SessionResumeRecipe, id string) string {
 			return ""
 		}
 	}
-	return recipe.Agent + " " + strings.Join(argv, " ")
+	start := recipe.Agent
+	if launch != nil {
+		start = cmp.Or(launch(), start)
+	}
+	return start + " " + strings.Join(argv, " ")
 }
 
-func ompResumeCommand(path, id string) string {
-	profile := ompProfile(path)
-	if profile != "" && !safeOmpProfile.MatchString(profile) {
+// ResumeCommand is the shell line that picks a session up again in its
+// folder, or "" for an id that isn't plain.
+func ResumeCommand(agent, id, cwd string) string { return resumeCommand("", agent, id, cwd, "") }
+
+// resumeFor is resumeCommand for a listed row: none for an agent whose
+// command is gone from this computer, which the line would fail to start.
+// A WSL distro's agent is looked for there, not here.
+func resumeFor(distro, agent, id, cwd, path string) string {
+	if distro == "" && cliGone(agent) {
 		return ""
 	}
-	return linkedResumeCommand(builtinomp.ResumeSession(profile), id)
+	return resumeCommand(distro, agent, id, cwd, path)
+}
+
+func resumeCommand(distro, agent, id, cwd, path string) string {
+	recipe, found := linkedSessionResumeRecipes[agent]
+	if !found || agent == "cursor" && cwd == "" {
+		return ""
+	}
+	if agent == "omp" {
+		if profile := ompProfile(path); profile != "" {
+			return resumeLine(distro, cwd, namedOMPResumeCommand(id, profile))
+		}
+	}
+	var launch func() string
+	if agent == "agy" && distro == "" {
+		launch = AgyStart
+	}
+	return resumeLine(distro, cwd, linkedResumeCommand(recipe, id, launch))
+}
+
+func namedOMPResumeCommand(id, profile string) string {
+	if !safeOmpProfile.MatchString(profile) {
+		return ""
+	}
+	return linkedResumeCommand(builtinomp.ResumeSession(profile), id, nil)
+}
+
+func resumeLine(distro, cwd, run string) string {
+	if run == "" {
+		return ""
+	}
+	if distro != "" {
+		return wslResume(distro, cwd, run)
+	}
+	if cwd == "" {
+		return run
+	}
+	if runtime.GOOS == "windows" {
+		return "Set-Location -LiteralPath '" + strings.ReplaceAll(cwd, "'", "''") + "'; " + run
+	}
+	return "cd " + shellQuote(cwd) + " && " + run
 }
 
 func codexResumeOnProvider(saved, id, provider string) string {
-	plain := linkedResumeCommand(linkedSessionResumeRecipes["codex"], id)
-	selected := linkedResumeCommand(builtincodex.ResumeSession(provider), id)
+	plain := linkedResumeCommand(linkedSessionResumeRecipes["codex"], id, nil)
+	selected := linkedResumeCommand(builtincodex.ResumeSession(provider), id, nil)
 	if plain != "" && selected != "" && strings.HasSuffix(saved, plain) {
 		return strings.TrimSuffix(saved, plain) + selected
 	}

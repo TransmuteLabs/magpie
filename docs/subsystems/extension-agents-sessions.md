@@ -164,14 +164,16 @@ must own the source's agent ID or explicitly profile that native target.
 Source data does not supply a command, executable path or environment.
 Existing `none` and `native` resume declarations keep their behavior.
 
-Built-in Claude Code, Codex, OMP and Pi contribute the same
-`SessionResumeRecipe` type from their linked modules. Pi uses its recipe for
-native transcripts and SDK sources that declare native Pi resume. The host
-also uses the recipe's agent to check whether Pi's executable is available.
-The host resolves OMP's profile from the
-selected session store and validates its name before asking the module for
-arguments. The native command renderer rejects flag-like session IDs, admits
-only shell-safe atoms and owns the working-directory and WSL wrappers.
+The [linked resume inventory](../../internal/extension/builtin/sessionresume/recipes.go)
+uses the same `SessionResumeRecipe` type for native commands. The host uses
+the recipe's agent to check executable availability for listed sessions.
+Pi also uses its recipe for SDK sources that declare native Pi resume.
+OMP resolves the profile from the selected store for resume and from the
+chosen target for CarryOver. The host validates the profile before asking
+the module for arguments. The native command renderer rejects flag-like or
+overlong session IDs and admits only shell-safe atoms. The host retains the
+working-directory and WSL wrappers, Cursor's directory requirement and
+agy's local launch overlay.
 Opening a Codex session checks its saved provider at launch time. When
 the provider still exists and differs from the current choice, the Codex
 module supplies the structured override recipe. The host keeps ownership
@@ -288,6 +290,13 @@ global provider, saved provider/catalog/effort restoration, auxiliary
 models, effort and background compaction edits pass the same typed snapshot in process and
 return an `AgentPlan`. Claude effort and routing-related environment
 flags use that contract on their ordinary configuration paths.
+OMP uses it to update its provider catalog and set a Magpie model on a
+role. Picking that model for the default role also updates `enabledModels`
+in the same plan. The host resolves the profile's actual YAML paths,
+checks the catalog and config snapshots, and remembers its API only after
+publication. The plan preserves a configured provider API and user agent
+header and can read a legacy `models.json` when creating the YAML catalog.
+Catalog refresh and removal use the same checked publication.
 The ordinary Codex subagent model and effort fields use the auxiliary model
 plan. A model change checks the saved effort against the new model and clears
 an incompatible effort in the same checked `config.toml` write. The gateway's
@@ -310,6 +319,10 @@ route settings plan publishes the gateway address and key, main model, tiers,
 subagent model and managed output limit together. It removes the old
 `ANTHROPIC_MODEL` override in the same write. The host authorizes caller keys
 against the settings snapshot and records field fingerprints after publication.
+The plan also removes enabled cloud switches that would bypass the gateway
+and tier labels that no longer describe the selected model. Sync applies
+the same rules to the current file, and restoration metadata comes from
+the snapshot used for the checked write.
 Disconnect compares those fingerprints against its own snapshot. It restores
 the original route and removes its effort override in one plan. It preserves
 hand-edited values and deletions. When the current endpoint is confirmed as

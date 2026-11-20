@@ -253,7 +253,9 @@ func TestResumeCommand(t *testing.T) {
 
 func TestResumeUsesLinkedAgentRecipe(t *testing.T) {
 	setupMore(t)
-	targets := []struct{ agent, id string }{{"claude", mgCC}, {"codex", mgCX}, {"pi", piFirst}}
+	targets := []struct{ agent, id string }{
+		{"claude", mgCC}, {"codex", mgCX}, {"pi", piFirst}, {"opencode", ocMain},
+	}
 	for _, target := range targets {
 		previous, registered := linkedSessionResumeRecipes[target.agent]
 		if !registered {
