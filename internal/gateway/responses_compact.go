@@ -2,14 +2,19 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/codexsummary"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+type unaryCompactKey struct{}
 
 func (s *Server) responsesCompact(w http.ResponseWriter, r *http.Request) {
 	body, ok := s.requestBody(w, r, provider.Responses)
@@ -22,6 +27,12 @@ func (s *Server) responsesCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noteAsked(r.Context(), model)
+	if s.nativeCompactionForWire(model, s.compactsUnary) && !hasMagpieCheckpoint(body) {
+		r = r.WithContext(context.WithValue(r.Context(), unaryCompactKey{}, true))
+		body = keyTiered(r, codexTiered(r, fastTier(body), model), model)
+		s.serveAgent(w, r, provider.Responses, body)
+		return
+	}
 	history := compactHistory(body)
 	if len(history) == 0 {
 		writeError(w, provider.Responses, http.StatusBadRequest, "compact requires nonempty, self-contained input without conversation references, control items or unreadable checkpoints")
@@ -75,4 +86,38 @@ func compactHistory(body []byte) []json.RawMessage {
 		}
 	}
 	return history
+}
+
+func hasMagpieCheckpoint(body []byte) bool {
+	for _, item := range getIn(body, "input").Array() {
+		if slices.Contains(compactionKinds, item.Get("type").Str) &&
+			strings.HasPrefix(item.Get("encrypted_content").Str, magpieCompaction) {
+			return true
+		}
+	}
+	return false
+}
+
+// unaryCompact is whether r is a /responses/compact request.
+func unaryCompact(r *http.Request) bool {
+	v, _ := r.Context().Value(unaryCompactKey{}).(bool)
+	return v
+}
+
+// compactsUnary is whether model at p can be asked /responses/compact: a
+// key's provider (no account) whose wire carries Responses and asks model
+// on it.
+func (s *Server) compactsUnary(p provider.Provider, model string) bool {
+	return p.Account == nil && s.carriesCompaction(p, model)
+}
+
+// unaryCompactCarriers keeps of cands those compactsUnary.
+func (s *Server) unaryCompactCarriers(cands []candidate, pl planned) ([]candidate, planned, bool) {
+	return keepCandidates(cands, pl, func(c candidate) bool { return s.compactsUnary(c.p, c.model) })
+}
+
+// unaryCompactError is what a /responses/compact for model is told when
+// nothing that serves it has the route.
+func unaryCompactError(model string) string {
+	return fmt.Sprintf("/responses/compact is not supported for %s: it is relayed only to a provider whose own API is Responses (an API key's provider asking the model on Responses), and none of those serves %s; compact on /responses instead", model, model)
 }
