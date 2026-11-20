@@ -374,7 +374,14 @@ func readUpTo(ctx context.Context, auto func() string, complete Complete, limit 
 	if model == "" {
 		runErr = errors.New("no model to read conversations with: pick one")
 	} else {
-		res, runErr = run(ctx, st, model, st.Effort, complete, limit)
+		ss, oldest, err := due(ctx, st, now())
+		if ctx.Err() != nil {
+			return Result{}, context.Cause(ctx)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		res, runErr = run(ctx, ss, oldest, model, st.Effort, complete, limit)
 	}
 	if context.Cause(ctx) == errStopped && errors.Is(runErr, context.Canceled) {
 		runErr = nil
@@ -415,16 +422,29 @@ type ran struct {
 // (sessions.GatewayKeys). Reading only the files left every agent seen
 // only through the gateway out of memory (bxgz233 on X: 1000+ WorkBuddy
 // sessions, none read).
-func listed() []sessions.Session {
-	native := sessions.List(Listed)
+func listed(ctx context.Context) ([]sessions.Session, error) {
+	native, err := sessions.ListContext(ctx, Listed)
+	if err != nil {
+		return nil, err
+	}
 	keys := map[string]bool{}
 	for _, s := range native {
 		for _, k := range sessions.GatewayKeys(s) {
 			keys[k] = true
 		}
 	}
-	all := sessions.MergeExternal(native, usage.ListedGateway(keys, Listed))
-	return all[:min(len(all), Listed)]
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	external := usage.ListedGateway(keys, Listed)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	all := sessions.MergeExternal(native, external)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return all[:min(len(all), Listed)], nil
 }
 
 // transcriptOf reads s where it is kept: a gateway-only session from what
@@ -448,10 +468,17 @@ func forget(at, since, oldest time.Time) bool {
 
 // due are the sessions to read now, the latest first, and the last turn
 // of the oldest listed.
-func due(st State, t time.Time) ([]sessions.Session, time.Time) {
+func due(ctx context.Context, st State, t time.Time) ([]sessions.Session, time.Time, error) {
+	rows, err := list(ctx)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
 	var out []sessions.Session
 	var oldest time.Time
-	for _, s := range list() {
+	for _, s := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, time.Time{}, err
+		}
 		if oldest.IsZero() || s.Last.Before(oldest) {
 			oldest = s.Last
 		}
@@ -467,16 +494,16 @@ func due(st State, t time.Time) ([]sessions.Session, time.Time) {
 		out = append(out, s)
 	}
 	slices.SortStableFunc(out, func(a, b sessions.Session) int { return b.Last.Compare(a.Last) })
-	return out, oldest
+	if err := ctx.Err(); err != nil {
+		return nil, time.Time{}, err
+	}
+	return out, oldest, nil
 }
 
 func key(s sessions.Session) string { return s.Agent + "/" + s.ID }
 
-func run(ctx context.Context, st State, model, effort string, complete Complete, limit int) (ran, error) {
-	r := ran{done: map[string]time.Time{}}
-	ss, oldest := due(st, now())
-	r.oldest = oldest
-	r.left = len(ss)
+func run(ctx context.Context, ss []sessions.Session, oldest time.Time, model, effort string, complete Complete, limit int) (ran, error) {
+	r := ran{done: map[string]time.Time{}, oldest: oldest, left: len(ss)}
 	of.Store(int64(len(ss)))
 	for _, s := range ss {
 		if r.Read >= limit {

@@ -38,9 +38,9 @@ func TestGatewayOnlySessionsRead(t *testing.T) {
 	for i, id := range []string{"wb-1", "wb-1", "unrecorded"} {
 		usage.Append(usage.Record{Time: at.Add(time.Duration(i) * time.Minute), Agent: "workbuddy", Session: id, Provider: "p", Model: "m", Input: 10, Output: 2, Status: 200})
 	}
-	ss, _ := due(State{Since: sb.at.Add(-Back)}, sb.at)
-	if len(ss) != 2 || !ss[0].Gateway || !ss[1].Gateway {
-		t.Fatalf("due: %+v", ss)
+	ss, _, err := due(t.Context(), State{Since: sb.at.Add(-Back)}, sb.at)
+	if err != nil || len(ss) != 2 || !ss[0].Gateway || !ss[1].Gateway {
+		t.Fatalf("due: %+v %v", ss, err)
 	}
 	res, err := Run(context.Background(), "auto/m", sb.complete)
 	if err != nil || res.Read != 1 || len(sb.asked) != 1 || sb.asked[0] != "auto/m User: wb: we release with make ship" {

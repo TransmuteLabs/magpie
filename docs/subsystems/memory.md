@@ -277,7 +277,12 @@ linked `MemoryOwner`.
   with a Stop (`Stop`, `POST /api/memory/distill/stop`; switching off
   stops it too). The linked service registers the run before looking up
   the model, and the GUI takes the running state from that service.
-  Stop is available during discovery and while reading one conversation.
+  Stop cancels discovery, transcript reads and model requests. Native
+  discovery checks for cancellation between agent listings and queued
+  file parses. A synchronous filesystem read, an already running file
+  parse or a lock acquisition can finish before the run exits. The
+  gateway-only Usage projection is checked before and after its
+  synchronous read.
   A stop or a failure leaves the rest for the next run, and the row says
   how many from the sessions discovered (`State.Left`).
 - State is `distill.json` beside the `memory` folder (`memdistill.Path`):
@@ -334,6 +339,10 @@ linked `MemoryOwner`.
   even when the operation returns success after cancellation
   (`TestReadAllLeavesInterruptedTranscriptPending`,
   `TestReadAllDiscardsSuccessfulReplyAfterStop`).
+  When discovery is interrupted before a complete listing, the previous
+  run's marks and counts stay as written
+  (`TestReadAllCanBeStoppedWhileListing`,
+  `TestFindStopsBeforeParsingCanceledListing`).
 - Routes: `GET /api/memory/distill`, `POST /api/memory/distill`
   `{on, model, effort?, days?}` (switching on, a new model, or a longer
   range reads at once; a bad level or range is a 400,
