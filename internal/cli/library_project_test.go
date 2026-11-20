@@ -278,3 +278,201 @@ func TestLibraryProjectInstructionsCmd(t *testing.T) {
 		t.Errorf("AGENTS.md is still there: %v", err)
 	}
 }
+
+// magpie library project server|subagent … (#7248, jinpwng on X): a
+// project's MCP servers and subagents added, pointed at other agents and
+// taken out from a terminal, through the calls the page makes. Claude
+// Code's project file keeps the user's own server.
+func TestLibraryProjectServerAndSubagentCmd(t *testing.T) {
+	proj := projectSandbox(t)
+	if _, err := library.SaveServer("", library.Server{Name: "docs", Transport: "stdio", Command: "npx", Args: []string{"-y", "docs-mcp"}, Agents: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := library.SaveSubagent("", library.Subagent{Name: "reviewer", Description: "reviews", Prompt: "You review code.", Agents: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	own := `{"mcpServers":{"mine":{"command":"mine"}}}`
+	if err := os.WriteFile(filepath.Join(proj, ".mcp.json"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		t.Helper()
+		out, err := projectOut(t, args...)
+		if err != nil {
+			t.Fatalf("library project %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	refused := func(args ...string) {
+		t.Helper()
+		if out, err := projectOut(t, args...); err == nil {
+			t.Errorf("library project %v was taken:\n%s", args, out)
+		}
+	}
+	read := func(rel string) string {
+		b, _ := os.ReadFile(filepath.Join(proj, rel))
+		return string(b)
+	}
+	must("add", ".")
+	refused("server", "add", ".", "nope")
+	refused("server", "add", ".", "docs", "agents=zz")
+	refused("server", "add", ".", "docs", "--yes")
+	refused("server", "rm", ".", "docs") // not in it
+	refused("subagent", "add", ".", "docs")
+
+	must("server", "add", ".", "docs", "agents=claude")
+	if got := read(".mcp.json"); !strings.Contains(got, "docs-mcp") || !strings.Contains(got, `"mine"`) {
+		t.Errorf(".mcp.json:\n%s", got)
+	}
+	if out := must("server", "."); !strings.Contains(out, "docs") || !strings.Contains(out, "claude") {
+		t.Errorf("list:\n%s", out)
+	}
+	out := must("server", "list", ".", "--json")
+	var js struct {
+		Servers map[string][]string `json:"servers"`
+	}
+	if err := json.Unmarshal([]byte(out), &js); err != nil || len(js.Servers["docs"]) != 1 {
+		t.Errorf("--json %v:\n%s", err, out)
+	}
+	must("server", "agents", ".", "docs", "claude,codex")
+	if got := read(".codex/config.toml"); !strings.Contains(got, "docs-mcp") {
+		t.Errorf(".codex/config.toml:\n%s", got)
+	}
+	must("server", "rm", ".", "docs")
+	if got := read(".mcp.json"); strings.Contains(got, "docs-mcp") || !strings.Contains(got, `"mine"`) {
+		t.Errorf(".mcp.json after rm:\n%s", got)
+	}
+
+	// with no agents=, the agents here that read a project's subagents
+	must("subagent", "add", ".", "reviewer")
+	if got := read(".claude/agents/reviewer.md"); !strings.Contains(got, "You review code.") {
+		t.Errorf("claude's subagent:\n%s", got)
+	}
+	if got := read(".codex/agents/reviewer.toml"); !strings.Contains(got, "developer_instructions") {
+		t.Errorf("codex's subagent:\n%s", got)
+	}
+	must("subagent", "agents", ".", "reviewer", "codex")
+	if _, err := os.Stat(filepath.Join(proj, ".claude/agents/reviewer.md")); err == nil {
+		t.Error("claude's subagent stayed")
+	}
+	must("subagent", "rm", ".", "reviewer")
+	if _, err := os.Stat(filepath.Join(proj, ".codex/agents/reviewer.toml")); err == nil {
+		t.Error("codex's subagent stayed")
+	}
+	refused("subagent", "rm", ".", "reviewer")
+}
+
+// #7253: one hook added to a project and taken out again through the CLI,
+// beside the user's own entry, for the agents named.
+func TestLibraryProjectHookCmd(t *testing.T) {
+	proj := projectSandbox(t)
+	if _, err := library.SaveHook("", library.Hook{Name: "bark", Event: "turn-end", Command: "say bark", Agents: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	own := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}`
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "settings.local.json"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		t.Helper()
+		out, err := projectOut(t, args...)
+		if err != nil {
+			t.Fatalf("library project %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	read := func(rel string) string {
+		b, _ := os.ReadFile(filepath.Join(proj, rel))
+		return string(b)
+	}
+	must("add", ".")
+	for _, bad := range [][]string{{"hook", "add", ".", "nope"}, {"hook", "add", ".", "bark", "agents=zz"}, {"hook", "add", ".", "bark", "--yes"}, {"hook", "rm", ".", "bark"}} {
+		if out, err := projectOut(t, bad...); err == nil {
+			t.Errorf("library project %v was taken:\n%s", bad, out)
+		}
+	}
+	must("hook", "add", ".", "bark", "agents=claude,codex")
+	if got := read(".claude/settings.local.json"); !strings.Contains(got, "say bark") || !strings.Contains(got, "echo mine") {
+		t.Errorf("claude:\n%s", got)
+	}
+	if got := read(".codex/hooks.json"); !strings.Contains(got, "say bark") {
+		t.Errorf("codex:\n%s", got)
+	}
+	if out := must("hook", "."); !strings.Contains(out, "bark") || !strings.Contains(out, "codex") {
+		t.Errorf("list:\n%s", out)
+	}
+	// each row says where it comes from (#7247): magpie's bark, the project's echo mine
+	var listed struct {
+		Items []struct{ Name, Source, Path string }
+	}
+	if err := json.Unmarshal([]byte(must("hook", ".", "--json")), &listed); err != nil {
+		t.Fatal(err)
+	}
+	src := map[string]string{}
+	for _, it := range listed.Items {
+		src[it.Name] = it.Source
+	}
+	if src["bark"] != "magpie" || src["echo mine"] != "project" || len(src) != 2 {
+		t.Errorf("sources: %+v", listed.Items)
+	}
+	must("hook", "agents", ".", "bark", "codex")
+	if got := read(".claude/settings.local.json"); strings.Contains(got, "say bark") || !strings.Contains(got, "echo mine") {
+		t.Errorf("claude after agents:\n%s", got)
+	}
+	must("hook", "rm", ".", "bark")
+	if _, err := os.Stat(filepath.Join(proj, ".codex", "hooks.json")); err == nil {
+		t.Error("the file magpie made stayed")
+	}
+}
+
+// magpie library project pi (#7249): add, off, on, rm, adopt and list, and
+// the project's own package left as it is.
+func TestLibraryProjectPiCmd(t *testing.T) {
+	proj := projectSandbox(t)
+	if err := os.MkdirAll(filepath.Join(proj, ".pi"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := `{"packages":["npm:pi-own"]}`
+	if err := os.WriteFile(filepath.Join(proj, ".pi", "settings.json"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	must := func(args ...string) string {
+		t.Helper()
+		out, err := projectOut(t, args...)
+		if err != nil {
+			t.Fatalf("library project %v: %v\n%s", args, err, out)
+		}
+		return out
+	}
+	read := func() string {
+		b, _ := os.ReadFile(filepath.Join(proj, ".pi", "settings.json"))
+		return strings.Join(strings.Fields(string(b)), "")
+	}
+	must("add", ".")
+	for _, bad := range [][]string{{"pi", "add", ".", "--evil"}, {"pi", "add", ".", "-x"}, {"pi", "add", ".", "./local dir"}, {"pi", "add", ".", "npm:pi-own"}} {
+		if out, err := projectOut(t, bad...); err == nil {
+			t.Errorf("library project %v was taken:\n%s", bad, out)
+		}
+	}
+	must("pi", "add", ".", "npm:pi-demo")
+	if got := read(); !strings.Contains(got, `"npm:pi-own"`) || !strings.Contains(got, `"npm:pi-demo"`) {
+		t.Errorf("add: %s", got)
+	}
+	must("pi", "off", ".", "npm:pi-demo")
+	if got := read(); !strings.Contains(got, `"extensions":[]`) {
+		t.Errorf("off: %s", got)
+	}
+	out := must("pi", ".", "--json")
+	if !strings.Contains(out, `"by": "project"`) || !strings.Contains(out, `"state": "off"`) {
+		t.Errorf("list:\n%s", out)
+	}
+	must("pi", "on", ".", "npm:pi-demo")
+	must("pi", "adopt", ".", "npm:pi-own")
+	must("pi", "rm", ".", "npm:pi-demo", "npm:pi-own")
+	if got := read(); got != own {
+		t.Errorf("rm: %s", got)
+	}
+}
