@@ -171,12 +171,7 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 	// reasoning level and how far back it reads; a longer range reads at
 	// once too
 	mux.HandleFunc("POST /api/memory/distill", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct {
-			On     bool    `json:"on"`
-			Model  string  `json:"model"`
-			Effort *string `json:"effort"`
-			Days   *int    `json:"days"`
-		}
+		var in memdistill.SettingsChange
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
@@ -185,27 +180,11 @@ func memoryDistillRoutes(mux *http.ServeMux) {
 			fail(rw, fmt.Errorf("a model's id such as codex/gpt-5.5, not %q", in.Model))
 			return
 		}
-		was, _ := memdistill.Load()
-		if in.Effort != nil {
-			if _, err := memdistill.SetEffort(*in.Effort); err != nil {
-				fail(rw, err)
-				return
-			}
-		}
-		longer := false
-		if in.Days != nil {
-			st, err := memdistill.SetRange(*in.Days)
-			if err != nil {
-				fail(rw, err)
-				return
-			}
-			longer = st.Since.Before(was.Since)
-		}
-		if _, err := memdistill.Set(in.On, in.Model); err != nil {
+		_, read, err := memdistill.Configure(in)
+		if err != nil {
 			fail(rw, err)
 			return
 		}
-		read := in.On && (!was.On || was.Model != in.Model || longer)
 		if read {
 			distillNow()
 		}

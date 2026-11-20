@@ -189,6 +189,26 @@ func TestDistillRangeAndEffortRoutes(t *testing.T) {
 			t.Fatalf("%s taken", bad)
 		}
 	}
+	t.Run("invalid range preserves settings and leaves the run alone", func(t *testing.T) {
+		before, err := os.ReadFile(memdistill.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs := reads
+		if code, _ := post(`{"on":true,"model":"relay/model","effort":"high","days":12}`); code != http.StatusBadRequest {
+			t.Fatalf("invalid combination returned %d", code)
+		}
+		after, err := os.ReadFile(memdistill.Path())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Error("rejected combination changed distillation settings")
+		}
+		if reads != runs {
+			t.Errorf("rejected combination started %d runs", reads-runs)
+		}
+	})
 }
 
 // Stop on the row ends the run going (RealZeroP27 on X: a backlog read
