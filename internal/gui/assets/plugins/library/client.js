@@ -992,7 +992,7 @@ magpie.plugin("library", (ctx) => {
     // Pi's extensions too: one installed or changed outside magpie since
     if (id === "pi" && piView) loadPi();
     // and the plugins and packages the agents installed themselves
-    if (["skills", "mcp", "hooks"].includes(id) && nativeView) loadNative();
+    if (NATIVE_TABS.includes(id) && nativeView) loadNative();
     // memory too: agents save to it while the page is open
     if (id === "memory" && mem) loadMemory();
     if (!lib) return page.querySelector(":scope > .lib-skel")?.replaceWith(skeleton(id));
@@ -2209,6 +2209,9 @@ magpie.plugin("library", (ctx) => {
   // registers nothing, and whether a session loads one isn't known from
   // its files. Asked for when a tab that lists them is drawn, not part of
   // /api/library, which is polled.
+  // Claude Code's own plugins too (#7266): their subagents on Subagents,
+  // and their parts beside a project's whole-plugin choice on Plugins
+  const NATIVE_TABS = ["skills", "mcp", "hooks", "subagents", "plugins"];
   let nativeView = null;   // /api/library/native
   let nativeLoading = false;
   async function loadNative() {
@@ -2223,7 +2226,16 @@ magpie.plugin("library", (ctx) => {
       // a list that can't be read is not drawn, never a wrong one
     }
     nativeLoading = false;
-    if (nativeView && ["skills", "mcp", "hooks"].includes(tab)) render();
+    if (nativeView && NATIVE_TABS.includes(tab)) render();
+  }
+  // a Claude Code plugin's parts, from any of its installed records, in
+  // the words a library plugin's are said in
+  function claudeNativeParts(id) {
+    if (!nativeView) { if (!nativeLoading) loadNative(); return ""; }
+    const p = nativeView.find((x) => x.agent === "claude" && x.name === id);
+    if (!p) return "";
+    const of = (kind) => (p.parts || []).filter((x) => x.kind === kind).map((x) => x.name);
+    return pluginParts({ skills: of("skill"), mcp: of("mcp"), hooks: of("hook"), subagents: of("subagent") });
   }
   function nativeSection(kind) {
     if (agentless()) return [];
@@ -2243,7 +2255,7 @@ magpie.plugin("library", (ctx) => {
         if (p.project) origin.append(pathLink(p.project));
         origin.title = p.source || "";
         who.append(origin);
-        row.append(glyph(GLYPH[kind === "mcp" ? "web" : kind === "hook" ? "cmd" : "skill"]), who);
+        row.append(glyph(GLYPH[{ mcp: "web", hook: "cmd", subagent: "subagent" }[kind] || "skill"]), who);
         if (p.enabled === false) row.append(tag(t("Off in {agent}", { agent: p.agentName }), "warn", t("{agent}'s own settings turn this plugin off", { agent: p.agentName })));
         rows.push(row);
       }
@@ -2885,11 +2897,36 @@ magpie.plugin("library", (ctx) => {
   }
   // a part a Claude plugin brought: its agents follow the plugin's when
   // those change (library/plugin.go givePlugin)
-  const withPlugin = (nm, x) => {
-    if (x.bundle) nm.append(tag(t("In {plugin}", { plugin: x.bundle }), "lib-bundle",
-      t("Comes with the Claude plugin {plugin}. Changing the plugin's agents, or turning it off and on, gives this to the plugin's agents again.", { plugin: x.bundle })));
+  // On Skills, Hooks and Subagents (kind) the tag shows only what that
+  // plugin brought, the rest back with the bar's Show all (#7280, jinpwng)
+  const withPlugin = (nm, x, kind) => {
+    if (!x.bundle) return nm;
+    const b = tag(t("In {plugin}", { plugin: x.bundle }), "lib-bundle",
+      t("Comes with the Claude plugin {plugin}. Changing the plugin's agents, or turning it off and on, gives this to the plugin's agents again.", { plugin: x.bundle }));
+    if (kind) {
+      b.classList.add("link");
+      b.dataset.bundle = x.bundle;
+      b.onclick = (e) => { e.stopPropagation(); bundleOnly[kind] = x.bundle; render(); };
+    }
+    nm.append(b);
     return nm;
   };
+  // what a tab shows of a plugin's, picked from its tag: nothing once the
+  // plugin brings none of the tab's items any more
+  const bundleOnly = {};
+  const onlyBundle = (kind, items) => {
+    const b = bundleOnly[kind];
+    if (b && !items.some((x) => x.bundle === b)) delete bundleOnly[kind];
+    return bundleOnly[kind] ? items.filter((x) => x.bundle === bundleOnly[kind]) : items;
+  };
+  function bundleBar(kind) {
+    const b = bundleOnly[kind];
+    if (!b) return [];
+    const bar = el("div", "row-head lib-bundleonly");
+    bar.append(el("span", "label", t("Only what {plugin} brings", { plugin: b })), el("span", "grow"),
+      button(t("Show all"), "lib-bundleall", () => { delete bundleOnly[kind]; render(); }));
+    return [bar];
+  }
 
   // ---------- MCP servers ----------
 
@@ -4799,8 +4836,8 @@ magpie.plugin("library", (ctx) => {
         body.append(rh);
       }
       const list = el("div", "list lib-list");
-      list.append(...[...hooks].sort((a, b) => a.name.localeCompare(b.name)).map((h) => hookRow(h, all)));
-      body.append(list);
+      list.append(...onlyBundle("hooks", [...hooks]).sort((a, b) => a.name.localeCompare(b.name)).map((h) => hookRow(h, all)));
+      body.append(...bundleBar("hooks"), list);
       if (picking) body.append(pickBar(all));
       const after = el("div", "after-list");
       after.append(button(t("＋ Add hook"), "", () => editHook(null)));
@@ -4827,7 +4864,7 @@ magpie.plugin("library", (ctx) => {
   function hookRow(h, all) {
     const row = el("div", "row lib-row click lib-hook");
     const who = el("div", "who");
-    who.append(withPlugin(el("div", "name mono", h.name), h));
+    who.append(withPlugin(el("div", "name mono", h.name), h, "hooks"));
     // what it is for, in the user's own words (#2011)
     if (h.description) who.append(el("div", "lib-hookdesc", h.description));
     who.append(el("div", "sub lib-hookev", hookLine(h)));
@@ -5008,8 +5045,8 @@ magpie.plugin("library", (ctx) => {
       body.append(empty(t("No subagents in the library yet"), t("Add one, and pick the agents that can hand it a task."), button(t("＋ Add a subagent"), "action", () => editSubagent(null))));
     } else {
       const list = el("div", "list lib-list");
-      list.append(...[...subs].sort((a, b) => a.name.localeCompare(b.name)).map((s) => subagentRow(s, all)));
-      body.append(list);
+      list.append(...onlyBundle("subagents", [...subs]).sort((a, b) => a.name.localeCompare(b.name)).map((s) => subagentRow(s, all)));
+      body.append(...bundleBar("subagents"), list);
       const after = el("div", "after-list");
       after.append(button(t("＋ Add subagent"), "", () => editSubagent(null)));
       body.append(after);
@@ -5028,6 +5065,7 @@ magpie.plugin("library", (ctx) => {
     const skip = all.filter((a) => subagentAgentOf(a.id).no);
     if (skip.length) body.append(el("p", "lib-aside lib-subagents-no", t("magpie can't give subagents to {agents} yet: their chips are greyed, and say why.", { agents: skip.map((a) => a.name).join(", ") })));
     if (!agentless() && (subs.length || lib.projects.length)) renderProjects(body, "subagents");
+    body.append(...nativeSection("subagent"));
   }
 
   // subagents from a repository (CHENGJIAHEGOXIS on X): a link to one,
@@ -5146,7 +5184,7 @@ magpie.plugin("library", (ctx) => {
   function subagentRow(s, all) {
     const row = el("div", "row lib-row click lib-subagent");
     const who = el("div", "who");
-    who.append(withPlugin(el("div", "name mono", s.name), s));
+    who.append(withPlugin(el("div", "name mono", s.name), s, "subagents"));
     who.append(el("div", "lib-subagentdesc", s.description));
     const line = subagentLine(s);
     if (line) who.append(el("div", "sub lib-subagentuses", line));
@@ -5693,6 +5731,7 @@ magpie.plugin("library", (ctx) => {
     p.mcp?.length ? t("MCP servers: {names}", { names: p.mcp.join(", ") }) : "",
     p.hooks?.length ? t("Hooks: {names}", { names: p.hooks.join(", ") }) : "",
     p.subagents?.length ? t("Subagents: {names}", { names: p.subagents.join(", ") }) : "",
+    p.extensions?.length ? t("Pi extensions: {names}", { names: p.extensions.join(", ") }) : "",
   ].filter(Boolean).join(" · ");
 
   function renderPlugins(body) {
@@ -5763,7 +5802,7 @@ magpie.plugin("library", (ctx) => {
       w.append(el("span", "name", x.name), el("span", "sub", x.description || ""));
       const count = (n) => (n ? [String(n)] : []);
       const parts = x.remote ? t("Fetched from its own repository when installed")
-        : pluginParts({ skills: count(x.skills), mcp: count(x.mcp), hooks: count(x.hooks), subagents: count(x.subagents) });
+        : pluginParts({ skills: count(x.skills), mcp: count(x.mcp), hooks: count(x.hooks), subagents: count(x.subagents), extensions: count(x.extensions) });
       if (parts) w.append(el("span", "sub lib-plparts", parts));
       r.append(cb, w);
       if (x.have) r.append(tag(t("in the library"), ""));
@@ -5797,7 +5836,7 @@ magpie.plugin("library", (ctx) => {
     if (p.description) who.append(el("div", "lib-subagentdesc", p.description));
     // counts, not every name: PStack has a hundred (jinpwng on X); the
     // names are in the dialog, folded
-    const line = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]]
+    const line = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents], [t("Pi extensions"), p.extensions]]
       .filter(([, v]) => v?.length).map(([k, v]) => k + " " + v.length).join(" · ");
     if (line) who.append(el("div", "sub lib-plparts", line));
     // synced in from another computer, its source not reached here yet
@@ -5817,7 +5856,7 @@ magpie.plugin("library", (ctx) => {
     head.append(glyph(GLYPH.folder), el("b", "", p.name));
     ed.append(head);
     if (p.description) ed.append(el("p", "lib-subagentdesc", p.description));
-    const rows = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents]].filter(([, v]) => v?.length);
+    const rows = [[t("Skills"), p.skills], [t("MCP servers"), p.mcp], [t("Hooks"), p.hooks], [t("Subagents"), p.subagents], [t("Pi extensions"), p.extensions]].filter(([, v]) => v?.length);
     for (const [label, names] of rows) {
       const d = el("details", "lib-plgroup");
       d.append(el("summary", "", label + " " + names.length), el("div", "mono lib-plnames", names.join(", ")));
@@ -5939,7 +5978,8 @@ magpie.plugin("library", (ctx) => {
         null,
         many && [removeEveryButton("skills"), GLYPH.trash],
       ]));
-      body.append(rh);
+      onlyBundle("skills", lib.skills);
+      body.append(rh, ...bundleBar("skills"));
       drawSkills(box, all);
       body.append(box);
       // under the list, so the skills stay where they were above it
@@ -6122,7 +6162,7 @@ magpie.plugin("library", (ctx) => {
     if (pick !== "source") {
       const skills = [...lib.skills].sort(byName(pick));
       const g = { key: "flat", repo: "", skills, parts: null,
-        text: new Map(skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + skillRepo(s)).toLowerCase()])) };
+        text: new Map(skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + (s.bundle || "") + " " + skillRepo(s)).toLowerCase()])) };
       grouped[pick] = { lib, groups: [g] };
       return grouped[pick].groups;
     }
@@ -6170,7 +6210,7 @@ magpie.plugin("library", (ctx) => {
       ...mine.filter((g) => g.skills.length && mineHere(g)), ...down.sort(byRepo), ...(by.has("local") ? [by.get("local")] : [])];
     for (const g of groups) {
       g.skills.sort((a, b) => a.name.localeCompare(b.name));
-      g.text = new Map(g.skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + (g.mine || (g.owner ? skillRepo(s) : g.repo))).toLowerCase()]));
+      g.text = new Map(g.skills.map((s) => [s, (s.name + " " + (s.note || "") + " " + (s.description || "") + " " + (s.bundle || "") + " " + (g.mine || (g.owner ? skillRepo(s) : g.repo))).toLowerCase()]));
       g.parts = g.mine ? null : partsOf(g);
     }
     grouped[pick] = { lib, groups };
@@ -6267,7 +6307,12 @@ magpie.plugin("library", (ctx) => {
   // What a group shows: its skills the filter matches, and whether it's
   // folded. While filtering a group is open unless folded since the filter
   // changed; else as the user last left it, or folded when there are many.
-  const skillHits = (g, q) => (q ? g.skills.filter((s) => g.text.get(s).includes(q)) : g.skills);
+  // the filter matches a skill's plugin too (#7280), and a plugin's tag
+  // picked shows only what it brought
+  const skillHits = (g, q) => {
+    const b = bundleOnly.skills;
+    return q || b ? g.skills.filter((s) => (!b || s.bundle === b) && (!q || g.text.get(s).includes(q))) : g.skills;
+  };
   const groupFolded = (g, q) => (q ? unfiltered.has(g.key) : folds[g.key] ?? lib.skills.length > MANY);
 
   // Collapse all / Expand all (#1862, WardLu): every group the list shows
@@ -7462,7 +7507,7 @@ magpie.plugin("library", (ctx) => {
       if (problem) n.append(tag(t("Not written"), "warn", problem));
       else if (b.off) n.append(tag(t("Off"), ""));
       w.append(n);
-      const line = [[t("Skills"), b.skills], [t("MCP servers"), b.mcp], [t("Hooks"), b.hooks], [t("Subagents"), b.subagents]]
+      const line = [[t("Skills"), b.skills], [t("MCP servers"), b.mcp], [t("Hooks"), b.hooks], [t("Subagents"), b.subagents], [t("Pi extensions"), b.extensions]]
         .filter(([, v]) => v?.length).map(([k, v]) => k + " " + v.length).join(" · ");
       const sub = el("div", "sub lib-plparts", problem || line);
       sub.title = problem || line;
@@ -7484,6 +7529,10 @@ magpie.plugin("library", (ctx) => {
         const row = el("div", "row lib-row lib-projskill lib-projplugin lib-projclaude");
         const w = el("div", "who");
         w.append(el("div", "name mono", c.id));
+        // what it brings, as Claude Code's record of it declares (#7266):
+        // read once the native list is in, and only listed, never written
+        const n = claudeNativeParts(c.id);
+        if (n) w.append(el("div", "sub lib-projclaude-parts", n));
         row.append(glyph(GLYPH.folder), w);
         const say = (next) => next.length
           ? t("{item} is in {name} for {agents}", { item: c.id, name: p.name, agents: nameOf("claude") })
@@ -8353,7 +8402,7 @@ magpie.plugin("library", (ctx) => {
   function skillRow(s, all) {
     const row = el("div", "row lib-row click lib-skill" + (s.missing ? " missing" : "") + (s.source ? " src" : "") + (s.offHere ? " offhere" : ""));
     const who = el("div", "who");
-    const nm = withPlugin(el("div", "name", s.name), s);
+    const nm = withPlugin(el("div", "name", s.name), s, "skills");
     const c = s.check;
     const gone = isGone(s);
     if (gone) {
