@@ -132,6 +132,12 @@ and keep the user's engine fields. Off removes the owned engine and an
 unchanged Magpie-created default fleet in one publication. The host releases
 the fleet's recovery record after the publication succeeds.
 
+Qwen Code's [settings planner](../../internal/extension/builtin/qwen/settings.go)
+publishes the model, provider list, gateway key and auth type from one
+snapshot. Catalog sync leaves the selected model in place. Native model
+choices keep native auth, and reset retires saved settings only after
+publication.
+
 Per-agent telemetry and the global Privacy switch use the built-in
 telemetry planner with checked JSONC, TOML and YAML snapshots. A refused
 restoration leaves its ownership record available for retry.

@@ -2,15 +2,82 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestQwenRejectsConcurrentSettingsChanges(t *testing.T) {
+	for _, action := range []string{"select", "sync", "reset"} {
+		t.Run(action, func(t *testing.T) {
+			home, path := qwenHome(t)
+			writeFile(t, path, qwenUser)
+			target := qwen(home)
+			selectModel := func() error { return target.Apply("model", "magpie/deepseek/pro") }
+			change := selectModel
+			if action != "select" {
+				if err := selectModel(); err != nil {
+					t.Fatal(err)
+				}
+				if action == "sync" {
+					if err := provider.Save(provider.Provider{ID: "later", Name: "Later", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"m1"}}); err != nil {
+						t.Fatal(err)
+					}
+					change = target.Sync
+				} else {
+					change = func() error { return target.Apply("model", "") }
+				}
+			}
+			saved := maps.Clone(stashShared())
+			want := strings.Replace(readFile(path), `"outputLanguage": "zh-CN"`, `"outputLanguage": "en"`, 1)
+			resolved, err := edit.Target(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := false
+			err = edit.Filtered(func(writing string, body []byte) []byte {
+				if writing == resolved && !injected {
+					injected = true
+					writeFile(t, path, want)
+				}
+				return body
+			}, change)
+			if !injected || !errors.Is(err, extension.ErrActionChanged) {
+				t.Errorf("%s: %v, external change injected: %t", action, err, injected)
+			}
+			if got := readFile(path); got != want {
+				t.Errorf("%s overwrote the concurrent settings change: %s", action, got)
+			}
+			if !maps.Equal(saved, stashShared()) {
+				t.Error("recovery values changed after refused publication")
+			}
+		})
+	}
+}
+
+func TestQwenNativeModelKeepsNativeAuth(t *testing.T) {
+	home, path := qwenHome(t)
+	writeFile(t, path, `{"security":{"auth":{"selectedType":"qwen-oauth"}},"model":{"name":"original"}}`)
+	target := qwen(home)
+	if err := target.Apply("model", "qwen3.8-max"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := edit.GetJSON(path, "model.name"); got != "qwen3.8-max" {
+		t.Fatalf("model = %q", got)
+	}
+	if got, _ := edit.GetJSON(path, "security.auth.selectedType"); got != "qwen-oauth" {
+		t.Fatalf("native auth = %q, want qwen-oauth", got)
+	}
+}
 
 // qwenUser is a settings.json as Qwen Code leaves it for someone with a
 // custom model provider of their own, and settings magpie has nothing to
