@@ -28,6 +28,7 @@ func TestSDKProfileRevealUsesLaunchConfig(t *testing.T) {
 	home := sandboxHome(t)
 	bin := filepath.Join(home, "bin")
 	testenv.Program(t, filepath.Join(bin, "opencode"), "#!/bin/sh\nexit 0\n")
+	testenv.Program(t, filepath.Join(bin, "codex"), "#!/bin/sh\necho codex-cli 0.1.0\n")
 	testenv.Program(t, filepath.Join(home, ".local", "bin", "zsh"), "#!/bin/sh\nexit 1\n")
 	t.Setenv("PATH", bin)
 	t.Setenv("SHELL", "/bin/bash")
@@ -42,7 +43,7 @@ func TestSDKProfileRevealUsesLaunchConfig(t *testing.T) {
 	}
 	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Dir(config))
 
-	const moduleID, profileID = "fixture.agent-reveal", "opencode-sdk-reveal"
+	const moduleID, profileID, codexProfileID = "fixture.agent-reveal", "opencode-sdk-reveal", "codex-sdk-open"
 	source := t.TempDir()
 	cmd := exec.CommandContext(testenv.DeadlineContext(t, time.Minute),
 		filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-mod=readonly", "-p=1",
@@ -57,6 +58,9 @@ func TestSDKProfileRevealUsesLaunchConfig(t *testing.T) {
 		Agents: []sdk.AgentDescriptor{{
 			ID: profileID, Name: "OpenCode reveal fixture", Profile: &sdk.AgentProfile{Target: "opencode"},
 			Launch: &sdk.AgentLaunch{Env: map[string]string{"OPENCODE_CONFIG": "{config}"}},
+		}, {
+			ID: codexProfileID, Name: "Codex open fixture", Profile: &sdk.AgentProfile{Target: "codex"},
+			Launch: &sdk.AgentLaunch{},
 		}},
 	}
 	body, err := json.Marshal(manifest)
@@ -134,6 +138,43 @@ func TestSDKProfileRevealUsesLaunchConfig(t *testing.T) {
 	if rec := post(desktop, profileID); rec.Code != http.StatusNoContent || !slices.Equal(shown, []string{filepath.Dir(config)}) {
 		t.Errorf("SDK profile reveal with missing settings: %d %s, showed %q", rec.Code, rec.Body, shown)
 	}
+
+	t.Run("open-adopted-codex", func(t *testing.T) {
+		candidate, err := agent.Find(codexProfileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := candidate.ConnectHow(); err != nil {
+			t.Fatal(err)
+		}
+		current, err := agent.Find("codex")
+		if err != nil || current.ID != codexProfileID {
+			t.Fatalf("Codex did not resolve to its adopted SDK profile: %v", err)
+		}
+		var appCalls int
+		var commands []string
+		wasApp, wasInstalled, wasTerminal := codexAppOpener, codexAppInstalled, agentTerminal
+		t.Cleanup(func() {
+			codexAppOpener, codexAppInstalled, agentTerminal = wasApp, wasInstalled, wasTerminal
+		})
+		codexAppInstalled = func() bool { return true }
+		codexAppOpener = func(context.Context) error { appCalls++; return nil }
+		agentTerminal = func(command, _, _ string) error { commands = append(commands, command); return nil }
+		handler := Handler(desktop, nil)
+		open := func(id string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest("POST", "/api/agents/open", strings.NewReader(`{"agent":"`+id+`"}`)))
+			return rec
+		}
+		stale := open("codex")
+		if stale.Code == http.StatusNoContent || appCalls != 0 || len(commands) != 0 {
+			t.Errorf("stale Codex row opened a process: %d, apps %d, commands %q", stale.Code, appCalls, commands)
+		}
+		active := open(codexProfileID)
+		if active.Code != http.StatusNoContent || !slices.Equal(commands, []string{"magpie " + codexProfileID + " run"}) {
+			t.Errorf("SDK profile open: %d %s, commands %q", active.Code, active.Body, commands)
+		}
+	})
 }
 
 func TestAgentRevealLeavesStoppedWSLDistroAsleep(t *testing.T) {

@@ -446,11 +446,31 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
-		if in.Agent == "codex" && !in.Terminal && codexOpensApp() {
-			if isWeb(w) {
+		openApp := in.Agent == "codex" && !in.Terminal && codexOpensApp()
+		if isWeb(w) {
+			if openApp {
 				fail(rw, errors.New("opening an app is only for the desktop app"))
-				return
+			} else {
+				fail(rw, errors.New("opening a terminal is only for the desktop app"))
 			}
+			return
+		}
+		if !openApp && !terminalHere() {
+			fail(rw, errors.New("opening a terminal is only for the desktop app"))
+			return
+		}
+		var target *agent.Agent
+		for _, a := range agent.Detected() {
+			if a.ID == in.Agent {
+				target = a
+				break
+			}
+		}
+		if target == nil {
+			fail(rw, errors.New("no command starts this agent"))
+			return
+		}
+		if openApp {
 			if err := codexAppOpener(r.Context()); err != nil {
 				fail(rw, err)
 				return
@@ -458,21 +478,12 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			rw.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if !terminalHere() || isWeb(w) {
-			fail(rw, errors.New("opening a terminal is only for the desktop app"))
-			return
-		}
-		run, name := "", ""
-		for _, a := range agent.Detected() {
-			if a.ID == in.Agent {
-				run, name = agentCommand(a), a.Name
-			}
-		}
+		run := agentCommand(target)
 		if run == "" {
 			fail(rw, errors.New("no command starts this agent"))
 			return
 		}
-		if err := agentTerminal(run, name, settings.Shared().SessionTerminal); err != nil {
+		if err := agentTerminal(run, target.Name, settings.Shared().SessionTerminal); err != nil {
 			fail(rw, err)
 			return
 		}

@@ -277,6 +277,9 @@ Legacy agentplug Env keeps its existing placeholder behavior.
 For an adopted launch-only profile using `{config}`, the Agents row's Reveal
 action opens that same inherited file or its directory. Adoption for launch
 does not add the inherited path to the module's settings write targets.
+Open resolves the current row before choosing its terminal or app opener.
+After a profile adopts Codex, its row starts the SDK profile and a stale
+Codex row no longer opens the native app.
 
 Ordinary `magpie <agent> run` rechecks the selected SDK launch after
 executable lookup, using the same launch admission as session resume. A
