@@ -17,7 +17,7 @@ func tracksEnablement(manifest sdk.Manifest) bool {
 	if manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver) ||
 		manifest.Contract.Has(sdk.BudgetPolicy) || manifest.Contract.Has(sdk.MaskingRules) ||
 		manifest.Contract.Has(sdk.RequestPolicy) || manifest.Contract.Has(sdk.GatewayHooks) ||
-		manifest.Contract.Has(sdk.GatewayMiddleware) {
+		manifest.Contract.Has(sdk.GatewayMiddleware) || manifest.Contract.Has(sdk.AgentWiring) {
 		return true
 	}
 	for _, tool := range manifest.Tools {

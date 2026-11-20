@@ -61,30 +61,17 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 }
 
 func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
-	entries, err := manager.ListContext(ctx)
+	entry, config, err := manager.ActiveModuleConfig(ctx, plugin)
 	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != plugin || entry.Disabled {
+	for _, actual := range entry.Manifest.Agents {
+		if actual.ID != descriptor.ID || !extensionBindingSameDescriptor(actual, descriptor) {
 			continue
-		}
-		found := false
-		for _, actual := range entry.Manifest.Agents {
-			if actual.ID == descriptor.ID && extensionBindingSameDescriptor(actual, descriptor) {
-				found = true
-			}
-		}
-		if !found {
-			return nil, errors.New("agent module definition changed; rediscover the agent")
-		}
-		config, err := manager.ModuleConfig(ctx, plugin)
-		if err != nil {
-			return nil, err
 		}
 		return &extensionAgentRuntime{manager: manager, entry: entry, config: config.Version}, nil
 	}
-	return nil, errors.New("agent module is disabled or unavailable")
+	return nil, errors.New("agent module definition changed; rediscover the agent")
 }
 
 func acquireAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
