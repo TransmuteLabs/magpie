@@ -4,9 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -91,6 +96,84 @@ func TestCatalogProjectionRefusesUndeclaredRootStaleAndUnknownReads(t *testing.T
 			result, err := invokeCatalog(t, manager, scope)
 			if err == nil || len(result.Accounts) != 0 || strings.Contains(err.Error(), "private diagnostic") {
 				t.Fatal("revoked or unknown catalog read published data or private failure text", result, err)
+			}
+		})
+	}
+}
+
+func TestActiveGenerationChecksStopAtCatalogDeadline(t *testing.T) {
+	manager, scope := usageManagerVersion(t, 8, func(manifest *sdk.Manifest) {
+		manifest.CatalogAccess = &sdk.CatalogAccessDescriptor{Scope: "selected"}
+	})
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	lock, err := os.OpenFile(filepath.Join(manager.catalog.Root, "catalog.lock"), os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	for _, projection := range []bool{false, true} {
+		name := "lease"
+		if projection {
+			name = "projection"
+		}
+		t.Run(name, func(t *testing.T) {
+			lockCatalog := func() error {
+				held, err := filelock.TryLock(lock)
+				if err == nil && !held {
+					return errors.New("could not hold catalog lock")
+				}
+				return err
+			}
+			release := sync.OnceFunc(func() { filelock.Unlock(lock) })
+			defer release()
+			ready := make(chan error, 1)
+			manager.catalogReader = func(context.Context, sdk.Scope, sdk.CatalogAccessDescriptor) (sdk.CatalogReadResult, error) {
+				err := lockCatalog()
+				ready <- err
+				return projectedCatalog(), err
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			result := make(chan error, 1)
+			go func() {
+				if projection {
+					authority := hostAuthority{manifest: lease.Manifest(), method: sdk.MethodToolCall}
+					call := lease.group.withAuthority(ctx, sdk.PrimaryComponent, "read")
+					_, err := manager.readCatalogProjection(call, scope, json.RawMessage(`{}`), authority)
+					result <- err
+					return
+				}
+				err := lockCatalog()
+				ready <- err
+				if err != nil {
+					result <- err
+					return
+				}
+				result <- lease.CheckCurrent(ctx)
+			}()
+			select {
+			case err := <-ready:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case err := <-result:
+				t.Fatalf("generation check returned before reaching the held lock: %v", err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("generation check did not reach the lock")
+			}
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("generation check returned %v instead of its deadline", err)
+				}
+			case <-time.After(900 * time.Millisecond):
+				release()
+				<-result
+				t.Fatal("canceled generation check waited for the catalog lock")
 			}
 		})
 	}

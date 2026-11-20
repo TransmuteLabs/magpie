@@ -23,30 +23,16 @@ func SetCatalogProjectionReader(read CatalogProjectionReader) {
 }
 
 func (manager *Manager) catalogProjectionCurrent(ctx context.Context, scope sdk.Scope, group *componentGroup) error {
-	if ctx.Err() != nil || group == nil || group.ctx.Err() != nil || manager.isClosed() {
-		return errors.New("catalog projection caller is no longer active")
-	}
-	if _, err := manager.authFor(scope); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := manager.List()
-	if err != nil {
-		return errors.New("catalog projection package is unavailable")
+	if group == nil || group.ctx.Err() != nil || manager.isClosed() {
+		return errors.New("catalog projection caller is no longer active")
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != scope.Plugin {
-			continue
-		}
-		if entry.Disabled || entry.Revision != group.entry.Revision || entry.Directory != group.entry.Directory {
-			return errors.New("catalog projection package changed")
-		}
-		config, err := manager.runtimeModuleConfig(entry.Manifest)
-		if err != nil || config.Version != group.config.Version {
-			return errors.New("catalog projection configuration changed")
-		}
-		return nil
+	if _, err := manager.authForContext(ctx, scope); err != nil {
+		return err
 	}
-	return errors.New("catalog projection package was removed")
+	return manager.checkActiveGeneration(ctx, group.entry, group.config.Version)
 }
 
 func (manager *Manager) readCatalogProjection(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority) (any, error) {

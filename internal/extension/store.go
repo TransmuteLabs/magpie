@@ -375,11 +375,15 @@ func (s *Store) journal(scope sdk.Scope, state string, inference bool) (JournalE
 }
 
 func (s *Store) Operation(plugin, operation string) (JournalEntry, error) {
+	return s.OperationContext(context.Background(), plugin, operation)
+}
+
+func (s *Store) OperationContext(ctx context.Context, plugin, operation string) (JournalEntry, error) {
 	var result JournalEntry
 	if !storePluginID(plugin) || !storeToken(operation) {
 		return result, storeInvalid()
 	}
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		if entry, found, err := refreshOperation(root, plugin, operation); err != nil || found {
 			result = entry
 			return err

@@ -46,7 +46,10 @@ func (m *Manager) WindowAccounts(ctx context.Context, id, revision, part, bindin
 	if err != nil || windowAccountGrant(entry.Manifest, binding) != nil {
 		return nil, errors.New("window binding does not grant account discovery")
 	}
-	accounts, err := m.store.Accounts(id, binding.Provider)
+	accounts, err := m.store.AccountsContext(ctx, id, binding.Provider)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, errors.New("window accounts are unavailable")
 	}
@@ -65,7 +68,7 @@ func (m *Manager) WindowAccounts(ctx context.Context, id, revision, part, bindin
 	return summaries, nil
 }
 
-func (m *Manager) selectedWindowScope(manifest sdk.Manifest, binding sdk.BindingDescriptor, selection *sdk.AccountSelection) (sdk.Scope, error) {
+func (m *Manager) selectedWindowScope(ctx context.Context, manifest sdk.Manifest, binding sdk.BindingDescriptor, selection *sdk.AccountSelection) (sdk.Scope, error) {
 	scope := sdk.Scope{Plugin: manifest.ID}
 	if binding.Provider == "" {
 		if selection != nil {
@@ -80,7 +83,10 @@ func (m *Manager) selectedWindowScope(manifest sdk.Manifest, binding sdk.Binding
 	if err != nil {
 		return scope, err
 	}
-	account, err := m.store.GetAccount(manifest.ID, binding.Provider, selection.ID)
+	account, err := m.store.GetAccountContext(ctx, manifest.ID, binding.Provider, selection.ID)
+	if ctx.Err() != nil {
+		return scope, ctx.Err()
+	}
 	if err != nil || account.Generation != generation {
 		return scope, errors.New("window account selection changed or is unavailable")
 	}
@@ -95,7 +101,7 @@ type windowIntentRecord struct {
 	Fingerprint string    `json:"fingerprint"`
 }
 
-func (s *Store) bindWindowIntent(scope sdk.Scope, binding string, input json.RawMessage) error {
+func (s *Store) bindWindowIntent(ctx context.Context, scope sdk.Scope, binding string, input json.RawMessage) error {
 	if !storeValidScope(scope) || scope.Account == "" || !storeToken(scope.Operation) || !sdk.ValidID(binding) || !json.Valid(input) {
 		return errors.New("window intent requires its selected account and bounded input")
 	}
@@ -105,7 +111,7 @@ func (s *Store) bindWindowIntent(scope sdk.Scope, binding string, input json.Raw
 	}
 	digest := sha256.Sum256(compact.Bytes())
 	record := windowIntentRecord{Schema: 1, Scope: scope, Binding: binding, Fingerprint: hex.EncodeToString(digest[:])}
-	return s.withStore(scope.Plugin, func(root *os.Root) error {
+	return s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		if err := storeCheckGeneration(root, scope); err != nil {
 			return err
 		}

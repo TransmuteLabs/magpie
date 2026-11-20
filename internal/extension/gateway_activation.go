@@ -96,13 +96,13 @@ func (owner *GatewayActivation) reconcile() {
 	err := manager.Reload(owner.ctx)
 	if err == nil {
 		var installed []Installed
-		installed, err = manager.List()
+		installed, err = manager.ListContext(owner.ctx)
 		if err == nil {
 			for _, entry := range installed {
-				if entry.Disabled || !entry.Manifest.ActivatesGateway() {
+				if entry.Disabled || entry.Manifest.Component != nil || entry.observerEnablementErr != nil || !entry.Manifest.ActivatesGateway() {
 					continue
 				}
-				config, readErr := manager.runtimeModuleConfig(entry.Manifest)
+				config, readErr := manager.runtimeModuleConfigContext(owner.ctx, entry.Manifest)
 				if readErr == nil {
 					desired[entry.Manifest.ID] = entry
 					configs[entry.Manifest.ID] = config.Version
@@ -112,7 +112,8 @@ func (owner *GatewayActivation) reconcile() {
 	}
 	for id, lease := range owner.leases {
 		entry, exists := desired[id]
-		if !exists || entry.Revision != lease.Revision() || configs[id] != lease.ConfigVersion() || !lease.client.alive() {
+		if !exists || entry.Revision != lease.Revision() || entry.EnableGeneration != lease.worker.entry.EnableGeneration ||
+			configs[id] != lease.ConfigVersion() || !lease.client.alive() {
 			owner.withdraw(lease)
 			delete(owner.leases, id)
 		}
@@ -124,13 +125,13 @@ func (owner *GatewayActivation) reconcile() {
 		if owner.leases[id] != nil {
 			continue
 		}
-		identity := entry.Revision + "\x00" + configs[id]
+		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + configs[id]
 		if owner.failed[id] == identity {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(owner.ctx, 10*time.Second)
 		worker, client, acquireErr := manager.acquire(ctx, id, &expectedGeneration{
-			packageRevision: entry.Revision, configVersion: configs[id],
+			packageRevision: entry.Revision, configVersion: configs[id], enableGeneration: &entry.EnableGeneration,
 		})
 		cancel()
 		if acquireErr != nil {

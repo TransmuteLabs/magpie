@@ -95,7 +95,7 @@ func (m *Manager) compareAndSwapModuleConfig(ctx context.Context, id, packageRev
 			if err := ctx.Err(); err != nil {
 				return VersionedValue{}, err
 			}
-			return m.store.StateCAS(sdk.Scope{Plugin: id}, moduleConfigKey, version, values)
+			return m.store.StateCASContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey, version, values)
 		}
 		return VersionedValue{}, errors.New("module configuration requires an installed root module")
 	}()

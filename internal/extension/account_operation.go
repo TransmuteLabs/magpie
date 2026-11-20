@@ -17,19 +17,28 @@ func (lease *Lease) CheckCurrent(ctx context.Context) error {
 	if lease.closed.Load() || lease.ctx.Err() != nil {
 		return errors.New("native account operation lease closed")
 	}
-	installed, err := lease.manager.List()
+	return lease.manager.checkActiveGeneration(ctx, lease.worker.entry, lease.ConfigVersion())
+}
+
+func (m *Manager) checkActiveGeneration(ctx context.Context, expected Installed, configVersion string) error {
+	installed, err := m.ListContext(ctx)
 	if err != nil {
 		return err
 	}
 	position := slices.IndexFunc(installed, func(entry Installed) bool {
-		return entry.Manifest.ID == lease.Manifest().ID && !entry.Disabled && entry.Revision == lease.Revision()
+		return entry.Manifest.ID == expected.Manifest.ID && !entry.Disabled && entry.Manifest.Component == nil &&
+			entry.observerEnablementErr == nil && entry.Revision == expected.Revision &&
+			entry.Directory == expected.Directory && entry.EnableGeneration == expected.EnableGeneration
 	})
 	if position < 0 {
-		return errors.New("native account operation package changed")
+		return errors.New("extension package generation changed")
 	}
-	config, err := lease.manager.ModuleConfig(ctx, lease.Manifest().ID)
-	if err != nil || config.Version != lease.ConfigVersion() {
-		return errors.New("native account operation configuration changed")
+	config, err := m.runtimeModuleConfigContext(ctx, installed[position].Manifest)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil || config.Version != configVersion {
+		return errors.New("extension configuration changed")
 	}
 	return nil
 }

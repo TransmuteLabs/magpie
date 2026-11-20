@@ -65,7 +65,10 @@ func (m *Manager) invalidateUsage(ctx context.Context, scope sdk.Scope, raw json
 	if readOnly || !owned || component.effect != "write" || component.group == nil {
 		return nil, errors.New("a read cannot invalidate usage")
 	}
-	operation, err := m.store.Operation(scope.Plugin, scope.Operation)
+	operation, err := m.store.OperationContext(ctx, scope.Plugin, scope.Operation)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil || operation.Scope != scope || operation.State != "accepted" {
 		return nil, errors.New("usage invalidation requires durable write acceptance")
 	}

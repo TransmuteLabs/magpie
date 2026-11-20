@@ -443,7 +443,7 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	if len(input) == 0 || len(input) > sdk.MaxHostBytes || !json.Valid(input) {
 		return nil, errors.New("module action input must be bounded JSON")
 	}
-	current, err := group.manager.authFor(scope)
+	current, err := group.manager.authForContext(ctx, scope)
 	if err != nil || !bytes.Equal(current, auth) {
 		return nil, errors.New("component binding account authority changed")
 	}
@@ -452,7 +452,7 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 		if authority.effect != "write" {
 			return nil, errors.New("a read component call cannot delegate a write")
 		}
-		if err := group.accepted(scope); err != nil {
+		if err := group.accepted(ctx, scope); err != nil {
 			return nil, err
 		}
 	}
@@ -468,7 +468,7 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	defer cancel()
 	call = group.withAuthority(call, component, action.Effect)
 	call = context.WithValue(call, hostAuthorityKey{}, hostAuthority{manifest: group.entry.Manifest, method: sdk.MethodModuleCall})
-	current, err = group.manager.authFor(scope)
+	current, err = group.manager.authForContext(call, scope)
 	if err != nil || !bytes.Equal(current, auth) {
 		return nil, errors.New("component binding account authority changed")
 	}
@@ -484,7 +484,7 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 			if !decodeHostParams(event.Data, &receipt) || scope.Operation == "" || receipt.OperationID != scope.Operation {
 				return errors.New("component accepted another root operation")
 			}
-			return group.accepted(scope)
+			return group.accepted(call, scope)
 		})
 	if err != nil {
 		return nil, err
@@ -497,11 +497,14 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	return bytes.Clone(result), nil
 }
 
-func (group *componentGroup) accepted(scope sdk.Scope) error {
+func (group *componentGroup) accepted(ctx context.Context, scope sdk.Scope) error {
 	if scope.Operation == "" {
 		return errors.New("component write requires an accepted root operation")
 	}
-	operation, err := group.manager.store.Operation(scope.Plugin, scope.Operation)
+	operation, err := group.manager.store.OperationContext(ctx, scope.Plugin, scope.Operation)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil || operation.Scope != scope || operation.State != "accepted" {
 		return errors.New("component write requires the same durable accepted root operation")
 	}

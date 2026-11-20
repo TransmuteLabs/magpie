@@ -169,13 +169,13 @@ func TestWindowSelectedWriteIntentPinsAccountGenerationAndInput(test *testing.T)
 		test.Fatal("a replay reached the helper:", calls.Load())
 	}
 	scope := sdk.Scope{Plugin: id, Provider: "vendor", Account: "account-a", Generation: 1, Operation: "reserved-before-dispatch", Attempt: 1}
-	if err := manager.store.bindWindowIntent(scope, "page.write", json.RawMessage(`{"one":1}`)); err != nil {
+	if err := manager.store.bindWindowIntent(test.Context(), scope, "page.write", json.RawMessage(`{"one":1}`)); err != nil {
 		test.Fatal(err)
 	}
-	if err := manager.store.bindWindowIntent(scope, "page.write", json.RawMessage(`{"one":2}`)); err == nil {
+	if err := manager.store.bindWindowIntent(test.Context(), scope, "page.write", json.RawMessage(`{"one":2}`)); err == nil {
 		test.Fatal("an undispatched intent accepted changed business input")
 	}
-	if err := manager.store.bindWindowIntent(scope, "another.binding", json.RawMessage(`{"one":1}`)); err == nil {
+	if err := manager.store.bindWindowIntent(test.Context(), scope, "another.binding", json.RawMessage(`{"one":1}`)); err == nil {
 		test.Fatal("an undispatched intent accepted another binding")
 	}
 	replacement, err := manager.Store().SaveAccount(Account{Plugin: id, Provider: "vendor", ID: "account-a",
@@ -263,14 +263,14 @@ func TestWindowSelectedIntentSurvivesReopenAndUnreadableRecord(test *testing.T) 
 	manager, fixture, _, _ := accountWindowFixture(test)
 	scope := sdk.Scope{Plugin: fixture.id, Provider: "vendor", Account: "account-a", Generation: 1, Operation: "intent", Attempt: 1}
 	input := json.RawMessage(`{"effect":"one"}`)
-	if err := manager.store.bindWindowIntent(scope, "page.write", input); err != nil {
+	if err := manager.store.bindWindowIntent(test.Context(), scope, "page.write", input); err != nil {
 		test.Fatal(err)
 	}
 	reopened := NewStore(manager.Namespace())
-	if err := reopened.bindWindowIntent(scope, "page.write", input); err != nil {
+	if err := reopened.bindWindowIntent(test.Context(), scope, "page.write", input); err != nil {
 		test.Fatal("unchanged intent lost on restart:", err)
 	}
-	if err := reopened.bindWindowIntent(scope, "page.write", json.RawMessage(`{"effect":"two"}`)); err == nil {
+	if err := reopened.bindWindowIntent(test.Context(), scope, "page.write", json.RawMessage(`{"effect":"two"}`)); err == nil {
 		test.Fatal("reopened store forgot the bound input")
 	}
 	if err := manager.store.withStore(fixture.id, func(root *os.Root) error {
@@ -278,7 +278,7 @@ func TestWindowSelectedIntentSurvivesReopenAndUnreadableRecord(test *testing.T) 
 	}); err != nil {
 		test.Fatal(err)
 	}
-	if err := reopened.bindWindowIntent(scope, "page.write", input); err == nil {
+	if err := reopened.bindWindowIntent(test.Context(), scope, "page.write", input); err == nil {
 		test.Fatal("unreadable intent was treated as a new operation")
 	}
 }

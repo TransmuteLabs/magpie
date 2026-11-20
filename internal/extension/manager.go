@@ -1292,7 +1292,10 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 			authority.invocation == nil || authority.invocation.scope != scope {
 			return nil, errors.New("this call cannot replace account credentials")
 		}
-		operation, err := m.store.Operation(scope.Plugin, scope.Operation)
+		operation, err := m.store.OperationContext(ctx, scope.Plugin, scope.Operation)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err != nil || operation.Scope != scope || operation.State != "accepted" {
 			return nil, errors.New("account replacement requires a durable accepted operation")
 		}

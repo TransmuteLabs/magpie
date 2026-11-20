@@ -148,7 +148,7 @@ func (parent *ownedProcess) check(ctx context.Context) error {
 	if err := parent.lease.CheckCurrent(ctx); err != nil {
 		return err
 	}
-	if _, err := parent.lease.manager.authFor(parent.scope); err != nil {
+	if _, err := parent.lease.manager.authForContext(ctx, parent.scope); err != nil {
 		return err
 	}
 	if err := parent.launch.Check(ctx); err != nil {
