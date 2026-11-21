@@ -203,13 +203,13 @@ func TestAtomically(t *testing.T) {
 
 func TestAtomicallyKeepsEditMadeDuringRollback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	target, err := Target(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	const original = "model = \"original\"\n"
 	const user = "model = \"user\"\n"
 	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := Target(path)
+	if err != nil {
 		t.Fatal(err)
 	}
 	failure := errors.New("later step failed")
