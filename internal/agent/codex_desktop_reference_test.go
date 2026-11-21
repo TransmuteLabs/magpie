@@ -121,10 +121,11 @@ func TestCodexDesktopCatalogConflictKeepsConcurrentConfigEdit(t *testing.T) {
 			}
 			app = true
 			desk := filepath.Join(cx.Dir, "magpie-desktop-models.json")
-			target, err := edit.Target(desk)
+			dir, err := filepath.EvalSymlinks(cx.Dir)
 			if err != nil {
 				t.Fatal(err)
 			}
+			target := filepath.Join(dir, filepath.Base(desk))
 			const deskEdit = `{"models":[{"slug":"external"}]}`
 			var configEdit string
 			CodexDesktopList = func() ([]byte, bool) {

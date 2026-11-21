@@ -1863,7 +1863,7 @@ func codexIn(at place) *Agent {
 			Model    string `toml:"model"`
 		}
 		if err := toml.Unmarshal(edit.TOMLWithout(raw, "projects"), &current); err != nil {
-			return nil, config.preserveOnError(path, err)
+			return nil, config.preserveOnError(path, fmt.Errorf("%s: %w", path, err))
 		}
 		base := gatewayBase(current.BaseURL)
 		fromProvider := current.Provider == magpieID
