@@ -163,10 +163,10 @@ func Main() int {
 		defer wmu.Unlock()
 		enc.Encode(v)
 	}
+	base := heap()
 	go func() {
 		// a builtin allocating is past the interrupt's reach, so it is the
 		// process that ends: its heap is the script's alone
-		base := heap()
 		tick := time.NewTicker(20 * time.Millisecond)
 		for range tick.C {
 			if h := heap(); h > base && h-base > s.Limits.Heap {

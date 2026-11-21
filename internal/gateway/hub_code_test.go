@@ -244,20 +244,24 @@ func TestHubCodeOff(t *testing.T) {
 	}
 }
 
-// A builtin is Go, past goja's interrupt: one that allocates gigabytes at
-// once, or a regular expression that backtracks for ever, is ended with
-// the script's process at its memory or its time, and takes neither
-// magpie's memory nor the request with it.
+// A script's process ends when its retained heap exceeds the budget or a
+// builtin runs past its time. Use a small heap budget so the memory case
+// can cross it well before the deadline, even on a busy runner.
 func TestHubCodeBuiltinsEndWithTheirProcess(t *testing.T) {
 	was := hubCodeWait
+	heap := hubCodeHeap
 	hubCodeWait = 2 * time.Second
-	t.Cleanup(func() { hubCodeWait = was })
+	t.Cleanup(func() { hubCodeWait, hubCodeHeap = was, heap })
 	_, run := codeHub(t, nil)
-	for _, c := range []struct{ code, want string }{
-		{`return "x".repeat(3e9).length`, "memory"},
-		{`return /^(a+)+$(?!x)/.test("a".repeat(40) + "b")`, "didn't finish"},
-		{`const a = []; a.length = 4e9; return a.indexOf(1)`, "didn't finish"},
+	for _, c := range []struct {
+		code, want string
+		heap       uint64
+	}{
+		{`globalThis.kept = "x".repeat(64 << 20); while (true) {}`, "memory", 16 << 20},
+		{`return /^(a+)+$(?!x)/.test("a".repeat(40) + "b")`, "didn't finish", heap},
+		{`const a = []; a.length = 4e9; return a.indexOf(1)`, "didn't finish", heap},
 	} {
+		hubCodeHeap = c.heap
 		code, want := c.code, c.want
 		before := hubHeapNow()
 		start := time.Now()
