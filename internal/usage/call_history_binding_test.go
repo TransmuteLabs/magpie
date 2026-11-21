@@ -56,7 +56,12 @@ func TestQueryPageKeepsCallsUnderBoundJSONLHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	write(filepath.Join(home, sourceRoot, thread+".jsonl"), []byte("{}\n"))
+	sourcePath := filepath.Join(home, sourceRoot, thread+".jsonl")
+	write(sourcePath, []byte("{}\n"))
+	sourcePath, err = filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifest := sdk.Manifest{Schema: 1, ID: "fixture.codex-accounting", Version: "1.0.0", Runtime: "exec", Entry: entry,
 		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 6}, Capabilities: []sdk.Capability{sdk.SessionSource}},
 		SessionSources: []sdk.SessionSourceDescriptor{{ID: "history", Agent: "codex", Codec: "fixture-jsonl",
@@ -123,7 +128,7 @@ func TestQueryPageKeepsCallsUnderBoundJSONLHistory(t *testing.T) {
 		check(t, true)
 	})
 	t.Run("warm", func(t *testing.T) {
-		if selected, found := sessions.Find("codex", thread); !found || selected.Path != filepath.Join(home, sourceRoot, thread+".jsonl") {
+		if selected, found := sessions.Find("codex", thread); !found || selected.Path != sourcePath {
 			t.Fatalf("SDK journal did not own history: %+v, found=%v, errors=%v", selected, found, sessions.SessionSourceErrors())
 		}
 		check(t, true)

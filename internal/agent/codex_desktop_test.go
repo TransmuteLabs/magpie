@@ -53,10 +53,11 @@ func TestCodexDesktopSyncKeepsAConcurrentlyChosenCatalog(t *testing.T) {
 	}
 	app = true
 	desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
-	target, err := edit.Target(desktop)
+	dir, err := filepath.EvalSymlinks(cx.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	target := filepath.Join(dir, filepath.Base(desktop))
 	writeFile(t, filepath.Join(cx.Dir, "mine.json"), list)
 	user := "model_catalog_json = \"mine.json\"\n" + read()
 	var edited bool
@@ -134,10 +135,11 @@ func TestCodexDesktopSyncKeepsEditsBeforeTheLinkedPlan(t *testing.T) {
 	}
 	app = true
 	desktop := filepath.Join(cx.Dir, "magpie-desktop-models.json")
-	target, err := edit.Target(desktop)
+	dir, err := filepath.EvalSymlinks(cx.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	target := filepath.Join(dir, filepath.Base(desktop))
 	var userConfig string
 	CodexDesktopList = func() ([]byte, bool) {
 		if userConfig == "" {

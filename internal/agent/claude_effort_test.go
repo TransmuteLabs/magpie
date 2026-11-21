@@ -116,9 +116,13 @@ func TestClaudeEffortPublishesOneChange(t *testing.T) {
   "effortLevel": "high",
   "modelSettings": {"claude-opus-5-5": {"effortLevel": "high"}}
 }`)
+			target, err := edit.Target(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			writes := 0
 			if err := edit.Filtered(func(name string, body []byte) []byte {
-				if name == path {
+				if name == target {
 					writes++
 				}
 				return body
