@@ -234,10 +234,26 @@ func SetAccountName(id, ref, name string) error {
 // is a cache's.
 func withAccountNames(qs []SubscriptionQuota) []SubscriptionQuota {
 	out := make([]SubscriptionQuota, len(qs))
+	type sdkAccount struct{ provider, user string }
+	var sdkNames map[sdkAccount]string
 	for i, q := range qs {
 		if q.From == "" {
 			own := AccountNameOf(labelProvider(q.Provider), q.User)
-			q.Alias, q.Named = cmp.Or(own, AccountLabelOf(q.Provider, q.User), q.Seat), own != ""
+			var vendor string
+			if strings.HasPrefix(q.Provider, "extension-") {
+				if sdkNames == nil {
+					sdkNames = map[sdkAccount]string{}
+					for _, login := range listExtensionLogins("") {
+						if name := login.ExtensionAccountName(); name != "" {
+							sdkNames[sdkAccount{login.Agent, login.User}] = name
+						}
+					}
+				}
+				vendor = sdkNames[sdkAccount{q.Provider, q.User}]
+			} else {
+				vendor = PluginUserOf(q.Provider, q.User)
+			}
+			q.Alias, q.Named = cmp.Or(own, vendor, q.Seat), own != ""
 		}
 		out[i] = q
 	}

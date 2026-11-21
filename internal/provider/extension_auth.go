@@ -121,7 +121,7 @@ func saveExtensionAuth(scope sdk.Scope, result sdk.AuthResult) (sdk.AuthResult, 
 		return sdk.AuthResult{}, errors.New("extension authentication returned no credentials")
 	}
 	_, err := providerExtensionHost().Store().SaveAccount(extensionhost.Account{
-		Plugin: scope.Plugin, Provider: scope.Provider, ID: id, Auth: result.Credentials, ExpiresAt: result.ExpiresAt,
+		Plugin: scope.Plugin, Provider: scope.Provider, ID: id, Name: result.Name, Auth: result.Credentials, ExpiresAt: result.ExpiresAt,
 	}, scope.Generation)
 	if err != nil {
 		return sdk.AuthResult{}, err

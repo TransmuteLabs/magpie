@@ -24,6 +24,7 @@ import (
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/source"
 	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/magpie/internal/windowmeta"
 )
 
 // The plugin market: the plugins magpie suggests, from the community
@@ -853,16 +854,7 @@ func installedOwn(spec string) (own struct {
 // at most 80 bytes, with no control or format characters (a bidi
 // override would make it read as another name); "" otherwise.
 func ownName(said string) string {
-	n := strings.TrimSpace(said)
-	if n == "" || len(n) > 80 || !utf8.ValidString(n) {
-		return ""
-	}
-	for _, r := range n {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return ""
-		}
-	}
-	return n
+	return windowmeta.PluginDisplayName(said)
 }
 
 // ownSummary is what a package.json's magpie.summary says of the package,

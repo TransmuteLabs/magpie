@@ -667,3 +667,25 @@ func TestAllLoginsDiscoversExtensionProvidersOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestSDKQuotaShowsProviderNameAndKeepsAccountID(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	scope := sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
+	_, err := saveExtensionAuth(scope, sdk.AuthResult{ID: "alice", Name: "reader@example.test", Credentials: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := ExtensionProviderID(scope.Plugin, scope.Provider)
+	read := []SubscriptionQuota{{Provider: id, User: "alice"}, {Provider: id, User: "bob"}}
+	got := withAccountNames(read)
+	if got[0].User != "alice" || got[0].Alias != "reader@example.test" || got[0].Named || got[1].Alias != "" {
+		t.Fatalf("wrong usage labels: %q %q", got[0].Alias, got[1].Alias)
+	}
+	if err := SetAccountName(id, "alice", "My account"); err != nil {
+		t.Fatal(err)
+	}
+	got = withAccountNames(read)
+	if got[0].User != "alice" || got[0].Alias != "My account" || !got[0].Named {
+		t.Fatalf("user alias did not take precedence: %q", got[0].Alias)
+	}
+}

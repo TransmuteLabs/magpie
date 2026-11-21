@@ -39,6 +39,7 @@ type extensionProviderHost interface {
 var providerExtensionHost = func() extensionProviderHost { return extensionhost.Default() }
 
 type extensionAccount struct {
+	name             string
 	host             extensionProviderHost
 	manifest         sdk.Manifest
 	descriptor       sdk.ProviderDescriptor
@@ -46,6 +47,13 @@ type extensionAccount struct {
 	modelKey         string
 	enableGeneration string
 	generation       *atomic.Uint64
+}
+
+func (login Login) ExtensionAccountName() string {
+	if login.extension != nil {
+		return login.extension.name
+	}
+	return ""
 }
 
 func ExtensionProviderID(module, provider string) string {
@@ -123,6 +131,7 @@ func discoverExtensionModuleContext(ctx context.Context, host extensionProviderH
 			}
 			identities[identity] = true
 			out = append(out, extensionProvider(&extensionAccount{host: host, manifest: manifest, descriptor: descriptor,
+				name:     account.Name,
 				scope:    sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID, Account: account.ID, Generation: account.Generation},
 				modelKey: modelRevision, enableGeneration: entry.EnableGeneration}))
 		}
@@ -826,14 +835,29 @@ func switchExtensionLogin(agent, user string) error {
 	return rankLogins(agent, append([]string{user}, order...))
 }
 
-func forgetExtensionLogin(agent, user string) error {
+func ForgetExtensionLogin(agent string, account sdk.AccountSelection) error {
+	if settings.AccountDiscoveryOff() {
+		return errAccountDiscoveryOff
+	}
+	generation, err := account.Validate()
+	if err != nil {
+		return err
+	}
+	return forgetExtensionLogin(agent, account.ID, generation)
+}
+
+func forgetExtensionLogin(agent, user string, expectedGeneration uint64) error {
 	logins, _ := extensionLogins(agent)
 	for _, login := range logins {
 		if login.User != user {
 			continue
 		}
+		scope := login.extension.currentScope()
+		if expectedGeneration != 0 && scope.Generation != expectedGeneration {
+			return errors.New("extension account generation changed")
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := LogoutExtensionAuth(ctx, login.extension.scope)
+		err := LogoutExtensionAuth(ctx, scope)
 		cancel()
 		if err != nil {
 			return err

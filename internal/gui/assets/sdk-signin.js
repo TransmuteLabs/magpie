@@ -12,6 +12,14 @@ export async function start(sub, form, options) {
   providerForm(sub, form, options);
 }
 
+export async function signOut(a, l, p) {
+  const shown = { agent: p?.name || a.agentName, user: accountShownOf(p, l.user) };
+  if (!await confirmAction(t("Sign {agent} out of {user}?", shown),
+    t("magpie forgets this account's sign-in; the account itself is untouched"), t("Sign out"))) return;
+  await accountAction("login/forget", { agent: a.agent, account: { id: l.user, expectedGeneration: l.extensionGeneration } },
+    t("{agent} signed out of {user}", shown), true);
+}
+
 function choiceButton(label, choices, change) {
   const button = el("button", "proto");
   button.type = "button";

@@ -99,10 +99,9 @@ const MaxActions = 8
 var PageReads = []string{"usage:summary", "usage:day", "providers:list"}
 
 // PanelSlots are the places in magpie's own pages a plugin's panel can
-// go: under the Agents page's list, at the end of the Usage page, on
-// Settings' Plugins tab, and in a provider's editor (which tells the
-// panel the provider's id and name).
-var PanelSlots = []string{"agents", "usage", "settings", "provider"}
+// go: under the Agents, Usage and Sessions pages, on Settings' Plugins tab
+// and in a provider's editor (which tells the panel the provider's id and name).
+var PanelSlots = []string{"agents", "usage", "settings", "provider", "sessions"}
 
 // Replaceable are the built-in pages a plugin's page can take the place
 // of: the pages that are built-in plugins of their own.

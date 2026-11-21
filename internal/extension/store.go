@@ -36,6 +36,7 @@ type Account struct {
 	Plugin     string          `json:"plugin"`
 	Provider   string          `json:"provider"`
 	ID         string          `json:"id"`
+	Name       string          `json:"-"`
 	Generation uint64          `json:"generation"`
 	Auth       json.RawMessage `json:"auth"`
 	ExpiresAt  int64           `json:"expiresAt,omitempty"`
@@ -199,7 +200,7 @@ func (s *Store) AccountsContext(ctx context.Context, plugin, provider string) ([
 		result = []Account{}
 		for _, record := range records.Accounts {
 			if !record.Deleted && record.Provider == provider {
-				result = append(result, record.Account)
+				result = append(result, record.namedAccount(root))
 			}
 		}
 		return nil
@@ -240,6 +241,9 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 	if len(account.Auth) > storeFileLimit || !json.Valid(account.Auth) || account.ExpiresAt < 0 {
 		return result, storeError("invalid_state", "Extension credentials must be bounded JSON.")
 	}
+	if !storeToken(account.Name) {
+		account.Name = ""
+	}
 	err := s.withStore(account.Plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, account.Plugin)
 		if err != nil {
@@ -256,6 +260,9 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 				}
 				if generation != expectedGeneration || record.Deleted {
 					return storeError("conflict", "Extension account generation changed.")
+				}
+				if account.Name == "" {
+					account.Name = record.namedAccount(root).Name
 				}
 				break
 			}
@@ -278,6 +285,7 @@ func (s *Store) SaveAccount(account Account, expectedGeneration uint64) (Account
 		if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
 			return err
 		}
+		account.writeLabel(root)
 		result = account
 		return nil
 	})
@@ -319,7 +327,11 @@ func (s *Store) DeleteAccount(plugin, provider, id string, expectedGeneration ui
 				}
 				flow.Canceled = true
 			}
-			return storeWrite(root, "accounts.json", records, storeFileLimit)
+			if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
+				return err
+			}
+			_ = root.Remove(record.labelFile())
+			return nil
 		}
 		return storeError("not_found", "Extension account is unavailable.")
 	})

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/plugininstall"
 	"github.com/yetone/magpie/internal/pluginrt"
+	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -27,6 +29,7 @@ type sdkPluginJSON struct {
 	NativeABI    uint32               `json:"nativeABI,omitempty"`
 	Platforms    []string             `json:"platforms,omitempty"`
 	Capabilities []sdk.Capability     `json:"capabilities"`
+	ProviderIDs  []string             `json:"providerIDs,omitempty"`
 	Agents       []string             `json:"agents,omitempty"`
 	Inbounds     []string             `json:"inbounds,omitempty"`
 	Protocols    []string             `json:"protocols,omitempty"`
@@ -57,18 +60,25 @@ var sdkPluginChecks struct {
 func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.Installed) pluginEntryJSON {
 	manifest := entry.Manifest
 	version := manifest.Contract.Version
+	presentation := host.PluginPresentation(ctx, entry)
 	info := &sdkPluginJSON{
-		Description: host.PluginDescription(ctx, entry),
+		Description: presentation.Description,
 		Runtime:     manifest.Runtime, API: fmt.Sprintf("%d.%d", version.Major, version.Minor),
 		Capabilities: manifest.Contract.Capabilities, Window: manifest.Window != nil,
 		Checkable: sdkPluginCheckable(entry),
 	}
 	row := pluginEntryJSON{
 		Entry:   plugin.Entry{Spec: "sdk:" + manifest.ID, Off: entry.Disabled},
-		OwnName: manifest.ID, Version: manifest.Version, SDK: info,
+		OwnName: presentation.Name, Icon: sdkPluginIcon(presentation.Icon), Version: manifest.Version, SDK: info,
 		Providers: []string{}, Moved: []string{},
 		IsAgent: len(manifest.Agents) != 0, InMagpieOnly: len(manifest.Providers) == 0,
 		IsMiddleware: manifest.Middleware != nil, IsGateway: manifest.Hooks != nil,
+	}
+	if row.OwnName == "" {
+		row.OwnName = manifest.ID
+	}
+	if presentation.Window != nil {
+		row.setWindow(presentation.Window)
 	}
 	if err := sdk.CheckCompatibility(manifest); err != nil {
 		row.Error = err.Error()
@@ -86,14 +96,18 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 	if compatibility := manifest.Compatibility; compatibility != nil {
 		info.HostAPI, info.NativeABI, info.Platforms = compatibility.HostAPI, compatibility.NativeABI, compatibility.Platforms
 	}
-	for _, provider := range manifest.Providers {
-		row.Providers = append(row.Providers, provider.Name)
-		for _, protocol := range provider.Protocols {
+	served := make([]plugin.Provider, 0, len(manifest.Providers))
+	for _, descriptor := range manifest.Providers {
+		row.Providers = append(row.Providers, descriptor.Name)
+		info.ProviderIDs = append(info.ProviderIDs, provider.ExtensionProviderID(manifest.ID, descriptor.ID))
+		served = append(served, plugin.Provider{ID: descriptor.ID, Name: descriptor.Name})
+		for _, protocol := range descriptor.Protocols {
 			if !slices.Contains(info.Protocols, string(protocol)) {
 				info.Protocols = append(info.Protocols, string(protocol))
 			}
 		}
 	}
+	row.Serves = servesBeside(nil, served)
 	for _, agent := range manifest.Agents {
 		info.Agents = append(info.Agents, agent.Name)
 	}
@@ -114,6 +128,18 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 		row.Latest = check.Latest
 	}
 	return row
+}
+
+func sdkPluginIcon(name string) string {
+	if !sdk.ValidID(name) {
+		return ""
+	}
+	for _, suffix := range []string{".svg", ".png"} {
+		if info, err := fs.Stat(assets, "assets/icons/"+name+suffix); err == nil && info.Mode().IsRegular() {
+			return name
+		}
+	}
+	return ""
 }
 
 func sdkSettingsOf(ctx context.Context, host *extension.Manager, entry extension.Installed) (*sdkPluginSettings, error) {

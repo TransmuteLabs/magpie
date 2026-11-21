@@ -700,6 +700,12 @@ rejects installation. `permissions` govern existing window reads; named
 SDK bindings separately grant each page/panel its action or service endpoint.
 Merely shipping TS assets does not register a page.
 
+An extension can put its history controls in `magpie.panels` with
+`slot: "sessions"`. A panel-only package adds no sidebar page. The panel
+keeps its frame while the Sessions list redraws and uses the same checked
+`window:panel:<index>` bindings and history consent as other window parts.
+Hosts without that slot reject a package whose only window part declares it.
+
 The adapter reuses [`pluginpage.go`](../../internal/gui/pluginpage.go),
 [`pagebridge.js`](../../internal/gui/pagebridge.js) and the existing window
 kernel. SDK packages do not enter `plugins.json`, and a static UI does not

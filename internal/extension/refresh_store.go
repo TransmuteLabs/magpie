@@ -149,6 +149,7 @@ func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account,
 				return err
 			}
 		}
+		selected = account.namedAccount(root)
 		account.Refresh = &refreshRecord{
 			Schema: 1, Scope: scope, Revision: revision, Config: config,
 			State: "dispatched", Updated: time.Now().UTC(),
@@ -160,7 +161,7 @@ func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account,
 		if err := storeWrite(root, "accounts.json", records, storeFileLimit-4096); err != nil {
 			return err
 		}
-		selected = account.Account
+		selected.writeLabel(root)
 		return nil
 	})
 	return selected, err
@@ -193,6 +194,10 @@ func (s *Store) finishRefresh(scope sdk.Scope, result *sdk.AuthResult, state str
 			}
 			receipt = *result
 			receipt.ID, receipt.Credentials = scope.Account, nil
+			account.Name = result.Name
+			if account.Name == "" {
+				account.Name = account.namedAccount(root).Name
+			}
 			account.Auth = bytes.Clone(result.Credentials)
 			account.ExpiresAt = result.ExpiresAt
 			account.Generation++
@@ -201,7 +206,13 @@ func (s *Store) finishRefresh(scope sdk.Scope, result *sdk.AuthResult, state str
 		if !validRefreshRecord(*account) {
 			return storeInvalid()
 		}
-		return storeWrite(root, "accounts.json", records, storeFileLimit)
+		if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
+			return err
+		}
+		if result != nil {
+			account.writeLabel(root)
+		}
+		return nil
 	})
 	return receipt, err
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/yetone/magpie/internal/update"
 	"github.com/yetone/magpie/internal/upstream"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // The providers page: the vendors the user added, the presets they can add
@@ -1220,6 +1221,14 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		out.Account = &accountJSON{Account: *a, Agent: a.Agent}
 		out.Account.Name, out.Account.Icon = accountLabel(p)
 		out.Account.Logins = provider.Logins(a.Agent)
+		for _, login := range out.Account.Logins {
+			if name := login.ExtensionAccountName(); name != "" {
+				if out.AccountUsers == nil {
+					out.AccountUsers = map[string]string{}
+				}
+				out.AccountUsers[strings.ToLower(strings.TrimSpace(login.User))] = name
+			}
+		}
 		if a.Agent == "claude" {
 			out.Account.WSL = provider.ClaudeInWSL()
 		}
@@ -3491,7 +3500,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	// Switching the account an agent is signed in to, among those magpie
 	// remembers, and forgetting one.
 	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ Agent, User string }
+		var in struct {
+			Agent, User string
+			Account     sdk.AccountSelection
+		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
 			return
@@ -3507,7 +3519,11 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				return err
 			}
 		case "forget":
-			change = func() error { return provider.ForgetLogin(in.Agent, in.User) }
+			if in.Account.ID == "" {
+				change = func() error { return provider.ForgetLogin(in.Agent, in.User) }
+			} else {
+				change = func() error { return provider.ForgetExtensionLogin(in.Agent, in.Account) }
+			}
 		case "on", "off":
 			change = func() error { return provider.SetLoginOn(in.Agent, in.User, r.PathValue("action") == "on") }
 		case "access-only", "renewed":

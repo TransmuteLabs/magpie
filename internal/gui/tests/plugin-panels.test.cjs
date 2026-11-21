@@ -21,7 +21,7 @@ const assets = path.resolve(__dirname, "../assets");
 const example = path.resolve(__dirname, "../testdata/panel-plugin/ui");
 const bridge = path.resolve(__dirname, "../pagebridge.js");
 
-const NOTES = "1".repeat(32), SPEND = "2".repeat(32), SETS = "3".repeat(32), TALL = "4".repeat(32), BROKEN = "5".repeat(32), LIB = "6".repeat(32);
+const NOTES = "1".repeat(32), SPEND = "2".repeat(32), SETS = "3".repeat(32), TALL = "4".repeat(32), BROKEN = "5".repeat(32), LIB = "6".repeat(32), HISTORY = "7".repeat(32);
 const panel = (tok, i, slot, title, file, name = "magpie-provider-notes", reads = ["usage:summary"]) => ({
   spec: "/x/" + name, name, key: `plugin-${name.replace("magpie-", "")}-${i}`, slot, title, reads, url: `/_magpie/plugin/${tok}/${file}`,
 });
@@ -51,6 +51,7 @@ function server(lang, seen, opts) {
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
     if (url.pathname === "/api/providers") return json({ providers: providerList, presets: [], excluded: [], gateway: { running: true, window: true }, plugins: [] });
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [] });
+    if (url.pathname === "/api/sessions/manage") return json({ agents: [], sessions: [] });
     if (url.pathname === "/api/plugin-pages") return json(opts.pages);
     if (url.pathname === "/api/plugin-panels") return json(opts.panels);
     if (url.pathname === "/api/plugin-pages/read") {
@@ -73,7 +74,7 @@ function server(lang, seen, opts) {
       let body;
       if (rel === "_magpie/bridge.js") body = await fs.readFile(bridge);
       else if ([NOTES, SPEND, SETS].includes(tok)) body = await fs.readFile(path.join(example, rel)).catch(() => null);
-      else if (tok === TALL && rel === "tall.html") body = TALL_HTML;
+      else if ((tok === TALL || tok === HISTORY) && rel === "tall.html") body = TALL_HTML;
       else if (tok === BROKEN && rel === "broken.html") body = BROKEN_HTML;
       else if (tok === BROKEN && rel === "app.js") body = seen.broken ? "throw new Error('fixture: the panel broke')" : "1";
       else if (tok === LIB && rel === "index.html") body = LIB_HTML;
@@ -96,6 +97,29 @@ async function frameReady(page, tok) {
 const fits = (page, sel) => page.evaluate((sel) => { const v = document.querySelector(sel); return v.scrollWidth <= v.clientWidth + 1; }, sel);
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: a Sessions panel keeps its frame across list redraws`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    page.setDefaultTimeout(8000);
+    const history = panel(HISTORY, 0, "sessions", "History fixture", "tall.html", "history-fixture", []);
+    const opts = { panels: [history], pages: [] };
+    await page.route("**/*", server("en", {}, opts));
+    await page.goto("http://magpie.test/");
+    assert.equal(await page.locator(`iframe[src*="${HISTORY}"]`).count(), 0);
+    await page.evaluate(() => show("sessions"));
+    const slot = page.locator('#view-sessions .plugin-slot[data-slot="sessions"]');
+    const frame = slot.frameLocator("iframe");
+    await frame.locator("#box").waitFor();
+    await frame.locator("#box").evaluate(box => { box.dataset.readerState = "selected"; });
+    await page.evaluate(() => magpie.call("sessions", "relang"));
+    assert.equal(await frame.locator("#box").getAttribute("data-reader-state"), "selected");
+    assert.equal(await page.locator('button[data-plugin-page]').count(), 0);
+    opts.panels = [];
+    await page.evaluate(() => window.loadPluginPages());
+    assert.equal(await slot.locator("iframe").count(), 0);
+  });
+
   test(`${engine}: a plugin's panels draw in magpie's own pages, shut in`, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());

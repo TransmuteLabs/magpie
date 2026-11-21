@@ -316,6 +316,10 @@ func archiveWindowAuthRecords(root *os.Root, records *storeAccounts) error {
 }
 
 func (s *Store) updateWindowAuth(plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error) (windowAuthRecord, error) {
+	return s.updateWindowAuthThen(plugin, flow, update, nil)
+}
+
+func (s *Store) updateWindowAuthThen(plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error, committed func(*os.Root)) (windowAuthRecord, error) {
 	var result windowAuthRecord
 	err := s.withStore(plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
@@ -336,6 +340,9 @@ func (s *Store) updateWindowAuth(plugin, flow string, update func(*windowAuthRec
 			if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
 				return err
 			}
+			if committed != nil {
+				committed(root)
+			}
 			result = *record
 			return nil
 		}
@@ -345,7 +352,9 @@ func (s *Store) updateWindowAuth(plugin, flow string, update func(*windowAuthRec
 }
 
 func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (windowAuthRecord, error) {
-	return s.updateWindowAuth(plugin, flow, func(record *windowAuthRecord, records *storeAccounts) error {
+	var previous storeAccount
+	var published Account
+	return s.updateWindowAuthThen(plugin, flow, func(record *windowAuthRecord, records *storeAccounts) error {
 		if record.Phase != "polling" || record.Canceled || time.Now().UnixMilli() >= record.Expires {
 			return errors.New("window authentication authority ended before publication")
 		}
@@ -374,6 +383,7 @@ func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (w
 			if refresh := records.Accounts[index].Refresh; refresh != nil && refresh.Scope.Generation == record.Scope.Generation && refresh.State == "dispatched" {
 				return errors.New("window authentication cannot replace a credential refresh in progress")
 			}
+			previous = records.Accounts[index]
 			generation = record.Scope.Generation
 		} else if index >= 0 {
 			previous := records.Accounts[index]
@@ -398,9 +408,16 @@ func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (w
 			records.Accounts[index].Account = account.Account
 			records.Accounts[index].Deleted = false
 		}
+		published = account.Account
+		published.Name = result.Name
 		record.Phase, record.Continuation, record.URL, record.UserCode = "complete", nil, "", ""
 		record.Receipt = &sdk.AccountSummary{ID: result.ID, Generation: strconv.FormatUint(generation+1, 10), ExpiresAt: result.ExpiresAt}
 		record.Interval, record.Next, record.Private = 0, 0, nil
 		return nil
+	}, func(root *os.Root) {
+		if !storeToken(published.Name) && previous.Generation != 0 {
+			published.Name = previous.namedAccount(root).Name
+		}
+		published.writeLabel(root)
 	})
 }

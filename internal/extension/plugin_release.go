@@ -2,12 +2,8 @@ package extension
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"strings"
-	"unicode"
 
 	"github.com/yetone/magpie/internal/netproxy"
 	"golang.org/x/mod/semver"
@@ -44,43 +40,6 @@ func (m *Manager) ProbePluginRelease(ctx context.Context, source string) (bool, 
 		}
 	}
 	return false, nil
-}
-
-func (m *Manager) PluginDescription(ctx context.Context, entry Installed) string {
-	const filename = "package.json"
-	expected, present := entry.Files[filename]
-	if !present || ctx.Err() != nil {
-		return ""
-	}
-	root, err := m.catalog.open(false)
-	if err != nil {
-		return ""
-	}
-	defer root.Close()
-	directory, err := openWindowDirectory(root, entry.Directory)
-	if err != nil {
-		return ""
-	}
-	defer directory.Close()
-	body, err := catalogReadFile(directory, filename, releaseMetadataLimit)
-	if err != nil {
-		return ""
-	}
-	digest := sha256.Sum256(body)
-	if hex.EncodeToString(digest[:]) != expected {
-		return ""
-	}
-	var metadata struct {
-		Description string `json:"description"`
-	}
-	if json.Unmarshal(body, &metadata) != nil {
-		return ""
-	}
-	description := strings.TrimSpace(metadata.Description)
-	if strings.ContainsFunc(description, unicode.IsControl) {
-		return ""
-	}
-	return description
 }
 
 func (m *Manager) CheckUpdate(ctx context.Context, entry Installed) (ReleaseAvailability, error) {

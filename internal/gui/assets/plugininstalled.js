@@ -48,6 +48,16 @@ window.pmInstalled = function ({ es, st, everything, entryOf, kindOf, srcOf, nam
   };
 };
 
+window.pmSDKSubscriptions = function (entry) {
+  if (!providers || providers.last || entry.off || !entry.sdk.capabilities?.includes("account-auth")) return [];
+  const grants = sdkSubs();
+  return (entry.sdk.providerIDs || []).flatMap((id, index) => {
+    const grant = grants.find((sub) => sub.id === id && (sub.page || sub.revision && sub.methods?.length));
+    const signedIn = !!hasLogins(id);
+    return grant || signedIn ? [{ id, name: entry.providers[index], icon: grant?.icon, signedIn }] : [];
+  });
+};
+
 window.pmSDKDetails = function ({ sdk, providers }, gitWeb) {
   const box = el("details", "sub pm-sdk");
   box.append(el("summary", "", "SDK " + sdk.api + " · " + sdk.runtime));

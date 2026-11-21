@@ -192,6 +192,50 @@ func TestExtensionWindowCatalogAssets(t *testing.T) {
 	}
 }
 
+func TestExtensionSessionsPanelUsesItsOwnSlot(t *testing.T) {
+	pagePlugins(t)
+	host, catalog := windowTestManager(t)
+	source := t.TempDir()
+	for name, body := range map[string]string{
+		sdk.ManifestFile: `{"schema":1,"id":"history-fixture","version":"1.0.0","runtime":"exec","entry":"worker","contract":{"version":{"major":1,"minor":1},"capabilities":["module-rpc"]},"window":{"metadata":"package.json"},"actions":[{"id":"refresh","effect":"read","inputSchema":{"type":"object"}}],"bindings":[{"id":"history.refresh","from":"window:panel:0","action":"refresh"}]}`,
+		"package.json":   `{"magpie":{"panels":[{"slot":"sessions","title":"History fixture","file":"history.html"}]}}`,
+		"history.html":   `<!doctype html><p>History fixture</p>`,
+		"worker":         `must not execute for window discovery`,
+	} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := catalog.Install(t.Context(), source, func(context.Context, extension.Installed) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mux := pageMux()
+	pages, panels := windowTestPages(t, mux)
+	for _, page := range pages {
+		if page.Name == "history-fixture" {
+			t.Fatalf("Sessions panel appeared in the sidebar: %+v", page)
+		}
+	}
+	for _, panel := range panels {
+		if panel.Name != "history-fixture" {
+			continue
+		}
+		if panel.Slot != "sessions" || panel.Ref == "" || panel.Title != "History fixture" {
+			t.Fatalf("wrong Sessions panel: %+v", panel)
+		}
+		part, err := resolveExtensionWindow(t.Context(), panel.Ref)
+		if err != nil || part.part != "window:panel:0" {
+			t.Fatalf("Sessions panel lost its checked binding: %+v %v", part, err)
+		}
+		body := do(mux, httptest.NewRequest("GET", panel.URL, nil))
+		if body.Code != http.StatusOK || !strings.Contains(body.Body.String(), "<p>History fixture</p>") || host.Running(panel.Name) {
+			t.Fatalf("Sessions panel assets: %d %s", body.Code, body.Body)
+		}
+		return
+	}
+	t.Fatal("installed history panel missing from Sessions")
+}
+
 func TestExtensionWindowRevisionsAndUnknownCatalog(t *testing.T) {
 	pagePlugins(t)
 	host, catalog := windowTestManager(t)

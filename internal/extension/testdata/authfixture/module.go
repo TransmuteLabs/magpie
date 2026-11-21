@@ -60,7 +60,10 @@ func Module() sdk.Module {
 			sdk.MethodProviderModels: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 				return sdk.ModelsResult{}, nil
 			},
-			sdk.MethodAuthLogout: unsupported,
+			sdk.MethodAuthLogout: func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+				_, err := record(ctx, "logout", call)
+				return nil, err
+			},
 			sdk.MethodAuthRefresh: func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 				config, err := record(ctx, "refresh", call)
 				if err != nil {
@@ -119,7 +122,7 @@ func Module() sdk.Module {
 				if config.Fail {
 					return nil, &sdk.Error{Code: "vendor", Message: "PRIVATE-CONTINUATION PRIVATE-CREDENTIAL", Outcome: "uncertain"}
 				}
-				return sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"token":"PRIVATE-CREDENTIAL"}`)}, nil
+				return sdk.AuthResult{ID: "chosen", Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-CREDENTIAL"}`)}, nil
 			},
 		},
 	}
@@ -132,10 +135,18 @@ func Module() sdk.Module {
 			if err := json.Unmarshal(call.Params, &request); err != nil {
 				return nil, err
 			}
-			if call.Scope.Account != "chosen" || string(call.Auth) != `{"token":"PRIVATE-CREDENTIAL"}` {
+			var token string
+			var used float64
+			switch call.Scope.Account {
+			case "chosen":
+				token, used = `{"token":"PRIVATE-CREDENTIAL"}`, 17
+			case "other":
+				token, used = `{"token":"PRIVATE-OTHER"}`, 23
+			}
+			if token == "" || string(call.Auth) != token {
 				return nil, errors.New("usage lacks the selected account")
 			}
-			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "Weekly", Used: 17}}}, nil
+			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "Weekly", Used: used}}}, nil
 		}
 	}
 	if manifest.Contract.Has(sdk.ProviderSignIn) {

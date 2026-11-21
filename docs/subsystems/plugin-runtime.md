@@ -44,6 +44,16 @@ config proof headers before forwarding body bytes. The browser-only
 SDK root config uses its own fixed `module.config` CAS namespace; it is
 distinct from built-in settings composition below.
 
+Installed SDK rows use `magpie.name` and a bundled `magpie.icon` from the
+frozen root `package.json`, with the declared window metadata as a
+fallback. Older windows can supply their page title. The row describes its
+checked page, panels and served providers even when account discovery has
+yet to complete. The list reads package metadata without warming a module.
+Enabled rows join the ordinary Providers snapshot by exact provider ID for
+account status and available sign-in grants. Sign in opens the same
+Providers flow used by the Add sheet. Options uses the module's declared
+settings schema.
+
 See [composite ownership](../adr/0005-composite-module-contract.md) for the
 descriptor, lifecycle and proof contract, and the
 [runtime comparison](extension-runtime-comparison.md) for the five runtime
@@ -471,7 +481,8 @@ starts a Bun host.
 
 - **Panels.** `magpie.panels: [{slot, file, title}]`, at most 8 a plugin
   (`maxPanels`), each `slot` one of `plugin.PanelSlots`: `agents` (the end
-  of the Agents page), `usage` (the end of Usage's Overview), `settings` (a
+  of the Agents page), `usage` (the end of Usage's Overview), `sessions`
+  (under the Sessions list), `settings` (a
   Plugins tab in Settings, shown only while a panel is in it, in the tab
   strip and in the sidebar of a wide window) and `provider` (each saved
   provider's editor, told `{provider: {id, name}}`). `file` is an .html in

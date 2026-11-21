@@ -13821,7 +13821,11 @@ function renderAccounts(a, p) {
     const swUse = (title, b = el("button", "text", t("Use"))) => (b.title = title, b.onclick = () => (b.classList.add("busy"), accountAction("login/switch", { agent: a.agent, user: l.user }, t("{agent} now uses {user}", { agent: a.agentName, user: l.user }))), b);
     // its Remove, titled as given; true: the own account's, else the plain one
     const forgetOf = (title) => {
-      const f = el("button", "text quiet", t("Remove"));
+      const f = el("button", "text quiet", t(l.extensionGeneration ? "Sign out" : "Remove"));
+      if (l.extensionGeneration) {
+        f.onclick = () => import("./sdk-signin.js").then((m) => f.isConnected && m.signOut(a, l, p)).catch(statusErr);
+        return f;
+      }
       if (title) f.title = title !== true ? title : l.own ? forgetOwnTitle(a) : t("magpie forgets this account's sign-in; the account itself is untouched");
       f.onclick = () => accountAction("login/forget", { agent: a.agent, user: l.user }, t("{user} removed", { user: l.user }));
       return f;
@@ -13923,7 +13927,7 @@ function renderAccounts(a, p) {
       const using = el("span", "using", l.paused ? t("Paused") : back ? t("First for now") : several ? t("First") : t("In use"));
       if (back && !l.paused) using.title = t("{user} was nearly used up, so magpie signed {agent} in to this one; it goes back to {user} once that has room again", { user: back.user, agent: a.agentName });
       line.append(using);
-      if (a.agent === "qoder" || a.agent === "qoder-cn" || l.own) {
+      if (l.extensionGeneration || a.agent === "qoder" || a.agent === "qoder-cn" || l.own) {
         line.append(forgetOf(l.own));
       } else if (a.agent === "codex" && ls.length === 1) {
         // Codex's only account: signed out, as codex logout does

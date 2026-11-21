@@ -1749,7 +1749,7 @@ func ForgetLogin(agent, user string) error {
 		return errAccountDiscoveryOff
 	}
 	if strings.HasPrefix(agent, "extension-") {
-		return forgetExtensionLogin(agent, user)
+		return forgetExtensionLogin(agent, user, 0)
 	}
 	if pp, ok := pluginOfAgent(agent); ok {
 		return forgetPluginLogin(pp, user)

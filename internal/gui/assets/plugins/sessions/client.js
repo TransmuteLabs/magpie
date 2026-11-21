@@ -15,6 +15,7 @@
 // in a new language, and reveal is the Usage page's way in.
 magpie.plugin("sessions", (ctx) => {
   let page = null;
+  let listHead, listBody;
 
   let data = null;        // /api/sessions/manage
   let failed = "";
@@ -398,7 +399,17 @@ magpie.plugin("sessions", (ctx) => {
     fitObserver?.disconnect();
     if (page.querySelector(".sm-agent-pick.open")) closeProtoMenu();
     page.classList.toggle("loading", !data?.sessions && !failed);
-    page.replaceChildren(head(), body());
+    const nextHead = head(), nextBody = body();
+    if (listHead?.parentNode === page && listBody?.parentNode === page) {
+      listHead.replaceWith(nextHead);
+      listBody.replaceWith(nextBody);
+    } else {
+      page.replaceChildren(nextHead, nextBody);
+      const slot = magpie.slot?.("sessions");
+      if (slot) page.append(slot);
+    }
+    listHead = nextHead;
+    listBody = nextBody;
     const wrap = page.querySelector(".sm-switch");
     const tabs = wrap.querySelector(".sm-agents");
     const pick = wrap.querySelector(".sm-agent-pick");

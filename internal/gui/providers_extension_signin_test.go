@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -288,7 +289,7 @@ func TestProviderSignInUsesOrdinaryAccountsModelsAndUsage(t *testing.T) {
 		if row.ID == id {
 			found = row.Account != nil && row.Account.Agent == id && len(row.Models) == 1 &&
 				row.Models[0].ID == "fixture-model" && len(row.Account.Logins) == 1 &&
-				row.Account.Logins[0].User == "chosen" && row.Account.Logins[0].ExtensionGeneration == "1"
+				row.AccountUsers["chosen"] == "reader@example.test" && row.Account.Logins[0].User == "chosen" && row.Account.Logins[0].ExtensionGeneration == "1"
 		}
 	}
 	if !found {
@@ -302,4 +303,80 @@ func TestProviderSignInUsesOrdinaryAccountsModelsAndUsage(t *testing.T) {
 	reauthorize := newFlow(current, "reauthorize", `{"method":"device","account":{"id":"chosen","expectedGeneration":"1"}}`)
 	finish(current, "reauthorize", reauthorize, "2")
 	signIn(current.Revision, "stale-account", "start", `"request":"start","options":{"method":"device","account":{"id":"chosen","expectedGeneration":"1"}}`, false)
+
+	other, err := manager.Store().SaveAccount(extension.Account{
+		Plugin: manifest.ID, Provider: "vendor", ID: "other", Auth: json.RawMessage(`{"token":"PRIVATE-OTHER"}`),
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "logout.jsonl")
+	config, err := manager.ModuleConfig(t.Context(), manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = json.Marshal(authfixture.Config{Trace: trace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, config.Version, raw); err != nil {
+		t.Fatal(err)
+	}
+	logout := func(user, generation string, accepted bool) {
+		t.Helper()
+		post("/api/login/forget", `{"agent":"`+id+`","account":{"id":"`+user+`","expectedGeneration":"`+generation+`"}}`, accepted)
+	}
+	logout("chosen", "1", false)
+	logout("chosen", "02", false)
+	post("/api/login/forget", `{"agent":"`+id+`","user":"chosen","account":null}`, false)
+	if _, err := os.Stat(trace); !os.IsNotExist(err) {
+		t.Fatalf("a stale or invalid generation reached auth.logout: %v", err)
+	}
+	logout("chosen", "2", true)
+	if _, err := manager.Store().GetAccount(manifest.ID, "vendor", "chosen"); err == nil {
+		t.Fatal("sign out left the selected credentials in the active store")
+	}
+	retained, err := manager.Store().GetAccount(manifest.ID, "vendor", "other")
+	if err != nil || retained.Generation != other.Generation || !bytes.Equal(retained.Auth, other.Auth) {
+		t.Fatalf("sign out changed the other account's credentials or generation: %v", err)
+	}
+	state = readProviderSignInState(t, mux)
+	if !slices.ContainsFunc(state.Providers, func(row providerJSON) bool {
+		return row.ID == id && row.Account != nil && len(row.Account.Logins) == 1 &&
+			row.Account.Logins[0].User == "other" && len(row.Models) == 1
+	}) {
+		t.Fatal("sign out changed the surviving account or its ordinary provider and model")
+	}
+	usage = do(mux, httptest.NewRequest(http.MethodGet, "/api/login/usage?agent="+id, nil))
+	var quotas map[string]provider.SubscriptionQuota
+	if usage.Code != http.StatusOK || json.Unmarshal(usage.Body.Bytes(), &quotas) != nil ||
+		len(quotas) != 1 || len(quotas["other"].Windows) != 1 || quotas["other"].Windows[0].Used != 23 {
+		t.Fatalf("sign out left stale usage or dropped the surviving account: %s", usage.Body.String())
+	}
+	logout("other", "1", true)
+	if slices.ContainsFunc(readProviderSignInState(t, mux).Providers, func(row providerJSON) bool { return row.ID == id }) ||
+		slices.ContainsFunc(provider.Served(), func(entry provider.Entry) bool { return entry.Provider.ID == id }) {
+		t.Fatal("signing out the last account left an ordinary provider or served model")
+	}
+	selected()
+	calls, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(calls), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("wanted two logout calls, got %d", len(lines))
+	}
+	for index, want := range []sdk.Scope{
+		{Plugin: manifest.ID, Provider: "vendor", Account: "chosen", Generation: 2},
+		{Plugin: manifest.ID, Provider: "vendor", Account: "other", Generation: 1},
+	} {
+		var call struct {
+			Method string
+			Scope  sdk.Scope
+		}
+		if err := json.Unmarshal(lines[index], &call); err != nil || call.Method != "logout" || call.Scope != want {
+			t.Fatalf("wrong selected logout authority: %+v, %v", call, err)
+		}
+	}
 }

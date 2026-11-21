@@ -57,6 +57,15 @@ enablement generation. A flow cannot cross between the form and a plugin
 window. The journal retains its existing on-disk schema and numeric config
 version.
 
+The account ID remains the key for routing, quota and reauthorization. A
+valid authentication or refresh result name is stored with the account
+and displayed in Providers and Usage, with the user's alias taking precedence.
+A separate per-account label file records only the public name and its
+generation. Credential storage retains its existing schema for rollback.
+Existing accounts can reuse a successful refresh receipt for their current
+generation. Without one, the next named sign-in or refresh
+supplies the label.
+
 After completion, the account appears in the existing provider catalog,
 model list and Usage. Accounts disabled globally suppress SDK sign-in choices
 and their operations. See [`ProviderSignIns`](../../internal/extension/provider_signin.go),
@@ -140,6 +149,15 @@ The next request discovers a new binding and uses its current `Frame.Auth`.
 sign-ins save credentials and expiry through generation CAS; returned
 helper results omit credentials. The manager supplies credentials through
 `Frame.Auth`, rather than copying them into execute/models/usage parameters.
+
+The ordinary Providers editor offers **Sign out** for each SDK account.
+Its confirmation submits the SDK account selection through `/api/login/forget`.
+A stale generation is refused before invoking
+`auth.logout`. Once that hook succeeds, the store removes the selected
+credentials by generation CAS. The account list and allowance cards drop
+the removed account, and the provider keeps serving through its remaining
+accounts. The subscription remains available for a new sign-in.
+
 Refresh uses a host-owned [transaction](../adr/0007-transactional-account-refresh.md):
 one cross-process owner rereads the selected generation, records dispatch,
 and atomically publishes credentials, expiry, the next generation and a

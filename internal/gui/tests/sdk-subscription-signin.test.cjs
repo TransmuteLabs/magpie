@@ -40,6 +40,7 @@ const text = {
 
 function fixture(lang) {
   const starts = [];
+  const signouts = [];
   const flows = new Map();
   const opens = [];
   const unexpected = [];
@@ -78,6 +79,17 @@ function fixture(lang) {
       opens.push(req.postDataJSON().url);
       return json({});
     }
+    if (url.pathname === "/api/login/forget") {
+      const body = req.postDataJSON();
+      const account = body.account;
+      signouts.push(body);
+      if (body.agent !== primary.id || !account || !logins.some((login) =>
+        login.user === account.id && login.extensionGeneration === account.expectedGeneration)) {
+        return route.fulfill({ status: 400, json: { error: "extension account generation changed" } });
+      }
+      logins = logins.filter((login) => login.user !== account.id).map((login, index) => ({ ...login, active: index === 0 }));
+      return json(payload());
+    }
     if (url.pathname === signInPath) {
       const body = req.postDataJSON();
       if (body.operation === "start") {
@@ -111,7 +123,7 @@ function fixture(lang) {
         const renewing = flow.start.options.account;
         const account = renewing?.id || selected;
         const generation = renewing ? Number(renewing.expectedGeneration) + 1 : 4;
-        const login = { user: account, active: !renewing, on: true, own: true, extensionGeneration: String(generation) };
+        const login = { user: account, active: !renewing, on: true, extensionGeneration: String(generation) };
         logins = renewing ? logins.map((item) => item.user === account ? login : item) : [login];
         return json({ flow: body.flow, state: "complete", account: { id: account, generation } });
       }
@@ -137,7 +149,7 @@ function fixture(lang) {
     });
     return bytes ? route.fulfill({ body: bytes, contentType }) : route.fulfill({ status: 404, body: "" });
   };
-  return { serve, starts, flows, opens, unexpected,
+  return { serve, starts, signouts, flows, opens, unexpected,
     delayStart() {
       linkOnly = false;
       let receive, release;
@@ -150,7 +162,7 @@ function fixture(lang) {
     needReauthorization() {
       linkOnly = false;
       logins = [
-        { user: other, active: true, on: true, own: true, extensionGeneration: "7" },
+        { user: other, active: true, on: true, extensionGeneration: "7" },
         { ...logins[0], active: false, lapsed: lapse },
       ];
     },
@@ -296,6 +308,29 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await openEditor();
           await selectedRow.getByText("Sign-in required", { exact: true }).waitFor();
           assert.equal(await button(selectedRow, words.again).count(), 0);
+
+          const activeRow = editor.locator(`[data-account-id="${other}"]`);
+          const confirmation = page.getByRole("alertdialog");
+          await button(activeRow, `Settings for ${other}`).click();
+          await button(activeRow, "Sign out").click();
+          await confirmation.getByRole("heading").filter({ hasText: other }).waitFor();
+          await button(confirmation, words.cancel).click();
+          await confirmation.waitFor({ state: "detached" });
+          assert.deepEqual(ctl.signouts, []);
+          const signOut = async (row, user, generation) => {
+            await button(row, "Sign out").click();
+            await confirmation.getByRole("heading").filter({ hasText: user }).waitFor();
+            const [sent] = await Promise.all([
+              page.waitForRequest(origin + "/api/login/forget"),
+              button(confirmation, "Sign out").click(),
+            ]);
+            assert.deepEqual(sent.postDataJSON(), { agent: primary.id, account: { id: user, expectedGeneration: generation } });
+            await row.waitFor({ state: "detached" });
+          };
+          await signOut(activeRow, other, "7");
+          await selectedRow.waitFor();
+          await signOut(selectedRow, selected, "6");
+          await page.locator(".row.provider", { hasText: primary.name }).waitFor({ state: "detached" });
 
           ctl.showLegacy();
           await page.goto(origin + "/?view=providers");

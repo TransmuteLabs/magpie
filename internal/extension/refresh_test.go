@@ -113,9 +113,9 @@ func TestRefreshConcurrentCallsPublishOneGeneration(t *testing.T) {
 		})
 	}
 	wait.Wait()
-	account, err := manager.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
-	if err != nil || account.Generation != 2 || calls.Load() != 1 {
-		t.Fatalf("refresh did not publish exactly one exchange/generation: %d exchanges, generation %d, %v", calls.Load(), account.Generation, err)
+	accounts, err := manager.Store().Accounts(scope.Plugin, scope.Provider)
+	if err != nil || len(accounts) != 1 || accounts[0].Generation != 2 || accounts[0].Name != "Fixture" || calls.Load() != 1 {
+		t.Fatalf("refresh did not publish exactly one exchange and named account: %d exchanges, %d accounts, %v", calls.Load(), len(accounts), err)
 	}
 }
 
@@ -701,5 +701,57 @@ func TestRefreshFixtureCountsOnlyItsOwnExchangeEndpoint(t *testing.T) {
 	}
 	if _, err := manager.RefreshAccount(context.Background(), scope.Plugin, scope); err != nil || calls.Load() != 1 {
 		t.Fatalf("actual refresh endpoint = %d calls, %v", calls.Load(), err)
+	}
+}
+
+func TestLegacyRefreshAccountNameIsGenerationBound(t *testing.T) {
+	store, root := storeTest(t)
+	scope := storeTestScope()
+	storeTestAccount(t, store, scope)
+	if _, err := store.claimRefresh(scope, "revision", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.finishRefresh(scope, &sdk.AuthResult{
+		ID: scope.Account, Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"rotated"}`),
+	}, "completed"); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the schema-2 shape written before accounts carried a display name.
+	if err := store.withStore(scope.Plugin, func(root *os.Root) error {
+		records, err := storeReadAccounts(root, scope.Plugin)
+		if err != nil {
+			return err
+		}
+		records.Schema, records.AuthFlows = 2, nil
+		records.Accounts[0].Usage = nil
+		if err := root.Remove(records.Accounts[0].labelFile()); err != nil {
+			return err
+		}
+		return storeWrite(root, "accounts.json", records, storeFileLimit)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewStore(root)
+	accounts, err := reopened.Accounts(scope.Plugin, scope.Provider)
+	if err != nil || len(accounts) != 1 || accounts[0].Name != "reader@example.test" {
+		t.Fatalf("current legacy refresh receipt did not restore account label: %v", err)
+	}
+	scope.Generation, scope.Operation = 2, "next-operation"
+	if _, err := reopened.claimRefresh(scope, "revision", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reopened.finishRefresh(scope, &sdk.AuthResult{Credentials: json.RawMessage(`{}`)}, "completed"); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = reopened.Accounts(scope.Plugin, scope.Provider)
+	if err != nil || len(accounts) != 1 || accounts[0].Name != "reader@example.test" || accounts[0].Generation != 3 {
+		t.Fatalf("unnamed rotation lost the account label: %v", err)
+	}
+	if err := reopened.DeleteAccount(scope.Plugin, scope.Provider, scope.Account, accounts[0].Generation); err != nil {
+		t.Fatal(err)
+	}
+	recreated, err := reopened.SaveAccount(Account{Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: json.RawMessage(`{}`)}, 0)
+	if err != nil || recreated.Name != "" {
+		t.Fatalf("recreated account inherited an obsolete label: %v", err)
 	}
 }

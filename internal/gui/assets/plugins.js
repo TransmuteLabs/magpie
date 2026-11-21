@@ -1260,13 +1260,14 @@
   // one its package.json gives itself (magpie.name, #4558), else the
   // package's or the folder's
   function shownName(e) {
+    if (e.sdk) return e.ownName || label(e.spec);
     const pkg = name(e.spec);
     return (listings || []).find((x) => x.package === pkg)?.name || e.ownName || (isGit(e.spec) && e.package) || label(e.spec);
   }
 
   function installedRow(e) {
     const pkg = name(e.spec);
-    const l = (listings || []).find((x) => x.package === pkg);
+    const l = !e.sdk && (listings || []).find((x) => x.package === pkg);
     const r = el("div", "row pm-row" + (e.off ? " off" : ""));
     const who = el("div", "who");
     const nm = el("div", "name");
@@ -1328,7 +1329,7 @@
     if (e.panels?.length) nm.append(kindChip("pn"));
     if (e.providers?.length || !(e.gatewayOnly || e.middlewareOnly || e.inMagpieOnly || e.isAgent || toolsOnly || (mw && !e.isMiddleware) || (ag && !e.isAgent))) nm.append(kindChip("pv"));
     who.append(nm);
-    const subs = subsOf(pkg);
+    const subs = e.sdk ? window.pmSDKSubscriptions?.(e) || [] : subsOf(pkg);
     const sub = el("div", "sub");
     const cands = e.off ? [] : movableOf(pkg);
     // a provider another installed plugin signs in to as well (neiko on
@@ -1573,7 +1574,7 @@
   // where a plugin's panels go in magpie's own pages (magpie.panels), and
   // the row menus its page adds items to (magpie.actions), titled with
   // their titles; picking an item tells the page the row's name only
-  const SLOTS = { agents: "the Agents page", usage: "the Usage page", settings: "Settings", provider: "each provider's editor" };
+  const SLOTS = { agents: "the Agents page", usage: "the Usage page", settings: "Settings", provider: "each provider's editor", sessions: "Sessions" };
   const MENUS = { provider: "providers' menus", agent: "agents' menus" };
   function whereLine(xs, key, names, text) {
     const d = el("div", "sub pm-mw pm-page");

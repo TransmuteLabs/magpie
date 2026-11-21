@@ -370,22 +370,7 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 			}
 		}
 		if w, _ := plugin.Window(plugin.Target(e.Spec)); w != nil {
-			reads := w.Reads
-			if reads == nil {
-				reads = []string{}
-			}
-			if w.Page != nil {
-				j.Page = &pluginPageInfoJSON{Title: w.Page.Title, Replaces: w.Page.Replaces, Reads: reads}
-			}
-			for _, p := range w.Panels {
-				j.Panels = append(j.Panels, pluginPanelInfoJSON{Slot: p.Slot, Title: p.Title})
-			}
-			if len(w.Panels) > 0 {
-				j.PanelReads = reads
-			}
-			for _, a := range w.Actions {
-				j.Actions = append(j.Actions, pluginActionInfoJSON{Menu: a.Menu, Title: a.Title})
-			}
+			j.setWindow(w)
 			j.InMagpieOnly = plugin.InMagpieOnly(plugin.Target(e.Spec))
 		}
 		for _, c := range clashes[e.Spec] {
@@ -432,6 +417,25 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		}
 	}
 	return s
+}
+
+func (row *pluginEntryJSON) setWindow(window *plugin.WindowSpec) {
+	reads := window.Reads
+	if reads == nil {
+		reads = []string{}
+	}
+	if window.Page != nil {
+		row.Page = &pluginPageInfoJSON{Title: window.Page.Title, Replaces: window.Page.Replaces, Reads: reads}
+	}
+	for _, panel := range window.Panels {
+		row.Panels = append(row.Panels, pluginPanelInfoJSON{Slot: panel.Slot, Title: panel.Title})
+	}
+	if len(window.Panels) > 0 {
+		row.PanelReads = reads
+	}
+	for _, action := range window.Actions {
+		row.Actions = append(row.Actions, pluginActionInfoJSON{Menu: action.Menu, Title: action.Title})
+	}
 }
 
 // servesBeside is what a plugin's "Serves" chip names besides the
