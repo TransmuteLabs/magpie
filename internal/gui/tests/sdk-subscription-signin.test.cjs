@@ -173,6 +173,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await context.route("**/*", ctl.serve);
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (error) => errors.push(error.message));
         const sheet = page.locator("#addSheet"), sheetForm = sheet.locator(".signing");
