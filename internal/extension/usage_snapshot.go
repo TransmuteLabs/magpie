@@ -81,7 +81,7 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 func (s *Store) readUsageModule(ctx context.Context, private *os.Root, entry Installed, selected map[sdk.Scope]bool, out *UsageSnapshot) {
 	module := entry.Manifest.ID
 	_ = readStoreNamespace(ctx, private, module, func(root *os.Root) error {
-		accounts, err := storeLoadAccountSnapshot(root, module, s.accountSnapshotSlot(module))
+		accounts, err := storeLoadAccountSnapshot(root, module, s)
 		if err != nil || accounts == nil {
 			return err
 		}

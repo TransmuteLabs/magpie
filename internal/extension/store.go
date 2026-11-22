@@ -63,13 +63,14 @@ type JournalEntry struct {
 }
 
 type Store struct {
-	root               string
-	mu                 sync.Mutex
-	accountSnapshots   [8]atomic.Pointer[storeReadSnapshot[storeAccounts]]
-	accountSyncMu      sync.Mutex
-	accountSyncEnabled bool
-	accountSync        [8]*storeSyncConfirmation
-	ownerSnapshot      atomic.Pointer[storeReadSnapshot[[]subscriptionRecord]]
+	root                 string
+	mu                   sync.Mutex
+	accountSnapshots     [8]atomic.Pointer[storeReadSnapshot[storeAccounts]]
+	largeAccountSnapshot atomic.Pointer[storeReadSnapshot[storeAccounts]]
+	accountSyncMu        sync.Mutex
+	accountSyncEnabled   bool
+	accountSync          [8]*storeSyncConfirmation
+	ownerSnapshot        atomic.Pointer[storeReadSnapshot[[]subscriptionRecord]]
 }
 
 type storeAccount struct {
@@ -651,19 +652,15 @@ func storeReadAccounts(root *os.Root, plugin string) (storeAccounts, error) {
 }
 
 func (s *Store) readAccounts(root *os.Root, plugin string) (storeAccounts, error) {
-	return storeLoadAccounts(root, plugin, s.accountSnapshotSlot(plugin))
-}
-
-func (s *Store) accountSnapshotSlot(plugin string) *atomic.Pointer[storeReadSnapshot[storeAccounts]] {
-	return &s.accountSnapshots[s.accountSnapshotIndex(plugin)]
+	return storeLoadAccounts(root, plugin, s)
 }
 
 func (s *Store) accountSnapshotIndex(plugin string) int {
 	return int(sha256.Sum256([]byte(plugin))[0]) % len(s.accountSnapshots)
 }
 
-func storeLoadAccounts(root *os.Root, plugin string, snapshot *atomic.Pointer[storeReadSnapshot[storeAccounts]]) (storeAccounts, error) {
-	view, err := storeLoadAccountSnapshot(root, plugin, snapshot)
+func storeLoadAccounts(root *os.Root, plugin string, store *Store) (storeAccounts, error) {
+	view, err := storeLoadAccountSnapshot(root, plugin, store)
 	if err != nil {
 		return storeAccounts{}, err
 	}
@@ -673,8 +670,12 @@ func storeLoadAccounts(root *os.Root, plugin string, snapshot *atomic.Pointer[st
 	return view.value, nil
 }
 
-func storeLoadAccountSnapshot(root *os.Root, plugin string, snapshot *atomic.Pointer[storeReadSnapshot[storeAccounts]]) (*storeReadSnapshot[storeAccounts], error) {
-	return storeLoadSnapshotView(root, "accounts.json", plugin, snapshot, func(data []byte) (storeAccounts, error) {
+func storeLoadAccountSnapshot(root *os.Root, plugin string, store *Store) (*storeReadSnapshot[storeAccounts], error) {
+	var small, large *atomic.Pointer[storeReadSnapshot[storeAccounts]]
+	if store != nil {
+		small, large = &store.accountSnapshots[store.accountSnapshotIndex(plugin)], &store.largeAccountSnapshot
+	}
+	return storeLoadSnapshotView(root, "accounts.json", plugin, small, large, func(data []byte) (storeAccounts, error) {
 		return storeDecodeAccounts(data, plugin)
 	})
 }

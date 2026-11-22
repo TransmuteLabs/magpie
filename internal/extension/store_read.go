@@ -11,7 +11,10 @@ import (
 	"github.com/yetone/magpie/internal/filelock"
 )
 
-const storeSnapshotLimit = 64 << 10
+const (
+	storeSnapshotLimit             = 64 << 10
+	storeLargeAccountSnapshotLimit = 128 << 10
+)
 
 var errAccountListBudget = errors.New("extension account list exceeds its budget")
 
@@ -52,7 +55,7 @@ func sameStorePublication(left, right os.FileInfo) bool {
 }
 
 func storeLoadSnapshot[T any](root *os.Root, name, namespace string, snapshot *atomic.Pointer[storeReadSnapshot[T]], decode func([]byte) (T, error)) (T, bool, error) {
-	view, err := storeLoadSnapshotView(root, name, namespace, snapshot, decode)
+	view, err := storeLoadSnapshotView(root, name, namespace, snapshot, nil, decode)
 	if view != nil {
 		return view.value, true, nil
 	}
@@ -60,9 +63,19 @@ func storeLoadSnapshot[T any](root *os.Root, name, namespace string, snapshot *a
 	return zero, false, err
 }
 
-func storeLoadSnapshotView[T any](root *os.Root, name, namespace string, snapshot *atomic.Pointer[storeReadSnapshot[T]], decode func([]byte) (T, error)) (*storeReadSnapshot[T], error) {
+func storeLoadSnapshotView[T any](root *os.Root, name, namespace string, snapshot, large *atomic.Pointer[storeReadSnapshot[T]], decode func([]byte) (T, error)) (*storeReadSnapshot[T], error) {
 	data, file, err := storeReadFile(root, name, storeFileLimit)
-	cacheable := snapshot != nil && err == nil && file != nil && len(data) <= storeSnapshotLimit
+	limit := storeSnapshotLimit
+	if len(data) > limit && large != nil {
+		snapshot, large = large, snapshot
+		limit = storeLargeAccountSnapshotLimit
+	}
+	if large != nil {
+		if previous := large.Load(); previous != nil && previous.namespace == namespace {
+			large.CompareAndSwap(previous, nil)
+		}
+	}
+	cacheable := snapshot != nil && err == nil && file != nil && len(data) <= limit
 	var digest [sha256.Size]byte
 	if snapshot != nil {
 		cached := snapshot.Load()
@@ -92,7 +105,7 @@ func storeLoadSnapshotView[T any](root *os.Root, name, namespace string, snapsho
 
 func (s *Store) withReadAccountsSnapshot(ctx context.Context, plugin string, read func(*os.Root, *storeReadSnapshot[storeAccounts]) error) error {
 	return s.withReadStoreContext(ctx, plugin, func(root *os.Root) error {
-		view, err := storeLoadAccountSnapshot(root, plugin, s.accountSnapshotSlot(plugin))
+		view, err := storeLoadAccountSnapshot(root, plugin, s)
 		if err != nil {
 			return err
 		}

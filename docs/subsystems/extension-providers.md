@@ -37,6 +37,10 @@ read one checked account snapshot for the selected providers of a module.
 Discovery reads account labels for display. Renewal and outside history
 only project IDs, generations and expiration from that snapshot. Each
 operation still checks its selected generation at admission.
+Stream scope checks read and hash the current account file before reusing a
+validated decode. Each Store can retain one additional decoded account file
+above 64 KiB and through 128 KiB. Larger files are decoded on each read.
+Durability confirmation keeps its existing 64 KiB descriptor pin limit.
 Core remembers selection, order and on/off state in
 its existing account metadata, without copying credentials there. Account
 discovery off excludes authenticated extensions before their store is read.

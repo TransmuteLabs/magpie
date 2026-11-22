@@ -64,7 +64,7 @@ func (m *Manager) withProviderStore(ctx context.Context, expected Installed, con
 				if off {
 					return storeError("account_discovery_off", "Subscription accounts are off in magpie.")
 				}
-				snapshot, err = storeLoadAccountSnapshot(root, scope.Plugin, m.store.accountSnapshotSlot(scope.Plugin))
+				snapshot, err = storeLoadAccountSnapshot(root, scope.Plugin, m.store)
 				if err != nil {
 					return err
 				}
