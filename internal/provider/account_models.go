@@ -48,6 +48,11 @@ func codexOwnHidden(p Provider, model string) bool {
 // AccountRefs are the provider's accounts, or keys, as AccountModels
 // knows them: a signed-in account's name, a key's KeyID.
 func (p Provider) AccountRefs() []string {
+	return p.AccountRefsWith(Logins)
+}
+
+// AccountRefsWith uses the caller's login lookup to assemble the account refs.
+func (p Provider) AccountRefsWith(logins func(string) []Login) []string {
 	var out []string
 	if p.Account == nil {
 		for _, k := range p.KeyList() {
@@ -62,7 +67,7 @@ func (p Provider) AccountRefs() []string {
 	if p.Account.User != "" {
 		out = append(out, p.Account.User)
 	}
-	for _, l := range Logins(agent) {
+	for _, l := range logins(agent) {
 		if !slices.ContainsFunc(out, func(u string) bool { return accountKey(u) == accountKey(l.User) }) {
 			out = append(out, l.User)
 		}

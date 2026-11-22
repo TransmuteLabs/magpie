@@ -1036,6 +1036,10 @@ func providerInfo(p provider.Provider, agents []agentUse) providerJSON {
 // given: the vendor's list read once for the picks, what is exposed and
 // the newest of each family, as each read builds it whole.
 func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUse, desktop map[string]string) providerJSON {
+	return providerInfoWithLogins(p, ls, agents, desktop, provider.Logins)
+}
+
+func providerInfoWithLogins(p provider.Provider, ls provider.Listing, agents []agentUse, desktop map[string]string, logins func(string) []provider.Login) providerJSON {
 	avail := ls.Available
 	if p.IsExtension() {
 		avail = catalog.Chat(avail)
@@ -1066,7 +1070,7 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		out.SignInMoves = provider.SignInMovesOf(p.ID)
 	}
 	if p.Account != nil {
-		for _, r := range p.AccountRefs() {
+		for _, r := range p.AccountRefsWith(logins) {
 			if s := provider.SeatNameOf(p.ID, r); s != "" {
 				if out.AccountSeats == nil {
 					out.AccountSeats = map[string]string{}
@@ -1236,7 +1240,7 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 	if a := p.Account; a != nil {
 		out.Account = &accountJSON{Account: *a, Agent: a.Agent, OwnerRevision: ownerRevision}
 		out.Account.Name, out.Account.Icon = accountLabel(p)
-		out.Account.Logins = provider.Logins(a.Agent)
+		out.Account.Logins = logins(a.Agent)
 		for _, login := range out.Account.Logins {
 			if name := login.ExtensionAccountName(); name != "" {
 				if out.AccountUsers == nil {
@@ -1595,6 +1599,10 @@ func accountRests(id string) map[string][]provider.KeyRest {
 }
 
 func providersState() providersJSON {
+	return providersStateContext(context.Background())
+}
+
+func providersStateContext(ctx context.Context) providersJSON {
 	// an account signed in since start-up is listed with its vendor's
 	// models, not magpie's own list of them (#204): asked behind the page,
 	// which is told so and asks again, never waited for (#541)
@@ -1664,6 +1672,19 @@ func providersState() providersJSON {
 	var remoteMCP map[string]bool // read once, at the first Remote magpie
 	var connects map[string]bool  // the same
 	all := provider.All()
+	extensionLogins := sync.OnceValue(func() map[string][]provider.Login {
+		return provider.ExtensionLoginsByProvider(ctx)
+	})
+	sdkLogins := func(agent string) []provider.Login {
+		byProvider := extensionLogins()
+		if byProvider == nil {
+			return nil
+		}
+		if rows, ok := byProvider[agent]; ok {
+			return rows
+		}
+		return []provider.Login{}
+	}
 	// both lists made once at their size: each grown by append was 6 MB of
 	// what forty polls of the Providers page allocated with real accounts
 	s.Providers = make([]providerJSON, 0, len(all))
@@ -1672,7 +1693,11 @@ func providersState() providersJSON {
 	for _, p := range all {
 		// a preset is added once any provider is its, whatever its id
 		have[p.ID], have[p.Preset] = true, true
-		info := providerInfoWith(p, provider.KeptListing(p), uses, desktop)
+		logins := provider.Logins
+		if p.IsExtension() {
+			logins = sdkLogins
+		}
+		info := providerInfoWithLogins(p, provider.KeptListing(p), uses, desktop, logins)
 		if p.IsRemoteMagpie() {
 			if remoteMCP == nil {
 				remoteMCP = library.RemoteMCPOn()
@@ -1861,7 +1886,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 			return
 		}
-		s := providersState()
+		s := providersStateContext(r.Context())
+		if r.Context().Err() != nil {
+			return
+		}
 		if sum, ok := writeProvidersJSON(rw, s); ok {
 			keepProvidersSummed(s, sum)
 		}

@@ -55,6 +55,9 @@ ambiguous account set, excludes that module from discovery and logs the
 module and cause. Discovery fails if the shared installed catalog or core
 account policy cannot be read. The aggregate login list discovers SDK
 providers once and marks the first enabled account active for each provider.
+Each Providers response uses one such projection for its SDK account
+references and login rows. The next response discovers the current accounts,
+and provider options keep their own configuration check.
 
 ### Sign-in before the first account
 

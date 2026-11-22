@@ -736,6 +736,22 @@ func listExtensionLoginsContext(ctx context.Context, agent string) []Login {
 	return listExtensionLoginsWithOwnersContext(ctx, agent, nil)
 }
 
+// ExtensionLoginsByProvider lists SDK logins for one display response.
+func ExtensionLoginsByProvider(ctx context.Context) map[string][]Login {
+	if settings.AccountDiscoveryOff() {
+		return nil
+	}
+	logins := listExtensionLoginsContext(ctx, "")
+	if logins == nil || ctx.Err() != nil {
+		return nil
+	}
+	byProvider := make(map[string][]Login)
+	for _, login := range logins {
+		byProvider[login.Agent] = append(byProvider[login.Agent], login)
+	}
+	return byProvider
+}
+
 func listExtensionLoginsWithOwnersContext(ctx context.Context, agent string, owners *extensionSubscriptionOwners) []Login {
 	providers, saved, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), func() extensionSubscriptionOwners {
 		if owners != nil {
