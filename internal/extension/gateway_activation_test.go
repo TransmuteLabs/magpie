@@ -373,6 +373,146 @@ func TestGatewayActivationBackoffIsScopedToGeneration(t *testing.T) {
 	}
 }
 
+func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := entry.Manifest.ID
+	owner := activationTestOwner(t, manager)
+	watch := newActivationWatch(manager.root)
+	owner.reconcile(watch)
+	delays := []int{1, 2, 4, 8, 16, 32, 60, 60}
+	for attempt, seconds := range delays {
+		lease := owner.leases[id]
+		if lease.Lease == nil || !manager.Running(id) {
+			t.Fatal("fixture did not retain a live worker")
+		}
+		stopActivationWorker(t, lease.client)
+		select {
+		case <-owner.changed:
+		case <-time.After(10 * time.Second):
+			t.Fatal("worker exit did not schedule reconciliation")
+		}
+		before := time.Now()
+		owner.reconcile(watch)
+		if manager.Running(id) || owner.leases[id].Lease != nil {
+			t.Fatal("activation immediately replaced its failed worker")
+		}
+		retry := owner.retries[id]
+		want := time.Duration(seconds) * time.Second
+		if retry.delay != want || retry.next.Before(before.Add(want)) {
+			t.Fatalf("worker exit scheduled %v at %v, want %v backoff", retry.delay, retry.next, want)
+		}
+		if attempt+1 != len(delays) {
+			retry.next = time.Time{}
+			owner.retries[id] = retry
+			owner.reconcile(watch)
+		}
+	}
+	retry := owner.retries[id]
+	retry.next = time.Now().Add(time.Hour)
+	owner.retries[id] = retry
+	owner.reconcile(watch)
+	if manager.Running(id) || owner.retries[id] != retry {
+		t.Fatal("reconciliation bypassed the backoff or counted the same exit twice")
+	}
+	if err := manager.SetEnabled(t.Context(), id, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(t.Context(), id, true); err != nil {
+		t.Fatal(err)
+	}
+	owner.reconcile(watch)
+	renewed := owner.leases[id]
+	if renewed.Lease == nil || !manager.Running(id) ||
+		renewed.worker.entry.EnableGeneration == entry.EnableGeneration || len(owner.retries) != 0 {
+		t.Fatal("new enablement epoch did not start immediately")
+	}
+}
+
+func TestGatewayActivationRejectsWorkerExitedBeforeRetention(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := entry.Manifest.ID
+	owner := activationTestOwner(t, manager)
+	worker, client, err := manager.acquire(t.Context(), id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopActivationWorker(t, client)
+	if err := manager.checkActiveGeneration(t.Context(), worker.entry, worker.config.Version); err != nil {
+		releaseWorker(worker)
+		t.Fatalf("fixture generation changed: %v", err)
+	}
+	owner.retain(worker, client)
+	if owner.leases[id].Lease != nil || owner.retries[id].delay != gatewayActivationRetryStart {
+		t.Fatal("dead worker passed activation admission or failed to schedule a retry")
+	}
+}
+
+func TestGatewayActivationResetsBackoffAfterStableWorker(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := entry.Manifest.ID
+	owner := activationTestOwner(t, manager)
+	watch := newActivationWatch(manager.root)
+	owner.retries[id] = activationRetry{
+		identity: activationIdentity(entry, "0"),
+		delay:    32 * time.Second,
+	}
+	owner.reconcile(watch)
+	lease := owner.leases[id]
+	if lease.Lease == nil || owner.retries[id].delay != 32*time.Second {
+		t.Fatal("handshake cleared the existing failure streak")
+	}
+	lease.since = time.Now().Add(-2 * gatewayActivationStable)
+	owner.leases[id] = lease
+	owner.reconcile(watch)
+	if !manager.Running(id) || len(owner.retries) != 0 {
+		t.Fatal("stable worker did not clear the existing failure streak")
+	}
+	stopActivationWorker(t, lease.client)
+	owner.reconcile(watch)
+	if manager.Running(id) || owner.retries[id].delay != gatewayActivationRetryStart {
+		t.Fatal("worker exit after stability retained the previous failure streak")
+	}
+}
+
+func activationTestOwner(t *testing.T, manager *Manager) *GatewayActivation {
+	t.Helper()
+	owner := &GatewayActivation{
+		manager: manager, ctx: t.Context(), changed: make(chan struct{}, 1),
+		leases: map[string]activationLease{}, retries: map[string]activationRetry{},
+	}
+	t.Cleanup(func() {
+		for _, lease := range owner.leases {
+			owner.withdraw(lease)
+		}
+	})
+	return owner
+}
+
+func stopActivationWorker(t *testing.T, client *workerClient) {
+	t.Helper()
+	client.fail(errors.New("fixture interrupted activation transport"))
+	select {
+	case <-client.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fixture worker did not exit")
+	}
+}
+
 func TestActivationWatchFollowsAtomicReplacement(t *testing.T) {
 	for _, mode := range []struct {
 		name      string
