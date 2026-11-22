@@ -19,6 +19,8 @@ type windowAuthDispatchKey struct{}
 type WindowAuthPolicy func(context.Context, sdk.Scope) (context.Context, error)
 type WindowAuthAccountPolicy func(context.Context, *Manager, sdk.Scope, sdk.AccountSummary)
 
+var errWindowAuthUnconfirmed = errors.New("window authentication completion could not be confirmed")
+
 type windowAuthDispatch struct {
 	record windowAuthRecord
 	config sdk.ConfigSnapshot
@@ -188,7 +190,8 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if !created {
 		m.mu.Unlock()
 		if !record.active() {
-			return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
+			view, err := m.replayWindowAuth(ctx, record)
+			return m.windowAuthResult(ctx, record.Scope, view, err)
 		}
 		if owner != nil {
 			if !sameModuleConfig(owner.lease.worker.config, config) {
@@ -234,7 +237,7 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 	if _, err := policy(ctx, sdk.Scope{Plugin: id, Provider: grant.Provider}); err != nil {
 		return windowAuthRecord{}, nil, errors.New("window authentication policy refuses this operation")
 	}
-	record, err := m.store.windowAuthRecord(id, flow)
+	record, err := m.store.readWindowAuthRecord(ctx, id, flow, false)
 	journalPart, journalRevision := windowAuthJournalSelection(entry, config.Version, part)
 	if part == sdk.ProviderSignInPart {
 		journalRevision = subscriptionJournalRevision(ctx, journalRevision)
@@ -254,7 +257,7 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 		return windowAuthRecord{}, nil, err
 	}
 	if owner == nil && record.active() {
-		record, err = m.store.windowAuthRecord(id, flow)
+		record, err = m.store.readWindowAuthRecord(ctx, id, flow, false)
 		if err != nil {
 			return windowAuthRecord{}, nil, errors.New("window authentication receipt is unavailable")
 		}
@@ -273,10 +276,38 @@ func (m *Manager) CoreAuthFinish(ctx context.Context, id, revision, part, bindin
 	}
 	switch record.Phase {
 	case "complete", "canceled", "expired", "uncertain":
-		return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
+		view, err := m.replayWindowAuth(ctx, record)
+		return m.windowAuthResult(ctx, record.Scope, view, err)
 	default:
 		return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
 	}
+}
+
+func (m *Manager) replayWindowAuth(ctx context.Context, record windowAuthRecord) (sdk.WindowAuthFlowView, error) {
+	if record.Phase != "complete" {
+		return record.public(), nil
+	}
+	err := m.withWindowAuthAuthority(ctx, record, func() error {
+		confirmed, err := m.store.readWindowAuthRecord(ctx, record.Scope.Plugin, record.Flow, true)
+		if err != nil {
+			return err
+		}
+		if confirmed.Phase != "complete" || confirmed.Receipt == nil || *confirmed.Receipt != *record.Receipt ||
+			confirmed.Intent != record.Intent || confirmed.Fingerprint != record.Fingerprint ||
+			confirmed.Parent != record.Parent || confirmed.Revision != record.Revision || confirmed.Config != record.Config ||
+			confirmed.Part != record.Part || confirmed.Binding != record.Binding || confirmed.Scope != record.Scope ||
+			confirmed.Canceled != record.Canceled {
+			return errWindowAuthUnconfirmed
+		}
+		return nil
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return sdk.WindowAuthFlowView{}, ctx.Err()
+		}
+		return sdk.WindowAuthFlowView{}, errWindowAuthUnconfirmed
+	}
+	return record.public(), nil
 }
 
 func (m *Manager) windowAuthResult(ctx context.Context, scope sdk.Scope, view sdk.WindowAuthFlowView, err error) (sdk.WindowAuthFlowView, error) {
@@ -294,7 +325,7 @@ func (m *Manager) CoreAuthCancel(ctx context.Context, id, revision, part, bindin
 		return sdk.WindowAuthFlowView{}, err
 	}
 	if !record.active() {
-		return record.public(), nil
+		return m.replayWindowAuth(ctx, record)
 	}
 	config := sdk.ConfigSnapshot{Version: record.Config}
 	if owner != nil {
@@ -320,7 +351,7 @@ func (m *Manager) CoreAuthCancel(ctx context.Context, id, revision, part, bindin
 	if owner != nil && record.Phase == "canceled" {
 		owner.cancel()
 	}
-	return record.public(), nil
+	return m.replayWindowAuth(ctx, record)
 }
 
 func (owner *windowAuthOwner) submit(ctx context.Context, start bool, options sdk.WindowAuthStartOptions) (sdk.WindowAuthFlowView, error) {
@@ -330,11 +361,11 @@ func (owner *windowAuthOwner) submit(ctx context.Context, start bool, options sd
 	case <-ctx.Done():
 		return sdk.WindowAuthFlowView{}, ctx.Err()
 	case <-owner.done:
-		record, err := owner.manager.store.windowAuthRecord(owner.record.Scope.Plugin, owner.record.Flow)
+		record, err := owner.manager.store.readWindowAuthRecord(ctx, owner.record.Scope.Plugin, owner.record.Flow, false)
 		if err != nil {
 			return sdk.WindowAuthFlowView{}, errors.New("window authentication receipt is unavailable")
 		}
-		return record.public(), nil
+		return owner.manager.replayWindowAuth(ctx, record)
 	}
 	select {
 	case <-task.done:
@@ -368,7 +399,7 @@ func (owner *windowAuthOwner) run(stop func() bool) {
 		case task := <-owner.tasks:
 			task.view, task.err = owner.execute(task)
 			close(task.done)
-			if task.view.State == "complete" || task.view.State == "uncertain" || task.view.State == "canceled" || task.view.State == "expired" {
+			if errors.Is(task.err, errWindowAuthUnconfirmed) || task.view.State == "complete" || task.view.State == "uncertain" || task.view.State == "canceled" || task.view.State == "expired" {
 				return
 			}
 		}
@@ -377,7 +408,7 @@ func (owner *windowAuthOwner) run(stop func() bool) {
 
 func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowView, error) {
 	manager, plugin, flow := owner.manager, owner.record.Scope.Plugin, owner.record.Flow
-	record, err := manager.store.windowAuthRecord(plugin, flow)
+	record, err := manager.store.readWindowAuthRecord(task.caller, plugin, flow, false)
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication state is unavailable")
 	}
@@ -385,7 +416,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 		return sdk.WindowAuthFlowView{}, task.caller.Err()
 	}
 	if record.Canceled || record.Phase == "complete" || record.Phase == "canceled" || record.Phase == "expired" || record.Phase == "uncertain" {
-		return record.public(), nil
+		return manager.replayWindowAuth(task.caller, record)
 	}
 	if record.Phase == "waiting" && (task.start || time.Now().UnixMilli() < record.Next) {
 		return record.public(), nil
@@ -500,34 +531,50 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 					return record.public(), nil
 				}
 			} else if !result.Pending {
+				var completed windowAuthRecord
 				err = manager.withWindowAuthSelection(ctx, record, func(entry Installed, from string) error {
 					if err := manager.store.checkSubscriptionResult(ctx, record.Scope, result.ID); err != nil {
 						return err
 					}
 
 					var err error
-					record, err = manager.store.publishWindowAuth(ctx, plugin, flow, result, func(root *os.Root) error {
+					completed, err = manager.store.publishWindowAuth(ctx, plugin, flow, result, func(root *os.Root) error {
 						return manager.checkWindowAuthConfigAtRoot(ctx, root, entry, from, record, owner.lease.worker.config)
 					})
 					return err
 				})
-				if err == nil {
+				if completed.Phase == "complete" {
 					notifyChanged()
-					return record.public(), nil
+					if err != nil {
+						return sdk.WindowAuthFlowView{}, errWindowAuthUnconfirmed
+					}
+					return completed.public(), nil
 				}
 				if len(result.Credentials) <= sdk.MaxHostBytes && json.Valid(result.Credentials) {
-					_, _ = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
+					_, err := manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
+						if current.Phase == "complete" {
+							return errWindowAuthUnconfirmed
+						}
 						current.Phase, current.Private, current.Receipt = "uncertain", &result, nil
 						return nil
 					})
+					if errors.Is(err, errWindowAuthUnconfirmed) {
+						return sdk.WindowAuthFlowView{}, err
+					}
 				}
 			}
 		}
 	}
-	_, _ = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
+	_, err = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
+		if current.Phase == "complete" {
+			return errWindowAuthUnconfirmed
+		}
 		current.Phase = "uncertain"
 		return nil
 	})
+	if errors.Is(err, errWindowAuthUnconfirmed) {
+		return sdk.WindowAuthFlowView{}, err
+	}
 	return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
 }
 

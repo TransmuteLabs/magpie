@@ -71,6 +71,7 @@ type Store struct {
 	accountSyncEnabled   bool
 	accountSync          [8]*storeSyncConfirmation
 	ownerSnapshot        atomic.Pointer[storeReadSnapshot[[]subscriptionRecord]]
+	windowAuthSync       func(*os.Root) error
 }
 
 type storeAccount struct {
@@ -1021,6 +1022,10 @@ func storePublishContext(ctx context.Context, root *os.Root, name string, value 
 }
 
 func storePublishChecked(ctx context.Context, root *os.Root, name string, value any, limit int, check func() error) (bool, error) {
+	return storePublishWithSync(ctx, root, name, value, limit, check, storeSync)
+}
+
+func storePublishWithSync(ctx context.Context, root *os.Root, name string, value any, limit int, check func() error, syncDirectory func(*os.Root) error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -1058,7 +1063,7 @@ func storePublishChecked(ctx context.Context, root *os.Root, name string, value 
 	if root.Rename(temp, name) != nil {
 		return false, storeError("store_write", "Extension store could not be persisted.")
 	}
-	return true, storeSync(root)
+	return true, syncDirectory(root)
 }
 
 func storeSync(root *os.Root) error {

@@ -109,6 +109,13 @@ sync and rename primitives. Account deletion or a changed generation
 prevents selected-account publication. A new sign-in cannot overwrite an
 existing account or revive a tombstone.
 
+If the account-file replacement is visible but directory sync fails, the
+host preserves the complete receipt and returns a sanitized error. The
+same flow can confirm the receipt later under the Store lock, including
+after restart or archival. Until confirmation succeeds, the host withholds
+the account summary and does not register local login policy. No receipt
+read repeats the exchange.
+
 Selected reauthorization shares the existing credential-refresh file lock.
 The owner acquires that lock before catalog/Store work and retains it through
 the exchange and publication. An active dispatched refresh remains a fence.

@@ -187,7 +187,7 @@ func (s *Store) reserveWindowAuth(record windowAuthRecord) (windowAuthRecord, bo
 				return nil
 			}
 		}
-		previous, found, err := readWindowAuthArchive(root, record.Scope.Plugin, "intent-"+record.Intent)
+		previous, found, err := readWindowAuthArchive(root, record.Scope.Plugin, "intent-"+record.Intent, false)
 		if err != nil {
 			return err
 		}
@@ -242,11 +242,15 @@ func storeCheckWindowAuthConfig(root *os.Root, record windowAuthRecord) error {
 }
 
 func (s *Store) windowAuthRecord(plugin, flow string) (windowAuthRecord, error) {
+	return s.readWindowAuthRecord(context.Background(), plugin, flow, false)
+}
+
+func (s *Store) readWindowAuthRecord(ctx context.Context, plugin, flow string, confirm bool) (windowAuthRecord, error) {
 	var result windowAuthRecord
 	if len(flow) != 64 || strings.Trim(flow, "0123456789abcdef") != "" {
 		return result, storeInvalid()
 	}
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
 		if err != nil {
 			return err
@@ -254,25 +258,36 @@ func (s *Store) windowAuthRecord(plugin, flow string) (windowAuthRecord, error) 
 		for _, record := range records.AuthFlows {
 			if record.Flow == flow {
 				result = record
-				return nil
+				break
 			}
 		}
-		archived, found, err := readWindowAuthArchive(root, plugin, "flow-"+flow)
-		if err != nil {
-			return err
-		}
-		if found {
+		if result.Flow == "" {
+			archived, found, err := readWindowAuthArchive(root, plugin, "flow-"+flow, confirm)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return errors.New("window authentication flow is unavailable")
+			}
 			result = archived
-			return nil
 		}
-		return errors.New("window authentication flow is unavailable")
+		if confirm && result.Phase == "complete" {
+			if err := s.syncWindowAuth(root); err != nil {
+				return err
+			}
+			return ctx.Err()
+		}
+		return nil
 	})
 	return result, err
 }
 
-func readWindowAuthArchive(root *os.Root, plugin, name string) (windowAuthRecord, bool, error) {
+func readWindowAuthArchive(root *os.Root, plugin, name string, confirm bool) (windowAuthRecord, bool, error) {
 	var record windowAuthRecord
-	directory, err := storeDirectory(root, "auth-receipts")
+	directory, err := storeOpenDirectory(root, "auth-receipts", false)
+	if errors.Is(err, os.ErrNotExist) {
+		return record, false, nil
+	}
 	if err != nil {
 		return record, false, err
 	}
@@ -284,6 +299,11 @@ func readWindowAuthArchive(root *os.Root, plugin, name string) (windowAuthRecord
 	if record.Scope.Plugin != plugin || name != "flow-"+record.Flow && name != "intent-"+record.Intent ||
 		!validWindowAuthRecords(storeAccounts{Schema: 4, AuthFlows: []windowAuthRecord{record}}, plugin) {
 		return windowAuthRecord{}, false, storeUnreadable()
+	}
+	if confirm && record.Phase == "complete" {
+		if err := storeSync(directory); err != nil {
+			return windowAuthRecord{}, false, err
+		}
 	}
 	return record, true, nil
 }
@@ -327,6 +347,13 @@ func (s *Store) updateWindowAuth(plugin, flow string, update func(*windowAuthRec
 	return s.updateWindowAuthChecked(context.Background(), plugin, flow, update, nil, nil)
 }
 
+func (s *Store) syncWindowAuth(root *os.Root) error {
+	if s.windowAuthSync != nil {
+		return s.windowAuthSync(root)
+	}
+	return storeSync(root)
+}
+
 func (s *Store) updateWindowAuthChecked(ctx context.Context, plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error, check func(*os.Root) error, committed func(*os.Root)) (windowAuthRecord, error) {
 	var result windowAuthRecord
 	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
@@ -349,14 +376,20 @@ func (s *Store) updateWindowAuthChecked(ctx context.Context, plugin, flow string
 			if check != nil {
 				beforeRename = func() error { return check(root) }
 			}
-			_, err := storePublishChecked(ctx, root, "accounts.json", records, storeFileLimit, beforeRename)
+			syncDirectory := storeSync
+			if committed != nil {
+				syncDirectory = s.syncWindowAuth
+			}
+			published, err := storePublishWithSync(ctx, root, "accounts.json", records, storeFileLimit, beforeRename, syncDirectory)
+			if err == nil || published && committed != nil {
+				result = *record
+			}
 			if err != nil {
 				return err
 			}
 			if committed != nil {
 				committed(root)
 			}
-			result = *record
 			return nil
 		}
 		return errors.New("window authentication flow is unavailable")
