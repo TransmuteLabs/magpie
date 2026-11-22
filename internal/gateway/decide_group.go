@@ -86,6 +86,7 @@ func (s *Server) decideFailed(c candidate, status int, header http.Header, body 
 	if shapeRefused(status, body) || promptRefused(status, body) || protectionRefused(status, body) || zdrRefused(status, body) || !retryable(status, body) {
 		return failureOf(c, status, body), nil
 	}
+	c.sentModel = c.model
 	rest := s.restAfter(c, status, header, body)
 	return rest.Why, &rest
 }

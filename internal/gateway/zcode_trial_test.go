@@ -43,6 +43,15 @@ const (
 // alone, as any vendor's does (modelNamed).
 // After skygunner's TestZCodeTrialQuotaRestsTheModelAlone (e04a1b994).
 func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
+	checkZCodeTrialRest(t, "")
+}
+
+func TestZCodeAliasedTrialRefusalRestsTheTrialAlone(t *testing.T) {
+	checkZCodeTrialRest(t, "preview")
+}
+
+func checkZCodeTrialRest(t *testing.T, alias string) {
+	t.Helper()
 	for _, tc := range []struct {
 		name, vendor, model, body string
 		status                    int
@@ -78,6 +87,9 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 		{"another vendor's risk control", "factory", "GLM-5.3-Trial", zcodeStartRisk, 405, false, true},
 		{"another vendor's block", "factory", "GLM-5.3-Trial", zcodeStartEdge, 405, false, true},
 	} {
+		if alias != "" && (tc.vendor != "zcode" || !tc.listed) {
+			continue
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			// a ZCode list with no free model, which would rest a paid
 			// model alone whatever it said (PaidBesideFree)
@@ -109,11 +121,18 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 				r.Body = io.NopCloser(strings.NewReader(string(body)))
 				good.ServeHTTP(w, r)
 			}))
+			model := tc.model
+			if alias != "" {
+				if _, changed, err := provider.SetModelID(tc.vendor+"/"+model, alias); err != nil || !changed {
+					t.Fatalf("set model ID: changed %v, error %v", changed, err)
+				}
+				model = alias
+			}
 			p, err := provider.Find(tc.vendor)
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := candidate{p: *p, rest: tc.vendor, model: tc.model}
+			c := candidate{p: *p, rest: tc.vendor, model: model}
 			// the account's windows were read, so its rest isn't narrowed
 			// later by a read that comes in
 			old := allowances
@@ -125,7 +144,7 @@ func TestZCodeTrialRefusalRestsTheTrialAlone(t *testing.T) {
 			scriptedOn(t, "b", provider.Chat, b)
 			// the trial, then the account's own model, each with another
 			// provider behind it
-			for name, first := range map[string]string{"T": tc.model, "S": "GLM-5.3"} {
+			for name, first := range map[string]string{"T": model, "S": "GLM-5.3"} {
 				if err := provider.SaveGroup(provider.Group{Name: name, Members: []string{tc.vendor + "/" + first, "b/m"}, Routing: provider.Ordered}); err != nil {
 					t.Fatal(err)
 				}

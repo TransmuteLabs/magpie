@@ -143,8 +143,9 @@ func postAs(t *testing.T, s *Server, session, body string) (int, string) {
 // openRouterFreeLimit answers one free model with an OpenRouter limit and its
 // sibling successfully.
 type openRouterFreeLimit struct {
-	tried []string
-	body  string
+	tried   []string
+	body    string
+	limited string
 }
 
 func (f *openRouterFreeLimit) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +153,7 @@ func (f *openRouterFreeLimit) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	model := modelOf(body)
 	f.tried = append(f.tried, model)
 	w.Header().Set("Content-Type", "application/json")
-	if model == "x/a:free" {
+	if model == "x/a:free" || f.limited != "" && model == f.limited {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, f.body)
 		return
@@ -164,18 +165,38 @@ func (f *openRouterFreeLimit) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 // the next group request starts with its sibling, even after that sibling's
 // successful answer cleared the provider-level rest.
 func TestOpenRouterSharedPoolRateLimitRestsOneModel(t *testing.T) {
+	t.Run("native", func(t *testing.T) { checkOpenRouterSharedPoolRest(t, "x/a:free", "", "") })
+	t.Run("alias", func(t *testing.T) { checkOpenRouterSharedPoolRest(t, "x/a:free", "first", "") })
+	t.Run("wire", func(t *testing.T) { checkOpenRouterSharedPoolRest(t, "x/paid", "first", "x/a:free") })
+}
+
+func checkOpenRouterSharedPoolRest(t *testing.T, native, alias, wire string) {
+	t.Helper()
 	fresh(t)
 	f := &openRouterFreeLimit{body: `{"error":{"message":"Provider returned error","code":429,"metadata":{"limit_source":"upstream_provider_shared_pool"}}}`}
 	up := httptest.NewServer(f)
 	t.Cleanup(up.Close)
 	if err := provider.Save(provider.Provider{
 		ID: "orf", Name: "OpenRouter Free", Preset: "openrouter", Key: "k",
-		Models: []string{"x/a:free", "x/b:free"}, Chat: up.URL + "/v1",
+		Models: []string{native, "x/b:free"}, Chat: up.URL + "/v1",
 	}); err != nil {
 		t.Fatal(err)
 	}
+	firstModel := native
+	if alias != "" {
+		if _, changed, err := provider.SetModelID("orf/"+firstModel, alias); err != nil || !changed {
+			t.Fatalf("set model ID: changed %v, error %v", changed, err)
+		}
+		firstModel = alias
+	}
+	firstRef := "orf/" + firstModel
+	if wire != "" {
+		if err := provider.SetUpstreamName(firstRef, wire); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := provider.SaveGroup(provider.Group{
-		Name: "Free", Members: []string{"orf/x/a:free", "orf/x/b:free"}, Routing: provider.Ordered,
+		Name: "Free", Members: []string{firstRef, "orf/x/b:free"}, Routing: provider.Ordered,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +210,7 @@ func TestOpenRouterSharedPoolRateLimitRestsOneModel(t *testing.T) {
 	if rec.Header().Get("X-Magpie-OpenRouter-Limit-Source") != "" {
 		t.Fatal("internal OpenRouter routing detail reached the client")
 	}
-	if first := s.trace.routes[len(s.trace.routes)-1].Tries[0]; first.Rest == nil || first.Rest.Key != "orf/x/a:free" {
+	if first := s.trace.routes[len(s.trace.routes)-1].Tries[0]; first.Rest == nil || first.Rest.Key != firstRef {
 		t.Fatalf("shared-pool rest key: %+v", first)
 	}
 	if code, reply := postAs(t, s, "", body); code != http.StatusOK || !strings.Contains(reply, "from b") {
@@ -198,8 +219,41 @@ func TestOpenRouterSharedPoolRateLimitRestsOneModel(t *testing.T) {
 	if got := strings.Join(f.tried, " "); got != "x/a:free x/b:free x/b:free" {
 		t.Fatalf("models tried %q, want a b b", got)
 	}
-	if !s.Unrest("orf/x/a:free") || s.resting("orf/x/a:free") {
+	if !s.Unrest(firstRef) || s.resting(firstRef) {
 		t.Fatal("model rest was not lifted by its key")
+	}
+}
+
+func TestOpenRouterPaidModelWithFreeAliasKeepsProviderRest(t *testing.T) {
+	fresh(t)
+	f := &openRouterFreeLimit{
+		body:    `{"error":{"message":"Provider returned error","code":429,"metadata":{"limit_source":"upstream_provider_shared_pool"}}}`,
+		limited: "x/paid",
+	}
+	up := httptest.NewServer(f)
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{
+		ID: "orf", Name: "OpenRouter", Preset: "openrouter", Key: "k",
+		Models: []string{"x/paid", "x/b:free"}, Chat: up.URL + "/v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := provider.SetModelID("orf/x/paid", "paid:free"); err != nil || !changed {
+		t.Fatalf("set model ID: changed %v, error %v", changed, err)
+	}
+	if err := provider.SaveGroup(provider.Group{
+		Name: "Mixed", Members: []string{"orf/paid:free", "orf/x/b:free"}, Routing: provider.Ordered,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	code, reply := postAs(t, s, "", `{"model":"group/mixed","messages":[{"role":"user","content":"hi"}]}`)
+	if code != http.StatusOK || !strings.Contains(reply, "from b") {
+		t.Fatalf("group reply: %d %s", code, reply)
+	}
+	first := s.trace.routes[len(s.trace.routes)-1].Tries[0]
+	if first.Rest == nil || first.Rest.Key != "orf" || first.Rest.Model != "" {
+		t.Fatalf("paid model's shared-pool refusal should rest the provider: %+v", first)
 	}
 }
 

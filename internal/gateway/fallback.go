@@ -50,9 +50,10 @@ const fallbackCooldown = time.Minute
 var groupBudget = 540 * time.Second
 
 type candidate struct {
-	p     provider.Provider
-	model string
-	rest  string // what rests after a failure: the provider, or one of its keys
+	p         provider.Provider
+	model     string
+	rest      string // what rests after a failure: the provider, or one of its keys
+	sentModel string
 	// effort is the reasoning the group's member it is of is fixed at
 	// ("provider/model:low"); "" for one that follows the agent or the group
 	effort string
@@ -201,7 +202,14 @@ func (c candidate) seat() string {
 }
 
 func (c candidate) isOpenRouterFree() bool {
-	return c.p.VendorPreset() == "openrouter" && strings.HasSuffix(c.model, ":free")
+	return c.p.VendorPreset() == "openrouter" && strings.HasSuffix(c.refusedModel(), ":free")
+}
+
+func (c candidate) refusedModel() string {
+	if c.sentModel != "" {
+		return c.sentModel
+	}
+	return c.p.OwnModelID(c.model)
 }
 
 // restID is the candidate's model's own rest key: a free OpenRouter
@@ -219,7 +227,7 @@ func (c candidate) pooled(now time.Time) bool {
 	if c.p.Account == nil {
 		return false
 	}
-	return allowances(c.p.Account.UsageAgent())[c.p.Account.User].Pooled(c.model, provider.SpentShareOf(c.p.Routing), now)
+	return allowances(c.p.Account.UsageAgent())[c.p.Account.User].Pooled(c.p.OwnModelID(c.model), provider.SpentShareOf(c.p.Routing), now)
 }
 
 // who is the key or account itself, however many the provider has on: a
@@ -1018,6 +1026,10 @@ func capHeld(p, acct provider.Provider, model string, now time.Time) *capHold {
 	}
 	a := acct.Account
 	caps := provider.HoldCaps(p, a.Agent, a.User)
+	if !caps.Holds() {
+		return nil
+	}
+	model = acct.OwnModelID(model)
 	if a.Agent == "codex" && freeOnChatGPT(model, a.Plan) {
 		// a call ChatGPT counts in no window spends nothing a usage cap
 		// keeps (#1593); credits set not to be spent still hold it at

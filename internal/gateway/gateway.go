@@ -2481,7 +2481,8 @@ func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Prov
 	// counted, and not at all where there are none
 	wires := sync.OnceValue(func() map[string]string { return settings.Shared().Wires() })
 	for i, c := range counts {
-		res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, provider.UpstreamNameAsIn(wires(), c.p.ID, model, c.p.SentIDAt(model, sentEffortIf(c.p, model, provider.Anthropic, body)))), r.Header)
+		c.sentModel = provider.UpstreamNameAsIn(wires(), c.p.ID, model, c.p.SentIDAt(model, sentEffortIf(c.p, model, provider.Anthropic, body)))
+		res, err := s.forward(r.Context(), c.p, provider.Anthropic, "/v1/messages/count_tokens", rewriteModel(body, c.sentModel), r.Header)
 		if tooMany := (*errRPM)(nil); errors.As(err, &tooMany) {
 			break // its minute filled since: nobody rests, the estimate answers
 		}
@@ -5070,6 +5071,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		}
 		asName := provider.SentNameOnIn(wiresOf(r.Context()), c.p.ID, accountAgent(c.p), c.model, sent)
 		wentAs = wireName(c.model, at.model, asName)
+		c.sentModel = cmp.Or(wentAs, c.model)
 		try.Wire = wentAs
 		try.Entry, try.EntryWhy = entryOf()
 		try.Swapped, try.Routed = swapped(asName, call.Usage.Served) && !usage.ListedAs(c.p.ID, c.model, call.Usage.Served), usage.GroupRouted(asName, call.Usage.Served)

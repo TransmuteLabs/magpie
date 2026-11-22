@@ -114,10 +114,11 @@ func (s *Server) nearCapOf(c candidate, now time.Time) (used, ahead float64, nea
 	if !ok {
 		return 0, 0, false
 	}
-	used, _ = al.For(c.model, now)
+	model := c.p.OwnModelID(c.model)
+	used, _ = al.For(model, now)
 	out, _, turns := s.lanes.out(c.who())
 	ahead = s.turnSpend.ahead(c.who(), used, turns, s.lanes.inReading(c.who()), out)
-	return used, ahead, al.NearCap(c.model, caps, nearCapPoints+ahead, now)
+	return used, ahead, al.NearCap(model, caps, nearCapPoints+ahead, now)
 }
 
 // nearCapOf says whether c's account is within points of a usage cap set
@@ -125,10 +126,14 @@ func (s *Server) nearCapOf(c candidate, now time.Time) (used, ahead float64, nea
 // the model.
 func nearCapOf(c candidate, now time.Time, points float64) (float64, bool) {
 	al, caps, ok := capWatched(c)
-	if !ok || !al.NearCap(c.model, caps, points, now) {
+	if !ok {
 		return 0, false
 	}
-	used, _ := al.For(c.model, now)
+	model := c.p.OwnModelID(c.model)
+	if !al.NearCap(model, caps, points, now) {
+		return 0, false
+	}
+	used, _ := al.For(model, now)
 	return used, true
 }
 
@@ -140,7 +145,7 @@ func capWatched(c candidate) (provider.Allowance, provider.WindowCaps, bool) {
 		return nil, provider.WindowCaps{}, false
 	}
 	caps := provider.HoldCaps(c.p, a.Agent, a.User)
-	if a.Agent == "codex" && freeOnChatGPT(c.model, a.Plan) {
+	if a.Agent == "codex" && freeOnChatGPT(c.p.OwnModelID(c.model), a.Plan) {
 		return nil, provider.WindowCaps{}, false // spends nothing a cap keeps (capHeld)
 	}
 	if !caps.Holds() {

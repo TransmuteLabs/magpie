@@ -1636,7 +1636,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// for below tells (Fable's week used up, the other weekly quota left:
 	// kaitokiku on X)
 	if !unread && why == failQuota && !pooled && c.p.Account != nil && c.model != "" && c.full(now).IsZero() {
-		unread = allowances(c.p.Account.UsageAgent())[c.p.Account.User].Scoped(c.model)
+		unread = allowances(c.p.Account.UsageAgent())[c.p.Account.User].Scoped(c.p.OwnModelID(c.model))
 	}
 	// a model the key's plan doesn't serve rests alone, counted by itself
 	// (#1235): the key's other models are still served. So does a ZCode
@@ -1698,7 +1698,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 				d, r.By = w, "resets"
 			} else if w := resetsNoted(header, now); w > 0 {
 				d, r.By = w, "resets"
-			} else if t := al.Full(c.model, provider.SpentShareOf(c.p.Routing), now); !t.IsZero() {
+			} else if t := al.Full(c.p.OwnModelID(c.model), provider.SpentShareOf(c.p.Routing), now); !t.IsZero() {
 				d, r.By = t.Sub(now), "window"
 			} else if w := retryAfter(header, now); w > chatgptCreditRest {
 				d, r.By = w, "retry-after"
@@ -2111,7 +2111,7 @@ func modelNamed(c candidate, why string, body []byte) bool {
 		return false
 	}
 	words := bytes.ToLower(wordsOf(body))
-	name := strings.ToLower(c.model)
+	name := strings.ToLower(c.refusedModel())
 	if namesModel(words, name) || claudeFamilyLimit(c, name, words) {
 		return true
 	}
@@ -2344,7 +2344,7 @@ func (c candidate) fullIn(a provider.Allowance, now time.Time) time.Time {
 	if spendsCredits(c.p, a) || c.p.Account == nil && a.OnCredits() {
 		return time.Time{}
 	}
-	return a.Full(c.model, provider.SpentShareOf(c.p.Routing), now)
+	return a.Full(c.p.OwnModelID(c.model), provider.SpentShareOf(c.p.Routing), now)
 }
 
 // onCredits: c is a Codex account that goes on past its allowance on its
@@ -2391,7 +2391,7 @@ func spendsCredits(p provider.Provider, a provider.Allowance) bool {
 // the subscription's credits.
 func (c candidate) creditsLast(now time.Time) bool {
 	acct := c.p.Account
-	if acct == nil || acct.UsageAgent() != "codex" || !provider.CodexCreditsLast(acct.User) || freeOnChatGPT(c.model, acct.Plan) {
+	if acct == nil || acct.UsageAgent() != "codex" || !provider.CodexCreditsLast(acct.User) || freeOnChatGPT(c.p.OwnModelID(c.model), acct.Plan) {
 		return false
 	}
 	return c.pastWindows(now)
@@ -2402,7 +2402,7 @@ func (c candidate) creditsLast(now time.Time) bool {
 // it on its credits (spendsCredits).
 func (c candidate) pastWindows(now time.Time) bool {
 	a, _ := c.allowance()
-	return spendsCredits(c.p, a) && a.CapHeld(c.model, provider.WindowCaps{Credits: true}, now) != nil
+	return spendsCredits(c.p, a) && a.CapHeld(c.p.OwnModelID(c.model), provider.WindowCaps{Credits: true}, now) != nil
 }
 
 // behindOthers is cs with those on credits that go behind (creditsBehind)
@@ -2780,13 +2780,13 @@ func (s *Server) weighRouted(p provider.Provider, cs []candidate, model string, 
 		var a provider.Allowance
 		var ok, free bool
 		whose := c.p.ID // whose wallet a balance is in
-		m := c.model    // the model as its allowance counts it
+		m := c.p.OwnModelID(c.model)
 		if c.p.IsRemoteMagpie() {
 			// another magpie's: by the card of its provider serving the
 			// model there, as last read from it (#6708, zzh11223311 on X);
 			// read again in the background only when there is another to
 			// weigh it against
-			a, m, free, ok = remoteSeat(c.p, c.model, len(cs) > 1)
+			a, m, free, ok = remoteSeat(c.p, m, len(cs) > 1)
 		} else if c.p.Account == nil {
 			// a key that reads its own windows is weighed by them as an
 			// account is; any other key isn't known

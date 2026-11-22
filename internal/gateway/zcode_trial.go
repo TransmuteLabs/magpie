@@ -31,18 +31,19 @@ var (
 // refusal of a ZCode account, an account-wide 429 or 1113 among them,
 // rests the account as before.
 func zcodeTrialRefused(c candidate, status int, body []byte) bool {
-	if c.p.PluginProvider() != "zcode" || !strings.HasSuffix(strings.ToLower(c.model), "-trial") {
+	model := zcodeTrialModel(c)
+	if model == "" {
 		return false
 	}
 	said := strings.TrimSpace(vendorMessage(body))
 	switch status {
 	case http.StatusBadRequest:
 		m := zcodeEndedWords.FindStringSubmatch(said)
-		return m != nil && strings.EqualFold(m[1], c.model)
+		return m != nil && strings.EqualFold(m[1], model)
 	case http.StatusTooManyRequests:
 		// the plugin names the bucket's own model, the entry less -Trial
 		m := zcodeSpentWords.FindStringSubmatch(said)
-		return m != nil && strings.EqualFold(m[1]+"-Trial", c.model)
+		return m != nil && strings.EqualFold(m[1]+"-Trial", model)
 	}
 	return false
 }
@@ -61,7 +62,7 @@ func zcodeTrialRefused(c candidate, status int, body []byte) bool {
 // account (code 3012, failRestricted) is read before, and rests as
 // zcodeTrialRestricted says.
 func zcodeTrialBlocked(c candidate, status int, body []byte) bool {
-	if status < 400 || c.p.PluginProvider() != "zcode" || !strings.HasSuffix(strings.ToLower(c.model), "-trial") {
+	if status < 400 || zcodeTrialModel(c) == "" {
 		return false
 	}
 	return provider.EdgeBlocked(wordsOf(body)) && !restrictedSaid(status, wordsOf(body))
@@ -77,5 +78,15 @@ func zcodeTrialBlocked(c candidate, status int, body []byte) bool {
 // plain model goes to zcode.z.ai too, gets its own 3012, and that rests
 // the account, as zcodeTrialBlocked's block page does.
 func zcodeTrialRestricted(c candidate, why string) bool {
-	return why == failRestricted && c.p.PluginProvider() == "zcode" && strings.HasSuffix(strings.ToLower(c.model), "-trial")
+	return why == failRestricted && zcodeTrialModel(c) != ""
+}
+
+func zcodeTrialModel(c candidate) string {
+	if c.p.PluginProvider() == "zcode" {
+		model := c.p.OwnModelID(c.model)
+		if strings.HasSuffix(strings.ToLower(model), "-trial") {
+			return model
+		}
+	}
+	return ""
 }

@@ -104,7 +104,7 @@ func (p Provider) KeyCapHeld(k KeyAccount, model string, now time.Time, read fun
 	if !ok {
 		return nil
 	}
-	return al.CapHeld(model, caps, now)
+	return al.CapHeld(p.OwnModelID(model), caps, now)
 }
 
 // KeyAccountOf is the key of p with the id ref (KeyInfo.ID), and whether
@@ -640,11 +640,11 @@ func WithCapped(m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
 			// a pool's own window holds its models (allowanceOf)
 			pool := w.PoolWindow() && len(PoolMembers(q.Windows, w)) > 0
 			w.Capped = (!w.Aside || pool) && !w.Unlimited
-			w.CapsSome = w.Capped && (w.Model != "" || w.matches != nil || pool)
 			// set aside, it still holds at a cap the user set on it
 			// before (allowanceOf), and at no other
 			w.OwnCap = w.Aside && !w.Unlimited && !w.Text && w.Model == "" && !pool
 			w.Capped = w.Capped || w.OwnCap
+			w.CapsSome = w.Capped && (w.Model != "" || w.matches != nil || pool)
 			if w.Capped {
 				w.CapID = WindowCapID(w.Name)
 			}

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Vendors that count limits per model name the model in the refusal. Each
@@ -29,15 +31,23 @@ const (
 // names no model rests the key, as before.
 func TestModelNamedLimitRestsTheModelNotTheKey(t *testing.T) {
 	for _, tc := range []struct {
-		name, body string
-		status     int
+		name, body, native, alias, wire string
 	}{
-		{"groq tpd", groqModelTPD, 429},
-		{"gemini per-model day quota", geminiModelDay, 429},
+		{name: "groq tpd", body: groqModelTPD, native: "gpt-4o"},
+		{name: "gemini per-model day quota", body: geminiModelDay, native: "gpt-4o"},
+		{name: "openai tpm with alias", body: openAIModelTPM, native: "gpt-4o", alias: "fast"},
+		{name: "openai tpm with wire equal to alias", body: openAIModelTPM, native: "deployment-a", alias: "gpt-4o", wire: "gpt-4o"},
+		{name: "openai tpm with distinct wire and alias", body: openAIModelTPM, native: "deployment-a", alias: "fast", wire: "gpt-4o"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			opts := settings.Load()
+			zero := 0
+			opts.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxTotalRetries: &zero}}
+			if err := settings.Save(opts); err != nil {
+				t.Fatal(err)
+			}
 			restingUntil.Lock()
 			restingUntil.m, restingUntil.note = map[string]time.Time{}, map[string]Rest{}
 			restingUntil.Unlock()
@@ -51,7 +61,7 @@ func TestModelNamedLimitRestsTheModelNotTheKey(t *testing.T) {
 				json.NewDecoder(r.Body).Decode(&req)
 				w.Header().Set("Content-Type", "application/json")
 				if req.Model == "gpt-4o" {
-					w.WriteHeader(tc.status)
+					w.WriteHeader(http.StatusTooManyRequests)
 					io.WriteString(w, tc.body)
 					return
 				}
@@ -59,9 +69,21 @@ func TestModelNamedLimitRestsTheModelNotTheKey(t *testing.T) {
 			}))
 			defer up.Close()
 			p := provider.Provider{ID: "relay", Name: "relay", Chat: up.URL + "/v1",
-				Models: []string{"gpt-4o", "gpt-4o-mini"}, Key: "k-one"}
+				Models: []string{tc.native, "gpt-4o-mini"}, Key: "k-one"}
 			if err := provider.Save(p); err != nil {
 				t.Fatal(err)
+			}
+			model := tc.native
+			if tc.alias != "" {
+				if _, changed, err := provider.SetModelID("relay/"+model, tc.alias); err != nil || !changed {
+					t.Fatalf("set model ID: changed %v, error %v", changed, err)
+				}
+				model = tc.alias
+			}
+			if tc.wire != "" {
+				if err := provider.SetUpstreamName("relay/"+model, tc.wire); err != nil {
+					t.Fatal(err)
+				}
 			}
 			saved, err := provider.Find("relay")
 			if err != nil {
@@ -74,17 +96,17 @@ func TestModelNamedLimitRestsTheModelNotTheKey(t *testing.T) {
 				s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
 				return rec.Code
 			}
-			if code := send("gpt-4o"); code != 429 {
-				t.Fatalf("gpt-4o: %d", code)
+			if code := send(model); code != 429 {
+				t.Fatalf("%s: %d", model, code)
 			}
 			key := saved.RestKey(saved.KeyList()[0])
 			_, keyRests := RestOf(key)
-			r, modelRests := RestOf(key + "/gpt-4o")
+			r, modelRests := RestOf(key + "/" + model)
 			if keyRests {
 				t.Errorf("the key rests whole for one model's limit")
 			}
-			if !modelRests || r.Model != "gpt-4o" {
-				t.Errorf("gpt-4o doesn't rest on its own: %+v", r)
+			if !modelRests || r.Model != model {
+				t.Errorf("%s doesn't rest on its own: %+v", model, r)
 			}
 			if code := send("gpt-4o-mini"); code != 200 {
 				t.Errorf("gpt-4o-mini, which the vendor didn't limit, answered %d", code)

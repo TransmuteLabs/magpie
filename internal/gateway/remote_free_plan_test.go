@@ -17,6 +17,12 @@ import (
 // plan tells it now: the free one goes first, though the paid one has
 // more left and renews sooner, and the trace says it is free.
 func TestRemoteMagpieFreePlanSpentFirst(t *testing.T) {
+	t.Run("native", func(t *testing.T) { checkRemoteMagpieFreePlan(t, "") })
+	t.Run("alias", func(t *testing.T) { checkRemoteMagpieFreePlan(t, "fast") })
+}
+
+func checkRemoteMagpieFreePlan(t *testing.T, alias string) {
+	t.Helper()
 	fresh(t)
 	t.Setenv("MAGPIE_ADDR", "")
 	provider.ForgetRemoteCardsForTest()
@@ -41,14 +47,20 @@ func TestRemoteMagpieFreePlanSpentFirst(t *testing.T) {
 		t.Cleanup(srv.Close)
 		return srv
 	}
+	const nativeModel = "claude/claude-sonnet-5-5"
 	paid := remote("sk-magpie-paid", "Pro", 20, 30*time.Hour)
 	free := remote("sk-magpie-free", "Free", 60, 100*time.Hour)
 	for _, p := range []provider.Provider{
 		{ID: "mac-paid", Name: "Mac Paid", Preset: provider.RemoteMagpiePreset, Key: "sk-magpie-paid", Chat: paid.URL},
-		{ID: "mac-free", Name: "Mac Free", Preset: provider.RemoteMagpiePreset, Key: "sk-magpie-free", Chat: free.URL},
+		{ID: "mac-free", Name: "Mac Free", Preset: provider.RemoteMagpiePreset, Key: "sk-magpie-free", Chat: free.URL, Models: []string{nativeModel}},
 	} {
 		if err := provider.Save(p); err != nil {
 			t.Fatal(err)
+		}
+	}
+	if alias != "" {
+		if _, changed, err := provider.SetModelID("mac-free/"+nativeModel, alias); err != nil || !changed {
+			t.Fatalf("set model ID: changed %v, error %v", changed, err)
 		}
 	}
 	provider.RemoteCards(context.Background())
@@ -57,7 +69,7 @@ func TestRemoteMagpieFreePlanSpentFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return candidate{p: *p, model: "claude/claude-sonnet-5-5", rest: id + "-free"}
+		return candidate{p: *p, model: p.ListedModelID(nativeModel), rest: id + "-free"}
 	}
 	a, b := member("mac-paid"), member("mac-free")
 	g := provider.Provider{ID: "auto-free", Routing: provider.FreeExpiring}

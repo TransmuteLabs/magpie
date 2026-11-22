@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -436,6 +437,96 @@ func TestAsideWindowKeepsItsOwnCap(t *testing.T) {
 	}
 	if w := got[2]; !w.Capped || w.OwnCap || w.CapID != "total credits" {
 		t.Fatalf("Total credits: capped %v, own %v, id %q", w.Capped, w.OwnCap, w.CapID)
+	}
+}
+
+func TestAsideWindowCapKeepsItsModelScope(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	raw := []byte(`{"windows":[
+		{"name":"Paid credits","used":100,"aside":true,"notModels":["free"],"resetsAt":"` + reset + `"},
+		{"name":"Paid total","used":10,"notModels":["free"],"resetsAt":"` + reset + `"},
+		{"name":"Free requests","used":0,"models":["free"],"resetsAt":"` + reset + `"}
+	]}`)
+	allowance := PluginAllowanceForTest(raw, now)
+	caps := WindowCaps{Windows: map[string]int{"paid credits": 90}}
+	if held := allowance.CapHeld("paid", caps, now); held == nil || held.Cap != 90 {
+		t.Fatalf("paid model should be held by its credits cap: %+v", held)
+	}
+	if held := allowance.CapHeld("free", caps, now); held != nil {
+		t.Errorf("free model is outside the paid credits cap: %+v", held)
+	}
+	if allowance.NearCap("free", caps, 5, now) {
+		t.Error("free model was considered near the paid credits cap")
+	}
+}
+
+func TestAsideWindowCapDoesNotNeedAnOverlappingWindow(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(time.Hour)
+	q := SubscriptionQuota{Windows: []QuotaWindow{
+		{Name: "Paid credits", Used: 100, Aside: true, ResetsAt: &reset, matches: idSetOf([]string{"paid"}).has},
+		{Name: "Free requests", Used: 0, ResetsAt: &reset, matches: idSetOf([]string{"free"}).has},
+	}}
+	allowance := allowanceOf(q.Windows, now)
+	caps := WindowCaps{Windows: map[string]int{"paid credits": 90}}
+	if held := allowance.CapHeld("paid", caps, now); held == nil || held.Cap != 90 {
+		t.Errorf("paid model should be held by its own capped window: %+v", held)
+	}
+	if !allowance.NearCap("paid", caps, 5, now) {
+		t.Error("paid model should be near its own cap")
+	}
+	if held := allowance.CapHeld("free", caps, now); held != nil {
+		t.Errorf("free model is outside the paid cap: %+v", held)
+	}
+	if used, _ := allowance.For("paid", now); used != 0 {
+		t.Errorf("the aside window contributed to ordinary usage: %v", used)
+	}
+	if _, known := routedAllowance("plugin", "owner", SubscriptionQuota{Windows: q.Windows[:1]}, now); known {
+		t.Error("an aside-only reading should still leave ordinary usage unknown")
+	}
+	withPaidWindows := allowanceOf(append(slices.Clone(q.Windows),
+		QuotaWindow{Name: "Paid total", matches: idSetOf([]string{"paid"}).has},
+		QuotaWindow{Name: "Paid daily", matches: idSetOf([]string{"paid"}).has},
+	), now)
+	if limits := withPaidWindows.capLimits("paid"); len(limits) != 3 {
+		t.Errorf("want two ordinary limits and one aside cap, got %d limits", len(limits))
+	}
+	window := WithCapped(map[string]SubscriptionQuota{"owner": q})["owner"].Windows[0]
+	if !window.Capped || !window.OwnCap || !window.CapsSome || window.CapID != "paid credits" {
+		t.Errorf("quota card should say only some models are capped: %+v", window)
+	}
+}
+
+func TestPoolWindowCapKeepsItsModelScope(t *testing.T) {
+	now := time.Now()
+	reset := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	for _, test := range []struct {
+		name, filter string
+		holdsFree    bool
+	}{
+		{name: "exclude free", filter: `,"notModels":["free"]`},
+		{name: "only paid", filter: `,"models":["paid"]`},
+		{name: "whole pool", holdsFree: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := []byte(`{"windows":[
+				{"name":"Paid","model":"paid","family":"Paid","pool":"Shared","used":10},
+				{"name":"Free","model":"free","family":"Free","pool":"Shared","used":0},
+				{"name":"Credits","pool":"Shared","aside":true,"used":100,"resetsAt":"` + reset + `"` + test.filter + `}
+			]}`)
+			allowance := PluginAllowanceForTest(raw, now)
+			caps := WindowCaps{Windows: map[string]int{"shared · credits": 90}}
+			if held := allowance.CapHeld("paid", caps, now); held == nil || held.Cap != 90 {
+				t.Fatalf("paid model should be held by its pool cap: %+v", held)
+			}
+			if held := allowance.CapHeld("free", caps, now); (held != nil) != test.holdsFree {
+				t.Errorf("free model cap: %+v, want held %v", held, test.holdsFree)
+			}
+			if near := allowance.NearCap("free", caps, 5, now); near != test.holdsFree {
+				t.Errorf("free model near cap: %v, want %v", near, test.holdsFree)
+			}
+		})
 	}
 }
 

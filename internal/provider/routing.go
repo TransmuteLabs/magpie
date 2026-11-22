@@ -1510,7 +1510,7 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 		if !w.PoolWindow() || w.Text {
 			continue
 		}
-		pl := Limit{Used: w.Used, Span: w.Span, Name: w.LineName(), Resets: resets(w)}
+		pl := Limit{Used: w.Used, Span: w.Span, Name: w.LineName(), Resets: resets(w), matches: w.matches}
 		for _, m := range PoolMembers(ws, w) {
 			if i, ok := at[m.Model]; ok {
 				a[i].pool = append(a[i].pool, pl)
@@ -1521,19 +1521,20 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 	// once the plan's and the extra credits are counted together, ferock
 	// on Discord) holds at that cap still: the user's value outlives the
 	// plugin's change of which window stops the account
+	if len(a) == 0 {
+		return a
+	}
 	for _, w := range ws {
 		if !w.Aside || w.Text || w.Model != "" || w.PoolWindow() {
 			continue
 		}
 		// with its count, so a cap of an amount of its unit holds too
-		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true,
+		al := Limit{Used: w.Used, Span: w.Span, Name: w.Name, Resets: resets(w), aside: true, matches: w.matches,
 			Amount: w.Amount, Of: w.Limit, Unit: w.Unit, extra: w.Extra}
 		if w.amountPresence == quotaAmountAbsent {
 			al.Amount, al.Of = 0, 0
 		}
-		for i := range a {
-			a[i].pool = append(a[i].pool, al)
-		}
+		a[0].pool = append(a[0].pool, al)
 	}
 	return a
 }
@@ -1541,11 +1542,31 @@ func allowanceOf(ws []QuotaWindow, now time.Time) Allowance {
 // capLimits are the windows of a that count model, each with the windows
 // of the pool it draws on, which hold it at caps only.
 func (a Allowance) capLimits(model string) []Limit {
-	var out []Limit
-	for _, l := range a {
-		if l.applies(model) {
-			out = append(append(out, l), l.pool...)
-		}
+	if len(a) == 0 {
+		return nil
 	}
+	var out []Limit
+	aside := a[0].pool
+	addAside := func() {
+		for _, l := range aside {
+			if l.aside && l.applies(model) {
+				out = append(out, l)
+			}
+		}
+		aside = nil
+	}
+	for _, l := range a {
+		if !l.applies(model) {
+			continue
+		}
+		out = append(out, l)
+		for _, pooled := range l.pool {
+			if !pooled.aside && pooled.applies(model) {
+				out = append(out, pooled)
+			}
+		}
+		addAside()
+	}
+	addAside()
 	return out
 }

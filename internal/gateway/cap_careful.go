@@ -91,7 +91,7 @@ func readCareful(ctx context.Context, ps []provider.Provider, models []string) {
 				continue
 			}
 			al, known := allowances(a.UsageAgent())[a.User]
-			if carefulDoubt(a, al, known, models[i], caps, now) == "" {
+			if carefulDoubt(a, al, known, acct.OwnModelID(models[i]), caps, now) == "" {
 				continue
 			}
 			key := a.UsageAgent() + "/" + strings.ToLower(a.User)
