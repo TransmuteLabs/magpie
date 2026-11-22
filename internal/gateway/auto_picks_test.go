@@ -61,7 +61,7 @@ func TestAddedProviderTakesNoAutomaticPick(t *testing.T) {
 	fresh(t)
 	// OpenAI's API: searches by itself (rank 3), sees at 5
 	seeing(t, provider.Provider{ID: "oai", Responses: "https://api.openai.com/v1"}, 5)
-	seedAutoPicks()
+	seedAutoPicks(t.Context())
 	if f := heldFile(t); !f.Seeded || f.Vision != "oai" || f.Searcher != "oai" {
 		t.Fatalf("held %+v, want oai for both", f)
 	}
@@ -149,7 +149,7 @@ func TestAutoPicksSeededFromTheLedger(t *testing.T) {
 		// anth added: magpie picked it for both
 		call(ago(2), "vision", "anth", "")
 		call(ago(1), "web_search", "anth", "")
-		seedAutoPicks()
+		seedAutoPicks(t.Context())
 		if f := heldFile(t); f.Vision != "oai" || f.Searcher != "oai" {
 			t.Fatalf("held %+v, want oai given back for both", f)
 		}
@@ -169,7 +169,7 @@ func TestAutoPicksSeededFromTheLedger(t *testing.T) {
 		call(ago(8), "vision", "anth", "")
 		call(ago(6), "vision", "oai", "")
 		call(ago(2), "vision", "anth", "")
-		seedAutoPicks()
+		seedAutoPicks(t.Context())
 		if f := heldFile(t); f.Vision != "anth" || f.Searcher != "anth" {
 			t.Fatalf("held %+v, want anth kept", f)
 		}
@@ -180,7 +180,7 @@ func TestAutoPicksSeededFromTheLedger(t *testing.T) {
 		seeing(t, provider.Provider{ID: "anth", Anthropic: "https://api.anthropic.com"}, 1)
 		call(ago(8), "vision", "removed", "")
 		call(ago(2), "vision", "anth", "")
-		seedAutoPicks()
+		seedAutoPicks(t.Context())
 		if f := heldFile(t); f.Vision != "anth" {
 			t.Fatalf("held %+v, want anth: the one before is gone", f)
 		}
@@ -200,7 +200,7 @@ func TestClaudeAccountAddedTakesNoImages(t *testing.T) {
 	provider.ForgetAccounts()
 	t.Cleanup(provider.ForgetAccounts)
 	seeing(t, provider.Provider{ID: "keyed", Chat: "http://keyed.invalid/v1"}, 1)
-	seedAutoPicks()
+	seedAutoPicks(t.Context())
 	if m := AutoVision(); m != "keyed/eye" {
 		t.Fatalf("AutoVision = %q before the Claude account", m)
 	}
