@@ -633,7 +633,9 @@ func (s *Server) watchUnrouted(w http.ResponseWriter, r *http.Request, f *inflig
 	held := new(atomic.Pointer[unroutedHold])
 	held.Store(u)
 	r = r.WithContext(context.WithValue(ctx, unroutedKey{}, held))
-	if r.Body != nil && r.Body != http.NoBody {
+	if _, buffered := r.Body.(*socketRequestBody); buffered {
+		u.bodyEnded.Store(true)
+	} else if r.Body != nil && r.Body != http.NoBody {
 		r.Body = waitedBody{r.Body, u}
 	}
 	u.r = r
