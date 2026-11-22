@@ -72,7 +72,7 @@ func (l *Lease) finishUsageRead(ctx context.Context, scope sdk.Scope, stamp *Usa
 		})
 	}
 	return m.withProviderStore(ctx, entry, l.ConfigVersion(), scope, false, func(root *os.Root, snapshot *storeReadSnapshot[storeAccounts]) error {
-		current, err := m.store.usageStampFromSnapshot(ctx, root, snapshot, scope, storeSync)
+		_, current, err := m.store.usageAccountFromSnapshot(ctx, root, snapshot, scope, storeSync)
 		if err != nil {
 			return err
 		}

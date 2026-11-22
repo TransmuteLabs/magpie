@@ -1092,11 +1092,6 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 			return nil, errors.New("business cancellation requires its selected account")
 		}
 	}
-	if method == sdk.MethodProviderExecute {
-		if err := m.store.UsageReadyContext(ctx, scope); err != nil {
-			return nil, beforeProviderDispatch(method, err)
-		}
-	}
 	var usageRead *UsageStamp
 	if method == sdk.MethodProviderUsage {
 		var err error
@@ -1112,7 +1107,12 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 			return nil, err
 		}
 	}
-	auth, err := m.authForContext(ctx, scope)
+	var auth json.RawMessage
+	if method == sdk.MethodProviderExecute {
+		auth, err = m.store.authForReadyUsage(ctx, scope)
+	} else {
+		auth, err = m.authForContext(ctx, scope)
+	}
 	if err != nil {
 		return nil, beforeProviderDispatch(method, err)
 	}

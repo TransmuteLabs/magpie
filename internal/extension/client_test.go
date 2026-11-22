@@ -154,6 +154,12 @@ func helperModule() sdk.Module {
 				return nil, err
 			}
 			if count, measured := strings.CutPrefix(request.Model, "fixture-stream-"); measured {
+				var auth struct {
+					StreamFixture bool `json:"streamFixture"`
+				}
+				if json.Unmarshal(call.Auth, &auth) != nil || !auth.StreamFixture {
+					return nil, errors.New("selected fixture credentials did not reach the worker")
+				}
 				chunks, err := strconv.Atoi(count)
 				if err != nil || chunks < 0 || chunks > 500 {
 					return nil, errors.New("bad fixture chunk count")

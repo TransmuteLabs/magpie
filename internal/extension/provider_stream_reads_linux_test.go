@@ -90,7 +90,10 @@ func TestProviderStreamStoreReads(t *testing.T) {
 				short := countProviderStreamReads(t, files, func() { call(0) })
 				long := countProviderStreamReads(t, files, func() { call(500) })
 				t.Logf("accounts_bytes=%d files=[accounts,catalog,config,owners] chunks_0=%v chunks_500=%v", fileBytes, short, long)
-				if short[0] > 10 || long[0] < short[0] || long[0]-short[0] > 500 {
+				if short[0] > 9 {
+					t.Fatalf("execute preflight exceeded nine account reads: %v", short)
+				}
+				if long[0] < short[0] || long[0]-short[0] > 500 {
 					t.Fatalf("account reads exceeded one per event: %v to %v", short, long)
 				}
 				if !slices.Equal(short[1:], long[1:]) {
@@ -115,14 +118,19 @@ func seedProviderStreamAccounts(t *testing.T, manager *Manager, scope sdk.Scope,
 		}
 	}
 	records.Accounts[count-1].ID = scope.Account
+	records.Accounts[count-1].Auth = json.RawMessage(`{"streamFixture":true}`)
 	upgradeWindowAuthStore(&records)
 	if oversize {
-		records.Accounts[0].Auth = json.RawMessage(`{"padding":""}`)
+		auth := `{"padding":"`
+		if count == 1 {
+			auth = `{"streamFixture":true,"padding":"`
+		}
+		records.Accounts[0].Auth = json.RawMessage(auth + `"}`)
 		encoded, err := json.Marshal(records)
 		if err != nil {
 			t.Fatal(err)
 		}
-		records.Accounts[0].Auth = json.RawMessage(`{"padding":"` + strings.Repeat("x", storeSnapshotLimit-len(encoded)) + `"}`)
+		records.Accounts[0].Auth = json.RawMessage(auth + strings.Repeat("x", storeSnapshotLimit-len(encoded)) + `"}`)
 	}
 	if err := manager.Store().withStoreContext(t.Context(), scope.Plugin, func(root *os.Root) error {
 		return storeWrite(root, "accounts.json", records, storeFileLimit)
@@ -220,7 +228,7 @@ func TestProviderStreamStopsAfterPeerAccountReplacement(t *testing.T) {
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "0")
 	manager, entry := fixtureManagerAt(t, 9)
 	account, err := manager.Store().SaveAccount(Account{
-		Plugin: entry.Manifest.ID, Provider: "provider", ID: "selected", Auth: json.RawMessage(`{}`),
+		Plugin: entry.Manifest.ID, Provider: "provider", ID: "selected", Auth: json.RawMessage(`{"streamFixture":true}`),
 	}, 0)
 	if err != nil {
 		t.Fatal(err)

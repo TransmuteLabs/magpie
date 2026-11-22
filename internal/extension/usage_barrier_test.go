@@ -102,10 +102,17 @@ func TestUsageEpochFencesInferenceUntilMatchedFreshAcknowledgment(t *testing.T) 
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("usage invalidation changed credentials, generation or expiry")
 	}
-	if _, err := manager.Call(context.Background(), scope.Plugin, sdk.MethodProviderExecute, scope,
-		sdk.ExecuteRequest{Protocol: "chat", Model: "model", Body: []byte(`{}`)}, nil); err == nil {
-		t.Fatal("dirty account admitted inference")
+	blocked := scope
+	blocked.Operation, blocked.Attempt = "dirty-usage-blocked", 1
+	_, err = manager.Call(context.Background(), scope.Plugin, sdk.MethodProviderExecute, blocked,
+		sdk.ExecuteRequest{Protocol: "chat", Model: "model", Body: []byte(`{}`)}, nil)
+	storeTestError(t, err, "usage_refresh_required")
+	var refused *sdk.Error
+	if !errors.As(err, &refused) || refused.Outcome != "not-started" {
+		t.Fatalf("dirty account did not get a pre-dispatch refusal: %v", err)
 	}
+	_, err = manager.Store().Operation(scope.Plugin, blocked.Operation)
+	storeTestError(t, err, "not_found")
 	if _, err := manager.Store().AcknowledgeUsage(scope, 0); err == nil {
 		t.Fatal("pre-mutation acknowledgment reopened inference")
 	}

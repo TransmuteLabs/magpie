@@ -71,35 +71,43 @@ func (s *Store) UsageStampContext(ctx context.Context, scope sdk.Scope) (UsageSt
 }
 
 func (s *Store) usageStampContext(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error) (UsageStamp, error) {
+	_, stamp, err := s.readUsageAccount(ctx, scope, confirm)
+	return stamp, err
+}
+
+func (s *Store) readUsageAccount(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error) (*storeAccount, UsageStamp, error) {
+	var account *storeAccount
 	var stamp UsageStamp
 	if !storeValidScope(scope) || scope.Account == "" {
-		return stamp, storeInvalid()
+		return nil, stamp, storeInvalid()
 	}
 	err := s.withReadAccountsSnapshot(ctx, scope.Plugin, func(root *os.Root, snapshot *storeReadSnapshot[storeAccounts]) error {
 		var err error
-		stamp, err = s.usageStampFromSnapshot(ctx, root, snapshot, scope, confirm)
+		account, stamp, err = s.usageAccountFromSnapshot(ctx, root, snapshot, scope, confirm)
 		return err
 	})
 	if err != nil {
-		return UsageStamp{}, err
+		return nil, UsageStamp{}, err
 	}
-	return stamp, nil
+	return account, stamp, nil
 }
 
-func (s *Store) usageStampFromSnapshot(ctx context.Context, root *os.Root, snapshot *storeReadSnapshot[storeAccounts], scope sdk.Scope, confirm func(*os.Root) error) (UsageStamp, error) {
+func (s *Store) usageAccountFromSnapshot(ctx context.Context, root *os.Root, snapshot *storeReadSnapshot[storeAccounts], scope sdk.Scope, confirm func(*os.Root) error) (*storeAccount, UsageStamp, error) {
 	if snapshot == nil {
-		return UsageStamp{}, storeError("stale_generation", "Extension usage account scope changed.")
+		return nil, UsageStamp{}, storeError("stale_generation", "Extension usage account scope changed.")
 	}
 	records := snapshot.value
 	account, err := usageAccount(&records, scope)
 	if err != nil {
-		return UsageStamp{}, err
+		return nil, UsageStamp{}, err
 	}
 	stamp := usageStamp(*account)
 	if !stamp.Dirty {
-		return stamp, s.confirmAccountSnapshot(ctx, root, snapshot, confirm)
+		if err := s.confirmAccountSnapshot(ctx, root, snapshot, confirm); err != nil {
+			return nil, UsageStamp{}, err
+		}
 	}
-	return stamp, nil
+	return account, stamp, nil
 }
 
 func (s *Store) InvalidateUsage(scope sdk.Scope) (UsageStamp, error) {
@@ -196,15 +204,31 @@ func (s *Store) UsageReady(scope sdk.Scope) error {
 }
 
 func (s *Store) UsageReadyContext(ctx context.Context, scope sdk.Scope) error {
-	if scope.Account == "" {
-		return ctx.Err()
+	_, err := s.readUsageReadyAccount(ctx, scope)
+	return err
+}
+
+func (s *Store) authForReadyUsage(ctx context.Context, scope sdk.Scope) (json.RawMessage, error) {
+	account, err := s.readUsageReadyAccount(ctx, scope)
+	if err != nil || account == nil {
+		return nil, err
 	}
-	stamp, err := s.UsageStampContext(ctx, scope)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return bytes.Clone(account.Auth), nil
+}
+
+func (s *Store) readUsageReadyAccount(ctx context.Context, scope sdk.Scope) (*storeAccount, error) {
+	if scope.Account == "" {
+		return nil, ctx.Err()
+	}
+	account, stamp, err := s.readUsageAccount(ctx, scope, storeSync)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if stamp.Dirty {
-		return &sdk.Error{Code: "usage_refresh_required", Message: "A fresh account usage acknowledgment is required.", Outcome: "not-started"}
+		return nil, &sdk.Error{Code: "usage_refresh_required", Message: "A fresh account usage acknowledgment is required.", Outcome: "not-started"}
 	}
-	return nil
+	return account, nil
 }
