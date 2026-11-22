@@ -35,6 +35,9 @@ func TestSDKGatewayCapturedReplyP19(t *testing.T) {
 	manager := installSDKGatewayHook(t, sdkHookConfig{ResponseURL: observer.URL}, sdk.GatewayHookDescriptor{Response: true})
 	const result = `{"id":"r1","status":"completed","output":[]}`
 	const failed = `{"status":"failed","error":{"message":"fixture failure"}}`
+	const statusFailed = `{"error":null,"status":"completed","\u0073tatus":"incompl\u0065te"}`
+	const finalNullError = `{"error":{"message":"replaced"},"\u0065rror": null ,"Status":"failed","status":false}`
+	const deliveredNullError = `{"error":{"message":"replaced"},"\u0065rror":null,"Status":"failed","status":false}`
 	for _, test := range []struct {
 		name, wire, wantReply string
 		status                int
@@ -43,6 +46,8 @@ func TestSDKGatewayCapturedReplyP19(t *testing.T) {
 		{name: "unary", wire: " \t" + result + "\n", wantReply: result, status: 200, success: true},
 		{name: "SSE terminal", wire: p19HookCompletedSSE(result), wantReply: result, status: 200, stream: true, success: true},
 		{name: "failed response", wire: failed, wantReply: failed, status: 200},
+		{name: "last decoded error member", wire: finalNullError, wantReply: deliveredNullError, status: 200, success: true},
+		{name: "last decoded SSE status", wire: p19HookCompletedSSE(statusFailed), wantReply: statusFailed, status: 200, stream: true},
 		{name: "truncated SSE", wire: `data: {"type":"response.output_text.delta","delta":"x"}` + "\n\n", wantReply: "null", status: 200, stream: true},
 		{name: "HTTP failure", wire: result, wantReply: "null", status: 502},
 	} {

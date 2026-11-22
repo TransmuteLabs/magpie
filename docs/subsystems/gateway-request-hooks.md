@@ -79,7 +79,8 @@ lifetime independently of the client connection. Completed-response capture
 does not delay client EOF, and a client closing after a whole response does
 not cancel it. There are at most 128 active runs, each abandoned run expires
 after 15 minutes, and callbacks have bounded per-module and shared budgets.
-The gateway transfers its newly assembled reply buffer to the SDK observer.
+The gateway checks the assembled reply's top-level `error` and `status`
+directly in its JSON bytes, then transfers the buffer to the SDK observer.
 Ordinary `Finish` callers can reuse their buffers after it returns.
 Normal finish retains leases until notification completes; shutdown cancels
 and joins owned notifications before closing their workers. Disabling or

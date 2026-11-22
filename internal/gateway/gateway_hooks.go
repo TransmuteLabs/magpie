@@ -29,15 +29,35 @@ func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Prot
 			return
 		}
 		reply, err := gatewayReply(proto, output)
-		var response obj
-		json.Unmarshal(reply, &response)
-		success := err == nil && (len(response["error"]) == 0 || string(response["error"]) == "null") && str(response, "status") != "failed" && str(response, "status") != "incomplete"
+		success := err == nil && gatewayReplySucceeded(reply)
 		if sdkRun, ok := run.(*extension.GatewayRun); ok {
 			sdkRun.FinishOwnedReply(r.Context(), reply, success, body)
 			return
 		}
 		run.Finish(r.Context(), reply, success, body)
 	}
+}
+
+func gatewayReplySucceeded(reply []byte) bool {
+	reply = trimJSON(reply)
+	if len(reply) == 0 || reply[0] != '{' {
+		return true
+	}
+	var failure, status []byte
+	eachMember(reply, func(key, value []byte) bool {
+		switch {
+		case keyIs(key, "error"):
+			failure = value
+		case keyIs(key, "status"):
+			status = value
+		}
+		return true
+	})
+	if len(failure) != 0 && string(failure) != "null" {
+		return false
+	}
+	state, _ := stringBytes(status)
+	return string(state) != "failed" && string(state) != "incomplete"
 }
 
 // gatewayReply is the reply the client got as one whole reply in its API: a
