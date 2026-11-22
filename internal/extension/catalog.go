@@ -1056,7 +1056,15 @@ func catalogReadFile(root *os.Root, name string, limit int64) ([]byte, error) {
 	if !os.SameFile(info, opened) {
 		return nil, fmt.Errorf("extension file %q changed while opening it", name)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	bounded := io.LimitReader(file, limit+1)
+	var data []byte
+	if size := opened.Size(); size > bytes.MinRead && size <= 64<<10 {
+		buffer := bytes.NewBuffer(make([]byte, 0, int(size)+bytes.MinRead))
+		_, err = buffer.ReadFrom(bounded)
+		data = buffer.Bytes()
+	} else {
+		data, err = io.ReadAll(bounded)
+	}
 	if err != nil {
 		return nil, err
 	}
