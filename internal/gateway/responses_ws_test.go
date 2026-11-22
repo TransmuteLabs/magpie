@@ -529,7 +529,7 @@ func TestResponsesSocketInterrupt(t *testing.T) {
 	}
 }
 
-func holdResponsesSocket(t *testing.T, path string, frameLimit int64) (*sockClient, *respUp, <-chan struct{}) {
+func holdResponsesSocket(t *testing.T, path string, frameLimit int64) (*sockClient, *httptest.Server, *respUp, <-chan struct{}) {
 	t.Helper()
 	fresh(t)
 	stopped := make(chan struct{})
@@ -550,7 +550,8 @@ func holdResponsesSocket(t *testing.T, path string, frameLimit int64) (*sockClie
 	sockUp(t, up)
 	s := New()
 	s.requestLimits.body = frameLimit
-	c, _, err := dialSock(t, serveSock(t, s), path, nil)
+	ts := serveSock(t, s)
+	c, _, err := dialSock(t, ts, path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,11 +561,11 @@ func holdResponsesSocket(t *testing.T, path string, frameLimit int64) (*sockClie
 		last(events).Get("delta").String() != "partial" {
 		t.Fatalf("first response: %v, %v", events, err)
 	}
-	return c, up, stopped
+	return c, ts, up, stopped
 }
 
 func TestResponsesSocketQueuedTurnsRunInOrderAfterInterrupt(t *testing.T) {
-	c, up, stopped := holdResponsesSocket(t, "/v1/responses", 0)
+	c, _, up, stopped := holdResponsesSocket(t, "/v1/responses", 0)
 	const pending = 8
 	for number := range pending {
 		input := strings.Replace(userHi, `"hi"`, fmt.Sprintf(`"queued %d"`, number), 1)
@@ -616,7 +617,7 @@ func TestResponsesSocketPendingLimitStopsBeforeDispatch(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			c, up, stopped := holdResponsesSocket(t, test.path, test.frameLimit)
+			c, ts, up, stopped := holdResponsesSocket(t, test.path, test.frameLimit)
 			for range test.count {
 				c.send(test.frame)
 			}
@@ -633,7 +634,26 @@ func TestResponsesSocketPendingLimitStopsBeforeDispatch(t *testing.T) {
 				t.Fatal("overflow did not stop the upstream request")
 			}
 			if calls := up.calls(); calls != 1 {
-				t.Errorf("upstream calls = %d, want only the first turn", calls)
+				t.Fatalf("upstream calls = %d, want only the first turn", calls)
+			}
+			reconnected, _, err := dialSock(t, ts, test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			end := last(reconnected.turn(create("resp_wait", userMore)))
+			if end.Get("type").String() != "error" || end.Get("status").Int() != http.StatusBadRequest ||
+				end.Get("error.code").String() != "previous_response_not_found" || up.calls() != 1 {
+				t.Fatalf("old continuation after reconnect: %s, %d upstream calls", end.Raw, up.calls())
+			}
+			end = last(reconnected.turn(create("", userMore+","+userHi)))
+			if end.Get("type").String() != "response.completed" || up.calls() != 2 {
+				t.Fatalf("full request after reconnect: %s, %d upstream calls", end.Raw, up.calls())
+			}
+			request := gjson.ParseBytes(up.body(1))
+			input := request.Get("input").Array()
+			if request.Get("previous_response_id").Exists() || len(input) != 2 ||
+				input[0].Get("content.0.text").String() != "and more" || input[1].Get("content.0.text").String() != "hi" {
+				t.Fatalf("full request after reconnect reached upstream as %s", request.Raw)
 			}
 		})
 	}
@@ -644,7 +664,7 @@ func TestResponsesSocketPendingPayloadFits(t *testing.T) {
 	first := create("", userHi)
 	second := create("", userMore)
 	firstSize := 3<<10 + 1
-	c, up, stopped := holdResponsesSocket(t, CodexPath+"/responses", budget)
+	c, _, up, stopped := holdResponsesSocket(t, CodexPath+"/responses", budget)
 	c.send(first + strings.Repeat(" ", firstSize-len(first)))
 	c.send(second + strings.Repeat(" ", budget-firstSize-len(second)))
 
