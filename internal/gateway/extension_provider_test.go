@@ -17,6 +17,7 @@ import (
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
 )
@@ -32,8 +33,9 @@ func extensionGatewayManifest() sdk.Manifest {
 			Models: []sdk.Model{{ID: "m1", Protocols: []protocolext.Protocol{"chat"}, ContextWindow: 32768, MaxOutput: 4096}}}}}
 }
 
-func TestExtensionProviderNeverFallsBackAfterAcceptance(t *testing.T) {
-	worker := filepath.Join(t.TempDir(), extensionGatewayManifest().Entry)
+func buildExtensionGatewayWorker(t *testing.T, directory string) string {
+	t.Helper()
+	worker := filepath.Join(directory, extensionGatewayManifest().Entry)
 	buildContext, stopBuild := context.WithTimeout(context.Background(), time.Minute)
 	defer stopBuild()
 	build := exec.CommandContext(buildContext, filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", worker, "./testdata/extensionworker")
@@ -41,6 +43,11 @@ func TestExtensionProviderNeverFallsBackAfterAcceptance(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build external worker fixture: %v\n%s", err, output)
 	}
+	return worker
+}
+
+func TestExtensionProviderNeverFallsBackAfterAcceptance(t *testing.T) {
+	worker := buildExtensionGatewayWorker(t, t.TempDir())
 	for _, scenario := range []struct {
 		name       string
 		status     int
@@ -188,5 +195,80 @@ func TestExtensionProviderNeverFallsBackAfterAcceptance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExtensionResponsesSocketKeepsTerminalReceipt(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	t.Setenv("MAGPIE_ADDR", "")
+	directory := t.TempDir()
+	buildExtensionGatewayWorker(t, directory)
+	manifest := extensionGatewayManifest()
+	manifest.Providers[0].Protocols = []protocolext.Protocol{"responses"}
+	manifest.Providers[0].Models[0].Protocols = []protocolext.Protocol{"responses"}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := extensionhost.Default()
+	t.Cleanup(func() { closeSDKGatewayHook(t, manager) })
+	if _, err := manager.Install(t.Context(), directory); err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+	id := provider.ExtensionProviderID(manifest.ID, manifest.Providers[0].ID)
+	keys, secrets := newCaller(t, "Fixture socket")
+	server, public := sockServer(t)
+	t.Cleanup(server.idle.stop)
+	client, _, err := dialSock(t, public, "/v1/responses", http.Header{
+		"X-Test-Remote": {"192.168.1.9:5000"},
+		"Authorization": {"Bearer " + secrets[0]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := func(previous, item string) string {
+		return strings.Replace(create(previous, item), `"fake/m1"`, `"`+id+`/m1"`, 1)
+	}
+	client.send(turn("", userHi))
+	start, err := client.until("response.output_text.delta", "error", "response.failed")
+	if err != nil || len(start) == 0 || last(start).Get("delta").String() != "sdk socket output " {
+		t.Fatalf("first useful frame did not reach the client: %v %v", start, err)
+	}
+	frames, err := client.until("response.completed", "error", "response.failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := last(frames)
+	output := end.Get("response.output.0.content.0.text").String()
+	replyID := end.Get("response.id").String()
+	if end.Get("type").String() != "response.completed" || replyID == "" ||
+		output != "sdk socket output "+strings.Repeat("x", 128<<10) || end.Get("response.usage.input_tokens").Int() != 11 {
+		t.Fatalf("terminal frame = type %q, id %q, output %d bytes, input tokens %d",
+			end.Get("type").String(), replyID, len(output), end.Get("response.usage.input_tokens").Int())
+	}
+	if next := last(client.turn(turn(replyID, userMore))); next.Get("type").String() != "response.completed" {
+		t.Fatalf("continuation failed: %.300s", next.Raw)
+	}
+	entry, err := manager.Store().OperationContext(t.Context(), manifest.ID, replyID)
+	if err != nil || entry.State != "completed" {
+		t.Fatalf("first operation receipt = %q (%v)", entry.State, err)
+	}
+	calls := 0
+	usage.Visit(time.Time{}, func(record usage.Record) {
+		if record.ResponseID != replyID || record.Provider != id {
+			return
+		}
+		calls++
+		if record.CallerKeyID != keys[0].ID || record.Input != 13 || record.Output != 6 || record.Status != http.StatusOK {
+			t.Errorf("first call Usage = caller %q, %d/%d tokens, status %d", record.CallerKeyID, record.Input, record.Output, record.Status)
+		}
+	})
+	if calls != 1 {
+		t.Fatalf("first terminal response had %d Usage rows, want one", calls)
 	}
 }

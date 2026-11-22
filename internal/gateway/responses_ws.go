@@ -949,19 +949,26 @@ func codexLimitsFrame(h http.Header) []byte {
 	return b
 }
 
+type socketResponseID string
+
+func (id *socketResponseID) UnmarshalJSON(response []byte) error {
+	*id = socketResponseID(gjson.GetBytes(response, "id").String())
+	return nil
+}
+
 // event is one event of the reply's stream.
 func (w *socketTurnWriter) event(data []byte) error {
 	var e struct {
-		Type     string          `json:"type"`
-		Response json.RawMessage `json:"response"`
-		Item     json.RawMessage `json:"item"`
+		Type     string           `json:"type"`
+		Response socketResponseID `json:"response"`
+		Item     json.RawMessage  `json:"item"`
 	}
 	if json.Unmarshal(data, &e) != nil {
 		return nil // not JSON: Codex would skip it too
 	}
 	switch e.Type {
 	case "response.created", "response.in_progress":
-		w.note(gjson.GetBytes(e.Response, "id").String())
+		w.note(string(e.Response))
 	case "response.output_item.done":
 		// in the order they came, as Codex adds them to its side
 		if len(e.Item) > 0 {
@@ -971,7 +978,7 @@ func (w *socketTurnWriter) event(data []byte) error {
 			w.items = append(w.items, e.Item)
 		}
 	case "response.completed":
-		w.note(gjson.GetBytes(e.Response, "id").String())
+		w.note(string(e.Response))
 		w.ended, w.completed = true, true
 	case "response.incomplete", "response.failed", "response.cancelled", "error":
 		w.ended = true

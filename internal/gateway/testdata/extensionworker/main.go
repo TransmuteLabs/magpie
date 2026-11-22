@@ -28,6 +28,9 @@ func main() {
 			if err := json.Unmarshal(call.Params, &request); err != nil {
 				return nil, err
 			}
+			if request.Protocol == "responses" {
+				return streamResponsesFixture(ctx, call, stream, request)
+			}
 			bodyText := string(request.Body)
 			if strings.Contains(bodyText, "not-started") ||
 				strings.Contains(bodyText, "accepted effort failure") && strings.Contains(bodyText, "The number of the kind that fits it best") {
@@ -72,4 +75,38 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func streamResponsesFixture(ctx context.Context, call sdk.Call, stream *sdk.Stream, request sdk.ExecuteRequest) (any, error) {
+	const prefix = "sdk socket output "
+	body := string(request.Body)
+	if strings.Contains(body, "and more") && !strings.Contains(body, prefix) {
+		return nil, &sdk.Error{Code: "missing_history", Message: "fixture continuation lost its assistant item", Outcome: "not-started"}
+	}
+	if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
+		return nil, err
+	}
+	if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusOK,
+		Headers: http.Header{"Content-Type": {"text/event-stream"}}}); err != nil {
+		return nil, err
+	}
+	id := call.Scope.Operation
+	text := prefix + strings.Repeat("x", 128<<10)
+	item := fmt.Sprintf(`{"type":"message","id":"msg_fixture","role":"assistant","phase":"final_answer","status":"completed","content":[{"type":"output_text","text":%q}]}`, text)
+	for _, event := range []string{
+		fmt.Sprintf(`{"type":"response.created","response":{"id":%q,"model":%q,"object":"response","status":"in_progress","output":[]}}`, id, request.Model),
+		`{"type":"response.output_text.delta","item_id":"msg_fixture","output_index":0,"content_index":0,"delta":"sdk socket output "}`,
+		`{"type":"response.output_item.done","output_index":0,"item":` + item + `}`,
+		fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"model":%q,"object":"response","status":"completed","output":[%s],"usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16}}}`, id, request.Model, item),
+	} {
+		wire := []byte("data: " + event + "\n\n")
+		for len(wire) > 0 {
+			size := min(len(wire), sdk.MaxChunkBytes)
+			if err := stream.Emit(ctx, "data", wire[:size]); err != nil {
+				return nil, err
+			}
+			wire = wire[size:]
+		}
+	}
+	return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed", Usage: &sdk.Usage{InputTokens: 13, OutputTokens: 6}}, nil
 }

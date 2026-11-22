@@ -662,6 +662,70 @@ func TestResponsesSocketWarmupBoundsHeldHistory(t *testing.T) {
 	}
 }
 
+func TestSocketTerminalDecodesOnlyTheResponseID(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	frame := socketTerminalFrame(128 << 10)
+	run := &socketTurnRun{}
+	writer := socketTurnWriter{rs: &responsesSocket{}, ctx: ctx, run: run}
+	if err := writer.event(frame); !errors.Is(err, context.Canceled) {
+		t.Fatalf("send result = %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const events = 32
+	for range events {
+		if err := writer.event(frame); !errors.Is(err, context.Canceled) {
+			t.Fatalf("send result = %v", err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if perEvent := (after.TotalAlloc - before.TotalAlloc) / events; perEvent > uint64(len(frame))/2 {
+		t.Fatalf("a %d-byte terminal event allocated %d bytes per event", len(frame), perEvent)
+	}
+	clear(frame)
+	if writer.id != "resp_fixture" || !writer.completed || !slices.Equal(run.ids, []string{"resp_fixture"}) {
+		t.Fatalf("terminal state after releasing the frame: id=%q completed=%v ids=%v", writer.id, writer.completed, run.ids)
+	}
+}
+
+func TestSocketResponseIDDecodingKeepsTerminalSemantics(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, test := range []struct {
+		name, frame, id              string
+		ended, completed, suppressed bool
+	}{
+		{name: "escaped id", frame: `{"type":"response.completed","response":{"id":"r\u0065ply"}}`, id: "reply", ended: true, completed: true},
+		{name: "duplicate response", frame: `{"type":"response.created","response":{"id":"prior"},"Response":{"id":"next"}}`, id: "next"},
+		{name: "duplicate null", frame: `{"type":"response.completed","response":{"id":"discard"},"response":null}`, ended: true, completed: true},
+		{name: "duplicate id", frame: `{"type":"response.in_progress","response":{"id":"first","id":"second"}}`, id: "first"},
+		{name: "numeric id", frame: `{"type":"response.in_progress","response":{"id":123}}`, id: "123"},
+		{name: "failed response", frame: `{"type":"response.failed","response":{"id":"ignored"}}`, ended: true},
+		{name: "wrong type", frame: `{"type":{},"response":{"id":"invalid"}}`, suppressed: true},
+		{name: "invalid tail", frame: `{"type":"response.completed","response":{"id":"invalid"}}!`, suppressed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame := []byte(test.frame)
+			run := &socketTurnRun{}
+			writer := socketTurnWriter{rs: &responsesSocket{}, ctx: ctx, run: run}
+			err := writer.event(frame)
+			if test.suppressed && err != nil || !test.suppressed && !errors.Is(err, context.Canceled) {
+				t.Fatalf("send result = %v (suppressed=%v)", err, test.suppressed)
+			}
+			clear(frame)
+			var ids []string
+			if test.id != "" {
+				ids = []string{test.id}
+			}
+			if writer.id != test.id || writer.ended != test.ended || writer.completed != test.completed || !slices.Equal(run.ids, ids) {
+				t.Fatalf("reply state = id %q, ended %v, completed %v, ids %v", writer.id, writer.ended, writer.completed, run.ids)
+			}
+		})
+	}
+}
+
 func TestSocketOutputItemOwnsOnlyTheDecodedItem(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
