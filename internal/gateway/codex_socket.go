@@ -367,7 +367,8 @@ func codexSocketMessage(req *http.Request) ([]byte, bool) {
 		return nil, false
 	}
 	body = bytes.TrimSpace(body)
-	if len(body) < 2 || body[0] != '{' || !gjson.ValidBytes(body) {
+	if len(body) < 2 || body[0] != '{' ||
+		(!heldJSONKnownValid(body) && !gjson.ValidBytes(body)) {
 		return nil, false
 	}
 	if !gjson.GetBytes(body, "stream").Bool() || gjson.GetBytes(body, "type").Exists() {

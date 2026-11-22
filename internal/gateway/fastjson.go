@@ -899,6 +899,16 @@ func validHash(data []byte) uint64 {
 // validHashed, when set (tests), is told of each body validHash sums.
 var validHashed atomic.Pointer[func(data []byte)]
 
+func heldJSONKnownValid(data []byte) bool {
+	if len(data) < validMemoMin {
+		return false
+	}
+	heldBodies.Lock()
+	entry := heldBodies.long[unsafe.SliceData(data)]
+	heldBodies.Unlock()
+	return entry.valid && entry.n == len(data)
+}
+
 // heldLongOf is what longBody finds of data when data is a body being
 // served (holdBody), whole, and whether it is one. A held body is not
 // written while held, so it is known again by where it is, not by a hash
