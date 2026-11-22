@@ -83,3 +83,56 @@ func TestActiveModuleConfigFencesEnablementAndConfiguration(t *testing.T) {
 		t.Fatal("module with unreadable enablement was selected")
 	}
 }
+
+func TestCheckinModuleConfigReleasesCatalogWhileWaitingForStore(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	t.Cleanup(func() { managerReleaseClose(t, manager) })
+	manifest := componentFixtureManifest()
+	manifest.Contract.Version.Minor = 8
+	selected := installComponentFixture(t, manager, manifest)
+	id := selected.Manifest.ID
+	first, err := manager.CompareAndSwapModuleConfig(t.Context(), id, "0", json.RawMessage(`{"label":"first"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		release := holdPrivateStoreTestLock(t, manager.store)
+		done := make(chan error, 1)
+		go func() {
+			_, err := manager.CheckinModuleConfig(t.Context(), selected)
+			done <- err
+		}()
+		synctest.Wait()
+		select {
+		case err := <-done:
+			release()
+			t.Fatalf("check-in configuration bypassed the Store lock: %v", err)
+		default:
+		}
+		peer := NewCatalog(manager.Namespace())
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		disableErr := peer.SetEnabled(ctx, id, false)
+		release()
+		if disableErr != nil {
+			t.Fatalf("pending check-in configuration held the catalog: %v", disableErr)
+		}
+		if err := <-done; !errors.Is(err, ErrActionChanged) {
+			t.Fatalf("check-in configuration returned a revoked selection: %v", err)
+		}
+	})
+	peer := NewCatalog(manager.Namespace())
+	if err := peer.SetEnabled(t.Context(), id, true); err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.ActiveModule(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version, err := manager.CheckinModuleConfig(t.Context(), current); err != nil || version != first.Version {
+		t.Fatalf("new enablement did not select the existing configuration: %q %v", version, err)
+	}
+	if version, err := manager.CheckinModuleConfig(t.Context(), selected); !errors.Is(err, ErrActionChanged) || version != "" {
+		t.Fatalf("new enablement revived the old selection: %q %v", version, err)
+	}
+}

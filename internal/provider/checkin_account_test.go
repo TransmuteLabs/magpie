@@ -80,6 +80,11 @@ type checkinConfirmedHost struct {
 	calls  int
 }
 
+func (host *checkinConfirmedHost) CheckinModuleConfig(ctx context.Context, selected extensionhost.Installed) (string, error) {
+	config, err := host.ModuleConfig(ctx, selected.Manifest.ID)
+	return config.Version, err
+}
+
 func (host *checkinConfirmedHost) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Scope, _, _ string, _ sdk.AccountCheckinRequest, admit func(context.Context) error) (extensionhost.CheckinExecution, error) {
 	if err := admit(ctx); err != nil {
 		return extensionhost.CheckinExecution{}, err

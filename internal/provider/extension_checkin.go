@@ -38,6 +38,7 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 	}
 	host := providerExtensionHost()
 	owner, ok := host.(interface {
+		CheckinModuleConfig(context.Context, extensionhost.Installed) (string, error)
 		CheckinAccountWithAdmission(context.Context, sdk.Scope, string, string, sdk.AccountCheckinRequest, func(context.Context) error) (extensionhost.CheckinExecution, error)
 	})
 	if !ok {
@@ -51,7 +52,7 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 		return nil
 	}
 	var providers []Provider
-	revisions := map[string]string{}
+	modules := map[string]extensionhost.Installed{}
 	owners := sync.OnceValue(func() extensionSubscriptionOwners { return currentSubscriptionOwners(ctx) })
 	for _, entry := range installed {
 		manifest := entry.Manifest
@@ -64,7 +65,18 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 		}) {
 			continue
 		}
-		discovered, err := discoverExtensionModuleContext(ctx, host, entry, owners)
+		if settings.AccountDiscoveryOff() {
+			return nil
+		}
+		config, err := owner.CheckinModuleConfig(ctx, entry)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			log.Printf("extension check-ins unavailable for %s: read module configuration: %v", manifest.ID, err)
+			continue
+		}
+		discovered, err := projectExtensionProviders(ctx, host, entry, entry.Revision+"\x00"+config, owners)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -73,7 +85,7 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 			continue
 		}
 		providers = append(providers, discovered...)
-		revisions[manifest.ID] = entry.Revision
+		modules[manifest.ID] = entry
 	}
 	if len(providers) == 0 {
 		return nil
@@ -92,20 +104,29 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 			accountOn[key] = extensionPolicyOn(login)
 		}
 	}
+	configs := make(map[string]string, len(modules))
 	for _, selected := range providers {
 		binding := selected.Account.extension
 		descriptor := binding.descriptor.Checkin
 		if descriptor == nil || binding.scope.Account == "" {
 			continue
 		}
-		revision := revisions[binding.scope.Plugin]
-		config, err := host.ModuleConfig(ctx, binding.scope.Plugin)
+		module := modules[binding.scope.Plugin]
+		config, checked := configs[binding.scope.Plugin]
+		if !checked {
+			config, err = owner.CheckinModuleConfig(ctx, module)
+			if err != nil {
+				config = ""
+			}
+			configs[binding.scope.Plugin] = config
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err != nil || revision == "" {
+		if config == "" {
 			continue
 		}
+		binding.modelKey = module.Revision + "\x00" + config
 		position, found := positions[selected.ID]
 		if !found {
 			position = len(out)
@@ -138,7 +159,7 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 				if day == "" {
 					return wbCheckinFailed(errors.New("check-in requires the ordinary owner's day"))
 				}
-				execution, err := owner.CheckinAccountWithAdmission(ctx, scope, revision, config.Version,
+				execution, err := owner.CheckinAccountWithAdmission(ctx, scope, module.Revision, config,
 					sdk.AccountCheckinRequest{Day: day, Proxy: netproxy.Choice(ctx)}, admit)
 				receipt := execution.Receipt
 				result := WorkBuddyCheckin{}

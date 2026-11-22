@@ -49,7 +49,7 @@ func TestUsageSnapshotLockBudget(t *testing.T) {
 				done := make(chan result, 1)
 				go func() {
 					read := false
-					err := manager.withUsageSnapshotView(ctx, func(readCtx context.Context, _ catalogView, _ *os.Root) error {
+					err := manager.withCatalogStoreRead(ctx, func(readCtx context.Context, _ catalogView, _ *os.Root) error {
 						read = true
 						time.Sleep(2 * time.Second)
 						return readCtx.Err()

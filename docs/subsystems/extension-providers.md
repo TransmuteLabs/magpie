@@ -575,7 +575,12 @@ quota cards. Automatic execution defaults to off. Provider/account Off,
 account exclusion, manual policy, the ordinary owner's day and retry gates
 keep their existing owners. Identical display names never merge accounts.
 Discovery uses the check-in caller's deadline for catalog and private
-account reads. The runner rechecks the account's current On and visibility
+account reads. After projecting accounts, it checks the original package
+and enablement together with the current effective configuration once per
+module. A replaced or unreadable module contributes no rows. Rows that
+remain share the same configuration version. Discovery releases the
+catalog lock before waiting for a private Store writer. The runner
+rechecks the account's current On and visibility
 before refresh and after primary or private service startup, before a write
 can dispatch. A manual press remains available while the provider is Off.
 

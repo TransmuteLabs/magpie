@@ -4,11 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"time"
 
 	"github.com/yetone/magpie/internal/netproxy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func (m *Manager) CheckinModuleConfig(ctx context.Context, selected Installed) (string, error) {
+	id := selected.Manifest.ID
+	if m == nil || m.catalog == nil || m.store == nil || !sdk.ValidID(id) || m.isClosed() {
+		return "", ErrActionChanged
+	}
+	var version string
+	err := m.withCatalogStoreRead(ctx, func(ctx context.Context, view catalogView, private *os.Root) error {
+		entry, found := view.lookup(id)
+		if !found || !activeRoot(entry) {
+			return ErrActionChanged
+		}
+		entry = view.enabledEntry(entry)
+		if !activeRoot(entry) || entry.Revision != selected.Revision || entry.Directory != selected.Directory ||
+			entry.EnableGeneration != selected.EnableGeneration {
+			return ErrActionChanged
+		}
+		return readStoreNamespace(ctx, private, id, func(root *os.Root) error {
+			state, err := storeReadState(root, sdk.Scope{Plugin: id}, moduleConfigKey)
+			if err != nil {
+				return err
+			}
+			config, err := m.runtimeModuleConfigValue(entry, state.VersionedValue)
+			version = config.Version
+			return err
+		})
+	})
+	if err != nil {
+		return "", err
+	}
+	if m.isClosed() {
+		return "", ErrActionChanged
+	}
+	return version, nil
+}
 
 func (m *Manager) CheckinAccount(ctx context.Context, scope sdk.Scope, revision, config string, request sdk.AccountCheckinRequest) (CheckinExecution, error) {
 	return m.CheckinAccountWithAdmission(ctx, scope, revision, config, request, nil)

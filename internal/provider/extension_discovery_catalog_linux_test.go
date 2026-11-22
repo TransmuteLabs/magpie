@@ -26,19 +26,54 @@ func TestExtensionDiscoveryReadsOneCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	var providers []Provider
+	reads := countProviderCatalogReads(t, filepath.Join(manager.Namespace(), "catalog.json"), func() {
+		var err error
+		providers, err = ExtensionProviders()
+		if err != nil || len(providers) != 4 {
+			t.Fatalf("discover installed providers: got %d, error %v", len(providers), err)
+		}
+	})
+	t.Logf("provider discovery opened and closed catalog.json %d times", reads)
+	if reads != 1 {
+		t.Fatalf("provider discovery read catalog.json %d times; want 1", reads)
+	}
+	for _, provider := range providers {
+		if !provider.Account.Lists("m1") || provider.Account.Lists("absent") {
+			t.Fatalf("provider %s gave wrong model eligibility", provider.ID)
+		}
+	}
+}
+
+func TestExtensionCheckinInventorySharesConfiguration(t *testing.T) {
+	manager, id, trace := checkinOwnerFixture(t, "", "")
+	var shown []PluginCheckin
+	var accounts []CheckinAccount
+	reads := countProviderCatalogReads(t, filepath.Join(manager.Namespace(), "catalog.json"), func() {
+		shown, accounts = CheckinSettingsContext(t.Context())
+	})
+	if len(shown) != 1 || shown[0].ID != id || shown[0].On || len(accounts) != 2 ||
+		accounts[0].By != pluginCheckinBy(id) || accounts[1].By != accounts[0].By ||
+		accounts[0].Key == accounts[1].Key || checkinClaims(t, trace) != 0 {
+		t.Fatalf("SDK check-in inventory: providers %+v, accounts %+v, claims %d", shown, accounts, checkinClaims(t, trace))
+	}
+	t.Logf("SDK check-in inventory opened and closed catalog.json %d times", reads)
+	if reads != 3 {
+		t.Fatalf("SDK check-in inventory read catalog.json %d times; want 3", reads)
+	}
+}
+
+func countProviderCatalogReads(t *testing.T, path string, run func()) int {
+	t.Helper()
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer unix.Close(fd)
-	if _, err := unix.InotifyAddWatch(fd, filepath.Join(manager.Namespace(), "catalog.json"),
-		unix.IN_OPEN|unix.IN_CLOSE_NOWRITE); err != nil {
+	if _, err := unix.InotifyAddWatch(fd, path, unix.IN_OPEN|unix.IN_CLOSE_NOWRITE); err != nil {
 		t.Fatal(err)
 	}
-	providers, err := ExtensionProviders()
-	if err != nil || len(providers) != 4 {
-		t.Fatalf("discover installed providers: got %d, error %v", len(providers), err)
-	}
+	run()
 
 	reads := 0
 	var events [4096]byte
@@ -67,13 +102,5 @@ func TestExtensionDiscoveryReadsOneCatalog(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("provider discovery opened and closed catalog.json %d times", reads)
-	if reads != 1 {
-		t.Fatalf("provider discovery read catalog.json %d times; want 1", reads)
-	}
-	for _, provider := range providers {
-		if !provider.Account.Lists("m1") || provider.Account.Lists("absent") {
-			t.Fatalf("provider %s gave wrong model eligibility", provider.ID)
-		}
-	}
+	return reads
 }

@@ -110,6 +110,126 @@ func checkinClaims(t *testing.T, trace string) int {
 	return strings.Count(string(raw), `"event":"claim"`)
 }
 
+type checkinInventoryHost struct {
+	*extensionhost.Manager
+	beforeFinalConfig func()
+	configReads       int
+}
+
+func (host *checkinInventoryHost) readCheckinConfig() {
+	host.configReads++
+	if host.configReads == 2 && host.beforeFinalConfig != nil {
+		host.beforeFinalConfig()
+	}
+}
+
+func (host *checkinInventoryHost) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
+	host.readCheckinConfig()
+	return host.Manager.ModuleConfig(ctx, id)
+}
+
+func (host *checkinInventoryHost) CheckinModuleConfig(ctx context.Context, selected extensionhost.Installed) (string, error) {
+	host.readCheckinConfig()
+	if manager, ok := any(host.Manager).(interface {
+		CheckinModuleConfig(context.Context, extensionhost.Installed) (string, error)
+	}); ok {
+		return manager.CheckinModuleConfig(ctx, selected)
+	}
+	config, err := host.Manager.ModuleConfig(ctx, selected.Manifest.ID)
+	return config.Version, err
+}
+
+func TestExtensionCheckinInventoryChecksModuleAfterAccountProjection(t *testing.T) {
+	for _, change := range []string{"removed", "replaced", "off-on", "unreadable", "config"} {
+		t.Run(change, func(t *testing.T) {
+			manager, id, oldTrace := checkinOwnerFixture(t, "", "")
+			peer := extensionhost.NewManager(manager.Namespace())
+			t.Cleanup(func() { closeDiscoveryCatalogManager(t, peer) })
+			const module = "checkin.fixture"
+			ctx := t.Context()
+			original, err := manager.ActiveModule(ctx, module)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(manager.Namespace(), filepath.FromSlash(original.Directory))
+			freshTrace := filepath.Join(t.TempDir(), "current.jsonl")
+			values, err := json.Marshal(map[string]string{"trace": freshTrace})
+			if err != nil {
+				t.Fatal(err)
+			}
+			changeConfig := func() {
+				before, err := peer.Store().StateGetContext(ctx, sdk.Scope{Plugin: module}, "module.config")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := peer.Store().StateCASContext(ctx, sdk.Scope{Plugin: module}, "module.config", before.Version, values); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ran := false
+			host := &checkinInventoryHost{Manager: manager, beforeFinalConfig: func() {
+				ran = true
+				switch change {
+				case "removed":
+					if err := peer.Remove(ctx, module); err != nil {
+						t.Fatal(err)
+					}
+				case "replaced":
+					if err := peer.Restart(ctx, module); err != nil {
+						t.Fatal(err)
+					}
+				case "off-on":
+					if err := peer.SetEnabled(ctx, module, false); err != nil {
+						t.Fatal(err)
+					}
+					if err := peer.SetEnabled(ctx, module, true); err != nil {
+						t.Fatal(err)
+					}
+				case "unreadable":
+					if _, err := peer.Store().StateCASContext(ctx, sdk.Scope{Plugin: module}, "module.config", 1,
+						json.RawMessage(`{"trace":"first","trace":"second"}`)); err != nil {
+						t.Fatal(err)
+					}
+				case "config":
+					changeConfig()
+				}
+			}}
+			previous := providerExtensionHost
+			providerExtensionHost = func() extensionProviderHost { return host }
+			t.Cleanup(func() { providerExtensionHost = previous })
+			shown, accounts := CheckinSettingsContext(ctx)
+			if !ran {
+				t.Fatal("final check-in configuration selection did not run")
+			}
+			if change == "config" {
+				if len(shown) != 1 || shown[0].ID != id || len(accounts) != 2 {
+					t.Fatalf("valid change lost selected inventory: %+v %+v", shown, accounts)
+				}
+			} else if len(shown) != 0 || len(accounts) != 0 {
+				t.Fatalf("invalidated selection reached Settings: %+v %+v", shown, accounts)
+			}
+			if change == "removed" {
+				if _, err := peer.Install(ctx, source); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if change != "config" {
+				changeConfig()
+			}
+			shown, accounts = CheckinSettingsContext(ctx)
+			if len(shown) != 1 || shown[0].ID != id || len(accounts) != 2 || accounts[0].Key == accounts[1].Key ||
+				checkinClaims(t, oldTrace) != 0 || checkinClaims(t, freshTrace) != 0 {
+				t.Fatalf("current inventory or read-only contract lost: %+v %+v", shown, accounts)
+			}
+			results := CheckInAccount(ctx, accounts[0].By, accounts[0].Key)
+			if len(results) != 1 || results[0].Outcome != CheckinClaimed ||
+				checkinClaims(t, oldTrace) != 0 || checkinClaims(t, freshTrace) != 1 {
+				t.Fatalf("current selection lost the repaired configuration: %+v", results)
+			}
+		})
+	}
+}
+
 func TestExtensionCheckinUsesOrdinaryOwners(t *testing.T) {
 	manager, id, trace := checkinOwnerFixture(t, "", "")
 	accounts := CheckinAccounts()

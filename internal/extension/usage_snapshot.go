@@ -40,7 +40,7 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 		selected[scope.Plugin][scope] = true
 	}
 	var result UsageSnapshot
-	err := m.withUsageSnapshotView(ctx, func(ctx context.Context, view catalogView, private *os.Root) error {
+	err := m.withCatalogStoreRead(ctx, func(ctx context.Context, view catalogView, private *os.Root) error {
 		snapshot := UsageSnapshot{
 			Modules:  make(map[string]UsageModuleStamp, len(selected)),
 			Accounts: make(map[sdk.Scope]UsageStamp, len(scopes)),
@@ -78,7 +78,7 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 	return result, nil
 }
 
-func (m *Manager) withUsageSnapshotView(ctx context.Context, read func(context.Context, catalogView, *os.Root) error) error {
+func (m *Manager) withCatalogStoreRead(ctx context.Context, read func(context.Context, catalogView, *os.Root) error) error {
 	attempt := func(lockCtx context.Context) error {
 		return m.catalog.withLockedViewContext(ctx, lockCtx, func(view catalogView) error {
 			if err := lockCtx.Err(); err != nil {
