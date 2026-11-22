@@ -8,6 +8,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,6 +355,92 @@ func TestActivationWatchFollowsAtomicReplacement(t *testing.T) {
 			watch.finish()
 			publish(config)
 			waitEvent(config)
+		})
+	}
+}
+
+func TestActivationWatchRearmsAfterRenameBack(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("fixture uses inotify or kqueue self-rename events")
+	}
+	for _, mode := range []struct {
+		name      string
+		filesOnly bool
+	}{{"directory", false}, {"file", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "extensions")
+			watch := newActivationWatch(root)
+			if !mode.filesOnly && watch.filesOnly {
+				t.Skip("directory watching is not used on kqueue")
+			}
+			watch.filesOnly = mode.filesOnly
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			catalog := filepath.Join(root, "catalog.json")
+			if err := os.WriteFile(catalog, []byte("[]"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := root
+			if mode.filesOnly {
+				target = catalog
+			}
+			before, err := os.Lstat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			watch.open(fsnotify.NewWatcher)
+			defer watch.close()
+			if watch.backend == nil {
+				t.Fatal("fixture watcher unavailable")
+			}
+			watch.begin()
+			watch.finish()
+			if !slices.Contains(watch.backend.WatchList(), target) {
+				t.Fatal("fixture path is not registered")
+			}
+			wait := func(description string, ready func(fsnotify.Event) bool) {
+				t.Helper()
+				timer := time.NewTimer(5 * time.Second)
+				defer timer.Stop()
+				for {
+					select {
+					case event, open := <-watch.events():
+						if !open {
+							t.Fatal("fixture watcher closed")
+						}
+						if ready(event) {
+							return
+						}
+					case err := <-watch.errors():
+						t.Fatalf("watch error: %v", err)
+					case <-timer.C:
+						t.Fatalf("watch did not see %s", description)
+					}
+				}
+			}
+			parked := target + ".parked"
+			if err := os.Rename(target, parked); err != nil {
+				t.Fatal(err)
+			}
+			wait("backend remove the renamed registration", func(event fsnotify.Event) bool {
+				return filepath.Clean(event.Name) == target && event.Has(fsnotify.Rename) &&
+					!slices.Contains(watch.backend.WatchList(), target) && watch.relevant(event)
+			})
+			if err := os.Rename(parked, target); err != nil {
+				t.Fatal(err)
+			}
+			if after, err := os.Lstat(target); err != nil || !os.SameFile(before, after) {
+				t.Fatalf("rename-back changed the fixture inode: %v", err)
+			}
+			watch.begin()
+			watch.finish()
+			if err := os.WriteFile(catalog, []byte("[]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wait("a catalog write after rename-back", func(event fsnotify.Event) bool {
+				return filepath.Clean(event.Name) == catalog && event.Has(fsnotify.Write) && watch.relevant(event)
+			})
 		})
 	}
 }

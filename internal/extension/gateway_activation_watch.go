@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
@@ -63,6 +64,13 @@ func (watch *activationWatch) begin() {
 	clear(watch.dirs)
 	clear(watch.files)
 	if watch.backend != nil {
+		registered := watch.backend.WatchList()
+		slices.Sort(registered)
+		for name := range watch.watched {
+			if _, exists := slices.BinarySearch(registered, name); !exists {
+				delete(watch.watched, name)
+			}
+		}
 		watch.followFile(filepath.Join(watch.root, "catalog.json"))
 	}
 	watch.added = false
