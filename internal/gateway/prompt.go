@@ -16,6 +16,7 @@ package gateway
 // requests' bodies the trace holds in memory (keepBody).
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"slices"
@@ -1043,6 +1044,9 @@ func (b *promptBuilder) responsesTool(t json.RawMessage) {
 }
 
 func (b *promptBuilder) responsesItem(raw json.RawMessage) {
+	if !b.keep && b.responsesPlainText(raw) {
+		return
+	}
 	var it struct {
 		Type      string            `json:"type"`
 		Role      string            `json:"role"`
@@ -1146,6 +1150,75 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 	default:
 		b.chat(rawTokens(raw), rawPiece("", it.Type, raw))
 	}
+}
+
+func (b *promptBuilder) responsesPlainText(raw []byte) bool {
+	item, ok := plainPromptFields(raw, `"type"`, `"role"`, `"content"`, `"id"`, `"status"`, `"phase"`)
+	if !ok || (item[0] != nil && string(item[0]) != `"message"`) {
+		return false
+	}
+	user := string(item[1]) == `"user"`
+	if !user && string(item[1]) != `"assistant"` {
+		return false
+	}
+	content := item[2]
+	if len(content) == 0 || content[0] != '[' {
+		return false
+	}
+	var block []byte
+	eachElement(content, func(raw []byte) bool {
+		if block != nil {
+			block = nil
+			return false
+		}
+		block = raw
+		return true
+	})
+	part, ok := plainPromptFields(block, `"type"`, `"text"`, `"annotations"`, `"logprobs"`)
+	if !ok || (string(part[0]) != `"input_text"` && string(part[0]) != `"output_text"`) {
+		return false
+	}
+	quoted := part[1]
+	if len(quoted) < 2 || quoted[0] != '"' {
+		return false
+	}
+	text := quoted[1 : len(quoted)-1]
+	if !plainASCII(text) {
+		return false
+	}
+	words := bytes.Trim(text, " ")
+	if bytes.IndexByte(words, '<') >= 0 || hasPrefix(words, "#") {
+		return false
+	}
+	if user {
+		for _, lead := range injected {
+			if hasPrefix(words, lead) {
+				return false
+			}
+		}
+		if len(words) != 0 {
+			b.newTurn()
+		}
+	}
+	b.chat((len(text)+3)/4, PromptPiece{Size: len(text)})
+	return true
+}
+
+func plainPromptFields(raw []byte, names ...string) (fields [6][]byte, ok bool) {
+	if len(raw) == 0 || raw[0] != '{' {
+		return fields, false
+	}
+	ok = true
+	eachMember(raw, func(key, value []byte) bool {
+		index := slices.Index(names, string(key))
+		if index < 0 || fields[index] != nil {
+			ok = false
+			return false
+		}
+		fields[index] = value
+		return true
+	})
+	return fields, ok
 }
 
 type rPart struct {
