@@ -36,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -301,6 +302,80 @@ type savedStick struct {
 	StoodIn bool `json:"stoodIn,omitempty"`
 }
 
+type keptStick struct {
+	key   string
+	value savedStick
+}
+
+func encodeSavedSticks(kept []keptStick) ([]byte, error) {
+	order := make([]int, len(kept))
+	for index := range order {
+		order[index] = index
+	}
+	slices.SortFunc(order, func(left, right int) int {
+		return strings.Compare(kept[left].key, kept[right].key)
+	})
+	output := make([]byte, 0, 2+256*len(kept))
+	output = append(output, '{')
+	for position, index := range order {
+		if position > 0 {
+			output = append(output, ',')
+		}
+		output = appendJSONString(output, kept[index].key)
+		var err error
+		output, err = appendSavedStick(append(output, ':'), &kept[index].value)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return append(output, '}'), nil
+}
+
+func appendSavedStick(dst []byte, value *savedStick) ([]byte, error) {
+	dst = appendJSONString(append(dst, `{"rest":`...), value.Rest)
+	dst = appendJSONString(append(dst, `,"who":`...), value.Who)
+	if value.Model != "" {
+		dst = appendJSONString(append(dst, `,"model":`...), value.Model)
+	}
+	if value.Effort != "" {
+		dst = appendJSONString(append(dst, `,"effort":`...), value.Effort)
+	}
+	if value.Turn != 0 {
+		dst = strconv.AppendInt(append(dst, `,"turn":`...), int64(value.Turn), 10)
+	}
+	dst, err := appendStickTime(append(dst, `,"at":`...), value.At)
+	if err != nil {
+		return nil, err
+	}
+	if value.CacheRead != 0 {
+		dst = strconv.AppendInt(append(dst, `,"cacheRead":`...), int64(value.CacheRead), 10)
+	}
+	if value.CacheWrite != 0 {
+		dst = strconv.AppendInt(append(dst, `,"cacheWrite":`...), int64(value.CacheWrite), 10)
+	}
+	if value.CacheHour != 0 {
+		dst = strconv.AppendInt(append(dst, `,"cacheHour":`...), int64(value.CacheHour), 10)
+	}
+	if !value.CacheHourAt.IsZero() {
+		dst, err = appendStickTime(append(dst, `,"cacheHourAt":`...), value.CacheHourAt)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if value.StoodIn {
+		dst = append(dst, `,"stoodIn":true`...)
+	}
+	return append(dst, '}'), nil
+}
+
+func appendStickTime(dst []byte, stamp time.Time) ([]byte, error) {
+	text, err := stamp.AppendText(append(dst, '"'))
+	if err != nil {
+		return nil, err
+	}
+	return append(text, '"'), nil
+}
+
 func sticksPath() string { return filepath.Join(filepath.Dir(provider.Path()), "affinity.json") }
 
 // stickOf is who answered key last, read from the file again when it isn't
@@ -349,32 +424,24 @@ func saveSticks() {
 	}
 	sticksFlush.Unlock()
 	now := time.Now()
-	type kept struct {
-		k string
-		v savedStick
-	}
 	sticks.Lock()
-	ks := make([]kept, 0, min(len(sticks.m), sticksKept))
+	ks := make([]keptStick, 0, min(len(sticks.m), sticksKept))
 	for k, st := range sticks.m {
 		if now.Sub(st.at) <= stickKeep {
-			ks = append(ks, kept{k, savedStick{st.rest, st.who, st.model, st.effort, st.turn, st.at, st.cacheRead, st.cacheWrite, st.hour.tokens, st.hour.at, st.stoodIn}})
+			ks = append(ks, keptStick{k, savedStick{st.rest, st.who, st.model, st.effort, st.turn, st.at, st.cacheRead, st.cacheWrite, st.hour.tokens, st.hour.at, st.stoodIn}})
 		}
 	}
 	sticks.Unlock()
 	if len(ks) > sticksKept {
-		slices.SortFunc(ks, func(a, b kept) int {
-			if order := b.v.At.Compare(a.v.At); order != 0 {
+		slices.SortFunc(ks, func(a, b keptStick) int {
+			if order := b.value.At.Compare(a.value.At); order != 0 {
 				return order
 			}
-			return strings.Compare(a.k, b.k)
+			return strings.Compare(a.key, b.key)
 		})
 		ks = ks[:sticksKept]
 	}
-	out := make(map[string]*savedStick, len(ks))
-	for i := range ks {
-		out[ks[i].k] = &ks[i].v
-	}
-	b, err := json.Marshal(out)
+	b, err := encodeSavedSticks(ks)
 	if err != nil {
 		return
 	}

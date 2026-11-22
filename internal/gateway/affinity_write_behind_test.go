@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -112,6 +113,52 @@ func TestAffinitySnapshotAllocations(t *testing.T) {
 	t.Logf("saved %d bytes, %.0f allocations per write", file.Size(), allocs)
 	if allocs > 2*sticksKept {
 		t.Errorf("saving %d sticks made %.0f allocations", sticksKept, allocs)
+	}
+}
+
+func TestAffinitySnapshotWireFormat(t *testing.T) {
+	fresh(t)
+	at := time.Now().In(time.FixedZone("offset", 5*3600+30*60))
+	key := "conversation-<\u2028\xff"
+	sticks.Lock()
+	sticks.m[key] = stick{
+		rest: "<relay>", who: "provider#account", model: "claude\n\u2029", effort: "high",
+		turn: 3, at: at, cacheRead: 1200, cacheWrite: 1400,
+		hour: hourCache{tokens: 1600, at: at.Add(-time.Minute)}, stoodIn: true,
+	}
+	sticks.m["minimal"] = stick{rest: "relay", who: "provider#account", at: at}
+	sticks.Unlock()
+
+	saveSticks()
+	saved, err := os.ReadFile(sticksPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err := json.Marshal(map[string]savedStick{
+		key: {
+			Rest: "<relay>", Who: "provider#account", Model: "claude\n\u2029", Effort: "high",
+			Turn: 3, At: at, CacheRead: 1200, CacheWrite: 1400,
+			CacheHour: 1600, CacheHourAt: at.Add(-time.Minute), StoodIn: true,
+		},
+		"minimal": {Rest: "relay", Who: "provider#account", At: at},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(saved, reference) {
+		t.Fatalf("wrote %s, want %s", saved, reference)
+	}
+
+	sticks.Lock()
+	sticks.m["invalid"] = stick{who: "provider#account", at: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}
+	sticks.Unlock()
+	saveSticks()
+	after, err := os.ReadFile(sticksPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, saved) {
+		t.Fatal("an invalid timestamp replaced the previous snapshot")
 	}
 }
 
