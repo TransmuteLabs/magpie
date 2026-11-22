@@ -81,28 +81,20 @@ func sessionMigrationIdentity(ctx context.Context, manager *extension.Manager, p
 }
 
 func sessionMigrationSelection(ctx context.Context, manager *extension.Manager, plugin string) (sessionModuleSelection, error) {
-	entry, err := manager.ActiveModule(ctx, plugin)
+	entry, config, err := manager.ActiveModuleConfig(ctx, plugin)
 	if err != nil {
 		return sessionModuleSelection{}, err
 	}
-	config := ""
-	if entry.Manifest.Contract.Version.Minor >= 1 {
-		current, value, err := manager.ActiveModuleConfig(ctx, plugin)
-		if err != nil {
-			return sessionModuleSelection{}, err
-		}
-		if !sameSessionModule(entry, current) {
-			return sessionModuleSelection{}, extension.ErrActionChanged
-		}
-		entry = current
-		config = value.Version
+	version := config.Version
+	if entry.Manifest.Contract.Version.Minor == 0 {
+		version = ""
 	}
-	body, err := json.Marshal([]string{manager.Namespace(), plugin, entry.Revision, config})
+	body, err := json.Marshal([]string{manager.Namespace(), plugin, entry.Revision, version})
 	if err != nil {
 		return sessionModuleSelection{}, err
 	}
 	digest := sha256.Sum256(body)
-	return sessionModuleSelection{entry: entry, identity: hex.EncodeToString(digest[:]), configVersion: config}, nil
+	return sessionModuleSelection{entry: entry, identity: hex.EncodeToString(digest[:]), configVersion: version}, nil
 }
 
 func sameSessionModule(before, after extension.Installed) bool {
