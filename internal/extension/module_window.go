@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/yetone/magpie/internal/windowmeta"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -29,6 +30,7 @@ type WindowModule struct {
 	Metadata        string
 	Configuration   sdk.ConfigSnapshot
 	Manifest        sdk.Manifest
+	Window          *windowmeta.WindowSpec
 }
 
 type WindowServiceTarget struct {
@@ -50,20 +52,55 @@ func windowRevision(packageRevision, configVersion string) string {
 }
 
 func (m *Manager) Windows(ctx context.Context) ([]WindowModule, error) {
+	return m.windows(ctx, false)
+}
+
+func (m *Manager) WindowsWithMetadata(ctx context.Context) ([]WindowModule, error) {
+	return m.windows(ctx, true)
+}
+
+func (m *Manager) windows(ctx context.Context, withMetadata bool) ([]WindowModule, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	entries, err := m.readContributionEntries(ctx)
+	if m == nil || m.isClosed() {
+		return nil, errContributionRevoked
+	}
+	var entries []Installed
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		for _, entry := range view.entries {
+			if entry.Manifest.Window == nil || !activeRoot(entry) {
+				continue
+			}
+			if entry = view.enabledEntry(entry); activeRoot(entry) {
+				entries = append(entries, entry)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]WindowModule, 0)
-	for _, entry := range entries {
-		if entry.Manifest.Window == nil {
-			continue
+	out := make([]WindowModule, 0, len(entries))
+	var root *os.Root
+	if withMetadata && len(entries) != 0 {
+		root, err = m.catalog.open(false)
+		if err != nil {
+			return nil, err
 		}
+		defer root.Close()
+	}
+	for _, entry := range entries {
 		if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
 			return nil, err
+		}
+		var window *windowmeta.WindowSpec
+		directory := filepath.Join(m.root, filepath.FromSlash(entry.Directory))
+		if root != nil {
+			window, err = readWindowMetadata(ctx, root, entry, directory)
+			if err != nil {
+				return nil, err
+			}
 		}
 		config, err := m.readModuleConfigContext(ctx, entry.Manifest.ID)
 		if err != nil {
@@ -73,11 +110,52 @@ func (m *Manager) Windows(ctx context.Context) ([]WindowModule, error) {
 			ID: entry.Manifest.ID, Version: entry.Manifest.Version,
 			Revision: windowRevision(entry.Revision, config.Version), PackageRevision: entry.Revision,
 			ConfigVersion: config.Version, Configuration: config,
-			Directory: filepath.Join(m.root, filepath.FromSlash(entry.Directory)),
-			Metadata:  entry.Manifest.Window.Metadata, Manifest: entry.Manifest.Clone(),
+			Directory: directory, Window: window,
+			Metadata: entry.Manifest.Window.Metadata, Manifest: entry.Manifest.Clone(),
 		})
 	}
+	if root != nil {
+		if err := m.checkWindowEntries(ctx, entries); err != nil {
+			return nil, err
+		}
+	}
 	return out, ctx.Err()
+}
+
+func (m *Manager) checkWindowEntries(ctx context.Context, entries []Installed) error {
+	return m.catalog.withView(ctx, func(view catalogView) error {
+		if m.isClosed() {
+			return errContributionRevoked
+		}
+		for _, entry := range entries {
+			current, found := view.lookup(entry.Manifest.ID)
+			if !found || !activeRoot(current) || current.Revision != entry.Revision || current.Directory != entry.Directory {
+				return errContributionRevoked
+			}
+			current = view.enabledEntry(current)
+			if !activeRoot(current) || current.EnableGeneration != entry.EnableGeneration {
+				return errContributionRevoked
+			}
+		}
+		return nil
+	})
+}
+
+func readWindowMetadata(ctx context.Context, root *os.Root, entry Installed, directory string) (*windowmeta.WindowSpec, error) {
+	metadata := entry.Manifest.Window.Metadata
+	data, err := readWindowFile(ctx, root, entry, metadata)
+	if err != nil {
+		return nil, err
+	}
+	if trimmed := bytes.TrimSpace(data); len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(data) {
+		return nil, fmt.Errorf("invalid window metadata for %s", entry.Manifest.ID)
+	}
+	target := filepath.Join(directory, filepath.FromSlash(path.Dir(metadata)))
+	window, _ := windowmeta.WindowFromData(target, data)
+	if window == nil {
+		return nil, fmt.Errorf("module %s has no readable window parts", entry.Manifest.ID)
+	}
+	return window, nil
 }
 
 func (m *Manager) windowEntry(ctx context.Context, id, revision string) (Installed, sdk.ConfigSnapshot, error) {
@@ -101,11 +179,31 @@ func (m *Manager) windowEntry(ctx context.Context, id, revision string) (Install
 	return entry, config, ctx.Err()
 }
 
+func (m *Manager) ReadWindowConfig(ctx context.Context, id, revision string) (sdk.ConfigSnapshot, error) {
+	entry, config, err := m.windowEntry(ctx, id, revision)
+	if err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	if err := m.checkWindowEntries(ctx, []Installed{entry}); err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	return config, nil
+}
+
 func (m *Manager) ReadWindowFile(ctx context.Context, id, revision, filename string) ([]byte, error) {
 	entry, _, err := m.windowEntry(ctx, id, revision)
 	if err != nil {
 		return nil, err
 	}
+	root, err := m.catalog.open(false)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return readWindowFile(ctx, root, entry, filename)
+}
+
+func readWindowFile(ctx context.Context, root *os.Root, entry Installed, filename string) ([]byte, error) {
 	if !catalogRelative(filename) {
 		return nil, errors.New("module window file must be package-relative")
 	}
@@ -113,11 +211,6 @@ func (m *Manager) ReadWindowFile(ctx context.Context, id, revision, filename str
 	if !found {
 		return nil, errors.New("module window file is not in its frozen package")
 	}
-	root, err := m.catalog.open(false)
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
 	directory, err := openWindowDirectory(root, entry.Directory)
 	if err != nil {
 		return nil, err

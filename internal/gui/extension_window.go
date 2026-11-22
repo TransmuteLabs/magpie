@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -26,6 +24,8 @@ import (
 // actions. Discovery does not acquire a worker or enter the legacy Bun host.
 type extensionWindowHost interface {
 	Windows(context.Context) ([]extension.WindowModule, error)
+	WindowsWithMetadata(context.Context) ([]extension.WindowModule, error)
+	ReadWindowConfig(context.Context, string, string) (sdk.ConfigSnapshot, error)
 	ReadWindowFile(context.Context, string, string, string) ([]byte, error)
 	CallWindowBinding(context.Context, string, string, string, string, json.RawMessage) (json.RawMessage, error)
 	CompareAndSwapWindowConfig(context.Context, string, string, string, json.RawMessage) (sdk.ConfigSnapshot, error)
@@ -68,28 +68,16 @@ func extensionPanelProviderIDs(manifest sdk.Manifest) map[string]string {
 }
 
 func extensionWindowParts(ctx context.Context) ([]pluginPage, []pluginPanel, error) {
-	host := extensionWindows()
-	modules, err := host.Windows(ctx)
+	modules, err := extensionWindows().WindowsWithMetadata(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	var pages []pluginPage
 	var panels []pluginPanel
 	for _, module := range modules {
-		data, err := host.ReadWindowFile(ctx, module.ID, module.Revision, module.Metadata)
-		if err != nil {
-			return nil, nil, err
-		}
-		var metadata map[string]json.RawMessage
-		if json.Unmarshal(data, &metadata) != nil || metadata == nil {
-			return nil, nil, fmt.Errorf("invalid window metadata for %s", module.ID)
-		}
+		window := module.Window
 		base := path.Dir(module.Metadata)
 		target := filepath.Join(module.Directory, filepath.FromSlash(base))
-		window, _ := plugin.WindowFromData(target, data)
-		if window == nil {
-			return nil, nil, fmt.Errorf("module %s has no readable window parts", module.ID)
-		}
 		key := extensionPageKey(module.ID)
 		specID := "sdk:" + module.ID + "@" + module.PackageRevision + ":" + module.ConfigVersion
 		reads := window.Reads
@@ -282,7 +270,12 @@ func extensionWindowRoutes(mux *http.ServeMux) {
 			return
 		}
 		if in.Expected == nil && len(in.Values) == 0 {
-			writeJSON(w, part.config)
+			config, err := extensionWindows().ReadWindowConfig(r.Context(), part.id, part.revision)
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			writeJSON(w, config)
 			return
 		}
 		if in.Expected == nil || len(in.Values) == 0 {

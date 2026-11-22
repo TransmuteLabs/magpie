@@ -52,6 +52,10 @@ func TestWindowMetadataAndConfigRespectDeadline(t *testing.T) {
 					_, err := manager.Windows(ctx)
 					return err
 				}},
+				{"metadata", func(ctx context.Context) error {
+					_, err := manager.WindowsWithMetadata(ctx)
+					return err
+				}},
 				{"asset", func(ctx context.Context) error {
 					_, err := manager.ReadWindowFile(ctx, entry.Manifest.ID, revision, "ui/index.html")
 					return err

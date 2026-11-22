@@ -34,6 +34,13 @@ format. [`extension_window.go`](../../internal/gui/extension_window.go)
 adapts those parts to the same page/panel renderer, error boundary, read
 permissions and [`pagebridge.js`](../../internal/gui/pagebridge.js).
 Shipping adjacent assets alone does not register a page.
+Page and panel discovery selects installed windows in one catalog read,
+reads their config revisions and hash-checked metadata outside the catalog
+lock, then checks their package and enable generations together. The change
+poll reads revisions and provider identities without opening the window
+files. An asset or action resolves its current window generation before use.
+A configuration read checks the requested config revision, then confirms the
+selected package and enable generation after releasing the private Store.
 
 An SDK `provider` panel appears under the current public IDs of its
 module's visible inference providers. An optional `providers` list in that
