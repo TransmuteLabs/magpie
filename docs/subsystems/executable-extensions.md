@@ -348,7 +348,10 @@ and retire the cached generation through the existing bounded drain and
 disposer before replacement. A replacement listener can serve HTTP during
 the predecessor's drain. Gateway activation and account tasks take ownership
 as their previous owners release it, unless the replacement listener stops
-first. Startup failure is logged and the ordinary listener continues serving.
+first. The listener keeps serving after an acquisition failure. Subsequent
+reconciliation retries the same generation after a delay that doubles from
+one second to a one-minute cap. A new package, enablement or config generation
+can start without waiting for the previous generation's backoff.
 
 Private service manifests inherit no activation. Public component
 handshakes also omit a provider's check-in declaration when its referenced

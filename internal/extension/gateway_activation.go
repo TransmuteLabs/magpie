@@ -11,8 +11,10 @@ import (
 )
 
 const (
-	gatewayActivationFallback = 5 * time.Second
-	gatewayActivationCoalesce = 20 * time.Millisecond
+	gatewayActivationFallback   = 5 * time.Second
+	gatewayActivationCoalesce   = 20 * time.Millisecond
+	gatewayActivationRetryStart = time.Second
+	gatewayActivationRetryMax   = time.Minute
 )
 
 type GatewayActivation struct {
@@ -24,7 +26,13 @@ type GatewayActivation struct {
 	unsubscribe func()
 	once        sync.Once
 	leases      map[string]activationLease
-	failed      map[string]string
+	retries     map[string]activationRetry
+}
+
+type activationRetry struct {
+	identity string
+	next     time.Time
+	delay    time.Duration
 }
 
 type activationLease struct {
@@ -78,7 +86,7 @@ func (m *Manager) beginGatewayActivation(ctx context.Context, openWatch func() (
 	lifetime, cancel := context.WithCancel(ctx)
 	owner := &GatewayActivation{
 		manager: m, ctx: lifetime, cancel: cancel, done: make(chan struct{}),
-		changed: make(chan struct{}, 1), leases: map[string]activationLease{}, failed: map[string]string{},
+		changed: make(chan struct{}, 1), leases: map[string]activationLease{}, retries: map[string]activationRetry{},
 	}
 	m.gatewayActivation = owner
 	m.activationWG.Add(1)
@@ -219,8 +227,14 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 			continue
 		}
 		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + config
-		if owner.failed[id] == identity {
-			continue
+		retry, failed := owner.retries[id]
+		if failed {
+			if retry.identity != identity {
+				delete(owner.retries, id)
+				retry = activationRetry{}
+			} else if time.Now().Before(retry.next) {
+				continue
+			}
 		}
 		ctx, cancel := context.WithTimeout(owner.ctx, 10*time.Second)
 		worker, client, acquireErr := manager.acquire(ctx, id, &expectedGeneration{
@@ -228,10 +242,12 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 		})
 		cancel()
 		if acquireErr != nil {
-			owner.failed[id] = identity
-			if owner.ctx.Err() == nil {
-				log.Printf("extension gateway activation %s: %v", id, acquireErr)
+			if owner.ctx.Err() != nil {
+				return
 			}
+			delay := min(max(retry.delay*2, gatewayActivationRetryStart), gatewayActivationRetryMax)
+			owner.retries[id] = activationRetry{identity: identity, next: time.Now().Add(delay), delay: delay}
+			log.Printf("extension gateway activation %s: %v", id, acquireErr)
 			continue
 		}
 		lifetime, revoke := context.WithCancel(owner.ctx)
@@ -243,12 +259,12 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 			owner.withdraw(lease)
 			continue
 		}
-		delete(owner.failed, id)
+		delete(owner.retries, id)
 		owner.leases[id] = lease
 	}
-	for id := range owner.failed {
+	for id := range owner.retries {
 		if generation, exists := desired[id]; !exists || !generation.entry.Manifest.ActivatesGateway() {
-			delete(owner.failed, id)
+			delete(owner.retries, id)
 		}
 	}
 }

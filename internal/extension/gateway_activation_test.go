@@ -46,6 +46,33 @@ func waitActivation(t *testing.T, want string, ready func() bool) {
 	}
 }
 
+func activationFixturePackage(t *testing.T) string {
+	t.Helper()
+	source := gatewayFixturePackage(t, "1.0.0", sdk.GatewayHookDescriptor{Request: true})
+	raw, err := os.ReadFile(filepath.Join(source, sdk.ManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest sdk.Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Contract.Version.Minor = 8
+	manifest.Activation = []string{sdk.ActivationGateway}
+	catalogTestWriteManifest(t, source, manifest)
+	return source
+}
+
+func parkActivationProgram(t *testing.T, manager *Manager, entry Installed) (restore func() error) {
+	t.Helper()
+	program := filepath.Join(manager.root, entry.Directory, entry.Manifest.Entry)
+	parked := filepath.Join(t.TempDir(), "worker")
+	if err := os.Rename(program, parked); err != nil {
+		t.Fatal(err)
+	}
+	return func() error { return os.Rename(parked, program) }
+}
+
 func TestGatewayActivationDoesNotPollCatalogAtIdle(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	closeActivationTestManager(t, manager)
@@ -129,19 +156,7 @@ func TestGatewayActivationFollowsExternalPublication(t *testing.T) {
 		}
 		return
 	}
-	source := gatewayFixturePackage(t, "1.0.0", sdk.GatewayHookDescriptor{Request: true})
-	manifestPath := filepath.Join(source, sdk.ManifestFile)
-	raw, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var manifest sdk.Manifest
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	manifest.Contract.Version.Minor = 8
-	manifest.Activation = []string{sdk.ActivationGateway}
-	catalogTestWriteManifest(t, source, manifest)
+	source := activationFixturePackage(t)
 	root := filepath.Join(t.TempDir(), "config", "extensions")
 	manager := NewManager(root)
 	closeActivationTestManager(t, manager)
@@ -174,7 +189,7 @@ func TestGatewayActivationFollowsExternalPublication(t *testing.T) {
 	waitActivation(t, "external re-enable", func() bool { return running("1") })
 
 	catalog := filepath.Join(root, "catalog.json")
-	raw, err = os.ReadFile(catalog)
+	raw, err := os.ReadFile(catalog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +270,107 @@ func TestGatewayActivationFallsBackAfterWatchFailure(t *testing.T) {
 		current := manager.catalog.listSnapshot.Load()
 		return publication.Load() && current != nil && current.digest == want
 	})
+}
+
+func TestGatewayActivationRetriesUnchangedGeneration(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreProgram := parkActivationProgram(t, manager, entry)
+	id := entry.Manifest.ID
+
+	repaired := make(chan error, 1)
+	wakeups := 0
+	_, err = manager.beginGatewayActivation(t.Context(), func() (*fsnotify.Watcher, error) {
+		wakeups++
+		if wakeups == 2 {
+			manager.mu.Lock()
+			selected := manager.workers[id] != nil
+			manager.mu.Unlock()
+			if !selected || manager.Running(id) {
+				repaired <- errors.New("activation did not fail after selecting the installed module")
+			} else {
+				repaired <- restoreProgram()
+			}
+		}
+		return nil, errors.New("fixture watch unavailable")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-repaired:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("activation did not complete the first failed start")
+	}
+
+	waitActivation(t, "start after a transient failure at the same generation", func() bool {
+		return manager.Running(id)
+	})
+	entries, err := manager.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Revision != entry.Revision || entries[0].EnableGeneration != entry.EnableGeneration {
+		t.Fatal("fixture repair changed the installed generation")
+	}
+}
+
+func TestGatewayActivationBackoffIsScopedToGeneration(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreProgram := parkActivationProgram(t, manager, entry)
+	id := entry.Manifest.ID
+	owner := &GatewayActivation{
+		manager: manager, ctx: t.Context(), changed: make(chan struct{}, 1),
+		leases: map[string]activationLease{}, retries: map[string]activationRetry{},
+	}
+	defer func() {
+		for _, lease := range owner.leases {
+			owner.withdraw(lease)
+		}
+	}()
+	watch := newActivationWatch(manager.root)
+
+	for _, seconds := range []int{1, 2, 4, 8, 16, 32, 60, 60} {
+		before := time.Now()
+		owner.reconcile(watch)
+		retry := owner.retries[id]
+		want := time.Duration(seconds) * time.Second
+		if retry.delay != want || retry.next.Before(before.Add(want)) {
+			t.Fatalf("failed start scheduled %v at %v, want %v backoff", retry.delay, retry.next, want)
+		}
+		retry.next = time.Time{}
+		owner.retries[id] = retry
+	}
+	retry := owner.retries[id]
+	retry.next = time.Now().Add(time.Hour)
+	owner.retries[id] = retry
+	if err := restoreProgram(); err != nil {
+		t.Fatal(err)
+	}
+	owner.reconcile(watch)
+	if manager.Running(id) || owner.retries[id] != retry {
+		t.Fatal("an early reconciliation ignored the generation's backoff")
+	}
+	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), id, "0", json.RawMessage(`{"fixture":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	owner.reconcile(watch)
+	lease := owner.leases[id]
+	if !manager.Running(id) || lease.Lease == nil || lease.worker.config.Version != "1" || len(owner.retries) != 0 {
+		t.Fatal("a new configuration generation inherited the old backoff")
+	}
 }
 
 func TestActivationWatchFollowsAtomicReplacement(t *testing.T) {
