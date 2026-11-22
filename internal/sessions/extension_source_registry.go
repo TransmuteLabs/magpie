@@ -179,7 +179,7 @@ func BindSessionSourceNative(ctx context.Context, plugin, source, expectedRevisi
 	if err != nil {
 		return err
 	}
-	if err := edit.WriteAtomic(path, body); err != nil {
+	if err := edit.WriteAtomicChecked(path, body, ctx.Err, nil); err != nil {
 		return err
 	}
 	invalidateSessionSources()
@@ -216,7 +216,7 @@ func UnbindSessionSourceNative(ctx context.Context, agent, expectedIdentity stri
 	if err != nil {
 		return err
 	}
-	if err := edit.WriteAtomic(path, body); err != nil {
+	if err := edit.WriteAtomicChecked(path, body, ctx.Err, nil); err != nil {
 		return err
 	}
 	invalidateSessionSources()
