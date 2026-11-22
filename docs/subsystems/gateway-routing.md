@@ -319,9 +319,13 @@ When a chat classifier answers the intent and only its effort question fails,
 the group routes by the intent and keeps the effort requested by the agent.
 The trace records `Classified.effortError`. Concurrent requests sharing that
 classifier call receive the same partial result, and the next matching turn
-asks again. Parent cancellation discards a partial result. An accepted,
-completed or uncertain SDK operation that fails still stops routing and
-automatic replay.
+asks again when the classifier is available. Parent cancellation discards a
+partial result. An accepted, completed or uncertain SDK operation that fails
+stops routing and automatic replay. New callers in its model and account
+scope receive the terminal stop during the classifier's pause, including
+callers whose question has a cached answer or is already in flight. Earlier
+callers can finish and cache their results while the terminal pause remains
+in effect.
 
 The gateway uses its runtime's [routing catalog](plugin-runtime.md#gateway-extension-points-p3-router-strategy)
 for provider keys, nested group members, fallbacks, affinity and tracing.

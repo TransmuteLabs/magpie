@@ -39,6 +39,9 @@ func main(){
   req,_:=http.NewRequestWithContext(ctx,"POST",auth.URL,bytes.NewReader(body));res,err:=http.DefaultClient.Do(req);if err!=nil{return nil,err}
   raw,err:=io.ReadAll(res.Body);res.Body.Close();if err!=nil{return nil,err}
   var reply map[string]any;if err:=json.Unmarshal(raw,&reply);err!=nil{return nil,err}
+  if status,ok:=reply["notStartedStatus"].(float64);ok{
+   return sdk.ExecuteResult{Status:int(status),Outcome:"not-started"},nil
+  }
   if data,ok:=reply["wireBody"].(string);ok{
    status:=int(reply["status"].(float64));outcome:=reply["outcome"].(string)
    if outcome=="accepted" {
@@ -677,6 +680,129 @@ func TestChatClassifierTerminalEffortStopsRouting(t *testing.T) {
 		rest.Header().Get("X-Magpie-Operation") != "" || intentCalls.Load() != 1 || effortCalls.Load() != 1 || targetCalls.Load() != 0 {
 		t.Fatalf("resting classifier replayed or exposed a prior receipt: status=%d headers=%v calls=%d/%d/%d",
 			rest.Code, rest.Header(), intentCalls.Load(), effortCalls.Load(), targetCalls.Load())
+	}
+}
+
+func TestChatClassifierLateAnswerPreservesTerminalRest(t *testing.T) {
+	for _, outcome := range []string{"partial", "complete", "ordinary failure"} {
+		t.Run(outcome, func(t *testing.T) {
+			const terminalText = "fix the terminal bug"
+			const lateText = "fix the late bug"
+			var sdkCalls atomic.Int32
+			parked, release := make(chan struct{}), make(chan struct{})
+			var parkOnce sync.Once
+			id := installPolicyRouteFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+				var input struct{ Body []byte }
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Error(err)
+					http.Error(writer, "invalid fixture request", http.StatusBadRequest)
+					return
+				}
+				sdkCalls.Add(1)
+				body := string(input.Body)
+				effort := strings.Contains(body, "Levels:")
+				if strings.Contains(body, terminalText) && effort {
+					io.WriteString(writer, `{"wireBody":"{\"error\":{\"message\":\"accepted effort failed\"}}","status":503,"outcome":"accepted"}`)
+					return
+				}
+				if strings.Contains(body, lateText) && (effort == (outcome != "ordinary failure")) {
+					parkOnce.Do(func() { close(parked) })
+					select {
+					case <-release:
+					case <-request.Context().Done():
+						return
+					}
+					switch outcome {
+					case "partial":
+						io.WriteString(writer, `{"chatAnswer":"unknown"}`)
+					case "ordinary failure":
+						io.WriteString(writer, `{"notStartedStatus":400}`)
+					default:
+						io.WriteString(writer, `{"chatAnswer":"2"}`)
+					}
+					return
+				}
+				io.WriteString(writer, `{"chatAnswer":"1"}`)
+			})
+			resetClassified(t)
+			classifierScopeTarget(t)
+			if err := provider.SaveGroup(provider.Group{ID: "intent", Name: "Intent", Routing: provider.Ordered,
+				Members: []string{"scope-target/default", "scope-target/chosen"}, Classifier: id + "/free", Effort: provider.EffortAuto,
+				Rules: []provider.Rule{{Use: "scope-target/chosen", Intent: "bug"}}}); err != nil {
+				t.Fatal(err)
+			}
+			noRetries := 0
+			current := settings.Load()
+			current.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{MaxTotalRetries: &noRetries}}
+			if err := settings.Save(current); err != nil {
+				t.Fatal(err)
+			}
+			server := New()
+			t.Cleanup(server.idle.stop)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			send := func(session, text string) *httptest.ResponseRecorder {
+				body, _ := json.Marshal(map[string]any{"model": "group/intent", "reasoning_effort": "medium",
+					"messages": []map[string]string{{"role": "user", "content": text}}})
+				request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body))).WithContext(ctx)
+				request.RemoteAddr = "127.0.0.1:12345"
+				request.Header.Set("X-Session-ID", session)
+				reply := httptest.NewRecorder()
+				server.Front().ServeHTTP(reply, request)
+				return reply
+			}
+			late := make(chan *httptest.ResponseRecorder, 1)
+			joined := make(chan struct{})
+			go func() {
+				defer close(joined)
+				late <- send("late", lateText)
+			}()
+			defer func() {
+				cancel()
+				<-joined
+			}()
+			select {
+			case <-parked:
+			case <-ctx.Done():
+				t.Fatal("the late classifier question did not reach the worker")
+			}
+			first := send("terminal", terminalText)
+			if first.Code != http.StatusConflict || first.Header().Get("X-Should-Retry") != "false" ||
+				first.Header().Get("X-Magpie-Operation") == "" {
+				t.Fatalf("terminal classifier did not establish a receipt and stop: %d %v %s", first.Code, first.Header(), first.Body)
+			}
+			close(release)
+			var finished *httptest.ResponseRecorder
+			select {
+			case finished = <-late:
+			case <-ctx.Done():
+				t.Fatal("the late classifier did not finish after release")
+			}
+			route := lastRoute(server)
+			if finished.Code != http.StatusOK || route.Rule == nil || route.Rule.Classified == nil || sdkCalls.Load() != 4 {
+				t.Fatalf("late fixture did not complete: %d %s rule=%+v SDK calls=%d", finished.Code, finished.Body, route.Rule, sdkCalls.Load())
+			}
+			classification := route.Rule.Classified
+			switch outcome {
+			case "partial":
+				if classification.Intent != "bug" || classification.EffortError == "" || classification.Error != "" || !strings.Contains(finished.Body.String(), "chosen") {
+					t.Fatalf("late partial intent was lost: %+v %s", classification, finished.Body)
+				}
+			case "complete":
+				if classification.Intent != "bug" || classification.Effort == "" || classification.Error != "" || !strings.Contains(finished.Body.String(), "chosen") {
+					t.Fatalf("late complete answer was lost: %+v %s", classification, finished.Body)
+				}
+			case "ordinary failure":
+				if classification.Error == "" || classification.EffortError != "" || !strings.Contains(finished.Body.String(), "default") {
+					t.Fatalf("late ordinary failure was lost: %+v %s", classification, finished.Body)
+				}
+			}
+			rest := send("terminal-again", terminalText)
+			if rest.Code != http.StatusConflict || rest.Header().Get("X-Should-Retry") != "false" ||
+				rest.Header().Get("X-Magpie-Operation") != "" || sdkCalls.Load() != 4 ||
+				!strings.Contains(rest.Body.String(), "not asked again") {
+				t.Fatalf("late answer broke terminal rest: response=%d %v %s SDK calls=%d, want 4", rest.Code, rest.Header(), rest.Body, sdkCalls.Load())
+			}
+		})
 	}
 }
 

@@ -194,6 +194,12 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 	flight := key + "\x00" + rest
 	now := time.Now()
 	classified.Lock()
+	failure, resting := classified.failed[rest]
+	resting = resting && now.Sub(failure.at) < classifyRest
+	if resting && failure.cause != nil {
+		classified.Unlock()
+		return verdict{}, false, fmt.Errorf("%s failed %s ago; not asked again for now: %w", model, now.Sub(failure.at).Round(time.Second), failure.cause)
+	}
 	if c, ok := classified.m[key]; ok && now.Sub(c.at) < classifyKeep {
 		classified.Unlock()
 		return c.v, true, nil
@@ -210,12 +216,9 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 			return verdict{}, false, ctx.Err()
 		}
 	}
-	if f, ok := classified.failed[rest]; ok && now.Sub(f.at) < classifyRest {
+	if resting {
 		classified.Unlock()
-		if f.cause != nil {
-			return verdict{}, false, fmt.Errorf("%s failed %s ago; not asked again for now: %w", model, now.Sub(f.at).Round(time.Second), f.cause)
-		}
-		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
+		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(failure.at).Round(time.Second), failure.err)
 	}
 	c := &classifyCall{done: make(chan struct{}), err: errors.New("classifier did not finish")}
 	classified.inflight[flight] = c
@@ -231,6 +234,9 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 	classified.Lock()
 	defer classified.Unlock()
 	c.err = err
+	now = time.Now()
+	failure = classified.failed[rest]
+	holdingTerminal := failure.cause != nil && now.Sub(failure.at) < classifyRest
 	terminal := err != nil && terminalExtensionError(err)
 	if !terminal && errors.As(err, new(effortFailed)) {
 		if canceled := ctx.Err(); canceled != nil {
@@ -243,16 +249,18 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 		if was, ok := classified.last[model]; !ok || was.err != err.Error() {
 			log.Printf("routing: the classifier %s couldn't say: %s", model, err)
 		}
-		classified.last[model] = classifyFailure{err: err.Error(), at: time.Now()}
-		delete(classified.failed, rest)
+		classified.last[model] = classifyFailure{err: err.Error(), at: now}
+		if !holdingTerminal {
+			delete(classified.failed, rest)
+		}
 		return v, false, err
 	}
 	if err != nil {
-		f := classifyFailure{err: err.Error(), at: time.Now()}
+		f := classifyFailure{err: err.Error(), at: now}
 		if terminal {
 			f.cause = sharedClassifierError(err)
 		}
-		if (ctx.Err() == nil || terminal) && !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
+		if (terminal || !holdingTerminal && ctx.Err() == nil) && !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
 			classified.failed[rest] = f
 		}
 		if was, ok := classified.last[model]; !ok || was.err != f.err {
@@ -263,7 +271,9 @@ func classifyContext(ctx context.Context, ask classifier, held access.Identity, 
 		return verdict{}, false, err
 	}
 	c.v = v
-	delete(classified.failed, rest)
+	if !holdingTerminal {
+		delete(classified.failed, rest)
+	}
 	delete(classified.last, model)
 	classified.m[key] = classifiedAs{v: v, at: time.Now()}
 	if len(classified.m) > 4096 {

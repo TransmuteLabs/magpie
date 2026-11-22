@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 type classifyResult struct {
@@ -237,6 +239,80 @@ func TestConcurrentClassificationSharesFailure(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestClassifierTerminalRestPrecedesCacheAndNewWaiters(t *testing.T) {
+	resetClassified(t)
+	synctest.Test(t, func(t *testing.T) {
+		affected := access.Identity{Accounts: []string{"judge/affected"}}
+		other := access.Identity{Accounts: []string{"judge/other"}}
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		allow := func() { releaseOnce.Do(func() { close(release) }) }
+		defer allow()
+		var calls atomic.Int32
+		want := verdict{Intent: "bug", Said: "1", Effort: "medium"}
+		ask := func(_ access.Identity, _ string, _ []string, _ before, _ bool, text string) (verdict, error) {
+			calls.Add(1)
+			switch text {
+			case "terminal":
+				return verdict{}, &decisionOperationError{
+					cause:  &sdk.Error{Code: "fixture_failed", Message: "accepted operation failed", Outcome: "accepted"},
+					module: "fixture", operation: "receipt",
+				}
+			case "in flight":
+				<-release
+			}
+			return want, nil
+		}
+		run := func(scope access.Identity, text string) classifyResult {
+			value, cached, err := classifyContext(t.Context(), ask, scope, t.Name(), []string{"bug"}, before{}, true, text)
+			return classifyResult{value, cached, err}
+		}
+		checkRest := func(result classifyResult) {
+			t.Helper()
+			var failure *decisionOperationError
+			if result.v != (verdict{}) || result.cached || !terminalExtensionError(result.err) ||
+				!errors.As(result.err, &failure) || failure.operation != "" {
+				t.Errorf("terminal rest leaked a result or a receipt: %+v", result)
+			}
+		}
+		if got := run(other, "warm"); got.v != want || got.cached || got.err != nil {
+			t.Fatalf("warm-up = %+v", got)
+		}
+		owner, waiter, newcomer := make(chan classifyResult, 1), make(chan classifyResult, 1), make(chan classifyResult, 1)
+		go func() { owner <- run(affected, "in flight") }()
+		synctest.Wait()
+		go func() { waiter <- run(affected, "in flight") }()
+		synctest.Wait()
+		if got := run(affected, "terminal"); !terminalExtensionError(got.err) {
+			t.Fatalf("terminal fixture = %+v", got)
+		}
+		checkRest(run(affected, "warm"))
+		go func() { newcomer <- run(affected, "in flight") }()
+		synctest.Wait()
+		select {
+		case got := <-newcomer:
+			checkRest(got)
+		default:
+			t.Error("a new caller joined a flight during terminal rest")
+		}
+		if got := run(other, "warm"); got.v != want || !got.cached || got.err != nil {
+			t.Errorf("unaffected scope lost the memo: %+v", got)
+		}
+		allow()
+		for index, result := range []classifyResult{<-owner, <-waiter} {
+			if result.v != want || result.cached != (index == 1) || result.err != nil {
+				t.Errorf("admitted caller %d lost its result: %+v", index, result)
+			}
+		}
+		time.Sleep(classifyRest - time.Nanosecond)
+		checkRest(run(affected, "in flight"))
+		time.Sleep(time.Nanosecond)
+		if got := run(affected, "in flight"); got.v != want || !got.cached || got.err != nil || calls.Load() != 3 {
+			t.Errorf("expired terminal rest lost the complete memo: %+v, asks=%d", got, calls.Load())
+		}
+	})
 }
 
 func TestConcurrentClassificationPanicReleasesWaiters(t *testing.T) {
