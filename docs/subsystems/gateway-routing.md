@@ -3464,9 +3464,13 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   `response.incomplete`; one naming another reply, or none in flight,
   `response.interrupt.failed`. Other frames during a turn wait in arrival
   order, up to eight pending frames and 64 MiB of their read buffers per
-  connection. If either limit would be exceeded, the gateway cancels the
-  active request, discards the pending frames and closes the socket with
-  1013 (`TestResponsesSocketPendingLimitStopsBeforeDispatch`).
+  connection. The gateway trims spare buffer capacity if the pending payload
+  fits and the allocated buffers exceed the budget. If either limit would
+  be exceeded, it cancels the active request, discards the pending frames
+  and sends close code 1013. On overflow, a blocked writer has one second to
+  finish before the gateway cancels the socket's writes
+  (`TestResponsesSocketPendingLimitStopsBeforeDispatch`,
+  `TestResponsesSocketPendingPayloadFits`, `TestResponsesSocketOverflowDuringWrite`).
 - An outgoing frame has at most a minute to reach the client. A write
   timeout closes the connection and cancels the active request
   (`TestResponsesSocketWriteDeadline`).
