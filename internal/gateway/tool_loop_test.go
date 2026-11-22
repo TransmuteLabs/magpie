@@ -330,6 +330,49 @@ func BenchmarkToolLoopCheck(b *testing.B) {
 	}
 }
 
+func BenchmarkToolLoopMarkupTail(b *testing.B) {
+	plain := strings.Repeat("continue this discussion. ", 320)
+	for _, tc := range []struct {
+		name, text string
+		results    bool
+	}{
+		{name: "plain", text: plain},
+		{name: "escaped", text: "<env>Tools & files</env>\n" + plain},
+		{name: "dense", text: strings.Repeat("<row>x & y</row>\n", 500)},
+		{name: "escaped-with-results", text: "<env>Tools & files</env>\n" + plain, results: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			if settings.Shared().NoLoopGuard {
+				b.Fatal("tool loop guard is disabled")
+			}
+			quoted, _ := json.Marshal(tc.text)
+			item := fmt.Sprintf(`{"type":"message","role":"user","content":[{"type":"input_text","text":%s}]}`, quoted)
+			var tail []string
+			for range tailItems {
+				tail = append(tail, item)
+			}
+			if tc.results {
+				recent := getIn([]byte(toolTurns(provider.Responses, toolLoopRepeats, pollJob, false)), "input").Raw
+				tail = append(tail, recent[1:len(recent)-1])
+			}
+			body := []byte(toolTurns(provider.Responses, toolLoopRepeats, pollJob, false, tail...))
+			if !mayLoop(provider.Responses, body) {
+				b.Fatal("fixture has too few tool results")
+			}
+			server := &Server{}
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			reply := httptest.NewRecorder()
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			for b.Loop() {
+				if server.stoppedToolLoop(reply, request, provider.Responses, body) {
+					b.Fatal("recorded results unexpectedly stopped this turn")
+				}
+			}
+		})
+	}
+}
+
 // The conversation's tail is read where it sits in the body: GetBytes
 // copied the whole input list to find the last items, 45 MiB of a Codex
 // turn on every request (#4004).
@@ -355,42 +398,55 @@ func TestToolLoopSkipsResultsBeforeTheTail(t *testing.T) {
 	for _, tc := range []struct {
 		from          provider.Protocol
 		plain, marker string
-		alternate     string
+		alternates    []string
 	}{
-		{provider.Responses, `{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}`, `"function_call_output"`, `"function_call_\u006futput"`},
-		{provider.Chat, `{"role":"user","content":%q}`, `"role":"tool"`, `"role":"\u0074ool"`},
-		{provider.Anthropic, `{"role":"user","content":%q}`, `"tool_result"`, `"tool_resul\u0074"`},
-		{provider.Gemini, `{"role":"user","parts":[{"text":%q}]}`, `"functionResponse"`, `"_FuNcTiOn_RE_sponse"`},
+		{provider.Responses, `{"type":"message","role":"user","content":[{"type":"input_text","text":%s}]}`, `"function_call_output"`, []string{`"function_call_\u006futput"`}},
+		{provider.Chat, `{"role":"user","content":%s}`, `"role":"tool"`, []string{`"role":"\u0074ool"`}},
+		{provider.Anthropic, `{"role":"user","content":%s}`, `"tool_result"`, []string{`"tool_resul\u0074"`}},
+		{provider.Gemini, `{"role":"user","parts":[{"text":%s}]}`, `"functionResponse"`, []string{`"_FuNcTiOn_RE_sponse"`, `"functionRe\u017Fponse"`}},
 	} {
 		t.Run(string(tc.from), func(t *testing.T) {
 			fresh(t)
 			s := New()
 			req := httptest.NewRequest(http.MethodPost, "/v1", nil)
-			rec := httptest.NewRecorder()
-			text := fmt.Sprintf(tc.plain, strings.Repeat("continue this discussion. ", 320))
-			turns := make([]string, tailItems)
-			for i := range turns {
-				turns[i] = text
-			}
-			body := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false, turns...))
-			if !mayLoop(tc.from, body) {
-				t.Fatal("fixture is missing historical tool results")
-			}
-			stopped := false
-			if n := allocated(func() { stopped = s.stoppedToolLoop(rec, req, tc.from, body) }); n > uint64(len(body))/8 {
-				t.Errorf("tool loop guard allocated %d bytes for a %d-byte body with completed tool turns", n, len(body))
-			}
-			if stopped {
-				t.Fatal("historical tool calls stopped an ordinary text turn")
-			}
+			for _, text := range []struct{ name, prefix string }{
+				{"plain", ""},
+				{"escaped-markup", "<env>Tools & files</env>\n"},
+			} {
+				t.Run(text.name, func(t *testing.T) {
+					prose, _ := json.Marshal(text.prefix + strings.Repeat("continue this discussion. ", 320))
+					item := fmt.Sprintf(tc.plain, prose)
+					turns := make([]string, tailItems)
+					for i := range turns {
+						turns[i] = item
+					}
+					body := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false, turns...))
+					if !mayLoop(tc.from, body) {
+						t.Fatal("fixture is missing historical tool results")
+					}
+					if tail := tailOf(tc.from, body); tail != nil {
+						t.Errorf("materialized %d bytes despite no tool results in the retained tail", len(tail))
+					}
+					rec := httptest.NewRecorder()
+					stopped := false
+					if n := allocated(func() { stopped = s.stoppedToolLoop(rec, req, tc.from, body) }); n > uint64(len(body))/8 {
+						t.Errorf("tool loop guard allocated %d bytes for a %d-byte body with completed tool turns", n, len(body))
+					}
+					if stopped {
+						t.Fatal("historical tool calls stopped an ordinary text turn")
+					}
 
-			recent := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false))
-			recentList := getIn(recent, conversationKey[tc.from]).Raw
-			prefixList := getIn(body, conversationKey[tc.from])
-			at := prefixList.Index + len(prefixList.Raw) - 1
-			looping := string(body[:at]) + "," + strings.ReplaceAll(recentList[1:len(recentList)-1], tc.marker, tc.alternate) + string(body[at:])
-			if !s.stoppedToolLoop(httptest.NewRecorder(), req, tc.from, []byte(looping)) {
-				t.Fatal("a loop with an alternate spelling of its tool result was missed")
+					recent := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false))
+					recentList := getIn(recent, conversationKey[tc.from]).Raw
+					prefixList := getIn(body, conversationKey[tc.from])
+					at := prefixList.Index + len(prefixList.Raw) - 1
+					for _, alternate := range append([]string{tc.marker}, tc.alternates...) {
+						looping := string(body[:at]) + "," + strings.ReplaceAll(recentList[1:len(recentList)-1], tc.marker, alternate) + string(body[at:])
+						if !s.stoppedToolLoop(httptest.NewRecorder(), req, tc.from, []byte(looping)) {
+							t.Errorf("a loop with a %s tool result was missed", alternate)
+						}
+					}
+				})
 			}
 		})
 	}

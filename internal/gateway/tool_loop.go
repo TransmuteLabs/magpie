@@ -142,22 +142,36 @@ func tailOf(from provider.Protocol, body []byte) []byte {
 
 // mayContainToolResult is a conservative check for the allocator-heavy
 // parse. A result's type or role may be escaped, and Responses can
-// reconstruct results from web search items.
+// reconstruct results from web search items. The HTML escapes for <, >
+// and & cannot spell a result marker.
 func mayContainToolResult(from provider.Protocol, body []byte) bool {
-	if bodyHas(body, `\u`) {
-		return true
-	}
+	var literal bool
 	switch from {
 	case provider.Responses:
-		return bodyHas(body, `_output"`) || bodyHas(body, `"web_search_call"`)
+		literal = bodyHas(body, `_output"`) || bodyHas(body, `"web_search_call"`)
 	case provider.Chat:
-		return bodyHas(body, `"tool"`)
+		literal = bodyHas(body, `"tool"`)
 	case provider.Anthropic:
-		return bodyHas(body, `"tool_result"`)
+		literal = bodyHas(body, `"tool_result"`)
 	case provider.Gemini:
-		return mayContainGeminiResult(body)
+		literal = mayContainGeminiResult(body)
 	default:
 		return true
+	}
+	if literal {
+		return true
+	}
+	for {
+		at := bodyIndex(body, `\u`)
+		if at < 0 {
+			return false
+		}
+		switch hex4(body[at:]) {
+		case '<', '>', '&':
+			body = body[at+6:]
+		default:
+			return true
+		}
 	}
 }
 
