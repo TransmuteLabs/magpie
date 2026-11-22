@@ -68,8 +68,9 @@ Reauthorization also requires a grant and the selected account generation.
 Both the form and the window bridge use the same credential broker. The form
 has its own flow authority, bound to the selected package, configuration and
 enablement generation. A flow cannot cross between the form and a plugin
-window. The journal retains its existing on-disk schema and numeric config
-version.
+window. A live flow also checks the worker's effective configuration before
+dispatch and publication, including replacements at the same CAS version.
+The journal retains its existing on-disk schema and numeric config version.
 
 The account ID remains the key for routing, quota and reauthorization. A
 valid authentication or refresh result name is stored with the account
@@ -267,8 +268,10 @@ replacement/deletion or configuration CAS before reusing provider/model
 snapshots. A configuration transition rebuilds the
 selected model catalog under its new version; already selected old bindings
 remain fenced. Worker selection and the execute generation fence also compare
-effective configuration values. Replacing the configuration at the same CAS
-version retires workers configured with different values. Reordering JSON
+effective configuration values. This applies at dispatch after a worker slot
+opens for SDK 1.1 and later. SDK 1.0 has no runtime configuration.
+Replacing the configuration at the same CAS version retires workers
+configured with different values. Reordering JSON
 object fields leaves their configuration current. Unrelated private state and
 account-local state do not invalidate it. `extension.AccountStamp` reads
 directory/file metadata and handle-derived portable file identities without

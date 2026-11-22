@@ -82,6 +82,10 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
 	}
+	config.Values, err = effectiveModuleConfig(entry.Manifest, config.Values)
+	if err != nil {
+		return sdk.WindowAuthFlowView{}, errors.New("window authentication configuration is unavailable")
+	}
 	method := slices.IndexFunc(grant.Methods, func(method sdk.WindowAuthMethod) bool {
 		return method.ID == options.Method && method.Mode == "poll"
 	})
@@ -132,6 +136,9 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if ctx.Err() != nil {
 		return sdk.WindowAuthFlowView{}, ctx.Err()
 	}
+	if !sameModuleConfig(lease.worker.config, config) {
+		return sdk.WindowAuthFlowView{}, errors.New("window authentication configuration changed")
+	}
 	input := bytes.Clone(options.Input)
 	if len(input) == 0 {
 		input = json.RawMessage("null")
@@ -161,7 +168,7 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	}
 	options.Input = input
 	var created bool
-	err = m.withWindowAuthAuthority(ctx, record, func() error {
+	err = m.withWindowAuthConfig(ctx, record, lease.worker.config, func() error {
 		var err error
 		record, created, err = m.store.reserveWindowAuth(record)
 		return err
@@ -173,12 +180,15 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	owner := m.windowAuthOwners[record.Flow]
 	if !created {
 		m.mu.Unlock()
+		if !record.active() {
+			return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
+		}
 		if owner != nil {
+			if !sameModuleConfig(owner.lease.worker.config, config) {
+				return sdk.WindowAuthFlowView{}, errors.New("window authentication configuration changed")
+			}
 			view, err := owner.submit(ctx, true, options)
 			return m.windowAuthResult(ctx, record.Scope, view, err)
-		}
-		if record.Phase == "complete" || record.Phase == "canceled" || record.Phase == "expired" || record.Phase == "uncertain" {
-			return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
 		}
 		return sdk.WindowAuthFlowView{Flow: record.Flow, State: "uncertain"}, nil
 	}
@@ -226,13 +236,17 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 		record.Revision != journalRevision || record.Config != config.Version || record.Scope.Provider != grant.Provider {
 		return windowAuthRecord{}, nil, errors.New("window authentication flow does not belong to this view")
 	}
-	if err := m.withWindowAuthAuthority(ctx, record, func() error { return nil }); err != nil {
-		return windowAuthRecord{}, nil, err
-	}
 	m.mu.Lock()
 	owner := m.windowAuthOwners[flow]
 	m.mu.Unlock()
-	if owner == nil && (record.Phase == "reserved" || record.Phase == "starting" || record.Phase == "waiting" || record.Phase == "polling") {
+	config = sdk.ConfigSnapshot{Version: record.Config}
+	if owner != nil && record.active() {
+		config = owner.lease.worker.config
+	}
+	if err := m.withWindowAuthConfig(ctx, record, config, nil); err != nil {
+		return windowAuthRecord{}, nil, err
+	}
+	if owner == nil && record.active() {
 		record, err = m.store.windowAuthRecord(id, flow)
 		if err != nil {
 			return windowAuthRecord{}, nil, errors.New("window authentication receipt is unavailable")
@@ -272,10 +286,14 @@ func (m *Manager) CoreAuthCancel(ctx context.Context, id, revision, part, bindin
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
 	}
-	if record.Phase == "complete" || record.Phase == "uncertain" || record.Phase == "canceled" || record.Phase == "expired" {
+	if !record.active() {
 		return record.public(), nil
 	}
-	err = m.withWindowAuthAuthority(ctx, record, func() error {
+	config := sdk.ConfigSnapshot{Version: record.Config}
+	if owner != nil {
+		config = owner.lease.worker.config
+	}
+	err = m.withWindowAuthConfig(ctx, record, config, func() error {
 		var updateErr error
 		record, updateErr = m.store.updateWindowAuth(id, flow, func(record *windowAuthRecord, _ *storeAccounts) error {
 			if record.Phase == "complete" || record.Phase == "uncertain" {
@@ -388,9 +406,9 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 		}
 	}
 	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
-		return manager.withWindowAuthAuthority(current, record, func() error { return nil })
+		return owner.withAuthority(current, record, nil)
 	})
-	err = manager.withWindowAuthAuthority(ctx, record, func() error {
+	err = owner.withAuthority(ctx, record, func() error {
 		if err := task.caller.Err(); err != nil {
 			return err
 		}
@@ -433,7 +451,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 			interval := max(int64(1000), min(result.PollAfterMs, int64(300_000)))
 			view := sdk.WindowAuthFlowView{Flow: flow, State: "waiting", URL: result.URL, UserCode: result.UserCode, RetryAfterMs: interval}
 			if view.Validate() == nil {
-				err = manager.withWindowAuthAuthority(ctx, record, func() error {
+				err = owner.withAuthority(ctx, record, func() error {
 					var err error
 					record, err = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
 						if current.Canceled || current.Phase != "starting" {
@@ -457,7 +475,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 				result.ID = record.Scope.Account
 			}
 			if result.Pending && len(result.Credentials) == 0 && result.ID == "" {
-				err = manager.withWindowAuthAuthority(ctx, record, func() error {
+				err = owner.withAuthority(ctx, record, func() error {
 					var err error
 					record, err = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
 						if current.Canceled || current.Phase != "polling" {
@@ -472,7 +490,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 					return record.public(), nil
 				}
 			} else if !result.Pending {
-				err = manager.withWindowAuthAuthority(ctx, record, func() error {
+				err = owner.withAuthority(ctx, record, func() error {
 					if err := manager.store.checkSubscriptionResult(ctx, record.Scope, result.ID); err != nil {
 						return err
 					}
@@ -515,7 +533,7 @@ func (m *Manager) revokeWindowAuthOwners(tracked map[string]bool, current map[st
 		}
 		generation, found := current[id]
 		entry, config := generation.entry, generation.config.Version
-		if found && config == owner.record.Config {
+		if found && sameModuleConfig(generation.config, owner.lease.worker.config) {
 			if grant, ok := entry.Manifest.ResolveAuthBinding(owner.record.Binding); ok && grant.Provider == owner.record.Scope.Provider {
 				part, revision := windowAuthJournalSelection(entry, config, grant.From)
 				if grant.From == sdk.ProviderSignInPart {
@@ -543,6 +561,14 @@ func (m *Manager) revokeWindowAuthOwners(tracked map[string]bool, current map[st
 }
 
 func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuthRecord, action func() error) error {
+	return m.withWindowAuthConfig(ctx, record, sdk.ConfigSnapshot{Version: record.Config}, action)
+}
+
+func (owner *windowAuthOwner) withAuthority(ctx context.Context, record windowAuthRecord, action func() error) error {
+	return owner.manager.withWindowAuthConfig(ctx, record, owner.lease.worker.config, action)
+}
+
+func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRecord, expected sdk.ConfigSnapshot, action func() error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -579,7 +605,12 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 			return errors.New("authentication enablement changed")
 		}
 	}
-	config, err := m.readModuleConfigContext(ctx, record.Scope.Plugin)
+	var config sdk.ConfigSnapshot
+	if expected.Values == nil {
+		config, err = m.readModuleConfigContext(ctx, record.Scope.Plugin)
+	} else {
+		config, err = m.runtimeModuleConfigContext(ctx, entry)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -594,8 +625,12 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 			revision = subscriptionJournalRevision(ctx, revision)
 		}
 	}
-	if err != nil || part != record.Part || revision != record.Revision || config.Version != record.Config {
+	if err != nil || part != record.Part || revision != record.Revision ||
+		config.Version != record.Config || !sameModuleConfig(config, expected) {
 		return errors.New("window authentication selection changed")
 	}
-	return action()
+	if action != nil {
+		return action()
+	}
+	return nil
 }

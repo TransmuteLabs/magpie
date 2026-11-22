@@ -39,6 +39,14 @@ type windowAuthRecord struct {
 	Private      *sdk.AuthResult     `json:"private,omitempty"`
 }
 
+func (record windowAuthRecord) active() bool {
+	switch record.Phase {
+	case "reserved", "starting", "waiting", "polling":
+		return true
+	}
+	return false
+}
+
 func (record *windowAuthRecord) UnmarshalJSON(raw []byte) error {
 	probe := json.NewDecoder(bytes.NewReader(raw))
 	probe.UseNumber()
@@ -197,8 +205,7 @@ func (s *Store) reserveWindowAuth(record windowAuthRecord) (windowAuthRecord, bo
 		}
 		active := 0
 		for _, previous := range records.AuthFlows {
-			if previous.Expires > time.Now().UnixMilli() &&
-				(previous.Phase == "reserved" || previous.Phase == "starting" || previous.Phase == "waiting" || previous.Phase == "polling") {
+			if previous.Expires > time.Now().UnixMilli() && previous.active() {
 				active++
 			}
 		}

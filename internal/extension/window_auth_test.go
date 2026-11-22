@@ -156,6 +156,12 @@ func TestWindowAuthOwnerPollProjectionThrottleAndPublication(t *testing.T) {
 			if err != nil || account.Generation != 1 || !bytes.Contains(account.Auth, []byte("PRIVATE-CREDENTIAL")) {
 				t.Fatal("account publication:", err)
 			}
+			replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+			replayed, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			if err != nil || replayed.State != "complete" || replayed.Account == nil || replayed.Account.Generation != "1" ||
+				authWindowTrace(t, trace, "finish") != 1 {
+				t.Fatalf("changed values hid or replayed a durable receipt: %s %v", replayed.State, err)
+			}
 		})
 	}
 }
@@ -262,7 +268,7 @@ func TestWindowAuthOwnerRejectsForeignFramesMethodsAndGrants(t *testing.T) {
 }
 
 func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
-	for _, change := range []string{"off", "config", "cancel", "delete", "caller-disconnect"} {
+	for _, change := range []string{"off", "config", "same CAS configuration", "reordered configuration", "cancel", "delete", "caller-disconnect"} {
 		t.Run(change, func(t *testing.T) {
 			dir := t.TempDir()
 			config := authfixture.Config{Started: filepath.Join(dir, "started"), Release: filepath.Join(dir, "release")}
@@ -307,6 +313,10 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 				if _, err := manager.CompareAndSwapModuleConfig(t.Context(), id, "1", json.RawMessage(`{}`)); err != nil {
 					t.Fatal(err)
 				}
+			case "same CAS configuration":
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+			case "reordered configuration":
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"refreshStarted":"","refreshRelease":""`, `"refreshRelease":"","refreshStarted":""`)
 			case "cancel":
 				if _, err := manager.CoreAuthCancel(ctx, id, revision, "window:page", "signin", view.Flow); err != nil {
 					t.Fatal(err)
@@ -332,7 +342,7 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 			for {
 				record, err := manager.store.windowAuthRecord(id, view.Flow)
 				if err == nil && (record.Phase == "complete" || record.Phase == "uncertain") {
-					if (record.Phase == "complete") != (change == "caller-disconnect") {
+					if (record.Phase == "complete") != (change == "caller-disconnect" || change == "reordered configuration") {
 						t.Fatalf("changed authority published an account: %s -> %s", change, record.Phase)
 					}
 					break
@@ -345,13 +355,77 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 			}
 			accounts, err := manager.Store().Accounts(id, "vendor")
 			expected := 0
-			if change == "caller-disconnect" {
+			if change == "caller-disconnect" || change == "reordered configuration" {
 				expected = 1
 			}
 			if err != nil || len(accounts) != expected {
 				t.Fatalf("wrong credential publication after %s: %d %v", change, len(accounts), err)
 			}
 		})
+	}
+}
+
+func TestWindowAuthFinishRechecksSameCASConfigurationAfterSlotWait(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "trace")
+	manager, id, revision := authWindowFixture(t, false, authfixture.Config{Trace: trace})
+	ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "queued-finish"), 5*time.Second)
+	defer cancel()
+	view, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{Method: "device"})
+	if err != nil || view.State != "waiting" {
+		t.Fatalf("start: %s %v", view.State, err)
+	}
+	authWindowReady(t, manager, id, view)
+	manager.mu.Lock()
+	owner := manager.windowAuthOwners[view.Flow]
+	manager.mu.Unlock()
+	if owner == nil {
+		t.Fatal("waiting flow lost its owner")
+	}
+	client := owner.lease.client
+	slots := client.slots
+	for range cap(slots) {
+		slots <- struct{}{}
+	}
+	release := sync.OnceFunc(func() {
+		for range cap(slots) {
+			<-slots
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+	}()
+	defer func() {
+		cancel()
+		release()
+		<-done
+	}()
+	for len(client.regularSlots) == 0 {
+		select {
+		case <-done:
+			t.Fatal("finish returned before it could wait for a slot")
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if record, err := manager.store.windowAuthRecord(id, view.Flow); err != nil || record.Phase != "polling" {
+		t.Fatalf("finish did not reach the worker wait: %s %v", record.Phase, err)
+	}
+	replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+	release()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got := authWindowTrace(t, trace, "finish"); got != 0 {
+		t.Errorf("revoked window flow reached the worker %d time(s)", got)
+	}
+	accounts, err := manager.Store().Accounts(id, "vendor")
+	if err != nil || len(accounts) != 0 {
+		t.Fatalf("revoked flow published %d accounts: %v", len(accounts), err)
 	}
 }
 

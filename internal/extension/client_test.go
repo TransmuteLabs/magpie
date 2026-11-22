@@ -472,7 +472,7 @@ func fixturePackage(t *testing.T) string {
 	return fixturePackageAt(t, 1)
 }
 
-func fixturePackageAt(t testing.TB, apiMinor int) string {
+func fixturePackageAt(t testing.TB, apiMinor int, excluded ...sdk.Capability) string {
 	t.Helper()
 	directory := t.TempDir()
 	entry := "worker"
@@ -510,6 +510,9 @@ func fixturePackageAt(t testing.TB, apiMinor int) string {
 		Sessions:  []sdk.SessionDescriptor{{ID: "session", Name: "Fixture session"}},
 		Tools:     []sdk.ToolDescriptor{{Name: "tool", InputSchema: json.RawMessage(`{"type":"object"}`)}},
 	}
+	manifest.Contract.Capabilities = slices.DeleteFunc(manifest.Contract.Capabilities, func(capability sdk.Capability) bool {
+		return slices.Contains(excluded, capability)
+	})
 	b, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -525,7 +528,7 @@ func fixtureManager(t testing.TB) (*Manager, Installed) {
 	return fixtureManagerAt(t, 1)
 }
 
-func fixtureManagerAt(t testing.TB, apiMinor int) (*Manager, Installed) {
+func fixtureManagerAt(t testing.TB, apiMinor int, excluded ...sdk.Capability) (*Manager, Installed) {
 	t.Helper()
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() {
@@ -537,7 +540,7 @@ func fixtureManagerAt(t testing.TB, apiMinor int) (*Manager, Installed) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	entry, err := manager.Install(ctx, fixturePackageAt(t, apiMinor))
+	entry, err := manager.Install(ctx, fixturePackageAt(t, apiMinor, excluded...))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,16 +1001,31 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 	}{
 		{"configuration", 9}, {"inbound enable epoch", 9}, {"account", 9}, {"removed account", 9}, {"privacy", 9},
 		{"account", 8}, {"removed account", 8}, {"privacy", 8},
+		{"same CAS configuration", 8}, {"same CAS public configuration", 8},
+		{"reordered configuration", 8}, {"no configuration contract", 0},
 	} {
 		name := scenario.change
 		if scenario.minor < 9 {
 			name = "legacy " + name
 		}
 		t.Run(name, func(t *testing.T) {
-			manager, installed := fixtureManagerAt(t, scenario.minor)
+			var excluded []sdk.Capability
+			if scenario.change == "same CAS public configuration" {
+				excluded = append(excluded, sdk.AccountAuth, sdk.ModelDiscovery, sdk.UsageReporter)
+			}
+			if scenario.minor == 0 {
+				excluded = append(excluded, sdk.ModuleRPC)
+			}
+			manager, installed := fixtureManagerAt(t, scenario.minor, excluded...)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
 			id := installed.Manifest.ID
+			switch scenario.change {
+			case "same CAS configuration", "same CAS public configuration", "reordered configuration":
+				if _, err := manager.CompareAndSwapModuleConfig(ctx, id, "0", json.RawMessage(`{"mode":"fast","limit":1}`)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			lease, err := manager.Acquire(ctx, id)
 			if err != nil {
 				t.Fatal(err)
@@ -1027,6 +1045,9 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 			}
 			scope := sdk.Scope{Plugin: id, Provider: account.Provider, Account: account.ID, Generation: account.Generation,
 				Operation: "waiting-execute", Attempt: 1}
+			if scenario.change == "same CAS public configuration" {
+				scope.Account, scope.Generation = "", 0
+			}
 			request := sdk.ExecuteRequest{Protocol: "chat", Model: "model"}
 			if scenario.minor >= 9 {
 				ctx = WithProviderExecuteSelection(ctx, lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration)
@@ -1072,6 +1093,12 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 			switch scenario.change {
 			case "configuration":
 				_, err = peer.CompareAndSwapModuleConfig(ctx, id, lease.ConfigVersion(), json.RawMessage(`{"updated":true}`))
+			case "same CAS configuration", "same CAS public configuration":
+				replaceRuntimeConfigAtSameVersion(t, peer, id, `"mode":"fast"`, `"mode":"safe"`)
+			case "reordered configuration":
+				replaceRuntimeConfigAtSameVersion(t, peer, id, `"mode":"fast","limit":1`, `"limit":1,"mode":"fast"`)
+			case "no configuration contract":
+				_, err = peer.Store().StateCASContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey, 0, json.RawMessage(`{"unused":true}`))
 			case "inbound enable epoch":
 				if err = peer.catalog.SetEnabled(ctx, id, false); err == nil {
 					err = peer.catalog.SetEnabled(ctx, id, true)
@@ -1090,6 +1117,12 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 			next := lease.client.next.Load()
 			release()
 			err = <-result
+			if scenario.change == "reordered configuration" || scenario.change == "no configuration contract" {
+				if err != nil || lease.client.next.Load() == next {
+					t.Fatalf("compatible selection did not reach RPC admission: %v", err)
+				}
+				return
+			}
 			var outcome *OutcomeError
 			if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || lease.client.next.Load() != next {
 				t.Fatalf("revoked selection crossed RPC admission: %v", err)

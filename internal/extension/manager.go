@@ -1281,7 +1281,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 		}
 	}
 	admit := m.subscriptionAdmission(ctx, manifest, method, scope, authMutation)
-	if method == sdk.MethodProviderExecute && (expected != nil || scope.Account != "") {
+	if method == sdk.MethodProviderExecute && (manifest.Contract.Version.Minor >= 1 || expected != nil || scope.Account != "") {
 		admit = l.providerExecuteAdmission(scope, expected != nil, admit)
 	}
 	if effect && scope.Provider != "" && manifest.Contract.Version.Minor >= 8 && manifest.Contract.Has(sdk.UsageReporter) &&
@@ -1423,6 +1423,14 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 				err = m.withActiveConfig(ctx, l.worker.entry, l.worker.config, checkSelection)
 			} else {
 				err = checkSelection()
+				if err == nil && l.worker.entry.Manifest.Contract.Version.Minor >= 1 {
+					current, readErr := m.runtimeModuleConfigContext(ctx, l.worker.entry)
+					if readErr != nil {
+						err = readErr
+					} else if !sameModuleConfig(current, l.worker.config) {
+						err = errors.New("extension configuration changed")
+					}
+				}
 			}
 		}
 		if err != nil {
