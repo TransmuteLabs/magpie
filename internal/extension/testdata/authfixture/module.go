@@ -23,6 +23,7 @@ type Config struct {
 	ImportProxy    string `json:"importProxy"`
 	QueueRelease   string `json:"queueRelease"`
 	ExecuteRelease string `json:"executeRelease"`
+	UsageRelease   string `json:"usageRelease"`
 }
 
 func Module() sdk.Module {
@@ -40,7 +41,7 @@ func Module() sdk.Module {
 		if json.Unmarshal(current.Config.Values, &config) != nil {
 			return config, errors.New("invalid fixture config")
 		}
-		if config.Trace != "" {
+		if config.Trace != "" && (method != "usage" || config.UsageRelease != "") {
 			file, err := os.OpenFile(config.Trace, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 			if err != nil {
 				return config, err
@@ -238,6 +239,24 @@ func Module() sdk.Module {
 			}
 			if token == "" || string(call.Auth) != token {
 				return nil, errors.New("usage lacks the selected account")
+			}
+			config, err := record(ctx, "usage", call)
+			if err != nil {
+				return nil, err
+			}
+			if call.Scope.Account == "other" && config.UsageRelease != "" {
+				ticker := time.NewTicker(20 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					if _, err := os.Stat(config.UsageRelease); err == nil {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-ticker.C:
+					}
+				}
 			}
 			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "Weekly", Used: used}}}, nil
 		}

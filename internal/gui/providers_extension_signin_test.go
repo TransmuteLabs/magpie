@@ -480,6 +480,147 @@ func TestLoginUsageEditorReturnsCompletedRowsAtDeadline(t *testing.T) {
 	}
 }
 
+func TestLoginUsageEditorReturnsCompletedSDKReadingWhileSiblingWaits(t *testing.T) {
+	sandboxHome(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	manager := providerAuthFixtureManager(t)
+	manifest := providerAuthFixtureManifest()
+	installProviderAuthFixture(t, manager, &manifest)
+	for id, token := range map[string]string{"chosen": "PRIVATE-CREDENTIAL", "other": "PRIVATE-OTHER"} {
+		if _, err := manager.Store().SaveAccount(extension.Account{
+			Plugin: manifest.ID, Provider: "vendor", ID: id, Auth: json.RawMessage(`{"token":"` + token + `"}`),
+		}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peer := extension.NewStore(manager.Namespace())
+	chosen := sdk.Scope{Plugin: manifest.ID, Provider: "vendor", Account: "chosen", Generation: 1}
+	if _, err := peer.InvalidateUsage(chosen); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	trace, release := filepath.Join(dir, "usage.jsonl"), filepath.Join(dir, "release")
+	config, err := json.Marshal(authfixture.Config{Trace: trace, UsageRelease: release})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", config); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.Acquire(t.Context(), manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Close()
+
+	ctx, stop := context.WithTimeout(t.Context(), 40*time.Second)
+	var requests sync.WaitGroup
+	defer func() {
+		stop()
+		requests.Wait()
+	}()
+	mux := http.NewServeMux()
+	providerRoutes(mux, nil)
+	path := "/api/login/usage?agent=" + provider.ExtensionProviderID(manifest.ID, "vendor")
+	read := func(parent context.Context) <-chan *httptest.ResponseRecorder {
+		done := make(chan *httptest.ResponseRecorder, 1)
+		requests.Go(func() {
+			done <- do(mux, httptest.NewRequestWithContext(parent, http.MethodGet, path, nil))
+		})
+		return done
+	}
+	reply := func(done <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+		t.Helper()
+		select {
+		case result := <-done:
+			return result
+		case <-ctx.Done():
+			t.Fatalf("account editor did not return: %v", ctx.Err())
+			return nil
+		}
+	}
+	traceCount := func() (chosen, other int) {
+		t.Helper()
+		data, err := os.ReadFile(trace)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return bytes.Count(data, []byte(`"account":"chosen"`)), bytes.Count(data, []byte(`"account":"other"`))
+	}
+	check := func(result *httptest.ResponseRecorder, want int) {
+		t.Helper()
+		var quotas map[string]provider.SubscriptionQuota
+		if result.Code != http.StatusOK || json.Unmarshal(result.Body.Bytes(), &quotas) != nil || len(quotas) != want {
+			t.Fatalf("expected %d completed readings, got %d: %s", want, result.Code, result.Body.String())
+		}
+		if quota := quotas["chosen"]; quota.ReadDeferred || len(quota.Windows) != 1 || quota.Windows[0].Used != 17 {
+			t.Fatalf("account editor lost the completed SDK reading: %+v", quota)
+		}
+		if want == 2 {
+			if quota := quotas["other"]; quota.ReadDeferred || len(quota.Windows) != 1 || quota.Windows[0].Used != 23 {
+				t.Fatalf("account editor did not recover the released SDK reading: %+v", quota)
+			}
+		}
+	}
+
+	caller, cancelCaller := context.WithCancel(ctx)
+	defer cancelCaller()
+	canceled := read(caller)
+	for {
+		chosenCalls, otherCalls := traceCount()
+		stamp, err := peer.UsageStampContext(ctx, chosen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chosenCalls == 1 && otherCalls == 1 && !stamp.Dirty {
+			break
+		}
+		select {
+		case result := <-canceled:
+			t.Fatalf("account editor returned before cancellation and the two live reads: %d %s", result.Code, result.Body)
+		case <-ctx.Done():
+			t.Fatalf("fixture did not reach both SDK readings: %v", ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	partial := read(ctx)
+	allowRevocation := make(chan struct{})
+	revocation := make(chan error, 1)
+	revoked := read(loginUsageReplyContext{Context: ctx, beforeReply: sync.OnceFunc(func() {
+		select {
+		case <-allowRevocation:
+			_, err := peer.InvalidateUsage(chosen)
+			revocation <- err
+		case <-ctx.Done():
+		}
+	})})
+	cancelCaller()
+	if result := reply(canceled); result.Body.Len() != 0 {
+		t.Fatalf("externally canceled account editor received a body: %d %s", result.Code, result.Body)
+	}
+	check(reply(partial), 1)
+	close(allowRevocation)
+	result := reply(revoked)
+	select {
+	case err := <-revocation:
+		if err != nil {
+			t.Fatal(err)
+		}
+	default:
+		t.Fatal("account editor skipped the reply boundary")
+	}
+	if result.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expired account editor exposed the revoked SDK reading: %d %s", result.Code, result.Body)
+	}
+	if chosenCalls, otherCalls := traceCount(); chosenCalls != 1 || otherCalls != 1 {
+		t.Fatalf("the requests did not share their SDK reads: chosen=%d other=%d", chosenCalls, otherCalls)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check(reply(read(ctx)), 2)
+}
+
 func TestProviderSignInUsesOrdinaryAccountsModelsAndUsage(t *testing.T) {
 	sandboxHome(t)
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
