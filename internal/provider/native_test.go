@@ -2,9 +2,11 @@ package provider
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Native is the API a client does best to ask a model on, for the gateway
@@ -52,5 +54,40 @@ func TestNative(t *testing.T) {
 		if got := c.p.Native(c.model); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestAgentModelProtocols(t *testing.T) {
+	providerFileHome(t)
+	prefs := settings.Load()
+	prefs.ModelAPIs = map[string]string{
+		"hybrid/gemini-only":  "gemini",
+		"preferred/chat-only": "chat",
+	}
+	if err := settings.Save(prefs); err != nil {
+		t.Fatal(err)
+	}
+	hybrid := Provider{ID: "hybrid", Chat: "http://127.0.0.1:1/v1", Gemini: "http://127.0.0.1:1/v1beta"}
+	preferred := Provider{ID: "preferred", Chat: "http://127.0.0.1:1/v1", Responses: "http://127.0.0.1:1/v1", BaseAPI: "responses"}
+	translated := Provider{ID: "code-assist", Account: &Account{codeAssist: "http://127.0.0.1:1"}}
+	for _, test := range []struct {
+		name      string
+		provider  Provider
+		model     string
+		api       Protocol
+		endpoints []string
+	}{
+		{"native before Gemini", hybrid, "both", Chat, []string{"/v1/chat/completions"}},
+		{"explicit Gemini", hybrid, "gemini-only", Gemini, nil},
+		{"translated Code Assist", translated, "model", Gemini, nil},
+		{"preferred base", preferred, "both", Responses, []string{"/v1/chat/completions", "/v1/responses"}},
+		{"explicit Chat", preferred, "chat-only", Chat, []string{"/v1/chat/completions"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api, endpoints := AgentModelProtocols(Entry{Provider: &test.provider, Model: test.model}, nil)
+			if api != test.api || !slices.Equal(endpoints, test.endpoints) {
+				t.Fatalf("paired projection %q %v, want %q %v", api, endpoints, test.api, test.endpoints)
+			}
+		})
 	}
 }

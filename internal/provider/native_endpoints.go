@@ -18,6 +18,26 @@ func NativeEndpoints(e Entry) []string {
 	return endpointsOf(e.Provider.relayed(e.Model))
 }
 
+// AgentModelProtocols returns the preferred API and native gateway paths for
+// an agent's model entry, using the same relay list for both.
+func AgentModelProtocols(entry Entry, members []Member) (Protocol, []string) {
+	if entry.Group != "" {
+		return agentGroupProtocols(members, true, true)
+	}
+	provider, model := entry.Provider, entry.Model
+	relayed := provider.relayed(model)
+	if preferred := provider.nativeAmong(model, relayed); preferred != "" {
+		return preferred, endpointsOf(relayed)
+	}
+	apis := provider.APIs(model)
+	for _, protocol := range provider.Speaks() {
+		if (protocol == Gemini || protocol == CodeAssist) && (apis == nil || slices.Contains(apis, protocol)) {
+			return Gemini, nil
+		}
+	}
+	return "", nil
+}
+
 // PreferredEndpoint is the path a request for the model is best asked on
 // (/v1/models' magpie_prefers, for another magpie that has this one as its
 // provider): its provider's Native API, or for a routing group the one
@@ -68,16 +88,8 @@ func endpointsOf(prs []Protocol) []string {
 // member takes it on. None when a member translates every request anyway,
 // or the members share no API.
 func GroupEndpoints(ms []Member) []string {
-	var common []Protocol
-	for i, m := range ms {
-		r := m.Provider.relayed(m.Model)
-		if i == 0 {
-			common = r
-			continue
-		}
-		common = slices.DeleteFunc(common, func(pr Protocol) bool { return !slices.Contains(r, pr) })
-	}
-	return endpointsOf(common)
+	_, endpoints := agentGroupProtocols(ms, false, true)
+	return endpoints
 }
 
 // GroupAPI is the API an agent that asks each model on one API is wired
@@ -95,19 +107,38 @@ func GroupEndpoints(ms []Member) []string {
 // relayed; a Messages-only group stays on Chat too, as the thinking a
 // Claude member takes is known by its own model, not by the group's id.
 func GroupAPI(ms []Member) Protocol {
-	best := false
-	for _, m := range ms {
-		relayed := m.Provider.relayed(m.Model)
-		if len(relayed) == 0 {
+	api, _ := agentGroupProtocols(ms, true, false)
+	return api
+}
+
+func agentGroupProtocols(members []Member, withAPI, withEndpoints bool) (Protocol, []string) {
+	var common []Protocol
+	var preferResponses bool
+	for index, member := range members {
+		relayed := member.Provider.relayed(member.Model)
+		if withEndpoints {
+			if index == 0 {
+				common = relayed
+			} else {
+				common = slices.DeleteFunc(common, func(protocol Protocol) bool {
+					return !slices.Contains(relayed, protocol)
+				})
+			}
+		}
+		if !withAPI || len(relayed) == 0 {
 			continue
 		}
 		if !slices.Contains(relayed, Responses) {
-			return ""
+			if !withEndpoints {
+				return "", nil
+			}
+			withAPI = false
+			continue
 		}
-		best = best || m.Provider.nativeAmong(m.Model, relayed) == Responses
+		preferResponses = preferResponses || member.Provider.nativeAmong(member.Model, relayed) == Responses
 	}
-	if best {
-		return Responses
+	if withAPI && preferResponses {
+		return Responses, endpointsOf(common)
 	}
-	return ""
+	return "", endpointsOf(common)
 }

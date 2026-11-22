@@ -47,9 +47,11 @@ func TestGroupAPI(t *testing.T) {
 		{"one best there, one serving it too", of(resp, both), Responses, []string{"/v1/responses"}},
 		{"the one best there second", of(both, resp), Responses, []string{"/v1/responses"}},
 		{"with a subscription translated anyway", of(resp, claude), Responses, nil},
+		{"translated subscription first", of(claude, resp), Responses, nil},
 		{"none best on Responses", of(both, both), "", []string{"/v1/chat/completions", "/v1/responses"}},
 		{"a Chat-only member", of(resp, chat), "", nil},
 		{"a Messages-only member", of(resp, anth), "", nil},
+		{"intersect after a Responses veto", of(both, chat, anth), "", nil},
 		{"Messages-only", of(anth, anth), "", []string{"/v1/messages"}},
 		{"no members", nil, "", nil},
 	} {
@@ -58,6 +60,10 @@ func TestGroupAPI(t *testing.T) {
 		}
 		if got := GroupEndpoints(c.ms); !slices.Equal(got, c.endpoints) {
 			t.Errorf("%s: endpoints %v, want %v", c.name, got, c.endpoints)
+		}
+		api, endpoints := AgentModelProtocols(Entry{Group: "fixture"}, c.ms)
+		if api != c.api || !slices.Equal(endpoints, c.endpoints) {
+			t.Errorf("%s: paired projection %q %v, want %q %v", c.name, api, endpoints, c.api, c.endpoints)
 		}
 	}
 }

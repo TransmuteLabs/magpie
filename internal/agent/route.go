@@ -418,30 +418,6 @@ func buildModels(agent string) []catalog.Model {
 			yes := true
 			m.ImageInput = &yes
 		}
-		// APIs is the preferred client protocol, preserving the vendor's
-		// own content where possible. A group's members may differ, so a
-		// group has Responses when one member is best there and every
-		// other takes it as it is too (provider.GroupAPI; #1594,
-		// ObsidianArch02): Pi, omp, droid and dsh then ask it there, and a
-		// GPT group's tool-call arguments stream as the member sends them
-		// instead of being held for a Chat answer
-		if e.Group == "" {
-			if n := e.Provider.Native(e.Model); n != "" {
-				m.APIs = []string{string(n)}
-			} else {
-				// Gemini clients also reach Code Assist and Google plugins
-				// through the gateway's Gemini API, with translation as needed.
-				apis := e.Provider.APIs(e.Model)
-				for _, pr := range e.Provider.Speaks() {
-					if (pr == provider.Gemini || pr == provider.CodeAssist) && (apis == nil || slices.Contains(apis, pr)) {
-						m.APIs = []string{string(provider.Gemini)}
-						break
-					}
-				}
-			}
-		} else if api := provider.GroupAPI(members(e.ID)); api != "" {
-			m.APIs = []string{string(api)}
-		}
 		// the service tiers Codex is offered on it, as the gateway's own
 		// lists offer them: Fast in the Codex CLI magpie writes
 		// magpie-models.json for (#1530)
@@ -454,16 +430,15 @@ func buildModels(agent string) []catalog.Model {
 			// shape, handed on as it is (codexcat)
 			m.Codex = e.Codex
 		}
-		// the gateway paths it goes on untranslated, as /v1/models says
-		// them: what an agent plugin's connect is told (cleary5779)
-		m.Endpoints = provider.NativeEndpoints(e)
+		var modelMembers []provider.Member
 		if e.Group != "" {
-			// a group's, the APIs every member relays as it is
-			// (provider.GroupEndpoints), which /v1/models leaves out: a
-			// remote magpie sends a group's request on in the client's
-			// API, for the other side to pick per member
-			m.Endpoints = provider.GroupEndpoints(members(e.ID))
+			modelMembers = members(e.ID)
 		}
+		api, endpoints := provider.AgentModelProtocols(e, modelMembers)
+		if api != "" {
+			m.APIs = []string{string(api)}
+		}
+		m.Endpoints = endpoints
 		// Codex's /fast on a ChatGPT account's own GPT model, which
 		// OpenCode has no command for and takes as variants (#2379); a
 		// group is sent fast as the group says, as a fast pick is

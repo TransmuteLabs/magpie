@@ -536,6 +536,39 @@ func TestExtensionProviderAccountModelUnionAndAllPaused(t *testing.T) {
 	}
 }
 
+func TestExtensionAgentModelProtocolsAreAccountScoped(t *testing.T) {
+	fixtureExtensionProvider(t, true)
+	providers, err := ExtensionProviders()
+	if err != nil || len(providers) != 2 {
+		t.Fatalf("expected two providers, got %d: %v", len(providers), err)
+	}
+	if providers[0].ID != providers[1].ID || providers[0].Account.User == providers[1].Account.User {
+		t.Fatal("fixture must expose two accounts under the same provider ID")
+	}
+	const model = "same-model"
+	for index, protocol := range []protocolext.Protocol{"chat", "messages"} {
+		result := sdk.ModelsResult{Models: []sdk.Model{{ID: model, Protocols: []protocolext.Protocol{protocol}}}}
+		if _, err := providers[index].Account.extension.writeModelCatalog(t.Context(), result, extensionhost.VersionedValue{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, check := range []struct {
+		account  int
+		api      Protocol
+		endpoint string
+	}{
+		{0, Chat, "/v1/chat/completions"},
+		{1, Anthropic, "/v1/messages"},
+		{0, Chat, "/v1/chat/completions"},
+	} {
+		account := &providers[check.account]
+		api, endpoints := AgentModelProtocols(Entry{Provider: account, Model: model}, nil)
+		if api != check.api || len(endpoints) != 1 || endpoints[0] != check.endpoint {
+			t.Fatalf("account %q has %q %v, want %q [%s]", account.Account.User, api, endpoints, check.api, check.endpoint)
+		}
+	}
+}
+
 func TestExtensionProviderPartialUsageDoesNotInventZero(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	provider := extensionAccounts()[0]
