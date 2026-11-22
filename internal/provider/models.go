@@ -2189,6 +2189,10 @@ func (p Provider) FreeModel(model string) bool {
 	if p.CountFree {
 		return true
 	}
+	return p.withExtensionModelList().freeModel(model)
+}
+
+func (p Provider) freeModel(model string) bool {
 	for _, m := range p.Available() {
 		if strings.EqualFold(m.ID, model) {
 			if m.Free {
@@ -3067,10 +3071,11 @@ func priceOf(s settings.Settings, p Provider, known bool, model string, at time.
 // (FreeModel) costs nothing. An SDK account's free check and tariff use
 // the same model projection for this quote.
 func (p Provider) PriceAt(s settings.Settings, model string, at time.Time) (catalog.Price, bool) {
-	if !p.CountFree {
-		p = p.withExtensionModelList()
+	if p.CountFree {
+		return catalog.Price{}, true
 	}
-	if p.FreeModel(model) {
+	p = p.withExtensionModelList()
+	if p.freeModel(model) {
 		return catalog.Price{}, true
 	}
 	// a key that bills at its own rate (KeyPriceRates) is priced at it

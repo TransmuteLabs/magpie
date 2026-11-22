@@ -14,6 +14,79 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+func TestExtensionFreeModelKeepsModelListStates(t *testing.T) {
+	host := fixtureExtensionProvider(t, false)
+	const model = "fixture-free-model-state"
+	host.manifest.Providers[0].Models = nil
+	result := json.RawMessage(`{"models":[]}`)
+	calls := 0
+	host.call = func(_ context.Context, method string, _ sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		if method != sdk.MethodProviderModels {
+			return nil, fmt.Errorf("unexpected %s", method)
+		}
+		calls++
+		return result, nil
+	}
+	p := extensionAccounts()[0]
+	available := p.Available()
+	_, priced := p.ListPrice(model)
+	if !p.Account.Lists(model) || len(available) != 0 || priced || p.FreeModel(model) || calls != 0 {
+		t.Fatalf("unfetched models = %+v, priced=%t, model RPCs=%d", available, priced, calls)
+	}
+	if _, err := p.Account.fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	available = p.Available()
+	_, priced = p.ListPrice(model)
+	if p.Account.Lists(model) || len(available) != 0 || priced || p.FreeModel(model) || calls != 1 {
+		t.Fatalf("known-empty models = %+v, priced=%t, model RPCs=%d", available, priced, calls)
+	}
+	result = json.RawMessage(`{"models":[{"id":"fixture-free-model-state","price":{"input":7}}]}`)
+	if _, err := p.Account.fetch(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if price, priced := p.ListPrice(model); !priced || price.Input != 7 || p.FreeModel(model) || calls != 2 {
+		t.Fatalf("published price = %+v, known=%t, model RPCs=%d", price, priced, calls)
+	}
+}
+
+func TestExtensionFreeModelRevalidatesSelectedAccountAndOwner(t *testing.T) {
+	const model = "fixture-free-model-authority"
+	for _, name := range []string{"account", "owner"} {
+		t.Run(name, func(t *testing.T) {
+			host := fixtureExtensionProvider(t, true)
+			host.manifest.Providers[0].Models = []sdk.Model{{ID: model, Price: &sdk.ModelPrice{}}}
+			providers, err := ExtensionProviders()
+			if err != nil || len(providers) != 2 {
+				t.Fatalf("discover SDK accounts = %d, error %v", len(providers), err)
+			}
+			p := providers[0]
+			scope, ok := p.ExtensionScope()
+			if !ok || !p.FreeModel(model) {
+				t.Fatal("selected account did not expose its initial zero price")
+			}
+			if name == "owner" {
+				usageTestSubscriptionOwner(t, host, "free-model-owner")
+				owners, err := host.Store().SubscriptionOwners(t.Context())
+				if err != nil || len(owners) != 1 || !owners[0].Active {
+					t.Fatalf("publish current subscription owner: %d rows, error %v", len(owners), err)
+				}
+			} else {
+				_, err := host.store.SaveAccount(extensionhost.Account{
+					Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account,
+					Auth: json.RawMessage(`{"access":"replacement"}`),
+				}, scope.Generation)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if p.FreeModel(model) {
+				t.Fatal("free classification reused the former SDK selection")
+			}
+		})
+	}
+}
+
 func TestExtensionPriceAtReadsModelsOnce(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	const paid = "price-at-paid"

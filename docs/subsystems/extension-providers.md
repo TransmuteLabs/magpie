@@ -244,11 +244,13 @@ free. Refreshed models are validated before publishing their account/store
 snapshot.
 
 `PriceAt` uses one lazy model projection per quote on an SDK account.
-The free check and list pricing share it, including lookups by the vendor's
-ID and the user's alias. The gateway's vision and search candidate builder
-uses one SDK model projection per provider for its exposed models and
-fallback prices. Dispatch still checks the current account and package
-selection at admission.
+`FreeModel` shares one projection between the model's free flag and list
+pricing when Free first routing asks it directly. Both paths retain price
+lookups by the vendor's ID and the user's alias, and each new operation
+checks the selected account and catalog again. The gateway's vision and
+search candidate builder uses one SDK model projection per provider for
+its exposed models and fallback prices. Dispatch still checks the current
+account and package selection at admission.
 
 Codex's model tags track the exact saved catalog roots for projected
 SDK providers with model discovery, including roots that have yet to be
