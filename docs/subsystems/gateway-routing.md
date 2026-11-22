@@ -3536,6 +3536,11 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   is sent the whole conversation each turn, since those protocols keep
   nothing between requests. A socket's conversation doesn't outlive the
   socket or the gateway.
+  The vendor socket retains the fields it compares for a delta when there
+  are at most 256 such fields and their decoded names and wire values total
+  at most 256 KiB. An over-budget turn goes whole and supplies no base for
+  the next delta. The next eligible whole turn establishes a base again.
+  The usual WebSocket message-size fallback applies to these whole turns.
 
 ## A Realtime session
 

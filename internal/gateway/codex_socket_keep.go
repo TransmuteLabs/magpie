@@ -56,7 +56,11 @@ var (
 // codexKeepMax is how many sockets are kept at most.
 const codexKeepMax = 32
 
-const codexKeepRawInputMax = 4096
+const (
+	codexKeepRawInputMax = 4096
+	codexKeepFieldBytes  = 256 << 10
+	codexKeepFieldCount  = 256
+)
 
 var (
 	codexKeepMu   sync.Mutex
@@ -236,8 +240,8 @@ type codexTurnShape struct {
 
 // codexShape is body's shape, false for a body that is not continued
 // from: one whose input is neither an item list nor null, or that names
-// a previous response itself. A repeated input keeps the socket but
-// leaves fields nil, so both this turn and its successor go whole.
+// a previous response itself. A repeated input or oversized comparison
+// keeps the socket but leaves fields nil, so this turn and its successor go whole.
 // The items borrow body until the wire
 // message is made. Only byte-identical inputs reuse the kept turn's
 // canonical sums. Both slices from the pool are immutable.
@@ -275,22 +279,33 @@ func codexShape(body []byte, key string) (*codexTurnShape, bool) {
 	if repeatedInput {
 		return &codexTurnShape{}, true
 	}
-	s := &codexTurnShape{
-		fields:  map[string]string{},
-		input:   input,
-		sums:    make([]itemSum, len(input)),
-		rawSums: make([]itemSum, min(len(input), codexKeepRawInputMax)),
-	}
+	fields := map[string]string{}
+	remaining := codexKeepFieldBytes
 	for k, v := range top {
 		switch k {
 		case "input", "client_metadata", "stream_options":
 			continue
 		}
+		remaining -= len(k) + len(v)
+		if remaining < 0 || len(fields) == codexKeepFieldCount {
+			for _, item := range input {
+				if item[0] != '{' {
+					return nil, false
+				}
+			}
+			return &codexTurnShape{}, true
+		}
 		var b bytes.Buffer
 		if json.Compact(&b, v) != nil {
 			return nil, false
 		}
-		s.fields[k] = b.String()
+		fields[k] = b.String()
+	}
+	s := &codexTurnShape{
+		fields:  fields,
+		input:   input,
+		sums:    make([]itemSum, len(input)),
+		rawSums: make([]itemSum, min(len(input), codexKeepRawInputMax)),
 	}
 	var priorRaw, priorSums []itemSum
 	codexKeepMu.Lock()

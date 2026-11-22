@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -75,6 +76,142 @@ func (f *fakeSocketBackend) turn(i int) socketTurn {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sockets[i]
+}
+
+func TestCodexKeptShapeBoundsNonInputFields(t *testing.T) {
+	body := []byte(strings.Replace(keptTurn("conv", "gpt-5.5", userPing),
+		"be brief", strings.Repeat("x", 1<<20), 1))
+	shapes := make([]*codexKept, 16)
+	if _, ok := codexShape(body, ""); !ok {
+		t.Fatal("cannot warm the turn shape")
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for index := range shapes {
+		shape, ok := codexShape(body, "")
+		if !ok {
+			t.Fatal("cannot prepare the kept turn shape")
+		}
+		shapes[index] = &codexKept{fields: shape.fields, input: shape.sums, rawInput: shape.rawSums}
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(body)
+	runtime.KeepAlive(shapes)
+
+	retained := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	t.Logf("%d kept turn shapes retain %d additional bytes after GC", len(shapes), retained)
+	if retained > 4<<20 {
+		t.Fatalf("kept turn shapes retain %d bytes for 16 identical 1 MiB instructions", retained)
+	}
+}
+
+func BenchmarkCodexKeptShapeNonInputFields(bench *testing.B) {
+	for _, size := range []int{256, 1 << 20} {
+		bench.Run(fmt.Sprintf("instructions-%d", size), func(bench *testing.B) {
+			body := []byte(strings.Replace(keptTurn("conv", "gpt-5.5", userPing),
+				"be brief", strings.Repeat("x", size), 1))
+			bench.ReportAllocs()
+			bench.SetBytes(int64(len(body)))
+			for bench.Loop() {
+				if _, ok := codexShape(body, ""); !ok {
+					bench.Fatal("cannot prepare the turn shape")
+				}
+			}
+		})
+	}
+}
+
+func TestCodexKeptSocketComparesPreparedFields(t *testing.T) {
+	socketOn(t)
+	backend := &fakeSocketBackend{keep: true}
+	backend.frames = keptReply(backend)
+	chatgpt(t, backend.ServeHTTP)
+
+	turn := func(fields string, history ...string) string {
+		return strings.TrimSuffix(keptTurn("conv", "gpt-5.5", history...), "}") + `,"metadata":` + fields + "}"
+	}
+	first := turn(`{"kind":"stable","amount":1}`, userPing)
+	second := turn(`{ "kind" : "stable", "amount" : 1 }`, userPing, asstPong, userAgain)
+	third := turn(`{"kind":"stable","amount":2}`, userPing, asstPong, userAgain, asstPong, userAgain)
+	for _, body := range []string{first, second, third} {
+		keptPost(t, "acct-1", body)
+	}
+	if posts, turns := backend.counts(); posts != 0 || turns != 3 || backend.opened() != 1 {
+		t.Fatalf("got %d HTTP posts and %d turns on %d sockets", posts, turns, backend.opened())
+	}
+	unchanged := gjson.ParseBytes(backend.turn(1).msg)
+	if unchanged.Get("previous_response_id").String() != "resp-1" || unchanged.Get("input.#").Int() != 1 ||
+		unchanged.Get("metadata.amount").Int() != 1 {
+		t.Fatal("a whitespace-only field edit lost the delta or changed the field")
+	}
+	changed := gjson.ParseBytes(backend.turn(2).msg)
+	if changed.Get("previous_response_id").Exists() || changed.Get("input.#").Int() != 5 ||
+		changed.Get("metadata.amount").Int() != 2 {
+		t.Fatal("a field value edit reused the delta or lost current data")
+	}
+}
+
+func TestCodexKeptSocketOverBudgetFieldsGoWhole(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		add  func(string) string
+	}{
+		{
+			name: "large value",
+			add: func(body string) string {
+				return strings.Replace(body, "be brief", strings.Repeat("x", 1<<20), 1)
+			},
+		},
+		{
+			name: "many names",
+			add: func(body string) string {
+				var fields strings.Builder
+				for index := range codexKeepFieldCount {
+					fmt.Fprintf(&fields, `,"extra_%d":true`, index)
+				}
+				return strings.TrimSuffix(body, "}") + fields.String() + "}"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			socketOn(t)
+			backend := &fakeSocketBackend{keep: true}
+			backend.frames = keptReply(backend)
+			chatgpt(t, backend.ServeHTTP)
+
+			history := []string{userPing}
+			for turn := range 4 {
+				body := keptTurn("conv", "gpt-5.5", history...)
+				if turn < 2 {
+					body = test.add(body)
+				}
+				keptPost(t, "acct-1", body)
+				if posts, turns := backend.counts(); posts != 0 || turns != turn+1 || backend.opened() != 1 {
+					t.Fatalf("turn %d got %d HTTP posts and %d turns on %d sockets", turn, posts, turns, backend.opened())
+				}
+				request := backend.turn(turn).msg
+				if turn < 3 {
+					if string(request) != `{"type":"response.create",`+body[1:] {
+						t.Fatalf("whole turn %d did not preserve the request (%d bytes sent)", turn, len(request))
+					}
+				} else if result := gjson.ParseBytes(request); result.Get("previous_response_id").String() != "resp-3" ||
+					result.Get("input.#").Int() != 1 {
+					t.Fatal("returning within the budget did not restore deltas")
+				}
+				history = append(history, asstPong, userAgain)
+			}
+		})
+	}
+}
+
+func TestCodexKeptShapeRejectsLargeTurnWithNonObjectItem(t *testing.T) {
+	body := []byte(strings.Replace(keptTurn("conv", "gpt-5.5", "null"),
+		"be brief", strings.Repeat("x", 1<<20), 1))
+	if _, ok := codexShape(body, ""); ok {
+		t.Fatal("a non-object input item made the turn eligible for the kept socket")
+	}
 }
 
 // rem_thank on X: Codex sends a turn on its kept socket as only its new
