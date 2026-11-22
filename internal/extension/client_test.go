@@ -183,6 +183,23 @@ func helperModule() sdk.Module {
 		sdk.MethodProviderUsage: func(_ context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 			var request sdk.UsageRequest
 			_ = json.Unmarshal(call.Params, &request)
+			if call.Scope.Session == "fixture-usage-wire" {
+				if call.Scope.Account == "" {
+					if len(call.Auth) != 0 {
+						return nil, errors.New("unscoped usage received account credentials")
+					}
+				} else {
+					var auth struct {
+						Marker string `json:"usageFixture"`
+					}
+					if json.Unmarshal(call.Auth, &auth) != nil || auth.Marker != "rotated" {
+						return nil, errors.New("scoped usage did not receive the selected credentials")
+					}
+				}
+				if manifest.Contract.Version.Minor >= 4 && len(request.Credentials) != 0 && string(request.Credentials) != "null" {
+					return nil, errors.New("usage received credentials in params")
+				}
+			}
 			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "daily", Used: 12}}}, nil
 		},
 		sdk.MethodAuthStart: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
