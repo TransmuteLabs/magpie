@@ -1024,12 +1024,7 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 			s.UnmaskedProviders = append(s.UnmaskedProviders, modelRef{ID: p.ID, Name: p.Name, Provider: p.ID, PName: p.Name, Icon: p.Icon})
 		}
 	}
-	for _, pat := range s.DisabledModels {
-		if s.DisabledHits == nil {
-			s.DisabledHits = map[string][]string{}
-		}
-		s.DisabledHits[pat] = provider.DisabledHits(pat)
-	}
+	s.DisabledHits = provider.DisabledHitsFor(ctx, providers, s.DisabledModels)
 	for _, e := range models {
 		if e.Group != "" || e.Provider.Ready() && !e.Provider.DecideOnly() {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}

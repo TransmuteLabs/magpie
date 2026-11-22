@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"log"
 	"slices"
 	"strings"
@@ -291,14 +292,31 @@ func DisabledBy(pat, pid, model string) bool {
 // DisabledHits are the providers' models, on and listed, that pat turns
 // off now, as "<provider>/<model>".
 func DisabledHits(pat string) []string {
-	var out []string
-	for _, p := range All() {
+	return DisabledHitsFor(context.Background(), All(), []string{pat})[pat]
+}
+
+// DisabledHitsFor uses the supplied provider list to find the models turned off by each pattern.
+func DisabledHitsFor(ctx context.Context, providers []Provider, patterns []string) map[string][]string {
+	if len(patterns) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(patterns))
+	for _, pat := range patterns {
+		out[pat] = nil
+	}
+	for _, p := range providers {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !p.On() {
 			continue
 		}
-		for _, m := range p.Exposed() {
-			if DisabledBy(pat, p.ID, m.ID) {
-				out = append(out, p.ID+"/"+m.ID)
+		for _, m := range p.exposedContext(ctx) {
+			names := namesOf(p.ID, m.ID)
+			for pat := range out {
+				if _, off := matchDisabled([]string{pat}, names...); off {
+					out[pat] = append(out[pat], p.ID+"/"+m.ID)
+				}
 			}
 		}
 	}
