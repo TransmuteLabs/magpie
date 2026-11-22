@@ -6,7 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"reflect"
+	"maps"
+	"slices"
 	"strconv"
 	"sync/atomic"
 
@@ -75,7 +76,21 @@ func sameModuleConfig(current, expected sdk.ConfigSnapshot) bool {
 		return decoder.Decode(values)
 	}
 	var left, right map[string]any
-	return parse(current.Values, &left) == nil && parse(expected.Values, &right) == nil && reflect.DeepEqual(left, right)
+	return parse(current.Values, &left) == nil && parse(expected.Values, &right) == nil &&
+		(left == nil) == (right == nil) && maps.EqualFunc(left, right, sameModuleConfigValue)
+}
+
+func sameModuleConfigValue(left, right any) bool {
+	switch left := left.(type) {
+	case map[string]any:
+		right, ok := right.(map[string]any)
+		return ok && maps.EqualFunc(left, right, sameModuleConfigValue)
+	case []any:
+		right, ok := right.([]any)
+		return ok && slices.EqualFunc(left, right, sameModuleConfigValue)
+	default:
+		return left == right
+	}
 }
 
 func effectiveModuleConfig(manifest sdk.Manifest, values json.RawMessage) (json.RawMessage, error) {
