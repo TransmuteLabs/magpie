@@ -445,18 +445,26 @@ type moduleGeneration struct {
 	config sdk.ConfigSnapshot
 }
 
+type reconcileCleanup struct {
+	stopping []<-chan struct{}
+	revoked  []*windowAuthOwner
+}
+
 func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, error) {
 	if err := filelock.LockMutex(ctx, &m.reloadMu); err != nil {
 		return nil, err
 	}
-	current, stopping, err := m.reconcileLocked(ctx, activate, observeConfig)
+	current, cleanup, err := m.reconcileLocked(ctx, activate, observeConfig)
 	m.reloadMu.Unlock()
-	if err != nil || len(stopping) == 0 {
+	for _, owner := range cleanup.revoked {
+		owner.recordRevocation()
+	}
+	if err != nil || len(cleanup.stopping) == 0 {
 		return current, err
 	}
 	wait, cancel := context.WithTimeout(ctx, componentCloseTimeout)
 	defer cancel()
-	for _, stopped := range stopping {
+	for _, stopped := range cleanup.stopping {
 		select {
 		case <-stopped:
 		case <-wait.Done():
@@ -466,11 +474,12 @@ func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig fu
 	return current, ctx.Err()
 }
 
-func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, []<-chan struct{}, error) {
+func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, reconcileCleanup, error) {
+	var cleanup reconcileCleanup
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return nil, nil, errors.New("extension manager is closed")
+		return nil, cleanup, errors.New("extension manager is closed")
 	}
 	tracked := make(map[string]bool, len(m.workers)+len(m.windowAuthOwners)+len(m.processes))
 	for id := range m.workers {
@@ -504,21 +513,26 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 				return err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cleanup.revoked = m.markRevokedWindowAuthOwners(tracked, current)
 		return nil
 	})
 	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
+		return nil, cleanup, ctx.Err()
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return nil, nil, err
+		return nil, cleanup, err
 	}
 	if err != nil {
 		current = nil
+		cleanup.revoked = m.markRevokedWindowAuthOwners(tracked, nil)
 	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return nil, nil, errors.New("extension manager is closed")
+		return nil, cleanup, errors.New("extension manager is closed")
 	}
 	var retiring []*managedWorker
 	for id, worker := range m.workers {
@@ -529,18 +543,16 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 		}
 	}
 	m.mu.Unlock()
-	var stopping []<-chan struct{}
 	for _, worker := range retiring {
 		if stopped := m.retire(worker); stopped != nil && !activate {
-			stopping = append(stopping, stopped)
+			cleanup.stopping = append(cleanup.stopping, stopped)
 		}
 	}
-	m.revokeWindowAuthOwners(tracked, current)
 	m.revokeOwnedProcesses(tracked, current)
 	if err == nil {
 		err = ctx.Err()
 	}
-	return current, stopping, err
+	return current, cleanup, err
 }
 
 func (w *managedWorker) matches(entry Installed, config sdk.ConfigSnapshot) bool {

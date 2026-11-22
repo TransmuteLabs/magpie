@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -22,6 +24,7 @@ type WindowAuthAccountPolicy func(context.Context, *Manager, sdk.Scope, sdk.Acco
 var errWindowAuthUnconfirmed = errors.New("window authentication completion could not be confirmed")
 
 type windowAuthDispatch struct {
+	owner  *windowAuthOwner
 	record windowAuthRecord
 	config sdk.ConfigSnapshot
 }
@@ -48,14 +51,17 @@ type windowAuthTask struct {
 }
 
 type windowAuthOwner struct {
-	manager *Manager
-	lease   *Lease
-	record  windowAuthRecord
-	ctx     context.Context
-	cancel  context.CancelFunc
-	policy  WindowAuthPolicy
-	tasks   chan *windowAuthTask
-	done    chan struct{}
+	manager            *Manager
+	lease              *Lease
+	record             windowAuthRecord
+	ctx                context.Context
+	cancel             context.CancelFunc
+	policy             WindowAuthPolicy
+	tasks              chan *windowAuthTask
+	done               chan struct{}
+	revoked            atomic.Bool
+	revocationMu       sync.Mutex
+	revocationRecorded bool
 }
 
 func windowAuthIdentity(ctx context.Context, intent bool) (string, string, error) {
@@ -418,6 +424,9 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	if record.Canceled || record.Phase == "complete" || record.Phase == "canceled" || record.Phase == "expired" || record.Phase == "uncertain" {
 		return manager.replayWindowAuth(task.caller, record)
 	}
+	if err := owner.checkRevoked(); err != nil {
+		return sdk.WindowAuthFlowView{}, err
+	}
 	if record.Phase == "waiting" && (task.start || time.Now().UnixMilli() < record.Next) {
 		return record.public(), nil
 	}
@@ -446,7 +455,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
 		return owner.withAuthority(current, record, nil)
 	})
-	err = owner.withAuthority(ctx, record, func() error {
+	err = owner.withActiveAuthority(ctx, record, func() error {
 		if err := task.caller.Err(); err != nil {
 			return err
 		}
@@ -467,9 +476,9 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication authority changed before dispatch")
 	}
-	if revision, _ := SubscriptionOwnerRevision(ctx); revision != "" {
-		ctx = context.WithValue(ctx, windowAuthDispatchKey{}, windowAuthDispatch{record: record, config: owner.lease.worker.config})
-	}
+	ctx = context.WithValue(ctx, windowAuthDispatchKey{}, windowAuthDispatch{
+		owner: owner, record: record, config: owner.lease.worker.config,
+	})
 	owner.lease.worker.mu.Lock()
 	owner.lease.worker.refreshing++
 	owner.lease.worker.mu.Unlock()
@@ -492,7 +501,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 			interval := max(int64(1000), min(result.PollAfterMs, int64(300_000)))
 			view := sdk.WindowAuthFlowView{Flow: flow, State: "waiting", URL: result.URL, UserCode: result.UserCode, RetryAfterMs: interval}
 			if view.Validate() == nil {
-				err = owner.withAuthority(ctx, record, func() error {
+				err = owner.withActiveAuthority(ctx, record, func() error {
 					var err error
 					record, err = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
 						if current.Canceled || current.Phase != "starting" {
@@ -516,7 +525,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 				result.ID = record.Scope.Account
 			}
 			if result.Pending && len(result.Credentials) == 0 && result.ID == "" {
-				err = owner.withAuthority(ctx, record, func() error {
+				err = owner.withActiveAuthority(ctx, record, func() error {
 					var err error
 					record, err = manager.store.updateWindowAuth(plugin, flow, func(current *windowAuthRecord, _ *storeAccounts) error {
 						if current.Canceled || current.Phase != "polling" {
@@ -539,7 +548,10 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 
 					var err error
 					completed, err = manager.store.publishWindowAuth(ctx, plugin, flow, result, func(root *os.Root) error {
-						return manager.checkWindowAuthConfigAtRoot(ctx, root, entry, from, record, owner.lease.worker.config)
+						if err := manager.checkWindowAuthConfigAtRoot(ctx, root, entry, from, record, owner.lease.worker.config); err != nil {
+							return err
+						}
+						return owner.checkRevoked()
 					})
 					return err
 				})
@@ -578,21 +590,20 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
 }
 
-func (m *Manager) revokeWindowAuthOwners(tracked map[string]bool, current map[string]moduleGeneration) {
+func (m *Manager) markRevokedWindowAuthOwners(tracked map[string]bool, current map[string]moduleGeneration) []*windowAuthOwner {
 	m.mu.Lock()
 	owners := make([]*windowAuthOwner, 0, len(m.windowAuthOwners))
 	for _, owner := range m.windowAuthOwners {
-		owners = append(owners, owner)
+		if tracked[owner.record.Scope.Plugin] {
+			owners = append(owners, owner)
+		}
 	}
 	m.mu.Unlock()
+	revoked := owners[:0]
 	for _, owner := range owners {
-		id := owner.record.Scope.Plugin
-		if !tracked[id] {
-			continue
-		}
-		generation, found := current[id]
+		generation, found := current[owner.record.Scope.Plugin]
 		entry, config := generation.entry, generation.config.Version
-		if found && sameModuleConfig(generation.config, owner.lease.worker.config) {
+		if !owner.revoked.Load() && found && owner.lease.worker.matches(entry, generation.config) {
 			if grant, ok := entry.Manifest.ResolveAuthBinding(owner.record.Binding); ok && grant.Provider == owner.record.Scope.Provider {
 				part, revision := windowAuthJournalSelection(entry, config, grant.From)
 				if grant.From == sdk.ProviderSignInPart {
@@ -603,20 +614,39 @@ func (m *Manager) revokeWindowAuthOwners(tracked map[string]bool, current map[st
 				}
 			}
 		}
-		record, err := m.store.updateWindowAuth(owner.record.Scope.Plugin, owner.record.Flow, func(record *windowAuthRecord, _ *storeAccounts) error {
-			if record.Phase == "complete" || record.Phase == "uncertain" {
-				return nil
-			}
-			record.Canceled = true
-			if record.Phase == "reserved" || record.Phase == "waiting" {
-				record.Phase, record.Continuation = "canceled", nil
-			}
-			return nil
-		})
-		if err != nil || record.Phase == "canceled" || record.Phase == "complete" || record.Phase == "uncertain" || record.Phase == "expired" {
-			owner.cancel()
-		}
+		owner.revoked.Store(true)
+		revoked = append(revoked, owner)
 	}
+	return revoked
+}
+
+func (owner *windowAuthOwner) recordRevocation() {
+	owner.revocationMu.Lock()
+	defer owner.revocationMu.Unlock()
+	if owner.revocationRecorded {
+		return
+	}
+	record, err := owner.manager.store.updateWindowAuth(owner.record.Scope.Plugin, owner.record.Flow, func(record *windowAuthRecord, _ *storeAccounts) error {
+		if record.Phase == "complete" || record.Phase == "uncertain" {
+			return nil
+		}
+		record.Canceled = true
+		if record.Phase == "reserved" || record.Phase == "waiting" {
+			record.Phase, record.Continuation = "canceled", nil
+		}
+		return nil
+	})
+	owner.revocationRecorded = err == nil
+	if err != nil || record.Phase == "canceled" || record.Phase == "complete" || record.Phase == "uncertain" || record.Phase == "expired" {
+		owner.cancel()
+	}
+}
+
+func (owner *windowAuthOwner) checkRevoked() error {
+	if owner != nil && owner.revoked.Load() {
+		return errors.New("window authentication authority changed")
+	}
+	return nil
 }
 
 func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuthRecord, action func() error) error {
@@ -625,6 +655,15 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 
 func (owner *windowAuthOwner) withAuthority(ctx context.Context, record windowAuthRecord, action func() error) error {
 	return owner.manager.withWindowAuthConfig(ctx, record, owner.lease.worker.config, action)
+}
+
+func (owner *windowAuthOwner) withActiveAuthority(ctx context.Context, record windowAuthRecord, action func() error) error {
+	return owner.withAuthority(ctx, record, func() error {
+		if err := owner.checkRevoked(); err != nil {
+			return err
+		}
+		return action()
+	})
 }
 
 func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRecord, expected sdk.ConfigSnapshot, action func() error) error {
@@ -724,7 +763,10 @@ func (m *Manager) checkWindowAuthDispatch(ctx context.Context, catalog, private 
 		return err
 	}
 	return readStoreNamespace(ctx, private, entry.Manifest.ID, func(root *os.Root) error {
-		return m.checkWindowAuthConfigAtRoot(ctx, root, entry, from, dispatch.record, dispatch.config)
+		if err := m.checkWindowAuthConfigAtRoot(ctx, root, entry, from, dispatch.record, dispatch.config); err != nil {
+			return err
+		}
+		return dispatch.owner.checkRevoked()
 	})
 }
 

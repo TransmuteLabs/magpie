@@ -100,6 +100,13 @@ Off, package replacement and configuration replacement retire idle owners
 on runtime reload. Active exchanges drain privately; they cannot publish
 against a changed package/configuration or a canceled flow.
 
+Reconciliation marks the selected owners revoked while it reads the catalog
+generation. It records cancellation after releasing the manager's worker
+selection mutex, so a Store writer cannot delay acquisition for another
+module through that mutex. A marked flow cannot dispatch or publish new
+credentials after its next admission check. Confirmed receipts remain
+replayable under the current grant and policy.
+
 ## Transaction and lock order
 
 [`window_auth_store.go`](../../internal/extension/window_auth_store.go)

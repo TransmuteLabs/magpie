@@ -682,7 +682,10 @@ func (m *Manager) admitSubscriptionCall(ctx context.Context, method string, scop
 func (m *Manager) fenceSubscriptionRollback(ctx context.Context, scope sdk.Scope, dispatch windowAuthDispatch) error {
 	revision, _ := SubscriptionOwnerRevision(ctx)
 	if revision == "" {
-		return m.store.checkSubscriptionView(ctx, scope)
+		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+			return err
+		}
+		return dispatch.owner.checkRevoked()
 	}
 	return m.withSubscriptionCatalogScope(ctx, scope, func(catalog *os.Root) error {
 		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
