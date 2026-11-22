@@ -241,9 +241,23 @@ func Changed() {
 // read their files afresh each time.
 func dropHeld() {
 	held.Lock()
+	dropHeldLocked()
+	held.Unlock()
+}
+
+func dropHeldAt(generation uint64) bool {
+	held.Lock()
+	defer held.Unlock()
+	if held.gen != generation {
+		return false
+	}
+	dropHeldLocked()
+	return true
+}
+
+func dropHeldLocked() {
 	held.gen++
 	held.built = nil
-	held.Unlock()
 }
 
 // Stamp marks what the catalog is built from, read without building it.

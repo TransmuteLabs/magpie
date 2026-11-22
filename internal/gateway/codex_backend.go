@@ -2544,9 +2544,10 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 			own = append(own, e)
 		}
 	}
+	tag := codexListTag()
 	all := codexMerged(own, cached)
 	// the list is the backend's and magpie's, and so is its ETag
-	w.Header().Set("ETag", codexcat.WithTag(etag, codexListTag()))
+	w.Header().Set("ETag", codexcat.WithTag(etag, tag))
 	writeJSON(w, 200, map[string]any{"models": all})
 }
 

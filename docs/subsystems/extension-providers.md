@@ -241,6 +241,15 @@ The free check and list pricing share it, including lookups by the vendor's
 ID and the user's alias. Dispatch still checks the current account and
 package selection at admission.
 
+Codex's model tags track the exact saved catalog roots for projected
+SDK providers with model discovery, including roots that have yet to be
+published. A kept tag checks their file identity and metadata. A changed
+root drops the held catalog before rebuilding the tag. Ordinary replies
+carrying `X-Models-Etag` can therefore see a publication from another
+process on the next request. The steady path checks only those files,
+with no catalog discovery or worker call. Model reads still validate the
+selected account and the root and chunk contents.
+
 The extension catalog file is also part of `Hold`'s root checks and
 `StampNow`. A catalog installed, enabled, disabled, upgraded or removed by
 another CLI invalidates provider and model snapshots on the next request,

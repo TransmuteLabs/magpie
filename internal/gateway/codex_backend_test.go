@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,12 +19,16 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gwmw"
+	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // chatgpt stands in for the ChatGPT backend behind CodexBase.
@@ -993,6 +999,118 @@ func TestCodexModelsEtagTagged(t *testing.T) {
 	tag := codexcat.Tag(provider.CodexListed())
 	if got := rec.Header().Get("X-Models-Etag"); got != `W/"v1+magpie-`+tag+`"` || !codexcat.Tagged(got, tag) {
 		t.Errorf("%d X-Models-Etag %q", rec.Code, got)
+	}
+}
+
+func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
+	const writerEnv = "MAGPIE_CODEX_ETAG_WRITER_CONFIG"
+	const writerModelEnv = "MAGPIE_CODEX_ETAG_WRITER_MODEL"
+	if config := os.Getenv(writerEnv); config != "" {
+		t.Setenv("XDG_CONFIG_HOME", config)
+		t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+		manager := extension.Default()
+		t.Cleanup(func() {
+			ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := manager.Close(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+		accounts, err := provider.ExtensionProviders()
+		if err != nil || len(accounts) != 2 {
+			t.Fatalf("writer accounts: %d, %v", len(accounts), err)
+		}
+		for _, account := range accounts {
+			models, err := account.Fetch(t.Context())
+			if err != nil || len(models) != 1 || models[0].ID != os.Getenv(writerModelEnv) {
+				t.Fatalf("writer models: %+v, %v", models, err)
+			}
+		}
+		return
+	}
+
+	var updated atomic.Bool
+	id := installPolicyRouteFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		model := "old-entitlement"
+		if updated.Load() {
+			model = "new-entitlement"
+		}
+		if err := json.NewEncoder(w).Encode(sdk.ModelsResult{Models: []sdk.Model{{ID: model}}}); err != nil {
+			t.Error(err)
+		}
+	}, func(manifest *sdk.Manifest) {
+		manifest.ID = "fixture.codex-etag"
+		manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.ModelDiscovery)
+		manifest.Providers[0].Models = nil
+	})
+	chatgpt(t, func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			w.Header().Set("ETag", `W/"backend"`)
+			io.WriteString(w, `{"models":[]}`)
+			return
+		}
+		w.Header().Set("X-Models-Etag", `W/"backend"`)
+		io.WriteString(w, sse(
+			`data: {"type":"response.created","response":{"id":"r1"}}`,
+			`data: {"type":"response.completed","response":{"id":"r1"}}`))
+	})
+	old := time.Now().Add(-time.Hour)
+	home := catalog.CodexHome()
+	for _, path := range []string{provider.Path(), settings.Path(), catalog.CachePath(), extension.CatalogPath(),
+		filepath.Join(home, "config.toml"), filepath.Join(home, "auth.json"), catalog.CodexModelsCache()} {
+		if err := os.Chtimes(path, old, old); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	tags := func() string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		codexServe(recorder, `{"model":"gpt-5.5","stream":true,"input":[]}`)
+		if tag := recorder.Header().Get("X-Models-Etag"); recorder.Code == 200 && strings.Contains(tag, "backend+magpie-") {
+			return tag
+		}
+		t.Fatalf("Codex reply: %d %s %s", recorder.Code, recorder.Header().Get("X-Models-Etag"), recorder.Body)
+		return ""
+	}
+	hasModel := func(id string) bool {
+		return slices.ContainsFunc(provider.CodexListed(), func(model catalog.Model) bool { return model.ID == id })
+	}
+	if !hasModel(id + "/old-entitlement") {
+		t.Fatal("old SDK model was never visible to Codex")
+	}
+	before := tags()
+	if tag := tags(); tag != before {
+		t.Fatalf("steady state tag changed: %q -> %q", before, tag)
+	}
+
+	publish := func(model string) {
+		t.Helper()
+		updated.Store(model == "new-entitlement")
+		ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+		defer cancel()
+		writer := proc.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexModelsEtagFollowsForeignSDKPublication$", "-test.count=1")
+		writer.Env = append(os.Environ(), writerEnv+"="+os.Getenv("XDG_CONFIG_HOME"), writerModelEnv+"="+model)
+		if output, err := writer.CombinedOutput(); err != nil {
+			t.Fatalf("foreign model publication: %v\n%s", err, output)
+		}
+	}
+	publish("new-entitlement")
+	after := tags()
+	if !hasModel(id+"/new-entitlement") || hasModel(id+"/old-entitlement") {
+		t.Fatal("the model catalog did not follow the foreign publication")
+	}
+	if after == before {
+		t.Fatalf("Codex reply kept %q after the visible SDK models changed", after)
+	}
+
+	publish("old-entitlement")
+	request := httptest.NewRequest(http.MethodGet, CodexPath+"/models", nil)
+	request.Header.Set("Authorization", "Bearer chatgpt-token")
+	list := httptest.NewRecorder()
+	New().Handler().ServeHTTP(list, request)
+	if list.Code != 200 || list.Header().Get("ETag") != before ||
+		!strings.Contains(list.Body.String(), id+"/old-entitlement") || strings.Contains(list.Body.String(), id+"/new-entitlement") {
+		t.Fatalf("Codex models and tag diverged after publication: %d ETag %q body %s", list.Code, list.Header().Get("ETag"), list.Body)
 	}
 }
 
