@@ -6467,7 +6467,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	// apply_patch as a function, left web_search out and added
 	// max_output_tokens, the shape such a relay turns away (maralica on
 	// Discord). Its web_search goes to the relay as sent.
-	if relay && searchedForIt(r.Context(), p, from, model, body) && !(sealed || codexAsSent(p, r.Header)) {
+	if relay && !(sealed || codexAsSent(p, r.Header)) && searchedForIt(r.Context(), p, from, model, body) {
 		relay, ownAPI = false, true
 	}
 	// Claude Code's advisor, which magpie runs for a model whose upstream
