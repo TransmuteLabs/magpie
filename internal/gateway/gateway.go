@@ -2636,26 +2636,27 @@ func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 		// Codex with magpie as its provider asks for a thread's title
 		// here (#743)
 		if from == provider.Responses {
+			kind := requestCallKind(r.Header, requestSessionMetadata(r.Header, body))
 			// on the conversation's model, not the one the app chose
 			// for it (codexSideTo)
 			session := func() string { return s.codexSideSession(r, body) }
-			if to := codexTitlesTo(r.Header, body, true, session); to != "" {
+			if to := codexTitlesTo(kind, body, true, session); to != "" {
 				s.codexTitle(w, r, body, to)
 				return
 			}
-			if to := codexDescriptionsTo(r.Header, body, true, session); to != "" {
+			if to := codexDescriptionsTo(kind, body, true, session); to != "" {
 				s.codexDescription(w, r, body, to)
 				return
 			}
-			if to := codexSummariesTo(r.Header, body, true, session); to != "" {
+			if to := codexSummariesTo(kind, body, true, session); to != "" {
 				s.codexSummary(w, r, body, to)
 				return
 			}
-			if to := codexCommitsTo(r.Header, body, true, session); to != "" {
+			if to := codexCommitsTo(kind, body, true, session); to != "" {
 				s.codexCommit(w, r, body, to)
 				return
 			}
-			if to := codexPredictionsTo(r.Header, body, true, session); to != "" {
+			if to := codexPredictionsTo(kind, body, true, session); to != "" {
 				s.codexPrediction(w, r, body, to)
 				return
 			}

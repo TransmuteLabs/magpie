@@ -139,23 +139,23 @@ func (s *Server) codexBackend(w http.ResponseWriter, r *http.Request) {
 		// nothing of them
 		if rest == "/responses" {
 			session := func() string { return s.codexSideSession(r, body) }
-			if to := codexTitlesTo(r.Header, body, false, session); to != "" {
+			if to := codexTitlesTo(kind, body, false, session); to != "" {
 				s.codexTitle(w, r, body, to)
 				return
 			}
-			if to := codexDescriptionsTo(r.Header, body, false, session); to != "" {
+			if to := codexDescriptionsTo(kind, body, false, session); to != "" {
 				s.codexDescription(w, r, body, to)
 				return
 			}
-			if to := codexSummariesTo(r.Header, body, false, session); to != "" {
+			if to := codexSummariesTo(kind, body, false, session); to != "" {
 				s.codexSummary(w, r, body, to)
 				return
 			}
-			if to := codexCommitsTo(r.Header, body, false, session); to != "" {
+			if to := codexCommitsTo(kind, body, false, session); to != "" {
 				s.codexCommit(w, r, body, to)
 				return
 			}
-			if to := codexPredictionsTo(r.Header, body, false, session); to != "" {
+			if to := codexPredictionsTo(kind, body, false, session); to != "" {
 				s.codexPrediction(w, r, body, to)
 				return
 			}
