@@ -22,6 +22,7 @@ package provider
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -510,7 +511,11 @@ const maxNest = 8
 // they did: the Routing page, the gateway's model list, the CLI and the
 // TUI all list them so.
 func Groups() []Group {
-	return groupsIn(providerEntries())
+	return GroupsContext(context.Background())
+}
+
+func GroupsContext(ctx context.Context) []Group {
+	return groupsInContext(ctx, providerEntriesContext(ctx))
 }
 
 // groupsIn is the groups among entries (Groups), built once while a
@@ -519,7 +524,13 @@ func Groups() []Group {
 // groups over every model (FindGroup, then the groups' entries). Each
 // caller gets a copy of its own to change.
 func groupsIn(entries []Entry) []Group {
-	return cloneGroups(heldFrom("groups", entries, buildGroupsIn))
+	return groupsInContext(context.Background(), entries)
+}
+
+func groupsInContext(ctx context.Context, entries []Entry) []Group {
+	return cloneGroups(heldFromContext(ctx, "groups", entries, func(entries []Entry) []Group {
+		return buildGroupsInContext(ctx, entries)
+	}))
 }
 
 // sharedGroups is Groups for a caller that only reads them: no copy, so
@@ -591,6 +602,10 @@ func cloneGroups(gs []Group) []Group {
 var groupsBuilt atomic.Int64
 
 func buildGroupsIn(entries []Entry) []Group {
+	return buildGroupsInContext(context.Background(), entries)
+}
+
+func buildGroupsInContext(ctx context.Context, entries []Entry) []Group {
 	groupsBuilt.Add(1)
 	f := heldOf("file", load)
 	var out []Group
@@ -598,7 +613,7 @@ func buildGroupsIn(entries []Entry) []Group {
 	var have map[string]bool // the providers magpie has, switched off or not
 	var found []Group        // the groups magpie finds, for a changed one to follow
 	if !f.NoAutoGroups {
-		found = foundGroups(entries)
+		found = foundGroupsContext(ctx, entries)
 	}
 	for _, g := range f.Groups {
 		if g.Hidden {
@@ -608,7 +623,7 @@ func buildGroupsIn(entries []Entry) []Group {
 		if strings.HasPrefix(g.ID, "auto-") {
 			if have == nil {
 				have = map[string]bool{}
-				for _, p := range All() {
+				for _, p := range AllContext(ctx) {
 					have[p.ID] = true
 				}
 			}
@@ -1023,7 +1038,15 @@ func GoneAutoGroup(ref string) bool {
 // stays in the group, a member the gateway skips (membersIn), rather than
 // taking a group of two away with every agent, rule and group set to it.
 func foundGroups(entries []Entry) []Group {
-	return autoGroups(unskipped(foundFrom(entries, heldOffEntries()), heldOf("file", load).AutoGroupSkip), heldSettings().ModelSameAs)
+	return foundGroupsContext(context.Background(), entries)
+}
+
+func foundGroupsContext(ctx context.Context, entries []Entry) []Group {
+	idle := heldOffEntriesContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return autoGroups(unskipped(foundFromContext(ctx, entries, idle), heldOf("file", load).AutoGroupSkip), heldSettings().ModelSameAs)
 }
 
 // unskipped is entries without the models of the providers skip names:
@@ -1067,6 +1090,10 @@ func SetAutoGroupSkip(ids []string) error {
 // foundFrom is entries with idle's models it lacks, each provider's in
 // the Providers order, so a provider on again is back in its place.
 func foundFrom(entries, idle []Entry) []Entry {
+	return foundFromContext(context.Background(), entries, idle)
+}
+
+func foundFromContext(ctx context.Context, entries, idle []Entry) []Entry {
 	have := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		have[e.ID] = true
@@ -1076,7 +1103,7 @@ func foundFrom(entries, idle []Entry) []Entry {
 		return entries
 	}
 	at := map[string]int{}
-	for i, p := range All() {
+	for i, p := range AllContext(ctx) {
 		at[p.ID] = i
 	}
 	pos := func(e Entry) int {
@@ -1606,7 +1633,13 @@ func Unpicked(id string) (pid string, ok bool) {
 // levels (Group.Levels) offers those, and so does a group in it for its
 // models. Held while a request holds the catalog (heldFrom).
 func groupEntries(entries []Entry) []Entry {
-	return heldFrom("group entries", entries, buildGroupEntries)
+	return groupEntriesContext(context.Background(), entries)
+}
+
+func groupEntriesContext(ctx context.Context, entries []Entry) []Entry {
+	return heldFromContext(ctx, "group entries", entries, func(entries []Entry) []Entry {
+		return buildGroupEntriesContext(ctx, entries)
+	})
 }
 
 // entryOf is where in entries the last entry of provider pid's model is,
@@ -1656,8 +1689,12 @@ func groupSharedKimi(e *Entry, ms []Member, entries []Entry, find entryOf) {
 }
 
 func buildGroupEntries(entries []Entry) []Entry {
+	return buildGroupEntriesContext(context.Background(), entries)
+}
+
+func buildGroupEntriesContext(ctx context.Context, entries []Entry) []Entry {
 	var out []Entry
-	all := groupsIn(entries)
+	all := groupsInContext(ctx, entries)
 	find := entriesBy(entries)
 	for _, g := range all {
 		if g.Hidden || g.Disabled {
@@ -2304,16 +2341,22 @@ func GroupsWith(id string) []Group {
 // catalog, so it is shared, only for reading: the providers' page asked
 // for it once for each provider, 11.6 MB of what twenty polls allocated.
 func MemberGroups() map[string][]string {
-	return heldFrom("member-groups", providerEntries(), memberGroupsIn)
+	return MemberGroupsContext(context.Background())
+}
+
+func MemberGroupsContext(ctx context.Context) map[string][]string {
+	return heldFromContext(ctx, "member-groups", providerEntriesContext(ctx), func(entries []Entry) map[string][]string {
+		return memberGroupsInContext(ctx, entries)
+	})
 }
 
 // memberGroupsBuilt counts MemberGroups built, for a test.
 var memberGroupsBuilt atomic.Int64
 
-func memberGroupsIn(entries []Entry) map[string][]string {
+func memberGroupsInContext(ctx context.Context, entries []Entry) map[string][]string {
 	memberGroupsBuilt.Add(1)
 	out := map[string][]string{}
-	for _, g := range groupsIn(entries) {
+	for _, g := range groupsInContext(ctx, entries) {
 		if g.Hidden {
 			continue
 		}

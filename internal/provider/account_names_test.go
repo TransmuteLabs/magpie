@@ -3,15 +3,45 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestEmptyQuotaNamesDoNotWaitForSDKStore(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	unlock, locked := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !locked {
+		t.Fatal("could not lock the SDK Store")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan []SubscriptionQuota, 1)
+		go func() { done <- withAccountNames(nil) }()
+		synctest.Wait()
+		select {
+		case cards := <-done:
+			unlock()
+			if len(cards) != 0 {
+				t.Errorf("naming an empty snapshot published %d cards", len(cards))
+			}
+		default:
+			unlock()
+			<-done
+			t.Error("naming an empty snapshot waited for the SDK Store")
+		}
+	})
+}
 
 // #1515: a plugin's signed-in account (ZCode's, through
 // opencode-zcode-auth) takes a name of the user's own. It is magpie's,
@@ -95,4 +125,87 @@ func TestAccountNameOfAPluginAccount(t *testing.T) {
 	if got := AccountNameOf(id, "31****36@qq.com"); got != "" {
 		t.Fatalf("cleared name %q", got)
 	}
+}
+
+func TestUsageAccountNameFollowsSubscriptionOwner(t *testing.T) {
+	host := fixtureExtensionProvider(t, false)
+	const providerID, user, sdkID = "devin", "existing-account", "sdk-account"
+	const communityName, sdkName, alias = "Community account", "SDK account", "Work"
+	host.manifest.Providers[0].ID = providerID
+	host.manifest.Contract.Capabilities = append(host.manifest.Contract.Capabilities, sdk.AccountAuth)
+	if _, err := host.store.SaveAccount(extensionhost.Account{Plugin: host.manifest.ID, Provider: providerID, ID: sdkID,
+		Name: sdkName, Auth: json.RawMessage(`{}`)}, 0); err != nil {
+		t.Fatal(err)
+	}
+	const spec = "@magpie-community/opencode-devin-auth"
+	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settings.Dir(), "plugins.json"), []byte(`{"plugins":[{"spec":"`+spec+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugin.UseCached([]plugin.Provider{{ID: providerID, Spec: spec, Name: "Community Devin"}})
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	loginUsageCache.Lock()
+	previous := loginUsageCache.m
+	loginUsageCache.m = map[string]loginUsageEntry{
+		"plugin:" + providerID + "/" + user: {q: SubscriptionQuota{User: communityName}},
+	}
+	loginUsageCache.Unlock()
+	t.Cleanup(func() {
+		loginUsageCache.Lock()
+		loginUsageCache.m = previous
+		loginUsageCache.Unlock()
+	})
+
+	dir := filepath.Join(host.namespace, "private", ".saved-signins")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner := struct {
+		extensionhost.SubscriptionOwner
+		GrantRevision string            `json:"grantRevision"`
+		Digests       map[string]string `json:"digests"`
+		Tickets       []string          `json:"tickets"`
+	}{
+		SubscriptionOwner: extensionhost.SubscriptionOwner{
+			Module: host.manifest.ID, Provider: providerID, PublicID: providerID, Revision: "fixture-owner",
+			Accounts: []extensionhost.SubscriptionAccount{{Key: "saved-key", ID: sdkID, User: user, LoginID: "saved-login"}},
+		},
+		GrantRevision: strings.Repeat("a", 64),
+		Digests:       map[string]string{"saved-key": strings.Repeat("b", 64)},
+		Tickets:       []string{"fixture-ticket"},
+	}
+	setOwner := func(active bool) {
+		t.Helper()
+		owner.Active = active
+		body, err := json.Marshal([]any{owner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "subscription-owners.json"), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		Changed()
+	}
+	check := func(want string, named bool) {
+		t.Helper()
+		rows := []SubscriptionQuota{{Provider: providerID, User: user, Seat: "Plan seat"}}
+		card := withAccountNames(rows)[0]
+		if card.Provider != providerID || card.User != user || card.Alias != want || card.Named != named || rows[0].Alias != "" {
+			t.Fatalf("want Usage label %q (user alias: %t), got %+v", want, named, card)
+		}
+	}
+	check(communityName, false)
+	setOwner(true)
+	check(sdkName, false)
+	if err := SetAccountName(providerID, user, alias); err != nil {
+		t.Fatal(err)
+	}
+	check(alias, true)
+	if err := SetAccountName(providerID, user, ""); err != nil {
+		t.Fatal(err)
+	}
+	setOwner(false)
+	check(communityName, false)
 }

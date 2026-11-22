@@ -43,21 +43,18 @@ func (s *Server) serveAgent(w http.ResponseWriter, r *http.Request, from provide
 	if s.stoppedToolLoop(w, r, from, body) {
 		return
 	}
-	w, body, hooked := s.gatewayHooks(w, r, from, body)
+	selection := s.selectGateway(r)
+	w, body, hooked := applyGatewayHooks(w, r, from, body, selection)
 	defer hooked()
 	agents := gwmw.AgentsWanted(middlewareWanted)
-	if s.extensions != nil {
-		origin := gatewayOrigin(r)
-		if hubFromPage(r) {
-			origin = "browser"
-		}
-		agents = append(agents, extensionMiddlewareAgent{manager: s.extensions, ctx: r.Context(), origin: origin})
+	if selection.HasMiddleware() {
+		agents = append(agents, extensionMiddlewareAgent{selection: selection, ctx: r.Context()})
 	}
 	if len(agents) == 0 {
 		s.serve(w, r, from, body)
 		return
 	}
-	info := gwmw.Info{Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r)}
+	info := gwmw.Info{Protocol: string(from), Model: modelOf(body), Stream: streamOf(body), Path: r.URL.Path, Agent: agentOf(r), Caller: pluginCaller(r.Context())}
 	var runs mwRuns
 	for _, a := range agents {
 		// the user's middleware runs before a route is begun: a wait

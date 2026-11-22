@@ -87,10 +87,11 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 	}
 	source := owner.session
 	manager := extension.Default()
-	manifest, identity, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
+	selected, err := sessionMigrationSelection(ctx, manager, route.Plugin)
 	if err != nil {
 		return CarryResult{}, err
 	}
+	manifest := selected.entry.Manifest
 	owned := false
 	for _, descriptor := range manifest.Sessions {
 		if descriptor == route.Session {
@@ -111,7 +112,7 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 	if err != nil {
 		return CarryResult{}, err
 	}
-	key := sessionMigrationKey(identity, source, route, store, options)
+	key := sessionMigrationKey(selected, source, route, store, options)
 	release, err := acquireSessionMigration(ctx, key)
 	if err != nil {
 		return CarryResult{}, err
@@ -119,17 +120,13 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 	defer release()
 	if receipt, ok := cachedSessionMigration(key); ok {
 		if sessionMigrationReceiptValid(ctx, receipt) {
-			_, current, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
-			if err != nil {
-				return CarryResult{}, err
-			}
-			if current != identity {
-				return CarryResult{}, extension.ErrActionChanged
-			}
 			if sourceBeforePublish != nil {
 				sourceBeforePublish()
 			}
 			if err := owner.check(ctx); err != nil {
+				return CarryResult{}, err
+			}
+			if err := selected.check(ctx, manager); err != nil {
 				return CarryResult{}, err
 			}
 			return receipt.result, nil
@@ -140,11 +137,11 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 	if err != nil {
 		return CarryResult{}, err
 	}
-	if sessionMigrationKey(identity, source, route, store, options) != key {
+	if sessionMigrationKey(selected, source, route, store, options) != key {
 		return CarryResult{}, extension.ErrActionChanged
 	}
-	plan, snapshot, err := convertHistorySource(ctx, extension.Default(), route.Plugin, route.Session.ID, owner,
-		route.Session.To, sdk.Scope{Session: source.ID, Operation: "session.convert"}, options,
+	plan, snapshot, err := convertHistorySource(ctx, manager, route.Plugin, route.Session.ID, owner,
+		route.Session.To, sdk.Scope{Session: source.ID, Operation: "session.convert"}, options, selected,
 		extension.ActionPolicy{Root: store.root, CreateUnder: store.prefix,
 			BackupDir: filepath.Join(appdir.Config(), "extensions", "action-backups", route.Plugin, route.Session.ID),
 			RevalidateInputs: func(ctx context.Context, created map[string]fs.FileInfo) error {
@@ -195,11 +192,10 @@ func carryExtensionOwned(ctx context.Context, owner sessionHistoryOwner, route S
 			return CarryResult{}, err
 		}
 	}
-	_, currentIdentity, err := sessionMigrationIdentity(ctx, manager, route.Plugin)
-	if err != nil {
+	if err := selected.check(ctx, manager); err != nil {
 		return CarryResult{}, err
 	}
-	if currentIdentity != identity || !bytes.Equal(options, currentOptions) {
+	if !bytes.Equal(options, currentOptions) {
 		return CarryResult{}, extension.ErrActionChanged
 	}
 	if err := owner.check(ctx); err != nil {
@@ -314,10 +310,10 @@ func convertExtensionSource(ctx context.Context, host extension.ActionRuntime, p
 	if err != nil {
 		return nil, nil, err
 	}
-	return convertHistorySource(ctx, host, plugin, converter, owner, target, scope, options, policy)
+	return convertHistorySource(ctx, host, plugin, converter, owner, target, scope, options, sessionModuleSelection{}, policy)
 }
 
-func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plugin, converter string, owner sessionHistoryOwner, target string, scope sdk.Scope, options []byte, policy extension.ActionPolicy) (*extension.ActionPlan, *sessionSourceSnapshot, error) {
+func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plugin, converter string, owner sessionHistoryOwner, target string, scope sdk.Scope, options []byte, selected sessionModuleSelection, policy extension.ActionPolicy) (*extension.ActionPlan, *sessionSourceSnapshot, error) {
 	source := owner.session
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -336,13 +332,12 @@ func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plu
 	}
 	scope.Session = source.ID
 	manager, managed := host.(*extension.Manager)
-	identity := ""
-	if managed {
-		_, current, err := sessionMigrationIdentity(ctx, manager, plugin)
+	if managed && selected.entry.Manifest.ID == "" {
+		current, err := sessionMigrationSelection(ctx, manager, plugin)
 		if err != nil {
 			return nil, nil, err
 		}
-		identity = current
+		selected = current
 	}
 	snapshot, body, err := readSessionSource(ctx, source.Path)
 	if err != nil {
@@ -367,7 +362,7 @@ func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plu
 	}
 	request := sdk.SessionRequest{ID: converter, From: source.Agent, To: target, Options: options,
 		Files: []sdk.SessionDocument{{Path: filepath.Base(source.Path), Format: source.Agent, Body: body}}}
-	host, release, err := sessionSourceRuntime(ctx, host, plugin)
+	host, release, err := sessionSourceRuntime(ctx, host, plugin, selected)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -376,7 +371,7 @@ func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plu
 		return nil, nil, err
 	}
 	previous := policy.RevalidateInputs
-	policy.InputIdentity += "\x00" + identity
+	policy.InputIdentity += "\x00" + selected.identity + "\x00" + selected.entry.EnableGeneration
 	checkAuthority := func(ctx context.Context) error {
 		if err := checkSessionSourceAdmission(ctx); err != nil {
 			return err
@@ -385,13 +380,7 @@ func convertHistorySource(ctx context.Context, host extension.ActionRuntime, plu
 			return err
 		}
 		if managed {
-			_, current, err := sessionMigrationIdentity(ctx, manager, plugin)
-			if err != nil {
-				return err
-			}
-			if current != identity {
-				return extension.ErrActionChanged
-			}
+			return selected.check(ctx, manager)
 		}
 		return nil
 	}

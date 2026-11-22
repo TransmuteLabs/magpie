@@ -63,6 +63,8 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const vm = require('node:vm')
 const { EventEmitter } = require('node:events')
+const { isDeepStrictEqual } = require('node:util')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const source = fs.readFileSync(0, 'utf8')
 const section = (from, to) => {
   const start = source.indexOf(from)
@@ -79,19 +81,26 @@ stdout.write = line => {
   return blockOn !== 'all' && !(blockOn === 'chunk' && msg.event === 'chunk')
 }
 const rl = new EventEmitter()
+const scope = new AsyncLocalStorage()
 const context = vm.createContext({
   Buffer, Headers, AbortController, DOMException, ReadableStream,
   process: { stdout, stdin: {}, exit: () => { throw Error('unexpected exit') } },
   readline: { createInterface: () => rl },
-  options: async () => ({ fetch: async () => context.reply }),
+  options: async () => ({ opts: { fetch: async () => context.reply }, saved: context.savedAuth() }),
+  isDeepStrictEqual, savedAuth: () => ({ known: true }),
   infoOf: async () => ({ models: {} }),
   sdkHeaders: () => ({}), bodyOf: () => undefined,
   accountKey: () => '',
-  via: { run: (_, fn) => fn() }, inScope: (_, key, fn) => fn(),
+  via: { run: (_, fn) => fn() }, scope,
+  inScope: (_, key, fn) => {
+    const local = { key, saved: context.savedAuth() }
+    return scope.run(local, fn, local)
+  },
 })
 const run = code => vm.runInContext(code, context)
 run(section('const rpcWrite =', '// A plugin writing to stdout'))
-run('const hooks = []; const inflight = new Map(); const handlers = {}')
+run('const hooks = []; const inflight = new Map(); const handlers = {}; let loaderGen = 0')
+run(section('const AUTH_EPOCH =', '// authCopy is'))
 run(section('async function doFetch(', '// ---- the loop'))
 run(section('// Everything waits for init;'))
 const message = value => rl.emit('line', JSON.stringify(value))
@@ -247,14 +256,16 @@ async function main() {
     for (const stage of ['options', 'info']) {
       let release
       let entered = false
+      let blocked = true
       let vendorCalls = 0
       const barrier = new Promise(resolve => { release = resolve })
-      context.options = async () => {
-        if (stage === 'options') { entered = true; await barrier }
-        return { fetch: async () => { vendorCalls++; return context.reply } }
+      context.options = async (provider, key, needInfo) => {
+        if (blocked && stage === 'options') { entered = true; await barrier }
+        const info = needInfo ? await context.infoOf(provider, key) : null
+        return { opts: { fetch: async () => { vendorCalls++; return context.reply } }, info, saved: context.savedAuth() }
       }
       context.infoOf = async () => {
-        if (stage === 'info') { entered = true; await barrier }
+        if (blocked && stage === 'info') { entered = true; await barrier }
         return { models: {} }
       }
       // a request is told the provider only for a chat.headers hook
@@ -269,8 +280,7 @@ async function main() {
       release()
       await until(idle, 'cancelled setup finishes')
       assert.equal(vendorCalls, 0, 'cancelled setup never starts vendor')
-      context.options = async () => ({ fetch: async () => { vendorCalls++; return context.reply } })
-      context.infoOf = async () => ({ models: {} })
+      blocked = false
       fetchOne()
       await until(idle, 'healthy fetch after cancelled setup')
       assert.equal(vendorCalls, 1)

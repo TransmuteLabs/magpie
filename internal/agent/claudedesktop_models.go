@@ -42,38 +42,30 @@ func desktopModelsHash(raw []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// desktopSyncModels writes p's inferenceModels as magpie lists them now,
-// takes away the one magpie wrote when nothing is picked, and leaves the
-// user's own alone.
-func desktopSyncModels(p desktopPaths) error {
-	if !desktopWired(p) {
-		return nil
-	}
+func (draft *desktopDraft) syncModels(p desktopPaths) error {
 	want, ok := gateway.DesktopInferenceModels()
 	if !ok {
 		return nil // the picks unknown: what is there stays
 	}
 	key := desktopModelsMark + p.key
-	marks := strings.Fields(stashShared()[key])
-	b, err := edit.Read(p.prof)
-	if err != nil || b == nil {
-		return err // no profile: desktopOn writes one, then this
+	marks := strings.Fields(draft.saved[key])
+	fields, err := draft.fields(p.prof)
+	if err != nil || draft.body(p.prof) == nil {
+		return err
 	}
-	raw, has := edit.GetJSONRaw(p.prof, "inferenceModels")
-	if has && !slices.Contains(marks, desktopModelsHash([]byte(raw))) {
-		return desktopSyncDiscovery(p, false) // the list is the user's
+	raw, has := fields["inferenceModels"]
+	if has && !slices.Contains(marks, desktopModelsHash(raw)) {
+		return draft.syncDiscovery(p, fields, false)
 	}
 	discovers, _ := gateway.DesktopDiscovers()
-	if err := desktopSyncDiscovery(p, want != nil && discovers); err != nil {
+	if err := draft.syncDiscovery(p, fields, want != nil && discovers); err != nil {
 		return err
 	}
 	if want == nil {
+		delete(draft.saved, key)
 		if has {
-			if err := edit.DelJSON(p.prof, "inferenceModels"); err != nil {
-				return err
-			}
+			return draft.patch(p.prof, nil, "inferenceModels")
 		}
-		forget(key)
 		return nil
 	}
 	next, err := json.Marshal(want)
@@ -81,42 +73,28 @@ func desktopSyncModels(p desktopPaths) error {
 		return err
 	}
 	h := desktopModelsHash(next)
-	if has && desktopModelsHash([]byte(raw)) == h {
-		stash(map[string]string{key: h})
+	draft.saved[key] = h
+	if has && desktopModelsHash(raw) == h {
 		return nil
 	}
-	// marked before it is written: a write cut short leaves a list magpie
-	// still knows for its own
-	stash(map[string]string{key: strings.Join(append(marks, h), " ")})
-	if err := edit.SetJSON(p.prof, edit.KV{Path: "inferenceModels", Value: json.RawMessage(next)}); err != nil {
-		return err
-	}
-	stash(map[string]string{key: h})
-	return nil
+	return draft.patch(p.prof, []edit.KV{{Path: "inferenceModels", Value: json.RawMessage(next)}})
 }
 
-// desktopSyncDiscovery has Desktop read /v1/models beside magpie's
-// inferenceModels while on, where Desktop's Code tab finds a later tier of
-// a model picked for two (gateway.DesktopDiscovers), and takes back the
-// modelDiscoveryEnabled magpie wrote once off. Unset, Desktop skips
-// /v1/models while the list names no bare tier word.
-func desktopSyncDiscovery(p desktopPaths, on bool) error {
+func (draft *desktopDraft) syncDiscovery(p desktopPaths, fields map[string]json.RawMessage, on bool) error {
 	key := desktopDiscoveryMark + p.key
-	ours := stashShared()[key] != ""
-	raw, has := edit.GetJSONRaw(p.prof, "modelDiscoveryEnabled")
-	if ours && (!has || strings.TrimSpace(raw) != "true") {
-		forget(key) // taken away or changed: the user's now
+	ours := draft.saved[key] != ""
+	raw, has := fields["modelDiscoveryEnabled"]
+	if ours && string(raw) != "true" {
+		delete(draft.saved, key)
 		ours = false
 	}
 	switch {
 	case on && !has:
-		stash(map[string]string{key: "1"})
-		return edit.SetJSON(p.prof, edit.KV{Path: "modelDiscoveryEnabled", Value: true})
+		draft.saved[key] = "1"
+		return draft.patch(p.prof, []edit.KV{{Path: "modelDiscoveryEnabled", Value: true}})
 	case !on && ours:
-		if err := edit.DelJSON(p.prof, "modelDiscoveryEnabled"); err != nil {
-			return err
-		}
-		forget(key)
+		delete(draft.saved, key)
+		return draft.patch(p.prof, nil, "modelDiscoveryEnabled")
 	}
 	return nil
 }

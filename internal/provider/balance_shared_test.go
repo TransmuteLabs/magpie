@@ -98,7 +98,7 @@ func TestKeysOfOneAccountShareItsBalance(t *testing.T) {
 		bh[quotaHistKey(p, u)] = []BalancePoint{{At: before, Amount: 8.80}}
 	}
 	bh[quotaHistKey("site", "other")] = []BalancePoint{{At: before.Add(-time.Hour), Amount: 8.39}, {At: before, Amount: 8.39}}
-	writeBalanceHist(bh)
+	writeBalanceHist(t.Context(), bh)
 	balanceHistMu.Unlock()
 	ForgetBalances()
 	want := "site|1-A031-Pro|$8.39|1-A031-Pro\nsite|2-S009-Plus|$8.39|1-A031-Pro\nsite|3-S010-Team-2|$8.39|1-A031-Pro\nsite|other|$8.39|\nsite|quota|$8.39|\npanel|t1|$8.39|\npanel|t2|$8.39|"
@@ -106,7 +106,7 @@ func TestKeysOfOneAccountShareItsBalance(t *testing.T) {
 		t.Fatalf("after they moved together:\n%s\nwant\n%s", got, want)
 	}
 	// as magpie quota --json and /v1/magpie/quotas tell them
-	for _, q := range quotaReport(nil, nil, KeyBalances(context.Background()), time.Now()) {
+	for _, q := range quotaReport(t.Context(), nil, nil, KeyBalances(context.Background()), time.Now()) {
 		if q.User == "2-S009-Plus" && q.SharedBalance != "1-A031-Pro" {
 			t.Fatalf("the report's card: %+v", q)
 		}

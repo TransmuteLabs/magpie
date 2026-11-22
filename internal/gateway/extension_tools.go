@@ -17,13 +17,6 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-type extensionToolAccountSource interface {
-	ToolModules(context.Context) ([]extension.Installed, error)
-	Store() *extension.Store
-}
-
-var extensionToolAccounts = func() extensionToolAccountSource { return extension.Default() }
-
 var runExtensionPluginTool = plugin.RunExtensionTool
 
 // extensionToolHTTPContext replaces inherited authority using authenticated
@@ -77,34 +70,8 @@ func extensionToolContext(ctx context.Context, spec string, args json.RawMessage
 		if decoder.Decode(&selection) != nil || selection.Provider == "" || selection.Account == "" {
 			return ctx, nil, errors.New("extension account context needs an explicit provider and account")
 		}
-		manager := extensionToolAccounts()
-		entries, err := manager.ToolModules(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx, nil, ctx.Err()
-			}
-			return ctx, nil, errors.New("extension account declarations could not be read")
-		}
-		declared := false
-		for _, entry := range entries {
-			if entry.Manifest.ID != id || !entry.Manifest.Contract.Has(sdk.AccountAuth) {
-				continue
-			}
-			for _, provider := range entry.Manifest.Providers {
-				declared = declared || provider.ID == selection.Provider
-			}
-		}
-		if !declared {
-			return ctx, nil, errors.New("extension does not declare authentication for this provider")
-		}
-		account, err := manager.Store().GetAccountContext(ctx, id, selection.Provider, selection.Account)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx, nil, ctx.Err()
-			}
-			return ctx, nil, errors.New("extension account is unavailable")
-		}
-		scope.Provider, scope.Account, scope.Generation = account.Provider, account.ID, account.Generation
+		scope.Provider, scope.Account = selection.Provider, selection.Account
+		var err error
 		ctx, scope, err = provider.PrepareExtensionAccountScope(ctx, scope)
 		if err != nil {
 			return ctx, nil, err

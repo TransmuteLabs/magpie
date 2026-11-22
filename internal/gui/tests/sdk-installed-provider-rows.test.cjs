@@ -39,7 +39,7 @@ function fixture(last = false) {
     view: "agents", SUBS: [], panelAccts: null,
     providers: {
       last,
-      providers: [{ account: { agent: "exact-sdk-go", logins: [{}] } }],
+      providers: [{ account: { agent: "exact-sdk-go", logins: [{ extensionGeneration: "1" }] } }],
       sdkSubscriptions: [
         { id: "exact-sdk-zen", name: "Example Zen", revision: "native-fixture", methods: [{ id: "key" }] },
         { id: "exact-sdk-public", name: "Example Public", page: "sdk-fixture" },
@@ -64,7 +64,7 @@ function fixture(last = false) {
   const source = plugins.replace(/\}\)\(\);\s*$/, "window.installedRow = installedRow;\n})();");
   assert.notEqual(source, plugins);
   vm.runInContext(`${owner("PUZZLE")}\n${owner("hasLogins")}\n${owner("sdkSubs")}\n${signIn}\n${options}\n${source}`, context);
-  return { row: context.installedRow, calls, menu: () => menu };
+  return { row: context.installedRow, calls, menu: () => menu, providers: context.providers };
 }
 
 const suite = {
@@ -100,6 +100,27 @@ test("Installed SDK row uses ordinary provider accounts and authorized sign-in c
   assert.deepEqual(Array.from(menu().choices, (choice) => choice.v), ["exact-sdk-zen", "exact-sdk-public"]);
   await menu().select("exact-sdk-zen", event);
   assert.deepEqual(calls, [["show", "providers"], ["start", "exact-sdk-zen"]]);
+});
+
+test("Installed offers sign-in for expired SDK accounts and keeps paused accounts signed in", async () => {
+  const { row, calls, providers } = fixture();
+  const id = "exact-sdk-go";
+  const entry = { ...suite, providers: ["Example Go"], serves: ["Example Go"], sdk: { ...suite.sdk, providerIDs: [id] } };
+  providers.sdkSubscriptions.push({ id, revision: "native-fixture", methods: [{ id: "key" }] });
+  const logins = providers.providers[0].account.logins;
+  logins[0].lapsed = "Sign-in has expired";
+  const expired = row(entry);
+  assert.match(expired.textContent, /Example Go: not signed in/);
+  const sign = expired.all((node) => node.tag === "button" && node.text === "Sign in")[0];
+  assert.ok(sign);
+  sign.onclick({ stopPropagation() {} });
+  await new Promise(setImmediate);
+  assert.deepEqual(calls, [["show", "providers"], ["start", id]]);
+
+  logins.push({ extensionGeneration: "2", paused: true });
+  const paused = row(entry);
+  assert.match(paused.textContent, /Example Go: signed in/);
+  assert.ok(!buttons(paused).includes("Sign in"));
 });
 
 test("Installed rows suppress unavailable SDK actions and preserve legacy sign-in", async () => {

@@ -1656,7 +1656,11 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 		own bool
 	}
 	var jobs []job
-	for _, p := range All() {
+	providers := AllContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	for _, p := range providers {
 		if p.Hidden || p.Off || p.Account != nil || p.Key == "" {
 			continue
 		}
@@ -1791,11 +1795,18 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 	if ctx.Err() == nil {
 		// each balance kept, and drawn over time with its runs-out, on
 		// the cards themselves (an estimate is neither: noteBalanceHistory)
-		noteBalanceHistory(out, time.Now())
+		noteBalanceHistory(ctx, out, time.Now())
+		if ctx.Err() != nil {
+			return out
+		}
 		// the history of the cards read now and of those kept, a partial
 		// read (one card's refresh) keeping the others
 		h := sharedBalanceHist(slices.Concat(kept, out))
 		c.Lock()
+		if ctx.Err() != nil {
+			c.Unlock()
+			return out
+		}
 		// the keys that read one account's balance, told apart afresh
 		// over every card (balance_shared.go)
 		c.data = shareBalances(cacheCards(c.data, out, seq, again), h)

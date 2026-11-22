@@ -12,6 +12,11 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	AccountCheckinRateLimitAPIMinor = 20
+	AccountCheckinRateLimited       = "rate-limited"
+)
+
 type AccountCheckinDescriptor struct {
 	Action  string `json:"action"`
 	Recheck bool   `json:"recheck,omitempty"`
@@ -66,6 +71,10 @@ func (request AccountCheckinRequest) Validate() error {
 func (result AccountCheckinResult) Validate() error {
 	switch result.Outcome {
 	case "claimed", "done", "inactive", "ineligible", "failed", "captcha", "own-app":
+	case AccountCheckinRateLimited:
+		if result.Until == "" {
+			return fmt.Errorf("rate-limited check-in requires an until boundary")
+		}
 	default:
 		return fmt.Errorf("unknown account check-in outcome")
 	}

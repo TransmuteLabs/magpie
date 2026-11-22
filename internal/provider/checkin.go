@@ -16,11 +16,18 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
+	"maps"
+	"net/http"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -44,6 +51,7 @@ type checkiner struct {
 	label    string // the vendor in the log
 	recheck  bool   // its campaigns can change before the Beijing day ends
 	accounts func() []checkinAcct
+	legacy   legacyCheckinKeys
 	// only, of a press for one account (CheckInAccount), is its key: the
 	// others are neither asked nor said, and it is asked even while left
 	// out of the daily check-in, whose switch it leaves as it is
@@ -61,31 +69,42 @@ func (c checkiner) clock() time.Time { return c.now() }
 // checkinNow checks each account in use in for today that isn't yet, and
 // keeps what came of it; soon, a failure is tried again without waiting
 // out wbCheckinRetry. It says how every account stands, those it didn't
-// ask as last kept.
+// ask as last kept. An empty outcome represents a call with no observation.
 func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin {
-	if discoveryOff() {
+	if discoveryOff() || filelock.LockMutex(ctx, c.mu) != nil {
 		return nil
 	}
-	c.mu.Lock()
 	defer c.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	now := c.now()
 	day := wbCheckinDay(now)
-	st, err := readCheckins(c.path)
+	snapshot, err := readCheckins(c.path)
 	if err != nil {
 		// unknown, never empty: nothing is asked or written, the file
 		// is left as it is, and each account says why
 		return c.unread(now, err)
 	}
 	var out []WorkBuddyCheckin
-	changed := false
+	previous := snapshot
+	migrated := false
+	if len(c.legacy) > 0 {
+		previous = maps.Clone(snapshot)
+		migrated = c.legacy.moveHistory(previous)
+	}
+	var observations map[string]WorkBuddyCheckin
 	// one account signed in twice (the built-in and the plugin) is
 	// checked in once
 	asked := map[string]bool{}
 	// and an account the user left out is not asked at all, by the loop
 	// or a press (#1902)
-	off := checkinOff()
+	off := checkinOff(c.legacy)
 	gate := checkinGate(now)
 	for _, a := range c.accounts() {
+		if ctx.Err() != nil {
+			break
+		}
 		if !a.On || a.key == "" || asked[a.key] || !c.reaches(a.key, off) {
 			continue
 		}
@@ -95,7 +114,7 @@ func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin
 			continue
 		}
 		asked[a.key] = true
-		prev, seen := st[a.key]
+		prev, seen := previous[a.key]
 		// the loop asks for a day not yet asked from the user's time of
 		// day on (checkinGate); a press asks at once
 		if !soon && (!seen || prev.Day != day) && now.Before(gate) {
@@ -142,31 +161,138 @@ func (c checkiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyCheckin
 		// provider set to direct whose check-in went out through the
 		// global proxy was refused there (#2777)
 		r := a.do(withCheckinDay(ViaLogin(ctx, a.provider, a.User), day))
+		if r.Outcome == "" {
+			continue
+		}
 		r.Day, r.At = day, now
 		if r.Offline && seen && prev.Day == day && prev.Offline {
 			r.Tries = prev.Tries + 1
 		}
-		switch {
-		case r.Outcome == CheckinClaimed:
+		if r.Outcome == CheckinClaimed {
 			r.Claimed = now
-		case seen && prev.claimedOn(day):
-			// a done after magpie's own claim is that claim
-			r.Claimed = cmp.Or(prev.Claimed, prev.At)
 		}
-		st[a.key], changed = r, true
+		r = keepCheckinClaim(r, prev)
+		if observations == nil {
+			observations = map[string]WorkBuddyCheckin{}
+		}
+		observations[a.key] = r
 		r.User, r.By, r.Asked = a.User, c.by, true
 		out = append(out, r.shown())
 	}
-	if changed {
-		if b, err := json.MarshalIndent(st, "", "  "); err == nil {
-			if err := writePrivate(c.path, append(b, '\n')); err != nil {
-				log.Printf("%s check-in: %v", c.label, err)
-			} else {
-				wroteCheckins(c.path, st)
+	if len(observations) > 0 || migrated && ctx.Err() == nil {
+		c.publishCheckins(ctx, snapshot, previous, observations)
+	}
+	c.legacy.adoptOff(ctx)
+	return out
+}
+
+func (c checkiner) publishCheckins(ctx context.Context, snapshot, previous, observations map[string]WorkBuddyCheckin) {
+	publication := ctx
+	if len(observations) > 0 {
+		publication = context.WithoutCancel(ctx)
+	}
+	lock := filelock.Mutex{Path: func() string { return c.path + ".lock" }}
+	if !lock.LockCheckedContext(publication) {
+		if publication.Err() == nil {
+			log.Printf("%s check-in: %s lock unavailable", c.label, c.path)
+		}
+		return
+	}
+	defer lock.Unlock()
+	current, err := readCheckins(c.path)
+	if err != nil {
+		return
+	}
+	changed := false
+	migrate := ctx.Err() == nil
+	for alias, keys := range c.legacy {
+		aliased, exists := current[alias]
+		if !exists {
+			continue
+		}
+		key := keys[0]
+		if original, seen := snapshot[alias]; !seen || !reflect.DeepEqual(original, aliased) {
+			if observed, asked := observations[key]; asked && !observed.At.After(aliased.At) {
+				delete(observations, key)
+			}
+			continue
+		}
+		if migrate {
+			moveCheckinAlias(current, alias, key, aliased)
+			changed = true
+		}
+	}
+	for key, observed := range observations {
+		if latest, exists := current[key]; exists {
+			if latest.At.After(observed.At) || latest.At.Equal(observed.At) && !reflect.DeepEqual(latest, previous[key]) {
+				withClaim := keepCheckinClaim(latest, observed)
+				if !withClaim.Claimed.Equal(latest.Claimed) {
+					current[key] = withClaim
+					changed = true
+				}
+				continue
+			}
+			observed = keepCheckinClaim(observed, latest)
+		}
+		current[key] = observed
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err == nil {
+		data = append(data, '\n')
+		if publication.Done() == nil {
+			err = writePrivate(c.path, data)
+		} else {
+			err = writePrivateQuietChecked(c.path, data, publication.Err)
+			if err == nil {
+				filememo.Forget()
 			}
 		}
 	}
-	return out
+	if err != nil {
+		if publication.Err() == nil {
+			log.Printf("%s check-in: %v", c.label, err)
+		}
+		return
+	}
+	wroteCheckins(c.path, current)
+}
+
+func keepCheckinClaim(result, previous WorkBuddyCheckin) WorkBuddyCheckin {
+	if previous.claimedOn(result.Day) {
+		claimed := cmp.Or(previous.Claimed, previous.At)
+		kept := result.Claimed
+		if result.Outcome == CheckinClaimed {
+			kept = cmp.Or(kept, result.At)
+		}
+		if kept.Before(claimed) {
+			result.Claimed = claimed
+		}
+	}
+	return result
+}
+
+func checkinReply(req *http.Request, send func(*http.Request) (*http.Response, error)) (*http.Response, []byte, error) {
+	if err := req.Context().Err(); err != nil {
+		return nil, nil, err
+	}
+	res, err := send(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	return res, body, err
+}
+
+func checkinRequestFailed(ctx context.Context, err error) WorkBuddyCheckin {
+	if errors.Is(err, ctx.Err()) {
+		return WorkBuddyCheckin{}
+	}
+	return wbCheckinFailed(err)
 }
 
 // checkinGate is when the loop first asks for the Beijing day now is on:
@@ -200,7 +326,7 @@ func checkinGate(now time.Time) time.Time {
 func (c checkiner) unread(now time.Time, err error) []WorkBuddyCheckin {
 	var out []WorkBuddyCheckin
 	listed := map[string]bool{}
-	off := checkinOff()
+	off := checkinOff(c.legacy)
 	for _, a := range c.accounts() {
 		if !a.On || a.key == "" || listed[a.key] || !c.reaches(a.key, off) {
 			continue
@@ -222,9 +348,9 @@ func (c checkiner) reaches(key string, off map[string]bool) bool {
 
 // checkinOff are the accounts left out of their vendor's daily check-in
 // (settings.CheckinOff), by their entry in its file.
-func checkinOff() map[string]bool {
+func checkinOff(legacy legacyCheckinKeys) map[string]bool {
 	off := map[string]bool{}
-	for _, k := range settings.Load().CheckinOff {
+	for _, k := range legacy.expandOff(settings.Load().CheckinOff) {
 		off[k] = true
 	}
 	return off
@@ -246,8 +372,27 @@ type CheckinAccount struct {
 // reaches, WorkBuddy's, Trae CN's, MiniMax Code's, Qoder's and the
 // plugins' that check in themselves, each once; asks nothing.
 func CheckinAccounts() []CheckinAccount {
-	cs := checkiners()
-	off := checkinOff()
+	cs, legacy := checkiners()
+	return checkinAccounts(cs, legacy)
+}
+
+// CheckinSettingsContext reads the providers once for the plugin and account
+// rows of the same Settings response.
+func CheckinSettingsContext(ctx context.Context) ([]PluginCheckin, []CheckinAccount) {
+	providers := allPluginCheckinProviders(ctx)
+	if ctx.Err() != nil {
+		return nil, nil
+	}
+	legacy := legacyPluginCheckinKeys(providers)
+	accounts := checkinAccounts(checkinersFor(ctx, providers, legacy), legacy)
+	if ctx.Err() != nil {
+		return nil, nil
+	}
+	return pluginCheckins(providers, legacy), accounts
+}
+
+func checkinAccounts(cs []checkiner, legacy legacyCheckinKeys) []CheckinAccount {
+	off := checkinOff(legacy)
 	var out []CheckinAccount
 	seen := map[string]bool{}
 	for _, c := range cs {
@@ -268,24 +413,37 @@ func CheckinAccounts() []CheckinAccount {
 // checkiners are every vendor's check-in: WorkBuddy's, Trae CN's, MiniMax
 // Code's, Qoder's and each plugin's that checks in itself, with its name
 // (a plugin's provider's, for WorkBuddyCheckin.Vendor; "" for a built-in).
-func checkiners() []checkiner {
-	cs, _ := namedCheckiners(context.Background())
-	return cs
+func checkiners() ([]checkiner, legacyCheckinKeys) {
+	cs, _, legacy := namedCheckiners(context.Background())
+	return cs, legacy
 }
 
-func namedCheckiners(ctx context.Context) ([]checkiner, []string) {
+func namedCheckiners(ctx context.Context) ([]checkiner, []string, legacyCheckinKeys) {
+	providers := allPluginCheckinProviders(ctx)
+	legacy := legacyPluginCheckinKeys(providers)
+	cs := checkinersFor(ctx, providers, legacy)
+	names := make([]string, len(cs)-len(providers), len(cs))
+	for _, provider := range providers {
+		names = append(names, provider.Name)
+	}
+	return cs, names, legacy
+}
+
+func checkinersFor(ctx context.Context, providers []pluginCheckinProvider, legacy legacyCheckinKeys) []checkiner {
+	workbuddy := newWBCheckiner()
+	workbuddy.accounts = func() []wbAccount { return wbCheckinAccountsContext(ctx) }
 	cs := []checkiner{
-		newWBCheckiner().checkiner(),
-		newTraeCheckiner(traeCheckinAccounts),
-		newMiniMaxCheckiner(miniMaxCheckinAccounts),
-		newQoderCheckiner(qoderCheckinAccounts, time.Now),
+		workbuddy.checkiner(),
+		newTraeCheckiner(func() []traeAccount { return traeCheckinAccountsContext(ctx) }),
+		newMiniMaxCheckiner(func() []miniMaxAccount { return miniMaxCheckinAccountsContext(ctx) }),
+		newQoderCheckiner(func() []qoderCheckinAcct { return qoderCheckinAccountsContext(ctx) }, time.Now),
 	}
-	names := make([]string, len(cs))
-	for _, p := range allPluginCheckinProviders(ctx) {
-		cs = append(cs, p.checkiner(time.Now))
-		names = append(names, p.Name)
+	for _, p := range providers {
+		runner := p.checkiner(time.Now)
+		runner.legacy = legacy
+		cs = append(cs, runner)
 	}
-	return cs, names
+	return cs
 }
 
 // CheckInAccount checks one account in for today now, as a press of Check
@@ -297,7 +455,7 @@ func CheckInAccount(ctx context.Context, by, key string) []WorkBuddyCheckin {
 	if key == "" || ctx.Err() != nil {
 		return nil
 	}
-	cs, names := namedCheckiners(ctx)
+	cs, names, _ := namedCheckiners(ctx)
 	if ctx.Err() != nil {
 		return nil
 	}

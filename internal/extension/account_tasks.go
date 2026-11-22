@@ -187,7 +187,7 @@ func (manager *Manager) beginAccountTaskForeground(ctx context.Context, lease *L
 	}) {
 		return ctx, func(bool) {}, nil
 	}
-	stamp, err := manager.store.UsageStamp(scope)
+	stamp, err := manager.store.UsageStampContext(ctx, scope)
 	if err != nil {
 		return ctx, func(bool) {}, err
 	}
@@ -197,7 +197,7 @@ func (manager *Manager) beginAccountTaskForeground(ctx context.Context, lease *L
 		if _, err := lease.Call(ctx, sdk.MethodProviderUsage, usageScope, sdk.UsageRequest{}, nil); err != nil {
 			return ctx, func(bool) {}, err
 		}
-		if err := manager.store.UsageReady(scope); err != nil {
+		if err := manager.store.UsageReadyContext(ctx, scope); err != nil {
 			return ctx, func(bool) {}, err
 		}
 	}

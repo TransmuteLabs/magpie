@@ -1,85 +1,237 @@
 package plugin
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-// TestAuthLockWaitDoesNotFreezeTheHost (#5112): a plugin-auth.json.lock held
-// by another host makes changeAuth wait, and the wait must leave the event
-// loop free: every other plugin's timers, requests and model lists run on
-// the same loop. Atomics.wait in pause() froze it for as long as the lock
-// was held (up to 20s). The change is still made once the lock is let go,
-// concurrent changes in one host don't lose each other's, and a lock
-// left by a dead host (older than AUTH_LOCK_STALE) is taken over.
 func TestAuthLockWaitDoesNotFreezeTheHost(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("no node on PATH")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	sandbox(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, node, "-e", authLockAsyncJS, filepath.Join(t.TempDir(), "plugin-auth.json"))
-	cmd.Stdin = bytes.NewReader(hostJS)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("%v\n%s", err, out)
+	abs, err := filepath.Abs("testdata/renew/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AuthPath(), []byte(`{"renewco":{"type":"api","key":"test-source"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host, err := get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopOwner := startSavedAuthOwner(t, ctx)
+	defer stopOwner()
+
+	lock := AuthPath() + ".lock"
+	old := time.Now().Add(-11 * time.Second)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	bunWrite := make(chan error, 1)
+	go func() {
+		bunWrite <- host.call(ctx, "import", map[string]any{
+			"provider": "renewco", "key": "renewco#bun",
+			"auth": map[string]any{"type": "api", "key": "test-bun"},
+		}, nil)
+	}()
+	goWrite := make(chan error, 1)
+	go func() {
+		goWrite <- EditAuth(func(all map[string]json.RawMessage) (bool, error) {
+			all["renewco#go"] = json.RawMessage(`{"type":"api","key":"test-go"}`)
+			return true, nil
+		})
+	}()
+	defer func() {
+		stopOwner()
+		cancel()
+		for _, write := range []chan error{bunWrite, goWrite} {
+			if write != nil {
+				<-write
+			}
+		}
+	}()
+	poll, stopPoll := context.WithTimeout(ctx, time.Second)
+	err = host.call(poll, "gatewayStates", nil, nil)
+	stopPoll()
+	if err != nil {
+		t.Fatalf("unrelated Bun RPC stalled while auth owner was live: %v", err)
+	}
+	select {
+	case err := <-bunWrite:
+		bunWrite = nil
+		t.Fatalf("Bun writer finished while the saved-auth owner was live: %v", err)
+	case err := <-goWrite:
+		goWrite = nil
+		t.Fatalf("Go writer finished while the saved-auth owner was live: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	stopOwner()
+	if err := <-bunWrite; err != nil {
+		bunWrite = nil
+		t.Fatalf("Bun write after owner death: %v", err)
+	}
+	bunWrite = nil
+	if err := <-goWrite; err != nil {
+		goWrite = nil
+		t.Fatalf("Go write after owner death: %v", err)
+	}
+	goWrite = nil
+	for _, key := range []string{"renewco", "renewco#go", "renewco#bun"} {
+		if authFile(t)[key] == nil {
+			t.Fatalf("missing account %q after publishing both changes", key)
+		}
+	}
+	if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy reservation left behind: %v", err)
 	}
 }
 
-const authLockAsyncJS = `
-const assert = require('node:assert/strict')
-const realFs = require('node:fs')
-const path = require('node:path')
-const vm = require('node:vm')
-const source = realFs.readFileSync(0, 'utf8')
-const start = source.indexOf('function parseAuth(')
-const end = source.indexOf('// ---- accounts', start)
-assert.ok(start >= 0 && end > start, 'production section exists')
-const authPath = process.argv[1]
-const context = vm.createContext({
-  fs: realFs, path, authPath, Buffer, structuredClone, Date, Promise, Math, JSON, Object, Error, Array, String, Number,
-  setTimeout, process, toErr: () => {}, send: () => {},
-})
-vm.runInContext(source.slice(start, end), context)
-const run = code => vm.runInContext(code, context)
-const lock = authPath + '.lock'
+func startSavedAuthOwner(t *testing.T, ctx context.Context) func() {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSavedAuthLockOwner$")
+	cmd.Env = append(os.Environ(), "MAGPIE_TEST_SAVED_AUTH_OWNER=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	stop := func() {
+		if !stopped {
+			stopped = true
+			_ = cmd.Process.Kill()
+			_ = stdin.Close()
+			_ = cmd.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || ready != "holding saved auth\n" {
+		t.Fatalf("saved-auth subprocess did not acquire its lock: %q, %v", ready, err)
+	}
+	return stop
+}
 
-;(async () => {
-  realFs.writeFileSync(authPath, JSON.stringify({ a: { type: 'api', key: 'k1' } }))
+func TestSavedAuthLockOwner(t *testing.T) {
+	if os.Getenv("MAGPIE_TEST_SAVED_AUTH_OWNER") != "1" {
+		return
+	}
+	err := WithSavedAuth(t.Context(), "renewco", "renewco", func(json.RawMessage) error {
+		fmt.Println("holding saved auth")
+		_, err := io.Copy(io.Discard, os.Stdin)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
-  // #5271: release from the event loop itself, without counting timer ticks.
-  realFs.writeFileSync(lock, '')
-  const released = new Promise((resolve, reject) => setImmediate(() => {
-    try {
-      assert.ok(realFs.existsSync(lock), 'the event loop ran while the other host still held the lock')
-      assert.equal(JSON.parse(realFs.readFileSync(authPath, 'utf8')).b, undefined, 'the change is still waiting')
-      realFs.unlinkSync(lock)
-      resolve()
-    } catch (e) { reject(e) }
-  }))
-  const waiting = run('changeAuth((all) => { all.b = { type: "api", key: "k2" } })')
-  await released
-  await waiting
-  const now = JSON.parse(realFs.readFileSync(authPath, 'utf8'))
-  assert.equal(now.b.key, 'k2')
-  assert.equal(now.a.key, 'k1', 'the others are kept')
-  assert.ok(!realFs.existsSync(lock), 'the lock is let go')
+func TestAuthWriteRespectsAnOlderWritersReservation(t *testing.T) {
+	sandbox(t)
+	if err := os.MkdirAll(filepath.Dir(AuthPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := AuthPath() + ".lock"
+	if err := os.WriteFile(lock, []byte("old owner"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-11 * time.Second)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte(`{"renewco":{"type":"api","key":"test-source"}}`)
+	if err := os.WriteFile(AuthPath(), before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	if err := SignOut(ctx, "renewco", "renewco"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sign-out with the older writer's reservation: %v", err)
+	}
+	if recorded, err := os.ReadFile(lock); err != nil || string(recorded) != "old owner" {
+		t.Fatalf("older writer lost its reservation: %v", err)
+	}
+	if recorded, err := os.ReadFile(AuthPath()); err != nil || string(recorded) != string(before) {
+		t.Fatalf("credentials changed while the older writer held its reservation: %v", err)
+	}
+	abandoned := lock + ".abandoned"
+	if err := os.Rename(lock, abandoned); err != nil {
+		t.Fatal(err)
+	}
+	if err := SignOut(t.Context(), "renewco", "renewco"); err != nil {
+		t.Fatal(err)
+	}
+	if len(authFile(t)) != 0 {
+		t.Fatal("sign-out after offline recovery kept the account")
+	}
+	if recorded, err := os.ReadFile(abandoned); err != nil || string(recorded) != "old owner" {
+		t.Fatalf("the moved reservation changed during recovery: %v", err)
+	}
+}
 
-  // 20 changes at once lose none
-  await Promise.all(Array.from({ length: 20 }, (_, i) => run('changeAuth((all) => { all.n = { n: (all.n?.n ?? 0) + 1 } })')))
-  assert.equal(JSON.parse(realFs.readFileSync(authPath, 'utf8')).n.n, 20, 'no two writers at once')
+func TestAuthStoreRejectsAnUpdateFromAnOlderSnapshot(t *testing.T) {
+	sandbox(t)
+	path := AuthPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"renewco":{"type":"api","key":"old"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := editHostAuth(t.Context(), path, authStoreRequest{ID: 1})
+	if err != nil || before.Snapshot == nil {
+		t.Fatalf("reading the auth snapshot failed: %v", err)
+	}
+	if err := SignOut(t.Context(), "renewco", "renewco"); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := editHostAuth(t.Context(), path, authStoreRequest{
+		ID: 2, Version: before.Snapshot.Version,
+		Records: json.RawMessage(`{"renewco":{"type":"api","key":"stale-renewal"}}`),
+	})
+	if err != nil || !stale.Retry {
+		t.Fatalf("an auth update from the old snapshot was accepted: %v", err)
+	}
+	if len(authFile(t)) != 0 {
+		t.Fatal("the account returned after it was signed out")
+	}
+}
 
-  // a lock left by a host that died
-  realFs.writeFileSync(lock, '')
-  const old = new Date(Date.now() - 11e3)
-  realFs.utimesSync(lock, old, old)
-  await run('changeAuth((all) => { all.c = { type: "api", key: "k3" } })')
-  assert.equal(JSON.parse(realFs.readFileSync(authPath, 'utf8')).c.key, 'k3', 'a stale lock is taken over')
-  assert.ok(!realFs.existsSync(lock))
-  console.log('ok')
-})().catch(e => { console.error(e); process.exit(1) })
-`
+func TestAuthWriteFailsWithoutAnOSLock(t *testing.T) {
+	sandbox(t)
+	path := AuthPath()
+	if err := os.MkdirAll(path+".write.lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	before := []byte(`{"renewco":{"type":"api","key":"test-source"}}`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SignOut(t.Context(), "renewco", "renewco"); err == nil {
+		t.Fatal("sign-out succeeded without an OS writer lock")
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("credentials changed while the OS lock was unavailable: %v", err)
+	}
+}

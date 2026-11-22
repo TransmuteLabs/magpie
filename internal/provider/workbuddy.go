@@ -360,12 +360,10 @@ func wbCallVia(ctx context.Context, do func(*http.Request) (*http.Response, erro
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	res, err := do(req)
+	res, b, err := checkinReply(req, do)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	var env struct {
 		Code json.Number     `json:"code"`
 		Msg  string          `json:"msg"`

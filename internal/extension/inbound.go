@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -38,29 +39,67 @@ func (m *Manager) Protocols() (*codec.Registry, error) {
 }
 
 func (m *Manager) ProtocolsContext(ctx context.Context) (*codec.Registry, error) {
-	entries, err := m.readContributionEntries(ctx)
+	if m == nil || m.isClosed() {
+		return nil, errContributionRevoked
+	}
+	var registry *codec.Registry
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		selected := make([]inboundGeneration, 0, len(view.inbound))
+		for _, index := range view.inbound {
+			entry := view.enabledEntry(view.entries[index])
+			if activeRoot(entry) {
+				selected = append(selected, inboundGeneration{index, entry.EnableGeneration})
+			}
+		}
+		m.protocolMu.Lock()
+		defer m.protocolMu.Unlock()
+		if previous := m.protocols; previous != nil && previous.catalog == view.validatedCatalog && slices.Equal(previous.selected, selected) {
+			registry = previous.registry
+			return nil
+		}
+		var adapters []codec.Inbound
+		for _, generation := range selected {
+			entry := view.entries[generation.index]
+			for _, inbound := range entry.Manifest.Inbounds {
+				adapters = append(adapters, &remoteInbound{
+					manager: m, module: entry.Manifest.ID, revision: entry.Revision, enableGeneration: generation.enablement,
+					descriptor: inbound, discovery: entry.Manifest.Contract.Has(sdk.ModelDiscovery),
+					tools:             entry.Manifest.Contract.Has(sdk.ToolProvider),
+					executor:          entry.Manifest.Contract.Version.Minor >= 4 && entry.Manifest.Contract.Has(sdk.OutboundExecutor),
+					accountOperations: entry.Manifest.Contract.Has(sdk.NativeAccountOperations),
+				})
+			}
+		}
+		compiled, err := codec.New(adapters...)
+		if err != nil {
+			return err
+		}
+		m.protocols = &installedProtocols{catalog: view.validatedCatalog, selected: selected, registry: compiled}
+		registry = compiled
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	var adapters []codec.Inbound
-	for _, entry := range entries {
-		for _, inbound := range entry.Manifest.Inbounds {
-			adapters = append(adapters, &remoteInbound{
-				manager: m, module: entry.Manifest.ID, revision: entry.Revision,
-				descriptor: inbound, discovery: entry.Manifest.Contract.Has(sdk.ModelDiscovery),
-				tools:             entry.Manifest.Contract.Has(sdk.ToolProvider),
-				executor:          entry.Manifest.Contract.Version.Minor >= 4 && entry.Manifest.Contract.Has(sdk.OutboundExecutor),
-				accountOperations: entry.Manifest.Contract.Has(sdk.NativeAccountOperations),
-			})
-		}
-	}
-	return codec.New(adapters...)
+	return registry, nil
+}
+
+type inboundGeneration struct {
+	index      int
+	enablement string
+}
+
+type installedProtocols struct {
+	catalog  *validatedCatalog
+	selected []inboundGeneration
+	registry *codec.Registry
 }
 
 type remoteInbound struct {
 	manager           *Manager
 	module            string
 	revision          string
+	enableGeneration  string
 	descriptor        sdk.InboundDescriptor
 	discovery         bool
 	tools             bool
@@ -112,13 +151,11 @@ func (call *remoteCall) ready(ctx context.Context) error {
 		return call.err
 	}
 	if call.lease == nil {
-		lease, err := call.manager.AcquireNative(ctx, call.module)
+		lease, err := call.manager.acquireNative(ctx, call.module, &expectedGeneration{
+			packageRevision: call.revision, enableGeneration: &call.enableGeneration,
+		})
 		if err != nil {
 			return err
-		}
-		if lease.Revision() != call.revision {
-			lease.Close()
-			return errors.New("extension changed before the native request began")
 		}
 		call.lease = lease
 		pinInboundLease(ctx, lease)

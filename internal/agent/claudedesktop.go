@@ -33,7 +33,6 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -202,43 +201,7 @@ func claudeDesktop(home string) *Agent {
 					Note: "Desktop's third-party gateway: Code and Cowork on magpie's models, no Anthropic sign-in (restart Desktop)"}}
 			},
 		}, desktopGatewayField(ps, func() error { return desktopApply(home, ps, magpieID) })}, append(desktopTierFields(home, ps), desktopSubagentField(ps), desktopSubagentEffortField(ps))...),
-		// a Desktop already on magpie gets the import and tool search
-		// policies too (desktopSeedImport, desktopSeedToolSearch,
-		// desktopSeedPrefer1M), and a
-		// profile for magpie's gateway it applies a key the gateway takes
-		// (desktopKeyApplied)
-		Sync: func() error {
-			var errs []error
-			for _, p := range ps {
-				if desktopWired(p) {
-					if err := desktopSeedImport(p); err != nil {
-						errs = append(errs, err)
-					}
-					if err := desktopSeedToolSearch(p); err != nil {
-						errs = append(errs, err)
-					}
-					if err := desktopSeedPrefer1M(p); err != nil {
-						errs = append(errs, err)
-					}
-					if err := desktopKeyApplied(p); err != nil {
-						errs = append(errs, err)
-					}
-					// the models and picks as they are now (a provider
-					// saved or removed reaches it through SyncCatalog)
-					if err := desktopSyncModels(p); err != nil {
-						errs = append(errs, err)
-					}
-					// a Desktop on magpie from before the servers were
-					// carried gets them once
-					if stashShared()[desktopMCPSeen+p.key] == "" {
-						if err := desktopCarryMCP(p); err != nil {
-							errs = append(errs, err)
-						}
-					}
-				}
-			}
-			return joinErrs(errs)
-		},
+		Sync: func() error { return desktopSyncSettings(ps) },
 	}
 }
 
@@ -299,20 +262,40 @@ func desktopRead(ps []desktopPaths) []desktopPaths {
 // desktopCheck is what keeps one set of Desktop's folders off magpie's
 // gateway, "" for nothing.
 func desktopCheck(p desktopPaths) string {
-	prof := p.prof
-	if id, _ := edit.GetJSON(p.meta, "appliedId"); id != desktopProfileID {
-		// one for magpie's gateway the user applied is on magpie too
-		if prof = desktopAppliedGateway(p); prof == "" {
-			return "Claude Desktop uses another gateway configuration now (appliedId in configLibrary/_meta.json), not magpie's"
-		}
+	meta, err := desktopReadFields(p.meta)
+	if err != nil {
+		return err.Error()
 	}
-	if !desktop3p(p, prof) {
+	if err := desktopHybridCheck(meta); err != nil {
+		return err.Error()
+	}
+	prof := desktopProfilePath(p, desktopString(meta["appliedId"]))
+	if prof == "" {
+		return desktopOtherProfile
+	}
+	profile, err := desktopReadFields(prof)
+	if err != nil {
+		return err.Error()
+	}
+	if desktopString(profile["inferenceProvider"]) != "gateway" ||
+		prof != p.prof && !desktopIsOurGateway(desktopString(profile["inferenceGatewayBaseUrl"])) {
+		return desktopOtherProfile
+	}
+	if err := desktopProfileCheck(profile); err != nil {
+		return err.Error()
+	}
+	saved, err := desktopReadFields(p.config3p)
+	if err != nil {
+		return err.Error()
+	}
+	if !desktop3p(profile, saved) {
 		return "Claude Desktop's deploymentMode (Claude-3p/claude_desktop_config.json) is 1p now, so it signs in with Anthropic rather than using magpie"
 	}
 	gw := desktopGateway()
 	want := desktopKey(gw)
 	return wiringOff("Claude Desktop", prof, func(k string) (string, bool) {
-		v, ok := edit.GetJSON(prof, k)
+		raw, ok := profile[k]
+		v := desktopString(raw)
 		if k != "inferenceGatewayApiKey" {
 			return v, ok
 		}
@@ -321,6 +304,9 @@ func desktopCheck(p desktopPaths) string {
 		// not said to be changed
 		open, known := desktopOpen(k, v)
 		if !known {
+			if mark := stashShared()[desktopKeyMark+p.key]; prof == p.prof && mark != "" && mark != desktopValueHash(want) {
+				return "sealed for the previous gateway key", true
+			}
 			return want, true
 		}
 		if prof != p.prof && desktopKeyTaken(open, want) {
@@ -330,22 +316,13 @@ func desktopCheck(p desktopPaths) string {
 	}, "inferenceGatewayBaseUrl", gw, "inferenceGatewayApiKey", want)
 }
 
-// desktop3p: Desktop starts in its 3p mode with prof, the gateway profile
-// it applies, as Desktop decides it (m4 in 4.4212's and 2.7032's
-// index.pre.js): with the profile's disableDeploymentModeChooser, whatever
-// deploymentMode says, and otherwise unless Claude-3p's
-// claude_desktop_config.json holds "1p" — none is 3p. The Claude folder's
-// deploymentMode isn't read, and Desktop deletes Claude-3p's itself: a
-// stored "1p" with no claude.ai sign-in is dropped at start and Desktop
-// relaunches in 3p ("deploymentMode written { mode: undefined }"), so
-// requiring "3p" in both files called a Desktop on magpie off it (dev_quj
-// on X: "已不经过 magpie：配置已变更" after a restart).
-func desktop3p(p desktopPaths, prof string) bool {
-	if c, _ := edit.GetJSON(prof, "disableDeploymentModeChooser"); c == "true" {
-		return true
+func desktop3p(profile, saved map[string]json.RawMessage) bool {
+	if desktopModeCheck(profile) != nil {
+		return false
 	}
-	m, _ := edit.GetJSON(p.config3p, "deploymentMode")
-	return m != "1p"
+	return desktopString(profile["deploymentMode"]) == "3p" ||
+		bytes.Equal(profile["disableDeploymentModeChooser"], []byte("true")) ||
+		desktopString(saved["deploymentMode"]) != "1p"
 }
 
 // desktopKeyTaken: the gateway takes v where magpie gives Desktop want,
@@ -366,65 +343,37 @@ func desktopKeyTaken(v, want string) bool {
 // Desktop ran on magpie). It is the user's profile: magpie keeps it
 // applied and sets nothing in it but a key the gateway refuses.
 func desktopAppliedGateway(p desktopPaths) string {
-	id, _ := edit.GetJSON(p.meta, "appliedId")
-	if id == "" || id == desktopProfileID || filepath.Base(id) != id || strings.HasPrefix(id, ".") {
+	meta, err := desktopReadFields(p.meta)
+	if err != nil || desktopHybridCheck(meta) != nil {
 		return ""
 	}
-	f := filepath.Join(p.library, id+".json")
-	b, err := os.ReadFile(f)
-	if err != nil || !desktopObjectBytes(b) {
+	path := desktopProfilePath(p, desktopString(meta["appliedId"]))
+	if path == "" || path == p.prof {
 		return ""
 	}
-	var prof struct {
-		Provider string `json:"inferenceProvider"`
-		BaseURL  string `json:"inferenceGatewayBaseUrl"`
+	profile, err := desktopReadFields(path)
+	if err == nil && desktopIsGatewayProfile(profile) {
+		return path
 	}
-	if json.Unmarshal(b, &prof) != nil || prof.Provider != "gateway" || !desktopIsOurGateway(prof.BaseURL) {
-		return ""
-	}
-	return f
-}
-
-// desktopKeyApplied gives the profile desktopAppliedGateway finds the
-// key magpie gives Desktop, only where the one it holds is a key this
-// gateway won't take (another magpie's, from the computer it was exported
-// on): one it takes stays, and so does one Desktop sealed that magpie
-// can't open (desktopOpen). Its address and every other setting, its
-// connectors among them, stay as they are.
-func desktopKeyApplied(p desktopPaths) error {
-	f := desktopAppliedGateway(p)
-	if f == "" {
-		return nil
-	}
-	want := desktopKey(desktopGateway())
-	v, _ := edit.GetJSON(f, "inferenceGatewayApiKey")
-	// a key Desktop sealed that magpie can't open is left as it is
-	if open, known := desktopOpen("inferenceGatewayApiKey", v); !known || desktopKeyTaken(open, want) {
-		return nil
-	}
-	kvs := []edit.KV{{Path: "inferenceGatewayApiKey", Value: want}}
-	if v, _ := edit.GetJSON(f, "inferenceGatewayAuthScheme"); v == "" {
-		kvs = append(kvs, edit.KV{Path: "inferenceGatewayAuthScheme", Value: "bearer"})
-	}
-	return edit.SetJSON(f, kvs...)
+	return ""
 }
 
 // desktopApply turns Desktop's wiring on for v == magpieID, off for "",
 // or writes it again where the address or key changed.
 func desktopApply(home string, ps []desktopPaths, v string) error {
-	on := desktopOn
-	if v == "" {
-		on = desktopOff
-	}
-	desktopAdoptStash(ps)
+	ps = slices.Clone(ps)
 	src := desktopLocaleFrom(ps)
-	for _, p := range ps {
+	for index := range ps {
 		if src != "" {
-			p.app = src
+			ps[index].app = src
 		}
-		if err := on(p); err != nil {
-			return err
-		}
+	}
+	change := desktopConnect
+	if v == "" {
+		change = desktopDisconnect
+	}
+	if err := desktopUpdate(ps, change); err != nil {
+		return err
 	}
 	// its Code tab is Claude Code, told what Desktop's ids for
 	// magpie's models can do while that one runs on magpie
@@ -465,16 +414,11 @@ func desktopTierFields(home string, ps []desktopPaths) []Field {
 				// the profile's list of models, whose behavesAs a pick
 				// has, and the window the Code tab's Claude Code holds it
 				// to (claudeBudget's behaves)
-				var errs []error
-				for _, p := range ps {
-					if err := desktopSyncModels(p); err != nil {
-						errs = append(errs, err)
-					}
-				}
+				err := desktopSyncSettings(ps)
 				if desktopWiredAny(ps) {
 					desktopClaudeSync(home)
 				}
-				return joinErrs(errs)
+				return err
 			},
 			Options: func(map[string]string) []Option {
 				if !desktopWiredAny(ps) {
@@ -553,58 +497,16 @@ func desktopSubagentEffortField(ps []desktopPaths) Field {
 
 // desktopWired: _meta.json lists magpie's profile.
 func desktopWired(p desktopPaths) bool {
-	entries, _, err := desktopEntries(p.meta)
+	fields, err := desktopReadFields(p.meta)
+	if err != nil {
+		return false
+	}
+	entries, err := desktopMetaEntries(fields)
 	return err == nil && slices.ContainsFunc(entries, desktopOurs)
 }
 
 // desktopWiredAny: any set of Desktop's folders is on magpie.
 func desktopWiredAny(ps []desktopPaths) bool { return slices.ContainsFunc(ps, desktopWired) }
-
-// desktopEntries reads _meta.json's entries, and whether the file is there.
-func desktopEntries(meta string) ([]json.RawMessage, bool, error) {
-	b, err := edit.Read(meta)
-	if err != nil || b == nil {
-		return nil, false, err
-	}
-	if len(bytes.TrimSpace(b)) == 0 {
-		return nil, true, nil
-	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, true, errors.New(meta + ": not a JSON object")
-	}
-	var entries []json.RawMessage
-	if raw, ok := doc["entries"]; ok {
-		if err := json.Unmarshal(raw, &entries); err != nil {
-			return nil, true, errors.New(meta + ": entries is not a list")
-		}
-	}
-	return entries, true, nil
-}
-
-func desktopEntryID(raw json.RawMessage) string {
-	var e struct {
-		ID string `json:"id"`
-	}
-	json.Unmarshal(raw, &e)
-	return e.ID
-}
-
-func desktopOurs(raw json.RawMessage) bool { return desktopEntryID(raw) == desktopProfileID }
-
-// desktopObject: the file is missing, empty or a JSON object — one magpie
-// can edit without losing anything.
-func desktopObject(path string) error {
-	b, err := edit.Read(path)
-	if err != nil || len(bytes.TrimSpace(b)) == 0 {
-		return err
-	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal(b, &m) != nil {
-		return errors.New(path + ": not a JSON object")
-	}
-	return nil
-}
 
 // The stash keeps what Desktop had before magpie: each file's
 // deploymentMode ("" when it had none), the profile applied, and the
@@ -629,337 +531,12 @@ const (
 	desktopMCPSeen = "claude-desktop.mcp-seen"
 )
 
-var desktopStashKeys = []string{desktopStashed, desktopMode, desktopMode3p, desktopApplied, desktopMade, desktopProfile, desktopLocale, desktopImport, desktopSearch, desktopLong, desktopSSH, desktopMCP, desktopMCPSeen, desktopModelsMark, desktopDiscoveryMark}
-
-// desktopAdoptStash moves the stash a packaged Desktop's folders got
-// before they had keys of their own (when magpie wrote only one set) onto
-// the package's keys: the stash is theirs when the package's folders are
-// on magpie and the real ones aren't.
-func desktopAdoptStash(ps []desktopPaths) {
-	var pkg, real *desktopPaths
-	for i := range ps {
-		if ps[i].key == ".package" {
-			pkg = &ps[i]
-		} else {
-			real = &ps[i]
-		}
-	}
-	if pkg == nil || real == nil || !desktopWired(*pkg) || desktopWired(*real) {
-		return
-	}
-	m := stashLoad()
-	if m[desktopStashed] == "" || m[desktopStashed+pkg.key] != "" {
-		return
-	}
-	kv := map[string]string{}
-	for _, k := range desktopStashKeys {
-		kv[k+pkg.key], kv[k] = m[k], ""
-	}
-	stash(kv)
-}
-
-// desktopOn points Claude Desktop at the gateway: deploymentMode 3p in both
-// config files, magpie's profile written and applied. Every other key, and
-// every other profile, stays as it is.
-func desktopOn(p desktopPaths) error {
-	// nothing is written unless every file can be
-	for _, f := range []string{p.config, p.config3p, p.prof} {
-		if err := desktopObject(f); err != nil {
-			return err
-		}
-	}
-	entries, _, err := desktopEntries(p.meta)
-	if err != nil {
-		return err
-	}
-	wired := slices.ContainsFunc(entries, desktopOurs)
-	if !wired {
-		var made []string
-		for _, f := range []string{p.dir, p.config, p.dir3p, p.config3p, p.library, p.meta, p.app3p} {
-			if _, err := os.Stat(f); err != nil {
-				made = append(made, f)
-			}
-		}
-		mode, _ := edit.GetJSON(p.config, "deploymentMode")
-		mode3p, _ := edit.GetJSON(p.config3p, "deploymentMode")
-		applied, _ := edit.GetJSON(p.meta, "appliedId")
-		k := p.key
-		forget(desktopMode+k, desktopMode3p+k, desktopApplied+k, desktopMade+k, desktopLocale+k)
-		stash(map[string]string{desktopStashed + k: "1", desktopMode + k: mode, desktopMode3p + k: mode3p,
-			desktopApplied + k: applied, desktopMade + k: strings.Join(made, "\n")})
-	}
-
-	// the profile: the gateway's address and key set, Desktop's own
-	// settings in it (the user's, from its window) kept, and those it had
-	// when switched off put back (#2035)
-	if b, _ := edit.Read(p.prof); len(bytes.TrimSpace(b)) == 0 {
-		if err := os.MkdirAll(p.library, 0o755); err != nil {
-			return err
-		}
-		was := []byte("{}\n")
-		if kept := unstash(desktopProfile + p.key); kept != "" && desktopObjectBytes([]byte(kept)) {
-			was = []byte(kept)
-		} else if own := desktopOwnGatewayProfile(p); own != nil {
-			was = own
-		}
-		if err := os.WriteFile(p.prof, was, 0o600); err != nil {
-			return err
-		}
-	}
-	gw := desktopGateway()
-	kvs := []edit.KV{
-		{Path: "inferenceProvider", Value: "gateway"},
-		{Path: "inferenceGatewayBaseUrl", Value: gw},
-		{Path: "inferenceGatewayApiKey", Value: desktopKey(gw)},
-		{Path: "inferenceGatewayAuthScheme", Value: "bearer"},
-	}
-	// policies seeded once: the user may tighten them in Desktop
-	if _, ok := edit.GetJSON(p.prof, "disableDeploymentModeChooser"); !ok {
-		kvs = append(kvs, edit.KV{Path: "disableDeploymentModeChooser", Value: true})
-	}
-	if _, ok := edit.GetJSON(p.prof, "coworkEgressAllowedHosts"); !ok {
-		kvs = append(kvs, edit.KV{Path: "coworkEgressAllowedHosts", Value: []string{"*"}})
-	}
-	if err := edit.SetJSON(p.prof, kvs...); err != nil {
-		return err
-	}
-	if err := desktopSeedImport(p); err != nil {
-		return err
-	}
-	if err := desktopSeedToolSearch(p); err != nil {
-		return err
-	}
-	if err := desktopSeedPrefer1M(p); err != nil {
-		return err
-	}
-	// pointed at an address of this computer's for SSH remote sessions,
-	// which 3p mode allows no host for until the profile says so
-	if gw != gateway.URL() {
-		if err := desktopSeedSSH(p); err != nil {
-			return err
-		}
-	}
-
-	// a profile for magpie's gateway the user applied since magpie's
-	// (one imported from another computer) stays applied, its connectors
-	// with it; it gets a key the gateway takes. Switching on the first
-	// time, one applied starts magpie's profile instead (#2035, above).
-	theirs := wired && desktopAppliedGateway(p) != ""
-	if theirs {
-		if err := desktopKeyApplied(p); err != nil {
-			return err
-		}
-	}
-
-	// _meta.json: magpie's entry (where it was, if it was), applied
-	if !wired {
-		entry, _ := json.Marshal(map[string]string{"id": desktopProfileID, "name": "magpie"})
-		entries = append(entries, entry)
-		if err := edit.SetJSON(p.meta, edit.KV{Path: "entries", Value: entries}); err != nil {
-			return err
-		}
-	}
-	if !theirs {
-		if err := edit.SetJSON(p.meta, edit.KV{Path: "appliedId", Value: desktopProfileID}); err != nil {
-			return err
-		}
-	}
-
-	desktopCarryLocale(p)
-	if err := desktopCarryMCP(p); err != nil {
-		return err
-	}
-	// a pick for a tier: the list its behavesAs goes in
-	if err := desktopSyncModels(p); err != nil {
-		return err
-	}
-
-	// the mode last: until here Desktop still starts as it did
-	for _, f := range []string{p.config3p, p.config} {
-		if err := edit.SetJSON(f, edit.KV{Path: "deploymentMode", Value: "3p"}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+var desktopStashKeys = []string{desktopStashed, desktopMode, desktopMode3p, desktopModes, desktopApplied, desktopMade, desktopProfile, desktopLocale, desktopImport, desktopSearch, desktopLong, desktopSSH, desktopMCP, desktopMCPSeen, desktopModelsMark, desktopDiscoveryMark, desktopKeyMark, desktopImported}
 
 // desktopImportOn is Desktop's own "Claude.ai data import" policy
 // (claudeAiImport, a 3p-only key of Desktop 1.28929 and later) turned on,
 // with its banner shown only when there is something to import.
 var desktopImportOn = map[string]any{"enabled": true, "bannerBehavior": "detect"}
-
-// desktopSeedImport lets Desktop on magpie bring in the sessions it had
-// signed in with Anthropic. 3p mode runs in a userData of its own
-// (Claude-3p), whose Code and Cowork sessions are keyed by its install id
-// and a fixed org (claude-code-sessions/<ant-did>/00000000-0000-4000-8000-
-// 000000000001), so the Code tab came up empty and the signed-in sessions,
-// in Claude/claude-code-sessions/<account>/<org>, were out of sight until
-// Desktop was switched back (lambdua on X: 切换账号，对话都能全都不见).
-// Nothing is lost; Desktop only offers its importer (Settings → Import,
-// "earlier Claude sessions on this computer": Claude/, other Claude*
-// folders and ~/.claude/projects, copied with the originals left in place)
-// when claudeAiImport.enabled is true, false by default (Desktop 2.7032's
-// B9/VKi). It is seeded into magpie's profile once, where the profile has
-// no claudeAiImport of its own: one the user set, or took away in
-// Desktop's window since, stays theirs. Run on every switch on and from
-// Sync, so a Desktop already on magpie gets it at magpie's next start.
-// The mark is read, never unstashed: it outlives the check and a switch
-// off, or the next Sync would write the policy back.
-func desktopSeedImport(p desktopPaths) error {
-	return desktopSeedOnce(p, desktopImport, "claudeAiImport", desktopImportOn)
-}
-
-// desktopSeedToolSearch turns on Desktop's own tool search policy
-// (toolSearchEnabled, 3p only, off by default) in magpie's profile. Off,
-// Desktop starts Claude Code with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
-// (Desktop 2.7032's Ztr "off" in the session env), and Claude Code 2.1.312
-// and 2.1.316 then keep tool search off whatever ENABLE_TOOL_SEARCH says
-// (its oae: "standard" while experimental betas are off, unless an admin
-// tier forces it), so every MCP tool's schema went whole on each request
-// (bigcat1800 on Discord: Desktop 4.4212, 13 MCP servers, ~162K tokens of
-// tools; a sandbox CLI with 60 MCP tools sent 83 tools, 205KB). On, with
-// the gateway provider and a bundled Claude Code of 2.1.247 or later,
-// Desktop gives the CLI ENABLE_TOOL_SEARCH=force as a managed setting
-// ("host"): the same CLI sent 13 tools, MCP ones behind ToolSearch, 56KB,
-// asking only tool-search-tool-2025-10-19 of the betas. The gateway
-// carries deferred tools to every upstream (Tool.Deferred,
-// withoutDeferredTools). Seeded once, as claudeAiImport is: a value the
-// user set in Desktop's window, false too, or one they took away since,
-// stays theirs.
-func desktopSeedToolSearch(p desktopPaths) error {
-	return desktopSeedOnce(p, desktopSearch, "toolSearchEnabled", true)
-}
-
-// desktopSeedPrefer1M turns on Desktop's own "Use 1M wherever it's
-// available" (modelPrefer1mContext, 3p only, off by default) in magpie's
-// profile, so a model Desktop offers a 1M entry for is shown by that entry
-// alone and its Code tab hands Claude Code the "[1m]" id. Desktop
-// 5.11492 starts the Code tab's Claude Code with
-// CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000 in its --settings whenever the
-// provider routes models itself, the gateway too (Fcn and Lcn in its
-// app.asar), and those flag settings come before ~/.claude/settings.json,
-// so the window magpie tells Claude Code there (claudeContextEnv) no longer
-// reached it: every model listed by its plain id ran at 200K, a 1M one too
-// (fwxkogaia on X, v0.1.4321). Claude Code takes a "[1m]" id for 1M whatever
-// that variable says (pT in 2.1.322). Desktop offers the 1M entry only for
-// a row whose max_input_tokens is 1M or more (magpie lists none of its rows
-// with supports_1m), so only models of 1M or more change; a smaller one
-// past 200K still runs at Desktop's 200K. Seeded once, as
-// toolSearchEnabled is: the user's own value, false too, or their taking it
-// away since, stays theirs.
-func desktopSeedPrefer1M(p desktopPaths) error {
-	return desktopSeedOnce(p, desktopLong, "modelPrefer1mContext", true)
-}
-
-// desktopSeedOnce writes key in magpie's profile once, where the profile
-// has none, and marks it in the stash under mark: once marked it is never
-// written again, so the user's own value, or their taking it away, holds.
-func desktopSeedOnce(p desktopPaths, mark, key string, value any) error {
-	if stashShared()[mark+p.key] != "" {
-		return nil
-	}
-	if desktopObject(p.prof) != nil {
-		return nil
-	}
-	if _, ok := edit.GetJSON(p.prof, key); !ok {
-		if err := edit.SetJSON(p.prof, edit.KV{Path: key, Value: value}); err != nil {
-			return err
-		}
-	}
-	stash(map[string]string{mark + p.key: "1"})
-	return nil
-}
-
-// desktopServers is the mcpServers object of a claude_desktop_config.json,
-// nil when it has none or can't be read as one.
-func desktopServers(path string) map[string]json.RawMessage {
-	raw, ok := edit.GetJSONRaw(path, "mcpServers")
-	if !ok {
-		return nil
-	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &m) != nil {
-		return nil
-	}
-	return m
-}
-
-// desktopCarryMCP gives Desktop's 3p mode the MCP servers the user added
-// signed in with Anthropic (Settings → Developer). 3p mode reads its
-// servers from Claude-3p's claude_desktop_config.json, a file of its own,
-// so on magpie Desktop's connector list had none of the user's
-// (aa86222 on Discord: connectors didn't sync). Each server Claude's file
-// has and Claude-3p's doesn't is copied; one of the same name in Claude-3p
-// (the user's, or the library's, which writes both) stays as it is. What
-// was copied is kept in the stash, so off takes back each one still as it
-// was copied. The connectors of a claude.ai account don't come along:
-// Desktop reaches them through claude.ai with that account
-// (/api/organizations/<org>/mcp/servers/…), and 3p mode has none.
-func desktopCarryMCP(p desktopPaths) error {
-	stash(map[string]string{desktopMCPSeen + p.key: "1"})
-	own := desktopServers(p.mcpFrom)
-	if p.mcpFrom == p.config3p || len(own) == 0 || desktopObject(p.config3p) != nil {
-		return nil
-	}
-	if _, has := edit.GetJSONRaw(p.config3p, "mcpServers"); has && desktopServers(p.config3p) == nil {
-		return nil // not an object: Desktop's, or the user's, left alone
-	}
-	have := desktopServers(p.config3p)
-	carried := map[string]json.RawMessage{}
-	if prev := stashShared()[desktopMCP+p.key]; prev != "" {
-		json.Unmarshal([]byte(prev), &carried)
-	}
-	merged := map[string]json.RawMessage{}
-	for k, v := range have {
-		merged[k] = v
-	}
-	added := false
-	for name, v := range own {
-		if _, ok := merged[name]; ok {
-			continue
-		}
-		merged[name], carried[name] = v, v
-		added = true
-	}
-	if !added {
-		return nil
-	}
-	if err := edit.SetJSON(p.config3p, edit.KV{Path: "mcpServers", Value: merged}); err != nil {
-		return err
-	}
-	b, _ := json.Marshal(carried)
-	stash(map[string]string{desktopMCP + p.key: string(b)})
-	return nil
-}
-
-// desktopUncarryMCP takes the servers desktopCarryMCP copied out of
-// Claude-3p again, each only while it is still as copied: one the user
-// changed since is theirs. An mcpServers left empty goes with them.
-func desktopUncarryMCP(p desktopPaths) error {
-	prev := unstash(desktopMCP + p.key)
-	var carried map[string]json.RawMessage
-	if prev == "" || json.Unmarshal([]byte(prev), &carried) != nil || len(carried) == 0 {
-		return nil
-	}
-	have := desktopServers(p.config3p)
-	if have == nil {
-		return nil
-	}
-	gone := false
-	for name, v := range carried {
-		if cur, ok := have[name]; ok && desktopSameJSON(cur, v) {
-			delete(have, name)
-			gone = true
-		}
-	}
-	if !gone {
-		return nil
-	}
-	if len(have) == 0 {
-		return edit.DelJSON(p.config3p, "mcpServers")
-	}
-	return edit.SetJSON(p.config3p, edit.KV{Path: "mcpServers", Value: have})
-}
 
 func desktopSameJSON(a, b json.RawMessage) bool {
 	var x, y any
@@ -982,184 +559,6 @@ func desktopLocaleFrom(ps []desktopPaths) string {
 		}
 	}
 	return ""
-}
-
-// desktopCarryLocale gives Desktop's 3p mode the language the user picked
-// signed in with Anthropic. Claude-3p is a userData of its own, so its
-// config.json starts with no "locale" and Desktop falls back to the
-// system's languages: the user's Chinese was gone once magpie turned 3p
-// on (memory and Osal on Discord). Only "locale" is written, only into a
-// config.json that is missing or a JSON object without one: a language
-// set in 3p mode, by Desktop or by hand, is the user's and stays. What
-// can't be read is left alone. The value written is stashed, so switching
-// off can take a config.json magpie made for it away again.
-//
-// It holds only for a language Desktop's 3p window has. That window is
-// its bundled UI (Resources/ion-dist), with 11 catalogs and no Chinese up
-// to 4.23118.0 at least; on every start it asks the main process for its
-// own pick (requestLocaleChange: its localStorage, else navigator.languages
-// mapped onto those 11, else en-US), and the main process writes that into
-// Claude-3p/config.json. So a Chinese "locale" there, carried or set by
-// hand, is "en-US" again after each start, by Desktop and not by magpie
-// (Dx25 on Discord, Windows), and nothing magpie writes can keep it.
-func desktopCarryLocale(p desktopPaths) {
-	if p.app == "" || p.app3p == "" || p.app == p.app3p {
-		return
-	}
-	loc, ok := edit.GetJSON(p.app, "locale")
-	if !ok || !desktopLocaleName.MatchString(loc) {
-		return
-	}
-	if desktopObject(p.app3p) != nil {
-		return
-	}
-	if _, has := edit.GetJSON(p.app3p, "locale"); has {
-		return
-	}
-	if err := os.MkdirAll(p.dir3p, 0o755); err != nil {
-		return
-	}
-	if edit.SetJSON(p.app3p, edit.KV{Path: "locale", Value: loc}) == nil {
-		stash(map[string]string{desktopLocale + p.key: loc})
-	}
-}
-
-// desktopOff puts Claude Desktop back as it was before magpie: each
-// deploymentMode as it was (gone where there was none), the profile it had
-// applied, magpie's profile and entry removed, and the files and folders
-// magpie made gone again if nothing else went into them.
-func desktopOff(p desktopPaths) error {
-	entries, _, err := desktopEntries(p.meta)
-	if err != nil {
-		return err
-	}
-	k := p.key
-	stashed := unstash(desktopStashed+k) != ""
-	mode, mode3p, applied := unstash(desktopMode+k), unstash(desktopMode3p+k), unstash(desktopApplied+k)
-	var made []string
-	if m := unstash(desktopMade + k); m != "" {
-		made = strings.Split(m, "\n")
-	}
-	if !stashed && !slices.ContainsFunc(entries, desktopOurs) {
-		return nil
-	}
-
-	for f, was := range map[string]string{p.config: mode, p.config3p: mode3p} {
-		if cur, _ := edit.GetJSON(f, "deploymentMode"); cur != "3p" {
-			continue // changed since, by Desktop or the user: theirs
-		}
-		if was != "" {
-			err = edit.SetJSON(f, edit.KV{Path: "deploymentMode", Value: was})
-		} else {
-			err = edit.DelJSON(f, "deploymentMode")
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	if slices.ContainsFunc(entries, desktopOurs) {
-		entries = slices.DeleteFunc(entries, desktopOurs)
-		if len(entries) == 0 && slices.Contains(made, p.meta) {
-			err = edit.DelJSON(p.meta, "entries")
-		} else {
-			if entries == nil {
-				entries = []json.RawMessage{}
-			}
-			err = edit.SetJSON(p.meta, edit.KV{Path: "entries", Value: entries})
-		}
-		if err != nil {
-			return err
-		}
-	}
-	if id, _ := edit.GetJSON(p.meta, "appliedId"); id == desktopProfileID {
-		// the profile applied before, if it is still there, else the first
-		// one left, else none
-		next := ""
-		if applied != "" && applied != desktopProfileID && slices.ContainsFunc(entries, func(e json.RawMessage) bool { return desktopEntryID(e) == applied }) {
-			next = applied
-		} else if len(entries) > 0 {
-			next = desktopEntryID(entries[0])
-		}
-		if next != "" {
-			err = edit.SetJSON(p.meta, edit.KV{Path: "appliedId", Value: next})
-		} else {
-			err = edit.DelJSON(p.meta, "appliedId")
-		}
-		if err != nil {
-			return err
-		}
-	}
-	// the profile goes, and what is in it is kept for the next on: the
-	// settings the user made in it are theirs (#2035)
-	if b, err := os.ReadFile(p.prof); err == nil && desktopObjectBytes(b) && !desktopEmpty(b) {
-		stash(map[string]string{desktopProfile + k: string(b)})
-	}
-	if err := os.Remove(p.prof); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-
-	if err := desktopUncarryMCP(p); err != nil {
-		return err
-	}
-
-	// Claude-3p's config.json magpie made only to carry the language:
-	// gone again when it still holds nothing but that language
-	if loc := unstash(desktopLocale + k); loc != "" && slices.Contains(made, p.app3p) {
-		if b, err := os.ReadFile(p.app3p); err == nil {
-			var m map[string]json.RawMessage
-			var only string
-			if json.Unmarshal(b, &m) == nil && len(m) == 1 && json.Unmarshal(m["locale"], &only) == nil && only == loc {
-				os.Remove(p.app3p)
-			}
-		}
-	}
-
-	// what magpie made, deepest first: a file only if it is an empty
-	// object now, a folder only if it is empty
-	for _, f := range slices.Backward(made) {
-		st, err := os.Stat(f)
-		if err != nil {
-			continue
-		}
-		if st.IsDir() {
-			os.Remove(f)
-			continue
-		}
-		if b, _ := os.ReadFile(f); desktopEmpty(b) {
-			os.Remove(f)
-		}
-	}
-	return nil
-}
-
-// desktopOwnGatewayProfile is the profile the user made themselves in
-// Desktop's window for magpie's gateway, the one applied before magpie
-// applied its own: its settings (chat tab, default effort, allowed hosts
-// and whatever Desktop adds) start magpie's profile, so switching on
-// doesn't trade them for magpie's defaults (#2035). A profile for another
-// gateway, Bedrock or Vertex is not one: its models and settings are for
-// somewhere else. nil when there is none.
-func desktopOwnGatewayProfile(p desktopPaths) []byte {
-	id, _ := edit.GetJSON(p.meta, "appliedId")
-	if id == desktopProfileID {
-		id = unstash(desktopApplied + p.key)
-	}
-	if id == "" || id == desktopProfileID || filepath.Base(id) != id || strings.HasPrefix(id, ".") {
-		return nil
-	}
-	b, err := os.ReadFile(filepath.Join(p.library, id+".json"))
-	if err != nil || !desktopObjectBytes(b) {
-		return nil
-	}
-	var prof struct {
-		Provider string `json:"inferenceProvider"`
-		BaseURL  string `json:"inferenceGatewayBaseUrl"`
-	}
-	if json.Unmarshal(b, &prof) != nil || prof.Provider != "gateway" || !desktopIsOurGateway(prof.BaseURL) {
-		return nil
-	}
-	return b
 }
 
 // desktopIsOurGateway: u is magpie's gateway, by its port on this machine
@@ -1185,17 +584,6 @@ func desktopIsOurGateway(u string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
-}
-
-// desktopObjectBytes: b is a JSON object.
-func desktopObjectBytes(b []byte) bool {
-	var m map[string]json.RawMessage
-	return json.Unmarshal(b, &m) == nil && m != nil
-}
-
-func desktopEmpty(b []byte) bool {
-	var m map[string]json.RawMessage
-	return json.Unmarshal(b, &m) == nil && len(m) == 0
 }
 
 // what claudedesktop says after a change (notice.go)

@@ -15,10 +15,7 @@ import (
 // one on the gateway's port: the allow list, a key from another machine
 // or through a proxy, a rebound page's Host, and corsGuard's Origin rules.
 func (s *Server) Front() http.Handler {
-	// the goroutine dump ahead of lanGuard too, whose allow list reads
-	// settings.json under its lock (dumpFirst)
-	// (socketEntry: a socket's turns go through all of it again)
-	s.frontOnce.Do(func() { s.front = s.withProtocolRegistry(socketEntry(s.dumpFirst(lanGuard(s.Handler())))) })
+	s.frontOnce.Do(func() { s.front = s.handler(true) })
 	return s.front
 }
 
@@ -69,6 +66,9 @@ func (s *Server) ClientPathContext(ctx context.Context, p string) bool {
 	if ClientPath(p) {
 		return true
 	}
+	if protocolPathReserved(p) {
+		return false
+	}
 	host, err := s.protocolHost(ctx)
 	return err == nil && host.ClientPath(p)
 }
@@ -78,6 +78,9 @@ func (s *Server) ClientPathContext(ctx context.Context, p string) bool {
 func InstalledClientPathContext(ctx context.Context, p string) bool {
 	if ClientPath(p) {
 		return true
+	}
+	if protocolPathReserved(p) {
+		return false
 	}
 	registry, err := extension.Default().ProtocolsContext(ctx)
 	if err != nil {

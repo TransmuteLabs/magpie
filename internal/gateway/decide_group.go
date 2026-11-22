@@ -134,7 +134,7 @@ func (s *Server) serveDecisionGroup(w http.ResponseWriter, r *http.Request, body
 			members = groupKeeps(keyWho, g, ms)
 		}
 		var held bool
-		if cs, pl, held = allowedCandidates(who, cs, pl, members); len(cs) == 0 && held {
+		if cs, pl, held = allowedCandidates(r.Context(), who, cs, pl, members); len(cs) == 0 && held {
 			writeError(w, provider.Chat, http.StatusForbidden, keyAccountsError(who, asked))
 			return
 		}
@@ -461,8 +461,9 @@ func (s *Server) askDecisionGroupWithContext(ctx context.Context, wait time.Dura
 	// held to the group's own accounts, if it is: no request carries a
 	// caller here to hold (heldByGroup); and to who's, the accounts the
 	// group asking holds its classifier to
+	current := provider.CurrentAccountIDs(ctx)
 	cs = slices.DeleteFunc(cs, func(c candidate) bool {
-		return groupHeld(c, []provider.Group{g}) != "" || !accountAllowed(access.Caller(ctx), c)
+		return groupHeld(c, []provider.Group{g}, current) != "" || !accountAllowed(access.Caller(ctx), c.p, current)
 	})
 	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
@@ -482,7 +483,11 @@ func (s *Server) askDecider(wait time.Duration, who access.Identity, p provider.
 func (s *Server) askDeciderWithContext(ctx context.Context, wait time.Duration, p provider.Provider, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 	cs, _ := s.decideKeys(p, model)
 	// held to who's accounts: those the group asking holds it to
-	cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(access.Caller(ctx), c) })
+	who := access.Caller(ctx)
+	if len(who.Accounts) > 0 {
+		current := provider.CurrentAccountIDs(ctx)
+		cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(who, c.p, current) })
+	}
 	cs = probeOne(cs) // of those resting, only the one back soonest (#1799)
 	if len(cs) == 0 {
 		return verdict{}, fmt.Errorf("no key or account of %s may be asked %s now", p.Name, model)

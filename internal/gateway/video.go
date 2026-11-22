@@ -1399,7 +1399,7 @@ func (s *Server) startVideo(ctx context.Context, r *http.Request, p provider.Pro
 		// use, of those in use — not the provider's first alone, which a
 		// key held to a later one was refused by — or none, refused
 		var ok bool
-		if p, ok = allowedKey(keyWho, p, model); !ok {
+		if p, ok = allowedKey(r.Context(), keyWho, p); !ok {
 			return videoStart{p: p}, 403, errors.New(keyAccountsError(keyWho, f.Model))
 		}
 	}
@@ -1492,12 +1492,12 @@ func videoAsker(r *http.Request, p provider.Provider) (provider.Provider, string
 		return p, ""
 	}
 	if !p.IsRemoteMagpie() && (filmsOpenAI(p) || filmsMiniMax(p) || filmsDashScope(p) || isArk(p) && len(customVideomakers(p)) > 0) {
-		if p.Key == "" && p.Account == nil || accountAllowed(who, candidate{p: p}) {
+		if p.Key == "" && p.Account == nil || accountAllowed(who, p, provider.CurrentAccountIDs(r.Context())) {
 			return p, ""
 		}
 		return p, keyAccountsError(who, p.ID)
 	}
-	q, ok := allowedKey(who, p, "")
+	q, ok := allowedKey(r.Context(), who, p)
 	if !ok {
 		return p, keyAccountsError(who, p.ID)
 	}

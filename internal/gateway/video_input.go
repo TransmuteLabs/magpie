@@ -95,14 +95,73 @@ func currentVideo(r *Request) bool {
 	return false
 }
 
-// hasCurrentVideo is currentVideo of a body as the client sent it. Most
-// bodies name no video at all and are not parsed.
+// hasCurrentVideo is currentVideo of a body as the client sent it.
 func hasCurrentVideo(from provider.Protocol, body []byte) bool {
-	if !bodyHas(body, "video") {
-		return false
-	}
+	return mayHoldVideo(from, body) && currentVideoBody(from, body)
+}
+
+func currentVideoBody(from provider.Protocol, body []byte) bool {
 	req, err := parse(from, body)
 	return err == nil && currentVideo(req)
+}
+
+// mayHoldVideo only checks for shapes the parser can read as video. Files
+// may get their media type from a filename instead of an explicit MIME type.
+func mayHoldVideo(from provider.Protocol, body []byte) bool {
+	switch from {
+	case provider.Chat:
+		if bodyHasPartType(body, `"video_url"`) || bodyHasPartType(body, `"file"`) || bodyHasPartType(body, `"input_audio"`) {
+			return true
+		}
+	case provider.Responses:
+		if bodyHasPartType(body, `"input_file"`) {
+			return true
+		}
+	case provider.Gemini:
+		return bodyHasVideoMIME(body) || bodyHasJSONEscape(body, "vViIİdDeEoO/")
+	default:
+		if bodyHasPartType(body, `"video"`) || bodyHasPartType(body, `"document"`) {
+			return true
+		}
+	}
+	return bodyHasJSONEscape(body, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+}
+
+func bodyHasPartType(body []byte, kind string) bool {
+	const field = `"type"`
+	for {
+		at := bodyIndex(body, kind)
+		if at < 0 {
+			return false
+		}
+		before := trimJSON(body[:at])
+		if len(before) > 0 && before[len(before)-1] == ':' {
+			key := trimJSON(before[:len(before)-1])
+			if len(key) >= len(field) && strings.EqualFold(bytesStr(key[len(key)-len(field):]), field) {
+				return true
+			}
+		}
+		body = body[at+1:]
+	}
+}
+
+func bodyHasVideoMIME(body []byte) bool {
+	for _, first := range []string{`"v`, `"V`} {
+		for rest := body; ; {
+			at := bodyIndex(rest, first)
+			if at < 0 {
+				break
+			}
+			rest = rest[at+1:]
+			head := bytesStr(rest[:min(len(rest), len(`vİdeo\/`))])
+			mimeType, _, ok := strings.Cut(head, "/")
+			mimeType = strings.TrimSuffix(mimeType, `\`)
+			if ok && (strings.EqualFold(mimeType, "video") || strings.EqualFold(mimeType, "vİdeo")) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // videoRefused is what the agent is told of a video for a model, or a

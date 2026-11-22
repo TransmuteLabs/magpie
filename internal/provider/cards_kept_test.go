@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	extensionhost "github.com/yetone/magpie/internal/extension"
 )
 
 // cardOf is the card cs has of provider and user, nil when none.
@@ -116,6 +119,108 @@ func TestCachedCardsKeepALaterPageRead(t *testing.T) {
 	subscriptionUsageCache.Unlock()
 	if q := cardOf(CachedCards(time.Now()), "codex", "me@example.com"); q == nil || q.Windows[0].Used != 10 || q.Name != "Codex" {
 		t.Fatalf("the later background read: %+v", q)
+	}
+}
+
+func TestCachedCardsUseCurrentExtensionBackgroundReading(t *testing.T) {
+	host, used, calls := prepareUsageReadFixture(t)
+	id := ExtensionProviderID(host.manifest.ID, "vendor")
+	before := usageTestRead(t, id, "alice", 20)
+	warmSubscriptionUsageForTest(t)
+	if card := cardOf(CachedCards(time.Now()), id, "alice"); card == nil ||
+		card.Name != host.manifest.Providers[0].Name || len(card.Windows) != 1 || card.Windows[0].Used != 20 {
+		t.Errorf("background SDK read did not create a subscription card: %+v", card)
+	}
+	warmSubscriptionUsageForTest(t, before)
+	logins, _ := extensionLogins(id)
+	forgetLoginReading(logins[0])
+	used.Store(40)
+	usageTestRead(t, id, "alice", 40)
+	beforeCards := calls.Load()
+	if card := cardOf(CachedCards(time.Now()), id, "alice"); card == nil || len(card.Windows) != 1 || card.Windows[0].Used != 40 {
+		t.Errorf("older page read overshadowed a current background SDK read: %+v", card)
+	}
+	if _, err := extensionhost.NewStore(host.Namespace()).InvalidateUsage(logins[0].extension.currentScope()); err != nil {
+		t.Fatal(err)
+	}
+	cards := CachedCards(time.Now())
+	if card := cardOf(cards, id, "alice"); card != nil && len(card.Windows) != 0 {
+		t.Errorf("invalidated SDK reading still became a known card: %+v", card)
+	}
+	if card := cardOf(cards, id, "bob"); card == nil || len(card.Windows) != 1 || card.Windows[0].Used != 20 {
+		t.Errorf("alice's invalidation discarded bob's current card: %+v", card)
+	}
+	if calls.Load() != beforeCards {
+		t.Fatal("cached card publication asked a vendor")
+	}
+}
+
+func TestCachedCardsIgnoreLegacySnapshotAfterCutover(t *testing.T) {
+	host, _, calls := prepareUsageReadFixture(t)
+	const publicID = "transferred-subscription"
+	page := keepLast(SubscriptionQuota{Provider: publicID, User: "alice", Windows: []QuotaWindow{{Name: "legacy", Used: 80}}}, "alice")
+	usageTestSubscriptionOwner(t, host, publicID)
+	warmSubscriptionUsageForTest(t)
+	if card := cardOf(CachedCards(time.Now()), publicID, "alice"); card != nil && len(card.Windows) != 0 {
+		t.Errorf("SDK card inherited a legacy disk snapshot: %+v", card)
+	}
+	warmSubscriptionUsageForTest(t, page)
+	if card := cardOf(CachedCards(time.Now()), publicID, "alice"); card != nil && len(card.Windows) != 0 {
+		t.Errorf("SDK card inherited a legacy page snapshot: %+v", card)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("cached card publication asked a vendor during cutover")
+	}
+}
+
+func TestSubscriptionUsageRejectsLegacyCardAfterCutover(t *testing.T) {
+	host, _, calls := prepareUsageReadFixture(t)
+	const publicID = "transferred-subscription"
+	until := time.Now().Add(time.Hour)
+	page := SubscriptionQuota{
+		Provider: publicID, Name: "Moved subscription", User: "alice", Plan: "legacy plan",
+		Windows: []QuotaWindow{{Name: "legacy", Used: 80}}, Balance: "$2",
+		BalanceTrend: &BalanceTrend{}, Until: &until, Renew: "auto",
+		Resets: &ResetCredits{Count: 2},
+	}
+	resetsOnly := SubscriptionQuota{Provider: publicID, Name: page.Name, User: "old-account", Resets: &ResetCredits{Count: 1}}
+	other := SubscriptionQuota{Provider: "other-subscription", User: "bob", Windows: []QuotaWindow{{Name: "quota", Used: 30}}}
+	warmSubscriptionUsageForTest(t, page, resetsOnly, other)
+	if card := cardOf(SubscriptionUsage(t.Context()), publicID, "alice"); card == nil || len(card.Windows) != 1 || card.Windows[0].Used != 80 {
+		t.Fatalf("the Usage page did not show the current legacy card: %+v", card)
+	}
+
+	usageTestSubscriptionOwner(t, host, publicID)
+	for source, cards := range map[string][]SubscriptionQuota{
+		"Usage page": SubscriptionUsage(t.Context()),
+		"export":     CachedCardsContext(t.Context(), time.Now()),
+	} {
+		for _, user := range []string{"alice", "old-account"} {
+			card := cardOf(cards, publicID, user)
+			if card == nil || card.Name != page.Name || len(card.Windows) != 0 || !card.ReadDeferred {
+				t.Errorf("%s did not defer the old owner's card for %s: %+v", source, user, card)
+				continue
+			}
+			data, err := json.Marshal(card)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"plan", "balance", "balanceTrend", "until", "renew", "resets"} {
+				if _, found := fields[field]; found {
+					t.Errorf("%s published stale %s for %s", source, field, user)
+				}
+			}
+		}
+		if card := cardOf(cards, other.Provider, other.User); card == nil || len(card.Windows) != 1 || card.Windows[0].Used != 30 {
+			t.Errorf("%s changed an unrelated subscription: %+v", source, card)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("publishing cached quotas asked a vendor")
 	}
 }
 

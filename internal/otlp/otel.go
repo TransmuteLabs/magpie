@@ -237,9 +237,11 @@ func (e *otelExporter) run(every time.Duration) {
 	flush := func() {
 		timer.Stop()
 		e.flush(batch)
-		for _, it := range batch {
-			if n := int64(recordBytes(it.record)); n > 0 {
-				e.bytes.Add(-n)
+		for index := range batch {
+			size := int64(recordBytes(batch[index].record))
+			batch[index] = otelItem{}
+			if size > 0 {
+				e.bytes.Add(-size)
 			}
 		}
 		batch = batch[:0]

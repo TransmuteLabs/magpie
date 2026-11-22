@@ -14,7 +14,6 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"path/filepath"
 	"slices"
@@ -74,22 +73,26 @@ type pluginCheckinProvider struct {
 
 // pluginCheckinProviders are the plugins' providers whose plugin checks
 // in, those signed in to.
-var pluginCheckinProviders = func() []pluginCheckinProvider {
+func pluginCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 	var out []pluginCheckinProvider
-	for _, pp := range heldPlugins() {
-		if !pp.Checkin || movingNow(pp.ID) {
+	owners := sync.OnceValue(func() extensionSubscriptionOwners { return currentSubscriptionOwners(ctx) })
+	for _, pp := range plugin.Cached() {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !pp.Checkin || movingNow(pp.ID) || owners().replaces(pp.ID) {
 			continue
 		}
 		p := pluginCheckinProvider{ID: pp.ID, Name: pp.Name}
 		card := PluginID(pp.ID)
-		for _, l := range pluginLogins(pp) {
+		for _, l := range pluginLoginsContext(ctx, pp) {
 			acct := l.acct.Key
 			id := pp.ID
 			p.accounts = append(p.accounts, pluginCheckinAcct{User: l.User, On: l.On, key: pluginCheckinKey(id, acct), legacy: pluginCheckinLegacyKey(id, l.acct), card: card,
 				do: func(ctx context.Context) WorkBuddyCheckin {
 					c, err := plugin.AccountCheckin(ctx, id, acct)
 					if err != nil {
-						return wbCheckinFailed(err)
+						return checkinRequestFailed(ctx, err)
 					}
 					r := WorkBuddyCheckin{Outcome: c.Outcome, Credit: c.Credit, Streak: c.Streak, Msg: c.Message}
 					// the vendor's own day turns then (Qoder's 10:00
@@ -104,17 +107,15 @@ var pluginCheckinProviders = func() []pluginCheckinProvider {
 			out = append(out, p)
 		}
 	}
-	adoptLegacyPluginCheckins(out)
+	if ctx.Err() != nil {
+		return nil
+	}
 	return out
 }
 
-// pluginCheckinAdopted are the legacy entries (pluginCheckinLegacyKey),
-// by the check-in file they were looked for in, that
-// adoptLegacyPluginCheckins has carried over or found nothing kept under,
-// so it reads the files once for each; under pluginCheckinMu.
-var pluginCheckinAdopted = map[[2]string]bool{}
+type legacyCheckinKeys map[string][]string
 
-// adoptLegacyPluginCheckins carries what was kept under each account's
+// legacyPluginCheckinKeys maps what was kept under each account's
 // entry before plugins#254 (its provider and display name) over to its
 // entry now (its sign-in), so an upgrade neither checks an account in
 // twice in a day nor loses the user's own Off. Kept under a name two
@@ -128,13 +129,7 @@ var pluginCheckinAdopted = map[[2]string]bool{}
 //     switched that name off, and none of its sign-ins was checked in
 //     since; one switched on only by the upgrade would be checked in
 //     against the user's choice.
-//
-// A file that can't be read or parsed is left for later as it is, and the
-// entries are carried again once it reads.
-func adoptLegacyPluginCheckins(ps []pluginCheckinProvider) {
-	pluginCheckinMu.Lock()
-	defer pluginCheckinMu.Unlock()
-	path := pluginCheckinPath()
+func legacyPluginCheckinKeys(ps []pluginCheckinProvider) legacyCheckinKeys {
 	// an entry a sign-in keeps now is never taken for an old one
 	now := map[string]bool{}
 	for _, p := range ps {
@@ -144,101 +139,88 @@ func adoptLegacyPluginCheckins(ps []pluginCheckinProvider) {
 	}
 	// each legacy entry's heirs, those in use first: the old check-in
 	// skipped an account not in use before it took the key
-	heirs := map[string][]string{}
-	var order []string
+	heirs := legacyCheckinKeys{}
 	for _, inUse := range []bool{true, false} {
 		for _, p := range ps {
 			for _, a := range p.accounts {
-				if a.On != inUse || a.legacy == "" || now[a.legacy] || pluginCheckinAdopted[[2]string{path, a.legacy}] {
+				if a.On != inUse || a.legacy == "" || now[a.legacy] {
 					continue
-				}
-				if _, ok := heirs[a.legacy]; !ok {
-					order = append(order, a.legacy)
 				}
 				heirs[a.legacy] = append(heirs[a.legacy], a.key)
 			}
 		}
 	}
-	if len(order) == 0 {
-		return
-	}
-	checkins := adoptLegacyCheckinFile(path, order, heirs)
-	off := adoptLegacyCheckinOff(heirs)
-	if checkins && off {
-		for _, l := range order {
-			pluginCheckinAdopted[[2]string{path, l}] = true
-		}
-	}
+	return heirs
 }
 
-// adoptLegacyCheckinFile gives each legacy entry of the check-in file at
-// path to its first heir that has none of its own, and drops it; it says
-// whether the file is as it should be now.
-func adoptLegacyCheckinFile(path string, order []string, heirs map[string][]string) bool {
-	st, err := readCheckins(path)
-	if err != nil {
-		return false
-	}
+func (heirs legacyCheckinKeys) moveHistory(st map[string]WorkBuddyCheckin) bool {
 	changed := false
-	for _, l := range order {
-		r, ok := st[l]
+	for legacy, keys := range heirs {
+		result, ok := st[legacy]
 		if !ok {
 			continue
 		}
-		if _, has := st[heirs[l][0]]; !has {
-			st[heirs[l][0]] = r
-		}
-		delete(st, l)
+		moveCheckinAlias(st, legacy, keys[0], result)
 		changed = true
 	}
-	if !changed {
-		return true
-	}
-	out, err := json.MarshalIndent(st, "", "  ")
-	if err == nil {
-		err = writePrivate(path, append(out, '\n'))
-	}
-	if err == nil {
-		wroteCheckins(path, st)
-	}
-	if err != nil {
-		log.Printf("plugin check-in: %v", err)
-		return false
-	}
-	return true
+	return changed
 }
 
-// adoptLegacyCheckinOff puts every heir of a legacy entry in
-// settings.CheckinOff in its place; it says whether the settings are as
-// they should be now.
-func adoptLegacyCheckinOff(heirs map[string][]string) bool {
-	s, err := settings.LoadChecked()
-	if err != nil {
-		return false
+func moveCheckinAlias(st map[string]WorkBuddyCheckin, alias, key string, result WorkBuddyCheckin) {
+	if canonical, exists := st[key]; exists {
+		if !result.At.After(canonical.At) {
+			result, canonical = canonical, result
+		}
+		result = keepCheckinClaim(result, canonical)
 	}
-	if !slices.ContainsFunc(s.CheckinOff, func(k string) bool { _, ok := heirs[k]; return ok }) {
-		return true
+	st[key] = result
+	delete(st, alias)
+}
+
+func (heirs legacyCheckinKeys) expandOff(off []string) []string {
+	if len(heirs) == 0 || !slices.ContainsFunc(off, func(key string) bool { return heirs[key] != nil }) {
+		return off
 	}
-	err = settings.EditCheckinOff(func(off []string) []string {
-		var out []string
-		for _, k := range off {
-			ks, ok := heirs[k]
-			if !ok {
-				ks = []string{k}
-			}
-			for _, k := range ks {
-				if !slices.Contains(out, k) {
-					out = append(out, k)
-				}
+	var out []string
+	for _, key := range off {
+		keys := heirs[key]
+		if len(keys) == 0 {
+			keys = []string{key}
+		}
+		for _, key := range keys {
+			if !slices.Contains(out, key) {
+				out = append(out, key)
 			}
 		}
-		return out
-	})
-	if err != nil {
-		log.Printf("plugin check-in: %v", err)
-		return false
 	}
-	return true
+	return out
+}
+
+func (heirs legacyCheckinKeys) adoptOff(ctx context.Context) {
+	if len(heirs) == 0 || ctx.Err() != nil {
+		return
+	}
+	s, err := settings.LoadChecked()
+	if err != nil || slices.Equal(s.CheckinOff, heirs.expandOff(s.CheckinOff)) || ctx.Err() != nil {
+		return
+	}
+	if err := settings.EditCheckinOff(heirs.expandOff); err != nil {
+		log.Printf("plugin check-in: %v", err)
+	}
+}
+
+func SetCheckinAccountOn(ctx context.Context, key string, on bool) error {
+	heirs := legacyPluginCheckinKeys(pluginCheckinProviders(ctx))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return settings.EditCheckinOff(func(off []string) []string {
+		off = slices.DeleteFunc(heirs.expandOff(off), func(saved string) bool { return saved == key })
+		if !on {
+			off = append(off, key)
+		}
+		return off
+	})
 }
 
 // pluginChecksIn says whether pp's plugin presses the check-in itself:
@@ -302,11 +284,14 @@ func (c pluginCheckiner) checkinNow(ctx context.Context, soon bool) []WorkBuddyC
 	if ctx.Err() != nil {
 		return nil
 	}
+	heirs := legacyPluginCheckinKeys(providers)
 	for _, p := range providers {
 		if c.only != nil && !c.only(p.ID) {
 			continue
 		}
-		for _, r := range p.checkiner(c.now).checkinNow(ctx, soon) {
+		runner := p.checkiner(c.now)
+		runner.legacy = heirs
+		for _, r := range runner.checkinNow(ctx, soon) {
 			r.Vendor = p.Name
 			out = append(out, r)
 		}
@@ -344,10 +329,16 @@ type PluginCheckin struct {
 // PluginCheckins are the plugins' providers that check in, each with its
 // accounts' last check-ins as kept; asks nothing.
 func PluginCheckins() []PluginCheckin {
+	ps := allPluginCheckinProviders(context.Background())
+	return pluginCheckins(ps, legacyPluginCheckinKeys(ps))
+}
+
+func pluginCheckins(ps []pluginCheckinProvider, legacy legacyCheckinKeys) []PluginCheckin {
 	st := shownCheckins(pluginCheckinPath())
+	legacy.moveHistory(st)
 	s := settings.Load()
 	var out []PluginCheckin
-	for _, p := range allPluginCheckinProviders(context.Background()) {
+	for _, p := range ps {
 		pc := PluginCheckin{ID: p.ID, Name: p.Name, On: PluginCheckinOn(s, p.ID)}
 		listed := map[string]bool{}
 		for _, a := range p.accounts {
@@ -368,12 +359,18 @@ func HasPluginCheckin() bool { return len(allPluginCheckinProviders(context.Back
 
 // pluginCheckinMarks is qs with the cards of the plugins' accounts that
 // check in marked, as WithCheckins marks the built-ins'.
-func pluginCheckinMarks(qs []SubscriptionQuota) []SubscriptionQuota {
-	ps := allPluginCheckinProviders(context.Background())
-	if len(ps) == 0 {
+func pluginCheckinMarks(ctx context.Context, qs []SubscriptionQuota) []SubscriptionQuota {
+	ps := allPluginCheckinProviders(ctx)
+	if len(ps) == 0 || ctx.Err() != nil {
 		return qs
 	}
+	heirs := legacyPluginCheckinKeys(ps)
 	st := shownCheckins(pluginCheckinPath())
+	heirs.moveHistory(st)
+	off := checkinOff(heirs)
+	if ctx.Err() != nil {
+		return qs
+	}
 	for _, p := range ps {
 		var on []checkinCard
 		for _, a := range p.accounts {
@@ -381,7 +378,7 @@ func pluginCheckinMarks(qs []SubscriptionQuota) []SubscriptionQuota {
 				on = append(on, checkinCard{User: a.User, card: a.card, key: a.key})
 			}
 		}
-		qs = markCheckins(qs, on, st, pluginCheckinBy(p.ID))
+		qs = markCheckinsWithOff(qs, on, st, pluginCheckinBy(p.ID), off)
 	}
 	return qs
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"time"
 
@@ -22,10 +21,22 @@ const (
 var errModuleConfigClosed = errors.New("extension manager is closed")
 
 func (m *Manager) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
-	if err := m.moduleConfigOwner(ctx, id); err != nil {
-		return sdk.ConfigSnapshot{}, err
+	if ctx == nil || m == nil || m.store == nil || !sdk.ValidID(id) {
+		return sdk.ConfigSnapshot{}, errors.New("module configuration requires a manager, context and module identity")
 	}
-	return m.readModuleConfigContext(ctx, id)
+	if m.isClosed() {
+		return sdk.ConfigSnapshot{}, errModuleConfigClosed
+	}
+	var config sdk.ConfigSnapshot
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		if _, err := view.configEntry(id, expectedGeneration{}); err != nil {
+			return err
+		}
+		var err error
+		config, err = m.readModuleConfigContext(ctx, id)
+		return err
+	})
+	return config, err
 }
 
 func (m *Manager) readModuleConfig(id string) (sdk.ConfigSnapshot, error) {
@@ -33,10 +44,18 @@ func (m *Manager) readModuleConfig(id string) (sdk.ConfigSnapshot, error) {
 }
 
 func (m *Manager) readModuleConfigContext(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
-	value, err := m.store.StateGetContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
+	value, err := m.readModuleConfigValue(ctx, id)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
+	return moduleConfigSnapshot(value)
+}
+
+func (m *Manager) readModuleConfigValue(ctx context.Context, id string) (VersionedValue, error) {
+	return m.store.StateGetContext(ctx, sdk.Scope{Plugin: id}, moduleConfigKey)
+}
+
+func moduleConfigSnapshot(value VersionedValue) (sdk.ConfigSnapshot, error) {
 	if value.Version == 0 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
@@ -51,10 +70,10 @@ func (m *Manager) CompareAndSwapModuleConfig(ctx context.Context, id, expected s
 }
 
 func (m *Manager) compareAndSwapModuleConfig(ctx context.Context, id, packageRevision, expected string, values json.RawMessage) (sdk.ConfigSnapshot, error) {
-	return m.updateModuleConfig(ctx, id, expectedGeneration{packageRevision: packageRevision, configVersion: expected}, values)
+	return m.updateModuleConfig(ctx, id, "", expectedGeneration{packageRevision: packageRevision, configVersion: expected}, values)
 }
 
-func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected expectedGeneration, values json.RawMessage) (sdk.ConfigSnapshot, error) {
+func (m *Manager) updateModuleConfig(ctx context.Context, id, provider string, expected expectedGeneration, values json.RawMessage) (sdk.ConfigSnapshot, error) {
 	if ctx == nil || m == nil || m.catalog == nil || m.store == nil || !sdk.ValidID(id) {
 		return sdk.ConfigSnapshot{}, errors.New("module configuration requires its installed root owner")
 	}
@@ -82,9 +101,18 @@ func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected ex
 			return VersionedValue{}, err
 		}
 		defer unlock()
-		entry, err := moduleConfigEntry(root, id, expected)
+		view, err := m.catalog.readView(root)
 		if err != nil {
 			return VersionedValue{}, err
+		}
+		entry, err := view.configEntry(id, expected)
+		if err != nil {
+			return VersionedValue{}, err
+		}
+		if _, bound := SubscriptionOwnerRevision(ctx); provider != "" && bound {
+			if err := m.store.checkSubscriptionView(ctx, sdk.Scope{Plugin: id, Provider: provider}); err != nil {
+				return VersionedValue{}, err
+			}
 		}
 		config := values
 		if expected.enableGeneration != nil {
@@ -120,58 +148,27 @@ func (m *Manager) updateModuleConfig(ctx context.Context, id string, expected ex
 	return snapshot, nil
 }
 
-func moduleConfigEntry(root *os.Root, id string, expected expectedGeneration) (Installed, error) {
-	entries, _, err := catalogRead(root)
-	if err != nil {
-		return Installed{}, err
+func (view catalogView) configEntry(id string, expected expectedGeneration) (Installed, error) {
+	entry, found := view.lookup(id)
+	if !found || entry.Manifest.Component != nil {
+		return Installed{}, errors.New("module configuration requires an installed root module")
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != id || entry.Manifest.Component != nil {
-			continue
+	if entry.Manifest.Contract.Version.Minor < 1 {
+		return Installed{}, errors.New("module configuration requires SDK API 1.1 or newer")
+	}
+	if expected.packageRevision != "" && (expected.packageRevision != entry.Revision || entry.Disabled) {
+		return Installed{}, ErrCatalogConflict
+	}
+	if expected.enableGeneration != nil {
+		enablement, err := readObserverEnablement(view.root, id)
+		if err != nil {
+			return Installed{}, err
 		}
-		if entry.Manifest.Contract.Version.Minor < 1 {
-			return Installed{}, errors.New("module configuration requires SDK API 1.1 or newer")
-		}
-		if expected.packageRevision != "" && (expected.packageRevision != entry.Revision || entry.Disabled) {
+		if enablement != *expected.enableGeneration {
 			return Installed{}, ErrCatalogConflict
 		}
-		if expected.enableGeneration != nil {
-			enablement, err := readObserverEnablement(root, id)
-			if err != nil {
-				return Installed{}, err
-			}
-			if enablement != *expected.enableGeneration {
-				return Installed{}, ErrCatalogConflict
-			}
-		}
-		return entry, nil
 	}
-	return Installed{}, errors.New("module configuration requires an installed root module")
-}
-
-func (m *Manager) moduleConfigOwner(ctx context.Context, id string) error {
-	if ctx == nil || m == nil || m.store == nil || !sdk.ValidID(id) {
-		return errors.New("module configuration requires a manager, context and module identity")
-	}
-	if m.isClosed() {
-		return errModuleConfigClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	entries, err := m.catalog.list(ctx)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID == id && entry.Manifest.Component == nil {
-			if entry.Manifest.Contract.Version.Minor < 1 {
-				return errors.New("module configuration requires SDK API 1.1 or newer")
-			}
-			return nil
-		}
-	}
-	return errors.New("module configuration requires an installed module")
+	return entry, nil
 }
 
 func moduleConfigValues(values json.RawMessage) error {

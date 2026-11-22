@@ -3,6 +3,7 @@ package usage
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -87,8 +88,15 @@ func catchUpReported(path string) error {
 // (the call is the client's, which can send its own), and no caller key's
 // budget is spent, since the call didn't go through magpie.
 func IngestReported(recs []Record) ([]bool, error) {
+	return ingestReported(context.Background(), recs, nil, nil)
+}
+
+func ingestReported(ctx context.Context, recs []Record, authorize func(func() error) error, overlap *outsideCallOverlap) ([]bool, error) {
 	reported.ingest.Lock()
 	defer reported.ingest.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	path := Path()
 	// most of the catching up is done before the gateway's lock is taken,
 	// so a long log doesn't hold its calls up; what it wrote meanwhile is
@@ -96,15 +104,46 @@ func IngestReported(recs []Record) ([]bool, error) {
 	if err := catchUpReported(path); err != nil {
 		return nil, err
 	}
+	if err := overlap.catchUp(ctx, path); err != nil {
+		return nil, err
+	}
+	if authorize == nil {
+		return appendReported(ctx, path, recs, overlap)
+	}
+	var took []bool
+	err := authorize(func() error {
+		var err error
+		took, err = appendReported(ctx, path, recs, overlap)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return took, nil
+}
+
+func appendReported(ctx context.Context, path string, recs []Record, overlap *outsideCallOverlap) ([]bool, error) {
 	mu.Lock()
 	defer mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := catchUpReported(path); err != nil {
+		return nil, err
+	}
+	if err := overlap.catchUp(ctx, path); err != nil {
 		return nil, err
 	}
 	took := make([]bool, len(recs))
 	var buf []byte
 	batch := map[string]bool{}
 	for i, r := range recs {
+		if overlap != nil {
+			if !overlap.pending[r.RequestID] {
+				continue
+			}
+			r.RequestID = overlap.prefix + r.RequestID
+		}
 		if r.RequestID == "" || reported.rids[r.RequestID] || batch[r.RequestID] {
 			continue
 		}
@@ -129,6 +168,9 @@ func IngestReported(recs []Record) ([]bool, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	before, _ := statLogHandle(f)
 	if _, err := f.Write(buf); err != nil {
 		// what part of it reached the file is read back by the next scan

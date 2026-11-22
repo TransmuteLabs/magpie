@@ -33,16 +33,23 @@ const manyModels = 24
 // from the vendor itself when there is one, over the models.dev catalog (or,
 // for an account, whatever the agent's own sign-in can see).
 func (p Provider) Available() []catalog.Model {
+	return p.availableContext(context.Background())
+}
+
+func (p Provider) availableContext(ctx context.Context) []catalog.Model {
 	if p.DecideOnly() {
+		if p.IsExtension() {
+			return p.extensionDecisionModelsContext(ctx)
+		}
 		return p.decideModels()
 	}
 	// by the ids the user lists them by (SetModelID)
-	ms := p.ids().list(p.available())
+	ms := p.ids().list(p.availableModels(ctx))
 	if p.Decides() {
 		// a gateway's Jev among its chat models, with its window and input
 		ms = slices.Clone(ms)
 		for i, m := range ms {
-			if p.isDecision(m) {
+			if p.isDecisionContext(ctx, m) {
 				ms[i] = withDecideFacts([]catalog.Model{m})[0]
 			}
 		}
@@ -51,6 +58,10 @@ func (p Provider) Available() []catalog.Model {
 }
 
 func (p Provider) available() []catalog.Model {
+	return p.availableModels(context.Background())
+}
+
+func (p Provider) availableModels(ctx context.Context) []catalog.Model {
 	if p.ListsOff() {
 		// the ids added by hand alone (Exposed)
 		return nil
@@ -58,7 +69,7 @@ func (p Provider) available() []catalog.Model {
 	signedIn := p.Account != nil && p.Account.models != nil
 	var known []catalog.Model
 	if signedIn {
-		known = p.Account.models()
+		known = p.Account.listedModels(ctx)
 	} else {
 		// read only below: every way out of here returns a new list
 		// (Decorate's, or the one without previews) or none of known
@@ -102,7 +113,9 @@ func (p Provider) available() []catalog.Model {
 		// a model the provider's catalog doesn't list reads as it does
 		// under the other providers serving it (GLM-5-Turbo, not
 		// glm-5-turbo, beside ZCode's)
-		return catalog.Named(catalog.Decorate(live, known))
+		// a relay's ids of one model at each effort as that model, with
+		// those efforts (effort_variants.go)
+		return catalog.Named(p.foldEffortVariants(catalog.Decorate(live, known)))
 	}
 	if p.IsAzure() {
 		// an Azure resource serves its deployments alone, named as the
@@ -221,6 +234,11 @@ func (p Provider) liveByID(model string) []catalog.Model {
 	own := p.OwnModelID(model)
 	ms := catalog.LiveByIDShared(p.ID, own)
 	if own == model {
+		if len(ms) == 0 && p.foldsEfforts() {
+			// a relay's effort family, whose own id it may not list:
+			// its default member's (effort_variants.go)
+			return p.liveFamily(model)
+		}
 		return ms
 	}
 	out := slices.Clone(ms)
@@ -404,8 +422,14 @@ func liveIDs(id string) map[string]bool {
 	for _, m := range ms {
 		out[m.ID] = true
 	}
-	// picks are of the ids the user lists them by (SetModelID)
-	return modelIDsOf(id).ids(out)
+	// picks are of the ids the user lists them by (SetModelID), and of a
+	// relay's effort families (effort_variants.go)
+	out = modelIDsOf(id).ids(out)
+	all := sharedAll()
+	if i := slices.IndexFunc(all, func(p Provider) bool { return p.ID == id }); i >= 0 {
+		out = all[i].withFamilyIDs(out)
+	}
+	return out
 }
 
 // dropGonePicks takes out of the saved provider's picks those before had
@@ -1722,6 +1746,24 @@ func (p Provider) Serving(model string) func(KeyAccount) bool {
 	}
 	// the vendor's lists name the model by its own id (SetModelID)
 	keys, found := x.of[p.OwnModelID(model)]
+	if !found {
+		// a relay's effort family: the keys listed any of its ids
+		// (effort_variants.go)
+		if f, ok := p.family(model); ok {
+			keys = map[string]bool{}
+			for _, id := range f.members() {
+				ks, ok := x.of[id]
+				if ok && len(ks) == 0 {
+					keys = nil // one of them listed to every key
+					break
+				}
+				for k := range ks {
+					keys[k] = true
+				}
+				found = found || ok
+			}
+		}
+	}
 	return func(k KeyAccount) bool {
 		id := keyID(k.Key)
 		return !found || len(keys) == 0 || !x.listed[id] || keys[id]
@@ -1795,10 +1837,14 @@ const pickWait = time.Hour
 // newest of each family only under Best in family; none after Select none
 // (ServesNone).
 func (p Provider) Exposed() []catalog.Model {
+	return p.exposedContext(context.Background())
+}
+
+func (p Provider) exposedContext(ctx context.Context) []catalog.Model {
 	if p.ServesNone() || p.waitsForPicks() {
 		return nil
 	}
-	return p.ExposedOf(p.Available())
+	return p.ExposedOf(p.availableContext(ctx))
 }
 
 // ExposedOf is Exposed of avail, p.Available() as the caller has already
@@ -3617,7 +3663,21 @@ func catalogKeeping(keep func(Entry) bool) []Entry {
 	// grown by append for the providers' models, it was 29 MB of what forty
 	// polls of the Providers page allocated with real accounts
 	out := append(make([]Entry, 0, len(groups)+len(entries)), groups...)
-	kept := unlistedByGroups(entries)
+	return appendListedEntries(out, entries, unlistedByGroups(entries), keep)
+}
+
+// ListedProviderEntries reads the direct entries Catalog gives to callers,
+// including its group visibility rules, under the caller's deadline.
+func ListedProviderEntries(ctx context.Context) []Entry {
+	entries := providerEntriesContext(ctx)
+	kept := unlistedByGroupsContext(ctx, entries)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return appendListedEntries(make([]Entry, 0, len(entries)), entries, kept, nil)
+}
+
+func appendListedEntries(out, entries []Entry, kept map[string][]string, keep func(Entry) bool) []Entry {
 	for _, e := range entries {
 		if !e.Provider.Unlisted && len(kept[e.ID]) == 0 || keep != nil && keep(e) {
 			out = append(out, e)
@@ -3648,7 +3708,11 @@ func CatalogGroups() ([]Entry, int) {
 // that do: those it names, a member fixed at an effort counting as its
 // model, and those its patterns match.
 func unlistedByGroups(entries []Entry) map[string][]string {
-	by := groupsKeeping(entries)
+	return unlistedByGroupsContext(context.Background(), entries)
+}
+
+func unlistedByGroupsContext(ctx context.Context, entries []Entry) map[string][]string {
+	by := groupsKeepingContext(ctx, entries)
 	if by == nil {
 		return nil
 	}
@@ -3666,12 +3730,19 @@ func unlistedByGroups(entries []Entry) map[string][]string {
 // groupsKeeping is unlistedByGroups with the groups themselves, by the
 // models, "provider/model", they keep out of the lists.
 func groupsKeeping(entries []Entry) map[string][]Group {
+	return groupsKeepingContext(context.Background(), entries)
+}
+
+func groupsKeepingContext(ctx context.Context, entries []Entry) map[string][]Group {
 	// read only: the file parsed once until it changes (storedFile)
 	if !slices.ContainsFunc(storedFile().Groups, func(g Group) bool { return g.Unlists }) {
 		return nil
 	}
 	out := map[string][]Group{}
-	for _, g := range groupsIn(entries) {
+	for _, g := range groupsInContext(ctx, entries) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !g.Unlists || g.Hidden || g.Disabled {
 			continue
 		}
@@ -3679,8 +3750,8 @@ func groupsKeeping(entries []Entry) map[string][]Group {
 			if strings.HasPrefix(id, GroupPrefix) {
 				continue
 			}
-			model, _ := memberEffortIn(entries, id)
-			if p, m, ok := resolveIn(entries, model); ok && !slices.ContainsFunc(out[p.ID+"/"+m], func(o Group) bool { return o.ID == g.ID }) {
+			model, _ := memberEffortInContext(ctx, entries, id)
+			if p, m, ok := resolveInContext(ctx, entries, model); ok && !slices.ContainsFunc(out[p.ID+"/"+m], func(o Group) bool { return o.ID == g.ID }) {
 				out[p.ID+"/"+m] = append(out[p.ID+"/"+m], g)
 			}
 		}
@@ -3753,8 +3824,12 @@ func groupKeptIn(entries []Entry) map[string][]string {
 // each model it may go to, and a copy each time was ~380KB with 12
 // providers of 20 models (#3725).
 func Served() []Entry {
-	return heldFrom("served", providerEntries(), func(entries []Entry) []Entry {
-		return slices.Clip(append(slices.Clone(groupEntries(entries)), entries...))
+	return ServedContext(context.Background())
+}
+
+func ServedContext(ctx context.Context) []Entry {
+	return heldFromContext(ctx, "served", providerEntriesContext(ctx), func(entries []Entry) []Entry {
+		return slices.Clip(append(slices.Clone(groupEntriesContext(ctx, entries)), entries...))
 	})
 }
 
@@ -3762,9 +3837,13 @@ func Served() []Entry {
 // the providers kept for routing groups (Provider.Unlisted), and those a
 // group keeps out of the lists (Group.Unlists).
 func Unlisted() []Entry {
+	return UnlistedContext(context.Background())
+}
+
+func UnlistedContext(ctx context.Context) []Entry {
 	var out []Entry
-	entries := providerEntries()
-	kept := unlistedByGroups(entries)
+	entries := providerEntriesContext(ctx)
+	kept := unlistedByGroupsContext(ctx, entries)
 	for _, e := range entries {
 		if e.Provider.Unlisted || len(kept[e.ID]) > 0 {
 			out = append(out, e)
@@ -3775,10 +3854,16 @@ func Unlisted() []Entry {
 
 // providerEntries is the catalog without its groups.
 func providerEntries() []Entry {
-	return heldEntries(buildEntries)
+	return providerEntriesContext(context.Background())
 }
 
-func buildEntries() []Entry { return entriesOff(disabledNow()) }
+func providerEntriesContext(ctx context.Context) []Entry {
+	return heldEntriesContext(ctx, func() []Entry { return buildEntries(ctx) })
+}
+
+func buildEntries(ctx context.Context) []Entry {
+	return entriesOfContext(ctx, Provider.On, disabledNow())
+}
 
 // entriesOff is the providers' catalog less the models off reports.
 func entriesOff(off func(pid, model string) bool) []Entry {
@@ -3789,27 +3874,38 @@ func entriesOff(off func(pid, model string) bool) []Entry {
 // which the groups magpie finds keep (foundFrom). One without a key, a
 // plugin not signed in, finds no group.
 func heldOffEntries() []Entry {
-	return heldOf("off entries", func() []Entry {
-		return keptOf("off entries", func() []Entry {
-			return slices.Clip(entriesOf(func(p Provider) bool { return p.Ready() && (p.Off || p.KeptToAgent()) }, disabledNow()))
+	return heldOffEntriesContext(context.Background())
+}
+
+func heldOffEntriesContext(ctx context.Context) []Entry {
+	return heldOfContext(ctx, "off entries", func() []Entry {
+		return keptOfContext(ctx, "off entries", func() []Entry {
+			return slices.Clip(entriesOfContext(ctx, func(p Provider) bool { return p.Ready() && (p.Off || p.KeptToAgent()) }, disabledNow()))
 		})
 	})
 }
 
 // entriesOf is the catalog of the providers of, less the models off reports.
 func entriesOf(of func(Provider) bool, off func(pid, model string) bool) []Entry {
+	return entriesOfContext(context.Background(), of, off)
+}
+
+func entriesOfContext(ctx context.Context, of func(Provider) bool, off func(pid, model string) bool) []Entry {
 	var out []Entry
 	s := settings.Load()
 	gone := retiredNow() // its vendor said it is retired (retired.go)
-	for _, p := range All() {
+	for _, p := range AllContext(ctx) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !of(p) || p.DecideOnly() { // a dedicated decision API only routes
 			continue
 		}
-		for _, m := range p.Exposed() {
+		for _, m := range p.exposedContext(ctx) {
 			if off(p.ID, m.ID) { // the user turned it off (#1867)
 				continue
 			}
-			if !p.isDecision(m) && !gone[p.ID+"/"+m.ID] {
+			if !p.isDecisionContext(ctx, m) && !gone[p.ID+"/"+m.ID] {
 				out = append(out, sharedEntry(&p, m, s))
 			}
 		}
@@ -4010,6 +4106,10 @@ func Resolve(id string) (Provider, string, bool) {
 }
 
 func resolveIn(entries []Entry, id string) (Provider, string, bool) {
+	return resolveInContext(context.Background(), entries, id)
+}
+
+func resolveInContext(ctx context.Context, entries []Entry, id string) (Provider, string, bool) {
 	// by index: an Entry, its Provider in it, is large, and a copy of each
 	// one looked past was most of a group's members resolved (membersIn)
 	for i := range entries {
@@ -4020,7 +4120,7 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	if pid, model, ok := strings.Cut(id, "/"); ok {
 		// the providers a request holds (All): an agent's value of a
 		// model not listed lands here
-		if p := lookIn(sharedAll(), pid); p != nil && p.On() && !p.ServesNone() {
+		if p := lookIn(sharedAllContext(ctx), pid); p != nil && p.On() && !p.ServesNone() {
 			return p.clone(), model, true
 		}
 	}
@@ -4034,8 +4134,10 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 	// kept across requests, as the catalog is: built again for each model
 	// value no entry has (an agent's bare "gpt-5.5"), every provider's whole
 	// list was 835 MB of a live magpie's 33 GB in 53 minutes
-	for _, p := range heldOf("listed", func() map[string][]*Provider { return keptOf("listed", listedBy) })[id] {
-		if !p.DecidesModel(id) {
+	for _, p := range heldOfContext(ctx, "listed", func() map[string][]*Provider {
+		return keptOfContext(ctx, "listed", func() map[string][]*Provider { return listedByContext(ctx) })
+	})[id] {
+		if !p.decidesModelContext(ctx, id) {
 			found = append(found, *p)
 		}
 	}
@@ -4048,14 +4150,17 @@ func resolveIn(entries []Entry, id string) (Provider, string, bool) {
 // listedBy is the providers on that list each model, in order, each once.
 // Every model of a provider points at one copy of it: a copy a model was
 // 1.3KB each, 32 MB allocated at start-up on a real account's lists.
-func listedBy() map[string][]*Provider {
+func listedByContext(ctx context.Context) map[string][]*Provider {
 	out := map[string][]*Provider{}
-	for _, p := range All() {
+	for _, p := range AllContext(ctx) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !p.On() || p.ServesNone() {
 			continue
 		}
 		pp := &p
-		for _, m := range p.Available() {
+		for _, m := range p.availableContext(ctx) {
 			if l := out[m.ID]; len(l) == 0 || l[len(l)-1] != pp { // each once
 				out[m.ID] = append(l, pp)
 			}

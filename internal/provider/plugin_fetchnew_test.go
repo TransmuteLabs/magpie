@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/testenv"
 )
@@ -63,15 +64,19 @@ func TestFetchNewLeavesListedPlugins(t *testing.T) {
 func TestPluginUsageReadOnceWhicheverName(t *testing.T) {
 	bun := testenv.Bun(t)
 	claudeHome(t)
+	writeFile(t, catalog.CachePath(), map[string]any{"fakeco": map[string]any{"models": map[string]any{}}})
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Cleanup(plugin.Settle)
 	var asked atomic.Int32
-	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const usagePath = "/plugin-usage"
+	routes := http.NewServeMux()
+	routes.HandleFunc("GET "+usagePath, func(w http.ResponseWriter, r *http.Request) {
 		asked.Add(1)
 		fmt.Fprint(w, "Fake Max")
-	}))
+	})
+	vendor := httptest.NewServer(routes)
 	defer vendor.Close()
-	t.Setenv("FAKE_USAGE", vendor.URL)
+	t.Setenv("FAKE_USAGE", vendor.URL+usagePath)
 	clear := func() {
 		loginUsageCache.Lock()
 		loginUsageCache.m = nil

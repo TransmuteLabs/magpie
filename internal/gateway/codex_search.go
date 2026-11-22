@@ -150,8 +150,9 @@ func (s *Server) relaySearchers(r *http.Request, model string) []searchTarget {
 		cs = s.candidates(p, bare, provider.Responses)
 	}
 	var out []searchTarget
+	current := provider.CurrentAccountIDs(r.Context())
 	for _, c := range cs {
-		if !accountAllowed(who, c) {
+		if !accountAllowed(who, c.p, current) {
 			continue
 		}
 		if !upstreamSearches(c.p) || magpieSearches(r.Context(), c.p) {
@@ -184,9 +185,10 @@ func chatGPTSearchers(r *http.Request, model string) ([]provider.Provider, strin
 	}
 	all = append(all, p.AlsoOn()...)
 	var ready, later []provider.Provider
+	current := provider.CurrentAccountIDs(r.Context())
 	for _, o := range all {
 		c := candidate{p: o, model: bare, rest: o.ID}
-		if !accountAllowed(who, c) {
+		if !accountAllowed(who, o, current) {
 			continue
 		}
 		if resting(c) || provider.SignInMarked(o.Account) {

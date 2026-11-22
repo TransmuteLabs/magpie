@@ -1,7 +1,7 @@
 # Go extension SDK
 
 Implement a `Module` with a validated `Manifest` and handlers for each
-advertised capability. The current source SDK supports API 1.19 and native,
+advertised capability. The current source SDK supports API 1.20 and native,
 exec and Bun runtimes. The host supplies installation, scoped authority,
 account publication and lifecycle; a module supplies its domain handlers.
 The [host reference](../../docs/subsystems/executable-extensions.md) is the
@@ -13,14 +13,14 @@ application repository at the matching application tag or commit; it has no
 separate SDK release tag. The JS release package is stamped from the same
 build's `VERSION` through `make sdk-js-pack`; its checked-in
 `0.0.0-alpha.0` version identifies development source. Application/package
-release versions do not renumber wire API 1.19, native ABI 1 or manifest
+release versions do not renumber wire API 1.20, native ABI 1 or manifest
 compatibility floors.
 
 Declare the minimum contract and only the capabilities used. The simple
 [Go](../../examples/extensions/echo-go/magpie-plugin.json) and
 [native](../../examples/extensions/echo-native/magpie-plugin.json) examples
 retain explicit SDK 1.0 single-primary manifests. `FullContract()` advertises
-the available API 1.19 ceiling; it is not a default manifest or a requirement
+the available API 1.20 ceiling; it is not a default manifest or a requirement
 to enable every capability. Composite configuration is negotiated separately.
 Magpie needs no external module to start; installing this SDK does not install
 or start a domain module.
@@ -120,7 +120,7 @@ The host compares this projection with the matching projection of its complete
 installation authority; a handshake is not the group's permission source.
 `Manifest.Clone()` retains a deep copy of the complete root descriptor.
 Manifest and handler declarations are copied before traffic.
-`FullContract()` is API 1.19. Explicit API 1.0 modules without composite fields
+`FullContract()` is API 1.20. Explicit API 1.0 modules without composite fields
 retain their original single-controller behavior. The separate codec host
 contract is API 0.5, retaining the older 0.1 inbound, 0.2 catalog, 0.3 tool
 and 0.4 executor-binding contracts.
@@ -383,6 +383,13 @@ operation receipt alongside the ordinary saved result. An unknown or failed
 completion cannot replay through manual/daily check-in, restart or a new
 credential generation. Known not-started and ordinary non-claim rechecks
 have distinct intents. This operation reports no inference usage.
+
+API 1.20 modules may return `AccountCheckinRateLimited` with a strict,
+required `Until` after a completed rate-limit decision. Retain any confirmed
+partial effects and resolve uncertainty before returning this result. The
+host reuses the completed receipt until the boundary, including on a
+manual press. At or after `Until` a later call gets a new intent.
+`failed` with `Until` still requires reconciliation.
 
 A root `Activation: []string{ActivationGateway}` requests a lease only
 after the ordinary gateway successfully binds. Stop, disable, removal and

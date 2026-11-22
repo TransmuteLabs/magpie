@@ -1,9 +1,54 @@
 package provider
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestHeardClaudeQuotaRespectsUnreadableOwner(t *testing.T) {
+	host, _, _ := prepareUsageReadFixture(t)
+	const user = "heard@example.test"
+	warmSubscriptionUsageForTest(t, SubscriptionQuota{
+		Provider: "claude", Name: "Claude Code", User: user,
+		Windows: []QuotaWindow{{Name: "5 hours", Used: 10}},
+	})
+	t.Cleanup(func() {
+		claudeUsage.Lock()
+		delete(claudeUsage.m, user)
+		claudeUsage.Unlock()
+	})
+	NoteClaudeLimits(user, []ClaudeLimit{{Kind: "five_hour", Used: 0.42, ResetsAt: time.Now().Add(time.Hour).Unix()}})
+	assertHeard := func() {
+		t.Helper()
+		if q := cardOf(SubscriptionUsage(t.Context()), "claude", user); q == nil || len(q.Windows) != 1 || q.Windows[0].Used != 42 {
+			t.Fatalf("valid ownership did not project the heard Claude quota: %+v", q)
+		}
+	}
+	assertHeard()
+
+	dir := filepath.Join(host.Namespace(), "private", ".saved-signins")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "subscription-owners.json")
+	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for surface, cards := range map[string][]SubscriptionQuota{
+		"Usage":  SubscriptionUsage(t.Context()),
+		"export": CachedCardsContext(t.Context(), time.Now()),
+	} {
+		if q := cardOf(cards, "claude", user); q == nil || !q.ReadDeferred || len(q.Windows) != 0 {
+			t.Errorf("%s returned heard Claude windows without readable ownership: %+v", surface, q)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertHeard()
+}
 
 // #2206 (SuInk): a Claude account's allowance heard only as Claude Code
 // answered (NoteClaudeLimits) is on the cards another magpie is told

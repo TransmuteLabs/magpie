@@ -13,6 +13,7 @@ package routes
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"log"
 	"slices"
@@ -33,7 +34,7 @@ type Option struct {
 
 type Source struct {
 	Find func(string) (Strategy, bool)
-	List func() []Option
+	List func(context.Context) []Option
 }
 
 type registration struct {
@@ -157,6 +158,10 @@ func (c *Catalog) Served(routing string) bool {
 // List returns the serving registrations followed by the installed metadata.
 // Reading the installed source never starts a worker.
 func (c *Catalog) List() []Option {
+	return c.ListContext(context.Background())
+}
+
+func (c *Catalog) ListContext(ctx context.Context) []Option {
 	reg := c.registered
 	reg.RLock()
 	options := make([]Option, 0, len(reg.byID))
@@ -174,7 +179,7 @@ func (c *Catalog) List() []Option {
 	for _, option := range options {
 		seen[option.ID] = true
 	}
-	for _, option := range safeList(c.installed.List) {
+	for _, option := range safeList(ctx, c.installed.List) {
 		if strings.Contains(option.ID, "/") && !seen[option.ID] {
 			seen[option.ID] = true
 			options = append(options, option)
@@ -192,13 +197,13 @@ func safeLookup(find func(string) (Strategy, bool), name string) (strategy Strat
 	return find(name)
 }
 
-func safeList(list func() []Option) (out []Option) {
+func safeList(ctx context.Context, list func(context.Context) []Option) (out []Option) {
 	defer func() {
 		if recover() != nil {
 			out = nil
 		}
 	}()
-	return list()
+	return list(ctx)
 }
 
 // Apply is the order s gives seats, checked: an order that isn't a

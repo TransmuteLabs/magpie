@@ -109,7 +109,7 @@ func newTraeCheckiner(accounts func() []traeAccount) checkiner {
 func traeCheckin(ctx context.Context, a traeAccount) WorkBuddyCheckin {
 	var st traeCheckinStatus
 	if err := traeCall(ctx, a, "/status", &st); err != nil {
-		return wbCheckinFailed(err)
+		return checkinRequestFailed(ctx, err)
 	}
 	if st.Code != 0 {
 		return traeRefused(st.Code, st.Message)
@@ -122,7 +122,7 @@ func traeCheckin(ctx context.Context, a traeAccount) WorkBuddyCheckin {
 	}
 	var got traeCheckinStatus
 	if err := traeCall(ctx, a, "/claim", &got); err != nil {
-		return wbCheckinFailed(err)
+		return checkinRequestFailed(ctx, err)
 	}
 	if got.Code == traeOwnAppOnly {
 		// status said on and not in, so the claim itself is refused, and
@@ -170,12 +170,10 @@ func traeCall(ctx context.Context, a traeAccount, path string, dst *traeCheckinS
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	res, err := a.via(req)
+	res, b, err := checkinReply(req, a.via)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if strings.EqualFold(res.Header.Get("X-Magpie-Sign-In"), "expired") || res.StatusCode == http.StatusUnauthorized {
 		return errors.New("Trae CN's sign-in has expired — sign in again")
 	}
@@ -233,14 +231,18 @@ func traeCards(accts []traeAccount) []checkinCard {
 // traeCheckinAccounts are the Trae CN plugin's accounts, each sent through
 // the plugin's fetch, which signs it as the account.
 func traeCheckinAccounts() []traeAccount {
-	pp, ok := PluginOf(TraeCNID)
+	return traeCheckinAccountsContext(context.Background())
+}
+
+func traeCheckinAccountsContext(ctx context.Context) []traeAccount {
+	pp, ok := pluginOfContext(ctx, TraeCNID)
 	if !ok || pluginChecksIn(pp) {
 		return nil
 	}
 	auths := plugin.Auths(pp.ID)
 	card := PluginID(pp.ID)
 	var out []traeAccount
-	for _, l := range pluginLogins(pp) {
+	for _, l := range pluginLoginsContext(ctx, pp) {
 		key := l.acct.Key
 		out = append(out, traeAccount{User: l.User, On: l.On, uid: str(auths[key]["uid"]), card: card,
 			via: func(req *http.Request) (*http.Response, error) {

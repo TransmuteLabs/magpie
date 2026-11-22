@@ -1,11 +1,13 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -86,6 +88,8 @@ func TestStdBase64Body(t *testing.T) {
 			"contents.0.parts.1.inlineData.data", s, "contents.0.parts.0.text", false},
 		{"gemini snake", provider.Gemini, `{"contents":[{"role":"user","parts":[{"inline_data":{"mime_type":"image/png","data":"` + u + `"}}]}]}`,
 			"contents.0.parts.0.inline_data.data", s, "contents.0.role", false},
+		{"gemini escaped key", provider.Gemini, `{"contents":[{"role":"user","parts":[{"inline\u0044ata":{"mimeType":"image/png","data":"` + u + `"}}]}]}`,
+			"contents.0.parts.0.inlineData.data", s, "contents.0.role", false},
 		{"gemini pdf", provider.Gemini, `{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"application/pdf","data":"` + pdfU + `"}}]}]}`,
 			"contents.0.parts.0.inlineData.data", pdfS, "contents.0.parts.0.inlineData.mimeType", false},
 		{"gemini function response", provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"shot","response":{},"parts":[{"inlineData":{"mimeType":"image/png","data":"` + u + `"}}]}}]}]}`,
@@ -98,10 +102,14 @@ func TestStdBase64Body(t *testing.T) {
 			"messages.0.content.0.image_url.url", "data:image/png;base64," + s, "messages.0.content.0.image_url.detail", false},
 		{"chat standard", provider.Chat, `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + s + `"}}]}]}`,
 			"messages.0.content.0.image_url.url", "data:image/png;base64," + s, "model", true},
+		{"chat escaped data URL", provider.Chat, `{"model":"m","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png\u003bbase64\u002c` + u + `"}}]}]}`,
+			"messages.0.content.0.image_url.url", "data:image/png;base64," + s, "model", false},
 		{"responses", provider.Responses, `{"model":"m","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,` + u + `","detail":"auto"}]}]}`,
 			"input.0.content.0.image_url", "data:image/png;base64," + s, "input.0.content.0.detail", false},
 		{"messages", provider.Anthropic, `{"model":"m","max_tokens":9,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + u + `"},"cache_control":{"type":"ephemeral"}}]}]}`,
 			"messages.0.content.0.source.data", s, "messages.0.content.0.cache_control.type", false},
+		{"messages escaped source type", provider.Anthropic, `{"model":"m","max_tokens":9,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base\u00364","media_type":"image/png","data":"` + u + `"}}]}]}`,
+			"messages.0.content.0.source.data", s, "model", false},
 		{"messages tool_result", provider.Anthropic, `{"model":"m","max_tokens":9,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + u + `"}}]}]}]}`,
 			"messages.0.content.0.content.0.source.data", s, "messages.0.content.0.tool_use_id", false},
 	}
@@ -126,6 +134,40 @@ func TestStdBase64Body(t *testing.T) {
 			before, after := gjson.Get(c.body, c.kept), gjson.GetBytes(out, c.kept)
 			if !before.Exists() || before.Raw != after.Raw {
 				t.Fatalf("%s was %s, is %s", c.kept, before.Raw, after.Raw)
+			}
+		})
+	}
+}
+
+func TestStdBase64SkipsOpaqueStringsAndRemoteImages(t *testing.T) {
+	token := strings.Repeat("_-Aa", 10000)
+	for _, tc := range []struct {
+		name  string
+		proto provider.Protocol
+		body  string
+	}{
+		{"sealed responses", provider.Responses, `{"input":[{"type":"reasoning","encrypted_content":"` + token + `"},{"role":"user","content":"hi"}]}`},
+		{"messages signature", provider.Anthropic, `{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"ok","signature":"` + token + `"}]},{"role":"user","content":"hi"}]}`},
+		{"gemini signature", provider.Gemini, `{"contents":[{"role":"model","parts":[{"text":"ok","thoughtSignature":"` + token + `"}]},{"role":"user","parts":[{"text":"hi"}]}]}`},
+		{"signed remote image", provider.Chat, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/image?sz=32\u0026sig=` + token + `"}}]}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			var hashes atomic.Int32
+			onHash := func(data []byte) {
+				if bytes.Equal(data, body) {
+					hashes.Add(1)
+				}
+			}
+			validHashed.Store(&onHash)
+			t.Cleanup(func() { validHashed.Store(nil) })
+			var out []byte
+			allocs := testing.AllocsPerRun(5, func() { out = stdBase64Body(tc.proto, body) })
+			if !bytes.Equal(out, []byte(tc.body)) {
+				t.Fatal("the body changed")
+			}
+			if count := hashes.Load(); count != 0 || allocs != 0 {
+				t.Errorf("entered the JSON walker for opaque strings: %d body hashes, %g allocs per turn", count, allocs)
 			}
 		})
 	}

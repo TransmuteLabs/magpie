@@ -347,7 +347,7 @@ func TestGatewayHooksKeepStateInTheOriginalGeneration(t *testing.T) {
 func TestGatewayHooksRejectAnUnstartedPreviousEnablement(t *testing.T) {
 	manager, trace := gatewayFixtureManager(t, sdk.GatewayHookDescriptor{Request: true})
 	info := sdk.GatewayContext{Origin: "local", Protocol: "chat", Model: "m"}
-	entries := manager.gatewayEntries(t.Context(), info.Origin, false)
+	entries := manager.SelectGateway(t.Context(), info.Origin).hooks
 	if len(entries) != 1 {
 		t.Fatalf("selected %d gateway hooks", len(entries))
 	}

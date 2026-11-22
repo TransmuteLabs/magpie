@@ -64,6 +64,17 @@ const codexSocketBeta = "responses_websockets=2026-02-06"
 // spoken HTTP before it is tried again.
 var codexSocketShun = 10 * time.Minute
 
+// codexRelayShun is how long a relay (provider.SocketRelay) that refused
+// the socket is spoken HTTP: most relays never take it (tried 11-21:
+// DeepSeek 405, OpenRouter, AiHubMix and OpenCode Go 404), and asking
+// every ten minutes cost each a refused handshake ahead of a turn. A
+// passing fault (429, 5xx) is still codexSocketShun's.
+var codexRelayShun = 6 * time.Hour
+
+// codexDeltaLapse is how long a relay that answered a delta not as one
+// (codexDeltaIgnored) is sent each turn whole, on its socket still.
+var codexDeltaLapse = 24 * time.Hour
+
 // codexSocketDial bounds the handshake, as Codex's own
 // websocket_connect_timeout does.
 var codexSocketDial = 30 * time.Second
@@ -78,7 +89,35 @@ var (
 	// codexTooBig is the smallest message a host closed 1009 on, and
 	// until when messages that big go to it over HTTP; under codexShunMu.
 	codexTooBig = map[string]tooBig{}
+	// codexNoDelta is until when a relay's turns go whole
+	// (codexDeltaIgnored); under codexShunMu.
+	codexNoDelta = map[string]time.Time{}
 )
+
+// codexDeltaIgnored notes that host answered a turn sent after
+// previous_response_id without saying it followed that response, as a
+// relay that drops the field would; its turns go whole for
+// codexDeltaLapse.
+func codexDeltaIgnored(host string) {
+	codexShunMu.Lock()
+	_, was := codexNoDelta[host]
+	codexNoDelta[host] = time.Now().Add(codexDeltaLapse)
+	codexShunMu.Unlock()
+	if !was {
+		log.Printf("codex: %s answered a turn after previous_response_id without naming it; its turns go whole for %s", host, codexDeltaLapse)
+	}
+}
+
+func codexDeltaLapsed(host string) bool {
+	codexShunMu.Lock()
+	defer codexShunMu.Unlock()
+	until, ok := codexNoDelta[host]
+	if ok && time.Now().After(until) {
+		delete(codexNoDelta, host)
+		return false
+	}
+	return ok
+}
 
 type tooBig struct {
 	size  int
@@ -123,13 +162,15 @@ func codexShunned(host string) bool {
 	return ok
 }
 
-func shunCodexSocket(host string, why string) {
+func shunCodexSocket(host string, why string, d time.Duration) {
 	codexShunMu.Lock()
-	_, was := codexShun[host]
-	codexShun[host] = time.Now().Add(codexSocketShun)
+	until, was := codexShun[host]
+	if t := time.Now().Add(d); !was || t.After(until) {
+		codexShun[host] = t
+	}
 	codexShunMu.Unlock()
 	if !was {
-		log.Printf("codex: %s refused the WebSocket (%s); its turns go over HTTP for %s", host, why, codexSocketShun)
+		log.Printf("codex: %s refused the WebSocket (%s); its turns go over HTTP for %s", host, why, d)
 	}
 }
 
@@ -139,15 +180,39 @@ func shunCodexSocket(host string, why string) {
 // goes through next.
 type codexSocket struct{ next http.RoundTripper }
 
-func (t codexSocket) RoundTrip(req *http.Request) (*http.Response, error) {
+func codexSocketTurn(req *http.Request) (turn, shun bool) {
 	if codexSocketOff.Load() || req.Method != http.MethodPost || req.GetBody == nil {
-		return t.next.RoundTrip(req)
+		return false, false
 	}
-	turn, shun := provider.SocketTurn(req)
-	if !turn || (shun && codexShunned(req.URL.Host)) {
-		return t.next.RoundTrip(req)
+	turn, shun = provider.SocketTurn(req)
+	return turn && (!shun || !codexShunned(req.URL.Host)), shun
+}
+
+func (t codexSocket) roundTripHTTP(req *http.Request) (*http.Response, error) {
+	if wire := codexWireOf(req); wire != nil && wire.encode != nil && req.Method == http.MethodPost {
+		req = wire.httpRequest(req)
+		if wire.encoded != nil {
+			defer provider.LetGo(req)
+		}
 	}
-	res, err := t.overSocket(req, shun)
+	return t.next.RoundTrip(req)
+}
+
+func (t codexSocket) RoundTrip(req *http.Request) (*http.Response, error) {
+	turn, shun := codexSocketTurn(req)
+	if !turn {
+		return t.roundTripHTTP(req)
+	}
+	res, err := t.overSocket(req, shun, shun && provider.SocketRelay(req))
+	if wire := codexWireOf(req); wire != nil && !wire.http {
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		if res != nil && res.Request == req {
+			res.Request = req.WithContext(req.Context())
+			res.Request.Body, res.Request.GetBody = nil, nil
+		}
+	}
 	if res != nil && res.StatusCode == http.StatusOK && res.Header.Get("Content-Type") == "" &&
 		!provider.CodexTurnURL(req.URL) {
 		// what a Responses provider's stream is said to be over HTTP;
@@ -158,8 +223,9 @@ func (t codexSocket) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // overSocket is RoundTrip for a turn that may go over the socket; shun
-// says a refused handshake leaves the host to HTTP for a while.
-func (t codexSocket) overSocket(req *http.Request, shun bool) (*http.Response, error) {
+// says a refused handshake leaves the host to HTTP for a while, and relay
+// that it is a relay's (provider.SocketRelay).
+func (t codexSocket) overSocket(req *http.Request, shun, relay bool) (*http.Response, error) {
 	overHTTP := false
 	toSocket(req.Context())
 	defer func() { sentOnSocket(req.Context(), !overHTTP) }()
@@ -168,7 +234,7 @@ func (t codexSocket) overSocket(req *http.Request, shun bool) (*http.Response, e
 			toHTTP(req.Context())
 		}
 		overHTTP = true
-		return t.next.RoundTrip(req)
+		return t.roundTripHTTP(req)
 	}
 	body, ok := codexSocketMessage(req)
 	copilot := provider.CopilotSocketTurn(req)
@@ -183,7 +249,13 @@ func (t codexSocket) overSocket(req *http.Request, shun bool) (*http.Response, e
 		}
 		create = func(body []byte) []byte { return copilotCreate(body, initiator) }
 	}
-	msg := create(body)
+	var msg []byte
+	full := func() []byte {
+		if msg == nil {
+			msg = create(body)
+		}
+		return msg
+	}
 	var shape *codexTurnShape
 	key := codexKeepKey(req, body)
 	if key == "" && copilot {
@@ -192,30 +264,54 @@ func (t codexSocket) overSocket(req *http.Request, shun bool) (*http.Response, e
 		key = codexKeepKeyOf(req, conversationID(req.Header, body), "")
 	}
 	if key != "" {
-		if s, ok := codexShape(body); ok {
+		if s, ok := codexShape(body, key); ok {
 			shape = s
 		} else {
 			key = ""
 		}
 	}
 	if k := codexKeepTake(key); k != nil {
-		send := msg
-		if d, ok := k.delta(body, shape); ok {
+		var send []byte
+		after := ""
+		if relay && codexDeltaLapsed(req.URL.Host) {
+			// it answered a delta not as one lately: whole on its socket
+		} else if d, ok := k.delta(body, shape); ok {
 			send = create(d)
+			if relay {
+				after = k.replyID
+			}
 		}
+		if send == nil {
+			send = full()
+		}
+		shape.input = nil
 		if codexMessageTooBig(req.URL.Host, len(send)) {
 			k.close()
 		} else {
-			res, err := t.turn(req, k, send, shape, true)
+			res, err := t.turn(req, k, send, shape, true, after)
 			if !errors.Is(err, errCodexSocketAgain) {
 				return res, err
 			}
 		}
 	}
+	if shape != nil {
+		shape.input = nil
+	}
+	msg = full()
 	if codexMessageTooBig(req.URL.Host, len(msg)) {
 		return viaHTTP()
 	}
-	res, err := t.socket(req, msg, key, shape, shun, copilot)
+	res, err := t.socket(req, msg, key, shape, shun, relay, copilot)
+	if errors.Is(err, errCodexSocketRelayError) {
+		// a relay's socket answered a new turn with an error: HTTP
+		// answers it, and a relay whose HTTP takes the turn it refused
+		// is one whose socket isn't to be asked
+		res, err := viaHTTP()
+		if err == nil && res.StatusCode < 400 {
+			shunCodexSocket(req.URL.Host, "an error frame its HTTP route answered", codexRelayShun)
+		}
+		return res, err
+	}
 	if errors.Is(err, errCodexSocketFallBack) {
 		return viaHTTP()
 	}
@@ -228,30 +324,40 @@ var (
 	// errCodexSocketAgain says a kept socket failed before the reply was
 	// handed on, and the turn goes whole on a new one.
 	errCodexSocketAgain = errors.New("codex: on a new socket")
+	// errCodexSocketRelayError says a relay's new socket answered with
+	// an error frame ahead of the reply: the turn goes over HTTP.
+	errCodexSocketRelayError = errors.New("codex: a relay's error over HTTP")
 )
 
 // codexSocketMessage is req's turn as the body of the socket's
 // response.create message, and false for a body that isn't a streamed
 // turn.
 func codexSocketMessage(req *http.Request) ([]byte, bool) {
-	rc, err := req.GetBody()
-	if err != nil {
-		return nil, false
-	}
-	defer rc.Close()
-	plain := rc
-	if enc := req.Header.Get("Content-Encoding"); enc != "" {
-		if !strings.EqualFold(enc, "zstd") {
+	var body []byte
+	if wire := codexWireOf(req); wire != nil && wire.plain != nil {
+		body = wire.plain
+	} else {
+		rc, err := req.GetBody()
+		if err != nil {
 			return nil, false
 		}
-		d := &http.Request{Header: http.Header{"Content-Encoding": {enc}}, Body: rc}
-		if plain, err = decodedBody(d); err != nil {
+		defer rc.Close()
+		plain := rc
+		if enc := req.Header.Get("Content-Encoding"); enc != "" {
+			if !strings.EqualFold(enc, "zstd") {
+				return nil, false
+			}
+			d := &http.Request{Header: http.Header{"Content-Encoding": {enc}}, Body: rc}
+			if plain, err = decodedBody(d); err != nil {
+				return nil, false
+			}
+			defer plain.Close()
+		}
+		if body, err = io.ReadAll(io.LimitReader(plain, defaultBodyLimit+1)); err != nil {
 			return nil, false
 		}
-		defer plain.Close()
 	}
-	body, err := io.ReadAll(io.LimitReader(plain, defaultBodyLimit+1))
-	if err != nil || len(body) > defaultBodyLimit {
+	if len(body) > defaultBodyLimit {
 		return nil, false
 	}
 	body = bytes.TrimSpace(body)
@@ -398,7 +504,7 @@ func codexSocketHeaders(req *http.Request, copilot bool) http.Header {
 // carries on with key's conversation is kept for its next turn. A host
 // that refuses the handshake is left to HTTP for a while when shun says
 // so (a provider's Socket "on" never is).
-func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *codexTurnShape, shun, copilot bool) (*http.Response, error) {
+func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *codexTurnShape, shun, relay, copilot bool) (*http.Response, error) {
 	// the socket may outlive the request, kept for the next turn: only
 	// the handshake ends with it
 	ctx, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
@@ -420,13 +526,23 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 		switch {
 		case !shun:
 			// tried again next turn
+		case hs == nil && relay:
+			// a relay that never answers the handshake costs a turn
+			// codexSocketDial each time it is asked
+			shunCodexSocket(u.Host, err.Error(), codexRelayShun)
 		case hs == nil:
-			shunCodexSocket(u.Host, err.Error())
+			shunCodexSocket(u.Host, err.Error(), codexSocketShun)
+		case relay && (hs.StatusCode == http.StatusTooManyRequests || hs.StatusCode >= 500):
+			shunCodexSocket(u.Host, hs.Status, codexSocketShun)
+		case relay:
+			// a 401 too: a relay that answers HTTP with the same key
+			// may answer the socket's path with anything
+			shunCodexSocket(u.Host, hs.Status, codexRelayShun)
 		case hs.StatusCode == http.StatusUnauthorized || hs.StatusCode == http.StatusTooManyRequests ||
 			hs.StatusCode >= 500:
 			// the account's or a passing fault: HTTP says it as it is
 		default:
-			shunCodexSocket(u.Host, hs.Status)
+			shunCodexSocket(u.Host, hs.Status, codexSocketShun)
 		}
 		return nil, errCodexSocketFallBack
 	}
@@ -450,14 +566,16 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 		}
 		header[k] = vs
 	}
-	k := &codexKept{c: c, cancel: cancel, key: key, host: u.Host, header: header, opened: time.Now(), copilot: copilot}
-	return t.turn(req, k, msg, shape, false)
+	k := &codexKept{c: c, cancel: cancel, key: key, host: u.Host, header: header, opened: time.Now(), copilot: copilot, relay: relay}
+	return t.turn(req, k, msg, shape, false, "")
 }
 
 // turn sends msg on k and reads the frames ahead of the reply proper. On
 // a kept socket (reused), whatever fails before the reply is handed on
-// is errCodexSocketAgain.
-func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *codexTurnShape, reused bool) (*http.Response, error) {
+// is errCodexSocketAgain. after is the response a relay's delta was sent
+// after: its reply is handed on only once response.created names it
+// (provider.SocketRelay); one that doesn't is sent again whole.
+func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *codexTurnShape, reused bool, after string) (*http.Response, error) {
 	ended := func(err error) error {
 		if req.Context().Err() != nil {
 			return req.Context().Err()
@@ -510,6 +628,10 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 				body.Close()
 				return nil, errCodexSocketAgain
 			}
+			if k.relay {
+				body.Close()
+				return nil, errCodexSocketRelayError
+			}
 			// ahead of the reply: it stands for the HTTP route's status
 			if res, fall := codexSocketError(req, header, frame, k.copilot); fall || res != nil {
 				body.Close()
@@ -518,6 +640,15 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 				}
 				return res, nil
 			}
+		}
+		if after != "" && kind != "codex.rate_limits" && kind != "codex.response.metadata" &&
+			(kind != "response.created" || gjson.GetBytes(frame, "response.previous_response_id").String() != after) {
+			// a relay that answers the new input alone as a whole
+			// conversation: nothing has been handed on, and the turn goes
+			// whole on a new socket
+			body.Close()
+			codexDeltaIgnored(k.host)
+			return nil, errCodexSocketAgain
 		}
 		body.pending = append(body.pending, sseEvent(kind, frame)...)
 		if kind != "codex.rate_limits" && kind != "codex.response.metadata" {
@@ -753,6 +884,7 @@ func (b *codexSocketBody) frame() ([]byte, error) {
 			// kept for the conversation's next turn, which may carry on
 			// from this one
 			b.k.fields, b.k.input = b.shape.fields, b.shape.sums
+			b.k.rawInput = b.shape.rawSums
 			b.k.output, b.k.sealed, b.k.replyID = b.output, b.sealed, id
 			codexKeepPut(b.k)
 		} else {

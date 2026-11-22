@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,10 +12,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
+	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/provider"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // #2216 (Kenoia): a key held to models or accounts on a shared magpie was
@@ -216,10 +221,113 @@ func TestHeldKeyToldItsOwnQuotas(t *testing.T) {
 	}
 }
 
+func TestQuotaSurfacesColdStoreHonorDeadline(t *testing.T) {
+	for _, scenario := range []struct {
+		name, method, path string
+		held               bool
+	}{
+		{"cards", http.MethodGet, provider.RemoteCardsPath, true},
+		{"refresh-all", http.MethodPost, provider.RemoteRefreshPath, true},
+		{"refresh-card", http.MethodPost, provider.RemoteRefreshPath + "?provider=alpha&user=Two", true},
+		{"history", http.MethodGet, "/v1/magpie/quotas/history", true},
+		{"live", http.MethodGet, "/v1/magpie/quotas", false},
+		{"kept", http.MethodGet, "/v1/magpie/quotas?kept=1", false},
+		{"statusline", http.MethodGet, StatuslinePath + "?format=json", false},
+		{"accounts", http.MethodGet, AccountsPath, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			fresh(t)
+			t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+			t.Setenv("MAGPIE_ADDR", "")
+			seedKeptBalances(t)
+			manager := extensionhost.Default()
+			source, manifest := t.TempDir(), extensionGatewayManifest()
+			manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.AccountAuth)
+			if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), mustJSON(manifest), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, manifest.Entry), []byte("catalog metadata fixture"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := extensionhost.NewCatalog(manager.Namespace()).Install(t.Context(), source,
+				func(context.Context, extensionhost.Installed) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: manifest.ID, Provider: manifest.Providers[0].ID,
+				ID: "test", Auth: json.RawMessage(`{"access":"fixture"}`)}, 0); err != nil {
+				t.Fatal(err)
+			}
+			keys, secrets := newCaller(t, "Alpha Two")
+			for action, change := range map[string]access.Change{
+				"models-key":   {Key: keys[0].ID, Models: []string{"alpha/*"}},
+				"accounts-key": {Key: keys[0].ID, Accounts: []string{"alpha/" + provider.KeyID("alpha-two")}},
+				"quotas-key":   {Key: keys[0].ID, Quotas: true},
+			} {
+				if _, err := access.Update(action, change); err != nil {
+					t.Fatal(action, err)
+				}
+			}
+			handler := lanGuard(New().Handler())
+			call := func(ctx context.Context, method, path string, held bool) *httptest.ResponseRecorder {
+				request := httptest.NewRequestWithContext(ctx, method, path, nil)
+				request.RemoteAddr = "127.0.0.1:5000"
+				if held {
+					request.RemoteAddr = "192.168.1.9:5000"
+					request.Header.Set("Authorization", "Bearer "+secrets[0])
+				}
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				return response
+			}
+			provider.Changed()
+			unlock, held := filelock.Lock(filepath.Join(manager.Namespace(), "private", ".lock"), time.Second)
+			if !held {
+				t.Fatal("could not hold the current SDK Store")
+			}
+			synctest.Test(t, func(t *testing.T) {
+				done := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+					defer cancel()
+					done <- call(ctx, scenario.method, scenario.path, scenario.held)
+				}()
+				synctest.Wait()
+				time.Sleep(2 * time.Second)
+				synctest.Wait()
+				select {
+				case response := <-done:
+					unlock()
+					if response.Body.Len() != 0 {
+						t.Errorf("an expired quota request published a response: %s", response.Body)
+					}
+				default:
+					unlock()
+					<-done
+					t.Error("quota request still blocked on cold discovery after its deadline")
+				}
+			})
+			remoteRefreshes.Lock()
+			attempts := len(remoteRefreshes.at)
+			remoteRefreshes.Unlock()
+			if attempts != 0 {
+				t.Errorf("an expired quota request started a refresh: %d", attempts)
+			}
+			response := call(t.Context(), http.MethodGet, provider.RemoteCardsPath, true)
+			var result struct {
+				Data []struct{ Provider, User string }
+			}
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil ||
+				len(result.Data) != 1 || result.Data[0].Provider != "alpha" || result.Data[0].User != "Two" {
+				t.Fatalf("the held key lost its exact account scope after discovery canceled: %d %s", response.Code, response.Body)
+			}
+		})
+	}
+}
+
 // seedKeptBalances saves provider alpha with two keys, One and Two (models
 // m1 and m2), and beta with one key (o1), each key's balance kept on disk
 // (quotas.json) as last read.
-func seedKeptBalances(t *testing.T) {
+func seedKeptBalances(t *testing.T, firstWindows ...provider.QuotaWindow) {
 	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -240,7 +348,11 @@ func seedKeptBalances(t *testing.T) {
 	at := time.Now().Add(-time.Minute)
 	kept := map[string]any{}
 	for _, k := range []struct{ id, key, user string }{{"alpha", "alpha-one", "One"}, {"alpha", "alpha-two", "Two"}, {"beta", "beta-key", ""}} {
-		kept[k.id+"/"+tag(k.key)] = map[string]any{"at": at, "quota": provider.SubscriptionQuota{Provider: k.id, User: k.user, Balance: "$5.00", Windows: []provider.QuotaWindow{}}}
+		card := provider.SubscriptionQuota{Provider: k.id, User: k.user, Balance: "$5.00", Windows: []provider.QuotaWindow{}}
+		if k.key == "alpha-one" {
+			card.Windows = append(card.Windows, firstWindows...)
+		}
+		kept[k.id+"/"+tag(k.key)] = map[string]any{"at": at, "quota": card}
 	}
 	if err := os.WriteFile(filepath.Join(filepath.Dir(provider.Path()), "quotas.json"), mustJSON(kept), 0o600); err != nil {
 		t.Fatal(err)
@@ -319,24 +431,59 @@ func TestRemoteMagpieShowsHeldKeyItsQuotas(t *testing.T) {
 // account, so a held key told the card isn't told it, while this machine's
 // owner (no scope) is; the caller's windows are left as they are.
 func TestHeldKeyToldNoWindowHolds(t *testing.T) {
-	qs := []provider.Quota{{Provider: "alpha", User: "a@example.com", Windows: []provider.QuotaSpan{
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "")
+	windows := []provider.QuotaWindow{
 		{Name: "5 hours", Used: 40, Holds: &provider.WindowHolds{Tokens: 900000, Priced: true}},
 		{Name: "7 days", Used: 2, HoldsWhy: provider.HoldsLow},
-	}}}
-	if got := (*quotaScope)(nil).quotas(qs); got[0].Windows[0].Holds == nil || got[0].Windows[1].HoldsWhy == "" {
-		t.Fatalf("the owner wasn't told the whole: %+v", got[0].Windows)
 	}
-	s := &quotaScope{every: map[string]bool{"alpha": true}, refs: map[string][]provider.AccountRef{}}
-	got := s.quotas(qs)
-	if len(got) != 1 {
-		t.Fatalf("the key wasn't told its card: %+v", got)
+	seedKeptBalances(t, windows...)
+	previous := provider.ReckonHolds
+	t.Cleanup(func() { provider.ReckonHolds = previous })
+	reads := 0
+	provider.ReckonHolds = func(_ context.Context, cards []provider.SubscriptionQuota, _ time.Time) []provider.SubscriptionQuota {
+		reads++
+		return cards
 	}
-	for _, w := range got[0].Windows {
-		if w.Holds != nil || w.HoldsWhy != "" {
-			t.Errorf("a held key was told %s's whole: %+v", w.Name, w)
+	keys, secrets := newCaller(t, "Owner", "Alpha")
+	if _, err := access.Update("models-key", access.Change{Key: keys[1].ID, Models: []string{"alpha/*"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := access.Update("quotas-key", access.Change{Key: keys[1].ID, Quotas: true}); err != nil {
+		t.Fatal(err)
+	}
+	handler := lanGuard(New().Handler())
+	readWindows := func(secret string) []provider.QuotaSpan {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/v1/magpie/quotas?kept=1", nil)
+		r.RemoteAddr = "192.168.1.9:5000"
+		r.Header.Set("Authorization", "Bearer "+secret)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var response struct{ Data []provider.Quota }
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &response) != nil {
+			t.Fatalf("quota report: %d %s", w.Code, w.Body.String())
+		}
+		for _, card := range response.Data {
+			if card.Provider == "alpha" && card.User == "One" && len(card.Windows) == len(windows) {
+				return card.Windows
+			}
+		}
+		t.Fatalf("the caller wasn't told the card and its windows: %+v", response.Data)
+		return nil
+	}
+	if got := readWindows(secrets[0]); got[0].Holds == nil || got[1].HoldsWhy != provider.HoldsLow {
+		t.Fatalf("the owner wasn't told the whole: %+v", got)
+	}
+	for index, w := range readWindows(secrets[1]) {
+		if w.Name != windows[index].Name || w.Used != windows[index].Used || w.Holds != nil || w.HoldsWhy != "" {
+			t.Errorf("a held key should see only the allowance window: %+v", w)
 		}
 	}
-	if qs[0].Windows[0].Holds == nil || qs[0].Windows[1].HoldsWhy == "" {
-		t.Errorf("the caller's windows were written to: %+v", qs[0].Windows)
+	if reads != 1 {
+		t.Errorf("Usage history read %d times, want once for the owner", reads)
+	}
+	if windows[0].Holds == nil || windows[1].HoldsWhy != provider.HoldsLow {
+		t.Errorf("the source windows were written to: %+v", windows)
 	}
 }

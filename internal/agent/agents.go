@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -259,10 +260,18 @@ func ClientsIn(all []*Agent) []*Agent {
 // All returns every agent magpie knows about, detected or not: its own,
 // then those plugins add.
 func All() []*Agent {
+	return AllContext(context.Background())
+}
+
+func AllContext(ctx context.Context) []*Agent {
 	home, cfg := homes()
 	own := builtins(home, cfg)
 	all := append(own, pluggedAgents(home, own, nil)...)
-	return extensionAgentOwnership(home, all, extensionAgents(home, all, nil))
+	extensions := extensionAgentsContext(ctx, home, all, nil)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return extensionAgentOwnership(home, all, extensions)
 }
 
 // AllKnown is All() with the agents in WSL's distros as they were last

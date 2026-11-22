@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -109,6 +110,32 @@ func BenchmarkRequestSessionMetadata(b *testing.B) {
 	}
 }
 
+func TestRequestSessionIdentitySharesClientMetadata(t *testing.T) {
+	h := http.Header{}
+	h.Set("session-id", "root")
+	h.Set("x-codex-turn-metadata", `{"thread_id":"from-header","subagent_kind":"collab_spawn"}`)
+	var extra strings.Builder
+	for index := range 64 {
+		fmt.Fprintf(&extra, `,"extra_%d":"unrecognized field"`, index)
+	}
+	body := []byte(`{"input":"` + strings.Repeat("x", 300000) + `","client_metadata":{` +
+		`"x-codex-turn-metadata":{"turn_id":"body-turn","thread_id":"child","thread_source":"subagent","subagent_kind":"collab_spawn"},` +
+		`"thread_id":"from-flat"` + extra.String() + `}}`)
+	m, sub := requestSessionIdentity("codex", h, body)
+	if want := (sessionMetadata{Turn: "body-turn", Thread: "child", Source: "subagent"}); m != want || sub != "child" {
+		t.Fatalf("metadata %+v and plugin subagent %q, want %+v and child", m, sub, want)
+	}
+	shared := testing.AllocsPerRun(10, func() { requestSessionIdentity("codex", h, body) })
+	separate := testing.AllocsPerRun(10, func() {
+		requestSessionMetadata(h, body)
+		codexPluginSubagent("codex", h, func() map[string]json.RawMessage { return requestClientMetadata(body) })
+	})
+	t.Logf("session identity allocations with shared and separate metadata: %.0f and %.0f", shared, separate)
+	if saved := separate - shared; saved < 32 {
+		t.Errorf("sharing client_metadata saved %.0f allocations, want at least 32", saved)
+	}
+}
+
 // Only client_metadata is decoded now (#3394); what a body that isn't the
 // usual shape gives stays what decoding the whole body gave.
 func TestSessionMetadataOddBodies(t *testing.T) {
@@ -118,6 +145,7 @@ func TestSessionMetadataOddBodies(t *testing.T) {
 	for _, tc := range []struct{ name, body, turn, parent string }{
 		{"metadata a string", `{"client_metadata":"x"}`, "from-header", "head"},
 		{"metadata null", `{"client_metadata":null}`, "from-header", "head"},
+		{"nested metadata with an invalid parent", `{"client_metadata":{"x-codex-turn-metadata":{"turn_id":"body-turn","parent_thread_id":false}}}`, "body-turn", "head"},
 		{"body cut short", `{"client_metadata":{"parent_thread_id":"body"}`, "from-header", "head"},
 		{"body an array", `[{"client_metadata":{"parent_thread_id":"body"}}]`, "from-header", "head"},
 		{"nested name only", `{"input":[{"client_metadata":{"parent_thread_id":"body"}}]}`, "from-header", "head"},

@@ -352,19 +352,18 @@ func (a *Agent) appReads() (files []string, reads func() string) {
 		return files, func() string {
 			var b strings.Builder
 			for _, p := range ps {
-				id, _ := edit.GetJSON(p.meta, "appliedId")
-				applied := p.prof
-				if f := desktopAppliedGateway(p); f != "" {
-					applied = f
-				}
+				meta, _ := desktopReadFields(p.meta)
+				id := desktopString(meta["appliedId"])
+				profile, _ := desktopReadFields(desktopProfilePath(p, id))
+				saved, _ := desktopReadFields(p.config3p)
 				// the mode Desktop starts in, not the files' words: it
 				// drops a stored deploymentMode itself (desktop3p)
 				mode := "1p"
-				if desktop3p(p, applied) {
+				if desktopHybridCheck(meta) == nil && desktopIsGatewayProfile(profile) && desktop3p(profile, saved) {
 					mode = "3p"
 				}
 				prof, _ := edit.Read(p.prof)
-				b.WriteString(mode + "\n" + id + "\n")
+				b.WriteString(mode + "\n" + id + "\n" + string(meta["hybridPointer"]) + "\n")
 				b.Write(prof)
 				b.WriteString("\n")
 				// a profile of the user's for magpie's gateway, applied

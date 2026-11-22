@@ -24,7 +24,7 @@ func TestBalanceHistoryRecords(t *testing.T) {
 	t0 := time.Date(2026, 10, 3, 8, 0, 0, 0, time.UTC)
 	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
 	note := func(m int, qs ...SubscriptionQuota) []SubscriptionQuota {
-		noteBalanceHistory(qs, at(m))
+		noteBalanceHistory(t.Context(), qs, at(m))
 		return qs
 	}
 	note(0, balCard("Main", "¥100.00"))
@@ -127,7 +127,7 @@ func TestBalanceHistoryTwoCurrencies(t *testing.T) {
 	t0 := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
 	key := quotaHistKey("deepseek", "main")
 	// what an earlier magpie kept: whichever amount came first
-	writeBalanceHist(balanceHist{key: {{t0.Add(-30 * time.Minute), 11.2}, {t0.Add(-20 * time.Minute), -0.05}, {t0.Add(-10 * time.Minute), 11.15}}})
+	writeBalanceHist(t.Context(), balanceHist{key: {{t0.Add(-30 * time.Minute), 11.2}, {t0.Add(-20 * time.Minute), -0.05}, {t0.Add(-10 * time.Minute), 11.15}}})
 	var last []SubscriptionQuota
 	for i, v := range []string{"11.12", "11.10", "11.08", "11.05"} {
 		body := `{"is_available":true,"balance_infos":[` + cny + `,` + usd(v) + `]}`
@@ -142,7 +142,7 @@ func TestBalanceHistoryTwoCurrencies(t *testing.T) {
 			t.Fatalf("read %d: card says %q, want %q", i, bal, want)
 		}
 		last = []SubscriptionQuota{balCard("Main", bal)}
-		noteBalanceHistory(last, t0.Add(time.Duration(i)*10*time.Minute))
+		noteBalanceHistory(t.Context(), last, t0.Add(time.Duration(i)*10*time.Minute))
 	}
 	tr := last[0].BalanceTrend
 	if tr == nil || tr.Currency != "$" || len(tr.Points) != 4 {
@@ -186,7 +186,7 @@ func TestBalanceOnlyCardHasTrend(t *testing.T) {
 		windowed := quotaOfPlugin(SubscriptionQuota{Provider: "fakeco", Name: "FakeCo", User: "a@fake"},
 			plugin.Usage{Balance: "$3", Windows: []plugin.UsageWindow{{Name: "5 hours", Used: fptr(25)}}})
 		qs := []SubscriptionQuota{wallet, windowed}
-		noteCardHistory(qs, t0.Add(time.Duration(m)*time.Minute))
+		noteCardHistory(t.Context(), qs, t0.Add(time.Duration(m)*time.Minute))
 		return qs
 	}
 	if got := read(0, "6122 credits"); got[0].BalanceTrend != nil {
@@ -207,7 +207,7 @@ func TestBalanceOnlyCardHasTrend(t *testing.T) {
 	}
 	failed := quotaOfPlugin(SubscriptionQuota{Provider: "raccoon", Name: "Raccoon", User: "138****0000"},
 		plugin.Usage{Balance: "1 credits", Error: "401"})
-	noteCardHistory([]SubscriptionQuota{failed}, t0.Add(90*time.Minute))
+	noteCardHistory(t.Context(), []SubscriptionQuota{failed}, t0.Add(90*time.Minute))
 	if pts := readBalanceHist()[quotaHistKey("raccoon", "138****0000")]; len(pts) != 3 {
 		t.Fatalf("after a failed read, points = %+v, want the three", pts)
 	}

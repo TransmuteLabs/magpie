@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"slices"
 	"testing"
 )
@@ -15,7 +16,7 @@ func TestLazyLookupNeverOverridesRegisteredOrSmart(test *testing.T) {
 			remove()
 			return Strategy{Exact: true, Order: func(string, []Seat) []int { return []int{1, 0} }}, true
 		},
-		List: func() []Option {
+		List: func(context.Context) []Option {
 			remove := base.Register(Option{ID: "lookup/list"}, Ordered)
 			remove()
 			return []Option{{ID: "lookup/reverse", Name: "Reverse", Plugin: "lookup"}, {ID: "smart", Name: "Bad"}}
@@ -51,7 +52,7 @@ func TestLazyLookupNeverOverridesRegisteredOrSmart(test *testing.T) {
 func TestLookupFailureLeavesUnknownAndRegistryUnlocked(test *testing.T) {
 	catalog := NewCatalog().WithSource(Source{
 		Find: func(string) (Strategy, bool) { panic("private fixture") },
-		List: func() []Option { panic("private fixture") },
+		List: func(context.Context) []Option { panic("private fixture") },
 	})
 	if catalog.Served("lookup/failed") || len(catalog.List()) != 1 {
 		test.Fatal("panicking lookup changed ordinary routing availability")

@@ -76,7 +76,7 @@ func TestCreditWindowShapes(t *testing.T) {
 	now := time.Now()
 	check := func(who string, q SubscriptionQuota, ok bool, used, total float64, unit string) {
 		t.Helper()
-		noteDailyCredits([]SubscriptionQuota{q}, now)
+		noteDailyCredits(t.Context(), []SubscriptionQuota{q}, now)
 		b, _ := os.ReadFile(creditsPath())
 		accts, _ := parseCredits(b)
 		a := accts[q.Provider+"|u|"+q.Windows[0].Name]
@@ -124,7 +124,7 @@ func TestDailyCreditsEveryVendor(t *testing.T) {
 	design := func(hours, week float64) SubscriptionQuota {
 		return pluginWindowsCard(t, "opendesign", "d", `[{"name":"5 hours","used":1,"span":18000,"display":"`+jsonNum(hours)+` / 100 credits"},{"name":"Week","used":1,"span":604800,"display":"`+jsonNum(week)+` / 1000 credits"}]`)
 	}
-	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(qs, at) }
+	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(t.Context(), qs, at) }
 	read(day(1, 9), trae(4600), qoder(100, 0), codearts(1000, 500), design(10, 200))
 	read(day(1, 12), trae(4678.52), qoder(130, 20), codearts(1300, 700), design(30, 220))
 	// a new month: Trae's total started again, CodeArts' too
@@ -190,7 +190,7 @@ func TestDailyCreditsKeptBefore(t *testing.T) {
 	if d := withDailyCredits([]SubscriptionQuota{card}, day(2, 9))[0].Daily; !reflect.DeepEqual(d, want) {
 		t.Errorf("before a new reading: %+v, want %+v", d, want)
 	}
-	noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy", "李雷", 140.25, 5600)}, day(2, 10))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy", "李雷", 140.25, 5600)}, day(2, 10))
 	want.Days = append(want.Days, DayCredits{"2026-10-02", 10})
 	if d := withDailyCredits([]SubscriptionQuota{card}, day(2, 11))[0].Daily; !reflect.DeepEqual(d, want) {
 		t.Errorf("after: %+v, want %+v", d, want)

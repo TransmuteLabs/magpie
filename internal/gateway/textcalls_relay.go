@@ -70,11 +70,11 @@ type responsesTextCalls struct {
 }
 
 func (t *responsesTextCalls) write(b []byte) []byte {
-	t.buf = append(t.buf, b...)
 	if !t.sse {
+		t.buf = append(t.buf, b...)
 		return nil
 	}
-	out, rest := tidyEvents(t.buf, t.event)
+	out, rest := tidyEvents(t.buf, b, t.event)
 	t.buf = rest
 	return t.numbered(out)
 }

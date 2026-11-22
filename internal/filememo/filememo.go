@@ -4,6 +4,7 @@ package filememo
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io/fs"
 	"os"
@@ -15,9 +16,10 @@ import (
 )
 
 type entry struct {
-	mod  time.Time
-	size int64
-	v    any
+	mod    time.Time
+	size   int64
+	digest [sha256.Size]byte
+	v      any
 	// the bytes parsed, while the file's time is too recent to tell a
 	// second write by: Linux stamps a file from a clock a tick (a few
 	// milliseconds) coarse, so two writes of one size inside a tick (two
@@ -43,6 +45,8 @@ type memoKey struct{ kind, path string }
 // settled is how old a file's time must be for any later write to stamp
 // a later one, many ticks of the coarsest clock.
 const settled = 2 * time.Second
+
+const currentReadBufferLimit = 256 << 10
 
 var (
 	mu   sync.Mutex
@@ -201,17 +205,36 @@ func Look(path string) {
 // bytes). kind tells apart two parses of
 // one file. What it returns is shared: the caller must not change it.
 func Read[T any](kind, path string, parse func([]byte) (T, error)) (T, error) {
-	return read(kind, path, parse, true)
+	return read(kind, path, parse, heldRead, nil)
 }
 
-// ReadNow is Read with the file looked at even while a request holds what
-// was read (Hold): for bytes a write is made from, which a write another
-// process made inside the held second would otherwise be lost under.
+// ReadNow checks the file even during Hold. It uses the same size, timestamp
+// and near-write content checks as Read.
 func ReadNow[T any](kind, path string, parse func([]byte) (T, error)) (T, error) {
-	return read(kind, path, parse, false)
+	return read(kind, path, parse, unheldRead, nil)
 }
 
-func read[T any](kind, path string, parse func([]byte) (T, error), held bool) (T, error) {
+// ReadCurrent reuses a parse only when the current file contents match,
+// including after replacements that preserve size and modification time.
+func ReadCurrent[T any](kind, path string, parse func([]byte) (T, error)) (T, error) {
+	return read(kind, path, parse, verifiedRead, nil)
+}
+
+// ReadNowWithSnapshot checks contents like ReadCurrent and uses the supplied
+// reader. The reader must verify that its bytes are from the file just statted.
+func ReadNowWithSnapshot[T any](kind, path string, parse func([]byte) (T, error), snapshot func(string, os.FileInfo, []byte) ([]byte, error)) (T, error) {
+	return read(kind, path, parse, verifiedRead, snapshot)
+}
+
+type readMode uint8
+
+const (
+	heldRead readMode = iota
+	unheldRead
+	verifiedRead
+)
+
+func read[T any](kind, path string, parse func([]byte) (T, error), mode readMode, snapshot func(string, os.FileInfo, []byte) ([]byte, error)) (T, error) {
 	var zero T
 	key := memoKey{kind, path}
 	mu.Lock()
@@ -221,19 +244,25 @@ func read[T any](kind, path string, parse func([]byte) (T, error), held bool) (T
 		e.touched = true
 		seen[key] = e
 	}
-	if ok && held && holds > 0 && e.raw == nil && e.gen == gen && time.Since(e.checked) < heldFor {
+	if ok && mode == heldRead && holds > 0 && e.raw == nil && e.gen == gen && time.Since(e.checked) < heldFor {
 		mu.Unlock()
 		return e.v.(T), nil
 	}
-	if m, ok := missing[path]; ok && held && holds > 0 && m.gen == gen && time.Since(m.checked) < heldFor {
+	if m, ok := missing[path]; ok && mode == heldRead && holds > 0 && m.gen == gen && time.Since(m.checked) < heldFor {
 		mu.Unlock()
 		return zero, m.err
 	}
 	g := gen
 	mu.Unlock()
-	fi, err := statFile(path)
+	var fi os.FileInfo
+	var err error
+	if snapshot == nil {
+		fi, err = statFile(path)
+	} else {
+		fi, err = steady.Stat(path)
+	}
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if snapshot == nil && errors.Is(err, fs.ErrNotExist) {
 			mu.Lock()
 			if holds > 0 && g == gen {
 				missing[path] = missingFile{err, time.Now(), g}
@@ -242,7 +271,8 @@ func read[T any](kind, path string, parse func([]byte) (T, error), held bool) (T
 		}
 		return zero, err
 	}
-	if ok && e.mod.Equal(fi.ModTime()) && e.size == fi.Size() && e.raw == nil {
+	sameStamp := ok && e.mod.Equal(fi.ModTime()) && e.size == fi.Size()
+	if mode != verifiedRead && sameStamp && e.raw == nil {
 		mu.Lock()
 		if holds > 0 && g == gen {
 			e.checked, e.gen = time.Now(), g
@@ -251,10 +281,9 @@ func read[T any](kind, path string, parse func([]byte) (T, error), held bool) (T
 		mu.Unlock()
 		return e.v.(T), nil
 	}
-	if ok && e.raw != nil && e.mod.Equal(fi.ModTime()) && e.size == fi.Size() {
-		// written just now and the same size and time: most often the
-		// same bytes, read into the buffer kept for it rather than a new
-		// one each time. A read beside this one takes a buffer of its own.
+	if sameStamp {
+		// The stamp alone is insufficient near a write or on ReadCurrent.
+		// A read beside this one takes a buffer of its own.
 		mu.Lock()
 		buf := seen[key].again
 		if cur, ok := seen[key]; ok {
@@ -262,59 +291,77 @@ func read[T any](kind, path string, parse func([]byte) (T, error), held bool) (T
 			seen[key] = cur
 		}
 		mu.Unlock()
-		if int64(cap(buf)) <= fi.Size() {
-			buf = make([]byte, 0, fi.Size()+512)
+		var b []byte
+		if snapshot != nil {
+			b, err = snapshot(path, fi, buf)
+		} else {
+			if int64(cap(buf)) <= fi.Size() {
+				buf = make([]byte, 0, fi.Size()+512)
+			}
+			b, err = steady.ReadThereInto(path, buf)
 		}
-		b, err := steady.ReadThereInto(path, buf)
 		if err != nil {
 			return zero, err
 		}
-		if bytes.Equal(b, e.raw) {
+		if e.raw != nil && bytes.Equal(b, e.raw) || mode == verifiedRead && sha256.Sum256(b) == e.digest {
 			mu.Lock()
-			if cur, ok := seen[key]; ok && cur.again == nil && cur.mod.Equal(e.mod) {
+			if cur, ok := seen[key]; ok && cur.again == nil && cur.mod.Equal(e.mod) &&
+				cur.digest == e.digest && (mode != verifiedRead || cap(b) <= currentReadBufferLimit) {
 				cur.again = b[:0]
 				seen[key] = cur
 			}
 			mu.Unlock()
-			settle(key, e)
+			if snapshot == nil {
+				settle(key, e)
+			}
 			return e.v.(T), nil
 		}
 		// the buffer was this read's alone: it is what was parsed now
-		return parsed(key, fi, b, parse, g)
+		return parsed(key, fi, b, parse, g, snapshot != nil)
 	}
-	b, err := steady.ReadThere(path)
+	var b []byte
+	if snapshot != nil {
+		b, err = snapshot(path, fi, nil)
+	} else {
+		b, err = steady.ReadThere(path)
+	}
 	if err != nil {
 		return zero, err
 	}
-	if ok && e.mod.Equal(fi.ModTime()) && bytes.Equal(b, e.raw) {
-		settle(key, e)
+	if ok && e.raw != nil && e.mod.Equal(fi.ModTime()) && bytes.Equal(b, e.raw) {
+		if snapshot == nil {
+			settle(key, e)
+		}
 		return e.v.(T), nil
 	}
-	return parsed(key, fi, b, parse, g)
+	return parsed(key, fi, b, parse, g, snapshot != nil)
 }
 
 // settle drops e's bytes once its file's time is old enough to tell a
 // later write by: from then on its time and size are looked at alone.
 func settle(key memoKey, e entry) {
-	if time.Since(e.mod) > settled {
+	if e.raw != nil && time.Since(e.mod) > settled {
 		mu.Lock()
-		e.raw, e.again = nil, nil
-		seen[key] = e
+		if cur, ok := seen[key]; ok && cur.digest == e.digest && cur.mod.Equal(e.mod) && cur.size == e.size {
+			cur.raw, cur.again = nil, nil
+			seen[key] = cur
+		}
 		mu.Unlock()
 	}
 }
 
 // parsed is parse of b, the file at key's bytes as fi found it, kept for
 // the next read; g is Forget's generation when it was looked at.
-func parsed[T any](key memoKey, fi os.FileInfo, b []byte, parse func([]byte) (T, error), g uint64) (T, error) {
+func parsed[T any](key memoKey, fi os.FileInfo, b []byte, parse func([]byte) (T, error), g uint64, snapshot bool) (T, error) {
 	v, err := parse(b)
 	if err != nil {
 		var zero T
 		return zero, err
 	}
+	digest := sha256.Sum256(b)
 	mu.Lock()
-	e := entry{mod: fi.ModTime(), size: fi.Size(), v: v, touched: true}
-	if time.Since(e.mod) <= settled {
+	e := entry{mod: fi.ModTime(), size: fi.Size(), digest: digest, v: v, touched: true}
+	if snapshot && cap(b) <= currentReadBufferLimit || !snapshot && time.Since(e.mod) <= settled {
 		e.raw = b
 	} else if holds > 0 && g == gen {
 		e.checked, e.gen = time.Now(), g

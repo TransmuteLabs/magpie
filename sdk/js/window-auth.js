@@ -24,7 +24,9 @@ function validateFields(fields) {
 
 export function validateWindowAuthBindings(manifest) {
   const signIn = manifest.contract.capabilities.includes("provider-signin");
+  const savedSignIn = manifest.contract.capabilities.includes("provider-saved-signin");
   if (signIn && (manifest.contract.version.minor < 5 || !manifest.contract.capabilities.includes("account-auth"))) fail();
+  if (savedSignIn && !signIn) fail();
   if (manifest.authBindings === undefined) return;
   if (!Array.isArray(manifest.authBindings) || manifest.authBindings.length > 64) fail();
   if (!manifest.authBindings.length) return;
@@ -45,6 +47,8 @@ export function validateWindowAuthBindings(manifest) {
       if (!method || !id(method.id) || method.mode !== "poll" || methods.has(method.id)) fail();
       if (providerSignIn ? !word(method.label) : (method.label ?? "") !== "" || method.fields?.length) fail();
       validateFields(method.fields);
+      if (method.id === "saved-signin" && (!savedSignIn || !providerSignIn || method.fields?.length !== 1
+        || method.fields[0].key !== "record" || method.fields[0].type !== "secret" || method.fields[0].optional)) fail();
       methods.add(method.id);
     }
     if (Buffer.byteLength(binding.from) > 256) fail();

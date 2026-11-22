@@ -60,6 +60,11 @@ type protocolBinding struct {
 	err    error
 }
 
+type protocolHostCache struct {
+	registry *sdk.Registry
+	host     *protocolext.Host
+}
+
 func (server *Server) protocolHost(ctx context.Context) (*protocolext.Host, error) {
 	if server.protocols != nil || server.extensions == nil {
 		return server.protocols, nil
@@ -68,7 +73,15 @@ func (server *Server) protocolHost(ctx context.Context) (*protocolext.Host, erro
 	if err != nil {
 		return nil, err
 	}
-	return protocolext.New(registry, protocolPathReserved)
+	if cached := server.protocolCache.Load(); cached != nil && cached.registry == registry {
+		return cached.host, nil
+	}
+	host, err := protocolext.New(registry, protocolPathReserved)
+	if err != nil {
+		return nil, err
+	}
+	server.protocolCache.Store(&protocolHostCache{registry: registry, host: host})
+	return host, nil
 }
 
 func (server *Server) withProtocolRegistry(next http.Handler) http.Handler {
@@ -76,12 +89,8 @@ func (server *Server) withProtocolRegistry(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if pinned, ok := request.Context().Value(protocolRegistryCtx{}).(protocolBinding); ok && pinned.server == server {
-			next.ServeHTTP(writer, request)
-			return
-		}
 		binding := protocolBinding{server: server}
-		if !ClientPath(request.URL.Path) {
+		if !protocolPathReserved(request.URL.Path) {
 			binding.host, binding.err = server.protocolHost(request.Context())
 		}
 		ctx := context.WithValue(request.Context(), protocolRegistryCtx{}, binding)
@@ -99,7 +108,7 @@ func (server *Server) protocolEntry(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if ClientPath(request.URL.Path) {
+		if protocolPathReserved(request.URL.Path) {
 			next.ServeHTTP(writer, request)
 			return
 		}

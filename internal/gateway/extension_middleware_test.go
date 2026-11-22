@@ -32,7 +32,7 @@ type sdkMiddlewareTrace struct {
 	WriteDenied bool               `json:"writeDenied"`
 }
 
-func buildSDKMiddleware(test *testing.T) string {
+func buildSDKMiddleware(test testing.TB) string {
 	test.Helper()
 	directory := test.TempDir()
 	entry := "worker"
@@ -50,7 +50,7 @@ func buildSDKMiddleware(test *testing.T) string {
 	return directory
 }
 
-func installSDKMiddleware(test *testing.T, manager *extension.Manager, directory, version string, descriptor sdk.GatewayMiddlewareDescriptor) {
+func installSDKMiddleware(test testing.TB, manager *extension.Manager, directory, version string, descriptor sdk.GatewayMiddlewareDescriptor) {
 	test.Helper()
 	entry := "worker"
 	if runtime.GOOS == "windows" {
@@ -75,7 +75,7 @@ func sdkMiddlewareDescriptor() sdk.GatewayMiddlewareDescriptor {
 	return sdk.GatewayMiddlewareDescriptor{Request: true, Account: true, Provider: true, Event: true, Response: true}
 }
 
-func configureSDKMiddleware(test *testing.T, manager *extension.Manager, options map[string]any) {
+func configureSDKMiddleware(test testing.TB, manager *extension.Manager, options map[string]any) {
 	test.Helper()
 	config, err := manager.ModuleConfig(test.Context(), "middleware.fixture")
 	if err != nil {

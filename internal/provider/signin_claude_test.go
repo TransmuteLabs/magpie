@@ -155,12 +155,8 @@ func noAnthropic(t *testing.T) {
 	t.Cleanup(func() { claudeBase = old })
 }
 
-// A browser that can't come back to this machine: the page Claude Code
-// prints shows a code, pasted into magpie, which types it into Claude Code;
-// or the address the browser ended on, handed to Claude Code's listener.
-func TestClaudeSignInByPaste(t *testing.T) {
-	claudeHome(t)
-	noAnthropic(t)
+func probeClaudeListener(t *testing.T) {
+	t.Helper()
 	probe, err := (&http.Client{Timeout: signInDeadline}).Get(claudeBase + "/")
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +165,15 @@ func TestClaudeSignInByPaste(t *testing.T) {
 	if probe.StatusCode != http.StatusNotFound {
 		t.Fatalf("listener probe status = %d, want 404", probe.StatusCode)
 	}
+}
+
+// A browser that can't come back to this machine: the page Claude Code
+// prints shows a code, pasted into magpie, which types it into Claude Code;
+// or the address the browser ended on, handed to Claude Code's listener.
+func TestClaudeSignInByPaste(t *testing.T) {
+	claudeHome(t)
+	noAnthropic(t)
+	probeClaudeListener(t)
 	fakeClaudeLogin(t, fakeClaudeAccount{email: "paste@example.com", plan: "pro", refresh: "sk-ant-ort01-paste"}, "", false)
 
 	st, err := StartSignIn("claude")

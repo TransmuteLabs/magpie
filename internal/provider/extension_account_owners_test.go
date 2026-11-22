@@ -49,6 +49,7 @@ func TestExtensionKeepAliveDiscoveryHonorsDeadline(t *testing.T) {
 		host := fixtureExtensionProvider(t, true)
 		host.manifest.Contract.Version.Minor = 8
 		host.manifest.Providers[0].KeepAlive = &sdk.AccountKeepAliveDescriptor{}
+		registerFixtureExtensionPolicies(t, host, host.manifest.ID, "vendor")
 		if providers, err := ExtensionProviders(); err != nil || len(providers) != 2 {
 			t.Fatalf("ordinary account discovery: len=%d err=%v", len(providers), err)
 		}
@@ -75,6 +76,15 @@ func TestExtensionAccountTaskAdmissionHonorsDeadline(t *testing.T) {
 			t.Fatalf("canceled task admission: err=%v model requests=%d", err, fixture.calls.Load())
 		}
 	})
+	t.Run("subscription owner", func(t *testing.T) {
+		err := whileExtensionAccountLockHeld(t, fixture.manager.Namespace(), filepath.Join("private", ".lock"), func(ctx context.Context) error {
+			_, _, _, _, err := PrepareExtensionAccountTask(ctx, fixture.manager, selection)
+			return err
+		})
+		if !errors.Is(err, context.DeadlineExceeded) || fixture.calls.Load() != 0 {
+			t.Fatalf("canceled owner admission: err=%v model requests=%d", err, fixture.calls.Load())
+		}
+	})
 	t.Run("pinned account", func(t *testing.T) {
 		_, _, _, check, err := PrepareExtensionAccountTask(t.Context(), fixture.manager, selection)
 		if err != nil {
@@ -85,6 +95,19 @@ func TestExtensionAccountTaskAdmissionHonorsDeadline(t *testing.T) {
 			t.Fatalf("canceled task recheck: err=%v", err)
 		}
 	})
+}
+
+func TestExtensionNetworkOwnerReadHonorsDeadline(t *testing.T) {
+	fixture := newAccountTaskCatalogFixture(t)
+	selection := fixture.selection(t)
+	scope := sdk.Scope{Plugin: selection.Scope.Plugin, Provider: selection.Scope.Provider}
+	err := whileExtensionAccountLockHeld(t, fixture.manager.Namespace(), filepath.Join("private", ".lock"), func(ctx context.Context) error {
+		_, err := ExtensionNetworkContext(ctx, scope)
+		return err
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || fixture.manager.Running(scope.Plugin) {
+		t.Fatalf("canceled network owner admission: %v", err)
+	}
 }
 
 func TestExtensionCheckinDiscoveryHonorsDeadline(t *testing.T) {

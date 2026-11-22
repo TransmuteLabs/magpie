@@ -18,6 +18,7 @@ import (
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/requestpolicy"
+	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -28,6 +29,48 @@ type extensionResponseHead struct {
 }
 
 type extensionResponseKey struct{}
+
+type extensionSigningKey struct{}
+
+type extensionSigning struct {
+	binding   *extensionAccount
+	selection extensionSelection
+}
+
+func (binding *extensionAccount) signRequest(ctx context.Context, request *http.Request) error {
+	if previous, ok := request.Context().Value(extensionSigningKey{}).(*atomic.Pointer[extensionSigning]); ok {
+		previous.Store(nil)
+	}
+	if err := extensionhost.CheckExecutor(ctx, binding.scope.Plugin, binding.host.Namespace()); err != nil {
+		return err
+	}
+	selected, err := binding.checkedSelection(ctx, binding.manifest.Contract.Version.Minor >= 9)
+	if err != nil {
+		return err
+	}
+	signing := new(atomic.Pointer[extensionSigning])
+	signing.Store(&extensionSigning{binding: binding, selection: selected})
+	signed := context.WithValue(request.Context(), extensionSigningKey{}, signing)
+	*request = *request.WithContext(signed)
+	return nil
+}
+
+func (binding *extensionAccount) prepareRequest(ctx context.Context) (*extensionAccount, error) {
+	if pending, ok := ctx.Value(extensionSigningKey{}).(*atomic.Pointer[extensionSigning]); ok {
+		if signing := pending.Swap(nil); signing != nil && signing.binding == binding &&
+			signing.selection.scope.Generation == binding.currentScope().Generation &&
+			!extensionRefreshDue(signing.selection.expiresAt) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if binding.manifest.Contract.Has(sdk.AccountAuth) && settings.AccountDiscoveryOff() {
+				return nil, errAccountDiscoveryOff
+			}
+			return binding.prepareSelection(ctx, signing.selection)
+		}
+	}
+	return binding.prepare(ctx)
+}
 
 type extensionResponseBody struct {
 	*io.PipeReader
@@ -50,14 +93,18 @@ const extensionReceiptGrace = 2 * time.Second
 func (p Provider) ExtensionBindingIdentity() string {
 	if p.IsExtension() {
 		binding := p.Account.extension
-		return extensionBindingIdentity(binding.host.Namespace(), binding.currentScope(), binding.modelKey, binding.enableGeneration)
+		return binding.executionIdentity(binding.host.Namespace(), binding.currentScope(), binding.modelKey, binding.enableGeneration)
 	}
 	return ""
 }
 
-func extensionBindingIdentity(namespace string, scope sdk.Scope, revision, enableGeneration string) string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", namespace, scope.Plugin, scope.Provider,
+func (binding *extensionAccount) executionIdentity(namespace string, scope sdk.Scope, revision, enableGeneration string) string {
+	key := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s", namespace, scope.Plugin, scope.Provider,
 		scope.Account, scope.Generation, revision, enableGeneration)
+	if owner := binding.identity().revision; owner != "" {
+		key += "\x00" + owner
+	}
+	return key
 }
 
 func ExtensionResponseBindingIdentity(response *http.Response) string {
@@ -149,7 +196,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if attempt := extensionAttemptOf(ctx); attempt != nil && attempt.FinalRefusal() != nil {
 		return nil, errors.New("final refusal requires an outer routing decision")
 	}
-	prepared, err := binding.prepare(ctx)
+	prepared, err := binding.prepareRequest(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +249,17 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		}
 	}
 	scope := binding.scope
+	identity := binding.identity()
+	ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, identity.revision)
+	if scope.Account != "" {
+		ctx = extensionhost.WithProviderExecutePolicy(ctx, func(ctx context.Context) error {
+			return checkExtensionLoginForExecute(ctx, identity)
+		})
+	}
+	if binding.manifest.Contract.Version.Minor >= 9 {
+		revision, config, _ := strings.Cut(binding.modelKey, "\x00")
+		ctx = extensionhost.WithProviderExecuteSelection(ctx, revision, config, binding.enableGeneration)
+	}
 	scope.Operation, scope.Attempt = randomToken(18), 1
 	scope.Session = request.Header.Get(ConversationHeader)
 	if scope.Session == "" {
@@ -242,7 +300,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if !requestpolicy.HasSelection(ctx) {
 		ctx = requestpolicy.WithSelection(ctx, bindingIdentity+"\x00"+model, model)
 	}
-	selectedPolicy, policyErr := requestpolicy.FromContext(ctx).PolicyFor(ExtensionProviderID(scope.Plugin, scope.Provider), model, "", requestpolicy.Defaults())
+	selectedPolicy, policyErr := requestpolicy.FromContext(ctx).PolicyFor(binding.identity().provider, model, "", requestpolicy.Defaults())
 	if policyErr != nil {
 		return nil, policyErr
 	}
@@ -279,7 +337,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		}
 		callCtx := extensionhost.WithProviderExecutionBinding(ctx, func(actual extensionhost.ProviderExecutionBinding) {
 			if actual.Scope == scope && actual.Namespace == binding.host.Namespace() && actual.PackageRevision != "" && actual.ConfigVersion != "" {
-				responseBody.bindingIdentity = extensionBindingIdentity(actual.Namespace, actual.Scope,
+				responseBody.bindingIdentity = binding.executionIdentity(actual.Namespace, actual.Scope,
 					actual.PackageRevision+"\x00"+actual.ConfigVersion, actual.EnableGeneration)
 			}
 		})
@@ -320,6 +378,9 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			return nil
 		})
 		if err != nil {
+			if outcome, ok := errors.AsType[*extensionhost.OutcomeError](err); ok && outcome.Outcome == "not-started" {
+				extensionSelectionFailure(ctx, scope, err)
+			}
 			finish(err)
 			return
 		}

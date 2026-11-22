@@ -26,7 +26,7 @@ func TestAuthorizeNoPrompts(t *testing.T) {
 	if err != nil || a.URL != "https://cliflow.invalid/auth" || a.Method != "code" {
 		t.Fatalf("Authorize = %+v, %v", a, err)
 	}
-	if got, err := Finish(ctx, a.Session, "good"); err != nil || got != (Saved{"cliflow", "cliflow"}) {
+	if got, err := Finish(ctx, a.Session, "good"); err != nil || got.Provider != "cliflow" || got.Account != "cliflow" || got.AuthEpoch == "" {
 		t.Fatalf("Finish = %+v, %v", got, err)
 	}
 }

@@ -34,7 +34,7 @@ func TestSearchAPIsMixedFromSettings(t *testing.T) {
 	mixed := func() (out []string) {
 		t.Helper()
 		var s settingsJSON
-		searchState(&s)
+		searchState(&s, provider.All(), provider.Served())
 		for _, a := range s.SearchAPIs {
 			if a.Mix {
 				out = append(out, a.Vendor)

@@ -2,13 +2,19 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func TestCodexQuotaUsesProviderWindowDuration(t *testing.T) {
@@ -124,6 +130,222 @@ func TestSubscriptionUsageServesStale(t *testing.T) {
 	}
 }
 
+func warmSubscriptionUsageForTest(t *testing.T, cards ...SubscriptionQuota) {
+	t.Helper()
+	cache := &subscriptionUsageCache
+	cache.Lock()
+	if cache.pending != nil {
+		cache.Unlock()
+		t.Fatal("another usage refresh is in flight")
+	}
+	oldData, oldAt, oldAsked := cache.data, cache.at, cache.asked
+	cache.data, cache.at, cache.asked = cards, time.Now(), false
+	cache.Unlock()
+	t.Cleanup(func() {
+		cache.Lock()
+		cache.data, cache.at, cache.asked = oldData, oldAt, oldAsked
+		cache.Unlock()
+	})
+}
+
+func TestSubscriptionUsageDiscoveryTimeoutKeepsSnapshot(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+		return json.RawMessage(`{"windows":[{"name":"quota","used":40}]}`), nil
+	}
+	oldTimeout := subscriptionTimeout
+	subscriptionTimeout = time.Second
+	t.Cleanup(func() { subscriptionTimeout = oldTimeout })
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the Store lock")
+	}
+	release := sync.OnceFunc(unlock)
+	defer release()
+	synctest.Test(t, func(t *testing.T) {
+		previous := SubscriptionQuota{Provider: "copilot", Name: "Copilot", User: "previous",
+			Windows: []QuotaWindow{{Name: "previous window", Used: 25}}}
+		warmSubscriptionUsageForTest(t, previous)
+		cache := &subscriptionUsageCache
+		made := time.Now().Add(-time.Hour)
+		cache.Lock()
+		cache.at = made
+		cache.Unlock()
+
+		pending := func() <-chan struct{} {
+			cache.Lock()
+			defer cache.Unlock()
+			return cache.pending
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		SubscriptionUsage(ctx)
+		if done := pending(); done != nil {
+			<-done
+		} else {
+			t.Fatal("the stale snapshot did not start a discovery")
+		}
+		synctest.Wait()
+		cache.Lock()
+		data, at, reading := cache.data, cache.at, cache.pending != nil
+		cache.Unlock()
+		if reading || !at.Equal(made) || len(data) != 1 || data[0].Provider != previous.Provider ||
+			len(data[0].Windows) != 1 || data[0].Windows[0].Used != 25 {
+			t.Errorf("timed-out discovery changed the previous snapshot: cards=%d age=%v reading=%v",
+				len(data), time.Since(at), reading)
+		}
+
+		release()
+		SubscriptionUsage(t.Context())
+		synctest.Wait()
+		if done := pending(); done != nil {
+			<-done
+		}
+		if cards := SubscriptionUsage(t.Context()); len(cards) != 2 || len(cards[0].Windows) != 1 || cards[0].Windows[0].Used != 40 {
+			t.Errorf("discovery after release did not replace the snapshot: cards=%d", len(cards))
+		}
+
+		host.disabled = true
+		Changed()
+		cache.Lock()
+		cache.at = time.Now().Add(-time.Hour)
+		cache.Unlock()
+		SubscriptionUsage(t.Context())
+		if done := pending(); done != nil {
+			<-done
+		}
+		synctest.Wait()
+		cache.Lock()
+		defer cache.Unlock()
+		if cache.data == nil || len(cache.data) != 0 || time.Since(cache.at) >= time.Minute || cache.pending != nil {
+			t.Error("completed empty discovery did not record an empty snapshot")
+		}
+	})
+}
+
+func TestSubscriptionUsageWarmExtensionReadReleasesCache(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+		return json.RawMessage(`{"windows":[{"name":"quota","used":40}]}`), nil
+	}
+	logins, _ := extensionLogins(extensionAccounts()[0].ID)
+	quota := extensionQuota(t.Context(), logins[0])
+	if quota.Error != "" || quota.extensionUsage == nil || len(quota.Windows) != 1 {
+		t.Fatalf("fixture did not read a known SDK quota: error=%q windows=%d", quota.Error, len(quota.Windows))
+	}
+	ordinary := SubscriptionQuota{Provider: "fixture-ordinary", Name: "Before", Windows: []QuotaWindow{{Name: "quota", Used: 27}}}
+	warmSubscriptionUsageForTest(t, quota, ordinary)
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the Store lock")
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(unlock) }
+	defer release()
+	publishedName := ordinary.Name
+	synctest.Test(t, func(t *testing.T) {
+		call := func(deadline time.Duration) <-chan []SubscriptionQuota {
+			done := make(chan []SubscriptionQuota, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(t.Context(), deadline)
+				defer cancel()
+				done <- SubscriptionUsage(ctx)
+			}()
+			return done
+		}
+		first := call(time.Second)
+		synctest.Wait()
+		select {
+		case <-first:
+			t.Fatal("the warm SDK quota did not wait on the held Store lock")
+		default:
+		}
+
+		check := func(label string, cards []SubscriptionQuota, name string) {
+			t.Helper()
+			if len(cards) != 2 || len(cards[0].Windows) != 0 || !cards[0].ReadDeferred ||
+				cards[0].Error != context.DeadlineExceeded.Error() || cards[1].Name != name ||
+				len(cards[1].Windows) != 0 || !cards[1].ReadDeferred {
+				t.Errorf("%s returned unusable quotas: %+v", label, cards)
+			}
+		}
+		cache := &subscriptionUsageCache
+		if cache.TryLock() {
+			ordinary.Name = "Published"
+			cache.data = cacheCards(cache.data, []SubscriptionQuota{ordinary}, 2, true)
+			cache.Unlock()
+			publishedName = ordinary.Name
+			second := call(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
+			synctest.Wait()
+			select {
+			case cards := <-second:
+				check("another warm reader", cards, "Published")
+			default:
+				t.Error("another warm reader missed its deadline with the Store held")
+				defer func() { <-second }()
+			}
+			select {
+			case <-first:
+				t.Error("the first warm reader returned before its deadline")
+				release()
+				return
+			default:
+			}
+		} else {
+			t.Error("the warm reader blocked cache publication while waiting on Store")
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		select {
+		case cards := <-first:
+			check("first warm reader", cards, "Before")
+		default:
+			t.Error("first warm reader missed its deadline with the Store held")
+			defer func() { <-first }()
+		}
+		release()
+	})
+	if cards := SubscriptionUsage(t.Context()); len(cards) != 2 || len(cards[0].Windows) != 1 ||
+		cards[0].Windows[0].Used != 40 || cards[1].Name != publishedName ||
+		len(cards[1].Windows) != 1 || cards[1].Windows[0].Used != 27 {
+		t.Fatalf("deadline damaged the cached snapshot: %+v", cards)
+	}
+}
+
+func TestSubscriptionUsageWarmExtensionReadRevokedByDisable(t *testing.T) {
+	fixture := newAccountTaskCatalogFixture(t)
+	module := fixture.entry.Manifest.ID
+	id := ExtensionProviderID(module, "vendor")
+	logins, _ := extensionLogins(id)
+	if len(logins) != 1 {
+		t.Fatalf("expected one signed-in SDK account, got %d", len(logins))
+	}
+	quota := extensionQuota(t.Context(), logins[0])
+	if quota.Error != "" || quota.extensionUsage == nil || quota.extensionUsage.ownerRevision != "" || len(quota.Windows) != 1 {
+		t.Fatalf("fixture did not read a known SDK quota without a transfer: error=%q windows=%d", quota.Error, len(quota.Windows))
+	}
+	warmSubscriptionUsageForTest(t, quota)
+	if cards := SubscriptionUsage(t.Context()); len(cards) != 1 || len(cards[0].Windows) != 1 || cards[0].Windows[0].Used != 10 {
+		t.Fatalf("warm read did not show the enabled module's quota: %+v", cards)
+	}
+	foreign := extensionhost.NewManager(fixture.manager.Namespace())
+	defer foreign.Close(t.Context())
+	for _, enabled := range []bool{false, true} {
+		if err := foreign.SetEnabled(t.Context(), module, enabled); err != nil {
+			t.Fatal(err)
+		}
+		stamp := quota.extensionUsage.stamp
+		if current, err := fixture.manager.Store().UsageStamp(stamp.Scope); err != nil ||
+			current.Dirty || current.Revision != stamp.Revision {
+			t.Fatalf("module toggle changed the fixture's usage stamp: %+v %v", current, err)
+		}
+		if cards := SubscriptionUsage(t.Context()); len(cards) != 1 || len(cards[0].Windows) != 0 || !cards[0].ReadDeferred {
+			t.Errorf("enabled=%t: a revoked SDK quota appeared in the warm response: %+v", enabled, cards)
+		}
+	}
+}
+
 func TestChosenWindows(t *testing.T) {
 	ws := []QuotaWindow{{Name: "Gemini 3.8 Flash (High)", Model: "gemini-3.8-flash-high"}, {Name: "Gemini 3 Flash", Model: "gemini-3-flash"}, {Name: "Weekly"}}
 	got := chosenWindows(ws, map[string]bool{"gemini-3.8-flash-high": true}, nil)
@@ -185,7 +407,8 @@ func TestCopilotQuotaWithoutEditorsSignIn(t *testing.T) {
 	t.Cleanup(func() { CopilotUserURL = old })
 
 	var card *SubscriptionQuota
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	cards, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range cards {
 		if q.Provider == "copilot" {
 			card = &q
 		}

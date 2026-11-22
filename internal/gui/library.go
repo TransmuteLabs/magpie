@@ -234,6 +234,10 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		m.Direct = library.PiDirectAt(q, list)
 		writeJSON(rw, m)
 	})
+	mux.HandleFunc("GET /api/library/market/claude", func(rw http.ResponseWriter, r *http.Request) {
+		list, err := library.MarketClaudePlugins(r.URL.Query().Get("q"))
+		writeJSON(rw, marketOf(list, err))
+	})
 	mux.HandleFunc("POST /api/library/market/about", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ IDs []string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -310,13 +314,16 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		writeJSON(rw, p)
 	})
 	// which skills GitHub has changed: the page as it is, each skill from
-	// there carrying what the check found of it
+	// there carrying what the check found of it. With Update by themselves
+	// on, the ones changed there are updated too, and the result says so
+	// (skill_autoupdate.go)
 	mux.HandleFunc("POST /api/library/skills/check", func(rw http.ResponseWriter, r *http.Request) {
-		if _, err := library.CheckSkills(); err != nil {
+		_, up, err := library.CheckSkillsUpdating()
+		if err != nil {
 			fail(rw, err)
 			return
 		}
-		v, err := libraryView(nil)
+		v, err := libraryView(up)
 		if err != nil {
 			fail(rw, err)
 			return

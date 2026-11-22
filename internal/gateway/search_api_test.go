@@ -124,7 +124,7 @@ func TestSearchAPIsEachAsked(t *testing.T) {
 func TestWebSearchBySearchAPI(t *testing.T) {
 	var mu sync.Mutex
 	var asked [][]map[string]any
-	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	model := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
 			Tools []struct {
 				Function struct {
@@ -153,8 +153,9 @@ func TestWebSearchBySearchAPI(t *testing.T) {
 		io.WriteString(w, sse(`data: {"id":"d","choices":[{"index":0,"delta":{"role":"assistant","content":"Go 1.27.1 is out."}}]}`,
 			`data: {"id":"d","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
 			`data: [DONE]`))
-	}))
+	})))
 	defer model.Close()
+	probeFixtureRoot(t, model)
 	apis := newSearchAPIs(t)
 
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

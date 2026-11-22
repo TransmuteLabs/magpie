@@ -39,6 +39,7 @@ import (
 	"github.com/yetone/magpie/internal/bridgesid"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/dirent"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
@@ -1501,9 +1502,12 @@ const cacheVersion = 29
 // request still answering carried and has no reply id for yet.
 // agy 1: a step's tokens are counted under the model its conversation's
 // database names (agyStepModels), not "agy".
+// agy 2, antigravity 3: the skills a prompt calls up (/<name>) and a
+// model's read of a SKILL.md calls up (agyAskedSkills, agyTools); the
+// app's tool calls, from its transcript.
 // pi 1, raft 1, cindy 1: a pi-subagents tool result's model work is its
 // subagents', counted from their own files (piSubagentsRead).
-var parseVersions = map[string]int{"codex": 3, "zcode": 1, "dsh": 3, "antigravity": 2, "agy": 1, "pi": 1, "raft": 1, "cindy": 1}
+var parseVersions = map[string]int{"codex": 3, "zcode": 1, "dsh": 3, "antigravity": 3, "agy": 2, "pi": 1, "raft": 1, "cindy": 1}
 
 type cacheFile struct {
 	Version int    `json:"version"`
@@ -2035,24 +2039,24 @@ func offOf(f file) int64 {
 // prices rather than a reading per row, and a price changed while it is
 // read takes effect in the next listing rather than halfway through this
 // one.
-func pricer() func(string) *catalog.Price {
+func pricer() (func(string) *catalog.Price, func()) {
+	releaseFiles, releaseCatalog := filememo.Hold(), provider.Hold()
 	prices := map[string]*catalog.Price{}
-	s := settings.Load()
-	return func(model string) *catalog.Price {
+	s := settings.Shared()
+	price := func(model string) *catalog.Price {
 		if p, ok := prices[model]; ok {
 			return p
 		}
-		// held: a model's price looks its provider up among every
-		// provider, and with nothing held each look built them all again
-		// (~40 MB in 4 minutes of the Sessions page open, a check of every
-		// kept price on each 10 s refresh); held, a pass builds them once
-		defer provider.Hold()()
 		var pp *catalog.Price
 		if p, ok := PriceOf(s, model); ok {
 			pp = &p
 		}
 		prices[model] = pp
 		return pp
+	}
+	return price, func() {
+		releaseCatalog()
+		releaseFiles()
 	}
 }
 
@@ -2191,7 +2195,9 @@ func sourceListing(ctx context.Context, limit, made int) ([]Session, int, bool, 
 	if err := ctx.Err(); err != nil {
 		return nil, 0, false, err
 	}
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	defer releasePrices()
+	titles := codexTitleOf()
 	if out, ok := keptListing(files, limit, price, titles); ok {
 		if keptList.made == made {
 			return nil, made, true, nil
@@ -3338,7 +3344,9 @@ func sourceTitles(keys []string) map[string]string {
 	titleFiles := append(append([]file(nil), fs...), parents...)
 	taskTitles := codexSubagentTaskTitles(titleFiles)
 	identities := codexIdentitySnapshot(fs)
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	defer releasePrices()
+	titles := codexTitleOf()
 	for k, g := range groups {
 		if s, ok := assembleListed(g, price, titles); ok {
 			setSessionCodexIdentity(&s, identities)
@@ -3434,7 +3442,9 @@ func sourceGet(key string) (s Session, ok, found bool) {
 	} else {
 		refresh(fs, files)
 	}
-	s, ok = assemble(fs, pricer(), codexTitleOf())
+	price, releasePrices := pricer()
+	defer releasePrices()
+	s, ok = assemble(fs, price, codexTitleOf())
 	setSessionCodexIdentity(&s, identities)
 	setSessionCodexTaskTitle(&s, taskTitles)
 	if parserFor(fs[0].agent).claude {

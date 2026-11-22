@@ -11,12 +11,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -39,6 +42,23 @@ var (
 
 type Catalog struct {
 	Root string
+
+	snapshotMu   sync.Mutex
+	listSnapshot atomic.Pointer[validatedCatalog]
+}
+
+type validatedCatalog struct {
+	root    string
+	digest  [sha256.Size]byte
+	entries []Installed
+	byID    map[string]int
+	inbound []int
+	gateway []int
+}
+
+type catalogView struct {
+	root *os.Root
+	*validatedCatalog
 }
 
 type Installed struct {
@@ -48,7 +68,7 @@ type Installed struct {
 	Disabled  bool              `json:"disabled"`
 	Revision  string            `json:"revision"`
 	Source    *PackageSource    `json:"source,omitempty"`
-	// EnableGeneration tracks observer enablement independently of the frozen package.
+	// EnableGeneration tracks module enablement independently of the frozen package.
 	EnableGeneration      string `json:"-"`
 	observerEnablementErr error
 }
@@ -69,33 +89,129 @@ func (catalog *Catalog) List() ([]Installed, error) {
 }
 
 func (catalog *Catalog) list(ctx context.Context) ([]Installed, error) {
-	if err := ctx.Err(); err != nil {
+	var entries []Installed
+	err := catalog.withView(ctx, func(view catalogView) error {
+		entries = make([]Installed, 0, len(view.entries))
+		for _, entry := range view.entries {
+			entries = append(entries, cloneInstalled(view.enabledEntry(entry)))
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
+	}
+	return entries, nil
+}
+
+func (catalog *Catalog) withView(ctx context.Context, read func(catalogView) error) error {
+	return catalog.withLockedView(ctx, func(view catalogView) error {
+		if err := read(view); err != nil {
+			return err
+		}
+		return ctx.Err()
+	})
+}
+
+func (catalog *Catalog) withLockedView(ctx context.Context, use func(catalogView) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	root, err := catalog.open(false)
 	if errors.Is(err, errCatalogRootMissing) {
-		return []Installed{}, nil
+		return use(catalogView{validatedCatalog: &emptyCatalog})
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer root.Close()
-	unlock, err := catalogLock(ctx, root)
+	unlock, err := catalogReadLock(ctx, root)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, statErr := root.Lstat("catalog.json"); errors.Is(statErr, os.ErrNotExist) {
+			return use(catalogView{validatedCatalog: &emptyCatalog})
+		}
+		unlock, err = catalogLock(ctx, root)
+	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer unlock()
-	entries, _, err := catalogRead(root)
+	view, err := catalog.readView(root)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	for index := range entries {
-		entry := &entries[index]
-		if !entry.Disabled && tracksEnablement(entry.Manifest) {
-			entry.EnableGeneration, entry.observerEnablementErr = readObserverEnablement(root, entry.Manifest.ID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return use(view)
+}
+
+func cloneInstalled(entry Installed) Installed {
+	entry.Manifest = entry.Manifest.Clone()
+	entry.Files = maps.Clone(entry.Files)
+	if entry.Source != nil {
+		entry.Source = new(*entry.Source)
+	}
+	return entry
+}
+
+func (view catalogView) lookup(id string) (Installed, bool) {
+	index, ok := view.byID[id]
+	if !ok {
+		return Installed{}, false
+	}
+	return view.entries[index], true
+}
+
+func (view catalogView) enabledEntry(entry Installed) Installed {
+	if !entry.Disabled && entry.Manifest.Component == nil {
+		entry.EnableGeneration, entry.observerEnablementErr = readObserverEnablement(view.root, entry.Manifest.ID)
+	}
+	return entry
+}
+
+var emptyCatalog validatedCatalog
+
+func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
+	data, snapshot, err := catalogReadSnapshot(root)
+	if err != nil {
+		return catalogView{}, err
+	}
+	if !snapshot.present {
+		return catalogView{root: root, validatedCatalog: &emptyCatalog}, nil
+	}
+	match := func(cached *validatedCatalog) bool {
+		return cached != nil && cached.root == root.Name() && cached.digest == snapshot.digest
+	}
+	if cached := catalog.listSnapshot.Load(); match(cached) {
+		return catalogView{root: root, validatedCatalog: cached}, nil
+	}
+	catalog.snapshotMu.Lock()
+	defer catalog.snapshotMu.Unlock()
+	if cached := catalog.listSnapshot.Load(); match(cached) {
+		return catalogView{root: root, validatedCatalog: cached}, nil
+	}
+	entries, err := catalogDecodeEntries(data)
+	if err != nil {
+		return catalogView{}, err
+	}
+	validated := &validatedCatalog{
+		root: root.Name(), digest: snapshot.digest, entries: entries,
+		byID: make(map[string]int, len(entries)),
+	}
+	for index, entry := range entries {
+		validated.byID[entry.Manifest.ID] = index
+		if !activeRoot(entry) {
+			continue
+		}
+		if len(entry.Manifest.Inbounds) != 0 {
+			validated.inbound = append(validated.inbound, index)
+		}
+		if entry.Manifest.Hooks != nil || entry.Manifest.Middleware != nil {
+			validated.gateway = append(validated.gateway, index)
 		}
 	}
-	return entries, ctx.Err()
+	catalog.listSnapshot.Store(validated)
+	return catalogView{root: root, validatedCatalog: validated}, nil
 }
 
 func (catalog *Catalog) Install(ctx context.Context, source string, check func(context.Context, Installed) error) (Installed, error) {
@@ -317,7 +433,7 @@ func (catalog *Catalog) SetEnabled(ctx context.Context, id string, on bool) erro
 			return nil, nil
 		}
 		entry.Disabled = disabled
-		if on && tracksEnablement(entry.Manifest) {
+		if on && entry.Manifest.Component == nil {
 			if err := catalogValidateEntries(entries); err != nil {
 				return nil, err
 			}
@@ -540,12 +656,36 @@ func catalogDirectoryIdentity(directory *os.Root, before fs.FileInfo) error {
 }
 
 func catalogLock(ctx context.Context, root *os.Root) (func(), error) {
+	return catalogLockMode(ctx, root, false)
+}
+
+func catalogReadLock(ctx context.Context, root *os.Root) (func(), error) {
+	return catalogLockMode(ctx, root, true)
+}
+
+func catalogLockMode(ctx context.Context, root *os.Root, shared bool) (func(), error) {
 	ctx, cancel := context.WithTimeout(ctx, filelock.Wait)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := root.OpenFile("catalog.lock", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	var file *os.File
+	var err error
+	if shared {
+		info, statErr := root.Lstat("catalog.lock")
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("extension catalog lock is not a regular file")
+		}
+		file, err = root.Open("catalog.lock")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		file, err = root.OpenFile("catalog.lock", os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	}
 	if errors.Is(err, fs.ErrExist) {
 		info, statErr := root.Lstat("catalog.lock")
 		if statErr != nil {
@@ -573,16 +713,22 @@ func catalogLock(ctx context.Context, root *os.Root) (func(), error) {
 		file.Close()
 		return nil, errors.New("extension catalog lock changed while opening it")
 	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, err
+	if !shared && opened.Mode().Perm() != 0o600 {
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			return nil, err
+		}
+	}
+	tryLock := filelock.TryLock
+	if shared {
+		tryLock = filelock.TryShared
 	}
 	for {
 		if err := ctx.Err(); err != nil {
 			file.Close()
 			return nil, err
 		}
-		held, err := filelock.TryLock(file)
+		held, err := tryLock(file)
 		if err != nil {
 			file.Close()
 			return nil, err
@@ -605,8 +751,23 @@ type catalogSnapshot struct {
 }
 
 func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
+	data, snapshot, err := catalogReadSnapshot(root)
+	if err != nil {
+		return nil, catalogSnapshot{}, err
+	}
+	if !snapshot.present {
+		return []Installed{}, snapshot, nil
+	}
+	entries, err := catalogDecodeEntries(data)
+	if err != nil {
+		return nil, catalogSnapshot{}, err
+	}
+	return entries, snapshot, nil
+}
+
+func catalogReadSnapshot(root *os.Root) ([]byte, catalogSnapshot, error) {
 	if _, err := root.Lstat("catalog.json"); errors.Is(err, fs.ErrNotExist) {
-		return []Installed{}, catalogSnapshot{}, nil
+		return nil, catalogSnapshot{}, nil
 	} else if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -614,17 +775,21 @@ func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
+	return data, catalogSnapshot{present: true, digest: sha256.Sum256(data)}, nil
+}
+
+func catalogDecodeEntries(data []byte) ([]Installed, error) {
 	var entries []Installed
 	if err := catalogDecode(data, &entries); err != nil {
-		return nil, catalogSnapshot{}, fmt.Errorf("read extension catalog: %w", err)
+		return nil, fmt.Errorf("read extension catalog: %w", err)
 	}
 	if entries == nil {
-		return nil, catalogSnapshot{}, errors.New("extension catalog must be a JSON array")
+		return nil, errors.New("extension catalog must be a JSON array")
 	}
 	if err := catalogValidateEntries(entries); err != nil {
-		return nil, catalogSnapshot{}, fmt.Errorf("read extension catalog: %w", err)
+		return nil, fmt.Errorf("read extension catalog: %w", err)
 	}
-	return entries, catalogSnapshot{present: true, digest: sha256.Sum256(data)}, nil
+	return entries, nil
 }
 
 func catalogWrite(ctx context.Context, root *os.Root, entries []Installed) (bool, error) {

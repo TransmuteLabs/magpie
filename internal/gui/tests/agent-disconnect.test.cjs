@@ -24,20 +24,26 @@ const fresh = () => ({
   profiles: [],
 });
 
-function server(lang, posts) {
-  let cur = fresh();
+function server(lang, posts, cur = fresh(), previews = []) {
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ ...cur, settings: { lang, theme: "light" } });
+    if (url.pathname.startsWith("/api/agents/preview/")) {
+      previews.push(url.pathname);
+      return json({ changes: [], revision: "fixture-revision" });
+    }
     if (url.pathname.startsWith("/api/agents/disconnect/")) {
       posts.push(url.pathname);
       cur = JSON.parse(JSON.stringify(cur));
       const a = cur.agents.find((x) => x.id === url.pathname.split("/").pop());
-      delete a.wired;
-      a.fields[0].value = "gpt-5.4";
+      if (a.native?.needsRecovery) cur.agents = cur.agents.filter((x) => x.id !== a.id);
+      else {
+        delete a.wired;
+        a.fields[0].value = "gpt-5.4";
+      }
       return json({ ...cur, settings: { lang, theme: "light" } });
     }
     if (url.pathname === "/api/set") { posts.push(url.pathname); return json({ ...cur, settings: { lang, theme: "light" } }); }
@@ -62,6 +68,55 @@ const row = (id) => `.row.agent[data-id="${id}"]`;
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {
     const w = words[lang];
+    test(`${engine} ${lang}: a pending SDK binding can be recovered from Agents`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      t.after(() => browser.close());
+      const page = await browser.newPage({ viewport: { width: 980, height: 620 }, reducedMotion: "reduce" });
+      page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
+      const fixture = fresh();
+      for (const [id, detail] of [["pending-sdk", "agent binding needs recovery"], ["invalid-sdk", "ordinary runtime error"]]) {
+        const native = { provider: "invalid", runtime: "unavailable", detail, fields: {} };
+        if (id === "pending-sdk") native.needsRecovery = true;
+        fixture.agents.push({
+          id, name: id, icon: "generic", path: `/fixture/${id}`, native,
+          drift: { kind: "unwired", field: "model", detail },
+          fields: [{ key: "model", label: "model", value: "", options }],
+        });
+      }
+      const posts = [], previews = [], errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", server(lang, posts, fixture, previews));
+      await page.goto("http://magpie.test/?view=agents");
+
+      const pending = page.locator(row("pending-sdk")), invalid = page.locator(row("invalid-sdk"));
+      const menu = page.locator(".pop.row-menu");
+      const item = menu.locator(".rm-item", { hasText: w.item });
+      await invalid.locator(".ag-handle").click();
+      await menu.waitFor();
+      assert.equal(await item.count(), 0, "an ordinary invalid native state cannot restore an interrupted binding");
+      await page.keyboard.press("Escape");
+      await menu.waitFor({ state: "detached" });
+      const reconnect = await page.evaluate(() => t("Reconnect"));
+      assert.equal(await invalid.locator(".ag-fix").textContent(), reconnect, "ordinary invalid keeps Reconnect");
+      await pending.locator(".ag-handle").click();
+      await menu.waitFor();
+      assert.equal(await item.count(), 1, "a pending binding offers the ordinary disconnect action");
+      assert.equal(await pending.locator(".ag-fix").textContent(), w.item, "the pending row offers recovery");
+      assert.equal(await pending.locator(".ag-conn").count(), 0, "a pending binding has no connection switch");
+      await item.click();
+
+      const ask = page.locator(".editor.disconnect-ask");
+      await ask.waitFor();
+      assert.deepEqual(posts, [], "opening recovery prepares a preview without writing");
+      await ask.locator(".bar button", { hasText: w.go }).click();
+      await ask.waitFor({ state: "detached" });
+      await pending.waitFor({ state: "detached" });
+      assert.deepEqual(previews, ["/api/agents/preview/pending-sdk"]);
+      assert.deepEqual(posts, ["/api/agents/disconnect/pending-sdk"]);
+      assert.deepEqual(errors, []);
+    });
+
     test(`${engine} ${lang}: Disconnect from magpie puts back what the agent had`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       t.after(() => browser.close());

@@ -44,6 +44,7 @@ type pendingCall struct {
 	seq          uint64
 	credit       bool
 	ended        bool
+	terminal     bool
 	hostID       string
 	processHosts map[int]string
 	hostWG       sync.WaitGroup
@@ -81,7 +82,11 @@ type workerClient struct {
 	err           error
 	hostCall      func(context.Context, sdk.Scope, string, json.RawMessage) (any, error)
 	hostCounts    [sdk.ProcessLaneCount + 1]int
+	processExit   chan struct{}
+	earlyError    bool
 }
+
+type workerAdmission func(context.Context) (finish func(confirmed bool), err error)
 
 // The child gets ordinary process essentials and its own state/home. In
 // particular, environment-based provider credentials are not inherited.
@@ -153,6 +158,10 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 		nativeSlots:   make(chan struct{}, sdk.MaxConcurrent/2),
 		lifetime:      lifetime, hostCall: hostCall,
 		cancelFrames: make(chan sdk.Frame, sdk.MaxConcurrent),
+		earlyError:   entry.Manifest.Runtime == "bun" && !entry.Manifest.Contract.Has(sdk.ProviderSavedSignIn),
+	}
+	if entry.Manifest.Runtime != "native" {
+		client.processExit = make(chan struct{})
 	}
 	go func() {
 		defer close(client.logDone)
@@ -167,6 +176,9 @@ func startWorker(ctx context.Context, root string, entry Installed, bun string,
 		// failure read cancels the process and releases both pipes.
 		<-client.readDone
 		err := transport.wait()
+		if client.processExit != nil {
+			close(client.processExit)
+		}
 		<-client.logDone
 		client.fail(err)
 		<-client.writeDone
@@ -372,6 +384,7 @@ func (c *workerClient) read() {
 			}
 			pending.ended = true
 			pending.credit = false
+			pending.terminal = frame.Result != nil || frame.Error != nil && !c.earlyError
 		}
 		c.mu.Unlock()
 		if pending == nil {
@@ -499,6 +512,12 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope, auth json.RawMessage,
 	params any, consume func(Event) error,
 ) (json.RawMessage, error) {
+	return c.callWithAdmission(ctx, method, scope, auth, params, consume, nil)
+}
+
+func (c *workerClient) callWithAdmission(ctx context.Context, method string, scope sdk.Scope, auth json.RawMessage,
+	params any, consume func(Event) error, admit workerAdmission,
+) (json.RawMessage, error) {
 	class := c.regularSlots
 	switch method {
 	case sdk.MethodInboundResponse:
@@ -530,6 +549,20 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	if err != nil {
 		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 	}
+	var release func(bool)
+	if admit != nil {
+		release, err = admit(ctx)
+		if err != nil {
+			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+	}
+	var pending *pendingCall
+	dispatched, retained := false, false
+	defer func() {
+		if !retained {
+			c.finishAdmission(pending, release, dispatched)
+		}
+	}()
 	id := strconv.FormatUint(c.next.Add(1), 10)
 	if parent := processParent(ctx); parent != nil {
 		parent.mu.Lock()
@@ -542,7 +575,7 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	}
 	callbackCtx, stopCallbacks := context.WithCancel(ctx)
 	defer stopCallbacks()
-	pending := &pendingCall{ctx: callbackCtx, scope: scope, frames: make(chan sdk.Frame, 2)}
+	pending = &pendingCall{ctx: callbackCtx, scope: scope, frames: make(chan sdk.Frame, 2)}
 	c.mu.Lock()
 	if c.err != nil {
 		c.mu.Unlock()
@@ -551,7 +584,6 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	c.pending[id] = pending
 	c.mu.Unlock()
 	trackStorageCall(ctx)
-	retained := false
 	successfulProcessResult := false
 	defer func() {
 		c.mu.Lock()
@@ -575,11 +607,13 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	}
 	if err := c.send(ctx, frame); err != nil {
 		var outcome *OutcomeError
-		if errors.As(err, &outcome) {
+		if errors.As(err, &outcome) && outcome.Outcome == "not-started" {
 			return nil, err
 		}
+		dispatched = true
 		return nil, &OutcomeError{Outcome: "uncertain", Cause: err}
 	}
+	dispatched = true
 	for {
 		var reply sdk.Frame
 		select {
@@ -587,7 +621,7 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 		case <-ctx.Done():
 			// The worker cannot keep an unresponsive canceled operation
 			// forever. Retire it after a bounded grace period.
-			retained = c.cancelPending(id, pending)
+			retained = c.cancelPending(id, pending, release)
 			return nil, ctx.Err()
 		case <-c.readDone:
 			select {
@@ -599,7 +633,7 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 		if reply.Kind == "event" {
 			if consume != nil {
 				if err := consume(Event{Name: reply.Event, Data: reply.Data}); err != nil {
-					retained = c.cancelPending(id, pending)
+					retained = c.cancelPending(id, pending, release)
 					return nil, err
 				}
 			}
@@ -612,7 +646,7 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 			}
 			if err := c.send(ctx, sdk.Frame{Kind: "ack", ID: id, Seq: reply.Seq}); err != nil {
 				if ctx.Err() != nil {
-					retained = c.cancelPending(id, pending)
+					retained = c.cancelPending(id, pending, release)
 					return nil, ctx.Err()
 				}
 				return nil, &OutcomeError{Outcome: "uncertain", Cause: err}
@@ -630,7 +664,31 @@ func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope,
 	}
 }
 
-func (c *workerClient) cancelPending(id string, pending *pendingCall) bool {
+func (c *workerClient) finishAdmission(pending *pendingCall, release func(bool), dispatched bool) {
+	if release == nil {
+		return
+	}
+	if !dispatched {
+		release(true)
+		return
+	}
+	c.mu.Lock()
+	terminal := pending.terminal
+	c.mu.Unlock()
+	if terminal {
+		release(true)
+	} else if c.processExit == nil {
+		release(false)
+	} else {
+		c.fail(errors.New("worker stopped before confirming an admitted subscription call"))
+		go func() {
+			<-c.processExit
+			release(true)
+		}()
+	}
+}
+
+func (c *workerClient) cancelPending(id string, pending *pendingCall, release func(bool)) bool {
 	c.mu.Lock()
 	if c.err != nil {
 		c.mu.Unlock()
@@ -648,6 +706,10 @@ func (c *workerClient) cancelPending(id string, pending *pendingCall) bool {
 	go func() {
 		defer c.cancelWG.Done()
 		c.retireCanceled(id, pending)
+		if release != nil {
+			pending.hostWG.Wait()
+			c.finishAdmission(pending, release, true)
+		}
 	}()
 	return true
 }

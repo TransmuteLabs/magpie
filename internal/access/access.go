@@ -467,10 +467,7 @@ func LANSecret() string {
 		}
 		return keys[i].Secret
 	}
-	if s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) {
-		return s.LANKey
-	}
-	return ""
+	return legacyLANSecret(keys)
 }
 
 // Default says secret is the sharing key magpie itself made (the default
@@ -899,7 +896,10 @@ func ProveSecret(id string) (string, bool) {
 	}
 	mu.Lock()
 	keys, err := load()
-	s := settings.Load()
+	var legacy string
+	if err == nil {
+		legacy = legacyLANSecret(keys)
+	}
 	mu.Unlock()
 	if err != nil {
 		return "", false
@@ -910,8 +910,8 @@ func ProveSecret(id string) (string, bool) {
 	}
 	// the sharing key an older magpie kept in the settings alone, which
 	// Check takes while the store has none marked
-	if s.LANKey != "" {
-		secrets = append(secrets, s.LANKey)
+	if legacy != "" {
+		secrets = append(secrets, legacy)
 	}
 	found := ""
 	for _, secret := range secrets {
@@ -950,11 +950,21 @@ func On(id string) bool {
 			return err == nil
 		}
 	}
-	s := settings.Load()
-	if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) {
-		return legacyLANKey(s.LANKey).ID == id
+	if secret := legacyLANSecret(keys); secret != "" {
+		return legacyLANKey(secret).ID == id
 	}
 	return false
+}
+
+func legacyLANSecret(keys []Key) string {
+	if slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) {
+		return ""
+	}
+	s, err := settings.LoadCurrent()
+	if err != nil || !s.LAN || s.LANKeyID != "" || strings.HasPrefix(s.LANKey, revokedLANPrefix) {
+		return ""
+	}
+	return s.LANKey
 }
 
 func legacyLANKey(secret string) Key {
@@ -979,7 +989,10 @@ func MigrateLegacyLANKeyBestEffort() {
 }
 
 func migrateLegacyLANKey() error {
-	s := settings.Load()
+	s, err := settings.LoadCurrent()
+	if err != nil {
+		return err
+	}
 	if s.LANKey == "" || s.LANKeyID != "" || strings.HasPrefix(s.LANKey, revokedLANPrefix) {
 		return nil
 	}
@@ -1026,7 +1039,10 @@ func configureLAN(on, rotate bool) error {
 	if err := migrateLegacyLANKey(); err != nil {
 		return err
 	}
-	s := settings.Load()
+	s, err := settings.LoadCurrent()
+	if err != nil {
+		return err
+	}
 	if on {
 		keys, err := load()
 		if err != nil {

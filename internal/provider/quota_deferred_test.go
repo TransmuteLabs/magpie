@@ -55,7 +55,7 @@ func TestQuotaDeferredReadIsNotFailure(t *testing.T) {
 			if got := deferred(q); got != tc.want {
 				t.Errorf("readDeferred = %v, want %v for %q", got, tc.want, tc.err)
 			}
-			report := quotaReport([]SubscriptionQuota{q}, nil, nil, time.Now())
+			report := quotaReport(t.Context(), []SubscriptionQuota{q}, nil, nil, time.Now())
 			if len(report) != 1 || deferred(report[0]) != tc.want {
 				t.Errorf("CLI/gateway report lost readDeferred: %+v", report)
 			}

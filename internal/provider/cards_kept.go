@@ -13,6 +13,7 @@ package provider
 // were read). Nothing here asks a vendor.
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"time"
@@ -26,9 +27,11 @@ type cardFace struct{ name, icon string }
 // accountCard is the face of the card the Usage page gives each account
 // of agent, as its usage is read (LoginUsage): a plugin's ("plugin:<id>")
 // as the plugin's cards are.
-func accountCard(agent string) cardFace {
-	if pp, ok := pluginOfAgent(agent); ok && strings.HasPrefix(agent, "plugin:") {
-		return pluginCardFace(pp)
+func accountCard(ctx context.Context, agent string) cardFace {
+	if strings.HasPrefix(agent, "plugin:") {
+		if pp, ok := pluginOfAgentContext(ctx, agent); ok {
+			return pluginCardFace(pp)
+		}
 	}
 	switch agent {
 	case "claude":
@@ -58,7 +61,7 @@ func accountCard(agent string) cardFace {
 // know, such as a custom provider removed since.
 func KnownFace(id string) (name, icon string) {
 	if !strings.HasPrefix(id, "plugin:") {
-		if f := accountCard(id); f.name != "" {
+		if f := accountCard(context.Background(), id); f.name != "" {
 			return f.name, f.icon
 		}
 	}
@@ -83,10 +86,15 @@ var cardAgents = []string{"claude", "codex", "copilot", "kiro", "zcode", "workbu
 // cardLogins are the accounts the Usage page has a card of its own for,
 // as LoginUsage reads them, a built-in moved onto its plugin by the
 // plugin's.
-func cardLogins() []Login {
+func cardLogins(ctx context.Context) []Login {
 	agents := []string{}
-	for _, provider := range extensionAccounts() {
-		agents = append(agents, provider.ID)
+	host := providerExtensionHost()
+	providers, saved, _ := extensionProvidersWithPolicyContext(ctx, host, func() extensionSubscriptionOwners {
+		owners, err := host.Store().SubscriptionOwners(ctx)
+		return extensionSubscriptionOwners{rows: owners, err: err}
+	})
+	if ctx.Err() != nil {
+		return nil
 	}
 	for _, id := range cardAgents {
 		if PluginServes(id) || id == "kiro" && kiroKey() != "" {
@@ -97,10 +105,16 @@ func cardLogins() []Login {
 	for _, pp := range plugin.Cached() {
 		agents = append(agents, pluginAgent(pp))
 	}
+	out := extensionLoginsFrom(providers, saved, "")
 	seen := map[string]bool{}
-	var out []Login
+	for _, login := range out {
+		seen[login.Agent+"/"+strings.ToLower(login.User)] = true
+	}
 	for _, agent := range agents {
-		ls, _ := usageLogins(agent)
+		ls, _ := usageLoginsContext(ctx, agent)
+		if ctx.Err() != nil {
+			return nil
+		}
 		for _, l := range ls {
 			if k := l.Agent + "/" + strings.ToLower(l.User); l.User != "" && !seen[k] {
 				seen[k] = true
@@ -115,48 +129,77 @@ func cardLogins() []Login {
 // for the Usage page or behind it (LoginUsage), in place of an older
 // one. An account without a card gets one, from its reading, else from
 // the one kept on disk (quotas.json) as of when it was made.
-func withAccountReadings(cards []SubscriptionQuota) []SubscriptionQuota {
-	ls := cardLogins()
+func withAccountReadings(ctx context.Context, cards []SubscriptionQuota) []SubscriptionQuota {
+	ls := cardLogins(ctx)
 	if len(ls) == 0 {
 		return cards
+	}
+	keys := make([]string, len(ls))
+	for index, login := range ls {
+		keys[index] = loginReadingCacheKeyContext(ctx, login)
+		if ctx.Err() != nil {
+			return cards
+		}
 	}
 	read := map[string]SubscriptionQuota{}
 	c := &loginUsageCache
 	now := time.Now()
 	c.Lock()
-	for _, l := range ls {
-		k := l.Agent + "/" + strings.ToLower(l.User)
+	for _, k := range keys {
 		if e, ok := c.m[k]; ok {
 			read[k] = e.asOf(now).read
 		}
 	}
 	c.Unlock()
 	out := slices.Clone(cards)
-	for _, l := range ls {
+	for index, l := range ls {
 		id := loginProvider(l)
-		q, ok := read[l.Agent+"/"+strings.ToLower(l.User)]
+		q, ok := read[keys[index]]
 		i := slices.IndexFunc(out, func(x SubscriptionQuota) bool {
 			return x.From == "" && x.Provider == id && strings.EqualFold(x.User, l.User)
 		})
 		if i >= 0 {
+			if l.extension != nil && out[i].extensionUsage == nil {
+				if ok {
+					q.Provider, q.User = id, l.User
+					out[i] = q
+				} else {
+					out[i] = deferredExtensionQuota(ctx, out[i])
+				}
+				continue
+			}
+			if !l.pluginUsage.matches(out[i].pluginUsage) {
+				out[i].pluginUsage = l.pluginUsage
+				out[i] = deferredExtensionQuota(ctx, out[i])
+				out[i].readSeq = 0
+			}
 			// the same reading (perLogin's) or a later one
-			if ok && q.readSeq >= out[i].readSeq {
+			if ok && l.pluginUsage.matches(q.pluginUsage) && q.readSeq >= out[i].readSeq {
 				q.Provider, q.Name, q.Icon, q.User = id, out[i].Name, out[i].Icon, out[i].User
 				out[i] = q
 			}
 			out[i] = withHeardClaude(out[i], l)
 			continue
 		}
-		if !ok {
+		if !ok || !l.pluginUsage.matches(q.pluginUsage) {
+			if l.extension != nil {
+				continue
+			}
 			if q, ok = lastReading(id + "/" + strings.ToLower(l.User)); !ok {
 				q = SubscriptionQuota{Plan: l.Plan, Windows: []QuotaWindow{}}
+			} else if !l.pluginUsage.matches(q.pluginUsage) {
+				q.pluginUsage = l.pluginUsage
+				q = deferredExtensionQuota(ctx, q)
 			}
 		}
 		if q = withHeardClaude(q, l); !ok && q.readSeq == 0 {
 			continue
 		}
-		f := accountCard(l.Agent)
-		q.Provider, q.Name, q.Icon, q.User = id, f.name, f.icon, l.User
+		if l.extension == nil {
+			f := accountCard(ctx, l.Agent)
+			q.Name, q.Icon = f.name, f.icon
+		}
+		q.Provider, q.User = id, l.User
 		out = append(out, q)
 	}
 	return out
@@ -197,20 +240,6 @@ func withHeardClaude(q SubscriptionQuota, l Login) SubscriptionQuota {
 	q.Windows, q.ReadAt, q.AsOf, q.Error, q.ReadError, q.ReadDeferred = e.windows(now), &at, nil, "", "", false
 	q.readSeq = max(q.readSeq, e.heardSeq)
 	return q
-}
-
-// withHeardClaudeCards is cards with each Claude account's card as
-// withHeardClaude has it: the Usage page's, kept from the read before
-// (SubscriptionUsage holds them a minute, or till asked), showed a
-// snapshot from before while Routing, which reads what was heard, showed
-// the account's last reply (mayne_wong on X).
-func withHeardClaudeCards(cards []SubscriptionQuota) []SubscriptionQuota {
-	for i, q := range cards {
-		if q.Provider == "claude" && q.From == "" && q.User != "" {
-			cards[i] = withHeardClaude(q, Login{Agent: "claude", User: q.User})
-		}
-	}
-	return cards
 }
 
 // lastReading is the reading kept on disk under key (keepLast), with its
@@ -265,8 +294,12 @@ func cardKeys(p Provider) []cardKey {
 // keyCardProviders are the providers whose keys can have a plan or
 // balance card.
 func keyCardProviders() []Provider {
+	return keyCardProvidersContext(context.Background())
+}
+
+func keyCardProvidersContext(ctx context.Context) []Provider {
 	var out []Provider
-	for _, p := range All() {
+	for _, p := range AllContext(ctx) {
 		if !p.Hidden && !p.Off && p.Account == nil && p.Key != "" {
 			out = append(out, p)
 		}

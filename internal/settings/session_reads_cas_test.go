@@ -64,14 +64,16 @@ func TestSessionReadsCASPreservesNeighborsAndRejectsABA(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial, err := InspectSessionReads()
-	if err != nil || initial.Reads.Reads("opencode") {
+	if err != nil || initial.Reads.Reads("opencode") || initial.Reads.Generation == "" {
 		t.Fatal(initial, err)
 	}
+	stale := Load()
 	if err := CompareAndSwapSessionRead(initial.Revision, "opencode", true); err != nil {
 		t.Fatal(err)
 	}
 	current, err := InspectSessionReads()
 	if err != nil || !current.Reads.All || !current.Reads.Asked ||
+		current.Reads.Generation == initial.Reads.Generation ||
 		!reflect.DeepEqual(current.Reads.Agents, map[string]bool{"opencode": true, "codex": false, "claude": true}) {
 		t.Fatal("selected CAS replaced neighboring consent", current, err)
 	}
@@ -90,6 +92,18 @@ func TestSessionReadsCASPreservesNeighborsAndRejectsABA(t *testing.T) {
 	}
 	if err := CompareAndSwapSessionRead(current.Revision, "opencode", false); !errors.Is(err, ErrSessionReadsChanged) {
 		t.Fatal("revoke/rebind ABA accepted", err)
+	}
+	restored, err := InspectSessionReads()
+	if err != nil || !restored.Reads.Reads("opencode") || restored.Reads.Generation == current.Reads.Generation {
+		t.Fatal("restored permission reused the previous generation", restored, err)
+	}
+	stale.Theme = "dark"
+	if err := Save(stale); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := InspectSessionReads()
+	if err != nil || !reflect.DeepEqual(saved.Reads, restored.Reads) {
+		t.Fatal("saving another setting changed the read decision", saved, err)
 	}
 }
 

@@ -19,11 +19,15 @@ func TestUnchangedLoginsSaveKeepsFileAndParse(t *testing.T) {
 	if err := os.Chtimes(loginsPath(), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := filememo.ReadNow("logins", loginsPath(), parseLogins); err != nil {
+	if _, err := filememo.ReadCurrent("logins", loginsPath(), parseLogins); err != nil {
 		t.Fatal(err)
 	}
+	stamp := StampNow()
 	if err := writeLogins(readLogins()); err != nil {
 		t.Fatal(err)
+	}
+	if StampNow() != stamp {
+		t.Error("an unchanged save invalidated the catalog stamp")
 	}
 	fi, err := os.Stat(loginsPath())
 	if err != nil {
@@ -33,7 +37,7 @@ func TestUnchangedLoginsSaveKeepsFileAndParse(t *testing.T) {
 		t.Fatalf("an unchanged save moved logins.json's time to %v", fi.ModTime())
 	}
 	parses := 0
-	if _, err := filememo.ReadNow("logins", loginsPath(), func(b []byte) ([]savedLogin, error) {
+	if _, err := filememo.ReadCurrent("logins", loginsPath(), func(b []byte) ([]savedLogin, error) {
 		parses++
 		return parseLogins(b)
 	}); err != nil {
@@ -50,6 +54,9 @@ func TestUnchangedLoginsSaveKeepsFileAndParse(t *testing.T) {
 	}
 	if fi, _ := os.Stat(loginsPath()); fi.ModTime().Equal(old) {
 		t.Fatal("a changed account was not written")
+	}
+	if StampNow() == stamp {
+		t.Error("a changed account left the catalog stamp unchanged")
 	}
 }
 

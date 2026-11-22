@@ -3,6 +3,7 @@ import { validateRichQuotaWindow } from "./rich-quota.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const invalid = () => { throw new SDKError("invalid_params", "Invalid usage result or applicability"); };
+const validTimestamp = value => value === undefined || Number.isSafeInteger(value) && value >= 0 && value <= 253402300799999;
 
 export function parseUsageRevision(value) {
   if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value) || value.length > 20 || BigInt(value) > 18446744073709551615n) invalid();
@@ -11,7 +12,7 @@ export function parseUsageRevision(value) {
 
 export function validateUsageResult(manifest, value) {
   if (!object(value) || value.windows !== undefined && (!Array.isArray(value.windows) || value.windows.length > 1024)) invalid();
-  if (value.asOf !== undefined && (!Number.isSafeInteger(value.asOf) || value.asOf < 0)) invalid();
+  if (!validTimestamp(value.asOf)) invalid();
   if (Object.hasOwn(value, "revision")) {
     if (manifest.contract.version.minor < 4) invalid();
     parseUsageRevision(value.revision);
@@ -22,9 +23,7 @@ export function validateUsageResult(manifest, value) {
     validateRichQuotaWindow(manifest, window);
     if (manifest.contract.version.minor < 4 && ["models", "notModels", "aside"].some(key => Object.hasOwn(window, key))) invalid();
     if (window.aside !== undefined && typeof window.aside !== "boolean") invalid();
-    for (const key of ["asOf", "resetsAt"]) {
-      if (window[key] !== undefined && (!Number.isSafeInteger(window[key]) || window[key] < 0)) invalid();
-    }
+    if (!validTimestamp(window.asOf) || !validTimestamp(window.resetsAt)) invalid();
     for (const key of ["models", "notModels"]) {
       const models = window[key] ?? [];
       if (!Array.isArray(models) || models.length > 1024 || models.some(model =>

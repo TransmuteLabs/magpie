@@ -18,6 +18,7 @@ type AccountSummary struct {
 	ID         string `json:"id"`
 	Generation string `json:"generation"`
 	ExpiresAt  int64  `json:"expiresAt,omitempty"`
+	Name       string `json:"name,omitempty"`
 }
 
 type WindowCallOptions struct {

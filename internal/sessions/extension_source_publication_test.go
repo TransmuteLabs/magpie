@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,18 +12,110 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/extension"
 )
 
 func sourceForeignOff(t *testing.T, id string) {
 	t.Helper()
-	host := os.Getenv("MAGPIE_SOURCE_TEST_HOST")
+	setSourceModuleInChild(t, "MAGPIE_SOURCE_TEST_HOST", "off", id)
+}
+
+func setSourceModuleInChild(t *testing.T, hostEnv, action, id string) {
+	t.Helper()
+	host := os.Getenv(hostEnv)
 	if host == "" {
 		t.Fatal("requires explicitly built synthetic Source host CLI")
 	}
-	command := exec.CommandContext(t.Context(), host, "plugin", "sdk", "off", id)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, host, "plugin", "sdk", action, id)
 	command.Env = os.Environ()
 	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("foreign CLI off failed: %v %s", err, output)
+		t.Fatalf("foreign CLI %s failed: %v %s", action, err, output)
+	}
+}
+
+func cycleSourceModule(t *testing.T, manager *extension.Manager, id, hostEnv string) {
+	t.Helper()
+	before, err := manager.ActiveModule(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch := sourceEpoch.Load()
+	catalog := extension.NewCatalog(manager.Namespace())
+	for _, action := range []string{"off", "on"} {
+		if hostEnv == "" {
+			if err := catalog.SetEnabled(t.Context(), id, action == "on"); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		setSourceModuleInChild(t, hostEnv, action, id)
+	}
+	after, err := manager.ActiveModule(t.Context(), id)
+	if err != nil || after.Revision != before.Revision || after.EnableGeneration == before.EnableGeneration ||
+		sourceEpoch.Load() != epoch {
+		t.Fatal("foreign cycle did not change only the durable enablement generation", err)
+	}
+}
+
+func TestSourceNativeForeignCycleRevokesSelectedBinding(t *testing.T) {
+	manager, installed, _ := installedSourceFixture(t)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".fixture-omp", "sessions", "bound.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceFixtureWrite(t, path, "bound session", 7)
+	if err := BindSessionSourceNative(t.Context(), installed.Manifest.ID, "native-omp", installed.Revision); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := os.ReadFile(sourceBindingsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, found := Find("omp", "bound")
+	if !found || selected.source == nil {
+		t.Fatal("ordinary Find did not use the bound JSONL source", selected)
+	}
+	assertTranscript := func(selected Session) {
+		t.Helper()
+		transcript, err := TranscriptOf(selected)
+		if err != nil || len(transcript.Parts) != 1 || transcript.Parts[0].Text != "bound session" {
+			t.Fatal("ordinary bound transcript unavailable", transcript, err)
+		}
+	}
+	assertTranscript(selected)
+	_, made, _ := ListUnless(0, -1)
+	var publication sync.Once
+	sourceBeforePublish = func() {
+		publication.Do(func() {
+			cycleSourceModule(t, manager, installed.Manifest.ID, "MAGPIE_SOURCE_TEST_HOST")
+			if transcript, err := TranscriptOf(selected); !errors.Is(err, extension.ErrActionChanged) || len(transcript.Parts) != 0 {
+				t.Error("selected JSONL transcript survived a foreign enablement cycle", transcript, err)
+			}
+		})
+	}
+	t.Cleanup(func() { sourceBeforePublish = nil })
+	rows, _, same := ListUnless(0, made)
+	sourceBeforePublish = nil
+	if same || slices.ContainsFunc(rows, func(row Session) bool { return row.Agent == "omp" && row.ID == "bound" }) {
+		t.Error("JSONL listing published a revoked generation", rows, same)
+	}
+	fresh, found := Find("omp", "bound")
+	if !found || fresh.source == nil {
+		t.Fatal("reenabled JSONL source did not honor the existing binding", fresh)
+	}
+	if _, err := TranscriptOf(selected); !errors.Is(err, extension.ErrActionChanged) {
+		t.Error("fresh JSONL discovery revived the previous selection", err)
+	}
+	assertTranscript(fresh)
+	if after, err := os.ReadFile(sourceBindingsPath()); err != nil || !bytes.Equal(binding, after) {
+		t.Fatal("enablement cycle rewrote the persisted binding", err)
 	}
 }
 

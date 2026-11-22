@@ -3,7 +3,7 @@ export type UIValue = null | boolean | number | string | UIValue[] | { [key: str
 export interface UIConfigValues { [key: string]: UIValue }
 export interface UIConfigSnapshot { version: string; values: UIConfigValues }
 export interface AccountSelection { id: string; expectedGeneration: string }
-export interface AccountSummary { id: string; generation: string; expiresAt?: number }
+export interface AccountSummary { id: string; generation: string; expiresAt?: number; name?: string }
 export interface WindowCallOptions { account?: AccountSelection }
 export interface WindowAuthStartOptions { method: string; input?: UIValue; account?: AccountSelection }
 export interface WindowAuthFlowView {

@@ -7,40 +7,16 @@ import (
 	"io/fs"
 	"os"
 	"strings"
-
-	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const observerEnablementLimit = 128
-
-func tracksEnablement(manifest sdk.Manifest) bool {
-	if manifest.Contract.Has(sdk.LedgerObserver) || manifest.Contract.Has(sdk.RequestObserver) ||
-		manifest.Contract.Has(sdk.BudgetPolicy) || manifest.Contract.Has(sdk.MaskingRules) ||
-		manifest.Contract.Has(sdk.RequestPolicy) || manifest.Contract.Has(sdk.GatewayHooks) ||
-		manifest.Contract.Has(sdk.GatewayMiddleware) || manifest.Contract.Has(sdk.AgentWiring) ||
-		len(manifest.Contributions) != 0 ||
-		len(manifest.SearchSources) != 0 || len(manifest.RoutingStrategies) != 0 || len(manifest.Settings) != 0 {
-		return true
-	}
-	for _, tool := range manifest.Tools {
-		if tool.MemorySearch {
-			return true
-		}
-	}
-	for _, binding := range manifest.AuthBindings {
-		if binding.From == sdk.ProviderSignInPart {
-			return true
-		}
-	}
-	return false
-}
 
 func observerEnablementFile(id string) string {
 	return ".observer-" + storeHash(id) + ".json"
 }
 
 // An absent marker is the pre-toggle generation. Other failures mean the
-// generation is unknown and cannot admit observer calls.
+// generation is unknown and cannot admit module calls.
 func readObserverEnablement(root *os.Root, id string) (string, error) {
 	name := observerEnablementFile(id)
 	if _, err := root.Lstat(name); errors.Is(err, fs.ErrNotExist) {
@@ -57,7 +33,7 @@ func readObserverEnablement(root *os.Root, id string) (string, error) {
 }
 
 // The catalog lock covers both writes. Persist the fence before enabling the
-// observer. A failed catalog publication can only invalidate
+// module. A failed catalog publication can only invalidate
 // queued events conservatively.
 func advanceObserverEnablement(root *os.Root, id string) error {
 	if _, err := readObserverEnablement(root, id); err != nil {

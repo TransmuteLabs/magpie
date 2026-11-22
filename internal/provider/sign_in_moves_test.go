@@ -2,8 +2,6 @@ package provider
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -29,9 +27,7 @@ func TestSignInMovesSaysWhatSwitchDoes(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginsMu.Unlock()
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("usage endpoint read: %s", r.URL)
-	}))
+	fake := refuseClaudeUsageReads(t)
 	defer fake.Close()
 	claudeBase = fake.URL // isolate puts it back
 

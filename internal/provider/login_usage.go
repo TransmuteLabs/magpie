@@ -7,7 +7,9 @@ package provider
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -144,19 +146,77 @@ var errLeftAlone = errors.New("not read yet: this subscription is switched off i
 // LoginUsage itself stays empty for it: warm-ups and switching read it and
 // must not take a kept reading for a fresh one.
 func LoginUsageShown(ctx context.Context, agent string) map[string]SubscriptionQuota {
-	if !settings.AccountDiscoveryOff() && leftAlone(agent) {
-		if logins, ok := usageLogins(agent); ok {
-			return keptLoginUsage(logins)
+	return loginUsageShown(ctx, agent, false)
+}
+
+// LoginUsageEditor projects the readings ready for the account editor. Its
+// vendor, history and check-in work shares one budget. After it expires a
+// short local owner and proof check can still confirm a completed reading
+// while the caller is connected.
+func LoginUsageEditor(parent context.Context, agent string) (map[string]SubscriptionQuota, error) {
+	ctx, cancel := context.WithTimeout(parent, 12*time.Second)
+	defer cancel()
+	out := loginUsageShown(ctx, agent, true)
+	out = LoginCheckinsContext(ctx, agent, WithCapped(out))
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	proof := ctx
+	if ctx.Err() != nil && len(out) > 0 {
+		var stop context.CancelFunc
+		proof, stop = context.WithTimeout(parent, 100*time.Millisecond)
+		defer stop()
+	}
+	check := subscriptionQuotaCheck(proof, slices.Collect(maps.Values(out))...)
+	var deferred []string
+	for user, quota := range out {
+		current := check(quota)
+		if !current {
+			out[user] = deferredExtensionQuota(proof, quota)
+		}
+		if !current || quota.extensionUsage != nil && quota.ReadDeferred {
+			deferred = append(deferred, user)
 		}
 	}
-	return LoginUsage(ctx, agent)
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		for _, user := range deferred {
+			delete(out, user)
+		}
+		if len(out) == 0 {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func loginUsageShown(ctx context.Context, agent string, completedOnly bool) map[string]SubscriptionQuota {
+	if !settings.AccountDiscoveryOff() && leftAlone(agent) {
+		if logins, ok := usageLoginsContext(ctx, agent); ok {
+			return keptLoginUsage(ctx, logins, completedOnly)
+		}
+	}
+	out, _, _ := loginUsageOf(ctx, agent, nil, completedOnly)
+	return out
 }
 
 // keptLoginUsage is each of logins' last reading, asking no one.
-func keptLoginUsage(logins []Login) map[string]SubscriptionQuota {
+func keptLoginUsage(ctx context.Context, logins []Login, completedOnly bool) map[string]SubscriptionQuota {
 	out := map[string]SubscriptionQuota{}
 	for _, l := range logins {
-		out[l.User] = keepLast(cutShort(l, errLeftAlone), l.User)
+		if ctx.Err() != nil {
+			if completedOnly {
+				break
+			}
+			return nil
+		}
+		quota := keepLastContext(ctx, cutShort(l, errLeftAlone), l.User)
+		if completedOnly && ctx.Err() != nil {
+			break
+		}
+		out[l.User] = quota
 	}
 	return out
 }
@@ -167,7 +227,7 @@ func keptLoginUsage(logins []Login) map[string]SubscriptionQuota {
 // each account's reading's state: when it was last read well, and
 // whether this try failed.
 func loginUsageAt(ctx context.Context, agent string) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
-	return loginUsageOf(ctx, agent, nil)
+	return loginUsageOf(ctx, agent, nil, false)
 }
 
 // someLoginUsage is LoginUsage of the named accounts alone. What a
@@ -185,15 +245,15 @@ func someLoginUsage(ctx context.Context, agent string, users ...string) map[stri
 	if len(want) == 0 {
 		return map[string]SubscriptionQuota{}
 	}
-	out, _, _ := loginUsageOf(ctx, agent, want)
+	out, _, _ := loginUsageOf(ctx, agent, want, false)
 	return out
 }
 
 // loginUsageOf is loginUsageAt over the accounts whose lower-cased user
 // is in only, or over every account when only is nil.
-func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
+func loginUsageOf(ctx context.Context, agent string, only map[string]bool, completedOnly bool) (map[string]SubscriptionQuota, time.Time, map[string]readState) {
 	// nor of a provider switched off or removed (leftAlone)
-	if settings.AccountDiscoveryOff() || leftAlone(agent) {
+	if ctx.Err() != nil || settings.AccountDiscoveryOff() || leftAlone(agent) {
 		return nil, time.Time{}, nil
 	}
 	asked := time.Now()
@@ -214,7 +274,10 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		return out, asked, states
 	}
 	out := map[string]SubscriptionQuota{}
-	logins, ok := usageLogins(agent)
+	logins, ok := usageLoginsContext(ctx, agent)
+	if ctx.Err() != nil {
+		return nil, time.Time{}, nil
+	}
 	if !ok {
 		return out, asked, states
 	}
@@ -229,6 +292,9 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		go func() {
 			defer wg.Done()
 			e := loginReading(ctx, l)
+			if completedOnly && ctx.Err() != nil {
+				return
+			}
 			mu.Lock()
 			out[l.User] = e.q
 			states[l.User] = e.state()
@@ -239,6 +305,9 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 		}()
 	}
 	wg.Wait()
+	if ctx.Err() != nil {
+		return out, oldest, states
+	}
 	usageRead(agent, out) // a window not started: the warm-up looks now
 	if len(out) > 0 {
 		// the batch's readings are points of each account's quota history
@@ -260,21 +329,13 @@ func loginUsageOf(ctx context.Context, agent string, only map[string]bool) (map[
 			q.User = user // a login's reading itself carries no user
 			qs = append(qs, q)
 		}
-		noteHistory(qs, time.Now())
+		noteHistoryWrite(ctx, qs, time.Now())
 	}
 	return out, oldest, states
 }
 
-// noteHistory notes a batch of accounts' readings in the quota history.
-// The write is synchronous: it runs after the batch's readings have all
-// completed, so it holds no waiter on a reading. Tests substitute their
-// own note or write.
-var noteHistory = func(qs []SubscriptionQuota, now time.Time) {
-	noteHistoryWrite(qs, now)
-}
-
 // noteHistoryWrite is the history write itself; tests count or hold it.
-var noteHistoryWrite = noteQuotaHistory
+var noteHistoryWrite = noteSubscriptionQuotaHistory
 
 // loginReading is l's allowance as LoginUsage and the Usage page both show
 // it, one reading for the two: what was read less than a minute ago comes
@@ -294,7 +355,7 @@ func loginReading(ctx context.Context, l Login) loginUsageEntry {
 
 // cachedLoginReading is loginReading as read or kept.
 func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
-	key := loginReadingCacheKey(l)
+	key := loginReadingCacheKeyContext(ctx, l)
 	if l.extension != nil {
 		if err := l.extension.check(ctx); err != nil {
 			q := SubscriptionQuota{Provider: l.Agent, User: l.User, Error: err.Error()}
@@ -316,7 +377,7 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 	e, ok := c.m[key]
 	if ok && (held || time.Since(e.at) < time.Minute) {
 		c.Unlock()
-		if !extensionUsageValid(l, e.q) {
+		if !loginUsageValid(ctx, l, e.q) {
 			c.Lock()
 			ok = false
 		} else {
@@ -329,19 +390,24 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 			return e
 		}
 	}
-	entry := func(read SubscriptionQuota) loginUsageEntry {
+	community := strings.HasPrefix(l.Agent, "plugin:")
+	entry := func(ctx context.Context, read SubscriptionQuota) loginUsageEntry {
 		q := read
-		if q.Error != "" && ok && q.Provider != "claude" && extensionUsageValid(l, e.q) {
+		if q.Error != "" && (!community || !q.ReadDeferred) && ok && q.Provider != "claude" && loginUsageValid(ctx, l, e.q) {
 			q = e.q // a hiccup keeps what was known
 		}
 		return loginUsageEntry{at: time.Now(), q: q, read: read}
+	}
+	if err := ctx.Err(); l.extension != nil && err != nil {
+		c.Unlock()
+		return entry(ctx, cutShort(l, err))
 	}
 	r := c.pending[key]
 	if r == nil && held {
 		// nothing read since magpie started: the reading kept on disk,
 		// as of when it was made
 		c.Unlock()
-		return entry(keepLast(cutShort(l, errNotAsked), l.User))
+		return entry(ctx, keepLastContext(ctx, cutShort(l, errNotAsked), l.User))
 	}
 	if r == nil {
 		if stale {
@@ -359,36 +425,60 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 			// it is bounded as the Usage page's refresh is
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), subscriptionTimeout)
 			defer cancel()
-			r.e = entry(keepReading(rctx, readNow(namedFor(l, loginQuota(rctx, l))), l.User))
-			c.Lock()
-			// one dropped meanwhile (StaleAllowance) read too soon, and a
-			// Claude account the user asked to see meanwhile is read again
-			// (AskClaudeUsage), as SubscriptionUsage reads it: neither is kept
-			if c.pending[key] == r {
-				delete(c.pending, key)
-				if (l.Agent != "claude" || claudeAskGeneration.Load() == asked) && extensionUsageValid(l, r.e.q) {
-					if c.m == nil {
-						c.m = map[string]loginUsageEntry{}
-					}
-					c.m[key] = r.e
-				}
+			read := readNow(namedFor(l, loginQuota(rctx, l)))
+			if !community || !read.ReadDeferred {
+				read = keepReading(rctx, read, l.User)
+			} else {
+				order, _ := rctx.Value(quotaReadKey{}).(quotaRead)
+				read.readSeq, read.readStarted = order.seq, order.started
 			}
-			c.Unlock()
-			close(r.done)
+			r.e = entry(rctx, read)
+			finishLoginReading(rctx, l, key, r, asked)
 		}()
 	}
 	c.Unlock()
 	select {
 	case <-r.done:
-		if !extensionUsageValid(l, r.e.q) {
-			return entry(SubscriptionQuota{Provider: l.Agent, User: l.User,
-				Error: "account usage was invalidated; refresh required", ReadDeferred: true})
+		if !loginUsageValid(ctx, l, r.e.q) {
+			if l.pluginUsage != nil {
+				quota := cutShort(l, errPluginUsageAccountChanged)
+				return entry(ctx, l.pluginUsage.deferred(ctx, quota))
+			}
+			q := SubscriptionQuota{Provider: l.Agent, User: l.User,
+				Error: "account usage was invalidated; refresh required", ReadDeferred: true}
+			if err := ctx.Err(); err != nil {
+				q.Error = err.Error()
+			}
+			return entry(ctx, q)
 		}
 		return r.e
 	case <-ctx.Done():
 		// given up on: as a reading cut short would have said
-		return entry(keepReading(ctx, cutShort(l, ctx.Err()), l.User))
+		q := cutShort(l, ctx.Err())
+		if l.extension == nil {
+			q = keepReading(ctx, q, l.User)
+		}
+		return entry(ctx, q)
 	}
+}
+
+func finishLoginReading(ctx context.Context, login Login, key string, read *loginRead, asked uint64) {
+	valid := loginUsageValid(ctx, login, read.e.q)
+	c := &loginUsageCache
+	c.Lock()
+	// A dropped read (StaleAllowance) or a Claude read superseded by
+	// AskClaudeUsage is no longer the reading to keep.
+	if c.pending[key] == read {
+		delete(c.pending, key)
+		if valid && (login.Agent != "claude" || claudeAskGeneration.Load() == asked) {
+			if c.m == nil {
+				c.m = map[string]loginUsageEntry{}
+			}
+			c.m[key] = read.e
+		}
+	}
+	c.Unlock()
+	close(read.done)
 }
 
 // usageLogins are the accounts whose allowance LoginUsage asks for, each
@@ -397,24 +487,32 @@ func cachedLoginReading(ctx context.Context, l Login) loginUsageEntry {
 // False for an agent that tells none, and for the built-in Grok, read by
 // home.
 func usageLogins(agent string) (logins []Login, ok bool) {
-	if logins, ok := extensionLogins(agent); ok {
+	return usageLoginsContext(context.Background(), agent)
+}
+
+func usageLoginsContext(ctx context.Context, agent string) (logins []Login, ok bool) {
+	if logins, ok := extensionLoginsContext(ctx, agent); ok {
 		return logins, true
 	}
-	if pp, ok := pluginOfAgent(agent); ok {
-		return pluginUsageLogins(pp), true
+	if pp, ok := pluginOfAgentContext(ctx, agent); ok {
+		return pluginUsageLogins(ctx, pp), true
 	}
 	if agent == "grok" {
 		return nil, false
 	}
-	return builtinLogins(agent)
+	return builtinLoginsContext(ctx, agent)
 }
 
 // builtinLogins are the accounts of a built-in subscription whose
 // allowance can be asked; false for an agent that tells none.
 func builtinLogins(agent string) (logins []Login, ok bool) {
+	return builtinLoginsContext(context.Background(), agent)
+}
+
+func builtinLoginsContext(ctx context.Context, agent string) (logins []Login, ok bool) {
 	switch agent {
 	case "claude", "codex":
-		logins = Logins(agent)
+		logins = loginsContext(ctx, agent)
 	case "copilot":
 		logins = copilotLoginList()
 	case ChatGPTAPIID:
@@ -726,6 +824,9 @@ func cutShort(l Login, err error) SubscriptionQuota {
 func namedFor(l Login, q SubscriptionQuota) SubscriptionQuota {
 	if q.User == "" {
 		q.User = l.User
+	}
+	if q.pluginUsage == nil {
+		q.pluginUsage = l.pluginUsage
 	}
 	return q
 }

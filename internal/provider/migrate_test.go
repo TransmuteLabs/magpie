@@ -197,7 +197,7 @@ func TestMoveToPlugin(t *testing.T) {
 	}
 	// a built-in with no usage card of its own (Devin) keeps the plugin's
 	cards := 0
-	qs := fetchSubscriptionUsage(context.Background())
+	qs, _ := fetchSubscriptionUsage(context.Background())
 	for _, q := range qs {
 		if q.Provider == "fakeco" {
 			cards++
@@ -205,7 +205,7 @@ func TestMoveToPlugin(t *testing.T) {
 	}
 	if cards == 0 {
 		t.Fatalf("the moved plugin's accounts show no usage: moved %v, plugins %d, logins %d, cards %+v",
-			Moved("fakeco"), len(plugin.Cached()), len(pluginUsageLogins(mustPlugin(t))), qs)
+			Moved("fakeco"), len(plugin.Cached()), len(pluginUsageLogins(t.Context(), mustPlugin(t))), qs)
 	}
 
 }
@@ -371,7 +371,8 @@ func TestRetiredBuiltinQuiet(t *testing.T) {
 	if !BuiltinRetired("zed") {
 		t.Fatal("zed isn't retired")
 	}
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	cards, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range cards {
 		if q.Provider == "zed" {
 			t.Fatalf("a card of the retired built-in: %+v", q)
 		}

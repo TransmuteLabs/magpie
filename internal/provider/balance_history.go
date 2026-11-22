@@ -18,6 +18,7 @@ package provider
 // balanceHistMax.
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -25,9 +26,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -72,52 +73,68 @@ type BalanceTrend struct {
 // balanceHist is the file: key ("provider|user") → points.
 type balanceHist map[string][]BalancePoint
 
-var balanceHistMu sync.Mutex
+var balanceHistMu = filelock.Mutex{Path: func() string { return balanceHistPath() + ".lock" }}
 
 func balanceHistPath() string { return filepath.Join(filepath.Dir(Path()), "balance-history.json") }
+
+func parseBalanceHist(b []byte) (balanceHist, error) {
+	h := balanceHist{}
+	if json.Unmarshal(b, &h) != nil || h == nil {
+		return balanceHist{}, nil
+	}
+	return h, nil
+}
 
 // balanceHistShared is the file as last parsed, while it is unchanged
 // (filememo): every usage read gives each balance its trend from it, and
 // the file runs to hundreds of KB. It is shared: never changed.
 func balanceHistShared() balanceHist {
-	h, err := filememo.Read("balance-history", balanceHistPath(), func(b []byte) (balanceHist, error) {
-		h := balanceHist{}
-		if json.Unmarshal(b, &h) != nil || h == nil {
-			return balanceHist{}, nil
-		}
-		return h, nil
-	})
+	h, err := filememo.Read("balance-history", balanceHistPath(), parseBalanceHist)
 	if err != nil || h == nil {
 		return balanceHist{}
 	}
 	return h
 }
 
-// readBalanceHist is the file for a caller to change and write: a copy of
-// balanceHistShared, each key's points its own.
+// readBalanceHist reads a mutable draft under the writer lock. A request
+// can hold the display's memo while another magpie replaces the file.
 func readBalanceHist() balanceHist {
-	h := balanceHistShared()
-	out := make(balanceHist, len(h))
-	for k, pts := range h {
-		out[k] = slices.Clone(pts)
+	b, err := os.ReadFile(balanceHistPath())
+	if os.IsNotExist(err) {
+		return balanceHist{}
 	}
-	return out
+	if err != nil {
+		return nil
+	}
+	h, _ := parseBalanceHist(b)
+	return h
 }
 
-func writeBalanceHist(h balanceHist) {
+func writeBalanceHist(ctx context.Context, h balanceHist) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b, err := json.Marshal(h)
 	if err != nil {
-		return
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	path := balanceHistPath()
 	// readBalanceHist reads a file that doesn't parse as no history: it is
 	// kept aside before it is written over, and not written over when it
 	// can't be
-	if lastgood.KeepUnparsed(path, lastgood.Into[balanceHist]) != nil {
-		return
+	if err := lastgood.KeepUnparsed(path, lastgood.Into[balanceHist]); err != nil {
+		return err
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	_ = writeFileAtomic(path, b)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return writeFileAtomicChecked(path, b, ctx.Err)
 }
 
 // addBalancePoint puts n after pts, the last moved to it when near, or in
@@ -209,15 +226,54 @@ func currencyHistKey(key, sign string) string { return key + "|" + strings.TrimS
 // noteBalanceHistory keeps the balance each card among qs tells, and gives
 // every card with a balance its trend, on qs itself. A balance estimated
 // from one typed (Estimate) is neither kept nor given one.
-func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
-	balanceHistMu.Lock()
+func noteBalanceHistory(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
+	noteBalanceBatch(ctx, qs, now, false)
+}
+
+func noteBalanceBatch(ctx context.Context, qs []SubscriptionQuota, now time.Time, subscription bool) {
+	h, ok := noteBalancePoints(ctx, qs, now, subscription)
+	if !ok || ctx.Err() != nil {
+		return
+	}
+	for i, q := range qs {
+		if q.Balance == "" || len(q.BalanceParts) > 0 || q.Estimate != nil {
+			continue
+		}
+		if h == nil {
+			h = balanceHistShared()
+		}
+		key := quotaHistKey(q.Provider, q.User)
+		cs := balanceCurrencies(q.Balance)
+		if cs != nil {
+			key = currencyHistKey(key, cs[0].Sign)
+		}
+		qs[i].BalanceTrend = balanceTrend(h[key], now)
+		if cs != nil && qs[i].BalanceTrend != nil {
+			qs[i].BalanceTrend.Currency = cs[0].Sign
+		}
+	}
+}
+
+func noteBalancePoints(ctx context.Context, qs []SubscriptionQuota, now time.Time, subscription bool) (balanceHist, bool) {
+	if !balanceHistMu.LockCheckedContext(ctx) {
+		return nil, false
+	}
 	defer balanceHistMu.Unlock()
+	if subscription {
+		copy(qs, ValidateSubscriptionQuotas(ctx, qs))
+	}
+	if ctx.Err() != nil {
+		return nil, false
+	}
 	var h balanceHist
 	changed := false
 	for _, q := range qs {
 		pts := balancePointsOf(q, now)
 		if len(pts) > 0 && h == nil {
 			h = readBalanceHist()
+			if h == nil {
+				return nil, false
+			}
 		}
 		if card := quotaHistKey(q.Provider, q.User); len(pts) > 1 && len(h[card]) > 0 {
 			// the card's own line, kept before its currencies were told
@@ -254,25 +310,9 @@ func noteBalanceHistory(qs []SubscriptionQuota, now time.Time) {
 				h[key] = slices.Clip(pts)
 			}
 		}
-		writeBalanceHist(h)
+		_ = writeBalanceHist(ctx, h)
 	}
-	for i, q := range qs {
-		if q.Balance == "" || len(q.BalanceParts) > 0 || q.Estimate != nil {
-			continue
-		}
-		if h == nil {
-			h = balanceHistShared() // read only from here on
-		}
-		key := quotaHistKey(q.Provider, q.User)
-		cs := balanceCurrencies(q.Balance)
-		if cs != nil {
-			key = currencyHistKey(key, cs[0].Sign)
-		}
-		qs[i].BalanceTrend = balanceTrend(h[key], now)
-		if cs != nil && qs[i].BalanceTrend != nil {
-			qs[i].BalanceTrend.Currency = cs[0].Sign
-		}
-	}
+	return h, true
 }
 
 // balanceTrend is pts' trend at now, nil with fewer than two points shown.
@@ -334,8 +374,15 @@ func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }
 // had no curve on the Usage page, where every other card has one
 // (corddis_114 on Discord). A card with windows keeps its windows' curve
 // alone.
-func noteCardHistory(qs []SubscriptionQuota, now time.Time) {
-	noteQuotaHistory(qs, now)
+func noteCardHistory(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
+	if ctx.Err() != nil {
+		return
+	}
+	noteDailyCredits(ctx, qs, now)
+	noteSubscriptionQuotaHistory(ctx, qs, now)
+	if ctx.Err() != nil {
+		return
+	}
 	var idx []int
 	for i, q := range qs {
 		if q.Balance != "" && len(q.Windows) == 0 && len(q.BalanceParts) == 0 {
@@ -349,8 +396,8 @@ func noteCardHistory(qs []SubscriptionQuota, now time.Time) {
 	for j, i := range idx {
 		sub[j] = qs[i]
 	}
-	noteBalanceHistory(sub, now)
+	noteBalanceBatch(ctx, sub, now, true)
 	for j, i := range idx {
-		qs[i].BalanceTrend = sub[j].BalanceTrend
+		qs[i] = sub[j]
 	}
 }

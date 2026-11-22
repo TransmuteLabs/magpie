@@ -22,7 +22,7 @@ test("workflow enumerates before selection and invalidates changed generations w
   const previous = globalThis.window;
   let generation = "9007199254740993", calls = 0, reject = false;
   globalThis.window = { magpie: { backend: {
-    accounts: async () => [{ id: "chosen", generation }],
+    accounts: async () => [{ id: "chosen", generation, name: "Reader" }],
     call: async (_binding, _input, options) => {
       calls++;
       if (reject) throw new Error("host refused");
@@ -35,6 +35,7 @@ test("workflow enumerates before selection and invalidates changed generations w
     assert.throws(() => workflow.call());
     await workflow.refresh();
     assert.equal(workflow.snapshot.selection, null);
+    assert.equal(workflow.snapshot.accounts[0].name, "Reader");
     assert.throws(() => workflow.select("foreign"));
     workflow.select("chosen");
     assert.equal(await workflow.call(), generation);

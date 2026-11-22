@@ -1,7 +1,9 @@
 package settings
 
 import (
+	"errors"
 	"testing"
+	"time"
 )
 
 // AccountDiscoveryOff parses settings.json once for each version of the
@@ -33,5 +35,33 @@ func TestAccountDiscoveryOffParsedOnce(t *testing.T) {
 	}
 	if AccountDiscoveryOff() {
 		t.Fatal("saved on, still read off")
+	}
+}
+
+func TestCurrentAccountDiscoveryDoesNotWaitForSettingsWriter(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	if err := Save(Settings{NoAccountDiscovery: true}); err != nil {
+		t.Fatal(err)
+	}
+	unlock := lockFile()
+	result := make(chan error, 1)
+	go func() {
+		off, err := AccountDiscoveryOffNow()
+		if err == nil && !off {
+			err = errors.New("saved discovery setting was lost")
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		unlock()
+		<-result
+		t.Fatal("publication policy reads must not invert the settings writer's lock order")
 	}
 }

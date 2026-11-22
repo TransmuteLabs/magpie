@@ -48,6 +48,10 @@ func (controller *extensionController) target() string {
 	return controller.item.Agent.ID
 }
 
+func (controller *extensionController) fileOnly() bool {
+	return controller.item.Agent.Launch == nil && controller.item.Agent.Profile == nil
+}
+
 func (controller *extensionController) read(ctx context.Context) (extensionBindingRecord, error) {
 	if err := controller.checkRoot(); err != nil {
 		return extensionBindingRecord{}, err
@@ -77,10 +81,13 @@ func (controller *extensionController) observe(ctx context.Context) (extensionBi
 		}
 	}
 	if err == nil && record.Revision == 0 {
-		var legacy bool
-		legacy, err = extensionLegacyAgentOwned(controller.item.Plugin, controller.item.Agent.ID)
-		if err == nil && legacy {
-			err = fmt.Errorf("agent is owned by previous config descriptor %s/%s; reinstall its previous module release and disconnect that descriptor before adopting SDK 1.5 launch/profile wiring", controller.item.Plugin, controller.item.Agent.ID)
+		record.legacy, err = extensionLegacyAgentOwner(controller.item.Plugin, controller.item.Agent.ID)
+		if err == nil && record.legacy != "" {
+			if !controller.fileOnly() {
+				err = fmt.Errorf("agent is owned by previous config descriptor %s/%s; reinstall its previous module release and disconnect that descriptor before adopting SDK 1.5 launch/profile wiring", controller.item.Plugin, controller.item.Agent.ID)
+			} else if err = json.Unmarshal([]byte(record.legacy), &record.Before); err != nil {
+				err = fmt.Errorf("extension agent ownership could not be read: %w", err)
+			}
 		}
 	}
 	if err == nil && record.Phase != "" && record.Phase != "disconnected" &&
@@ -116,9 +123,25 @@ func (controller *extensionController) snapshot(record extensionBindingRecord) *
 }
 
 func (controller *extensionController) policy(record extensionBindingRecord) extension.ActionPolicy {
-	return extension.ActionPolicy{Root: controller.home, Paths: controller.item.Agent.ConfigFiles,
-		Binding:   controller.snapshot(record),
+	policy := extension.ActionPolicy{Root: controller.home, Paths: controller.item.Agent.ConfigFiles,
 		BackupDir: filepath.Join(appdir.Config(), "extensions", "action-backups", controller.item.Plugin, controller.item.Agent.ID)}
+	if !controller.fileOnly() {
+		policy.Binding = controller.snapshot(record)
+	}
+	return policy
+}
+
+func (controller *extensionController) options(record extensionBindingRecord, manifest sdk.Manifest, field, value string) ([]byte, error) {
+	id, address := controller.item.Agent.ID, gateway.URL()
+	options := extensionAgentOptions{Gateway: address, Key: agentKeyAt(id, address),
+		Models: viaMagpie(id, "magpie/"), Field: field, Value: value}
+	if record.hasOwner() {
+		options.Previous = record.Before
+	}
+	if !controller.fileOnly() {
+		options.PriorModels = record.ModelOptions
+	}
+	return marshalExtensionAgentOptions(options, manifest, id)
 }
 
 func (controller *extensionController) spec() *launchSpec {
@@ -140,8 +163,13 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 	if err != nil {
 		return nil, err
 	}
-	if record.Phase == "pending" {
+	resumeDisconnect := intent == "disconnect" && controller.fileOnly() && record.Phase == "pending" &&
+		!record.RecoverySafe && !record.FinishDisconnect
+	if record.Phase == "pending" && !resumeDisconnect {
 		return nil, errors.New("agent transition is incomplete; disconnect to recover it")
+	}
+	if (intent == "sync" || intent == "disconnect") && !record.hasOwner() {
+		return nil, extension.ErrActionChanged
 	}
 	if record.Phase == "owned" && !extensionBindingSameDescriptor(record.Descriptor, controller.item.Agent) {
 		return nil, errors.New("agent definition changed while owned; disconnect before adopting its replacement")
@@ -151,20 +179,17 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 		return nil, err
 	}
 	defer host.lease.Close()
-	var previous []extension.ActionSettingFile
-	if record.Phase == "owned" {
-		previous = record.Before
+	if resumeDisconnect && (host.entry.Revision != record.PackageRevision || host.config != record.ConfigVersion) {
+		return nil, errors.New("agent module changed since the interrupted transition")
 	}
-	opts, err := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(controller.item.Agent.ID, gateway.URL()),
-		Models: viaMagpie(controller.item.Agent.ID, "magpie/"), Field: field, Value: value, Previous: previous, PriorModels: record.ModelOptions},
-		host.entry.Manifest, controller.item.Agent.ID)
+	opts, err := controller.options(record, host.entry.Manifest, field, value)
 	if err != nil {
 		return nil, err
 	}
 	var catalog struct {
 		Models json.RawMessage `json:"models"`
 	}
-	if host.entry.Manifest.Contract.Version.Minor >= 9 {
+	if !controller.fileOnly() && host.entry.Manifest.Contract.Version.Minor >= 9 {
 		if err := json.Unmarshal(opts, &catalog); err != nil {
 			return nil, err
 		}
@@ -173,6 +198,17 @@ func (controller *extensionController) prepare(ctx context.Context, intent, fiel
 		sdk.AgentPlanRequest{ID: controller.item.Agent.ID, Action: intent, Options: opts}, controller.policy(record))
 	if err != nil {
 		return nil, err
+	}
+	if resumeDisconnect {
+		for _, current := range action.Snapshots() {
+			matches := func(known extension.ActionSettingFile) bool {
+				return current.Path == known.Path && current.BeforeHash == known.BeforeHash &&
+					current.Mode == known.Mode && current.Exists == known.Exists
+			}
+			if !slices.ContainsFunc(record.Applied, matches) && !slices.ContainsFunc(record.PriorApplied, matches) {
+				return nil, extension.ErrActionChanged
+			}
+		}
 	}
 	var shell *update.ShellFunctionPlan
 	if launch := controller.spec(); launch != nil {
@@ -224,6 +260,15 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 		prior.Revision == ^uint64(0) {
 		return extension.ErrActionChanged
 	}
+	if prior.Revision == 0 {
+		legacy, err := extensionLegacyAgentOwner(controller.item.Plugin, controller.item.Agent.ID)
+		if err != nil {
+			return err
+		}
+		if legacy != plan.before.legacy {
+			return extension.ErrActionChanged
+		}
+	}
 	for otherKey, claim := range ledger.Records {
 		if otherKey != key && extensionSameHome(claim.Home, controller.home) && claim.Phase != "disconnected" &&
 			extensionBindingTarget(claim) == controller.target() {
@@ -233,7 +278,8 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 	if err := plan.runtime.check(ctx, controller.item.Plugin); err != nil {
 		return err
 	}
-	if err := extension.ActionSnapshotsMatch(ctx, controller.home, plan.action.Snapshots()); err != nil {
+	snapshots := plan.action.Snapshots()
+	if err := extension.ActionSnapshotsMatch(ctx, controller.home, snapshots); err != nil {
 		return err
 	}
 	if plan.shell != nil {
@@ -249,18 +295,30 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 	if controller.unchangedSync(prior, plan) {
 		return controller.applyUnchangedSync(ctx, prior, plan)
 	}
+	preview := plan.action.Preview()
+	values, connected := map[string]string{}, plan.intent != "disconnect"
+	if preview.Binding != nil {
+		values, connected = maps.Clone(preview.Binding.Values), preview.Binding.Connected
+	}
 	record := extensionBindingRecord{
 		Plugin: controller.item.Plugin, Agent: controller.item.Agent.ID, Home: controller.home,
 		Revision: prior.Revision + 1, Phase: "pending", Descriptor: controller.item.Agent.Clone(), Bin: controller.bin,
 		PackageRevision: plan.runtime.entry.Revision, ConfigVersion: plan.runtime.config,
-		Values: maps.Clone(plan.action.Preview().Binding.Values), Before: plan.action.Snapshots(),
+		Values: values, Before: snapshots,
 		ModelOptions: append(json.RawMessage(nil), plan.modelOptions...),
 		Applied:      plan.action.PlannedSnapshots(), RecoverySafe: true,
 	}
-	if prior.Phase == "owned" {
+	if prior.hasOwner() {
 		record.Before, record.PriorApplied = extension.CloneActionSnapshots(prior.Before), extension.CloneActionSnapshots(prior.Applied)
 		record.PriorShells = slices.Clone(prior.Shells)
 		record.RecoverySafe = prior.RecoverySafe && extension.ActionSnapshotsMatch(ctx, controller.home, prior.Applied) == nil
+	} else if plan.before.legacy != "" {
+		record.Before = extension.CloneActionSnapshots(plan.before.Before)
+		record.RecoverySafe = false
+	}
+	if controller.fileOnly() && plan.before.hasOwner() {
+		record.PriorApplied = snapshots
+		record.FinishDisconnect = !connected
 	}
 	if plan.shell != nil {
 		record.Shells = plan.shell.Snapshots()
@@ -279,7 +337,7 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 		return err
 	}
 	shellApplied := false
-	result, err := plan.action.ExecuteAgent(ctx, plan.action.Preview().Revision, func() error {
+	result, err := plan.action.ExecuteAgent(ctx, preview.Revision, func() error {
 		if err := plan.runtime.check(ctx, controller.item.Plugin); err != nil {
 			return err
 		}
@@ -323,16 +381,20 @@ func (controller *extensionController) apply(ctx context.Context, plan *extensio
 		return errors.New("agent action was not applied; ownership remains pending")
 	}
 	record.Phase = "owned"
-	if !plan.action.Preview().Binding.Connected {
+	if !connected {
 		record.Phase = "disconnected"
 	}
 	record.PriorApplied = nil
 	record.PriorShells = nil
+	record.FinishDisconnect = false
 	ledger.Records[key] = record
-	return extensionBindingWrite(ledger)
+	if err := extensionBindingWrite(ledger); err != nil {
+		return fmt.Errorf("agent action applied; ownership could not be finalized (backup %s): %w", result.Backup, err)
+	}
+	return nil
 }
 
-func (controller *extensionController) recover(ctx context.Context) error {
+func (controller *extensionController) recover(ctx context.Context, revision uint64) error {
 	if err := controller.checkRoot(); err != nil {
 		return err
 	}
@@ -352,13 +414,16 @@ func (controller *extensionController) recover(ctx context.Context) error {
 	}
 	key := extensionBindingKey(controller.home, controller.item.Plugin, controller.item.Agent.ID)
 	record := ledger.Records[key]
+	if record.Revision != revision {
+		return extension.ErrActionChanged
+	}
 	if record.Phase == "" || record.Phase == "disconnected" {
 		return nil
 	}
 	if !extensionBindingSameDescriptor(record.Descriptor, controller.item.Agent) {
 		return extension.ErrActionChanged
 	}
-	if !record.RecoverySafe {
+	if !record.RecoverySafe && !record.FinishDisconnect {
 		return errors.New("agent files contain rebased user edits; enable the original module to disconnect safely")
 	}
 	if record.Revision == ^uint64(0) {
@@ -367,7 +432,11 @@ func (controller *extensionController) recover(ctx context.Context) error {
 	if err := update.ShellFunctionsRecoverable(record.Shells, record.PriorShells); err != nil {
 		return err
 	}
-	if err := extension.RestoreOwnedActionSnapshots(ctx, controller.home, record.Before, record.Applied, record.PriorApplied); err != nil {
+	original, known := record.Before, [][]extension.ActionSettingFile{record.Applied, record.PriorApplied}
+	if record.FinishDisconnect {
+		original, known = record.Applied, [][]extension.ActionSettingFile{record.PriorApplied}
+	}
+	if err := extension.RestoreOwnedActionSnapshots(ctx, controller.home, original, known...); err != nil {
 		return err
 	}
 	if err := update.RestoreShellFunctions(record.Shells, record.PriorShells); err != nil {
@@ -375,6 +444,9 @@ func (controller *extensionController) recover(ctx context.Context) error {
 	}
 	record.Revision++
 	record.Phase = "disconnected"
+	record.PriorApplied = nil
+	record.PriorShells = nil
+	record.FinishDisconnect = false
 	ledger.Records[key] = record
 	return extensionBindingWrite(ledger)
 }
@@ -408,20 +480,35 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 	}
 	owned := func() bool {
 		record, err := read()
-		return err == nil && record.Phase != "" && record.Phase != "disconnected"
+		return err == nil && record.hasOwner()
 	}
 	a.extensionMetadata = &extensionAgentMetadata{plugin: item.Plugin, descriptor: desc.Clone(), base: base, owns: owned,
-		disconnected: func() bool { record, err := read(); return err == nil && record.Phase == "disconnected" }}
+		disconnected: func() bool {
+			record, err := read()
+			return err == nil && (record.Phase == "disconnected" || controller.fileOnly() &&
+				record.Revision == 0 && !record.hasOwner() && stashShared()[desc.ID+disconnectedKey] == "1")
+		}}
 	a.detect = func() bool {
-		return owned() || base != nil && base.Detected() || controller.bin != "" && lookExtensionBin(controller.bin) || a.Path != "" && isFile(a.Path)
+		for _, name := range desc.ConfigFiles {
+			if isFile(filepath.Join(home, filepath.FromSlash(name))) {
+				return true
+			}
+		}
+		return owned() || base != nil && base.Detected() || controller.bin != "" && lookExtensionBin(controller.bin)
 	}
 	run := func(intent, key, value string) error {
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if intent == "sync" && !owned() {
-			return nil
+		if intent == "sync" {
+			record, err := controller.observe(ctx)
+			if err != nil {
+				return err
+			}
+			if !record.hasOwner() {
+				return nil
+			}
 		}
 		plan, err := controller.prepare(ctx, intent, key, value)
 		if err != nil {
@@ -433,39 +520,51 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 		Read: func() NativeState {
 			record, err := read()
 			state := NativeState{Provider: "disconnected", Runtime: "available", Fields: map[string]NativeField{}}
+			values, connected := record.Values, record.Phase == "owned"
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err == nil && owned() {
+			if err == nil && record.Phase != "pending" && (controller.fileOnly() || record.hasOwner()) {
 				runtime, runtimeErr := acquireAgentRuntime(ctx, host, item.Plugin, desc)
 				err = runtimeErr
 				if runtime != nil {
-					if runtime.entry.Revision != record.PackageRevision || runtime.config != record.ConfigVersion {
+					if !controller.fileOnly() && (runtime.entry.Revision != record.PackageRevision || runtime.config != record.ConfigVersion) {
 						err = errors.New("agent module changed; sync or reconnect before using it")
 					} else {
-						opts, optionsErr := marshalExtensionAgentOptions(extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(desc.ID, gateway.URL()),
-							Models: viaMagpie(desc.ID, "magpie/"), Previous: record.Before, PriorModels: record.ModelOptions}, runtime.entry.Manifest, desc.ID)
+						opts, optionsErr := controller.options(record, runtime.entry.Manifest, "", "")
 						err = optionsErr
 						if err == nil {
 							inspection, inspectErr := extension.NewActions(runtime).AgentInspect(ctx, item.Plugin, sdk.Scope{Operation: "agent.inspect"},
 								sdk.AgentInspectRequest{ID: desc.ID, Options: opts}, controller.policy(record))
 							state.Detail, err = inspection.Detail, inspectErr
+							if controller.fileOnly() {
+								values, connected = inspection.Values, inspection.Connected && record.hasOwner()
+							}
 						}
 					}
 					runtime.lease.Close()
 				}
 			}
-			if err != nil || record.Phase == "pending" {
-				state.Provider, state.Runtime, state.Detail = "invalid", "unavailable", fmt.Sprint(errors.Join(err, errors.New("agent binding needs recovery")))
-			} else if record.Phase == "owned" {
+			if record.Phase == "pending" {
+				state.NeedsRecovery = err == nil
+				err = errors.Join(err, errors.New("agent binding needs recovery"))
+			}
+			if err != nil {
+				state.Provider, state.Runtime, state.Detail = "invalid", "unavailable", err.Error()
+			} else if connected {
 				state.Provider = "connected"
 			}
 			for _, field := range desc.Fields {
-				state.Fields[field.Key] = NativeField{Value: record.Values[field.Key], Status: state.Provider}
+				state.Fields[field.Key] = NativeField{Value: values[field.Key], Status: state.Provider}
 			}
 			return state
 		},
 		Connect: func() error { return run("connect", "", "") },
-		Apply:   func(key, value string) error { return run("set", key, value) },
+		Apply: func(key, value string) error {
+			if controller.fileOnly() && a.Field(key) == nil {
+				return fmt.Errorf("unknown extension agent field %q", key)
+			}
+			return run("set", key, value)
+		},
 	}
 	var pending *extensionAgentPlan
 	var revision string
@@ -474,16 +573,25 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 		defer controller.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		pending, revision = nil, ""
 		record, err := controller.read(ctx)
 		if err != nil {
 			return nil, err
 		}
 		result := &DisconnectPlan{}
-		if record.Phase == "" || record.Phase == "disconnected" {
+		if !record.hasOwner() {
 			return result, nil
 		}
 		pending, err = controller.prepare(ctx, "disconnect", "", "")
 		if err != nil {
+			if record.legacy != "" {
+				return nil, err
+			}
+			if controller.fileOnly() && record.Phase == "owned" {
+				if _, ownerErr := inspectAgentRuntime(ctx, host, item.Plugin, desc); ownerErr == nil {
+					return nil, err
+				}
+			}
 			pending = nil
 			result.actionRevision = "recover:" + strconv.FormatUint(record.Revision, 10)
 		} else {
@@ -512,8 +620,15 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 	a.Native.Execute = func(plan *DisconnectPlan) error {
 		controller.mu.Lock()
 		defer controller.mu.Unlock()
+		if plan == nil {
+			return extension.ErrActionChanged
+		}
 		if revision != plan.Revision(desc.ID) {
-			if !owned() && len(plan.Files) == 0 {
+			record, err := read()
+			if err != nil {
+				return err
+			}
+			if !record.hasOwner() && len(plan.Files) == 0 && len(plan.Settings) == 0 {
 				return nil
 			}
 			return extension.ErrActionChanged
@@ -527,16 +642,32 @@ func extensionControlledAgent(home string, host *extension.Manager, item Extensi
 		if err != nil || plan.actionRevision != "recover:"+strconv.FormatUint(record.Revision, 10) {
 			return extension.ErrActionChanged
 		}
-		return controller.recover(ctx)
+		return controller.recover(ctx, record.Revision)
 	}
 	a.Native.ExecuteOffline = a.Native.Execute
 	a.Sync = func() error { return run("sync", "", "") }
 	for _, field := range desc.Fields {
 		key := field.Key
 		a.Fields = append(a.Fields, Field{Key: key, Label: field.Label,
-			Get:     func() string { record, _ := read(); return record.Values[key] },
-			Set:     func(value string) error { return run("set", key, value) },
-			Options: func(_ map[string]string) []Option { return viaMagpie(desc.ID, "magpie/") },
+			Get: func() string {
+				if controller.fileOnly() {
+					return a.Native.Read().Fields[key].Value
+				}
+				record, _ := read()
+				return record.Values[key]
+			},
+			Set: func(value string) error { return a.Native.Apply(key, value) },
+			Options: func(current map[string]string) []Option {
+				options := viaMagpie(desc.ID, "magpie/")
+				if !controller.fileOnly() {
+					return options
+				}
+				picks := []Option{{Value: "", Label: "default"}}
+				if value := current[key]; value != "" {
+					picks = append(picks, Option{Value: value, Label: value})
+				}
+				return append(picks, options...)
+			},
 		})
 	}
 	if launch := controller.spec(); launch != nil {

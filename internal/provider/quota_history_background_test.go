@@ -67,10 +67,10 @@ func TestBackgroundReadsNoteHistoryOnce(t *testing.T) {
 	var calls atomic.Int32
 	var batch atomic.Int32
 	oldWrite := noteHistoryWrite
-	noteHistoryWrite = func(qs []SubscriptionQuota, now time.Time) {
+	noteHistoryWrite = func(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
 		calls.Add(1)
 		batch.Store(int32(len(qs)))
-		noteQuotaHistory(qs, now)
+		noteQuotaHistoryContext(ctx, qs, now)
 	}
 	t.Cleanup(func() { noteHistoryWrite = oldWrite })
 
@@ -133,7 +133,7 @@ func TestHistoryWriteHoldsNoWaiter(t *testing.T) {
 	entered := make(chan struct{})
 	var writes atomic.Int32
 	oldWrite := noteHistoryWrite
-	noteHistoryWrite = func(qs []SubscriptionQuota, now time.Time) {
+	noteHistoryWrite = func(_ context.Context, _ []SubscriptionQuota, _ time.Time) {
 		if writes.Add(1) == 1 {
 			close(entered)
 			<-release // the slow disk, held until the test lets go

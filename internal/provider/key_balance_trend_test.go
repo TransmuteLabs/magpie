@@ -37,7 +37,7 @@ func TestKeyBalancesCarryTheirTrend(t *testing.T) {
 	}
 	// read an hour ago at $3
 	before := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
-	writeBalanceHist(balanceHist{quotaHistKey("relay", ""): {{At: before, Amount: 3}}})
+	writeBalanceHist(t.Context(), balanceHist{quotaHistKey("relay", ""): {{At: before, Amount: 3}}})
 	got := KeyBalances(context.Background())
 	if len(got) != 1 || got[0].Balance != "$2.00" {
 		t.Fatalf("cards %+v", got)

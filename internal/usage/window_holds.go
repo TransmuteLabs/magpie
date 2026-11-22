@@ -9,6 +9,7 @@ package usage
 // rounded percent to scale up (provider.HoldsFloor).
 
 import (
+	"context"
 	"math"
 	"slices"
 	"strings"
@@ -21,11 +22,19 @@ import (
 
 // magpie quota --json and GET /v1/magpie/quotas tell the same whole as the
 // Usage page (#2333).
-func init() { provider.ReckonHolds = WithWindowHolds }
+func init() { provider.ReckonHolds = WithWindowHoldsContext }
 
 // WithWindowHolds is qs with each window's Holds reckoned from the log, as
 // it stood at now. qs itself, which the caller may share, is left as it is.
 func WithWindowHolds(qs []provider.SubscriptionQuota, now time.Time) []provider.SubscriptionQuota {
+	return WithWindowHoldsContext(context.Background(), qs, now)
+}
+
+// WithWindowHoldsContext estimates holds using the request's provider lookup.
+func WithWindowHoldsContext(ctx context.Context, qs []provider.SubscriptionQuota, now time.Time) []provider.SubscriptionQuota {
+	if ctx.Err() != nil {
+		return qs
+	}
 	since, ok := holdsSince(qs, now)
 	if !ok { // none can be reckoned: each one only says why
 		return carryHolds(windowHolds(qs, now, time.Time{}, nil, provider.Renames{}, nil, nil, func(func(Record)) {}), now)
@@ -34,7 +43,7 @@ func WithWindowHolds(qs []provider.SubscriptionQuota, now time.Time) []provider.
 	hist := provider.QuotaHistories(since, "", "")
 	started := withRecordedWindowStarts(qs, hist, now)
 	dry := dryRuns(started, hist, now)
-	out := windowHolds(started, now, s.firstOwn, apiPricer(), provider.UsageRenames(), provider.SamePlanAccounts(), dry, func(fn func(Record)) { s.visit(since, fn) })
+	out := windowHolds(started, now, s.firstOwn, apiPricer(ctx), provider.UsageRenames(), provider.SamePlanAccounts(), dry, func(fn func(Record)) { s.visit(since, fn) })
 	return carryHolds(withSpansOf(out, qs), now)
 }
 
@@ -265,7 +274,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 			h.Routed.Tokens += int64(r.Input + r.Output)
 			h.Routed.CacheRead += int64(r.CacheRead)
 			h.Routed.CacheWrite += int64(r.CacheWrite)
-			if pr := priceOf(r); pr != nil {
+			if pr := holdsPrice(qs[s.q].Provider, r, priceOf); pr != nil {
 				h.Routed.Cost += r.CostAt(*pr)
 				h.Routed.BaseCost += r.CostAt(baseRates(*pr))
 			} else {
@@ -321,6 +330,35 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 	return out
 }
 
+// holdsPrice is what a call weighs in the whole of a window of card's: its
+// API price (priceOf), except where card is a ChatGPT plan's (Codex) and
+// OpenAI says how fast the plan's included usage goes in the call's tier
+// (catalog.PlanTierTimes): there it is the Standard price that many times
+// over. A Fast or Ultrafast call priced at its API rate while it drew the
+// window down faster made the whole read smaller the more of them there
+// were (mu33410 on X: GPT-6.2 Ultrafast is 3x in the API, 6x of the plan).
+func holdsPrice(card string, r Record, priceOf func(Record) *catalog.Price) *catalog.Price {
+	tier := r.billedTier()
+	if card != "codex" || tier == "" {
+		return priceOf(r)
+	}
+	for _, m := range []string{strings.TrimSpace(r.Served), r.Model} {
+		x, ok := catalog.PlanTierTimes(m, tier)
+		if m == "" || !ok {
+			continue
+		}
+		std := r
+		std.TierAsked, std.TierSent, std.TierServed = "", "", ""
+		pr := priceOf(std)
+		if pr == nil {
+			return nil
+		}
+		v := pr.Times(x)
+		return &v
+	}
+	return priceOf(r)
+}
+
 // baseRates is pr without its long-context tiers: every call at the base
 // rates however large its input (WindowHolds.BaseCost, #5861). A peak
 // hour's price is kept, as that is what the vendor's base rate is then.
@@ -337,15 +375,18 @@ func baseRates(pr catalog.Price) catalog.Price {
 // the ledger is (#1498), and so is a call the vendor answered with another
 // model (servedInstead, #5340) when that one has a price. A price of
 // nothing at all is no API price.
-func apiPricer() func(Record) *catalog.Price {
+func apiPricer(ctx context.Context) func(Record) *catalog.Price {
 	st := settings.Load()
 	wires := st.Wires()
 	prices := map[[5]string]*catalog.Price{}
 	one := func(providerID, model string) *catalog.Price {
+		if ctx.Err() != nil {
+			return nil
+		}
 		v, ok := provider.MakerPrice(model)
 		if !ok || v.Cost(1e6, 1e6, 0, 0) == 0 {
 			ok = false
-			if p, err := provider.Find(providerID); err == nil {
+			if p, err := provider.FindContext(ctx, providerID); err == nil {
 				v, ok = p.ListPrice(model)
 			}
 		}

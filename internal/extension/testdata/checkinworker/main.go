@@ -87,6 +87,7 @@ func main() {
 				var auth struct {
 					Token string `json:"token"`
 					Mode  string `json:"mode"`
+					Until string `json:"until"`
 				}
 				if json.Unmarshal(call.Auth, &auth) != nil || auth.Token != call.Scope.Account ||
 					call.Scope.Provider != "vendor" || call.Scope.Operation == "" {
@@ -113,6 +114,8 @@ func main() {
 					return map[string]any{"outcome": "invented"}, nil
 				case "error":
 					return nil, errors.New("accepted claim failed")
+				case "failed", "rate-limited":
+					return map[string]any{"outcome": auth.Mode, "until": auth.Until, "message": "fixture vendor pause"}, nil
 				case "done", "inactive":
 					return map[string]any{"outcome": auth.Mode}, nil
 				}

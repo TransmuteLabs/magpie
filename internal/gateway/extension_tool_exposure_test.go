@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,30 +17,16 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func exposureGatewayFixture(t *testing.T) (*extensionToolAccountFake, *atomic.Int64) {
+func exposureGatewayFixture(t *testing.T) (*extensionToolAccountFixture, *atomic.Int64) {
 	t.Helper()
 	fake := extensionToolGatewayFixture(t)
-	fake.entries[0].Manifest.Contract.Version = sdk.APIVersion{Major: 1, Minor: 2}
-	fake.entries[0].Manifest.Tools = []sdk.ToolDescriptor{
+	fake.manifest.Contract.Version = sdk.APIVersion{Major: 1, Minor: 2}
+	fake.manifest.Tools = []sdk.ToolDescriptor{
 		{Name: "legacy", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "public", Exposure: "shared", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "owner-memory", Description: "OWNER_ONLY_DESCRIPTION", Exposure: "local-owner", InputSchema: json.RawMessage(`{"type":"object"}`)},
 	}
-	source := t.TempDir()
-	body, err := json.Marshal(fake.entries[0].Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "worker"), []byte("metadata only; must never execute"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := extension.NewCatalog(extension.Default().Namespace()).Install(t.Context(), source,
-		func(context.Context, extension.Installed) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
+	installMetadataTool(t, fake.manifest)
 	oldList, oldRun := pluginTools, runExtensionPluginTool
 	pluginTools = plugin.Tools
 	calls := &atomic.Int64{}
@@ -208,22 +192,8 @@ func TestExtensionToolExposureHTTPManifestTransition(t *testing.T) {
 	if response := post(toolsList); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), name) {
 		t.Fatalf("shared SDK tool was not listed: %d %s", response.Code, response.Body)
 	}
-	fake.entries[0].Manifest.Tools[1].Exposure = "local-owner"
-	source := t.TempDir()
-	body, err := json.Marshal(fake.entries[0].Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "worker"), []byte("updated metadata; never run"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := extension.NewCatalog(extension.Default().Namespace()).Install(t.Context(), source,
-		func(context.Context, extension.Installed) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
+	fake.manifest.Tools[1].Exposure = "local-owner"
+	installMetadataTool(t, fake.manifest)
 	response := post(toolsCall(name, `{"origin":"local","_meta":{"localOwner":true}}`))
 	if calls.Load() != 0 || strings.Contains(response.Body.String(), "ran SDK tool") {
 		t.Fatalf("cached shared name bypassed the new manifest: %d %s", response.Code, response.Body)

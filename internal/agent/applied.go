@@ -603,7 +603,7 @@ func (a *Agent) handWired() bool { return a.Native == nil && a.Spelled != nil &&
 // magpie counts only where magpie set the agent up (handWired).
 func (a *Agent) Wired() bool {
 	if a.Native != nil {
-		return a.Native.Read().Provider == "connected"
+		return a.Native.Read().Wired()
 	}
 	// joined by a provider named magpie in the agent's own config (Hermes's
 	// providers.magpie, VS Code's magpie group), as a model on it is

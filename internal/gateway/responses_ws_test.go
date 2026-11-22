@@ -877,7 +877,7 @@ func TestHeldTurnOwnsItsInput(t *testing.T) {
 // canceled by the client after the reply was whole on its side).
 func TestResponsesSocketChatDoneTurn(t *testing.T) {
 	fresh(t)
-	f := &doneHold{held: make(chan struct{})}
+	f := &doneHold{}
 	up := doneHoldUp(t, f)
 	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Chat: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
 		t.Fatal(err)

@@ -115,8 +115,10 @@ func TestExtensionManualReplacementInvalidatesHeldDiscovery(t *testing.T) {
 	heldFor, keptFor = time.Hour, time.Hour
 	t.Cleanup(func() { heldFor, keptFor = originalHeld, originalKept })
 	initial := extensionAccounts()[0]
-	cacheKey := initial.Account.extension.cacheKey()
-	extensionModelCache.Store(cacheKey, []sdk.Model{{ID: "old-generation-only"}})
+	cacheKey := initial.Account.extension.modelCatalogKey()
+	if _, err := initial.Account.extension.writeModelCatalog(t.Context(), sdk.ModelsResult{Models: []sdk.Model{{ID: "old-generation-only"}}}, extensionhost.VersionedValue{}); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { extensionModelCache.Delete(cacheKey) })
 	snapshot := func() (Provider, Stamp, []string) {
 		t.Helper()

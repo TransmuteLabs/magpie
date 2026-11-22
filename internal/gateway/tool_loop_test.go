@@ -351,6 +351,75 @@ func TestTailOfReadsInPlace(t *testing.T) {
 	}
 }
 
+func TestToolLoopSkipsResultsBeforeTheTail(t *testing.T) {
+	for _, tc := range []struct {
+		from          provider.Protocol
+		plain, marker string
+		alternate     string
+	}{
+		{provider.Responses, `{"type":"message","role":"user","content":[{"type":"input_text","text":%q}]}`, `"function_call_output"`, `"function_call_\u006futput"`},
+		{provider.Chat, `{"role":"user","content":%q}`, `"role":"tool"`, `"role":"\u0074ool"`},
+		{provider.Anthropic, `{"role":"user","content":%q}`, `"tool_result"`, `"tool_resul\u0074"`},
+		{provider.Gemini, `{"role":"user","parts":[{"text":%q}]}`, `"functionResponse"`, `"_FuNcTiOn_RE_sponse"`},
+	} {
+		t.Run(string(tc.from), func(t *testing.T) {
+			fresh(t)
+			s := New()
+			req := httptest.NewRequest(http.MethodPost, "/v1", nil)
+			rec := httptest.NewRecorder()
+			text := fmt.Sprintf(tc.plain, strings.Repeat("continue this discussion. ", 320))
+			turns := make([]string, tailItems)
+			for i := range turns {
+				turns[i] = text
+			}
+			body := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false, turns...))
+			if !mayLoop(tc.from, body) {
+				t.Fatal("fixture is missing historical tool results")
+			}
+			stopped := false
+			if n := allocated(func() { stopped = s.stoppedToolLoop(rec, req, tc.from, body) }); n > uint64(len(body))/8 {
+				t.Errorf("tool loop guard allocated %d bytes for a %d-byte body with completed tool turns", n, len(body))
+			}
+			if stopped {
+				t.Fatal("historical tool calls stopped an ordinary text turn")
+			}
+
+			recent := []byte(toolTurns(tc.from, toolLoopRepeats, codexRead, false))
+			recentList := getIn(recent, conversationKey[tc.from]).Raw
+			prefixList := getIn(body, conversationKey[tc.from])
+			at := prefixList.Index + len(prefixList.Raw) - 1
+			looping := string(body[:at]) + "," + strings.ReplaceAll(recentList[1:len(recentList)-1], tc.marker, tc.alternate) + string(body[at:])
+			if !s.stoppedToolLoop(httptest.NewRecorder(), req, tc.from, []byte(looping)) {
+				t.Fatal("a loop with an alternate spelling of its tool result was missed")
+			}
+		})
+	}
+}
+
+func TestToolLoopReadsDuplicateInputAndRestoredSearches(t *testing.T) {
+	fresh(t)
+	server := New()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	text := `{"type":"message","role":"user","content":"carry on"}`
+	history := strings.Repeat(text+",", tailItems-1) + text
+	body := []byte(toolTurns(provider.Responses, toolLoopRepeats, codexRead, false, history))
+	list := getIn(body, "input")
+	end := list.Index + len(list.Raw) - 1
+
+	loop := getIn([]byte(toolTurns(provider.Responses, toolLoopRepeats, codexRead, false)), "input").Raw
+	duplicate := string(body[:end+1]) + `,"Input":` + loop + string(body[end+1:])
+	if !server.stoppedToolLoop(httptest.NewRecorder(), request, provider.Responses, []byte(duplicate)) {
+		t.Fatal("the last spelling of input was not read")
+	}
+
+	thinking := `{"type":"reasoning","encrypted_content":` + fmt.Sprintf("%q", claudeThinking("find the answer", "sig")) + `}`
+	search := `{"type":"web_search_call","action":{"query":"find the answer"}}`
+	recovered := string(body[:end]) + strings.Repeat(","+thinking+","+search, toolLoopRepeats) + string(body[end:])
+	if !server.stoppedToolLoop(httptest.NewRecorder(), request, provider.Responses, []byte(recovered)) {
+		t.Fatal("the restored web search results were not read")
+	}
+}
+
 // A wait asked again with the same arguments gets the same answer by
 // design (xiaozhi09400: clock__sleep {"duration_ms":60000} while CI ran).
 // Any other call, however it is named, is still a loop.

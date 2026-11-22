@@ -21,8 +21,8 @@ func (controller *extensionController) unchangedSync(prior extensionBindingRecor
 		return false
 	}
 	preview := plan.action.Preview()
-	if preview.Binding == nil || !preview.Binding.Connected || !maps.Equal(prior.Values, preview.Binding.Values) ||
-		len(preview.Files) != 0 {
+	if len(preview.Files) != 0 ||
+		preview.Binding != nil && (!preview.Binding.Connected || !maps.Equal(prior.Values, preview.Binding.Values)) {
 		return false
 	}
 	if !slices.EqualFunc(prior.Applied, plan.action.Snapshots(), func(first, second extension.ActionSettingFile) bool {

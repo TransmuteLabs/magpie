@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -49,6 +50,27 @@ func (host *fixtureExtensionProviderHost) Manifest(id string) (sdk.Manifest, err
 
 func (host *fixtureExtensionProviderHost) Store() *extensionhost.Store { return host.store }
 
+func (host *fixtureExtensionProviderHost) PublishModelCatalog(ctx context.Context, _ extensionhost.Installed, _ string, scope sdk.Scope, key string, expected uint64, value json.RawMessage) (extensionhost.VersionedValue, error) {
+	scope = sdk.Scope{Plugin: scope.Plugin}
+	current, err := host.store.StateGetContext(ctx, scope, key)
+	if err != nil || current.Version == expected && bytes.Equal(current.Value, value) {
+		return current, err
+	}
+	return host.store.StateCASContext(ctx, scope, key, expected, value)
+}
+
+func (host *fixtureExtensionProviderHost) CheckSubscriptionScope(ctx context.Context, _ sdk.Scope, revision string) error {
+	if revision != "" {
+		return errors.New("fixture has no subscription owner")
+	}
+	return ctx.Err()
+}
+
+func (host *fixtureExtensionProviderHost) SaveSubscriptionAccount(_ context.Context, scope sdk.Scope, account extensionhost.Account) (extensionhost.AccountGeneration, error) {
+	saved, err := host.store.SaveAccount(account, scope.Generation)
+	return extensionhost.AccountGeneration{ID: saved.ID, Generation: saved.Generation}, err
+}
+
 func (host *fixtureExtensionProviderHost) Namespace() string { return host.namespace }
 
 func (host *fixtureExtensionProviderHost) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
@@ -79,7 +101,31 @@ func (host *fixtureExtensionProviderHost) Call(ctx context.Context, id, method s
 	if host.call == nil {
 		return nil, errors.New("unexpected extension invocation")
 	}
-	return host.call(ctx, method, scope, params, consume)
+	raw, err := host.call(ctx, method, scope, params, consume)
+	if err != nil || method != sdk.MethodProviderUsage || scope.Account == "" || host.manifest.Contract.Version.Minor < 4 {
+		return raw, err
+	}
+	result, fresh, err := sdk.ValidateUsageResult(host.manifest, raw)
+	if err != nil {
+		return nil, err
+	}
+	request, ok := params.(sdk.UsageRequest)
+	if !ok {
+		return nil, errors.New("wrong usage request")
+	}
+	stamp, err := host.store.UsageStampContext(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	if result.Revision != request.Revision || stamp.Version() != request.Revision {
+		return nil, &sdk.Error{Code: "usage_stale", Message: "Usage revision changed."}
+	}
+	if fresh && stamp.Dirty {
+		if _, err := host.store.AcknowledgeUsageContext(ctx, scope, stamp.Revision); err != nil {
+			return nil, err
+		}
+	}
+	return raw, nil
 }
 
 func fixtureExtensionProvider(t *testing.T, authenticated bool) *fixtureExtensionProviderHost {
@@ -388,7 +434,11 @@ func TestExtensionProviderNativeMetadataAndStableOperationIdentity(t *testing.T)
 func TestExtensionProviderCacheIsolatedBetweenStores(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	first := extensionAccounts()[0].Account.extension
-	extensionModelCache.Store(first.cacheKey(), []sdk.Model{{ID: "m1", Price: &sdk.ModelPrice{Input: 91, Output: 92}, Efforts: []string{"high"}}})
+	if _, err := first.writeModelCatalog(t.Context(), sdk.ModelsResult{Models: []sdk.Model{
+		{ID: "m1", Price: &sdk.ModelPrice{Input: 91, Output: 92}, Efforts: []string{"high"}},
+	}}, extensionhost.VersionedValue{}); err != nil {
+		t.Fatal(err)
+	}
 	if models, err := first.models(); err != nil || len(models) != 1 || models[0].Price == nil ||
 		models[0].Price.Input != 91 || !slices.Equal(models[0].Efforts, []string{"high"}) {
 		t.Fatalf("cached model metadata was lost: %+v %v", models, err)
@@ -459,8 +509,14 @@ func TestExtensionProviderAccountModelUnionAndAllPaused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	extensionModelCache.Store(all[0].Account.extension.cacheKey(), []sdk.Model{{ID: "alice-only", Protocols: []protocolext.Protocol{"chat"}}})
-	extensionModelCache.Store(all[1].Account.extension.cacheKey(), []sdk.Model{{ID: "bob-only", Protocols: []protocolext.Protocol{"messages"}}})
+	for index, model := range []sdk.Model{
+		{ID: "alice-only", Protocols: []protocolext.Protocol{"chat"}},
+		{ID: "bob-only", Protocols: []protocolext.Protocol{"messages"}},
+	} {
+		if _, err := all[index].Account.extension.writeModelCatalog(t.Context(), sdk.ModelsResult{Models: []sdk.Model{model}}, extensionhost.VersionedValue{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	primary := extensionAccounts()[0]
 	if models := primary.Account.models(); len(models) != 2 {
 		t.Fatalf("provider did not expose the in-use accounts' union: %+v", models)
@@ -558,6 +614,7 @@ type discoveryExtensionHost struct {
 	catalogErr  error
 	configError string
 	listCalls   atomic.Int64
+	storeCalls  atomic.Int64
 }
 
 func (host *discoveryExtensionHost) List() ([]extensionhost.Installed, error) {
@@ -577,6 +634,11 @@ func (host *discoveryExtensionHost) ModuleConfig(_ context.Context, id string) (
 		return sdk.ConfigSnapshot{}, errors.New("bad configuration")
 	}
 	return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
+}
+
+func (host *discoveryExtensionHost) Store() *extensionhost.Store {
+	host.storeCalls.Add(1)
+	return host.store
 }
 
 func fixtureExtensionDiscovery(t *testing.T) (*discoveryExtensionHost, string, string) {
@@ -621,7 +683,7 @@ func TestExtensionDiscoveryIsolatesModuleFailures(t *testing.T) {
 				t.Fatalf("unavailable provider exposed logins: %+v", logins)
 			}
 			saved, err := readLoginsFile()
-			if err != nil || len(saved) != 1 || saved[0].Agent != healthy {
+			if err != nil || len(saved) != 0 {
 				t.Fatalf("discovery published bad account policy: %+v, %v", saved, err)
 			}
 		})
@@ -668,10 +730,41 @@ func TestAllLoginsDiscoversExtensionProvidersOnce(t *testing.T) {
 	}
 }
 
+func TestExtensionDiscoveryReadsAccountsOncePerModule(t *testing.T) {
+	fixture := fixtureExtensionProvider(t, true)
+	other := fixture.manifest.Providers[0]
+	other.ID = "other"
+	fixture.manifest.Providers = append(fixture.manifest.Providers, other)
+	if _, err := fixture.store.SaveAccount(extensionhost.Account{
+		Plugin: fixture.manifest.ID, Provider: other.ID, ID: "carol",
+		Name: "Carol's subscription", Auth: json.RawMessage(`{}`),
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	host := &discoveryExtensionHost{fixtureExtensionProviderHost: fixture,
+		entries: []extensionhost.Installed{{Manifest: fixture.manifest, Revision: "fixture"}}}
+	providerExtensionHost = func() extensionProviderHost { return host }
+	providers, err := ExtensionProviders()
+	if err != nil || len(providers) != 3 {
+		t.Fatalf("provider discovery: %+v, %v", providers, err)
+	}
+	index := slices.IndexFunc(providers, func(row Provider) bool { return row.Account.User == "carol" })
+	if index < 0 {
+		t.Fatal("other descriptor lost its account")
+	}
+	selected := providers[index].Account.extension
+	if selected.scope.Provider != other.ID || selected.scope.Generation != 1 || selected.name != "Carol's subscription" {
+		t.Fatalf("unexpected account scope or label: %+v, %q", selected.scope, selected.name)
+	}
+	if count := host.storeCalls.Load(); count != 2 {
+		t.Fatalf("ownership and module accounts made %d store lookups, want 2", count)
+	}
+}
+
 func TestSDKQuotaShowsProviderNameAndKeepsAccountID(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
 	scope := sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
-	_, err := saveExtensionAuth(scope, sdk.AuthResult{ID: "alice", Name: "reader@example.test", Credentials: json.RawMessage(`{}`)})
+	_, err := saveExtensionAuth(t.Context(), host, scope, sdk.AuthResult{ID: "alice", Name: "reader@example.test", Credentials: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

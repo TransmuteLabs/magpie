@@ -322,7 +322,7 @@ func TestExtensionToolExpiryPreflightRevocationDuringRefresh(test *testing.T) {
 }
 
 func TestExtensionToolExpiryPreflightRevocationBeforeDispatch(test *testing.T) {
-	for _, mode := range []string{"manual replacement", "config", "disabled", "hold"} {
+	for _, mode := range []string{"manual replacement", "config", "disabled", "disabled and enabled", "hold"} {
 		test.Run(mode, func(test *testing.T) {
 			fixture := installToolRefreshFixture(test, nil)
 			ctx, args, err := extensionToolContext(test.Context(), refreshToolSpec, refreshToolArgs)
@@ -345,6 +345,14 @@ func TestExtensionToolExpiryPreflightRevocationBeforeDispatch(test *testing.T) {
 				}
 			case "disabled":
 				if err := fixture.manager.SetEnabled(ctx, fixture.scope.Plugin, false); err != nil {
+					test.Fatal(err)
+				}
+			case "disabled and enabled":
+				catalog := extension.NewCatalog(fixture.manager.Namespace())
+				if err := catalog.SetEnabled(ctx, fixture.scope.Plugin, false); err != nil {
+					test.Fatal(err)
+				}
+				if err := catalog.SetEnabled(ctx, fixture.scope.Plugin, true); err != nil {
 					test.Fatal(err)
 				}
 			case "hold":

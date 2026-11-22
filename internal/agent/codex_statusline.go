@@ -60,7 +60,7 @@ func codexStatusDraws(at place) bool {
 func codexStatusField(at place, path string, here bool) Field {
 	flagKey := at.key(codexStatusFlagKey)
 	return Field{
-		Key: "statusline", Label: "status line", Quiet: true,
+		Key: "statusline", Label: "status line", Quiet: true, Switch: true,
 		Get: func() string {
 			if codexStatusRead(path).Owned() {
 				return "on"

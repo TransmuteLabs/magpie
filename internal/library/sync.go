@@ -169,6 +169,10 @@ func Sync() (*Result, error) {
 	if _, err := adoptPluginTools(); err != nil {
 		log.Printf("library: giving plugin tools a server: %v", err)
 	}
+	return syncSavedLibrary()
+}
+
+func syncSavedLibrary() (*Result, error) {
 	res := &Result{Changed: []string{}, Problems: []Problem{}}
 	b := newBackups()
 	var all, gone []*Target
@@ -612,6 +616,10 @@ type View struct {
 	// gateway.HubOnDemandOver): the Tools on demand row says them
 	HubFindsItself  []string `json:"hubFindsItself"`
 	HubOnDemandOver int      `json:"hubOnDemandOver"`
+	// HubOnDemandQuery is the query the address for other apps takes to
+	// give its tools on demand (gateway.HubOnDemandQuery): Connect's
+	// Other apps tab gives that address too
+	HubOnDemandQuery string `json:"hubOnDemandQuery"`
 	// CheckDue is set when the skills from GitHub weren't checked for
 	// updates since magpie started, or not for a while: the page checks
 	// them as it shows them (#1449)
@@ -687,16 +695,12 @@ func readView(problems []Problem, glance bool) (*View, error) {
 		if err := l.save(); err != nil {
 			return nil, err
 		}
-		go func() {
-			if _, err := Sync(); err != nil {
-				log.Printf("library: syncing after plugin tools: %v", err)
-			}
-		}()
+		syncAdoptedServersSoon()
 	}
 	// the agents are found once for the whole read: finding them looks
 	// through every agent's folders, in WSL too (#1624)
 	targets, asleep, gone := selectTargets(false, l.hasTarget)
-	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, HubCode: !settings.Shared().RouterNoCode, HubFindsItself: hubFindsItself(), HubOnDemandOver: gateway.HubOnDemandOver, Partial: glance}
+	v := &View{Agents: []AgentView{}, Servers: []ServerView{}, Skills: []SkillView{}, FoundSkills: []FoundSkill{}, Instructions: l.instructionsView(targets, asleep), Dir: Dir(), Backups: BackupDir(), CopySkills: l.CopySkills, SharedSkills: l.SharedSkills, SharedDir: sharedSkillsDir(), AutoUpdateSkills: l.AutoUpdateSkills, MCPHub: l.MCPHub, SkillRouter: l.SkillRouter, HubPath: gateway.HubMCPPath, HubNote: settings.Shared().RouterNote, HubName: gateway.HostName(), HubAllTools: settings.Shared().RouterAllTools, HubCode: !settings.Shared().RouterNoCode, HubFindsItself: hubFindsItself(), HubOnDemandOver: gateway.HubOnDemandOver, HubOnDemandQuery: gateway.HubOnDemandQuery, Partial: glance}
 	// each agent's skills folder as it really is, links followed: the
 	// agents reading the same one get copies together (copyWhy)
 	skillsAt := map[*Target]string{}

@@ -82,8 +82,7 @@ type responsesEnumTidy struct {
 }
 
 func (t *responsesEnumTidy) write(b []byte) []byte {
-	t.buf = append(t.buf, b...)
-	out, rest := tidyEvents(t.buf, t.event)
+	out, rest := tidyEvents(t.buf, b, t.event)
 	t.buf = rest
 	return out
 }

@@ -171,6 +171,15 @@ var Sync = (*os.File).Sync
 // A write that is served takes the stale temps earlier writes left beside
 // p when they died (RemoveStaleTemps) along with it.
 func WriteFile(p string, b []byte, perm fs.FileMode) error {
+	return WriteFileChecked(p, b, perm, nil)
+}
+
+func WriteFileChecked(p string, b []byte, perm fs.FileMode, check func() error) error {
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(p), "."+filepath.Base(p)+".*")
 	if err != nil {
 		return err
@@ -186,7 +195,7 @@ func WriteFile(p string, b []byte, perm fs.FileMode) error {
 		err = cerr
 	}
 	if err == nil {
-		err = Rename(tmp.Name(), p)
+		err = RenameChecked(tmp.Name(), p, check)
 	}
 	if err != nil {
 		os.Remove(tmp.Name())

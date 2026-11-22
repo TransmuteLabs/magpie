@@ -5,10 +5,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // zeroedAuth is plugin-auth.json as #1505's Windows crash left it: its full
@@ -123,33 +127,41 @@ func TestZeroedPluginAuthWithoutBackupNotWrittenOver(t *testing.T) {
 	}
 }
 
-// The host flushes plugin-auth.json before renaming it over the old: a
+// The store flushes plugin-auth.json before renaming it over the old: a
 // flush that fails leaves the sign-ins there as they were.
 func TestPluginAuthSyncedBeforeRename(t *testing.T) {
 	sandbox(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	flag := filepath.Join(t.TempDir(), "fail")
-	t.Setenv("FSYNC_FAIL", flag)
-	abs, _ := filepath.Abs("testdata/nofsync/index.js")
-	if _, err := Add(ctx, abs); err != nil {
-		t.Fatal(err)
+	var fail atomic.Bool
+	syncFile := steady.Sync
+	prefix := filepath.Join(filepath.Dir(AuthPath()), "."+filepath.Base(AuthPath())+".")
+	steady.Sync = func(file *os.File) error {
+		if strings.HasPrefix(file.Name(), prefix) && fail.Load() {
+			return syscall.EIO
+		}
+		return syncFile(file)
 	}
-	if _, err := Import(ctx, "syncco", map[string]any{"type": "api", "key": "k-old"}); err != nil {
+	t.Cleanup(func() {
+		Settle()
+		steady.Sync = syncFile
+	})
+	addRenew(t, ctx)
+	if _, err := Import(ctx, "renewco", map[string]any{"type": "api", "key": "k-old"}); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(AuthPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(flag, nil, 0o600)
-	if _, err := Import(ctx, "syncco", map[string]any{"type": "api", "key": "k-new"}); err == nil {
+	fail.Store(true)
+	if _, err := Import(ctx, "renewco", map[string]any{"type": "api", "key": "k-new"}); err == nil || !strings.Contains(err.Error(), syscall.EIO.Error()) {
 		t.Fatal("a sign-in saved without its flush said done")
 	}
 	if after, _ := os.ReadFile(AuthPath()); !bytes.Equal(after, before) {
 		t.Fatalf("a failed flush changed plugin-auth.json:\n%s\nwas\n%s", after, before)
 	}
-	if left, _ := filepath.Glob(AuthPath() + ".tmp-*"); len(left) != 0 {
+	if left, _ := filepath.Glob(prefix + "*"); len(left) != 0 {
 		t.Fatalf("a failed write left %v", left)
 	}
 }

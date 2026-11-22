@@ -144,11 +144,23 @@ const errRemoteUnreachable = "couldn't reach the remote magpie"
 // keys behind it since (cards_kept.go): a magpie serving only other
 // magpies has nobody on its page (#1313).
 func CachedCards(now time.Time) []SubscriptionQuota {
+	return CachedCardsContext(context.Background(), now)
+}
+
+// CachedCardsContext publishes cached quota evidence for the caller's context.
+func CachedCardsContext(ctx context.Context, now time.Time) []SubscriptionQuota {
+	if ctx.Err() != nil {
+		return nil
+	}
 	c := &subscriptionUsageCache
 	c.Lock()
 	data := c.data
 	c.Unlock()
-	subs := withDailyCredits(visibleQuotas(withAccountReadings(data)), now)
+	subs := visibleQuotasContext(ctx, withAccountReadings(ctx, data))
+	if ctx.Err() != nil {
+		return nil
+	}
+	subs = withDailyCredits(subs, now)
 	p := &planQuotaCache
 	p.Lock()
 	plans := slices.Clone(p.data)
@@ -157,7 +169,10 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 	b.Lock()
 	balances := slices.Clone(b.data)
 	b.Unlock()
-	ps := keyCardProviders()
+	ps := keyCardProvidersContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 	if plans == nil || balances == nil {
 		keptPlans, keptBalances := keptKeyCards(ps)
 		if plans == nil {
@@ -169,7 +184,7 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 	}
 	plans, balances = withKeyReadings(plans, ps, "plan"), withKeyReadings(balances, ps, "balance")
 	plans, subs = seatCards(plans, subs)
-	subs = WithImageLane(withAccountNames(subs), now)
+	subs = WithImageLane(withAccountNamesContext(ctx, subs), now)
 	out := []SubscriptionQuota{}
 	for _, g := range []struct {
 		kind string
@@ -183,7 +198,11 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 			}
 		}
 	}
-	return oneCardPerAccount(append(out, passedOnCards()...))
+	out = append(out, passedOnCardsContext(ctx)...)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return ValidateSubscriptionQuotas(ctx, oneCardPerAccount(out))
 }
 
 // passedOnCards are the cards of each Remote magpie this one uses, as
@@ -194,8 +213,12 @@ func CachedCards(now time.Time) []SubscriptionQuota {
 // on nothing; the card standing for the remote itself and its keys'
 // limits (remoteKeyCards) are this magpie's own business with it.
 func passedOnCards() []SubscriptionQuota {
+	return passedOnCardsContext(context.Background())
+}
+
+func passedOnCardsContext(ctx context.Context) []SubscriptionQuota {
 	var out []SubscriptionQuota
-	for _, p := range remoteMagpies() {
+	for _, p := range remoteMagpiesContext(ctx) {
 		c := &remoteCardCache
 		c.Lock()
 		r := c.m[remoteCardsID(p)]
@@ -276,8 +299,12 @@ func ForgetKeptCardsForTest() {
 
 // remoteMagpies are the remote magpies this magpie uses.
 func remoteMagpies() []Provider {
+	return remoteMagpiesContext(context.Background())
+}
+
+func remoteMagpiesContext(ctx context.Context) []Provider {
 	var out []Provider
-	for _, p := range All() {
+	for _, p := range sharedAllContext(ctx) {
 		if p.IsRemoteMagpie() && !p.Hidden && !p.Off && !p.SelfLeftOut() && p.Key != "" && p.Anthropic != "" {
 			out = append(out, p)
 		}
@@ -287,7 +314,10 @@ func remoteMagpies() []Provider {
 
 // RemoteCards is every remote magpie's cards, named for this computer.
 func RemoteCards(ctx context.Context) []SubscriptionQuota {
-	ps := remoteMagpies()
+	ps := remoteMagpiesContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 	got := make([][]SubscriptionQuota, len(ps))
 	var wg sync.WaitGroup
 	for i, p := range ps {
@@ -316,7 +346,9 @@ func remoteCards(ctx context.Context, p Provider, fresh bool) []SubscriptionQuot
 	if !ok || fresh || time.Since(r.at) >= remoteCardsFor {
 		asked := time.Now()
 		cards, err := askRemote(ctx, p, http.MethodGet, RemoteCardsPath, remoteWait)
-		r = keepRemoteCards(id, asked, cards, err)
+		if !remoteReadCanceled(ctx, err) {
+			r = keepRemoteCards(id, asked, cards, err)
+		}
 	}
 	name := remoteName(p)
 	if len(r.cards) == 0 || r.held {
@@ -401,8 +433,12 @@ func remoteName(p Provider) string {
 // remoteOf is the remote magpie a card's provider id names, and the id of
 // the card there ("" for the card that stands for the remote itself).
 func remoteOf(id string) (Provider, string, bool) {
+	return remoteOfContext(context.Background(), id)
+}
+
+func remoteOfContext(ctx context.Context, id string) (Provider, string, bool) {
 	rid, card, _ := strings.Cut(id, "/")
-	for _, p := range remoteMagpies() {
+	for _, p := range remoteMagpiesContext(ctx) {
 		if p.ID == rid {
 			return p, card, true
 		}
@@ -413,7 +449,12 @@ func remoteOf(id string) (Provider, string, bool) {
 // IsRemoteCard is whether id is a card this magpie has from a remote
 // magpie, or the card standing for the remote itself.
 func IsRemoteCard(id string) bool {
-	_, _, ok := remoteOf(id)
+	return IsRemoteCardContext(context.Background(), id)
+}
+
+// IsRemoteCardContext reads whether another Magpie supplies the card.
+func IsRemoteCardContext(ctx context.Context, id string) bool {
+	_, _, ok := remoteOfContext(ctx, id)
 	return ok
 }
 
@@ -437,10 +478,17 @@ func refreshRemote(ctx context.Context, p Provider, card, user string) {
 		path += "?" + q.Encode()
 	}
 	asked := time.Now()
-	if _, err := askRemote(ctx, p, http.MethodPost, path, remoteRefreshWait); err != nil {
+	if _, err := askRemote(ctx, p, http.MethodPost, path, remoteRefreshWait); err != nil && !remoteReadCanceled(ctx, err) {
 		keepRemoteCards(remoteCardsID(p), asked, nil, err)
 	}
-	remoteCards(ctx, p, true)
+	if ctx.Err() == nil {
+		remoteCards(ctx, p, true)
+	}
+}
+
+func remoteReadCanceled(ctx context.Context, err error) bool {
+	cause := ctx.Err()
+	return cause != nil && errors.Is(err, cause)
 }
 
 // keepRemoteCards keeps what a read of a remote's cards asked at asked
@@ -486,7 +534,10 @@ func keepRemoteCardsOf(id string, gen int, asked time.Time, cards []Subscription
 // ago, as its own GET /v1/magpie/quotas/history has it (read from its
 // disk, no vendor asked), the providers named as RemoteCards names them.
 func RemoteQuotaHistories(ctx context.Context, days string) []QuotaHistory {
-	ps := remoteMagpies()
+	ps := remoteMagpiesContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 	got := make([][]QuotaHistory, len(ps))
 	var wg sync.WaitGroup
 	for i, p := range ps {

@@ -31,7 +31,9 @@ type gathered struct {
 	buf    bytes.Buffer
 	// capped: the max_output_tokens the client asked, for a reply that
 	// stopped at it with no end said (endsAtProbeCap)
-	capped int
+	capped  int
+	compact bool
+	kept    []json.RawMessage
 }
 
 func (g *gathered) Header() http.Header         { return g.h }
@@ -48,6 +50,9 @@ func (g *gathered) Write(b []byte) (int, error) { return g.buf.Write(b) }
 // the stream began it, incomplete at max_output_tokens.
 func (g *gathered) finish(w http.ResponseWriter, p provider.Provider, sse bool, cut string, failed string) (int, string) {
 	if !sse {
+		if g.compact && g.status == http.StatusOK {
+			return g.compacted(w, p, g.buf.Bytes(), nil)
+		}
 		for k, vs := range g.h {
 			w.Header()[k] = vs
 		}
@@ -109,12 +114,27 @@ func (g *gathered) finish(w http.ResponseWriter, p provider.Provider, sse bool, 
 		}
 		return writeError(w, provider.Responses, 502, msg), msg
 	}
+	if g.compact {
+		return g.compacted(w, p, resp, items)
+	}
 	if len(items) == 0 && text.Len() > 0 {
 		msg, _ := json.Marshal(map[string]any{"type": "message", "id": "msg_" + newID(), "role": "assistant", "status": "completed",
 			"content": []any{map[string]any{"type": "output_text", "text": text.String(), "annotations": []any{}}}})
 		items[0] = msg
 	}
-	resp = withStreamedOutput(resp, items)
+	return g.writeJSON(w, withStreamedOutput(resp, items)), ""
+}
+
+func (g *gathered) compacted(w http.ResponseWriter, p provider.Provider, response json.RawMessage, streamed map[int]json.RawMessage) (int, string) {
+	data, ok := compactionReply(response, g.kept, streamed)
+	if !ok {
+		msg := p.Name + ": the compaction_trigger was answered without a compaction item"
+		return writeError(w, provider.Responses, http.StatusBadGateway, msg), msg
+	}
+	return g.writeJSON(w, data), ""
+}
+
+func (g *gathered) writeJSON(w http.ResponseWriter, body []byte) int {
 	for _, k := range []string{"Request-Id", "X-Request-Id"} {
 		if v := g.h.Get(k); v != "" {
 			w.Header().Set(k, v)
@@ -122,8 +142,8 @@ func (g *gathered) finish(w http.ResponseWriter, p provider.Provider, sse bool, 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(resp)
-	return http.StatusOK, ""
+	w.Write(body)
+	return http.StatusOK
 }
 
 // incompleteAtLength is a response as its stream began it, made the

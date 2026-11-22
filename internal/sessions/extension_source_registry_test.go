@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,42 @@ import (
 	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestUnbindHistoryOwnerHonorsCallerDeadline(t *testing.T) {
+	for _, storage := range []bool{false, true} {
+		name, path := "jsonl", sourceBindingsPath
+		if storage {
+			name, path = "storage", storageConsentsPath
+		}
+		t.Run(name, func(t *testing.T) {
+			setup(t)
+			identity := strings.Repeat("a", 64)
+			body, err := json.Marshal([]SessionSourceBinding{{Plugin: "fixture", Source: "history", Agent: "claude", Identity: identity}})
+			if storage {
+				body, err = json.Marshal([]StorageSourceConsent{{Plugin: "fixture", Source: "history", Agent: "claude", RootSlot: "main", RootRef: identity, Identity: identity}})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeHistoryAuthority(t, path(), body)
+			unlock, held := filelock.Lock(path()+".lock", 0)
+			if !held {
+				t.Fatal("could not hold the history owner lock")
+			}
+			defer unlock()
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			err = UnbindSessionSourceNative(ctx, "claude", identity)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("blocked unbind returned %v, want caller deadline", err)
+			}
+			after, err := os.ReadFile(path())
+			if err != nil || !bytes.Equal(after, body) {
+				t.Fatal("canceled unbind changed the history owner", err)
+			}
+		})
+	}
+}
 
 func TestSourceBindingInspectionRejectsMalformedAuthority(t *testing.T) {
 	setup(t)

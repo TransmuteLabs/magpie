@@ -15,16 +15,19 @@ const dirtyStart = app.indexOf("let providerDraftRef = ");
 const dirtyEnd = app.indexOf("// backdropClick", dirtyStart);
 const editorStart = app.indexOf("function renderEditor(");
 const editorEnd = app.indexOf("function drawEditor(", editorStart);
-const reopenStart = app.indexOf("row.onclick = async () => {\n      if (providerDirty()");
+const reopenStart = app.indexOf("row.onclick = async () => {\n      if (!await leaveDraft())");
 const reopenEnd = app.indexOf("}; // the preset sheet", reopenStart);
+const reopenHelpersStart = app.indexOf("function reEdit(");
+const reopenHelpersEnd = app.indexOf("async function cancelEdit(", reopenHelpersStart);
 assert.ok(start >= 0 && end > start && actionStart >= 0 && actionEnd > actionStart &&
   dirtyStart >= 0 && dirtyEnd > dirtyStart && editorStart >= 0 && editorEnd > editorStart &&
-  reopenStart >= 0 && reopenEnd > reopenStart);
+  reopenStart >= 0 && reopenEnd > reopenStart && reopenHelpersStart >= 0 && reopenHelpersEnd > reopenHelpersStart);
 
 function element(tag, className, textContent = "") {
   const node = {
     tag, className, textContent, children: [], dataset: {},
     classList: { toggle() {} },
+    querySelector() { return null; },
     append(...children) {
       for (const child of children) {
         child.parent = this;
@@ -78,7 +81,7 @@ function harness(options = {}) {
     headersOf: value => value,
     modelPrefsOfDraft: () => undefined,
     accountModelsDraft: () => null,
-    dropSigningIn() {}, renderProviders() {}, renderAgents() {}, saidMoved() {},
+    dropSigningIn() {}, dropSDKSignIn() {}, renderProviders() {}, renderAgents() {}, saidMoved() {},
     doneSaving() {},
     structuredClone,
   });
@@ -93,7 +96,7 @@ function harness(options = {}) {
   context.loadProviderPreview = async () => ({ providerPreview: () => previewOwner });
   vm.runInContext(
     app.slice(start, end).replaceAll('import("./provideroptions.js")', "loadProviderOptions()") +
-      app.slice(actionStart, actionEnd) + app.slice(dirtyStart, dirtyEnd) +
+      app.slice(actionStart, actionEnd) + app.slice(dirtyStart, dirtyEnd) + app.slice(reopenHelpersStart, reopenHelpersEnd) +
       app.slice(editorStart, editorEnd).replace('import("./providerpreview.js")', "loadProviderPreview()"), context,
   );
   context.drawEditor = current => {
@@ -180,10 +183,10 @@ test("opening the ordinary editor remains clean after its lazy option renderer c
 });
 
 test("external package or config redraw cannot transfer a paid acknowledgement to a new owner", async () => {
-  for (const changed of [{ packageRevision: "revision-b" }, { configVersion: "1" }, { provider: "other" }]) {
-    const view = harness(), original = provider();
+  for (const changed of [{ packageRevision: "revision-b" }, { configVersion: "1" }, { provider: "other" }, { ownerRevision: "owner-b" }]) {
+    const view = harness(), original = provider({ ownerRevision: "owner-a" });
     await control(await view.draw(original)).select("on");
-    const latest = provider(changed);
+    const latest = provider({ ownerRevision: "owner-a", ...changed });
     await view.draw(latest);
     await assert.rejects(view.save(latest), /changed/i);
     assert.equal(view.calls.length, 0, "stale acknowledged edit must not reach configuration CAS");
@@ -195,6 +198,7 @@ test("confirmation declared only in another locale is asked and reaches the save
   let accepted = false;
   const view = harness({ confirm: () => accepted });
   const current = provider({
+    ownerRevision: "owner-a",
     options: [{ key: "paid", label: "Paid", confirms: { de: "Costs credits" }, on: false }],
   });
   const box = await view.draw(current);
@@ -207,6 +211,7 @@ test("confirmation declared only in another locale is asked and reaches the save
   await view.save(current);
   assert.deepEqual(view.calls[0].input.confirmed, ["paid"]);
   assert.equal(view.calls[0].input.values.paid, true);
+  assert.equal(view.calls[0].input.ownerRevision, "owner-a");
 });
 
 test("a declared blank translation map still obtains an explicit acknowledgement", async () => {

@@ -40,32 +40,32 @@ type StorageSourceRoot struct {
 }
 
 type storageSourceRecord struct {
-	entry      extension.Installed
-	descriptor sdk.StorageSourceDescriptor
-	store      sdk.SessionSourceStore
-	root       string
-	rootRef    string
-	identity   string
-	family     string
-	locator    sdk.StorageSessionLocator
-	epoch      uint64
+	entry         extension.Installed
+	descriptor    sdk.StorageSourceDescriptor
+	store         sdk.SessionSourceStore
+	root          string
+	rootRef       string
+	identity      string
+	configVersion string
+	family        string
+	locator       sdk.StorageSessionLocator
+	epoch         uint64
 }
 
+const storageConsentsFile = "storage-source-consents.json"
+
+var storageConsentsLock = filelock.Mutex{Path: func() string { return storageConsentsPath() + ".lock" }}
+
 func storageConsentsPath() string {
-	return filepath.Join(appdir.Config(), "storage-source-consents.json")
+	return filepath.Join(appdir.Config(), storageConsentsFile)
 }
 
 func readStorageConsents() ([]StorageSourceConsent, error) {
-	name := storageConsentsPath()
-	root, err := os.OpenRoot(filepath.Dir(name))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	_, body, err := readSessionInput(context.Background(), root, filepath.Base(name), 64<<10)
+	return withHistoryClaimsRoot(context.Background(), readStorageConsentsAt)
+}
+
+func readStorageConsentsAt(ctx context.Context, root *os.Root) ([]StorageSourceConsent, error) {
+	_, body, err := readSessionInput(ctx, root, storageConsentsFile, 64<<10)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -95,10 +95,11 @@ func readStorageConsents() ([]StorageSourceConsent, error) {
 }
 
 func selectedStorageRoot(ctx context.Context, manager *extension.Manager, plugin, source, slot string) (storageSourceRecord, error) {
-	entry, identity, err := sessionMigrationSelection(ctx, manager, plugin)
+	selected, err := sessionMigrationSelection(ctx, manager, plugin)
 	if err != nil {
 		return storageSourceRecord{}, err
 	}
+	entry, identity := selected.entry, selected.identity
 	descriptor, found := entry.Manifest.ResolveStorageSource(source)
 	if !found {
 		return storageSourceRecord{}, errors.New("unknown storage source")
@@ -134,7 +135,8 @@ func selectedStorageRoot(ctx context.Context, manager *extension.Manager, plugin
 		return storageSourceRecord{}, err
 	}
 	return storageSourceRecord{entry: entry, descriptor: descriptor, store: store,
-		root: roots[0], rootRef: hex.EncodeToString(hash[:]), identity: identity, epoch: sourceEpoch.Load()}, nil
+		root: roots[0], rootRef: hex.EncodeToString(hash[:]), identity: identity,
+		configVersion: selected.configVersion, epoch: sourceEpoch.Load()}, nil
 }
 
 func BindStorageSource(ctx context.Context, plugin, source, slot, rootRef, expectedRevision string) error {
@@ -150,12 +152,14 @@ func BindStorageSource(ctx context.Context, plugin, source, slot, rootRef, expec
 	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		return err
 	}
-	unlock, held := filelock.Lock(name+".lock", filelock.Wait)
-	if !held {
+	if !storageConsentsLock.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("storage source consent is busy")
 	}
-	defer unlock()
-	consents, err := readStorageConsents()
+	defer storageConsentsLock.Unlock()
+	consents, err := withHistoryClaimsRoot(ctx, readStorageConsentsAt)
 	if err != nil {
 		return err
 	}
@@ -197,12 +201,14 @@ func bindSingleStorageSource(ctx context.Context, manifest sdk.Manifest, source,
 
 func UnbindStorageSource(ctx context.Context, agent, expectedIdentity string) error {
 	name := storageConsentsPath()
-	unlock, held := filelock.Lock(name+".lock", filelock.Wait)
-	if !held {
+	if !storageConsentsLock.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("storage source consent is busy")
 	}
-	defer unlock()
-	consents, err := readStorageConsents()
+	defer storageConsentsLock.Unlock()
+	consents, err := withHistoryClaimsRoot(ctx, readStorageConsentsAt)
 	if err != nil {
 		return err
 	}
@@ -285,11 +291,14 @@ func (record *storageSourceRecord) check(ctx context.Context) error {
 		return err
 	}
 	current, err := selectedStorageRoot(ctx, sourceManager(), record.entry.Manifest.ID, record.descriptor.ID, record.store.Slot)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if err != nil || current.rootRef != record.rootRef || current.identity != record.identity ||
-		current.entry.Revision != record.entry.Revision {
+		!sameSessionModule(record.entry, current.entry) {
 		return extension.ErrActionChanged
 	}
-	consents, err := readStorageConsents()
+	consents, err := withHistoryClaimsRoot(ctx, readStorageConsentsAt)
 	if err != nil {
 		return err
 	}
@@ -299,7 +308,7 @@ func (record *storageSourceRecord) check(ctx context.Context) error {
 	return nil
 }
 
-func prepareStorageSources(ctx context.Context, manager *extension.Manager, entries []extension.Installed, view *sessionSourceView, counts map[string]int, consents []StorageSourceConsent) []error {
+func prepareStorageSources(ctx context.Context, manager *extension.Manager, entries []extension.Installed, view *sessionSourceView, owners map[string]sourceOwner, consents []StorageSourceConsent) []error {
 	previous := sourceView.Load()
 	previousRecords := map[sdk.StorageSessionLocator]*sessionSourceRecord{}
 	if previous != nil && previous.epoch == view.epoch {
@@ -315,7 +324,7 @@ func prepareStorageSources(ctx context.Context, manager *extension.Manager, entr
 			if !nativeSourceOwner(source.Agent) {
 				view.agents[source.Agent] = true
 			}
-			if entry.Disabled || !Reads(source.Agent) || counts[source.Agent] != 1 {
+			if entry.Disabled || !Reads(source.Agent) || owners[source.Agent].count != 1 {
 				continue
 			}
 			for _, store := range source.Roots {
@@ -325,6 +334,10 @@ func prepareStorageSources(ctx context.Context, manager *extension.Manager, entr
 				}
 				if err != nil {
 					problems = append(problems, err)
+					continue
+				}
+				if !sameSessionModule(entry, record.entry) {
+					problems = append(problems, extension.ErrActionChanged)
 					continue
 				}
 				if !storageConsented(consents, record) {
@@ -361,7 +374,7 @@ func sameStorageSourceRecord(previous, current *sessionSourceRecord) bool {
 	}
 	before, after := previous.storage, current.storage
 	return before.rootRef == after.rootRef && before.identity == after.identity && before.family == after.family &&
-		before.epoch == after.epoch && before.entry.Revision == after.entry.Revision &&
+		before.epoch == after.epoch && sameSessionModule(before.entry, after.entry) &&
 		before.locator == after.locator && previous.usageKnown == current.usageKnown &&
 		previous.parentID == current.parentID && previous.rootID == current.rootID &&
 		reflect.DeepEqual(previous.summary, current.summary)
@@ -370,11 +383,7 @@ func sameStorageSourceRecord(previous, current *sessionSourceRecord) bool {
 func (record storageSourceRecord) enumerate(ctx context.Context, manager *extension.Manager) ([]*sessionSourceRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	config, err := manager.ModuleConfig(ctx, record.entry.Manifest.ID)
-	if err != nil {
-		return nil, err
-	}
-	lease, err := manager.AcquireRevision(ctx, record.entry.Manifest.ID, record.entry.Revision, config.Version)
+	lease, err := manager.AcquireOutsideCalls(ctx, record.entry, record.configVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +434,8 @@ func (record storageSourceRecord) enumerate(ctx context.Context, manager *extens
 				summary.Mod = summary.Last.UnixNano()
 			}
 			records = append(records, &sessionSourceRecord{storage: &selected, summary: summary,
-				grant: sourceGrant{plugin: record.entry.Manifest.ID, identity: record.identity, reference: record.rootRef,
+				grant: sourceGrant{plugin: record.entry.Manifest.ID, revision: record.entry.Revision, identity: record.identity,
+					enableGeneration: record.entry.EnableGeneration, reference: record.rootRef,
 					descriptor: sdk.SessionSourceDescriptor{ID: record.descriptor.ID, Agent: record.descriptor.Agent,
 						Transcript: record.descriptor.Transcript, Resume: record.descriptor.Resume,
 						AgentResume: record.descriptor.AgentResume.Clone()}},
@@ -482,11 +492,7 @@ func storageSourceReadChecked(ctx context.Context, record *sessionSourceRecord, 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	manager := sourceManager()
-	config, err := manager.ModuleConfig(ctx, selected.entry.Manifest.ID)
-	if err != nil {
-		return sdk.StorageResult{}, err
-	}
-	lease, err := manager.AcquireRevision(ctx, selected.entry.Manifest.ID, selected.entry.Revision, config.Version)
+	lease, err := manager.AcquireOutsideCalls(ctx, selected.entry, selected.configVersion)
 	if err != nil {
 		return sdk.StorageResult{}, err
 	}

@@ -108,10 +108,9 @@ func keepAliveOwnerFixture(t *testing.T, hold func(http.ResponseWriter, *http.Re
 	}
 	fixture.scope = sdk.Scope{Plugin: manifest.ID, Provider: "vendor", Account: "selected", Generation: 1}
 	auth, _ := json.Marshal(map[string]string{"url": fixture.endpoint, "token": "synthetic-original"})
-	if _, err := fixture.manager.Store().SaveAccount(extensionhost.Account{
-		Plugin: manifest.ID, Provider: "vendor", ID: fixture.scope.Account, Auth: auth,
-		ExpiresAt: time.Now().Add(30 * time.Second).UnixMilli(),
-	}, 0); err != nil {
+	if _, err := saveExtensionAuth(t.Context(), fixture.manager, sdk.Scope{Plugin: manifest.ID, Provider: "vendor"}, sdk.AuthResult{
+		ID: fixture.scope.Account, Credentials: auth, ExpiresAt: time.Now().Add(30 * time.Second).UnixMilli(),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if providers, err := ExtensionProviders(); err != nil || len(providers) != 1 {
@@ -150,7 +149,7 @@ func TestExtensionKeepAliveUsesTransactionalRefresh(t *testing.T) {
 }
 
 func TestExtensionKeepAliveRejectsChangedSelectionBeforeDispatch(t *testing.T) {
-	for _, change := range []string{"account", "config", "disabled", "package", "account off", "provider off", "cancel", "network hold"} {
+	for _, change := range []string{"account", "config", "disabled", "re-enabled", "package", "account off", "provider off", "unreadable discovery", "cancel", "network hold"} {
 		t.Run(change, func(t *testing.T) {
 			fixture := keepAliveOwnerFixture(t, nil)
 			selected, err := extensionSignInsKept(t.Context(), fixture.manager)
@@ -174,6 +173,13 @@ func TestExtensionKeepAliveRejectsChangedSelectionBeforeDispatch(t *testing.T) {
 			case "disabled":
 				if err := fixture.manager.SetEnabled(ctx, fixture.scope.Plugin, false); err != nil {
 					t.Fatal(err)
+				}
+			case "re-enabled":
+				foreign := extensionhost.NewCatalog(fixture.manager.Namespace())
+				for _, enabled := range []bool{false, true} {
+					if err := foreign.SetEnabled(ctx, fixture.scope.Plugin, enabled); err != nil {
+						t.Fatal(err)
+					}
 				}
 			case "package":
 				path := filepath.Join(fixture.directory, sdk.ManifestFile)
@@ -202,6 +208,8 @@ func TestExtensionKeepAliveRejectsChangedSelectionBeforeDispatch(t *testing.T) {
 				if err := os.WriteFile(Path(), raw, 0600); err != nil {
 					t.Fatal(err)
 				}
+			case "unreadable discovery":
+				damageExtensionDiscoverySettings(t)
 			case "cancel":
 				canceled, cancel := context.WithCancel(ctx)
 				cancel()
@@ -213,6 +221,23 @@ func TestExtensionKeepAliveRejectsChangedSelectionBeforeDispatch(t *testing.T) {
 				t.Fatalf("revoked %s selection dispatched: calls=%d err=%v", change, fixture.calls.Load(), err)
 			}
 		})
+	}
+}
+
+func damageExtensionDiscoverySettings(t *testing.T) {
+	t.Helper()
+	path := settings.Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".bak", []byte(`{"noAccountDiscovery":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"noAccountDiscovery":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := settings.LoadChecked(); err != nil || settings.AccountDiscoveryOffIn(recovered) {
+		t.Fatalf("fixture did not preserve a usable discovery-enabled backup: %v", err)
 	}
 }
 

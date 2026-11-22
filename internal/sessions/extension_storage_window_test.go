@@ -199,7 +199,7 @@ func TestWindowStorageExternalConsentABAInvalidatesView(t *testing.T) {
 	}
 }
 func TestWindowStorageChangesInvalidateInspectedAuthority(t *testing.T) {
-	for _, change := range []string{"package", "config", "root", "off", "gateway", "consent-file", "settings"} {
+	for _, change := range []string{"package", "config", "root", "off", "foreign-cycle", "gateway", "consent-file", "settings"} {
 		t.Run(change, func(t *testing.T) {
 			manager, owner := windowStorageFixture(t)
 			inspection, err := InspectWindowStorage(t.Context(), owner, "history")
@@ -226,6 +226,8 @@ func TestWindowStorageChangesInvalidateInspectedAuthority(t *testing.T) {
 				if err := manager.SetEnabled(t.Context(), owner.Module, false); err != nil {
 					t.Fatal(err)
 				}
+			case "foreign-cycle":
+				cycleSourceModule(t, manager, owner.Module, "")
 			case "gateway":
 				previous := OwnOff.Load()
 				denied := func() bool { return true }
@@ -246,6 +248,17 @@ func TestWindowStorageChangesInvalidateInspectedAuthority(t *testing.T) {
 			result := RequestWindowStorage(t.Context(), owner, "history", inspection.ViewRef, inspection.Roots[0].RootRef)
 			if result.State == "ready" || result.State == "released" {
 				t.Fatal("changed tuple accepted old inspection", change, result)
+			}
+			if change == "foreign-cycle" {
+				fresh := result.Inspection
+				if result.State != "changed" || fresh == nil || fresh.ViewRef == inspection.ViewRef ||
+					fresh.Roots[0].RootRef != inspection.Roots[0].RootRef || fresh.Roots[0].Consented {
+					t.Fatal("enablement cycle did not replace only the inspected authority", result)
+				}
+				retry := RequestWindowStorage(t.Context(), owner, "history", fresh.ViewRef, fresh.Roots[0].RootRef)
+				if retry.State != "ready" {
+					t.Fatal("new inspection could not grant the existing root", retry)
+				}
 			}
 		})
 	}

@@ -23,7 +23,9 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/netproxy"
+	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -45,6 +47,9 @@ type Manager struct {
 	root              string
 	catalog           *Catalog
 	store             *Store
+	configMemos       [8]atomic.Pointer[moduleConfigMemo]
+	protocolMu        sync.Mutex
+	protocols         *installedProtocols
 	workers           map[string]*managedWorker
 	closed            bool
 	closeDone         chan struct{}
@@ -80,8 +85,10 @@ func NewManager(root string) *Manager {
 			root = absolute
 		}
 	}
+	store := NewStore(root)
+	store.accountSyncEnabled = true
 	return &Manager{
-		root: root, catalog: NewCatalog(root), store: NewStore(root),
+		root: root, catalog: NewCatalog(root), store: store,
 		workers: make(map[string]*managedWorker),
 	}
 }
@@ -130,7 +137,7 @@ func Default() *Manager {
 	if defaults.ended {
 		defaults.Unlock()
 		selected := NewManager(root)
-		selected.closed = true
+		_ = selected.Close(context.Background())
 		return selected
 	}
 	var old *Manager
@@ -207,16 +214,20 @@ func (m *Manager) ListContext(ctx context.Context) ([]Installed, error) {
 }
 
 func (m *Manager) Manifest(id string) (sdk.Manifest, error) {
-	entries, err := m.List()
-	if err != nil {
-		return sdk.Manifest{}, err
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID == id && !entry.Disabled {
-			return entry.Manifest, nil
+	return m.manifestContext(context.Background(), id)
+}
+
+func (m *Manager) manifestContext(ctx context.Context, id string) (sdk.Manifest, error) {
+	var manifest sdk.Manifest
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		entry, found := view.lookup(id)
+		if !found || entry.Disabled {
+			return errors.New("extension is not enabled")
 		}
-	}
-	return sdk.Manifest{}, errors.New("extension is not enabled")
+		manifest = entry.Manifest.Clone()
+		return nil
+	})
+	return manifest, err
 }
 
 func (m *Manager) Install(ctx context.Context, source string) (Installed, error) {
@@ -303,7 +314,7 @@ func (m *Manager) install(ctx context.Context, source string, options installOpt
 		}
 		handshake, done := context.WithTimeout(ctx, 10*time.Second)
 		defer done()
-		config, err := m.runtimeModuleConfigContext(handshake, candidate.Manifest)
+		config, err := m.runtimeModuleConfigContext(handshake, candidate)
 		if err != nil {
 			return err
 		}
@@ -425,91 +436,156 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 }
 
 func (m *Manager) Reload(ctx context.Context) error {
-	if err := lockContext(ctx, &m.reloadMu); err != nil {
-		return err
+	_, err := m.reconcile(ctx, false)
+	return err
+}
+
+type moduleGeneration struct {
+	entry  Installed
+	config sdk.ConfigSnapshot
+}
+
+func (m *Manager) reconcile(ctx context.Context, activate bool) (map[string]moduleGeneration, error) {
+	if err := filelock.LockMutex(ctx, &m.reloadMu); err != nil {
+		return nil, err
 	}
-	defer m.reloadMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
+	current, stopping, err := m.reconcileLocked(ctx, activate)
+	m.reloadMu.Unlock()
+	if err != nil || len(stopping) == 0 {
+		return current, err
 	}
-	entries, err := m.catalog.list(ctx)
+	wait, cancel := context.WithTimeout(ctx, componentCloseTimeout)
+	defer cancel()
+	for _, stopped := range stopping {
+		select {
+		case <-stopped:
+		case <-wait.Done():
+			return current, wait.Err()
+		}
+	}
+	return current, ctx.Err()
+}
+
+func (m *Manager) reconcileLocked(ctx context.Context, activate bool) (map[string]moduleGeneration, []<-chan struct{}, error) {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, nil, errors.New("extension manager is closed")
+	}
+	tracked := make(map[string]bool, len(m.workers)+len(m.windowAuthOwners)+len(m.processes))
+	for id := range m.workers {
+		tracked[id] = true
+	}
+	for _, owner := range m.windowAuthOwners {
+		tracked[owner.record.Scope.Plugin] = true
+	}
+	for parent := range m.processes {
+		tracked[parent.scope.Plugin] = true
+	}
+	m.mu.Unlock()
+
+	current := make(map[string]moduleGeneration, len(tracked))
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		for _, entry := range view.entries {
+			if !activeRoot(entry) || (!tracked[entry.Manifest.ID] && !(activate && entry.Manifest.ActivatesGateway())) {
+				continue
+			}
+			if entry = view.enabledEntry(entry); !activeRoot(entry) {
+				continue
+			}
+			config, err := m.runtimeModuleConfigContext(ctx, entry)
+			if err == nil {
+				current[entry.Manifest.ID] = moduleGeneration{entry, config}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return nil, nil, err
+	}
 	if err != nil {
-		return err
-	}
-	current := make(map[string]Installed, len(entries))
-	configs := make(map[string]string, len(entries))
-	for _, entry := range entries {
-		if entry.Disabled {
-			continue
-		}
-		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
-		if err != nil {
-			// Revoke the unreadable generation without denying unrelated modules.
-			// Direct acquisition of this module still returns the config error.
-			continue
-		}
-		current[entry.Manifest.ID] = entry
-		configs[entry.Manifest.ID] = config.Version
-	}
-	if err := ctx.Err(); err != nil {
-		return err
+		current = nil
 	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return errors.New("extension manager is closed")
+		return nil, nil, errors.New("extension manager is closed")
 	}
 	var retiring []*managedWorker
 	for id, worker := range m.workers {
-		entry, found := current[id]
-		if !found || entry.Revision != worker.entry.Revision || entry.EnableGeneration != worker.entry.EnableGeneration || configs[id] != worker.config.Version {
-			delete(m.workers, id)
+		generation, found := current[id]
+		if tracked[id] && (!found || !worker.matches(generation.entry, generation.config)) {
+			m.detachWorkerLocked(id, worker)
 			retiring = append(retiring, worker)
 		}
 	}
-	m.retireWG.Add(len(retiring))
 	m.mu.Unlock()
-	m.revokeWindowAuthOwners(current, configs)
-	m.revokeOwnedProcesses(current, configs)
-	// New lookups have already lost these generations. An active call keeps
-	// its own worker until it drains; retiring never redirects its response.
+	var stopping []<-chan struct{}
 	for _, worker := range retiring {
-		m.retire(worker)
+		if stopped := m.retire(worker); stopped != nil && !activate {
+			stopping = append(stopping, stopped)
+		}
 	}
-	return ctx.Err()
+	m.revokeWindowAuthOwners(tracked, current)
+	m.revokeOwnedProcesses(tracked, current)
+	if err == nil {
+		err = ctx.Err()
+	}
+	return current, stopping, err
 }
 
-func (m *Manager) retire(worker *managedWorker) {
+func (w *managedWorker) matches(entry Installed, config sdk.ConfigSnapshot) bool {
+	return w.entry.Revision == entry.Revision && w.entry.EnableGeneration == entry.EnableGeneration &&
+		w.config.Version == config.Version
+}
+
+func (m *Manager) detachWorkerLocked(id string, worker *managedWorker) {
 	worker.mu.Lock()
 	worker.retiring = true
-	if worker.active == 0 {
-		client := worker.client
-		worker.mu.Unlock()
-		if client != nil {
-			_ = closeModuleClient(client)
-		}
-		m.retireWG.Done()
-		return
-	}
-	idle := worker.idle
 	worker.mu.Unlock()
+	delete(m.workers, id)
+	m.retireWG.Add(1)
+}
+
+func (m *Manager) retire(worker *managedWorker) <-chan struct{} {
+	worker.mu.Lock()
+	worker.retiring = true
+	idle, draining := worker.idle, worker.active != 0
+	worker.mu.Unlock()
+	var stopped chan struct{}
+	if !draining {
+		stopped = make(chan struct{})
+	}
 	go func() {
 		defer m.retireWG.Done()
-		timer := time.NewTimer(30 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-idle:
-		case <-timer.C:
-			worker.mu.Lock()
-			refreshing := worker.refreshing > 0
-			worker.mu.Unlock()
-			if refreshing {
-				select {
-				case <-idle:
-				case <-m.startCtx.Done():
+		if stopped != nil {
+			defer close(stopped)
+		}
+		if draining {
+			timer := time.NewTimer(30 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-idle:
+			case <-timer.C:
+				worker.mu.Lock()
+				refreshing := worker.refreshing > 0
+				worker.mu.Unlock()
+				if refreshing {
+					timer.Reset(refreshLifetime)
+					select {
+					case <-idle:
+					case <-m.startCtx.Done():
+					case <-timer.C:
+					}
 				}
+			case <-m.startCtx.Done():
 			}
-		case <-m.startCtx.Done():
 		}
 		worker.mu.Lock()
 		client := worker.client
@@ -518,68 +594,143 @@ func (m *Manager) retire(worker *managedWorker) {
 			_ = closeModuleClient(client)
 		}
 	}()
+	return stopped
 }
 
 type expectedGeneration struct {
 	packageRevision  string
 	configVersion    string
 	enableGeneration *string
+	exact            bool
+}
+
+func (expected *expectedGeneration) matches(entry Installed, config string) bool {
+	return expected == nil ||
+		(expected.packageRevision == entry.Revision || !expected.exact && expected.packageRevision == "") &&
+			(expected.configVersion == config || !expected.exact && expected.configVersion == "") &&
+			(expected.enableGeneration == nil || *expected.enableGeneration == entry.EnableGeneration)
+}
+
+type providerExecuteSelectionKey struct{}
+type providerExecutePolicyKey struct{}
+
+func WithProviderExecutePolicy(ctx context.Context, check func(context.Context) error) context.Context {
+	return context.WithValue(ctx, providerExecutePolicyKey{}, check)
+}
+
+func WithProviderExecuteSelection(ctx context.Context, revision, config, epoch string) context.Context {
+	return context.WithValue(ctx, providerExecuteSelectionKey{}, &expectedGeneration{
+		packageRevision: revision, configVersion: config, enableGeneration: &epoch, exact: true,
+	})
+}
+
+func providerExecuteSelection(ctx context.Context, method string) *expectedGeneration {
+	if method != sdk.MethodProviderExecute {
+		return nil
+	}
+	selected, _ := ctx.Value(providerExecuteSelectionKey{}).(*expectedGeneration)
+	return selected
 }
 
 func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGeneration) (*managedWorker, *workerClient, error) {
-	if err := m.Reload(ctx); err != nil {
-		return nil, nil, err
-	}
-	entries, err := m.catalog.list(ctx)
+	worker, err := m.selectGenerationWorker(ctx, id, expected)
 	if err != nil {
 		return nil, nil, err
 	}
-	var selected *Installed
-	for index := range entries {
-		if entries[index].Manifest.ID == id && !entries[index].Disabled {
-			selected = &entries[index]
-			break
+	return m.acquireWorker(ctx, worker)
+}
+
+func (m *Manager) selectGenerationWorker(ctx context.Context, id string, expected *expectedGeneration) (*managedWorker, error) {
+	var worker *managedWorker
+	var stale *managedWorker
+	err := func() error {
+		if err := filelock.LockMutex(ctx, &m.reloadMu); err != nil {
+			return err
 		}
+		defer m.reloadMu.Unlock()
+		return m.catalog.withView(ctx, func(view catalogView) error {
+			generation, err := m.workerGeneration(ctx, view, id)
+			var current *moduleGeneration
+			if err == nil {
+				current = &generation
+				entry := generation.entry
+				if !expected.matches(entry, generation.config.Version) {
+					err = errors.New("module generation changed before acquisition")
+				} else {
+					err = sdk.CheckCompatibility(entry.Manifest)
+				}
+			}
+			worker, stale, err = m.selectWorker(ctx, id, current, true, err)
+			return err
+		})
+	}()
+	if stale != nil {
+		m.retire(stale)
 	}
-	if selected == nil {
-		return nil, nil, errors.New("extension is not enabled")
+	return worker, err
+}
+
+func (m *Manager) workerGeneration(ctx context.Context, view catalogView, id string) (moduleGeneration, error) {
+	entry, found := view.lookup(id)
+	if !found || !activeRoot(entry) {
+		return moduleGeneration{}, errors.New("extension is not enabled")
 	}
-	config, err := m.runtimeModuleConfigContext(ctx, selected.Manifest)
+	entry = view.enabledEntry(entry)
+	if entry.observerEnablementErr != nil {
+		return moduleGeneration{}, entry.observerEnablementErr
+	}
+	config, err := m.runtimeModuleConfigContext(ctx, entry)
 	if err != nil {
-		return nil, nil, err
+		return moduleGeneration{}, err
 	}
-	if expected != nil && expected.enableGeneration != nil && selected.observerEnablementErr != nil {
-		return nil, nil, selected.observerEnablementErr
-	}
-	if expected != nil && (expected.packageRevision != "" && expected.packageRevision != selected.Revision ||
-		expected.configVersion != "" && expected.configVersion != config.Version ||
-		expected.enableGeneration != nil && *expected.enableGeneration != selected.EnableGeneration) {
-		return nil, nil, errors.New("module generation changed before acquisition")
-	}
-	if err := sdk.CheckCompatibility(selected.Manifest); err != nil {
-		return nil, nil, err
-	}
-	return m.acquireSelected(ctx, id, selected, config)
+	return moduleGeneration{entry, config}, nil
 }
 
 func (m *Manager) acquireSelected(ctx context.Context, id string, selected *Installed, config sdk.ConfigSnapshot) (*managedWorker, *workerClient, error) {
+	worker, _, err := m.selectWorker(ctx, id, &moduleGeneration{*selected, config}, false, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m.acquireWorker(ctx, worker)
+}
+
+func (m *Manager) selectWorker(ctx context.Context, id string, current *moduleGeneration, authoritative bool, admissionErr error) (*managedWorker, *managedWorker, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed {
-		m.mu.Unlock()
 		return nil, nil, errors.New("extension manager is closed")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if errors.Is(admissionErr, context.Canceled) || errors.Is(admissionErr, context.DeadlineExceeded) {
+		return nil, nil, admissionErr
+	}
 	worker := m.workers[id]
-	if worker != nil && (worker.entry.Revision != selected.Revision || worker.entry.EnableGeneration != selected.EnableGeneration || worker.config.Version != config.Version) {
-		m.mu.Unlock()
-		return nil, nil, errors.New("module generation changed before cached worker admission")
+	var stale *managedWorker
+	if worker != nil && (current == nil || !worker.matches(current.entry, current.config)) {
+		if !authoritative {
+			return nil, nil, errors.New("module generation changed before cached worker admission")
+		}
+		m.detachWorkerLocked(id, worker)
+		stale, worker = worker, nil
+	}
+	if admissionErr != nil {
+		return nil, stale, admissionErr
 	}
 	if worker == nil {
 		m.startLifecycleLocked()
-		worker = &managedWorker{entry: *selected, config: cloneModuleConfig(config)}
+		worker = &managedWorker{entry: current.entry, config: cloneModuleConfig(current.config)}
 		m.workers[id] = worker
 	}
-	m.mu.Unlock()
+	return worker, stale, nil
+}
+
+func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker) (*managedWorker, *workerClient, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		// Refresh retains a worker while holding the manager lock. Keep the
 		// same order for restart and register startup before Close can wait.
 		m.mu.Lock()
@@ -639,6 +790,13 @@ func (m *Manager) acquireSelected(ctx context.Context, id string, selected *Inst
 				_ = group.Close(context.Background())
 			}
 		}
+		if err == nil {
+			err = m.checkActiveGeneration(handshake, worker.entry, worker.config.Version)
+			if err != nil {
+				_ = closeModuleClient(client)
+				client = nil
+			}
+		}
 		cancel()
 		stop()
 		worker.mu.Lock()
@@ -696,15 +854,23 @@ func (m *Manager) acquireLease(ctx context.Context, id string, expected *expecte
 	if err != nil {
 		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 	}
+	return m.newLease(ctx, worker, client), nil
+}
+
+func (m *Manager) newLease(ctx context.Context, worker *managedWorker, client *workerClient) *Lease {
 	lifetime, cancel := context.WithCancel(ctx)
-	return &Lease{manager: m, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: cancel}, nil
+	return &Lease{manager: m, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: cancel}
 }
 
 // AcquireNative reserves a logical codec response as well as its process
 // generation. Separate RPC credits leave room to encode a provider's output
 // even when inference calls occupy every ordinary execution slot.
 func (m *Manager) AcquireNative(ctx context.Context, id string) (*Lease, error) {
-	lease, err := m.Acquire(ctx, id)
+	return m.acquireNative(ctx, id, nil)
+}
+
+func (m *Manager) acquireNative(ctx context.Context, id string, expected *expectedGeneration) (*Lease, error) {
+	lease, err := m.acquireLease(ctx, id, expected)
 	if err != nil {
 		return nil, err
 	}
@@ -739,48 +905,59 @@ func (l *Lease) Close() {
 func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, params any,
 	consume func(Event) error,
 ) (json.RawMessage, error) {
-	if lease := inboundLeaseFrom(ctx); lease != nil && lease.Manifest().ID == id {
+	if lease := inboundLeaseFrom(ctx); lease != nil && lease.worker.entry.Manifest.ID == id {
 		if lease.manager != m {
 			return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension host changed during the native request")}
 		}
 		return lease.Call(ctx, method, scope, params, consume)
 	}
-	manifest, err := m.Manifest(id)
-	if err != nil {
-		return nil, err
-	}
 	if scope.Plugin == "" {
 		scope.Plugin = id
 	}
-	if err := validateMethod(manifest, method, scope); err != nil {
-		return nil, err
-	}
-	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
-		return nil, err
-	}
-	if err := validateStorageScope(manifest, method, scope, params); err != nil {
-		return nil, err
-	}
-	if method == sdk.MethodAuthRefresh {
-		result, err := m.RefreshAccount(ctx, id, scope)
-		if err != nil {
-			return nil, err
+	expected := providerExecuteSelection(ctx, method)
+	if method == sdk.MethodProviderExecute {
+		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 		}
-		return json.Marshal(result)
 	}
-	if _, err := m.authForContext(ctx, scope); err != nil {
-		return nil, err
+	worker, err := m.selectGenerationWorker(ctx, id, expected)
+	if err != nil {
+		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 	}
-	lease, err := m.Acquire(ctx, id)
+	params, err = validateCall(worker.entry.Manifest, method, scope, params)
 	if err != nil {
 		return nil, err
 	}
+	if method == sdk.MethodAuthRefresh {
+		if err := netproxy.Held(ctx); err != nil {
+			return nil, err
+		}
+	} else if err := m.checkAccountScope(ctx, scope); err != nil {
+		return nil, beforeProviderDispatch(method, err)
+	}
+	worker, client, err := m.acquireWorker(ctx, worker)
+	if err != nil {
+		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
+	}
+	lease := m.newLease(ctx, worker, client)
 	defer lease.Close()
-	return lease.Call(ctx, method, scope, params, consume)
+	return lease.callSelected(ctx, method, scope, params, consume, nil, true)
 }
 
 func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params any,
 	consume func(Event) error,
+) (json.RawMessage, error) {
+	return l.call(ctx, method, scope, params, consume, nil)
+}
+
+func (l *Lease) call(ctx context.Context, method string, scope sdk.Scope, params any,
+	consume func(Event) error, prepareResult func(json.RawMessage),
+) (json.RawMessage, error) {
+	return l.callSelected(ctx, method, scope, params, consume, prepareResult, false)
+}
+
+func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope, params any,
+	consume func(Event) error, prepareResult func(json.RawMessage), validated bool,
 ) (json.RawMessage, error) {
 	if l.closed.Load() {
 		return nil, errors.New("extension request lease is closed")
@@ -790,18 +967,34 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	defer func() { stop(); cancel() }()
 	m, manifest, client := l.manager, l.worker.entry.Manifest, l.client
 	id := manifest.ID
-	if scope.Plugin != "" && scope.Plugin != id {
-		return nil, errors.New("extension scope belongs to another module")
+	if scope.Plugin == "" {
+		scope.Plugin = id
 	}
-	scope.Plugin = id
-	if err := validateMethod(manifest, method, scope); err != nil {
-		return nil, err
+	if !validated {
+		var err error
+		params, err = validateCall(manifest, method, scope, params)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
-		return nil, err
+	expected := providerExecuteSelection(ctx, method)
+	if !expected.matches(l.worker.entry, l.ConfigVersion()) {
+		return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("module generation changed before provider execution")}
 	}
-	if err := validateStorageScope(manifest, method, scope, params); err != nil {
-		return nil, err
+	if method == sdk.MethodProviderExecute && !validated {
+		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+	}
+	if method == sdk.MethodAuthStart {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		if err := admitSavedSignInStart(ctx, raw); err != nil {
+			return nil, err
+		}
+		params = json.RawMessage(raw)
 	}
 	var budgetRequest sdk.BudgetPolicyRequest
 	if sdk.IsBudgetMethod(method) {
@@ -860,7 +1053,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		var err error
 		ctx, finish, err = m.beginAccountTaskForeground(ctx, l, scope, params)
 		if err != nil {
-			return nil, err
+			return nil, beforeProviderDispatch(method, err)
 		}
 		defer func() { finish(taskCompleted) }()
 	}
@@ -871,6 +1064,13 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		}
 		return json.Marshal(result)
 	}
+	authMutation := (method == sdk.MethodAuthStart || method == sdk.MethodAuthFinish || method == sdk.MethodAuthLogout) &&
+		ctx.Value(savedSignInStateKey{}) == nil
+	if authMutation {
+		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+			return nil, err
+		}
+	}
 	if sdk.BusinessCancel(manifest, method) {
 		if err := validateCancelIntent(params, scope); err != nil {
 			return nil, err
@@ -880,14 +1080,14 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		}
 	}
 	if method == sdk.MethodProviderExecute {
-		if err := m.store.UsageReady(scope); err != nil {
-			return nil, err
+		if err := m.store.UsageReadyContext(ctx, scope); err != nil {
+			return nil, beforeProviderDispatch(method, err)
 		}
 	}
 	var usageRead *UsageStamp
 	if method == sdk.MethodProviderUsage {
 		var err error
-		params, usageRead, err = m.prepareUsageRead(manifest, scope, params)
+		params, usageRead, err = l.prepareUsageRead(ctx, scope, params)
 		if err != nil {
 			return nil, err
 		}
@@ -901,7 +1101,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	auth, err := m.authForContext(ctx, scope)
 	if err != nil {
-		return nil, err
+		return nil, beforeProviderDispatch(method, err)
 	}
 	effect := method == sdk.MethodProviderExecute || method == sdk.MethodToolCall ||
 		method == sdk.MethodGatewayResponse || method == sdk.MethodGatewaySignIn || sdk.BusinessCancel(manifest, method)
@@ -921,8 +1121,12 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 				return result, err
 			}
 		}
-		var err error
 		client, err = l.group.actionClient(ctx, action)
+		if err != nil {
+			return nil, err
+		}
+		// A lazy service can outlive the selected account during startup.
+		auth, err = m.authForContext(ctx, scope)
 		if err != nil {
 			return nil, err
 		}
@@ -931,12 +1135,6 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		}
 		effect = action.Effect == "write"
 	}
-	// A lazy service may have needed time to start. Account replacement
-	// during that wait revokes this generation before action dispatch.
-	auth, err = m.authForContext(ctx, scope)
-	if err != nil {
-		return nil, err
-	}
 	if err := checkLeasedCheckin(ctx, l, method, scope, params); err != nil {
 		return nil, err
 	}
@@ -944,11 +1142,14 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	if err != nil {
 		return nil, err
 	}
-	if err := checkWindowAdmission(ctx); err != nil {
-		return nil, err
+	middleware := sdk.IsMiddlewareMethod(method)
+	if !middleware {
+		if err := checkWindowAdmission(ctx); err != nil {
+			return nil, err
+		}
 	}
 	ctx = withOwnCallParent(ctx, method)
-	if method == sdk.MethodGatewayRequest || method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
+	if method == sdk.MethodGatewayRequest || method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || middleware {
 		// Retain this restriction when a recall delegates a read action to
 		// a private component, which has its own module.call authority.
 		ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
@@ -983,8 +1184,8 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if scope.Attempt == 0 {
 			scope.Attempt = 1
 		}
-		if _, err := m.store.journal(scope, "dispatched", method == sdk.MethodProviderExecute || accountTask); err != nil {
-			return nil, err
+		if _, err := m.store.journal(ctx, scope, "dispatched", method == sdk.MethodProviderExecute || accountTask); err != nil {
+			return nil, beforeProviderDispatch(method, err)
 		}
 	}
 	invocation := &invocationAuthority{scope: scope}
@@ -992,7 +1193,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	ctx = beginRequestPolicy(ctx, l, scope, method, params)
 	accepted := false
 	onEvent := func(event Event) error {
-		if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || sdk.IsMiddlewareMethod(method) {
+		if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) || method == sdk.MethodLedgerObserve || middleware {
 			return errors.New("session source reads are unary")
 		}
 		if sdk.IsBudgetMethod(method) {
@@ -1004,7 +1205,7 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		if method == sdk.MethodProviderCalls {
 			return errors.New("outside-call history reads are unary")
 		}
-		if _, err := m.authForContext(ctx, scope); err != nil {
+		if err := m.checkAccountScope(ctx, scope); err != nil {
 			return err
 		}
 		if err := checkWindowAdmission(ctx); err != nil {
@@ -1034,6 +1235,11 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			if !effect || json.Unmarshal(event.Data, &value) != nil || value.OperationID != scope.Operation {
 				return errors.New("extension accepted an unknown operation")
 			}
+			if method == sdk.MethodToolCall && scope.Account != "" && manifest.Contract.Has(sdk.AccountAuth) {
+				if err := m.fenceSubscriptionRollback(ctx, scope); err != nil {
+					return err
+				}
+			}
 			if _, err := m.store.Journal(scope, "accepted"); err != nil {
 				return err
 			}
@@ -1061,8 +1267,31 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 			})
 		}
 	}
-	result, err := client.call(ctx, method, scope, auth, params, onEvent)
+	admit := m.subscriptionAdmission(ctx, manifest, method, scope, authMutation)
+	if method == sdk.MethodProviderExecute && (expected != nil || scope.Account != "") {
+		admit = l.providerExecuteAdmission(scope, expected != nil, admit)
+	}
+	if effect && scope.Provider != "" && manifest.Contract.Version.Minor >= 8 && manifest.Contract.Has(sdk.UsageReporter) &&
+		(method == sdk.MethodModuleCall || method == sdk.MethodToolCall) {
+		admit = m.ownCallAdmission(ctx, scope, admit)
+	}
+	if middleware {
+		previous := admit
+		admit = func(dispatch context.Context) (func(bool), error) {
+			if err := checkWindowAdmission(dispatch); err != nil {
+				return nil, err
+			}
+			if previous != nil {
+				return previous(dispatch)
+			}
+			return nil, nil
+		}
+	}
+	result, err := client.callWithAdmission(ctx, method, scope, auth, params, onEvent, admit)
 	if err == nil {
+		if prepareResult != nil {
+			prepareResult(result)
+		}
 		err = m.checkResultPublication(ctx, invocation)
 		if err != nil {
 			result = nil
@@ -1099,12 +1328,12 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 		err = finishStorageCall(ctx, result)
 	}
 	if err == nil && method == sdk.MethodProviderUsage {
-		err = m.finishUsageRead(manifest, scope, usageRead, result)
+		err = l.finishUsageRead(ctx, scope, usageRead, result)
 	}
 	if err == nil && outsideRead != nil {
 		_, err = sdk.DecodeOutsideCallsResult(manifest, *outsideRead, result)
 		if err == nil {
-			_, err = m.authForContext(ctx, scope)
+			err = m.checkAccountScope(ctx, scope)
 		}
 	}
 	if effect {
@@ -1149,6 +1378,91 @@ func (l *Lease) Call(ctx context.Context, method string, scope sdk.Scope, params
 	}
 	taskCompleted = err == nil
 	return result, err
+}
+
+func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next workerAdmission) workerAdmission {
+	return func(ctx context.Context) (func(bool), error) {
+		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+			return nil, err
+		}
+		m := l.manager
+		var release func(bool)
+		var err error
+		if next != nil {
+			release, err = next(ctx)
+		}
+		if err == nil {
+			checkSelection := func() error {
+				if exact || next == nil {
+					if err := m.checkAccountScope(ctx, scope); err != nil {
+						return err
+					}
+				}
+				if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+					return err
+				}
+				if check, ok := ctx.Value(providerExecutePolicyKey{}).(func(context.Context) error); ok && check != nil {
+					return check(ctx)
+				}
+				return nil
+			}
+			if exact {
+				err = m.withActiveGeneration(ctx, l.worker.entry, l.ConfigVersion(), checkSelection)
+			} else {
+				err = checkSelection()
+			}
+		}
+		if err != nil {
+			if release != nil {
+				release(true)
+			}
+			return nil, err
+		}
+		return release, nil
+	}
+}
+
+func checkProviderExecuteDiscovery(ctx context.Context, scope sdk.Scope) error {
+	if err := ctx.Err(); err != nil || scope.Account == "" {
+		return err
+	}
+	off, err := settings.AccountDiscoveryOffNow()
+	if off && err == nil {
+		return storeError("account_discovery_off", "Subscription accounts are off in magpie.")
+	}
+	if err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+func beforeProviderDispatch(method string, err error) error {
+	var refusal *sdk.Error
+	if method == sdk.MethodProviderExecute && errors.As(err, &refusal) &&
+		refusal.Outcome == "" && (refusal.Code == "stale_generation" || refusal.Code == "not_found") {
+		return &OutcomeError{Outcome: "not-started", Cause: err}
+	}
+	return err
+}
+
+func validateCall(manifest sdk.Manifest, method string, scope sdk.Scope, params any) (any, error) {
+	if err := validateMethod(manifest, method, scope); err != nil {
+		return nil, err
+	}
+	if method == sdk.MethodSessionSourceRead || sdk.IsStorageMethod(method) {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, err
+		}
+		params = json.RawMessage(raw)
+	}
+	if err := validateSessionSourceScope(manifest, method, scope, params); err != nil {
+		return nil, err
+	}
+	if err := validateStorageScope(manifest, method, scope, params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }
 
 func validateMethod(manifest sdk.Manifest, method string, scope sdk.Scope) error {
@@ -1227,14 +1541,27 @@ func (m *Manager) authFor(scope sdk.Scope) (json.RawMessage, error) {
 }
 
 func (m *Manager) authForContext(ctx context.Context, scope sdk.Scope) (json.RawMessage, error) {
+	return m.readAccountAuth(ctx, scope, true)
+}
+
+func (m *Manager) checkAccountScope(ctx context.Context, scope sdk.Scope) error {
+	_, err := m.readAccountAuth(ctx, scope, false)
+	return err
+}
+
+func (m *Manager) readAccountAuth(ctx context.Context, scope sdk.Scope, copyAuth bool) (json.RawMessage, error) {
 	if scope.Account == "" {
 		return nil, ctx.Err()
 	}
-	account, err := m.store.GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
+	account, err := m.store.readAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account, &scope.Generation, copyAuth)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err != nil || account.Generation != scope.Generation {
+	if err != nil {
+		var refusal *sdk.Error
+		if errors.As(err, &refusal) && (refusal.Code == "not_found" || refusal.Code == "stale_generation") {
+			return nil, storeError(refusal.Code, "extension account scope was revoked")
+		}
 		return nil, errors.New("extension account scope was revoked")
 	}
 	return account.Auth, nil
@@ -1254,7 +1581,7 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := m.authForContext(ctx, scope); err != nil {
+	if err := m.checkAccountScope(ctx, scope); err != nil {
 		return nil, err
 	}
 	if sdk.IsBudgetMethod(authority.method) {
@@ -1312,9 +1639,14 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		if !decodeHostParams(raw, &request) || !json.Valid(request.Credentials) || string(request.Credentials) == "null" {
 			return nil, errors.New("invalid replacement credentials")
 		}
-		account, err := m.store.SaveAccount(Account{
-			Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: request.Credentials,
-		}, scope.Generation)
+		var account Account
+		err = m.withSubscriptionScope(ctx, scope, func() error {
+			var err error
+			account, err = m.store.SaveAccount(Account{
+				Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: request.Credentials,
+			}, scope.Generation)
+			return err
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -1357,7 +1689,11 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 		if !decodeHostParams(raw, &request) {
 			return nil, errors.New("invalid state request")
 		}
-		value, err := m.store.StateGet(scope, request.Key)
+		get := m.store.StateGetContext
+		if temporary, ok := ctx.Value(savedSignInStateKey{}).(*savedSignInState); ok {
+			get = temporary.get
+		}
+		value, err := get(ctx, scope, request.Key)
 		if err != nil {
 			return nil, err
 		}
@@ -1391,9 +1727,16 @@ func (m *Manager) hostCall(ctx context.Context, scope sdk.Scope, method string, 
 				return nil, errors.New("invalid state revision")
 			}
 		}
-		value, err := m.store.StateCAS(scope, request.Key, version, request.Value)
+		get, cas := m.store.StateGetContext, m.store.StateCASContext
+		if temporary, ok := ctx.Value(savedSignInStateKey{}).(*savedSignInState); ok {
+			get, cas = temporary.get, temporary.cas
+		}
+		value, err := cas(ctx, scope, request.Key, version, request.Value)
 		if err != nil {
-			current, readErr := m.store.StateGet(scope, request.Key)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			current, readErr := get(ctx, scope, request.Key)
 			if readErr == nil && current.Version != version {
 				return sdk.StateCASResult{Swapped: false, Version: strconv.FormatUint(current.Version, 10)}, nil
 			}
@@ -1419,6 +1762,9 @@ func decodeParamsLimit(raw json.RawMessage, value any, limit int) bool {
 }
 
 func (m *Manager) Close(ctx context.Context) error {
+	if m.store != nil {
+		m.store.closeAccountSync()
+	}
 	m.mu.Lock()
 	if m.closed {
 		done := m.closeDone

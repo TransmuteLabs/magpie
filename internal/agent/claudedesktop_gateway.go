@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -63,15 +64,6 @@ func desktopGateway() string {
 // desktopKey is the key Desktop's profile gets at gw.
 func desktopKey(gw string) string { return agentKeyAt("claude-desktop", gw) }
 
-// desktopSeedSSH puts Desktop's sshHostAllowlist in the profile, seeded once with every
-// host where the profile is pointed beyond loopback and has none: 3p mode
-// refuses every host without it, and the address was picked to reach one.
-// The user may narrow it in Desktop's window, or take it away; magpie never
-// writes it again (desktopSeedOnce).
-func desktopSeedSSH(p desktopPaths) error {
-	return desktopSeedOnce(p, desktopSSH, "sshHostAllowlist", []string{"*"})
-}
-
 // desktopGatewayField picks where Desktop reaches the gateway: this
 // computer (loopback), or one of its https addresses for SSH remote
 // sessions.
@@ -89,13 +81,21 @@ func desktopGatewayField(ps []desktopPaths, apply func() error) Field {
 			if v != "" && !slices.Contains(desktopLANURLs(), v) {
 				return fmt.Errorf("Claude Desktop can be pointed at %q only while magpie is shared on the local network and serves https:// there (Settings > Network and sharing: Share on local network, HTTPS)", v)
 			}
-			if err := settings.SetDesktopGateway(v); err != nil {
+			saved, err := settings.LoadChecked()
+			if err != nil {
+				return err
+			}
+			previous := saved.DesktopGateway
+			if err := settings.SetDesktopGateway(previous, v); err != nil {
 				return err
 			}
 			if !desktopWiredAny(ps) {
 				return nil
 			}
-			return apply()
+			if err := apply(); err != nil {
+				return errors.Join(err, settings.SetDesktopGateway(v, previous))
+			}
+			return nil
 		},
 		Options: func(map[string]string) []Option {
 			urls := desktopLANURLs()

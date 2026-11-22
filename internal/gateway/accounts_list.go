@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -43,27 +44,31 @@ func (s *Server) accountsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusForbidden, "magpie's accounts are told to another machine only when magpie is shared on the local network (Settings → Network and sharing → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
 		return
 	}
-	scope, ok := scopeQuotas(w, r)
+	ctx := r.Context()
+	scope, ok := scopeQuotas(ctx, w, r)
 	if !ok {
 		return
 	}
 	only := strings.TrimSpace(r.URL.Query().Get("provider"))
 	out := []listedAccount{}
-	for _, p := range provider.All() {
+	for _, p := range provider.AllContext(ctx) {
+		if ctx.Err() != nil {
+			return
+		}
 		if only != "" && !strings.EqualFold(only, p.ID) {
 			continue
 		}
 		if !scope.provider(p.ID) {
 			continue
 		}
-		on := accountsOnNow(p)
+		on := accountsOnNow(ctx, p)
 		keysOn := map[string]bool{}
 		if p.Account == nil {
 			for _, k := range p.KeyList() {
 				keysOn[k.ID] = k.On
 			}
 		}
-		for _, a := range p.AccountIDs() {
+		for _, a := range p.AccountIDsContext(ctx) {
 			if scope != nil && !scope.who.AllowsAccount(p.ID, a.ID) {
 				continue
 			}
@@ -76,17 +81,19 @@ func (s *Server) accountsList(w http.ResponseWriter, r *http.Request) {
 			out = append(out, l)
 		}
 	}
-	writeJSON(w, 200, map[string]any{"object": "list", "data": out})
+	if ctx.Err() == nil {
+		writeJSON(w, 200, map[string]any{"object": "list", "data": out})
+	}
 }
 
 // accountsOnNow is the users of p's accounts requests may take
 // (AccountsOn), lowercased.
-func accountsOnNow(p provider.Provider) map[string]bool {
+func accountsOnNow(ctx context.Context, p provider.Provider) map[string]bool {
 	on := map[string]bool{}
 	if p.Account == nil {
 		return on
 	}
-	for _, a := range p.AccountsOn() {
+	for _, a := range p.AccountsOnContext(ctx) {
 		if a.Account != nil {
 			on[strings.ToLower(a.Account.User)] = true
 		}

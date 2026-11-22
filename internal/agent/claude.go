@@ -330,10 +330,11 @@ const claudeReviewEnv = string(builtinclaude.ReviewFlag)
 // "true" also keeps it on in a conversation begun without it, which
 // Claude Code otherwise holds off until it is compacted. The gateway
 // carries deferred tools to Anthropic upstreams and loads them in place on
-// a Responses upstream that takes it (#2660); elsewhere it turns them away,
-// and Claude Code declares every tool for that conversation, so a load
-// doesn't cost the prompt cache (gateway/deferred_route.go).
-// One the user set is theirs.
+// a Responses upstream that takes it (#2660); elsewhere a loaded tool is
+// declared from its load on (a load changes the tools, so an OpenAI-style
+// prompt cache starts again there). It never turns them away: Claude Code
+// would keep tool search off for that conversation (lightwlh on X).
+// One the user set is theirs: false keeps every tool declared and the cache.
 const claudeSearchEnv = string(builtinclaude.SearchFlag)
 
 // claudeReviewed reports whether every model Claude Code can reach
@@ -1437,7 +1438,7 @@ func claudeIn(at place) *Agent {
 		// ultracode (2.1.284 on): Claude plans a workflow for each
 		// substantive task, at whatever effort. Only a model that takes
 		// xhigh has it.
-		Key: "ultracode", Label: "ultracode", Quiet: true,
+		Key: "ultracode", Label: "ultracode", Quiet: true, Switch: true,
 		// shown off for a model without it, which Claude Code runs so
 		Get: func() string {
 			if v, _ := edit.GetJSON(path, "ultracode"); v == "true" && contains(claudeEffortsFor(get()), "xhigh") {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
-	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -37,7 +36,9 @@ func readExtensionAuthRequest(w http.ResponseWriter, r *http.Request, body any) 
 	return true
 }
 
-func runExtensionAuth(w http.ResponseWriter, ctx context.Context, host extensionWindowAuthHost, id, revision, part, binding string, in extensionAuthRequest) {
+var errModuleAuthentication = errors.New("module authentication could not complete this request")
+
+func runExtensionAuth(ctx context.Context, host extensionWindowAuthHost, id, revision, part, binding string, in extensionAuthRequest) (sdk.WindowAuthFlowView, error) {
 	ctx = extension.WithWindowAuthParent(ctx, in.Parent)
 	ctx = extension.WithModuleRequestID(ctx, in.Request)
 	ctx = provider.ExtensionWindowAuthContext(ctx)
@@ -62,17 +63,9 @@ func runExtensionAuth(w http.ResponseWriter, ctx context.Context, host extension
 		err = errors.New("module authentication operation is not supported")
 	}
 	if err != nil || view.Validate() != nil {
-		fail(w, errors.New("module authentication could not complete this request"))
-		return
+		return sdk.WindowAuthFlowView{}, errModuleAuthentication
 	}
-	if part == sdk.ProviderSignInPart {
-		writeJSON(w, struct {
-			sdk.WindowAuthFlowView
-			LinkOnly bool `json:"linkOnly,omitempty"`
-		}{view, settings.Shared().SignInLinkOnly})
-		return
-	}
-	writeJSON(w, view)
+	return view, nil
 }
 
 func extensionWindowAuthRoutes(mux *http.ServeMux) {
@@ -96,6 +89,11 @@ func extensionWindowAuthRoutes(mux *http.ServeMux) {
 			fail(w, errors.New("module authentication is unavailable"))
 			return
 		}
-		runExtensionAuth(w, r.Context(), host, part.id, part.revision, part.part, in.Binding, in.extensionAuthRequest)
+		view, err := runExtensionAuth(r.Context(), host, part.id, part.revision, part.part, in.Binding, in.extensionAuthRequest)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, view)
 	})
 }

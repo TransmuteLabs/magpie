@@ -144,7 +144,7 @@ func newMiniMaxCheckiner(accounts func() []miniMaxAccount) checkiner {
 func miniMaxCheckin(ctx context.Context, a miniMaxAccount) WorkBuddyCheckin {
 	var st miniMaxStatus
 	if err := miniMaxCall(ctx, a, http.MethodGet, "/status", &st); err != nil {
-		return wbCheckinFailed(err)
+		return checkinRequestFailed(ctx, err)
 	}
 	if st.Base != nil && st.Base.Code != 0 {
 		return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: fmt.Sprintf("code %d: %s", st.Base.Code, st.Base.Msg)}
@@ -166,7 +166,7 @@ func miniMaxCheckin(ctx context.Context, a miniMaxAccount) WorkBuddyCheckin {
 	}
 	var got miniMaxClaim
 	if err := miniMaxCall(ctx, a, http.MethodPost, "/claim", &got); err != nil {
-		return wbCheckinFailed(err)
+		return checkinRequestFailed(ctx, err)
 	}
 	if got.Base != nil && got.Base.Code != 0 {
 		return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: fmt.Sprintf("code %d: %s", got.Base.Code, got.Base.Msg)}
@@ -208,12 +208,10 @@ func miniMaxCall(ctx context.Context, a miniMaxAccount, method, path string, dst
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-timestamp", ts)
 	req.Header.Set("x-signature", hex.EncodeToString(sum[:]))
-	res, err := a.via(req)
+	res, b, err := checkinReply(req, a.via)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if strings.EqualFold(res.Header.Get("X-Magpie-Sign-In"), "expired") || res.StatusCode == http.StatusUnauthorized {
 		return errors.New("MiniMax Code's sign-in has expired — sign in again")
 	}
@@ -275,20 +273,24 @@ func miniMaxCards(accts []miniMaxAccount) []checkinCard {
 // sites, each sent through the plugin's fetch, which signs it in as the
 // account.
 func miniMaxCheckinAccounts() []miniMaxAccount {
+	return miniMaxCheckinAccountsContext(context.Background())
+}
+
+func miniMaxCheckinAccountsContext(ctx context.Context) []miniMaxAccount {
 	var out []miniMaxAccount
 	for _, site := range []string{MiniMaxCodeID, MiniMaxCodeGlobalID} {
-		if pp, ok := PluginOf(site); ok && !pluginChecksIn(pp) {
-			out = append(out, miniMaxSiteAccounts(site, pp)...)
+		if pp, ok := pluginOfContext(ctx, site); ok && !pluginChecksIn(pp) {
+			out = append(out, miniMaxSiteAccounts(ctx, site, pp)...)
 		}
 	}
 	return out
 }
 
-func miniMaxSiteAccounts(site string, pp plugin.Provider) []miniMaxAccount {
+func miniMaxSiteAccounts(ctx context.Context, site string, pp plugin.Provider) []miniMaxAccount {
 	auths := plugin.Auths(pp.ID)
 	card := PluginID(pp.ID)
 	var out []miniMaxAccount
-	for _, l := range pluginLogins(pp) {
+	for _, l := range pluginLoginsContext(ctx, pp) {
 		key := l.acct.Key
 		uid := str(auths[key]["realUserID"])
 		if uid == "" {

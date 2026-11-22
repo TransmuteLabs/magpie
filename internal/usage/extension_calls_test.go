@@ -2,7 +2,9 @@ package usage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -136,6 +138,148 @@ func setOutsideUsageFixture(t *testing.T, manager *extensionhost.Manager, scope 
 	}
 	if _, err := manager.Store().StateCAS(scope, "calls-fixture", value.Version, raw); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeUsageSubscriptionOwner(t *testing.T, manager *extensionhost.Manager, scope sdk.Scope, active bool) {
+	t.Helper()
+	saveUsageSubscriptionOwner(t, manager, scope, active)
+	provider.Changed()
+}
+
+func saveUsageSubscriptionOwner(t *testing.T, manager *extensionhost.Manager, scope sdk.Scope, active bool) {
+	t.Helper()
+	owner := struct {
+		extensionhost.SubscriptionOwner
+		GrantRevision string            `json:"grantRevision"`
+		Digests       map[string]string `json:"digests"`
+		Tickets       []string          `json:"tickets"`
+	}{
+		SubscriptionOwner: extensionhost.SubscriptionOwner{
+			Module: scope.Plugin, Provider: scope.Provider, PublicID: "saved-vendor",
+			Revision: fmt.Sprintf("fixture-owner-%t", active), Active: active,
+			Accounts: []extensionhost.SubscriptionAccount{
+				{Key: "saved-key", ID: scope.Account, User: "saved-alice", LoginID: "saved-login"},
+			},
+		},
+		GrantRevision: strings.Repeat("a", 64),
+		Digests:       map[string]string{"saved-key": strings.Repeat("b", 64)},
+		Tickets:       []string{"fixture-ticket"},
+	}
+	raw, err := json.Marshal([]any{owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(manager.Namespace(), "private", ".saved-signins")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "subscription-owners.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSDKOwnCallUsesOwnerAtDispatch(t *testing.T) {
+	manager, scope := usageExtension(t, 8)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	release := provider.Hold()
+	defer release()
+	heldProvider := provider.ExtensionProviderID(scope.Plugin, scope.Provider)
+	saveUsageSubscriptionOwner(t, manager, scope, true)
+	if got := provider.ExtensionProviderID(scope.Plugin, scope.Provider); got != heldProvider {
+		t.Fatalf("the held subscription view changed before dispatch: %q", got)
+	}
+	scope.Operation, scope.Attempt = "own-after-transfer", 1
+	if _, err := invokeUsageReport(t, manager, scope, "usagefixture.own", "usage.append", ownUsageParams(), true, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rows := Load(time.Time{}); len(rows) != 1 || rows[0].Provider != "saved-vendor" || rows[0].ProviderAccount != "saved-alice" {
+		t.Fatalf("new execution used the held owner from before transfer: %+v", rows)
+	}
+	if entry, err := manager.Store().Operation(scope.Plugin, scope.Operation); err != nil || entry.Scope != scope {
+		t.Fatalf("execution changed the private operation scope: %+v %v", entry, err)
+	}
+}
+
+func TestSDKOwnCallKeepsOwnerAfterAcceptance(t *testing.T) {
+	manager, scope := usageExtension(t, 8)
+	selectedProvider := provider.ExtensionProviderID(scope.Plugin, scope.Provider)
+	scope.Operation, scope.Attempt = "own-before-transfer", 1
+	if _, err := invokeUsageReport(t, manager, scope, "usagefixture.own", "usage.append", ownUsageParams(), true, 1,
+		func(event extensionhost.Event) error {
+			if event.Name == "accepted" {
+				saveUsageSubscriptionOwner(t, manager, scope, true)
+			}
+			return nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if rows := Load(time.Time{}); len(rows) != 1 || rows[0].Provider != selectedProvider || rows[0].ProviderAccount != scope.Account {
+		t.Fatalf("accepted execution switched its accounting owner: %+v", rows)
+	}
+}
+
+func TestSDKUsageKeepsTransferredAccountTogether(t *testing.T) {
+	manager, scope := usageExtension(t, 8)
+	writeUsageSubscriptionOwner(t, manager, scope, true)
+	providers, err := provider.ExtensionProviders()
+	if err != nil || len(providers) != 1 || providers[0].ID != "saved-vendor" || providers[0].Account == nil ||
+		providers[0].Account.User != "saved-alice" {
+		t.Fatalf("SDK routing must resolve the saved subscription's public account: %+v, %v", providers, err)
+	}
+	routed := providers[0]
+	now := time.Now().UTC()
+	previous := outsideIO.now
+	outsideIO.now = func() time.Time { return now }
+	t.Cleanup(func() { outsideIO.now = previous })
+	Append(Record{Time: now.Add(-10 * time.Minute), Agent: "codex", Provider: routed.ID, ProviderAccount: routed.Account.User,
+		Model: "fixture-model", Status: 200, Input: 11, RequestID: "vendor-through"})
+
+	scope.Operation, scope.Attempt = "transferred-own", 1
+	if _, err := invokeUsageReport(t, manager, scope, "usagefixture.own", "usage.append", ownUsageParams(), true, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	scope.Operation, scope.Attempt = "", 0
+
+	key := "sdk:" + routed.ID + "\x00" + scope.Account
+	watermark := now.Add(-time.Hour)
+	if err := writeOutsideMarks(map[string]time.Time{key: watermark}); err != nil {
+		t.Fatal(err)
+	}
+	window := watermark.UnixMilli()
+	var calls []any
+	for _, id := range []string{"vendor-through", "vendor-own", "vendor-history"} {
+		call := outsideUsageParams()["calls"].([]any)[0].(map[string]any)
+		call["id"], call["time"] = id, now.Add(-10*time.Minute).UnixMilli()
+		calls = append(calls, call)
+	}
+	setOutsideUsageFixture(t, manager, scope, map[string]any{"": map[string]any{"calls": calls}}, &window)
+	ReadOutsideCalls(t.Context())
+
+	records := Load(time.Time{})
+	var input, imported int
+	for _, record := range records {
+		if record.Provider != routed.ID || record.ProviderAccount != routed.Account.User {
+			t.Errorf("Usage split the transferred account: %q / %q", record.Provider, record.ProviderAccount)
+		}
+		input += record.Input
+		if record.IsReported() {
+			imported++
+			namespace := sha256.Sum256([]byte(scope.Plugin + "\x00" + scope.Provider + "\x00" + scope.Account))
+			if want := fmt.Sprintf("sdk:%x:vendor-history", namespace); record.RequestID != want {
+				t.Errorf("unexpected reported call %q, want %q", record.RequestID, want)
+			}
+		}
+	}
+	if imported != 1 || len(records) != 3 || input != 31 {
+		t.Errorf("overlap affected Usage totals: %d imported of %d rows, %d input tokens", imported, len(records), input)
+	}
+	if marks := readOutsideMarks(); len(marks) != 1 || !marks[key].Equal(now.Add(-outsideOverlap)) {
+		t.Errorf("transferred account lost its persisted watermark: %+v", marks)
 	}
 }
 
@@ -551,9 +695,21 @@ func TestSDKOwnCallRejectsCanceledAndReplacedAcceptedWriters(t *testing.T) {
 }
 
 func TestSDKOutsideHistoryRejectsCanceledAndReplacedReaders(t *testing.T) {
-	for _, change := range []string{"account", "config", "module", "disabled", "canceled"} {
+	for _, change := range []string{"account", "config", "module", "disabled", "reenabled", "canceled", "owner"} {
 		t.Run(change, func(t *testing.T) {
 			manager, scope := usageExtension(t, 8)
+			if change == "owner" {
+				writeUsageSubscriptionOwner(t, manager, scope, true)
+			}
+			var before extensionhost.Installed
+			var beforeConfig sdk.ConfigSnapshot
+			if change == "reenabled" {
+				var err error
+				before, beforeConfig, err = manager.ActiveModuleConfig(t.Context(), scope.Plugin)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			endpoint, started, release := usageWorkerBarrier(t)
 			raw, err := json.Marshal(map[string]any{
 				"pages": map[string]any{"": outsideUsageParams()}, "wait": endpoint,
@@ -594,8 +750,20 @@ func TestSDKOutsideHistoryRejectsCanceledAndReplacedReaders(t *testing.T) {
 				err = replaceUsageModule(t, manager, scope)
 			case "disabled":
 				err = manager.SetEnabled(t.Context(), scope.Plugin, false)
+			case "reenabled":
+				if err = manager.SetEnabled(t.Context(), scope.Plugin, false); err != nil {
+					t.Fatal(err)
+				}
+				err = manager.SetEnabled(t.Context(), scope.Plugin, true)
+				after, afterConfig, readErr := manager.ActiveModuleConfig(t.Context(), scope.Plugin)
+				if readErr != nil || before.Revision != after.Revision || beforeConfig.Version != afterConfig.Version {
+					t.Fatalf("off/on changed the package or configuration: %s/%s → %s/%s (%v)",
+						before.Revision, beforeConfig.Version, after.Revision, afterConfig.Version, readErr)
+				}
 			case "canceled":
 				cancel()
+			case "owner":
+				writeUsageSubscriptionOwner(t, manager, scope, false)
 			}
 			release()
 			<-done
@@ -605,6 +773,117 @@ func TestSDKOutsideHistoryRejectsCanceledAndReplacedReaders(t *testing.T) {
 			if len(Load(time.Time{})) != 0 || len(readOutsideMarks()) != 0 {
 				t.Fatalf("%s reader published under revoked authority", change)
 			}
+			if change == "reenabled" {
+				ReadOutsideCalls(t.Context())
+				if rows, marks := Load(time.Time{}), readOutsideMarks(); len(rows) != 1 || !rows[0].IsReported() || len(marks) != 1 {
+					t.Fatalf("current enablement did not publish a fresh history window: rows=%+v marks=%v", rows, marks)
+				}
+			}
 		})
+	}
+}
+
+func holdOutsideUsageIngest(t *testing.T) func() {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	var unlock sync.Once
+	reported.ingest.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ReadOutsideCalls(ctx)
+	}()
+	finish := func() {
+		unlock.Do(reported.ingest.Unlock)
+		<-done
+	}
+	t.Cleanup(func() {
+		cancel()
+		finish()
+	})
+	stacks := make([]byte, 256<<10)
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		n := runtime.Stack(stacks, true)
+		if strings.Contains(string(stacks[:n]), ".ingestReported(") {
+			return finish
+		}
+		select {
+		case <-done:
+			t.Fatal("outside reader exited before reaching reported ingestion")
+		case <-ctx.Done():
+			t.Fatal("outside reader did not reach reported ingestion", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestSDKOutsideHistoryRechecksOwnerAfterWaitingToIngest(t *testing.T) {
+	for _, transferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("transferred=%t", transferred), func(t *testing.T) {
+			manager, scope := usageExtension(t, 8)
+			if transferred {
+				writeUsageSubscriptionOwner(t, manager, scope, true)
+			}
+			setOutsideUsageFixture(t, manager, scope, map[string]any{"": outsideUsageParams()}, nil)
+			finish := holdOutsideUsageIngest(t)
+			writeUsageSubscriptionOwner(t, manager, scope, !transferred)
+			finish()
+			if rows, marks := Load(time.Time{}), readOutsideMarks(); len(rows) != 0 || len(marks) != 0 {
+				t.Fatalf("ownership changed before ingestion but the stale window published: rows=%+v marks=%v", rows, marks)
+			}
+			writeUsageSubscriptionOwner(t, manager, scope, true)
+			ReadOutsideCalls(t.Context())
+			if rows, marks := Load(time.Time{}), readOutsideMarks(); len(rows) != 1 || rows[0].Provider != "saved-vendor" ||
+				rows[0].ProviderAccount != "saved-alice" || len(marks) != 1 {
+				t.Fatalf("new owner could not import a clean window: rows=%+v marks=%v", rows, marks)
+			}
+		})
+	}
+}
+
+func TestSDKOutsideHistorySeesGatewayAppendAfterVisit(t *testing.T) {
+	manager, scope := usageExtension(t, 8)
+	writeUsageSubscriptionOwner(t, manager, scope, true)
+	const publicProvider, publicUser = "saved-vendor", "saved-alice"
+	vendorIDs := []string{"same-call", "other-account", "other-provider"}
+	var calls []any
+	for _, id := range vendorIDs {
+		call := outsideUsageParams()["calls"].([]any)[0].(map[string]any)
+		call["id"] = id
+		calls = append(calls, call)
+	}
+	setOutsideUsageFixture(t, manager, scope, map[string]any{"": map[string]any{"calls": calls}}, nil)
+	Append(Record{Provider: publicProvider, ProviderAccount: publicUser, RequestID: "earlier-local", Input: 10, Status: 200})
+	observer := &fakeObserver{}
+	remove := Observe(observer)
+	defer remove()
+	finish := holdOutsideUsageIngest(t)
+	Append(Record{Provider: publicProvider, ProviderAccount: publicUser, RequestID: vendorIDs[0], Input: 11, Status: 200})
+	Append(Record{Provider: publicProvider, ProviderAccount: "other-user", RequestID: vendorIDs[1], Input: 21, Status: 200})
+	Append(Record{Provider: "other-provider", ProviderAccount: publicUser, RequestID: vendorIDs[2], Input: 31, Status: 200})
+	finish()
+	namespace := sha256.Sum256([]byte(scope.Plugin + "\x00" + scope.Provider + "\x00" + scope.Account))
+	var ids []string
+	var input int
+	for _, row := range Load(time.Time{}) {
+		if row.Provider != publicProvider || row.ProviderAccount != publicUser {
+			continue
+		}
+		input += row.Input
+		if row.IsReported() {
+			ids = append(ids, row.RequestID)
+		}
+	}
+	if len(ids) != 2 || ids[0] != fmt.Sprintf("sdk:%x:%s", namespace, vendorIDs[1]) ||
+		ids[1] != fmt.Sprintf("sdk:%x:%s", namespace, vendorIDs[2]) || input != 35 {
+		t.Fatalf("late gateway write split the overlap or deduped another provider/account: ids=%v input=%d", ids, input)
+	}
+	if _, _, count := observer.counts(); count != 3 {
+		t.Fatalf("only successful ordinary calls reach live observers, got %d", count)
+	}
+	if marks := readOutsideMarks(); len(marks) != 1 || marks["sdk:saved-vendor\x00alice"].IsZero() {
+		t.Fatalf("a reconciled import did not advance its watermark: %v", marks)
 	}
 }

@@ -55,6 +55,9 @@ func setAccountOrder(id string, order []string) error {
 		// and kept in logins.json as plugin:<its id>
 		return arrangeLoginsAs(p.ID, pluginAgent(*p.Account.plugin), order)
 	}
+	if p.IsExtension() {
+		return arrangeExtensionLogins(p.ID, order)
+	}
 	if p.Account != nil {
 		return arrangeLogins(p.Account.Agent, order)
 	}

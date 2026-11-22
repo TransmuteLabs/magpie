@@ -214,11 +214,11 @@ type toolUseIDs struct {
 }
 
 func (t *toolUseIDs) write(b []byte) []byte {
-	t.buf = append(t.buf, b...)
 	if !t.sse {
+		t.buf = append(t.buf, b...)
 		return nil
 	}
-	out, rest := tidyEvents(t.buf, t.event)
+	out, rest := tidyEvents(t.buf, b, t.event)
 	t.buf = rest
 	return out
 }
@@ -230,7 +230,7 @@ func (t *toolUseIDs) flush() []byte {
 		return t.whole(b)
 	}
 	// what events remain go as they came, the reply may end inside one
-	out, rest := tidyEvents(b, t.event)
+	out, rest := tidyEvents(nil, b, t.event)
 	return append(out, rest...)
 }
 

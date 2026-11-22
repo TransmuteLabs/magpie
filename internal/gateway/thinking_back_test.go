@@ -74,10 +74,10 @@ func TestThinkingBackLearnedBehindAnotherName(t *testing.T) {
 				}
 				return 0, ""
 			}}
-			mineSrv := httptest.NewServer(mine)
+			mineSrv := httptest.NewServer(withoutAnonymousFixtureProbe(mine))
 			t.Cleanup(mineSrv.Close)
 			plain := &fake{t: t, reply: thinkingBackStream}
-			plainSrv := httptest.NewServer(plain)
+			plainSrv := httptest.NewServer(withoutAnonymousFixtureProbe(plain))
 			t.Cleanup(plainSrv.Close)
 			for _, p := range []provider.Provider{
 				{ID: "plan", Name: "Plan", Key: "k", Models: []string{"gpt-5.5"}, Responses: up.URL + "/v1"},

@@ -19,6 +19,7 @@ const ExtensionToolPrefix = "extension:"
 type extensionToolRuntime interface {
 	List() ([]extension.Installed, error)
 	ToolModules(context.Context) ([]extension.Installed, error)
+	ActiveModule(context.Context, string) (extension.Installed, error)
 	Call(context.Context, string, string, sdk.Scope, any, func(extension.Event) error) (json.RawMessage, error)
 }
 
@@ -36,7 +37,9 @@ func extensionTools(entries []extension.Installed, enabledOnly bool) []PluginToo
 	return extensionToolsVisible(entries, enabledOnly, true)
 }
 
-func callerExtensionTools(ctx context.Context, entries []extension.Installed) []PluginTools {
+// ExtensionToolsFor projects enabled SDK tool descriptors for the caller
+// without starting a module or the legacy plugin host.
+func ExtensionToolsFor(ctx context.Context, entries []extension.Installed) []PluginTools {
 	return extensionToolsVisible(entries, true, extension.LocalOwner(ctx))
 }
 
@@ -74,18 +77,37 @@ func extensionToolsVisible(entries []extension.Installed, enabledOnly, owner boo
 }
 
 func ReadList() (List, error) {
+	list, _, err := installedToolEntries()
+	return list, err
+}
+
+func ReadToolInventory() (List, func() map[string][]string, error) {
+	list, entries, err := installedToolEntries()
+	if err != nil {
+		return List{}, nil, err
+	}
+	return list, func() map[string][]string {
+		names, err := LegacyToolNames()
+		if err != nil {
+			return nil
+		}
+		return addExtensionToolNames(names, entries)
+	}, nil
+}
+
+func installedToolEntries() (List, []extension.Installed, error) {
 	list, err := readLegacyToolList()
 	if err != nil {
-		return List{}, err
+		return List{}, nil, err
 	}
 	entries, err := extensionToolsRuntime().List()
 	if err != nil {
-		return List{}, err
+		return List{}, nil, err
 	}
 	for _, entry := range entries {
 		list.Plugins = append(list.Plugins, Entry{Spec: ExtensionToolPrefix + entry.Manifest.ID, Off: entry.Disabled})
 	}
-	return list, nil
+	return list, entries, nil
 }
 
 func ToolsOn() (int, error) {
@@ -105,7 +127,7 @@ func ToolsOn() (int, error) {
 }
 
 func ToolNames() map[string][]string {
-	names, err := legacyToolNames()
+	names, err := LegacyToolNames()
 	if err != nil {
 		return nil
 	}
@@ -113,6 +135,10 @@ func ToolNames() map[string][]string {
 	if err != nil {
 		return nil
 	}
+	return addExtensionToolNames(names, entries)
+}
+
+func addExtensionToolNames(names map[string][]string, entries []extension.Installed) map[string][]string {
 	for _, group := range extensionTools(entries, false) {
 		if names == nil {
 			names = map[string][]string{}
@@ -153,15 +179,14 @@ func RunExtensionTool(ctx context.Context, spec, name string, args json.RawMessa
 	ctx, cancel := context.WithTimeout(ctx, ToolTimeout)
 	defer cancel()
 	manager := extensionToolsRuntime()
-	entries, err := manager.ToolModules(ctx)
+	entry, err := manager.ActiveModule(ctx, id)
 	if err != nil {
 		return result, err
 	}
-	declared := slices.ContainsFunc(entries, func(entry extension.Installed) bool {
-		return entry.Manifest.ID == id && slices.ContainsFunc(entry.Manifest.Tools, func(tool sdk.ToolDescriptor) bool {
+	declared := entry.Manifest.Contract.Has(sdk.ToolProvider) &&
+		slices.ContainsFunc(entry.Manifest.Tools, func(tool sdk.ToolDescriptor) bool {
 			return tool.Name == name && extensionToolVisible(tool.Exposure, extension.LocalOwner(ctx))
 		})
-	})
 	if !declared {
 		return result, errors.New("extension is disabled, removed, or does not declare this tool")
 	}

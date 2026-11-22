@@ -2,12 +2,15 @@ package gui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
@@ -71,5 +74,44 @@ func TestPluginSignInPageOpensOnce(t *testing.T) {
 	}
 	if n, st := start("blue"); n != 1 || st.Opened {
 		t.Fatalf("a page nothing opened was opened %d times: %+v", n, st)
+	}
+}
+
+func TestPluginBrowserSignInSurvivesRequest(t *testing.T) {
+	bun := testenv.Bun(t)
+	home := sandboxHome(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
+	t.Cleanup(plugin.Settle)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	source, err := filepath.Abs("../plugin/testdata/signinend/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Add(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	requestCtx, endRequest := context.WithCancel(ctx)
+	defer endRequest()
+	reply := do(Handler(nil, nil), httptest.NewRequestWithContext(requestCtx, http.MethodPost, "/api/plugin-signin",
+		bytes.NewBufferString(`{"provider":"signinend","method":1}`)))
+	endRequest()
+	var started provider.SignInState
+	if reply.Code != http.StatusOK || json.Unmarshal(reply.Body.Bytes(), &started) != nil || started.ID == "" || started.State != "waiting" {
+		t.Fatalf("browser setup: %d %s", reply.Code, reply.Body)
+	}
+	t.Cleanup(func() { provider.CancelSignIn(started.ID) })
+	if err := os.WriteFile(filepath.Join(home, "go"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.WaitSignIn(ctx, started.ID)
+	if err != nil || result.State != "done" || !plugin.SignedIn("signinend") {
+		t.Fatalf("browser did not finish after its start request ended: %+v (%v)", result, err)
 	}
 }

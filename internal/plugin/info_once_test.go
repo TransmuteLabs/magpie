@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -88,6 +89,12 @@ func TestFetchBuildsInfoOnce(t *testing.T) {
 		t.Fatalf("after a new sign-in 5 requests asked the models hook %d times, want 1", got)
 	}
 	// new options: built again, once
+	if err := settings.EditPluginOptions(func(options map[string]map[string]bool) (map[string]map[string]bool, error) {
+		options["fakeco"] = map[string]bool{"model-list": true}
+		return options, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := SetProviderOptions(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -97,5 +104,13 @@ func TestFetchBuildsInfoOnce(t *testing.T) {
 	}
 	if got := asked() - n; got != 1 {
 		t.Fatalf("after new options 5 requests asked the models hook %d times, want 1", got)
+	}
+	if err := SetProviderOptions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n = asked()
+	fetch()
+	if got := asked() - n; got != 0 {
+		t.Fatalf("reapplying the same options asked the models hook %d times, want 0", got)
 	}
 }

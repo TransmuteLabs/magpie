@@ -172,6 +172,27 @@ func TestSDKGatewayUsesServingManager(t *testing.T) {
 	}
 }
 
+func TestSDKRequestOnlyHookDoesNotCaptureResponse(t *testing.T) {
+	fresh(t)
+	manager := installSDKGatewayHook(t, sdkHookConfig{Marker: "request-only"}, sdk.GatewayHookDescriptor{Request: true})
+	const body = `{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request.RemoteAddr = "127.0.0.1:1234"
+	recorder := httptest.NewRecorder()
+	writer, accepted, finish := newServer(manager, routes.NewCatalog()).gatewayHooks(recorder, request, provider.Chat, []byte(body))
+	defer finish()
+	if !bytes.Contains(accepted, []byte("sdk recall: request-only")) {
+		t.Fatalf("request hook did not enrich the body: %s", accepted)
+	}
+	if writer != recorder {
+		t.Error("a request-only SDK hook captured the response")
+	}
+	const reply = `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	if _, err := io.WriteString(writer, reply); err != nil || recorder.Body.String() != reply {
+		t.Fatalf("reply forwarded as %q, write error %v", recorder.Body, err)
+	}
+}
+
 func closeSDKGatewayHook(t *testing.T, manager *extension.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -718,7 +739,7 @@ func TestSDKGatewayResponseOnly(t *testing.T) {
 func TestSDKGatewaySignInLoopWithoutLegacyHost(t *testing.T) {
 	codexSignedIn(t, "spare@example.com")
 	deliveries := make(chan sdkHookDelivery, 4)
-	observer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	observer := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var value sdkHookDelivery
 		if json.NewDecoder(r.Body).Decode(&value) != nil {
 			t.Error("invalid sign-in delivery")
@@ -726,10 +747,11 @@ func TestSDKGatewaySignInLoopWithoutLegacyHost(t *testing.T) {
 		}
 		deliveries <- value
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})))
 	t.Cleanup(observer.Close)
 	manager := extension.NewManager(t.TempDir())
 	installSDKGatewayHookOn(t, manager, sdkHookConfig{SignInURL: observer.URL}, sdk.GatewayHookDescriptor{SignIn: true})
+	probeFixtureRoot(t, observer)
 	server := newServer(manager, routes.NewCatalog())
 	access := codexAccessToken(t)
 	revokedUpstream(t, access)

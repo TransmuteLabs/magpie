@@ -34,9 +34,12 @@ at the shared MCP and Library entry. An account expiring within one minute
 uses the existing leased `auth.refresh` transaction before the tool runs.
 Only the durable, exact refresh successor with usable expiry is adopted;
 manual credential replacements do not transfer the old call's authority.
-The selected package, configuration, account and network policy are checked
-again before dispatch, acceptance and successful result publication. Disabled, paused or held selections
-fail closed. Unbound tools and unknown-expiry accounts do not trigger refresh.
+The selected package, configuration, enablement generation, account and network
+policy are checked again before dispatch, acceptance and successful result
+publication. Disabling and re-enabling a module revokes a prepared call even
+when its package and configuration stay the same. Disabled, paused or held
+selections fail closed. Unbound tools and unknown-expiry accounts do not trigger
+refresh.
 There is no reactive 401 refresh or automatic tool replay. The ordinary paths,
 concurrent rotating exchange and revocation controls are exercised by
 `TestExtensionToolExpiryPreflight*` in the gateway package.
@@ -79,9 +82,11 @@ the Library projection is in
 [`plugin_tools.go`](../../internal/library/plugin_tools.go).
 Scoped Memory callbacks check their running generation before and after
 search. Catalog and configuration reads use the tool call's context.
-The same SDK registry supplies enabled tool declarations for MCP discovery
-and execution. It also resolves tool account declarations. These reads and
-the selected account store use the caller's cancellation. The SDK tool
+The same SDK registry supplies enabled tool declarations for MCP discovery.
+Once the tool's module is known, account preparation reads that module and its
+configuration together by ID, and dispatch checks only the selected module.
+SDK 1.0 uses configuration version zero. These reads and the selected account
+store use the caller's cancellation. The SDK tool
 timeout starts before its final declaration check. The installed inventory
 still includes disabled modules for the Plugins page.
 

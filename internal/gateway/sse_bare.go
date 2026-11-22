@@ -25,6 +25,8 @@ import (
 // past it, it is no error object, and goes on as it came.
 const bareLimit = 1 << 20
 
+const bareReadSize = 32 << 10
+
 // bareErrors is r with every line that is a JSON error object of its own
 // (bareError) written as a data event. Lines that start anything else go
 // on as they come, a line not yet ended included; only a line that may
@@ -59,14 +61,29 @@ func (b *bareErrorReader) Read(p []byte) (int, error) {
 			}
 			return 0, b.err
 		}
-		if b.scratch == nil {
-			b.scratch = make([]byte, 32<<10)
+		direct := len(p) >= bareReadSize
+		var buf []byte
+		if direct {
+			buf = p[:bareReadSize]
+		} else {
+			if b.scratch == nil {
+				b.scratch = make([]byte, bareReadSize)
+			}
+			buf = b.scratch
 		}
-		n, err := b.r.Read(b.scratch)
-		b.in = append(b.in, b.scratch[:n]...)
+		n, err := b.r.Read(buf)
 		b.err = err
 		if n > 0 {
-			b.judge(false)
+			chunk := buf[:n]
+			if len(b.in) == 0 && b.bare == nil && b.unchanged(chunk) {
+				if direct {
+					return n, nil
+				}
+				b.out = chunk
+			} else {
+				b.in = append(b.in, chunk...)
+				b.judge(false)
+			}
 		}
 	}
 	n := copy(p, b.out)
@@ -75,6 +92,32 @@ func (b *bareErrorReader) Read(p []byte) (int, error) {
 		b.out = nil
 	}
 	return n, nil
+}
+
+func (b *bareErrorReader) unchanged(chunk []byte) bool {
+	mid, blank := b.mid, b.blank
+	for len(chunk) > 0 {
+		line, rest, ended := bytes.Cut(chunk, []byte{'\n'})
+		switch {
+		case mid:
+			if ended {
+				mid, blank = false, false
+			}
+		case ended:
+			text := bytes.TrimSpace(line)
+			if startsBare(text) {
+				return false
+			}
+			blank = len(text) == 0
+		case mayBeBare(line):
+			return false
+		default:
+			mid = true
+		}
+		chunk = rest
+	}
+	b.mid, b.blank = mid, blank
+	return true
 }
 
 // judge moves what of in can be judged to out; at the body's end
@@ -123,7 +166,7 @@ func (b *bareErrorReader) judge(eof bool) {
 		if len(line) == 0 {
 			continue
 		}
-		if len(t) > 0 && (t[0] == '{' || t[0] == '[') {
+		if startsBare(t) {
 			b.bare = append([]byte{}, line...)
 			b.settle()
 			continue
@@ -168,7 +211,11 @@ func (b *bareErrorReader) release() {
 // value: nothing yet but spaces, or a { or [ first.
 func mayBeBare(start []byte) bool {
 	t := bytes.TrimLeft(start, " \t\r")
-	return len(t) == 0 || t[0] == '{' || t[0] == '['
+	return len(t) == 0 || startsBare(t)
+}
+
+func startsBare(line []byte) bool {
+	return len(line) > 0 && (line[0] == '{' || line[0] == '[')
 }
 
 // sseField says whether a line is one of SSE's own: a field or a comment.

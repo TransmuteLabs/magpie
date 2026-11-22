@@ -178,6 +178,10 @@ func (snapshot linkedActionSnapshot) matchesFile() (bool, error) {
 }
 
 func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sdk.ActionSettings) (sdk.AgentPlan, error), files ...LinkedActionFile) (err error) {
+	return ApplyLinkedAgentPlanWithCommit(options, planner, nil, files...)
+}
+
+func ApplyLinkedAgentPlanWithCommit[Options any](options Options, planner func(Options, sdk.ActionSettings) (sdk.AgentPlan, error), commit func() error, files ...LinkedActionFile) (err error) {
 	snapshots := make(map[string]linkedActionSnapshot, len(files))
 	var originals []linkedActionSnapshot
 	check := func() error {
@@ -188,6 +192,15 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			}
 		}
 		return changed
+	}
+	finish := func() error {
+		if err := check(); err != nil {
+			return err
+		}
+		if commit != nil {
+			return commit()
+		}
+		return nil
 	}
 	defer func() {
 		if err == nil {
@@ -240,7 +253,7 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 		return errors.New("linked settings plan returned a binding change")
 	}
 	if len(plan.Files) == 0 {
-		return check()
+		return finish()
 	}
 	if err := validateActionOutput(plan.Files); err != nil {
 		return err
@@ -253,6 +266,9 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 		if snapshot.file.UnlinkLast && !change.Remove ||
 			change.Remove && (snapshot.file.UnlinkLast || snapshot.file.UnlinkName) && index != len(plan.Files)-1 {
 			return fmt.Errorf("linked settings unlink for %q must be the final change", change.Path)
+		}
+		if commit != nil && change.Remove && (snapshot.file.UnlinkLast || snapshot.file.UnlinkName) {
+			return errors.New("linked settings cannot combine a commit with a final unlink")
 		}
 	}
 	if err := check(); err != nil {
@@ -321,5 +337,5 @@ func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sd
 			return err
 		}
 	}
-	return check()
+	return finish()
 }

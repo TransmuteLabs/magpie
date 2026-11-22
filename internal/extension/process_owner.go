@@ -91,6 +91,17 @@ func newOwnedProcess(ctx context.Context, lease *Lease, scope sdk.Scope, launch 
 		stopIO()
 		return nil, err
 	}
+	if err := lease.manager.store.withStoreContext(parentCtx, scope.Plugin, func(root *os.Root) error {
+		state, err := storeDirectory(root, "state")
+		if err != nil {
+			return err
+		}
+		return state.Close()
+	}); err != nil {
+		cancel()
+		stopIO()
+		return nil, err
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		cancel()
@@ -513,12 +524,16 @@ func (lease *Lease) closeOwnedProcesses() {
 	}
 }
 
-func (manager *Manager) revokeOwnedProcesses(current map[string]Installed, configs map[string]string) {
+func (manager *Manager) revokeOwnedProcesses(tracked map[string]bool, current map[string]moduleGeneration) {
 	manager.mu.Lock()
 	var revoke []*ownedProcess
 	for parent := range manager.processes {
-		entry, found := current[parent.scope.Plugin]
-		if !found || entry.Revision != parent.lease.Revision() || configs[parent.scope.Plugin] != parent.lease.ConfigVersion() {
+		id := parent.scope.Plugin
+		if !tracked[id] {
+			continue
+		}
+		generation, found := current[id]
+		if !found || !parent.lease.worker.matches(generation.entry, generation.config) {
 			revoke = append(revoke, parent)
 		}
 	}

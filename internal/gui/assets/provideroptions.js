@@ -30,7 +30,7 @@ window.paintProviderOptions = function(box, options, values, confirmed) {
 };
 
 function sameProviderOptionsOwner(first, second) {
-  return first && second && ["module", "provider", "packageRevision", "configVersion"].every(key => first[key] === second[key]);
+  return first && second && ["module", "provider", "packageRevision", "ownerRevision", "configVersion"].every(key => first[key] === second[key]);
 }
 
 function providerOptionsChanged(provider) {
@@ -71,7 +71,7 @@ window.saveExtensionProviderOptions = async function(editingDraft, provider) {
   try {
     receipt = await api("provider/extension-options", {
       id: provider.id, module: owner.module, provider: owner.provider,
-      packageRevision: owner.packageRevision, expected: owner.configVersion,
+      packageRevision: owner.packageRevision, ownerRevision: owner.ownerRevision, expected: owner.configVersion,
       values: submitted, confirmed: [...(editingDraft.extensionConfirms || [])],
     });
   } catch (error) {

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -532,6 +534,42 @@ func TestHeldWaiterTakesTheBuild(t *testing.T) {
 	if v, w := <-first, <-second; v != 1 || w != 1 || n.Load() != 0 {
 		t.Fatalf("got %d and %d, the second built %d times; want 1, 1 and 0", v, w, n.Load())
 	}
+}
+
+func TestHeldWaiterDeadlineDoesNotCancelBuild(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		defer Hold()()
+		release, builder := heldBuilding(t, "t-deadline", "built")
+		defer release()
+		waiter := make(chan string, 1)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		go func() {
+			waiter <- heldOfContext(ctx, "t-deadline", func() string {
+				t.Error("expired waiter started a second build")
+				return "duplicate"
+			})
+		}()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		select {
+		case value := <-waiter:
+			if value != "" {
+				t.Errorf("expired waiter got %q", value)
+			}
+		default:
+			t.Error("expired waiter stayed attached to the build")
+			release()
+			<-waiter
+		}
+		release()
+		if value := <-builder; value != "built" {
+			t.Fatalf("another caller's deadline interrupted the builder: %q", value)
+		}
+		if value := heldOf("t-deadline", func() string { return "rebuilt" }); value != "built" {
+			t.Fatalf("another caller's deadline discarded the completed build: %q", value)
+		}
+	})
 }
 
 // A build that never ends, or panics, keeps no one waiting for good: a

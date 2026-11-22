@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,7 +20,7 @@ import (
 func TestLiveListsEndpointsRoute(t *testing.T) {
 	var mu sync.Mutex
 	var hits []string
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		hits = append(hits, r.URL.Path)
 		mu.Unlock()
@@ -61,7 +62,7 @@ data: {"type":"message_stop"}`))
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 	defer up.Close()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
@@ -87,17 +88,21 @@ data: {"type":"message_stop"}`))
 		mu.Lock()
 		hits = nil
 		mu.Unlock()
+		probeFixtureRoot(t, up)
 		res, err := http.Post(gw.URL+c.path, "application/json", strings.NewReader(c.body))
 		if err != nil {
 			t.Fatal(err)
 		}
 		b, _ := io.ReadAll(res.Body)
 		res.Body.Close()
+		mu.Lock()
+		routed := slices.Clone(hits)
+		mu.Unlock()
 		if res.StatusCode != 200 || !strings.Contains(string(b), c.want) {
-			t.Fatalf("%s: %d %s (upstream %v)", c.path, res.StatusCode, b, hits)
+			t.Fatalf("%s: %d %s (upstream %v)", c.path, res.StatusCode, b, routed)
 		}
-		if len(hits) != 1 {
-			t.Fatalf("%s: tried %v", c.path, hits)
+		if len(routed) != 1 {
+			t.Fatalf("%s: tried %v", c.path, routed)
 		}
 	}
 }

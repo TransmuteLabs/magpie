@@ -21,6 +21,7 @@ type refreshKey struct {
 	provider   string
 	account    string
 	generation uint64
+	owner      string
 }
 
 type refreshRun struct {
@@ -65,7 +66,11 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 	if err := netproxy.Held(ctx); err != nil {
 		return sdk.AuthResult{}, err
 	}
-	key := refreshKey{scope.Plugin, scope.Provider, scope.Account, scope.Generation}
+	if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+		return sdk.AuthResult{}, err
+	}
+	revision, _ := SubscriptionOwnerRevision(ctx)
+	key := refreshKey{scope.Plugin, scope.Provider, scope.Account, scope.Generation, revision}
 	m.mu.Lock()
 	if m.closed || lease.closed.Load() {
 		m.mu.Unlock()
@@ -148,38 +153,48 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 		return sdk.AuthResult{}, err
 	}
 	defer unlock()
-	if receipt, err := m.store.refreshStatus(scope); err != nil || receipt != nil {
-		if receipt != nil {
-			return *receipt, err
-		}
-		return sdk.AuthResult{}, err
-	}
 	operation, err := randomID()
 	if err != nil {
 		return sdk.AuthResult{}, err
 	}
 	scope.Session, scope.Operation, scope.Attempt = "", "refresh-"+operation, 1
-	run.mu.Lock()
-	if err := caller.Err(); err != nil {
-		run.mu.Unlock()
-		return sdk.AuthResult{}, err
+	var cached *sdk.AuthResult
+	var account Account
+	err = m.withSubscriptionScope(run.ctx, scope, func() error {
+		var err error
+		cached, err = m.store.refreshStatus(scope)
+		if err != nil || cached != nil {
+			return err
+		}
+		run.mu.Lock()
+		defer run.mu.Unlock()
+		if err := caller.Err(); err != nil {
+			return err
+		}
+		if err := run.ctx.Err(); err != nil {
+			return err
+		}
+		account, err = m.store.claimRefresh(scope, run.lease.Revision(), run.lease.ConfigVersion())
+		if err != nil {
+			return err
+		}
+		if err := caller.Err(); err != nil {
+			_, _ = m.store.finishRefresh(scope, nil, "not-started")
+			return err
+		}
+		run.dispatched = true
+		return nil
+	})
+	if cached != nil {
+		return *cached, err
 	}
-	if err := run.ctx.Err(); err != nil {
-		run.mu.Unlock()
-		return sdk.AuthResult{}, err
-	}
-	account, err := m.store.claimRefresh(scope, run.lease.Revision(), run.lease.ConfigVersion())
 	if err != nil {
-		run.mu.Unlock()
 		return sdk.AuthResult{}, err
 	}
-	if err := caller.Err(); err != nil {
-		run.mu.Unlock()
+	if err := m.store.checkSubscriptionView(run.ctx, scope); err != nil {
 		_, _ = m.store.finishRefresh(scope, nil, "not-started")
 		return sdk.AuthResult{}, err
 	}
-	run.dispatched = true
-	run.mu.Unlock()
 	ctx, cancel := context.WithTimeout(run.ctx, refreshRPCLimit)
 	defer cancel()
 	ctx = context.WithValue(ctx, hostAuthorityKey{}, hostAuthority{
@@ -190,11 +205,20 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 	}
 	raw, callErr := run.lease.client.call(ctx, sdk.MethodAuthRefresh, scope, account.Auth, sdk.AuthRefreshRequest{},
 		func(Event) error { return errors.New("credential refresh must return one unary result") })
+	cause := errors.New("extension credential refresh did not publish replacement credentials")
 	if callErr == nil {
 		if result, err := decodeRefreshResult(scope, raw); err == nil {
-			receipt, err := m.store.finishRefresh(scope, &result, "completed")
+			var receipt sdk.AuthResult
+			err := m.withSubscriptionScope(run.ctx, scope, func() error {
+				var err error
+				receipt, err = m.store.finishRefresh(scope, &result, "completed")
+				return err
+			})
 			if err == nil {
 				return receipt, nil
+			}
+			if errors.Is(err, errSubscriptionChanged) {
+				cause = err
 			}
 		}
 	}
@@ -206,7 +230,6 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 		state = "not-started"
 	}
 	_, _ = m.store.finishRefresh(scope, nil, state)
-	cause := errors.New("extension credential refresh did not publish replacement credentials")
 	if errors.Is(callErr, context.Canceled) {
 		cause = context.Canceled
 	} else if errors.Is(callErr, context.DeadlineExceeded) {

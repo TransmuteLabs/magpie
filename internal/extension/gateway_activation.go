@@ -107,7 +107,17 @@ func (owner *GatewayActivation) run(stopping context.Context) {
 	defer stop()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	var nextSignInSweep time.Time
 	for {
+		if time.Now().After(nextSignInSweep) {
+			nextSignInSweep = time.Now().Add(time.Minute)
+			ctx, cancel := context.WithTimeout(owner.ctx, time.Second)
+			err := owner.manager.store.reapSavedSignIns(ctx)
+			cancel()
+			if err != nil && owner.ctx.Err() == nil {
+				log.Printf("extension saved sign-in cleanup: %v", err)
+			}
+		}
 		owner.reconcile()
 		select {
 		case <-owner.ctx.Done():
@@ -120,29 +130,14 @@ func (owner *GatewayActivation) run(stopping context.Context) {
 
 func (owner *GatewayActivation) reconcile() {
 	manager := owner.manager
-	desired := map[string]Installed{}
-	configs := map[string]string{}
-	err := manager.Reload(owner.ctx)
-	if err == nil {
-		var installed []Installed
-		installed, err = manager.readContributionEntries(owner.ctx)
-		if err == nil {
-			for _, entry := range installed {
-				if !entry.Manifest.ActivatesGateway() {
-					continue
-				}
-				config, readErr := manager.runtimeModuleConfigContext(owner.ctx, entry.Manifest)
-				if readErr == nil {
-					desired[entry.Manifest.ID] = entry
-					configs[entry.Manifest.ID] = config.Version
-				}
-			}
-		}
+	desired, err := manager.reconcile(owner.ctx, true)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
 	}
 	for id, lease := range owner.leases {
-		entry, exists := desired[id]
-		if !exists || entry.Revision != lease.Revision() || entry.EnableGeneration != lease.worker.entry.EnableGeneration ||
-			configs[id] != lease.ConfigVersion() || !lease.client.alive() {
+		generation, exists := desired[id]
+		if !exists || !generation.entry.Manifest.ActivatesGateway() ||
+			!lease.worker.matches(generation.entry, generation.config) || !lease.client.alive() {
 			owner.withdraw(lease)
 			delete(owner.leases, id)
 		}
@@ -150,17 +145,18 @@ func (owner *GatewayActivation) reconcile() {
 	if err != nil || owner.ctx.Err() != nil {
 		return
 	}
-	for id, entry := range desired {
-		if owner.leases[id] != nil {
+	for id, generation := range desired {
+		entry, config := generation.entry, generation.config.Version
+		if !entry.Manifest.ActivatesGateway() || owner.leases[id] != nil {
 			continue
 		}
-		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + configs[id]
+		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + config
 		if owner.failed[id] == identity {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(owner.ctx, 10*time.Second)
 		worker, client, acquireErr := manager.acquire(ctx, id, &expectedGeneration{
-			packageRevision: entry.Revision, configVersion: configs[id], enableGeneration: &entry.EnableGeneration,
+			packageRevision: entry.Revision, configVersion: config, enableGeneration: &entry.EnableGeneration,
 		})
 		cancel()
 		if acquireErr != nil {
@@ -180,7 +176,7 @@ func (owner *GatewayActivation) reconcile() {
 		owner.leases[id] = lease
 	}
 	for id := range owner.failed {
-		if _, exists := desired[id]; !exists {
+		if generation, exists := desired[id]; !exists || !generation.entry.Manifest.ActivatesGateway() {
 			delete(owner.failed, id)
 		}
 	}
@@ -193,8 +189,7 @@ func (owner *GatewayActivation) withdraw(lease *Lease) {
 	closed := manager.closed
 	retire := !closed && manager.workers[lease.Manifest().ID] == lease.worker
 	if retire {
-		delete(manager.workers, lease.Manifest().ID)
-		manager.retireWG.Add(1)
+		manager.detachWorkerLocked(lease.worker.entry.Manifest.ID, lease.worker)
 	}
 	manager.mu.Unlock()
 	if retire {

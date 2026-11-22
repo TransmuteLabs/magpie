@@ -3,13 +3,17 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -106,6 +110,97 @@ func TestExtensionCatalogProjectionPreservesQuotaApplicabilityAndUnknown(t *test
 	if projected := projectedCatalogQuota(Provider{}, SubscriptionQuota{Error: "private vendor failure",
 		Windows: []QuotaWindow{{Name: "daily", Used: 0}}}, models); projected.Known || len(projected.Windows) != 0 {
 		t.Fatal("a failed quota read became an empty allowance", projected)
+	}
+}
+
+func TestExtensionCatalogProjectionQuotaProofHonorsDeadline(t *testing.T) {
+	old, _, _ := prepareUsageReadFixture(t)
+	id := ExtensionProviderID(old.manifest.ID, "vendor")
+	quota := usageTestRead(t, id, "alice", 20)
+	current := fixtureExtensionProvider(t, true)
+	warmSubscriptionUsageForTest(t, quota)
+	scope := sdk.Scope{Plugin: current.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
+	access := sdk.CatalogAccessDescriptor{Scope: "selected"}
+	if result, err := extensionCatalogProjection(t.Context(), scope, access); err != nil ||
+		len(result.Accounts) != 1 || !result.Accounts[0].Quota.Known {
+		t.Fatalf("fixture did not reach its warm quota projection: %+v %v", result, err)
+	}
+	unlock, held := filelock.Lock(filepath.Join(old.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the quota proof Store lock")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		type projection struct {
+			result sdk.CatalogReadResult
+			err    error
+		}
+		done := make(chan projection, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			result, err := extensionCatalogProjection(ctx, scope, access)
+			done <- projection{result, err}
+		}()
+		synctest.Wait()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		select {
+		case got := <-done:
+			unlock()
+			if got.err == nil || len(got.result.Accounts) != 0 {
+				t.Errorf("a timed-out projection published quota: %+v %v", got.result, got.err)
+			}
+		default:
+			unlock()
+			<-done
+			t.Error("projection remained blocked by the cached proof after its deadline")
+		}
+	})
+}
+
+func TestExtensionCatalogProjectionColdStoreHonorsDeadline(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	scope := sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
+	access := sdk.CatalogAccessDescriptor{Scope: "selected"}
+	Changed()
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the current SDK Store")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		done := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			result, err := extensionCatalogProjection(ctx, scope, access)
+			if len(result.Accounts) != 0 || result.ReadAt != 0 {
+				t.Errorf("a canceled read published a catalog: %+v", result)
+			}
+			done <- err
+		}()
+		synctest.Wait()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			unlock()
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("cold catalog error = %v, want deadline exceeded", err)
+			}
+		default:
+			unlock()
+			<-done
+			t.Error("cold catalog discovery still held the request after its deadline")
+		}
+	})
+	result, err := extensionCatalogProjection(t.Context(), scope, access)
+	if err != nil || len(result.Accounts) != 1 || len(result.Accounts[0].Models) != 1 ||
+		result.Accounts[0].Models[0].ID != ExtensionProviderID(scope.Plugin, scope.Provider)+"/m1" {
+		t.Fatalf("canceled discovery spoiled the next selected catalog: %+v %v", result, err)
+	}
+	scope.Generation++
+	if result, err := extensionCatalogProjection(t.Context(), scope, access); err == nil || len(result.Accounts) != 0 {
+		t.Fatalf("selected catalog accepted a different generation: %+v %v", result, err)
 	}
 }
 

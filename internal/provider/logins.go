@@ -10,6 +10,7 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -35,7 +36,6 @@ import (
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/netproxy"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/steady"
 )
@@ -83,8 +83,9 @@ type Login struct {
 	first bool
 	// home is the other Codex folder a ChatGPT account is signed in to
 	// in, Codex's own there (codexHomeLogins): not one to switch ~/.codex to.
-	home      string
-	extension *extensionAccount
+	home        string
+	extension   *extensionAccount
+	pluginUsage *pluginUsageSelection
 }
 
 type savedLogin struct {
@@ -132,7 +133,10 @@ type savedLogin struct {
 	// Refused is the Claude credential Anthropic refused (its version, in
 	// claude_auth.go): Lapsed holds while the account has that one, and
 	// says nothing of the one it is refreshed or signed in to next.
-	Refused string `json:"refused,omitempty"`
+	Refused            string                  `json:"refused,omitempty"`
+	SDKLapsed          string                  `json:"sdkLapsed,omitempty"`
+	SDKRefused         string                  `json:"sdkRefused,omitempty"`
+	PluginObservations pluginLoginObservations `json:"pluginObservations,omitzero"`
 	// Hidden is the agent's own sign-in removed in magpie, with the mark
 	// of the sign-in it was (side_logins.go): it is listed and tried no
 	// more until the agent signs in anew. The agent's files stay as they are.
@@ -199,6 +203,17 @@ func loginID(l savedLogin) string {
 // for an account whose logins haven't been written since — and for an
 // agent that keeps its accounts elsewhere, made of the name always.
 func LoginID(agent, user string) string {
+	return loginIDContext(context.Background(), agent, user)
+}
+
+func loginIDContext(ctx context.Context, agent, user string) string {
+	if owner, ok := heldSubscriptionOwnersContext(ctx).byPublicID(agent); ok {
+		for _, account := range owner.Accounts {
+			if accountKey(account.User) == accountKey(user) {
+				return account.LoginID
+			}
+		}
+	}
 	for _, l := range readLogins() {
 		if l.Agent == agent && accountKey(l.User) == accountKey(user) {
 			return loginID(l)
@@ -208,6 +223,14 @@ func LoginID(agent, user string) string {
 }
 
 func loginsPath() string { return appdir.Join(filepath.Dir(Path()), "logins.json") }
+
+func readCurrentLogins() ([]savedLogin, error) {
+	logins, err := filememo.ReadCurrent("logins", loginsPath(), parseLogins)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return logins, err
+}
 
 // lastLogins is the accounts last read from logins.json: a read that fails
 // (a file half there, one magpie can't open for a moment) is them, not no
@@ -310,8 +333,17 @@ func writeLogins(ls []savedLogin) error { return writeLoginsTold(ls, true) }
 // idle magpie built every catalog again each seenEvery, ~42 MB for dsh's
 // round alone. A reader still finds the file's new time and size.
 func writeLoginsTold(ls []savedLogin, tell bool) error {
+	return writeLoginsChecked(ls, tell, nil)
+}
+
+func writeLoginsChecked(ls []savedLogin, tell bool, check func() error) error {
 	if settings.AccountDiscoveryOff() {
 		return errAccountDiscoveryOff
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	// every account gets its stable id before it is written (#905): the
 	// one it has, or the stand-in made of its name, there to stay
@@ -326,10 +358,12 @@ func writeLoginsTold(ls []savedLogin, tell bool) error {
 	if err != nil {
 		return err
 	}
-	if tell {
-		defer Changed() // an account added, switched or gone: All builds anew
-	}
 	beforeLoginsWrite()
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
+	}
 	b = append(b, '\n')
 	if fileHolds(loginsPath(), b, 0o600) {
 		// the bytes are on the disk already (#6289): no new generation, no
@@ -344,16 +378,15 @@ func writeLoginsTold(ls []savedLogin, tell bool) error {
 	if err := lastgood.Keep(loginsPath(), validLogins, 0o600); err != nil {
 		return err
 	}
-	write := writePrivate
-	if !tell {
-		write = writePrivateQuiet
-	}
-	if err := write(loginsPath(), b); err != nil {
+	if err := writePrivateQuietChecked(loginsPath(), b, check); err != nil {
 		return err
 	}
 	lastLoginsMu.Lock()
 	lastLogins, loginsKnown = slices.Clone(ls), true
 	lastLoginsMu.Unlock()
+	if tell {
+		Changed()
+	}
 	return nil
 }
 
@@ -395,7 +428,14 @@ func writePrivate(path string, b []byte) error {
 // writePrivateQuiet is writePrivate with nothing read forgotten: a
 // request holding the file reads the old bytes for up to a second.
 func writePrivateQuiet(path string, b []byte) error {
+	return writePrivateQuietChecked(path, b, nil)
+}
+
+func writePrivateQuietChecked(path string, b []byte, check func() error) error {
 	if fileHolds(path, b, 0o600) {
+		if check != nil {
+			return check()
+		}
 		return nil
 	}
 	path, err := edit.Target(path) // a symlink stays, its target written
@@ -405,7 +445,7 @@ func writePrivateQuiet(path string, b []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return steady.WriteFile(path, b, 0o600)
+	return steady.WriteFileChecked(path, b, 0o600, check)
 }
 
 // fileHolds reports whether path is a file of exactly b, with the mode
@@ -413,10 +453,17 @@ func writePrivateQuiet(path string, b []byte) error {
 // writeChanged is steady.WriteFile for a file that is left alone, mtime
 // and all, when it already holds b (#6289).
 func writeChanged(path string, b []byte, perm os.FileMode) error {
+	return writeChangedChecked(path, b, perm, nil)
+}
+
+func writeChangedChecked(path string, b []byte, perm os.FileMode, check func() error) error {
 	if fileHolds(path, b, perm) {
+		if check != nil {
+			return check()
+		}
 		return nil
 	}
-	return steady.WriteFile(path, b, perm)
+	return steady.WriteFileChecked(path, b, perm, check)
 }
 
 func fileHolds(path string, b []byte, perm os.FileMode) bool {
@@ -1191,22 +1238,32 @@ func (p Provider) SignedOut() bool {
 // took logins.json's lock, a file opened across magpies (a seventh of
 // the list's CPU). The caller gets its own copy.
 func Logins(agent string) []Login {
-	return slices.Clone(heldOf("logins\x00"+agent, func() []Login { return loginsNow(agent) }))
+	return loginsContext(context.Background(), agent)
+}
+
+func loginsContext(ctx context.Context, agent string) []Login {
+	return slices.Clone(heldOfContext(ctx, "logins\x00"+agent, func() []Login {
+		return loginsNowContext(ctx, agent)
+	}))
 }
 
 // loginsRuns counts the lists Logins made (a test reads it).
 var loginsRuns atomic.Int64
 
 func loginsNow(agent string) []Login {
+	return loginsNowContext(context.Background(), agent)
+}
+
+func loginsNowContext(ctx context.Context, agent string) []Login {
 	loginsRuns.Add(1)
 	if settings.AccountDiscoveryOff() {
 		return nil
 	}
-	if logins, ok := extensionLogins(agent); ok {
+	if logins, ok := extensionLoginsContext(ctx, agent); ok {
 		return logins
 	}
-	if pp, ok := pluginOfAgent(agent); ok {
-		return pluginLoginList(pp)
+	if pp, ok := pluginOfAgentContext(ctx, agent); ok {
+		return pluginLoginList(ctx, pp)
 	}
 	var side []Login
 	switch agent {
@@ -1217,13 +1274,14 @@ func loginsNow(agent string) []Login {
 	case "gemini", "antigravity":
 		return googleLoginList(agent)
 	case "":
-		side = append(side, listExtensionLogins("")...)
+		side = append(side, listExtensionLoginsContext(ctx, "")...)
 		// a plugin's accounts go by its provider's id (a moved built-in's
 		// by the built-in's), the one in use first marked, as its own page
 		// lists them
 		byPlugin := map[string][]Login{}
-		for _, pp := range plugin.Cached() {
-			for _, l := range pluginLoginList(pp) {
+		plugins := heldPluginsContext(ctx)
+		for _, pp := range plugins {
+			for _, l := range pluginLoginList(ctx, pp) {
 				l.Agent = PluginID(pp.ID)
 				byPlugin[pp.ID] = append(byPlugin[pp.ID], l)
 			}
@@ -1250,7 +1308,7 @@ func loginsNow(agent string) []Login {
 			delete(byPlugin, b.id)
 		}
 		// the other plugins' after them
-		for _, pp := range plugin.Cached() {
+		for _, pp := range plugins {
 			side = append(side, byPlugin[pp.ID]...)
 			delete(byPlugin, pp.ID)
 		}
@@ -1476,7 +1534,7 @@ func switchLogin(agent, user string) error { return switchLoginBy(agent, user, f
 // itself (SwitchWhenSpent) rather than the user: the Codex app is then
 // restarted to follow it only when the user asked for that (RestartApp).
 func switchLoginBy(agent, user string, byMagpie bool) error {
-	if strings.HasPrefix(agent, "extension-") {
+	if isExtensionLoginAgent(agent) {
 		if settings.AccountDiscoveryOff() {
 			return errAccountDiscoveryOff
 		}
@@ -1748,7 +1806,7 @@ func ForgetLogin(agent, user string) error {
 	if settings.AccountDiscoveryOff() {
 		return errAccountDiscoveryOff
 	}
-	if strings.HasPrefix(agent, "extension-") {
+	if isExtensionLoginAgent(agent) {
 		return forgetExtensionLogin(agent, user, 0)
 	}
 	if pp, ok := pluginOfAgent(agent); ok {

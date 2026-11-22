@@ -22,7 +22,7 @@ func TestSourceResumeIdentityBindsSelectedInputAndRecipe(t *testing.T) {
 	if len(token) != 64 || sourceResumeToken(makeRecord()) != token {
 		t.Fatal("source command lacks a stable selection identity", token)
 	}
-	for _, change := range []string{"snapshot", "path", "cwd", "args", "launch-agent", "resume-mode", "storage-key", "storage-root"} {
+	for _, change := range []string{"snapshot", "path", "cwd", "args", "launch-agent", "resume-mode", "enablement", "storage-key", "storage-root"} {
 		t.Run(change, func(t *testing.T) {
 			record := makeRecord()
 			previous := token
@@ -43,6 +43,8 @@ func TestSourceResumeIdentityBindsSelectedInputAndRecipe(t *testing.T) {
 				record.grant.descriptor.AgentResume.Agent = "other-launch"
 			case "resume-mode":
 				record.grant.descriptor.Resume = "none"
+			case "enablement":
+				record.grant.enableGeneration = "new-generation"
 			case "storage-key":
 				record.storage.locator.Key = "other"
 			case "storage-root":

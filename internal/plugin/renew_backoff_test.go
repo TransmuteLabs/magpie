@@ -35,7 +35,7 @@ const start = source.indexOf('const RENEW_LEAD =')
 const end = source.indexOf('function leadOf(', start)
 assert.ok(start >= 0 && end > start, 'the renewal section exists')
 const unrenewed = new Map()
-const context = vm.createContext({ unrenewed, secretOf: (a) => a.refresh, Date, Math })
+const context = vm.createContext({ unrenewed, secretOf: (a) => a.refresh, AUTH_EPOCH: "_magpieAuthEpoch", Date, Math })
 vm.runInContext(source.slice(start, end), context)
 const run = (code) => vm.runInContext(code, context)
 

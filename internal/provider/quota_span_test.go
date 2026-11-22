@@ -25,7 +25,7 @@ func TestCreditsRunningOutReachTheQuotaReport(t *testing.T) {
 		Display: "282 / 3400", Amount: 282, Limit: 3400, Unit: "credits", RunsOutAt: "2026-10-30T17:34:42.000Z", RunsOut: 18.44}}}
 	q := quotaOfPlugin(SubscriptionQuota{Kind: "subscription", Provider: "workbuddy", User: "133****0660"}, u)
 
-	got := quotaReport([]SubscriptionQuota{q}, nil, nil, now)
+	got := quotaReport(t.Context(), []SubscriptionQuota{q}, nil, nil, now)
 	if len(got) != 1 || len(got[0].Windows) != 1 {
 		t.Fatalf("cards: %+v", got)
 	}
@@ -92,7 +92,7 @@ func TestQuotaSpanCarriesEveryWindowField(t *testing.T) {
 	full := QuotaWindow{Balance: &bal, Unlimited: true, Name: "Credits", Used: 40, ResetsAt: &at, Display: "1 / 2", Text: true, Amount: 1, Limit: 2, Unit: "credits",
 		RunsOutAt: &at, RunsOut: 3, Pool: "P", Lane: "images", Holds: &WindowHolds{}, HoldsWhy: "x", Spent: &bal, SpentSince: &at,
 		Error: "not read", AsOf: &at, Unknown: true}
-	got := quotaReport([]SubscriptionQuota{{Provider: "p", Windows: []QuotaWindow{full}}}, nil, nil, at)
+	got := quotaReport(t.Context(), []SubscriptionQuota{{Provider: "p", Windows: []QuotaWindow{full}}}, nil, nil, at)
 	b, _ := json.Marshal(got[0].Windows[0])
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {

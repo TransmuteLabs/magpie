@@ -56,7 +56,7 @@ func TestHistoryWriteHoldsNoReadingWaiter(t *testing.T) {
 	var writes atomic.Int32
 	var heldReleaseOnce sync.Once
 	oldWrite := noteHistoryWrite
-	noteHistoryWrite = func(qs []SubscriptionQuota, now time.Time) {
+	noteHistoryWrite = func(_ context.Context, _ []SubscriptionQuota, _ time.Time) {
 		if writes.Add(1) == 1 { // only the first caller pays for the write
 			close(noteEntered)
 			<-held // the slow disk, held until the test lets go
@@ -143,7 +143,7 @@ func TestCachedBatchNoteSkipsTheRead(t *testing.T) {
 	}
 	reads := 0
 	oldRead := readQuotaHist
-	readQuotaHist = func() quotaHist {
+	readQuotaHist = func() (quotaHist, error) {
 		reads++
 		return oldRead()
 	}

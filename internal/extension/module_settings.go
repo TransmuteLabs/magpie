@@ -20,37 +20,77 @@ type ModuleSettingsSnapshot struct {
 	Values map[string]json.RawMessage `json:"values"`
 }
 
-func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSettingsSnapshot, error) {
+type ModuleSettingsResult struct {
+	Snapshot ModuleSettingsSnapshot
+	Err      error
+}
+
+func (m *Manager) ListWithSettings(ctx context.Context) ([]Installed, map[string]ModuleSettingsResult, error) {
+	var entries []Installed
+	options := make(map[string]ModuleSettingsResult)
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		entries = make([]Installed, 0, len(view.entries))
+		for _, entry := range view.entries {
+			entry = view.enabledEntry(entry)
+			entries = append(entries, cloneInstalled(entry))
+			if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
+				options[entry.Manifest.ID] = ModuleSettingsResult{Err: err}
+				continue
+			}
+			if entry.Disabled || len(entry.Manifest.Settings) == 0 {
+				continue
+			}
+			result := ModuleSettingsResult{Err: m.moduleSettingsOwner(entry)}
+			if result.Err == nil {
+				result.Snapshot, result.Err = m.readModuleSettings(ctx, entry)
+			}
+			options[entry.Manifest.ID] = result
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return entries, options, nil
+}
+
+func (m *Manager) moduleSettingsOwner(entry Installed) error {
 	if m == nil || m.isClosed() {
-		return ModuleSettingsSnapshot{}, errModuleConfigClosed
+		return errModuleConfigClosed
 	}
 	if entry.Disabled || entry.Manifest.Component != nil || len(entry.Manifest.Settings) == 0 || entry.Revision == "" {
-		return ModuleSettingsSnapshot{}, errors.New("settings require an enabled root module with declared settings")
+		return errors.New("settings require an enabled root module with declared settings")
 	}
-	if entry.observerEnablementErr != nil {
-		return ModuleSettingsSnapshot{}, entry.observerEnablementErr
-	}
-	root, err := m.catalog.open(false)
-	if err != nil {
+	return entry.observerEnablementErr
+}
+
+func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSettingsSnapshot, error) {
+	if err := m.moduleSettingsOwner(entry); err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
-	defer root.Close()
-	unlock, err := catalogLock(ctx, root)
-	if err != nil {
-		return ModuleSettingsSnapshot{}, err
-	}
-	defer unlock()
-	if m.isClosed() {
-		return ModuleSettingsSnapshot{}, errModuleConfigClosed
-	}
-	current, err := moduleConfigEntry(root, entry.Manifest.ID, expectedGeneration{
-		packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
+	var snapshot ModuleSettingsSnapshot
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		if m.isClosed() {
+			return errModuleConfigClosed
+		}
+		current, err := view.configEntry(entry.Manifest.ID, expectedGeneration{
+			packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
+		})
+		if err != nil {
+			return err
+		}
+		current.EnableGeneration = entry.EnableGeneration
+		snapshot, err = m.readModuleSettings(ctx, current)
+		return err
 	})
 	if err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
-	manifest := current.Manifest
-	config, err := m.runtimeModuleConfigContext(ctx, manifest)
+	return snapshot, nil
+}
+
+func (m *Manager) readModuleSettings(ctx context.Context, entry Installed) (ModuleSettingsSnapshot, error) {
+	config, err := m.runtimeModuleConfigContext(ctx, entry)
 	if err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
@@ -58,8 +98,8 @@ func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSe
 	if err := json.Unmarshal(config.Values, &fields); err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
-	values := make(map[string]json.RawMessage, len(manifest.Settings))
-	for _, setting := range manifest.Settings {
+	values := make(map[string]json.RawMessage, len(entry.Manifest.Settings))
+	for _, setting := range entry.Manifest.Settings {
 		values[setting.Name] = fields[setting.Name]
 	}
 	return ModuleSettingsSnapshot{ModuleSettingsRevision: ModuleSettingsRevision{
@@ -71,7 +111,7 @@ func (m *Manager) CompareAndSwapModuleSettings(ctx context.Context, id string, r
 	if revision.PackageRevision == "" {
 		return ErrCatalogConflict
 	}
-	_, err := m.updateModuleConfig(ctx, id, expectedGeneration{
+	_, err := m.updateModuleConfig(ctx, id, "", expectedGeneration{
 		packageRevision: revision.PackageRevision, configVersion: revision.ConfigVersion,
 		enableGeneration: &revision.EnableGeneration,
 	}, changes)

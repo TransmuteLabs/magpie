@@ -16,7 +16,11 @@ type RoutingBinding = contributionBinding[sdk.RoutingStrategyDescriptor]
 var errRoutingRevoked = errors.New("routing strategy was revoked during ordering")
 
 func (m *Manager) RoutingStrategies() []RoutingBinding {
-	ctx, cancel := context.WithTimeout(context.Background(), sdk.MaxRoutingTimeoutMs*time.Millisecond)
+	return m.RoutingStrategiesContext(context.Background())
+}
+
+func (m *Manager) RoutingStrategiesContext(parent context.Context) []RoutingBinding {
+	ctx, cancel := context.WithTimeout(parent, sdk.MaxRoutingTimeoutMs*time.Millisecond)
 	defer cancel()
 	return registeredContributions(ctx, m, "", sdk.Manifest.DeclaredRoutingStrategies)
 }

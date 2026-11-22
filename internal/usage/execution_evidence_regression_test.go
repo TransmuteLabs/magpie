@@ -16,7 +16,7 @@ func TestAstraContractsUnknownCurrencyLedger(t *testing.T) {
 			if err := sdk.ValidateOwnCall(manifest, call); err != nil {
 				t.Fatal("fixture is not a valid SDK own call", err)
 			}
-			record := extensionCall(sdk.Scope{Plugin: "fixture", Provider: "vendor", Account: "account"}, call)
+			record := extensionCall("fixture-vendor", "account", call)
 			record.Time = time.Unix(1800000000, 0)
 			serving := &extensionLedgerServing{ctx: context.Background(), queue: make(chan extensionLedgerDelivery, 1)}
 			targets := []extensionhost.LedgerTarget{{Module: "observer"}}

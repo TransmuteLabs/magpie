@@ -22,7 +22,6 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	"github.com/yetone/magpie/internal/netproxy"
-	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -175,6 +174,7 @@ type QuotaWindow struct {
 // from Dial's local token log: vendors expose percentages, not token totals.
 type SubscriptionQuota struct {
 	extensionUsage *extensionUsageProof
+	pluginUsage    *pluginUsageSelection
 	Provider       string        `json:"provider"`
 	Name           string        `json:"name"`
 	Icon           string        `json:"icon"`
@@ -302,9 +302,10 @@ type SubscriptionQuota struct {
 	// routable: a remote magpie's card whose windows have Routing laid
 	// back on them (keepRemoteCards), so routing may go by them
 	routable bool
-	// In-process read order, separate from the vendor's ReadAt and never
-	// persisted: restarting starts a new sequence.
-	readSeq uint64
+	// Read order for in-process caches and the shared credit history,
+	// separate from when the vendor's reading arrived (ReadAt).
+	readSeq     uint64
+	readStarted time.Time
 	// wideBalance marks a balance that is the account's, not the key's
 	// own (balanceAccountWide)
 	wideBalance bool
@@ -356,13 +357,13 @@ var subscriptionTimeout = 20 * time.Second
 // cached it comes back at once, and a stale copy is refreshed in the
 // background; only the very first call waits, for as long as ctx allows.
 func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
-	if settings.AccountDiscoveryOff() {
+	if ctx.Err() != nil || settings.AccountDiscoveryOff() {
 		return nil
 	}
+	held := heldRead(ctx)
 	c := &subscriptionUsageCache
 	c.Lock()
 	have, fresh := c.data != nil, time.Since(c.at) < time.Minute
-	held := heldRead(ctx)
 	if held && have {
 		// allowances read only when asked (#1518): the cards stand as
 		// they were last read till the user asks again
@@ -381,19 +382,28 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		readCtx, seq := quotaReading(bg)
 		asked := claudeAskGeneration.Load()
 		goRead(func() {
-			out := fetchSubscriptionUsage(readCtx)
-			noteDailyCredits(out, time.Now())
-			noteCardHistory(out, time.Now())
+			out, discovered := fetchSubscriptionUsage(readCtx)
+			if discovered {
+				publishCtx, cancel := context.WithTimeout(readCtx, subscriptionTimeout)
+				noteCardHistory(publishCtx, out, time.Now())
+				discovered = publishCtx.Err() == nil
+				cancel()
+			}
 			c.Lock()
-			c.data = cacheCards(c.data, out, seq, false)
-			c.at, c.pending = time.Now(), nil
-			if claudeAskGeneration.Load() != asked {
-				c.at = time.Time{} // asked meanwhile: read again
+			c.pending = nil
+			if discovered {
+				c.data = cacheCards(c.data, out, seq, false)
+				c.at = time.Now()
+				if claudeAskGeneration.Load() != asked {
+					c.at = time.Time{} // asked meanwhile: read again
+				}
 			}
 			c.Unlock()
 			// told before done is closed, so whoever waits for the refresh
 			// has it finished, hook and all
-			toldUsage()
+			if discovered {
+				toldUsage()
+			}
 			close(done)
 		})
 	}
@@ -407,9 +417,13 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 	}
 	c.Lock()
-	out := visibleQuotas(c.data)
+	data := c.data
 	c.Unlock()
-	return withDailyCredits(withHeardClaudeCards(out), time.Now())
+	out := visibleQuotasContext(ctx, data)
+	if ctx.Err() != nil {
+		return out
+	}
+	return withDailyCredits(out, time.Now())
 }
 
 // SubscriptionUsageReading says a read of the accounts' usage is under way:
@@ -423,9 +437,11 @@ func SubscriptionUsageReading() bool {
 	return c.pending != nil
 }
 
-// visibleQuotas drops accounts removed from magpie since the last refresh.
-func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
-	all = currentExtensionQuotas(slices.Clone(all))
+// visibleQuotasContext drops accounts removed from magpie since the last refresh.
+func visibleQuotasContext(ctx context.Context, all []SubscriptionQuota) []SubscriptionQuota {
+	if ctx.Err() != nil {
+		return nil
+	}
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden || p.Off // switched off: not asked either
@@ -436,9 +452,15 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 		if hidden[q.Provider] {
 			continue
 		}
+		if q.extensionUsage == nil && q.From == "" && q.Provider == "claude" && q.User != "" {
+			q = withHeardClaude(q, Login{Agent: "claude", User: q.User})
+		}
 		if q.Provider == "gemini" || q.Provider == "antigravity" {
 			if chosen == nil {
-				chosen = keptExposedIDs("gemini", "antigravity")
+				chosen = keptExposedIDs(ctx, "gemini", "antigravity")
+			}
+			if ctx.Err() != nil {
+				continue
 			}
 			var base func(string) string
 			if q.Provider == "antigravity" {
@@ -455,7 +477,7 @@ func visibleQuotas(all []SubscriptionQuota) []SubscriptionQuota {
 		}
 		out = append(out, q)
 	}
-	return out
+	return ValidateSubscriptionQuotas(ctx, out)
 }
 
 // keptExposed is exposedIDs for Gemini's and Antigravity's quotas, kept
@@ -480,22 +502,26 @@ var exposedBuilds atomic.Int64
 
 // keptExposedIDs is exposedIDs(ids...), built again only after a change
 // or for other ids. What it gives is shared: read only.
-func keptExposedIDs(ids ...string) map[string]map[string]bool {
+func keptExposedIDs(ctx context.Context, ids ...string) map[string]map[string]bool {
+	if ctx.Err() != nil {
+		return nil
+	}
 	key := strings.Join(ids, "\x00")
 	now := StampNow()
 	keptExposed.Lock()
-	defer keptExposed.Unlock()
 	if keptExposed.ids != nil && keptExposed.key == key && keptExposed.stamp == now && time.Since(keptExposed.at) < exposedFor {
-		return keptExposed.ids
+		cached := keptExposed.ids
+		keptExposed.Unlock()
+		return cached
 	}
+	keptExposed.Unlock()
 	exposedBuilds.Add(1)
-	built := exposedIDs(ids...)
-	// a change while it was built: the next read builds it again
-	if StampNow() == now {
+	built := exposedIDs(ctx, ids...)
+	keptExposed.Lock()
+	if ctx.Err() == nil && StampNow() == now {
 		keptExposed.ids, keptExposed.key, keptExposed.stamp, keptExposed.at = built, key, now, time.Now()
-	} else {
-		keptExposed.ids = nil
 	}
+	keptExposed.Unlock()
 	return built
 }
 
@@ -503,14 +529,14 @@ func keptExposedIDs(ids ...string) map[string]map[string]bool {
 // it. Only those are built: every provider's whole list, each account's
 // and plugin's, was built for the two whose quotas are narrowed, on each
 // usage read (20 MB of a live magpie's idle two minutes).
-func exposedIDs(ids ...string) map[string]map[string]bool {
+func exposedIDs(ctx context.Context, ids ...string) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
-	for _, p := range All() {
+	for _, p := range sharedAllContext(ctx) {
 		if !slices.Contains(ids, p.ID) {
 			continue
 		}
 		offered := map[string]bool{}
-		for _, m := range p.Exposed() {
+		for _, m := range p.exposedContext(ctx) {
 			offered[m.ID] = true
 		}
 		out[p.ID] = offered
@@ -543,24 +569,23 @@ func chosenWindows(ws []QuotaWindow, chosen map[string]bool, base func(string) s
 }
 
 // fetchSubscriptionUsage asks every signed-in vendor at once.
-func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
-	if settings.AccountDiscoveryOff() {
-		return nil
+func fetchSubscriptionUsage(ctx context.Context) (cards []SubscriptionQuota, discovered bool) {
+	if ctx.Err() != nil || settings.AccountDiscoveryOff() {
+		return nil, false
 	}
 	ctx, _ = quotaReading(ctx)
-	// read for every card's caller alike, or for the one card ctx reads
-	// again (RefreshUsage), as long as a refresh of them all would be
-	ctx0, cancel := context.WithTimeout(context.WithoutCancel(ctx), subscriptionTimeout)
+	ctx, cancel := context.WithTimeout(ctx, subscriptionTimeout)
 	defer cancel()
+	plugins := heldPluginsContext(ctx)
 	// each account asked through its own proxy, if it has one (#237)
 	proxies := map[string]string{}
 	for _, p := range load().Providers {
 		proxies[p.ID] = p.Proxy
 	}
-	via := func(id string) context.Context { return netproxy.With(ctx0, proxies[id]) }
+	via := func(id string) context.Context { return netproxy.With(ctx, proxies[id]) }
 	// and one account of several through its own, if it has one (perLogin
 	// and loginQuota ask each so)
-	viaLogin := func(id, user string) context.Context { return ViaLogin(ctx0, id, user) }
+	viaLogin := func(id, user string) context.Context { return ViaLogin(ctx, id, user) }
 	hidden := map[string]bool{}
 	for _, p := range load().Providers {
 		hidden[p.ID] = p.Hidden || p.Off // switched off: not asked either
@@ -573,7 +598,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		for _, id := range []string{"claude", "cursor", "grok", "codex", "copilot", "kiro", "zcode", wbCN.id, wbAI.id, CommandCodePlanID, "qoder", QoderCNID, "zed", "devin", "factory", MiMoID, ChatGPTAPIID, "gemini", "antigravity"} {
 			hidden[id] = hidden[id] || id != r.provider
 		}
-		for _, pp := range plugin.Cached() {
+		for _, pp := range plugins {
 			id := PluginID(pp.ID)
 			hidden[id] = hidden[id] || id != r.provider
 			hidden[pp.ID] = hidden[pp.ID] || pp.ID != r.provider
@@ -590,7 +615,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 		placed[id] = true
 		if !hidden[id] {
-			fetches = append(fetches, pluginUsageFetchesOf(via, id)...)
+			fetches = append(fetches, pluginUsageFetchesOf(plugins, via, id)...)
 		}
 		return true
 	}
@@ -600,8 +625,8 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		if p, ok := claudeAccount(); ok {
 			// signed out, Claude Code's own allowance is none: the account
 			// in its place is a saved one, read as the others are
-			if ls := accountsOf("claude"); len(ls) > 1 || p.Account.standIn {
-				fetches = append(fetches, perLogin(via("claude"), ls, accountCard("claude"))...)
+			if ls := accountsOf(ctx, "claude"); len(ls) > 1 || p.Account.standIn {
+				fetches = append(fetches, perLogin(via("claude"), ls, accountCard(ctx, "claude"))...)
 			} else {
 				fetches = append(fetches, withUser(ctx, p.Account.User, func() SubscriptionQuota {
 					return claudeSubscriptionUsage(viaLogin("claude", p.Account.User), p.Account.User)
@@ -615,8 +640,8 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 	moved("grok")
 	if home, err := os.UserHomeDir(); err == nil {
 		if p, ok := codexAccount(home); ok && !hidden["codex"] {
-			if ls := accountsOf("codex"); len(ls) > 1 {
-				fetches = append(fetches, perLogin(via("codex"), ls, accountCard("codex"))...)
+			if ls := accountsOf(ctx, "codex"); len(ls) > 1 {
+				fetches = append(fetches, perLogin(via("codex"), ls, accountCard(ctx, "codex"))...)
 			} else {
 				dir := appdir.CodexHomeIn(home)
 				fetches = append(fetches, withUser(ctx, p.Account.User, func() SubscriptionQuota { return codexSubscriptionUsage(viaLogin("codex", p.Account.User), dir) }))
@@ -630,7 +655,7 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		// gateway's GET /v1/magpie/quotas, however fresh its reading was
 		// (subscription_usage_test.go, TestCopilotQuotaWithoutEditorsSignIn).
 		if ls := copilotLoginList(); len(ls) > 0 && !hidden["copilot"] {
-			fetches = append(fetches, perLogin(via("copilot"), ls, accountCard("copilot"))...)
+			fetches = append(fetches, perLogin(via("copilot"), ls, accountCard(ctx, "copilot"))...)
 		}
 	}
 	for _, id := range []string{"kiro", "zcode", wbCN.id, wbAI.id, CommandCodePlanID, "qoder", QoderCNID, "zed", "devin", "factory", MiMoID} {
@@ -657,8 +682,11 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 			})
 		}
 	}
-	fetches = append(fetches, pluginUsageFetches(via, hidden, placed)...)
-	fetches = append(fetches, extensionUsageFetches(via, hidden)...)
+	fetches = append(fetches, pluginUsageFetches(plugins, via, hidden, placed)...)
+	fetches = append(fetches, extensionUsageFetches(ctx, via, hidden)...)
+	if ctx.Err() != nil {
+		return nil, false
+	}
 	// each fetch keeps what it read (keepLast) itself: an account's
 	// reading, shared with LoginUsage, is kept once
 	out := make([]SubscriptionQuota, len(fetches))
@@ -668,13 +696,13 @@ func fetchSubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		go func() { defer wg.Done(); out[i] = f() }()
 	}
 	wg.Wait()
-	return out
+	return out, true
 }
 
 // accountsOf is every account magpie remembers for agent, the one it is
 // signed in to first.
-func accountsOf(agent string) []Login {
-	ls := Logins(agent)
+func accountsOf(ctx context.Context, agent string) []Login {
+	ls := loginsContext(ctx, agent)
 	sort.SliceStable(ls, func(i, j int) bool { return ls[i].Active && !ls[j].Active })
 	return ls
 }

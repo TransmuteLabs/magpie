@@ -35,6 +35,18 @@ func TestLoginsListedOnceARequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	Logins("codex")
+	if n := loginsRuns.Load() - runs; n != 0 {
+		t.Fatalf("after an identical save: listed %d times, want 0", n)
+	}
+	updated := readLogins()
+	seen := updated[0].Seen.Add(-time.Minute)
+	updated[0].Seen = seen
+	if err := writeLogins(updated); err != nil {
+		t.Fatal(err)
+	}
+	if accounts := Logins("codex"); len(accounts) != 1 || !accounts[0].Seen.Equal(seen) {
+		t.Fatalf("after changing the last-seen time: %+v", accounts)
+	}
 	if n := loginsRuns.Load() - runs; n != 1 {
 		t.Fatalf("after a write: listed %d times, want 1", n)
 	}

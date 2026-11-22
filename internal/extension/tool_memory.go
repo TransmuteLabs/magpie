@@ -67,7 +67,7 @@ func (manager *Manager) checkToolMemoryGrant(ctx context.Context, grant *toolMem
 	for _, entry := range manager.contributionEntries(ctx) {
 		if entry.Manifest.ID == selected.Manifest.ID && entry.Revision == selected.Revision &&
 			entry.EnableGeneration == selected.EnableGeneration {
-			config, err := manager.runtimeModuleConfigContext(ctx, entry.Manifest)
+			config, err := manager.runtimeModuleConfigContext(ctx, entry)
 			if err == nil && config.Version == grant.lease.ConfigVersion() && !grant.lease.closed.Load() {
 				return ctx.Err()
 			}

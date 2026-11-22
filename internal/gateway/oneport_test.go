@@ -106,6 +106,19 @@ func TestClientPathProtocolsArePerServerAndExact(t *testing.T) {
 	}
 }
 
+func TestReservedRoutesDoNotWaitForProtocolCatalog(t *testing.T) {
+	fresh(t)
+	server := New()
+	server.extensions = extension.NewManager(t.TempDir())
+	t.Cleanup(server.idle.stop)
+	request := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	request.RemoteAddr = "127.0.0.1:50001"
+	response := protocolCallUnderCatalogLock(t, server, server.Front(), request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("built-in API response: %d %s", response.Code, response.Body)
+	}
+}
+
 func TestClientPathProtocolsCannotShadowCoreNamespaces(t *testing.T) {
 	fresh(t)
 	for _, endpoint := range []string{"/api", "/api/state", "/api/new-admin-route", "/_magpie/sign-in", "/agent/codex/v1/models", "/wsl-secret/v1/models",

@@ -1,12 +1,14 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,9 +55,13 @@ func checkinOwnerFixtureWithService(t *testing.T, started, release string, modes
 		t.Fatalf("build checkin fixture: %v\n%s", err, output)
 	}
 	action := map[string]any{"id": "daily.claim", "effect": "write", "inputSchema": map[string]any{"type": "object"}}
+	minor := 8
+	if slices.Contains(modes, "rate-limited") {
+		minor = sdk.FullContract().Version.Minor
+	}
 	manifest := map[string]any{
 		"schema": 1, "id": "checkin.fixture", "version": "1.0.0", "runtime": "exec", "entry": entry,
-		"contract": map[string]any{"version": map[string]int{"major": 1, "minor": 8},
+		"contract": map[string]any{"version": map[string]int{"major": 1, "minor": minor},
 			"capabilities": []string{"outbound-executor", "account-auth", "module-rpc"}},
 		"providers": []any{map[string]any{"id": "vendor", "name": "Fixture", "protocols": []string{"chat"},
 			"checkin": map[string]any{"action": "daily.claim", "recheck": true}}},
@@ -86,9 +92,8 @@ func checkinOwnerFixtureWithService(t *testing.T, started, release string, modes
 	for position, mode := range modes {
 		id := []string{"first", "second"}[position]
 		auth, _ := json.Marshal(map[string]string{"token": id, "mode": mode, "displayName": "same display name"})
-		if _, err := manager.Store().SaveAccount(extensionhost.Account{
-			Plugin: "checkin.fixture", Provider: "vendor", ID: id, Auth: auth,
-		}, 0); err != nil {
+		if _, err := saveExtensionAuth(t.Context(), manager, sdk.Scope{Plugin: "checkin.fixture", Provider: "vendor"},
+			sdk.AuthResult{ID: id, Credentials: auth}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -130,7 +135,7 @@ func TestExtensionCheckinUsesOrdinaryOwners(t *testing.T) {
 	if len(PluginCheckins()[0].Checkins) != 1 || len(settings.Load().CheckinOff) != 1 {
 		t.Fatal("ordinary check-in display or account exclusion was lost")
 	}
-	marked := pluginCheckinMarks([]SubscriptionQuota{{Provider: id, User: "first"}, {Provider: id, User: "second"}})
+	marked := pluginCheckinMarks(t.Context(), []SubscriptionQuota{{Provider: id, User: "first"}, {Provider: id, User: "second"}})
 	if len(marked) != 2 || marked[0].CheckinKey == marked[1].CheckinKey || marked[0].Checkin == nil ||
 		marked[0].Checkin.Operation == nil || marked[0].Checkin.Operation.State != "completed" || marked[1].Checkin != nil {
 		t.Fatalf("ordinary cards lost exact account receipts: %+v", marked)
@@ -148,17 +153,107 @@ func TestExtensionCheckinUsesOrdinaryOwners(t *testing.T) {
 	}
 }
 
+func TestExtensionCheckinDeadlinePreservesPreviousMark(t *testing.T) {
+	started := filepath.Join(t.TempDir(), "started")
+	release := filepath.Join(t.TempDir(), "release")
+	manager, id, trace := checkinOwnerFixtureWithService(t, started, release, "")
+	key := pluginCheckinKey(id, "first")
+	now := time.Now()
+	previous, err := json.Marshal(map[string]WorkBuddyCheckin{
+		key: {Day: wbCheckinDay(now), At: now, Outcome: CheckinInactive, Msg: "earlier confirmed result"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginCheckinPath(), previous, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	results := CheckInAccount(ctx, pluginCheckinBy(id), key)
+	if _, err := os.Stat(started); err != nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("deadline did not expire during private startup: %v (%v)", ctx.Err(), err)
+	}
+	if got := checkinClaims(t, trace); got != 0 {
+		t.Fatalf("expired preflight dispatched %d claims", got)
+	}
+	if len(results) != 0 {
+		t.Errorf("expired preflight produced a check-in observation: %+v", results)
+	}
+	if got, err := os.ReadFile(pluginCheckinPath()); err != nil || !bytes.Equal(got, previous) {
+		t.Errorf("expired preflight replaced stored history: %s (%v)", got, err)
+	}
+	if err := manager.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(release, []byte("released"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	results = CheckInAccount(t.Context(), pluginCheckinBy(id), key)
+	if len(results) != 1 || results[0].Outcome != CheckinClaimed || results[0].Operation == nil ||
+		results[0].Operation.State != "completed" || checkinClaims(t, trace) != 1 {
+		t.Fatalf("expired preflight prevented the next authorized claim: %+v", results)
+	}
+}
+
+func TestExtensionCheckinUsesStoredAccountWithoutWritingPolicy(t *testing.T) {
+	manager, id, trace := checkinOwnerFixture(t)
+	if _, err := manager.Store().SaveAccount(extensionhost.Account{
+		Plugin: "checkin.fixture", Provider: "vendor", ID: "first", Auth: json.RawMessage(`{"token":"first"}`),
+	}, 0); err != nil {
+		t.Fatal(err)
+	}
+	Changed()
+	accounts := CheckinAccounts()
+	if len(accounts) != 1 || accounts[0].By != pluginCheckinBy(id) {
+		t.Fatalf("existing SDK account not discovered: %+v", accounts)
+	}
+	results := CheckInAccount(t.Context(), accounts[0].By, accounts[0].Key)
+	if len(results) != 1 || results[0].Outcome != CheckinClaimed || checkinClaims(t, trace) != 1 {
+		t.Fatalf("existing SDK account could not check in: %+v", results)
+	}
+	if _, err := os.Stat(loginsPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check-in wrote routing policy for the account: %v", err)
+	}
+}
+
 func TestExtensionCheckinTerminalWriteCannotReplay(t *testing.T) {
-	for _, mode := range []string{"lost", "invalid", "error"} {
+	for _, mode := range []string{"lost", "invalid", "error", "failed", "rate-limited"} {
 		t.Run(mode, func(t *testing.T) {
-			manager, _, trace := checkinOwnerFixture(t, mode)
+			fixtureMode := mode
+			if mode == "rate-limited" {
+				fixtureMode = ""
+			}
+			manager, _, trace := checkinOwnerFixture(t, fixtureMode)
+			if mode == "failed" || mode == "rate-limited" {
+				account, err := manager.Store().GetAccount("checkin.fixture", "vendor", "first")
+				if err != nil {
+					t.Fatal(err)
+				}
+				account.Auth, _ = json.Marshal(map[string]string{
+					"token": "first", "mode": mode, "until": time.Now().Add(-time.Hour).Format(time.RFC3339Nano),
+				})
+				if _, err := manager.Store().SaveAccount(account, account.Generation); err != nil {
+					t.Fatal(err)
+				}
+				Changed()
+			}
 			accounts := CheckinAccounts()
 			if len(accounts) != 1 {
 				t.Fatalf("SDK account not registered: %+v", accounts)
 			}
 			run := func() []WorkBuddyCheckin { return CheckInAccount(t.Context(), accounts[0].By, accounts[0].Key) }
-			if results := run(); len(results) != 1 || results[0].Outcome != CheckinFailed {
-				t.Fatalf("terminal write result: %+v", results)
+			first := run()
+			if len(first) != 1 || first[0].Outcome != CheckinFailed || first[0].Operation == nil ||
+				first[0].Operation.State == "not-started" {
+				t.Fatalf("terminal write result: %+v", first)
+			}
+			if mode == "failed" && (first[0].Operation.State != "completed" || first[0].ValidUntil.IsZero()) {
+				t.Fatalf("legacy failed fixture missed its saved result and expired boundary: %+v", first)
+			}
+			if mode == "rate-limited" && (first[0].Operation.State != "uncertain" ||
+				!strings.Contains(first[0].Msg, "requires SDK API 1.20")) {
+				t.Fatalf("older contract accepted the newer result: %+v", first)
 			}
 			run()
 			account, err := manager.Store().GetAccount("checkin.fixture", "vendor", "first")
@@ -172,11 +267,62 @@ func TestExtensionCheckinTerminalWriteCannotReplay(t *testing.T) {
 			if err := manager.Close(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			run()
+			if err := os.Remove(pluginCheckinPath()); err != nil {
+				t.Fatal(err)
+			}
+			retained := run()
+			if len(retained) != 1 || retained[0].Outcome != CheckinFailed || retained[0].Operation == nil ||
+				*retained[0].Operation != *first[0].Operation {
+				t.Fatalf("terminal receipt did not survive restart and loss of its display record: %+v", retained)
+			}
 			if calls := checkinClaims(t, trace); calls != 1 {
 				t.Fatalf("terminal write replayed across manual/generation/manager restart: %d", calls)
 			}
 		})
+	}
+}
+
+func TestExtensionCheckinRateLimitAppliesToSchedulerAndPress(t *testing.T) {
+	manager, id, trace := checkinOwnerFixture(t, "rate-limited")
+	account, err := manager.Store().GetAccount("checkin.fixture", "vendor", "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	boundary := now.Add(40 * time.Minute).UTC()
+	account.Auth, _ = json.Marshal(map[string]string{
+		"token": "first", "mode": "rate-limited", "until": boundary.Format(time.RFC3339Nano),
+	})
+	if _, err := manager.Store().SaveAccount(account, account.Generation); err != nil {
+		t.Fatal(err)
+	}
+	Changed()
+	accounts := CheckinAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("SDK account not registered: %+v", accounts)
+	}
+	press := func() []WorkBuddyCheckin { return CheckInAccount(t.Context(), accounts[0].By, accounts[0].Key) }
+	first := press()
+	if len(first) != 1 || first[0].Outcome != CheckinFailed || first[0].Msg != "fixture vendor pause" ||
+		!first[0].ValidUntil.Equal(boundary) || first[0].Operation == nil || first[0].Operation.State != "completed" {
+		t.Fatalf("ordinary check-in did not project the completed pause: %+v", first)
+	}
+	providers := extensionCheckinProviders(t.Context())
+	if len(providers) != 1 || providers[0].ID != id {
+		t.Fatalf("scheduled check-in did not find its owner: %+v", providers)
+	}
+	scheduled := wbCheckinLoop{}
+	during := scheduled.tick(t.Context(), providers[0].checkiner(func() time.Time { return boundary.Add(-time.Minute) }))
+	if len(during) != 1 || during[0].Asked || !during[0].ValidUntil.Equal(boundary) || !scheduled.again.Equal(boundary) {
+		t.Fatalf("scheduler did not keep the exact boundary: result=%+v next=%s", during, scheduled.again)
+	}
+	if err := os.Remove(pluginCheckinPath()); err != nil {
+		t.Fatal(err)
+	}
+	repeated := press()
+	if len(repeated) != 1 || repeated[0].Operation == nil || *first[0].Operation != *repeated[0].Operation ||
+		!repeated[0].ValidUntil.Equal(boundary) || checkinClaims(t, trace) != 1 {
+		t.Fatalf("manual check-in lost the durable pause after display loss: %+v", repeated)
 	}
 }
 
@@ -266,7 +412,7 @@ func TestExtensionCheckinPreservesSelectedPolicyAndOwnerDay(t *testing.T) {
 }
 
 func TestExtensionCheckinRefusesCapturedReplacedAuthority(t *testing.T) {
-	for _, change := range []string{"configuration", "account", "disabled"} {
+	for _, change := range []string{"configuration", "account", "disabled", "removed policy", "unreadable discovery"} {
 		t.Run(change, func(t *testing.T) {
 			manager, _, trace := checkinOwnerFixture(t, "")
 			captured := extensionCheckinProviders(t.Context())
@@ -294,6 +440,12 @@ func TestExtensionCheckinRefusesCapturedReplacedAuthority(t *testing.T) {
 				if err := manager.SetEnabled(t.Context(), "checkin.fixture", false); err != nil {
 					t.Fatal(err)
 				}
+			case "removed policy":
+				if err := os.Remove(loginsPath()); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable discovery":
+				damageExtensionDiscoverySettings(t)
 			}
 			results := captured[0].checkiner(time.Now).checkinNow(t.Context(), true)
 			if len(results) != 1 || results[0].Outcome != CheckinFailed || checkinClaims(t, trace) != 0 {

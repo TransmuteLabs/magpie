@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 // fakeClaude is a Claude.app whose executable, Claude, writes the
@@ -248,5 +250,90 @@ func TestAddLeavesTheirs(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(theirs, "Contents", "Info.plist")); err != nil {
 		t.Fatal("theirs gone")
+	}
+}
+
+func TestLauncherCommitFailureRestoresBundle(t *testing.T) {
+	noRegister(t)
+	home := t.TempDir()
+	app := fakeClaude(t, home, filepath.Join(home, "args"))
+	launcher, err := Add(home, app, filepath.Join(home, "old-profile"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(launcher, "Contents", "MacOS", exeName)
+	body, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(launcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("could not save preferences")
+	check := func(err error) {
+		t.Helper()
+		if !errors.Is(err, sentinel) {
+			t.Fatalf("change = %v, want preference error", err)
+		}
+		after, statErr := os.Stat(launcher)
+		newBody, readErr := os.ReadFile(executable)
+		if statErr != nil || readErr != nil || !os.SameFile(original, after) || !bytes.Equal(body, newBody) {
+			t.Fatal("failed change lost the original launcher")
+		}
+	}
+	_, err = AddWithCommit(home, app, filepath.Join(home, "new-profile"), filepath.Join(home, ".claude-new"), func() error {
+		if current, readErr := os.ReadFile(executable); readErr != nil || bytes.Equal(body, current) {
+			t.Fatal("replacement was not in place at commit")
+		}
+		return sentinel
+	})
+	check(err)
+	_, err = RemoveWithCommit(home, func() error {
+		if Here(home) != "" {
+			t.Fatal("launcher was still present at commit")
+		}
+		return sentinel
+	})
+	check(err)
+	if _, err := Remove(home); err != nil || Here(home) != "" {
+		t.Fatalf("remove after rollback: %v", err)
+	}
+}
+
+func TestAbsentLauncherCommitHoldsHomeLock(t *testing.T) {
+	const child = "MAGPIE_TEST_LAUNCHER_LOCK_HOME"
+	if home := os.Getenv(child); home != "" {
+		unlock, held := filelock.Lock(launcherLockPath(home), 0)
+		defer unlock()
+		if held {
+			t.Fatal("another process acquired the launcher lock during commit")
+		}
+		return
+	}
+	home := t.TempDir()
+	_, err := RemoveWithCommit(home, func() error {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAbsentLauncherCommitHoldsHomeLock$")
+		cmd.Env = append(os.Environ(), child+"="+home)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("lock probe: %v: %s", err, output)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(launcherLockPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, held := filelock.Lock(launcherLockPath(home), 0)
+	defer unlock()
+	after, err := os.Stat(launcherLockPath(home))
+	if !held || err != nil || !os.SameFile(before, after) {
+		t.Fatal("commit did not release the persistent lock")
+	}
+	if _, err := os.Stat(filepath.Dir(Path(home))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removing an absent launcher created its Applications directory: %v", err)
 	}
 }

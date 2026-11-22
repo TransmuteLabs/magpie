@@ -28,6 +28,7 @@ package provider
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -52,6 +53,10 @@ func MemberEffort(id string) (model, effort string) {
 // (nil to read the providers' models as needed). Several levels come
 // back as MemberLevels reads them: each once, lowest first, joined by "+".
 func memberEffortIn(entries []Entry, id string) (string, string) {
+	return memberEffortInContext(context.Background(), entries, id)
+}
+
+func memberEffortInContext(ctx context.Context, entries []Entry, id string) (string, string) {
 	id, _ = MemberAccount(id) // the account a member names comes after its effort (groupaccount.go)
 	i := strings.LastIndex(id, ":")
 	if i <= 0 {
@@ -61,7 +66,7 @@ func memberEffortIn(entries []Entry, id string) (string, string) {
 	if level == "" {
 		return id, "" // ":free", ":7b", ":0" — the model's own
 	}
-	if !strings.HasPrefix(id, GroupPrefix) && isModel(entries, id) {
+	if !strings.HasPrefix(id, GroupPrefix) && isModelContext(ctx, entries, id) {
 		return id, ""
 	}
 	return id[:i], level
@@ -100,6 +105,10 @@ func (m Member) Spelled() string {
 // colon and all: a catalog id, a model the user picked for its provider,
 // or one its provider lists.
 func isModel(entries []Entry, id string) bool {
+	return isModelContext(context.Background(), entries, id)
+}
+
+func isModelContext(ctx context.Context, entries []Entry, id string) bool {
 	if slices.ContainsFunc(entries, func(e Entry) bool { return e.ID == id || e.Model == id }) {
 		return true
 	}
@@ -108,26 +117,26 @@ func isModel(entries []Entry, id string) bool {
 	// request, and each member at an effort found every provider again
 	// (Find) and read its whole model list (Available), a third of
 	// /v1/models' CPU
-	return heldOf("has-model\x00"+id, func() bool { return providersHave(id) })
+	return heldOfContext(ctx, "has-model\x00"+id, func() bool { return providersHaveContext(ctx, id) })
 }
 
 // providersLooked counts providersHave's looks, for tests.
 var providersLooked atomic.Int64
 
 // providersHave is isModel's look at the providers, past the catalog.
-func providersHave(id string) bool {
+func providersHaveContext(ctx context.Context, id string) bool {
 	providersLooked.Add(1)
 	pid, model, ok := strings.Cut(id, "/")
 	var ps []Provider
 	if ok {
-		if p, err := Find(pid); err == nil {
+		if p, err := FindContext(ctx, pid); err == nil {
 			ps = []Provider{*p}
 		}
 	} else {
-		model, ps = id, All()
+		model, ps = id, AllContext(ctx)
 	}
 	for _, p := range ps {
-		if slices.Contains(p.Models, model) || slices.ContainsFunc(p.Available(), func(m catalog.Model) bool { return m.ID == model }) {
+		if slices.Contains(p.Models, model) || slices.ContainsFunc(p.availableContext(ctx), func(m catalog.Model) bool { return m.ID == model }) {
 			return true
 		}
 	}

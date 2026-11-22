@@ -1,12 +1,83 @@
 package sessions
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCodexForkCacheReplacesGrowingParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "parent.jsonl")
+	var history strings.Builder
+	var firstMarks map[cxCheckpoint]bool
+	var firstTurns map[string]bool
+	for checkpoint := 1; checkpoint <= codexForksKept; checkpoint++ {
+		history.WriteString(forkCheckpoint(checkpoint))
+		if err := os.WriteFile(path, []byte(history.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		marks, turns := codexCheckpointsOf(path)
+		if len(marks) != checkpoint || len(turns) != checkpoint {
+			t.Fatalf("parent grew to %d, got %d checkpoints and %d turns", checkpoint, len(marks), len(turns))
+		}
+		if checkpoint == 1 {
+			firstMarks, firstTurns = marks, turns
+		}
+	}
+	if len(firstMarks) != 1 || len(firstTurns) != 1 || !firstTurns["turn-1"] {
+		t.Fatalf("updating the cache changed a fork's in-use snapshot: %v, %v", firstMarks, firstTurns)
+	}
+	parents := 0
+	codexForks.Lock()
+	for _, entry := range codexForks.kept {
+		if entry.path == path {
+			parents++
+		}
+	}
+	codexForks.Unlock()
+	if parents != 1 {
+		t.Fatalf("cache holds %d versions of one parent, want 1", parents)
+	}
+}
+
+func TestCodexForkCacheTracksParentReplacement(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "parent.jsonl")
+	if err := os.WriteFile(path, []byte(forkCheckpoint(1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, turns := codexCheckpointsOf(path)
+	if !turns["turn-1"] {
+		t.Fatalf("the initial turn was absent: %v", turns)
+	}
+	replacement := filepath.Join(directory, "replacement.jsonl")
+	if err := os.WriteFile(replacement, []byte(forkCheckpoint(2)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	marks, turns := codexCheckpointsOf(path)
+	if len(marks) != 1 || len(turns) != 1 || !turns["turn-2"] {
+		t.Fatalf("the replacement parent has stale checkpoints or turns: %v, %v", marks, turns)
+	}
+}
+
+func forkCheckpoint(checkpoint int) string {
+	return fmt.Sprintf(`{"type":"turn_context","payload":{"turn_id":"turn-%[1]d"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%[1]d},"last_token_usage":{"input_tokens":1}}}}
+`, checkpoint)
+}
 
 // A fork's rollout starts with every line of its parent's, token_count
 // events included, stamped when the fork wrote them (codex-rs 0.117's

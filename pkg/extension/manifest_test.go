@@ -164,7 +164,7 @@ func TestModuleRequiresEveryAdvertisedHandlerAndRefusesUnknownMethods(t *testing
 	if legacy.Version.Major != 0 || legacy.Version.Minor != 5 || protocolext.CatalogContract().Version.Minor != 2 {
 		t.Fatal("external version altered the legacy codec contract")
 	}
-	if version := FullContract().Version; version != (APIVersion{Major: 1, Minor: 19}) {
+	if version := FullContract().Version; version != (APIVersion{Major: 1, Minor: 20}) {
 		t.Fatalf("unexpected SDK ceiling: %+v", version)
 	}
 }

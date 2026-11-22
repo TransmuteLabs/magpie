@@ -53,7 +53,7 @@ func (manager *Manager) observationTargets(ctx context.Context, capability sdk.C
 		if !declared {
 			continue
 		}
-		config, err := manager.runtimeModuleConfigContext(ctx, entry.Manifest)
+		config, err := manager.runtimeModuleConfigContext(ctx, entry)
 		if err != nil {
 			// An unreadable configuration revokes only that module.
 			continue

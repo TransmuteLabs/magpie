@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -131,13 +132,14 @@ func cloneSummary(s Summary) Summary {
 // usagePriceCacheKey invalidates priced views when local prices or provider feeds change.
 func usagePriceCacheKey(now time.Time) string {
 	// one catalog for the providers and the group names read below (#5978)
+	defer filememo.Hold()()
 	defer provider.Hold()()
 	_, offset := now.Zone()
 	meta := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d", statKey(settings.Path()), statKey(provider.Path())+provider.KeyRatesKey(), catalog.CacheKey(), liveListKey("antigravity"), now.Format("2006-01-02"), now.Location(), offset)
 	// Sign-ins and plugin lists can change independently of providers.json.
 	// Their identity and price feeds affect both grouping and historical costs.
 	h := sha256.New()
-	st := settings.Load()
+	st := settings.Shared()
 	prices, _ := json.Marshal(st.ModelPrices)
 	aliases := provider.UsageRenames().Key()
 	// and the names models' usage is counted under, which the groups key on

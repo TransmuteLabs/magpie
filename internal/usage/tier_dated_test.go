@@ -59,7 +59,7 @@ func TestDatedUltrafastPricedAtItsDay(t *testing.T) {
 	}
 	// one Pricer and one Coster across every call: a cache keyed without
 	// the day would price the second Ultrafast call as the first
-	cost, api, priceOf := NewCoster(), apiPricer(), Pricer()
+	cost, api, priceOf := NewCoster(), apiPricer(t.Context()), Pricer()
 	for _, c := range calls {
 		rec := Record{Time: c.at, Provider: c.prov, Model: c.model, TierSent: c.sent, TierServed: c.served, Input: in, Output: out, CacheRead: cached}
 		if pr := priceOf(rec); pr == nil || math.Abs(rec.CostAt(*pr)-c.want) > 1e-9 {

@@ -58,8 +58,9 @@ func deadChain(t *testing.T, keys ...string) (*deadKeys, *Server) {
 		restingUntil.Unlock()
 	})
 	d := &deadKeys{}
-	up := httptest.NewServer(d)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(d))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	p := provider.Provider{ID: "mockdead", Name: "mockdead", Chat: up.URL + "/v1", Models: []string{"glm-5.3-flash"}, Routing: provider.Ordered}
 	p.Key = keys[0]
 	for _, k := range keys[1:] {

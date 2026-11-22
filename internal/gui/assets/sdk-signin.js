@@ -16,7 +16,7 @@ export async function signOut(a, l, p) {
   const shown = { agent: p?.name || a.agentName, user: accountShownOf(p, l.user) };
   if (!await confirmAction(t("Sign {agent} out of {user}?", shown),
     t("magpie forgets this account's sign-in; the account itself is untouched"), t("Sign out"))) return;
-  await accountAction("login/forget", { agent: a.agent, account: { id: l.user, expectedGeneration: l.extensionGeneration } },
+  await accountAction("login/forget", { agent: a.agent, ownerRevision: a.ownerRevision, account: { id: l.user, expectedGeneration: l.extensionGeneration } },
     t("{agent} signed out of {user}", shown), true);
 }
 
@@ -47,7 +47,7 @@ function providerForm(sub, form, options) {
   const parent = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
   const isCurrent = () => !closed && signing === form;
   const send = (operation, body) => api("provider/sdk-signin", {
-    id: sub.id, revision: sub.revision, parent, operation, ...body,
+    id: sub.id, revision: sub.revision, ownerRevision: sub.ownerRevision, parent, operation, ...body,
   });
   const discard = (flow) => { if (flow) send("cancel", { flow }).catch(() => {}); };
   const account = options.user ? { id: options.user, expectedGeneration: options.generation } : null;
@@ -61,7 +61,8 @@ function providerForm(sub, form, options) {
 
   const summary = el("span", "tt");
   const questions = el("form", "tt");
-  const title = account ? t("Sign in again") + " · " + account.id : t("Sign in to {name}", { name: sub.name });
+  const provider = account && providers?.providers?.find((row) => row.account?.agent === sub.id);
+  const title = account ? t("Sign in again") + " · " + accountShownOf(provider, account.id) : t("Sign in to {name}", { name: sub.name });
   const ask = el("span", "n", title);
   const fields = el("div");
   let controls = [];

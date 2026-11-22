@@ -205,7 +205,8 @@ func (s *Server) realtime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if keyWho, held := accountHolds(r); held {
-		tries = slices.DeleteFunc(tries, func(c candidate) bool { return !accountAllowed(keyWho, c) })
+		current := provider.CurrentAccountIDs(r.Context())
+		tries = slices.DeleteFunc(tries, func(c candidate) bool { return !accountAllowed(keyWho, c.p, current) })
 		if len(tries) == 0 {
 			refuse(http.StatusForbidden, keyAccountsError(keyWho, asked))
 			return

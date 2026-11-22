@@ -41,10 +41,12 @@ func TestSDKPluginListingUsesFrozenPresentation(t *testing.T) {
 		{ID: "primary", Name: "Example Go", Protocols: []protocolext.Protocol{protocolext.Chat}},
 		{ID: "secondary", Name: "Example Zen", Protocols: []protocolext.Protocol{protocolext.Chat}},
 	}
-	manifest.AuthBindings = []sdk.WindowAuthBindingDescriptor{{
-		ID: "primary", From: sdk.ProviderSignInPart, Provider: "primary",
-		Methods: []sdk.WindowAuthMethod{{ID: "device", Mode: "poll", Label: "Device sign-in"}},
-	}}
+	for _, descriptor := range manifest.Providers {
+		manifest.AuthBindings = append(manifest.AuthBindings, sdk.WindowAuthBindingDescriptor{
+			ID: descriptor.ID, From: sdk.ProviderSignInPart, Provider: descriptor.ID,
+			Methods: []sdk.WindowAuthMethod{{ID: "device", Mode: "poll", Label: "Device sign-in"}},
+		})
+	}
 	source := t.TempDir()
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
@@ -127,8 +129,13 @@ func TestSDKPluginListingUsesFrozenPresentation(t *testing.T) {
 	}
 	signIns := readProviderSignInState(t, mux).SDKSubscriptions
 	wantIDs := []string{provider.ExtensionProviderID(manifest.ID, "primary"), provider.ExtensionProviderID(manifest.ID, "secondary")}
-	if !slices.Equal(row.SDK.ProviderIDs, wantIDs) || len(signIns) != 1 || signIns[0].ID != wantIDs[0] {
-		t.Errorf("SDK providers in Installed = %v, sign-in grants = %+v", row.SDK.ProviderIDs, signIns)
+	if !slices.Equal(row.SDK.ProviderIDs, wantIDs) || len(signIns) != len(wantIDs) {
+		t.Fatalf("SDK providers in Installed = %v, sign-in grants = %+v", row.SDK.ProviderIDs, signIns)
+	}
+	for index, item := range signIns {
+		if item.ID != wantIDs[index] || item.Name != manifest.Providers[index].Name || item.Icon != "opencode" {
+			t.Errorf("SDK subscription did not keep its provider name and package icon: %+v", item)
+		}
 	}
 
 	if err := host.SetEnabled(t.Context(), manifest.ID, false); err != nil {

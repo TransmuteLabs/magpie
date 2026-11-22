@@ -19,7 +19,7 @@ import (
 func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 	for _, route := range []string{"MCP", "Library text", "Library result"} {
 		test.Run(route, func(test *testing.T) {
-			for _, mode := range []string{"unchanged", "account off", "manual replacement", "configuration", "module off", "accepted unchanged", "accepted account off", "uncertain unchanged", "uncertain account off"} {
+			for _, mode := range []string{"unchanged", "account off", "manual replacement", "configuration", "module off", "module reenabled", "accepted unchanged", "accepted account off", "uncertain unchanged", "uncertain account off"} {
 				test.Run(mode, func(test *testing.T) {
 					fixture := installToolRefreshFixture(test, nil)
 					started, release := make(chan sdk.Scope, 1), make(chan struct{})
@@ -145,6 +145,12 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 						_, err = fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(`{"publication":"changed"}`))
 					case "module off":
 						err = extension.NewCatalog(fixture.manager.Namespace()).SetEnabled(ctx, fixture.scope.Plugin, false)
+					case "module reenabled":
+						catalog := extension.NewCatalog(fixture.manager.Namespace())
+						err = catalog.SetEnabled(ctx, fixture.scope.Plugin, false)
+						if err == nil {
+							err = catalog.SetEnabled(ctx, fixture.scope.Plugin, true)
+						}
 					}
 					releaseOnce.Do(func() { close(release) })
 					if err != nil {

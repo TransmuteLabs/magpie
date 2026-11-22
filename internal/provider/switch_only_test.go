@@ -129,9 +129,7 @@ func TestClaudeSwitchOnlyServesNothingAndStillSwitches(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginsMu.Unlock()
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("usage endpoint read: %s", r.URL)
-	}))
+	fake := refuseClaudeUsageReads(t)
 	defer fake.Close()
 	claudeBase = fake.URL // isolate puts it back
 	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
@@ -325,9 +323,7 @@ func TestClaudeSwitchOnlyMovesASignInKeptOnOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginsMu.Unlock()
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("usage endpoint read: %s", r.URL)
-	}))
+	fake := refuseClaudeUsageReads(t)
 	defer fake.Close()
 	claudeBase = fake.URL // isolate puts it back
 	for user, u := range map[string]float64{"a@example.com": 100, "b@example.com": 10} {

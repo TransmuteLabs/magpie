@@ -29,7 +29,7 @@ func TestPluginTextRowIsText(t *testing.T) {
 			t.Errorf("%s: Text %v", w.Name, w.Text)
 		}
 	}
-	r := quotaReport([]SubscriptionQuota{q}, nil, nil, time.Now())
+	r := quotaReport(t.Context(), []SubscriptionQuota{q}, nil, nil, time.Now())
 	if len(r) != 1 || len(r[0].Windows) != 5 || !r[0].Windows[0].Text || r[0].Windows[1].Text {
 		t.Fatalf("report %+v", r)
 	}

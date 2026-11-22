@@ -1,9 +1,14 @@
 package usage
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
 	"time"
 
 	"github.com/yetone/magpie/internal/access"
@@ -20,7 +25,8 @@ func WithOwnCallAppender(ctx context.Context, appendRecord func(Record)) context
 
 func init() {
 	extensionhost.OnOwnCallContext(func(ctx context.Context, scope sdk.Scope, call sdk.OwnCall) {
-		record := extensionCall(scope, call)
+		id, user := extensionhost.OwnCallPublicLogin(ctx)
+		record := extensionCall(id, user, call)
 		record.Agent, record.Session = "magpie", scope.Session
 		who := access.Caller(ctx)
 		record.CallerKeyID, record.CallerKeyName, record.CallerIssuerID = who.KeyID, who.KeyName, who.IssuerID()
@@ -33,9 +39,9 @@ func init() {
 	})
 }
 
-func extensionCall(scope sdk.Scope, call sdk.OwnCall) Record {
+func extensionCall(id, user string, call sdk.OwnCall) Record {
 	record := Record{
-		Provider: provider.ExtensionProviderID(scope.Plugin, scope.Provider), ProviderAccount: scope.Account,
+		Provider: id, ProviderAccount: user,
 		Model: call.Model, Requested: call.Model, Kind: call.Kind, Status: call.Status, Millis: call.Millis,
 		Error: clipProbeError(call.Error),
 	}
@@ -101,14 +107,15 @@ func extensionCallCounts(record *Record, counts sdk.ExecutionCounts) {
 }
 
 func readExtensionOutsideCalls(ctx context.Context, marks map[string]time.Time) bool {
-	accounts, err := provider.ExtensionOutsideAccounts()
+	accounts, err := provider.ExtensionOutsideAccounts(ctx)
 	if err != nil {
 		return false
 	}
 	changed := false
 	for _, account := range accounts {
 		scope := account.Scope()
-		key := "sdk:" + account.ProviderID() + "\x00" + scope.Account
+		id, user := account.PublicLogin()
+		key := "sdk:" + id + "\x00" + scope.Account
 		now := outsideIO.now()
 		since, known := marks[key]
 		if !known {
@@ -118,28 +125,25 @@ func readExtensionOutsideCalls(ctx context.Context, marks map[string]time.Time) 
 		if err != nil {
 			continue
 		}
-		through := map[string]bool{}
-		Visit(since, func(record Record) {
-			if record.Provider == account.ProviderID() && record.ProviderAccount == scope.Account &&
-				!record.IsReported() && record.RequestID != "" {
-				through[record.RequestID] = true
-			}
-		})
 		namespace := sha256.Sum256([]byte(scope.Plugin + "\x00" + scope.Provider + "\x00" + scope.Account))
+		overlap := outsideCallOverlap{provider: id, account: user, since: since,
+			prefix: "sdk:" + hex.EncodeToString(namespace[:]) + ":", pending: make(map[string]bool, len(calls))}
 		records := make([]Record, 0, len(calls))
 		for _, call := range calls {
-			if through[call.ID] {
-				continue
-			}
-			record := extensionCall(scope, call.OwnCall)
+			overlap.pending[call.ID] = true
+			record := extensionCall(id, user, call.OwnCall)
 			record.Time, record.Agent, record.Session = time.UnixMilli(call.Time).UTC(), scope.Plugin, call.Session
-			record.RequestID = "sdk:" + hex.EncodeToString(namespace[:]) + ":" + call.ID
+			record.RequestID = call.ID
 			records = append(records, record)
 		}
-		if account.Current(ctx) != nil {
-			continue
+		if len(records) > 0 {
+			snapshot := readLogSnapshot()
+			overlap.path, overlap.info, overlap.offset = snapshot.path, snapshot.info, snapshot.off
+			snapshot.visit(since, overlap.note)
 		}
-		if _, err := IngestReported(records); err != nil {
+		if _, err := ingestReported(ctx, records, func(publish func() error) error {
+			return account.Publish(ctx, publish)
+		}, &overlap); err != nil {
 			continue
 		}
 		next := now.Add(-outsideOverlap)
@@ -150,4 +154,71 @@ func readExtensionOutsideCalls(ctx context.Context, marks map[string]time.Time) 
 		changed = true
 	}
 	return changed
+}
+
+type outsideCallOverlap struct {
+	provider, account, prefix string
+	since                     time.Time
+	path                      string
+	info                      os.FileInfo
+	offset                    int64
+	pending                   map[string]bool
+}
+
+func (overlap *outsideCallOverlap) note(record Record) {
+	if overlap.pending[record.RequestID] && record.Provider == overlap.provider &&
+		record.ProviderAccount == overlap.account && !record.IsReported() && !record.IsProbe() &&
+		!record.Time.Before(overlap.since) {
+		delete(overlap.pending, record.RequestID)
+	}
+}
+
+var errOutsideLogChanged = errors.New("usage log changed during outside history import")
+
+func (overlap *outsideCallOverlap) catchUp(ctx context.Context, path string) error {
+	if overlap == nil || overlap.path == "" {
+		return nil
+	}
+	if path != overlap.path {
+		return errOutsideLogChanged
+	}
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) && overlap.info == nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := statLogHandle(file)
+	if err != nil {
+		return err
+	}
+	unchanged := sameLogInfo(overlap.info, info)
+	if unchanged && info.Size() == overlap.offset {
+		return nil
+	}
+	if !unchanged && overlap.info != nil && (!sameLogFile(overlap.info, info) || info.Size() <= overlap.info.Size()) {
+		return errOutsideLogChanged
+	}
+	reader := bufio.NewReaderSize(io.NewSectionReader(file, overlap.offset, info.Size()-overlap.offset), 64<<10)
+	for len(overlap.pending) != 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		line, err := reader.ReadBytes('\n')
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		overlap.offset += int64(len(line))
+		var record Record
+		if json.Unmarshal(line, &record) == nil {
+			overlap.note(record)
+		}
+	}
+	overlap.info = info
+	return nil
 }

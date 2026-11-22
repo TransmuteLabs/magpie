@@ -46,7 +46,8 @@ func TestPluginSameNameOtherUID(t *testing.T) {
 	if m := saved(); len(m) != 2 || m[first.Account]["uid"] != "u1" || m[second.Account]["uid"] != "u2" {
 		t.Fatalf("saved %v", m)
 	}
-	if again := signIn("pat/u1"); again != first {
+	if again := signIn("pat/u1"); again.Provider != first.Provider || again.Account != first.Account ||
+		again.AuthEpoch == "" || again.AuthEpoch == first.AuthEpoch {
 		t.Fatalf("u1 again as %+v, not %+v", again, first)
 	}
 	if m := saved(); len(m) != 2 {

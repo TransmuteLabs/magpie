@@ -43,20 +43,14 @@ type GatewayRun struct {
 	expiry  func() bool
 	mu      sync.Mutex
 	calls   []gatewayHookCall
+	observe bool
 	closed  bool
 	finish  bool
 	once    sync.Once
 }
 
-func (m *Manager) HasGateway(ctx context.Context) bool {
-	return slices.ContainsFunc(m.contributionEntries(ctx), func(entry Installed) bool {
-		hooks := entry.Manifest.Hooks
-		return hooks != nil && (hooks.Request || hooks.Response)
-	})
-}
-
 func (m *Manager) HasGatewaySignIn(ctx context.Context) bool {
-	return len(m.gatewayEntries(ctx, "local", true)) > 0
+	return len(m.gatewaySignInEntries(ctx)) > 0
 }
 
 func gatewayHookTimeout(descriptor sdk.GatewayHookDescriptor) time.Duration {
@@ -89,16 +83,12 @@ func gatewayCaptureBudget(calls []gatewayHookCall) time.Duration {
 	return max(longest, min(10*time.Second, max(2*time.Second, total)))
 }
 
-func gatewayHookOrigin(descriptor sdk.GatewayHookDescriptor, origin string) bool {
-	return descriptor.AllowsOrigin(origin)
-}
-
-func (m *Manager) gatewayEntries(ctx context.Context, origin string, signin bool) []Installed {
-	return slices.DeleteFunc(m.contributionEntries(ctx), func(entry Installed) bool {
+func (m *Manager) gatewaySignInEntries(ctx context.Context) []Installed {
+	entries, _ := m.selectContributions(ctx, func(entry Installed) bool {
 		hooks := entry.Manifest.Hooks
-		return hooks == nil || !gatewayHookOrigin(*hooks, origin) ||
-			signin && !hooks.SignIn || !signin && !hooks.Request && !hooks.Response
+		return hooks != nil && hooks.SignIn && hooks.AllowsOrigin("local")
 	})
+	return entries
 }
 
 func (m *Manager) openGatewayRun(ctx context.Context, body []byte, info sdk.GatewayContext, lifetime time.Duration) *GatewayRun {
@@ -125,12 +115,8 @@ func (m *Manager) openGatewayRun(ctx context.Context, body []byte, info sdk.Gate
 // acquireGatewayLease uses the request's bounded startup context without
 // making the resulting lease depend on the client's connection lifetime.
 func (m *Manager) acquireGatewayLease(ctx, lifetime context.Context, entry Installed) (*Lease, error) {
-	config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
-	if err != nil {
-		return nil, err
-	}
 	worker, client, err := m.acquire(ctx, entry.Manifest.ID, &expectedGeneration{
-		packageRevision: entry.Revision, configVersion: config.Version, enableGeneration: &entry.EnableGeneration,
+		packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
 	})
 	if err != nil {
 		return nil, err
@@ -142,11 +128,67 @@ func (m *Manager) acquireGatewayLease(ctx, lifetime context.Context, entry Insta
 // BeginGateway runs only explicit, origin-eligible SDK hooks. A failed hook
 // keeps the last accepted body and is excluded from completion notification.
 func (m *Manager) BeginGateway(ctx context.Context, body []byte, info sdk.GatewayContext) *GatewayRun {
-	if ctx == nil || ctx.Err() != nil || len(body) > gatewayBodyLimit || !gatewayObject(body) {
+	if len(body) > gatewayBodyLimit {
 		return nil
 	}
-	entries := m.gatewayEntries(ctx, info.Origin, false)
-	if len(entries) == 0 {
+	return m.SelectGateway(ctx, info.Origin).BeginGateway(ctx, body, info)
+}
+
+type GatewaySelection struct {
+	manager    *Manager
+	origin     string
+	hooks      []Installed
+	middleware []Installed
+}
+
+func (m *Manager) SelectGateway(ctx context.Context, origin string) GatewaySelection {
+	if ctx == nil || m == nil || m.isClosed() {
+		return GatewaySelection{}
+	}
+	selection := GatewaySelection{manager: m, origin: origin}
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		for _, index := range view.gateway {
+			entry := view.entries[index]
+			hooks := entry.Manifest.Hooks
+			middleware := entry.Manifest.Middleware
+			useHooks := hooks != nil && (hooks.Request || hooks.Response) && hooks.AllowsOrigin(origin)
+			useMiddleware := middleware != nil && middleware.AllowsOrigin(origin)
+			if !useHooks && !useMiddleware {
+				continue
+			}
+			entry = view.enabledEntry(entry)
+			if !activeRoot(entry) {
+				continue
+			}
+			if useHooks {
+				selection.hooks = append(selection.hooks, entry)
+			}
+			if useMiddleware {
+				selection.middleware = append(selection.middleware, entry)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return GatewaySelection{}
+	}
+	return selection
+}
+
+func (selection GatewaySelection) HasHooks() bool { return len(selection.hooks) != 0 }
+
+func (selection GatewaySelection) HasMiddleware() bool { return len(selection.middleware) != 0 }
+
+func (selection GatewaySelection) BeginGateway(ctx context.Context, body []byte, info sdk.GatewayContext) *GatewayRun {
+	if !selection.HasHooks() {
+		return nil
+	}
+	info.Origin = selection.origin
+	return selection.manager.beginGateway(ctx, body, info, selection.hooks)
+}
+
+func (m *Manager) beginGateway(ctx context.Context, body []byte, info sdk.GatewayContext, entries []Installed) *GatewayRun {
+	if ctx == nil || ctx.Err() != nil || len(body) > gatewayBodyLimit || !gatewayObject(body) {
 		return nil
 	}
 	run := m.openGatewayRun(ctx, body, info, gatewayRunLifetime)
@@ -194,6 +236,7 @@ func (m *Manager) BeginGateway(ctx context.Context, body []byte, info sdk.Gatewa
 			break
 		}
 		run.calls = append(run.calls, gatewayHookCall{lease: lease, descriptor: hooks, state: state})
+		run.observe = run.observe || hooks.Response
 		run.mu.Unlock()
 	}
 	run.mu.Lock()
@@ -251,6 +294,12 @@ func gatewayHookChange(before, after []byte) bool {
 	return true
 }
 
+func (run *GatewayRun) ObservesResponse() bool {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return !run.closed && run.observe
+}
+
 func (run *GatewayRun) Finish(_ context.Context, reply json.RawMessage, success bool, request ...json.RawMessage) {
 	if run == nil {
 		return
@@ -261,12 +310,18 @@ func (run *GatewayRun) Finish(_ context.Context, reply json.RawMessage, success 
 		return
 	}
 	run.finish = true
+	if !run.observe {
+		run.mu.Unlock()
+		go run.release()
+		return
+	}
 	calls := slices.Clone(run.calls)
 	run.mu.Unlock()
-	body := bytes.Clone(run.Body)
+	body := run.Body
 	if len(request) != 0 && len(request[0]) <= gatewayBodyLimit && gatewayObject(request[0]) {
-		body = bytes.Clone(request[0])
+		body = request[0]
 	}
+	body = bytes.Clone(body)
 	if len(reply) > 8<<20 || !json.Valid(reply) {
 		reply, success = json.RawMessage("null"), false
 	}
@@ -340,7 +395,7 @@ func (m *Manager) GatewaySignIn(ctx context.Context, event sdk.GatewaySignInEven
 	if ctx == nil || ctx.Err() != nil {
 		return
 	}
-	entries := m.gatewayEntries(ctx, "local", true)
+	entries := m.gatewaySignInEntries(ctx)
 	if len(entries) == 0 {
 		return
 	}

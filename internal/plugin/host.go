@@ -56,21 +56,24 @@ type message struct {
 	Data    string            `json:"data"`
 	// raw is Data decoded, filled by push so the body reads it without
 	// decoding the same frame a second time. It is never on the wire.
-	raw      []byte
-	Provider string `json:"provider"`
-	Account  string `json:"account"`
-	Said     string `json:"said"`
-	Level    string `json:"level"`
-	Message  string `json:"message"`
-	Title    string `json:"title"`
-	Variant  string `json:"variant"`
-	Count    int    `json:"count"`
+	raw       []byte
+	Provider  string      `json:"provider"`
+	Account   string      `json:"account"`
+	AuthEpoch *string     `json:"authEpoch"`
+	Route     *FetchModel `json:"route"`
+	Said      string      `json:"said"`
+	Level     string      `json:"level"`
+	Message   string      `json:"message"`
+	Title     string      `json:"title"`
+	Variant   string      `json:"variant"`
+	Count     int         `json:"count"`
 	// Loads is a "load" event's models and how busy each is, a percent;
 	// -1 clears one (magpie.load in host.js)
 	Loads map[string]float64 `json:"loads"`
 	// Usage is a "usage" event's request, one the plugin sent its vendor
 	// on its own (magpie.usage in host.js)
-	Usage *OwnCall `json:"usage"`
+	Usage     *OwnCall          `json:"usage"`
+	AuthStore *authStoreRequest `json:"authStore"`
 }
 
 // OwnCall is a request a plugin sent its vendor on its own, outside any
@@ -137,7 +140,12 @@ type call struct {
 	owed   int
 	// headed is whether the reply's head has been queued: a second one is a
 	// broken child, not another free line.
-	headed bool
+	headed          bool
+	checkAdmission  func(context.Context, FetchAuth, bool) error
+	providerOptions map[string]map[string]bool
+	resolveRoute    func(*FetchModel) (*FetchTarget, error)
+	askedAdmission  bool
+	admitted        bool
 
 	// h and id are how the call is given up: the child is told to stop its
 	// fetch only while the call is still the host's.
@@ -231,11 +239,19 @@ func (c *call) push(m message) bool {
 	}
 	cost := 0
 	switch m.Event {
+	case "admitFetch":
+		if c.checkAdmission == nil || c.askedAdmission || c.headed || len(m.Account) > 512 ||
+			m.AuthEpoch != nil && len(*m.AuthEpoch) > 128 ||
+			m.Route != nil && (c.resolveRoute == nil || m.Route.oversized()) {
+			return c.rejectFrameLocked()
+		}
+		c.askedAdmission = true
+		m = message{Event: m.Event, Account: m.Account, AuthEpoch: m.AuthEpoch, Route: m.Route}
 	case "head":
 		// exactly one head, and it is free: a repeat would be an unbounded
 		// run of zero-cost lines. Its headers are capped by magpie's own
 		// envelope, so an unbounded header set is not a free line either.
-		if c.headed || len(m.Headers) > maxHeadEntries || headCost(m.Headers) > maxHeadBytes {
+		if c.headed || c.checkAdmission != nil && !c.admitted || len(m.Headers) > maxHeadEntries || headCost(m.Headers) > maxHeadBytes {
 			return c.rejectFrameLocked()
 		}
 		c.headed = true
@@ -245,6 +261,9 @@ func (c *call) push(m message) bool {
 		// before it is queued, so a flood of empty chunks cannot grow the
 		// queue without spending the window. The frame is decoded once, here,
 		// so the body reads it without decoding the same bytes again.
+		if c.checkAdmission != nil && !c.headed {
+			return c.rejectFrameLocked()
+		}
 		raw, err := base64.StdEncoding.DecodeString(m.Data)
 		if err != nil || len(raw) == 0 || len(raw) > maxFrame {
 			return c.rejectFrameLocked()
@@ -492,7 +511,12 @@ type host struct {
 	proxy   string
 	proxyAt time.Time
 	// addr is the gateway's address the host was told (hostAddr)
-	addr string
+	addr            string
+	authPath        string
+	authRequests    chan authStoreRequest
+	authDone        chan struct{}
+	authUseRequests chan authStoreRequest
+	authUseDone     chan struct{}
 	// output is the child's stdout and stderr, read apart from its Wait,
 	// and waited gives what that Wait said; both are nil in the tests'
 	// fake hosts, which have no child
@@ -522,6 +546,8 @@ func (h *host) wait() error {
 // at once and closes the pipe a moment later, which ends the reader too.
 func (h *host) reap() {
 	h.fail(quitErr(h.wait()))
+	<-h.authDone
+	<-h.authUseDone
 	live.Lock()
 	delete(live.hosts, h)
 	live.Unlock()
@@ -747,13 +773,14 @@ func OnChangeNow(f func()) {
 
 var (
 	onSignInMu sync.Mutex
-	onSignIn   func(provider, account, said string)
+	onSignIn   func(provider, account, said string, epoch *string)
 )
 
 // OnSignIn registers f to be told what a plugin said, outside an answer,
 // its account's sign-in is: "expired", "kept" or "renewed" (a models
-// hook's error saying it).
-func OnSignIn(f func(provider, account, said string)) {
+// hook's error saying it). The epoch is the observed sign-in's, with
+// nil for an unknown or absent slot and an empty string for a legacy one.
+func OnSignIn(f func(provider, account, said string, epoch *string)) {
 	onSignInMu.Lock()
 	onSignIn = f
 	onSignInMu.Unlock()
@@ -941,9 +968,12 @@ var (
 )
 
 func (h *host) stop() {
-	h.in.Close()
 	start := time.Now()
-	wait := time.NewTimer(stopWait)
+	defer h.in.Close()
+	drainCtx, cancel := context.WithTimeout(h.ctx, stopWait)
+	_ = h.enqueue(drainCtx, map[string]string{"method": "drain"})
+	cancel()
+	wait := time.NewTimer(time.Until(start.Add(stopWait)))
 	defer wait.Stop()
 	select {
 	case <-h.dead:
@@ -1158,21 +1188,26 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	hctx, hcancel := context.WithCancel(context.Background())
 	h := &host{
 		cmd: cmd, in: in,
-		calls:    map[int64]*call{},
-		dead:     make(chan struct{}),
-		slots:    make(chan struct{}, callLimit()),
-		streams:  make(chan struct{}, streamLimit()),
-		out:      make(chan writeReq, callLimit()),
-		ctrl:     map[int64]*ctrl{},
-		ctrlWake: make(chan struct{}, 1),
-		ctx:      hctx,
-		cancel:   hcancel,
-		proxy:    proxy,
-		proxyAt:  time.Now(),
-		addr:     addr,
-		output:   output,
-		waited:   waited,
-		tree:     tree,
+		calls:           map[int64]*call{},
+		dead:            make(chan struct{}),
+		slots:           make(chan struct{}, callLimit()),
+		streams:         make(chan struct{}, streamLimit()),
+		out:             make(chan writeReq, callLimit()),
+		ctrl:            map[int64]*ctrl{},
+		ctrlWake:        make(chan struct{}, 1),
+		ctx:             hctx,
+		cancel:          hcancel,
+		proxy:           proxy,
+		proxyAt:         time.Now(),
+		addr:            addr,
+		output:          output,
+		waited:          waited,
+		tree:            tree,
+		authPath:        AuthPath(),
+		authRequests:    make(chan authStoreRequest, 1),
+		authDone:        make(chan struct{}),
+		authUseRequests: make(chan authStoreRequest, 1),
+		authUseDone:     make(chan struct{}),
 	}
 	live.hosts[h] = true
 	live.Unlock()
@@ -1185,6 +1220,8 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	go h.reap()
 	go h.writerLoop()
 	go h.ctrlLoop()
+	go h.authStoreLoop()
+	go h.authUseLoop()
 	generation.Add(1)
 
 	l := Load()
@@ -1212,7 +1249,7 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		catalogPath = catalog.CachePath()
 	}
 	err = h.call(ictx, "init", map[string]any{
-		"authPath":      AuthPath(),
+		"authPath":      h.authPath,
 		"modelsDevPath": catalogPath,
 		"piPath":        pi,
 		"directory":     settings.Dir(),
@@ -1437,10 +1474,26 @@ func (h *host) dispatch(m message) {
 		switch m.Event {
 		case "auth":
 			changed()
+		case "authStore":
+			if m.AuthStore == nil || m.AuthStore.ID <= 0 {
+				h.fail(errors.New("invalid request to save plugin sign-ins"))
+				h.kill()
+				return
+			}
+			queue := h.authRequests
+			if m.AuthStore.Use != "" || m.AuthStore.Release {
+				queue = h.authUseRequests
+			}
+			select {
+			case queue <- *m.AuthStore:
+			default:
+				h.fail(errors.New("the plugin host sent overlapping sign-in updates"))
+				h.kill()
+			}
 		case "recovered":
 			// the host read plugin-auth.json from its last good
 			// generation (#1505): the GUI says so
-			lastgood.Noted(AuthPath(), m.Said)
+			lastgood.Noted(h.authPath, m.Said)
 		case "renewing":
 			h.renewing.Store(int32(m.Count))
 		case "signIn":
@@ -1450,7 +1503,7 @@ func (h *host) dispatch(m message) {
 			if f != nil {
 				// counted, so Told waits for it: it writes the
 				// account's lapse into logins.json (#1935)
-				tell(func() { f(m.Provider, m.Account, m.Said) })
+				tell(func() { f(m.Provider, m.Account, m.Said, m.AuthEpoch) })
 			}
 		case "load":
 			noteLoads(m.Provider, m.Loads, time.Now())
@@ -1522,7 +1575,11 @@ func (h *host) enqueueOwned(ctx context.Context, v any, done chan error, c *call
 // encoded body twice over and copied it out twice more, so a 1 MB request
 // was some 5 MB more before it reached the plugin (#3472).
 func fetchLine(id int64, r FetchRequest) ([]byte, error) {
-	head, err := json.Marshal(map[string]any{"id": id, "method": "fetch", "params": r})
+	params := struct {
+		FetchRequest
+		Admission bool `json:"admission,omitempty"`
+	}{r, r.CheckAdmission != nil}
+	head, err := json.Marshal(map[string]any{"id": id, "method": "fetch", "params": params})
 	if err != nil {
 		return nil, err
 	}
@@ -1933,6 +1990,7 @@ type FetchRequest struct {
 	Model    string            `json:"model"`
 	NPM      string            `json:"npm"`
 	URL      string            `json:"url"`
+	Route    *FetchRoute       `json:"route,omitempty"`
 	Method   string            `json:"method"`
 	Headers  map[string]string `json:"headers"`
 	Body     []byte            `json:"-"`
@@ -1940,7 +1998,54 @@ type FetchRequest struct {
 	// Proxy is the provider's or the account's own proxy (netproxy.With):
 	// "direct", or its URL; "" follows magpie's. Fetch takes it from ctx
 	// when it isn't set.
-	Proxy string `json:"proxy,omitempty"`
+	Proxy           string                     `json:"proxy,omitempty"`
+	ProviderOptions map[string]map[string]bool `json:"providerOptions,omitempty"`
+	// CheckAdmission checks the prepared account with current discovery policy.
+	CheckAdmission func(context.Context, FetchAuth, bool) error `json:"-"`
+}
+
+// FetchRoute binds an original logical model to the request's dispatch.
+// Resolve receives the account's prepared model, or nil when its list fell back.
+type FetchRoute struct {
+	Name    string                                  `json:"name"`
+	Model   string                                  `json:"model,omitempty"`
+	Resolve func(*FetchModel) (*FetchTarget, error) `json:"-"`
+}
+
+// FetchModel is the selected account's model endpoint from the loader's
+// provider info. Its ID is the plugin's logical model ID.
+type FetchModel struct {
+	ID          string   `json:"id"`
+	NPM         string   `json:"npm"`
+	APIID       string   `json:"apiId"`
+	URL         string   `json:"url"`
+	Also        []string `json:"also"`
+	ProviderURL string   `json:"providerURL"`
+}
+
+func (m *FetchModel) oversized() bool {
+	size := len(m.ID) + len(m.NPM) + len(m.APIID) + len(m.URL) + len(m.ProviderURL)
+	for _, pkg := range m.Also {
+		size += len(pkg) + 1
+	}
+	return size > maxHeadBytes
+}
+
+// FetchTarget is the route the provider approves at dispatch. Path is a
+// suffix of the loader's base (else Base) or an absolute URL on its origin.
+// LoaderV1 keeps an Anthropic model's /v1 below the loader's base.
+type FetchTarget struct {
+	Path     string          `json:"path"`
+	Base     string          `json:"base"`
+	LoaderV1 bool            `json:"loaderV1,omitempty"`
+	Patch    *FetchBodyPatch `json:"patch,omitempty"`
+}
+
+// FetchBodyPatch replaces bytes [Start, End) of the original body.
+type FetchBodyPatch struct {
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+	Data  []byte `json:"data"`
 }
 
 // proxyOf is the proxy ctx names for the host: "" when it names none,
@@ -2118,36 +2223,60 @@ func hostEnv(env []string) []string {
 // Fetch sends r through the provider's plugin — its loader's fetch, or
 // Bun's own when it gives none — and streams back the reply.
 func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
+	res, _, err := FetchWithAuth(ctx, r)
+	return res, err
+}
+
+// FetchAuth identifies the slot and sign-in the host used for the reply.
+// Epoch is nil when the host could not bind a saved sign-in. An empty
+// epoch identifies a saved sign-in from before epochs were added.
+type FetchAuth struct {
+	Account string
+	Epoch   *string
+}
+
+// FetchWithAuth streams the reply and returns host-owned sign-in metadata.
+func FetchWithAuth(ctx context.Context, r FetchRequest) (*http.Response, FetchAuth, error) {
 	if err := netproxy.Held(ctx); err != nil {
-		return nil, err
+		return nil, FetchAuth{}, err
+	}
+	if r.Route != nil && (r.CheckAdmission == nil || r.Route.Resolve == nil) {
+		return nil, FetchAuth{}, errors.New("a routed plugin fetch needs dispatch admission")
 	}
 	h, err := get(ctx)
 	if err != nil {
-		return nil, err
+		return nil, FetchAuth{}, err
 	}
 	if r.Proxy == "" {
 		r.Proxy = proxyOf(ctx)
 	}
 	id, c, err := h.beginStream(ctx)
 	if err != nil {
-		return nil, err
+		return nil, FetchAuth{}, err
 	}
+	c.mu.Lock()
+	c.checkAdmission = r.CheckAdmission
+	c.providerOptions = r.ProviderOptions
+	if r.Route != nil {
+		c.resolveRoute = r.Route.Resolve
+	}
+	c.mu.Unlock()
 	line, err := fetchLine(id, r)
 	if err != nil {
 		c.settle(err)
-		return nil, err
+		return nil, FetchAuth{}, err
 	}
 	c.watchCtx(ctx)
 	err = h.enqueueLine(ctx, line, nil, c, callSending)
 	if err != nil {
 		c.settle(err)
-		return nil, err
+		return nil, FetchAuth{}, err
 	}
 	head, answer, err := c.headRead(ctx)
 	if err != nil {
 		// Settling either releases a completed answer or stops an active fetch.
 		c.settle(err)
-		return nil, err
+		return nil, FetchAuth{}, err
 	}
 	b := &body{h: h, id: id, c: c, ctx: ctx, answer: answer, closed: make(chan struct{})}
 	res := &http.Response{
@@ -2163,7 +2292,7 @@ func Fetch(ctx context.Context, r FetchRequest) (*http.Response, error) {
 	// the body is decoded already: fetch takes the Content-Encoding off
 	res.Header.Del("Content-Encoding")
 	res.Header.Del("Content-Length")
-	return res, nil
+	return res, FetchAuth{Account: head.Account, Epoch: head.AuthEpoch}, nil
 }
 
 // errBodyClosed is what a read after the body was closed gets.
@@ -2207,34 +2336,32 @@ func (c *call) headRead(ctx context.Context) (head message, answer *message, err
 	defer idle.Stop()
 	for {
 		if m, ok := c.pop(); ok {
-			return m, nil, nil
+			if m.Event == "admitFetch" {
+				if err := c.admitFetch(ctx, m); err != nil {
+					return message{}, nil, err
+				}
+				continue
+			}
+			return m, answer, nil
 		}
 		if err := c.givenUp(); err != nil {
 			return message{}, nil, err
 		}
-		if m := c.result(); m != nil {
-			// The head may have arrived with this answer after the empty
-			// queue check above. Drain it before interpreting the answer,
-			// just as when done wakes the reader below.
-			if hm, ok := c.pop(); ok {
-				return hm, m, nil
+		if answer != nil {
+			if answer.Error != nil {
+				return message{}, answer, errors.New(answer.Error.Message)
 			}
-			if m.Error != nil {
-				return message{}, m, errors.New(m.Error.Message)
-			}
-			return message{}, m, errors.New("the plugin answered no response")
+			return message{}, answer, errors.New("the plugin answered no response")
+		}
+		// A short reply can queue its head beside its answer. Check the
+		// queue again before interpreting an answer we just found.
+		if answer = c.result(); answer != nil {
+			continue
 		}
 		select {
 		case <-c.wake:
 		case m := <-c.done:
-			// the answer came with the head: keep it for the body
-			if hm, ok := c.pop(); ok {
-				return hm, &m, nil
-			}
-			if m.Error != nil {
-				return message{}, &m, errors.New(m.Error.Message)
-			}
-			return message{}, &m, errors.New("the plugin answered no response")
+			answer = &m
 		case <-ctx.Done():
 			return message{}, nil, ctx.Err()
 		case <-c.h.dead:
@@ -2245,6 +2372,41 @@ func (c *call) headRead(ctx context.Context) (head message, answer *message, err
 			return message{}, nil, fmt.Errorf("the plugin sent no reply in %s; that fetch was given up on", bodyIdleWait)
 		}
 	}
+}
+
+func (c *call) admitFetch(ctx context.Context, m message) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	options, off, err := settings.PluginOptionsNow()
+	if err != nil {
+		return fmt.Errorf("the plugin's provider options or account discovery policy could not be read: %w", err)
+	}
+	if err := c.checkAdmission(ctx, FetchAuth{Account: m.Account, Epoch: m.AuthEpoch}, off); err != nil {
+		return err
+	}
+	params := struct {
+		ID      int64                       `json:"id"`
+		Options *map[string]map[string]bool `json:"options,omitempty"`
+		Target  *FetchTarget                `json:"target,omitempty"`
+	}{ID: c.id}
+	if !maps.EqualFunc(options, c.providerOptions, maps.Equal) {
+		params.Options = &options
+	}
+	c.mu.Lock()
+	resolve := c.resolveRoute
+	c.resolveRoute = nil
+	c.mu.Unlock()
+	if resolve != nil {
+		params.Target, err = resolve(m.Route)
+		if err != nil {
+			return err
+		}
+	}
+	c.mu.Lock()
+	c.admitted = true
+	c.mu.Unlock()
+	return c.h.enqueueOwned(ctx, map[string]any{"method": "fetchAdmission", "params": params}, nil, c, callActive)
 }
 
 // body is a fetch's reply body. Its reader takes the chunks the call queued,

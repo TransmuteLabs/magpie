@@ -13,12 +13,15 @@ package provider
 // plan it stands in for (Seat), unless the user named it themselves.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 // seat is the signed-in account a key's plan was found to be.
@@ -162,7 +165,13 @@ func notShown(plans, subs []SubscriptionQuota) []SubscriptionQuota {
 // subscription id was found to stand in for, "" when none: the plan's
 // provider as it is named now, and its key's name when it has several.
 func SeatNameOf(id, user string) string {
-	seatMemo.Lock()
+	return SeatNameOfContext(context.Background(), id, user)
+}
+
+func SeatNameOfContext(ctx context.Context, id, user string) string {
+	if filelock.LockMutex(ctx, &seatMemo.Mutex) != nil {
+		return ""
+	}
 	memo := seatsLocked()
 	var plans []string
 	for k, s := range memo {
@@ -174,7 +183,7 @@ func SeatNameOf(id, user string) string {
 	slices.Sort(plans)
 	for _, k := range plans {
 		pid, key, _ := strings.Cut(k, "/")
-		p, err := Find(pid)
+		p, err := FindContext(ctx, pid)
 		if err != nil || p.Off {
 			continue
 		}

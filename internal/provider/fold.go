@@ -18,9 +18,11 @@ package provider
 // the providers were in.
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -257,6 +259,15 @@ func foldWhere(candidates func([]Provider) [][]int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if len(f.PendingFoldSettings) != 0 || len(f.PendingFoldHistories) != 0 {
+		if err := settleFold(f); err != nil {
+			return 0, err
+		}
+		f, err = read()
+		if err != nil {
+			return 0, err
+		}
+	}
 	if len(f.Providers) < 2 {
 		return 0, nil
 	}
@@ -362,17 +373,25 @@ func foldWhere(candidates func([]Provider) [][]int) (int, error) {
 		g.Classifier = ref(g.Classifier)
 		g.Pick = ref(g.Pick)
 	}
-	if err := store(f); err != nil {
+	f.PendingFoldSettings = gone
+	published, err := publishFold(&f, folds, ps)
+	if !published {
 		return 0, err
 	}
+	finishProviderStore(f)
 	for id := range gone {
 		// the list last fetched for it is the one it went into's
 		_ = os.Remove(catalog.LivePath(id))
 		_ = os.Remove(catalog.LivePath(decisionsID(id)))
 	}
-	foldSettings(&s, gone, ref)
-	foldHistories(folds, ps)
-	return len(gone), nil
+	if err != nil {
+		return len(gone), err
+	}
+	current, err := read()
+	if err != nil {
+		return len(gone), err
+	}
+	return len(gone), settleFold(current)
 }
 
 // foldSet is the provider the copies ps[set…] fold into — the first of
@@ -482,45 +501,125 @@ func compact(xs []string) []string {
 	return out
 }
 
-// foldSettings moves what the settings say by a folded provider's id to
-// the one it went into. Its per-model preferences were the same as that
-// one's (foldShape), so they go; a picker's lists of models and an agent's
-// providers name the one it went into, once.
-func foldSettings(s *settings.Settings, gone map[string]string, ref func(string) string) {
-	before, _ := json.Marshal(s)
-	settings.PerModelKeys(s, func(_ string, m reflect.Value) {
-		if !m.IsValid() || m.Kind() != reflect.Map {
-			return
-		}
-		for _, k := range m.MapKeys() {
-			id, _, ok := strings.Cut(k.String(), "/")
-			if _, folded := gone[id]; ok && folded {
-				m.SetMapIndex(k, reflect.Value{})
-			}
-		}
-	})
-	for _, lists := range []map[string][]string{s.HiddenModels, s.PickedModels, s.OrderedModels, s.FastPicks, s.UltraPicks} {
-		for k, ids := range lists {
-			lists[k] = compact(mapEach(ids, ref))
+var errFoldSettingsChanged = errors.New("provider preferences changed during the fold")
+
+func foldSettingsMatch(current *settings.Settings, gone map[string]string) error {
+	refs := foldRefs(file{}, current)
+	for old, into := range gone {
+		if !slices.Equal(refs[old], refs[into]) || modelPrefs(current, old) != modelPrefs(current, into) {
+			return fmt.Errorf("%w: %s and %s now differ", errFoldSettingsChanged, old, into)
 		}
 	}
-	for a, names := range s.Visible {
-		s.Visible[a] = compact(mapEach(names, func(n string) string {
-			if t, ok := gone[strings.ToLower(n)]; ok {
-				return t
-			}
-			return ref(n)
-		}))
-	}
-	if after, _ := json.Marshal(s); !bytes.Equal(before, after) {
-		_ = settings.Save(*s)
-	}
+	return nil
 }
 
-// foldHistories moves the balances and windows kept for each folded
-// provider's key, kept by the provider's id while it had one key, to the
-// key's name on the one it went into, where they are read now.
-func foldHistories(folds [][]int, ps []Provider) {
+func foldSettings(current *settings.Settings, gone map[string]string) (bool, error) {
+	changed := false
+	var conflict error
+	settings.PerModelKeys(current, func(_ string, values reflect.Value) {
+		if conflict != nil {
+			return
+		}
+		for _, key := range values.MapKeys() {
+			id, model, ok := strings.Cut(key.String(), "/")
+			into, folded := gone[id]
+			if !ok || !folded {
+				continue
+			}
+			target := reflect.ValueOf(into + "/" + model).Convert(values.Type().Key())
+			value, saved := values.MapIndex(key), values.MapIndex(target)
+			if saved.IsValid() && !reflect.DeepEqual(saved.Interface(), value.Interface()) {
+				conflict = fmt.Errorf("%w: %s and %s now differ", errFoldSettingsChanged, key.String(), target.String())
+				return
+			}
+			values.SetMapIndex(target, value)
+			values.SetMapIndex(key, reflect.Value{})
+			changed = true
+		}
+	})
+	if conflict != nil {
+		return false, conflict
+	}
+	ref := func(model string) string {
+		return foldedRef(model, func(id string) string { return cmpOr(gone[id], id) })
+	}
+	rewrite := func(lists map[string][]string, ref func(string) string) {
+		for agent, ids := range lists {
+			moved := mapEach(ids, ref)
+			if !slices.Equal(ids, moved) {
+				lists[agent] = compact(moved)
+				changed = true
+			}
+		}
+	}
+	for _, lists := range []map[string][]string{current.HiddenModels, current.PickedModels, current.OrderedModels, current.FastPicks, current.UltraPicks} {
+		rewrite(lists, ref)
+	}
+	rewrite(current.Visible, func(name string) string {
+		if into, ok := gone[strings.ToLower(name)]; ok {
+			return into
+		}
+		return ref(name)
+	})
+	return changed, nil
+}
+
+func settleFold(f file) error {
+	if len(f.PendingFoldSettings) == 0 && len(f.PendingFoldHistories) == 0 {
+		return nil
+	}
+	active := make(map[string]bool, len(f.Providers))
+	for _, entry := range f.Providers {
+		active[entry.ID] = true
+	}
+	gone := make(map[string]string, len(f.PendingFoldSettings))
+	for _, entry := range f.Providers {
+		for _, old := range entry.Was {
+			into := f.PendingFoldSettings[old]
+			if into != "" && !active[old] && (entry.ID == into || slices.Contains(entry.Was, into)) {
+				gone[old] = entry.ID
+			}
+		}
+	}
+	moves := make(map[string]string)
+	for old, into := range gone {
+		if f.PendingFoldSettings[old] != into {
+			continue
+		}
+		for _, id := range []string{old, into} {
+			if key := f.PendingFoldHistories[id]; strings.HasPrefix(key, into+"|") {
+				moves[id] = key
+			}
+		}
+	}
+	unlock, err := lockFoldHistories(moves)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	f.PendingFoldSettings = nil
+	f.PendingFoldHistories = nil
+	return publishProvidersWith(f, func(write providerWrite) error {
+		balances, quotas, err := readFoldHistories(moves)
+		if err != nil {
+			return err
+		}
+		if err := foldHistories(balances, quotas, moves); err != nil {
+			return err
+		}
+		if len(gone) > 0 {
+			err := settings.EditFoldReferences(func(current *settings.Settings, _ func() error) (bool, error) {
+				return foldSettings(current, gone)
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return write(nil)
+	})
+}
+
+func publishFold(f *file, folds [][]int, ps []Provider) (bool, error) {
 	moves := map[string]string{} // a folded key's provider id → "into|key name"
 	for _, set := range folds {
 		p, _ := foldSet(ps, set)
@@ -538,6 +637,66 @@ func foldHistories(folds [][]int, ps []Provider) {
 			moves[q.ID] = quotaHistKey(p.ID, name)
 		}
 	}
+	f.PendingFoldHistories = moves
+	unlock, err := lockFoldHistories(moves)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	published := false
+	err = publishProvidersWith(*f, func(write providerWrite) error {
+		return settings.EditFoldReferences(func(current *settings.Settings, check func() error) (bool, error) {
+			if err := foldSettingsMatch(current, f.PendingFoldSettings); err != nil {
+				return false, err
+			}
+			changed, err := foldSettings(current, f.PendingFoldSettings)
+			if err != nil {
+				return false, err
+			}
+			balances, quotas, err := readFoldHistories(moves)
+			if err != nil {
+				return false, err
+			}
+			if err := write(check); err != nil {
+				return false, err
+			}
+			published = true
+			return changed, foldHistories(balances, quotas, moves)
+		})
+	})
+	return published, err
+}
+
+func lockFoldHistories(moves map[string]string) (func(), error) {
+	if len(moves) == 0 {
+		return func() {}, nil
+	}
+	if !balanceHistMu.LockChecked() {
+		return nil, fmt.Errorf("%s: could not lock balance history", balanceHistMu.Path())
+	}
+	if !quotaHistMu.LockChecked() {
+		balanceHistMu.Unlock()
+		return nil, fmt.Errorf("%s: could not lock quota history", quotaHistMu.Path())
+	}
+	return func() {
+		quotaHistMu.Unlock()
+		balanceHistMu.Unlock()
+	}, nil
+}
+
+func readFoldHistories(moves map[string]string) (balanceHist, quotaHist, error) {
+	if len(moves) == 0 {
+		return nil, nil, nil
+	}
+	balances, err := readFoldHistory[balanceHist](balanceHistPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	quotas, err := readFoldHistory[quotaHist](quotaHistPath())
+	return balances, quotas, err
+}
+
+func foldHistories(balances balanceHist, quotas quotaHist, moves map[string]string) error {
 	// "id|" is a provider's with one key, "id||sign" one of its lines of a
 	// balance in several currencies
 	moved := func(k string) (string, bool) {
@@ -555,42 +714,74 @@ func foldHistories(folds [][]int, ps []Provider) {
 		}
 		return to, true
 	}
-	balanceHistMu.Lock()
-	if _, err := os.Stat(balanceHistPath()); err == nil {
-		h := readBalanceHist()
-		changed := false
-		for k, pts := range h {
-			if to, ok := moved(k); ok {
-				delete(h, k)
-				h[to] = append(h[to], pts...)
-				changed = true
-			}
-		}
-		if changed {
-			writeBalanceHist(h)
+	balanceChanged := false
+	for _, key := range slices.Sorted(maps.Keys(balances)) {
+		if to, ok := moved(key); ok && to != key {
+			points := balances[key]
+			delete(balances, key)
+			balances[to] = mergeFoldPoints(balances[to], points,
+				func(point BalancePoint) time.Time { return point.At },
+				func(first, second BalancePoint) bool {
+					return first.At.Equal(second.At) && first.Amount == second.Amount
+				})
+			balanceChanged = true
 		}
 	}
-	balanceHistMu.Unlock()
-	quotaHistMu.Lock()
-	if _, err := os.Stat(quotaHistPath()); err == nil {
-		h := heldQuotaHist()
-		changed := false
-		for k, lines := range h {
-			if to, ok := moved(k); ok {
-				delete(h, k)
-				if h[to] == nil {
-					h[to] = lines
-				} else {
-					for w, pts := range lines {
-						h[to][w] = append(h[to][w], pts...)
-					}
-				}
-				changed = true
-			}
-		}
-		if changed {
-			writeQuotaHist(h)
+	if balanceChanged {
+		if err := writeBalanceHist(context.Background(), balances); err != nil {
+			return fmt.Errorf("fold balance history: %w", err)
 		}
 	}
-	quotaHistMu.Unlock()
+	quotaChanged := false
+	for _, key := range slices.Sorted(maps.Keys(quotas)) {
+		if to, ok := moved(key); ok && to != key {
+			lines := quotas[key]
+			delete(quotas, key)
+			if quotas[to] == nil {
+				quotas[to] = make(map[string][]QuotaPoint, len(lines))
+			}
+			for window, points := range lines {
+				quotas[to][window] = mergeFoldPoints(quotas[to][window], points,
+					func(point QuotaPoint) time.Time { return point.At }, samePoint)
+			}
+			quotaChanged = true
+		}
+	}
+	if quotaChanged {
+		if err := writeQuotaHist(context.Background(), quotas); err != nil {
+			return fmt.Errorf("fold quota history: %w", err)
+		}
+	}
+	return nil
+}
+
+func readFoldHistory[History any](path string) (History, error) {
+	var history History
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return history, nil
+	}
+	if err != nil {
+		return history, err
+	}
+	if err := json.Unmarshal(body, &history); err != nil {
+		return history, fmt.Errorf("%s: could not decode history: %w", path, err)
+	}
+	return history, nil
+}
+
+func mergeFoldPoints[Point any](into, from []Point, at func(Point) time.Time, same func(Point, Point) bool) []Point {
+	all := slices.Concat(into, from)
+	slices.SortStableFunc(all, func(first, second Point) int { return at(first).Compare(at(second)) })
+	kept := all[:0]
+	firstAtTime := 0
+	for _, point := range all {
+		if len(kept) > 0 && !at(kept[firstAtTime]).Equal(at(point)) {
+			firstAtTime = len(kept)
+		}
+		if !slices.ContainsFunc(kept[firstAtTime:], func(other Point) bool { return same(point, other) }) {
+			kept = append(kept, point)
+		}
+	}
+	return slices.Clip(kept)
 }

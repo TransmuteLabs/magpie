@@ -36,7 +36,13 @@ func TestPluginRenewsSignIns(t *testing.T) {
 	logf := filepath.Join(t.TempDir(), "renewals")
 	t.Setenv("RENEW_LOG", logf)
 	said := make(chan string, 16)
-	OnSignIn(func(provider, account, s string) { said <- provider + " " + account + " " + s })
+	OnSignIn(func(provider, account, s string, epoch *string) {
+		notice := provider + " " + account + " " + s
+		if epoch != nil {
+			notice += " " + *epoch
+		}
+		said <- notice
+	})
 	t.Cleanup(func() { OnSignIn(nil) })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -109,8 +115,8 @@ func TestPluginRenewsSignIns(t *testing.T) {
 	if h := send(due); h != "Bearer a-1" || len(renewals()) != 1 {
 		t.Fatalf("renewed again: %q, %v", h, renewals())
 	}
-	if s := waitSaid(t, said); s != "renewco "+due+" renewed" {
-		t.Fatalf("said %q", s)
+	if s := waitSaid(t, said); s != "renewco "+due+" renewed "+savedEpoch(t, ctx, due) {
+		t.Fatal("renewal did not report the renewed account's epoch")
 	}
 
 	// time left, or no expiry: not renewed
@@ -128,8 +134,8 @@ func TestPluginRenewsSignIns(t *testing.T) {
 	if h := send(gone); h != "Bearer old-gone@renew" {
 		t.Fatalf("a refused account went with %q", h)
 	}
-	if s := waitSaid(t, said); s != "renewco "+gone+" expired" {
-		t.Fatalf("said %q", s)
+	if s := waitSaid(t, said); s != "renewco "+gone+" expired "+savedEpoch(t, ctx, gone) {
+		t.Fatal("refused renewal did not report the observed account's epoch")
 	}
 	send(gone)
 	// can't be reached: sent as it is, not tried again at once
@@ -149,6 +155,76 @@ func TestPluginRenewsSignIns(t *testing.T) {
 	}
 	if a := stored(gone); a["access"] != "old-gone@renew" {
 		t.Fatalf("a refused account was changed: %v", a)
+	}
+}
+
+func TestFetchLoaderUsesCurrentSavedSignIn(t *testing.T) {
+	sandbox(t)
+	t.Setenv("RENEW_LOG", filepath.Join(t.TempDir(), "renewals"))
+	t.Setenv("RENEW_CAPTURE_AUTH", "1")
+	srv := testenv.FakeVendor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if token == "Bearer models-token" {
+			w.Header().Set("X-Renew-Access", "fetch-token")
+		}
+		io.WriteString(w, token)
+	}))
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	abs, err := filepath.Abs("testdata/renew/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	const account = "renewco"
+	if err := Restore(ctx, "renewco", account, map[string]any{
+		"type": "oauth", "refresh": "r-ok", "access": "old-token", "expires": 1, "accountId": "user@renew",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	epochs, err := CurrentAuthEpochs(ctx)
+	if err != nil || epochs[account] == "" {
+		t.Fatalf("restore had no sign-in epoch: %v", err)
+	}
+	fetch := func(requested, want string) FetchAuth {
+		t.Helper()
+		res, auth, err := FetchWithAuth(ctx, FetchRequest{Provider: "renewco", Account: requested, Model: "renew-1",
+			NPM: "@ai-sdk/openai-compatible", URL: srv.URL + "/v1/chat/completions", Method: "POST", Body: []byte(`{}`),
+			Headers: map[string]string{"X-Fake-Run": os.Getenv("FAKE_RUN")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		token, err := io.ReadAll(res.Body)
+		if err != nil || res.StatusCode != http.StatusOK || string(token) != want {
+			t.Fatalf("vendor saw %q, want %q (status %d, %v)", token, want, res.StatusCode, err)
+		}
+		return auth
+	}
+	assertFetchEpoch(t, fetch("", "Bearer models-token"), account, epochs[account])
+	if err := WithAuthEpoch(ctx, account, epochs[account], func() error { return nil }); err != nil {
+		t.Fatalf("renewal or client.auth.set replaced the sign-in epoch: %v", err)
+	}
+	if saved := Auths("renewco")[account]; saved["access"] != "fetch-token" || saved["refresh"] != "r-ok+" {
+		t.Fatalf("renewal, models and fetch did not keep their saves: access=%v, refresh=%v", saved["access"], saved["refresh"])
+	}
+	assertFetchEpoch(t, fetch(account, "Bearer fetch-token"), account, epochs[account])
+	if err := EditAuth(func(records map[string]json.RawMessage) (bool, error) {
+		records[account] = json.RawMessage(`{"type":"oauth","refresh":"r-replaced","access":"new-token","expires":9000000000000000,"accountId":"user@renew"}`)
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertFetchEpoch(t, fetch(account, "Bearer new-token"), account, savedEpoch(t, ctx, account))
+	legacy := `{"renewco":{"type":"oauth","refresh":"r-legacy","access":"legacy-token","expires":9000000000000000}}`
+	if err := os.WriteFile(AuthPath(), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertFetchEpoch(t, fetch(account, "Bearer legacy-token"), account, "")
+	if got := fetch("renewco#absent", ""); got.Account != "renewco#absent" || got.Epoch != nil {
+		t.Error("an absent slot had sign-in proof")
 	}
 }
 

@@ -78,7 +78,7 @@ func TranscriptOf(s Session) (Transcript, error) {
 	return TranscriptOfContext(context.Background(), s)
 }
 
-func TranscriptOfContext(ctx context.Context, s Session) (Transcript, error) {
+func TranscriptOfContext(ctx context.Context, s Session) (out Transcript, err error) {
 	owner, err := selectSessionHistoryOwner(ctx, s)
 	if err != nil {
 		if errors.Is(err, ErrNotRead) {
@@ -86,17 +86,19 @@ func TranscriptOfContext(ctx context.Context, s Session) (Transcript, error) {
 		}
 		return Transcript{}, err
 	}
+	defer func() {
+		if changed := owner.check(ctx); changed != nil {
+			out, err = Transcript{}, changed
+		}
+	}()
 	if owner.mode == historyDelegated {
 		return extensionSourceTranscript(ctx, owner.session.source)
 	}
-	out := Transcript{Parts: []Part{}}
+	out = Transcript{Parts: []Part{}}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return out, ErrNoTranscript
 	}
 	err = readHistoryTranscript(ctx, owner, nil, out.add)
-	if changed := owner.check(ctx); changed != nil {
-		return Transcript{}, changed
-	}
 	return out, err
 }
 

@@ -70,11 +70,20 @@ func pluginCard(pp plugin.Provider) (string, string) {
 }
 
 // pluginUsageLogins are the accounts of pp whose allowance can be asked.
-func pluginUsageLogins(pp plugin.Provider) []Login {
+func pluginUsageLogins(ctx context.Context, pp plugin.Provider) []Login {
 	if !pp.Usage || !pp.SignedIn || movingNow(pp.ID) {
 		return nil
 	}
-	return pluginLoginList(pp)
+	selected := pluginLoginsContext(ctx, pp)
+	if len(selected) == 0 {
+		return nil
+	}
+	logins := make([]Login, len(selected))
+	for index, entry := range selected {
+		logins[index] = entry.Login
+		logins[index].pluginUsage = pluginUsageOf(pp, entry)
+	}
+	return logins
 }
 
 // signInGone is a plugin's usage saying the account's sign-in is gone.
@@ -83,49 +92,60 @@ var signInGone = lazyre.New(`(?i)sign-in has (expired|lapsed)|sign in again`)
 // pluginLoginQuota is the allowance of one of a plugin provider's
 // accounts, l.Agent being "plugin:" and its id.
 func pluginLoginQuota(ctx context.Context, l Login) SubscriptionQuota {
-	pp, ok := pluginOfAgent(l.Agent)
+	pp, ok := pluginOfAgentContext(ctx, l.Agent)
 	name, icon := pluginCard(pp)
 	q := SubscriptionQuota{Provider: PluginID(pp.ID), Name: name, Icon: icon, Plan: l.Plan, User: l.User, Windows: []QuotaWindow{}}
 	if !ok {
 		q.Error = "no such plugin provider"
 		return q
 	}
-	key := ""
-	for _, x := range pluginLogins(pp) {
+	var selected pluginLogin
+	for _, x := range pluginLoginsContext(ctx, pp) {
 		if strings.EqualFold(x.User, l.User) {
-			key = x.acct.Key
+			selected = x
 		}
 	}
+	key := selected.acct.Key
 	if key == "" {
 		q.Error = "not signed in"
 		return q
 	}
+	q.pluginUsage = pluginUsageOf(pp, selected)
+	if !l.pluginUsage.matches(q.pluginUsage) {
+		q.pluginUsage = l.pluginUsage
+		return deferPluginQuota(q, l.User, errPluginUsageAccountChanged)
+	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	began := pluginSignInAt()
+	observation, endRead := beginPluginLoginRead(selected.saved)
+	defer endRead()
 	u, err := plugin.AccountUsage(ctx, pp.ID, key)
 	if err != nil {
 		q.Error = err.Error()
-		return q
+		return withCurrentPluginUsage(ctx, q, pp.ID, observation)
 	}
 	// the plugin says what the read means for the sign-in, as a built-in's
 	// usage read marked the account or left it; one that doesn't say has
 	// an error to sign in again mark it and a clean read clear it. What a
 	// request was answered while it read is newer, and stands.
+	var status int
 	switch {
 	case u.SignIn == "expired":
-		notePluginLapseSince(pp, key, http.StatusUnauthorized, began)
+		status = http.StatusUnauthorized
 	case u.SignIn == "renewed":
-		notePluginLapseSince(pp, key, http.StatusOK, began)
+		status = http.StatusOK
 	case u.SignIn == "kept":
 	case signInGone.MatchString(u.Error):
-		notePluginLapseSince(pp, key, http.StatusUnauthorized, began)
+		status = http.StatusUnauthorized
 	case u.Error == "":
-		notePluginLapseSince(pp, key, http.StatusOK, began)
+		status = http.StatusOK
 	}
-	keepPluginPlan(pp, key, u.Plan)
+	observation.status = status
+	observation.plan = u.Plan
+	observation.text = func(user string) string { return lapsedText(pp, user) }
 	// a wallet's spend counted, for a cap to hold it (#5770)
-	return withWalletSpend(namedModelWindows(quotaOfPlugin(q, u), pp.Models), l.User, time.Now())
+	q = namedModelWindows(quotaOfPlugin(q, u), pp.Models)
+	return withCurrentPluginUsage(ctx, q, pp.ID, observation)
 }
 
 // namedModelWindows scopes each window that says no models but is named
@@ -297,27 +317,29 @@ func bareID(id string) (string, bool) {
 // pluginUsageFetches are a card's fetch for each plugin account that
 // tells its allowance, but those placed already where their built-in's
 // cards were.
-func pluginUsageFetches(via func(string) context.Context, hidden, placed map[string]bool) []func() SubscriptionQuota {
+func pluginUsageFetches(plugins []plugin.Provider, via func(string) context.Context, hidden, placed map[string]bool) []func() SubscriptionQuota {
 	var out []func() SubscriptionQuota
-	for _, pp := range plugin.Cached() {
+	for _, pp := range plugins {
 		id := PluginID(pp.ID)
 		if hidden[id] || placed[pp.ID] {
 			continue
 		}
-		ls := pluginUsageLogins(pp)
+		ctx := via(id)
+		ls := pluginUsageLogins(ctx, pp)
 		if len(ls) == 0 {
 			continue
 		}
-		out = append(out, perLogin(via(id), ls, pluginCardFace(pp))...)
+		out = append(out, perLogin(ctx, ls, pluginCardFace(pp))...)
 	}
 	return out
 }
 
 // pluginUsageFetchesOf are the cards of the plugin provider id.
-func pluginUsageFetchesOf(via func(string) context.Context, id string) []func() SubscriptionQuota {
-	for _, pp := range plugin.Cached() {
+func pluginUsageFetchesOf(plugins []plugin.Provider, via func(string) context.Context, id string) []func() SubscriptionQuota {
+	for _, pp := range plugins {
 		if pp.ID == id {
-			return perLogin(via(id), pluginUsageLogins(pp), pluginCardFace(pp))
+			ctx := via(id)
+			return perLogin(ctx, pluginUsageLogins(ctx, pp), pluginCardFace(pp))
 		}
 	}
 	return nil

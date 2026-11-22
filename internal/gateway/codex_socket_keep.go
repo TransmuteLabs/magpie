@@ -56,6 +56,8 @@ var (
 // codexKeepMax is how many sockets are kept at most.
 const codexKeepMax = 32
 
+const codexKeepRawInputMax = 4096
+
 var (
 	codexKeepMu   sync.Mutex
 	codexKeepPool = map[string]*codexKept{}
@@ -64,18 +66,19 @@ var (
 // codexKept is a socket to the backend and what its last turn sent and
 // got back.
 type codexKept struct {
-	c      *websocket.Conn
-	cancel context.CancelFunc
-	key    string // "" for a turn that names no conversation
-	host   string
-	header http.Header // the handshake's, as each reply carries them
-	opened time.Time
-	used   time.Time
-	once   sync.Once
-	timer  *time.Timer
-	fields map[string]string
-	input  []itemSum
-	output []itemSum
+	c        *websocket.Conn
+	cancel   context.CancelFunc
+	key      string // "" for a turn that names no conversation
+	host     string
+	header   http.Header // the handshake's, as each reply carries them
+	opened   time.Time
+	used     time.Time
+	once     sync.Once
+	timer    *time.Timer
+	fields   map[string]string
+	input    []itemSum
+	rawInput []itemSum
+	output   []itemSum
 	// sealed says which of output are reasoning items, which a Copilot
 	// turn may come back without: Copilot's reasoning ids are Base64,
 	// + and / in them, and plainItemIDs leaves such reasoning out of the
@@ -84,6 +87,7 @@ type codexKept struct {
 	sealed  []bool
 	replyID string
 	copilot bool // Copilot's socket (copilotCreate)
+	relay   bool // a relay's (provider.SocketRelay)
 }
 
 // close ends the socket at once.
@@ -224,15 +228,17 @@ func codexKeptCount() int {
 
 // codexTurnShape is what of a turn the next one is compared with.
 type codexTurnShape struct {
-	fields map[string]string
-	input  []json.RawMessage
-	sums   []itemSum
+	fields  map[string]string
+	input   []json.RawMessage
+	sums    []itemSum
+	rawSums []itemSum
 }
 
 // codexShape is body's shape, false for a body that is not continued
 // from: one whose input isn't a list of items, or that names a previous
-// response itself.
-func codexShape(body []byte) (*codexTurnShape, bool) {
+// response itself. Only byte-identical inputs reuse the kept turn's
+// canonical sums. Both slices from the pool are immutable.
+func codexShape(body []byte, key string) (*codexTurnShape, bool) {
 	var top map[string]json.RawMessage
 	if json.Unmarshal(body, &top) != nil {
 		return nil, false
@@ -244,7 +250,12 @@ func codexShape(body []byte) (*codexTurnShape, bool) {
 	if json.Unmarshal(top["input"], &input) != nil {
 		return nil, false
 	}
-	s := &codexTurnShape{fields: map[string]string{}, input: input, sums: make([]itemSum, len(input))}
+	s := &codexTurnShape{
+		fields:  map[string]string{},
+		input:   input,
+		sums:    make([]itemSum, len(input)),
+		rawSums: make([]itemSum, min(len(input), codexKeepRawInputMax)),
+	}
 	for k, v := range top {
 		switch k {
 		case "input", "client_metadata", "stream_options":
@@ -256,7 +267,20 @@ func codexShape(body []byte) (*codexTurnShape, bool) {
 		}
 		s.fields[k] = b.String()
 	}
+	var priorRaw, priorSums []itemSum
+	codexKeepMu.Lock()
+	if kept := codexKeepPool[key]; kept != nil {
+		priorRaw, priorSums = kept.rawInput, kept.input
+	}
+	codexKeepMu.Unlock()
 	for i, it := range input {
+		if i < len(s.rawSums) {
+			s.rawSums[i] = sha256.Sum256(it)
+			if i < len(priorRaw) && s.rawSums[i] == priorRaw[i] {
+				s.sums[i] = priorSums[i]
+				continue
+			}
+		}
 		sum, ok := codexSocketItem(it)
 		if !ok {
 			return nil, false
@@ -342,7 +366,7 @@ func (k *codexKept) delta(body []byte, s *codexTurnShape) ([]byte, bool) {
 		}
 		return nil, false
 	}
-	in := gjson.GetBytes(body, "input")
+	in := getIn(body, "input")
 	if !in.IsArray() || in.Index <= 0 {
 		return nil, false
 	}

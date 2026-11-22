@@ -66,7 +66,7 @@ func claudeStatusField(at place, path string, settled func()) Field {
 	}
 	here := at.base == nil
 	return Field{
-		Key: "statusline", Label: "status line", Quiet: true,
+		Key: "statusline", Label: "status line", Quiet: true, Switch: true,
 		Get: func() string {
 			if _, ours := cur(); ours {
 				return "on"

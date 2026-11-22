@@ -46,7 +46,7 @@ func TestModelSetToSystemOneIsADecisionModel(t *testing.T) {
 	if got := ids(Deciders()); !slices.Contains(got, "ark/ep-decide") || slices.Contains(got, "ark/ep-chat") {
 		t.Fatalf("Deciders = %v", got)
 	}
-	if got := ids(buildEntries()); !slices.Contains(got, "ark/ep-chat") || slices.Contains(got, "ark/ep-decide") {
+	if got := ids(buildEntries(t.Context())); !slices.Contains(got, "ark/ep-chat") || slices.Contains(got, "ark/ep-decide") {
 		t.Fatalf("conversation models = %v", got)
 	}
 
@@ -57,7 +57,7 @@ func TestModelSetToSystemOneIsADecisionModel(t *testing.T) {
 	if p, _ = Find("ark"); p.DecidesModel("ep-decide") {
 		t.Fatal("still a decision model after Auto")
 	}
-	if got := ids(buildEntries()); !slices.Contains(got, "ark/ep-decide") {
+	if got := ids(buildEntries(t.Context())); !slices.Contains(got, "ark/ep-decide") {
 		t.Fatalf("conversation models after Auto = %v", got)
 	}
 }

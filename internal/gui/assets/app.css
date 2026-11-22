@@ -1,5 +1,8 @@
 /* magpie — one quiet surface, real logos, controls that read as pop-up buttons. */
 :root {
+  /* a page's own search box to the list or empty box under it, on every
+     page that has one (search-list-gap.test.cjs) */
+  --find-gap: 10px;
   --bg: #f4f4f6;
   --card: #ffffff;
   --card-2: #f9f9fb;      /* expanded editor */
@@ -541,7 +544,9 @@ body.side-nav #nav button.has-dot.can-fold::after { right: 28px; }
    of a row up, over Discover (#1787) */
 .nav-sub > button { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-sub > button > :is(svg, .nav-s-ic) { flex: none; width: 14px; height: 14px; margin-left: -2px; color: var(--muted); transition: color .2s var(--ease); }
-.nav-s:hover:not(.cur) > svg, .nav-s.cur > svg { color: inherit; }
+.nav-s:hover:not(.cur) > :is(svg, .nav-s-ic), .nav-s.cur > :is(svg, .nav-s-ic) { color: inherit; }
+/* an agent's own logo in the glyph's place (navicons.js navSubIc) */
+.nav-s-ic > .ic { display: flex; width: 100%; height: 100%; }
 .nav-sub > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub > button > em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* an update waiting, in the sidebar's dot colour, as the words the dot means */
@@ -1475,6 +1480,9 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 /* the last label can be wider than its bar's column: let it spill left, not off the card */
 .chart .labels span:last-child { display: flex; justify-content: flex-end; }
 .row.stat .who { flex: 0 0 180px; }
+/* the logo meets the top of the name's letters, not the middle of a name and
+   the line under it, which wraps to several lines (the owner, 11-21) */
+.row.stat > .ic { align-self: flex-start; margin-top: 4px; }
 /* the line under a name (a sign-in's id, its calls, credits and speed) is
    read whole at every width, not cut where the column ends */
 .row.stat .who .sub { white-space: normal; overflow-wrap: anywhere; }
@@ -2842,7 +2850,7 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 /* Providers' search (#1614): a toolbar field over the list, at its right
    edge as Settings' is; across the page when the window is narrow. While
    searching, the Turned off fold stays open on the ones that match. */
-#view-providers .pv-head { display: flex; justify-content: flex-end; gap: 8px; margin: 0 0 10px; flex: none; }
+#view-providers .pv-head { display: flex; justify-content: flex-end; gap: 8px; margin: 0 0 var(--find-gap); flex: none; }
 /* Hide accounts, on Routing, Usage and (its own switch) Providers. On, it
    says so in its struck eye and its words, a shade darker: a page tool,
    not a banner */
@@ -3702,8 +3710,13 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .tile .n { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tile .nm .badge { flex: none; }
 /* a partner's row carries its tagline on a second, quieter line */
-.tile.two { height: 46px; }
-.tile.two .ic { width: 22px; height: 22px; }
+.tile.two { height: 46px; align-items: flex-start; padding-top: 6px; }
+.tile.two .have, .tile.two .cnt { align-self: center; }
+/* the logo's top on the top of the name's letters, not of its line: the
+   name's half-leading and the room over its letters at 13px are 4.25px
+   for Latin capitals and 3 to 3.5px for CJK. A whole pixel, as the logo
+   is drawn on one (partner-tile-top.test.cjs) */
+.tile.two .ic { width: 22px; height: 22px; margin-top: 4px; }
 .tile .col { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .tile .sub { min-width: 0; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sheet .grid:has(> .tile.two) { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 2px 12px; }
@@ -3839,6 +3852,22 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { opacity: 1; box-shadow
 .editor .key-rate { display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: center; gap: 8px; min-width: 0; }
 .editor .key-rate .who { font-size: 12px; font-weight: 500; color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor .key-rate input { min-width: 0; width: 100%; }
+/* a key's factor on its read rate (@YIXIE233 on X): a third column,
+   named once over it, while the provider has a top-up rate */
+.editor .key-rate .key-rate-factor, .editor .key-rate-head { display: none; }
+.editor .fx .key-rate, .editor .fx .key-rate-head { grid-template-columns: minmax(0, 1fr) 96px 80px; }
+.editor .fx .key-rate .key-rate-factor { display: block; }
+.editor .fx .key-rate-head { display: grid; gap: 8px; margin-top: 4px; padding: 0 11px; font-size: 12px; color: var(--fg-2); }
+.editor .key-rate-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* narrow: a key's name over its two boxes, the factor still under its head */
+.editor .key-rates-all { container-type: inline-size; }
+@container (max-width: 320px) {
+  .editor .fx .key-rate { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); row-gap: 4px; }
+  .editor .fx .key-rate .who { grid-column: 1 / -1; }
+  .editor .fx .key-rate-head { grid-template-columns: minmax(0, 1fr); }
+  .editor .fx .key-rate-head span:not(:last-child) { display: none; }
+  .editor .fx .key-rate-head span:last-child { text-align: right; }
+}
 /* past eight keys their lines fold behind All N keys, opened with a filter */
 .editor .acct-proxy-tools { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .editor .acct-proxy-tools .acct-proxy-filter { flex: 1 1 auto; min-width: 0; }
@@ -4389,6 +4418,15 @@ body.panel #find { display: none; }
 .plugin-panel-frame { flex: none; min-height: 0; height: 48px; }
 .plugin-panel-broke { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 12px 14px; }
 .plugin-panel-broke .note { flex: 1 1 200px; color: var(--muted); overflow-wrap: anywhere; }
+/* a provider's panels are rows of its editor: the title in the names'
+   column, the panel in the fields'. Set in the editor's grid as one item,
+   the slot fell in the names' column, 132px wide (Marvis's first line,
+   11-21). */
+.editor .plugin-slot[data-slot="provider"]:not([hidden]), .editor .plugin-slot[data-slot="provider"] > .plugin-panel { display: contents; }
+.editor .plugin-slot[data-slot="provider"] .row-head { align-self: start; justify-content: flex-end; height: auto; margin: 0; padding-top: calc((var(--field-h, 29px) - 17px) / 2); font-size: 12px; color: var(--fg-2); text-align: right; }
+.editor .plugin-slot[data-slot="provider"] .row-head .label { font: inherit; letter-spacing: normal; text-transform: none; color: inherit; }
+.editor .plugin-slot[data-slot="provider"] .row-head .note { display: none; }
+.editor .plugin-slot[data-slot="provider"] .plugin-panel-body { align-self: start; min-width: 0; }
 /* a built-in page a plugin's page replaces steps aside in the sidebar */
 #nav button[data-replaced] { display: none !important; }
 img.nav-ic { border-radius: 3px; object-fit: contain; }
@@ -5499,6 +5537,16 @@ body.window .row + .row.agent.conn > .who { min-height: 41px; } /* the line abov
 .prefs-more { margin: 10px 0 0; }
 .prefs-more > summary { margin-left: 2px; }
 .prefs-more > .list { margin-top: 6px; }
+/* an Advanced fold inside a card (Privacy's Models folder): a line of the
+   card's own, ruled like its rows, its chevron's ink on the labels' left
+   edge (the chevron's path starts 2.8px into its box; a row's label 14px
+   in, its first letter's ink about a pixel more) */
+.list > .row-fold { border-top: 1px solid var(--line-2); }
+.list > .row-fold > .prefs-more { margin: 0; }
+.list > .row-fold > .prefs-more > summary { display: flex; margin: 0; padding: 13px 12px 13px 11.5px; border-radius: 0; }
+@media (max-width: 760px), (pointer: coarse) and (max-width: 1024px) { body.web .list > .row-fold > .prefs-more > summary { padding-left: 9.75px; } } /* the rows' 12px there */
+.list > .row-fold > .prefs-more > summary:focus-visible { outline-offset: -2px; }
+.list > .row-fold > .prefs-more > .row { border-top: 1px solid var(--line-2); }
 /* which copy is left on the old list: a sentence that wraps as one, under the warning's words */
 .ag-vl.ag-stale-copy { display: block; padding-left: 14px; font-size: 12px; line-height: 1.6; color: var(--fg-2); }
 /* Codex's daemon: restarted from its line, a button that sits in the sentence */

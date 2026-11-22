@@ -17,6 +17,11 @@ type extensionOptionHost interface {
 	CompareAndSwapProviderOptions(context.Context, string, string, string, string, map[string]bool, []string) (sdk.ConfigSnapshot, error)
 }
 
+type extensionProviderOptionsJSON struct {
+	*extension.ProviderOptionsSnapshot
+	OwnerRevision string `json:"ownerRevision,omitempty"`
+}
+
 var extensionProviderOptions = func() extensionOptionHost { return extension.Default() }
 
 func extensionProviderOptionRoutes(mux *http.ServeMux) {
@@ -26,6 +31,7 @@ func extensionProviderOptionRoutes(mux *http.ServeMux) {
 			Module          string                    `json:"module"`
 			Provider        string                    `json:"provider"`
 			PackageRevision string                    `json:"packageRevision"`
+			OwnerRevision   string                    `json:"ownerRevision,omitempty"`
 			Expected        string                    `json:"expected"`
 			Values          sdk.ProviderOptionChanges `json:"values"`
 			Confirmed       []string                  `json:"confirmed"`
@@ -36,11 +42,14 @@ func extensionProviderOptionRoutes(mux *http.ServeMux) {
 			fail(w, err)
 			return
 		}
-		if decoder.Decode(new(any)) != io.EOF || input.ID != provider.ExtensionProviderID(input.Module, input.Provider) {
+		id, _, visible := provider.ExtensionPublicProvider(input.Module, input.Provider)
+		if decoder.Decode(new(any)) != io.EOF || !visible || input.ID != id ||
+			provider.CheckExtensionSubscription(r.Context(), input.Module, input.Provider, input.OwnerRevision) != nil {
 			fail(w, errors.New("provider switch update requires its exact SDK owner"))
 			return
 		}
-		config, err := extensionProviderOptions().CompareAndSwapProviderOptions(r.Context(), input.Module, input.Provider,
+		ctx := extension.WithSubscriptionOwnerRevision(r.Context(), input.OwnerRevision)
+		config, err := extensionProviderOptions().CompareAndSwapProviderOptions(ctx, input.Module, input.Provider,
 			input.PackageRevision, input.Expected, input.Values, input.Confirmed)
 		if err != nil {
 			fail(w, err)

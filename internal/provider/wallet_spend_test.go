@@ -24,7 +24,7 @@ func TestWalletSpendCounted(t *testing.T) {
 	zone := time.FixedZone("UTC+8", 8*3600)
 	t0 := time.Date(2026, 11, 9, 10, 0, 0, 0, zone)
 	read := func(left float64, at time.Time) QuotaWindow {
-		return withWalletSpend(wallet(left), "me@example.com", at).Windows[0]
+		return withWalletSpend(t.Context(), wallet(left), "me@example.com", at, walletObservation{}, t.Context().Err).Windows[0]
 	}
 	for i, c := range []struct {
 		left, spent float64
@@ -38,12 +38,8 @@ func TestWalletSpendCounted(t *testing.T) {
 			t.Fatalf("an uncapped wallet read as used: %+v", w)
 		}
 	}
-	// a restart reads the count back
-	walletSpends.Lock()
-	walletSpends.path = ""
-	walletSpends.Unlock()
 	if w := read(700, t0.Add(time.Hour)); *w.Spent != 350 {
-		t.Fatalf("after a restart: spent %v", *w.Spent)
+		t.Fatalf("after reading the saved count: spent %v", *w.Spent)
 	}
 	// the next local day starts again from its first reading
 	day := time.Date(2026, 11, 10, 0, 0, 1, 0, zone)
@@ -56,7 +52,7 @@ func TestWalletSpendCounted(t *testing.T) {
 		q := wallet(0)
 		b := left
 		q.Windows = []QuotaWindow{{Name: "星火积分", Balance: &b, ResetsAt: &reset}}
-		return withWalletSpend(q, "me@example.com", at).Windows[0]
+		return withWalletSpend(t.Context(), q, "me@example.com", at, walletObservation{}, t.Context().Err).Windows[0]
 	}
 	ws(50, day)
 	if w := ws(40, day.Add(time.Hour)); *w.Spent != 10 {
@@ -66,13 +62,13 @@ func TestWalletSpendCounted(t *testing.T) {
 		t.Fatalf("after its reset: %v", *w.Spent)
 	}
 	// a window with a share of its own, a failed reading: left alone
-	q := withWalletSpend(SubscriptionQuota{Provider: "codex", Windows: []QuotaWindow{{Name: "Weekly", Used: 30}}}, "me@example.com", t0)
+	q := withWalletSpend(t.Context(), SubscriptionQuota{Provider: "codex", Windows: []QuotaWindow{{Name: "Weekly", Used: 30}}}, "me@example.com", t0, walletObservation{}, t.Context().Err)
 	if q.Windows[0].Spent != nil {
 		t.Fatal("a window with no balance counted")
 	}
 	q = wallet(10)
 	q.Error = "sign in again"
-	if q = withWalletSpend(q, "me@example.com", t0); q.Windows[0].Spent != nil {
+	if q = withWalletSpend(t.Context(), q, "me@example.com", t0, walletObservation{}, t.Context().Err); q.Windows[0].Spent != nil {
 		t.Fatal("a failed reading counted")
 	}
 }
@@ -92,7 +88,7 @@ func TestWalletCapHolds(t *testing.T) {
 	}
 	caps := AccountCapsOf("codex", "me@example.com")
 	read := func(left float64, at time.Time) QuotaWindow {
-		return withWalletSpend(wallet(left), "me@example.com", at).Windows[0]
+		return withWalletSpend(t.Context(), wallet(left), "me@example.com", at, walletObservation{}, t.Context().Err).Windows[0]
 	}
 	w := read(10000, now)
 	if h := allowanceOf([]QuotaWindow{w}, now).CapHeld("any", caps, now); h != nil {

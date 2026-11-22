@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"slices"
 	"sync"
 	"time"
@@ -30,24 +29,26 @@ type MiddlewareRun struct {
 }
 
 func (m *Manager) BeginMiddleware(ctx context.Context, info sdk.GatewayContext) []*MiddlewareRun {
+	return m.SelectGateway(ctx, info.Origin).BeginMiddleware(ctx, info)
+}
+
+func (selection GatewaySelection) BeginMiddleware(ctx context.Context, info sdk.GatewayContext) []*MiddlewareRun {
 	if ctx == nil || ctx.Err() != nil {
 		return nil
 	}
+	info.Origin = selection.origin
 	var runs []*MiddlewareRun
-	for _, entry := range m.contributionEntries(ctx) {
-		descriptor := entry.Manifest.Middleware
+	for _, entry := range selection.middleware {
 		if len(runs) == 32 {
 			break
 		}
-		if descriptor == nil || !descriptor.AllowsOrigin(info.Origin) {
-			continue
-		}
-		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
+		descriptor := entry.Manifest.Middleware
+		config, err := selection.manager.runtimeModuleConfigContext(ctx, entry)
 		if err != nil {
 			continue
 		}
 		owned, cancel := context.WithCancel(ctx)
-		runs = append(runs, &MiddlewareRun{Module: entry.Manifest.ID, manager: m, entry: entry,
+		runs = append(runs, &MiddlewareRun{Module: entry.Manifest.ID, manager: selection.manager, entry: entry,
 			config: config.Version, descriptor: *descriptor,
 			info: info, ctx: owned, cancel: cancel})
 	}
@@ -61,43 +62,30 @@ func (run *MiddlewareRun) Descriptor() sdk.GatewayMiddlewareDescriptor {
 	return descriptor
 }
 
+var errMiddlewareChanged = errors.New("middleware package or configuration changed")
+
 func (run *MiddlewareRun) check(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, entry := range run.manager.contributionEntries(ctx) {
-		if entry.Manifest.ID != run.Module || entry.Revision != run.entry.Revision ||
-			entry.EnableGeneration != run.entry.EnableGeneration ||
-			!reflect.DeepEqual(entry.Manifest.Middleware, &run.descriptor) {
-			continue
+	if err := run.manager.checkActiveGeneration(ctx, run.entry, run.config); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		config, err := run.manager.runtimeModuleConfigContext(ctx, entry.Manifest)
-		if err == nil && config.Version == run.config {
-			return nil
-		}
+		return errMiddlewareChanged
 	}
-	return errors.New("middleware package or configuration changed")
+	return nil
 }
 
 func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.MiddlewareContext) (sdk.MiddlewareResult, error) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if run.closed || !slices.Contains(run.descriptor.Methods(), method) {
+	if run.closed || !run.descriptor.DeclaresMethod(method) {
 		return sdk.MiddlewareResult{}, errors.New("middleware hook is unavailable")
 	}
 	if len(body) > sdk.MaxMiddlewareBodyBytes {
 		return sdk.MiddlewareResult{}, errors.New("middleware body exceeds its byte limit")
 	}
-	if err := run.check(run.ctx); err != nil {
-		return sdk.MiddlewareResult{}, err
-	}
 	extra.GatewayContext = run.info
-	request := sdk.MiddlewareCall{Body: bytes.Clone(body), State: bytes.Clone(run.state), Context: extra}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return sdk.MiddlewareResult{}, err
-	}
-	if _, err := sdk.DecodeMiddlewareCall(run.descriptor, method, sdk.Scope{}, raw); err != nil {
+	request := sdk.MiddlewareCall{Body: body, State: run.state, Context: extra}
+	if err := sdk.ValidateMiddlewareCall(run.descriptor, method, sdk.Scope{}, request); err != nil {
 		return sdk.MiddlewareResult{}, err
 	}
 	if run.lease == nil {
@@ -120,21 +108,24 @@ func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.Middleware
 	ctx, cancel := context.WithTimeout(run.ctx, limit)
 	defer cancel()
 	ctx = withContributionAdmission(ctx, run.check)
-	ctx = context.WithValue(ctx, gatewayReadOnlyKey{}, true)
-	output, err := run.lease.Call(ctx, method, sdk.Scope{}, request, nil)
+	var result sdk.MiddlewareResult
+	var validationErr error
+	_, err := run.lease.call(ctx, method, sdk.Scope{}, request, nil, func(output json.RawMessage) {
+		result, validationErr = sdk.DecodeMiddlewareResult(method, output)
+		if validationErr == nil && len(result.Body) > 0 &&
+			(method == sdk.MethodMiddlewareRequest || method == sdk.MethodMiddlewareProvider) &&
+			!gatewayHookChange(body, result.Body) {
+			validationErr = errors.New("middleware changed protected request fields")
+		}
+	})
 	if err != nil {
+		if errors.Is(err, errMiddlewareChanged) {
+			return sdk.MiddlewareResult{}, errMiddlewareChanged
+		}
 		return sdk.MiddlewareResult{}, errors.New("middleware hook failed")
 	}
-	result, err := sdk.DecodeMiddlewareResult(method, output)
-	if err != nil {
-		return sdk.MiddlewareResult{}, err
-	}
-	if len(result.Body) > 0 && (method == sdk.MethodMiddlewareRequest || method == sdk.MethodMiddlewareProvider) &&
-		!gatewayHookChange(body, result.Body) {
-		return sdk.MiddlewareResult{}, errors.New("middleware changed protected request fields")
-	}
-	if err := run.check(ctx); err != nil {
-		return sdk.MiddlewareResult{}, err
+	if validationErr != nil {
+		return sdk.MiddlewareResult{}, validationErr
 	}
 	if len(result.State) > 0 {
 		run.state = bytes.Clone(result.State)

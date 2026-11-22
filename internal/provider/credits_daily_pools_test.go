@@ -32,7 +32,7 @@ func TestDailyCreditsPoolSetAside(t *testing.T) {
 		return pluginWindowsCard(t, "kiro", "k", `[{"name":"Credits","used":1,"display":"x","amount":`+jsonNum(month)+`,"limit":50,"unit":"credits","span":2592000},`+
 			`{"name":"Bonus credits","used":1,"display":"x","amount":`+jsonNum(bonus)+`,"limit":500,"unit":"credits","aside":true}]`)
 	}
-	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(qs, at) }
+	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(t.Context(), qs, at) }
 	read(day(1, 9), wb(0, 281.9999965, false), kiro(50, 0))
 	// only the extra credits move: WorkBuddy spends them first
 	read(day(1, 12), wb(0, 290.5, false), kiro(50, 12))
@@ -88,7 +88,7 @@ func TestDailyCreditsPoolsOfWhole(t *testing.T) {
 	wb := func(plan, extra float64) SubscriptionQuota {
 		return pluginWindowsCard(t, "workbuddy", "yapechan", `[`+win("Credits", plan, 500, true)+`,`+win("Extra credits", extra, 2900, true)+`,`+win("Total credits", plan+extra, 3400, false)+`]`)
 	}
-	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(qs, at) }
+	read := func(at time.Time, qs ...SubscriptionQuota) { noteDailyCredits(t.Context(), qs, at) }
 	read(day(7, 8), wb(0, 281.9999965))
 	// the extra credits move alone, then the plan's alone, then both
 	read(day(7, 9), wb(0, 300))

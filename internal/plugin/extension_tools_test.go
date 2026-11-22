@@ -41,6 +41,21 @@ func (fake *extensionToolsFake) ToolModules(ctx context.Context) ([]extension.In
 	}), fake.listErr
 }
 
+func (fake *extensionToolsFake) ActiveModule(ctx context.Context, id string) (extension.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return extension.Installed{}, err
+	}
+	if fake.listErr != nil {
+		return extension.Installed{}, fake.listErr
+	}
+	for _, entry := range fake.entries {
+		if entry.Manifest.ID == id && !entry.Disabled {
+			return entry, nil
+		}
+	}
+	return extension.Installed{}, errors.New("extension is unavailable")
+}
+
 func (fake *extensionToolsFake) Call(ctx context.Context, module, method string, scope sdk.Scope, params any, consume func(extension.Event) error) (json.RawMessage, error) {
 	fake.calls++
 	fake.scope, fake.module, fake.method = scope, module, method
@@ -151,6 +166,23 @@ func TestExtensionToolsWithoutLegacyNotes(t *testing.T) {
 	}
 	if count, err := ToolsOn(); err != nil || count != 0 {
 		t.Fatalf("no plugins = %d, %v", count, err)
+	}
+}
+
+func TestToolInventoryUsesOneSDKSnapshot(t *testing.T) {
+	fake := extensionToolsFixture(t)
+	list, names, err := ReadToolInventory()
+	if err != nil || !slices.ContainsFunc(list.Plugins, func(entry Entry) bool {
+		return entry.Spec == "extension:tool.module" && !entry.Off
+	}) {
+		t.Fatalf("installed tools: %+v, %v", list, err)
+	}
+	fake.listErr = errors.New("catalog reopened")
+	if got := names()["extension:tool.module"]; !slices.Equal(got, []string{"another", "echo"}) {
+		t.Fatalf("names from the installed snapshot: %v", got)
+	}
+	if list, _, err := ReadToolInventory(); err == nil || len(list.Plugins) != 0 {
+		t.Fatalf("new read reused the old catalog: %+v, %v", list, err)
 	}
 }
 

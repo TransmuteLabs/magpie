@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -218,6 +220,74 @@ func TestModuleConfigCASLetsAnActiveGroupDrain(t *testing.T) {
 	case <-fixture.group.closeDone:
 	case <-wait.Done():
 		t.Fatal("retired group did not stop after its active lease drained")
+	}
+}
+
+func TestReloadIdleStopHonorsDeadlineAndLeavesAdmissionFree(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	manifest := componentFixtureManifest()
+	entry := installComponentFixture(t, manager, manifest)
+	config, err := manager.ModuleConfig(t.Context(), manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newComponentFixture(t, manager, entry, config)
+	if err := fixture.group.prepare(t.Context(), fixture.primary); err != nil {
+		t.Fatal(err)
+	}
+	fixture.primary.group = fixture.group
+	manager.mu.Lock()
+	manager.startLifecycleLocked()
+	manager.workers[manifest.ID] = &managedWorker{entry: entry, config: config, client: fixture.primary}
+	manager.mu.Unlock()
+	closeRoutingManager(t, manager)
+
+	other := NewManager(manager.root)
+	if _, err := other.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", json.RawMessage(`{"label":"new"}`)); err != nil {
+		t.Fatal(err)
+	}
+	stopStarted, releaseStop := make(chan struct{}), make(chan struct{})
+	fixture.stop = func(component string) {
+		if component == sdk.PrimaryComponent {
+			close(stopStarted)
+			<-releaseStop
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	result, finished := make(chan error, 1), make(chan struct{})
+	go func() {
+		defer close(finished)
+		result <- manager.Reload(ctx)
+	}()
+	defer func() {
+		close(releaseStop)
+		cancel()
+		<-finished
+	}()
+	select {
+	case <-stopStarted:
+	case <-ctx.Done():
+		t.Fatal("idle generation did not begin stopping")
+	}
+
+	next, stopNext := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer stopNext()
+	if err := manager.Reload(next); err != nil {
+		t.Fatalf("wedged cleanup held the reload lock: %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("reload with idle cleanup still pending returned %v, want deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload exceeded its deadline while waiting for idle cleanup")
+	}
+	select {
+	case <-fixture.group.closeDone:
+		t.Fatal("test did not keep the idle cleanup parked")
+	default:
 	}
 }
 

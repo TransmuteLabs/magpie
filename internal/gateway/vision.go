@@ -30,12 +30,7 @@ import (
 // Agents are told a model that can't see takes images while one that can
 // describes them to it.
 func init() {
-	provider.Described = func() bool {
-		// whether one sees, not which account a request goes to
-		defer provider.Unwaited()()
-		_, ok := seer()
-		return ok
-	}
+	provider.Described = canDescribe
 }
 
 // VisionAgent is the User-Agent of the descriptions magpie asks for.
@@ -120,17 +115,35 @@ func (s *Server) blindTo(pid, model string, in *bool) bool {
 // names it, the description's row in Routing and Settings › Models say it
 // is missing, and a request turned away for want of a describer says so.
 func seer() (string, bool) {
-	switch v := provider.HeldSettings().Vision; v {
-	case "off":
+	model, automatic := configuredSeer()
+	if automatic {
+		model = AutoVision()
+	}
+	return model, model != ""
+}
+
+func configuredSeer() (model string, automatic bool) {
+	v := provider.HeldSettings().Vision
+	if v == "off" {
 		return "", false
-	case "":
-	default:
-		if pickedMissing(v) == "" {
-			return v, true
+	}
+	if v != "" && pickedMissing(v) == "" {
+		return v, false
+	}
+	return "", true
+}
+
+func canDescribe() bool {
+	defer provider.Unwaited()()
+	if model, automatic := configuredSeer(); !automatic {
+		return model != ""
+	}
+	for _, p := range provider.All() {
+		if len(seerCandidates(p)) > 0 {
+			return true
 		}
 	}
-	m := AutoVision()
-	return m, m != ""
+	return false
 }
 
 // VisionMissing is the model Settings › Models › Image recognition names
@@ -236,6 +249,13 @@ type rankedSeer struct {
 	ready bool
 }
 
+func seerCandidates(p provider.Provider) []smallCand {
+	if !p.On() || p.DecideOnly() {
+		return nil
+	}
+	return keptSmallCands(p, "sees", seesAt(p.ID))
+}
+
 // seersRanked is each switched-on provider's small model that sees, in
 // the order AutoVision picks among them: allowance left first, then a
 // Claude account's, a Codex account's, an API key's, another account's,
@@ -270,10 +290,10 @@ func seersRankedHeld(skip func(string) bool, held string) []rankedSeer {
 	}
 	var rs []ranked
 	for _, p := range provider.All() {
-		if !p.On() || p.DecideOnly() {
+		cs := seerCandidates(p)
+		if len(cs) == 0 {
 			continue
 		}
-		cs := keptSmallCands(p, "sees", seesAt(p.ID))
 		if skip != nil {
 			cs = slices.DeleteFunc(slices.Clone(cs), func(c smallCand) bool { return skip(p.ID + "/" + c.id) })
 		}

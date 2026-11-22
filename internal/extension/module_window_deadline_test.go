@@ -12,6 +12,26 @@ import (
 	"github.com/yetone/magpie/internal/filelock"
 )
 
+func holdPrivateStoreTestLock(t *testing.T, store *Store) func() {
+	t.Helper()
+	if err := store.withPrivateStore(t.Context(), func(*os.Root) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(store.root, "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := filelock.TryLock(lock)
+	if err != nil || !held {
+		lock.Close()
+		t.Fatalf("hold private store lock: %v, %v", held, err)
+	}
+	return func() {
+		filelock.Unlock(lock)
+		lock.Close()
+	}
+}
+
 func TestWindowMetadataAndConfigRespectDeadline(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() { managerReleaseClose(t, manager) })
@@ -42,7 +62,7 @@ func TestWindowMetadataAndConfigRespectDeadline(t *testing.T) {
 				}},
 			} {
 				t.Run(operation.name, func(t *testing.T) {
-					unlock := manager.store.mu.Unlock
+					var unlock func()
 					if barrier == "catalog" {
 						held, err := filelock.TryLock(catalog)
 						if err != nil || !held {
@@ -50,7 +70,7 @@ func TestWindowMetadataAndConfigRespectDeadline(t *testing.T) {
 						}
 						unlock = func() { filelock.Unlock(catalog) }
 					} else {
-						manager.store.mu.Lock()
+						unlock = holdPrivateStoreTestLock(t, manager.store)
 					}
 					ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 					defer cancel()

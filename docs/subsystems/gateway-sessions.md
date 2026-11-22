@@ -537,8 +537,13 @@ that kept a sessions cache (`sessions.json`) or a call cache
 (`Asked`, `All`); a fresh one reads none, not asked. The decision is
 saved, so a cache written later never turns it into "all", and a value
 already saved is never replaced. `settings.save` keeps the stored value
-and sync and restore keep it (`KeepOwn`); only `SetSessionReads` writes
-it. A settings.json that can't be written leaves this run reading
+and sync and restore keep it (`KeepOwn`). `SetSessionReads` and the
+source window's checked consent setter advance the saved generation
+when the read decision changes. History publication checks that
+generation, including when another magpie turns reading off and on
+during an operation. A new operation can use the restored permission.
+Ordinary settings saves preserve the read decision and its generation.
+A settings.json that can't be written leaves this run reading
 nothing. In a test binary nothing settled reads everything and nothing
 is written (`readsAllInTests`).
 

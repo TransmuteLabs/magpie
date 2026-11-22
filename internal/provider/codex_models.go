@@ -395,11 +395,15 @@ func accountModels(agent, user string) string {
 // Lists reports whether the account's plan has the model, as far as magpie
 // knows: one whose list was never fetched is taken to have them all.
 func (a *Account) Lists(model string) bool {
+	return a.listsContext(context.Background(), model)
+}
+
+func (a *Account) listsContext(ctx context.Context, model string) bool {
 	if a == nil {
 		return true
 	}
 	if a.extension != nil {
-		models, known, err := a.extension.selectedModels(context.Background())
+		models, known, err := a.extension.selectedModels(ctx)
 		if err != nil {
 			return false
 		}

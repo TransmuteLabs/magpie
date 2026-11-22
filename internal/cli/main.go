@@ -26,6 +26,7 @@ import (
 	"github.com/yetone/magpie/internal/codexrelay"
 	"github.com/yetone/magpie/internal/davsync"
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/imagemcp"
 	"github.com/yetone/magpie/internal/library"
@@ -369,12 +370,12 @@ var startUp = func() {
 	}
 	// the providers and settings read once for every agent's fields, which
 	// the moves below look at (a write among them reads them again)
-	release := provider.Hold()
+	defer filememo.Hold()()
+	defer provider.Hold()()
 	agent.RenameLegacy()
 	agent.MoveCursorEfforts()
 	agent.MoveAntigravityEfforts()
 	agent.MoveOffAccountIDs()
-	release()
 }
 
 // servesPages is whether magpie run with args serves plugins' pages,
@@ -694,12 +695,16 @@ func runWithRestart(args []string, beforeRestart func()) error {
 	case "import":
 		return importCmd(args[1:])
 	case "providers":
+		defer filememo.Hold()()
+		defer provider.Hold()()
 		return providers()
 	case "presets":
 		return presets()
 	case "provider":
 		return providerCmd(args)
 	case "models":
+		defer filememo.Hold()()
+		defer provider.Hold()()
 		return models(args[1:])
 	case "model":
 		return modelCmd(args[1:])
@@ -708,6 +713,8 @@ func runWithRestart(args []string, beforeRestart func()) error {
 	case "search":
 		return searchCmd(args[1:])
 	case "groups":
+		defer filememo.Hold()()
+		defer provider.Hold()()
 		return groups()
 	case "group":
 		return groupCmd(args)
@@ -800,14 +807,24 @@ func runWithRestart(args []string, beforeRestart func()) error {
 	case 2:
 		// default is magpie's word in any case, as an agent's name and a
 		// field's are: magpie codex DEFAULT wrote model = "DEFAULT"
-		if strings.EqualFold(args[1], "default") && (len(a.Fields) == 0 && a.Native != nil || a.Wired()) {
-			return disconnect(a)
+		if strings.EqualFold(args[1], "default") {
+			if a.Native != nil {
+				if len(a.Fields) == 0 {
+					return disconnect(a)
+				}
+				state := a.Native.Read()
+				if state.Wired() || state.NeedsRecovery {
+					return disconnect(a)
+				}
+			} else if a.Wired() {
+				return disconnect(a)
+			}
+			if len(a.Fields) != 0 {
+				return set(a, a.Fields[0].Key, "")
+			}
 		}
 		if len(a.Fields) == 0 {
 			return fmt.Errorf("%s has no configurable fields\n\n%s", a.Name, strings.TrimRight(agentHelp(a), "\n"))
-		}
-		if strings.EqualFold(args[1], "default") {
-			return set(a, a.Fields[0].Key, "")
 		}
 		// `magpie codex model`: a field's name alone asks what it is set to,
 		// where it was set as the model (model = "model"). Claude Code's
@@ -901,7 +918,7 @@ func fieldAsValue(a *agent.Agent, f, g *agent.Field, value string) error {
 			return fmt.Errorf("%q is one field of %s's: magpie %s %s shows it", h.Label, a.Name, a.ID, h.Key)
 		}
 	}
-	if g.Options != nil {
+	if g.Switch && g.Options != nil {
 		if o := g.Options(a.Values()); len(o) == 1 && o[0].Value == "on" {
 			return fmt.Errorf("%q is a switch of %s's, not a value for its %s: magpie %s %s on", value, a.Name, f.Label, a.ID, g.Key)
 		}

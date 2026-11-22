@@ -20,10 +20,10 @@ func TestUnreadStateKeptAside(t *testing.T) {
 		{"stepfun-auth.json", stepfunPath, func() { saveStepFun(map[string]stepfunSession{"cn": {}}) }},
 		{"qianfan-auth.json", qianfanPath, func() { saveQianfan(map[string]qianfanSession{"baidu-qianfan": {}}) }},
 		{"login-returns.json", loginReturnsPath, func() { setLoginReturn("codex", loginReturn{Back: "a", To: "b"}) }},
-		{"quota-history.json", quotaHistPath, func() { writeQuotaHist(quotaHist{}) }},
-		{"balance-history.json", balanceHistPath, func() { writeBalanceHist(balanceHist{}) }},
+		{"quota-history.json", quotaHistPath, func() { writeQuotaHist(t.Context(), quotaHist{}) }},
+		{"balance-history.json", balanceHistPath, func() { writeBalanceHist(t.Context(), balanceHist{}) }},
 		{"credits-daily.json", creditsPath, func() {
-			noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy", "me", 1, 10)}, time.Now())
+			noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy", "me", 1, 10)}, time.Now())
 		}},
 	} {
 		for _, was := range []string{`{"someone": {"a": `, `[]`} {

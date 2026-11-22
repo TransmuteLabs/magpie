@@ -15,7 +15,8 @@ func TestPricerBuildsTheProvidersOnce(t *testing.T) {
 	PriceOf = priceOf // setup's stub never looks a provider up
 	provider.Changed()
 	before := provider.AllBuilt.Load()
-	price := pricer()
+	price, releasePrices := pricer()
+	defer releasePrices()
 	for _, m := range []string{"openai/gpt-5", "anthropic/claude-opus-5-5", "deepseek/deepseek-chat", "google/gemini-3-pro", "xai/grok-4", "moonshotai/kimi-k2"} {
 		price(m)
 	}

@@ -523,6 +523,7 @@ export async function serve(module, { input = process.stdin, output = process.st
         }
       } catch (error) {
         stopCall(record, error instanceof SDKError ? error : internal());
+        if (manifest.contract.capabilities.includes("provider-saved-signin")) await handler.catch(() => {});
         while (record.hostPending.some(count => count > 0)) await Promise.all(record.hostTails);
         if (!writer.closed) await writer.write({ kind: "result", id: call.id, error: publicError(error) }, undefined, retire);
       } finally {

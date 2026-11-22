@@ -76,6 +76,20 @@ func setAside(pkg string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	if !loginsMu.LockChecked() {
+		return errSubscriptionLoginsLocked
+	}
+	defer loginsMu.Unlock()
+	owners := currentSubscriptionOwners(context.Background())
+	if owners.err != nil {
+		return owners.err
+	}
+	protected := make(map[string]bool, len(owners.rows))
+	for _, owner := range owners.rows {
+		if owner.Active || owner.Pending {
+			protected[owner.PublicID] = true
+		}
+	}
 	f, err := read()
 	if err != nil {
 		return err
@@ -83,7 +97,7 @@ func setAside(pkg string, ids []string) error {
 	keep := make([]Provider, 0, len(f.Providers))
 	moved := false
 	for _, p := range f.Providers {
-		if slices.Contains(ids, p.ID) && OnlyPicks(p) {
+		if !protected[p.ID] && slices.Contains(ids, p.ID) && OnlyPicks(p) {
 			// one set aside before under the same id gives way to this
 			f.PluginLeft = slices.DeleteFunc(f.PluginLeft, func(l LeftRecord) bool { return l.Provider.ID == p.ID })
 			f.PluginLeft = append(f.PluginLeft, LeftRecord{Package: pkg, Provider: p})

@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -50,6 +52,19 @@ type extensionWindowPart struct {
 
 func extensionPageKey(module string) string {
 	return "extension-" + hex.EncodeToString([]byte(module))
+}
+
+func extensionPanelProviderIDs(manifest sdk.Manifest) map[string]string {
+	ids := map[string]string{}
+	for _, descriptor := range manifest.Providers {
+		if descriptor.AccountOnly() {
+			continue
+		}
+		if id, _, visible := provider.ExtensionPublicProvider(manifest.ID, descriptor.ID); visible {
+			ids[descriptor.ID] = id
+		}
+	}
+	return ids
 }
 
 func extensionWindowParts(ctx context.Context) ([]pluginPage, []pluginPanel, error) {
@@ -122,11 +137,25 @@ func extensionWindowParts(ctx context.Context) ([]pluginPage, []pluginPanel, err
 			}
 			pages = append(pages, page)
 		}
+		var providerIDs map[string]string
 		for i, spec := range window.Panels {
 			p := part("window:panel:"+strconv.Itoa(i), spec.Dir, spec.File)
 			panel := pluginPanel{Spec: specID, Name: module.ID, Key: key + "-" + strconv.Itoa(i),
 				Slot: spec.Slot, Title: spec.Title, Titles: spec.Titles, Reads: reads, Ref: p.ref, window: p,
 				token: p.ref, file: p.file, URL: pluginPagePrefix + p.ref + "/" + p.file}
+			if panel.Slot == "provider" {
+				if providerIDs == nil {
+					providerIDs = extensionPanelProviderIDs(module.Manifest)
+				}
+				for _, descriptor := range module.Manifest.Providers {
+					if id := providerIDs[descriptor.ID]; id != "" && (spec.Providers == nil || slices.Contains(spec.Providers, descriptor.ID)) {
+						panel.Providers = append(panel.Providers, id)
+					}
+				}
+				if len(panel.Providers) == 0 {
+					continue
+				}
+			}
 			if panel.Title == "" {
 				panel.Title = module.ID
 			}
@@ -296,7 +325,8 @@ func extensionWindowRoutes(mux *http.ServeMux) {
 }
 
 // Re-read metadata rather than relying on in-process notifications: a CLI in
-// another process may install/disable a package or CAS its configuration.
+// another process may install/disable a package, CAS its configuration or
+// transfer a provider's public ID.
 func extensionWindowVersion(ctx context.Context) (string, error) {
 	modules, err := extensionWindows().Windows(ctx)
 	if err != nil {
@@ -304,7 +334,7 @@ func extensionWindowVersion(ctx context.Context) (string, error) {
 	}
 	hash := sha256.New()
 	for _, module := range modules {
-		encoded, err := json.Marshal([]string{module.ID, module.Revision, module.Configuration.Version})
+		encoded, err := json.Marshal([]any{module.ID, module.Revision, module.Configuration.Version, extensionPanelProviderIDs(module.Manifest)})
 		if err != nil {
 			return "", err
 		}

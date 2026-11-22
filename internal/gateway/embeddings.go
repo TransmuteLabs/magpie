@@ -205,7 +205,8 @@ func (s *Server) serveRetrieval(w http.ResponseWriter, r *http.Request, path, op
 	// the accounts or keys the calling key may not use are left out of
 	// the tries too (#905): a group's members through it no less
 	if keyWho, held := accountHolds(r); held {
-		tries = slices.DeleteFunc(tries, func(c candidate) bool { return !accountAllowed(keyWho, c) })
+		current := provider.CurrentAccountIDs(r.Context())
+		tries = slices.DeleteFunc(tries, func(c candidate) bool { return !accountAllowed(keyWho, c.p, current) })
 		if len(tries) == 0 {
 			msg := keyAccountsError(keyWho, asked)
 			call.Status, call.Error = 403, msg

@@ -31,8 +31,11 @@ func (host *extensionAgentRuntime) check(ctx context.Context, plugin string) err
 	if err != nil {
 		return err
 	}
-	if entry.Revision != host.entry.Revision {
+	if entry.Revision != host.entry.Revision || entry.EnableGeneration != host.entry.EnableGeneration {
 		return extension.ErrActionChanged
+	}
+	if entry.Manifest.Contract.Version.Minor == 0 {
+		return nil
 	}
 	config, err := host.manager.ModuleConfig(ctx, plugin)
 	if err != nil {
@@ -60,7 +63,11 @@ func (host *extensionAgentRuntime) Invoke(ctx context.Context, plugin, method st
 func inspectAgentRuntime(ctx context.Context, manager *extension.Manager, plugin string, descriptor sdk.AgentDescriptor) (*extensionAgentRuntime, error) {
 	entry, config, err := manager.ActiveModuleConfig(ctx, plugin)
 	if err != nil {
-		return nil, err
+		legacy, legacyErr := manager.ActiveModule(ctx, plugin)
+		if legacyErr != nil || legacy.Manifest.Contract.Version.Minor != 0 {
+			return nil, err
+		}
+		entry, config.Version = legacy, "0"
 	}
 	for _, actual := range entry.Manifest.Agents {
 		if actual.ID != descriptor.ID || !extensionBindingSameDescriptor(actual, descriptor) {

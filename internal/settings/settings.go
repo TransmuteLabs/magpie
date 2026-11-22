@@ -2213,26 +2213,11 @@ var parsed struct {
 // generation when b doesn't parse. Each call has a Settings of its own to
 // change: the one kept for the same bytes is cloned, never handed out.
 func parse(b []byte) (Settings, error) {
-	parsed.Lock()
-	if parsed.raw != nil && bytes.Equal(parsed.raw, b) {
-		s := parsed.s
-		parsed.Unlock()
-		return s.clone().normal(), nil
-	}
-	parsed.Unlock()
-	var s Settings
-	var err error
-	parses.Add(1)
-	perr := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s)
+	s, perr := parseCurrentSettings(b)
 	if perr == nil {
-		s = s.settleDock()
-		// only what parsed whole is kept: a last good generation read in
-		// its place is read again, as is a file that can't be read at all
-		parsed.Lock()
-		parsed.raw, parsed.s, parsed.norm, parsed.normed = bytes.Clone(b), s, Settings{}, false
-		parsed.Unlock()
 		return s.clone().normal(), nil
 	}
+	var err error
 	// one left all zero by a crash (#1505) is its last good generation
 	bak, ferr := lastgood.Fallback(Path(), b, validSettings)
 	if ferr == nil {
@@ -2242,6 +2227,28 @@ func parse(b []byte) (Settings, error) {
 		err = fmt.Errorf("could not read settings at %s: %w", Path(), perr)
 	}
 	return s.settleDock().normal(), err
+}
+
+func parseCurrentSettings(b []byte) (Settings, error) {
+	parsed.Lock()
+	if parsed.raw != nil && bytes.Equal(parsed.raw, b) {
+		s := parsed.s
+		parsed.Unlock()
+		return s, nil
+	}
+	parsed.Unlock()
+	var s Settings
+	parses.Add(1)
+	err := json.Unmarshal(bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")), &s)
+	if err == nil {
+		s = s.settleDock()
+		// only what parsed whole is kept: a last good generation read in
+		// its place is read again, as is a file that can't be read at all
+		parsed.Lock()
+		parsed.raw, parsed.s, parsed.norm, parsed.normed = bytes.Clone(b), s, Settings{}, false
+		parsed.Unlock()
+	}
+	return s, err
 }
 
 // parses counts settings.json's parses (Parses).
@@ -2334,9 +2341,10 @@ func Save(s Settings) error {
 // "allow all" is All with no Agents, so an agent installed later is read
 // too, and "allow selected" names each agent found then.
 type SessionReads struct {
-	Asked  bool            `json:"asked"`
-	All    bool            `json:"all,omitempty"`
-	Agents map[string]bool `json:"agents,omitempty"`
+	Asked      bool            `json:"asked"`
+	All        bool            `json:"all,omitempty"`
+	Agents     map[string]bool `json:"agents,omitempty"`
+	Generation string          `json:"generation,omitempty"`
 	// Kept: the agents turned off one by one (Keep off, Settings ›
 	// Privacy), not only left off among the first choice's list. An agent
 	// that is off, found here and not kept is asked about once more
@@ -2410,13 +2418,32 @@ func SetHTTPS(on bool) error {
 
 // SetDesktopGateway sets DesktopGateway alone, from what the file holds
 // now. A settings file that can't be read is left as it is, with the error.
-func SetDesktopGateway(u string) error {
+func SetDesktopGateway(expected, u string) error {
 	defer lockFile()()
 	s, err := loadChecked()
 	if err != nil {
 		return err
 	}
+	if s.DesktopGateway != expected {
+		return errors.New("Claude Desktop's gateway setting changed")
+	}
 	s.DesktopGateway = strings.TrimSpace(u)
+	return save(s, false)
+}
+
+func SetDesktopIsolation(on, expectedClaude, defaultClaude bool) error {
+	defer lockFile()()
+	s, err := loadChecked()
+	if err != nil {
+		return err
+	}
+	if on && (s.DesktopIsolatedClaude != expectedClaude || defaultClaude && s.DesktopIsolatedClaudeChosen) {
+		return errors.New("Claude Desktop's Code folder setting changed")
+	}
+	s.DesktopIsolated = on
+	if defaultClaude {
+		s.DesktopIsolatedClaude = true
+	}
 	return save(s, false)
 }
 
@@ -2679,6 +2706,10 @@ func save(s Settings, recording bool) error {
 // saveOwn is save; reads says s's SessionReads is the one to write, where
 // any other save keeps the file's.
 func saveOwn(s Settings, recording, reads bool) error {
+	return saveOwnChecked(s, recording, reads, nil)
+}
+
+func saveOwnChecked(s Settings, recording, reads bool, check func() error) error {
 	defer filememo.Forget() // read again, where a request holds it
 	// what is written is settled: a Settings read from an older file was
 	// settled as it was read, and one made without reading has its Dock
@@ -3000,7 +3031,9 @@ func saveOwn(s Settings, recording, reads bool) error {
 	if !recording {
 		s.GatewayConversations = consent
 	}
-	if !reads {
+	if reads {
+		s.SessionReads = nextSessionReads(storedReads, s.SessionReads)
+	} else {
 		s.SessionReads = storedReads
 	}
 	// the file there now is kept first, before anything below can make
@@ -3015,6 +3048,19 @@ func saveOwn(s Settings, recording, reads bool) error {
 	if err != nil {
 		return err
 	}
+	if err := publishSettings(append(b, '\n'), check); err != nil {
+		return err
+	}
+	// a request holding the catalog holds the settings too: it sees these
+	if catalog.Forget != nil {
+		catalog.Forget()
+	}
+	return nil
+}
+
+func publishSettings(body []byte, check func() error) error {
+	settingsPublicationMu.Lock()
+	defer settingsPublicationMu.Unlock()
 	// Restrict existing settings without changing the owner's permissions.
 	if fi, err := os.Stat(Path()); err == nil && fi.Mode().Perm()&0o077 != 0 {
 		if err := os.Chmod(Path(), fi.Mode().Perm()&0o700); err != nil {
@@ -3030,14 +3076,7 @@ func saveOwn(s Settings, recording, reads bool) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := edit.WriteAtomic(Path(), append(b, '\n')); err != nil {
-		return err
-	}
-	// a request holding the catalog holds the settings too: it sees these
-	if catalog.Forget != nil {
-		catalog.Forget()
-	}
-	return nil
+	return edit.WriteAtomicChecked(Path(), body, check, nil)
 }
 
 func (s Settings) normal() Settings {

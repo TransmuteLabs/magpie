@@ -188,6 +188,23 @@ replacement. Unknown/failed completion blocks subsequent writes. A proven
 not-started refusal and an ordinary known non-claim recheck each reserve a
 new operation ID. No inference usage row is manufactured for credit grants.
 
+SDK API 1.20 adds the `rate-limited` check-in result. Return it after a
+confirmed, completed rate-limit decision with a required `until` boundary.
+The module retains the receipts for any preceding confirmed claims and
+reconciles any uncertain effects before returning this result. The durable
+intent holds the result and the same completed receipt across day changes,
+manual presses, restarts and credential generations. A new operation can
+start at or after `until`. The ordinary scheduler receives its existing
+`failed` display state with the exact retry boundary. A plain SDK `failed`
+remains unresolved, including saved results with `until`. Lost or invalid
+completion also requires reconciliation.
+
+The declared check-in action requires the host's selected-account
+reservation. An independent `module.call` cannot issue a check-in write
+with its own operation ID. A package returning `rate-limited` declares
+API 1.20. Older hosts reject that package during admission and fail closed
+if they encounter an existing intent with the new outcome.
+
 `BeginGatewayActivation` owns one handle per manager. The ordinary
 `ListenAndServe` attachment is after successful bind; `New` and `Front`
 remain metadata-only. In-process change notifications have a removable

@@ -79,13 +79,16 @@ type pluginSignIn struct {
 // through magpie and keep alive (plugin.Provider.Renews), the accounts
 // switched on and not refused, of a provider neither switched off, hidden
 // nor being moved. Tests replace it.
-var pluginSignInsKept = func() []pluginSignIn {
+var pluginSignInsKept = func(ctx context.Context) []pluginSignIn {
 	var out []pluginSignIn
-	for _, pp := range heldPlugins() {
+	for _, pp := range heldPluginsContext(ctx) {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if !pp.Renews || movingNow(pp.ID) || leftAlone(PluginID(pp.ID)) {
 			continue
 		}
-		for _, l := range pluginLogins(pp) {
+		for _, l := range pluginLoginsContext(ctx, pp) {
 			if !l.On || l.Lapsed != "" {
 				continue
 			}
@@ -99,6 +102,9 @@ var pluginSignInsKept = func() []pluginSignIn {
 
 // keepPluginSignedIn renews one sign-in if it is due; tests replace it.
 var keepPluginSignedIn = func(ctx context.Context, s pluginSignIn) (plugin.KeptSignedIn, error) {
+	if err := plugin.CheckCommunitySubscription(ctx, s.ID); err != nil {
+		return plugin.KeptSignedIn{}, err
+	}
 	if !plugin.Running() && !plugin.HasBun() {
 		return plugin.KeptSignedIn{}, errNoBun
 	}
@@ -137,7 +143,7 @@ func (k *signInKeeper) look(ctx context.Context, now time.Time) time.Duration {
 		}
 	}
 	due := map[signInDue]bool{}
-	for _, s := range pluginSignInsKept() {
+	for _, s := range pluginSignInsKept(ctx) {
 		if ctx.Err() != nil {
 			break
 		}

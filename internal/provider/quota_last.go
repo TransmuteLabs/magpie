@@ -6,6 +6,7 @@ package provider
 // A reading that comes back replaces it at once.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,8 +28,9 @@ type lastQuotasT struct {
 }
 
 type lastQuota struct {
-	At time.Time         `json:"at"`
-	Q  SubscriptionQuota `json:"quota"`
+	At          time.Time             `json:"at"`
+	Q           SubscriptionQuota     `json:"quota"`
+	PluginUsage *pluginUsageSelection `json:"pluginUsage,omitempty"`
 	// what the windows' json leaves out, for routing
 	Spans []lastWindow `json:"spans,omitempty"`
 }
@@ -59,7 +61,11 @@ func keyTag(kind, key string) string {
 // keepLast is q, or the last reading of its account when q failed in
 // passing; a good reading is kept for next time.
 func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
-	if strings.HasPrefix(q.Provider, "extension-") {
+	return keepLastContext(context.Background(), q, user)
+}
+
+func keepLastContext(ctx context.Context, q SubscriptionQuota, user string) SubscriptionQuota {
+	if q.extensionUsage != nil || strings.HasPrefix(q.Provider, "extension-") {
 		return q
 	}
 	if user == "" {
@@ -68,20 +74,25 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 	if user == "" || q.Provider == "" {
 		return q
 	}
+	owners := heldSubscriptionOwnersContext(ctx)
+	if _, owned := owners.byPublicID(q.Provider); owned || owners.err != nil {
+		return q
+	}
 	key := q.Provider + "/" + strings.ToLower(user)
 	c := &lastQuotas
 	c.Lock()
 	defer c.Unlock()
 	c.load()
 	if q.Error == "" {
-		if kept := c.m[key].Q; q.readSeq != 0 && kept.readSeq > q.readSeq {
+		entry := c.m[key]
+		if kept := entry.Q; q.pluginUsage.matches(entry.PluginUsage) && q.readSeq != 0 && kept.readSeq > q.readSeq {
 			kept.Name, kept.Icon, kept.User = q.Name, q.Icon, q.User
 			return kept
 		}
 		if len(q.Windows) == 0 && q.Balance == "" {
 			return q
 		}
-		e := lastQuota{At: time.Now(), Q: q}
+		e := lastQuota{At: time.Now(), Q: q, PluginUsage: q.pluginUsage}
 		for _, w := range q.Windows {
 			e.Spans = append(e.Spans, lastWindow{w.Span, w.Model, w.Aside})
 		}
@@ -108,8 +119,11 @@ func keepLast(q SubscriptionQuota, user string) SubscriptionQuota {
 		read = c.reported // keep the reported values, even after their reset
 	}
 	out, ok := read(key)
-	if !ok {
+	if !ok || !q.pluginUsage.matches(out.pluginUsage) {
 		return q
+	}
+	if out.pluginUsage == nil {
+		out.pluginUsage = q.pluginUsage
 	}
 	out.ReadDeferred = readDeferred(q.Error)
 	if !out.ReadDeferred {
@@ -214,6 +228,7 @@ func (c *lastQuotasT) reported(key string) (SubscriptionQuota, bool) {
 		return SubscriptionQuota{}, false
 	}
 	out := e.Q
+	out.pluginUsage = e.PluginUsage
 	out.Windows = make([]QuotaWindow, len(e.Q.Windows))
 	copy(out.Windows, e.Q.Windows)
 	for i := range out.Windows {
@@ -239,17 +254,30 @@ func lastAllowances(agent string) map[string]Allowance {
 	}
 	now := time.Now()
 	out := map[string]Allowance{}
+	var community map[string]communityAllowanceBinding
 	c := &lastQuotas
 	c.Lock()
-	defer c.Unlock()
 	c.load()
 	for _, l := range logins {
 		q, ok := c.reading(loginProvider(l) + "/" + strings.ToLower(l.User))
-		if !ok || len(q.Windows) == 0 {
+		if !ok || !l.pluginUsage.matches(q.pluginUsage) || len(q.Windows) == 0 {
 			continue
 		}
 		if a, ok := routedAllowance(agent, l.User, q, now); ok {
 			out[l.User] = a
+			if l.pluginUsage != nil {
+				if community == nil {
+					community = map[string]communityAllowanceBinding{}
+				}
+				community[l.User] = communityAllowanceBinding{provider: q.Provider, selected: *l.pluginUsage}
+			}
+		}
+	}
+	c.Unlock()
+	current := currentCommunityAllowanceBindings(context.Background(), community)
+	for user := range community {
+		if _, valid := current[user]; !valid {
+			delete(out, user)
 		}
 	}
 	return out

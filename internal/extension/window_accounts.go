@@ -46,20 +46,20 @@ func (m *Manager) WindowAccounts(ctx context.Context, id, revision, part, bindin
 	if err != nil || windowAccountGrant(entry.Manifest, binding) != nil {
 		return nil, errors.New("window binding does not grant account discovery")
 	}
-	accounts, err := m.store.AccountsContext(ctx, id, binding.Provider)
+	accounts, err := m.store.accountMetadataForProvider(ctx, id, binding.Provider, 1024)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if errors.Is(err, errAccountListBudget) {
+		return nil, errors.New("window account list exceeds its budget")
 	}
 	if err != nil {
 		return nil, errors.New("window accounts are unavailable")
 	}
-	if len(accounts) > 1024 {
-		return nil, errors.New("window account list exceeds its budget")
-	}
 	summaries := make([]sdk.AccountSummary, len(accounts))
 	for index, account := range accounts {
 		summaries[index] = sdk.AccountSummary{
-			ID: account.ID, Generation: strconv.FormatUint(account.Generation, 10), ExpiresAt: account.ExpiresAt,
+			ID: account.ID, Generation: strconv.FormatUint(account.Generation, 10), ExpiresAt: account.ExpiresAt, Name: account.Name,
 		}
 	}
 	if _, _, err := m.windowEntry(ctx, id, revision); err != nil {

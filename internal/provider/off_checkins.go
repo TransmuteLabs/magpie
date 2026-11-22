@@ -1,5 +1,7 @@
 package provider
 
+import "context"
+
 // OffCheckins are the accounts a daily check-in reaches whose provider
 // the user switched off (wxkwxk666 on X: 禁用的供应商也要能签到). The Usage
 // page leaves a switched-off provider's cards out (visibleQuotas), and the
@@ -12,19 +14,27 @@ package provider
 // read and nothing is asked; a provider whose account was removed from
 // magpie (Hidden) is not listed.
 func OffCheckins() []SubscriptionQuota {
+	return OffCheckinsContext(context.Background())
+}
+
+func OffCheckinsContext(ctx context.Context) []SubscriptionQuota {
 	off := map[string]Provider{}
-	for _, p := range All() {
+	for _, p := range sharedAllContext(ctx) {
 		if p.Off && !p.Hidden {
 			off[p.ID] = p
 		}
 	}
-	if len(off) == 0 {
+	if len(off) == 0 || ctx.Err() != nil {
 		return nil
 	}
 	var qs []SubscriptionQuota
 	seen := map[string]bool{}
-	skip := checkinOff()
-	for _, c := range checkiners() {
+	runners, _, legacy := namedCheckiners(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	skip := checkinOff(legacy)
+	for _, c := range runners {
 		var st map[string]WorkBuddyCheckin
 		for _, a := range c.accounts() {
 			p, ok := off[a.provider]
@@ -33,7 +43,7 @@ func OffCheckins() []SubscriptionQuota {
 			}
 			seen[c.by+"\x00"+a.key] = true
 			name, icon := p.Name, p.Icon
-			if pp, ok := PluginOf(a.provider); ok {
+			if pp, ok := pluginOfContext(ctx, a.provider); ok {
 				name, icon = pluginCard(pp)
 			}
 			if name == "" {
@@ -45,6 +55,7 @@ func OffCheckins() []SubscriptionQuota {
 				Checkins: true, CheckinBy: c.by, CheckinKey: a.key, CheckinOff: skip[a.key]}
 			if st == nil {
 				st = shownCheckins(c.path)
+				c.legacy.moveHistory(st)
 			}
 			if r, ok := st[a.key]; ok {
 				r.User, r.By = a.User, c.by
@@ -53,5 +64,5 @@ func OffCheckins() []SubscriptionQuota {
 			qs = append(qs, q)
 		}
 	}
-	return InProviderOrder(qs)
+	return InProviderOrderContext(ctx, qs)
 }

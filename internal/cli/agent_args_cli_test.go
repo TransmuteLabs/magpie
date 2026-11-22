@@ -230,6 +230,24 @@ func TestEveryAgentFieldNameWritesNothing(t *testing.T) {
 	}
 }
 
+func TestRefusedAgentFieldNameDoesNotLoadChoices(t *testing.T) {
+	calls := 0
+	a := &agent.Agent{
+		ID: "fixture", Name: "Fixture",
+		Fields: []agent.Field{{
+			Key: "model", Label: "model", Get: func() string { return "fixture-model" },
+			Options: func(map[string]string) []agent.Option {
+				calls++
+				return []agent.Option{{Value: "fixture-model"}}
+			},
+		}},
+	}
+	want := `"model" is a field of Fixture's, not a value for its model: magpie fixture model shows it`
+	if err := set(a, "model", "model"); err == nil || err.Error() != want || calls != 0 {
+		t.Fatalf("refusing a field name = %v, choice reads = %d", err, calls)
+	}
+}
+
 // Claude Code's tiers are named as its model's aliases are: magpie claude
 // opus sets its model to opus, as the docs have it, where another field's
 // name alone shows that field; magpie claude help says so.

@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -13,6 +14,11 @@ import (
 // because the windows may have been sampled at different times.
 // A shorter window is its last observed cycle, not all its cycles added.
 func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.QuotaHistory, from, to time.Time) []provider.SubscriptionQuota {
+	return HistoricalWindowHoldsContext(context.Background(), cards, hist, from, to)
+}
+
+// HistoricalWindowHoldsContext estimates a past window using the request's provider lookup.
+func HistoricalWindowHoldsContext(ctx context.Context, cards []provider.SubscriptionQuota, hist []provider.QuotaHistory, from, to time.Time) []provider.SubscriptionQuota {
 	snapshots := []provider.SubscriptionQuota{}
 	for _, q := range cards {
 		if q.From != "" || q.User == "" {
@@ -71,7 +77,7 @@ func HistoricalWindowHolds(cards []provider.SubscriptionQuota, hist []provider.Q
 		past = append(past, a)
 	}
 	s := readLogSnapshot()
-	return windowHolds(snapshots, to, s.firstOwn, apiPricer(), provider.UsageRenames(), provider.SamePlanAccounts(), dryRuns(snapshots, past, to), func(fn func(Record)) {
+	return windowHolds(snapshots, to, s.firstOwn, apiPricer(ctx), provider.UsageRenames(), provider.SamePlanAccounts(), dryRuns(snapshots, past, to), func(fn func(Record)) {
 		s.visit(since, func(r Record) {
 			if r.Time.Before(to) {
 				fn(r)

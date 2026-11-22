@@ -86,7 +86,9 @@ func CodexRelay() http.Handler {
 		}
 		copyHeaders(req.Header, r.Header)
 		req.Header.Del("Accept-Encoding")
-		res, _, err := sendCodexRelay(req, body, func(int) (*http.Response, error) { return client.Do(req) })
+		res, _, err := sendCodexRelay(client, req, body, func(req *http.Request, _ int) (*http.Response, error) {
+			return client.Do(req)
+		})
 		if err != nil {
 			relayError(w, http.StatusBadGateway, "OpenAI can't be reached ("+err.Error()+"). magpie isn't running, so this thread goes to OpenAI on Codex's own sign-in.")
 			return

@@ -2,7 +2,7 @@
 
 Magpie has several kinds of extension: built-in Go plugins, legacy provider
 and gateway plugins, agent adapters, Library resources and installable SDK
-modules. This census maps those surfaces to the current API 1.19 SDK and the
+modules. This census maps those surfaces to the current API 1.20 SDK and the
 ordinary host owners. It distinguishes three layers:
 
 - **Contract:** public descriptors, DTOs, method negotiation and validation.
@@ -23,7 +23,7 @@ and transport matrix extends that inventory.
 
 ## Owner navigation and compatibility
 
-The advertised API 1.19 ceiling does not change a module's negotiated minimum
+The advertised API 1.20 ceiling does not change a module's negotiated minimum
 or activate undeclared capabilities. Explicit API1.0 single-primary modules
 remain supported; components require API1.1, private-tool exposure API1.2 and
 later adapters retain the floors shown in their owning contracts.

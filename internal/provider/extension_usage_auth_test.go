@@ -126,6 +126,7 @@ func TestExtensionUsageAuthUnavailableLockDefersStateChange(t *testing.T) {
 		for _, refused := range []bool{false, true} {
 			t.Run(fmt.Sprintf("completion-%v/refused-%v", completion, refused), func(t *testing.T) {
 				host := fixtureExtensionProvider(t, true)
+				registerFixtureExtensionPolicies(t, host, host.manifest.ID, "vendor")
 				if !refused {
 					extensionAuthUsage(t, host, nil, &sdk.Error{Code: "unauthenticated", Message: "refused"})
 				}
@@ -176,6 +177,52 @@ func TestExtensionUsageAuthUnavailableLockDefersStateChange(t *testing.T) {
 	}
 }
 
+func TestExtensionUsageAuthPreservesUnreadableCurrentPolicy(t *testing.T) {
+	for _, phase := range []string{"before dispatch", "at completion"} {
+		t.Run(phase, func(t *testing.T) {
+			host := fixtureExtensionProvider(t, true)
+			registerFixtureExtensionPolicies(t, host, host.manifest.ID, "vendor")
+			logins, _ := extensionLogins(ExtensionProviderID(host.manifest.ID, "vendor"))
+			path := loginsPath()
+			malformed := `[{"agent":`
+			damage := func() {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path+".bak", raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(malformed), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantCalls, calls := 0, 0
+			if phase == "before dispatch" {
+				damage()
+			} else {
+				wantCalls = 1
+			}
+			host.call = func(_ context.Context, method string, _ sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+				if method != sdk.MethodProviderUsage {
+					t.Fatalf("unexpected usage dispatch %s", method)
+				}
+				calls++
+				if phase == "at completion" {
+					damage()
+				}
+				return nil, &sdk.Error{Code: "unauthenticated", Message: "fixture credentials refused"}
+			}
+			quota := extensionQuota(t.Context(), logins[0])
+			raw, err := os.ReadFile(path)
+			if err != nil || string(raw) != malformed || calls != wantCalls || !quota.ReadDeferred {
+				t.Fatalf("unreadable live policy recovered inside a quota read: primary preserved=%t calls=%d want=%d deferred=%t read=%v",
+					string(raw) == malformed, calls, wantCalls, quota.ReadDeferred, err)
+			}
+		})
+	}
+}
+
 func TestExtensionUsageAuthLatestReadOwnsPublication(t *testing.T) {
 	for _, newerRefusal := range []bool{false, true} {
 		t.Run(map[bool]string{false: "newer recovery", true: "newer refusal"}[newerRefusal], func(t *testing.T) {
@@ -212,7 +259,8 @@ func TestExtensionUsageAuthLatestReadOwnsPublication(t *testing.T) {
 
 func TestExtensionUsageAuthKeepAliveUsesCurrentSelection(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
-	host.manifest.Contract.Version.Minor = 12
+	host.manifest.Contract.Version.Minor = 8
+	host.manifest.Contract.Capabilities = []sdk.Capability{sdk.OutboundExecutor, sdk.AccountAuth, sdk.UsageReporter}
 	host.manifest.Providers[0].KeepAlive = &sdk.AccountKeepAliveDescriptor{}
 	account, err := host.store.GetAccount(host.manifest.ID, "vendor", "alice")
 	if err != nil {
@@ -250,9 +298,7 @@ func TestExtensionUsageAuthMalformedMarkKeepsKnownRefusal(t *testing.T) {
 	if _, err := host.store.SaveAccount(account, account.Generation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExtensionProviders(); err != nil {
-		t.Fatal(err)
-	}
+	registerFixtureExtensionPolicies(t, host, host.manifest.ID, "vendor")
 	loginsMu.Lock()
 	logins, err := readLoginsFile()
 	if err == nil {
@@ -277,7 +323,8 @@ func TestExtensionUsageAuthMalformedMarkKeepsKnownRefusal(t *testing.T) {
 	}
 }
 
-func TestExtensionUsageAuthThroughInstalledWorker(t *testing.T) {
+func keepAliveUsageFixture(t *testing.T, token string) *keepAliveFixture {
+	t.Helper()
 	fixture := keepAliveOwnerFixture(t, nil)
 	path := filepath.Join(fixture.directory, sdk.ManifestFile)
 	raw, err := os.ReadFile(path)
@@ -305,11 +352,23 @@ func TestExtensionUsageAuthThroughInstalledWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	account.ExpiresAt = time.Now().Add(2 * time.Hour).UnixMilli()
-	account, err = fixture.manager.Store().SaveAccount(account, account.Generation)
+	account.Auth, err = json.Marshal(map[string]string{"url": fixture.endpoint, "token": token})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := fixture.manager.Store().SaveAccount(account, account.Generation); err != nil {
+		t.Fatal(err)
+	}
 	Changed()
+	return fixture
+}
+
+func TestExtensionUsageAuthThroughInstalledWorker(t *testing.T) {
+	fixture := keepAliveUsageFixture(t, "synthetic-original")
+	account, err := fixture.manager.Store().GetAccount(fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
+	if err != nil {
+		t.Fatal(err)
+	}
 	id := ExtensionProviderID(fixture.scope.Plugin, fixture.scope.Provider)
 	read := func(refused bool) {
 		t.Helper()
@@ -319,7 +378,41 @@ func TestExtensionUsageAuthThroughInstalledWorker(t *testing.T) {
 			t.Fatalf("installed worker authentication state: logins=%+v quota=%+v", logins, quota)
 		}
 	}
+	expectKept := func(want int) {
+		t.Helper()
+		selected, err := extensionSignInsKept(t.Context(), fixture.manager)
+		if err != nil || len(selected) != want {
+			t.Errorf("idle keepalive selected %d accounts, want %d: %v", len(selected), want, err)
+		}
+	}
+	expectKept(1)
 	read(true)
+	expectKept(0)
+	before, config, err := fixture.manager.ActiveModuleConfig(t.Context(), fixture.scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := extensionhost.NewCatalog(fixture.manager.Namespace())
+	for _, enabled := range []bool{false, true} {
+		if err := foreign.SetEnabled(t.Context(), fixture.scope.Plugin, enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, nextConfig, err := fixture.manager.ActiveModuleConfig(t.Context(), fixture.scope.Plugin)
+	if err != nil || after.Revision != before.Revision || nextConfig.Version != config.Version ||
+		after.EnableGeneration == before.EnableGeneration {
+		t.Fatalf("toggle must change just the enablement: package=%v config=%v enablement=%v err=%v",
+			after.Revision != before.Revision, nextConfig.Version != config.Version,
+			after.EnableGeneration != before.EnableGeneration, err)
+	}
+	logins := Logins(id)
+	if len(logins) != 1 || logins[0].Lapsed != "" {
+		t.Errorf("re-enabled subscription retained an earlier refusal: logins=%+v", logins)
+	}
+	expectKept(1)
+	StaleAllowance(id, fixture.scope.Account)
+	read(true)
+	expectKept(0)
 	account.Auth = json.RawMessage(`{"token":"synthetic-rotated"}`)
 	if _, err := fixture.manager.Store().SaveAccount(account, account.Generation); err != nil {
 		t.Fatal(err)

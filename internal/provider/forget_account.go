@@ -21,9 +21,30 @@ import (
 // agent's own sign-in, which magpie only reads, is hidden as Remove hides
 // it. Signing in again starts afresh.
 func ForgetAccount(id string) error {
+	return ForgetAccountAt(context.Background(), id, "")
+}
+
+func ForgetAccountAt(ctx context.Context, id, ownerRevision string) error {
 	p, ok := find(Accounts(), strings.ToLower(strings.TrimSpace(id)))
 	if !ok || p.Account == nil {
 		return fmt.Errorf("no signed-in account %q", id)
+	}
+	if p.IsExtension() {
+		binding := p.Account.extension
+		if binding.identity().revision != ownerRevision {
+			return errSubscriptionOwnerChanged
+		}
+		if err := CheckExtensionSubscription(ctx, binding.scope.Plugin, binding.scope.Provider, ownerRevision); err != nil {
+			return err
+		}
+		logins, _ := extensionLogins(p.Account.Agent)
+		return forgetListedLogins(logins, func(login Login) error {
+			scope := login.extension.scope
+			return forgetExtensionLoginSelected(ctx, p.Account.Agent, login.User, scope.Generation, &ownerRevision)
+		})
+	}
+	if ownerRevision != "" {
+		return errSubscriptionOwnerChanged
 	}
 	if p.IsPlugin() {
 		pp, ok := PluginOf(p.ID)
@@ -50,7 +71,12 @@ func ForgetAccount(id string) error {
 // forgetLogins forgets each of a built-in's accounts, the one in use first
 // last, as the accounts list removes them one by one.
 func forgetLogins(agent string) error {
-	ls := Logins(agent)
+	return forgetListedLogins(Logins(agent), func(login Login) error {
+		return ForgetLogin(agent, login.User)
+	})
+}
+
+func forgetListedLogins(ls []Login, forget func(Login) error) error {
 	slices.SortStableFunc(ls, func(a, b Login) int {
 		switch {
 		case a.Active == b.Active:
@@ -62,7 +88,7 @@ func forgetLogins(agent string) error {
 	})
 	var errs []error
 	for _, l := range ls {
-		if err := ForgetLogin(agent, l.User); err != nil {
+		if err := forget(l); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -74,6 +100,13 @@ func forgetLogins(agent string) error {
 // the ones magpie signed in to through it from plugin-auth.json, and the
 // agent's own (a CLI's sign-in the plugin reads) hidden.
 func forgetPluginAccounts(pp plugin.Provider) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	release, err := plugin.GuardCommunitySubscription(ctx, pp.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	agent := pluginAgent(pp)
 	var errs []error
 	keys, users := map[string]bool{}, map[string]bool{}
@@ -93,8 +126,6 @@ func forgetPluginAccounts(pp plugin.Provider) error {
 			errs = append(errs, err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if !own {
 		// every sign-in kept under the provider's id, listed or not
 		if err := plugin.SignOut(ctx, pp.ID, ""); err != nil {

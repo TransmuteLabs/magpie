@@ -18,8 +18,10 @@ The `memory` folder in magpie's config folder, one Markdown file per memory
   last returned each memory and how often (so a search never rewrites a
   memory's file, `TestUseDoesNotRewriteTheMemory`), and the hash of each
   file as magpie last wrote it.
-- `index.json` is a cache of the parsed files by size and mtime: gone or
-  garbled, memory reads the same (`TestIndexIsOnlyACache`).
+- The reader uses a bounded in-process cache of parsed Markdown. Each
+  view checks the current bytes and mtime of each file. Reusing the
+  parsed record avoids decoding unchanged Markdown. Older `index.json`
+  files are left on disk and unused.
 - `journal.json` holds a change to more than one file (a merge, a sync)
   before any is written; a change cut off halfway is finished by the next
   read (`TestCutOffChangeIsFinished`). A journal that can't be read is an
@@ -70,6 +72,12 @@ memory saved earlier, stored as UTC, reads the same way.
 and refuses empty or over-long text, an unknown kind and a bad scope
 (`TestSaveRefusesWhatIsntAMemory`).
 `Forget` archives; `Remove` deletes.
+
+A search ranks one view. It records new uses in `meta.json` under the
+writer lock. Within a minute of the last use, a returned record needs
+no counters written. The write rechecks the current use count and
+record before recording a hit. Handwritten Markdown remains byte-for-byte
+as saved.
 
 ## Runtime paths
 

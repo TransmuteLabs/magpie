@@ -63,7 +63,7 @@ func Tools(ctx context.Context) ([]PluginTools, error) {
 			out = append(out, PluginTools{Spec: l.Spec, Tools: l.Tools})
 		}
 	}
-	return append(out, callerExtensionTools(ctx, entries)...), nil
+	return append(out, ExtensionToolsFor(ctx, entries)...), nil
 }
 
 // ToolTimeout is how long a tool may run before its call is answered that
@@ -189,7 +189,7 @@ func legacyToolsOn(list List) (int, error) {
 
 // legacyToolNames are the tools noted for each plugin, by spec, sorted: what the
 // Plugins page shows for a plugin whose host isn't running.
-func legacyToolNames() (map[string][]string, error) {
+func LegacyToolNames() (map[string][]string, error) {
 	b, err := steady.ReadFile(toolsPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil

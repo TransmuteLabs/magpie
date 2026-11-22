@@ -8,12 +8,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+	"unsafe"
+	"weak"
 
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -193,6 +196,36 @@ func TestOTelQueueDoesNotBlock(t *testing.T) {
 	if e.dropped.Load() != 1 {
 		t.Fatalf("dropped=%d", e.dropped.Load())
 	}
+}
+
+func TestOTelFlushReleasesBodyWithBudget(t *testing.T) {
+	t.Setenv("MAGPIE_OTEL_ENABLED", "false")
+	synctest.Test(t, func(t *testing.T) {
+		exporter := newOTelExporter()
+		go exporter.run(time.Minute)
+		defer func() {
+			close(exporter.stop)
+			<-exporter.done
+		}()
+		offer := func() weak.Pointer[byte] {
+			body := strings.Repeat("payload", 1<<12)
+			exporter.offer(otelItem{record: Record{BodyIn: body}})
+			return weak.Make(unsafe.StringData(body))
+		}
+		body := offer()
+		for range otelBatchSize - 1 {
+			exporter.offer(otelItem{})
+		}
+		synctest.Wait()
+		if exporter.bytes.Load() != 0 {
+			t.Fatal("the exporter did not finish the batch")
+		}
+		runtime.GC()
+		runtime.GC()
+		if body.Value() != nil {
+			t.Error("the exporter keeps a body after releasing its budget")
+		}
+	})
 }
 
 func TestOTelDisabledAndChangedDestination(t *testing.T) {

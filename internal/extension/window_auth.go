@@ -13,7 +13,9 @@ import (
 
 type windowAuthParentKey struct{}
 type windowAuthPolicyKey struct{}
+type windowAuthAccountPolicyKey struct{}
 type WindowAuthPolicy func(context.Context, sdk.Scope) (context.Context, error)
+type WindowAuthAccountPolicy func(context.Context, *Manager, sdk.Scope, sdk.AccountSummary)
 
 func WithWindowAuthParent(ctx context.Context, parent string) context.Context {
 	return context.WithValue(ctx, windowAuthParentKey{}, parent)
@@ -21,6 +23,10 @@ func WithWindowAuthParent(ctx context.Context, parent string) context.Context {
 
 func WithWindowAuthPolicy(ctx context.Context, policy WindowAuthPolicy) context.Context {
 	return context.WithValue(ctx, windowAuthPolicyKey{}, policy)
+}
+
+func WithWindowAuthAccountPolicy(ctx context.Context, policy WindowAuthAccountPolicy) context.Context {
+	return context.WithValue(ctx, windowAuthAccountPolicyKey{}, policy)
 }
 
 type windowAuthTask struct {
@@ -65,6 +71,9 @@ func (m *Manager) windowAuthGrant(ctx context.Context, id, revision, part, bindi
 }
 
 func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding string, options sdk.WindowAuthStartOptions) (sdk.WindowAuthFlowView, error) {
+	if options.Method == sdk.SavedSignInMethod {
+		return sdk.WindowAuthFlowView{}, errors.New("saved sign-ins require the local import command")
+	}
 	parent, request, err := windowAuthIdentity(ctx, true)
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
@@ -137,12 +146,18 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication identity is unavailable")
 	}
 	journalPart, journalRevision := windowAuthJournalSelection(entry, config.Version, part)
+	if part == sdk.ProviderSignInPart {
+		journalRevision = subscriptionJournalRevision(ctx, journalRevision)
+	}
 	record := windowAuthRecord{
 		Flow: storeHash(nonce), Intent: storeHash(id, revision, part, parent, request),
 		Fingerprint: storeHash(binding, options.Method, string(selected), compact.String()),
 		Parent:      parent, Revision: journalRevision, Config: config.Version,
 		Part: journalPart, Binding: binding, Method: options.Method, Scope: scope,
 		Phase: "reserved", Created: expires.Add(-10 * time.Minute).UnixMilli(), Expires: expires.UnixMilli(),
+	}
+	if part == sdk.ProviderSignInPart && journalRevision != providerSignInRevision(entry, config.Version) {
+		record.Fingerprint = storeHash(record.Fingerprint, journalRevision)
 	}
 	options.Input = input
 	var created bool
@@ -159,10 +174,11 @@ func (m *Manager) CoreAuthStart(ctx context.Context, id, revision, part, binding
 	if !created {
 		m.mu.Unlock()
 		if owner != nil {
-			return owner.submit(ctx, true, options)
+			view, err := owner.submit(ctx, true, options)
+			return m.windowAuthResult(ctx, record.Scope, view, err)
 		}
 		if record.Phase == "complete" || record.Phase == "canceled" || record.Phase == "expired" || record.Phase == "uncertain" {
-			return record.public(), nil
+			return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
 		}
 		return sdk.WindowAuthFlowView{Flow: record.Flow, State: "uncertain"}, nil
 	}
@@ -203,16 +219,25 @@ func (m *Manager) windowAuthFlow(ctx context.Context, id, revision, part, bindin
 	}
 	record, err := m.store.windowAuthRecord(id, flow)
 	journalPart, journalRevision := windowAuthJournalSelection(entry, config.Version, part)
+	if part == sdk.ProviderSignInPart {
+		journalRevision = subscriptionJournalRevision(ctx, journalRevision)
+	}
 	if err != nil || record.Parent != parent || record.Part != journalPart || record.Binding != binding ||
 		record.Revision != journalRevision || record.Config != config.Version || record.Scope.Provider != grant.Provider {
 		return windowAuthRecord{}, nil, errors.New("window authentication flow does not belong to this view")
 	}
-	if _, err := policy(ctx, record.Scope); err != nil {
-		return windowAuthRecord{}, nil, errors.New("window authentication policy refuses this operation")
+	if err := m.withWindowAuthAuthority(ctx, record, func() error { return nil }); err != nil {
+		return windowAuthRecord{}, nil, err
 	}
 	m.mu.Lock()
 	owner := m.windowAuthOwners[flow]
 	m.mu.Unlock()
+	if owner == nil && (record.Phase == "reserved" || record.Phase == "starting" || record.Phase == "waiting" || record.Phase == "polling") {
+		record, err = m.store.windowAuthRecord(id, flow)
+		if err != nil {
+			return windowAuthRecord{}, nil, errors.New("window authentication receipt is unavailable")
+		}
+	}
 	return record, owner, nil
 }
 
@@ -221,15 +246,25 @@ func (m *Manager) CoreAuthFinish(ctx context.Context, id, revision, part, bindin
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, err
 	}
-	if owner == nil {
-		switch record.Phase {
-		case "complete", "canceled", "expired", "uncertain":
-			return record.public(), nil
-		default:
-			return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
+	if owner != nil {
+		view, err := owner.submit(ctx, false, sdk.WindowAuthStartOptions{})
+		return m.windowAuthResult(ctx, record.Scope, view, err)
+	}
+	switch record.Phase {
+	case "complete", "canceled", "expired", "uncertain":
+		return m.windowAuthResult(ctx, record.Scope, record.public(), nil)
+	default:
+		return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
+	}
+}
+
+func (m *Manager) windowAuthResult(ctx context.Context, scope sdk.Scope, view sdk.WindowAuthFlowView, err error) (sdk.WindowAuthFlowView, error) {
+	if err == nil && view.Account != nil {
+		if policy, ok := ctx.Value(windowAuthAccountPolicyKey{}).(WindowAuthAccountPolicy); ok && policy != nil {
+			policy(ctx, m, scope, *view.Account)
 		}
 	}
-	return owner.submit(ctx, false, sdk.WindowAuthStartOptions{})
+	return view, err
 }
 
 func (m *Manager) CoreAuthCancel(ctx context.Context, id, revision, part, binding, flow string) (sdk.WindowAuthFlowView, error) {
@@ -240,15 +275,19 @@ func (m *Manager) CoreAuthCancel(ctx context.Context, id, revision, part, bindin
 	if record.Phase == "complete" || record.Phase == "uncertain" || record.Phase == "canceled" || record.Phase == "expired" {
 		return record.public(), nil
 	}
-	record, err = m.store.updateWindowAuth(id, flow, func(record *windowAuthRecord, _ *storeAccounts) error {
-		if record.Phase == "complete" || record.Phase == "uncertain" {
+	err = m.withWindowAuthAuthority(ctx, record, func() error {
+		var updateErr error
+		record, updateErr = m.store.updateWindowAuth(id, flow, func(record *windowAuthRecord, _ *storeAccounts) error {
+			if record.Phase == "complete" || record.Phase == "uncertain" {
+				return nil
+			}
+			record.Canceled = true
+			if record.Phase == "waiting" || record.Phase == "reserved" {
+				record.Phase, record.Continuation = "canceled", nil
+			}
 			return nil
-		}
-		record.Canceled = true
-		if record.Phase == "waiting" || record.Phase == "reserved" {
-			record.Phase, record.Continuation = "canceled", nil
-		}
-		return nil
+		})
+		return updateErr
 	})
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication cancellation could not be recorded")
@@ -434,6 +473,10 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 				}
 			} else if !result.Pending {
 				err = manager.withWindowAuthAuthority(ctx, record, func() error {
+					if err := manager.store.checkSubscriptionResult(ctx, record.Scope, result.ID); err != nil {
+						return err
+					}
+
 					var err error
 					record, err = manager.store.publishWindowAuth(plugin, flow, result)
 					return err
@@ -458,7 +501,7 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	return sdk.WindowAuthFlowView{Flow: flow, State: "uncertain"}, nil
 }
 
-func (m *Manager) revokeWindowAuthOwners(current map[string]Installed, configs map[string]string) {
+func (m *Manager) revokeWindowAuthOwners(tracked map[string]bool, current map[string]moduleGeneration) {
 	m.mu.Lock()
 	owners := make([]*windowAuthOwner, 0, len(m.windowAuthOwners))
 	for _, owner := range m.windowAuthOwners {
@@ -466,11 +509,18 @@ func (m *Manager) revokeWindowAuthOwners(current map[string]Installed, configs m
 	}
 	m.mu.Unlock()
 	for _, owner := range owners {
-		entry, found := current[owner.record.Scope.Plugin]
-		config := configs[entry.Manifest.ID]
+		id := owner.record.Scope.Plugin
+		if !tracked[id] {
+			continue
+		}
+		generation, found := current[id]
+		entry, config := generation.entry, generation.config.Version
 		if found && config == owner.record.Config {
 			if grant, ok := entry.Manifest.ResolveAuthBinding(owner.record.Binding); ok && grant.Provider == owner.record.Scope.Provider {
 				part, revision := windowAuthJournalSelection(entry, config, grant.From)
+				if grant.From == sdk.ProviderSignInPart {
+					revision = subscriptionJournalRevision(owner.ctx, revision)
+				}
 				if part == owner.record.Part && revision == owner.record.Revision {
 					continue
 				}
@@ -511,33 +561,41 @@ func (m *Manager) withWindowAuthAuthority(ctx context.Context, record windowAuth
 		return err
 	}
 	defer unlock()
-	entries, _, err := catalogRead(root)
+	view, err := m.catalog.readView(root)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != record.Scope.Plugin || entry.Disabled {
-			continue
+	entry, found := view.lookup(record.Scope.Plugin)
+	if !found || entry.Disabled {
+		return errors.New("window authentication package changed or is disabled")
+	}
+	grant, found := entry.Manifest.ResolveAuthBinding(record.Binding)
+	if !found || grant.Provider != record.Scope.Provider {
+		return errors.New("authentication grant changed")
+	}
+	if grant.From == sdk.ProviderSignInPart {
+		entry = view.enabledEntry(entry)
+		if entry.observerEnablementErr != nil {
+			return errors.New("authentication enablement changed")
 		}
-		grant, found := entry.Manifest.ResolveAuthBinding(record.Binding)
-		if !found || grant.Provider != record.Scope.Provider {
-			return errors.New("authentication grant changed")
+	}
+	config, err := m.readModuleConfigContext(ctx, record.Scope.Plugin)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	part, revision := windowAuthJournalSelection(entry, config.Version, grant.From)
+	// Saved-subscription transactions use the same catalog authority but
+	// do not carry a GUI flow identity.
+	if record.Flow != "" {
+		if err := m.store.checkSubscriptionView(ctx, record.Scope); err != nil {
+			return err
 		}
 		if grant.From == sdk.ProviderSignInPart {
-			entry.EnableGeneration, err = readObserverEnablement(root, record.Scope.Plugin)
-			if err != nil {
-				return errors.New("authentication enablement changed")
-			}
+			revision = subscriptionJournalRevision(ctx, revision)
 		}
-		config, err := m.readModuleConfigContext(ctx, record.Scope.Plugin)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		part, revision := windowAuthJournalSelection(entry, config.Version, grant.From)
-		if err != nil || part != record.Part || revision != record.Revision || config.Version != record.Config {
-			return errors.New("window authentication selection changed")
-		}
-		return action()
 	}
-	return errors.New("window authentication package changed or is disabled")
+	if err != nil || part != record.Part || revision != record.Revision || config.Version != record.Config {
+		return errors.New("window authentication selection changed")
+	}
+	return action()
 }

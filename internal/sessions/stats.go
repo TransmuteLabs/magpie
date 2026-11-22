@@ -270,7 +270,9 @@ func sourceStatsKept(ranges []int, now time.Time, wantNative bool, alias func(st
 	// every changed file, whatever the range, so a wider range picked later
 	// finds them read rather than starting another run
 	refresh(files, files)
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	defer releasePrices()
+	titles := codexTitleOf()
 	if alias == nil {
 		names = "\x00none"
 	}

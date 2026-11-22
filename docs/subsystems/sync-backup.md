@@ -332,7 +332,11 @@ gateway's log lock is taken, the rest under it, and the new lines are
 appended with O_APPEND a few MB at a time after a newline if the log ends
 in an unfinished line. Rows keep `Computer == ""`: they are this computer's
 calls from then on, key spend caps included. Quota points merge with
-`provider.MergeQuotaHistory`. `Result.Usage` is the number of calls added,
+`provider.MergeQuotaHistory`, under the same file lock as local allowance
+sampling. Sync retrieves the remote data before taking that lock and
+records the received version after the local merge succeeds. An expired
+sync deadline or failed write leaves the remote version eligible for retry.
+`Result.Usage` is the number of calls added,
 nil when the file has no usage (one made before, or with `--no-usage`),
 which restores as before.
 

@@ -4,11 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func (m *Manager) prepareUsageRead(manifest sdk.Manifest, scope sdk.Scope, params any) (any, *UsageStamp, error) {
+type providerUsageSelectionKey struct{}
+
+type providerUsageSelection struct {
+	revision, config, enableGeneration string
+}
+
+func WithProviderUsageSelection(ctx context.Context, revision, config, enableGeneration string) context.Context {
+	return context.WithValue(ctx, providerUsageSelectionKey{}, providerUsageSelection{revision, config, enableGeneration})
+}
+
+func (l *Lease) prepareUsageRead(ctx context.Context, scope sdk.Scope, params any) (any, *UsageStamp, error) {
+	entry := l.worker.entry
+	if selected, bound := ctx.Value(providerUsageSelectionKey{}).(providerUsageSelection); bound &&
+		(selected.revision != entry.Revision || selected.config != l.ConfigVersion() ||
+			selected.enableGeneration != entry.EnableGeneration) {
+		return nil, nil, storeError("usage_stale", "The selected usage module generation changed.")
+	}
+	manifest := entry.Manifest
 	if manifest.Contract.Version.Minor < 4 || scope.Account == "" {
 		return params, nil, nil
 	}
@@ -17,7 +35,7 @@ func (m *Manager) prepareUsageRead(manifest sdk.Manifest, scope sdk.Scope, param
 	if err != nil || !decodeHostParams(raw, &request) || len(request.Credentials) != 0 && string(request.Credentials) != "null" {
 		return nil, nil, errors.New("usage credentials must come from the selected account")
 	}
-	stamp, err := m.store.UsageStamp(scope)
+	stamp, err := l.manager.store.UsageStampContext(ctx, scope)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -28,8 +46,12 @@ func (m *Manager) prepareUsageRead(manifest sdk.Manifest, scope sdk.Scope, param
 	return request, &stamp, nil
 }
 
-func (m *Manager) finishUsageRead(manifest sdk.Manifest, scope sdk.Scope, stamp *UsageStamp, raw json.RawMessage) error {
-	result, fresh, err := sdk.ValidateUsageResult(manifest, raw)
+func (l *Lease) finishUsageRead(ctx context.Context, scope sdk.Scope, stamp *UsageStamp, raw json.RawMessage) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entry := l.worker.entry
+	result, fresh, err := sdk.ValidateUsageResult(entry.Manifest, raw)
 	if err != nil {
 		return err
 	}
@@ -39,17 +61,26 @@ func (m *Manager) finishUsageRead(manifest sdk.Manifest, scope sdk.Scope, stamp 
 	if result.Revision != stamp.Version() {
 		return storeError("usage_stale", "The usage result did not acknowledge its requested revision.")
 	}
-	current, err := m.store.UsageStamp(scope)
-	if err != nil {
-		return err
+	if _, bound := SubscriptionOwnerRevision(ctx); !bound {
+		ctx = WithSubscriptionOwnerRevision(ctx, "")
 	}
-	if current.Revision != stamp.Revision {
-		return storeError("usage_stale", "The usage read preceded an invalidation.")
+	m := l.manager
+	if fresh && stamp.Dirty {
+		return m.withProviderPublication(ctx, entry, l.ConfigVersion(), scope, func(root *os.Root) error {
+			_, err := acknowledgeUsageLocked(ctx, root, scope, stamp.Revision)
+			return err
+		})
 	}
-	if fresh {
-		_, err = m.store.AcknowledgeUsage(scope, stamp.Revision)
-	}
-	return err
+	return m.withProviderStore(ctx, entry, l.ConfigVersion(), scope, false, func(root *os.Root, snapshot *storeReadSnapshot[storeAccounts]) error {
+		current, err := m.store.usageStampFromSnapshot(ctx, root, snapshot, scope, storeSync)
+		if err != nil {
+			return err
+		}
+		if current.Revision != stamp.Revision {
+			return storeError("usage_stale", "The usage read preceded an invalidation.")
+		}
+		return nil
+	})
 }
 
 func (m *Manager) invalidateUsage(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority) (any, error) {
@@ -65,14 +96,7 @@ func (m *Manager) invalidateUsage(ctx context.Context, scope sdk.Scope, raw json
 	if readOnly || !owned || component.effect != "write" || component.group == nil {
 		return nil, errors.New("a read cannot invalidate usage")
 	}
-	operation, err := m.store.OperationContext(ctx, scope.Plugin, scope.Operation)
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if err != nil || operation.Scope != scope || operation.State != "accepted" {
-		return nil, errors.New("usage invalidation requires durable write acceptance")
-	}
-	stamp, err := m.store.InvalidateUsage(scope)
+	stamp, err := m.store.invalidateUsage(ctx, scope, true)
 	if err != nil {
 		return nil, err
 	}

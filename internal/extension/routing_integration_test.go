@@ -300,7 +300,7 @@ func TestRoutingAdmissionRespectsDeadlineWhileOwnerIsLocked(test *testing.T) {
 		test.Fatal(err)
 	}
 	defer stateLock.Close()
-	for _, owner := range []string{"catalog", "private state", "local state", "reload"} {
+	for _, owner := range []string{"catalog", "private state", "reload"} {
 		test.Run(owner, func(test *testing.T) {
 			var unlock func()
 			switch owner {
@@ -314,9 +314,6 @@ func TestRoutingAdmissionRespectsDeadlineWhileOwnerIsLocked(test *testing.T) {
 					test.Fatalf("private lock: held=%v, err=%v", held, err)
 				}
 				unlock = func() { filelock.Unlock(stateLock) }
-			case "local state":
-				manager.store.mu.Lock()
-				unlock = manager.store.mu.Unlock
 			case "reload":
 				manager.reloadMu.Lock()
 				unlock = manager.reloadMu.Unlock
@@ -362,19 +359,19 @@ func TestContributionAccountPublicationRespectsDeadline(test *testing.T) {
 	if err := manager.checkResultPublication(test.Context(), invocation); err != nil {
 		test.Fatal(err)
 	}
-	manager.store.mu.Lock()
+	unlock := holdPrivateStoreTestLock(test, manager.store)
 	ctx, cancel := context.WithTimeout(test.Context(), 100*time.Millisecond)
 	defer cancel()
 	result := make(chan error, 1)
 	go func() { result <- manager.checkResultPublication(ctx, invocation) }()
 	select {
 	case err := <-result:
-		manager.store.mu.Unlock()
+		unlock()
 		if !errors.Is(err, context.DeadlineExceeded) {
 			test.Fatalf("expired publication returned %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		manager.store.mu.Unlock()
+		unlock()
 		<-result
 		test.Fatal("result waited for account authority after the deadline")
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -14,6 +15,8 @@ type ownCallParentKey struct{}
 type ownCallParent struct {
 	mu       sync.Mutex
 	method   string
+	scope    sdk.Scope
+	login    PublicSubscriptionLogin
 	appended bool
 	reported bool
 	snapshot *sdk.OwnCall
@@ -47,6 +50,47 @@ func withOwnCallParent(ctx context.Context, method string) context.Context {
 	return context.WithValue(ctx, ownCallParentKey{}, &ownCallParent{method: method})
 }
 
+func OwnCallPublicLogin(ctx context.Context) (provider, user string) {
+	parent, _ := ctx.Value(ownCallParentKey{}).(*ownCallParent)
+	if parent == nil {
+		return "", ""
+	}
+	return parent.login.Provider, parent.login.User
+}
+
+func (m *Manager) ownCallAdmission(ctx context.Context, scope sdk.Scope, admit workerAdmission) workerAdmission {
+	parent := ctx.Value(ownCallParentKey{}).(*ownCallParent)
+	if parent.login.Visible {
+		return admit
+	}
+	return func(ctx context.Context) (func(bool), error) {
+		var release func(bool)
+		if admit != nil {
+			var err error
+			release, err = admit(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		owners, err := m.store.SubscriptionOwners(ctx)
+		if err == nil {
+			login := ResolveSubscriptionLogin(owners, scope)
+			if rev, bound := SubscriptionOwnerRevision(ctx); !login.Visible || bound && login.Revision != rev {
+				err = errSubscriptionChanged
+			} else {
+				parent.scope, parent.login = scope, login
+			}
+		}
+		if err != nil {
+			if release != nil {
+				release(true)
+			}
+			return nil, err
+		}
+		return release, nil
+	}
+}
+
 func (m *Manager) appendOwnCall(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority) (any, error) {
 	return m.recordOwnCall(ctx, scope, raw, authority, false)
 }
@@ -57,6 +101,7 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 	readOnly, _ := ctx.Value(gatewayReadOnlyKey{}).(bool)
 	var request sdk.OwnCallRequest
 	if !live || !owned || component.group == nil || component.effect != "write" || readOnly ||
+		!parent.login.Visible || parent.scope != scope ||
 		parent.method != sdk.MethodModuleCall && parent.method != sdk.MethodToolCall ||
 		authority.method != sdk.MethodModuleCall && authority.method != sdk.MethodToolCall ||
 		!decodeHostParams(raw, &request) || sdk.ValidateOwnCall(authority.manifest, request.Call) != nil ||
@@ -93,7 +138,7 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 	if handler == nil {
 		return nil, errors.New("ordinary usage accounting is unavailable")
 	}
-	if err := lockContext(ctx, &parent.mu); err != nil {
+	if err := filelock.LockMutex(ctx, &parent.mu); err != nil {
 		return nil, err
 	}
 	if parent.appended || scheduled && parent.reported && !snapshot {

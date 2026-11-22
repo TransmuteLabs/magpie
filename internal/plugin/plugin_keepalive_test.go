@@ -38,7 +38,7 @@ func TestKeepSignedInRenewsIdleSignIns(t *testing.T) {
 	logf := filepath.Join(t.TempDir(), "renewals")
 	t.Setenv("RENEW_LOG", logf)
 	said := make(chan string, 16)
-	OnSignIn(func(provider, account, s string) { said <- provider + " " + account + " " + s })
+	OnSignIn(func(provider, account, s string, _ *string) { said <- provider + " " + account + " " + s })
 	t.Cleanup(func() { OnSignIn(nil) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

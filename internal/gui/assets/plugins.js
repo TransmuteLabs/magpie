@@ -246,6 +246,9 @@
   // the sidebar's dot, followed: Plugins opens on Installed, where the
   // plugins with an update are named at the top
   window.pluginTabTo = (id) => { tab = id; };
+  // opened from another page (app.js show): on Installed when an update
+  // waits, and the opening counted for its partners (provider.CountPage)
+  window.pmOpen = (up) => { if (up) tab = "installed"; api("page", { page: "plugins" }).catch(() => {}); };
   // pluginQuery: Discover, looking for q (the add sheet found nothing by it)
   window.pluginQuery = (q) => {
     query = q;
@@ -669,7 +672,7 @@
   // week's picks: one a day, the most downloaded, the most starred.
   const ORDER = ["pv", "mw", "ag", "tl", "pg"];
   const SHELVES = { pv: "Subscriptions", mw: "Gateway middleware", ag: "Agents", tl: "Tools for agents", pg: "Pages" };
-  const SHORT = { pv: "Subscriptions", mw: "Middleware", ag: "Agents", tl: "Tools", pg: "Pages" };
+  const SHORT = { pv: "Subscriptions", mw: "Middleware", ag: "Agents", tl: "Tools", pg: "Pages", ss: "Sessions" };
   const SHELF_N = { pv: 6 };
   const SOURCES = [["", "All sources"], ["ours", "magpie community"], ["third", "Other authors"], ["gh", "Unofficial, on GitHub"]];
   const SORTS = [["hot", "Most popular"], ["liked", "Most liked"], ["name", "Name"]];

@@ -218,7 +218,7 @@ func shareQuotas(ctx context.Context, c Config, u *usageState, fs files, listed 
 		if err != nil {
 			return err
 		}
-		if err := provider.MergeQuotaHistory(plain, time.Now()); err != nil {
+		if err := provider.MergeQuotaHistoryContext(ctx, plain, time.Now()); err != nil {
 			return fmt.Errorf("reading %s: %w", f, err)
 		}
 		u.Quotas[f] = ver

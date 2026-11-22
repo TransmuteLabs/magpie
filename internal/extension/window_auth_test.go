@@ -160,6 +160,80 @@ func TestWindowAuthOwnerPollProjectionThrottleAndPublication(t *testing.T) {
 	}
 }
 
+func TestWindowAuthPollReturnsDurableResultAfterOwnerLeaves(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "auth.trace")
+	manager, id, revision := authWindowFixture(t, false, authfixture.Config{Trace: trace})
+	ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "start-intent"), 6*time.Second)
+	defer cancel()
+	start, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{Method: "browser"})
+	if err != nil || start.State != "waiting" {
+		t.Fatalf("start: %s %v", start.State, err)
+	}
+	authWindowReady(t, manager, id, start)
+	manager.mu.Lock()
+	owner := manager.windowAuthOwners[start.Flow]
+	manager.mu.Unlock()
+	if owner == nil {
+		t.Fatal("authentication owner missing")
+	}
+	read := make(chan struct{})
+	resume := make(chan struct{})
+	policyCalls := 0
+	stale := WithWindowAuthPolicy(ctx, func(current context.Context, _ sdk.Scope) (context.Context, error) {
+		policyCalls++
+		if policyCalls == 2 {
+			close(read)
+			select {
+			case <-resume:
+			case <-current.Done():
+			}
+		}
+		return current, current.Err()
+	})
+	type result struct {
+		view sdk.WindowAuthFlowView
+		err  error
+	}
+	outcome := make(chan result, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		view, err := manager.CoreAuthFinish(stale, id, revision, "window:page", "signin", start.Flow)
+		outcome <- result{view, err}
+	}()
+	defer func() {
+		cancel()
+		<-finished
+	}()
+	select {
+	case <-read:
+	case <-ctx.Done():
+		t.Fatal("the first poll did not capture its pre-completion receipt")
+	}
+	completed, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", start.Flow)
+	if err != nil || completed.State != "complete" || completed.Account == nil {
+		t.Fatalf("completion: %s %v", completed.State, err)
+	}
+	select {
+	case <-owner.done:
+	case <-ctx.Done():
+		t.Fatal("the authentication owner did not leave")
+	}
+	close(resume)
+	select {
+	case returned := <-outcome:
+		if returned.err != nil || returned.view.State != "complete" || returned.view.Account == nil ||
+			returned.view.Account.ID != completed.Account.ID || returned.view.Account.Generation != completed.Account.Generation {
+			t.Fatalf("poll after durable completion returned %s: %v", returned.view.State, returned.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the first poll did not finish")
+	}
+	if authWindowTrace(t, trace, "finish") != 1 {
+		t.Fatal("the poll replayed the auth exchange")
+	}
+}
+
 func TestWindowAuthOwnerRejectsForeignFramesMethodsAndGrants(t *testing.T) {
 	manager, id, revision := authWindowFixture(t, false, authfixture.Config{})
 	ctx := authWindowContext(t.Context(), "start")

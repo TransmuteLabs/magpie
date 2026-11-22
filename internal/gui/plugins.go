@@ -88,6 +88,9 @@ func pluginSubs() []pluginSubJSON {
 	out := []pluginSubJSON{}
 	chosen := settings.Load().PluginOptions
 	for _, pp := range plugin.Cached() {
+		if provider.CommunitySubscriptionOwned(pp.ID) {
+			continue
+		}
 		var opts []pluginOptionJSON
 		for _, o := range pp.Options {
 			opts = append(opts, pluginOptionJSON{o, plugin.OptionOn(chosen, pp.ID, o)})
@@ -281,10 +284,11 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 		clashes = plugin.Clashes(loaded)
 		asked = err == nil
 	}
-	if !asked {
+	if !asked && len(l.Plugins) > 0 {
+		names, _ := plugin.LegacyToolNames()
 		for _, e := range l.Plugins {
 			var ts []plugin.Tool
-			for _, n := range plugin.ToolNames()[e.Spec] {
+			for _, n := range names[e.Spec] {
 				ts = append(ts, plugin.Tool{Name: n})
 			}
 			if len(ts) > 0 && !e.Off {
@@ -292,10 +296,35 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 			}
 		}
 	}
+	host := extension.Default()
+	entries, options, err := host.ListWithSettings(ctx)
+	if err != nil {
+		s.SDKError = err.Error()
+	} else {
+		tools = append(tools, plugin.ExtensionToolsFor(extension.WithLocalOwner(ctx, !isWeb(w)), entries)...)
+	}
 	toolNames := gateway.ToolNames(tools)
 	var servers map[string]library.PluginServer
 	if len(tools) > 0 {
 		servers = library.PluginServers()
+	}
+	setTools := func(row *pluginEntryJSON, spec string) {
+		if row.Off {
+			return
+		}
+		for _, group := range tools {
+			if group.Spec != spec {
+				continue
+			}
+			for _, tool := range group.Tools {
+				row.Tools = append(row.Tools, pluginToolJSON{
+					Name: tool.Name, Description: tool.Description, MCP: toolNames[spec][tool.Name],
+				})
+			}
+		}
+		if server, ok := servers[plugin.Name(spec)]; ok && len(row.Tools) > 0 {
+			row.ToolsServer = &server
+		}
 	}
 	// each plugin's subscriptions, by the names it gave last (plugin.Cached,
 	// which holds them without starting the host or asking anyone, and asks
@@ -307,6 +336,9 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	// list for one vendor after another every time it was opened.
 	provs := map[string][]plugin.Provider{}
 	for _, p := range plugin.Cached() {
+		if provider.CommunitySubscriptionOwned(p.ID) {
+			continue
+		}
 		names[p.Spec] = append(names[p.Spec], p.Name)
 		provs[p.Spec] = append(provs[p.Spec], p)
 		idName[p.ID] = p.Name
@@ -380,18 +412,8 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 			}
 			j.Clashes = append(j.Clashes, pluginClashJSON{Clash: c, Name: n})
 		}
-		for _, pt := range tools {
-			if pt.Spec != e.Spec || e.Off {
-				continue
-			}
-			for _, x := range pt.Tools {
-				j.Tools = append(j.Tools, pluginToolJSON{Name: x.Name, Description: x.Description, MCP: toolNames[e.Spec][x.Name]})
-			}
-			if sv, ok := servers[plugin.Name(e.Spec)]; ok && len(j.Tools) > 0 {
-				j.ToolsServer = &sv
-			}
-		}
-		j.Moved = provider.MovedOnto(e.Spec)
+		setTools(&j, e.Spec)
+		j.Moved = slices.DeleteFunc(provider.MovedOnto(e.Spec), provider.CommunitySubscriptionOwned)
 		if j.Moved == nil {
 			j.Moved = []string{}
 		}
@@ -407,14 +429,10 @@ func pluginsState(ctx context.Context, w Windows) pluginsJSON {
 	for i, ic := range provider.RepoIcons(said, 0) {
 		s.Plugins[i].Icon = ic
 	}
-	host := extension.Default()
-	entries, err := host.List()
-	if err != nil {
-		s.SDKError = err.Error()
-	} else {
-		for _, entry := range entries {
-			s.Plugins = append(s.Plugins, sdkPluginRow(ctx, host, entry))
-		}
+	for _, entry := range entries {
+		row := sdkPluginRow(ctx, host, entry, options[entry.Manifest.ID])
+		setTools(&row, plugin.ExtensionToolPrefix+entry.Manifest.ID)
+		s.Plugins = append(s.Plugins, row)
 	}
 	return s
 }
@@ -862,11 +880,17 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		release, err := plugin.GuardCommunitySubscription(ctx, in.Provider)
+		if err != nil {
+			fail(rw, errNoPluginMethod)
+			return
+		}
+		defer release()
 		if in.Inputs == nil {
 			in.Inputs = map[string]string{}
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
-		defer cancel()
 		if in.Key != "" {
 			msg, err := plugin.Validate(ctx, in.Provider, in.Method, in.Key, in.Value)
 			if err != nil {
@@ -904,10 +928,21 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, errNoPluginMethod)
 			return
 		}
+		owned := provider.CommunitySubscriptionOwnedContext(r.Context(), in.Provider)
+		if r.Context().Err() != nil {
+			return
+		}
+		if owned {
+			fail(rw, errNoPluginMethod)
+			return
+		}
 		if pp.Methods[in.Method].Type == "api" {
 			ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 			defer cancel()
 			id, err := provider.PluginAPIKey(ctx, in.Provider, in.Method, in.Inputs, in.Key)
+			if r.Context().Err() != nil {
+				return
+			}
 			if err != nil {
 				fail(rw, err)
 				return
@@ -919,7 +954,13 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, provider.SignInState{Agent: id, State: "done"})
 			return
 		}
-		st, err := provider.StartPluginSignInWith(in.Provider, in.Method, in.Inputs, provider.SignInOptions{Proxy: in.Proxy, User: in.User})
+		st, err := provider.StartPluginSignInWithContext(r.Context(), in.Provider, in.Method, in.Inputs, provider.SignInOptions{Proxy: in.Proxy, User: in.User})
+		if r.Context().Err() != nil {
+			if err == nil {
+				provider.CancelSignIn(st.ID)
+			}
+			return
+		}
 		if err != nil {
 			fail(rw, err)
 			return

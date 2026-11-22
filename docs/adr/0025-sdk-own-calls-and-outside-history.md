@@ -35,6 +35,14 @@ cannot select identity, ledger source, caller key, provider key or `Watched`.
 Reads, recall, source reads and ordinary provider execution cannot acquire
 own-call authority through a nested component write.
 
+When the worker admits a write, the host captures its public provider and
+user from the selected module's current subscription owner. Nested writes
+and paid-task termination use that same login. New admissions use the
+transferred login, subject to any owner revision selected by the caller.
+Accepted work keeps its earlier attribution if ownership changes. The
+module's private account and credential generation identify the operation
+journal.
+
 The callback rechecks account generation, enabled package revision,
 configuration version and cancellation. A parent intent admits one append;
 a repeated callback returns `accepted: false`. The existing operation journal
@@ -67,8 +75,9 @@ facts are refused by the Go/JS author SDK and host.
 
 The ordinary provider adapter in
 [`extension_calls.go`](../../internal/provider/extension_calls.go) pins the
-installed revision and configuration, uses the selected account's existing
-network policy, and rechecks the binding before, between and after pages.
+installed revision, configuration, enablement generation and subscription
+owner. It uses the selected account's existing network policy and rechecks
+the binding before, between and after pages.
 It reads at most 32 pages, 500 calls per page and 5,000 calls per window.
 A repeated cursor, failed page, cancellation or replacement rejects the
 complete window. No partial page is published.
@@ -81,10 +90,20 @@ the account watermark. Failure to persist that watermark safely retries the
 window using the ordinary reported-RID deduplication, including after the
 in-memory dedup cache is reset.
 
+The ledger append admits the selected generation and subscription owner
+after waiting for reported ingestion. It holds catalog and account read
+locks through the append. Switching the module off and back on invalidates
+an older read even when its package and configuration are identical. A
+subscription transfer or rollback invalidates a pending read under the
+previous owner, including a read that started before any transfer.
+
 Reported IDs are namespaced by module, provider and account, independently
 of credential generation. Credential refresh does not duplicate history;
 the same vendor ID in a different account remains independent. Vendor IDs
 already recorded as normal calls for that provider/account are excluded.
+The importer checks the indexed window before publication, then reconciles
+new log lines under the normal append lock. An ordinary call committed
+during ingestion therefore suppresses its reported copy.
 Modules must still omit their gateway calls when the host has no matching
 vendor request ID; no adapter can infer those missing correlations.
 `AccountDiscoveryOff` suppresses SDK account discovery for this reader.

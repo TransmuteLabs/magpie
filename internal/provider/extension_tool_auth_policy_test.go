@@ -40,6 +40,8 @@ func TestExtensionToolAuthPolicyUsesSelectedBinding(test *testing.T) {
 		test.Run(scenario, func(test *testing.T) {
 			host := fixtureExtensionProvider(test, true)
 			host.manifest.Contract.Version.Minor = 12
+			host.manifest.Contract.Capabilities = append(host.manifest.Contract.Capabilities, sdk.ToolProvider)
+			host.manifest.Tools = []sdk.ToolDescriptor{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}}
 			selected := &toolAuthPolicyHost{fixtureExtensionProviderHost: host, revision: "tool-policy-1"}
 			providerExtensionHost = func() extensionProviderHost { return selected }
 			if quota := extensionAuthUsage(test, host, nil, &sdk.Error{Code: "unauthenticated", Message: "synthetic refusal"}); quota.Error == "" {

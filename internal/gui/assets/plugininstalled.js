@@ -17,7 +17,8 @@ window.pmInstalled = function ({ es, st, everything, entryOf, kindOf, srcOf, nam
         (e.isMiddleware || e.isGateway) && "mw",
         e.isAgent && "ag",
         e.sdk.capabilities?.includes("tool-provider") && "tl",
-        e.sdk.window && "pg",
+        e.page && "pg",
+        e.sdk.sessions?.length && "ss",
       ].filter(Boolean);
       return { e, kinds, src: e.sdk.source ? "gh" : "third" };
     }
@@ -26,7 +27,7 @@ window.pmInstalled = function ({ es, st, everything, entryOf, kindOf, srcOf, nam
     const kind = e.middleware || e.isMiddleware || e.gateway || e.isGateway ? "mw" : e.agent || e.isAgent ? "ag" : e.tools?.length && !e.providers?.length ? "tl" : e.page && !e.providers?.length ? "pg" : "pv";
     return { e, kinds: [kind], src: isGit(e.spec) ? "gh" : name(e.spec).startsWith("@magpie-community/") ? "ours" : "third" };
   });
-  const kinds = ORDER.filter((k) => sorted.some((x) => x.kinds.includes(k)));
+  const kinds = [...ORDER, "ss"].filter((k) => sorted.some((x) => x.kinds.includes(k)));
   const srcs = SOURCES.map(([v]) => v).filter((v) => v && sorted.some((x) => x.src === v));
   if (!kinds.includes(st.kind) || kinds.length < 2) st.kind = "";
   if (!srcs.includes(st.src) || srcs.length < 2) st.src = "";
@@ -53,8 +54,8 @@ window.pmSDKSubscriptions = function (entry) {
   const grants = sdkSubs();
   return (entry.sdk.providerIDs || []).flatMap((id, index) => {
     const grant = grants.find((sub) => sub.id === id && (sub.page || sub.revision && sub.methods?.length));
-    const signedIn = !!hasLogins(id);
-    return grant || signedIn ? [{ id, name: entry.providers[index], icon: grant?.icon, signedIn }] : [];
+    const signedIn = providers.providers.some((row) => row.account?.agent === id && row.account.logins?.some((login) => login.extensionGeneration && !login.lapsed));
+    return signedIn || grant ? [{ id, name: entry.providers[index], icon: grant?.icon, signedIn }] : [];
   });
 };
 

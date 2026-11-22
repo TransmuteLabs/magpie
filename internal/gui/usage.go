@@ -268,8 +268,32 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 	// panel's, the Usage page's, routing's): each saved Claude account's
 	// /usage is run too, as its card's refresh runs it (#5380); opening
 	// the page asks without it.
+	showQuotas := func(ctx context.Context, rw http.ResponseWriter, r *http.Request) {
+		now := usage.Clock()
+		qs := provider.Quotas(ctx)
+		qs = provider.WithCheckinsContext(ctx, qs)
+		qs = provider.InProviderOrderContext(ctx, qs)
+		qs = usage.WithWindowHoldsContext(ctx, qs, now)
+		qs = provider.WithWindowStarts(qs, now)
+		qs = provider.WithHeldWindows(qs, now)
+		qs = provider.ValidateSubscriptionQuotas(ctx, withTrayKinds(qs))
+		if r.Context().Err() != nil {
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			http.Error(rw, err.Error(), http.StatusGatewayTimeout)
+			return
+		}
+		if r.Method == http.MethodGet && provider.SubscriptionUsageReading() {
+			rw.Header().Set("X-Magpie-Reading", "1")
+		}
+		writeJSON(rw, qs)
+	}
 	mux.HandleFunc("GET /api/usage/quotas", func(rw http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
+		if ctx.Err() != nil {
+			return
+		}
 		if q := r.URL.Query(); q.Get("asked") != "" {
 			if q.Get("all") != "" {
 				provider.AskEveryClaudeUsage()
@@ -280,25 +304,7 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		}
 		ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		defer cancel()
-		// a WorkBuddy (China) account's card says how its daily check-in
-		// went (#694)
-		qs := provider.InProviderOrder(provider.WithCheckins(provider.Quotas(ctx)))
-		// and what each window holds whole, by what magpie routed in it
-		qs = usage.WithWindowHolds(qs, usage.Clock())
-		// and when each began, for its Pace number (fflake33)
-		qs = provider.WithWindowStarts(qs, usage.Clock())
-		// and which an account can't spend for another window used up,
-		// for the accounts' sum (#4791)
-		qs = provider.WithHeldWindows(qs, usage.Clock())
-		// and which the menu bar can show, by kind, for Settings to pick
-		// among (settings.TrayWindows)
-		qs = withTrayKinds(qs)
-		// an account's card may be the stale copy a read under way will
-		// replace: the page asks again until it has landed (#959)
-		if provider.SubscriptionUsageReading() {
-			rw.Header().Set("X-Magpie-Reading", "1")
-		}
-		writeJSON(rw, qs)
+		showQuotas(ctx, rw, r)
 	})
 	// One card read again, from its refresh button (#840): ?provider= and,
 	// of a card with several accounts, &user=; the others are left as they
@@ -312,7 +318,7 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		provider.RefreshUsage(ctx, id, r.URL.Query().Get("user"))
-		writeJSON(rw, withTrayKinds(provider.WithHeldWindows(provider.WithWindowStarts(usage.WithWindowHolds(provider.InProviderOrder(provider.WithCheckins(provider.Quotas(ctx))), usage.Clock()), usage.Clock()), usage.Clock())))
+		showQuotas(ctx, rw, r)
 	})
 	// WorkBuddy's daily check-in pressed now, from the Usage card, for
 	// each account not in yet today, as `magpie accounts checkin` does; the
@@ -393,7 +399,10 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 	// the Usage page's folded Switched off group (wxkwxk666 on X): asks
 	// nothing, switches nothing on
 	mux.HandleFunc("GET /api/usage/checkins/off", func(rw http.ResponseWriter, r *http.Request) {
-		qs := provider.OffCheckins()
+		qs := provider.OffCheckinsContext(r.Context())
+		if r.Context().Err() != nil {
+			return
+		}
 		if qs == nil {
 			qs = []provider.SubscriptionQuota{}
 		}
@@ -407,7 +416,10 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 		// and a remote magpie's, for its cards (office/codex)
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
-		writeJSON(rw, append(hs, provider.RemoteQuotaHistories(ctx, days)...))
+		hs = append(hs, provider.RemoteQuotaHistories(ctx, days)...)
+		if r.Context().Err() == nil {
+			writeJSON(rw, hs)
+		}
 	})
 	// Historical whole-window estimates come only from this computer's
 	// readings and ledger. Selecting a cycle never asks a vendor.
@@ -421,7 +433,15 @@ func usageRoutes(mux *http.ServeMux, w Windows) {
 			return
 		}
 		hist := provider.QuotaHistories(now.Add(-45*24*time.Hour), args.Get("provider"), args.Get("user"))
-		writeJSON(rw, usage.HistoricalWindowHolds(provider.CachedCards(now), hist, from, to))
+		ctx := r.Context()
+		cards := provider.CachedCardsContext(ctx, now)
+		if ctx.Err() != nil {
+			return
+		}
+		holds := usage.HistoricalWindowHoldsContext(ctx, cards, hist, from, to)
+		if ctx.Err() == nil {
+			writeJSON(rw, holds)
+		}
 	})
 	// spends one of a Codex account's rate-limit resets, which the page
 	// has asked the user about first: the one they chose (Credit, an id

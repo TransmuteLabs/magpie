@@ -8,7 +8,7 @@
 // refuses), and "r-slow…" renews after 4 seconds.
 import fs from "node:fs"
 
-export const RenewPlugin = async () => ({
+export const RenewPlugin = async ({ client }) => ({
   config: async (cfg) => {
     cfg.provider = cfg.provider ?? {}
     cfg.provider.renewco = {
@@ -22,6 +22,7 @@ export const RenewPlugin = async () => ({
     provider: "renewco",
     methods: [{ type: "api", label: "API key" }],
     async refresh(auth) {
+      if (Object.hasOwn(auth, "_magpieAuthEpoch")) throw new Error("refresh received local sign-in metadata")
       fs.appendFileSync(process.env.RENEW_LOG, auth.refresh + "\n")
       await new Promise((ok) => setTimeout(ok, auth.refresh.startsWith("r-slow") ? 4000 : 300))
       if (auth.refresh.startsWith("r-gone")) throw Object.assign(new Error("RenewCo turned the refresh token away"), { signIn: "expired" })
@@ -31,16 +32,33 @@ export const RenewPlugin = async () => ({
       // a vendor that spends a refresh token once gives a new one
       return { access: "a-" + n, refresh: auth.refresh + "+", expires: Date.now() + 3600e3 }
     },
-    loader: async (getAuth) => ({
-      baseURL: process.env.FAKE_BASE,
-      async fetch(url, init) {
-        const a = await getAuth()
-        const h = new Headers(init.headers)
-        h.set("authorization", "Bearer " + a.access)
-        // the test this host runs for (testenv.FakeVendor)
-        if (process.env.FAKE_RUN) h.set("x-fake-run", process.env.FAKE_RUN)
-        return fetch(url, { ...init, headers: h })
-      },
-    }),
+    loader: async (getAuth) => {
+      const captured = process.env.RENEW_CAPTURE_AUTH ? await getAuth() : null
+      if (captured && Object.hasOwn(captured, "_magpieAuthEpoch")) throw new Error("loader received local sign-in metadata")
+      return {
+        baseURL: process.env.FAKE_BASE,
+        async fetch(url, init) {
+          const a = captured ?? await getAuth()
+          const h = new Headers(init.headers)
+          h.set("authorization", "Bearer " + a.access)
+          // the test this host runs for (testenv.FakeVendor)
+          if (process.env.FAKE_RUN) h.set("x-fake-run", process.env.FAKE_RUN)
+          const response = await fetch(url, { ...init, headers: h })
+          const replacement = response.headers.get("x-renew-access")
+          if (replacement) await client.auth.set({ path: { id: "renewco" }, body: { ...a, access: replacement } })
+          return response
+        },
+      }
+    },
   },
+  ...(process.env.RENEW_CAPTURE_AUTH && {
+    provider: {
+      id: "renewco",
+      async models(provider, { auth }) {
+        if (auth && Object.hasOwn(auth, "_magpieAuthEpoch")) throw new Error("models received local sign-in metadata")
+        if (auth?.access === "a-1") await client.auth.set({ path: { id: "renewco" }, body: { ...auth, access: "models-token" } })
+        return provider.models
+      },
+    },
+  }),
 })

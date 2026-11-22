@@ -99,7 +99,7 @@ var base64Class = func() (t [256]uint8) {
 // Gemini inlineData part's whatever its type (a PDF, a recording), written
 // as standard, padded base64; the body as it came when there is none.
 func stdBase64Body(proto provider.Protocol, body []byte) []byte {
-	if !mayHoldOddBase64(body) {
+	if !mayHoldInlineBase64(proto, body) || !mayHoldOddBase64(body) {
 		return body
 	}
 	if proto == provider.Gemini {
@@ -125,6 +125,22 @@ func stdBase64Body(proto provider.Protocol, body []byte) []byte {
 		return body
 	}
 	return out
+}
+
+func mayHoldInlineBase64(proto provider.Protocol, body []byte) bool {
+	switch proto {
+	case provider.Gemini:
+		if bodyHas(body, `"inlineData"`) || bodyHas(body, `"inline_data"`) {
+			return true
+		}
+	case provider.Chat, provider.Responses, provider.Anthropic:
+		if bodyHas(body, ";base64,") || proto == provider.Anthropic && bodyHas(body, `"base64"`) {
+			return true
+		}
+	default:
+		return false
+	}
+	return bodyHasJSONEscape(body, "inlineData_;base64,")
 }
 
 // geminiStdBase64 writes every inlineData part's data of a Gemini request

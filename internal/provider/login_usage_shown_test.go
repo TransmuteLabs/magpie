@@ -25,7 +25,10 @@ func TestLoginUsageShownOfSwitchedOffClaude(t *testing.T) {
 	keepLast(SubscriptionQuota{Provider: "claude", User: "pro@example.com", ReadAt: &at,
 		Windows: []QuotaWindow{{Name: "5 hours", Span: 5 * time.Hour, Used: 12}}}, "")
 
-	got := keptLoginUsage([]Login{{Agent: "claude", User: "pro@example.com", Plan: "Pro"}, {Agent: "claude", User: "new@example.com", Plan: "Pro"}})
+	got := keptLoginUsage(t.Context(), []Login{
+		{Agent: "claude", User: "pro@example.com", Plan: "Pro"},
+		{Agent: "claude", User: "new@example.com", Plan: "Pro"},
+	}, false)
 	if q := got["pro@example.com"]; q.Error != "" || len(q.Windows) != 1 || q.Windows[0].Used != 12 || !q.ReadDeferred {
 		t.Fatalf("a read account shows its last reading: %+v", q)
 	}

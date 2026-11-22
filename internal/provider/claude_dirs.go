@@ -690,9 +690,7 @@ func claudeSignedOut(l savedLogin) string {
 // claudeStandInAccount is the Claude Code provider while Claude Code is
 // signed out, on claudeListed's account; false with no account saved.
 func claudeStandInAccount() (Provider, bool) {
-	loginsMu.Lock()
-	ls := readLogins()
-	loginsMu.Unlock()
+	ls := sharedLogins()
 	user := claudeListed(ls)
 	if user == "" {
 		return Provider{}, false

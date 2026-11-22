@@ -48,8 +48,12 @@ test("check-in wire rejects invalid results and preserves absent or zero grant",
     { outcome: "claimed", streak: 2147483648 }, { outcome: "done", until: "tomorrow" },
     ...["2026-02-30T03:04:05Z", "2026-11-14T3:04:05Z", "2026-11-14T03:04:05+24:00",
       "2026-11-14T03:04:05,1Z", "2026-11-14T03:04:05.1234567890Z"].map(until => ({ outcome: "done", until })),
-    { outcome: "done", message: "\0" }])
+    { outcome: "done", message: "\0" }, { outcome: "rate-limited" }, { outcome: "rate-limited", until: null },
+    { outcome: "rate-limited", until: "" }, { outcome: "rate-limited", until: "tomorrow" }])
     assert.throws(() => validateAccountCheckinResult(value));
   assert.equal(validateAccountCheckinResult({ outcome: "claimed" }).credit, undefined);
   assert.equal(validateAccountCheckinResult({ outcome: "claimed", credit: 0 }).credit, 0);
+  const until = "2027-01-02T03:04:05.123456789Z";
+  assert.deepEqual(validateAccountCheckinResult({ outcome: "rate-limited", until }), { outcome: "rate-limited", until });
+  assert.deepEqual(validateAccountCheckinResult({ outcome: "failed", until }), { outcome: "failed", until });
 });

@@ -77,3 +77,51 @@ func BenchmarkAnswered(b *testing.B) {
 	b.StopTimer()
 	flushSticks()
 }
+
+func fillAffinitySnapshot(t testing.TB) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	now := time.Now().UTC()
+	sticks.Lock()
+	previous, previousFrom, previousMod := sticks.m, sticks.from, sticks.mod
+	sticks.m = make(map[string]stick, sticksKept)
+	for i := range sticksKept {
+		at := now.Add(-time.Duration(i) * time.Second)
+		sticks.m[fmt.Sprintf("conversation-%04d", i)] = stick{
+			rest: "provider", who: "provider#account", model: "model", effort: "high",
+			turn: 8, at: at, cacheRead: 1100, cacheWrite: 2200,
+			hour: hourCache{tokens: 3300, at: at}, stoodIn: i%4 == 0,
+		}
+	}
+	sticks.Unlock()
+	t.Cleanup(func() {
+		sticks.Lock()
+		sticks.m, sticks.from, sticks.mod = previous, previousFrom, previousMod
+		sticks.Unlock()
+	})
+}
+
+func TestAffinitySnapshotAllocations(t *testing.T) {
+	fillAffinitySnapshot(t)
+	saveSticks()
+	file, err := os.Stat(sticksPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocs := testing.AllocsPerRun(4, saveSticks)
+	t.Logf("saved %d bytes, %.0f allocations per write", file.Size(), allocs)
+	if allocs > 2*sticksKept {
+		t.Errorf("saving %d sticks made %.0f allocations", sticksKept, allocs)
+	}
+}
+
+func BenchmarkSaveSticks(b *testing.B) {
+	fillAffinitySnapshot(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		saveSticks()
+	}
+	if _, err := os.Stat(sticksPath()); err != nil {
+		b.Fatal(err)
+	}
+}

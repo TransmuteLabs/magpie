@@ -30,6 +30,7 @@ func TestAuthReadOncePerVersion(t *testing.T) {
 
 const authReadOnceJS = `
 const assert = require('node:assert/strict')
+const { createHash } = require('node:crypto')
 const realFs = require('node:fs')
 const vm = require('node:vm')
 const source = realFs.readFileSync(0, 'utf8')
@@ -41,13 +42,17 @@ const section = (from, to) => {
 }
 const authPath = process.argv[1]
 let reads = 0
+let unreadable = false
 const fs = { ...realFs, readFileSync: (p, ...rest) => {
-  if (p === authPath) reads++
+  if (p === authPath) {
+    reads++
+    if (unreadable) throw Object.assign(new Error('primary sign-ins unavailable'), { code: 'EACCES' })
+  }
   return realFs.readFileSync(p, ...rest)
 } }
-const context = vm.createContext({ fs, authPath, Buffer, structuredClone, Date, toErr: () => {}, send: () => {}, pause: () => {} })
+const context = vm.createContext({ fs, authPath, Buffer, createHash, structuredClone, Date, scope: { getStore: () => undefined }, toErr: () => {}, send: () => {}, pause: () => {} })
 const run = code => vm.runInContext(code, context)
-run(section('function parseAuth(', '// writeDurable'))
+run(section('function parseAuth(', 'let authSequence'))
 const past = new Date(Date.now() - 60e3)
 const write = (v, at) => {
   realFs.writeFileSync(authPath, JSON.stringify(v))
@@ -57,6 +62,14 @@ const write = (v, at) => {
 write({ a: { type: 'api', key: 'k1' } }, past)
 for (let i = 0; i < 100; i++) assert.equal(run('readAuth()').a.key, 'k1')
 assert.equal(reads, 1, 'a settled file is read once for 100 reads, read ' + reads + ' times')
+
+unreadable = true
+assert.equal(run('readAuth()').a.key, 'k1')
+assert.throws(() => run('readAuthView(true)'), { code: 'EACCES' })
+unreadable = false
+assert.equal(run('readAuthView(true).all').a.key, 'k1')
+write({ a: { type: 'api', key: 'k4' } }, past)
+assert.equal(run('readAuthView(true).all').a.key, 'k4')
 
 // written again: read again
 write({ a: { type: 'api', key: 'k2' }, b: { type: 'api', key: 'k3' } }, new Date(past.getTime() + 1000))

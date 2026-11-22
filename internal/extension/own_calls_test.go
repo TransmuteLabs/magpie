@@ -50,7 +50,11 @@ func TestOwnCallAuthorityRejectsRecallInferenceAndChangedConfiguration(t *testin
 			t.Fatal("read, inference or unbound parent appended own-call usage")
 		}
 	}
-	canceled, cancel := context.WithCancel(withOwnCallParent(write, sdk.MethodModuleCall))
+	parent := withOwnCallParent(write, sdk.MethodModuleCall)
+	if _, err := manager.ownCallAdmission(parent, scope, nil)(parent); err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(parent)
 	cancel()
 	if _, err := manager.hostCall(canceled, scope, sdk.MethodUsageAppend, raw); err == nil {
 		t.Fatal("canceled parent appended own usage")
@@ -60,13 +64,13 @@ func TestOwnCallAuthorityRejectsRecallInferenceAndChangedConfiguration(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.hostCall(withOwnCallParent(write, sdk.MethodModuleCall), scope, sdk.MethodUsageAppend, raw); err == nil {
+	if _, err := manager.hostCall(parent, scope, sdk.MethodUsageAppend, raw); err == nil {
 		t.Fatal("old configuration retained own-call authority")
 	}
 	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), scope.Plugin, updated.Version, json.RawMessage(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.hostCall(withOwnCallParent(write, sdk.MethodModuleCall), scope, sdk.MethodUsageAppend, raw); err == nil {
+	if _, err := manager.hostCall(parent, scope, sdk.MethodUsageAppend, raw); err == nil {
 		t.Fatal("restoring identical config values revived old callback authority")
 	}
 	if recorded != 0 {
@@ -91,6 +95,9 @@ func TestOwnCallCatalogWaitUsesParentDeadline(t *testing.T) {
 	defer OnOwnCall(func(sdk.Scope, sdk.OwnCall) { recorded++ })()
 	authority := hostAuthority{manifest: lease.Manifest(), method: sdk.MethodModuleCall}
 	parent := withOwnCallParent(lease.group.withAuthority(t.Context(), sdk.PrimaryComponent, "write"), sdk.MethodModuleCall)
+	if _, err := manager.ownCallAdmission(parent, scope, nil)(parent); err != nil {
+		t.Fatal(err)
+	}
 	raw := json.RawMessage(`{"call":{"kind":"cache_keepalive","model":"model","usage":{"inputTokens":3}}}`)
 	lock, err := os.OpenFile(filepath.Join(manager.catalog.Root, "catalog.lock"), os.O_RDWR, 0o600)
 	if err != nil {

@@ -427,7 +427,8 @@ func TestClaudeDesktopOnKeepsTheUsersOwnGatewayProfile(t *testing.T) {
   "disableDeploymentModeChooser": true,
   "disableDeepLinkRegistration": true,
   "inferenceProvider": "gateway",
-  "inferenceCredentialKind": "static"
+  "inferenceCredentialKind": "static",
+  "inferenceCredentialHelper": "/path/to/unused-credential-helper"
 }`
 	own := filepath.Join(p.library, "5b0d0c6e-1f2a-4c3b-9d4e-0a1b2c3d4e5f.json")
 	body := fmt.Sprintf(theirs, gateway.URL())

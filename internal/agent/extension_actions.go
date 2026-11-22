@@ -5,15 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/extension"
-	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -31,7 +27,10 @@ type ExtensionAgentRegistry interface {
 var _ ExtensionAgentRegistry = (*extension.Manager)(nil)
 
 func ExtensionAgents(host ExtensionAgentRegistry) ([]ExtensionAgent, error) {
-	installed, err := host.List()
+	return listExtensionAgents(host.List())
+}
+
+func listExtensionAgents(installed []extension.Installed, err error) ([]ExtensionAgent, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -59,12 +58,16 @@ func PlanExtension(ctx context.Context, host extension.ActionRuntime, plugin str
 // extensionAgents connects executable SDK modules to the same ordinary
 // Agent/NativeConnection API the UI and agent commands already use.
 func extensionAgents(home string, existing []*Agent, errs map[string]string) []*Agent {
+	return extensionAgentsContext(context.Background(), home, existing, errs)
+}
+
+func extensionAgentsContext(parent context.Context, home string, existing []*Agent, errs map[string]string) []*Agent {
 	host := extension.Default()
-	out := installedExtensionAgents(host, home, existing, errs)
+	out := installedExtensionAgentsContext(parent, host, home, existing, errs)
 	if _, err := os.Lstat(extensionBindingPath()); os.IsNotExist(err) {
 		return out
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	ledger, err := extensionBindingObserve(ctx)
 	if err != nil {
@@ -91,7 +94,11 @@ func extensionAgents(home string, existing []*Agent, errs map[string]string) []*
 }
 
 func installedExtensionAgents(host *extension.Manager, home string, existing []*Agent, errs map[string]string) []*Agent {
-	list, err := ExtensionAgents(host)
+	return installedExtensionAgentsContext(context.Background(), host, home, existing, errs)
+}
+
+func installedExtensionAgentsContext(ctx context.Context, host *extension.Manager, home string, existing []*Agent, errs map[string]string) []*Agent {
+	list, err := listExtensionAgents(host.ListContext(ctx))
 	if err != nil {
 		if errs != nil {
 			errs["sdk"] = err.Error()
@@ -151,11 +158,7 @@ func installedExtensionAgents(host *extension.Manager, home string, existing []*
 		if item.Agent.Launch != nil {
 			binaries[strings.ToLower(bin)] = true
 		}
-		if item.Agent.Launch != nil || item.Agent.Profile != nil {
-			out = append(out, extensionControlledAgent(home, host, item, base))
-		} else {
-			out = append(out, extensionAgent(home, host, item))
-		}
+		out = append(out, extensionControlledAgent(home, host, item, base))
 	}
 	return out
 }
@@ -230,188 +233,6 @@ func marshalExtensionAgentOptions(options extensionAgentOptions, manifest sdk.Ma
 		Models         []json.RawMessage        `json:"models"`
 		DecisionModels []sdk.AgentDecisionModel `json:"decisionModels"`
 	}{envelope(options), models, decisions})
-}
-
-func extensionAgent(home string, host ExtensionAgentRegistry, item ExtensionAgent) *Agent {
-	desc := item.Agent
-	actions := extension.NewActions(host)
-	policy := extension.ActionPolicy{Root: home, Paths: desc.ConfigFiles,
-		BackupDir: filepath.Join(appdir.Config(), "extensions", "action-backups", item.Plugin, desc.ID)}
-	ownerKey := "sdk.agent." + item.Plugin + ":" + desc.ID
-	var mu sync.Mutex
-	owned := func() bool { return stashShared()[ownerKey] != "" }
-	options := func(field, value string) ([]byte, error) {
-		opts := extensionAgentOptions{Gateway: gateway.URL(), Key: agentKeyAt(desc.ID, gateway.URL()),
-			Models: viaMagpie(desc.ID, "magpie/"), Field: field, Value: value}
-		if raw := stashShared()[ownerKey]; raw != "" {
-			if err := json.Unmarshal([]byte(raw), &opts.Previous); err != nil {
-				return nil, fmt.Errorf("extension agent ownership could not be read: %w", err)
-			}
-		}
-		manifest, err := host.Manifest(item.Plugin)
-		if err != nil {
-			return nil, err
-		}
-		return marshalExtensionAgentOptions(opts, manifest, desc.ID)
-	}
-	inspect := func() (sdk.AgentInspectResult, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		opts, err := options("", "")
-		if err != nil {
-			return sdk.AgentInspectResult{}, err
-		}
-		return actions.AgentInspect(ctx, item.Plugin, sdk.Scope{Operation: "agent.inspect"},
-			sdk.AgentInspectRequest{ID: desc.ID, Options: opts}, policy)
-	}
-	prepare := func(action, field, value string) (*extension.ActionPlan, error) {
-		opts, err := options(field, value)
-		if err != nil {
-			return nil, err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		return actions.AgentPlan(ctx, item.Plugin, sdk.Scope{Operation: "agent." + action},
-			sdk.AgentPlanRequest{ID: desc.ID, Action: action, Options: opts}, policy)
-	}
-	execute := func(plan *extension.ActionPlan, disconnect bool) error {
-		// Native API callers serialize each object's operations. The action
-		// service also rechecks every file while holding the root write lock.
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		result, err := plan.Execute(ctx, plan.Preview().Revision)
-		if err != nil {
-			return err
-		}
-		stashMu.Lock()
-		defer stashMu.Unlock()
-		state := stashLoad()
-		if disconnect {
-			delete(state, ownerKey)
-			state[desc.ID+disconnectedKey] = "1"
-		} else {
-			if state[ownerKey] == "" {
-				snapshot, err := json.Marshal(plan.Snapshots())
-				if err != nil {
-					return err
-				}
-				state[ownerKey] = string(snapshot)
-			}
-			delete(state, desc.ID+disconnectedKey)
-		}
-		if err := stashWrite(state); err != nil {
-			return fmt.Errorf("agent files applied; ownership could not be saved (backup %s): %w", result.Backup, err)
-		}
-		return nil
-	}
-	run := func(action, key, value string) error {
-		mu.Lock()
-		defer mu.Unlock()
-		plan, err := prepare(action, key, value)
-		if err != nil {
-			return err
-		}
-		return execute(plan, false)
-	}
-	a := &Agent{ID: desc.ID, Name: desc.Name, Bin: desc.Bin, Path: filepath.Join(home, filepath.FromSlash(desc.ConfigFiles[0])),
-		ListOnly: true, Spelled: prefixed}
-	a.Aliases = append([]string(nil), desc.Aliases...)
-	a.UA = make([]string, len(desc.UA))
-	for index, prefix := range desc.UA {
-		a.UA[index] = strings.ToLower(prefix)
-	}
-	a.extensionMetadata = &extensionAgentMetadata{plugin: item.Plugin, descriptor: desc.Clone(), owns: owned}
-	a.Dir = filepath.Dir(a.Path)
-	a.detect = func() bool {
-		for _, name := range desc.ConfigFiles {
-			if isFile(filepath.Join(home, filepath.FromSlash(name))) {
-				return true
-			}
-		}
-		return desc.Bin != "" && lookExtensionBin(desc.Bin)
-	}
-	a.Native = &NativeConnection{
-		Read: func() NativeState {
-			result, err := inspect()
-			state := NativeState{Provider: "disconnected", Runtime: "available", Fields: map[string]NativeField{}}
-			if err != nil {
-				state.Provider, state.Runtime, state.Detail = "invalid", "unavailable", err.Error()
-				return state
-			}
-			state.Detail = result.Detail
-			if result.Connected && owned() {
-				state.Provider = "connected"
-			}
-			for _, f := range desc.Fields {
-				state.Fields[f.Key] = NativeField{Value: result.Values[f.Key], Status: state.Provider}
-			}
-			return state
-		},
-		Connect: func() error { return run("connect", "", "") },
-		Apply: func(key, value string) error {
-			if a.Field(key) == nil {
-				return fmt.Errorf("unknown extension agent field %q", key)
-			}
-			return run("set", key, value)
-		},
-	}
-	var pending *extension.ActionPlan
-	var pendingRevision string
-	a.Native.Disconnect = func() (*DisconnectPlan, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if !owned() {
-			pending, pendingRevision = nil, ""
-			return &DisconnectPlan{}, nil
-		}
-		plan, err := prepare("disconnect", "", "")
-		if err != nil {
-			return nil, err
-		}
-		before := map[string][]byte{}
-		for _, file := range plan.Snapshots() {
-			before[file.Path] = file.Body
-		}
-		native := &DisconnectPlan{actionRevision: plan.Preview().Revision}
-		for _, file := range plan.Preview().Files {
-			native.Files = append(native.Files, PlannedFile{Path: filepath.Join(plan.Root(), filepath.FromSlash(file.Path)),
-				Before: before[file.Path], After: file.Body})
-		}
-		pending, pendingRevision = plan, native.Revision(desc.ID)
-		return native, nil
-	}
-	a.Native.Execute = func(plan *DisconnectPlan) error {
-		mu.Lock()
-		defer mu.Unlock()
-		if pending == nil && !owned() && len(plan.Files) == 0 && len(plan.Settings) == 0 {
-			return nil
-		}
-		if pending == nil || pendingRevision != plan.Revision(desc.ID) {
-			return extension.ErrActionChanged
-		}
-		return execute(pending, true)
-	}
-	a.Sync = func() error {
-		if !owned() {
-			return nil
-		}
-		return run("sync", "", "")
-	}
-	for _, f := range desc.Fields {
-		key := f.Key
-		a.Fields = append(a.Fields, Field{Key: key, Label: f.Label,
-			Get: func() string { result, _ := inspect(); return result.Values[key] },
-			Set: func(value string) error { return a.Native.Apply(key, value) },
-			Options: func(cur map[string]string) []Option {
-				opts := []Option{{Value: "", Label: "default"}}
-				if cur[key] != "" {
-					opts = append(opts, Option{Value: cur[key], Label: cur[key]})
-				}
-				return append(opts, viaMagpie(desc.ID, "magpie/")...)
-			},
-		})
-	}
-	return a
 }
 
 func lookExtensionBin(bin string) bool {

@@ -20,14 +20,27 @@ func AccountDiscoveryOff() bool {
 	// the one setting, parsed once for each version of the file: it is
 	// asked for each agent and each plugin every time the providers are
 	// built, a whole parse of settings.json each (#2502)
-	off, err := filememo.Read("settings:no-accounts", Path(), func(b []byte) (bool, error) {
-		s, err := parse(b)
-		return s.NoAccountDiscovery, err
-	})
+	off, err := filememo.Read("settings:no-accounts", Path(), accountDiscoveryOff)
 	if err != nil {
 		return load().NoAccountDiscovery
 	}
 	return off
+}
+
+func AccountDiscoveryOffNow() (bool, error) {
+	if noAccountsEnv() {
+		return true, nil
+	}
+	current, err := readCurrentSettings()
+	if err != nil || current == nil {
+		return false, err
+	}
+	return current.NoAccountDiscovery, nil
+}
+
+func accountDiscoveryOff(raw []byte) (bool, error) {
+	s, err := parse(raw)
+	return s.NoAccountDiscovery, err
 }
 
 // AccountDiscoveryOffIn is AccountDiscoveryOff with the settings already

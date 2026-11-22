@@ -3,13 +3,16 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -17,6 +20,11 @@ import (
 )
 
 func checkinActivationFixture(t *testing.T, private bool) (*Manager, Installed, string, string, string) {
+	t.Helper()
+	return checkinActivationFixtureWithMinor(t, private, 8)
+}
+
+func checkinActivationFixtureWithMinor(t *testing.T, private bool, minor int) (*Manager, Installed, string, string, string) {
 	t.Helper()
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() {
@@ -39,7 +47,7 @@ func checkinActivationFixture(t *testing.T, private bool) (*Manager, Installed, 
 	}
 	manifest := sdk.Manifest{
 		Schema: 1, ID: "checkin.fixture", Version: "1.0.0", Runtime: "exec", Entry: entry,
-		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 8},
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: minor},
 			Capabilities: []sdk.Capability{sdk.ModuleRPC, sdk.OutboundExecutor, sdk.AccountAuth}},
 		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture", Protocols: []codec.Protocol{"chat"},
 			Checkin: &sdk.AccountCheckinDescriptor{Action: "daily.claim"}}},
@@ -190,5 +198,172 @@ func TestCheckinLeaseRechecksAfterPrivateStartup(t *testing.T) {
 					change, completed.execution, completed.err, raw)
 			}
 		})
+	}
+}
+
+func TestCheckinReservationWaitRespectsCancellation(t *testing.T) {
+	manager, installed, trace, _, _ := checkinActivationFixture(t, false)
+	scope := sdk.Scope{Plugin: installed.Manifest.ID, Provider: "vendor", Account: "first", Generation: 1}
+	config, err := manager.ModuleConfig(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	unlock := sync.OnceFunc(func() { filelock.Unlock(lock) })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	admitted := make(chan struct{})
+	completed := make(chan struct{})
+	request := sdk.AccountCheckinRequest{Day: "2026-11-14"}
+	var execution CheckinExecution
+	var checkinErr error
+	admissions := 0
+	go func() {
+		defer close(completed)
+		execution, checkinErr = manager.CheckinAccountWithAdmission(ctx, scope, installed.Revision, config.Version, request,
+			func(context.Context) error {
+				admissions++
+				if admissions != 2 {
+					return nil
+				}
+				held, err := filelock.TryLock(lock)
+				if err != nil || !held {
+					return errors.Join(errors.New("fixture could not hold the private Store lock"), err)
+				}
+				close(admitted)
+				return nil
+			})
+	}()
+	defer func() {
+		cancel()
+		unlock()
+		select {
+		case <-completed:
+		case <-time.After(15 * time.Second):
+			t.Error("check-in fixture did not stop after lock release")
+		}
+	}()
+	select {
+	case <-admitted:
+	case <-completed:
+		t.Fatalf("check-in finished before reservation lock: %+v, %v", execution, checkinErr)
+	case <-time.After(15 * time.Second):
+		t.Fatal("check-in did not reach reservation lock")
+	}
+	cancel()
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Error("canceled check-in continued waiting to reserve its operation")
+	}
+	unlock()
+	select {
+	case <-completed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("check-in did not return after lock release")
+	}
+	if !errors.Is(checkinErr, context.Canceled) || execution.Receipt.Scope.Operation != "" {
+		t.Errorf("canceled reservation returned %+v, %v", execution, checkinErr)
+	}
+	intentPath := filepath.Join(manager.Namespace(), "private", scope.Plugin, "checkins", checkinIntentName(scope))
+	if _, err := os.Lstat(intentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("canceled check-in left a reservation: %v", err)
+	}
+	events, err := os.ReadFile(trace)
+	if err != nil || strings.Contains(string(events), `"event":"claim"`) {
+		t.Fatalf("canceled check-in trace: %s, %v", events, err)
+	}
+	retry, err := manager.CheckinAccount(t.Context(), scope, installed.Revision, config.Version, request)
+	if err != nil || retry.Receipt.State != "completed" || retry.Result == nil || retry.Result.Outcome != "claimed" {
+		t.Fatalf("fresh check-in after canceled reservation: %+v, %v", retry, err)
+	}
+}
+
+func TestCheckinRateLimitWaitsAcrossRestart(t *testing.T) {
+	manager, installed, trace, _, _ := checkinActivationFixtureWithMinor(t, false, sdk.FullContract().Version.Minor)
+	scope := sdk.Scope{Plugin: installed.Manifest.ID, Provider: "vendor", Account: "first", Generation: 1}
+	config, err := manager.ModuleConfig(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+	account, err := manager.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account.Auth, _ = json.Marshal(map[string]string{"token": scope.Account, "mode": "rate-limited", "until": boundary})
+	account, err = manager.Store().SaveAccount(account, account.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.Generation = account.Generation
+	request := sdk.AccountCheckinRequest{Day: "2026-11-22"}
+	first, err := manager.CheckinAccount(t.Context(), scope, installed.Revision, config.Version, request)
+	if err != nil || first.Result == nil || first.Result.Outcome != "rate-limited" || first.Result.Until != boundary ||
+		first.Receipt.State != "completed" || first.Receipt.Scope.Operation == "" {
+		t.Fatalf("completed rate-limit pause was rejected by ordinary check-in: result=%+v receipt=%+v error=%v",
+			first.Result, first.Receipt, err)
+	}
+	journal, err := manager.Store().Operation(scope.Plugin, first.Receipt.Scope.Operation)
+	if err != nil || journal.Scope != first.Receipt.Scope || journal.State != "completed" {
+		t.Fatalf("rate-limit completion lacks a durable receipt: %+v %v", journal, err)
+	}
+	if err := manager.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewManager(manager.root)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := restarted.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	account.Auth = json.RawMessage(`{"token":"first","mode":"done"}`)
+	account, err = restarted.Store().SaveAccount(account, account.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.Generation = account.Generation
+	request.Day = "2026-11-23"
+	held, err := restarted.CheckinAccount(t.Context(), scope, installed.Revision, config.Version, request)
+	if err != nil || held.Result == nil || held.Result.Outcome != first.Result.Outcome ||
+		held.Result.Until != boundary || held.Receipt != first.Receipt {
+		t.Fatalf("replacement credential or owner day lost the pause: result=%+v receipt=%+v error=%v",
+			held.Result, held.Receipt, err)
+	}
+	direct := scope
+	direct.Operation, direct.Attempt = "direct-checkin", 1
+	input, _ := json.Marshal(request)
+	_, err = restarted.Call(t.Context(), scope.Plugin, sdk.MethodModuleCall, direct,
+		sdk.ModuleCallRequest{Action: "daily.claim", Input: input}, nil)
+	var refused *OutcomeError
+	if !errors.As(err, &refused) || refused.Outcome != "not-started" {
+		t.Fatalf("ordinary module.call bypassed the check-in intent: %v", err)
+	}
+	intentPath := filepath.Join(restarted.Namespace(), "private", scope.Plugin, "checkins", checkinIntentName(scope))
+	var saved checkinIntent
+	raw, err := os.ReadFile(intentPath)
+	if err != nil || json.Unmarshal(raw, &saved) != nil || saved.Result == nil || saved.Result.Until != boundary {
+		t.Fatalf("read persisted pause: %s, %v", raw, err)
+	}
+	saved.Result.Until = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	raw, _ = json.Marshal(saved)
+	if err := os.WriteFile(intentPath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	next, err := restarted.CheckinAccount(t.Context(), scope, installed.Revision, config.Version, request)
+	if err != nil || next.Result == nil || next.Result.Outcome != "done" || next.Receipt.State != "completed" ||
+		next.Receipt.Scope.Generation != scope.Generation || next.Receipt.Scope.Operation == first.Receipt.Scope.Operation {
+		t.Fatalf("expired pause did not permit a fresh operation: result=%+v receipt=%+v error=%v", next.Result, next.Receipt, err)
+	}
+	events, err := os.ReadFile(trace)
+	if err != nil || strings.Count(string(events), `"event":"claim"`) != 2 || strings.Contains(string(events), `"operation":"direct-checkin"`) {
+		t.Fatalf("wanted one vendor invocation on each side of the pause: %s %v", events, err)
 	}
 }

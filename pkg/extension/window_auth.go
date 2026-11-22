@@ -18,6 +18,7 @@ type WindowAuthMethod struct {
 }
 
 const ProviderSignInPart = "provider:signin"
+const SavedSignInMethod = "saved-signin"
 
 type AuthInputField struct {
 	Key      string            `json:"key"`
@@ -188,6 +189,10 @@ func (manifest Manifest) validateWindowAuthBindings() error {
 	if manifest.Contract.Has(ProviderSignIn) && (manifest.Contract.Version.Minor < 5 || !manifest.Contract.Has(AccountAuth)) {
 		return fmt.Errorf("provider sign-in requires SDK API 1.5 and account authentication")
 	}
+	savedSignIn := manifest.Contract.Has(ProviderSavedSignIn)
+	if savedSignIn && !manifest.Contract.Has(ProviderSignIn) {
+		return fmt.Errorf("saved sign-in requires provider sign-in")
+	}
 	if len(manifest.AuthBindings) == 0 {
 		return nil
 	}
@@ -211,6 +216,13 @@ func (manifest Manifest) validateWindowAuthBindings() error {
 			return method.Label != "" || len(method.Fields) != 0
 		}) {
 			return fmt.Errorf("window authentication requires a window and uses its own form")
+		}
+		for _, method := range binding.Methods {
+			if method.ID == SavedSignInMethod &&
+				(!savedSignIn || binding.From != ProviderSignInPart || len(method.Fields) != 1 ||
+					method.Fields[0].Key != "record" || method.Fields[0].Type != "secret" || method.Fields[0].Optional) {
+				return fmt.Errorf("saved sign-in requires its capability and one required secret record")
+			}
 		}
 		seen[binding.ID] = true
 	}

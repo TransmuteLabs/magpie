@@ -38,7 +38,7 @@ func TestSearchKeyShown(t *testing.T) {
 		t.Fatalf("a search API not added: %d %s", rec.Code, rec.Body)
 	}
 	var s settingsJSON
-	searchState(&s)
+	searchState(&s, provider.All(), provider.Served())
 	if len(s.SearchAPIs) != 1 || s.SearchAPIs[0].Key == key || s.SearchAPIs[0].Key == "" {
 		t.Fatalf("the settings list %+v", s.SearchAPIs)
 	}
@@ -80,7 +80,7 @@ func TestSearchAPIBaseURLFromSettings(t *testing.T) {
 		t.Fatalf("a refused address changed it: %+v", as)
 	}
 	var s settingsJSON
-	searchState(&s)
+	searchState(&s, provider.All(), provider.Served())
 	if len(s.SearchAPIs) != 1 || s.SearchAPIs[0].URL != "https://other.example.com" {
 		t.Fatalf("the settings list %+v", s.SearchAPIs)
 	}
@@ -112,7 +112,7 @@ func TestSearchAPIOrderAndOffFromSettings(t *testing.T) {
 		}
 	}
 	var s settingsJSON
-	searchState(&s)
+	searchState(&s, provider.All(), provider.Served())
 	if len(s.SearchAPIs) != 2 || s.SearchAPIs[0].Vendor != "exa" || s.SearchAPIs[0].Off || s.SearchAPIs[1].Vendor != "tavily" || !s.SearchAPIs[1].Off || s.SearchAPIs[1].Key == "" {
 		t.Fatalf("%+v", s.SearchAPIs)
 	}
@@ -154,7 +154,7 @@ func TestSearchKeyListFromSettings(t *testing.T) {
 	list := func() []searchKeyJSON {
 		t.Helper()
 		var s settingsJSON
-		searchState(&s)
+		searchState(&s, provider.All(), provider.Served())
 		b, _ := json.Marshal(s)
 		for _, k := range keys {
 			if strings.Contains(string(b), k) {

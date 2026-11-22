@@ -28,28 +28,34 @@ import (
 const extensionBindingLimit = 64 << 20
 
 type extensionBindingRecord struct {
-	Plugin          string                         `json:"plugin"`
-	Agent           string                         `json:"agent"`
-	Home            string                         `json:"home"`
-	Revision        uint64                         `json:"revision"`
-	Phase           string                         `json:"phase"`
-	Descriptor      sdk.AgentDescriptor            `json:"descriptor"`
-	Bin             string                         `json:"bin"`
-	PackageRevision string                         `json:"packageRevision"`
-	ConfigVersion   string                         `json:"configVersion"`
-	Values          map[string]string              `json:"values"`
-	ModelOptions    json.RawMessage                `json:"modelOptions,omitempty"`
-	Before          []extension.ActionSettingFile  `json:"before"`
-	Applied         []extension.ActionSettingFile  `json:"applied"`
-	PriorApplied    []extension.ActionSettingFile  `json:"priorApplied,omitempty"`
-	Shells          []update.ShellFunctionSnapshot `json:"shells"`
-	PriorShells     []update.ShellFunctionSnapshot `json:"priorShells,omitempty"`
-	RecoverySafe    bool                           `json:"recoverySafe"`
+	Plugin           string                         `json:"plugin"`
+	Agent            string                         `json:"agent"`
+	Home             string                         `json:"home"`
+	Revision         uint64                         `json:"revision"`
+	Phase            string                         `json:"phase"`
+	Descriptor       sdk.AgentDescriptor            `json:"descriptor"`
+	Bin              string                         `json:"bin"`
+	PackageRevision  string                         `json:"packageRevision"`
+	ConfigVersion    string                         `json:"configVersion"`
+	Values           map[string]string              `json:"values"`
+	ModelOptions     json.RawMessage                `json:"modelOptions,omitempty"`
+	Before           []extension.ActionSettingFile  `json:"before"`
+	Applied          []extension.ActionSettingFile  `json:"applied"`
+	PriorApplied     []extension.ActionSettingFile  `json:"priorApplied,omitempty"`
+	Shells           []update.ShellFunctionSnapshot `json:"shells"`
+	PriorShells      []update.ShellFunctionSnapshot `json:"priorShells,omitempty"`
+	RecoverySafe     bool                           `json:"recoverySafe"`
+	FinishDisconnect bool                           `json:"finishDisconnect,omitempty"`
+	legacy           string
 }
 
 type extensionBindingLedger struct {
 	Schema  int                               `json:"schema"`
 	Records map[string]extensionBindingRecord `json:"records"`
+}
+
+func (record extensionBindingRecord) hasOwner() bool {
+	return record.Phase == "owned" || record.Phase == "pending" || record.legacy != ""
 }
 
 func extensionBindingPath() string {
@@ -241,6 +247,10 @@ func extensionBindingValidate(ledger extensionBindingLedger) error {
 			Connected: record.Phase == "owned", Values: record.Values,
 		}) != nil {
 			return errors.New("agent binding ownership values are invalid")
+		}
+		if record.FinishDisconnect && (record.Phase != "pending" || record.Descriptor.Launch != nil ||
+			record.Descriptor.Profile != nil || len(record.PriorApplied) == 0) {
+			return errors.New("agent binding disconnect snapshots are invalid")
 		}
 		for index, snapshots := range [][]extension.ActionSettingFile{record.Before, record.Applied, record.PriorApplied} {
 			if index == 2 && len(snapshots) == 0 {

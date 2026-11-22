@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +79,58 @@ func TestProviderOptionsUseCheckedRootConfigWithoutWorkers(test *testing.T) {
 	}
 	if manager.startCtx != nil || len(manager.workers) != 0 {
 		test.Fatal("metadata and configuration started a plugin worker")
+	}
+}
+
+func TestProviderOptionsRequireCurrentSubscriptionOwner(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	entry := installOptionsFixture(t, manager)
+	ctx := t.Context()
+	owner := subscriptionRecord{
+		SubscriptionOwner: SubscriptionOwner{
+			Module: entry.Manifest.ID, Provider: "vendor", PublicID: "legacy",
+			Revision: "owner-one", Active: true,
+			Accounts: []SubscriptionAccount{{Key: "vendor", ID: "account", User: "account", LoginID: "account"}},
+		},
+		GrantRevision: strings.Repeat("a", 64),
+		Digests:       map[string]string{"vendor": strings.Repeat("b", 64)},
+		Tickets:       []string{"ticket"},
+	}
+	writeOwner := func() {
+		t.Helper()
+		if err := withTestSavedSignIns(manager.store, ctx, func(dir *os.Root) error {
+			return storeWrite(dir, subscriptionOwnersFile, []subscriptionRecord{owner}, storeFileLimit)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(revision, version string, on bool) (sdk.ConfigSnapshot, error) {
+		return manager.CompareAndSwapProviderOptions(WithSubscriptionOwnerRevision(ctx, revision),
+			entry.Manifest.ID, "vendor", entry.Revision, version, map[string]bool{"defaultOn": on}, nil)
+	}
+	writeOwner()
+	for _, revision := range []string{"", "another-owner"} {
+		if _, err := set(revision, "0", false); !errors.Is(err, errSubscriptionChanged) {
+			t.Fatalf("stale editor got %v for owner revision %q", err, revision)
+		}
+	}
+	if config, err := set(owner.Revision, "0", false); err != nil || config.Version != "1" {
+		t.Fatalf("current owner could not save the option: %+v %v", config, err)
+	}
+	previous := owner.Revision
+	owner.Revision, owner.Active = "owner-two", false
+	writeOwner()
+	if _, err := set(previous, "1", true); !errors.Is(err, errSubscriptionChanged) {
+		t.Fatalf("editor could write after rollback: %v", err)
+	}
+	config, err := manager.ModuleConfig(ctx, entry.Manifest.ID)
+	if err != nil || config.Version != "1" || !bytes.Equal(config.Values, []byte(`{"defaultOn":false}`)) {
+		t.Fatalf("a rejected update changed the configuration: %+v %v", config, err)
+	}
+	if _, err := manager.CompareAndSwapModuleConfig(WithSubscriptionOwnerRevision(ctx, previous),
+		entry.Manifest.ID, "1", json.RawMessage(`{"defaultOn":true}`)); err != nil {
+		t.Fatalf("module configuration was limited by a provider editor revision: %v", err)
 	}
 }
 

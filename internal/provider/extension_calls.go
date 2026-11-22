@@ -12,49 +12,65 @@ import (
 )
 
 type ExtensionOutsideAccount struct {
-	scope    sdk.Scope
-	provider string
-	host     extensionProviderHost
-	entry    extensionhost.Installed
-	config   string
+	scope  sdk.Scope
+	public extensionPublicIdentity
+	host   *extensionhost.Manager
+	entry  extensionhost.Installed
+	config string
 }
 
 func (account ExtensionOutsideAccount) Scope() sdk.Scope { return account.scope }
 
-func (account ExtensionOutsideAccount) ProviderID() string { return account.provider }
+func (account ExtensionOutsideAccount) PublicLogin() (provider, user string) {
+	return account.public.provider, account.public.user
+}
 
-func ExtensionOutsideAccounts() ([]ExtensionOutsideAccount, error) {
+func ExtensionOutsideAccounts(ctx context.Context) ([]ExtensionOutsideAccount, error) {
 	if settings.AccountDiscoveryOff() {
 		return nil, nil
 	}
-	host := providerExtensionHost()
-	entries, err := host.List()
+	host, supported := providerExtensionHost().(*extensionhost.Manager)
+	if !supported {
+		return nil, errors.New("outside calls require the selected runtime")
+	}
+	entries, err := host.ActiveModules(ctx)
 	if err != nil {
 		return nil, err
 	}
+	owners, err := host.Store().SubscriptionOwners(ctx)
+	if err != nil {
+		return nil, err
+	}
+	public := extensionSubscriptionOwners{rows: owners}
 	var accounts []ExtensionOutsideAccount
 	for _, entry := range entries {
-		if entry.Disabled || entry.Manifest.Contract.Version.Minor < 8 {
+		if entry.Manifest.Contract.Version.Minor < 8 {
 			continue
 		}
-		for _, descriptor := range entry.Manifest.Providers {
-			if !descriptor.Calls {
-				continue
-			}
-			config, err := host.ModuleConfig(context.Background(), entry.Manifest.ID)
-			if err != nil {
-				return nil, err
-			}
-			selected, err := host.Store().Accounts(entry.Manifest.ID, descriptor.ID)
-			if err != nil {
-				return nil, err
-			}
-			for _, account := range selected {
+		descriptors := slices.DeleteFunc(slices.Clone(entry.Manifest.Providers), func(descriptor sdk.ProviderDescriptor) bool {
+			return !descriptor.Calls
+		})
+		if len(descriptors) == 0 {
+			continue
+		}
+		config, err := host.ModuleConfig(ctx, entry.Manifest.ID)
+		if err != nil {
+			return nil, err
+		}
+		selected, err := extensionAccountMetadata(ctx, host, entry.Manifest.ID, descriptors, false)
+		if err != nil {
+			return nil, err
+		}
+		for _, descriptor := range descriptors {
+			for _, account := range selected[descriptor.ID] {
+				scope := sdk.Scope{Plugin: entry.Manifest.ID, Provider: descriptor.ID,
+					Account: account.ID, Generation: account.Generation}
+				identity := public.identity(scope)
+				if !identity.visible {
+					continue
+				}
 				accounts = append(accounts, ExtensionOutsideAccount{
-					scope: sdk.Scope{Plugin: entry.Manifest.ID, Provider: descriptor.ID,
-						Account: account.ID, Generation: account.Generation},
-					provider: ExtensionProviderID(entry.Manifest.ID, descriptor.ID),
-					host:     host, entry: entry, config: config.Version,
+					scope: scope, public: identity, host: host, entry: entry, config: config.Version,
 				})
 			}
 		}
@@ -62,54 +78,32 @@ func ExtensionOutsideAccounts() ([]ExtensionOutsideAccount, error) {
 	return accounts, nil
 }
 
-func (account ExtensionOutsideAccount) Current(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+func (account ExtensionOutsideAccount) Publish(ctx context.Context, publish func() error) error {
 	if settings.AccountDiscoveryOff() || account.host == nil {
 		return errors.New("outside account discovery is unavailable")
 	}
-	entries, err := account.host.List()
-	if err != nil || !slices.ContainsFunc(entries, func(entry extensionhost.Installed) bool {
-		return entry.Manifest.ID == account.scope.Plugin && !entry.Disabled && entry.Revision == account.entry.Revision
-	}) {
-		return extensionhost.ErrActionChanged
-	}
-	config, err := account.host.ModuleConfig(ctx, account.scope.Plugin)
-	if err != nil || config.Version != account.config {
-		return extensionhost.ErrActionChanged
-	}
-	selected, err := account.host.Store().GetAccount(account.scope.Plugin, account.scope.Provider, account.scope.Account)
-	if err != nil || selected.Generation != account.scope.Generation {
-		return errors.New("outside account generation changed")
-	}
-	return nil
+	ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, account.public.revision)
+	return account.host.PublishOutsideCalls(ctx, account.entry, account.config, account.scope, publish)
 }
 
 func (account ExtensionOutsideAccount) Calls(ctx context.Context, since, until time.Time) ([]sdk.OutsideCall, error) {
-	if err := account.Current(ctx); err != nil {
+	if err := account.Publish(ctx, nil); err != nil {
 		return nil, err
 	}
-	host, supported := account.host.(interface {
-		AcquireRevision(context.Context, string, string, string) (*extensionhost.Lease, error)
-	})
-	if !supported {
-		return nil, errors.New("outside calls require the selected runtime lease")
+	ctx, err := extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, account.public.revision), account.scope)
+	if err != nil {
+		return nil, err
 	}
-	lease, err := host.AcquireRevision(ctx, account.scope.Plugin, account.entry.Revision, account.config)
+	lease, err := account.host.AcquireOutsideCalls(ctx, account.entry, account.config)
 	if err != nil {
 		return nil, err
 	}
 	defer lease.Close()
-	ctx, err = extensionNetworkContext(ctx, account.scope)
-	if err != nil {
-		return nil, err
-	}
 	request := sdk.OutsideCallsRequest{Since: since.UnixMilli(), Until: until.UnixMilli()}
 	cursors := map[string]bool{}
 	var calls []sdk.OutsideCall
 	for range sdk.MaxOutsideCallPages {
-		if err := account.Current(ctx); err != nil {
+		if err := account.Publish(ctx, nil); err != nil {
 			return nil, err
 		}
 		if cursors[request.Cursor] {
@@ -132,7 +126,7 @@ func (account ExtensionOutsideAccount) Calls(ctx context.Context, since, until t
 			calls = append(calls, call)
 		}
 		if page.NextCursor == "" {
-			if err := account.Current(ctx); err != nil {
+			if err := account.Publish(ctx, nil); err != nil {
 				return nil, err
 			}
 			return calls, nil

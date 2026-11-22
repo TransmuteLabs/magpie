@@ -12,9 +12,6 @@ package memory
 //     declined, when each memory was last used (so a search rewrites this
 //     file, not the memory's), and each memory file's hash as magpie last
 //     wrote it, which tells a hand edit from magpie's own.
-//   - index.json: each file's size, time, hash and what it says, so a
-//     read parses only the files that changed since. It is a cache, never
-//     read for what isn't in the files: deleted, it is made again.
 //   - journal.json, while a change to more than one file is written:
 //     every file the change writes, put down first, so a change cut off
 //     halfway is finished by the next read, never left half done.
@@ -46,6 +43,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // Path is memory.json, where memory was kept before Dir; a variable for
@@ -64,6 +62,8 @@ const (
 func in(name string) string { return filepath.Join(Dir(), name) }
 
 var mu = filelock.Mutex{Path: func() string { return Dir() + ".lock" }}
+
+var errStoreLock = errors.New("cannot lock the Memory store")
 
 // meta is meta.json.
 type meta struct {
@@ -227,30 +227,22 @@ func hashOf(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// entry is one file in index.json.
 type entry struct {
-	Size   int64     `json:"size"`
-	Mod    time.Time `json:"mod"`
-	Hash   string    `json:"hash"`
-	Memory *Memory   `json:"memory"`
+	mod    time.Time
+	size   int64
+	hash   string
+	memory *Memory
 }
 
-type index struct {
-	Version int               `json:"version"`
-	Files   map[string]*entry `json:"files"`
-}
+const (
+	parsedMemoryBytes = 4 << 20
+	parsedMemoryFiles = 4096
+)
 
-// loadIndex is index.json, empty when it isn't there or can't be read: it
-// is only a cache.
-func loadIndex() *index {
-	x := &index{}
-	if b, err := os.ReadFile(in(indexName)); err == nil {
-		json.Unmarshal(b, x)
-	}
-	if x.Version != 1 || x.Files == nil {
-		x = &index{Version: 1, Files: map[string]*entry{}}
-	}
-	return x
+var parsedMemories struct {
+	dir     string
+	entries map[string]entry
+	bytes   int64
 }
 
 // noted are the memory files read as broken, by name and hash, so each is
@@ -266,8 +258,7 @@ func read() (*file, error) {
 		return nil, err
 	}
 	f := &file{Version: 1, seen: map[string]string{}, broken: map[string]bool{}, written: map[string]string{}}
-	var mt meta
-	b, err := lastgood.Read(in(metaName), lastgood.Into[meta])
+	mt, data, err := readMeta()
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if _, err := os.Stat(Path()); !errors.Is(err, fs.ErrNotExist) {
@@ -276,22 +267,23 @@ func read() (*file, error) {
 	case err != nil:
 		return nil, err
 	default:
-		if err := json.Unmarshal(b, &mt); err != nil {
-			return nil, err
-		}
-		f.metaB = b
+		f.metaB = data
 		f.Projects, f.Digest, f.Published, f.Dismissed, f.Removed, f.Declined = mt.Projects, mt.Digest, mt.Published, mt.Dismissed, mt.Removed, mt.Declined
 		if mt.Written != nil {
 			f.written = mt.Written
 		}
 	}
-	es, err := os.ReadDir(Dir())
+	dir := Dir()
+	es, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	x := loadIndex()
-	dirty := false
-	names := map[string]bool{}
+	if parsedMemories.dir != dir {
+		parsedMemories.dir = dir
+		parsedMemories.entries = make(map[string]entry)
+		parsedMemories.bytes = 0
+	}
+	var scratch []byte
 	for _, e := range es {
 		name := e.Name()
 		id, ok := strings.CutSuffix(name, ".md")
@@ -306,35 +298,24 @@ func read() (*file, error) {
 			f.broken[id] = true
 			continue
 		}
-		names[name] = true
-		var m *Memory
-		var h string
-		if en := x.Files[name]; en != nil && en.Memory != nil && en.Size == info.Size() && en.Mod.Equal(info.ModTime()) {
-			c := *en.Memory
-			m, h = &c, en.Hash
-		} else {
-			data, err := os.ReadFile(filepath.Join(Dir(), name))
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
+		cached := parsedMemories.entries[id]
+		current, err := readMemoryFile(dir, id, info.ModTime(), &scratch, cached)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				f.broken[id], f.seen[id] = true, current.hash
 			}
-			if err != nil {
-				f.broken[id] = true
-				continue
-			}
-			h = hashOf(data)
-			if m, err = decode(id, data, info.ModTime()); err != nil {
-				f.broken[id], f.seen[id] = true, h
-				if _, was := noted.LoadOrStore(name+h, true); !was {
-					log.Printf("memory: %s can't be read, left as it is: %v", name, err)
-				}
-				delete(x.Files, name)
-				continue
-			}
-			x.Files[name] = &entry{Size: info.Size(), Mod: info.ModTime(), Hash: h, Memory: m}
-			c := *m
-			m = &c
-			dirty = true
+			continue
 		}
+		if current.memory != cached.memory {
+			dropParsedMemory(id)
+			if len(parsedMemories.entries) < parsedMemoryFiles && parsedMemories.bytes+current.size <= parsedMemoryBytes {
+				parsedMemories.entries[id] = current
+				parsedMemories.bytes += current.size
+			}
+		}
+		m := new(*current.memory)
+		m.Tags, m.Sources = slices.Clone(m.Tags), slices.Clone(m.Sources)
+		h := current.hash
 		f.seen[id] = h
 		if f.metaB != nil && f.written[id] != h {
 			// changed, or added, by hand: the user's
@@ -349,15 +330,9 @@ func read() (*file, error) {
 		}
 		f.Memories = append(f.Memories, m)
 	}
-	for name := range x.Files {
-		if !names[name] {
-			delete(x.Files, name)
-			dirty = true
-		}
-	}
-	if dirty && len(es) > 0 {
-		if b, err := json.Marshal(x); err == nil {
-			edit.WriteAtomic(in(indexName), b) // a cache: a failed write costs a parse
+	for id := range parsedMemories.entries {
+		if _, seen := f.seen[id]; !seen || f.broken[id] {
+			dropParsedMemory(id)
 		}
 	}
 	slices.SortFunc(f.Memories, func(a, b *Memory) int {
@@ -367,6 +342,46 @@ func read() (*file, error) {
 		return strings.Compare(a.ID, b.ID)
 	})
 	return f, nil
+}
+
+func dropParsedMemory(id string) {
+	if cached, ok := parsedMemories.entries[id]; ok {
+		parsedMemories.bytes -= cached.size
+		delete(parsedMemories.entries, id)
+	}
+}
+
+func readMemoryFile(dir, id string, mod time.Time, scratch *[]byte, cached entry) (entry, error) {
+	filename := id + ".md"
+	data, err := steady.ReadThereInto(filepath.Join(dir, filename), *scratch)
+	if err != nil {
+		return entry{}, err
+	}
+	*scratch = data[:0]
+	hash := hashOf(data)
+	if cached.memory != nil && hash == cached.hash && mod.Equal(cached.mod) {
+		return cached, nil
+	}
+	record, err := decode(id, data, mod)
+	if err != nil {
+		if _, was := noted.LoadOrStore(filename+hash, true); !was {
+			log.Printf("memory: %s can't be read, left as it is: %v", filename, err)
+		}
+	}
+	return entry{mod: mod, size: int64(len(data)), hash: hash, memory: record}, err
+}
+
+func readMeta() (meta, []byte, error) {
+	var parsed meta
+	data, err := lastgood.Read(in(metaName), func(data []byte) bool {
+		var current meta
+		if err := json.Unmarshal(data, &current); err != nil {
+			return false
+		}
+		parsed = current
+		return true
+	})
+	return parsed, data, err
 }
 
 // op is one file a write puts down (Data) or removes (Del).
@@ -439,12 +454,12 @@ func write(f *file) error {
 	if len(written) == 0 {
 		mt.Written = nil
 	}
-	mb, err := json.MarshalIndent(mt, "", "  ")
+	metaWrite, err := metaChange(mt, f.metaB)
 	if err != nil {
 		return err
 	}
-	if f.metaB == nil || !bytes.Equal(mb, f.metaB) {
-		ops = append(ops, op{Name: metaName, Data: string(mb)})
+	if metaWrite != nil {
+		ops = append(ops, *metaWrite)
 	}
 	if len(ops) == 0 {
 		return nil
@@ -468,6 +483,63 @@ func write(f *file) error {
 		return os.Remove(in(journalName))
 	}
 	return nil
+}
+
+func metaChange(current meta, previous []byte) (*op, error) {
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(data, previous) {
+		return nil, nil
+	}
+	return &op{Name: metaName, Data: string(data)}, nil
+}
+
+func touch(ids []string, at time.Time) {
+	if len(ids) == 0 || !mu.LockChecked() {
+		return
+	}
+	defer mu.Unlock()
+	if err := replay(); err != nil {
+		return
+	}
+	current, data, err := readMeta()
+	if errors.Is(err, fs.ErrNotExist) {
+		current = meta{Version: 1}
+	} else if err != nil {
+		return
+	}
+	dir := Dir()
+	var scratch []byte
+	changed := false
+	for _, id := range ids {
+		useOf := current.Used[id]
+		if !validID(id) || at.Sub(useOf.At) <= time.Minute {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(dir, id+".md"))
+		if err != nil || info.IsDir() {
+			continue
+		}
+		cached := entry{}
+		if parsedMemories.dir == dir {
+			cached = parsedMemories.entries[id]
+		}
+		if _, err := readMemoryFile(dir, id, info.ModTime(), &scratch, cached); err != nil {
+			continue
+		}
+		if current.Used == nil {
+			current.Used = map[string]use{}
+		}
+		current.Used[id] = use{At: at, Uses: useOf.Uses + 1}
+		changed = true
+	}
+	if changed {
+		if write, err := metaChange(current, data); err == nil && write != nil {
+			_ = putDown([]op{*write})
+		}
+	}
 }
 
 // putDown puts ops down, each file whole (written through a temp file).
@@ -557,7 +629,7 @@ func changeContext(ctx context.Context, fn func(f *file) error) error {
 		return err
 	}
 	if !mu.LockChecked() {
-		return errors.New("cannot lock the Memory store")
+		return errStoreLock
 	}
 	defer mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -579,14 +651,12 @@ func changeContext(ctx context.Context, fn func(f *file) error) error {
 // view reads memory under the lock: consistent with the last write, and
 // with no journal left half done.
 func view() (*file, error) {
-	mu.Lock()
+	if !mu.LockChecked() {
+		return nil, errStoreLock
+	}
 	defer mu.Unlock()
 	return read()
 }
-
-// cached is memory for the digest, which a library sync reads for every
-// agent: index.json keeps it to a listing and a stat a file.
-func cached() (*file, error) { return view() }
 
 // Modified is when memory last changed, zero when there is none: for a
 // reader to tell whether it changed.

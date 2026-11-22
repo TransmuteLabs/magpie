@@ -1,6 +1,6 @@
-import { type Compatibility, type Contract, type ExecuteRequest, type Manifest, type Model } from "../index.js";
+import { type AccountCheckinResult, type Compatibility, type Contract, type ExecuteRequest, type Manifest, type Model } from "../index.js";
 
-for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] as const) {
+for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] as const) {
   const contract: Contract = { version: { major: 1, minor }, capabilities: ["module-rpc"] };
   const manifest: Manifest = {
     schema: 1, id: "typed-contract", version: "1.0.0", runtime: "bun", entry: "worker.js", contract,
@@ -9,9 +9,9 @@ for (const minor of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1
 }
 
 type AssertFalse<Value extends false> = Value;
-type UnsupportedMinorRejected = AssertFalse<20 extends Contract["version"]["minor"] ? true : false>;
+type UnsupportedMinorRejected = AssertFalse<21 extends Contract["version"]["minor"] ? true : false>;
 type UnsupportedMajorRejected = AssertFalse<2 extends Contract["version"]["major"] ? true : false>;
-type UnsupportedHostAPIRejected = AssertFalse<"^1.20" extends Compatibility["hostAPI"] ? true : false>;
+type UnsupportedHostAPIRejected = AssertFalse<"^1.21" extends Compatibility["hostAPI"] ? true : false>;
 const compatibility: Compatibility = { hostAPI: "^1.8", nativeABI: 1 };
 void compatibility;
 const decisionCompatibility: Compatibility = { hostAPI: "^1.7", nativeABI: 1 };
@@ -26,13 +26,18 @@ const legacyContracts: Contract[] = [
   { version: { major: 1, minor: 5 }, capabilities: ["module-rpc"] },
 ];
 const future: Contract = {
-  // @ts-expect-error SDK API 1.20 is outside the negotiated range.
-  version: { major: 1, minor: 20 },
+  // @ts-expect-error SDK API 1.21 is outside the negotiated range.
+  version: { major: 1, minor: 21 },
   capabilities: ["session-source"],
 };
 void sourcePreview;
 void legacyContracts;
 void future;
+const limited: AccountCheckinResult = { outcome: "rate-limited", until: "2026-11-22T16:15:00Z" };
+const limitedCompatibility: Compatibility = { hostAPI: "^1.20", nativeABI: 1 };
+type MissingCheckinBoundaryRejected = AssertFalse<{ outcome: "rate-limited" } extends AccountCheckinResult ? true : false>;
+void limited;
+void limitedCompatibility;
 const decision: Model = { id: "decision", kind: "decision", protocols: null, operations: ["systemone"] };
 const request: ExecuteRequest = { protocol: "", operation: "systemone", model: decision.id,
   caller: { agent: "codex", name: "Codex", via: ["studio", "relay"] } };

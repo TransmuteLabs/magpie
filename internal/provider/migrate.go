@@ -779,10 +779,13 @@ func move(ctx context.Context, id string, mv *mover) (err error) {
 			continue
 		}
 		// through the account's proxy, as its requests go
-		c, err := plugin.Check(ViaLogin(ctx, id, a.User), id, moved[i].Key)
+		key := moved[i].Key
+		epochs, epochErr := plugin.CurrentAuthEpochs(ctx)
+		epoch, present := epochs[key]
+		c, err := plugin.Check(ViaLogin(ctx, id, a.User), id, key)
 		switch {
-		case err == nil && (c.Refused != "" || refused(c.Usage)):
-			notePluginLapse(pp, moved[i].Key, http.StatusUnauthorized)
+		case err == nil && epochErr == nil && present && (c.Refused != "" || refused(c.Usage)):
+			notePluginLapse(ctx, pp, plugin.FetchAuth{Account: key, Epoch: &epoch}, http.StatusUnauthorized, false)
 		case err != nil:
 			log.Printf("moving %s's %s to its plugin untried: %s", id, a.User, err)
 		}

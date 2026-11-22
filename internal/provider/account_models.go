@@ -10,6 +10,7 @@ package provider
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -84,6 +85,11 @@ type AccountRef struct {
 // account list knows them (#905): an account by its stable id, a key by
 // its fingerprint, with the name and plan each is shown by.
 func (p Provider) AccountIDs() []AccountRef {
+	return p.AccountIDsContext(context.Background())
+}
+
+// AccountIDsContext reads account identities with the caller's cancellation.
+func (p Provider) AccountIDsContext(ctx context.Context) []AccountRef {
 	var out []AccountRef
 	if p.Account == nil {
 		for _, k := range p.KeyList() {
@@ -96,12 +102,15 @@ func (p Provider) AccountIDs() []AccountRef {
 		agent = p.ID
 	}
 	if p.Account.User != "" {
-		out = append(out, AccountRef{ID: LoginID(agent, p.Account.User), User: p.Account.User, Plan: p.Account.Plan})
+		out = append(out, AccountRef{ID: loginIDContext(ctx, agent, p.Account.User), User: p.Account.User, Plan: p.Account.Plan})
 	}
-	for _, l := range Logins(agent) {
+	for _, l := range loginsContext(ctx, agent) {
 		if !slices.ContainsFunc(out, func(r AccountRef) bool { return accountKey(r.User) == accountKey(l.User) }) {
-			out = append(out, AccountRef{ID: LoginID(agent, l.User), User: l.User, Plan: l.Plan})
+			out = append(out, AccountRef{ID: loginIDContext(ctx, agent, l.User), User: l.User, Plan: l.Plan})
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	return out
 }

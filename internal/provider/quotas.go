@@ -15,7 +15,7 @@ import (
 // what doesn't answer before ctx ends comes back with an error.
 func Quotas(ctx context.Context) []SubscriptionQuota {
 	subs, plans, balances := quotas(ctx)
-	return cardsServed(subs, plans, balances, LastServed())
+	return ValidateSubscriptionQuotas(ctx, cardsServed(ctx, subs, plans, balances, LastServed()))
 }
 
 // InProviderOrder is qs in the order the user put the providers in on the
@@ -25,8 +25,16 @@ func Quotas(ctx context.Context) []SubscriptionQuota {
 // hasn't arranged the cards themselves (Zhenbao TONG on Discord: the
 // providers moved in the window, the tray kept its own order).
 func InProviderOrder(qs []SubscriptionQuota) []SubscriptionQuota {
+	return InProviderOrderContext(context.Background(), qs)
+}
+
+// InProviderOrderContext sorts cards using a cancellable provider lookup.
+func InProviderOrderContext(ctx context.Context, qs []SubscriptionQuota) []SubscriptionQuota {
+	if len(qs) < 2 {
+		return slices.Clone(qs)
+	}
 	at := map[string]int{}
-	for i, p := range All() {
+	for i, p := range sharedAllContext(ctx) {
 		at[p.ID] = i
 	}
 	rank := func(q SubscriptionQuota) int {
@@ -45,7 +53,8 @@ func InProviderOrder(qs []SubscriptionQuota) []SubscriptionQuota {
 // wait waits on; no key's balance is asked for.
 func Allotted(ctx context.Context) []SubscriptionQuota {
 	plans, subs := seatCards(PlanQuotas(ctx), SubscriptionUsage(ctx))
-	return append(withAccountNames(subs), plans...)
+	subs = ValidateSubscriptionQuotas(ctx, withAccountNamesContext(ctx, subs))
+	return append(subs, plans...)
 }
 
 func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
@@ -56,7 +65,7 @@ func quotas(ctx context.Context) (subs, plans, balances []SubscriptionQuota) {
 	go func() { p <- PlanQuotas(ctx) }()
 	go func() { r <- RemoteCards(ctx) }()
 	plans, subs = seatCards(<-p, SubscriptionUsage(ctx))
-	subs, balances = WithImageLane(withAccountNames(subs), time.Now()), <-b
+	subs, balances = WithImageLane(withAccountNamesContext(ctx, subs), time.Now()), <-b
 	// a remote magpie's cards, each after this computer's of its kind
 	for _, q := range <-r {
 		switch q.Kind {
@@ -166,24 +175,42 @@ type QuotaSpan struct {
 	amountPresence uint8
 }
 
-// ReckonHolds is usage.WithWindowHolds, which package usage sets: it reads
+// ReckonHolds is usage.WithWindowHoldsContext, which package usage sets: it reads
 // the usage log, which this package can't import. QuotaReport,
 // KeptQuotaReport and RefreshReport tell each window's whole by it, as the
 // Usage page does (#2333); nil, where usage isn't linked in, leaves it out.
-var ReckonHolds func(qs []SubscriptionQuota, now time.Time) []SubscriptionQuota
+var ReckonHolds func(ctx context.Context, qs []SubscriptionQuota, now time.Time) []SubscriptionQuota
 
 // QuotaReport is Quotas as Quota, the reset times made absolute from now.
 func QuotaReport(ctx context.Context, now time.Time) []Quota {
-	subs, plans, balances := quotas(ctx)
-	return withServed(quotaReport(subs, plans, balances, now), LastServed())
+	return ScopedQuotaReport(ctx, now, false, nil)
 }
 
 // KeptQuotaReport is QuotaReport from what was last read (CachedCards),
 // asking no vendor: for a status line, which Claude Code runs again on
 // every message (#1997), so it must neither wait for a read nor start one.
 func KeptQuotaReport(now time.Time) []Quota {
+	return KeptQuotaReportContext(context.Background(), now)
+}
+
+// KeptQuotaReportContext reads the kept cards with the caller's cancellation.
+func KeptQuotaReportContext(ctx context.Context, now time.Time) []Quota {
+	return ScopedQuotaReport(ctx, now, true, nil)
+}
+
+// ScopedQuotaReport applies an optional held-key account scope before checking
+// the readings that can appear in the report.
+func ScopedQuotaReport(ctx context.Context, now time.Time, kept bool, allows func(context.Context, string, string) bool) []Quota {
+	if !kept {
+		subs, plans, balances := quotas(ctx)
+		return buildQuotaReport(ctx, subs, plans, balances, now, allows)
+	}
+	cards := CachedCardsContext(ctx, now)
+	if ctx.Err() != nil {
+		return nil
+	}
 	var subs, plans, balances []SubscriptionQuota
-	for _, q := range CachedCards(now) {
+	for _, q := range cards {
 		switch q.Kind {
 		case "plan":
 			plans = append(plans, q)
@@ -193,40 +220,72 @@ func KeptQuotaReport(now time.Time) []Quota {
 			subs = append(subs, q)
 		}
 	}
-	return withServed(quotaReport(subs, plans, balances, now), LastServed())
+	return buildQuotaReport(ctx, subs, plans, balances, now, allows)
 }
 
-// quotaReport assembles the cards from readings the tests feed directly.
-func quotaReport(subs, plans, balances []SubscriptionQuota, now time.Time) []Quota {
-	if ReckonHolds != nil { // one pass over the log for every card
-		all := ReckonHolds(slices.Concat(subs, plans, balances), now)
-		ns, np := len(subs), len(plans)
-		subs, plans, balances = all[:ns], all[ns:ns+np], all[ns+np:]
+func quotaReport(ctx context.Context, subs, plans, balances []SubscriptionQuota, now time.Time) []Quota {
+	return buildQuotaReport(ctx, subs, plans, balances, now, nil)
+}
+
+func buildQuotaReport(ctx context.Context, subs, plans, balances []SubscriptionQuota, now time.Time, allows func(context.Context, string, string) bool) []Quota {
+	if ctx.Err() != nil {
+		return nil
 	}
-	out := []Quota{}
-	for _, g := range []struct {
-		kind string
-		qs   []SubscriptionQuota
-	}{{"subscription", subs}, {"plan", plans}, {"balance", balances}} {
-		for _, q := range g.qs {
-			r := Quota{Provider: q.Provider, Name: q.Name, Kind: g.kind, Plan: q.Plan, User: q.User, AsOf: q.AsOf, ReadAt: q.ReadAt, ReadDeferred: q.ReadDeferred, ReadError: q.ReadError,
-				Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat}
-			// a pool's own windows stand in for the models' drawing on it,
-			// as the usage page shows them
-			for _, w := range PooledWindows(q.Windows) {
-				s := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Lane: w.Lane,
-					AsOf: w.AsOf, Error: w.Error, Unknown: w.Unknown,
-					Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Balance: w.Balance,
-					amountPresence: w.amountPresence,
-					Spent:          w.Spent, SpentSince: w.SpentSince, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
-				if s.ResetsAt == nil && w.ResetSecs > 0 {
-					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
-					s.ResetsAt = &t
-				}
-				r.Windows = append(r.Windows, s)
-			}
-			out = append(out, r)
+	readings := slices.Concat(subs, plans, balances)
+	if allows == nil && ReckonHolds != nil {
+		readings = ReckonHolds(ctx, readings, now)
+		if ctx.Err() != nil {
+			return nil
 		}
+	}
+	for index := range readings {
+		switch {
+		case index < len(subs):
+			readings[index].Kind = "subscription"
+		case index < len(subs)+len(plans):
+			readings[index].Kind = "plan"
+		default:
+			readings[index].Kind = "balance"
+		}
+	}
+	latest := quotaReportServed(ctx, readings, LastServed())
+	if allows != nil {
+		visible := readings[:0]
+		for _, reading := range readings {
+			if reading.From == "" && allows(ctx, reading.Provider, reading.User) {
+				visible = append(visible, reading)
+			}
+		}
+		readings = visible
+	}
+	checked := ValidateSubscriptionQuotas(ctx, readings)
+	if ctx.Err() != nil {
+		return nil
+	}
+	out := make([]Quota, 0, len(checked))
+	for index, q := range checked {
+		last := readings[index].LastServedAt
+		r := Quota{Provider: q.Provider, Name: q.Name, Kind: q.Kind, Plan: q.Plan, User: q.User, AsOf: q.AsOf, ReadAt: q.ReadAt, ReadDeferred: q.ReadDeferred, ReadError: q.ReadError,
+			Windows: []QuotaSpan{}, Balance: q.Balance, BalanceSplit: q.BalanceSplit, SharedBalance: q.SharedBalance, Error: q.Error, Until: q.Until, Renew: q.Renew, Resets: q.Resets, ResetsUsed: q.ResetsUsed, From: q.From, Alias: q.Alias, Seat: q.Seat,
+			LastServedAt: last, Last: last != nil && last.Equal(latest)}
+		// a pool's own windows stand in for the models' drawing on it,
+		// as the usage page shows them
+		for _, w := range PooledWindows(q.Windows) {
+			span := QuotaSpan{Unlimited: w.Unlimited, Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Lane: w.Lane,
+				AsOf: w.AsOf, Error: w.Error, Unknown: w.Unknown,
+				Amount: w.Amount, Limit: w.Limit, Unit: w.Unit, Pool: w.Pool, RunsOutAt: w.RunsOutAt, RunsOut: w.RunsOut, Balance: w.Balance,
+				amountPresence: w.amountPresence,
+				Spent:          w.Spent, SpentSince: w.SpentSince, Holds: w.Holds, HoldsWhy: w.HoldsWhy}
+			if allows != nil {
+				span.Holds, span.HoldsWhy = nil, ""
+			}
+			if span.ResetsAt == nil && w.ResetSecs > 0 {
+				at := now.Add(time.Duration(w.ResetSecs) * time.Second)
+				span.ResetsAt = &at
+			}
+			r.Windows = append(r.Windows, span)
+		}
+		out = append(out, r)
 	}
 	return out
 }

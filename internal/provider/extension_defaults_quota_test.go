@@ -86,9 +86,9 @@ func TestExtensionDefaultsRejectStaleSelection(t *testing.T) {
 }
 
 func TestExtensionUsageTimeKeepsUTC(t *testing.T) {
-	at, err := extensionUsageTime(1000)
-	if err != nil || at == nil {
-		t.Fatalf("usage timestamp: %v %v", at, err)
+	at := extensionUsageTime(1000)
+	if at == nil {
+		t.Fatal("usage timestamp missing")
 	}
 	if at.Location() != time.UTC || at.UnixMilli() != 1000 || at.Format(time.RFC3339Nano) != "1970-01-01T00:00:01Z" {
 		t.Fatalf("usage timestamp lost its UTC identity: %v", at)
@@ -140,7 +140,7 @@ func TestExtensionRichQuotaProjectsWithoutInventingAllowance(t *testing.T) {
 	if quota.Windows[2].Count(false) != "" {
 		t.Fatal("missing amount invented a native count")
 	}
-	for _, value := range []any{quota.Windows, quotaReport([]SubscriptionQuota{quota}, nil, nil, time.Now())[0].Windows} {
+	for _, value := range []any{quota.Windows, quotaReport(t.Context(), []SubscriptionQuota{quota}, nil, nil, time.Now())[0].Windows} {
 		wire, err := json.Marshal(value)
 		if err != nil {
 			t.Fatal(err)

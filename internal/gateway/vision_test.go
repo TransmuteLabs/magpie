@@ -2,13 +2,18 @@ package gateway
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
@@ -86,6 +91,31 @@ func eyed(t *testing.T) (*Server, *eyeUp) {
 		t.Fatal(err)
 	}
 	return New(), u
+}
+
+func TestOnlyImageTurnPicksAutomaticDescriber(t *testing.T) {
+	s, up := eyed(t)
+	if err := os.WriteFile(autoPicksPath(), []byte(`{"seeded":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const text = `{"model":"probe/text","messages":[{"role":"user","content":"Read this."}]}`
+	if code, body := postAs(t, s, "", text); code != http.StatusOK {
+		t.Fatalf("text turn: %d %s", code, body)
+	}
+	if pick := heldFile(t).Vision; pick != "" {
+		t.Errorf("text turn picked a vision provider: %s", pick)
+	}
+
+	const image = `{"model":"probe/text","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`
+	if code, body := postAs(t, s, "", image); code != http.StatusOK {
+		t.Fatalf("image turn: %d %s", code, body)
+	}
+	if pick, described := heldFile(t).Vision, up.sent("eye"); pick != "probe" || len(described) != 1 {
+		t.Errorf("image turn picked %q and described %d images", pick, len(described))
+	}
+	if sent := up.sent("text"); len(sent) != 2 || !strings.Contains(sent[1], "HELLO") {
+		t.Errorf("text model requests: %v", sent)
+	}
 }
 
 func TestTextOnlyModelIsGivenTheImagesDescription(t *testing.T) {
@@ -212,6 +242,75 @@ func TestSeerPicksAModelThatSees(t *testing.T) {
 	noVision(t)
 	if _, ok := seer(); ok {
 		t.Fatal("seer with vision off")
+	}
+}
+
+func TestCodexCatalogAdvertisesVisionWithoutRanking(t *testing.T) {
+	server, _ := eyed(t)
+	p, err := provider.Find("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quotaReads atomic.Int64
+	oldAllowance := keyAllowance
+	keyAllowance = func(p provider.Provider) (provider.Allowance, bool) {
+		if p.ID == "probe" {
+			quotaReads.Add(1)
+			return week(100, time.Now().Add(time.Hour)), true
+		}
+		return oldAllowance(p)
+	}
+	t.Cleanup(func() { keyAllowance = oldAllowance })
+	if err := os.WriteFile(autoPicksPath(), []byte(`{"seeded":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	type model struct {
+		ID         string   `json:"slug"`
+		Modalities []string `json:"input_modalities"`
+	}
+	handler := server.Handler()
+	for _, tc := range []struct {
+		name, choice   string
+		eye, describes bool
+	}{
+		{"automatic with a spent describer", "", true, true},
+		{"missing pick with a spent fallback", "removed/eye", true, true},
+		{"off with a candidate", "off", true, false},
+		{"automatic without a candidate", "", false, false},
+		{"missing pick without a fallback", "removed/eye", false, false},
+		{"explicit pick of a served model", "probe/text", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			models := []string{"text"}
+			if tc.eye {
+				models = append(models, "eye")
+			}
+			p.Models = models
+			if err := provider.Save(*p); err != nil {
+				t.Fatal(err)
+			}
+			pickVision(t, tc.choice)
+			rec := httptest.NewRecorder()
+			before := quotaReads.Load()
+			held := heldFile(t).Vision
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, CodexCatalogPath, nil))
+			var list struct {
+				Models []model `json:"models"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || rec.Code != http.StatusOK {
+				t.Fatalf("codex catalog: %d %s (%v)", rec.Code, rec.Body, err)
+			}
+			idx := slices.IndexFunc(list.Models, func(m model) bool { return m.ID == "probe/text" })
+			if idx < 0 || slices.Contains(list.Models[idx].Modalities, "image") != tc.describes {
+				t.Errorf("probe/text not listed with image support %t", tc.describes)
+			}
+			if reads := quotaReads.Load() - before; reads != 0 {
+				t.Errorf("codex catalog ranked vision by quota: %d allowance reads", reads)
+			}
+			if pick := heldFile(t).Vision; pick != held {
+				t.Errorf("codex catalog changed the Image recognition provider from %q to %q", held, pick)
+			}
+		})
 	}
 }
 

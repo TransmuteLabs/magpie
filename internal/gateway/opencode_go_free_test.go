@@ -172,12 +172,12 @@ func TestOpenCodeGoOwnFreeModelGetsNothingOfOpenCodes(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", tmp)
 	t.Setenv("TMP", tmp)
-	preferred, _ := json.Marshal("Prefer " + filepath.Join(tmp, "opencode"))
+	preferred, _ := json.Marshal("Prefer " + filepath.Join(tmp, "opencode") + " over generic system temporary directories such as /tmp")
 	if rec := goClaudeAsk(s, "go/glm-5-free"); rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 	a = asked()
-	if len(a) != 3 || !strings.Contains(a[2].body, string(preferred[1:len(preferred)-1])) || !strings.Contains(a[2].body, provider.OpenCodeStub) {
+	if len(a) != 3 || !strings.Contains(a[2].body, strings.Trim(string(preferred), `"`)) || !strings.Contains(a[2].body, provider.OpenCodeStub) {
 		t.Fatalf("Zen's free model at Zen: %+v", a)
 	}
 }

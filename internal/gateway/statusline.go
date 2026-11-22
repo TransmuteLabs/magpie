@@ -50,7 +50,8 @@ func (s *Server) statusline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusForbidden, "magpie's status line is told to another machine only when magpie is shared on the local network (Settings → Network and sharing → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
 		return
 	}
-	scope, ok := scopeQuotas(w, r)
+	ctx := r.Context()
+	scope, ok := scopeQuotas(ctx, w, r)
 	if !ok {
 		return
 	}
@@ -95,7 +96,10 @@ func (s *Server) statusline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now()
-	qs := scope.quotas(provider.KeptQuotaReport(now))
+	qs := scope.quotaReport(ctx, now, true)
+	if ctx.Err() != nil {
+		return
+	}
 	line := provider.StatuslineText(model, qs, names, now)
 	w.Header().Set("Cache-Control", "no-store")
 	if q.Get("format") == "json" {

@@ -25,7 +25,7 @@ func TestAccountTaskDurableIntentCannotReplayAcrossProcessOwners(t *testing.T) {
 	if err != nil || receipt.State != "reserved" || receipt.Scope != scope {
 		t.Fatal("fresh owner lost the unresolved reserved receipt", receipt, err)
 	}
-	if _, err := store.journal(scope, "dispatched", true); err != nil {
+	if _, err := store.journal(t.Context(), scope, "dispatched", true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Journal(scope, "accepted"); err != nil {
@@ -37,7 +37,7 @@ func TestAccountTaskDurableIntentCannotReplayAcrossProcessOwners(t *testing.T) {
 	if err := store.finishAccountTask(scope, "pinned", "uncertain"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.journal(scope, "dispatched", true); err == nil {
+	if _, err := other.journal(t.Context(), scope, "dispatched", true); err == nil {
 		t.Fatal("a fresh owner redispatched an accepted uncertain task")
 	}
 	if err := other.reserveAccountTask(scope, "pinned"); err == nil {

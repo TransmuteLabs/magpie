@@ -27,7 +27,12 @@ others available through `AlsoOn`. An entirely paused provider remains
 visible, while `OwnPaused` prevents routing through it.
 
 Authenticated accounts come from `Manager.Store`, with their exact ID and
-credential generation. Core remembers selection, order and on/off state in
+credential generation. Discovery, idle renewal and outside history each
+read one checked account snapshot for the selected providers of a module.
+Discovery reads account labels for display. Renewal and outside history
+only project IDs, generations and expiration from that snapshot. Each
+operation still checks its selected generation at admission.
+Core remembers selection, order and on/off state in
 its existing account metadata, without copying credentials there. Account
 discovery off excludes authenticated extensions before their store is read.
 Modules without `account-auth` are public providers and remain available.
@@ -45,6 +50,10 @@ catalog, without starting the module. A provider can appear here before it
 has an account or routable models. Providers with an existing `window:page`
 grant open their own sign-in page until the package declares a
 `provider:signin` binding.
+
+Sign-in choices and signed-in account rows keep the provider name declared
+in the SDK manifest. They use the same checked package icon as Installed
+when one is available.
 
 A root manifest requests `provider-signin` alongside `account-auth` and
 declares one `authBindings` grant with `from: "provider:signin"` per provider
@@ -72,6 +81,106 @@ and their operations. See [`ProviderSignIns`](../../internal/extension/provider_
 the [Providers route](../../internal/gui/providers_extension_signin.go) and
 the [HTTP regression](../../internal/gui/providers_extension_signin_test.go).
 
+For migration, `magpie plugin sdk auth import <module> <provider>
+<saved-account-key>` prepares one current community sign-in for an installed
+module. The provider sign-in grant declares `saved-signin` with one required
+secret `record` field. This method is available only to the local import
+command, including at the SDK dispatch boundary. Its SDK `auth.start`
+returns a continuation without an interactive step or polling delay.
+`auth.finish` verifies that continuation on the same module lease and
+returns the new credential. State reads and writes during verification share
+a temporary, bounded store, discarded when the verification ends. Modules
+choose which saved formats they can verify. Verification uses the selected
+source account's current proxy. Unreadable provider settings and a proxy
+change before dispatch refuse the import.
+
+The command returns a ticket and account summary. Prepared credentials stay
+in a separate private namespace omitted by Providers, the gateway, usage
+polling and the account observation stamp. The ticket expires after ten
+minutes or at the imported credential's earlier expiry. Access to the ticket store and gateway
+maintenance, including startup, remove expired copies. `magpie plugin sdk
+auth activate <module> <provider> <ticket>` rechecks the package, module
+configuration, enablement and account generation. Both preparation and
+activation check the exact bytes of the current source record under the
+community store's writer lock immediately before their local writes.
+Malformed UTF-8 is refused before verification. A changed, unavailable
+or occupied source refuses the operation. Activation preserves the existing
+account store schema and the legacy sign-in for rollback. If the publication
+is visible but disk finalization fails, the command returns the active
+account summary with a warning. Rechecking the same ticket can complete
+local setup without creating a new credential generation. Activation checks
+the current installed plugin list under its writers' lock. An absent list
+allows standalone activation. An unreadable or invalid list refuses it.
+Activation adds the SDK account under its own provider ID. Routing
+references and account policies still name the legacy provider and need to
+be checked before a cutover.
+
+Completing a sign-in or activating a saved sign-in registers a
+missing account policy for the credential generation in the receipt.
+Registration preserves existing pause and order settings. If policy
+storage is unavailable, the committed sign-in remains complete.
+The request can cancel while waiting for policy storage. The activation
+keeps its ticket until local registration succeeds. Repeating activation
+with the same ticket or reading the managed flow's completion again can
+register the missing policy without repeating vendor authentication.
+If `magpie plugin sdk auth finish` cannot register local policy, its
+credential-free result includes the committed generation, owner revision
+when present, and a warning. Use `magpie plugin sdk auth register <module>
+<provider> <account> <generation> <owner-revision-or-empty>` to finish
+local setup. The command checks the exact current generation and owner.
+
+`magpie plugin sdk auth transfer <module> <provider> <ticket>...` takes
+prepared tickets for the complete community subscription. Its ownership
+record keeps the public provider ID and the public aliases of transferred
+accounts. Providers, Subscriptions and Installed resolve that same owner.
+The ordinary sign-in form carries the owner and package revisions. Selected
+reauthorization and sign-out also carry the account generation. SDK switches
+carry the configuration version. Signing out a removed subscription checks
+the owner revision and each selected account's generation. A view from before
+the transfer or rollback cannot change the current owner's credentials or
+switches. CLI sign-in and sign-out for transferred subscriptions use the
+managed `plugin sdk auth` commands so continuations and publication remain
+bound to the current owner.
+Other declared plugin pages and panels remain available.
+
+`magpie plugin sdk auth rollback <public-provider> <owner-revision>` restores
+the community projection after checking its original saved accounts and the
+SDK credential generations recorded at transfer. A dispatched or uncertain
+refresh, a changed account set or generation, or a dispatched SDK sign-in or
+sign-out prevents automatic rollback. A refresh with a durable `not-started`
+outcome still permits rollback. The host records the rollback constraint
+before dispatching authentication and before acknowledging an accepted tool
+that may replace the selected credentials. A credential-bearing call,
+including model discovery, usage and component calls, also holds shared
+subscription admission from dispatch through handler and callback completion.
+An owner switch while a call is queued invalidates the call before dispatch.
+Canceling a dispatched call leaves the admission in place until a confirmed
+terminal or worker process exit. A native transport lost without a terminal
+keeps the subscription busy until the hosting process exits. A Bun worker
+declaring `provider-saved-signin` emits a terminal after its handler returns,
+including on cancellation. Switching owners
+and claiming credential work share the catalog lock across processes. Repeating a
+completed rollback returns its receipt. The SDK package stays installed.
+Removing the community package while the SDK owns its subscription keeps
+the public provider's settings and saved sign-ins.
+Restore the community package and enable it before rolling back. Transfer and
+rollback hold the installed-plugin list lock from the source check through
+publication. Waiting for the account settings and installed-plugin list uses
+the command's deadline. Transfer checks the current discovery setting when
+reconciling account settings. Import, activation, transfer and rollback
+check it after waiting for saved credentials and before publishing each new
+ticket, credential generation or owner revision. Unreadable discovery
+settings, an unreadable current list or a disabled source stop the change.
+Transfer and rollback check the public provider ID and custom-provider
+collisions against the same current `providers.json` snapshot. They repeat
+the check after waiting for the saved credentials and before each owner
+revision is written. A missing file is an empty list. An unreadable
+current file stops the transition even when a readable backup exists.
+A transfer interrupted after it records a pending owner returns that
+revision for recovery. Pending and rolled-back records suppress the SDK
+subscription projection. A prepared ticket alone leaves both the community
+subscription and the existing SDK provider ID unchanged.
+
 `ListedAPIs` uses declared model protocols. The provider exposes the union
 of models available to its enabled accounts; `Account.Lists` retains each
 account's own restriction. `Account.fetch` invokes `provider.models` and
@@ -83,21 +192,32 @@ existing private Store, so a fresh CLI can select dynamically discovered
 models without starting another worker or vendor request. A measured empty
 catalog remains distinct from a list that has never been fetched.
 The in-process cache keeps up to 64 snapshots and 32 MiB of their encoded
-catalog size. An evicted snapshot can be reopened from the private Store.
+catalog size. A cache hit checks the durable root's version and content.
+An evicted snapshot can be reopened from the private Store.
 Account eligibility uses the result and its known/unknown state from the
 same read, including when another caller evicts the snapshot.
 
 Catalog bytes are split into bounded content-addressed chunks. The root
-record is published only after all chunks, validation and the selected
-package/config checks succeed. Interrupted or failed refreshes retain the
-earlier root. Cold reads verify every chunk and the complete digest, then
+record is published after all chunks and validation succeed. Publication
+checks the selected package, configuration, enablement, owner and account
+under the catalog and Store locks before comparing the root version read
+before discovery. Account-bound publication checks the active settings
+file at admission before reading the account. An unreadable or invalid
+file blocks publication even when the settings editor can recover a
+backup. A missing file uses the default. An identical result also
+checks the root version and leaves it untouched. If another refresh already
+changed the root, the caller reads that published catalog. Cancellation
+before the write retains the earlier root. A write that completes during
+cancellation still invalidates the provider cache. Cold reads
+verify every chunk and the complete digest, then
 apply the same SDK model validation as live discovery; unreadable data is
 unknown rather than an empty or unrestricted entitlement list. Account or
 configuration changes cannot reuse another selection's cache key. Each read
 pins its account generation and cache key before lookup. Both warm and cold
-reads recheck the account and selected package/configuration before returning
-models; a deleted or replaced selection fails closed, and a late cold read
-cannot publish an earlier generation's catalog under a newer key.
+reads recheck the account, package, configuration and enablement before
+returning models. A deleted or replaced selection fails closed. A late cold
+read cannot publish an earlier generation's catalog under a newer key.
+Static models check the same selection and take their list from the manifest.
 
 Models carry optional prices in USD per million tokens and explicit core
 effort levels. The adapter maps these to `catalog.Model.Price` and
@@ -143,6 +263,19 @@ non-retryable conflict rather than entering generic upstream outage patience.
 This is a not-started policy rejection, not a fabricated accepted/uncertain
 write receipt, and it cannot overwrite an earlier durable terminal outcome.
 The next request discovers a new binding and uses its current `Frame.Auth`.
+
+The outbound adapter uses the selected account from `Sign` once in `Do`.
+Direct calls, repeated attempts and credentials due for refresh run
+preflight again. For SDK 1.9 and later, the selection pins the package,
+configuration and enablement through the installed worker's dispatch
+admission. The host checks the worker generation and the account under the
+same catalog lock after any subscription admission. Sign-out removes
+credentials in the same catalog-before-Store lock order.
+After the worker queue opens, every supported SDK version checks
+the account generation and discovery policy. Outbound provider requests also
+check the current on/off policy for the selected public account, including a
+transferred alias. Older inbound calls retain their original lease and
+report the generation of the worker that answered.
 
 `StartExtensionAuth`, `FinishExtensionAuth`, `RefreshExtensionAuth` and
 `LogoutExtensionAuth` use the installed authentication contract. Completed
@@ -193,8 +326,12 @@ Paid task admission compares account policy without these transient read
 markers. Its live check separately revalidates the selected generation's
 authentication status, so a fresh usage read preserves task authority while
 a selected-account authentication refusal still revokes it.
-The mark is bound to the Store namespace, installed package/configuration and
-exact credential generation; a replacement selection cannot inherit it.
+The mark is bound to the Store namespace, installed package, configuration,
+enablement and exact credential generation. A replacement selection cannot
+inherit it, even if a process switches the module off and back on after the
+refusal's final selection check. The initial enablement retains its existing
+mark identity. Idle renewal checks the same binding and discards a queued
+selection if the enablement has changed.
 Malformed mark metadata retains an existing refusal. No credential or vendor
 error prose is copied into login metadata, and a plain HTTP status/error string
 does not establish an authentication transition.
@@ -205,8 +342,8 @@ before any renewal or tool dispatch and through its retained live check at
 dispatch, host callbacks, acceptance and result publication. A typed usage
 refusal for the selected credential generation blocks business sends and
 refresh; public tools retain their unbound behavior. A mark for another Store,
-package, configuration or credential generation cannot lapse the current
-selection. The preliminary tagged-mark policy remains provisional so a genuine
+package, configuration, enablement or credential generation cannot lapse the
+current selection. The preliminary tagged-mark policy remains provisional so a genuine
 replacement credential generation can recover. A tool's authorized account
 replacement uses the existing publication-scope proof when checking its final
 generation; it grants no renewed callback or replay authority.
@@ -230,8 +367,10 @@ renewal loop when the listener has no manager. Shutdown joins the renewal
 worker before releasing that lock, while the listener drains separately.
 Catalog inspection starts no worker or Bun, including with empty catalogs.
 Only enabled providers and ordinarily listed, enabled, visible, nonpaused,
-nonlapsed accounts with known expiry are eligible. Discovery off and failed
-policy/store reads suppress renewal. The timer uses the selected account's
+nonlapsed accounts with known expiry are eligible. Renewal, account tasks,
+account-bound tools and check-ins check discovery in the active settings file
+before admitting a call. An unreadable active file defers the work even when
+the settings display can recover from a backup. The timer uses the selected account's
 network hold/proxy policy and pins its package, configuration and generation
 before calling the existing leased `auth.refresh` transaction. It verifies an
 actual refresh-successor receipt, rechecks policy and binding, and never
@@ -330,7 +469,9 @@ latest validated snapshot; progress does not append ledger rows.
 `usage.append` and the terminal result's optional `call` share the same
 one-call gate. Termination, including cancellation, flushes admitted evidence
 once through normal accounting, its observers and the original caller's
-budget. The gateway supplies the existing `budget.Append` sink; it calls the
+budget. The Usage row keeps the public provider and user selected
+at dispatch, including when a subscription transfer ends the task. The
+gateway supplies the existing `budget.Append` sink, which calls the
 ordinary ledger append without creating another row. Missing evidence never
 becomes invented zero usage. Canceled module callbacks cannot regain
 authority. Joining the host owner does not prove that a vendor stopped work,
@@ -387,12 +528,26 @@ policy. Its unary request carries `day` and `proxy`; credentials stay in
 and accepts a bounded message and strict RFC3339 boundary.
 
 The host-private [`checkin_intent.go`](../../internal/extension/checkin_intent.go)
-reserves a durable operation before dispatch. Lost, invalid, failed or
+reserves a durable operation before dispatch. The caller's context covers
+the Store lock wait and the reservation up to the atomic rename. Once the
+reservation commits, the host records the dispatch outcome durably even
+when the caller cancels. Lost, invalid, failed or
 uncertain completion refuses another write across manual presses, manager
 restart, credential generation changes and loss of the display record.
 Known not-started and ordinary completed non-claim rechecks get distinct
 intents. The saved result retains the exact operation scope and terminal
-state. Credit grants do not create an inference ledger row. See
+state. The declared account check-in action accepts only a reserved intent
+from this owner.
+
+API 1.20's `rate-limited` result represents a completed rate-limit decision
+with a required `until` boundary. The same completed receipt is returned
+before that boundary, including after a manual press or a day change. A
+successor gets a new operation ID when the boundary is reached. The ordinary
+scheduler keeps the exact boundary in `ValidUntil` with its existing
+`failed` display state. An SDK `failed` result still requires
+reconciliation, even when it includes `until`.
+
+Credit grants do not create an inference ledger row. See
 [ADR 0024](../adr/0024-sdk-account-checkin-gateway-activation.md) for the
 wire, reconciliation boundary and scoped evidence.
 
@@ -553,10 +708,23 @@ processor. Imported outside-account history retains its deliberate observer
 bypass. This sink is not request capture or guaranteed durable export.
 
 `provider.usage` returns validated quota windows through the existing
-subscription quota path. Both the reading cache and routing freshness are
-fenced by current account generations. Late reads cannot publish routing
-state for a replaced account. External quotas do not reuse the legacy
-name-only disk fallback across generations.
+subscription quota path. Routing and cached card reads bind quota windows
+to the account and usage revisions, package, configuration, enablement
+generation and public subscription owner. An off/on cycle invalidates its
+earlier allowances even when package and configuration stay the same. The
+first ownership transfer also invalidates a reading made before it. A
+fresh background reading can replace an older Usage-page card for the
+same account. SDK accounts require their scoped reading after transfer,
+including when legacy quota snapshots used the same public ID. Catalog
+projection and the cached cards endpoint use the caller's context to
+validate quota evidence.
+
+The scheduled Usage refresh preserves the previous snapshot and its age
+if account discovery runs out of time. It releases the pending read so a
+subsequent request can retry. Completed discovery with zero accounts
+replaces the previous snapshot with an empty one. Explicit refresh uses
+its caller's context for the final SDK proof check before recording
+history or replacing cached cards.
 
 API 1.9 provider descriptors may declare `maxConcurrency` per account and
 `maxAccounts` for active account fanout. Omission preserves the existing
@@ -586,11 +754,27 @@ in its parameters. Dirty usage blocks inference, including the atomic
 execution-journal admission boundary.
 
 Usage reads capture and echo their revision. Only a current, fresh ordinary
-reading can acknowledge it; unknown, deferred or historical results cannot
-reopen the account. Store-backed proofs fence cached reads, late waiters,
+reading can acknowledge it. The SDK validates the result and window `asOf`
+and window `resetsAt` as Unix milliseconds through
+`9999-12-31T23:59:59.999Z` before acknowledgment. Omission and zero denote
+an absent timestamp. Explicit `null` is invalid. Unknown, deferred or historical results cannot reopen the
+account. Store-backed proofs fence cached reads, late waiters,
 routing and display across processes. Disk history alone restores no routing
 authority after restart. See [ADR 0013](../adr/0013-usage-revisions-and-business-cancel.md)
 for schema, durability and vendor mutation-ordering responsibilities.
+
+The Usage page and quota exports both check the current subscription owner
+before showing cached local readings. A legacy card kept under a public ID
+that has transferred to SDK ownership is deferred until that owner produces
+a current reading. Deferred cards retain display identity. Allowances,
+balances, reset credits and plan renewal fields are withdrawn together.
+An unreadable ownership record defers proofless local readings until
+ownership can be checked.
+
+The account editor uses its request deadline for account discovery, quota
+proofs, history publication and check-in metadata. Expired reads skip
+history publication. An account's shared quota read keeps its own deadline
+so other callers can still receive the result.
 
 Business `operation.cancel` at API 1.4 uses a new journaled intent while
 retaining a separate target operation/reference. It leaves the target's

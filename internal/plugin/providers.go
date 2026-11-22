@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -233,7 +234,7 @@ type Provider struct {
 // Option is a switch a plugin declares for its provider (auth.options,
 // #2038): magpie shows it, keeps the user's value in settings'
 // PluginOptions and hands it to the plugin (input.magpie.option). A change
-// has the providers listed again (SetProviderOptions); nothing else runs.
+// schedules a new provider listing (SetProviderOptions).
 type Option struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
@@ -277,9 +278,12 @@ func SetProviderOptions(ctx context.Context) error {
 		forgetProviders()
 		return nil
 	}
-	err := Call(ctx, "setProviderOptions", map[string]any{"options": settings.Load().PluginOptions}, nil)
-	forgetProviders()
-	return err
+	defer forgetProviders()
+	options, _, err := settings.PluginOptionsNow()
+	if err != nil {
+		return err
+	}
+	return Call(ctx, "setProviderOptions", map[string]any{"options": options}, nil)
 }
 
 // Account is one account a provider is signed in to: Key is where
@@ -295,6 +299,7 @@ type Account struct {
 	Models    []string `json:"models,omitempty"`
 	FellBack  bool     `json:"fellBack,omitempty"`
 	ListError string   `json:"listError,omitempty"`
+	AuthEpoch string   `json:"-"`
 }
 
 var (
@@ -341,11 +346,25 @@ func forgetProviders() {
 // Providers asks the plugins for their providers, starting the host if
 // need be, and keeps the answer for Cached.
 func Providers(ctx context.Context) ([]Provider, error) {
-	var ps []Provider
-	if err := Call(ctx, "providers", listingArgs(), &ps); err != nil {
+	ps, err := listProviders(ctx, 0)
+	if err != nil {
 		return nil, err
 	}
 	ps = commitProviders(ps, nil)
+	return ps, nil
+}
+
+func listProviders(ctx context.Context, deadline time.Duration) ([]Provider, error) {
+	options, _, err := settings.PluginOptionsNow()
+	if err != nil {
+		return nil, err
+	}
+	args := listingArgs()
+	args["providerOptions"] = options
+	var ps []Provider
+	if err := callWithTimeout(ctx, "providers", args, &ps, deadline); err != nil {
+		return nil, err
+	}
 	return ps, nil
 }
 
@@ -411,8 +430,8 @@ var (
 // kept for Cached when it was answered while the invalidation it began
 // under still stood. Tests replace it to stall or fail an ask without Bun.
 var refreshProviders = func(ctx context.Context, epoch uint64) error {
-	var ps []Provider
-	if err := callWithTimeout(ctx, "providers", listingArgs(), &ps, refreshDeadline); err != nil {
+	ps, err := listProviders(ctx, refreshDeadline)
+	if err != nil {
 		return err
 	}
 	commitProviders(ps, &epoch)
@@ -803,6 +822,7 @@ type storedAuth struct {
 	AccountID string          `json:"accountId"`
 	Email     string          `json:"email"`
 	Key       string          `json:"key"`
+	AuthEpoch string          `json:"_magpieAuthEpoch"`
 	Metadata  struct {
 		Email string `json:"email"`
 	} `json:"metadata"`
@@ -878,7 +898,7 @@ func accountsOf(auth map[string]storedAuth, provider string) []Account {
 			continue
 		}
 		who := firstNonEmpty(a.AccountID, a.Metadata.Email, a.Email)
-		acct := Account{Key: k, Type: a.Type, AccountID: who}
+		acct := Account{Key: k, Type: a.Type, AccountID: who, AuthEpoch: a.AuthEpoch}
 		if a.Type == "api" && len(a.Key) >= 12 {
 			acct.Hint = a.Key[len(a.Key)-4:]
 		}
@@ -1050,8 +1070,9 @@ func Authorize(ctx context.Context, provider string, method int, inputs map[stri
 // Saved is where a sign-in was kept: the provider (a plugin may sign in
 // to another than asked) and the account's key.
 type Saved struct {
-	Provider string `json:"provider"`
-	Account  string `json:"account"`
+	Provider  string `json:"provider"`
+	Account   string `json:"account"`
+	AuthEpoch string `json:"authEpoch,omitempty"`
 }
 
 // ErrFailed is a sign-in the plugin says failed.
@@ -1104,11 +1125,12 @@ func APIKey(ctx context.Context, provider string, method int, inputs map[string]
 // "added", "updated" (the account was signed in already) or "failed",
 // with why; Provider and Account are where it is kept.
 type Imported struct {
-	Status   string `json:"status"`
-	User     string `json:"user"`
-	Error    string `json:"error"`
-	Provider string `json:"provider"`
-	Account  string `json:"account"`
+	Status    string `json:"status"`
+	User      string `json:"user"`
+	Error     string `json:"error"`
+	Provider  string `json:"provider"`
+	Account   string `json:"account"`
+	AuthEpoch string `json:"authEpoch,omitempty"`
 }
 
 // ImportFiles hands the texts of the files the user picked to provider's
@@ -1153,13 +1175,28 @@ func InstallCLI(ctx context.Context, provider string) error {
 // SignOut forgets one account of the provider's, every one when account
 // is "".
 func SignOut(ctx context.Context, provider, account string) error {
+	path := AuthPath()
+	release, err := guardCommunitySubscription(ctx, path, provider)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if Running() {
 		return Call(ctx, "signOut", map[string]any{"provider": provider, "account": account}, nil)
 	}
-	unlock := lockAuth()
-	defer unlock()
+	unlock, err := lockAuth(ctx, path)
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		unlock()
+		if published {
+			changed()
+		}
+	}()
 	var m map[string]json.RawMessage
-	b, err := readAuthFile()
+	b, err := lastgood.Read(path, validAuth)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -1174,14 +1211,14 @@ func SignOut(ctx context.Context, provider, account string) error {
 			delete(m, k)
 		}
 	}
-	b, _ = json.MarshalIndent(m, "", "  ")
-	if err := lastgood.Keep(AuthPath(), validAuth, 0o600); err != nil {
+	next, _ := json.MarshalIndent(m, "", "  ")
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := writeWhole(AuthPath(), append(b, '\n')); err != nil {
+	if err := publishAuth(ctx, path, b, next, validAuth); err != nil {
 		return err
 	}
-	changed()
+	published = true
 	return nil
 }
 
@@ -1194,49 +1231,24 @@ type Options struct {
 	Fetch   bool              `json:"fetch"`
 }
 
-var (
-	optMu    sync.Mutex
-	optCache = map[string]Options{}
-	optGen   int64
-)
-
 // LoaderOptions runs the provider's auth loader for account (once per
 // sign-in and host) and gives what it returned; account "" is the
 // provider's first.
 func LoaderOptions(ctx context.Context, provider, account string) (Options, error) {
-	ck := provider + "\x00" + account
-	optMu.Lock()
-	if optGen != generation.Load() {
-		optCache, optGen = map[string]Options{}, generation.Load()
-	}
-	o, ok := optCache[ck]
-	optMu.Unlock()
-	if ok {
-		return o, nil
-	}
-	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx)}, &o); err != nil {
+	values, _, err := settings.PluginOptionsNow()
+	if err != nil {
 		return Options{}, err
 	}
-	optMu.Lock()
-	if optGen == generation.Load() {
-		optCache[ck] = o
+	var o Options
+	if err := Call(ctx, "load", map[string]any{"provider": provider, "account": account, "proxy": proxyOf(ctx), "providerOptions": values}, &o); err != nil {
+		return Options{}, err
 	}
-	optMu.Unlock()
 	return o, nil
-}
-
-func init() {
-	OnChange(func() {
-		optMu.Lock()
-		optCache = map[string]Options{}
-		optMu.Unlock()
-	})
 }
 
 // Import keeps auth (a plugin-auth.json entry) as one more of provider's
 // accounts — or, the same account as one kept already, in its place — and
-// gives the account's key. The plugin's host is started for it: it alone
-// writes the file while it runs.
+// gives the account's key. The plugin's host is started for it.
 func Import(ctx context.Context, provider string, auth map[string]any) (string, error) {
 	var r struct {
 		Account string `json:"account"`
@@ -1279,9 +1291,114 @@ func Auths(provider string) map[string]map[string]any {
 		// the caller's own: decoded afresh from what is shared
 		var a map[string]any
 		_ = json.Unmarshal(v, &a)
+		delete(a, authEpochField)
 		out[k] = a
 	}
 	return out
+}
+
+// WithSavedAuth reads one current sign-in under the writers' lock. The
+// callback may commit local state and must not call the plugin or a vendor.
+func WithSavedAuth(ctx context.Context, provider, account string, use func(json.RawMessage) error) error {
+	return WithSavedAuthChecked(ctx, provider, account, ctx.Err, use)
+}
+
+func WithSavedAuthChecked(ctx context.Context, provider, account string, check func() error, use func(json.RawMessage) error) error {
+	if provider == "" || account == "" || ProviderOf(account) != provider {
+		return errors.New("select a saved sign-in of the same provider")
+	}
+	return withSavedAuths(ctx, AuthPath(), provider, check, func(records map[string]json.RawMessage) error {
+		record := records[account]
+		if len(record) == 0 {
+			return errors.New("the selected saved plugin sign-in is missing")
+		}
+		return use(record)
+	})
+}
+
+func WithSavedAuths(ctx context.Context, provider string, use func(map[string]json.RawMessage) error) error {
+	return withSavedProviderAuths(ctx, provider, ctx.Err, use)
+}
+
+func withSavedProviderAuths(ctx context.Context, provider string, check func() error, use func(map[string]json.RawMessage) error) error {
+	if provider == "" {
+		return errors.New("select a source provider")
+	}
+	path := AuthPath()
+	release, err := lockCommunitySubscription(ctx, path, provider, false)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return withSavedAuths(ctx, path, provider, check, use)
+}
+
+func WithInstalledSavedAuths(ctx context.Context, provider, spec string, use func(map[string]json.RawMessage) error) error {
+	return WithInstalledSavedAuthsChecked(ctx, provider, spec, ctx.Err, use)
+}
+
+func WithInstalledSavedAuthsChecked(ctx context.Context, provider, spec string, check func() error, use func(map[string]json.RawMessage) error) error {
+	return WithInstalledPlugins(ctx, check, func(installed []Entry) error {
+		if !slices.ContainsFunc(installed, func(entry Entry) bool { return entry.Spec == spec && !entry.Off }) {
+			return errors.New("the source subscription's plugin is no longer installed and enabled")
+		}
+		return withSavedProviderAuths(ctx, provider, check, use)
+	})
+}
+
+func withSavedAuths(ctx context.Context, path, provider string, check func() error, use func(map[string]json.RawMessage) error) error {
+	unlock, err := lockAuth(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := check(); err != nil {
+		return err
+	}
+	records, err := readSavedAuths(path, provider)
+	if err != nil {
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	return use(records)
+}
+
+func readSavedAuths(path, provider string) (map[string]json.RawMessage, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("saved plugin sign-ins are unavailable")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("saved plugin sign-ins are unavailable")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return nil, errors.New("current saved plugin sign-ins changed")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, authDocumentLimit+1))
+	var records map[string]json.RawMessage
+	if err != nil || len(raw) > authDocumentLimit || json.Unmarshal(raw, &records) != nil || records == nil {
+		return nil, errors.New("current saved plugin sign-ins are unreadable")
+	}
+	for key, raw := range records {
+		if ProviderOf(key) != provider {
+			delete(records, key)
+			continue
+		}
+		record, err := authCredentials(bytes.TrimSpace(raw))
+		if err != nil {
+			return nil, err
+		}
+		if len(record) == 0 || record[0] != '{' || len(record) > 16<<10 {
+			return nil, errors.New("a saved plugin sign-in has an unsupported format")
+		}
+		records[key] = record
+	}
+	return records, nil
 }
 
 // Take gives provider's accounts named by keys (every one when there are

@@ -206,7 +206,7 @@ func TestPiPackage(t *testing.T) {
 	if _, err := signIn("bad"); !errors.Is(err, ErrFailed) || !strings.Contains(err.Error(), "that code isn't right") {
 		t.Fatalf("a bad code: %v", err)
 	}
-	if got, err := signIn("good"); err != nil || got != (Saved{"fakepi", "fakepi"}) {
+	if got, err := signIn("good"); err != nil || got.Provider != "fakepi" || got.Account != "fakepi" || got.AuthEpoch == "" {
 		t.Fatalf("Finish = %+v, %v", got, err)
 	}
 	if b, err := os.ReadFile(filepath.Join(filepath.Dir(AuthPath()), "pi", "stolen")); err == nil {

@@ -28,6 +28,7 @@ import (
 
 type (
 	Info          = sdk.LinkedMiddlewareInfo
+	Caller        = sdk.LinkedMiddlewareCaller
 	Reject        = sdk.LinkedMiddlewareReject
 	Agent         = sdk.LinkedAgentMiddleware
 	Run           = sdk.LinkedMiddlewareRun

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"hash/maphash"
 	"os"
 	"slices"
@@ -254,6 +255,10 @@ func stampNowFiles() [4]rootStamp {
 // for what each row of a page looks up: shared by them, so read only.
 func Held[T any](key string, build func() T) T { return heldOf(key, build) }
 
+func HeldContext[T any](ctx context.Context, key string, build func() T) T {
+	return heldOfContext(ctx, key, build)
+}
+
 // heldCall is a build in flight, for the callers that miss it together.
 type heldCall struct {
 	done chan struct{}
@@ -290,6 +295,13 @@ const heldRounds = 3
 // then one of them builds again (#5104). Outside a request every caller
 // builds, as before.
 func heldOf[T any](key string, build func() T) T {
+	return heldOfContext(context.Background(), key, build)
+}
+
+func heldOfContext[T any](ctx context.Context, key string, build func() T) (zero T) {
+	if ctx.Err() != nil {
+		return zero
+	}
 	held.Lock()
 	if held.holds == 0 {
 		held.Unlock()
@@ -306,8 +318,14 @@ func heldOf[T any](key string, build func() T) T {
 			break
 		}
 		held.Unlock()
-		if round == heldRounds || !c.wait(heldWait) {
+		if round == heldRounds || !c.waitContext(ctx, heldWait) {
+			if ctx.Err() != nil {
+				return zero
+			}
 			return build()
+		}
+		if ctx.Err() != nil {
+			return zero
 		}
 		if c.fresh {
 			return c.v.(T)
@@ -336,7 +354,7 @@ func heldOf[T any](key string, build func() T) T {
 	held.Lock()
 	// a filememo-only write (settings.Save) meanwhile is a write too: kept,
 	// what was read before it would be given for a second after it
-	c.v, c.fresh = v, held.gen == gen && filememo.Gen() == fgen && held.env == env
+	c.v, c.fresh = v, ctx.Err() == nil && held.gen == gen && filememo.Gen() == fgen && held.env == env
 	if held.holds > 0 && c.fresh {
 		if held.built == nil {
 			held.built = map[string]heldValue{}
@@ -351,21 +369,23 @@ func heldOf[T any](key string, build func() T) T {
 
 // wait waits for the build to end, for d at most, and says whether it
 // ended.
-func (c *heldCall) wait(d time.Duration) bool {
+func (c *heldCall) waitContext(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-c.done:
 		return true
+	case <-ctx.Done():
+		return false
 	case <-t.C:
 		return false
 	}
 }
 
-func heldEntries(build func() []Entry) []Entry {
+func heldEntriesContext(ctx context.Context, build func() []Entry) []Entry {
 	// clipped: a caller's append copies
-	return heldOf("entries", func() []Entry {
-		return keptOf("entries", func() []Entry {
+	return heldOfContext(ctx, "entries", func() []Entry {
+		return keptOfContext(ctx, "entries", func() []Entry {
 			entriesBuilt.Add(1)
 			return slices.Clip(build())
 		})
@@ -403,12 +423,23 @@ var kept struct {
 // keptOf is what build gives, kept across requests (kept) while one holds
 // the catalog, and built afresh outside one.
 func keptOf[T any](key string, build func() T) T {
-	return keptFit(key, func(any) bool { return true }, build)
+	return keptOfContext(context.Background(), key, build)
+}
+
+func keptOfContext[T any](ctx context.Context, key string, build func() T) T {
+	return keptFitContext(ctx, key, func(any) bool { return true }, build)
 }
 
 // keptFit is keptOf, taking what is kept only where fits says it is
 // still the one wanted.
 func keptFit[T any](key string, fits func(any) bool, build func() T) T {
+	return keptFitContext(context.Background(), key, fits, build)
+}
+
+func keptFitContext[T any](ctx context.Context, key string, fits func(any) bool, build func() T) (zero T) {
+	if ctx.Err() != nil {
+		return zero
+	}
 	if !holdingNow() {
 		return build()
 	}
@@ -426,7 +457,7 @@ func keptFit[T any](key string, fits func(any) bool, build func() T) T {
 	// and a write meanwhile moves the stamp the next look takes
 	v := build()
 	kept.Lock()
-	if kept.stamp == st {
+	if ctx.Err() == nil && kept.stamp == st {
 		if kept.of == nil {
 			kept.of = map[string]any{}
 		}
@@ -524,9 +555,16 @@ func holdingNow() bool {
 // heldPlugins is plugin.Cached, which reads the plugins' list and
 // sign-ins each time, and PluginOf asks for every model.
 func heldPlugins() []plugin.Provider {
-	return heldOf("plugins", func() []plugin.Provider {
+	return heldPluginsContext(context.Background())
+}
+
+func heldPluginsContext(ctx context.Context) []plugin.Provider {
+	return heldOfContext(ctx, "plugins", func() []plugin.Provider {
 		pluginsBuilt.Add(1)
-		return slices.Clip(plugin.Cached())
+		owners := heldSubscriptionOwnersContext(ctx)
+		return slices.Clip(slices.DeleteFunc(plugin.Cached(), func(entry plugin.Provider) bool {
+			return owners.replaces(entry.ID)
+		}))
 	})
 }
 
@@ -549,6 +587,13 @@ type fromEntries[T any] struct {
 // and each built them from every member of every group again (the CPU a
 // request to a group took at once, with many providers).
 func heldFrom[T any](key string, entries []Entry, build func([]Entry) T) T {
+	return heldFromContext(context.Background(), key, entries, build)
+}
+
+func heldFromContext[T any](ctx context.Context, key string, entries []Entry, build func([]Entry) T) (zero T) {
+	if ctx.Err() != nil {
+		return zero
+	}
 	var at *Entry
 	if len(entries) > 0 {
 		at = &entries[0]
@@ -567,13 +612,13 @@ func heldFrom[T any](key string, entries []Entry, build func([]Entry) T) T {
 	}
 	gen := held.gen
 	held.Unlock()
-	f := keptFit(key, func(v any) bool {
+	f := keptFitContext(ctx, key, func(v any) bool {
 		f, ok := v.(fromEntries[T])
 		return ok && f.at == at && f.n == len(entries)
 	}, func() fromEntries[T] { return fromEntries[T]{at, len(entries), build(entries)} })
 	v := f.v
 	held.Lock()
-	if held.holds > 0 && held.gen == gen {
+	if ctx.Err() == nil && held.holds > 0 && held.gen == gen {
 		if held.built == nil {
 			held.built = map[string]heldValue{}
 		}

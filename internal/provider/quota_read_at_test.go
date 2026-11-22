@@ -41,7 +41,7 @@ func TestClaudeKeptReadingKeepsItsTime(t *testing.T) {
 	if len(pts) != 1 || !pts[0].At.Equal(told.UTC()) || pts[0].Left != 70 {
 		t.Fatalf("history = %+v, want one point at %v", pts, told)
 	}
-	if r := quotaReport([]SubscriptionQuota{q}, nil, nil, time.Now()); len(r) != 1 || r[0].ReadAt == nil || !r[0].ReadAt.Equal(told) {
+	if r := quotaReport(t.Context(), []SubscriptionQuota{q}, nil, nil, time.Now()); len(r) != 1 || r[0].ReadAt == nil || !r[0].ReadAt.Equal(told) {
 		t.Fatalf("report = %+v", r)
 	}
 

@@ -12,6 +12,8 @@ const authError = "module authentication could not complete this request";
 const deviceURL = "https://vendor.test/device";
 const selected = "selected@example.test";
 const other = "other@example.test";
+const selectedName = "Selected subscription name";
+const selectedAlias = "Selected local alias";
 const device = { id: "device", mode: "poll", label: "Device code" };
 const key = { id: "key", mode: "poll", label: "API key", fields: [
   { key: "site", type: "select", label: "Account region", choices: [
@@ -38,23 +40,35 @@ const text = {
   de: { section: "Abos", method: "Anmeldemethode", sign: "Anmelden", cancel: "Abbrechen", close: "Schließen", again: "Erneut anmelden", open: "Im Browser öffnen" },
 };
 
-function fixture(lang) {
+function fixture(lang, subscription = primary) {
   const starts = [];
   const signouts = [];
   const flows = new Map();
   const opens = [];
   const unexpected = [];
   let logins = [];
+  let accountName, accountAlias;
   let held, finish, linkOnly = true, reauthorize = true, legacyPage = false, pageListed = true;
+  let owner = subscription.ownerRevision ? "sdk" : "";
   const lapse = "This sign-in has expired; sign in again";
   const payload = () => {
     const providers = [{ id: "openai", name: "OpenAI", icon: "openai", models: [], agents: [],
       key: { set: true, masked: "sk-…abcd" } }];
-    if (logins.length) providers.push({ id: primary.id, name: primary.name, icon: primary.icon,
-      models: [], agents: [], key: {}, account: { agent: primary.id, agentName: primary.name,
-        agentIcon: primary.icon, user: logins[0].user, logins } });
-    const sdkSubscriptions = [{ ...primary, reauthorize }, alternate, ...(legacyPage ? [legacy] : [])];
-    return { providers, sdkSubscriptions, presets: [], plugins: [],
+    if (logins.length) providers.push({ id: subscription.id, name: subscription.name, icon: subscription.icon,
+      accountUsers: accountName ? { [selected]: accountName } : undefined,
+      accountNames: accountAlias ? { [selected]: accountAlias } : undefined,
+      models: [], agents: [], key: {}, account: { agent: subscription.id, agentName: subscription.name,
+        agentIcon: subscription.icon, ownerRevision: subscription.ownerRevision, user: logins[0].user, logins } });
+    const sdkSubscriptions = [
+      ...(!owner || owner === "sdk" ? [{ ...subscription, reauthorize }] : []),
+      alternate, ...(legacyPage ? [legacy] : []),
+    ];
+    const restored = owner === "community";
+    const plugins = restored ? [{ id: subscription.id, pid: subscription.id, name: "Community Devin", spec: "@fixture/devin" }] : [];
+    return { providers, sdkSubscriptions, presets: [], plugins,
+      onPlugins: restored ? [subscription.id] : [],
+      sdkOwnedSubscriptions: owner && !restored ? [subscription.id] : [],
+      movable: restored ? [subscription.id] : [],
       excluded: [], gateway: { running: true, window: true } };
   };
   const serve = async (route) => {
@@ -83,7 +97,7 @@ function fixture(lang) {
       const body = req.postDataJSON();
       const account = body.account;
       signouts.push(body);
-      if (body.agent !== primary.id || !account || !logins.some((login) =>
+      if (body.agent !== subscription.id || body.ownerRevision !== subscription.ownerRevision || !account || !logins.some((login) =>
         login.user === account.id && login.extensionGeneration === account.expectedGeneration)) {
         return route.fulfill({ status: 400, json: { error: "extension account generation changed" } });
       }
@@ -95,7 +109,7 @@ function fixture(lang) {
       if (body.operation === "start") {
         starts.push(body);
         const account = body.options.account;
-        if (account && (!reauthorize || !logins.some((item) => item.user === account.id && item.extensionGeneration === account.expectedGeneration))) {
+        if (body.ownerRevision !== subscription.ownerRevision || account && (!reauthorize || !logins.some((item) => item.user === account.id && item.extensionGeneration === account.expectedGeneration))) {
           return route.fulfill({ status: 400, json: { error: authError } });
         }
         const flow = `flow-${starts.length}`;
@@ -110,7 +124,8 @@ function fixture(lang) {
         return json(view);
       }
       const flow = flows.get(body.flow);
-      if (!flow || flow.start.parent !== body.parent || flow.start.id !== body.id || flow.start.revision !== body.revision) {
+      if (!flow || flow.start.parent !== body.parent || flow.start.id !== body.id || flow.start.revision !== body.revision ||
+          flow.start.ownerRevision !== body.ownerRevision) {
         unexpected.push("SDK sign-in used the wrong flow identity");
         return route.fulfill({ status: 400, json: { error: "wrong flow" } });
       }
@@ -167,9 +182,14 @@ function fixture(lang) {
       ];
     },
     advanceGeneration() { logins[1].extensionGeneration = "5"; },
+    setAccountLabel(name, alias) { accountName = name; accountAlias = alias; },
     noReauthorization() { reauthorize = false; logins[1].lapsed = lapse; },
     showLegacy() { legacyPage = true; },
     removeLegacyPage() { pageListed = false; },
+    setOwner(value) {
+      owner = value;
+      logins = value === "sdk" ? [{ user: selected, active: true, on: true, extensionGeneration: "4", lapsed: lapse }] : [];
+    },
   };
 }
 
@@ -177,6 +197,44 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   test(`${engine}: SDK subscription sign-in through Providers`, { timeout: 120_000 }, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
+    await t.test("transferred subscription keeps one tile and the current sign-in owner", async (t) => {
+      const subscription = { ...primary, id: "devin", name: "Fixture Devin", ownerRevision: "owner-2", methods: [device] };
+      const ctl = fixture("en", subscription);
+      ctl.setOwner("sdk");
+      ctl.setAccountLabel(selectedName, selectedAlias);
+      const context = await browser.newContext({ viewport: { width: 1080, height: 850 }, reducedMotion: "reduce", serviceWorkers: "block" });
+      t.after(() => context.close());
+      await context.route("**/*", ctl.serve);
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
+      const tiles = page.locator("#addSheet .tile");
+      const add = async () => {
+        await page.goto(origin + "/?view=providers");
+        await page.locator("#addProvider").click();
+        await tiles.filter({ hasText: alternate.name }).waitFor();
+      };
+      await add();
+      assert.deepEqual(await tiles.filter({ hasText: "Devin" }).allTextContents(), [subscription.name]);
+      await page.locator("#addSheet").getByRole("button", { name: "Close", exact: true }).click();
+      await page.locator(".row.provider").filter({ hasText: subscription.name }).click();
+      const editor = page.locator(".editor .accts");
+      await editor.getByRole("button", { name: "Sign in again", exact: true }).click();
+      await editor.locator(".signing").getByText(`Sign in again · ${selectedAlias}`, { exact: true }).waitFor();
+      await editor.locator(".signing").getByRole("button", { name: "Sign in", exact: true }).click();
+      await editor.locator(".signing .devcode").waitFor();
+      assert.equal(ctl.starts.length, 1);
+      assert.equal(ctl.starts[0].id, subscription.id);
+      assert.equal(ctl.starts[0].ownerRevision, subscription.ownerRevision);
+      assert.deepEqual(ctl.starts[0].options.account, { id: selected, expectedGeneration: "4" });
+      ctl.setOwner("unavailable");
+      await add();
+      assert.equal(await tiles.filter({ hasText: "Devin" }).count(), 0);
+      ctl.setOwner("community");
+      await add();
+      assert.equal(await tiles.filter({ hasText: "Devin" }).count(), 1);
+      assert.equal(await tiles.filter({ hasText: subscription.name }).count(), 0);
+      assert.deepEqual(ctl.unexpected, []);
+    });
     for (const [lang, words] of Object.entries(text)) {
       await t.test(lang, { timeout: 24_000 }, async (t) => {
         const ctl = fixture(lang);
@@ -276,6 +334,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await page.locator(".row.provider", { hasText: primary.name }).count(), 1);
 
         ctl.needReauthorization();
+        if (lang === "en") ctl.setAccountLabel(selectedName);
         const openEditor = async () => {
           await page.goto(origin + "/?view=providers");
           await page.locator(".row.provider", { hasText: primary.name }).click();
@@ -283,16 +342,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await openEditor();
         const selectedRow = editor.locator(`[data-account-id="${selected}"]`);
         const renewForm = editor.locator(".signing");
-        const selectedAccount = () => renewForm.getByText(`${words.again} · ${selected}`, { exact: true }).waitFor();
+        const selectedAccount = (label) => renewForm.getByText(`${words.again} · ${label}`, { exact: true }).waitFor();
         await button(selectedRow, words.again).click();
-        await selectedAccount();
+        await selectedAccount(lang === "en" ? selectedName : selected);
         if (lang === "en") {
           ctl.advanceGeneration();
+          ctl.setAccountLabel(selectedName, selectedAlias);
           const stale = await sign(renewForm);
           assert.deepEqual(stale.options.account, { id: selected, expectedGeneration: "4" });
           await renewForm.getByText(authError, { exact: true }).waitFor();
           await button(renewForm, "Try again").click();
-          await selectedAccount();
+          await selectedAccount(selectedAlias);
           assert.equal(ctl.starts.length, 6, "Try again requires a new sign-in submission");
         }
         const [renew] = await Promise.all([sign(renewForm), page.waitForRequest(origin + "/api/open")]);
@@ -317,9 +377,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await button(confirmation, words.cancel).click();
           await confirmation.waitFor({ state: "detached" });
           assert.deepEqual(ctl.signouts, []);
-          const signOut = async (row, user, generation) => {
+          const signOut = async (row, user, generation, label = user) => {
             await button(row, "Sign out").click();
-            await confirmation.getByRole("heading").filter({ hasText: user }).waitFor();
+            await confirmation.getByRole("heading").filter({ hasText: label }).waitFor();
             const [sent] = await Promise.all([
               page.waitForRequest(origin + "/api/login/forget"),
               button(confirmation, "Sign out").click(),
@@ -329,7 +389,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           };
           await signOut(activeRow, other, "7");
           await selectedRow.waitFor();
-          await signOut(selectedRow, selected, "6");
+          await signOut(selectedRow, selected, "6", selectedAlias);
           await page.locator(".row.provider", { hasText: primary.name }).waitFor({ state: "detached" });
 
           ctl.showLegacy();

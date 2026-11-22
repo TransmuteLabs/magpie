@@ -6,9 +6,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -173,5 +176,175 @@ func TestPluginPageReplacesFirstWins(t *testing.T) {
 	}
 	if pages[1].Spec != second || pages[1].Replaces != "" {
 		t.Errorf("the second: %+v", pages[1])
+	}
+}
+
+// A provider panel of a plugin that gives providers is listed with the ids
+// magpie knows them by, so the window draws it in their editors only; a
+// plugin that gives none is listed with none, its panel in every
+// provider's editor. Marvis's first-line panel was in Kimi's editor, and
+// in every other provider's (11-21).
+func TestPluginProviderPanelsNameTheirProviders(t *testing.T) {
+	on, off, _, _ := panelPlugins(t)
+	plugin.UseCached([]plugin.Provider{{ID: "marvis", Spec: on, Name: "Marvis"}, {ID: "other", Spec: off, Name: "Other"}})
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	h := pageMux()
+	var panels []pluginPanel
+	w := do(h, httptest.NewRequest("GET", "/api/plugin-panels", nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &panels); err != nil || len(panels) != 3 {
+		t.Fatalf("panels: %s %v", w.Body, err)
+	}
+	for _, p := range panels {
+		want := []string(nil)
+		if p.Slot == "provider" {
+			want = []string{"marvis"}
+		}
+		if !slices.Equal(p.Providers, want) {
+			t.Errorf("%s panel: providers %v, want %v", p.Slot, p.Providers, want)
+		}
+	}
+	// a plugin that gives no provider: every provider's
+	plugin.UseCached([]plugin.Provider{})
+	w = do(h, httptest.NewRequest("GET", "/api/plugin-panels", nil))
+	if strings.Contains(w.Body.String(), `"providers"`) {
+		t.Errorf("a plugin with no providers: %s", w.Body)
+	}
+}
+
+func TestSDKProviderPanelsFollowSubscriptionOwner(t *testing.T) {
+	notes, _, _, _ := panelPlugins(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
+	manager := providerAuthFixtureManager(t)
+	manifest := providerAuthFixtureManifest()
+	const subscription = "devin"
+	const community = "@magpie-community/opencode-devin-auth"
+	manifest.Contract.Version.Minor = 11
+	manifest.Providers[0].ID = subscription
+	second := manifest.Providers[0]
+	second.ID, second.Name = "second", "Second"
+	service := second
+	service.ID, service.Name, service.Protocols, service.Models = "service", "Service", nil, nil
+	manifest.Providers = append(manifest.Providers, second, service)
+	for index := range manifest.AuthBindings {
+		manifest.AuthBindings[index].Provider = subscription
+	}
+	installProviderAuthFixtureWindow(t, manager, &manifest, `{"name":"auth-fixture","magpie":{
+		"page":{"title":"Fixture","file":"index.html"},
+		"panels":[
+			{"slot":"provider","title":"Owned providers","file":"index.html"},
+			{"slot":"provider","title":"Devin only","file":"index.html","providers":["devin","unrelated"]},
+			{"slot":"provider","title":"Other module","file":"index.html","providers":["unrelated"]},
+			{"slot":"provider","title":"Empty scope","file":"index.html","providers":[]},
+			{"slot":"provider","title":"Invalid scope","file":"index.html","providers":["devin",null]},
+			{"slot":"provider","title":"Null scope","file":"index.html","providers":null},
+			{"slot":"provider","title":"Account only","file":"index.html","providers":["service"]},
+			{"slot":"sessions","title":"History","file":"index.html","providers":[]}
+		]}}`)
+	list := plugin.Load()
+	list.Plugins = append(list.Plugins, plugin.Entry{Spec: community})
+	config, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for file, data := range map[string]string{
+		"plugins.json":     string(config),
+		"plugin-auth.json": `{"devin":{"type":"api","key":"PRIVATE-SAVED"}}`,
+		"migrations.json":  `{"devin":{"state":"plugin","package":"` + community + `"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(settings.Dir(), file), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plugin.UseCached([]plugin.Provider{
+		{ID: subscription, Name: "Community Devin", Spec: community, Methods: []plugin.Method{{Type: "api", Label: "API key"}}},
+		{ID: "unrelated", Name: "Other provider", Spec: notes},
+	})
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	provider.Changed()
+
+	handler := pageMux()
+	windowVersion := func() string {
+		t.Helper()
+		var view struct{ Version string }
+		response := do(handler, httptest.NewRequest("GET", "/api/plugin-pages/changes", nil))
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &view) != nil || view.Version == "" {
+			t.Fatalf("window version: %d %s", response.Code, response.Body)
+		}
+		return view.Version
+	}
+	secondID := provider.ExtensionProviderID(manifest.ID, second.ID)
+	assertPanels := func(t *testing.T, publicID string) string {
+		t.Helper()
+		pages, panels := windowTestPages(t, handler)
+		if !slices.ContainsFunc(pages, func(page pluginPage) bool { return page.Name == manifest.ID }) {
+			t.Error("the module page disappeared with its provider panel")
+		}
+		want := map[string][]string{"Owned providers": {secondID}, "History": nil}
+		if publicID != "" {
+			want["Owned providers"] = []string{publicID, secondID}
+			want["Devin only"] = []string{publicID}
+		}
+		devinPanelURL := ""
+		var legacyNotes bool
+		for _, panel := range panels {
+			if panel.Spec == notes && panel.Slot == "provider" {
+				legacyNotes = slices.Equal(panel.Providers, []string{"unrelated"})
+			}
+			if panel.Name != manifest.ID {
+				continue
+			}
+			expected, exists := want[panel.Title]
+			if !exists || !slices.Equal(panel.Providers, expected) {
+				t.Errorf("panel %q providers %v, want %v (present: %t)", panel.Title, panel.Providers, expected, exists)
+			}
+			delete(want, panel.Title)
+			if panel.Title == "Devin only" {
+				devinPanelURL = panel.URL
+			}
+		}
+		if len(want) != 0 || !legacyNotes {
+			t.Errorf("missing SDK panels %v or original legacy provider panel (present: %t)", want, legacyNotes)
+		}
+		return devinPanelURL
+	}
+	hashed := provider.ExtensionProviderID(manifest.ID, subscription)
+	t.Run("before transfer", func(t *testing.T) { assertPanels(t, hashed) })
+	before := windowVersion()
+	prepared, err := provider.ImportSavedPluginAuth(t.Context(), manager, manifest.ID, subscription, subscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowVersion() != before {
+		t.Error("preparation changed the window before the subscription was transferred")
+	}
+	owner, err := provider.TransferSavedPluginSubscription(t.Context(), manager, manifest.ID, subscription, []string{prepared.Ticket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var transferredPanel string
+	t.Run("transferred", func(t *testing.T) {
+		transferredPanel = assertPanels(t, subscription)
+		response := do(handler, httptest.NewRequest("GET", transferredPanel, nil))
+		if response.Code != http.StatusOK {
+			t.Errorf("provider panel is not served: %d %s", response.Code, response.Body)
+		}
+	})
+	transferred := windowVersion()
+	if transferred == before {
+		t.Error("the panel watcher cannot detect the transferred owner")
+	}
+	if _, err := provider.RollbackSavedPluginSubscription(t.Context(), manager, subscription, owner.Revision); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("rolled back", func(t *testing.T) {
+		assertPanels(t, "")
+		response := do(handler, httptest.NewRequest("GET", transferredPanel, nil))
+		if response.Code != http.StatusNotFound {
+			t.Errorf("rolled-back provider panel remains served: %d %s", response.Code, response.Body)
+		}
+	})
+	if windowVersion() == transferred {
+		t.Error("the panel watcher cannot detect the rolled-back owner")
 	}
 }

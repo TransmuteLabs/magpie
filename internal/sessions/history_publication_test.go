@@ -3,6 +3,7 @@ package sessions
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,22 +71,121 @@ func TestHistoryPublicationWithoutSDKCatalog(t *testing.T) {
 }
 
 func TestHistoryPublicationSettingsWriter(t *testing.T) {
-	if os.Getenv("MAGPIE_TEST_WRITE_CONSENT") != "1" {
-		return
-	}
-	if err := settings.SetSessionReads(func(*settings.SessionReads) *settings.SessionReads {
-		return &settings.SessionReads{Asked: true, Agents: map[string]bool{"claude": false}}
-	}); err != nil {
-		t.Fatal(err)
+	switch os.Getenv("MAGPIE_TEST_WRITE_CONSENT") {
+	case "off", "cycle":
+		if err := settings.SetSessionReads(func(cur *settings.SessionReads) *settings.SessionReads {
+			cur.Agents["claude"] = false
+			return cur
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if os.Getenv("MAGPIE_TEST_WRITE_CONSENT") == "cycle" {
+			if err := settings.SetSessionReads(func(cur *settings.SessionReads) *settings.SessionReads {
+				cur.Agents["claude"] = true
+				return cur
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	case "settings":
+		saved := settings.Load()
+		saved.Theme = "dark"
+		if err := settings.Save(saved); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func foreignHistoryConsentOff(t *testing.T) {
 	t.Helper()
+	foreignHistorySettingsWrite(t, "off")
+}
+
+func foreignHistorySettingsWrite(t *testing.T, mode string) {
+	t.Helper()
 	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHistoryPublicationSettingsWriter$")
-	command.Env = append(os.Environ(), "MAGPIE_TEST_WRITE_CONSENT=1")
+	command.Env = append(os.Environ(), "MAGPIE_TEST_WRITE_CONSENT="+mode)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("settings child: %v %s", err, output)
+	}
+}
+
+func TestHistoryPublicationFindAfterForeignConsentCycle(t *testing.T) {
+	for _, mode := range []string{"cycle", "settings"} {
+		t.Run(mode, func(t *testing.T) {
+			dirs := consentHome(t)
+			writeTwoAgents(t, dirs)
+			if err := SetReads(nil, map[string]bool{"claude": true}); err != nil {
+				t.Fatal(err)
+			}
+			if _, found := Find("claude", "sess1"); !found {
+				t.Fatal("missing fixture session")
+			}
+			epoch := sourceEpoch.Load()
+			calls := 0
+			previous := sourceBeforePublish
+			sourceBeforePublish = func() {
+				calls++
+				if calls == 1 {
+					foreignHistorySettingsWrite(t, mode)
+				}
+			}
+			t.Cleanup(func() { sourceBeforePublish = previous })
+			row, found := Find("claude", "sess1")
+			if !found || row.ID != "sess1" || !Reads("claude") || sourceEpoch.Load() != epoch {
+				t.Fatal("failed to establish a foreign edit with consent still on", found, row.ID)
+			}
+			want := 1
+			if mode == "cycle" {
+				want = 2
+			}
+			if calls != want {
+				t.Fatalf("Find published after %d attempt(s), want %d", calls, want)
+			}
+		})
+	}
+}
+
+func TestHistoryTranscriptAfterForeignConsentCycle(t *testing.T) {
+	for _, mode := range []string{"cycle", "settings"} {
+		t.Run(mode, func(t *testing.T) {
+			dirs := consentHome(t)
+			path := writeTwoAgents(t, dirs)
+			if err := SetReads(nil, map[string]bool{"claude": true}); err != nil {
+				t.Fatal(err)
+			}
+			row, found := Find("claude", "sess1")
+			if !found {
+				t.Fatal("missing fixture session")
+			}
+			epoch := sourceEpoch.Load()
+			previous := scanHook
+			called := false
+			scanHook = func(name string, _ int64) {
+				if name == path && !called {
+					called = true
+					foreignHistorySettingsWrite(t, mode)
+				}
+			}
+			defer func() { scanHook = previous }()
+			transcript, err := TranscriptOf(row)
+			if !called || !Reads("claude") || sourceEpoch.Load() != epoch {
+				t.Fatal("failed to establish a foreign edit with consent still on", called)
+			}
+			if mode == "settings" {
+				if err != nil || len(transcript.Parts) == 0 {
+					t.Fatal("an unrelated setting revoked the transcript", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNotRead) || len(transcript.Parts) != 0 {
+				t.Errorf("a held transcript published after revocation: parts=%d err=%v", len(transcript.Parts), err)
+			}
+			fresh, err := TranscriptOf(row)
+			if err != nil || len(fresh.Parts) == 0 || fresh.Parts[0].Text != "my secret plan" {
+				t.Fatal("a new read did not use the new consent", len(fresh.Parts), err)
+			}
+		})
 	}
 }
 

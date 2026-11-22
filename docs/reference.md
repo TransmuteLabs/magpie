@@ -1601,7 +1601,11 @@ per middleware; `{skip: true}` passes the account over for that request),
 event of a streamed reply and `onResponse(body, ctx)` a whole one, all in
 the agent's own API. A hook returns the changed object, or nothing to
 leave it; `onEvent` returns `null` to drop an event, and
-`ctx.reject(status, message)` turns a request away. Declare it with
+`ctx.reject(status, message)` turns a request away. `ctx.caller` is
+the agent the request came from, `{agent, name, via}`, through any magpies
+that passed it on (as a plugin's `chat.headers` gets `input.caller`), so
+`onRequest` can refuse an agent before any provider is asked; the async
+request hooks get it too. Declare it with
 `"magpie": { "middleware": "./mw.js" }` in `package.json`, or add a single
 `*.middleware.js` file:
 
@@ -2980,6 +2984,13 @@ and through the next 30 seconds, extended to as much as 90 seconds while
 the process remains above a threshold. It also saves `heap-before.pb.gz`,
 `heap-peak.pb.gz`, and `heap-after.pb.gz`. `incident.json` names the build,
 PID, trigger, sampled peaks, and whether the process recovered at the end.
+Each heap snapshot is limited to 16 MiB of compressed output. In
+`incident.json`, `heapProfiles` lists the snapshots by filename. An
+`attempt` reports its sample time, bytes written and any error. A `file`
+reports the sample time and compressed size of the last successful file,
+which can be older than a failed attempt or the sampled memory peak.
+`copyError` explains why a captured baseline could not be saved in the
+incident.
 The directory keeps the newest three captures. Automatic recording owns
 Go's CPU profiler while active and `magpie cpu` reports that it is in use.
 The app reads the environment on each launch.
@@ -4750,11 +4761,14 @@ and models to look after first, by magpie's own ids only:
   fine-tune) is only `<provider>/other`; one on a provider of your own is
   only `custom`, a routing group only `group`;
 - how many of each, and how many routing groups you have.
-- for each partner (a sponsor listed first in the add sheet), by its id, how
-  many times a day the add sheet showed it, its row was opened, its key
-  page was opened and a provider was added from it (at most 20 of each,
-  5 adds), kept in `~/.cache/magpie/partner-counts.json` for at most 14
-  days and sent the day after as `magpie partner` events;
+- for each partner (a sponsor listed first in the add sheet, or in the
+  Plugins page's Discover), by its id, how many times a day it was shown,
+  its row was opened, its key page was opened and a provider was added
+  from it or its plugin installed (at most 20 of each, 5 adds), with where
+  it is listed (`slot`: `providers` or `plugins`), and how many times a
+  day the Plugins page was opened (at most 20), kept in
+  `~/.cache/magpie/partner-counts.json` for at most 14 days and sent the
+  day after as `magpie partner` and `magpie page` events;
 - to usemagpie.ai, not PostHog, which of the plugins Discover lists are
   installed and on (npm names, or `github:owner/repo` for a repository
   tagged `magpie-plugin`; never a folder, a private repository or an
@@ -4784,8 +4798,8 @@ Partners are also counted where usemagpie.ai sees them, whatever these
 settings say, as any website sees its visits. The partner list
 (`/api/partners`) gives each partner's website and key page as a
 `https://usemagpie.ai/go/<id>/site|keys[/<region>]` link, which sends a
-`magpie partner go` event (the partner, which link, the region, and the
-country Cloudflare gives) before sending the browser on; and one in ten
+`magpie partner go` event (the partner, which link, the region, where it
+is listed, and the country Cloudflare gives) before sending the browser on; and one in ten
 fetches of the list sends a `magpie partners fetch` event with weight 10
 and the country, while a partner is listed. Each event has an id of its
 own: no install id, address or account goes with it. The code is

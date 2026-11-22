@@ -34,12 +34,15 @@ func TestAccountCheckinWireAndClone(t *testing.T) {
 		`{"outcome":"done","until":"tomorrow"}`, `{"outcome":"done","until":"2026-02-30T03:04:05Z"}`,
 		`{"outcome":"done","until":"2026-11-14T3:04:05Z"}`, `{"outcome":"done","until":"2026-11-14T03:04:05+24:00"}`,
 		`{"outcome":"done","until":"2026-11-14T03:04:05,1Z"}`, `{"outcome":"done","until":"2026-11-14T03:04:05.1234567890Z"}`,
-		`{"outcome":"done","streak":2147483648}`, `{"outcome":"claimed","credentials":{}}`} {
+		`{"outcome":"done","streak":2147483648}`, `{"outcome":"claimed","credentials":{}}`,
+		`{"outcome":"rate-limited"}`, `{"outcome":"rate-limited","until":null}`, `{"outcome":"rate-limited","until":""}`,
+		`{"outcome":"rate-limited","until":"tomorrow"}`} {
 		if _, err := DecodeAccountCheckinResult(json.RawMessage(raw)); err == nil {
 			t.Fatalf("unsafe check-in result: %s", raw)
 		}
 	}
-	for _, raw := range []string{`{"outcome":"claimed"}`, `{"outcome":"claimed","credit":0}`, `{"outcome":"done","until":"2027-01-02T03:04:05Z"}`} {
+	for _, raw := range []string{`{"outcome":"claimed"}`, `{"outcome":"claimed","credit":0}`, `{"outcome":"done","until":"2027-01-02T03:04:05Z"}`,
+		`{"outcome":"rate-limited","until":"2027-01-02T03:04:05.123456789Z"}`, `{"outcome":"failed","until":"2027-01-02T03:04:05Z"}`} {
 		if _, err := DecodeAccountCheckinResult(json.RawMessage(raw)); err != nil {
 			t.Fatalf("valid check-in result: %s %v", raw, err)
 		}

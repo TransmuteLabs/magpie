@@ -2699,7 +2699,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 	}
 	for _, part := range parts {
 		speeds.merge(part.speeds)
-		out.Big.merge(part.big)
+		out.Big.merge(part.bigWrite())
 		if !part.first.IsZero() && (first.IsZero() || part.first.Before(first)) {
 			first = part.first
 		}
@@ -2903,6 +2903,7 @@ func buildRequestBlocksIn(p Period, f Filter, offset, limit int, now time.Time, 
 			}
 		}
 	}
+	settle(out.Series)
 	return out
 }
 func pageFromLedger(p Period, f Filter, offset, limit int, all Ledgered) RequestPage {

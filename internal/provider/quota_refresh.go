@@ -19,6 +19,11 @@ type cardRefreshKey struct{}
 
 type quotaReadKey struct{}
 
+type quotaRead struct {
+	seq     uint64
+	started time.Time
+}
+
 var quotaReadSequence atomic.Uint64
 
 // quotaReading orders reads when they start, not when the vendor answers.
@@ -27,18 +32,19 @@ var quotaReadSequence atomic.Uint64
 // when asked, sends nothing (holdUnasked).
 func quotaReading(ctx context.Context) (context.Context, uint64) {
 	ctx = holdUnasked(ctx)
-	if seq, ok := ctx.Value(quotaReadKey{}).(uint64); ok {
-		return ctx, seq
+	if read, ok := ctx.Value(quotaReadKey{}).(quotaRead); ok {
+		return ctx, read.seq
 	}
-	seq := quotaReadSequence.Add(1)
-	return context.WithValue(ctx, quotaReadKey{}, seq), seq
+	read := quotaRead{seq: quotaReadSequence.Add(1), started: time.Now()}
+	return context.WithValue(ctx, quotaReadKey{}, read), read.seq
 }
 
 // keepReading also orders the last good reading on disk: a late response
 // must not become the fallback for the next failed request.
 func keepReading(ctx context.Context, q SubscriptionQuota, user string) SubscriptionQuota {
-	q.readSeq, _ = ctx.Value(quotaReadKey{}).(uint64)
-	return keepLast(q, user)
+	read, _ := ctx.Value(quotaReadKey{}).(quotaRead)
+	q.readSeq, q.readStarted = read.seq, read.started
+	return keepLastContext(ctx, q, user)
 }
 
 // refreshing is the card a read is for, when it is for one card alone.
@@ -70,7 +76,7 @@ func refreshLogins(ctx context.Context, ls []Login) []Login {
 		if r.user != "" && !strings.EqualFold(l.User, r.user) {
 			continue
 		}
-		forgetLoginReading(l)
+		forgetLoginReadingContext(ctx, l)
 		out = append(out, l)
 	}
 	return out
@@ -79,7 +85,14 @@ func refreshLogins(ctx context.Context, ls []Login) []Login {
 // forgetLoginReading has l's next reading asked for, keeping what it was
 // for a hiccup (as AskUsage does for every account).
 func forgetLoginReading(l Login) {
-	key := loginReadingCacheKey(l)
+	forgetLoginReadingContext(context.Background(), l)
+}
+
+func forgetLoginReadingContext(ctx context.Context, l Login) {
+	key := loginReadingCacheKeyContext(ctx, l)
+	if ctx.Err() != nil {
+		return
+	}
 	c := &loginUsageCache
 	c.Lock()
 	if e, ok := c.m[key]; ok {
@@ -126,17 +139,30 @@ func RefreshEach(ctx context.Context, cards []SubscriptionQuota) {
 // so the cards come from the read itself, not from the caches.
 func RefreshReport(ctx context.Context, provider, user string, now time.Time) []Quota {
 	subs, plans, balances := refreshCards(ctx, provider, user)
+	if ctx.Err() != nil {
+		return nil
+	}
 	plans, subs = seatCards(plans, subs)
-	subs = withAccountNames(subs)
-	return withServed(quotaReport(subs, plans, balances, now), LastServed())
+	subs = withAccountNamesContext(ctx, subs)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return quotaReport(ctx, subs, plans, balances, now)
 }
 
 // refreshCards is RefreshUsage, with the cards it read: only the asked
 // card's provider (and account), each kind apart.
 func refreshCards(ctx context.Context, provider, user string) (subs, plans, balances []SubscriptionQuota) {
 	// a remote magpie's card is read again there (remote_quotas.go)
-	if p, card, ok := remoteOf(provider); ok {
+	p, card, remoteCard := remoteOfContext(ctx, provider)
+	if ctx.Err() != nil {
+		return nil, nil, nil
+	}
+	if remoteCard {
 		refreshRemote(ctx, p, card, user)
+		if ctx.Err() != nil {
+			return nil, nil, nil
+		}
 		for _, q := range append(remoteCards(ctx, p, false), remoteKeyCards(ctx, p, false, "")...) {
 			if card != "" && !strings.EqualFold(q.Provider, provider) || user != "" && !strings.EqualFold(q.User, user) {
 				continue
@@ -170,15 +196,18 @@ func refreshCards(ctx context.Context, provider, user string) (subs, plans, bala
 	go func() { defer wg.Done(); balances = asked(KeyBalances(ctx)) }()
 	go func() {
 		defer wg.Done()
-		out := fetchSubscriptionUsage(ctx)
-		now := time.Now()
-		noteDailyCredits(out, now)
-		noteCardHistory(out, now)
+		out, discovered := fetchSubscriptionUsage(ctx)
+		if !discovered || ctx.Err() != nil {
+			return
+		}
+		noteCardHistory(ctx, out, time.Now())
 		c := &subscriptionUsageCache
 		c.Lock()
-		c.data = cacheCards(c.data, out, seq, true)
+		if ctx.Err() == nil {
+			c.data = cacheCards(c.data, out, seq, true)
+			subs = out
+		}
 		c.Unlock()
-		subs = out
 	}()
 	wg.Wait()
 	return subs, plans, balances
@@ -189,21 +218,30 @@ func refreshCards(ctx context.Context, provider, user string) (subs, plans, bala
 // again: in place of the card, newer reads standing, with its history,
 // and the menu bar told. A card the Usage page doesn't have (hidden, or
 // nothing read yet) isn't added.
-func keepCardRead(q SubscriptionQuota, seq uint64) {
+func keepCardRead(ctx context.Context, q SubscriptionQuota, seq uint64) {
 	out := []SubscriptionQuota{q}
 	c := &subscriptionUsageCache
+	has := func() bool {
+		return slices.ContainsFunc(c.data, func(k SubscriptionQuota) bool {
+			return k.Provider == q.Provider && strings.EqualFold(k.User, q.User)
+		})
+	}
 	c.Lock()
-	has := slices.ContainsFunc(c.data, func(k SubscriptionQuota) bool {
-		return k.Provider == q.Provider && strings.EqualFold(k.User, q.User)
-	})
-	if has {
-		c.data = cacheCards(c.data, out, seq, true)
-	}
+	ok := has()
 	c.Unlock()
-	if has {
-		noteQuotaHistory(out, time.Now())
-		toldUsage()
+	if !ok || ctx.Err() != nil {
+		return
 	}
+	// noted first: a stale replica's window is set to the current one
+	noteSubscriptionQuotaHistory(ctx, out, time.Now())
+	c.Lock()
+	if ctx.Err() != nil || !has() {
+		c.Unlock()
+		return
+	}
+	c.data = cacheCards(c.data, out, seq, true)
+	c.Unlock()
+	toldUsage()
 }
 
 // cacheCards commits a batch without overwriting cards read by a newer

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -120,6 +121,233 @@ func TestUsageEpochFencesInferenceUntilMatchedFreshAcknowledgment(t *testing.T) 
 	}
 }
 
+func TestUsageRPCDoesNotAcknowledgeAfterCancellationOrPolicyChange(t *testing.T) {
+	for _, test := range []string{"cancellation", "account discovery off", "module reenabled"} {
+		t.Run(test, func(t *testing.T) {
+			t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+			manager, scope := usageManager(t)
+			store := manager.Store()
+			before, err := store.InvalidateUsage(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			defer filelock.Unlock(lock)
+			replied, resume := make(chan struct{}), make(chan struct{})
+			checks := 0
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			ctx = context.WithValue(ctx, windowAdmissionKey{}, func(context.Context) error {
+				checks++
+				if checks != 2 {
+					return nil
+				}
+				held, err := filelock.TryShared(lock)
+				if err != nil {
+					return err
+				}
+				if !held {
+					return errors.New("fixture could not hold the acknowledgment lock")
+				}
+				close(replied)
+				if test == "module reenabled" {
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return nil
+			})
+			done := make(chan error, 1)
+			go func() {
+				_, err := manager.Call(ctx, scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, nil)
+				done <- err
+			}()
+			select {
+			case <-replied:
+			case err := <-done:
+				t.Fatalf("usage did not reach acknowledgment: %v", err)
+			case <-time.After(5 * time.Second):
+				cancel()
+				filelock.Unlock(lock)
+				<-done
+				t.Fatal("usage result did not arrive")
+			}
+			switch test {
+			case "cancellation":
+				cancel()
+				select {
+				case err = <-done:
+				case <-time.After(time.Second):
+					t.Error("canceled usage RPC still waited for its acknowledgment lock")
+					filelock.Unlock(lock)
+					err = <-done
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("usage RPC returned %v, want cancellation", err)
+				}
+			case "account discovery off":
+				t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+				filelock.Unlock(lock)
+				if err := <-done; err == nil {
+					t.Error("usage RPC acknowledged after account discovery was disabled")
+				}
+				t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+			case "module reenabled":
+				if err := manager.SetEnabled(t.Context(), scope.Plugin, false); err == nil {
+					err = manager.SetEnabled(t.Context(), scope.Plugin, true)
+					if err != nil {
+						t.Error(err)
+					}
+				} else {
+					t.Error(err)
+				}
+				filelock.Unlock(lock)
+				close(resume)
+				if err := <-done; err == nil {
+					t.Error("usage RPC acknowledged for a superseded enable generation")
+				}
+			}
+			filelock.Unlock(lock)
+			after, err := store.UsageStamp(scope)
+			if err != nil || after != before {
+				t.Fatalf("rejected usage RPC changed the dirty revision: before=%+v after=%+v err=%v", before, after, err)
+			}
+			if _, err := manager.Call(t.Context(), scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UsageReady(scope); err != nil {
+				t.Fatal("a fresh read could not acknowledge:", err)
+			}
+		})
+	}
+}
+
+func TestUsageRPCCleanReplyCannotOutliveInvalidation(t *testing.T) {
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	manager, scope := usageManager(t)
+	peer := NewStore(manager.Namespace())
+	admissions := 0
+	ctx := context.WithValue(t.Context(), windowAdmissionKey{}, func(context.Context) error {
+		admissions++
+		if admissions != 2 {
+			return nil
+		}
+		_, err := peer.InvalidateUsage(scope)
+		return err
+	})
+	_, err := manager.Call(ctx, scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, nil)
+	var stale *sdk.Error
+	if !errors.As(err, &stale) || stale.Code != "usage_stale" {
+		t.Fatalf("clean reply after invalidation = %v, want usage_stale", err)
+	}
+	stamp, err := manager.Store().UsageStamp(scope)
+	if err != nil || stamp.Revision != 1 || !stamp.Dirty {
+		t.Fatalf("late reply changed the new revision: %+v %v", stamp, err)
+	}
+	if _, err := manager.Call(t.Context(), scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, nil); err != nil {
+		t.Fatal("fresh usage read did not acknowledge the new revision:", err)
+	}
+}
+
+func TestUsageRPCRejectsInvalidTimestampsBeforeAcknowledgment(t *testing.T) {
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	manager, scope := usageManagerVersion(t, 4, func(manifest *sdk.Manifest) {
+		manifest.Args = []string{"--sdk-raw-usage"}
+	})
+	store := manager.Store()
+	for _, scenario := range []string{"reset-out-of-range", "null-reset", "null-window-as-of", "null-result-as-of"} {
+		t.Run(scenario, func(t *testing.T) {
+			before, err := store.InvalidateUsage(scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			badScope := scope
+			badScope.Session = scenario
+			if _, err := manager.Call(ctx, scope.Plugin, sdk.MethodProviderUsage, badScope, sdk.UsageRequest{}, nil); err == nil {
+				t.Error("usage RPC accepted an invalid timestamp")
+			}
+			if after, err := store.UsageStamp(scope); err != nil || after != before {
+				t.Fatalf("invalid timestamp cleared the dirty revision: before=%+v after=%+v err=%v", before, after, err)
+			}
+			if _, err := manager.Call(ctx, scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, nil); err != nil {
+				t.Fatal("usage RPC rejected the last valid reset millisecond:", err)
+			}
+			if after, err := store.UsageStamp(scope); err != nil || after.Dirty || after.Revision != before.Revision {
+				t.Fatalf("valid reset did not acknowledge the dirty revision: %+v %v", after, err)
+			}
+		})
+	}
+}
+
+func TestUsageRPCCleanReadSharesStoreLock(t *testing.T) {
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	manager, scope := usageManager(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	held, err := filelock.TryShared(lock)
+	if err != nil || !held {
+		t.Fatalf("fixture could not hold the shared Store lock: %v", err)
+	}
+	defer filelock.Unlock(lock)
+	var result sdk.UsageResult
+	if err := manager.Invoke(ctx, scope.Plugin, sdk.MethodProviderUsage, scope, sdk.UsageRequest{}, &result, nil); err != nil {
+		t.Fatal("clean quota read needed the writer lock:", err)
+	}
+	if len(result.Windows) != 1 || result.Windows[0].Used != 12 || result.Revision != "0" {
+		t.Fatalf("unexpected clean quota result: %+v", result)
+	}
+}
+
+func TestUsageExecutionPreflightStopsAtDeadline(t *testing.T) {
+	manager, scope := usageManager(t)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	unlock, held := filelock.Lock(filepath.Join(manager.Namespace(), "private", ".lock"), 0)
+	if !held {
+		t.Fatal("fixture could not hold the Store lock")
+	}
+	defer unlock()
+	scope.Operation, scope.Attempt = "deadline-without-dispatch", 1
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := lease.Call(ctx, sdk.MethodProviderExecute, scope,
+			sdk.ExecuteRequest{Protocol: "chat", Model: "model", Body: json.RawMessage(`{}`)}, nil)
+		done <- err
+	}()
+	select {
+	case err = <-done:
+	case <-time.After(time.Second):
+		t.Error("usage preflight continued waiting on Store after the deadline")
+		unlock()
+		err = <-done
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("usage preflight error = %v, want deadline", err)
+	}
+	unlock()
+	if _, err := manager.Store().Operation(scope.Plugin, scope.Operation); err == nil {
+		t.Fatal("cancelled preflight dispatched inference")
+	}
+}
+
 func TestUsageInvalidationReceiptReadRespectsCallbackDeadline(t *testing.T) {
 	manager, scope := usageManager(t)
 	lease, err := manager.Acquire(t.Context(), scope.Plugin)
@@ -168,6 +396,71 @@ func TestUsageInvalidationReceiptReadRespectsCallbackDeadline(t *testing.T) {
 	}
 	if stamp, err := store.UsageStamp(scope); err != nil || stamp.Revision != 1 || !stamp.Dirty {
 		t.Fatalf("live callback did not invalidate usage: %+v, %v", stamp, err)
+	}
+}
+
+type usageInvalidationProbeContext struct {
+	context.Context
+	observe func()
+}
+
+func (ctx usageInvalidationProbeContext) Err() error {
+	err := ctx.Context.Err()
+	if err == nil {
+		ctx.observe()
+	}
+	return err
+}
+
+func TestUsageInvalidationCommitsUnderItsReceiptLock(t *testing.T) {
+	manager, scope := usageManager(t)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	scope.Operation, scope.Attempt = "usage-invalidation-transaction", 1
+	store := manager.Store()
+	if _, err := store.Journal(scope, "dispatched"); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Journal(scope, "accepted")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authority := hostAuthority{manifest: lease.worker.entry.Manifest, method: sdk.MethodToolCall}
+	call := lease.group.withAuthority(t.Context(), sdk.PrimaryComponent, "write")
+	ctx, cancel := context.WithCancel(call)
+	defer cancel()
+	enteredStore := false
+	probe := usageInvalidationProbeContext{Context: ctx, observe: func() {
+		if !store.mu.TryLock() {
+			enteredStore = true
+			return
+		}
+		store.mu.Unlock()
+		if enteredStore {
+			cancel()
+		}
+	}}
+	result, err := manager.invalidateUsage(probe, scope, json.RawMessage(`{}`), authority)
+	stamp, stampErr := store.UsageStamp(scope)
+	if stampErr != nil {
+		t.Fatal(stampErr)
+	}
+	if ctx.Err() != nil {
+		if !errors.Is(err, context.Canceled) || stamp.Revision != 0 || stamp.Dirty {
+			t.Fatalf("callback invalidated usage after cancellation between Store transactions: %v, %+v", err, stamp)
+		}
+		t.Fatal("callback released the Store before publishing its accepted invalidation")
+	}
+	if !enteredStore || err != nil || result != (sdk.UsageInvalidateResult{Revision: "1"}) ||
+		stamp.Revision != 1 || !stamp.Dirty {
+		t.Fatalf("accepted callback did not publish one invalidation under its receipt lock: %v, %v, %+v", result, err, stamp)
+	}
+	if current, err := store.Operation(scope.Plugin, scope.Operation); err != nil || current != receipt {
+		t.Fatalf("usage invalidation changed the operation receipt: %+v, %v", current, err)
 	}
 }
 
@@ -300,7 +593,11 @@ func TestUsageInvalidationRequiresAcceptedDeclaredWrite(t *testing.T) {
 
 func TestUsageEpochNonfreshResultsCannotAcknowledge(t *testing.T) {
 	manager, scope := usageManager(t)
-	manifest := sdk.Manifest{Contract: sdk.FullContract()}
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
 	stamp, err := manager.Store().InvalidateUsage(scope)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +610,7 @@ func TestUsageEpochNonfreshResultsCannotAcknowledge(t *testing.T) {
 		`{"revision":"1","windows":[{"name":"quota","used":0,"aside":true}]}`,
 		`{"revision":"1","windows":[{"name":"quota","used":0,"error":"unavailable"}]}`,
 	} {
-		_ = manager.finishUsageRead(manifest, scope, &stamp, json.RawMessage(raw))
+		_ = lease.finishUsageRead(t.Context(), scope, &stamp, json.RawMessage(raw))
 		if err := manager.Store().UsageReady(scope); err == nil {
 			t.Fatalf("nonfresh read reopened inference: %s", raw)
 		}
@@ -321,7 +618,7 @@ func TestUsageEpochNonfreshResultsCannotAcknowledge(t *testing.T) {
 	if _, err := manager.Store().InvalidateUsage(scope); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.finishUsageRead(manifest, scope, &stamp,
+	if err := lease.finishUsageRead(t.Context(), scope, &stamp,
 		json.RawMessage(`{"revision":"1","windows":[{"name":"quota","used":0}]}`)); err == nil {
 		t.Fatal("late matching response acknowledged a newer mutation")
 	}
@@ -341,7 +638,7 @@ func TestUsageEpochAdmissionRechecksAfterOptimisticRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope.Operation, scope.Attempt = "inference-after-mutation", 1
-	if _, err := store.journal(scope, "dispatched", true); err == nil {
+	if _, err := store.journal(t.Context(), scope, "dispatched", true); err == nil {
 		t.Fatal("admission used its pre-mutation optimistic read")
 	}
 	if _, err := store.Operation(scope.Plugin, scope.Operation); err == nil {
@@ -450,7 +747,7 @@ func TestUsageEpochMalformedMetadataCannotEraseDirtyFence(t *testing.T) {
 			if err := store.UsageReady(scope); err == nil {
 				t.Fatal("malformed metadata erased the inference barrier")
 			}
-			if _, err := store.journal(scope, "dispatched", true); err == nil {
+			if _, err := store.journal(t.Context(), scope, "dispatched", true); err == nil {
 				t.Fatal("malformed metadata admitted inference")
 			}
 		})

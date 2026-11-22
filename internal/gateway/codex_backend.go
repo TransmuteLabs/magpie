@@ -738,13 +738,14 @@ func compactSigninHeld(r *http.Request, model string, on *provider.Provider) (ac
 	if !held || provider.CodexAPIKeySignedIn() {
 		return who, false
 	}
+	current := provider.CurrentAccountIDs(r.Context())
 	if on != nil {
 		// compacted on another of Codex's accounts (compactOn): the key
 		// holds that one, not the sign-in
-		return who, !who.AllowsAccount(on.ID, on.AccountID())
+		return who, !accountAllowed(who, *on, current)
 	}
 	p, _, ok := provider.Resolve("codex/" + model)
-	if !ok || p.Account == nil || p.Account.Agent != "codex" || !who.AllowsAccount(p.ID, p.AccountID()) {
+	if !ok || p.Account == nil || p.Account.Agent != "codex" || !accountAllowed(who, p, current) {
 		return who, true
 	}
 	return who, false
@@ -1337,8 +1338,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 			// left to the transport, the reply comes back plain for the usage in it
 			req.Header.Del("Accept-Encoding")
 			var policyErr error
-			res, sent, err = sendCodexRelay(req, body, func(wire int) (*http.Response, error) {
-				sentUp(r.Context(), wire, len(body))
+			res, sent, err = sendCodexRelay(s.client, req, body, func(req *http.Request, wire int) (*http.Response, error) {
 				policy, err := requestPolicy(req.Context(), policyProvider)
 				if err == nil && !requestpolicy.ConsumeRoutePermit(req.Context()) {
 					err = requestpolicy.FromContext(req.Context()).Dispatch(req.Context(), policy)
@@ -1347,6 +1347,7 @@ func (s *Server) codexUpstreamOn(w http.ResponseWriter, r *http.Request, rest st
 					policyErr = err
 					return nil, err
 				}
+				sentUp(r.Context(), wire, len(body))
 				response, err := s.client.Do(req)
 				return gotDown(r.Context(), response), err
 			})
@@ -2537,11 +2538,6 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(body, &list)
 		own = list.Models
 	}
-	// what follows reads the providers seven times over (the catalog, the
-	// codex provider's picks and windows, the list's tag): held, they are
-	// built once, where each build read every agent's sign-in, keychain
-	// items among them, and together held the answer past Codex's 5 s (#746)
-	defer provider.Hold()()
 	cached := own == nil
 	if cached {
 		for _, e := range codexcat.CacheEntries() {
@@ -2559,7 +2555,6 @@ func (s *Server) codexModels(w http.ResponseWriter, r *http.Request) {
 // the backend's answer), as the user narrowed and set them on the codex
 // provider, with magpie's models after them. The entries are written into.
 func codexMerged(own []any, cached bool) []any {
-	defer provider.Hold()()
 	// the slugs the sign-in's list has, before the user's narrowing: a
 	// ChatGPT account's model it lacks is listed by magpie's id after it
 	// (provider.CodexListedBeside)

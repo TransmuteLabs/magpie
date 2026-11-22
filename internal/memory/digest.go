@@ -113,7 +113,7 @@ func publish(due bool) (changed bool, err error) {
 // when there is nothing, or memory can't be read (unknown: the
 // caller keeps what the agent has).
 func Digest(agent string) (string, error) {
-	f, err := cached()
+	f, err := view()
 	if err != nil {
 		return "", err
 	}

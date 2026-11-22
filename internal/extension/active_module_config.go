@@ -2,7 +2,6 @@ package extension
 
 import (
 	"context"
-	"errors"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -17,44 +16,33 @@ func (m *Manager) ActiveModuleConfig(ctx context.Context, id string) (Installed,
 	if m.isClosed() {
 		return Installed{}, sdk.ConfigSnapshot{}, errModuleConfigClosed
 	}
-	root, err := m.catalog.open(false)
-	if err != nil {
-		return Installed{}, sdk.ConfigSnapshot{}, err
-	}
-	defer root.Close()
-	unlock, err := catalogLock(ctx, root)
-	if err != nil {
-		return Installed{}, sdk.ConfigSnapshot{}, err
-	}
-	defer unlock()
-	entries, _, err := catalogRead(root)
-	if err != nil {
-		return Installed{}, sdk.ConfigSnapshot{}, err
-	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != id || entry.Disabled || entry.Manifest.Component != nil {
-			continue
+	var result Installed
+	var config sdk.ConfigSnapshot
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		entry, found := view.lookup(id)
+		if !found || !activeRoot(entry) {
+			return ErrActionChanged
 		}
-		if entry.Manifest.Contract.Version.Minor < 1 {
-			return Installed{}, sdk.ConfigSnapshot{}, errors.New("module configuration requires SDK API 1.1 or newer")
+		entry = view.enabledEntry(entry)
+		if entry.observerEnablementErr != nil {
+			return entry.observerEnablementErr
 		}
-		if tracksEnablement(entry.Manifest) {
-			entry.EnableGeneration, err = readObserverEnablement(root, id)
+		current := sdk.ConfigSnapshot{Version: "0", Values: []byte("{}")}
+		if entry.Manifest.Contract.Version.Minor >= 1 {
+			var err error
+			current, err = m.readModuleConfigContext(ctx, id)
 			if err != nil {
-				return Installed{}, sdk.ConfigSnapshot{}, err
+				return err
 			}
 		}
-		config, err := m.readModuleConfigContext(ctx, id)
-		if err != nil {
-			return Installed{}, sdk.ConfigSnapshot{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return Installed{}, sdk.ConfigSnapshot{}, err
-		}
-		if m.isClosed() {
-			return Installed{}, sdk.ConfigSnapshot{}, errModuleConfigClosed
-		}
-		return entry, config, nil
+		result, config = cloneInstalled(entry), current
+		return nil
+	})
+	if err != nil {
+		return Installed{}, sdk.ConfigSnapshot{}, err
 	}
-	return Installed{}, sdk.ConfigSnapshot{}, ErrActionChanged
+	if m.isClosed() {
+		return Installed{}, sdk.ConfigSnapshot{}, errModuleConfigClosed
+	}
+	return result, config, nil
 }

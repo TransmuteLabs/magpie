@@ -63,7 +63,10 @@ body.window .lib-head { top: -2px; margin: -2px 0 0; padding: 8px 0 4px; }
 /* its switch stays beside its text in a narrow window, as a setting's does */
 .lib-list .row.lib-hub { flex-wrap: nowrap; }
 .lib-hub .name { white-space: normal; }
-.lib-hub .lib-hubstats { margin-top: 4px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* one line, cut where it runs out: a check ending adds its tools to it in
+   place, and the router sits over the list, so a line more would move
+   every server row under the pointer (the whole count is its title) */
+.lib-hub .lib-hubstats { margin-top: 4px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* the address any other app connects at, under the switch */
 .lib-list .row.lib-hubat { flex-wrap: nowrap; align-items: center; }
 .lib-hubat > .lib-glyph { align-self: center; margin-top: 0; }
@@ -422,6 +425,9 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 .lib-rowacts { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity .14s; }
 .lib-row:hover .lib-rowacts, .lib-rowacts:focus-within { opacity: 1; }
 .lib-icon { width: 26px; height: 26px; padding: 0; display: inline-grid; place-items: center; }
+/* a row's buttons keep their size: a long command squeezed them, so each
+   row's Bring in and Remove sat at another x down the list */
+.lib-row > .lib-icon, .lib-row > .action { flex: none; }
 .lib-rowacts.busy { opacity: 1; }
 .lib-icon.busy, .lib-icon.busy:disabled { opacity: 1; color: var(--muted); }
 /* busy: app.js glyphBusy has put the spinner's arc in place of the glyph */
@@ -429,7 +435,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 @media (prefers-reduced-motion: reduce) { .lib-icon.busy svg > * { animation: none; } }
 
 /* the skill finder */
-.lib-install { margin-bottom: 4px; }
+.lib-install { margin-bottom: var(--find-gap); }
 .lib-find { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; }
 .lib-find input { flex: 1; min-width: 0; height: 28px; border: 0; outline: none; background: none; font-size: 13px; color: var(--fg); }
 .lib-find input::placeholder { color: var(--faint); }
@@ -554,7 +560,7 @@ input.lib-setname:focus { border-color: var(--accent); box-shadow: 0 0 0 3px col
 
 /* the market: servers and skills to add, each with its own picture */
 .mk { display: flex; flex-direction: column; }
-.mk-find { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; margin-bottom: 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); transition: border-color .14s, box-shadow .14s; }
+.mk-find { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; margin-bottom: var(--find-gap); border-radius: 10px; background: var(--card); border: 1px solid var(--line); transition: border-color .14s, box-shadow .14s; }
 .mk-find:focus-within { border-color: color-mix(in srgb, var(--fg) 35%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--fg) 7%, transparent); }
 .mk-find input { flex: 1; min-width: 0; height: 100%; border: 0; outline: none; background: none; font-size: 13px; color: var(--fg); }
 .mk-find input::placeholder { color: var(--faint); }

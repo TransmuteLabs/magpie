@@ -37,6 +37,7 @@ package provider
 // #3321, are its Credits window's.
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -44,9 +45,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -80,9 +81,10 @@ const (
 )
 
 type creditsReading struct {
-	Used  float64   `json:"used"`
-	Total float64   `json:"total"`
-	At    time.Time `json:"at"`
+	Used    float64   `json:"used"`
+	Total   float64   `json:"total"`
+	At      time.Time `json:"at"`
+	Started time.Time `json:"started,omitzero"`
 }
 
 type creditsAccount struct {
@@ -96,9 +98,9 @@ type creditsAccount struct {
 	Part bool `json:"part,omitempty"`
 }
 
-// creditsMu keeps two readings in one magpie from writing the file at once;
-// each reads it afresh, so another magpie's (the CLI's) is kept too.
-var creditsMu sync.Mutex
+var creditsMu = filelock.Mutex{
+	Path: func() string { return creditsPath() + ".lock" },
+}
 
 func creditsPath() string { return filepath.Join(filepath.Dir(Path()), "credits-daily.json") }
 
@@ -247,7 +249,7 @@ func creditOf(w QuotaWindow) (creditWindow, bool) {
 // breakdown of another is told by what each reading used (see
 // noteDailyCredits), not by its being set aside.
 func creditWindows(q SubscriptionQuota) []creditWindow {
-	if q.Error != "" || q.AsOf != nil {
+	if q.Error != "" || q.AsOf != nil || q.ReadDeferred {
 		return nil // a reading kept from before isn't a new one
 	}
 	var all []creditWindow
@@ -282,18 +284,38 @@ func creditsOldKey(q SubscriptionQuota) string {
 
 // noteDailyCredits keeps the readings of the credits windows among qs,
 // made at now, and counts what each used since its last.
-func noteDailyCredits(qs []SubscriptionQuota, now time.Time) {
-	creditsMu.Lock()
-	defer creditsMu.Unlock()
+func noteDailyCredits(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
 	path := creditsPath()
-	accts := map[string]*creditsAccount{}
-	if b, err := os.ReadFile(path); err == nil {
-		accts, _ = parseCredits(b)
-	}
+	var accts map[string]*creditsAccount
+	var current func(SubscriptionQuota) bool
 	day := now.Local().Format("2006-01-02")
 	changed := false
 	for _, q := range qs {
 		ws := creditWindows(q)
+		if len(ws) == 0 {
+			continue
+		}
+		if current == nil {
+			if !creditsMu.LockCheckedContext(ctx) {
+				return
+			}
+			defer creditsMu.Unlock()
+			current = subscriptionQuotaCheck(ctx, qs...)
+		}
+		if !current(q) {
+			continue
+		}
+		if accts == nil {
+			b, err := os.ReadFile(path)
+			switch {
+			case err == nil:
+				accts, _ = parseCredits(b)
+			case os.IsNotExist(err):
+				accts = map[string]*creditsAccount{}
+			default:
+				return
+			}
+		}
 		pools := poolsOfWhole(ws)
 		type step struct {
 			c creditWindow
@@ -321,11 +343,18 @@ func noteDailyCredits(qs []SubscriptionQuota, now time.Time) {
 				part := c.aside && !pools[c.name] && slices.ContainsFunc(ws, func(x creditWindow) bool { return !x.aside && x.unit == c.unit })
 				a = &creditsAccount{Since: day, Part: part}
 				accts[key] = a
-				a.Last = creditsReading{Used: c.used, Total: c.total, At: now}
+				a.Last = creditsReading{Used: c.used, Total: c.total, At: now, Started: q.readStarted}
 				changed = true
 				continue
 			}
+			if !q.readStarted.IsZero() && !q.readStarted.After(a.Last.Started) {
+				continue
+			}
 			if c.used == a.Last.Used && c.total == a.Last.Total {
+				if !q.readStarted.IsZero() {
+					a.Last.Started = q.readStarted
+					changed = true
+				}
 				continue
 			}
 			d := max(c.used-a.Last.Used, 0)
@@ -355,11 +384,11 @@ func noteDailyCredits(qs []SubscriptionQuota, now time.Time) {
 				}
 				a.Days[day] = math.Round((a.Days[day]+d)*100) / 100
 			}
-			a.Last = creditsReading{Used: c.used, Total: c.total, At: now}
+			a.Last = creditsReading{Used: c.used, Total: c.total, At: now, Started: q.readStarted}
 			changed = true
 		}
 	}
-	if !changed {
+	if !changed || ctx.Err() != nil {
 		return
 	}
 	cut := now.Local().AddDate(0, 0, -creditsKept).Format("2006-01-02")
@@ -371,16 +400,13 @@ func noteDailyCredits(qs []SubscriptionQuota, now time.Time) {
 		}
 	}
 	b, err := json.MarshalIndent(accts, "", "  ")
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return
 	}
-	// parseCredits reads a file that doesn't parse as no days: it is kept
-	// aside before it is written over, and not written over when it can't be
-	if lastgood.KeepUnparsed(path, lastgood.Into[map[string]*creditsAccount]) != nil {
+	if lastgood.KeepUnparsed(path, lastgood.Into[map[string]*creditsAccount]) != nil || ctx.Err() != nil {
 		return
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	_ = writeFileAtomic(path, b)
+	_ = writeFileAtomicChecked(path, b, ctx.Err)
 }
 
 // poolsOfWhole are the windows set aside that a counted window is the

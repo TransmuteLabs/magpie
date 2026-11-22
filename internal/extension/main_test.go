@@ -31,11 +31,15 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if slices.Contains(os.Args, "--sdk-wedged-input") {
-		rawWorkerHelper(false)
+		rawWorkerHelper(sdk.MethodToolCall)
 		os.Exit(0)
 	}
 	if slices.Contains(os.Args, "--sdk-raw-observer") {
-		rawWorkerHelper(true)
+		rawWorkerHelper(sdk.MethodLedgerObserve, sdk.MethodRequestObserve)
+		os.Exit(0)
+	}
+	if slices.Contains(os.Args, "--sdk-raw-usage") {
+		rawWorkerHelper(sdk.MethodProviderUsage)
 		os.Exit(0)
 	}
 	if slices.Contains(os.Args, "--sdk-stall-handshake") {

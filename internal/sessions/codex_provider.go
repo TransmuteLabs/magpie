@@ -313,13 +313,15 @@ func moveCodexProvider(id, to string, admit func() error) (CodexMove, error) {
 	}
 	refresh(mine, all)
 	var fs []file
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	titles := codexTitleOf()
 	for _, g := range groups {
 		if one, _ := assembleListed(g, price, titles); one.ID == id && !one.ReadOnly {
 			fs = g
 			break
 		}
 	}
+	releasePrices()
 	var paths []string
 	for _, f := range fs {
 		for _, p := range []string{f.path, rolloutTwin(f.path)} {

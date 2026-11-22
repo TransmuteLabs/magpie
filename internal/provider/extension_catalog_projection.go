@@ -29,7 +29,10 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 	if _, err := readLoginsFile(); err != nil {
 		return sdk.CatalogReadResult{}, err
 	}
-	entries := Catalog()
+	entries := ListedProviderEntries(ctx)
+	if err := ctx.Err(); err != nil {
+		return sdk.CatalogReadResult{}, err
+	}
 	byProvider := map[string][]Entry{}
 	for _, entry := range entries {
 		if entry.Group == "" && entry.Provider != nil {
@@ -37,37 +40,49 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 		}
 	}
 	now := time.Now()
-	cards := CachedCards(now)
+	cards := CachedCardsContext(ctx, now)
+	if err := ctx.Err(); err != nil {
+		return sdk.CatalogReadResult{}, err
+	}
 	result := sdk.CatalogReadResult{ReadAt: now.UnixMilli(), Accounts: []sdk.CatalogAccountProjection{}}
 	selected := access.Scope == "selected"
-	for _, configured := range All() {
+	var selectedID string
+	if selected {
+		selectedID = heldSubscriptionOwnersContext(ctx).identity(scope).provider
+	}
+	for _, configured := range AllContext(ctx) {
 		if err := ctx.Err(); err != nil {
 			return sdk.CatalogReadResult{}, err
 		}
 		if !configured.On() || configured.Unlisted || len(byProvider[configured.ID]) == 0 {
 			continue
 		}
-		if selected && configured.ID != ExtensionProviderID(scope.Plugin, scope.Provider) {
+		if selected && configured.ID != selectedID {
 			continue
 		}
 		if configured.Account != nil {
-			for _, account := range configured.AccountsOn() {
+			for _, account := range configured.AccountsOnContext(ctx) {
 				binding := account.Account.extension
-				if selected && (binding == nil || binding.currentScope().Plugin != scope.Plugin ||
-					binding.currentScope().Provider != scope.Provider || binding.currentScope().Account != scope.Account ||
-					binding.currentScope().Generation != scope.Generation) {
-					continue
+				if selected {
+					if binding == nil {
+						continue
+					}
+					current := binding.currentScope()
+					if current.Plugin != scope.Plugin || current.Provider != scope.Provider ||
+						current.Account != scope.Account || current.Generation != scope.Generation {
+						continue
+					}
 				}
 				projection := projectedCatalogAccount(scope.Plugin, configured.ID, "account", account.Account.User)
 				for _, entry := range byProvider[configured.ID] {
 					if configured.AccountServes(account.Account.User, entry.Model) &&
-						account.Account.Lists(configured.OwnModelID(entry.Model)) {
+						account.Account.listsContext(ctx, configured.OwnModelID(entry.Model)) {
 						projection.Models = append(projection.Models, projectedCatalogModel(entry))
 					}
 				}
 				for _, card := range cards {
 					if card.Provider == configured.ID && strings.EqualFold(card.User, account.Account.User) {
-						projection.Quota = projectedCatalogQuota(configured, currentExtensionQuota(card), projection.Models)
+						projection.Quota = projectedCatalogQuota(configured, currentExtensionQuotaContext(ctx, card), projection.Models)
 						break
 					}
 				}
@@ -102,7 +117,10 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 			}
 		}
 	}
-	if ctx.Err() != nil || StampNow() != stamp {
+	if err := ctx.Err(); err != nil {
+		return sdk.CatalogReadResult{}, err
+	}
+	if StampNow() != stamp {
 		return sdk.CatalogReadResult{}, errors.New("catalog changed while its projection was read")
 	}
 	if selected && len(result.Accounts) != 1 {

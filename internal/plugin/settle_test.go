@@ -66,7 +66,7 @@ func TestSettleWaitsForTheSignInHook(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		release := make(chan struct{})
 		var said atomic.Pointer[string]
-		OnSignIn(func(provider, account, s string) {
+		OnSignIn(func(provider, account, s string, _ *string) {
 			<-release
 			said.Store(&s)
 		})

@@ -19,26 +19,36 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	}
 	fail := func(err error) (context.Context, sdk.Scope, error) { return ctx, scope, err }
 	host := providerExtensionHost()
-	entries, err := host.ListContext(ctx)
+	entry, config, err := toolAccountModule(ctx, host, scope.Plugin)
 	if err != nil {
 		return fail(err)
 	}
-	index := slices.IndexFunc(entries, func(entry extensionhost.Installed) bool {
-		return entry.Manifest.ID == scope.Plugin && !entry.Disabled && entry.Manifest.Contract.Has(sdk.AccountAuth) &&
-			slices.ContainsFunc(entry.Manifest.Providers, func(descriptor sdk.ProviderDescriptor) bool { return descriptor.ID == scope.Provider })
-	})
-	if index < 0 {
-		return fail(errors.New("extension account provider is unavailable"))
+	if !entry.Manifest.Contract.Has(sdk.ToolProvider) || !entry.Manifest.Contract.Has(sdk.AccountAuth) ||
+		!slices.ContainsFunc(entry.Manifest.Providers, func(descriptor sdk.ProviderDescriptor) bool {
+			return descriptor.ID == scope.Provider
+		}) {
+		return fail(errors.New("extension does not declare authentication for this provider"))
 	}
-	entry := entries[index]
-	config := sdk.ConfigSnapshot{Version: "0"}
-	if entry.Manifest.Contract.Version.Minor >= 1 {
-		config, err = host.ModuleConfig(ctx, scope.Plugin)
+	if scope.Generation == 0 {
+		account, err := host.Store().GetAccountContext(ctx, scope.Plugin, scope.Provider, scope.Account)
 		if err != nil {
-			return fail(err)
+			if ctx.Err() != nil {
+				return fail(ctx.Err())
+			}
+			return fail(errors.New("extension account is unavailable"))
 		}
+		scope.Provider, scope.Account, scope.Generation = account.Provider, account.ID, account.Generation
 	}
+	revision := entry.Revision + "\x00" + config.Version
 	choice, networkSelected := "", false
+	public, err := readSubscriptionIdentity(ctx, scope)
+	if err != nil {
+		return fail(err)
+	}
+	if expected, bound := extensionhost.SubscriptionOwnerRevision(ctx); bound && expected != public.revision {
+		return fail(errSubscriptionOwnerChanged)
+	}
+	ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, public.revision)
 	check := func(current context.Context) error {
 		if err := current.Err(); err != nil {
 			return err
@@ -46,40 +56,28 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		if err := netproxy.Held(current); err != nil {
 			return err
 		}
-		policy, err := extensionKeepAlivePolicyNow()
+		policy, err := extensionKeepAlivePolicyNow(current)
 		if err != nil {
 			return err
 		}
-		id := ExtensionProviderID(scope.Plugin, scope.Provider)
+		if err := CheckExtensionSubscription(current, scope.Plugin, scope.Provider, public.revision); err != nil {
+			return err
+		}
 		selected := extensionSignIn{host: host, entry: entry, config: config.Version,
-			scope: extensionhost.AccountPublicationScope(current, host.Namespace(), scope)}
+			scope: extensionhost.AccountPublicationScope(current, host.Namespace(), scope), public: public}
 		for _, descriptor := range policy.providers.Providers {
-			if descriptor.ID == id && (descriptor.Off || descriptor.Hidden) {
+			if descriptor.ID == public.provider && (descriptor.Off || descriptor.Hidden) {
 				return errors.New("extension account provider is off")
 			}
 		}
 		for _, login := range policy.logins {
-			if login.Agent == id && login.User == scope.Account && !policy.allowsSelection(selected, selected.scope.Generation) {
+			if public.hasPolicy(login) && !policy.allowsSelection(selected, selected.scope.Generation) {
 				return errors.New("extension account is off, paused or unavailable")
 			}
 		}
-		entries, err := host.ListContext(current)
-		if err != nil {
+		if _, err := selectedExtensionModule(current, host, scope.Plugin, revision, entry.EnableGeneration,
+			entry.Manifest.Contract.Version.Minor >= 1); err != nil {
 			return err
-		}
-		if !slices.ContainsFunc(entries, func(now extensionhost.Installed) bool {
-			return now.Manifest.ID == scope.Plugin && !now.Disabled && now.Revision == entry.Revision
-		}) {
-			return errors.New("extension tool package changed")
-		}
-		if entry.Manifest.Contract.Version.Minor >= 1 {
-			now, err := host.ModuleConfig(current, scope.Plugin)
-			if err != nil {
-				return err
-			}
-			if now.Version != config.Version {
-				return errors.New("extension tool configuration changed")
-			}
 		}
 		network, err := extensionNetworkContext(current, scope)
 		if err != nil {
@@ -156,5 +154,19 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	if err := admit(ctx); err != nil {
 		return fail(err)
 	}
-	return extensionhost.WithToolAccountCheck(ctx, host.Namespace(), entry.Revision, config.Version, admit), scope, nil
+	return extensionhost.WithToolAccountCheck(ctx, host.Namespace(), entry.Revision, config.Version, entry.EnableGeneration, admit), scope, nil
+}
+
+func toolAccountModule(ctx context.Context, host extensionProviderHost, id string) (extensionhost.Installed, sdk.ConfigSnapshot, error) {
+	if registry, ok := host.(interface {
+		ActiveModuleConfig(context.Context, string) (extensionhost.Installed, sdk.ConfigSnapshot, error)
+	}); ok {
+		return registry.ActiveModuleConfig(ctx, id)
+	}
+	entry, err := enabledExtensionModule(ctx, host, id)
+	config := sdk.ConfigSnapshot{Version: "0"}
+	if err == nil && entry.Manifest.Contract.Version.Minor >= 1 {
+		config, err = host.ModuleConfig(ctx, id)
+	}
+	return entry, config, err
 }

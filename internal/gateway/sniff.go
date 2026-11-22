@@ -61,18 +61,23 @@ func (s *usageSniffer) write(b []byte) {
 		s.buf = append(s.buf, b...)
 		return
 	}
-	s.buf = append(s.buf, b...)
-	for {
-		i := bytes.IndexByte(s.buf, '\n')
-		if i < 0 {
-			break
+	for len(b) > 0 {
+		line, rest, ended := bytes.Cut(b, []byte{'\n'})
+		if !ended {
+			if len(s.buf)+len(line) > 1<<20 {
+				s.buf, s.data = nil, nil
+			} else {
+				s.buf = append(s.buf, line...)
+			}
+			return
 		}
-		s.line(bytes.TrimSuffix(s.buf[:i], []byte{'\r'}))
-		s.buf = s.buf[i+1:]
-	}
-	if len(s.buf) > 1<<20 { // a runaway line is not one we can use
-		s.buf = nil
-		s.data = nil
+		if len(s.buf) > 0 {
+			s.buf = append(s.buf, line...)
+			line = s.buf
+			s.buf = s.buf[:0]
+		}
+		s.line(bytes.TrimSuffix(line, []byte{'\r'}))
+		b = rest
 	}
 }
 
@@ -94,12 +99,17 @@ func (s *usageSniffer) line(line []byte) {
 			s.data = nil // never let an unbounded event accumulate
 			return
 		}
-		if len(s.data) > 0 {
-			s.data = append(s.data, '\n')
-		}
-		s.data = append(s.data, rest...)
 		// Relays also send one JSON event per data line without blank separators.
 		// Parse a complete value now, but keep incomplete multiline JSON.
+		if len(s.data) == 0 {
+			if data := bytes.TrimSpace(rest); json.Valid(data) {
+				s.parse(data)
+			} else {
+				s.data = append(s.data, rest...)
+			}
+			return
+		}
+		s.data = append(append(s.data, '\n'), rest...)
 		if json.Valid(bytes.TrimSpace(s.data)) {
 			s.flushEvent()
 		}

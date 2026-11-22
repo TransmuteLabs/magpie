@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -55,7 +56,11 @@ func (s *Server) stoppedToolLoop(w http.ResponseWriter, r *http.Request, from pr
 	if settings.Shared().NoLoopGuard || !mayLoop(from, body) {
 		return false
 	}
-	req, err := parse(from, tailOf(from, body))
+	tail := tailOf(from, body)
+	if len(tail) == 0 {
+		return false
+	}
+	req, err := parse(from, tail)
 	if err != nil {
 		return false // serve says what is wrong with it
 	}
@@ -97,32 +102,86 @@ const tailItems = 8 * toolLoopRepeats
 // the guard to parse a turn's end and not the whole of a long one, which
 // took ~30ms and 20MB a turn of 1.5MB; gjson finds the items without
 // decoding them. A body whose conversation isn't such a list is as it came.
+// A long list with no possible result in the retained body needs no parse.
 func tailOf(from provider.Protocol, body []byte) []byte {
 	list := getIn(body, conversationKey[from])
 	if !list.IsArray() || list.Index <= 0 {
 		return body
 	}
-	var items []gjson.Result
+	var items [tailItems]gjson.Result
+	count := 0
 	list.ForEach(func(_, v gjson.Result) bool {
-		items = append(items, v)
+		items[count%tailItems] = v
+		count++
 		return true
 	})
-	if len(items) <= tailItems {
+	if count <= tailItems {
 		return body
+	}
+	first := count % tailItems
+	end := list.Index + len(list.Raw)
+	before, after := body[:list.Index], body[end:]
+	retained := body[items[first].Index:end]
+	if !mayContainToolResult(from, retained) && !mayContainToolResult(from, before) && !mayContainToolResult(from, after) {
+		return nil
 	}
 	// a slice made to its size, not a bytes.Buffer: under -race the
 	// Buffer's Grow allocates its slice twice
-	b := make([]byte, 0, len(body)-list.Index-len(list.Raw)+items[len(items)-1].Index+len(items[len(items)-1].Raw)-items[len(items)-tailItems].Index+list.Index+2)
-	b = append(b, body[:list.Index]...)
+	b := make([]byte, 0, len(before)+len(retained)+len(after)+1)
+	b = append(b, before...)
 	b = append(b, '[')
-	for i, v := range items[len(items)-tailItems:] {
-		if i > 0 {
+	for offset := range tailItems {
+		if offset > 0 {
 			b = append(b, ',')
 		}
-		b = append(b, v.Raw...)
+		b = append(b, items[(first+offset)%tailItems].Raw...)
 	}
 	b = append(b, ']')
-	return append(b, body[list.Index+len(list.Raw):]...)
+	return append(b, after...)
+}
+
+// mayContainToolResult is a conservative check for the allocator-heavy
+// parse. A result's type or role may be escaped, and Responses can
+// reconstruct results from web search items.
+func mayContainToolResult(from provider.Protocol, body []byte) bool {
+	if bodyHas(body, `\u`) {
+		return true
+	}
+	switch from {
+	case provider.Responses:
+		return bodyHas(body, `_output"`) || bodyHas(body, `"web_search_call"`)
+	case provider.Chat:
+		return bodyHas(body, `"tool"`)
+	case provider.Anthropic:
+		return bodyHas(body, `"tool_result"`)
+	case provider.Gemini:
+		return mayContainGeminiResult(body)
+	default:
+		return true
+	}
+}
+
+// mayContainGeminiResult allows the underscores removed by geminiCamel
+// and the case folding done by the Gemini decoder.
+func mayContainGeminiResult(body []byte) bool {
+	const field = "functionResponse"
+	rest := bytesStr(body)
+	for {
+		var found bool
+		_, rest, found = strings.Cut(rest, `"`)
+		if !found {
+			return false
+		}
+		key := strings.TrimLeft(rest, "_")
+		if len(key) == 0 || key[0] != 'f' && key[0] != 'F' {
+			continue
+		}
+		key, _, found = strings.Cut(key, `"`)
+		if found && len(key)-strings.Count(key, "_") <= len(field)*utf8.UTFMax &&
+			strings.EqualFold(strings.ReplaceAll(key, "_", ""), field) {
+			return true
+		}
+	}
 }
 
 // toolLoop is a conversation's newest exchange and how many turns in a row

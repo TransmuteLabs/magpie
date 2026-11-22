@@ -2,11 +2,13 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -215,6 +217,17 @@ var pluginLoginLocks atomic.Int64
 // own account is named as the agent is signed in now; removed in magpie,
 // it is only hidden, and shows again once the agent signs in anew.
 func pluginLogins(pp plugin.Provider) []pluginLogin {
+	return pluginLoginsContext(context.Background(), pp)
+}
+
+func pluginLoginsContext(ctx context.Context, pp plugin.Provider) []pluginLogin {
+	return pluginLoginsCheckedContext(ctx, pp, ctx.Err)
+}
+
+func pluginLoginsCheckedContext(ctx context.Context, pp plugin.Provider, check func() error) []pluginLogin {
+	if check() != nil {
+		return nil
+	}
 	if settings.AccountDiscoveryOff() {
 		if publicPlugin(pp) {
 			return publicLogins(pp)
@@ -234,7 +247,7 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 	labels := pluginLabels(pp, named)
 	// looked at as kept, and copied only at the first change: nearly
 	// every list changes nothing, and a page's state lists each plugin's
-	settle := func(ls []savedLogin) ([]savedLogin, bool) {
+	settle := func(ls []savedLogin, saving bool) ([]savedLogin, bool) {
 		changed := false
 		have := map[string]bool{}
 		var keep []savedLogin
@@ -271,7 +284,11 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 				if !changed {
 					ls, changed = slices.Clone(ls), true
 				}
-				ls = append(ls, savedLogin{Agent: agent, User: labels[a.Key], Home: a.Key, On: true, Seen: time.Now().UTC().Truncate(time.Second)})
+				login := savedLogin{Agent: agent, User: labels[a.Key], Home: a.Key, On: true, Seen: time.Now().UTC().Truncate(time.Second)}
+				if saving {
+					login.PluginObservations.Epoch = rand.Text()
+				}
+				ls = append(ls, login)
 			}
 		}
 		return ls, changed
@@ -279,13 +296,16 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 	// what nothing changes takes no lock: taken, it opens logins.json's
 	// lock file, across magpies, and /api/providers lists every plugin
 	// (a fifth of its CPU). A change is made from a read under it.
-	if _, changed := settle(sharedLogins()); changed {
+	if _, changed := settle(sharedLogins(), false); changed {
 		pluginLoginLocks.Add(1)
-		loginsMu.Lock()
-		if ls, changed := settle(sharedLogins()); changed {
-			_ = writeLogins(ls)
-		}
-		loginsMu.Unlock()
+		withPluginLogins(ctx, pp.ID, func() {
+			if check() != nil {
+				return
+			}
+			if ls, changed := settle(sharedLogins(), true); changed {
+				_ = writeLoginsChecked(ls, true, check)
+			}
+		})
 	}
 	var out []pluginLogin
 	for _, l := range sideLogins(agent, "", func(l savedLogin) bool { _, ok := byKey[l.Home]; return ok && l.Hidden == "" }) {
@@ -296,9 +316,9 @@ func pluginLogins(pp plugin.Provider) []pluginLogin {
 	return out
 }
 
-func pluginSide(pp plugin.Provider) []sideLogin {
+func pluginSide(ctx context.Context, pp plugin.Provider) []sideLogin {
 	var out []sideLogin
-	for _, l := range pluginLogins(pp) {
+	for _, l := range pluginLoginsContext(ctx, pp) {
 		out = append(out, l.sideLogin)
 	}
 	return out
@@ -307,26 +327,32 @@ func pluginSide(pp plugin.Provider) []sideLogin {
 // pluginOfAgent is the plugin provider the accounts page names by its
 // magpie id.
 func pluginOfAgent(agent string) (plugin.Provider, bool) {
+	return pluginOfAgentContext(context.Background(), agent)
+}
+
+func pluginOfAgentContext(ctx context.Context, agent string) (plugin.Provider, bool) {
 	if strings.HasPrefix(agent, "plugin:") {
 		id := strings.TrimPrefix(agent, "plugin:")
-		for _, pp := range plugin.Cached() {
+		for _, pp := range heldPluginsContext(ctx) {
 			if pp.ID == id {
 				return pp, true
 			}
 		}
 		return plugin.Provider{}, false
 	}
-	return PluginOf(agent)
+	return pluginOfContext(ctx, agent)
 }
 
-func pluginLoginList(pp plugin.Provider) []Login { return loginsOf(pluginSide(pp)) }
+func pluginLoginList(ctx context.Context, pp plugin.Provider) []Login {
+	return loginsOf(pluginSide(ctx, pp))
+}
 
 func switchPluginLogin(pp plugin.Provider, user string) error {
-	return switchSideLogin(pluginAgent(pp), user, pluginSide(pp))
+	return switchSideLogin(pluginAgent(pp), user, pluginSide(context.Background(), pp))
 }
 
 func setPluginLoginOn(pp plugin.Provider, user string, on bool) error {
-	return setSideLoginOn(pluginAgent(pp), user, on, pluginSide(pp))
+	return setSideLoginOn(pluginAgent(pp), user, on, pluginSide(context.Background(), pp))
 }
 
 // forgetPluginLogin signs the account out: its sign-in is magpie's own.
@@ -334,8 +360,15 @@ func setPluginLoginOn(pp plugin.Provider, user string, on bool) error {
 // signed in, and the account shows again once it signs in anew. Qoder's
 // first goes as the built-in's did, the next put first.
 func forgetPluginLogin(pp plugin.Provider, user string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	release, err := plugin.GuardCommunitySubscription(ctx, pp.ID)
+	if err != nil {
+		return err
+	}
+	defer release()
 	agent := pluginAgent(pp)
-	ls := pluginSide(pp)
+	ls := pluginSide(ctx, pp)
 	i := slices.IndexFunc(ls, func(l sideLogin) bool { return strings.EqualFold(l.User, user) })
 	if i < 0 {
 		return fmt.Errorf("no %s account %q", pp.Name, user)
@@ -360,7 +393,7 @@ func forgetPluginLogin(pp plugin.Provider, user string) error {
 	}
 	key := ls[i].saved.Home
 	isNext := listedMatch(agent, next, ls)
-	err := editListedLogin(agent, user, ls, func(saved []savedLogin, j int) ([]savedLogin, error) {
+	err = editListedLogin(agent, user, ls, func(saved []savedLogin, j int) ([]savedLogin, error) {
 		n := -1
 		if next != "" {
 			n = pickSaved(saved, isNext)
@@ -403,23 +436,20 @@ func pluginAlsoOn(pp plugin.Provider) []Provider {
 	return out
 }
 
-// keepPluginPlan keeps the plan an account's allowance told on its row,
-// for the accounts list to show it as a built-in's.
-func keepPluginPlan(pp plugin.Provider, key, plan string) {
-	if plan == "" {
+// withPluginLogins holds community ownership through a login edit and
+// checks the SDK store before taking loginsMu.
+func withPluginLogins(ctx context.Context, provider string, edit func()) {
+	release, err := plugin.GuardCommunitySubscription(ctx, provider)
+	if err != nil {
 		return
 	}
-	loginsMu.Lock()
+	defer release()
+	if !loginsMu.LockCheckedContext(ctx) {
+		return
+	}
 	defer loginsMu.Unlock()
-	ls := readLogins()
-	for i, l := range ls {
-		if l.Agent == pluginAgent(pp) && l.Home == key {
-			if l.Plan != plan {
-				ls[i].Plan = plan
-				_ = writeLogins(ls)
-			}
-			return
-		}
+	if ctx.Err() == nil {
+		edit()
 	}
 }
 
@@ -438,72 +468,201 @@ func PluginAccountUser(id, key string) string {
 // notePluginLapse marks the account at key lapsed when its vendor refused
 // a request (401), as a built-in's refused sign-in is marked, and clears
 // the mark once one goes through.
-func notePluginLapse(pp plugin.Provider, key string, status int) {
-	notePluginLapseSince(pp, key, status, toldNow)
-}
-
-// What plugin accounts' sign-ins were told of (a request's answer, a usage
-// reading, a sign-in) is counted, under loginsMu: pluginSignInTold
-// counts it all, and pluginSignInSaid has the count each account was last
-// told of at. A count, not a time: Windows' clock moves in ticks of up to
-// 15.6ms, and a reading begun just after an answer would read as begun
-// with it.
-var (
-	pluginSignInTold uint64
-	pluginSignInSaid = map[string]uint64{}
-)
-
-// toldNow is the began of what is told now, not read from earlier.
-const toldNow = ^uint64(0)
-
-// pluginSignInAt is the count a usage reading beginning now goes by.
-func pluginSignInAt() uint64 {
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	return pluginSignInTold
-}
-
-// notePluginLapseSince is notePluginLapse for what a usage reading begun
-// at began (pluginSignInAt) found, toldNow for what is told now: what was
-// told of the sign-in since began stands over it. A reading begun before
-// a request's 401 that ended clean took the mark off an account the
-// vendor had just refused.
-func notePluginLapseSince(pp plugin.Provider, key string, status int, began uint64) {
-	notePluginLapseOf(pluginAgent(pp), key, status, began, func(user string) string { return lapsedText(pp, user) })
-}
-
-// notePluginLapseOf is notePluginLapseSince by the account's agent, so a
-// mark can be cleared without the plugin's provider at hand.
-func notePluginLapseOf(agent, key string, status int, began uint64, text func(user string) string) {
-	refused := status == http.StatusUnauthorized
-	if !refused && (status < 200 || status > 299) {
+func notePluginLapse(ctx context.Context, pp plugin.Provider, auth plugin.FetchAuth, status int, explicitStatus bool) {
+	if ctx.Err() != nil || !pluginLoginStatus(status) {
 		return
 	}
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	said := agent + "/" + key
-	if pluginSignInSaid[said] > began {
+	key := auth.Account
+	agent := pluginAgent(pp)
+	for _, login := range sharedLogins() {
+		if login.Agent != agent || login.Home != key {
+			continue
+		}
+		ref := pluginLoginReadKey{loginsPath(), agent, key}
+		pluginLoginReads.Lock()
+		active := pluginLoginReads.active[ref]
+		pluginLoginReads.Unlock()
+		lapse := ""
+		if status == http.StatusUnauthorized {
+			lapse = lapsedText(pp, login.User)
+		}
+		if !explicitStatus && active == nil && login.Lapsed == lapse {
+			return
+		}
+		notePluginLogin(ctx, pp.ID, key, pluginLoginObservation{
+			status: status, explicitStatus: explicitStatus, loginID: loginID(login), epoch: login.PluginObservations.Epoch,
+			authEpoch: auth.Epoch, active: active,
+			text: func(user string) string { return lapsedText(pp, user) },
+		})
 		return
 	}
-	if began == toldNow {
-		pluginSignInTold++
-		began = pluginSignInTold
+}
+
+type pluginLoginOrder struct {
+	Revision uint64    `json:"revision,omitempty"`
+	Started  time.Time `json:"started,omitzero"`
+}
+
+func (order pluginLoginOrder) after(saved pluginLoginOrder) bool {
+	return order.Revision > saved.Revision || order.Revision == saved.Revision && order.Started.After(saved.Started)
+}
+
+type pluginLoginObservations struct {
+	Epoch    string           `json:"epoch,omitempty"`
+	Revision uint64           `json:"revision,omitempty"`
+	SignIn   pluginLoginOrder `json:"signIn,omitzero"`
+	Plan     pluginLoginOrder `json:"plan,omitzero"`
+}
+
+type pluginLoginReadKey struct {
+	path, agent, account string
+}
+
+type pluginLoginReadSet struct {
+	count    int
+	answered time.Time
+}
+
+var pluginLoginReads struct {
+	sync.Mutex
+	active map[pluginLoginReadKey]*pluginLoginReadSet
+}
+
+type pluginLoginObservation struct {
+	order          pluginLoginOrder
+	status         int
+	plan           string
+	loginID        string
+	epoch          string
+	authEpoch      *string
+	signedIn       bool
+	explicitStatus bool
+	active         *pluginLoginReadSet
+	text           func(user string) string
+}
+
+func beginPluginLoginRead(login savedLogin) (pluginLoginObservation, func()) {
+	key := pluginLoginReadKey{loginsPath(), login.Agent, login.Home}
+	pluginLoginReads.Lock()
+	if pluginLoginReads.active == nil {
+		pluginLoginReads.active = map[pluginLoginReadKey]*pluginLoginReadSet{}
 	}
-	pluginSignInSaid[said] = began
-	ls := readLogins()
-	for i, l := range ls {
-		if l.Agent == agent && l.Home == key {
-			want := ""
-			if refused {
-				want = text(l.User)
+	active := pluginLoginReads.active[key]
+	if active == nil {
+		active = &pluginLoginReadSet{}
+		pluginLoginReads.active[key] = active
+	}
+	active.count++
+	began := time.Now()
+	pluginLoginReads.Unlock()
+	observation := pluginLoginObservation{
+		order:   pluginLoginOrder{Revision: login.PluginObservations.Revision, Started: began},
+		loginID: loginID(login),
+		epoch:   login.PluginObservations.Epoch,
+		active:  active,
+	}
+	return observation, func() {
+		pluginLoginReads.Lock()
+		active.count--
+		if active.count == 0 {
+			delete(pluginLoginReads.active, key)
+		}
+		pluginLoginReads.Unlock()
+	}
+}
+
+func pluginLoginStatus(status int) bool {
+	return status == http.StatusUnauthorized || status >= 200 && status <= 299
+}
+
+func (observation pluginLoginObservation) recordsLogin() bool {
+	return pluginLoginStatus(observation.status) || observation.plan != "" || observation.signedIn
+}
+
+func notePluginLogin(ctx context.Context, provider, key string, observation pluginLoginObservation) {
+	if !observation.recordsLogin() || settings.AccountDiscoveryOff() {
+		return
+	}
+	withPluginLogins(ctx, provider, func() {
+		check := func() error {
+			off, err := currentUsageDiscovery(ctx)
+			if err == nil && off {
+				err = errAccountDiscoveryOff
 			}
-			if l.Lapsed != want {
-				ls[i].Lapsed = want
-				_ = writeLogins(ls)
+			return err
+		}
+		if check() != nil {
+			return
+		}
+		agent := "plugin:" + provider
+		logins, err := readCurrentLogins()
+		if err != nil {
+			return
+		}
+		for index, login := range logins {
+			if login.Agent != agent || login.Home != key {
+				continue
+			}
+			if observation.loginID != "" && (loginID(login) != observation.loginID || login.PluginObservations.Epoch != observation.epoch) {
+				continue
+			}
+			publish := func() error { return recordPluginLogin(logins, index, observation, check) }
+			if observation.authEpoch != nil {
+				_ = plugin.WithAuthEpoch(ctx, key, *observation.authEpoch, publish)
+			} else {
+				_ = publish()
 			}
 			return
 		}
+	})
+}
+
+func recordPluginLogin(logins []savedLogin, index int, observation pluginLoginObservation, check func() error) error {
+	login := logins[index]
+	current := login
+	orders := &current.PluginObservations
+	order := observation.order
+	immediate := order.Started.IsZero()
+	if immediate {
+		order.Revision = orders.Revision + 1
+	} else if order.Revision > orders.Revision {
+		return check()
 	}
+	if pluginLoginStatus(observation.status) && order.after(orders.SignIn) &&
+		(immediate || !order.Started.Before(observation.active.answered)) {
+		current.Lapsed = ""
+		if observation.status == http.StatusUnauthorized {
+			current.Lapsed = observation.text(login.User)
+		}
+		if !immediate || observation.signedIn || observation.explicitStatus || current.Lapsed != login.Lapsed {
+			orders.SignIn = order
+		}
+	}
+	if observation.plan != "" && order.after(orders.Plan) {
+		orders.Plan = order
+		current.Plan = observation.plan
+	}
+	if observation.signedIn {
+		orders.Plan = order
+		orders.Epoch = rand.Text()
+		current.Hidden = ""
+	}
+	if *orders != login.PluginObservations {
+		orders.Revision++
+		changed := current.Lapsed != login.Lapsed || current.Plan != login.Plan || current.Hidden != login.Hidden ||
+			orders.Epoch != login.PluginObservations.Epoch
+		next := slices.Clone(logins)
+		next[index] = current
+		if err := writeLoginsChecked(next, changed, check); err != nil {
+			return err
+		}
+	} else if err := check(); err != nil {
+		return err
+	}
+	if immediate && observation.active != nil && check() == nil {
+		observation.active.answered = time.Now()
+	}
+	return nil
 }
 
 // lapsedText is what a plugin account the vendor refused says.
@@ -522,22 +681,16 @@ func lapsedText(pp plugin.Provider, user string) string {
 // change to plugins.json is read again, and a sign-in finished then left
 // the account saying "sign in again" (#2748).
 func clearPluginLapse(saved plugin.Saved) {
-	notePluginLapseOf("plugin:"+saved.Provider, saved.Account, http.StatusOK, toldNow, nil)
+	observation := pluginLoginObservation{status: http.StatusOK, signedIn: true}
+	if saved.AuthEpoch != "" {
+		observation.authEpoch = &saved.AuthEpoch
+	}
+	notePluginLogin(context.Background(), saved.Provider, saved.Account, observation)
 	for _, pp := range plugin.Cached() {
 		if pp.ID == saved.Provider {
 			if user := pluginNames(pp)[saved.Account]; user != "" {
 				StaleAllowance(pluginAgent(pp), user)
 			}
-		}
-	}
-	loginsMu.Lock()
-	defer loginsMu.Unlock()
-	ls := readLogins()
-	for i, l := range ls {
-		if l.Agent == "plugin:"+saved.Provider && l.Home == saved.Account && l.Hidden != "" {
-			ls[i].Hidden = ""
-			_ = writeLogins(ls)
-			return
 		}
 	}
 }

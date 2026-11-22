@@ -22,7 +22,6 @@ import (
 	"github.com/yetone/magpie/internal/autostart"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/egress"
-	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/plugin"
@@ -153,23 +152,23 @@ func keysApart(listed, on []string, at map[string]int) ([]string, int) {
 }
 
 type providerJSON struct {
-	ExtensionOptions      *extension.ProviderOptionsSnapshot `json:"extensionOptions,omitempty"`
-	ExtensionOptionsError string                             `json:"extensionOptionsError,omitempty"`
-	ID                    string                             `json:"id"`
-	Name                  string                             `json:"name"`
-	Icon                  string                             `json:"icon"`
-	IconFrom              string                             `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
-	Preset                string                             `json:"preset"`
-	Host                  string                             `json:"host"`
-	Chat                  string                             `json:"chat"`
-	Responses             string                             `json:"responses"`
-	Anthropic             string                             `json:"anthropic"`
-	Gemini                string                             `json:"gemini,omitempty"` // a Gemini API's base (#1346)
-	Decide                string                             `json:"decide,omitempty"` // a decision API: it only routes groups
-	Catalog               string                             `json:"catalog"`
-	Website               string                             `json:"website"`
-	KeysURL               string                             `json:"keysUrl"`
-	Headers               map[string]string                  `json:"headers,omitempty"`
+	ExtensionOptions      *extensionProviderOptionsJSON `json:"extensionOptions,omitempty"`
+	ExtensionOptionsError string                        `json:"extensionOptionsError,omitempty"`
+	ID                    string                        `json:"id"`
+	Name                  string                        `json:"name"`
+	Icon                  string                        `json:"icon"`
+	IconFrom              string                        `json:"iconFrom,omitempty"` // the address Icon was fetched from (provider.IconFrom)
+	Preset                string                        `json:"preset"`
+	Host                  string                        `json:"host"`
+	Chat                  string                        `json:"chat"`
+	Responses             string                        `json:"responses"`
+	Anthropic             string                        `json:"anthropic"`
+	Gemini                string                        `json:"gemini,omitempty"` // a Gemini API's base (#1346)
+	Decide                string                        `json:"decide,omitempty"` // a decision API: it only routes groups
+	Catalog               string                        `json:"catalog"`
+	Website               string                        `json:"website"`
+	KeysURL               string                        `json:"keysUrl"`
+	Headers               map[string]string             `json:"headers,omitempty"`
 	// JSON fields added to each request's body (provider.ExtraBody, #1604)
 	ExtraBody provider.ExtraBody `json:"extraBody,omitempty"`
 	// headers of the vendor's reply passed on (provider.ReplyHeaders, #4145)
@@ -481,7 +480,11 @@ type providerJSON struct {
 	// what one of a sub2api relay's dollars cost the user, and each key's
 	// group rate read from the relay, by its id (@YIXIE233 on X)
 	TopUpRate     float64            `json:"topUpRate,omitempty"`
+	RateReadHours int                `json:"rateReadHours,omitempty"`
 	KeyGroupRates map[string]float64 `json:"keyGroupRates,omitempty"`
+	// what each key's read group rate is multiplied by, by its id, where
+	// it isn't 1 (@YIXIE233 on X)
+	KeyRateFactors map[string]float64 `json:"keyRateFactors,omitempty"`
 
 	// what it charges against the official price, 0 for that (#819)
 	PriceRate float64     `json:"priceRate,omitempty"`
@@ -625,7 +628,8 @@ type accountJSON struct {
 	Logins []provider.Login `json:"logins,omitempty"`
 	// Builtin is a plugin's provider id, for a plugin beside a built-in
 	// subscription (cursor-plugin's cursor): its plan named as the built-in's
-	Builtin string `json:"builtin,omitempty"`
+	Builtin       string `json:"builtin,omitempty"`
+	OwnerRevision string `json:"ownerRevision,omitempty"`
 	// WSL is the distro Claude Code runs in, for a Windows with none of its own
 	WSL string `json:"wsl,omitempty"`
 }
@@ -642,7 +646,11 @@ func agentNamed(q string) (*agent.Agent, error) {
 // Providers page, the state and the drift each looked at a list of their
 // own beside the one accountLabel looks names up in, every agent built
 // again (~0.2 MB a poll with real accounts). Shared, so read only.
-func heldAgents() []*agent.Agent { return provider.Held("agent.All", agent.All) }
+func heldAgents() []*agent.Agent { return heldAgentsContext(context.Background()) }
+
+func heldAgentsContext(ctx context.Context) []*agent.Agent {
+	return provider.HeldContext(ctx, "agent.All", func() []*agent.Agent { return agent.AllContext(ctx) })
+}
 
 // accountLabel is the name and logo an account is shown with: its agent's,
 // the subscription's for one no agent magpie configures, and a plugin's
@@ -652,6 +660,9 @@ func accountLabel(p provider.Provider) (name, icon string) {
 	a := p.Account
 	if a == nil {
 		return p.Name, p.Icon
+	}
+	if scope, ok := p.ExtensionScope(); ok {
+		return p.Name, sdkProviderIcon(scope.Plugin)
 	}
 	name, icon = a.Agent, "generic"
 	if a.Agent == "factory" {
@@ -843,8 +854,9 @@ func mediaInputs(kinds []string) []string {
 
 type excludedJSON struct {
 	provider.Exclusion
-	Name string `json:"agentName"`
-	Icon string `json:"agentIcon"`
+	Name          string `json:"agentName"`
+	Icon          string `json:"agentIcon"`
+	OwnerRevision string `json:"ownerRevision,omitempty"`
 }
 
 type providersJSON struct {
@@ -868,8 +880,9 @@ type providersJSON struct {
 	// Codex's accounts have, after a switch (provider.CodexAppProjectsShort)
 	CodexProjects bool `json:"codexProjects,omitempty"`
 	// Plugins are the providers the plugins sign in to, for the add sheet
-	Plugins          []pluginSubJSON             `json:"plugins"`
-	SDKSubscriptions []extensionSubscriptionJSON `json:"sdkSubscriptions,omitempty"`
+	Plugins               []pluginSubJSON             `json:"plugins"`
+	SDKSubscriptions      []extensionSubscriptionJSON `json:"sdkSubscriptions,omitempty"`
+	SDKOwnedSubscriptions []string                    `json:"sdkOwnedSubscriptions,omitempty"`
 	// OnPlugins are the built-in subscriptions moved onto their plugins,
 	// which the add sheet offers as the plugin's alone
 	OnPlugins []string `json:"onPlugins,omitempty"`
@@ -882,9 +895,9 @@ type providersJSON struct {
 	// Unmoved are the retired built-ins whose accounts haven't moved onto
 	// their plugins yet, served by nothing until they do, with why
 	Unmoved []provider.MoveCandidate `json:"unmoved,omitempty"`
-	// Withdrawn are the plugins this magpie still has that magpie gives
+	// Withdrawn are the plugins this magpie still has on that magpie gives
 	// to nobody new, for the page to say the risk and what to use instead
-	Withdrawn []plugin.Withdrawal `json:"withdrawn,omitempty"`
+	Withdrawn []withdrawnJSON `json:"withdrawn,omitempty"`
 	// AgyMove are the withdrawn Antigravity plugin's accounts (by email)
 	// that Antigravity (local agy CLI) can take as they are, which it
 	// doesn't have yet (provider.MoveToAgy), and AgyMoved what moving
@@ -1034,16 +1047,19 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, AccountCaps: p.AccountCaps, AccountWindowCaps: p.AccountWindowCaps, AccountWindowAmounts: p.AccountWindowAmounts, AccountNames: p.AccountNames, Headers: p.Headers, ExtraBody: p.ExtraBody, ReplyHeaders: p.ReplyHeaders, PassHeaders: p.PassHeaders, Searches: p.Searches, Cline: p.ClinePinnable(), PinUpstream: p.PinUpstream, Unredacted: p.Unredacted, CountFree: p.CountFree, Billing: p.Billing, BillingKind: p.BillingKind(), InsecureTLS: p.InsecureTLS, TakesInsecureTLS: p.TakesInsecureTLS(), HTTP1: p.HTTP1, ClientCert: tilde(p.ClientCert), ClientKey: tilde(p.ClientKey), ServerCA: tilde(p.ServerCA), TakesClientCert: p.TakesClientCert(), ServerPin: p.ServerPin, TakesServerPin: p.TakesServerPin(), Resolve: p.Resolve, TakesResolve: p.TakesResolve(), Socket: p.Socket, TakesSocket: p.TakesSocket(), LimitRestOff: p.LimitRestOff, UpstreamProviders: p.UpstreamProviders, ImageFilesOff: p.ImageFilesOff, TakesImageFiles: p.TakesImageFiles(), NativeCompaction: p.NativeCompaction, CarriesCompaction: p.CarriesCompaction(), PassUserAgent: !p.MagpieUserAgent, OwnClient: p.OwnClient(), PassErrors: p.PassErrors, TakesPassErrors: p.TakesPassErrors(), AuthHeader: p.AuthHeader, BothAuth: p.BothAuth(), BalanceURL: p.BalanceURL, BalancePath: p.BalancePath, BalanceMethod: p.BalanceMethod, NoBalanceProbe: p.NoBalanceProbe, ModelsURL: p.ModelsURL, ListOff: p.ListsOff(), TakesListOff: p.Account == nil && !p.IsPlugin() && !p.DecideOnly(), TakesModelHeaders: p.Account == nil, DecideAPIKind: p.DecideAPIKind(),
 		Ready: p.Ready(), Chosen: p.PicksOf(avail), Agents: make([]providerAgent, 0, len(agents)),
 		Fallback: p.Fallback, Routing: p.Routing, Sink: p.Sink, UseFirst: p.UseFirst, NoStandIn: p.NoStandIn, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, SwitchOnly: p.SwitchOnly, RestartApp: p.RestartApp, Self: p.SelfAnswered(), KeepSelf: p.KeepSelf, ThisDevice: p.ThisDevice, CapStop: p.CapStop, CapCareful: p.CapCareful, Unlisted: p.Unlisted, NoModels: p.ServesNone(), BestInFamily: p.BestInFamily && len(p.Models) == 0 && !p.NoModels, Off: p.Off, Contexts: p.Contexts,
-		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), MaxAccounts: p.MaxAccounts, PluginAccounts: p.PluginAtOnce(), PriceRate: p.PriceRate, KeyPriceRates: p.KeyPriceRates, TopUpRate: p.TopUpRate, KeyGroupRates: keyGroupRatesOf(p),
+		MaxConcurrency: p.MaxConcurrency, PluginConcurrency: p.PluginConcurrency(), MaxAccounts: p.MaxAccounts, PluginAccounts: p.PluginAtOnce(), PriceRate: p.PriceRate, KeyPriceRates: p.KeyPriceRates, TopUpRate: p.TopUpRate, RateReadHours: p.RateReadHours, KeyGroupRates: keyGroupRatesOf(p), KeyRateFactors: p.KeyRateFactors,
 		RateWindows: p.RateWindows, RateNow: rateNowOf(p, time.Now()),
 		AccountConcurrency: p.AccountConcurrency, AccountWeights: p.AccountWeights, QueueLimit: p.QueueLimit, QueueWait: p.QueueWait, MaxRPM: p.MaxRPM, MaxImages: p.MaxImages,
 		Outputs: provider.OutputsOf(p.ID), Compacts: provider.CompactsOf(p.ID),
 	}
+	var ownerRevision string
 	if scope, ok := p.ExtensionScope(); ok {
-		var err error
-		out.ExtensionOptions, err = extensionProviderOptions().ProviderOptions(context.Background(), scope.Plugin, scope.Provider)
+		_, ownerRevision, _ = provider.ExtensionPublicProvider(scope.Plugin, scope.Provider)
+		options, err := extensionProviderOptions().ProviderOptions(context.Background(), scope.Plugin, scope.Provider)
 		if err != nil {
 			out.ExtensionOptionsError = err.Error()
+		} else if options != nil {
+			out.ExtensionOptions = &extensionProviderOptionsJSON{ProviderOptionsSnapshot: options, OwnerRevision: ownerRevision}
 		}
 	}
 	if p.Account != nil && p.Account.Agent == p.ID {
@@ -1218,7 +1234,7 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		}
 	}
 	if a := p.Account; a != nil {
-		out.Account = &accountJSON{Account: *a, Agent: a.Agent}
+		out.Account = &accountJSON{Account: *a, Agent: a.Agent, OwnerRevision: ownerRevision}
 		out.Account.Name, out.Account.Icon = accountLabel(p)
 		out.Account.Logins = provider.Logins(a.Agent)
 		for _, login := range out.Account.Logins {
@@ -1231,6 +1247,9 @@ func providerInfoWith(p provider.Provider, ls provider.Listing, agents []agentUs
 		}
 		if a.Agent == "claude" {
 			out.Account.WSL = provider.ClaudeInWSL()
+		}
+		if p.IsExtension() && (out.Icon == "" || out.Icon == "generic") {
+			out.Icon = out.Account.Icon
 		}
 		if pp, ok := provider.PluginOf(p.ID); ok && p.IsPlugin() {
 			// a plugin's sign-in: the page follows it by the provider's id
@@ -1585,6 +1604,13 @@ func providersState() providersJSON {
 	s.RoutingOptions = routingOptions()
 	s.OnPlugins = provider.OnPlugins()
 	s.Movable = provider.MovableIDs()
+	for _, id := range s.Movable {
+		if provider.CommunitySubscriptionOwned(id) {
+			s.SDKOwnedSubscriptions = append(s.SDKOwnedSubscriptions, id)
+		}
+	}
+	s.Movable = slices.DeleteFunc(s.Movable, provider.CommunitySubscriptionOwned)
+	s.OnPlugins = slices.DeleteFunc(s.OnPlugins, provider.CommunitySubscriptionOwned)
 	// a retired built-in whose plugin is installed is the plugin's, moved
 	// or not: the add sheet signs in to it through the plugin alone
 	for _, id := range s.Movable {
@@ -1605,11 +1631,11 @@ func providersState() providersJSON {
 		if c.ID == "antigravity" && len(s.AgyMove) > 0 {
 			continue
 		}
-		if provider.BuiltinRetired(c.ID) {
+		if provider.BuiltinRetired(c.ID) && !provider.CommunitySubscriptionOwned(c.ID) {
 			s.Unmoved = append(s.Unmoved, c)
 		}
 	}
-	s.Withdrawn = plugin.WithdrawnKept()
+	s.Withdrawn = withdrawnLines()
 	if err := provider.FileError(); err != nil {
 		s.FileError = err.Error()
 	}
@@ -1623,6 +1649,9 @@ func providersState() providersJSON {
 			// a removed account as its row was named: a plugin's by the
 			// provider it signs in to, not its agent "plugin" (#694)
 			e.Name, e.Icon = accountLabel(p)
+			if scope, ok := p.ExtensionScope(); ok {
+				_, e.OwnerRevision, _ = provider.ExtensionPublicProvider(scope.Plugin, scope.Provider)
+			}
 		} else if a, err := agentNamed(x.Agent); err == nil {
 			e.Name, e.Icon = a.Name, a.Icon
 		}
@@ -2007,6 +2036,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	mux.HandleFunc("POST /api/provider/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {
 			provider.Provider
+			OwnerRevision string `json:"ownerRevision,omitempty"`
 			// Proxy is the proxy its requests go through (#237), "" to
 			// follow the global one; a save that leaves it out keeps it
 			Proxy *string `json:"proxy"`
@@ -2082,8 +2112,12 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			// TopUpRate is what one of a sub2api relay's dollars cost
 			// (@YIXIE233 on X): a number, null or 0 for none; left out,
 			// it is kept
-			TopUpRate    json.RawMessage `json:"topUpRate"`
-			AccountOrder []string        `json:"accountOrder"`
+			TopUpRate json.RawMessage `json:"topUpRate"`
+			// RateReadHours is how often, in hours, its keys' group rates
+			// are read (@YIXIE233 on X): 1 to 168, null or 0 for the
+			// default six; left out, it is kept
+			RateReadHours json.RawMessage `json:"rateReadHours"`
+			AccountOrder  []string        `json:"accountOrder"`
 			// New is set by the editor's Add: the provider is one more, never
 			// one replacing the provider that has its id or name
 			New bool `json:"new"`
@@ -2375,7 +2409,7 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		case "forget":
 			// a removed account signed out for good: adding it back
 			// later signs in afresh rather than bringing it back (#694)
-			if err := provider.ForgetAccount(in.ID); err != nil {
+			if err := provider.ForgetAccountAt(r.Context(), in.ID, req.OwnerRevision); err != nil {
 				fail(rw, err)
 				return
 			}
@@ -2500,11 +2534,25 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				return
 			}
 			in.TopUpRate = topUp
+			every, keepEvery, err := rateReadHoursOf(req.RateReadHours)
+			if err != nil {
+				fail(rw, err)
+				return
+			}
+			in.RateReadHours = every
 			// each key's own rate, by its id (@tnt12231 on X): {} takes
 			// them all off, left out they are kept
 			for k, r := range in.KeyPriceRates {
 				if bad := provider.KeyPriceRateOK(r); bad != "" {
 					fail(rw, fmt.Errorf("%s, not %v (key %s)", bad, r, k))
+					return
+				}
+			}
+			// each key's factor on its read rate (@YIXIE233 on X): {}
+			// takes them all off, left out they are kept
+			for k, f := range in.KeyRateFactors {
+				if bad := provider.KeyRateFactorOK(f); bad != "" {
+					fail(rw, fmt.Errorf("%s, not %v (key %s)", bad, f, k))
 					return
 				}
 			}
@@ -2660,11 +2708,17 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 				if keepTopUp && old != nil {
 					in.TopUpRate = old.TopUpRate
 				}
-				if in.TopUpRate > 0 && (old == nil || old.TopUpRate != in.TopUpRate) {
+				if keepEvery && old != nil {
+					in.RateReadHours = old.RateReadHours
+				}
+				if in.TopUpRate > 0 && (old == nil || old.TopUpRate != in.TopUpRate || old.RateReadHours != in.RateReadHours) {
 					defer provider.ReadKeyRatesSoon()
 				}
 				if in.KeyPriceRates == nil && old != nil {
 					in.KeyPriceRates = old.KeyPriceRates
+				}
+				if in.KeyRateFactors == nil && old != nil {
+					in.KeyRateFactors = old.KeyRateFactors
 				}
 				if keepWins && old != nil {
 					in.RateWindows = old.RateWindows
@@ -3491,18 +3545,23 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 	})
 	// How much of its allowance each of an agent's accounts has used.
 	mux.HandleFunc("GET /api/login/usage", func(rw http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-		defer cancel()
-		// and each account's daily check-in, for its row's Check in now
-		agent := r.URL.Query().Get("agent")
-		writeJSON(rw, provider.LoginCheckins(agent, provider.WithCapped(provider.LoginUsageShown(ctx, agent))))
+		quotas, err := provider.LoginUsageEditor(r.Context(), r.URL.Query().Get("agent"))
+		if r.Context().Err() != nil {
+			return
+		}
+		if err != nil {
+			http.Error(rw, err.Error(), http.StatusGatewayTimeout)
+			return
+		}
+		writeJSON(rw, quotas)
 	})
 	// Switching the account an agent is signed in to, among those magpie
 	// remembers, and forgetting one.
 	mux.HandleFunc("POST /api/login/{action}", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct {
-			Agent, User string
-			Account     sdk.AccountSelection
+			Agent, User   string
+			Account       sdk.AccountSelection
+			OwnerRevision string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
@@ -3520,9 +3579,16 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			}
 		case "forget":
 			if in.Account.ID == "" {
+				if in.Account.ExpectedGeneration != "" || in.OwnerRevision != "" ||
+					strings.HasPrefix(in.Agent, "extension-") || provider.SDKSubscriptionOwns(in.Agent) {
+					fail(rw, errors.New("sign out requires the current SDK account selection"))
+					return
+				}
 				change = func() error { return provider.ForgetLogin(in.Agent, in.User) }
 			} else {
-				change = func() error { return provider.ForgetExtensionLogin(in.Agent, in.Account) }
+				change = func() error {
+					return provider.ForgetExtensionLoginAt(r.Context(), in.Agent, in.Account, in.OwnerRevision)
+				}
 			}
 		case "on", "off":
 			change = func() error { return provider.SetLoginOn(in.Agent, in.User, r.PathValue("action") == "on") }
@@ -3705,6 +3771,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 			fail(rw, err)
 			return
 		}
+		if provider.SDKSubscriptionOwns(in.Agent) {
+			fail(rw, errModuleAuthentication)
+			return
+		}
 		st, err := provider.StartSignInWith(in.Agent, provider.SignInOptions{Site: in.Site, Proxy: in.Proxy, User: in.User})
 		if err != nil {
 			fail(rw, err)
@@ -3768,6 +3838,10 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&in); err != nil {
 			fail(rw, err)
+			return
+		}
+		if provider.SDKSubscriptionOwns(in.Agent) {
+			fail(rw, errModuleAuthentication)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
@@ -4026,6 +4100,14 @@ func providerRoutes(mux *http.ServeMux, w Windows) {
 		}
 		rw.WriteHeader(http.StatusNoContent)
 	})
+	// a page opened whose openings are counted (provider.CountPage): the
+	// Plugins page, where its partners are listed
+	mux.HandleFunc("POST /api/page", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ Page string }
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in)
+		provider.CountPage(in.Page)
+		rw.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /api/open", func(rw http.ResponseWriter, r *http.Request) {
 		var in struct{ URL string }
 		_ = json.NewDecoder(r.Body).Decode(&in)
@@ -4193,6 +4275,25 @@ func topUpRateOf(raw json.RawMessage) (r float64, keep bool, err error) {
 	return *n, false, nil
 }
 
+// rateReadHoursOf is a save's rateReadHours: keep when the save left it
+// out, 0 for null, else the hours.
+func rateReadHoursOf(raw json.RawMessage) (h int, keep bool, err error) {
+	if len(raw) == 0 {
+		return 0, true, nil
+	}
+	var n *int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false, fmt.Errorf("rates are read every whole number of hours, like 3, not %s", raw)
+	}
+	if n == nil {
+		return 0, false, nil
+	}
+	if bad := provider.RateReadHoursOK(*n); bad != "" {
+		return 0, false, fmt.Errorf("%s, not %d", bad, *n)
+	}
+	return *n, false, nil
+}
+
 // keyGroupRatesOf is each of p's keys' group rate read from its relay, by
 // the key's id: nil when none was read.
 func keyGroupRatesOf(p provider.Provider) map[string]float64 {
@@ -4283,4 +4384,30 @@ func fetchedCount(p provider.Provider, ids int) int {
 		return n
 	}
 	return ids
+}
+
+// withdrawnJSON is a withdrawn plugin the page names. Beside is set when
+// the plugin to use instead is on and signed in with every account the
+// withdrawn one has: nothing is left to move, so the page offers to turn
+// the withdrawn one off rather than to use what is in use already (a
+// user signed in to agy-cli was still told to use it).
+type withdrawnJSON struct {
+	plugin.Withdrawal
+	Beside bool `json:"beside,omitempty"`
+}
+
+// withdrawnLines are the withdrawn plugins still on. One turned off
+// sends nothing anywhere, so it gets no line.
+func withdrawnLines() []withdrawnJSON {
+	list := plugin.Load().Plugins
+	var out []withdrawnJSON
+	for _, w := range plugin.WithdrawnKept() {
+		if w.Off {
+			continue
+		}
+		// the plugin to use instead (w.Package), on
+		insteadOn := slices.ContainsFunc(list, func(e plugin.Entry) bool { return !e.Off && plugin.PackageName(e.Spec) == w.Package })
+		out = append(out, withdrawnJSON{Withdrawal: w, Beside: insteadOn && w.ID == "antigravity" && provider.AgyHasEvery()})
+	}
+	return out
 }

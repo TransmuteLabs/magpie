@@ -3,7 +3,6 @@ package extension
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -30,14 +29,30 @@ func (m *Manager) contributionEntries(ctx context.Context) []Installed {
 }
 
 func (m *Manager) readContributionEntries(ctx context.Context) ([]Installed, error) {
+	return m.selectContributions(ctx, nil)
+}
+
+func (m *Manager) selectContributions(ctx context.Context, include func(Installed) bool) ([]Installed, error) {
 	if m == nil || m.isClosed() {
 		return nil, errContributionRevoked
 	}
-	entries, err := m.catalog.list(ctx)
+	var entries []Installed
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		entries = []Installed{}
+		for _, entry := range view.entries {
+			if !activeRoot(entry) || include != nil && !include(entry) {
+				continue
+			}
+			if entry = view.enabledEntry(entry); activeRoot(entry) {
+				entries = append(entries, cloneInstalled(entry))
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return slices.DeleteFunc(entries, func(entry Installed) bool { return !activeRoot(entry) }), nil
+	return entries, nil
 }
 
 func activeRoot(entry Installed) bool {
@@ -45,36 +60,41 @@ func activeRoot(entry Installed) bool {
 }
 
 func (m *Manager) ActiveModule(ctx context.Context, id string) (Installed, error) {
-	entries, err := m.readContributionEntries(ctx)
+	if m == nil || m.isClosed() {
+		return Installed{}, errContributionRevoked
+	}
+	var result Installed
+	err := m.catalog.withView(ctx, func(view catalogView) error {
+		entry, found := view.lookup(id)
+		if found && activeRoot(entry) {
+			entry = view.enabledEntry(entry)
+			if activeRoot(entry) {
+				result = cloneInstalled(entry)
+				return nil
+			}
+		}
+		return errContributionRevoked
+	})
 	if err != nil {
 		return Installed{}, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID == id {
-			return entry, nil
-		}
-	}
-	return Installed{}, errContributionRevoked
+	return result, nil
 }
 
 func registeredContributions[T comparable](ctx context.Context, m *Manager, module string, declared func(sdk.Manifest) []T) []contributionBinding[T] {
+	entries, _ := m.selectContributions(ctx, func(entry Installed) bool {
+		return (module == "" || module == entry.Manifest.ID) && len(declared(entry.Manifest)) > 0
+	})
 	var bindings []contributionBinding[T]
-	for _, entry := range m.contributionEntries(ctx) {
-		if module != "" && entry.Manifest.ID != module {
-			continue
-		}
-		descriptors := declared(entry.Manifest)
-		if len(descriptors) == 0 {
-			continue
-		}
-		config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
+	for _, entry := range entries {
+		config, err := m.runtimeModuleConfigContext(ctx, entry)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil {
 			continue
 		}
-		for _, descriptor := range descriptors {
+		for _, descriptor := range declared(entry.Manifest) {
 			bindings = append(bindings, contributionBinding[T]{
 				Namespace: m.Namespace(), Module: entry.Manifest.ID, Revision: entry.Revision,
 				ConfigVersion: config.Version, Descriptor: descriptor, enableGeneration: entry.EnableGeneration,

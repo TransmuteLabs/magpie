@@ -114,7 +114,7 @@ func TestFakePlugin(t *testing.T) {
 		t.Fatalf("an expired sign-in: %v", err)
 	}
 	a, _ = Authorize(ctx, "fakeco", 1, in, NewAccount)
-	if got, err := Finish(ctx, a.Session, "good"); err != nil || got != (Saved{"fakeco", "fakeco"}) {
+	if got, err := Finish(ctx, a.Session, "good"); err != nil || got.Provider != "fakeco" || got.Account != "fakeco" || got.AuthEpoch == "" {
 		t.Fatalf("Finish = %+v, %v", got, err)
 	}
 	var saved map[string]map[string]any
@@ -253,7 +253,8 @@ func TestPluginAccounts(t *testing.T) {
 	}
 
 	// red again: the same account, its sign-in replaced
-	if again := signIn("red"); again != red {
+	if again := signIn("red"); again.Provider != red.Provider || again.Account != red.Account ||
+		again.AuthEpoch == "" || again.AuthEpoch == red.AuthEpoch {
 		t.Fatalf("signed in again as %+v, not %+v", again, red)
 	}
 	b, _ = os.ReadFile(AuthPath())

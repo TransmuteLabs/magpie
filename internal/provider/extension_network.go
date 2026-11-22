@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/netproxy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -61,7 +62,16 @@ func extensionNetworkContext(ctx context.Context, scope sdk.Scope) (context.Cont
 	if err := netproxy.Held(ctx); err != nil {
 		return ctx, err
 	}
-	provider := Provider{ID: ExtensionProviderID(scope.Plugin, scope.Provider),
-		Account: &Account{User: scope.Account}}
-	return provider.Via(ctx), nil
+	identity, err := readSubscriptionIdentity(ctx, scope)
+	if err != nil {
+		return ctx, err
+	}
+	expected, bound := extensionhost.SubscriptionOwnerRevision(ctx)
+	if !identity.visible || bound && identity.revision != expected {
+		return ctx, errSubscriptionOwnerChanged
+	}
+	if !bound && identity.revision != "" {
+		ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, identity.revision)
+	}
+	return ViaLogin(ctx, identity.provider, identity.user), nil
 }

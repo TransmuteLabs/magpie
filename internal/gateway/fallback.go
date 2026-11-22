@@ -763,6 +763,7 @@ func innerPatience(m provider.Member) int {
 // one asked for, adding to pl's order as it goes: those set aside and
 // those unlisted it gathers for planGroup to put last.
 func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed, hold []provider.Group) []candidate {
+	var current accountIDLookup
 	keys := func(m provider.Member) []candidate {
 		cs, aside, left, barred := perKeyBarred(m.Provider, m.Model, from)
 		// a group the member is reached through that is held to some
@@ -771,10 +772,13 @@ func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, fr
 		// and a member on one account of its own (EastonXvii on X) is
 		// sent on it alone, never on its provider's others
 		if by := append(slices.Clip(hold), m.Via...); m.Account != "" || slices.ContainsFunc(by, func(h provider.Group) bool { return len(h.Accounts) > 0 }) {
+			if current == nil {
+				current = provider.CurrentAccountIDs(context.Background())
+			}
 			out := func(l []candidate) []candidate {
 				return slices.DeleteFunc(l, func(c candidate) bool {
-					own := memberHeld(c, m, g)
-					name := cmp.Or(own, groupHeld(c, by))
+					own := memberHeld(c, m, g, current)
+					name := cmp.Or(own, groupHeld(c, by, current))
 					if name == "" {
 						return false
 					}

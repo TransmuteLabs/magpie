@@ -9,6 +9,7 @@ package provider
 // gateway noted, and a restart doesn't forget it.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -219,17 +220,16 @@ func readServed(path string) map[string]time.Time {
 	return m
 }
 
-// withServed sets each quota's LastServedAt from served, and Last on the
-// latest (on each of them, when a key's plan and balance tie).
-func withServed(qs []Quota, served map[string]time.Time) []Quota {
-	if len(served) == 0 {
-		return qs
-	}
+func quotaReportServed(ctx context.Context, qs []SubscriptionQuota, served map[string]time.Time) time.Time {
 	by := servedBy{served: served}
 	var latest time.Time
 	for i := range qs {
 		q := &qs[i]
-		if at := by.at(q.Provider, q.Kind, q.User); !at.IsZero() {
+		q.LastServedAt = nil
+		if len(served) == 0 {
+			continue
+		}
+		if at := by.at(ctx, q.Provider, q.Kind, q.User); !at.IsZero() {
 			t := at.UTC()
 			q.LastServedAt = &t
 			if at.After(latest) {
@@ -237,12 +237,7 @@ func withServed(qs []Quota, served map[string]time.Time) []Quota {
 			}
 		}
 	}
-	for i := range qs {
-		if qs[i].LastServedAt != nil && qs[i].LastServedAt.Equal(latest) {
-			qs[i].Last = true
-		}
-	}
-	return qs
+	return latest
 }
 
 // servedBy finds when a card's account, plan or key last answered, in
@@ -254,7 +249,7 @@ type servedBy struct {
 
 // at is when the card of provider's kind ("subscription", "plan" or
 // "balance") told by user last answered; zero when it hasn't.
-func (s *servedBy) at(provider, kind, user string) time.Time {
+func (s *servedBy) at(ctx context.Context, provider, kind, user string) time.Time {
 	var at time.Time
 	latestOf := func(id string) {
 		if t, ok := s.served[id]; ok && t.After(at) {
@@ -276,7 +271,7 @@ func (s *servedBy) at(provider, kind, user string) time.Time {
 		// a plan's or balance's key, by the name or mask it is told by
 		if s.keys == nil {
 			s.keys = map[string][]KeyInfo{}
-			for _, p := range All() {
+			for _, p := range sharedAllContext(ctx) {
 				s.keys[p.ID] = p.KeyList()
 			}
 		}
@@ -291,11 +286,11 @@ func (s *servedBy) at(provider, kind, user string) time.Time {
 
 // cardsServed sets LastServedAt on the Usage page's cards, this
 // computer's own (a remote magpie's answer there, not here), as
-// withServed does on the gateway's: what the Usage page and the tray
+// quotaReportServed does on the gateway's: what the Usage page and the tray
 // panel show in full, and what the menu bar's "account in use" follows,
 // is the account that answered last. Each is a copy; the caches the
 // cards come from are left as they were.
-func cardsServed(subs, plans, balances []SubscriptionQuota, served map[string]time.Time) []SubscriptionQuota {
+func cardsServed(ctx context.Context, subs, plans, balances []SubscriptionQuota, served map[string]time.Time) []SubscriptionQuota {
 	out := make([]SubscriptionQuota, 0, len(subs)+len(plans)+len(balances))
 	by := servedBy{served: served}
 	for _, g := range []struct {
@@ -303,8 +298,9 @@ func cardsServed(subs, plans, balances []SubscriptionQuota, served map[string]ti
 		qs   []SubscriptionQuota
 	}{{"subscription", subs}, {"plan", plans}, {"balance", balances}} {
 		for _, q := range g.qs {
+			q.Kind = g.kind
 			if q.From == "" && len(served) > 0 {
-				if at := by.at(q.Provider, g.kind, q.User); !at.IsZero() {
+				if at := by.at(ctx, q.Provider, g.kind, q.User); !at.IsZero() {
 					t := at.UTC()
 					q.LastServedAt = &t
 				}

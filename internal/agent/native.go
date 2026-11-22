@@ -42,11 +42,14 @@ func (e *RuntimeUnavailableError) Error() string {
 func (e *RuntimeUnavailableError) Unwrap() error { return e.Cause }
 
 type NativeState struct {
-	Provider string                 `json:"provider"`
-	Detail   string                 `json:"detail,omitempty"`
-	Runtime  string                 `json:"runtime"`
-	Fields   map[string]NativeField `json:"fields"`
+	Provider      string                 `json:"provider"`
+	Detail        string                 `json:"detail,omitempty"`
+	Runtime       string                 `json:"runtime"`
+	Fields        map[string]NativeField `json:"fields"`
+	NeedsRecovery bool                   `json:"needsRecovery,omitempty"`
 }
+
+func (state NativeState) Wired() bool { return state.Provider == "connected" }
 
 type NativeField struct {
 	Value  string `json:"value"`

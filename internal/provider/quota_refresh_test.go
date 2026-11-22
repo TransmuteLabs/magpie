@@ -2,16 +2,186 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/yetone/magpie/internal/agentenv"
+	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/netproxy"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+type storedQuotaHistoryHost struct {
+	*fixtureExtensionProviderHost
+	afterRead func(context.Context)
+}
+
+func (host storedQuotaHistoryHost) ModuleConfig(ctx context.Context, id string) (sdk.ConfigSnapshot, error) {
+	host.afterRead(ctx)
+	return host.fixtureExtensionProviderHost.ModuleConfig(ctx, id)
+}
+
+func TestLoginUsageHistoryHonorsCallerDeadline(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	id := ExtensionProviderID(host.manifest.ID, "vendor")
+	lock, err := os.OpenFile(filepath.Join(host.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	var vendorAnswered atomic.Bool
+	host.call = func(_ context.Context, method string, scope sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		if method != sdk.MethodProviderUsage || scope.Account != "alice" {
+			t.Errorf("unexpected quota call %s for %q", method, scope.Account)
+		}
+		vendorAnswered.Store(true)
+		return json.RawMessage(`{"windows":[{"name":"quota","used":40}]}`), nil
+	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		deadline, _ := ctx.Deadline()
+		held := make(chan bool, 1)
+		hold := sync.OnceFunc(func() {
+			ok, err := filelock.TryLock(lock)
+			held <- ok && err == nil
+		})
+		release := sync.OnceFunc(func() { filelock.Unlock(lock) })
+		defer release()
+		providerExtensionHost = func() extensionProviderHost {
+			return storedQuotaHistoryHost{host, func(ctx context.Context) {
+				limit, _ := ctx.Deadline()
+				if vendorAnswered.Load() && limit.Equal(deadline) {
+					hold()
+				}
+			}}
+		}
+		done := make(chan map[string]SubscriptionQuota, 1)
+		go func() { done <- someLoginUsage(ctx, id, "alice") }()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		select {
+		case locked := <-held:
+			if !locked {
+				t.Error("could not lock the Store after validating the quota")
+			}
+		default:
+			t.Error("quota did not reach the final caller-side proof")
+		}
+		select {
+		case readings := <-done:
+			if result := readings["alice"]; len(result.Windows) != 1 || result.Windows[0].Used != 40 {
+				t.Errorf("deadline lost a completed reading: %+v", result)
+			}
+		default:
+			release()
+			<-done
+			t.Error("account quota history waited for the Store after the caller expired")
+		}
+	})
+	if _, err := os.Stat(quotaHistPath()); !os.IsNotExist(err) {
+		t.Errorf("expired read published quota history: %v", err)
+	}
+	providerExtensionHost = func() extensionProviderHost { return host }
+	reading := someLoginUsage(t.Context(), id, "alice")["alice"]
+	if len(reading.Windows) != 1 || reading.Windows[0].Used != 40 {
+		t.Fatalf("account quota did not recover: %+v", reading)
+	}
+	if _, err := os.Stat(quotaHistPath()); err != nil {
+		t.Fatal("fresh read did not publish quota history:", err)
+	}
+}
+
+func TestRefreshReportHistoryHonorsCallerDeadline(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	id := ExtensionProviderID(host.manifest.ID, "vendor")
+	if err := Save(Provider{ID: id, Proxy: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	previous := SubscriptionQuota{Provider: id, User: "alice", Windows: []QuotaWindow{{Name: "quota", Used: 25}}}
+	warmSubscriptionUsageForTest(t, previous)
+	lock := filelock.Mutex{Path: func() string { return filepath.Join(host.Namespace(), "private", ".lock") }}
+	var vendorAnswered atomic.Bool
+	host.call = func(_ context.Context, method string, scope sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		if method != sdk.MethodProviderUsage || scope.Account != "alice" {
+			t.Errorf("unexpected quota call %s for %q", method, scope.Account)
+		}
+		vendorAnswered.Store(true)
+		return json.RawMessage(`{"windows":[{"name":"quota","used":40}]}`), nil
+	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		deadline, _ := ctx.Deadline()
+		held := make(chan func(), 1)
+		hold := sync.OnceFunc(func() {
+			if lock.LockCheckedContext(ctx) {
+				held <- lock.Unlock
+			} else {
+				held <- nil
+			}
+		})
+		providerExtensionHost = func() extensionProviderHost {
+			return storedQuotaHistoryHost{host, func(ctx context.Context) {
+				limit, _ := ctx.Deadline()
+				if vendorAnswered.Load() && limit.Equal(deadline) && netproxy.Choice(ctx) == "direct" {
+					hold()
+				}
+			}}
+		}
+		done := make(chan []Quota, 1)
+		go func() { done <- RefreshReport(ctx, id, "alice", time.Now()) }()
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		release := func() {}
+		select {
+		case unlock := <-held:
+			if unlock == nil {
+				t.Error("fixture could not hold the Store after the quota read")
+			} else {
+				release = sync.OnceFunc(unlock)
+			}
+		default:
+			t.Error("refresh did not reach the post-vendor proof")
+		}
+		defer release()
+		select {
+		case cards := <-done:
+			if len(cards) != 0 {
+				t.Errorf("expired refresh returned %d cards", len(cards))
+			}
+		default:
+			release()
+			<-done
+			t.Error("quota history or report naming outlasted the caller deadline")
+		}
+	})
+	cache := &subscriptionUsageCache
+	cache.Lock()
+	cards := cache.data
+	cache.Unlock()
+	if len(cards) != 1 || len(cards[0].Windows) != 1 || cards[0].Windows[0].Used != 25 {
+		t.Errorf("expired refresh replaced the previous card: %+v", cards)
+	}
+	if _, err := os.Stat(quotaHistPath()); !os.IsNotExist(err) {
+		t.Errorf("expired refresh recorded quota history: %v", err)
+	}
+	providerExtensionHost = func() extensionProviderHost { return host }
+	if cards := RefreshReport(t.Context(), id, "alice", time.Now()); len(cards) != 1 ||
+		len(cards[0].Windows) != 1 || cards[0].Windows[0].Used != 40 {
+		t.Fatalf("a later refresh failed to recover: %+v", cards)
+	}
+}
 
 // A card's refresh button reads that card alone (Hu9956, #840): the key
 // it is for is asked again and the cache has its new figure, while the

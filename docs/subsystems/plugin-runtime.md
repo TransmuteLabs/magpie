@@ -35,6 +35,12 @@ adapts those parts to the same page/panel renderer, error boundary, read
 permissions and [`pagebridge.js`](../../internal/gui/pagebridge.js).
 Shipping adjacent assets alone does not register a page.
 
+An SDK `provider` panel appears under the current public IDs of its
+module's visible inference providers. An optional `providers` list in that
+panel names its module's declared provider IDs and narrows the eligible set.
+Omitting the field selects all eligible providers. An empty or invalid list
+selects none. An ownership transfer or rollback refreshes the panel list.
+
 Named bindings grant a particular frame its module actions or ready service
 endpoint. Refs bind package revision and config version, and off/update/config
 change invalidates them. The existing HTTP/SSE proxy holds a root lease for
@@ -49,10 +55,19 @@ frozen root `package.json`, with the declared window metadata as a
 fallback. Older windows can supply their page title. The row describes its
 checked page, panels and served providers even when account discovery has
 yet to complete. The list reads package metadata without warming a module.
+The Installed Pages filter follows standalone pages. The Sessions filter
+includes SDK modules that declare converters, session sources or storage
+sources.
 Enabled rows join the ordinary Providers snapshot by exact provider ID for
 account status and available sign-in grants. Sign in opens the same
 Providers flow used by the Add sheet. Options uses the module's declared
 settings schema.
+
+Installed lists enabled tool declarations under their ordinary MCP names.
+Once Library adopts `extension:<id>`, Give to agents and Hide from agents
+control that server. The desktop window lists local-owner tools, and the web
+listing contains shared tools. The Library switch leaves the tool's
+[MCP discovery and execution scope](plugin-tools.md) in effect.
 
 See [composite ownership](../adr/0005-composite-module-contract.md) for the
 descriptor, lifecycle and proof contract, and the
@@ -484,8 +499,12 @@ starts a Bun host.
   of the Agents page), `usage` (the end of Usage's Overview), `sessions`
   (under the Sessions list), `settings` (a
   Plugins tab in Settings, shown only while a panel is in it, in the tab
-  strip and in the sidebar of a wide window) and `provider` (each saved
-  provider's editor, told `{provider: {id, name}}`). `file` is an .html in
+  strip and in the sidebar of a wide window) and `provider` (a provider's
+  editor, told `{provider: {id, name}}`: a row of the form before
+  Advanced, the title in the names column; the panel lists the ids of the
+  providers its plugin gives, from `plugin.Listed()`, and shows only in
+  their editors, or in every saved provider's when the plugin gives none).
+  `file` is an .html in
   the plugin's folder (`plugin.FileIn`). `GET /api/plugin-panels` lists an
   on plugin's panels in plugins.json order, each with a token of its own
   (`pageToken(spec + "\x00panel\x00" + i)`), served under the same policy

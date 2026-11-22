@@ -89,7 +89,7 @@ func TestCancelledSignInSavesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := Finish(ctx, a.Session, ""); err != nil || got != (Saved{"signinend", "signinend"}) {
+	if got, err := Finish(ctx, a.Session, ""); err != nil || got.Provider != "signinend" || got.Account != "signinend" || got.AuthEpoch == "" {
 		t.Fatalf("Finish = %+v, %v", got, err)
 	}
 	if b, _ := os.ReadFile(AuthPath()); !strings.Contains(string(b), `"tok-late"`) {

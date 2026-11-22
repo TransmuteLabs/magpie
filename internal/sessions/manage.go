@@ -354,7 +354,8 @@ func listAgentWith(agent string, all []file, quick bool) []Managed {
 	}
 	copies, branches := ccFamily(mine)
 	copyIDs := copiesByKeeper(copies, groups)
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	titles := codexTitleOf()
 	out := []Managed{}
 	for k, fs := range groups {
 		if copies[k] != "" {
@@ -382,6 +383,7 @@ func listAgentWith(agent string, all []file, quick bool) []Managed {
 		}
 		out = append(out, m)
 	}
+	releasePrices()
 	if agent == "codex" {
 		codexProviders(out, groups)
 		out = keptSubagents(out)
@@ -525,13 +527,15 @@ func Delete(agent, id string) (Trashed, error) {
 	var fs []file
 	var s Session
 	key := ""
-	price, titles := pricer(), codexTitleOf()
+	price, releasePrices := pricer()
+	titles := codexTitleOf()
 	for k, g := range groups {
 		if one, _ := assembleListed(g, price, titles); one.ID == id {
 			fs, s, key = g, one, k
 			break
 		}
 	}
+	releasePrices()
 	if len(fs) == 0 {
 		return Trashed{}, errors.New("no such session")
 	}

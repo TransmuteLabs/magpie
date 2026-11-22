@@ -5,42 +5,42 @@ import (
 	"errors"
 	"time"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/netproxy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const extensionRefreshLead = time.Minute
 
+func extensionRefreshDue(expiresAt int64) bool {
+	return expiresAt != 0 && expiresAt <= time.Now().Add(extensionRefreshLead).UnixMilli()
+}
+
 func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount, error) {
-	if err := binding.check(ctx); err != nil {
+	selected, err := binding.checkedSelection(ctx, binding.manifest.Contract.Version.Minor >= 9)
+	if err != nil {
 		return nil, err
 	}
-	if binding.manifest.Contract.Version.Minor >= 9 {
-		if err := binding.checkModelRevision(ctx); err != nil {
-			return nil, err
-		}
+	return binding.prepareSelection(ctx, selected)
+}
+
+func (binding *extensionAccount) prepareSelection(ctx context.Context, selected extensionSelection) (*extensionAccount, error) {
+	if selected.scope.Generation != binding.currentScope().Generation {
+		err := &sdk.Error{Code: "stale_generation", Message: "Extension account generation changed."}
+		extensionSelectionFailure(ctx, selected.scope, err)
+		return nil, err
 	}
 	origin := binding
 	snapshot := *binding
-	snapshot.scope, snapshot.generation = binding.currentScope(), nil
+	snapshot.scope, snapshot.generation = selected.scope, nil
 	binding = &snapshot
 	if binding.scope.Account == "" || !binding.manifest.Contract.Has(sdk.AccountAuth) {
 		return binding, nil
 	}
-	account, err := binding.host.Store().GetAccountContext(ctx, binding.scope.Plugin, binding.scope.Provider, binding.scope.Account)
-	if err != nil {
-		extensionSelectionFailure(ctx, binding.scope, err)
-		return nil, err
-	}
-	if account.Generation != binding.scope.Generation {
-		err := &sdk.Error{Code: "stale_generation", Message: "Extension account generation changed."}
-		extensionSelectionFailure(ctx, binding.scope, err)
-		return nil, err
-	}
-	if account.ExpiresAt == 0 || account.ExpiresAt > time.Now().Add(extensionRefreshLead).UnixMilli() {
+	if !extensionRefreshDue(selected.expiresAt) {
 		return binding, nil
 	}
-	ctx, err = extensionNetworkContext(ctx, binding.scope)
+	ctx, err := extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, binding.identity().revision), binding.scope)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount
 	}
 	prepared := *binding
 	prepared.scope.Generation = current.Generation
-	if err := prepared.check(ctx); err != nil {
+	if err := prepared.checkSelected(ctx, binding.manifest.Contract.Version.Minor >= 9); err != nil {
 		return nil, err
 	}
 	if origin.generation != nil {

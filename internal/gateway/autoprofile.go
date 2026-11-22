@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -32,13 +34,19 @@ const (
 	profileMemory     = 1536 << 20
 	profilePeakStep   = 128 << 20
 	profileCPUBytes   = 1 << 20
-	profileHeapBytes  = 4 << 20
+	profileHeapBytes  = 16 << 20
 	profileKeep       = 3
 	profilePrefix     = "magpie-incident-"
 	profileTimeFormat = "20060102T150405.000000000Z"
+
+	profileBaselineFile = ".magpie-heap-baseline.pb.gz"
+	profileBeforeFile   = "heap-before.pb.gz"
+	profilePeakFile     = "heap-peak.pb.gz"
+	profileAfterFile    = "heap-after.pb.gz"
 )
 
 var autoProfiling atomic.Bool
+var errProfileHeapLimit = fmt.Errorf("heap profile exceeds %d bytes", profileHeapBytes)
 
 type profileBuffer struct {
 	bytes.Buffer
@@ -53,6 +61,29 @@ func (buf *profileBuffer) Write(data []byte) (int, error) {
 		return len(data), nil
 	}
 	return buf.Buffer.Write(data)
+}
+
+type profileHeapWriter struct {
+	file  io.Writer
+	bytes int64
+	err   error
+}
+
+func (writer *profileHeapWriter) Write(data []byte) (int, error) {
+	if writer.err != nil {
+		return 0, writer.err
+	}
+	if int64(len(data)) > profileHeapBytes-writer.bytes {
+		writer.err = errProfileHeapLimit
+		return 0, writer.err
+	}
+	size, err := writer.file.Write(data)
+	writer.bytes += int64(size)
+	if err == nil && size != len(data) {
+		err = io.ErrShortWrite
+	}
+	writer.err = err
+	return size, err
 }
 
 type profileSample struct {
@@ -76,6 +107,23 @@ type profileSliceData struct {
 	body []byte
 }
 
+type profileHeapFile struct {
+	At    time.Time `json:"at"`
+	Bytes int64     `json:"bytes"`
+}
+
+type profileHeapAttempt struct {
+	At    time.Time `json:"at"`
+	Bytes int64     `json:"bytes"`
+	Error string    `json:"error,omitempty"`
+}
+
+type profileHeapStatus struct {
+	Attempt   *profileHeapAttempt `json:"attempt,omitempty"`
+	File      *profileHeapFile    `json:"file,omitempty"`
+	CopyError string              `json:"copyError,omitempty"`
+}
+
 type profileIncident struct {
 	PID        int            `json:"pid"`
 	Version    string         `json:"version"`
@@ -85,6 +133,8 @@ type profileIncident struct {
 	CPUPeak    profileSample  `json:"cpuPeak"`
 	End        *profileSample `json:"end,omitempty"`
 	Recovered  bool           `json:"recovered"`
+
+	HeapProfiles map[string]profileHeapStatus `json:"heapProfiles,omitempty"`
 
 	dir            string
 	unlock         func()
@@ -97,8 +147,9 @@ type autoProfileRecorder struct {
 	current      *profileBuffer
 	currentSince time.Time
 	history      []profileSliceData
-	baseline     []byte
-	baselineAt   time.Time
+	baseline     profileHeapStatus
+	baselineInfo os.FileInfo
+	writeHeap    func(io.Writer) error
 	nextCapture  time.Time
 	incident     *profileIncident
 }
@@ -169,6 +220,7 @@ func (recorder *autoProfileRecorder) stopCPU() {
 func (recorder *autoProfileRecorder) run(stop <-chan struct{}) {
 	clock := time.NewTicker(profileTick)
 	defer clock.Stop()
+	defer recorder.clearBaseline()
 	lastAt := time.Now()
 	lastCPU, lastKnown := processCPU()
 	gauges := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
@@ -224,19 +276,19 @@ func (recorder *autoProfileRecorder) observe(sample profileSample) bool {
 		if memory > incident.MemoryPeak.memory() {
 			incident.MemoryPeak = sample
 		}
-		if memory >= incident.heapPeakMemory+profilePeakStep {
-			incident.heapPeakMemory = memory
-			incident.write("heap-peak.pb.gz", autoHeap())
-			incident.save()
-		}
 		if sample.CPUPercent > incident.CPUPeak.CPUPercent {
 			incident.CPUPeak = sample
+		}
+		if memory >= incident.heapPeakMemory+profilePeakStep {
+			incident.heapPeakMemory = memory
+			recorder.captureIncidentHeap(profilePeakFile, sample.At)
+			incident.save()
 		}
 		age := sample.At.Sub(incident.Trigger.At)
 		return age >= profileDeadline || (age >= profileFollow && !sample.high())
 	}
 	if !sample.high() {
-		if sample.At.Sub(recorder.baselineAt) >= profileBaseline {
+		if recorder.baseline.Attempt == nil || sample.At.Sub(recorder.baseline.Attempt.At) >= profileBaseline {
 			recorder.takeBaseline(sample.At)
 		}
 		return false
@@ -251,47 +303,190 @@ func (recorder *autoProfileRecorder) observe(sample profileSample) bool {
 		return false
 	}
 	recorder.incident = incident
-	if !recorder.baselineAt.IsZero() {
-		stamp := recorder.baselineAt
-		incident.BaselineAt = &stamp
-	}
 	incident.save()
 	for _, slice := range recorder.history {
 		incident.write(slice.name, slice.body)
 	}
-	incident.write("heap-before.pb.gz", recorder.baseline)
-	incident.write("heap-peak.pb.gz", autoHeap())
+	recorder.copyBaseline()
+	recorder.captureIncidentHeap(profilePeakFile, sample.At)
+	incident.save()
 	log.Printf("auto profile: capture %s", incident.dir)
 	return false
 }
 
 func (recorder *autoProfileRecorder) takeBaseline(at time.Time) {
-	if baseline := autoHeap(); baseline != nil {
-		recorder.baseline, recorder.baselineAt = baseline, at
+	path := filepath.Join(recorder.dir, profileBaselineFile)
+	unlock, locked := filelock.Lock(path+".lock", 0)
+	if !locked {
+		recorder.baseline.Attempt = heapProfileAttempt(path, at, 0, errors.New("couldn't lock the heap baseline"))
+		return
 	}
+	defer unlock()
+	if info := recorder.captureHeap(path, at, &recorder.baseline); info != nil {
+		recorder.baselineInfo = info
+		if closed, err := regularProfileFile(path); err == nil && os.SameFile(info, closed) {
+			recorder.baselineInfo = closed
+		}
+	}
+}
+
+func (recorder *autoProfileRecorder) clearBaseline() {
+	if recorder.baselineInfo == nil {
+		return
+	}
+	path := filepath.Join(recorder.dir, profileBaselineFile)
+	unlock, locked := filelock.Lock(path+".lock", 0)
+	if !locked {
+		return
+	}
+	defer unlock()
+	if info, err := regularProfileFile(path); err == nil && recorder.ownsBaseline(info) {
+		if err := os.Remove(path); err != nil {
+			log.Printf("auto profile: %v", err)
+		}
+	}
+}
+
+func (recorder *autoProfileRecorder) ownsBaseline(info os.FileInfo) bool {
+	expected := recorder.baselineInfo
+	return expected != nil && os.SameFile(expected, info) &&
+		info.Size() == expected.Size() && info.ModTime().Equal(expected.ModTime())
+}
+
+func (recorder *autoProfileRecorder) copyBaseline() {
+	status := profileHeapStatus{Attempt: recorder.baseline.Attempt}
+	if recorder.baseline.File != nil {
+		dest := filepath.Join(recorder.incident.dir, profileBeforeFile)
+		_, _, err := writeHeapProfileFile(dest, recorder.readBaseline)
+		if err != nil {
+			status.CopyError = err.Error()
+			log.Printf("auto profile: %s: %v", dest, err)
+		} else {
+			status.File = recorder.baseline.File
+			recorder.incident.BaselineAt = &status.File.At
+		}
+	}
+	if status.Attempt != nil {
+		recorder.incident.HeapProfiles[profileBeforeFile] = status
+	}
+}
+
+func (recorder *autoProfileRecorder) readBaseline(dst io.Writer) error {
+	path := filepath.Join(recorder.dir, profileBaselineFile)
+	info, err := regularProfileFile(path)
+	if err != nil {
+		return err
+	}
+	if !recorder.ownsBaseline(info) {
+		return errors.New("the heap baseline was replaced")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return err
+	}
+	if !recorder.ownsBaseline(info) {
+		return errors.New("the heap baseline was replaced")
+	}
+	size, err := io.Copy(dst, file)
+	if err == nil && size != info.Size() {
+		err = io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 func (recorder *autoProfileRecorder) finish(sample profileSample, recovered bool) {
 	incident := recorder.incident
 	defer incident.unlock()
 	incident.End, incident.Recovered = &sample, recovered
-	incident.write("heap-after.pb.gz", autoHeap())
+	recorder.captureIncidentHeap(profileAfterFile, sample.At)
 	incident.save()
 	recorder.incident = nil
 	recorder.nextCapture = sample.At.Add(profileCooldown)
 }
 
-func autoHeap() []byte {
-	buffer := &profileBuffer{limit: profileHeapBytes}
-	if err := pprof.WriteHeapProfile(buffer); err != nil {
-		log.Printf("auto profile: %v", err)
-		return nil
+func (recorder *autoProfileRecorder) captureIncidentHeap(name string, at time.Time) {
+	incident := recorder.incident
+	status := incident.HeapProfiles[name]
+	recorder.captureHeap(filepath.Join(incident.dir, name), at, &status)
+	incident.HeapProfiles[name] = status
+}
+
+func (recorder *autoProfileRecorder) captureHeap(path string, at time.Time, status *profileHeapStatus) os.FileInfo {
+	writeHeap := recorder.writeHeap
+	if writeHeap == nil {
+		writeHeap = pprof.WriteHeapProfile
 	}
-	if buffer.exceeded {
-		log.Printf("auto profile: heap snapshot exceeded %d bytes", profileHeapBytes)
-		return nil
+	info, size, err := writeHeapProfileFile(path, writeHeap)
+	status.Attempt = heapProfileAttempt(path, at, size, err)
+	if err == nil {
+		status.File = &profileHeapFile{At: at, Bytes: size}
 	}
-	return buffer.Bytes()
+	return info
+}
+
+func heapProfileAttempt(path string, at time.Time, size int64, err error) *profileHeapAttempt {
+	attempt := &profileHeapAttempt{At: at, Bytes: size}
+	if err != nil {
+		attempt.Error = err.Error()
+		log.Printf("auto profile: %s: %v", path, err)
+	}
+	return attempt
+}
+
+func regularProfileFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return info, err
+}
+
+func writeHeapProfileFile(path string, write func(io.Writer) error) (os.FileInfo, int64, error) {
+	if _, err := regularProfileFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, 0, err
+	}
+	temp := path + ".part"
+	if _, err := regularProfileFile(temp); err == nil {
+		if err := os.Remove(temp); err != nil {
+			return nil, 0, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, 0, err
+	}
+	file, err := os.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, 0, err
+	}
+	writer := &profileHeapWriter{file: file}
+	err = write(writer)
+	if writer.err != nil {
+		err = writer.err
+	}
+	if err == nil && writer.bytes == 0 {
+		err = errors.New("empty heap profile")
+	}
+	var info os.FileInfo
+	if err == nil {
+		info, err = file.Stat()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(temp, path)
+	}
+	if err != nil {
+		if removeErr := os.Remove(temp); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, removeErr)
+		}
+		return nil, writer.bytes, err
+	}
+	return info, writer.bytes, nil
 }
 
 func openProfileIncident(root, version string, sample profileSample) (*profileIncident, error) {
@@ -310,7 +505,8 @@ func openProfileIncident(root, version string, sample profileSample) (*profileIn
 	}
 	return &profileIncident{
 		PID: os.Getpid(), Version: version, Trigger: sample, MemoryPeak: sample, CPUPeak: sample,
-		dir: dir, unlock: unlock, heapPeakMemory: sample.memory(),
+		HeapProfiles: make(map[string]profileHeapStatus, 3),
+		dir:          dir, unlock: unlock, heapPeakMemory: sample.memory(),
 	}, nil
 }
 
@@ -363,7 +559,7 @@ func removeProfileIncident(dir string) error {
 
 func profileArtifact(name string) bool {
 	switch name {
-	case "incident.json", "heap-before.pb.gz", "heap-peak.pb.gz", "heap-after.pb.gz":
+	case "incident.json", profileBeforeFile, profilePeakFile, profileAfterFile:
 		return true
 	}
 	stamp, ok := strings.CutPrefix(name, "cpu-")

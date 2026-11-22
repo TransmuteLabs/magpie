@@ -6,11 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/desktopiso"
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -91,11 +93,8 @@ var saveDesktopIsolatedClaude = func(on, chosen bool) error {
 // off and no Claude-Magpie-3p yet; one made before, with chats in that
 // folder, keeps the ~/.claude its Code tab had, and a choice the user
 // made either way stays theirs.
-func desktopIsoClaudeDefault(iso desktopPaths) error {
-	if desktopIsolatedOn() || isDir(iso.dir3p) || desktopIsolatedClaudeOn() || desktopIsolatedClaudeChosen() {
-		return nil
-	}
-	return saveDesktopIsolatedClaude(true, false)
+func desktopIsoClaudeDefault(iso desktopPaths) bool {
+	return !desktopIsolatedOn() && !isDir(iso.dir3p) && !desktopIsolatedClaudeOn() && !desktopIsolatedClaudeChosen()
 }
 
 // desktopIsolatedFrom marks a Claude Magpie that the user's own Desktop's
@@ -142,15 +141,6 @@ func DesktopTwinCode(a *Agent) bool {
 	return ok && desktopWired(iso)
 }
 
-// desktopIsoClaudeArg is the folder Claude Magpie.app is made with: its
-// own while the user turned it on, "" for ~/.claude.
-func desktopIsoClaudeArg(home string) string {
-	if desktopIsolatedClaudeOn() {
-		return desktopIsolatedClaudeDir(home)
-	}
-	return ""
-}
-
 // desktopClaudeRow is the Claude Code row of the isolated Desktop's
 // folder, as claudeDirAgents makes it.
 func desktopClaudeRow(home string) *Agent {
@@ -167,22 +157,6 @@ func desktopClaudeSync(home string) {
 	if isDir(desktopIsolatedClaudeDir(home)) {
 		_ = desktopClaudeRow(home).Sync()
 	}
-}
-
-// desktopIsoClaudeMake makes the isolated Desktop's Claude Code folder,
-// with an empty settings.json, which makes it a Claude Code's folder to
-// the Agents page and gives magpie the file to write; one there already
-// is left as it is.
-func desktopIsoClaudeMake(home string) error {
-	dir := desktopIsolatedClaudeDir(home)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	f := filepath.Join(dir, "settings.json")
-	if _, err := os.Lstat(f); errors.Is(err, os.ErrNotExist) {
-		return os.WriteFile(f, []byte("{}\n"), 0o600)
-	}
-	return nil
 }
 
 // DesktopIsolated is the isolated Desktop as it is here: whether it can
@@ -215,26 +189,36 @@ func DesktopIsolatedHere() (DesktopIsolated, bool) {
 // again. The folder itself, with what Claude Code keeps in it, stays when
 // turned off.
 func SetDesktopIsolatedClaude(home string, on bool) error {
-	if desktopdir.Isolated(desktopdir.OS, home) == "" {
+	iso, ok := desktopIsolatedSet(desktopdir.OS, home, os.Getenv)
+	if !ok {
 		return ErrDesktopIsolatedOS
 	}
+	var claudeDir, codeSettings string
+	var files []extension.LinkedActionFile
 	if on {
-		if err := desktopIsoClaudeMake(home); err != nil {
-			return err
+		claudeDir = desktopIsolatedClaudeDir(home)
+		codeSettings = filepath.Join(claudeDir, "settings.json")
+		files = append(files, extension.LinkedActionFile{Name: codeSettings, Path: codeSettings, Private: true})
+	}
+	save := func() error { return saveDesktopIsolatedClaude(on, true) }
+	commit := func() error {
+		if desktopiso.Here(home) == "" {
+			return save()
 		}
-	}
-	if err := saveDesktopIsolatedClaude(on, true); err != nil {
-		return err
-	}
-	if desktopiso.Here(home) != "" {
 		app := desktopClaudeApp()
 		if app == "" {
 			return ErrDesktopNoApp
 		}
-		iso, _ := desktopIsolatedSet(desktopdir.OS, home, os.Getenv)
-		if _, err := desktopIsoAdd(home, app, iso.dir3p, desktopIsoClaudeArg(home)); err != nil {
-			return err
+		_, err := desktopIsoAdd(home, app, iso.dir3p, claudeDir, save)
+		return err
+	}
+	if err := desktopSettingsAction(nil, commit, func(draft *desktopDraft) error {
+		if on && !draft.files[codeSettings].Exists {
+			draft.changes[codeSettings] = []byte("{}\n")
 		}
+		return nil
+	}, files...); err != nil {
+		return err
 	}
 	desktopClaudeSync(home)
 	return nil
@@ -257,19 +241,12 @@ var desktopClaudeApp = func() string {
 	return ""
 }
 
-// desktopIsoAdd is desktopiso.Add; a test sets it, so no app is
+// desktopIsoAdd is desktopiso.AddWithCommit; a test sets it, so no app is
 // registered with Launch Services.
-var desktopIsoAdd = desktopiso.Add
+var desktopIsoAdd = desktopiso.AddWithCommit
 
 // saveDesktopIsolated keeps the user's choice; a var for tests.
-var saveDesktopIsolated = func(on bool) error {
-	s, err := settings.LoadChecked()
-	if err != nil {
-		return err
-	}
-	s.DesktopIsolated = on
-	return settings.Save(s)
-}
+var saveDesktopIsolated = settings.SetDesktopIsolation
 
 // SetDesktopIsolated turns the isolated Desktop on or off for home. On:
 // Claude Magpie.app is made (made new, with a Claude Code folder of its
@@ -292,64 +269,80 @@ func SetDesktopIsolated(home string, on bool) (string, error) {
 		if app == "" {
 			return "", ErrDesktopNoApp
 		}
-		if err := desktopIsoClaudeDefault(iso); err != nil {
-			return "", err
+		defaultClaude, currentClaude := desktopIsoClaudeDefault(iso), desktopIsolatedClaudeOn()
+		var claudeDir, codeSettings string
+		var files []extension.LinkedActionFile
+		if currentClaude || defaultClaude {
+			claudeDir = desktopIsolatedClaudeDir(home)
+			codeSettings = filepath.Join(claudeDir, "settings.json")
+			files = append(files, extension.LinkedActionFile{Name: codeSettings, Path: codeSettings, Private: true})
 		}
-		if err := os.MkdirAll(iso.dir3p, 0o755); err != nil {
-			return "", err
-		}
-		if desktopIsolatedClaudeOn() {
-			if err := desktopIsoClaudeMake(home); err != nil {
-				return "", err
+		var launcher string
+		commit := func() error {
+			if err := os.MkdirAll(iso.dir3p, 0o755); err != nil {
+				return err
 			}
+			var err error
+			launcher, err = desktopIsoAdd(home, app, iso.dir3p, claudeDir, func() error {
+				return saveDesktopIsolated(true, currentClaude, defaultClaude)
+			})
+			return err
 		}
-		p, err := desktopIsoAdd(home, app, iso.dir3p, desktopIsoClaudeArg(home))
+		if src := desktopLocaleFrom(usual); src != "" {
+			iso.app = src
+		}
+		paths := append([]desktopPaths{iso}, usual...)
+		err := desktopSettingsAction(paths, commit, func(draft *desktopDraft) error {
+			fromWired, err := draft.wired(usual...)
+			if err != nil {
+				return err
+			}
+			toWired, err := draft.wired(iso)
+			if err != nil {
+				return err
+			}
+			if codeSettings != "" && !draft.files[codeSettings].Exists {
+				draft.changes[codeSettings] = []byte("{}\n")
+			}
+			if !fromWired || toWired {
+				return nil
+			}
+			if err := desktopConnect(draft, iso); err != nil {
+				return err
+			}
+			for _, p := range usual {
+				if err := desktopDisconnect(draft, p); err != nil {
+					return err
+				}
+			}
+			draft.saved[desktopIsolatedFrom] = "1"
+			return nil
+		}, files...)
 		if err != nil {
 			return "", err
 		}
-		if desktopWiredAny(usual) && !desktopWired(iso) {
-			desktopAdoptStash(usual)
-			if src := desktopLocaleFrom(usual); src != "" {
-				iso.app = src
-			}
-			if err := desktopOn(iso); err != nil {
-				return "", err
-			}
-			for _, u := range usual {
-				if err := desktopOff(u); err != nil {
-					return "", err
-				}
-			}
-			stash(map[string]string{desktopIsolatedFrom: "1"})
-		}
-		if err := saveDesktopIsolated(true); err != nil {
-			return "", err
-		}
 		desktopClaudeSync(home)
-		return p, nil
+		return launcher, nil
 	}
-	if desktopWired(iso) {
-		if unstashPeek(desktopIsolatedFrom) != "" {
-			desktopAdoptStash(usual)
-			src := desktopLocaleFrom(usual)
-			for _, u := range usual {
+	src := desktopLocaleFrom(usual)
+	commit := func() error {
+		_, err := desktopiso.RemoveWithCommit(home, func() error { return saveDesktopIsolated(false, false, false) })
+		return err
+	}
+	if err := desktopSettingsAction(append(slices.Clone(usual), iso), commit, func(draft *desktopDraft) error {
+		if draft.saved[desktopIsolatedFrom] != "" {
+			for _, p := range usual {
 				if src != "" {
-					u.app = src
+					p.app = src
 				}
-				if err := desktopOn(u); err != nil {
-					return "", err
+				if err := desktopConnect(draft, p); err != nil {
+					return err
 				}
 			}
 		}
-		if err := desktopOff(iso); err != nil {
-			return "", err
-		}
-	}
-	forget(desktopIsolatedFrom)
-	if err := saveDesktopIsolated(false); err != nil {
-		return "", err
-	}
-	if _, err := desktopiso.Remove(home); err != nil {
+		delete(draft.saved, desktopIsolatedFrom)
+		return desktopDisconnect(draft, iso)
+	}); err != nil {
 		return "", err
 	}
 	desktopClaudeSync(home)

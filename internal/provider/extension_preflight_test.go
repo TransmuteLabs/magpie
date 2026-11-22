@@ -16,6 +16,110 @@ import (
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
+type preflightReadingHost struct {
+	*fixtureExtensionProviderHost
+	accountReads atomic.Int32
+}
+
+func (host *preflightReadingHost) Store() *extensionhost.Store {
+	host.accountReads.Add(1)
+	return host.store
+}
+
+func TestExtensionProviderPreflightReadsAccountOnce(t *testing.T) {
+	fixture := fixtureExtensionProvider(t, true)
+	fixture.manifest.Contract.Version.Minor = 9
+	provider := extensionAccounts()[0]
+	host := &preflightReadingHost{fixtureExtensionProviderHost: fixture}
+	provider.Account.extension.host = host
+	var calls atomic.Int32
+	host.call = func(_ context.Context, method string, scope sdk.Scope, params any, emit func(extensionhost.Event) error) (json.RawMessage, error) {
+		calls.Add(1)
+		request, ok := params.(sdk.ExecuteRequest)
+		if !ok || method != sdk.MethodProviderExecute || request.Model != "m1" ||
+			scope.Account != "alice" || scope.Generation != 1 {
+			return nil, errors.New("unexpected execute request or authority")
+		}
+		if err := emit(extensionhost.Event{Name: "headers", Data: json.RawMessage(`{"status":204}`)}); err != nil {
+			return nil, err
+		}
+		return json.RawMessage(`{"status":204,"outcome":"completed"}`), nil
+	}
+	body := `{"model":"m1"}`
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, provider.Chat+"/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Sign(t.Context(), request, Chat, []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	signReads := host.accountReads.Swap(0)
+	response, err := provider.Do(http.DefaultClient, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if response.StatusCode != http.StatusNoContent || readErr != nil || closeErr != nil || calls.Load() != 1 {
+		t.Fatalf("SDK execute status=%d calls=%d read=%v close=%v", response.StatusCode, calls.Load(), readErr, closeErr)
+	}
+	if executeReads := host.accountReads.Swap(0); signReads != 1 || executeReads != 0 {
+		t.Errorf("account store reads: signing=%d dispatch preflight=%d, want 1 and 0", signReads, executeReads)
+	}
+
+	for _, mode := range []string{"retry", "direct"} {
+		retry := request.Clone(request.Context())
+		if mode == "direct" {
+			retry = request.Clone(t.Context())
+		}
+		retry.Body = io.NopCloser(strings.NewReader(body))
+		response, err := provider.Do(http.DefaultClient, retry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if response.StatusCode != http.StatusNoContent || readErr != nil || closeErr != nil {
+			t.Fatalf("%s status=%d read=%v close=%v", mode, response.StatusCode, readErr, closeErr)
+		}
+		if reads := host.accountReads.Swap(0); reads != 1 {
+			t.Errorf("%s account store reads=%d, want 1", mode, reads)
+		}
+	}
+
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+	blocked := request.Clone(t.Context())
+	blocked.Body = io.NopCloser(strings.NewReader(body))
+	if err := provider.Sign(t.Context(), blocked, Chat, []byte(body)); !errors.Is(err, errAccountDiscoveryOff) {
+		t.Errorf("signing with account discovery off: %v", err)
+	}
+	if reply, err := provider.Do(http.DefaultClient, blocked); !errors.Is(err, errAccountDiscoveryOff) {
+		if reply != nil {
+			reply.Body.Close()
+		}
+		t.Errorf("execution with account discovery off: %v", err)
+	}
+	if reads := host.accountReads.Load(); reads != 0 || calls.Load() != 3 {
+		t.Errorf("account discovery off accessed a private account: reads=%d executions=%d", reads, calls.Load())
+	}
+}
+
+func TestExtensionProviderSigningRejectsChangedSelectedConfig(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.manifest.Contract.Version.Minor = 9
+	provider := extensionAccounts()[0]
+	host.config = "1"
+	body := `{"model":"m1"}`
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, provider.Chat+"/chat/completions", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Sign(t.Context(), request, Chat, []byte(body)); err == nil ||
+		!strings.Contains(err.Error(), "configuration or enablement changed") {
+		t.Fatalf("signing admitted a superseded SDK configuration: %v", err)
+	}
+}
+
 func expiringExtensionFixture(t *testing.T) (*fixtureExtensionProviderHost, Provider) {
 	t.Helper()
 	host := fixtureExtensionProvider(t, true)
@@ -104,17 +208,29 @@ func TestExtensionProviderRefreshesBeforeExpiredAccountWork(t *testing.T) {
 }
 
 func TestExtensionProviderRefreshPreflightFailsClosed(t *testing.T) {
-	for _, scenario := range []string{"held", "uncertain", "short expiry", "manual replacement"} {
+	for _, scenario := range []string{"held", "uncertain", "short expiry", "manual replacement", "owner changed", "config changed"} {
 		t.Run(scenario, func(t *testing.T) {
-			host, provider := expiringExtensionFixture(t)
+			host, _ := expiringExtensionFixture(t)
+			host.manifest.Contract.Version.Minor = 9
+			provider := extensionAccounts()[0]
 			var refreshes atomic.Int32
 			host.refresh = func(_ context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
 				refreshes.Add(1)
 				if scenario == "uncertain" {
 					return sdk.AuthResult{}, &extensionhost.OutcomeError{Outcome: "uncertain"}
 				}
+				expires := time.Hour
+				if scenario == "short expiry" {
+					expires = time.Second
+				}
 				_, err := host.store.SaveAccount(extensionhost.Account{Plugin: id, Provider: "vendor", ID: "alice",
-					Auth: json.RawMessage(`{"access":"too-short"}`), ExpiresAt: time.Now().Add(time.Second).UnixMilli()}, scope.Generation)
+					Auth: json.RawMessage(`{"access":"refreshed"}`), ExpiresAt: time.Now().Add(expires).UnixMilli()}, scope.Generation)
+				switch scenario {
+				case "owner changed":
+					usageTestSubscriptionOwner(t, host, "transferred-subscription")
+				case "config changed":
+					host.config = "1"
+				}
 				return sdk.AuthResult{ID: "alice"}, err
 			}
 			host.call = func(context.Context, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
@@ -135,6 +251,10 @@ func TestExtensionProviderRefreshPreflightFailsClosed(t *testing.T) {
 			request, _ := http.NewRequestWithContext(ctx, http.MethodPost, provider.Chat+"/chat/completions", strings.NewReader(`{"model":"m1"}`))
 			if _, err := provider.Do(http.DefaultClient, request); err == nil {
 				t.Fatal("unusable credentials were admitted")
+			} else if scenario == "owner changed" && !errors.Is(err, errSubscriptionOwnerChanged) {
+				t.Fatalf("post-refresh owner fence: %v", err)
+			} else if scenario == "config changed" && !strings.Contains(err.Error(), "configuration or enablement changed") {
+				t.Fatalf("post-refresh config fence: %v", err)
 			}
 			if (scenario == "held" || scenario == "manual replacement") && refreshes.Load() != 0 {
 				t.Fatal("network hold or superseded credentials triggered a refresh")

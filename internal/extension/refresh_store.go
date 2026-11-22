@@ -44,17 +44,13 @@ func validRefreshRecord(account storeAccount) bool {
 	return false
 }
 
-func refreshOperation(root *os.Root, plugin, operation string) (JournalEntry, bool, error) {
-	records, err := storeReadAccounts(root, plugin)
-	if err != nil {
-		return JournalEntry{}, false, err
-	}
+func refreshOperation(records storeAccounts, operation string) (JournalEntry, bool) {
 	for _, account := range records.Accounts {
 		if record := account.Refresh; record != nil && record.Scope.Operation == operation {
-			return JournalEntry{Scope: record.Scope, State: record.State, Updated: record.Updated}, true, nil
+			return JournalEntry{Scope: record.Scope, State: record.State, Updated: record.Updated}, true
 		}
 	}
-	return JournalEntry{}, false, nil
+	return JournalEntry{}, false
 }
 
 func refreshConflict() error {

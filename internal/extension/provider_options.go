@@ -111,5 +111,7 @@ func (m *Manager) CompareAndSwapProviderOptions(ctx context.Context, id, provide
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
-	return m.compareAndSwapModuleConfig(ctx, id, revision, expected, body)
+	return m.updateModuleConfig(ctx, id, provider, expectedGeneration{
+		packageRevision: revision, configVersion: expected,
+	}, body)
 }

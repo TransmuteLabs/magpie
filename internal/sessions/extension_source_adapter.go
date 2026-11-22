@@ -54,12 +54,13 @@ func PrepareSessionSources(ctx context.Context) error {
 	sourceCancel.Store(&cancel)
 	defer func() { sourceCancel.CompareAndSwap(&cancel, nil); cancel() }()
 	epoch := sourceEpoch.Load()
-	claims, err := readHistoryClaims()
+	claims, err := readHistoryClaims(ctx)
 	if err != nil {
-		owners := sourceBoundOwners(sourceView.Load())
-		for agent := range claims.owners {
-			owners[agent] = true
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		owners := sourceBoundOwners(sourceView.Load())
+		maps.Copy(owners, claims.owners)
 		for _, agent := range nativeHistoryOwners() {
 			owners[agent] = true
 		}
@@ -84,40 +85,34 @@ func PrepareSessionSources(ctx context.Context) error {
 	}
 	previous := sourceView.Load()
 	var problems []error
-	counts := map[string]int{}
+	owners := enabledSourceOwners(entries)
 	for _, entry := range entries {
-		if !entry.Disabled {
-			for _, source := range entry.Manifest.StorageSources {
-				counts[source.Agent]++
-			}
-		}
 		for _, source := range entry.Manifest.SessionSources {
 			if !nativeSourceOwner(source.Agent) {
 				view.agents[source.Agent] = true
 			}
 		}
-		if !entry.Disabled {
-			for _, source := range entry.Manifest.SessionSources {
-				counts[source.Agent]++
-			}
-		}
 	}
-	problems = append(problems, prepareStorageSources(ctx, manager, entries, view, counts, claims.consents)...)
+	problems = append(problems, prepareStorageSources(ctx, manager, entries, view, owners, claims.consents)...)
 	for _, entry := range entries {
 		if entry.Disabled {
 			continue
 		}
 		for _, descriptor := range entry.Manifest.SessionSources {
-			if !Reads(descriptor.Agent) || counts[descriptor.Agent] != 1 {
+			if !Reads(descriptor.Agent) || owners[descriptor.Agent].count != 1 {
 				continue
 			}
-			_, identity, err := sessionMigrationIdentity(ctx, manager, entry.Manifest.ID)
+			selected, err := sessionMigrationSelection(ctx, manager, entry.Manifest.ID)
 			if err != nil {
 				problems = append(problems, err)
 				continue
 			}
+			if !sameSessionModule(entry, selected.entry) {
+				problems = append(problems, extension.ErrActionChanged)
+				continue
+			}
 			if nativeSourceOwner(descriptor.Agent) && !slices.ContainsFunc(bindings, func(binding SessionSourceBinding) bool {
-				return binding.Plugin == entry.Manifest.ID && binding.Source == descriptor.ID && binding.Agent == descriptor.Agent && binding.Identity == identity
+				return binding.Plugin == entry.Manifest.ID && binding.Source == descriptor.ID && binding.Agent == descriptor.Agent && binding.Identity == selected.identity
 			}) {
 				continue
 			}
@@ -128,7 +123,7 @@ func PrepareSessionSources(ctx context.Context) error {
 					continue
 				}
 				for _, root := range roots {
-					grant, err := makeSourceGrant(entry.Manifest.ID, identity, descriptor, store, root)
+					grant, err := makeSourceGrant(entry.Manifest.ID, selected.identity, descriptor, store, root)
 					if errors.Is(err, fs.ErrNotExist) {
 						continue
 					}
@@ -146,7 +141,7 @@ func PrepareSessionSources(ctx context.Context) error {
 							problems = append(problems, errors.New("session source snapshot record budget exceeded"))
 							break
 						}
-						record, err := prepareSourceRecord(ctx, manager, entry, grant, name, previous)
+						record, err := prepareSourceRecord(ctx, manager, selected, grant, name, previous)
 						if record != nil {
 							view.records = append(view.records, record)
 						}
@@ -181,11 +176,23 @@ func PrepareSessionSources(ctx context.Context) error {
 	if epoch != sourceEpoch.Load() {
 		return extension.ErrActionChanged
 	}
-	for _, record := range view.records {
-		if err := checkSourceRecordGrant(ctx, record); err != nil {
-			sourceView.Store(&sessionSourceView{epoch: epoch, owners: view.owners, agents: view.agents})
-			return err
+	checks, err := checkSourceRecordGrants(ctx, view.records)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if epoch != sourceEpoch.Load() {
+		return extension.ErrActionChanged
+	}
+	if err == nil {
+		for _, record := range view.records {
+			if err = checks[record.grant.reference]; err != nil {
+				break
+			}
 		}
+	}
+	if err != nil {
+		sourceView.Store(&sessionSourceView{epoch: epoch, owners: view.owners, agents: view.agents})
+		return err
 	}
 	for _, problem := range problems {
 		view.problems = append(view.problems, problem.Error())
@@ -204,7 +211,9 @@ func sourceBoundOwners(view *sessionSourceView) map[string]bool {
 	return owners
 }
 
-func prepareSourceRecord(ctx context.Context, manager *extension.Manager, entry extension.Installed, grant sourceGrant, name string, previous *sessionSourceView) (*sessionSourceRecord, error) {
+func prepareSourceRecord(ctx context.Context, manager *extension.Manager, selected sessionModuleSelection, grant sourceGrant, name string, previous *sessionSourceView) (*sessionSourceRecord, error) {
+	grant.revision = selected.entry.Revision
+	grant.enableGeneration = selected.entry.EnableGeneration
 	epoch := sourceEpoch.Load()
 	ctx = withSessionSourceAdmission(ctx, func() error {
 		if err := ctx.Err(); err != nil {
@@ -221,7 +230,8 @@ func prepareSourceRecord(ctx context.Context, manager *extension.Manager, entry 
 	var old *sessionSourceRecord
 	if previous != nil {
 		for _, record := range previous.records {
-			if record.grant.reference == grant.reference && record.request.Locator.Path == name &&
+			if record.grant.reference == grant.reference && record.grant.enableGeneration == grant.enableGeneration &&
+				record.request.Locator.Path == name &&
 				os.SameFile(record.grant.info, grant.info) {
 				old = record
 				break
@@ -233,54 +243,47 @@ func prepareSourceRecord(ctx context.Context, manager *extension.Manager, entry 
 		return old, nil
 	}
 	if err == nil {
-		config, configErr := manager.ModuleConfig(ctx, entry.Manifest.ID)
-		if configErr != nil {
-			err = configErr
-		} else {
-			var lease *extension.Lease
-			lease, err = manager.AcquireRevision(ctx, entry.Manifest.ID, entry.Revision, config.Version)
-			if err == nil {
-				var raw json.RawMessage
-				snapshot, err = collectSourceDocuments(ctx, manager, lease, grant, &request, snapshot)
-				if err == nil && old != nil && !old.stale && sameSourceSelection(request, old.request) && old.snapshot.check(ctx) == nil {
-					lease.Close()
-					return old, nil
-				}
-				if sourceBeforeRPC != nil {
-					if err == nil {
-						err = sourceBeforeRPC(ctx)
-					}
-				}
-				if err == nil {
-					err = checkSessionSourceAdmission(ctx)
-				}
-				if err == nil {
-					raw, err = lease.Call(ctx, sdk.MethodSessionSourceRead,
-						sdk.Scope{Session: request.Locator.SessionID, Operation: sdk.MethodSessionSourceRead}, request, nil)
-				}
+		var lease *extension.Lease
+		lease, err = manager.AcquireOutsideCalls(ctx, selected.entry, selected.configVersion)
+		if err == nil {
+			var raw json.RawMessage
+			snapshot, err = collectSourceDocuments(ctx, manager, lease, grant, &request, snapshot)
+			if err == nil && old != nil && !old.stale && sameSourceSelection(request, old.request) && old.snapshot.check(ctx) == nil {
 				lease.Close()
+				return old, nil
+			}
+			if sourceBeforeRPC != nil && err == nil {
+				err = sourceBeforeRPC(ctx)
+			}
+			if err == nil {
+				err = checkSessionSourceAdmission(ctx)
+			}
+			if err == nil {
+				raw, err = lease.Call(ctx, sdk.MethodSessionSourceRead,
+					sdk.Scope{Session: request.Locator.SessionID, Operation: sdk.MethodSessionSourceRead}, request, nil)
+			}
+			lease.Close()
+			if err == nil {
+				var result sdk.SessionSourceReadResult
+				result, err = sdk.DecodeSessionSourceResult(request, raw)
 				if err == nil {
-					var result sdk.SessionSourceReadResult
-					result, err = sdk.DecodeSessionSourceResult(request, raw)
+					err = snapshot.check(ctx)
 					if err == nil {
-						err = snapshot.check(ctx)
-						if err == nil {
-							_, identity, identityErr := sessionMigrationIdentity(ctx, manager, entry.Manifest.ID)
-							if identityErr != nil || identity != grant.identity || !Reads(grant.descriptor.Agent) {
-								err = extension.ErrActionChanged
-							}
+						err = selected.check(ctx, manager)
+						if err == nil && !Reads(grant.descriptor.Agent) {
+							err = extension.ErrActionChanged
 						}
-						if err == nil {
-							summary := sourceSummaryState(grant, request, snapshot, result.Summary)
-							if summary == nil {
-								err = errors.New("session source counters exceed host integer range")
-							} else {
-								request.Documents = nil
-								return &sessionSourceRecord{grant: grant, request: request, snapshot: snapshot,
-									summary: summary, usageKnown: result.Summary.Usage != nil,
-									parentID: result.Summary.ParentID, rootID: result.Summary.RootID,
-									subs: sourceDescendantIDs(result.Summary.Subs)}, nil
-							}
+					}
+					if err == nil {
+						summary := sourceSummaryState(grant, request, snapshot, result.Summary)
+						if summary == nil {
+							err = errors.New("session source counters exceed host integer range")
+						} else {
+							request.Documents = nil
+							return &sessionSourceRecord{grant: grant, request: request, snapshot: snapshot,
+								summary: summary, usageKnown: result.Summary.Usage != nil,
+								parentID: result.Summary.ParentID, rootID: result.Summary.RootID,
+								subs: sourceDescendantIDs(result.Summary.Subs)}, nil
 						}
 					}
 				}
@@ -314,6 +317,33 @@ func prepareSourcesBeforeReadContext(ctx context.Context) {
 	_ = PrepareSessionSources(ctx)
 }
 
+func checkSourceRecordGrants(ctx context.Context, records []*sessionSourceRecord) (map[string]error, error) {
+	if len(records) == 0 {
+		return nil, ctx.Err()
+	}
+	checks := map[string]error{}
+	for _, record := range records {
+		reference := record.grant.reference
+		if _, checked := checks[reference]; !checked {
+			checks[reference] = checkSourceRecordGrant(ctx, record)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	owners, err := currentSourceOwners(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		grant := record.grant
+		if checks[grant.reference] == nil && !owners[grant.descriptor.Agent].matches(grant) {
+			checks[grant.reference] = extension.ErrActionChanged
+		}
+	}
+	return checks, ctx.Err()
+}
+
 func refreshSourceAuthority(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -323,8 +353,11 @@ func refreshSourceAuthority(ctx context.Context) {
 		if view == nil {
 			return
 		}
-		claims, claimErr := readHistoryClaims()
+		claims, claimErr := readHistoryClaims(ctx)
 		if claimErr != nil {
+			if claims.owners == nil {
+				claims.owners = map[string]bool{}
+			}
 			for agent := range view.owners {
 				claims.owners[agent] = true
 			}
@@ -332,14 +365,14 @@ func refreshSourceAuthority(ctx context.Context) {
 				claims.owners[agent] = true
 			}
 		}
-		allowed := map[string]bool{}
-		for _, record := range view.records {
-			if _, checked := allowed[record.grant.reference]; !checked {
-				allowed[record.grant.reference] = view.epoch == sourceEpoch.Load() && checkSourceRecordGrant(ctx, record) == nil
-			}
+		var checks map[string]error
+		var checkErr error
+		current := view.epoch == sourceEpoch.Load()
+		if current {
+			checks, checkErr = checkSourceRecordGrants(ctx, view.records)
 		}
 		records := slices.DeleteFunc(slices.Clone(view.records), func(record *sessionSourceRecord) bool {
-			return !allowed[record.grant.reference]
+			return !current || checkErr != nil || checks[record.grant.reference] != nil
 		})
 		if ctx.Err() != nil {
 			return

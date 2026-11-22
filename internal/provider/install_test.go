@@ -66,16 +66,26 @@ func TestSignInCanceledWhileInstalling(t *testing.T) {
 	oldExe := DevinExecutable
 	DevinExecutable = func() string { return "" }
 	t.Cleanup(func() { DevinExecutable = oldExe })
-	stopped := make(chan struct{})
+	started, stopped := make(chan struct{}), make(chan struct{})
 	oldRun := runInstaller
 	runInstaller = func(ctx context.Context, c agentCLI) ([]byte, error) {
+		close(started)
 		<-ctx.Done()
 		close(stopped)
 		return nil, ctx.Err()
 	}
 	t.Cleanup(func() { runInstaller = oldRun })
 
-	st, _ := StartPluginSignIn("devin", 0, nil)
+	st, err := StartPluginSignIn("devin", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer CancelSignIn(st.ID)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the installer did not start")
+	}
 	CancelSignIn(st.ID)
 	select {
 	case <-stopped:

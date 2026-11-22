@@ -74,11 +74,18 @@ const (
 
 // LinkedMiddlewareInfo describes the request in the agent's own API.
 type LinkedMiddlewareInfo struct {
-	Protocol string `json:"protocol"`
-	Model    string `json:"model"`
-	Stream   bool   `json:"stream"`
-	Path     string `json:"path"`
-	Agent    string `json:"agent,omitempty"`
+	Protocol string                  `json:"protocol"`
+	Model    string                  `json:"model"`
+	Stream   bool                    `json:"stream"`
+	Path     string                  `json:"path"`
+	Agent    string                  `json:"agent,omitempty"`
+	Caller   *LinkedMiddlewareCaller `json:"caller,omitempty"`
+}
+
+type LinkedMiddlewareCaller struct {
+	Agent string   `json:"agent"`
+	Name  string   `json:"name"`
+	Via   []string `json:"via"`
 }
 
 // LinkedMiddlewareReject ends a request in the agent API's error shape.

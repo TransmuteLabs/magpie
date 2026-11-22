@@ -5,14 +5,183 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestExtensionUsageCacheKeyStopsAtCallerDeadline(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	logins, _ := extensionLogins(extensionAccounts()[0].ID)
+	login := logins[0]
+	var got loginUsageEntry
+	_ = whileExtensionAccountLockHeld(t, host.Namespace(), filepath.Join("private", ".lock"), func(ctx context.Context) error {
+		got = cachedLoginReading(ctx, login)
+		return nil
+	})
+	if got.q.Error != context.DeadlineExceeded.Error() || len(got.q.Windows) != 0 {
+		t.Fatalf("lock wait returned an authoritative reading: error=%q windows=%d", got.q.Error, len(got.q.Windows))
+	}
+}
+
+func TestExtensionUsageCanceledAcknowledgmentPreservesDirtyRevision(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.manifest.Contract.Version.Minor = 4
+	logins, _ := extensionLogins(extensionAccounts()[0].ID)
+	login := logins[0]
+	scope := login.extension.currentScope()
+	dirty, err := host.store.InvalidateUsage(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(host.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	response := func(_ context.Context, _ string, _ sdk.Scope, params any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		request := params.(sdk.UsageRequest)
+		return json.Marshal(sdk.UsageResult{Revision: request.Revision,
+			Windows: []sdk.UsageWindow{{Name: "quota", Used: 12}}})
+	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		shared := make(chan bool, 1)
+		host.call = func(ctx context.Context, method string, scope sdk.Scope, params any, consume func(extensionhost.Event) error) (json.RawMessage, error) {
+			held, err := filelock.TryShared(lock)
+			shared <- held && err == nil
+			return response(ctx, method, scope, params, consume)
+		}
+		done := make(chan SubscriptionQuota, 1)
+		go func() { done <- extensionQuota(ctx, login) }()
+		held := <-shared
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		if held {
+			filelock.Unlock(lock)
+		} else {
+			t.Error("vendor fixture could not hold the shared Store lock")
+		}
+		select {
+		case got := <-done:
+			if got.Error != context.Canceled.Error() || !got.ReadDeferred || len(got.Windows) != 0 {
+				t.Errorf("canceled read: error=%q deferred=%v windows=%d", got.Error, got.ReadDeferred, len(got.Windows))
+			}
+		default:
+			t.Error("post-vendor quota acknowledgment waited on Store after cancellation")
+			<-done
+		}
+	})
+	stamp, err := host.store.UsageStamp(scope)
+	if err != nil || !stamp.Dirty || stamp.Revision != dirty.Revision {
+		t.Fatalf("canceled acknowledgment changed dirty revision: %+v %v", stamp, err)
+	}
+	host.call = response
+	if got := extensionQuota(t.Context(), login); got.Error != "" || len(got.Windows) != 1 {
+		t.Fatalf("later fresh read did not recover quota: error=%q windows=%d", got.Error, len(got.Windows))
+	}
+	if err := host.store.UsageReady(scope); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtensionUsageAcceptsHostAcknowledgmentUnderSharedLock(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.manifest.Contract.Version.Minor = 4
+	logins, _ := extensionLogins(extensionAccounts()[0].ID)
+	login := logins[0]
+	scope := login.extension.currentScope()
+	dirty, err := host.store.InvalidateUsage(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.OpenFile(filepath.Join(host.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	defer filelock.Unlock(lock)
+	host.call = func(ctx context.Context, _ string, scope sdk.Scope, params any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		if _, err := host.store.AcknowledgeUsageContext(ctx, scope, dirty.Revision); err != nil {
+			return nil, err
+		}
+		held, err := filelock.TryShared(lock)
+		if err != nil {
+			return nil, err
+		}
+		if !held {
+			t.Error("fixture could not hold the shared Store lock")
+		}
+		request := params.(sdk.UsageRequest)
+		return json.Marshal(sdk.UsageResult{Revision: request.Revision,
+			Windows: []sdk.UsageWindow{{Name: "quota", Used: 12}}})
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	quota := extensionQuota(ctx, login)
+	if quota.Error != "" || quota.ReadDeferred || len(quota.Windows) != 1 || quota.Windows[0].Used != 12 {
+		t.Fatalf("host acknowledgment was not sufficient: error=%q deferred=%t windows=%+v",
+			quota.Error, quota.ReadDeferred, quota.Windows)
+	}
+}
+
+func TestExtensionUsagePublicationReleasesCacheWhileCheckingStore(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	logins, _ := extensionLogins(extensionAccounts()[0].ID)
+	login := logins[0]
+	key := loginReadingCacheKey(login)
+	_, proof, err := extensionUsageRequest(t.Context(), login.extension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("fixture could not hold the Store lock")
+	}
+	synctest.Test(t, func(t *testing.T) {
+		read := &loginRead{done: make(chan struct{}),
+			e: loginUsageEntry{q: SubscriptionQuota{extensionUsage: proof}}}
+		cache := &loginUsageCache
+		cache.Lock()
+		if cache.pending == nil {
+			cache.pending = make(map[string]*loginRead)
+		}
+		cache.pending[key] = read
+		cache.Unlock()
+		go finishLoginReading(t.Context(), login, key, read, 0)
+		synctest.Wait()
+		select {
+		case <-read.done:
+			t.Error("fixture did not hold the durable proof check")
+		default:
+		}
+		if cache.TryLock() {
+			delete(cache.pending, key)
+			cache.Unlock()
+		} else {
+			t.Error("proof check held the login usage cache lock")
+		}
+		unlock()
+		<-read.done
+		cache.Lock()
+		_, published := cache.m[key]
+		delete(cache.pending, key)
+		delete(cache.m, key)
+		cache.Unlock()
+		if published {
+			t.Error("superseded reading was published after its proof completed")
+		}
+	})
+}
 
 func TestExtensionUsageChild(t *testing.T) {
 	root := os.Getenv("SDK_USAGE_CHILD_ROOT")
@@ -140,15 +309,16 @@ func TestExtensionUsageEpochDoesNotChangeModelIdentityOrOtherAccount(t *testing.
 	host := fixtureExtensionProvider(t, true)
 	all := extensionAccounts()
 	first, second := all[0].Account.extension, all[0].AlsoOn()[0].Account.extension
-	modelKey, usageKey := first.cacheKey(), extensionUsageKey(first)
-	otherKey := extensionUsageKey(second)
+	ctx := t.Context()
+	modelKey, usageKey := first.cacheKey(), extensionUsageKey(ctx, first)
+	otherKey := extensionUsageKey(ctx, second)
 	if _, err := host.store.InvalidateUsage(first.currentScope()); err != nil {
 		t.Fatal(err)
 	}
-	if first.cacheKey() != modelKey || extensionUsageKey(first) == usageKey || extensionUsageKey(second) != otherKey {
+	if first.cacheKey() != modelKey || extensionUsageKey(ctx, first) == usageKey || extensionUsageKey(ctx, second) != otherKey {
 		t.Fatal("invalidation touched model identity or another account")
 	}
-	if !strings.Contains(extensionUsageKey(first), "usage:1") {
+	if !strings.Contains(extensionUsageKey(ctx, first), "usage:1") {
 		t.Fatal("usage revision missing from cache identity")
 	}
 }

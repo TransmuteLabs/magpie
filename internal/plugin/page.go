@@ -78,7 +78,9 @@ func SetPageOptions(spec string, opts map[string]any) error {
 	}
 	// under plugins.json's lock too, as SetOptions is: another magpie's
 	// change saved meanwhile stands (#4666)
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return errPluginListBusy
+	}
 	listMu.Lock()
 	defer listMu.Unlock()
 	defer listFileMu.Unlock()

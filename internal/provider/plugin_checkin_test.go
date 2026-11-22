@@ -1,12 +1,17 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,6 +60,83 @@ func pressed(t *testing.T, file string) []string {
 	return strings.Fields(string(b))
 }
 
+func TestCheckinAccountCancelPreservesPreviousMark(t *testing.T) {
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	var calls atomic.Int32
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ck-cancel" {
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 1 {
+			close(started)
+			<-unblock
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(func() {
+		release()
+		vendor.Close()
+	})
+	t.Setenv("FAKE_CHECKIN_URL", vendor.URL)
+	pluginCheckinSandbox(t, "ck-cancel")
+	accounts := CheckinAccounts()
+	if len(accounts) != 1 || accounts[0].By != "plugin:fakeco" {
+		t.Fatalf("ordinary check-in accounts: %+v", accounts)
+	}
+	account := accounts[0]
+	now := time.Now()
+	previous, err := json.Marshal(map[string]WorkBuddyCheckin{
+		account.Key: {Day: wbCheckinDay(now), At: now, Outcome: CheckinInactive, Msg: "earlier confirmed result"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginCheckinPath(), previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	results := make(chan []WorkBuddyCheckin, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		results <- CheckInAccount(ctx, account.By, account.Key)
+	}()
+	defer func() {
+		cancel()
+		release()
+		<-finished
+	}()
+	select {
+	case <-started:
+	case got := <-results:
+		t.Fatalf("returned before asking the vendor: %+v", got)
+	case <-ctx.Done():
+		t.Fatal("no vendor request to cancel")
+	}
+	cancel()
+	select {
+	case got := <-results:
+		if len(got) != 0 {
+			t.Errorf("transport cancellation produced a check-in observation: %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the canceled check-in waited for a vendor response")
+	}
+	if got, err := os.ReadFile(pluginCheckinPath()); err != nil || !bytes.Equal(got, previous) {
+		t.Errorf("transport cancellation replaced stored history: %s (%v)", got, err)
+	}
+	release()
+	if got := CheckInAccount(t.Context(), account.By, account.Key); len(got) != 1 || got[0].Outcome != CheckinClaimed || !got[0].Asked {
+		t.Fatalf("next press did not receive a confirmed claim: %+v", got)
+	}
+	if got := CheckInAccount(t.Context(), account.By, account.Key); len(got) != 1 || got[0].Outcome != CheckinClaimed || got[0].Asked || calls.Load() != 2 {
+		t.Fatalf("confirmed claim was not reused, calls %d: %+v", calls.Load(), got)
+	}
+}
+
 // A plugin's own check-in (auth.checkin; Lemon on Discord) runs as magpie's
 // own do: each account once a Beijing day while it is on, a failure asked
 // again after wbCheckinRetry, a captcha left for the user (never retried
@@ -65,7 +147,7 @@ func TestPluginCheckinRunsAsTheBuiltinsDo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	ps := pluginCheckinProviders()
+	ps := pluginCheckinProviders(t.Context())
 	if len(ps) != 1 || ps[0].ID != "fakeco" || ps[0].Name != "FakeCo" || len(ps[0].accounts) != len(keys) {
 		t.Fatalf("the plugins that check in: %+v", ps)
 	}
@@ -295,7 +377,7 @@ func TestPluginCheckinTellsSignInsOfOneNameApart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	pluginCheckinOn(t)
-	ps := pluginCheckinProviders()
+	ps := pluginCheckinProviders(t.Context())
 	if len(ps) != 1 || len(ps[0].accounts) != 4 {
 		t.Fatalf("the plugins that check in: %+v", ps)
 	}
@@ -396,7 +478,7 @@ func TestPluginCheckinCarriesOverDisplayNameEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ps := pluginCheckinProviders()
+	ps := pluginCheckinProviders(t.Context())
 	if len(ps) != 1 || len(ps[0].accounts) != 4 {
 		t.Fatalf("the plugins that check in: %+v", ps)
 	}
@@ -414,11 +496,23 @@ func TestPluginCheckinCarriesOverDisplayNameEntries(t *testing.T) {
 	if heir == "" || namesake == "" {
 		t.Fatalf("A's sign-ins: %+v", ps[0].accounts)
 	}
+	if got := PluginCheckins(); len(got) != 1 || len(got[0].Checkins) != 2 {
+		t.Fatalf("Settings missed the kept legacy results: %+v", got)
+	}
+	for _, a := range CheckinAccounts() {
+		if a.By == "plugin:fakeco" && a.On == strings.HasPrefix(a.User, "B@fake") {
+			t.Fatalf("Settings' row %+v: B's should be off, A's on", a)
+		}
+	}
+
+	// the loop asks only A's namesake: the heir is in, B's are off
+	loop := pluginCheckiner{now: func() time.Time { return now }, only: func(id string) bool { return PluginCheckinOn(settings.Load(), id) }}
+	loop.checkinNow(ctx, false)
 	st := shownCheckins(pluginCheckinPath())
 	if r, ok := st[heir]; !ok || r.Outcome != CheckinClaimed || r.Credit != 400 || r.Day != "2026-10-06" {
 		t.Fatalf("A's check-in went to %s as %+v (ok %v): %+v", heir, r, ok, st)
 	}
-	if _, ok := st[namesake]; ok {
+	if st[namesake].Credit == 400 {
 		t.Fatalf("A's check-in was carried to both its sign-ins: %+v", st)
 	}
 	if _, ok := st["fakeco|A@fake"]; ok {
@@ -433,9 +527,6 @@ func TestPluginCheckinCarriesOverDisplayNameEntries(t *testing.T) {
 		t.Fatalf("CheckinOff = %q, want %q", off, want)
 	}
 
-	// the loop asks only A's namesake: the heir is in, B's are off
-	loop := pluginCheckiner{now: func() time.Time { return now }, only: func(id string) bool { return PluginCheckinOn(settings.Load(), id) }}
-	loop.checkinNow(ctx, false)
 	var who string
 	for w, k := range keys {
 		if pluginCheckinKey("fakeco", k) == namesake {
@@ -446,15 +537,10 @@ func TestPluginCheckinCarriesOverDisplayNameEntries(t *testing.T) {
 		t.Fatalf("after the upgrade pressed %q, want only %s", p, who)
 	}
 	// and nothing is carried again, or asked again, on the next look
-	pluginCheckinProviders()
+	pluginCheckinProviders(t.Context())
 	loop.checkinNow(ctx, false)
 	if p := pressed(t, presses); len(p) != 1 {
 		t.Fatalf("a second look pressed %q", p)
-	}
-	for _, a := range CheckinAccounts() {
-		if a.By == "plugin:fakeco" && a.On == strings.HasPrefix(a.User, "B@fake") {
-			t.Fatalf("Settings' row %+v: B's should be off, A's on", a)
-		}
 	}
 }
 
@@ -462,23 +548,23 @@ func TestPluginCheckinCarriesOverDisplayNameEntries(t *testing.T) {
 // over or written over, and it is carried once it reads.
 func TestPluginCheckinCarriesNothingOverAnUnreadableFile(t *testing.T) {
 	path := filepath.Join(claudeHome(t), "plugin-checkin.json")
-	order, heirs := []string{"fakeco|A"}, map[string][]string{"fakeco|A": {"fakeco|fakeco", "fakeco|fakeco#x1"}}
+	runner := checkiner{
+		path: path, now: time.Now, mu: &pluginCheckinMu, label: "fakeco",
+		legacy:   legacyCheckinKeys{"fakeco|A": {"fakeco|fakeco", "fakeco|fakeco#x1"}},
+		accounts: func() []checkinAcct { return nil },
+	}
 	bad := []byte(`{"fakeco|A": {"day": "2026-10-06",`)
 	if err := os.WriteFile(path, bad, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if adoptLegacyCheckinFile(path, order, heirs) {
-		t.Fatal("a file that doesn't parse was taken as carried over")
-	}
+	runner.checkinNow(t.Context(), true)
 	if b, _ := os.ReadFile(path); string(b) != string(bad) {
 		t.Fatalf("the file was written over: %s", b)
 	}
 	if err := os.WriteFile(path, []byte(`{"fakeco|A": {"day": "2026-10-06", "outcome": "claimed"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !adoptLegacyCheckinFile(path, order, heirs) {
-		t.Fatal("not carried once the file reads")
-	}
+	runner.checkinNow(t.Context(), true)
 	st := shownCheckins(path)
 	if _, ok := st["fakeco|fakeco"]; !ok || len(st) != 1 {
 		t.Fatalf("carried as %+v", st)
@@ -820,7 +906,7 @@ func TestLoginCheckinsPressOneAccount(t *testing.T) {
 	presses := pluginCheckinSandbox(t, keys...)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	ps := pluginCheckinProviders()
+	ps := pluginCheckinProviders(t.Context())
 	if len(ps) != 1 || len(ps[0].accounts) != len(keys) {
 		t.Fatalf("the plugins that check in: %+v", ps)
 	}

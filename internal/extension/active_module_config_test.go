@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -25,11 +26,14 @@ func TestActiveModuleConfigFencesEnablementAndConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	synctest.Test(t, func(t *testing.T) {
-		manager.store.mu.Lock()
+		unlock, held := filelock.Lock(filepath.Join(manager.Namespace(), "private", ".lock"), 0)
+		if !held {
+			t.Fatal("could not hold the private store")
+		}
 		released := false
 		defer func() {
 			if !released {
-				manager.store.mu.Unlock()
+				unlock()
 			}
 		}()
 		type result struct {
@@ -48,7 +52,7 @@ func TestActiveModuleConfigFencesEnablementAndConfiguration(t *testing.T) {
 		if err := manager.catalog.SetEnabled(ctx, id, false); !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("enablement write passed a pending configuration selection: %v", err)
 		}
-		manager.store.mu.Unlock()
+		unlock()
 		released = true
 		got := <-done
 		if got.err != nil || got.entry.Revision != installed.Revision || got.entry.EnableGeneration != "" ||

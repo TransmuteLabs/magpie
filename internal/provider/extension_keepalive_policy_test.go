@@ -39,6 +39,7 @@ func TestExtensionKeepAliveEligibilityAndUnknownReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			provider := providers[0].ID
+			registerFixtureExtensionPolicies(t, host, host.manifest.ID, "vendor")
 			logins, err := readLoginsFile()
 			if err != nil {
 				t.Fatal(err)

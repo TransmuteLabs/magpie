@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -129,5 +130,105 @@ func TestWithoutPassthrough(t *testing.T) {
 	// the signed-in Codex relay asks again the same way
 	if b2, ok := withoutUnreadable(body, []byte(passthroughRefusalBody)); !ok || string(b2) != want {
 		t.Fatalf("withoutUnreadable: %v %s", ok, b2)
+	}
+}
+
+func TestWithoutPassthroughRawBytes(t *testing.T) {
+	const untouched = `{"text":"\u003c", "future" : [1.0, {"drop":7}]}`
+	const editObject = `{ "z" : 1.0, "` + passthroughKey + `" : ` +
+		`{ "d\u0072op" : [1], "next" : {"n":1.0,"drop":2}, "" : false, "drop":null }, "extra" : "<" }`
+	const editObjectFiltered = `{ "z" : 1.0, "` + passthroughKey + `" : ` +
+		`{"next":{"n":1.0,"drop":2},"":false}, "extra" : "<" }`
+	const editObjectRemoved = `{"extra":"\u003c","z":1.0}`
+	const nullObject = `{"` + passthroughKey + `" : null, "z" : 0}`
+	const nullObjectRemoved = `{"z":0}`
+	const escapedObject = `{"internal_chat_message_metadata_passthrou\u0067h": {"drop":1, "keep":"\u0061"}}`
+	const escapedObjectFiltered = `{"internal_chat_message_metadata_passthrou\u0067h": {"keep":"\u0061"}}`
+	const prefix = " \n" + `{ "version" : 1e0, "input" : [ null, "note]", `
+	const suffix = `], "other" : {"` + passthroughKey + `":{"drop":1}} }` + " \t\n"
+	const body = prefix + untouched + ", " + editObject + ", " + nullObject + ", " + escapedObject + suffix
+
+	for _, test := range []struct {
+		name  string
+		field string
+		want  string
+	}{
+		{"members", "drop", prefix + untouched + ", " + editObjectFiltered + ", " + nullObject + ", " + escapedObjectFiltered + suffix},
+		{"whole", "", prefix + untouched + ", " + editObjectRemoved + ", " + nullObjectRemoved + ", {}" + suffix},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(body)
+			got, changed := withoutPassthrough(input, test.field)
+			if !changed || string(got) != test.want || string(input) != body || !json.Valid(got) {
+				t.Fatalf("changed=%t\n got %s\nwant %s", changed, got, test.want)
+			}
+		})
+	}
+}
+
+func TestWithoutPassthroughLeavesTheOriginalSlice(t *testing.T) {
+	for _, fixture := range []string{
+		`{"input":[{"` + passthroughKey + `": {"keep":1}}]}`,
+		`{"input":[{"` + passthroughKey + `": ["drop"]}]}`,
+		`{"input":"` + passthroughKey + `"}`,
+		`{"input":[],"` + passthroughKey + `":{"drop":1}}`,
+		`{"input":[{"` + passthroughKey + `":{"drop":1}}]`,
+	} {
+		input := []byte(fixture)
+		got, changed := withoutPassthrough(input, "drop")
+		if changed || string(got) != fixture || &got[0] != &input[0] {
+			t.Fatalf("unmodified request was copied or changed: %t, %s", changed, got)
+		}
+	}
+}
+
+func TestRefusedPassthroughIsScopedToProviderAndProtocol(t *testing.T) {
+	server := &Server{unfit: make(map[string]bool)}
+	body := []byte(strings.Replace(passthroughTurn, "%s", "model", 1))
+	server.markUnfit("first", passthroughRefused("content_token_count"), provider.Responses)
+	server.markUnfit("first", passthroughRefused("turn_id"), provider.Responses)
+	server.markUnfit("second", passthroughRefused("turn_id"), provider.Chat)
+
+	got := server.withoutRefusedPassthrough("first", provider.Responses, body)
+	if passthroughHas(got, "turn_id") || passthroughHas(got, "content_token_count") ||
+		!passthroughHas(got, "content_item_kinds") || !json.Valid(got) {
+		t.Fatalf("selected provider retained a refused member or lost another: %s", got)
+	}
+	for _, got := range [][]byte{
+		server.withoutRefusedPassthrough("second", provider.Responses, body),
+		server.withoutRefusedPassthrough("first", provider.Chat, body),
+	} {
+		if string(got) != string(body) || &got[0] != &body[0] {
+			t.Fatalf("unrelated provider or protocol changed: %s", got)
+		}
+	}
+	server.markUnfit("first", passthroughRefused(""), provider.Responses)
+	if all := server.withoutRefusedPassthrough("first", provider.Responses, body); strings.Contains(string(all), passthroughKey) {
+		t.Fatalf("whole-field refusal did not take precedence: %s", all)
+	}
+}
+
+func BenchmarkRefusedPassthroughLongInput(b *testing.B) {
+	const prefix = `{"model":"model","input":[`
+	item := `{"type":"message","role":"user","content":"` + strings.Repeat("a", 384) +
+		`","` + passthroughKey + `":{"content_token_count":[1]}}`
+	for _, count := range []int{64, 256, 1024} {
+		input := []byte(prefix + strings.Repeat(item+",", count-1) + item + `]}`)
+		for _, refused := range []bool{false, true} {
+			b.Run(fmt.Sprintf("%d/refused=%t", count, refused), func(b *testing.B) {
+				server := &Server{unfit: make(map[string]bool)}
+				if refused {
+					server.markUnfit("provider", passthroughRefused("content_token_count"), provider.Responses)
+				}
+				b.ReportAllocs()
+				b.SetBytes(int64(len(input)))
+				for b.Loop() {
+					out := server.withoutRefusedPassthrough("provider", provider.Responses, input)
+					if (len(out) < len(input)) != refused {
+						b.Fatal("unexpected response body")
+					}
+				}
+			})
+		}
 	}
 }

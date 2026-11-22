@@ -208,6 +208,7 @@ export const FakePlugin = async ({ client }) => ({
   },
   auth: {
     provider: ID,
+    ...(process.env.FAKE_MODELS_LOG ? { options: [{ key: "model-list", label: "Model list" }] } : {}),
     single: process.env.FAKE_KEYLESS === "1",
     methods: [
       { type: "api", label: "API key", ...(process.env.FAKE_KEYLESS === "1" ? { keyless: true, authorize: async (inputs) => ({ type: "success", key: inputs.credential || "public-fixture" }) } : {}) },

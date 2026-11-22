@@ -18,6 +18,7 @@ import (
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
@@ -95,7 +96,10 @@ func sdkCLIHostWithAPIForTest(t *testing.T, minor int) *sdkCLITestHost {
 	return host
 }
 
-func (host *sdkCLITestHost) List() ([]extensionhost.Installed, error) {
+func (host *sdkCLITestHost) ListContext(ctx context.Context) ([]extensionhost.Installed, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return host.entries, host.listErr
 }
 
@@ -904,6 +908,34 @@ func TestSDKCLIAccountsNeverPrintCredentials(t *testing.T) {
 	}
 }
 
+func TestSDKCLIAccountReadsHonorDeadline(t *testing.T) {
+	for _, args := range [][]string{
+		{"accounts", "sample", "vendor", "--json"},
+		{"call", "sample", sdk.MethodProviderExecute, `{"body":"AA=="}`, "--scope", `{"provider":"vendor","account":"account"}`},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			host := sdkCLIHostForTest(t)
+			if _, err := host.store.SaveAccount(extensionhost.Account{
+				Plugin: "sample", Provider: "vendor", ID: "account", Auth: json.RawMessage(`{"token":"private"}`),
+			}, 0); err != nil {
+				t.Fatal(err)
+			}
+			unlock, held := filelock.Lock(filepath.Join(host.manager.Namespace(), "private", ".lock"), 0)
+			if !held {
+				t.Fatal("test could not lock SDK account store")
+			}
+			defer unlock()
+			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+			defer cancel()
+			var out bytes.Buffer
+			err := sdkPluginRun(ctx, args, host, &out, sdkCLIAuth{})
+			if !errors.Is(err, context.DeadlineExceeded) || out.Len() != 0 || len(host.calls) != 0 {
+				t.Fatalf("account read ended with %v, output %q, calls %v", err, out.String(), host.calls)
+			}
+		})
+	}
+}
+
 func TestSDKCLIAuthUsesSavedGenerationAndHidesCredentials(t *testing.T) {
 	for _, operation := range []string{"start", "finish", "refresh", "logout"} {
 		t.Run(operation, func(t *testing.T) {
@@ -930,13 +962,15 @@ func TestSDKCLIAuthUsesSavedGenerationAndHidesCredentials(t *testing.T) {
 					}
 					return sdk.AuthStartResult{UserCode: "code"}, nil
 				},
-				finish: func(ctx context.Context, scope sdk.Scope, request sdk.AuthFinishRequest) (sdk.AuthResult, error) {
+				finish: func(ctx context.Context, scope sdk.Scope, request sdk.AuthFinishRequest) (provider.ExtensionAuthCompletion, error) {
 					check(scope)
 					called = "finish"
 					if request.Code != "code" {
 						t.Fatalf("finish request = %+v", request)
 					}
-					return sdk.AuthResult{ID: "account", Credentials: json.RawMessage(`{"token":"must-not-print"}`)}, nil
+					return provider.ExtensionAuthCompletion{AuthResult: sdk.AuthResult{
+						ID: "account", Credentials: json.RawMessage(`{"token":"must-not-print"}`),
+					}}, nil
 				},
 				refresh: func(ctx context.Context, scope sdk.Scope) (sdk.AuthResult, error) {
 					check(scope)

@@ -183,8 +183,8 @@ func newAccountTaskCatalogFixture(t *testing.T) *accountTaskCatalogFixture {
 		t.Fatal(err)
 	}
 	auth, _ := json.Marshal(map[string]string{"url": upstream.URL + "/models", "token": "synthetic"})
-	if _, err := fixture.manager.Store().SaveAccount(extensionhost.Account{
-		Plugin: manifest.ID, Provider: "vendor", ID: "selected", Auth: auth}, 0); err != nil {
+	if _, err := saveExtensionAuth(t.Context(), fixture.manager, sdk.Scope{Plugin: manifest.ID, Provider: "vendor"},
+		sdk.AuthResult{ID: "selected", Credentials: auth}); err != nil {
 		t.Fatal(err)
 	}
 	if all, err := ExtensionProviders(); err != nil || len(all) != 1 {

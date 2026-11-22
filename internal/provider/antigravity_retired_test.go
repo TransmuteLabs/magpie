@@ -34,7 +34,8 @@ func TestRetiredAntigravityAsksGoogleNothing(t *testing.T) {
 	if ms := movingOf(t, "antigravity"); len(ms) != 1 {
 		t.Fatalf("the mover carries %d accounts, want 1: %+v", len(ms), ms)
 	}
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	cards, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range cards {
 		if q.Provider == "antigravity" {
 			t.Fatalf("usage has an Antigravity card: %+v", q)
 		}

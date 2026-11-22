@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -134,6 +135,42 @@ func storageSelected(t *testing.T) Session {
 		t.Fatal("ordinary Find did not select the installed native SQLite source", selected)
 	}
 	return selected
+}
+
+func TestStorageNativeForeignCycleRevokesSelectedConsent(t *testing.T) {
+	fixture := installStorageNativeFixture(t)
+	consent, err := os.ReadFile(storageConsentsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := storageSelected(t)
+	assertTranscript := func(selected Session) {
+		t.Helper()
+		transcript, err := TranscriptOf(selected)
+		if err != nil || !slices.ContainsFunc(transcript.Parts, func(part Part) bool {
+			return part.Text == "first split part"
+		}) {
+			t.Fatal("ordinary SQLite transcript unavailable", transcript, err)
+		}
+	}
+	assertTranscript(selected)
+	sourceBeforePublish = func() {
+		cycleSourceModule(t, fixture.manager, fixture.entry.Manifest.ID, "MAGPIE_STORAGE_TEST_HOST")
+	}
+	t.Cleanup(func() { sourceBeforePublish = nil })
+	transcript, err := TranscriptOf(selected)
+	sourceBeforePublish = nil
+	if !errors.Is(err, extension.ErrActionChanged) || len(transcript.Parts) != 0 {
+		t.Error("SQLite transcript published after a foreign enablement cycle", transcript, err)
+	}
+	fresh := storageSelected(t)
+	if _, err := TranscriptOf(selected); !errors.Is(err, extension.ErrActionChanged) {
+		t.Error("fresh SQLite discovery revived the previous selection", err)
+	}
+	assertTranscript(fresh)
+	if after, err := os.ReadFile(storageConsentsPath()); err != nil || !bytes.Equal(consent, after) {
+		t.Fatal("enablement cycle rewrote the persisted consent", err)
+	}
 }
 
 func TestStorageNativeOrdinarySQLiteSource(t *testing.T) {

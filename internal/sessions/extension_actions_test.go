@@ -153,6 +153,37 @@ func testSessionExtensionOrdinaryCarryOver(test *testing.T, profile string) {
 	if !bytes.Equal(otherAfter, otherBody) {
 		test.Fatal("ordinary conversion changed the other store's source")
 	}
+	test.Run("converter enablement", func(test *testing.T) {
+		cycle := func() { cycleSourceModule(test, host, manifest.ID, "") }
+		test.Cleanup(func() { sourceBeforePublish = nil })
+		sourceBeforePublish = cycle
+		cached, err := CarryOver(session, "omp")
+		sourceBeforePublish = nil
+		if !errors.Is(err, extension.ErrActionChanged) || cached != (CarryResult{}) {
+			test.Error("cached conversion published across converter enablement", cached, err)
+		}
+		if cached, err := CarryOver(session, "omp"); err == nil || cached != (CarryResult{}) {
+			test.Error("new generation reused the previous conversion receipt", cached, err)
+		}
+		if after, err := os.ReadFile(output); err != nil || !bytes.Equal(body, after) {
+			test.Fatal("enablement cycle changed previously published output", err)
+		}
+		if err := os.Remove(output); err != nil {
+			test.Fatal(err)
+		}
+		sourceBeforePublish = cycle
+		pending, err := CarryOver(session, "omp")
+		sourceBeforePublish = nil
+		if !errors.Is(err, extension.ErrActionChanged) || pending != (CarryResult{}) {
+			test.Error("fresh conversion published across converter enablement", pending, err)
+		}
+		if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
+			test.Fatal("revoked conversion left its output behind", err)
+		}
+		if recovered, err := CarryOver(session, "omp"); err != nil || recovered != result {
+			test.Fatal("new converter generation could not publish a fresh conversion", recovered, err)
+		}
+	})
 	// The cached migration is a publication too: a second process can change
 	// the selected history owner after receipt validation without an epoch bump.
 	sourceBeforePublish = func() { delegateHistoryForTest(test, "claude") }

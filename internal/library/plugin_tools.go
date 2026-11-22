@@ -35,6 +35,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/plugin"
@@ -42,25 +43,53 @@ import (
 )
 
 // pluginToolsOf and runPluginToolOf are the gateway's, a test's fakes in
-// their place; pluginsInstalled and toolsNoted are the plugin package's.
+// their place. The plugin package supplies the installed tool inventory.
 var (
 	pluginToolsOf         = gateway.PluginToolsOf
 	runPluginToolOf       = gateway.RunPluginToolOf
 	runPluginToolResultOf = gateway.RunPluginToolResultOf
-	pluginsInstalled      = plugin.ReadList
-	toolsNoted            = plugin.ToolNames
+	pluginInventory       = plugin.ReadToolInventory
 )
+
+var adoptedServersSync struct {
+	sync.Mutex
+	running, again bool
+}
 
 func init() {
 	plugin.ToolsNoted = func() {
 		if changed, err := adoptPluginTools(); err != nil {
 			log.Printf("library: giving plugin tools a server: %v", err)
 		} else if changed {
-			if _, err := Sync(); err != nil {
-				log.Printf("library: syncing after plugin tools: %v", err)
-			}
+			syncAdoptedServersSoon()
 		}
 	}
+}
+
+func syncAdoptedServersSoon() {
+	adoptedServersSync.Lock()
+	if adoptedServersSync.running {
+		adoptedServersSync.again = true
+		adoptedServersSync.Unlock()
+		return
+	}
+	adoptedServersSync.running = true
+	adoptedServersSync.Unlock()
+	go func() {
+		for {
+			if _, err := syncSavedLibrary(); err != nil {
+				log.Printf("library: syncing adopted servers: %v", err)
+			}
+			adoptedServersSync.Lock()
+			if !adoptedServersSync.again {
+				adoptedServersSync.running = false
+				adoptedServersSync.Unlock()
+				return
+			}
+			adoptedServersSync.again = false
+			adoptedServersSync.Unlock()
+		}
+	}()
 }
 
 // pluginURL is the address of the plugin's tools at the gateway at base.
@@ -89,11 +118,11 @@ func adoptPluginTools() (bool, error) {
 // plugins installed and the tools they were noted giving; true when it
 // changed the library.
 func (l *Library) adoptPlugins() bool {
-	pl, err := pluginsInstalled()
+	pl, names, err := pluginInventory()
 	if err != nil {
 		return false // unknown: nothing added, nothing taken out
 	}
-	noted := toolsNoted()
+	noted := sync.OnceValue(names)
 	installed := map[string]bool{}
 	for _, e := range pl.Plugins {
 		installed[plugin.Name(e.Spec)] = true
@@ -111,7 +140,7 @@ func (l *Library) adoptPlugins() bool {
 	}
 	for _, e := range pl.Plugins {
 		name := plugin.Name(e.Spec)
-		if e.Off || len(noted[e.Spec]) == 0 || slices.Contains(l.PluginsOffered, name) {
+		if e.Off || slices.Contains(l.PluginsOffered, name) || len(noted()[e.Spec]) == 0 {
 			continue
 		}
 		l.PluginsOffered = append(l.PluginsOffered, name)

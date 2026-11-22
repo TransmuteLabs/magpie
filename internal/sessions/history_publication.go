@@ -38,14 +38,19 @@ func inspectHistoryReads() (*settings.SessionReads, error) {
 }
 
 func checkHistoryRead(agent string) error {
+	_, err := historyReadGeneration(agent)
+	return err
+}
+
+func historyReadGeneration(agent string) (string, error) {
 	reads, err := inspectHistoryReads()
 	if err != nil {
-		return errors.Join(extension.ErrActionChanged, err)
+		return "", errors.Join(extension.ErrActionChanged, err)
 	}
 	if !reads.Reads(agent) {
-		return ErrNotRead
+		return "", ErrNotRead
 	}
-	return nil
+	return reads.Generation, nil
 }
 
 func inspectHistoryPublication(ctx context.Context) (historyPublication, error) {
@@ -57,7 +62,7 @@ func inspectHistoryPublication(ctx context.Context) (historyPublication, error) 
 	if err != nil {
 		return historyPublication{}, err
 	}
-	claims, err := readHistoryClaims()
+	claims, err := readHistoryClaims(ctx)
 	if err != nil {
 		return historyPublication{}, err
 	}
@@ -75,17 +80,7 @@ func (snapshot historyPublication) jsonlAccounting(ctx context.Context) map[stri
 	if err != nil {
 		return nil
 	}
-	sources := map[string]int{}
-	for _, entry := range entries {
-		if !entry.Disabled {
-			for _, descriptor := range entry.Manifest.SessionSources {
-				sources[descriptor.Agent]++
-			}
-			for _, descriptor := range entry.Manifest.StorageSources {
-				sources[descriptor.Agent]++
-			}
-		}
-	}
+	sources := enabledSourceOwners(entries)
 	rooted := map[string]bool{}
 	for _, consent := range snapshot.consents {
 		rooted[consent.Agent] = true
@@ -93,7 +88,7 @@ func (snapshot historyPublication) jsonlAccounting(ctx context.Context) map[stri
 	var allowed map[string]bool
 	for _, binding := range snapshot.bindings {
 		agent := binding.Agent
-		if !snapshot.reads.Reads(agent) || rooted[agent] || sources[agent] != 1 ||
+		if !snapshot.reads.Reads(agent) || rooted[agent] || sources[agent].count != 1 ||
 			snapshot.view != nil && snapshot.view.agents[agent] {
 			continue
 		}

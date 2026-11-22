@@ -10531,7 +10531,7 @@ The card shows how many tokens billion-context saved, in its own count: the net 
 - Never a file, entry or skill of yours with the same name. The page shows the clash and lets you choose.
 - Anything it replaces goes to the backups first.
 
-Projects can get skills and MCP servers too, in the project’s own folders (such as `.claude/skills`, `.agents/skills`, `.mcp.json` or `.codex/config.toml`). From a terminal, `magpie library project add .` adds the folder you are in, `magpie library project skill add . pdf docx` gives it skills, `magpie library project skill rm . pdf` takes one away, and `magpie library project skills .` lists them. `magpie library project plugin on . superpowers` turns on, for this folder alone, a plugin Claude Code has installed (or a plugin in the library), `magpie library project plugin off . superpowers` turns it off again, and `magpie library project plugin .` lists which are on.
+Projects can get skills and MCP servers too, in the project’s own folders (such as `.claude/skills`, `.agents/skills`, `.mcp.json` or `.codex/config.toml`). From a terminal, `magpie library project add .` adds the folder you are in, `magpie library project skill add . pdf docx` gives it skills, `magpie library project skill rm . pdf` takes one away, and `magpie library project skills .` lists them. `magpie library project plugin on . superpowers` turns on, for this folder alone, a plugin Claude Code has installed (or a plugin in the library), `magpie library project plugin off . superpowers` turns it off again, and `magpie library project plugin .` lists which are on. To put a plugin in the library from a terminal, as Find plugins and Install do, run `magpie library plugin import ./my-plugin` with a folder (a Claude plugin, a Pi package or a marketplace), `owner/repo` or a git address; `agents=none` keeps it for projects alone, and `magpie library plugin` lists what the library has.
 
 A project can have instructions of its own as well, so your shared instructions keep only what holds everywhere. On the Instructions page, open a project under the shared text and write what only it needs. magpie puts it between its two marker lines in the file each agent reads in that project: `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, Cursor and most others, `GEMINI.md` for Gemini CLI. The rest of the file stays yours. A file magpie makes is kept out of git, and turning an agent off takes its part out again. From a terminal: `magpie library project instructions . text "Use pnpm here."`, and `… agents claude,codex` or `… agents none`.
 
@@ -10571,13 +10571,13 @@ Every tool an agent is given goes out, with its whole parameter schema, on every
 - **`find_tools`.** takes the words of what the task needs and gives the tools that match: the best 5 with their description and parameters, then up to 15 more by name. Its own description names each server and its tools, so the model knows what there is to find.
 - **`call_tool`.** runs a tool by name, with its arguments.
 
-An agent that searches its MCP tools itself is given every tool, and its own search keeps them out of each request: Claude Code, Claude Desktop, Codex, Pi, Droid and omp. So is an agent given 10 tools or fewer, and an app at the Other apps address, since magpie can’t tell which app that is.
+An agent that searches its MCP tools itself is given every tool, and its own search keeps them out of each request: Claude Code, Claude Desktop, Codex, Pi, Droid and omp. So is an agent given 10 tools or fewer, and an app at the Other apps address, since magpie can’t tell which app that is. An app there that doesn’t search its tools itself can ask for them on demand: add `?tools=on-demand` to the address, as in `http://127.0.0.1:3425/mcp/magpie/hub?tools=on-demand`.
 
 To give every agent every tool instead, turn off Tools on demand under MCP router in Library → MCP, then restart your agents.
 
 ## Other apps
 
-With the router on, the Other apps row shows an address ending in `/mcp/magpie/hub`, which serves every server in the Library. Connect… opens a sheet with a ready entry to copy for Cursor, VS Code, Windsurf or any app that takes a JSON MCP config; in the app window, Cursor and VS Code also have Add, which opens the app to confirm. An app on another computer needs a gateway key, as every request from your network does (see [Remote magpie](https://usemagpie.ai/docs/remote)).
+With the router on, the Other apps row shows an address ending in `/mcp/magpie/hub`, which serves every server in the Library. Connect… → Other apps also gives the address with `?tools=on-demand`, for an app that should get its tools on demand. Connect… opens a sheet with a ready entry to copy for Cursor, VS Code, Windsurf or any app that takes a JSON MCP config; in the app window, Cursor and VS Code also have Add, which opens the app to confirm. An app on another computer needs a gateway key, as every request from your network does (see [Remote magpie](https://usemagpie.ai/docs/remote)).
 
 > **Command servers run on this computer.** Anyone holding a gateway key on your network can call them through the router, with your rights here. Only share keys with people you trust.
 
@@ -11816,7 +11816,7 @@ Optional async `onResponse(reply, ctx)` receives a best-effort completion notifi
 
 Optional async `onSignIn(event, ctx)` hears of a subscription account that has to be signed in again: `event` is `{provider, providerName, account, state, endsAt?}`, `state` `signed-out`, or `ending` for a Claude sign-in within three days of its end. It is told once until the account works again, and carries no token. A hooks file may export only `onSignIn`.
 
-It runs in Bun once per agent request, before the JS gateway middleware, for every provider, Codex's own ChatGPT sign-in included. body is the agent API object. ctx contains `protocol`, `model`, `stream`, `path`, `agent`, `session`, `cwd`, `query`, `options` and `signal`. The query is the latest user text, excluding tool results and images. Missing identity fields are empty; authorization headers are never included.
+It runs in Bun once per agent request, before the JS gateway middleware, for every provider, Codex's own ChatGPT sign-in included. body is the agent API object. ctx contains `protocol`, `model`, `stream`, `path`, `agent`, `caller`, `session`, `cwd`, `query`, `options` and `signal`. `caller` is `{agent, name, via}`, as the middleware’s `ctx.caller`, in `onRequest` and `onResponse` alike. A request hook can’t turn a request away; a middleware’s `ctx.reject` can, before any provider is asked. The query is the latest user text, excluding tool results and images. Missing identity fields are empty; authorization headers are never included.
 
 Return an object to replace the request, or undefined to keep it. A hook that changes the model, streaming, the client's tools or its tool choice is rolled back, as a failure, and gets no `onResponse` for that request. Each hook receives a clone; mutations from failed or undefined hooks are discarded. Successful changes follow enabled plugin order. Each hook defaults to one second; `gatewayTimeoutMs` accepts integers from 100 to 30000 milliseconds; a value outside that range is clamped to the nearer bound. The chain sums budgets, clamped to 2–10 seconds, or takes the longest hook's own timeout when that is longer; host startup is bounded to 11 seconds, and startup plus RPC to the chain budget plus one second (at least 11 seconds). Settings → Plugins offers JSON options and call, latency, failure and outcome diagnostics. `ctx.report(code, bytes)` accepts ready/empty/unbound/unauthorized/unavailable/invalid/skipped and byte counts only. Statistics reset on reload and retain no private text. Use `ctx.signal` with fetch. Errors, invalid returns, timeouts and a host busy starting keep the request. Bun plugins have host privileges; install trusted code.
 
@@ -11892,7 +11892,15 @@ Each is a named export or a member of `export default { … }`. Bodies and event
 
 `export const events = ["content_block_delta"]` calls `onEvent` only for events of those names (Anthropic Messages and Responses name theirs). Chat Completions and Gemini events have no name, so leave `events` out for them. An event holds a piece of the reply, so a word can be split over two events. A `data: [DONE]` line and comments pass by unseen. A compressed reply passes as it is.
 
-`ctx` has `protocol` (`anthropic`, `chat`, `responses` or `gemini`), `model` and `stream` as the agent asked, `path`, `agent` when magpie knows it, `options` (the plugin’s options) and `state`, an object of the request’s own.
+`ctx` has `protocol` (`anthropic`, `chat`, `responses` or `gemini`), `model` and `stream` as the agent asked, `path`, `agent` when magpie knows it, `caller`, `options` (the plugin’s options) and `state`, an object of the request’s own.
+
+`ctx.caller` is the agent the request came from, `{agent, name, via}`, the same as a provider plugin’s `chat.headers` gets as `input.caller`: for a request another magpie passed on with a Remote magpie provider it names the agent on the first computer, and `via` the computers it came through, the agent’s first (empty for an agent on this computer). `ctx.agent` is the client that sent this request, which for a request passed on is `magpie`. To refuse an agent before any provider is asked, turn it away in `onRequest`:
+
+```
+export function onRequest(body, ctx) {
+  if (ctx.caller?.agent === "pi") return ctx.reject(403, "not for Pi")
+}
+```
 
 ### When a hook fails
 
@@ -12106,7 +12114,7 @@ A plugin can also put panels into the pages magpie draws itself. Each one is a s
 | `agents` | The end of the Agents page | `{}` |
 | `usage` | The end of Usage’s Overview | `{}` |
 | `settings` | A Plugins tab in Settings, there only while a plugin has a panel in it | `{}` |
-| `provider` | Each saved provider’s editor | `{ provider: { id, name } }` |
+| `provider` | The editor of each provider the plugin gives (every saved provider’s when it gives none), as a row before Advanced | `{ provider: { id, name } }` |
 
 A plugin has at most 8 panels. A panel’s height follows its `<html>` (up to 2400px), so let the page size itself and don’t give `html` or `body` a fixed height. A panel that throws, or doesn’t answer in 10 seconds, shows {name} stopped working with Try again in its own place; the page around it and the panels beside it go on.
 
@@ -12232,7 +12240,7 @@ Unless you turn that part off, one `magpie uses` event follows for each agent, p
 - **providers.** that are on: a preset’s id (`deepseek`), a subscription’s (`codex`, `copilot`), a known community plugin’s (`plugin:kiro`). A provider you added yourself is only `custom`; any other plugin only `plugin`.
 - **models.** the connected agents are set to, as provider id and vendor model id (`deepseek/deepseek-v4`). On a key’s provider, a model id that [models.dev](https://models.dev) doesn’t list (a local model, a fine-tune) is only `<provider>/other`; a model on your own provider is `custom`; a routing group is `group`.
 
-With them go `magpie partner` events: for each partner listed first in the add sheet, by its id, how many times on a day that has ended the sheet showed it, its row was opened, its key page was opened, and a provider was added from it (`what`: `shown`, `opened`, `keys`, `added`; at most 20 a day each, 5 adds). Counts only, never a provider of your own.
+With them go `magpie partner` events: for each partner listed first in the add sheet or in the Plugins page’s Discover, by its id, how many times on a day that has ended it was shown, its row was opened, its key page was opened, and a provider was added from it or its plugin installed (`what`: `shown`, `opened`, `keys`, `added`; at most 20 a day each, 5 adds), and where it is listed (`slot`: `providers` or `plugins`). Counts only, never a provider of your own. A `magpie page` event says how many times on that day the Plugins page was opened (`page`: `plugins`; at most 20).
 
 With that part on, magpie also tells `usemagpie.ai`, on the same day, which of the plugins Discover lists are installed and on, so Discover can say how many use each one: `POST /api/plugins/report` with the same random id and the plugins’ npm names, or `github:owner/repo` for a repository tagged `magpie-plugin` (at most 50). A plugin from a folder, a private repository or a package Discover doesn’t list is never named. The same report names the MCP servers in your Library that an agent is given and that the Library’s market lists from what ships with magpie, by their market ids only (`context7`, `io.github.owner/name`; at most 50), so the market can put the most used first; a server of your own, or one found only by a search, is never named, nor its address, command or keys. A like on a plugin’s page goes as `POST /api/plugins/like` with the id, the plugin and whether it is on, and only for a plugin installed here; the plugins you liked are kept in `plugin-likes.json`. The site counts the ids that reported a plugin in the last 7 days, drops a report after 30 days, and keeps your address only hashed, for an hour, to limit how often it is asked. Discover reads the counts from `GET /api/plugins/stats`, which carries no id. The code is [internal/stats/plugins.go](https://github.com/yetone/magpie/blob/main/internal/stats/plugins.go) and [site/pluginstats.js](https://github.com/yetone/magpie/blob/main/site/pluginstats.js).
 
@@ -12257,7 +12265,9 @@ Every event carries `$process_person_profile: false`, so PostHog keeps no person
     { "event": "magpie uses", "properties": { "kind": "provider", "id": "custom", … } },
     { "event": "magpie uses", "properties": { "kind": "model", "id": "deepseek/deepseek-v4", … } },
     { "event": "magpie partner", "timestamp": "2026-10-12T12:00:00Z",
-      "properties": { "id": "<partner id>", "what": "shown", "count": 3, "day": "2026-10-12", … } }
+      "properties": { "id": "<partner id>", "what": "shown", "count": 3, "day": "2026-10-12", "slot": "providers", … } },
+    { "event": "magpie page", "timestamp": "2026-10-12T12:00:00Z",
+      "properties": { "page": "plugins", "count": 2, "day": "2026-10-12", … } }
   ]
 }
 ```
@@ -12306,8 +12316,8 @@ magpie asks its own site for a few things, whatever the privacy settings say, as
 
 - `/api/latest`: the update feed, every 6 hours unless `noAutoUpdate` is on, with `?lang=` for the notes in your language, and `?channel=stable` or `?channel=daily` when Settings → About → Update channel is Stable or Daily; a fresh install asks `?channel=stable` once too, to stay on Stable when it is Stable’s version. Neither says who you are. `/api/notes` gives What’s new after an update.
 - `/files/<version>/<file>`: the release files an update and the installer download, served from Cloudflare R2. A file the site doesn’t hold is sent on to github.com. Nothing is counted.
-- `/api/partners`: the add sheet’s partner list, every 6 hours. One fetch in ten is counted as a `magpie partners fetch` event, with the country Cloudflare gives, while a partner is listed.
-- `/go/<partner>/site` and `/go/<partner>/keys`: a partner’s website and key-page links, opened in your browser, are counted (the partner, which link, a region, a country) as `magpie partner go` before you are sent on.
+- `/api/partners`: the partner list of the add sheet and the Plugins page, every 6 hours. One fetch in ten is counted as a `magpie partners fetch` event, with the country Cloudflare gives, while a partner is listed.
+- `/go/<partner>/site` and `/go/<partner>/keys`: a partner’s website and key-page links, opened in your browser, are counted (the partner, which link, a region, where it is listed, a country) as `magpie partner go` before you are sent on.
 - `/api/plugins/stats`: Discover’s counts of how many use and like each plugin, and the Library market’s of how many use each MCP server, at most once an hour. It carries no id; the plugin report and likes do, and go only with sharing what you use on.
 - `/api/icon?url=…`: icons named by a plugin, an import link or the library are fetched through it, so their hosts see Cloudflare’s address, not yours. The worker passes the picture on and counts and keeps nothing.
 

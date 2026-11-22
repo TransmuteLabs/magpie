@@ -567,15 +567,19 @@ func keyListed(r *http.Request, shown []provider.Entry, off func(string) bool) [
 // held. members are the group's the key may go to through it
 // (groupKeeps), nil for a model. held says every candidate was an
 // account or key the key may not use.
-func allowedCandidates(who access.Identity, cs []candidate, pl planned, members map[string]bool) ([]candidate, planned, bool) {
+func allowedCandidates(ctx context.Context, who access.Identity, cs []candidate, pl planned, members map[string]bool) ([]candidate, planned, bool) {
 	out := cs[:0:0]
 	order := pl.order[:0:0]
 	held := false
+	var current accountIDLookup
+	if len(who.Accounts) > 0 {
+		current = provider.CurrentAccountIDs(ctx)
+	}
 	for i, c := range cs {
 		if !members[c.p.ID+"/"+c.model] && !modelAllowed(who, c.p, c.model) {
 			continue // a model the key may not use: skipped, as before
 		}
-		if !accountAllowed(who, c) {
+		if !accountAllowed(who, c.p, current) {
 			held = true
 			if i < len(pl.order) {
 				w := pl.order[i]
@@ -593,7 +597,7 @@ func allowedCandidates(who access.Identity, cs []candidate, pl planned, members 
 	// nor is one held for its credits there for a reset to bring back, or
 	// one past its cap for a conversation kept strictly on it
 	gone := func(c candidate) bool {
-		return !members[c.p.ID+"/"+c.model] && !modelAllowed(who, c.p, c.model) || !accountAllowed(who, c)
+		return !members[c.p.ID+"/"+c.model] && !modelAllowed(who, c.p, c.model) || !accountAllowed(who, c.p, current)
 	}
 	pl.held = slices.DeleteFunc(slices.Clone(pl.held), gone)
 	pl.capped = slices.DeleteFunc(slices.Clone(pl.capped), gone)
@@ -615,12 +619,22 @@ func allowedCandidates(who access.Identity, cs []candidate, pl planned, members 
 // fingerprint — "<provider>/<ref>", told apart in lower case, as
 // accounts are. A key that lists none uses every account, as keys
 // always did.
-func accountAllowed(who access.Identity, c candidate) bool {
+func accountAllowed(who access.Identity, p provider.Provider, current accountIDLookup) bool {
 	if len(who.Accounts) == 0 {
 		return true
 	}
-	return who.AllowsAccount(c.p.ID, c.p.AccountID())
+	pid := strings.TrimSpace(p.ID)
+	for _, entry := range who.Accounts {
+		named, _, scoped := strings.Cut(strings.TrimSpace(entry), "/")
+		if scoped && strings.EqualFold(named, pid) {
+			id, known := current(p)
+			return known && who.AllowsAccount(pid, id)
+		}
+	}
+	return who.AllowsAccount(pid, "")
 }
+
+type accountIDLookup func(provider.Provider) (string, bool)
 
 // heldByGroup is r with its caller held to the routing group g's own
 // accounts too (Group.Accounts, duanckham on X): a request through the
@@ -680,9 +694,9 @@ func heldByGroupAt(r *http.Request, id string) *http.Request {
 // groupHeld is the name of the first of gs, routing groups a candidate is
 // reached through, held to accounts (Group.Accounts) that leave its account
 // or key out — by AllowsAccount, a gateway key's rule; "" for none.
-func groupHeld(c candidate, gs []provider.Group) string {
+func groupHeld(c candidate, gs []provider.Group, current accountIDLookup) string {
 	for _, g := range gs {
-		if len(g.Accounts) > 0 && !(access.Identity{Accounts: g.Accounts}).AllowsAccount(c.p.ID, c.p.AccountID()) {
+		if !accountAllowed(access.Identity{Accounts: g.Accounts}, c.p, current) {
 			return cmp.Or(g.Name, g.ID)
 		}
 	}
@@ -692,8 +706,8 @@ func groupHeld(c candidate, gs []provider.Group) string {
 // memberHeld is the name of g, the group m is a member of, when m names
 // an account of its own (Member.Account, EastonXvii on X) other than c's;
 // "" when it names none or c's.
-func memberHeld(c candidate, m provider.Member, g provider.Group) string {
-	if m.Account == "" || (access.Identity{Accounts: []string{m.Account}}).AllowsAccount(c.p.ID, c.p.AccountID()) {
+func memberHeld(c candidate, m provider.Member, g provider.Group, current accountIDLookup) string {
+	if m.Account == "" || accountAllowed(access.Identity{Accounts: []string{m.Account}}, c.p, current) {
 		return ""
 	}
 	if len(m.Via) > 0 {
@@ -712,12 +726,13 @@ func memberHeld(c candidate, m provider.Member, g provider.Group) string {
 // ollama) has nothing to hold. A key's own list of models (#474) is not
 // weighed here; the paths that can go over the keys do (onKeys, a
 // drawing's, the decision path's).
-func allowedKey(who access.Identity, p provider.Provider, model string) (provider.Provider, bool) {
+func allowedKey(ctx context.Context, who access.Identity, p provider.Provider) (provider.Provider, bool) {
+	current := provider.CurrentAccountIDs(ctx)
 	if p.Key == "" {
-		return p, p.Account == nil || accountAllowed(who, candidate{p: p, model: model})
+		return p, p.Account == nil || accountAllowed(who, p, current)
 	}
 	for _, k := range p.KeysOn() {
-		if q := p.WithKey(k); accountAllowed(who, candidate{p: q, model: model}) {
+		if q := p.WithKey(k); accountAllowed(who, q, current) {
 			return q, true
 		}
 	}
@@ -745,7 +760,8 @@ func (s *Server) onKeys(r *http.Request, p provider.Provider, model, asked strin
 		return nil, http.StatusForbidden, barredError(asked, pl.left)
 	}
 	if keyWho, held := accountHolds(r); held {
-		cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(keyWho, c) })
+		current := provider.CurrentAccountIDs(r.Context())
+		cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(keyWho, c.p, current) })
 		if len(cs) == 0 {
 			return nil, http.StatusForbidden, keyAccountsError(keyWho, asked)
 		}

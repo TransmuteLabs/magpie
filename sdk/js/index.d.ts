@@ -31,17 +31,18 @@ export interface AccountCheckinRequest {
   day: string;
   proxy?: string;
 }
-export interface AccountCheckinResult {
-  outcome: "claimed" | "done" | "inactive" | "ineligible" | "failed" | "captcha" | "own-app";
+export type AccountCheckinResult = {
   credit?: number | null;
   streak?: number | null;
   message?: string;
-  until?: string;
-}
+} & (
+  | { outcome: "claimed" | "done" | "inactive" | "ineligible" | "failed" | "captcha" | "own-app"; until?: string }
+  | { outcome: "rate-limited"; until: string }
+);
 export function validateAccountCheckinRequest(value: unknown): AccountCheckinRequest;
 export function validateAccountCheckinResult(value: unknown): AccountCheckinResult;
 export type Protocol = "chat" | "responses" | "messages" | "anthropic" | "gemini";
-export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth" | "provider-signin"
+export type Capability = "inbound-codec" | "outbound-executor" | "agent-wiring" | "account-auth" | "provider-signin" | "provider-saved-signin"
   | "model-discovery" | "usage-reporter" | "operation-control" | "tool-provider" | "session-migration" | "module-rpc" | "gateway-hooks"
   | "session-source" | "session-related-inputs" | "agent-process" | "native-account-operations" | "session-storage-source" | "request-observer" | "ledger-observer" | "gateway-middleware" | "request-policy" | "request-handoff" | "budget-policy" | "masking-rules";
 export type Method = "inbound.decode" | "inbound.response" | "provider.execute" | "provider.models"
@@ -101,7 +102,7 @@ export function requestWithPolicy(signal: AbortSignal, host: RequestPolicyHost, 
   classify: (response: Response) => RequestRecoveryRequest | null | Promise<RequestRecoveryRequest | null>
 ): Promise<{response: Response; decision: RequestRecoveryResult | null}>;
 export interface Contract {
-  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 };
+  version: { major: 1; minor: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 };
   capabilities: readonly Capability[];
 }
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -537,7 +538,7 @@ export interface ServiceDescriptor {
   contract: ServiceContract; methods: string[]; start: "eager" | "lazy";
   dependsOn?: string[]; ready?: ServiceReady;
 }
-export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15" | "^1.16" | "^1.17" | "^1.18" | "^1.19"; nativeABI?: number; platforms?: string[] }
+export interface Compatibility { hostAPI: "^1" | "^1.1" | "^1.2" | "^1.3" | "^1.4" | "^1.5" | "^1.6" | "^1.7" | "^1.8" | "^1.9" | "^1.10" | "^1.11" | "^1.12" | "^1.13" | "^1.14" | "^1.15" | "^1.16" | "^1.17" | "^1.18" | "^1.19" | "^1.20"; nativeABI?: number; platforms?: string[] }
 export interface ProviderOption {
   key: string; label: string; description?: string; default?: boolean; confirm?: string;
   labels?: Record<string, string>; descriptions?: Record<string, string>; confirms?: Record<string, string>;
@@ -548,7 +549,7 @@ export function validateProviderOptionValues(manifest: Manifest, values: Record<
 export interface WindowDescriptor { metadata: string }
 export interface BindingDescriptor { id: string; from: string; action?: string; service?: string; endpoint?: string; provider?: string }
 export interface AccountSelection { id: string; expectedGeneration: string }
-export interface AccountSummary { id: string; generation: string; expiresAt?: number }
+export interface AccountSummary { id: string; generation: string; expiresAt?: number; name?: string }
 export interface WindowCallOptions { account?: AccountSelection }
 export interface AuthInputChoice { value: string; label: string }
 export interface AuthInputField { key: string; label: string; type: "text" | "secret" | "select"; optional?: boolean; choices?: AuthInputChoice[] }

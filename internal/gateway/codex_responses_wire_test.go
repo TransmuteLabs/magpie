@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/klauspost/compress/zstd"
+	"github.com/tidwall/gjson"
 
 	builtincodex "github.com/yetone/magpie/internal/extension/builtin/codex"
 	"github.com/yetone/magpie/internal/provider"
@@ -53,6 +55,190 @@ func TestLinkedCodexOwnRelayKeepsRetryAndMetering(t *testing.T) {
 	codexSignedIn(t)
 	hits := watchLinkedCodexResponses(t, builtincodex.ResponsesWireRelayedTurn)
 	testLinkedCodexRetryAndMetering(t, hits, "acct-1", "me@example.com", 0)
+}
+
+func TestLinkedCodexSocketSkipsHTTPEncoder(t *testing.T) {
+	socketOn(t)
+	zstdTurns(t)
+	codexSignedIn(t)
+	hits := watchLinkedCodexResponses(t, builtincodex.ResponsesWireRelayedTurn)
+	watched := linkedCodexResponses
+	linkedCodexResponses = func(req sdk.ExecuteRequest, encoding string, mode builtincodex.ResponsesWireMode, send builtincodex.ResponsesWireSend) (builtincodex.ResponsesWireReply, error) {
+		return watched(req, encoding, mode, func(encode func() []byte) (int, int, io.ReadCloser, error) {
+			if encode == nil {
+				t.Fatal("turn did not supply an HTTP encoder")
+			}
+			return send(func() []byte {
+				t.Error("successful socket turn ran the HTTP encoder")
+				return encode()
+			})
+		})
+	}
+	backend := &fakeSocketBackend{frames: wholeReply}
+	up := httptest.NewServer(backend)
+	t.Cleanup(up.Close)
+	base := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	t.Cleanup(func() { provider.CodexBase = base })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, CodexPath+"/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"ping"}`))
+	req.Header.Set("Authorization", "Bearer chatgpt-token")
+	req.Header.Set("chatgpt-account-id", "acct-1")
+	New().Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pong") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if httpTurns, socketTurns := backend.counts(); httpTurns != 0 || socketTurns != 1 || hits.Load() != 1 {
+		t.Fatalf("HTTP %d, socket %d, linked %d, want one socket through linked wire", httpTurns, socketTurns, hits.Load())
+	}
+}
+
+func TestLinkedCodexSocketChoosesBeforeHTTPCompression(t *testing.T) {
+	for _, fixture := range []struct {
+		name  string
+		mode  builtincodex.ResponsesWireMode
+		spare []string
+	}{
+		{name: "relay", mode: builtincodex.ResponsesWireRelayedTurn},
+		{name: "routed", mode: builtincodex.ResponsesWireRoutedTurn, spare: []string{"spare@example.com"}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			socketOn(t)
+			codexSignedIn(t, fixture.spare...)
+			t.Cleanup(provider.CodexZstdForTests(false))
+			hits := watchLinkedCodexResponses(t, fixture.mode)
+			backend := &fakeSocketBackend{
+				whole:     true,
+				closeWith: websocket.StatusMessageTooBig,
+				frames: func(socketTurn) []string {
+					provider.CodexZstdForTests(true)
+					return nil
+				},
+			}
+			posts := make(chan sentTurn, 2)
+			up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodPost {
+					wire, err := io.ReadAll(req.Body)
+					if err != nil {
+						t.Error(err)
+					}
+					call := sentTurn{encoding: req.Header.Get("Content-Encoding"),
+						path: req.URL.Path, account: req.Header.Get("chatgpt-account-id"),
+						length: req.ContentLength, wire: len(wire), body: wire}
+					if call.encoding == "zstd" {
+						decoder, err := zstd.NewReader(nil)
+						if err != nil {
+							t.Error(err)
+						} else {
+							call.body, err = decoder.DecodeAll(wire, nil)
+							decoder.Close()
+							if err != nil {
+								t.Error(err)
+							}
+						}
+					}
+					select {
+					case posts <- call:
+					default:
+						t.Error("unexpected repeated HTTP fallback")
+					}
+				}
+				backend.ServeHTTP(w, req)
+			})))
+			t.Cleanup(up.Close)
+			base := provider.CodexBase
+			provider.CodexBase = up.URL + "/backend-api/codex"
+			t.Cleanup(func() { provider.CodexBase = base })
+
+			server := New()
+			rec := httptest.NewRecorder()
+			body := `{"model":"gpt-5.5","stream":true,"input":"` + strings.Repeat("ping ", 1024) + `"}`
+			req := httptest.NewRequest(http.MethodPost, CodexPath+"/responses", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer chatgpt-token")
+			req.Header.Set("chatgpt-account-id", "acct-1")
+			server.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pong") {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			if httpTurns, socketTurns := backend.counts(); httpTurns != 1 || socketTurns != 1 || hits.Load() != 1 {
+				t.Fatalf("HTTP %d, socket %d, linked %d, want one of each", httpTurns, socketTurns, hits.Load())
+			}
+			post := <-posts
+			checkZstd(t, post, "gpt-5.5")
+			message := backend.turn(0).msg
+			if post.account != "acct-1" || !bytes.Equal(message, codexCreate(post.body)) {
+				t.Fatalf("HTTP fallback changed socket input or account: %q", post.account)
+			}
+			route := lastRoute(server)
+			call, ok := server.RouteCall(route.ID)
+			if !ok {
+				t.Fatal("no call headers for the response")
+			}
+			headers := call.Headers()
+			if headers == nil || len(headers.Upstream) != 1 || http.Header(headers.Upstream[0].Request).Get("Content-Encoding") != "zstd" {
+				t.Error("call headers did not record the HTTP fallback's content encoding")
+			}
+			for _, row := range usage.Load(time.Time{}) {
+				if row.RouteID == route.ID && !row.HandedOn {
+					if want := len(message) + post.wire; row.UpBytes != want || row.PlainBytes != len(post.body) {
+						t.Errorf("wire %d/%d plain %d/%d", row.UpBytes, want, row.PlainBytes, len(post.body))
+					}
+					return
+				}
+			}
+			t.Fatal("no usage row for socket and HTTP fallback")
+		})
+	}
+}
+
+func BenchmarkLinkedCodexSocketDelta(b *testing.B) {
+	wasOff := codexSocketOff.Swap(false)
+	b.Cleanup(func() {
+		codexKeepDrain()
+		codexSocketOff.Store(wasOff)
+	})
+	b.Cleanup(provider.CodexZstdForTests(true))
+	backend := &fakeSocketBackend{keep: true, frames: func(socketTurn) []string {
+		return []string{
+			`{"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
+			`{"type":"response.output_text.delta","delta":"pong"}`,
+			`{"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`,
+		}
+	}}
+	up := httptest.NewServer(backend)
+	b.Cleanup(up.Close)
+	base := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	b.Cleanup(func() { provider.CodexBase = base })
+
+	handler := New().Handler()
+	large := strings.Replace(userPing, "ping", strings.Repeat("text a; text b. ", 64<<10), 1)
+	body := keptTurn("long-kept", "gpt-5.5", large)
+	post := func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, CodexPath+"/responses", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer chatgpt-token")
+		req.Header.Set("chatgpt-account-id", "acct-1")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "pong") {
+			b.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	post()
+	b.ReportAllocs()
+	for b.Loop() {
+		post()
+	}
+	if posts, sockets := backend.counts(); posts != 0 || sockets != b.N+1 || backend.opened() != 1 {
+		b.Fatalf("HTTP %d, WS turns %d, sockets %d", posts, sockets, backend.opened())
+	}
+	if turn := gjson.ParseBytes(backend.turn(1).msg); turn.Get("previous_response_id").String() != "r1" ||
+		len(turn.Get("input").Array()) != 0 {
+		b.Fatalf("kept turn was not a delta, %d bytes", len(turn.Raw))
+	}
+	b.ReportMetric(float64(len(backend.turn(0).msg)), "full-B")
+	b.ReportMetric(float64(len(backend.turn(1).msg)), "delta-B")
 }
 
 func testLinkedCodexRetryAndMetering(t *testing.T, hits *atomic.Int32, retryAccountID, accountName string, tries int) {

@@ -14,18 +14,18 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
-const assets = path.resolve(__dirname, "../assets");
+const assets = process.env.MAGPIE_ASSETS || path.resolve(__dirname, "../assets");
 
 const qoderCN = { id: "qoder-cn", name: "Qoder CN", icon: "qoder", models: [], agents: [], key: {}, account: { agent: "qoder-cn", agentName: "Qoder CN", agentIcon: "qoder", user: "b@q", logins: [{ user: "b@q", active: true, on: true }] } };
 // the removed Qoder, named by its provider as the backend now names it
 const removed = (quiet) => ({ agent: "plugin", provider: "qoder-plugin", name: "Qoder", why: "You removed it from magpie.", quiet, agentName: "Qoder", agentIcon: "qoder" });
 
-function server(lang, asked, quiet, fail) {
+function server(lang, asked, quiet, fail, ownerRevision) {
   let gone = false;
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
-    const state = () => ({ providers: [qoderCN], presets: [], excluded: gone ? [] : [removed(quiet)], gateway: { running: true, window: true }, plugins: [] });
+    const state = () => ({ providers: [qoderCN], presets: [], excluded: gone ? [] : [{ ...removed(quiet), ownerRevision }], gateway: { running: true, window: true }, plugins: [] });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
@@ -54,6 +54,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   test(engine + ": a removed subscription can be signed out for good", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
+    await t.test("the removed SDK subscription sends its owner revision when confirmed", async (t) => {
+      const context = await browser.newContext({ viewport: { width: 900, height: 700 } });
+      t.after(() => context.close());
+      const page = await context.newPage();
+      const asked = [];
+      await page.route("**/*", server("en", asked, false, null, "owner-before-confirmation"));
+      await page.goto("http://magpie.test/?view=providers");
+      await page.locator("#excluded .excluded button.link").filter({ hasText: /^Sign out$/ }).click();
+      const ask = page.locator("#modal .forget-ask");
+      await ask.waitFor();
+      assert.deepEqual(asked, []);
+      await ask.getByRole("button", { name: "Sign out", exact: true }).click();
+      await page.locator("#modal").waitFor({ state: "hidden" });
+      assert.deepEqual(asked, [["forget", { id: "qoder-plugin", ownerRevision: "owner-before-confirmation" }]]);
+    });
     for (const lang of ["en", "zh"]) {
       await t.test(lang + ": the add sheet's row", async () => {
         const w = L[lang];

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -64,8 +63,13 @@ const WaitHeader = "X-Magpie-Wait"
 
 // SessionToPluginHeader and SubagentToPluginHeader tell a plugin's fetch
 // the session the agent named (sessionOf: Claude Code's
-// x-claude-code-session-id and the rest) and the Claude Code subagent the
-// request is of (x-claude-code-agent-id). The agent's own headers never
+// x-claude-code-session-id and the rest; for an OpenCode 1 subagent that
+// names no separate root session, its x-opencode-parent-session-id unless
+// the caller set X-Magpie-Session) and the subagent the request is of:
+// Claude Code's x-claude-code-agent-id, Codex's spawn thread id
+// (collab_spawn / thread_spawn / agent_job), or OpenCode's
+// x-opencode-session-id when x-opencode-parent-session-id is set. The
+// agent's own headers never
 // reach a plugin, so a plugin that keeps state per conversation (Devin's
 // cache keepalive) had only the request's text to go by, and Claude Code
 // Auto's permission check, whose history grows in its one merged user
@@ -117,10 +121,14 @@ func (p Provider) warmPlugin(ctx context.Context) {
 // routing groups, when it is id-plugin — but for a built-in moved
 // onto the plugin, whose id the plugin has now.
 func PluginID(id string) string {
+	return pluginID(id, func() bool { return customIDs()[id] })
+}
+
+func pluginID(id string, hasCustomProvider func() bool) string {
 	if PluginServes(id) {
 		return id
 	}
-	if slices.Contains(accountIDs, id) || Preset(id) != nil || id == "magpie" || id == autoID || id == strings.TrimSuffix(GroupPrefix, "/") || customIDs()[id] {
+	if slices.Contains(accountIDs, id) || Preset(id) != nil || id == "magpie" || id == autoID || id == strings.TrimSuffix(GroupPrefix, "/") || hasCustomProvider() {
 		return id + "-plugin"
 	}
 	return id
@@ -230,12 +238,20 @@ func (p Provider) PluginOpenAICompatible(model string) bool {
 		pp = cur
 	}
 	m, ok := pluginModel(pp, model)
-	return ok && firstOf(m.NPM, pp.NPM) == "@ai-sdk/openai-compatible"
+	return ok && pluginModelOpenAICompatible(pp, m)
+}
+
+func pluginModelOpenAICompatible(pp plugin.Provider, model plugin.Model) bool {
+	return firstOf(model.NPM, pp.NPM) == "@ai-sdk/openai-compatible"
 }
 
 // PluginOf is the plugin provider magpie's provider id is, when it is one.
 func PluginOf(id string) (plugin.Provider, bool) {
-	for _, pp := range heldPlugins() {
+	return pluginOfContext(context.Background(), id)
+}
+
+func pluginOfContext(ctx context.Context, id string) (plugin.Provider, bool) {
+	for _, pp := range heldPluginsContext(ctx) {
 		if PluginID(pp.ID) == id {
 			return pp, true
 		}
@@ -246,12 +262,16 @@ func PluginOf(id string) (plugin.Provider, bool) {
 // pluginAccounts are the plugins' providers signed in to, each as its
 // first account.
 func pluginAccounts() []Provider {
+	return pluginAccountsContext(context.Background())
+}
+
+func pluginAccountsContext(ctx context.Context) []Provider {
 	var out []Provider
-	for _, pp := range heldPlugins() {
+	for _, pp := range heldPluginsContext(ctx) {
 		if movingNow(pp.ID) {
 			continue // shown once the move is through (migrate.go)
 		}
-		if ls := pluginLogins(pp); len(ls) > 0 {
+		if ls := pluginLoginsContext(ctx, pp); len(ls) > 0 {
 			// the provider offers what any account switched on serves, as
 			// the requests reach each through its own list (#2554)
 			keys := []string{ls[0].acct.Key}
@@ -740,6 +760,19 @@ func WithEffort(ctx context.Context, effort string) context.Context {
 	return context.WithValue(ctx, effortKey{}, effort)
 }
 
+type pluginMultipartModel struct {
+	id    string
+	start int
+}
+
+type pluginMultipartModelKey struct{}
+
+// WithPluginMultipartModel marks the model field in a generated form so the
+// plugin can use its prepared API ID while preserving the rest of the form.
+func WithPluginMultipartModel(ctx context.Context, model string, start int) context.Context {
+	return context.WithValue(ctx, pluginMultipartModelKey{}, pluginMultipartModel{id: model, start: start})
+}
+
 // pluginFetch sends a request the gateway made for a plugin's provider
 // through the plugin: to the base URL its loader gave (else the model's,
 // the provider's, the AI SDK package's), with what the loader adds.
@@ -758,7 +791,16 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 		body = buf.Bytes()
 	}
 	rest := strings.TrimPrefix(req.URL.String(), pluginBase+pp.ID)
-	model := bodyModel(body)
+	formModel, _ := ctx.Value(pluginMultipartModelKey{}).(pluginMultipartModel)
+	model := formModel.id
+	if model != "" {
+		end := formModel.start + len(model)
+		if formModel.start < 0 || end < formModel.start || end > len(body) || string(body[formModel.start:end]) != model {
+			return nil, fmt.Errorf("the plugin's request has an invalid multipart model field")
+		}
+	} else {
+		model = bodyModel(body)
+	}
 	codeAssist := strings.HasPrefix(rest, "/v1internal:")
 	if codeAssist {
 		// Code Assist's envelope off: Gemini's own request, the model in
@@ -782,36 +824,10 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 	if !ok {
 		m = plugin.Model{ID: model, NPM: pp.NPM}
 	}
-	api := modelAPIID(m)
-	if api != model && !codeAssist {
-		body = withModel(body, api)
-	}
-	o, err := plugin.LoaderOptions(ctx, pp.ID, account)
-	if err != nil {
-		return nil, err
-	}
-	base := pluginRequestBase(pp, m, o.BaseURL)
-	if base == "" {
-		return nil, errors.New(pp.Name + "'s plugin says nowhere to send its requests")
-	}
-	var url string
-	switch {
-	case codeAssist:
-		url = base + "/models/" + GeminiModelPath(api) + ":streamGenerateContent?alt=sse"
-	case strings.HasPrefix(rest, "/v1/"):
+	if strings.HasPrefix(rest, "/v1/") {
 		// chat, responses and Anthropic's messages: the AI SDK's base
 		// ends where magpie's /v1 does
-		url = base + strings.TrimPrefix(rest, "/v1")
-	case strings.HasPrefix(rest, "https://") || strings.HasPrefix(rest, "http://"):
-		// a URL of the vendor's own outside the base (Provider.Origin's),
-		// signed by the plugin as its other requests: only at the host the
-		// plugin sends to, never anywhere else with the account's sign-in
-		if HostOf(rest) != HostOf(base) {
-			return nil, fmt.Errorf("%s's plugin sends to %s, not %s", pp.Name, HostOf(base), HostOf(rest))
-		}
-		url = rest
-	default:
-		url = base + rest
+		rest = strings.TrimPrefix(rest, "/v1")
 	}
 	h := map[string]string{}
 	for k, vs := range req.Header {
@@ -822,37 +838,126 @@ func pluginFetch(pp plugin.Provider, account string, req *http.Request) (*http.R
 	if e, _ := ctx.Value(effortKey{}).(string); e != "" {
 		h[strings.ToLower(EffortHeader)] = e
 	}
-	resp, err := plugin.Fetch(ctx, plugin.FetchRequest{
-		Provider: pp.ID, Account: account, Model: api, NPM: m.NPM, URL: url, Method: req.Method,
-		Headers: h, Body: body, Session: req.Header.Get(ConversationHeader),
+	provider, public := pp.ID, publicPlugin(pp)
+	options, off, err := settings.PluginOptionsNow()
+	if err != nil {
+		return nil, fmt.Errorf("the plugin's provider options or account discovery policy could not be read: %w", err)
+	}
+	if off && !public {
+		return nil, errAccountDiscoveryOff
+	}
+	route := &plugin.FetchRoute{
+		Name: pp.Name,
+		Resolve: func(live *plugin.FetchModel) (*plugin.FetchTarget, error) {
+			return pluginFetchTarget(pp, m, live, model, rest, body, codeAssist, formModel)
+		},
+	}
+	if ok {
+		route.Model = m.ID
+	}
+	resp, auth, err := plugin.FetchWithAuth(ctx, plugin.FetchRequest{
+		Provider: provider, Account: account, Model: modelAPIID(m), NPM: m.NPM, URL: rest, Method: req.Method,
+		Route: route, Headers: h, Body: body, Session: req.Header.Get(ConversationHeader), ProviderOptions: options,
+		CheckAdmission: func(ctx context.Context, auth plugin.FetchAuth, discoveryOff bool) error {
+			return checkPluginFetchAccount(ctx, provider, account, public, discoveryOff, auth)
+		},
 	})
 	if err == nil {
-		notePluginSignIn(pp, account, resp)
+		notePluginSignIn(ctx, pp, auth, resp)
 	}
 	return resp, err
 }
 
-// pluginRequestBase is the base URL a plugin provider's request for m goes
-// under: the loader's (else the model's, the provider's, the AI SDK
-// package's), with no slash at its end.
-//
-// A loader's base is the provider's, said once for all its models, and an
-// Anthropic model may be served under /v1 of it: Copilot's loader says
-// https://api.githubcopilot.com, while its Claude models are on
-// /v1/messages (models.dev's api.url .../v1; OpenCode's own Copilot
-// provider sends them to the loader's base + "/v1"). Sent to the bare base
-// they went to /messages and Copilot answered 404 (cyoking1 on X). So an
-// Anthropic model whose own URL ends in /v1 is sent under the loader's
-// base + /v1, when that base doesn't end in it already.
-func pluginRequestBase(pp plugin.Provider, m plugin.Model, loader string) string {
-	base := strings.TrimRight(firstOf(loader, m.URL, pp.API, npmBase[m.NPM]), "/")
-	if base == "" || loader == "" || pluginProtocol(pp.ID, m) != Anthropic {
-		return base
+func pluginFetchTarget(pp plugin.Provider, m plugin.Model, selected *plugin.FetchModel, model, path string, body []byte, codeAssist bool, formModel pluginMultipartModel) (*plugin.FetchTarget, error) {
+	base := pp.API
+	if selected != nil {
+		if selected.ID != m.ID {
+			return nil, fmt.Errorf("the plugin's selected model changed before the request was sent")
+		}
+		live := plugin.Model{ID: selected.ID, NPM: selected.NPM, APIID: selected.APIID, URL: selected.URL, Also: selected.Also}
+		route, _, _ := strings.Cut(path, "?")
+		if (route == "/images/generations" || route == "/images/edits") &&
+			pluginModelOpenAICompatible(pp, m) && !pluginModelOpenAICompatible(pp, live) {
+			return nil, fmt.Errorf("the plugin's model %q changed its API before the request was sent", model)
+		}
+		if pluginProtocol(pp.ID, live) != pluginProtocol(pp.ID, m) || !slices.Equal(live.Also, m.Also) {
+			var wire Protocol
+			switch {
+			case codeAssist:
+				wire = CodeAssist
+			case route == "/messages":
+				wire = Anthropic
+			case route == "/responses":
+				wire = Responses
+			case route == "/chat/completions":
+				wire = Chat
+			}
+			if wire != "" && !slices.Contains(pluginProtocols(pp.ID, live), wire) {
+				return nil, fmt.Errorf("the plugin's model %q changed its API before the request was sent", model)
+			}
+		}
+		base, m = selected.ProviderURL, live
 	}
-	if strings.HasSuffix(strings.TrimRight(m.URL, "/"), "/v1") && !strings.HasSuffix(base, "/v1") {
-		base += "/v1"
+	target := &plugin.FetchTarget{
+		Path:     path,
+		Base:     firstOf(m.URL, base, npmBase[m.NPM]),
+		LoaderV1: pluginProtocol(pp.ID, m) == Anthropic && strings.HasSuffix(strings.TrimRight(m.URL, "/"), "/v1"),
 	}
-	return base
+	api := modelAPIID(m)
+	if codeAssist {
+		target.Path = GeminiPath(api, true)
+	} else if api != model {
+		if formModel.id != "" {
+			target.Patch = &plugin.FetchBodyPatch{Start: formModel.start, End: formModel.start + len(model), Data: []byte(api)}
+		} else if start, end, ok := modelJSONSpan(body); ok {
+			quoted, _ := json.Marshal(api)
+			target.Patch = &plugin.FetchBodyPatch{Start: start, End: end, Data: quoted}
+		} else if rewritten := withModel(body, api); !bytes.Equal(rewritten, body) {
+			target.Patch = &plugin.FetchBodyPatch{End: len(body), Data: rewritten}
+		}
+	}
+	return target, nil
+}
+
+func checkPluginFetchAccount(ctx context.Context, provider, account string, public, discoveryOff bool, auth plugin.FetchAuth) error {
+	if plugin.ProviderOf(auth.Account) != provider || account != "" && auth.Account != account {
+		return fmt.Errorf("the plugin's selected account changed before the request was sent")
+	}
+	if !public && auth.Epoch == nil {
+		return fmt.Errorf("the plugin's selected sign-in is unavailable before the request was sent")
+	}
+	if discoveryOff {
+		if public {
+			return ctx.Err()
+		}
+		return errAccountDiscoveryOff
+	}
+	logins, err := readCurrentLogins()
+	if err != nil {
+		return fmt.Errorf("the plugin's account policy could not be read: %w", err)
+	}
+	agent := "plugin:" + provider
+	switchedOff := false
+	first := ""
+	for index := range logins {
+		login := &logins[index]
+		if login.Agent != agent || login.Home == "" {
+			continue
+		}
+		if login.Home == auth.Account {
+			if login.Hidden != "" {
+				return fmt.Errorf("the plugin's selected account is hidden")
+			}
+			switchedOff = !login.On
+		}
+		if login.Hidden == "" && (first == "" || login.First) {
+			first = login.Home
+		}
+	}
+	if switchedOff && auth.Account != first {
+		return fmt.Errorf("the plugin's selected account is switched off")
+	}
+	return ctx.Err()
 }
 
 // SignInHeader is how a plugin says what its answer means for the
@@ -862,8 +967,9 @@ func pluginRequestBase(pp plugin.Provider, m plugin.Model, loader string) string
 // be a 502; "kept" leaves the account as it is, as a built-in answering a
 // 401 of the vendor's without its sign-in refused did; "renewed" clears
 // the mark, as a built-in whose sign-in renewed took it off whatever the
-// request then met. Without it a 401 marks the account and a success
-// clears the mark.
+// request then met. Both "expired" and "renewed" record the observation
+// even when the mark already agrees. Without it a 401 marks the account
+// and a success clears the mark.
 const SignInHeader = "X-Magpie-Sign-In"
 
 // SentModelHeader is how a plugin says the model id it sent the vendor,
@@ -920,28 +1026,34 @@ func modelOnly401(resp *http.Response) bool {
 // notePluginSignIn marks or clears an account's lapse as the plugin's
 // answer says, and takes SignInHeader off it. A 401 it says nothing of
 // that is about the model alone leaves the account as it is (kept).
-func notePluginSignIn(pp plugin.Provider, account string, resp *http.Response) {
+func notePluginSignIn(ctx context.Context, pp plugin.Provider, auth plugin.FetchAuth, resp *http.Response) {
 	said := strings.ToLower(strings.TrimSpace(resp.Header.Get(SignInHeader)))
 	resp.Header.Del(SignInHeader)
 	if said == "" && modelOnly401(resp) {
 		said = "kept"
 	}
-	notePluginSaid(pp, account, said, resp.StatusCode)
+	notePluginSaid(ctx, pp, auth, said, resp.StatusCode)
 }
 
 // notePluginSaid marks or clears an account's lapse as the plugin said
 // ("expired", "kept", "renewed"), or, when it said nothing, as status
 // reads: a 401 marks it and a success clears it.
-func notePluginSaid(pp plugin.Provider, account, said string, status int) {
+func notePluginSaid(ctx context.Context, pp plugin.Provider, auth plugin.FetchAuth, said string, status int) {
+	if auth.Account == "" || auth.Epoch == nil {
+		return
+	}
+	explicitStatus := true
 	switch said {
 	case "expired":
-		notePluginLapse(pp, account, http.StatusUnauthorized)
+		status = http.StatusUnauthorized
 	case "renewed":
-		notePluginLapse(pp, account, http.StatusOK)
+		status = http.StatusOK
 	case "kept":
+		return
 	default:
-		notePluginLapse(pp, account, status)
+		explicitStatus = false
 	}
+	notePluginLapse(ctx, pp, auth, status, explicitStatus)
 }
 
 func init() {
@@ -962,20 +1074,21 @@ func init() {
 	// a plugin provider switched off in magpie isn't asked its models:
 	// Off means no request goes to it (ChangQiu on Discord)
 	plugin.ListingOff = pluginsOff
-	// a models hook saying its account's sign-in expired marks it, as a
-	// built-in whose model list the vendor refused marked the account
-	plugin.OnSignIn(func(id, account, said string) {
-		pp, ok := pluginOfAgent("plugin:" + id)
-		if !ok {
-			// told while the providers were first read: wait for them
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			_, _ = plugin.Providers(ctx)
-			if pp, ok = pluginOfAgent("plugin:" + id); !ok {
-				pp = plugin.Provider{ID: id}
+	// An explicit sign-in event can outlive the caller that caused it.
+	plugin.OnSignIn(func(id, account, said string, epoch *string) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		pp := plugin.Provider{ID: id}
+		if said == "expired" {
+			listed, _ := plugin.Listed()
+			for _, provider := range listed {
+				if provider.ID == id {
+					pp = provider
+					break
+				}
 			}
 		}
-		notePluginSaid(pp, account, said, 0)
+		notePluginSaid(ctx, pp, plugin.FetchAuth{Account: account, Epoch: epoch}, said, 0)
 	})
 }
 
@@ -1007,8 +1120,20 @@ func withModel(body []byte, model string) []byte {
 // has no such "model". Decoding a body and marshalling it again to ask
 // a plugin for its model id allocated ten times a 45 MB request (#4004).
 func replaceModel(body []byte, model string) ([]byte, bool) {
-	if !gjson.ValidBytes(body) {
+	start, end, ok := modelJSONSpan(body)
+	if !ok {
 		return nil, false
+	}
+	name, _ := json.Marshal(model)
+	out := make([]byte, 0, len(body)-(end-start)+len(name))
+	out = append(out, body[:start]...)
+	out = append(out, name...)
+	return append(out, body[end:]...), true
+}
+
+func modelJSONSpan(body []byte) (start, end int, ok bool) {
+	if !gjson.ValidBytes(body) {
+		return 0, 0, false
 	}
 	n := 0
 	for _, k := range gjson.GetBytes(body, "@keys").Array() {
@@ -1019,13 +1144,9 @@ func replaceModel(body []byte, model string) ([]byte, bool) {
 	was := gjson.GetBytes(body, "model")
 	at := was.Index
 	if n != 1 || was.Type != gjson.String || at <= 0 {
-		return nil, false
+		return 0, 0, false
 	}
-	name, _ := json.Marshal(model)
-	out := make([]byte, 0, len(body)-len(was.Raw)+len(name))
-	out = append(out, body[:at]...)
-	out = append(out, name...)
-	return append(out, body[at+len(was.Raw):]...), true
+	return at, at + len(was.Raw), true
 }
 
 func firstOf(ss ...string) string {
@@ -1046,8 +1167,10 @@ func firstOf(ss ...string) string {
 // request log here, whichever way it goes: a plugin's fetch and a client
 // of the account's own pass no transport that would.
 func (p Provider) Do(client *http.Client, req *http.Request) (*http.Response, error) {
-	if err := p.CheckExecutor(req.Context()); err != nil {
-		return nil, err
+	if !p.IsExtension() {
+		if err := p.CheckExecutor(req.Context()); err != nil {
+			return nil, err
+		}
 	}
 	if ctx := req.Context(); probelog.Pending(ctx) {
 		start := time.Now()

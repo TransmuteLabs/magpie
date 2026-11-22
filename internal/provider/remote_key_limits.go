@@ -149,20 +149,22 @@ func remoteKeyCardOf(ctx context.Context, p Provider, name, key string, fresh bo
 	c.Unlock()
 	if !ok || fresh || time.Since(r.at) >= remoteCardsFor {
 		got, err := askRemoteKeyLimit(ctx, p, key)
-		r.at = time.Now()
-		if err != nil {
-			// what was read before stays, dated: a failed read is not
-			// "no limit" and not "nothing used"
-			r.err = err.Error()
-		} else {
-			r.got, r.readAt, r.err = got, r.at, ""
+		if !remoteReadCanceled(ctx, err) {
+			r.at = time.Now()
+			if err != nil {
+				// what was read before stays, dated: a failed read is not
+				// "no limit" and not "nothing used"
+				r.err = err.Error()
+			} else {
+				r.got, r.readAt, r.err = got, r.at, ""
+			}
+			c.Lock()
+			if c.m == nil {
+				c.m = map[string]remoteKeyRead{}
+			}
+			c.m[id] = r
+			c.Unlock()
 		}
-		c.Lock()
-		if c.m == nil {
-			c.m = map[string]remoteKeyRead{}
-		}
-		c.m[id] = r
-		c.Unlock()
 	}
 	from := remoteName(p)
 	q := SubscriptionQuota{Provider: p.ID + "/" + remoteKeyCard, Name: from, Icon: "magpie", User: name, Kind: "plan", From: from, Windows: []QuotaWindow{}}
@@ -263,7 +265,10 @@ func askRemoteKeyLimit(ctx context.Context, p Provider, key string) (*remoteKeyA
 		return nil, fmt.Errorf("%s %s: %w", errRemoteUnreachable, remoteName(p), err)
 	}
 	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	b, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	switch {
 	case res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusMethodNotAllowed:
 		return nil, errors.New(errRemoteNoKeyLimit)

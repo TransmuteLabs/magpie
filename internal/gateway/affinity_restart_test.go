@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -60,18 +62,38 @@ func TestAffinityFileBounded(t *testing.T) {
 	now := time.Now()
 	sticks.Lock()
 	for i := range sticksKept + 50 {
-		sticks.m[strings.Repeat("k", 1+i%7)+string(rune('a'+i%26))+time.Duration(i).String()] = stick{rest: "a", who: "a", at: now.Add(-time.Duration(i) * time.Second)}
+		at := now.Add(-time.Duration(min(i, sticksKept-1)) * time.Second)
+		sticks.m[fmt.Sprintf("conversation-<%04d>", i)] = stick{rest: "a", who: "a", at: at}
 	}
 	sticks.m["old"] = stick{rest: "a", who: "a", at: now.Add(-stickKeep - time.Minute)}
 	sticks.Unlock()
 	saveSticks()
+	first, err := os.ReadFile(sticksPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveSticks()
+	second, err := os.ReadFile(sticksPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("the same affinity snapshot produced different bytes")
+	}
+
 	sticks.Lock()
+	defer sticks.Unlock()
 	sticks.m, sticks.from, sticks.mod = map[string]stick{}, "", time.Time{}
 	_, old := stickOf("old")
 	n := len(sticks.m)
-	sticks.Unlock()
 	if old || n != sticksKept {
 		t.Fatalf("read back %d (old kept %v), want the latest %d", n, old, sticksKept)
+	}
+	for i := range sticksKept + 50 {
+		key := fmt.Sprintf("conversation-<%04d>", i)
+		if _, ok := sticks.m[key]; ok != (i < sticksKept) {
+			t.Fatalf("conversation %q present: %t, want %t", key, ok, i < sticksKept)
+		}
 	}
 }
 

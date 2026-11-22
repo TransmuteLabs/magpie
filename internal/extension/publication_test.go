@@ -36,7 +36,7 @@ func TestAccountReplacementTerminalPublication(t *testing.T) {
 			defer lease.Close()
 			var revoked atomic.Bool
 			var publicationContext context.Context
-			ctx = WithToolAccountCheck(ctx, manager.Namespace(), lease.Revision(), lease.ConfigVersion(),
+			ctx = WithToolAccountCheck(ctx, manager.Namespace(), lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration,
 				func(current context.Context) error {
 					if revoked.Load() {
 						return errors.New("selected policy was revoked")

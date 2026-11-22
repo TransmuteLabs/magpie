@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -18,11 +19,21 @@ type gatewayHookRun interface {
 	Close()
 }
 
+func (s *Server) selectGateway(r *http.Request) extension.GatewaySelection {
+	origin := gatewayOrigin(r)
+	if hubFromPage(r) {
+		origin = "browser"
+	}
+	return s.extensions.SelectGateway(r.Context(), origin)
+}
+
 func (s *Server) gatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte) (http.ResponseWriter, []byte, func()) {
+	return applyGatewayHooks(w, r, from, body, s.selectGateway(r))
+}
+
+func applyGatewayHooks(w http.ResponseWriter, r *http.Request, from provider.Protocol, body []byte, selection extension.GatewaySelection) (http.ResponseWriter, []byte, func()) {
 	legacy := plugin.HasGateway()
-	manager := s.extensions
-	sdkHooks := manager != nil && manager.HasGateway(r.Context())
-	if !legacy && !sdkHooks {
+	if !legacy && !selection.HasHooks() {
 		return w, body, func() {}
 	}
 	// Derive provenance and identity once, before either runtime can enrich the
@@ -35,15 +46,15 @@ func (s *Server) gatewayHooks(w http.ResponseWriter, r *http.Request, from provi
 	if req, err := parse(from, body); err == nil {
 		info.Cwd, info.Query = workDir(req), gatewayQuery(req)
 	}
-	sdkInfo := info
-	if hubFromPage(r) {
-		sdkInfo.Origin = "browser"
-	}
 	var finish []func()
-	wrap := func(accepted json.RawMessage, run gatewayHookRun) {
+	accept := func(accepted json.RawMessage, run gatewayHookRun, observe bool) {
+		body = accepted
+		if !observe {
+			finish = append(finish, func() { run.Finish(r.Context(), nil, false) })
+			return
+		}
 		var done func()
 		w, done = gatewayResponse(w, r, from, accepted, run)
-		body = accepted
 		finish = append(finish, func() {
 			defer run.Close()
 			done()
@@ -54,19 +65,19 @@ func (s *Server) gatewayHooks(w http.ResponseWriter, r *http.Request, from provi
 		run := plugin.GatewayBegin(r.Context(), body, plugin.GatewayContext{
 			Origin: info.Origin, Protocol: info.Protocol, Model: info.Model, Stream: info.Stream,
 			Path: info.Path, Agent: info.Agent, Session: info.Session, Kind: info.Kind,
-			Cwd: info.Cwd, Query: info.Query,
+			Cwd: info.Cwd, Query: info.Query, Caller: pluginCaller(r.Context()),
 		})
 		waited()
 		if run != nil {
-			wrap(run.Body, run)
+			accept(run.Body, run, true)
 		}
 	}
-	if sdkHooks && r.Context().Err() == nil {
+	if selection.HasHooks() && r.Context().Err() == nil {
 		waited := noteWait(r.Context(), "plugin hooks")
-		run := manager.BeginGateway(r.Context(), body, sdkInfo)
+		run := selection.BeginGateway(r.Context(), body, info)
 		waited()
 		if run != nil {
-			wrap(run.Body, run)
+			accept(run.Body, run, run.ObservesResponse())
 		}
 	}
 	return w, body, func() {

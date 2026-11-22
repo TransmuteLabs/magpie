@@ -22,8 +22,7 @@ type idTidy struct {
 type idOf struct{ id, typ string }
 
 func (t *idTidy) write(b []byte) []byte {
-	t.buf = append(t.buf, b...)
-	out, rest := tidyEvents(t.buf, t.event)
+	out, rest := tidyEvents(t.buf, b, t.event)
 	t.buf = rest
 	return out
 }

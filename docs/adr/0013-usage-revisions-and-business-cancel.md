@@ -75,6 +75,8 @@ Admission requires API 1.4, `account-auth`, `usage-reporter`, a selected
 account at its exact credential generation, WRITE component authority and
 the same operation's durable accepted receipt. READ actions, recalls,
 unaccepted operations, stale accounts and explicit selectors are refused.
+The host reads the receipt and account and checks cancellation before
+writing the new revision under one Store lock.
 
 API 1.4 READ actions cannot use `state.cas`. Declared `account-auth`
 lifecycle calls `auth.start`, `auth.finish` and `auth.logout` may still
@@ -104,10 +106,17 @@ generation. Freshness requires all of the following:
 - Every ordinary window has a known numeric share, no error and no `asOf`.
 - The echoed revision matches both the request and the current Store.
 
-The host atomically persists that acknowledgment. A stale read cannot
-acknowledge a newer invalidation, even through another process. Invalidation
-without a later fresh acknowledgment leaves the account dirty, including
-after an interrupted or failed mutation.
+The `provider.usage` call owns the durable acknowledgment. Before writing,
+it checks the caller's cancellation, the selected package, configuration,
+enablement, subscription owner, account generation and usage revision.
+Account discovery policy is checked under the Store lock. The quota adapter
+validates the resulting proof without writing another acknowledgment.
+Clean and nonfresh replies check the requested usage revision in the same
+account snapshot used for publication admission, under the shared Store
+lock. Clean acknowledgments still require directory durability confirmation.
+A stale read cannot acknowledge a newer invalidation, even through another
+process. Invalidation without a later fresh acknowledgment leaves the account
+dirty, including after an interrupted or failed mutation.
 
 `provider.execute` checks readiness before dispatch and rechecks dirty state
 under the same Store lock that writes its dispatched execution receipt.
@@ -138,6 +147,12 @@ generation, revision and validated freshness. Cached reads, pending waiters,
 routing, display and history paths check that proof before reuse. Changing
 one account invalidates that account's allowance entries; other account
 entries remain. Published map snapshots are not mutated in place.
+
+The subscription quota page takes a cache snapshot before checking
+Store-backed proofs with the page request's context. A held Store lock
+therefore leaves publishers and other readers free. A proof also checks
+the active package and enablement generation. Turning a module off
+revokes its cached windows even when its saved account remains clean.
 
 Serialized SDK quota history does not carry live authority. After restart,
 it cannot restore known routing allowance without a fresh scoped proof.

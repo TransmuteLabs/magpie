@@ -51,20 +51,17 @@ type sessionLeasedRuntime struct {
 	lease *extension.Lease
 }
 
-func sessionSourceRuntime(ctx context.Context, host extension.ActionRuntime, plugin string) (extension.ActionRuntime, func(), error) {
+func sessionSourceRuntime(ctx context.Context, host extension.ActionRuntime, plugin string, selected sessionModuleSelection) (extension.ActionRuntime, func(), error) {
 	manifest, err := host.Manifest(plugin)
 	if err != nil {
 		return nil, nil, err
 	}
 	action, declared := manifest.ResolveAction(sessionInputsAction)
-	if !declared {
-		return host, func() {}, nil
-	}
-	if action.Effect != "read" || !manifest.Contract.Has(sdk.ModuleRPC) {
+	if declared && (action.Effect != "read" || !manifest.Contract.Has(sdk.ModuleRPC)) {
 		return nil, nil, errors.New("session input planning requires a declared read-only module action")
 	}
 	if manager, ok := host.(*extension.Manager); ok {
-		lease, err := manager.Acquire(ctx, plugin)
+		lease, err := manager.AcquireOutsideCalls(ctx, selected.entry, selected.configVersion)
 		if err != nil {
 			return nil, nil, err
 		}

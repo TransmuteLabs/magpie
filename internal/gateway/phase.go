@@ -105,33 +105,49 @@ type phaseTidy struct {
 }
 
 func (t *phaseTidy) write(b []byte) []byte {
-	t.buf = append(t.buf, b...)
 	if !t.sse {
+		t.buf = append(t.buf, b...)
 		return nil
 	}
-	out, rest := tidyEvents(t.buf, t.event)
+	out, rest := tidyEvents(t.buf, b, t.event)
 	t.buf = rest
 	return out
 }
 
-// tidyEvents is each whole event in buf through event, and buf's part of
-// an event that hasn't ended, moved to buf's front so the next write
-// appends into the same bytes. What event gives may be its ev, a slice of
-// buf, so it is copied out before buf is written again.
-func tidyEvents(buf []byte, event func(ev []byte) []byte) (out, rest []byte) {
+// tidyEvents runs each whole event through event. The unchanged output can
+// borrow chunk until the caller writes it. The unfinished event is owned
+// across writes; callbacks that hold whole events likewise take a copy.
+func tidyEvents(pending, chunk []byte, event func(ev []byte) []byte) (out, rest []byte) {
+	buf := chunk
+	if len(pending) > 0 {
+		buf = append(pending, chunk...)
+	}
 	at := 0
 	for {
 		n := eventEnd(buf[at:])
 		if n < 0 {
 			break
 		}
-		if out == nil {
-			out = make([]byte, 0, len(buf))
+		ev := buf[at : at+n : at+n]
+		replacement := event(ev)
+		if out != nil {
+			out = append(out, replacement...)
+		} else if len(replacement) != n || &replacement[0] != &ev[0] {
+			out = append(make([]byte, 0, len(buf)), buf[:at]...)
+			out = append(out, replacement...)
 		}
-		out = append(out, event(buf[at:at+n])...)
 		at += n
 	}
-	return out, append(buf[:0], buf[at:]...)
+	if at == 0 {
+		if len(pending) > 0 {
+			return nil, buf
+		}
+		return nil, append(pending[:0], buf...)
+	}
+	if out == nil {
+		out = buf[:at:at]
+	}
+	return out, bytes.Clone(buf[at:])
 }
 
 func (t *phaseTidy) flush() []byte {

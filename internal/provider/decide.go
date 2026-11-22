@@ -185,14 +185,18 @@ func (p Provider) DecideOnly() bool {
 // also serves. A dedicated decision API may use any model name, and a
 // plugin's are the ones it marks besides Jev's (#1514).
 func (p Provider) DecidesModel(model string) bool {
+	return p.decidesModelContext(context.Background(), model)
+}
+
+func (p Provider) decidesModelContext(ctx context.Context, model string) bool {
 	if p.IsExtension() {
-		return p.Account.extension.decisionModel(p.OwnModelID(model))
+		return p.Account.extension.decisionModelContext(ctx, p.OwnModelID(model))
 	}
 	if !p.Decides() {
 		return false
 	}
 	if p.IsPlugin() {
-		return p.pluginMarks(model) || jevID(model)
+		return p.pluginMarksContext(ctx, model) || jevID(model)
 	}
 	if p.DecideOnly() {
 		return true
@@ -224,6 +228,10 @@ func (p Provider) DecidesModel(model string) bool {
 // isDecision uses a listed remote model's marker without reading its whole
 // list again. Other providers keep their endpoint and name-based rules.
 func (p Provider) isDecision(m catalog.Model) bool {
+	return p.isDecisionContext(context.Background(), m)
+}
+
+func (p Provider) isDecisionContext(ctx context.Context, m catalog.Model) bool {
 	if p.IsExtension() {
 		return m.Decides
 	}
@@ -233,14 +241,18 @@ func (p Provider) isDecision(m catalog.Model) bool {
 	if p.IsPlugin() && p.Decides() && m.Decides {
 		return true
 	}
-	return p.DecidesModel(m.ID)
+	return p.decidesModelContext(ctx, m.ID)
 }
 
 // pluginMarks reports whether p's plugin marks model as a decision model
 // (plugin.Model.Decides), as it last listed its models.
 func (p Provider) pluginMarks(model string) bool {
+	return p.pluginMarksContext(context.Background(), model)
+}
+
+func (p Provider) pluginMarksContext(ctx context.Context, model string) bool {
 	pp := *p.Account.plugin
-	if cur, ok := PluginOf(p.ID); ok {
+	if cur, ok := pluginOfContext(ctx, p.ID); ok {
 		pp = cur
 	}
 	m, ok := pluginModel(pp, model)

@@ -10,9 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+	"unsafe"
+	"weak"
 
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -39,6 +43,76 @@ func archiveTo(t *testing.T, b *memBucket) {
 	was := ArchiveBucket
 	ArchiveBucket = func() (Putter, bool) { return b, true }
 	t.Cleanup(func() { ArchiveBucket = was })
+}
+
+type waitingArchiveBucket struct {
+	memBucket
+	ready, release chan struct{}
+	once           sync.Once
+}
+
+func (bucket *waitingArchiveBucket) Put(ctx context.Context, name string, data []byte) error {
+	bucket.once.Do(func() { close(bucket.ready) })
+	select {
+	case <-bucket.release:
+		return bucket.memBucket.Put(ctx, name, data)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestQueuedArchiveReleasesWriterAndPreview(t *testing.T) {
+	fresh(t)
+	if err := settings.Save(settings.Settings{RequestArchive: true}); err != nil {
+		t.Fatal(err)
+	}
+	bucket := &waitingArchiveBucket{
+		memBucket: memBucket{objs: map[string][]byte{}},
+		ready:     make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	previous := ArchiveBucket
+	ArchiveBucket = func() (Putter, bool) { return bucket, true }
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(bucket.release) }) }
+	t.Cleanup(func() {
+		release()
+		archivePending.Wait()
+		ArchiveBucket = previous
+	})
+	queue := func() (weak.Pointer[httptest.ResponseRecorder], weak.Pointer[byte], string) {
+		recorder := httptest.NewRecorder()
+		res := &captureResponseWriter{ResponseWriter: recorder}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		wire := archiving(req, res, time.Now(), []byte(`{"input":"archived request"}`))
+		res.full.add([]byte(`{"output":"archived response"}`))
+		preview := strings.Repeat("preview", 1<<10)
+		previewRef := weak.Make(unsafe.StringData(preview))
+		writerRef := weak.Make(recorder)
+		archive(Call{Status: http.StatusOK, Archive: wire.name, wire: wire, RequestBody: preview})
+		return writerRef, previewRef, wire.name
+	}
+	queue()
+	select {
+	case <-bucket.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first archive did not reach the bucket")
+	}
+	writer, preview, name := queue()
+	runtime.GC()
+	runtime.GC()
+	if writer.Value() != nil || preview.Value() != nil {
+		t.Error("a queued archive keeps a completed response writer or a Recent preview live")
+	}
+	release()
+	archivePending.Wait()
+	var got Archived
+	if err := json.Unmarshal(bucket.objs["archive/"+name+".json"], &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Request.Body != `{"input":"archived request"}` || got.Response.Body != `{"output":"archived response"}` || got.Call.RequestBody != "" {
+		t.Error("the queued archive did not keep the spooled exchange independently from the preview")
+	}
 }
 
 // archiveVendor answers a chat request, with a cookie of its own, and

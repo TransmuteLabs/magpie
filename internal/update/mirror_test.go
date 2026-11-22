@@ -126,7 +126,7 @@ func TestUpdateThroughAProxyGiven(t *testing.T) {
 	sum := sha256.Sum256(body)
 	var mu sync.Mutex
 	var seen []string
-	px := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	px := updateProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.URL.String())
 		mu.Unlock()
@@ -137,8 +137,7 @@ func TestUpdateThroughAProxyGiven(t *testing.T) {
 		json.NewEncoder(w).Encode(Release{Version: "9.9.9", Assets: map[string]Asset{
 			BinaryAsset(): {URL: "http://releases.magpie.invalid/asset", SHA256: hex.EncodeToString(sum[:])},
 		}})
-	}))
-	defer px.Close()
+	})
 	if err := settings.Save(settings.Settings{Proxy: "direct"}); err != nil {
 		t.Fatal(err)
 	}

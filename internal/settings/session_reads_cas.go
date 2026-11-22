@@ -2,12 +2,13 @@ package settings
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"os"
 	"reflect"
 )
@@ -19,35 +20,31 @@ type SessionReadsSnapshot struct {
 	Revision string
 }
 
+func nextSessionReads(before, after *SessionReads) *SessionReads {
+	if after == nil {
+		return nil
+	}
+	next := *after
+	if before != nil && before.Asked == next.Asked && before.All == next.All && maps.Equal(before.Agents, next.Agents) {
+		next.Generation = before.Generation
+	} else {
+		next.Generation = rand.Text()
+	}
+	return &next
+}
+
 func sessionReadsFile() ([]byte, string, error) {
-	before, err := os.Lstat(Path())
+	path := Path()
+	body, after, err := readSettingsSnapshot(path, os.Lstat)
 	if errors.Is(err, os.ErrNotExist) {
-		hash := sha256.Sum256([]byte(Path() + "\x00absent"))
+		hash := sha256.Sum256([]byte(path + "\x00absent"))
 		return nil, hex.EncodeToString(hash[:]), nil
 	}
-	if err != nil {
-		return nil, "", err
-	}
-	if !before.Mode().IsRegular() || before.Size() > 32<<20 {
-		return nil, "", errors.New("settings consent requires a bounded regular file")
-	}
-	file, err := os.Open(Path())
-	if err != nil {
-		return nil, "", err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
+	if errors.Is(err, errSettingsFileChanged) {
 		return nil, "", ErrSessionReadsChanged
 	}
-	body, err := io.ReadAll(io.LimitReader(file, (32<<20)+1))
-	if err != nil || len(body) > 32<<20 {
-		return nil, "", errors.New("settings consent could not be read")
-	}
-	after, err := os.Lstat(Path())
-	if err != nil || !os.SameFile(opened, after) || opened.Size() != after.Size() ||
-		!opened.ModTime().Equal(after.ModTime()) {
-		return nil, "", ErrSessionReadsChanged
+	if err != nil {
+		return nil, "", err
 	}
 	if len(bytes.TrimSpace(body)) != 0 && !validSettings(body) {
 		return nil, "", errors.New("settings consent is malformed")
@@ -62,7 +59,7 @@ func sessionReadsFile() ([]byte, string, error) {
 		}
 	}
 	hash := sha256.New()
-	fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\x00%d\x00", Path(), identity, after.Size(), after.ModTime().UnixNano(), after.Mode())
+	fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\x00%d\x00", path, identity, after.Size(), after.ModTime().UnixNano(), after.Mode())
 	hash.Write(body)
 	return body, hex.EncodeToString(hash.Sum(nil)), nil
 }

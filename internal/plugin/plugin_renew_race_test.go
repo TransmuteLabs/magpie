@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,7 +37,8 @@ type raceVendor struct {
 func newRaceVendor(t *testing.T) *raceVendor {
 	t.Helper()
 	v := &raceVendor{valid: map[string]string{"r1": "r2"}, arrived: make(chan struct{}, 8), store: AuthPath()}
-	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	routes := http.NewServeMux()
+	routes.HandleFunc("POST /oauth/token", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		v.mu.Lock()
 		v.exchanges = append(v.exchanges, string(b))
@@ -67,16 +67,15 @@ func newRaceVendor(t *testing.T) *raceVendor {
 			return
 		}
 		fmt.Fprintf(w, `{"access":"a-%s","refresh":%q}`, next, next)
-	}))
-	t.Cleanup(tokens.Close)
-	api := testenv.FakeVendor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	})
+	routes.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		v.mu.Lock()
 		v.auths = append(v.auths, r.Header.Get("Authorization"))
 		v.mu.Unlock()
 		io.WriteString(w, "ok")
-	}))
-	t.Cleanup(api.Close)
-	t.Setenv("RACE_TOKEN_URL", tokens.URL)
+	})
+	vendor := testenv.FakeVendor(t, routes)
+	t.Setenv("RACE_TOKEN_URL", vendor.URL+"/oauth/token")
 	return v
 }
 
@@ -145,7 +144,7 @@ func TestRenewOtherHost(t *testing.T) {
 	t.Cleanup(Settle)
 	var mu sync.Mutex
 	out := func(s string) { mu.Lock(); os.Stdout.WriteString(s + "\n"); mu.Unlock() }
-	OnSignIn(func(_, _, s string) { out("said " + s) })
+	OnSignIn(func(_, _, s string, _ *string) { out("said " + s) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	h, err := get(ctx)
@@ -186,7 +185,7 @@ func TestRenewOnceAcrossHosts(t *testing.T) {
 	t.Cleanup(release)
 	var mu sync.Mutex
 	var said []string
-	OnSignIn(func(_, _, s string) { mu.Lock(); said = append(said, s); mu.Unlock() })
+	OnSignIn(func(_, _, s string, _ *string) { mu.Lock(); said = append(said, s); mu.Unlock() })
 	t.Cleanup(func() { OnSignIn(nil) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -267,8 +266,17 @@ func TestRenewOnceAcrossHosts(t *testing.T) {
 func TestRenewLockOfDeadHostAndRefusal(t *testing.T) {
 	sandbox(t)
 	v := newRaceVendor(t)
+	stray, err := http.Get(os.Getenv("RACE_TOKEN_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stray.Body.Close()
+	if stray.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("token endpoint answered a request from another test with %d", stray.StatusCode)
+	}
+
 	said := make(chan string, 16)
-	OnSignIn(func(_, _, s string) { said <- s })
+	OnSignIn(func(_, _, s string, _ *string) { said <- s })
 	t.Cleanup(func() { OnSignIn(nil) })
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/yetone/magpie/internal/beat"
 	"github.com/yetone/magpie/internal/codexcat"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -188,7 +189,12 @@ func CodexDesktopCatalog() (b []byte, ok bool) {
 	}
 	codexDeskAsk(who, codexDeskDue(who, behind, listed, listedAt))
 	codexDesk.Unlock()
-	if body == nil && (revoked || failed) {
+	if body == nil && !revoked && !failed {
+		return nil, false
+	}
+	defer filememo.Hold()()
+	defer provider.Hold()()
+	if body == nil {
 		var own []any
 		for _, e := range codexcat.CacheEntries() {
 			own = append(own, e)
@@ -202,9 +208,6 @@ func CodexDesktopCatalog() (b []byte, ok bool) {
 		}
 		b, err := json.MarshalIndent(map[string]any{"models": codexMerged(own, true)}, "", " ")
 		return b, err == nil
-	}
-	if body == nil {
-		return nil, false
 	}
 	// each caller's own copy: codexMerged writes into the entries
 	var list struct {

@@ -10,6 +10,7 @@ package provider
 // which a drag or Make first sets — is the gateway's alone.
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -71,13 +72,17 @@ func CodexSignInKept() bool {
 // signed in to at its own place among them; nil otherwise, when the one
 // signed in to is the first.
 func (p Provider) LoginRanks() map[string]int {
+	return p.loginRanksContext(context.Background())
+}
+
+func (p Provider) loginRanksContext(ctx context.Context) map[string]int {
 	if p.Account == nil || p.Account.token != nil && !p.Account.standIn || !slices.Contains(switchedAgents, p.Account.Agent) ||
 		!p.keepsLogin() || p.KeepLoginAs == "" {
 		return nil
 	}
 	ranks := map[string]int{}
 	kept := false
-	for i, l := range Logins(p.Account.Agent) {
+	for i, l := range loginsContext(ctx, p.Account.Agent) {
 		ranks[strings.ToLower(l.User)] = i
 		kept = kept || strings.EqualFold(l.User, p.KeepLoginAs)
 	}

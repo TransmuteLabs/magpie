@@ -66,7 +66,7 @@ func TestFastCallsPricedAtTheirTier(t *testing.T) {
 		t.Fatalf("rows %d", len(rows))
 	}
 	var total float64
-	cost, api := NewCoster(), apiPricer()
+	cost, api := NewCoster(), apiPricer(t.Context())
 	for i, c := range calls {
 		r := rows[len(calls)-1-i]
 		if r.Model != c.model || !r.Priced || math.Abs(r.Cost-c.want) > 1e-9 {

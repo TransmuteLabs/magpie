@@ -12,15 +12,15 @@ import (
 )
 
 type extensionMiddlewareAgent struct {
-	manager *extension.Manager
-	ctx     context.Context
-	origin  string
+	selection extension.GatewaySelection
+	ctx       context.Context
 }
 
 type extensionMiddlewareCall struct {
-	run      *extension.MiddlewareRun
-	provider *sdk.MiddlewareProvider
-	account  *sdk.MiddlewareAccount
+	run        *extension.MiddlewareRun
+	descriptor sdk.GatewayMiddlewareDescriptor
+	provider   *sdk.MiddlewareProvider
+	account    *sdk.MiddlewareAccount
 }
 
 type extensionMiddlewareRun struct {
@@ -28,21 +28,21 @@ type extensionMiddlewareRun struct {
 }
 
 func (agent extensionMiddlewareAgent) Begin(info gwmw.Info) gwmw.Run {
-	runs := agent.manager.BeginMiddleware(agent.ctx, sdk.GatewayContext{Origin: agent.origin,
+	runs := agent.selection.BeginMiddleware(agent.ctx, sdk.GatewayContext{
 		Protocol: info.Protocol, Model: info.Model, Stream: info.Stream, Path: info.Path, Agent: info.Agent})
 	if len(runs) == 0 {
 		return nil
 	}
 	run := &extensionMiddlewareRun{}
 	for _, current := range runs {
-		run.calls = append(run.calls, extensionMiddlewareCall{run: current})
+		run.calls = append(run.calls, extensionMiddlewareCall{run: current, descriptor: current.Descriptor()})
 	}
 	return run
 }
 
 func (run *extensionMiddlewareRun) Request(body []byte) ([]byte, *gwmw.Reject) {
 	for _, call := range run.calls {
-		if !call.run.Descriptor().Request {
+		if !call.descriptor.Request {
 			continue
 		}
 		result, err := call.run.Apply(sdk.MethodMiddlewareRequest, body, sdk.MiddlewareContext{})
@@ -68,7 +68,7 @@ func (run *extensionMiddlewareRun) Account(account gwmw.Account) (bool, string) 
 		}
 		call.account = &sdk.MiddlewareAccount{Ref: middleware.AccountReference(call.run.Module, account),
 			Provider: account.ID, Name: account.Name, Kind: account.Agent, Model: account.Model}
-		if !call.run.Descriptor().Account {
+		if !call.descriptor.Account {
 			continue
 		}
 		result, err := call.run.Apply(sdk.MethodMiddlewareAccount, nil, sdk.MiddlewareContext{Account: call.account})
@@ -83,7 +83,7 @@ func (run *extensionMiddlewareRun) Tried(body []byte, to gwmw.To) []byte {
 	for index := range run.calls {
 		call := &run.calls[index]
 		call.provider = &sdk.MiddlewareProvider{ID: to.ID, Name: to.Name, Account: to.Account, Model: to.Model}
-		if !call.run.Descriptor().Provider {
+		if !call.descriptor.Provider {
 			continue
 		}
 		result, err := call.run.Apply(sdk.MethodMiddlewareProvider, body,
@@ -97,11 +97,11 @@ func (run *extensionMiddlewareRun) Tried(body []byte, to gwmw.To) []byte {
 
 func (run *extensionMiddlewareRun) Wrap(w http.ResponseWriter) (http.ResponseWriter, func()) {
 	hooks := middleware.ResponseHooks{MaxBytes: sdk.MaxMiddlewareBodyBytes}
-	if slices.ContainsFunc(run.calls, func(call extensionMiddlewareCall) bool { return call.run.Descriptor().Event }) {
+	if slices.ContainsFunc(run.calls, func(call extensionMiddlewareCall) bool { return call.descriptor.Event }) {
 		hooks.Event = func(name string, body []byte) ([]byte, bool) {
 			changed := false
 			for _, call := range run.calls {
-				descriptor := call.run.Descriptor()
+				descriptor := call.descriptor
 				if !descriptor.Event || len(descriptor.Events) > 0 && !slices.Contains(descriptor.Events, name) {
 					continue
 				}
@@ -123,10 +123,10 @@ func (run *extensionMiddlewareRun) Wrap(w http.ResponseWriter) (http.ResponseWri
 			return nil, false
 		}
 	}
-	if slices.ContainsFunc(run.calls, func(call extensionMiddlewareCall) bool { return call.run.Descriptor().Response }) {
+	if slices.ContainsFunc(run.calls, func(call extensionMiddlewareCall) bool { return call.descriptor.Response }) {
 		hooks.Response = func(body []byte, status int) []byte {
 			for _, call := range run.calls {
-				if !call.run.Descriptor().Response {
+				if !call.descriptor.Response {
 					continue
 				}
 				result, err := call.run.Apply(sdk.MethodMiddlewareResponse, body,

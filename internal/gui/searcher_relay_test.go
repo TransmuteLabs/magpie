@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -32,7 +33,7 @@ func TestSearcherPickerOffersResponsesRelay(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body)
 	}
 	var s settingsJSON
-	searchState(&s)
+	searchState(&s, provider.All(), provider.Served())
 	if len(s.SearchChoices) != 1 || s.SearchChoices[0].Name != "Relay" {
 		t.Fatalf("choices = %+v", s.SearchChoices)
 	}
@@ -67,7 +68,7 @@ func TestSearcherThenFromSettings(t *testing.T) {
 		}
 	}
 	var st settingsJSON
-	searchState(&st)
+	searchState(&st, provider.All(), provider.Served())
 	if len(st.SearchChoices) != 2 {
 		t.Fatalf("choices = %+v", st.SearchChoices)
 	}

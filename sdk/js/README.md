@@ -17,7 +17,7 @@ It requires Node 22+ and npm. Untagged Git descriptions such as a bare commit or
 with the application built from the same checkout and version; this target
 does not publish or run as part of ordinary Go builds.
 
-Package release versions are separate from the wire contract revision API 1.19
+Package release versions are separate from the wire contract revision API 1.20
 and native ABI 1. Module manifest contract minima and capability gates keep
 those protocol numbers, irrespective of the package release version.
 Declare the minimum contract and capabilities your module needs. `CONTRACT` describes available
@@ -346,7 +346,8 @@ same module with `account-auth`. Primary bindings and service endpoints cannot
 grant accounts. Existing root bindings and two-argument calls stay compatible.
 
 `ui.backend.accounts(binding)` returns only
-`AccountSummary{id, generation, expiresAt?}`. The user selects an entry;
+`AccountSummary{id, generation, expiresAt?, name?}`. The name is display
+metadata. The user selects an entry;
 `ui.backend.call(binding, input, {account: {id, expectedGeneration}})` sends
 that selection outside business input. No first-account fallback is made.
 Use strings for generation, including values above 2^53. The backend author
@@ -512,6 +513,13 @@ reference in the ordinary saved result. Unknown or failed completion blocks
 another write across manual/daily calls, process restart and credential
 generation changes. Known not-started and ordinary completed non-claim
 rechecks use new intents; credit grants create no inference billing row.
+
+API 1.20 modules may return `outcome: "rate-limited"` with a required
+`until` after a completed rate-limit decision. The host keeps that receipt
+until the boundary, including on a manual press, and reserves a new intent
+for a later call at or after `until`. Retain any confirmed partial effects
+and resolve uncertainty before returning this result. A `failed` result
+with `until` still requires reconciliation.
 
 A root `activation: ["gateway"]` requests a lease after successful listener
 bind. The ordinary gateway stays cold during `New`/`Front`, metadata reads

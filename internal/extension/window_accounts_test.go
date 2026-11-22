@@ -94,7 +94,7 @@ func accountWindowFixture(test *testing.T) (*Manager, *windowAccountFixture, str
 		}
 	})
 	for _, id := range []string{"account-a", "account-b"} {
-		if _, err := manager.Store().SaveAccount(Account{Plugin: manifest.ID, Provider: "vendor", ID: id,
+		if _, err := manager.Store().SaveAccount(Account{Plugin: manifest.ID, Provider: "vendor", ID: id, Name: id + "@example.test",
 			Auth: json.RawMessage(`{"credential":"SECRET-` + id + `"}`)}, 0); err != nil {
 			test.Fatal(err)
 		}
@@ -109,6 +109,11 @@ func TestWindowSelectedAccountsSafeProjectionAndAuthority(test *testing.T) {
 	raw, _ := json.Marshal(accounts)
 	if err != nil || len(accounts) != 2 || bytes.Contains(raw, []byte("SECRET")) || bytes.Contains(raw, []byte("auth")) {
 		test.Fatalf("unsafe account projection: %s %v", raw, err)
+	}
+	for _, account := range accounts {
+		if account.Name != account.ID+"@example.test" {
+			test.Fatal("account picker did not receive the name of its selected account")
+		}
 	}
 	selection := &sdk.AccountSelection{ID: "account-b", ExpectedGeneration: "1"}
 	result, err := manager.CallWindowBindingWithOptions(test.Context(), id, revision, "window:page", "page.read",
@@ -140,6 +145,51 @@ func TestWindowSelectedAccountsSafeProjectionAndAuthority(test *testing.T) {
 	}
 	if _, err := manager.CallWindowBinding(test.Context(), id, revision, "window:page", "page.root", json.RawMessage(`{}`)); err != nil {
 		test.Fatal("legacy root call changed:", err)
+	}
+}
+
+func TestWindowSelectedAccountsBudget(test *testing.T) {
+	manager, fixture, revision, _ := accountWindowFixture(test)
+	store := manager.Store()
+	if err := store.withStore(fixture.id, func(root *os.Root) error {
+		records, err := storeReadAccounts(root, fixture.id)
+		if err != nil {
+			return err
+		}
+		for index := len(records.Accounts); index < 1024; index++ {
+			records.Accounts = append(records.Accounts, storeAccount{Account: Account{
+				Plugin: fixture.id, Provider: "vendor", ID: "vendor-" + strconv.Itoa(index),
+				Generation: 1, Auth: json.RawMessage(`{}`),
+			}})
+		}
+		records.Accounts = append(records.Accounts,
+			storeAccount{Account: Account{Plugin: fixture.id, Provider: "other-vendor", ID: "foreign",
+				Generation: 1, Auth: json.RawMessage(`{}`)}},
+			storeAccount{Account: Account{Plugin: fixture.id, Provider: "vendor", ID: "deleted",
+				Generation: 2}, Deleted: true},
+		)
+		return storeWrite(root, "accounts.json", records, storeFileLimit)
+	}); err != nil {
+		test.Fatal(err)
+	}
+	accounts, err := manager.WindowAccounts(test.Context(), fixture.id, revision, "window:page", "page.read")
+	if err != nil || len(accounts) != 1024 {
+		test.Fatalf("account list at limit: length %d, error %v", len(accounts), err)
+	}
+	for _, account := range accounts {
+		if account.ID == "foreign" || account.ID == "deleted" {
+			test.Fatal("out-of-scope account in window list:", account.ID)
+		}
+	}
+	overflow := Account{Plugin: fixture.id, Provider: "vendor", ID: "over-budget", Name: "Overflow label",
+		Auth: json.RawMessage(`{}`)}
+	if _, err := store.SaveAccount(overflow, 0); err != nil {
+		test.Fatal(err)
+	}
+	test.Log("overflow label file", overflow.labelFile())
+	accounts, err = manager.WindowAccounts(test.Context(), fixture.id, revision, "window:page", "page.read")
+	if accounts != nil || err == nil || err.Error() != "window account list exceeds its budget" {
+		test.Fatalf("over-budget account list: length %d, error %v", len(accounts), err)
 	}
 }
 

@@ -474,35 +474,3 @@ func Remove(ids ...string) error {
 		return nil
 	})
 }
-
-// touch notes that a search returned the memories with ids, at most once
-// a minute each so a busy agent doesn't rewrite the file on every search.
-func touch(ids []string) {
-	if len(ids) == 0 {
-		return
-	}
-	t := now()
-	f, err := view()
-	if err != nil {
-		return
-	}
-	stale := false
-	for _, m := range f.Memories {
-		if slices.Contains(ids, m.ID) && t.Sub(m.Used) > time.Minute {
-			stale = true
-			break
-		}
-	}
-	if !stale {
-		return
-	}
-	change(func(f *file) error {
-		for _, m := range f.Memories {
-			if slices.Contains(ids, m.ID) && t.Sub(m.Used) > time.Minute {
-				m.Used = t
-				m.Uses++
-			}
-		}
-		return nil
-	})
-}

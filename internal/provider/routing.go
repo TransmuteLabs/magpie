@@ -296,6 +296,7 @@ var usedCache struct {
 	at         map[string]time.Time
 	loading    map[string]chan struct{} // closed when the fetch in flight is done
 	extensions map[string]map[string]string
+	community  map[string]map[string]communityAllowanceBinding
 	// renewed: the generation when an account's windows were started
 	// again. Read/reset order cannot use the clock: two events can have
 	// the same timestamp, even with its monotonic part.
@@ -940,9 +941,88 @@ func Allowances(agent string) map[string]Allowance {
 	return m
 }
 
+type communityAllowanceBinding struct {
+	provider string
+	selected pluginUsageSelection
+}
+
+func currentCommunityAllowanceBindings(ctx context.Context, bindings map[string]communityAllowanceBinding) map[string]communityAllowanceBinding {
+	if len(bindings) == 0 {
+		return bindings
+	}
+	current := subscriptionQuotaCheck(ctx)
+	var valid map[string]communityAllowanceBinding
+	for user, binding := range bindings {
+		if current(SubscriptionQuota{Provider: binding.provider, User: user, pluginUsage: &binding.selected}) {
+			continue
+		}
+		if valid == nil {
+			valid = maps.Clone(bindings)
+		}
+		delete(valid, user)
+	}
+	if valid != nil {
+		return valid
+	}
+	return bindings
+}
+
+func pruneCommunityAllowanceBindings(agent string) {
+	c := &usedCache
+	c.Lock()
+	bindings := c.community[agent]
+	c.Unlock()
+	current := currentCommunityAllowanceBindings(context.Background(), bindings)
+	if len(bindings) == len(current) {
+		return
+	}
+	c.Lock()
+	if maps.Equal(c.community[agent], bindings) {
+		syncAllowanceBindings(&c.community, agent, current)
+	}
+	c.Unlock()
+}
+
+func syncAllowanceBindings[Binding comparable](cache *map[string]map[string]Binding, agent string, bindings map[string]Binding) {
+	before := (*cache)[agent]
+	if (before == nil) == (bindings == nil) && maps.Equal(before, bindings) {
+		return
+	}
+	if bindings == nil {
+		delete(*cache, agent)
+	} else {
+		if *cache == nil {
+			*cache = map[string]map[string]Binding{}
+		}
+		(*cache)[agent] = maps.Clone(bindings)
+	}
+	if usedCache.at != nil {
+		usedCache.at[agent] = time.Time{}
+	}
+	var changed bool
+	for user, previous := range before {
+		if current, ok := bindings[user]; ok && previous == current {
+			continue
+		}
+		if !changed {
+			if snapshot, ok := usedCache.m[agent]; ok {
+				usedCache.m[agent] = maps.Clone(snapshot)
+			}
+			changed = true
+		}
+		delete(usedCache.m[agent], user)
+		key := agent + "/" + strings.ToLower(user)
+		delete(usedCache.read, key)
+		delete(usedCache.seen, key)
+		delete(usedCache.heard, key)
+		delete(usedCache.renewed, key)
+	}
+}
+
 // readAllowances is Allowances as agent's own readings tell it.
 func readAllowances(agent string) map[string]Allowance {
 	bindings, external := extensionUsageBindings(agent)
+	pruneCommunityAllowanceBindings(agent)
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
@@ -963,7 +1043,14 @@ func readAllowances(agent string) map[string]Allowance {
 			share := renewalShare(agent) // read before the lock: it reads providers.json
 			all := map[string]Allowance{}
 			readings, readAt, states := loginUsageAt(ctx, agent)
+			var community map[string]communityAllowanceBinding
 			for user, q := range readings {
+				if q.pluginUsage != nil {
+					if community == nil {
+						community = map[string]communityAllowanceBinding{}
+					}
+					community[user] = communityAllowanceBinding{provider: q.Provider, selected: *q.pluginUsage}
+				}
 				if q.Error != "" || len(q.Windows) == 0 {
 					continue
 				}
@@ -972,14 +1059,26 @@ func readAllowances(agent string) map[string]Allowance {
 				}
 			}
 			current, _ := extensionUsageBindings(agent)
+			currentCommunity := currentCommunityAllowanceBindings(ctx, community)
+			if len(community) != len(currentCommunity) {
+				for user := range community {
+					if _, valid := currentCommunity[user]; !valid {
+						delete(all, user)
+						delete(states, user)
+					}
+				}
+				readAt = time.Time{}
+			}
 			c.Lock()
-			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) {
+			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) ||
+				(community != nil || len(c.community[agent]) != 0) && ctx.Err() != nil {
 				c.at[agent] = time.Time{}
 				delete(c.loading, agent)
 				c.Unlock()
 				close(done)
 				return
 			}
+			syncAllowanceBindings(&c.community, agent, currentCommunity)
 			now := time.Now()
 			// as old as its oldest reading: one the Usage page made 50s
 			// ago, taken here, is read again in 10s, not kept a minute
@@ -1070,6 +1169,7 @@ func readAllowances(agent string) map[string]Allowance {
 		case <-done:
 		case <-time.After(firstWait):
 		}
+		pruneCommunityAllowanceBindings(agent)
 	}
 	if external {
 		current, _ := extensionUsageBindings(agent)
@@ -1093,13 +1193,13 @@ func readAllowances(agent string) map[string]Allowance {
 // an account whose reading is too old or failed (Provider.CapCareful).
 func UsageRead(agent, user string) (at time.Time, failed, ok bool) {
 	c := &usedCache
-	if bindings, external := extensionUsageBindings(agent); external {
-		c.Lock()
-		syncExtensionAllowanceBindings(agent, bindings)
-		c.Unlock()
-	}
+	bindings, external := extensionUsageBindings(agent)
+	pruneCommunityAllowanceBindings(agent)
 	c.Lock()
 	defer c.Unlock()
+	if external {
+		syncExtensionAllowanceBindings(agent, bindings)
+	}
 	st, ok := c.read[agent+"/"+strings.ToLower(user)]
 	return st.at, st.failed, ok
 }
@@ -1315,7 +1415,7 @@ func (a Allowance) restartedBy(runsOut time.Time) Allowance {
 // (#3650): the account is then not known, as one never read, rather than
 // one with all of it left, ahead of the rest.
 func routedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Allowance, bool) {
-	if strings.HasPrefix(agent, "extension-") && q.extensionUsage == nil {
+	if isExtensionLoginAgent(agent) && q.extensionUsage == nil {
 		return nil, false
 	}
 	if q.extensionUsage != nil && !q.extensionUsage.current() {

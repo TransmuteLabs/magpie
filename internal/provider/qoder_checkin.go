@@ -102,7 +102,7 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 		Campaigns []qoderCampaign `json:"campaigns"`
 	}
 	if err := qoderCall(ctx, a, http.MethodGet, qoderCampaignURLs[a.site], &list); err != nil {
-		return wbCheckinFailed(err)
+		return checkinRequestFailed(ctx, err)
 	}
 	var daily []qoderCampaign
 	for _, c := range list.Campaigns {
@@ -112,6 +112,7 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 	}
 	var credit float64
 	var until time.Time
+	interrupted := false
 	claimed, failed := 0, 0
 	var why string
 	for _, c := range daily {
@@ -120,7 +121,7 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 				until = end
 			}
 		}
-		if c.ClaimStatus != "CLAIMABLE" || c.ID == "" {
+		if interrupted || c.ClaimStatus != "CLAIMABLE" || c.ID == "" {
 			continue
 		}
 		var got qoderClaim
@@ -132,6 +133,10 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 			err = fmt.Errorf("the claim answered %q", got.Status)
 		}
 		if err != nil {
+			if errors.Is(err, ctx.Err()) {
+				interrupted = true
+				continue
+			}
 			failed++
 			why = err.Error()
 			continue
@@ -144,10 +149,12 @@ func qoderCheckin(ctx context.Context, a qoderCheckinAcct, now time.Time) WorkBu
 		}
 	}
 	switch {
-	case failed > 0:
+	case failed > 0 && (!interrupted || claimed == 0):
 		return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: why}
 	case claimed > 0:
 		return WorkBuddyCheckin{Outcome: CheckinClaimed, Credit: credit, ValidUntil: until}
+	case interrupted:
+		return WorkBuddyCheckin{}
 	case len(daily) == 0:
 		return WorkBuddyCheckin{Outcome: CheckinInactive}
 	}
@@ -184,12 +191,10 @@ func qoderCall(ctx context.Context, a qoderCheckinAcct, method, u string, dst an
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.via(req)
+	res, b, err := checkinReply(req, a.via)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if strings.EqualFold(res.Header.Get("X-Magpie-Sign-In"), "expired") || res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
 		return errors.New("Qoder's sign-in has expired — sign in again")
 	}
@@ -257,14 +262,18 @@ func qoderCards(accts []qoderCheckinAcct) []checkinCard {
 // moved ones and ones signed in on the plugin beside the built-in, each
 // sent through the plugin's fetch, which signs it as the account.
 func qoderCheckinAccounts() []qoderCheckinAcct {
+	return qoderCheckinAccountsContext(context.Background())
+}
+
+func qoderCheckinAccountsContext(ctx context.Context) []qoderCheckinAcct {
 	var out []qoderCheckinAcct
-	for _, pp := range heldPlugins() {
+	for _, pp := range heldPluginsContext(ctx) {
 		if _, ok := qoderCampaignURLs[pp.ID]; !ok || movingNow(pp.ID) || pluginChecksIn(pp) {
 			continue
 		}
 		auths := plugin.Auths(pp.ID)
 		card := PluginID(pp.ID)
-		for _, l := range pluginLogins(pp) {
+		for _, l := range pluginLoginsContext(ctx, pp) {
 			key := l.acct.Key
 			out = append(out, qoderCheckinAcct{User: l.User, On: l.On, site: pp.ID, uid: str(auths[key]["uid"]), card: card,
 				via: func(req *http.Request) (*http.Response, error) {

@@ -48,25 +48,20 @@ func (publication LibraryPublication) Lock(ctx context.Context) (func(), error) 
 }
 
 func (publication LibraryPublication) verifyLocked(ctx context.Context, root *os.Root) error {
-	entries, _, err := catalogRead(root)
+	view, err := publication.manager.catalog.readView(root)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != publication.module {
-			continue
-		}
-		if !activeRoot(entry) || entry.Revision != publication.revision {
-			break
-		}
-		generation, err := readObserverEnablement(root, publication.module)
-		if err != nil {
-			return err
-		}
-		if generation == publication.enableGeneration && !publication.manager.isClosed() {
-			return ctx.Err()
-		}
-		break
+	entry, found := view.lookup(publication.module)
+	if !found || !activeRoot(entry) || entry.Revision != publication.revision {
+		return errContributionRevoked
 	}
-	return errContributionRevoked
+	entry = view.enabledEntry(entry)
+	if entry.observerEnablementErr != nil {
+		return entry.observerEnablementErr
+	}
+	if entry.EnableGeneration != publication.enableGeneration || publication.manager.isClosed() {
+		return errContributionRevoked
+	}
+	return ctx.Err()
 }

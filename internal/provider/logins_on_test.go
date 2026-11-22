@@ -217,7 +217,8 @@ func TestSubscriptionUsageEachAccount(t *testing.T) {
 	t.Cleanup(func() { CodexBase = old })
 
 	var codex []SubscriptionQuota
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	cards, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range cards {
 		if q.Provider == "codex" {
 			codex = append(codex, q)
 		}
@@ -231,7 +232,8 @@ func TestSubscriptionUsageEachAccount(t *testing.T) {
 // codexCards are the Usage page's Codex cards, by account.
 func codexCards() map[string]SubscriptionQuota {
 	out := map[string]SubscriptionQuota{}
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	cards, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range cards {
 		if q.Provider == "codex" {
 			out[q.User] = q
 		}
@@ -335,6 +337,7 @@ func TestLoginUsageReadOnceAtATime(t *testing.T) {
 
 	// the first to ask starts both accounts' readings, then gives up
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	gaveUp := make(chan map[string]SubscriptionQuota, 1)
 	go func() { gaveUp <- LoginUsage(ctx, "codex") }()
 	for deadline := time.Now().Add(5 * time.Second); hits.Load() < 2; time.Sleep(5 * time.Millisecond) {
@@ -364,6 +367,10 @@ func TestLoginUsageReadOnceAtATime(t *testing.T) {
 			}
 		}()
 	}
+	t.Cleanup(func() {
+		release()
+		wg.Wait()
+	})
 	cancel()
 	select {
 	case u := <-gaveUp:

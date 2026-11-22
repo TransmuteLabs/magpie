@@ -52,6 +52,56 @@ A plugin that learns a step's usage only after the step has ended reports it wit
 
 The gateway parses the field into `Usage.Deferred` ([`cUsage`](../../internal/gateway/chat.go)) and adds it only where it bills: the usage records, the OTel attempt spans and route pricing, which prices it as a tier before the request's own ([`routeUsage`](../../internal/gateway/trace.go), [`Usage.billed`](../../internal/gateway/ir.go)). What a client is told stays the request's own, because agents read `prompt_tokens` as how full their context is: the passthrough forwards the plugin's bytes as they are, whose standard fields are the step's own, and a translated reply is encoded from the own count alone. `promptCounted` also reads the request's own. A reply without the field is handled as before. With an older magpie the field is ignored and the owed step goes unbilled in the ledger. [`deferred_usage_test.go`](../../internal/gateway/deferred_usage_test.go) covers the passthrough, the translated reply, the ledger, the OTel span and the pricing tiers.
 
+## Usage and saved account observations
+
+A community plugin's Usage read keeps the worker's deadline through account
+reconciliation and the saved plan and sign-in update. The edit checks SDK
+ownership before taking the login lock and holds the shared community ownership
+lock through publication. Cancellation interrupts either login lock wait and
+is checked at the file replacement. Under the login lock, the reply selects the
+saved login ID and account lifetime from the current file. Discovery is checked
+again before replacing the staged file. Switching discovery off or making its
+settings unreadable defers an account's observation. A keyless public plugin
+can still show its Usage with discovery off and leaves the saved login alone.
+Plan and sign-in observations advance
+independently in `logins.json`, including a Usage reply that confirms the
+value already saved. A reply compares the revision its read saw and, within
+the same revision, the read's start time. This comparison also applies when
+the newer observation came from another magpie process. Completing account
+sign-in advances both fields. A plugin response with `X-Magpie-Sign-In`
+set to `renewed` or `expired` advances the saved sign-in order even when
+the lapse mark already agrees. The saved plan order is independent, and
+`kept` makes no sign-in observation. A status inferred from HTTP that
+agrees with the lapse mark skips the ownership and login locks when the
+process has no active Usage read for that account.
+The gateway carries the request context into sign-in observation. A canceled
+request stops waiting for the login lock and cannot publish a pending edit.
+Catalog invalidation follows a successful account change. A canceled write
+or an identical saved file keeps the current catalog stamp. A newer Usage
+reply that confirms the current plan or sign-in can still advance the
+saved observation order. This replaces `logins.json` with the previous
+generation kept for recovery, so an older reply in another process
+cannot overwrite the confirmed value. An update to the order alone keeps
+the catalog stamp.
+
+The idle renewal scheduler keeps the gateway's context while reading
+subscription ownership and reconciling saved account rows. A renewal saved by
+the plugin host can still clear its lapse after the caller has canceled. The
+host's asynchronous sign-in notifications have a one-minute deadline for
+the local update and use the last saved provider name for expiry messages.
+They do not request a new provider listing.
+
+The wallet counter keeps the same Usage deadline while waiting for its writer
+and through replacement of `wallet-spend.json`. All wallet windows in one
+reply publish together. The writer reads the saved counters under the
+same lock before applying the reply. A canceled or unreadable observation
+leaves the saved counters intact. The subscription owner is checked before
+the write and stays locked while the reply is applied.
+
+See [`plugin_accounts.go`](../../internal/provider/plugin_accounts.go),
+[`wallet_spend.go`](../../internal/provider/wallet_spend.go), and the
+[Usage regressions](../../internal/provider/plugin_usage_persistence_test.go).
+
 ## A usage window that says no share
 
 A usage window's `used` (percent) may be left out when the plugin can't tell it: the Loomy plugins send only `display` ([#3650](https://github.com/yetone/magpie/issues/3650)). Left out is not 0. The host passes it on as `null` (`usageOf` in [`host.js`](../../internal/plugin/host.js)), `plugin.UsageWindow.Used` is a `*float64`, and [`quotaOfPlugin`](../../internal/provider/plugin_usage.go) makes such a window `Text` and `Aside`: the card shows its `display` (else "No allowance reported"), never a percentage or a meter (`quotaNoShare` in `app.js`), and `allowanceOf` leaves it out. An account whose windows all tell no share has no allowance, so routing counts it not known (`routedAllowance` in [`routing.go`](../../internal/provider/routing.go), for a fresh reading and the one kept on disk alike), as one never read, rather than as the one with all of it left. A window that says `used: 0` is a reading at 0, as before. [`plugin_usage_absent_test.go`](../../internal/provider/plugin_usage_absent_test.go) and `usage-no-reading.test.cjs` cover both.
@@ -96,6 +146,8 @@ The hook returns `{outcome, credit?, streak?, message?, until?}`. `outcome` is o
 [`plugin_checkin.go`](../../internal/provider/plugin_checkin.go) runs these through the same `checkiner` as the built-in check-ins ([`checkin.go`](../../internal/provider/checkin.go)): each signed-in, in-use account once a Beijing day, the first look 2 minutes after start and then every 30 minutes, the day's first ask from the time of day the user set (`settings.CheckinAt`, one for every vendor, built-in and plugin; the first such time on the computer's clock at or after the Beijing day's start, `checkinGate`, so every Beijing day holds one; none set asks as the day turns, as before; times_ang on X) while an answer for that day, its `until` and its retries go on as below, a `failed` asked again after 30 minutes, or at its `until` when that is later (`heldUntil`: a rate-limited claim read, plugins#793), at most 24 hours on and across the Beijing day's turn, a press still asking at once, every other outcome settled for the day. A `done`, `inactive` or `ineligible` answered before noon Beijing (`checkinSureHour`) for an account magpie hasn't seen claim that Beijing day is provisional (`provisional`, #3326): a vendor whose day turns at UTC midnight (08:00 Beijing) or later still answers yesterday's "already" at 00:00, and magpie took it for today's and never asked again. The loop asks it again 30 minutes after the answer, until a claim or an answer from noon on, so at most 24 more asks a day and none once magpie claims; a press (`soon`) asks it again at once, whatever the hour, since the vendor's answer is what the press is for. A claim stamps `Claimed`, carried over while later answers that day say done, so a done after magpie's own claim is settled. Such a record is sent with `again: true` (`shown`, never kept), and the card, Settings, TUI and CLI say the vendor said already checked in and magpie asks again later, not "Checked in today", and the card keeps *Check in now*. A vendor whose day turns after noon Beijing (a US day) is not covered. The Qoder, Qoder CN and ZCode plugins are the exception, as magpie's own Qoder check-in is (`recheck`, `pluginRechecks`, #2696, plugins#503): a campaign or gift plan can open mid-day (Qoder CN's ran 10:00 to 09:59 the next day), so the loop asks again 30 minutes after the last answer, whatever it was but a `captcha` or `own-app`, which waits on the user in the vendor's app and stands for the day (asked again, ZCode's claim only answered 3007 again, plugins#503), and *Check in now* asks at once, and their card keeps *Check in now* for an `inactive` result. Every other plugin keeps the day's result. A plugin whose vendor's day turns at another hour says when in `until` (an RFC 3339 time or epoch milliseconds; `host.js` passes it on as RFC 3339, `plugin.Checkin.Until`), kept as the record's `ValidUntil`: the answer is settled only until then, whatever its outcome (`settled`), the loop wakes then rather than at its next 30-minute look (`wbCheckinLoop.tick`), and an early `done` that says it isn't provisional, since the vendor said when its day turns. Qoder's daily credits open at 10:00 UTC+8 and close at 09:59 the next day (its `/me/campaigns` `startAt`/`endAt`); the Qoder plugins from 0.2.43 answer `until` a minute past the next opening, so a check-in before 10:00, which claims or meets the day before's campaign, is asked again at 10:01, not up to half an hour later (sdytman on Discord). Times are compared as instants, so the machine's zone doesn't matter. Results are kept in `plugin-checkin.json` by `provider|<sign-in key>` (`pluginCheckinKey`: the key `plugin-auth.json` keeps the sign-in under, `autoclaw` or `autoclaw#x1y2z3`), never by the display name: two sign-ins can share a name (AutoClaw's default can't be changed), and keyed by it only the first of them was ever checked in, by the loop or *Check in now* (plugins#254). The sign-in key holds over a refresh and over signing in to the same account again (`settle` in `host.js` puts it back under its key); a sign-in made after one was signed out the same day may take the freed key, and with it that day's result. An entry kept by `provider|<display name>` before then is carried over once the plugin's accounts are listed (`adoptLegacyPluginCheckins`): a check-in goes to the first sign-in in use of that name, the one the old key asked, and only to it, so its namesakes are asked and none twice; an `Off` in `settings.CheckinOff` goes to every sign-in of that name, since none of them was checked in while it was off. A `plugin-checkin.json` that can't be read or parsed is left as it is and carried over once it reads; until then no plugin account is checked in, and each says why (`readCheckins`, as for every vendor's check-in file). A failure is recorded as failed and never resets an account, a key or a previous day's result. Each account's Usage card has the check-in row (`checkinBy: "plugin:<provider>"`), and Settings → Usage has a Plugins tab with a Daily check-in switch per provider (`settings.PluginCheckins`, `POST /api/settings/plugin-checkin {provider, on}`; *Check in now* is `POST /api/usage/plugin-checkin {provider}`). The press says what it came to, a count per kind (`checkinPressSaid`, #3326): claimed now with the credits, already checked in today, not available yet (`inactive`, `ineligible`, or an `again` answer), to check in in the vendor's own app, failed; a result is claimed now only when it carries `asked` (`Asked`, sent but never kept), so an account claimed earlier today counts as already. `magpie accounts checkin` and `c` on the TUI's Usage page include them. Every check-in, built-in or a plugin's, also skips an account listed in `settings.CheckinOff` by its file key (#1902): `checkinNow` asks nothing for it, by the loop or a press, `CheckinAccounts()` lists each account with its own `on` for Settings (`checkinAccounts`, a row each under the vendor's switch when it has two or more, `POST /api/settings/checkin-account {key, on}`), and its card carries `checkinOff`. Under each vendor's switch in Settings, a *Check in now* row checks one account in once (`checkinNowRow`, drawn by [`checkinnow.js`](../../internal/gui/assets/checkinnow.js), loaded when Settings draws a vendor's check-in so it weighs nothing on the core; `POST /api/usage/checkin-account {by, key}`, `provider.CheckInAccount`; xiaowu_95660 on Discord): the same `checkinNow` press, with `only` set to that account's key, so no other account is asked or reported, and the account is asked even while its switch is off, which the press leaves as it is. With two or more accounts the button opens the app menu to pick one. The row says what came of it: checked in with the credit and streak, already checked in today, not eligible or no check-in event with the vendor's message, check in in the vendor's own app, or the failure. It reads the Usage cards again but doesn't draw Settings again under the button.
 
 The switch is off by default. For a provider whose vendor magpie checked in through the plugin's fetch before (WorkBuddy, Trae CN, MiniMax Code, Qoder), it follows that vendor's existing switch until set on its own, and magpie's own check-in leaves that provider's accounts to the plugin (`pluginChecksIn`), so an account is never checked in twice.
+
+Check-in cards and account settings show the saved metadata while a vendor call is in progress. The reads project old display-name keys onto current sign-ins in memory. The first sign-in in use inherits the old result, and every sign-in sharing the old key inherits Off. After the vendor calls, the runner locks the history file's `.lock` companion, reads the latest valid history and merges each account's outcome. A newer or concurrently written same-time row keeps its outcome and can inherit a same-day claim. A canceled run still saves the outcomes it received and defers alias and Off migration. For an unchanged alias, migration keeps the later of the old and current key's results. An explicit account toggle expands old Off entries before applying the change to the chosen sign-in.
 
 A provider switched off (`Off`, not `Hidden`) has no Usage card and the loop leaves it alone (`leftAlone`), but its accounts can still be checked in by hand (wxkwxk666 on X). `GET /api/usage/checkins/off` lists them (`provider.OffCheckins` in [`off_checkins.go`](../../internal/provider/off_checkins.go)): one card per account a checkiner reaches, with no windows, nothing read or asked, its check-in marked by its own key rather than its name. The Usage page shows them in a *Switched off · n* line after the cards and the hidden line, folded until clicked (`renderQuotaOff` in `plugins/usage/page.js`), each account with what came of today's check-in and, when it isn't in, its own *Check in* (`ciNowSend` from `checkinnow.js`, `POST /api/usage/checkin-account`). *Check in all*, at the allowances' head (`checkinAll`), presses every account of the cards and of that line not checked in today (`checkinDue`, its per-account switch ignored as a press does), one `checkin-account` each, three at a time, saying how far it has got and then the counts (`checkinPressSaid`); with none due it says so and asks nothing. Neither switches a provider back on. See `TestOffCheckinsListsSwitchedOffAccounts`, `usage-checkin-all.test.cjs`.
 
@@ -157,7 +209,55 @@ A plugin in front of an OpenAI-compatible API draws with the image models its li
 
 A plugin's model on Gemini's API (`@ai-sdk/google`, so `Provider.APIs` is Code Assist alone) draws as a Google sign-in's image models do (XYenon's Google AI Studio plugin, XYenon/magpie-google-ai-studio). `Drawers` lists it when its id names an image model (`catalog.DrawsID`) or the plugin says it gives images (`capabilities.output.image`, or models.dev's `modalities.output`, read into `OutputModalities`), and it isn't an Imagen (`catalog.ImagesAPI`, which draws on `:predict`, not served). `draw` sends it to `drawCodeAssist` (`pluginDrawsGemini`): one `generateContent` per image through the plugin's `fetch`, with `responseModalities` `["TEXT","IMAGE"]` (`Request.draws` asks for it of a model not named for images), and an edit's pictures as the prompt's `inlineData`; the pictures come back from the answer's `inlineData`. The images routes' key holds and usage apply as for any drawer. `TestGeminiPluginDraws`.
 
-A request `pluginFetch` sends goes under the loader's `baseURL`, else the model's own `api.url`, the provider's `api`, its npm's default (`pluginRequestBase` in [`plugins.go`](../../internal/provider/plugins.go)); magpie's `/v1` is taken off the path, as the AI SDK's base ends where magpie's `/v1` does. The loader's base is one for all the provider's models, so an Anthropic model whose own URL ends in `/v1` goes under the loader's base + `/v1` when that base doesn't end in it: Copilot's loader says `https://api.githubcopilot.com` (or its enterprise host), its Claude models are on `/v1/messages` (models.dev's `api.url`, and OpenCode's own Copilot provider adds `/v1` for them), and sent to `/messages` they were answered 404 (cyoking1 on X). A model whose own URL has no `/v1` (Kiro's) and a base that ends in it go as before. `TestPluginAnthropicBaseKeepsV1`.
+[`pluginFetch`](../../internal/provider/plugins.go) gives the host a path and
+the logical model ID. [`fetchAs`](../../internal/plugin/host.js) prepares the
+selected account's model, loader `baseURL`, credentials and fetch together.
+After the asynchronous loader and `chat.headers` hooks, the host asks Go
+whether the selected slot and model can serve the request. Go resolves the
+prepared model's API ID and its model, provider or npm fallback base. A
+successful account list that omits the selected model stops dispatch. An
+unavailable list can still use the cached catalog. A change that makes the
+encoded API incompatible stops dispatch, including a switch away from an
+OpenAI-compatible image API. The host checks absolute targets against the
+selected origin and applies the model's API ID while preserving the
+remaining JSON or generated multipart request bytes. A private account
+requires a saved sign-in. Go checks
+current subscription discovery and the slot's routing policy. The legacy
+first-account and missing-row defaults still apply. Public keyless providers
+can serve with discovery off. The permit belongs to the current fetch and
+is exchanged outside HTTP. The host checks the prepared sign-in and options
+again after the permit, before calling the plugin's fetch.
+
+`Provider.Do` reads saved provider switches and discovery policy together.
+The loader, model and header hooks share those switch values, including
+after an asynchronous hook. A switch saved by a different Magpie process
+takes effect on the next request to the same host. The permit checks the
+current saved values again. A changed effective value stops the prepared
+request before the plugin's fetch or cache publication. Re-saving the
+same values, including explicitly saving a plugin's default, leaves
+the prepared request and cache valid.
+`Provider.Origin` uses the saved switches when asking for a loader address.
+An explicit or scheduled model refresh also gives the listing hooks the
+saved switches at the start of that operation.
+`TestPluginFetchUsesOneLoaderForAddressAndKey`,
+`TestPluginFetchStopsWhenSignInChangesDuringHeaders` and
+`TestPluginFetchOnlyUsesTheSelectedOriginForAbsoluteURLs` exercise these paths
+through `Provider.Do` and the Bun host. `TestPluginFetchChecksCurrentPolicyAfterHeaders`
+and `TestPluginFetchUsesCurrentLoaderOptions` cover changes during preparation.
+`TestPluginFetchFollowsDurableProviderOptions` covers a save from a second
+process and an unchanged save while preparation is in flight.
+`TestPluginAccountRoutesFollowDurableProviderOptions` checks the next fetch,
+origin and model refresh under a warm host, including a Gemini path and a
+switch to an incompatible API.
+
+Go strips its `/v1` prefix because the AI SDK's base ends where that
+prefix does. An Anthropic model whose own URL ends in `/v1` keeps `/v1`
+under the loader's base, as Copilot's Claude models do. If the model uses
+a different path or the loader already includes `/v1`, the loader's base
+stands. The Code Assist envelope is still unwrapped in Go and sent as a
+Gemini model path. `TestPluginAnthropicBaseKeepsV1` and
+`TestPluginFetchKeepsGeminiPathAndUnwrapsCodeAssist` check what the upstream
+receives.
 
 A plugin model is spoken to on the API of its AI SDK package (`pluginProtocol`: `@ai-sdk/anthropic` is Anthropic's messages, `@ai-sdk/openai` Responses, `@ai-sdk/google` Code Assist, anything else chat completions). A plugin whose vendor serves a model on other APIs too lists their packages on the model as `also` (an array, on the config model or the models hook's; the host passes it as `plugin.Model.Also`). `pluginProtocols` gives the model's own API first and then those, which is what `ListedAPIs` (`pluginAPIs`), the catalog's `APIs` and the provider's bases are built from, so a client's request on any of them is relayed to the plugin's `fetch` as it was sent, and only a request on an API not listed is translated, to the model's own (`usable` puts it first for a plugin). Before, the one API was all a plugin model had: OpenDesign's Anthropic request to an Open Design Cloud model declared on chat completions went upstream as chat completions, though amr-link serves every model on all three (gaubeebangeel on X, plugins#888). A model with no `also` is unchanged. The plugin's `fetch` signs by the request's path, not the declared package (Open Design's `signFor`). `TestPluginModelServedOnMoreAPIsKeepsTheClientAPI`.
 
@@ -206,10 +306,10 @@ So `forwardOnce` sets two more headers on every plugin request, each dropped fir
 
 | Header | Value |
 | --- | --- |
-| `x-magpie-session` (`provider.SessionToPluginHeader`) | The session the request names, as `sessionOf` reads it: the caller's own `X-Magpie-Session`, else the agent's header (Claude Code's `x-claude-code-session-id`, OpenCode's `x-opencode-session`, Codex's `session_id` and the rest of `sessionHeaders`). |
-| `x-magpie-subagent` (`provider.SubagentToPluginHeader`) | The Claude Code subagent the request is of (`x-claude-code-agent-id`, `subOf`); never sent for the lead's own turns. |
+| `x-magpie-session` (`provider.SessionToPluginHeader`) | The session the request belongs to: the caller's own `X-Magpie-Session`, else the agent's session header (`sessionOf`: Claude Code's `x-claude-code-session-id`, OpenCode's `x-opencode-session`, Codex's `session-id`/`session_id` and the rest of `sessionHeaders`). For an OpenCode 1 subagent, where `x-session-affinity` / `x-session-id` carry the child's own id and no root header is sent, `x-magpie-session` carries `x-opencode-parent-session-id` so the pair matches Claude Code, Codex and OpenCode 2 (`chat.headers`'s `input.sessionID` comes from `X-Magpie-Conversation` and keeps the child's own id). |
+| `x-magpie-subagent` (`provider.SubagentToPluginHeader`) | The subagent the request is of: Claude Code's `x-claude-code-agent-id` (`subOf`), a Codex spawned subagent's thread id (`collab_spawn` / `thread_spawn` / `agent_job`, from `thread_id` in turn metadata / `client_metadata` or `thread-id`, when distinct from the root session), or an OpenCode subagent's `x-opencode-session-id` when `x-opencode-parent-session-id` names a different session; never sent for the lead's own turns, Codex's non-spawn helper calls (`thread_title`, `guardian`, `review`), or OpenCode user forks. |
 
-`unsaid` in `host.js` takes both off whatever the plugin sends on. Devin 0.1.34 keys its keepalive by them. `TestPluginToldTheSession` ([`plugin_session_test.go`](../../internal/gateway/plugin_session_test.go)) sends Claude Code's lead and subagent, a caller's `X-Magpie-Session`, OpenCode's header and none, to a relayed Anthropic model and a translated Chat one, unstreamed, and checks what the plugin read and that the vendor got neither header.
+`unsaid` in `host.js` takes both off whatever the plugin sends on. Devin 0.1.34 keys its keepalive by them. `TestPluginToldTheSession` ([`plugin_session_test.go`](../../internal/gateway/plugin_session_test.go)) sends Claude Code's lead and subagent, a caller's `X-Magpie-Session`, none, Codex's lead, spawned subagent (via headers and `client_metadata`) and helper calls, and OpenCode 1/2's lead, fork and subagent, to relayed Messages/Responses/Chat models and translated paths, a Codex subagent over the Responses WebSocket, and magpie's own ask entering `serve` again on a Codex subagent's turn (as `searchWith` does), which is told no subagent; and checks what the plugin read and that the vendor got no `x-magpie-*` header.
 
 ## The agent that asked, for a plugin
 
@@ -223,7 +323,7 @@ A plugin couldn't tell which agent a request came from: the gateway knew it (`ca
 
 Each value, and each computer, is percent-encoded UTF-8 (`url.PathEscape`; `decodeURIComponent` reads it). A request passed on names the agent on the first computer, never the magpie in between, so the value is the same whether the agent is here or several hops away. To carry the whole way, `passOnCaller` sends `X-Magpie-Via-Chain` beside `X-Magpie-Via`: the computers before, then this one (`hostName`). The receiving magpie takes it only from a magpie's request, only when it begins with `X-Magpie-Via` and each part is a `label` (at most `catalog.MaxVia` of them), else the chain is `X-Magpie-Via` alone, as an older magpie sends (`chainOf`); `withCaller` takes it off every request as it arrives, as the others.
 
-The host gives the same to `chat.headers` as `input.caller`, `{agent, name, via}` (`callerOf` in [`host.js`](../../internal/plugin/host.js)), a copy per hook. `input.agent` stays OpenCode's `"build"`, which a plugin may go by, and OpenCode never sets `caller`, so a plugin written for both checks for it. `unsaid` takes the three headers off whatever the plugin sends on, so no vendor is told and its request is the same whoever asked.
+The host gives the same to `chat.headers` as `input.caller`, `{agent, name, via}` (`callerOf` in [`host.js`](../../internal/plugin/host.js)), a copy per hook. `input.agent` stays OpenCode's `"build"`, which a plugin may go by, and OpenCode never sets `caller`, so a plugin written for both checks for it. The JS gateway middleware and the async request hooks get the same value as `ctx.caller` (`pluginCaller`; [Gateway middleware](gateway-middleware.md), [request hooks](gateway-request-hooks.md)), so a magpie can turn an agent away before a provider is picked. `unsaid` takes the three headers off whatever the plugin sends on, so no vendor is told and its request is the same whoever asked.
 
 `TestPluginToldTheCaller` ([`plugin_caller_test.go`](../../internal/gateway/plugin_caller_test.go)) sends a request from an agent known by its token and one by its User-Agent, one passed on by a real Remote magpie hop, one through two magpies, one from a magpie that sends no chain, and a client's own `X-Magpie-Agent` and `X-Magpie-Caller-*` headers, which aren't taken; it checks what the plugin's fetch and its `chat.headers` hook were told, that the vendor got no `x-magpie-` header, and that the vendor got the same body and headers in every case. `TestPassOnCallerAddsThisComputer` checks the chain each magpie sends and the next reads back, and that a chain not beginning at `X-Magpie-Via`, or with a part that isn't a name, or past `MaxVia`, is read as `X-Magpie-Via` alone.
 
@@ -274,7 +374,32 @@ A 401 marks the account's sign-in by default (`notePluginSignIn` in [`plugins.go
 
 ## A 401 on an access token its refresh token renews
 
-An OAuth account keeps a short-lived access token beside its refresh token, and its plugin's loader (or magpie's `auth.refresh`) renews the access token when its stored `expires` comes. A vendor can turn an access token away before that: Copilot's API dropped the inference token of a slot that had carried no traffic, while its GitHub OAuth token still traded at `/copilot_internal/v2/token`, and the bare 401 marked the account "sign-in has expired — sign in again", whose row then offered only a new device flow ([magpie-community/plugins#618](https://github.com/magpie-community/plugins/issues/618), jinpy666). The host now judges a 401 its plugin said nothing of (no `X-Magpie-Sign-In`) against the sign-in as the request found it (`staleAccess` in [`host.js`](../../internal/plugin/host.js)): an OAuth sign-in with a refresh token whose access token is still the stored one and not due yet is made due (`expires` 1, under the auth lock, only while the access token is unchanged) and said `kept`, so the next request renews it and goes through, and the gateway fails this one over as it fails any 401. The account is still marked when the access token was renewed for this request and turned away, when it was due already and the plugin didn't renew it, when the account has no refresh token, and when the plugin says so (an error with `signIn: "expired"`, a refresh `auth.refresh` was refused). A sign-in that can't be read when the 401 comes (`readAuthState`'s `known` false) is unknown: `kept`, never marked. A marked account is still routed to (`pluginAlsoOn` leaves no account on out for its mark), so a slot marked before is renewed on its next request and cleared by the success. Copilot's plugin 0.1.1 says `expired` only for the token exchange's own 401 and `renewed` for a quota read GitHub answers, which clears a mark left from before. `TestPluginStaleAccessRenewsNotLapses` in [`plugin_stale_access_test.go`](../../internal/provider/plugin_stale_access_test.go) covers the idle account renewed, a renewed token turned away, a refused refresh, an unreadable sign-in and the marked account still routed.
+An OAuth account keeps a short-lived access token beside its refresh
+token. Its plugin's loader or magpie's `auth.refresh` renews the access
+token when its stored expiry comes due. A vendor can refuse the access
+token sooner while the refresh token still works, as Copilot did for
+an idle account ([magpie-community/plugins#618](https://github.com/magpie-community/plugins/issues/618)).
+
+For a 401 without `X-Magpie-Sign-In`, [`staleAccess`](../../internal/plugin/host.js)
+compares the sign-in used for the request with the current saved sign-in.
+A replacement or unreadable record gives `kept`. When the request used
+its original OAuth token with time left and a refresh token, the host
+sets `expires` to 1 only while the whole saved record still matches.
+The gateway can fail over on the 401 and renew the token on its next use.
+A refused token already due or renewed for that request can mark the
+account lapsed. The mark leaves the account eligible for routing, so
+later successful authentication can clear it.
+
+The host sends the selected slot and sign-in epoch alongside the
+response head, outside HTTP headers. Asynchronous sign-in notices carry
+the epoch observed by the loader, fetch, models hook or renewal. A
+provider applies the observation only under the current record's epoch
+check. A late result from an earlier sign-in leaves the replacement
+alone, including when the plugin explicitly said `expired` or
+`renewed`. Tests cover early access-token refusal, failed renewal,
+unreadable credentials and a repeat sign-in while a request waits for
+its 401. [Provider tests](../../internal/provider/plugin_stale_access_test.go)
+and [host tests](../../internal/plugin/auth_dispatch_test.go).
 
 ## A sign-in nothing uses
 
@@ -282,7 +407,18 @@ A plugin's `auth.refresh` renews a sign-in only when something uses the account 
 
 Inside the host, a sign-in whose renewal failed isn't renewed again by whatever uses it next: `renewal` in [`host.js`](../../internal/plugin/host.js) holds it 30 seconds (`RENEW_RETRY`), doubled with each failure in a row of that sign-in up to 30 minutes (`RENEW_RETRY_MOST`, `retryAfter`, `failedRenewal`); one the plugin said `signIn: "expired"` of isn't tried again at all, and a new sign-in starts afresh. A refresh that gives nothing back while the sign-in is due counts as a failure: magpie-ima-auth 0.3.0 (third-party) catches ima's "sign in again", warns and returns undefined, and the host asked it again on every request, models listing and usage read, ~80 times a minute for two dead accounts (JZGiVvkSOA75376 on X). A models hook that throws with `signIn: "expired"` is held the same way for that sign-in (`refusedLists`, keyed by its access, refresh and key): the listing falls back with the same error and the hook isn't asked until the backoff has passed, which stopped two dead Zed sign-ins being refused by Zed ~30 times a minute. `TestPluginRenewsSignIns` (its `r-none` account), `TestRenewRetryBacksOff` and `TestRefusedListIsNotAskedAgain` in [`internal/plugin`](../../internal/plugin) cover them.
 
-An account signed out while one of its hooks runs stays signed out. A hook that saves a sign-in through `client.auth.set` (a models list spending a rotating refresh token, as the fake plugin's `rot-` sign-ins do) saves nothing once the account it was called for is gone from plugin-auth.json: `inScope` in [`host.js`](../../internal/plugin/host.js) notes whether the account was signed in when the call began (`had`), and `auth.set` checks it under the file's lock, as `renewLocked` already did for a renewal. A sign-in's own steps (`signingIn`) are not held to it, since their account is new. Before this, a listing that started before a sign-out, or before a failed move took its accounts back out of the plugin (`putBack`), wrote the account in again, and the plugin kept an account of a move that failed (#5126, #5119). `TestSignOutOutlastsRunningHook` in [`signout_hook_test.go`](../../internal/plugin/signout_hook_test.go) holds the hook (`FAKE_MODELS_HOLD`) across the sign-out in a real host.
+`inScope` in [`host.js`](../../internal/plugin/host.js) records the sign-in
+a hook reads. Each `client.auth.set` or `client.auth.remove` for that
+account checks the whole record in the latest snapshot before its edit.
+A concurrent sign-out, replacement or rotation of the record wins.
+An edit to a different account can be retried against the newer document.
+After publication the same hook reads its saved record and can make
+another edit. Model lookup and due renewal prepare the sign-in before a
+provider loader runs, and a returned fetch keeps that loader's binding.
+`signingIn` steps can save the credentials the user is adding.
+`TestSignOutOutlastsRunningHook` and `TestScopedAuthWritesKeepNewSignIns` in
+[`signout_hook_test.go`](../../internal/plugin/signout_hook_test.go)
+exercise these checks in a real host.
 
 ## A model's free and rate
 
@@ -390,6 +526,10 @@ A host whose stdin closes leaves only once nothing is pending, and a promise alo
 
 A plugin's account whose sign-in its vendor refused (`lapsed`, or an allowance read saying so) keeps Sign in again and Remove on its row, whether it is in use or the agent's own (`signedOut` in `renderAccounts`, `app.js`).
 
+`POST /api/plugin-signin` uses its request context for the subscription
+ownership read and initial sign-in setup. The installer or OAuth browser
+flow returned to the user keeps its own cancellation and timeout.
+
 A plugin sign-in's page is opened once. An `authorize` result may say `opened: true` (not OpenCode's field): the plugin's own CLI opened the page already. Grok's `grok login --device-auth` does this on macOS and Windows, where nothing turns it off, and magpie's opening it too showed two pages (andyfmyth on X; plugin 0.1.17, which on other systems gives grok a `BROWSER` that opens nothing instead). `host.js` passes it on as `Authorization.Opened`, then `SignInState.Opened`, and the desktop's `/api/plugin-signin`, `magpie plugin login` and the window in a browser tab (`startPluginSignIn`, and `followSignIn` after an install) then open nothing; the page's link is still shown (`TestPluginSignInPageOpensOnce`, `plugin-signin-opened.test.cjs`).
 
 A plugin sign-in magpie gives up on ends in the host too (#5016). The user's Cancel, or the sign-in's timeout (`signInTimeout`), ends `plugin.Finish`'s context, and `authorize`, `callback` and `apiKey` are cancellable calls (`cancellable` in [`host.go`](../../internal/plugin/host.go)), as a gateway request is: magpie writes `abort` for the call, and `host.js` (`signInSteps`) drops whatever the plugin answers after it, so nothing is saved, and counts the call as done at once. The plugin's own wait is told where the host can tell it: every fetch the plugin makes for the sign-in carries the sign-in's signal (`whileSigningIn`), and magpie's hook hands the signal to the plugin as a second argument, `callback(code, { signal })` and `authorize(inputs, { signal })` (OpenCode passes none), so a plugin that polls a file or its vendor for minutes (AStudio's waits on its desktop app's session file, plugins#658) can stop. Before, a session file written after Cancel still signed the account in. An `oauth` method's `authorize` that can't start says why as an `api` method's does, `{ type: "failed", error }`; `host.js` answers it, or a result with no `callback`, as the sign-in's failure (`plugin.Authorize` gives `ErrFailed` with the reason) instead of calling the callback it lacks, which reached the user as "s.a.callback is not a function". `TestCancelledSignInSavesNothing`, `TestCancelledSignInEndsThePluginsWait`, `TestCancelledSignInEndsItsFetch` and `TestSignInFailsWithThePluginsReason` in [`plugin_signinend_test.go`](../../internal/plugin/plugin_signinend_test.go).
@@ -401,6 +541,59 @@ A plugin `fetch` has a bound before its head as well as between its body's bytes
 A completed fetch still drains its queued response head before interpreting the terminal result (`headRead`). The head and completion may arrive between the reader's initial empty-queue check and its result check; that short reply must not become “the plugin answered no response”. The terminal result is carried into the body, preserving its bytes and any final error (`TestHostHeadArrivesWithCompletion`).
 
 The GUI's plugin integration includes `subOf`, `pluginSubs`, and `startPluginSignIn`. A change to sign-in or provider presentation must follow these paths as well as the built-in paths it affects.
+
+## Saved sign-in writes
+
+Legacy plugin sign-ins live in `plugin-auth.json`. Bun proposes a change
+from a fresh snapshot over the host pipe. The Go writer checks the
+snapshot again and publishes through `lastgood.Keep` and an atomic rename.
+A concurrent change retries only the local edit. A separate Go worker
+handles disk work and lock waits. The host keeps the pipe open while it
+drains so an active renewal can save the replacement token.
+
+An explicit sign-in publishes a fresh epoch in the same record as its
+credentials, including a sign-in with the same credentials. Automatic
+renewal preserves the epoch. Older saved slots have an empty epoch and
+remain readable. The metadata stays in the host's store and control
+messages. Plugins receive the credential fields, including when Pi
+reads or edits them. A Pi credential edit runs its callback once and
+compares the original record under the write transaction. If a
+concurrent sign-in or rotation wins, Pi receives the surviving record.
+
+[`lockAuth`](../../internal/plugin/auth_lock.go) also protects offline sign-out,
+backup restore, and the check of the current saved sign-in during SDK
+publication. All these paths require an exclusive OS lock on the
+persistent `plugin-auth.json.write.lock`. Lock failure and wait timeout
+end the operation. The OS releases ownership when a process dies. Bun
+edits are limited to a 16 MiB credential document.
+
+The loader, model listing, fetch, usage, and renewal hold shared admission
+for the provider across vendor work and credential writes, including when
+the caller cancels while the hook finishes. During SDK cutover,
+[`WithSavedAuths`](../../internal/plugin/providers.go) takes exclusive
+admission before it checks the saved sign-ins. An admitted operation makes
+cutover return a busy error. The common writer freezes the provider's
+records as soon as its ownership is pending or active. Writes for other
+providers preserve the frozen bytes used to verify rollback.
+
+While holding the OS lock, a writer links its `.write-owner` marker to
+the legacy `.lock` reservation. This requires hard links on the
+configuration volume. A new writer can recover that link after a crash
+and waits for a reservation it cannot identify. Older binaries can
+still expire `.lock` by age, including during handover. Finish their
+writes before a saved sign-in transfer, and finish new writes before
+rolling back. Older cleanup affects only the legacy reservation.
+
+An older `.lock` carries no process identity. If it remains after a
+crash, stop every Magpie process and Bun host that can write to the
+configuration directory, including processes on other machines sharing
+the volume. Keep them stopped while moving `plugin-auth.json.lock` aside
+as `plugin-auth.json.lock.abandoned`. Leave the sign-ins, `.write.lock`
+and `.write-owner` in place. Restart Magpie and retry the operation.
+`TestAuthWriteRespectsAnOlderWritersReservation` in
+[`auth_lock_async_test.go`](../../internal/plugin/auth_lock_async_test.go)
+checks that a timed-out write leaves the reservation and credentials
+intact and that writes resume after this recovery.
 
 ## Verification
 

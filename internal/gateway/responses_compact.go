@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/codexsummary"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -27,7 +29,7 @@ func (s *Server) responsesCompact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	noteAsked(r.Context(), model)
-	if s.nativeCompactionForWire(model, s.compactsUnary) && !hasMagpieCheckpoint(body) {
+	if !hasMagpieCheckpoint(body) && s.nativeCompactionForWire(model, s.carriesCompaction) {
 		r = r.WithContext(context.WithValue(r.Context(), unaryCompactKey{}, true))
 		body = keyTiered(r, codexTiered(r, fastTier(body), model), model)
 		s.serveAgent(w, r, provider.Responses, body)
@@ -89,13 +91,20 @@ func compactHistory(body []byte) []json.RawMessage {
 }
 
 func hasMagpieCheckpoint(body []byte) bool {
-	for _, item := range getIn(body, "input").Array() {
-		if slices.Contains(compactionKinds, item.Get("type").Str) &&
-			strings.HasPrefix(item.Get("encrypted_content").Str, magpieCompaction) {
-			return true
-		}
+	input := memberOrNil(bytes.TrimSpace(body), "input")
+	if len(input) == 0 || input[0] != '[' {
+		return false
 	}
-	return false
+	found := false
+	eachElement(input, func(item []byte) bool {
+		kind, _ := stringBytes(memberOrNil(item, "type"))
+		if slices.Contains(compactionKinds, string(kind)) {
+			seal, _ := stringBytes(memberOrNil(item, "encrypted_content"))
+			found = bytes.HasPrefix(seal, []byte(magpieCompaction))
+		}
+		return !found
+	})
+	return found
 }
 
 // unaryCompact is whether r is a /responses/compact request.
@@ -104,20 +113,78 @@ func unaryCompact(r *http.Request) bool {
 	return v
 }
 
-// compactsUnary is whether model at p can be asked /responses/compact: a
-// key's provider (no account) whose wire carries Responses and asks model
-// on it.
-func (s *Server) compactsUnary(p provider.Provider, model string) bool {
-	return p.Account == nil && s.carriesCompaction(p, model)
+func compactForAccount(body []byte) ([]byte, []json.RawMessage) {
+	input := memberOrNil(bytes.TrimSpace(body), "input")
+	var items, kept []json.RawMessage
+	if text, ok := stringBytes(input); ok {
+		item, _ := json.Marshal(userMessage(string(text)))
+		items = append(items, item)
+		kept = append(kept, item)
+	} else if len(input) > 0 && input[0] == '[' {
+		eachElement(input, func(raw []byte) bool {
+			item := json.RawMessage(raw)
+			items = append(items, item)
+			role, _ := stringBytes(memberOrNil(item, "role"))
+			if string(role) != "user" {
+				return true
+			}
+			rawKind := memberOrNil(item, "type")
+			kind, _ := stringBytes(rawKind)
+			if rawKind == nil || string(kind) == "message" {
+				kept = append(kept, item)
+			}
+			return true
+		})
+	}
+	items = append(items, json.RawMessage(`{"type":"compaction_trigger"}`))
+	return withFields(body, map[string]any{"input": items, "stream": true}), kept
 }
 
-// unaryCompactCarriers keeps of cands those compactsUnary.
-func (s *Server) unaryCompactCarriers(cands []candidate, pl planned) ([]candidate, planned, bool) {
-	return keepCandidates(cands, pl, func(c candidate) bool { return s.compactsUnary(c.p, c.model) })
+func compactionReply(response json.RawMessage, kept []json.RawMessage, streamed map[int]json.RawMessage) ([]byte, bool) {
+	if !jsonCheck(response) {
+		return nil, false
+	}
+	rawOutput := memberOrNil(bytes.TrimSpace(response), "output")
+	if len(rawOutput) == 0 || rawOutput[0] != '[' {
+		return nil, false
+	}
+	if len(streamed) > 0 && len(bytes.TrimSpace(rawOutput[1:len(rawOutput)-1])) == 0 {
+		response = withStreamedOutput(response, streamed)
+		rawOutput = memberOrNil(response, "output")
+	}
+	result := gjson.ParseBytes(response)
+	output := slices.Clone(kept)
+	eachElement(rawOutput, func(item []byte) bool {
+		kind, _ := stringBytes(memberOrNil(item, "type"))
+		if slices.Contains(compactionKinds, string(kind)) {
+			if encrypted, _ := stringBytes(memberOrNil(item, "encrypted_content")); len(encrypted) > 0 {
+				output = append(output, json.RawMessage(item))
+			}
+		}
+		return true
+	})
+	if len(output) == len(kept) {
+		return nil, false
+	}
+	id := result.Get("id").Str
+	if id == "" {
+		id = "cmp_" + newID()
+	}
+	reply := map[string]any{"id": id, "object": "response.compaction", "output": output}
+	if created := result.Get("created_at"); created.Exists() {
+		reply["created_at"] = json.RawMessage(created.Raw)
+	} else {
+		reply["created_at"] = time.Now().Unix()
+	}
+	if usage := result.Get("usage"); usage.IsObject() {
+		reply["usage"] = json.RawMessage(usage.Raw)
+	}
+	data, err := json.Marshal(reply)
+	return data, err == nil
 }
 
 // unaryCompactError is what a /responses/compact for model is told when
 // nothing that serves it has the route.
 func unaryCompactError(model string) string {
-	return fmt.Sprintf("/responses/compact is not supported for %s: it is relayed only to a provider whose own API is Responses (an API key's provider asking the model on Responses), and none of those serves %s; compact on /responses instead", model, model)
+	return fmt.Sprintf("/responses/compact is not supported for %s: it needs an API-key provider, ChatGPT account or Copilot account that serves the model on Responses", model)
 }

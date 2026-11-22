@@ -30,15 +30,17 @@ func TestQuotasLastServed(t *testing.T) {
 	servedAt.Lock()
 	servedAt.m = map[string]time.Time{}
 	servedAt.Unlock()
-	qs := withServed([]Quota{
-		{Provider: "codex", Kind: "subscription", User: "a@x.com"},
-		{Provider: "codex", Kind: "subscription", User: "b@x.com"},
-		{Provider: "dk", Kind: "plan", User: "work"},
-		{Provider: "dk", Kind: "plan", User: Mask("sk-other-key-0002")},
-		{Provider: "dk", Kind: "balance"},
-		{Provider: "solo", Kind: "balance"},
-		{Provider: "none", Kind: "balance"},
-	}, LastServed())
+	qs := quotaReport(t.Context(), []SubscriptionQuota{
+		{Provider: "codex", User: "a@x.com"},
+		{Provider: "codex", User: "b@x.com"},
+	}, []SubscriptionQuota{
+		{Provider: "dk", User: "work"},
+		{Provider: "dk", User: Mask("sk-other-key-0002")},
+	}, []SubscriptionQuota{
+		{Provider: "dk"},
+		{Provider: "solo"},
+		{Provider: "none"},
+	}, now)
 	want := []*time.Time{ptr(now.Add(-time.Hour)), nil, nil, ptr(now.Add(-time.Minute)), ptr(now.Add(-time.Minute)), ptr(now.Add(-2 * time.Hour)), nil}
 	for i, q := range qs {
 		if (q.LastServedAt == nil) != (want[i] == nil) || q.LastServedAt != nil && !q.LastServedAt.Equal(*want[i]) {
@@ -80,7 +82,7 @@ func TestCardsLastServed(t *testing.T) {
 		{Provider: "codex", User: "b@x.com", From: "studio"},
 	}
 	balances := []SubscriptionQuota{{Provider: "solo"}}
-	got := cardsServed(subs, nil, balances, LastServed())
+	got := cardsServed(t.Context(), subs, nil, balances, LastServed())
 	if len(got) != 4 {
 		t.Fatalf("cards: %+v", got)
 	}

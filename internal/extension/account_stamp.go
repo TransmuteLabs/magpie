@@ -78,14 +78,22 @@ func accountStampAt(root string) (AccountFileStamp, error) {
 		if err != nil {
 			return AccountFileStamp{}, err
 		}
-		accountInfo, accountErr := accountFileInfo(namespace, "accounts.json")
-		configInfo, configErr := accountConfigFileInfo(namespace, entry.Name())
-		namespace.Close()
-		for _, source := range []struct {
+		type stampSource struct {
 			name string
 			info os.FileInfo
 			err  error
-		}{{"accounts.json", accountInfo, accountErr}, {moduleConfigKey, configInfo, configErr}} {
+		}
+		var sources []stampSource
+		if entry.Name() == savedSignInsDir {
+			info, err := accountFileInfo(namespace, subscriptionOwnersFile)
+			sources = append(sources, stampSource{subscriptionOwnersFile, info, err})
+		} else {
+			accountInfo, accountErr := accountFileInfo(namespace, "accounts.json")
+			configInfo, configErr := accountConfigFileInfo(namespace, entry.Name())
+			sources = append(sources, stampSource{"accounts.json", accountInfo, accountErr}, stampSource{moduleConfigKey, configInfo, configErr})
+		}
+		namespace.Close()
+		for _, source := range sources {
 			if errors.Is(source.err, os.ErrNotExist) {
 				continue
 			}

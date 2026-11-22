@@ -29,6 +29,8 @@ import (
 // the time a file system can tell apart could keep its time and size.
 const settleFor = 3 * time.Second
 
+const treeMemoLimit = 4096
+
 // stamper sums what a walk sees of a folder's files and links without
 // opening one: each one's place, type, size and time. The walk that reads
 // a folder stamps it as it goes, before opening a file, so a file written
@@ -88,6 +90,12 @@ func rememberedHash(dir string, lv leave) string {
 	}
 	if settled {
 		memo.Lock()
+		if _, kept := memo.hashes[key]; !kept && len(memo.hashes) >= treeMemoLimit {
+			for old := range memo.hashes {
+				delete(memo.hashes, old)
+				break
+			}
+		}
 		memo.hashes[key] = hashMemo{stamp: stamp, hash: h}
 		memo.Unlock()
 	}
@@ -108,6 +116,12 @@ func rememberedSame(a, b string, ta, tb tree, compare func() (same, sure bool)) 
 	same, sure := compare()
 	memo.Lock()
 	if sure && ta.settled && tb.settled {
+		if _, kept := memo.trees[key]; !kept && len(memo.trees) >= treeMemoLimit {
+			for old := range memo.trees {
+				delete(memo.trees, old)
+				break
+			}
+		}
 		memo.trees[key] = treeMemo{a: ta.stamp, b: tb.stamp, same: same}
 	} else {
 		delete(memo.trees, key)

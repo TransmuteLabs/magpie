@@ -799,7 +799,11 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 		user string
 	}
 	var jobs []job
-	for _, p := range All() {
+	providers := AllContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
+	for _, p := range providers {
 		if p.Hidden || p.Off || p.Account != nil || p.Key == "" {
 			continue
 		}
@@ -910,11 +914,13 @@ func PlanQuotas(ctx context.Context) []SubscriptionQuota {
 		}
 	}
 	if ctx.Err() == nil {
-		noteQuotaHistory(out, time.Now())
+		noteQuotaHistoryContext(ctx, out, time.Now())
 		c.Lock()
-		c.data = cacheCards(c.data, out, seq, again)
-		if !again {
-			c.at, out = time.Now(), c.data
+		if ctx.Err() == nil {
+			c.data = cacheCards(c.data, out, seq, again)
+			if !again {
+				c.at, out = time.Now(), c.data
+			}
 		}
 		c.Unlock()
 	}

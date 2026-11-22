@@ -15,12 +15,11 @@ import (
 // sent them, the provider's key in place of magpie's
 func TestClaudeCodeHeadersReachAnthropicRelay(t *testing.T) {
 	f := &fake{t: t, ctype: "application/json", reply: `{"id":"msg","type":"message","content":[]}`}
-	up := setup(t, provider.Anthropic, f)
 	var query string
-	up.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := setup(t, provider.Anthropic, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.RawQuery
 		f.ServeHTTP(w, r)
-	})
+	}))
 	claude := http.Header{
 		"User-Agent":        {"claude-cli/2.1.0 (external, cli)"},
 		"X-App":             {"cli"},
@@ -74,6 +73,7 @@ func TestClaudeCodeHeadersReachAnthropicRelay(t *testing.T) {
 	p.Key = ""
 	provider.Save(*p)
 	send("/v1/messages", claude)
+	probeFixtureRoot(t, up)
 	if a, k := f.head.Get("Authorization"), f.head.Get("X-Api-Key"); a != "" || k != "" {
 		t.Errorf("magpie's key leaked: %q %q", a, k)
 	}

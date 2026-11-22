@@ -136,3 +136,79 @@ func TestMiddlewareDTOAuthorityAndBounds(test *testing.T) {
 		test.Fatal("middleware required methods do not match declared hooks:", methods)
 	}
 }
+
+func TestMiddlewareTypedCallMatchesWire(test *testing.T) {
+	descriptor := *middlewareManifest().Middleware
+	event := MiddlewareCall{Body: json.RawMessage(` { "text": "<hello>" } `), State: json.RawMessage(`{"seen":true}`),
+		Context: MiddlewareContext{GatewayContext: GatewayContext{Origin: "local", Protocol: "chat"}, Event: "delta"}}
+	account := MiddlewareCall{Context: event.Context}
+	account.Context.Account = &MiddlewareAccount{Ref: strings.Repeat("a", 32), Provider: "test", Kind: "example"}
+	provider := event
+	provider.Context.Provider = &MiddlewareProvider{ID: "test", Name: "Example", Model: "test/model"}
+
+	for _, item := range []struct {
+		name   string
+		method string
+		scope  Scope
+		call   MiddlewareCall
+		mutate func(*MiddlewareCall)
+		code   string
+	}{
+		{name: "request", method: MethodMiddlewareRequest, call: event},
+		{name: "account", method: MethodMiddlewareAccount, call: account},
+		{name: "provider", method: MethodMiddlewareProvider, call: provider},
+		{name: "event", method: MethodMiddlewareEvent, call: event},
+		{name: "response", method: MethodMiddlewareResponse, call: event},
+		{name: "undeclared", method: "middleware.unknown", call: event, code: "invalid_params"},
+		{name: "scope", method: MethodMiddlewareEvent, scope: Scope{Session: "borrowed"}, call: event, code: "permission_denied"},
+		{name: "origin", method: MethodMiddlewareEvent, call: event, code: "permission_denied",
+			mutate: func(call *MiddlewareCall) { call.Context.Origin = "remote" }},
+		{name: "missing provider", method: MethodMiddlewareProvider, call: event, code: "invalid_params"},
+		{name: "account body", method: MethodMiddlewareAccount, call: account, code: "invalid_params",
+			mutate: func(call *MiddlewareCall) { call.Body = json.RawMessage(`{}`) }},
+		{name: "body shape", method: MethodMiddlewareEvent, call: event, code: "invalid_params",
+			mutate: func(call *MiddlewareCall) { call.Body = json.RawMessage(`[]`) }},
+		{name: "escaped body", method: MethodMiddlewareEvent, call: event, code: "invalid_params",
+			mutate: func(call *MiddlewareCall) {
+				call.Body = json.RawMessage(`{"text":"` + strings.Repeat("<", MaxMiddlewareBodyBytes/5) + `"}`)
+			}},
+		{name: "escaped state", method: MethodMiddlewareEvent, call: event, code: "invalid_params",
+			mutate: func(call *MiddlewareCall) {
+				call.State = json.RawMessage(`"` + strings.Repeat(">", MaxGatewayStateBytes/5) + `"`)
+			}},
+		{name: "normalized text", method: MethodMiddlewareEvent, call: event,
+			mutate: func(call *MiddlewareCall) { call.Context.Agent = "local\xff" }},
+		{name: "normalized query bound", method: MethodMiddlewareEvent, call: event, code: "invalid_params",
+			mutate: func(call *MiddlewareCall) { call.Context.Query = strings.Repeat("\xff", 6<<10) }},
+	} {
+		test.Run(item.name, func(test *testing.T) {
+			call := item.call
+			if item.mutate != nil {
+				item.mutate(&call)
+			}
+			wire, err := json.Marshal(call)
+			if err != nil {
+				test.Fatal(err)
+			}
+			_, wireErr := DecodeMiddlewareCall(descriptor, item.method, item.scope, wire)
+			typedErr := ValidateMiddlewareCall(descriptor, item.method, item.scope, call)
+			for name, err := range map[string]error{"typed": typedErr, "wire": wireErr} {
+				if item.code == "" {
+					if err != nil {
+						test.Errorf("%s rejected valid call: %v", name, err)
+					}
+				} else if found, ok := err.(*Error); !ok || found.Code != item.code {
+					test.Errorf("%s error = %v, want %s", name, err, item.code)
+				}
+			}
+		})
+	}
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"body":{},"context":{"origin":"local"},"ignored":true}`),
+		json.RawMessage(`{"body":{},"context":{"origin":"local"}} {}`),
+	} {
+		if _, err := DecodeMiddlewareCall(descriptor, MethodMiddlewareEvent, Scope{}, raw); err == nil {
+			test.Fatal("wire decoder accepted an invalid envelope", string(raw))
+		}
+	}
+}

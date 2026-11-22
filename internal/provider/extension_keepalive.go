@@ -25,6 +25,7 @@ type extensionSignIn struct {
 	entry  extensionhost.Installed
 	config string
 	scope  sdk.Scope
+	public extensionPublicIdentity
 	at     time.Time
 }
 
@@ -36,7 +37,7 @@ type extensionSignInDue struct {
 
 func (selected extensionSignIn) key() extensionSignInDue {
 	return extensionSignInDue{
-		namespace: selected.host.Namespace(), revision: selected.entry.Revision, config: selected.config,
+		namespace: selected.host.Namespace(), revision: selected.entry.Revision + "\x00" + selected.public.revision, config: selected.config,
 		scope: selected.scope, at: selected.at.UnixMilli(),
 	}
 }
@@ -46,57 +47,67 @@ type extensionKeepAlivePolicy struct {
 	logins    []savedLogin
 }
 
-func extensionKeepAlivePolicyNow() (extensionKeepAlivePolicy, error) {
-	set, err := settings.LoadChecked()
+func requireExtensionAccountDiscovery(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	off, err := settings.AccountDiscoveryOffNow()
+	if err != nil {
+		return err
+	}
+	if off {
+		return errAccountDiscoveryOff
+	}
+	return ctx.Err()
+}
+
+func extensionKeepAlivePolicyNow(ctx context.Context) (extensionKeepAlivePolicy, error) {
+	if err := requireExtensionAccountDiscovery(ctx); err != nil {
+		return extensionKeepAlivePolicy{}, err
+	}
+	providers, err := filememo.ReadCurrent("providers", Path(), parseProviders)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return extensionKeepAlivePolicy{}, err
+	}
+	logins, err := readCurrentLogins()
 	if err != nil {
 		return extensionKeepAlivePolicy{}, err
 	}
-	if settings.AccountDiscoveryOffIn(set) {
-		return extensionKeepAlivePolicy{}, errAccountDiscoveryOff
-	}
-	providers, err := filememo.ReadNow("providers", Path(), parseProviders)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return extensionKeepAlivePolicy{}, err
-	}
-	logins, err := filememo.ReadNow("logins", loginsPath(), parseLogins)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return extensionKeepAlivePolicy{}, err
-	}
-	return extensionKeepAlivePolicy{providers: providers, logins: logins}, nil
+	return extensionKeepAlivePolicy{providers: providers, logins: logins}, ctx.Err()
 }
 
-func (policy extensionKeepAlivePolicy) allows(provider, account string) bool {
+func (policy extensionKeepAlivePolicy) allows(identity extensionPublicIdentity) bool {
+	if !identity.visible {
+		return false
+	}
 	for _, stored := range policy.providers.Providers {
-		if stored.ID == provider && (stored.Off || stored.Hidden) {
+		if stored.ID == identity.provider && (stored.Off || stored.Hidden) {
 			return false
 		}
 	}
 	for _, login := range policy.logins {
-		if login.Agent == provider && login.User == account {
-			return login.On && !login.Paused && login.Hidden == "" &&
-				(login.Lapsed == "" || validExtensionAuthMark(login.Refused))
+		if identity.hasPolicy(login) {
+			return extensionPolicyOn(login) &&
+				(login.Lapsed == "" || identity.revision != "" || validExtensionAuthMark(login.Refused))
 		}
 	}
 	return false
 }
 
 func (policy extensionKeepAlivePolicy) allowsSelection(selected extensionSignIn, generation uint64) bool {
-	provider := ExtensionProviderID(selected.scope.Plugin, selected.scope.Provider)
-	if !policy.allows(provider, selected.scope.Account) {
-		return false
+	identity := selected.public
+	if identity.provider == "" {
+		identity = heldSubscriptionOwners().identity(selected.scope)
 	}
-	revision := selected.entry.Revision
-	contract := selected.entry.Manifest.Contract
-	if contract.Version.Minor >= 9 || contract.Version.Minor >= 1 && contract.Has(sdk.ModelDiscovery) {
-		revision += "\x00" + selected.config
-	} else {
-		revision += "\x00"
+	if !policy.allows(identity) {
+		return false
 	}
 	scope := selected.scope
 	scope.Generation = generation
-	binding := &extensionAccount{host: selected.host, scope: scope, modelKey: revision}
+	binding := &extensionAccount{host: selected.host, scope: scope, public: identity,
+		modelKey: selected.entry.Revision + "\x00" + selected.config, enableGeneration: selected.entry.EnableGeneration}
 	for _, login := range policy.logins {
-		if login.Agent == provider && login.User == scope.Account {
+		if identity.hasPolicy(login) {
 			return extensionAuthLapse(binding, login) == ""
 		}
 	}
@@ -110,8 +121,8 @@ var extensionSignInsKept = func(ctx context.Context, host extensionProviderHost)
 	if err := netproxy.Held(ctx); err != nil {
 		return nil, err
 	}
-	set, err := settings.LoadChecked()
-	if err != nil || settings.AccountDiscoveryOffIn(set) {
+	off, err := settings.AccountDiscoveryOffNow()
+	if err != nil || off {
 		return nil, err
 	}
 	entries, err := activeProviderModules(ctx, host)
@@ -128,46 +139,57 @@ var extensionSignInsKept = func(ctx context.Context, host extensionProviderHost)
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	policy, err := extensionKeepAlivePolicyNow()
+	policy, err := extensionKeepAlivePolicyNow(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var out []extensionSignIn
+	owners := currentSubscriptionOwners(ctx)
+	if owners.err != nil {
+		return nil, owners.err
+	}
 	for _, entry := range entries {
 		config, err := host.ModuleConfig(ctx, entry.Manifest.ID)
 		if err != nil {
 			return nil, err
 		}
 		entry.Manifest = entry.Manifest.Clone()
-		for _, descriptor := range entry.Manifest.Providers {
+		descriptors := slices.DeleteFunc(slices.Clone(entry.Manifest.Providers), func(descriptor sdk.ProviderDescriptor) bool {
+			if descriptor.KeepAlive.Lead() == 0 {
+				return true
+			}
+			scope := sdk.Scope{Plugin: entry.Manifest.ID, Provider: descriptor.ID}
+			identity := owners.identity(scope)
+			return !slices.ContainsFunc(policy.logins, func(login savedLogin) bool {
+				if login.Agent != identity.policyAgent {
+					return false
+				}
+				candidate := identity
+				candidate.user = login.User
+				return policy.allows(candidate)
+			})
+		})
+		accounts, err := extensionAccountMetadata(ctx, host, entry.Manifest.ID, descriptors, false)
+		if err != nil {
+			return nil, err
+		}
+		for _, descriptor := range descriptors {
 			lead := descriptor.KeepAlive.Lead()
-			if lead == 0 {
-				continue
-			}
-			provider := ExtensionProviderID(entry.Manifest.ID, descriptor.ID)
-			if !slices.ContainsFunc(policy.logins, func(login savedLogin) bool {
-				return login.Agent == provider && policy.allows(provider, login.User)
-			}) {
-				continue
-			}
-			accounts, err := host.Store().AccountsContext(ctx, entry.Manifest.ID, descriptor.ID)
-			if err != nil {
-				return nil, err
-			}
+			scope := sdk.Scope{Plugin: entry.Manifest.ID, Provider: descriptor.ID}
 			identities := map[string]bool{}
-			for _, account := range accounts {
+			for _, account := range accounts[descriptor.ID] {
 				identity := strings.ToLower(account.ID)
 				if identities[identity] {
 					return nil, errors.New("extension keep-alive account identities are ambiguous")
 				}
 				identities[identity] = true
-				if account.ExpiresAt == 0 || !policy.allows(provider, account.ID) {
+				if account.ExpiresAt == 0 {
 					continue
 				}
+				scope.Account, scope.Generation = account.ID, account.Generation
 				selected := extensionSignIn{
 					host: host, entry: entry, config: config.Version,
-					scope: sdk.Scope{Plugin: entry.Manifest.ID, Provider: descriptor.ID,
-						Account: account.ID, Generation: account.Generation},
+					scope: scope, public: owners.identity(scope),
 					at: time.UnixMilli(account.ExpiresAt).Add(-lead),
 				}
 				if policy.allowsSelection(selected, account.Generation) {
@@ -186,7 +208,10 @@ func (selected extensionSignIn) current(ctx context.Context, generation uint64) 
 	if err := netproxy.Held(ctx); err != nil {
 		return err
 	}
-	policy, err := extensionKeepAlivePolicyNow()
+	if err := CheckExtensionSubscription(ctx, selected.scope.Plugin, selected.scope.Provider, selected.public.revision); err != nil {
+		return err
+	}
+	policy, err := extensionKeepAlivePolicyNow(ctx)
 	if err != nil {
 		return err
 	}
@@ -197,7 +222,7 @@ func (selected extensionSignIn) current(ctx context.Context, generation uint64) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err != nil || entry.Revision != selected.entry.Revision {
+	if err != nil || entry.Revision != selected.entry.Revision || entry.EnableGeneration != selected.entry.EnableGeneration {
 		return extensionhost.ErrActionChanged
 	}
 	config, err := selected.host.ModuleConfig(ctx, selected.scope.Plugin)
@@ -227,7 +252,7 @@ var keepExtensionSignedIn = func(ctx context.Context, selected extensionSignIn) 
 	if !ok {
 		return errors.New("extension keep-alive requires the selected runtime lease")
 	}
-	network, err := extensionNetworkContext(ctx, selected.scope)
+	network, err := extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, selected.public.revision), selected.scope)
 	if err != nil {
 		return err
 	}

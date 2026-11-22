@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -50,6 +52,39 @@ func codexServe(w http.ResponseWriter, body string) {
 	req.Header.Set("Authorization", "Bearer chatgpt-token")
 	req.Header.Set("chatgpt-account-id", "acct-1")
 	New().Handler().ServeHTTP(w, req)
+}
+
+func TestCodexRelayBudgetRefusalRecordsNoUpstreamBytes(t *testing.T) {
+	setup(t, provider.Chat, &fake{t: t})
+	var requests atomic.Int64
+	chatgpt(t, func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected dispatch", http.StatusBadGateway)
+	})
+	zero := 0
+	ctx := requestpolicy.WithConfig(t.Context(), &requestpolicy.Config{
+		Defaults: requestpolicy.Options{MaxRetries: &zero, MaxTotalRetries: &zero},
+	})
+	policy, err := requestPolicy(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := requestpolicy.FromContext(ctx).Dispatch(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, CodexPath+"/responses",
+		strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"hi"}`))
+	request.Header.Set("Authorization", "Bearer chatgpt-token")
+	server := New()
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusTooManyRequests || requests.Load() != 0 {
+		t.Fatalf("relay returned %d with %d upstream requests: %s", response.Code, requests.Load(), response.Body)
+	}
+	rows := usage.Load(time.Time{})
+	if len(rows) != 0 || server.Traffic().Up != 0 {
+		t.Fatalf("rejected relay recorded upstream traffic: rows=%+v traffic=%+v", rows, server.Traffic())
+	}
 }
 
 // One of Codex's own models goes on to the ChatGPT backend as it came, the

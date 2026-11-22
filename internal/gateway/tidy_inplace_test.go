@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -77,5 +78,18 @@ func TestTidiesPassAStreamSplitAnywhere(t *testing.T) {
 		if !bytes.Equal(got, []byte(stream)) {
 			t.Fatalf("written %d bytes at a time:\n%s\nwant\n%s", step, got, stream)
 		}
+	}
+}
+
+func TestRelayedCommentEventsDoNotAllocate(t *testing.T) {
+	chunk := []byte(strings.Repeat(": keepalive\r\n\r\n", 128))
+	ids, phases := &idTidy{}, &phaseTidy{sse: true}
+	allocs := testing.AllocsPerRun(20, func() {
+		if got := phases.write(ids.write(chunk)); !bytes.Equal(got, chunk) {
+			t.Fatalf("comment events changed: %q", got)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("comment events allocated %.0f times", allocs)
 	}
 }

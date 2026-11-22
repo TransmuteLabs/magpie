@@ -94,6 +94,18 @@ Cancellation during catalog discovery preserves the last published view.
 into the persistent native path cache. Failed reads under unchanged authority
 retain detached last-good metadata as `source_status: stale`; revoked authority
 hides it. Source preparation errors are exposed at `/api/sessions/sources`.
+Final preparation checks shared authority once per grant, then reads the
+current enabled catalog. JSONL and rooted storage descriptors both count
+toward the single-source rule for each agent. If a competing descriptor
+became enabled during a read, the prepared view is rejected. Refresh and
+held session reads apply the same ownership rule. File and attachment
+checks remain specific to the selected session.
+Selections, worker leases and conversion receipts also bind the durable
+enablement generation. Turning a module off and back on from another
+process invalidates held sessions, displayed agent resume tokens and
+in-flight or reusable conversion results. A rooted storage window also
+needs a new inspection. A fresh selection can use the existing binding
+or storage consent when the package and configuration still match.
 Persisted grant checks also run while another decoder is preparing. After
 locked listing/management/statistics reads, publication rechecks grants,
 consent, epoch and the immutable view outside the cache mutex. A changed view
@@ -732,25 +744,35 @@ Format-aware removal/restoration remains the module's responsibility.
 
 ## Manual wiring and ownership recovery
 
-The adapter regards an agent as wired only when inspection reports a
-connection and its host stash ownership record exists. A manually configured
-gateway connection alone does not grant background sync or disconnect
-ownership. With no record, sync returns without a plan and disconnect returns
-an empty plan.
+For configuration-only descriptors, the ordinary controller reports a
+connection when the module's inspection reports one and the host owns the
+binding. A manual connection does not authorize background sync or
+disconnect. Without an owner, sync returns without a plan and disconnect
+returns an empty plan.
 
-The ownership record is the stash entry
-`sdk.agent.<plugin>:<agent>`, containing the first adoption snapshots.
-SDK IDs cannot contain `:`, so dotted module and agent IDs remain distinct
-components. This unreleased SDK does not migrate the old dotted keys.
-After successful connect/set/sync file application the adapter saves that
-record if absent and clears the disconnected mark. After successful
-disconnect application it removes ownership and records the user's
-disconnected choice. Recreating an `Agent` object reads the same stash state.
+These descriptors use the same durable `sdk-agent-bindings.json` ownership
+ledger as launch and profile descriptors. They keep the existing file
+contract with `settings.files` and `options.previous`, including SDK 1.0
+modules. The host records pending ownership before applying files and keeps
+the first adoption snapshots through connect, set and sync. A successful
+disconnect records the user's disconnected choice. If finalization fails
+after applying files, the error identifies the checked action backup.
+Rediscovery retains the recovery row for an interrupted or disabled owner.
 
-The stash update is after the Actions file transaction. A stash write failure
-therefore reports that files were applied and names the backup location; it
-does not roll the files back. A crash in this interval has no automatic
-ownership reconciliation in this adapter. Recovery backups remain available.
+Explicit disconnect can restore an interrupted adoption from known
+snapshots. If a subsequent interrupted action had rebased user edits, the
+original enabled module can prepare a format-aware disconnect from
+recognized file snapshots. If that disconnect was already planned and
+interrupted during publication, recovery can complete its saved file
+changes without invoking the module. Recovery checks the ledger revision and
+leaves unknown edits untouched.
+
+Existing `sdk.agent.<plugin>:<agent>` stash entries supply their original
+snapshots until the next checked transition records ownership in the ledger.
+The ledger then takes precedence for the same module, descriptor and home.
+SDK IDs cannot contain `:`, so dotted module and agent IDs remain distinct.
+An installed launch/profile replacement must wait for that configuration-only
+owner to disconnect.
 
 ## Converter routing, source documents and native resume
 

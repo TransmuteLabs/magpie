@@ -3,8 +3,11 @@ package sessions
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math"
+	"os"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
 )
@@ -15,17 +18,38 @@ type historyClaims struct {
 	owners   map[string]bool
 }
 
-func readHistoryClaims() (historyClaims, error) {
-	bindings, bindingErr := readSourceBindings()
-	consents, consentErr := readStorageConsents()
-	claims := historyClaims{bindings: bindings, consents: consents, owners: map[string]bool{}}
-	for _, binding := range bindings {
-		claims.owners[binding.Agent] = true
+func withHistoryClaimsRoot[T any](ctx context.Context, read func(context.Context, *os.Root) (T, error)) (T, error) {
+	var zero T
+	if err := ctx.Err(); err != nil {
+		return zero, err
 	}
-	for _, consent := range consents {
-		claims.owners[consent.Agent] = true
+	root, err := os.OpenRoot(appdir.Config())
+	if errors.Is(err, fs.ErrNotExist) {
+		return zero, nil
 	}
-	return claims, errors.Join(bindingErr, consentErr)
+	if err != nil {
+		return zero, err
+	}
+	defer root.Close()
+	return read(ctx, root)
+}
+
+func readHistoryClaims(ctx context.Context) (historyClaims, error) {
+	return withHistoryClaimsRoot(ctx, func(ctx context.Context, root *os.Root) (historyClaims, error) {
+		bindings, bindingErr := readSourceBindingsAt(ctx, root)
+		consents, consentErr := readStorageConsentsAt(ctx, root)
+		claims := historyClaims{bindings: bindings, consents: consents}
+		if len(bindings)+len(consents) != 0 {
+			claims.owners = make(map[string]bool, len(bindings)+len(consents))
+			for _, binding := range bindings {
+				claims.owners[binding.Agent] = true
+			}
+			for _, consent := range consents {
+				claims.owners[consent.Agent] = true
+			}
+		}
+		return claims, errors.Join(bindingErr, consentErr)
+	})
 }
 
 type historyOwnerMode uint8
@@ -37,9 +61,10 @@ const (
 )
 
 type sessionHistoryOwner struct {
-	mode    historyOwnerMode
-	session Session
-	reader  historyPartReader
+	mode           historyOwnerMode
+	session        Session
+	reader         historyPartReader
+	readGeneration string
 }
 
 type historyPartReader func(context.Context, Session, historyRead, func(bool, Part) bool) error
@@ -64,11 +89,18 @@ func (read historyRead) call(session Session) Call {
 }
 
 func selectSessionHistoryOwner(ctx context.Context, session Session) (sessionHistoryOwner, error) {
-	owner := sessionHistoryOwner{mode: historyNative, session: session}
+	if err := ctx.Err(); err != nil {
+		return sessionHistoryOwner{}, err
+	}
+	generation, err := historyReadGeneration(session.Agent)
+	if err != nil {
+		return sessionHistoryOwner{}, err
+	}
+	owner := sessionHistoryOwner{mode: historyNative, session: session, readGeneration: generation}
 	if session.source != nil {
 		owner.mode = historyDelegated
 	}
-	if err := owner.check(ctx); err != nil {
+	if err := owner.checkSelection(ctx); err != nil {
 		return sessionHistoryOwner{}, err
 	}
 	switch {
@@ -110,30 +142,41 @@ func (owner sessionHistoryOwner) check(ctx context.Context) error {
 	if owner.mode == historyUnavailable {
 		return extension.ErrActionChanged
 	}
+	generation, err := historyReadGeneration(owner.session.Agent)
+	if err != nil {
+		return err
+	}
+	if generation != owner.readGeneration {
+		return ErrNotRead
+	}
+	return owner.checkSelection(ctx)
+}
+
+func (owner sessionHistoryOwner) checkSelection(ctx context.Context) error {
 	if owner.mode == historyDelegated {
-		if err := checkHistoryRead(owner.session.Agent); err != nil {
-			return err
-		}
 		if owner.session.source == nil || owner.session.source.grant.descriptor.Agent != owner.session.Agent {
 			return extension.ErrActionChanged
 		}
 		return checkSelectedSource(ctx, owner.session.source)
 	}
-	return checkNativeHistoryOwner(ctx, owner.session.Agent)
+	if err := checkNativeHistoryClaim(ctx, owner.session.Agent); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func checkNativeHistoryOwner(ctx context.Context, agent string) error {
 	if err := checkHistoryRead(agent); err != nil {
 		return err
 	}
-	if err := checkNativeHistoryClaim(agent); err != nil {
+	if err := checkNativeHistoryClaim(ctx, agent); err != nil {
 		return err
 	}
 	return ctx.Err()
 }
 
-func checkNativeHistoryClaim(agent string) error {
-	claims, err := readHistoryClaims()
+func checkNativeHistoryClaim(ctx context.Context, agent string) error {
+	claims, err := readHistoryClaims(ctx)
 	if err != nil {
 		return errors.Join(extension.ErrActionChanged, err)
 	}
@@ -157,7 +200,7 @@ func lockNativeHistoryMutation(agent string) (func(), error) {
 		unlockStorage()
 		unlockBinding()
 	}
-	if err := checkNativeHistoryClaim(agent); err != nil {
+	if err := checkNativeHistoryClaim(context.Background(), agent); err != nil {
 		unlock()
 		return nil, err
 	}

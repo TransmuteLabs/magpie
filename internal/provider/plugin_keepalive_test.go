@@ -1,13 +1,16 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/testenv"
 )
@@ -19,7 +22,7 @@ func fakeSignIns(t *testing.T, ins *[]pluginSignIn, answer func(pluginSignIn) (p
 	asked := map[string]int{}
 	wasIns, wasKeep := pluginSignInsKept, keepPluginSignedIn
 	t.Cleanup(func() { pluginSignInsKept, keepPluginSignedIn = wasIns, wasKeep })
-	pluginSignInsKept = func() []pluginSignIn { return *ins }
+	pluginSignInsKept = func(context.Context) []pluginSignIn { return *ins }
 	keepPluginSignedIn = func(_ context.Context, s pluginSignIn) (plugin.KeptSignedIn, error) {
 		asked[s.Key]++
 		return answer(s)
@@ -195,6 +198,114 @@ func TestKeepAliveBackoff(t *testing.T) {
 	}
 }
 
+func TestKeepPluginsSignedInCancelsDiscovery(t *testing.T) {
+	for _, boundary := range []string{"owner", "logins"} {
+		t.Run(boundary, func(t *testing.T) {
+			claudeHome(t)
+			was := plugin.ListInBackground(false)
+			t.Cleanup(func() { plugin.ListInBackground(was) })
+			t.Cleanup(plugin.Settle)
+			wasFirst := keepAliveLookFirst
+			keepAliveLookFirst = 0
+			t.Cleanup(func() { keepAliveLookFirst = wasFirst })
+
+			const spec = "renewal-fixture"
+			writeFile(t, plugin.ListPath(), plugin.List{Plugins: []plugin.Entry{{Spec: spec}}})
+			plugin.UseCached([]plugin.Provider{{Spec: spec, ID: "renewco", Renews: true}})
+			writeFile(t, plugin.AuthPath(), map[string]any{"renewco": map[string]any{
+				"type": "oauth", "expires": time.Now().Add(time.Hour).UnixMilli(), "accountId": "new@renew",
+			}})
+			saveLogins(t, savedLogin{Agent: "plugin:renewco", Home: "renewco", User: "old@renew", On: true})
+			before, err := os.ReadFile(loginsPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			namespace := filepath.Join(filepath.Dir(plugin.AuthPath()), "extensions")
+			root, lock := namespace, filepath.Join("private", ".lock")
+			reached := pluginsBuilt.Load
+			if boundary == "logins" {
+				root, lock = filepath.Dir(loginsMu.Path()), filepath.Base(loginsMu.Path())
+				reached = pluginLoginLocks.Load
+			}
+			initial := reached()
+			err = whileExtensionAccountLockHeld(t, root, lock, func(ctx context.Context) error {
+				KeepPluginsSignedIn(ctx)
+				return ctx.Err()
+			})
+			if !errors.Is(err, context.DeadlineExceeded) || reached() <= initial {
+				t.Fatalf("canceled discovery did not reach %s: %v", boundary, err)
+			}
+			if after, err := os.ReadFile(loginsPath()); err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("canceled discovery changed logins: %v", err)
+			}
+			if plugin.Running() {
+				t.Fatal("discovery started the plugin host")
+			}
+		})
+	}
+}
+
+func TestPluginRenewalCommitsSignInWithoutListing(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Setenv("RENEW_LOG", filepath.Join(t.TempDir(), "renewals"))
+	t.Setenv("RENEW_CAPTURE_AUTH", "1")
+	was := plugin.ListInBackground(false)
+	t.Cleanup(func() { plugin.ListInBackground(was) })
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	spec, err := filepath.Abs("../plugin/testdata/renew/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Add(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	key, err := plugin.Import(ctx, "renewco", map[string]any{
+		"type": "oauth", "refresh": "r-ok", "access": "old",
+		"expires": time.Now().Add(time.Minute).UnixMilli(), "accountId": "me@renew",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saveLogins(t, savedLogin{
+		Agent: "plugin:renewco", Home: key, User: "me@renew", On: true, Lapsed: "sign in again", Plan: "Existing plan",
+	})
+	plugin.UseCached(nil)
+	listing := filepath.Join(filepath.Dir(plugin.AuthPath()), "plugin-providers.json")
+	if err := os.Remove(listing); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+
+	unlock, held := filelock.Lock(loginsMu.Path(), time.Second)
+	if !held {
+		t.Fatal("could not hold the login lock")
+	}
+	defer func() { unlock() }()
+	renewal, err := plugin.KeepSignedIn(ctx, "renewco", key)
+	cancel()
+	if err != nil || !renewal.Renewed || plugin.Auths("renewco")[key]["access"] != "a-1" {
+		t.Fatalf("renewal did not save credentials: %v (%+v)", err, renewal)
+	}
+	unlock()
+	unlock = func() {}
+	plugin.Told()
+
+	login := loginOf(t, readLogins(), "plugin:renewco", "me@renew")
+	if login.Lapsed != "" || login.Plan != "Existing plan" || login.PluginObservations.SignIn.Revision == 0 {
+		t.Fatalf("renewal did not complete the saved sign-in: %+v", login)
+	}
+	if _, known := plugin.Listed(); known {
+		t.Fatal("a saved renewal fetched a new provider listing")
+	}
+	if plugin.Auths("renewco")[key]["access"] != "a-1" {
+		t.Fatal("a model listing overwrote the saved renewal")
+	}
+}
+
 // Only the sign-ins switched on and not marked, of a plugin provider not
 // switched off, are kept alive: an account switched off, one the vendor
 // turned away and every account of a provider switched off are left as
@@ -227,7 +338,7 @@ func TestKeptSignInsAreTheOnesSwitchedOn(t *testing.T) {
 	kept := func() map[string]bool {
 		t.Helper()
 		got := map[string]bool{}
-		for _, s := range pluginSignInsKept() {
+		for _, s := range pluginSignInsKept(ctx) {
 			if s.ID != "renewco" || s.At.UnixMilli() != soon-5*60*1000 {
 				t.Fatalf("kept %+v", s)
 			}
@@ -251,7 +362,7 @@ func TestKeptSignInsAreTheOnesSwitchedOn(t *testing.T) {
 	if err := setPluginLoginOn(pp, users[keys["off@renew"]], false); err != nil {
 		t.Fatal(err)
 	}
-	notePluginLapse(pp, keys["lapsed@renew"], http.StatusUnauthorized)
+	notePluginLapse(ctx, pp, fixtureFetchAuth(t, ctx, keys["lapsed@renew"]), http.StatusUnauthorized, false)
 	if got := kept(); len(got) != 1 || !got[keys["on@renew"]] {
 		t.Fatalf("kept %v, want on@renew alone", got)
 	}

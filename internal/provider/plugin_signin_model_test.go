@@ -39,6 +39,7 @@ func TestPluginModel401KeepsSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	pp := mustPlugin(t)
+	auth := fixtureFetchAuth(t, ctx, key)
 	lapsed := func() bool {
 		for _, l := range pluginLogins(mustPlugin(t)) {
 			return l.Lapsed != ""
@@ -49,7 +50,7 @@ func TestPluginModel401KeepsSignIn(t *testing.T) {
 	answer := func(status int, body string) {
 		t.Helper()
 		resp := &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
-		notePluginSignIn(pp, key, resp)
+		notePluginSignIn(ctx, pp, auth, resp)
 		got, err := io.ReadAll(resp.Body)
 		if err != nil || string(got) != body {
 			t.Fatalf("the body after the check: %q, %v; want %q", got, err, body)
@@ -97,4 +98,14 @@ func TestPluginModel401KeepsSignIn(t *testing.T) {
 			t.Fatalf("a 401 about the sign-in didn't mark it: %q", body)
 		}
 	}
+}
+
+func fixtureFetchAuth(t *testing.T, ctx context.Context, account string) plugin.FetchAuth {
+	t.Helper()
+	epochs, err := plugin.CurrentAuthEpochs(ctx)
+	epoch, found := epochs[account]
+	if err != nil || !found {
+		t.Fatalf("read fixture account authority: %v", err)
+	}
+	return plugin.FetchAuth{Account: account, Epoch: &epoch}
 }

@@ -277,7 +277,7 @@ func TestGatewayKeyKeptOutQuotaCards(t *testing.T) {
 	if !s.provider("relay") {
 		t.Fatal("the provider's quota is the key's")
 	}
-	if s.card("relay", "Bee") || !s.card("relay", "Sea") {
+	if s.card(t.Context(), "relay", "Bee") || !s.card(t.Context(), "relay", "Sea") {
 		t.Fatal("Bee is kept out, Sea is not")
 	}
 }

@@ -239,12 +239,12 @@ func renewClaude(ctx context.Context, r Renewal) Renewal {
 	ctx, run := keepingAlive(Asked(ctx), r.User)
 	ctx, seq := quotaReading(ctx)
 	forgetLoginReading(l)
-	face := accountCard("claude")
+	face := accountCard(ctx, "claude")
 	q := loginReading(ctx, l).read
 	q.Name, q.Icon, q.User = face.name, face.icon, l.User
 	ran, err := run.result()
 	if ran {
-		keepCardRead(q, seq)
+		keepCardRead(ctx, q, seq)
 	} else {
 		err = errKeepAliveNotRun
 	}

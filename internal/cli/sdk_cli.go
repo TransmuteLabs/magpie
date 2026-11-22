@@ -30,7 +30,13 @@ const sdkPluginUsage = `usage: magpie plugin sdk list [--json]
        magpie plugin sdk on|off|rm|reload <module>
        magpie plugin sdk call|invoke <module> <method> <json> [--scope <json>]
        magpie plugin sdk accounts <module> <provider> [--json]
+       magpie plugin sdk auth import <module> <provider> <saved-account-key>
+       magpie plugin sdk auth activate <module> <provider> <ticket>
+       magpie plugin sdk auth transfer <module> <provider> <ticket>...
+       magpie plugin sdk auth owners
+       magpie plugin sdk auth rollback <public-provider> <owner-revision>
        magpie plugin sdk auth start|finish <module> <provider> <json> [--scope <json>]
+       magpie plugin sdk auth register <module> <provider> <account> <generation> <owner-revision-or-empty>
        magpie plugin sdk auth refresh|logout <module> <provider> <account> [--scope <json>]
        magpie plugin sdk agent <module> <json> --root <absolute-directory> --path <relative-file>... [--scope <json>] [--apply --backup-dir <absolute-directory>]
        magpie plugin sdk session <module> <json> --root <absolute-directory> --path <relative-file>... [--scope <json>] [--apply --backup-dir <absolute-directory>]
@@ -42,13 +48,17 @@ agent/session preview the bounded host plan. Only --apply writes files, with an 
 GitHub sources use release ZIPs for this platform and require checksums.txt; @tag pins a release.
 Module sources select the highest stable module version; #module precedes an optional exact @module-vSEMVER pin.
 update follows saved unpinned sources; pinned and local packages stay unchanged.
+auth import prepares a saved community sign-in; auth activate publishes the selected ticket.
+auth transfer changes the owner of a subscription using tickets for all its saved accounts.
+auth owners shows ownership revisions; auth rollback restores the community owner.
+auth register retries local account setup for a committed sign-in without calling its provider.
 config reads SDK 1.1 module configuration without starting a worker.
 config writes replace the whole object and require the CAS version from a previous read.
 Removing a module retains its installed generations and private state.`
 
 type sdkCLIHost interface {
 	extensionhost.ActionRuntime
-	List() ([]extensionhost.Installed, error)
+	ListContext(context.Context) ([]extensionhost.Installed, error)
 	Install(context.Context, string) (extensionhost.Installed, error)
 	Update(context.Context, string) (extensionhost.Installed, error)
 	SetEnabled(context.Context, string, bool) error
@@ -61,10 +71,15 @@ type sdkCLIHost interface {
 }
 
 type sdkCLIAuth struct {
-	start   func(context.Context, sdk.Scope, sdk.AuthStartRequest) (sdk.AuthStartResult, error)
-	finish  func(context.Context, sdk.Scope, sdk.AuthFinishRequest) (sdk.AuthResult, error)
-	refresh func(context.Context, sdk.Scope) (sdk.AuthResult, error)
-	logout  func(context.Context, sdk.Scope) error
+	importSaved func(context.Context, string, string, string) (extensionhost.PreparedSignIn, error)
+	activate    func(context.Context, string, string, string) (sdk.AccountSummary, error)
+	transfer    func(context.Context, string, string, []string) (extensionhost.SubscriptionOwner, error)
+	rollback    func(context.Context, string, string) (extensionhost.SubscriptionOwner, error)
+	start       func(context.Context, sdk.Scope, sdk.AuthStartRequest) (sdk.AuthStartResult, error)
+	finish      func(context.Context, sdk.Scope, sdk.AuthFinishRequest) (provider.ExtensionAuthCompletion, error)
+	register    func(context.Context, sdk.Scope) error
+	refresh     func(context.Context, sdk.Scope) (sdk.AuthResult, error)
+	logout      func(context.Context, sdk.Scope) error
 }
 
 type sdkCLIOptions struct {
@@ -83,9 +98,22 @@ func sdkPluginCmd(ctx context.Context, args []string) error {
 		_, err := fmt.Fprintln(os.Stdout, sdkPluginUsage)
 		return err
 	}
-	return sdkPluginRun(ctx, args, extensionhost.Default(), os.Stdout, sdkCLIAuth{
+	host := extensionhost.Default()
+	return sdkPluginRun(ctx, args, host, os.Stdout, sdkCLIAuth{
+		importSaved: func(ctx context.Context, module, providerID, account string) (extensionhost.PreparedSignIn, error) {
+			return provider.ImportSavedPluginAuth(ctx, host, module, providerID, account)
+		},
+		activate: func(ctx context.Context, module, providerID, ticket string) (sdk.AccountSummary, error) {
+			return provider.ActivateSavedPluginAuth(ctx, host, module, providerID, ticket)
+		},
+		transfer: func(ctx context.Context, module, providerID string, tickets []string) (extensionhost.SubscriptionOwner, error) {
+			return provider.TransferSavedPluginSubscription(ctx, host, module, providerID, tickets)
+		},
+		rollback: func(ctx context.Context, id, revision string) (extensionhost.SubscriptionOwner, error) {
+			return provider.RollbackSavedPluginSubscription(ctx, host, id, revision)
+		},
 		start: provider.StartExtensionAuth, finish: provider.FinishExtensionAuth,
-		refresh: provider.RefreshExtensionAuth, logout: provider.LogoutExtensionAuth,
+		register: provider.RegisterExtensionLogin, refresh: provider.RefreshExtensionAuth, logout: provider.LogoutExtensionAuth,
 	})
 }
 
@@ -116,7 +144,7 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 		if len(options.args) != 0 {
 			return sdkCLIUsage("list takes no module argument")
 		}
-		entries, err := host.List()
+		entries, err := host.ListContext(ctx)
 		if err != nil {
 			return err
 		}
@@ -160,7 +188,7 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 			_, err = fmt.Fprintf(out, "installed %s %s (%s)\n", entry.Manifest.ID, entry.Manifest.Version, sdkCLIEnabled(entry))
 			return err
 		case "inspect":
-			entry, err := sdkCLIInstalled(host, id)
+			entry, err := sdkCLIInstalled(ctx, host, id)
 			if err != nil {
 				return err
 			}
@@ -183,7 +211,7 @@ func sdkPluginRun(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 	case "call", "invoke":
 		return sdkCLICall(ctx, rest, host, out)
 	case "accounts":
-		return sdkCLIAccounts(rest, host, out)
+		return sdkCLIAccounts(ctx, rest, host, out)
 	case "auth":
 		return sdkCLIAuthCommand(ctx, rest, host, auth, out)
 	case "agent", "session":
@@ -251,7 +279,7 @@ func sdkCLIUpdate(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	entries, err := host.List()
+	entries, err := host.ListContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -303,8 +331,8 @@ func sdkCLIUpdate(ctx context.Context, args []string, host sdkCLIHost, out io.Wr
 	return errors.Join(failures...)
 }
 
-func sdkCLIInstalled(host sdkCLIHost, id string) (extensionhost.Installed, error) {
-	entries, err := host.List()
+func sdkCLIInstalled(ctx context.Context, host sdkCLIHost, id string) (extensionhost.Installed, error) {
+	entries, err := host.ListContext(ctx)
 	if err != nil {
 		return extensionhost.Installed{}, err
 	}
@@ -328,13 +356,19 @@ func sdkCLICall(ctx context.Context, args []string, host sdkCLIHost, out io.Writ
 	if err := sdkCLIInput(input); err != nil {
 		return err
 	}
-	scope, err := sdkCLIScope(host, id, options.scope)
+	scope, err := sdkCLIScope(ctx, host, id, options.scope)
 	if err != nil {
 		return err
 	}
 	ctx, err = provider.ExtensionNetworkContext(ctx, scope)
 	if err != nil {
 		return err
+	}
+	if owner, _ := extensionhost.SubscriptionOwnerRevision(ctx); owner != "" {
+		switch method {
+		case sdk.MethodAuthStart, sdk.MethodAuthFinish, sdk.MethodAuthLogout:
+			return errors.New("use magpie plugin sdk auth for a transferred subscription")
+		}
 	}
 	// This command is a direct local management invocation, unlike a
 	// forwarded MCP request. The runtime still checks the executing lease.
@@ -359,7 +393,7 @@ func sdkCLICall(ctx context.Context, args []string, host sdkCLIHost, out io.Writ
 	}{"result", result})
 }
 
-func sdkCLIAccounts(args []string, host sdkCLIHost, out io.Writer) error {
+func sdkCLIAccounts(ctx context.Context, args []string, host sdkCLIHost, out io.Writer) error {
 	options, err := sdkCLIFlags(args, "--json")
 	if err != nil {
 		return err
@@ -367,7 +401,7 @@ func sdkCLIAccounts(args []string, host sdkCLIHost, out io.Writer) error {
 	if len(options.args) != 2 {
 		return sdkCLIUsage("accounts requires a module and provider")
 	}
-	entry, err := sdkCLIInstalled(host, options.args[0])
+	entry, err := sdkCLIInstalled(ctx, host, options.args[0])
 	if err != nil {
 		return err
 	}
@@ -376,7 +410,7 @@ func sdkCLIAccounts(args []string, host sdkCLIHost, out io.Writer) error {
 	}) {
 		return errors.New("SDK module does not declare that provider")
 	}
-	accounts, err := host.Store().Accounts(entry.Manifest.ID, options.args[1])
+	accounts, err := host.Store().AccountGenerationsContext(ctx, entry.Manifest.ID, options.args[1])
 	if err != nil {
 		return err
 	}
@@ -388,7 +422,7 @@ func sdkCLIAccounts(args []string, host sdkCLIHost, out io.Writer) error {
 	}
 	views := make([]accountView, len(accounts))
 	for index, account := range accounts {
-		views[index] = accountView{account.Plugin, account.Provider, account.ID, account.Generation}
+		views[index] = accountView{entry.Manifest.ID, options.args[1], account.ID, account.Generation}
 	}
 	if options.json {
 		return sdkCLIJSON(out, views)
@@ -405,7 +439,7 @@ func sdkCLIAccounts(args []string, host sdkCLIHost, out io.Writer) error {
 	return nil
 }
 
-func sdkCLIScope(host sdkCLIHost, id string, scope sdk.Scope) (sdk.Scope, error) {
+func sdkCLIScope(ctx context.Context, host sdkCLIHost, id string, scope sdk.Scope) (sdk.Scope, error) {
 	if scope.Plugin != "" && scope.Plugin != id {
 		return sdk.Scope{}, errors.New("SDK scope belongs to another module")
 	}
@@ -419,7 +453,7 @@ func sdkCLIScope(host sdkCLIHost, id string, scope sdk.Scope) (sdk.Scope, error)
 	if scope.Provider == "" {
 		return sdk.Scope{}, errors.New("SDK account scope requires a provider")
 	}
-	account, err := host.Store().GetAccount(id, scope.Provider, scope.Account)
+	account, err := host.Store().GetAccountContext(ctx, id, scope.Provider, scope.Account)
 	if err != nil {
 		return sdk.Scope{}, err
 	}
@@ -432,9 +466,75 @@ func sdkCLIScope(host sdkCLIHost, id string, scope sdk.Scope) (sdk.Scope, error)
 
 func sdkCLIAuthCommand(ctx context.Context, args []string, host sdkCLIHost, auth sdkCLIAuth, out io.Writer) error {
 	if len(args) == 0 {
-		return sdkCLIUsage("auth requires start, finish, refresh or logout")
+		return sdkCLIUsage("auth requires import, activate, transfer, owners, rollback, start, finish, register, refresh or logout")
 	}
 	operation := args[0]
+	switch operation {
+	case "owners":
+		if len(args) != 1 {
+			return sdkCLIUsage("auth owners takes no arguments")
+		}
+		owners, err := host.Store().SubscriptionOwners(ctx)
+		if err != nil {
+			return err
+		}
+		if owners == nil {
+			owners = []extensionhost.SubscriptionOwner{}
+		}
+		return sdkCLIJSON(out, owners)
+	case "transfer":
+		if len(args) < 4 {
+			return sdkCLIUsage("auth transfer requires a module, provider and tickets for all saved accounts")
+		}
+		owner, err := auth.transfer(ctx, args[1], args[2], args[3:])
+		return sdkCLISubscriptionReceipt(out, owner, err)
+	case "rollback":
+		if len(args) != 3 {
+			return sdkCLIUsage("auth rollback requires a public provider and owner revision")
+		}
+		owner, err := auth.rollback(ctx, args[1], args[2])
+		return sdkCLISubscriptionReceipt(out, owner, err)
+	case "register":
+		if len(args) != 6 {
+			return sdkCLIUsage("auth register requires a module, provider, account, generation and owner revision")
+		}
+		selection := sdk.AccountSelection{ID: args[3], ExpectedGeneration: args[4]}
+		generation, err := selection.Validate()
+		if err != nil {
+			return err
+		}
+		ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, args[5])
+		if err := auth.register(ctx, sdk.Scope{Plugin: args[1], Provider: args[2], Account: selection.ID, Generation: generation}); err != nil {
+			return err
+		}
+		return sdkCLIJSON(out, sdk.AccountSummary{ID: selection.ID, Generation: selection.ExpectedGeneration})
+	}
+	if operation == "import" {
+		if len(args) != 4 {
+			return sdkCLIUsage("auth import requires a module, provider and exact saved account key")
+		}
+		account, err := auth.importSaved(ctx, args[1], args[2], args[3])
+		if err != nil {
+			return err
+		}
+		return sdkCLIJSON(out, account)
+	}
+	if operation == "activate" {
+		if len(args) != 4 {
+			return sdkCLIUsage("auth activate requires a module, provider and preparation ticket")
+		}
+		account, err := auth.activate(ctx, args[1], args[2], args[3])
+		if err != nil {
+			if account.ID == "" {
+				return err
+			}
+			return sdkCLIJSON(out, struct {
+				sdk.AccountSummary
+				Warning string `json:"warning"`
+			}{account, "The account is active. Repeat activation with the same ticket to finish local setup."})
+		}
+		return sdkCLIJSON(out, account)
+	}
 	if operation != "start" && operation != "finish" && operation != "refresh" && operation != "logout" {
 		return sdkCLIUsage("unknown SDK authentication command")
 	}
@@ -456,7 +556,7 @@ func sdkCLIAuthCommand(ctx context.Context, args []string, host sdkCLIHost, auth
 		}
 		options.scope.Account = input
 	}
-	scope, err := sdkCLIScope(host, id, options.scope)
+	scope, err := sdkCLIScope(ctx, host, id, options.scope)
 	if err != nil {
 		return err
 	}
@@ -499,6 +599,16 @@ func sdkCLIAuthCommand(ctx context.Context, args []string, host sdkCLIHost, auth
 	return nil
 }
 
+func sdkCLISubscriptionReceipt(out io.Writer, owner extensionhost.SubscriptionOwner, err error) error {
+	if err == nil {
+		return sdkCLIJSON(out, owner)
+	}
+	if owner.Revision == "" {
+		return err
+	}
+	return errors.Join(err, sdkCLIJSON(out, owner))
+}
+
 func sdkCLIAction(ctx context.Context, command string, args []string, host sdkCLIHost, out io.Writer) error {
 	options, err := sdkCLIFlags(args, "--scope", "--root", "--path", "--apply", "--backup-dir")
 	if err != nil {
@@ -510,7 +620,7 @@ func sdkCLIAction(ctx context.Context, command string, args []string, host sdkCL
 	if options.apply && !filepath.IsAbs(options.backup) {
 		return sdkCLIUsage("--apply requires an absolute --backup-dir")
 	}
-	scope, err := sdkCLIScope(host, options.args[0], options.scope)
+	scope, err := sdkCLIScope(ctx, host, options.args[0], options.scope)
 	if err != nil {
 		return err
 	}

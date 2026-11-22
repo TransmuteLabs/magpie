@@ -281,7 +281,7 @@ func TestExtensionAgentControllerStaleConcurrentPlanAndShellRollback(t *testing.
 	if err := os.WriteFile(last.Path, []byte("# personal\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.recover(t.Context()); err != nil {
+	if err := controller.recover(t.Context(), 0); err != nil {
 		t.Fatal("failed transition lost its recoverable ownership record", err)
 	}
 	first, err := controller.prepare(t.Context(), "connect", "", "")
@@ -361,7 +361,7 @@ func TestExtensionAgentControllerOfflineDriftAndPendingRecovery(t *testing.T) {
 	if err := update.RestoreShellFunctions(record.Shells); err != nil {
 		t.Fatal(err)
 	}
-	if err := controller.recover(t.Context()); err != nil {
+	if err := controller.recover(t.Context(), record.Revision); err != nil {
 		t.Fatal("interrupted transition with already-restored shells could not recover", err)
 	}
 	raw, _ := os.ReadFile(path)
@@ -611,7 +611,7 @@ func TestExtensionAgentControllerRetainsPendingAfterPartialShellRollback(t *test
 				t.Fatal("partial shell failure did not roll back the config file")
 			}
 			if userEdit {
-				if err := controller.recover(t.Context()); err == nil {
+				if err := controller.recover(t.Context(), record.Revision); err == nil {
 					t.Fatal("recovery blindly overwrote a user-edited partially applied wrapper")
 				}
 				raw, _ := os.ReadFile(first.Path)
@@ -622,7 +622,7 @@ func TestExtensionAgentControllerRetainsPendingAfterPartialShellRollback(t *test
 					t.Fatal(err)
 				}
 			}
-			if err := controller.recover(t.Context()); err != nil {
+			if err := controller.recover(t.Context(), record.Revision); err != nil {
 				t.Fatal("known preimages could not be explicitly recovered", err)
 			}
 			record, err = controller.read(t.Context())
@@ -642,10 +642,25 @@ func TestExtensionAgentLaunchUpgradePreservesLegacyOwnerAndRequiresItsDisconnect
 	if err := os.WriteFile(path, []byte(`{"model":"own","note":"original personal"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old, _ := Find(legacy.ID)
-	if _, err := old.ConnectHow(); err != nil {
+	backupRoot := filepath.Join(filepath.Dir(extensionBindingPath()), "extensions/action-backups/fixture.agent/fixture-launch")
+	options, err := json.Marshal(extensionAgentOptions{Gateway: "http://127.0.0.1:3425", Key: "magpie-fixture"})
+	if err != nil {
 		t.Fatal(err)
 	}
+	plan, err := PlanExtension(t.Context(), host, "fixture.agent", sdk.Scope{Operation: "agent.connect"},
+		sdk.AgentPlanRequest{ID: legacy.ID, Action: "connect", Options: options},
+		extension.ActionPolicy{Root: home, Paths: legacy.ConfigFiles, BackupDir: backupRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plan.Execute(t.Context(), plan.Preview().Revision); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := json.Marshal(plan.Snapshots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stash(map[string]string{"sdk.agent.fixture.agent:" + legacy.ID: string(snapshots)})
 	var values map[string]string
 	raw, _ := os.ReadFile(path)
 	if err := json.Unmarshal(raw, &values); err != nil {
@@ -660,7 +675,6 @@ func TestExtensionAgentLaunchUpgradePreservesLegacyOwnerAndRequiresItsDisconnect
 	if err != nil {
 		t.Fatal(err)
 	}
-	backupRoot := filepath.Join(filepath.Dir(extensionBindingPath()), "extensions/action-backups/fixture.agent/fixture-launch")
 	backups := map[string][]byte{}
 	if err := filepath.WalkDir(backupRoot, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

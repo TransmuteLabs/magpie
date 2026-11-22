@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -38,8 +39,11 @@ type quotaScope struct {
 
 // scopeQuotas is the request's quota scope. It answers a held key that
 // may not be told quotas 403 (refuseHeld) and says so with ok false.
-func scopeQuotas(w http.ResponseWriter, r *http.Request) (*quotaScope, bool) {
-	who := access.Caller(r.Context())
+func scopeQuotas(ctx context.Context, w http.ResponseWriter, r *http.Request) (*quotaScope, bool) {
+	if quotaRequestDone(ctx, w, r) {
+		return nil, false
+	}
+	who := access.Caller(ctx)
 	if !heldKey(who) {
 		return nil, true
 	}
@@ -47,7 +51,22 @@ func scopeQuotas(w http.ResponseWriter, r *http.Request) (*quotaScope, bool) {
 		refuseHeld(w, r, heldQuotasOff)
 		return nil, false
 	}
-	return newQuotaScope(who, provider.Catalog()), true
+	entries := provider.ListedProviderEntries(ctx)
+	if quotaRequestDone(ctx, w, r) {
+		return nil, false
+	}
+	scope := newQuotaScope(who, entries)
+	return scope, !quotaRequestDone(ctx, w, r)
+}
+
+func quotaRequestDone(ctx context.Context, w http.ResponseWriter, r *http.Request) bool {
+	if err := ctx.Err(); err != nil {
+		if r.Context().Err() == nil {
+			writeError(w, provider.Chat, http.StatusGatewayTimeout, err.Error())
+		}
+		return true
+	}
+	return false
 }
 
 func newQuotaScope(who access.Identity, catalog []provider.Entry) *quotaScope {
@@ -75,11 +94,11 @@ func (s *quotaScope) provider(id string) bool {
 }
 
 // card says the key may be told the card of provider id's account user.
-func (s *quotaScope) card(id, user string) bool {
+func (s *quotaScope) card(ctx context.Context, id, user string) bool {
 	if s == nil {
-		return true
+		return ctx.Err() == nil
 	}
-	if !s.provider(id) {
+	if ctx.Err() != nil || !s.provider(id) {
 		return false
 	}
 	if len(s.who.Accounts) == 0 {
@@ -87,11 +106,14 @@ func (s *quotaScope) card(id, user string) bool {
 	}
 	refs, ok := s.refs[id]
 	if !ok {
-		p, err := provider.Find(id)
+		p, err := provider.FindContext(ctx, id)
 		if err != nil {
 			return false
 		}
-		refs = p.AccountIDs()
+		refs = p.AccountIDsContext(ctx)
+		if ctx.Err() != nil {
+			return false
+		}
 		s.refs[id] = refs
 	}
 	// a provider's only key has a card named by no one (cardKeys)
@@ -119,13 +141,13 @@ func (s *quotaScope) card(id, user string) bool {
 }
 
 // cards is cs as the key may be told them.
-func (s *quotaScope) cards(cs []provider.SubscriptionQuota) []provider.SubscriptionQuota {
+func (s *quotaScope) cards(ctx context.Context, cs []provider.SubscriptionQuota) []provider.SubscriptionQuota {
 	if s == nil {
 		return cs
 	}
 	out := []provider.SubscriptionQuota{}
 	for _, q := range cs {
-		if q.From == "" && s.card(q.Provider, q.User) {
+		if q.From == "" && s.card(ctx, q.Provider, q.User) {
 			out = append(out, q)
 		}
 	}
@@ -136,9 +158,15 @@ func (s *quotaScope) cards(cs []provider.SubscriptionQuota) []provider.Subscript
 // told none of the cards here is answered as held: the other magpie then
 // shows the key's own limit, not that nothing was read here, which a
 // refresh wouldn't change.
-func writeCards(w http.ResponseWriter, r *http.Request, s *quotaScope) {
-	all := provider.CachedCards(time.Now())
-	cs := s.cards(all)
+func writeCards(ctx context.Context, w http.ResponseWriter, r *http.Request, s *quotaScope) {
+	all := provider.CachedCardsContext(ctx, time.Now())
+	if quotaRequestDone(ctx, w, r) {
+		return
+	}
+	cs := s.cards(ctx, all)
+	if quotaRequestDone(ctx, w, r) {
+		return
+	}
 	if len(cs) == 0 && len(all) > 0 {
 		refuseHeld(w, r, heldRefused)
 		return
@@ -148,43 +176,31 @@ func writeCards(w http.ResponseWriter, r *http.Request, s *quotaScope) {
 	// magpie's Codex card had none on the computer reading it). A held key
 	// is told none, as in quotas.
 	if s == nil && provider.ReckonHolds != nil {
-		cs = provider.ReckonHolds(cs, time.Now())
+		cs = provider.ReckonHolds(ctx, cs, time.Now())
 	}
 	// with what routing reads of each window, so the other magpie can
 	// weigh this one by them (#6708)
-	writeJSON(w, 200, map[string]any{"object": "list", "data": provider.ToldRouting(cs)})
+	cs = provider.ValidateSubscriptionQuotas(ctx, provider.ToldRouting(cs))
+	if !quotaRequestDone(ctx, w, r) {
+		writeJSON(w, 200, map[string]any{"object": "list", "data": cs})
+	}
 }
 
-// quotas is qs as the key may be told them. A window's whole (Holds,
-// #2333) is left out: it is reckoned from every call routed through the
-// account, other keys' and the owner's too, which a held key is not told.
-func (s *quotaScope) quotas(qs []provider.Quota) []provider.Quota {
+func (s *quotaScope) quotaReport(ctx context.Context, now time.Time, kept bool) []provider.Quota {
 	if s == nil {
-		return qs
+		return provider.ScopedQuotaReport(ctx, now, kept, nil)
 	}
-	out := []provider.Quota{}
-	for _, q := range qs {
-		if q.From == "" && s.card(q.Provider, q.User) {
-			ws := make([]provider.QuotaSpan, len(q.Windows))
-			for i, w := range q.Windows {
-				w.Holds, w.HoldsWhy = nil, ""
-				ws[i] = w
-			}
-			q.Windows = ws
-			out = append(out, q)
-		}
-	}
-	return out
+	return provider.ScopedQuotaReport(ctx, now, kept, s.card)
 }
 
 // histories is hs as the key may be told them.
-func (s *quotaScope) histories(hs []provider.QuotaHistory) []provider.QuotaHistory {
+func (s *quotaScope) histories(ctx context.Context, hs []provider.QuotaHistory) []provider.QuotaHistory {
 	if s == nil {
 		return hs
 	}
 	out := []provider.QuotaHistory{}
 	for _, h := range hs {
-		if s.card(h.Provider, h.User) {
+		if s.card(ctx, h.Provider, h.User) {
 			out = append(out, h)
 		}
 	}

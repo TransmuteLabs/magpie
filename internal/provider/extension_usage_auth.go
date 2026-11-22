@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"slices"
 	"strings"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -12,7 +13,11 @@ import (
 const extensionAuthMark = "extension-auth:"
 
 func (binding *extensionAccount) authMark() string {
-	return extensionAuthMark + extensionModelHash([]byte(binding.cacheKey())) + ":"
+	key := binding.cacheKey()
+	if binding.enableGeneration != "" {
+		key += "\x00enable:" + binding.enableGeneration
+	}
+	return extensionAuthMark + extensionModelHash([]byte(key)) + ":"
 }
 
 func validExtensionAuthMark(value string) bool {
@@ -25,76 +30,99 @@ func validExtensionAuthMark(value string) bool {
 }
 
 func extensionAuthLapse(binding *extensionAccount, saved savedLogin) string {
-	if validExtensionAuthMark(saved.Refused) && !strings.HasPrefix(saved.Refused, binding.authMark()) {
+	lapsed, refused := extensionAuthStatus(binding, &saved)
+	if validExtensionAuthMark(*refused) && !strings.HasPrefix(*refused, binding.authMark()) {
 		return ""
 	}
-	return saved.Lapsed
+	return *lapsed
+}
+
+func extensionAuthStatus(binding *extensionAccount, saved *savedLogin) (lapsed, refused *string) {
+	if binding.identity().revision != "" {
+		return &saved.SDKLapsed, &saved.SDKRefused
+	}
+	return &saved.Lapsed, &saved.Refused
 }
 
 func (binding *extensionAccount) beginUsageAuth(ctx context.Context) (string, error) {
 	if binding.scope.Account == "" || !binding.manifest.Contract.Has(sdk.AccountAuth) {
 		return "", nil
 	}
-	if !loginsMu.LockChecked() {
+	if !loginsMu.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		return "", errors.New("account authentication update deferred: login lock is unavailable")
 	}
 	defer loginsMu.Unlock()
+	if err := requireExtensionAccountDiscovery(ctx); err != nil {
+		return "", err
+	}
 	if err := binding.check(ctx); err != nil {
 		return "", err
 	}
 	if err := binding.checkModelRevision(ctx); err != nil {
 		return "", err
 	}
-	logins, err := readLoginsFile()
+	logins, err := readCurrentLogins()
 	if err != nil {
 		return "", err
 	}
-	for index := range logins {
-		saved := &logins[index]
-		if saved.Agent != ExtensionProviderID(binding.scope.Plugin, binding.scope.Provider) || saved.User != binding.scope.Account {
-			continue
-		}
-		before := saved.Lapsed
-		saved.Lapsed = extensionAuthLapse(binding, *saved)
-		saved.Refused = binding.authMark() + strings.ToLower(rand.Text())
-		if err := writeLoginsTold(logins, saved.Lapsed != before); err != nil {
-			return "", err
-		}
-		return saved.Refused, nil
+	beforeCount := len(logins)
+	logins, index := ensureExtensionLoginPolicy(slices.Clone(logins), binding.identity())
+	saved := &logins[index]
+	lapsed, refused := extensionAuthStatus(binding, saved)
+	before := *lapsed
+	*lapsed = extensionAuthLapse(binding, *saved)
+	*refused = binding.authMark() + strings.ToLower(rand.Text())
+	token := *refused
+	if err := writeLoginsChecked(logins, *lapsed != before || len(logins) != beforeCount,
+		func() error { return requireExtensionAccountDiscovery(ctx) }); err != nil {
+		return "", err
 	}
-	return "", errors.New("extension login metadata is unavailable")
+	return token, nil
 }
 
 func (binding *extensionAccount) finishUsageAuth(ctx context.Context, token string, refused bool) error {
 	if token == "" {
 		return nil
 	}
-	if !loginsMu.LockChecked() {
+	if !loginsMu.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("account authentication update deferred: login lock is unavailable")
 	}
 	defer loginsMu.Unlock()
+	if err := requireExtensionAccountDiscovery(ctx); err != nil {
+		return err
+	}
 	if err := binding.check(ctx); err != nil {
 		return err
 	}
 	if err := binding.checkModelRevision(ctx); err != nil {
 		return err
 	}
-	logins, err := readLoginsFile()
+	logins, err := readCurrentLogins()
 	if err != nil {
 		return err
 	}
+	identity := binding.identity()
 	for index := range logins {
-		saved := &logins[index]
-		if saved.Agent != ExtensionProviderID(binding.scope.Plugin, binding.scope.Provider) || saved.User != binding.scope.Account || saved.Refused != token {
+		saved := logins[index]
+		lapsed, refusedMark := extensionAuthStatus(binding, &saved)
+		if !identity.hasPolicy(saved) || *refusedMark != token {
 			continue
 		}
-		lapsed := ""
+		message := ""
 		if refused {
-			lapsed = "Account sign-in has expired; sign in again"
+			message = "Account sign-in has expired; sign in again"
 		}
-		if saved.Lapsed != lapsed {
-			saved.Lapsed = lapsed
-			return writeLogins(logins)
+		if *lapsed != message {
+			*lapsed = message
+			next := slices.Clone(logins)
+			next[index] = saved
+			return writeLoginsChecked(next, true, func() error { return requireExtensionAccountDiscovery(ctx) })
 		}
 		return nil
 	}

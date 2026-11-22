@@ -1022,9 +1022,10 @@ func (s *Server) drawingTries(g provider.Group, ms []provider.Member, keeps map[
 		return true
 	}
 	cs, _ := s.planGroup(g.Live(), ms, provider.Chat)
+	current := provider.CurrentAccountIDs(context.Background())
 	for _, c := range cs {
 		for _, m := range ms {
-			if m.Provider.ID == c.p.ID && m.Model == c.model && memberHeld(c, m, g) == "" && add(m) {
+			if m.Provider.ID == c.p.ID && m.Model == c.model && memberHeld(c, m, g, current) == "" && add(m) {
 				break
 			}
 		}
@@ -1421,7 +1422,8 @@ func (s *Server) drawOnAccounts(ctx context.Context, r *http.Request, p provider
 	// fan-out (#905): the next one a refusal hands the request to no less
 	// than the first, so none it may not use draws
 	if keyWho, held := accountHolds(r); held {
-		cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(keyWho, c) })
+		current := provider.CurrentAccountIDs(r.Context())
+		cs = slices.DeleteFunc(cs, func(c candidate) bool { return !accountAllowed(keyWho, c.p, current) })
 		if len(cs) == 0 {
 			return p, drawn{}, http.StatusForbidden, time.Time{}, errors.New(keyAccountsError(keyWho, d.Model))
 		}
@@ -1913,6 +1915,9 @@ func (s *Server) drawImages(ctx context.Context, p provider.Provider, model stri
 		for k, v := range map[string]string{"model": model, "prompt": d.Prompt, "n": strconv.Itoa(d.N), "size": size, "quality": d.Quality, "complexity": d.Complexity, "background": d.Background, "output_format": d.Format} {
 			if v != "" {
 				mw.WriteField(k, v)
+				if k == "model" && p.IsPlugin() {
+					ctx = provider.WithPluginMultipartModel(ctx, model, buf.Len()-len(v))
+				}
 			}
 		}
 		if strings.Contains(m, "dall-e") {

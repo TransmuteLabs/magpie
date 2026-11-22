@@ -98,7 +98,8 @@ func TestPluginUsage(t *testing.T) {
 	}
 
 	cards := 0
-	for _, q := range fetchSubscriptionUsage(context.Background()) {
+	read, _ := fetchSubscriptionUsage(context.Background())
+	for _, q := range read {
 		if q.Provider == "fakeco" {
 			cards++
 			if q.Name != "FakeCo" || q.User == "" {
@@ -116,7 +117,7 @@ func TestPluginUsage(t *testing.T) {
 	// different times by when they renew.
 	time.Sleep(2 * time.Millisecond)
 	again := context.WithValue(context.Background(), cardRefreshKey{}, cardRefresh{"fakeco", "A@fake"})
-	qs := fetchSubscriptionUsage(again)
+	qs, _ := fetchSubscriptionUsage(again)
 	if len(qs) != 1 || qs[0].User != "a@fake" || qs[0].Error != "" || len(qs[0].Windows) != len(first) {
 		t.Fatalf("a@fake read again: %+v", qs)
 	}
@@ -215,7 +216,7 @@ func TestPluginUsageLapse(t *testing.T) {
 	}
 	pp := mustPlugin(t)
 	for _, u := range []string{"ok@fake", "renewed@fake"} {
-		notePluginLapse(pp, keys[u], http.StatusUnauthorized)
+		notePluginLapse(ctx, pp, fixtureFetchAuth(t, ctx, keys[u]), http.StatusUnauthorized, false)
 	}
 	lapsed := func() map[string]bool {
 		out := map[string]bool{}
@@ -309,7 +310,8 @@ func TestPluginUsageReadOlderThanAnswer(t *testing.T) {
 	}
 	// as the gateway notes a request's answer that says nothing of it
 	answered := func(status int) func() {
-		return func() { notePluginSaid(pp, key, "", status) }
+		auth := fixtureFetchAuth(t, ctx, key)
+		return func() { notePluginSaid(ctx, pp, auth, "", status) }
 	}
 	nothing := func() {}
 

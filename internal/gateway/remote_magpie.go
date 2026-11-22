@@ -18,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // A request passed on to another computer's magpie (a Remote magpie
@@ -122,7 +123,9 @@ func withCaller(next http.Handler) http.Handler {
 			principal = "key:" + who.KeyID
 		}
 		sum := sha256.Sum256([]byte(principal))
-		ctx = extension.WithCaller(ctx, hex.EncodeToString(sum[:16]), pluginCaller)
+		ctx = extension.WithCaller(ctx, hex.EncodeToString(sum[:16]), func(ctx context.Context) *sdk.ExecuteCaller {
+			return (*sdk.ExecuteCaller)(pluginCaller(ctx))
+		})
 		if searchingFrom(r) {
 			// another magpie's search: only the model itself searches
 			ctx = context.WithValue(ctx, searchingKey{}, true)

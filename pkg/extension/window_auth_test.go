@@ -141,6 +141,61 @@ func TestProviderSignInIsExplicitAndIndependentOfWindow(t *testing.T) {
 	}
 }
 
+func TestSavedSignInRequiresItsOwnCapabilityAndPrivateInput(t *testing.T) {
+	const savedSignInCapability Capability = "provider-saved-signin"
+	manifest := Manifest{
+		Schema: 1, ID: "saved-signin", Version: "0.1.0", Runtime: "exec", Entry: "worker",
+		Contract:  Contract{Version: APIVersion{Major: 1, Minor: 12}, Capabilities: []Capability{AccountAuth, ProviderSignIn, savedSignInCapability}},
+		Providers: []ProviderDescriptor{{ID: "test", Name: "Test"}},
+		AuthBindings: []WindowAuthBindingDescriptor{{
+			ID: "connect", From: ProviderSignInPart, Provider: "test",
+			Methods: []WindowAuthMethod{{
+				ID: "saved-signin", Mode: "poll", Label: "Import",
+				Fields: []AuthInputField{{Key: "record", Label: "Saved account", Type: "secret"}},
+			}},
+		}},
+	}
+	undeclared := manifest.Clone()
+	undeclared.Contract.Capabilities = []Capability{AccountAuth, ProviderSignIn}
+	if err := undeclared.Validate(); err == nil {
+		t.Fatal("reserved method can be installed without the capability")
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !manifest.Public().Contract.Has(savedSignInCapability) {
+		t.Fatal("worker handshake lost the capability after removing packaging data")
+	}
+	for name, mutate := range map[string]func(*Manifest){
+		"without provider sign-in": func(value *Manifest) {
+			value.Contract.Capabilities = []Capability{AccountAuth, savedSignInCapability}
+		},
+		"window": func(value *Manifest) {
+			value.Window = &WindowDescriptor{Metadata: "package.json"}
+			value.AuthBindings[0].From = "window:page"
+			value.AuthBindings[0].Methods[0].Label = ""
+			value.AuthBindings[0].Methods[0].Fields = nil
+		},
+		"nullable record": func(value *Manifest) {
+			value.AuthBindings[0].Methods[0].Fields[0].Optional = true
+		},
+		"wrong record name": func(value *Manifest) {
+			value.AuthBindings[0].Methods[0].Fields[0].Key = "other"
+		},
+		"text record": func(value *Manifest) {
+			value.AuthBindings[0].Methods[0].Fields[0].Type = "text"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := manifest.Clone()
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid saved sign-in accepted")
+			}
+		})
+	}
+}
+
 func TestWindowAuthBindingsDeclareProviderMethodAndExactPart(t *testing.T) {
 	source := accountBindingManifest()
 	source.AuthBindings = []WindowAuthBindingDescriptor{{

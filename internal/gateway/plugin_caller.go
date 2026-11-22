@@ -7,9 +7,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/yetone/magpie/internal/gwmw"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
-	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // tellCaller tells a plugin's fetch the agent its request came from, as
@@ -39,7 +39,12 @@ func tellCaller(ctx context.Context, h http.Header) {
 	}
 }
 
-func pluginCaller(ctx context.Context) *sdk.ExecuteCaller {
+// pluginCaller is the agent a request came from as a plugin is told it: the
+// one value behind a fetch's x-magpie-caller-* headers (chat.headers'
+// input.caller), the JS middleware's ctx.caller and the async request
+// hooks' ctx.caller (@febsincos on X: refuse an agent before a provider is
+// picked). nil when the gateway knows no agent.
+func pluginCaller(ctx context.Context) *gwmw.Caller {
 	c, ok := ctx.Value(callerCtx{}).(caller)
 	if !ok || c.agent == "" {
 		return nil
@@ -48,5 +53,8 @@ func pluginCaller(ctx context.Context) *sdk.ExecuteCaller {
 	if len(via) == 0 && c.via != "" {
 		via = []string{c.via}
 	}
-	return &sdk.ExecuteCaller{Agent: c.agent, Name: usage.AgentName(c.agent), Via: via}
+	if via == nil {
+		via = []string{}
+	}
+	return &gwmw.Caller{Agent: c.agent, Name: usage.AgentName(c.agent), Via: via}
 }

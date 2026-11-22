@@ -24,9 +24,11 @@ type ResponsesWireReply struct {
 }
 
 // ResponsesWireSend lends one synchronous send at the destination and with
-// the context and account already selected by the host. A nil argument
-// sends the existing signed body's bytes unchanged.
-type ResponsesWireSend func(zstdBody []byte) (status int, body io.ReadCloser, err error)
+// the context and account already selected by the host. The host calls
+// encode only for a send that needs HTTP bytes. A nil encoder or result
+// leaves the signed body's bytes unchanged. Size is the HTTP body size
+// for the edge reset check, zero for a successful socket turn.
+type ResponsesWireSend func(encode func() []byte) (status, size int, body io.ReadCloser, err error)
 
 type ResponsesWireMode uint8
 
@@ -40,24 +42,20 @@ func ExecuteResponsesWire(request sdk.ExecuteRequest, encoding string, mode Resp
 	if request.Protocol != "responses" || request.Operation != "" {
 		return ResponsesWireReply{}, errors.New("Codex wire execution requires a Responses request")
 	}
-	var zstdBody []byte
+	var encode func() []byte
 	switch mode {
 	case ResponsesWireRoutedTurn, ResponsesWireRelayedTurn:
-		zstdBody = EncodeResponsesZstd(request.Body, encoding)
+		encode = func() []byte { return EncodeResponsesZstd(request.Body, encoding) }
 	case ResponsesWireNativeCompact:
 	default:
 		return ResponsesWireReply{}, errors.New("unknown Codex Responses wire mode")
 	}
-	status, body, err := send(zstdBody)
+	status, size, body, err := send(encode)
 	if err != nil {
 		return ResponsesWireReply{}, err
 	}
 	if mode != ResponsesWireRoutedTurn {
 		return ResponsesWireReply{Body: body}, nil
-	}
-	size := len(request.Body)
-	if zstdBody != nil {
-		size = len(zstdBody)
 	}
 	return ReadResponsesDrop(status, size, body), nil
 }

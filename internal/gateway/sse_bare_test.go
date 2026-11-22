@@ -112,6 +112,36 @@ func TestBareErrorsHoldsNothingElse(t *testing.T) {
 	pw.Close()
 }
 
+func TestBareErrorsPlainReadsWithoutAllocation(t *testing.T) {
+	body := strings.Repeat(agThinking, 150)
+	upstream := strings.NewReader(body)
+	reader := &bareErrorReader{}
+	buffer := make([]byte, 32<<10)
+	allocs := testing.AllocsPerRun(20, func() {
+		upstream.Reset(body)
+		*reader = bareErrorReader{r: upstream, blank: true}
+		for offset := 0; ; {
+			n, err := reader.Read(buffer)
+			if string(buffer[:n]) != body[offset:offset+n] {
+				t.Fatalf("bytes changed at offset %d", offset)
+			}
+			offset += n
+			if err == io.EOF {
+				if offset != len(body) {
+					t.Fatalf("forwarded %d of %d bytes", offset, len(body))
+				}
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("plain SSE reads allocated %.0f times", allocs)
+	}
+}
+
 // zRain's case end to end: Antigravity's 200 stream that ends on the bare
 // error is told as the 400 it is, with Google's words, not as a reply
 // that "ended before it was complete". It is the request's fault: the

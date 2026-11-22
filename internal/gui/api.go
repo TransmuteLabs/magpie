@@ -390,11 +390,15 @@ type unlistedJSON struct {
 
 // unlistedModels lists provider.Unlisted for the page.
 func unlistedModels() []unlistedJSON {
-	es := provider.Unlisted()
+	return unlistedModelsContext(context.Background())
+}
+
+func unlistedModelsContext(ctx context.Context) []unlistedJSON {
+	es := provider.UnlistedContext(ctx)
 	if len(es) == 0 {
 		return nil
 	}
-	in := provider.MemberGroups()
+	in := provider.MemberGroupsContext(ctx)
 	out := make([]unlistedJSON, 0, len(es))
 	for _, e := range es {
 		gs := in[e.ID]
@@ -756,9 +760,9 @@ type searchAuthJSON struct {
 	On       int    `json:"on"`
 }
 
-func searchState(s *settingsJSON) {
+func searchState(s *settingsJSON, providers []provider.Provider, models []provider.Entry) {
 	names := map[string]string{}
-	for _, e := range provider.Served() {
+	for _, e := range models {
 		names[e.ID] = cmp.Or(e.Name, e.Model)
 	}
 	s.SearchAPIs, s.SearchVendors = []searchAPIJSON{}, []searchVendorJSON{}
@@ -808,7 +812,7 @@ func searchState(s *settingsJSON) {
 	for _, p := range gateway.RelaysSaidToSearch() {
 		s.SearchRelays = append(s.SearchRelays, p.Name)
 	}
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if p.On() && !slices.ContainsFunc(s.SearchChoices, func(c searchChoiceJSON) bool { return c.ID == p.ID }) && !slices.Contains(s.SearchRelays, p.Name) {
 			s.SearchLeftOut = append(s.SearchLeftOut, p.Name)
 		}
@@ -885,20 +889,43 @@ func codexWindowUnder(st settings.Settings, model string) *codexRunWindow {
 }
 
 func routingOptions() []routes.Option {
+	return routingOptionsContext(context.Background())
+}
+
+func routingOptionsContext(ctx context.Context) []routes.Option {
 	if server := served.Load(); server != nil {
-		return server.RoutingOptions()
+		return server.RoutingOptionsContext(ctx)
 	}
-	return gateway.RoutingOptions()
+	return gateway.RoutingOptionsContext(ctx)
 }
 
 func settingsState() settingsJSON {
+	return settingsStateContext(context.Background())
+}
+
+func writeSettingsState(rw http.ResponseWriter, r *http.Request) {
+	s := settingsStateContext(r.Context())
+	if r.Context().Err() == nil {
+		writeJSON(rw, s)
+	}
+}
+
+func settingsStateContext(ctx context.Context) settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
+	providers, models, groups := provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+	s.CheckinPlugins, s.CheckinAccounts = provider.CheckinSettingsContext(ctx)
+	if ctx.Err() != nil {
+		return s
+	}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
 	s.NameEnv = settings.EnvName()
 	s.Log = tilde(applog.Current())
 	s.Builtins = builtinsState()
 	s.PanelKeys = panelKeysState()
-	s.RoutingOptions = routingOptions()
+	s.RoutingOptions = routingOptionsContext(ctx)
+	if ctx.Err() != nil {
+		return s
+	}
 	s.JSRoutings = []routes.Option{}
 	for _, option := range s.RoutingOptions {
 		if strings.Contains(option.ID, "/") {
@@ -971,11 +998,9 @@ func settingsState() settingsJSON {
 	s.Trae, s.TraeCheckins = provider.HasTrae(), provider.TraeCheckins()
 	s.MiniMax, s.MiniMaxCheckins = provider.HasMiniMax(), provider.MiniMaxCheckins()
 	s.Qoder, s.QoderCheckins = provider.HasQoder(), provider.QoderCheckins()
-	s.CheckinPlugins = provider.PluginCheckins()
-	s.CheckinAccounts = provider.CheckinAccounts()
 	s.VisionAuto, s.VisionModels, s.VisionMissing = gateway.AutoVision(), []modelRef{}, gateway.VisionMissing()
 	s.VisionEfforts, s.VisionEffortNow = gateway.VisionEfforts(), gateway.VisionEffortNow()
-	for _, e := range provider.Served() {
+	for _, e := range models {
 		if e.Images && (e.ImageInput == nil || *e.ImageInput) && (e.Group != "" || e.Provider.Ready()) {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}
 			if e.Group != "" {
@@ -991,10 +1016,10 @@ func settingsState() settingsJSON {
 	}
 	s.TitleModels, s.MaskRouteModels = []modelRef{}, []modelRef{}
 	// only a provider or a group set to go unmasked can take one (most have none)
-	unmaskedAny := slices.ContainsFunc(provider.All(), provider.Provider.SkipsRedaction) ||
-		slices.ContainsFunc(provider.Groups(), func(g provider.Group) bool { return g.Redact == provider.RedactOff })
+	unmaskedAny := slices.ContainsFunc(providers, provider.Provider.SkipsRedaction) ||
+		slices.ContainsFunc(groups, func(g provider.Group) bool { return g.Redact == provider.RedactOff })
 	s.UnmaskedProviders = []modelRef{}
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if p.SkipsRedaction() {
 			s.UnmaskedProviders = append(s.UnmaskedProviders, modelRef{ID: p.ID, Name: p.Name, Provider: p.ID, PName: p.Name, Icon: p.Icon})
 		}
@@ -1005,7 +1030,7 @@ func settingsState() settingsJSON {
 		}
 		s.DisabledHits[pat] = provider.DisabledHits(pat)
 	}
-	for _, e := range provider.Served() {
+	for _, e := range models {
 		if e.Group != "" || e.Provider.Ready() && !e.Provider.DecideOnly() {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}
 			if e.Group != "" {
@@ -1017,9 +1042,9 @@ func settingsState() settingsJSON {
 			}
 		}
 	}
-	searchState(&s)
+	searchState(&s, providers, models)
 	s.ImageGenAuto, s.ImageGenModels, s.ImageGenMissing = gateway.AutoDrawer(), []modelRef{}, gateway.DrawerMissing()
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
@@ -1041,13 +1066,13 @@ func settingsState() settingsJSON {
 	// of image models only isn't served to agents (jzw690 on X), so it is
 	// listed from the groups themselves
 	listed := map[string]bool{}
-	for _, e := range provider.Served() {
+	for _, e := range models {
 		if e.Group != "" && gateway.GroupDraws(e.ID) {
 			listed[e.ID] = true
 			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: e.ID, Name: e.Name, PName: e.Group})
 		}
 	}
-	for _, g := range provider.Groups() {
+	for _, g := range groups {
 		if ref := g.Ref(); !g.Hidden && !g.Disabled && !listed[ref] && gateway.GroupDraws(ref) {
 			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: ref, Name: cmp.Or(g.Name, g.ID), PName: g.ID})
 		}
@@ -1057,7 +1082,7 @@ func settingsState() settingsJSON {
 	}
 	s.ImageGenHidden = gateway.DrawerHidden(s.ImageGen)
 	s.VideoGenAuto, s.VideoGenModels, s.VideoGenMissing = gateway.AutoVideomaker(), []modelRef{}, gateway.VideomakerMissing()
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
@@ -1398,14 +1423,21 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// ?last=1: the state kept from the last read, at once (#1519);
 		// null when none is kept
 		if r.URL.Query().Get("last") == "1" {
-			if s, ok := lastKnown(); ok {
+			s, ok := lastKnownContext(r.Context())
+			if r.Context().Err() != nil {
+				return
+			}
+			if ok {
 				writeJSON(rw, s)
 			} else {
 				writeJSON(rw, nil)
 			}
 			return
 		}
-		s := state()
+		s := stateContext(r.Context())
+		if r.Context().Err() != nil {
+			return
+		}
 		if sum, ok := writeStateJSON(rw, s); ok {
 			keepStateSummed(s, sum)
 		}
@@ -1761,7 +1793,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	builtinRoutes(mux)
 	mux.HandleFunc("GET /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		access.MigrateLegacyLANKeyBestEffort()
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	mux.HandleFunc("POST /api/settings", func(rw http.ResponseWriter, r *http.Request) {
 		// read, checked and saved as `magpie settings set` saves (#4745)
@@ -1816,7 +1848,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if in.UpdateChannel != cur.UpdateChannel && (!in.NoAutoUpdate || updates.json().Latest != "") && updates.begin() {
 			go updates.run()
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// whether usage reads as used or left: the Usage page's toggle and
 	// Settings', for every meter and the menu bar alike (#122)
@@ -2551,7 +2583,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// and Trae CN's (#694)
 	mux.HandleFunc("POST /api/settings/trae-checkin", func(rw http.ResponseWriter, r *http.Request) {
@@ -2566,7 +2598,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// and MiniMax Code's (#811)
 	mux.HandleFunc("POST /api/settings/minimax-checkin", func(rw http.ResponseWriter, r *http.Request) {
@@ -2581,7 +2613,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// and Qoder's daily credits
 	mux.HandleFunc("POST /api/settings/qoder-checkin", func(rw http.ResponseWriter, r *http.Request) {
@@ -2596,7 +2628,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// and a plugin's own daily check-in, by its provider
 	mux.HandleFunc("POST /api/settings/plugin-checkin", func(rw http.ResponseWriter, r *http.Request) {
@@ -2622,7 +2654,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// and a switch a plugin declares for its provider (auth.options, #2038),
 	// by the plugin's own provider id, handed to the running host at once
@@ -2640,18 +2672,20 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, errors.New("no provider or no such option"))
 			return
 		}
-		s := settings.Load()
-		s.PluginOptions = maps.Clone(s.PluginOptions)
-		if s.PluginOptions == nil {
-			s.PluginOptions = map[string]map[string]bool{}
+		release, err := plugin.GuardCommunitySubscription(r.Context(), in.Provider)
+		if err != nil {
+			fail(rw, err)
+			return
 		}
-		own := maps.Clone(s.PluginOptions[in.Provider])
-		if own == nil {
-			own = map[string]bool{}
-		}
-		own[in.Key] = in.On
-		s.PluginOptions[in.Provider] = own
-		if err := settings.Save(s); err != nil {
+		err = settings.EditPluginOptions(func(options map[string]map[string]bool) (map[string]map[string]bool, error) {
+			if options[in.Provider] == nil {
+				options[in.Provider] = map[string]bool{}
+			}
+			options[in.Provider][in.Key] = in.On
+			return options, nil
+		})
+		release()
+		if err != nil {
 			fail(rw, err)
 			return
 		}
@@ -2676,20 +2710,11 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 			fail(rw, errors.New("no account"))
 			return
 		}
-		s := settings.Load()
-		off := slices.DeleteFunc(slices.Clone(s.CheckinOff), func(k string) bool { return k == in.Key })
-		if !in.On {
-			off = append(off, in.Key)
-		}
-		if len(off) == 0 {
-			off = nil
-		}
-		s.CheckinOff = off
-		if err := settings.Save(s); err != nil {
+		if err := provider.SetCheckinAccountOn(r.Context(), in.Key, in.On); err != nil {
 			fail(rw, err)
 			return
 		}
-		writeJSON(rw, settingsState())
+		writeSettingsState(rw, r)
 	})
 	// how large the window and the panel are drawn: Settings' choice and
 	// Ctrl/Cmd +, − and 0 in either, set on its own so a key pressed while
@@ -3422,34 +3447,44 @@ func stateSettings(s settings.Settings) settings.Settings {
 }
 
 func state() stateJSON {
+	return stateContext(context.Background())
+}
+
+func stateContext(ctx context.Context) stateJSON {
 	s := stateJSON{Agents: []agentJSON{}, Profiles: []profileJSON{}, Catalog: catalog.Source(), Settings: settings.Shared()} // only encoded, never changed
 	s.Settings = stateSettings(s.Settings)
-	s.RoutingOptions = routingOptions()
+	s.RoutingOptions = routingOptionsContext(ctx)
+	s.Unlisted = unlistedModelsContext(ctx)
+	for _, e := range provider.ServedContext(ctx) {
+		if e.Group == "" {
+			s.Served++
+		}
+	}
+	all := heldAgentsContext(ctx)
+	if ctx.Err() != nil {
+		return s
+	}
 	// state() is asked for after nearly every click, so the rate — a
 	// network fetch once every TTL — is only worth its rare latency when
 	// cny is actually chosen; usd never looks at it
 	if s.Settings.Currency != "usd" {
 		s.FX = costFX(s.Settings)
 	}
-	s.Unlisted = unlistedModels()
 	s.CLIBehind = cliBehind()
 	s.ConfigBlocked = configBlocked()
 	if served.Load() == nil {
 		s.GatewayOther = gatewayOther.Load()
 		s.GatewayHeld = gateway.LastHeld()
 	}
-	for _, e := range provider.Served() {
-		if e.Group == "" {
-			s.Served++
-		}
-	}
-	all := heldAgents()
 	for _, a := range agent.ClientsIn(all) {
 		s.Clients = append(s.Clients, clientJSON{ID: a.ID, Name: a.Name, Icon: a.Icon})
 	}
 	detected := agent.DetectedIn(all)
 	now := make(map[string]map[string]string, len(detected))
 	for _, a := range detected {
+		if ctx.Err() != nil {
+			return s
+		}
 		if a.Follow != nil {
 			_ = a.Follow()
 		}
@@ -3460,7 +3495,12 @@ func state() stateJSON {
 		aj.Menu = a.ListsModels
 		aj.NoNames = a.NoNames
 		aj.Drift = a.Drift()
-		aj.Wired = a.Wired()
+		if a.Native != nil {
+			native := a.Native.Read()
+			aj.Native, aj.Wired = &native, native.Wired()
+		} else {
+			aj.Wired = a.Wired()
+		}
 		if aj.Wired {
 			aj.StaleCopies = a.StaleCopies()
 			aj.Stale = len(aj.StaleCopies)
@@ -3531,10 +3571,6 @@ func state() stateJSON {
 		aj.Command = agentLine(a, aj.Launch, runtime.GOOS)
 		aj.Terminal = terminalHere() && aj.Command != ""
 		aj.OpenApp = a.ID == "codex" && codexOpensApp()
-		if a.Native != nil {
-			native := a.Native.Read()
-			aj.Native = &native
-		}
 		s.Agents = append(s.Agents, aj)
 	}
 	if ps, err := profile.Load(); err == nil {

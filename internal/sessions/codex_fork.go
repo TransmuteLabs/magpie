@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -73,9 +74,8 @@ func (s *codexUsageState) copied(total, last *cxUsage) bool {
 	return s.Copied[cxCheckpoint{*total, *last}]
 }
 
-// codexForks keeps the checkpoints of the parents last read, by path,
-// size and time: forks a spawn_agent makes are of one parent, often many
-// at a time.
+// codexForks keeps one checkpoint snapshot per parent path. A fork in
+// progress keeps its own reference to the snapshot it was given.
 var codexForks struct {
 	sync.Mutex
 	kept []codexForkParent
@@ -83,25 +83,39 @@ var codexForks struct {
 
 type codexForkParent struct {
 	path  string
-	size  int64
-	mod   time.Time
+	info  os.FileInfo
 	marks map[cxCheckpoint]bool
 	turns map[string]bool
 }
 
 const codexForksKept = 8
 
+func codexParentFileInfo(path string) os.FileInfo {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, _ := file.Stat()
+	return info
+}
+
+func sameCodexParent(previous, current os.FileInfo) bool {
+	return current != nil && os.SameFile(previous, current) && previous.Size() == current.Size() &&
+		previous.ModTime().Equal(current.ModTime())
+}
+
 // codexCheckpointsOf are the token_count checkpoints of the rollout at
 // path, and its turn ids (nil when it names none); nil when it can't be
 // read whole.
 func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
-	fi, err := os.Stat(path)
-	if err != nil {
+	fi := codexParentFileInfo(path)
+	if fi == nil {
 		return nil, nil
 	}
 	codexForks.Lock()
 	for _, k := range codexForks.kept {
-		if k.path == path && k.size == fi.Size() && k.mod.Equal(fi.ModTime()) {
+		if k.path == path && sameCodexParent(k.info, fi) {
 			codexForks.Unlock()
 			return k.marks, k.turns
 		}
@@ -109,7 +123,7 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 	codexForks.Unlock()
 	marks := map[cxCheckpoint]bool{}
 	var turns map[string]bool
-	err = eachLine(path, func(b []byte) {
+	err := eachLine(path, func(b []byte) {
 		h := b[:min(len(b), 1024)]
 		top, payload := typeAfter(h, cxType), typeAfter(h, cxPayload)
 		if top == "turn_context" || top == "event_msg" && payload == "task_started" {
@@ -141,11 +155,24 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 		return nil, nil
 	}
 	codexForks.Lock()
-	codexForks.kept = append(codexForks.kept, codexForkParent{path, fi.Size(), fi.ModTime(), marks, turns})
-	if n := len(codexForks.kept); n > codexForksKept {
-		codexForks.kept = append([]codexForkParent(nil), codexForks.kept[n-codexForksKept:]...)
+	defer codexForks.Unlock()
+	if !sameCodexParent(fi, codexParentFileInfo(path)) {
+		return marks, turns
 	}
-	codexForks.Unlock()
+	for index, parent := range codexForks.kept {
+		if parent.path != path {
+			continue
+		}
+		if sameCodexParent(parent.info, fi) {
+			return parent.marks, parent.turns
+		}
+		codexForks.kept = slices.Delete(codexForks.kept, index, index+1)
+		break
+	}
+	if len(codexForks.kept) == codexForksKept {
+		codexForks.kept = slices.Delete(codexForks.kept, 0, 1)
+	}
+	codexForks.kept = append(codexForks.kept, codexForkParent{path, fi, marks, turns})
 	return marks, turns
 }
 

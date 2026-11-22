@@ -2990,12 +2990,13 @@ magpie.plugin("library", (ctx) => {
       : t("Add a server once and switch it on for the agents that should have it — magpie writes it into each one's config in the shape that agent reads.")));
     const all = mcpAgents();
     pickingFor("servers", lib.servers);
+    // the router first, over the list (the owner, 11-21: at the list's
+    // foot nobody found it); with no server only where it is what the
+    // page is for, with no agent, to turn on before the first server
+    if (lib.servers.length || agentless()) body.append(...hubPart());
     if (!lib.servers.length) {
       const add = button(t("＋ Add a server"), "action", () => editServer(null));
       body.append(empty(t("No servers in the library yet"), lib.foundServers.length && !agentless() ? t("Add one, or bring in those your agents already have, below.") : t("Paste a server's JSON from its README, or fill it in."), add));
-      // with no agent, the router is what the page is for: there to turn
-      // on before the first server
-      if (agentless()) body.append(...hubPart());
     } else {
       const list = el("div", "list lib-list");
       // turned off, they fold away below the ones on, as Providers' do
@@ -3057,9 +3058,6 @@ magpie.plugin("library", (ctx) => {
       const after = el("div", "after-list");
       after.append(button(t("＋ Add server"), "", () => editServer(null)));
       body.append(after);
-      // kept while picking too, as Add server is: the page stays as tall,
-      // so Select doesn't move under the pointer (library-servers-bulk)
-      body.append(...hubPart());
       // each server is checked once a session, and again only once it
       // changed; once the rows are on the page, for them to show it. One
       // that no agent and no project has is started for nobody, so it is
@@ -3110,7 +3108,11 @@ magpie.plugin("library", (ctx) => {
       : lib.mcpHub
       ? t("Each agent is given one server, magpie, in place of these. magpie runs each server once for all of them and hands each call to it, as server__tool. Restart an agent for it to read the change.")
       : t("Serve every server through magpie: each agent is given one server, magpie, in place of these, and any other app connects at one address.")));
-    if (lib.mcpHub) who.append(el("div", "sub lib-hubstats", hubStats()));
+    if (lib.mcpHub) {
+      const stats = el("div", "sub lib-hubstats", hubStats());
+      stats.title = stats.textContent;
+      who.append(stats);
+    }
     row.append(hubMark(), who, toggle(!!lib.mcpHub, t("MCP router"), (on) =>
       change("servers/hub", { on }, agentless()
         ? (on ? t("The MCP router is on: apps can connect at its address") : t("The MCP router is off"))
@@ -3463,6 +3465,17 @@ magpie.plugin("library", (ctx) => {
       const addr = el("div", "lib-hubaddr");
       addr.append(el("code", "", url), copyBtn(url, t("Address")));
       out.push(addr, el("p", "lib-hubcap", t("From another computer, use the address magpie is reached at there, with a gateway key: Authorization: Bearer <key>.")));
+      // the address that gives its tools on demand (gateway.HubOnDemandQuery;
+      // Passings_z on X): which app connects isn't known, so the plain
+      // address gives every tool, and an app that doesn't search its tools
+      // itself asks for them on demand. Only while Tools on demand is on,
+      // since with it off the query changes nothing
+      if (!lib.hubAllTools && lib.hubOnDemandQuery) {
+        const lazy = url + "?" + lib.hubOnDemandQuery;
+        const addr2 = el("div", "lib-hubaddr lib-hubaddr-lazy");
+        addr2.append(el("code", "", lazy), copyBtn(lazy, t("Address")));
+        out.push(addr2, el("p", "lib-hubcap", t("For an app that doesn't search its tools itself: past {n} tools, it is given one that finds a tool and one that runs it.", { n: lib.hubOnDemandOver })));
+      }
       const apps = [
         ...(mcpAgents().some((a) => a.id === "cursor") ? [] : [{ id: "cursor", icon: "cursor", name: "Cursor", link: true, where: t("Or add it to ~/.cursor/mcp.json"), text: json({ mcpServers: { magpie: { url } } }) }]),
         { id: "vscode", icon: "vscode", name: "VS Code", link: true, where: t("Or add it to .vscode/mcp.json, or to your user mcp.json"), text: json({ servers: { magpie: { type: "http", url } } }) },
@@ -3745,7 +3758,11 @@ magpie.plugin("library", (ctx) => {
     // the click moves until the answer comes
     if (health.get(name) && !health.get(name).h && !box.hidden) return;
     box.hidden = !(toolsOpen.has(name) && list.length);
-    if (box.hidden) return box.replaceChildren();
+    if (box.hidden) {
+      liftRow(box);
+      return box.replaceChildren();
+    }
+    toolsLift.observe(box);
     const ul = el("ul", "lib-toollist");
     const off = toolsOffOf(name);
     for (const tl of list) {
@@ -3767,6 +3784,39 @@ magpie.plugin("library", (ctx) => {
     foot.append(el("span", "grow"), button(t("Check again"), "", () => recheck(name)));
     parts.push(foot);
     box.replaceChildren(...parts);
+  }
+  // A server's chips and switch stay where they were when its tools open
+  // (the owner): the list makes the row taller, and the row centres what
+  // it holds, so they would sit half the list lower. Those on the name's
+  // line are moved back up by what the row grew past its closed height;
+  // on a narrow window they are on a line of their own and stay there.
+  // translate moves them without changing the row, so measuring again
+  // sees the same layout.
+  const toolsLift = new ResizeObserver((entries) => entries.forEach((e) => liftRow(e.target)));
+  function liftRow(box) {
+    const who = box.parentElement, row = who?.parentElement;
+    if (!row || !box.isConnected) return toolsLift.unobserve(box);
+    const others = [...row.children].filter((c) => c !== who);
+    let up = 0, line = [];
+    if (!box.hidden) {
+      toolsLift.observe(box);
+      const cs = getComputedStyle(row), top = box.getBoundingClientRect().top, w = who.getBoundingClientRect(), wt = w.top;
+      // centred beside the name's column (the picture sits at the top
+      // already), not on a line under it
+      const centred = (c) => { const a = getComputedStyle(c).alignSelf; return a === "center" || (a === "auto" || a === "normal") && cs.alignItems === "center"; };
+      const beside = others.filter((c) => c.getBoundingClientRect().top + (c._lift || 0) < w.bottom);
+      line = beside.filter(centred);
+      const pad = cs.boxSizing === "border-box" ? parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth) : 0;
+      const head = top - wt - parseFloat(getComputedStyle(box).marginTop);
+      const closed = Math.max(head, (parseFloat(cs.minHeight) || 0) - pad, ...beside.map((c) => c.offsetHeight));
+      up = Math.max(0, Math.round(who.offsetHeight - closed) / 2);
+    } else toolsLift.unobserve(box);
+    for (const c of others) {
+      const by = line.includes(c) ? up : 0;
+      if ((c._lift || 0) === by) continue;
+      c._lift = by;
+      c.style.translate = by ? `0 ${-by}px` : "";
+    }
   }
   // Each tool has a switch (nf1qaz2w on Discord): one turned off is left
   // out by the agents given the server that can leave out a single tool.
@@ -3898,7 +3948,7 @@ magpie.plugin("library", (ctx) => {
   function paintHealth(x) {
     // the hub's count of tools follows each check
     const stats = page.querySelector(".lib-hubstats");
-    if (stats) stats.textContent = hubStats();
+    if (stats) stats.textContent = stats.title = hubStats();
     const boxes = typeof x === "string" ? page.querySelectorAll(`.lib-health[data-server="${CSS.escape(x)}"]`) : [x];
     for (const b of boxes) {
       const e = health.get(b.dataset.server);
@@ -5840,14 +5890,30 @@ magpie.plugin("library", (ctx) => {
     const plugins = lib.plugins || [];
     if (!plugins.length) {
       body.append(empty(t("No Claude plugins in the library yet"), t("Install one from a folder, a git address or a marketplace.json.")));
+      body.append(discover("claude"));
       // Claude Code's own plugins can still be turned on for a project
       if (!agentless() && lib.projects.length && (lib.claudeInstalled || []).length) renderProjects(body, "plugins");
       return;
     }
-    const list = el("div", "list lib-list");
+    const list = el("div", "list lib-list lib-plugins");
     list.append(...[...plugins].sort((a, b) => a.name.localeCompare(b.name)).map((p) => pluginRow(p, all)));
-    body.append(list);
+    body.append(list, discover("claude"));
+    filterPlugins(body);
     if (!agentless()) renderProjects(body, "plugins");
+  }
+  // The market's search narrows the installed plugins too: a row shows
+  // when its name, version, description or parts have every word typed.
+  function filterPlugins(body) {
+    const list = body.querySelector(".lib-plugins");
+    if (!list) return;
+    const words = market.claude.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    let shown = 0;
+    for (const row of list.querySelectorAll(":scope > .lib-plugin")) {
+      const text = (row.querySelector(".who")?.textContent || "").toLowerCase();
+      row.hidden = !words.every((w) => text.includes(w));
+      if (!row.hidden) shown++;
+    }
+    list.hidden = !shown;
   }
 
   function pluginFind() {
@@ -5989,8 +6055,11 @@ magpie.plugin("library", (ctx) => {
     body.append(intro(agentless()
       ? t("A magpie on another computer that adds this one as a provider, with Use its skills and prompts on, takes these skills and gives them to its agents.")
       : t("A skill is a folder with a SKILL.md an agent loads when it's needed. The library keeps each one once and links it into the agents you pick.")));
-    body.append(installCard());
     const all = skillAgents();
+    // the skill router first, over the install card and the list (the
+    // owner, 11-21: at the foot of a long list nobody found it)
+    if (lib.skills.length && all.length) body.append(...skillRouterPart());
+    body.append(installCard());
     pickingFor("skills", lib.skills);
     if (lib.skills.length) {
       const rh = el("div", "row-head lib-skillshead");
@@ -6082,7 +6151,7 @@ magpie.plugin("library", (ctx) => {
       drawSkills(box, all);
       body.append(box);
       // under the list, so the skills stay where they were above it
-      if (all.length) body.append(skillHowBar(), skillWhereBar(), ...skillAutoPart(), ...skillRouterPart());
+      if (all.length) body.append(skillHowBar(), skillWhereBar(), ...skillAutoPart());
       if (picking) body.append(pickBar(all));
     }
     if (lib.newSkills?.length) renderNewSkills(body);
@@ -7878,6 +7947,12 @@ magpie.plugin("library", (ctx) => {
   // the skills from GitHub and git repositories as this page does and
   // fetches again each one changed there; one changed here keeps its
   // Update button (skill_autoupdate.go). Only with such a skill to update.
+  // the skills an update by themselves fetched again, "" for none
+  function updatedSaid(res) {
+    const up = res?.updated || [];
+    return up.length === 1 ? t("{name} is updated", { name: up[0] }) : up.length ? t("updated: {names}", { names: up.join(", ") }) : "";
+  }
+
   function skillAutoPart() {
     if (!lib.autoUpdateSkills && !lib.skills.some((s) => s.kind === "github" || s.kind === "git")) return [];
     const list = el("div", "list lib-list lib-hublist lib-skillauto");
@@ -7885,8 +7960,9 @@ magpie.plugin("library", (ctx) => {
     const who = el("div", "who");
     who.append(el("div", "name", t("Update by themselves")));
     who.append(el("div", "sub wraps", t("Fetch skills from GitHub and git again when they change there. One you changed here stays as it is.")));
+    // switched on, it looks at once: what that updated is said first
     row.append(glyph(GLYPH.down), who, toggle(!!lib.autoUpdateSkills, t("Update by themselves"), (on) =>
-      change("skills/auto-update", { on }, on ? t("Skills update by themselves now") : t("Skills wait for you to update them now"))));
+      change("skills/auto-update", { on }, on ? (res) => [updatedSaid(res), t("Skills update by themselves now")].filter(Boolean).join(" · ") : t("Skills wait for you to update them now"))));
     list.append(row);
     return [list];
   }
@@ -8291,16 +8367,20 @@ magpie.plugin("library", (ctx) => {
     render();
     try {
       take(await api("library/skills/check", {}));
+      // with Update by themselves on, the check updated what it found
+      const updated = updatedSaid(lib.result);
       const got = lib.skills.filter((s) => s.check);
       const n = got.filter((s) => s.check.status === "update" && !isGone(s)).length;
       const unknown = got.filter((s) => s.check.status === "unknown");
       const gone = lib.skills.filter(isGone).map((s) => s.name);
       let msg = n ? (n === 1 ? t("1 skill has an update") : t("{n} skills have updates", { n })) : gone.length ? "" : t("Every skill is up to date");
+      if (updated) msg = updated + (msg ? " · " + msg : "");
       if (gone.length) msg += (msg ? " · " : "") + goneSaid(gone);
       const more = lib.newSkills?.length || 0;
       if (more) msg += " · " + (more === 1 ? t("1 more skill in their repositories") : t("{n} more skills in their repositories", { n: more }));
       if (quiet) {
         const said = [];
+        if (updated) said.push(updated);
         if (n) said.push(n === 1 ? t("1 skill has an update") : t("{n} skills have updates", { n }));
         if (gone.length) said.push(goneSaid(gone));
         if (more) said.push(more === 1 ? t("1 more skill in their repositories") : t("{n} more skills in their repositories", { n: more }));
@@ -9237,6 +9317,7 @@ magpie.plugin("library", (ctx) => {
     mcp: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, custom: null, shown: 0 },
     skills: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, shown: 0 },
     pi: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, shown: 0 },
+    claude: { q: "", items: null, error: "", loading: false, seq: 0, timer: 0, shown: 0 },
   };
   // how many cards a list shows at first, and each Show more adds
   const MARKET_PAGE = 60;
@@ -9269,7 +9350,7 @@ magpie.plugin("library", (ctx) => {
     // a list already drawn is never reordered under the reader
     const users = kind === "mcp" ? askServerUsers() : null;
     try {
-      const r = await api("library/market/" + ({ mcp: "servers", skills: "skills", pi: "pi" })[kind] + "?q=" + encodeURIComponent(m.q.trim()));
+      const r = await api("library/market/" + ({ mcp: "servers", skills: "skills", pi: "pi", claude: "claude" })[kind] + "?q=" + encodeURIComponent(m.q.trim()));
       if (users) await Promise.race([users, new Promise((ok) => setTimeout(ok, 1000))]);
       if (seq !== m.seq) return;
       m.items = r.items || [];
@@ -9297,7 +9378,7 @@ magpie.plugin("library", (ctx) => {
     m.loading = false;
     drawMarket(kind);
     if (kind === "skills") describeSkills();
-    if (kind === "pi") return;
+    if (kind === "pi" || kind === "claude") return;
     // The market reads the library as it is now; one it calls added that
     // this page doesn't list was added elsewhere — another window, the CLI.
     const mine = new Set((kind === "mcp" ? lib?.servers : lib?.skills)?.map((x) => x.name) || []);
@@ -9334,7 +9415,8 @@ magpie.plugin("library", (ctx) => {
     const inp = el("input");
     inp.type = "search";
     inp.dataset.lib = "market-" + kind;
-    inp.placeholder = kind === "mcp" ? t("Search MCP servers — GitHub, Postgres, Figma…") : kind === "pi" ? t("Search Pi packages on npm, or enter a package or git URL…") : t("Search skills on skills.sh — react, pdf, testing…");
+    inp.placeholder = kind === "mcp" ? t("Search MCP servers — GitHub, Postgres, Figma…") : kind === "pi" ? t("Search Pi packages on npm, or enter a package or git URL…")
+      : kind === "claude" ? t("Search Claude plugins — GitHub, Figma, testing…") : t("Search skills on skills.sh — react, pdf, testing…");
     inp.spellcheck = false;
     inp.autocomplete = "off";
     inp.value = m.q;
@@ -9342,7 +9424,9 @@ magpie.plugin("library", (ctx) => {
       m.q = inp.value;
       clearTimeout(m.timer);
       const q = m.q.trim();
-      if (kind !== "mcp" && q.length === 1) return;
+      // the Claude plugins' search finds the installed ones too
+      if (kind === "claude") filterPlugins(box.closest(".lib-body") || page);
+      if (kind !== "mcp" && kind !== "claude" && q.length === 1) return;
       m.timer = setTimeout(() => fetchMarket(kind), 320);
     };
     inp.onkeydown = (e) => {
@@ -9365,7 +9449,7 @@ magpie.plugin("library", (ctx) => {
     box.classList.toggle("loading", m.loading);
     const note = box.querySelector(".mk-note");
     note.textContent = q && m.items ? (m.items.length === 1 ? t("1 result") : t("{n} results", { n: m.items.length }))
-      : kind === "mcp" ? (m.byUse ? t("Most used first, then featured and the MCP Registry") : t("Featured, and the official MCP Registry")) : kind === "pi" ? t("Most downloaded on npm") : t("Popular on skills.sh");
+      : kind === "mcp" ? (m.byUse ? t("Most used first, then featured and the MCP Registry") : t("Featured, and the official MCP Registry")) : kind === "pi" ? t("Most downloaded on npm") : kind === "claude" ? t("Claude Code's official marketplace") : t("Popular on skills.sh");
     const grid = box.querySelector(".mk-grid");
     grid.replaceChildren();
     if (!m.items) {
@@ -9401,7 +9485,7 @@ magpie.plugin("library", (ctx) => {
     moreCards(kind, grid);
   }
 
-  const cardOf = (kind, x) => kind === "mcp" ? serverCard(x) : kind === "pi" ? piCard(x) : x.skills ? repoCard(x) : skillCard(x);
+  const cardOf = (kind, x) => kind === "mcp" ? serverCard(x) : kind === "pi" ? piCard(x) : kind === "claude" ? claudeCard(x) : x.skills ? repoCard(x) : skillCard(x);
 
   // What a list shows, a card each. skills.sh lists a repository's skills
   // one by one (Ethereal499 on X: mattpocock/skills' all apart), so two or
@@ -10036,6 +10120,39 @@ magpie.plugin("library", (ctx) => {
     }
     piBusy.delete(key);
     if (tab === "pi") render();
+  }
+  // A plugin of Claude Code's official marketplace: installed into the
+  // library from the marketplace, by the same install as an address
+  // typed above, for every agent shown (its row's chips change that).
+  function claudeCard(x) {
+    const has = (lib?.plugins || []).some((p) => p.name === x.name);
+    const c = el("div", "mk-card" + (has ? " have" : ""));
+    c.dataset.id = x.name;
+    const top = el("div", "mk-top");
+    const who = el("div", "mk-who");
+    const nm = el("div", "mk-name");
+    nm.append(el("span", "mk-title", x.title || x.name));
+    who.append(nm);
+    const meta = el("div", "mk-meta");
+    if (x.author) meta.append(el("span", "mk-pub", x.author));
+    if (x.category) meta.append(el("span", "mk-badge", x.category));
+    who.append(meta);
+    top.append(logo(x.icon, x.title || x.name), who);
+    const d = el("p", "mk-desc", x.description || "");
+    d.title = x.description || "";
+    const foot = el("div", "mk-foot");
+    if (x.repo) foot.append(extLink(x.repo, t("Source")));
+    else if (x.homepage) foot.append(extLink(x.homepage, t("Website")));
+    foot.append(el("span", "grow"));
+    if (has) {
+      const b = el("span", "mk-have");
+      b.append(svg(CHECK, 11, 2), el("span", "", t("Installed")));
+      foot.append(b);
+    } else {
+      foot.append(button(t("Install"), "action mk-add", () => change("plugins/install", { source: x.source, names: [x.name], agents: shownAgents().map((a) => a.id) }, t("1 plugin installed"))));
+    }
+    c.append(top, d, foot);
+    return c;
   }
   function confirmRemovePi(p, k) {
     const ed = el("div", "editor lib-editor lib-rmone");

@@ -27,11 +27,53 @@ type SessionSourceBinding struct {
 }
 
 type sourceGrant struct {
-	plugin, identity, root, reference string
-	requested                         string
-	store                             sdk.SessionSourceStore
-	descriptor                        sdk.SessionSourceDescriptor
-	info                              fs.FileInfo
+	plugin, revision, identity, root, reference string
+	enableGeneration                            string
+	requested                                   string
+	store                                       sdk.SessionSourceStore
+	descriptor                                  sdk.SessionSourceDescriptor
+	info                                        fs.FileInfo
+}
+
+type sourceOwner struct {
+	plugin, revision, enableGeneration string
+	count                              int
+}
+
+func enabledSourceOwners(entries []extension.Installed) map[string]sourceOwner {
+	owners := map[string]sourceOwner{}
+	for _, entry := range entries {
+		if entry.Disabled {
+			continue
+		}
+		add := func(agent string) {
+			owners[agent] = sourceOwner{entry.Manifest.ID, entry.Revision, entry.EnableGeneration, owners[agent].count + 1}
+		}
+		for _, descriptor := range entry.Manifest.SessionSources {
+			add(descriptor.Agent)
+		}
+		for _, descriptor := range entry.Manifest.StorageSources {
+			add(descriptor.Agent)
+		}
+	}
+	return owners
+}
+
+func currentSourceOwners(ctx context.Context) (map[string]sourceOwner, error) {
+	entries, err := sourceManager().ActiveModules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return enabledSourceOwners(entries), nil
+}
+
+func (owner sourceOwner) matches(grant sourceGrant) bool {
+	return owner.count == 1 && owner.plugin == grant.plugin && owner.revision == grant.revision &&
+		owner.enableGeneration == grant.enableGeneration
+}
+
+func (grant sourceGrant) matches(selected sessionModuleSelection) bool {
+	return selected.identity == grant.identity && selected.entry.EnableGeneration == grant.enableGeneration
 }
 
 var sourceEpoch atomic.Uint64
@@ -53,21 +95,20 @@ func invalidateSessionSources() {
 	}
 }
 
+const sourceBindingsFile = "session-source-bindings.json"
+
+var sourceBindingsLock = filelock.Mutex{Path: func() string { return sourceBindingsPath() + ".lock" }}
+
 func sourceBindingsPath() string {
-	return filepath.Join(appdir.Config(), "session-source-bindings.json")
+	return filepath.Join(appdir.Config(), sourceBindingsFile)
 }
 
 func readSourceBindings() ([]SessionSourceBinding, error) {
-	path := sourceBindingsPath()
-	root, err := os.OpenRoot(filepath.Dir(path))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer root.Close()
-	_, body, err := readSessionInput(context.Background(), root, filepath.Base(path), 64<<10)
+	return withHistoryClaimsRoot(context.Background(), readSourceBindingsAt)
+}
+
+func readSourceBindingsAt(ctx context.Context, root *os.Root) ([]SessionSourceBinding, error) {
+	_, body, err := readSessionInput(ctx, root, sourceBindingsFile, 64<<10)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -114,12 +155,14 @@ func BindSessionSourceNative(ctx context.Context, plugin, source, expectedRevisi
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	unlock, held := filelock.Lock(path+".lock", filelock.Wait)
-	if !held {
+	if !sourceBindingsLock.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("session source binding is busy")
 	}
-	defer unlock()
-	bindings, err := readSourceBindings()
+	defer sourceBindingsLock.Unlock()
+	bindings, err := withHistoryClaimsRoot(ctx, readSourceBindingsAt)
 	if err != nil {
 		return err
 	}
@@ -148,12 +191,14 @@ func UnbindSessionSourceNative(ctx context.Context, agent, expectedIdentity stri
 		return errors.New("native source release requires its exact binding identity")
 	}
 	path := sourceBindingsPath()
-	unlock, held := filelock.Lock(path+".lock", filelock.Wait)
-	if !held {
+	if !sourceBindingsLock.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("session source binding is busy")
 	}
-	defer unlock()
-	bindings, err := readSourceBindings()
+	defer sourceBindingsLock.Unlock()
+	bindings, err := withHistoryClaimsRoot(ctx, readSourceBindingsAt)
 	if err != nil {
 		return err
 	}

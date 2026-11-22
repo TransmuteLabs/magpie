@@ -59,7 +59,7 @@ func TestSDKSearchSettingsUsesOrdinarySelection(test *testing.T) {
 	}
 	const vendor = "sdk:search.fixture:specstream"
 	var state settingsJSON
-	searchState(&state)
+	searchState(&state, provider.All(), provider.Served())
 	index := slices.IndexFunc(state.SearchVendors, func(value searchVendorJSON) bool { return value.ID == vendor })
 	if index < 0 || state.SearchVendors[index].NeedURL || !state.SearchVendors[index].KeyOptional || manager.Running("search.fixture") {
 		test.Fatal("ordinary Settings did not offer an SDK source without starting its runtime")
@@ -78,7 +78,7 @@ func TestSDKSearchSettingsUsesOrdinarySelection(test *testing.T) {
 		test.Fatalf("Settings did not select source in the ordinary search owner: %+v", saved)
 	}
 	post(`{"vendor":"` + vendor + `","on":false}`)
-	searchState(&state)
+	searchState(&state, provider.All(), provider.Served())
 	if len(state.SearchAPIs) != 1 || !state.SearchAPIs[0].Off || len(provider.SearchAPIs()) != 0 {
 		test.Fatal("Settings Off did not suppress source dispatch")
 	}
@@ -86,7 +86,7 @@ func TestSDKSearchSettingsUsesOrdinarySelection(test *testing.T) {
 	if err := manager.SetEnabled(test.Context(), "search.fixture", false); err != nil {
 		test.Fatal(err)
 	}
-	searchState(&state)
+	searchState(&state, provider.All(), provider.Served())
 	if slices.ContainsFunc(state.SearchVendors, func(value searchVendorJSON) bool { return value.ID == vendor }) ||
 		len(state.SearchAPIs) != 1 || state.SearchAPIs[0].Ready || manager.Running("search.fixture") {
 		test.Fatal("disabled module remained an available Settings source")

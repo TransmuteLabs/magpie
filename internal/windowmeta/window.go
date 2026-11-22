@@ -65,11 +65,12 @@ type ServiceSpec struct {
 // PanelSpec is a panel a plugin adds to one of magpie's own pages: a
 // part of that page, drawn by the plugin's HTML in a frame of its own.
 type PanelSpec struct {
-	Slot   string // one of PanelSlots
-	Title  string // "" when it names none
-	Titles map[string]string
-	File   string // the panel's HTML, inside the plugin's folder
-	Dir    string // the folder the panel's files are served from: File's
+	Slot      string // one of PanelSlots
+	Title     string // "" when it names none
+	Titles    map[string]string
+	File      string // the panel's HTML, inside the plugin's folder
+	Dir       string // the folder the panel's files are served from: File's
+	Providers []string
 }
 
 // ActionSpec is an item a plugin adds to one of magpie's menus
@@ -145,6 +146,7 @@ func WindowFromData(target string, b []byte) (w *WindowSpec, only bool) {
 		File      string          `json:"file"`
 		Icon      string          `json:"icon"`
 		Slot      string          `json:"slot"`
+		Providers json.RawMessage `json:"providers"`
 		Replaces  string          `json:"replaces"`
 		ID        string          `json:"id"`
 		Menu      string          `json:"menu"`
@@ -195,7 +197,12 @@ func WindowFromData(target string, b []byte) (w *WindowSpec, only bool) {
 		if !ok || !slices.Contains(PanelSlots, slot) {
 			continue
 		}
-		w.Panels = append(w.Panels, PanelSpec{Slot: slot, Title: strings.TrimSpace(pn.Title), Titles: titles(pn.Titles), File: file, Dir: filepath.Dir(file)})
+		var providers []string
+		if slot == "provider" && len(pn.Providers) != 0 &&
+			(json.Unmarshal(pn.Providers, &providers) != nil || providers == nil || slices.Contains(providers, "")) {
+			providers = []string{}
+		}
+		w.Panels = append(w.Panels, PanelSpec{Slot: slot, Title: strings.TrimSpace(pn.Title), Titles: titles(pn.Titles), File: file, Dir: filepath.Dir(file), Providers: providers})
 	}
 	// an action opens the plugin's page, so a plugin with none has no
 	// action; an id given twice is the first's

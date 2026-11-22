@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 // #4532: a saved Claude account not needed for weeks (switch-only, or
@@ -24,6 +27,7 @@ func TestRenewLoginsKeepsSavedClaudeSignedIn(t *testing.T) {
 	var text atomic.Value
 	text.Store(resetsAhead("Current week (all models): 1% used · resets Nov 6 at 11am (Asia/Dubai)"))
 	fakeClaudeUsage(t, &text, nil)
+	probeClaudeListener(t)
 	var mu sync.Mutex
 	var dirs []string
 	var fail atomic.Value
@@ -246,6 +250,107 @@ func TestRenewLoginsKeepsClaudeReading(t *testing.T) {
 	if used(q.Windows) != 37 {
 		t.Fatalf("kept on disk: %+v", q)
 	}
+}
+
+func TestRenewLoginsClaudeHistoryHonorsCancellation(t *testing.T) {
+	claudeThree(t)
+	keepAliveClean(t)
+	if err := ForgetLogin("claude", "team@x.com · Acme"); err != nil {
+		t.Fatal(err)
+	}
+	user := "max@x.com"
+	oldCard := SubscriptionQuota{Provider: "claude", User: user, Windows: []QuotaWindow{{Name: "7 days", Used: 8}}}
+	noteQuotaHistory([]SubscriptionQuota{oldCard}, time.Now().Add(-time.Minute))
+	before := QuotaHistoryData()
+	if len(before) == 0 {
+		t.Fatal("the starting quota history was not saved")
+	}
+	subscriptionUsageCache.Lock()
+	subscriptionUsageCache.data = []SubscriptionQuota{oldCard}
+	subscriptionUsageCache.Unlock()
+
+	var output atomic.Value
+	output.Store(resetsAhead(strings.Replace(claudeWeeklyOnly, "(all models): 1%", "(all models): 37%", 1)))
+	fakeClaudeUsage(t, &output, nil)
+	started, release := make(chan struct{}), make(chan struct{})
+	UsageClaudeVia(func(ctx context.Context, dir string) (string, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-release:
+		}
+		writeFile(t, filepath.Join(dir, ".credentials.json"), map[string]any{"claudeAiOauth": map[string]any{
+			"accessToken": "rotated-access", "refreshToken": "rotated-refresh",
+			"expiresAt": time.Now().Add(8 * time.Hour).UnixMilli(), "subscriptionType": "max",
+		}})
+		return output.Load().(string), nil
+	})
+
+	unlock, held := filelock.Lock(quotaHistPath()+".lock", time.Second)
+	if !held {
+		t.Fatal("could not hold the quota history file")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	result, done := make(chan []Renewal, 1), make(chan struct{})
+	var releaseOnce sync.Once
+	finishUsage := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		finishUsage()
+		cancel()
+		unlock()
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		result <- RenewLogins(ctx, 0)
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the saved account's usage read did not start")
+	}
+	key := loginReadingCacheKeyContext(ctx, Login{Agent: "claude", User: user})
+	loginUsageCache.Lock()
+	read := loginUsageCache.pending[key]
+	loginUsageCache.Unlock()
+	if read == nil {
+		t.Fatal("the started usage read is not pending")
+	}
+	finishUsage()
+	select {
+	case <-read.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the account refresh did not finish")
+	}
+	cancel()
+	select {
+	case got := <-result:
+		if len(got) != 1 || got[0].User != user || !got[0].Renewed || got[0].Err != "" {
+			t.Fatalf("confirmed renewal: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("renewal waited on quota history after cancellation")
+	}
+	if after := QuotaHistoryData(); !bytes.Equal(after, before) {
+		t.Errorf("canceled renewal changed quota history: %s", after)
+	}
+	subscriptionUsageCache.Lock()
+	cards := slices.Clone(subscriptionUsageCache.data)
+	subscriptionUsageCache.Unlock()
+	if len(cards) != 1 || len(cards[0].Windows) != 1 || cards[0].Windows[0].Used != 8 {
+		t.Errorf("canceled renewal changed the kept card: %+v", cards)
+	}
+	for _, login := range readLogins() {
+		if login.Agent == "claude" && login.User == user {
+			cred, _ := parseClaudeCredentials(login.Auth)
+			if cred.OAuth.RefreshToken != "rotated-refresh" || login.Renewed.IsZero() {
+				t.Errorf("the saved account lost its confirmed renewal")
+			}
+			return
+		}
+	}
+	t.Fatal("the renewed account is missing")
 }
 
 // #4532: a renewal that fails before anything is refreshed (the network,

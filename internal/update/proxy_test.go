@@ -15,6 +15,31 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
+func updateProxyFixture(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !r.URL.IsAbs() {
+			http.NotFound(w, r)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("direct request to proxy fixture returned %s", response.Status)
+	}
+	return server
+}
+
 // The update feed and a release's download go through the proxy set in
 // Settings, as magpie's other requests do (#294): a network that reaches
 // usemagpie.ai and GitHub only through it gets its updates too.
@@ -31,7 +56,7 @@ func TestUpdateGoesThroughTheProxy(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
 	// the proxy: a plain http:// request comes to it whole, by its URL
-	px := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	px := updateProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		seen = append(seen, r.URL.String())
 		mu.Unlock()
@@ -42,8 +67,7 @@ func TestUpdateGoesThroughTheProxy(t *testing.T) {
 		json.NewEncoder(w).Encode(Release{Version: "9.9.9", Assets: map[string]Asset{
 			BinaryAsset(): {URL: "http://releases.magpie.invalid/asset", SHA256: hex.EncodeToString(sum[:])},
 		}})
-	}))
-	defer px.Close()
+	})
 	if err := settings.Save(settings.Settings{Proxy: px.URL}); err != nil {
 		t.Fatal(err)
 	}
@@ -81,17 +105,14 @@ func TestUpdateTakesItsOwnProxy(t *testing.T) {
 	var mu sync.Mutex
 	hits := map[string]int{}
 	serve := func(name string) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return updateProxyFixture(t, func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			hits[name]++
 			mu.Unlock()
 			json.NewEncoder(w).Encode(Release{Version: "9.9.9"})
-		}))
+		})
 	}
 	own, global, run := serve("own"), serve("global"), serve("run")
-	defer own.Close()
-	defer global.Close()
-	defer run.Close()
 	t.Setenv("MAGPIE_UPDATE_FEED", "http://feed.magpie.invalid/api/latest")
 	ask := func(ctx context.Context, s settings.Settings) {
 		t.Helper()

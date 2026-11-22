@@ -167,8 +167,14 @@ func taskGatewayFixture(t *testing.T, mode string, private ...string) (*Server, 
 		t.Fatal(err)
 	}
 	auth, _ := json.Marshal(map[string]string{"url": vendor.URL, "token": "synthetic", "mode": mode})
-	if _, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: manifest.ID, Provider: "vendor",
-		ID: "selected", Auth: auth}, 0); err != nil {
+	account, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: manifest.ID, Provider: "vendor",
+		ID: "selected", Auth: auth}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.RegisterExtensionLogin(t.Context(), sdk.Scope{
+		Plugin: account.Plugin, Provider: account.Provider, Account: account.ID, Generation: account.Generation,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := provider.ExtensionProviders(); err != nil {
@@ -395,7 +401,7 @@ func TestExtensionAccountTaskDeferredUsageCannotAdmitForeground(t *testing.T) {
 }
 
 func TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce(t *testing.T) {
-	for _, change := range []string{"foreground", "account", "configuration", "shutdown"} {
+	for _, change := range []string{"foreground", "account", "configuration", "shutdown", "owner"} {
 		t.Run(change, func(t *testing.T) {
 			server, manager, id, paid, count := taskGatewayFixture(t, "snapshots")
 			observer := &fakeObserver{}
@@ -412,10 +418,11 @@ func TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce(t *testing.T
 			}
 			ctx := access.WithIdentity(t.Context(), who)
 			operation := scheduleGatewayTask(t, server, id, ctx)
+			var selected sdk.Scope
 			select {
-			case scope := <-paid:
-				if scope.Operation != operation || scope.Generation != 1 {
-					t.Fatal("usage barrier belongs to another paid tick", scope)
+			case selected = <-paid:
+				if selected.Operation != operation || selected.Generation != 1 {
+					t.Fatal("usage barrier belongs to another paid tick", selected)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("task did not acknowledge both measured usage snapshots")
@@ -448,6 +455,8 @@ func TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce(t *testing.T
 				}
 			case "shutdown":
 				cancel()
+			case "owner":
+				saveTaskSubscriptionOwner(t, manager, selected, "saved-vendor", "saved-user", "saved-login")
 			}
 			taskReceipt(t, manager, operation, "uncertain")
 			var rows []usage.Record
@@ -462,7 +471,8 @@ func TestExtensionAccountTaskCancellationKeepsLastMeasuredFactsOnce(t *testing.T
 			row := rows[0]
 			if row.Input != 23 || row.Output != 3 || row.CacheRead != 19 || row.CacheWrite != 5 ||
 				row.CacheWrite1h != 2 || row.UpstreamResponseID != "native-response" ||
-				row.ResponseID != "" || row.CallerKeyID != who.KeyID || row.Operation != operation {
+				row.ResponseID != "" || row.CallerKeyID != who.KeyID || row.Operation != operation ||
+				row.Provider != id || row.ProviderAccount != selected.Account {
 				t.Fatal("cancellation changed the last measured facts or their original caller", row)
 			}
 			observer.mu.Lock()
@@ -514,6 +524,86 @@ func TestExtensionAccountTaskOrdinaryLifecycleAndAppendOnce(t *testing.T) {
 	})
 	if receipt.Scope.Account != "selected" || count.Load() != 1 {
 		t.Fatal("task was duplicated or changed accounts", receipt, count.Load())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func saveTaskSubscriptionOwner(t *testing.T, manager *extensionhost.Manager, scope sdk.Scope, publicProvider, publicUser, stableLogin string) {
+	t.Helper()
+	owner := extensionhost.SubscriptionOwner{
+		Module: scope.Plugin, Provider: scope.Provider, PublicID: publicProvider, Revision: "fixture-owner",
+		Active: true, Accounts: []extensionhost.SubscriptionAccount{
+			{Key: "saved-key", ID: scope.Account, User: publicUser, LoginID: stableLogin},
+		},
+	}
+	raw, err := json.Marshal([]any{struct {
+		extensionhost.SubscriptionOwner
+		GrantRevision string            `json:"grantRevision"`
+		Digests       map[string]string `json:"digests"`
+		Tickets       []string          `json:"tickets"`
+	}{owner, strings.Repeat("a", 64), map[string]string{"saved-key": strings.Repeat("b", 64)}, []string{"fixture-ticket"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(manager.Namespace(), "private", ".saved-signins")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "subscription-owners.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+}
+
+func TestExtensionAccountTaskHonorsTransferredAccountACL(t *testing.T) {
+	server, manager, _, _, count := taskGatewayFixture(t, "")
+	const publicProvider, publicUser, stableLogin = "saved-vendor", "saved-user", "saved-login"
+	scope := sdk.Scope{Plugin: "tasks.fixture", Provider: "vendor", Account: "selected", Generation: 1}
+	saveTaskSubscriptionOwner(t, manager, scope, publicProvider, publicUser, stableLogin)
+	if err := provider.RegisterExtensionLogin(t.Context(), scope); err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+	if got := provider.LoginID(publicProvider, publicUser); got != stableLogin {
+		t.Fatalf("public account did not retain its original login ID: %q", got)
+	}
+	secret, err := access.Update("add-key", access.Change{Name: "transferred-task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	who, err := access.Check(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := access.Update("accounts-key", access.Change{Key: who.KeyID, Accounts: []string{publicProvider + "/" + stableLogin}}); err != nil {
+		t.Fatal(err)
+	}
+	who, err = access.Check(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, done := serveKeepAliveGateway(t, server)
+	waitFor(t, "task gateway listener", func() bool { return server.Addr() != "" })
+	operation := scheduleGatewayTask(t, server, publicProvider, access.WithIdentity(t.Context(), who), "schedule:overdue")
+	var receipt extensionhost.JournalEntry
+	waitFor(t, "terminal transferred account task", func() bool {
+		receipt, err = manager.Store().Operation(scope.Plugin, operation)
+		return err == nil && (receipt.State == "completed" || receipt.State == "not-started")
+	})
+	if receipt.State != "completed" || receipt.Scope.Account != scope.Account || count.Load() != 1 {
+		t.Fatalf("public grant did not admit exactly one paid call with a private receipt: %+v, calls=%d", receipt, count.Load())
+	}
+	var measured int
+	for _, row := range usage.Load(time.Time{}) {
+		if row.Operation == operation && row.Provider == publicProvider && row.ProviderAccount == publicUser && row.Kind == "cache_keepalive" {
+			measured++
+		}
+	}
+	if measured != 1 {
+		t.Fatal("transferred paid call did not use its admitted public login", measured)
 	}
 	cancel()
 	if err := <-done; err != nil {

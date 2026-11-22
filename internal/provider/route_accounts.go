@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"slices"
 	"strings"
 )
@@ -28,15 +29,20 @@ type AccountOn struct {
 // account of the user's choosing, the one signed in to stands at its own
 // place in the order, not first (#524).
 func (p Provider) AccountsOn() []AccountOn {
-	also := p.AlsoOn()
+	return p.AccountsOnContext(context.Background())
+}
+
+// AccountsOnContext reads the eligible accounts in the caller's context.
+func (p Provider) AccountsOnContext(ctx context.Context) []AccountOn {
+	also := p.alsoOnWithPicks(ctx)
 	var all []AccountOn
-	if len(also) == 0 || !p.OwnPaused() {
+	if len(also) == 0 || !p.ownPausedContext(ctx) {
 		all = append(all, AccountOn{Provider: p, Own: true})
 	}
 	for i, q := range also {
 		all = append(all, AccountOn{Provider: q, Rank: i + 1})
 	}
-	if ranks := p.LoginRanks(); ranks != nil {
+	if ranks := p.loginRanksContext(ctx); ranks != nil {
 		at := func(a AccountOn) int {
 			if r, ok := ranks[strings.ToLower(a.Account.User)]; ok {
 				return r

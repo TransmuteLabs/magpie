@@ -26,21 +26,20 @@ type fakePlugins struct {
 func fakePluginTools(t *testing.T, specs ...string) *fakePlugins {
 	t.Helper()
 	f := &fakePlugins{specs: specs}
-	oldI, oldN, oldT, oldR := pluginsInstalled, toolsNoted, pluginToolsOf, runPluginToolOf
-	t.Cleanup(func() { pluginsInstalled, toolsNoted, pluginToolsOf, runPluginToolOf = oldI, oldN, oldT, oldR })
-	pluginsInstalled = func() (plugin.List, error) {
+	oldInventory, oldTools, oldRun := pluginInventory, pluginToolsOf, runPluginToolOf
+	t.Cleanup(func() { pluginInventory, pluginToolsOf, runPluginToolOf = oldInventory, oldTools, oldRun })
+	pluginInventory = func() (plugin.List, func() map[string][]string, error) {
 		var l plugin.List
 		for _, s := range f.specs {
 			l.Plugins = append(l.Plugins, plugin.Entry{Spec: s, Off: f.off})
 		}
-		return l, f.err
-	}
-	toolsNoted = func() map[string][]string {
-		m := map[string][]string{}
-		for _, s := range f.specs {
-			m[s] = []string{"crawl", "search"}
-		}
-		return m
+		return l, func() map[string][]string {
+			m := map[string][]string{}
+			for _, s := range f.specs {
+				m[s] = []string{"crawl", "search"}
+			}
+			return m
+		}, f.err
 	}
 	pluginToolsOf = func(_ context.Context, name string) ([]plugin.Tool, error) {
 		for _, s := range f.specs {

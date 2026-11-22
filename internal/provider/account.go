@@ -120,13 +120,21 @@ type Account struct {
 	pluginKey string // the account's key in plugin-auth.json
 	// wasHost is the built-in's API host, for a moved one's to show as it
 	// did; moved says there is one to show ("" too: Zed's had none).
-	wasHost   string
-	moved     bool
-	transport func(req *http.Request) (*http.Response, error)
-	extension *extensionAccount
+	wasHost       string
+	moved         bool
+	transport     func(req *http.Request) (*http.Response, error)
+	extension     *extensionAccount
+	extensionList func(context.Context) []catalog.Model
 	// clientFor is the client a request of the account's goes through in
 	// place of the one it was given, nil for that one (zcode_start.go).
 	clientFor func(req *http.Request) *http.Client
+}
+
+func (a *Account) listedModels(ctx context.Context) []catalog.Model {
+	if a.extensionList != nil {
+		return a.extensionList(ctx)
+	}
+	return a.models()
 }
 
 // APIs lists the APIs model is served on, as the provider's last model
@@ -219,6 +227,10 @@ func (p Provider) ListedAPIs(model string) []Protocol {
 // Sign authenticates a request to the provider, refreshing what needs it.
 // Plain providers get their key; accounts get the agent's tokens.
 func (p Provider) Sign(ctx context.Context, req *http.Request, proto Protocol, body []byte) error {
+	if p.IsExtension() {
+		p.passClientHeaders(ctx, req.Header)
+		return p.Account.extension.signRequest(ctx, req)
+	}
 	if err := p.CheckExecutor(ctx); err != nil {
 		return err
 	}
@@ -958,8 +970,12 @@ func refreshFailed(status int, agent, msg string) error {
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
+	return accountsContext(context.Background())
+}
+
+func accountsContext(ctx context.Context) []Provider {
 	if settings.AccountDiscoveryOff() {
-		return append(pluginAccounts(), extensionAccounts()...)
+		return append(pluginAccountsContext(ctx), extensionAccountsContext(ctx)...)
 	}
 	rememberLogins(false)
 	home, _ := os.UserHomeDir()
@@ -987,7 +1003,7 @@ func Accounts() []Provider {
 	}
 	// a built-in moved onto its plugin is the plugin's now (migrate.go)
 	out = slices.DeleteFunc(out, func(p Provider) bool { return PluginServes(p.ID) })
-	return append(placeMoved(out, pluginAccounts()), extensionAccounts()...)
+	return append(placeMoved(out, pluginAccountsContext(ctx)), extensionAccountsContext(ctx)...)
 }
 
 // builtinOrder is the built-ins' ids in the order Accounts lists them.

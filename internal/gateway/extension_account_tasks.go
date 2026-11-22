@@ -61,7 +61,7 @@ func (server *Server) accountTaskAdmitter(original access.Identity, localOwner b
 			return extensionhost.AccountTaskAdmission{}, err
 		}
 		if !modelAllowed(who, selected, selection.Model) ||
-			!who.AllowsAccount(selected.ID, provider.LoginID(selected.ID, scope.Account)) {
+			!who.AllowsAccount(selected.ID, provider.LoginID(selected.ID, accountOf(selected))) {
 			return extensionhost.AccountTaskAdmission{}, errors.New("paid account task is outside the caller's current model/account authority")
 		}
 		candidate, err := accountTaskCandidate(selected, selection.Model)

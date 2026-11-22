@@ -400,10 +400,14 @@ func wbCheckin(ctx context.Context, a wbAccount) WorkBuddyCheckin {
 // they don't read either, the sign-in itself is refused: sign in again.
 func wbCheckinUnauthorized(ctx context.Context, do func(*http.Request) (*http.Response, error), a wbAccount, h map[string]string, err error) WorkBuddyCheckin {
 	if !wbIsUnauthorized(err) {
-		return wbCheckinRefused(err)
+		return wbCheckinRefused(ctx, err)
 	}
-	if wbCallVia(ctx, do, http.MethodPost, a.site.api()+"/billing/meter/get-user-resource-summary", h, map[string]any{}, nil) == nil {
+	err = wbCallVia(ctx, do, http.MethodPost, a.site.api()+"/billing/meter/get-user-resource-summary", h, map[string]any{}, nil)
+	switch {
+	case err == nil:
 		return WorkBuddyCheckin{Outcome: CheckinOwnApp, Msg: "WorkBuddy answered the check-in 401 Unauthorized while this account's credits read fine: its check-in takes WorkBuddy's own app"}
+	case errors.Is(err, ctx.Err()):
+		return WorkBuddyCheckin{}
 	}
 	return WorkBuddyCheckin{Outcome: CheckinFailed, Msg: "WorkBuddy refused this account's sign-in (401 Unauthorized); sign in to it again"}
 }
@@ -421,7 +425,7 @@ func wbIsUnauthorized(err error) bool {
 
 // wbCheckinRefused is what an error from the event's API comes to: one of
 // its answers for the day, or a failure to try again.
-func wbCheckinRefused(err error) WorkBuddyCheckin {
+func wbCheckinRefused(ctx context.Context, err error) WorkBuddyCheckin {
 	var we *wbError
 	if errors.As(err, &we) {
 		switch we.code {
@@ -433,7 +437,7 @@ func wbCheckinRefused(err error) WorkBuddyCheckin {
 			return WorkBuddyCheckin{Outcome: CheckinInactive, Msg: we.msg}
 		}
 	}
-	return wbCheckinFailed(err)
+	return checkinRequestFailed(ctx, err)
 }
 
 // wbCheckinFailed is a check-in err kept from an answer: offline when the
@@ -482,22 +486,34 @@ func WorkBuddyCheckins() []WorkBuddyCheckin {
 // those in through the plugin's fetch. qs, which may be the usage cache,
 // is left as it is; nothing is asked.
 func WithCheckins(qs []SubscriptionQuota) []SubscriptionQuota {
-	qs = withCheckins(qs, wbCheckinAccounts(), shownCheckins(wbCheckinPath()))
-	qs = markCheckins(qs, traeCards(traeCheckinAccounts()), shownCheckins(traeCheckinPath()), "trae")
-	qs = markCheckins(qs, miniMaxCards(miniMaxCheckinAccounts()), shownCheckins(miniMaxCheckinPath()), "minimax")
-	qs = markCheckins(qs, qoderCards(qoderCheckinAccounts()), shownCheckins(qoderCheckinPath()), "qoder")
-	return pluginCheckinMarks(qs)
+	return WithCheckinsContext(context.Background(), qs)
+}
+
+// WithCheckinsContext adds check-in metadata using the caller's context.
+func WithCheckinsContext(ctx context.Context, qs []SubscriptionQuota) []SubscriptionQuota {
+	if len(qs) == 0 || ctx.Err() != nil {
+		return qs
+	}
+	qs = withCheckins(qs, wbCheckinAccountsContext(ctx), shownCheckins(wbCheckinPath()))
+	qs = markCheckins(qs, traeCards(traeCheckinAccountsContext(ctx)), shownCheckins(traeCheckinPath()), "trae")
+	qs = markCheckins(qs, miniMaxCards(miniMaxCheckinAccountsContext(ctx)), shownCheckins(miniMaxCheckinPath()), "minimax")
+	qs = markCheckins(qs, qoderCards(qoderCheckinAccountsContext(ctx)), shownCheckins(qoderCheckinPath()), "qoder")
+	return pluginCheckinMarks(ctx, qs)
 }
 
 // LoginCheckins is m, agent's accounts' readings by user (LoginUsage),
 // with each account's daily check-in as its Usage card has it
 // (WithCheckins), for the provider editor's account rows (xwoffice_91592).
 func LoginCheckins(agent string, m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
-	if len(m) == 0 {
+	return LoginCheckinsContext(context.Background(), agent, m)
+}
+
+func LoginCheckinsContext(ctx context.Context, agent string, m map[string]SubscriptionQuota) map[string]SubscriptionQuota {
+	if len(m) == 0 || ctx.Err() != nil {
 		return m
 	}
 	card := loginProvider(Login{Agent: agent})
-	if pp, ok := pluginOfAgent(agent); ok {
+	if pp, ok := pluginOfAgentContext(ctx, agent); ok {
 		card = PluginID(pp.ID)
 	}
 	users := make([]string, 0, len(m))
@@ -506,7 +522,7 @@ func LoginCheckins(agent string, m map[string]SubscriptionQuota) map[string]Subs
 		users = append(users, u)
 		qs = append(qs, SubscriptionQuota{Provider: card, User: u})
 	}
-	qs = WithCheckins(qs)
+	qs = WithCheckinsContext(ctx, qs)
 	out := make(map[string]SubscriptionQuota, len(m))
 	for i, u := range users {
 		q, c := m[u], qs[i]
@@ -542,8 +558,14 @@ func markCheckins(qs []SubscriptionQuota, on []checkinCard, st map[string]WorkBu
 	if len(on) == 0 {
 		return qs
 	}
+	return markCheckinsWithOff(qs, on, st, by, checkinOff(nil))
+}
+
+func markCheckinsWithOff(qs []SubscriptionQuota, on []checkinCard, st map[string]WorkBuddyCheckin, by string, off map[string]bool) []SubscriptionQuota {
+	if len(on) == 0 {
+		return qs
+	}
 	out := slices.Clone(qs)
-	off := checkinOff()
 	for i, q := range out {
 		var mine []checkinCard
 		for _, a := range on {
@@ -578,21 +600,25 @@ func HasWorkBuddy() bool { return len(wbCheckinAccounts()) > 0 }
 // plugin's, checked in through it, unless the plugin checks them in
 // itself.
 func wbCheckinAccounts() []wbAccount {
-	pp, ok := PluginOf(wbCN.id)
+	return wbCheckinAccountsContext(context.Background())
+}
+
+func wbCheckinAccountsContext(ctx context.Context) []wbAccount {
+	pp, ok := pluginOfContext(ctx, wbCN.id)
 	if !ok || pluginChecksIn(pp) {
 		return nil
 	}
-	return wbPluginAccounts(pp)
+	return wbPluginAccounts(ctx, pp)
 }
 
 // wbPluginAccounts are the WorkBuddy plugin's accounts of pp, each sent
 // through the plugin's fetch, which signs it, and told by the card its
 // usage is on.
-func wbPluginAccounts(pp plugin.Provider) []wbAccount {
+func wbPluginAccounts(ctx context.Context, pp plugin.Provider) []wbAccount {
 	auths := plugin.Auths(pp.ID)
 	card := PluginID(pp.ID)
 	var out []wbAccount
-	for _, l := range pluginLogins(pp) {
+	for _, l := range pluginLoginsContext(ctx, pp) {
 		key := l.acct.Key
 		out = append(out, wbAccount{Login: l.Login, site: wbCN, card: card, creds: wbCreds{UID: str(auths[key]["uid"])},
 			via: func(req *http.Request) (*http.Response, error) {

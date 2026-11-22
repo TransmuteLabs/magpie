@@ -735,6 +735,7 @@ func (p *Provider) replaceKey(keyRef, key string) (was, now string, err error) {
 	moveKeyed(p.AccountWindowAmounts, keyRef, now)
 	moveKeyed(p.KeyOwnBalances, keyRef, now)
 	moveKeyed(p.KeyPriceRates, keyRef, now)
+	moveKeyed(p.KeyRateFactors, keyRef, now)
 	return keyRef, now, nil
 }
 

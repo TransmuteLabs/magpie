@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 )
 
 // paraphrase-multilingual-MiniLM-L12-v2 (sentence-transformers, Apache
@@ -137,7 +138,6 @@ func loadEmbedNet(path string) (*net, error) {
 		for c := range sc {
 			sc[c], zp[c] = s, int32(z.raw[0])
 		}
-		// raw is a slice of the file read whole; the table is most of it
 		return q.raw, sc, zp
 	}
 	emb := func(name string, rows int64) []float32 {
@@ -231,5 +231,6 @@ func loadEmbedNet(path string) (*net, error) {
 	if missing != nil {
 		return nil, missing
 	}
+	nt.word = slices.Clone(nt.word)
 	return nt, nil
 }

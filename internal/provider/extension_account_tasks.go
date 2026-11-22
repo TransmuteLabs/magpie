@@ -23,9 +23,13 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if manager == nil || manager.Namespace() != providerExtensionHost().Namespace() {
 		return fail(errors.New("paid task belongs to another provider host"))
 	}
-	policy, err := extensionKeepAlivePolicyNow()
-	id := ExtensionProviderID(selection.Scope.Plugin, selection.Scope.Provider)
-	if err != nil || !policy.allows(id, selection.Scope.Account) {
+	policy, err := extensionKeepAlivePolicyNow(ctx)
+	public, ownerErr := readSubscriptionIdentity(ctx, selection.Scope)
+	if ownerErr != nil {
+		return fail(ownerErr)
+	}
+	id, user := public.provider, public.user
+	if err != nil || !policy.allows(public) {
 		return fail(errors.New("paid task account is off, unlisted or unreadable"))
 	}
 	if _, disabled := ModelDisabled(id, selection.Model); disabled || DisabledUnknown() {
@@ -68,7 +72,7 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	bindingScope := scope
 	bindingScope.Operation, bindingScope.Attempt, bindingScope.Session = "", 0, ""
 	binding := &extensionAccount{host: manager, manifest: entry.Manifest, descriptor: descriptor,
-		scope: bindingScope, modelKey: revision}
+		scope: bindingScope, modelKey: revision, public: public, enableGeneration: entry.EnableGeneration}
 	prepared, err := binding.prepare(ctx)
 	if err != nil {
 		return fail(err)
@@ -81,7 +85,7 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 			selected = accountSettings(selected, stored)
 		}
 	}
-	if !selected.On() || selected.OwnPaused() || !selected.AccountServes(scope.Account, selection.Model) {
+	if !selected.On() || selected.OwnPaused() || !selected.AccountServes(user, selection.Model) {
 		return fail(errors.New("paid task selected account no longer serves its model"))
 	}
 	ctx, err = extensionNetworkContext(ctx, scope)
@@ -95,7 +99,7 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if err != nil || !slices.ContainsFunc(models, func(model catalog.Model) bool { return model.ID == selection.Model }) {
 		return fail(errors.New("paid task model is absent from its current account catalog"))
 	}
-	quota := extensionQuota(ctx, Login{Agent: id, User: scope.Account, On: true, extension: binding})
+	quota := extensionQuota(ctx, Login{Agent: id, User: user, On: true, extension: binding})
 	if quota.Error != "" || quota.ReadDeferred || quota.extensionUsage == nil ||
 		!quota.extensionUsage.fresh || !quota.extensionUsage.current() {
 		return fail(errors.New("paid task requires a fresh successful account quota reading"))
@@ -108,17 +112,20 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 			return fail(errors.New("paid task account quota is unknown or exhausted"))
 		}
 	}
-	if allowanceOf(quota.Windows, time.Now()).CapHeld(selection.Model, HoldCaps(selected, id, scope.Account), time.Now()) != nil {
+	if allowanceOf(quota.Windows, time.Now()).CapHeld(selection.Model, HoldCaps(selected, id, user), time.Now()) != nil {
 		return fail(errors.New("paid task account is held at its usage cap"))
 	}
 	choice := netproxy.Choice(ctx)
-	selectedSignIn := extensionSignIn{host: manager, entry: entry, config: config.Version, scope: scope}
+	selectedSignIn := extensionSignIn{host: manager, entry: entry, config: config.Version, scope: scope, public: public}
 	policy = accountTaskPolicy(policy)
 	check := func(current context.Context) error {
 		if err := current.Err(); err != nil {
 			return err
 		}
-		now, err := extensionKeepAlivePolicyNow()
+		if err := CheckExtensionSubscription(current, scope.Plugin, scope.Provider, public.revision); err != nil {
+			return err
+		}
+		now, err := extensionKeepAlivePolicyNow(current)
 		if err != nil || !now.allowsSelection(selectedSignIn, scope.Generation) ||
 			!reflect.DeepEqual(accountTaskPolicy(now), policy) {
 			return errors.New("paid task account policy changed during admission")
@@ -134,7 +141,10 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 			return errors.New("paid task account generation changed during admission")
 		}
 		network, err := extensionNetworkContext(current, scope)
-		if err != nil || netproxy.Choice(network) != choice {
+		if err != nil {
+			return err
+		}
+		if netproxy.Choice(network) != choice {
 			return errors.New("paid task selected proxy changed during admission")
 		}
 		if err := netproxy.Held(network); err != nil {
@@ -151,6 +161,7 @@ func accountTaskPolicy(policy extensionKeepAlivePolicy) extensionKeepAlivePolicy
 		if validExtensionAuthMark(policy.logins[index].Refused) {
 			policy.logins[index].Refused, policy.logins[index].Lapsed = "", ""
 		}
+		policy.logins[index].SDKRefused, policy.logins[index].SDKLapsed = "", ""
 	}
 	return policy
 }

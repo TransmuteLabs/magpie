@@ -38,17 +38,19 @@ func sourceResumeToken(record *sessionSourceRecord) string {
 		return ""
 	}
 	selection := struct {
-		Owner    []string
-		Locator  sdk.SessionSourceLocator
-		Snapshot string
-		Recipe   *sdk.SessionResumeRecipe
-		Storage  *sdk.StorageSessionLocator
-		Family   string
+		Owner            []string
+		Locator          sdk.SessionSourceLocator
+		Snapshot         string
+		Recipe           *sdk.SessionResumeRecipe
+		Storage          *sdk.StorageSessionLocator
+		Family           string
+		EnableGeneration string `json:",omitempty"`
 	}{
 		Owner: []string{record.grant.plugin, record.grant.identity, record.grant.reference,
 			record.grant.descriptor.ID, record.grant.descriptor.Agent, record.grant.descriptor.Resume,
 			sourceRecordID(record), record.summary.Cwd},
 		Locator: record.request.Locator, Snapshot: record.request.Snapshot, Recipe: record.grant.descriptor.AgentResume,
+		EnableGeneration: record.grant.enableGeneration,
 	}
 	if record.storage != nil {
 		selection.Storage = &record.storage.locator
@@ -112,12 +114,15 @@ func PlanExtensionSourceResume(ctx context.Context, owner, id, expected string) 
 		if expected != sourceResumeToken(record) || record.grant.descriptor.Resume != "agent" {
 			return nil, extension.ErrActionChanged
 		}
-		manifest, identity, err := sessionMigrationIdentity(ctx, sourceManager(), record.grant.plugin)
-		if err != nil || identity != record.grant.identity {
+		selected, err := sessionMigrationSelection(ctx, sourceManager(), record.grant.plugin)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil || !record.grant.matches(selected) {
 			return nil, extension.ErrActionChanged
 		}
 		recipe := record.grant.descriptor.AgentResume
-		if err := sdk.ValidateSessionResume(manifest, owner, "agent", recipe); err != nil {
+		if err := sdk.ValidateSessionResume(selected.entry.Manifest, owner, "agent", recipe); err != nil {
 			return nil, err
 		}
 		args, err := recipe.Arguments(id)

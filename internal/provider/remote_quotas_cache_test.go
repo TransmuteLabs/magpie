@@ -3,10 +3,80 @@ package provider
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestCanceledRemoteQuotaReadLeavesCacheReadyToRetry(t *testing.T) {
+	for _, kind := range []string{"cards", "key limit"} {
+		t.Run(kind, func(t *testing.T) {
+			ForgetRemoteCardsForTest()
+			t.Cleanup(ForgetRemoteCardsForTest)
+			started := make(chan struct{})
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case RemoteCardsPath, RemoteKeyLimitPath:
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				if calls.Add(1) == 1 {
+					close(started)
+					<-r.Context().Done()
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if kind == "cards" {
+					_, _ = io.WriteString(w, `{"object":"list","data":[{"provider":"sample","name":"Sample"}]}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"limited":false}`)
+			}))
+			t.Cleanup(server.Close)
+			remote := Provider{ID: "office", Anthropic: server.URL, Key: "synthetic"}
+			read := func(ctx context.Context) {
+				if kind == "cards" {
+					remoteCards(ctx, remote, false)
+					return
+				}
+				remoteKeyCardOf(ctx, remote, "Test", remote.Key, false)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				read(ctx)
+			}()
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("remote read never started")
+			}
+			cancel()
+			<-done
+			read(t.Context())
+			if calls.Load() != 2 {
+				t.Errorf("the canceled read blocked a fresh attempt: %d remote calls", calls.Load())
+			}
+			if kind == "cards" {
+				if got := remoteCards(t.Context(), remote, false); len(got) != 1 || got[0].Provider != "office/sample" {
+					t.Fatalf("remote cards did not recover: %+v", got)
+				}
+			} else if got := remoteKeyCardOf(t.Context(), remote, "Test", remote.Key, false); got.GatewayKey == nil {
+				t.Fatalf("remote key limit did not recover: %+v", got)
+			}
+		})
+	}
+}
 
 func TestRemoteCardsCacheSeparatesEndpoints(t *testing.T) {
 	ForgetRemoteCardsForTest()

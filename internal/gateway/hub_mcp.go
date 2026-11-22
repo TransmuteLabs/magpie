@@ -642,7 +642,7 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 		if MCPHub != nil {
 			ss = hubServersFor(r.Context(), agent)
 		}
-		if hubOnDemand(agent, hubToolCount(ss)) {
+		if hubOnDemand(agent, hubToolCount(ss), hubAsksOnDemand(r)) {
 			say += hubOnDemandSay
 		}
 		if hubCodeOn(hubToolCount(ss)) {
@@ -663,7 +663,7 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 	case "tools/list":
 		ts := hubTools(r.Context(), agent)
 		where := hubWhere(r)
-		onDemand := hubOnDemand(agent, len(ts))
+		onDemand := hubOnDemand(agent, len(ts), hubAsksOnDemand(r))
 		var list []any
 		if onDemand {
 			// hubTools ran, so each server's tools are as just listed
@@ -677,7 +677,7 @@ func (s *Server) hubMCPCall(r *http.Request, agent string, m mcpMessage) (any, m
 			}
 		}
 		if hubCodeOn(len(ts)) {
-			list = append(list, hubCodeSpec(where, onDemand))
+			list = append(list, hubCodeSpec(where, onDemand, hubSkillsOf(agent)))
 		}
 		return map[string]any{"tools": list}, nil
 	case "tools/call":

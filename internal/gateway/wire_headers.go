@@ -96,6 +96,10 @@ func upstreamBegins(req *http.Request, plugin string) func(*http.Response, error
 		t.sent.Set("Host", req.Host)
 	}
 	return func(res *http.Response, err error) {
+		if wire := codexWireOf(req); req.Method == http.MethodPost && wire != nil && wire.encoded != nil {
+			t.sent.Del("Content-Length")
+			t.sent.Set("Content-Encoding", "zstd")
+		}
 		observeUpstreamFailure(req.Context(), plugin, res)
 		t.took = time.Since(t.start)
 		if err != nil {

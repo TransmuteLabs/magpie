@@ -123,7 +123,7 @@ func TestQuotaReportPoolsAntigravity(t *testing.T) {
 			{Name: "7 days", Pool: "Claude & GPT", Span: week, Aside: true, Used: 90, ResetsAt: &reset},
 			{Name: "5 hours", Pool: "Claude & GPT", Span: five, Aside: true, Used: 90, ResetsAt: &reset},
 		}}
-	got := quotaReport([]SubscriptionQuota{antigravity}, nil, nil, now)
+	got := quotaReport(t.Context(), []SubscriptionQuota{antigravity}, nil, nil, now)
 	var names []string
 	for _, w := range got[0].Windows {
 		names = append(names, w.Name)

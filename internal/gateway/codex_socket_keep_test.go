@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
@@ -9,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/tidwall/gjson"
 
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -21,8 +25,14 @@ func keptReply(f *fakeSocketBackend) func(socketTurn) []string {
 		f.mu.Lock()
 		n := len(f.sockets)
 		f.mu.Unlock()
+		// The real backend names the turn's previous_response_id back in
+		// response.created; a relay that ignores it names none.
+		created := fmt.Sprintf(`{"type":"response.created","response":{"id":"resp-%d"}}`, n)
+		if prev := gjson.GetBytes(turn.msg, "previous_response_id").String(); prev != "" {
+			created = fmt.Sprintf(`{"type":"response.created","response":{"id":"resp-%d","previous_response_id":%q}}`, n, prev)
+		}
 		return []string{
-			fmt.Sprintf(`{"type":"response.created","response":{"id":"resp-%d"}}`, n),
+			created,
 			`{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","status":"in_progress","role":"assistant","content":[]}}`,
 			`{"type":"response.output_text.delta","delta":"pong"}`,
 			`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"pong"}]}}`,
@@ -79,7 +89,9 @@ func TestCodexKeptSocketSendsTheDelta(t *testing.T) {
 	chatgpt(t, f.ServeHTTP)
 
 	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing))
-	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing, asstPong, userAgain))
+	samePing := `{"id":"msg_u","status":"completed","type":"message","role":"user","name":null,"content":[` +
+		`{"type":"input_text","text":"ping","annotations":[],"logprobs":[]}]}`
+	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", samePing, asstPong, userAgain))
 
 	if posts, sockets := f.counts(); posts != 0 || sockets != 2 || f.opened() != 1 {
 		t.Fatalf("%d posts, %d turns on %d sockets; want both turns on one socket", posts, sockets, f.opened())
@@ -101,20 +113,183 @@ func TestCodexKeptSocketSendsTheDelta(t *testing.T) {
 	}
 
 	// an edited history goes whole, on the same socket
-	edited := strings.Replace(userPing, "ping", "PING", 1)
-	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", edited, asstPong, userAgain, asstPong, userAgain))
+	edited := strings.Replace(samePing, "ping", "PING", 1)
+	history := []string{edited, asstPong, userAgain, asstPong, userAgain}
+	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", history...))
 	third := gjson.ParseBytes(f.turn(2).msg)
-	if third.Get("previous_response_id").Exists() || len(third.Get("input").Array()) != 5 {
+	if third.Get("previous_response_id").Exists() || third.Get("input.#").Int() != 5 ||
+		third.Get("input.0.content.0.text").String() != "PING" {
 		t.Errorf("edited history went as a delta: %s", f.turn(2).msg)
 	}
-	// another model goes whole too
-	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.4", edited, asstPong, userAgain, asstPong, userAgain, asstPong, userAgain))
+	history = append(history, asstPong, userAgain)
+	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", history...))
 	fourth := gjson.ParseBytes(f.turn(3).msg)
-	if fourth.Get("previous_response_id").Exists() || len(fourth.Get("input").Array()) != 7 {
-		t.Errorf("another model went as a delta: %s", f.turn(3).msg)
+	if fourth.Get("previous_response_id").String() != "resp-3" || fourth.Get("input.#").Int() != 1 ||
+		fourth.Get("input.0.content.0.text").String() != "again" {
+		t.Errorf("the edited history was not carried forward: %s", f.turn(3).msg)
 	}
-	if f.turn(3).socket != 1 {
-		t.Errorf("turn on socket %d, want the kept one", f.turn(3).socket)
+
+	// another model goes whole too
+	history = append(history, asstPong, userAgain)
+	keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.4", history...))
+	fifth := gjson.ParseBytes(f.turn(4).msg)
+	if fifth.Get("previous_response_id").Exists() || fifth.Get("input.#").Int() != int64(len(history)) {
+		t.Errorf("another model went as a delta: %s", f.turn(4).msg)
+	}
+	if f.turn(4).socket != 1 {
+		t.Errorf("turn on socket %d, want the kept one", f.turn(4).socket)
+	}
+}
+
+func TestCodexKeptInputSkipsRepeatedNormalization(t *testing.T) {
+	socketOn(t)
+	backend := &fakeSocketBackend{keep: true}
+	backend.frames = keptReply(backend)
+	chatgpt(t, backend.ServeHTTP)
+
+	history := codexSocketHistory(128)
+	body := keptTurn("allocations", "gpt-5.5", history...)
+	keptPost(t, "acct-1", body)
+	codexKeepMu.Lock()
+	var key string
+	if len(codexKeepPool) == 1 {
+		for key = range codexKeepPool {
+		}
+	}
+	codexKeepMu.Unlock()
+	if key == "" {
+		t.Fatal("first turn did not keep a socket")
+	}
+	input := []byte(body)
+	var shape *codexTurnShape
+	allocs := testing.AllocsPerRun(5, func() {
+		shape, _ = codexShape(input, key)
+	})
+	if shape == nil || len(shape.sums) != len(history) {
+		t.Fatal("could not read the kept history")
+	}
+	if limit := float64(len(history) * 4); allocs > limit {
+		t.Fatalf("shaping %d unchanged items allocated %.0f times, want at most %.0f", len(history), allocs, limit)
+	}
+}
+
+func TestCodexKeptInputSumsAreBounded(t *testing.T) {
+	history := strings.Repeat(`{},`, codexKeepRawInputMax) + `{}`
+	shape, ok := codexShape([]byte(`{"input":[`+history+`]}`), "")
+	if !ok || len(shape.sums) != codexKeepRawInputMax+1 || len(shape.rawSums) != codexKeepRawInputMax {
+		t.Fatal("the memo limit affected the full history's sums")
+	}
+}
+
+func codexSocketHistory(count int) []string {
+	history := make([]string, count)
+	text := strings.Repeat("Read this file. ", 128)
+	for i := range history {
+		history[i] = strings.Replace(userPing, "ping", fmt.Sprintf("%d %s", i, text), 1)
+	}
+	return history
+}
+
+func BenchmarkCodexKeptSocketHistory(b *testing.B) {
+	wasOff := codexSocketOff.Swap(false)
+	b.Cleanup(func() {
+		codexKeepDrain()
+		codexSocketOff.Store(wasOff)
+	})
+	backend := &fakeSocketBackend{keep: true}
+	backend.frames = keptReply(backend)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(backend))
+	b.Cleanup(up.Close)
+	base := provider.CodexBase
+	provider.CodexBase = up.URL + "/backend-api/codex"
+	b.Cleanup(func() { provider.CodexBase = base })
+	server := New()
+	front := httptest.NewServer(server.Front())
+	b.Cleanup(front.Close)
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		server.sockets.drain(ctx)
+	})
+	const (
+		historyItems  = 128
+		continuations = 24
+	)
+	history := codexSocketHistory(historyItems)
+	full := func() []byte {
+		return codexCreate([]byte(keptTurn("history", "gpt-5.5", history...)))
+	}
+	turns := [][]byte{full()}
+	for i := range continuations {
+		body := keptTurn("history", "gpt-5.5", userAgain)
+		turns = append(turns, codexCreate(withField([]byte(body), "previous_response_id", []byte(fmt.Sprintf(`"resp-%d"`, i+1)))))
+		history = append(history, asstPong, userAgain)
+	}
+	history[0] = strings.Replace(history[0], "Read", "read", 1)
+	turns = append(turns, full())
+	u := "ws" + strings.TrimPrefix(front.URL, "http") + CodexPath + "/responses"
+	h := http.Header{"Authorization": {"Bearer chatgpt-token"}, "Chatgpt-Account-Id": {"acct-1"}}
+	b.ReportAllocs()
+	for b.Loop() {
+		ctx, cancel := context.WithTimeout(b.Context(), 15*time.Second)
+		c, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPHeader: h})
+		if err != nil {
+			cancel()
+			b.Fatal(err)
+		}
+		for _, frame := range turns {
+			if err := c.Write(ctx, websocket.MessageText, frame); err != nil {
+				_ = c.CloseNow()
+				cancel()
+				b.Fatal(err)
+			}
+			for {
+				_, event, err := c.Read(ctx)
+				if err != nil {
+					_ = c.CloseNow()
+					cancel()
+					b.Fatal(err)
+				}
+				kind := gjson.GetBytes(event, "type").String()
+				if kind == "response.completed" {
+					break
+				}
+				if kind == "error" || kind == "response.failed" || kind == "response.incomplete" {
+					_ = c.CloseNow()
+					cancel()
+					b.Fatalf("turn ended as %s", event)
+				}
+			}
+		}
+		_ = c.CloseNow()
+		cancel()
+		b.StopTimer()
+		if posts, calls := backend.counts(); posts != 0 || calls != len(turns) {
+			b.Fatalf("HTTP %d, WS turns %d, want %d WS turns", posts, calls, len(turns))
+		}
+		for i := range len(turns) {
+			turn := backend.turn(i)
+			message := gjson.ParseBytes(turn.msg)
+			wantInput, wantPrev := 1, fmt.Sprintf("resp-%d", i)
+			switch i {
+			case 0:
+				wantInput, wantPrev = historyItems, ""
+			case len(turns) - 1:
+				wantInput, wantPrev = len(history), ""
+				if got := message.Get("input.0.content.0.text").String(); !strings.Contains(got, "read") {
+					b.Fatal("whole retry lost the edit")
+				}
+			}
+			if got := message.Get("input.#").Int(); got != int64(wantInput) ||
+				message.Get("previous_response_id").String() != wantPrev || turn.socket != backend.opened() {
+				b.Fatalf("turn %d: input %d, previous response %q, socket %d", i, got, message.Get("previous_response_id").String(), turn.socket)
+			}
+		}
+		codexKeepDrain()
+		backend.mu.Lock()
+		backend.sockets = nil
+		backend.mu.Unlock()
+		b.StartTimer()
 	}
 }
 

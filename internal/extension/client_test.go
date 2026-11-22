@@ -20,12 +20,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/netproxy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 	codec "github.com/yetone/magpie/pkg/protocolext"
 )
 
-func rawWorkerHelper(observations bool) {
+func rawWorkerHelper(methods ...string) {
 	body, err := os.ReadFile(sdk.ManifestFile)
 	if err != nil {
 		os.Exit(1)
@@ -66,7 +67,7 @@ func rawWorkerHelper(observations bool) {
 			ready = nil
 			result = struct{}{}
 		case sdk.MethodLedgerObserve, sdk.MethodRequestObserve:
-			if !observations || ready == nil {
+			if !slices.Contains(methods, frame.Method) || ready == nil {
 				os.Exit(1)
 			}
 			result = struct{}{}
@@ -80,8 +81,26 @@ func rawWorkerHelper(observations bool) {
 			if payload.Model == "bad" || payload.RequestID == "bad" {
 				result = map[string]int{"input": 999}
 			}
-		default:
-			if observations || frame.Method != sdk.MethodToolCall || manifest.Contract.Version.Minor >= 1 && ready == nil {
+		case sdk.MethodProviderUsage:
+			var request sdk.UsageRequest
+			if !slices.Contains(methods, frame.Method) || ready == nil || json.Unmarshal(frame.Params, &request) != nil {
+				os.Exit(1)
+			}
+			window := map[string]any{"name": "daily", "used": 12, "resetsAt": int64(253402300799999)}
+			report := map[string]any{"revision": request.Revision, "windows": []any{window}}
+			switch frame.Scope.Session {
+			case "reset-out-of-range":
+				window["resetsAt"] = int64(253402300800000)
+			case "null-reset":
+				window["resetsAt"] = nil
+			case "null-window-as-of":
+				window["asOf"] = nil
+			case "null-result-as-of":
+				report["asOf"] = nil
+			}
+			result = report
+		case sdk.MethodToolCall:
+			if !slices.Contains(methods, frame.Method) || manifest.Contract.Version.Minor >= 1 && ready == nil {
 				os.Exit(1)
 			}
 			// Complete control RPCs before simulating a payload handler that
@@ -93,6 +112,8 @@ func rawWorkerHelper(observations bool) {
 			for {
 				time.Sleep(time.Hour)
 			}
+		default:
+			os.Exit(1)
 		}
 		body, err := json.Marshal(result)
 		if err != nil || output.Encode(sdk.Frame{Kind: "result", ID: frame.ID, Result: body}) != nil {
@@ -448,6 +469,11 @@ func (fixtureReply) Finish(error) error { return nil }
 
 func fixturePackage(t *testing.T) string {
 	t.Helper()
+	return fixturePackageAt(t, 1)
+}
+
+func fixturePackageAt(t testing.TB, apiMinor int) string {
+	t.Helper()
 	directory := t.TempDir()
 	entry := "worker"
 	if filepath.Ext(os.Args[0]) == ".exe" {
@@ -471,7 +497,7 @@ func fixturePackage(t *testing.T) string {
 	manifest := sdk.Manifest{
 		Schema: 1, ID: "fixture", Version: "1.0.0", Runtime: "exec", Entry: entry, Args: []string{"--sdk-test-worker"},
 		Contract: sdk.Contract{
-			Version: sdk.APIVersion{Major: 1, Minor: 1},
+			Version: sdk.APIVersion{Major: 1, Minor: apiMinor},
 			Capabilities: []sdk.Capability{
 				sdk.InboundCodec, sdk.OutboundExecutor, sdk.AgentWiring, sdk.AccountAuth,
 				sdk.ModelDiscovery, sdk.UsageReporter, sdk.OperationControl,
@@ -494,7 +520,12 @@ func fixturePackage(t *testing.T) string {
 	return directory
 }
 
-func fixtureManager(t *testing.T) (*Manager, Installed) {
+func fixtureManager(t testing.TB) (*Manager, Installed) {
+	t.Helper()
+	return fixtureManagerAt(t, 1)
+}
+
+func fixtureManagerAt(t testing.TB, apiMinor int) (*Manager, Installed) {
 	t.Helper()
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() {
@@ -506,7 +537,7 @@ func fixtureManager(t *testing.T) (*Manager, Installed) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	entry, err := manager.Install(ctx, fixturePackage(t))
+	entry, err := manager.Install(ctx, fixturePackageAt(t, apiMinor))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,6 +693,78 @@ func TestWorkerAcceptanceDurableAndCrashNeverReplayed(t *testing.T) {
 		t.Fatal("a previous operation was replayed")
 	}
 	toolCall(t, manager, sdk.Scope{}, "pid", nil)
+}
+
+func TestWorkerProviderStreamRechecksSelectedAccount(t *testing.T) {
+	for _, change := range []string{"replacement", "sign out"} {
+		t.Run(change, func(t *testing.T) {
+			manager, installed := fixtureManager(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			account, err := manager.Store().SaveAccount(Account{
+				Plugin: installed.Manifest.ID, Provider: "provider", ID: "account", Auth: json.RawMessage(`{"token":"selected"}`),
+			}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := sdk.Scope{Plugin: account.Plugin, Provider: account.Provider, Account: account.ID,
+				Generation: account.Generation, Operation: "revoked-stream", Attempt: 1}
+			var events []string
+			wantCode := "stale_generation"
+			if change == "sign out" {
+				wantCode = "not_found"
+			}
+			_, err = manager.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope,
+				sdk.ExecuteRequest{Protocol: "chat", Model: "model"}, func(event Event) error {
+					events = append(events, event.Name)
+					if event.Name != "accepted" {
+						return nil
+					}
+					if change == "sign out" {
+						return manager.DeleteSubscriptionAccount(ctx, scope, "")
+					}
+					account.Auth = json.RawMessage(`{"token":"replacement"}`)
+					_, err := NewStore(manager.Namespace()).SaveAccount(account, scope.Generation)
+					return err
+				})
+			storeTestError(t, err, wantCode)
+			var outcome *OutcomeError
+			if !errors.As(err, &outcome) || outcome.Outcome != "uncertain" || !slices.Equal(events, []string{"accepted"}) {
+				t.Fatalf("revoked stream delivered events %v with outcome %v", events, err)
+			}
+			journal, err := manager.Store().Operation(scope.Plugin, scope.Operation)
+			if err != nil || journal.State != "uncertain" || journal.Scope != scope {
+				t.Fatalf("revoked stream lost its durable operation: %+v %v", journal, err)
+			}
+		})
+	}
+}
+
+func BenchmarkWorkerProviderStreamSelectedAccount(bench *testing.B) {
+	manager, installed := fixtureManager(bench)
+	account, err := manager.Store().SaveAccount(Account{
+		Plugin: installed.Manifest.ID, Provider: "provider", ID: "account",
+		Auth: json.RawMessage(`{"token":"` + strings.Repeat("a", 48<<10) + `"}`),
+	}, 0)
+	if err != nil {
+		bench.Fatal(err)
+	}
+	scope := sdk.Scope{Plugin: account.Plugin, Provider: account.Provider, Account: account.ID, Generation: account.Generation}
+	request := sdk.ExecuteRequest{Protocol: "chat", Model: "model"}
+	call := func() {
+		var events int
+		if _, err := manager.Call(bench.Context(), scope.Plugin, sdk.MethodProviderExecute, scope, request, func(event Event) error {
+			events++
+			return nil
+		}); err != nil || events != 3 {
+			bench.Fatalf("provider stream delivered %d events: %v", events, err)
+		}
+	}
+	call()
+	bench.ReportAllocs()
+	for bench.Loop() {
+		call()
+	}
 }
 
 func TestWorkerScopedHostStateAndGeneration(t *testing.T) {
@@ -851,6 +954,272 @@ func TestWorkerRemovedAuthCapabilityDoesNotReceiveRetainedCredentials(t *testing
 	}
 	if auth := toolCall(t, manager, sdk.Scope{}, "auth", nil); string(auth) != "null" {
 		t.Fatalf("credentials leaked to an unbound call: %s", auth)
+	}
+}
+
+func TestManagerCallRefusesInvalidContractAndRevokedScopeBeforeStart(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		method string
+		scope  sdk.Scope
+	}{
+		{"outside contract", sdk.MethodLedgerObserve, sdk.Scope{}},
+		{"undeclared provider", sdk.MethodToolCall, sdk.Scope{Provider: "unknown"}},
+		{"revoked account", sdk.MethodToolCall, sdk.Scope{Provider: "provider", Account: "gone", Generation: 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner, installed := fixtureManager(t)
+			manager := NewManager(owner.Namespace())
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := manager.Close(ctx); err != nil {
+					t.Error(err)
+				}
+			})
+			if _, err := manager.Call(t.Context(), installed.Manifest.ID, test.method, test.scope,
+				sdk.ToolRequest{ID: "tool", Arguments: json.RawMessage(`{"action":"auth"}`)}, nil); err == nil {
+				t.Fatal("invalid call was accepted")
+			}
+			if manager.Running(installed.Manifest.ID) {
+				t.Fatal("invalid call started an installed worker")
+			}
+			if auth := toolCall(t, manager, sdk.Scope{}, "auth", nil); string(auth) != "null" {
+				t.Fatalf("ordinary invocation failed after rejected request: %s", auth)
+			}
+		})
+	}
+}
+
+func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
+	for _, scenario := range []struct {
+		change string
+		minor  int
+	}{
+		{"configuration", 9}, {"inbound enable epoch", 9}, {"account", 9}, {"removed account", 9}, {"privacy", 9},
+		{"account", 8}, {"removed account", 8}, {"privacy", 8},
+	} {
+		name := scenario.change
+		if scenario.minor < 9 {
+			name = "legacy " + name
+		}
+		t.Run(name, func(t *testing.T) {
+			manager, installed := fixtureManagerAt(t, scenario.minor)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			id := installed.Manifest.ID
+			lease, err := manager.Acquire(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			peer := NewManager(manager.Namespace())
+			t.Cleanup(func() {
+				if err := peer.Close(context.Background()); err != nil {
+					t.Error(err)
+				}
+			})
+			account, err := manager.Store().SaveAccount(Account{
+				Plugin: id, Provider: "provider", ID: "account", Auth: json.RawMessage(`{"token":"original"}`),
+			}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := sdk.Scope{Plugin: id, Provider: account.Provider, Account: account.ID, Generation: account.Generation,
+				Operation: "waiting-execute", Attempt: 1}
+			request := sdk.ExecuteRequest{Protocol: "chat", Model: "model"}
+			if scenario.minor >= 9 {
+				ctx = WithProviderExecuteSelection(ctx, lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration)
+			}
+			if scenario.change == "inbound enable epoch" || scenario.minor < 9 {
+				ctx = WithInboundLease(ctx)
+				pinInboundLease(ctx, lease)
+			}
+			bound := make(chan ProviderExecutionBinding, 1)
+			ctx = WithProviderExecutionBinding(ctx, func(actual ProviderExecutionBinding) { bound <- actual })
+			slots := lease.client.regularSlots
+			for range cap(slots) {
+				slots <- struct{}{}
+			}
+			release := sync.OnceFunc(func() {
+				for range cap(slots) {
+					<-slots
+				}
+			})
+			result := make(chan error, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, err := manager.Call(ctx, id, sdk.MethodProviderExecute, scope, request, nil)
+				result <- err
+			}()
+			defer func() {
+				cancel()
+				release()
+				<-done
+			}()
+			select {
+			case actual := <-bound:
+				if actual.Scope != scope || actual.PackageRevision != lease.Revision() || actual.ConfigVersion != lease.ConfigVersion() ||
+					actual.EnableGeneration != lease.worker.entry.EnableGeneration {
+					t.Fatalf("execution bound another selection: %+v", actual)
+				}
+			case err := <-result:
+				t.Fatalf("execute returned before the slot opened: %v", err)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			switch scenario.change {
+			case "configuration":
+				_, err = peer.CompareAndSwapModuleConfig(ctx, id, lease.ConfigVersion(), json.RawMessage(`{"updated":true}`))
+			case "inbound enable epoch":
+				if err = peer.catalog.SetEnabled(ctx, id, false); err == nil {
+					err = peer.catalog.SetEnabled(ctx, id, true)
+				}
+			case "account":
+				account.Auth = json.RawMessage(`{"token":"replacement"}`)
+				_, err = peer.Store().SaveAccount(account, account.Generation)
+			case "removed account":
+				err = peer.Store().DeleteAccount(id, account.Provider, account.ID, account.Generation)
+			case "privacy":
+				t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := lease.client.next.Load()
+			release()
+			err = <-result
+			var outcome *OutcomeError
+			if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || lease.client.next.Load() != next {
+				t.Fatalf("revoked selection crossed RPC admission: %v", err)
+			}
+			wantCode := map[string]string{"account": "stale_generation", "removed account": "not_found", "privacy": "account_discovery_off"}[scenario.change]
+			if wantCode != "" {
+				var revoked *sdk.Error
+				if !errors.As(err, &revoked) || revoked.Code != wantCode {
+					t.Fatalf("account revocation lost its SDK error: %v", err)
+				}
+			}
+			record, err := manager.Store().Operation(id, scope.Operation)
+			if err != nil || record.State != "not-started" {
+				t.Fatalf("pre-dispatch refusal left an incorrect journal: %+v %v", record, err)
+			}
+		})
+	}
+}
+
+func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
+	for _, change := range []string{"enable epoch", "sign out", "privacy", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			t.Setenv("MAGPIE_NO_ACCOUNTS", "0")
+			manager, scope := usageManagerVersion(t, 9, func(manifest *sdk.Manifest) {
+				manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.ProviderSignIn, sdk.ProviderSavedSignIn)
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			lease, err := manager.Acquire(ctx, scope.Plugin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lease.Close()
+			scope.Operation, scope.Attempt = "admitted-execute", 1
+			ctx = WithProviderExecuteSelection(ctx, lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration)
+			logoutCtx := ctx
+			checks := 0
+			ctx = context.WithValue(ctx, windowAdmissionKey{}, func(ctx context.Context) error {
+				checks++
+				if checks != 2 {
+					return nil
+				}
+				switch change {
+				case "enable epoch":
+					peer := NewCatalog(manager.Namespace())
+					if err := peer.SetEnabled(ctx, scope.Plugin, false); err != nil {
+						return err
+					}
+					return peer.SetEnabled(ctx, scope.Plugin, true)
+				case "sign out":
+					peer := NewManager(manager.Namespace())
+					defer peer.Close(logoutCtx)
+					logout := sdk.Scope{Plugin: scope.Plugin, Provider: scope.Provider, Account: scope.Account, Generation: scope.Generation}
+					if _, err := peer.Call(logoutCtx, scope.Plugin, sdk.MethodAuthLogout, logout, sdk.AuthLogoutRequest{}, nil); err != nil {
+						return err
+					}
+					return peer.DeleteSubscriptionAccount(logoutCtx, logout, "")
+				case "privacy":
+					t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+				}
+				return nil
+			})
+			next := lease.client.next.Load()
+			_, err = manager.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope,
+				sdk.ExecuteRequest{Protocol: "chat", Model: "model"}, nil)
+			state := "not-started"
+			if change == "unchanged" {
+				state = "completed"
+				if err != nil || lease.client.next.Load() == next {
+					t.Fatalf("unchanged selection was not dispatched: %v", err)
+				}
+			} else {
+				var outcome *OutcomeError
+				if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || lease.client.next.Load() != next {
+					t.Fatalf("selection changed during owner admission crossed RPC dispatch: %v", err)
+				}
+				if change == "sign out" {
+					var refusal *sdk.Error
+					if !errors.As(err, &refusal) || refusal.Code != "not_found" {
+						t.Fatalf("sign-out lost its account refusal: %v", err)
+					}
+				}
+				root, openErr := manager.catalog.open(false)
+				if openErr != nil {
+					t.Fatal(openErr)
+				}
+				defer root.Close()
+				held, lockErr := lockSubscriptionUse(ctx, root, scope.Plugin, scope.Provider, false)
+				if lockErr != nil {
+					t.Fatalf("refused execution retained subscription admission: %v", lockErr)
+				}
+				held()
+			}
+			if checks < 2 {
+				t.Fatal("fixture did not reach subscription admission")
+			}
+			record, err := manager.Store().Operation(scope.Plugin, scope.Operation)
+			if err != nil || record.State != state {
+				t.Fatalf("execution journal: %+v, %v, want %q", record, err, state)
+			}
+		})
+	}
+}
+
+func TestManagerCallProviderPrivacyPrecedesAccountRead(t *testing.T) {
+	manager, scope := usageManagerVersion(t, 9)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if held, err := filelock.TryLock(lock); err != nil || !held {
+		t.Fatalf("hold account store: %t, %v", held, err)
+	}
+	defer filelock.Unlock(lock)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	ctx = WithInboundLease(WithProviderExecuteSelection(ctx, lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration))
+	pinInboundLease(ctx, lease)
+	_, err = manager.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope,
+		sdk.ExecuteRequest{Protocol: "chat", Model: "model"}, nil)
+	var refusal *sdk.Error
+	if !errors.As(err, &refusal) || refusal.Code != "account_discovery_off" {
+		t.Fatalf("provider privacy did not refuse before waiting for the account store: %v", err)
 	}
 }
 

@@ -13,10 +13,10 @@ func (p Provider) extensionDefaults() (*int, *int) {
 	}
 	binding := p.Account.extension
 	ctx := context.Background()
-	if binding.manifest.Contract.Version.Minor < 9 || binding.check(ctx) != nil || binding.checkModelRevision(ctx) != nil {
+	if binding.manifest.Contract.Version.Minor < 9 || binding.check(ctx) != nil {
 		return nil, nil
 	}
-	entry, err := enabledExtensionModule(ctx, binding.host, binding.scope.Plugin)
+	entry, err := binding.modelRevisionEntry(ctx)
 	if err != nil || entry.Manifest.Contract.Version.Minor < 9 {
 		return nil, nil
 	}

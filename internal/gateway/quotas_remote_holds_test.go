@@ -26,7 +26,7 @@ func TestRemoteMagpieCardsCarryTheirWholes(t *testing.T) {
 	t.Cleanup(func() { provider.ReckonHolds = was })
 	// the reckoning itself is usage's (window_holds_test.go): here, each
 	// card is marked as reckoned
-	provider.ReckonHolds = func(qs []provider.SubscriptionQuota, now time.Time) []provider.SubscriptionQuota {
+	provider.ReckonHolds = func(_ context.Context, qs []provider.SubscriptionQuota, now time.Time) []provider.SubscriptionQuota {
 		out := make([]provider.SubscriptionQuota, len(qs))
 		for i, q := range qs {
 			q.Windows = append(append([]provider.QuotaWindow(nil), q.Windows...), provider.QuotaWindow{Name: "Weekly", Used: 2, HoldsWhy: provider.HoldsLow})

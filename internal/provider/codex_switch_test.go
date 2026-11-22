@@ -145,15 +145,7 @@ func TestClaudeSwitchedWhenSpent(t *testing.T) {
 	loginsMu.Unlock()
 
 	used := map[string]float64{"a@example.com": 97, "b@example.com": 10}
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.RequestURI() == "/" && r.ContentLength == 0 &&
-			len(r.TransferEncoding) == 0 && r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
-			http.NotFound(w, r)
-			return
-		}
-		t.Errorf("usage endpoint read: %s", r.URL)
-		http.NotFound(w, r)
-	}))
+	fake := refuseClaudeUsageReads(t)
 	defer fake.Close()
 	claudeBase = fake.URL // isolate puts it back
 	switched := func() string {

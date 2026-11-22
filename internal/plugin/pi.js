@@ -494,7 +494,7 @@ async function answer(events, { model, stream, res, said }) {
 
 // load loads the pi plugins in list ({spec, target}) and gives, for each,
 // the hooks of the providers it registers, or why it couldn't load.
-// h is what host.js lends: readAuth, changeAuth, keyFor, send, directory.
+// h supplies the host's scoped credentials, events and directory.
 export async function load(h, list) {
   const home = path.join(h.directory, "pi")
   // pi keeps its settings and caches here, not in the user's ~/.pi. This
@@ -521,7 +521,7 @@ export async function load(h, list) {
   const chains = new Map()
   const credentials = {
     async read(id) {
-      return toPi(h.readAuth()[h.keyFor(id)])
+      return toPi(h.readCredential(h.keyFor(id)))
     },
     async list() {
       return Object.entries(h.readAuth())
@@ -533,25 +533,21 @@ export async function load(h, list) {
       const key = h.keyFor(id)
       const prev = chains.get(key) ?? Promise.resolve()
       const run = prev.catch(() => {}).then(async () => {
-        const was = h.readAuth()[key]
-        const next = await fn(toPi(was))
-        if (next === undefined) return toPi(was)
-        await h.changeAuth((all) => {
-          all[key] = fromPi(next, all[key])
+        let edited = false
+        const kept = await h.modifyCredential(key, async (was) => {
+          const next = await fn(toPi(was))
+          if (next === undefined) return undefined
+          edited = true
+          return fromPi(next, was)
         })
-        h.send({ event: "auth", provider: key.split("#")[0], account: key })
-        mirror()
-        return next
+        if (edited) mirror()
+        return toPi(kept)
       })
       chains.set(key, run)
       return run
     },
     async delete(id) {
-      const key = h.keyFor(id)
-      await h.changeAuth((all) => {
-        if (!(key in all)) return false
-        delete all[key]
-      })
+      await h.deleteCredential(h.keyFor(id))
       mirror()
     },
   }

@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+func refuseClaudeUsageReads(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.RequestURI() != "/" || r.ContentLength != 0 ||
+			len(r.TransferEncoding) != 0 || r.Header.Get("Authorization") != "" || r.Header.Get("X-Api-Key") != "" {
+			t.Errorf("unexpected Claude request: %s %s", r.Method, r.URL.RequestURI())
+		}
+		http.NotFound(w, r)
+	}))
+}
+
 // Claude Code whose requests go through magpie's gateway stays signed in to
 // the account the user put it on when that one is spent: the gateway moves
 // its requests to another account with room by itself, and moving the
@@ -32,9 +43,7 @@ func TestClaudeRoutedThroughMagpieKeepsItsSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginsMu.Unlock()
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("usage endpoint read: %s", r.URL)
-	}))
+	fake := refuseClaudeUsageReads(t)
 	defer fake.Close()
 	claudeBase = fake.URL // isolate puts it back
 

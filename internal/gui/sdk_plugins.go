@@ -57,7 +57,7 @@ var sdkPluginChecks struct {
 	byID map[string]sdkPluginCheck
 }
 
-func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.Installed) pluginEntryJSON {
+func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.Installed, options extension.ModuleSettingsResult) pluginEntryJSON {
 	manifest := entry.Manifest
 	version := manifest.Contract.Version
 	presentation := host.PluginPresentation(ctx, entry)
@@ -71,7 +71,7 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 		Entry:   plugin.Entry{Spec: "sdk:" + manifest.ID, Off: entry.Disabled},
 		OwnName: presentation.Name, Icon: sdkPluginIcon(presentation.Icon), Version: manifest.Version, SDK: info,
 		Providers: []string{}, Moved: []string{},
-		IsAgent: len(manifest.Agents) != 0, InMagpieOnly: len(manifest.Providers) == 0,
+		IsAgent:      len(manifest.Agents) != 0,
 		IsMiddleware: manifest.Middleware != nil, IsGateway: manifest.Hooks != nil,
 	}
 	if row.OwnName == "" {
@@ -80,14 +80,14 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 	if presentation.Window != nil {
 		row.setWindow(presentation.Window)
 	}
-	if err := sdk.CheckCompatibility(manifest); err != nil {
-		row.Error = err.Error()
-	} else if !entry.Disabled && len(manifest.Settings) != 0 {
-		settings, err := sdkSettingsOf(ctx, host, entry)
+	if options.Err != nil {
+		row.Error = options.Err.Error()
+	} else if options.Snapshot.Values != nil {
+		schema, err := pluginrt.SchemaOf(manifest.Settings)
 		if err != nil {
 			row.Error = err.Error()
 		} else {
-			info.Settings = settings
+			info.Settings = &sdkPluginSettings{ModuleSettingsSnapshot: options.Snapshot, Schema: schema}
 		}
 	}
 	if entry.Source != nil {
@@ -98,15 +98,18 @@ func sdkPluginRow(ctx context.Context, host *extension.Manager, entry extension.
 	}
 	served := make([]plugin.Provider, 0, len(manifest.Providers))
 	for _, descriptor := range manifest.Providers {
-		row.Providers = append(row.Providers, descriptor.Name)
-		info.ProviderIDs = append(info.ProviderIDs, provider.ExtensionProviderID(manifest.ID, descriptor.ID))
-		served = append(served, plugin.Provider{ID: descriptor.ID, Name: descriptor.Name})
+		if id, _, visible := provider.ExtensionPublicProvider(manifest.ID, descriptor.ID); visible {
+			row.Providers = append(row.Providers, descriptor.Name)
+			info.ProviderIDs = append(info.ProviderIDs, id)
+			served = append(served, plugin.Provider{ID: id, Name: descriptor.Name})
+		}
 		for _, protocol := range descriptor.Protocols {
 			if !slices.Contains(info.Protocols, string(protocol)) {
 				info.Protocols = append(info.Protocols, string(protocol))
 			}
 		}
 	}
+	row.InMagpieOnly = len(served) == 0
 	row.Serves = servesBeside(nil, served)
 	for _, agent := range manifest.Agents {
 		info.Agents = append(info.Agents, agent.Name)
@@ -140,18 +143,6 @@ func sdkPluginIcon(name string) string {
 		}
 	}
 	return ""
-}
-
-func sdkSettingsOf(ctx context.Context, host *extension.Manager, entry extension.Installed) (*sdkPluginSettings, error) {
-	snapshot, err := host.ModuleSettings(ctx, entry)
-	if err != nil {
-		return nil, err
-	}
-	schema, err := pluginrt.SchemaOf(entry.Manifest.Settings)
-	if err != nil {
-		return nil, err
-	}
-	return &sdkPluginSettings{ModuleSettingsSnapshot: snapshot, Schema: schema}, nil
 }
 
 func saveSDKPluginSettings(w http.ResponseWriter, r *http.Request) {

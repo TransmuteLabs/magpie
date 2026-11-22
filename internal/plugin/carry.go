@@ -1,35 +1,54 @@
 package plugin
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
-
-	"github.com/yetone/magpie/internal/lastgood"
-	"github.com/yetone/magpie/internal/settings"
+	"maps"
 )
 
-// AuthEntries is plugin-auth.json's sign-ins by key, each as written, for
-// a backup that carries them. A file that can't be read is an error,
+// AuthEntries is plugin-auth.json's credentials by key for a backup
+// that carries them. A file that can't be read is an error,
 // never no sign-ins: carried as none, it would read as every sign-in
 // signed out.
 func AuthEntries() (map[string]json.RawMessage, error) {
-	b, err := readAuthFile()
-	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]json.RawMessage{}, nil
-	}
+	records, _, err := readAuthEntries()
 	if err != nil {
 		return nil, err
 	}
+	return authEntryCredentials(records)
+}
+
+func authEntryCredentials(records map[string]json.RawMessage) (map[string]json.RawMessage, error) {
+	out := make(map[string]json.RawMessage, len(records))
+	for key, raw := range records {
+		record, err := authCredentials(raw)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = record
+	}
+	return out, nil
+}
+
+func readAuthEntries() (map[string]json.RawMessage, []byte, error) {
+	b, err := readAuthFile()
+	if errors.Is(err, fs.ErrNotExist) {
+		return map[string]json.RawMessage{}, []byte("{}"), nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if m == nil {
 		m = map[string]json.RawMessage{}
 	}
-	return m, nil
+	return m, b, nil
 }
 
 // AuthWho is who a sign-in entry is signed in as (its accountId, or the
@@ -54,35 +73,57 @@ func AuthExpires(raw json.RawMessage) int64 {
 	return a.Expires
 }
 
-// EditAuth changes plugin-auth.json under plugin-auth.json.lock, which
-// host.js takes too, read afresh there: f gets the sign-ins by key and
-// says whether it changed them. A file that can't be read is not written
-// over; the one there is kept as its last good generation first, and the
-// new one is renamed in whole.
+// EditAuth changes plugin-auth.json under the shared writer lock. f gets
+// the sign-ins by key and says whether it changed them. A file that can't
+// be read is left as it is.
 func EditAuth(f func(m map[string]json.RawMessage) (bool, error)) error {
-	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
-		return err
-	}
-	unlock := lockAuth()
-	defer unlock()
-	m, err := AuthEntries()
+	path := AuthPath()
+	unlock, err := lockAuth(context.Background(), path)
 	if err != nil {
 		return err
 	}
+	published := false
+	defer func() {
+		unlock()
+		if published {
+			changed()
+		}
+	}()
+	records, before, err := readAuthEntries()
+	if err != nil {
+		return err
+	}
+	credentials, err := authEntryCredentials(records)
+	if err != nil {
+		return err
+	}
+	m := maps.Clone(credentials)
 	ch, err := f(m)
 	if err != nil || !ch {
 		return err
+	}
+	for key, raw := range m {
+		if sameAuthRecord(credentials[key], raw) {
+			m[key] = records[key]
+			continue
+		}
+		var record map[string]json.RawMessage
+		if json.Unmarshal(raw, &record) != nil || record == nil {
+			continue
+		}
+		record[authEpochField], _ = json.Marshal(rand.Text())
+		m[key], err = json.Marshal(record)
+		if err != nil {
+			return err
+		}
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := lastgood.Keep(AuthPath(), validAuth, 0o600); err != nil {
+	if err := publishAuth(context.Background(), path, before, b, validAuth); err != nil {
 		return err
 	}
-	if err := writeWhole(AuthPath(), append(b, '\n')); err != nil {
-		return err
-	}
-	changed()
+	published = true
 	return nil
 }

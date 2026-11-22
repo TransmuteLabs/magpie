@@ -42,7 +42,7 @@ const WANT = {
   "My hook": ["mw", "third"], "opencode-unlisted-auth": ["pv", "third"],
 };
 
-function server(lang, fetched) {
+function server(lang, fetched, installed = INSTALLED) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -52,7 +52,7 @@ function server(lang, fetched) {
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true }, plugins: [] });
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [] });
     if (url.pathname === "/api/gateway/trace") return json({ routes: [] });
-    if (url.pathname === "/api/plugins") return json({ bun: true, bunVersion: "1.4.2", plugins: INSTALLED, picker: false, movable: [] });
+    if (url.pathname === "/api/plugins") return json({ bun: true, bunVersion: "1.4.2", plugins: installed, picker: false, movable: [] });
     if (url.pathname === "/api/plugins/listings") return json({ listings: LISTINGS });
     if (url.pathname === "/api/plugins/npm") return json({ npm: {} });
     if (url.pathname === "/api/plugins/github") return json(GH);
@@ -161,6 +161,47 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await ctx.close();
         }
       });
+    }
+  });
+
+  test(engine + ": Installed filters SDK pages and session contributions", async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
+    t.after(() => browser.close());
+    const sdk = { runtime: "native", api: "1.18", capabilities: [] };
+    const base = { providers: [], moved: [], version: "1.0.0", inMagpieOnly: true };
+    const installed = [
+      { ...base, spec: "sdk:panel", ownName: "Panel only", providers: ["Fixture provider"], sdk: { ...sdk, window: true },
+        panels: [{ slot: "sessions", title: "History controls" }] },
+      { ...base, spec: "sdk:page", ownName: "Standalone SDK", sdk: { ...sdk, window: true },
+        page: { title: "Standalone page", reads: [] } },
+      { ...base, spec: "sdk:omp-sessions", ownName: "OMP Sessions", sdk: { ...sdk, sessions: ["omp-export", "omp-storage"] } },
+      { ...base, spec: "legacy-page", ownName: "Legacy standalone", page: { title: "Legacy page", reads: [] } },
+    ];
+    for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+      const page = await browser.newPage({ viewport: { width: 420, height: 850 } });
+      const fetched = [], errors = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await page.route("**/*", server(lang, fetched, installed));
+      try {
+        await page.goto("http://magpie.test/?view=plugins");
+        const tr = (value) => page.evaluate((value) => t(value), value);
+        await page.locator(":is(.lib-tabs .opt, .nav-s):visible", { hasText: await tr("Installed") }).first().click();
+        const view = page.locator("#view-plugins");
+        const kinds = view.locator(".pm-listhead .pm-kinds .opt");
+        for (const [label, want] of [["Pages", ["Legacy standalone", "Standalone SDK"]], ["Sessions", ["OMP Sessions"]]]) {
+          await t.test(`${lang} ${label}`, async () => {
+            const pick = kinds.filter({ hasText: await tr(label) });
+            await pick.click({ timeout: 4000 });
+            const rows = view.locator(".pm-list .pm-row .who .name > span:first-child");
+            assert.deepEqual((await rows.allInnerTexts()).map((value) => value.trim()).sort(), want);
+            assert.equal(await pick.locator("em").textContent(), String(want.length));
+          });
+        }
+        assert.deepEqual(errors, []);
+        assert.deepEqual(fetched, []);
+      } finally {
+        await page.close();
+      }
     }
   });
 

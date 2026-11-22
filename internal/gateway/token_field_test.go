@@ -70,16 +70,18 @@ func TestChatTokenFieldRetriedWhenNamed(t *testing.T) {
 		}
 		return 0, ""
 	}}
-	up := httptest.NewServer(f)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(f))
 	defer up.Close()
 	var otherGot [][]byte
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	other := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		otherGot = append(otherGot, b)
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, ok)
-	}))
+	})))
 	defer other.Close()
+	probeFixtureRoot(t, up)
+	probeFixtureRoot(t, other)
 	for _, p := range []provider.Provider{
 		{ID: "relay", Name: "Relay", Key: "k", Chat: up.URL + "/v1", Models: []string{"gpt-6.1-sol"}},
 		{ID: "zhipu-like", Name: "Other", Key: "k", Chat: other.URL + "/v1", Models: []string{"glm-5"}},

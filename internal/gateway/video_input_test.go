@@ -125,6 +125,30 @@ func serveVideo(s *Server, path, body string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func TestCurrentVideoSkipsPlainText(t *testing.T) {
+	prose := `\u003cheading\u003e` + strings.Repeat("Read this report on a video. ", 1600)
+	for _, tc := range []struct {
+		name  string
+		proto provider.Protocol
+		body  string
+	}{
+		{"chat", provider.Chat, `{"messages":[{"role":"system","content":"` + prose + `"},{"role":"user","content":"video"}]}`},
+		{"responses", provider.Responses, `{"instructions":"` + prose + `","input":"video"}`},
+		{"messages", provider.Anthropic, `{"system":"` + prose + `","messages":[{"role":"user","content":"video"}]}`},
+		{"gemini", provider.Gemini, `{"contents":[{"role":"user","parts":[{"text":"` + prose + `"},{"text":"Video"}]}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			if hasCurrentVideo(tc.proto, body) {
+				t.Fatal("text found as a video")
+			}
+			if allocs := testing.AllocsPerRun(5, func() { hasCurrentVideo(tc.proto, body) }); allocs != 0 {
+				t.Errorf("video check parsed the text-only body: %g allocs per turn", allocs)
+			}
+		})
+	}
+}
+
 // A video reaches the upstream on every API that carries content blocks,
 // in that API's own shape: Chat's video_url, a Chat file of a video and a
 // Responses input_file of one go to a Messages upstream as a video block,
@@ -203,14 +227,19 @@ func TestVideoForAModelThatTakesNone(t *testing.T) {
 	saveVideoProvider(t, provider.Provider{ID: "chat", Name: "Chat", Chat: chatUp.URL + "/v1", Key: "k", Models: []string{"v", "t", "u"}}, chatUp.URL+"/v1")
 	s := New()
 
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions"} {
-		body := strings.Replace(reporterVideoBody, `"m1"`, `"anth/t"`, 1)
-		if path == "/v1/chat/completions" {
-			body = `{"model":"anth/t","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"data:video/mp4;base64,` + videoData + `"}},{"type":"text","text":"用一句话描述这段视频画面。"}]}]}`
-		}
-		rec := serveVideo(s, path, body)
+	for _, tc := range []struct {
+		name, path, body string
+	}{
+		{"messages", "/v1/messages", strings.Replace(reporterVideoBody, `"m1"`, `"anth/t"`, 1)},
+		{"messages escaped type", "/v1/messages", `{"model":"anth/t","messages":[{"role":"user","content":[{"type":"\u0076ideo","source":{"type":"base64","data":"` + videoData + `"}}]}]}`},
+		{"chat", "/v1/chat/completions", `{"model":"anth/t","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"data:video/mp4;base64,` + videoData + `"}},{"type":"text","text":"用一句话描述这段视频画面。"}]}]}`},
+		{"chat filename", "/v1/chat/completions", `{"model":"anth/t","messages":[{"role":"user","content":[{"Type" : "file","file":{"file_data":"` + videoData + `","filename":"clip.webm"}}]}]}`},
+		{"responses filename", "/v1/responses", `{"model":"anth/t","input":[{"type":"input_file","file_data":"` + videoData + `","filename":"clip.webm"}]}`},
+		{"gemini folded MIME", "/v1beta/models/anth/t:generateContent", `{"contents":[{"role":"user","parts":[{"inline_data":{"mime_type":"ViDeO\/mp4","data":"` + videoData + `"}}]}]}`},
+	} {
+		rec := serveVideo(s, tc.path, tc.body)
 		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "does not support video input") {
-			t.Errorf("%s video to a model that takes none: %d %s", path, rec.Code, rec.Body.String())
+			t.Errorf("%s video to a model that takes none: %d %s", tc.name, rec.Code, rec.Body.String())
 		}
 	}
 	if bodies, _ := anth.sent(); len(bodies) != 0 {

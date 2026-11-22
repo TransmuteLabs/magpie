@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"os"
@@ -120,6 +121,10 @@ func keepStateSummed(s stateJSON, sum [32]byte) {
 // with the settings as they are now; false when none is kept, or it was
 // kept by another version.
 func lastKnown() (stateJSON, bool) {
+	return lastKnownContext(context.Background())
+}
+
+func lastKnownContext(ctx context.Context) (stateJSON, bool) {
 	lastState.Lock()
 	if !lastState.read {
 		lastState.kept, _ = os.ReadFile(lastStatePath())
@@ -132,7 +137,7 @@ func lastKnown() (stateJSON, bool) {
 		return stateJSON{}, false
 	}
 	f.State.Settings = stateSettings(settings.Load())
-	f.State.RoutingOptions = routingOptions()
+	f.State.RoutingOptions = routingOptionsContext(ctx)
 	f.State.Last = true
 	return f.State, true
 }

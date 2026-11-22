@@ -368,31 +368,42 @@ func accountRows(ls []provider.Login, now time.Time) []accountRow {
 		}(l.Agent)
 	}
 	wg.Wait()
-	rows := []accountRow{}
-	for _, l := range ls {
-		r := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}, Lapsed: l.Lapsed}
-		r.Seat = provider.SeatNameOf(l.Agent, l.User)
-		r.Alias = cmp.Or(provider.AccountLabelOf(l.Agent, l.User), r.Seat)
+	rows := make([]accountRow, len(ls))
+	readings := make([]provider.SubscriptionQuota, 0, len(ls))
+	matches := make([]int, 0, len(ls))
+	for index, l := range ls {
+		row := accountRow{Agent: l.Agent, User: l.User, Plan: l.Plan, Active: l.Active, On: l.On, Windows: []quotaSpan{}, Lapsed: l.Lapsed}
+		row.Seat = provider.SeatNameOfContext(ctx, l.Agent, l.User)
+		row.Alias = cmp.Or(provider.AccountLabelOfContext(ctx, l.Agent, l.User), row.Seat)
+		rows[index] = row
 		for user, q := range usage[l.Agent] {
-			if !strings.EqualFold(user, l.User) {
-				continue
-			}
-			if r.Plan == "" {
-				r.Plan = q.Plan
-			}
-			r.Error, r.Resets, r.AsOf, r.ReadAt, r.Balance = q.Error, q.Resets, q.AsOf, q.ReadAt, q.Balance
-			// a pool's own windows stand in for the models' drawing on it,
-			// as the usage page shows them
-			for _, w := range provider.PooledWindows(q.Windows) {
-				s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Pool: w.Pool, Unit: w.Unit, Balance: w.Balance}
-				if s.ResetsAt == nil && w.ResetSecs > 0 {
-					t := now.Add(time.Duration(w.ResetSecs) * time.Second)
-					s.ResetsAt = &t
-				}
-				r.Windows = append(r.Windows, s)
+			if strings.EqualFold(user, l.User) {
+				readings = append(readings, q)
+				matches = append(matches, index)
+				break
 			}
 		}
-		rows = append(rows, r)
+	}
+	proof := ctx
+	if ctx.Err() != nil && len(readings) > 0 {
+		var stop context.CancelFunc
+		proof, stop = context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer stop()
+	}
+	for index, q := range provider.ValidateSubscriptionQuotas(proof, readings) {
+		r := &rows[matches[index]]
+		r.Plan = cmp.Or(r.Plan, q.Plan)
+		r.Error, r.Resets, r.AsOf, r.ReadAt, r.Balance = q.Error, q.Resets, q.AsOf, q.ReadAt, q.Balance
+		// a pool's own windows stand in for the models' drawing on it,
+		// as the usage page shows them
+		for _, w := range provider.PooledWindows(q.Windows) {
+			s := quotaSpan{Name: w.Name, Used: w.Used, Remaining: max(0, 100-w.Used), ResetsAt: w.ResetsAt, Display: w.Display, Text: w.Text, Pool: w.Pool, Unit: w.Unit, Balance: w.Balance}
+			if s.ResetsAt == nil && w.ResetSecs > 0 {
+				t := now.Add(time.Duration(w.ResetSecs) * time.Second)
+				s.ResetsAt = &t
+			}
+			r.Windows = append(r.Windows, s)
+		}
 	}
 	return rows
 }

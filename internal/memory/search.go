@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/yetone/magpie/internal/memembed"
@@ -75,12 +76,15 @@ func Search(q Query) ([]Hit, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]string, len(hits))
-	for i, h := range hits {
-		ids[i] = h.ID
-	}
 	if strings.TrimSpace(q.Text) != "" {
-		touch(ids)
+		at := now()
+		var ids []string
+		for _, hit := range hits {
+			if at.Sub(hit.Used) > time.Minute {
+				ids = append(ids, hit.ID)
+			}
+		}
+		touch(ids, at)
 	}
 	return hits, nil
 }

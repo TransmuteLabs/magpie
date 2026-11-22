@@ -119,6 +119,9 @@ func testExtensionKeepAliveGateway(t *testing.T, isolated bool) {
 		}
 	}
 	install(process, "process")
+	if err := provider.RegisterExtensionLogin(t.Context(), scope); err != nil {
+		t.Fatal(err)
+	}
 	if providers, err := provider.ExtensionProviders(); err != nil || len(providers) != 1 {
 		t.Fatalf("ordinary gateway account discovery: %v %v", providers, err)
 	}

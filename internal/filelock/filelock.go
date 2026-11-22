@@ -4,6 +4,7 @@
 package filelock
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"log"
@@ -12,6 +13,26 @@ import (
 	"sync"
 	"time"
 )
+
+func LockMutex(ctx context.Context, mu *sync.Mutex) error {
+	if ctx.Done() == nil {
+		mu.Lock()
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
 
 // Wait is how long Mutex waits for another magpie to let go, before it
 // goes on without the lock, as it did before there was one: a magpie
@@ -30,6 +51,13 @@ var mkdirAll = os.MkdirAll
 // held is false when it went on without the lock: on a file system
 // without locks, or after wait.
 func Lock(path string, wait time.Duration) (unlock func(), held bool) {
+	return lockPath(context.Background(), path, wait)
+}
+
+func lockPath(ctx context.Context, path string, wait time.Duration) (unlock func(), held bool) {
+	if ctx.Err() != nil {
+		return func() {}, false
+	}
 	// the folder is made only when the file can't be opened for want of
 	// it: made first, each lock asked the system for the folder too, on
 	// every take (#1665: ~190 times in a Windows start's first 25s, each
@@ -57,7 +85,12 @@ func Lock(path string, wait time.Duration) (unlock func(), held bool) {
 			log.Printf("%s: another magpie held it for %v; going on without it", path, wait)
 			return func() {}, false
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return func() {}, false
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
@@ -77,22 +110,29 @@ type Mutex struct {
 }
 
 func (m *Mutex) Lock() {
-	m.lock()
+	m.mu.Lock()
+	m.lockFile(context.Background())
 }
 
 func (m *Mutex) LockChecked() bool {
-	if m.lock() {
+	return m.LockCheckedContext(context.Background())
+}
+
+func (m *Mutex) LockCheckedContext(ctx context.Context) bool {
+	if LockMutex(ctx, &m.mu) != nil {
+		return false
+	}
+	if m.lockFile(ctx) && ctx.Err() == nil {
 		return true
 	}
 	m.Unlock()
 	return false
 }
 
-func (m *Mutex) lock() bool {
-	m.mu.Lock()
+func (m *Mutex) lockFile(ctx context.Context) bool {
 	var held bool
-	m.unlock, held = Lock(m.Path(), Wait)
-	if m.Locked != nil {
+	m.unlock, held = lockPath(ctx, m.Path(), Wait)
+	if m.Locked != nil && ctx.Err() == nil {
 		m.Locked()
 	}
 	return held

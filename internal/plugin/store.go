@@ -81,10 +81,11 @@ var listMu sync.Mutex
 // plugin manager) are separate processes, and listMu never saw the other
 // one, so the later whole-list write went out with what the other had
 // saved since its read (#4666). Under it every change reads the file
-// afresh, so both changes stand. A lock another magpie holds is waited
-// for up to filelock.Wait, then gone on without, as before there was
-// one; the same shape as mcpauth's fileMu.
+// afresh, so both changes stand. Subscription transfers also hold this
+// lock while checking that their source is still installed and enabled.
 var listFileMu = filelock.Mutex{Path: func() string { return listPath() + ".lock" }}
+
+var errPluginListBusy = errors.New("the installed plugins list is busy or unavailable")
 
 // bunMu is held through each bun command that changes plugins/ (add,
 // update, remove). Two at once read package.json and bun.lock before
@@ -143,33 +144,6 @@ func Dir() string { return filepath.Join(settings.Dir(), "plugins") }
 // AuthPath is the plugins' sign-ins, OpenCode's auth.json in shape.
 func AuthPath() string { return filepath.Join(settings.Dir(), "plugin-auth.json") }
 
-// authLockStale is how long plugin-auth.json.lock is held at most: one
-// older was left by a host or a magpie that died holding it.
-const authLockStale = 10 * time.Second
-
-// lockAuth takes plugin-auth.json.lock, which host.js takes too, for a
-// change to plugin-auth.json read afresh under it: two hosts (one being
-// restarted) and magpie never write each other's accounts away. It gives
-// the unlock.
-func lockAuth() func() {
-	lock := AuthPath() + ".lock"
-	start := time.Now()
-	for {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			f.Close()
-			return func() { os.Remove(lock) }
-		}
-		if !os.IsExist(err) && !os.IsPermission(err) {
-			return func() {} // no folder to lock in: no file to change either
-		}
-		if fi, err := os.Stat(lock); err == nil && time.Since(fi.ModTime()) > authLockStale || time.Since(start) > 2*authLockStale {
-			os.Remove(lock)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func listPath() string { return filepath.Join(settings.Dir(), "plugins.json") }
 
 // ListPath is plugins.json's path.
@@ -215,6 +189,36 @@ func list() List {
 func Load() List {
 	l := list()
 	return List{Plugins: clonePlugins(l.Plugins), Config: cloneMap(l.Config), Prefer: maps.Clone(l.Prefer)}
+}
+
+// WithInstalledPlugins checks the current list while holding its writers' lock.
+func WithInstalledPlugins(ctx context.Context, check func() error, use func([]Entry) error) error {
+	if !listFileMu.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errPluginListBusy
+	}
+	defer listFileMu.Unlock()
+	if err := check(); err != nil {
+		return err
+	}
+	path := listPath()
+	raw, err := readAuthDocument(path)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return use(nil)
+		}
+	}
+	var current *List
+	if err != nil || json.Unmarshal(raw, &current) != nil || current == nil ||
+		slices.ContainsFunc(current.Plugins, func(entry Entry) bool { return strings.TrimSpace(entry.Spec) == "" }) {
+		return errors.New("the current installed plugins list is unavailable")
+	}
+	return use(current.Plugins)
 }
 
 // clonePlugins copies the entries, their options with them.
@@ -491,7 +495,9 @@ func add(ctx context.Context, spec, version string) (Entry, error) {
 		}
 		return Entry{}, err
 	}
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return Entry{}, errPluginListBusy
+	}
 	listMu.Lock()
 	defer listMu.Unlock()
 	defer listFileMu.Unlock()
@@ -638,7 +644,9 @@ func indexOf(l List, name string) int {
 
 // Remove takes a plugin off the list (and out of plugins/).
 func Remove(ctx context.Context, name string) error {
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return errPluginListBusy
+	}
 	listMu.Lock()
 	l := Load()
 	i := indexOf(l, name)
@@ -669,7 +677,9 @@ func Remove(ctx context.Context, name string) error {
 
 // SetOff turns a plugin off or back on.
 func SetOff(name string, off bool) error {
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return errPluginListBusy
+	}
 	listMu.Lock()
 	defer listMu.Unlock()
 	defer listFileMu.Unlock()
@@ -692,7 +702,9 @@ func SetOff(name string, off bool) error {
 // with it; one switched off leaves the id to the others until it is on
 // again.
 func Prefer(name, id string) error {
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return errPluginListBusy
+	}
 	listMu.Lock()
 	defer listMu.Unlock()
 	defer listFileMu.Unlock()
@@ -718,7 +730,9 @@ func Prefer(name, id string) error {
 // SetOptions sets the options a plugin is handed (a middleware's
 // ctx.options); nil takes them away.
 func SetOptions(name string, opts map[string]any) error {
-	listFileMu.Lock()
+	if !listFileMu.LockChecked() {
+		return errPluginListBusy
+	}
 	listMu.Lock()
 	defer listMu.Unlock()
 	defer listFileMu.Unlock()

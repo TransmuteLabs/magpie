@@ -17,6 +17,7 @@ function summary(value) {
     throw new SDKError("invalid_params", "Invalid account expiry");
   }
   return Object.freeze({ id: value.id, generation: value.generation,
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
     ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) });
 }
 

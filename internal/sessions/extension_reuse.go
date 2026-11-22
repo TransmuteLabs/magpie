@@ -22,6 +22,11 @@ type sessionMigrationReceipt struct {
 	order   uint64
 }
 
+type sessionModuleSelection struct {
+	entry                   extension.Installed
+	identity, configVersion string
+}
+
 var extensionMigrations = struct {
 	sync.Mutex
 	entries  map[string]sessionMigrationReceipt
@@ -71,42 +76,63 @@ func forgetSessionMigration(key string) {
 }
 
 func sessionMigrationIdentity(ctx context.Context, manager *extension.Manager, plugin string) (sdk.Manifest, string, error) {
-	entry, identity, err := sessionMigrationSelection(ctx, manager, plugin)
-	return entry.Manifest, identity, err
+	selected, err := sessionMigrationSelection(ctx, manager, plugin)
+	return selected.entry.Manifest, selected.identity, err
 }
 
-func sessionMigrationSelection(ctx context.Context, manager *extension.Manager, plugin string) (extension.Installed, string, error) {
+func sessionMigrationSelection(ctx context.Context, manager *extension.Manager, plugin string) (sessionModuleSelection, error) {
 	entry, err := manager.ActiveModule(ctx, plugin)
 	if err != nil {
-		return extension.Installed{}, "", err
+		return sessionModuleSelection{}, err
 	}
 	config := ""
 	if entry.Manifest.Contract.Version.Minor >= 1 {
-		value, err := manager.ModuleConfig(ctx, plugin)
+		current, value, err := manager.ActiveModuleConfig(ctx, plugin)
 		if err != nil {
-			return extension.Installed{}, "", err
+			return sessionModuleSelection{}, err
 		}
+		if !sameSessionModule(entry, current) {
+			return sessionModuleSelection{}, extension.ErrActionChanged
+		}
+		entry = current
 		config = value.Version
 	}
 	body, err := json.Marshal([]string{manager.Namespace(), plugin, entry.Revision, config})
 	if err != nil {
-		return extension.Installed{}, "", err
+		return sessionModuleSelection{}, err
 	}
 	digest := sha256.Sum256(body)
-	return entry, hex.EncodeToString(digest[:]), nil
+	return sessionModuleSelection{entry: entry, identity: hex.EncodeToString(digest[:]), configVersion: config}, nil
 }
 
-func sessionMigrationKey(identity string, source Session, route SessionExtension, target *sessionTargetStore, options []byte) string {
+func sameSessionModule(before, after extension.Installed) bool {
+	return before.Manifest.ID == after.Manifest.ID && before.Revision == after.Revision &&
+		before.EnableGeneration == after.EnableGeneration
+}
+
+func (selected sessionModuleSelection) check(ctx context.Context, manager *extension.Manager) error {
+	current, err := sessionMigrationSelection(ctx, manager, selected.entry.Manifest.ID)
+	if err != nil {
+		return err
+	}
+	if !sameSessionModule(selected.entry, current.entry) || selected.identity != current.identity {
+		return extension.ErrActionChanged
+	}
+	return nil
+}
+
+func sessionMigrationKey(selected sessionModuleSelection, source Session, route SessionExtension, target *sessionTargetStore, options []byte) string {
 	body, _ := json.Marshal(struct {
-		Identity string
-		Agent    string
-		ID       string
-		Path     string
-		Cwd      string
-		Route    SessionExtension
-		Target   string
-		Options  []byte
-	}{identity, source.Agent, source.ID, source.Path, source.Cwd, route, target.selection(), options})
+		Identity         string
+		EnableGeneration string
+		Agent            string
+		ID               string
+		Path             string
+		Cwd              string
+		Route            SessionExtension
+		Target           string
+		Options          []byte
+	}{selected.identity, selected.entry.EnableGeneration, source.Agent, source.ID, source.Path, source.Cwd, route, target.selection(), options})
 	digest := sha256.Sum256(body)
 	return hex.EncodeToString(digest[:])
 }

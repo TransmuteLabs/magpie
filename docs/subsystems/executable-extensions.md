@@ -10,7 +10,7 @@ their ordinary owners. Legacy installation and retired-account migration have
 their own [provider/plugin policy](provider-plugins.md); they are not an SDK
 startup grant or an automatic-install promise.
 
-The available SDK contract is API 1.19. Authors declare the minimum contract
+The available SDK contract is API 1.20. Authors declare the minimum contract
 and capabilities their module uses; a newer SDK does not enable every adapter
 or raise an existing module's contract. Explicit SDK 1.0 single-primary modules
 remain supported. Capability-specific floors and failure rules belong to the
@@ -22,7 +22,7 @@ the same build `VERSION` via `make sdk-js-pack`, with a checked-in development
 placeholder of `0.0.0-alpha.0`; the release owner must pair both outputs from
 the same checkout. This packaging target does not publish or alter ordinary
 application build dependencies. Release versions are distinct from wire API
-1.15 and native ABI 1. Manifest minima, negotiation and capability gates retain
+1.20 and native ABI 1. Manifest minima, negotiation and capability gates retain
 their protocol numbering. See the [JS packaging instructions](../../sdk/js/README.md).
 
 | Task or reader | Owning reference |
@@ -277,6 +277,25 @@ every file, verifies the worker's public handshake and rechecks the payload
 before publishing. A failed check keeps the old catalog. Concurrent writes
 use compare-and-swap under a lock. Upgrade preserves a user's disabled setting.
 
+The catalog reads bounded bytes from the guarded root under a shared
+interprocess lock. It reuses a validated snapshot when the root path and
+content digest match. Changed bytes pass strict decoding, revision and
+ownership checks before publication. A read or validation error fails that
+lookup. An absent catalog yields an empty list. Returned entries own their
+nested manifests, file inventories and release provenance.
+
+The snapshot indexes module IDs, inbound protocols, and gateway hooks and
+middleware. A lookup reads the enablement markers of the selected roots,
+so disabling and re-enabling a package invalidates its previous leases even
+when the package bytes are unchanged. Acquisition reads the selected
+module's configuration and checks its generation again after worker startup.
+`Catalog.Verify` still checks the installed payload at its verification points.
+
+Authentication and Library publication also use the indexed snapshot while
+holding the exclusive catalog lock. They compare the current catalog bytes
+and still read the selected root's applicable enablement and configuration
+before publication.
+
 Data lives under `appdir.Config()/extensions`. Removal revokes new work but
 retains private state and payload generations for recovery and workers still
 draining in another gateway process.
@@ -314,7 +333,8 @@ After successful bind, [`extension_activation.go`](../../internal/gateway/extens
 attaches [`Manager.BeginGatewayActivation`](../../internal/extension/gateway_activation.go).
 Its handle resolves active root modules under the gateway lifetime, pins
 package, enablement and configuration identity, reconciles local and external
-catalog changes, and joins its removable change subscription.
+catalog changes, and joins its removable change subscription. Activation and
+explicit reload reconcile against one catalog snapshot per pass.
 Disable, removal, configuration replacement and shutdown release the lease
 and retire the cached generation through the existing bounded drain and
 disposer before replacement. A replacement listener can serve HTTP during
@@ -387,6 +407,10 @@ Raw configuration writes from the CLI, window and provider owners share
 validation with the form. Module startup and handler snapshots get missing
 defaults in memory. Defaults alone create no saved keys, and an update whose
 settings reject saved values fails validation without changing them.
+Runtime reads use the guarded store for current configuration and CAS
+versions. The manager reuses successful validation and defaults for matching
+saved bytes and package revisions. Eight slots keep at most 64 KiB of
+effective values each. A caller receives its own copy.
 
 `ModuleReady.State` / `ModuleContext.State` is opaque instance-local state
 for clients or pools; it stays in the runtime, outside JSON and the C ABI.
@@ -419,6 +443,11 @@ new acquisitions to the current package/config;
 existing leases retain their old group, including a later lazy start on that
 same old snapshot. Native ABI logical close and process termination have the
 different failure boundaries described below.
+
+Explicit reload waits for idle groups it detaches, for up to three seconds
+and within its context deadline. It waits outside the generation lock, so
+new acquisitions can proceed during disposal. Active groups drain in the
+background, and gateway activation reconciles without waiting for disposal.
 
 Runtime admission and retained refresh use the same manager-before-worker
 lock order. Startup is registered while the manager lock is held, so shutdown
@@ -507,8 +536,10 @@ tools and use the existing MCP permission/budget path. They respect the
 Plugin tools toggle and cannot select another module's tool.
 
 GUI one-port forwarding recognizes installed routes from the serving instance
-or the local installed catalog when proxying to another process. Page-port
-marking remains intact; a loopback proxy does not acquire local authority.
+or the local installed catalog when proxying to another process. Reserved
+gateway and GUI paths are classified before consulting the protocol registry.
+Page-port marking remains intact; a loopback proxy does not acquire local
+authority.
 
 ## Host services and effects
 
@@ -530,6 +561,9 @@ Account replacement requires account-auth authority and an accepted receipt
 for the exact selected account. It returns only ID/generation; the handler
 then returns its terminal result, since the old generation is revoked.
 
+The dispatch claim uses the caller's deadline when taking the Store lock
+and checks cancellation before starting receipt publication. If it stops
+at either point, the operation ID remains available for reuse.
 Callbacks use their request deadline when reading an operation receipt.
 Final receipt collection and journal writes remain with the operation owner.
 The host persists acceptance before acknowledging it. Unexplained dispatched

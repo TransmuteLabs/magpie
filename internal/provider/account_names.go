@@ -13,6 +13,7 @@ package provider
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"strings"
 	"unicode"
@@ -139,8 +140,15 @@ func AccountShownOf(id, user string) string { return cmp.Or(AccountLabelOf(id, u
 // (PluginUserOf); "" for none. id is a provider's or "plugin:<id>", as
 // logins name a plugin's accounts.
 func AccountLabelOf(id, user string) string {
+	return AccountLabelOfContext(context.Background(), id, user)
+}
+
+func AccountLabelOfContext(ctx context.Context, id, user string) string {
 	id = labelProvider(id)
-	return cmp.Or(AccountNameOf(id, user), PluginUserOf(id, user))
+	if name := AccountNameOf(id, user); name != "" {
+		return name
+	}
+	return pluginUserOfContext(ctx, id, user)
 }
 
 // labelProvider is the provider id behind id, a provider's or
@@ -161,7 +169,11 @@ func labelProvider(id string) string {
 // this run, else the last reading quotas.json has, so a read that fails
 // or hasn't been made yet shows what was known, or user, never nothing.
 func PluginUserOf(id, user string) string {
-	pp, ok := pluginOfAgent(id)
+	return pluginUserOfContext(context.Background(), id, user)
+}
+
+func pluginUserOfContext(ctx context.Context, id, user string) string {
+	pp, ok := pluginOfAgentContext(ctx, id)
 	if !ok {
 		return ""
 	}
@@ -228,22 +240,32 @@ func SetAccountName(id, ref, name string) error {
 	return Save(*p)
 }
 
-// withAccountNames is qs with each account's name of the user's own on
-// its card, else the name of the key plan it stands for (Seat), as
-// Alias; Named when Alias is the user's own name. qs is not changed: it
-// is a cache's.
+// withAccountNames gives each card the user's own name, its current
+// provider's account name or the name of its plan seat. Named marks the
+// user's own name. The cached qs are unchanged.
 func withAccountNames(qs []SubscriptionQuota) []SubscriptionQuota {
+	return withAccountNamesContext(context.Background(), qs)
+}
+
+func withAccountNamesContext(ctx context.Context, qs []SubscriptionQuota) []SubscriptionQuota {
+	if len(qs) == 0 || ctx.Err() != nil {
+		return nil
+	}
 	out := make([]SubscriptionQuota, len(qs))
 	type sdkAccount struct{ provider, user string }
 	var sdkNames map[sdkAccount]string
+	owners := heldSubscriptionOwnersContext(ctx)
 	for i, q := range qs {
+		if ctx.Err() != nil {
+			return nil
+		}
 		if q.From == "" {
 			own := AccountNameOf(labelProvider(q.Provider), q.User)
 			var vendor string
-			if strings.HasPrefix(q.Provider, "extension-") {
+			if _, owned := owners.byPublicID(q.Provider); owned || strings.HasPrefix(q.Provider, "extension-") {
 				if sdkNames == nil {
 					sdkNames = map[sdkAccount]string{}
-					for _, login := range listExtensionLogins("") {
+					for _, login := range listExtensionLoginsContext(ctx, "") {
 						if name := login.ExtensionAccountName(); name != "" {
 							sdkNames[sdkAccount{login.Agent, login.User}] = name
 						}
@@ -251,7 +273,7 @@ func withAccountNames(qs []SubscriptionQuota) []SubscriptionQuota {
 				}
 				vendor = sdkNames[sdkAccount{q.Provider, q.User}]
 			} else {
-				vendor = PluginUserOf(q.Provider, q.User)
+				vendor = pluginUserOfContext(ctx, q.Provider, q.User)
 			}
 			q.Alias, q.Named = cmp.Or(own, vendor, q.Seat), own != ""
 		}

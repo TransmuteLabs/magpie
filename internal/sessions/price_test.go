@@ -156,7 +156,8 @@ func TestListingPricesEveryModelAtTheSettingsItReadOnce(t *testing.T) {
 	}
 	state("widget-a", 0.2)
 
-	listing := pricer()
+	listing, release := pricer()
+	defer release()
 	if p := listing("relay/widget-a"); p == nil || p.Input != 0.2 {
 		t.Fatalf("the model is priced at %v; want the $0.2 stated", p)
 	}
@@ -170,7 +171,9 @@ func TestListingPricesEveryModelAtTheSettingsItReadOnce(t *testing.T) {
 	if p := listing("relay/widget-a"); p == nil || p.Input != 0.2 {
 		t.Errorf("the listing now prices the first model at %v; want the $0.2 it read", p)
 	}
-	if p := pricer()("relay/widget-b"); p == nil || p.Input != 3 {
+	nextListing, releaseNext := pricer()
+	defer releaseNext()
+	if p := nextListing("relay/widget-b"); p == nil || p.Input != 3 {
 		t.Errorf("the next listing prices the second at %v; want the $3 just written", p)
 	}
 }

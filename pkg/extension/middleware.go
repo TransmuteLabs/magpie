@@ -1,11 +1,13 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -78,19 +80,30 @@ func IsMiddlewareMethod(method string) bool {
 
 func (descriptor GatewayMiddlewareDescriptor) Methods() []string {
 	var methods []string
-	for _, entry := range []struct {
-		enabled bool
-		method  string
-	}{
-		{descriptor.Request, MethodMiddlewareRequest}, {descriptor.Account, MethodMiddlewareAccount},
-		{descriptor.Provider, MethodMiddlewareProvider}, {descriptor.Event, MethodMiddlewareEvent},
-		{descriptor.Response, MethodMiddlewareResponse},
-	} {
-		if entry.enabled {
-			methods = append(methods, entry.method)
+	for _, method := range []string{MethodMiddlewareRequest, MethodMiddlewareAccount,
+		MethodMiddlewareProvider, MethodMiddlewareEvent, MethodMiddlewareResponse} {
+		if descriptor.DeclaresMethod(method) {
+			methods = append(methods, method)
 		}
 	}
 	return methods
+}
+
+func (descriptor GatewayMiddlewareDescriptor) DeclaresMethod(method string) bool {
+	switch method {
+	case MethodMiddlewareRequest:
+		return descriptor.Request
+	case MethodMiddlewareAccount:
+		return descriptor.Account
+	case MethodMiddlewareProvider:
+		return descriptor.Provider
+	case MethodMiddlewareEvent:
+		return descriptor.Event
+	case MethodMiddlewareResponse:
+		return descriptor.Response
+	default:
+		return false
+	}
 }
 
 func (descriptor GatewayMiddlewareDescriptor) AllowsOrigin(origin string) bool {
@@ -139,50 +152,85 @@ func DecodeMiddlewareCall(descriptor GatewayMiddlewareDescriptor, method string,
 	if err := ValidateMiddlewareScope(scope); err != nil {
 		return call, err
 	}
-	if !slices.Contains(descriptor.Methods(), method) || decodeParams(raw, &call) != nil ||
-		len(call.Body) > MaxMiddlewareBodyBytes || gatewayState(call.State) != nil {
+	if !descriptor.DeclaresMethod(method) || decodeParams(raw, &call) != nil {
 		return call, &Error{Code: "invalid_params", Message: "invalid or undeclared middleware call"}
+	}
+	return call, validateMiddlewareCall(descriptor, method, call)
+}
+
+func ValidateMiddlewareCall(descriptor GatewayMiddlewareDescriptor, method string, scope Scope, call MiddlewareCall) error {
+	if err := ValidateMiddlewareScope(scope); err != nil {
+		return err
+	}
+	if !descriptor.DeclaresMethod(method) || !middlewareJSONWithin(call.Body, MaxMiddlewareBodyBytes) ||
+		!middlewareJSONWithin(call.State, MaxGatewayStateBytes) {
+		return &Error{Code: "invalid_params", Message: "invalid or undeclared middleware call"}
+	}
+	return validateMiddlewareCall(descriptor, method, call)
+}
+
+func middlewareJSONWithin(raw json.RawMessage, limit int) bool {
+	if len(raw) > limit {
+		return false
+	}
+	if len(raw) <= limit/6 || !bytes.ContainsAny(raw, "<>&\u2028\u2029") {
+		return true
+	}
+	encoded, err := json.Marshal(raw)
+	return err == nil && len(encoded) <= limit
+}
+
+func middlewareString(value string, limit int) bool {
+	return searchString(value, limit) ||
+		len(value) <= limit && !utf8.ValidString(value) && searchString(string([]rune(value)), limit)
+}
+
+func validateMiddlewareCall(descriptor GatewayMiddlewareDescriptor, method string, call MiddlewareCall) error {
+	if len(call.Body) > MaxMiddlewareBodyBytes || gatewayState(call.State) != nil {
+		return &Error{Code: "invalid_params", Message: "invalid or undeclared middleware call"}
 	}
 	if method == MethodMiddlewareAccount {
 		if len(call.Body) != 0 || call.Context.Account == nil {
-			return call, &Error{Code: "invalid_params", Message: "account hook requires only a sanitized account"}
+			return &Error{Code: "invalid_params", Message: "account hook requires only a sanitized account"}
 		}
 	} else if !gatewayObject(call.Body) {
-		return call, &Error{Code: "invalid_params", Message: "middleware body must be a bounded JSON object"}
+		return &Error{Code: "invalid_params", Message: "middleware body must be a bounded JSON object"}
 	}
 	if err := gatewayContext(GatewayHookDescriptor{Origins: descriptor.Origins}, call.Context.GatewayContext); err != nil {
-		return call, err
+		return err
 	}
 	context := call.Context
 	for _, value := range []string{context.Protocol, context.Model, context.Path, context.Agent,
 		context.Session, context.Cwd, context.Kind, context.Event} {
-		if !searchString(value, 4096) {
-			return call, &Error{Code: "invalid_params", Message: "invalid middleware context"}
+		if !middlewareString(value, 4096) {
+			return &Error{Code: "invalid_params", Message: "invalid middleware context"}
 		}
 	}
-	if len(context.Query) > 16<<10 || !json.Valid(raw) ||
+	const queryLimit = 16 << 10
+	if len(context.Query) > queryLimit || len(context.Query) > queryLimit/3 &&
+		!utf8.ValidString(context.Query) && len(string([]rune(context.Query))) > queryLimit ||
 		context.Status != 0 && (context.Status < 100 || context.Status > 599) {
-		return call, &Error{Code: "invalid_params", Message: "invalid middleware context bounds"}
+		return &Error{Code: "invalid_params", Message: "invalid middleware context bounds"}
 	}
 	if account := context.Account; account != nil {
 		if len(account.Ref) != 32 || strings.ContainsFunc(account.Ref, func(value rune) bool {
 			return (value < '0' || value > '9') && (value < 'a' || value > 'f')
 		}) ||
-			!searchString(account.Provider, 300) || !searchString(account.Name, 256) ||
-			!searchString(account.Kind, 128) || !searchString(account.Model, 4096) {
-			return call, &Error{Code: "invalid_params", Message: "invalid sanitized middleware account"}
+			!middlewareString(account.Provider, 300) || !middlewareString(account.Name, 256) ||
+			!middlewareString(account.Kind, 128) || !middlewareString(account.Model, 4096) {
+			return &Error{Code: "invalid_params", Message: "invalid sanitized middleware account"}
 		}
 	}
 	if provider := context.Provider; provider != nil {
-		if !searchString(provider.ID, 300) || !searchString(provider.Name, 256) ||
-			!searchString(provider.Account, 128) || !searchString(provider.Model, 4096) {
-			return call, &Error{Code: "invalid_params", Message: "invalid middleware provider"}
+		if !middlewareString(provider.ID, 300) || !middlewareString(provider.Name, 256) ||
+			!middlewareString(provider.Account, 128) || !middlewareString(provider.Model, 4096) {
+			return &Error{Code: "invalid_params", Message: "invalid middleware provider"}
 		}
 	}
 	if method == MethodMiddlewareProvider && context.Provider == nil {
-		return call, &Error{Code: "invalid_params", Message: "provider hook requires its current try"}
+		return &Error{Code: "invalid_params", Message: "provider hook requires its current try"}
 	}
-	return call, nil
+	return nil
 }
 
 func DecodeMiddlewareResult(method string, raw json.RawMessage) (MiddlewareResult, error) {

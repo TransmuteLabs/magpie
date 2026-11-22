@@ -27,7 +27,8 @@ func extensionAuxiliaryCall(ctx context.Context, binding *extensionAccount, meth
 		}
 		return nil
 	default:
-		return extensionAuthCall(ctx, binding.scope, method, struct{}{}, nil)
+		_, err := extensionAuthCall(ctx, binding.host, binding.scope, method, struct{}{}, nil)
+		return err
 	}
 }
 

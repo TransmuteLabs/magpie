@@ -75,7 +75,7 @@ func TestPluginCheckinGoesThroughItsProxy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ps := pluginCheckinProviders()
+	ps := pluginCheckinProviders(t.Context())
 	if len(ps) != 1 || len(ps[0].accounts) != 2 {
 		t.Fatalf("the plugins that check in: %+v", ps)
 	}

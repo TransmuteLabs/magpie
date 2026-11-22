@@ -24,7 +24,9 @@ package provider
 // quotaHistSame of the next one dropped for it.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"math"
 	"os"
@@ -32,12 +34,13 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 const (
@@ -79,7 +82,7 @@ type QuotaHistory struct {
 // quotaHist is the file: account ("provider|user") → window → points.
 type quotaHist map[string]map[string][]QuotaPoint
 
-var quotaHistMu sync.Mutex
+var quotaHistMu = filelock.Mutex{Path: func() string { return quotaHistPath() + ".lock" }}
 
 // lastNoted is each account's newest noted reading's time, kept per history
 // file and in memory only: a batch whose readings are all older notes
@@ -100,34 +103,51 @@ func parseQuotaHist(b []byte) (quotaHist, error) {
 }
 
 // readQuotaHist is the history file's read; tests count the reads.
-var readQuotaHist = func() quotaHist {
-	if b, err := os.ReadFile(quotaHistPath()); err == nil {
-		h, _ := parseQuotaHist(b)
-		return h
+var readQuotaHist = func() (quotaHist, error) {
+	b, err := os.ReadFile(quotaHistPath())
+	if os.IsNotExist(err) {
+		return quotaHist{}, nil
 	}
-	return quotaHist{}
+	if err != nil {
+		return nil, err
+	}
+	return parseQuotaHist(b)
 }
 
-func writeQuotaHist(h quotaHist) {
+func writeQuotaHist(ctx context.Context, h quotaHist) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	b, err := marshalQuotaHist(h)
 	if err != nil {
-		return
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	path := quotaHistPath()
 	// parseQuotaHist reads a file that doesn't parse as no history: it is
 	// kept aside before it is written over, and not written over when it
 	// can't be. What this process wrote last parsed, and is still there.
-	if wrote, _ := quotaHistWrote(path); !wrote && lastgood.KeepUnparsed(path, lastgood.Into[quotaHist]) != nil {
-		return
+	if wrote, _ := quotaHistWrote(path); !wrote {
+		if err := lastgood.KeepUnparsed(path, lastgood.Into[quotaHist]); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := writeFileAtomicChecked(path, b, ctx.Err); err != nil {
+		return err
 	}
 	quotaHistOwn = quotaHistMine{}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	if writeFileAtomic(path, b) != nil {
-		return
-	}
 	if fi, err := os.Stat(path); err == nil {
 		quotaHistOwn = quotaHistMine{path, fi, h}
 	}
+	return nil
 }
 
 // quotaHistOwn is the history as this process last wrote it, under
@@ -164,9 +184,13 @@ func quotaHistWrote(path string) (bool, quotaHist) {
 // heldQuotaHist is the history to change and write back, under
 // quotaHistMu: the one this process wrote while the file is still it,
 // else the file's.
-func heldQuotaHist() quotaHist {
+func heldQuotaHist() (quotaHist, error) {
 	if ok, h := quotaHistWrote(quotaHistPath()); ok {
-		return h
+		draft := make(quotaHist, len(h))
+		for key, windows := range h {
+			draft[key] = maps.Clone(windows)
+		}
+		return draft, nil
 	}
 	return readQuotaHist()
 }
@@ -260,16 +284,14 @@ func addPoint(pts []QuotaPoint, n QuotaPoint) []QuotaPoint {
 		if !newCycle(p1, p2) && !newCycle(p2, n) {
 			flat := math.Abs(n.Left-p2.Left) < 0.05 && math.Abs(p2.Left-p1.Left) < 0.05
 			if flat || n.At.Sub(p1.At) < quotaHistGap {
-				pts[k-1] = n
-				return pts
+				return slices.Concat(pts[:k-1], []QuotaPoint{n})
 			}
 		}
 	}
 	if k >= 1 && n.At.Sub(pts[k-1].At) < quotaHistSame && !newCycle(pts[k-1], n) {
-		pts[k-1] = n
-		return pts
+		return slices.Concat(pts[:k-1], []QuotaPoint{n})
 	}
-	return append(pts, n)
+	return slices.Concat(pts, []QuotaPoint{n})
 }
 
 // prune drops what is older than kept and what is past quotaHistMax.
@@ -299,20 +321,43 @@ func quotaHistKey(provider, user string) string { return provider + "|" + string
 // noteQuotaHistory keeps what each window among qs says, at when it was
 // read (ReadAt), or now: a reading handed back again from a cache (a
 // Claude account's, kept until Claude Code tells it again) keeps its time
-// and so isn't taken for a new one.
+// and so isn't taken for a new one. A stale replica's window
+// (quota_stale.go) isn't kept, and its card in qs is set to the later
+// window, so call it before the cards are cached.
 func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
-	qs = currentExtensionQuotas(slices.Clone(qs))
-	quotaHistMu.Lock()
+	noteSubscriptionQuotaHistory(context.Background(), qs, now)
+}
+
+func noteQuotaHistoryContext(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
+	noteQuotaBatch(ctx, qs, now, false)
+}
+
+func noteSubscriptionQuotaHistory(ctx context.Context, qs []SubscriptionQuota, now time.Time) {
+	noteQuotaBatch(ctx, qs, now, true)
+}
+
+func noteQuotaBatch(ctx context.Context, qs []SubscriptionQuota, now time.Time, subscription bool) {
+	if !quotaHistMu.LockCheckedContext(ctx) {
+		return
+	}
 	defer quotaHistMu.Unlock()
+	cards := qs
+	if subscription {
+		copy(qs, ValidateSubscriptionQuotas(ctx, qs))
+	} else {
+		qs = currentExtensionQuotas(ctx, slices.Clone(qs))
+	}
+	if ctx.Err() != nil {
+		return
+	}
 	path := quotaHistPath()
-	if lastNotedPath != path {
-		// another history file: the noted times say nothing about it
-		lastNoted, lastNotedPath = map[string]time.Time{}, path
+	var previous, pending map[string]time.Time
+	if lastNotedPath == path {
+		previous = lastNoted
 	}
 	// A batch of cached readings notes nothing new: every reading's time is
 	// no newer than what was last noted for its account, so the file need
 	// not be read and parsed for that batch again (#1358).
-	skip := true
 	for _, q := range qs {
 		if q.Error != "" || q.AsOf != nil || q.ReadDeferred || q.Provider == "" {
 			continue // a reading kept from before isn't a new one
@@ -322,17 +367,19 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 			at = *q.ReadAt
 		}
 		key := quotaHistKey(q.Provider, q.User)
-		if lastNoted[key].Before(at) {
-			lastNoted[key] = at
-			skip = false
+		if previous[key].Before(at) && pending[key].Before(at) {
+			if pending == nil {
+				pending = make(map[string]time.Time)
+			}
+			pending[key] = at
 		}
 	}
-	if skip {
+	if len(pending) == 0 || ctx.Err() != nil {
 		return
 	}
 	var h quotaHist
 	changed := false
-	for _, q := range qs {
+	for i, q := range qs {
 		if q.Error != "" || q.AsOf != nil || q.ReadDeferred || q.Provider == "" {
 			continue // a reading kept from before isn't a new one
 		}
@@ -340,13 +387,18 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 		if q.ReadAt != nil && !q.ReadAt.After(now) {
 			at = *q.ReadAt
 		}
-		for _, w := range q.Windows {
+		var current []QuotaWindow
+		for j, w := range q.Windows {
 			p, ok := pointOf(w, at, now)
 			if !ok {
 				continue
 			}
 			if h == nil {
-				h = heldQuotaHist()
+				var err error
+				h, err = heldQuotaHist()
+				if err != nil {
+					return
+				}
 			}
 			key := quotaHistKey(q.Provider, q.User)
 			if h[key] == nil {
@@ -354,23 +406,43 @@ func noteQuotaHistory(qs []SubscriptionQuota, now time.Time) {
 			}
 			name := w.LineName() // Antigravity's pools each have a 5-hour window
 			before := h[key][name]
-			k := len(before)
-			var last QuotaPoint
-			if k > 0 {
-				last = before[k-1]
+			if kept := withoutStale(q.Provider, before); staleWindowVendors[q.Provider] && len(kept) > 0 {
+				if cw, stale := currentWindow(w, p, kept[len(kept)-1]); stale {
+					if current == nil {
+						current = slices.Clone(q.Windows)
+					}
+					current[j] = cw
+					for m, f := range q.Windows {
+						if sameBucket(f, w) {
+							current[m].Used, current[m].ResetsAt, current[m].ResetSecs, current[m].StartsAt = cw.Used, cw.ResetsAt, 0, nil
+						}
+					}
+					continue
+				}
 			}
 			after := addPoint(before, p)
-			if len(after) != k || k > 0 && after[k-1] != last {
+			if len(after) != len(before) || len(before) > 0 && after[len(after)-1].At.After(before[len(before)-1].At) {
 				changed = true
 			}
 			h[key][name] = after
 		}
+		if current != nil {
+			cards[i].Windows = current
+		}
 	}
-	if !changed {
+	if changed {
+		h.prune(now)
+		if writeQuotaHist(ctx, h) != nil {
+			return
+		}
+	} else if ctx.Err() != nil {
 		return
 	}
-	h.prune(now)
-	writeQuotaHist(h)
+	if lastNotedPath != path {
+		lastNoted, lastNotedPath = pending, path
+	} else {
+		maps.Copy(lastNoted, pending)
+	}
 }
 
 // mergeQuotaHist puts b's points into a: the union of both, a point within
@@ -408,28 +480,41 @@ func samePoint(x, y QuotaPoint) bool {
 // QuotaHistoryData is this computer's history as kept, for the usage sync
 // to share.
 func QuotaHistoryData() []byte {
-	quotaHistMu.Lock()
-	defer quotaHistMu.Unlock()
-	b, _ := os.ReadFile(quotaHistPath())
+	b, _ := steady.ReadFile(quotaHistPath())
 	return b
 }
 
 // MergeQuotaHistory merges another computer's history (as QuotaHistoryData
 // gave it there) into this one's.
 func MergeQuotaHistory(data []byte, now time.Time) error {
+	return MergeQuotaHistoryContext(context.Background(), data, now)
+}
+
+// MergeQuotaHistoryContext applies the caller's deadline to the local merge.
+func MergeQuotaHistoryContext(ctx context.Context, data []byte, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var b quotaHist
 	if err := json.Unmarshal(data, &b); err != nil {
 		return err
 	}
-	quotaHistMu.Lock()
+	if !quotaHistMu.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("could not lock quota history")
+	}
 	defer quotaHistMu.Unlock()
-	h := heldQuotaHist()
+	h, err := heldQuotaHist()
+	if err != nil {
+		return err
+	}
 	if !mergeQuotaHist(h, b) {
-		return nil
+		return ctx.Err()
 	}
 	h.prune(now)
-	writeQuotaHist(h)
-	return nil
+	return writeQuotaHist(ctx, h)
 }
 
 // QuotaHistories is every account's windows' points since since, the
@@ -448,7 +533,8 @@ func QuotaHistories(since time.Time, provider, user string) []QuotaHistory {
 		}
 		a := QuotaHistory{Provider: p, User: u, Lines: []QuotaLine{}}
 		for _, name := range slices.Sorted(maps.Keys(h[key])) {
-			pts := h[key][name]
+			// a stale replica's readings, kept before they were known as one
+			pts := withoutStale(p, h[key][name])
 			i, _ := slices.BinarySearchFunc(pts, since, func(p QuotaPoint, t time.Time) int { return p.At.Compare(t) })
 			if i > 0 {
 				i-- // the one before, so a line reaches the range's edge

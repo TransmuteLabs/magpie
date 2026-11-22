@@ -16,7 +16,11 @@ export const RacePlugin = async () => ({
     provider: "raceco",
     methods: [{ type: "api", label: "API key" }],
     async refresh(auth) {
-      const res = await fetch(process.env.RACE_TOKEN_URL, { method: "POST", body: auth.refresh })
+      const res = await fetch(process.env.RACE_TOKEN_URL, {
+        method: "POST",
+        headers: { "x-fake-run": process.env.FAKE_RUN },
+        body: auth.refresh,
+      })
       const t = await res.json()
       if (t.error === "invalid_grant") throw Object.assign(new Error("RaceCo: invalid_grant"), { signIn: "expired" })
       if (!res.ok) throw new Error("RaceCo: " + res.status)

@@ -12,7 +12,7 @@ import (
 // check cannot authorize a replacement worker with different exposure.
 func checkLeasedTool(ctx context.Context, lease *Lease, params any) (context.Context, error) {
 	if selected, ok := ctx.Value(toolAccountCheckKey{}).(toolAccountCheck); ok {
-		if lease.manager.Namespace() != selected.namespace || lease.Revision() != selected.revision || lease.ConfigVersion() != selected.config {
+		if lease.manager.Namespace() != selected.namespace || !selected.generation.matches(lease.worker.entry, lease.ConfigVersion()) {
 			return ctx, errors.New("extension tool account selection belongs to another runtime generation")
 		}
 	}
@@ -42,11 +42,14 @@ func checkLeasedTool(ctx context.Context, lease *Lease, params any) (context.Con
 type toolScopeKey struct{}
 
 type toolAccountCheckKey struct{}
-type toolAccountCheck struct{ namespace, revision, config string }
+type toolAccountCheck struct {
+	namespace  string
+	generation expectedGeneration
+}
 
 // WithToolAccountCheck pins the prepared account's runtime and retains its
 // policy check through dispatch, acceptance and host callbacks.
-func WithToolAccountCheck(ctx context.Context, namespace, revision, config string, check func(context.Context) error) context.Context {
+func WithToolAccountCheck(ctx context.Context, namespace, revision, config, epoch string, check func(context.Context) error) context.Context {
 	previous, _ := ctx.Value(windowAdmissionKey{}).(func(context.Context) error)
 	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
 		if previous != nil {
@@ -56,7 +59,12 @@ func WithToolAccountCheck(ctx context.Context, namespace, revision, config strin
 		}
 		return check(current)
 	})
-	return context.WithValue(ctx, toolAccountCheckKey{}, toolAccountCheck{namespace, revision, config})
+	return context.WithValue(ctx, toolAccountCheckKey{}, toolAccountCheck{
+		namespace: namespace,
+		generation: expectedGeneration{
+			packageRevision: revision, configVersion: config, enableGeneration: &epoch, exact: true,
+		},
+	})
 }
 
 // WithToolScope carries authority resolved by the host for one tool call.

@@ -31,7 +31,7 @@ func SetLoginOn(agent, user string, on bool) error {
 	if discoveryOff() {
 		return errAccountDiscoveryOff
 	}
-	if strings.HasPrefix(agent, "extension-") {
+	if isExtensionLoginAgent(agent) {
 		return setExtensionLoginOn(agent, user, on)
 	}
 	if pp, ok := pluginOfAgent(agent); ok {
@@ -109,13 +109,17 @@ func pausedOwn(ls []savedLogin, agent, user string) bool {
 // logins.json under its lock: listed once a request, as Logins is (#5104),
 // and a write lists it anew.
 func (p Provider) OwnPaused() bool {
+	return p.ownPausedContext(context.Background())
+}
+
+func (p Provider) ownPausedContext(ctx context.Context) bool {
 	if p.IsExtension() {
-		return !extensionAccountOn(p.ID, p.Account.User)
+		return !p.Account.extension.on()
 	}
 	if p.Account == nil || p.Account.token != nil && !p.Account.standIn || !slices.Contains(loginAgents, p.Account.Agent) {
 		return false
 	}
-	return heldOf("ownPaused\x00"+p.Account.Agent+"\x00"+p.Account.User, func() bool {
+	return heldOfContext(ctx, "ownPaused\x00"+p.Account.Agent+"\x00"+p.Account.User, func() bool {
 		loginsMu.Lock()
 		defer loginsMu.Unlock()
 		return pausedOwn(readLogins(), p.Account.Agent, p.Account.User)
@@ -130,7 +134,11 @@ func (p Provider) OwnPaused() bool {
 // afresh had none, and a second WorkBuddy AI account queued 62s with the
 // wait set to 1s (#1899).
 func (p Provider) AlsoOn() []Provider {
-	out := p.alsoOn()
+	return p.alsoOnWithPicks(context.Background())
+}
+
+func (p Provider) alsoOnWithPicks(ctx context.Context) []Provider {
+	out := p.alsoOnContext(ctx)
 	for i, q := range out {
 		out[i] = withPicks(q, p)
 	}
@@ -140,8 +148,12 @@ func (p Provider) AlsoOn() []Provider {
 // alsoOn is AlsoOn as each sign-in makes its accounts, without the
 // provider's settings.
 func (p Provider) alsoOn() []Provider {
+	return p.alsoOnContext(context.Background())
+}
+
+func (p Provider) alsoOnContext(ctx context.Context) []Provider {
 	if p.IsExtension() {
-		return p.extensionAlsoOn()
+		return p.extensionAlsoOnContext(ctx)
 	}
 	if p.IsPlugin() {
 		return pluginAlsoOn(*p.Account.plugin)
@@ -159,7 +171,7 @@ func (p Provider) alsoOn() []Provider {
 		return nil
 	}
 	var out []Provider
-	for _, l := range Logins(p.Account.Agent) {
+	for _, l := range loginsContext(ctx, p.Account.Agent) {
 		if l.Active || l.first || !l.On {
 			continue
 		}

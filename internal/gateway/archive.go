@@ -66,17 +66,19 @@ func archiveLimit() int64 {
 	return int64(min(mb, 1024)) << 20
 }
 
-// wire is what an archived call keeps besides what Call has: the request's
-// method, path, headers and whole body, the response's, and where it goes.
-type wire struct {
+type archiveRequest struct {
 	name         string // <date>/<id>
 	method, path string
 	query        string // its secrets taken out on the way (a key= Gemini's way)
-	req          http.Header
-	body         []byte // the request's, until it is written to reqFull
-	reqFull      *spool
-	res          *captureResponseWriter
+	reqHead      http.Header
 	to           Putter
+}
+
+// wire tracks the archive while the gateway is serving the call.
+type wire struct {
+	archiveRequest
+	body []byte
+	res  *captureResponseWriter
 }
 
 // archiveDest is where a call is archived, and false when it isn't: the S3
@@ -111,8 +113,11 @@ func archiving(r *http.Request, res *captureResponseWriter, start time.Time, bod
 	name, id := archiveID(start)
 	res.Header().Set(ArchiveHeader, id)
 	res.full = &spool{limit: archiveLimit()}
-	return &wire{name: name, method: r.Method, path: r.URL.Path,
-		query: r.URL.RawQuery, req: r.Header.Clone(), body: body, res: res, to: to}
+	return &wire{
+		archiveRequest: archiveRequest{name: name, method: r.Method, path: r.URL.Path,
+			query: r.URL.RawQuery, reqHead: r.Header.Clone(), to: to},
+		body: body, res: res,
+	}
 }
 
 // archiveID is a new call's name in the archive, "<date>/<id>", and its
@@ -136,15 +141,16 @@ func archiveOwn(c Call, sent *http.Request, body []byte, status int, head http.H
 		return ""
 	}
 	name, _ := archiveID(c.Time)
-	c.Archive, c.Status, c.wire = name, status, nil
-	w := &wire{name: name, method: sent.Method, path: sent.URL.Path, query: sent.URL.RawQuery, req: sent.Header.Clone(), to: to}
+	c.Archive, c.Status = name, status
+	request := archiveRequest{name: name, method: sent.Method, path: sent.URL.Path,
+		query: sent.URL.RawQuery, reqHead: sent.Header.Clone(), to: to}
 	req, res := &spool{limit: archiveLimit()}, &spool{limit: archiveLimit()}
 	req.add(body)
 	res.add(answer)
 	if head == nil {
 		head = http.Header{}
 	}
-	queueArchive(archiveJob{c: c, w: w, resHead: head.Clone(), req: req, res: res})
+	queueArchive(archiveJob{archiveRequest: request, c: c, resHead: head.Clone(), req: req, res: res})
 	return name
 }
 
@@ -211,8 +217,8 @@ type ArchivePart struct {
 }
 
 type archiveJob struct {
+	archiveRequest
 	c        Call
-	w        *wire
 	resHead  http.Header
 	req, res *spool
 }
@@ -241,13 +247,15 @@ func archive(c Call) {
 	if res == nil {
 		res = &spool{}
 	}
-	queueArchive(archiveJob{c: c, w: w, resHead: w.res.Header().Clone(), req: req, res: res})
+	queueArchive(archiveJob{archiveRequest: w.archiveRequest, c: c, resHead: w.res.Header().Clone(), req: req, res: res})
 }
 
 // queueArchive puts j in the upload queue, or drops it when the queue is
 // full.
 func queueArchive(j archiveJob) {
-	w := j.w
+	j.c.wire = nil
+	j.c.RequestBody, j.c.ResponseBody = "", ""
+	j.c.wholeIn, j.c.wholeOut, j.c.maskIn = nil, nil, nil
 	archiveOnce.Do(func() {
 		archiveJobs = make(chan archiveJob, archiveQueue)
 		go func() {
@@ -265,7 +273,7 @@ func queueArchive(j archiveJob) {
 		archivePending.Done()
 		req.discard()
 		res.discard()
-		log.Printf("request archive: %s dropped: %d uploads already waiting", w.name, archiveQueue)
+		log.Printf("request archive: %s dropped: %d uploads already waiting", j.name, archiveQueue)
 	}
 }
 
@@ -273,26 +281,24 @@ func upload(j archiveJob) {
 	defer j.req.discard()
 	defer j.res.discard()
 	c := j.c
-	c.wire = nil
-	c.RequestBody, c.ResponseBody = "", ""
 	reqBody, err1 := j.req.read()
 	resBody, err2 := j.res.read()
 	if err := errors.Join(err1, err2); err != nil {
-		archiveFailed(j.w.name, err)
+		archiveFailed(j.name, err)
 		return
 	}
 	c.Error, c.Fallback = redact.Scrub(c.Error), redact.Scrub(c.Fallback)
-	path := j.w.path
-	if j.w.query != "" {
-		path += "?" + scrubQuery(j.w.query)
+	path := j.path
+	if j.query != "" {
+		path += "?" + scrubQuery(j.query)
 	}
-	a := Archived{ID: j.w.name, Call: c,
-		Request: ArchivePart{Method: j.w.method, Path: path, Headers: scrubHeaders(j.w.req),
+	a := Archived{ID: j.name, Call: c,
+		Request: ArchivePart{Method: j.method, Path: path, Headers: scrubHeaders(j.reqHead),
 			Body: string(redact.ScrubJSON(reqBody)), Size: j.req.size, Truncated: j.req.cut()},
 		Response: ArchivePart{Status: c.Status, Headers: scrubHeaders(j.resHead),
 			Body: string(redact.ScrubJSON(resBody)), Size: j.res.size, Truncated: j.res.cut()},
 	}
-	if h := j.c.headers.masked(); h != nil {
+	if h := c.headers.masked(); h != nil {
 		a.Upstream, a.UpstreamMore = h.Upstream, h.More
 	}
 	// as it reads in the bucket: a query's & and a body's <tags> as they are
@@ -300,19 +306,20 @@ func upload(j archiveJob) {
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
+	key := "archive/" + j.name + ".json"
 	err := enc.Encode(a)
 	if err == nil {
 		// a minute, and a second more for each 256 KB a slow link takes
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute+time.Duration(buf.Len()>>18)*time.Second)
-		err = j.w.to.Put(ctx, "archive/"+j.w.name+".json", buf.Bytes())
+		err = j.to.Put(ctx, key, buf.Bytes())
 		cancel()
 	}
 	if err != nil {
-		archiveFailed(j.w.name, err)
+		archiveFailed(j.name, err)
 		return
 	}
-	if k, ok := j.w.to.(archiveKeeper); ok {
-		bucketAdded(k, "archive/"+j.w.name+".json", int64(buf.Len())) // kept under its size (archive_bucket.go)
+	if k, ok := j.to.(archiveKeeper); ok {
+		bucketAdded(k, key, int64(buf.Len())) // kept under its size (archive_bucket.go)
 	}
 	archiveMu.Lock()
 	archiveErr = ""

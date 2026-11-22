@@ -189,7 +189,7 @@ func TestSyncKeepsMostUses(t *testing.T) {
 	carry(t, a, b)
 	a.use(t)
 	*at = at.Add(2 * time.Minute)
-	touch([]string{m.ID})
+	touch([]string{m.ID}, *at)
 	if !carry(t, a, b) {
 		t.Fatal("uses from the other computer weren't taken")
 	}
@@ -200,7 +200,7 @@ func TestSyncKeepsMostUses(t *testing.T) {
 	a.use(t)
 	x, _ := Collect()
 	*at = at.Add(2 * time.Minute)
-	touch([]string{m.ID})
+	touch([]string{m.ID}, *at)
 	y, _ := Collect()
 	if x.Hash() != y.Hash() {
 		t.Fatal("a search changed what tells a sync something changed")

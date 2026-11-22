@@ -1,28 +1,58 @@
 package extension
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"sync/atomic"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
-	return m.runtimeModuleConfigContext(context.Background(), manifest)
+const moduleConfigMemoLimit = 64 << 10
+
+type moduleConfigMemo struct {
+	revision string
+	digest   [sha256.Size]byte
+	values   json.RawMessage
 }
 
-func (m *Manager) runtimeModuleConfigContext(ctx context.Context, manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
+func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot, error) {
+	return m.runtimeModuleConfigContext(context.Background(), Installed{Manifest: manifest})
+}
+
+func (m *Manager) runtimeModuleConfigContext(ctx context.Context, entry Installed) (sdk.ConfigSnapshot, error) {
+	manifest := entry.Manifest
 	if manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	config, err := m.readModuleConfigContext(ctx, manifest.ID)
+	value, err := m.readModuleConfigValue(ctx, manifest.ID)
+	if err != nil {
+		return sdk.ConfigSnapshot{}, err
+	}
+	var slot *atomic.Pointer[moduleConfigMemo]
+	var digest [sha256.Size]byte
+	if entry.Revision != "" && len(value.Value) <= moduleConfigMemoLimit {
+		index := int(sha256.Sum256([]byte(manifest.ID))[0]) % len(m.configMemos)
+		slot = &m.configMemos[index]
+		digest = sha256.Sum256(value.Value)
+		if memo := slot.Load(); memo != nil && memo.revision == entry.Revision && memo.digest == digest {
+			return sdk.ConfigSnapshot{Version: strconv.FormatUint(value.Version, 10), Values: bytes.Clone(memo.values)}, nil
+		}
+	}
+	config, err := moduleConfigSnapshot(value)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
 	config.Values, err = effectiveModuleConfig(manifest, config.Values)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
+	}
+	if slot != nil && len(config.Values) <= moduleConfigMemoLimit {
+		slot.Store(&moduleConfigMemo{revision: entry.Revision, digest: digest, values: bytes.Clone(config.Values)})
 	}
 	return config, nil
 }

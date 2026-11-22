@@ -403,7 +403,7 @@ func TestQuotaReportsReckonByTheLog(t *testing.T) {
 	if provider.ReckonHolds == nil {
 		t.Fatal("provider.ReckonHolds isn't set: the quota reports tell no whole")
 	}
-	qs := provider.ReckonHolds([]provider.SubscriptionQuota{{Provider: "codex", User: "sam@example.com", Windows: []provider.QuotaWindow{
+	qs := provider.ReckonHolds(t.Context(), []provider.SubscriptionQuota{{Provider: "codex", User: "sam@example.com", Windows: []provider.QuotaWindow{
 		{Name: "5 hours", Used: 10, ResetsAt: &reset, Span: 5 * time.Hour},
 		{Name: "7 days", Used: 2, ResetsAt: &reset, Span: 7 * 24 * time.Hour},
 	}}}, now)
@@ -430,7 +430,7 @@ func TestHoldsPriceTheModelItIsTheSameAs(t *testing.T) {
 	if err := settings.Save(s); err != nil {
 		t.Fatal(err)
 	}
-	priceOf := apiPricer()
+	priceOf := apiPricer(t.Context())
 	if pr := priceOf(Record{Provider: "wb", Model: "gpt-5-5-wb"}); pr == nil || pr.Input != 1.25 {
 		t.Errorf("the model it is the same as wasn't its API price: %+v", pr)
 	}
@@ -514,7 +514,7 @@ func TestWindowHoldsReckonsAntigravityPools(t *testing.T) {
 // whole for every other call in the window.
 func TestHoldsPriceTheModelTheReplyNamed(t *testing.T) {
 	holdsHome(t)
-	priceOf := apiPricer()
+	priceOf := apiPricer(t.Context())
 	named := Record{Provider: "relay", Model: "moonshot-kimi-k3", Served: "gpt-5.5"}
 	if pr := priceOf(named); pr == nil || pr.Input != 1.25 {
 		t.Fatalf("the model the reply named wasn't its API price: %+v", pr)

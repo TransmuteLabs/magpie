@@ -251,11 +251,10 @@ func Check(secret string) (Identity, error) {
 	}
 	i := slices.IndexFunc(keys, func(k Key) bool { return subtle.ConstantTimeCompare([]byte(secret), []byte(k.Secret)) == 1 })
 	if i < 0 {
-		s := settings.Load()
 		// A read-only config directory may prevent the first store write. Never
 		// fall back after either durable marker exists, or to a revoked mirror.
-		if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) && subtle.ConstantTimeCompare([]byte(secret), []byte(s.LANKey)) == 1 {
-			k := legacyLANKey(s.LANKey)
+		if legacy := legacyLANSecret(keys); legacy != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(legacy)) == 1 {
+			k := legacyLANKey(legacy)
 			// sum as Check gives the same key once migrated, so the
 			// caller's identity is one before and after
 			return Identity{KeyID: k.ID, KeyName: k.Name, Default: true, sum: sha256.Sum256([]byte(k.Secret))}, nil

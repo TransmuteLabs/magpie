@@ -22,7 +22,7 @@ func TestQuotaHistoryWrittenNotReadAgain(t *testing.T) {
 	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
 	reads := 0
 	oldRead := readQuotaHist
-	readQuotaHist = func() quotaHist {
+	readQuotaHist = func() (quotaHist, error) {
 		reads++
 		return oldRead()
 	}

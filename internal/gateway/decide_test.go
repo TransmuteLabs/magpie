@@ -84,16 +84,16 @@ type jevUp struct {
 }
 
 func (u *jevUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || r.URL.Path != "/v1/systemone" {
+		http.NotFound(w, r)
+		return
+	}
 	b, _ := io.ReadAll(r.Body)
 	var q map[string]any
 	json.Unmarshal(b, &q)
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.asked, u.auth = append(u.asked, q), r.Header.Get("Authorization")
-	if r.URL.Path != "/v1/systemone" {
-		http.NotFound(w, r)
-		return
-	}
 	answers := map[string]any{}
 	qs, _ := q["questions"].(map[string]any)
 	if _, ok := qs["intent"]; ok {
@@ -303,6 +303,7 @@ func jevved(t *testing.T, effort string, rules ...provider.Rule) (*Server, *rule
 	j := &jevUp{choice: noIntent, sure: 0.9, score: 0}
 	srv := httptest.NewServer(j)
 	t.Cleanup(srv.Close)
+	probeFixtureRoot(t, srv)
 	if err := provider.Save(provider.Provider{ID: "ts", Name: "TypeSafe", Key: "kts", Decide: srv.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}

@@ -475,17 +475,23 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	if err := checkWindowAdmission(call); err != nil {
 		return nil, err
 	}
-	result, err := group.invoke(client, call, sdk.MethodModuleCall, scope, bytes.Clone(auth),
-		sdk.ModuleCallRequest{Action: action.ID, Input: bytes.Clone(input)}, func(event Event) error {
-			if event.Name != "accepted" || action.Effect != "write" {
-				return errors.New("module RPC 1.1 is unary and permits only write acceptance")
-			}
-			var receipt sdk.AcceptedEvent
-			if !decodeHostParams(event.Data, &receipt) || scope.Operation == "" || receipt.OperationID != scope.Operation {
-				return errors.New("component accepted another root operation")
-			}
-			return group.accepted(call, scope)
-		})
+	params := sdk.ModuleCallRequest{Action: action.ID, Input: bytes.Clone(input)}
+	consume := func(event Event) error {
+		if event.Name != "accepted" || action.Effect != "write" {
+			return errors.New("module RPC 1.1 is unary and permits only write acceptance")
+		}
+		var receipt sdk.AcceptedEvent
+		if !decodeHostParams(event.Data, &receipt) || scope.Operation == "" || receipt.OperationID != scope.Operation {
+			return errors.New("component accepted another root operation")
+		}
+		return group.accepted(call, scope)
+	}
+	var result json.RawMessage
+	if admit := group.manager.subscriptionAdmission(call, group.entry.Manifest, sdk.MethodModuleCall, scope, false); admit != nil {
+		result, err = client.callWithAdmission(call, sdk.MethodModuleCall, scope, bytes.Clone(auth), params, consume, admit)
+	} else {
+		result, err = group.invoke(client, call, sdk.MethodModuleCall, scope, bytes.Clone(auth), params, consume)
+	}
 	if err != nil {
 		return nil, err
 	}

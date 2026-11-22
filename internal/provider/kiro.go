@@ -461,11 +461,15 @@ func saveKiro(c kiroCred) {
 }
 
 func writeFileAtomic(path string, b []byte) error {
+	return writeFileAtomicChecked(path, b, nil)
+}
+
+func writeFileAtomicChecked(path string, b []byte, check func() error) error {
 	path, err := edit.Target(path) // a symlink stays, its target written
 	if err != nil {
 		return err
 	}
-	return writeChanged(path, b, 0o600) // on the disk before it is renamed in (#1505)
+	return writeChangedChecked(path, b, 0o600, check)
 }
 
 // kiroPost posts to a sign-in endpoint.

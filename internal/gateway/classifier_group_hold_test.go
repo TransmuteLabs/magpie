@@ -24,11 +24,12 @@ func TestClassifierModelHeldToItsGroupsAccount(t *testing.T) {
 			codexSignedIn(t, "spare@example.com")
 			asked := lunaBackend(t)
 			user := provider.LoginID("codex", "spare@example.com")
-			relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				t.Errorf("the relay, switched off in the group, was asked")
-				w.WriteHeader(500)
-			}))
+			relay := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("the relay, switched off in the group, was asked: %s %s", r.Method, r.URL.RequestURI())
+				w.WriteHeader(http.StatusInternalServerError)
+			})))
 			t.Cleanup(relay.Close)
+			probeFixtureRoot(t, relay)
 			if err := provider.Save(provider.Provider{ID: "relay", Name: "Relay", Chat: relay.URL + "/v1", Key: "sk-r", Models: []string{"gpt-6-luna"}}); err != nil {
 				t.Fatal(err)
 			}

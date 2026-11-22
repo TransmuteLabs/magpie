@@ -29,25 +29,39 @@ package provider
 // count again.
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"maps"
 	"os"
 	"path/filepath"
-	"sync"
+	"slices"
+	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 // walletSpend is one wallet window's count for its period.
 type walletSpend struct {
-	Ends  time.Time `json:"ends"`  // when the period ends
-	Since time.Time `json:"since"` // its first reading
-	Spent float64   `json:"spent"`
-	Last  float64   `json:"last"` // the balance last read
+	Ends        time.Time         `json:"ends"`  // when the period ends
+	Since       time.Time         `json:"since"` // its first reading
+	Spent       float64           `json:"spent"`
+	Last        float64           `json:"last"` // the balance last read
+	Observation walletObservation `json:"observation,omitzero"`
 }
 
-var walletSpends struct {
-	sync.Mutex
-	m    map[string]walletSpend
-	path string // the file m was read from: another HOME reads its own
+type walletObservation struct {
+	pluginLoginOrder
+	LoginID   string `json:"loginId"`
+	Epoch     string `json:"epoch,omitempty"`
+	AuthEpoch string `json:"authEpoch,omitempty"`
+}
+
+var errWalletReplySuperseded = errors.New("a newer Usage reply already observed this wallet")
+
+var walletSpends = filelock.Mutex{
+	Path: func() string { return walletSpendPath() + ".lock" },
 }
 
 func walletSpendPath() string { return filepath.Join(filepath.Dir(Path()), "wallet-spend.json") }
@@ -65,71 +79,118 @@ func walletPeriodEnd(w QuotaWindow, now time.Time) time.Time {
 	return time.Date(y, m, d+1, 0, 0, 0, 0, now.Location())
 }
 
-// noteWalletSpend counts the reading of wallet window w at now under key
-// and is its period's count.
-func noteWalletSpend(key string, w QuotaWindow, now time.Time) walletSpend {
-	b := *w.Balance
+func noteWalletSpend(ctx context.Context, prefix string, windows []QuotaWindow, now time.Time, observation walletObservation, check func() error) ([]walletSpend, error) {
+	if !walletSpends.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("the wallet spend lock is unavailable")
+	}
+	defer walletSpends.Unlock()
+	if err := check(); err != nil {
+		return nil, err
+	}
 	path := walletSpendPath()
-	c := &walletSpends
-	c.Lock()
-	defer c.Unlock()
-	if c.path != path {
-		c.path, c.m = path, nil
-		if raw, err := os.ReadFile(path); err == nil {
-			// one that can't be read starts each count again from now,
-			// which each window's SpentSince says
-			json.Unmarshal(raw, &c.m)
-		}
-	}
-	s, ok := c.m[key]
+	current := map[string]walletSpend{}
+	raw, err := os.ReadFile(path)
 	switch {
-	case !ok || !now.Before(s.Ends) || now.Before(s.Since):
-		s = walletSpend{Ends: walletPeriodEnd(w, now), Since: now, Last: b}
-	case b < s.Last:
-		s.Spent += s.Last - b
-		s.Last = b
-	case b > s.Last:
-		s.Last = b // topped up: nothing spent
-	default:
-		return s
+	case err == nil:
+		if json.Unmarshal(raw, &current) != nil || current == nil {
+			return nil, errors.New("the wallet spend file is unreadable")
+		}
+		superseded := false
+		for key, spend := range current {
+			if spend.Since.IsZero() || !spend.Ends.After(spend.Since) || spend.Spent < 0 || spend.Last < 0 {
+				return nil, errors.New("the wallet spend file has invalid counters")
+			}
+			saved := spend.Observation
+			if saved == (walletObservation{}) {
+				continue
+			}
+			if saved.LoginID == "" || saved.Started.IsZero() {
+				return nil, errors.New("the wallet spend file has an invalid observation")
+			}
+			if saved.LoginID == observation.LoginID && saved.Epoch == observation.Epoch && saved.AuthEpoch == observation.AuthEpoch &&
+				strings.HasPrefix(key, prefix) && !observation.after(saved.pluginLoginOrder) {
+				superseded = true
+			}
+		}
+		if superseded {
+			return nil, errWalletReplySuperseded
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return nil, err
 	}
-	if c.m == nil {
-		c.m = map[string]walletSpend{}
-	}
-	c.m[key] = s
-	for k, e := range c.m {
-		if now.Sub(e.Ends) > 7*24*time.Hour {
-			delete(c.m, k) // a wallet not read for a week
+	counts := make([]walletSpend, len(windows))
+	changed := false
+	for index, window := range windows {
+		if !walletSpendWindow(window) {
+			continue
+		}
+		key := prefix + WindowCapID(window.Name)
+		previous, ok := current[key]
+		balance := *window.Balance
+		next := previous
+		if !ok || !now.Before(previous.Ends) || now.Before(previous.Since) {
+			next = walletSpend{Ends: walletPeriodEnd(window, now), Since: now, Last: balance}
+		} else {
+			next.Last = balance
+			next.Spent += max(previous.Last-balance, 0)
+		}
+		next.Observation = observation
+		counts[index] = next
+		if next != previous {
+			current[key] = next
+			changed = true
 		}
 	}
-	if raw, err := json.Marshal(c.m); err == nil {
-		os.MkdirAll(filepath.Dir(path), 0o700)
-		writeFileAtomic(path, raw)
+	if !changed {
+		return counts, check()
 	}
-	return s
+	maps.DeleteFunc(current, func(_ string, entry walletSpend) bool { return now.Sub(entry.Ends) > 7*24*time.Hour })
+	raw, err = json.Marshal(current)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeFileAtomicChecked(path, raw, check); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+func walletSpendWindow(window QuotaWindow) bool {
+	return window.Balance != nil && !window.Text
+}
+
+func countsWalletSpend(q SubscriptionQuota, user string) bool {
+	return q.Error == "" && q.Provider != "" && user != "" && slices.ContainsFunc(q.Windows, walletSpendWindow)
 }
 
 // withWalletSpend is a fresh reading q of account user with each wallet
 // window's spend counted (Spent, SpentSince) and, on an account with a
 // usage cap, read as that much used of what its period had. q's windows
 // are its own, changed in place.
-func withWalletSpend(q SubscriptionQuota, user string, now time.Time) SubscriptionQuota {
-	if q.Error != "" || q.Provider == "" || user == "" {
+func withWalletSpend(ctx context.Context, q SubscriptionQuota, user string, now time.Time, observation walletObservation, check func() error) SubscriptionQuota {
+	if !countsWalletSpend(q, user) {
 		return q
 	}
-	var caps *WindowCaps
+	counts, err := noteWalletSpend(ctx, q.Provider+"/"+accountKey(user)+"/", q.Windows, now, observation, check)
+	if errors.Is(err, errWalletReplySuperseded) || errors.Is(err, errAccountDiscoveryOff) || errors.Is(err, errPluginUsageDiscovery) {
+		return deferPluginQuota(q, user, err)
+	}
+	if err != nil {
+		q.Error = err.Error()
+		return q
+	}
+	caps := AccountCapsOf(q.Provider, user)
 	for i := range q.Windows {
 		w := &q.Windows[i]
-		if w.Balance == nil || w.Text {
+		if !walletSpendWindow(*w) {
 			continue
 		}
-		s := noteWalletSpend(q.Provider+"/"+accountKey(user)+"/"+WindowCapID(w.Name), *w, now)
+		s := counts[i]
 		spent, since := s.Spent, s.Since
 		w.Spent, w.SpentSince = &spent, &since
-		if caps == nil {
-			c := AccountCapsOf(q.Provider, user)
-			caps = &c
-		}
 		of := spent + max(*w.Balance, 0)
 		if !caps.Holds() || of <= 0 {
 			continue

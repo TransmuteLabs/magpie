@@ -27,25 +27,42 @@ func StartPluginSignIn(id string, method int, inputs map[string]string) (SignInS
 // StartPluginSignInWith is StartPluginSignIn through the proxy o picks,
 // else the one the provider's requests go through (#1663).
 func StartPluginSignInWith(id string, method int, inputs map[string]string, o SignInOptions) (SignInState, error) {
+	return StartPluginSignInWithContext(context.Background(), id, method, inputs, o)
+}
+
+// StartPluginSignInWithContext ties the synchronous setup to ctx. A browser
+// sign-in or installer already handed to the caller has its own lifetime.
+func StartPluginSignInWithContext(ctx context.Context, id string, method int, inputs map[string]string, o SignInOptions) (SignInState, error) {
 	if settings.AccountDiscoveryOff() {
 		return SignInState{}, errAccountDiscoveryOff
+	}
+	if err := plugin.CheckCommunitySubscription(ctx, id); err != nil {
+		return SignInState{}, err
 	}
 	s := &signInFlow{done: make(chan struct{})}
 	if err := s.pickProxy(PluginID(id), o); err != nil {
 		return SignInState{}, err
 	}
 	s.st = SignInState{ID: randomToken(9), Agent: PluginID(id), State: "waiting", Proxy: s.proxy}
-	cli, install := pluginCLI(id)
+	cli, install := pluginCLI(ctx, id)
+	if err := ctx.Err(); err != nil {
+		return SignInState{}, err
+	}
 	var installing context.Context
 	if install {
 		s.st.State, s.st.Installing = "installing", cli.Name
 		// through the proxy the sign-in takes: a plugin's own installer
 		// downloads with the plugin's fetch (plugin.InstallCLI)
 		installing, s.stop = context.WithCancel(s.via(context.Background()))
-	} else if err := s.pluginBegin(id, method, inputs); err != nil {
+	} else if err := s.pluginBegin(ctx, id, method, inputs); err != nil {
 		return SignInState{}, err
 	}
 	signIns.Lock()
+	if err := ctx.Err(); err != nil {
+		signIns.Unlock()
+		s.finish(SignInState{State: "canceled"})
+		return SignInState{}, err
+	}
 	for sid, o := range signIns.m {
 		if o.st.Agent == s.st.Agent {
 			o.finish(SignInState{State: "canceled"})
@@ -56,10 +73,13 @@ func StartPluginSignInWith(id string, method int, inputs map[string]string, o Si
 	signIns.Unlock()
 	if install {
 		go func() {
-			err := installCLI(installing, cli)
+			err := plugin.CheckCommunitySubscription(installing, id)
+			if err == nil {
+				err = installCLI(installing, cli)
+			}
 			if err == nil {
 				forgetAccountCaches()
-				err = s.pluginBegin(id, method, inputs)
+				err = s.pluginBegin(installing, id, method, inputs)
 			}
 			if err != nil {
 				s.finish(SignInState{State: "failed", Error: err.Error()})
@@ -81,15 +101,15 @@ var pluginRunsCLI = map[string]bool{"grok": true}
 // pluginRunsCLI, or one the plugin says it installs itself (auth.cli,
 // plugin.CLI). The last is how agy-cli has agy installed in a container,
 // as Claude's sign-in downloads Claude Code there (niuniu_8964 on X).
-func pluginCLI(id string) (agentCLI, bool) {
+func pluginCLI(ctx context.Context, id string) (agentCLI, bool) {
 	if PluginServes(PluginID(id)) {
 		return missingCLI(PluginID(id))
 	}
 	if pluginRunsCLI[id] {
 		return missingCLI(id)
 	}
-	if pp, ok := PluginOf(PluginID(id)); ok && pp.CLI != nil {
-		c := ownCLI(id, *pp.CLI)
+	if pp, ok := pluginOfContext(ctx, PluginID(id)); ok && pp.CLI != nil {
+		c := ownCLI(ctx, id, *pp.CLI)
 		if c.find() == "" {
 			return c, true
 		}
@@ -101,11 +121,11 @@ func pluginCLI(id string) (agentCLI, bool) {
 // the plugin says it is installed, installed by the plugin. A plugin that
 // can't be asked counts it as there: its authorize says what is missing,
 // as it did before it could install anything.
-func ownCLI(id string, c plugin.CLI) agentCLI {
+func ownCLI(parent context.Context, id string, c plugin.CLI) agentCLI {
 	return agentCLI{
 		Name: c.Name,
 		find: func() string {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 			defer cancel()
 			if in, err := plugin.CLIInstalled(ctx, id); err == nil && !in {
 				return ""
@@ -124,7 +144,7 @@ func ownCLI(id string, c plugin.CLI) agentCLI {
 // said "install Grok Build first: curl … | bash", which the image has no
 // curl to run (#2223).
 func PluginCLIMissing(id string) string {
-	c, ok := pluginCLI(id)
+	c, ok := pluginCLI(context.Background(), id)
 	if !ok {
 		return ""
 	}
@@ -134,7 +154,10 @@ func PluginCLIMissing(id string) string {
 // InstallPluginCLI installs the CLI PluginCLIMissing names, with its
 // vendor's installer or, where that can't run, as it installs it.
 func InstallPluginCLI(ctx context.Context, id string) error {
-	c, ok := pluginCLI(id)
+	c, ok := pluginCLI(ctx, id)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !ok {
 		return nil
 	}
@@ -147,10 +170,13 @@ func InstallPluginCLI(ctx context.Context, id string) error {
 
 // pluginBegin asks the plugin for the page to open and waits for the
 // sign-in to finish there, or for the code the page shows.
-func (s *signInFlow) pluginBegin(id string, method int, inputs map[string]string) error {
-	ctx, cancel := context.WithTimeout(s.via(context.Background()), time.Minute)
+func (s *signInFlow) pluginBegin(parent context.Context, id string, method int, inputs map[string]string) error {
+	ctx, cancel := context.WithTimeout(s.via(parent), time.Minute)
+	defer cancel()
+	if err := plugin.CheckCommunitySubscription(ctx, id); err != nil {
+		return err
+	}
 	a, err := plugin.Authorize(ctx, id, method, inputs, plugin.NewAccount)
-	cancel()
 	if err != nil {
 		return err
 	}
@@ -249,12 +275,12 @@ func PluginAPIKey(ctx context.Context, id string, method int, inputs map[string]
 	// sign-in is (StartPluginSignInWith), but for a public plugin's: one
 	// saved would be signed in and listed nowhere
 	if settings.AccountDiscoveryOff() {
-		if pp, ok := PluginOf(PluginID(id)); !ok || !publicPlugin(pp) {
+		if pp, ok := pluginOfContext(ctx, PluginID(id)); !ok || !publicPlugin(pp) {
 			return "", errAccountDiscoveryOff
 		}
 	}
 	if strings.TrimSpace(key) == "" {
-		pp, ok := PluginOf(PluginID(id))
+		pp, ok := pluginOfContext(ctx, PluginID(id))
 		if !ok || method < 0 || method >= len(pp.Methods) || pp.Methods[method].Type != "api" || !pp.Methods[method].NoKey() {
 			return "", errors.New("enter the key")
 		}
@@ -307,7 +333,7 @@ func ImportPluginFiles(ctx context.Context, id string, texts []string) ([]Import
 			out = append(out, ImportedAccount{User: user, Status: "failed", Error: r.Error})
 			continue
 		}
-		PluginSignedIn(plugin.Saved{Provider: r.Provider, Account: r.Account})
+		PluginSignedIn(plugin.Saved{Provider: r.Provider, Account: r.Account, AuthEpoch: r.AuthEpoch})
 		out = append(out, ImportedAccount{User: user, Status: r.Status})
 	}
 	forgetAccountCaches()

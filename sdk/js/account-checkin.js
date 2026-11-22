@@ -30,7 +30,8 @@ export function validateAccountCheckinRequest(value) {
 
 export function validateAccountCheckinResult(value) {
   if (!object(value) || Object.keys(value).some(key => !["outcome", "credit", "streak", "message", "until"].includes(key))
-    || !["claimed", "done", "inactive", "ineligible", "failed", "captcha", "own-app"].includes(value.outcome)
+    || !["claimed", "done", "inactive", "ineligible", "failed", "captcha", "own-app", "rate-limited"].includes(value.outcome)
+    || value.outcome === "rate-limited" && (value.until == null || value.until === "")
     || value.credit != null && (typeof value.credit !== "number" || !Number.isFinite(value.credit) || value.credit < 0)
     || value.streak != null && (!Number.isInteger(value.streak) || value.streak < 0 || value.streak > 2147483647)
     || value.message != null && !text(value.message, true)

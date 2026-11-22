@@ -23,15 +23,18 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
 	xdraw "golang.org/x/image/draw"
 
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
@@ -169,6 +172,10 @@ var ErrTheirs = errors.New(Name + ".app is there already and isn't magpie's")
 // gives its path. One of magpie's there already is made again; one that
 // isn't magpie's stays, and Add fails (ErrTheirs).
 func Add(home, claudeApp, dir, claudeDir string) (string, error) {
+	return AddWithCommit(home, claudeApp, dir, claudeDir, nil)
+}
+
+func AddWithCommit(home, claudeApp, dir, claudeDir string, commit func() error) (string, error) {
 	p := Path(home)
 	if _, err := os.Lstat(p); err == nil && !Mine(p) {
 		return "", ErrTheirs
@@ -203,10 +210,7 @@ func Add(home, claudeApp, dir, claudeDir string) (string, error) {
 			return "", err
 		}
 	}
-	if err := os.RemoveAll(p); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, p); err != nil {
+	if _, err := changeLauncher(home, tmp, commit); err != nil {
 		return "", err
 	}
 	register(p)
@@ -216,14 +220,103 @@ func Add(home, claudeApp, dir, claudeDir string) (string, error) {
 // Remove takes the app away when magpie made it, and gives the path it
 // was at, "" when there was none of magpie's.
 func Remove(home string) (string, error) {
-	p := Here(home)
-	if p == "" {
-		return "", nil
-	}
-	if err := os.RemoveAll(p); err != nil {
+	return RemoveWithCommit(home, nil)
+}
+
+func RemoveWithCommit(home string, commit func() error) (string, error) {
+	p := Path(home)
+	removed, err := changeLauncher(home, "", commit)
+	if err != nil || !removed {
 		return "", err
 	}
 	return p, nil
+}
+
+func launcherLockPath(home string) string {
+	return filepath.Join(home, "Library", "Application Support", "magpie", "claude-desktop-launcher.lock")
+}
+
+func changeLauncher(home, staged string, commit func() error) (removed bool, err error) {
+	path := Path(home)
+	// All magpie configurations that manage this home's launcher share one
+	// persistent lock, including removal before Applications exists.
+	unlock, locked := filelock.Lock(launcherLockPath(home), filelock.Wait)
+	if !locked {
+		return false, errors.New("cannot lock the Claude Magpie launcher")
+	}
+	defer unlock()
+	current, err := os.Lstat(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	var saved string
+	if current != nil {
+		var plist []byte
+		if current.IsDir() {
+			plist, err = os.ReadFile(filepath.Join(path, "Contents", "Info.plist"))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return false, err
+			}
+		}
+		if bytes.Contains(plist, []byte("<string>"+BundleID+"</string>")) {
+			hold, err := os.MkdirTemp(filepath.Dir(path), ".claude-magpie-previous-")
+			if err != nil {
+				return false, err
+			}
+			defer os.Remove(hold)
+			saved = filepath.Join(hold, filepath.Base(path))
+			if err := os.Rename(path, saved); err != nil {
+				return false, err
+			}
+		} else if staged != "" {
+			return false, ErrTheirs
+		}
+	}
+	var installed os.FileInfo
+	defer func() {
+		if err == nil {
+			if saved != "" {
+				if cleanErr := os.RemoveAll(saved); cleanErr != nil {
+					log.Printf("remove previous Claude Magpie launcher: %v", cleanErr)
+				}
+			}
+			return
+		}
+		if installed != nil {
+			if at, readErr := os.Lstat(path); readErr == nil && os.SameFile(installed, at) {
+				err = errors.Join(err, os.Rename(path, staged))
+			}
+		}
+		if saved != "" {
+			if _, readErr := os.Lstat(path); errors.Is(readErr, os.ErrNotExist) {
+				if restoreErr := os.Rename(saved, path); restoreErr == nil {
+					return
+				} else {
+					err = errors.Join(err, restoreErr)
+				}
+			}
+			err = errors.Join(err, fmt.Errorf("previous Claude Magpie launcher kept at %s", saved))
+		}
+	}()
+	if staged != "" {
+		info, err := os.Lstat(staged)
+		if err != nil {
+			return false, err
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return false, errors.New("Claude Magpie launcher changed during replacement")
+		}
+		if err := os.Rename(staged, path); err != nil {
+			return false, err
+		}
+		installed = info
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			return false, err
+		}
+	}
+	return saved != "", nil
 }
 
 // Icon is the app's icon, as an .icns: Claude.app's own (its

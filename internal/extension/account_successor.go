@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"os"
 
@@ -20,37 +21,36 @@ func (s *Store) refreshedAccount(ctx context.Context, scope sdk.Scope, confirm f
 		return Account{}, storeInvalid()
 	}
 	var current Account
-	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
-		records, err := storeReadAccounts(root, scope.Plugin)
-		if err != nil {
-			return err
+	err := s.withReadAccountsSnapshot(ctx, scope.Plugin, func(root *os.Root, snapshot *storeReadSnapshot[storeAccounts]) error {
+		if snapshot == nil {
+			return storeError("not_found", "Extension account is unavailable.")
 		}
+		records := snapshot.value
 		index := refreshIndex(records, scope)
 		if index < 0 || records.Accounts[index].Deleted {
 			return storeError("not_found", "Extension account is unavailable.")
 		}
 		account := records.Accounts[index]
-		if account.Generation == scope.Generation {
-			if account.Refresh != nil && account.Refresh.State == "completed" && account.Refresh.ToGeneration == account.Generation {
-				if err := confirm(root); err != nil {
-					return err
-				}
+		if account.Generation != scope.Generation {
+			receipt, err := refreshReceipt(account, scope)
+			if err != nil {
+				return err
 			}
-			current = account.Account
-			return nil
+			if receipt == nil || account.Generation != scope.Generation+1 || receipt.ExpiresAt != account.ExpiresAt {
+				return storeError("stale_generation", "Extension account generation changed.")
+			}
 		}
-		receipt, err := refreshReceipt(account, scope)
-		if err != nil {
-			return err
-		}
-		if receipt == nil || account.Generation != scope.Generation+1 || receipt.ExpiresAt != account.ExpiresAt {
-			return storeError("stale_generation", "Extension account generation changed.")
-		}
-		if err := confirm(root); err != nil {
-			return err
+		if account.Refresh != nil && account.Refresh.State == "completed" && account.Refresh.ToGeneration == account.Generation {
+			if err := s.confirmAccountSnapshot(ctx, root, snapshot, confirm); err != nil {
+				return err
+			}
 		}
 		current = account.Account
 		return nil
 	})
-	return current, err
+	if err != nil {
+		return Account{}, err
+	}
+	current.Auth = bytes.Clone(current.Auth)
+	return current, nil
 }

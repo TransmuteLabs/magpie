@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"strconv"
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/lazyre"
@@ -63,73 +62,82 @@ func withoutPassthroughIf(body []byte, drop func(field string) bool) ([]byte, bo
 	if !gjson.ValidBytes(body) {
 		return body, false
 	}
-	n := int(gjson.GetBytes(body, "input.#").Int())
-	type cut struct {
-		at, end int
-		with    []byte
-	}
-	var cuts []cut
-	for i := 0; i < n; i++ {
-		item := gjson.GetBytes(body, "input."+strconv.Itoa(i))
-		pt := gjson.GetBytes(body, "input."+strconv.Itoa(i)+"."+passthroughKey)
-		if !pt.Exists() || pt.Index <= 0 || item.Index <= 0 {
-			continue
-		}
-		if drop("") {
-			var m map[string]json.RawMessage
-			if json.Unmarshal([]byte(item.Raw), &m) != nil {
-				continue
-			}
-			delete(m, passthroughKey)
-			nb, err := json.Marshal(m)
-			if err != nil {
-				continue
-			}
-			cuts = append(cuts, cut{item.Index, item.Index + len(item.Raw), nb})
-			continue
-		}
-		if !pt.IsObject() {
-			continue
-		}
-		// the members kept as they were written, in their order
-		nb := []byte{'{'}
-		had := false
-		pt.ForEach(func(k, v gjson.Result) bool {
-			if k.String() != "" && drop(k.String()) {
-				had = true
-				return true
-			}
-			if len(nb) > 1 {
-				nb = append(nb, ',')
-			}
-			nb = append(append(append(nb, k.Raw...), ':'), v.Raw...)
-			return true
-		})
-		if !had {
-			continue
-		}
-		nb = append(nb, '}')
-		cuts = append(cuts, cut{pt.Index, pt.Index + len(pt.Raw), nb})
-	}
-	if len(cuts) == 0 {
+	input := getIn(body, "input")
+	if !input.IsArray() {
 		return body, false
 	}
-	// from the last, so each earlier cut's offsets still hold
-	out := body
-	for i := len(cuts) - 1; i >= 0; i-- {
-		c := cuts[i]
-		nb := make([]byte, 0, len(out)-(c.end-c.at)+len(c.with))
-		nb = append(nb, out[:c.at]...)
-		nb = append(nb, c.with...)
-		out = append(nb, out[c.end:]...)
+	var out, fields []byte
+	last := 0
+	input.ForEach(func(_ gjson.Result, item gjson.Result) bool {
+		if !item.IsObject() || item.Index <= 0 {
+			return true
+		}
+		metadata := item.Get(passthroughKey)
+		if !metadata.Exists() || metadata.Index <= 0 {
+			return true
+		}
+		section := metadata
+		var replacement []byte
+		if drop("") {
+			var object map[string]json.RawMessage
+			if json.Unmarshal([]byte(item.Raw), &object) != nil {
+				return true
+			}
+			delete(object, passthroughKey)
+			encoded, err := json.Marshal(object)
+			if err != nil {
+				return true
+			}
+			section, replacement = item, encoded
+		} else {
+			if !metadata.IsObject() {
+				return true
+			}
+			fields = append(fields[:0], '{')
+			changed := false
+			metadata.ForEach(func(key, value gjson.Result) bool {
+				if field := key.String(); field != "" && drop(field) {
+					changed = true
+					return true
+				}
+				if len(fields) > 1 {
+					fields = append(fields, ',')
+				}
+				fields = append(fields, key.Raw...)
+				fields = append(fields, ':')
+				fields = append(fields, value.Raw...)
+				return true
+			})
+			if !changed {
+				return true
+			}
+			fields = append(fields, '}')
+			replacement = fields
+		}
+		if out == nil {
+			out = make([]byte, 0, len(body))
+		}
+		out = append(out, body[last:section.Index]...)
+		out = append(out, replacement...)
+		last = section.Index + len(section.Raw)
+		return true
+	})
+	if out == nil {
+		return body, false
 	}
-	return out, true
+	return append(out, body[last:]...), true
 }
 
 // withoutRefusedPassthrough is body without the passthrough members
 // providerID turned away before.
 func (s *Server) withoutRefusedPassthrough(providerID string, proto provider.Protocol, body []byte) []byte {
 	if proto != provider.Responses || !bodyHas(body, passthroughKey) {
+		return body
+	}
+	s.mu.Lock()
+	empty := len(s.unfit) == 0
+	s.mu.Unlock()
+	if empty {
 		return body
 	}
 	if !s.fits(providerID, passthroughRefused(""), proto) {

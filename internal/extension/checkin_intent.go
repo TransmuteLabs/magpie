@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"context"
 	"errors"
 	"os"
 	"time"
@@ -49,14 +50,14 @@ func checkinExecution(record checkinIntent) CheckinExecution {
 	return result
 }
 
-func (s *Store) reserveCheckin(scope sdk.Scope, day string) (checkinIntent, bool, error) {
+func (s *Store) reserveCheckin(ctx context.Context, scope sdk.Scope, day string) (checkinIntent, bool, error) {
 	var selected checkinIntent
 	dispatch := false
 	if !storeValidScope(scope) || scope.Account == "" || scope.Operation != "" || scope.Session != "" ||
 		scope.Attempt != 0 || (sdk.AccountCheckinRequest{Day: day}).Validate() != nil {
 		return selected, false, storeInvalid()
 	}
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		if err := storeCheckGeneration(root, scope); err != nil {
 			return err
 		}
@@ -69,18 +70,20 @@ func (s *Store) reserveCheckin(scope sdk.Scope, day string) (checkinIntent, bool
 		if err != nil {
 			return err
 		}
-		selected = previous
 		if found && previous.Receipt.State != "not-started" {
 			if previous.Result == nil || previous.Result.Outcome == "failed" {
+				selected = previous
 				return &OutcomeError{Outcome: "uncertain", Cause: errors.New("check-in has an unresolved write; reconcile its operation before retrying")}
 			}
 			until, _ := time.Parse(time.RFC3339, previous.Result.Until)
+			if previous.Result.Outcome == sdk.AccountCheckinRateLimited && time.Now().Before(until) {
+				selected = previous
+				return nil
+			}
 			switch previous.Result.Outcome {
 			case "claimed", "captcha", "own-app":
-				if !until.IsZero() && time.Now().Before(until) {
-					return nil
-				}
-				if previous.Day == day && until.IsZero() {
+				if !until.IsZero() && time.Now().Before(until) || until.IsZero() && previous.Day == day {
+					selected = previous
 					return nil
 				}
 			}
@@ -90,8 +93,12 @@ func (s *Store) reserveCheckin(scope sdk.Scope, day string) (checkinIntent, bool
 			return err
 		}
 		scope.Operation, scope.Attempt = operation, 1
-		selected = checkinIntent{Day: day, Receipt: JournalEntry{Scope: scope, State: "reserved", Updated: time.Now().UTC()}}
-		if err := storeWrite(dir, checkinIntentName(scope), selected, storeFileLimit); err != nil {
+		record := checkinIntent{Day: day, Receipt: JournalEntry{Scope: scope, State: "reserved", Updated: time.Now().UTC()}}
+		published, err := storePublishContext(ctx, dir, checkinIntentName(scope), record, storeFileLimit)
+		if published {
+			selected = record
+		}
+		if err != nil {
 			return err
 		}
 		dispatch = true

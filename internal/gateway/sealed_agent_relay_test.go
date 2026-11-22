@@ -39,8 +39,9 @@ func (f *relayOfChatGPT) requests() []string {
 func relayOn(t *testing.T, id string) *relayOfChatGPT {
 	t.Helper()
 	f := &relayOfChatGPT{}
-	up := httptest.NewServer(f)
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(f))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	if err := provider.Save(provider.Provider{ID: id, Name: strings.ToUpper(id), Key: "sk-" + id, Models: []string{"gpt-6-astra"}, Responses: up.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}

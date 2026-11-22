@@ -26,7 +26,21 @@ export default async ({ client }) => ({
       auth: "seekco",
       async execute({ query, key }, ctx) {
         const a = await ctx.getAuth()
-        if (query === "rotate") await client.auth.set({ path: { id: "seekco" }, body: { ...a, access: "rotated-" + a.accountId } })
+        if (query === "hold-write" || query === "hold-remove") {
+          const hold = process.env.SEARCHAUTH_WRITE_HOLD
+          const fs = await import("node:fs")
+          fs.writeFileSync(hold + ".in", "")
+          while (!fs.existsSync(hold) && !ctx.abort.aborted) await new Promise((ok) => setTimeout(ok, 10))
+          if (ctx.abort.aborted) throw ctx.abort.reason
+        }
+        const auth = { path: { id: "seekco" } }
+        const rotate = (value) => client.auth.set({ ...auth, body: { ...value, access: "rotated-" + value.accountId } })
+        if (query === "rotate" || query === "hold-write") await rotate(a)
+        if (query === "hold-remove") await client.auth.remove(auth)
+        if (query === "rotate-twice") {
+          await rotate(a)
+          await client.auth.set({ ...auth, body: { ...await ctx.getAuth(), refresh: a.refresh + "+" } })
+        }
         if (a.access === "spent") throw Object.assign(new Error("Seek: rate limited"), { status: 429, retryAfter: 60 })
         return [{ title: a.accountId + " " + a.access, url: "https://seek.invalid/" + query, text: "key=" + key + " fields=" + Object.keys(a).sort().join(",") }]
       },

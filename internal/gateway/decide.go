@@ -778,7 +778,7 @@ func (s *Server) serveSystemOneBody(w http.ResponseWriter, r *http.Request, body
 			return
 		}
 		var held bool
-		if cs, pl, held = allowedCandidates(accWho, cs, pl, nil); len(cs) == 0 && held {
+		if cs, pl, held = allowedCandidates(r.Context(), accWho, cs, pl, nil); len(cs) == 0 && held {
 			writeError(w, provider.Chat, http.StatusForbidden, keyAccountsError(accWho, asked))
 			return
 		}
@@ -931,6 +931,16 @@ func sentEffort(proto provider.Protocol, body []byte, p provider.Provider, model
 		return ""
 	}
 	return fitFor(p, model, e)
+}
+
+// sentEffortIf is sentEffort for a model that goes out by the effort it
+// is asked at, a relay's effort family (provider.SentIDAt): for any other
+// the body is not read for it.
+func sentEffortIf(p provider.Provider, model string, proto provider.Protocol, body []byte) string {
+	if p.SentIDAt(model, "") == model {
+		return ""
+	}
+	return sentEffort(proto, body, p, model)
 }
 
 // fitFor is the effort a request asking for want goes to model at, at p:

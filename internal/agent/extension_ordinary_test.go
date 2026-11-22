@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +221,204 @@ func TestExtensionAgentOrdinaryPreservesManualWiring(t *testing.T) {
 	body, _ := os.ReadFile(path)
 	if !bytes.Equal(body, original) {
 		t.Fatalf("manual wiring changed: %s", body)
+	}
+}
+
+func TestExtensionAgentOrdinaryDisconnectWithoutStashPublication(t *testing.T) {
+	descriptor := sdk.AgentDescriptor{
+		ID: "fixture-editor", Name: "Fixture editor", ConfigFiles: []string{".fixture.json"},
+		Fields: []sdk.AgentField{{Key: "model", Label: "Model"}},
+	}
+	installAgentActionFixture(t, descriptor)
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".fixture.json")
+	if err := os.WriteFile(path, []byte(`{"model":"own","note":"original"}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := Find(descriptor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.ConnectHow(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	var wired map[string]string
+	if err != nil || json.Unmarshal(raw, &wired) != nil || wired["gateway"] == "" {
+		t.Fatalf("connect did not publish gateway settings: %s (%v)", raw, err)
+	}
+	forget("sdk.agent.fixture.agent:" + descriptor.ID)
+	wired["note"] = "user edit after connect"
+	edited, err := json.Marshal(wired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, edited, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	agent, err = Find(descriptor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(path)
+	var restored map[string]string
+	if err != nil || json.Unmarshal(raw, &restored) != nil || restored["model"] != "own" ||
+		restored["gateway"] != "" || restored["key"] != "" || restored["note"] != wired["note"] {
+		t.Fatalf("rediscovered disconnect did not restore its owned settings: %s (%v)", raw, err)
+	}
+}
+
+func TestExtensionAgentOrdinaryRecoversInterruptedConfigTransition(t *testing.T) {
+	const fixtureIntent = "MAGPIE_TEST_AGENT_CONFIG_TRANSITION"
+	const fixtureHome = "MAGPIE_TEST_AGENT_CONFIG_TRANSITION_HOME"
+	const interrupted = 86
+	descriptor := sdk.AgentDescriptor{
+		ID: "fixture-editor", Name: "Fixture editor", ConfigFiles: []string{".fixture.json"},
+		Fields: []sdk.AgentField{{Key: "model", Label: "Model"}},
+	}
+	if intent := os.Getenv(fixtureIntent); intent != "" {
+		home := os.Getenv(fixtureHome)
+		if home == "" || !filepath.IsAbs(home) {
+			t.Fatal("interruption fixture has no isolated home")
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+		t.Setenv("APPDATA", filepath.Join(home, "appdata"))
+		host := extension.Default()
+		controller := newExtensionController(home, host, ExtensionAgent{Plugin: "fixture.agent", Agent: descriptor}, nil)
+		plan, err := controller.prepare(t.Context(), intent, "model", "magpie/fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime, err := acquireAgentRuntime(t.Context(), host, "fixture.agent", descriptor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer runtime.lease.Close()
+		opts, err := json.Marshal(extensionAgentOptions{Gateway: "http://127.0.0.1:3425", Key: "magpie-fixture-editor",
+			Previous: plan.before.Before, Field: "model", Value: "magpie/fixture"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings := filepath.Join(home, descriptor.ConfigFiles[0])
+		initial, err := os.ReadFile(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy := controller.policy(plan.before)
+		policy.RevalidateInputs = func(_ context.Context, _ map[string]fs.FileInfo) error {
+			current, err := os.ReadFile(settings)
+			if err == nil && !bytes.Equal(current, initial) {
+				os.Exit(interrupted)
+			}
+			return err
+		}
+		plan.action, err = extension.NewActions(runtime).AgentPlan(t.Context(), "fixture.agent", sdk.Scope{Operation: "agent." + intent},
+			sdk.AgentPlanRequest{ID: descriptor.ID, Action: intent, Options: opts}, policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("controller returned instead of stopping after publication: %v", controller.apply(t.Context(), plan))
+	}
+
+	for _, intent := range []string{"connect", "set", "disconnect"} {
+		t.Run(intent, func(t *testing.T) {
+			host := installAgentActionFixture(t, descriptor)
+			home, _ := os.UserHomeDir()
+			settings := filepath.Join(home, descriptor.ConfigFiles[0])
+			before := []byte(`{"model":"own","note":"original"}`)
+			if err := os.WriteFile(settings, before, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			readSettings := func() []byte {
+				t.Helper()
+				raw, err := os.ReadFile(settings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			}
+			note := "original"
+			if intent != "connect" {
+				agent, err := Find(descriptor.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := agent.ConnectHow(); err != nil {
+					t.Fatal(err)
+				}
+				var values map[string]string
+				if err := json.Unmarshal(readSettings(), &values); err != nil {
+					t.Fatal(err)
+				}
+				note = "user edit before transition"
+				values["note"] = note
+				edited, err := json.Marshal(values)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(settings, edited, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			program, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			child := exec.CommandContext(ctx, program, "-test.run=^TestExtensionAgentOrdinaryRecoversInterruptedConfigTransition$")
+			child.Env = append(os.Environ(), fixtureIntent+"="+intent, fixtureHome+"="+home)
+			child.WaitDelay = 2 * time.Second
+			output, err := child.CombinedOutput()
+			var exited *exec.ExitError
+			if !errors.As(err, &exited) || exited.ExitCode() != interrupted {
+				t.Fatalf("transition did not stop after publication: %v\n%s", err, output)
+			}
+			published := readSettings()
+			ledger, err := extensionBindingRead()
+			record := ledger.Records[extensionBindingKey(home, "fixture.agent", descriptor.ID)]
+			if err != nil || record.Phase != "pending" || len(record.Before) != 1 || !bytes.Equal(record.Before[0].Body, before) ||
+				len(record.Applied) != 1 || !bytes.Equal(record.Applied[0].Body, published) {
+				t.Fatalf("interrupted %s lost its original or published snapshots: %+v %v", intent, record, err)
+			}
+			controller := newExtensionController(home, host, ExtensionAgent{Plugin: "fixture.agent", Agent: descriptor}, nil)
+			if err := controller.recover(t.Context(), record.Revision-1); !errors.Is(err, extension.ErrActionChanged) ||
+				!bytes.Equal(readSettings(), published) {
+				t.Fatalf("stale recovery attempted to restore a different transition: %v", err)
+			}
+			if intent == "disconnect" {
+				if err := host.SetEnabled(t.Context(), "fixture.agent", false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			agent, err := Find(descriptor.ID)
+			if err != nil || agent.Native.Read().Provider != "invalid" {
+				t.Fatalf("interrupted %s did not surface in ordinary discovery: %v", intent, err)
+			}
+			changed := []byte(`{"note":"new unknown edit"}`)
+			if err := os.WriteFile(settings, changed, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.Disconnect(); err == nil || !bytes.Equal(readSettings(), changed) {
+				t.Fatal("disconnect recovery overwrote an edit made after interruption")
+			}
+			if err := os.WriteFile(settings, published, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.Disconnect(); err != nil {
+				t.Fatalf("ordinary disconnect could not recover interrupted %s: %v", intent, err)
+			}
+			var restored map[string]string
+			if err := json.Unmarshal(readSettings(), &restored); err != nil || restored["model"] != "own" ||
+				restored["gateway"] != "" || restored["key"] != "" || restored["note"] != note || !agent.Disconnected() {
+				t.Fatalf("recovery discarded original settings or user edits: %s (%v)", readSettings(), err)
+			}
+		})
 	}
 }
 

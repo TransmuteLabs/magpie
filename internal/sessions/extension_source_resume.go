@@ -2,7 +2,6 @@ package sessions
 
 import (
 	"context"
-	"errors"
 	"os"
 	"time"
 
@@ -30,10 +29,19 @@ func checkSelectedSource(ctx context.Context, record *sessionSourceRecord) error
 	if !found {
 		return extension.ErrActionChanged
 	}
-	if record.storage != nil {
-		return nil
+	if record.storage == nil {
+		if err := record.snapshot.check(ctx); err != nil {
+			return err
+		}
 	}
-	return record.snapshot.check(ctx)
+	owners, err := currentSourceOwners(ctx)
+	if err != nil {
+		return err
+	}
+	if !owners[record.grant.descriptor.Agent].matches(record.grant) {
+		return extension.ErrActionChanged
+	}
+	return ctx.Err()
 }
 
 func checkSourceGrant(ctx context.Context, grant sourceGrant) error {
@@ -61,7 +69,7 @@ func checkSourceGrant(ctx context.Context, grant sourceGrant) error {
 		return extension.ErrActionChanged
 	}
 	if nativeSourceOwner(grant.descriptor.Agent) {
-		bindings, err := readSourceBindings()
+		bindings, err := withHistoryClaimsRoot(ctx, readSourceBindingsAt)
 		if err != nil {
 			return err
 		}
@@ -76,8 +84,11 @@ func checkSourceGrant(ctx context.Context, grant sourceGrant) error {
 			return extension.ErrActionChanged
 		}
 	}
-	_, identity, err := sessionMigrationIdentity(ctx, sourceManager(), grant.plugin)
-	if err != nil || identity != grant.identity {
+	current, err := sessionMigrationSelection(ctx, sourceManager(), grant.plugin)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil || !grant.matches(current) {
 		return extension.ErrActionChanged
 	}
 	return nil
@@ -107,55 +118,48 @@ func extensionSourceTranscript(ctx context.Context, record *sessionSourceRecord)
 		return Transcript{}, ErrNoTranscript
 	}
 	manager := sourceManager()
-	entries, err := manager.ListContext(ctx)
+	selected, err := sessionMigrationSelection(ctx, manager, record.grant.plugin)
 	if err != nil {
 		return Transcript{}, err
 	}
-	for _, entry := range entries {
-		if entry.Manifest.ID != record.grant.plugin || entry.Disabled {
-			continue
-		}
-		config, err := manager.ModuleConfig(ctx, entry.Manifest.ID)
-		if err != nil {
-			return Transcript{}, err
-		}
-		lease, err := manager.AcquireRevision(ctx, entry.Manifest.ID, entry.Revision, config.Version)
-		if err != nil {
-			return Transcript{}, err
-		}
-		defer lease.Close()
-		request, snapshot, err := captureSourceRequest(ctx, record.grant, record.request.Locator.Path, "transcript")
-		if err != nil {
-			return Transcript{}, err
-		}
-		if _, err := collectSourceDocuments(ctx, manager, lease, record.grant, &request, snapshot); err != nil {
-			return Transcript{}, err
-		}
-		if !sameSourceSelection(request, record.request) {
-			return Transcript{}, extension.ErrActionChanged
-		}
-		if err := checkSessionSourceAdmission(ctx); err != nil {
-			return Transcript{}, err
-		}
-		raw, err := lease.Call(ctx, sdk.MethodSessionSourceRead,
-			sdk.Scope{Session: request.Locator.SessionID, Operation: sdk.MethodSessionSourceRead}, request, nil)
-		if err != nil {
-			return Transcript{}, err
-		}
-		result, err := sdk.DecodeSessionSourceResult(request, raw)
-		if err != nil {
-			return Transcript{}, err
-		}
-		if err := checkSelectedSource(ctx, record); err != nil {
-			return Transcript{}, err
-		}
-		transcript := Transcript{Parts: []Part{}, Cut: result.Cut}
-		for _, part := range result.Parts {
-			if !transcript.add(false, part) {
-				break
-			}
-		}
-		return transcript, nil
+	if !record.grant.matches(selected) {
+		return Transcript{}, extension.ErrActionChanged
 	}
-	return Transcript{}, errors.New("session source is disabled")
+	lease, err := manager.AcquireOutsideCalls(ctx, selected.entry, selected.configVersion)
+	if err != nil {
+		return Transcript{}, err
+	}
+	defer lease.Close()
+	request, snapshot, err := captureSourceRequest(ctx, record.grant, record.request.Locator.Path, "transcript")
+	if err != nil {
+		return Transcript{}, err
+	}
+	if _, err := collectSourceDocuments(ctx, manager, lease, record.grant, &request, snapshot); err != nil {
+		return Transcript{}, err
+	}
+	if !sameSourceSelection(request, record.request) {
+		return Transcript{}, extension.ErrActionChanged
+	}
+	if err := checkSessionSourceAdmission(ctx); err != nil {
+		return Transcript{}, err
+	}
+	raw, err := lease.Call(ctx, sdk.MethodSessionSourceRead,
+		sdk.Scope{Session: request.Locator.SessionID, Operation: sdk.MethodSessionSourceRead}, request, nil)
+	if err != nil {
+		return Transcript{}, err
+	}
+	result, err := sdk.DecodeSessionSourceResult(request, raw)
+	if err != nil {
+		return Transcript{}, err
+	}
+	if err := checkSelectedSource(ctx, record); err != nil {
+		return Transcript{}, err
+	}
+	transcript := Transcript{Parts: []Part{}, Cut: result.Cut}
+	for _, part := range result.Parts {
+		if !transcript.add(false, part) {
+			break
+		}
+	}
+	return transcript, nil
 }

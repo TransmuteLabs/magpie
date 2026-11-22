@@ -353,19 +353,26 @@ func saveSticks() {
 		k string
 		v savedStick
 	}
-	var ks []kept
 	sticks.Lock()
+	ks := make([]kept, 0, min(len(sticks.m), sticksKept))
 	for k, st := range sticks.m {
 		if now.Sub(st.at) <= stickKeep {
 			ks = append(ks, kept{k, savedStick{st.rest, st.who, st.model, st.effort, st.turn, st.at, st.cacheRead, st.cacheWrite, st.hour.tokens, st.hour.at, st.stoodIn}})
 		}
 	}
 	sticks.Unlock()
-	slices.SortFunc(ks, func(a, b kept) int { return b.v.At.Compare(a.v.At) })
-	ks = ks[:min(len(ks), sticksKept)]
-	out := make(map[string]savedStick, len(ks))
-	for _, k := range ks {
-		out[k.k] = k.v
+	if len(ks) > sticksKept {
+		slices.SortFunc(ks, func(a, b kept) int {
+			if order := b.v.At.Compare(a.v.At); order != 0 {
+				return order
+			}
+			return strings.Compare(a.k, b.k)
+		})
+		ks = ks[:sticksKept]
+	}
+	out := make(map[string]*savedStick, len(ks))
+	for i := range ks {
+		out[ks[i].k] = &ks[i].v
 	}
 	b, err := json.Marshal(out)
 	if err != nil {

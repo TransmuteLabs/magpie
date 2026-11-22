@@ -56,20 +56,20 @@ func TestDailyCredits(t *testing.T) {
 		{day(5, 12), 70, 5600},    // 60 while magpie wasn't reading: on the 5th
 	}
 	for _, s := range steps {
-		noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy", "李雷", s.used, s.tot)}, s.at)
+		noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy", "李雷", s.used, s.tot)}, s.at)
 	}
 	// another account, the AI build's through its plugin; an error and a
 	// card kept from before count nothing; a window telling a share alone
 	// isn't counted
-	noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 10, 3000)}, day(4, 9))
-	noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 15, 3000)}, day(4, 10))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 10, 3000)}, day(4, 9))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 15, 3000)}, day(4, 10))
 	errd := wbCard("workbuddy-ai", "138****5678", 999, 3000)
 	errd.Error = "boom"
 	asOf := day(4, 11)
 	kept := wbCard("workbuddy-ai", "138****5678", 900, 3000)
 	kept.AsOf = &asOf
-	noteDailyCredits([]SubscriptionQuota{errd, kept, shareCard("cursor", "x", 50)}, day(4, 12))
-	noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 18, 3000)}, day(4, 13))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{errd, kept, shareCard("cursor", "x", 50)}, day(4, 12))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy-ai", "138****5678", 18, 3000)}, day(4, 13))
 
 	cards := []SubscriptionQuota{wbCard("workbuddy", "李雷", 70, 5600), wbCard("workbuddy-ai", "138****5678", 18, 3000), shareCard("cursor", "x", 50)}
 	got := withDailyCredits(cards, day(5, 13))
@@ -97,7 +97,7 @@ func TestDailyCredits(t *testing.T) {
 	}
 	// days long gone are dropped from the file at the next reading, and a
 	// card isn't told of days older than creditsShown
-	noteDailyCredits([]SubscriptionQuota{wbCard("workbuddy", "李雷", 71, 5600)}, day(5, 14).AddDate(1, 2, 0))
+	noteDailyCredits(t.Context(), []SubscriptionQuota{wbCard("workbuddy", "李雷", 71, 5600)}, day(5, 14).AddDate(1, 2, 0))
 	got = withDailyCredits(cards[:1], day(5, 15).AddDate(1, 2, 0))
 	if d := dailyOf(t, got, "李雷"); len(d.Days) != 1 || d.Days[0].Used != 1 || d.Since != "2026-10-01" {
 		t.Errorf("a year on: %+v", d)

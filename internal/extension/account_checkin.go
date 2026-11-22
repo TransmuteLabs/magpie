@@ -16,6 +16,11 @@ func (m *Manager) CheckinAccount(ctx context.Context, scope sdk.Scope, revision,
 
 type checkinAdmissionKey struct{}
 
+type checkinAdmission struct {
+	scope sdk.Scope
+	check func(context.Context) error
+}
+
 func (m *Manager) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Scope, revision, config string, request sdk.AccountCheckinRequest,
 	admit func(context.Context) error,
 ) (CheckinExecution, error) {
@@ -33,7 +38,6 @@ func (m *Manager) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Sco
 		if err := admit(ctx); err != nil {
 			return CheckinExecution{}, err
 		}
-		ctx = context.WithValue(ctx, checkinAdmissionKey{}, admit)
 	}
 	lease, err := m.AcquireRevision(ctx, scope.Plugin, revision, config)
 	if err != nil {
@@ -59,11 +63,12 @@ func (m *Manager) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Sco
 			return CheckinExecution{}, err
 		}
 	}
-	record, dispatch, err := m.store.reserveCheckin(scope, request.Day)
+	record, dispatch, err := m.store.reserveCheckin(ctx, scope, request.Day)
 	if err != nil || !dispatch {
 		return checkinExecution(record), err
 	}
 	scope = record.Receipt.Scope
+	ctx = context.WithValue(ctx, checkinAdmissionKey{}, checkinAdmission{scope: scope, check: admit})
 	input, _ := json.Marshal(request)
 	var raw json.RawMessage
 	if err = lease.CheckCurrent(ctx); err == nil {
@@ -92,6 +97,13 @@ func (m *Manager) CheckinAccountWithAdmission(ctx context.Context, scope sdk.Sco
 	if err == nil {
 		var result sdk.AccountCheckinResult
 		result, err = sdk.DecodeAccountCheckinResult(raw)
+		if err == nil && result.Outcome == sdk.AccountCheckinRateLimited {
+			if manifest.Contract.Version.Minor < sdk.AccountCheckinRateLimitAPIMinor {
+				err = errors.New("rate-limited check-in result requires SDK API 1.20")
+			} else if record.Receipt.State != "completed" {
+				err = errors.New("rate-limited check-in result requires a completed operation receipt")
+			}
+		}
 		if err == nil {
 			record.Result = &result
 		} else {
@@ -123,12 +135,14 @@ func checkLeasedCheckin(ctx context.Context, lease *Lease, method string, scope 
 	}
 	descriptor, found := manifest.AccountCheckin(scope.Provider)
 	var request sdk.AccountCheckinRequest
+	admission, owned := ctx.Value(checkinAdmissionKey{}).(checkinAdmission)
 	if manifest.Contract.Version.Minor < 8 || !manifest.Contract.Has(sdk.AccountAuth) ||
 		!manifest.Contract.Has(sdk.ModuleRPC) || !found || descriptor.Action != action.Action ||
 		scope.Account == "" || scope.Generation == 0 || scope.Session != "" ||
+		!owned || admission.scope != scope ||
 		!decodeHostParams(action.Input, &request) || request.Validate() != nil ||
 		request.Proxy != netproxy.Choice(ctx) {
-		return &OutcomeError{Outcome: "not-started", Cause: errors.New("leased check-in requires its negotiated selected-account input")}
+		return &OutcomeError{Outcome: "not-started", Cause: errors.New("leased check-in requires its reserved selected-account intent")}
 	}
 	if err := lease.CheckCurrent(ctx); err != nil {
 		return &OutcomeError{Outcome: "not-started", Cause: err}
@@ -136,8 +150,8 @@ func checkLeasedCheckin(ctx context.Context, lease *Lease, method string, scope 
 	if err := netproxy.Held(ctx); err != nil {
 		return &OutcomeError{Outcome: "not-started", Cause: err}
 	}
-	if admit, ok := ctx.Value(checkinAdmissionKey{}).(func(context.Context) error); ok {
-		if err := admit(ctx); err != nil {
+	if admission.check != nil {
+		if err := admission.check(ctx); err != nil {
 			return &OutcomeError{Outcome: "not-started", Cause: err}
 		}
 	}

@@ -22,8 +22,8 @@ func Source(manager *extension.Manager) routes.Source {
 			}
 			return Strategy(manager, binding), true
 		},
-		List: func() []routes.Option {
-			bindings := manager.RoutingStrategies()
+		List: func(ctx context.Context) []routes.Option {
+			bindings := manager.RoutingStrategiesContext(ctx)
 			out := make([]routes.Option, len(bindings))
 			for index, binding := range bindings {
 				out[index] = routes.Option{

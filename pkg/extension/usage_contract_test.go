@@ -26,6 +26,9 @@ func TestUsage14FloorApplicabilityAndFreshness(t *testing.T) {
 		`{"windows":[{"name":"quota","used":101}]}`,
 		`{"windows":[{"name":"quota","used":1,"aside":null}]}`,
 		`{"windows":[{"name":"quota","used":1,"asOf":-1}]}`,
+		`{"asOf":null,"windows":[{"name":"quota","used":1}]}`,
+		`{"windows":[{"name":"quota","used":1,"asOf":null}]}`,
+		`{"windows":[{"name":"quota","used":1,"resetsAt":null}]}`,
 		`null`,
 	} {
 		if _, _, err := ValidateUsageResult(manifest, json.RawMessage(raw)); err == nil {
@@ -40,5 +43,34 @@ func TestUsage14FloorApplicabilityAndFreshness(t *testing.T) {
 		if _, fresh, err := ValidateUsageResult(manifest, json.RawMessage(raw)); err != nil || fresh {
 			t.Fatalf("non-authoritative acknowledgment = %v %v", fresh, err)
 		}
+	}
+}
+
+func TestUsageTimestampRange(t *testing.T) {
+	manifest := Manifest{Contract: Contract{Version: APIVersion{Major: 1, Minor: 4}}}
+	const lastMillisecond = 253402300799999
+	for _, field := range []struct {
+		name string
+		set  func(*UsageResult, int64)
+	}{
+		{"result asOf", func(result *UsageResult, value int64) { result.AsOf = value }},
+		{"window asOf", func(result *UsageResult, value int64) { result.Windows[0].AsOf = value }},
+		{"window resetsAt", func(result *UsageResult, value int64) { result.Windows[0].ResetsAt = value }},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			for _, value := range []int64{-1, 0, lastMillisecond, lastMillisecond + 1} {
+				result := UsageResult{Windows: []UsageWindow{{Name: "quota", Used: 12}}}
+				field.set(&result, value)
+				raw, err := json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, fresh, err := ValidateUsageResult(manifest, raw)
+				inRange := value >= 0 && value <= lastMillisecond
+				if (err == nil) != inRange || !inRange && fresh {
+					t.Errorf("timestamp %d: fresh=%v err=%v, want valid=%v", value, fresh, err, inRange)
+				}
+			}
+		})
 	}
 }

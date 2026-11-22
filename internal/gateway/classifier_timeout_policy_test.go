@@ -70,14 +70,16 @@ func TestClassifierTimeoutCauseRetainsParentAndPolicy(t *testing.T) {
 			fresh(t)
 			started := make(chan struct{})
 			var sends atomic.Int32
-			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			upstream := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				io.Copy(io.Discard, request.Body)
 				if sends.Add(1) == 1 {
 					close(started)
 				}
 				<-request.Context().Done()
-			}))
+			})))
 			t.Cleanup(upstream.Close)
+			upstream.Client().Timeout = 5 * time.Second
+			probeFixtureRoot(t, upstream)
 			if err := provider.Save(provider.Provider{ID: "timeout-judge", Name: "Timeout judge",
 				Key: "judge", Chat: upstream.URL + "/v1", Models: []string{"judge"}}); err != nil {
 				t.Fatal(err)

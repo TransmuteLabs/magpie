@@ -36,6 +36,25 @@ func forgetReported() {
 	reported.ingest.Unlock()
 }
 
+func TestReportedOutsideOverlapRechecksDuringAppend(t *testing.T) {
+	reportedHome(t)
+	snapshot := readLogSnapshot()
+	candidate := Record{Time: time.Now().UTC(), Provider: "vendor", ProviderAccount: "account", RequestID: "vendor-id", Status: 200, Input: 12}
+	overlap := &outsideCallOverlap{provider: candidate.Provider, account: candidate.ProviderAccount,
+		since: candidate.Time, path: snapshot.path, info: snapshot.info, offset: snapshot.off,
+		prefix: "sdk:fixture:", pending: map[string]bool{candidate.RequestID: true}}
+	took, err := ingestReported(t.Context(), []Record{candidate}, func(publish func() error) error {
+		Append(candidate)
+		return publish()
+	}, overlap)
+	if err != nil || len(took) != 1 || took[0] {
+		t.Fatalf("a call committed during publication admission was imported again: %v, %v", took, err)
+	}
+	if rows := Load(time.Time{}); len(rows) != 1 || rows[0].IsReported() || rows[0].RequestID != candidate.RequestID {
+		t.Fatalf("the append lock did not retain the ordinary call: %+v", rows)
+	}
+}
+
 // A reported call (#1874) is written beside the gateway's own, marked
 // reported: priced at magpie's prices when it said no cost, at its own
 // when it did; counted in the totals and in a source of its own, which

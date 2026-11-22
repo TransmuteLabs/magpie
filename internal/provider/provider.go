@@ -10,6 +10,7 @@ package provider
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -615,6 +616,16 @@ type Provider struct {
 	// bills at that times this, unless it has a rate in KeyPriceRates.
 	// 0 is none: no group rate is read.
 	TopUpRate float64 `json:"topUpRate,omitempty"`
+	// RateReadHours is, for a provider with a TopUpRate, how many hours a
+	// key's read group rate stands before it is read again (@YIXIE233 on
+	// X asked for 3), 1 to 168; 0 is the default, six.
+	RateReadHours int `json:"rateReadHours,omitempty"`
+	// KeyRateFactors is, for a provider with a TopUpRate, what each key's
+	// read rate is multiplied by, by its KeyID (@YIXIE233 on X: groups of
+	// one relay whose upstream caches differ cost 2-3x apart at the same
+	// group rate). A key not in it has 1; a rate in KeyPriceRates is
+	// never multiplied (see key_rate.go).
+	KeyRateFactors map[string]float64 `json:"keyRateFactors,omitempty"`
 	// zeroRate marks a PriceRate of 0 that is a rate, a free group's, not
 	// the price as listed; set by atKeyRate alone
 	zeroRate bool
@@ -806,7 +817,10 @@ type file struct {
 	// Deleted are the providers the user deleted, so the calls made to
 	// one stay its own when another is added under its id (Renames).
 	Deleted []Deleted `json:"deleted,omitempty"`
-	source  providerSource
+
+	PendingFoldSettings  map[string]string `json:"pendingFoldSettings,omitempty"`
+	PendingFoldHistories map[string]string `json:"pendingFoldHistories,omitempty"`
+	source               providerSource
 }
 
 type providerSource struct {
@@ -965,6 +979,12 @@ func store(f file) error {
 }
 
 func publishProviders(f file) error {
+	return publishProvidersWith(f, nil)
+}
+
+type providerWrite func(check func() error) error
+
+func publishProvidersWith(f file, publish func(providerWrite) error) error {
 	p := Path()
 	if !f.source.known {
 		return errors.New("providers.json write requires a known source")
@@ -997,7 +1017,14 @@ func publishProviders(f file) error {
 	if err := lastgood.Keep(p, validProviders, 0o600); err != nil {
 		return err
 	}
-	return writePrivate(p, append(b, '\n'))
+	b = append(b, '\n')
+	if publish == nil {
+		return writePrivate(p, b)
+	}
+	return publish(func(check func() error) error {
+		defer filememo.Forget()
+		return writePrivateQuietChecked(p, b, check)
+	})
 }
 
 func finishProviderStore(f file) {
@@ -1015,7 +1042,12 @@ func finishProviderStore(f file) {
 // item or a CLI's among them, and Codex's /models asked for it seven times
 // over, past the 5 s Codex waits for the list (#746).
 func All() []Provider {
-	shared := sharedAll()
+	return AllContext(context.Background())
+}
+
+// AllContext lists the configured providers and signed-in agents for ctx.
+func AllContext(ctx context.Context) []Provider {
+	shared := sharedAllContext(ctx)
 	out := make([]Provider, len(shared))
 	for i, p := range shared {
 		out[i] = p.clone() // callers change theirs, Keys[i] and Headers included
@@ -1029,7 +1061,11 @@ func All() []Provider {
 // account's keys and headers, to read one (~15 MB in 2 minutes of an
 // idle magpie with its window open).
 func sharedAll() []Provider {
-	held := heldOf("all", allProviders)
+	return sharedAllContext(context.Background())
+}
+
+func sharedAllContext(ctx context.Context) []Provider {
+	held := heldOfContext(ctx, "all", func() []Provider { return allProvidersContext(ctx) })
 	// asked once, from the settings a held look has read already: asked for
 	// each account, settings.json was parsed for every account of every
 	// model's price (agent.magpieModels, the GUI's drift every 15s and dsh's
@@ -1069,6 +1105,7 @@ func (p Provider) clone() Provider {
 	p.KeySpendCaps = maps.Clone(p.KeySpendCaps)
 	p.KeyOwnBalances = maps.Clone(p.KeyOwnBalances)
 	p.KeyPriceRates = maps.Clone(p.KeyPriceRates)
+	p.KeyRateFactors = maps.Clone(p.KeyRateFactors)
 	if p.AccountWindowCaps != nil {
 		m := make(map[string]map[string]int, len(p.AccountWindowCaps))
 		for k, v := range p.AccountWindowCaps {
@@ -1122,12 +1159,12 @@ var AllBuilt atomic.Int64
 // by when it was asked, not by when the request that asked began (#2965).
 var AllBuiltAt atomic.Int64
 
-func allProviders() []Provider {
+func allProvidersContext(ctx context.Context) []Provider {
 	AllBuilt.Add(1)
 	AllBuiltAt.Store(time.Now().UnixNano())
 	f := load()
 	out, picks := ownOf(f)
-	for _, a := range Accounts() {
+	for _, a := range accountsContext(ctx) {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
@@ -1263,7 +1300,16 @@ func find(ps []Provider, id string) (Provider, bool) {
 
 // Find looks a provider up by id (or name, case-insensitively).
 func Find(id string) (*Provider, error) {
-	p, err := findIn(sharedAll(), id)
+	return FindContext(context.Background(), id)
+}
+
+// FindContext resolves a provider with the caller's cancellation.
+func FindContext(ctx context.Context, id string) (*Provider, error) {
+	all := sharedAllContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p, err := findIn(all, id)
 	if p != nil {
 		c := p.clone() // the caller's to change, as All's are
 		p = &c
@@ -1942,8 +1988,12 @@ func normalize(p Provider) Provider {
 	p.KeySpendCaps = normalKeySpendCaps(p.KeySpendCaps)
 	p.KeyOwnBalances = normalKeyOwnBalances(p.KeyOwnBalances)
 	p.KeyPriceRates = normalKeyPriceRates(p.KeyPriceRates)
+	p.KeyRateFactors = normalKeyRateFactors(p.KeyRateFactors)
 	if TopUpRateOK(p.TopUpRate) != "" {
 		p.TopUpRate = 0
+	}
+	if RateReadHoursOK(p.RateReadHours) != "" {
+		p.RateReadHours = 0
 	}
 	if len(p.Models) > 0 {
 		p.NoModels = false // a pick is no longer Select none

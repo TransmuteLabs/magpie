@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"time"
 
@@ -18,6 +19,10 @@ type Config struct {
 	Fail           bool   `json:"fail"`
 	RefreshStarted string `json:"refreshStarted"`
 	RefreshRelease string `json:"refreshRelease"`
+	RefreshOutcome string `json:"refreshOutcome"`
+	ImportProxy    string `json:"importProxy"`
+	QueueRelease   string `json:"queueRelease"`
+	ExecuteRelease string `json:"executeRelease"`
 }
 
 func Module() sdk.Module {
@@ -47,9 +52,6 @@ func Module() sdk.Module {
 			}
 		}
 		return config, nil
-	}
-	unsupported := func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
-		return nil, &sdk.Error{Code: "unsupported", Message: "Not used by this fixture"}
 	}
 	module := sdk.Module{
 		Manifest: manifest,
@@ -84,24 +86,79 @@ func Module() sdk.Module {
 					case <-time.After(time.Millisecond):
 					}
 				}
+				if config.RefreshOutcome != "" {
+					return nil, &sdk.Error{Code: "fixture_refused", Message: "Fixture did not rotate the credential", Outcome: config.RefreshOutcome}
+				}
 				return sdk.AuthResult{ID: call.Scope.Account, Credentials: json.RawMessage(`{"token":"PRIVATE-REFRESHED"}`)}, nil
 			},
-			sdk.MethodAuthStart: func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
-				if _, err := record(ctx, "start", call); err != nil {
+			sdk.MethodAuthStart: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+				config, err := record(ctx, "start", call)
+				if err != nil {
 					return nil, err
+				}
+				var request sdk.AuthStartRequest
+				if json.Unmarshal(call.Params, &request) == nil && request.Method == "saved-signin" {
+					var input struct{ Record string }
+					if json.Unmarshal(request.Input, &input) != nil {
+						return nil, errors.New("expected the selected synthetic saved sign-in")
+					}
+					continuation := `{"private":"PRIVATE-IMPORT"}`
+					switch input.Record {
+					case `{"type":"api","key":"PRIVATE-SAVED"}`:
+					case `{"type":"api","key":"PRIVATE-ROTATED-SAVED"}`:
+						continuation = `{"private":"PRIVATE-IMPORT-ROTATED"}`
+					case `{"type":"api","key":"PRIVATE-OTHER"}`:
+						continuation = `{"private":"PRIVATE-IMPORT-OTHER"}`
+					default:
+						return nil, errors.New("expected the selected synthetic saved sign-in")
+					}
+					if config.ImportProxy != "" {
+						var network sdk.NetworkProxyResult
+						if err := stream.HostCall(ctx, sdk.MethodNetworkProxy, sdk.NetworkProxyRequest{URL: "https://fixture.invalid"}, &network); err != nil ||
+							network.URL != config.ImportProxy {
+							return nil, errors.New("saved sign-in did not resolve through the selected source proxy")
+						}
+					}
+					var state sdk.StateCASResult
+					if err := stream.HostCall(ctx, sdk.MethodStateCAS, sdk.StateCASRequest{
+						Key: "fixture.saved-sign-in", Version: "0", Value: json.RawMessage(input.Record),
+					}, &state); err != nil || !state.Swapped {
+						return nil, errors.New("expected empty temporary sign-in state")
+					}
+					return sdk.AuthStartResult{Continuation: json.RawMessage(continuation)}, nil
 				}
 				return sdk.AuthStartResult{
 					URL: "https://fixture.invalid/verify", UserCode: "SAFE-CODE", PollAfterMs: 1000,
 					Continuation: json.RawMessage(`{"private":"PRIVATE-CONTINUATION"}`),
 				}, nil
 			},
-			sdk.MethodAuthFinish: func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			sdk.MethodAuthFinish: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
 				config, err := record(ctx, "finish", call)
 				if err != nil {
 					return nil, err
 				}
 				var request sdk.AuthFinishRequest
-				if json.Unmarshal(call.Params, &request) != nil || string(request.Continuation) != `{"private":"PRIVATE-CONTINUATION"}` {
+				if json.Unmarshal(call.Params, &request) != nil {
+					return nil, errors.New("missing private fixture continuation")
+				}
+				result := sdk.AuthResult{ID: "chosen", Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-CREDENTIAL"}`)}
+				switch string(request.Continuation) {
+				case `{"private":"PRIVATE-IMPORT"}`, `{"private":"PRIVATE-IMPORT-OTHER"}`, `{"private":"PRIVATE-IMPORT-ROTATED"}`:
+					record := `{"type":"api","key":"PRIVATE-SAVED"}`
+					if string(request.Continuation) == `{"private":"PRIVATE-IMPORT-OTHER"}` {
+						record = `{"type":"api","key":"PRIVATE-OTHER"}`
+						result = sdk.AuthResult{ID: "other", Name: "other@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-OTHER"}`)}
+					} else if string(request.Continuation) == `{"private":"PRIVATE-IMPORT-ROTATED"}` {
+						record = `{"type":"api","key":"PRIVATE-ROTATED-SAVED"}`
+						result.Credentials = json.RawMessage(`{"token":"PRIVATE-ROTATED"}`)
+					}
+					var state sdk.StateValue
+					if err := stream.HostCall(ctx, sdk.MethodStateGet, sdk.StateGetRequest{Key: "fixture.saved-sign-in"}, &state); err != nil ||
+						!state.Found || state.Version != "1" || string(state.Value) != record {
+						return nil, errors.New("finish lost temporary sign-in state")
+					}
+				case `{"private":"PRIVATE-CONTINUATION"}`:
+				default:
 					return nil, errors.New("missing private fixture continuation")
 				}
 				if config.Started != "" {
@@ -122,12 +179,48 @@ func Module() sdk.Module {
 				if config.Fail {
 					return nil, &sdk.Error{Code: "vendor", Message: "PRIVATE-CONTINUATION PRIVATE-CREDENTIAL", Outcome: "uncertain"}
 				}
-				return sdk.AuthResult{ID: "chosen", Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-CREDENTIAL"}`)}, nil
+				return result, nil
 			},
 		},
 	}
 	if manifest.Contract.Has(sdk.OutboundExecutor) {
-		module.Handlers[sdk.MethodProviderExecute] = unsupported
+		module.Handlers[sdk.MethodProviderExecute] = func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
+			config, err := record(ctx, "execute", call)
+			if err != nil {
+				return nil, err
+			}
+			if config.ExecuteRelease != "" {
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+					return nil, errors.New("fixture request was not canceled")
+				}
+				if _, err := record(ctx, "execute-canceled", call); err != nil {
+					return nil, err
+				}
+				deadline := time.After(5 * time.Second)
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				for {
+					if _, err := os.Stat(config.ExecuteRelease); err == nil {
+						return nil, ctx.Err()
+					}
+					select {
+					case <-deadline:
+						return nil, errors.New("fixture execution was not released")
+					case <-ticker.C:
+					}
+				}
+			}
+			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusOK,
+				Headers: http.Header{"Content-Type": {"application/json"}}}); err != nil {
+				return nil, err
+			}
+			if err := stream.Emit(ctx, "data", []byte(`{"id":"fixture","choices":[{"message":{"role":"assistant","content":"SDK executed"},"finish_reason":"stop"}]}`)); err != nil {
+				return nil, err
+			}
+			return sdk.ExecuteResult{Status: http.StatusOK, Outcome: "completed"}, nil
+		}
 	}
 	if manifest.Contract.Has(sdk.UsageReporter) {
 		module.Handlers[sdk.MethodProviderUsage] = func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
@@ -150,7 +243,23 @@ func Module() sdk.Module {
 		}
 	}
 	if manifest.Contract.Has(sdk.ProviderSignIn) {
-		module.Handlers[sdk.MethodProviderModels] = func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+		module.Handlers[sdk.MethodProviderModels] = func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			if call.Scope.Session == "hold-queue" {
+				config, err := record(ctx, "hold-queue", call)
+				if err != nil {
+					return nil, err
+				}
+				for config.QueueRelease != "" {
+					if _, err := os.Stat(config.QueueRelease); err == nil {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(time.Millisecond):
+					}
+				}
+			}
 			return sdk.ModelsResult{Models: manifest.Providers[0].Models}, nil
 		}
 	}

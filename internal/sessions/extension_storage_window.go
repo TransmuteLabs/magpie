@@ -17,7 +17,6 @@ import (
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
-	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -115,41 +114,16 @@ func inspectWindowStorage(ctx context.Context, owner WindowStorageOwner, source 
 		return nil, extension.ErrActionChanged
 	}
 	manager := sourceManager()
-	manifest, _, err := sessionMigrationIdentity(ctx, manager, owner.Module)
+	selected, err := sessionMigrationSelection(ctx, manager, owner.Module)
 	if err != nil {
 		return nil, err
 	}
-	descriptor, found := manifest.ResolveStorageSource(source)
+	if selected.entry.Revision != owner.PackageRevision || selected.configVersion != owner.ConfigVersion {
+		return nil, extension.ErrActionChanged
+	}
+	descriptor, found := selected.entry.Manifest.ResolveStorageSource(source)
 	if !found {
 		return nil, errors.New("window did not declare this storage source")
-	}
-	entries, err := manager.ListContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	count := 0
-	matched := false
-	for _, entry := range entries {
-		if entry.Disabled {
-			continue
-		}
-		if entry.Manifest.ID == owner.Module {
-			matched = entry.Revision == owner.PackageRevision
-		}
-		for _, candidate := range entry.Manifest.StorageSources {
-			if candidate.Agent == descriptor.Agent {
-				count++
-			}
-		}
-		for _, candidate := range entry.Manifest.SessionSources {
-			if candidate.Agent == descriptor.Agent {
-				count++
-			}
-		}
-	}
-	config, err := manager.ModuleConfig(ctx, owner.Module)
-	if err != nil || !matched || config.Version != owner.ConfigVersion || count != 1 {
-		return nil, extension.ErrActionChanged
 	}
 	reads, err := settings.InspectSessionReads()
 	if err != nil {
@@ -185,7 +159,7 @@ func inspectWindowStorage(ctx context.Context, owner WindowStorageOwner, source 
 		if err != nil {
 			return nil, err
 		}
-		if record.entry.Revision != owner.PackageRevision {
+		if !sameSessionModule(selected.entry, record.entry) || record.identity != selected.identity {
 			return nil, extension.ErrActionChanged
 		}
 		root := WindowStorageRoot{Slot: store.Slot, RootRef: record.rootRef, Available: true, Consented: storageConsented(rows, record)}
@@ -196,8 +170,20 @@ func inspectWindowStorage(ctx context.Context, owner WindowStorageOwner, source 
 	if err != nil || again != revision {
 		return nil, extension.ErrActionChanged
 	}
+	if err := selected.check(ctx, manager); err != nil {
+		return nil, err
+	}
+	owners, err := currentSourceOwners(ctx)
+	if err != nil {
+		return nil, err
+	}
+	authority := owners[descriptor.Agent]
+	if authority.count != 1 || authority.plugin != owner.Module || authority.revision != selected.entry.Revision ||
+		authority.enableGeneration != selected.entry.EnableGeneration {
+		return nil, extension.ErrActionChanged
+	}
 	snapshot.inspection.ViewRef = windowStorageRef("view", owner, source, reads.Revision, revision, snapshot.epoch,
-		snapshot.inspection.OwnOff, snapshot.inspection.Roots)
+		selected.entry.EnableGeneration, snapshot.inspection.OwnOff, snapshot.inspection.Roots)
 	for index := range snapshot.inspection.Roots {
 		root := &snapshot.inspection.Roots[index]
 		if root.Consented {
@@ -241,15 +227,17 @@ func changeWindowStorageConsent(ctx context.Context, snapshot *windowStorageSnap
 	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
 		return err
 	}
-	unlock, held := filelock.Lock(name+".lock", filelock.Wait)
-	if !held {
+	if !storageConsentsLock.LockCheckedContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errors.New("storage source consent is busy")
 	}
-	defer unlock()
+	defer storageConsentsLock.Unlock()
 	if err := snapshot.check(ctx); err != nil {
 		return err
 	}
-	rows, err := readStorageConsents()
+	rows, err := withHistoryClaimsRoot(ctx, readStorageConsentsAt)
 	if err != nil {
 		return err
 	}

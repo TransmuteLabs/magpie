@@ -58,7 +58,7 @@ func codexSignedIn(t *testing.T, spares ...string) {
 // allowance, as it says so; it notes the accounts asked and the models.
 func usedUp(t *testing.T, tried, models *[]string) {
 	t.Helper()
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		*tried = append(*tried, r.Header.Get("chatgpt-account-id"))
 		*models = append(*models, modelOf(b))
@@ -71,8 +71,9 @@ func usedUp(t *testing.T, tried, models *[]string) {
 			`data: {"type":"response.created","response":{"id":"r1","model":"gpt-5.5"}}`,
 			`data: {"type":"response.output_text.delta","delta":"pong"}`,
 			`data: {"type":"response.completed","response":{"id":"r1","usage":{"input_tokens":7,"output_tokens":1}}}`))
-	}))
+	})))
 	t.Cleanup(up.Close)
+	probeFixtureRoot(t, up)
 	was := provider.CodexBase
 	provider.CodexBase = up.URL + "/backend-api/codex"
 	t.Cleanup(func() { provider.CodexBase = was })

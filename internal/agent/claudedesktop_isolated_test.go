@@ -41,17 +41,25 @@ func isolatedFakes(t *testing.T, home string) (desktopPaths, desktopPaths, *bool
 	oldOn, oldSave, oldApp, oldAdd := desktopIsolatedOn, saveDesktopIsolated, desktopClaudeApp, desktopIsoAdd
 	oldCOn, oldCSave, oldChosen := desktopIsolatedClaudeOn, saveDesktopIsolatedClaude, desktopIsolatedClaudeChosen
 	desktopIsolatedOn = func() bool { return on }
-	saveDesktopIsolated = func(v bool) error { on = v; return nil }
+	saveDesktopIsolated = func(v, _, defaultClaude bool) error {
+		on, claudeOn = v, claudeOn || defaultClaude
+		return nil
+	}
 	desktopIsolatedClaudeOn = func() bool { return claudeOn }
 	desktopIsolatedClaudeChosen = func() bool { return chosen }
 	saveDesktopIsolatedClaude = func(v, c bool) error { claudeOn, chosen = v, chosen || c; return nil }
 	claudeApp := filepath.Join(home, "Applications", "Claude.app")
 	desktopClaudeApp = func() string { return claudeApp }
-	desktopIsoAdd = func(home, app, dir, claudeDir string) (string, error) {
+	desktopIsoAdd = func(home, app, dir, claudeDir string, commit func() error) (string, error) {
 		if app != claudeApp || dir != iso.dir3p {
 			t.Errorf("app made for %q on %q", app, dir)
 		}
 		made = append(made, claudeDir)
+		if commit != nil {
+			if err := commit(); err != nil {
+				return "", err
+			}
+		}
 		p := desktopiso.Path(home)
 		if err := os.MkdirAll(filepath.Join(p, "Contents"), 0o755); err != nil {
 			return "", err

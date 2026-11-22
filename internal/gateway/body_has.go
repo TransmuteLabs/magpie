@@ -16,6 +16,22 @@ import (
 // time, and compares the needle only where that byte is.
 func bodyHas(b []byte, sep string) bool { return bodyIndex(b, sep) >= 0 }
 
+// bodyHasJSONEscape is a conservative fallback for literal markers that can
+// be spelled with Unicode escapes. Other escapes, such as HTML in prose, do
+// not make the marker possible.
+func bodyHasJSONEscape(body []byte, markerChars string) bool {
+	for {
+		at := bodyIndex(body, `\u`)
+		if at < 0 {
+			return false
+		}
+		if r := hex4(body[at:]); r >= 0 && strings.ContainsRune(markerChars, r) {
+			return true
+		}
+		body = body[at+2:]
+	}
+}
+
 // bodyIndex is bytes.Index(b, sep), found as bodyHas finds it.
 func bodyIndex(b []byte, sep string) int {
 	if len(sep) < 2 || len(b) < 1024 {

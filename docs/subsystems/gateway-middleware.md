@@ -47,8 +47,10 @@ Request and provider transforms cannot change the caller-authorized model,
 stream setting or client tool declarations/choice.
 
 [`MiddlewareRun`](../../internal/extension/middleware.go) rechecks the selected
-package revision, configuration and enablement before admission and before
-accepting a result. Disabling and re-enabling a module revokes previous
+package revision, configuration and enablement after it obtains a worker slot
+and again after validating the result. Host callbacks recheck the same selection.
+These checks release catalog and state locks before the worker or upstream
+handles the request. Disabling and re-enabling a module revokes previous
 selections. Cancellation closes the request lease. Startup
 has a one-second budget; hooks have 250 ms, or 50 ms per event. Hook failure
 retains the last accepted body/state. DTO bodies are limited to 1 MiB and
@@ -63,7 +65,8 @@ not live community-package or vendor compatibility.
 
 ## Runtime path
 
-1. `serveAgent` establishes the [gateway session identity and optional recording](gateway-sessions.md), runs the [asynchronous request hooks](gateway-request-hooks.md), then calls `Begin` on each registered `gwmw.Agent` with the request's protocol, model, stream flag, path and agent. The legacy JS chain starts at `middleware.Begin`. With no middleware it calls `serve` directly.
+1. `serveAgent` establishes the [gateway session identity and optional recording](gateway-sessions.md), runs the [asynchronous request hooks](gateway-request-hooks.md), then calls `Begin` on each registered `gwmw.Agent` with the request's protocol, model, stream flag, path, agent and caller. The legacy JS chain starts at `middleware.Begin`. With no middleware it calls `serve` directly.
+   `ctx.agent` is `agentOf(r)`, the client that sent this request. Legacy middleware and asynchronous hooks receive `ctx.caller`, the linked SDK caller shape `{agent, name, via}`. [`pluginCaller`](../../internal/gateway/plugin_caller.go) supplies the same recorded origin as the provider fetch's `x-magpie-caller-*` headers. `via` lists the computers that passed on the request, starting at the agent's machine. A local agent has `via: []`. Legacy middleware can reject an agent in `onRequest` before provider selection, including when another magpie forwarded the request (`TestMiddlewareToldTheCaller`).
 2. `Run.Request` passes the agent's body, in its own API, to each `onRequest` in turn. An object returned is the body the next middleware and the gateway get; `undefined` keeps the bytes as they were. `ctx.reject(status, message)` stops the chain, and the agent gets that error in its API's shape (`writeError`).
 3. `Run.Tried` runs each `onProvider` on the body each time `serve` tries it on a provider, just before that try is sent (`triedOn` in the candidate loop of `gateway.go`; `serveAgent` puts the runs that are `gwmw.Tried` on the request's context). `ctx.provider` says which: `id`, `name`, `account` (the subscription's kind, as `accountAgent` gives it: `claude`, `antigravity`, …; absent for a key) and `model`, the model's id there. Every try starts again from the body `onRequest` left, so what one provider is sent changes no other try's: this is how a plugin acts on one vendor only, for an agent such as Claude Desktop whose model names say nothing of where they go. `null` and `ctx.reject` turn nothing away here; the request has been routed.
 4. `Run.Account` runs each `onAccount(account, ctx)` before each try on a subscription account, at the top of the candidate loop in `gateway.go` (`accountSkipped`; `serveAgent` puts the runs that are `gwmw.Accounts` on the request's context beside the `gwmw.Tried` ones), before anything of the try is done: no Codex reset is spent (`resetBeforeCredits`), no body is built and nothing is sent. `account` is `{ref, provider, name, kind, model}`; `ref` is an HMAC-SHA256 (first 16 bytes, hex) of the middleware's name (`plugin.Name`: a package's name without its version, a file's path) and the account's agent, user and plan, lower-cased, keyed by a random key made once per install in `account-ref.key` in magpie's config folder (`accountRef`, `refKey` in [`account.go`](../../internal/middleware/account.go)). So it is the same on every request and after a restart, different for each middleware, and the email can't be found from it without that key, even by someone who knows the email to try. The plan is part of who the account is, so a plan change gives a new ref. A key file that can't be read is never written over: that process makes refs with a key of its own and logs it. `{skip: true}` passes the account over for this request: the next candidate is asked, as past an account that can't be used, with a `passed over by middleware <name>` line in the call's fallback, and the account isn't rested, held or counted against. When the last candidate is passed over, nothing is sent (no fail-open): the agent gets the failure of a candidate asked before it, or, with none, the 404 "none of <model>'s models is ready" a request with no member ready gets. The first `{skip: true}` wins, and the middleware after it isn't asked. A try on a key asks no `onAccount`. `ctx.account` is set to the same object for that middleware's later hooks of the try (`onProvider`, `onEvent`, `onResponse`), and taken away on a key's try.
@@ -109,7 +112,7 @@ go test -tags nogui -run 'TestParseRouting|TestPluginListSaysMiddleware' ./inter
 go test -tags nogui -run TestPluginRoutingKept ./internal/provider
 go test -tags nogui -run TestOnServesStrategies ./plugins/middleware
 node --test internal/gui/tests/routing-js.test.cjs
-go test -tags nogui -run 'TestMiddlewareThroughGateway|TestMiddlewareOnProviderPerTry|WithoutTheAgentsMiddleware|TestOnAccountSkip' ./internal/gateway
+go test -tags nogui -run 'TestMiddlewareThroughGateway|TestMiddlewareToldTheCaller|TestMiddlewareOnProviderPerTry|WithoutTheAgentsMiddleware|TestOnAccountSkip' ./internal/gateway
 go test -tags nogui -run 'TestOnAccount|TestAccountRefKey' ./internal/middleware
 go test -tags nogui -run TestPluginListSaysMiddleware .
 go test -tags nogui -run "TestSetOptionsShortName|TestBuiltinMarket" ./internal/plugin

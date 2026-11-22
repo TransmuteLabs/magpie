@@ -20,25 +20,38 @@ func (lease *Lease) CheckCurrent(ctx context.Context) error {
 }
 
 func (m *Manager) checkActiveGeneration(ctx context.Context, expected Installed, configVersion string) error {
-	entry, err := m.ActiveModule(ctx, expected.Manifest.ID)
-	if ctx.Err() != nil {
-		return ctx.Err()
+	return m.withActiveGeneration(ctx, expected, configVersion, nil)
+}
+
+func (m *Manager) withActiveGeneration(ctx context.Context, expected Installed, configVersion string, publish func() error) error {
+	if m == nil || m.isClosed() {
+		return errContributionRevoked
 	}
-	if err != nil {
-		return err
-	}
-	if entry.Revision != expected.Revision || entry.Directory != expected.Directory ||
-		entry.EnableGeneration != expected.EnableGeneration {
-		return errors.New("extension package generation changed")
-	}
-	config, err := m.runtimeModuleConfigContext(ctx, entry.Manifest)
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err != nil || config.Version != configVersion {
-		return errors.New("extension configuration changed")
-	}
-	return nil
+	return m.catalog.withLockedView(ctx, func(view catalogView) error {
+		entry, found := view.lookup(expected.Manifest.ID)
+		if !found || !activeRoot(entry) {
+			return errContributionRevoked
+		}
+		entry = view.enabledEntry(entry)
+		if !activeRoot(entry) {
+			return errContributionRevoked
+		}
+		if entry.Revision != expected.Revision || entry.Directory != expected.Directory ||
+			entry.EnableGeneration != expected.EnableGeneration {
+			return errors.New("extension package generation changed")
+		}
+		config, err := m.runtimeModuleConfigContext(ctx, entry)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil || config.Version != configVersion {
+			return errors.New("extension configuration changed")
+		}
+		if publish != nil {
+			return publish()
+		}
+		return nil
+	})
 }
 
 func AccountOperationLease(ctx context.Context) (*Lease, error) {

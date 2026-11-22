@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -27,31 +26,19 @@ import (
 	"github.com/yetone/magpie/pkg/protocolext"
 )
 
-type extensionToolAccountFake struct {
-	entries []extension.Installed
-	store   *extension.Store
-	err     error
-	listed  int
-	stop    func()
+type extensionToolAccountFixture struct {
+	manifest sdk.Manifest
+	store    *extension.Store
+	stop     func()
 }
 
-func (fake *extensionToolAccountFake) ToolModules(ctx context.Context) ([]extension.Installed, error) {
-	fake.listed++
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return slices.DeleteFunc(slices.Clone(fake.entries), func(entry extension.Installed) bool {
-		return entry.Disabled || !entry.Manifest.Contract.Has(sdk.ToolProvider)
-	}), fake.err
-}
-
-func (fake *extensionToolAccountFake) Store() *extension.Store { return fake.store }
-
-func extensionToolGatewayFixture(t *testing.T) *extensionToolAccountFake {
+func extensionToolGatewayFixture(t *testing.T) *extensionToolAccountFixture {
 	t.Helper()
 	fresh(t)
-	fake := &extensionToolAccountFake{
-		entries: []extension.Installed{{Manifest: sdk.Manifest{
+	manager := extension.Default()
+	fixture := &extensionToolAccountFixture{
+		store: manager.Store(),
+		manifest: sdk.Manifest{
 			Schema: sdk.ManifestSchema, ID: "tool.module", Version: "1.0.0", Runtime: "exec", Entry: "worker",
 			Contract: sdk.Contract{
 				Version: sdk.APIVersion{Major: 1},
@@ -63,25 +50,9 @@ func extensionToolGatewayFixture(t *testing.T) *extensionToolAccountFake {
 			Tools: []sdk.ToolDescriptor{{
 				Name: "echo", InputSchema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"string"},"_magpie":{"type":"object","properties":{"provider":{"type":"string"},"account":{"type":"string"}},"required":["provider","account"]}}}`),
 			}},
-		}}},
+		},
 	}
-	manager := extension.Default()
-	fake.store = manager.Store()
-	source := t.TempDir()
-	manifest, err := json.Marshal(fake.entries[0].Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), manifest, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(source, "worker"), []byte("discovery fixture; never executed"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := extension.NewCatalog(manager.Namespace()).Install(t.Context(), source,
-		func(context.Context, extension.Installed) error { return nil }); err != nil {
-		t.Fatal(err)
-	}
+	installMetadataTool(t, fixture.manifest)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -89,18 +60,33 @@ func extensionToolGatewayFixture(t *testing.T) *extensionToolAccountFake {
 			t.Error(err)
 		}
 	})
-	if _, err := fake.store.SaveAccount(extension.Account{
+	if _, err := fixture.store.SaveAccount(extension.Account{
 		Plugin: "tool.module", Provider: "vendor", ID: "selected", Auth: json.RawMessage(`{"token":"synthetic-private-secret"}`),
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
-	previous := extensionToolAccounts
-	extensionToolAccounts = func() extensionToolAccountSource { return fake }
-	t.Cleanup(func() { extensionToolAccounts = previous })
-	off := gwtool.Serve(gwtool.PluginTools)
-	fake.stop = off
-	t.Cleanup(off)
-	return fake
+	fixture.stop = gwtool.Serve(gwtool.PluginTools)
+	t.Cleanup(fixture.stop)
+	return fixture
+}
+
+func installMetadataTool(t *testing.T, manifest sdk.Manifest) {
+	t.Helper()
+	source := t.TempDir()
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, manifest.Entry), []byte("metadata fixture; never executed"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extension.NewCatalog(extension.Default().Namespace()).Install(t.Context(), source,
+		func(context.Context, extension.Installed) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestExtensionToolContextDerivesAuthority(t *testing.T) {
@@ -137,7 +123,12 @@ func TestExtensionToolContextDerivesAuthority(t *testing.T) {
 }
 
 func TestExtensionToolContextRefusesRestrictedDelegation(t *testing.T) {
-	fake := extensionToolGatewayFixture(t)
+	extensionToolGatewayFixture(t)
+	unlock, held := filelock.Lock(filepath.Join(extension.Default().Namespace(), "catalog.lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the catalog")
+	}
+	defer unlock()
 	for _, who := range []access.Identity{
 		{ReadOnly: true},
 		{Models: []string{"vendor/model"}},
@@ -148,13 +139,12 @@ func TestExtensionToolContextRefusesRestrictedDelegation(t *testing.T) {
 		{Issuer: &access.Identity{ReadOnly: true}},
 	} {
 		ctx := access.WithIdentity(t.Context(), who)
-		_, _, err := extensionToolContext(ctx, "extension:tool.module",
+		bound, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		_, _, err := extensionToolContext(bound, "extension:tool.module",
 			json.RawMessage(`{"_magpie":{"provider":"vendor","account":"selected"}}`))
-		if err == nil {
-			t.Fatalf("restricted caller delegated credentials: %+v", who)
-		}
-		if fake.listed != 0 {
-			t.Fatal("restricted delegation read account declarations")
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), "this gateway key cannot delegate") {
+			t.Fatalf("restricted delegation passed the key gate before reading the catalog: %+v, %v", who, err)
 		}
 		unbound, args, err := extensionToolContext(ctx, "extension:tool.module", json.RawMessage(`{"value":"unbound"}`))
 		if err != nil || extension.ToolScopeFrom(unbound).Account != "" || string(args) != `{"value":"unbound"}` {
@@ -349,7 +339,7 @@ func TestExtensionToolNetworkHoldPreventsDispatch(t *testing.T) {
 }
 
 func TestExtensionToolContextRequiresExplicitDeclaredAccount(t *testing.T) {
-	fake := extensionToolGatewayFixture(t)
+	fixture := extensionToolGatewayFixture(t)
 	for _, args := range []string{
 		`{"_magpie":null}`, `{"_magpie":{}}`, `{"_magpie":[]}`,
 		`{"_magpie":{"provider":"vendor"}}`,
@@ -367,22 +357,38 @@ func TestExtensionToolContextRequiresExplicitDeclaredAccount(t *testing.T) {
 		}
 	}
 	args := json.RawMessage(`{"_magpie":{"provider":"vendor","account":"selected"}}`)
-	fake.entries[0].Manifest.Contract.Capabilities = []sdk.Capability{sdk.ToolProvider}
+	unauthenticated := fixture.manifest.Clone()
+	unauthenticated.Contract.Capabilities = []sdk.Capability{sdk.ToolProvider, sdk.ModelDiscovery}
+	installMetadataTool(t, unauthenticated)
 	if _, _, err := extensionToolContext(t.Context(), "extension:tool.module", args); err == nil {
 		t.Fatal("tool without account-auth received credentials")
 	}
-	fake.entries[0].Manifest.Contract.Capabilities = []sdk.Capability{sdk.ToolProvider, sdk.AccountAuth}
-	fake.entries[0].Disabled = true
+	installMetadataTool(t, fixture.manifest)
+	catalog := extension.NewCatalog(extension.Default().Namespace())
+	if err := catalog.SetEnabled(t.Context(), fixture.manifest.ID, false); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := extensionToolContext(t.Context(), "extension:tool.module", args); err == nil {
 		t.Fatal("disabled module received credentials")
 	}
-	fake.entries[0].Disabled = false
-	fake.err = errors.New("unknown catalog")
+	if err := catalog.SetEnabled(t.Context(), fixture.manifest.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := filepath.Join(extension.Default().Namespace(), "catalog.json")
+	saved, err := os.ReadFile(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(catalogPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := extensionToolContext(t.Context(), "extension:tool.module", args); err == nil {
 		t.Fatal("unknown catalog granted credentials")
 	}
-	fake.err = nil
-	if err := fake.store.DeleteAccount("tool.module", "vendor", "selected", 1); err != nil {
+	if err := os.WriteFile(catalogPath, saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.DeleteAccount("tool.module", "vendor", "selected", 1); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := extensionToolContext(t.Context(), "extension:tool.module", args); err == nil {
@@ -392,7 +398,7 @@ func TestExtensionToolContextRequiresExplicitDeclaredAccount(t *testing.T) {
 
 func TestExtensionToolsMCPPreservesRichResultAndScope(t *testing.T) {
 	fake := extensionToolGatewayFixture(t)
-	descriptor := fake.entries[0].Manifest.Tools[0]
+	descriptor := fake.manifest.Tools[0]
 	groups := []plugin.PluginTools{{Spec: "extension:tool.module", Tools: []plugin.Tool{
 		{Name: descriptor.Name, Schema: descriptor.InputSchema},
 	}}}
@@ -622,9 +628,6 @@ func TestExtensionToolsCatalogLifecycleWithoutBun(t *testing.T) {
 func TestExtensionToolDiscoveryRespectsCancellation(t *testing.T) {
 	extensionToolGatewayFixture(t)
 	manager := extension.Default()
-	previous := extensionToolAccounts
-	extensionToolAccounts = func() extensionToolAccountSource { return manager }
-	defer func() { extensionToolAccounts = previous }()
 	bound := json.RawMessage(`{"_magpie":{"provider":"vendor","account":"selected"}}`)
 	for _, scenario := range []struct {
 		name, lock string
