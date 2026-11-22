@@ -80,6 +80,10 @@ their ownership. Disable/removal/revocation hides delegated data; it does not
 silently fall through to another parser. Unknown SDK formats never use Claude's
 default decoder.
 
+Ordinary JSONL binding and rooted storage consent changes honor the caller's
+deadline while waiting for their file locks and check for cancellation again
+before publishing the write.
+
 Native trash and restore hold the same file locks as source bindings and
 storage consent while moving files. They check current ownership under those
 locks. If ownership has transferred or cannot be determined, the original

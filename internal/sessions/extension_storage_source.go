@@ -180,7 +180,7 @@ func BindStorageSource(ctx context.Context, plugin, source, slot, rootRef, expec
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := edit.WriteAtomic(name, body); err != nil {
+	if err := edit.WriteAtomicChecked(name, body, ctx.Err, nil); err != nil {
 		return err
 	}
 	invalidateSessionSources()
@@ -225,7 +225,7 @@ func UnbindStorageSource(ctx context.Context, agent, expectedIdentity string) er
 	}
 	body, err := json.Marshal(consents)
 	if err == nil {
-		err = edit.WriteAtomic(name, body)
+		err = edit.WriteAtomicChecked(name, body, ctx.Err, nil)
 	}
 	if err == nil {
 		invalidateSessionSources()
