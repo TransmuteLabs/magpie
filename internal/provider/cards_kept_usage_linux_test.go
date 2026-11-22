@@ -50,8 +50,13 @@ func TestKeptSDKUsageBatchesCacheKeyReads(t *testing.T) {
 			}
 			var page []SubscriptionQuota
 			readings := make(map[string]loginUsageEntry, count)
+			users := make(map[string]bool, count)
 			now := time.Now()
 			for _, login := range logins {
+				if users[login.User] {
+					t.Fatalf("discovered duplicate SDK account %q", login.User)
+				}
+				users[login.User] = true
 				_, proof, err := extensionUsageRequest(t.Context(), login.extension)
 				if err != nil {
 					t.Fatal(err)
@@ -69,12 +74,15 @@ func TestKeptSDKUsageBatchesCacheKeyReads(t *testing.T) {
 
 			check := func(report []Quota, revoked string) {
 				t.Helper()
-				found := 0
+				seen := make(map[string]bool, count)
 				for _, quota := range report {
 					if quota.Provider != id {
 						continue
 					}
-					found++
+					if !users[quota.User] || seen[quota.User] {
+						t.Fatalf("kept report published an unexpected or duplicate SDK account %q", quota.User)
+					}
+					seen[quota.User] = true
 					if quota.User == revoked {
 						if !quota.ReadDeferred || len(quota.Windows) != 0 {
 							t.Fatalf("kept report published revoked windows: %+v", quota)
@@ -83,8 +91,8 @@ func TestKeptSDKUsageBatchesCacheKeyReads(t *testing.T) {
 						t.Fatalf("kept report did not select the current cached reading: %+v", quota)
 					}
 				}
-				if found != count {
-					t.Fatalf("published %d SDK quotas, want %d", found, count)
+				if len(seen) != count {
+					t.Fatalf("published %d distinct SDK quotas, want %d", len(seen), count)
 				}
 			}
 			check(KeptQuotaReportContext(t.Context(), now), "")
@@ -118,18 +126,19 @@ func TestKeptSDKUsageBatchesCacheKeyReads(t *testing.T) {
 					}
 					return cards
 				}
-				report := KeptQuotaReportContext(t.Context(), now)
-				wire, err := json.Marshal(report)
-				if err != nil {
-					t.Fatal(err)
+				for range 2 {
+					report := KeptQuotaReportContext(t.Context(), now)
+					ReckonHolds = nil
+					wire, err := json.Marshal(report)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var decoded []Quota
+					if err := json.Unmarshal(wire, &decoded); err != nil {
+						t.Fatal(err)
+					}
+					check(decoded, page[0].User)
 				}
-				var decoded []Quota
-				if err := json.Unmarshal(wire, &decoded); err != nil {
-					t.Fatal(err)
-				}
-				check(decoded, page[0].User)
-				ReckonHolds = nil
-				check(KeptQuotaReportContext(t.Context(), now), page[0].User)
 			}
 			if fixture.manager.Running(fixture.scope.Plugin) || fixture.calls.Load() != 0 {
 				t.Fatal("reading warm quota cards started the SDK worker or asked the vendor")
