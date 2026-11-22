@@ -21,10 +21,15 @@ func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Prot
 		if streamOf(body) {
 			_ = http.NewResponseController(w).Flush()
 		}
+		if capture.full.cut() || capture.status >= http.StatusBadRequest {
+			capture.full.discard()
+			run.Finish(r.Context(), nil, false, body)
+			return
+		}
 		output, err := capture.full.read()
 		// a client that hangs up once it has the whole reply (Codex, on
 		// response.completed) still got it: gatewayReply judges the bytes
-		if err != nil || capture.full.cut() || capture.status >= 400 {
+		if err != nil {
 			run.Finish(r.Context(), nil, false, body)
 			return
 		}

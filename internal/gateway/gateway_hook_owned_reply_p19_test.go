@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -41,7 +42,9 @@ func TestSDKGatewayCapturedReplyP19(t *testing.T) {
 	for _, test := range []struct {
 		name, wire, wantReply string
 		status                int
+		captureLimit          int64
 		stream, success       bool
+		readError             bool
 	}{
 		{name: "unary", wire: " \t" + result + "\n", wantReply: result, status: 200, success: true},
 		{name: "SSE terminal", wire: p19HookCompletedSSE(result), wantReply: result, status: 200, stream: true, success: true},
@@ -50,6 +53,8 @@ func TestSDKGatewayCapturedReplyP19(t *testing.T) {
 		{name: "last decoded SSE status", wire: p19HookCompletedSSE(statusFailed), wantReply: statusFailed, status: 200, stream: true},
 		{name: "truncated SSE", wire: `data: {"type":"response.output_text.delta","delta":"x"}` + "\n\n", wantReply: "null", status: 200, stream: true},
 		{name: "HTTP failure", wire: result, wantReply: "null", status: 502},
+		{name: "cut capture", wire: result, wantReply: "null", status: 200, captureLimit: 16},
+		{name: "spool read error", wire: result, wantReply: "null", status: 200, readError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -62,14 +67,34 @@ func TestSDKGatewayCapturedReplyP19(t *testing.T) {
 			req.RemoteAddr = "127.0.0.1:1234"
 			client := httptest.NewRecorder()
 			writer, accepted, finish := applyGatewayHooks(client, req, provider.Responses, []byte(reqBody), manager.SelectGateway(ctx, "local"))
+			capture, ok := writer.(*conversationWriter)
+			if !ok {
+				t.Fatal("SDK response hook did not capture the reply")
+			}
+			t.Cleanup(capture.full.discard)
+			if test.captureLimit != 0 {
+				capture.full.limit = test.captureLimit
+			}
 			writer.WriteHeader(test.status)
 			wire := []byte(test.wire)
 			if length, err := writer.Write(wire); err != nil || length != len(wire) {
 				t.Fatalf("client write = (%d, %v), want %d bytes", length, err, len(wire))
 			}
+			if capture.full.f == nil {
+				t.Fatal("missing spool file")
+			}
+			path := capture.full.f.Name()
+			if test.readError {
+				if err := capture.full.f.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			clear(wire)
 			cancel()
 			finish()
+			if _, err := os.Stat(path); capture.full.f != nil || !os.IsNotExist(err) {
+				t.Fatalf("spool remained after finish: file = %v, stat = %v", capture.full.f, err)
+			}
 			clear(accepted)
 			if client.Code != test.status || client.Body.String() != test.wire {
 				t.Fatalf("client status/body = %d %q", client.Code, client.Body.Bytes())
