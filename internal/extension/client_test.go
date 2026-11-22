@@ -1008,23 +1008,25 @@ func TestManagerCallRefusesInvalidContractAndRevokedScopeBeforeStart(t *testing.
 
 func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 	for _, scenario := range []struct {
-		change      string
-		minor       int
-		heldInbound bool
+		change  string
+		minor   int
+		inbound string
 	}{
 		{change: "configuration", minor: 9}, {change: "inbound enable epoch", minor: 9},
 		{change: "account", minor: 9}, {change: "removed account", minor: 9}, {change: "privacy", minor: 9},
 		{change: "account", minor: 8}, {change: "removed account", minor: 8}, {change: "privacy", minor: 8},
-		{change: "account", minor: 8, heldInbound: true}, {change: "privacy", minor: 8, heldInbound: true},
+		{change: "account", minor: 8, inbound: "decoded"}, {change: "privacy", minor: 8, inbound: "decoded"},
 		{change: "same CAS configuration", minor: 8}, {change: "same CAS public configuration", minor: 8},
+		{change: "same CAS configuration", minor: 8, inbound: "synthetic"},
+		{change: "same CAS configuration", minor: 8, inbound: "failed decode"},
 		{change: "reordered configuration", minor: 8}, {change: "no configuration contract", minor: 0},
 	} {
 		name := scenario.change
 		if scenario.minor < 9 {
 			name = "legacy " + name
 		}
-		if scenario.heldInbound {
-			name = "held inbound " + name
+		if scenario.inbound != "" {
+			name = scenario.inbound + " inbound " + name
 		}
 		t.Run(name, func(t *testing.T) {
 			var excluded []sdk.Capability
@@ -1044,13 +1046,42 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			acquire := manager.Acquire
-			if scenario.heldInbound {
-				acquire = manager.AcquireNative
-			}
-			lease, err := acquire(ctx, id)
-			if err != nil {
-				t.Fatal(err)
+			var lease *Lease
+			decodeFails := scenario.inbound == "failed decode"
+			bindsCodec := scenario.inbound == "decoded" || decodeFails
+			if bindsCodec {
+				ctx = WithInboundLease(ctx)
+				registry, err := manager.ProtocolsContext(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				adapter, found := registry.Lookup(installed.Manifest.Inbounds[0].Path)
+				if !found {
+					t.Fatal("missing inbound codec")
+				}
+				call := codec.Bind(adapter, ctx)
+				defer call.Reply(httptest.NewRecorder()).Finish(nil)
+				body := []byte(`{"model":"fixture/model","prompt":"test"}`)
+				if decodeFails {
+					body = []byte(`invalid JSON`)
+				}
+				if _, err := call.Decode(ctx, nil, body); (err != nil) != decodeFails {
+					t.Fatalf("decode returned %v, want error: %t", err, decodeFails)
+				}
+				lease = inboundLeaseFrom(ctx)
+				if lease == nil || !lease.native {
+					t.Fatal("decode did not pin a native lease")
+				}
+			} else {
+				acquire := manager.Acquire
+				if scenario.inbound == "synthetic" {
+					acquire = manager.AcquireNative
+				}
+				selected, err := acquire(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lease = selected
 			}
 			defer lease.Close()
 			peer := NewManager(manager.Namespace())
@@ -1074,7 +1105,7 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 			if scenario.minor >= 9 {
 				ctx = WithProviderExecuteSelection(ctx, lease.Revision(), lease.ConfigVersion(), lease.worker.entry.EnableGeneration)
 			}
-			if scenario.change == "inbound enable epoch" || scenario.minor < 9 {
+			if !bindsCodec && (scenario.change == "inbound enable epoch" || scenario.minor < 9) {
 				ctx = WithInboundLease(ctx)
 				pinInboundLease(ctx, lease)
 			}
@@ -1112,7 +1143,7 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
-			if scenario.heldInbound {
+			if scenario.inbound == "decoded" {
 				if _, err := peer.CompareAndSwapModuleConfig(ctx, id, lease.ConfigVersion(), json.RawMessage(`{"updated":true}`)); err != nil {
 					t.Fatal(err)
 				}
@@ -1170,7 +1201,7 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 }
 
 func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
-	for _, change := range []string{"enable epoch", "sign out", "privacy", "configuration replacement", "unchanged"} {
+	for _, change := range []string{"enable epoch", "sign out", "privacy", "configuration replacement", "lease closing", "unchanged"} {
 		t.Run(change, func(t *testing.T) {
 			t.Setenv("MAGPIE_NO_ACCOUNTS", "0")
 			manager, scope := usageManagerVersion(t, 9, func(manifest *sdk.Manifest) {
@@ -1219,6 +1250,14 @@ func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
 				}
 				return nil
 			})
+			if change == "lease closing" {
+				ctx = WithInboundLease(ctx)
+				pinInboundLease(ctx, lease)
+				ctx = WithProviderExecutePolicy(ctx, func(context.Context) error {
+					lease.closed.Store(true)
+					return nil
+				})
+			}
 			next := lease.client.next.Load()
 			_, err = manager.Call(ctx, scope.Plugin, sdk.MethodProviderExecute, scope,
 				sdk.ExecuteRequest{Protocol: "chat", Model: "model"}, nil)
@@ -1232,6 +1271,9 @@ func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
 				var outcome *OutcomeError
 				if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || lease.client.next.Load() != next {
 					t.Fatalf("selection changed during owner admission crossed RPC dispatch: %v", err)
+				}
+				if change == "lease closing" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("closing lease lost its cancellation: %v", err)
 				}
 				if change == "sign out" {
 					var refusal *sdk.Error

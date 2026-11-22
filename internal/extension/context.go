@@ -35,7 +35,8 @@ type publicationAuthority struct {
 }
 type nativeLeaseRef struct {
 	sync.Mutex
-	lease *Lease
+	lease   *Lease
+	decoded bool
 }
 
 type ProviderExecutionBinding struct {
@@ -146,6 +147,25 @@ func pinInboundLease(ctx context.Context, lease *Lease) {
 		}
 		ref.Unlock()
 	}
+}
+
+func markInboundLeaseDecoded(ctx context.Context, lease *Lease) {
+	if ref, ok := ctx.Value(nativeLeaseKey{}).(*nativeLeaseRef); ok {
+		ref.Lock()
+		if ref.lease == lease {
+			ref.decoded = true
+		}
+		ref.Unlock()
+	}
+}
+
+func isDecodedInboundLease(ctx context.Context, lease *Lease) bool {
+	if ref, ok := ctx.Value(nativeLeaseKey{}).(*nativeLeaseRef); ok {
+		ref.Lock()
+		defer ref.Unlock()
+		return ref.decoded && ref.lease == lease
+	}
+	return false
 }
 
 func inboundLeaseFrom(ctx context.Context) *Lease {

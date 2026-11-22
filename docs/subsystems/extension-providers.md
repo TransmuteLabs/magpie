@@ -278,8 +278,8 @@ selected model catalog under its new version; already selected old bindings
 remain fenced. Worker selection and the execute generation fence also compare
 effective configuration values. This applies at dispatch after a worker slot
 opens for SDK 1.1 and later. SDK 1.0 has no runtime configuration. A matching
-provider call on a legacy request's original inbound lease keeps the lease's
-configuration snapshot through dispatch.
+provider call on the original lease of a successfully decoded legacy
+inbound request keeps the lease's configuration snapshot through dispatch.
 Replacing the configuration at the same CAS version retires workers
 configured with different values. Reordering JSON
 object fields leaves their configuration current. Unrelated private state and
@@ -322,7 +322,8 @@ check the current on/off policy for the selected public account, including a
 transferred alias. Matching SDK 1.8 and earlier inbound calls retain their
 original lease and report the generation of the worker that answered. They
 still apply current account generation, discovery, login policy and any
-subscription ownership checks at dispatch.
+subscription ownership checks at dispatch. Before returning from admission,
+the host checks that the request and its worker lease are both still live.
 
 `StartExtensionAuth`, `FinishExtensionAuth`, `RefreshExtensionAuth` and
 `LogoutExtensionAuth` use the installed authentication contract. Completed

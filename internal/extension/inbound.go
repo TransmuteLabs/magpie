@@ -219,6 +219,7 @@ func (call *remoteCall) Decode(ctx context.Context, headers http.Header, body []
 	} else if request.AccountOperation != "" {
 		return codec.Request{}, errors.New("unexpected native account operation")
 	}
+	markInboundLeaseDecoded(ctx, call.lease)
 	return codec.Request{
 		Protocol: codec.Protocol(request.Protocol), Body: request.Body,
 		Session: request.Session, Timeout: time.Duration(request.TimeoutMs) * time.Millisecond,

@@ -189,9 +189,11 @@ func TestMessagesDispatchBindingFollowsActualWorker(t *testing.T) {
 		name        string
 		minor       int
 		heldInbound bool
+		configOnly  bool
 	}{
 		{name: "admission", minor: 8},
 		{name: "held inbound", minor: 8, heldInbound: true},
+		{name: "held inbound config only", minor: 8, heldInbound: true, configOnly: true},
 		{name: "exact signed selection", minor: 9},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -252,6 +254,10 @@ func TestMessagesDispatchBindingFollowsActualWorker(t *testing.T) {
 			swap := func() error {
 				if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", json.RawMessage(`{"route":"next"}`)); err != nil {
 					return err
+				}
+				if scenario.configOnly {
+					replacement = selection(installed)
+					return nil
 				}
 				entry, err := install("1.0.1")
 				if err == nil {

@@ -1447,7 +1447,7 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 			} else {
 				err = checkSelection()
 				minor := l.worker.entry.Manifest.Contract.Version.Minor
-				heldInbound := minor < 9 && l.native && inboundLeaseFrom(ctx) == l
+				heldInbound := minor < 9 && l.native && isDecodedInboundLease(ctx, l)
 				if err == nil && minor >= 1 && !heldInbound {
 					current, readErr := m.runtimeModuleConfigContext(ctx, l.worker.entry)
 					if readErr != nil {
@@ -1457,6 +1457,15 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 					}
 				}
 			}
+		}
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err == nil {
+			err = l.ctx.Err()
+		}
+		if err == nil && l.closed.Load() {
+			err = context.Canceled
 		}
 		if err != nil {
 			if release != nil {
