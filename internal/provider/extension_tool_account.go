@@ -87,42 +87,37 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		}
 		return strings.TrimSpace(proxy), nil
 	}
-	check := func(current context.Context) error {
+	check := func(current context.Context) (context.Context, error) {
 		if _, err := checkPolicy(current, scope); err != nil {
-			return err
-		}
-		if err := CheckExtensionSubscription(current, scope.Plugin, scope.Provider, public.revision); err != nil {
-			return err
+			return current, err
 		}
 		active, activeConfig, err := toolAccountModule(current, host, scope.Plugin)
 		if err != nil {
-			return err
+			return current, err
 		}
 		if err := runtimeSelection.CheckConfig(active, activeConfig); err != nil {
-			return err
+			return current, err
+		}
+		if revision, bound := extensionhost.SubscriptionOwnerRevision(current); !bound || revision != public.revision {
+			return current, errSubscriptionOwnerChanged
 		}
 		network, err := extensionNetworkContext(current, scope)
 		if err != nil {
-			return err
+			return current, err
 		}
 		if err := netproxy.Held(network); err != nil {
-			return err
+			return current, err
 		}
 		if networkSelected && netproxy.Choice(network) != choice {
-			return errors.New("extension tool network policy changed")
+			return current, errors.New("extension tool network policy changed")
 		}
-		return nil
+		return network, nil
 	}
-	if err := check(ctx); err != nil {
-		return fail(err)
-	}
-	ctx, err = extensionNetworkContext(ctx, scope)
+	network, err := check(ctx)
 	if err != nil {
 		return fail(err)
 	}
-	if err := netproxy.Held(ctx); err != nil {
-		return fail(err)
-	}
+	ctx = network
 	choice, networkSelected = netproxy.Choice(ctx), true
 	account, err := host.Store().RefreshedAccountContext(ctx, scope)
 	if err != nil {
@@ -144,7 +139,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 			return fail(err)
 		}
 		defer lease.Close()
-		if err := check(ctx); err != nil {
+		if _, err := check(ctx); err != nil {
 			return fail(err)
 		}
 		refreshScope := scope
@@ -172,7 +167,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		Changed()
 	}
 	admit := func(current context.Context) error {
-		if err := check(current); err != nil {
+		if _, err := check(current); err != nil {
 			return err
 		}
 		account, err := host.Store().GetAccountContext(current, scope.Plugin, scope.Provider, scope.Account)

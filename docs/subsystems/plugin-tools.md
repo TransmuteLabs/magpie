@@ -92,6 +92,8 @@ search. Catalog and configuration reads use the tool call's context.
 The same SDK registry supplies enabled tool declarations for MCP discovery.
 Once the tool's module is known, account preparation reads that module and its
 configuration together by ID, and dispatch checks only the selected module.
+Each account policy check resolves ownership and the account's network context
+from one fresh owner snapshot. The queue and publication checks resolve it again.
 SDK 1.0 uses configuration version zero. These reads and the selected account
 store use the caller's cancellation. The SDK tool
 timeout starts before its final declaration check. The installed inventory
