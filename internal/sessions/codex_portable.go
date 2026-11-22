@@ -175,17 +175,17 @@ func portCodexRollouts(ctx context.Context, home string, left bool) (CodexPort, 
 	}
 	start := time.Now()
 	var due []string
-	seen := map[string]bool{}
-	add := func(p string) {
-		if !seen[p] {
-			seen[p] = true
+	retry := map[string]bool{}
+	add := func(p string, wasPending bool) {
+		if _, seen := retry[p]; !seen {
+			retry[p] = wasPending
 			due = append(due, p)
 		}
 	}
 	for _, p := range was.Pending {
 		for _, q := range []string{p, rolloutTwin(p)} { // Codex may have compressed it since
 			if fi, err := os.Stat(q); err == nil && fi.Mode().IsRegular() {
-				add(q)
+				add(q, true)
 			}
 		}
 	}
@@ -195,7 +195,7 @@ func portCodexRollouts(ctx context.Context, home string, left bool) (CodexPort, 
 				return nil
 			}
 			if fi, err := d.Info(); err == nil && fi.Mode().IsRegular() && !fi.ModTime().Before(since) {
-				add(p)
+				add(p, false)
 			}
 			return nil
 		})
@@ -208,7 +208,7 @@ func portCodexRollouts(ctx context.Context, home string, left bool) (CodexPort, 
 			pending = append(pending, due[i:]...)
 			break
 		}
-		changed, err := portRollout(ctx, home, p, left)
+		changed, err := portRollout(ctx, home, p, left, retry[p])
 		switch {
 		case errors.Is(err, errRolloutHeld):
 			res.Held = append(res.Held, p)
@@ -297,8 +297,8 @@ func unsealedReasoning(line []byte) bool {
 // portRollout writes the rollout at path portable, if it has magpie's
 // compaction item (or, left, a reasoning item OpenAI didn't seal), and
 // says whether it did.
-func portRollout(ctx context.Context, home, path string, left bool) (bool, error) {
-	return editRollout(ctx, home, path, func() func(line []byte, paged bool) ([]byte, bool) {
+func portRollout(ctx context.Context, home, path string, left, wasPending bool) (bool, error) {
+	return editRollout(ctx, home, path, wasPending, func() func(line []byte, paged bool) ([]byte, bool) {
 		ours := true // begun on OpenAI's provider or magpie's
 		return func(line []byte, paged bool) ([]byte, bool) {
 			if isMetaLine(line) {
@@ -335,7 +335,7 @@ func portRollout(ctx context.Context, home, path string, left bool) (bool, error
 // out, compressed for a .zst, cost a pass more than reading it (#4735).
 // If a Codex already holds the thread, leave it for a later pass before
 // preparing a rewrite. Publication still takes the locks again.
-func editRollout(ctx context.Context, home, path string, edits func() func(line []byte, paged bool) ([]byte, bool)) (bool, error) {
+func editRollout(ctx context.Context, home, path string, wasPending bool, edits func() func(line []byte, paged bool) ([]byte, bool)) (bool, error) {
 	thread := codexThreadOf(filepath.Base(path))
 	if thread == "" {
 		return false, nil
@@ -344,18 +344,21 @@ func editRollout(ctx context.Context, home, path string, edits func() func(line 
 	if err != nil {
 		return false, err
 	}
+	var coordination, threadLock string
+	if wasPending {
+		coordination, threadLock = rolloutLockPaths(home, thread)
+		if rolloutWriterBusy(coordination, threadLock) {
+			return false, errRolloutHeld
+		}
+	}
 	if changed, err := eachEditedLine(ctx, path, edits(), nil); err != nil || !changed {
 		return false, err
 	}
-	locks := filepath.Join(home, "thread-writer-locks")
-	coordination := filepath.Join(locks, ".coordination.lock")
-	threadLock := filepath.Join(locks, thread+".lock")
-	release, writerHeld := lockRolloutPublication(coordination, threadLock, 0)
-	if writerHeld {
-		return false, errRolloutHeld
+	if !wasPending {
+		coordination, threadLock = rolloutLockPaths(home, thread)
 	}
-	if release != nil {
-		release()
+	if rolloutWriterBusy(coordination, threadLock) {
+		return false, errRolloutHeld
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".magpie-"+filepath.Base(path)+"-*")
 	if err != nil {
@@ -409,7 +412,7 @@ func editRollout(ctx context.Context, home, path string, edits func() func(line 
 	}
 	os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
 
-	release, _ = lockRolloutPublication(coordination, threadLock, filelock.Wait)
+	release, _ := lockRolloutPublication(coordination, threadLock, filelock.Wait)
 	if release == nil {
 		return false, errRolloutHeld
 	}
@@ -425,6 +428,19 @@ func editRollout(ctx context.Context, home, path string, edits func() func(line 
 	}
 	done = true
 	return true, nil
+}
+
+func rolloutLockPaths(home, thread string) (coordination, threadLock string) {
+	locks := filepath.Join(home, "thread-writer-locks")
+	return filepath.Join(locks, ".coordination.lock"), filepath.Join(locks, thread+".lock")
+}
+
+func rolloutWriterBusy(coordination, threadLock string) bool {
+	release, held := lockRolloutPublication(coordination, threadLock, 0)
+	if release != nil {
+		release()
+	}
+	return held
 }
 
 // lockRolloutPublication takes the coordination lock before testing the
@@ -468,6 +484,9 @@ func eachEditedLine(ctx context.Context, path string, edit func(line []byte, pag
 		return false, err
 	}
 	defer in.Close()
+	if scanHook != nil {
+		scanHook(path, 0)
+	}
 	br := bufio.NewReaderSize(in, 64<<10)
 	changed := false
 	paged, metaSeen := false, false
@@ -605,7 +624,7 @@ func repairLineages(ctx context.Context, home string) (fixed []string, whole boo
 		if !ok || at == base.Get("end_byte_offset").Int() {
 			continue
 		}
-		changed, err := editRollout(ctx, home, p, func() func(line []byte, paged bool) ([]byte, bool) {
+		changed, err := editRollout(ctx, home, p, false, func() func(line []byte, paged bool) ([]byte, bool) {
 			return func(line []byte, paged bool) ([]byte, bool) {
 				r := gjson.GetBytes(line, "payload.history_base.end_byte_offset")
 				if !isMetaLine(line) || r.Index <= 0 || r.Type != gjson.Number {

@@ -221,19 +221,51 @@ func TestPortCodexRolloutsOnlyReadsWhatHasNothingToChange(t *testing.T) {
 func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	lines := portRolloutLines("s")
 	home, path := portHome(t, lines, false)
-	orig, _ := os.ReadFile(path)
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := bytes.Replace(orig, []byte("fix the build"), []byte("run the build"), 1)
 	_, letGo := holdThread(t, home, portThread)
 	was := rolloutWrites.Load()
-	for pass := range 2 {
+	var opens int
+	previous := scanHook
+	scanHook = func(name string, _ int64) {
+		if name == path {
+			opens++
+		}
+	}
+	defer func() { scanHook = previous }()
+	for pass, wantOpens := range []int{1, 0, 0} {
+		opens = 0
 		res, err := PortCodexRollouts(t.Context(), home)
 		if err != nil || !res.Done || !reflect.DeepEqual(res.Held, []string{path}) || len(res.Rewritten) != 0 {
 			t.Fatalf("pass %d with the thread open: %+v, %v", pass+1, res, err)
+		}
+		if opens != wantOpens {
+			t.Errorf("pass %d opened the rollout %d times, want %d", pass+1, opens, wantOpens)
+		}
+		if pass == 0 {
+			next := path + ".new"
+			if err := os.WriteFile(next, replacement, info.Mode().Perm()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(next, info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(next, path); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if prepared := rolloutWrites.Load() - was; prepared != 0 {
 		t.Errorf("prepared %d rewrites while the thread was open, want none", prepared)
 	}
-	if b, _ := os.ReadFile(path); !bytes.Equal(b, orig) {
+	if b, _ := os.ReadFile(path); !bytes.Equal(b, replacement) {
 		t.Fatal("written while a Codex had the thread open")
 	}
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".magpie-*")); len(left) > 0 {
@@ -241,9 +273,20 @@ func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	}
 	letGo()
 	// the pass after looks again at what it left, though its time is old
+	opens = 0
 	res, err := PortCodexRollouts(t.Context(), home)
-	if err != nil || len(res.Rewritten) != 1 {
+	if err != nil || !res.Done || len(res.Held) != 0 || !reflect.DeepEqual(res.Rewritten, []string{path}) {
 		t.Fatalf("pass after: %+v, %v", res, err)
+	}
+	if opens != 2 || rolloutWrites.Load()-was != 1 {
+		t.Fatalf("after release: %d content opens and %d prepared rewrites, want 2 and 1", opens, rolloutWrites.Load()-was)
+	}
+	if b, err := os.ReadFile(path); err != nil || !bytes.Contains(b, []byte("run the build")) || bytes.Contains(b, []byte("fix the build")) {
+		t.Fatalf("publication lost the replacement's edit: %v", err)
+	}
+	res, err = PortCodexRollouts(t.Context(), home)
+	if err != nil || !res.Done || len(res.Held) != 0 || len(res.Rewritten) != 0 || rolloutWrites.Load()-was != 1 {
+		t.Fatalf("pass after publication: %+v, %v", res, err)
 	}
 
 	home2, path2 := portHome(t, lines, false)
@@ -254,6 +297,50 @@ func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path2); !bytes.Equal(b, orig2) {
 		t.Fatal("written without Codex's writer locks")
+	}
+}
+
+func TestPortCodexRolloutsPendingWithUncertainWriterLock(t *testing.T) {
+	home, path := portHome(t, portRolloutLines("summary"), false)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, letGo := holdThread(t, home, portThread)
+	res, err := PortCodexRollouts(t.Context(), home)
+	if err != nil || !res.Done || !reflect.DeepEqual(res.Held, []string{path}) {
+		t.Fatalf("initial pass: %+v, %v", res, err)
+	}
+	letGo()
+	lock := filepath.Join(home, "thread-writer-locks", portThread+".lock")
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var opens int
+	previous := scanHook
+	scanHook = func(name string, _ int64) {
+		if name == path {
+			opens++
+		}
+	}
+	defer func() { scanHook = previous }()
+	res, err = PortCodexRollouts(t.Context(), home)
+	if err != nil || !res.Done || !reflect.DeepEqual(res.Held, []string{path}) || len(res.Rewritten) != 0 || opens != 2 {
+		t.Fatalf("uncertain lock: %+v, %v, %d content opens, want 2 and no publication", res, err, opens)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("invalid guard allowed publication: %v", err)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	res, err = PortCodexRollouts(t.Context(), home)
+	if err != nil || !res.Done || !reflect.DeepEqual(res.Rewritten, []string{path}) || len(res.Held) != 0 {
+		t.Fatalf("restored lock: %+v, %v", res, err)
 	}
 }
 
@@ -271,7 +358,7 @@ func TestEditRolloutRechecksPublication(t *testing.T) {
 			}
 			want := original
 			passes := 0
-			changed, err := editRollout(t.Context(), home, path, func() func([]byte, bool) ([]byte, bool) {
+			changed, err := editRollout(t.Context(), home, path, false, func() func([]byte, bool) ([]byte, bool) {
 				passes++
 				if passes == 2 {
 					if change == "writer opens" {
