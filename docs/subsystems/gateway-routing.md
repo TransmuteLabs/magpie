@@ -3489,7 +3489,11 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   false`.
 - `generate: false` (Codex's warmup) is answered locally with a
   `response.created` and `response.completed` of its own id; nothing is
-  sent upstream.
+  sent upstream. The socket refuses a warmup with `413 request_too_large`
+  before replying or retaining its history if the reconstructed input
+  array alone exceeds the route's decoded-body limit. It measures the
+  array as the HTTP request would serialize it, allowing inter-token
+  whitespace, and leaves earlier response IDs available after a refusal.
 - `response.interrupt` naming the reply in flight cancels its request and
   is answered `response.interrupt.accepted`, then an interrupted
   `response.incomplete`; one naming another reply, or none in flight,

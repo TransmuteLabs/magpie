@@ -1506,6 +1506,25 @@ func appendRawJSON(dst []byte, raw json.RawMessage, escapeHTML bool, depth int) 
 	return appendCompactJSON(dst, raw, escapeHTML, depth)
 }
 
+func compactJSONSize(src []byte) int64 {
+	html := bytes.Count(src, []byte("<")) + bytes.Count(src, []byte(">")) + bytes.Count(src, []byte("&"))
+	separators := bytes.Count(src, []byte("\u2028")) + bytes.Count(src, []byte("\u2029"))
+	size := int64(len(src)) + 5*int64(html) + 3*int64(separators)
+	for i := 0; i < len(src); {
+		switch c := src[i]; {
+		case c == '"':
+			i = skipJSONString(src, i)
+		case isJSONSpace(c):
+			next := skipJSONSpace(src, i+1)
+			size -= int64(next - i)
+			i = next
+		default:
+			i++
+		}
+	}
+	return size
+}
+
 // appendCompactJSON is encoding/json's appendCompact of src, a valid JSON
 // value: without the space between its tokens, and with <, >, & and
 // U+2028, U+2029 escaped when escapeHTML, as json.Marshal writes them.

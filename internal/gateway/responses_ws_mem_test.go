@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -398,6 +399,118 @@ func TestResponsesSocketBoundsReconstructedBody(t *testing.T) {
 	retry := last(client.turn(create(previous, userMore)))
 	if retry.Get("type").String() != "response.completed" {
 		t.Fatalf("shorter continuation ended as %s", retry.Raw)
+	}
+}
+
+func TestResponsesSocketWarmupBoundsHeldHistory(t *testing.T) {
+	const limit = 48 << 10
+	const warmup = `"generate":false`
+	longText := strings.Repeat("x", 32<<10)
+	longItem := strings.Replace(userHi, "hi", longText, 1)
+	htmlText := strings.Repeat("<", 9<<10)
+	htmlItem := strings.Replace(userHi, "hi", htmlText, 1)
+	pad := strings.Repeat(" ", 32<<10)
+	padded := func(item string) string {
+		return strings.Replace(item, `"type":`, `"type":`+pad, 1)
+	}
+	quotedItem := strings.Replace(userHi, "hi", ` \thi  \"quoted\" <&`+"\u2028", 1)
+	edgeText := ` \t\"<>&\u003c` + "\u2028\u2029" + strings.Repeat("<", (8<<10)-128)
+	edgeItem := func(text string) string {
+		return padded(strings.Replace(userMore, "and more", text, 1))
+	}
+	encoded, err := json.Marshal([]json.RawMessage{json.RawMessage(userHi), json.RawMessage(edgeItem(edgeText))})
+	if err != nil || len(encoded) > limit {
+		t.Fatalf("boundary fixture base has %d bytes: %v", len(encoded), err)
+	}
+	exact := edgeText + strings.Repeat("x", limit-len(encoded))
+	for _, route := range []struct {
+		name, path string
+	}{
+		{name: "public", path: "/v1/responses"},
+		{name: "native", path: CodexPath + "/responses"},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			fresh(t)
+			up := &respUp{}
+			vendor := httptest.NewServer(withoutAnonymousFixtureProbe(up))
+			t.Cleanup(vendor.Close)
+			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Responses: vendor.URL + "/v1", Models: []string{"m1"}}); err != nil {
+				t.Fatal(err)
+			}
+			server := New()
+			server.requestLimits.body = limit
+			listener := serveSock(t, server)
+			for _, test := range []struct {
+				name, first, second string
+				history             []json.RawMessage
+				tooLarge            bool
+				warmupOnly          bool
+			}{
+				{name: "joined", first: longItem, second: longItem, history: []json.RawMessage{json.RawMessage(longItem)}, tooLarge: true},
+				{name: "escaped", first: userHi, second: htmlItem, history: []json.RawMessage{json.RawMessage(userHi)}, tooLarge: true},
+				{name: "exactly fits", first: userHi, second: edgeItem(exact), warmupOnly: true},
+				{name: "one byte over", first: userHi, second: edgeItem(exact + "x"), history: []json.RawMessage{json.RawMessage(userHi)}, tooLarge: true},
+				{name: "inter-token whitespace", first: padded(quotedItem), second: padded(userMore),
+					history: []json.RawMessage{json.RawMessage(quotedItem), json.RawMessage(userMore)}},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					client, _, err := dialSock(t, listener, route.path, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					calls := up.calls()
+					expectLocal := func(got []gjson.Result) string {
+						t.Helper()
+						out := last(got)
+						id := out.Get("response.id").String()
+						if len(got) != 2 || got[0].Get("type").String() != "response.created" ||
+							out.Get("type").String() != "response.completed" || id == "" ||
+							got[0].Get("response.id").String() != id {
+							t.Fatalf("warmup ended with %s (%d events)", out.Raw, len(got))
+						}
+						return id
+					}
+					previous := expectLocal(client.turn(create("", test.first, warmup)))
+					expectLocal(client.turn(create("", userHi, warmup)))
+					if test.tooLarge {
+						missing := last(client.turn(create("resp_missing", test.second, warmup)))
+						if missing.Get("status").Int() != http.StatusBadRequest ||
+							missing.Get("error.code").String() != "previous_response_not_found" {
+							t.Errorf("unknown predecessor got %s", missing.Raw)
+						}
+					}
+					got := client.turn(create(previous, test.second, warmup))
+					if test.tooLarge {
+						out := last(got)
+						if len(got) != 1 || out.Get("type").String() != "error" ||
+							out.Get("status").Int() != http.StatusRequestEntityTooLarge ||
+							out.Get("error.type").String() != "request_too_large" {
+							t.Errorf("oversized warmup ended with %s (%d events)", out.Raw, len(got))
+						}
+					} else {
+						previous = expectLocal(got)
+					}
+					if n := up.calls() - calls; n != 0 {
+						t.Fatalf("warmups sent %d upstream requests", n)
+					}
+					if test.warmupOnly {
+						return
+					}
+					out := last(client.turn(create(previous, userPing)))
+					if n := up.calls() - calls; out.Get("type").String() != "response.completed" || n != 1 {
+						t.Fatalf("ordinary continuation ended with %s and %d upstream requests", out.Raw, n)
+					}
+					input := gjson.GetBytes(up.body(calls), "input").Raw
+					want, err := json.Marshal(append(slices.Clone(test.history), json.RawMessage(userPing)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if input != string(want) {
+						t.Errorf("upstream input differs (length %d, want %d)", len(input), len(want))
+					}
+				})
+			}
+		})
 	}
 }
 

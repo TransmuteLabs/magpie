@@ -488,9 +488,13 @@ func (rs *responsesSocket) held(id string) ([]json.RawMessage, bool) {
 // Codex's tools and instructions, on every turn a socket held, ~39 MB of
 // a long session's live heap.
 func (rs *responsesSocket) keep(id string, prior, fresh, reply []json.RawMessage) {
+	rs.keepOwned(id, prior, ownItems(fresh), reply)
+}
+
+func (rs *responsesSocket) keepOwned(id string, prior, fresh, reply []json.RawMessage) {
 	t := heldTurn{id: id, items: make([]json.RawMessage, 0, len(prior)+len(fresh)+len(reply))}
 	t.items = append(t.items, prior...)
-	t.items = append(t.items, ownItems(fresh)...)
+	t.items = append(t.items, fresh...)
 	t.items = append(t.items, reply...)
 	rs.turns = append(rs.turns, t)
 	if len(rs.turns) > socketKeep {
@@ -513,6 +517,44 @@ func ownItems(items []json.RawMessage) []json.RawMessage {
 	return out
 }
 
+func compactSocketItems(items []json.RawMessage, n int) []json.RawMessage {
+	buf := make([]byte, 0, n)
+	out := make([]json.RawMessage, len(items))
+	for i, it := range items {
+		start := len(buf)
+		buf, _ = appendCompactJSON(buf, it, true, 0)
+		out[i] = buf[start:len(buf):len(buf)]
+	}
+	return out
+}
+
+func warmupInputSize(prior, fresh []json.RawMessage, limit int64) (compactSize int, fits bool) {
+	left := limit - 2 - int64(max(0, len(prior)+len(fresh)-1))
+	if left < 0 {
+		return 0, false
+	}
+	for _, item := range prior {
+		left -= compactJSONSize(item)
+		if left < 0 {
+			return 0, false
+		}
+	}
+	beforeFresh := left
+	var rawSize int64
+	for _, item := range fresh {
+		left -= compactJSONSize(item)
+		if left < 0 {
+			return 0, false
+		}
+		rawSize += int64(len(item))
+	}
+	encodedSize := beforeFresh - left
+	if rawSize > encodedSize {
+		return int(encodedSize), true
+	}
+	return 0, true
+}
+
 // turn serves one response.create.
 func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []byte) {
 	rs.frames++
@@ -527,7 +569,6 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_value", "input is neither text nor a list of items", "input")
 		return
 	}
-	input := fresh
 	var held []json.RawMessage
 	if raw := q["previous_response_id"]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		var id string
@@ -539,13 +580,23 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 				"Previous response with id '"+id+"' not found.", "previous_response_id")
 			return
 		}
-		held, input = prior, append(prior[:len(prior):len(prior)], fresh...)
+		held = prior
 		rs.continued++
 	}
 	// a warmup (generate false) asks for no reply: Codex sends it with
 	// the conversation ahead of its first turn, and that turn follows it
 	var generate bool
 	if raw := q["generate"]; len(raw) > 0 && json.Unmarshal(raw, &generate) == nil && !generate {
+		limit := rs.s.bodyLimitOf()
+		if strings.HasPrefix(rs.path, CodexPath+"/") {
+			limit = rs.s.codexLimitOf()
+		}
+		compactSize, fits := warmupInputSize(held, fresh, limit)
+		if !fits {
+			const status = http.StatusRequestEntityTooLarge
+			rs.writeError(ctx, status, errorTypeFor(status), "", overLimit(limit).Error()+" — "+requestBytesHint, "")
+			return
+		}
 		id := "resp_" + newID()
 		t.mu.Lock()
 		t.ids = append(t.ids, id)
@@ -562,11 +613,19 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		resp["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 		b, _ = json.Marshal(map[string]any{"type": "response.completed", "response": resp})
 		if rs.write(ctx, b) == nil {
-			rs.keep(id, held, fresh, nil)
+			if compactSize > 0 {
+				rs.keepOwned(id, held, compactSocketItems(fresh, compactSize), nil)
+			} else {
+				rs.keep(id, held, fresh, nil)
+			}
 		}
 		return
 	}
 	// the body the HTTP route would have had
+	input := fresh
+	if len(held) != 0 {
+		input = append(held[:len(held):len(held)], fresh...)
+	}
 	delete(q, "type")
 	delete(q, "previous_response_id")
 	delete(q, "generate")
