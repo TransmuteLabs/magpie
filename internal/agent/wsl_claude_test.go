@@ -379,12 +379,10 @@ func TestWSLClaudeNotFolded(t *testing.T) {
 // case, lower, upper — and by a prefix of it: an id in lowercase comes up
 // wherever a typed name is lowercased before it is looked for.
 func TestWSLAgentIDFound(t *testing.T) {
-	// wslAgents() is Windows-only and the suite runs on macOS and Linux:
-	// turned on, the fake distro's agent is in All() and Find here too
-	on := wslOn
-	wslOn = true
-	t.Cleanup(func() { wslOn = on })
-	root, _ := claudeDistroHome(t, `{"model": "claude-opus-5-5"}`)
+	home, root := t.TempDir(), t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	writeFile(t, filepath.Join(root, "home", "me", ".claude", "settings.json"), `{"model": "claude-opus-5-5"}`)
 	fakeWSL(t, "Debian\r\n", "Debian\r\n", map[string]string{
 		"Debian": "home:/home/me\ndir:.claude\n",
 	}, map[string]string{"Debian": root})
