@@ -1,18 +1,18 @@
 package sessions
 
 import (
+	"bufio"
 	"bytes"
-	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/yetone/magpie/internal/sessionformat"
 )
 
 // A Codex fork (the CLI's /fork, the app's fork, a spawn_agent with the
@@ -182,36 +182,48 @@ func readCodexParent(file *os.File) (map[cxCheckpoint]bool, map[string]bool, os.
 	if scanHook != nil {
 		scanHook(file.Name(), 0)
 	}
-	err = sessionformat.EachLine(context.Background(), lines, func(b []byte) {
-		h := b[:min(len(b), 1024)]
-		top, payload := typeAfter(h, cxType), typeAfter(h, cxPayload)
-		if top == "turn_context" || top == "event_msg" && payload == "task_started" {
-			var l struct {
+	reader := bufio.NewReaderSize(lines, 64<<10)
+	for {
+		line, err := reader.ReadSlice('\n')
+		header := line[:min(len(line), 1024)]
+		top, payload := typeAfter(header, cxType), typeAfter(header, cxPayload)
+		turn := top == "turn_context" || top == "event_msg" && payload == "task_started"
+		checkpoint := top == "event_msg" && payload == "token_count" && !bytes.Contains(header, cxInfo)
+		if err == bufio.ErrBufferFull {
+			if turn || checkpoint {
+				line, err = readLongLine(reader, line)
+			} else {
+				for err == bufio.ErrBufferFull {
+					_, err = reader.ReadSlice('\n')
+				}
+			}
+		}
+		switch {
+		case turn:
+			var record struct {
 				Payload struct {
 					TurnID string `json:"turn_id"`
 				} `json:"payload"`
 			}
-			if json.Unmarshal(b, &l) == nil && l.Payload.TurnID != "" {
+			if json.Unmarshal(line, &record) == nil && record.Payload.TurnID != "" {
 				if turns == nil {
 					turns = map[string]bool{}
 				}
-				turns[l.Payload.TurnID] = true
+				turns[record.Payload.TurnID] = true
 			}
-			return
+		case checkpoint:
+			if total, ok := cxUsageIn(line, cxTotal); ok {
+				if last, ok := cxUsageIn(line, cxLast); ok {
+					marks[cxCheckpoint{*total, *last}] = true
+				}
+			}
 		}
-		if top != "event_msg" || payload != "token_count" || bytes.Contains(h, cxInfo) {
-			return
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		total, ok := cxUsageIn(b, cxTotal)
-		if !ok {
-			return
+		if err != nil {
+			return nil, nil, nil
 		}
-		if last, ok := cxUsageIn(b, cxLast); ok {
-			marks[cxCheckpoint{*total, *last}] = true
-		}
-	})
-	if err != nil {
-		return nil, nil, nil
 	}
 	info, _ := file.Stat()
 	return marks, turns, info

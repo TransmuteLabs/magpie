@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -179,6 +180,131 @@ func TestCodexForkCacheTracksParentReplacement(t *testing.T) {
 	if len(marks) != 1 || len(turns) != 1 || !turns["turn-2"] {
 		t.Fatalf("the replacement parent has stale checkpoints or turns: %v, %v", marks, turns)
 	}
+}
+
+func TestCodexForkColdParentReadsPlainAndPacked(t *testing.T) {
+	padding := strings.Repeat("x", 128<<10)
+	history := strings.Join([]string{
+		strings.TrimSuffix(forkCheckpoint(1), "\n"),
+		"",
+		`{"type":"compacted","payload":{"content":"` + padding + `","nested":{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":99},"last_token_usage":{"input_tokens":1}}}}}}`,
+		`{"type":"turn_context","payload":{"turn_id":"bad-turn","padding":"` + padding,
+		`{"type":"turn_context","payload":{"turn_id":""}}`,
+		`{"padding":"` + strings.Repeat("x", 1024) + `","type":"turn_context","payload":{"turn_id":"past-header"}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":null,"total_token_usage":{"input_tokens":98},"last_token_usage":{"input_tokens":1}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":97},"last_token_usage":{"input_tokens":"bad"}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","padding":"` + padding + `","info":{"total_token_usage":{"input_tokens":2},"last_token_usage":{"input_tokens":1}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3},"last_token_usage":{"input_tokens":2}}}`,
+		`{"type":"event_msg","payload":{"type":"task_started","padding":"` + padding + `","turn_id":"last-turn"}}`,
+	}, "\n")
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "parent.jsonl")
+	if err := os.WriteFile(plain, []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packed := pack(t, plain, true)
+	wantMarks := map[cxCheckpoint]bool{
+		{Total: cxUsage{Input: 1, Known: 1}, Last: cxUsage{Input: 1, Known: 1}}: true,
+		{Total: cxUsage{Input: 2, Known: 1}, Last: cxUsage{Input: 1, Known: 1}}: true,
+		{Total: cxUsage{Input: 3, Known: 1}, Last: cxUsage{Input: 2, Known: 1}}: true,
+	}
+	wantTurns := map[string]bool{"turn-1": true, "last-turn": true}
+	for name, path := range map[string]string{"plain": plain, "packed": packed} {
+		t.Run(name, func(t *testing.T) {
+			marks, turns, info := readCodexForkFixture(t, path)
+			current, err := os.Stat(path)
+			if err != nil || info == nil || !sameCodexParent(info, current) {
+				t.Fatalf("parent descriptor info = %v, current = %v, err = %v", info, current, err)
+			}
+			if !maps.Equal(marks, wantMarks) || !maps.Equal(turns, wantTurns) {
+				t.Fatalf("checkpoints = %v, turns = %v, want %v and %v", marks, turns, wantMarks, wantTurns)
+			}
+		})
+	}
+	t.Run("corrupt packed", func(t *testing.T) {
+		compressed, err := os.ReadFile(packed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		compressed[len(compressed)-1] ^= 1
+		path := filepath.Join(dir, "corrupt.jsonl.zst")
+		if err := os.WriteFile(path, compressed, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if marks, turns, info := readCodexForkFixture(t, path); marks != nil || turns != nil || info != nil {
+			t.Fatalf("returned a partial snapshot after a decompression error: %v, %v, %v", marks, turns, info)
+		}
+	})
+}
+
+func TestCodexForkColdParentSkipsIgnoredLineAllocations(t *testing.T) {
+	const checkpoints, scans = 8, 4
+	history := codexForkScanCorpus(checkpoints, 128<<10)
+	path := filepath.Join(t.TempDir(), "parent.jsonl")
+	if err := os.WriteFile(path, []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range scans {
+		marks, turns, info := readCodexForkFixture(t, path)
+		if len(marks) != checkpoints || len(turns) != checkpoints || info == nil {
+			t.Fatalf("scan got %d checkpoints and %d turns, file info = %v", len(marks), len(turns), info)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if per := (after.TotalAlloc - before.TotalAlloc) / scans; per > 512<<10 {
+		t.Fatalf("cold parent scan allocated %d bytes with %d bytes of ignored output per scan", per, checkpoints*(128<<10))
+	}
+}
+
+func BenchmarkCodexForkColdParent(b *testing.B) {
+	const checkpoints = 48
+	for _, fixture := range []struct {
+		name    string
+		padding int
+	}{
+		{name: "mixed", padding: 256 << 10},
+		{name: "checkpoints"},
+	} {
+		b.Run(fixture.name, func(b *testing.B) {
+			history := codexForkScanCorpus(checkpoints, fixture.padding)
+			path := filepath.Join(b.TempDir(), "parent.jsonl")
+			if err := os.WriteFile(path, []byte(history), 0o600); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.SetBytes(int64(len(history)))
+			for b.Loop() {
+				marks, turns, info := readCodexForkFixture(b, path)
+				if len(marks) != checkpoints || len(turns) != checkpoints || info == nil {
+					b.Fatalf("scan got %d checkpoints and %d turns, file info = %v", len(marks), len(turns), info)
+				}
+			}
+		})
+	}
+}
+
+func readCodexForkFixture(t testing.TB, path string) (map[cxCheckpoint]bool, map[string]bool, os.FileInfo) {
+	file, err := os.Open(path)
+	if err != nil {
+		t.Helper()
+		t.Fatal(err)
+	}
+	return readCodexParent(file)
+}
+
+func codexForkScanCorpus(checkpoints, padding int) string {
+	var history strings.Builder
+	ignored := `{"type":"response_item","payload":{"type":"function_call_output","output":"` + strings.Repeat("x", padding) + `"}}` + "\n"
+	for checkpoint := 1; checkpoint <= checkpoints; checkpoint++ {
+		history.WriteString(forkCheckpoint(checkpoint))
+		if padding > 0 {
+			history.WriteString(ignored)
+		}
+	}
+	return history.String()
 }
 
 func forkCheckpoint(checkpoint int) string {

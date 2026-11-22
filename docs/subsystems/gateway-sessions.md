@@ -1139,7 +1139,10 @@ first, token_count events included, stamped at the fork's time; its
 session_meta names the parent (`forked_from_id`), and a checkpoint the
 parent's rollout holds (its total and last call alike) is the parent's,
 on Usage and Sessions both (`codexRolloutOf`, `codexCheckpointsOf` in
-[`codex_fork.go`](../../internal/sessions/codex_fork.go)). The copies
+[`codex_fork.go`](../../internal/sessions/codex_fork.go)). The parent scan
+uses the first 1024 bytes of each line to select turn and token-count
+records. It gathers long lines only for those records, in either plain
+or packed rollouts, and includes the last line without a newline. The copies
 are the head of the fork only: its first turn the parent never had (a
 `turn_id` of its own) ends them, so a call of the fork's own is counted
 even when its numbers are those of one the parent made after the fork.
