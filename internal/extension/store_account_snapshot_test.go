@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -151,6 +154,153 @@ func TestStoreLargeAccountSnapshotDoesNotConfirmDurability(t *testing.T) {
 	}
 	if confirmations != 2 || store.accountSync[store.accountSnapshotIndex(scope.Plugin)] != nil {
 		t.Fatalf("large account view recorded durability instead of confirming each time: %d confirmations", confirmations)
+	}
+}
+
+func TestStoreLargeAccountSnapshotReleasesDisplacedConfirmation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory durability does not use descriptors")
+	}
+	ctx := t.Context()
+	manager := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	store := manager.Store()
+	writer := NewStore(manager.Namespace())
+	scope := storeTestScope()
+	scope.Operation, scope.Attempt = "", 0
+	colliding := scope
+	slot := store.accountSnapshotIndex(scope.Plugin)
+	for index := 0; ; index++ {
+		colliding.Plugin = fmt.Sprintf("test-confirmation-%d", index)
+		if store.accountSnapshotIndex(colliding.Plugin) == slot {
+			break
+		}
+	}
+	storeTestAccount(t, writer, scope)
+	storeTestAccount(t, writer, colliding)
+	if _, err := store.UsageStampContext(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	displaced := store.accountSync[slot]
+	if displaced == nil {
+		t.Fatal("small publication did not pin its file and directory")
+	}
+
+	requireOldPin := func() {
+		t.Helper()
+		if store.accountSync[slot] != displaced {
+			t.Fatal("unsuccessful read removed the confirmed pin")
+		}
+		for _, file := range []*os.File{displaced.file, displaced.directory} {
+			if _, err := file.Stat(); err != nil {
+				t.Fatalf("unsuccessful read closed a descriptor: %v", err)
+			}
+		}
+	}
+	writeAccountSnapshotFixture(t, writer, scope.Plugin, []byte(`{}`))
+	_, err := store.UsageStampContext(ctx, scope)
+	storeTestError(t, err, "store_unreadable")
+	requireOldPin()
+
+	writeAccountSnapshotFixture(t, writer, scope.Plugin, accountSnapshotFixture(t, scope, 1, storeSnapshotLimit+1))
+	if _, err := writer.InvalidateUsage(scope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AcknowledgeUsage(scope, 1); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("fixture directory sync failed")
+	if stamp, err := store.usageStampContext(ctx, scope, func(*os.Root) error { return syncErr }); !errors.Is(err, syncErr) || stamp != (UsageStamp{}) {
+		t.Fatalf("unconfirmed usage returned %+v, %v", stamp, err)
+	}
+	requireOldPin()
+	canceled, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if stamp, err := store.usageStampContext(canceled, scope, func(root *os.Root) error {
+		cancel()
+		return storeSync(root)
+	}); !errors.Is(err, context.Canceled) || stamp != (UsageStamp{}) {
+		t.Fatalf("canceled usage returned %+v, %v", stamp, err)
+	}
+	requireOldPin()
+
+	want := UsageStamp{Scope: scope, Revision: 1}
+	if stamp, err := store.UsageStampContext(ctx, scope); err != nil || stamp != want {
+		t.Fatalf("large publication returned %+v, %v, want %+v", stamp, err, want)
+	}
+	if store.accountSync[slot] != nil {
+		t.Error("large publication retained a small confirmation pin")
+	}
+	for _, file := range []*os.File{displaced.file, displaced.directory} {
+		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+			t.Errorf("large publication retained a displaced descriptor: %v", err)
+		}
+	}
+
+	if _, err := store.UsageStampContext(ctx, colliding); err != nil {
+		t.Fatal(err)
+	}
+	other := store.accountSync[slot]
+	if other == nil || other.namespace != colliding.Plugin {
+		t.Fatal("colliding namespace did not pin its own publication")
+	}
+	confirmations := 0
+	for range 2 {
+		if stamp, err := store.usageStampContext(ctx, scope, func(root *os.Root) error {
+			confirmations++
+			return storeSync(root)
+		}); err != nil || stamp != want {
+			t.Fatalf("repeated large publication returned %+v, %v", stamp, err)
+		}
+	}
+	if confirmations != 2 || store.accountSync[slot] != other {
+		t.Fatalf("got %d syncs or a displaced confirmation from another namespace", confirmations)
+	}
+}
+
+func TestStoreLargeAccountSnapshotKeepsReplacementRootConfirmation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory durability does not use descriptors")
+	}
+	ctx := t.Context()
+	manager := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = manager.Close(context.Background()) })
+	store := manager.Store()
+	writer := NewStore(manager.Namespace())
+	scope := storeTestScope()
+	path := writeAccountSnapshotFixture(t, writer, scope.Plugin, accountSnapshotFixture(t, scope, 1, storeSnapshotLimit+1))
+	directory := filepath.Dir(path)
+	displaced, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer displaced.Close()
+	snapshot, err := storeLoadAccountSnapshot(displaced, scope.Plugin, store)
+	if err != nil || snapshot == nil {
+		t.Fatalf("load prior rooted publication: %v", err)
+	}
+	if err := os.Rename(directory, directory+".displaced"); err != nil {
+		t.Fatal(err)
+	}
+	storeTestAccount(t, writer, scope)
+	if _, err := store.UsageStampContext(ctx, scope); err != nil {
+		t.Fatal(err)
+	}
+	slot := store.accountSnapshotIndex(scope.Plugin)
+	current := store.accountSync[slot]
+	if current == nil {
+		t.Fatal("replacement root did not pin its small publication")
+	}
+	if err := store.confirmAccountSnapshot(ctx, displaced, snapshot, storeSync); err != nil {
+		t.Fatalf("confirm a previously rooted publication: %v", err)
+	}
+	if store.accountSync[slot] != current {
+		t.Fatal("previously rooted read removed the replacement root's pin")
+	}
+	if _, err := store.usageStampContext(ctx, scope, func(*os.Root) error {
+		return errors.New("replacement root was already confirmed")
+	}); err != nil {
+		t.Fatalf("replacement root lost its durability proof: %v", err)
 	}
 }
 

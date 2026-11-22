@@ -118,8 +118,11 @@ func (s *Store) confirmAccountSnapshot(ctx context.Context, root *os.Root, snaps
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if runtime.GOOS == "windows" || snapshot.file.Size() > storeSnapshotLimit {
+	if runtime.GOOS == "windows" {
 		return confirmAccountPublication(ctx, root, snapshot, confirm)
+	}
+	if snapshot.file.Size() > storeSnapshotLimit {
+		return s.confirmLargeAccountSnapshot(ctx, root, snapshot, confirm)
 	}
 	directory, err := root.Stat(".")
 	if err != nil || !directory.IsDir() {
@@ -152,6 +155,33 @@ func (s *Store) confirmAccountSnapshot(ctx context.Context, root *os.Root, snaps
 	s.accountSync[slot].close()
 	s.accountSync[slot] = pin
 	s.accountSyncMu.Unlock()
+	return nil
+}
+
+func (s *Store) confirmLargeAccountSnapshot(ctx context.Context, root *os.Root, snapshot *storeReadSnapshot[storeAccounts], confirm func(*os.Root) error) error {
+	slot := s.accountSnapshotIndex(snapshot.namespace)
+	s.accountSyncMu.Lock()
+	previous := s.accountSync[slot]
+	s.accountSyncMu.Unlock()
+	if err := confirmAccountPublication(ctx, root, snapshot, confirm); err != nil {
+		return err
+	}
+	if previous == nil || previous.namespace != snapshot.namespace {
+		return nil
+	}
+	directory, err := root.Stat(".")
+	if err != nil || !os.SameFile(previous.directoryInfo, directory) {
+		return nil
+	}
+	s.accountSyncMu.Lock()
+	defer s.accountSyncMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.accountSync[slot] == previous {
+		s.accountSync[slot] = nil
+		previous.close()
+	}
 	return nil
 }
 

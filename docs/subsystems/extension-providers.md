@@ -40,7 +40,8 @@ operation still checks its selected generation at admission.
 Stream scope checks read and hash the current account file before reusing a
 validated decode. Each Store can retain one additional decoded account file
 above 64 KiB and through 128 KiB. Larger files are decoded on each read.
-Durability confirmation keeps its existing 64 KiB descriptor pin limit.
+Durability confirmation pins descriptors only through 64 KiB. Successfully
+confirming a larger replacement releases the previous pin for that directory.
 Core remembers selection, order and on/off state in
 its existing account metadata, without copying credentials there. Account
 discovery off excludes authenticated extensions before their store is read.
