@@ -2,9 +2,11 @@ package extension
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -38,36 +40,34 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 		selected[scope.Plugin][scope] = true
 	}
 	var result UsageSnapshot
-	err := m.catalog.withView(ctx, func(view catalogView) error {
-		return m.store.withReadPrivateContext(ctx, func(private *os.Root) error {
-			snapshot := UsageSnapshot{
-				Modules:  make(map[string]UsageModuleStamp, len(selected)),
-				Accounts: make(map[sdk.Scope]UsageStamp, len(scopes)),
-			}
-			err := readStoreNamespace(ctx, private, savedSignInsDir, func(root *os.Root) error {
-				var err error
-				snapshot.Owners, err = m.store.readSubscriptionOwners(root)
-				return err
-			})
-			if err != nil {
-				return err
-			}
-			for module, accounts := range selected {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				entry, found := view.lookup(module)
-				if !found || !activeRoot(entry) {
-					continue
-				}
-				entry = view.enabledEntry(entry)
-				if activeRoot(entry) {
-					m.store.readUsageModule(ctx, private, entry, accounts, &snapshot)
-				}
-			}
-			result = snapshot
-			return ctx.Err()
+	err := m.withUsageSnapshotView(ctx, func(ctx context.Context, view catalogView, private *os.Root) error {
+		snapshot := UsageSnapshot{
+			Modules:  make(map[string]UsageModuleStamp, len(selected)),
+			Accounts: make(map[sdk.Scope]UsageStamp, len(scopes)),
+		}
+		err := readStoreNamespace(ctx, private, savedSignInsDir, func(root *os.Root) error {
+			var err error
+			snapshot.Owners, err = m.store.readSubscriptionOwners(root)
+			return err
 		})
+		if err != nil {
+			return err
+		}
+		for module, accounts := range selected {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entry, found := view.lookup(module)
+			if !found || !activeRoot(entry) {
+				continue
+			}
+			entry = view.enabledEntry(entry)
+			if activeRoot(entry) {
+				m.store.readUsageModule(ctx, private, entry, accounts, &snapshot)
+			}
+		}
+		result = snapshot
+		return ctx.Err()
 	})
 	if err != nil {
 		return UsageSnapshot{}, err
@@ -76,6 +76,41 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 		return UsageSnapshot{}, ErrActionChanged
 	}
 	return result, nil
+}
+
+func (m *Manager) withUsageSnapshotView(ctx context.Context, read func(context.Context, catalogView, *os.Root) error) error {
+	attempt := func(lockCtx context.Context) error {
+		return m.catalog.withLockedViewContext(ctx, lockCtx, func(view catalogView) error {
+			if err := lockCtx.Err(); err != nil {
+				return err
+			}
+			if err := m.store.withReadPrivate(ctx, false, func(private *os.Root) error {
+				return read(ctx, view, private)
+			}); err != nil {
+				return err
+			}
+			return ctx.Err()
+		})
+	}
+	err := attempt(ctx)
+	if !errors.Is(err, errStoreReadBusy) {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, filelock.Wait)
+	defer cancel()
+	for errors.Is(err, errStoreReadBusy) {
+		err = m.store.withReadPrivateContext(waitCtx, func(*os.Root) error { return nil })
+		if err == nil {
+			err = attempt(waitCtx)
+		}
+	}
+	if waitCtx.Err() != nil && errors.Is(err, context.DeadlineExceeded) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return storeError("store_locked", "Extension store lock is unavailable.")
+	}
+	return err
 }
 
 func (s *Store) readUsageModule(ctx context.Context, private *os.Root, entry Installed, selected map[sdk.Scope]bool, out *UsageSnapshot) {

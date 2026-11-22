@@ -45,6 +45,8 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 		return sdk.CatalogReadResult{}, err
 	}
 	result := sdk.CatalogReadResult{ReadAt: now.UnixMilli(), Accounts: []sdk.CatalogAccountProjection{}}
+	var quotaCards []SubscriptionQuota
+	var quotaRows []int
 	selected := access.Scope == "selected"
 	var selectedID string
 	if selected {
@@ -75,15 +77,20 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 				}
 				projection := projectedCatalogAccount(scope.Plugin, configured.ID, "account", account.Account.User)
 				projection.Models = projectedCatalogAccountModels(ctx, configured, account.Account, byProvider[configured.ID])
+				if len(projection.Models) == 0 {
+					continue
+				}
 				for _, card := range cards {
 					if card.Provider == configured.ID && strings.EqualFold(card.User, account.Account.User) {
-						projection.Quota = projectedCatalogQuota(configured, currentExtensionQuotaContext(ctx, card), projection.Models)
+						projection.Quota = projectedCatalogQuota(configured, card, projection.Models)
+						if projection.Quota.Known && card.extensionUsage != nil {
+							quotaCards = append(quotaCards, card)
+							quotaRows = append(quotaRows, len(result.Accounts))
+						}
 						break
 					}
 				}
-				if len(projection.Models) > 0 {
-					result.Accounts = append(result.Accounts, projection)
-				}
+				result.Accounts = append(result.Accounts, projection)
 			}
 			continue
 		}
@@ -109,6 +116,15 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 			projection.Quota = projectedCatalogKeyQuota(configured.WithKey(key), projection.Models)
 			if len(projection.Models) > 0 {
 				result.Accounts = append(result.Accounts, projection)
+			}
+		}
+	}
+	if len(quotaCards) != 0 {
+		checked := currentExtensionQuotas(ctx, quotaCards)
+		discoveryErr := requireExtensionAccountDiscovery(ctx)
+		for index, card := range checked {
+			if discoveryErr != nil || card.Error != "" || len(card.Windows) == 0 {
+				result.Accounts[quotaRows[index]].Quota = sdk.CatalogQuotaProjection{}
 			}
 		}
 	}

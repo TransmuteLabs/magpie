@@ -17,6 +17,7 @@ const (
 )
 
 var errAccountListBudget = errors.New("extension account list exceeds its budget")
+var errStoreReadBusy = errors.New("extension store reader would wait for a writer")
 
 type storeReadSnapshot[T any] struct {
 	namespace string
@@ -201,6 +202,10 @@ func (s *Store) withReadStoreContext(ctx context.Context, name string, read func
 }
 
 func (s *Store) withReadPrivateContext(ctx context.Context, read func(*os.Root) error) error {
+	return s.withReadPrivate(ctx, true, read)
+}
+
+func (s *Store) withReadPrivate(ctx context.Context, wait bool, read func(*os.Root) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -239,8 +244,18 @@ func (s *Store) withReadPrivateContext(ctx context.Context, read func(*os.Root) 
 		return err
 	}
 	defer lock.Close()
-	if err := storeWaitLock(ctx, lock, filelock.TryShared); err != nil {
-		return err
+	if wait {
+		if err := storeWaitLock(ctx, lock, filelock.TryShared); err != nil {
+			return err
+		}
+	} else {
+		held, err := filelock.TryShared(lock)
+		if err != nil {
+			return storeError("store_locked", "Extension store lock is unavailable.")
+		}
+		if !held {
+			return errStoreReadBusy
+		}
 	}
 	defer filelock.Unlock(lock)
 	named, namedErr := private.Lstat(".lock")

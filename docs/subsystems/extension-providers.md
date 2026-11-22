@@ -745,10 +745,15 @@ API 1.8 `catalogAccess` declares `selected` or `inventory` authority for
 `catalog.read`. The provider owner projects enabled, listed models, per-account
 restrictions and cached quota windows with model applicability and timestamps.
 The caller receives opaque account references, not account names, keys, endpoints
-or headers. A missing or failed reading is unknown. Reading this projection does
-not refresh vendor data. The host checks package, configuration, cancellation and
-selected account generation before and after the owner read; private services
-retain only explicitly granted root permission.
+or headers. A missing or failed reading is unknown. After selecting all models
+and accounts, the provider owner checks the cached SDK readings together against
+one current snapshot per manager, then checks account discovery again. When a
+Store writer holds the lock, the snapshot releases the catalog, waits for the
+Store and retries against the current catalog within the caller's deadline.
+A changed usage revision clears the affected account's quota. This projection does
+not refresh vendor data. The host checks package, configuration, cancellation
+and selected account generation before and after the owner read; private
+services retain only explicitly granted root permission.
 
 The separate API 1.8 `ledger-observer` capability and `ledger` descriptor use the
 ordinary `usage.Observer` entry point. Only the serving gateway consumes the

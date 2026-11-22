@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,7 +17,10 @@ import (
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/proc"
+	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"github.com/yetone/magpie/pkg/protocolext"
 )
 
 func TestExtensionCatalogProjectionUsesOrdinaryKeyModelAndVisibilityPolicy(t *testing.T) {
@@ -273,6 +277,179 @@ func TestExtensionCatalogProjectionPreservesQuotaApplicabilityAndUnknown(t *test
 	if projected := projectedCatalogQuota(Provider{}, SubscriptionQuota{Error: "private vendor failure",
 		Windows: []QuotaWindow{{Name: "daily", Used: 0}}}, models); projected.Known || len(projected.Windows) != 0 {
 		t.Fatal("a failed quota read became an empty allowance", projected)
+	}
+}
+
+type catalogProjectionQuotaHost struct {
+	*extensionhost.Manager
+	lateModule string
+	onLate     func()
+	calls      atomic.Int32
+}
+
+func (host *catalogProjectionQuotaHost) ActiveModuleConfig(ctx context.Context, id string) (extensionhost.Installed, sdk.ConfigSnapshot, error) {
+	entry, config, err := host.Manager.ActiveModuleConfig(ctx, id)
+	if err == nil && id == host.lateModule && host.onLate != nil {
+		host.onLate()
+	}
+	return entry, config, err
+}
+
+func (host *catalogProjectionQuotaHost) Call(context.Context, string, string, sdk.Scope, any, func(extensionhost.Event) error) (json.RawMessage, error) {
+	host.calls.Add(1)
+	return nil, errors.New("catalog projection must use cached readings")
+}
+
+func TestExtensionCatalogProjectionBatchesCurrentQuotaProofs(t *testing.T) {
+	providerFileHome(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	const module, lateModule, vendor, lateVendor = "fixture.catalog-usage", "fixture.catalog-late", "vendor", "late-vendor"
+	manager := extensionhost.NewManager(filepath.Dir(extensionhost.CatalogPath()))
+	t.Cleanup(func() { closeDiscoveryCatalogManager(t, manager) })
+	previous := providerExtensionHost
+	providerExtensionHost = func() extensionProviderHost { return manager }
+	t.Cleanup(func() {
+		providerExtensionHost = previous
+		Changed()
+	})
+	foreign := extensionhost.NewCatalog(manager.Namespace())
+	install := func(module, vendor string, users ...string) {
+		t.Helper()
+		source := t.TempDir()
+		manifest := sdk.Manifest{
+			Schema: sdk.ManifestSchema, ID: module, Version: "1.0.0", Runtime: "exec", Entry: "worker",
+			Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 8},
+				Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.AccountAuth, sdk.UsageReporter}},
+			Providers: []sdk.ProviderDescriptor{{ID: vendor, Name: "Fixture", Protocols: []protocolext.Protocol{protocolext.Messages},
+				Models: []sdk.Model{{ID: "m1", Name: "Fixture model"}}}},
+		}
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, manifest.Entry), []byte("fixture, never executed"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := foreign.Install(t.Context(), source, func(ctx context.Context, _ extensionhost.Installed) error {
+			return ctx.Err()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, user := range users {
+			if _, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: module, Provider: vendor, ID: user,
+				Auth: json.RawMessage(`{"token":"synthetic"}`), ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	install(module, vendor, "alice", "bob")
+	install(lateModule, lateVendor, "late")
+	providerID, lateID := ExtensionProviderID(module, vendor), ExtensionProviderID(lateModule, lateVendor)
+	if err := SetOrder([]string{providerID, lateID}); err != nil {
+		t.Fatal(err)
+	}
+
+	observed := time.Now().Add(-time.Minute)
+	readings := map[string]SubscriptionQuota{}
+	providers, err := ExtensionProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, selected := range providers {
+		if selected.ID != providerID {
+			continue
+		}
+		user := selected.Account.User
+		_, proof, err := extensionUsageRequest(t.Context(), selected.Account.extension)
+		if err != nil || proof == nil {
+			t.Fatalf("warm usage proof for %s: %v", user, err)
+		}
+		used := map[string]float64{"alice": 20, "bob": 40}[user]
+		readings[user] = SubscriptionQuota{Provider: providerID, User: user, ReadAt: &observed,
+			Windows: []QuotaWindow{{Name: "Plan", Used: used}}, extensionUsage: proof}
+	}
+	alice, bob := readings["alice"], readings["bob"]
+	if alice.extensionUsage == nil || bob.extensionUsage == nil {
+		t.Fatal("fixture did not discover both quota accounts")
+	}
+	warmSubscriptionUsageForTest(t, alice, bob)
+
+	host := &catalogProjectionQuotaHost{Manager: manager, lateModule: lateModule}
+	providerExtensionHost = func() extensionProviderHost { return host }
+	Changed()
+	held.Lock()
+	oldHeldFor := heldFor
+	heldFor = time.Hour
+	held.Unlock()
+	t.Cleanup(func() {
+		held.Lock()
+		heldFor = oldHeldFor
+		held.Unlock()
+	})
+	defer Hold()()
+	const reader = "catalog-reader"
+	project := func() sdk.CatalogReadResult {
+		t.Helper()
+		result, err := extensionCatalogProjection(t.Context(), sdk.Scope{Plugin: reader}, sdk.CatalogAccessDescriptor{Scope: "inventory"})
+		if err != nil || len(result.Accounts) != 3 || result.Accounts[2].Provider != lateID {
+			t.Fatalf("expected two SDK accounts followed by the later selection: %+v, %v", result, err)
+		}
+		return result
+	}
+	before := project()
+	row := func(result sdk.CatalogReadResult, user string) sdk.CatalogAccountProjection {
+		t.Helper()
+		ref := projectedCatalogAccount(reader, providerID, "account", user).Ref
+		for _, account := range result.Accounts[:2] {
+			if account.Ref == ref {
+				return account
+			}
+		}
+		t.Fatalf("catalog lost the %s account", user)
+		return sdk.CatalogAccountProjection{}
+	}
+	for _, quota := range []SubscriptionQuota{alice, bob} {
+		value := row(before, quota.User).Quota
+		if !value.Known || value.AsOf != observed.UnixMilli() || len(value.Windows) != 1 ||
+			value.Windows[0].Used == nil || *value.Windows[0].Used != quota.Windows[0].Used {
+			t.Fatalf("fixture did not project warm quota for %s: %+v", quota.User, value)
+		}
+	}
+	rawScope, err := json.Marshal(bob.extensionUsage.stamp.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lateChecks := 0
+	host.onLate = func() {
+		lateChecks++
+		if lateChecks != 1 {
+			t.Fatal("the held catalog repeated the later model selection")
+		}
+		ctx := testenv.DeadlineContext(t, 15*time.Second)
+		peer := proc.CommandContext(ctx, os.Args[0], "-test.run=^TestExtensionUsageChild$", "-test.count=1")
+		peer.Env = append(os.Environ(), "SDK_USAGE_CHILD_ROOT="+manager.Namespace(), "SDK_USAGE_CHILD_SCOPE="+string(rawScope))
+		if output, err := peer.CombinedOutput(); err != nil {
+			t.Fatalf("invalidate Bob from another process: %v\n%s", err, output)
+		}
+		stamp, err := manager.Store().UsageStampContext(ctx, bob.extensionUsage.stamp.Scope)
+		if err != nil || !stamp.Dirty || stamp.Revision == bob.extensionUsage.stamp.Revision {
+			t.Fatalf("peer failed to commit Bob's new usage revision: %+v, %v", stamp, err)
+		}
+	}
+	after := project()
+	if lateChecks != 1 || host.calls.Load() != 0 {
+		t.Fatalf("late model selections = %d, worker calls = %d", lateChecks, host.calls.Load())
+	}
+	if got, want := row(after, alice.User), row(before, alice.User); !reflect.DeepEqual(got, want) {
+		t.Fatalf("peer invalidation changed the unaffected sibling: got %+v, want %+v", got, want)
+	}
+	want := row(before, bob.User)
+	want.Quota = sdk.CatalogQuotaProjection{}
+	if got := row(after, bob.User); !reflect.DeepEqual(got, want) {
+		t.Fatalf("peer invalidation must clear only Bob's quota: got %+v, want %+v", got, want)
 	}
 }
 

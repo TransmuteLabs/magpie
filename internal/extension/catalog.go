@@ -113,6 +113,10 @@ func (catalog *Catalog) withView(ctx context.Context, read func(catalogView) err
 }
 
 func (catalog *Catalog) withLockedView(ctx context.Context, use func(catalogView) error) error {
+	return catalog.withLockedViewContext(ctx, ctx, use)
+}
+
+func (catalog *Catalog) withLockedViewContext(ctx, lockCtx context.Context, use func(catalogView) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -124,12 +128,12 @@ func (catalog *Catalog) withLockedView(ctx context.Context, use func(catalogView
 		return err
 	}
 	defer root.Close()
-	unlock, err := catalogReadLock(ctx, root)
+	unlock, err := catalogReadLock(lockCtx, root)
 	if errors.Is(err, os.ErrNotExist) {
 		if _, statErr := root.Lstat("catalog.json"); errors.Is(statErr, os.ErrNotExist) {
 			return use(catalogView{validatedCatalog: &emptyCatalog})
 		}
-		unlock, err = catalogLock(ctx, root)
+		unlock, err = catalogLock(lockCtx, root)
 	}
 	if err != nil {
 		return err
