@@ -958,6 +958,10 @@ func storeReadBytes(root *os.Root, name string, limit int64) ([]byte, bool, erro
 }
 
 func storeReadFile(root *os.Root, name string, limit int64) ([]byte, os.FileInfo, error) {
+	return storeReadFileWithBuffer(root, name, limit, nil)
+}
+
+func storeReadFileWithBuffer(root *os.Root, name string, limit int64, buffer func(int64) []byte) ([]byte, os.FileInfo, error) {
 	if root == nil {
 		return nil, nil, nil
 	}
@@ -969,7 +973,13 @@ func storeReadFile(root *os.Root, name string, limit int64) ([]byte, os.FileInfo
 		return nil, nil, err
 	}
 	defer file.Close()
-	data := make([]byte, info.Size()+1)
+	var data []byte
+	if buffer != nil {
+		data = buffer(info.Size())
+	}
+	if data == nil {
+		data = make([]byte, info.Size()+1)
+	}
 	n, err := io.ReadFull(file, data)
 	if int64(n) != info.Size() || err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, nil, storeUnreadable()

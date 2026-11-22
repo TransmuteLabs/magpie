@@ -69,6 +69,25 @@ func BenchmarkStoreAccountRead(b *testing.B) {
 						}
 					}
 				})
+				b.Run("CheckGenerationParallel", func(b *testing.B) {
+					check := func() error {
+						return store.CheckAccountGenerationContext(b.Context(), scope)
+					}
+					if err := check(); err != nil {
+						b.Fatal(err)
+					}
+					b.ReportAllocs()
+					b.SetBytes(int64(len(data)))
+					b.SetParallelism(2)
+					b.RunParallel(func(iteration *testing.PB) {
+						for iteration.Next() {
+							if err := check(); err != nil {
+								b.Error(err)
+								return
+							}
+						}
+					})
+				})
 			})
 		}
 	}

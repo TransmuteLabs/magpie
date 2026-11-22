@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -87,9 +88,19 @@ func TestProviderStreamStoreReads(t *testing.T) {
 				}
 				call(1)
 				call(2)
-				short := countProviderStreamReads(t, files, func() { call(0) })
-				long := countProviderStreamReads(t, files, func() { call(500) })
-				t.Logf("accounts_bytes=%d files=[accounts,catalog,config,owners] chunks_0=%v chunks_500=%v", fileBytes, short, long)
+				measuredCall := func(chunks int) ([]int, uint64) {
+					var before, after runtime.MemStats
+					reads := countProviderStreamReads(t, files, func() {
+						runtime.ReadMemStats(&before)
+						call(chunks)
+						runtime.ReadMemStats(&after)
+					})
+					return reads, after.TotalAlloc - before.TotalAlloc
+				}
+				short, shortAlloc := measuredCall(0)
+				long, longAlloc := measuredCall(500)
+				t.Logf("accounts_bytes=%d files=[accounts,catalog,config,owners] chunks_0=%v/%d B chunks_500=%v/%d B",
+					fileBytes, short, shortAlloc, long, longAlloc)
 				if short[0] > 9 {
 					t.Fatalf("execute preflight exceeded nine account reads: %v", short)
 				}
@@ -98,6 +109,10 @@ func TestProviderStreamStoreReads(t *testing.T) {
 				}
 				if !slices.Equal(short[1:], long[1:]) {
 					t.Fatalf("catalog, config or owner reads grew with events: %v to %v", short, long)
+				}
+				if size == "oversize" && longAlloc > shortAlloc+500*uint64(fileBytes)/2 {
+					t.Fatalf("500 stream events allocated %d B beyond the empty stream with a %d B account file",
+						longAlloc-shortAlloc, fileBytes)
 				}
 				journal, err := manager.Store().Operation(scope.Plugin, fmt.Sprintf("measure-%d-%s-500", accounts, size))
 				if err != nil || journal.State != "completed" {
@@ -227,14 +242,10 @@ func TestProviderStreamStopsAfterPeerAccountReplacement(t *testing.T) {
 	}
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "0")
 	manager, entry := fixtureManagerAt(t, 9)
-	account, err := manager.Store().SaveAccount(Account{
-		Plugin: entry.Manifest.ID, Provider: "provider", ID: "selected", Auth: json.RawMessage(`{"streamFixture":true}`),
-	}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := sdk.Scope{Plugin: account.Plugin, Provider: account.Provider, Account: account.ID, Generation: account.Generation,
+	scope := sdk.Scope{Plugin: entry.Manifest.ID, Provider: "provider", Account: "selected", Generation: 1,
 		Operation: "peer-replaced-stream", Attempt: 1}
+	path := filepath.Join(manager.Namespace(), "private", scope.Plugin, "accounts.json")
+	seedProviderStreamAccounts(t, manager, scope, 1, true, path)
 	ctx, client := providerStreamSelection(t, t.Context(), manager, scope.Plugin)
 	encoded, err := json.Marshal(scope)
 	if err != nil {

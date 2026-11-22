@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,6 +89,31 @@ func TestStoreLargeAccountSnapshotChecksCurrentPublication(t *testing.T) {
 	check()
 	if next := loadedAccountSnapshot(t, store, scope.Plugin); next == repaired {
 		t.Fatal("missing publication did not evict its snapshot")
+	}
+}
+
+func TestStoreLargeAccountSnapshotConcurrentReaders(t *testing.T) {
+	for index := range 8 {
+		t.Run(fmt.Sprintf("store-%d", index), func(t *testing.T) {
+			t.Parallel()
+			store := NewStore(t.TempDir())
+			scope := storeTestScope()
+			scope.Generation += uint64(index)
+			size := storeSnapshotLimit + 1 + index*1024
+			data := accountSnapshotFixture(t, scope, 1, size)
+			want, err := storeDecodeAccounts(data, scope.Plugin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeAccountSnapshotFixture(t, store, scope.Plugin, data)
+			for range 16 {
+				account, err := store.GetAccountContext(t.Context(), scope.Plugin, scope.Provider, scope.Account)
+				if err != nil || account.Generation != scope.Generation || !bytes.Equal(account.Auth, want.Accounts[0].Auth) {
+					t.Fatalf("incorrect account across concurrent reads: generation=%d, auth bytes=%d, error=%v",
+						account.Generation, len(account.Auth), err)
+				}
+			}
+		})
 	}
 }
 

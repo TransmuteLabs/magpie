@@ -40,6 +40,9 @@ operation still checks its selected generation at admission.
 Stream scope checks read and hash the current account file before reusing a
 validated decode. Each Store can retain one additional decoded account file
 above 64 KiB and through 128 KiB. Larger files are decoded on each read.
+Reads in the additional size range can share one cleared scratch buffer
+across Stores. Concurrent readers can allocate their own buffer while it is
+in use.
 Durability confirmation pins descriptors only through 64 KiB. Successfully
 confirming a larger replacement releases the previous pin for that directory.
 Core remembers selection, order and on/off state in

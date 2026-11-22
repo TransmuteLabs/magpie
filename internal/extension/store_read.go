@@ -18,6 +18,7 @@ const (
 
 var errAccountListBudget = errors.New("extension account list exceeds its budget")
 var errStoreReadBusy = errors.New("extension store reader would wait for a writer")
+var spareLargeAccountReadBuffer = make(chan []byte, 1)
 
 type storeReadSnapshot[T any] struct {
 	namespace string
@@ -65,7 +66,31 @@ func storeLoadSnapshot[T any](root *os.Root, name, namespace string, snapshot *a
 }
 
 func storeLoadSnapshotView[T any](root *os.Root, name, namespace string, snapshot, large *atomic.Pointer[storeReadSnapshot[T]], decode func([]byte) (T, error)) (*storeReadSnapshot[T], error) {
-	data, file, err := storeReadFile(root, name, storeFileLimit)
+	var scratch []byte
+	data, file, err := storeReadFileWithBuffer(root, name, storeFileLimit, func(fileSize int64) []byte {
+		if large == nil || fileSize <= storeSnapshotLimit || fileSize > storeLargeAccountSnapshotLimit {
+			return nil
+		}
+		size := int(fileSize) + 1
+		select {
+		case scratch = <-spareLargeAccountReadBuffer:
+		default:
+		}
+		if cap(scratch) < size {
+			scratch = make([]byte, size)
+		}
+		scratch = scratch[:size]
+		return scratch
+	})
+	if scratch != nil {
+		defer func() {
+			clear(scratch)
+			select {
+			case spareLargeAccountReadBuffer <- scratch:
+			default:
+			}
+		}()
+	}
 	limit := storeSnapshotLimit
 	if len(data) > limit && large != nil {
 		snapshot, large = large, snapshot
