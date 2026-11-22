@@ -950,7 +950,7 @@ func currentCommunityAllowanceBindings(ctx context.Context, bindings map[string]
 	if len(bindings) == 0 {
 		return bindings
 	}
-	current := subscriptionQuotaCheckWithOwners(ctx, owners)
+	current := subscriptionQuotaCheckWithOwners(ctx, owners, len(bindings))
 	var valid map[string]communityAllowanceBinding
 	for user, binding := range bindings {
 		if current(SubscriptionQuota{Provider: binding.provider, User: user, pluginUsage: &binding.selected}) {

@@ -138,10 +138,10 @@ func localSubscription(quota SubscriptionQuota) bool {
 }
 
 func subscriptionQuotaCheck(ctx context.Context, quotas ...SubscriptionQuota) func(SubscriptionQuota) bool {
-	return subscriptionQuotaCheckWithOwners(ctx, nil, quotas...)
+	return subscriptionQuotaCheckWithOwners(ctx, nil, 0, quotas...)
 }
 
-func subscriptionQuotaCheckWithOwners(ctx context.Context, selected *extensionSubscriptionOwners, quotas ...SubscriptionQuota) func(SubscriptionQuota) bool {
+func subscriptionQuotaCheckWithOwners(ctx context.Context, selected *extensionSubscriptionOwners, communityCount int, quotas ...SubscriptionQuota) func(SubscriptionQuota) bool {
 	discovery := sync.OnceValues(func() (bool, error) { return currentUsageDiscovery(ctx) })
 	snapshot := sync.OnceValue(func() quotaUsageSnapshots {
 		if off, err := discovery(); err != nil || off {
@@ -178,8 +178,24 @@ func subscriptionQuotaCheckWithOwners(ctx context.Context, selected *extensionSu
 		if err != nil {
 			return nil
 		}
+		slots := indexCommunityLoginSlots(logins, communityCount, quotas)
+		if slots == nil {
+			return func(selected *pluginUsageSelection) bool {
+				return selected.currentAuth(epochs) && selected.loginIndex(logins) >= 0
+			}
+		}
 		return func(selected *pluginUsageSelection) bool {
-			return selected.currentAuth(epochs) && selected.loginIndex(logins) >= 0
+			if !selected.currentAuth(epochs) {
+				return false
+			}
+			index, found := slots[selected.Slot]
+			if !found {
+				return false
+			}
+			if index >= 0 {
+				return selected.loginIndex(logins[index:index+1]) == 0
+			}
+			return selected.loginIndex(logins) >= 0
 		}
 	})
 	return func(quota SubscriptionQuota) bool {
@@ -201,6 +217,34 @@ func subscriptionQuotaCheckWithOwners(ctx context.Context, selected *extensionSu
 		}
 		return true
 	}
+}
+
+func indexCommunityLoginSlots(logins []savedLogin, communityCount int, quotas []SubscriptionQuota) map[string]int {
+	const threshold = 32
+	if len(logins) < threshold || communityCount+len(quotas) < threshold {
+		return nil
+	}
+	for _, quota := range quotas {
+		if communityCount >= threshold {
+			break
+		}
+		if quota.pluginUsage != nil && quota.extensionUsage == nil && localSubscription(quota) {
+			communityCount++
+		}
+	}
+	if communityCount < threshold {
+		return nil
+	}
+	slots := make(map[string]int, len(logins))
+	for index := range logins {
+		slot := logins[index].Home
+		if _, duplicate := slots[slot]; duplicate {
+			slots[slot] = -1
+		} else {
+			slots[slot] = index
+		}
+	}
+	return slots
 }
 
 // ValidateSubscriptionQuotas defers local readings the current owner can no
