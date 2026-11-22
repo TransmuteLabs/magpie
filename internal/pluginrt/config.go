@@ -2,6 +2,7 @@ package pluginrt
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
@@ -9,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -98,7 +98,12 @@ var (
 // default layers alone. One that can't be read or doesn't parse is an
 // error, never an empty file.
 func Load() (File, bool, error) {
-	b, err := os.ReadFile(Path())
+	path := Path()
+	body, err := os.ReadFile(path)
+	return parsePluginFile(path, body, err)
+}
+
+func parsePluginFile(path string, body []byte, err error) (File, bool, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return File{}, false, nil
 	}
@@ -106,13 +111,13 @@ func Load() (File, bool, error) {
 		return File{}, true, err
 	}
 	var f File
-	if err := yaml.Unmarshal(b, &f); err != nil {
-		return File{}, true, fmt.Errorf("%s doesn't parse: %w", Path(), err)
+	if err := yaml.Unmarshal(body, &f); err != nil {
+		return File{}, true, fmt.Errorf("%s doesn't parse: %w", path, err)
 	}
 	switch f.Preset {
 	case "", PresetAll, PresetEssentials:
 	default:
-		return File{}, true, fmt.Errorf("%s: no preset %q (essentials or all)", Path(), f.Preset)
+		return File{}, true, fmt.Errorf("%s: no preset %q (essentials or all)", path, f.Preset)
 	}
 	return f, true, nil
 }
@@ -415,9 +420,13 @@ type AppliedState struct {
 }
 
 func refreshRuntime() (*Runtime, error) {
+	f, present, err := Load()
+	return applyPluginFile(f, present, err)
+}
+
+func applyPluginFile(f File, present bool, err error) (*Runtime, error) {
 	ms := Registered()
 	rt := processRuntime(ms)
-	f, present, err := Load()
 	if err != nil && rt.composed != nil {
 		return rt, err
 	}
@@ -439,27 +448,41 @@ func refreshRuntime() (*Runtime, error) {
 // and what a plugin registers with the gateway (an observer) follows
 // without a restart.
 func KeepFresh(ctx context.Context, every func() time.Duration, also ...string) {
-	files := append([]string{Path()}, also...)
-	stamp := func() string {
-		var b strings.Builder
-		for _, p := range files {
-			if fi, err := os.Stat(p); err == nil {
-				fmt.Fprintf(&b, "%d/%d;", fi.ModTime().UnixNano(), fi.Size())
-			} else {
-				b.WriteString("-;")
-			}
-		}
-		return b.String()
+	path := Path()
+	type configStamp struct {
+		digest [sha256.Size]byte
+		status string
 	}
-	last := ""
+	var last configStamp
+	lastFiles := make([]os.FileInfo, len(also))
+	initial := true
 	for {
 		// taken before the look, so a write made during it isn't missed
 		written := filememo.Written()
-		if now := stamp(); now != last {
-			last = now
-			if _, err := Refresh(); err != nil {
-				log.Printf("plugins: %v", err)
+		changed := initial
+		initial = false
+		for index, name := range also {
+			info, _ := os.Stat(name)
+			previous := lastFiles[index]
+			if !sameDependencyFile(info, previous) {
+				changed = true
 			}
+			lastFiles[index] = info
+		}
+		defMu.Lock()
+		body, readErr := os.ReadFile(path)
+		stamp := configStamp{digest: sha256.Sum256(body)}
+		if readErr != nil {
+			stamp.status = readErr.Error()
+		}
+		var refreshErr error
+		if changed || stamp != last {
+			last = stamp
+			_, refreshErr = applyPluginFile(parsePluginFile(path, body, readErr))
+		}
+		defMu.Unlock()
+		if refreshErr != nil {
+			log.Printf("plugins: %v", refreshErr)
 		}
 		// a write of this process's is looked at once made; every only
 		// catches another process's
@@ -470,6 +493,13 @@ func KeepFresh(ctx context.Context, every func() time.Duration, also ...string) 
 		case <-written:
 		}
 	}
+}
+
+func sameDependencyFile(current, previous os.FileInfo) bool {
+	if current == nil || previous == nil {
+		return current == nil && previous == nil
+	}
+	return os.SameFile(current, previous) && current.Size() == previous.Size() && current.ModTime().Equal(previous.ModTime())
 }
 
 // Running is the process's runtime, nil before the first Refresh.

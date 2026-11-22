@@ -35,9 +35,9 @@ func TestWindowAuthStoreReaddsForgottenAccount(t *testing.T) {
 			}
 			reopened := NewStore(store.root)
 			readyAuthStore(t, reopened, fresh)
-			receipt, err := reopened.publishWindowAuth(plugin, fresh.Flow, sdk.AuthResult{
+			receipt, err := reopened.publishWindowAuth(t.Context(), plugin, fresh.Flow, sdk.AuthResult{
 				ID: first.ID, Credentials: json.RawMessage(`{"token":"second"}`),
-			})
+			}, nil)
 			generation := first.Generation + 2
 			if err != nil || receipt.Receipt == nil || receipt.Receipt.Generation != strconv.FormatUint(generation, 10) {
 				t.Fatalf("fresh sign-in could not re-add a forgotten account at generation %d: %v", generation, err)
@@ -45,9 +45,9 @@ func TestWindowAuthStoreReaddsForgottenAccount(t *testing.T) {
 			duplicate := fresh
 			duplicate.Flow, duplicate.Intent = storeHash("duplicate-flow"), storeHash("duplicate-intent")
 			readyAuthStore(t, reopened, duplicate)
-			if _, err := reopened.publishWindowAuth(plugin, duplicate.Flow, sdk.AuthResult{
+			if _, err := reopened.publishWindowAuth(t.Context(), plugin, duplicate.Flow, sdk.AuthResult{
 				ID: first.ID, Credentials: json.RawMessage(`{"token":"replacement"}`),
-			}); err == nil {
+			}, nil); err == nil {
 				t.Fatal("unselected sign-in replaced an active account")
 			}
 			account, err := store.GetAccount(plugin, provider, first.ID)
@@ -109,7 +109,7 @@ func TestWindowAuthStoreForgetFencesEarlierUnselectedSignIns(t *testing.T) {
 		if err != nil || !after.Canceled || after.public().State != "canceled" {
 			t.Errorf("%s sign-in did not lose publication authority: %s, %v", record.Phase, after.public().State, err)
 		}
-		if _, err := store.publishWindowAuth(plugin, record.Flow, sdk.AuthResult{ID: account.ID, Credentials: json.RawMessage(`{}`)}); err == nil {
+		if _, err := store.publishWindowAuth(t.Context(), plugin, record.Flow, sdk.AuthResult{ID: account.ID, Credentials: json.RawMessage(`{}`)}, nil); err == nil {
 			t.Errorf("%s sign-in restored the forgotten account", record.Phase)
 		}
 	}
@@ -118,7 +118,7 @@ func TestWindowAuthStoreForgetFencesEarlierUnselectedSignIns(t *testing.T) {
 		if id == "" {
 			id = account.ID
 		}
-		if _, err := store.publishWindowAuth(plugin, record.Flow, sdk.AuthResult{ID: id, Credentials: json.RawMessage(`{}`)}); err != nil {
+		if _, err := store.publishWindowAuth(t.Context(), plugin, record.Flow, sdk.AuthResult{ID: id, Credentials: json.RawMessage(`{}`)}, nil); err != nil {
 			t.Fatalf("forget blocked an independently scoped sign-in for %s: %v", record.Scope.Provider, err)
 		}
 	}

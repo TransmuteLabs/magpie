@@ -545,7 +545,7 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 
 func (w *managedWorker) matches(entry Installed, config sdk.ConfigSnapshot) bool {
 	return w.entry.Revision == entry.Revision && w.entry.EnableGeneration == entry.EnableGeneration &&
-		w.config.Version == config.Version
+		sameModuleConfig(w.config, config)
 }
 
 func (m *Manager) detachWorkerLocked(id string, worker *managedWorker) {
@@ -791,7 +791,7 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, acti
 			}
 		}
 		if err == nil {
-			err = m.checkActiveGeneration(handshake, worker.entry, worker.config.Version)
+			err = m.checkActiveConfig(handshake, worker.entry, worker.config)
 			if err != nil {
 				_ = closeModuleClient(client)
 				client = nil
@@ -1249,7 +1249,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 				return errors.New("extension accepted an unknown operation")
 			}
 			if method == sdk.MethodToolCall && scope.Account != "" && manifest.Contract.Has(sdk.AccountAuth) {
-				if err := m.fenceSubscriptionRollback(ctx, scope); err != nil {
+				if err := m.fenceSubscriptionRollback(ctx, scope, windowAuthDispatch{}); err != nil {
 					return err
 				}
 			}
@@ -1285,7 +1285,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 	if method == sdk.MethodToolCall && scope.Account != "" && admit == nil {
 		_, recheckQueuedTool = ctx.Value(toolAccountCheckKey{}).(toolAccountCheck)
 	}
-	if method == sdk.MethodProviderExecute && (expected != nil || scope.Account != "") {
+	if method == sdk.MethodProviderExecute && (manifest.Contract.Version.Minor >= 1 || expected != nil || scope.Account != "") {
 		admit = l.providerExecuteAdmission(scope, expected != nil, admit)
 	}
 	if effect && scope.Provider != "" && manifest.Contract.Version.Minor >= 8 && manifest.Contract.Has(sdk.UsageReporter) &&
@@ -1443,9 +1443,17 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 				return nil
 			}
 			if exact {
-				err = m.withActiveGeneration(ctx, l.worker.entry, l.ConfigVersion(), checkSelection)
+				err = m.withActiveConfig(ctx, l.worker.entry, l.worker.config, checkSelection)
 			} else {
 				err = checkSelection()
+				if err == nil && l.worker.entry.Manifest.Contract.Version.Minor >= 1 {
+					current, readErr := m.runtimeModuleConfigContext(ctx, l.worker.entry)
+					if readErr != nil {
+						err = readErr
+					} else if !sameModuleConfig(current, l.worker.config) {
+						err = errors.New("extension configuration changed")
+					}
+				}
 			}
 		}
 		if err != nil {

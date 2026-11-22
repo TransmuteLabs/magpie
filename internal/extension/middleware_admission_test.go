@@ -77,7 +77,7 @@ func TestSDKMiddlewareRevokedWhileWaitingForWorker(t *testing.T) {
 			t.Fatal("hook returned before the worker slot opened", err)
 		default:
 		}
-		if _, err := peer.CompareAndSwapModuleConfig(t.Context(), entry.Manifest.ID, run.config, json.RawMessage(`{"updated":true}`)); err != nil {
+		if _, err := peer.CompareAndSwapModuleConfig(t.Context(), entry.Manifest.ID, run.config.Version, json.RawMessage(`{"updated":true}`)); err != nil {
 			t.Fatal(err)
 		}
 		<-client.regularSlots

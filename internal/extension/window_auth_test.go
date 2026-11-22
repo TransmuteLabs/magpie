@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension/testdata/authfixture"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -156,6 +157,12 @@ func TestWindowAuthOwnerPollProjectionThrottleAndPublication(t *testing.T) {
 			if err != nil || account.Generation != 1 || !bytes.Contains(account.Auth, []byte("PRIVATE-CREDENTIAL")) {
 				t.Fatal("account publication:", err)
 			}
+			replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+			replayed, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			if err != nil || replayed.State != "complete" || replayed.Account == nil || replayed.Account.Generation != "1" ||
+				authWindowTrace(t, trace, "finish") != 1 {
+				t.Fatalf("changed values hid or replayed a durable receipt: %s %v", replayed.State, err)
+			}
 		})
 	}
 }
@@ -262,7 +269,7 @@ func TestWindowAuthOwnerRejectsForeignFramesMethodsAndGrants(t *testing.T) {
 }
 
 func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
-	for _, change := range []string{"off", "config", "cancel", "delete", "caller-disconnect"} {
+	for _, change := range []string{"off", "config", "same CAS configuration", "reordered configuration", "cancel", "delete", "caller-disconnect"} {
 		t.Run(change, func(t *testing.T) {
 			dir := t.TempDir()
 			config := authfixture.Config{Started: filepath.Join(dir, "started"), Release: filepath.Join(dir, "release")}
@@ -307,6 +314,10 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 				if _, err := manager.CompareAndSwapModuleConfig(t.Context(), id, "1", json.RawMessage(`{}`)); err != nil {
 					t.Fatal(err)
 				}
+			case "same CAS configuration":
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+			case "reordered configuration":
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"refreshStarted":"","refreshRelease":""`, `"refreshRelease":"","refreshStarted":""`)
 			case "cancel":
 				if _, err := manager.CoreAuthCancel(ctx, id, revision, "window:page", "signin", view.Flow); err != nil {
 					t.Fatal(err)
@@ -332,7 +343,7 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 			for {
 				record, err := manager.store.windowAuthRecord(id, view.Flow)
 				if err == nil && (record.Phase == "complete" || record.Phase == "uncertain") {
-					if (record.Phase == "complete") != (change == "caller-disconnect") {
+					if (record.Phase == "complete") != (change == "caller-disconnect" || change == "reordered configuration") {
 						t.Fatalf("changed authority published an account: %s -> %s", change, record.Phase)
 					}
 					break
@@ -345,11 +356,312 @@ func TestWindowAuthOwnerRevokesPublicationDuringExchange(t *testing.T) {
 			}
 			accounts, err := manager.Store().Accounts(id, "vendor")
 			expected := 0
-			if change == "caller-disconnect" {
+			if change == "caller-disconnect" || change == "reordered configuration" {
 				expected = 1
 			}
 			if err != nil || len(accounts) != expected {
 				t.Fatalf("wrong credential publication after %s: %d %v", change, len(accounts), err)
+			}
+		})
+	}
+}
+
+func TestWindowAuthFinishRechecksSameCASConfigurationAfterSlotWait(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "trace")
+	manager, id, revision := authWindowFixture(t, false, authfixture.Config{Trace: trace})
+	ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "queued-finish"), 5*time.Second)
+	defer cancel()
+	view, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{Method: "device"})
+	if err != nil || view.State != "waiting" {
+		t.Fatalf("start: %s %v", view.State, err)
+	}
+	authWindowReady(t, manager, id, view)
+	manager.mu.Lock()
+	owner := manager.windowAuthOwners[view.Flow]
+	manager.mu.Unlock()
+	if owner == nil {
+		t.Fatal("waiting flow lost its owner")
+	}
+	client := owner.lease.client
+	slots := client.slots
+	for range cap(slots) {
+		slots <- struct{}{}
+	}
+	release := sync.OnceFunc(func() {
+		for range cap(slots) {
+			<-slots
+		}
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+	}()
+	defer func() {
+		cancel()
+		release()
+		<-done
+	}()
+	for len(client.regularSlots) == 0 {
+		select {
+		case <-done:
+			t.Fatal("finish returned before it could wait for a slot")
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if record, err := manager.store.windowAuthRecord(id, view.Flow); err != nil || record.Phase != "polling" {
+		t.Fatalf("finish did not reach the worker wait: %s %v", record.Phase, err)
+	}
+	replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+	release()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got := authWindowTrace(t, trace, "finish"); got != 0 {
+		t.Errorf("revoked window flow reached the worker %d time(s)", got)
+	}
+	accounts, err := manager.Store().Accounts(id, "vendor")
+	if err != nil || len(accounts) != 0 {
+		t.Fatalf("revoked flow published %d accounts: %v", len(accounts), err)
+	}
+}
+
+func TestTransferredWindowAuthFinishRechecksConfigAfterRollbackFenceWait(t *testing.T) {
+	for _, change := range []string{"same CAS replacement", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "trace")
+			manager, id, revision := authWindowFixture(t, false, authfixture.Config{Trace: trace})
+			ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "transferred-finish"), 10*time.Second)
+			defer cancel()
+			ctx = WithSubscriptionOwnerRevision(ctx, "transfer-revision")
+			owner, _ := SubscriptionOwnerRevision(ctx)
+			if err := withTestSavedSignIns(manager.store, ctx, func(dir *os.Root) error {
+				return storeWrite(dir, subscriptionOwnersFile, []subscriptionRecord{{
+					SubscriptionOwner: SubscriptionOwner{
+						Module: id, Provider: "vendor", PublicID: "legacy-vendor", Revision: owner, Active: true,
+						Accounts: []SubscriptionAccount{{Key: "vendor", ID: "chosen", User: "alice", LoginID: "alice-login"}},
+					},
+					GrantRevision: strings.Repeat("a", 64),
+					Digests:       map[string]string{"vendor": strings.Repeat("b", 64)},
+					Tickets:       []string{"transferred-ticket"},
+					Generations:   []uint64{1},
+				}}, storeFileLimit)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			account, err := manager.Store().SaveAccount(Account{
+				Plugin: id, Provider: "vendor", ID: "chosen", Auth: json.RawMessage(`{"token":"fixture"}`),
+			}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{
+				Method: "device", Account: &sdk.AccountSelection{ID: "chosen", ExpectedGeneration: "1"},
+			})
+			if err != nil || view.State != "waiting" {
+				t.Fatalf("start: %s %v", view.State, err)
+			}
+			authWindowReady(t, manager, id, view)
+			manager.mu.Lock()
+			client := manager.windowAuthOwners[view.Flow].lease.client
+			manager.mu.Unlock()
+			slots := client.slots
+			for range cap(slots) {
+				slots <- struct{}{}
+			}
+			unblockSlots := sync.OnceFunc(func() {
+				for range cap(slots) {
+					<-slots
+				}
+			})
+			lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+			if err != nil {
+				unblockSlots()
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			var result sdk.WindowAuthFlowView
+			var finishErr error
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				result, finishErr = manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			}()
+			unblockStore := sync.OnceFunc(func() { filelock.Unlock(lock) })
+			defer func() {
+				unblockStore()
+				unblockSlots()
+				cancel()
+				<-done
+			}()
+			wait := func(stage string, ready func() bool) {
+				t.Helper()
+				tick := time.NewTicker(time.Millisecond)
+				defer tick.Stop()
+				for !ready() {
+					select {
+					case <-done:
+						t.Fatalf("finish returned before %s: %s %v", stage, result.State, finishErr)
+					case <-ctx.Done():
+						t.Fatalf("wait for %s: %v", stage, ctx.Err())
+					case <-tick.C:
+					}
+				}
+			}
+			wait("worker-slot wait", func() bool { return len(client.regularSlots) != 0 })
+			if held, err := filelock.TryShared(lock); err != nil || !held {
+				t.Fatalf("hold the peer Store reader: %v", err)
+			}
+			unblockSlots()
+			wait("rollback fence's exclusive Store wait", func() bool {
+				if !manager.store.mu.TryLock() {
+					return true
+				}
+				manager.store.mu.Unlock()
+				return false
+			})
+			wantState, wantCalls, wantGeneration := "complete", 1, account.Generation+1
+			if change == "same CAS replacement" {
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+				wantState, wantCalls, wantGeneration = "uncertain", 0, account.Generation
+			}
+			unblockStore()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if calls := authWindowTrace(t, trace, "finish"); calls != wantCalls {
+				t.Errorf("finish worker calls = %d, want %d", calls, wantCalls)
+			}
+			if finishErr != nil || result.State != wantState {
+				t.Fatalf("finish: %s %v, want %s", result.State, finishErr, wantState)
+			}
+			current, err := manager.Store().GetAccount(id, "vendor", "chosen")
+			if err != nil || current.Generation != wantGeneration {
+				t.Fatalf("account generation = %d, want %d: %v", current.Generation, wantGeneration, err)
+			}
+			if change == "unchanged" {
+				replay, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+				if err != nil || replay.State != "complete" || replay.Account == nil || result.Account == nil ||
+					replay.Account.Generation != result.Account.Generation || authWindowTrace(t, trace, "finish") != 1 {
+					t.Fatalf("finish did not replay its completed receipt: %s %v", replay.State, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowAuthFinishRechecksConfigAfterPublicationWait(t *testing.T) {
+	for _, change := range []string{"same CAS replacement", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			dir := t.TempDir()
+			config := authfixture.Config{
+				Trace: filepath.Join(dir, "trace"), Started: filepath.Join(dir, "started"), Release: filepath.Join(dir, "release"),
+			}
+			manager, id, revision := authWindowFixture(t, false, config)
+			original, err := manager.Store().SaveAccount(Account{
+				Plugin: id, Provider: "vendor", ID: "chosen", Auth: json.RawMessage(`{"token":"original"}`),
+			}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "publication-wait"), 8*time.Second)
+			defer cancel()
+			view, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{
+				Method: "device", Account: &sdk.AccountSelection{ID: original.ID, ExpectedGeneration: "1"},
+			})
+			if err != nil || view.State != "waiting" {
+				t.Fatalf("start: %s %v", view.State, err)
+			}
+			authWindowReady(t, manager, id, view)
+			lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			var result sdk.WindowAuthFlowView
+			var finishErr error
+			done := make(chan struct{})
+			unblockStore := sync.OnceFunc(func() { filelock.Unlock(lock) })
+			go func() {
+				defer close(done)
+				result, finishErr = manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			}()
+			defer func() {
+				unblockStore()
+				cancel()
+				<-done
+			}()
+			wait := func(stage string, ready func() bool) {
+				t.Helper()
+				tick := time.NewTicker(time.Millisecond)
+				defer tick.Stop()
+				for !ready() {
+					select {
+					case <-done:
+						t.Fatalf("finish returned before %s: %s %v", stage, result.State, finishErr)
+					case <-ctx.Done():
+						t.Fatalf("wait for %s: %v", stage, ctx.Err())
+					case <-tick.C:
+					}
+				}
+			}
+			wait("worker exchange", func() bool {
+				_, err := os.Stat(config.Started)
+				return err == nil
+			})
+			if held, err := filelock.TryShared(lock); err != nil || !held {
+				t.Fatalf("hold the peer Store reader: %v", err)
+			}
+			if err := os.WriteFile(config.Release, []byte("release"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wait("exclusive publication wait", func() bool {
+				if !manager.store.mu.TryLock() {
+					return true
+				}
+				manager.store.mu.Unlock()
+				return false
+			})
+			if change == "same CAS replacement" {
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+			}
+			unblockStore()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			current, err := manager.Store().GetAccount(id, "vendor", original.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := manager.store.windowAuthRecord(id, view.Flow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls := authWindowTrace(t, config.Trace, "finish"); calls != 1 {
+				t.Fatalf("worker finish calls = %d, want 1", calls)
+			}
+			if change == "same CAS replacement" {
+				if finishErr != nil || result.State != "uncertain" || result.Account != nil || receipt.Phase != "uncertain" || receipt.Receipt != nil ||
+					current.Generation != original.Generation || !bytes.Equal(current.Auth, original.Auth) {
+					t.Fatalf("replacement published a stale result: state=%s phase=%s generation=%d err=%v", result.State, receipt.Phase, current.Generation, finishErr)
+				}
+				return
+			}
+			if finishErr != nil || result.State != "complete" || result.Account == nil || receipt.Receipt == nil || *result.Account != *receipt.Receipt ||
+				current.Generation != original.Generation+1 || string(current.Auth) != `{"token":"PRIVATE-CREDENTIAL"}` {
+				t.Fatalf("unchanged configuration lost its publication: state=%s phase=%s generation=%d err=%v", result.State, receipt.Phase, current.Generation, finishErr)
+			}
+			replay, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			if err != nil || replay.State != "complete" || replay.Account == nil || *replay.Account != *result.Account || authWindowTrace(t, config.Trace, "finish") != 1 {
+				t.Fatalf("finish did not replay its completed receipt: %s %v", replay.State, err)
 			}
 		})
 	}

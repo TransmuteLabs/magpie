@@ -684,9 +684,9 @@ settings for that plugin. Switches and settings edits update that same row.
   (`magpie plugin preset essentials|all`). Off is refused while the plugin
   is in use.
 - **The window**: see [GUI app shell](gui-shell.md), "Built-in plugins".
-- **The gateway**: the process serving it runs `pluginrt.KeepFresh` (every
-  2s), which refreshes when plugins.yml, settings.json or providers.json
-  changes (and plugins.json, for `middleware`), so a
+- **The gateway**: the process serving it runs `pluginrt.KeepFresh`, which
+  checks the bytes of plugins.yml and follows identity and metadata changes
+  in the files that built-ins consult for `InUse`. A
   plugin turned on or off in the window or by `magpie plugin builtin` comes
   and goes in the gateway without a restart, and a headless `magpie serve`
   follows the file too.

@@ -116,7 +116,7 @@ func (m *Manager) recordOwnCall(ctx context.Context, scope sdk.Scope, raw json.R
 	if group.ctx.Err() != nil {
 		return nil, ErrActionChanged
 	}
-	if err := m.checkActiveGeneration(ctx, group.entry, group.config.Version); err != nil {
+	if err := m.checkActiveConfig(ctx, group.entry, group.config); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

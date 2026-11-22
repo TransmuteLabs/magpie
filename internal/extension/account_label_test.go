@@ -24,7 +24,7 @@ func TestAccountLabelPublicationIsOptionalAndGenerationBound(t *testing.T) {
 				}
 			}
 			result := sdk.AuthResult{ID: target.ID, Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"private"}`)}
-			receipt, err := store.publishWindowAuth(target.Plugin, flow.Flow, result)
+			receipt, err := store.publishWindowAuth(t.Context(), target.Plugin, flow.Flow, result, nil)
 			if err != nil || receipt.Phase != "complete" {
 				t.Fatalf("label write affected credential publication: %s %v", receipt.Phase, err)
 			}

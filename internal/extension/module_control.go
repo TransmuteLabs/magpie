@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 
@@ -25,14 +26,18 @@ func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot
 }
 
 func (m *Manager) runtimeModuleConfigContext(ctx context.Context, entry Installed) (sdk.ConfigSnapshot, error) {
-	manifest := entry.Manifest
-	if manifest.Contract.Version.Minor < 1 {
+	if entry.Manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	value, err := m.readModuleConfigValue(ctx, manifest.ID)
+	value, err := m.readModuleConfigValue(ctx, entry.Manifest.ID)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
+	return m.runtimeModuleConfigValue(entry, value)
+}
+
+func (m *Manager) runtimeModuleConfigValue(entry Installed, value VersionedValue) (sdk.ConfigSnapshot, error) {
+	manifest := entry.Manifest
 	var slot *atomic.Pointer[moduleConfigMemo]
 	var digest [sha256.Size]byte
 	if entry.Revision != "" && len(value.Value) <= moduleConfigMemoLimit {
@@ -55,6 +60,22 @@ func (m *Manager) runtimeModuleConfigContext(ctx context.Context, entry Installe
 		slot.Store(&moduleConfigMemo{revision: entry.Revision, digest: digest, values: bytes.Clone(config.Values)})
 	}
 	return config, nil
+}
+
+func sameModuleConfig(current, expected sdk.ConfigSnapshot) bool {
+	if current.Version != expected.Version {
+		return false
+	}
+	if expected.Values == nil || bytes.Equal(current.Values, expected.Values) {
+		return true
+	}
+	parse := func(raw json.RawMessage, values *map[string]any) error {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		return decoder.Decode(values)
+	}
+	var left, right map[string]any
+	return parse(current.Values, &left) == nil && parse(expected.Values, &right) == nil && reflect.DeepEqual(left, right)
 }
 
 func effectiveModuleConfig(manifest sdk.Manifest, values json.RawMessage) (json.RawMessage, error) {
