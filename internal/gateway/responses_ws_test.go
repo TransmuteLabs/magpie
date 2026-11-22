@@ -1,16 +1,20 @@
 package gateway
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -80,6 +84,11 @@ func sockUp(t *testing.T, u *respUp) {
 func sockServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	s := New()
+	return s, serveSock(t, s)
+}
+
+func serveSock(t *testing.T, s *Server) *httptest.Server {
+	t.Helper()
 	front := s.Front()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if v := r.Header.Get("X-Test-Remote"); v != "" {
@@ -100,7 +109,7 @@ func sockServer(t *testing.T) (*Server, *httptest.Server) {
 		defer cancel()
 		s.sockets.drain(ctx)
 	})
-	return s, ts
+	return ts
 }
 
 type sockClient struct {
@@ -315,12 +324,14 @@ func TestResponsesSocketContinues(t *testing.T) {
 		if id == "" || got[0].Get("type").String() != "response.created" {
 			t.Fatalf("%s turn 1: %v", path, got)
 		}
-		var done bool
+		var outputItem string
 		for _, f := range got {
-			done = done || f.Get("type").String() == "response.output_item.done"
+			if f.Get("type").String() == "response.output_item.done" {
+				outputItem = f.Get("item").Raw
+			}
 		}
-		if !done {
-			t.Errorf("%s: no item: %v", path, got)
+		if outputItem == "" {
+			t.Fatalf("%s: no item: %v", path, got)
 		}
 		got = c.turn(create(id, userMore))
 		if last(got).Get("type").String() != "response.completed" {
@@ -334,6 +345,8 @@ func TestResponsesSocketContinues(t *testing.T) {
 		if len(in) != 3 || in[0].Get("content.0.text").String() != "hi" || in[1].Get("role").String() != "assistant" ||
 			in[1].Get("content.0.text").String() != "answer 1" || in[2].Get("content.0.text").String() != "and more" {
 			t.Errorf("%s turn 2 upstream input: %s", path, b)
+		} else if in[1].Raw != outputItem {
+			t.Errorf("%s: continued item %s differs from streamed item %s", path, in[1].Raw, outputItem)
 		}
 		for _, k := range []string{"type", "previous_response_id", "generate"} {
 			if gjson.GetBytes(b, k).Exists() {
@@ -514,6 +527,185 @@ func TestResponsesSocketInterrupt(t *testing.T) {
 	if got = c.turn(create("", userHi)); last(got).Get("type").String() != "response.completed" {
 		t.Errorf("after: %v", got)
 	}
+}
+
+func holdResponsesSocket(t *testing.T, path string, frameLimit int64) (*sockClient, *respUp, <-chan struct{}) {
+	t.Helper()
+	fresh(t)
+	stopped := make(chan struct{})
+	up := &respUp{}
+	up.reply = func(w http.ResponseWriter, r *http.Request, _ int) {
+		up.mu.Lock()
+		up.reply = nil
+		up.mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(
+			`data: {"type":"response.created","response":{"id":"resp_wait","object":"response","status":"in_progress","output":[]}}`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_wait","role":"assistant","status":"in_progress","content":[]}}`,
+			`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_wait","delta":"partial"}`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+		close(stopped)
+	}
+	sockUp(t, up)
+	s := New()
+	s.requestLimits.body = frameLimit
+	c, _, err := dialSock(t, serveSock(t, s), path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.send(create("", userHi))
+	events, err := c.until("response.output_text.delta", "error")
+	if err != nil || len(events) == 0 || events[0].Get("response.id").String() != "resp_wait" ||
+		last(events).Get("delta").String() != "partial" {
+		t.Fatalf("first response: %v, %v", events, err)
+	}
+	return c, up, stopped
+}
+
+func TestResponsesSocketQueuedTurnsRunInOrderAfterInterrupt(t *testing.T) {
+	c, up, stopped := holdResponsesSocket(t, "/v1/responses", 0)
+	const pending = 8
+	for number := range pending {
+		input := strings.Replace(userHi, `"hi"`, fmt.Sprintf(`"queued %d"`, number), 1)
+		c.send(create("", input))
+	}
+	c.send(`{"type":"response.interrupt","response_id":"other","mode":"discard_partial_items"}`)
+	if events, err := c.until("response.interrupt.failed", "response.completed", "error"); err != nil ||
+		last(events).Get("type").String() != "response.interrupt.failed" || up.calls() != 1 {
+		t.Fatalf("before interrupt: %v, %v, %d upstream calls", events, err, up.calls())
+	}
+	c.send(`{"type":"response.interrupt","response_id":"resp_wait","mode":"discard_partial_items"}`)
+	events, err := c.until("response.incomplete", "error")
+	if err != nil || len(events) != 2 || events[0].Get("type").String() != "response.interrupt.accepted" ||
+		last(events).Get("response.incomplete_details.reason").String() != "interrupted" {
+		t.Fatalf("interrupt: %v, %v", events, err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("interrupted upstream request did not stop")
+	}
+	for number := range pending {
+		events, err := c.until("response.completed", "error")
+		if err != nil || last(events).Get("type").String() != "response.completed" {
+			t.Fatalf("queued turn %d: %v, %v", number, events, err)
+		}
+		want := fmt.Sprintf("queued %d", number)
+		if got := gjson.GetBytes(up.body(number+1), "input.0.content.0.text").String(); got != want {
+			t.Errorf("queued turn %d: upstream got %q, want %q", number, got, want)
+		}
+	}
+	if calls := up.calls(); calls != pending+1 {
+		t.Errorf("upstream calls = %d, want %d", calls, pending+1)
+	}
+}
+
+func TestResponsesSocketPendingLimitStopsBeforeDispatch(t *testing.T) {
+	for _, test := range []struct {
+		name, path string
+		frameLimit int64
+		frame      string
+		count      int
+	}{
+		{name: "count", path: "/v1/responses", frame: create("", userMore), count: 9},
+		{
+			name: "bytes", path: CodexPath + "/responses", frameLimit: 8 << 10,
+			frame: create("", strings.Replace(userHi, "hi", strings.Repeat("x", 5<<10), 1)),
+			count: 2,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, up, stopped := holdResponsesSocket(t, test.path, test.frameLimit)
+			for range test.count {
+				c.send(test.frame)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			_ = c.c.Write(ctx, websocket.MessageText, []byte(`{"type":"response.interrupt","response_id":"other"}`))
+			events, err := c.until("response.interrupt.failed", "response.completed", "error")
+			if websocket.CloseStatus(err) != websocket.StatusTryAgainLater {
+				t.Fatalf("pending limit: close = %v, frames = %v", err, events)
+			}
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				t.Fatal("overflow did not stop the upstream request")
+			}
+			if calls := up.calls(); calls != 1 {
+				t.Errorf("upstream calls = %d, want only the first turn", calls)
+			}
+		})
+	}
+}
+
+type pipeSocketUpgrade struct {
+	*httptest.ResponseRecorder
+	conn net.Conn
+}
+
+func (w pipeSocketUpgrade) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
+}
+
+func TestResponsesSocketWriteDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server, peer := net.Pipe()
+		defer server.Close()
+		defer peer.Close()
+		req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		conn, err := websocket.Accept(pipeSocketUpgrade{httptest.NewRecorder(), server}, req, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseNow()
+		live, closeSocket := context.WithCancel(t.Context())
+		defer closeSocket()
+		socket := responsesSocket{c: conn, live: live, cancel: closeSocket}
+		drained := make(chan error, 1)
+		go func() {
+			buf := make([]byte, 2+len("first"))
+			_, err := io.ReadFull(peer, buf)
+			drained <- err
+		}()
+		if err := socket.write(live, []byte("first")); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-drained; err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Minute)
+
+		turn, interrupt := context.WithCancel(live)
+		defer interrupt()
+		wrote := make(chan error, 1)
+		go func() { wrote <- socket.write(turn, []byte("unread")) }()
+		synctest.Wait()
+		interrupt()
+		synctest.Wait()
+		select {
+		case err := <-wrote:
+			t.Fatalf("an interrupt closed a write in progress: %v", err)
+		default:
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		select {
+		case err := <-wrote:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("blocked write = %v, want deadline exceeded", err)
+			}
+		default:
+			t.Fatal("a client that does not read still holds the socket after a minute")
+		}
+		if live.Err() != context.Canceled {
+			t.Errorf("socket context = %v after write timeout", live.Err())
+		}
+	})
 }
 
 // A reply cut before its end is a failed turn, as the HTTP route tells

@@ -77,23 +77,24 @@ func providerExtensionsContext(ctx context.Context) ([]Provider, []savedLogin, e
 }
 
 func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProviderHost, ownerSnapshot func() extensionSubscriptionOwners) ([]Provider, []savedLogin, error) {
-	installed, err := activeProviderModules(ctx, host)
+	modules, err := configuredProviderModules(ctx, host)
 	if err != nil {
 		return nil, nil, err
 	}
 	out := []Provider{}
 	owners := sync.OnceValue(ownerSnapshot)
-	for _, entry := range installed {
-		if !entry.Manifest.Contract.Has(sdk.OutboundExecutor) &&
-			!slices.ContainsFunc(entry.Manifest.Providers, func(provider sdk.ProviderDescriptor) bool { return provider.AccountOnly() }) {
+	for _, module := range modules {
+		if module.ConfigError != nil {
+			log.Printf("extension providers unavailable for %s: read module configuration: %v", module.Manifest.ID, module.ConfigError)
 			continue
 		}
-		providers, err := discoverExtensionModuleContext(ctx, host, entry, owners)
+		modelRevision := module.Revision + "\x00" + module.ConfigVersion
+		providers, err := projectExtensionProviders(ctx, host, module.Installed, modelRevision, owners)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
-			log.Printf("extension providers unavailable for %s: %v", entry.Manifest.ID, err)
+			log.Printf("extension providers unavailable for %s: %v", module.Manifest.ID, err)
 			continue
 		}
 		out = append(out, providers...)
@@ -124,15 +125,20 @@ func enabledExtensionModule(ctx context.Context, host extensionProviderHost, id 
 }
 
 func discoverExtensionModuleContext(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed, ownerSnapshot func() extensionSubscriptionOwners) ([]Provider, error) {
-	manifest := entry.Manifest.Clone()
-	authenticated := manifest.Contract.Has(sdk.AccountAuth)
-	if authenticated && settings.AccountDiscoveryOff() {
+	if entry.Manifest.Contract.Has(sdk.AccountAuth) && settings.AccountDiscoveryOff() {
 		return nil, nil
 	}
 	modelRevision, err := extensionModelRevision(ctx, host, entry)
 	if err != nil {
 		return nil, fmt.Errorf("read module configuration: %w", err)
 	}
+	entry.Manifest = entry.Manifest.Clone()
+	return projectExtensionProviders(ctx, host, entry, modelRevision, ownerSnapshot)
+}
+
+func projectExtensionProviders(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed, modelRevision string, ownerSnapshot func() extensionSubscriptionOwners) ([]Provider, error) {
+	manifest := entry.Manifest
+	authenticated := manifest.Contract.Has(sdk.AccountAuth)
 	var out []Provider
 	owners := ownerSnapshot()
 	if owners.err != nil {
@@ -144,6 +150,7 @@ func discoverExtensionModuleContext(ctx context.Context, host extensionProviderH
 	})
 	var accounts map[string][]extensionhost.AccountMetadata
 	if authenticated {
+		var err error
 		accounts, err = extensionAccountMetadata(ctx, host, manifest.ID, descriptors, true)
 		if err != nil {
 			return nil, fmt.Errorf("read accounts for %s: %w", manifest.ID, err)

@@ -76,7 +76,7 @@ func BenchmarkRuntimeConfigValidation(bench *testing.B) {
 			manager, entry := runtimeConfigFixture(bench, fixture.fields)
 			bench.ReportAllocs()
 			for bench.Loop() {
-				current, err := manager.reconcile(bench.Context(), true)
+				current, err := manager.reconcile(bench.Context(), true, nil)
 				if err != nil || current[entry.Manifest.ID].config.Version != "1" {
 					bench.Fatalf("reconciliation did not select the configured module: %v", err)
 				}
@@ -99,7 +99,7 @@ func TestRuntimeConfigUsesCurrentBytesAndReturnsOwnedValues(t *testing.T) {
 	id := entry.Manifest.ID
 	reconcile := func(want string) sdk.ConfigSnapshot {
 		t.Helper()
-		current, err := manager.reconcile(t.Context(), true)
+		current, err := manager.reconcile(t.Context(), true, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -183,7 +183,7 @@ func TestRuntimeConfigUsesCurrentBytesAndReturnsOwnedValues(t *testing.T) {
 	if err := manager.checkActiveGeneration(t.Context(), replacement, "2"); err != nil {
 		t.Fatal(err)
 	}
-	current, err := manager.reconcile(t.Context(), true)
+	current, err := manager.reconcile(t.Context(), true, nil)
 	if err != nil || current[id].config.Version != "2" || string(current[id].config.Values) != `{"label":"second","mode":"safe"}` {
 		t.Fatalf("reconciliation must use the current CAS version: %+v, %v", current[id].config, err)
 	}

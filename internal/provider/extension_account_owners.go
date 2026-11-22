@@ -5,7 +5,36 @@ import (
 	"slices"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/settings"
 )
+
+func configuredProviderModules(ctx context.Context, host extensionProviderHost) ([]extensionhost.ProviderModule, error) {
+	includeAccounts := !settings.AccountDiscoveryOff()
+	if registry, ok := host.(interface {
+		ActiveProviderModules(context.Context, bool) ([]extensionhost.ProviderModule, error)
+	}); ok {
+		return registry.ActiveProviderModules(ctx, includeAccounts)
+	}
+	entries, err := activeProviderModules(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var modules []extensionhost.ProviderModule
+	for _, entry := range entries {
+		if !extensionhost.ProviderDiscoveryEligible(entry.Manifest, includeAccounts) {
+			continue
+		}
+		version, err := extensionConfigVersion(ctx, host, entry)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		entry.Manifest = entry.Manifest.Clone()
+		modules = append(modules, extensionhost.ProviderModule{
+			Installed: entry, ConfigVersion: version, ConfigError: err,
+		})
+	}
+	return modules, nil
+}
 
 func activeProviderModules(ctx context.Context, host extensionProviderHost) ([]extensionhost.Installed, error) {
 	if registry, ok := host.(interface {

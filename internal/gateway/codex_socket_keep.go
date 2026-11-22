@@ -235,19 +235,20 @@ type codexTurnShape struct {
 }
 
 // codexShape is body's shape, false for a body that is not continued
-// from: one whose input isn't a list of items, or that names a previous
-// response itself. Only byte-identical inputs reuse the kept turn's
+// from: one whose input is neither an item list nor null, or that names
+// a previous response itself. The items borrow body until the wire
+// message is made. Only byte-identical inputs reuse the kept turn's
 // canonical sums. Both slices from the pool are immutable.
 func codexShape(body []byte, key string) (*codexTurnShape, bool) {
 	var top map[string]json.RawMessage
-	if json.Unmarshal(body, &top) != nil {
+	if decodeJSONView(body, &top) != nil {
 		return nil, false
 	}
 	if _, ok := top["previous_response_id"]; ok {
 		return nil, false
 	}
-	var input []json.RawMessage
-	if json.Unmarshal(top["input"], &input) != nil {
+	input, ok := inputList(top["input"])
+	if !ok {
 		return nil, false
 	}
 	s := &codexTurnShape{

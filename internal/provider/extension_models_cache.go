@@ -104,15 +104,19 @@ type extensionModelCatalog struct {
 }
 
 func extensionModelRevision(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed) (string, error) {
-	version := "0"
-	if entry.Manifest.Contract.Version.Minor >= 1 {
-		config, err := host.ModuleConfig(ctx, entry.Manifest.ID)
-		if err != nil {
-			return "", err
-		}
-		version = config.Version
+	version, err := extensionConfigVersion(ctx, host, entry)
+	if err != nil {
+		return "", err
 	}
 	return entry.Revision + "\x00" + version, nil
+}
+
+func extensionConfigVersion(ctx context.Context, host extensionProviderHost, entry extensionhost.Installed) (string, error) {
+	if entry.Manifest.Contract.Version.Minor < 1 {
+		return "0", nil
+	}
+	config, err := host.ModuleConfig(ctx, entry.Manifest.ID)
+	return config.Version, err
 }
 
 func (binding *extensionAccount) checkModelRevision(ctx context.Context) error {

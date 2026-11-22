@@ -82,6 +82,10 @@ const (
 	socketKeep = 2
 	// socketErrMax is the most of an error reply sent on
 	socketErrMax = 1 << 20
+
+	socketQueueFrames  = 8
+	socketQueueBytes   = 64 << 20
+	socketWriteTimeout = time.Minute
 )
 
 // clientSockets are the sockets being served, which end with the gateway.
@@ -161,15 +165,19 @@ type heldTurn struct {
 }
 
 type responsesSocket struct {
-	s    *Server
-	o    *socketOrigin
-	path string
-	c    *websocket.Conn
-	ctx  context.Context
-	live context.Context // the socket's, for writes (send)
+	s      *Server
+	o      *socketOrigin
+	path   string
+	c      *websocket.Conn
+	ctx    context.Context
+	live   context.Context // the socket's, for writes (send)
+	cancel context.CancelFunc
 
-	writeMu sync.Mutex
-	turns   []heldTurn // the newest last
+	writeMu     sync.Mutex
+	writeCtx    context.Context
+	writeCancel context.CancelFunc
+	writeUntil  time.Time
+	turns       []heldTurn // the newest last
 
 	// the turn state the last reply said, and the turn it is for
 	// (client_metadata.turn_id): Codex continues a turn on its socket by
@@ -218,7 +226,7 @@ func (s *Server) serveResponsesSocket(w http.ResponseWriter, r *http.Request) bo
 		return true
 	}
 	defer s.sockets.remove(sock)
-	sock.serve()
+	sock.serve(int(min(most, socketQueueBytes)))
 	if sock.frames > 0 {
 		log.Printf("responses socket from %s ended: %d turns, %d continued, %d bytes received, %d sent on as whole requests",
 			r.RemoteAddr, sock.frames, sock.continued, sock.got, sock.sent)
@@ -242,11 +250,11 @@ type socketMsg struct {
 	err  error
 }
 
-func (rs *responsesSocket) serve() {
+func (rs *responsesSocket) serve(queueLimit int) {
 	ctx, cancel := context.WithCancel(rs.ctx)
 	defer cancel()
 	defer rs.c.CloseNow()
-	rs.live = ctx
+	rs.live, rs.cancel = ctx, cancel
 	in := make(chan socketMsg)
 	go func() {
 		for {
@@ -266,10 +274,16 @@ func (rs *responsesSocket) serve() {
 		}
 	}()
 	var queued []socketMsg
+	var queuedBytes int
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		var m socketMsg
 		if len(queued) > 0 {
-			m, queued = queued[0], queued[1:]
+			m = queued[0]
+			queuedBytes -= cap(m.data)
+			queued = slices.Delete(queued, 0, 1)
 		} else {
 			select {
 			case m = <-in:
@@ -314,7 +328,15 @@ func (rs *responsesSocket) serve() {
 					return
 				}
 				if gjson.GetBytes(n.data, "type").String() != "response.interrupt" {
+					if len(queued) >= socketQueueFrames || cap(n.data) > queueLimit-queuedBytes {
+						stop()
+						clear(queued)
+						rs.c.Close(websocket.StatusTryAgainLater, "pending response frame limit reached")
+						<-done
+						return
+					}
 					queued = append(queued, n)
+					queuedBytes += cap(n.data)
 					continue
 				}
 				id := gjson.GetBytes(n.data, "response_id").String()
@@ -361,13 +383,29 @@ func interruptReply(kind, id string) []byte {
 // write sends frame unless ctx, a turn's, has ended (interrupted, or the
 // client gone). The write itself is under the socket's context: one whose
 // context ends mid-write closes the socket, which an interrupt mustn't.
+// A bounded write context is reused across frames while it has time left.
 func (rs *responsesSocket) write(ctx context.Context, frame []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	rs.writeMu.Lock()
 	defer rs.writeMu.Unlock()
-	return rs.c.Write(rs.live, websocket.MessageText, frame)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if time.Until(rs.writeUntil) < socketWriteTimeout/2 {
+		if rs.writeCancel != nil {
+			rs.writeCancel()
+		}
+		rs.writeCtx, rs.writeCancel = context.WithTimeout(rs.live, socketWriteTimeout)
+		rs.writeUntil, _ = rs.writeCtx.Deadline()
+	}
+	err := rs.c.Write(rs.writeCtx, websocket.MessageText, frame)
+	if err != nil && rs.writeCtx.Err() == context.DeadlineExceeded {
+		rs.cancel()
+		rs.c.CloseNow()
+	}
+	return err
 }
 
 // writeError is an error frame as Codex reads one: the HTTP status and
@@ -824,7 +862,10 @@ func (w *socketTurnWriter) event(data []byte) error {
 	case "response.output_item.done":
 		// in the order they came, as Codex adds them to its side
 		if len(e.Item) > 0 {
-			w.items = append(w.items, append(json.RawMessage(nil), e.Item...))
+			if cap(e.Item)-len(e.Item) > len(e.Item) {
+				e.Item = bytes.Clone(e.Item)
+			}
+			w.items = append(w.items, e.Item)
 		}
 	case "response.completed":
 		w.note(gjson.GetBytes(e.Response, "id").String())

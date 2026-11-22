@@ -6,6 +6,13 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+)
+
+const (
+	gatewayActivationFallback = 5 * time.Second
+	gatewayActivationCoalesce = 20 * time.Millisecond
 )
 
 type GatewayActivation struct {
@@ -16,8 +23,13 @@ type GatewayActivation struct {
 	changed     chan struct{}
 	unsubscribe func()
 	once        sync.Once
-	leases      map[string]*Lease
+	leases      map[string]activationLease
 	failed      map[string]string
+}
+
+type activationLease struct {
+	*Lease
+	stopWake func() bool
 }
 
 // ListenerOwnerDraining identifies a canceled listener that still holds an
@@ -45,6 +57,10 @@ func listenerOwnerConflict(ctx context.Context, done <-chan struct{}) error {
 }
 
 func (m *Manager) BeginGatewayActivation(ctx context.Context) (*GatewayActivation, error) {
+	return m.beginGatewayActivation(ctx, fsnotify.NewWatcher)
+}
+
+func (m *Manager) beginGatewayActivation(ctx context.Context, openWatch func() (*fsnotify.Watcher, error)) (*GatewayActivation, error) {
 	m.mu.Lock()
 	if err := ctx.Err(); err != nil {
 		m.mu.Unlock()
@@ -62,20 +78,22 @@ func (m *Manager) BeginGatewayActivation(ctx context.Context) (*GatewayActivatio
 	lifetime, cancel := context.WithCancel(ctx)
 	owner := &GatewayActivation{
 		manager: m, ctx: lifetime, cancel: cancel, done: make(chan struct{}),
-		changed: make(chan struct{}, 1), leases: map[string]*Lease{}, failed: map[string]string{},
+		changed: make(chan struct{}, 1), leases: map[string]activationLease{}, failed: map[string]string{},
 	}
 	m.gatewayActivation = owner
 	m.activationWG.Add(1)
 	stopping := m.startCtx
 	m.mu.Unlock()
-	owner.unsubscribe = SubscribeChanges(func() {
-		select {
-		case owner.changed <- struct{}{}:
-		default:
-		}
-	})
-	go owner.run(stopping)
+	owner.unsubscribe = SubscribeChanges(owner.wake)
+	go owner.run(stopping, openWatch)
 	return owner, nil
+}
+
+func (owner *GatewayActivation) wake() {
+	select {
+	case owner.changed <- struct{}{}:
+	default:
+	}
 }
 
 func (owner *GatewayActivation) Close(ctx context.Context) error {
@@ -88,7 +106,7 @@ func (owner *GatewayActivation) Close(ctx context.Context) error {
 	}
 }
 
-func (owner *GatewayActivation) run(stopping context.Context) {
+func (owner *GatewayActivation) run(stopping context.Context, openWatch func() (*fsnotify.Watcher, error)) {
 	defer func() {
 		owner.cancel()
 		owner.unsubscribe()
@@ -105,34 +123,84 @@ func (owner *GatewayActivation) run(stopping context.Context) {
 	}()
 	stop := context.AfterFunc(stopping, owner.cancel)
 	defer stop()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var nextSignInSweep time.Time
-	for {
-		if time.Now().After(nextSignInSweep) {
-			nextSignInSweep = time.Now().Add(time.Minute)
-			ctx, cancel := context.WithTimeout(owner.ctx, time.Second)
-			err := owner.manager.store.reapSavedSignIns(ctx)
-			cancel()
-			if err != nil && owner.ctx.Err() == nil {
-				log.Printf("extension saved sign-in cleanup: %v", err)
-			}
+	watch := newActivationWatch(owner.manager.root)
+	defer watch.close()
+	watch.open(openWatch)
+	sweep := time.NewTicker(time.Minute)
+	defer sweep.Stop()
+	fallback := time.NewTicker(gatewayActivationFallback)
+	defer fallback.Stop()
+	debounce := time.NewTimer(gatewayActivationCoalesce)
+	defer debounce.Stop()
+	debounce.Stop()
+	var pending <-chan time.Time
+	schedule := func() {
+		if pending == nil {
+			debounce.Reset(gatewayActivationCoalesce)
+			pending = debounce.C
 		}
-		owner.reconcile()
+	}
+	owner.reapSavedSignIns()
+	owner.reconcile(watch)
+	for owner.ctx.Err() == nil {
 		select {
 		case <-owner.ctx.Done():
 			return
 		case <-owner.changed:
-		case <-ticker.C:
+			schedule()
+		case event, open := <-watch.events():
+			if !open {
+				watch.close()
+				schedule()
+			} else if watch.relevant(event) {
+				schedule()
+			}
+		case <-watch.errors():
+			watch.close()
+			schedule()
+		case <-pending:
+			pending = nil
+			owner.reconcile(watch)
+		case <-fallback.C:
+			debounce.Stop()
+			pending = nil
+			watch.open(openWatch)
+			owner.reconcile(watch)
+		case <-sweep.C:
+			owner.reapSavedSignIns()
 		}
 	}
 }
 
-func (owner *GatewayActivation) reconcile() {
+func (owner *GatewayActivation) reapSavedSignIns() {
+	ctx, cancel := context.WithTimeout(owner.ctx, time.Second)
+	defer cancel()
+	if err := owner.manager.store.reapSavedSignIns(ctx); err != nil && owner.ctx.Err() == nil {
+		log.Printf("extension saved sign-in cleanup: %v", err)
+	}
+}
+
+func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 	manager := owner.manager
-	desired, err := manager.reconcile(owner.ctx, true)
+	watch.begin()
+	var modules []string
+	var observe func(string)
+	if watch.backend != nil {
+		observe = func(id string) {
+			if len(modules) < activationWatchLimit-1 {
+				modules = append(modules, id)
+			}
+		}
+	}
+	desired, err := manager.reconcile(owner.ctx, true, observe)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
+	}
+	for _, id := range modules {
+		watch.followConfig(id)
+	}
+	if watch.finish() {
+		owner.wake()
 	}
 	for id, lease := range owner.leases {
 		generation, exists := desired[id]
@@ -147,7 +215,7 @@ func (owner *GatewayActivation) reconcile() {
 	}
 	for id, generation := range desired {
 		entry, config := generation.entry, generation.config.Version
-		if !entry.Manifest.ActivatesGateway() || owner.leases[id] != nil {
+		if !entry.Manifest.ActivatesGateway() || owner.leases[id].Lease != nil {
 			continue
 		}
 		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + config
@@ -167,7 +235,10 @@ func (owner *GatewayActivation) reconcile() {
 			continue
 		}
 		lifetime, revoke := context.WithCancel(owner.ctx)
-		lease := &Lease{manager: manager, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: revoke}
+		lease := activationLease{
+			Lease:    &Lease{manager: manager, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: revoke},
+			stopWake: context.AfterFunc(client.lifetime, owner.wake),
+		}
 		if lease.CheckCurrent(owner.ctx) != nil {
 			owner.withdraw(lease)
 			continue
@@ -182,7 +253,8 @@ func (owner *GatewayActivation) reconcile() {
 	}
 }
 
-func (owner *GatewayActivation) withdraw(lease *Lease) {
+func (owner *GatewayActivation) withdraw(lease activationLease) {
+	lease.stopWake()
 	lease.Close()
 	manager := owner.manager
 	manager.mu.Lock()

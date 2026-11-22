@@ -26,6 +26,11 @@ provider after one. `Accounts` projects the first account in use, with the
 others available through `AlsoOn`. An entirely paused provider remains
 visible, while `OwnPaused` prevents routing through it.
 
+Discovery selects the eligible packages, their enablement and their saved
+configuration versions in one checked catalog view. It releases the catalog
+read lock before projecting accounts. Dispatch and model publication check
+the current selection again.
+
 Authenticated accounts come from `Manager.Store`, with their exact ID and
 credential generation. Discovery, idle renewal and outside history each
 read one checked account snapshot for the selected providers of a module.
@@ -240,9 +245,12 @@ use the pure `extension.CatalogPath` helper and never acquire or replace the
 default manager under the provider cache lock.
 
 Private SDK account and root module-configuration metadata share a source
-stamp. Each new hold, including one overlapping an existing request, detects
-another process's account replacement/deletion or configuration CAS before
-reusing provider/model snapshots. A configuration transition rebuilds the
+stamp. Each new hold, including one overlapping an existing request, observes
+a scan that starts after the hold arrives. Holds already waiting for the next
+scan can share its successful result. A hold arriving during a scan waits for
+a later scan. This lets a new hold detect another process's account
+replacement/deletion or configuration CAS before reusing provider/model
+snapshots. A configuration transition rebuilds the
 selected model catalog under its new version; already selected old bindings
 remain fenced. Unrelated private state and account-local state do not
 invalidate it. `extension.AccountStamp` reads directory/file metadata and handle-derived
@@ -252,6 +260,7 @@ even when size, mode and mtime are preserved. Observations are serialized outsid
 the global provider cache mutex and published with monotonically increasing
 revisions; a delayed old observation cannot replace a newer published one.
 Unavailable metadata invalidates the snapshot rather than comparing as unchanged.
+Other holds waiting on a failed scan take a fresh observation.
 Quota-only account-file publication conservatively invalidates it too;
 unrelated scoped state does not.
 The stamp remains an optimistic cache hint: an in-place rewrite preserving

@@ -335,6 +335,14 @@ Its handle resolves active root modules under the gateway lifetime, pins
 package, enablement and configuration identity, reconciles local and external
 catalog changes, and joins its removable change subscription. Activation and
 explicit reload reconcile against one catalog snapshot per pass.
+Local notices, worker exits and filesystem notifications coalesce before
+reconciliation. Directory watches follow atomic publications and newly created
+directories. On kqueue systems the watcher opens only the catalog and selected
+module files to bound descriptors. A five-second fallback checks for missed
+changes, unavailable watches and new files and retries watch setup after a
+backend error. Notifications only schedule work. Reconciliation and
+admission still verify current bytes under their existing guards. Expired
+sign-ins are cleaned at startup and on a separate minute timer.
 Disable, removal, configuration replacement and shutdown release the lease
 and retire the cached generation through the existing bounded drain and
 disposer before replacement. A replacement listener can serve HTTP during

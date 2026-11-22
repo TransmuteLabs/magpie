@@ -27,13 +27,9 @@ func (m *Manager) ActiveModuleConfig(ctx context.Context, id string) (Installed,
 		if entry.observerEnablementErr != nil {
 			return entry.observerEnablementErr
 		}
-		current := sdk.ConfigSnapshot{Version: "0", Values: []byte("{}")}
-		if entry.Manifest.Contract.Version.Minor >= 1 {
-			var err error
-			current, err = m.readModuleConfigContext(ctx, id)
-			if err != nil {
-				return err
-			}
+		current, err := m.readActiveModuleConfig(ctx, entry)
+		if err != nil {
+			return err
 		}
 		result, config = cloneInstalled(entry), current
 		return nil
@@ -45,4 +41,11 @@ func (m *Manager) ActiveModuleConfig(ctx context.Context, id string) (Installed,
 		return Installed{}, sdk.ConfigSnapshot{}, errModuleConfigClosed
 	}
 	return result, config, nil
+}
+
+func (m *Manager) readActiveModuleConfig(ctx context.Context, entry Installed) (sdk.ConfigSnapshot, error) {
+	if entry.Manifest.Contract.Version.Minor < 1 {
+		return sdk.ConfigSnapshot{Version: "0", Values: []byte("{}")}, nil
+	}
+	return m.readModuleConfigContext(ctx, entry.Manifest.ID)
 }

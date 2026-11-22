@@ -11,13 +11,114 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/proc"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	empty, err := extensionhost.AccountStamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := extensionhost.NewStore(filepath.Dir(extensionhost.CatalogPath()))
+	if _, err := store.SaveAccount(extensionhost.Account{Plugin: "fixture", Provider: "vendor",
+		ID: "alice", Auth: json.RawMessage(`{"access":"fixture"}`)}, 0); err != nil {
+		t.Fatal(err)
+	}
+	account, err := extensionhost.AccountStamp()
+	if err != nil || account.Equal(empty) {
+		t.Fatalf("account fixture did not change the stamp: %v", err)
+	}
+	for _, attempt := range []struct {
+		name           string
+		secondError    error
+		waiters        int
+		waiterRevision extensionAccountFiles
+	}{
+		{name: "sharing", waiters: 8, waiterRevision: 2},
+		{name: "failed_observation", secondError: errors.New("metadata unavailable"), waiters: 1, waiterRevision: 3},
+	} {
+		t.Run(attempt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var observations accountFileObservations
+				var reads atomic.Int64
+				firstFinished, secondFinished := make(chan struct{}), make(chan struct{})
+				finishFirst := sync.OnceFunc(func() { close(firstFinished) })
+				finishSecond := sync.OnceFunc(func() { close(secondFinished) })
+				defer finishFirst()
+				defer finishSecond()
+				read := func() (extensionhost.AccountFileStamp, error) {
+					switch reads.Add(1) {
+					case 1:
+						<-firstFinished
+						return empty, nil
+					case 2:
+						<-secondFinished
+						return account, attempt.secondError
+					default:
+						return empty, nil
+					}
+				}
+				start := func() <-chan extensionAccountFiles {
+					result := make(chan extensionAccountFiles, 1)
+					go func() { result <- observations.observe(read) }()
+					return result
+				}
+				first := start()
+				synctest.Wait()
+				leader := start()
+				synctest.Wait()
+				waiting := make([]<-chan extensionAccountFiles, attempt.waiters)
+				for index := range waiting {
+					waiting[index] = start()
+				}
+				synctest.Wait()
+				if got := reads.Load(); got != 1 {
+					t.Fatalf("started %d scans before the first finished", got)
+				}
+				finishFirst()
+				synctest.Wait()
+				if got := reads.Load(); got != 2 {
+					t.Fatalf("queued hold did not start a fresh scan, reads=%d", got)
+				}
+				var later <-chan extensionAccountFiles
+				if attempt.secondError == nil {
+					later = start()
+					synctest.Wait()
+				}
+				finishSecond()
+				if firstRevision, leaderRevision := <-first, <-leader; firstRevision != 1 || leaderRevision != 2 {
+					t.Fatalf("first and queued observations got revisions %d and %d", firstRevision, leaderRevision)
+				}
+				for _, waiter := range waiting {
+					if observed := <-waiter; observed != attempt.waiterRevision {
+						t.Errorf("waiting hold observed revision %d, want %d", observed, attempt.waiterRevision)
+					}
+				}
+				if later != nil {
+					if observed := <-later; observed != 3 {
+						t.Errorf("hold arriving during the second scan observed its old revision %d", observed)
+					}
+				}
+				if got := reads.Load(); got != 3 {
+					t.Errorf("read %d stamps, want three fresh scans", got)
+				}
+				if serial := <-start(); serial != 3 || reads.Load() != 4 {
+					t.Errorf("serial hold must make a fresh read even when its stamp is unchanged, revision=%d scans=%d", serial, reads.Load())
+				}
+			})
+		})
+	}
+}
 
 func TestExtensionAccountObservationDoesNotHoldCatalogLock(t *testing.T) {
 	reading := make(chan struct{})
@@ -96,6 +197,20 @@ func TestExtensionAccountLateObservationCannotRestoreOldCatalog(t *testing.T) {
 }
 
 func TestExtensionManualReplacementInvalidatesHeldDiscovery(t *testing.T) {
+	const peerRoot = "MAGPIE_TEST_EXTENSION_HOLD_PEER_ROOT"
+	const peerPlugin = "MAGPIE_TEST_EXTENSION_HOLD_PEER_PLUGIN"
+	if root := os.Getenv(peerRoot); root != "" {
+		store := extensionhost.NewStore(root)
+		id := os.Getenv(peerPlugin)
+		account, err := store.GetAccount(id, "vendor", "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.DeleteAccount(id, "vendor", "alice", account.Generation); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	host := fixtureExtensionProvider(t, true)
 	plugin.UseCached(nil)
 	root := filepath.Dir(extensionhost.CatalogPath())
@@ -253,13 +368,27 @@ func TestExtensionManualReplacementInvalidatesHeldDiscovery(t *testing.T) {
 	if err := optimistic.Sign(ctx, request, Chat, nil); err == nil || attempt.Outcome(false) == nil {
 		t.Fatal("unchanged metadata permitted stale generation execution or retry patience")
 	}
-	fresh, _, _ := snapshot()
+	fresh, beforeSignOut, _ := snapshot()
 	freshScope, _ := fresh.ExtensionScope()
 	if freshScope.Generation != 4 {
 		t.Fatal("stale selection did not invalidate the undetected in-place replacement")
 	}
 	if original, _ := optimistic.ExtensionScope(); original.Generation != 3 {
 		t.Fatal("stale binding adopted the in-place manual successor")
+	}
+	peerCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	command := proc.CommandContext(peerCtx, os.Args[0], "-test.run=^TestExtensionManualReplacementInvalidatesHeldDiscovery$", "-test.count=1")
+	command.Env = append(os.Environ(), peerRoot+"="+root, peerPlugin+"="+host.manifest.ID)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("peer could not sign out: %v\n%s", err, output)
+	}
+	remaining, afterSignOut, _ := snapshot()
+	if scope, _ := remaining.ExtensionScope(); scope.Account != "bob" || afterSignOut == beforeSignOut {
+		t.Fatalf("a new overlapping hold missed the peer logout: %+v", scope)
+	}
+	if err := fresh.Account.extension.check(t.Context()); err == nil {
+		t.Fatal("the provider selected before peer logout can still use the revoked account")
 	}
 }
 

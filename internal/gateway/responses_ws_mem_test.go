@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,5 +108,46 @@ func TestSocketTurnBodiesFreed(t *testing.T) {
 	}
 	if len(kept) > 0 {
 		t.Fatalf("turn bodies %v of %d still kept after the socket's handler ended", kept, turns)
+	}
+}
+
+func TestSocketOutputItemOwnsOnlyTheDecodedItem(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	item := `{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.txt\"}"}`
+	for _, test := range []struct {
+		name  string
+		prior string
+	}{
+		{name: "one item"},
+		{name: "duplicate item field", prior: `"item":"` + strings.Repeat("x", 32<<10) + `",`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := []byte(`{"type":"response.output_item.done",` + test.prior + `"item":` + item + `}`)
+			writer := socketTurnWriter{ctx: ctx}
+			if err := writer.event(event); !errors.Is(err, context.Canceled) {
+				t.Fatalf("send result = %v", err)
+			}
+			clear(event)
+			if len(writer.items) != 1 || string(writer.items[0]) != item {
+				t.Fatalf("retained items = %s, want %s", writer.items, item)
+			}
+			if got := cap(writer.items[0]); got > 2*len(item) {
+				t.Errorf("%d retained bytes for a %d-byte item", got, len(item))
+			}
+		})
+	}
+}
+
+func BenchmarkSocketOutputItem(b *testing.B) {
+	ctx, cancel := context.WithCancel(b.Context())
+	cancel()
+	event := []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` +
+		strings.Repeat("x", 128<<10) + `"}]}}`)
+	writer := socketTurnWriter{ctx: ctx}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = writer.event(event)
+		writer.items = writer.items[:0]
 	}
 }

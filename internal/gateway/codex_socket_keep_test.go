@@ -160,16 +160,63 @@ func TestCodexKeptInputSkipsRepeatedNormalization(t *testing.T) {
 	if key == "" {
 		t.Fatal("first turn did not keep a socket")
 	}
-	input := []byte(body)
-	var shape *codexTurnShape
-	allocs := testing.AllocsPerRun(5, func() {
-		shape, _ = codexShape(input, key)
-	})
-	if shape == nil || len(shape.sums) != len(history) {
-		t.Fatal("could not read the kept history")
+	measure := func(input []byte, items int) float64 {
+		var shape *codexTurnShape
+		allocs := testing.AllocsPerRun(5, func() {
+			shape, _ = codexShape(input, key)
+		})
+		if shape == nil || len(shape.sums) != items {
+			t.Fatalf("could not read %d items from the kept history", items)
+		}
+		return allocs
 	}
-	if limit := float64(len(history) * 4); allocs > limit {
-		t.Fatalf("shaping %d unchanged items allocated %.0f times, want at most %.0f", len(history), allocs, limit)
+	const short = 16
+	smallAllocs := measure([]byte(keptTurn("allocations", "gpt-5.5", history[:short]...)), short)
+	largeAllocs := measure([]byte(body), len(history))
+	t.Logf("shaping %d and %d unchanged items allocated %.0f and %.0f times", short, len(history), smallAllocs, largeAllocs)
+	if largeAllocs-smallAllocs > float64((len(history)-short)/2) {
+		t.Fatalf("allocation growth follows item count: %.0f for %d items, %.0f for %d", smallAllocs, short, largeAllocs, len(history))
+	}
+}
+
+func TestCodexShapeKeepsWireValues(t *testing.T) {
+	first := []byte(`{"input":false,"\u0069nput":[ { "text": "ping" } ],"model":"wrong","\u006dodel":"m","tools": [ { "a": 1e0, "a": 1.0 } ]}`)
+	prior, ok := codexShape(first, "")
+	if !ok || len(prior.input) != 1 || string(prior.input[0]) != `{ "text": "ping" }` {
+		t.Fatal("shape did not take the last input with its original bytes")
+	}
+	kept := &codexKept{fields: prior.fields, input: prior.sums, replyID: "reply"}
+	clear(first)
+
+	second := []byte(`{"input" : [ {"text":"ping"}, { "text" : "\u0061 /\u0026" } ],"model":"m","tools":[{"a":1e0,"a":1.0}],"client_metadata":{"turn":"second"},"stream_options":{"include_usage":true}}`)
+	next, ok := codexShape(second, "")
+	if !ok {
+		t.Fatal("next turn was not shaped")
+	}
+	delta, ok := kept.delta(second, next)
+	const want = `{"previous_response_id":"reply","input" : [{ "text" : "\u0061 /\u0026" }],"model":"m","tools":[{"a":1e0,"a":1.0}],"client_metadata":{"turn":"second"},"stream_options":{"include_usage":true}}`
+	if !ok || string(delta) != want {
+		t.Fatalf("delta = %s, want %s", delta, want)
+	}
+}
+
+func TestCodexShapeInputEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		ok   bool
+	}{
+		{`{"input":null}`, true},
+		{`{"input":[]}`, true},
+		{`{"input":{}}`, false},
+		{`{"input":[null]}`, false},
+		{`{"input":[],"\u0070revious_response_id":null}`, false},
+		{`{"other":[]}`, false},
+		{`{"input":[],"ignored":[}`, false},
+		{`{"input":[]} {}`, false},
+	} {
+		if _, ok := codexShape([]byte(tc.body), ""); ok != tc.ok {
+			t.Errorf("shape(%s) accepted = %t, want %t", tc.body, ok, tc.ok)
+		}
 	}
 }
 

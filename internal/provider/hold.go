@@ -44,21 +44,76 @@ var held struct {
 
 type extensionAccountFiles uint64
 
-var extensionAccountObservations struct {
+type accountFileObservation struct {
+	start, done chan struct{}
+	revision    extensionAccountFiles
+	valid       bool
+}
+
+type accountFileObservations struct {
 	sync.Mutex
 	stamp    extensionhost.AccountFileStamp
 	revision extensionAccountFiles
+	reading  bool
+	next     *accountFileObservation
 }
 
+var extensionAccountObservations accountFileObservations
+
 func extensionAccountFilesNow() extensionAccountFiles {
-	extensionAccountObservations.Lock()
-	defer extensionAccountObservations.Unlock()
-	stamp, err := extensionhost.AccountStamp()
-	if err != nil || !stamp.Equal(extensionAccountObservations.stamp) {
-		extensionAccountObservations.stamp = stamp
-		extensionAccountObservations.revision++
+	return extensionAccountObservations.observe(extensionhost.AccountStamp)
+}
+
+func (observations *accountFileObservations) observe(read func() (extensionhost.AccountFileStamp, error)) extensionAccountFiles {
+	for {
+		observations.Lock()
+		if next := observations.next; next != nil {
+			observations.Unlock()
+			<-next.done
+			if next.valid {
+				return next.revision
+			}
+			continue
+		}
+		var batch *accountFileObservation
+		if observations.reading {
+			batch = &accountFileObservation{start: make(chan struct{}), done: make(chan struct{})}
+			observations.next = batch
+			observations.Unlock()
+			<-batch.start
+			observations.Lock()
+			observations.next = nil
+		}
+		observations.reading = true
+		observations.Unlock()
+		return observations.scan(batch, read)
 	}
-	return extensionAccountObservations.revision
+}
+
+func (observations *accountFileObservations) scan(batch *accountFileObservation, read func() (extensionhost.AccountFileStamp, error)) (revision extensionAccountFiles) {
+	var stamp extensionhost.AccountFileStamp
+	valid := false
+	defer func() {
+		observations.Lock()
+		if !valid || !stamp.Equal(observations.stamp) {
+			observations.stamp = stamp
+			observations.revision++
+		}
+		revision = observations.revision
+		if batch != nil {
+			batch.revision, batch.valid = revision, valid
+			close(batch.done)
+		}
+		if next := observations.next; next != nil {
+			close(next.start)
+		} else {
+			observations.reading = false
+		}
+		observations.Unlock()
+	}()
+	stamp, err := read()
+	valid = err == nil
+	return
 }
 
 // rootStamp is a file's time and size, or that it wasn't there.

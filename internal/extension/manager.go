@@ -436,7 +436,7 @@ func (m *Manager) Restart(ctx context.Context, id string) error {
 }
 
 func (m *Manager) Reload(ctx context.Context) error {
-	_, err := m.reconcile(ctx, false)
+	_, err := m.reconcile(ctx, false, nil)
 	return err
 }
 
@@ -445,11 +445,11 @@ type moduleGeneration struct {
 	config sdk.ConfigSnapshot
 }
 
-func (m *Manager) reconcile(ctx context.Context, activate bool) (map[string]moduleGeneration, error) {
+func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, error) {
 	if err := filelock.LockMutex(ctx, &m.reloadMu); err != nil {
 		return nil, err
 	}
-	current, stopping, err := m.reconcileLocked(ctx, activate)
+	current, stopping, err := m.reconcileLocked(ctx, activate, observeConfig)
 	m.reloadMu.Unlock()
 	if err != nil || len(stopping) == 0 {
 		return current, err
@@ -466,7 +466,7 @@ func (m *Manager) reconcile(ctx context.Context, activate bool) (map[string]modu
 	return current, ctx.Err()
 }
 
-func (m *Manager) reconcileLocked(ctx context.Context, activate bool) (map[string]moduleGeneration, []<-chan struct{}, error) {
+func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, []<-chan struct{}, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -489,6 +489,9 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool) (map[strin
 		for _, entry := range view.entries {
 			if !activeRoot(entry) || (!tracked[entry.Manifest.ID] && !(activate && entry.Manifest.ActivatesGateway())) {
 				continue
+			}
+			if observeConfig != nil && entry.Manifest.Contract.Version.Minor >= 1 {
+				observeConfig(entry.Manifest.ID)
 			}
 			if entry = view.enabledEntry(entry); !activeRoot(entry) {
 				continue

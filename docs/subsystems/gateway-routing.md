@@ -3460,7 +3460,14 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
 - `response.interrupt` naming the reply in flight cancels its request and
   is answered `response.interrupt.accepted`, then an interrupted
   `response.incomplete`; one naming another reply, or none in flight,
-  `response.interrupt.failed`. Other frames during a turn wait for it.
+  `response.interrupt.failed`. Other frames during a turn wait in arrival
+  order, up to eight pending frames and 64 MiB of their read buffers per
+  connection. If either limit would be exceeded, the gateway cancels the
+  active request, discards the pending frames and closes the socket with
+  1013 (`TestResponsesSocketPendingLimitStopsBeforeDispatch`).
+- An outgoing frame has at most a minute to reach the client. A write
+  timeout closes the connection and cancels the active request
+  (`TestResponsesSocketWriteDeadline`).
 - An upstream cut the gateway tells as `response.failed` goes back as
   that frame, and the reply isn't kept; a stream that still ends with no
   terminal event closes the socket 1011, as an HTTP stream would be cut
