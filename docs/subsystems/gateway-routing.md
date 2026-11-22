@@ -3440,6 +3440,12 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   (`TestResponsesSocketGuards`). The upgrade itself passed those too, and
   coder/websocket's `Accept` refuses a browser Origin whose host isn't the
   `Host`. `holdCatalog` holds each turn, not the socket.
+  The bounds reader consumes the already buffered POST body directly when
+  its reader is untouched and the buffer has no spare capacity. The
+  reconstructed size limit, body room and text normalization still apply.
+  A buffer oversized by compaction goes through the regular read so the
+  prompt cache accounts for the memory it retains. Middleware that replaces
+  the body supplies its own reader (`readBoundedRequestBody`).
 - The reply's events go back a text frame each; the reply's headers as
   Codex reads them on a socket (`response.metadata` with
   `x-codex-turn-state`, `openai-model` and `x-reasoning-included`;

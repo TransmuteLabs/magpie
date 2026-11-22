@@ -18,9 +18,10 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 )
 
-// A socket turn's body is freed once the turn is over (casyubaji on
-// Discord: ~2.8 GB after 6 hours of Codex). Each turn is served from a
-// body built in memory, the whole conversation, and the trace keeps its
+// A socket turn's body is freed when the turn and its bounded prompt
+// cache entry are gone (casyubaji on Discord: ~2.8 GB after 6 hours of
+// Codex). Each turn is served from a body built in memory, the whole
+// conversation, and the trace keeps its
 // last 60 routes: a route that kept the turn's request context (its tool
 // scan, for the turn's end) kept the request on it (the inflight's
 // unrouted watch), and with it the body, so 60 of Codex's 20 MB
@@ -87,6 +88,9 @@ func TestSocketTurnBodiesFreed(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatal("the socket's handler did not end after its client went")
 	}
+	s.trace.mu.Lock()
+	s.trace.bodies = nil
+	s.trace.mu.Unlock()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(bodies) != turns {
@@ -108,6 +112,116 @@ func TestSocketTurnBodiesFreed(t *testing.T) {
 	}
 	if len(kept) > 0 {
 		t.Fatalf("turn bodies %v of %d still kept after the socket's handler ended", kept, turns)
+	}
+}
+
+func TestResponsesSocketReusesTurnBody(t *testing.T) {
+	fresh(t)
+	built := make(chan []byte, 1)
+	socketTurnBody = func(body []byte) { built <- body }
+	t.Cleanup(func() { socketTurnBody = nil })
+
+	reused := make(chan bool, 1)
+	up := &respUp{reply: func(w http.ResponseWriter, r *http.Request, _ int) {
+		select {
+		case body := <-built:
+			reused <- sharesBodyListed(body)
+		default:
+			http.Error(w, "no socket turn body", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"resp_reused","status":"completed","output":[]}}`))
+	}}
+	upstream := httptest.NewServer(withoutAnonymousFixtureProbe(up))
+	t.Cleanup(upstream.Close)
+	if err := provider.Save(provider.Provider{
+		ID: "fake", Name: "Fake", Key: "k", Responses: upstream.URL + "/v1", Models: []string{"m1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, server := sockServer(t)
+	client, _, err := dialSock(t, server, "/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := strings.Replace(userPing, "ping", strings.Repeat("x", 256<<10), 1)
+	if end := last(client.turn(create("", item))); end.Get("type").String() != "response.completed" {
+		t.Fatalf("turn ended as %s", end.Raw)
+	}
+	if !<-reused {
+		t.Fatal("gateway routed a copy of the socket's POST body")
+	}
+	if body := up.body(0); !strings.Contains(string(body), item) {
+		t.Fatal("upstream did not receive the complete input item")
+	}
+}
+
+func TestResponsesSocketDoesNotRetainSpareBodyCapacity(t *testing.T) {
+	fresh(t)
+	built := make(chan []byte, 1)
+	socketTurnBody = func(body []byte) { built <- body }
+	t.Cleanup(func() { socketTurnBody = nil })
+	up := &respUp{}
+	sockUp(t, up)
+	server, httpServer := sockServer(t)
+	client, _, err := dialSock(t, httpServer, "/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := strings.Replace(userPing, `"type":"message"`, `"type":`+strings.Repeat(" ", 256<<10)+`"message"`, 1)
+	item = strings.Replace(item, "ping", strings.Repeat("x", 64<<10), 1)
+	if end := last(client.turn(create("", item))); end.Get("type").String() != "response.completed" {
+		t.Fatalf("turn ended as %s", end.Raw)
+	}
+	body := <-built
+	if cap(body) <= 2*len(body) {
+		t.Fatalf("fixture allocated %d bytes for a %d-byte body", cap(body), len(body))
+	}
+	client.c.CloseNow()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	server.sockets.drain(ctx)
+	if err := ctx.Err(); err != nil {
+		t.Fatal(err)
+	}
+	server.trace.mu.Lock()
+	defer server.trace.mu.Unlock()
+	if len(server.trace.bodies) != 1 {
+		t.Fatalf("trace retained %d prompt bodies", len(server.trace.bodies))
+	}
+	prompt := server.trace.bodies[0].body
+	if cap(prompt) > 2*len(prompt) || &prompt[0] == &body[0] {
+		t.Fatalf("trace retained %d bytes for a %d-byte prompt", cap(prompt), len(prompt))
+	}
+}
+
+func TestResponsesSocketBoundsReconstructedBody(t *testing.T) {
+	fresh(t)
+	up := &respUp{}
+	sockUp(t, up)
+	server := New()
+	server.requestLimits.body = 48 << 10
+	client, _, err := dialSock(t, serveSock(t, server), "/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := strings.Replace(userPing, "ping", strings.Repeat("x", 32<<10), 1)
+	initial := last(client.turn(create("", item)))
+	if initial.Get("type").String() != "response.completed" {
+		t.Fatalf("initial turn ended as %s", initial.Raw)
+	}
+	previous := initial.Get("response.id").String()
+	overflow := last(client.turn(create(previous, item)))
+	if overflow.Get("type").String() != "error" || overflow.Get("status").Int() != http.StatusRequestEntityTooLarge {
+		t.Fatalf("overflow turn ended as %s", overflow.Raw)
+	}
+	if calls := up.calls(); calls != 1 {
+		t.Fatalf("upstream received %d turns after an oversized continuation", calls)
+	}
+	retry := last(client.turn(create(previous, userMore)))
+	if retry.Get("type").String() != "response.completed" {
+		t.Fatalf("shorter continuation ended as %s", retry.Raw)
 	}
 }
 

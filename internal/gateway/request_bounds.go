@@ -260,6 +260,15 @@ func readBoundedRequestBody(w http.ResponseWriter, r *http.Request, limits reque
 	if enc := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); enc != "" && enc != "identity" {
 		declared = -1
 	}
+	if buffered, ok := r.Body.(*socketRequestBody); ok &&
+		declared == int64(len(buffered.data)) && buffered.Len() == len(buffered.data) &&
+		cap(buffered.data) == len(buffered.data) {
+		body := buffered.data
+		buffered.Reset(nil)
+		buffered.data = nil
+		r.Header.Del("Content-Encoding")
+		return textBody(r.Header, body), 0, nil
+	}
 	original := r.Body
 	r.Body = &idleBody{original, controller, limits.readTimeout}
 	defer func() { r.Body = original }()

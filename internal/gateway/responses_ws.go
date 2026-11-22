@@ -681,6 +681,13 @@ func escapedSize(raw []byte) int {
 	return len(raw) + 5*(bytes.Count(raw, []byte("<"))+bytes.Count(raw, []byte(">"))+bytes.Count(raw, []byte("&")))
 }
 
+type socketRequestBody struct {
+	bytes.Reader
+	data []byte
+}
+
+func (*socketRequestBody) Close() error { return nil }
+
 // request is the POST a turn stands for: the upgrade's own request, its
 // URL, Host, address and headers, with the turn as its body.
 func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Request {
@@ -724,7 +731,7 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 	if strings.EqualFold(gjson.GetBytes(body, `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`).String(), "true") {
 		req.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
 	}
-	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.Body = &socketRequestBody{Reader: *bytes.NewReader(body), data: body}
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
