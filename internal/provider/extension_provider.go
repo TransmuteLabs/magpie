@@ -446,8 +446,9 @@ func loginReadingUserKey(agent, user string) string {
 	return agent + "/" + strings.ToLower(user)
 }
 
-func extensionUsageBindings(agent string) (map[string]string, bool) {
-	logins, external := extensionLogins(agent)
+func extensionUsageBindings(agent string, owners *extensionSubscriptionOwners) (map[string]string, bool) {
+	ctx := context.Background()
+	logins, external := extensionLoginsWithOwnersContext(ctx, agent, owners)
 	if !external {
 		return nil, false
 	}
@@ -649,17 +650,25 @@ func extensionLogins(agent string) ([]Login, bool) {
 }
 
 func extensionLoginsContext(ctx context.Context, agent string) ([]Login, bool) {
+	return extensionLoginsWithOwnersContext(ctx, agent, nil)
+}
+
+func extensionLoginsWithOwnersContext(ctx context.Context, agent string, owners *extensionSubscriptionOwners) ([]Login, bool) {
 	if strings.HasPrefix(agent, "extension-") {
-		return listExtensionLoginsContext(ctx, agent), true
+		return listExtensionLoginsWithOwnersContext(ctx, agent, owners), true
 	}
-	owners := heldSubscriptionOwnersContext(ctx)
+	current := owners
+	if current == nil {
+		held := heldSubscriptionOwnersContext(ctx)
+		current = &held
+	}
 	if ctx.Err() != nil {
 		return nil, true
 	}
-	if _, owned := owners.byPublicID(agent); !owned {
+	if _, owned := current.byPublicID(agent); !owned {
 		return nil, false
 	}
-	return listExtensionLoginsContext(ctx, agent), true
+	return listExtensionLoginsWithOwnersContext(ctx, agent, owners), true
 }
 
 // listExtensionLogins accepts an empty agent to list every SDK account.
@@ -668,7 +677,16 @@ func listExtensionLogins(agent string) []Login {
 }
 
 func listExtensionLoginsContext(ctx context.Context, agent string) []Login {
-	providers, saved, err := providerExtensionsContext(ctx)
+	return listExtensionLoginsWithOwnersContext(ctx, agent, nil)
+}
+
+func listExtensionLoginsWithOwnersContext(ctx context.Context, agent string, owners *extensionSubscriptionOwners) []Login {
+	providers, saved, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), func() extensionSubscriptionOwners {
+		if owners != nil {
+			return *owners
+		}
+		return heldSubscriptionOwnersContext(ctx)
+	})
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("extension logins unavailable: %v", err)

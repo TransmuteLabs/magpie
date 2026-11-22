@@ -138,6 +138,10 @@ func localSubscription(quota SubscriptionQuota) bool {
 }
 
 func subscriptionQuotaCheck(ctx context.Context, quotas ...SubscriptionQuota) func(SubscriptionQuota) bool {
+	return subscriptionQuotaCheckWithOwners(ctx, nil, quotas...)
+}
+
+func subscriptionQuotaCheckWithOwners(ctx context.Context, selected *extensionSubscriptionOwners, quotas ...SubscriptionQuota) func(SubscriptionQuota) bool {
 	discovery := sync.OnceValues(func() (bool, error) { return currentUsageDiscovery(ctx) })
 	snapshot := sync.OnceValue(func() quotaUsageSnapshots {
 		if off, err := discovery(); err != nil || off {
@@ -146,6 +150,9 @@ func subscriptionQuotaCheck(ctx context.Context, quotas ...SubscriptionQuota) fu
 		return readQuotaUsageSnapshots(ctx, quotas, true)
 	})
 	owners := sync.OnceValue(func() extensionSubscriptionOwners {
+		if selected != nil {
+			return *selected
+		}
 		host := providerExtensionHost()
 		if manager, ok := host.(*extensionhost.Manager); ok {
 			if usage := snapshot()[manager]; usage != nil {

@@ -274,7 +274,7 @@ func lastAllowances(agent string) map[string]Allowance {
 		}
 	}
 	c.Unlock()
-	current := currentCommunityAllowanceBindings(context.Background(), community)
+	current := currentCommunityAllowanceBindings(context.Background(), community, nil)
 	for user := range community {
 		if _, valid := current[user]; !valid {
 			delete(out, user)
