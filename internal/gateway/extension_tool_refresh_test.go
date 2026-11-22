@@ -514,6 +514,7 @@ func TestExtensionProviderExpiryPreflightRecheckedAtRefreshHandoff(test *testing
 		{name: "same CAS merely reorders config", minor: 8, change: "reordered configuration", wantRefresh: true, wantExecute: true},
 		{name: "API 1.0 uses empty config", minor: 0, sign: true, wantRefresh: true, wantExecute: true},
 		{name: "after handoff keeps the rotation", minor: 9, sign: true, change: "login off", afterHandoff: true, wantRefresh: true},
+		{name: "after handoff rejects inference on replacement config", minor: 9, sign: true, change: "same CAS configuration", afterHandoff: true, wantRefresh: true},
 	} {
 		test.Run(scenario.name, func(test *testing.T) {
 			observed, reply := make(chan struct{}), make(chan struct{})

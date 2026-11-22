@@ -875,6 +875,14 @@ Streaming data uses bounded chunks and synchronous pipe writes, preserving
 consumer backpressure. Usage events provide normalized token totals to the
 existing ledger.
 
+Starting with SDK 1.9, an outbound request carries the configuration
+selected at signing, or at preparation for a direct request. Worker
+acquisition and retained inbound leases must match its effective values,
+including when the saved configuration changes at the same CAS version.
+Equivalent JSON and settings defaults preserve the selection. A credential
+refresh can publish its completed rotation while the subsequent inference
+still requires its original configuration.
+
 The gateway uses the SDK account catalog and declared operations for
 embedding and rerank discovery. `/v1/models?kind=embedding,rerank`,
 the Providers inventory and inferred retrieval groups share the same SDK

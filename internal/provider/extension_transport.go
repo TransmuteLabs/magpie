@@ -55,20 +55,20 @@ func (binding *extensionAccount) signRequest(ctx context.Context, request *http.
 	return nil
 }
 
-func (binding *extensionAccount) prepareRequest(ctx context.Context) (*extensionAccount, error) {
+func (binding *extensionAccount) requestSelection(ctx context.Context) (extensionSelection, error) {
 	if pending, ok := ctx.Value(extensionSigningKey{}).(*atomic.Pointer[extensionSigning]); ok {
 		if signing := pending.Swap(nil); signing != nil && signing.binding == binding &&
 			signing.selection.scope.Generation == binding.currentScope().Generation {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return extensionSelection{}, err
 			}
 			if binding.manifest.Contract.Has(sdk.AccountAuth) && settings.AccountDiscoveryOff() {
-				return nil, errAccountDiscoveryOff
+				return extensionSelection{}, errAccountDiscoveryOff
 			}
-			return binding.prepareSelection(ctx, signing.selection, checkExtensionLoginForExecute)
+			return signing.selection, nil
 		}
 	}
-	return binding.prepareWithRefreshPolicy(ctx, checkExtensionLoginForExecute)
+	return binding.checkedSelection(ctx, binding.manifest.Contract.Version.Minor >= 9)
 }
 
 type extensionResponseBody struct {
@@ -195,7 +195,11 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 	if attempt := extensionAttemptOf(ctx); attempt != nil && attempt.FinalRefusal() != nil {
 		return nil, errors.New("final refusal requires an outer routing decision")
 	}
-	prepared, err := binding.prepareRequest(ctx)
+	selected, err := binding.requestSelection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := binding.prepareSelection(ctx, selected, checkExtensionLoginForExecute)
 	if err != nil {
 		return nil, err
 	}
@@ -256,8 +260,7 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 		})
 	}
 	if binding.manifest.Contract.Version.Minor >= 9 {
-		revision, config, _ := strings.Cut(binding.modelKey, "\x00")
-		ctx = extensionhost.WithProviderExecuteSelection(ctx, revision, config, binding.enableGeneration)
+		ctx = extensionhost.WithProviderExecuteConfig(ctx, selected.entry.Revision, selected.config, selected.entry.EnableGeneration)
 	}
 	scope.Operation, scope.Attempt = randomToken(18), 1
 	scope.Session = request.Header.Get(ConversationHeader)

@@ -619,15 +619,25 @@ func (m *Manager) retire(worker *managedWorker) <-chan struct{} {
 type expectedGeneration struct {
 	packageRevision  string
 	configVersion    string
+	configValues     json.RawMessage
 	enableGeneration *string
 	exact            bool
 }
 
-func (expected *expectedGeneration) matches(entry Installed, config string) bool {
-	return expected == nil ||
-		(expected.packageRevision == entry.Revision || !expected.exact && expected.packageRevision == "") &&
-			(expected.configVersion == config || !expected.exact && expected.configVersion == "") &&
-			(expected.enableGeneration == nil || *expected.enableGeneration == entry.EnableGeneration)
+func (expected *expectedGeneration) matches(entry Installed, config sdk.ConfigSnapshot) bool {
+	if expected == nil {
+		return true
+	}
+	if (expected.packageRevision != entry.Revision && (expected.exact || expected.packageRevision != "")) ||
+		(expected.configVersion != config.Version && (expected.exact || expected.configVersion != "")) ||
+		(expected.enableGeneration != nil && *expected.enableGeneration != entry.EnableGeneration) {
+		return false
+	}
+	if expected.configValues == nil || bytes.Equal(config.Values, expected.configValues) {
+		return true
+	}
+	values, err := effectiveModuleConfig(entry.Manifest, expected.configValues)
+	return err == nil && sameModuleConfig(config, sdk.ConfigSnapshot{Version: expected.configVersion, Values: values})
 }
 
 type providerExecuteSelectionKey struct{}
@@ -638,8 +648,13 @@ func WithProviderExecutePolicy(ctx context.Context, check func(context.Context) 
 }
 
 func WithProviderExecuteSelection(ctx context.Context, revision, config, epoch string) context.Context {
+	return WithProviderExecuteConfig(ctx, revision, sdk.ConfigSnapshot{Version: config}, epoch)
+}
+
+func WithProviderExecuteConfig(ctx context.Context, revision string, config sdk.ConfigSnapshot, epoch string) context.Context {
 	return context.WithValue(ctx, providerExecuteSelectionKey{}, &expectedGeneration{
-		packageRevision: revision, configVersion: config, enableGeneration: &epoch, exact: true,
+		packageRevision: revision, configVersion: config.Version, configValues: bytes.Clone(config.Values),
+		enableGeneration: &epoch, exact: true,
 	})
 }
 
@@ -673,7 +688,7 @@ func (m *Manager) selectGenerationWorker(ctx context.Context, id string, expecte
 			if err == nil {
 				current = &generation
 				entry := generation.entry
-				if !expected.matches(entry, generation.config.Version) {
+				if !expected.matches(entry, generation.config) {
 					err = errors.New("module generation changed before acquisition")
 				} else {
 					err = sdk.CheckCompatibility(entry.Manifest)
@@ -1007,7 +1022,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 		}
 	}
 	expected := providerExecuteSelection(ctx, method)
-	if !expected.matches(l.worker.entry, l.ConfigVersion()) {
+	if !expected.matches(l.worker.entry, l.worker.config) {
 		return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("module generation changed before provider execution")}
 	}
 	if method == sdk.MethodProviderExecute && !validated {

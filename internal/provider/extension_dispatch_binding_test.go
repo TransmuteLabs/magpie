@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -47,7 +48,8 @@ func main() {
 		sdk.MethodProviderExecute: func(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
 			module, _ := sdk.ModuleContextFrom(ctx)
 			reply := manifest.Version + "/" + module.Config.Version
-			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusForbidden}); err != nil {
+			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: http.StatusForbidden,
+				Headers: map[string][]string{"X-Fixture-Config": {string(module.Config.Values)}}}); err != nil {
 				return nil, err
 			}
 			if err := stream.Emit(ctx, "data", []byte(reply)); err != nil {
@@ -315,6 +317,161 @@ func TestMessagesDispatchBindingFollowsActualWorker(t *testing.T) {
 			if actual == "" || actual != want.ExtensionBindingIdentity() ||
 				scenario.minor == 8 && actual == selected.ExtensionBindingIdentity() {
 				t.Fatal("refusal identity does not follow the worker that actually answered")
+			}
+		})
+	}
+}
+
+func TestExtensionProviderPinsEffectiveDispatchConfig(t *testing.T) {
+	source, entry := buildDispatchBindingWorker(t)
+	const initial = `{"mode":"one","safe":true}`
+	const changed = `{"mode":"two","safe":true}`
+	const reordered = `{"safe":true,"mode":"one"}`
+	const payload = `{"model":"m1"}`
+
+	for _, scenario := range []struct {
+		name, replacement string
+		heldInbound       bool
+		settings          []sdk.FeatureSetting
+	}{
+		{name: "effective replacement", replacement: changed},
+		{name: "retained inbound", replacement: changed, heldInbound: true},
+		{name: "equal reorder", replacement: reordered},
+		{name: "with defaults", replacement: reordered, settings: []sdk.FeatureSetting{
+			{Name: "route", Kind: sdk.FeatureSettingString, Title: "Route", Default: "default"},
+		}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			manager := extensionhost.NewManager(t.TempDir())
+			t.Cleanup(func() { _ = manager.Close(context.Background()) })
+			minor := 9
+			if len(scenario.settings) != 0 {
+				minor = sdk.ModuleSettingsAPIMinor
+			}
+			manifest := sdk.Manifest{Schema: sdk.ManifestSchema, ID: "fixture.signed-config", Version: "1.0.0", Runtime: "exec", Entry: entry,
+				Contract:  sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: minor}, Capabilities: []sdk.Capability{sdk.OutboundExecutor, sdk.InboundCodec}},
+				Inbounds:  []sdk.InboundDescriptor{{ID: "fixture", Path: "/fixture/signed-config"}},
+				Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture", Protocols: []protocolext.Protocol{"messages"}}},
+				Settings:  scenario.settings,
+			}
+			raw, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			installed, err := manager.Install(ctx, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.CompareAndSwapModuleConfig(ctx, manifest.ID, "0", json.RawMessage(initial)); err != nil {
+				t.Fatal(err)
+			}
+			selectProvider := func() Provider {
+				t.Helper()
+				providers, err := discoverExtensionModuleContext(ctx, manager, installed, heldSubscriptionOwners)
+				if err != nil || len(providers) != 1 {
+					t.Fatalf("discover dispatch fixture: %d selections: %v", len(providers), err)
+				}
+				return providers[0]
+			}
+			selected := selectProvider()
+			namespace := filepath.Join(manager.Namespace(), "private", manifest.ID)
+			paths, err := filepath.Glob(filepath.Join(namespace, "state", "*.json"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("find config state: %v, %v", paths, err)
+			}
+			path := paths[0]
+			replace := func() {
+				t.Helper()
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := bytes.Replace(raw, []byte(initial), []byte(scenario.replacement), 1)
+				if bytes.Equal(raw, body) || len(raw) != len(body) {
+					t.Fatal("fixture replacement must change bytes at identical size")
+				}
+				next := path + ".replacement"
+				if err := os.WriteFile(next, body, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(next, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(next, path); err != nil {
+					t.Fatal(err)
+				}
+				current, err := os.Stat(path)
+				if err != nil || os.SameFile(current, info) || !current.ModTime().Equal(info.ModTime()) {
+					t.Fatalf("fixture did not replace config at the same timestamp: %v", err)
+				}
+			}
+			signedCtx := ctx
+			requestBody := &dispatchSwapReader{Reader: strings.NewReader(payload), swap: replace}
+			if scenario.heldInbound {
+				signedCtx = extensionhost.WithInboundLease(ctx)
+				registry, err := manager.Protocols()
+				if err != nil {
+					t.Fatal(err)
+				}
+				adapter, ok := registry.Lookup(manifest.Inbounds[0].Path)
+				if !ok {
+					t.Fatal("inbound codec missing")
+				}
+				call := protocolext.Bind(adapter, signedCtx)
+				t.Cleanup(func() { _ = call.Reply(httptest.NewRecorder()).Finish(io.EOF) })
+				if _, err := call.Decode(signedCtx, nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				replace()
+				requestBody.swap = nil
+			}
+			request := func(ctx context.Context, selected Provider, body io.Reader) *http.Request {
+				return httptest.NewRequestWithContext(ctx, http.MethodPost, selected.Anthropic+"/messages", body)
+			}
+			req := request(signedCtx, selected, requestBody)
+			if err := selected.Sign(signedCtx, req, Anthropic, []byte(payload)); err != nil {
+				t.Fatal(err)
+			}
+			response, err := selected.Do(http.DefaultClient, req)
+			if scenario.replacement == changed {
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				var refusal *extensionhost.OutcomeError
+				if response != nil || !errors.As(err, &refusal) || refusal.Outcome != "not-started" {
+					t.Errorf("obsolete selection reached the worker: response=%t error=%v", response != nil, err)
+				}
+				operations, readErr := os.ReadDir(filepath.Join(namespace, "operations"))
+				if len(operations) != 0 || readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+					t.Errorf("selection mismatch should precede journal admission: entries=%d error=%v", len(operations), readErr)
+				}
+				fresh := selectProvider()
+				response, err = fresh.Do(http.DefaultClient, request(ctx, fresh, strings.NewReader(payload)))
+			}
+			if err != nil || response == nil {
+				t.Fatalf("current configuration did not execute: response=%t error=%v", response != nil, err)
+			}
+			wire, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			var config map[string]any
+			wantMode := "one"
+			if scenario.replacement == changed {
+				wantMode = "two"
+			}
+			configErr := json.Unmarshal([]byte(response.Header.Get("X-Fixture-Config")), &config)
+			if response.StatusCode != http.StatusForbidden || string(wire) != "1.0.0/1" ||
+				readErr != nil || closeErr != nil || configErr != nil || config["mode"] != wantMode ||
+				len(scenario.settings) != 0 && config["route"] != "default" {
+				t.Fatalf("worker configuration: %d %q %v (read=%v close=%v config=%v), want mode %q",
+					response.StatusCode, wire, config, readErr, closeErr, configErr, wantMode)
 			}
 		})
 	}
