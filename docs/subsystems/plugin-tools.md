@@ -36,7 +36,10 @@ Only the durable, exact refresh successor with usable expiry is adopted;
 manual credential replacements do not transfer the old call's authority.
 The selected package, configuration, enablement generation, account and network
 policy are checked again after the worker queue opens, at acceptance and
-before successful result publication. A refusal after the queue leaves a
+before successful result publication. The selected effective configuration
+must match the worker and the current settings, including after a file
+replacement that preserves the CAS version. Reordering equivalent settings
+keeps the selection valid. A refusal after the queue leaves a
 `not-started` receipt before the worker receives the tool call. Disabling and
 re-enabling a module revokes a prepared call even
 when its package and configuration stay the same. Disabled, paused or held

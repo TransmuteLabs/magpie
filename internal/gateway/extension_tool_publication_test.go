@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,11 +20,17 @@ import (
 func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 	for _, route := range []string{"MCP", "Library text", "Library result"} {
 		test.Run(route, func(test *testing.T) {
-			for _, mode := range []string{"unchanged", "account off", "manual replacement", "configuration", "module off", "module reenabled", "accepted unchanged", "accepted account off", "uncertain unchanged", "uncertain account off"} {
+			for _, mode := range []string{"unchanged", "account off", "manual replacement", "configuration", "same CAS configuration", "reordered configuration", "module off", "module reenabled", "accepted unchanged", "accepted account off", "uncertain unchanged", "uncertain account off"} {
 				test.Run(mode, func(test *testing.T) {
 					fixture := installToolRefreshFixture(test, nil)
+					if mode == "same CAS configuration" || mode == "reordered configuration" {
+						if _, err := fixture.manager.CompareAndSwapModuleConfig(test.Context(), fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
+							test.Fatal(err)
+						}
+					}
 					started, release := make(chan sdk.Scope, 1), make(chan struct{})
 					var releaseOnce sync.Once
+					var calls atomic.Int32
 					defer releaseOnce.Do(func() { close(release) })
 					server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 						if request.Method != http.MethodPost || (request.URL.Path != "/" && request.URL.Path != "/tool") {
@@ -38,6 +45,12 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 						var call sdk.Call
 						if err := json.NewDecoder(request.Body).Decode(&call); err != nil {
 							test.Error(err)
+							writer.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						if calls.Add(1) != 1 {
+							writer.WriteHeader(http.StatusBadRequest)
+							return
 						}
 						started <- call.Scope
 						select {
@@ -143,6 +156,8 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 						}
 					case "configuration":
 						_, err = fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(`{"publication":"changed"}`))
+					case "same CAS configuration", "reordered configuration":
+						replaceToolConfigAtSameVersion(test, fixture, mode)
 					case "module off":
 						err = extension.NewCatalog(fixture.manager.Namespace()).SetEnabled(ctx, fixture.scope.Plugin, false)
 					case "module reenabled":
@@ -159,7 +174,7 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 					select {
 					case result := <-done:
 						joined = true
-						successful := mode == "unchanged" || mode == "accepted unchanged"
+						successful := mode == "unchanged" || mode == "accepted unchanged" || mode == "reordered configuration"
 						if successful {
 							if result.err != nil {
 								test.Errorf("unchanged authority failed: %v", result.err)
@@ -183,6 +198,9 @@ func TestExtensionToolPublicationKeepsSelectedAuthority(test *testing.T) {
 						}
 						if err != nil || receipt.State != after || receipt.Scope != dispatched {
 							test.Errorf("publication changed original receipt authority: %+v %v; want %s %+v", receipt, err, after, dispatched)
+						}
+						if calls.Load() != 1 {
+							test.Errorf("tool ran %d times, want one dispatch without replay", calls.Load())
 						}
 					case <-ctx.Done():
 						test.Fatal("tool did not join after releasing reply")

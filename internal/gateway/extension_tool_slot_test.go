@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,11 +25,16 @@ import (
 )
 
 func TestExtensionToolAccountRecheckedAfterWorkerQueue(test *testing.T) {
-	for _, change := range []string{"unchanged", "login off", "account replaced", "configuration", "discovery off"} {
+	for _, change := range []string{"unchanged", "login off", "account replaced", "configuration", "same CAS configuration", "reordered configuration", "discovery off"} {
 		test.Run(change, func(test *testing.T) {
 			fixture := installToolRefreshFixture(test, nil)
 			ctx, cancel := context.WithTimeout(test.Context(), 30*time.Second)
 			defer cancel()
+			if change == "same CAS configuration" || change == "reordered configuration" {
+				if _, err := fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
+					test.Fatal(err)
+				}
+			}
 			requestID := randomToken()
 			ctx = extension.WithRequestMetadata(ctx, extension.RequestMetadata{Plugin: fixture.scope.Plugin, RequestID: requestID})
 			identity, _ := json.Marshal([]string{fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account, "", "", requestID})
@@ -152,6 +160,8 @@ func TestExtensionToolAccountRecheckedAfterWorkerQueue(test *testing.T) {
 					}
 				})
 				_, err = peer.CompareAndSwapModuleConfig(ctx, scope.Plugin, "0", json.RawMessage(`{"updated":true}`))
+			case "same CAS configuration", "reordered configuration":
+				replaceToolConfigAtSameVersion(test, fixture, change)
 			case "discovery off":
 				current := settings.Load()
 				current.NoAccountDiscovery = true
@@ -161,17 +171,18 @@ func TestExtensionToolAccountRecheckedAfterWorkerQueue(test *testing.T) {
 				test.Fatal(err)
 			}
 			release()
+			successful := change == "unchanged" || change == "reordered configuration"
 			select {
 			case response := <-result:
 				reply := readMCP(test, response)
-				if reply.Result.IsError != (change != "unchanged") {
+				if reply.Result.IsError == successful {
 					test.Errorf("unexpected MCP outcome: %s", response.Body)
 				}
 			case <-ctx.Done():
 				test.Fatal("queued tool did not finish")
 			}
 			wantCalls, wantState := int32(0), "not-started"
-			if change == "unchanged" {
+			if successful {
 				wantCalls, wantState = 1, "completed"
 			}
 			receipt, err := fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
@@ -180,5 +191,51 @@ func TestExtensionToolAccountRecheckedAfterWorkerQueue(test *testing.T) {
 					receipt.State, wantCalls, wantState, err)
 			}
 		})
+	}
+}
+
+const toolConfigOriginal = `{"mode":"fast","limit":1}`
+
+func replaceToolConfigAtSameVersion(test *testing.T, fixture *toolRefreshFixture, change string) {
+	test.Helper()
+	directory := filepath.Join(fixture.manager.Namespace(), "private", fixture.scope.Plugin, "state")
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 {
+		test.Fatalf("want one saved module configuration: %v, %v", entries, err)
+	}
+	path := filepath.Join(directory, entries[0].Name())
+	info, err := os.Stat(path)
+	if err != nil {
+		test.Fatal(err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		test.Fatal(err)
+	}
+	replacement := `{"mode":"safe","limit":1}`
+	if change == "reordered configuration" {
+		replacement = `{"limit":1,"mode":"fast"}`
+	}
+	body := bytes.Replace(original, []byte(toolConfigOriginal), []byte(replacement), 1)
+	if bytes.Equal(body, original) || len(body) != len(original) {
+		test.Fatal("configuration replacement did not preserve size")
+	}
+	next := path + ".replacement"
+	if err := os.WriteFile(next, body, 0600); err != nil {
+		test.Fatal(err)
+	}
+	if err := os.Chtimes(next, info.ModTime(), info.ModTime()); err != nil {
+		test.Fatal(err)
+	}
+	if err := os.Rename(next, path); err != nil {
+		test.Fatal(err)
+	}
+	replaced, err := os.Stat(path)
+	if err != nil || os.SameFile(info, replaced) || replaced.Size() != info.Size() || !replaced.ModTime().Equal(info.ModTime()) {
+		test.Fatalf("replacement did not preserve stamp or change file identity: %v, %v", replaced, err)
+	}
+	config, err := fixture.manager.ModuleConfig(test.Context(), fixture.scope.Plugin)
+	if err != nil || config.Version != "1" || string(config.Values) != replacement {
+		test.Fatalf("replacement configuration was not read at CAS 1: %+v, %v", config, err)
 	}
 }

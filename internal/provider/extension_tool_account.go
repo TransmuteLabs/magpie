@@ -39,7 +39,10 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		}
 		scope.Provider, scope.Account, scope.Generation = account.Provider, account.ID, account.Generation
 	}
-	revision := entry.Revision + "\x00" + config.Version
+	runtimeSelection, err := extensionhost.NewToolAccountSelection(host.Namespace(), entry, config)
+	if err != nil {
+		return fail(err)
+	}
 	choice, networkSelected := "", false
 	public, err := readSubscriptionIdentity(ctx, scope)
 	if err != nil {
@@ -75,8 +78,11 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 				return errors.New("extension account is off, paused or unavailable")
 			}
 		}
-		if _, err := selectedExtensionModule(current, host, scope.Plugin, revision, entry.EnableGeneration,
-			entry.Manifest.Contract.Version.Minor >= 1); err != nil {
+		active, activeConfig, err := toolAccountModule(current, host, scope.Plugin)
+		if err != nil {
+			return err
+		}
+		if err := runtimeSelection.CheckConfig(active, activeConfig); err != nil {
 			return err
 		}
 		network, err := extensionNetworkContext(current, scope)
@@ -154,7 +160,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	if err := admit(ctx); err != nil {
 		return fail(err)
 	}
-	return extensionhost.WithToolAccountCheck(ctx, host.Namespace(), entry.Revision, config.Version, entry.EnableGeneration, admit), scope, nil
+	return extensionhost.WithToolAccountCheck(ctx, runtimeSelection, admit), scope, nil
 }
 
 func toolAccountModule(ctx context.Context, host extensionProviderHost, id string) (extensionhost.Installed, sdk.ConfigSnapshot, error) {
@@ -164,7 +170,7 @@ func toolAccountModule(ctx context.Context, host extensionProviderHost, id strin
 		return registry.ActiveModuleConfig(ctx, id)
 	}
 	entry, err := enabledExtensionModule(ctx, host, id)
-	config := sdk.ConfigSnapshot{Version: "0"}
+	config := sdk.ConfigSnapshot{Version: "0", Values: []byte("{}")}
 	if err == nil && entry.Manifest.Contract.Version.Minor >= 1 {
 		config, err = host.ModuleConfig(ctx, id)
 	}

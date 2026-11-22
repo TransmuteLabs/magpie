@@ -1283,7 +1283,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 	admit := m.subscriptionAdmission(ctx, manifest, method, scope, authMutation)
 	var recheckQueuedTool bool
 	if method == sdk.MethodToolCall && scope.Account != "" && admit == nil {
-		_, recheckQueuedTool = ctx.Value(toolAccountCheckKey{}).(toolAccountCheck)
+		_, recheckQueuedTool = ctx.Value(toolAccountCheckKey{}).(ToolAccountSelection)
 	}
 	if method == sdk.MethodProviderExecute && (manifest.Contract.Version.Minor >= 1 || expected != nil || scope.Account != "") {
 		admit = l.providerExecuteAdmission(scope, expected != nil, admit)

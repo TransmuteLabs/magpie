@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,9 @@ import (
 // checkLeasedTool is the final authority check. A discovery-time catalog
 // check cannot authorize a replacement worker with different exposure.
 func checkLeasedTool(ctx context.Context, lease *Lease, params any) (context.Context, error) {
-	if selected, ok := ctx.Value(toolAccountCheckKey{}).(toolAccountCheck); ok {
-		if lease.manager.Namespace() != selected.namespace || !selected.generation.matches(lease.worker.entry, lease.ConfigVersion()) {
+	if selected, ok := ctx.Value(toolAccountCheckKey{}).(ToolAccountSelection); ok {
+		if lease.manager.Namespace() != selected.namespace || !selected.matches(lease.worker.entry) ||
+			!sameModuleConfig(lease.worker.config, selected.config) {
 			return ctx, errors.New("extension tool account selection belongs to another runtime generation")
 		}
 	}
@@ -42,14 +44,56 @@ func checkLeasedTool(ctx context.Context, lease *Lease, params any) (context.Con
 type toolScopeKey struct{}
 
 type toolAccountCheckKey struct{}
-type toolAccountCheck struct {
-	namespace  string
-	generation expectedGeneration
+
+type ToolAccountSelection struct {
+	namespace        string
+	revision         string
+	directory        string
+	enableGeneration string
+	config           sdk.ConfigSnapshot
+}
+
+func NewToolAccountSelection(namespace string, entry Installed, config sdk.ConfigSnapshot) (ToolAccountSelection, error) {
+	values, err := effectiveModuleConfig(entry.Manifest, config.Values)
+	if err != nil {
+		return ToolAccountSelection{}, err
+	}
+	if len(values) == 0 {
+		return ToolAccountSelection{}, errors.New("extension tool configuration is unavailable")
+	}
+	config.Values = bytes.Clone(values)
+	return ToolAccountSelection{
+		namespace: namespace, revision: entry.Revision, directory: entry.Directory,
+		enableGeneration: entry.EnableGeneration, config: config,
+	}, nil
+}
+
+func (selected ToolAccountSelection) matches(entry Installed) bool {
+	return selected.revision == entry.Revision && selected.directory == entry.Directory &&
+		selected.enableGeneration == entry.EnableGeneration
+}
+
+func (selected ToolAccountSelection) CheckConfig(entry Installed, config sdk.ConfigSnapshot) error {
+	if !selected.matches(entry) {
+		return errors.New("extension tool package or enablement changed")
+	}
+	if config.Version != selected.config.Version {
+		return errors.New("extension tool configuration changed")
+	}
+	if bytes.Equal(config.Values, selected.config.Values) {
+		return nil
+	}
+	values, err := effectiveModuleConfig(entry.Manifest, config.Values)
+	config.Values = values
+	if err != nil || !sameModuleConfig(config, selected.config) {
+		return errors.New("extension tool configuration changed")
+	}
+	return nil
 }
 
 // WithToolAccountCheck pins the prepared account's runtime and retains its
 // policy check through dispatch, acceptance and host callbacks.
-func WithToolAccountCheck(ctx context.Context, namespace, revision, config, epoch string, check func(context.Context) error) context.Context {
+func WithToolAccountCheck(ctx context.Context, selected ToolAccountSelection, check func(context.Context) error) context.Context {
 	previous, _ := ctx.Value(windowAdmissionKey{}).(func(context.Context) error)
 	ctx = context.WithValue(ctx, windowAdmissionKey{}, func(current context.Context) error {
 		if previous != nil {
@@ -59,12 +103,7 @@ func WithToolAccountCheck(ctx context.Context, namespace, revision, config, epoc
 		}
 		return check(current)
 	})
-	return context.WithValue(ctx, toolAccountCheckKey{}, toolAccountCheck{
-		namespace: namespace,
-		generation: expectedGeneration{
-			packageRevision: revision, configVersion: config, enableGeneration: &epoch, exact: true,
-		},
-	})
+	return context.WithValue(ctx, toolAccountCheckKey{}, selected)
 }
 
 // WithToolScope carries authority resolved by the host for one tool call.
