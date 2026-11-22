@@ -76,7 +76,7 @@ func (m *Manager) checkResultPublication(ctx context.Context, invocation *invoca
 	proof.active.Store(true)
 	defer proof.active.Store(false)
 	ctx = context.WithValue(ctx, publicationAuthorityKey{}, proof)
-	if _, err := m.authForContext(ctx, AccountPublicationScope(ctx, proof.namespace, invocation.scope)); err != nil {
+	if err := m.checkAccountScope(ctx, AccountPublicationScope(ctx, proof.namespace, invocation.scope)); err != nil {
 		return err
 	}
 	return checkWindowAdmission(ctx)

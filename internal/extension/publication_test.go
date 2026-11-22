@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,49 @@ import (
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestAccountTerminalPublicationDoesNotCopyAuth(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeRoutingManager(t, manager)
+	const paddingSize = 96 << 10
+	const checks = 64
+	scope := storeTestScope()
+	accounts := []Account{
+		{Plugin: scope.Plugin, Provider: scope.Provider, ID: "short", Auth: json.RawMessage(`{"token":"small"}`)},
+		{Plugin: scope.Plugin, Provider: scope.Provider, ID: "large", Auth: json.RawMessage(`{"token":"` + strings.Repeat("x", paddingSize) + `"}`)},
+	}
+	for index, account := range accounts {
+		var err error
+		accounts[index], err = manager.Store().SaveAccount(account, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var allocations [2]uint64
+	for index, account := range accounts {
+		selected := scope
+		selected.Account, selected.Generation = account.ID, account.Generation
+		invocation := &invocationAuthority{scope: selected}
+		ctx := context.WithValue(t.Context(), hostAuthorityKey{}, hostAuthority{invocation: invocation})
+		if err := manager.checkResultPublication(ctx, invocation); err != nil {
+			t.Fatal(err)
+		}
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range checks {
+			if err := manager.checkResultPublication(ctx, invocation); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runtime.ReadMemStats(&after)
+		allocations[index] = after.TotalAlloc - before.TotalAlloc
+	}
+	t.Logf("terminal allocation B/check: small auth=%d, large auth=%d", allocations[0]/checks, allocations[1]/checks)
+	if allocations[1] > allocations[0]+checks*paddingSize/2 {
+		t.Fatalf("publication allocated %d B/check for large selected credentials in the same account file",
+			(allocations[1]-allocations[0])/checks)
+	}
+}
 
 func TestAccountReplacementTerminalPublication(t *testing.T) {
 	for _, mode := range []string{"success", "manual successor", "admission revoked", "prepared selection"} {
