@@ -189,11 +189,14 @@ func pickBefore(rows []string, current string) string {
 // ledger's Image description and Web search calls; Image and Video
 // generation, which no call of the ledger names as Automatic's, are held
 // to the pick now.
-func seedAutoPicks() {
+func seedAutoPicks(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	heldPicks.Lock()
 	f, ok := readAutoPicks()
 	heldPicks.Unlock()
-	if !ok || f.Seeded {
+	if !ok || f.Seeded || ctx.Err() != nil {
 		return
 	}
 	var vision, search []string
@@ -210,6 +213,9 @@ func seedAutoPicks() {
 			search = append(search, r.Provider)
 		}
 	})
+	if ctx.Err() != nil {
+		return
+	}
 	seed := autoPicksFile{Seeded: true}
 	cur := providerOfRef(AutoVision())
 	seed.Vision = cur
@@ -226,7 +232,7 @@ func seedAutoPicks() {
 	seed.Video = providerOfRef(AutoVideomaker())
 	heldPicks.Lock()
 	defer heldPicks.Unlock()
-	if f, ok := readAutoPicks(); ok && !f.Seeded {
+	if f, ok := readAutoPicks(); ok && !f.Seeded && ctx.Err() == nil {
 		writeAutoPicks(seed)
 	}
 }
@@ -248,7 +254,12 @@ func searcherFor(pid string) bool {
 	return m != ""
 }
 
-// KeepAutoPicksHeld begins the holds once the gateway serves.
-func KeepAutoPicksHeld(context.Context) { seedAutoPicks() }
-
-func init() { WhileServing = append(WhileServing, KeepAutoPicksHeld) }
+func startAutoPicks(ctx context.Context) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	var worker sync.WaitGroup
+	worker.Go(func() { seedAutoPicks(ctx) })
+	return func() {
+		cancel()
+		worker.Wait()
+	}
+}

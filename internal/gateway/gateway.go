@@ -1046,7 +1046,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		for _, f := range WhileServing {
 			go f(ctx)
 		}
-		return provider.KeepExtensionsSignedIn(ctx, s.extensions)
+		stopAutoPicks := startAutoPicks(ctx)
+		stopSignIns := provider.KeepExtensionsSignedIn(ctx, s.extensions)
+		return func() {
+			stopAutoPicks()
+			stopSignIns()
+		}
 	})
 	stopRelease := context.AfterFunc(ctx, releaseServing)
 	defer releaseServing()

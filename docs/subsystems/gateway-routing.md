@@ -3157,9 +3157,11 @@ held. Allowance still comes first for the moment (above), and the hold
 stays. A model picked in Settings is the user's and no hold touches it;
 the picker shows Automatic's pick as `Automatic · <model>`.
 
-Holds begin once, when the gateway first serves (`KeepAutoPicksHeld`,
-`seedAutoPicks`, `Seeded`); until then each pick is made as before, and a
-file that can't be read holds nothing and is not written over. The seed
+Holds begin once, when the gateway first serves (`startAutoPicks`,
+`seedAutoPicks`, `Seeded`). Gateway shutdown cancels seeding and waits for
+it to finish before releasing the serving lock. Until seeding completes,
+each pick is made as before, and a file that can't be read holds nothing
+and is not written over. The seed
 reads the last 30 days of the ledger: Image description calls (`vision`)
 and the searcher's Web search calls (`web_search`, not `SourceSearch`). A
 slot taken over by a provider added later (`pickBefore`: the one that
