@@ -1,13 +1,16 @@
 package provider
 
 import (
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Codex's list's tag is asked for on every GET of its models and every
@@ -31,11 +34,12 @@ const codexListSettled = 2 * time.Second
 // codexListStamp is what the tag is built from, read without building it:
 // the writes this magpie made or was told of (Changed, a plugin's change,
 // catalog.Touched or Reset, filememo.Forget), the environment, and the
-// files another process writes — magpie's providers, settings and
-// models.dev catalog, and Codex's config (the effort new sessions start
-// at), sign-in and model cache.
+// files another process writes — magpie's providers, settings, extensions
+// and models.dev catalog, and Codex's config (the effort new sessions
+// start at), sign-in and model cache.
 type codexListStamp struct {
 	gen, fgen, env uint64
+	extensions     rootStamp
 	files          [6]rootStamp
 }
 
@@ -44,7 +48,7 @@ func codexListStampNow() codexListStamp {
 	gen := held.gen
 	held.Unlock()
 	home := catalog.CodexHome()
-	return codexListStamp{gen: gen, fgen: filememo.Gen(), env: environSum(), files: [6]rootStamp{
+	return codexListStamp{gen: gen, fgen: filememo.Gen(), env: environSum(), extensions: stampOf(extensionhost.CatalogPath()), files: [6]rootStamp{
 		stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath()),
 		stampOf(filepath.Join(home, "config.toml")), stampOf(filepath.Join(home, "auth.json")),
 		stampOf(catalog.CodexModelsCache()),
@@ -54,6 +58,9 @@ func codexListStampNow() codexListStamp {
 // settled reports whether every file's time is old enough that a write
 // after it would stamp another.
 func (s codexListStamp) settled(now time.Time) bool {
+	if s.extensions.ok && now.Sub(s.extensions.mod) < codexListSettled {
+		return false
+	}
 	for _, f := range s.files {
 		if f.ok && now.Sub(f.mod) < codexListSettled {
 			return false
@@ -64,9 +71,82 @@ func (s codexListStamp) settled(now time.Time) bool {
 
 var codexListTags struct {
 	sync.Mutex
+	current *codexTagGeneration
+}
+
+type codexTagGeneration struct {
 	stamp codexListStamp
 	at    time.Time
+	ready bool
+	roots []codexModelRoot
 	of    map[string]string
+}
+
+type codexModelRoot struct {
+	path string
+	info os.FileInfo
+}
+
+func codexModelRoots(stamp codexListStamp) ([]codexModelRoot, bool) {
+	if !stamp.extensions.ok {
+		return nil, true
+	}
+	selected, err := ExtensionProviders()
+	if err != nil {
+		return nil, false
+	}
+	var roots []codexModelRoot
+	for _, provider := range selected {
+		binding := provider.Account.extension
+		if !binding.manifest.Contract.Has(sdk.ModelDiscovery) || binding.descriptor.AccountOnly() {
+			continue
+		}
+		path := binding.host.Store().ModelCatalogPath(binding.scope.Plugin, binding.modelCatalogKey())
+		if path == "" {
+			return nil, false
+		}
+		info, err := os.Lstat(path)
+		if err != nil && !os.IsNotExist(err) || info != nil && !info.Mode().IsRegular() {
+			return nil, false
+		}
+		roots = append(roots, codexModelRoot{path, info})
+	}
+	return roots, true
+}
+
+func codexModelRootsCurrent(roots []codexModelRoot) bool {
+	for _, root := range roots {
+		info, err := os.Lstat(root.path)
+		if os.IsNotExist(err) && root.info == nil {
+			continue
+		}
+		if err != nil || root.info == nil || !os.SameFile(root.info, info) ||
+			root.info.Size() != info.Size() || root.info.ModTime() != info.ModTime() || root.info.Mode() != info.Mode() {
+			return false
+		}
+	}
+	return true
+}
+
+func refreshCodexTagSources(generation *codexTagGeneration, now time.Time) *codexTagGeneration {
+	stamp := generation.stamp
+	roots, complete := codexModelRoots(stamp)
+	codexListTags.Lock()
+	defer codexListTags.Unlock()
+	if codexListTags.current != generation {
+		return nil
+	}
+	if generation.ready || len(roots) > 0 {
+		// Do not cache a tag made from a held catalog built before these
+		// roots were sampled. Refuse to rebase a concurrent account change.
+		if !dropHeldAt(stamp.gen) {
+			return nil
+		}
+		stamp.gen++
+	}
+	next := &codexTagGeneration{stamp: stamp, at: now, ready: complete, roots: roots}
+	codexListTags.current = next
+	return next
 }
 
 // codexListTag is buildCodexListTag's, built again only when its stamp
@@ -75,26 +155,36 @@ func codexListTag(kind string) string {
 	st := codexListStampNow()
 	now := time.Now()
 	codexListTags.Lock()
-	if codexListTags.stamp != st || now.Sub(codexListTags.at) >= codexListTagFor {
-		codexListTags.stamp, codexListTags.at, codexListTags.of = st, now, nil
-	}
-	if tag, ok := codexListTags.of[kind]; ok {
+	generation := codexListTags.current
+	if generation != nil && generation.stamp.gen > st.gen {
 		codexListTags.Unlock()
-		return tag
+		return buildCodexListTag(kind)
 	}
+	if generation == nil || generation.stamp != st || now.Sub(generation.at) >= codexListTagFor {
+		generation = &codexTagGeneration{stamp: st, at: now}
+		codexListTags.current = generation
+	}
+	tag, kept := generation.of[kind]
 	codexListTags.Unlock()
-	// built from what is there after st was taken: never older than st
-	tag := buildCodexListTag(kind)
-	if !st.settled(now) {
+
+	if !generation.ready || !codexModelRootsCurrent(generation.roots) {
+		generation = refreshCodexTagSources(generation, now)
+	} else if kept {
 		return tag
 	}
+
+	value := buildCodexListTag(kind)
+	if !st.settled(now) || generation == nil || !generation.ready || !codexModelRootsCurrent(generation.roots) {
+		return value
+	}
+
 	codexListTags.Lock()
-	if codexListTags.stamp == st {
-		if codexListTags.of == nil {
-			codexListTags.of = map[string]string{}
+	if codexListTags.current == generation {
+		if generation.of == nil {
+			generation.of = map[string]string{}
 		}
-		codexListTags.of[kind] = tag
+		generation.of[kind] = value
 	}
 	codexListTags.Unlock()
-	return tag
+	return value
 }

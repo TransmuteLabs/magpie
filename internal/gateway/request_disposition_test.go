@@ -85,7 +85,13 @@ func main(){
   if err:=stream.Emit(ctx,"data",content);err!=nil{return nil,err}
   return sdk.ExecuteResult{Status:200,Outcome:"completed",Usage:usage},nil
  }}}
- if manifest.Contract.Has(sdk.ModelDiscovery){module.Handlers[sdk.MethodProviderModels]=func(context.Context,sdk.Call,*sdk.Stream)(any,error){return sdk.ModelsResult{Models:manifest.Providers[0].Models},nil}}
+ if manifest.Contract.Has(sdk.ModelDiscovery){module.Handlers[sdk.MethodProviderModels]=func(ctx context.Context,call sdk.Call,_ *sdk.Stream)(any,error){
+  if manifest.ID!="fixture.codex-etag" {return sdk.ModelsResult{Models:manifest.Providers[0].Models},nil}
+  var auth struct{URL string};if err:=json.Unmarshal(call.Auth,&auth);err!=nil{return nil,err}
+  request,err:=http.NewRequestWithContext(ctx,"POST",auth.URL,nil);if err!=nil{return nil,err}
+  response,err:=http.DefaultClient.Do(request);if err!=nil{return nil,err};defer response.Body.Close()
+  var result sdk.ModelsResult;err=json.NewDecoder(response.Body).Decode(&result);return result,err
+ }}
  for _,method:=range sdk.RequiredMethods(manifest){if module.Handlers[method]==nil{module.Handlers[method]=func(context.Context,sdk.Call,*sdk.Stream)(any,error){return nil,&sdk.Error{Code:"not_supported",Message:"fixture does not sign in",Outcome:"not-started"}}}}
  if sdk.Serve(context.Background(),os.Stdin,os.Stdout,module)!=nil{os.Exit(1)}
 }`
