@@ -115,9 +115,10 @@ the exchange and publication. An active dispatched refresh remains a fence.
 Known completed refreshes cannot be silently adopted by an old selection.
 
 Catalog-sensitive publication uses catalog lock, then Store operations.
-The configuration read releases its Store lock before the publication
-transaction. The transaction's namespace-local configuration read does not
-call `StateGet`, `Manifest` or catalog discovery recursively under Store lock.
+Credential publication checks the worker's effective configuration again
+under the exclusive Store lock, immediately before replacing `accounts.json`.
+This namespace-local read does not call `StateGet`, `Manifest` or catalog
+discovery recursively under Store lock.
 No Store-held callback acquires the catalog lock.
 
 Reauthorization replaces only the selected record's `Account` and `Deleted`

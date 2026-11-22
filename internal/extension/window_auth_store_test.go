@@ -54,7 +54,7 @@ func TestWindowAuthStorePublishesAccountAndReceiptOnce(t *testing.T) {
 		go func() {
 			defer writers.Done()
 			owner := NewStore(store.root)
-			result, err := owner.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: secret})
+			result, err := owner.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: secret}, nil)
 			if err == nil {
 				published.Add(1)
 				if result.Receipt == nil || result.Receipt.Generation != "1" {
@@ -97,7 +97,7 @@ func TestWindowAuthStoreRejectsChangedIntentAndAccountAuthority(t *testing.T) {
 	if _, err := store.SaveAccount(Account{Plugin: record.Scope.Plugin, Provider: "vendor", ID: "chosen", Auth: json.RawMessage(`{"original":true}`)}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"replacement":true}`)}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"replacement":true}`)}, nil); err == nil {
 		t.Fatal("new sign-in overwrote an existing account")
 	}
 	account, _ := store.GetAccount(record.Scope.Plugin, "vendor", "chosen")
@@ -107,7 +107,7 @@ func TestWindowAuthStoreRejectsChangedIntentAndAccountAuthority(t *testing.T) {
 	if err := store.DeleteAccount(record.Scope.Plugin, "vendor", "chosen", 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"revived":true}`)}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"revived":true}`)}, nil); err == nil {
 		t.Fatal("new sign-in revived an existing tombstone")
 	}
 }
@@ -138,7 +138,7 @@ func TestWindowAuthStoreReauthorizationRequiresExactGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, err = store.publishWindowAuth(record.Scope.Plugin, record.Flow, result)
+			_, err = store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, result, nil)
 			if (err == nil) != (change == "same") {
 				t.Fatalf("unexpected reauthorization result for %s: %v", change, err)
 			}
@@ -250,7 +250,7 @@ func TestWindowAuthSchema4FailedPublicationLeavesAccountAndFlowUntouched(t *test
 	path := authAccountsPath(t, store, record.Scope.Plugin)
 	before, _ := os.ReadFile(path)
 	result, _ := json.Marshal(map[string]string{"token": strings.Repeat("y", 2<<20)})
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: result}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: result}, nil); err == nil {
 		t.Fatal("oversized transaction unexpectedly committed")
 	}
 	after, _ := os.ReadFile(path)
@@ -275,19 +275,19 @@ func TestWindowAuthSchema4PreservesReceiptAcrossAccountOperations(t *testing.T) 
 	if _, err := store.claimRefresh(scope, "revision", "0"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"invalid":true}`)}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"invalid":true}`)}, nil); err == nil {
 		t.Fatal("flow publication overwrote an active credential refresh")
 	}
 	if _, err := store.finishRefresh(scope, &sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"refreshed":true}`)}, "completed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"stale":true}`)}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"stale":true}`)}, nil); err == nil {
 		t.Fatal("flow publication adopted refresh successor generation")
 	}
 	if err := store.DeleteAccount(record.Scope.Plugin, "vendor", "chosen", 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"revived":true}`)}); err == nil {
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: "chosen", Credentials: json.RawMessage(`{"revived":true}`)}, nil); err == nil {
 		t.Fatal("flow publication revived a deleted selected account")
 	}
 	reopened := NewStore(store.root)
@@ -309,7 +309,7 @@ func TestWindowAuthSchema4ArchivesTerminalReceiptsWithoutReplayingIntent(t *test
 		record.Flow, record.Intent = storeHash("flow", string(rune(index+1))), storeHash("intent", string(rune(index+1)))
 		readyAuthStore(t, store, record)
 		id := strings.Repeat("a", index+1)
-		if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: id, Credentials: json.RawMessage(`{}`)}); err != nil {
+		if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{ID: id, Credentials: json.RawMessage(`{}`)}, nil); err != nil {
 			t.Fatal(err)
 		}
 		if index == 0 {
@@ -346,9 +346,9 @@ func TestWindowAuthSchema4ReauthorizationPreservesDirtyUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyAuthStore(t, store, record)
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{
 		ID: account.ID, Credentials: json.RawMessage(`{"token":"after"}`),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	next := record.Scope
@@ -387,9 +387,9 @@ func TestWindowAuthSchema4ReauthorizationPreservesRefreshReceipts(t *testing.T) 
 	}
 	record.Scope.Account, record.Scope.Generation = account.ID, account.Generation+1
 	readyAuthStore(t, store, record)
-	if _, err := store.publishWindowAuth(record.Scope.Plugin, record.Flow, sdk.AuthResult{
+	if _, err := store.publishWindowAuth(t.Context(), record.Scope.Plugin, record.Flow, sdk.AuthResult{
 		ID: account.ID, Credentials: json.RawMessage(`{"token":"reauthorized"}`),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, archived := range []bool{false, true} {

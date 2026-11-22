@@ -2,6 +2,7 @@ package extension
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -323,12 +324,12 @@ func archiveWindowAuthRecords(root *os.Root, records *storeAccounts) error {
 }
 
 func (s *Store) updateWindowAuth(plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error) (windowAuthRecord, error) {
-	return s.updateWindowAuthThen(plugin, flow, update, nil)
+	return s.updateWindowAuthChecked(context.Background(), plugin, flow, update, nil, nil)
 }
 
-func (s *Store) updateWindowAuthThen(plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error, committed func(*os.Root)) (windowAuthRecord, error) {
+func (s *Store) updateWindowAuthChecked(ctx context.Context, plugin, flow string, update func(*windowAuthRecord, *storeAccounts) error, check func(*os.Root) error, committed func(*os.Root)) (windowAuthRecord, error) {
 	var result windowAuthRecord
-	err := s.withStore(plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, plugin)
 		if err != nil {
 			return err
@@ -344,7 +345,12 @@ func (s *Store) updateWindowAuthThen(plugin, flow string, update func(*windowAut
 			if !validWindowAuthRecords(records, plugin) {
 				return storeInvalid()
 			}
-			if err := storeWrite(root, "accounts.json", records, storeFileLimit); err != nil {
+			var beforeRename func() error
+			if check != nil {
+				beforeRename = func() error { return check(root) }
+			}
+			_, err := storePublishChecked(ctx, root, "accounts.json", records, storeFileLimit, beforeRename)
+			if err != nil {
 				return err
 			}
 			if committed != nil {
@@ -358,10 +364,10 @@ func (s *Store) updateWindowAuthThen(plugin, flow string, update func(*windowAut
 	return result, err
 }
 
-func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (windowAuthRecord, error) {
+func (s *Store) publishWindowAuth(ctx context.Context, plugin, flow string, result sdk.AuthResult, check func(*os.Root) error) (windowAuthRecord, error) {
 	var previous storeAccount
 	var published Account
-	return s.updateWindowAuthThen(plugin, flow, func(record *windowAuthRecord, records *storeAccounts) error {
+	return s.updateWindowAuthChecked(ctx, plugin, flow, func(record *windowAuthRecord, records *storeAccounts) error {
 		if record.Phase != "polling" || record.Canceled || time.Now().UnixMilli() >= record.Expires {
 			return errors.New("window authentication authority ended before publication")
 		}
@@ -421,7 +427,7 @@ func (s *Store) publishWindowAuth(plugin, flow string, result sdk.AuthResult) (w
 		record.Receipt = &sdk.AccountSummary{ID: result.ID, Generation: strconv.FormatUint(generation+1, 10), ExpiresAt: result.ExpiresAt}
 		record.Interval, record.Next, record.Private = 0, 0, nil
 		return nil
-	}, func(root *os.Root) {
+	}, check, func(root *os.Root) {
 		if !storeToken(published.Name) && previous.Generation != 0 {
 			published.Name = previous.namedAccount(root).Name
 		}

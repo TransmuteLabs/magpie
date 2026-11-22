@@ -500,13 +500,15 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 					return record.public(), nil
 				}
 			} else if !result.Pending {
-				err = owner.withAuthority(ctx, record, func() error {
+				err = manager.withWindowAuthSelection(ctx, record, func(entry Installed, from string) error {
 					if err := manager.store.checkSubscriptionResult(ctx, record.Scope, result.ID); err != nil {
 						return err
 					}
 
 					var err error
-					record, err = manager.store.publishWindowAuth(plugin, flow, result)
+					record, err = manager.store.publishWindowAuth(ctx, plugin, flow, result, func(root *os.Root) error {
+						return manager.checkWindowAuthConfigAtRoot(ctx, root, entry, from, record, owner.lease.worker.config)
+					})
 					return err
 				})
 				if err == nil {
@@ -579,6 +581,31 @@ func (owner *windowAuthOwner) withAuthority(ctx context.Context, record windowAu
 }
 
 func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRecord, expected sdk.ConfigSnapshot, action func() error) error {
+	return m.withWindowAuthSelection(ctx, record, func(entry Installed, from string) error {
+		var config sdk.ConfigSnapshot
+		var err error
+		if expected.Values == nil {
+			config, err = m.readModuleConfigContext(ctx, record.Scope.Plugin)
+		} else {
+			config, err = m.runtimeModuleConfigContext(ctx, entry)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return errors.New("window authentication selection changed")
+		}
+		if err := checkWindowAuthConfig(ctx, entry, from, record, config, expected); err != nil {
+			return err
+		}
+		if action != nil {
+			return action()
+		}
+		return nil
+	})
+}
+
+func (m *Manager) withWindowAuthSelection(ctx context.Context, record windowAuthRecord, action func(Installed, string) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -601,15 +628,6 @@ func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRec
 	if err != nil {
 		return err
 	}
-	var config sdk.ConfigSnapshot
-	if expected.Values == nil {
-		config, err = m.readModuleConfigContext(ctx, record.Scope.Plugin)
-	} else {
-		config, err = m.runtimeModuleConfigContext(ctx, entry)
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
 	// Saved-subscription transactions use the same catalog authority but
 	// do not carry a GUI flow identity.
 	if record.Flow != "" {
@@ -617,16 +635,7 @@ func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRec
 			return err
 		}
 	}
-	if err != nil {
-		return errors.New("window authentication selection changed")
-	}
-	if err := checkWindowAuthConfig(ctx, entry, from, record, config, expected); err != nil {
-		return err
-	}
-	if action != nil {
-		return action()
-	}
-	return nil
+	return action(entry, from)
 }
 
 func (m *Manager) windowAuthEntry(root *os.Root, record windowAuthRecord) (Installed, string, error) {
@@ -668,14 +677,18 @@ func (m *Manager) checkWindowAuthDispatch(ctx context.Context, catalog, private 
 		return err
 	}
 	return readStoreNamespace(ctx, private, entry.Manifest.ID, func(root *os.Root) error {
-		value, err := storeReadState(root, sdk.Scope{Plugin: entry.Manifest.ID}, moduleConfigKey)
-		if err != nil {
-			return err
-		}
-		config, err := m.runtimeModuleConfigValue(entry, value.VersionedValue)
-		if err != nil {
-			return err
-		}
-		return checkWindowAuthConfig(ctx, entry, from, dispatch.record, config, dispatch.config)
+		return m.checkWindowAuthConfigAtRoot(ctx, root, entry, from, dispatch.record, dispatch.config)
 	})
+}
+
+func (m *Manager) checkWindowAuthConfigAtRoot(ctx context.Context, root *os.Root, entry Installed, from string, record windowAuthRecord, expected sdk.ConfigSnapshot) error {
+	value, err := storeReadState(root, sdk.Scope{Plugin: entry.Manifest.ID}, moduleConfigKey)
+	if err != nil {
+		return err
+	}
+	config, err := m.runtimeModuleConfigValue(entry, value.VersionedValue)
+	if err != nil {
+		return err
+	}
+	return checkWindowAuthConfig(ctx, entry, from, record, config, expected)
 }
