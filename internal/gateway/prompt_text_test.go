@@ -1,12 +1,15 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/gwmw"
+	"github.com/yetone/magpie/internal/masking"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -125,6 +128,78 @@ func TestPromptTextKeepsOnlyTheLastBodies(t *testing.T) {
 	}
 	if _, ok := tr.keptBodyOf(200); ok {
 		t.Fatal("kept the oldest past promptBodiesMax")
+	}
+}
+
+func TestPromptTextBoundsMaskedBodies(t *testing.T) {
+	const small = `{"system":"before","messages":[{"role":"user","content":"hello"}]}`
+	medium := make([]byte, promptBodyMax/2)
+	var tr trace
+	tr.keepBody(1, provider.Anthropic, medium, false)
+	tr.keepBody(2, provider.Anthropic, medium, false)
+	tr.keepBody(3, provider.Anthropic, medium, false)
+	tr.keepBody(4, provider.Anthropic, []byte(small), true)
+
+	masked := make([]byte, promptBodyMax)
+	tr.maskedBody(4, masked)
+	if _, ok := tr.keptBodyOf(1); ok {
+		t.Fatal("masking kept the oldest prompt past the shared byte limit")
+	}
+	if kept, ok := tr.keptBodyOf(4); !ok || kept.plain || !bytes.Equal(kept.body, masked) {
+		t.Fatal("masking lost the latest prompt")
+	}
+
+	tr.keepBody(5, provider.Anthropic, []byte(small), true)
+	tr.maskedBody(5, make([]byte, promptBodyMax+1))
+	if _, ok := tr.keptBodyOf(5); ok {
+		t.Fatal("kept a masked prompt over the per-body limit")
+	}
+
+	backing := make([]byte, len(small), 64<<10)
+	copy(backing, small)
+	tr.keepBody(6, provider.Anthropic, backing, false)
+	if kept, ok := tr.keptBodyOf(6); !ok || cap(kept.body) > 2*len(small) || !bytes.Equal(kept.body, backing) {
+		t.Fatal("the kept prompt still pins its spare capacity")
+	}
+}
+
+type expandedPromptMasker struct {
+	masking.Masker
+	body []byte
+}
+
+func (masker expandedPromptMasker) JSONHitsContext(context.Context, []byte) ([]byte, []gwmw.Hit) {
+	return masker.body, nil
+}
+
+func TestArchivedPromptDoesNotKeepOversizedMask(t *testing.T) {
+	fresh(t)
+	if err := settings.Save(settings.Settings{Redact: true}); err != nil {
+		t.Fatal(err)
+	}
+	archive := []byte(`{"system":"archived","messages":[{"role":"user","content":"hello"}]}`)
+	masked := []byte(`{"system":"` + strings.Repeat("x", promptBodyMax) + `"}`)
+	remove := gwmw.Mask(expandedPromptMasker{body: masked})
+	t.Cleanup(remove)
+	const archiveID = 11117
+	t.Cleanup(func() {
+		lastArchived.Lock()
+		if lastArchived.id == archiveID {
+			lastArchived.body = nil
+			lastArchived.id = 0
+		}
+		lastArchived.Unlock()
+	})
+
+	got, ok := archivedMasked(archiveID, archive)
+	if !ok || !bytes.Equal(got, masked) {
+		t.Fatal("the current archive read lost its masked result")
+	}
+	lastArchived.Lock()
+	retained := lastArchived.id == archiveID && lastArchived.body != nil
+	lastArchived.Unlock()
+	if retained {
+		t.Fatal("the archive cache kept a masked prompt over the per-body limit")
 	}
 }
 

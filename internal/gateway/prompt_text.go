@@ -49,19 +49,35 @@ type keptBody struct {
 func (t *trace) keepBody(id int64, from provider.Protocol, body []byte, plain bool) {
 	// its pictures kept apart, so a conversation of pictures keeps its
 	// text (leanImages)
-	body = leanImages(body, true)
-	if len(body) == 0 || len(body) > promptBodyMax {
+	body = retainedPromptBody(leanImages(body, true))
+	if body == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.bodies = append(t.bodies, keptBody{id: id, from: from, body: body, plain: plain})
+	t.trimPromptBodies()
+}
+
+func retainedPromptBody(body []byte) []byte {
+	if len(body) == 0 || len(body) > promptBodyMax {
+		return nil
+	}
+	if cap(body) > promptBodyMax || cap(body) > 2*len(body) {
+		compact := make([]byte, len(body))
+		copy(compact, body)
+		return compact
+	}
+	return body
+}
+
+func (t *trace) trimPromptBodies() {
 	total := 0
 	for _, b := range t.bodies {
-		total += len(b.body)
+		total += cap(b.body)
 	}
 	for len(t.bodies) > promptBodies || total > promptBodiesMax {
-		total -= len(t.bodies[0].body)
+		total -= cap(t.bodies[0].body)
 		t.bodies[0] = keptBody{}
 		t.bodies = t.bodies[1:]
 	}
@@ -69,11 +85,18 @@ func (t *trace) keepBody(id int64, from provider.Protocol, body []byte, plain bo
 
 // maskedBody puts body, masked, in place of route id's plain kept body.
 func (t *trace) maskedBody(id int64, body []byte) {
+	body = retainedPromptBody(body)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.bodies {
 		if t.bodies[i].id == id && t.bodies[i].plain {
+			if body == nil {
+				t.bodies = slices.Delete(t.bodies, i, i+1)
+				return
+			}
 			t.bodies[i].body, t.bodies[i].plain = body, false
+			t.trimPromptBodies()
+			return
 		}
 	}
 }
@@ -196,9 +219,12 @@ func archivedMasked(id int64, body []byte) ([]byte, bool) {
 	if masked == nil {
 		return nil, false
 	}
-	lastArchived.Lock()
-	lastArchived.id, lastArchived.sum, lastArchived.body = id, sum, masked
-	lastArchived.Unlock()
+	if retained := retainedPromptBody(masked); retained != nil {
+		lastArchived.Lock()
+		lastArchived.id, lastArchived.sum, lastArchived.body = id, sum, retained
+		lastArchived.Unlock()
+		masked = retained
+	}
 	return masked, true
 }
 
