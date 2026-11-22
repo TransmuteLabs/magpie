@@ -27,28 +27,54 @@ type ModuleSettingsResult struct {
 
 func (m *Manager) ListWithSettings(ctx context.Context) ([]Installed, map[string]ModuleSettingsResult, error) {
 	var entries []Installed
-	options := make(map[string]ModuleSettingsResult)
 	err := m.catalog.withView(ctx, func(view catalogView) error {
 		entries = make([]Installed, 0, len(view.entries))
 		for _, entry := range view.entries {
-			entry = view.enabledEntry(entry)
-			entries = append(entries, cloneInstalled(entry))
-			if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
-				options[entry.Manifest.ID] = ModuleSettingsResult{Err: err}
-				continue
-			}
-			if entry.Disabled || len(entry.Manifest.Settings) == 0 {
-				continue
-			}
-			result := ModuleSettingsResult{Err: m.moduleSettingsOwner(entry)}
-			if result.Err == nil {
-				result.Snapshot, result.Err = m.readModuleSettings(ctx, entry)
-			}
-			options[entry.Manifest.ID] = result
+			entries = append(entries, view.enabledEntry(entry))
 		}
 		return nil
 	})
 	if err != nil {
+		return nil, nil, err
+	}
+	options := make(map[string]ModuleSettingsResult)
+	var hasSettings bool
+	for index, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		entries[index] = cloneInstalled(entry)
+		if err := sdk.CheckCompatibility(entry.Manifest); err != nil {
+			options[entry.Manifest.ID] = ModuleSettingsResult{Err: err}
+			continue
+		}
+		if entry.Disabled || len(entry.Manifest.Settings) == 0 {
+			continue
+		}
+		result := ModuleSettingsResult{Err: m.moduleSettingsOwner(entry)}
+		if result.Err == nil {
+			result.Snapshot, result.Err = m.readModuleSettings(ctx, entry)
+			hasSettings = hasSettings || result.Err == nil
+		}
+		options[entry.Manifest.ID] = result
+	}
+	if hasSettings {
+		if err := m.catalog.withView(ctx, func(view catalogView) error {
+			for _, entry := range entries {
+				id := entry.Manifest.ID
+				if options[id].Snapshot.Values == nil {
+					continue
+				}
+				if _, err := m.currentModuleSettingsEntry(view, entry); err != nil {
+					options[id] = ModuleSettingsResult{Err: err}
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
 	return entries, options, nil
@@ -68,25 +94,43 @@ func (m *Manager) ModuleSettings(ctx context.Context, entry Installed) (ModuleSe
 	if err := m.moduleSettingsOwner(entry); err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
-	var snapshot ModuleSettingsSnapshot
+	var current Installed
 	err := m.catalog.withView(ctx, func(view catalogView) error {
-		if m.isClosed() {
-			return errModuleConfigClosed
-		}
-		current, err := view.configEntry(entry.Manifest.ID, expectedGeneration{
-			packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
-		})
-		if err != nil {
-			return err
-		}
-		current.EnableGeneration = entry.EnableGeneration
-		snapshot, err = m.readModuleSettings(ctx, current)
+		var err error
+		current, err = m.currentModuleSettingsEntry(view, entry)
 		return err
 	})
 	if err != nil {
 		return ModuleSettingsSnapshot{}, err
 	}
+	snapshot, err := m.readModuleSettings(ctx, current)
+	if err != nil {
+		return ModuleSettingsSnapshot{}, err
+	}
+	if err := m.catalog.withView(ctx, func(view catalogView) error {
+		_, err := m.currentModuleSettingsEntry(view, current)
+		return err
+	}); err != nil {
+		return ModuleSettingsSnapshot{}, err
+	}
 	return snapshot, nil
+}
+
+func (m *Manager) currentModuleSettingsEntry(view catalogView, entry Installed) (Installed, error) {
+	if m.isClosed() {
+		return Installed{}, errModuleConfigClosed
+	}
+	current, err := view.configEntry(entry.Manifest.ID, expectedGeneration{
+		packageRevision: entry.Revision, enableGeneration: &entry.EnableGeneration,
+	})
+	if err != nil {
+		return Installed{}, err
+	}
+	if current.Directory != entry.Directory {
+		return Installed{}, ErrCatalogConflict
+	}
+	current.EnableGeneration = entry.EnableGeneration
+	return current, nil
 }
 
 func (m *Manager) readModuleSettings(ctx context.Context, entry Installed) (ModuleSettingsSnapshot, error) {

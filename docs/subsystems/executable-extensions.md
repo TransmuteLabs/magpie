@@ -422,7 +422,10 @@ setting key must be unique and cannot also name a provider switch.
 
 **Plugins → Installed → Options** uses the same schema renderer as linked
 features. It shows only declared fields and saves only edited keys. The
-package revision, enablement generation and config version must still
+list reads each row's configuration outside the catalog lock, then checks
+the selected package and enablement before returning its settings.
+Unavailable settings keep their own row error. The package revision,
+enablement generation and config version must still
 match when the save takes the catalog lock. Sibling keys survive the patch.
 Raw configuration writes from the CLI, window and provider owners share
 validation with the form. Module startup and handler snapshots get missing
