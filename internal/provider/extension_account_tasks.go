@@ -35,18 +35,14 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if _, disabled := ModelDisabled(id, selection.Model); disabled || DisabledUnknown() {
 		return fail(errors.New("paid task model is disabled or its policy is unreadable"))
 	}
-	entry, err := enabledExtensionModule(ctx, manager, selection.Scope.Plugin)
+	entry, config, err := toolAccountModule(ctx, manager, selection.Scope.Plugin)
 	if err := ctx.Err(); err != nil {
 		return fail(err)
 	}
 	if err != nil || entry.Revision != selection.Revision {
 		return fail(errors.New("paid task package changed"))
 	}
-	config, err := manager.ModuleConfig(ctx, entry.Manifest.ID)
-	if err := ctx.Err(); err != nil {
-		return fail(err)
-	}
-	if err != nil || config.Version != selection.Config {
+	if config.Version != selection.Config {
 		return fail(errors.New("paid task configuration changed"))
 	}
 	account, err := manager.Store().RefreshedAccountContext(ctx, selection.Scope)
@@ -63,17 +59,25 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 	if !found {
 		return fail(errors.New("paid account tasks are no longer declared"))
 	}
-	revision, err := extensionModelRevision(ctx, manager, entry)
-	if err != nil {
-		return fail(err)
-	}
 	scope := selection.Scope
 	scope.Generation = account.Generation
 	bindingScope := scope
 	bindingScope.Operation, bindingScope.Attempt, bindingScope.Session = "", 0, ""
 	binding := &extensionAccount{host: manager, manifest: entry.Manifest, descriptor: descriptor,
-		scope: bindingScope, modelKey: revision, public: public, enableGeneration: entry.EnableGeneration}
-	prepared, err := binding.prepare(ctx)
+		scope: bindingScope, modelKey: entry.Revision + "\x00" + config.Version, public: public, enableGeneration: entry.EnableGeneration}
+	selectedBinding := extensionSelection{entry: entry, config: config, scope: bindingScope, expiresAt: account.ExpiresAt}
+	selectedSignIn := extensionSignIn{host: manager, entry: entry, config: config, scope: scope, public: public}
+	refreshPolicy := func(current context.Context, _ extensionPublicIdentity) error {
+		now, err := readExtensionKeepAlivePolicy(current)
+		if err != nil {
+			return err
+		}
+		if !now.allowsSelection(selectedSignIn, selectedSignIn.scope.Generation) {
+			return errors.New("paid task account is off, unlisted or unreadable")
+		}
+		return nil
+	}
+	prepared, err := binding.prepareSelection(ctx, selectedBinding, refreshPolicy)
 	if err != nil {
 		return fail(err)
 	}
@@ -116,7 +120,6 @@ func PrepareExtensionAccountTask(ctx context.Context, manager *extensionhost.Man
 		return fail(errors.New("paid task account is held at its usage cap"))
 	}
 	choice := netproxy.Choice(ctx)
-	selectedSignIn := extensionSignIn{host: manager, entry: entry, config: config.Version, scope: scope, public: public}
 	policy = accountTaskPolicy(policy)
 	check := func(current context.Context) error {
 		if err := current.Err(); err != nil {

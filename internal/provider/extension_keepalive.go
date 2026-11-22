@@ -23,7 +23,7 @@ const extensionKeepAliveLookMost = 30 * time.Second
 type extensionSignIn struct {
 	host   extensionProviderHost
 	entry  extensionhost.Installed
-	config string
+	config sdk.ConfigSnapshot
 	scope  sdk.Scope
 	public extensionPublicIdentity
 	at     time.Time
@@ -37,7 +37,7 @@ type extensionSignInDue struct {
 
 func (selected extensionSignIn) key() extensionSignInDue {
 	return extensionSignInDue{
-		namespace: selected.host.Namespace(), revision: selected.entry.Revision + "\x00" + selected.public.revision, config: selected.config,
+		namespace: selected.host.Namespace(), revision: selected.entry.Revision + "\x00" + selected.public.revision, config: selected.config.Version,
 		scope: selected.scope, at: selected.at.UnixMilli(),
 	}
 }
@@ -65,6 +65,10 @@ func extensionKeepAlivePolicyNow(ctx context.Context) (extensionKeepAlivePolicy,
 	if err := requireExtensionAccountDiscovery(ctx); err != nil {
 		return extensionKeepAlivePolicy{}, err
 	}
+	return readExtensionKeepAlivePolicy(ctx)
+}
+
+func readExtensionKeepAlivePolicy(ctx context.Context) (extensionKeepAlivePolicy, error) {
 	providers, err := filememo.ReadCurrent("providers", Path(), parseProviders)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return extensionKeepAlivePolicy{}, err
@@ -105,7 +109,7 @@ func (policy extensionKeepAlivePolicy) allowsSelection(selected extensionSignIn,
 	scope := selected.scope
 	scope.Generation = generation
 	binding := &extensionAccount{host: selected.host, scope: scope, public: identity,
-		modelKey: selected.entry.Revision + "\x00" + selected.config, enableGeneration: selected.entry.EnableGeneration}
+		modelKey: selected.entry.Revision + "\x00" + selected.config.Version, enableGeneration: selected.entry.EnableGeneration}
 	for _, login := range policy.logins {
 		if identity.hasPolicy(login) {
 			return extensionAuthLapse(binding, login) == ""
@@ -188,7 +192,7 @@ var extensionSignInsKept = func(ctx context.Context, host extensionProviderHost)
 				}
 				scope.Account, scope.Generation = account.ID, account.Generation
 				selected := extensionSignIn{
-					host: host, entry: entry, config: config.Version,
+					host: host, entry: entry, config: config,
 					scope: scope, public: owners.identity(scope),
 					at: time.UnixMilli(account.ExpiresAt).Add(-lead),
 				}
@@ -229,7 +233,7 @@ func (selected extensionSignIn) current(ctx context.Context, generation uint64) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err != nil || config.Version != selected.config {
+	if err != nil || config.Version != selected.config.Version {
 		return extensionhost.ErrActionChanged
 	}
 	account, err := selected.host.Store().GetAccountContext(ctx, selected.scope.Plugin, selected.scope.Provider, selected.scope.Account)
@@ -243,6 +247,13 @@ func (selected extensionSignIn) current(ctx context.Context, generation uint64) 
 }
 
 var keepExtensionSignedIn = func(ctx context.Context, selected extensionSignIn) error {
+	if selected.public.provider == "" {
+		public, err := readSubscriptionIdentity(ctx, selected.scope)
+		if err != nil {
+			return err
+		}
+		selected.public = public
+	}
 	if err := selected.current(ctx, selected.scope.Generation); err != nil {
 		return err
 	}
@@ -260,7 +271,7 @@ var keepExtensionSignedIn = func(ctx context.Context, selected extensionSignIn) 
 	defer cancel()
 	stopCaller := context.AfterFunc(ctx, cancel)
 	startLimit := time.AfterFunc(keepAliveRenewWait, cancel)
-	lease, err := host.AcquireRevision(owned, selected.scope.Plugin, selected.entry.Revision, selected.config)
+	lease, err := host.AcquireRevision(owned, selected.scope.Plugin, selected.entry.Revision, selected.config.Version)
 	stopCaller()
 	startLimit.Stop()
 	if err != nil {
@@ -272,6 +283,21 @@ var keepExtensionSignedIn = func(ctx context.Context, selected extensionSignIn) 
 	}
 	attempt, stop := context.WithTimeout(owned, keepAliveRenewWait)
 	defer stop()
+	attempt = extensionhost.WithRefreshLifecycle(attempt, ctx)
+	attempt, err = extensionhost.WithRefreshSelection(attempt, selected.host.Namespace(), selected.entry, selected.config)
+	if err != nil {
+		return err
+	}
+	attempt = extensionhost.WithRefreshPolicy(attempt, func(current context.Context) error {
+		policy, err := readExtensionKeepAlivePolicy(current)
+		if err != nil {
+			return err
+		}
+		if !policy.allowsSelection(selected, selected.scope.Generation) {
+			return errors.New("extension account is not enabled and listed for idle renewal")
+		}
+		return nil
+	})
 	raw, err := lease.Call(attempt, sdk.MethodAuthRefresh, selected.scope, sdk.AuthRefreshRequest{}, nil)
 	if err != nil {
 		return err

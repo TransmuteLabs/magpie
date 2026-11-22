@@ -58,18 +58,17 @@ func (binding *extensionAccount) signRequest(ctx context.Context, request *http.
 func (binding *extensionAccount) prepareRequest(ctx context.Context) (*extensionAccount, error) {
 	if pending, ok := ctx.Value(extensionSigningKey{}).(*atomic.Pointer[extensionSigning]); ok {
 		if signing := pending.Swap(nil); signing != nil && signing.binding == binding &&
-			signing.selection.scope.Generation == binding.currentScope().Generation &&
-			!extensionRefreshDue(signing.selection.expiresAt) {
+			signing.selection.scope.Generation == binding.currentScope().Generation {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			if binding.manifest.Contract.Has(sdk.AccountAuth) && settings.AccountDiscoveryOff() {
 				return nil, errAccountDiscoveryOff
 			}
-			return binding.prepareSelection(ctx, signing.selection)
+			return binding.prepareSelection(ctx, signing.selection, checkExtensionLoginForExecute)
 		}
 	}
-	return binding.prepare(ctx)
+	return binding.prepareWithRefreshPolicy(ctx, checkExtensionLoginForExecute)
 }
 
 type extensionResponseBody struct {

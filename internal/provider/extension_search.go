@@ -88,7 +88,7 @@ func RunExtensionSearch(ctx context.Context, vendor SearchVendor, selected *Prov
 			scope.Provider != binding.Descriptor.Provider || scope.Account == "" {
 			return sdk.SearchResult{}, errors.New("extension search account belongs to another source")
 		}
-		prepared, err := account.prepare(ctx)
+		prepared, err := account.prepareWithRefreshPolicy(ctx, checkExtensionLoginForExecute)
 		if err != nil {
 			return sdk.SearchResult{}, errors.New("extension search account preflight failed")
 		}

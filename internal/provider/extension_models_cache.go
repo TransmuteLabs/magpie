@@ -130,30 +130,38 @@ func (binding *extensionAccount) modelRevisionEntry(ctx context.Context) (extens
 }
 
 func selectedExtensionModule(ctx context.Context, host extensionProviderHost, id, expected, enableGeneration string, configurable bool) (extensionhost.Installed, error) {
+	entry, _, err := selectedExtensionModuleConfig(ctx, host, id, expected, enableGeneration, configurable)
+	return entry, err
+}
+
+func selectedExtensionModuleConfig(ctx context.Context, host extensionProviderHost, id, expected, enableGeneration string, configurable bool) (extensionhost.Installed, sdk.ConfigSnapshot, error) {
 	if registry, ok := host.(interface {
 		ActiveModuleConfig(context.Context, string) (extensionhost.Installed, sdk.ConfigSnapshot, error)
 	}); ok && configurable {
 		entry, config, err := registry.ActiveModuleConfig(ctx, id)
 		if err != nil {
-			return extensionhost.Installed{}, err
+			return extensionhost.Installed{}, sdk.ConfigSnapshot{}, err
 		}
 		if entry.Revision+"\x00"+config.Version != expected || entry.EnableGeneration != enableGeneration {
-			return extensionhost.Installed{}, errors.New("extension package, configuration or enablement changed")
+			return extensionhost.Installed{}, sdk.ConfigSnapshot{}, errors.New("extension package, configuration or enablement changed")
 		}
-		return entry, nil
+		return entry, config, nil
 	}
 	entry, err := enabledExtensionModule(ctx, host, id)
 	if err != nil {
-		return extensionhost.Installed{}, err
+		return extensionhost.Installed{}, sdk.ConfigSnapshot{}, err
 	}
-	revision, err := extensionModelRevision(ctx, host, entry)
-	if err != nil {
-		return extensionhost.Installed{}, err
+	config := sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}
+	if entry.Manifest.Contract.Version.Minor >= 1 {
+		config, err = host.ModuleConfig(ctx, entry.Manifest.ID)
+		if err != nil {
+			return extensionhost.Installed{}, sdk.ConfigSnapshot{}, err
+		}
 	}
-	if revision != expected || entry.EnableGeneration != enableGeneration {
-		return extensionhost.Installed{}, errors.New("extension package, configuration or enablement changed")
+	if entry.Revision+"\x00"+config.Version != expected || entry.EnableGeneration != enableGeneration {
+		return extensionhost.Installed{}, sdk.ConfigSnapshot{}, errors.New("extension package, configuration or enablement changed")
 	}
-	return entry, nil
+	return entry, config, nil
 }
 
 func (binding *extensionAccount) validateModels(models []sdk.Model) error {

@@ -145,7 +145,7 @@ func TestExtensionKeepAliveBackoffAndReplacement(t *testing.T) {
 	host := fixtureExtensionProvider(t, false)
 	now := time.Now()
 	selected := []extensionSignIn{{
-		host: host, entry: extensionhost.Installed{Revision: "fixture"}, config: "0",
+		host: host, entry: extensionhost.Installed{Revision: "fixture"}, config: sdk.ConfigSnapshot{Version: "0"},
 		scope: sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1},
 		at:    now.Add(-time.Second),
 	}}

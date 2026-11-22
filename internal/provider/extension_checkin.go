@@ -123,7 +123,9 @@ func extensionCheckinProviders(ctx context.Context) []pluginCheckinProvider {
 				if err := admit(ctx); err != nil {
 					return extensionCheckinPreflightFailure(err)
 				}
-				prepared, err := binding.prepare(ctx)
+				prepared, err := binding.prepareWithRefreshPolicy(ctx, func(current context.Context, public extensionPublicIdentity) error {
+					return extensionCheckinLoginCurrent(current, public, known)
+				})
 				if err != nil {
 					return extensionCheckinPreflightFailure(err)
 				}
@@ -189,6 +191,10 @@ func extensionCheckinAccountCurrent(ctx context.Context, binding *extensionAccou
 	if err := CheckExtensionSubscription(ctx, binding.scope.Plugin, binding.scope.Provider, public.revision); err != nil {
 		return err
 	}
+	return extensionCheckinLoginCurrent(ctx, public, requirePolicy)
+}
+
+func extensionCheckinLoginCurrent(ctx context.Context, public extensionPublicIdentity, requirePolicy bool) error {
 	logins, err := readCurrentLogins()
 	if err != nil {
 		return err
@@ -196,7 +202,7 @@ func extensionCheckinAccountCurrent(ctx context.Context, binding *extensionAccou
 	for _, login := range logins {
 		if public.hasPolicy(login) {
 			if login.On && login.Hidden == "" {
-				return nil
+				return ctx.Err()
 			}
 			return errors.New("extension check-in account is off or hidden")
 		}
@@ -204,5 +210,5 @@ func extensionCheckinAccountCurrent(ctx context.Context, binding *extensionAccou
 	if requirePolicy {
 		return errors.New("extension check-in account policy changed")
 	}
-	return nil
+	return ctx.Err()
 }

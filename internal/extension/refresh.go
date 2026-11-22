@@ -37,14 +37,57 @@ type refreshRun struct {
 }
 
 type toolRefreshCheckKey struct{}
+type refreshLifecycleKey struct{}
+type refreshPolicyKey struct{}
+type refreshSelectionKey struct{}
 
 type toolRefreshCheck struct {
 	selected ToolAccountSelection
 	check    func(context.Context) error
 }
 
+type refreshSelection struct {
+	namespace, plugin, revision, directory, enableGeneration string
+	config                                                   sdk.ConfigSnapshot
+}
+
 func WithToolRefreshCheck(ctx context.Context, selected ToolAccountSelection, check func(context.Context) error) context.Context {
 	return context.WithValue(ctx, toolRefreshCheckKey{}, toolRefreshCheck{selected: selected, check: check})
+}
+
+func WithRefreshLifecycle(ctx, lifecycle context.Context) context.Context {
+	return context.WithValue(ctx, refreshLifecycleKey{}, lifecycle)
+}
+
+func refreshStartError(caller context.Context) error {
+	if lifecycle, ok := caller.Value(refreshLifecycleKey{}).(context.Context); ok {
+		if err := lifecycle.Err(); err != nil {
+			return err
+		}
+	}
+	return caller.Err()
+}
+
+// WithRefreshPolicy binds a read-only provider policy check to refresh
+// admission. The check runs under the existing catalog and account guards.
+func WithRefreshPolicy(ctx context.Context, check func(context.Context) error) context.Context {
+	return context.WithValue(ctx, refreshPolicyKey{}, check)
+}
+
+// WithRefreshSelection prevents an acquired worker from replacing a binding's
+// selected package or configuration on the way to a credential exchange.
+func WithRefreshSelection(ctx context.Context, namespace string, entry Installed, config sdk.ConfigSnapshot) (context.Context, error) {
+	if config.Version != "" {
+		values, err := effectiveModuleConfig(entry.Manifest, config.Values)
+		if err != nil {
+			return ctx, err
+		}
+		config.Values = values
+	}
+	return context.WithValue(ctx, refreshSelectionKey{}, refreshSelection{
+		namespace: namespace, plugin: entry.Manifest.ID, revision: entry.Revision, directory: entry.Directory,
+		enableGeneration: entry.EnableGeneration, config: config,
+	}), nil
 }
 
 func (m *Manager) RefreshAccount(ctx context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
@@ -72,7 +115,16 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 	if !storeValidScope(scope) || scope.Account == "" {
 		return sdk.AuthResult{}, storeInvalid()
 	}
-	if err := ctx.Err(); err != nil {
+	start := ctx
+	lifecycle, idle := ctx.Value(refreshLifecycleKey{}).(context.Context)
+	if idle {
+		var cancel context.CancelFunc
+		start, cancel = context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(lifecycle, cancel)
+		defer stop()
+	}
+	if err := refreshStartError(start); err != nil {
 		return sdk.AuthResult{}, err
 	}
 	if err := netproxy.Held(ctx); err != nil {
@@ -84,7 +136,16 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 			return sdk.AuthResult{}, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension tool refresh lease has changed")}
 		}
 	}
-	if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+	if selected, ok := ctx.Value(refreshSelectionKey{}).(refreshSelection); ok {
+		entry := lease.worker.entry
+		if m.Namespace() != selected.namespace || entry.Manifest.ID != selected.plugin ||
+			entry.Revision != selected.revision || entry.Directory != selected.directory ||
+			entry.EnableGeneration != selected.enableGeneration ||
+			selected.config.Version != "" && !sameModuleConfig(lease.worker.config, selected.config) {
+			return sdk.AuthResult{}, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension refresh selection changed before worker acquisition")}
+		}
+	}
+	if err := m.store.checkSubscriptionView(start, scope); err != nil {
 		return sdk.AuthResult{}, err
 	}
 	revision, _ := SubscriptionOwnerRevision(ctx)
@@ -95,7 +156,8 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 		return sdk.AuthResult{}, errors.New("extension refresh owner is closed")
 	}
 	run := m.refreshes[key]
-	if run == nil {
+	joined := run != nil
+	if !joined {
 		if len(m.refreshes) >= maxRefreshOwners {
 			m.mu.Unlock()
 			return sdk.AuthResult{}, storeError("busy", "Extension credential refresh capacity is occupied.")
@@ -125,9 +187,22 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 		}
 		m.refreshes[key] = run
 		m.refreshWG.Add(1)
-		go m.ownRefresh(ctx, key, scope, run)
+		go m.ownRefresh(start, key, scope, run)
 	}
 	m.mu.Unlock()
+	if idle && joined {
+		select {
+		case <-run.done:
+			return run.receipt, run.err
+		case <-start.Done():
+			run.mu.Lock()
+			dispatched := run.dispatched
+			run.mu.Unlock()
+			if !dispatched {
+				return sdk.AuthResult{}, refreshStartError(start)
+			}
+		}
+	}
 	select {
 	case <-run.done:
 		return run.receipt, run.err
@@ -212,7 +287,7 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 			begin: func(current context.Context) error {
 				run.mu.Lock()
 				defer run.mu.Unlock()
-				if err := caller.Err(); err != nil {
+				if err := refreshStartError(caller); err != nil {
 					return err
 				}
 				if err := current.Err(); err != nil {
@@ -261,56 +336,53 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 
 func (lease *Lease) claimRefresh(ctx, caller context.Context, scope sdk.Scope) (Account, bool, error) {
 	m := lease.manager
-	tool, toolBound := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck)
 	check := func() error {
-		if err := caller.Err(); err != nil {
+		if err := refreshStartError(caller); err != nil {
 			return err
 		}
-		if toolBound {
-			return tool.check(ctx)
-		}
-		return nil
+		return checkRefreshPolicy(ctx, scope)
 	}
 	var account Account
 	var published bool
-	claim := func() error {
+	err := lease.withRefreshAuthority(ctx, scope, func() error {
 		var err error
 		account, published, err = m.store.claimRefreshContext(ctx, scope, lease.Revision(), lease.ConfigVersion(), check)
 		return err
-	}
-	if !toolBound {
-		err := m.withSubscriptionScope(ctx, scope, claim)
-		return account, published, err
-	}
-	err := m.withActiveConfig(ctx, lease.worker.entry, tool.selected.config, func() error {
-		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
-			return err
-		}
-		return claim()
 	})
 	return account, published, err
 }
 
 func (lease *Lease) admitClaimedRefresh(ctx context.Context, scope sdk.Scope, auth json.RawMessage, commit func() error) error {
 	m := lease.manager
-	tool, toolBound := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck)
-	admit := func() error {
+	return lease.withRefreshAuthority(ctx, scope, func() error {
 		return m.store.withClaimedRefresh(ctx, scope, lease.Revision(), lease.ConfigVersion(), auth, func() error {
-			if toolBound {
-				if err := tool.check(ctx); err != nil {
-					return err
-				}
+			if err := checkRefreshPolicy(ctx, scope); err != nil {
+				return err
 			}
 			return commit()
 		})
-	}
-	if !toolBound {
-		return m.withSubscriptionScope(ctx, scope, admit)
-	}
-	return m.withActiveConfig(ctx, lease.worker.entry, tool.selected.config, func() error {
+	})
+}
+
+func (lease *Lease) withRefreshAuthority(ctx context.Context, scope sdk.Scope, action func() error) error {
+	m := lease.manager
+	return m.withActiveConfig(ctx, lease.worker.entry, lease.worker.config, func() error {
 		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
 			return err
 		}
-		return admit()
+		return action()
 	})
+}
+
+func checkRefreshPolicy(ctx context.Context, scope sdk.Scope) error {
+	if tool, found := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck); found {
+		return tool.check(ctx)
+	}
+	if err := checkAccountDiscovery(ctx, scope); err != nil {
+		return err
+	}
+	if check, found := ctx.Value(refreshPolicyKey{}).(func(context.Context) error); found {
+		return check(ctx)
+	}
+	return nil
 }

@@ -39,12 +39,14 @@ held only for short reads/writes, so scoped callbacks and other accounts can
 progress during a refresh.
 
 After acquiring both worker slots and rereading the exact generation, the
-owner writes a dispatched fence before sending a single RPC. An ordinary
-account-bound tool also checks its selected package, effective configuration,
-subscription owner, discovery setting, login policy and proxy choice at
-admission. The operation ID is host-generated and cannot be changed by
-supplying another request, session or attempt ID. The fence
-and completed receipt are private metadata in the atomic account document.
+owner writes a dispatched fence before sending a single RPC. The owner checks
+the leased package, enablement and effective configuration, subscription owner
+and current account discovery at admission. A caller that already selected a
+worker generation binds renewal to that generation. The triggering operation
+supplies its login policy where applicable, and account-bound tools also
+check their proxy choice. The host generates the operation ID independently
+of any request, session or attempt ID. The fence and completed receipt are
+private metadata in the atomic account document.
 Schema 2 and strict unknown-field decoding prevent old hosts from silently
 discarding this metadata.
 
@@ -74,9 +76,11 @@ Cancellation before this handoff prevents the exchange. The owner reports
 `not-started` only after any existing fence has been durably finalized in
 that state. If finalization fails, the outcome is uncertain and the storage
 error is retained.
-After handoff, canceling a caller ends only its wait. The owner
-retains the selected package, configuration and network-policy context
-through publication.
+After handoff, a request can leave while the owner retains the selected
+package, configuration and network-policy context through publication.
+Stopping the idle renewal loop interrupts owner lookup and releases a wait
+on a foreground refresh that is still queued. The loop waits for an exchange
+that has crossed handoff under its existing deadline.
 The RPC has a 60-second limit inside a 70-second owned lifetime; Store lock
 waits retain their existing bounded, fail-closed behavior. At most 64
 refresh owners are admitted per Manager.

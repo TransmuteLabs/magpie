@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -145,6 +146,61 @@ func TestExtensionKeepAliveUsesTransactionalRefresh(t *testing.T) {
 	receipt, err := fixture.manager.RefreshAccount(t.Context(), fixture.scope.Plugin, fixture.scope)
 	if err != nil || len(receipt.Credentials) != 0 || fixture.calls.Load() != 1 {
 		t.Fatalf("idle/foreground replay spent the token twice or leaked credentials: calls=%d err=%v", fixture.calls.Load(), err)
+	}
+}
+
+type refreshCutoverHost struct {
+	*extensionhost.Manager
+	beforeAcquire func(context.Context) error
+	executes      atomic.Int32
+}
+
+func (host *refreshCutoverHost) RefreshAccount(ctx context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
+	if err := host.beforeAcquire(ctx); err != nil {
+		return sdk.AuthResult{}, err
+	}
+	return host.Manager.RefreshAccount(ctx, id, scope)
+}
+
+func (host *refreshCutoverHost) Call(ctx context.Context, id, method string, scope sdk.Scope, params any, consume func(extensionhost.Event) error) (json.RawMessage, error) {
+	if method == sdk.MethodProviderExecute {
+		host.executes.Add(1)
+	}
+	return host.Manager.Call(ctx, id, method, scope, params, consume)
+}
+
+func TestExtensionRefreshKeepsSelectionBeforeWorkerAcquisition(t *testing.T) {
+	fixture := keepAliveOwnerFixture(t, nil)
+	peer := extensionhost.NewManager(fixture.manager.Namespace())
+	t.Cleanup(func() { _ = peer.Close(context.Background()) })
+	host := &refreshCutoverHost{Manager: fixture.manager, beforeAcquire: func(ctx context.Context) error {
+		if err := peer.SetEnabled(ctx, fixture.scope.Plugin, false); err != nil {
+			return err
+		}
+		return peer.SetEnabled(ctx, fixture.scope.Plugin, true)
+	}}
+	providerExtensionHost = func() extensionProviderHost { return host }
+	providers, err := ExtensionProviders()
+	if err != nil || len(providers) != 1 {
+		t.Fatalf("discover fixture account: %d selections, %v", len(providers), err)
+	}
+	selected := providers[0]
+	const payload = `{"model":"fixture-model"}`
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, selected.Chat+"/chat/completions", strings.NewReader(payload))
+	if err := selected.Sign(request.Context(), request, Chat, []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := selected.Do(nil, request)
+	if response != nil {
+		response.Body.Close()
+	}
+	var refusal *extensionhost.OutcomeError
+	if response != nil || !errors.As(err, &refusal) || refusal.Outcome != "not-started" ||
+		fixture.calls.Load() != 0 || host.executes.Load() != 0 {
+		t.Fatalf("obsolete binding reached worker: response=%v error=%v refresh=%d execute=%d", response != nil, err, fixture.calls.Load(), host.executes.Load())
+	}
+	if _, err := fixture.manager.RefreshAccount(t.Context(), fixture.scope.Plugin, fixture.scope); err != nil || fixture.calls.Load() != 1 {
+		t.Fatalf("explicit refresh did not select the current lease: refresh=%d %v", fixture.calls.Load(), err)
 	}
 }
 

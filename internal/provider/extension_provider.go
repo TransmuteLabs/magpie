@@ -356,6 +356,7 @@ func (binding *extensionAccount) checkedEntry(ctx context.Context, exactRevision
 
 type extensionSelection struct {
 	entry     extensionhost.Installed
+	config    sdk.ConfigSnapshot
 	scope     sdk.Scope
 	expiresAt int64
 }
@@ -371,9 +372,11 @@ func (binding *extensionAccount) checkedSelection(ctx context.Context, exactRevi
 		return extensionSelection{}, err
 	}
 	var entry extensionhost.Installed
+	var config sdk.ConfigSnapshot
 	var err error
 	if exactRevision {
-		entry, err = binding.modelRevisionEntry(ctx)
+		entry, config, err = selectedExtensionModuleConfig(ctx, binding.host, binding.manifest.ID, binding.modelKey,
+			binding.enableGeneration, binding.manifest.Contract.Version.Minor >= 1)
 	} else {
 		entry, err = enabledExtensionModule(ctx, binding.host, binding.scope.Plugin)
 	}
@@ -388,7 +391,7 @@ func (binding *extensionAccount) checkedSelection(ctx context.Context, exactRevi
 		return extensionSelection{}, errors.New("extension provider is unavailable")
 	}
 	scope := binding.currentScope()
-	selected := extensionSelection{entry: entry, scope: scope}
+	selected := extensionSelection{entry: entry, config: config, scope: scope}
 	if scope.Account != "" {
 		account, err := binding.host.Store().RefreshedAccountContext(ctx, scope)
 		if err != nil {

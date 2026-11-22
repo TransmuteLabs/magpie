@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,80 @@ func TestRefreshCallerCancellationAfterExchangeStillPublishes(t *testing.T) {
 	receipt, err := manager.RefreshAccount(context.Background(), scope.Plugin, scope)
 	if err != nil || receipt.ID != scope.Account || len(receipt.Credentials) != 0 || calls.Load() != 1 {
 		t.Fatalf("completed receipt replay: %+v %v", receipt, err)
+	}
+}
+
+func TestRefreshLifecycleCancelsPreOwnerStoreWait(t *testing.T) {
+	manager, scope, calls := refreshFixture(t, func(writer http.ResponseWriter, _ *http.Request) {
+		refreshResponse(writer)
+	})
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	private := filepath.Join(manager.Namespace(), "private")
+	path := filepath.Join(private, scope.Plugin, "accounts.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, held := filelock.Lock(filepath.Join(private, ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the private Store lock")
+	}
+	release := sync.OnceFunc(unlock)
+	lifecycle, stop := context.WithCancel(t.Context())
+	attempt, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	result := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := lease.Call(WithRefreshLifecycle(attempt, lifecycle), sdk.MethodAuthRefresh, scope, sdk.AuthRefreshRequest{}, nil)
+		result <- err
+	}()
+	defer func() {
+		stop()
+		cancel()
+		release()
+		<-done
+	}()
+	stacks := make([]byte, 1<<20)
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		waiting := false
+		for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
+			if bytes.Contains(stack, []byte("(*Store).checkSubscriptionView(")) &&
+				bytes.Contains(stack, []byte("(*Manager).refreshFromLease(")) {
+				waiting = true
+				break
+			}
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("refresh returned before waiting for the held Store lock: %v", err)
+		case <-attempt.Done():
+			t.Fatal("refresh never waited for the held Store lock")
+		case <-poll.C:
+		}
+	}
+	stop()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("stopping refresh during owner lookup: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh owner lookup did not stop while the Store lock was held")
+	}
+	release()
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) || calls.Load() != 0 {
+		t.Fatalf("canceled owner lookup changed credentials or dispatched %d exchanges: %v", calls.Load(), err)
 	}
 }
 

@@ -17,14 +17,20 @@ func extensionRefreshDue(expiresAt int64) bool {
 }
 
 func (binding *extensionAccount) prepare(ctx context.Context) (*extensionAccount, error) {
+	return binding.prepareWithRefreshPolicy(ctx, nil)
+}
+
+type extensionRefreshPolicy func(context.Context, extensionPublicIdentity) error
+
+func (binding *extensionAccount) prepareWithRefreshPolicy(ctx context.Context, check extensionRefreshPolicy) (*extensionAccount, error) {
 	selected, err := binding.checkedSelection(ctx, binding.manifest.Contract.Version.Minor >= 9)
 	if err != nil {
 		return nil, err
 	}
-	return binding.prepareSelection(ctx, selected)
+	return binding.prepareSelection(ctx, selected, check)
 }
 
-func (binding *extensionAccount) prepareSelection(ctx context.Context, selected extensionSelection) (*extensionAccount, error) {
+func (binding *extensionAccount) prepareSelection(ctx context.Context, selected extensionSelection, check extensionRefreshPolicy) (*extensionAccount, error) {
 	if selected.scope.Generation != binding.currentScope().Generation {
 		err := &sdk.Error{Code: "stale_generation", Message: "Extension account generation changed."}
 		extensionSelectionFailure(ctx, selected.scope, err)
@@ -40,7 +46,19 @@ func (binding *extensionAccount) prepareSelection(ctx context.Context, selected 
 	if !extensionRefreshDue(selected.expiresAt) {
 		return binding, nil
 	}
-	ctx, err := extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, binding.identity().revision), binding.scope)
+	if selected.config.Version == "" {
+		entry, config, err := toolAccountModule(ctx, binding.host, selected.scope.Plugin)
+		if err != nil {
+			return nil, err
+		}
+		if entry.Revision != selected.entry.Revision || entry.Directory != selected.entry.Directory ||
+			entry.EnableGeneration != selected.entry.EnableGeneration {
+			return nil, extensionhost.ErrActionChanged
+		}
+		selected.config = config
+	}
+	identity := binding.identity()
+	ctx, err := extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, identity.revision), binding.scope)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +70,13 @@ func (binding *extensionAccount) prepareSelection(ctx context.Context, selected 
 	})
 	if !ok {
 		return nil, errors.New("extension host does not support transactional credential refresh")
+	}
+	ctx, err = extensionhost.WithRefreshSelection(ctx, binding.host.Namespace(), selected.entry, selected.config)
+	if err != nil {
+		return nil, err
+	}
+	if check != nil {
+		ctx = extensionhost.WithRefreshPolicy(ctx, func(current context.Context) error { return check(current, identity) })
 	}
 	if _, err := owner.RefreshAccount(ctx, binding.scope.Plugin, binding.scope); err != nil {
 		return nil, err

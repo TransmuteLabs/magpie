@@ -933,7 +933,7 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 	}
 	expected := providerExecuteSelection(ctx, method)
 	if method == sdk.MethodProviderExecute {
-		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+		if err := checkAccountDiscovery(ctx, scope); err != nil {
 			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 		}
 	}
@@ -999,7 +999,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 		return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("module generation changed before provider execution")}
 	}
 	if method == sdk.MethodProviderExecute && !validated {
-		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+		if err := checkAccountDiscovery(ctx, scope); err != nil {
 			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 		}
 	}
@@ -1422,7 +1422,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 
 func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next workerAdmission) workerAdmission {
 	return func(ctx context.Context) (func(bool), error) {
-		if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+		if err := checkAccountDiscovery(ctx, scope); err != nil {
 			return nil, err
 		}
 		m := l.manager
@@ -1438,7 +1438,7 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 						return err
 					}
 				}
-				if err := checkProviderExecuteDiscovery(ctx, scope); err != nil {
+				if err := checkAccountDiscovery(ctx, scope); err != nil {
 					return err
 				}
 				if check, ok := ctx.Value(providerExecutePolicyKey{}).(func(context.Context) error); ok && check != nil {
@@ -1481,7 +1481,7 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 	}
 }
 
-func checkProviderExecuteDiscovery(ctx context.Context, scope sdk.Scope) error {
+func checkAccountDiscovery(ctx context.Context, scope sdk.Scope) error {
 	if err := ctx.Err(); err != nil || scope.Account == "" {
 		return err
 	}

@@ -39,6 +39,29 @@ func refresh(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 	return result, err
 }
 
+func execute(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+	var auth struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(call.Auth, &auth) != nil || auth.URL == "" {
+		return nil, errors.New("missing synthetic execute endpoint")
+	}
+	body, err := json.Marshal(call)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, auth.URL+"/execute", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	response.Body.Close()
+	return sdk.ExecuteResult{Status: response.StatusCode, Outcome: "completed"}, nil
+}
+
 func tool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
 	var request sdk.ToolRequest
 	var arguments struct {
@@ -166,7 +189,8 @@ func main() {
 		Manifest: manifest,
 		Handlers: map[string]sdk.Handler{
 			sdk.MethodToolCall: tool, sdk.MethodAuthRefresh: refresh,
-			sdk.MethodAuthStart: unsupported, sdk.MethodAuthFinish: unsupported, sdk.MethodAuthLogout: unsupported,
+			sdk.MethodProviderExecute: execute,
+			sdk.MethodAuthStart:       unsupported, sdk.MethodAuthFinish: unsupported, sdk.MethodAuthLogout: unsupported,
 		},
 	}); err != nil {
 		panic(err)

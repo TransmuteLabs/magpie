@@ -64,7 +64,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		if err != nil {
 			return "", err
 		}
-		selected := extensionSignIn{host: host, entry: entry, config: config.Version,
+		selected := extensionSignIn{host: host, entry: entry, config: config,
 			scope: extensionhost.AccountPublicationScope(current, host.Namespace(), target), public: public}
 		var proxy string
 		for _, descriptor := range policy.providers.Providers {

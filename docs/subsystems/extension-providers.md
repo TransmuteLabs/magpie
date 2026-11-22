@@ -359,11 +359,15 @@ the exact next generation and an expiry more than thirty seconds away.
 Unknown expiry leaves current behavior unchanged. Network holds and manually
 superseded generations fail closed. This is request-driven preflight,
 separate from periodic scheduling and the module's vendor-specific exchange.
-An ordinary account-bound tool that needs renewal checks its effective
-configuration and current account policy again after refresh reaches the
-worker's available slots. If the caller leaves before the refresh RPC begins
-writing, no exchange starts. The tool separately rechecks its authority
-before it runs against the refreshed credentials.
+After its worker slots open and earlier stdin frames drain, renewal checks the
+leased package, enablement, effective configuration and current discovery
+policy. A provider that has selected a package and configuration keeps that
+selection through worker acquisition. Execution, search, check-in, tools,
+paid tasks and scheduled renewal also apply their own login policies.
+Explicit model and usage reads can still refresh an inactive account selected
+for inspection. Cancellation before worker handoff prevents the exchange.
+Execution and tools check their authority again before using the refreshed
+credentials.
 
 Typed `unauthenticated` errors from `provider.usage` also publish sign-in
 state through the existing login metadata. Ordinary login rows, sign-in alerts

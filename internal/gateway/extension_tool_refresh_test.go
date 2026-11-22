@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"github.com/yetone/magpie/pkg/protocolext"
 )
 
 const refreshToolSpec = "extension:tool.refresh"
@@ -38,23 +40,57 @@ type toolRefreshFixture struct {
 	scope     sdk.Scope
 	refreshes atomic.Int32
 	toolCalls atomic.Int32
+	executes  atomic.Int32
 	tool      mcpTool
 	server    *httptest.Server
 }
 
 func installToolRefreshFixture(test *testing.T, beforeReply func(*toolRefreshFixture)) *toolRefreshFixture {
 	test.Helper()
+	return installRefreshFixture(test, buildToolRefreshWorker(test), sdk.FullContract().Version.Minor, -time.Minute, beforeReply)
+}
+
+func buildToolRefreshWorker(test *testing.T) string {
+	test.Helper()
+	entry := "worker"
+	if runtime.GOOS == "windows" {
+		entry += ".exe"
+	}
+	worker := filepath.Join(test.TempDir(), entry)
+	build := proc.CommandContext(testenv.DeadlineContext(test, 2*time.Second), filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", worker, "./testdata/extensiontoolrefreshworker")
+	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		test.Fatalf("build fixture: %v\n%s", err, output)
+	}
+	return worker
+}
+
+func installRefreshFixture(test *testing.T, worker string, minor int, lifetime time.Duration, beforeReply func(*toolRefreshFixture)) *toolRefreshFixture {
+	test.Helper()
 	fresh(test)
 	test.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	fixture := &toolRefreshFixture{manager: extension.Default(), scope: sdk.Scope{Plugin: "tool.refresh", Provider: "vendor", Account: "selected", Generation: 1}}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPost || (request.URL.Path != "/" && request.URL.Path != "/tool") {
+		if request.Method != http.MethodPost {
 			http.NotFound(writer, request)
 			return
 		}
-		if request.URL.Path == "/tool" {
+		switch request.URL.Path {
+		case "/tool":
 			fixture.toolCalls.Add(1)
 			writer.WriteHeader(http.StatusOK)
+			return
+		case "/execute":
+			fixture.executes.Add(1)
+			var call sdk.Call
+			if err := json.NewDecoder(request.Body).Decode(&call); err != nil || call.Scope.Generation != 2 || !strings.Contains(string(call.Auth), "synthetic-rotated") {
+				test.Errorf("execute did not use the refresh successor: %+v %v", call.Scope, err)
+			}
+			writer.WriteHeader(http.StatusOK)
+			return
+		case "/":
+		default:
+			http.NotFound(writer, request)
 			return
 		}
 		fixture.refreshes.Add(1)
@@ -70,19 +106,18 @@ func installToolRefreshFixture(test *testing.T, beforeReply func(*toolRefreshFix
 	}))
 	test.Cleanup(fixture.server.Close)
 	directory := test.TempDir()
-	entry := "worker"
-	if runtime.GOOS == "windows" {
-		entry += ".exe"
-	}
-	build := proc.CommandContext(testenv.DeadlineContext(test, 2*time.Second), filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", filepath.Join(directory, entry), "./testdata/extensiontoolrefreshworker")
-	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		test.Fatalf("build fixture: %v\n%s", err, output)
+	entry := filepath.Base(worker)
+	if err := os.Link(worker, filepath.Join(directory, entry)); err != nil {
+		test.Fatal(err)
 	}
 	manifest := sdk.Manifest{Schema: sdk.ManifestSchema, ID: fixture.scope.Plugin, Version: "1.0.0", Runtime: "exec", Entry: entry,
-		Contract:  sdk.Contract{Version: sdk.FullContract().Version, Capabilities: []sdk.Capability{sdk.AccountAuth, sdk.ToolProvider}},
-		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture"}},
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: minor},
+			Capabilities: []sdk.Capability{sdk.AccountAuth, sdk.ToolProvider, sdk.OutboundExecutor}},
+		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture", Protocols: []protocolext.Protocol{"messages"}}},
 		Tools:     []sdk.ToolDescriptor{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}
+	if minor >= 8 {
+		manifest.Providers[0].KeepAlive = &sdk.AccountKeepAliveDescriptor{}
 	}
 	raw, _ := json.Marshal(manifest)
 	if err := os.WriteFile(filepath.Join(directory, sdk.ManifestFile), raw, 0600); err != nil {
@@ -101,7 +136,7 @@ func installToolRefreshFixture(test *testing.T, beforeReply func(*toolRefreshFix
 	})
 	auth, _ := json.Marshal(map[string]string{"url": fixture.server.URL, "token": "synthetic-original"})
 	if _, err := fixture.manager.Store().SaveAccount(extension.Account{Plugin: fixture.scope.Plugin, Provider: fixture.scope.Provider, ID: fixture.scope.Account,
-		Auth: auth, ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}, 0); err != nil {
+		Auth: auth, ExpiresAt: time.Now().Add(lifetime).UnixMilli()}, 0); err != nil {
 		test.Fatal(err)
 	}
 	if _, err := provider.ExtensionProviders(); err != nil {
@@ -392,46 +427,12 @@ func TestExtensionToolExpiryPreflightRecheckedAfterStdinDrains(test *testing.T) 
 			if _, err := fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
 				test.Fatal(err)
 			}
-			directory := test.TempDir()
-			resume := sync.OnceValue(func() error { return os.WriteFile(filepath.Join(directory, "continue"), nil, 0600) })
 			var running sync.WaitGroup
 			defer func() {
-				if err := resume(); err != nil {
-					test.Error(err)
-				}
 				cancel()
 				running.Wait()
 			}()
-			marker, err := json.Marshal(map[string]string{"fixture-stop-reading": directory})
-			if err != nil {
-				test.Fatal(err)
-			}
-			callPublic := func(arguments json.RawMessage) <-chan error {
-				returned := make(chan error, 1)
-				running.Go(func() {
-					_, err := fixture.manager.Call(ctx, fixture.scope.Plugin, sdk.MethodToolCall, sdk.Scope{},
-						sdk.ToolRequest{ID: "echo", Arguments: arguments}, nil)
-					returned <- err
-				})
-				return returned
-			}
-			markerDone := callPublic(marker)
-			waitToolRefreshPhase(test, ctx, "worker stdin pause", func() bool {
-				_, err := os.Stat(filepath.Join(directory, "ready"))
-				return err == nil
-			})
-			padding := json.RawMessage(`{"fixture-padding":"` + strings.Repeat("x", 2<<20) + `"}`)
-			paddedDone := callPublic(padding)
-			stacks := make([]byte, 1<<20)
-			waitToolRefreshPhase(test, ctx, "worker stuck in stdin write", func() bool {
-				for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
-					if bytes.Contains(stack, []byte("(*workerClient).writeLoop(")) &&
-						bytes.Contains(stack, []byte("os.(*File).Write(")) {
-						return true
-					}
-				}
-				return false
-			})
+			resume := stallRefreshInput(test, ctx, fixture)
 			type response struct {
 				output any
 				err    error
@@ -443,17 +444,9 @@ func TestExtensionToolExpiryPreflightRecheckedAfterStdinDrains(test *testing.T) 
 				output, err := fixture.run(caller, refreshToolArgs)
 				reply <- response{output, err}
 			})
-			waitToolRefreshPhase(test, ctx, "claimed refresh queued behind stdin", func() bool {
-				scope, state := toolRefreshReceipt(test, fixture)
-				if scope.Operation == "" || state != "dispatched" {
-					return false
-				}
-				stack := toolRefreshOwnerStack(stacks)
-				return bytes.Contains(stack, []byte("(*workerClient).callWithAdmission(")) &&
-					(bytes.Contains(stack, []byte("(*workerClient).send")) || bytes.Contains(stack, []byte("(*workerClient).reserveWrite(")))
-			})
-			claimed, _ := toolRefreshReceipt(test, fixture)
+			claimed := waitClaimedRefreshInput(test, ctx, fixture)
 
+			var err error
 			switch change {
 			case "login off":
 				err = provider.SetLoginOn(provider.ExtensionProviderID(fixture.scope.Plugin, fixture.scope.Provider), fixture.scope.Account, false)
@@ -474,19 +467,7 @@ func TestExtensionToolExpiryPreflightRecheckedAfterStdinDrains(test *testing.T) 
 			if err != nil {
 				test.Fatal(err)
 			}
-			if err := resume(); err != nil {
-				test.Fatal(err)
-			}
-			for _, done := range []<-chan error{markerDone, paddedDone} {
-				select {
-				case err := <-done:
-					if err != nil {
-						test.Fatal(err)
-					}
-				case <-ctx.Done():
-					test.Fatal("ordinary frames did not drain")
-				}
-			}
+			resume()
 			select {
 			case result := <-reply:
 				if change == "unchanged" {
@@ -509,6 +490,342 @@ func TestExtensionToolExpiryPreflightRecheckedAfterStdinDrains(test *testing.T) 
 			}
 		})
 	}
+}
+
+func TestExtensionProviderExpiryPreflightRecheckedAtRefreshHandoff(test *testing.T) {
+	worker := buildToolRefreshWorker(test)
+	for _, scenario := range []struct {
+		name         string
+		minor        int
+		sign         bool
+		change       string
+		beforeDo     bool
+		afterHandoff bool
+		waitUntilDue bool
+		wantRefresh  bool
+		wantExecute  bool
+	}{
+		{name: "signed login off", minor: 9, sign: true, change: "login off"},
+		{name: "signed before renewal window", minor: 9, sign: true, change: "login off", waitUntilDue: true},
+		{name: "direct discovery off", minor: 8, change: "discovery off"},
+		{name: "signed same CAS change before do", minor: 9, sign: true, change: "same CAS configuration", beforeDo: true},
+		{name: "direct do selects changed config", minor: 9, change: "same CAS configuration", beforeDo: true, wantRefresh: true, wantExecute: true},
+		{name: "same CAS changes effective config", minor: 9, sign: true, change: "same CAS configuration"},
+		{name: "same CAS merely reorders config", minor: 8, change: "reordered configuration", wantRefresh: true, wantExecute: true},
+		{name: "API 1.0 uses empty config", minor: 0, sign: true, wantRefresh: true, wantExecute: true},
+		{name: "after handoff keeps the rotation", minor: 9, sign: true, change: "login off", afterHandoff: true, wantRefresh: true},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			observed, reply := make(chan struct{}), make(chan struct{})
+			sawRefresh := sync.OnceFunc(func() { close(observed) })
+			releaseReply := sync.OnceFunc(func() { close(reply) })
+			lifetime := -time.Minute
+			if scenario.waitUntilDue {
+				lifetime = time.Minute + 4*time.Second
+			}
+			fixture := installRefreshFixture(test, worker, scenario.minor, lifetime, func(*toolRefreshFixture) {
+				sawRefresh()
+				<-reply
+			})
+			test.Cleanup(releaseReply)
+			ctx, cancel := context.WithTimeout(test.Context(), 30*time.Second)
+			defer cancel()
+			if scenario.minor >= 1 {
+				if _, err := fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
+					test.Fatal(err)
+				}
+			}
+			providers, err := provider.ExtensionProviders()
+			if err != nil || len(providers) != 1 {
+				test.Fatalf("discover fixture account: %d selections, %v", len(providers), err)
+			}
+			chosen := providers[0]
+			const payload = `{"model":"fixture-model"}`
+			request := httptest.NewRequestWithContext(ctx, http.MethodPost, chosen.Anthropic+"/messages", strings.NewReader(payload))
+			if scenario.sign {
+				if err := chosen.Sign(ctx, request, provider.Anthropic, []byte(payload)); err != nil {
+					test.Fatal(err)
+				}
+			}
+			if scenario.waitUntilDue {
+				account, err := fixture.manager.Store().GetAccountContext(ctx, fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
+				if err != nil {
+					test.Fatal(err)
+				}
+				delay := time.Until(time.UnixMilli(account.ExpiresAt).Add(-time.Minute))
+				if delay <= 0 {
+					test.Fatal("signing did not occur before renewal was due")
+				}
+				timer := time.NewTimer(delay + time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					test.Fatal(ctx.Err())
+				}
+			}
+			var resume func()
+			if scenario.beforeDo {
+				replaceToolConfigAtSameVersion(test, fixture, scenario.change)
+			} else {
+				resume = stallRefreshInput(test, ctx, fixture)
+			}
+			type result struct {
+				status int
+				err    error
+			}
+			returned := make(chan result, 1)
+			var running sync.WaitGroup
+			defer func() {
+				releaseReply()
+				cancel()
+				running.Wait()
+			}()
+			running.Go(func() {
+				response, err := chosen.Do(nil, request)
+				if response == nil {
+					returned <- result{err: err}
+					return
+				}
+				defer response.Body.Close()
+				_, readErr := io.Copy(io.Discard, response.Body)
+				returned <- result{status: response.StatusCode, err: errors.Join(err, readErr)}
+			})
+			var claimed sdk.Scope
+			if !scenario.beforeDo {
+				claimed = waitClaimedRefreshInput(test, ctx, fixture)
+				if scenario.afterHandoff {
+					resume()
+					select {
+					case <-observed:
+					case <-ctx.Done():
+						test.Fatal("refresh never reached the fixture after handoff")
+					}
+				}
+				switch scenario.change {
+				case "login off":
+					err = provider.SetLoginOn(chosen.ID, chosen.Account.User, false)
+				case "discovery off":
+					current := settings.Load()
+					current.NoAccountDiscovery = true
+					err = settings.Save(current)
+				case "same CAS configuration", "reordered configuration":
+					replaceToolConfigAtSameVersion(test, fixture, scenario.change)
+				}
+				if err != nil {
+					test.Fatal(err)
+				}
+				if !scenario.afterHandoff {
+					resume()
+				}
+			}
+			releaseReply()
+			select {
+			case response := <-returned:
+				if scenario.wantExecute {
+					if response.err != nil || response.status != http.StatusOK {
+						test.Errorf("active request failed: status=%d, %v", response.status, response.err)
+					}
+				} else if response.status != 0 || response.err == nil {
+					test.Errorf("revoked request returned status=%d, %v", response.status, response.err)
+				}
+			case <-ctx.Done():
+				test.Fatal("provider did not finish")
+			}
+			waitToolRefreshOwner(test, ctx)
+			wantRefresh, wantExecute, wantState, wantGeneration := int32(0), int32(0), "not-started", fixture.scope.Generation
+			if scenario.wantRefresh {
+				wantRefresh, wantState, wantGeneration = 1, "completed", wantGeneration+1
+			}
+			if scenario.wantExecute {
+				wantExecute = 1
+			}
+			if scenario.beforeDo && !scenario.wantRefresh {
+				wantState = ""
+			}
+			got, state := toolRefreshReceipt(test, fixture)
+			account, err := fixture.manager.Store().GetAccountContext(ctx, fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
+			sameOperation := got == claimed
+			if scenario.beforeDo && scenario.wantRefresh {
+				sameOperation = got.Operation != "" && got.Generation == fixture.scope.Generation
+			}
+			if !sameOperation || state != wantState || fixture.refreshes.Load() != wantRefresh || fixture.executes.Load() != wantExecute ||
+				err != nil || account.Generation != wantGeneration {
+				test.Errorf("refresh=%d execute=%d receipt=%+v state=%q generation=%d (read %v); want refresh=%d execute=%d same receipt %q in %q generation=%d",
+					fixture.refreshes.Load(), fixture.executes.Load(), got, state, account.Generation, err, wantRefresh, wantExecute, claimed.Operation, wantState, wantGeneration)
+			}
+		})
+	}
+}
+
+func TestExtensionKeepAliveCancelsRefreshBeforeStdinHandoff(test *testing.T) {
+	worker := buildToolRefreshWorker(test)
+	for _, scenario := range []struct {
+		name   string
+		joined bool
+	}{
+		{name: "own idle refresh"},
+		{name: "joined foreground refresh", joined: true},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			fixture := installRefreshFixture(test, worker, sdk.FullContract().Version.Minor, -time.Minute, nil)
+			ctx, cancel := context.WithTimeout(test.Context(), 30*time.Second)
+			defer cancel()
+			if err := provider.RegisterExtensionLogin(ctx, fixture.scope); err != nil {
+				test.Fatal(err)
+			}
+			var stop func()
+			var callers sync.WaitGroup
+			test.Cleanup(func() {
+				if stop != nil {
+					stop()
+				}
+				callers.Wait()
+			})
+			resume := stallRefreshInput(test, ctx, fixture)
+			var claimed sdk.Scope
+			foreground := make(chan error, 1)
+			if scenario.joined {
+				callers.Go(func() {
+					_, err := fixture.manager.RefreshAccount(ctx, fixture.scope.Plugin, fixture.scope)
+					foreground <- err
+				})
+				claimed = waitClaimedRefreshInput(test, ctx, fixture)
+			}
+			stop = provider.KeepExtensionsSignedIn(ctx, fixture.manager)
+			if scenario.joined {
+				stacks := make([]byte, 1<<20)
+				waitToolRefreshPhase(test, ctx, "idle keeper joined foreground refresh", func() bool {
+					for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
+						header, _, _ := bytes.Cut(stack, []byte("\n"))
+						if bytes.Contains(header, []byte("[select]")) &&
+							bytes.Contains(stack, []byte("(*Manager).refreshFromLease(")) &&
+							bytes.Contains(stack, []byte("(*extensionSignInKeeper).look(")) {
+							return true
+						}
+					}
+					return false
+				})
+			} else {
+				claimed = waitClaimedRefreshInput(test, ctx, fixture)
+			}
+			stopped := make(chan struct{})
+			callers.Go(func() {
+				stop()
+				close(stopped)
+			})
+			select {
+			case <-stopped:
+			case <-time.After(2 * time.Second):
+				test.Error("idle renewal did not stop while stdin was still blocked")
+			}
+			if scenario.joined {
+				got, state := toolRefreshReceipt(test, fixture)
+				if got != claimed || state != "dispatched" || fixture.refreshes.Load() != 0 {
+					test.Errorf("stopping the waiter changed the queued foreground refresh: %+v %s", got, state)
+				}
+			}
+			resume()
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				test.Fatal("idle renewal did not join")
+			}
+			wantState, wantCount, wantGeneration := "not-started", int32(0), fixture.scope.Generation
+			if scenario.joined {
+				select {
+				case err := <-foreground:
+					if err != nil {
+						test.Fatal(err)
+					}
+				case <-ctx.Done():
+					test.Fatal("foreground refresh did not finish")
+				}
+				wantState, wantCount, wantGeneration = "completed", 1, wantGeneration+1
+			}
+			got, state := toolRefreshReceipt(test, fixture)
+			account, err := fixture.manager.Store().GetAccountContext(ctx, fixture.scope.Plugin, fixture.scope.Provider, fixture.scope.Account)
+			if got != claimed || state != wantState || fixture.refreshes.Load() != wantCount || err != nil || account.Generation != wantGeneration {
+				test.Fatalf("idle renewal stop: refreshes=%d receipt=%+v %s generation=%d err=%v", fixture.refreshes.Load(), got, state, account.Generation, err)
+			}
+		})
+	}
+}
+
+func stallRefreshInput(test *testing.T, ctx context.Context, fixture *toolRefreshFixture) func() {
+	test.Helper()
+	directory := test.TempDir()
+	resume := sync.OnceValue(func() error { return os.WriteFile(filepath.Join(directory, "continue"), nil, 0600) })
+	held, cancel := context.WithCancel(ctx)
+	var running sync.WaitGroup
+	test.Cleanup(func() {
+		if err := resume(); err != nil {
+			test.Error(err)
+		}
+		cancel()
+		running.Wait()
+	})
+	marker, err := json.Marshal(map[string]string{"fixture-stop-reading": directory})
+	if err != nil {
+		test.Fatal(err)
+	}
+	call := func(arguments json.RawMessage) <-chan error {
+		returned := make(chan error, 1)
+		running.Go(func() {
+			_, err := fixture.manager.Call(held, fixture.scope.Plugin, sdk.MethodToolCall, sdk.Scope{},
+				sdk.ToolRequest{ID: "echo", Arguments: arguments}, nil)
+			returned <- err
+		})
+		return returned
+	}
+	markerDone := call(marker)
+	waitToolRefreshPhase(test, ctx, "worker stdin pause", func() bool {
+		_, err := os.Stat(filepath.Join(directory, "ready"))
+		return err == nil
+	})
+	paddedDone := call(json.RawMessage(`{"fixture-padding":"` + strings.Repeat("x", 2<<20) + `"}`))
+	stacks := make([]byte, 1<<20)
+	waitToolRefreshPhase(test, ctx, "worker stuck in stdin write", func() bool {
+		for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
+			if bytes.Contains(stack, []byte("(*workerClient).writeLoop(")) &&
+				bytes.Contains(stack, []byte("os.(*File).Write(")) {
+				return true
+			}
+		}
+		return false
+	})
+	return func() {
+		test.Helper()
+		if err := resume(); err != nil {
+			test.Fatal(err)
+		}
+		for _, done := range []<-chan error{markerDone, paddedDone} {
+			select {
+			case err := <-done:
+				if err != nil {
+					test.Fatal(err)
+				}
+			case <-ctx.Done():
+				test.Fatal("ordinary frames did not drain")
+			}
+		}
+	}
+}
+
+func waitClaimedRefreshInput(test *testing.T, ctx context.Context, fixture *toolRefreshFixture) sdk.Scope {
+	test.Helper()
+	stacks := make([]byte, 1<<20)
+	waitToolRefreshPhase(test, ctx, "claimed refresh queued behind stdin", func() bool {
+		scope, state := toolRefreshReceipt(test, fixture)
+		if scope.Operation == "" || state != "dispatched" {
+			return false
+		}
+		stack := toolRefreshOwnerStack(stacks)
+		return bytes.Contains(stack, []byte("(*workerClient).callWithAdmission(")) &&
+			(bytes.Contains(stack, []byte("(*workerClient).send")) || bytes.Contains(stack, []byte("(*workerClient).reserveWrite(")))
+	})
+	claimed, _ := toolRefreshReceipt(test, fixture)
+	return claimed
 }
 
 func waitToolRefreshPhase(test *testing.T, ctx context.Context, phase string, check func() bool) {
