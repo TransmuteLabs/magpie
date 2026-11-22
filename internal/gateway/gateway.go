@@ -2876,7 +2876,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// the log has the body as it went: masked, or as written where it
 	// went so
 	logBody := func(b []byte) {
-		call.RequestBody, call.RequestTruncated = captureRequestBody(b)
+		call.RequestBody, call.RequestTruncated = s.captureRecentRequestBody(b)
 		if wholeBodies {
 			call.wholeIn = b
 		}

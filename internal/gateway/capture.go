@@ -46,6 +46,21 @@ func captureRequestBody(p []byte) (string, bool) {
 	return string(p[:min(len(p), callBodyLimit)]), len(p) > callBodyLimit
 }
 
+func (s *Server) captureRecentRequestBody(body []byte) (string, bool) {
+	if len(body) >= callBodyLimit {
+		s.mu.Lock()
+		var previous string
+		if len(s.recent) != 0 {
+			previous = s.recent[len(s.recent)-1].RequestBody
+		}
+		s.mu.Unlock()
+		if len(previous) == callBodyLimit && previous == string(body[:callBodyLimit]) {
+			return previous, len(body) > callBodyLimit
+		}
+	}
+	return captureRequestBody(body)
+}
+
 type captureResponseWriter struct {
 	http.ResponseWriter
 	body capturedBody
