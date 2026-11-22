@@ -1323,7 +1323,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 			return nil, nil
 		}
 	}
-	result, err := client.callWithAdmission(ctx, method, scope, auth, params, onEvent, admit)
+	result, err := client.callWithAdmission(ctx, method, scope, auth, params, onEvent, admit, nil)
 	if err == nil {
 		if prepareResult != nil {
 			prepareResult(result)

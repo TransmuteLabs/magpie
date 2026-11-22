@@ -53,8 +53,42 @@ type pendingCall struct {
 }
 
 type workerWrite struct {
-	frame sdk.Frame
-	done  chan error
+	frame        sdk.Frame
+	encoded      []byte
+	done         chan error
+	probe        chan *workerWriteReservation
+	release      <-chan struct{}
+	ctx          context.Context
+	writeClaimed *atomic.Bool
+}
+
+type workerWriteReservation struct {
+	mu        sync.Mutex
+	retired   bool
+	committed chan struct{}
+	work      workerWrite
+}
+
+func (reservation *workerWriteReservation) commit(work workerWrite, begin func() error) (bool, error) {
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	if reservation.retired {
+		return false, nil
+	}
+	if err := begin(); err != nil {
+		return false, err
+	}
+	reservation.retired = true
+	reservation.work = work
+	close(reservation.committed)
+	return true, nil
+}
+
+func (reservation *workerWriteReservation) retire() workerWrite {
+	reservation.mu.Lock()
+	defer reservation.mu.Unlock()
+	reservation.retired = true
+	return reservation.work
 }
 
 type workerClient struct {
@@ -87,6 +121,12 @@ type workerClient struct {
 }
 
 type workerAdmission func(context.Context) (finish func(confirmed bool), err error)
+
+type workerCallPreparation struct {
+	auth  func(context.Context) (json.RawMessage, error)
+	admit func(context.Context, func() error) error
+	begin func(context.Context) error
+}
 
 // The child gets ordinary process essentials and its own state/home. In
 // particular, environment-based provider credentials are not inherited.
@@ -267,7 +307,7 @@ func (c *workerClient) write(frame sdk.Frame) error {
 }
 
 func (c *workerClient) send(ctx context.Context, frame sdk.Frame) error {
-	work := workerWrite{frame: frame, done: make(chan error, 1)}
+	work := newWorkerWrite(ctx, frame)
 	select {
 	case c.writes <- work:
 	case <-ctx.Done():
@@ -275,27 +315,103 @@ func (c *workerClient) send(ctx context.Context, frame sdk.Frame) error {
 	case <-c.lifetime.Done():
 		return &OutcomeError{Outcome: "not-started", Cause: errors.New("extension worker stopped")}
 	}
+	return c.awaitWrite(ctx, work)
+}
+
+func newWorkerWrite(ctx context.Context, frame sdk.Frame) workerWrite {
+	work := workerWrite{frame: frame, done: make(chan error, 1)}
+	if frame.Kind != "ack" {
+		work.ctx, work.writeClaimed = ctx, new(atomic.Bool)
+	}
+	return work
+}
+
+func (c *workerClient) reserveWrite(ctx context.Context, probe chan *workerWriteReservation) (*workerWriteReservation, error) {
+	select {
+	case c.writes <- workerWrite{probe: probe}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.lifetime.Done():
+		return nil, errors.New("extension worker stopped")
+	}
+	select {
+	case reservation := <-probe:
+		return reservation, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.lifetime.Done():
+		return nil, errors.New("extension worker stopped")
+	}
+}
+
+func (c *workerClient) sendPrepared(ctx context.Context, frame sdk.Frame, prepare *workerCallPreparation) error {
+	encoded, err := encodeWorkerFrame(frame)
+	if err != nil {
+		return err
+	}
+	release := make(chan struct{})
+	work := workerWrite{frame: frame, encoded: encoded, done: make(chan error, 1), release: release}
+	probe := make(chan *workerWriteReservation, 1)
+	for {
+		reservation, err := c.reserveWrite(ctx, probe)
+		if err != nil {
+			return &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+		committed := false
+		err = prepare.admit(ctx, func() error {
+			var err error
+			committed, err = reservation.commit(work, func() error {
+				if err := c.lifetime.Err(); err != nil {
+					return err
+				}
+				return prepare.begin(ctx)
+			})
+			return err
+		})
+		if committed {
+			close(release)
+			return c.awaitWrite(ctx, work)
+		}
+		if err != nil {
+			return &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+	}
+}
+
+func (c *workerClient) awaitWrite(ctx context.Context, work workerWrite) error {
 	select {
 	case err := <-work.done:
 		return err
 	case <-ctx.Done():
+		if work.writeClaimed != nil && work.writeClaimed.CompareAndSwap(false, true) {
+			return &OutcomeError{Outcome: "not-started", Cause: ctx.Err()}
+		}
 		// A blocked stdin write cannot be abandoned while the process
 		// continues: its partial frame could corrupt the next request.
 		// A tiny ACK remains serialized by writeLoop and can finish before
 		// the queued cancel; it carries no new request or authority.
-		if frame.Kind != "ack" {
+		if work.frame.Kind != "ack" {
 			c.fail(ctx.Err())
 		}
 		return ctx.Err()
 	case <-c.lifetime.Done():
-		return errors.New("extension worker stopped")
+		err := errors.New("extension worker stopped")
+		if work.writeClaimed != nil && work.writeClaimed.CompareAndSwap(false, true) {
+			return &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+		return err
 	}
 }
 
 func (c *workerClient) writeLoop() {
 	defer close(c.writeDone)
+	var reservation *workerWriteReservation
 	for {
 		var work workerWrite
+		var committed <-chan struct{}
+		if reservation != nil {
+			committed = reservation.committed
+		}
 		select {
 		case frame := <-c.cancelFrames:
 			work = workerWrite{frame: frame, done: make(chan error, 1)}
@@ -304,33 +420,80 @@ func (c *workerClient) writeLoop() {
 			case work = <-c.writes:
 			case frame := <-c.cancelFrames:
 				work = workerWrite{frame: frame, done: make(chan error, 1)}
+			case <-committed:
 			case <-c.lifetime.Done():
 				return
 			}
 		}
-		b, err := json.Marshal(work.frame)
-		if err != nil || len(b) > sdk.MaxFrameBytes {
-			work.done <- &OutcomeError{Outcome: "not-started", Cause: errors.New("extension frame exceeds its contract")}
+		if work.probe != nil {
+			if reservation == nil {
+				reservation = &workerWriteReservation{committed: make(chan struct{})}
+			}
+			work.probe <- reservation
 			continue
 		}
-		b = append(b, '\n')
-		for len(b) > 0 {
-			var n int
-			n, err = c.stdin.Write(b)
-			if err != nil || n == 0 {
-				if err == nil {
-					err = io.ErrShortWrite
+		if reservation != nil {
+			admitted := reservation.retire()
+			reservation = nil
+			if admitted.done != nil {
+				select {
+				case <-admitted.release:
+				case <-c.lifetime.Done():
+					return
 				}
-				break
+				if !c.writeFrame(admitted) {
+					return
+				}
 			}
-			b = b[n:]
 		}
-		work.done <- err
-		if err != nil {
-			c.fail(err)
+		if work.done != nil && !c.writeFrame(work) {
 			return
 		}
 	}
+}
+
+func encodeWorkerFrame(frame sdk.Frame) ([]byte, error) {
+	b, err := json.Marshal(frame)
+	if err != nil || len(b) > sdk.MaxFrameBytes {
+		return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension frame exceeds its contract")}
+	}
+	return append(b, '\n'), nil
+}
+
+func (c *workerClient) writeFrame(work workerWrite) bool {
+	b := work.encoded
+	if b == nil {
+		var err error
+		b, err = encodeWorkerFrame(work.frame)
+		if err != nil {
+			work.done <- err
+			return true
+		}
+	}
+	if work.writeClaimed != nil {
+		err := work.ctx.Err()
+		if err != nil || !work.writeClaimed.CompareAndSwap(false, true) {
+			if err == nil {
+				err = context.Canceled
+			}
+			work.done <- &OutcomeError{Outcome: "not-started", Cause: err}
+			return true
+		}
+	}
+	for len(b) > 0 {
+		written, err := c.stdin.Write(b)
+		if err == nil && written == 0 {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			work.done <- err
+			c.fail(err)
+			return false
+		}
+		b = b[written:]
+	}
+	work.done <- nil
+	return true
 }
 
 func (c *workerClient) read() {
@@ -512,11 +675,11 @@ func (c *workerClient) dispatchHost(frame sdk.Frame) bool {
 func (c *workerClient) call(ctx context.Context, method string, scope sdk.Scope, auth json.RawMessage,
 	params any, consume func(Event) error,
 ) (json.RawMessage, error) {
-	return c.callWithAdmission(ctx, method, scope, auth, params, consume, nil)
+	return c.callWithAdmission(ctx, method, scope, auth, params, consume, nil, nil)
 }
 
 func (c *workerClient) callWithAdmission(ctx context.Context, method string, scope sdk.Scope, auth json.RawMessage,
-	params any, consume func(Event) error, admit workerAdmission,
+	params any, consume func(Event) error, admit workerAdmission, prepare *workerCallPreparation,
 ) (json.RawMessage, error) {
 	class := c.regularSlots
 	switch method {
@@ -563,6 +726,12 @@ func (c *workerClient) callWithAdmission(ctx context.Context, method string, sco
 			c.finishAdmission(pending, release, dispatched)
 		}
 	}()
+	if prepare != nil {
+		auth, err = prepare.auth(ctx)
+		if err != nil {
+			return nil, &OutcomeError{Outcome: "not-started", Cause: err}
+		}
+	}
 	id := strconv.FormatUint(c.next.Add(1), 10)
 	if parent := processParent(ctx); parent != nil {
 		parent.mu.Lock()
@@ -605,7 +774,12 @@ func (c *workerClient) callWithAdmission(ctx context.Context, method string, sco
 	if deadline, ok := ctx.Deadline(); ok {
 		frame.Deadline = deadline.UnixMilli()
 	}
-	if err := c.send(ctx, frame); err != nil {
+	if prepare == nil {
+		err = c.send(ctx, frame)
+	} else {
+		err = c.sendPrepared(ctx, frame, prepare)
+	}
+	if err != nil {
 		var outcome *OutcomeError
 		if errors.As(err, &outcome) && outcome.Outcome == "not-started" {
 			return nil, err

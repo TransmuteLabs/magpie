@@ -2,6 +2,7 @@ package extension
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -35,6 +36,17 @@ type refreshRun struct {
 	lease      *Lease
 }
 
+type toolRefreshCheckKey struct{}
+
+type toolRefreshCheck struct {
+	selected ToolAccountSelection
+	check    func(context.Context) error
+}
+
+func WithToolRefreshCheck(ctx context.Context, selected ToolAccountSelection, check func(context.Context) error) context.Context {
+	return context.WithValue(ctx, toolRefreshCheckKey{}, toolRefreshCheck{selected: selected, check: check})
+}
+
 func (m *Manager) RefreshAccount(ctx context.Context, id string, scope sdk.Scope) (sdk.AuthResult, error) {
 	if scope.Plugin == "" {
 		scope.Plugin = id
@@ -65,6 +77,12 @@ func (m *Manager) refreshFromLease(ctx context.Context, lease *Lease, scope sdk.
 	}
 	if err := netproxy.Held(ctx); err != nil {
 		return sdk.AuthResult{}, err
+	}
+	if tool, ok := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck); ok {
+		if m.Namespace() != tool.selected.namespace || !tool.selected.matches(lease.worker.entry) ||
+			!sameModuleConfig(lease.worker.config, tool.selected.config) {
+			return sdk.AuthResult{}, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension tool refresh lease has changed")}
+		}
 	}
 	if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
 		return sdk.AuthResult{}, err
@@ -159,40 +177,15 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 	}
 	scope.Session, scope.Operation, scope.Attempt = "", "refresh-"+operation, 1
 	var cached *sdk.AuthResult
-	var account Account
 	err = m.withSubscriptionScope(run.ctx, scope, func() error {
 		var err error
-		cached, err = m.store.refreshStatus(scope)
-		if err != nil || cached != nil {
-			return err
-		}
-		run.mu.Lock()
-		defer run.mu.Unlock()
-		if err := caller.Err(); err != nil {
-			return err
-		}
-		if err := run.ctx.Err(); err != nil {
-			return err
-		}
-		account, err = m.store.claimRefresh(scope, run.lease.Revision(), run.lease.ConfigVersion())
-		if err != nil {
-			return err
-		}
-		if err := caller.Err(); err != nil {
-			_, _ = m.store.finishRefresh(scope, nil, "not-started")
-			return err
-		}
-		run.dispatched = true
-		return nil
+		cached, err = m.store.refreshStatusContext(run.ctx, scope)
+		return err
 	})
 	if cached != nil {
 		return *cached, err
 	}
 	if err != nil {
-		return sdk.AuthResult{}, err
-	}
-	if err := m.store.checkSubscriptionView(run.ctx, scope); err != nil {
-		_, _ = m.store.finishRefresh(scope, nil, "not-started")
 		return sdk.AuthResult{}, err
 	}
 	ctx, cancel := context.WithTimeout(run.ctx, refreshRPCLimit)
@@ -203,8 +196,35 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 	if group := run.lease.group; group != nil {
 		ctx = group.withAuthority(ctx, sdk.PrimaryComponent, "write")
 	}
-	raw, callErr := run.lease.client.call(ctx, sdk.MethodAuthRefresh, scope, account.Auth, sdk.AuthRefreshRequest{},
-		func(Event) error { return errors.New("credential refresh must return one unary result") })
+	var claimed bool
+	var claimedAuth json.RawMessage
+	raw, callErr := run.lease.client.callWithAdmission(ctx, sdk.MethodAuthRefresh, scope, nil, sdk.AuthRefreshRequest{},
+		func(Event) error { return errors.New("credential refresh must return one unary result") }, nil, &workerCallPreparation{
+			auth: func(current context.Context) (json.RawMessage, error) {
+				account, published, err := run.lease.claimRefresh(current, caller, scope)
+				claimed = published
+				claimedAuth = account.Auth
+				return account.Auth, err
+			},
+			admit: func(current context.Context, commit func() error) error {
+				return run.lease.admitClaimedRefresh(current, scope, claimedAuth, commit)
+			},
+			begin: func(current context.Context) error {
+				run.mu.Lock()
+				defer run.mu.Unlock()
+				if err := caller.Err(); err != nil {
+					return err
+				}
+				if err := current.Err(); err != nil {
+					return err
+				}
+				run.dispatched = true
+				return nil
+			},
+		})
+	if !claimed {
+		return sdk.AuthResult{}, callErr
+	}
 	cause := errors.New("extension credential refresh did not publish replacement credentials")
 	if callErr == nil {
 		if result, err := decodeRefreshResult(scope, raw); err == nil {
@@ -217,9 +237,7 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 			if err == nil {
 				return receipt, nil
 			}
-			if errors.Is(err, errSubscriptionChanged) {
-				cause = err
-			}
+			cause = err
 		}
 	}
 	state := "uncertain"
@@ -228,12 +246,71 @@ func (m *Manager) executeRefresh(caller context.Context, scope sdk.Scope, run *r
 	if errors.As(callErr, &outcome) && outcome.Outcome == "not-started" ||
 		errors.As(callErr, &rpc) && rpc.Outcome == "not-started" {
 		state = "not-started"
+		cause = callErr
 	}
-	_, _ = m.store.finishRefresh(scope, nil, state)
 	if errors.Is(callErr, context.Canceled) {
 		cause = context.Canceled
 	} else if errors.Is(callErr, context.DeadlineExceeded) {
 		cause = context.DeadlineExceeded
 	}
+	if _, err := m.store.finishRefresh(scope, nil, state); err != nil {
+		return sdk.AuthResult{}, &OutcomeError{Outcome: "uncertain", Cause: errors.Join(err, cause)}
+	}
 	return sdk.AuthResult{}, &OutcomeError{Outcome: state, Cause: cause}
+}
+
+func (lease *Lease) claimRefresh(ctx, caller context.Context, scope sdk.Scope) (Account, bool, error) {
+	m := lease.manager
+	tool, toolBound := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck)
+	check := func() error {
+		if err := caller.Err(); err != nil {
+			return err
+		}
+		if toolBound {
+			return tool.check(ctx)
+		}
+		return nil
+	}
+	var account Account
+	var published bool
+	claim := func() error {
+		var err error
+		account, published, err = m.store.claimRefreshContext(ctx, scope, lease.Revision(), lease.ConfigVersion(), check)
+		return err
+	}
+	if !toolBound {
+		err := m.withSubscriptionScope(ctx, scope, claim)
+		return account, published, err
+	}
+	err := m.withActiveConfig(ctx, lease.worker.entry, tool.selected.config, func() error {
+		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+			return err
+		}
+		return claim()
+	})
+	return account, published, err
+}
+
+func (lease *Lease) admitClaimedRefresh(ctx context.Context, scope sdk.Scope, auth json.RawMessage, commit func() error) error {
+	m := lease.manager
+	tool, toolBound := ctx.Value(toolRefreshCheckKey{}).(toolRefreshCheck)
+	admit := func() error {
+		return m.store.withClaimedRefresh(ctx, scope, lease.Revision(), lease.ConfigVersion(), auth, func() error {
+			if toolBound {
+				if err := tool.check(ctx); err != nil {
+					return err
+				}
+			}
+			return commit()
+		})
+	}
+	if !toolBound {
+		return m.withSubscriptionScope(ctx, scope, admit)
+	}
+	return m.withActiveConfig(ctx, lease.worker.entry, tool.selected.config, func() error {
+		if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
+			return err
+		}
+		return admit()
+	})
 }

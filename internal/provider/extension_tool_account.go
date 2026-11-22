@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
@@ -52,31 +53,46 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		return fail(errSubscriptionOwnerChanged)
 	}
 	ctx = extensionhost.WithSubscriptionOwnerRevision(ctx, public.revision)
-	check := func(current context.Context) error {
+	checkPolicy := func(current context.Context, target sdk.Scope) (string, error) {
 		if err := current.Err(); err != nil {
-			return err
+			return "", err
 		}
 		if err := netproxy.Held(current); err != nil {
-			return err
+			return "", err
 		}
 		policy, err := extensionKeepAlivePolicyNow(current)
 		if err != nil {
+			return "", err
+		}
+		selected := extensionSignIn{host: host, entry: entry, config: config.Version,
+			scope: extensionhost.AccountPublicationScope(current, host.Namespace(), target), public: public}
+		var proxy string
+		for _, descriptor := range policy.providers.Providers {
+			if descriptor.ID != public.provider {
+				continue
+			}
+			if descriptor.Off || descriptor.Hidden {
+				return "", errors.New("extension account provider is off")
+			}
+			proxy = descriptor.AccountProxies[accountKey(public.user)]
+			if proxy == "" {
+				proxy = descriptor.Proxy
+			}
+			break
+		}
+		for _, login := range policy.logins {
+			if public.hasPolicy(login) && !policy.allowsSelection(selected, selected.scope.Generation) {
+				return "", errors.New("extension account is off, paused or unavailable")
+			}
+		}
+		return strings.TrimSpace(proxy), nil
+	}
+	check := func(current context.Context) error {
+		if _, err := checkPolicy(current, scope); err != nil {
 			return err
 		}
 		if err := CheckExtensionSubscription(current, scope.Plugin, scope.Provider, public.revision); err != nil {
 			return err
-		}
-		selected := extensionSignIn{host: host, entry: entry, config: config.Version,
-			scope: extensionhost.AccountPublicationScope(current, host.Namespace(), scope), public: public}
-		for _, descriptor := range policy.providers.Providers {
-			if descriptor.ID == public.provider && (descriptor.Off || descriptor.Hidden) {
-				return errors.New("extension account provider is off")
-			}
-		}
-		for _, login := range policy.logins {
-			if public.hasPolicy(login) && !policy.allowsSelection(selected, selected.scope.Generation) {
-				return errors.New("extension account is off, paused or unavailable")
-			}
 		}
 		active, activeConfig, err := toolAccountModule(current, host, scope.Plugin)
 		if err != nil {
@@ -131,7 +147,18 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		if err := check(ctx); err != nil {
 			return fail(err)
 		}
-		if _, err := lease.Call(ctx, sdk.MethodAuthRefresh, scope, sdk.AuthRefreshRequest{}, nil); err != nil {
+		refreshScope := scope
+		refresh := extensionhost.WithToolRefreshCheck(ctx, runtimeSelection, func(current context.Context) error {
+			proxy, err := checkPolicy(current, refreshScope)
+			if err != nil {
+				return err
+			}
+			if proxy != choice {
+				return errors.New("extension tool network policy changed")
+			}
+			return nil
+		})
+		if _, err := lease.Call(refresh, sdk.MethodAuthRefresh, refreshScope, sdk.AuthRefreshRequest{}, nil); err != nil {
 			return fail(err)
 		}
 		account, err = host.Store().RefreshedAccountContext(ctx, scope)

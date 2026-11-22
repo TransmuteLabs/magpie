@@ -83,8 +83,12 @@ func refreshReceipt(account storeAccount, scope sdk.Scope) (*sdk.AuthResult, err
 }
 
 func (s *Store) refreshStatus(scope sdk.Scope) (*sdk.AuthResult, error) {
+	return s.refreshStatusContext(context.Background(), scope)
+}
+
+func (s *Store) refreshStatusContext(ctx context.Context, scope sdk.Scope) (*sdk.AuthResult, error) {
 	var receipt *sdk.AuthResult
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, scope.Plugin)
 		if err != nil {
 			return err
@@ -96,7 +100,7 @@ func (s *Store) refreshStatus(scope sdk.Scope) (*sdk.AuthResult, error) {
 		receipt, err = refreshReceipt(records.Accounts[index], scope)
 		if record := records.Accounts[index].Refresh; record != nil && record.Scope.Generation == scope.Generation && record.State == "dispatched" {
 			record.State, record.Updated = "uncertain", time.Now().UTC()
-			if persistErr := storeWrite(root, "accounts.json", records, storeFileLimit); persistErr != nil {
+			if _, persistErr := storePublishContext(ctx, root, "accounts.json", records, storeFileLimit); persistErr != nil {
 				return persistErr
 			}
 		}
@@ -109,8 +113,14 @@ func (s *Store) refreshStatus(scope sdk.Scope) (*sdk.AuthResult, error) {
 }
 
 func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account, error) {
+	account, _, err := s.claimRefreshContext(context.Background(), scope, revision, config, nil)
+	return account, err
+}
+
+func (s *Store) claimRefreshContext(ctx context.Context, scope sdk.Scope, revision, config string, check func() error) (Account, bool, error) {
 	var selected Account
-	err := s.withStore(scope.Plugin, func(root *os.Root) error {
+	var claimed bool
+	err := s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
 		records, err := storeReadAccounts(root, scope.Plugin)
 		if err != nil {
 			return err
@@ -139,13 +149,17 @@ func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account,
 			if err != nil {
 				return err
 			}
-			err = storeWrite(dir, storeHash(entry.Scope.Operation)+".json", entry, storeFileLimit)
+			_, err = storePublishContext(ctx, dir, storeHash(entry.Scope.Operation)+".json", entry, storeFileLimit)
 			dir.Close()
 			if err != nil {
 				return err
 			}
 		}
 		selected = account.namedAccount(root)
+		selected.Auth, err = json.Marshal(selected.Auth)
+		if err != nil {
+			return storeUnreadable()
+		}
 		account.Refresh = &refreshRecord{
 			Schema: 1, Scope: scope, Revision: revision, Config: config,
 			State: "dispatched", Updated: time.Now().UTC(),
@@ -154,13 +168,36 @@ func (s *Store) claimRefresh(scope sdk.Scope, revision, config string) (Account,
 		if !validRefreshRecord(*account) {
 			return storeInvalid()
 		}
-		if err := storeWrite(root, "accounts.json", records, storeFileLimit-4096); err != nil {
+		claimed, err = storePublishChecked(ctx, root, "accounts.json", records, storeFileLimit-4096, check)
+		if err != nil {
 			return err
 		}
 		selected.writeLabel(root)
 		return nil
 	})
-	return selected, err
+	return selected, claimed, err
+}
+
+func (s *Store) withClaimedRefresh(ctx context.Context, scope sdk.Scope, revision, config string, auth json.RawMessage, admit func() error) error {
+	return s.withStoreContext(ctx, scope.Plugin, func(root *os.Root) error {
+		records, err := s.readAccounts(root, scope.Plugin)
+		if err != nil {
+			return err
+		}
+		index := refreshIndex(records, scope)
+		if index < 0 {
+			return storeError("not_found", "Extension account is unavailable.")
+		}
+		account := records.Accounts[index]
+		if account.Deleted || account.Generation != scope.Generation || !bytes.Equal(account.Auth, auth) {
+			return storeError("stale_generation", "Extension account changed before credential refresh.")
+		}
+		record := account.Refresh
+		if record == nil || record.State != "dispatched" || record.Scope != scope || record.Revision != revision || record.Config != config {
+			return refreshConflict()
+		}
+		return admit()
+	})
 }
 
 func (s *Store) finishRefresh(scope sdk.Scope, result *sdk.AuthResult, state string) (sdk.AuthResult, error) {

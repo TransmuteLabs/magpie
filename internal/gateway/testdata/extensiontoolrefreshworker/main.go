@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -40,11 +42,15 @@ func refresh(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error
 func tool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
 	var request sdk.ToolRequest
 	var arguments struct {
-		Replace bool `json:"fixture-replace"`
-		Event   bool `json:"fixture-after-event"`
+		Replace bool   `json:"fixture-replace"`
+		Event   bool   `json:"fixture-after-event"`
+		Padding string `json:"fixture-padding"`
 	}
 	if json.Unmarshal(call.Params, &request) != nil || json.Unmarshal(request.Arguments, &arguments) != nil {
 		return nil, errors.New("invalid fixture arguments")
+	}
+	if arguments.Padding != "" {
+		return sdk.ToolResult{Content: json.RawMessage(`"drained"`)}, nil
 	}
 	if strings.Contains(string(call.Params), "fixture-accepted") {
 		if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
@@ -110,6 +116,40 @@ func tool(ctx context.Context, call sdk.Call, stream *sdk.Stream) (any, error) {
 	return sdk.ToolResult{Content: body}, nil
 }
 
+type fixtureInput struct {
+	*os.File
+	prefix []byte
+}
+
+func (input *fixtureInput) Read(data []byte) (int, error) {
+	count, err := input.File.Read(data)
+	for _, next := range data[:count] {
+		if next != '\n' {
+			if len(input.prefix) < 4096 {
+				input.prefix = append(input.prefix, next)
+			}
+			continue
+		}
+		_, marker, found := bytes.Cut(input.prefix, []byte(`"fixture-stop-reading":`))
+		var directory string
+		if found && json.NewDecoder(bytes.NewReader(marker)).Decode(&directory) == nil {
+			if err := os.WriteFile(filepath.Join(directory, "ready"), nil, 0600); err != nil {
+				return 0, err
+			}
+			for {
+				if _, err := os.Stat(filepath.Join(directory, "continue")); err == nil {
+					break
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return 0, err
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
+		input.prefix = input.prefix[:0]
+	}
+	return count, err
+}
+
 func main() {
 	raw, err := os.ReadFile(sdk.ManifestFile)
 	if err != nil {
@@ -122,7 +162,7 @@ func main() {
 	unsupported := func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
 		return nil, errors.New("unexpected fixture method")
 	}
-	if err := sdk.Serve(context.Background(), os.Stdin, os.Stdout, sdk.Module{
+	if err := sdk.Serve(context.Background(), &fixtureInput{File: os.Stdin}, os.Stdout, sdk.Module{
 		Manifest: manifest,
 		Handlers: map[string]sdk.Handler{
 			sdk.MethodToolCall: tool, sdk.MethodAuthRefresh: refresh,

@@ -51,6 +51,9 @@ func fixtureAuthRefresh(ctx context.Context, call sdk.Call, stream *sdk.Stream) 
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusConflict {
+		return nil, &sdk.Error{Code: "fixture", Message: "synthetic refresh declined", Outcome: "not-started"}
+	}
 	var result sdk.AuthResult
 	decoder := json.NewDecoder(response.Body)
 	if err := decoder.Decode(&result); err != nil {
@@ -116,6 +119,34 @@ func TestRefreshConcurrentCallsPublishOneGeneration(t *testing.T) {
 	accounts, err := manager.Store().Accounts(scope.Plugin, scope.Provider)
 	if err != nil || len(accounts) != 1 || accounts[0].Generation != 2 || accounts[0].Name != "Fixture" || calls.Load() != 1 {
 		t.Fatalf("refresh did not publish exactly one exchange and named account: %d exchanges, %d accounts, %v", calls.Load(), len(accounts), err)
+	}
+}
+
+func TestRefreshAdmitsEquivalentCredentialsReencodedByClaim(t *testing.T) {
+	manager, scope, calls := refreshFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+		var auth struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&auth); err != nil || auth.Token != "a&b<tag>" {
+			t.Errorf("claimed credentials changed: %v", err)
+		}
+		refreshResponse(writer)
+	})
+	path := filepath.Join(manager.Namespace(), "private", scope.Plugin, "accounts.json")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := bytes.Replace(original, []byte(`"auth":{`), []byte("\"auth\":{\n   \"token\": \"a&b<tag>\",\n   "), 1)
+	if bytes.Equal(original, legacy) {
+		t.Fatal("fixture did not produce a legacy account document")
+	}
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := manager.RefreshAccount(t.Context(), scope.Plugin, scope)
+	if err != nil || receipt.ID != scope.Account || calls.Load() != 1 {
+		t.Fatalf("credential re-encoding changed refresh admission: receipt=%q exchanges=%d err=%v", receipt.ID, calls.Load(), err)
 	}
 }
 
@@ -588,6 +619,70 @@ func TestRefreshPublicationIOFailureCannotReportSuccessOrReplay(t *testing.T) {
 	account, err := manager.Store().GetAccount(scope.Plugin, scope.Provider, scope.Account)
 	if err != nil || account.Generation != 1 {
 		t.Fatalf("failed commit changed generation: %d %v", account.Generation, err)
+	}
+}
+
+func TestRefreshNotStartedFinalizationFailureKeepsReplayFence(t *testing.T) {
+	exchanged, release := make(chan struct{}), make(chan struct{})
+	markExchange := sync.OnceFunc(func() { close(exchanged) })
+	resume := sync.OnceFunc(func() { close(release) })
+	manager, scope, calls := refreshFixture(t, func(writer http.ResponseWriter, _ *http.Request) {
+		markExchange()
+		<-release
+		writer.WriteHeader(http.StatusConflict)
+	})
+	t.Cleanup(resume)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	returned := make(chan error, 1)
+	go func() {
+		_, err := manager.RefreshAccount(ctx, scope.Plugin, scope)
+		returned <- err
+	}()
+	select {
+	case <-exchanged:
+	case <-ctx.Done():
+		t.Fatal("synthetic exchange was not reached")
+	}
+	accounts := filepath.Join(manager.Namespace(), "private", scope.Plugin, "accounts.json")
+	backup := accounts + ".failure-fixture"
+	if err := os.Rename(accounts, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(accounts, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resume()
+	select {
+	case err := <-returned:
+		var outcome *OutcomeError
+		var storage *sdk.Error
+		if !errors.As(err, &outcome) || outcome.Outcome != "uncertain" ||
+			!errors.As(outcome.Cause, &storage) || storage.Code != "store_unreadable" {
+			t.Errorf("failed finalization must report an uncertain storage outcome: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("failed finalization did not settle")
+	}
+	if err := os.Remove(accounts); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, accounts); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened := NewManager(manager.Namespace())
+	defer func() {
+		if err := reopened.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	_, err := reopened.RefreshAccount(ctx, scope.Plugin, scope)
+	var unresolved *sdk.Error
+	if !errors.As(err, &unresolved) || unresolved.Outcome != "uncertain" || calls.Load() != 1 {
+		t.Fatalf("reopened Store repeated a fenced refresh: %d exchanges, %v", calls.Load(), err)
 	}
 }
 

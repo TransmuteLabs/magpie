@@ -488,7 +488,7 @@ func (group *componentGroup) callBinding(ctx context.Context, from, bindingID st
 	}
 	var result json.RawMessage
 	if admit := group.manager.subscriptionAdmission(call, group.entry.Manifest, sdk.MethodModuleCall, scope, false); admit != nil {
-		result, err = client.callWithAdmission(call, sdk.MethodModuleCall, scope, bytes.Clone(auth), params, consume, admit)
+		result, err = client.callWithAdmission(call, sdk.MethodModuleCall, scope, bytes.Clone(auth), params, consume, admit, nil)
 	} else {
 		result, err = group.invoke(client, call, sdk.MethodModuleCall, scope, bytes.Clone(auth), params, consume)
 	}

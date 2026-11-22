@@ -675,6 +675,203 @@ func TestCanceledWorkerCallDrainsItsInFlightHostFrame(t *testing.T) {
 	}
 }
 
+func TestRefreshCancellationWhileWaitingForFirstWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lifetime, stop := context.WithCancel(t.Context())
+		reader, writer := io.Pipe()
+		client := &workerClient{
+			stdin: writer, lifetime: lifetime, writes: make(chan workerWrite), writeDone: make(chan struct{}),
+		}
+		go client.writeLoop()
+		defer func() {
+			stop()
+			reader.Close()
+			writer.Close()
+			<-client.writeDone
+		}()
+
+		first := make(chan error, 1)
+		go func() { first <- client.send(lifetime, sdk.Frame{Kind: "ack", ID: "first"}) }()
+		synctest.Wait()
+
+		caller, cancelCaller := context.WithCancel(lifetime)
+		defer cancelCaller()
+		refresh := make(chan error, 1)
+		go func() {
+			refresh <- client.sendPrepared(caller, sdk.Frame{Kind: "call", ID: "refresh", Method: sdk.MethodAuthRefresh},
+				&workerCallPreparation{
+					admit: func(_ context.Context, commit func() error) error { return commit() },
+					begin: func(ctx context.Context) error { return ctx.Err() },
+				})
+		}()
+		synctest.Wait()
+		cancelCaller()
+
+		frames := json.NewDecoder(reader)
+		var frame sdk.Frame
+		if err := frames.Decode(&frame); err != nil || frame.ID != "first" {
+			t.Fatalf("prior frame: %+v, %v", frame, err)
+		}
+		if err := <-first; err != nil {
+			t.Fatal(err)
+		}
+
+		last := make(chan error, 1)
+		go func() { last <- client.send(lifetime, sdk.Frame{Kind: "ack", ID: "last"}) }()
+		if err := frames.Decode(&frame); err != nil || frame.ID != "last" {
+			t.Fatalf("canceled refresh wrote a frame: %+v, %v", frame, err)
+		}
+		var outcome *OutcomeError
+		if err := <-refresh; !errors.As(err, &outcome) || outcome.Outcome != "not-started" || !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled refresh outcome: %v", err)
+		}
+		if err := <-last; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestRefreshWriterReservationRepeatsAdmissionAfterInterveningFrame(t *testing.T) {
+	for _, revoke := range []bool{false, true} {
+		name := "unchanged policy"
+		if revoke {
+			name = "changed policy"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				lifetime, stop := context.WithCancel(t.Context())
+				reader, writer := io.Pipe()
+				client := &workerClient{
+					stdin: writer, lifetime: lifetime, writes: make(chan workerWrite), writeDone: make(chan struct{}),
+				}
+				go client.writeLoop()
+				defer func() {
+					stop()
+					reader.Close()
+					writer.Close()
+					<-client.writeDone
+				}()
+				checks := 0
+				firstChecked, finishCheck := make(chan struct{}), make(chan struct{})
+				policyChanged := errors.New("synthetic policy changed")
+				var denied bool
+				refresh := make(chan error, 1)
+				go func() {
+					refresh <- client.sendPrepared(lifetime, sdk.Frame{Kind: "call", ID: "refresh", Method: sdk.MethodAuthRefresh},
+						&workerCallPreparation{
+							admit: func(_ context.Context, commit func() error) error {
+								checks++
+								if denied {
+									return policyChanged
+								}
+								if checks == 1 {
+									close(firstChecked)
+									<-finishCheck
+								}
+								return commit()
+							},
+							begin: func(ctx context.Context) error { return ctx.Err() },
+						})
+				}()
+				<-firstChecked
+				ack := make(chan error, 1)
+				go func() { ack <- client.send(lifetime, sdk.Frame{Kind: "ack", ID: "intervening"}) }()
+				frames := json.NewDecoder(reader)
+				var frame sdk.Frame
+				if err := frames.Decode(&frame); err != nil || frame.ID != "intervening" {
+					t.Errorf("ordinary frame could not pass during admission: %+v, %v", frame, err)
+				}
+				if err := <-ack; err != nil {
+					t.Error(err)
+				}
+				denied = revoke
+				close(finishCheck)
+
+				if !revoke {
+					if err := frames.Decode(&frame); err != nil || frame.ID != "refresh" {
+						t.Errorf("re-admitted frame: %+v, %v", frame, err)
+					}
+				}
+				err := <-refresh
+				if revoke {
+					var outcome *OutcomeError
+					if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || !errors.Is(err, policyChanged) {
+						t.Errorf("intervening policy change sent a stale frame: %v", err)
+					}
+				} else if err != nil {
+					t.Error(err)
+				}
+				if checks != 2 {
+					t.Errorf("candidate was checked %d times, want 2", checks)
+				}
+			})
+		})
+	}
+}
+
+func TestCanceledOrdinaryWriteBehindCommittedRefreshKeepsWorker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lifetime, stop := context.WithCancel(t.Context())
+		reader, writer := io.Pipe()
+		client := &workerClient{
+			stdin: writer, stdout: reader, lifetime: lifetime, cancel: stop,
+			writes: make(chan workerWrite), writeDone: make(chan struct{}),
+		}
+		go client.writeLoop()
+		defer func() {
+			stop()
+			reader.Close()
+			writer.Close()
+			<-client.writeDone
+		}()
+		enter, release := make(chan struct{}), make(chan struct{})
+		refresh := make(chan error, 1)
+		go func() {
+			refresh <- client.sendPrepared(lifetime, sdk.Frame{Kind: "call", ID: "refresh", Method: sdk.MethodAuthRefresh},
+				&workerCallPreparation{
+					admit: func(_ context.Context, commit func() error) error { return commit() },
+					begin: func(ctx context.Context) error {
+						close(enter)
+						<-release
+						return ctx.Err()
+					},
+				})
+		}()
+		<-enter
+		ordinary, cancelOrdinary := context.WithCancel(lifetime)
+		defer cancelOrdinary()
+		work := newWorkerWrite(ordinary, sdk.Frame{Kind: "call", ID: "canceled"})
+		client.writes <- work
+		canceled := make(chan error, 1)
+		go func() { canceled <- client.awaitWrite(ordinary, work) }()
+		close(release)
+		synctest.Wait()
+		cancelOrdinary()
+		var outcome *OutcomeError
+		err := <-canceled
+		if !errors.As(err, &outcome) || outcome.Outcome != "not-started" || !errors.Is(err, context.Canceled) {
+			t.Fatalf("unwritten ordinary frame reported %v", err)
+		}
+
+		frames := json.NewDecoder(reader)
+		var frame sdk.Frame
+		if err := frames.Decode(&frame); err != nil || frame.ID != "refresh" {
+			t.Fatalf("committed refresh was interrupted: %+v, %v", frame, err)
+		}
+		if err := <-refresh; err != nil {
+			t.Fatal(err)
+		}
+		ack := make(chan error, 1)
+		go func() { ack <- client.send(lifetime, sdk.Frame{Kind: "ack", ID: "after"}) }()
+		if err := frames.Decode(&frame); err != nil || frame.ID != "after" {
+			t.Fatalf("canceled ordinary frame was written or worker was closed: %+v, %v", frame, err)
+		}
+		if err := <-ack; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestWorkerAcceptanceDurableAndCrashNeverReplayed(t *testing.T) {
 	manager, _ := fixtureManager(t)
 	account, err := manager.Store().SaveAccount(Account{Plugin: "fixture", Provider: "provider", ID: "account", Auth: json.RawMessage(`{"token":"selected"}`)}, 0)
