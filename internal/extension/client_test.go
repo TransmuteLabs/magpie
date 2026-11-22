@@ -1008,17 +1008,23 @@ func TestManagerCallRefusesInvalidContractAndRevokedScopeBeforeStart(t *testing.
 
 func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 	for _, scenario := range []struct {
-		change string
-		minor  int
+		change      string
+		minor       int
+		heldInbound bool
 	}{
-		{"configuration", 9}, {"inbound enable epoch", 9}, {"account", 9}, {"removed account", 9}, {"privacy", 9},
-		{"account", 8}, {"removed account", 8}, {"privacy", 8},
-		{"same CAS configuration", 8}, {"same CAS public configuration", 8},
-		{"reordered configuration", 8}, {"no configuration contract", 0},
+		{change: "configuration", minor: 9}, {change: "inbound enable epoch", minor: 9},
+		{change: "account", minor: 9}, {change: "removed account", minor: 9}, {change: "privacy", minor: 9},
+		{change: "account", minor: 8}, {change: "removed account", minor: 8}, {change: "privacy", minor: 8},
+		{change: "account", minor: 8, heldInbound: true}, {change: "privacy", minor: 8, heldInbound: true},
+		{change: "same CAS configuration", minor: 8}, {change: "same CAS public configuration", minor: 8},
+		{change: "reordered configuration", minor: 8}, {change: "no configuration contract", minor: 0},
 	} {
 		name := scenario.change
 		if scenario.minor < 9 {
 			name = "legacy " + name
+		}
+		if scenario.heldInbound {
+			name = "held inbound " + name
 		}
 		t.Run(name, func(t *testing.T) {
 			var excluded []sdk.Capability
@@ -1038,7 +1044,11 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			lease, err := manager.Acquire(ctx, id)
+			acquire := manager.Acquire
+			if scenario.heldInbound {
+				acquire = manager.AcquireNative
+			}
+			lease, err := acquire(ctx, id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1101,6 +1111,11 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 				t.Fatalf("execute returned before the slot opened: %v", err)
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
+			}
+			if scenario.heldInbound {
+				if _, err := peer.CompareAndSwapModuleConfig(ctx, id, lease.ConfigVersion(), json.RawMessage(`{"updated":true}`)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			switch scenario.change {
 			case "configuration":

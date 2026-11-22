@@ -1446,7 +1446,9 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 				err = m.withActiveConfig(ctx, l.worker.entry, l.worker.config, checkSelection)
 			} else {
 				err = checkSelection()
-				if err == nil && l.worker.entry.Manifest.Contract.Version.Minor >= 1 {
+				minor := l.worker.entry.Manifest.Contract.Version.Minor
+				heldInbound := minor < 9 && l.native && inboundLeaseFrom(ctx) == l
+				if err == nil && minor >= 1 && !heldInbound {
 					current, readErr := m.runtimeModuleConfigContext(ctx, l.worker.entry)
 					if readErr != nil {
 						err = readErr
