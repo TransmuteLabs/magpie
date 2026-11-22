@@ -236,6 +236,11 @@ the SDK price leaves catalog fallbacks available; an explicit zero price is
 free. Refreshed models are validated before publishing their account/store
 snapshot.
 
+`PriceAt` uses one lazy model projection per quote on an SDK account.
+The free check and list pricing share it, including lookups by the vendor's
+ID and the user's alias. Dispatch still checks the current account and
+package selection at admission.
+
 The extension catalog file is also part of `Hold`'s root checks and
 `StampNow`. A catalog installed, enabled, disabled, upgraded or removed by
 another CLI invalidates provider and model snapshots on the next request,
@@ -916,8 +921,9 @@ the non-SDK thinking-default control. `account_stamp_config_test.go` and
 identity, unreadable sources, public/authenticated held catalogs and
 unrelated-state stability.
 `extension_models_test.go` checks custom-model prices and effort levels,
-unknown versus zero prices, core overrides and rates, and rejection of
-invalid refreshes without replacing the last validated snapshot.
+unknown versus zero prices, core overrides and rates, one price projection
+per quote across two accounts, and rejection of invalid refreshes without
+replacing the last validated snapshot.
 `extension_models_cache_test.go` checks cold discovery without another worker
 call, measured empty catalogs, configuration isolation, late refresh rejection,
 chunk integrity and held-read account/configuration revocation. Its generation

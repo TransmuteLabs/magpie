@@ -3045,8 +3045,15 @@ func priceOf(s settings.Settings, p Provider, known bool, model string, at time.
 // counts one made then: EffectivePriceAt for p as the caller holds it (a
 // routing group's member, at the rate of the key it holds), its Peak still set, for the caller to apply
 // with Price.In and tell whether it did. A model served at no cost there
-// (FreeModel) costs nothing.
+// (FreeModel) costs nothing. An SDK account's free check and tariff use
+// the same model projection for this quote.
 func (p Provider) PriceAt(s settings.Settings, model string, at time.Time) (catalog.Price, bool) {
+	if !p.CountFree && p.IsExtension() && p.Account.models != nil {
+		account := *p.Account
+		account.models = sync.OnceValue(account.models)
+		account.extensionList = nil
+		p.Account = &account
+	}
 	if p.FreeModel(model) {
 		return catalog.Price{}, true
 	}

@@ -3,14 +3,96 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
+
+func TestExtensionPriceAtReadsModelsOnce(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	const paid = "price-at-paid"
+	const alias = "price-at-local"
+	const free = "price-at-free"
+	const included = "price-at-included"
+	const unknown = "price-at-unknown"
+	prices := map[string]float64{"alice": 4, "bob": 8}
+	host.call = func(_ context.Context, method string, scope sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		price, ok := prices[scope.Account]
+		if method != sdk.MethodProviderModels || !ok {
+			return nil, fmt.Errorf("unexpected %s scope: %+v", method, scope)
+		}
+		return json.Marshal(sdk.ModelsResult{Models: []sdk.Model{
+			{ID: paid, Price: &sdk.ModelPrice{Input: price, Output: 2 * price}},
+			{ID: free, Price: &sdk.ModelPrice{}},
+			{ID: included, Free: true, Price: &sdk.ModelPrice{Input: price}},
+			{ID: unknown},
+		}})
+	}
+	provider := extensionAccounts()[0]
+	s := settings.Load()
+	s.ModelIDs = map[string]string{provider.ID + "/" + alias: paid}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	accounts := append([]Provider{provider}, provider.AlsoOn()...)
+	if len(accounts) != 2 {
+		t.Fatalf("got %d SDK accounts, want two", len(accounts))
+	}
+	for _, account := range accounts {
+		t.Run(account.Account.User, func(t *testing.T) {
+			if _, err := account.Account.fetch(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			reads := 0
+			list := account.Account.extensionList
+			account.Account.extensionList = func(ctx context.Context) []catalog.Model {
+				reads++
+				return list(ctx)
+			}
+			account.PriceRate = 0.5
+			price := prices[account.Account.User] * account.PriceRate
+			for _, test := range []struct {
+				name, model   string
+				tariff        float64
+				countFree     bool
+				input, output float64
+				known         bool
+				reads         int
+			}{
+				{name: "alias", model: alias, input: price, output: 2 * price, known: true, reads: 1},
+				{name: "tariff", model: alias, tariff: 11, input: 11, output: 11, known: true, reads: 1},
+				{name: "zero", model: free, tariff: 11, known: true, reads: 1},
+				{name: "included", model: included, tariff: 11, known: true, reads: 1},
+				{name: "unknown", model: unknown, reads: 1},
+				{name: "count-free", model: paid, countFree: true, known: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					p := account
+					p.CountFree = test.countFree
+					s := settings.Settings{}
+					if test.tariff != 0 {
+						s.ModelPrices = map[string]settings.ModelPrice{p.ID + "/" + test.model: statePrice(test.tariff)}
+					}
+					reads = 0
+					price, known := p.PriceAt(s, test.model, time.Time{})
+					if price.Input != test.input || price.Output != test.output || known != test.known {
+						t.Fatalf("PriceAt(%s) = %+v, %v; want input %g, output %g, known %v",
+							test.model, price, known, test.input, test.output, test.known)
+					}
+					if reads != test.reads {
+						t.Fatalf("PriceAt read SDK models %d times, want %d", reads, test.reads)
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestExtensionProviderCustomModelPricesAndEffortsReachCorePolicy(t *testing.T) {
 	host := fixtureExtensionProvider(t, true)
