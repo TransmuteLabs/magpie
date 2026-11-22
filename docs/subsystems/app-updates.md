@@ -77,9 +77,10 @@ For a manual release with no Test run, run Test on the same commit first.
 [`release_gate.py`](../../build/release_gate.py) owns this check; its offline
 fixtures include the workflow's publication dependency.
 
-Only the macOS app job is active. The parked Linux and Windows jobs are not
-release dependencies. Local commits do not publish anything until pushed
-or selected by an explicit workflow dispatch.
+The macOS and Linux amd64 desktop app jobs use the same version gate and
+both must succeed before publication. The Windows job remains parked.
+Local commits do not publish anything until pushed or selected by an
+explicit workflow dispatch.
 
 ## Selecting a local identity
 

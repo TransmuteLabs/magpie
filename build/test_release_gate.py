@@ -94,7 +94,7 @@ class ReleaseGateTest(unittest.TestCase):
     def test_publishing_requires_gate(self):
         workflow = Path(__file__).resolve().parents[1].joinpath(".github/workflows/fork-release.yml").read_text()
         release = workflow.split("\n  release:\n", 1)[1]
-        self.assertIn("needs: [check, app, verified]", release)
+        self.assertIn("needs: [check, app, linux, verified]", release)
         self.assertIn("python3 build/release_gate.py", workflow)
         self.assertIn('"$GITHUB_REPOSITORY" "$GITHUB_SHA"', workflow)
         self.assertIn("actions: read", workflow)

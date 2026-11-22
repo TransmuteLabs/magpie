@@ -1,7 +1,7 @@
 name: Fork release
 
 # Свой конвейер обновлений форка. Пуш в devzeus (обычно — мерж официального)
-# собирает mac-приложение и публикует релиз с ассетами и latest.json — фидом
+# собирает приложения macOS и Linux и публикует релиз с ассетами и latest.json — фидом
 # самообновления (internal/update: Feed, AppAsset, BinaryAsset, sameSigner):
 # приложение с env
 #   MAGPIE_UPDATE_FEED=https://github.com/TransmuteLabs/magpie/releases/latest/download/latest.json
@@ -169,11 +169,10 @@ jobs:
           if-no-files-found: error
 
   linux:
-    # пока выключено; включить — убрать if. Alma-вариант (контейнер
-    # almalinux:10 + dnf golang git gtk3-devel webkit2gtk4.1-devel)
-    # проверен руками на usbox-adm: та же make release-linux собирается
-    # меньше чем за минуту
-    if: false
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || needs.check.outputs.release == 'yes'
+    env:
+      BUILD_VERSION: ${{ needs.check.outputs.version || format('0.0.0-{0}', github.sha) }}
     # GUI линкует GTK 3 и WebKitGTK 4.1 через cgo — нативно; arm64 не нужен
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -225,8 +224,8 @@ jobs:
     if: needs.check.outputs.release == 'yes' &&
         (github.event_name == 'push' ||
          (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true'))
-    # при возврате windows/linux добавить их в needs
-    needs: [check, app, verified]
+    # при возврате windows добавить её в needs
+    needs: [check, app, linux, verified]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
