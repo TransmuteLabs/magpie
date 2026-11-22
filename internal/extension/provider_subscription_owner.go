@@ -625,7 +625,8 @@ func (m *Manager) admitSubscriptionCall(ctx context.Context, method string, scop
 		return nil, err
 	}
 	if authMutation {
-		if err := m.fenceSubscriptionRollback(ctx, scope); err != nil {
+		dispatch, _ := ctx.Value(windowAuthDispatchKey{}).(windowAuthDispatch)
+		if err := m.fenceSubscriptionRollback(ctx, scope, dispatch); err != nil {
 			release()
 			return nil, err
 		}
@@ -641,12 +642,12 @@ func (m *Manager) admitSubscriptionCall(ctx context.Context, method string, scop
 	}, nil
 }
 
-func (m *Manager) fenceSubscriptionRollback(ctx context.Context, scope sdk.Scope) error {
+func (m *Manager) fenceSubscriptionRollback(ctx context.Context, scope sdk.Scope, dispatch windowAuthDispatch) error {
 	revision, _ := SubscriptionOwnerRevision(ctx)
 	if revision == "" {
 		return m.store.checkSubscriptionView(ctx, scope)
 	}
-	return m.withSubscriptionScope(ctx, scope, func() error {
+	return m.withSubscriptionCatalogScope(ctx, scope, func(catalog *os.Root) error {
 		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
 			dir, err := storeDirectory(private, savedSignInsDir)
 			if err != nil {
@@ -657,16 +658,27 @@ func (m *Manager) fenceSubscriptionRollback(ctx context.Context, scope sdk.Scope
 			if err != nil {
 				return err
 			}
+			var check func() error
+			if dispatch.record.Flow != "" {
+				check = func() error { return m.checkWindowAuthDispatch(ctx, catalog, private, dispatch) }
+			}
 			for index := range rows {
 				record := &rows[index]
 				if record.Module != scope.Plugin || record.Provider != scope.Provider || record.Revision != revision || !record.Active {
 					continue
 				}
 				if record.AuthDispatched {
-					return storeSync(dir)
+					if err := storeSync(dir); err != nil || check == nil {
+						return err
+					}
+					return check()
 				}
 				record.AuthDispatched = true
-				return storeWrite(dir, subscriptionOwnersFile, rows, storeFileLimit)
+				if check == nil {
+					return storeWrite(dir, subscriptionOwnersFile, rows, storeFileLimit)
+				}
+				_, err := storePublishChecked(ctx, dir, subscriptionOwnersFile, rows, storeFileLimit, check)
+				return err
 			}
 			return errSubscriptionChanged
 		})
@@ -782,6 +794,10 @@ func (m *Manager) SaveSubscriptionAccount(ctx context.Context, scope sdk.Scope, 
 }
 
 func (m *Manager) withSubscriptionScope(ctx context.Context, scope sdk.Scope, action func() error) error {
+	return m.withSubscriptionCatalogScope(ctx, scope, func(*os.Root) error { return action() })
+}
+
+func (m *Manager) withSubscriptionCatalogScope(ctx context.Context, scope sdk.Scope, action func(*os.Root) error) error {
 	root, err := m.catalog.open(false)
 	if err != nil {
 		return err
@@ -795,5 +811,5 @@ func (m *Manager) withSubscriptionScope(ctx context.Context, scope sdk.Scope, ac
 	if err := m.store.checkSubscriptionView(ctx, scope); err != nil {
 		return err
 	}
-	return action()
+	return action(root)
 }

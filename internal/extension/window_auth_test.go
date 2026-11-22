@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension/testdata/authfixture"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/testenv"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -426,6 +427,132 @@ func TestWindowAuthFinishRechecksSameCASConfigurationAfterSlotWait(t *testing.T)
 	accounts, err := manager.Store().Accounts(id, "vendor")
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("revoked flow published %d accounts: %v", len(accounts), err)
+	}
+}
+
+func TestTransferredWindowAuthFinishRechecksConfigAfterRollbackFenceWait(t *testing.T) {
+	for _, change := range []string{"same CAS replacement", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "trace")
+			manager, id, revision := authWindowFixture(t, false, authfixture.Config{Trace: trace})
+			ctx, cancel := context.WithTimeout(authWindowContext(t.Context(), "transferred-finish"), 10*time.Second)
+			defer cancel()
+			ctx = WithSubscriptionOwnerRevision(ctx, "transfer-revision")
+			owner, _ := SubscriptionOwnerRevision(ctx)
+			if err := withTestSavedSignIns(manager.store, ctx, func(dir *os.Root) error {
+				return storeWrite(dir, subscriptionOwnersFile, []subscriptionRecord{{
+					SubscriptionOwner: SubscriptionOwner{
+						Module: id, Provider: "vendor", PublicID: "legacy-vendor", Revision: owner, Active: true,
+						Accounts: []SubscriptionAccount{{Key: "vendor", ID: "chosen", User: "alice", LoginID: "alice-login"}},
+					},
+					GrantRevision: strings.Repeat("a", 64),
+					Digests:       map[string]string{"vendor": strings.Repeat("b", 64)},
+					Tickets:       []string{"transferred-ticket"},
+					Generations:   []uint64{1},
+				}}, storeFileLimit)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			account, err := manager.Store().SaveAccount(Account{
+				Plugin: id, Provider: "vendor", ID: "chosen", Auth: json.RawMessage(`{"token":"fixture"}`),
+			}, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := manager.CoreAuthStart(ctx, id, revision, "window:page", "signin", sdk.WindowAuthStartOptions{
+				Method: "device", Account: &sdk.AccountSelection{ID: "chosen", ExpectedGeneration: "1"},
+			})
+			if err != nil || view.State != "waiting" {
+				t.Fatalf("start: %s %v", view.State, err)
+			}
+			authWindowReady(t, manager, id, view)
+			manager.mu.Lock()
+			client := manager.windowAuthOwners[view.Flow].lease.client
+			manager.mu.Unlock()
+			slots := client.slots
+			for range cap(slots) {
+				slots <- struct{}{}
+			}
+			unblockSlots := sync.OnceFunc(func() {
+				for range cap(slots) {
+					<-slots
+				}
+			})
+			lock, err := os.OpenFile(filepath.Join(manager.Namespace(), "private", ".lock"), os.O_RDWR, 0)
+			if err != nil {
+				unblockSlots()
+				t.Fatal(err)
+			}
+			defer lock.Close()
+			var result sdk.WindowAuthFlowView
+			var finishErr error
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				result, finishErr = manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+			}()
+			unblockStore := sync.OnceFunc(func() { filelock.Unlock(lock) })
+			defer func() {
+				unblockStore()
+				unblockSlots()
+				cancel()
+				<-done
+			}()
+			wait := func(stage string, ready func() bool) {
+				t.Helper()
+				tick := time.NewTicker(time.Millisecond)
+				defer tick.Stop()
+				for !ready() {
+					select {
+					case <-done:
+						t.Fatalf("finish returned before %s: %s %v", stage, result.State, finishErr)
+					case <-ctx.Done():
+						t.Fatalf("wait for %s: %v", stage, ctx.Err())
+					case <-tick.C:
+					}
+				}
+			}
+			wait("worker-slot wait", func() bool { return len(client.regularSlots) != 0 })
+			if held, err := filelock.TryShared(lock); err != nil || !held {
+				t.Fatalf("hold the peer Store reader: %v", err)
+			}
+			unblockSlots()
+			wait("rollback fence's exclusive Store wait", func() bool {
+				if !manager.store.mu.TryLock() {
+					return true
+				}
+				manager.store.mu.Unlock()
+				return false
+			})
+			wantState, wantCalls, wantGeneration := "complete", 1, account.Generation+1
+			if change == "same CAS replacement" {
+				replaceRuntimeConfigAtSameVersion(t, manager, id, `"fail":false`, `"fail":true `)
+				wantState, wantCalls, wantGeneration = "uncertain", 0, account.Generation
+			}
+			unblockStore()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if calls := authWindowTrace(t, trace, "finish"); calls != wantCalls {
+				t.Errorf("finish worker calls = %d, want %d", calls, wantCalls)
+			}
+			if finishErr != nil || result.State != wantState {
+				t.Fatalf("finish: %s %v, want %s", result.State, finishErr, wantState)
+			}
+			current, err := manager.Store().GetAccount(id, "vendor", "chosen")
+			if err != nil || current.Generation != wantGeneration {
+				t.Fatalf("account generation = %d, want %d: %v", current.Generation, wantGeneration, err)
+			}
+			if change == "unchanged" {
+				replay, err := manager.CoreAuthFinish(ctx, id, revision, "window:page", "signin", view.Flow)
+				if err != nil || replay.State != "complete" || replay.Account == nil || result.Account == nil ||
+					replay.Account.Generation != result.Account.Generation || authWindowTrace(t, trace, "finish") != 1 {
+					t.Fatalf("finish did not replay its completed receipt: %s %v", replay.State, err)
+				}
+			}
+		})
 	}
 }
 

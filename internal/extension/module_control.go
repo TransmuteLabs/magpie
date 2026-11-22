@@ -26,14 +26,18 @@ func (m *Manager) runtimeModuleConfig(manifest sdk.Manifest) (sdk.ConfigSnapshot
 }
 
 func (m *Manager) runtimeModuleConfigContext(ctx context.Context, entry Installed) (sdk.ConfigSnapshot, error) {
-	manifest := entry.Manifest
-	if manifest.Contract.Version.Minor < 1 {
+	if entry.Manifest.Contract.Version.Minor < 1 {
 		return sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}, nil
 	}
-	value, err := m.readModuleConfigValue(ctx, manifest.ID)
+	value, err := m.readModuleConfigValue(ctx, entry.Manifest.ID)
 	if err != nil {
 		return sdk.ConfigSnapshot{}, err
 	}
+	return m.runtimeModuleConfigValue(entry, value)
+}
+
+func (m *Manager) runtimeModuleConfigValue(entry Installed, value VersionedValue) (sdk.ConfigSnapshot, error) {
+	manifest := entry.Manifest
 	var slot *atomic.Pointer[moduleConfigMemo]
 	var digest [sha256.Size]byte
 	if entry.Revision != "" && len(value.Value) <= moduleConfigMemoLimit {

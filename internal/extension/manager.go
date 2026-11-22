@@ -1249,7 +1249,7 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 				return errors.New("extension accepted an unknown operation")
 			}
 			if method == sdk.MethodToolCall && scope.Account != "" && manifest.Contract.Has(sdk.AccountAuth) {
-				if err := m.fenceSubscriptionRollback(ctx, scope); err != nil {
+				if err := m.fenceSubscriptionRollback(ctx, scope, windowAuthDispatch{}); err != nil {
 					return err
 				}
 			}

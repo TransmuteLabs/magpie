@@ -70,6 +70,8 @@ has its own flow authority, bound to the selected package, configuration and
 enablement generation. A flow cannot cross between the form and a plugin
 window. A live flow also checks the worker's effective configuration before
 dispatch and publication, including replacements at the same CAS version.
+For a transferred subscription, dispatch checks the selected configuration
+after waiting for the catalog and Store locks that protect the rollback fence.
 The journal retains its existing on-disk schema and numeric config version.
 
 The account ID remains the key for routing, quota and reauthorization. A

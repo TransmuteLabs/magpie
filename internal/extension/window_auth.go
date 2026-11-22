@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"time"
 
@@ -14,8 +15,14 @@ import (
 type windowAuthParentKey struct{}
 type windowAuthPolicyKey struct{}
 type windowAuthAccountPolicyKey struct{}
+type windowAuthDispatchKey struct{}
 type WindowAuthPolicy func(context.Context, sdk.Scope) (context.Context, error)
 type WindowAuthAccountPolicy func(context.Context, *Manager, sdk.Scope, sdk.AccountSummary)
+
+type windowAuthDispatch struct {
+	record windowAuthRecord
+	config sdk.ConfigSnapshot
+}
 
 func WithWindowAuthParent(ctx context.Context, parent string) context.Context {
 	return context.WithValue(ctx, windowAuthParentKey{}, parent)
@@ -429,6 +436,9 @@ func (owner *windowAuthOwner) execute(task *windowAuthTask) (sdk.WindowAuthFlowV
 	if err != nil {
 		return sdk.WindowAuthFlowView{}, errors.New("window authentication authority changed before dispatch")
 	}
+	if revision, _ := SubscriptionOwnerRevision(ctx); revision != "" {
+		ctx = context.WithValue(ctx, windowAuthDispatchKey{}, windowAuthDispatch{record: record, config: owner.lease.worker.config})
+	}
 	owner.lease.worker.mu.Lock()
 	owner.lease.worker.refreshing++
 	owner.lease.worker.mu.Unlock()
@@ -587,23 +597,9 @@ func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRec
 		return err
 	}
 	defer unlock()
-	view, err := m.catalog.readView(root)
+	entry, from, err := m.windowAuthEntry(root, record)
 	if err != nil {
 		return err
-	}
-	entry, found := view.lookup(record.Scope.Plugin)
-	if !found || entry.Disabled {
-		return errors.New("window authentication package changed or is disabled")
-	}
-	grant, found := entry.Manifest.ResolveAuthBinding(record.Binding)
-	if !found || grant.Provider != record.Scope.Provider {
-		return errors.New("authentication grant changed")
-	}
-	if grant.From == sdk.ProviderSignInPart {
-		entry = view.enabledEntry(entry)
-		if entry.observerEnablementErr != nil {
-			return errors.New("authentication enablement changed")
-		}
 	}
 	var config sdk.ConfigSnapshot
 	if expected.Values == nil {
@@ -614,23 +610,72 @@ func (m *Manager) withWindowAuthConfig(ctx context.Context, record windowAuthRec
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	part, revision := windowAuthJournalSelection(entry, config.Version, grant.From)
 	// Saved-subscription transactions use the same catalog authority but
 	// do not carry a GUI flow identity.
 	if record.Flow != "" {
 		if err := m.store.checkSubscriptionView(ctx, record.Scope); err != nil {
 			return err
 		}
-		if grant.From == sdk.ProviderSignInPart {
-			revision = subscriptionJournalRevision(ctx, revision)
-		}
 	}
-	if err != nil || part != record.Part || revision != record.Revision ||
-		config.Version != record.Config || !sameModuleConfig(config, expected) {
+	if err != nil {
 		return errors.New("window authentication selection changed")
+	}
+	if err := checkWindowAuthConfig(ctx, entry, from, record, config, expected); err != nil {
+		return err
 	}
 	if action != nil {
 		return action()
 	}
 	return nil
+}
+
+func (m *Manager) windowAuthEntry(root *os.Root, record windowAuthRecord) (Installed, string, error) {
+	view, err := m.catalog.readView(root)
+	if err != nil {
+		return Installed{}, "", err
+	}
+	entry, found := view.lookup(record.Scope.Plugin)
+	if !found || entry.Disabled {
+		return Installed{}, "", errors.New("window authentication package changed or is disabled")
+	}
+	grant, found := entry.Manifest.ResolveAuthBinding(record.Binding)
+	if !found || grant.Provider != record.Scope.Provider {
+		return Installed{}, "", errors.New("authentication grant changed")
+	}
+	if grant.From == sdk.ProviderSignInPart {
+		entry = view.enabledEntry(entry)
+		if entry.observerEnablementErr != nil {
+			return Installed{}, "", errors.New("authentication enablement changed")
+		}
+	}
+	return entry, grant.From, nil
+}
+
+func checkWindowAuthConfig(ctx context.Context, entry Installed, from string, record windowAuthRecord, config, expected sdk.ConfigSnapshot) error {
+	part, revision := windowAuthJournalSelection(entry, config.Version, from)
+	if record.Flow != "" && from == sdk.ProviderSignInPart {
+		revision = subscriptionJournalRevision(ctx, revision)
+	}
+	if part != record.Part || revision != record.Revision || config.Version != record.Config || !sameModuleConfig(config, expected) {
+		return errors.New("window authentication selection changed")
+	}
+	return ctx.Err()
+}
+
+func (m *Manager) checkWindowAuthDispatch(ctx context.Context, catalog, private *os.Root, dispatch windowAuthDispatch) error {
+	entry, from, err := m.windowAuthEntry(catalog, dispatch.record)
+	if err != nil {
+		return err
+	}
+	return readStoreNamespace(ctx, private, entry.Manifest.ID, func(root *os.Root) error {
+		value, err := storeReadState(root, sdk.Scope{Plugin: entry.Manifest.ID}, moduleConfigKey)
+		if err != nil {
+			return err
+		}
+		config, err := m.runtimeModuleConfigValue(entry, value.VersionedValue)
+		if err != nil {
+			return err
+		}
+		return checkWindowAuthConfig(ctx, entry, from, dispatch.record, config, dispatch.config)
+	})
 }
