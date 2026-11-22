@@ -15,7 +15,7 @@ func NativeEndpoints(e Entry) []string {
 	if e.Group != "" {
 		return nil
 	}
-	return endpointsOf(relayed(*e.Provider, e.Model))
+	return endpointsOf(e.Provider.relayed(e.Model))
 }
 
 // PreferredEndpoint is the path a request for the model is best asked on
@@ -37,13 +37,17 @@ func PreferredEndpoint(e Entry, members func(id string) []Member) string {
 // relayed are the APIs p takes a request for model on as it is, in the
 // order p speaks them: none for a model every request to is translated
 // anyway.
-func relayed(p Provider, model string) []Protocol {
-	if p.Native(model) == "" {
-		return nil
+func (p Provider) relayed(model string) []Protocol {
+	if p.Account != nil {
+		switch p.Account.Agent {
+		case "claude", "devin":
+			return nil
+		}
 	}
-	apis := p.APIs(model)
+	speaks := p.Speaks()
+	apis := p.apisAmong(speaks, model)
 	var out []Protocol
-	for _, pr := range p.Speaks() {
+	for _, pr := range speaks {
 		if slices.Contains(Protocols, pr) && (apis == nil || slices.Contains(apis, pr)) {
 			out = append(out, pr)
 		}
@@ -66,7 +70,7 @@ func endpointsOf(prs []Protocol) []string {
 func GroupEndpoints(ms []Member) []string {
 	var common []Protocol
 	for i, m := range ms {
-		r := relayed(m.Provider, m.Model)
+		r := m.Provider.relayed(m.Model)
 		if i == 0 {
 			common = r
 			continue
@@ -93,14 +97,14 @@ func GroupEndpoints(ms []Member) []string {
 func GroupAPI(ms []Member) Protocol {
 	best := false
 	for _, m := range ms {
-		n := m.Provider.Native(m.Model)
-		if n == "" {
+		relayed := m.Provider.relayed(m.Model)
+		if len(relayed) == 0 {
 			continue
 		}
-		if !slices.Contains(relayed(m.Provider, m.Model), Responses) {
+		if !slices.Contains(relayed, Responses) {
 			return ""
 		}
-		best = best || n == Responses
+		best = best || m.Provider.nativeAmong(m.Model, relayed) == Responses
 	}
 	if best {
 		return Responses

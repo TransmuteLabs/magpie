@@ -3,14 +3,82 @@ package gateway
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"github.com/yetone/magpie/pkg/protocolext"
 	"golang.org/x/sys/unix"
 )
+
+func TestModelsListSDKReadsNativeModelAPIsOnce(t *testing.T) {
+	const model = "fixture-sdk-native-endpoint"
+	p := smallSDKProvider(t, 8, sdk.Model{
+		ID: model, Price: &sdk.ModelPrice{}, Protocols: []protocolext.Protocol{"chat"},
+	})
+	server := New()
+	t.Cleanup(server.idle.stop)
+	handler := server.Front()
+	serve := func(etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/v1/models", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("If-None-Match", etag)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	first := serve("")
+	tag, body := first.Header().Get("ETag"), first.Body.String()
+	if first.Code != http.StatusOK || tag == "" {
+		t.Fatalf("warmup model list: status %d, ETag %q", first.Code, tag)
+	}
+	type modelRow struct {
+		ID              string   `json:"id"`
+		NativeEndpoints []string `json:"native_endpoints"`
+	}
+	var list struct {
+		Data []modelRow `json:"data"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	wantID, wantEndpoints := p.ID+"/"+model, []string{"/v1/chat/completions"}
+	row := slices.IndexFunc(list.Data, func(entry modelRow) bool {
+		return entry.ID == wantID
+	})
+	if row < 0 || !slices.Equal(list.Data[row].NativeEndpoints, wantEndpoints) {
+		t.Fatalf("model list does not contain %q with endpoints %v: %s", wantID, wantEndpoints, body)
+	}
+
+	for _, phase := range []struct {
+		name string
+		tag  string
+		code int
+		body string
+	}{
+		{"full", "", http.StatusOK, body},
+		{"conditional", tag, http.StatusNotModified, ""},
+	} {
+		t.Run(phase.name, func(t *testing.T) {
+			var response *httptest.ResponseRecorder
+			reads := countSDKModelCatalogReads(t, func() { response = serve(phase.tag) })
+			if response.Code != phase.code || response.Header().Get("ETag") != tag || response.Body.String() != phase.body {
+				t.Fatalf("model list: status %d, ETag %q, same body %v; want %d, %q and the same body",
+					response.Code, response.Header().Get("ETag"), response.Body.String() == phase.body, phase.code, tag)
+			}
+			t.Logf("/v1/models opened and closed catalog.json %d times; ETag %s", reads, tag)
+			if reads != 8 {
+				t.Errorf("model list read catalog.json %d times, want 8 (native endpoints and price, each checking two accounts twice)", reads)
+			}
+		})
+	}
+}
 
 func TestSmallCandidatesSDKReadsOneModelProjection(t *testing.T) {
 	for _, api := range []struct {

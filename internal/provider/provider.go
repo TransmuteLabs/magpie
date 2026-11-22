@@ -2470,19 +2470,10 @@ func openAIModel(model string) bool {
 // request is translated anyway: a sign-in served through its agent's own
 // API (Claude Code's binary, Devin, Code Assist).
 func (p Provider) Native(model string) Protocol {
-	if p.Account != nil {
-		switch p.Account.Agent {
-		case "claude", "devin":
-			return ""
-		}
-	}
-	apis := p.APIs(model)
-	var out []Protocol
-	for _, pr := range p.Speaks() {
-		if slices.Contains(Protocols, pr) && (apis == nil || slices.Contains(apis, pr)) {
-			out = append(out, pr)
-		}
-	}
+	return p.nativeAmong(model, p.relayed(model))
+}
+
+func (p Provider) nativeAmong(model string, out []Protocol) Protocol {
 	if len(out) == 0 {
 		return ""
 	}
