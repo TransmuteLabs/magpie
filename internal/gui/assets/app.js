@@ -6338,7 +6338,7 @@ function drawProviders(quiet) {
     // accounts list says of each, not a green "signed in"
     const inUse = (p.account?.logins || []).filter((l) => l.on || l.active);
     const lapsed = inUse.length > 0 && inUse.every((l) => l.lapsed);
-    const sub = el("div", "sub", (p.account ? t(lapsed ? "{user} is signed out" : "signed in as {user}", { user: p.account.user }) : p.host) + " · " + models), ru = p.remoteUpdate;
+    const sub = el("div", "sub", (p.account ? t(lapsed ? "{user} is signed out" : "signed in as {user}", { user: accountShownOf(p, p.account.user) }) : p.host) + " · " + models), ru = p.remoteUpdate;
     if (ru) sub.append(" · ", Object.assign(el("span", "rup", t(ru.say, ru)), { title: t(ru.tip, ru) }));
     who.append(name, sub);
     const using = p.agents.filter((a) => a.current);

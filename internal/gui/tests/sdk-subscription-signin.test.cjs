@@ -10,9 +10,9 @@ const origin = "http://magpie.test";
 const signInPath = "/api/provider/sdk-signin";
 const authError = "module authentication could not complete this request";
 const deviceURL = "https://vendor.test/device";
-const selected = "selected@example.test";
+const selected = "0123456789abcdef0123456789abcdef";
 const other = "other@example.test";
-const selectedName = "Selected subscription name";
+const selectedName = "selected@example.test";
 const selectedAlias = "Selected local alias";
 const device = { id: "device", mode: "poll", label: "Device code" };
 const key = { id: "key", mode: "poll", label: "API key", fields: [
@@ -186,14 +186,56 @@ function fixture(lang, subscription = primary) {
     noReauthorization() { reauthorize = false; logins[1].lapsed = lapse; },
     showLegacy() { legacyPage = true; },
     removeLegacyPage() { pageListed = false; },
-    setOwner(value) {
+    setOwner(value, signInLapse = lapse) {
       owner = value;
-      logins = value === "sdk" ? [{ user: selected, active: true, on: true, extensionGeneration: "4", lapsed: lapse }] : [];
+      logins = value === "sdk" ? [{ user: selected, active: true, on: true, extensionGeneration: "4", lapsed: signInLapse }] : [];
     },
   };
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: SDK provider summary uses the selected account name`, async (t) => {
+    const ctl = fixture("en");
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    await context.route("**/*", ctl.serve);
+    const page = await context.newPage();
+    page.setDefaultTimeout(5000);
+    const row = page.locator(`.row.provider[data-id="${primary.id}"]`);
+    const openProviders = async () => {
+      await page.goto(origin + "/?view=providers");
+      return row.locator(".who .sub").textContent();
+    };
+
+    ctl.setOwner("sdk", "");
+    ctl.setAccountLabel(selectedName);
+    assert.equal(await openProviders(), `signed in as ${selectedName} · no models exposed`);
+    await row.click();
+    const account = page.locator(`.editor .accts .acc[data-account-id="${selected}"]`);
+    assert.equal(await account.locator(".acct-who .rename").textContent(), selectedName);
+    await account.locator(".acc-more").click();
+    await account.getByRole("button", { name: "Sign out", exact: true }).click();
+    const confirm = page.getByRole("alertdialog");
+    const [request] = await Promise.all([
+      page.waitForRequest(origin + "/api/login/forget"),
+      confirm.getByRole("button", { name: "Sign out", exact: true }).click(),
+    ]);
+    assert.deepEqual(request.postDataJSON(), {
+      agent: primary.id, account: { id: selected, expectedGeneration: "4" },
+    });
+    await row.waitFor({ state: "detached" });
+
+    ctl.setOwner("sdk");
+    ctl.setAccountLabel(selectedName, selectedAlias);
+    assert.equal(await openProviders(), `${selectedAlias} is signed out · no models exposed`);
+    ctl.setOwner("sdk", "");
+    assert.equal(await openProviders(), `signed in as ${selectedAlias} · no models exposed`);
+    ctl.setAccountLabel();
+    assert.equal(await openProviders(), `signed in as ${selected} · no models exposed`);
+    assert.deepEqual(ctl.unexpected, []);
+  });
+
   test(`${engine}: SDK subscription sign-in through Providers`, { timeout: 120_000 }, async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
