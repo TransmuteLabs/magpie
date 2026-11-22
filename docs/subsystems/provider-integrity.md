@@ -63,6 +63,9 @@ Routing binds cached allowance windows and read timestamps to each
 account's sign-in. For a Community plugin it checks the saved slot,
 account identity, and the credential lifetime committed by explicit sign-in.
 The publication reads one current credential projection for the batch.
+When routing has cached Community allowances, it uses one current owner
+snapshot both to validate those allowances and to resolve an SDK cutover.
+After waiting for the first reading it checks the current owner again.
 A replacement in another process defers the old reading even when
 `logins.json` could not be updated. Usage's plan, sign-in status and wallet
 writes hold the credential lifetime through publication. Token renewal

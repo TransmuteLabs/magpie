@@ -946,11 +946,11 @@ type communityAllowanceBinding struct {
 	selected pluginUsageSelection
 }
 
-func currentCommunityAllowanceBindings(ctx context.Context, bindings map[string]communityAllowanceBinding) map[string]communityAllowanceBinding {
+func currentCommunityAllowanceBindings(ctx context.Context, bindings map[string]communityAllowanceBinding, owners *extensionSubscriptionOwners) map[string]communityAllowanceBinding {
 	if len(bindings) == 0 {
 		return bindings
 	}
-	current := subscriptionQuotaCheck(ctx)
+	current := subscriptionQuotaCheckWithOwners(ctx, owners)
 	var valid map[string]communityAllowanceBinding
 	for user, binding := range bindings {
 		if current(SubscriptionQuota{Provider: binding.provider, User: user, pluginUsage: &binding.selected}) {
@@ -967,20 +967,26 @@ func currentCommunityAllowanceBindings(ctx context.Context, bindings map[string]
 	return bindings
 }
 
-func pruneCommunityAllowanceBindings(agent string) {
+func pruneCommunityAllowanceBindings(agent string) *extensionSubscriptionOwners {
 	c := &usedCache
 	c.Lock()
 	bindings := c.community[agent]
 	c.Unlock()
-	current := currentCommunityAllowanceBindings(context.Background(), bindings)
+	if len(bindings) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	owners := currentSubscriptionOwners(ctx)
+	current := currentCommunityAllowanceBindings(ctx, bindings, &owners)
 	if len(bindings) == len(current) {
-		return
+		return &owners
 	}
 	c.Lock()
 	if maps.Equal(c.community[agent], bindings) {
 		syncAllowanceBindings(&c.community, agent, current)
 	}
 	c.Unlock()
+	return &owners
 }
 
 func syncAllowanceBindings[Binding comparable](cache *map[string]map[string]Binding, agent string, bindings map[string]Binding) {
@@ -1021,8 +1027,8 @@ func syncAllowanceBindings[Binding comparable](cache *map[string]map[string]Bind
 
 // readAllowances is Allowances as agent's own readings tell it.
 func readAllowances(agent string) map[string]Allowance {
-	bindings, external := extensionUsageBindings(agent)
-	pruneCommunityAllowanceBindings(agent)
+	owners := pruneCommunityAllowanceBindings(agent)
+	bindings, external := extensionUsageBindings(agent, owners)
 	c := &usedCache
 	c.Lock()
 	if c.m == nil {
@@ -1058,8 +1064,8 @@ func readAllowances(agent string) map[string]Allowance {
 					all[user] = a
 				}
 			}
-			current, _ := extensionUsageBindings(agent)
-			currentCommunity := currentCommunityAllowanceBindings(ctx, community)
+			current, _ := extensionUsageBindings(agent, nil)
+			currentCommunity := currentCommunityAllowanceBindings(ctx, community, nil)
 			if len(community) != len(currentCommunity) {
 				for user := range community {
 					if _, valid := currentCommunity[user]; !valid {
@@ -1172,7 +1178,11 @@ func readAllowances(agent string) map[string]Allowance {
 		pruneCommunityAllowanceBindings(agent)
 	}
 	if external {
-		current, _ := extensionUsageBindings(agent)
+		if owners != nil {
+			latest := currentSubscriptionOwners(context.Background())
+			owners = &latest
+		}
+		current, _ := extensionUsageBindings(agent, owners)
 		c.Lock()
 		syncExtensionAllowanceBindings(agent, current)
 		c.Unlock()
@@ -1193,8 +1203,7 @@ func readAllowances(agent string) map[string]Allowance {
 // an account whose reading is too old or failed (Provider.CapCareful).
 func UsageRead(agent, user string) (at time.Time, failed, ok bool) {
 	c := &usedCache
-	bindings, external := extensionUsageBindings(agent)
-	pruneCommunityAllowanceBindings(agent)
+	bindings, external := extensionUsageBindings(agent, pruneCommunityAllowanceBindings(agent))
 	c.Lock()
 	defer c.Unlock()
 	if external {
