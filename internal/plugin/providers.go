@@ -17,7 +17,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
@@ -1299,28 +1301,28 @@ func Auths(provider string) map[string]map[string]any {
 
 // WithSavedAuth reads one current sign-in under the writers' lock. The
 // callback may commit local state and must not call the plugin or a vendor.
-func WithSavedAuth(ctx context.Context, provider, account string, use func(json.RawMessage) error) error {
+func WithSavedAuth(ctx context.Context, provider, account string, use func(extension.SavedSignInRecord) error) error {
 	return WithSavedAuthChecked(ctx, provider, account, ctx.Err, use)
 }
 
-func WithSavedAuthChecked(ctx context.Context, provider, account string, check func() error, use func(json.RawMessage) error) error {
+func WithSavedAuthChecked(ctx context.Context, provider, account string, check func() error, use func(extension.SavedSignInRecord) error) error {
 	if provider == "" || account == "" || ProviderOf(account) != provider {
 		return errors.New("select a saved sign-in of the same provider")
 	}
-	return withSavedAuths(ctx, AuthPath(), provider, check, func(records map[string]json.RawMessage) error {
-		record := records[account]
-		if len(record) == 0 {
+	return withSavedAuths(ctx, AuthPath(), provider, check, func(records map[string]extension.SavedSignInRecord) error {
+		record, ok := records[account]
+		if !ok {
 			return errors.New("the selected saved plugin sign-in is missing")
 		}
 		return use(record)
 	})
 }
 
-func WithSavedAuths(ctx context.Context, provider string, use func(map[string]json.RawMessage) error) error {
+func WithSavedAuths(ctx context.Context, provider string, use func(map[string]extension.SavedSignInRecord) error) error {
 	return withSavedProviderAuths(ctx, provider, ctx.Err, use)
 }
 
-func withSavedProviderAuths(ctx context.Context, provider string, check func() error, use func(map[string]json.RawMessage) error) error {
+func withSavedProviderAuths(ctx context.Context, provider string, check func() error, use func(map[string]extension.SavedSignInRecord) error) error {
 	if provider == "" {
 		return errors.New("select a source provider")
 	}
@@ -1333,11 +1335,11 @@ func withSavedProviderAuths(ctx context.Context, provider string, check func() e
 	return withSavedAuths(ctx, path, provider, check, use)
 }
 
-func WithInstalledSavedAuths(ctx context.Context, provider, spec string, use func(map[string]json.RawMessage) error) error {
+func WithInstalledSavedAuths(ctx context.Context, provider, spec string, use func(map[string]extension.SavedSignInRecord) error) error {
 	return WithInstalledSavedAuthsChecked(ctx, provider, spec, ctx.Err, use)
 }
 
-func WithInstalledSavedAuthsChecked(ctx context.Context, provider, spec string, check func() error, use func(map[string]json.RawMessage) error) error {
+func WithInstalledSavedAuthsChecked(ctx context.Context, provider, spec string, check func() error, use func(map[string]extension.SavedSignInRecord) error) error {
 	return WithInstalledPlugins(ctx, check, func(installed []Entry) error {
 		if !slices.ContainsFunc(installed, func(entry Entry) bool { return entry.Spec == spec && !entry.Off }) {
 			return errors.New("the source subscription's plugin is no longer installed and enabled")
@@ -1346,7 +1348,7 @@ func WithInstalledSavedAuthsChecked(ctx context.Context, provider, spec string, 
 	})
 }
 
-func withSavedAuths(ctx context.Context, path, provider string, check func() error, use func(map[string]json.RawMessage) error) error {
+func withSavedAuths(ctx context.Context, path, provider string, check func() error, use func(map[string]extension.SavedSignInRecord) error) error {
 	unlock, err := lockAuth(ctx, path)
 	if err != nil {
 		return err
@@ -1365,7 +1367,7 @@ func withSavedAuths(ctx context.Context, path, provider string, check func() err
 	return use(records)
 }
 
-func readSavedAuths(path, provider string) (map[string]json.RawMessage, error) {
+func readSavedAuths(path, provider string) (map[string]extension.SavedSignInRecord, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("saved plugin sign-ins are unavailable")
@@ -1380,23 +1382,24 @@ func readSavedAuths(path, provider string) (map[string]json.RawMessage, error) {
 		return nil, errors.New("current saved plugin sign-ins changed")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, authDocumentLimit+1))
-	var records map[string]json.RawMessage
-	if err != nil || len(raw) > authDocumentLimit || json.Unmarshal(raw, &records) != nil || records == nil {
+	var saved map[string]json.RawMessage
+	if err != nil || len(raw) > authDocumentLimit || !utf8.Valid(raw) || json.Unmarshal(raw, &saved) != nil || saved == nil {
 		return nil, errors.New("current saved plugin sign-ins are unreadable")
 	}
-	for key, raw := range records {
+	records := make(map[string]extension.SavedSignInRecord)
+	for key, record := range saved {
 		if ProviderOf(key) != provider {
-			delete(records, key)
 			continue
 		}
-		record, err := authCredentials(bytes.TrimSpace(raw))
+		record = bytes.TrimSpace(record)
+		credentials, err := authCredentials(record)
 		if err != nil {
 			return nil, err
 		}
-		if len(record) == 0 || record[0] != '{' || len(record) > 16<<10 {
+		if len(credentials) == 0 || credentials[0] != '{' || len(credentials) > 16<<10 {
 			return nil, errors.New("a saved plugin sign-in has an unsupported format")
 		}
-		records[key] = record
+		records[key] = extension.SavedSignInRecord{Raw: record, Credentials: credentials}
 	}
 	return records, nil
 }

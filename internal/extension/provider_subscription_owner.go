@@ -197,19 +197,18 @@ func (m *Manager) ActivateSavedSubscription(ctx context.Context, module, provide
 	defer release()
 	var result SubscriptionOwner
 	err = m.withWindowAuthAuthority(ctx, savedSignInAuthority(target, entry, config), func() error {
-		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
-			dir, err := storeDirectory(private, savedSignInsDir)
-			if err != nil {
-				return err
-			}
-			defer dir.Close()
-			root, err := storeDirectory(private, module)
-			if err != nil {
-				return err
-			}
-			defer root.Close()
-			return source(ctx, provider, func(raw map[string]json.RawMessage, accounts []SubscriptionAccount, checkSource func() error) error {
-				var err error
+		return source(ctx, provider, func(raw map[string]json.RawMessage, accounts []SubscriptionAccount, checkSource func() error) error {
+			return m.store.withPrivateStore(ctx, func(private *os.Root) error {
+				dir, err := storeDirectory(private, savedSignInsDir)
+				if err != nil {
+					return err
+				}
+				defer dir.Close()
+				root, err := storeDirectory(private, module)
+				if err != nil {
+					return err
+				}
+				defer root.Close()
 				result, err = publishSubscription(ctx, dir, root, target, publicID, tickets, raw, accounts, checkSource)
 				return err
 			})
@@ -465,40 +464,41 @@ func (m *Manager) RollbackSavedSubscription(ctx context.Context, publicID, expec
 	}
 	err = func() error {
 		defer unlock()
-		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
-			dir, err := storeDirectory(private, savedSignInsDir)
+		var selected subscriptionRecord
+		if err := m.store.withReadStoreContext(ctx, savedSignInsDir, func(dir *os.Root) error {
+			rows, index, err := subscriptionRollbackSelection(dir, publicID, expectedRevision)
 			if err != nil {
 				return err
 			}
-			defer dir.Close()
-			rows, err := readSubscriptionRecords(dir)
-			if err != nil {
-				return err
-			}
-			i := slices.IndexFunc(rows, func(r subscriptionRecord) bool { return r.PublicID == publicID })
-			if i < 0 {
-				return errSubscriptionChanged
-			}
-			r := &rows[i]
-			replay := !r.Pending && !r.Active && r.PreviousRevision == expectedRevision
-			if replay {
-				result = r.SubscriptionOwner
-				return storeSync(dir)
-			}
-			if !(r.Pending || r.Active) || r.Revision != expectedRevision {
-				return errSubscriptionChanged
-			}
-			release, err := lockSubscriptionUse(ctx, catalog, r.Module, r.Provider, false)
-			if err != nil {
-				return err
-			}
-			defer release()
-			if r.Active {
-				if err := r.checkRollback(private); err != nil {
+			selected = rows[index]
+			return nil
+		}); err != nil {
+			return err
+		}
+		publish := func(raw map[string]json.RawMessage, accounts []SubscriptionAccount, checkSource func() error) error {
+			return m.store.withPrivateStore(ctx, func(private *os.Root) error {
+				dir, err := storeOpenDirectory(private, savedSignInsDir, false)
+				if err != nil {
 					return err
 				}
-			}
-			return source(ctx, r.Provider, func(raw map[string]json.RawMessage, accounts []SubscriptionAccount, checkSource func() error) error {
+				defer dir.Close()
+				rows, index, err := subscriptionRollbackSelection(dir, publicID, expectedRevision)
+				if err != nil {
+					return err
+				}
+				r := &rows[index]
+				if r.Module != selected.Module || r.Provider != selected.Provider || r.Revision != selected.Revision {
+					return errSubscriptionChanged
+				}
+				if !r.Active && !r.Pending {
+					result = r.SubscriptionOwner
+					return storeSync(dir)
+				}
+				if r.Active {
+					if err := r.checkRollback(private); err != nil {
+						return err
+					}
+				}
 				if err := r.checkSource(raw, accounts); err != nil {
 					return err
 				}
@@ -519,7 +519,16 @@ func (m *Manager) RollbackSavedSubscription(ctx context.Context, publicID, expec
 				}
 				return err
 			})
-		})
+		}
+		if !selected.Active && !selected.Pending {
+			return publish(nil, nil, nil)
+		}
+		release, err := lockSubscriptionUse(ctx, catalog, selected.Module, selected.Provider, false)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return source(ctx, selected.Provider, publish)
 	}()
 	if result.Revision != "" {
 		notifyChanged()
@@ -527,6 +536,29 @@ func (m *Manager) RollbackSavedSubscription(ctx context.Context, publicID, expec
 		err = errSubscriptionChanged
 	}
 	return result, err
+}
+
+func subscriptionRollbackSelection(dir *os.Root, publicID, expectedRevision string) ([]subscriptionRecord, int, error) {
+	if dir == nil {
+		return nil, -1, errSubscriptionChanged
+	}
+	rows, err := readSubscriptionRecords(dir)
+	if err != nil {
+		return nil, -1, err
+	}
+	index := slices.IndexFunc(rows, func(row subscriptionRecord) bool {
+		if row.PublicID != publicID {
+			return false
+		}
+		if row.Active || row.Pending {
+			return row.Revision == expectedRevision
+		}
+		return row.PreviousRevision == expectedRevision
+	})
+	if index < 0 {
+		return nil, -1, errSubscriptionChanged
+	}
+	return rows, index, nil
 }
 
 func lockSubscriptionUse(ctx context.Context, root *os.Root, module, provider string, shared bool) (func(), error) {

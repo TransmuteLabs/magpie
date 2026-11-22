@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/plugin"
@@ -543,7 +544,7 @@ func TestPluginWalletPublicationHoldsOwner(t *testing.T) {
 	checkWalletUsage(t, readPluginUsageResult(t, result), 1000, 500, 0, 0)
 
 	cutover := func() error {
-		return plugin.WithSavedAuths(ctx, "fakeco", func(records map[string]json.RawMessage) error {
+		return plugin.WithSavedAuths(ctx, "fakeco", func(records map[string]extension.SavedSignInRecord) error {
 			if len(records) != 1 {
 				return fmt.Errorf("expected one source sign-in, got %d", len(records))
 			}

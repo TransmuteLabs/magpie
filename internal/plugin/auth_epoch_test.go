@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/extension"
 )
 
 func TestAPIKeyResignInCommitsAuthEpochInExistingSlot(t *testing.T) {
@@ -80,7 +82,13 @@ func TestAPIKeyResignInCommitsAuthEpochInExistingSlot(t *testing.T) {
 			t.Fatal("the export changed the credential object or included the local epoch")
 		}
 	}
-	if err := WithSavedAuth(ctx, account, account, func(raw json.RawMessage) error { assertExport(raw); return nil }); err != nil {
+	if err := WithSavedAuth(ctx, account, account, func(record extension.SavedSignInRecord) error {
+		assertExport(record.Credentials)
+		if !strings.Contains(string(record.Raw), previous) {
+			t.Fatal("the source record lost its committed epoch")
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := AuthEntries()

@@ -402,6 +402,11 @@ func TestAccountRowsRecheckSubscriptionAfterOtherReads(t *testing.T) {
 
 func TestSDKCLITransfersAndRestoresTheWholeSubscription(t *testing.T) {
 	manager, manifest, source := savedSignInFixture(t)
+	source = bytes.Replace(source, []byte(`"key":"PRIVATE-SAVED"`),
+		[]byte(`"key":"PRIVATE-SAVED","_magpieAuthEpoch":"initial-sign-in"`), 1)
+	if err := os.WriteFile(plugin.AuthPath(), source, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	const (
 		id          = "vendor"
 		selectedKey = "vendor#selected"
@@ -549,6 +554,14 @@ func TestSDKCLITransfersAndRestoresTheWholeSubscription(t *testing.T) {
 	if output, err := run(transfer...); err == nil || output != "" {
 		t.Fatal("changed source was transferred")
 	}
+	reauthed := bytes.Replace(source, []byte("initial-sign-in"), []byte("same-key-new-sign-in"), 1)
+	if err := os.WriteFile(plugin.AuthPath(), reauthed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := run(transfer...); err == nil || output != "" {
+		t.Fatal("transfer accepted a ticket from before the selected account signed in again")
+	}
+	checkProjection(false)
 	if err := os.WriteFile(plugin.AuthPath(), source, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +817,7 @@ func TestSDKSavedSignInReportsPublishedAccountWhenTicketCleanupFails(t *testing.
 	private := filepath.Join(filepath.Dir(plugin.AuthPath()), "extensions", "private")
 	ticketPath := filepath.Join(private, ".saved-signins", "records.json")
 	backupPath := ticketPath + ".test-backup"
-	source := func(ctx context.Context, providerID, key string, use func(json.RawMessage) error) error {
+	source := func(ctx context.Context, providerID, key string, use func(extensionhost.SavedSignInRecord) error) error {
 		if err := plugin.WithSavedAuth(ctx, providerID, key, use); err != nil {
 			return err
 		}
@@ -853,9 +866,16 @@ func TestSDKSavedSignInReportsPublishedAccountWhenTicketCleanupFails(t *testing.
 }
 
 func TestSDKSavedSignInActivationRechecksSelection(t *testing.T) {
-	for _, change := range []string{"source", "lock", "config", "enablement", "generation"} {
+	for _, change := range []string{"source", "reauthentication", "lock", "config", "enablement", "generation"} {
 		t.Run(change, func(t *testing.T) {
 			manager, manifest, source := savedSignInFixture(t)
+			if change == "reauthentication" {
+				source = bytes.Replace(source, []byte(`"key":"PRIVATE-SAVED"`),
+					[]byte(`"key":"PRIVATE-SAVED","_magpieAuthEpoch":"original-sign-in"`), 1)
+				if err := os.WriteFile(plugin.AuthPath(), source, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			prepared, err := provider.ImportSavedPluginAuth(t.Context(), manager, manifest.ID, "vendor", "vendor#selected")
 			if err != nil {
 				t.Fatal(err)
@@ -863,6 +883,11 @@ func TestSDKSavedSignInActivationRechecksSelection(t *testing.T) {
 			switch change {
 			case "source":
 				if err := plugin.SignOut(t.Context(), "vendor", "vendor#selected"); err != nil {
+					t.Fatal(err)
+				}
+			case "reauthentication":
+				source = bytes.Replace(source, []byte("original-sign-in"), []byte("new-sign-in"), 1)
+				if err := os.WriteFile(plugin.AuthPath(), source, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			case "lock":
@@ -915,15 +940,17 @@ func TestSDKSavedSignInRejectsIllFormedRecordBeforeVerification(t *testing.T) {
 	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", config); err != nil {
 		t.Fatal(err)
 	}
-	body := bytes.Replace(source, []byte(`"PRIVATE-SAVED"`), []byte{'"', 0x80, '"'}, 1)
-	if err := os.WriteFile(plugin.AuthPath(), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.ImportSavedPluginAuth(t.Context(), manager, manifest.ID, "vendor", "vendor#selected"); err == nil {
-		t.Fatal("import accepted invalid UTF-8 in the saved record")
-	}
-	if _, err := os.Stat(trace); !os.IsNotExist(err) {
-		t.Fatal("invalid UTF-8 reached the provider verifier")
+	for _, field := range []string{`"PRIVATE-SAVED"`, `"foreign"`} {
+		body := bytes.Replace(source, []byte(field), []byte{'"', 0x80, '"'}, 1)
+		if err := os.WriteFile(plugin.AuthPath(), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.ImportSavedPluginAuth(t.Context(), manager, manifest.ID, "vendor", "vendor#selected"); err == nil {
+			t.Fatalf("import accepted invalid UTF-8 at %s", field)
+		}
+		if _, err := os.Stat(trace); !os.IsNotExist(err) {
+			t.Fatal("invalid UTF-8 reached the provider verifier")
+		}
 	}
 }
 

@@ -567,6 +567,11 @@ persistent `plugin-auth.json.write.lock`. Lock failure and wait timeout
 end the operation. The OS releases ownership when a process dies. Bun
 edits are limited to a 16 MiB credential document.
 
+SDK publication takes this writer lock before taking the private SDK
+Store lock, matching the order community writers use to check ownership.
+Activation and rollback recheck their ticket or owner under the Store
+lock after the source wait.
+
 The loader, model listing, fetch, usage, and renewal hold shared admission
 for the provider across vendor work and credential writes, including when
 the caller cancels while the hook finishes. During SDK cutover,

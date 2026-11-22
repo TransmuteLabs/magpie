@@ -542,6 +542,121 @@ type savedAuthCommandResult struct {
 	err error
 }
 
+func TestSDKCLISavedAuthAndUnrelatedWriterFinish(t *testing.T) {
+	for _, operation := range []string{"import", "activate", "transfer", "rollback"} {
+		t.Run(operation, func(t *testing.T) {
+			manager, manifest, _ := savedSignInFixture(t)
+			if operation == "transfer" || operation == "rollback" {
+				installSavedAuthSource(t)
+			}
+			args := savedSubscriptionCommand(t, operation, manifest.ID)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			result := make(chan savedAuthCommandResult, 1)
+			finished := make(chan struct{})
+			run := func() {
+				go func() {
+					defer close(finished)
+					out, err := said(t, func() error { return sdkPluginCmd(ctx, args) })
+					result <- savedAuthCommandResult{out, err}
+				}()
+				t.Cleanup(func() {
+					cancel()
+					<-finished
+				})
+			}
+			var finishRelease string
+			if operation == "import" {
+				root := t.TempDir()
+				started := filepath.Join(root, "started")
+				finishRelease = filepath.Join(root, "release")
+				config, err := json.Marshal(authfixture.Config{Started: started, Release: finishRelease})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := manager.CompareAndSwapModuleConfig(t.Context(), manifest.ID, "0", config); err != nil {
+					t.Fatal(err)
+				}
+				run()
+				bound := time.NewTimer(4 * time.Second)
+				defer bound.Stop()
+				tick := time.NewTicker(5 * time.Millisecond)
+				defer tick.Stop()
+				for {
+					if _, err := os.Stat(started); err == nil {
+						break
+					}
+					select {
+					case done := <-result:
+						t.Fatalf("import returned before verification: %v", done.err)
+					case <-bound.C:
+						t.Fatal("import did not reach verification")
+					case <-tick.C:
+					}
+				}
+			}
+			entered := make(chan struct{})
+			publish := make(chan struct{})
+			allowWrite := sync.OnceFunc(func() { close(publish) })
+			writer := make(chan error, 1)
+			writerDone := make(chan struct{})
+			go func() {
+				defer close(writerDone)
+				writer <- plugin.EditAuth(func(records map[string]json.RawMessage) (bool, error) {
+					if _, exists := records["foreign"]; !exists {
+						return false, errors.New("unrelated fixture account is missing")
+					}
+					close(entered)
+					<-publish
+					delete(records, "foreign")
+					return true, nil
+				})
+			}()
+			t.Cleanup(func() {
+				cancel()
+				allowWrite()
+				<-writerDone
+			})
+			select {
+			case <-entered:
+			case err := <-writer:
+				t.Fatalf("unrelated writer returned before taking its lock: %v", err)
+			case <-time.After(4 * time.Second):
+				t.Fatal("unrelated writer did not acquire its lock")
+			}
+			if finishRelease != "" {
+				if err := os.WriteFile(finishRelease, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				run()
+			}
+			waitForSavedAuthCommand(t, result, filepath.Base(plugin.AuthPath())+".write.lock", "internal/plugin.withSavedAuths", "internal/plugin.lockAuth")
+			allowWrite()
+			bound := time.NewTimer(2 * time.Second)
+			defer bound.Stop()
+			select {
+			case err := <-writer:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-bound.C:
+				t.Fatal("unrelated auth writer could not publish while the SDK command waited for its source")
+			}
+			select {
+			case done := <-result:
+				checkSavedAuthReceipt(t, operation, done.out, done.err)
+			case <-bound.C:
+				t.Fatal("saved auth command remained blocked after the unrelated write")
+			}
+			records, err := plugin.AuthEntries()
+			if err != nil || len(records) != 2 || len(records["vendor"]) == 0 || len(records["vendor#selected"]) == 0 {
+				t.Fatal("unrelated sign-out and saved auth operation did not both preserve their effects")
+			}
+		})
+	}
+}
+
 func startSavedAuthCommandWaiting(t *testing.T, ctx context.Context, lock, origin, waiting string, args []string) (<-chan savedAuthCommandResult, func()) {
 	t.Helper()
 	unlock, held := filelock.Lock(lock, time.Second)
@@ -560,6 +675,12 @@ func startSavedAuthCommandWaiting(t *testing.T, ctx context.Context, lock, origi
 		out, err := said(t, func() error { return sdkPluginCmd(ctx, args) })
 		result <- savedAuthCommandResult{out, err}
 	}()
+	waitForSavedAuthCommand(t, result, filepath.Base(lock), origin, waiting)
+	return result, release
+}
+
+func waitForSavedAuthCommand(t *testing.T, result <-chan savedAuthCommandResult, label, origin, waiting string) {
+	t.Helper()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	bound := time.NewTimer(4 * time.Second)
@@ -569,14 +690,14 @@ func startSavedAuthCommandWaiting(t *testing.T, ctx context.Context, lock, origi
 		current := stacks[:runtime.Stack(stacks, true)]
 		for _, stack := range bytes.Split(current, []byte("\n\n")) {
 			if bytes.Contains(stack, []byte(origin)) && bytes.Contains(stack, []byte(waiting+"(")) {
-				return result, release
+				return
 			}
 		}
 		select {
 		case terminated := <-result:
-			t.Fatalf("command returned before waiting on %s: %v", filepath.Base(lock), terminated.err)
+			t.Fatalf("command returned before waiting on %s: %v", label, terminated.err)
 		case <-bound.C:
-			t.Fatalf("command did not wait on %s", filepath.Base(lock))
+			t.Fatalf("command did not wait on %s", label)
 		case <-ticker.C:
 		}
 	}
@@ -617,25 +738,30 @@ func checkSavedAuthTransactionFiles(t *testing.T, manager *extensionhost.Manager
 func checkSavedAuthRetry(t *testing.T, args []string) {
 	t.Helper()
 	out, err := said(t, func() error { return sdkPluginCmd(t.Context(), args) })
+	checkSavedAuthReceipt(t, args[1], out, err)
+}
+
+func checkSavedAuthReceipt(t *testing.T, operation, out string, err error) {
+	t.Helper()
 	var receipt struct {
 		Ticket, ID, Revision string
 		Active, Pending      bool
 	}
 	if err != nil || json.Unmarshal([]byte(out), &receipt) != nil || strings.Contains(out, "PRIVATE-") {
-		t.Fatalf("retry failed: %v", err)
+		t.Fatalf("saved auth %s failed: %v", operation, err)
 	}
-	switch args[1] {
+	switch operation {
 	case "import":
 		if receipt.Ticket == "" {
-			t.Fatal("retry did not return a preparation ticket")
+			t.Fatal("import did not return a preparation ticket")
 		}
 	case "activate":
 		if receipt.ID != "chosen" {
-			t.Fatal("retry did not activate the selected account")
+			t.Fatal("activation did not return the selected account")
 		}
 	case "transfer", "rollback":
-		if receipt.Revision == "" || receipt.Pending || receipt.Active != (args[1] == "transfer") {
-			t.Fatal("retry did not return a completed owner revision")
+		if receipt.Revision == "" || receipt.Pending || receipt.Active != (operation == "transfer") {
+			t.Fatal("transition did not return a completed owner revision")
 		}
 	}
 }

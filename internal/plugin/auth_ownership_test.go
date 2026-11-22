@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/testenv"
 )
@@ -71,9 +72,9 @@ func TestSavedSubscriptionHoldsInstalledSourceThroughPublication(t *testing.T) {
 	spec := Load().Plugins[0].Spec
 	writeTransferAuth(t, `{"transferco":{"type":"api","key":"fixture-key"}}`)
 	called := false
-	if err := WithInstalledSavedAuths(ctx, transferProvider, spec, func(records map[string]json.RawMessage) error {
+	if err := WithInstalledSavedAuths(ctx, transferProvider, spec, func(records map[string]extension.SavedSignInRecord) error {
 		called = true
-		if len(records) != 1 || len(records[transferProvider]) == 0 {
+		if len(records) != 1 || len(records[transferProvider].Raw) == 0 {
 			t.Fatal("the current saved account is missing")
 		}
 		file, err := os.OpenFile(listPath()+".lock", os.O_RDWR, 0o600)
@@ -95,7 +96,7 @@ func TestSavedSubscriptionHoldsInstalledSourceThroughPublication(t *testing.T) {
 	if err := SetOff(spec, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := WithInstalledSavedAuths(ctx, transferProvider, spec, func(map[string]json.RawMessage) error {
+	if err := WithInstalledSavedAuths(ctx, transferProvider, spec, func(map[string]extension.SavedSignInRecord) error {
 		t.Fatal("a disabled source reached publication")
 		return nil
 	}); err == nil {
@@ -142,8 +143,8 @@ func TestTransferredCommunityAuthCannotChange(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("another provider's Go write was refused: %v", err)
 			}
-			if err := WithSavedAuth(ctx, transferProvider, transferProvider, func(record json.RawMessage) error {
-				if !bytes.Equal(record, []byte(retained)) {
+			if err := WithSavedAuth(ctx, transferProvider, transferProvider, func(record extension.SavedSignInRecord) error {
+				if !bytes.Equal(record.Raw, []byte(retained)) {
 					return errors.New("neighboring writes changed the rollback digest")
 				}
 				return nil
@@ -251,7 +252,7 @@ func TestCommunityUseBlocksTransferThroughVendorWrite(t *testing.T) {
 				}
 				finished = nil
 			}
-			if err := WithSavedAuths(ctx, transferProvider, func(map[string]json.RawMessage) error {
+			if err := WithSavedAuths(ctx, transferProvider, func(map[string]extension.SavedSignInRecord) error {
 				return errors.New("transfer entered publication while a legacy vendor operation was in flight")
 			}); !errors.Is(err, errCommunitySubscriptionBusy) {
 				t.Errorf("cutover did not refuse the in-flight operation: %v", err)
@@ -262,7 +263,7 @@ func TestCommunityUseBlocksTransferThroughVendorWrite(t *testing.T) {
 			} else {
 				releaseSecondCall()
 			}
-			if err := WithSavedAuths(ctx, "neighbor", func(records map[string]json.RawMessage) error {
+			if err := WithSavedAuths(ctx, "neighbor", func(records map[string]extension.SavedSignInRecord) error {
 				if len(records) != 1 {
 					return errors.New("neighbor sign-ins were not available")
 				}
@@ -278,8 +279,8 @@ func TestCommunityUseBlocksTransferThroughVendorWrite(t *testing.T) {
 				finished = nil
 			}
 			for {
-				err := WithSavedAuths(ctx, transferProvider, func(records map[string]json.RawMessage) error {
-					if !bytes.Contains(records[transferProvider], []byte(`"after-renewal"`)) {
+				err := WithSavedAuths(ctx, transferProvider, func(records map[string]extension.SavedSignInRecord) error {
+					if !bytes.Contains(records[transferProvider].Credentials, []byte(`"after-renewal"`)) {
 						return errors.New("transfer observed a spent refresh token after the operation finished")
 					}
 					writeCommunityOwnership(t, true, false)

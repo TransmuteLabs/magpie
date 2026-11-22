@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/extension"
 )
 
 func TestAuthLockWaitDoesNotFreezeTheHost(t *testing.T) {
@@ -137,7 +139,7 @@ func TestSavedAuthLockOwner(t *testing.T) {
 	if os.Getenv("MAGPIE_TEST_SAVED_AUTH_OWNER") != "1" {
 		return
 	}
-	err := WithSavedAuth(t.Context(), "renewco", "renewco", func(json.RawMessage) error {
+	err := WithSavedAuth(t.Context(), "renewco", "renewco", func(extension.SavedSignInRecord) error {
 		fmt.Println("holding saved auth")
 		_, err := io.Copy(io.Discard, os.Stdin)
 		return err

@@ -45,7 +45,12 @@ func admitSavedSignInStart(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-type SavedSignInSource func(ctx context.Context, provider, key string, use func(json.RawMessage) error) error
+type SavedSignInRecord struct {
+	Raw         json.RawMessage
+	Credentials json.RawMessage
+}
+
+type SavedSignInSource func(ctx context.Context, provider, key string, use func(SavedSignInRecord) error) error
 
 func CheckSavedSignInDiscovery(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -110,13 +115,16 @@ func (m *Manager) PrepareSavedSignIn(ctx context.Context, module, provider, key 
 	}
 	var input json.RawMessage
 	var digest string
-	if err := source(ctx, provider, key, func(record json.RawMessage) error {
-		if !utf8.Valid(record) {
+	if err := source(ctx, provider, key, func(record SavedSignInRecord) error {
+		if !utf8.Valid(record.Raw) || !utf8.Valid(record.Credentials) {
 			return errors.New("the selected saved plugin sign-in contains invalid UTF-8")
 		}
-		digest = savedSignInDigest(record)
+		digest = savedSignInDigest(record.Raw)
+		if digest == "" {
+			return errors.New("the selected saved plugin sign-in is invalid")
+		}
 		var err error
-		input, err = json.Marshal(map[string]string{"record": string(record)})
+		input, err = json.Marshal(map[string]string{"record": string(record.Credentials)})
 		return err
 	}); err != nil {
 		return PreparedSignIn{}, err
@@ -145,7 +153,7 @@ func (m *Manager) PrepareSavedSignIn(ctx context.Context, module, provider, key 
 		Deadline: time.Now().Add(10 * time.Minute).UnixMilli(), Result: result,
 	}
 	err = m.withWindowAuthAuthority(ctx, authority, func() error {
-		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
+		publish := func(private *os.Root) error {
 			tickets, err := storeDirectory(private, savedSignInsDir)
 			if err != nil {
 				return err
@@ -197,14 +205,15 @@ func (m *Manager) PrepareSavedSignIn(ctx context.Context, module, provider, key 
 			if len(saved) >= savedSignInLimit {
 				return errors.New("saved sign-in preparation capacity is occupied")
 			}
-			return candidate.withSource(ctx, source, func() error {
-				if candidate.expired(time.Now().UnixMilli()) {
-					return errors.New("the verified saved sign-in has expired")
-				}
-				_, err := storePublishChecked(ctx, tickets, savedSignInsFile, append(saved, candidate), storeFileLimit,
-					func() error { return CheckSavedSignInDiscovery(ctx) })
-				return err
-			})
+			if candidate.expired(time.Now().UnixMilli()) {
+				return errors.New("the verified saved sign-in has expired")
+			}
+			_, err = storePublishChecked(ctx, tickets, savedSignInsFile, append(saved, candidate), storeFileLimit,
+				func() error { return CheckSavedSignInDiscovery(ctx) })
+			return err
+		}
+		return candidate.withSource(ctx, source, func() error {
+			return m.store.withPrivateStore(ctx, publish)
 		})
 	})
 	if err != nil {
@@ -255,41 +264,33 @@ func (m *Manager) ActivateSavedSignIn(ctx context.Context, module, provider, tic
 	}
 	var summary sdk.AccountSummary
 	err = m.withWindowAuthAuthority(ctx, savedSignInAuthority(target, entry, config), func() error {
-		return m.store.withPrivateStore(ctx, func(private *os.Root) error {
-			tickets, err := storeDirectory(private, savedSignInsDir)
-			if err != nil {
-				return err
-			}
-			defer tickets.Close()
-			owners, err := readSubscriptionRecords(tickets)
-			if err != nil {
-				return err
-			}
-			if slices.ContainsFunc(owners, func(r subscriptionRecord) bool { return r.Module == module && r.Provider == provider }) {
-				return errors.New("this SDK provider is reserved for a whole-subscription transition")
-			}
-			saved, err := readSavedSignIns(tickets)
-			if err != nil {
-				return err
-			}
-			now := time.Now().UnixMilli()
-			saved = slices.DeleteFunc(saved, func(candidate savedSignIn) bool { return candidate.expired(now) })
-			index := slices.IndexFunc(saved, func(candidate savedSignIn) bool {
-				return candidate.Module == module && candidate.Provider == provider && candidate.Ticket == ticket
-			})
-			if index < 0 {
-				return errors.New("prepared sign-in is unavailable or expired")
-			}
-			candidate := saved[index]
-			if candidate.Revision != target.Revision {
-				return errors.New("prepared sign-in's package selection changed")
-			}
-			root, err := storeDirectory(private, module)
-			if err != nil {
-				return err
-			}
-			defer root.Close()
-			return candidate.withSource(ctx, source, func() error {
+		var selected savedSignIn
+		if err := m.store.withReadStoreContext(ctx, savedSignInsDir, func(tickets *os.Root) error {
+			var err error
+			selected, err = activatableSavedSignIn(tickets, target, ticket)
+			return err
+		}); err != nil {
+			return err
+		}
+		return selected.withSource(ctx, source, func() error {
+			return m.store.withPrivateStore(ctx, func(private *os.Root) error {
+				tickets, err := storeDirectory(private, savedSignInsDir)
+				if err != nil {
+					return err
+				}
+				defer tickets.Close()
+				candidate, err := activatableSavedSignIn(tickets, target, ticket)
+				if err != nil {
+					return err
+				}
+				if candidate.Key != selected.Key || candidate.Digest != selected.Digest {
+					return errors.New("the selected saved plugin sign-in changed")
+				}
+				root, err := storeDirectory(private, module)
+				if err != nil {
+					return err
+				}
+				defer root.Close()
 				if candidate.expired(time.Now().UnixMilli()) {
 					return errors.New("prepared sign-in expired before activation")
 				}
@@ -322,9 +323,39 @@ func (m *Manager) ActivateSavedSignIn(ctx context.Context, module, provider, tic
 	return summary, err
 }
 
+func activatableSavedSignIn(tickets *os.Root, target ProviderSignIn, ticket string) (savedSignIn, error) {
+	unavailable := errors.New("prepared sign-in is unavailable or expired")
+	if tickets == nil {
+		return savedSignIn{}, unavailable
+	}
+	owners, err := readSubscriptionRecords(tickets)
+	if err != nil {
+		return savedSignIn{}, err
+	}
+	if slices.ContainsFunc(owners, func(r subscriptionRecord) bool { return r.Module == target.Module && r.Provider == target.Provider }) {
+		return savedSignIn{}, errors.New("this SDK provider is reserved for a whole-subscription transition")
+	}
+	saved, err := readSavedSignIns(tickets)
+	if err != nil {
+		return savedSignIn{}, err
+	}
+	now := time.Now().UnixMilli()
+	index := slices.IndexFunc(saved, func(candidate savedSignIn) bool {
+		return candidate.Module == target.Module && candidate.Provider == target.Provider && candidate.Ticket == ticket && !candidate.expired(now)
+	})
+	if index < 0 {
+		return savedSignIn{}, unavailable
+	}
+	candidate := saved[index]
+	if candidate.Revision != target.Revision {
+		return savedSignIn{}, errors.New("prepared sign-in's package selection changed")
+	}
+	return candidate, nil
+}
+
 func (candidate savedSignIn) withSource(ctx context.Context, source SavedSignInSource, use func() error) error {
-	return source(ctx, candidate.Provider, candidate.Key, func(record json.RawMessage) error {
-		if savedSignInDigest(record) != candidate.Digest {
+	return source(ctx, candidate.Provider, candidate.Key, func(record SavedSignInRecord) error {
+		if savedSignInDigest(record.Raw) != candidate.Digest {
 			return errors.New("the selected saved plugin sign-in changed")
 		}
 		return use()
@@ -332,7 +363,15 @@ func (candidate savedSignIn) withSource(ctx context.Context, source SavedSignInS
 }
 
 func savedSignInDigest(record json.RawMessage) string {
-	digest := sha256.Sum256(record)
+	record = bytes.TrimSpace(record)
+	if len(record) == 0 || record[0] != '{' || !utf8.Valid(record) {
+		return ""
+	}
+	stable, err := json.Marshal(record)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(stable)
 	return hex.EncodeToString(digest[:])
 }
 

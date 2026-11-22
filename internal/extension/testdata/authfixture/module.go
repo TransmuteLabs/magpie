@@ -103,11 +103,11 @@ func Module() sdk.Module {
 						return nil, errors.New("expected the selected synthetic saved sign-in")
 					}
 					continuation := `{"private":"PRIVATE-IMPORT"}`
-					switch input.Record {
-					case `{"type":"api","key":"PRIVATE-SAVED"}`:
-					case `{"type":"api","key":"PRIVATE-ROTATED-SAVED"}`:
+					switch savedFixtureKey(input.Record) {
+					case "PRIVATE-SAVED":
+					case "PRIVATE-ROTATED-SAVED":
 						continuation = `{"private":"PRIVATE-IMPORT-ROTATED"}`
-					case `{"type":"api","key":"PRIVATE-OTHER"}`:
+					case "PRIVATE-OTHER":
 						continuation = `{"private":"PRIVATE-IMPORT-OTHER"}`
 					default:
 						return nil, errors.New("expected the selected synthetic saved sign-in")
@@ -144,17 +144,17 @@ func Module() sdk.Module {
 				result := sdk.AuthResult{ID: "chosen", Name: "reader@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-CREDENTIAL"}`)}
 				switch string(request.Continuation) {
 				case `{"private":"PRIVATE-IMPORT"}`, `{"private":"PRIVATE-IMPORT-OTHER"}`, `{"private":"PRIVATE-IMPORT-ROTATED"}`:
-					record := `{"type":"api","key":"PRIVATE-SAVED"}`
+					key := "PRIVATE-SAVED"
 					if string(request.Continuation) == `{"private":"PRIVATE-IMPORT-OTHER"}` {
-						record = `{"type":"api","key":"PRIVATE-OTHER"}`
+						key = "PRIVATE-OTHER"
 						result = sdk.AuthResult{ID: "other", Name: "other@example.test", Credentials: json.RawMessage(`{"token":"PRIVATE-OTHER"}`)}
 					} else if string(request.Continuation) == `{"private":"PRIVATE-IMPORT-ROTATED"}` {
-						record = `{"type":"api","key":"PRIVATE-ROTATED-SAVED"}`
+						key = "PRIVATE-ROTATED-SAVED"
 						result.Credentials = json.RawMessage(`{"token":"PRIVATE-ROTATED"}`)
 					}
 					var state sdk.StateValue
 					if err := stream.HostCall(ctx, sdk.MethodStateGet, sdk.StateGetRequest{Key: "fixture.saved-sign-in"}, &state); err != nil ||
-						!state.Found || state.Version != "1" || string(state.Value) != record {
+						!state.Found || state.Version != "1" || savedFixtureKey(string(state.Value)) != key {
 						return nil, errors.New("finish lost temporary sign-in state")
 					}
 				case `{"private":"PRIVATE-CONTINUATION"}`:
@@ -264,6 +264,14 @@ func Module() sdk.Module {
 		}
 	}
 	return module
+}
+
+func savedFixtureKey(raw string) string {
+	var record map[string]string
+	if json.Unmarshal([]byte(raw), &record) != nil || len(record) != 2 || record["type"] != "api" {
+		return ""
+	}
+	return record["key"]
 }
 
 func Manifest() sdk.Manifest {

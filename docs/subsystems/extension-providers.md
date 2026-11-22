@@ -101,10 +101,14 @@ minutes or at the imported credential's earlier expiry. Access to the ticket sto
 maintenance, including startup, remove expired copies. `magpie plugin sdk
 auth activate <module> <provider> <ticket>` rechecks the package, module
 configuration, enablement and account generation. Both preparation and
-activation check the exact bytes of the current source record under the
-community store's writer lock immediately before their local writes.
-Malformed UTF-8 is refused before verification. A changed, unavailable
-or occupied source refuses the operation. Activation preserves the existing
+activation check the current source record under the community store's
+writer lock immediately before their local writes. The digest uses compact
+JSON with consistent HTML escaping, so rewriting the source file can keep
+its tickets valid. It includes the community sign-in epoch, so signing in
+again with the same key invalidates an earlier ticket. The SDK verifier
+receives the credential record with the epoch removed. Malformed UTF-8 is
+refused before decoding the source. A changed, unavailable or occupied
+source refuses the operation. Activation preserves the existing
 account store schema and the legacy sign-in for rollback. If the publication
 is visible but disk finalization fails, the command returns the active
 account summary with a warning. Rechecking the same ticket can complete

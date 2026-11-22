@@ -106,7 +106,7 @@ func ActivateSavedPluginAuth(ctx context.Context, host *extensionhost.Manager, m
 		return sdk.AccountSummary{}, err
 	}
 	account, err := host.ActivateSavedSignIn(ctx, module, providerID, ticket,
-		func(ctx context.Context, providerID, key string, use func(json.RawMessage) error) error {
+		func(ctx context.Context, providerID, key string, use func(extensionhost.SavedSignInRecord) error) error {
 			check := func() error { return extensionhost.CheckSavedSignInDiscovery(ctx) }
 			return plugin.WithInstalledPlugins(ctx, check, func(installed []plugin.Entry) error {
 				if err := allowSavedPluginActivation(providerID, installed); err != nil {
@@ -140,7 +140,7 @@ func allowSavedPluginActivation(providerID string, installed []plugin.Entry) err
 
 var errSavedSignInNeedsOwnerTransfer = errors.New("this sign-in requires a subscription owner transfer to preserve routing and access rules")
 
-func currentSavedPluginAuth(ctx context.Context, providerID, account string, use func(json.RawMessage) error) error {
+func currentSavedPluginAuth(ctx context.Context, providerID, account string, use func(extensionhost.SavedSignInRecord) error) error {
 	check := func() error { return extensionhost.CheckSavedSignInDiscovery(ctx) }
 	if err := check(); err != nil {
 		return err
@@ -258,7 +258,7 @@ func savedSubscriptionSource(id string) extensionhost.SavedSubscriptionSource {
 		if err := checkID(); err != nil {
 			return err
 		}
-		return plugin.WithInstalledSavedAuthsChecked(ctx, providerID, source.Spec, check, func(records map[string]json.RawMessage) error {
+		return plugin.WithInstalledSavedAuthsChecked(ctx, providerID, source.Spec, check, func(records map[string]extensionhost.SavedSignInRecord) error {
 			current, err := communitySubscription(providerID)
 			if err != nil {
 				return err
@@ -272,6 +272,7 @@ func savedSubscriptionSource(id string) extensionhost.SavedSubscriptionSource {
 			}
 			keys := slices.Sorted(maps.Keys(records))
 			accounts := make([]extensionhost.SubscriptionAccount, 0, len(keys))
+			raw := make(map[string]json.RawMessage, len(keys))
 			for _, key := range keys {
 				var user string
 				for _, login := range logins {
@@ -294,6 +295,7 @@ func savedSubscriptionSource(id string) extensionhost.SavedSubscriptionSource {
 					}
 				}
 				accounts = append(accounts, extensionhost.SubscriptionAccount{Key: key, User: user, LoginID: loginID(public)})
+				raw[key] = records[key].Raw
 			}
 			if err := check(); err != nil {
 				return err
@@ -301,7 +303,7 @@ func savedSubscriptionSource(id string) extensionhost.SavedSubscriptionSource {
 			if err := checkID(); err != nil {
 				return err
 			}
-			return use(records, accounts, checkID)
+			return use(raw, accounts, checkID)
 		})
 	}
 }

@@ -32,6 +32,30 @@ func withTestSavedSignIns(store *Store, ctx context.Context, action func(*os.Roo
 	})
 }
 
+func TestSavedSignInDigestIgnoresSourceReformatting(t *testing.T) {
+	original := json.RawMessage(`{"key":"a<b","_magpieAuthEpoch":"first","extra":{"active":true}}`)
+	rewritten, err := json.MarshalIndent(map[string]json.RawMessage{"vendor": original}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records map[string]json.RawMessage
+	if err := json.Unmarshal(rewritten, &records); err != nil {
+		t.Fatal(err)
+	}
+	digest := savedSignInDigest(original)
+	if digest == "" || savedSignInDigest(records["vendor"]) != digest {
+		t.Fatal("the unchanged sign-in no longer matches after a source-file rewrite")
+	}
+	for _, replacement := range []json.RawMessage{
+		json.RawMessage(`{"key":"a<b","_magpieAuthEpoch":"second","extra":{"active":true}}`),
+		json.RawMessage(`{"key":"a<b","_magpieAuthEpoch":"first","extra":{"active":false}}`),
+	} {
+		if savedSignInDigest(replacement) == digest {
+			t.Fatal("a changed sign-in still matches")
+		}
+	}
+}
+
 func TestPreparedSignInLeavesAccountStampUnchanged(t *testing.T) {
 	path := t.TempDir()
 	store := NewStore(path)
