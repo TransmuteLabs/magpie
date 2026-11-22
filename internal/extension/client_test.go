@@ -153,6 +153,18 @@ func helperModule() sdk.Module {
 			if err := stream.Emit(ctx, "headers", sdk.HeadersEvent{Status: 200, Headers: http.Header{"Content-Type": {"application/json"}}}); err != nil {
 				return nil, err
 			}
+			if count, measured := strings.CutPrefix(request.Model, "fixture-stream-"); measured {
+				chunks, err := strconv.Atoi(count)
+				if err != nil || chunks < 0 || chunks > 500 {
+					return nil, errors.New("bad fixture chunk count")
+				}
+				for index := range chunks {
+					if err := stream.Emit(ctx, "data", []byte(strconv.Itoa(index))); err != nil {
+						return nil, err
+					}
+				}
+				return sdk.ExecuteResult{Outcome: "completed"}, nil
+			}
 			answer := []byte(`{"id":"fixture","choices":[{"message":{"role":"assistant","content":"hello from worker"},"finish_reason":"stop"}]}`)
 			if err := stream.Emit(ctx, "data", answer); err != nil {
 				return nil, err
