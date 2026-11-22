@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/sessions"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -143,6 +145,154 @@ func TestClaudeDesktopRestartAfterAppliedProfileChange(t *testing.T) {
 	if !slices.Equal(events, []string{"quit " + bundle, "open " + bundle}) || row.AppBehind() != nil {
 		t.Fatalf("restart did not clear drift for %s: %q", bundle, events)
 	}
+}
+
+func TestClaudeDesktopConnectRestartDisconnectKeepsProfileAndHistory(t *testing.T) {
+	home := restartSandbox(t)
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3425")
+	claude := filepath.Join(home, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	wasOS := desktopdir.OS
+	desktopdir.OS = "darwin"
+	t.Cleanup(func() { desktopdir.OS = wasOS })
+	t.Cleanup(sessions.Reset)
+
+	apps := filepath.Join(home, "Applications")
+	bundle := macApp(t, apps, "Claude.app", claudeDesktopApp.id, "Claude")
+	restartOnMac = true
+	appFolders = func() []string { return []string{apps} }
+	alive, up := true, time.Hour
+	binary := filepath.Join(bundle, "Contents", "MacOS", "Claude")
+	running = func(pattern string) []runningProc {
+		if alive && regexp.MustCompile(pattern).MatchString(binary) {
+			return []runningProc{{up: up, cmd: binary}}
+		}
+		return nil
+	}
+	var events []string
+	appQuit = func(_ context.Context, path string) error {
+		events = append(events, "quit "+path)
+		alive = false
+		return nil
+	}
+	appOpen = func(_ context.Context, path string) error {
+		events = append(events, "open "+path)
+		alive, up = true, 0
+		return nil
+	}
+
+	paths := desktopSets(desktopdir.OS, home, os.Getenv)[0]
+	const ownID = "11111111-2222-4333-8444-555555555555"
+	own := filepath.Join(paths.library, ownID+".json")
+	const initialProfile = "{\n  \"inferenceProvider\": \"bedrock\",\n  \"toolSearchEnabled\": false\n}\n"
+	const editedProfile = "{\n  \"inferenceProvider\": \"bedrock\",\n  \"toolSearchEnabled\": true\n}\n"
+	desktopWrite(t, own, initialProfile)
+	desktopWrite(t, paths.config, `{"deploymentMode":"1p","globalShortcut":"Alt+Space"}`)
+	desktopWrite(t, paths.config3p, `{"preferences":{"theme":"dark"}}`)
+	desktopWrite(t, paths.meta, `{"appliedId":"`+ownID+`","entries":[{"id":"`+ownID+`","name":"Existing"}]}`)
+
+	const sessionID = "22222222-3333-4444-8555-666666666666"
+	const title = "Old Desktop session"
+	const prompt = "Text from before Connect"
+	const answer = "Answer from before Connect"
+	const metadataJSON = `{"sessionId":"local_old","cliSessionId":"` + sessionID + `","title":"` + title + `"}`
+	const transcriptJSON = `{"type":"user","uuid":"user","timestamp":"2026-11-01T12:00:00.000Z","cwd":"/work/app","sessionId":"` + sessionID + `","entrypoint":"claude-desktop","message":{"role":"user","content":"` + prompt + `"}}` + "\n" +
+		`{"type":"assistant","uuid":"reply","parentUuid":"user","timestamp":"2026-11-01T12:00:01.000Z","cwd":"/work/app","sessionId":"` + sessionID + `","entrypoint":"claude-desktop","message":{"id":"msg_old","role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"` + answer + `"}],"usage":{"input_tokens":7,"output_tokens":4}}}` + "\n"
+	metadata := filepath.Join(paths.dir, "claude-code-sessions", "account", "org", "local_old.json")
+	transcript := filepath.Join(claude, "projects", "-work-app", sessionID+".jsonl")
+	desktopWrite(t, metadata, metadataJSON)
+	desktopWrite(t, transcript, transcriptJSON)
+	checkBytes := func(stage, path, want string) {
+		t.Helper()
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Fatalf("%s: %s = %q, %v, want %q", stage, path, got, err, want)
+		}
+	}
+	checkHistory := func(stage string) {
+		t.Helper()
+		checkBytes(stage, metadata, metadataJSON)
+		checkBytes(stage, transcript, transcriptJSON)
+		sessions.Reset()
+		if got := sessions.DesktopTitles([]string{sessionID})[sessionID]; got != title {
+			t.Fatalf("%s: Desktop title = %q, want %q", stage, got, title)
+		}
+		old, ok := sessions.Find("claude", sessionID)
+		if !ok || old.App != "claude-desktop" || old.Path != transcript {
+			t.Fatalf("%s: old Desktop session = %+v, found %v", stage, old, ok)
+		}
+		history, err := sessions.TranscriptOf(old)
+		var spoken []string
+		for _, part := range history.Parts {
+			spoken = append(spoken, part.Text)
+		}
+		if err != nil || !slices.Equal(spoken, []string{prompt, answer}) {
+			t.Fatalf("%s: old transcript = %q, %v", stage, spoken, err)
+		}
+	}
+
+	checkHistory("before Connect")
+	row := claudeDesktop(home)
+	if !row.Detected() || row.Wired() || row.AppBehind() != nil {
+		t.Fatal("expected an unwired Desktop without a restart offer")
+	}
+	how, err := row.ConnectHow()
+	if err != nil || how != (Connection{How: "magpie", Field: "provider", Value: "magpie"}) ||
+		!row.Wired() || row.Check() != "" || row.AppBehind() == nil {
+		t.Fatalf("Connect = %+v, %v, wired %v, check %q, restart %v", how, err, row.Wired(), row.Check(), row.AppBehind())
+	}
+	profile := desktopJSON(t, paths.prof)
+	if desktopJSON(t, paths.meta)["appliedId"] != desktopProfileID ||
+		desktopJSON(t, paths.config3p)["deploymentMode"] != "3p" ||
+		profile["inferenceProvider"] != "gateway" || profile["inferenceGatewayBaseUrl"] != "http://127.0.0.1:3425" ||
+		profile["inferenceGatewayApiKey"] != gateway.TokenFor("claude-desktop") || profile["inferenceGatewayAuthScheme"] != "bearer" {
+		t.Fatalf("Connect did not select the Desktop gateway profile: %v", profile)
+	}
+	checkBytes("after Connect", own, initialProfile)
+	checkHistory("after Connect")
+
+	desktopWrite(t, own, editedProfile)
+	if err := edit.SetJSON(paths.config, edit.KV{Path: "globalShortcut", Value: "Ctrl+Space"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetJSON(paths.config3p, edit.KV{Path: "preferences", Value: map[string]string{"theme": "light"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetJSON(paths.meta, edit.KV{Path: "userSetting", Value: "after Connect"}); err != nil {
+		t.Fatal(err)
+	}
+	beforeRestart := desktopTree(t, paths)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := row.RestartApp(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(events, []string{"quit " + bundle, "open " + bundle}) || row.AppBehind() != nil ||
+		!maps.Equal(desktopTree(t, paths), beforeRestart) {
+		t.Fatalf("Restart did not reopen only the fixture bundle with the same files: %q", events)
+	}
+	checkHistory("after Restart")
+
+	if err := row.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	if row.Wired() || !row.Disconnected() {
+		t.Fatal("Desktop is still wired after Disconnect")
+	}
+	if _, err := os.Stat(paths.prof); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Magpie profile after Disconnect: %v", err)
+	}
+	for path, want := range map[string]map[string]any{
+		paths.config:   {"deploymentMode": "1p", "globalShortcut": "Ctrl+Space"},
+		paths.config3p: {"preferences": map[string]any{"theme": "light"}},
+		paths.meta: {"appliedId": ownID, "entries": []any{map[string]any{"id": ownID, "name": "Existing"}},
+			"userSetting": "after Connect"},
+	} {
+		if got := desktopJSON(t, path); !reflect.DeepEqual(got, want) {
+			t.Errorf("after Disconnect, %s = %v, want %v", path, got, want)
+		}
+	}
+	checkBytes("after Disconnect", own, editedProfile)
+	checkHistory("after Disconnect")
 }
 
 func TestClaudeDesktopSettingsRollback(t *testing.T) {

@@ -304,6 +304,37 @@ func TestDesktopSubagentTurnLeavesTitleOnLead(t *testing.T) {
 	}
 }
 
+func TestDesktopCodeTurnAttribution(t *testing.T) {
+	for _, agent := range []string{"claude-desktop", "claude"} {
+		t.Run(agent, func(t *testing.T) {
+			upstream := desktopSubagentSetup(t)
+			server := New()
+			const session = "33333333-4444-4555-8666-777777777777"
+			req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(
+				`{"model":"fake/m1","max_tokens":8000,"messages":[{"role":"user","content":"R05 attribution fixture"}],"tools":[{"name":"Bash","input_schema":{"type":"object"}}]}`))
+			req.Header.Set("Authorization", "Bearer "+TokenFor(agent))
+			req.Header.Set("User-Agent", desktopCodeUA)
+			req.Header.Set("x-claude-code-session-id", session)
+			rec := httptest.NewRecorder()
+			server.Handler().ServeHTTP(rec, req)
+			if rec.Code != 200 || !strings.Contains(rec.Body.String(), "on it") {
+				t.Fatalf("Code turn = %d %s", rec.Code, rec.Body.String())
+			}
+			if model, path := upstream.seen(); model != "m1" || path != "/v1/messages" {
+				t.Fatalf("upstream = %q %q", model, path)
+			}
+			route := lastRoute(server)
+			if route.Agent != agent || route.Session != session || route.Provider != "fake" || !route.Done || route.Status != 200 {
+				t.Fatalf("Code turn route = %+v", route)
+			}
+			if record := lastUsage(t); record.Agent != agent || record.RouteID != route.ID || record.Session != session ||
+				record.Provider != "fake" || record.Input != 7 || record.Output != 1 {
+				t.Fatalf("Code turn usage = %+v, route %d", record, route.ID)
+			}
+		})
+	}
+}
+
 // Claude Code 2.1.321 sends WebSearch as a request of its own, with
 // thinking off and the server search tool forced by name.
 const desktopWebSearchBody = `{"model":"fake/m1","max_tokens":16000,"thinking":{"type":"disabled"},"system":"You run a web search for another Claude model","tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"},"messages":[{"role":"user","content":"Search for Go release notes"}]}`
