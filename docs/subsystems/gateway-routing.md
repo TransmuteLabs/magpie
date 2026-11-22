@@ -130,6 +130,10 @@ plain-body transport outside this executor.
 
 ## Codex titles, descriptions, summaries and predictions
 
+The Codex relay and Responses API each share one call-kind classification
+across the side-turn selectors. Both use session metadata from the body or
+its header fallback. Explicit subagent and memory headers take priority.
+
 Codex's title and description requests are independent hidden turns. The
 settings `CodexTitles` and `CodexDescriptions` select their models separately;
 an empty setting preserves the requested model. On a Magpie model, both

@@ -27,8 +27,8 @@ import (
 // a title on one of magpie's models goes through codexTitle whoever picked
 // it (#743: Codex as magpie's provider had none at all, the model's plain
 // answer turned down).
-func codexTitlesTo(h http.Header, body []byte, ours bool, session func() string) string {
-	if !isTitleKind(requestCallKind(h, requestSessionMetadata(h, body))) {
+func codexTitlesTo(kind string, body []byte, ours bool, session func() string) string {
+	if !isTitleKind(kind) {
 		return ""
 	}
 	if to := settings.Shared().CodexTitles; to != "" {
@@ -84,8 +84,8 @@ func codexSideTo(body []byte, ours bool, session func() string) string {
 // description goes. "" leaves the request as Codex sent it; "off" answers
 // it with no description, sent nowhere; a model's id writes it. A description is not a title: Codex asks for {"description"}
 // alone, which the title wrapper cannot answer.
-func codexDescriptionsTo(h http.Header, body []byte, ours bool, session func() string) string {
-	if !isDescriptionKind(requestCallKind(h, requestSessionMetadata(h, body))) {
+func codexDescriptionsTo(kind string, body []byte, ours bool, session func() string) string {
+	if !isDescriptionKind(kind) {
 		return ""
 	}
 	if to := settings.Shared().CodexDescriptions; to != "" {
@@ -101,8 +101,8 @@ func codexDescriptionsTo(h http.Header, body []byte, ours bool, session func() s
 // of a thread): the model codexSideTo names, its answer handed back as the
 // {"summary": …} the request's schema asks for; "" leaves it as Codex sent
 // it.
-func codexSummariesTo(h http.Header, body []byte, ours bool, session func() string) string {
-	if !isSummaryKind(requestCallKind(h, requestSessionMetadata(h, body))) {
+func codexSummariesTo(kind string, body []byte, ours bool, session func() string) string {
+	if !isSummaryKind(kind) {
 		return ""
 	}
 	return codexSideTo(body, ours, session)
@@ -116,8 +116,8 @@ func codexSummariesTo(h http.Header, body []byte, ours bool, session func() stri
 // the app turns down, so on one of magpie's models the answer is handed
 // back in the schema's shape (codexCommit). "" leaves the request as Codex
 // sent it.
-func codexCommitsTo(h http.Header, body []byte, ours bool, session func() string) string {
-	if !isCommitKind(requestCallKind(h, requestSessionMetadata(h, body))) {
+func codexCommitsTo(kind string, body []byte, ours bool, session func() string) string {
+	if !isCommitKind(kind) {
 		return ""
 	}
 	return codexSideTo(body, ours, session)
@@ -258,8 +258,8 @@ func commitJSON(said string, shape titleShape) string {
 // Codex asked for when it is one of magpie's, else the session's
 // (codexSideTo), whose plain answer is wrapped as titles' and
 // descriptions' are.
-func codexPredictionsTo(h http.Header, body []byte, ours bool, session func() string) string {
-	if !isPredictionKind(requestCallKind(h, requestSessionMetadata(h, body))) {
+func codexPredictionsTo(kind string, body []byte, ours bool, session func() string) string {
+	if !isPredictionKind(kind) {
 		return ""
 	}
 	if to := settings.Shared().CodexPredictions; to != "" {
