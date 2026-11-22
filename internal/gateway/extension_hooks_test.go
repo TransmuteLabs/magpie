@@ -53,7 +53,7 @@ func installSDKGatewayHook(t *testing.T, config sdkHookConfig, descriptor sdk.Ga
 	return manager
 }
 
-func installSDKGatewayHookOn(t *testing.T, manager *extension.Manager, config sdkHookConfig, descriptor sdk.GatewayHookDescriptor) {
+func installSDKGatewayHookOn(t testing.TB, manager *extension.Manager, config sdkHookConfig, descriptor sdk.GatewayHookDescriptor) {
 	t.Helper()
 	// A successful SDK-only request with this path cannot have loaded Bun.
 	t.Setenv("MAGPIE_BUN", filepath.Join(t.TempDir(), "no-bun"))
@@ -193,7 +193,7 @@ func TestSDKRequestOnlyHookDoesNotCaptureResponse(t *testing.T) {
 	}
 }
 
-func closeSDKGatewayHook(t *testing.T, manager *extension.Manager) {
+func closeSDKGatewayHook(t testing.TB, manager *extension.Manager) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -301,6 +301,16 @@ func (run *GatewayRun) ObservesResponse() bool {
 }
 
 func (run *GatewayRun) Finish(_ context.Context, reply json.RawMessage, success bool, request ...json.RawMessage) {
+	run.finishResponse(reply, success, false, request)
+}
+
+// FinishOwnedReply takes exclusive ownership of reply. The caller must give
+// up access to its buffer. The optional request remains borrowed.
+func (run *GatewayRun) FinishOwnedReply(_ context.Context, reply json.RawMessage, success bool, request ...json.RawMessage) {
+	run.finishResponse(reply, success, true, request)
+}
+
+func (run *GatewayRun) finishResponse(reply json.RawMessage, success, ownsReply bool, request []json.RawMessage) {
 	if run == nil {
 		return
 	}
@@ -325,7 +335,9 @@ func (run *GatewayRun) Finish(_ context.Context, reply json.RawMessage, success 
 	if len(reply) > 8<<20 || !json.Valid(reply) {
 		reply, success = json.RawMessage("null"), false
 	}
-	reply = bytes.Clone(reply)
+	if !ownsReply {
+		reply = bytes.Clone(reply)
+	}
 	go func() {
 		defer run.release()
 		whole, cancelWhole := context.WithTimeout(run.ctx, gatewayCaptureBudget(calls)+time.Second)

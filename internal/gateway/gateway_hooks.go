@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -31,6 +32,10 @@ func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Prot
 		var response obj
 		json.Unmarshal(reply, &response)
 		success := err == nil && (len(response["error"]) == 0 || string(response["error"]) == "null") && str(response, "status") != "failed" && str(response, "status") != "incomplete"
+		if sdkRun, ok := run.(*extension.GatewayRun); ok {
+			sdkRun.FinishOwnedReply(r.Context(), reply, success, body)
+			return
+		}
 		run.Finish(r.Context(), reply, success, body)
 	}
 }
@@ -39,6 +44,7 @@ func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Prot
 // whole body as it is, and a stream read through the protocol's decoder into
 // the reply the gateway would have rendered. A Responses stream's completed
 // response is the reply itself. A stream that never ended is an error.
+// The returned reply owns its buffer.
 func gatewayReply(proto provider.Protocol, body []byte) (json.RawMessage, error) {
 	body = bytes.TrimSpace(body)
 	if json.Valid(body) {

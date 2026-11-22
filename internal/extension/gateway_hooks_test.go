@@ -32,7 +32,7 @@ func gatewayFixtureModule() sdk.Module {
 	if json.Unmarshal(data, &manifest) != nil {
 		panic("invalid gateway fixture manifest")
 	}
-	trace := func(ctx context.Context, call sdk.Call) error {
+	writeTrace := func(ctx context.Context, value any) error {
 		current, ok := sdk.ModuleContextFrom(ctx)
 		if !ok {
 			return errors.New("missing configured gateway instance")
@@ -48,7 +48,10 @@ func gatewayFixtureModule() sdk.Module {
 			return err
 		}
 		defer file.Close()
-		return json.NewEncoder(file).Encode(gatewayFixtureTrace{
+		return json.NewEncoder(file).Encode(value)
+	}
+	trace := func(ctx context.Context, call sdk.Call) error {
+		return writeTrace(ctx, gatewayFixtureTrace{
 			Method: call.Method, Version: manifest.Version, Scope: call.Scope, Auth: call.Auth, Params: call.Params,
 		})
 	}
@@ -119,6 +122,9 @@ func gatewayFixtureModule() sdk.Module {
 			if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
 				return nil, err
 			}
+			if response.Context.Query == p19GatewayFinishQuery {
+				return struct{}{}, writeTrace(ctx, p19GatewayDigest(response, call.Scope.Operation))
+			}
 			if err := trace(ctx, call); err != nil {
 				return nil, err
 			}
@@ -152,10 +158,11 @@ func gatewayFixtureModule() sdk.Module {
 	return sdk.Module{Manifest: manifest, Handlers: handlers}
 }
 
-func gatewayFixturePackage(t *testing.T, version string, hooks sdk.GatewayHookDescriptor) string {
+func gatewayFixturePackage(t testing.TB, version string, hooks sdk.GatewayHookDescriptor) string {
 	t.Helper()
-	directory := fixturePackage(t)
-	data, err := os.ReadFile(filepath.Join(directory, sdk.ManifestFile))
+	directory := fixturePackageAt(t, 1)
+	path := filepath.Join(directory, sdk.ManifestFile)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,11 +180,17 @@ func gatewayFixturePackage(t *testing.T, version string, hooks sdk.GatewayHookDe
 	manifest.Tools = []sdk.ToolDescriptor{{
 		Name: "tool", InputSchema: json.RawMessage(`{"type":"object"}`), Exposure: "local-owner",
 	}}
-	catalogTestWriteManifest(t, directory, manifest)
+	data, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return directory
 }
 
-func gatewayFixtureManager(t *testing.T, hooks sdk.GatewayHookDescriptor) (*Manager, string) {
+func gatewayFixtureManager(t testing.TB, hooks sdk.GatewayHookDescriptor) (*Manager, string) {
 	t.Helper()
 	manager := NewManager(t.TempDir())
 	t.Cleanup(func() {
