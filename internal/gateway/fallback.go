@@ -54,6 +54,7 @@ type candidate struct {
 	model     string
 	rest      string // what rests after a failure: the provider, or one of its keys
 	sentModel string
+	wires     func() map[string]string
 	// effort is the reasoning the group's member it is of is fixed at
 	// ("provider/model:low"); "" for one that follows the agent or the group
 	effort string
@@ -205,6 +206,41 @@ func (c candidate) isOpenRouterFree() bool {
 	return c.p.VendorPreset() == "openrouter" && strings.HasSuffix(c.refusedModel(), ":free")
 }
 
+func (c candidate) openRouterFreeRestID() string {
+	return c.restKey() + "/\x00openrouter-free"
+}
+
+func openRouterFreeTierModel(model string) bool {
+	return model == "openrouter/free" || strings.HasSuffix(model, ":free")
+}
+
+func (c candidate) openRouterFreeLimited(scope openRouterLimitScope, status int) bool {
+	return status == http.StatusTooManyRequests && c.p.Preset == "openrouter" &&
+		scope.freeTier() && openRouterFreeTierModel(c.refusedModel())
+}
+
+func (c candidate) openRouterFreeRest() (Rest, bool) {
+	if c.p.Preset != "openrouter" || c.p.LimitRestOff || c.p.PassesErrors() {
+		return Rest{}, false
+	}
+	r, ok := restOf(c.openRouterFreeRestID())
+	if !ok {
+		return Rest{}, false
+	}
+	model := c.sentModel
+	if model == "" {
+		wires := c.wires
+		if wires == nil {
+			wires = currentWires
+		}
+		model = provider.UpstreamNameIn(wires(), c.p.ID, c.model)
+	}
+	if !openRouterFreeTierModel(model) {
+		return Rest{}, false
+	}
+	return r, true
+}
+
 func (c candidate) refusedModel() string {
 	if c.sentModel != "" {
 		return c.sentModel
@@ -312,7 +348,18 @@ func perKeyOf(p provider.Provider, model string, from provider.Protocol) (out, a
 // serve the model (provider.AccountModels, #474): never tried, whatever
 // else there is — none, when every one of them is.
 func perKeyBarred(p provider.Provider, model string, from provider.Protocol) (out, aside, left, barred []candidate) {
+	return perKeyBarredWithWires(p, model, from, nil)
+}
+
+func perKeyBarredWithWires(p provider.Provider, model string, from provider.Protocol, wires func() map[string]string) (out, aside, left, barred []candidate) {
 	out, aside, left, barred = perKeyEvery(p, model, from)
+	if wires != nil && p.Preset == "openrouter" {
+		for _, candidates := range [][]candidate{out, aside, left, barred} {
+			for index := range candidates {
+				candidates[index].wires = wires
+			}
+		}
+	}
 	out, aside = keepAtOnce(p.AtOnce(), out, aside)
 	return out, aside, left, barred
 }
@@ -549,16 +596,16 @@ func (s *Server) candidates(p provider.Provider, model string, from provider.Pro
 // plan is candidates, and for the routing trace what each stood where it
 // did by, and those left out.
 func (s *Server) plan(p provider.Provider, model string, from provider.Protocol) ([]candidate, planned) {
-	return s.planPaused(p, model, from, nil)
+	return s.planPaused(p, model, from, nil, nil)
 }
 
 // planPaused is plan, a routing group among the fallbacks (01huadalang on
 // Discord) less the models paused leaves out of it: its pause rules, as
 // a request to the group would have them; nil pauses none.
-func (s *Server) planPaused(p provider.Provider, model string, from provider.Protocol, paused func(provider.Group, []provider.Member) []provider.Member) ([]candidate, planned) {
+func (s *Server) planPaused(p provider.Provider, model string, from provider.Protocol, paused func(provider.Group, []provider.Member) []provider.Member, wires func() map[string]string) ([]candidate, planned) {
 	var pl planned
 	add := func(q provider.Provider, m string, fallback bool) []candidate {
-		cs, aside, left, barred := perKeyBarred(q, m, from)
+		cs, aside, left, barred := perKeyBarredWithWires(q, m, from, wires)
 		pl.left = append(pl.left, s.barredOf(barred, q, fallback, from, nil)...)
 		pl.held = append(pl.held, creditsHeld(barred)...)
 		pl.capped = append(pl.capped, capHeldOnly(barred)...)
@@ -606,7 +653,7 @@ func (s *Server) planPaused(p provider.Provider, model string, from provider.Pro
 				seen[k] = true
 				return false
 			})
-			out = append(out, s.planFallbackGroup(g, ms, from, &pl)...)
+			out = append(out, s.planFallbackGroup(g, ms, from, &pl, wires)...)
 			continue
 		}
 		fp, fm, ok := provider.ResolveRoute(id)
@@ -669,14 +716,14 @@ func groupsAfter(p provider.Provider, model string, also ...string) (provider.Pr
 // to, its rows added to pl as fallbacks reached through g: the group's
 // keys and accounts in its own order, sunk by its own Sink, those set
 // aside after them.
-func (s *Server) planFallbackGroup(g provider.Group, ms []provider.Member, from provider.Protocol, pl *planned) []candidate {
+func (s *Server) planFallbackGroup(g provider.Group, ms []provider.Member, from provider.Protocol, pl *planned, wires func() map[string]string) []candidate {
 	if len(ms) == 0 {
 		return nil
 	}
 	at, leftAt, unlistedAt := len(pl.order), len(pl.left), len(pl.unlistedW)
 	var asides []candidate
 	var wAsides []Weighed
-	out := s.planLevel(g, ms, 0, from, pl, &asides, &wAsides, []provider.Group{g})
+	out := s.planLevel(g, ms, 0, from, pl, &asides, &wAsides, []provider.Group{g}, wires)
 	if s.sinks(g.Sinks(), g.Routing) {
 		var order []Weighed
 		out, order = sinkPlanned(out, pl.order[at:])
@@ -708,10 +755,14 @@ func (s *Server) planFallbackGroup(g provider.Group, ms []provider.Member, from 
 // too, within its own order (#2255), before g's Sink orders the whole.
 // A member's fallbacks are not the group's.
 func (s *Server) planGroup(g provider.Group, ms []provider.Member, from provider.Protocol) ([]candidate, planned) {
+	return s.planGroupWithWires(g, ms, from, nil)
+}
+
+func (s *Server) planGroupWithWires(g provider.Group, ms []provider.Member, from provider.Protocol, wires func() map[string]string) ([]candidate, planned) {
 	pl := planned{routing: g.Routing, grouped: true}
 	var asides []candidate
 	var wAsides []Weighed
-	out := s.planLevel(g, ms, 0, from, &pl, &asides, &wAsides, nil)
+	out := s.planLevel(g, ms, 0, from, &pl, &asides, &wAsides, nil, wires)
 	// a member never another's stand-in goes only where the group's
 	// first, or those before it, are so set too
 	var other bool
@@ -770,10 +821,10 @@ func innerPatience(m provider.Member) int {
 // planLevel orders the models ms of g, a group depth groups down from the
 // one asked for, adding to pl's order as it goes: those set aside and
 // those unlisted it gathers for planGroup to put last.
-func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed, hold []provider.Group) []candidate {
+func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, from provider.Protocol, pl *planned, asides *[]candidate, wAsides *[]Weighed, hold []provider.Group, wires func() map[string]string) []candidate {
 	var current accountIDLookup
 	keys := func(m provider.Member) []candidate {
-		cs, aside, left, barred := perKeyBarred(m.Provider, m.Model, from)
+		cs, aside, left, barred := perKeyBarredWithWires(m.Provider, m.Model, from, wires)
 		// a group the member is reached through that is held to some
 		// accounts (Group.Accounts) holds it to them: one it leaves out
 		// is said on the plan's left, held, as a gateway key's are
@@ -861,7 +912,7 @@ func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, fr
 					j++
 				}
 				var sub planned
-				cs := s.planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides, hold)
+				cs := s.planLevel(m.Via[depth], ms[i:j], depth+1, from, &sub, asides, wAsides, hold, wires)
 				cs, sub.order = s.sinkOwn(m.Via[depth], cs, sub.order)
 				pl.left = append(pl.left, sub.left...)
 				pl.capped = append(pl.capped, sub.capped...)
@@ -957,7 +1008,7 @@ func (s *Server) planLevel(g provider.Group, ms []provider.Member, depth int, fr
 				j++
 			}
 			at := len(pl.order)
-			cs := s.planLevel(m.Via[depth], ms[i:j], depth+1, from, pl, asides, wAsides, hold)
+			cs := s.planLevel(m.Via[depth], ms[i:j], depth+1, from, pl, asides, wAsides, hold, wires)
 			var order []Weighed
 			cs, order = s.sinkOwn(m.Via[depth], cs, pl.order[at:])
 			pl.order = append(pl.order[:at], order...)
@@ -995,10 +1046,8 @@ func (s *Server) sinkOwn(sub provider.Group, cs []candidate, order []Weighed) ([
 // a group in a group, or a provider routed its own way, is weighed by.
 func firstAwake(cs []candidate) candidate {
 	for _, c := range cs {
-		if _, resting := restOf(c.restKey()); !resting {
-			if _, resting = restOf(c.restID()); !resting {
-				return c
-			}
+		if _, resting := candidateRest(c); !resting {
+			return c
 		}
 	}
 	return cs[0]
@@ -1430,10 +1479,7 @@ func probeOne(cs []candidate) []candidate {
 	rests := 0
 	rest := make([]bool, len(cs))
 	for i, c := range cs {
-		r, ok := restOf(c.restKey())
-		if !ok && c.restID() != c.restKey() {
-			r, ok = restOf(c.restID())
-		}
+		r, ok := candidateRest(c)
 		if !ok {
 			continue
 		}
@@ -1460,12 +1506,20 @@ func probeOne(cs []candidate) []candidate {
 // group weighs nothing by them, and a reading that finds them full no
 // more is what brings it back (renewed).
 func restingOf(c candidate) (Rest, bool) {
+	r, ok := candidateRest(c)
+	if ok && r.agent == "" && r.user != "" {
+		keyAllowance(c.p)
+	}
+	return r, ok
+}
+
+func candidateRest(c candidate) (Rest, bool) {
 	r, ok := restOf(c.restKey())
 	if !ok && c.restID() != c.restKey() {
 		r, ok = restOf(c.restID())
 	}
-	if ok && r.agent == "" && r.user != "" {
-		keyAllowance(c.p)
+	if free, held := c.openRouterFreeRest(); held && (!ok || !free.Until.Before(r.Until)) {
+		return free, true
 	}
 	return r, ok
 }
@@ -1524,8 +1578,11 @@ func timedHeld(cs []candidate) (Rest, time.Time, bool) {
 	now := time.Now()
 	for i, c := range cs {
 		r, ok := restingOf(c)
-		if !ok || !vendorTimed(c, r) {
-			return Rest{}, time.Time{}, false
+		if !ok || (!r.FreeTier && !vendorTimed(c, r)) {
+			r, ok = c.openRouterFreeRest()
+			if !ok {
+				return Rest{}, time.Time{}, false
+			}
 		}
 		at := r.asksAt(now)
 		if !now.Before(at) {
@@ -1584,10 +1641,7 @@ func soonestBack(cs []candidate) (time.Time, bool) {
 // run out: none of them is likely to answer.
 func spentAfter(cs []candidate) bool {
 	for _, c := range cs {
-		r, ok := restOf(c.restKey())
-		if !ok && c.restID() != c.restKey() {
-			r, ok = restOf(c.restID())
-		}
+		r, ok := candidateRest(c)
 		if !ok || r.Why != failQuota && r.Why != failCredit {
 			return false
 		}
@@ -2632,12 +2686,12 @@ type holdWriter struct {
 	held            bytes.Buffer
 	upstreamFailure failureObservation
 
-	stream     bool      // a stream held until its first content
-	since      time.Time // when it began
-	scanned    int       // how much of held has been read as events
-	failure    int       // the status the stream's error stands for
-	failMsg    string
-	sharedPool bool // an OpenRouter upstream pool rejected this attempt
+	stream          bool      // a stream held until its first content
+	since           time.Time // when it began
+	scanned         int       // how much of held has been read as events
+	failure         int       // the status the stream's error stands for
+	failMsg         string
+	openRouterLimit openRouterLimitScope
 
 	// turnedAway: the account is asked with the system prompt Antigravity
 	// answers with a 429 whatever quota it has left — Claude Code's, its
@@ -4993,10 +5047,7 @@ func pinTo(raw string, cands []candidate, pl planned) ([]candidate, planned, int
 		if i >= len(pl.order) || !match(pl.order[i], &c) {
 			continue
 		}
-		r, ok := restOf(c.restKey())
-		if !ok && c.restID() != c.restKey() {
-			r, ok = restOf(c.restID())
-		}
+		r, ok := candidateRest(c)
 		if ok {
 			rests = append(rests, fmt.Sprintf("%s rests until %s (%s)", c.label(), r.Until.Format(time.RFC3339), r.Why))
 			continue

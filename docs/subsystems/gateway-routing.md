@@ -344,6 +344,20 @@ observers.
 
 ## Constraints and failure behavior
 
+An OpenRouter 429 that identifies the free tier's minute or daily window
+rests the free variants on the selected key. Routing uses the upstream
+model ID, including `openrouter/free`, after model aliases and wire overrides.
+Planning, cooldown checks and dispatch use the same wire overrides for
+the duration of a request. Edits take effect on subsequent requests.
+The vendor's `X-RateLimit-Reset` is a Unix timestamp in milliseconds.
+When the daily refusal gives no retry time, its documented reset is
+midnight UTC.
+Paid models stay eligible and can answer on the same key during the rest.
+An `upstream_provider_shared_pool` refusal keeps its existing model scope.
+Other refusals follow the usual cooldown rules. The Routing trace shows
+the free-tier rest on the affected model rows. Its **Try now** button lifts
+the shared free-tier rest on that key.
+
 When an upstream says its key's group cannot dispatch Messages, the gateway
 uses another available API for a retryable request. It remembers the refusal
 for that upstream key or account at its Messages endpoint across models. The

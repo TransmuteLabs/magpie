@@ -41,7 +41,7 @@ const relay = () => ({
   ],
 });
 
-function serve(lang, lifted) {
+function serve(lang, lifted, shownRoutes = routes) {
   const state = { agents: [{ id: "codex", name: "Codex", path: "/test/config.toml", fields: [] }], profiles: [], settings: { lang, theme: "light" } };
   const providers = { providers: [relay()], presets: [], excluded: [], gateway: { running: true, window: true } };
   return async (route) => {
@@ -57,7 +57,7 @@ function serve(lang, lifted) {
     }
     if (url.pathname === "/api/gateway/history") {
       const d = url.searchParams.get("day");
-      return json({ cut: false, days: [{ day, requests: routes.length }], routes: d ? routes : [] });
+      return json({ cut: false, days: [{ day, requests: shownRoutes.length }], routes: d ? shownRoutes : [] });
     }
     if (url.pathname === "/api/gateway/unrest") {
       lifted.push(JSON.parse(route.request().postData() || "{}"));
@@ -84,6 +84,36 @@ const posted = async (lifted) => {
   for (let i = 0; i < 60 && !lifted.length; i++) await new Promise((r) => setTimeout(r, 50));
   return lifted;
 };
+
+test("Routing keeps a free-tier rest off the paid row", async (t) => {
+  const browser = process.env.BROWSER === "webkit" ? await webkit.launch() : await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
+  t.after(() => browser.close());
+  const page = await browser.newPage({ reducedMotion: "reduce" });
+  const free = { ...a, model: "vendor/free:free" };
+  const paid = { ...a, model: "vendor/paid" };
+  const freeRest = { ...rest, freeTier: true, key: a.id + "/\u0000openrouter-free" };
+  const shown = [{
+    ...routes[0],
+    order: [{ ...free, rest: freeRest }, paid],
+    tries: [
+      { ...routes[0].tries[0], model: free.model, rest: freeRest },
+      { ...routes[0].tries[1], id: paid.id, model: paid.model },
+    ],
+  }];
+  const lifted = [];
+  await page.route("**/*", serve("en", lifted, shown));
+  await page.goto("http://magpie.test/?view=routing");
+  await page.locator(".rt-days .rt-day").nth(1).click();
+  await page.locator(".rt-req").first().click();
+  const row = page.locator(".rt-act").filter({ hasText: "zx" }).first();
+  const go = row.locator(".fix button", { hasText: "Try now" });
+  await go.waitFor();
+  assert.equal(await row.locator(".st.rest:not(.part)").count(), 0);
+  await go.click();
+  assert.deepEqual(await posted(lifted), [{ key: freeRest.key }]);
+  await go.waitFor({ state: "detached" });
+});
+
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 // a reader wheels down to it, and it is the button under the pointer
 async function reach(page, go) {

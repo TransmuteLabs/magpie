@@ -38,14 +38,8 @@ func spentRest(c candidate) bool {
 
 // resting says whether c rests now, as restLast will find.
 func resting(c candidate) bool {
-	if _, ok := restOf(c.restKey()); ok {
-		return true
-	}
-	if c.restID() != c.restKey() {
-		_, ok := restOf(c.restID())
-		return ok
-	}
-	return false
+	_, ok := candidateRest(c)
+	return ok
 }
 
 // weightedKept moves the pick of picked's round to kept, when affinity

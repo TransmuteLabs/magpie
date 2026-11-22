@@ -83,7 +83,8 @@ func (s *Server) dshCompactElsewhere(r *http.Request, agent, kind, asked string,
 		return ""
 	}
 	p, model, ok := provider.Resolve(asked)
-	if !ok || !s.allResting(p, model, from) {
+	wires := wiresFor(r.Context())
+	if !ok || !s.allResting(p, model, from, wires) {
 		return ""
 	}
 	key := provider.AutoGroupOf(p.ID, model)
@@ -92,7 +93,7 @@ func (s *Server) dshCompactElsewhere(r *http.Request, agent, kind, asked string,
 		if e.Group != "" || e.Provider.ID == p.ID || e.Context <= window || provider.AutoGroupOf(e.Provider.ID, e.Model) != key {
 			continue
 		}
-		if compactRefused(r, e.ID) != "" || s.allResting(*e.Provider, e.Model, from) {
+		if compactRefused(r, e.ID) != "" || s.allResting(*e.Provider, e.Model, from, wires) {
 			continue
 		}
 		best, window = e.ID, e.Context
@@ -106,8 +107,8 @@ func (s *Server) dshCompactElsewhere(r *http.Request, agent, kind, asked string,
 // allResting says whether every candidate a request for p's model would
 // try rests out of its limit, so it would be answered with the refusal
 // held for it (quotaHeld, timedHeld) without asking anyone.
-func (s *Server) allResting(p provider.Provider, model string, from provider.Protocol) bool {
-	cs := s.candidates(p, model, from)
+func (s *Server) allResting(p provider.Provider, model string, from provider.Protocol, wires func() map[string]string) bool {
+	cs, _ := s.planPaused(p, model, from, nil, wires)
 	if _, _, ok := quotaHeld(cs); ok {
 		return true
 	}

@@ -837,17 +837,69 @@ func isWorkBuddy(p provider.Provider) bool {
 	return id == "workbuddy" || id == provider.WorkBuddyAIID
 }
 
-// openRouterSharedPool says an OpenRouter free model was refused by the
-// provider's shared pool, rather than by OpenRouter's account-wide free tier.
-func openRouterSharedPool(body []byte) bool {
+type openRouterLimitScope uint8
+
+const (
+	openRouterUnknownLimit openRouterLimitScope = iota
+	openRouterUpstreamPool
+	openRouterFreeMinute
+	openRouterFreeDay
+)
+
+func readOpenRouterLimit(body []byte) openRouterLimitScope {
 	var reply struct {
 		Error struct {
+			Message  string `json:"message"`
 			Metadata struct {
-				LimitSource string `json:"limit_source"`
+				LimitSource  string          `json:"limit_source"`
+				ProviderCode json.RawMessage `json:"provider_code"`
 			} `json:"metadata"`
 		} `json:"error"`
 	}
-	return json.Unmarshal(body, &reply) == nil && reply.Error.Metadata.LimitSource == "upstream_provider_shared_pool"
+	if json.Unmarshal(body, &reply) != nil {
+		return openRouterUnknownLimit
+	}
+	switch reply.Error.Metadata.LimitSource {
+	case "upstream_provider_shared_pool":
+		return openRouterUpstreamPool
+	case "openrouter_free_tier_per_minute":
+		return openRouterFreeMinute
+	case "openrouter_free_tier_daily":
+		return openRouterFreeDay
+	case "":
+	default:
+		return openRouterUnknownLimit
+	}
+	if code := reply.Error.Metadata.ProviderCode; len(code) != 0 && string(code) != "null" {
+		return openRouterUnknownLimit
+	}
+	message := strings.TrimSpace(strings.TrimPrefix(reply.Error.Message, "ORF: "))
+	if name, ok := strings.CutPrefix(message, "Rate limit exceeded: free-models-per-"); ok {
+		window, _, _ := strings.Cut(strings.TrimSuffix(name, "."), ". ")
+		switch window {
+		case "min":
+			return openRouterFreeMinute
+		case "day":
+			return openRouterFreeDay
+		}
+	}
+	return openRouterUnknownLimit
+}
+
+func openRouterFreeReset(header http.Header, now time.Time) time.Duration {
+	millis, err := strconv.ParseInt(header.Get("X-RateLimit-Reset"), 10, 64)
+	if err != nil {
+		return 0
+	}
+	wait := time.UnixMilli(millis).Sub(now)
+	if wait <= 0 || wait > 24*time.Hour {
+		return 0
+	}
+	return wait
+}
+
+func (scope openRouterLimitScope) freeTier() bool {
+	return scope == openRouterFreeMinute || scope == openRouterFreeDay
 }
 
 // Rest is why a candidate sits out after a failure, and until when.
@@ -867,6 +919,7 @@ type Rest struct {
 	// answered before refused 401: a day, or until its probe answers).
 	By       string `json:"by"`
 	Failures int    `json:"failures,omitempty"` // in a row, for a backoff
+	FreeTier bool   `json:"freeTier,omitempty"`
 	// Key is what it rests by, for the app to lift the rest (Unrest)
 	Key string `json:"key,omitempty"`
 	// Model: the one model resting, when the account or key still
@@ -1534,12 +1587,16 @@ const restErrorRunes = 300
 
 // restAfter sets a failed candidate aside for as long as its failure says.
 func (s *Server) restAfter(c candidate, status int, header http.Header, body []byte) Rest {
-	return s.restAfterMarked(c, status, header, body, openRouterSharedPool(body))
+	scope := openRouterUnknownLimit
+	if c.p.VendorPreset() == "openrouter" {
+		scope = readOpenRouterLimit(body)
+	}
+	return s.restAfterMarked(c, status, header, body, scope)
 }
 
 // restAfterMarked keeps an upstream routing fact through gateway error
 // translation without putting it in the response sent to the client.
-func (s *Server) restAfterMarked(c candidate, status int, header http.Header, body []byte, sharedPool bool) Rest {
+func (s *Server) restAfterMarked(c candidate, status int, header http.Header, body []byte, openRouterLimit openRouterLimitScope) Rest {
 	// an error carried under a 200 rests as its own status would, and
 	// says that status where the rest is shown — first among equals the
 	// one its stream's error frame named outright (#4855)
@@ -1547,6 +1604,23 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	now := time.Now()
 	d := fallbackCooldown
 	why := failureOf(c, status, body)
+	sharedPool := c.isOpenRouterFree() && openRouterLimit == openRouterUpstreamPool
+	freeTier := c.openRouterFreeLimited(openRouterLimit, status)
+	var freeReset time.Duration
+	if freeTier {
+		why = failRate
+		if openRouterLimit == openRouterFreeDay {
+			why = failQuota
+		}
+		freeReset = openRouterFreeReset(header, now)
+		if header.Get("X-RateLimit-Reset") != "" {
+			header = header.Clone()
+			header.Del("X-RateLimit-Reset")
+		}
+		if freeReset == 0 && openRouterLimit == openRouterFreeDay && retryAfter(header, now) == 0 {
+			freeReset = now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour).Sub(now)
+		}
+	}
 	if why == failOther && azureSuspended(c, status) {
 		// an Azure key that answered before, refused 401: its
 		// subscription disabled for its credit spent, back when Azure
@@ -1718,6 +1792,13 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			d, r.By, r.Failures, guessed = creditBackoff(id, header, body, now)
 		}
 	case failQuota:
+		if freeTier {
+			d, r.By = quotaRest, "quota"
+			if wait := retryAfter(header, now); wait > 0 {
+				d, r.By = wait, "retry-after"
+			}
+			break
+		}
 		if c.onCredits() {
 			// a Codex account that holds credits refused as out of its
 			// allowance: at the moment a window is used up ChatGPT may
@@ -1771,9 +1852,15 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		}
 		d = min(d, longest)
 	case failRate:
-		d, r.By, r.Failures = s.rateRest(c, header, body, sharedPool, now)
+		id := c.restKey()
+		if freeTier {
+			id = c.openRouterFreeRestID()
+		} else if sharedPool || remoteModelRest(c, failRate, header) || modelLimitedBy(c, failRate, header, body) {
+			id = c.restID()
+		}
+		d, r.By, r.Failures = rateRest(c, id, header, body, now)
 		// rate limited with quota left: to the back, where the order sinks
-		if c.full(now).IsZero() && !(c.isOpenRouterFree() && sharedPool) {
+		if !freeTier && !sharedPool && c.full(now).IsZero() {
 			// a remote magpie's rest is the model's alone (caa53673, the
 			// key's own limit apart): the sink keeps the same scope, or
 			// one model's 429 would send the remote's other models, never
@@ -1898,19 +1985,20 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	} else if a == nil && why != failOther && why != failVerify && why != failRestricted && why != failSuspended {
 		staleKeyAllowance(c.p) // a key that reads its windows, too
 	}
+	if freeReset > 0 {
+		d, r.By, guessed = freeReset, "resets", false
+	}
 	r.Until = onWall(now.Add(d))
 	if a := c.p.Account; a != nil {
 		r.agent, r.user = a.UsageAgent(), a.User
-	} else if why == failQuota {
+	} else if why == failQuota && !freeTier {
 		// a key out of its own windows is back as soon as they are read
 		// full no more, not only when they start again: its owner may
 		// raise its limit, or reset its usage
 		r.user = provider.KeyAllowanceID(c.p)
 	}
 	id := c.restKey()
-	// OpenRouter identifies a provider's shared pool separately from its
-	// account-wide free-tier limit. Only the former leaves sibling models ready.
-	if why == failRate && c.isOpenRouterFree() && sharedPool {
+	if why == failRate && sharedPool {
 		id = c.restID()
 	}
 	// a refusal that names its reset and points to the account's other
@@ -1953,6 +2041,10 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	}
 	if remoteModelRest(c, why, header) {
 		id, r.there = c.restID(), true
+	}
+	if freeTier {
+		id = c.openRouterFreeRestID()
+		r.FreeTier = true
 	}
 	r.Key = id
 	if id == c.restID() {
@@ -2287,11 +2379,7 @@ func vendorSaidWhen(header http.Header, body []byte) bool {
 // each time before the next model of the group was (01huadalang). Failing
 // again while still resting — tried anyway, the last one left — keeps the
 // count where it is, so one request's own retries don't stretch it.
-func (s *Server) rateRest(c candidate, header http.Header, body []byte, sharedPool bool, now time.Time) (time.Duration, string, int) {
-	id := c.restKey()
-	if c.isOpenRouterFree() && sharedPool || remoteModelRest(c, failRate, header) || modelLimitedBy(c, failRate, header, body) {
-		id = c.restID()
-	}
+func rateRest(c candidate, id string, header http.Header, body []byte, now time.Time) (time.Duration, string, int) {
 	n := 1
 	restingUntil.Lock()
 	if prev, ok := restingUntil.note[id]; ok && prev.Why == failRate {

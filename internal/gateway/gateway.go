@@ -227,18 +227,26 @@ type wiresKey struct{}
 // only where something asks for one: a request refused before any name is
 // looked up pays for nothing.
 func withWires(r *http.Request) *http.Request {
-	load := sync.OnceValue(func() map[string]string { return settings.Shared().Wires() })
+	load := sync.OnceValue(currentWires)
 	return r.WithContext(context.WithValue(r.Context(), wiresKey{}, load))
+}
+
+func currentWires() map[string]string {
+	return settings.Shared().Wires()
 }
 
 // wiresOf is the names in force for ctx: the ones withWires read, or the
 // ones in force now for a request magpie made for itself and never carried
 // them on.
 func wiresOf(ctx context.Context) map[string]string {
+	return wiresFor(ctx)()
+}
+
+func wiresFor(ctx context.Context) func() map[string]string {
 	if load, ok := ctx.Value(wiresKey{}).(func() map[string]string); ok {
-		return load()
+		return load
 	}
-	return settings.Shared().Wires()
+	return currentWires
 }
 
 // The reasons serve gives a model move of its own (ModelMove.Why);
@@ -2791,6 +2799,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// the upstream names in force for this request, read once here rather
 	// than once per place a name is looked up below
 	r = withWires(r)
+	wires := wiresFor(r.Context())
 	// secrets go as placeholders and come back as they were; the log has
 	// what the vendor saw and said. plain is the body as the agent wrote
 	// it, for a request that goes only where the user said it may go
@@ -3440,7 +3449,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	leadScope := scope // where the lead of a subagent is kept
 	if isGroup {
 		// a routing group: every member's keys or accounts weighed together
-		cands, pl = s.planGroup(g, ms, from)
+		cands, pl = s.planGroupWithWires(g, ms, from, wires)
 		group = s.groupRef(g, ms)
 		group.Paused = paused
 		scope, mode = provider.GroupPrefix+g.ID, g.Affinity
@@ -3462,7 +3471,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			kept, _ := provider.PausedOut(fg, fms, agent, folder, ruleClock())
 			return kept
 		}
-		cands, pl = s.planPaused(p, model, from, pausedIn)
+		cands, pl = s.planPaused(p, model, from, pausedIn, wires)
 		if len(cands) == 0 && len(pl.capped) > 0 && !p.CapStop && !namedProvider(r, call.Model) || handedOnOf(r) != nil {
 			// every account held at the usage cap the user set, or Codex's
 			// own sign-in handed on (codexFallBack), and no fallback left:
@@ -3475,7 +3484,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// Codex's auto-review on codex-auto-review, which no group has,
 			// goes on where its conversation's turns go (codexReviewAfter)
 			if q, ok := groupsAfter(p, model, s.codexReviewAfter(r, p, model, body)...); ok {
-				cands, pl = s.planPaused(q, model, from, pausedIn)
+				cands, pl = s.planPaused(q, model, from, pausedIn, wires)
 			}
 		}
 		if handedOnOf(r) != nil {
@@ -4059,6 +4068,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			returnHanded()
 		}
 		call.UpstreamFailure = usage.UpstreamFailure{}
+		if _, held := c.openRouterFreeRest(); held && i < len(cands)-1 {
+			returnHanded()
+			continue
+		}
 		r = r.WithContext(requestpolicy.WithSelection(r.Context(), c.restID(), c.p.OwnModelID(c.model)))
 		if refusal, blocked := c.p.ExtensionAvailability(c.model, time.Now()); blocked {
 			returnHanded()
@@ -5072,6 +5085,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		asName := provider.SentNameOnIn(wiresOf(r.Context()), c.p.ID, accountAgent(c.p), c.model, sent)
 		wentAs = wireName(c.model, at.model, asName)
 		c.sentModel = cmp.Or(wentAs, c.model)
+		freeTierRefused := !c.p.LimitRestOff && !c.p.PassesErrors() && c.openRouterFreeLimited(hw.openRouterLimit, hw.code())
 		try.Wire = wentAs
 		try.Entry, try.EntryWhy = entryOf()
 		try.Swapped, try.Routed = swapped(asName, call.Usage.Served) && !usage.ListedAs(c.p.ID, c.model, call.Usage.Served), usage.GroupRouted(asName, call.Usage.Served)
@@ -5677,7 +5691,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		planAgain = 0
-		if wait, ok := passingFor(r.Context(), c.p.ID, hw.code(), hw.header, hw.errBody(), again); ok && !protected && !last && hw.failed() && spentAfter(cands[i+1:]) && admitRequestRetry(r.Context(), c.p.ID, wait) {
+		if wait, ok := passingFor(r.Context(), c.p.ID, hw.code(), hw.header, hw.errBody(), again); ok && !freeTierRefused && !protected && !last && hw.failed() && spentAfter(cands[i+1:]) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// the others left are out of their allowance (Discord, waroy: a
 			// Codex account run out, Grok busy a moment): this one is the
 			// last that may answer, and is tried again as the last is
@@ -5825,7 +5839,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				if f := failure(hw.code(), hw.errBody()); other == nil && f != failQuota && f != failCredit {
 					other = &Try{Status: call.Status, Error: call.Error, errType: call.Usage.ErrType}
 				}
-				rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+				rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 				try.Fail, try.Rest = rest.Why, &rest
 				s.trace.update(tr, func(t *Route) {
 					t.Tries[len(t.Tries)-1] = try
@@ -5906,7 +5920,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if f := failure(hw.code(), hw.errBody()); other == nil && f != failQuota && f != failCredit {
 				other = &Try{Status: call.Status, Error: call.Error, errType: call.Usage.ErrType}
 			}
-			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 			try.Fail, try.Rest = rest.Why, &rest
 			at := -1
 			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1], at = try, len(t.Tries)-1 })
@@ -5914,7 +5928,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				forbade = append(forbade, forbidden{c: c, rest: rest, try: at, words: words5xx})
 			}
 			skipped = append(skipped, c.label()+": "+call.Error)
-			if waitsOf(c.patience, patienceFallback) > 0 && !hw.turnedAway && busyFor(c, hw.code(), hw.errBody()) && !routedThere(hw.header) {
+			if waitsOf(c.patience, patienceFallback) > 0 && !freeTierRefused && !hw.turnedAway && busyFor(c, hw.code(), hw.errBody()) && !routedThere(hw.header) {
 				busyNow = noteBusy(busyNow, c, hw.header)
 			}
 			continue
@@ -5933,7 +5947,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// (spentAfter) and the agent is told theirs
 		lastSpent := last && isGroup && len(busyNow) > 0 && !hw.passing && hw.failed() && !busyFor(c, hw.code(), hw.errBody()) &&
 			slices.Contains([]string{failQuota, failCredit}, failure(hw.code(), hw.errBody())) && !spentAfter([]candidate{c})
-		if _, same := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); last && patience > 0 && !protected && !sameRefusal && !hw.turnedAway && !hw.refused && hw.failed() && (busyFor(c, hw.code(), hw.errBody()) && (!routedThere(hw.header) || len(busyNow) > 0) || lastSpent) &&
+		if _, same := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); last && !freeTierRefused && patience > 0 && !protected && !sameRefusal && !hw.turnedAway && !hw.refused && hw.failed() && (busyFor(c, hw.code(), hw.errBody()) && (!routedThere(hw.header) || len(busyNow) > 0) || lastSpent) &&
 			(isGroup || !codexReset(hw.code(), hw.errBody())) &&
 			(len(busyNow) > 0 || waitsOf(c.patience, patienceFallback) > 0 && !same) {
 			// every member has failed, each in a way that passes — busy,
@@ -5970,7 +5984,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			if len(next) > 0 {
 				try.Fail, try.Again = failureOf(c, hw.code(), hw.errBody()), wait.Milliseconds()
 				if lastSpent {
-					rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+					rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 					try.Fail, try.Rest = rest.Why, &rest
 				}
 				if isGroup {
@@ -5991,7 +6005,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				break
 			}
 		}
-		if wait, ok := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); ok && !protected && !sameRefusal && !hw.turnedAway && hw.failed() && waitFrom.IsZero() && !kept.tooQuiet(wait) && !kept.outlives(wait) && admitRequestRetry(r.Context(), c.p.ID, wait) {
+		if wait, ok := passingForCandidate(r.Context(), c, hw.code(), hw.header, hw.errBody(), again); ok && !freeTierRefused && !protected && !sameRefusal && !hw.turnedAway && hw.failed() && waitFrom.IsZero() && !kept.tooQuiet(wait) && !kept.outlives(wait) && admitRequestRetry(r.Context(), c.p.ID, wait) {
 			// nobody else is left: the same one again, after a moment (not
 			// what Antigravity turned away: it turns it away again; nor
 			// once the group's patience is spent)
@@ -6052,7 +6066,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 			small = nil
 			if len(next) > 0 {
-				rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+				rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 				try.Fail, try.Rest = rest.Why, &rest
 				s.trace.update(tr, func(t *Route) {
 					t.Tries[len(t.Tries)-1] = try
@@ -6066,7 +6080,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				continue
 			}
 		}
-		if last && !held && !hw.passing && hw.failed() && quotaStatus(hw.code()) && (c.p.Account == nil || !hw.turnedAway && try.Fail != failPrompt) && (try.Fail == failQuota || try.Fail == failCredit || failure(hw.code(), hw.errBody()) == failQuota || failure(hw.code(), hw.errBody()) == failCredit) {
+		if last && !held && !hw.passing && hw.failed() && (freeTierRefused || quotaStatus(hw.code()) && (c.p.Account == nil || !hw.turnedAway && try.Fail != failPrompt) && (try.Fail == failQuota || try.Fail == failCredit || failure(hw.code(), hw.errBody()) == failQuota || failure(hw.code(), hw.errBody()) == failCredit)) {
 			// the last key left is out of its allowance: it rests as the
 			// ones before it did, for the next request to be answered
 			// from the rests until the first of them is back (#1772). An
@@ -6077,7 +6091,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// quota or credit (not Antigravity's 429 to a prompt).
 			// quotaHeld still holds keys alone, and autoReset lifts the
 			// rest of an account it spends a reset of
-			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 			try.Fail, try.Rest = rest.Why, &rest
 		} else if last && !held && !hw.passing && hw.failed() && hw.code() == http.StatusTooManyRequests && !hw.turnedAway && try.Fail != failPrompt && failure(hw.code(), hw.errBody()) == failRate && vendorSaidWhen(hw.header, hw.errBody()) {
 			// the last one left is rate limited till a time its vendor
@@ -6086,7 +6100,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// the vendor, which flags an account asked so (hsjzg58958 on
 			// X). A 429 naming no time rests nobody, as before: a relay's
 			// moment of saturation is asked again
-			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.sharedPool)
+			rest := s.restAfterMarked(c, hw.code(), hw.header, hw.errBody(), hw.openRouterLimit)
 			try.Fail, try.Rest = rest.Why, &rest
 		}
 		if !hw.passing && hw.code() == http.StatusTooManyRequests && hw.header.Get("Retry-After") == "" {
@@ -6652,11 +6666,14 @@ func lastUserText(from provider.Protocol, body []byte) string {
 	return ""
 }
 
-// markOpenRouterSharedPool keeps an upstream routing fact in the held attempt,
-// rather than exposing it as a response header.
-func markOpenRouterSharedPool(w http.ResponseWriter) {
+func markOpenRouterLimit(w http.ResponseWriter, p provider.Provider, body []byte) {
+	if p.VendorPreset() != "openrouter" {
+		return
+	}
 	if h, ok := w.(*holdWriter); ok {
-		h.sharedPool = true
+		if scope := readOpenRouterLimit(body); scope != openRouterUnknownLimit || h.openRouterLimit != openRouterUpstreamPool {
+			h.openRouterLimit = scope
+		}
 	}
 }
 
@@ -8170,9 +8187,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			}
 			msg += wrongAPINote(p, model, res, b)
 		}
-		if p.VendorPreset() == "openrouter" && openRouterSharedPool(b) {
-			markOpenRouterSharedPool(w)
-		}
+		markOpenRouterLimit(w, p, b)
 		keepRetry(w.Header(), res.Header, b)
 		u.ErrType = provider.ErrorType(b)
 		if codexOutRefusal(p, proto, res.StatusCode, b) {
@@ -10277,9 +10292,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 			msg += " — " + antigravityHint(request.System)
 			markAntigravityTurnsAway(w, request.System)
 		}
-		if p.VendorPreset() == "openrouter" && openRouterSharedPool(b) {
-			markOpenRouterSharedPool(w)
-		}
+		markOpenRouterLimit(w, p, b)
 		keepRetry(w.Header(), res.Header, b)
 		u.ErrType = provider.ErrorType(b)
 		if turnedAway {

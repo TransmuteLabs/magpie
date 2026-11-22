@@ -382,10 +382,7 @@ func (s *Server) laneMate(cands []candidate, i int, group bool, gave map[string]
 // or account's, else its model's (restingOf, without reading a key's
 // allowance again).
 func restedUntil(c candidate) (time.Time, bool) {
-	r, ok := restOf(c.restKey())
-	if !ok && c.restID() != c.restKey() {
-		r, ok = restOf(c.restID())
-	}
+	r, ok := candidateRest(c)
 	return r.Until, ok
 }
 

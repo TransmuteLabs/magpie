@@ -921,7 +921,7 @@ function routingPage(part) {
   // (gemini-3.8-flash, in a pool of its own). The gateway names it; a kept
   // request from before it did has it on the end of the key it rests by,
   // after the model of the seat that carried it.
-  const restModel = (rest, m) => rest.model || (m && rest.key?.endsWith("/" + m) ? m : "");
+  const restModel = (rest, m) => rest.model || (m && (rest.freeTier || rest.key?.endsWith("/" + m)) ? m : "");
   // how long a rest is from a moment: now for a row, the moment it was
   // decided for the story of a request
   function restWhen(rest, from = now()) {

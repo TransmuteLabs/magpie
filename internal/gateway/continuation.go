@@ -652,9 +652,7 @@ func (s *Server) streamTranslated(w http.ResponseWriter, r *http.Request, p prov
 				if turnedAway {
 					markAntigravityTurnsAway(w, request.System)
 				}
-				if p.VendorPreset() == "openrouter" && openRouterSharedPool(b) {
-					markOpenRouterSharedPool(w)
-				}
+				markOpenRouterLimit(w, p, b)
 				keepRetry(w.Header(), res.Header, b)
 				u.ErrType = provider.ErrorType(b)
 				if turnedAway {

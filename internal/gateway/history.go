@@ -790,7 +790,7 @@ func foldTally(tallies map[string]*Tally, line []byte) {
 		}
 		// a rest on one model alone says nothing of the account (#1960),
 		// which answers its others; the page keeps that one from the trace
-		if w.Rest != nil && w.Rest.Model == "" && ms >= a.RestAt {
+		if w.Rest != nil && w.Rest.Model == "" && !w.Rest.FreeTier && ms >= a.RestAt {
 			rest := *w.Rest
 			a.Rest, a.RestAt = &rest, ms
 		}
@@ -834,7 +834,7 @@ func foldTally(tallies map[string]*Tally, line []byte) {
 				a.AuthAt = max(a.AuthAt, end)
 			}
 		}
-		if tr.Rest != nil && tr.Rest.Model == "" && end >= a.RestAt {
+		if tr.Rest != nil && tr.Rest.Model == "" && !tr.Rest.FreeTier && end >= a.RestAt {
 			rest := *tr.Rest
 			a.Rest, a.RestAt = &rest, end
 		}

@@ -281,34 +281,6 @@ func TestOpenRouterSharedPoolDirectReplyHidesRoutingHeader(t *testing.T) {
 	}
 }
 
-// OpenRouter's free-models-per-min limit is account-wide. It must retain the
-// provider rest key, rather than suggesting that another free model is ready.
-func TestOpenRouterFreeAccountRateLimitKeepsProviderRest(t *testing.T) {
-	fresh(t)
-	f := &openRouterFreeLimit{body: `{"error":{"message":"Rate limit exceeded: free-models-per-min"}}`}
-	up := httptest.NewServer(f)
-	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{
-		ID: "orf", Name: "OpenRouter Free", Preset: "openrouter", Key: "k",
-		Models: []string{"x/a:free", "x/b:free"}, Chat: up.URL + "/v1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.SaveGroup(provider.Group{
-		Name: "Free", Members: []string{"orf/x/a:free", "orf/x/b:free"}, Routing: provider.Ordered,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	s := New()
-	if code, body := postAs(t, s, "", `{"model":"group/free","messages":[{"role":"user","content":"hi"}]}`); code != http.StatusOK || !strings.Contains(body, "from b") {
-		t.Fatalf("group reply: %d %s", code, body)
-	}
-	first := s.trace.routes[len(s.trace.routes)-1].Tries[0]
-	if first.Fail != failRate || first.Rest == nil || first.Rest.Key != "orf" {
-		t.Fatalf("account rate limit rest: %+v", first)
-	}
-}
-
 // A model two providers serve is a group magpie finds; a group the user
 // makes routes over its members in the order it names them, the next one
 // taking a request the one before can't.
