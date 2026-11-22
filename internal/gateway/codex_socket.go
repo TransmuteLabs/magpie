@@ -437,7 +437,7 @@ func withoutClientMetadata(body []byte, key string) []byte {
 	if err != nil {
 		return body
 	}
-	out := make([]byte, 0, len(body))
+	out := make([]byte, 0, len(body)-len(cm.Raw)+len(raw))
 	out = append(out, body[:cm.Index]...)
 	out = append(out, raw...)
 	return append(out, body[cm.Index+len(cm.Raw):]...)

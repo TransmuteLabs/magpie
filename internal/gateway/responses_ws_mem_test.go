@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -370,6 +372,152 @@ func TestResponsesSocketDoesNotRetainSpareBodyCapacity(t *testing.T) {
 	prompt := server.trace.bodies[0].body
 	if cap(prompt) > 2*len(prompt) || &prompt[0] == &body[0] {
 		t.Fatalf("trace retained %d bytes for a %d-byte prompt", cap(prompt), len(prompt))
+	}
+}
+
+func TestResponsesSocketReusesTurnBodyAfterRemovingTurnState(t *testing.T) {
+	for _, test := range []struct {
+		name, metadata, state string
+		phase                 bool
+	}{
+		{name: "without metadata", phase: true},
+		{
+			name:     "explicit turn state",
+			metadata: `{"turn_id":"turn-2","x-codex-turn-state":"fixture-state"}`,
+			state:    "fixture-state",
+			phase:    true,
+		},
+		{name: "phase-less upstream assistant"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fresh(t)
+			socketOn(t)
+			type post struct {
+				body   []byte
+				size   int64
+				state  string
+				reused bool
+			}
+			var mu sync.Mutex
+			var posts []post
+			fake := &fakeSocketBackend{keep: true}
+			reply := keptReply(fake)
+			fake.frames = func(turn socketTurn) []string {
+				mu.Lock()
+				if len(posts) > 0 {
+					latest := &posts[len(posts)-1]
+					latest.reused = sharesBodyListed(latest.body)
+				}
+				mu.Unlock()
+				events := reply(turn)
+				if test.phase {
+					for index, event := range events {
+						events[index] = strings.Replace(event, `"status":"completed","role":"assistant"`,
+							`"status":"completed","role":"assistant","phase":"final_answer"`, 1)
+					}
+				}
+				return events
+			}
+			upstream := httptest.NewServer(withoutAnonymousFixtureProbe(fake))
+			t.Cleanup(upstream.Close)
+			if err := provider.Save(provider.Provider{
+				ID: "fixture", Name: "Fixture", Key: "vendor-only", Models: []string{"gpt-5.5"},
+				Responses: upstream.URL + "/backend-api/codex", Socket: provider.SocketOn,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			server := New()
+			front := server.Front()
+			public := httptest.NewServer(socketEntry(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if body, ok := req.Body.(*socketRequestBody); ok {
+					mu.Lock()
+					posts = append(posts, post{body: body.data, size: req.ContentLength, state: req.Header.Get("X-Codex-Turn-State")})
+					mu.Unlock()
+				}
+				front.ServeHTTP(w, req)
+			})))
+			t.Cleanup(public.Close)
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				server.sockets.drain(ctx)
+			})
+			client, _, err := dialSock(t, public, "/v1/responses", http.Header{
+				"Authorization": {"Bearer magpie"},
+				"OpenAI-Beta":   {"responses_websockets=2026-02-06"},
+				"User-Agent":    {"magpie-ws-pair-fixture"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			history := codexSocketHistory(128)
+			initial := codexCreate([]byte(keptTurn("turn-state-copy", "gpt-5.5", history...)))
+			first := client.turn(string(initial))
+			if end := last(first); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp-1" {
+				t.Fatalf("first turn ended as %s", end.Raw)
+			}
+			var assistant string
+			for _, event := range first {
+				if event.Get("type").String() == "response.output_item.done" {
+					assistant = event.Get("item").Raw
+				}
+			}
+			if assistant == "" {
+				t.Fatal("first turn gave no assistant item")
+			}
+			delta := withField([]byte(keptTurn("turn-state-copy", "gpt-5.5", userAgain)), "previous_response_id", []byte(`"resp-1"`))
+			if test.metadata != "" {
+				delta = withField(delta, "client_metadata", []byte(test.metadata))
+			}
+			frame := codexCreate(delta)
+			if end := last(client.turn(string(frame))); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp-2" {
+				t.Fatalf("continuation ended as %s", end.Raw)
+			}
+
+			mu.Lock()
+			actual := slices.Clone(posts)
+			mu.Unlock()
+			if len(actual) != 2 {
+				t.Fatalf("observed %d synthetic POSTs, want 2", len(actual))
+			}
+			var wantFields map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(keptTurn("turn-state-copy", "gpt-5.5", append(history, assistant, userAgain)...)), &wantFields); err != nil {
+				t.Fatal(err)
+			}
+			if test.metadata != "" {
+				wantFields["client_metadata"] = json.RawMessage(`{"turn_id":"turn-2"}`)
+			}
+			want, err := json.Marshal(wantFields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			continued := actual[1]
+			if !bytes.Equal(continued.body, want) || continued.size != int64(len(want)) || continued.state != test.state {
+				t.Fatalf("synthetic POST len/Content-Length/hash/state = %d/%d/%x/%q, want %d/%d/%x/%q",
+					len(continued.body), continued.size, sha256.Sum256(continued.body), continued.state, len(want), len(want), sha256.Sum256(want), test.state)
+			}
+			if httpPosts, turns := fake.counts(); httpPosts != 0 || turns != 2 || fake.opened() != 1 {
+				t.Fatalf("upstream received %d HTTP posts and %d WS turns on %d sockets", httpPosts, turns, fake.opened())
+			}
+			second := fake.turn(1)
+			wire := gjson.ParseBytes(second.msg)
+			wantPrevious, wantItems := "resp-1", 1
+			if !test.phase {
+				wantPrevious, wantItems = "", len(history)+2
+			}
+			if second.socket != fake.turn(0).socket || second.header.Get("Authorization") != "Bearer vendor-only" ||
+				wire.Get("model").String() != "gpt-5.5" || wire.Get("previous_response_id").String() != wantPrevious ||
+				wire.Get("input.#").Int() != int64(wantItems) || wire.Get(fmt.Sprintf("input.%d", wantItems-1)).Raw != userAgain {
+				t.Fatalf("upstream continuation previous=%q items=%d, want %q and %d: %.400s",
+					wire.Get("previous_response_id").String(), wire.Get("input.#").Int(), wantPrevious, wantItems, second.msg)
+			}
+			t.Logf("frame=%d POST len/cap=%d/%d POST sha256=%x upstream frame=%d sha256=%x", len(frame),
+				len(continued.body), cap(continued.body), sha256.Sum256(continued.body), len(second.msg), sha256.Sum256(second.msg))
+			if !continued.reused {
+				t.Fatal("bounded HTTP reader copied the reconstructed POST")
+			}
+		})
 	}
 }
 
