@@ -242,8 +242,10 @@ snapshot.
 
 `PriceAt` uses one lazy model projection per quote on an SDK account.
 The free check and list pricing share it, including lookups by the vendor's
-ID and the user's alias. Dispatch still checks the current account and
-package selection at admission.
+ID and the user's alias. The gateway's vision and search candidate builder
+uses one SDK model projection per provider for its exposed models and
+fallback prices. Dispatch still checks the current account and package
+selection at admission.
 
 Codex's model tags track the exact saved catalog roots for projected
 SDK providers with model discovery, including roots that have yet to be

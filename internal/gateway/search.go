@@ -632,39 +632,24 @@ type smallCand struct {
 // subscription, what magpie wrote into its agent, is magpie's own shape
 // whatever the user said of it, and stays out.
 func smallCands(p provider.Provider, keep func(catalog.Model) bool) []smallCand {
-	var ms []catalog.Model
 	s := settings.Shared()
-	for _, m := range p.Exposed() {
+	ms := p.ExposedWithPrices(func(m catalog.Model) bool {
 		if keep != nil && !keep(m) {
-			continue
+			return false
 		}
 		// a subscription's list can have what magpie wrote into its agent
 		if strings.HasPrefix(m.ID, provider.GroupPrefix) || strings.HasPrefix(m.ID, provider.AutoPrefix) || (p.Account != nil && strings.Contains(m.ID, "/")) {
-			continue
+			return false
 		}
 		if sees, said := provider.ImageOverrideIn(s, p.ID, m.ID); !said || !sees {
 			l := strings.ToLower(m.ID)
 			if strings.ContainsAny(l, ":~") || slices.ContainsFunc([]string{"nano", "lite", "image", "audio", "tts", "embed", "free"}, func(w string) bool { return strings.Contains(l, w) }) {
-				continue
+				return false
 			}
 		}
-		if m.ID == provider.CodexAutoReview {
-			// Codex's reviewer, priced free for the reviews it runs, not
-			// a model to ask anything else of
-			continue
-		}
-		if m.Price == nil {
-			// a subscription's list carries no prices: Codex's starts
-			// with its flagship, gpt-6.1-sol, which every search and
-			// every image was asked of while gpt-6-luna sat below it
-			// (lucy_85908 on Discord). Its list price, as the Usage
-			// page counts it, says which is the cheap one
-			if pr, ok := p.ListPrice(m.ID); ok {
-				m.Price = &pr
-			}
-		}
-		ms = append(ms, m)
-	}
+		// Codex's reviewer is free for the reviews it runs alone.
+		return m.ID != provider.CodexAutoReview
+	})
 	return rankSmall(ms)
 }
 

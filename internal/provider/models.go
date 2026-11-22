@@ -1847,6 +1847,25 @@ func (p Provider) exposedContext(ctx context.Context) []catalog.Model {
 	return p.ExposedOf(p.availableContext(ctx))
 }
 
+// ExposedWithPrices returns the exposed models keep accepts, filling in a
+// missing price with ListPrice. Both reads use the same SDK model list.
+func (p Provider) ExposedWithPrices(keep func(catalog.Model) bool) []catalog.Model {
+	p = p.withExtensionModelList()
+	var models []catalog.Model
+	for _, model := range p.Exposed() {
+		if !keep(model) {
+			continue
+		}
+		if model.Price == nil {
+			if price, ok := p.ListPrice(model.ID); ok {
+				model.Price = &price
+			}
+		}
+		models = append(models, model)
+	}
+	return models
+}
+
 // ExposedOf is Exposed of avail, p.Available() as the caller has already
 // read it: an editor's look at a provider read the vendor's list four
 // times over, each built afresh with its names and levels.
@@ -3048,11 +3067,8 @@ func priceOf(s settings.Settings, p Provider, known bool, model string, at time.
 // (FreeModel) costs nothing. An SDK account's free check and tariff use
 // the same model projection for this quote.
 func (p Provider) PriceAt(s settings.Settings, model string, at time.Time) (catalog.Price, bool) {
-	if !p.CountFree && p.IsExtension() && p.Account.models != nil {
-		account := *p.Account
-		account.models = sync.OnceValue(account.models)
-		account.extensionList = nil
-		p.Account = &account
+	if !p.CountFree {
+		p = p.withExtensionModelList()
 	}
 	if p.FreeModel(model) {
 		return catalog.Price{}, true

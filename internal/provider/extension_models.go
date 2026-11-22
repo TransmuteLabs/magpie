@@ -1,6 +1,21 @@
 package provider
 
-import "github.com/yetone/magpie/internal/catalog"
+import (
+	"sync"
+
+	"github.com/yetone/magpie/internal/catalog"
+)
+
+func (p Provider) withExtensionModelList() Provider {
+	if !p.IsExtension() || p.Account.models == nil {
+		return p
+	}
+	account := *p.Account
+	account.models = sync.OnceValue(account.models)
+	account.extensionList = nil
+	p.Account = &account
+	return p
+}
 
 // extensionListPrice preserves the executor's explicit price, including
 // zero, before catalog fallbacks. Core overrides and rate policy still apply.
