@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/sessionformat"
 )
 
 // A Codex fork (the CLI's /fork, the app's fork, a spawn_agent with the
@@ -75,10 +78,12 @@ func (s *codexUsageState) copied(total, last *cxUsage) bool {
 }
 
 // codexForks keeps one checkpoint snapshot per parent path. A fork in
-// progress keeps its own reference to the snapshot it was given.
+// progress keeps its own reference to the snapshot it was given. The
+// readers of one version of a parent share its in-progress scan.
 var codexForks struct {
 	sync.Mutex
-	kept []codexForkParent
+	kept    []codexForkParent
+	reading []*codexForkRead
 }
 
 type codexForkParent struct {
@@ -86,6 +91,11 @@ type codexForkParent struct {
 	info  os.FileInfo
 	marks map[cxCheckpoint]bool
 	turns map[string]bool
+}
+
+type codexForkRead struct {
+	codexForkParent
+	done chan struct{}
 }
 
 const codexForksKept = 8
@@ -109,21 +119,70 @@ func sameCodexParent(previous, current os.FileInfo) bool {
 // path, and its turn ids (nil when it names none); nil when it can't be
 // read whole.
 func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
-	fi := codexParentFileInfo(path)
-	if fi == nil {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
 		return nil, nil
 	}
 	codexForks.Lock()
-	for _, k := range codexForks.kept {
-		if k.path == path && sameCodexParent(k.info, fi) {
+	for _, kept := range codexForks.kept {
+		if kept.path == path && sameCodexParent(kept.info, info) {
 			codexForks.Unlock()
-			return k.marks, k.turns
+			file.Close()
+			return kept.marks, kept.turns
 		}
 	}
+	for _, reading := range codexForks.reading {
+		if reading.path == path && sameCodexParent(reading.info, info) {
+			codexForks.Unlock()
+			file.Close()
+			<-reading.done
+			return reading.marks, reading.turns
+		}
+	}
+	reading := &codexForkRead{
+		codexForkParent: codexForkParent{path: path, info: info},
+		done:            make(chan struct{}),
+	}
+	codexForks.reading = append(codexForks.reading, reading)
 	codexForks.Unlock()
+
+	marks, turns, after := readCodexParent(file)
+	unchanged := sameCodexParent(info, after) && sameCodexParent(info, codexParentFileInfo(path))
+	codexForks.Lock()
+	index := slices.Index(codexForks.reading, reading)
+	codexForks.reading = slices.Delete(codexForks.reading, index, index+1)
+	reading.marks, reading.turns = marks, turns
+	if unchanged {
+		codexForks.kept = slices.DeleteFunc(codexForks.kept, func(parent codexForkParent) bool {
+			return parent.path == path
+		})
+		if len(codexForks.kept) == codexForksKept {
+			codexForks.kept = slices.Delete(codexForks.kept, 0, 1)
+		}
+		codexForks.kept = append(codexForks.kept, reading.codexForkParent)
+	}
+	close(reading.done)
+	codexForks.Unlock()
+	return marks, turns
+}
+
+func readCodexParent(file *os.File) (map[cxCheckpoint]bool, map[string]bool, os.FileInfo) {
+	lines, err := openFileLines(file)
+	if err != nil {
+		return nil, nil, nil
+	}
+	defer lines.Close()
 	marks := map[cxCheckpoint]bool{}
 	var turns map[string]bool
-	err := eachLine(path, func(b []byte) {
+	if scanHook != nil {
+		scanHook(file.Name(), 0)
+	}
+	err = sessionformat.EachLine(context.Background(), lines, func(b []byte) {
 		h := b[:min(len(b), 1024)]
 		top, payload := typeAfter(h, cxType), typeAfter(h, cxPayload)
 		if top == "turn_context" || top == "event_msg" && payload == "task_started" {
@@ -152,28 +211,10 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 		}
 	})
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	codexForks.Lock()
-	defer codexForks.Unlock()
-	if !sameCodexParent(fi, codexParentFileInfo(path)) {
-		return marks, turns
-	}
-	for index, parent := range codexForks.kept {
-		if parent.path != path {
-			continue
-		}
-		if sameCodexParent(parent.info, fi) {
-			return parent.marks, parent.turns
-		}
-		codexForks.kept = slices.Delete(codexForks.kept, index, index+1)
-		break
-	}
-	if len(codexForks.kept) == codexForksKept {
-		codexForks.kept = slices.Delete(codexForks.kept, 0, 1)
-	}
-	codexForks.kept = append(codexForks.kept, codexForkParent{path, fi, marks, turns})
-	return marks, turns
+	info, _ := file.Stat()
+	return marks, turns, info
 }
 
 // codexRolloutOf is the rollout of thread id in the Codex folder that

@@ -2957,8 +2957,15 @@ func packed(path string) bool {
 // openLines opens a session file to read its lines, a packed one decompressed.
 func openLines(path string) (io.ReadCloser, error) {
 	f, err := os.Open(path)
-	if err != nil || !packed(path) {
+	if err != nil {
 		return f, err
+	}
+	return openFileLines(f)
+}
+
+func openFileLines(f *os.File) (io.ReadCloser, error) {
+	if !packed(f.Name()) {
+		return f, nil
 	}
 	d, ok := streamShelf.take(nil)
 	if !ok {
