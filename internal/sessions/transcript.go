@@ -98,7 +98,7 @@ func TranscriptOfContext(ctx context.Context, s Session) (out Transcript, err er
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return out, ErrNoTranscript
 	}
-	err = readHistoryTranscript(ctx, owner, nil, out.add)
+	err = owner.walkParts(ctx, historyRead{}, out.add)
 	return out, err
 }
 
@@ -140,7 +140,7 @@ func TranscriptAtContext(ctx context.Context, session Session, needle string) (o
 	// the parts TranscriptOf keeps are counted as it keeps them, and the
 	// found one's place among them noted, and the characters before it
 	at, saidAt, n, size, sizeAt, saidSize := -1, -1, 0, 0, 0, 0
-	if err := readHistoryTranscript(ctx, owner, nil, func(_ bool, p Part) bool {
+	if err := owner.walkParts(ctx, historyRead{}, func(_ bool, p Part) bool {
 		p, ok := keep(p)
 		if !ok {
 			return true
@@ -161,17 +161,20 @@ func TranscriptAtContext(ctx context.Context, session Session, needle string) (o
 	}); err != nil {
 		return Transcript{Parts: []Part{}}, err
 	}
+	if err := owner.check(ctx); err != nil {
+		return Transcript{Parts: []Part{}}, err
+	}
 	if saidAt >= 0 {
 		at, sizeAt = saidAt, saidSize
 	}
 	if at < 0 || sizeAt < transcriptMax {
 		out = Transcript{Parts: []Part{}}
-		err = readHistoryTranscript(ctx, owner, nil, out.add)
+		err = owner.walkParts(ctx, historyRead{}, out.add)
 		return out, err
 	}
 	out = Transcript{Parts: []Part{}, From: max(0, at-transcriptLead)}
 	i := 0
-	err = readHistoryTranscript(ctx, owner, nil, func(in bool, p Part) bool {
+	err = owner.walkParts(ctx, historyRead{}, func(in bool, p Part) bool {
 		if _, ok := keep(p); !ok {
 			return true
 		}

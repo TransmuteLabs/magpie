@@ -179,6 +179,52 @@ func TestHistoryOwnerRechecksSameSelectionBeforePublication(t *testing.T) {
 	}
 }
 
+func TestNativeTranscriptRechecksClaimsBeforePublication(t *testing.T) {
+	for _, mode := range []string{"transcript", "needle"} {
+		for _, claim := range []string{"binding", "corrupt-storage"} {
+			t.Run(mode+"/"+claim, func(t *testing.T) {
+				setup(t)
+				path := filepath.Join(t.TempDir(), "session.jsonl")
+				writeLines(t, path, `{"type":"user","message":{"role":"user","content":"find needle"}}`)
+				session := Session{Agent: "claude", ID: "session", Path: path}
+				validBinding, err := json.Marshal([]SessionSourceBinding{{
+					Plugin: "fixture", Source: "history", Agent: "claude", Identity: strings.Repeat("a", 64),
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claimPath, body := sourceBindingsPath(), validBinding
+				if claim == "corrupt-storage" {
+					claimPath, body = storageConsentsPath(), []byte("{invalid")
+				}
+				scans := 0
+				previous := scanHook
+				scanHook = func(name string, _ int64) {
+					if name == path {
+						scans++
+						writeHistoryAuthority(t, claimPath, body)
+					}
+				}
+				t.Cleanup(func() { scanHook = previous })
+				needle := ""
+				if mode == "needle" {
+					needle = "needle"
+				}
+				transcript, err := TranscriptAtContext(t.Context(), session, needle)
+				if scans != 1 || !errors.Is(err, extension.ErrActionChanged) || len(transcript.Parts) != 0 {
+					t.Fatalf("authority changed during first scan: scans=%d parts=%v err=%v", scans, transcript.Parts, err)
+				}
+				scanHook = previous
+				writeHistoryAuthority(t, claimPath, []byte("[]"))
+				transcript, err = TranscriptAtContext(t.Context(), session, needle)
+				if err != nil || len(transcript.Parts) != 1 || transcript.Parts[0].Text != "find needle" {
+					t.Fatalf("repaired authority: parts=%v err=%v", transcript.Parts, err)
+				}
+			})
+		}
+	}
+}
+
 func TestHistoryOwnerRechecksTitlesAfterForeignDelegation(t *testing.T) {
 	setup(t)
 	data := t.TempDir()

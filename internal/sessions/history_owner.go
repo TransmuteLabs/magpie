@@ -125,6 +125,13 @@ func (owner sessionHistoryOwner) readParts(ctx context.Context, read historyRead
 			err = changed
 		}
 	}()
+	return owner.walkParts(ctx, read, add)
+}
+
+func (owner sessionHistoryOwner) walkParts(ctx context.Context, read historyRead, add func(bool, Part) bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	stopped := false
 	return owner.reader(ctx, owner.session, read, func(user bool, part Part) bool {
 		if stopped || ctx.Err() != nil {
