@@ -561,16 +561,32 @@ func clientWholeHistory(fresh []json.RawMessage) bool {
 		return false
 	}
 	for _, raw := range fresh[:len(fresh)-1] {
-		var it map[string]json.RawMessage
-		if json.Unmarshal(raw, &it) != nil {
+		raw = trimJSON(raw)
+		if len(raw) == 0 || raw[0] != '{' {
 			continue
 		}
-		if _, has := it["id"]; !has {
+		if !bytes.Contains(raw, []byte(`"id"`)) && bytes.IndexByte(raw, '\\') < 0 {
 			continue
 		}
-		var typ string
-		json.Unmarshal(it["type"], &typ)
-		if typ == "reasoning" || idOptional[typ] {
+		if !jsonCheck(raw) {
+			continue
+		}
+		var hasID bool
+		var kind []byte
+		eachMember(raw, func(key, value []byte) bool {
+			switch {
+			case keyIs(key, "id"):
+				hasID = true
+			case keyIs(key, "type"):
+				kind = value
+			}
+			return true
+		})
+		if !hasID {
+			continue
+		}
+		typ, _ := stringBytes(kind)
+		if string(typ) == "reasoning" || idOptional[string(typ)] {
 			return true
 		}
 	}
