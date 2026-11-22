@@ -475,6 +475,7 @@ func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
 		if retry.delay != want || retry.next.Before(before.Add(want)) {
 			t.Fatalf("worker exit scheduled %v at %v, want %v backoff", retry.delay, retry.next, want)
 		}
+		waitActivationComponent(t, "original group retirement", lease.retired)
 		if attempt+1 != len(delays) {
 			retry.next = time.Time{}
 			owner.retries[id] = retry
