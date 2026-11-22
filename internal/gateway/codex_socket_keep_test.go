@@ -141,6 +141,50 @@ func TestCodexKeptSocketSendsTheDelta(t *testing.T) {
 	}
 }
 
+func TestCodexKeptSocketSendsAmbiguousInputWhole(t *testing.T) {
+	history := strings.Join([]string{userPing, asstPong, userAgain}, ",")
+	for _, test := range []struct {
+		name  string
+		first string
+		last  string
+	}{
+		{name: "duplicate", first: userPing, last: `"input"`},
+		{name: "same value", first: history, last: `"input"`},
+		{name: "escaped duplicate", first: userPing, last: `"\u0069nput"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			socketOn(t)
+			backend := &fakeSocketBackend{keep: true}
+			backend.frames = keptReply(backend)
+			chatgpt(t, backend.ServeHTTP)
+
+			keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing))
+			continueTurn := keptTurn("conv-1", "gpt-5.5", userPing, asstPong, userAgain)
+			ambiguous := strings.Replace(continueTurn, `"input":`, `"input":[`+test.first+`],`+test.last+`:`, 1)
+			keptPost(t, "acct-1", ambiguous)
+			if posts, turns := backend.counts(); posts != 0 || turns != 2 || backend.opened() != 1 {
+				t.Fatalf("%d posts, %d turns on %d sockets, want two turns on the kept socket", posts, turns, backend.opened())
+			}
+			if got, want := string(backend.turn(1).msg), `{"type":"response.create",`+ambiguous[1:]; got != want {
+				t.Errorf("ambiguous turn was changed: %s", got)
+			}
+
+			keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing, asstPong, userAgain, asstPong, userAgain))
+			keptPost(t, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing, asstPong, userAgain, asstPong, userAgain, asstPong, userAgain))
+			if posts, turns := backend.counts(); posts != 0 || turns != 4 || backend.opened() != 1 {
+				t.Fatalf("%d posts, %d turns on %d sockets, want four turns on the kept socket", posts, turns, backend.opened())
+			}
+			third, fourth := gjson.ParseBytes(backend.turn(2).msg), gjson.ParseBytes(backend.turn(3).msg)
+			if third.Get("previous_response_id").Exists() || third.Get("input.#").Int() != 5 {
+				t.Errorf("turn after ambiguous input did not go whole: %s", third.Raw)
+			}
+			if fourth.Get("previous_response_id").String() != "resp-3" || fourth.Get("input.#").Int() != 1 {
+				t.Errorf("the whole turn did not restore incremental requests: %s", fourth.Raw)
+			}
+		})
+	}
+}
+
 func TestCodexKeptInputSkipsRepeatedNormalization(t *testing.T) {
 	socketOn(t)
 	backend := &fakeSocketBackend{keep: true}
@@ -180,10 +224,10 @@ func TestCodexKeptInputSkipsRepeatedNormalization(t *testing.T) {
 }
 
 func TestCodexShapeKeepsWireValues(t *testing.T) {
-	first := []byte(`{"input":false,"\u0069nput":[ { "text": "ping" } ],"model":"wrong","\u006dodel":"m","tools": [ { "a": 1e0, "a": 1.0 } ]}`)
+	first := []byte(`{"\u0069nput":[ { "text": "ping" } ],"model":"wrong","\u006dodel":"m","tools": [ { "a": 1e0, "a": 1.0 } ]}`)
 	prior, ok := codexShape(first, "")
 	if !ok || len(prior.input) != 1 || string(prior.input[0]) != `{ "text": "ping" }` {
-		t.Fatal("shape did not take the last input with its original bytes")
+		t.Fatal("shape did not take the escaped input with its original bytes")
 	}
 	kept := &codexKept{fields: prior.fields, input: prior.sums, replyID: "reply"}
 	clear(first)

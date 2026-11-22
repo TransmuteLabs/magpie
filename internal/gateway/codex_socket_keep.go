@@ -236,20 +236,44 @@ type codexTurnShape struct {
 
 // codexShape is body's shape, false for a body that is not continued
 // from: one whose input is neither an item list nor null, or that names
-// a previous response itself. The items borrow body until the wire
+// a previous response itself. A repeated input keeps the socket but
+// leaves fields nil, so both this turn and its successor go whole.
+// The items borrow body until the wire
 // message is made. Only byte-identical inputs reuse the kept turn's
 // canonical sums. Both slices from the pool are immutable.
 func codexShape(body []byte, key string) (*codexTurnShape, bool) {
-	var top map[string]json.RawMessage
-	if decodeJSONView(body, &top) != nil {
+	var members []memberSpan
+	if len(body) >= validMemoMin {
+		var valid bool
+		if valid, members = longBody(body); !valid {
+			return nil, false
+		}
+	} else if !jsonCheck(body) {
 		return nil, false
 	}
+	raw := trimJSON(body)
+	if raw[0] != '{' {
+		return nil, false
+	}
+	top := make(map[string]json.RawMessage, len(members))
+	repeatedInput := false
+	eachMemberIn(raw, members, func(key, value []byte) bool {
+		name, _ := unquoteJSON(key)
+		if name == "input" && top[name] != nil {
+			repeatedInput = true
+		}
+		top[name] = value
+		return true
+	})
 	if _, ok := top["previous_response_id"]; ok {
 		return nil, false
 	}
 	input, ok := inputList(top["input"])
 	if !ok {
 		return nil, false
+	}
+	if repeatedInput {
+		return &codexTurnShape{}, true
 	}
 	s := &codexTurnShape{
 		fields:  map[string]string{},
@@ -340,7 +364,7 @@ func codexSocketItemBare(v any) any {
 // delta is body as its new input after previous_response_id, when s
 // carries on from k's last turn.
 func (k *codexKept) delta(body []byte, s *codexTurnShape) ([]byte, bool) {
-	if k.replyID == "" || k.fields == nil || len(s.fields) != len(k.fields) {
+	if k.replyID == "" || k.fields == nil || s.fields == nil || len(s.fields) != len(k.fields) {
 		return nil, false
 	}
 	for f, v := range k.fields {
