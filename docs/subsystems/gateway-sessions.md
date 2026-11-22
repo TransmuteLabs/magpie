@@ -59,6 +59,12 @@ computed from the usage ledger and is not persisted. Window projections and
 routing summaries reuse versioned log snapshots; appends and rewrites invalidate
 them, and price/provider changes also invalidate priced projections. Single-session
 lookups use the cached identity index. Native exclusions are applied per caller.
+Gateway sessions and their routing lists each take a snapshot of agent names,
+User-Agent prefixes and the user's `ClientAgents` mappings for the ledger fold.
+A change to those rules invalidates the cached projection and its counted
+prefix even when the ledger is unchanged. A routing list read later through
+`ViaIndex.Of` uses the rules it captured when it was made. The Sessions
+list's conditional response includes the same agent-rule version.
 
 WorkBuddy and CodeBuddy Code name their conversation in `X-Conversation-ID`.
 The gateway reads it as a native session header, after the existing native

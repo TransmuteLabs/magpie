@@ -64,8 +64,18 @@ func TestSessionsSameWithoutRows(t *testing.T) {
 		poll("an unchanged poll", true)
 	}
 
-	usage.Append(usage.Record{Time: time.Now(), Agent: "opencode", Session: "gw-only", Provider: "fake", Model: "m", Status: 200})
+	oldPluginAgents := usage.PluginAgents
+	t.Cleanup(func() { usage.PluginAgents = oldPluginAgents })
+	agentID := "opencode"
+	usage.PluginAgents = func() []usage.Known {
+		return []usage.Known{{ID: agentID, Names: []string{"sessions-tag-client"}}}
+	}
+	usage.Append(usage.Record{Time: time.Now(), Agent: "sessions-tag-client/1.0", Session: "gw-only", Provider: "fake", Model: "m", Status: 200})
 	poll("after a gateway call", false)
+	poll("the poll after it", true)
+
+	agentID = "pi"
+	poll("after a change to agent recognition", false)
 	poll("the poll after it", true)
 
 	if err := settings.EditUsageAliases(func(map[string]string) (map[string]string, error) {

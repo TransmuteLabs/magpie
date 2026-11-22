@@ -126,11 +126,11 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 		// the aliases and the agents are what they were when it was sent:
 		// told so without the rows being made, encoded and hashed again,
 		// ~60% of an unchanged poll's ~22 MB over ~17k real sessions
-		logV, logKnown := usage.LogVersion()
-		now := listTag{log: logV, drawn: drawn.String(), names: provider.UsageNamesKey() + sessions.HiddenStamp()}
+		usageVersion, usageKnown := usage.CurrentSessionUsageVersion()
+		now := listTag{usage: usageVersion, drawn: drawn.String(), names: provider.UsageNamesKey() + sessions.HiddenStamp()}
 		made := -1
 		listTags.Lock()
-		if t, ok := listTags.m[n]; ok && logKnown && t.same(now) && r.Header.Get("X-Magpie-Had") == t.tag {
+		if t, ok := listTags.m[n]; ok && usageKnown && t.same(now) && r.Header.Get("X-Magpie-Had") == t.tag {
 			made = t.made
 		}
 		listTags.Unlock()
@@ -195,7 +195,7 @@ func sessionRoutes(mux *http.ServeMux, w Windows) {
 			Terminal bool     `json:"terminal"`
 			Dirs     []string `json:"dirs"`
 		}{out.Terminal, out.Dirs})
-		if tag != "" && logKnown {
+		if tag != "" && usageKnown {
 			now.made, now.tag = made, tag
 			listTags.Lock()
 			if listTags.m == nil || len(listTags.m) >= statsMemoMost {
@@ -667,15 +667,15 @@ var listTags struct {
 var listsRowed atomic.Int64
 
 type listTag struct {
-	made  int    // sessions.ListUnless's listing
-	log   uint64 // usage.LogVersion
+	made  int // sessions.ListUnless's listing
+	usage usage.SessionUsageVersion
 	drawn string // the agents' names and icons, and the folders
 	names string // usage aliases and found groups' public ids
 	tag   string
 }
 
 func (t listTag) same(u listTag) bool {
-	return t.log == u.log && t.drawn == u.drawn && t.names == u.names
+	return t.usage == u.usage && t.drawn == u.drawn && t.names == u.names
 }
 
 // sameStats is whether a and b would be sent the same: a read again

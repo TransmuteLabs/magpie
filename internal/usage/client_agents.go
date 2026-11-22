@@ -51,13 +51,46 @@ func ReportedAs(ua string) string {
 // reportedAs is ReportedAs, and the client's own name when the user's
 // counting changed it ("" when it didn't).
 func reportedAs(ua string) (agent, client string) {
-	a := AgentOf(ua)
-	c := clientAs.Load()
-	if c == nil || len(c.m) == 0 {
-		return a, ""
+	id := AgentOf(ua)
+	return clientAs.Load().report(id)
+}
+
+func (clients *clientMap) report(id string) (agent, client string) {
+	if clients == nil || len(clients.m) == 0 {
+		return id, ""
 	}
-	if to := c.m[strings.ToLower(a)]; to != "" && to != a {
-		return to, a
+	if to := clients.m[strings.ToLower(id)]; to != "" && to != id {
+		return to, id
 	}
-	return a, ""
+	return id, ""
+}
+
+type sessionAgents struct {
+	known   []Known
+	clients *clientMap
+}
+
+var lastSessionAgents atomic.Pointer[sessionAgents]
+
+func readSessionAgents() *sessionAgents {
+	clients, known := readClientAgents(), knownAgents()
+	if current := lastSessionAgents.Load(); current != nil && current.clients == clients &&
+		slices.EqualFunc(current.known, known, func(first, second Known) bool {
+			return first.ID == second.ID && slices.Equal(first.Names, second.Names) && slices.Equal(first.UA, second.UA)
+		}) {
+		return current
+	}
+	known = slices.Clone(known)
+	for index := range known {
+		known[index].Names = slices.Clone(known[index].Names)
+		known[index].UA = slices.Clone(known[index].UA)
+	}
+	next := &sessionAgents{known: known, clients: clients}
+	lastSessionAgents.Store(next)
+	return next
+}
+
+func (agents *sessionAgents) reportedAs(ua string) string {
+	id, _ := agents.clients.report(agentOf(ua, agents.known))
+	return id
 }

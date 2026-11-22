@@ -19,7 +19,7 @@ func TestViasCountedOnAreCountedAfresh(t *testing.T) {
 	check := func(step string) {
 		t.Helper()
 		got := cachedVias(time.Time{}).all
-		want := buildVias(readLogSnapshot(), time.Time{}, provider.UsageRenames())
+		want := buildVias(readLogSnapshot(), time.Time{}, provider.UsageRenames(), readSessionAgents())
 		if len(got.m) == 0 {
 			t.Fatalf("%s: no lists", step)
 		}

@@ -551,11 +551,14 @@ func IsLibrary(id string) bool { return libraries[strings.ToLower(strings.TrimSp
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.
 func AgentOf(ua string) string {
+	return agentOf(ua, knownAgents())
+}
+
+func agentOf(ua string, agents []Known) string {
 	ua = strings.TrimSpace(ua)
 	name, _, _ := strings.Cut(ua, "/")
 	name, _, _ = strings.Cut(name, " ")
 	l := strings.ToLower(name)
-	agents := knownAgents()
 	// a name first: cursor-local is its own, though Cursor's UA (cursor)
 	// begins it
 	for _, k := range agents {
@@ -1249,23 +1252,28 @@ func Vias(since time.Time) ViaIndex {
 	return cachedVias(since)
 }
 
-// LogVersion is a number for the log as it stands, which changes when a
-// call is written to it, and whether there is one: a synthetic log
-// (LogCalls), or one not read to its end, has none; no log yet is one. The Sessions page
-// keys an unchanged list on it.
-func LogVersion() (uint64, bool) {
+// SessionUsageVersion is a comparable key for the ledger and agent rules
+// behind a session list.
+type SessionUsageVersion struct {
+	log    uint64
+	agents *sessionAgents
+}
+
+// CurrentSessionUsageVersion tracks the usage log and the agent identities
+// that group its calls. A synthetic or incomplete log has no version.
+func CurrentSessionUsageVersion() (SessionUsageVersion, bool) {
 	if LogCalls != nil {
-		return 0, false
+		return SessionUsageVersion{}, false
 	}
-	s := readLogSnapshot()
-	return s.version, s.info == nil || s.complete()
+	snapshot := readLogSnapshot()
+	return SessionUsageVersion{log: snapshot.version, agents: readSessionAgents()}, snapshot.info == nil || snapshot.complete()
 }
 
 // A provider renamed since is listed by the id it has now (renames): the
 // Sessions tab named a renamed one by its old id (cybercaius).
-func buildVias(snapshot *logSnapshot, since time.Time, renames provider.Renames) *viaLists {
+func buildVias(snapshot *logSnapshot, since time.Time, renames provider.Renames, agents *sessionAgents) *viaLists {
 	counted := map[string]viaAcc{}
-	countVias(snapshot.blocks, since, renames, nil, counted, keptStrings{})
+	countVias(snapshot.blocks, since, renames, agents, nil, counted, keptStrings{})
 	return listedVias(&viaLists{m: map[string][]Via{}, first: map[string]time.Time{}}, counted)
 }
 
@@ -1278,13 +1286,13 @@ type viaAcc struct {
 
 // countVias counts blocks' calls into own, a session's counts begun from
 // a copy of base's: base is never written.
-func countVias(blocks []*rowChunk, since time.Time, renames provider.Renames, base, own map[string]viaAcc, keep keptStrings) {
+func countVias(blocks []*rowChunk, since time.Time, renames provider.Renames, agents *sessionAgents, base, own map[string]viaAcc, keep keptStrings) {
 	visitBlocks(blocks, since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" || r.Model == "" {
 			return
 		}
 		r.Provider, r.Model, r.Effort = keep.of(renames.Of(r.Provider, r.Time)), keep.of(r.Model), keep.of(r.Effort)
-		k := ReportedAs(r.Agent) + "|" + r.Session
+		k := agents.reportedAs(r.Agent) + "|" + r.Session
 		a, seen := own[k]
 		if !seen {
 			if b, ok := base[k]; ok {

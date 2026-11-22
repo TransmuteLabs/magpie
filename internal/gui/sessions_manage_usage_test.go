@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,4 +78,51 @@ func TestSessionsManageCarriesUsage(t *testing.T) {
 		return
 	}
 	t.Fatalf("session %s not listed: %s", id, w.Body)
+}
+
+func TestSessionsManageViaDoesNotResolveAgentsPerCall(t *testing.T) {
+	sandboxHome(t)
+	sessions.Reset()
+	t.Cleanup(sessions.Reset)
+	const calls = 768
+	at := time.Now().Add(-time.Minute)
+	for range calls {
+		usage.Append(usage.Record{Time: at, Agent: "claude", Session: "via-only", Provider: "relay", Model: "opus-x", Effort: "high", Input: 3, Output: 2, Status: 200})
+	}
+	if rows := usage.GatewaySessions(time.Time{}, nil); len(rows) != 1 || rows[0].ID != "via-only" {
+		t.Fatalf("gateway projection to reuse: %+v", rows)
+	}
+	var reads atomic.Int64
+	old := usage.PluginAgents
+	t.Cleanup(func() { usage.PluginAgents = old })
+	usage.PluginAgents = func() []usage.Known {
+		reads.Add(1)
+		return old()
+	}
+
+	mux := http.NewServeMux()
+	sessionManageRoutes(mux, folderOnly{})
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/sessions/manage?agent=claude", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("manage: %d %s", w.Code, w.Body)
+	}
+	var out struct {
+		Sessions []managedJSON `json:"sessions"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Sessions) != 1 || out.Sessions[0].ID != "via-only" {
+		t.Fatalf("sessions: %+v", out.Sessions)
+	}
+	via := out.Sessions[0].Via
+	if len(via) != 1 || via[0].Provider != "relay" || via[0].Model != "opus-x" || via[0].Effort != "high" ||
+		via[0].Calls != calls || via[0].Tokens != calls*5 {
+		t.Fatalf("via: %+v", via)
+	}
+	t.Logf("agent registry reads for %d calls: %d", calls, reads.Load())
+	if read := reads.Load(); read == 0 || read > 2 {
+		t.Fatalf("agent registry read %d times for one manage request over %d calls", read, calls)
+	}
 }

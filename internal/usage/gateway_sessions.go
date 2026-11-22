@@ -235,11 +235,12 @@ func GatewaySessionByID(agent, id string, nativeKeys map[string]bool) (GatewaySe
 	if id == "" {
 		return GatewaySession{}, false
 	}
-	agent = ReportedAs(agent)
+	agents := readSessionAgents()
+	agent = agents.reportedAs(agent)
 	if nativeKeys[agent+"|"+id] {
 		return GatewaySession{}, false
 	}
-	entry := gatewayProjection()
+	entry := gatewayProjectionFor(agents)
 	i, ok := entry.byID[agent+"|"+id]
 	if !ok {
 		return GatewaySession{}, false
@@ -250,6 +251,7 @@ func GatewaySessionByID(agent, id string, nativeKeys map[string]bool) (GatewaySe
 type gatewayProjectionEntry struct {
 	version  uint64
 	meta     string
+	agents   *sessionAgents
 	zone     *time.Location // the zone its days are dates in
 	sessions []GatewaySession
 	byID     map[string]int
@@ -267,17 +269,21 @@ var gatewayCache struct {
 }
 
 func gatewayProjection() gatewayProjectionEntry {
+	return gatewayProjectionFor(readSessionAgents())
+}
+
+func gatewayProjectionFor(agents *sessionAgents) gatewayProjectionEntry {
 	snapshot := readLogSnapshot()
 	meta := usagePriceCacheKey(time.Now())
 	// read before the lock: it reads settings.json
 	alias := provider.UsageAlias()
 	gatewayCache.Lock()
 	defer gatewayCache.Unlock()
-	if e := gatewayCache.entry; e != nil && e.version == snapshot.version && e.meta == meta && e.zone == time.Local {
+	if e := gatewayCache.entry; e != nil && e.version == snapshot.version && e.meta == meta && e.agents == agents && e.zone == time.Local {
 		return *e
 	}
-	ss, prefix := foldGateway(snapshot, meta, alias, gatewayCache.prefix)
-	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, zone: time.Local, sessions: ss, byID: make(map[string]int, len(ss))}
+	ss, prefix := foldGateway(snapshot, meta, alias, agents, gatewayCache.prefix)
+	e := gatewayProjectionEntry{version: snapshot.version, meta: meta, agents: agents, zone: time.Local, sessions: ss, byID: make(map[string]int, len(ss))}
 	for i, s := range ss {
 		e.byID[s.Agent+"|"+s.ID] = i
 	}
@@ -292,11 +298,12 @@ func gatewayProjection() gatewayProjectionEntry {
 // full blocks, which never change: a new call is counted on from them
 // instead of the whole log again, ~600k calls on every poll (#2278).
 type gatewayPrefix struct {
-	n     int
-	last  *rowChunk // blocks[n-1], which proves blocks[:n] the same
-	meta  string
-	zone  *time.Location
-	built map[gatewayKey]GatewaySession
+	n      int
+	last   *rowChunk // blocks[n-1], which proves blocks[:n] the same
+	meta   string
+	agents *sessionAgents
+	zone   *time.Location
+	built  map[gatewayKey]GatewaySession
 }
 
 // gatewayFolds counts projections counted on from a prefix, for the tests.
@@ -305,12 +312,12 @@ var gatewayFolds int
 // foldGateway is the projection of every call in snapshot, sorted, and
 // the prefix to count the next one on from. Rows are counted in the log's
 // order either way, so its numbers are buildGatewaySessions' to the bit.
-func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, pre *gatewayPrefix) ([]GatewaySession, *gatewayPrefix) {
+func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, agents *sessionAgents, pre *gatewayPrefix) ([]GatewaySession, *gatewayPrefix) {
 	gatewayBuilds.Add(1)
 	blocks := snapshot.blocks
 	cut := max(len(blocks)-1, 0)
-	if pre == nil || pre.meta != meta || pre.zone != time.Local || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
-		pre = &gatewayPrefix{meta: meta, zone: time.Local, built: map[gatewayKey]GatewaySession{}}
+	if pre == nil || pre.meta != meta || pre.agents != agents || pre.zone != time.Local || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
+		pre = &gatewayPrefix{meta: meta, agents: agents, zone: time.Local, built: map[gatewayKey]GatewaySession{}}
 	} else if pre.n > 0 {
 		gatewayFolds++
 	}
@@ -334,11 +341,11 @@ func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, 
 	next := pre
 	if pre.n < cut {
 		own := map[gatewayKey]*gatewayAcc{}
-		countGateway(blocks[pre.n:cut], time.Time{}, nil, alias, priceOf, pre.built, own, nil, keep)
-		next = &gatewayPrefix{n: cut, last: blocks[cut-1], meta: meta, zone: time.Local, built: listed(pre.built, own)}
+		countGateway(blocks[pre.n:cut], time.Time{}, nil, alias, agents, priceOf, pre.built, own, nil, keep)
+		next = &gatewayPrefix{n: cut, last: blocks[cut-1], meta: meta, agents: agents, zone: time.Local, built: listed(pre.built, own)}
 	}
 	tail := map[gatewayKey]*gatewayAcc{}
-	countGateway(blocks[cut:], time.Time{}, nil, alias, priceOf, next.built, tail, nil, keep)
+	countGateway(blocks[cut:], time.Time{}, nil, alias, agents, priceOf, next.built, tail, nil, keep)
 	all := listed(next.built, tail)
 	out := make([]GatewaySession, 0, len(all))
 	for _, s := range all {
@@ -405,7 +412,7 @@ func buildGatewaySessions(snapshot *logSnapshot, since time.Time, nativeKeys map
 	gatewayBuilds.Add(1)
 	counted := map[gatewayKey]*gatewayAcc{}
 	daily := map[gatewayDayKey]*GatewayDayUsage{}
-	countGateway(snapshot.blocks, since, nativeKeys, alias, Pricer(), nil, counted, daily, keptStrings{})
+	countGateway(snapshot.blocks, since, nativeKeys, alias, readSessionAgents(), Pricer(), nil, counted, daily, keptStrings{})
 	out := make([]GatewaySession, 0, len(counted))
 	for _, a := range counted {
 		out = append(out, a.session())
@@ -488,12 +495,12 @@ func sortGatewaySessions(out []GatewaySession) {
 // countGateway counts blocks' calls into own, a session's counts begun
 // from its session in base (never written), and into daily when it is
 // not nil.
-func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]bool, alias func(string) string, priceOf func(Record) *catalog.Price, base map[gatewayKey]GatewaySession, own map[gatewayKey]*gatewayAcc, daily map[gatewayDayKey]*GatewayDayUsage, keep keptStrings) {
+func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]bool, alias func(string) string, agents *sessionAgents, priceOf func(Record) *catalog.Price, base map[gatewayKey]GatewaySession, own map[gatewayKey]*gatewayAcc, daily map[gatewayDayKey]*GatewayDayUsage, keep keptStrings) {
 	visitBlocks(blocks, since, func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Session == "" {
 			return
 		}
-		a := keep.of(ReportedAs(r.Agent))
+		a := keep.of(agents.reportedAs(r.Agent))
 		r.Session, r.Model = keep.of(r.Session), keep.of(r.Model)
 		k := gatewayKey{a, r.Session}
 		if nativeKeys != nil && nativeKeys[a+"|"+r.Session] {

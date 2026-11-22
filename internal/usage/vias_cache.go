@@ -17,6 +17,11 @@ type viaLists struct {
 	first map[string]time.Time
 }
 
+type viaGrouping struct {
+	agents  *sessionAgents
+	renames string
+}
+
 // viasCache keeps one index of the whole log, which answers every since a
 // session's calls all came after, and one window for a session that had
 // calls before its since. The Sessions list, each agent's manage page and
@@ -26,14 +31,14 @@ type viaLists struct {
 var viasCache struct {
 	sync.Mutex
 	version uint64
-	clients string // the clients counted as agents (#1958), and the renames
+	group   viaGrouping
 	all     *viaLists
 	// what all counted over the log's full blocks, which a call logged
 	// counts on from: each call was ~280 MB of the whole log again (#2278)
 	prefix *viaPrefix
 	window struct {
 		version uint64
-		clients string
+		group   viaGrouping
 		since   time.Time
 		m       map[string][]Via
 	}
@@ -47,7 +52,7 @@ type ViaIndex struct {
 	all      *viaLists
 	since    time.Time
 	snapshot *logSnapshot
-	clients  string
+	group    viaGrouping
 	renames  provider.Renames
 }
 
@@ -85,12 +90,12 @@ func (x ViaIndex) window() map[string][]Via {
 	viasCache.Lock()
 	defer viasCache.Unlock()
 	w := &viasCache.window
-	if w.m != nil && w.version == x.snapshot.version && w.clients == x.clients && w.since.Equal(x.since) {
+	if w.m != nil && w.version == x.snapshot.version && w.group == x.group && w.since.Equal(x.since) {
 		return w.m
 	}
-	m := buildVias(x.snapshot, x.since, x.renames).m
+	m := buildVias(x.snapshot, x.since, x.renames, x.group.agents).m
 	if x.snapshot.complete() {
-		w.version, w.clients, w.since, w.m = x.snapshot.version, x.clients, x.since, m
+		w.version, w.group, w.since, w.m = x.snapshot.version, x.group, x.since, m
 	}
 	return m
 }
@@ -100,18 +105,18 @@ func cachedVias(since time.Time) ViaIndex {
 	// a provider renamed is listed by the id it has now (Renames), so a
 	// rename is another index too
 	renames := provider.UsageRenames()
-	clients := clientAgentsKey() + "\x00" + renames.Key()
+	group := viaGrouping{agents: readSessionAgents(), renames: renames.Key()}
 	viasCache.Lock()
 	defer viasCache.Unlock()
 	all := viasCache.all
-	if all == nil || viasCache.version != snapshot.version || viasCache.clients != clients {
+	if all == nil || viasCache.version != snapshot.version || viasCache.group != group {
 		var prefix *viaPrefix
-		all, prefix = foldVias(snapshot, renames, clients, viasCache.prefix)
+		all, prefix = foldVias(snapshot, renames, group, viasCache.prefix)
 		if snapshot.complete() {
-			viasCache.version, viasCache.clients, viasCache.all, viasCache.prefix = snapshot.version, clients, all, prefix
+			viasCache.version, viasCache.group, viasCache.all, viasCache.prefix = snapshot.version, group, all, prefix
 		}
 	}
-	return ViaIndex{all: all, since: since, snapshot: snapshot, clients: clients, renames: renames}
+	return ViaIndex{all: all, since: since, snapshot: snapshot, group: group, renames: renames}
 }
 
 // complete is whether the snapshot reached the end of the log, so what is
@@ -127,7 +132,7 @@ func (s *logSnapshot) complete() bool {
 type viaPrefix struct {
 	n       int
 	last    *rowChunk
-	clients string
+	group   viaGrouping
 	counted map[string]viaAcc // never written: a count copies what it touches
 	lists   *viaLists         // counted's, listed
 }
@@ -139,11 +144,11 @@ var viaFolds int
 // fits, and the prefix of the log's full blocks to count on from next.
 // Its calls are counted in the log's order, as buildVias' are, so every
 // sum is the same to the last bit. Called under viasCache's lock.
-func foldVias(snapshot *logSnapshot, renames provider.Renames, clients string, pre *viaPrefix) (*viaLists, *viaPrefix) {
+func foldVias(snapshot *logSnapshot, renames provider.Renames, group viaGrouping, pre *viaPrefix) (*viaLists, *viaPrefix) {
 	blocks := snapshot.blocks
 	cut := max(len(blocks)-1, 0)
-	if pre == nil || pre.clients != clients || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
-		pre = &viaPrefix{clients: clients, counted: map[string]viaAcc{}, lists: &viaLists{m: map[string][]Via{}, first: map[string]time.Time{}}}
+	if pre == nil || pre.group != group || pre.n > cut || pre.n > 0 && blocks[pre.n-1] != pre.last {
+		pre = &viaPrefix{group: group, counted: map[string]viaAcc{}, lists: &viaLists{m: map[string][]Via{}, first: map[string]time.Time{}}}
 	} else if pre.n > 0 {
 		viaFolds++
 	}
@@ -151,11 +156,11 @@ func foldVias(snapshot *logSnapshot, renames provider.Renames, clients string, p
 	next := pre
 	if pre.n < cut {
 		own := map[string]viaAcc{}
-		countVias(blocks[pre.n:cut], time.Time{}, renames, pre.counted, own, keep)
-		next = &viaPrefix{n: cut, last: blocks[cut-1], clients: clients, counted: maps.Clone(pre.counted), lists: listedVias(pre.lists, own)}
+		countVias(blocks[pre.n:cut], time.Time{}, renames, group.agents, pre.counted, own, keep)
+		next = &viaPrefix{n: cut, last: blocks[cut-1], group: group, counted: maps.Clone(pre.counted), lists: listedVias(pre.lists, own)}
 		maps.Copy(next.counted, own)
 	}
 	tail := map[string]viaAcc{}
-	countVias(blocks[cut:], time.Time{}, renames, next.counted, tail, keep)
+	countVias(blocks[cut:], time.Time{}, renames, group.agents, next.counted, tail, keep)
 	return listedVias(next.lists, tail), next
 }
