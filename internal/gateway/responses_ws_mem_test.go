@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +16,130 @@ import (
 	"time"
 	"weak"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestResponsesSocketFreesQueuedFrameWhileOpen(t *testing.T) {
+	fresh(t)
+	const marker = "queued raw frame:"
+	frame := strings.Replace(create("resp_probe_1", userMore), "be brief", marker+strings.Repeat("x", 256<<10), 1)
+	frameSize := len(frame)
+	observed := make(chan weak.Pointer[byte], 1)
+	var captured atomic.Bool
+	capture := func(data []byte) {
+		if len(data) == frameSize && gjson.GetBytes(data, "type").String() == "response.create" &&
+			strings.HasPrefix(gjson.GetBytes(data, "instructions").String(), marker) && captured.CompareAndSwap(false, true) {
+			observed <- weak.Make(&data[0])
+		}
+	}
+	prior := validHashed.Swap(&capture)
+	t.Cleanup(func() { validHashed.Store(prior) })
+
+	first, third := make(chan struct{}), make(chan struct{})
+	releaseFirst, releaseThird := sync.OnceFunc(func() { close(first) }), sync.OnceFunc(func() { close(third) })
+	history := make(chan [5]string, 1)
+	var calls atomic.Int64
+	key := rand.Text()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer "+key {
+			w.WriteHeader(http.StatusMisdirectedRequest)
+			return
+		}
+		attempt := calls.Add(1)
+		var release <-chan struct{}
+		if attempt == 3 {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				history <- [5]string{}
+				return
+			}
+			var text [5]string
+			for index := range text {
+				text[index] = gjson.GetBytes(body, fmt.Sprintf("input.%d.content.0.text", index)).String()
+			}
+			if gjson.GetBytes(body, "input.#").Int() != int64(len(text)) {
+				text = [5]string{}
+			}
+			history <- text
+			release = third
+		} else {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if attempt == 1 {
+				release = first
+			}
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		id := fmt.Sprintf("resp_probe_%d", attempt)
+		io.WriteString(w, sse(
+			`data: {"type":"response.created","response":{"id":"`+id+`","object":"response","status":"in_progress","output":[]}}`,
+			`data: {"type":"response.output_text.delta","item_id":"msg_probe_`+fmt.Sprint(attempt)+`","output_index":0,"content_index":0,"delta":"answer"}`))
+		w.(http.Flusher).Flush()
+		if release != nil {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		item := fmt.Sprintf(`{"type":"message","id":"msg_probe_%d","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer %d"}]}`, attempt, attempt)
+		io.WriteString(w, sse(`data: {"type":"response.output_item.done","output_index":0,"item":`+item+`}`,
+			`data: {"type":"response.completed","response":{"id":"`+id+`","object":"response","status":"completed","output":[`+item+`],"usage":{"input_tokens":300,"output_tokens":50,"total_tokens":350}}}`))
+	}))
+	t.Cleanup(up.Close)
+	defer releaseFirst()
+	defer releaseThird()
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: key, Responses: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, server := sockServer(t)
+	client, _, err := dialSock(t, server, "/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.send(create("", userHi))
+	if events, err := client.until("response.created", "error"); err != nil || last(events).Get("response.id").String() != "resp_probe_1" {
+		t.Fatalf("first turn did not start: %v", err)
+	}
+	client.send(frame)
+	client.send(`{"type":"response.interrupt","response_id":"other"}`)
+	if events, err := client.until("response.interrupt.failed", "error"); err != nil || last(events).Get("type").String() != "response.interrupt.failed" {
+		t.Fatalf("queued frame barrier: %v", err)
+	}
+	releaseFirst()
+	for _, id := range []string{"resp_probe_1", "resp_probe_2"} {
+		if events, err := client.until("response.completed", "error"); err != nil || last(events).Get("response.id").String() != id {
+			t.Fatalf("turn %s did not complete: %v", id, err)
+		}
+	}
+	client.send(create("resp_probe_2", strings.Replace(userHi, `"hi"`, `"continuation"`, 1)))
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case got := <-history:
+		want := [5]string{"hi", "answer 1", "and more", "answer 2", "continuation"}
+		if got != want {
+			t.Fatalf("continuation history = %q, want %q", got, want)
+		}
+	case <-timer.C:
+		t.Fatal("continuation did not reach the vendor")
+	}
+	select {
+	case raw := <-observed:
+		runtime.GC()
+		if raw.Value() != nil {
+			t.Fatal("the drained queued frame is still retained while its socket is open")
+		}
+	default:
+		t.Fatal("the queued frame's backing allocation was not observed")
+	}
+	releaseThird()
+	if events, err := client.until("response.completed", "error"); err != nil || last(events).Get("response.id").String() != "resp_probe_3" {
+		t.Fatalf("same-socket continuation did not complete: %v", err)
+	}
+}
 
 // A socket turn's body is freed when the turn and its bounded prompt
 // cache entry are gone (casyubaji on Discord: ~2.8 GB after 6 hours of

@@ -703,6 +703,34 @@ func (w pipeSocketUpgrade) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
 }
 
+func dialPipeResponsesSocket(t *testing.T) (*websocket.Conn, *websocket.Conn, *http.Request) {
+	t.Helper()
+	server, peer := net.Pipe()
+	t.Cleanup(func() { server.Close() })
+	t.Cleanup(func() { peer.Close() })
+	var upgrade *http.Request
+	var conn *websocket.Conn
+	client, _, err := websocket.Dial(t.Context(), "ws://example.test/v1/responses", &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upgrade = req
+			response := httptest.NewRecorder()
+			var err error
+			conn, err = websocket.Accept(pipeSocketUpgrade{response, server}, req, nil)
+			if err != nil {
+				return nil, err
+			}
+			accepted := response.Result()
+			accepted.Body = peer
+			return accepted, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { client.CloseNow() })
+	return client, conn, upgrade
+}
+
 func TestResponsesSocketOverflowDuringWrite(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -713,30 +741,8 @@ func TestResponsesSocketOverflowDuringWrite(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				server, peer := net.Pipe()
-				defer server.Close()
-				defer peer.Close()
 				ctx := t.Context()
-				var upgrade *http.Request
-				var conn *websocket.Conn
-				client, _, err := websocket.Dial(ctx, "ws://example.test/v1/responses", &websocket.DialOptions{
-					HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-						upgrade = req
-						response := httptest.NewRecorder()
-						var err error
-						conn, err = websocket.Accept(pipeSocketUpgrade{response, server}, req, nil)
-						if err != nil {
-							return nil, err
-						}
-						accepted := response.Result()
-						accepted.Body = peer
-						return accepted, nil
-					})},
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer client.CloseNow()
+				client, conn, upgrade := dialPipeResponsesSocket(t)
 				started := make(chan struct{})
 				canceled := make(chan struct{})
 				requests := 0
@@ -788,6 +794,99 @@ func TestResponsesSocketOverflowDuringWrite(t *testing.T) {
 				}
 				if requests != 1 {
 					t.Errorf("overflow dispatched %d requests, want 1", requests)
+				}
+			})
+		})
+	}
+}
+
+func TestResponsesSocketInterruptDuringWrite(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		resume bool
+	}{
+		{name: "peer resumes and reuses the socket", resume: true},
+		{name: "peer never reads again"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				peer, conn, upgrade := dialPipeResponsesSocket(t)
+				defer peer.CloseNow()
+				deltaRead, canceled, served := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				requests := 0
+				via := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					w.Header().Set("Content-Type", "text/event-stream")
+					if requests != 1 {
+						io.WriteString(w, sse(`data: {"type":"response.completed","response":{"id":"resp_fresh","object":"response","status":"completed","output":[]}}`))
+						return
+					}
+					io.WriteString(w, sse(`data: {"type":"response.created","response":{"id":"resp_wait","object":"response","status":"in_progress","output":[]}}`))
+					io.WriteString(w, sse(`data: {"type":"response.output_text.delta","item_id":"msg_wait","output_index":0,"content_index":0,"delta":"partial"}`))
+					close(deltaRead)
+					<-r.Context().Done()
+					close(canceled)
+				})
+				socket := responsesSocket{c: conn, ctx: t.Context(), path: upgrade.URL.Path, o: &socketOrigin{req: upgrade, via: via}}
+				go func() {
+					socket.serve(socketQueueBytes)
+					close(served)
+				}()
+				client := &sockClient{t: t, c: peer}
+				client.send(create("", userHi))
+				events, err := client.until("response.created")
+				if err != nil || last(events).Get("response.id").String() != "resp_wait" {
+					t.Fatalf("first reply was not created: %v", err)
+				}
+				<-deltaRead
+				synctest.Wait()
+				prev := ""
+				if test.resume {
+					prev = "resp_wait"
+				}
+				client.send(create(prev, userMore))
+				interruptedAt := time.Now()
+				client.send(`{"type":"response.interrupt","response_id":"resp_wait"}`)
+				synctest.Wait()
+				select {
+				case <-canceled:
+				default:
+					t.Fatal("interrupt did not cancel the upstream while the socket write was blocked")
+				}
+				if delay := time.Since(interruptedAt); delay != 0 {
+					t.Fatalf("upstream cancellation waited %s for the client", delay)
+				}
+				if !test.resume {
+					time.Sleep(socketWriteTimeout)
+					synctest.Wait()
+					select {
+					case <-served:
+					default:
+						t.Fatal("socket stayed open past the write deadline")
+					}
+					if requests != 1 {
+						t.Fatalf("stalled socket dispatched %d requests, want only the first", requests)
+					}
+					return
+				}
+				time.Sleep(250 * time.Millisecond)
+				events, err = client.until("response.incomplete", "error")
+				if err != nil || len(events) != 3 ||
+					events[0].Get("type").String() != "response.output_text.delta" ||
+					events[1].Get("type").String() != "response.interrupt.accepted" ||
+					last(events).Get("response.incomplete_details.reason").String() != "interrupted" {
+					t.Fatalf("wrong interrupt sequence after reads resumed: %v, %v", events, err)
+				}
+				events, err = client.until("error", "response.completed")
+				if err != nil || last(events).Get("error.code").String() != "previous_response_not_found" {
+					t.Fatalf("queued continuation of interrupted response: %v, %v", events, err)
+				}
+				if end := last(client.turn(create("", userMore))); end.Get("response.id").String() != "resp_fresh" {
+					t.Fatalf("a fresh turn could not reuse the socket: %v", end)
+				}
+				synctest.Wait()
+				if requests != 2 {
+					t.Fatalf("resumed socket dispatched %d requests, want the canceled and fresh turns", requests)
 				}
 			})
 		})
