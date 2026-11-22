@@ -802,7 +802,7 @@ func (w *socketTurnWriter) startStream() {
 	w.pw, w.read = pw, make(chan struct{})
 	go func() {
 		defer close(w.read)
-		err := readSSE(pr, func(_, data string) error {
+		err := readSocketSSE(pr, func(_, data string) error {
 			data = strings.TrimSpace(data)
 			if data == "" || data == "[DONE]" {
 				return nil

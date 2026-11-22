@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+const sseBufferSize = 64 << 10
+
+var socketSSEBuffers = make(chan *[sseBufferSize]byte, 8)
+
 // readSSE walks a server-sent event stream, calling fn with each event's
 // name and data. Data lines of one event are joined with newlines.
 func readSSE(r io.Reader, fn func(event, data string) error) error {
@@ -22,11 +26,31 @@ func readSSE(r io.Reader, fn func(event, data string) error) error {
 // wrote as a JSON line of its own is read as the data event it means
 // (bareErrors).
 func readSSEAlive(r io.Reader, fn func(event, data string) error, alive func()) error {
-	if _, ok := r.(*bareErrorReader); !ok {
-		r = bareErrors(r)
+	return readSSEBuffered(r, fn, alive, make([]byte, sseBufferSize))
+}
+
+func readSocketSSE(reader io.Reader, accept func(event, data string) error) error {
+	var buffer *[sseBufferSize]byte
+	select {
+	case buffer = <-socketSSEBuffers:
+	default:
+		buffer = new([sseBufferSize]byte)
 	}
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64<<10), 32<<20)
+	err := readSSEBuffered(reader, accept, nil, buffer[:])
+	clear(buffer[:])
+	select {
+	case socketSSEBuffers <- buffer:
+	default:
+	}
+	return err
+}
+
+func readSSEBuffered(reader io.Reader, accept func(event, data string) error, alive func(), buffer []byte) error {
+	if _, ok := reader.(*bareErrorReader); !ok {
+		reader = bareErrors(reader)
+	}
+	sc := bufio.NewScanner(reader)
+	sc.Buffer(buffer, 32<<20)
 	var event string
 	var data []string
 	flush := func() error {
@@ -34,7 +58,7 @@ func readSSEAlive(r io.Reader, fn func(event, data string) error, alive func()) 
 			event = ""
 			return nil
 		}
-		err := fn(event, strings.Join(data, "\n"))
+		err := accept(event, strings.Join(data, "\n"))
 		event, data = "", nil
 		if err == nil && alive != nil {
 			alive()
