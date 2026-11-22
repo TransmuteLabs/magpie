@@ -83,9 +83,10 @@ const (
 	// socketErrMax is the most of an error reply sent on
 	socketErrMax = 1 << 20
 
-	socketQueueFrames  = 8
-	socketQueueBytes   = 64 << 20
-	socketWriteTimeout = time.Minute
+	socketQueueFrames   = 8
+	socketQueueBytes    = 64 << 20
+	socketOverflowGrace = time.Second
+	socketWriteTimeout  = time.Minute
 )
 
 // clientSockets are the sockets being served, which end with the gateway.
@@ -250,6 +251,36 @@ type socketMsg struct {
 	err  error
 }
 
+func enqueueSocketFrame(queued []socketMsg, queuedBytes int, frame socketMsg, limit int) ([]socketMsg, int, bool) {
+	if len(queued) >= socketQueueFrames {
+		return queued, queuedBytes, false
+	}
+	if cap(frame.data) <= limit-queuedBytes {
+		return append(queued, frame), queuedBytes + cap(frame.data), true
+	}
+	payload := int64(len(frame.data))
+	for _, pending := range queued {
+		payload += int64(len(pending.data))
+	}
+	if payload > int64(limit) {
+		return queued, queuedBytes, false
+	}
+	for index := range queued {
+		queued[index].data = compactSocketFrame(queued[index].data)
+	}
+	frame.data = compactSocketFrame(frame.data)
+	return append(queued, frame), int(payload), true
+}
+
+func compactSocketFrame(data []byte) []byte {
+	if cap(data) == len(data) {
+		return data
+	}
+	compacted := make([]byte, len(data))
+	copy(compacted, data)
+	return compacted
+}
+
 func (rs *responsesSocket) serve(queueLimit int) {
 	ctx, cancel := context.WithCancel(rs.ctx)
 	defer cancel()
@@ -328,15 +359,17 @@ func (rs *responsesSocket) serve(queueLimit int) {
 					return
 				}
 				if gjson.GetBytes(n.data, "type").String() != "response.interrupt" {
-					if len(queued) >= socketQueueFrames || cap(n.data) > queueLimit-queuedBytes {
+					var fits bool
+					queued, queuedBytes, fits = enqueueSocketFrame(queued, queuedBytes, n, queueLimit)
+					if !fits {
 						stop()
 						clear(queued)
+						abort := time.AfterFunc(socketOverflowGrace, cancel)
 						rs.c.Close(websocket.StatusTryAgainLater, "pending response frame limit reached")
+						abort.Stop()
 						<-done
 						return
 					}
-					queued = append(queued, n)
-					queuedBytes += cap(n.data)
 					continue
 				}
 				id := gjson.GetBytes(n.data, "response_id").String()

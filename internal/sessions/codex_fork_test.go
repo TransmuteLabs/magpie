@@ -4,10 +4,118 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
+
+func TestCodexForkCoalescesParentReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "parent.jsonl")
+	writeLines(t, path, strings.TrimSpace(forkCheckpoint(1)))
+	synctest.Test(t, func(t *testing.T) {
+		var scans atomic.Int32
+		release := make(chan struct{})
+		previous := scanHook
+		scanHook = func(name string, _ int64) {
+			if name == path {
+				scans.Add(1)
+				<-release
+			}
+		}
+		defer func() { scanHook = previous }()
+
+		const readers = 5
+		results := make(chan bool, readers)
+		for range readers {
+			go func() {
+				marks, turns := codexCheckpointsOf(path)
+				results <- len(marks) == 1 && len(turns) == 1 && turns["turn-1"]
+			}()
+		}
+		synctest.Wait()
+		close(release)
+		for range readers {
+			if !<-results {
+				t.Error("the reader did not see the parent's checkpoint and turn")
+			}
+		}
+		if count := scans.Load(); count != 1 {
+			t.Fatalf("%d full parent reads for %d callers, want 1", count, readers)
+		}
+	})
+}
+
+func TestCodexForkReadsReplacementDuringParentScan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents replacing a file opened by os.Open")
+	}
+	directory := t.TempDir()
+	path := filepath.Join(directory, "parent.jsonl")
+	replacement := filepath.Join(directory, "replacement.jsonl")
+	writeLines(t, path, strings.TrimSpace(forkCheckpoint(1)))
+	writeLines(t, replacement, strings.TrimSpace(forkCheckpoint(2)))
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	synctest.Test(t, func(t *testing.T) {
+		var scans atomic.Int32
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		previous := scanHook
+		scanHook = func(name string, _ int64) {
+			if name == path && scans.Add(1) == 1 {
+				<-release
+			}
+		}
+		defer func() { scanHook = previous }()
+		defer unblock()
+
+		before := make(chan bool, 1)
+		go func() {
+			marks, turns := codexCheckpointsOf(path)
+			before <- len(marks) == 1 && len(turns) == 1 && turns["turn-1"]
+		}()
+		synctest.Wait()
+		if scans.Load() != 1 {
+			t.Fatal("the original parent scan did not reach the read")
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatal(err)
+		}
+		after := make(chan bool, 1)
+		go func() {
+			marks, turns := codexCheckpointsOf(path)
+			after <- len(marks) == 1 && len(turns) == 1 && turns["turn-2"]
+		}()
+		synctest.Wait()
+		select {
+		case ok := <-after:
+			if !ok {
+				t.Error("the new reader did not get the replacement checkpoint and turn")
+			}
+		default:
+			t.Error("the new reader waited on the prior parent")
+		}
+		unblock()
+		if !<-before {
+			t.Error("the original reader did not read the parent whose identity it saw")
+		}
+		synctest.Wait()
+		marks, turns := codexCheckpointsOf(path)
+		if len(marks) != 1 || len(turns) != 1 || !turns["turn-2"] || scans.Load() != 2 {
+			t.Fatalf("the replacement did not stay cached, got %d marks, %v, %d scans", len(marks), turns, scans.Load())
+		}
+	})
+}
 
 func TestCodexForkCacheReplacesGrowingParent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "parent.jsonl")

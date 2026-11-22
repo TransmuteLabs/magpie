@@ -640,7 +640,7 @@ func (m *Manager) acquire(ctx context.Context, id string, expected *expectedGene
 	if err != nil {
 		return nil, nil, err
 	}
-	return m.acquireWorker(ctx, worker)
+	return m.acquireWorker(ctx, worker, false)
 }
 
 func (m *Manager) selectGenerationWorker(ctx context.Context, id string, expected *expectedGeneration) (*managedWorker, error) {
@@ -694,7 +694,7 @@ func (m *Manager) acquireSelected(ctx context.Context, id string, selected *Inst
 	if err != nil {
 		return nil, nil, err
 	}
-	return m.acquireWorker(ctx, worker)
+	return m.acquireWorker(ctx, worker, false)
 }
 
 func (m *Manager) selectWorker(ctx context.Context, id string, current *moduleGeneration, authoritative bool, admissionErr error) (*managedWorker, *managedWorker, error) {
@@ -729,7 +729,7 @@ func (m *Manager) selectWorker(ctx context.Context, id string, current *moduleGe
 	return worker, stale, nil
 }
 
-func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker) (*managedWorker, *workerClient, error) {
+func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, activation bool) (*managedWorker, *workerClient, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -748,10 +748,7 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker) (*ma
 			return nil, nil, errors.New("extension generation is draining")
 		}
 		if worker.client != nil && worker.client.alive() {
-			if worker.active == 0 {
-				worker.idle = make(chan struct{})
-			}
-			worker.active++
+			worker.retainLocked()
 			client := worker.client
 			worker.mu.Unlock()
 			m.mu.Unlock()
@@ -806,6 +803,9 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker) (*ma
 		retiring := worker.retiring
 		if err == nil && !retiring {
 			worker.client = client
+			if activation {
+				worker.retainLocked()
+			}
 		}
 		worker.starting = nil
 		close(started)
@@ -818,7 +818,17 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker) (*ma
 		if err != nil {
 			return nil, nil, err
 		}
+		if activation {
+			return worker, client, nil
+		}
 	}
+}
+
+func (worker *managedWorker) retainLocked() {
+	if worker.active == 0 {
+		worker.idle = make(chan struct{})
+	}
+	worker.active++
 }
 
 func releaseWorker(worker *managedWorker) {
@@ -938,7 +948,7 @@ func (m *Manager) Call(ctx context.Context, id, method string, scope sdk.Scope, 
 	} else if err := m.checkAccountScope(ctx, scope); err != nil {
 		return nil, beforeProviderDispatch(method, err)
 	}
-	worker, client, err := m.acquireWorker(ctx, worker)
+	worker, client, err := m.acquireWorker(ctx, worker, false)
 	if err != nil {
 		return nil, &OutcomeError{Outcome: "not-started", Cause: err}
 	}

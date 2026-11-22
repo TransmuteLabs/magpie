@@ -15,7 +15,10 @@ const (
 	gatewayActivationCoalesce   = 20 * time.Millisecond
 	gatewayActivationRetryStart = time.Second
 	gatewayActivationRetryMax   = time.Minute
+	gatewayActivationStable     = time.Minute
 )
+
+var errActivationWorkerExited = errors.New("extension worker exited")
 
 type GatewayActivation struct {
 	manager     *Manager
@@ -38,6 +41,7 @@ type activationRetry struct {
 type activationLease struct {
 	*Lease
 	stopWake func() bool
+	since    time.Time
 }
 
 // ListenerOwnerDraining identifies a canceled listener that still holds an
@@ -212,10 +216,18 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 	}
 	for id, lease := range owner.leases {
 		generation, exists := desired[id]
-		if !exists || !generation.entry.Manifest.ActivatesGateway() ||
-			!lease.worker.matches(generation.entry, generation.config) || !lease.client.alive() {
-			owner.withdraw(lease)
-			delete(owner.leases, id)
+		current := exists && generation.entry.Manifest.ActivatesGateway() &&
+			lease.worker.matches(generation.entry, generation.config)
+		if current && lease.client.alive() {
+			if time.Since(lease.since) >= gatewayActivationStable {
+				delete(owner.retries, id)
+			}
+			continue
+		}
+		owner.withdraw(lease)
+		delete(owner.leases, id)
+		if current {
+			owner.recordFailure(id, activationIdentity(generation.entry, generation.config.Version), errActivationWorkerExited)
 		}
 	}
 	if err != nil || owner.ctx.Err() != nil {
@@ -226,47 +238,70 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 		if !entry.Manifest.ActivatesGateway() || owner.leases[id].Lease != nil {
 			continue
 		}
-		identity := entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + config
-		retry, failed := owner.retries[id]
-		if failed {
+		identity := activationIdentity(entry, config)
+		if retry, failed := owner.retries[id]; failed {
 			if retry.identity != identity {
 				delete(owner.retries, id)
-				retry = activationRetry{}
 			} else if time.Now().Before(retry.next) {
 				continue
 			}
 		}
 		ctx, cancel := context.WithTimeout(owner.ctx, 10*time.Second)
-		worker, client, acquireErr := manager.acquire(ctx, id, &expectedGeneration{
+		worker, acquireErr := manager.selectGenerationWorker(ctx, id, &expectedGeneration{
 			packageRevision: entry.Revision, configVersion: config, enableGeneration: &entry.EnableGeneration,
 		})
+		var client *workerClient
+		if acquireErr == nil {
+			_, client, acquireErr = manager.acquireWorker(ctx, worker, true)
+		}
 		cancel()
 		if acquireErr != nil {
 			if owner.ctx.Err() != nil {
 				return
 			}
-			delay := min(max(retry.delay*2, gatewayActivationRetryStart), gatewayActivationRetryMax)
-			owner.retries[id] = activationRetry{identity: identity, next: time.Now().Add(delay), delay: delay}
-			log.Printf("extension gateway activation %s: %v", id, acquireErr)
+			owner.recordFailure(id, identity, acquireErr)
 			continue
 		}
-		lifetime, revoke := context.WithCancel(owner.ctx)
-		lease := activationLease{
-			Lease:    &Lease{manager: manager, worker: worker, client: client, group: client.group, ctx: lifetime, cancel: revoke},
-			stopWake: context.AfterFunc(client.lifetime, owner.wake),
-		}
-		if lease.CheckCurrent(owner.ctx) != nil {
-			owner.withdraw(lease)
-			continue
-		}
-		delete(owner.retries, id)
-		owner.leases[id] = lease
+		owner.retain(worker, client)
 	}
 	for id := range owner.retries {
 		if generation, exists := desired[id]; !exists || !generation.entry.Manifest.ActivatesGateway() {
 			delete(owner.retries, id)
 		}
 	}
+}
+
+func activationIdentity(entry Installed, config string) string {
+	return entry.Revision + "\x00" + entry.EnableGeneration + "\x00" + config
+}
+
+func (owner *GatewayActivation) recordFailure(id, identity string, err error) {
+	if owner.ctx.Err() != nil {
+		return
+	}
+	delay := gatewayActivationRetryStart
+	if retry := owner.retries[id]; retry.identity == identity {
+		delay = min(retry.delay*2, gatewayActivationRetryMax)
+	}
+	owner.retries[id] = activationRetry{identity: identity, next: time.Now().Add(delay), delay: delay}
+	log.Printf("extension gateway activation %s: %v", id, err)
+}
+
+func (owner *GatewayActivation) retain(worker *managedWorker, client *workerClient) {
+	id := worker.entry.Manifest.ID
+	lease := activationLease{
+		Lease:    owner.manager.newLease(owner.ctx, worker, client),
+		stopWake: context.AfterFunc(client.lifetime, owner.wake),
+	}
+	if err := lease.CheckCurrent(owner.ctx); err != nil || !client.alive() {
+		owner.withdraw(lease)
+		if err == nil {
+			owner.recordFailure(id, activationIdentity(worker.entry, worker.config.Version), errActivationWorkerExited)
+		}
+		return
+	}
+	lease.since = time.Now()
+	owner.leases[id] = lease
 }
 
 func (owner *GatewayActivation) withdraw(lease activationLease) {

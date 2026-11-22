@@ -639,6 +639,41 @@ func TestResponsesSocketPendingLimitStopsBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestResponsesSocketPendingPayloadFits(t *testing.T) {
+	const budget = 8 << 10
+	first := create("", userHi)
+	second := create("", userMore)
+	firstSize := 3<<10 + 1
+	c, up, stopped := holdResponsesSocket(t, CodexPath+"/responses", budget)
+	c.send(first + strings.Repeat(" ", firstSize-len(first)))
+	c.send(second + strings.Repeat(" ", budget-firstSize-len(second)))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	_ = c.c.Write(ctx, websocket.MessageText, []byte(`{"type":"response.interrupt","response_id":"resp_wait"}`))
+	events, err := c.until("response.incomplete", "error")
+	if err != nil || last(events).Get("response.incomplete_details.reason").String() != "interrupted" {
+		t.Fatalf("pending payloads used exactly %d bytes: interrupt = %v, %v", budget, events, err)
+	}
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		t.Fatal("interrupted upstream request did not stop")
+	}
+	for index, want := range []string{"hi", "and more"} {
+		events, err := c.until("response.completed", "error")
+		if err != nil || last(events).Get("type").String() != "response.completed" {
+			t.Fatalf("pending turn %d: %v, %v", index, events, err)
+		}
+		if got := gjson.GetBytes(up.body(index+1), "input.0.content.0.text").String(); got != want {
+			t.Errorf("pending turn %d upstream input = %q, want %q", index, got, want)
+		}
+	}
+	if calls := up.calls(); calls != 3 {
+		t.Errorf("upstream calls = %d, want 3", calls)
+	}
+}
+
 type pipeSocketUpgrade struct {
 	*httptest.ResponseRecorder
 	conn net.Conn
@@ -646,6 +681,97 @@ type pipeSocketUpgrade struct {
 
 func (w pipeSocketUpgrade) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
+}
+
+func TestResponsesSocketOverflowDuringWrite(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		drain bool
+	}{
+		{name: "peer stays blocked"},
+		{name: "peer resumes in time for 1013", drain: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				server, peer := net.Pipe()
+				defer server.Close()
+				defer peer.Close()
+				ctx := t.Context()
+				var upgrade *http.Request
+				var conn *websocket.Conn
+				client, _, err := websocket.Dial(ctx, "ws://example.test/v1/responses", &websocket.DialOptions{
+					HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						upgrade = req
+						response := httptest.NewRecorder()
+						var err error
+						conn, err = websocket.Accept(pipeSocketUpgrade{response, server}, req, nil)
+						if err != nil {
+							return nil, err
+						}
+						accepted := response.Result()
+						accepted.Body = peer
+						return accepted, nil
+					})},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer client.CloseNow()
+				started := make(chan struct{})
+				canceled := make(chan struct{})
+				requests := 0
+				via := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					requests++
+					if requests != 1 {
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					io.WriteString(w, sse(`data: {"type":"response.created","response":{"id":"resp_wait","output":[]}}`))
+					close(started)
+					<-r.Context().Done()
+					close(canceled)
+				})
+				socket := responsesSocket{c: conn, ctx: ctx, path: upgrade.URL.Path, o: &socketOrigin{req: upgrade, via: via}}
+				served := make(chan struct{})
+				go func() {
+					socket.serve(socketQueueBytes)
+					close(served)
+				}()
+				if err := client.Write(ctx, websocket.MessageText, []byte(create("", userHi))); err != nil {
+					t.Fatal(err)
+				}
+				<-started
+				synctest.Wait()
+				overflowAt := time.Now()
+				for range socketQueueFrames + 1 {
+					if err := client.Write(ctx, websocket.MessageText, []byte(create("", userMore))); err != nil {
+						t.Fatal(err)
+					}
+				}
+				<-canceled
+				if delay := time.Since(overflowAt); delay != 0 {
+					t.Errorf("provider cancellation took %v", delay)
+				}
+				if test.drain {
+					time.Sleep(250 * time.Millisecond)
+					_, first, err := client.Read(ctx)
+					if err != nil || gjson.GetBytes(first, "type").String() != "response.created" {
+						t.Fatalf("in-flight frame = %q, %v", first, err)
+					}
+					if _, _, err := client.Read(ctx); websocket.CloseStatus(err) != websocket.StatusTryAgainLater {
+						t.Fatalf("close after writes resume = %v, want 1013", err)
+					}
+				}
+				<-served
+				if delay := time.Since(overflowAt); delay > 2*time.Second {
+					t.Errorf("overflow held the blocked socket for %v", delay)
+				}
+				if requests != 1 {
+					t.Errorf("overflow dispatched %d requests, want 1", requests)
+				}
+			})
+		})
+	}
 }
 
 func TestResponsesSocketWriteDeadline(t *testing.T) {
