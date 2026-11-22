@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/yetone/magpie/internal/claudeseal"
 	"github.com/yetone/magpie/internal/codexsummary"
-	"github.com/yetone/magpie/internal/filelock"
 )
 
 const portThread = "01a15820-ff81-7840-bb3f-e18771c53aa8"
@@ -222,17 +222,16 @@ func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	lines := portRolloutLines("s")
 	home, path := portHome(t, lines, false)
 	orig, _ := os.ReadFile(path)
-	lf, err := os.OpenFile(filepath.Join(home, "thread-writer-locks", portThread+".lock"), os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatal(err)
+	_, letGo := holdThread(t, home, portThread)
+	was := rolloutWrites.Load()
+	for pass := range 2 {
+		res, err := PortCodexRollouts(t.Context(), home)
+		if err != nil || !res.Done || !reflect.DeepEqual(res.Held, []string{path}) || len(res.Rewritten) != 0 {
+			t.Fatalf("pass %d with the thread open: %+v, %v", pass+1, res, err)
+		}
 	}
-	defer lf.Close()
-	if got, err := filelock.TryLock(lf); !got || err != nil {
-		t.Fatalf("lock: %v %v", got, err)
-	}
-	res, err := PortCodexRollouts(context.Background(), home)
-	if err != nil || len(res.Held) != 1 || len(res.Rewritten) != 0 {
-		t.Fatalf("pass with the thread open: %+v, %v", res, err)
+	if prepared := rolloutWrites.Load() - was; prepared != 0 {
+		t.Errorf("prepared %d rewrites while the thread was open, want none", prepared)
 	}
 	if b, _ := os.ReadFile(path); !bytes.Equal(b, orig) {
 		t.Fatal("written while a Codex had the thread open")
@@ -240,9 +239,9 @@ func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".magpie-*")); len(left) > 0 {
 		t.Fatalf("left behind: %v", left)
 	}
-	filelock.Unlock(lf)
+	letGo()
 	// the pass after looks again at what it left, though its time is old
-	res, err = PortCodexRollouts(context.Background(), home)
+	res, err := PortCodexRollouts(t.Context(), home)
 	if err != nil || len(res.Rewritten) != 1 {
 		t.Fatalf("pass after: %+v, %v", res, err)
 	}
@@ -255,6 +254,51 @@ func TestPortCodexRolloutsLeavesAnOpenThread(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path2); !bytes.Equal(b, orig2) {
 		t.Fatal("written without Codex's writer locks")
+	}
+}
+
+func TestEditRolloutRechecksPublication(t *testing.T) {
+	for _, change := range []string{"writer opens", "same-stamp replacement"} {
+		t.Run(change, func(t *testing.T) {
+			home, path := portHome(t, portRolloutLines("summary"), false)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := original
+			passes := 0
+			changed, err := editRollout(t.Context(), home, path, func() func([]byte, bool) ([]byte, bool) {
+				passes++
+				if passes == 2 {
+					if change == "writer opens" {
+						holdThread(t, home, portThread)
+					} else {
+						want = bytes.Replace(original, []byte("fix the build"), []byte("run the build"), 1)
+						replacement := path + ".new"
+						if err := os.WriteFile(replacement, want, info.Mode().Perm()); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(replacement, path); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				return func(line []byte, _ bool) ([]byte, bool) { return portLine(line) }
+			})
+			if passes != 2 || changed || !errors.Is(err, errRolloutHeld) {
+				t.Errorf("publication with %s: passes=%d changed=%v err=%v", change, passes, changed, err)
+			}
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("publication replaced the concurrent source: %v", err)
+			}
+		})
 	}
 }
 

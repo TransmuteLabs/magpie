@@ -333,6 +333,8 @@ func portRollout(ctx context.Context, home, path string, left bool) (bool, error
 // see whether a line changes, and only then again to write it: most
 // rollouts a pass looks at have nothing to change, and writing each one
 // out, compressed for a .zst, cost a pass more than reading it (#4735).
+// If a Codex already holds the thread, leave it for a later pass before
+// preparing a rewrite. Publication still takes the locks again.
 func editRollout(ctx context.Context, home, path string, edits func() func(line []byte, paged bool) ([]byte, bool)) (bool, error) {
 	thread := codexThreadOf(filepath.Base(path))
 	if thread == "" {
@@ -344,6 +346,16 @@ func editRollout(ctx context.Context, home, path string, edits func() func(line 
 	}
 	if changed, err := eachEditedLine(ctx, path, edits(), nil); err != nil || !changed {
 		return false, err
+	}
+	locks := filepath.Join(home, "thread-writer-locks")
+	coordination := filepath.Join(locks, ".coordination.lock")
+	threadLock := filepath.Join(locks, thread+".lock")
+	release, writerHeld := lockRolloutPublication(coordination, threadLock, 0)
+	if writerHeld {
+		return false, errRolloutHeld
+	}
+	if release != nil {
+		release()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".magpie-"+filepath.Base(path)+"-*")
 	if err != nil {
@@ -397,34 +409,51 @@ func editRollout(ctx context.Context, home, path string, edits func() func(line 
 	}
 	os.Chtimes(tmp.Name(), fi.ModTime(), fi.ModTime())
 
-	// published as Codex publishes a compressed rollout: under the
-	// coordination lock every Codex writer takes before its thread's
-	// lock, with that lock free (or never made)
-	locks := filepath.Join(home, "thread-writer-locks")
-	unlock, held := filelock.Lock(filepath.Join(locks, ".coordination.lock"), filelock.Wait)
-	if !held {
+	release, _ = lockRolloutPublication(coordination, threadLock, filelock.Wait)
+	if release == nil {
 		return false, errRolloutHeld
 	}
-	defer unlock()
-	if lf, err := os.OpenFile(filepath.Join(locks, thread+".lock"), os.O_RDWR, 0); err == nil {
-		got, err := filelock.TryLock(lf)
-		if err != nil || !got {
-			lf.Close()
-			return false, errRolloutHeld
+	defer release()
+	if err := steady.RenameChecked(tmp.Name(), path, func() error {
+		now, err := os.Stat(path)
+		if err != nil || !os.SameFile(fi, now) || now.Size() != fi.Size() || !now.ModTime().Equal(fi.ModTime()) {
+			return errRolloutHeld
 		}
-		defer func() { filelock.Unlock(lf); lf.Close() }()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return false, errRolloutHeld
-	}
-	// written to since it was read: a Codex had it after all
-	if now, err := os.Stat(path); err != nil || now.Size() != fi.Size() || !now.ModTime().Equal(fi.ModTime()) {
-		return false, errRolloutHeld
-	}
-	if err := steady.Rename(tmp.Name(), path); err != nil {
+		return nil
+	}); err != nil {
 		return false, err
 	}
 	done = true
 	return true, nil
+}
+
+// lockRolloutPublication takes the coordination lock before testing the
+// thread's writer lock, as Codex does when publishing a compressed rollout.
+// writerHeld distinguishes a busy thread from an inconclusive lock probe.
+func lockRolloutPublication(coordination, threadLock string, wait time.Duration) (release func(), writerHeld bool) {
+	unlock, held := filelock.Lock(coordination, wait)
+	if !held {
+		return nil, false
+	}
+	writer, err := os.OpenFile(threadLock, os.O_RDWR, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return unlock, false
+	}
+	if err != nil {
+		unlock()
+		return nil, false
+	}
+	got, err := filelock.TryLock(writer)
+	if !got {
+		writer.Close()
+		unlock()
+		return nil, err == nil
+	}
+	return func() {
+		filelock.Unlock(writer)
+		writer.Close()
+		unlock()
+	}, false
 }
 
 // rolloutWrites counts the rollouts editRollout began to write out.
