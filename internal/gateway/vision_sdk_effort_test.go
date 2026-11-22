@@ -50,33 +50,63 @@ func TestSDKVisionDescriptionEffort(t *testing.T) {
 			Capabilities: []sdk.Capability{sdk.AccountAuth, sdk.ModelDiscovery, sdk.OutboundExecutor},
 		}
 		manifest.Providers[0].Models = []sdk.Model{
-			{ID: eye, Vision: true, Efforts: []string{"high", "low"}, Price: &sdk.ModelPrice{}},
+			{ID: eye, Vision: true, Efforts: []string{"high", "low"}, Price: &sdk.ModelPrice{Input: 2}},
 			{ID: eyeWithNone, Vision: true, Efforts: []string{"high", "none", "low"}, Price: &sdk.ModelPrice{Input: 1}},
-			{ID: eyeUnknown, Vision: true, Price: &sdk.ModelPrice{Input: 2}},
+			{ID: eyeUnknown, Vision: true, Price: &sdk.ModelPrice{}},
 		}
 	})
 	text := &eyeUp{}
 	textUpstream := httptest.NewServer(withoutAnonymousFixtureProbe(text))
 	t.Cleanup(textUpstream.Close)
 	base := textUpstream.URL + "/v1"
-	if err := provider.Save(provider.Provider{ID: "probe", Name: "Probe", Chat: base, Key: "fixture", Models: []string{"text"}}); err != nil {
+	if err := provider.Save(provider.Provider{ID: "probe", Name: "Probe", Chat: base, Key: "fixture", Models: []string{"text", "text-alt"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.SaveLive("probe", base, []catalog.Model{{ID: "text", ImageInput: imageInputBool(false)}}); err != nil {
+	if err := catalog.SaveLive("probe", base, []catalog.Model{
+		{ID: "text", ImageInput: imageInputBool(false)},
+		{ID: "text-alt", ImageInput: imageInputBool(false)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := provider.SetModelID("probe/text-alt", "local-text"); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{ID: "vision-text", Members: []string{"probe/local-text"}, Routing: provider.Ordered}); err != nil {
 		t.Fatal(err)
 	}
 	server := New()
 	t.Cleanup(server.idle.stop)
 	handler := server.Front()
+	post := func(t *testing.T, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/responses", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "127.0.0.1:12345"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	t.Run("text does not ask the SDK describer", func(t *testing.T) {
+		response := post(t, `{"model":"probe/text","input":"read"}`)
+		requestsMu.Lock()
+		count := requestCount
+		requestsMu.Unlock()
+		if got := len(text.sent("text")); response.Code != http.StatusOK || count != 0 || got != 1 {
+			t.Fatalf("text turn: status %d, SDK descriptions %d, text calls %d, response %s", response.Code, count, got, response.Body)
+		}
+	})
 	for _, test := range []struct {
-		name, model, pick, wantEffort string
-		automatic                     bool
-		wantMaxTokens                 int
+		name, model, pick, wantEffort, target, textID string
+		automatic                                     bool
+		wantMaxTokens                                 int
 	}{
-		{name: "automatic minimum", model: eye, automatic: true, wantEffort: "low", wantMaxTokens: 4096},
+		{name: "automatic with unknown levels", model: eyeUnknown, automatic: true, wantMaxTokens: 4096},
+		{name: "minimum when effort is unset", model: eye, wantEffort: "low", wantMaxTokens: 4096},
 		{name: "explicit tie favors higher effort", model: eye, pick: "medium", wantEffort: "high", wantMaxTokens: 28096},
 		{name: "default turns thinking off", model: eyeWithNone, wantEffort: "none", wantMaxTokens: 4096},
 		{name: "unknown levels leave effort out", model: eyeUnknown, pick: "high", wantMaxTokens: 4096},
+		{name: "image sent to alias", model: eyeUnknown, automatic: true, target: "probe/local-text", textID: "text-alt", wantMaxTokens: 4096},
+		{name: "image sent to group", model: eyeUnknown, automatic: true, target: "group/vision-text", textID: "text-alt", wantMaxTokens: 4096},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			current := settings.Load()
@@ -91,14 +121,14 @@ func TestSDKVisionDescriptionEffort(t *testing.T) {
 			requestsMu.Lock()
 			before := requestCount
 			requestsMu.Unlock()
-			textBefore := len(text.sent("text"))
+			target, textID := test.target, test.textID
+			if target == "" {
+				target, textID = "probe/text", "text"
+			}
+			textBefore := len(text.sent(textID))
 			image := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(test.name))
-			body := `{"model":"probe/text","input":[{"role":"user","content":[{"type":"input_text","text":"read"},{"type":"input_image","image_url":"` + image + `"}]}]}`
-			request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/responses", strings.NewReader(body))
-			request.Header.Set("Content-Type", "application/json")
-			request.RemoteAddr = "127.0.0.1:12345"
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, request)
+			body := `{"model":"` + target + `","input":[{"role":"user","content":[{"type":"input_text","text":"read"},{"type":"input_image","image_url":"` + image + `"}]}]}`
+			response := post(t, body)
 			if response.Code != http.StatusOK {
 				t.Fatalf("description request: status %d, body %s", response.Code, response.Body.String())
 			}
@@ -123,7 +153,7 @@ func TestSDKVisionDescriptionEffort(t *testing.T) {
 			if effort != test.wantEffort || (wire.Effort == nil) != (test.wantEffort == "") || wire.MaxTokens != test.wantMaxTokens {
 				t.Fatalf("SDK body %s, want effort %q and max_tokens %d", sent.Body, test.wantEffort, test.wantMaxTokens)
 			}
-			if got := text.sent("text"); len(got) != textBefore+1 || !strings.Contains(got[textBefore], description) ||
+			if got := text.sent(textID); len(got) != textBefore+1 || !strings.Contains(got[textBefore], description) ||
 				strings.Contains(got[textBefore], image) {
 				t.Fatalf("text model did not receive the description in place of the image: %v", got)
 			}

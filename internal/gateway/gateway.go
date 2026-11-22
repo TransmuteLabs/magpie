@@ -7601,13 +7601,14 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	// permission check asks "none", which Command Code turns away; and
 	// reasoning off at a level the model turned away before (below), at its
 	// lowest
-	asked := bodyEffort(proto, body)
-	effort := fitFor(p, model, asked)
-	if offEffort(effort) && s.turnedAway(p, model, effort, proto) {
-		effort = onEffort(p, model)
-	}
-	if asked != "" && effort != asked {
-		body = withBodyEffort(proto, body, effort)
+	if asked := bodyEffort(proto, body); asked != "" {
+		effort := fitFor(p, model, asked)
+		if offEffort(effort) && s.turnedAway(p, model, effort, proto) {
+			effort = onEffort(p, model)
+		}
+		if effort != asked {
+			body = withBodyEffort(proto, body, effort)
+		}
 	}
 	path := upstreamPath(p, proto, upstream)
 	if proto == provider.Responses && unaryCompact(r) && !nativeAccountCompact {
