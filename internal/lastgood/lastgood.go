@@ -117,13 +117,19 @@ func Keep(path string, valid Valid, perm fs.FileMode) error {
 	if err != nil {
 		return err
 	}
+	return KeepBytes(path, b, valid, perm)
+}
+
+// KeepBytes keeps the primary bytes read by a caller holding the same writer
+// lock as Keep.
+func KeepBytes(path string, b []byte, valid Valid, perm fs.FileMode) error {
 	if valid(b) {
 		if old, err := os.ReadFile(Bak(path)); err == nil && bytes.Equal(old, b) {
 			return nil
 		}
 		return steady.WriteFile(Bak(path), b, perm)
 	}
-	_, err = KeepBad(path, b)
+	_, err := KeepBad(path, b)
 	return err
 }
 

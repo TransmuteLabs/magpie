@@ -153,6 +153,12 @@ preserving its size and modification time still changes the next check, and
 an invalid current file defers the reading even if a backup can restore the
 account list for display.
 
+On Unix, when a private regular `logins.json` has the same length as the
+pending write, the writer uses one current read for the exact equality check
+and, if needed, the backup. The read checks that the opened file still
+matches the name. The writer checks the primary again after keeping the
+backup before replacing it. Symlinks and Windows use their existing paths.
+
 Strict account-discovery and legacy LAN key checks share the primary settings
 reader in [`current.go`](../../internal/settings/current.go). It checks the
 current bounded file on each read and reuses validated settings when the

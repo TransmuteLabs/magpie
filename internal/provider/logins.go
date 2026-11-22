@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -365,29 +366,71 @@ func writeLoginsChecked(ls []savedLogin, tell bool, check func() error) error {
 		}
 	}
 	b = append(b, '\n')
-	if fileHolds(loginsPath(), b, 0o600) {
-		// the bytes are on the disk already (#6289): no new generation, no
-		// new mtime, and what filememo parsed stays
-		lastLoginsMu.Lock()
-		lastLogins, loginsKnown = slices.Clone(ls), true
-		lastLoginsMu.Unlock()
-		return nil
-	}
+	path := loginsPath()
+	unchanged, current := compareLoginsForBackup(path, b)
 	// the file there now is kept first: as its last good generation, or
 	// copied aside when it doesn't read, never written over unkept
-	if err := lastgood.Keep(loginsPath(), validLogins, 0o600); err != nil {
-		return err
-	}
-	if err := writePrivateQuietChecked(loginsPath(), b, check); err != nil {
-		return err
+	if !unchanged {
+		if current != nil {
+			err = lastgood.KeepBytes(path, current, validLogins, 0o600)
+		} else {
+			err = lastgood.Keep(path, validLogins, 0o600)
+		}
+		if err != nil {
+			return err
+		}
+		if err := writePrivateQuietChecked(path, b, check); err != nil {
+			return err
+		}
 	}
 	lastLoginsMu.Lock()
 	lastLogins, loginsKnown = slices.Clone(ls), true
 	lastLoginsMu.Unlock()
-	if tell {
+	if tell && !unchanged {
 		Changed()
 	}
 	return nil
+}
+
+func compareLoginsForBackup(path string, wanted []byte) (bool, []byte) {
+	if runtime.GOOS == "windows" {
+		return fileHolds(path, wanted, 0o600), nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return fileHolds(path, wanted, 0o600), nil
+	}
+	if info.Size() != int64(len(wanted)) || info.Mode().Perm() != 0o600 {
+		return false, nil
+	}
+	current := readLoginsForBackup(path, info, len(wanted))
+	if current == nil {
+		return fileHolds(path, wanted, 0o600), nil
+	}
+	return bytes.Equal(current, wanted), current
+}
+
+func readLoginsForBackup(path string, before os.FileInfo, size int) []byte {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || before.Mode() != opened.Mode() || before.Size() != opened.Size() {
+		return nil
+	}
+	current := make([]byte, size+1)
+	count, err := io.ReadFull(file, current)
+	if err != io.ErrUnexpectedEOF || count != size {
+		return nil
+	}
+	named, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, named) || opened.Mode() != named.Mode() ||
+		opened.Size() != named.Size() || !opened.ModTime().Equal(named.ModTime()) {
+		return nil
+	}
+	return current[:count]
 }
 
 // beforeLoginsWrite is called as logins.json is about to be written: for a
