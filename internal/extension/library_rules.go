@@ -14,7 +14,7 @@ type LibraryRule struct {
 }
 
 func (m *Manager) LibraryRules(ctx context.Context) ([]LibraryRule, error) {
-	entries, err := m.ActiveModules(ctx)
+	entries, err := m.selectContributionPoint(ctx, sdk.ContributionLibraryRule, 1)
 	if err != nil {
 		return nil, err
 	}

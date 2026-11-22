@@ -90,7 +90,7 @@ func TestProviderStreamStoreReads(t *testing.T) {
 				call(2)
 				measuredCall := func(chunks int) ([]int, uint64) {
 					var before, after runtime.MemStats
-					reads := countProviderStreamReads(t, files, func() {
+					reads := countExtensionFileReads(t, files, func() {
 						runtime.ReadMemStats(&before)
 						call(chunks)
 						runtime.ReadMemStats(&after)
@@ -162,7 +162,7 @@ func seedProviderStreamAccounts(t *testing.T, manager *Manager, scope sdk.Scope,
 	return info.Size()
 }
 
-func countProviderStreamReads(t *testing.T, files []string, run func()) []int {
+func countExtensionFileReads(t *testing.T, files []string, run func()) []int {
 	t.Helper()
 	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC | unix.IN_NONBLOCK)
 	if err != nil {

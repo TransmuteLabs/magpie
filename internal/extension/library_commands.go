@@ -14,7 +14,7 @@ type LibraryCommand struct {
 }
 
 func (m *Manager) LibraryCommands(ctx context.Context) ([]LibraryCommand, error) {
-	entries, err := m.ActiveModules(ctx)
+	entries, err := m.selectContributionPoint(ctx, sdk.ContributionLibraryCommand, 1)
 	if err != nil {
 		return nil, err
 	}

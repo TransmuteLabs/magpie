@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -30,6 +31,14 @@ func (m *Manager) contributionEntries(ctx context.Context) []Installed {
 
 func (m *Manager) readContributionEntries(ctx context.Context) ([]Installed, error) {
 	return m.selectContributions(ctx, nil)
+}
+
+func (m *Manager) selectContributionPoint(ctx context.Context, point sdk.ContributionPoint, version int) ([]Installed, error) {
+	return m.selectContributions(ctx, func(entry Installed) bool {
+		return slices.ContainsFunc(entry.Manifest.Contributions, func(contribution sdk.ContributionDescriptor) bool {
+			return contribution.Point == point && contribution.Version == version
+		})
+	})
 }
 
 func (m *Manager) selectContributions(ctx context.Context, include func(Installed) bool) ([]Installed, error) {
