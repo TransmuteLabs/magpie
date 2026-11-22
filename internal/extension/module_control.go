@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 
@@ -55,6 +56,22 @@ func (m *Manager) runtimeModuleConfigContext(ctx context.Context, entry Installe
 		slot.Store(&moduleConfigMemo{revision: entry.Revision, digest: digest, values: bytes.Clone(config.Values)})
 	}
 	return config, nil
+}
+
+func sameModuleConfig(current, expected sdk.ConfigSnapshot) bool {
+	if current.Version != expected.Version {
+		return false
+	}
+	if expected.Values == nil || bytes.Equal(current.Values, expected.Values) {
+		return true
+	}
+	parse := func(raw json.RawMessage, values *map[string]any) error {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		return decoder.Decode(values)
+	}
+	var left, right map[string]any
+	return parse(current.Values, &left) == nil && parse(expected.Values, &right) == nil && reflect.DeepEqual(left, right)
 }
 
 func effectiveModuleConfig(manifest sdk.Manifest, values json.RawMessage) (json.RawMessage, error) {

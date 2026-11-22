@@ -266,10 +266,14 @@ scan. This lets a new hold detect another process's account
 replacement/deletion or configuration CAS before reusing provider/model
 snapshots. A configuration transition rebuilds the
 selected model catalog under its new version; already selected old bindings
-remain fenced. Unrelated private state and account-local state do not
-invalidate it. `extension.AccountStamp` reads directory/file metadata and handle-derived
-portable file identities without reading credential contents, acquiring store
-locks or initializing a manager. Identity distinguishes an atomic replacement
+remain fenced. Worker selection and the execute generation fence also compare
+effective configuration values. Replacing the configuration at the same CAS
+version retires workers configured with different values. Reordering JSON
+object fields leaves their configuration current. Unrelated private state and
+account-local state do not invalidate it. `extension.AccountStamp` reads
+directory/file metadata and handle-derived portable file identities without
+reading credential contents, acquiring store locks or initializing a manager.
+Identity distinguishes an atomic replacement
 even when size, mode and mtime are preserved. Observations are serialized outside
 the global provider cache mutex and published with monotonically increasing
 revisions; a delayed old observation cannot replace a newer published one.

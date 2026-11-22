@@ -152,7 +152,7 @@ func (m *Manager) checkRequestPolicy(ctx context.Context, invocation *requestPol
 	if _, err := m.authForContext(ctx, invocation.scope); err != nil {
 		return err
 	}
-	if err := m.checkActiveGeneration(ctx, lease.worker.entry, lease.ConfigVersion()); err != nil {
+	if err := m.checkActiveConfig(ctx, lease.worker.entry, lease.worker.config); err != nil {
 		return err
 	}
 	invocation.mu.Lock()

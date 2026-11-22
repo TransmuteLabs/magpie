@@ -17,7 +17,7 @@ type MiddlewareRun struct {
 
 	manager    *Manager
 	entry      Installed
-	config     string
+	config     sdk.ConfigSnapshot
 	descriptor sdk.GatewayMiddlewareDescriptor
 	info       sdk.GatewayContext
 	ctx        context.Context
@@ -49,7 +49,7 @@ func (selection GatewaySelection) BeginMiddleware(ctx context.Context, info sdk.
 		}
 		owned, cancel := context.WithCancel(ctx)
 		runs = append(runs, &MiddlewareRun{Module: entry.Manifest.ID, manager: selection.manager, entry: entry,
-			config: config.Version, descriptor: *descriptor,
+			config: config, descriptor: *descriptor,
 			info: info, ctx: owned, cancel: cancel})
 	}
 	return runs
@@ -65,7 +65,7 @@ func (run *MiddlewareRun) Descriptor() sdk.GatewayMiddlewareDescriptor {
 var errMiddlewareChanged = errors.New("middleware package or configuration changed")
 
 func (run *MiddlewareRun) check(ctx context.Context) error {
-	if err := run.manager.checkActiveGeneration(ctx, run.entry, run.config); err != nil {
+	if err := run.manager.checkActiveConfig(ctx, run.entry, run.config); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -91,7 +91,7 @@ func (run *MiddlewareRun) Apply(method string, body []byte, extra sdk.Middleware
 	if run.lease == nil {
 		startup, cancel := context.WithTimeout(run.ctx, time.Second)
 		worker, client, err := run.manager.acquire(startup, run.Module, &expectedGeneration{
-			packageRevision: run.entry.Revision, configVersion: run.config, enableGeneration: &run.entry.EnableGeneration,
+			packageRevision: run.entry.Revision, configVersion: run.config.Version, enableGeneration: &run.entry.EnableGeneration,
 		})
 		cancel()
 		if err != nil {

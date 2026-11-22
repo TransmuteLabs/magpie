@@ -545,7 +545,7 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 
 func (w *managedWorker) matches(entry Installed, config sdk.ConfigSnapshot) bool {
 	return w.entry.Revision == entry.Revision && w.entry.EnableGeneration == entry.EnableGeneration &&
-		w.config.Version == config.Version
+		sameModuleConfig(w.config, config)
 }
 
 func (m *Manager) detachWorkerLocked(id string, worker *managedWorker) {
@@ -791,7 +791,7 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, acti
 			}
 		}
 		if err == nil {
-			err = m.checkActiveGeneration(handshake, worker.entry, worker.config.Version)
+			err = m.checkActiveConfig(handshake, worker.entry, worker.config)
 			if err != nil {
 				_ = closeModuleClient(client)
 				client = nil
@@ -1420,7 +1420,7 @@ func (l *Lease) providerExecuteAdmission(scope sdk.Scope, exact bool, next worke
 				return nil
 			}
 			if exact {
-				err = m.withActiveGeneration(ctx, l.worker.entry, l.ConfigVersion(), checkSelection)
+				err = m.withActiveConfig(ctx, l.worker.entry, l.worker.config, checkSelection)
 			} else {
 				err = checkSelection()
 			}

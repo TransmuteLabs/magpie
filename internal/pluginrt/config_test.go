@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/filememo"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -240,6 +241,93 @@ func TestKeepFreshFollowsPluginsYml(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(1)
+}
+
+func TestKeepFreshFollowsSameStampPluginsYml(t *testing.T) {
+	home(t)
+	var applied atomic.Int32
+	const id = "same-stamp-plugins"
+	registerTestFeature(t, sdk.FeatureContribution{ID: id, Activate: func(lifetime sdk.FeatureLifetime) error {
+		applied.Add(1)
+		lifetime.OnDispose(func() { applied.Add(-1) })
+		return nil
+	}})
+	t.Cleanup(func() {
+		defMu.Lock()
+		defer defMu.Unlock()
+		if def != nil {
+			def.Stop()
+			def = nil
+		}
+	})
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	on := []byte("plugins:\n  - id: " + id + "\n    enabled: true \n")
+	off := []byte("plugins:\n  - id: " + id + "\n    enabled: false\n")
+	if err := os.WriteFile(Path(), on, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	scanned, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		KeepFresh(ctx, func() time.Duration {
+			select {
+			case scanned <- struct{}{}:
+			case <-ctx.Done():
+			}
+			return time.Hour
+		})
+	}()
+	defer func() { cancel(); <-done }()
+	check := func(want int32) {
+		t.Helper()
+		select {
+		case <-scanned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runtime did not check configuration")
+		}
+		if got := applied.Load(); got != want {
+			t.Errorf("active feature count = %d, want %d", got, want)
+		}
+	}
+	write := func(path string, body []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check(1)
+	next := Path() + ".replacement"
+	write(next, off)
+	if err := os.Rename(next, Path()); err != nil {
+		t.Fatal(err)
+	}
+	filememo.Forget()
+	check(0)
+	write(Path(), []byte("plugins: ["))
+	filememo.Forget()
+	check(0)
+	write(Path(), on)
+	filememo.Forget()
+	check(1)
+	write(Path(), off)
+	filememo.Forget()
+	check(0)
+	if err := os.Remove(Path()); err != nil {
+		t.Fatal(err)
+	}
+	filememo.Forget()
+	check(1)
 }
 
 func TestRefreshRetainsAnIsolatedConfiguration(t *testing.T) {

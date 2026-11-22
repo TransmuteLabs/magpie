@@ -16,7 +16,7 @@ func (lease *Lease) CheckCurrent(ctx context.Context) error {
 	if lease.closed.Load() || lease.ctx.Err() != nil {
 		return errors.New("native account operation lease closed")
 	}
-	return lease.manager.checkActiveGeneration(ctx, lease.worker.entry, lease.ConfigVersion())
+	return lease.manager.checkActiveConfig(ctx, lease.worker.entry, lease.worker.config)
 }
 
 func (m *Manager) checkActiveGeneration(ctx context.Context, expected Installed, configVersion string) error {
@@ -24,6 +24,14 @@ func (m *Manager) checkActiveGeneration(ctx context.Context, expected Installed,
 }
 
 func (m *Manager) withActiveGeneration(ctx context.Context, expected Installed, configVersion string, publish func() error) error {
+	return m.withActiveConfig(ctx, expected, sdk.ConfigSnapshot{Version: configVersion}, publish)
+}
+
+func (m *Manager) checkActiveConfig(ctx context.Context, expected Installed, config sdk.ConfigSnapshot) error {
+	return m.withActiveConfig(ctx, expected, config, nil)
+}
+
+func (m *Manager) withActiveConfig(ctx context.Context, expected Installed, expectedConfig sdk.ConfigSnapshot, publish func() error) error {
 	if m == nil || m.isClosed() {
 		return errContributionRevoked
 	}
@@ -44,7 +52,7 @@ func (m *Manager) withActiveGeneration(ctx context.Context, expected Installed, 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err != nil || config.Version != configVersion {
+		if err != nil || !sameModuleConfig(config, expectedConfig) {
 			return errors.New("extension configuration changed")
 		}
 		if publish != nil {

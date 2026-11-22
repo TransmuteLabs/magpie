@@ -32,7 +32,7 @@ func (manager *Manager) catalogProjectionCurrent(ctx context.Context, scope sdk.
 	if _, err := manager.authForContext(ctx, scope); err != nil {
 		return err
 	}
-	return manager.checkActiveGeneration(ctx, group.entry, group.config.Version)
+	return manager.checkActiveConfig(ctx, group.entry, group.config)
 }
 
 func (manager *Manager) readCatalogProjection(ctx context.Context, scope sdk.Scope, raw json.RawMessage, authority hostAuthority) (any, error) {

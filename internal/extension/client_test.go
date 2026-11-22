@@ -1110,7 +1110,7 @@ func TestManagerCallRechecksProviderExecutionAfterSlotWait(t *testing.T) {
 }
 
 func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
-	for _, change := range []string{"enable epoch", "sign out", "privacy", "unchanged"} {
+	for _, change := range []string{"enable epoch", "sign out", "privacy", "configuration replacement", "unchanged"} {
 		t.Run(change, func(t *testing.T) {
 			t.Setenv("MAGPIE_NO_ACCOUNTS", "0")
 			manager, scope := usageManagerVersion(t, 9, func(manifest *sdk.Manifest) {
@@ -1118,6 +1118,11 @@ func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
+			if change == "configuration replacement" {
+				if _, err := manager.CompareAndSwapModuleConfig(ctx, scope.Plugin, "0", json.RawMessage(`{"mode":"fast"}`)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			lease, err := manager.Acquire(ctx, scope.Plugin)
 			if err != nil {
 				t.Fatal(err)
@@ -1149,6 +1154,8 @@ func TestManagerCallRechecksProviderExecutionAfterOwnerAdmission(t *testing.T) {
 					return peer.DeleteSubscriptionAccount(logoutCtx, logout, "")
 				case "privacy":
 					t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+				case "configuration replacement":
+					replaceRuntimeConfigAtSameVersion(t, manager, scope.Plugin, `"fast"`, `"safe"`)
 				}
 				return nil
 			})
