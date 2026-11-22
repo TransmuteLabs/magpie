@@ -1281,12 +1281,35 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 		}
 	}
 	admit := m.subscriptionAdmission(ctx, manifest, method, scope, authMutation)
+	var recheckQueuedTool bool
+	if method == sdk.MethodToolCall && scope.Account != "" && admit == nil {
+		_, recheckQueuedTool = ctx.Value(toolAccountCheckKey{}).(toolAccountCheck)
+	}
 	if method == sdk.MethodProviderExecute && (expected != nil || scope.Account != "") {
 		admit = l.providerExecuteAdmission(scope, expected != nil, admit)
 	}
 	if effect && scope.Provider != "" && manifest.Contract.Version.Minor >= 8 && manifest.Contract.Has(sdk.UsageReporter) &&
 		(method == sdk.MethodModuleCall || method == sdk.MethodToolCall) {
 		admit = m.ownCallAdmission(ctx, scope, admit)
+	}
+	if recheckQueuedTool {
+		previous := admit
+		admit = func(dispatch context.Context) (func(bool), error) {
+			if previous == nil {
+				return nil, checkWindowAdmission(dispatch)
+			}
+			release, err := previous(dispatch)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkWindowAdmission(dispatch); err != nil {
+				if release != nil {
+					release(true)
+				}
+				return nil, err
+			}
+			return release, nil
+		}
 	}
 	if middleware {
 		previous := admit

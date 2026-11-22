@@ -35,14 +35,18 @@ uses the existing leased `auth.refresh` transaction before the tool runs.
 Only the durable, exact refresh successor with usable expiry is adopted;
 manual credential replacements do not transfer the old call's authority.
 The selected package, configuration, enablement generation, account and network
-policy are checked again before dispatch, acceptance and successful result
-publication. Disabling and re-enabling a module revokes a prepared call even
+policy are checked again after the worker queue opens, at acceptance and
+before successful result publication. A refusal after the queue leaves a
+`not-started` receipt before the worker receives the tool call. Disabling and
+re-enabling a module revokes a prepared call even
 when its package and configuration stay the same. Disabled, paused or held
 selections fail closed. Unbound tools and unknown-expiry accounts do not trigger
 refresh.
 There is no reactive 401 refresh or automatic tool replay. The ordinary paths,
 concurrent rotating exchange and revocation controls are exercised by
 `TestExtensionToolExpiryPreflight*` in the gateway package.
+`TestExtensionToolAccountRecheckedAfterWorkerQueue` checks interleaved login,
+credential, configuration and discovery changes through MCP `tools/call`.
 `TestExtensionToolPublicationKeepsSelectedAuthority` holds actual worker replies
 across revocation on MCP and both Library paths. The shared `Lease.Call` result
 check runs before usage/result publication and completed journaling; a revoked
