@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/yetone/magpie/internal/memembed"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -180,13 +181,13 @@ func wordHits(pool []*Memory, text string) []Hit {
 	var matches []int
 	for i, m := range pool {
 		doc := i + 1
-		for _, word := range Words(m.Text + " " + m.Why + " " + strings.Join(m.Tags, " ") + " " + m.Kind) {
-			if slot, exists := byWord[word]; exists && terms[slot].lastDoc != doc {
+		visitWordBytes(m.Text+" "+m.Why+" "+strings.Join(m.Tags, " ")+" "+m.Kind, func(word []byte) {
+			if slot, exists := byWord[string(word)]; exists && terms[slot].lastDoc != doc {
 				terms[slot].lastDoc = doc
 				terms[slot].frequency++
 				matches = append(matches, slot)
 			}
-		}
+		})
 		offsets[doc] = len(matches)
 	}
 	for i := range terms {
@@ -318,37 +319,39 @@ func kindRank(k string) int {
 // and each pair of them, since those are written without spaces.
 func Words(s string) []string {
 	out := []string{}
-	var word []rune
-	var cjk []rune
+	visitWordBytes(s, func(word []byte) {
+		out = append(out, string(word))
+	})
+	return out
+}
+
+func visitWordBytes(s string, visit func([]byte)) {
+	var word []byte
+	var cjk [2 * utf8.UTFMax]byte
+	var previousCJK rune
 	flushWord := func() {
 		if len(word) > 0 {
-			out = append(out, string(word))
+			visit(word)
 			word = word[:0]
 		}
-	}
-	flushCJK := func() {
-		for i := range cjk {
-			out = append(out, string(cjk[i]))
-			if i+1 < len(cjk) {
-				out = append(out, string(cjk[i:i+2]))
-			}
-		}
-		cjk = cjk[:0]
 	}
 	for _, r := range s {
 		switch {
 		case unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul):
 			flushWord()
-			cjk = append(cjk, r)
+			if previousCJK != 0 {
+				prefix := utf8.AppendRune(cjk[:0], previousCJK)
+				visit(utf8.AppendRune(prefix, r))
+			}
+			visit(utf8.AppendRune(cjk[:0], r))
+			previousCJK = r
 		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			flushCJK()
-			word = append(word, unicode.ToLower(r))
+			previousCJK = 0
+			word = utf8.AppendRune(word, unicode.ToLower(r))
 		default:
 			flushWord()
-			flushCJK()
+			previousCJK = 0
 		}
 	}
 	flushWord()
-	flushCJK()
-	return out
 }

@@ -99,6 +99,33 @@ func TestLexicalMembershipAllocationBudget(t *testing.T) {
 	}
 }
 
+func TestLexicalDocumentWordAllocationBudget(t *testing.T) {
+	pool := make([]*Memory, 32)
+	for index := range pool {
+		record := &Memory{Text: "unrelated ", Scope: Global}
+		if index%8 == 0 {
+			record.Tags = []string{"match"}
+		}
+		pool[index] = record
+	}
+	count := func() float64 {
+		return testing.AllocsPerRun(5, func() {
+			if hits := wordHits(pool, "match"); len(hits) != len(pool)/8 {
+				t.Fatalf("got %d matches, want %d", len(hits), len(pool)/8)
+			}
+		})
+	}
+	short := count()
+	for _, record := range pool {
+		if len(record.Tags) == 0 {
+			record.Text = strings.Repeat(record.Text, 64)
+		}
+	}
+	if long := count(); long > short+float64(len(pool)) {
+		t.Fatalf("long documents allocated %.0f times, short documents %.0f", long, short)
+	}
+}
+
 func BenchmarkLexicalMembership(b *testing.B) {
 	for _, count := range []int{192, 768} {
 		b.Run(fmt.Sprintf("records=%d", count), func(b *testing.B) {

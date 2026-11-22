@@ -13,6 +13,10 @@ func TestWordsSplitsCJK(t *testing.T) {
 	if got != "用|go|写|写测|测|测试|试|mote|run" {
 		t.Fatalf("words %q", got)
 	}
+	got = strings.Join(Words("ÅNGSTRÖM12𠀀界カ한KI\xffZ e\u0301\u0663"), "|")
+	if got != "ångström12|𠀀|𠀀界|界|界カ|カ|カ한|한|ki|z|e|٣" {
+		t.Fatalf("words %q", got)
+	}
 }
 
 func TestSearch(t *testing.T) {
