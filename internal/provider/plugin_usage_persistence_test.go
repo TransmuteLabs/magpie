@@ -172,6 +172,8 @@ func TestPluginUsageObservationsAcrossProcesses(t *testing.T) {
 	}{
 		{name: "changed-plan", old: pluginUsageReply{http.StatusOK, "Older plan"}, new: pluginUsageReply{http.StatusOK, "Newer plan"}, newPlan: "Newer plan", wantPlan: "Newer plan"},
 		{name: "reaffirmed-plan", old: pluginUsageReply{http.StatusOK, "Older plan"}, new: pluginUsageReply{http.StatusOK, "Saved plan"}, newPlan: "Saved plan", wantPlan: "Saved plan"},
+		{name: "reaffirmed-sign-in", old: pluginUsageReply{status: http.StatusUnauthorized}, new: pluginUsageReply{http.StatusOK, "Saved plan"}, newPlan: "Saved plan", wantPlan: "Saved plan"},
+		{name: "reaffirmed-lapse", old: pluginUsageReply{http.StatusOK, "Saved plan"}, new: pluginUsageReply{http.StatusOK, `{"plan":"Saved plan","signIn":"expired"}`}, newPlan: "Saved plan", wantPlan: "Saved plan", wasLapsed: true, wantLapse: true},
 		{name: "renewed-sign-in", old: pluginUsageReply{status: http.StatusUnauthorized}, new: pluginUsageReply{http.StatusOK, `{"plan":"Newer plan","signIn":"renewed"}`}, newPlan: "Newer plan", wantPlan: "Newer plan"},
 		{name: "response-renewed", old: pluginUsageReply{status: http.StatusUnauthorized}, new: pluginUsageReply{http.StatusBadGateway, "renewed"}, wantPlan: "Saved plan"},
 		{name: "response-expired", old: pluginUsageReply{http.StatusOK, "Older plan"}, new: pluginUsageReply{http.StatusBadGateway, "expired"}, wantPlan: "Older plan", wasLapsed: true, wantLapse: true},
