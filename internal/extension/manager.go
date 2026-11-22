@@ -41,6 +41,13 @@ type managedWorker struct {
 	config     sdk.ConfigSnapshot
 }
 
+var errGenerationDraining = errors.New("extension generation is draining")
+
+type gatewayGroupGeneration struct {
+	revision, enabled string
+	config            sdk.ConfigSnapshot
+}
+
 type Manager struct {
 	mu                sync.Mutex
 	reloadMu          sync.Mutex
@@ -51,6 +58,7 @@ type Manager struct {
 	protocolMu        sync.Mutex
 	protocols         *installedProtocols
 	workers           map[string]*managedWorker
+	gatewayGroups     map[string]map[chan struct{}]gatewayGroupGeneration
 	closed            bool
 	closeDone         chan struct{}
 	closeErr          error
@@ -572,6 +580,21 @@ func (m *Manager) detachWorkerLocked(id string, worker *managedWorker, expectedC
 	return true
 }
 
+func (m *Manager) finishComponentRetirement(id string, done chan struct{}) {
+	if m == nil {
+		close(done)
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	groups := m.gatewayGroups[id]
+	delete(groups, done)
+	if len(groups) == 0 {
+		delete(m.gatewayGroups, id)
+	}
+	close(done)
+}
+
 func (m *Manager) retire(worker *managedWorker) <-chan struct{} {
 	worker.mu.Lock()
 	worker.retiring = true
@@ -752,6 +775,12 @@ func (m *Manager) selectWorker(ctx context.Context, id string, current *moduleGe
 	if admissionErr != nil {
 		return nil, stale, admissionErr
 	}
+	for _, group := range m.gatewayGroups[id] {
+		if group.revision != current.entry.Revision || group.enabled != current.entry.EnableGeneration ||
+			!sameModuleConfig(group.config, current.config) {
+			return nil, stale, errGenerationDraining
+		}
+	}
 	if worker == nil {
 		m.startLifecycleLocked()
 		worker = &managedWorker{entry: current.entry, config: cloneModuleConfig(current.config)}
@@ -776,11 +805,14 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, acti
 		if worker.retiring {
 			worker.mu.Unlock()
 			m.mu.Unlock()
-			return nil, nil, errors.New("extension generation is draining")
+			return nil, nil, errGenerationDraining
 		}
 		if worker.client != nil && worker.client.alive() {
 			worker.retainLocked()
 			client := worker.client
+			if activation {
+				m.retainGatewayGroupLocked(worker, client.group)
+			}
 			worker.mu.Unlock()
 			m.mu.Unlock()
 			return worker, client, nil
@@ -814,11 +846,18 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, acti
 		}
 		if err == nil {
 			group := newComponentGroup(m, worker.entry, worker.config)
-			err = group.prepare(handshake, client)
-			if err == nil {
-				client.group = group
+			if activation && !m.admitGatewayGroupStartup(worker, group) {
+				group.beginClose()
+				client.close()
+				client = nil
+				err = errGenerationDraining
 			} else {
-				_ = group.Close(context.Background())
+				err = group.prepare(handshake, client)
+				if err == nil {
+					client.group = group
+				} else {
+					_ = group.Close(context.Background())
+				}
 			}
 		}
 		if err == nil {
@@ -852,6 +891,39 @@ func (m *Manager) acquireWorker(ctx context.Context, worker *managedWorker, acti
 		if activation {
 			return worker, client, nil
 		}
+	}
+}
+
+func (m *Manager) admitGatewayGroupStartup(worker *managedWorker, group *componentGroup) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if m.closed || worker.retiring {
+		return false
+	}
+	m.retainGatewayGroupLocked(worker, group)
+	return true
+}
+
+func (m *Manager) retainGatewayGroupLocked(worker *managedWorker, group *componentGroup) {
+	if group == nil || len(worker.entry.Manifest.Services) == 0 {
+		return
+	}
+	select {
+	case <-group.closeDone:
+		return
+	default:
+	}
+	id := worker.entry.Manifest.ID
+	if m.gatewayGroups == nil {
+		m.gatewayGroups = make(map[string]map[chan struct{}]gatewayGroupGeneration)
+	}
+	if m.gatewayGroups[id] == nil {
+		m.gatewayGroups[id] = make(map[chan struct{}]gatewayGroupGeneration)
+	}
+	m.gatewayGroups[id][group.closeDone] = gatewayGroupGeneration{
+		revision: worker.entry.Revision, enabled: worker.entry.EnableGeneration, config: worker.config,
 	}
 }
 

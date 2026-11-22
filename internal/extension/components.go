@@ -578,7 +578,7 @@ func (group *componentGroup) beginClose() {
 		group.mu.Unlock()
 		group.cancel()
 		go func() {
-			defer close(group.closeDone)
+			defer group.manager.finishComponentRetirement(group.entry.Manifest.ID, group.closeDone)
 			shutdown, cancel := context.WithTimeout(context.Background(), componentCloseTimeout)
 			defer cancel()
 			group.starts.Wait()

@@ -46,7 +46,11 @@ func TestMain(m *testing.M) {
 				}
 			}
 		}
-		if err := sdk.Serve(context.Background(), os.Stdin, os.Stdout, gatewayFixtureModule()); err != nil {
+		module := gatewayFixtureModule()
+		if module.Manifest.ID == activationStartupFixtureID {
+			module.Start = holdActivationPrimaryStart
+		}
+		if err := sdk.Serve(context.Background(), os.Stdin, os.Stdout, module); err != nil {
 			os.Exit(1)
 		}
 		os.Exit(0)
