@@ -791,9 +791,10 @@ same account. SDK accounts require their scoped reading after transfer,
 including when legacy quota snapshots used the same public ID. Catalog
 projection and the cached cards endpoint use the caller's context to
 validate quota evidence.
-Kept cards look up SDK background readings with one usage revision snapshot
-per Store module. The card and report publication checks sample current
-authority separately, including after caller scope and hold reckoning.
+Kept cards and routing look up SDK readings with one usage revision
+snapshot per Store module at each check. The card and report publication
+checks sample current authority separately, including after caller scope
+and hold reckoning.
 
 The scheduled Usage refresh preserves the previous snapshot and its age
 if account discovery runs out of time. It releases the pending read so a

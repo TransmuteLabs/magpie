@@ -441,6 +441,51 @@ func loginReadingCacheKeyContext(ctx context.Context, login Login) string {
 	return login.Agent + "/" + strings.ToLower(login.User)
 }
 
+func loginReadingCacheKeysContext(ctx context.Context, logins []Login) []string {
+	type module struct {
+		store *extensionhost.Store
+		id    string
+	}
+	type batch struct {
+		indexes []int
+		scopes  []sdk.Scope
+	}
+	batches := map[module]*batch{}
+	keys := make([]string, len(logins))
+	for index, login := range logins {
+		binding := login.extension
+		if binding == nil {
+			keys[index] = loginReadingCacheKeyContext(ctx, login)
+			continue
+		}
+		scope := binding.currentScope()
+		keys[index] = extensionUsageKeyPrefix(binding, scope)
+		if scope.Account == "" {
+			continue
+		}
+		selected := module{binding.host.Store(), scope.Plugin}
+		accounts := batches[selected]
+		if accounts == nil {
+			accounts = &batch{}
+			batches[selected] = accounts
+		}
+		accounts.indexes = append(accounts.indexes, index)
+		accounts.scopes = append(accounts.scopes, scope)
+	}
+	for selected, accounts := range batches {
+		stamps, _ := selected.store.UsageStampsContext(ctx, selected.id, accounts.scopes)
+		if ctx.Err() != nil {
+			return nil
+		}
+		for index, scope := range accounts.scopes {
+			stamp, found := stamps[scope]
+			position := accounts.indexes[index]
+			keys[position] = extensionUsageKeyWithStamp(keys[position], stamp, found)
+		}
+	}
+	return keys
+}
+
 func loginReadingUserKey(agent, user string) string {
 	if logins, external := extensionLogins(agent); external {
 		for _, login := range logins {
@@ -458,9 +503,14 @@ func extensionUsageBindings(agent string, owners *extensionSubscriptionOwners) (
 	if !external {
 		return nil, false
 	}
-	bindings := map[string]string{}
-	for _, login := range logins {
-		bindings[login.User] = loginReadingCacheKey(login)
+	bindings := make(map[string]string, len(logins))
+	if len(logins) == 1 {
+		login := logins[0]
+		bindings[login.User] = loginReadingCacheKeyContext(ctx, login)
+		return bindings, true
+	}
+	for index, key := range loginReadingCacheKeysContext(ctx, logins) {
+		bindings[logins[index].User] = key
 	}
 	return bindings, true
 }
