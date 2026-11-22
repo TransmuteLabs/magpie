@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -150,8 +149,7 @@ func TestHistoryWritersKeepConcurrentRecords(t *testing.T) {
 				if err := syncFile(file); err != nil {
 					return err
 				}
-				if filepath.Dir(file.Name()) != filepath.Dir(historyPath) ||
-					!strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(historyPath)+".") {
+				if !stagedWriteFor(file, historyPath) {
 					return nil
 				}
 				stageErr = cmd.Start()
@@ -251,8 +249,7 @@ func TestQuotaHistoryImportReturnsFailureUntilPublished(t *testing.T) {
 	fail := errors.New("quota history fixture flush failed")
 	syncFile := steady.Sync
 	steady.Sync = func(file *os.File) error {
-		if filepath.Dir(file.Name()) == filepath.Dir(quotaHistPath()) &&
-			strings.HasPrefix(filepath.Base(file.Name()), ".quota-history.json.") {
+		if stagedWriteFor(file, quotaHistPath()) {
 			return fail
 		}
 		return syncFile(file)

@@ -199,8 +199,7 @@ func TestFoldCopiesRetriesHistoryPublication(t *testing.T) {
 				func() {
 					defer func() { steady.Sync = syncFile }()
 					steady.Sync = func(file *os.File) error {
-						if filepath.Dir(file.Name()) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".") &&
-							!strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".bak.") {
+						if stagedWriteFor(file, path) {
 							return failure
 						}
 						return syncFile(file)
@@ -438,9 +437,7 @@ func TestFoldCopiesRetriesSettingsAndProviderPublication(t *testing.T) {
 				defer func() { steady.Sync = syncFile }()
 				writes := 0
 				steady.Sync = func(file *os.File) error {
-					if filepath.Dir(file.Name()) == filepath.Dir(path) &&
-						strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".") &&
-						!strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".bak.") {
+					if stagedWriteFor(file, path) {
 						writes++
 						if writes == scenario.publication {
 							return failure
@@ -481,9 +478,7 @@ func TestFoldCopiesRechecksSettingsBeforePublishing(t *testing.T) {
 		defer func() { steady.Sync = syncFile }()
 		changed := false
 		steady.Sync = func(file *os.File) error {
-			if !changed && filepath.Dir(file.Name()) == filepath.Dir(settings.Path()) &&
-				strings.HasPrefix(filepath.Base(file.Name()), ".settings.json.") &&
-				!strings.HasPrefix(filepath.Base(file.Name()), ".settings.json.bak.") {
+			if !changed && stagedWriteFor(file, settings.Path()) {
 				changed = true
 				if err := os.WriteFile(settings.Path(), next, 0o600); err != nil {
 					return err
@@ -521,9 +516,7 @@ func TestFoldCopiesKeepsHistoriesWhenPreferencesDivergeDuringPublication(t *test
 		defer func() { steady.Sync = syncFile }()
 		changed := false
 		steady.Sync = func(file *os.File) error {
-			name := filepath.Base(file.Name())
-			if !changed && filepath.Dir(file.Name()) == filepath.Dir(Path()) &&
-				strings.HasPrefix(name, ".providers.json.") && !strings.HasPrefix(name, ".providers.json.bak.") {
+			if !changed && stagedWriteFor(file, Path()) {
 				changed = true
 				if err := os.WriteFile(settings.Path(), next, 0o600); err != nil {
 					return err

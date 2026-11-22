@@ -6,8 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +25,7 @@ func TestPluginUsageRejectsPeerCredentialCommitWithoutLoginWrite(t *testing.T) {
 		failedLoginSync := false
 		path := loginsPath()
 		steady.Sync = func(file *os.File) error {
-			if filepath.Dir(file.Name()) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".") {
+			if stagedWriteFor(file, path) {
 				failedLoginSync = true
 				return errors.New("fixture refused final login metadata sync")
 			}

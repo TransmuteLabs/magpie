@@ -68,7 +68,7 @@ func TestPluginWalletDiscoveryAtPublication(t *testing.T) {
 					if err := syncFile(file); err != nil {
 						return err
 					}
-					if filepath.Dir(file.Name()) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".") {
+					if stagedWriteFor(file, path) {
 						flushed = true
 						return disable()
 					}
@@ -568,8 +568,7 @@ func TestPluginWalletPublicationHoldsOwner(t *testing.T) {
 	t.Cleanup(func() { steady.Sync = syncFile })
 	steady.Sync = func(file *os.File) error {
 		err := syncFile(file)
-		if err == nil && filepath.Dir(file.Name()) == filepath.Dir(path) &&
-			strings.HasPrefix(filepath.Base(file.Name()), "."+filepath.Base(path)+".") {
+		if err == nil && stagedWriteFor(file, path) {
 			cutoverAtFlush <- cutover()
 		}
 		return err

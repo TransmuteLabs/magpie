@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +125,7 @@ func cancelHistoryFlush(t *testing.T, path string, cancel context.CancelFunc) *b
 	flushed := false
 	steady.Sync = func(f *os.File) error {
 		err := oldSync(f)
-		if err == nil && filepath.Dir(f.Name()) == filepath.Dir(path) && strings.HasPrefix(filepath.Base(f.Name()), "."+filepath.Base(path)+".") {
+		if err == nil && stagedWriteFor(f, path) {
 			flushed = true
 			cancel()
 		}
