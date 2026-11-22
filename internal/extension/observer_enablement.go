@@ -19,10 +19,14 @@ func observerEnablementFile(id string) string {
 // generation is unknown and cannot admit module calls.
 func readObserverEnablement(root *os.Root, id string) (string, error) {
 	name := observerEnablementFile(id)
-	if _, err := root.Lstat(name); errors.Is(err, fs.ErrNotExist) {
+	info, err := root.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
-	raw, err := catalogReadFile(root, name, observerEnablementLimit)
+	if err != nil {
+		return "", errors.New("extension observer enablement is unreadable")
+	}
+	raw, err := catalogReadBoundedFile(root, name, info, observerEnablementLimit, nil)
 	var value string
 	if err != nil || json.Unmarshal(raw, &value) != nil || len(value) < 26 || strings.ContainsFunc(value, func(char rune) bool {
 		return !(char >= 'A' && char <= 'Z' || char >= '2' && char <= '7')

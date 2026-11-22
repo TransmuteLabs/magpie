@@ -821,12 +821,13 @@ func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
 }
 
 func catalogReadSnapshot(root *os.Root, room []byte) ([]byte, catalogSnapshot, error) {
-	if _, err := root.Lstat("catalog.json"); errors.Is(err, fs.ErrNotExist) {
+	info, err := root.Lstat("catalog.json")
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, catalogSnapshot{}, nil
 	} else if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
-	data, err := catalogReadFileInto(root, "catalog.json", catalogJSONLimit, room)
+	data, err := catalogReadBoundedFile(root, "catalog.json", info, catalogJSONLimit, room)
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -1092,14 +1093,14 @@ func catalogClone(entry Installed) (Installed, error) {
 }
 
 func catalogReadFile(root *os.Root, name string, limit int64) ([]byte, error) {
-	return catalogReadFileInto(root, name, limit, nil)
-}
-
-func catalogReadFileInto(root *os.Root, name string, limit int64, room []byte) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
+	return catalogReadBoundedFile(root, name, info, limit, nil)
+}
+
+func catalogReadBoundedFile(root *os.Root, name string, info fs.FileInfo, limit int64, room []byte) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, fmt.Errorf("extension file %q %w", name, errCatalogFileShape)
 	}
