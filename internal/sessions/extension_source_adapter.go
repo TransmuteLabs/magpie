@@ -84,6 +84,10 @@ func PrepareSessionSources(ctx context.Context) error {
 		return err
 	}
 	previous := sourceView.Load()
+	var reuse sourceRecordReuse
+	if previous != nil {
+		reuse.records = previous.records
+	}
 	var problems []error
 	owners := enabledSourceOwners(entries)
 	for _, entry := range entries {
@@ -141,7 +145,7 @@ func PrepareSessionSources(ctx context.Context) error {
 							problems = append(problems, errors.New("session source snapshot record budget exceeded"))
 							break
 						}
-						record, err := prepareSourceRecord(ctx, manager, selected, grant, name, previous)
+						record, err := prepareSourceRecord(ctx, manager, selected, grant, name, &reuse)
 						if record != nil {
 							view.records = append(view.records, record)
 						}
@@ -211,7 +215,50 @@ func sourceBoundOwners(view *sessionSourceView) map[string]bool {
 	return owners
 }
 
-func prepareSourceRecord(ctx context.Context, manager *extension.Manager, selected sessionModuleSelection, grant sourceGrant, name string, previous *sessionSourceView) (*sessionSourceRecord, error) {
+type sourceRecordLocator struct {
+	reference, enableGeneration, path string
+}
+
+type sourceRecordReuse struct {
+	records   []*sessionSourceRecord
+	byLocator map[sourceRecordLocator]*sessionSourceRecord
+}
+
+func (reuse *sourceRecordReuse) find(grant sourceGrant, name string) *sessionSourceRecord {
+	key := sourceRecordLocator{grant.reference, grant.enableGeneration, name}
+	if len(reuse.records) > 1 {
+		if reuse.byLocator == nil {
+			reuse.byLocator = make(map[sourceRecordLocator]*sessionSourceRecord, len(reuse.records))
+			for _, record := range reuse.records {
+				locator := sourceRecordLocator{record.grant.reference, record.grant.enableGeneration, record.request.Locator.Path}
+				if _, duplicate := reuse.byLocator[locator]; duplicate {
+					reuse.byLocator[locator] = nil
+				} else {
+					reuse.byLocator[locator] = record
+				}
+			}
+		}
+		record, found := reuse.byLocator[key]
+		if !found {
+			return nil
+		}
+		if record != nil {
+			if os.SameFile(record.grant.info, grant.info) {
+				return record
+			}
+			return nil
+		}
+	}
+	for _, record := range reuse.records {
+		if record.grant.reference == grant.reference && record.grant.enableGeneration == grant.enableGeneration &&
+			record.request.Locator.Path == name && os.SameFile(record.grant.info, grant.info) {
+			return record
+		}
+	}
+	return nil
+}
+
+func prepareSourceRecord(ctx context.Context, manager *extension.Manager, selected sessionModuleSelection, grant sourceGrant, name string, reuse *sourceRecordReuse) (*sessionSourceRecord, error) {
 	grant.revision = selected.entry.Revision
 	grant.enableGeneration = selected.entry.EnableGeneration
 	epoch := sourceEpoch.Load()
@@ -227,17 +274,7 @@ func prepareSourceRecord(ctx context.Context, manager *extension.Manager, select
 		}
 		return checkSourceGrant(ctx, grant)
 	})
-	var old *sessionSourceRecord
-	if previous != nil {
-		for _, record := range previous.records {
-			if record.grant.reference == grant.reference && record.grant.enableGeneration == grant.enableGeneration &&
-				record.request.Locator.Path == name &&
-				os.SameFile(record.grant.info, grant.info) {
-				old = record
-				break
-			}
-		}
-	}
+	old := reuse.find(grant, name)
 	request, snapshot, err := captureSourceRequest(ctx, grant, name, "summary")
 	if err == nil && old != nil && sameSourceSelection(request, old.request) && !old.stale && old.snapshot.check(ctx) == nil {
 		return old, nil

@@ -18,7 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-func installedSourceFixture(t *testing.T) (*extension.Manager, extension.Installed, string) {
+func installedSourceFixture(t testing.TB) (*extension.Manager, extension.Installed, string) {
 	t.Helper()
 	distribution := os.Getenv("MAGPIE_SOURCE_TEST_DIST")
 	if distribution == "" {
@@ -49,7 +49,7 @@ func installedSourceFixture(t *testing.T) (*extension.Manager, extension.Install
 	return manager, entry, path
 }
 
-func sourceFixtureWrite(t *testing.T, path, text string, input uint64) {
+func sourceFixtureWrite(t testing.TB, path, text string, input uint64) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"id": strings.TrimSuffix(filepath.Base(path), ".jsonl"), "cwd": "/work/source",
 		"title": text, "at": "2026-11-13T00:00:00Z", "role": "user", "text": text, "input": input})

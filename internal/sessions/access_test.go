@@ -13,7 +13,7 @@ import (
 
 // consentHome is setupCalls with settings of its own, and the gate as a
 // user's magpie has it: nothing settled reads as unsettled, not all-on.
-func consentHome(t *testing.T) callDirs {
+func consentHome(t testing.TB) callDirs {
 	t.Helper()
 	d := setupCalls(t)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(filepath.Dir(d.claude), "config"))
