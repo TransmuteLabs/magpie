@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -88,6 +90,167 @@ func TestExtensionCatalogProjectionKeepsAccountSelectionAndNeverFetchesVendor(t 
 			result.Accounts[0].Models[0].ID != id+"/"+want {
 			t.Fatal("selected catalog account used another account's models", result, err)
 		}
+	}
+}
+
+type countingCatalogProjectionHost struct {
+	*fixtureExtensionProviderHost
+	selections atomic.Int32
+}
+
+func (host *countingCatalogProjectionHost) ActiveModuleConfig(ctx context.Context, id string) (extensionhost.Installed, sdk.ConfigSnapshot, error) {
+	host.selections.Add(1)
+	config, err := host.ModuleConfig(ctx, id)
+	return extensionhost.Installed{Manifest: host.manifest, Revision: "fixture"}, config, err
+}
+
+func TestExtensionCatalogProjectionModelSelectionDoesNotScaleWithModels(t *testing.T) {
+	project := func(t *testing.T, modelCount int) int32 {
+		t.Helper()
+		host := &countingCatalogProjectionHost{fixtureExtensionProviderHost: fixtureExtensionProvider(t, true)}
+		models := make([]sdk.Model, 0, modelCount)
+		picks := make([]string, 0, modelCount)
+		for index := range modelCount {
+			id := "m" + strconv.Itoa(index+1)
+			models = append(models, sdk.Model{ID: id})
+			picks = append(picks, id)
+		}
+		host.manifest.Providers[0].Models = models
+		providerExtensionHost = func() extensionProviderHost { return host }
+		Changed()
+		providerID := ExtensionProviderID(host.manifest.ID, "vendor")
+		if err := SetModels(providerID, picks); err != nil {
+			t.Fatal(err)
+		}
+		host.selections.Store(0)
+		Changed()
+
+		result, err := extensionCatalogProjection(t.Context(), sdk.Scope{Plugin: "reader"},
+			sdk.CatalogAccessDescriptor{Scope: "inventory"})
+		accounts := 0
+		for _, account := range result.Accounts {
+			if account.Provider != providerID {
+				continue
+			}
+			accounts++
+			if len(account.Models) != modelCount {
+				t.Fatalf("account %q has %d models, want %d", account.Ref, len(account.Models), modelCount)
+			}
+		}
+		if err != nil || accounts != 2 {
+			t.Fatalf("projected %d SDK accounts, error %v", accounts, err)
+		}
+		selections := host.selections.Load()
+		t.Logf("SDK configuration selections for %d models: %d", modelCount, selections)
+		return selections
+	}
+	baseline := project(t, 1)
+	if baseline == 0 {
+		t.Fatal("fixture did not exercise SDK selection")
+	}
+	for _, modelCount := range []int{10, 100} {
+		t.Run(strconv.Itoa(modelCount), func(t *testing.T) {
+			if selections := project(t, modelCount); selections != baseline {
+				t.Fatalf("SDK model selection count = %d, want one-model baseline %d", selections, baseline)
+			}
+		})
+	}
+}
+
+func TestExtensionCatalogProjectionDistinguishesUnknownEmptyAndUnreadableAccountModels(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	host.manifest.Providers[0].Models = nil
+	access := sdk.CatalogAccessDescriptor{Scope: "selected"}
+	alice := sdk.Scope{Plugin: host.manifest.ID, Provider: "vendor", Account: "alice", Generation: 1}
+	bob := alice
+	bob.Account = "bob"
+	providers, err := ExtensionProviders()
+	if err != nil || len(providers) != 2 {
+		t.Fatalf("fixture providers = %d, %v", len(providers), err)
+	}
+	binding := func(scope sdk.Scope) *extensionAccount {
+		t.Helper()
+		for _, provider := range providers {
+			if candidate := provider.Account.extension; candidate.currentScope() == scope {
+				return candidate
+			}
+		}
+		t.Fatalf("missing fixture account %s", scope.Account)
+		return nil
+	}
+	peer := extensionhost.NewStore(host.Namespace())
+	seed := func(scope sdk.Scope, modelIDs ...string) {
+		t.Helper()
+		selected := *binding(scope)
+		external := *host
+		external.store = peer
+		selected.host = &external
+		module := sdk.Scope{Plugin: scope.Plugin}
+		before, err := peer.StateGetContext(t.Context(), module, selected.modelCatalogKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		models := make([]sdk.Model, 0, len(modelIDs))
+		for _, id := range modelIDs {
+			models = append(models, sdk.Model{ID: id})
+		}
+		if _, err := selected.writeModelCatalog(t.Context(), sdk.ModelsResult{Models: models}, before); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed(bob, "beta", "alpha")
+	Changed()
+	providerID := ExtensionProviderID(bob.Plugin, bob.Provider)
+	if _, changed, err := SetModelID(providerID+"/beta", "local-beta"); err != nil || !changed {
+		t.Fatalf("name vendor model locally: changed %t, error %v", changed, err)
+	}
+	project := func(scope sdk.Scope, wantModels ...string) string {
+		t.Helper()
+		result, err := extensionCatalogProjection(t.Context(), scope, access)
+		if len(wantModels) == 0 {
+			if err == nil || len(result.Accounts) != 0 {
+				t.Fatalf("projected an account with no eligible models: %+v, %v", result, err)
+			}
+			return ""
+		}
+		if err != nil || len(result.Accounts) != 1 {
+			t.Fatalf("selected projection: %+v, %v", result, err)
+		}
+		projected := result.Accounts[0]
+		got := make([]string, 0, len(projected.Models))
+		for _, model := range projected.Models {
+			got = append(got, model.ID)
+		}
+		if !slices.Equal(got, wantModels) || projected.Kind != "account" || projected.Quota.Known {
+			t.Fatalf("selected models = %v, want %v (account %+v)", got, wantModels, projected)
+		}
+		return projected.Ref
+	}
+
+	aliceRef := project(alice, providerID+"/local-beta", providerID+"/alpha")
+	bobRef := project(bob, providerID+"/local-beta", providerID+"/alpha")
+	if aliceRef == bobRef {
+		t.Fatal("separate account scopes shared an opaque reference")
+	}
+	seed(alice)
+	project(alice)
+
+	module := sdk.Scope{Plugin: alice.Plugin}
+	key := binding(alice).modelCatalogKey()
+	current, err := peer.StateGetContext(t.Context(), module, key)
+	if err != nil || current.Version == 0 {
+		t.Fatalf("missing known-empty model root: %+v, %v", current, err)
+	}
+	if _, err := peer.StateCASContext(t.Context(), module, key, current.Version, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	project(alice)
+	if ref := project(bob, providerID+"/local-beta", providerID+"/alpha"); ref != bobRef {
+		t.Fatal("Alice's unreadable model list changed Bob's identity")
+	}
+	seed(alice, "alpha")
+	if ref := project(alice, providerID+"/alpha"); ref != aliceRef {
+		t.Fatal("replacing Alice's model list changed her identity")
 	}
 }
 

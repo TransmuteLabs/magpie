@@ -74,12 +74,7 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 					}
 				}
 				projection := projectedCatalogAccount(scope.Plugin, configured.ID, "account", account.Account.User)
-				for _, entry := range byProvider[configured.ID] {
-					if configured.AccountServes(account.Account.User, entry.Model) &&
-						account.Account.listsContext(ctx, configured.OwnModelID(entry.Model)) {
-						projection.Models = append(projection.Models, projectedCatalogModel(entry))
-					}
-				}
+				projection.Models = projectedCatalogAccountModels(ctx, configured, account.Account, byProvider[configured.ID])
 				for _, card := range cards {
 					if card.Provider == configured.ID && strings.EqualFold(card.User, account.Account.User) {
 						projection.Quota = projectedCatalogQuota(configured, currentExtensionQuotaContext(ctx, card), projection.Models)
@@ -130,6 +125,41 @@ func extensionCatalogProjection(ctx context.Context, scope sdk.Scope, access sdk
 		return sdk.CatalogReadResult{}, err
 	}
 	return result, nil
+}
+
+func projectedCatalogAccountModels(ctx context.Context, configured Provider, account *Account, entries []Entry) []sdk.CatalogModelProjection {
+	var models []sdk.CatalogModelProjection
+	var allowed map[string]struct{}
+	loaded := false
+	binding := account.extension
+	for _, entry := range entries {
+		if !configured.AccountServes(account.User, entry.Model) {
+			continue
+		}
+		own := configured.OwnModelID(entry.Model)
+		if binding != nil {
+			if !loaded {
+				list, known, err := binding.selectedModels(ctx)
+				if err != nil || known && len(list) == 0 {
+					return nil
+				}
+				if len(list) > 0 {
+					allowed = make(map[string]struct{}, len(list))
+					for _, model := range list {
+						allowed[model.ID] = struct{}{}
+					}
+				}
+				loaded = true
+			}
+			if _, ok := allowed[own]; allowed != nil && !ok {
+				continue
+			}
+		} else if !account.listsContext(ctx, own) {
+			continue
+		}
+		models = append(models, projectedCatalogModel(entry))
+	}
+	return models
 }
 
 func projectedCatalogAccount(module, provider, kind, account string) sdk.CatalogAccountProjection {
