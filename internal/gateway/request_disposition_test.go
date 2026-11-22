@@ -78,7 +78,9 @@ func main(){
    return reply,nil
   }
   if err:=stream.Emit(ctx,"accepted",sdk.AcceptedEvent{OperationID:call.Scope.Operation});err!=nil{return nil,err}
-  content,_:=json.Marshal(map[string]any{"id":"fixture","model":request.Model,"choices":[]any{map[string]any{"index":0,"message":map[string]string{"role":"assistant","content":call.Scope.Account},"finish_reason":"stop"}}})
+  answer:=call.Scope.Account
+  if said,ok:=reply["chatAnswer"].(string);ok{answer=said}
+  content,_:=json.Marshal(map[string]any{"id":"fixture","model":request.Model,"choices":[]any{map[string]any{"index":0,"message":map[string]string{"role":"assistant","content":answer},"finish_reason":"stop"}}})
   var usage *sdk.Usage
   if request.Operation=="systemone" {content=[]byte("{\"answers\":{\"safe\":{\"type\":\"noul\",\"noul\":0.93},\"intent\":{\"choice\":\"safe\",\"confidence\":0.93},\"levels\":{\"noul\":0}},\"usage\":{\"input_tokens\":41,\"output_tokens\":3}}");usage=&sdk.Usage{InputTokens:41,OutputTokens:3}}
   if err:=stream.Emit(ctx,"headers",sdk.HeadersEvent{Status:200,Headers:http.Header{"Content-Type":{"application/json"}}});err!=nil{return nil,err}
@@ -625,6 +627,56 @@ func TestFinalRefusalGroupCanLeaveSpentProvider(t *testing.T) {
 	response := requestPolicyFront(t, `{"model":"budget-group","messages":[{"role":"user","content":"hello"}]}`)
 	if response.Code != 200 || first.Load() != 1 || second.n != 1 {
 		t.Fatalf("status=%d sends=(%d,%d) body=%s", response.Code, first.Load(), second.n, response.Body.String())
+	}
+}
+
+func TestChatClassifierTerminalEffortStopsRouting(t *testing.T) {
+	var intentCalls, effortCalls, targetCalls atomic.Int32
+	id := installPolicyRouteFixture(t, func(writer http.ResponseWriter, request *http.Request) {
+		var input struct{ Body []byte }
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Error(err)
+			http.Error(writer, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(string(input.Body), "Levels:") {
+			effortCalls.Add(1)
+			json.NewEncoder(writer).Encode(map[string]any{
+				"wireBody": `{"error":{"message":"accepted effort failed"}}`,
+				"status":   http.StatusServiceUnavailable,
+				"outcome":  "accepted",
+			})
+			return
+		}
+		intentCalls.Add(1)
+		io.WriteString(writer, `{"chatAnswer":"1"}`)
+	})
+	resetClassified(t)
+	serveOn(t, "scope-target", "target", []string{"default", "chosen"}, withoutAnonymousFixtureProbe(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			targetCalls.Add(1)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		io.WriteString(writer, chatOK)
+	})))
+	if err := provider.SaveGroup(provider.Group{ID: "intent", Name: "Intent", Routing: provider.Ordered,
+		Members: []string{"scope-target/default", "scope-target/chosen"}, Classifier: id + "/free", Effort: provider.EffortAuto,
+		Rules: []provider.Rule{{Use: "scope-target/chosen", Intent: "bug"}}}); err != nil {
+		t.Fatal(err)
+	}
+	reply := requestPolicyFront(t, `{"model":"group/intent","reasoning_effort":"medium","messages":[{"role":"user","content":"fix this bug"}]}`)
+	if intentCalls.Load() != 1 || effortCalls.Load() != 1 {
+		t.Fatalf("intent and effort dispatched %d and %d times, want one each", intentCalls.Load(), effortCalls.Load())
+	}
+	if reply.Code != http.StatusConflict || reply.Header().Get("X-Should-Retry") != "false" ||
+		reply.Header().Get("X-Magpie-Operation") == "" || targetCalls.Load() != 0 {
+		t.Fatalf("terminal effort was discarded: target calls=%d status=%d headers=%v body=%s", targetCalls.Load(), reply.Code, reply.Header(), reply.Body)
+	}
+	rest := requestPolicyFront(t, `{"model":"group/intent","reasoning_effort":"medium","messages":[{"role":"user","content":"fix the next bug"}]}`)
+	if rest.Code != http.StatusConflict || rest.Header().Get("X-Should-Retry") != "false" ||
+		rest.Header().Get("X-Magpie-Operation") != "" || intentCalls.Load() != 1 || effortCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Fatalf("resting classifier replayed or exposed a prior receipt: status=%d headers=%v calls=%d/%d/%d",
+			rest.Code, rest.Header(), intentCalls.Load(), effortCalls.Load(), targetCalls.Load())
 	}
 }
 

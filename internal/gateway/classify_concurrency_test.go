@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -77,6 +78,61 @@ func TestConcurrentClassificationSharesAnswer(t *testing.T) {
 			t.Fatalf("completed cache = %+v, %v, %v; calls = %d", v, cached, err, calls.Load())
 		}
 	})
+}
+
+func TestConcurrentClassificationSharesPartialAnswerAndAsksAgain(t *testing.T) {
+	resetClassified(t)
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		results := make(chan classifyResult, 2)
+		var calls atomic.Int32
+		partial := verdict{Intent: "refactoring", Said: "1"}
+		complete := verdict{Intent: "refactoring", Said: "1", Effort: "high", Score: 2}
+		effortErr := errors.New("the effort answer was invalid")
+		ask := func(access.Identity, string, []string, before, bool, string) (verdict, error) {
+			if calls.Add(1) == 1 {
+				<-release
+				return partial, effortFailed{effortErr}
+			}
+			return complete, nil
+		}
+		run := func() {
+			value, cached, err := classifyContext(t.Context(), ask, access.Identity{}, t.Name(), []string{"refactoring"}, before{}, true, "rename this package")
+			results <- classifyResult{value, cached, err}
+		}
+		go run()
+		synctest.Wait()
+		go run()
+		synctest.Wait()
+		close(release)
+		for range 2 {
+			got := <-results
+			if got.v != partial || got.cached || !errors.Is(got.err, effortErr) {
+				t.Errorf("partial answer = %+v, cached = %v, error = %v", got.v, got.cached, got.err)
+			}
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("partial answer dispatched %d questions, want 1", calls.Load())
+		}
+		run()
+		if got := <-results; got.v != complete || got.cached || got.err != nil || calls.Load() != 2 {
+			t.Fatalf("next answer = %+v, cached = %v, error = %v, calls = %d", got.v, got.cached, got.err, calls.Load())
+		}
+	})
+}
+
+func TestClassificationCanceledBeforePublishingPartialAnswer(t *testing.T) {
+	resetClassified(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ask := func(access.Identity, string, []string, before, bool, string) (verdict, error) {
+		cancel()
+		return verdict{Intent: "refactoring"}, effortFailed{errors.New("the effort answer was invalid")}
+	}
+	value, cached, err := classifyContext(ctx, ask, access.Identity{}, t.Name(), []string{"refactoring"}, before{}, true, "rename this package")
+	if value != (verdict{}) || cached || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled classifier published %+v, cached = %v, error = %v", value, cached, err)
+	}
 }
 
 func TestConcurrentClassificationDistinctKeys(t *testing.T) {

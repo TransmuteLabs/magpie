@@ -10,6 +10,7 @@ import (
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -107,6 +108,10 @@ type Classified struct {
 	Cached bool    `json:"cached,omitempty"` // said before, for the same message
 	Ms     int     `json:"ms,omitempty"`     // how long asking it took
 	Error  string  `json:"error,omitempty"`  // why it couldn't say: no intent matches then, unless Fallback
+	// EffortError: why it couldn't say how hard the turn is, asked apart
+	// from its intent, which still holds: the turn reasons as the agent
+	// asked
+	EffortError string `json:"effortError,omitempty"`
 	// Above: the reasoning a group above this one picked for the turn, so
 	// this one's classifier wasn't asked for it (#4358): the turn reasons
 	// at that, not as the agent asked
@@ -364,12 +369,15 @@ func ruleFor(key string, g provider.Group, ms []provider.Member, req *Request, a
 			if len(intents) > 0 {
 				c.Sure = v.Sure
 			}
-			if err != nil {
+			switch {
+			case err != nil && terminalExtensionError(err):
 				c.Error = err.Error()
-				if terminalExtensionError(err) {
-					hit.Classified, hit.terminal = c, err
-					return hit
-				}
+				hit.Classified, hit.terminal = c, err
+				return hit
+			case errors.As(err, new(effortFailed)):
+				c.EffortError = err.Error()
+			case err != nil:
+				c.Error = err.Error()
 				if c.After != "" {
 					// timed out, failed or resting: the intent the turn
 					// before had, still one of this turn's, is a better
