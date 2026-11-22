@@ -581,8 +581,8 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 	if socketTurnBody != nil {
 		socketTurnBody(body)
 	}
-	turnID := gjson.GetBytes(body, "client_metadata.turn_id").String()
-	req := rs.request(ctx, body)
+	_, hasClientMetadata := q["client_metadata"]
+	req, turnID := rs.request(ctx, body, hasClientMetadata)
 	if req.Header.Get("X-Codex-Turn-State") == "" && turnID != "" && turnID == rs.stateTurn {
 		req.Header.Set("X-Codex-Turn-State", rs.turnState)
 	}
@@ -690,7 +690,7 @@ func (*socketRequestBody) Close() error { return nil }
 
 // request is the POST a turn stands for: the upgrade's own request, its
 // URL, Host, address and headers, with the turn as its body.
-func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Request {
+func (rs *responsesSocket) request(ctx context.Context, body []byte, hasClientMetadata bool) (*http.Request, string) {
 	o := rs.o.req
 	req := o.Clone(ctx)
 	req.Method = http.MethodPost
@@ -724,19 +724,23 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 	// (codexSocketMessage, the other way)
 	// — the turn state in the header alone, which goes on only to the
 	// account that was given it (codex_turnstate.go)
-	if v := gjson.GetBytes(body, `client_metadata.x-codex-turn-state`).String(); v != "" {
-		req.Header.Set("X-Codex-Turn-State", v)
-		body = withoutClientMetadata(body, "x-codex-turn-state")
-	}
-	if strings.EqualFold(gjson.GetBytes(body, `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`).String(), "true") {
-		req.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
+	var turnID string
+	if hasClientMetadata {
+		turnID = gjson.GetBytes(body, "client_metadata.turn_id").String()
+		if v := gjson.GetBytes(body, `client_metadata.x-codex-turn-state`).String(); v != "" {
+			req.Header.Set("X-Codex-Turn-State", v)
+			body = withoutClientMetadata(body, "x-codex-turn-state")
+		}
+		if strings.EqualFold(gjson.GetBytes(body, `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`).String(), "true") {
+			req.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
+		}
 	}
 	req.Body = &socketRequestBody{Reader: *bytes.NewReader(body), data: body}
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 	req.ContentLength = int64(len(body))
 	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	req.RequestURI = ""
-	return req
+	return req, turnID
 }
 
 // socketTurnWriter takes the HTTP reply a turn is given and sends it on
