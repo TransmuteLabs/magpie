@@ -252,8 +252,8 @@ default manager under the provider cache lock.
 Private SDK account and root module-configuration metadata share a source
 stamp. Each new hold, including one overlapping an existing request, observes
 a scan that starts after the hold arrives. Holds already waiting for the next
-scan can share its successful result. A hold arriving during a scan waits for
-a later scan. This lets a new hold detect another process's account
+scan share its revision. A hold arriving during a scan waits for a later
+scan. This lets a new hold detect another process's account
 replacement/deletion or configuration CAS before reusing provider/model
 snapshots. A configuration transition rebuilds the
 selected model catalog under its new version; already selected old bindings
@@ -264,8 +264,9 @@ locks or initializing a manager. Identity distinguishes an atomic replacement
 even when size, mode and mtime are preserved. Observations are serialized outside
 the global provider cache mutex and published with monotonically increasing
 revisions; a delayed old observation cannot replace a newer published one.
-Unavailable metadata invalidates the snapshot rather than comparing as unchanged.
-Other holds waiting on a failed scan take a fresh observation.
+Unavailable metadata advances the invalidation revision for the whole batch.
+Those holds can rebuild under the new revision. Each subsequent batch still
+observes a fresh scan.
 Quota-only account-file publication conservatively invalidates it too;
 unrelated scoped state does not.
 The stamp remains an optimistic cache hint: an in-place rewrite preserving

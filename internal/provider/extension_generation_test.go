@@ -39,13 +39,12 @@ func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
 		t.Fatalf("account fixture did not change the stamp: %v", err)
 	}
 	for _, attempt := range []struct {
-		name           string
-		secondError    error
-		waiters        int
-		waiterRevision extensionAccountFiles
+		name             string
+		scanError        error
+		repairedRevision extensionAccountFiles
 	}{
-		{name: "sharing", waiters: 8, waiterRevision: 2},
-		{name: "failed_observation", secondError: errors.New("metadata unavailable"), waiters: 1, waiterRevision: 3},
+		{name: "sharing", repairedRevision: 3},
+		{name: "persistent_error", scanError: errors.New("metadata unavailable"), repairedRevision: 4},
 	} {
 		t.Run(attempt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -56,6 +55,7 @@ func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
 				finishSecond := sync.OnceFunc(func() { close(secondFinished) })
 				defer finishFirst()
 				defer finishSecond()
+				repaired := false
 				read := func() (extensionhost.AccountFileStamp, error) {
 					switch reads.Add(1) {
 					case 1:
@@ -63,10 +63,14 @@ func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
 						return empty, nil
 					case 2:
 						<-secondFinished
-						return account, attempt.secondError
-					default:
-						return empty, nil
+						if attempt.scanError == nil {
+							return account, nil
+						}
 					}
+					if !repaired && attempt.scanError != nil {
+						return extensionhost.AccountFileStamp{}, attempt.scanError
+					}
+					return empty, nil
 				}
 				start := func() <-chan extensionAccountFiles {
 					result := make(chan extensionAccountFiles, 1)
@@ -77,7 +81,7 @@ func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
 				synctest.Wait()
 				leader := start()
 				synctest.Wait()
-				waiting := make([]<-chan extensionAccountFiles, attempt.waiters)
+				waiting := make([]<-chan extensionAccountFiles, 16)
 				for index := range waiting {
 					waiting[index] = start()
 				}
@@ -90,33 +94,74 @@ func TestExtensionAccountObservationSharesOnlyTheNextScan(t *testing.T) {
 				if got := reads.Load(); got != 2 {
 					t.Fatalf("queued hold did not start a fresh scan, reads=%d", got)
 				}
-				var later <-chan extensionAccountFiles
-				if attempt.secondError == nil {
-					later = start()
-					synctest.Wait()
-				}
+				later := start()
+				synctest.Wait()
 				finishSecond()
 				if firstRevision, leaderRevision := <-first, <-leader; firstRevision != 1 || leaderRevision != 2 {
 					t.Fatalf("first and queued observations got revisions %d and %d", firstRevision, leaderRevision)
 				}
+				batched := 0
 				for _, waiter := range waiting {
-					if observed := <-waiter; observed != attempt.waiterRevision {
-						t.Errorf("waiting hold observed revision %d, want %d", observed, attempt.waiterRevision)
+					if observed := <-waiter; observed == 2 {
+						batched++
 					}
 				}
-				if later != nil {
-					if observed := <-later; observed != 3 {
-						t.Errorf("hold arriving during the second scan observed its old revision %d", observed)
-					}
+				if batched != len(waiting) {
+					t.Errorf("%d of %d queued holds got the second scan's revision", batched, len(waiting))
+				}
+				if observed := <-later; observed != 3 {
+					t.Errorf("hold arriving during the second scan observed revision %d, want 3", observed)
 				}
 				if got := reads.Load(); got != 3 {
 					t.Errorf("read %d stamps, want three fresh scans", got)
 				}
-				if serial := <-start(); serial != 3 || reads.Load() != 4 {
-					t.Errorf("serial hold must make a fresh read even when its stamp is unchanged, revision=%d scans=%d", serial, reads.Load())
+				repaired = true
+				if serial := <-start(); serial != attempt.repairedRevision || reads.Load() != 4 {
+					t.Errorf("first serial hold after repair: revision=%d reads=%d, want %d and 4",
+						serial, reads.Load(), attempt.repairedRevision)
+				}
+				if repeat := <-start(); repeat != attempt.repairedRevision || reads.Load() != 5 {
+					t.Errorf("next serial hold with unchanged stamp: revision=%d reads=%d, want %d and 5",
+						repeat, reads.Load(), attempt.repairedRevision)
 				}
 			})
 		})
+	}
+}
+
+func TestExtensionAccountObservationErrorInvalidatesHeldCatalog(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	originalHeld := heldFor
+	heldFor = time.Hour
+	t.Cleanup(func() { heldFor = originalHeld })
+	release := Hold()
+	defer release()
+	builds := 0
+	build := func() int { builds++; return builds }
+	const key = "account-observation-error"
+	if got := heldOf(key, build); got != 1 {
+		t.Fatalf("initial build = %d, want 1", got)
+	}
+
+	private := filepath.Join(filepath.Dir(extensionhost.CatalogPath()), "private")
+	if err := os.MkdirAll(filepath.Dir(private), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(private, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseFailed := Hold()
+	defer releaseFailed()
+	if got := heldOf(key, build); got != 2 {
+		t.Fatalf("metadata error left build %d, want 2", got)
+	}
+	if err := os.Remove(private); err != nil {
+		t.Fatal(err)
+	}
+	releaseRepaired := Hold()
+	defer releaseRepaired()
+	if got := heldOf(key, build); got != 3 {
+		t.Fatalf("metadata recovery left build %d, want 3", got)
 	}
 }
 

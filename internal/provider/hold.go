@@ -47,7 +47,6 @@ type extensionAccountFiles uint64
 type accountFileObservation struct {
 	start, done chan struct{}
 	revision    extensionAccountFiles
-	valid       bool
 }
 
 type accountFileObservations struct {
@@ -65,29 +64,24 @@ func extensionAccountFilesNow() extensionAccountFiles {
 }
 
 func (observations *accountFileObservations) observe(read func() (extensionhost.AccountFileStamp, error)) extensionAccountFiles {
-	for {
-		observations.Lock()
-		if next := observations.next; next != nil {
-			observations.Unlock()
-			<-next.done
-			if next.valid {
-				return next.revision
-			}
-			continue
-		}
-		var batch *accountFileObservation
-		if observations.reading {
-			batch = &accountFileObservation{start: make(chan struct{}), done: make(chan struct{})}
-			observations.next = batch
-			observations.Unlock()
-			<-batch.start
-			observations.Lock()
-			observations.next = nil
-		}
-		observations.reading = true
+	observations.Lock()
+	if next := observations.next; next != nil {
 		observations.Unlock()
-		return observations.scan(batch, read)
+		<-next.done
+		return next.revision
 	}
+	var batch *accountFileObservation
+	if observations.reading {
+		batch = &accountFileObservation{start: make(chan struct{}), done: make(chan struct{})}
+		observations.next = batch
+		observations.Unlock()
+		<-batch.start
+		observations.Lock()
+		observations.next = nil
+	}
+	observations.reading = true
+	observations.Unlock()
+	return observations.scan(batch, read)
 }
 
 func (observations *accountFileObservations) scan(batch *accountFileObservation, read func() (extensionhost.AccountFileStamp, error)) (revision extensionAccountFiles) {
@@ -101,7 +95,7 @@ func (observations *accountFileObservations) scan(batch *accountFileObservation,
 		}
 		revision = observations.revision
 		if batch != nil {
-			batch.revision, batch.valid = revision, valid
+			batch.revision = revision
 			close(batch.done)
 		}
 		if next := observations.next; next != nil {
