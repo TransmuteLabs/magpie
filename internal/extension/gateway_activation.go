@@ -59,6 +59,7 @@ type activationRetry struct {
 
 type activationLease struct {
 	*Lease
+	retired  <-chan struct{}
 	stopWake func()
 	since    time.Time
 }
@@ -294,7 +295,7 @@ func sameActivationGeneration(current, expected moduleGeneration) bool {
 func (owner *GatewayActivation) startReady() {
 	for id, lease := range owner.draining {
 		select {
-		case <-lease.client.done:
+		case <-lease.retired:
 			lease.stopWake()
 			delete(owner.draining, id)
 		default:
@@ -390,17 +391,21 @@ func (owner *GatewayActivation) recordFailure(id, identity string, err error) {
 }
 
 func (owner *GatewayActivation) watchWorker(lease *Lease) activationLease {
+	retired := lease.client.done
+	if group := lease.client.group; group != nil {
+		retired = group.closeDone
+	}
 	owner.exitWG.Add(1)
 	stop := context.AfterFunc(lease.client.lifetime, func() {
 		defer owner.exitWG.Done()
 		owner.wake()
 		select {
-		case <-lease.client.done:
+		case <-retired:
 			owner.wake()
 		case <-owner.ctx.Done():
 		}
 	})
-	return activationLease{Lease: lease, stopWake: func() {
+	return activationLease{Lease: lease, retired: retired, stopWake: func() {
 		if stop() {
 			owner.exitWG.Done()
 		}
@@ -424,7 +429,7 @@ func (owner *GatewayActivation) withdraw(lease activationLease) {
 		return
 	}
 	select {
-	case <-lease.client.done:
+	case <-lease.retired:
 		lease.stopWake()
 	default:
 		owner.draining[id] = lease
@@ -442,7 +447,7 @@ func (owner *GatewayActivation) shutdown() {
 	}
 	for _, lease := range owner.draining {
 		select {
-		case <-lease.client.done:
+		case <-lease.retired:
 		case <-owner.manager.startCtx.Done():
 		}
 		lease.stopWake()

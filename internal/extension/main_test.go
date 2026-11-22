@@ -25,6 +25,12 @@ func TestMain(m *testing.M) {
 		refreshChild()
 		os.Exit(0)
 	}
+	if slices.Contains(os.Args, "--sdk-activation-helper") {
+		if err := serveActivationHelper(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if slices.Contains(os.Args, "--sdk-hook-worker") {
 		if index := slices.Index(os.Args, "--sdk-activation-describe-gate"); index >= 0 {
 			gate := os.Args[index+1]
