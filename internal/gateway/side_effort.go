@@ -65,23 +65,27 @@ func leastEffort(model string) string {
 	return fitEffort("none", levels)
 }
 
-// VisionEffortNow is the level the Image recognition model in use is
-// asked at when one is picked in Settings ("" when none is): the picked
-// one fitted to the model's levels, for the row to show.
-func VisionEffortNow() string {
-	m, ok := seer()
-	if !ok {
-		return ""
+// VisionSettings gives the Settings row its automatic pick, any missing
+// manual pick, and the effective model's offered and fitted levels.
+func VisionSettings(picked, want string) (auto, missing string, levels []string, effort string) {
+	auto = AutoVision()
+	if picked == "off" {
+		return
 	}
-	return sideEffort(m, provider.HeldSettings().VisionEffort)
-}
-
-// VisionEfforts are the levels of the model that describes images now.
-func VisionEfforts() []string {
-	if m, ok := seer(); ok {
-		return ModelEfforts(m)
+	if picked != "" {
+		if p, model, ok := provider.Resolve(picked); ok {
+			levels = ByStrength(p.Efforts(model))
+		} else {
+			missing = picked
+		}
 	}
-	return nil
+	if auto != "" && (picked == "" || missing != "") {
+		levels = ModelEfforts(auto)
+	}
+	if want != "" && len(levels) != 0 {
+		effort = fitEffort(want, levels)
+	}
+	return
 }
 
 // searchEffort is the level the searcher's model, provider p's model, is

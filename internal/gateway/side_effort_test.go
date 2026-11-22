@@ -52,7 +52,7 @@ func TestVisionEffortPicked(t *testing.T) {
 	}
 	s := New()
 	h := lanGuard(s.Handler())
-	if got := VisionEfforts(); !slices.Equal(got, []string{"low", "medium", "high"}) {
+	if _, _, got, _ := VisionSettings(st.Vision, st.VisionEffort); !slices.Equal(got, []string{"low", "medium", "high"}) {
 		t.Fatalf("the row is offered %q", got)
 	}
 	ask := func(img string) gjson.Result {
@@ -69,8 +69,8 @@ func TestVisionEffortPicked(t *testing.T) {
 	if q := ask("aW1nMQ=="); q.Get("reasoning_effort").String() != "low" || q.Get("max_tokens").Int() != 4096 {
 		t.Fatalf("default sent %s", q.Raw)
 	}
-	if VisionEffortNow() != "" {
-		t.Fatalf("default shows %q", VisionEffortNow())
+	if _, _, _, got := VisionSettings(st.Vision, st.VisionEffort); got != "" {
+		t.Fatalf("default shows %q", got)
 	}
 	// picked: the level, with room for its thinking
 	pickEfforts(t, "high", "")
@@ -82,8 +82,8 @@ func TestVisionEffortPicked(t *testing.T) {
 	if q := ask("aW1nMw=="); q.Get("reasoning_effort").String() != "high" {
 		t.Fatalf("xhigh sent %s", q.Raw)
 	}
-	if VisionEffortNow() != "high" {
-		t.Fatalf("xhigh shows %q", VisionEffortNow())
+	if _, _, _, got := VisionSettings(st.Vision, "xhigh"); got != "high" {
+		t.Fatalf("xhigh shows %q", got)
 	}
 	// an image read before at another level is read again at this one
 	pickEfforts(t, "medium", "")

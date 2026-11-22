@@ -2362,7 +2362,9 @@ searcher's (MOMO on Discord): `visionEffort` and `searcherEffort` in
 [settings](../../internal/settings/settings.go), one of `catalog.EffortRank`
 or empty. The chip offers only the model's own levels (`ModelEfforts`:
 `Efforts`, weakest first; `visionEfforts`, `searchEfforts` in the settings
-read), and none for a model whose levels aren't known. A level picked is
+read), and none for a model whose levels aren't known. Settings takes one
+automatic image-recognition pick for both the label and its levels when
+automatic is in use (`VisionSettings`). A level picked is
 fitted to the model's levels (`visionEffort`, `sideEffort`, `fitEffort`) when
 the call is made, so a saved level outlives a change of model. Empty keeps
 magpie's own choice: Image recognition at the least level the model has, the

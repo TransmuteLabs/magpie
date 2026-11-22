@@ -998,8 +998,8 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 	s.Trae, s.TraeCheckins = provider.HasTrae(), provider.TraeCheckins()
 	s.MiniMax, s.MiniMaxCheckins = provider.HasMiniMax(), provider.MiniMaxCheckins()
 	s.Qoder, s.QoderCheckins = provider.HasQoder(), provider.QoderCheckins()
-	s.VisionAuto, s.VisionModels, s.VisionMissing = gateway.AutoVision(), []modelRef{}, gateway.VisionMissing()
-	s.VisionEfforts, s.VisionEffortNow = gateway.VisionEfforts(), gateway.VisionEffortNow()
+	s.VisionAuto, s.VisionMissing, s.VisionEfforts, s.VisionEffortNow = gateway.VisionSettings(s.Vision, s.VisionEffort)
+	s.VisionModels = []modelRef{}
 	for _, e := range models {
 		if e.Images && (e.ImageInput == nil || *e.ImageInput) && (e.Group != "" || e.Provider.Ready()) {
 			m := modelRef{ID: e.ID, Name: e.Name, Provider: e.Provider.ID, PName: e.Provider.Name, Icon: e.Provider.Icon}
