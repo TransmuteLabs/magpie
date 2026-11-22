@@ -337,10 +337,12 @@ catalog changes, and joins its removable change subscription. Activation and
 explicit reload reconcile against one catalog snapshot per pass.
 Local notices, worker exits and filesystem notifications coalesce before
 reconciliation. Directory watches follow atomic publications and newly created
-directories. On kqueue systems the watcher opens only the catalog and selected
-module files to bound descriptors. A five-second fallback checks for missed
-changes, unavailable watches and new files and retries watch setup after a
-backend error. Notifications only schedule work. Reconciliation and
+directories. On kqueue systems, the watcher opens selected files and their
+existing ancestors without opening other directory children. It watches a
+parent for new entries while a selected path is missing and caps total watched
+paths at 128. A five-second fallback checks for missed changes, unavailable
+watches and new files and retries watch setup after a backend error.
+Notifications only schedule work. Reconciliation and
 admission still verify current bytes under their existing guards. Expired
 sign-ins are cleaned at startup and on a separate minute timer.
 Disable, removal, configuration replacement and shutdown release the lease

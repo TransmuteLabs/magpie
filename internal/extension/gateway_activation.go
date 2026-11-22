@@ -69,7 +69,7 @@ func listenerOwnerConflict(ctx context.Context, done <-chan struct{}) error {
 }
 
 func (m *Manager) BeginGatewayActivation(ctx context.Context) (*GatewayActivation, error) {
-	return m.beginGatewayActivation(ctx, fsnotify.NewWatcher)
+	return m.beginGatewayActivation(ctx, nil)
 }
 
 func (m *Manager) beginGatewayActivation(ctx context.Context, openWatch func() (*fsnotify.Watcher, error)) (*GatewayActivation, error) {
@@ -170,6 +170,13 @@ func (owner *GatewayActivation) run(stopping context.Context, openWatch func() (
 		case <-watch.errors():
 			watch.close()
 			schedule()
+		case _, open := <-watch.vnodeChanges():
+			if !open {
+				watch.close()
+				schedule()
+			} else if watch.vnodeRelevant() {
+				schedule()
+			}
 		case <-pending:
 			pending = nil
 			owner.reconcile(watch)
@@ -197,7 +204,7 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 	watch.begin()
 	var modules []string
 	var observe func(string)
-	if watch.backend != nil {
+	if watch.active() {
 		observe = func(id string) {
 			if len(modules) < activationWatchLimit-1 {
 				modules = append(modules, id)

@@ -272,6 +272,82 @@ func TestGatewayActivationFallsBackAfterWatchFailure(t *testing.T) {
 	})
 }
 
+func TestGatewayActivationWakesWhenCatalogAppears(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "extensions")
+	manager := NewManager(root)
+	closeActivationTestManager(t, manager)
+	entry, err := manager.Install(t.Context(), activationFixturePackage(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "catalog.json")
+	parked := path + ".parked"
+	if _, err := manager.BeginGatewayActivation(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitActivation(t, "initial activation", func() bool { return manager.Running(entry.Manifest.ID) })
+	if err := os.Rename(path, parked); err != nil {
+		t.Fatal(err)
+	}
+	waitActivation(t, "withdrawal while catalog is absent", func() bool { return !manager.Running(entry.Manifest.ID) })
+	if err := os.Rename(parked, path); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.NewTimer(gatewayActivationFallback / 2)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for !manager.Running(entry.Manifest.ID) {
+		select {
+		case <-deadline.C:
+			t.Fatal("catalog publication did not activate the worker before the fallback")
+		case <-tick.C:
+		}
+	}
+}
+
+func TestActivationWatchWakesWhenRootAppears(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "outer", "extensions")
+	watch := newActivationWatch(root)
+	watch.open(nil)
+	defer watch.close()
+	if !watch.active() {
+		t.Fatal("fixture watcher unavailable")
+	}
+	watch.begin()
+	watch.finish()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "catalog.json"), []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.NewTimer(gatewayActivationFallback / 2)
+	defer deadline.Stop()
+	for {
+		select {
+		case event, open := <-watch.events():
+			if !open {
+				t.Fatal("fixture watcher closed")
+			}
+			if watch.relevant(event) {
+				return
+			}
+		case err := <-watch.errors():
+			t.Fatalf("watch error: %v", err)
+		case _, open := <-watch.vnodeChanges():
+			if !open {
+				t.Fatal("fixture watcher closed")
+			}
+			if watch.vnodeRelevant() {
+				return
+			}
+		case <-deadline.C:
+			t.Fatal("publication under a previously absent root did not schedule reconciliation")
+		}
+	}
+}
+
 func TestGatewayActivationRetriesUnchangedGeneration(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	closeActivationTestManager(t, manager)
