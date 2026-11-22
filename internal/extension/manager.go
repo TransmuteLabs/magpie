@@ -465,10 +465,13 @@ func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig fu
 	current, cleanup, err := m.reconcileLocked(ctx, activate, observeConfig)
 	m.reloadMu.Unlock()
 	for _, owner := range cleanup.revoked {
-		owner.recordRevocation()
+		owner.recordRevocation(ctx)
 	}
-	if err != nil || len(cleanup.stopping) == 0 {
+	if err != nil {
 		return current, err
+	}
+	if len(cleanup.stopping) == 0 {
+		return current, ctx.Err()
 	}
 	wait, cancel := context.WithTimeout(ctx, componentCloseTimeout)
 	defer cancel()

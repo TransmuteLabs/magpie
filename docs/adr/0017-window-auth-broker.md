@@ -107,6 +107,10 @@ module through that mutex. A marked flow cannot dispatch or publish new
 credentials after its next admission check. Confirmed receipts remain
 replayable under the current grant and policy.
 
+A concurrent reload can stop waiting for another reload's cancellation
+write when its own context ends. The reload recording the cancellation
+continues through the Store operation.
+
 ## Transaction and lock order
 
 [`window_auth_store.go`](../../internal/extension/window_auth_store.go)

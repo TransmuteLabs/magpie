@@ -82,6 +82,52 @@ func TestWindowAuthReloadDoesNotBlockUnrelatedModels(t *testing.T) {
 		return true
 	})
 
+	t.Run("canceled_join", func(check *testing.T) {
+		ctx, cancel := context.WithCancel(check.Context())
+		defer cancel()
+		observed, joined := make(chan struct{}), make(chan struct{})
+		var joinErr error
+		go func() {
+			defer close(joined)
+			_, joinErr = manager.reconcile(ctx, false, func(id string) {
+				if id == modelsEntry.Manifest.ID {
+					close(observed)
+				}
+			})
+		}()
+		t.Cleanup(func() { <-joined })
+		wait, stop := context.WithTimeout(check.Context(), 3*time.Second)
+		defer stop()
+		select {
+		case <-observed:
+		case <-joined:
+			check.Fatalf("second reload returned before selecting the current generation: %v", joinErr)
+		case <-wait.Done():
+			check.Fatal("second reload did not reach generation selection")
+		}
+		if err := filelock.LockMutex(wait, &manager.reloadMu); err != nil {
+			check.Fatalf("second reload did not release worker selection: %v", err)
+		}
+		manager.reloadMu.Unlock()
+
+		cancel()
+		deadline := time.NewTimer(time.Second)
+		defer deadline.Stop()
+		select {
+		case <-joined:
+			if !errors.Is(joinErr, context.Canceled) {
+				check.Errorf("canceled second reload returned %v", joinErr)
+			}
+		case <-deadline.C:
+			check.Error("canceled second reload still waited for the first revocation")
+		}
+		select {
+		case <-reloaded:
+			check.Errorf("first reload stopped before the Store was unlocked: %v", reloadErr)
+		default:
+		}
+	})
+
 	modelsCtx, stopModels := context.WithTimeout(t.Context(), 2*time.Second)
 	err = readModels(modelsCtx)
 	stopModels()

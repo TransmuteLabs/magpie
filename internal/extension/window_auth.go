@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -620,8 +621,10 @@ func (m *Manager) markRevokedWindowAuthOwners(tracked map[string]bool, current m
 	return revoked
 }
 
-func (owner *windowAuthOwner) recordRevocation() {
-	owner.revocationMu.Lock()
+func (owner *windowAuthOwner) recordRevocation(ctx context.Context) {
+	if !owner.revocationMu.TryLock() && filelock.LockMutex(ctx, &owner.revocationMu) != nil {
+		return
+	}
 	defer owner.revocationMu.Unlock()
 	if owner.revocationRecorded {
 		return
