@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"weak"
 
@@ -393,6 +395,158 @@ func TestSocketOutputItemOwnsOnlyTheDecodedItem(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResponsesSocketReleasesOutputEnvelopesAfterInterrupt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const keptItem = `{"type":"message","id":"msg_kept","role":"assistant","status":"completed","content":[{"type":"output_text","text":"kept"}]}`
+		const cutItem = `{"type":"message","id":"msg_cut","role":"assistant","status":"completed","content":[{"type":"output_text","text":"discarded"}]}`
+		type ownership struct {
+			envelope, item weak.Pointer[byte]
+		}
+		probes := make(chan ownership, 2)
+		sendItem := func(w *socketTurnWriter, item string) error {
+			event := []byte(`{"type":"response.output_item.done","padding":"` + strings.Repeat("x", 256<<10) + `","output_index":0,"item":` + item + `}`)
+			if err := w.event(event); err != nil {
+				return err
+			}
+			if len(w.items) != 1 || string(w.items[0]) != item {
+				return errors.New("output item was not decoded")
+			}
+			probes <- ownership{envelope: weak.Make(&event[0]), item: weak.Make(&w.items[0][0])}
+			return nil
+		}
+		readProbe := func() ownership {
+			t.Helper()
+			select {
+			case probe := <-probes:
+				return probe
+			default:
+				t.Fatal("missing output allocation probe")
+				return ownership{}
+			}
+		}
+		check := func(name string, probe ownership, itemLive bool) {
+			t.Helper()
+			if probe.envelope.Value() != nil {
+				t.Errorf("%s: the output event still retains its 256 KiB envelope", name)
+			}
+			if live := probe.item.Value() != nil; live != itemLive {
+				t.Errorf("%s: output item live = %t, want %t", name, live, itemLive)
+			}
+		}
+		var requests [][]string
+		canceled := make(chan struct{})
+		via := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Errorf("read synthetic request: %v", err)
+				return
+			}
+			var items []string
+			for _, item := range gjson.GetBytes(body, "input").Array() {
+				items = append(items, strings.Clone(item.Raw))
+			}
+			requests = append(requests, items)
+			if gjson.GetBytes(body, "previous_response_id").Exists() {
+				t.Error("the synthetic request still names a previous response")
+			}
+			id, item := "resp_fresh", ""
+			switch len(requests) {
+			case 1:
+				id, item = "resp_kept", keptItem
+			case 2:
+				id, item = "resp_cut", cutItem
+			}
+			w := response.(*socketTurnWriter)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if err := w.event([]byte(`{"type":"response.created","response":{"id":"` + id + `"}}`)); err != nil {
+				t.Errorf("send created: %v", err)
+				return
+			}
+			if item != "" {
+				if err := sendItem(w, item); err != nil {
+					t.Errorf("send output item: %v", err)
+					return
+				}
+			}
+			if id == "resp_cut" {
+				<-request.Context().Done()
+				close(canceled)
+				return
+			}
+			if err := w.event([]byte(`{"type":"response.completed","response":{"id":"` + id + `","status":"completed","output":[]}}`)); err != nil {
+				t.Errorf("send completed: %v", err)
+			}
+		})
+
+		peer, conn, upgrade := dialPipeResponsesSocket(t)
+		peer.SetReadLimit(1 << 20)
+		socket := responsesSocket{c: conn, ctx: t.Context(), path: upgrade.URL.Path, o: &socketOrigin{req: upgrade, via: via}}
+		served := make(chan struct{})
+		go func() {
+			defer close(served)
+			socket.serve(socketQueueBytes)
+		}()
+		defer func() {
+			peer.CloseNow()
+			<-served
+		}()
+		client := &sockClient{t: t, c: peer}
+		if end := last(client.turn(create("", userHi))); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp_kept" {
+			t.Fatalf("initial turn did not complete: %s", end.Get("type").String())
+		}
+		synctest.Wait()
+		kept := readProbe()
+		runtime.GC()
+		check("completed turn", kept, true)
+
+		client.send(create("resp_kept", userMore))
+		events, err := client.until("response.output_item.done", "error")
+		if err != nil || last(events).Get("item.id").String() != "msg_cut" {
+			t.Fatalf("interrupted turn did not yield its item: %v", err)
+		}
+		synctest.Wait()
+		cut := readProbe()
+		runtime.GC()
+		check("turn in progress", cut, true)
+
+		client.send(`{"type":"response.interrupt","response_id":"resp_cut","mode":"discard_partial_items"}`)
+		events, err = client.until("response.incomplete", "error")
+		if err != nil || len(events) != 2 || events[0].Get("type").String() != "response.interrupt.accepted" ||
+			events[0].Get("response_id").String() != "resp_cut" ||
+			last(events).Get("response.incomplete_details.reason").String() != "interrupted" {
+			t.Fatalf("did not accept interrupt and end the turn: %v, %v", events, err)
+		}
+		synctest.Wait()
+		select {
+		case <-canceled:
+		default:
+			t.Fatal("the canceled turn is still running")
+		}
+		runtime.GC()
+		check("older completed turn after interrupt", kept, true)
+		check("interrupted turn after joining", cut, false)
+
+		end := last(client.turn(create("resp_cut", userMore)))
+		if end.Get("status").Int() != http.StatusBadRequest || end.Get("error.code").String() != "previous_response_not_found" {
+			t.Fatalf("interrupted id was accepted: %s", end.Raw)
+		}
+		synctest.Wait()
+		if len(requests) != 2 || !slices.Equal(requests[1], []string{userHi, keptItem, userMore}) {
+			t.Fatalf("expected two requests and the completed item in the continuation, got %q", requests)
+		}
+
+		end = last(client.turn(create("", userMore)))
+		if end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp_fresh" {
+			t.Fatalf("a full turn did not reuse the socket: %s", end.Raw)
+		}
+		synctest.Wait()
+		if len(requests) != 3 || !slices.Equal(requests[2], []string{userMore}) {
+			t.Fatalf("fresh full turn did not dispatch exactly its own input: %q", requests)
+		}
+	})
 }
 
 func BenchmarkSocketOutputItem(b *testing.B) {
