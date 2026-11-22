@@ -42,8 +42,7 @@ func gatewayResponse(w http.ResponseWriter, r *http.Request, proto provider.Prot
 func gatewayReply(proto provider.Protocol, body []byte) (json.RawMessage, error) {
 	body = bytes.TrimSpace(body)
 	if json.Valid(body) {
-		var object obj
-		if err := json.Unmarshal(body, &object); err != nil || object == nil {
+		if body[0] != '{' {
 			return nil, errors.New("invalid model reply")
 		}
 		return bytes.Clone(body), nil
