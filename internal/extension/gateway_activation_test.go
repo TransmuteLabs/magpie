@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -407,20 +408,12 @@ func TestGatewayActivationBackoffIsScopedToGeneration(t *testing.T) {
 	}
 	restoreProgram := parkActivationProgram(t, manager, entry)
 	id := entry.Manifest.ID
-	owner := &GatewayActivation{
-		manager: manager, ctx: t.Context(), changed: make(chan struct{}, 1),
-		leases: map[string]activationLease{}, retries: map[string]activationRetry{},
-	}
-	defer func() {
-		for _, lease := range owner.leases {
-			owner.withdraw(lease)
-		}
-	}()
+	owner := activationTestOwner(t, manager)
 	watch := newActivationWatch(manager.root)
 
 	for _, seconds := range []int{1, 2, 4, 8, 16, 32, 60, 60} {
 		before := time.Now()
-		owner.reconcile(watch)
+		reconcileActivationTest(t, owner, watch)
 		retry := owner.retries[id]
 		want := time.Duration(seconds) * time.Second
 		if retry.delay != want || retry.next.Before(before.Add(want)) {
@@ -435,14 +428,14 @@ func TestGatewayActivationBackoffIsScopedToGeneration(t *testing.T) {
 	if err := restoreProgram(); err != nil {
 		t.Fatal(err)
 	}
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	if manager.Running(id) || owner.retries[id] != retry {
 		t.Fatal("an early reconciliation ignored the generation's backoff")
 	}
 	if _, err := manager.CompareAndSwapModuleConfig(t.Context(), id, "0", json.RawMessage(`{"fixture":true}`)); err != nil {
 		t.Fatal(err)
 	}
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	lease := owner.leases[id]
 	if !manager.Running(id) || lease.Lease == nil || lease.worker.config.Version != "1" || len(owner.retries) != 0 {
 		t.Fatal("a new configuration generation inherited the old backoff")
@@ -459,7 +452,7 @@ func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
 	id := entry.Manifest.ID
 	owner := activationTestOwner(t, manager)
 	watch := newActivationWatch(manager.root)
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	delays := []int{1, 2, 4, 8, 16, 32, 60, 60}
 	for attempt, seconds := range delays {
 		lease := owner.leases[id]
@@ -473,7 +466,7 @@ func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
 			t.Fatal("worker exit did not schedule reconciliation")
 		}
 		before := time.Now()
-		owner.reconcile(watch)
+		reconcileActivationTest(t, owner, watch)
 		if manager.Running(id) || owner.leases[id].Lease != nil {
 			t.Fatal("activation immediately replaced its failed worker")
 		}
@@ -485,13 +478,13 @@ func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
 		if attempt+1 != len(delays) {
 			retry.next = time.Time{}
 			owner.retries[id] = retry
-			owner.reconcile(watch)
+			reconcileActivationTest(t, owner, watch)
 		}
 	}
 	retry := owner.retries[id]
 	retry.next = time.Now().Add(time.Hour)
 	owner.retries[id] = retry
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	if manager.Running(id) || owner.retries[id] != retry {
 		t.Fatal("reconciliation bypassed the backoff or counted the same exit twice")
 	}
@@ -501,7 +494,7 @@ func TestGatewayActivationBacksOffAfterWorkerExit(t *testing.T) {
 	if err := manager.SetEnabled(t.Context(), id, true); err != nil {
 		t.Fatal(err)
 	}
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	renewed := owner.leases[id]
 	if renewed.Lease == nil || !manager.Running(id) ||
 		renewed.worker.entry.EnableGeneration == entry.EnableGeneration || len(owner.retries) != 0 {
@@ -527,7 +520,10 @@ func TestGatewayActivationRejectsWorkerExitedBeforeRetention(t *testing.T) {
 		releaseWorker(worker)
 		t.Fatalf("fixture generation changed: %v", err)
 	}
-	owner.retain(worker, client)
+	generation := moduleGeneration{worker.entry, worker.config}
+	owner.desired = map[string]moduleGeneration{id: generation}
+	owner.starting[id] = activationStart{generation: generation}
+	owner.finishStart(activationResult{id: id, lease: manager.newLease(owner.ctx, worker, client)})
 	if owner.leases[id].Lease != nil || owner.retries[id].delay != gatewayActivationRetryStart {
 		t.Fatal("dead worker passed activation admission or failed to schedule a retry")
 	}
@@ -547,19 +543,19 @@ func TestGatewayActivationResetsBackoffAfterStableWorker(t *testing.T) {
 		identity: activationIdentity(entry, "0"),
 		delay:    32 * time.Second,
 	}
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	lease := owner.leases[id]
 	if lease.Lease == nil || owner.retries[id].delay != 32*time.Second {
 		t.Fatal("handshake cleared the existing failure streak")
 	}
 	lease.since = time.Now().Add(-2 * gatewayActivationStable)
 	owner.leases[id] = lease
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	if !manager.Running(id) || len(owner.retries) != 0 {
 		t.Fatal("stable worker did not clear the existing failure streak")
 	}
 	stopActivationWorker(t, lease.client)
-	owner.reconcile(watch)
+	reconcileActivationTest(t, owner, watch)
 	if manager.Running(id) || owner.retries[id].delay != gatewayActivationRetryStart {
 		t.Fatal("worker exit after stability retained the previous failure streak")
 	}
@@ -567,16 +563,53 @@ func TestGatewayActivationResetsBackoffAfterStableWorker(t *testing.T) {
 
 func activationTestOwner(t *testing.T, manager *Manager) *GatewayActivation {
 	t.Helper()
-	owner := &GatewayActivation{
-		manager: manager, ctx: t.Context(), changed: make(chan struct{}, 1),
-		leases: map[string]activationLease{}, retries: map[string]activationRetry{},
-	}
-	t.Cleanup(func() {
-		for _, lease := range owner.leases {
-			owner.withdraw(lease)
-		}
-	})
+	owner := newGatewayActivation(manager, t.Context())
+	t.Cleanup(owner.shutdown)
 	return owner
+}
+
+func reconcileActivationTest(t *testing.T, owner *GatewayActivation, watch *activationWatch) {
+	t.Helper()
+	owner.reconcile(watch)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	for len(owner.starting) != 0 {
+		select {
+		case result := <-owner.started:
+			owner.finishStart(result)
+			owner.startReady()
+		case <-ctx.Done():
+			t.Fatal("activation did not finish its startup attempts")
+		}
+	}
+}
+
+func TestGatewayActivationLimitsAndJoinsPendingStarts(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	closeActivationTestManager(t, manager)
+	manager.reloadMu.Lock()
+	defer manager.reloadMu.Unlock()
+	owner := newGatewayActivation(manager, t.Context())
+	defer owner.shutdown()
+	owner.desired = make(map[string]moduleGeneration)
+	for index := range gatewayActivationStarts * 2 {
+		id := "activation-pending-" + strconv.Itoa(index)
+		owner.desired[id] = moduleGeneration{
+			entry: Installed{Manifest: sdk.Manifest{
+				ID: id, Activation: []string{sdk.ActivationGateway},
+				Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 8}},
+			}},
+		}
+	}
+	owner.startReady()
+	owner.startReady()
+	if got := len(owner.starting); got != gatewayActivationStarts {
+		t.Fatalf("queued %d concurrent starts, want %d", got, gatewayActivationStarts)
+	}
+	owner.shutdown()
+	if len(owner.starting) != 0 || len(owner.started) != 0 || len(owner.leases) != 0 {
+		t.Fatal("canceled activation left an unjoined start")
+	}
 }
 
 func stopActivationWorker(t *testing.T, client *workerClient) {

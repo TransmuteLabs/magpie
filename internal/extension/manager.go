@@ -524,7 +524,7 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 	for id, worker := range m.workers {
 		generation, found := current[id]
 		if tracked[id] && (!found || !worker.matches(generation.entry, generation.config)) {
-			m.detachWorkerLocked(id, worker)
+			m.detachWorkerLocked(id, worker, nil)
 			retiring = append(retiring, worker)
 		}
 	}
@@ -548,12 +548,16 @@ func (w *managedWorker) matches(entry Installed, config sdk.ConfigSnapshot) bool
 		sameModuleConfig(w.config, config)
 }
 
-func (m *Manager) detachWorkerLocked(id string, worker *managedWorker) {
+func (m *Manager) detachWorkerLocked(id string, worker *managedWorker, expectedClient *workerClient) bool {
 	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if expectedClient != nil && (worker.client != expectedClient || worker.starting != nil) {
+		return false
+	}
 	worker.retiring = true
-	worker.mu.Unlock()
 	delete(m.workers, id)
 	m.retireWG.Add(1)
+	return true
 }
 
 func (m *Manager) retire(worker *managedWorker) <-chan struct{} {
@@ -715,7 +719,7 @@ func (m *Manager) selectWorker(ctx context.Context, id string, current *moduleGe
 		if !authoritative {
 			return nil, nil, errors.New("module generation changed before cached worker admission")
 		}
-		m.detachWorkerLocked(id, worker)
+		m.detachWorkerLocked(id, worker, nil)
 		stale, worker = worker, nil
 	}
 	if admissionErr != nil {

@@ -346,9 +346,15 @@ Notifications only schedule work. Reconciliation and
 admission still verify current bytes under their existing guards. Expired
 sign-ins are cleaned at startup and on a separate minute timer.
 Disable, removal, configuration replacement and shutdown release the lease
-and retire the cached generation through the existing bounded drain and
-disposer before replacement. A replacement listener can serve HTTP during
-the predecessor's drain. Gateway activation and account tasks take ownership
+and retire the cached generation through the manager's bounded drain and
+disposer. Activation waits for that module's retired client before starting
+its replacement. Other modules can start during a drain or handshake, with
+at most four activation starts in flight and one per module. Listener
+shutdown cancels and joins pending starts and joins its retired clients.
+Retirement checks the client held by the activation lease so an ordinary
+request's replacement for the same generation can finish starting or stay
+cached. A replacement listener can serve HTTP during the predecessor's
+drain. Gateway activation and account tasks take ownership
 as their previous owners release it, unless the replacement listener stops
 first. The listener keeps serving after an acquisition failure or an
 unexpected worker exit. Subsequent reconciliation retries the same generation

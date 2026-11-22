@@ -16,6 +16,7 @@ const (
 	gatewayActivationRetryStart = time.Second
 	gatewayActivationRetryMax   = time.Minute
 	gatewayActivationStable     = time.Minute
+	gatewayActivationStarts     = 4
 )
 
 var errActivationWorkerExited = errors.New("extension worker exited")
@@ -30,6 +31,24 @@ type GatewayActivation struct {
 	once        sync.Once
 	leases      map[string]activationLease
 	retries     map[string]activationRetry
+	desired     map[string]moduleGeneration
+	draining    map[string]activationLease
+	starting    map[string]activationStart
+	started     chan activationResult
+	startWG     sync.WaitGroup
+	exitWG      sync.WaitGroup
+}
+
+type activationStart struct {
+	generation moduleGeneration
+	cancel     context.CancelFunc
+	superseded bool
+}
+
+type activationResult struct {
+	id    string
+	lease *Lease
+	err   error
 }
 
 type activationRetry struct {
@@ -40,7 +59,7 @@ type activationRetry struct {
 
 type activationLease struct {
 	*Lease
-	stopWake func() bool
+	stopWake func()
 	since    time.Time
 }
 
@@ -87,11 +106,7 @@ func (m *Manager) beginGatewayActivation(ctx context.Context, openWatch func() (
 		return nil, listenerOwnerConflict(previous.ctx, previous.done)
 	}
 	m.startLifecycleLocked()
-	lifetime, cancel := context.WithCancel(ctx)
-	owner := &GatewayActivation{
-		manager: m, ctx: lifetime, cancel: cancel, done: make(chan struct{}),
-		changed: make(chan struct{}, 1), leases: map[string]activationLease{}, retries: map[string]activationRetry{},
-	}
+	owner := newGatewayActivation(m, ctx)
 	m.gatewayActivation = owner
 	m.activationWG.Add(1)
 	stopping := m.startCtx
@@ -99,6 +114,16 @@ func (m *Manager) beginGatewayActivation(ctx context.Context, openWatch func() (
 	owner.unsubscribe = SubscribeChanges(owner.wake)
 	go owner.run(stopping, openWatch)
 	return owner, nil
+}
+
+func newGatewayActivation(manager *Manager, ctx context.Context) *GatewayActivation {
+	ctx, cancel := context.WithCancel(ctx)
+	return &GatewayActivation{
+		manager: manager, ctx: ctx, cancel: cancel, done: make(chan struct{}),
+		changed: make(chan struct{}, 1), leases: map[string]activationLease{}, retries: map[string]activationRetry{},
+		draining: map[string]activationLease{}, starting: map[string]activationStart{},
+		started: make(chan activationResult, gatewayActivationStarts),
+	}
 }
 
 func (owner *GatewayActivation) wake() {
@@ -122,9 +147,7 @@ func (owner *GatewayActivation) run(stopping context.Context, openWatch func() (
 	defer func() {
 		owner.cancel()
 		owner.unsubscribe()
-		for _, lease := range owner.leases {
-			owner.withdraw(lease)
-		}
+		owner.shutdown()
 		owner.manager.mu.Lock()
 		if owner.manager.gatewayActivation == owner {
 			owner.manager.gatewayActivation = nil
@@ -160,6 +183,9 @@ func (owner *GatewayActivation) run(stopping context.Context, openWatch func() (
 			return
 		case <-owner.changed:
 			schedule()
+		case result := <-owner.started:
+			owner.finishStart(result)
+			owner.startReady()
 		case event, open := <-watch.events():
 			if !open {
 				watch.close()
@@ -221,6 +247,17 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 	if watch.finish() {
 		owner.wake()
 	}
+	owner.desired = desired
+	if err != nil {
+		owner.desired = nil
+	}
+	for id, start := range owner.starting {
+		if generation, exists := desired[id]; !exists || !sameActivationGeneration(generation, start.generation) {
+			start.cancel()
+			start.superseded = true
+			owner.starting[id] = start
+		}
+	}
 	for id, lease := range owner.leases {
 		generation, exists := desired[id]
 		current := exists && generation.entry.Manifest.ActivatesGateway() &&
@@ -237,12 +274,42 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 			owner.recordFailure(id, activationIdentity(generation.entry, generation.config.Version), errActivationWorkerExited)
 		}
 	}
-	if err != nil || owner.ctx.Err() != nil {
+	if err != nil {
 		return
 	}
-	for id, generation := range desired {
+	for id := range owner.retries {
+		if generation, exists := desired[id]; !exists || !generation.entry.Manifest.ActivatesGateway() {
+			delete(owner.retries, id)
+		}
+	}
+	owner.startReady()
+}
+
+func sameActivationGeneration(current, expected moduleGeneration) bool {
+	return current.entry.Manifest.ActivatesGateway() && current.entry.Revision == expected.entry.Revision &&
+		current.entry.Directory == expected.entry.Directory &&
+		current.entry.EnableGeneration == expected.entry.EnableGeneration && sameModuleConfig(current.config, expected.config)
+}
+
+func (owner *GatewayActivation) startReady() {
+	for id, lease := range owner.draining {
+		select {
+		case <-lease.client.done:
+			lease.stopWake()
+			delete(owner.draining, id)
+		default:
+		}
+	}
+	if owner.ctx.Err() != nil {
+		return
+	}
+	for id, generation := range owner.desired {
+		if len(owner.starting) == gatewayActivationStarts {
+			return
+		}
 		entry, config := generation.entry, generation.config.Version
-		if !entry.Manifest.ActivatesGateway() || owner.leases[id].Lease != nil {
+		if !entry.Manifest.ActivatesGateway() || owner.leases[id].Lease != nil ||
+			owner.draining[id].Lease != nil || owner.starting[id].cancel != nil {
 			continue
 		}
 		identity := activationIdentity(entry, config)
@@ -254,27 +321,55 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 			}
 		}
 		ctx, cancel := context.WithTimeout(owner.ctx, 10*time.Second)
-		worker, acquireErr := manager.selectGenerationWorker(ctx, id, &expectedGeneration{
-			packageRevision: entry.Revision, configVersion: config, enableGeneration: &entry.EnableGeneration,
+		owner.starting[id] = activationStart{generation: generation, cancel: cancel}
+		owner.startWG.Go(func() {
+			defer cancel()
+			lease, err := owner.start(ctx, generation)
+			owner.started <- activationResult{id: id, lease: lease, err: err}
 		})
-		var client *workerClient
-		if acquireErr == nil {
-			_, client, acquireErr = manager.acquireWorker(ctx, worker, true)
-		}
-		cancel()
-		if acquireErr != nil {
-			if owner.ctx.Err() != nil {
-				return
-			}
-			owner.recordFailure(id, identity, acquireErr)
-			continue
-		}
-		owner.retain(worker, client)
 	}
-	for id := range owner.retries {
-		if generation, exists := desired[id]; !exists || !generation.entry.Manifest.ActivatesGateway() {
-			delete(owner.retries, id)
+}
+
+func (owner *GatewayActivation) start(ctx context.Context, generation moduleGeneration) (*Lease, error) {
+	manager := owner.manager
+	entry := generation.entry
+	worker, err := manager.selectGenerationWorker(ctx, entry.Manifest.ID, &expectedGeneration{
+		packageRevision: entry.Revision, configVersion: generation.config.Version,
+		enableGeneration: &entry.EnableGeneration, exact: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !worker.matches(entry, generation.config) {
+		return nil, errors.New("extension configuration changed before activation")
+	}
+	worker, client, err := manager.acquireWorker(ctx, worker, true)
+	if err != nil {
+		return nil, err
+	}
+	lease := manager.newLease(owner.ctx, worker, client)
+	return lease, lease.CheckCurrent(ctx)
+}
+
+func (owner *GatewayActivation) finishStart(result activationResult) {
+	start := owner.starting[result.id]
+	delete(owner.starting, result.id)
+	generation, exists := owner.desired[result.id]
+	current := owner.ctx.Err() == nil && !start.superseded && exists && sameActivationGeneration(generation, start.generation)
+	if result.lease != nil {
+		lease := owner.watchWorker(result.lease)
+		if current && result.err == nil && lease.client.alive() {
+			lease.since = time.Now()
+			owner.leases[result.id] = lease
+			return
 		}
+		owner.withdraw(lease)
+		if result.err == nil {
+			result.err = errActivationWorkerExited
+		}
+	}
+	if current && result.err != nil {
+		owner.recordFailure(result.id, activationIdentity(generation.entry, generation.config.Version), result.err)
 	}
 }
 
@@ -294,46 +389,63 @@ func (owner *GatewayActivation) recordFailure(id, identity string, err error) {
 	log.Printf("extension gateway activation %s: %v", id, err)
 }
 
-func (owner *GatewayActivation) retain(worker *managedWorker, client *workerClient) {
-	id := worker.entry.Manifest.ID
-	lease := activationLease{
-		Lease:    owner.manager.newLease(owner.ctx, worker, client),
-		stopWake: context.AfterFunc(client.lifetime, owner.wake),
-	}
-	if err := lease.CheckCurrent(owner.ctx); err != nil || !client.alive() {
-		owner.withdraw(lease)
-		if err == nil {
-			owner.recordFailure(id, activationIdentity(worker.entry, worker.config.Version), errActivationWorkerExited)
+func (owner *GatewayActivation) watchWorker(lease *Lease) activationLease {
+	owner.exitWG.Add(1)
+	stop := context.AfterFunc(lease.client.lifetime, func() {
+		defer owner.exitWG.Done()
+		owner.wake()
+		select {
+		case <-lease.client.done:
+			owner.wake()
+		case <-owner.ctx.Done():
 		}
-		return
-	}
-	lease.since = time.Now()
-	owner.leases[id] = lease
+	})
+	return activationLease{Lease: lease, stopWake: func() {
+		if stop() {
+			owner.exitWG.Done()
+		}
+	}}
 }
 
 func (owner *GatewayActivation) withdraw(lease activationLease) {
-	lease.stopWake()
 	lease.Close()
 	manager := owner.manager
+	id := lease.worker.entry.Manifest.ID
 	manager.mu.Lock()
 	closed := manager.closed
-	retire := !closed && manager.workers[lease.Manifest().ID] == lease.worker
-	if retire {
-		manager.detachWorkerLocked(lease.worker.entry.Manifest.ID, lease.worker)
-	}
+	retire := !closed && manager.workers[id] == lease.worker &&
+		manager.detachWorkerLocked(id, lease.worker, lease.client)
 	manager.mu.Unlock()
 	if retire {
 		manager.retire(lease.worker)
 	}
 	if closed {
+		lease.stopWake()
 		return
 	}
-	timer := time.NewTimer(35 * time.Second)
-	defer timer.Stop()
 	select {
 	case <-lease.client.done:
-	case <-manager.startCtx.Done():
-	case <-timer.C:
-		_ = closeModuleClient(lease.client)
+		lease.stopWake()
+	default:
+		owner.draining[id] = lease
 	}
+}
+
+func (owner *GatewayActivation) shutdown() {
+	owner.cancel()
+	owner.startWG.Wait()
+	for len(owner.starting) != 0 {
+		owner.finishStart(<-owner.started)
+	}
+	for _, lease := range owner.leases {
+		owner.withdraw(lease)
+	}
+	for _, lease := range owner.draining {
+		select {
+		case <-lease.client.done:
+		case <-owner.manager.startCtx.Done():
+		}
+		lease.stopWake()
+	}
+	owner.exitWG.Wait()
 }
