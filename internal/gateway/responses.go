@@ -1122,12 +1122,14 @@ func responseInstructions(r *Request) *Request {
 }
 
 func responsesParts(raw json.RawMessage) []Part {
-	var s string
-	if decodeJSON(raw, &s) == nil {
-		if s == "" {
-			return nil
+	if start := skipJSONSpace(raw, 0); start == len(raw) || raw[start] != '[' {
+		var s string
+		if decodeJSON(raw, &s) == nil {
+			if s == "" {
+				return nil
+			}
+			return []Part{{Kind: Text, Text: s}}
 		}
-		return []Part{{Kind: Text, Text: s}}
 	}
 	var items []struct {
 		Type     string `json:"type"`
