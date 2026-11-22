@@ -158,34 +158,58 @@ func wordHits(pool []*Memory, text string) []Hit {
 	if len(words) == 0 {
 		return []Hit{}
 	}
-	docs := make([][]string, len(pool))
-	df := map[string]int{}
+	type term struct {
+		frequency int
+		lastDoc   int
+		weight    float64
+	}
+	byWord := make(map[string]int, len(words))
+	order := make([]int, len(words))
+	terms := make([]term, 0, len(words))
+	for i, word := range words {
+		slot, exists := byWord[word]
+		if !exists {
+			slot = len(terms)
+			byWord[word] = slot
+			terms = append(terms, term{})
+		}
+		order[i] = slot
+	}
+
+	offsets := make([]int, len(pool)+1)
+	var matches []int
 	for i, m := range pool {
-		docs[i] = Words(m.Text + " " + m.Why + " " + strings.Join(m.Tags, " ") + " " + m.Kind)
-		seen := map[string]bool{}
-		for _, w := range docs[i] {
-			if !seen[w] {
-				seen[w] = true
-				df[w]++
+		doc := i + 1
+		for _, word := range Words(m.Text + " " + m.Why + " " + strings.Join(m.Tags, " ") + " " + m.Kind) {
+			if slot, exists := byWord[word]; exists && terms[slot].lastDoc != doc {
+				terms[slot].lastDoc = doc
+				terms[slot].frequency++
+				matches = append(matches, slot)
 			}
 		}
+		offsets[doc] = len(matches)
 	}
+	for i := range terms {
+		terms[i].lastDoc = 0
+		terms[i].weight = 1 + math.Log(float64(len(pool)+1)/float64(terms[i].frequency+1))
+	}
+
 	whole := norm(text)
 	out := []Hit{}
 	for i, m := range pool {
-		has := map[string]bool{}
-		for _, w := range docs[i] {
-			has[w] = true
+		doc := i + 1
+		if offsets[i] == offsets[doc] {
+			continue
+		}
+		for _, slot := range matches[offsets[i]:offsets[doc]] {
+			terms[slot].lastDoc = doc
 		}
 		score, matched := 0.0, 0
-		for _, w := range words {
-			if has[w] {
+		for _, slot := range order {
+			if terms[slot].lastDoc == doc {
 				matched++
-				score += 1 + math.Log(float64(len(pool)+1)/float64(df[w]+1))
+				score += terms[slot].weight
 			}
-		}
-		if matched == 0 {
-			continue
 		}
 		// most of the words, not one common one, make a match
 		score *= float64(matched) / float64(len(words))
