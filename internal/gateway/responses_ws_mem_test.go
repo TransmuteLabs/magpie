@@ -20,6 +20,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -260,6 +261,12 @@ func expectSocketTurnBodiesFreed(t *testing.T, socket string) {
 }
 
 func TestResponsesSocketReusesTurnBody(t *testing.T) {
+	t.Run("unrestricted", func(t *testing.T) { expectResponsesSocketReusesTurnBody(t, false) })
+	t.Run("model budget", func(t *testing.T) { expectResponsesSocketReusesTurnBody(t, true) })
+}
+
+func expectResponsesSocketReusesTurnBody(t *testing.T, modelBudget bool) {
+	t.Helper()
 	fresh(t)
 	built := make(chan []byte, 1)
 	socketTurnBody = func(body []byte) { built <- body }
@@ -284,20 +291,45 @@ func TestResponsesSocketReusesTurnBody(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var headers http.Header
+	if modelBudget {
+		keys, secrets := newCaller(t, "Budgeted")
+		setLimit(t, keys[0].ID, &access.Limit{Period: "day", Tokens: 1 << 30, Models: []string{"fake/m1"}})
+		headers = http.Header{"Authorization": {"Bearer " + secrets[0]}, "X-Test-Remote": {"192.168.1.9:5000"}}
+	}
 	_, server := sockServer(t)
-	client, _, err := dialSock(t, server, "/v1/responses", nil)
+	client, _, err := dialSock(t, server, "/v1/responses", headers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	item := strings.Replace(userPing, "ping", strings.Repeat("x", 256<<10), 1)
-	if end := last(client.turn(create("", item))); end.Get("type").String() != "response.completed" {
+	frame := create("", item)
+	want := []string{item}
+	if modelBudget {
+		warmup := last(client.turn(create("", item, `"generate":false`)))
+		if warmup.Get("type").String() != "response.completed" || up.calls() != 0 {
+			t.Fatalf("warmup ended as %s with %d upstream calls", warmup.Raw, up.calls())
+		}
+		frame = create(warmup.Get("response.id").String(), userMore)
+		want = append(want, userMore)
+	}
+	if end := last(client.turn(frame)); end.Get("type").String() != "response.completed" {
 		t.Fatalf("turn ended as %s", end.Raw)
 	}
 	if !<-reused {
 		t.Fatal("gateway routed a copy of the socket's POST body")
 	}
-	if body := up.body(0); !strings.Contains(string(body), item) {
-		t.Fatal("upstream did not receive the complete input item")
+	if up.calls() != 1 {
+		t.Fatalf("upstream received %d requests for one continuation", up.calls())
+	}
+	input := gjson.GetBytes(up.body(0), "input").Array()
+	if len(input) != len(want) {
+		t.Fatalf("upstream received %d input items, want %d", len(input), len(want))
+	}
+	for index, item := range want {
+		if input[index].Raw != item {
+			t.Fatalf("upstream input item %d changed", index)
+		}
 	}
 }
 

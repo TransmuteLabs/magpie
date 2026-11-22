@@ -88,7 +88,13 @@ func keyLimited(next http.Handler) http.Handler {
 				writeError(w, protoOfPath(r.URL.Path), status, err.Error())
 				return
 			}
-			r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
+			if buffered, ok := r.Body.(*socketRequestBody); ok && cap(b) == len(b) {
+				buffered.Reset(b)
+				buffered.data = b
+			} else {
+				r.Body = io.NopCloser(bytes.NewReader(b))
+			}
+			r.ContentLength = int64(len(b))
 			size, model = int64(len(b)), budget.ModelOf(b)
 		}
 		now := limitClock()
