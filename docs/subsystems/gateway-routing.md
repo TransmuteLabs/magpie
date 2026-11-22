@@ -2362,15 +2362,16 @@ searcher's (MOMO on Discord): `visionEffort` and `searcherEffort` in
 or empty. The chip offers only the model's own levels (`ModelEfforts`:
 `Efforts`, weakest first; `visionEfforts`, `searchEfforts` in the settings
 read), and none for a model whose levels aren't known. A level picked is
-fitted to the model's levels (`sideEffort`, `fitEffort`) when the call is
-made, so a saved level outlives a change of model. Empty keeps magpie's own:
-Image recognition at the least level the model has (`classifyEffort`), the
+fitted to the model's levels (`visionEffort`, `sideEffort`, `fitEffort`) when
+the call is made, so a saved level outlives a change of model. Empty keeps
+magpie's own choice: Image recognition at the least level the model has, the
 searcher with no level at all. Only these two calls carry it
 ([`side_effort.go`](../../internal/gateway/side_effort.go)):
 
-- `askVisionWith` sends Chat's `reasoning_effort`; the image cache key
-  (`sightKey`) has the level picked in it, so a new pick reads the image
-  again.
+- `askVisionWith` uses one reading of the model's levels to set Chat's
+  `reasoning_effort` and give a level chosen in Settings room in `max_tokens`.
+  The image cache key (`sightKey`) has the level picked in it, so a new pick
+  reads the image again.
 - `searchBody` sends the searcher's Anthropic body `thinking` (`disabled` for
   `none`, else enabled with `budgetOf`'s budget, 1024 for `minimal`) and
   `output_config.effort` unless the vendor model is a Claude older than

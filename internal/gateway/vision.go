@@ -718,11 +718,10 @@ func (s *Server) askVisionWith(ctx context.Context, model, src, system, text str
 		},
 		"max_tokens": 4096,
 	}
-	if effort := visionEffort(model); effort != "" {
+	if effort, picked := visionEffort(model); effort != "" {
 		req["reasoning_effort"] = effort
-		// a level picked in Settings is given room to think in
-		if picked := sideEffort(model, provider.HeldSettings().VisionEffort); picked != "" {
-			req["max_tokens"] = replyRoom(4096, picked)
+		if picked {
+			req["max_tokens"] = replyRoom(4096, effort)
 		}
 	}
 	body, _ := json.Marshal(req)

@@ -229,10 +229,10 @@ func TestVisionEffortUnchangedByClassifier(t *testing.T) {
 	fresh(t)
 	thinkVendor(t, provider.Provider{ID: "vu"}, "seer", nil)
 	thinkVendor(t, provider.Provider{ID: "vl"}, "seer", []string{"low", "high"})
-	if e := visionEffort("vu/seer"); e != "" {
-		t.Errorf("unknown levels: %q", e)
+	if effort, picked := visionEffort("vu/seer"); effort != "" || picked {
+		t.Errorf("unknown levels: effort %q, picked %t", effort, picked)
 	}
-	if e := visionEffort("vl/seer"); e != "low" {
-		t.Errorf("low, high: %q", e)
+	if effort, picked := visionEffort("vl/seer"); effort != "low" || picked {
+		t.Errorf("low, high: effort %q, picked %t", effort, picked)
 	}
 }
