@@ -27,9 +27,15 @@ import (
 // unrouted watch), and with it the body, so 60 of Codex's 20 MB
 // conversations stayed after every socket had closed.
 func TestSocketTurnBodiesFreed(t *testing.T) {
+	t.Run("upstream HTTP", func(t *testing.T) { expectSocketTurnBodiesFreed(t, "") })
+	t.Run("upstream WebSocket", func(t *testing.T) { expectSocketTurnBodiesFreed(t, provider.SocketOn) })
+}
+
+func expectSocketTurnBodiesFreed(t *testing.T, socket string) {
+	t.Helper()
 	fresh(t)
 	var served atomic.Int64
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var vendor http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
 		n := served.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -39,9 +45,17 @@ func TestSocketTurnBodiesFreed(t *testing.T) {
 			`data: {"type":"response.created","response":{"id":"`+id+`","object":"response","status":"in_progress","output":[]}}`,
 			`data: {"type":"response.output_item.done","output_index":0,"item":`+item+`}`,
 			`data: {"type":"response.completed","response":{"id":"`+id+`","object":"response","status":"completed","output":[`+item+`],"usage":{"input_tokens":300,"output_tokens":50,"total_tokens":350}}}`))
-	}))
+	})
+	var sockets *fakeSocketBackend
+	if socket == provider.SocketOn {
+		socketOn(t)
+		sockets = &fakeSocketBackend{path: "/v1/responses", keep: true}
+		sockets.frames = keptReply(sockets)
+		vendor = sockets
+	}
+	up := httptest.NewServer(withoutAnonymousFixtureProbe(vendor))
 	t.Cleanup(up.Close)
-	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Responses: up.URL + "/v1", Models: []string{"m1"}}); err != nil {
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "k", Responses: up.URL + "/v1", Models: []string{"m1"}, Socket: socket}); err != nil {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
@@ -72,6 +86,11 @@ func TestSocketTurnBodiesFreed(t *testing.T) {
 			t.Fatalf("turn %d: %v", i, got)
 		}
 		id = end.Get("response.id").String()
+	}
+	if sockets != nil {
+		if posts, observed := sockets.counts(); posts != 0 || observed != turns {
+			t.Fatalf("upstream got %d WS turns and %d HTTP posts, want %d WS turns", observed, posts, turns)
+		}
 	}
 	c.c.CloseNow()
 	// the socket's handler ends after its client goes (drain waits for

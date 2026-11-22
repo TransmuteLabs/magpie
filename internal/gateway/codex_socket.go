@@ -342,19 +342,25 @@ func codexSocketMessage(req *http.Request) ([]byte, bool) {
 			return nil, false
 		}
 		defer rc.Close()
-		plain := rc
-		if enc := req.Header.Get("Content-Encoding"); enc != "" {
-			if !strings.EqualFold(enc, "zstd") {
-				return nil, false
-			}
-			d := &http.Request{Header: http.Header{"Content-Encoding": {enc}}, Body: rc}
-			if plain, err = decodedBody(d); err != nil {
-				return nil, false
-			}
-			defer plain.Close()
+		encoding := req.Header.Get("Content-Encoding")
+		if encoding == "" {
+			body = provider.BufferedReplayBody(rc)
 		}
-		if body, err = io.ReadAll(io.LimitReader(plain, defaultBodyLimit+1)); err != nil {
-			return nil, false
+		if body == nil {
+			plain := rc
+			if encoding != "" {
+				if !strings.EqualFold(encoding, "zstd") {
+					return nil, false
+				}
+				d := &http.Request{Header: http.Header{"Content-Encoding": {encoding}}, Body: rc}
+				if plain, err = decodedBody(d); err != nil {
+					return nil, false
+				}
+				defer plain.Close()
+			}
+			if body, err = io.ReadAll(io.LimitReader(plain, defaultBodyLimit+1)); err != nil {
+				return nil, false
+			}
 		}
 	}
 	if len(body) > defaultBodyLimit {
