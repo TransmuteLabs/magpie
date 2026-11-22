@@ -48,6 +48,49 @@ func TestUsageEpochCrossProcessFencesExistingStore(t *testing.T) {
 	}
 }
 
+func TestUsageStampsKeepPerAccountRevisions(t *testing.T) {
+	store, root := storeTest(t)
+	scope := storeTestScope()
+	dirty, deleted, missing, stale := scope, scope, scope, scope
+	dirty.Account, deleted.Account, missing.Account = "dirty", "deleted", "missing"
+	stale.Generation++
+	for _, account := range []sdk.Scope{scope, dirty, deleted} {
+		storeTestAccount(t, store, account)
+	}
+	if err := store.DeleteAccount(deleted.Plugin, deleted.Provider, deleted.Account, deleted.Generation); err != nil {
+		t.Fatal(err)
+	}
+	peer := NewStore(root)
+	dirtyStamp, err := peer.InvalidateUsage(dirty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanStamp, err := store.UsageStampContext(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := []sdk.Scope{scope, dirty, deleted, missing, stale}
+	stamps, err := store.UsageStampsContext(t.Context(), scope.Plugin, requested)
+	if err != nil || len(stamps) != 2 || stamps[cleanStamp.Scope] != cleanStamp || stamps[dirtyStamp.Scope] != dirtyStamp ||
+		!dirtyStamp.Dirty || dirtyStamp.Revision != 1 {
+		t.Fatalf("batched stamps = %+v, err = %v; want only clean %+v and dirty %+v", stamps, err, cleanStamp, dirtyStamp)
+	}
+
+	absent := scope
+	absent.Plugin = "absent"
+	if stamps, err := store.UsageStampsContext(t.Context(), absent.Plugin, []sdk.Scope{absent}); err != nil || len(stamps) != 0 {
+		t.Fatalf("missing module stamps = %+v, err = %v", stamps, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "private", scope.Plugin, "accounts.json"), []byte(`{`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stamps, err = store.UsageStampsContext(t.Context(), scope.Plugin, requested)
+	storeTestError(t, err, "store_unreadable")
+	if len(stamps) != 0 {
+		t.Fatalf("corrupt module still supplied stamps: %+v", stamps)
+	}
+}
+
 func usageManager(t *testing.T) (*Manager, sdk.Scope) {
 	t.Helper()
 	return usageManagerVersion(t, 4)

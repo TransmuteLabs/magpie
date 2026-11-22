@@ -18,7 +18,9 @@ import (
 	"strings"
 	"time"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/plugin"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // cardFace is what a card is named and drawn with.
@@ -125,6 +127,51 @@ func cardLogins(ctx context.Context) []Login {
 	return out
 }
 
+func keptLoginReadingKeys(ctx context.Context, logins []Login) []string {
+	type module struct {
+		store *extensionhost.Store
+		id    string
+	}
+	type batch struct {
+		indexes []int
+		scopes  []sdk.Scope
+	}
+	batches := map[module]*batch{}
+	keys := make([]string, len(logins))
+	for index, login := range logins {
+		binding := login.extension
+		if binding == nil {
+			keys[index] = loginReadingCacheKeyContext(ctx, login)
+			continue
+		}
+		scope := binding.currentScope()
+		keys[index] = extensionUsageKeyPrefix(binding, scope)
+		if scope.Account == "" {
+			continue
+		}
+		selected := module{binding.host.Store(), scope.Plugin}
+		accounts := batches[selected]
+		if accounts == nil {
+			accounts = &batch{}
+			batches[selected] = accounts
+		}
+		accounts.indexes = append(accounts.indexes, index)
+		accounts.scopes = append(accounts.scopes, scope)
+	}
+	for selected, accounts := range batches {
+		stamps, _ := selected.store.UsageStampsContext(ctx, selected.id, accounts.scopes)
+		if ctx.Err() != nil {
+			return nil
+		}
+		for index, scope := range accounts.scopes {
+			stamp, found := stamps[scope]
+			position := accounts.indexes[index]
+			keys[position] = extensionUsageKeyWithStamp(keys[position], stamp, found)
+		}
+	}
+	return keys
+}
+
 // withAccountReadings is cards with each account's latest reading, made
 // for the Usage page or behind it (LoginUsage), in place of an older
 // one. An account without a card gets one, from its reading, else from
@@ -134,12 +181,9 @@ func withAccountReadings(ctx context.Context, cards []SubscriptionQuota) []Subsc
 	if len(ls) == 0 {
 		return cards
 	}
-	keys := make([]string, len(ls))
-	for index, login := range ls {
-		keys[index] = loginReadingCacheKeyContext(ctx, login)
-		if ctx.Err() != nil {
-			return cards
-		}
+	keys := keptLoginReadingKeys(ctx, ls)
+	if ctx.Err() != nil {
+		return cards
 	}
 	read := map[string]SubscriptionQuota{}
 	c := &loginUsageCache

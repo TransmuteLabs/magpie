@@ -418,7 +418,10 @@ func (binding *extensionAccount) currentScope() sdk.Scope {
 }
 
 func (binding *extensionAccount) cacheKey() string {
-	scope := binding.currentScope()
+	return binding.cacheKeyAt(binding.currentScope())
+}
+
+func (binding *extensionAccount) cacheKeyAt(scope sdk.Scope) string {
 	key := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%s", binding.host.Namespace(), scope.Plugin, scope.Provider,
 		scope.Account, scope.Generation, binding.modelKey)
 	if revision := binding.identity().revision; revision != "" {

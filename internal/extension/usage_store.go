@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -68,6 +69,47 @@ func (s *Store) UsageStamp(scope sdk.Scope) (UsageStamp, error) {
 
 func (s *Store) UsageStampContext(ctx context.Context, scope sdk.Scope) (UsageStamp, error) {
 	return s.usageStampContext(ctx, scope, storeSync)
+}
+
+// UsageStampsContext selects revisions keyed by account scope from one module snapshot.
+// Missing generations and unconfirmed clean revisions are omitted. Dirty revisions
+// are included so they select their own cache keys.
+func (s *Store) UsageStampsContext(ctx context.Context, plugin string, scopes []sdk.Scope) (map[sdk.Scope]UsageStamp, error) {
+	if !storePluginID(plugin) {
+		return nil, storeInvalid()
+	}
+	selected := make(map[sdk.Scope]bool, len(scopes))
+	for _, scope := range scopes {
+		if scope.Plugin == plugin && scope.Account != "" && storeValidScope(scope) {
+			scope.Session, scope.Operation, scope.Attempt = "", "", 0
+			selected[scope] = true
+		}
+	}
+	var stamps map[sdk.Scope]UsageStamp
+	err := s.withReadAccountsSnapshot(ctx, plugin, func(root *os.Root, snapshot *storeReadSnapshot[storeAccounts]) error {
+		stamps = nil
+		if snapshot == nil {
+			return nil
+		}
+		stamps = make(map[sdk.Scope]UsageStamp, len(selected))
+		confirmed := sync.OnceValue(func() bool {
+			return s.confirmAccountSnapshot(ctx, root, snapshot, storeSync) == nil
+		})
+		for _, account := range snapshot.value.Accounts {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			stamp := usageStamp(account)
+			if !account.Deleted && selected[stamp.Scope] && (stamp.Dirty || confirmed()) {
+				stamps[stamp.Scope] = stamp
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return stamps, nil
 }
 
 func (s *Store) usageStampContext(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error) (UsageStamp, error) {

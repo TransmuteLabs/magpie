@@ -51,16 +51,25 @@ func (proof *extensionUsageProof) currentSelection(ctx context.Context) bool {
 }
 
 func extensionUsageKey(ctx context.Context, binding *extensionAccount) string {
-	key := binding.cacheKey()
-	if binding.enableGeneration != "" {
-		key += "\x00enable:" + binding.enableGeneration
-	}
 	scope := binding.currentScope()
+	key := extensionUsageKeyPrefix(binding, scope)
 	if scope.Account == "" {
 		return key
 	}
 	stamp, err := binding.host.Store().UsageStampContext(ctx, scope)
-	if err != nil {
+	return extensionUsageKeyWithStamp(key, stamp, err == nil)
+}
+
+func extensionUsageKeyPrefix(binding *extensionAccount, scope sdk.Scope) string {
+	key := binding.cacheKeyAt(scope)
+	if binding.enableGeneration != "" {
+		key += "\x00enable:" + binding.enableGeneration
+	}
+	return key
+}
+
+func extensionUsageKeyWithStamp(key string, stamp extensionhost.UsageStamp, known bool) string {
+	if !known {
 		return key + "\x00usage:unavailable"
 	}
 	return fmt.Sprintf("%s\x00usage:%d", key, stamp.Revision)
