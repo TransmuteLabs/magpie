@@ -580,6 +580,10 @@ admission before it checks the saved sign-ins. An admitted operation makes
 cutover return a busy error. The common writer freezes the provider's
 records as soon as its ownership is pending or active. Writes for other
 providers preserve the frozen bytes used to verify rollback.
+Ownership is checked across the entire table. A missing `active` flag
+or a malformed authority flag blocks admission and writes until the
+table is repaired. Older records may omit `pending` and `authDispatched`
+when those flags are false.
 
 While holding the OS lock, a writer links its `.write-owner` marker to
 the legacy `.lock` reservation. This requires hard links on the

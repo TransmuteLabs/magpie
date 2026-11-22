@@ -473,9 +473,64 @@ func TestStoreReadViewsAreIndependentAndCurrent(t *testing.T) {
 	if err != nil || len(owners) != 1 || owners[0].Revision != "modified" {
 		t.Fatalf("owner revision after same-metadata rewrite: %v", err)
 	}
-	rewriteStoreReadFixture(t, ownerPath, []byte(`"active":true`), []byte(`"active":"xx"`))
+	rewriteStoreReadFixture(t, ownerPath, []byte(`"active":true`), []byte(`"active":null`))
 	_, err = store.SubscriptionOwners(ctx)
 	storeTestError(t, err, "store_unreadable")
+	rewriteStoreReadFixture(t, ownerPath, []byte(`"active":null`), []byte(`"active":"xx"`))
+	_, err = store.SubscriptionOwners(ctx)
+	storeTestError(t, err, "store_unreadable")
+	rewriteStoreReadFixture(t, ownerPath, []byte(`"active":"xx"`), []byte(`"active":true`))
+	owners, err = store.SubscriptionOwners(ctx)
+	if err != nil || len(owners) != 1 || !owners[0].Active {
+		t.Fatalf("owner after same-metadata repair: %v, %v", owners, err)
+	}
+}
+
+func TestSubscriptionOwnerAuthorityFlags(t *testing.T) {
+	const otherFields = `"module":"test-module","provider":"test-provider","publicID":"test-provider",` +
+		`"revision":"revision","accounts":[{"key":"saved","id":"account","user":"user","loginID":"login"}],` +
+		`"grantRevision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",` +
+		`"digests":{"saved":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},` +
+		`"tickets":["ticket"],"generations":[1]`
+	for _, test := range []struct {
+		name, flags                          string
+		active, pending, dispatched, invalid bool
+	}{
+		{name: "legacy active", flags: `,"active":true`, active: true},
+		{name: "legacy rolled back", flags: `,"active":false`},
+		{name: "pending", flags: `,"active":false,"pending":true`, pending: true},
+		{name: "explicit false", flags: `,"active":false,"pending":false,"authDispatched":false`},
+		{name: "dispatched", flags: `,"active":true,"authDispatched":true`, active: true, dispatched: true},
+		{name: "missing active", invalid: true},
+		{name: "null active", flags: `,"active":null`, invalid: true},
+		{name: "null pending", flags: `,"active":false,"pending":null`, invalid: true},
+		{name: "null dispatch fence", flags: `,"active":true,"authDispatched":null`, invalid: true},
+		{name: "repeated active", flags: `,"active":true,"Active":false`, invalid: true},
+		{name: "repeated pending", flags: `,"active":false,"pending":true,"pending":false`, invalid: true},
+		{name: "repeated dispatch fence", flags: `,"active":true,"authDispatched":true,"authDispatched":false`, invalid: true},
+		{name: "simultaneously active and pending", flags: `,"active":true,"pending":true`, invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows, err := decodeSubscriptionRecords([]byte("[{" + otherFields + test.flags + "}]"))
+			if test.invalid {
+				storeTestError(t, err, "store_unreadable")
+				if rows != nil {
+					t.Fatalf("damaged ownership returned partial rows: %+v", rows)
+				}
+				return
+			}
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("decode owner: %v, %v", rows, err)
+			}
+			row := rows[0]
+			if row.Active != test.active || row.Pending != test.pending || row.AuthDispatched != test.dispatched {
+				t.Fatalf("authority flags = %t, %t, %t", row.Active, row.Pending, row.AuthDispatched)
+			}
+			if test.dispatched && !errors.Is(row.checkRollback(nil), errRollbackUnverified) {
+				t.Fatal("a dispatched auth operation must keep rollback blocked")
+			}
+		})
+	}
 }
 
 func TestStoreReadOwnersRejectsSymlinkAncestor(t *testing.T) {

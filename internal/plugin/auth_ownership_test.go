@@ -19,6 +19,7 @@ import (
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/testenv"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const transferProvider = "transferco"
@@ -170,6 +171,79 @@ func TestTransferredCommunityAuthCannotChange(t *testing.T) {
 			}
 			if !SignedIn("neighbor") {
 				t.Fatal("rollback sign-out lost the neighboring account")
+			}
+		})
+	}
+}
+
+func TestDamagedSubscriptionOwnerKeepsCommunityAuthClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, changed, provider string
+		pending                 bool
+	}{
+		{name: "active", changed: `"active":null`, provider: transferProvider},
+		{name: "pending", changed: `"pending":null`, provider: transferProvider, pending: true},
+		{name: "independent row", changed: `"active":null`, provider: "neighbor"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sandbox(t)
+			ctx := t.Context()
+			path := writeCommunityOwnership(t, !test.pending, test.pending)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTransferAuth(t, `{"transferco":{"type":"api","key":"kept"},"neighbor":{"type":"api","key":"independent"}}`)
+			before, err := os.ReadFile(AuthPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckCommunitySubscription(ctx, transferProvider); !errors.Is(err, errCommunitySubscriptionOwned) {
+				t.Fatalf("valid ownership does not freeze the transferred login: %v", err)
+			}
+			if err := CheckCommunitySubscription(ctx, "neighbor"); err != nil {
+				t.Fatalf("valid unrelated owner blocks the neighboring login: %v", err)
+			}
+			field := `"active":true`
+			if test.pending {
+				field = `"pending":true`
+			}
+			damaged := bytes.Replace(raw, []byte(field), []byte(test.changed), 1)
+			if bytes.Equal(damaged, raw) {
+				t.Fatal("fixture did not change the authority field")
+			}
+			if err := writeWhole(path, damaged); err != nil {
+				t.Fatal(err)
+			}
+			read := func(name string, err error) {
+				t.Helper()
+				var failure *sdk.Error
+				if !errors.As(err, &failure) || failure.Code != "store_unreadable" {
+					t.Errorf("%s with damaged ownership: %v", name, err)
+				}
+			}
+			read("check", CheckCommunitySubscription(ctx, test.provider))
+			release, err := GuardCommunitySubscription(ctx, test.provider)
+			if release != nil {
+				release()
+			}
+			read("guard", err)
+			edit := func(records map[string]json.RawMessage) (bool, error) {
+				records[test.provider] = json.RawMessage(`{"type":"api","key":"replacement"}`)
+				return true, nil
+			}
+			read("edit", EditAuth(edit))
+			if after, err := os.ReadFile(AuthPath()); err != nil || !bytes.Equal(after, before) {
+				t.Errorf("credential bytes changed while ownership was unreadable: %v", err)
+			}
+			if err := writeWhole(path, raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckCommunitySubscription(ctx, transferProvider); !errors.Is(err, errCommunitySubscriptionOwned) {
+				t.Fatalf("repair did not restore the transferred login's freeze: %v", err)
+			}
+			if err := CheckCommunitySubscription(ctx, "neighbor"); err != nil {
+				t.Fatalf("repair did not restore independent access: %v", err)
 			}
 		})
 	}

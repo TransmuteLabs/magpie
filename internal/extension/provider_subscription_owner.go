@@ -46,6 +46,29 @@ type subscriptionRecord struct {
 	PreviousRevision string            `json:"previousRevision,omitempty"`
 }
 
+type subscriptionFlag uint8
+
+const (
+	subscriptionFlagAbsent subscriptionFlag = iota
+	subscriptionFlagFalse
+	subscriptionFlagTrue
+)
+
+func (flag *subscriptionFlag) UnmarshalJSON(raw []byte) error {
+	if *flag != subscriptionFlagAbsent {
+		return storeUnreadable()
+	}
+	switch string(raw) {
+	case "false":
+		*flag = subscriptionFlagFalse
+	case "true":
+		*flag = subscriptionFlagTrue
+	default:
+		return storeUnreadable()
+	}
+	return nil
+}
+
 var (
 	errSubscriptionChanged = errors.New("the subscription selection changed or is incomplete")
 	errRollbackUnverified  = errors.New("the transferred SDK credential state is no longer proven unchanged; automatic rollback is unavailable")
@@ -80,12 +103,25 @@ func readSubscriptionRecords(dir *os.Root) ([]subscriptionRecord, error) {
 }
 
 func decodeSubscriptionRecords(data []byte) ([]subscriptionRecord, error) {
-	var rows []subscriptionRecord
-	if err := storeDecode(data, &rows); err != nil {
+	var stored []struct {
+		subscriptionRecord
+		Active         subscriptionFlag `json:"active"`
+		Pending        subscriptionFlag `json:"pending"`
+		AuthDispatched subscriptionFlag `json:"authDispatched"`
+	}
+	if err := storeDecode(data, &stored); err != nil {
 		return nil, err
 	}
+	rows := make([]subscriptionRecord, 0, len(stored))
 	public, pairs := map[string]bool{}, map[string]bool{}
-	for _, r := range rows {
+	for _, row := range stored {
+		if row.Active == subscriptionFlagAbsent {
+			return nil, storeUnreadable()
+		}
+		r := row.subscriptionRecord
+		r.Active = row.Active == subscriptionFlagTrue
+		r.Pending = row.Pending == subscriptionFlagTrue
+		r.AuthDispatched = row.AuthDispatched == subscriptionFlagTrue
 		pair := r.Module + "/" + r.Provider
 		if !storePluginID(r.Module) || !sdk.ValidID(r.Provider) || !sdk.ValidID(r.PublicID) || public[r.PublicID] || pairs[pair] ||
 			len(r.GrantRevision) != 64 || !storeToken(r.Revision) || r.Pending && r.Active || !validSubscriptionAccounts(r.Accounts) || len(r.Digests) != len(r.Accounts) || len(r.Tickets) != len(r.Accounts) {
@@ -100,6 +136,7 @@ func decodeSubscriptionRecords(data []byte) ([]subscriptionRecord, error) {
 			}
 		}
 		public[r.PublicID], pairs[pair] = true, true
+		rows = append(rows, r)
 	}
 	return rows, nil
 }
