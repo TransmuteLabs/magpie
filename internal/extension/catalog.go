@@ -39,6 +39,8 @@ const (
 var (
 	ErrCatalogConflict    = errors.New("extension catalog changed during installation")
 	errCatalogRootMissing = errors.New("extension catalog root does not exist")
+	errCatalogFileShape   = errors.New("is not a bounded regular file")
+	errCatalogFileSize    = errors.New("exceeds its size limit")
 )
 
 type Catalog struct {
@@ -122,8 +124,15 @@ func (catalog *Catalog) withLockedViewContext(ctx, lockCtx context.Context, use 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	var previous *validatedCatalog
+	if catalog != nil {
+		previous = catalog.listSnapshot.Load()
+	}
 	root, err := catalog.open(false)
 	if errors.Is(err, errCatalogRootMissing) {
+		if previous != nil {
+			catalog.listSnapshot.CompareAndSwap(previous, nil)
+		}
 		return use(catalogView{validatedCatalog: &emptyCatalog})
 	}
 	if err != nil {
@@ -133,6 +142,7 @@ func (catalog *Catalog) withLockedViewContext(ctx, lockCtx context.Context, use 
 	unlock, err := catalogReadLock(lockCtx, root)
 	if errors.Is(err, os.ErrNotExist) {
 		if _, statErr := root.Lstat("catalog.json"); errors.Is(statErr, os.ErrNotExist) {
+			catalog.discardRootedSnapshot(root, previous)
 			return use(catalogView{validatedCatalog: &emptyCatalog})
 		}
 		unlock, err = catalogLock(lockCtx, root)
@@ -141,7 +151,7 @@ func (catalog *Catalog) withLockedViewContext(ctx, lockCtx context.Context, use 
 		return err
 	}
 	defer unlock()
-	view, err := catalog.readView(root)
+	view, err := catalog.readViewFrom(root, previous)
 	if err != nil {
 		return err
 	}
@@ -178,6 +188,10 @@ func (view catalogView) enabledEntry(entry Installed) Installed {
 var emptyCatalog validatedCatalog
 
 func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
+	return catalog.readViewFrom(root, catalog.listSnapshot.Load())
+}
+
+func (catalog *Catalog) readViewFrom(root *os.Root, previous *validatedCatalog) (catalogView, error) {
 	scratch := catalog.readScratch.Swap(nil)
 	var room []byte
 	if scratch != nil {
@@ -185,9 +199,13 @@ func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
 	}
 	data, snapshot, err := catalogReadSnapshot(root, room)
 	if err != nil {
+		if errors.Is(err, errCatalogFileShape) || errors.Is(err, errCatalogFileSize) {
+			catalog.discardRootedSnapshot(root, previous)
+		}
 		return catalogView{}, err
 	}
 	if !snapshot.present {
+		catalog.discardRootedSnapshot(root, previous)
 		return catalogView{root: root, validatedCatalog: &emptyCatalog}, nil
 	}
 	if len(data) > bytes.MinRead && cap(data) <= catalogReadScratchLimit {
@@ -202,16 +220,23 @@ func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
 	match := func(cached *validatedCatalog) bool {
 		return cached != nil && cached.root == root.Name() && cached.digest == snapshot.digest
 	}
-	if cached := catalog.listSnapshot.Load(); match(cached) {
-		return catalogView{root: root, validatedCatalog: cached}, nil
+	if match(previous) {
+		return catalogView{root: root, validatedCatalog: previous}, nil
 	}
 	catalog.snapshotMu.Lock()
-	defer catalog.snapshotMu.Unlock()
+	malformed := false
+	defer func() {
+		catalog.snapshotMu.Unlock()
+		if malformed {
+			catalog.discardRootedSnapshot(root, previous)
+		}
+	}()
 	if cached := catalog.listSnapshot.Load(); match(cached) {
 		return catalogView{root: root, validatedCatalog: cached}, nil
 	}
 	entries, err := catalogDecodeEntries(data)
 	if err != nil {
+		malformed = true
 		return catalogView{}, err
 	}
 	validated := &validatedCatalog{
@@ -232,6 +257,16 @@ func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
 	}
 	catalog.listSnapshot.Store(validated)
 	return catalogView{root: root, validatedCatalog: validated}, nil
+}
+
+func (catalog *Catalog) discardRootedSnapshot(root *os.Root, previous *validatedCatalog) {
+	if previous == nil {
+		return
+	}
+	current, err := os.Lstat(root.Name())
+	if err == nil && current.IsDir() && catalogDirectoryIdentity(root, current) == nil {
+		catalog.listSnapshot.CompareAndSwap(previous, nil)
+	}
 }
 
 func (catalog *Catalog) Install(ctx context.Context, source string, check func(context.Context, Installed) error) (Installed, error) {
@@ -1066,7 +1101,7 @@ func catalogReadFileInto(root *os.Root, name string, limit int64, room []byte) (
 		return nil, err
 	}
 	if !info.Mode().IsRegular() || info.Size() > limit {
-		return nil, fmt.Errorf("extension file %q is not a bounded regular file", name)
+		return nil, fmt.Errorf("extension file %q %w", name, errCatalogFileShape)
 	}
 	file, err := root.Open(name)
 	if err != nil {
@@ -1097,7 +1132,7 @@ func catalogReadFileInto(root *os.Root, name string, limit int64, room []byte) (
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("extension file %q exceeds its size limit", name)
+		return nil, fmt.Errorf("extension file %q %w", name, errCatalogFileSize)
 	}
 	return data, nil
 }

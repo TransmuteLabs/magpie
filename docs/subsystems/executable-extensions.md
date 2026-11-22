@@ -281,8 +281,10 @@ The catalog reads bounded bytes from the guarded root under a shared
 interprocess lock. It reuses a validated snapshot when the root path and
 content digest match. Changed bytes pass strict decoding, revision and
 ownership checks before publication. A read or validation error fails that
-lookup. An absent catalog yields an empty list. Returned entries own their
-nested manifests, file inventories and release provenance.
+lookup. An absent catalog yields an empty list. Confirmed absence or an invalid
+publication releases the previous decoded snapshot. Eviction preserves a
+concurrently published replacement. Returned entries own their nested
+manifests, file inventories and release provenance.
 Each catalog can reuse one read buffer up to 64 KiB. Concurrent reads obtain
 their own buffer when that buffer is in use.
 

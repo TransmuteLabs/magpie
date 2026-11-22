@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"weak"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
@@ -223,6 +225,165 @@ func TestCatalogListRecoversAndReadsLiveMarkers(test *testing.T) {
 	}
 	catalogTestWrite(test, filename, original, 0o600)
 	check("", false)
+}
+
+func TestCatalogListReleasesUnavailableSnapshot(test *testing.T) {
+	for _, failure := range []string{"missing root", "missing file and lock", "missing file", "malformed JSON", "directory"} {
+		test.Run(failure, func(test *testing.T) {
+			catalog, installed := catalogListFixture(test, 32)
+			manager := NewManager(catalog.Root)
+			defer manager.Close(test.Context())
+			listed, err := manager.ListContext(test.Context())
+			if err != nil || len(listed) != 1 || listed[0].Revision != installed.Revision {
+				test.Fatalf("warm catalog: %v, %v", listed, err)
+			}
+			previous := weak.Make(manager.catalog.listSnapshot.Load())
+			if previous.Value() == nil {
+				test.Fatal("fixture did not retain the indexed catalog")
+			}
+
+			filename := filepath.Join(catalog.Root, "catalog.json")
+			original, err := os.ReadFile(filename)
+			if err != nil {
+				test.Fatal(err)
+			}
+			parked := filepath.Join(test.TempDir(), "catalog-root")
+			if failure == "missing root" {
+				if err := os.Rename(catalog.Root, parked); err != nil {
+					test.Fatal(err)
+				}
+			} else if err := os.Remove(filename); err != nil {
+				test.Fatal(err)
+			}
+			switch failure {
+			case "missing file and lock":
+				if err := os.Remove(filepath.Join(catalog.Root, "catalog.lock")); err != nil {
+					test.Fatal(err)
+				}
+			case "malformed JSON":
+				catalogTestWrite(test, filename, []byte("["), 0o600)
+			case "directory":
+				if err := os.Mkdir(filename, 0o700); err != nil {
+					test.Fatal(err)
+				}
+			}
+
+			listed, err = manager.ListContext(test.Context())
+			if failure == "malformed JSON" || failure == "directory" {
+				if err == nil || listed != nil {
+					test.Fatalf("invalid publication: %v, %v", listed, err)
+				}
+			} else if err != nil || listed == nil || len(listed) != 0 {
+				test.Fatalf("absent publication: %v, %v", listed, err)
+			}
+			if manager.catalog.listSnapshot.Load() != nil {
+				test.Error("unavailable catalog still owns its previous decoded snapshot")
+			}
+			for range 3 {
+				runtime.GC()
+			}
+			if previous.Value() != nil {
+				test.Error("previous decoded snapshot survived collection")
+			}
+
+			switch failure {
+			case "missing root":
+				if err := os.Rename(parked, catalog.Root); err != nil {
+					test.Fatal(err)
+				}
+			case "directory":
+				if err := os.Remove(filename); err != nil {
+					test.Fatal(err)
+				}
+				fallthrough
+			default:
+				catalogTestWrite(test, filename, original, 0o600)
+			}
+			listed, err = manager.ListContext(test.Context())
+			if err != nil || len(listed) != 1 || listed[0].Revision != installed.Revision ||
+				manager.catalog.listSnapshot.Load() == nil {
+				test.Fatalf("catalog repair did not republish a valid snapshot: %v, %v", listed, err)
+			}
+		})
+	}
+}
+
+func TestCatalogListKeepsSnapshotOnCanceledLock(test *testing.T) {
+	catalog, _ := catalogListFixture(test, 0)
+	manager := NewManager(catalog.Root)
+	defer manager.Close(test.Context())
+	if listed, err := manager.ListContext(test.Context()); err != nil || len(listed) != 1 {
+		test.Fatalf("warm catalog: %v, %v", listed, err)
+	}
+	previous := manager.catalog.listSnapshot.Load()
+	root, err := catalog.open(false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer root.Close()
+	unlock, err := catalogLock(test.Context(), root)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer unlock()
+	if err := root.Remove("catalog.json"); err != nil {
+		test.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(test.Context(), 30*time.Millisecond)
+	defer cancel()
+	if listed, err := manager.ListContext(ctx); !errors.Is(err, context.DeadlineExceeded) || listed != nil {
+		test.Fatalf("catalog read through held lock: %v, %v", listed, err)
+	}
+	if manager.catalog.listSnapshot.Load() != previous {
+		test.Fatal("a canceled read changed the validated catalog")
+	}
+}
+
+func TestCatalogReadFromReplacedRootKeepsRepair(test *testing.T) {
+	if runtime.GOOS == "windows" {
+		test.Skip("open rooted directory cannot be renamed on Windows")
+	}
+	catalog, _ := catalogListFixture(test, 0)
+	manager := NewManager(catalog.Root)
+	defer manager.Close(test.Context())
+	if listed, err := manager.ListContext(test.Context()); err != nil || len(listed) != 1 {
+		test.Fatalf("warm catalog: %v, %v", listed, err)
+	}
+	root, err := catalog.open(false)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer root.Close()
+	unlock, err := catalogLock(test.Context(), root)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer unlock()
+	if err := root.Remove("catalog.json"); err != nil {
+		test.Fatal(err)
+	}
+	if err := os.Rename(catalog.Root, filepath.Join(test.TempDir(), "old")); err != nil {
+		test.Fatal(err)
+	}
+	peer := NewCatalog(catalog.Root)
+	installed := catalogTestInstall(test, peer, catalogTestPackage(test, "sample", "1.0.1"))
+	listed, err := manager.ListContext(test.Context())
+	if err != nil || len(listed) != 1 || listed[0].Revision != installed.Revision {
+		test.Fatalf("replacement catalog: %v, %v", listed, err)
+	}
+	repaired := manager.catalog.listSnapshot.Load()
+	if view, err := manager.catalog.readView(root); err != nil || len(view.entries) != 0 {
+		test.Fatalf("stale rooted absence: %v, %v", view, err)
+	}
+	if err := root.WriteFile("catalog.json", []byte("["), 0o600); err != nil {
+		test.Fatal(err)
+	}
+	if _, err := manager.catalog.readView(root); err == nil {
+		test.Fatal("stale rooted invalid data was accepted")
+	}
+	if manager.catalog.listSnapshot.Load() != repaired {
+		test.Fatal("the old rooted read evicted the replacement's validated snapshot")
+	}
 }
 
 func TestCatalogListSeesAtomicReplacementWithSameSizeAndTime(test *testing.T) {
