@@ -197,7 +197,7 @@ func (catalog *Catalog) readViewFrom(root *os.Root, previous *validatedCatalog) 
 	if scratch != nil {
 		room = *scratch
 	}
-	data, snapshot, err := catalogReadSnapshot(root, room)
+	data, snapshot, err := catalogReadSnapshot(root, room, previous)
 	if err != nil {
 		if errors.Is(err, errCatalogFileShape) || errors.Is(err, errCatalogFileSize) {
 			catalog.discardRootedSnapshot(root, previous)
@@ -208,7 +208,7 @@ func (catalog *Catalog) readViewFrom(root *os.Root, previous *validatedCatalog) 
 		catalog.discardRootedSnapshot(root, previous)
 		return catalogView{root: root, validatedCatalog: &emptyCatalog}, nil
 	}
-	if len(data) > bytes.MinRead && cap(data) <= catalogReadScratchLimit {
+	if cap(data) > bytes.MinRead && cap(data) <= catalogReadScratchLimit {
 		if scratch == nil {
 			scratch = new([]byte)
 		}
@@ -806,7 +806,7 @@ type catalogSnapshot struct {
 }
 
 func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
-	data, snapshot, err := catalogReadSnapshot(root, nil)
+	data, snapshot, err := catalogReadSnapshot(root, nil, nil)
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -820,14 +820,42 @@ func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
 	return entries, snapshot, nil
 }
 
-func catalogReadSnapshot(root *os.Root, room []byte) ([]byte, catalogSnapshot, error) {
-	info, err := root.Lstat("catalog.json")
+func catalogReadSnapshot(root *os.Root, room []byte, previous *validatedCatalog) ([]byte, catalogSnapshot, error) {
+	const name = "catalog.json"
+	info, err := root.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, catalogSnapshot{}, nil
 	} else if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
-	data, err := catalogReadBoundedFile(root, "catalog.json", info, catalogJSONLimit, room)
+	file, size, err := catalogOpenBoundedFile(root, name, info, catalogJSONLimit)
+	if err != nil {
+		return nil, catalogSnapshot{}, err
+	}
+	defer file.Close()
+	if size > catalogReadScratchLimit && previous != nil && previous.root == root.Name() {
+		const chunkSize = 32 << 10
+		if cap(room) < chunkSize {
+			room = make([]byte, chunkSize)
+		}
+		checksum := sha256.New()
+		count, err := io.CopyBuffer(checksum, io.LimitReader(file, catalogJSONLimit+1), room[:chunkSize])
+		if err != nil {
+			return nil, catalogSnapshot{}, err
+		}
+		if count > catalogJSONLimit {
+			return nil, catalogSnapshot{}, fmt.Errorf("extension file %q %w", name, errCatalogFileSize)
+		}
+		var digest [sha256.Size]byte
+		checksum.Sum(digest[:0])
+		if digest == previous.digest {
+			return room[:0], catalogSnapshot{present: true, digest: digest}, nil
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return nil, catalogSnapshot{}, err
+		}
+	}
+	data, err := catalogReadOpenedFile(file, name, size, catalogJSONLimit, room)
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -1101,24 +1129,41 @@ func catalogReadFile(root *os.Root, name string, limit int64) ([]byte, error) {
 }
 
 func catalogReadBoundedFile(root *os.Root, name string, info fs.FileInfo, limit int64, room []byte) ([]byte, error) {
-	if !info.Mode().IsRegular() || info.Size() > limit {
-		return nil, fmt.Errorf("extension file %q %w", name, errCatalogFileShape)
-	}
-	file, err := root.Open(name)
+	file, size, err := catalogOpenBoundedFile(root, name, info, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	return catalogReadOpenedFile(file, name, size, limit, room)
+}
+
+func catalogOpenBoundedFile(root *os.Root, name string, info fs.FileInfo, limit int64) (*os.File, int64, error) {
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return nil, 0, fmt.Errorf("extension file %q %w", name, errCatalogFileShape)
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, 0, err
+	}
 	opened, err := file.Stat()
 	if err != nil {
-		return nil, err
+		file.Close()
+		return nil, 0, err
 	}
 	if !os.SameFile(info, opened) {
-		return nil, fmt.Errorf("extension file %q changed while opening it", name)
+		file.Close()
+		return nil, 0, fmt.Errorf("extension file %q changed while opening it", name)
 	}
+	return file, opened.Size(), nil
+}
+
+func catalogReadOpenedFile(file *os.File, name string, size, limit int64, room []byte) ([]byte, error) {
 	bounded := io.LimitReader(file, limit+1)
-	var data []byte
-	if size := opened.Size(); size > bytes.MinRead && size <= catalogReadScratchLimit {
+	var (
+		data []byte
+		err  error
+	)
+	if size > bytes.MinRead && size <= catalogReadScratchLimit {
 		need := int(size) + bytes.MinRead
 		if cap(room) < need {
 			room = make([]byte, 0, need)

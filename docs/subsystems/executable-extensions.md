@@ -286,7 +286,9 @@ publication releases the previous decoded snapshot. Eviction preserves a
 concurrently published replacement. Returned entries own their nested
 manifests, file inventories and release provenance.
 Each catalog can reuse one read buffer up to 64 KiB. Concurrent reads obtain
-their own buffer when that buffer is in use.
+their own buffer when that buffer is in use. A warm read of a large catalog
+hashes all current bytes in chunks. If the digest changed, it rereads the
+same open file for validation and records the digest of the decoded bytes.
 
 The snapshot indexes module IDs, inbound protocols, and gateway hooks and
 middleware. A lookup reads the enablement markers of the selected roots,

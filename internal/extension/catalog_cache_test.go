@@ -1,6 +1,7 @@
 package extension
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -105,6 +106,176 @@ func TestSelectGatewayWarmCatalogReadAllocation(test *testing.T) {
 	small, large := measure(0), measure(128)
 	if large > small+(4<<10) {
 		test.Fatalf("larger warm gateway catalog allocated %d B/call, small catalog %d B/call", large, small)
+	}
+}
+
+func gatewayCatalogFixture(test testing.TB, resources int) (*Manager, Installed, string) {
+	test.Helper()
+	catalog, entry := catalogListFixture(test, 0)
+	entry.Manifest.Contract.Capabilities = append(entry.Manifest.Contract.Capabilities, sdk.GatewayHooks)
+	entry.Manifest.Hooks = &sdk.GatewayHookDescriptor{Request: true}
+	for index := range resources {
+		entry.Files[fmt.Sprintf("assets/resource-%04d.txt", index)] = entry.Files["worker"]
+	}
+	entry.Revision = catalogRevision(entry)
+	root, err := os.OpenRoot(catalog.Root)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := catalogWrite(test.Context(), root, []Installed{entry}); err != nil {
+		test.Fatal(err)
+	}
+	manager := NewManager(catalog.Root)
+	test.Cleanup(func() { manager.Close(context.Background()) })
+	return manager, entry, filepath.Join(catalog.Root, "catalog.json")
+}
+
+func TestSelectGatewayWarmLargeCatalogBoundsAllocation(test *testing.T) {
+	manager, entry, filename := gatewayCatalogFixture(test, 2048)
+	info, err := os.Stat(filename)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if info.Size() < 2*catalogReadScratchLimit {
+		test.Fatalf("catalog fixture is only %d bytes", info.Size())
+	}
+	selectGateway := func() {
+		selection := manager.SelectGateway(test.Context(), "local")
+		if len(selection.hooks) != 1 || selection.hooks[0].Revision != entry.Revision {
+			test.Fatal("gateway selection lost the expected hook")
+		}
+	}
+	selectGateway()
+
+	const calls = 128
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range calls {
+		selectGateway()
+	}
+	runtime.ReadMemStats(&after)
+	allocated := (after.TotalAlloc - before.TotalAlloc) / calls
+	test.Logf("%d byte catalog: %d B/call", info.Size(), allocated)
+	if allocated > catalogReadScratchLimit {
+		test.Fatalf("warm gateway selection allocated %d B/call, want at most %d", allocated, catalogReadScratchLimit)
+	}
+}
+
+func TestSelectGatewayLargeCatalogChecksCurrentBytesAndEnablement(test *testing.T) {
+	manager, entry, filename := gatewayCatalogFixture(test, 2048)
+	original, err := os.ReadFile(filename)
+	if err != nil {
+		test.Fatal(err)
+	}
+	stamp := time.Unix(1700000000, 0)
+	if err := os.Chtimes(filename, stamp, stamp); err != nil {
+		test.Fatal(err)
+	}
+	info, err := os.Stat(filename)
+	if err != nil {
+		test.Fatal(err)
+	}
+	assertHook := func(revision, generation string) {
+		test.Helper()
+		selection := manager.SelectGateway(test.Context(), "local")
+		if len(selection.hooks) != 1 || selection.hooks[0].Revision != revision || selection.hooks[0].EnableGeneration != generation {
+			test.Fatalf("gateway selection did not see revision %q and enablement %q: %d hooks", revision, generation, len(selection.hooks))
+		}
+	}
+	replace := func(data []byte) {
+		test.Helper()
+		if len(data) != len(original) {
+			test.Fatalf("replacement changes fixture size: %d != %d", len(data), len(original))
+		}
+		catalogTestWrite(test, filename, data, 0o600)
+		if err := os.Chtimes(filename, stamp, stamp); err != nil {
+			test.Fatal(err)
+		}
+		current, err := os.Stat(filename)
+		if err != nil {
+			test.Fatal(err)
+		}
+		if !os.SameFile(info, current) || current.Size() != info.Size() || !current.ModTime().Equal(info.ModTime()) {
+			test.Fatal("replacement changed the catalog identity, size or timestamp")
+		}
+	}
+
+	assertHook(entry.Revision, "")
+	entry.Manifest.Args[0] = "updated"
+	entry.Revision = catalogRevision(entry)
+	replacement, err := json.Marshal([]Installed{entry})
+	if err != nil {
+		test.Fatal(err)
+	}
+	replace(replacement)
+	assertHook(entry.Revision, "")
+
+	marker := filepath.Join(manager.catalog.Root, observerEnablementFile(entry.Manifest.ID))
+	const generation = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	catalogTestWrite(test, marker, []byte(`"`+generation+`"`), 0o600)
+	assertHook(entry.Revision, generation)
+
+	broken := bytes.Clone(replacement)
+	broken[0] = '{'
+	replace(broken)
+	if selection := manager.SelectGateway(test.Context(), "local"); selection.manager != nil || manager.catalog.listSnapshot.Load() != nil {
+		test.Fatal("invalid current catalog left the previous selection available")
+	}
+	replace(replacement)
+	assertHook(entry.Revision, generation)
+}
+
+func BenchmarkSelectGatewayCatalog(bench *testing.B) {
+	for _, setup := range []struct {
+		name      string
+		resources int
+		cold      bool
+		changed   bool
+		parallel  bool
+	}{
+		{name: "warm-small"},
+		{name: "warm-large", resources: 2048},
+		{name: "warm-large-parallel", resources: 2048, parallel: true},
+		{name: "cold-large", resources: 2048, cold: true},
+		{name: "changed-large", resources: 2048, changed: true},
+	} {
+		bench.Run(setup.name, func(bench *testing.B) {
+			manager, entry, _ := gatewayCatalogFixture(bench, setup.resources)
+			ctx := bench.Context()
+			selectGateway := func() bool {
+				selection := manager.SelectGateway(ctx, "local")
+				return len(selection.hooks) == 1 && selection.hooks[0].Revision == entry.Revision
+			}
+			if !selectGateway() {
+				bench.Fatal("initial gateway selection lost the expected hook")
+			}
+			mismatch := *manager.catalog.listSnapshot.Load()
+			mismatch.digest[0] ^= 1
+			bench.ReportAllocs()
+			if setup.parallel {
+				bench.ResetTimer()
+				bench.RunParallel(func(iterations *testing.PB) {
+					for iterations.Next() {
+						if !selectGateway() {
+							bench.Error("gateway selection lost the expected hook")
+							return
+						}
+					}
+				})
+				return
+			}
+			for bench.Loop() {
+				if setup.cold {
+					manager.catalog.listSnapshot.Store(nil)
+				} else if setup.changed {
+					manager.catalog.listSnapshot.Store(&mismatch)
+				}
+				if !selectGateway() {
+					bench.Fatal("gateway selection lost the expected hook")
+				}
+			}
+		})
 	}
 }
 
