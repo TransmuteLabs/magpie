@@ -29,10 +29,11 @@ import (
 )
 
 const (
-	catalogFileLimit    = 64 << 20
-	catalogPackageLimit = 256 << 20
-	catalogFilesLimit   = 4096
-	catalogJSONLimit    = catalogPackageLimit
+	catalogFileLimit        = 64 << 20
+	catalogPackageLimit     = 256 << 20
+	catalogFilesLimit       = 4096
+	catalogJSONLimit        = catalogPackageLimit
+	catalogReadScratchLimit = 64 << 10
 )
 
 var (
@@ -45,6 +46,7 @@ type Catalog struct {
 
 	snapshotMu   sync.Mutex
 	listSnapshot atomic.Pointer[validatedCatalog]
+	readScratch  atomic.Pointer[[]byte]
 }
 
 type validatedCatalog struct {
@@ -176,12 +178,26 @@ func (view catalogView) enabledEntry(entry Installed) Installed {
 var emptyCatalog validatedCatalog
 
 func (catalog *Catalog) readView(root *os.Root) (catalogView, error) {
-	data, snapshot, err := catalogReadSnapshot(root)
+	scratch := catalog.readScratch.Swap(nil)
+	var room []byte
+	if scratch != nil {
+		room = *scratch
+	}
+	data, snapshot, err := catalogReadSnapshot(root, room)
 	if err != nil {
 		return catalogView{}, err
 	}
 	if !snapshot.present {
 		return catalogView{root: root, validatedCatalog: &emptyCatalog}, nil
+	}
+	if len(data) > bytes.MinRead && cap(data) <= catalogReadScratchLimit {
+		if scratch == nil {
+			scratch = new([]byte)
+		}
+		defer func() {
+			*scratch = data[:0]
+			catalog.readScratch.CompareAndSwap(nil, scratch)
+		}()
 	}
 	match := func(cached *validatedCatalog) bool {
 		return cached != nil && cached.root == root.Name() && cached.digest == snapshot.digest
@@ -755,7 +771,7 @@ type catalogSnapshot struct {
 }
 
 func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
-	data, snapshot, err := catalogReadSnapshot(root)
+	data, snapshot, err := catalogReadSnapshot(root, nil)
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -769,13 +785,13 @@ func catalogRead(root *os.Root) ([]Installed, catalogSnapshot, error) {
 	return entries, snapshot, nil
 }
 
-func catalogReadSnapshot(root *os.Root) ([]byte, catalogSnapshot, error) {
+func catalogReadSnapshot(root *os.Root, room []byte) ([]byte, catalogSnapshot, error) {
 	if _, err := root.Lstat("catalog.json"); errors.Is(err, fs.ErrNotExist) {
 		return nil, catalogSnapshot{}, nil
 	} else if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
-	data, err := catalogReadFile(root, "catalog.json", catalogJSONLimit)
+	data, err := catalogReadFileInto(root, "catalog.json", catalogJSONLimit, room)
 	if err != nil {
 		return nil, catalogSnapshot{}, err
 	}
@@ -1041,6 +1057,10 @@ func catalogClone(entry Installed) (Installed, error) {
 }
 
 func catalogReadFile(root *os.Root, name string, limit int64) ([]byte, error) {
+	return catalogReadFileInto(root, name, limit, nil)
+}
+
+func catalogReadFileInto(root *os.Root, name string, limit int64, room []byte) ([]byte, error) {
 	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
@@ -1062,8 +1082,12 @@ func catalogReadFile(root *os.Root, name string, limit int64) ([]byte, error) {
 	}
 	bounded := io.LimitReader(file, limit+1)
 	var data []byte
-	if size := opened.Size(); size > bytes.MinRead && size <= 64<<10 {
-		buffer := bytes.NewBuffer(make([]byte, 0, int(size)+bytes.MinRead))
+	if size := opened.Size(); size > bytes.MinRead && size <= catalogReadScratchLimit {
+		need := int(size) + bytes.MinRead
+		if cap(room) < need {
+			room = make([]byte, 0, need)
+		}
+		buffer := bytes.NewBuffer(room[:0])
 		_, err = buffer.ReadFrom(bounded)
 		data = buffer.Bytes()
 	} else {

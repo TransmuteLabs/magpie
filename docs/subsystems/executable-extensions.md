@@ -283,6 +283,8 @@ content digest match. Changed bytes pass strict decoding, revision and
 ownership checks before publication. A read or validation error fails that
 lookup. An absent catalog yields an empty list. Returned entries own their
 nested manifests, file inventories and release provenance.
+Each catalog can reuse one read buffer up to 64 KiB. Concurrent reads obtain
+their own buffer when that buffer is in use.
 
 The snapshot indexes module IDs, inbound protocols, and gateway hooks and
 middleware. A lookup reads the enablement markers of the selected roots,

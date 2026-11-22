@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -73,6 +74,35 @@ func TestCatalogListWarmAllocations(test *testing.T) {
 	warm := testing.AllocsPerRun(10, func() { read(catalog) })
 	if warm >= cold/2 {
 		test.Fatalf("warm catalog still allocates like a strict reparse: warm %.0f, cold %.0f", warm, cold)
+	}
+}
+
+func TestSelectGatewayWarmCatalogReadAllocation(test *testing.T) {
+	measure := func(resources int) uint64 {
+		catalog, _ := catalogListFixture(test, resources)
+		manager := NewManager(catalog.Root)
+		ctx := test.Context()
+		defer manager.Close(ctx)
+		selectGateway := func() {
+			selection := manager.SelectGateway(ctx, "local")
+			if selection.manager != manager || selection.HasHooks() || selection.HasMiddleware() {
+				test.Fatal("expected a successful gateway selection without hooks or middleware")
+			}
+		}
+		selectGateway()
+
+		const calls = 128
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range calls {
+			selectGateway()
+		}
+		runtime.ReadMemStats(&after)
+		return (after.TotalAlloc - before.TotalAlloc) / calls
+	}
+	small, large := measure(0), measure(128)
+	if large > small+(4<<10) {
+		test.Fatalf("larger warm gateway catalog allocated %d B/call, small catalog %d B/call", large, small)
 	}
 }
 
