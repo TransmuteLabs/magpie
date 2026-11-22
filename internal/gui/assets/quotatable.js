@@ -210,11 +210,13 @@ function quotaTable(subs) {
         const e = el("td", "qt-msg", quotaError(sub.error, sub));
         e.colSpan = cols;
         e.title = sub.error;
+        e.append(...freeModelDailyRows(sub));
         tr.append(e);
       } else {
         if (bare({ sub, ws })) {
           const b = el("td", "qt-msg", t("{n} left", { n: sub.balance }));
           b.colSpan = cols;
+          b.append(...freeModelDailyRows(sub));
           tr.append(b);
         } else for (const n of names) {
           const here = inCol(ws, n);
@@ -226,6 +228,7 @@ function quotaTable(subs) {
           const o = el("td", "qt-w qt-other");
           for (const w of extra({ ws })) o.append(windowCell(w, true));
           if (sub.balance) o.append(el("div", "qt-fig", t("{n} left", { n: sub.balance })));
+          o.append(...freeModelDailyRows(sub));
           tr.append(o);
         }
       }

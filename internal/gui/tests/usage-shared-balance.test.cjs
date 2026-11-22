@@ -14,9 +14,10 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
-const assets = path.resolve(__dirname, "../assets");
+const assets = process.env.MAGPIE_USAGE_DAILY_ASSETS || path.resolve(__dirname, "../assets");
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
+const launch = (engine) => engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" });
 const trend = { points: [{ at: iso(now - 3 * 3600e3), amount: 9.2 }, { at: iso(now - 3600e3), amount: 8.8 }, { at: iso(now - 60e3), amount: 8.39 }] };
 const key = (provider, name, user, extra) => ({ provider, name, icon: "openai", user, windows: [], balance: "$8.39", readAt: iso(now), ...extra });
 const shared = { sharedBalance: "1-A031-Pro", balanceTrend: trend };
@@ -31,7 +32,7 @@ const quotas = () => [
   key("panel", "Panel", "t2"),
 ];
 
-function serve(lang) {
+function serve(lang, cards = quotas) {
   const settings = { theme: "light", lang, tray: "panel", quotaLeft: false, currency: "usd" };
   return async (route) => {
     const url = new URL(route.request().url());
@@ -41,7 +42,7 @@ function serve(lang) {
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings });
     if (url.pathname === "/api/settings") return json(settings);
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true } });
-    if (url.pathname === "/api/usage/quotas") return json(quotas());
+    if (url.pathname === "/api/usage/quotas") return json(cards());
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname.startsWith("/api/")) return json({});
@@ -56,6 +57,22 @@ const words = {
   en: { more: "+2 keys", tip: "One balance for the account these keys share: " + keysOf, sum: "$16.78 in all", why: "The balances added up, each account's once", panelSum: "$16.78 in all", panelWhy: "The 2 keys' balances added up" },
   zh: { more: "+2 个密钥", tip: "这些密钥同属一个账号，余额只显示一次：" + keysOf, sum: "合计 $16.78", why: "余额之和，每个账号只计一次", panelSum: "合计 $16.78", panelWhy: "2 个密钥的余额之和" },
 };
+
+const dailyWords = {
+  en: "Free-model requests · 2026-11-22 UTC · 1004/1000 used · 0 left where capped",
+  zh: "免费模型请求 · 2026-11-22 UTC · 已用 1004/1000 · 受限时剩余 0",
+  "zh-TW": "免費模型請求 · 2026-11-22 UTC · 已用 1004/1000 · 受限時剩餘 0",
+  ja: "無料モデルのリクエスト · 2026-11-22 UTC · 1004/1000 使用済み · 上限適用時は残り 0",
+  de: "Anfragen an kostenlose Modelle · 2026-11-22 UTC · 1004/1000 genutzt · 0 übrig, falls begrenzt",
+};
+
+const dailyQuotas = () => [
+  key("openrouter", "OpenRouter", "old-key", { sharedBalance: "old-key" }),
+  key("openrouter", "OpenRouter", "new-key", {
+    sharedBalance: "old-key", freeModelDaily: { day: "2026-11-22", used: 1004, limit: 1000, remaining: 0 },
+  }),
+  key("legacyrouter", "Legacy OpenRouter", "", {}),
+];
 
 const cards = (page) => page.evaluate(() => Object.fromEntries([...document.querySelectorAll("#subscriptionUsage > .subscription-card")].map((c) => [c.dataset.key, {
   users: [...c.querySelectorAll(".subscription-account .user")].filter((u) => u.offsetParent).map((u) => u.title),
@@ -73,20 +90,44 @@ const fits = (page, key) => page.evaluate((key) => {
   const bad = [];
   if (document.documentElement.scrollWidth > innerWidth) bad.push("page scrolls sideways");
   if (c.scrollWidth > c.clientWidth) bad.push("card spills");
-  for (const e of c.querySelectorAll(".subscription-head > *, .quota-balance b, .subscription-account .user, .quota-shared")) {
+  for (const e of c.querySelectorAll(".subscription-head > *, .quota-balance b, .subscription-account .user, .quota-shared, .quota-free-daily")) {
     if (!e.offsetParent) continue;
     const r = e.getBoundingClientRect();
     if (r.left < box.left - 0.5 || r.right > box.right + 0.5) bad.push(`${e.className || e.tagName} past the card`);
-    if (e.matches(".quota-sum, .quota-balance b, .quota-shared") && e.scrollWidth > e.clientWidth + 0.5) bad.push(`${e.className || e.tagName} cut: ${e.textContent}`);
+    if (e.matches(".quota-sum, .quota-balance b, .quota-shared, .quota-free-daily") && e.scrollWidth > e.clientWidth + 0.5) bad.push(`${e.className || e.tagName} cut: ${e.textContent}`);
   }
   return bad;
 }, key);
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  for (const [lang, summary] of Object.entries(dailyWords)) {
+    test(`${engine} ${lang}: free-model daily reading beside a shared balance`, async (t) => {
+      const browser = await launch(engine);
+      t.after(() => browser.close());
+      const page = await browser.newPage({ viewport: { width: 440, height: 700 }, reducedMotion: "reduce" });
+      page.setDefaultTimeout(5000);
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", serve(lang, dailyQuotas));
+      await page.goto("http://magpie.test/?view=usage");
+      const card = page.locator("#subscriptionUsage > [data-key=openrouter]");
+      await card.locator(".quota-balance b").waitFor();
+      assert.deepEqual(await card.locator(".quota-free-daily").allTextContents(), [`new-key · ${summary}`]);
+      assert.match(await card.locator(".quota-free-daily").getAttribute("title"), /BYOK/);
+      assert.equal(await card.locator(".quota-balance b").count(), 1);
+      assert.equal(await page.locator("#subscriptionUsage > [data-key=legacyrouter] .quota-free-daily").count(), 0);
+      assert.deepEqual(await fits(page, "openrouter"), []);
+      await page.locator("#quotaView button").nth(1).click();
+      const table = page.locator("#subscriptionUsage .qt-wrap");
+      await table.waitFor();
+      assert.deepEqual(await table.locator(".quota-free-daily").allTextContents(), [`new-key · ${summary}`]);
+      assert.deepEqual(errors, []);
+    });
+  }
   for (const lang of ["en", "zh"]) {
     const w = words[lang];
     test(`${engine} ${lang}: keys of one account show its balance once`, async (t) => {
-      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      const browser = await launch(engine);
       t.after(() => browser.close());
       const context = await browser.newContext({ viewport: { width: 900, height: 700 }, reducedMotion: "reduce" });
       const page = await context.newPage();

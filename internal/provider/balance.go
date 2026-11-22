@@ -69,7 +69,7 @@ func balanceSourceOf(p Provider) (balanceSource, bool) {
 		case "api.moonshot.ai":
 			return balanceSource{"https://api.moonshot.ai/v1/users/me/balance", readMoonshot("$"), "", nil, nil}, true
 		case "openrouter.ai":
-			return balanceSource{"https://openrouter.ai/api/v1/credits", readOpenRouter, "", nil, nil}, true
+			return balanceSource{openRouterCreditsURL, readOpenRouter, "", nil, nil}, true
 		case "api.siliconflow.cn":
 			return balanceSource{"https://api.siliconflow.cn/v1/user/info", readSiliconFlow("¥"), "", siliconFlowGone("https://cloud.siliconflow.cn", " (余额充值 → 代金券)"), nil}, true
 		case "api.siliconflow.com":
@@ -1750,6 +1750,11 @@ func KeyBalances(ctx context.Context) []SubscriptionQuota {
 				}
 				out[i] = keepReading(ctx, q, keyTag("balance", j.p.Key))
 				return
+			}
+			if openRouterDailyKey(j.p) && !holding(ctx) {
+				daily := make(chan *FreeModelDaily, 1)
+				go func() { daily <- readOpenRouterDaily(ctx, j.p) }()
+				defer func() { out[i].FreeModelDaily = <-daily }()
 			}
 			amount, parts, split, ws, wide, _, err := balanceRead(ctx, j.p)
 			if errors.Is(err, errNoBalance) {

@@ -2,6 +2,8 @@
 // kernel adds them to i18n.js's (magpie.strings).
 magpie.strings({
   zh: {
+    "Free-model requests · {day} UTC · {used}/{limit} used · {remaining} left where capped": "免费模型请求 · {day} UTC · 已用 {used}/{limit} · 受限时剩余 {remaining}",
+    "OpenRouter reports the tier limit. BYOK and exempt accounts or endpoints can still make requests.": "OpenRouter 报告的是档位限额。自带密钥（BYOK）以及豁免的账号或端点仍可发出请求。",
     "Other model": "其他模型",
     "Check…": "检查…",
     "Tries that failed, those handed on to another provider too": "失败的尝试，包括转交给其他供应商的",
@@ -302,6 +304,8 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "以 {to} 协议发往上游，与 agent 所用协议相同",
   },
   "zh-TW": {
+    "Free-model requests · {day} UTC · {used}/{limit} used · {remaining} left where capped": "免費模型請求 · {day} UTC · 已用 {used}/{limit} · 受限時剩餘 {remaining}",
+    "OpenRouter reports the tier limit. BYOK and exempt accounts or endpoints can still make requests.": "OpenRouter 回報的是級別限額。自備金鑰（BYOK）以及豁免的帳號或端點仍可發出請求。",
     "Other model": "其他模型",
     "Check…": "檢查…",
     "Tries that failed, those handed on to another provider too": "失敗的嘗試，包括轉交給其他供應商的",
@@ -602,6 +606,8 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "以 {to} 協議發往上游，與 agent 所用協議相同",
   },
   ja: {
+    "Free-model requests · {day} UTC · {used}/{limit} used · {remaining} left where capped": "無料モデルのリクエスト · {day} UTC · {used}/{limit} 使用済み · 上限適用時は残り {remaining}",
+    "OpenRouter reports the tier limit. BYOK and exempt accounts or endpoints can still make requests.": "OpenRouter はティアの上限を報告します。BYOK や上限の対象外となるアカウント・エンドポイントは引き続きリクエストできます。",
     "Other model": "別のモデル",
     "Check…": "チェック…",
     "Tries that failed, those handed on to another provider too": "失敗した試行（別のプロバイダに回したものも含む）",
@@ -902,6 +908,8 @@ magpie.strings({
     "Sent upstream as {to}, as the agent spoke it": "エージェントと同じ {to} で上流へ送信",
   },
   de: {
+    "Free-model requests · {day} UTC · {used}/{limit} used · {remaining} left where capped": "Anfragen an kostenlose Modelle · {day} UTC · {used}/{limit} genutzt · {remaining} übrig, falls begrenzt",
+    "OpenRouter reports the tier limit. BYOK and exempt accounts or endpoints can still make requests.": "OpenRouter meldet das Limit der Tarifstufe. Mit BYOK sowie bei ausgenommenen Konten oder Endpunkten sind weiterhin Anfragen möglich.",
     "Other model": "Anderes Modell",
     "Check…": "Prüfen…",
     "Tries that failed, those handed on to another provider too": "Fehlgeschlagene Versuche, auch an einen anderen Anbieter weitergegebene",

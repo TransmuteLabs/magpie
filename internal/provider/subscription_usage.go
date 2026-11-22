@@ -189,7 +189,9 @@ type SubscriptionQuota struct {
 	// BalanceSplit is what the Balance is made of, when the vendor tells
 	// it: DeepSeek's granted credit and the money topped up, each a part
 	// labelled SplitGranted or SplitTopUp
-	BalanceSplit []BalancePart `json:"balanceSplit,omitempty"`
+	BalanceSplit   []BalancePart   `json:"balanceSplit,omitempty"`
+	FreeModelDaily *FreeModelDaily `json:"freeModelDaily,omitempty"`
+
 	// BalanceTrend is the Balance over time, as magpie read it, and when
 	// it runs out at that pace (balance_history.go)
 	BalanceTrend *BalanceTrend `json:"balanceTrend,omitempty"`

@@ -438,6 +438,21 @@ the price is the own id's first (`ListPrice`). `TestModelIDListedAndAskedForByOw
 `TestModelIDLatestWins`, `TestModelIDMovesTheUsersRefs`,
 `TestLocalModelIDOnEveryRoute`.
 
+### OpenRouter's free-model daily count
+
+An OpenRouter balance card with direct HTTPS API endpoints can show an
+additional `freeModelDaily` reading. [`KeyBalances`](../../internal/provider/balance.go)
+reads it from [OpenRouter's key endpoint](https://openrouter.ai/docs/api/reference/limits)
+with the inference key over its configured proxy, alongside the existing
+credits request. The count reports used, limit and remaining for its dated
+UTC day. The key endpoint doesn't report the minute count and its daily
+number also reflects tier policy for BYOK and exempt requests.
+
+The Usage page displays the reading alongside the balance. Shared balance
+cards show each reported count with its key label. A missing or failed count
+leaves the credit reading independent. This value lives in the in-memory
+balance card and is outside allowance windows, caps and cooldowns.
+
 ## Constraints and failure behavior
 
 An allowance deliberately not requested (a saved Claude account outside

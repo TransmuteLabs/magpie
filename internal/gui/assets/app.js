@@ -16586,6 +16586,7 @@ function renderQuotas(lazy) {
       // its tooltip; the curve and the rest only in full
       if (brief) meters.classList.add("brief");
       box.append(meters);
+      if (!history) box.append(...freeModelDailyRows(sub));
       // a remote magpie's gateway key: what its windows don't say (#1547)
       const keyLine = !brief && !history && keyLimitLine(sub);
       if (keyLine) box.append(keyLine);
@@ -16787,25 +16788,6 @@ function byUsageOrder(list) {
   const order = state.settings?.usageOrder || [];
   const rank = (q) => { const i = order.indexOf(q.provider); return i < 0 ? order.length : i; };
   return list.map((q, i) => [q, i]).sort(([a, i], [b, j]) => rank(a) - rank(b) || i - j).map(([q]) => q);
-}
-
-// keyCards puts a key's balance on its plan's card (#1658); a failed one
-// keeps its own. balanceCard is its id, for the menu bar.
-function keyCards(list) {
-  list = sharedBalances(list);
-  const plan = (q) => q.windows?.length && !q.balance && !q.error;
-  const bal = (q) => q.balance && !q.windows?.length && !q.plan;
-  const merged = new Map(), gone = new Set();
-  for (const p of list) {
-    if (!plan(p)) continue;
-    const of = list.filter((b) => b.provider === p.provider && (b.from || "") === (p.from || "") && bal(b));
-    const b = of.find((x) => p.user && x.user === p.user)
-      || (!p.user && of.length === 1 && list.filter((x) => x.provider === p.provider && plan(x)).length === 1 ? of[0] : null);
-    if (!b || b.error || b.asOf || gone.has(b)) continue;
-    gone.add(b);
-    merged.set(p, { ...p, balance: b.balance, balanceParts: b.balanceParts, balanceSplit: b.balanceSplit, balanceTrend: b.balanceTrend, balanceCard: trayCardID(b) });
-  }
-  return gone.size ? list.filter((q) => !gone.has(q)).map((q) => merged.get(q) || q) : list;
 }
 
 // usageHandle: a card's logo is its handle (drag, or Alt+arrows); a grip

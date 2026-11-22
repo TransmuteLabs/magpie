@@ -634,6 +634,27 @@ function renderCosts() {
   if (sessions) renderSessions();
   document.dispatchEvent(new Event("magpie-costs-changed"));
 }
+// keyCards puts a key's balance on its plan's card (#1658); a failed one
+// keeps its own. balanceCard is its id, for the menu bar.
+function keyCards(list) {
+  list = sharedBalances(list);
+  const plan = (q) => q.windows?.length && !q.balance && !q.error;
+  const bal = (q) => q.balance && !q.windows?.length && !q.plan;
+  const merged = new Map(), gone = new Set();
+  for (const p of list) {
+    if (!plan(p)) continue;
+    const of = list.filter((b) => b.provider === p.provider && (b.from || "") === (p.from || "") && bal(b));
+    const b = of.find((x) => p.user && x.user === p.user)
+      || (!p.user && of.length === 1 && list.filter((x) => x.provider === p.provider && plan(x)).length === 1 ? of[0] : null);
+    if (!b || b.error || b.asOf || gone.has(b)) continue;
+    gone.add(b);
+    merged.set(p, { ...p, balance: b.balance, balanceParts: b.balanceParts, balanceSplit: b.balanceSplit, balanceTrend: b.balanceTrend,
+      freeModelDaily: b.freeModelDaily, sharedFreeModelDaily: b.sharedFreeModelDaily, balanceCard: trayCardID(b),
+    });
+  }
+  return gone.size ? list.filter((q) => !gone.has(q)).map((q) => merged.get(q) || q) : list;
+}
+
 // sharedBalances (keyCards): the keys magpie found to read one account's
 // balance (sharedBalance, the first one's name) as one card, the first's,
 // with the keys it stands for (sharedKeys): mimi on Discord, a site's three
@@ -647,9 +668,20 @@ function sharedBalances(list) {
     if (!q.sharedBalance) { out.push(q); continue; }
     const of = list.filter((x) => x.sharedBalance && same(x, q));
     if (of[0] !== q) continue;
-    out.push(of.length > 1 ? { ...q, sharedKeys: of.map((x) => x.user) } : q);
+    if (of.length === 1) { out.push(q); continue; }
+    const counters = of.flatMap((x) => x.sharedFreeModelDaily || (x.freeModelDaily ? [{ ...x.freeModelDaily, user: x.user }] : []));
+    out.push({ ...q, sharedKeys: of.map((x) => x.user), sharedFreeModelDaily: counters });
   }
   return out;
+}
+function freeModelDailyRows(q) {
+  const counters = q.sharedFreeModelDaily || (q.freeModelDaily ? [q.freeModelDaily] : []);
+  return counters.map(({ day, used, limit, remaining, user }) => {
+    const text = t("Free-model requests · {day} UTC · {used}/{limit} used · {remaining} left where capped", { day, used, limit, remaining });
+    const row = el("div", "quota-keyline quota-free-daily", user ? `${user} · ${text}` : text);
+    row.title = t("OpenRouter reports the tier limit. BYOK and exempt accounts or endpoints can still make requests.");
+    return row;
+  });
 }
 // beside such a card's key, how many more keys its balance is for, and on
 // hover which
