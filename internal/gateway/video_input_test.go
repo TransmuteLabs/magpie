@@ -233,8 +233,8 @@ func TestVideoForAModelThatTakesNone(t *testing.T) {
 		{"messages", "/v1/messages", strings.Replace(reporterVideoBody, `"m1"`, `"anth/t"`, 1)},
 		{"messages escaped type", "/v1/messages", `{"model":"anth/t","messages":[{"role":"user","content":[{"type":"\u0076ideo","source":{"type":"base64","data":"` + videoData + `"}}]}]}`},
 		{"chat", "/v1/chat/completions", `{"model":"anth/t","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"data:video/mp4;base64,` + videoData + `"}},{"type":"text","text":"用一句话描述这段视频画面。"}]}]}`},
-		{"chat filename", "/v1/chat/completions", `{"model":"anth/t","messages":[{"role":"user","content":[{"Type" : "file","file":{"file_data":"` + videoData + `","filename":"clip.webm"}}]}]}`},
-		{"responses filename", "/v1/responses", `{"model":"anth/t","input":[{"type":"input_file","file_data":"` + videoData + `","filename":"clip.webm"}]}`},
+		{"chat filename", "/v1/chat/completions", `{"model":"anth/t","messages":[{"role":"user","content":[{"Type" : "file","file":{"file_data":"` + videoData + `","filename":"clip.ogv"}}]}]}`},
+		{"responses filename", "/v1/responses", `{"model":"anth/t","input":[{"type":"input_file","file_data":"` + videoData + `","filename":"clip.ogv"}]}`},
 		{"gemini folded MIME", "/v1beta/models/anth/t:generateContent", `{"contents":[{"role":"user","parts":[{"inline_data":{"mime_type":"ViDeO\/mp4","data":"` + videoData + `"}}]}]}`},
 	} {
 		rec := serveVideo(s, tc.path, tc.body)
