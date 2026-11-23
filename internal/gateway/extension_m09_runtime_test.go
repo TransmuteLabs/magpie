@@ -449,25 +449,8 @@ func serveM09Host(t *testing.T, config string) {
 	if err := json.Unmarshal(raw, &setup); err != nil {
 		t.Fatal(err)
 	}
-	fresh(t)
-	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
-	t.Setenv("MAGPIE_ADDR", "")
-	manager := extensionhost.Default()
-	t.Cleanup(func() { closeSDKGatewayHook(t, manager) })
-	installed, err := manager.Install(t.Context(), setup.Package)
-	if err != nil {
-		t.Fatal(err)
-	}
-	module, relay := installed.Manifest.ID, installed.Manifest.Providers[0].ID
-	auth, err := json.Marshal(map[string]string{"origin": setup.Origin, "marker": setup.Marker})
-	if err != nil {
-		t.Fatal(err)
-	}
-	account, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: module, Provider: relay, ID: "alice", Auth: auth}, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	provider.Changed()
+	manager, account := installM09Module(t, setup.Package, setup.Origin, setup.Marker)
+	module, relay := account.Plugin, account.Provider
 	id := provider.ExtensionProviderID(module, relay)
 	keys, secrets := newCaller(t, "M09 fixture")
 	server := New()
@@ -570,6 +553,30 @@ func serveM09Host(t *testing.T, config string) {
 	if !t.Failed() {
 		writeM09JSON(t, filepath.Join(filepath.Dir(setup.Ready), "accounting.json"), report)
 	}
+}
+
+func installM09Module(t *testing.T, directory, origin, marker string) (*extensionhost.Manager, extensionhost.Account) {
+	t.Helper()
+	fresh(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	t.Setenv("MAGPIE_ADDR", "")
+	manager := extensionhost.Default()
+	t.Cleanup(func() { closeSDKGatewayHook(t, manager) })
+	installed, err := manager.Install(t.Context(), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module, relay := installed.Manifest.ID, installed.Manifest.Providers[0].ID
+	auth, err := json.Marshal(map[string]string{"origin": origin, "marker": marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: module, Provider: relay, ID: "alice", Auth: auth}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+	return manager, account
 }
 
 func writeM09JSON(t *testing.T, path string, value any) {
