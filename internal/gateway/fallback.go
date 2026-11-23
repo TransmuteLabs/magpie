@@ -39,6 +39,7 @@ import (
 	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const fallbackCooldown = time.Minute
@@ -2686,6 +2687,9 @@ type holdWriter struct {
 	held            bytes.Buffer
 	upstreamFailure failureObservation
 
+	takeProjectRefusal func() *sdk.Error
+	projectRefusal     *sdk.Error
+
 	stream          bool      // a stream held until its first content
 	since           time.Time // when it began
 	scanned         int       // how much of held has been read as events
@@ -2892,7 +2896,10 @@ func (h *holdWriter) writeHeader(code int) {
 	if h.tierStamp != nil {
 		h.tierStamp(h.header)
 	}
-	if h.hold && code >= 400 {
+	if code == http.StatusBadGateway && h.takeProjectRefusal != nil {
+		h.projectRefusal = h.takeProjectRefusal()
+	}
+	if code >= 400 && (h.hold || h.projectRefusal != nil) {
 		return
 	}
 	if h.hold && strings.HasPrefix(h.header.Get("Content-Type"), "text/event-stream") {

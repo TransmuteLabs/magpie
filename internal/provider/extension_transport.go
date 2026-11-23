@@ -380,6 +380,9 @@ func (binding *extensionAccount) execute(request *http.Request) (*http.Response,
 			return nil
 		})
 		if err != nil {
+			if !published {
+				extensionProjectRefusal(ctx, scope, err)
+			}
 			if outcome, ok := errors.AsType[*extensionhost.OutcomeError](err); ok && outcome.Outcome == "not-started" {
 				extensionSelectionFailure(ctx, scope, err)
 			}

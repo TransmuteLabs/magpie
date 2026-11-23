@@ -3,10 +3,10 @@ package provider
 import (
 	"context"
 	"errors"
-	"github.com/yetone/magpie/internal/requestpolicy"
 	"sync"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/requestpolicy"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -20,6 +20,8 @@ type ExtensionAttempt struct {
 	usage     *sdk.Usage
 	scope     sdk.Scope
 	refusal   *requestpolicy.Refusal
+
+	projectRefusal *sdk.Error
 }
 
 func WithExtensionAttempt(ctx context.Context) (context.Context, *ExtensionAttempt) {
@@ -90,8 +92,45 @@ func extensionBegin(ctx context.Context, scope sdk.Scope) {
 		attempt.scope = scope
 		attempt.usage = nil
 		attempt.refusal = nil
+		attempt.projectRefusal = nil
 		attempt.mu.Unlock()
 	}
+}
+
+func extensionProjectRefusal(ctx context.Context, scope sdk.Scope, err error) {
+	rejected, ok := err.(*sdk.Error)
+	if !ok || rejected == nil || rejected.Outcome != "not-started" || scope.Plugin != "opencode" {
+		return
+	}
+	if rejected.Code != "project_required" && rejected.Code != "invalid_project" {
+		return
+	}
+	switch scope.Provider {
+	case "opencode-go", "opencode-zen", "opencode-zen-free":
+	default:
+		return
+	}
+	if attempt := extensionAttemptOf(ctx); attempt != nil {
+		attempt.mu.Lock()
+		if attempt.scope == scope && attempt.err == nil && !attempt.accepted && !attempt.completed {
+			attempt.projectRefusal = rejected
+		}
+		attempt.mu.Unlock()
+	}
+}
+
+func (attempt *ExtensionAttempt) TakeProjectRefusal(scope sdk.Scope) *sdk.Error {
+	if attempt == nil {
+		return nil
+	}
+	attempt.mu.Lock()
+	defer attempt.mu.Unlock()
+	if attempt.scope.Plugin != scope.Plugin || attempt.scope.Provider != scope.Provider || attempt.scope.Account != scope.Account {
+		return nil
+	}
+	refusal := attempt.projectRefusal
+	attempt.projectRefusal = nil
+	return refusal
 }
 
 func extensionAttemptOf(ctx context.Context) *ExtensionAttempt {

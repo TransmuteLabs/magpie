@@ -32,6 +32,20 @@ func main() {
 				return streamResponsesFixture(ctx, call, stream, request)
 			}
 			bodyText := string(request.Body)
+			if manifest.ID == "opencode" && strings.Contains(bodyText, "project-fixture-") {
+				code := "project_required"
+				switch {
+				case strings.Contains(bodyText, "project-fixture-malformed"):
+					code = "invalid_project"
+				case strings.Contains(bodyText, "project-fixture-unrelated"):
+					code = "invalid_params"
+				case strings.Contains(bodyText, "project-fixture-accepted"):
+					if err := stream.Emit(ctx, "accepted", sdk.AcceptedEvent{OperationID: call.Scope.Operation}); err != nil {
+						return nil, err
+					}
+				}
+				return nil, &sdk.Error{Code: code, Message: "Explicit OpenCode projectId is required", Outcome: "not-started"}
+			}
 			if strings.Contains(bodyText, "not-started") ||
 				strings.Contains(bodyText, "accepted effort failure") && strings.Contains(bodyText, "The number of the kind that fits it best") {
 				return nil, &sdk.Error{Code: "not_started", Message: "fixture did not start", Outcome: "not-started"}

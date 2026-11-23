@@ -975,6 +975,14 @@ reference. An explicit not-started outcome leaves normal router fallback
 available. This guard does not authorize replay or reconcile a vendor's
 operation; status/cancel remain explicit operation-control calls.
 
+OpenCode Go, Zen and Zen Public require an explicit configured `projectId`
+or an `X-Opencode-Project` header admitted by the existing header policy.
+Their `project_required` and `invalid_project` errors qualify for
+attempt-local routing only with a durable `not-started` outcome and no
+published SDK events. With no eligible destination in the retry budget, the
+gateway returns HTTP 400 or a protocol error event if an SSE keepalive has
+already sent the response headers.
+
 ## Verification
 
 `extension_provider_test.go` in the provider package exercises account and

@@ -4307,6 +4307,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		pass := c.p.PassesErrors()
 		hw := newHoldWriter(w, kept.sent || !pass && (!last || again < max(lastRetries, rateRetries) || other != nil || autoPicks(c) && repicked < 2 ||
 			patience > 0 && rounds < replanRounds && (waitFrom.IsZero() || time.Since(waitFrom) < patience) || wantWhole))
+		bindProjectRefusal(hw, extensionAttempt, c.p)
 		// a compaction's summary is held to its end, for a cut or an
 		// error halfway to go to the next candidate (#2274)
 		hw.wantWhole = wantWhole && !pass
@@ -4941,6 +4942,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				tt := &t.Tries[len(t.Tries)-1]
 				tt.Done, tt.Status, tt.Error, tt.Fail, tt.Millis = true, call.Status, call.Error, fail, time.Since(began).Milliseconds()
 			})
+			break
+		}
+		if rejection := hw.projectRefusal; rejection != nil && !hw.passing {
+			call.Status, call.Error = http.StatusBadRequest, c.p.Name+": "+rejection.Message
+			call.Usage.ErrType = rejection.Code
+			s.trace.update(tr, func(route *Route) {
+				attempt := &route.Tries[len(route.Tries)-1]
+				attempt.Done, attempt.Status, attempt.Error = true, call.Status, call.Error
+				attempt.Fail, attempt.Millis = rejection.Code, time.Since(began).Milliseconds()
+			})
+			watched.attempt(call, Try{Start: began, Model: c.model, Status: call.Status, Error: call.Error}, c.p.ID, sent, hw, capture)
+			if !pass {
+				if next := nextPolicyCandidate(r.Context(), cands, i+1); next >= 0 {
+					if other == nil {
+						other = &Try{Status: call.Status, Error: call.Error, errType: rejection.Code}
+					}
+					skipped = append(skipped, c.label()+": "+call.Error)
+					i = next - 1
+					continue
+				}
+			}
+			writeProjectRefusal(w, kept, from, call.Error, rejection.Code)
 			break
 		}
 		if refusal := extensionAttempt.FinalRefusal(); refusal != nil {

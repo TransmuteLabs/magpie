@@ -33,6 +33,26 @@ func terminalExtensionOutcome(outcome string) bool {
 	return outcome == "accepted" || outcome == "uncertain" || outcome == "completed"
 }
 
+func bindProjectRefusal(writer *holdWriter, attempt *provider.ExtensionAttempt, selected provider.Provider) {
+	if scope, ok := selected.ExtensionScope(); ok && scope.Plugin == "opencode" {
+		writer.takeProjectRefusal = func() *sdk.Error { return attempt.TakeProjectRefusal(scope) }
+	}
+}
+
+func writeProjectRefusal(w http.ResponseWriter, kept *keptAlive, proto provider.Protocol, message, code string) {
+	if !kept.sent {
+		w.Header().Set("X-Should-Retry", "false")
+		writeErrorSaid(w, proto, http.StatusBadRequest, message, code, nil)
+		return
+	}
+	stream := newSSEWriter(w)
+	stream.begun = true
+	makeEncoder(proto, stream, &Request{Model: kept.model}).event(Event{
+		Kind: KError, Status: http.StatusBadRequest, Text: message, Code: code,
+		Said: []byte(`{"error":{"type":"invalid_request_error"}}`),
+	})
+}
+
 func decisionFailure(err error, attempt *provider.ExtensionAttempt) error {
 	if err == nil {
 		return nil

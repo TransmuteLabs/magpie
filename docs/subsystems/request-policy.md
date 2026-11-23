@@ -165,6 +165,13 @@ invalid or contradictory refusal leaves an `uncertain` receipt. A repeat that
 reaches the same operation identity stops at that receipt before fallback.
 The accepted/uncertain/completed fence returns 409 before routing can continue.
 
+OpenCode's typed `project_required` and `invalid_project` errors are local
+inference rejections before any SDK response event. They can advance to an
+eligible candidate using the existing dispatch budget. They neither retry
+the rejected attempt nor create an upstream failure or cooldown. An exhausted
+budget, including `maxTotalRetries: 0`, returns a request error. Once work is
+accepted, the ordinary terminal operation fence takes precedence.
+
 An outbound executor can also negotiate `request-handoff` alongside
 `request-policy` to report exhausted local admission with
 `HandoffExecution`/`handoffExecution`. This final `429` has phase `admission`,
