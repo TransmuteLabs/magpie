@@ -1,6 +1,6 @@
 module github.com/yetone/magpie
 
-go 1.26.8
+go 1.27.4
 
 require (
 	github.com/MoeForge/moejs v0.1.0
