@@ -1,9 +1,11 @@
+import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -116,6 +118,96 @@ class ReleaseGateTest(unittest.TestCase):
                         (root / "reply.json").write_text(json.dumps({"total_count": 1, "workflow_runs": [value]}))
                         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
                         self.assertEqual(result.returncode == 0, conclusion == "success", result.stderr)
+
+
+class ReleaseFeedTest(unittest.TestCase):
+    mac = "magpie-darwin-arm64.zip"
+    linux = "magpie-linux-amd64"
+    version = "0.1.1234"
+    payloads = {mac: b"macOS app archive", linux: b"Linux app binary"}
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.dist = self.root / "dist"
+        self.dist.mkdir()
+        self.env = {
+            "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
+            "HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1",
+            "VERSION": self.version, "REPO": REPO,
+        }
+        subprocess.run(["git", "init", "-q"], cwd=self.root, env=self.env, check=True, timeout=10)
+        for name, content in self.payloads.items():
+            (self.dist / name).write_bytes(content)
+
+    def run_feed(self):
+        workflow = Path(__file__).resolve().parents[1].joinpath(".github/workflows/fork-release.yml").read_text()
+        step = workflow.split("\n      - name: latest.json\n", 1)[1].split("\n      - name: Release\n", 1)[0]
+        script = textwrap.dedent(step.split("\n        run: |\n", 1)[1])
+        return subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", script], cwd=self.root, env=self.env,
+            capture_output=True, text=True, timeout=10,
+        )
+
+    def assert_refused(self, *names):
+        result = self.run_feed()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        for name in names:
+            self.assertIn(name, result.stderr)
+        self.assertFalse((self.dist / "latest.json").exists())
+        self.assertFalse((self.dist / "notes.md").exists())
+
+    def test_feed_records_both_supported_platforms(self):
+        result = self.run_feed()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        release = f"https://github.com/{REPO}/releases"
+        tag = f"f-v{self.version}"
+        notes = f"Первый релиз форка (официальная версия {self.version})."
+        assets = {
+            name: {"url": f"{release}/download/{tag}/{name}", "size": len(content),
+                   "sha256": hashlib.sha256(content).hexdigest()}
+            for name, content in self.payloads.items()
+        }
+        self.assertEqual(json.loads((self.dist / "latest.json").read_text()), {
+            "version": self.version, "notes": notes, "url": f"{release}/tag/{tag}", "assets": assets,
+        })
+        self.assertEqual((self.dist / "notes.md").read_text(), f"# {tag}\n\n{notes}\n")
+
+    def test_feed_refuses_missing_or_renamed_platform(self):
+        wrong = {self.mac: "magpie-darwin-amd64.zip", self.linux: "magpie-linux-arm64"}
+        for name, replacement in wrong.items():
+            file = self.dist / name
+            file.unlink()
+            with self.subTest(missing=name):
+                self.assert_refused(name)
+            wrong_file = self.dist / replacement
+            wrong_file.write_bytes(self.payloads[name])
+            with self.subTest(renamed=replacement):
+                self.assert_refused(name, replacement)
+            wrong_file.unlink()
+            file.write_bytes(self.payloads[name])
+
+    def test_feed_refuses_extra_platform(self):
+        unexpected = "magpie-windows-amd64.exe"
+        (self.dist / unexpected).write_bytes(b"disabled platform")
+        self.assert_refused(unexpected)
+
+    def test_feed_refuses_empty_platform_file(self):
+        (self.dist / self.linux).write_bytes(b"")
+        self.assert_refused(self.linux)
+
+    def test_feed_refuses_directory_as_platform_file(self):
+        path = self.dist / self.linux
+        path.unlink()
+        path.mkdir()
+        self.assert_refused(self.linux)
+
+    def test_feed_refuses_symlink_as_platform_file(self):
+        path = self.dist / self.linux
+        path.unlink()
+        path.symlink_to(self.dist / self.mac)
+        self.assert_refused(self.linux)
 
 
 if __name__ == "__main__":

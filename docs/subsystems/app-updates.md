@@ -77,10 +77,15 @@ For a manual release with no Test run, run Test on the same commit first.
 [`release_gate.py`](../../build/release_gate.py) owns this check; its offline
 fixtures include the workflow's publication dependency.
 
-The macOS and Linux amd64 desktop app jobs use the same version gate and
-both must succeed before publication. The Windows job remains parked.
-Local commits do not publish anything until pushed or selected by an
-explicit workflow dispatch.
+The macOS arm64 and Linux amd64 desktop app jobs use the same version gate
+and both must succeed before publication. Feed generation requires exactly
+`magpie-darwin-arm64.zip` and `magpie-linux-amd64` as nonempty regular files
+among the collected `magpie-*` entries. A missing, invalid or unexpected
+platform asset stops the release before it writes `latest.json`. Publication
+uploads those two files and the feed. The Windows job remains parked.
+A manual build without release enabled keeps the build artifacts in the
+workflow run. Local commits do not publish anything until pushed or selected
+by an explicit release dispatch.
 
 ## Selecting a local identity
 
