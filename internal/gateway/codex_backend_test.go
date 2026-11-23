@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/extension"
@@ -1002,10 +1003,24 @@ func TestCodexModelsEtagTagged(t *testing.T) {
 	}
 }
 
+const (
+	codexEtagFixtureID       = "fixture.codex-etag"
+	codexEtagWriterHomeEnv   = "MAGPIE_CODEX_ETAG_WRITER_CONFIG"
+	codexEtagWriterModelEnv  = "MAGPIE_CODEX_ETAG_WRITER_MODEL"
+	codexEtagWriterUpdateEnv = "MAGPIE_CODEX_ETAG_WRITER_UPDATE"
+)
+
+func publishForeignCodexModels(ctx context.Context, model string, updateConfig bool) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	writer := proc.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexModelsEtagFollowsForeignSDKPublication$", "-test.count=1")
+	writer.Env = append(os.Environ(), codexEtagWriterHomeEnv+"="+os.Getenv("XDG_CONFIG_HOME"),
+		codexEtagWriterModelEnv+"="+model, codexEtagWriterUpdateEnv+"="+strconv.FormatBool(updateConfig))
+	return writer.CombinedOutput()
+}
+
 func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
-	const writerEnv = "MAGPIE_CODEX_ETAG_WRITER_CONFIG"
-	const writerModelEnv = "MAGPIE_CODEX_ETAG_WRITER_MODEL"
-	if config := os.Getenv(writerEnv); config != "" {
+	if config := os.Getenv(codexEtagWriterHomeEnv); config != "" {
 		t.Setenv("XDG_CONFIG_HOME", config)
 		t.Setenv("MAGPIE_NO_ACCOUNTS", "")
 		manager := extension.Default()
@@ -1016,13 +1031,19 @@ func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
 				t.Error(err)
 			}
 		})
+		if os.Getenv(codexEtagWriterUpdateEnv) == "true" {
+			config, err := manager.CompareAndSwapModuleConfig(t.Context(), codexEtagFixtureID, "0", json.RawMessage(`{"revision":"new"}`))
+			if err != nil || config.Version != "1" {
+				t.Fatalf("writer module configuration: version %q, %v", config.Version, err)
+			}
+		}
 		accounts, err := provider.ExtensionProviders()
 		if err != nil || len(accounts) != 2 {
 			t.Fatalf("writer accounts: %d, %v", len(accounts), err)
 		}
 		for _, account := range accounts {
 			models, err := account.Fetch(t.Context())
-			if err != nil || len(models) != 1 || models[0].ID != os.Getenv(writerModelEnv) {
+			if err != nil || len(models) != 1 || models[0].ID != os.Getenv(codexEtagWriterModelEnv) {
 				t.Fatalf("writer models: %+v, %v", models, err)
 			}
 		}
@@ -1039,7 +1060,7 @@ func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
 			t.Error(err)
 		}
 	}, func(manifest *sdk.Manifest) {
-		manifest.ID = "fixture.codex-etag"
+		manifest.ID = codexEtagFixtureID
 		manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.ModelDiscovery)
 		manifest.Providers[0].Models = nil
 	})
@@ -1086,11 +1107,7 @@ func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
 	publish := func(model string) {
 		t.Helper()
 		updated.Store(model == "new-entitlement")
-		ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
-		defer cancel()
-		writer := proc.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexModelsEtagFollowsForeignSDKPublication$", "-test.count=1")
-		writer.Env = append(os.Environ(), writerEnv+"="+os.Getenv("XDG_CONFIG_HOME"), writerModelEnv+"="+model)
-		if output, err := writer.CombinedOutput(); err != nil {
+		if output, err := publishForeignCodexModels(t.Context(), model, false); err != nil {
 			t.Fatalf("foreign model publication: %v\n%s", err, output)
 		}
 	}
@@ -1111,6 +1128,151 @@ func TestCodexModelsEtagFollowsForeignSDKPublication(t *testing.T) {
 	if list.Code != 200 || list.Header().Get("ETag") != before ||
 		!strings.Contains(list.Body.String(), id+"/old-entitlement") || strings.Contains(list.Body.String(), id+"/new-entitlement") {
 		t.Fatalf("Codex models and tag diverged after publication: %d ETag %q body %s", list.Code, list.Header().Get("ETag"), list.Body)
+	}
+}
+
+func TestCodexColdModelsEtagFollowsInFlightSDKConfig(t *testing.T) {
+	const before, after, latest = "old-entitlement", "new-entitlement", "latest-entitlement"
+	var model atomic.Value
+	model.Store(before)
+	var executions atomic.Int32
+	id := installPolicyRouteFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != 0 {
+			executions.Add(1)
+			http.Error(w, "unexpected SDK execution", http.StatusBadGateway)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(sdk.ModelsResult{Models: []sdk.Model{{ID: model.Load().(string)}}}); err != nil {
+			t.Error(err)
+		}
+	}, func(manifest *sdk.Manifest) {
+		manifest.ID = codexEtagFixtureID
+		manifest.Contract.Capabilities = append(manifest.Contract.Capabilities, sdk.ModelDiscovery)
+		manifest.Providers[0].Models = nil
+	})
+	const email = "codex-peer-config@example.com"
+	codexChatGPTAuth(t, email)
+	keys, secrets := newCaller(t, "Codex peer configuration")
+	if _, err := access.Update("models-key", access.Change{Key: keys[0].ID, Models: []string{id + "/" + after}}); err != nil {
+		t.Fatal(err)
+	}
+	p, selected, ok := provider.Resolve("codex/gpt-5.5")
+	if !ok || selected != "gpt-5.5" || p.Account == nil || p.Account.User != email {
+		t.Fatal("ACL fixture did not resolve its Codex account")
+	}
+	aged := time.Now().Add(-time.Hour)
+	home := catalog.CodexHome()
+	for _, path := range []string{provider.Path(), settings.Path(), catalog.CachePath(), extension.CatalogPath(),
+		filepath.Join(home, "config.toml"), filepath.Join(home, "auth.json"), catalog.CodexModelsCache()} {
+		if err := os.Chtimes(path, aged, aged); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	registry, err := os.Stat(extension.CatalogPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := sse(
+		`data: {"type":"response.created","response":{"id":"r1"}}`,
+		`data: {"type":"response.completed","response":{"id":"r1"}}`)
+	var posts atomic.Int32
+	chatgptBase(t, withoutAnonymousFixtureProbe(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer chatgpt-token" || r.Header.Get("chatgpt-account-id") != "acct-1" {
+			t.Error("native relay changed OAuth or account")
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == CodexPath+"/models":
+			w.Header().Set("ETag", `W/"backend"`)
+			io.WriteString(w, `{"models":[{"slug":"gpt-5.5","priority":1}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == CodexPath+"/responses":
+			var turn struct {
+				Model  string `json:"model"`
+				Stream bool   `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&turn); err != nil || turn.Model != "gpt-5.5" || !turn.Stream {
+				t.Errorf("unexpected native turn: %+v, %v", turn, err)
+			}
+			if posts.Add(1) == 1 {
+				if !slices.ContainsFunc(provider.CodexListed(), func(entry catalog.Model) bool { return entry.ID == id+"/"+before }) {
+					t.Error("the old SDK catalog was not visible before peer publication")
+				}
+				model.Store(after)
+				if output, err := publishForeignCodexModels(r.Context(), after, true); err != nil {
+					t.Errorf("foreign config and model publication: %v\n%s", err, output)
+					http.Error(w, "peer publication failed", http.StatusBadGateway)
+					return
+				}
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("X-Models-Etag", `W/"backend"`)
+			io.WriteString(w, wire)
+		default:
+			t.Errorf("unexpected native route %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})))
+	forgetCodexLists(t)
+	server := New()
+	t.Cleanup(server.idle.stop)
+	handler := server.Front()
+	serve := func(method, suffix, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body io.Reader
+		if method == http.MethodPost {
+			body = strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}]}`)
+		}
+		req := httptest.NewRequestWithContext(t.Context(), method, "http://localhost"+CodexPath+suffix, body)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("chatgpt-account-id", "acct-1")
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		reply := httptest.NewRecorder()
+		handler.ServeHTTP(reply, req)
+		return reply
+	}
+	tag := func(want, hide string) string {
+		t.Helper()
+		reply := serve(http.MethodPost, "/responses", "chatgpt-token")
+		got := reply.Header().Get("X-Models-Etag")
+		if reply.Code != http.StatusOK || !strings.HasPrefix(got, `W/"backend+magpie-`) || reply.Body.String() != wire {
+			t.Fatalf("native turn: HTTP %d, tag %q, body %q", reply.Code, got, reply.Body)
+		}
+		list := serve(http.MethodGet, "/models", "chatgpt-token")
+		var decoded struct {
+			Models []struct{ Slug string } `json:"models"`
+		}
+		err := json.Unmarshal(list.Body.Bytes(), &decoded)
+		has := func(name string) bool {
+			return slices.ContainsFunc(decoded.Models, func(entry struct{ Slug string }) bool { return entry.Slug == id+"/"+name })
+		}
+		if list.Code != http.StatusOK || list.Header().Get("ETag") != got || err != nil || !has(want) || has(hide) {
+			t.Fatalf("native models: HTTP %d, list tag %q, turn tag %q, decode %v, body %s",
+				list.Code, list.Header().Get("ETag"), got, err, list.Body)
+		}
+		return got
+	}
+	first := tag(after, before)
+	current, err := os.Stat(extension.CatalogPath())
+	if err != nil || !os.SameFile(registry, current) || registry.ModTime() != current.ModTime() || registry.Size() != current.Size() {
+		t.Fatalf("configuration changed the registry file: %v", err)
+	}
+	denied := serve(http.MethodPost, "/responses", secrets[0])
+	if denied.Code != http.StatusForbidden || denied.Header().Get("X-Models-Etag") != "" ||
+		!strings.Contains(denied.Body.String(), "permission_error") || posts.Load() != 1 || executions.Load() != 0 {
+		t.Fatalf("restricted turn: HTTP %d, tag %q, posts %d, SDK executes %d, body %s",
+			denied.Code, denied.Header().Get("X-Models-Etag"), posts.Load(), executions.Load(), denied.Body)
+	}
+	model.Store(latest)
+	if output, err := publishForeignCodexModels(t.Context(), latest, false); err != nil {
+		t.Fatalf("publish on the new configuration key: %v\n%s", err, output)
+	}
+	if second := tag(latest, after); second == first {
+		t.Fatalf("tag stayed %q after publication on the new configuration key", second)
+	}
+	if posts.Load() != 2 || executions.Load() != 0 {
+		t.Fatalf("native posts %d, SDK executes %d", posts.Load(), executions.Load())
 	}
 }
 
