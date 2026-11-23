@@ -3254,13 +3254,11 @@ func sourceTitles(keys []string) map[string]string {
 				continue
 			}
 			agent, id, ok := strings.Cut(k, ":")
-			if !ok || !nativeHistoryCanRead(sourceView.Load(), agent) {
+			if !ok || agent != "zcode" || !nativeHistoryCanRead(sourceView.Load(), agent) {
 				continue
 			}
-			if agent == "zcode" {
-				if t, ok := zcodeTaskOf("sess_" + zcodeBareID(id)); ok && title(t.title) != "" && !ocDefaultTitle(title(t.title)) {
-					out[k] = t.title
-				}
+			if t, ok := zcodeTaskOf("sess_" + zcodeBareID(id)); ok && title(t.title) != "" && !ocDefaultTitle(title(t.title)) {
+				out[k] = t.title
 			}
 		}
 	}()
