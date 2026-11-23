@@ -16,7 +16,19 @@ func (s *Store) RefreshedAccountContext(ctx context.Context, scope sdk.Scope) (A
 	return s.refreshedAccount(ctx, scope, storeSync)
 }
 
+func (s *Store) RefreshedAccountMetadataContext(ctx context.Context, scope sdk.Scope) (AccountMetadata, error) {
+	account, err := s.readRefreshedAccount(ctx, scope, storeSync, false)
+	if err != nil {
+		return AccountMetadata{}, err
+	}
+	return AccountMetadata{ID: account.ID, Generation: account.Generation, ExpiresAt: account.ExpiresAt}, nil
+}
+
 func (s *Store) refreshedAccount(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error) (Account, error) {
+	return s.readRefreshedAccount(ctx, scope, confirm, true)
+}
+
+func (s *Store) readRefreshedAccount(ctx context.Context, scope sdk.Scope, confirm func(*os.Root) error, copyAuth bool) (Account, error) {
 	if !storeValidScope(scope) || scope.Account == "" {
 		return Account{}, storeInvalid()
 	}
@@ -46,6 +58,9 @@ func (s *Store) refreshedAccount(ctx context.Context, scope sdk.Scope, confirm f
 			}
 		}
 		current = account.Account
+		if !copyAuth {
+			current.Auth = nil
+		}
 		return nil
 	})
 	if err != nil {

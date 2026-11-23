@@ -393,7 +393,7 @@ func (binding *extensionAccount) checkedSelection(ctx context.Context, exactRevi
 	scope := binding.currentScope()
 	selected := extensionSelection{entry: entry, config: config, scope: scope}
 	if scope.Account != "" {
-		account, err := binding.host.Store().RefreshedAccountContext(ctx, scope)
+		account, err := binding.host.Store().RefreshedAccountMetadataContext(ctx, scope)
 		if err != nil {
 			extensionSelectionFailure(ctx, scope, err)
 			return extensionSelection{}, err

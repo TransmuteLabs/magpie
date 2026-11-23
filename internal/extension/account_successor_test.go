@@ -24,6 +24,10 @@ func TestAccountAuthorityReadsDoNotCreateStore(t *testing.T) {
 			_, err := store.RefreshedAccountContext(t.Context(), scope)
 			return err
 		}},
+		{"refreshed metadata", "not_found", func(store *Store) error {
+			_, err := store.RefreshedAccountMetadataContext(t.Context(), scope)
+			return err
+		}},
 		{"usage", "stale_generation", func(store *Store) error {
 			_, err := store.UsageStamp(scope)
 			return err
@@ -62,9 +66,13 @@ func TestAccountSuccessorReadsWithExistingSharedLock(t *testing.T) {
 func TestAccountSuccessorRequiresDurableRefreshReceipt(t *testing.T) {
 	store := NewStore(t.TempDir())
 	scope := sdk.Scope{Plugin: "fixture", Provider: "vendor", Account: "alice", Generation: 1, Operation: "refresh-fixture", Attempt: 1}
-	original := Account{Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: json.RawMessage(`{"access":"old"}`)}
+	original := Account{Plugin: scope.Plugin, Provider: scope.Provider, ID: scope.Account, Auth: json.RawMessage(`{"access":"old"}`), ExpiresAt: 123}
 	if _, err := store.SaveAccount(original, 0); err != nil {
 		t.Fatal(err)
+	}
+	if metadata, err := store.RefreshedAccountMetadataContext(t.Context(), scope); err != nil ||
+		metadata != (AccountMetadata{ID: scope.Account, Generation: 1, ExpiresAt: original.ExpiresAt}) {
+		t.Fatalf("metadata for current account = %+v, %v", metadata, err)
 	}
 	if _, err := store.claimRefresh(scope, "revision", "0"); err != nil {
 		t.Fatal(err)
@@ -75,29 +83,52 @@ func TestAccountSuccessorRequiresDurableRefreshReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	current, err := store.RefreshedAccount(scope)
-	if err != nil || current.Generation != 2 || string(current.Auth) != `{"access":"rotated"}` {
+	if err != nil || current.Generation != 2 || current.ExpiresAt != result.ExpiresAt || string(current.Auth) != `{"access":"rotated"}` {
 		t.Fatalf("durable refresh successor was unavailable: generation=%d %v", current.Generation, err)
 	}
+	peer := NewStore(store.root)
+	want := AccountMetadata{ID: scope.Account, Generation: current.Generation, ExpiresAt: current.ExpiresAt}
 	unconfirmedStore := NewStore(store.root)
 	for _, generation := range []uint64{1, 2} {
 		selected := scope
 		selected.Generation = generation
+		metadata, err := peer.RefreshedAccountMetadataContext(t.Context(), selected)
+		if err != nil || metadata != want {
+			t.Fatalf("metadata from generation %d = %+v, %v; want %+v", generation, metadata, err, want)
+		}
 		unconfirmed := errors.New("fixture directory sync failed")
-		current, err := unconfirmedStore.refreshedAccount(t.Context(), selected, func(*os.Root) error { return unconfirmed })
-		if !errors.Is(err, unconfirmed) || current.Generation != 0 || len(current.Auth) != 0 {
-			t.Fatalf("unconfirmed refresh publication was adopted from generation %d: %+v %v", generation, current, err)
+		for _, copyAuth := range []bool{true, false} {
+			current, err := unconfirmedStore.readRefreshedAccount(t.Context(), selected, func(*os.Root) error { return unconfirmed }, copyAuth)
+			if !errors.Is(err, unconfirmed) || current.Generation != 0 || current.ExpiresAt != 0 || len(current.Auth) != 0 {
+				t.Fatalf("unconfirmed refresh from generation %d (copy auth %t): generation=%d expiry=%d error=%v",
+					generation, copyAuth, current.Generation, current.ExpiresAt, err)
+			}
 		}
 	}
 	original.Auth = json.RawMessage(`{"access":"manual"}`)
-	if _, err := store.SaveAccount(original, 2); err != nil {
+	if _, err := peer.SaveAccount(original, 2); err != nil {
 		t.Fatal(err)
 	}
 	for _, generation := range []uint64{1, 2} {
 		stale := scope
 		stale.Generation = generation
-		if _, err := store.RefreshedAccount(stale); err == nil {
-			t.Fatalf("manual replacement was adopted as an owned refresh from generation %d", generation)
+		_, err := store.RefreshedAccount(stale)
+		storeTestError(t, err, "stale_generation")
+		metadata, err := store.RefreshedAccountMetadataContext(t.Context(), stale)
+		storeTestError(t, err, "stale_generation")
+		if metadata != (AccountMetadata{}) {
+			t.Fatalf("metadata for replaced generation %d = %+v", generation, metadata)
 		}
+	}
+	if err := peer.DeleteAccount(scope.Plugin, scope.Provider, scope.Account, 3); err != nil {
+		t.Fatal(err)
+	}
+	deleted := scope
+	deleted.Generation = 3
+	metadata, err := store.RefreshedAccountMetadataContext(t.Context(), deleted)
+	storeTestError(t, err, "not_found")
+	if metadata != (AccountMetadata{}) {
+		t.Fatalf("metadata for deleted generation = %+v", metadata)
 	}
 }
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,6 +167,84 @@ func TestExtensionPriceAtReadsModelsOnce(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestExtensionListPriceDoesNotCopyAccountAuth(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	const model = "fixture-list-price-auth-copy"
+	const largeAuth = 32 << 10
+	const maxSurcharge = 16 << 10
+	host.manifest.Contract.Capabilities = []sdk.Capability{sdk.OutboundExecutor, sdk.AccountAuth}
+	host.manifest.Providers[0].Models = []sdk.Model{{ID: model, Price: &sdk.ModelPrice{Input: 3, Output: 7}}}
+	host.call = func(_ context.Context, method string, _ sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		t.Fatalf("listing price started SDK method %s", method)
+		return nil, nil
+	}
+
+	for _, fixture := range []struct {
+		id   string
+		size int
+	}{{"alice", 32}, {"bob", largeAuth}} {
+		const prefix, suffix = `{"access":"`, `"}`
+		auth := json.RawMessage(prefix + strings.Repeat("x", fixture.size-len(prefix)-len(suffix)) + suffix)
+		saved, err := host.store.SaveAccount(extensionhost.Account{
+			Plugin: host.manifest.ID, Provider: "vendor", ID: fixture.id, Auth: auth, ExpiresAt: 123,
+		}, 1)
+		if err != nil || saved.Generation != 2 || len(saved.Auth) != fixture.size {
+			t.Fatalf("saved %s generation=%d auth bytes=%d, error %v", fixture.id, saved.Generation, len(saved.Auth), err)
+		}
+	}
+	accountFile := filepath.Join(host.namespace, "private", host.manifest.ID, "accounts.json")
+	info, err := os.Stat(accountFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size := info.Size(); size <= largeAuth || size >= 64<<10 {
+		t.Fatalf("account snapshot size %d is outside the warm fixture range", size)
+	}
+
+	accounts, err := ExtensionProviders()
+	if err != nil || len(accounts) != 2 {
+		t.Fatalf("got %d SDK accounts, error %v", len(accounts), err)
+	}
+	counted := &preflightReadingHost{fixtureExtensionProviderHost: host}
+	allocated := make(map[string]uint64, len(accounts))
+	for _, account := range accounts {
+		scope, ok := account.ExtensionScope()
+		if !ok || scope.Generation != 2 || (scope.Account != "alice" && scope.Account != "bob") {
+			t.Fatalf("unexpected price selection: %+v, found %t", scope, ok)
+		}
+		account.Account.extension.host = counted
+		quote := func() {
+			if price, known := account.ListPrice(model); !known || price.Input != 3 || price.Output != 7 {
+				t.Fatalf("%s list price = %+v, known=%t", scope.Account, price, known)
+			}
+		}
+		quote()
+		if reads := counted.accountReads.Swap(0); reads != 1 {
+			t.Fatalf("%s warm quote selected the account %d times, want 1", scope.Account, reads)
+		}
+		var quotes int32
+		allocated[scope.Account] = leastBytes(24, func() {
+			quote()
+			quotes++
+		})
+		if reads := counted.accountReads.Swap(0); reads != quotes {
+			t.Fatalf("%s prices selected the account %d times for %d quotes", scope.Account, reads, quotes)
+		}
+	}
+	small, large := allocated["alice"], allocated["bob"]
+	if small == 0 || large == 0 {
+		t.Fatalf("missing allocation samples: small=%d large=%d", small, large)
+	}
+	after, err := os.Stat(accountFile)
+	if err != nil || !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("account file changed during price measurements: %v", err)
+	}
+	t.Logf("same-file %d bytes: auth 32 bytes -> %d B/quote, auth %d bytes -> %d B/quote", info.Size(), small, largeAuth, large)
+	if large > small+maxSurcharge {
+		t.Fatalf("large selected auth adds %d B/quote, want at most %d", large-small, maxSurcharge)
 	}
 }
 
