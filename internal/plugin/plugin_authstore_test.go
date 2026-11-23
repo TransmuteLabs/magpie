@@ -130,7 +130,7 @@ func TestTwoHostsKeepEachOthersSignIns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2, _, err := startOn(ctx, os.Getenv("MAGPIE_BUN"))
+	h2, _, err := startOn(ctx, os.Getenv("MAGPIE_BUN"), false)
 	if err != nil {
 		t.Fatal(err)
 	}

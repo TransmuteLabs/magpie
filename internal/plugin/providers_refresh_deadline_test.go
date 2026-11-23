@@ -37,7 +37,7 @@ func refreshSandbox(t *testing.T, ask func(ctx context.Context, epoch uint64) er
 	refreshWriteList(t, refreshAbsPath(t, "testdata/fake/index.js"))
 	orig := refreshProviders
 	if ask != nil {
-		refreshProviders = ask
+		refreshProviders = func(ctx, _ context.Context, epoch uint64) error { return ask(ctx, epoch) }
 	}
 	// the cache starts stale, as after a sign-in, and the deadlines short
 	UseCached([]Provider{{ID: "fakeco", Spec: refreshAbsPath(t, "testdata/fake/index.js"), Name: "FakeCo"}})
@@ -383,6 +383,68 @@ func TestRefreshInvalidationCancelsStaleCall(t *testing.T) {
 	}
 }
 
+func TestRefreshQueuedBeforeRemovalDoesNotStartEmptyHost(t *testing.T) {
+	realRefreshPlugin(t, 0, 0)
+	original := refreshProviders
+	admitted, proceed := make(chan struct{}), make(chan struct{})
+	signalAdmission := sync.OnceFunc(func() { close(admitted) })
+	resume := sync.OnceFunc(func() { close(proceed) })
+	refreshProviders = func(ctx, startup context.Context, epoch uint64) error {
+		signalAdmission()
+		<-proceed
+		return original(ctx, startup, epoch)
+	}
+	t.Cleanup(func() {
+		resume()
+		Refreshed()
+		refreshProviders = original
+	})
+
+	before := generation.Load()
+	Cached()
+	select {
+	case <-admitted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the listing did not start with the plugin installed")
+	}
+	writeList(t, `{"plugins":[]}`)
+	resume()
+	Refreshed()
+	if Running() || generation.Load() != before {
+		t.Fatal("a listing admitted before removal started an empty plugin host")
+	}
+	if _, listed := ListedAt(); listed {
+		t.Fatal("a listing admitted before removal published after the plugin was removed")
+	}
+}
+
+func TestRelistCanceledWhileWaitingForHost(t *testing.T) {
+	storeSandbox(t)
+	t.Setenv("MAGPIE_BUN", "")
+	writeList(t, `{"plugins":[{"spec":"/plugins/fake"}]}`)
+	if HasBun() {
+		t.Fatal("the test profile should have no Bun")
+	}
+	hostMu.Lock()
+	defer hostMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := RelistProviders(ctx)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("waiting for the host ended with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a canceled listing still waits for the plugin host")
+	}
+}
+
 // settleLooks has a hook told of a change look at the providers, as
 // catalog.Touched's SyncCatalog does, while it is set.
 var settleLooks atomic.Bool
@@ -408,8 +470,123 @@ func TestSettleStartsNoRefresh(t *testing.T) {
 	settleLooks.Store(true)
 	Settle()
 	settleLooks.Store(false)
-	refreshing.Wait()
+	Refreshed()
 	if n := asks.Load(); n != 0 {
 		t.Fatalf("Settle started %d refreshes", n)
+	}
+}
+
+func TestCachedListingStopsAtServingHandoff(t *testing.T) {
+	var asks atomic.Int32
+	var blockOwner atomic.Bool
+	started, canceled := make(chan struct{}), make(chan struct{})
+	finish := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(finish) })
+	spec := refreshAbsPath(t, "testdata/fake/index.js")
+	refreshSandbox(t, func(ctx context.Context, epoch uint64) error {
+		name := "Unexpected"
+		switch asks.Add(1) {
+		case 1:
+			if !blockOwner.Load() {
+				return nil
+			}
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			<-finish
+			name = "Old owner"
+		case 2:
+			name = "New owner"
+		}
+		commitProviders([]Provider{{ID: "fakeco", Spec: spec, Name: name}}, &epoch)
+		return nil
+	})
+	defer unblock()
+	defer RequireBackgroundListingOwner()()
+	settleLooks.Store(true)
+	t.Cleanup(func() { settleLooks.Store(false); Told() })
+
+	before := time.Now().Add(time.Minute)
+	writeList(t, fmt.Sprintf(`{"plugins":[{"spec":%q,"off":true}]}`, spec))
+	if err := os.Chtimes(listPath(), before, before); err != nil {
+		t.Fatal(err)
+	}
+	checkList()
+	Told()
+	if got := Cached(); len(got) != 0 {
+		t.Fatalf("disabled plugin still listed: %+v", got)
+	}
+	refreshWriteList(t, spec)
+	checkList()
+	Told()
+	Cached()
+	Refreshed()
+	if asks.Load() != 0 || Running() {
+		t.Fatal("a passive catalog read started a listing")
+	}
+
+	blockOwner.Store(true)
+	listingStopped := make(chan struct{})
+	stop := sync.OnceFunc(ServeBackgroundListings(t.Context(), func(ctx context.Context) {
+		Cached()
+		<-ctx.Done()
+		close(listingStopped)
+	}))
+	defer func() { unblock(); stop() }()
+	waitFor(t, "the first owner's request", func() bool { return asks.Load() == 1 })
+	<-started
+	stopped := make(chan struct{})
+	go func() { stop(); close(stopped) }()
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the old owner's request was not canceled")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("ownership released with a listing still running")
+	default:
+	}
+	refreshWriteList(t, spec+" ")
+	checkList()
+	Told()
+	refreshWriteList(t, spec)
+	checkList()
+	Told()
+	unblock()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ownership did not release after the listing ended")
+	}
+	select {
+	case <-listingStopped:
+	default:
+		t.Fatal("ownership released before the periodic listing ended")
+	}
+	Cached()
+	Refreshed()
+	if asks.Load() != 1 {
+		t.Fatalf("a revoked listing retried: %d requests", asks.Load())
+	}
+	if _, ok := Listed(); ok {
+		t.Fatal("the old listing published after losing ownership")
+	}
+
+	listed := make(chan struct{})
+	stopNext := ServeBackgroundListings(t.Context(), func(context.Context) {
+		Cached()
+		Refreshed()
+		close(listed)
+	})
+	defer stopNext()
+	select {
+	case <-listed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the new owner's listing did not finish")
+	}
+	got, ok := Listed()
+	if asks.Load() != 2 || !ok || len(got) != 1 || got[0].Name != "New owner" {
+		t.Fatalf("new owner: %d requests, listed %+v, known %v", asks.Load(), got, ok)
 	}
 }

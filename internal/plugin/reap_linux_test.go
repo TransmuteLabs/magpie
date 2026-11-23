@@ -145,7 +145,7 @@ func TestEndHostsLeavesNoChild(t *testing.T) {
 		t.Fatalf("children left once EndHosts returned: %v", c)
 	}
 	hostMu.Lock()
-	_, err := getLocked(ctx)
+	_, err := getLocked(ctx, false)
 	hostMu.Unlock()
 	if err == nil {
 		t.Fatal("a host started after EndHosts")

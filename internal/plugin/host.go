@@ -932,6 +932,20 @@ func Running() bool {
 	return current != nil && current.alive()
 }
 
+func canListProviders(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if HasBun() {
+		return true
+	}
+	if err := hostMu.LockCtx(ctx); err != nil {
+		return false
+	}
+	defer hostMu.Unlock()
+	return current != nil && current.alive()
+}
+
 // Warm starts the host if none is up and Bun is here. A plugin's page in
 // the window whose plugin has a part for the host too (a local service
 // its page goes to, as Magiczerowxy/magpie-chat's does) is served by the
@@ -1032,6 +1046,10 @@ func hostScript(name string, js []byte) (string, error) {
 // get is the running host, started (Bun downloaded, the plugins loaded)
 // when there is none.
 func get(ctx context.Context) (*host, error) {
+	return getHost(ctx, false)
+}
+
+func getHost(ctx context.Context, installedOnly bool) (*host, error) {
 	checkList()
 	if err := hostMu.LockCtx(ctx); err != nil {
 		if e := bunNotReadyNow(err); e != nil {
@@ -1040,12 +1058,18 @@ func get(ctx context.Context) (*host, error) {
 		return nil, fmt.Errorf("waiting for the plugin host: %w", err)
 	}
 	defer hostMu.Unlock()
-	return getLocked(ctx)
+	return getLocked(ctx, installedOnly)
 }
 
-// getLocked requires hostMu. Gateway hooks bound both the lock wait and
-// startup with their request-hook budget.
-func getLocked(ctx context.Context) (*host, error) {
+// getLocked requires hostMu. Gateway hooks bound the wait and startup with
+// their request budget. A listing may start a host only for installed plugins.
+func getLocked(ctx context.Context, installedOnly bool) (*host, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if installedOnly && len(list().Plugins) == 0 {
+		return nil, errNoInstalledPlugins
+	}
 	if hostStale.Swap(false) && current != nil {
 		go current.retire()
 		current = nil
@@ -1057,7 +1081,7 @@ func getLocked(ctx context.Context) (*host, error) {
 	if current != nil && current.alive() {
 		return current, nil
 	}
-	h, err := start(ctx)
+	h, err := start(ctx, installedOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -1065,12 +1089,12 @@ func getLocked(ctx context.Context) (*host, error) {
 	return h, nil
 }
 
-func start(ctx context.Context) (*host, error) {
+func start(ctx context.Context, installedOnly bool) (*host, error) {
 	bun, err := hostBun(ctx)
 	if err != nil {
 		return nil, err
 	}
-	h, crashed, err := startOn(ctx, bun)
+	h, crashed, err := startOn(ctx, bun, installedOnly)
 	if crashed {
 		err = whyDied(ctx, bun, err)
 	}
@@ -1086,7 +1110,7 @@ func start(ctx context.Context) (*host, error) {
 	if !ok {
 		return nil, err
 	}
-	h, _, perr := startOn(ctx, prev)
+	h, _, perr := startOn(ctx, prev, installedOnly)
 	if perr != nil {
 		return nil, err
 	}
@@ -1118,7 +1142,7 @@ func cancelCatalogSyncs() {
 
 // startOn starts the host on the bun given; crashed is whether it died
 // before it started.
-func startOn(ctx context.Context, bun string) (*host, bool, error) {
+func startOn(ctx context.Context, bun string, installedOnly bool) (*host, bool, error) {
 	js, err := hostFile()
 	if err != nil {
 		return nil, false, err
@@ -1128,6 +1152,13 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 		return nil, false, err
 	}
 	if err := os.MkdirAll(settings.Dir(), 0o700); err != nil {
+		return nil, false, err
+	}
+	l := Load()
+	if installedOnly && len(l.Plugins) == 0 {
+		return nil, false, errNoInstalledPlugins
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
 	catalog.Seed() // the shipped copy, read until models.dev answers
@@ -1224,7 +1255,6 @@ func startOn(ctx context.Context, bun string) (*host, bool, error) {
 	go h.authUseLoop()
 	generation.Add(1)
 
-	l := Load()
 	type item struct {
 		Spec    string         `json:"spec"`
 		Target  string         `json:"target"`
@@ -1949,16 +1979,23 @@ func Call(ctx context.Context, method string, params, out any) error {
 // Background listings allow the host its own startup budget. The optional
 // timeout begins only after initialization and bounds just the requested RPC.
 func callWithTimeout(ctx context.Context, method string, params, out any, timeout time.Duration) error {
+	startup := ctx
+	if timeout > 0 {
+		startup = context.WithoutCancel(ctx)
+	}
+	return callWithStartup(ctx, startup, method, params, out, timeout, false)
+}
+
+func callWithStartup(ctx, startup context.Context, method string, params, out any, timeout time.Duration, installedOnly bool) error {
 	// a read the user didn't ask for, held back (#1518): the plugin isn't
 	// asked either, nor does its host start for it
 	if err := netproxy.Held(ctx); err != nil {
 		return err
 	}
-	startup := ctx
-	if timeout > 0 {
-		startup = context.WithoutCancel(ctx)
+	if err := startup.Err(); err != nil {
+		return err
 	}
-	h, err := get(startup)
+	h, err := getHost(startup, installedOnly)
 	if err != nil {
 		return err
 	}

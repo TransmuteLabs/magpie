@@ -311,15 +311,17 @@ var (
 	// Failed reads keep the old list. Cached tries once per invalidation,
 	// with bounded retries, then waits for a sign-in or plugin change.
 	provGood   bool
-	provBusy   bool
 	provTried  bool
 	provCancel context.CancelFunc
+	provDone   chan struct{}
 	// provEpoch counts the invalidations (forgetProviders), so a refresh
 	// that began before one doesn't put what it read over the newer state.
 	provEpoch uint64
 	// provSettling is set while Settle runs: no refresh starts, nor goes
 	// on to a newer invalidation, to start a host in a folder going away.
 	provSettling bool
+	provGates    int
+	provOwner    context.Context
 )
 
 func providersPath() string { return filepath.Join(settings.Dir(), "plugin-providers.json") }
@@ -348,15 +350,39 @@ func forgetProviders() {
 // Providers asks the plugins for their providers, starting the host if
 // need be, and keeps the answer for Cached.
 func Providers(ctx context.Context) ([]Provider, error) {
-	ps, err := listProviders(ctx, 0)
+	return providers(ctx, nil)
+}
+
+var errNoInstalledPlugins = errors.New("no installed plugins to list")
+
+// RelistProviders is the periodic listing. An empty installation needs no host.
+func RelistProviders(ctx context.Context) ([]Provider, error) {
+	if len(list().Plugins) == 0 || !canListProviders(ctx) {
+		return nil, ctx.Err()
+	}
+	provMu.Lock()
+	epoch := provEpoch
+	provMu.Unlock()
+	ps, err := providers(ctx, &epoch)
+	if errors.Is(err, errNoInstalledPlugins) {
+		return nil, nil
+	}
+	return ps, err
+}
+
+func providers(ctx context.Context, epoch *uint64) ([]Provider, error) {
+	ps, err := listProviders(ctx, ctx, 0, epoch != nil)
 	if err != nil {
 		return nil, err
 	}
-	ps = commitProviders(ps, nil)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ps = commitProviders(ps, epoch)
 	return ps, nil
 }
 
-func listProviders(ctx context.Context, deadline time.Duration) ([]Provider, error) {
+func listProviders(ctx, startup context.Context, deadline time.Duration, installedOnly bool) ([]Provider, error) {
 	options, _, err := settings.PluginOptionsNow()
 	if err != nil {
 		return nil, err
@@ -364,7 +390,7 @@ func listProviders(ctx context.Context, deadline time.Duration) ([]Provider, err
 	args := listingArgs()
 	args["providerOptions"] = options
 	var ps []Provider
-	if err := callWithTimeout(ctx, "providers", args, &ps, deadline); err != nil {
+	if err := callWithStartup(ctx, startup, "providers", args, &ps, deadline, installedOnly); err != nil {
 		return nil, err
 	}
 	return ps, nil
@@ -373,7 +399,7 @@ func listProviders(ctx context.Context, deadline time.Duration) ([]Provider, err
 // commitProviders keeps ps for Cached and on disk, with a list a plugin
 // fell back to replaced by the one it told last, and gives what was kept.
 // epoch, when given, is the invalidation the read began under: a newer
-// one that went by meanwhile stands, and ps is then only given back.
+// one that went by meanwhile stands, and the old answer is discarded.
 func commitProviders(ps []Provider, epoch *uint64) []Provider {
 	// Serialize publishers without blocking Cached on Windows rename retries.
 	provWriteMu.Lock()
@@ -381,7 +407,7 @@ func commitProviders(ps []Provider, epoch *uint64) []Provider {
 	provMu.Lock()
 	if epoch != nil && provEpoch != *epoch {
 		provMu.Unlock()
-		return ps
+		return nil
 	}
 	ps = keepListed(ps, provCache)
 	ps = keepUnloaded(ps, provCache)
@@ -431,9 +457,12 @@ var (
 // refreshProviders is one bounded ask of the plugins for their providers,
 // kept for Cached when it was answered while the invalidation it began
 // under still stood. Tests replace it to stall or fail an ask without Bun.
-var refreshProviders = func(ctx context.Context, epoch uint64) error {
-	ps, err := listProviders(ctx, refreshDeadline)
+var refreshProviders = func(ctx, startup context.Context, epoch uint64) error {
+	ps, err := listProviders(ctx, startup, refreshDeadline, true)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	commitProviders(ps, &epoch)
@@ -444,7 +473,7 @@ var refreshProviders = func(ctx context.Context, epoch uint64) error {
 // a deadline, retrying a failure with backoff a bounded number of times.
 // A failure keeps the providers already kept, as it keeps the ones on
 // disk; a newer invalidation during the refresh is not overwritten by it.
-func refreshProvidersWithRetry(ctx context.Context, epoch uint64) {
+func refreshProvidersWithRetry(ctx, startup context.Context, epoch uint64) {
 	wait := refreshBackoff
 	for try := 0; try < refreshTries; try++ {
 		if try > 0 {
@@ -455,8 +484,9 @@ func refreshProvidersWithRetry(ctx context.Context, epoch uint64) {
 			}
 			wait *= 2
 		}
-		err := refreshProviders(ctx, epoch)
-		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		err := refreshProviders(ctx, startup, epoch)
+		if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errNoInstalledPlugins) {
 			return
 		}
 		// a failure keeps what is kept already, and is retried; one that
@@ -473,22 +503,22 @@ func refreshProvidersWithRetry(ctx context.Context, epoch uint64) {
 
 // Keep the same admission across intervening changes, so Refreshed waits for
 // the latest state too. Invalidation cancels only the old listing, not startup.
-func refreshProvidersInBackground(ctx context.Context, epoch uint64) {
-	defer refreshing.Done()
+func refreshProvidersInBackground(ctx, owner context.Context, epoch uint64, done chan struct{}) {
 	for {
-		if Running() || HasBun() {
-			refreshProvidersWithRetry(ctx, epoch)
+		if len(list().Plugins) != 0 && canListProviders(ctx) {
+			refreshProvidersWithRetry(ctx, owner, epoch)
 		}
 		provMu.Lock()
 		provCancel()
-		if provEpoch != epoch && !provGood && !provTried && !provSettling {
+		if provEpoch != epoch && !provGood && !provTried && owner == backgroundListingContextLocked() {
 			epoch = provEpoch
-			ctx, provCancel = context.WithCancel(context.Background())
+			ctx, provCancel = context.WithCancel(owner)
 			provTried = true
 			provMu.Unlock()
 			continue
 		}
-		provBusy, provCancel = false, nil
+		provDone, provCancel = nil, nil
+		close(done)
 		provMu.Unlock()
 		return
 	}
@@ -644,9 +674,6 @@ func Listed() ([]Provider, bool) {
 	return ps, true
 }
 
-// refreshing is Cached's refreshes in the background.
-var refreshing sync.WaitGroup
-
 // ListInBackground sets whether Cached, finding the plugins not asked
 // since this magpie started or since they changed, asks them in the
 // background: true until it is set. The app, serve, web, tray and the TUI
@@ -660,9 +687,86 @@ func ListInBackground(on bool) (was bool) { return !noBackgroundList.Swap(!on) }
 
 var noBackgroundList atomic.Bool
 
+func backgroundListingContextLocked() context.Context {
+	if provSettling || noBackgroundList.Load() {
+		return nil
+	}
+	if provOwner != nil {
+		if provOwner.Err() != nil {
+			return nil
+		}
+		return provOwner
+	}
+	if provGates > 0 {
+		return nil
+	}
+	return context.Background()
+}
+
+func cancelBackgroundListingLocked() <-chan struct{} {
+	provEpoch++
+	if provDone != nil {
+		provTried = provGood
+		provCancel()
+	}
+	return provDone
+}
+
+// RequireBackgroundListingOwner keeps Cached passive until the gateway
+// acquires serving ownership, including reads made during startup.
+func RequireBackgroundListingOwner() func() {
+	provMu.Lock()
+	provGates++
+	var done <-chan struct{}
+	if provOwner == nil {
+		done = cancelBackgroundListingLocked()
+	}
+	provMu.Unlock()
+	if done != nil {
+		<-done
+	}
+	return func() {
+		provMu.Lock()
+		provGates--
+		provMu.Unlock()
+	}
+}
+
+// ServeBackgroundListings admits Cached refreshes and periodic listings
+// during the serving lease. Stop joins both before the lease is released.
+func ServeBackgroundListings(ctx context.Context, relist func(context.Context)) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	provMu.Lock()
+	provOwner = ctx
+	provMu.Unlock()
+	var periodic sync.WaitGroup
+	periodic.Go(func() { relist(ctx) })
+	return func() {
+		provMu.Lock()
+		cancel()
+		var done <-chan struct{}
+		if provOwner == ctx {
+			provOwner = nil
+			done = cancelBackgroundListingLocked()
+		}
+		provMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		periodic.Wait()
+	}
+}
+
 // Refreshed waits for Cached's refreshes in the background to end, the
 // host left running: for tests that watch the providers' list on disk.
-func Refreshed() { refreshing.Wait() }
+func Refreshed() {
+	provMu.Lock()
+	done := provDone
+	provMu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
 
 // Told waits for the hooks told of a change or a sign-in (OnChange,
 // OnSignIn) to end: for tests, so that a change one test made is not told
@@ -706,13 +810,13 @@ func Settle() {
 		provSettling = false
 		provMu.Unlock()
 	}()
-	refreshing.Wait()
+	Refreshed()
 	Restart()
 	// what the host said of a sign-in is written before the folder goes
 	// (#1935); a hook that read the providers to know the account's
 	// started a host again, which goes too
 	Told()
-	refreshing.Wait()
+	Refreshed()
 	Restart()
 	// and no host goes on finishing its calls in a folder going away
 	hostMu.Lock()
@@ -780,23 +884,17 @@ func Cached() []Provider {
 		}
 		out = append(out, p)
 	}
-	if !good && len(l.Plugins) > 0 {
+	if !good {
 		// refreshed in the background: a sign-in or the plugins changed.
 		// Whether one is already in flight is read and set under one lock,
 		// so two callers asking at once start one refresh, not two.
 		provMu.Lock()
-		start := !provBusy && !provGood && !provTried && !provSettling && !noBackgroundList.Load()
-		var ctx context.Context
-		if start {
-			ctx, provCancel = context.WithCancel(context.Background())
-			provBusy, provTried = true, true
-			refreshing.Add(1)
+		if owner := backgroundListingContextLocked(); owner != nil && provDone == nil && !provGood && !provTried {
+			ctx, cancel := context.WithCancel(owner)
+			provCancel, provDone, provTried = cancel, make(chan struct{}), true
+			go refreshProvidersInBackground(ctx, owner, provEpoch, provDone)
 		}
-		epoch := provEpoch
 		provMu.Unlock()
-		if start {
-			go refreshProvidersInBackground(ctx, epoch)
-		}
 	}
 	return out
 }

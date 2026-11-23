@@ -34,7 +34,7 @@ func TestHostStartsPastAnOverlongStderrLine(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	h, _, err := startOn(ctx, bun)
+	h, _, err := startOn(ctx, bun, false)
 	if err != nil {
 		t.Fatalf("the host did not start past the plugin's overlong stderr line: %v", err)
 	}

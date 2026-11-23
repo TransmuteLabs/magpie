@@ -41,12 +41,12 @@ func TestCachedReadsSavedProvidersOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	provMu.Lock()
-	was := [4]any{provCache, provGood, provTried, provBusy}
+	wasCache, wasGood, wasTried := provCache, provGood, provTried
 	provCache, provGood, provTried = nil, false, true // no refresh starts
 	provMu.Unlock()
 	t.Cleanup(func() {
 		provMu.Lock()
-		provCache, provGood, provTried, provBusy = was[0].([]Provider), was[1].(bool), was[2].(bool), was[3].(bool)
+		provCache, provGood, provTried = wasCache, wasGood, wasTried
 		provMu.Unlock()
 	})
 

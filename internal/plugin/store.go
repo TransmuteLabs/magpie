@@ -357,7 +357,9 @@ func KeepNoticing(ctx context.Context, every func() time.Duration) {
 	for {
 		// taken before the look, so a write made during it isn't missed
 		written := filememo.Written()
-		if checkList() {
+		changed := checkList()
+		retireUninstalledHost(ctx)
+		if changed {
 			// listed again now, as the Plugins page asks its host at once
 			Cached()
 		}
@@ -367,6 +369,29 @@ func KeepNoticing(ctx context.Context, every func() time.Duration) {
 		case <-beat.Next(every()):
 		case <-written:
 		}
+	}
+}
+
+func retireUninstalledHost(ctx context.Context) {
+	if !hostStale.Load() || len(list().Plugins) != 0 {
+		return
+	}
+	var retired *host
+	_ = WithInstalledPlugins(ctx, ctx.Err, func(installed []Entry) error {
+		if len(installed) != 0 {
+			return nil
+		}
+		if err := hostMu.LockCtx(ctx); err != nil {
+			return err
+		}
+		defer hostMu.Unlock()
+		if hostStale.Swap(false) {
+			retired, current = current, nil
+		}
+		return nil
+	})
+	if retired != nil {
+		retired.retire()
 	}
 }
 

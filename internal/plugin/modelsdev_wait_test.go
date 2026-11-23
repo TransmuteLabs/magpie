@@ -88,7 +88,7 @@ func TestHostStartDoesNotWaitOnHangingModelsDev(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		h, _, err := startOn(ctx, bun)
+		h, _, err := startOn(ctx, bun, false)
 		if err != nil {
 			t.Fatalf("startOn failed: %v", err)
 		}
@@ -119,7 +119,7 @@ func TestHostStartDoesNotWaitOnHangingModelsDev(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		h, _, err := startOn(ctx, bun)
+		h, _, err := startOn(ctx, bun, false)
 		if err != nil {
 			t.Fatalf("startOn failed with sync in flight: %v", err)
 		}

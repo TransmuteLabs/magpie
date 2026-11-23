@@ -2133,6 +2133,7 @@ const refusedLists = new Map()
 const signInOf = (a) => JSON.stringify([a?.access ?? "", a?.refresh ?? "", a?.key ?? "", a?.[AUTH_EPOCH] ?? ""])
 
 async function info(id, key, strict, limit, quiet, signal) {
+  signal?.throwIfAborted()
   if (!quiet) {
     let admitted = false
     try {
@@ -2148,6 +2149,7 @@ async function info(id, key, strict, limit, quiet, signal) {
 }
 
 async function buildInfo(id, key, strict, limit, quiet, signal) {
+  signal?.throwIfAborted()
   const md = mdev()[id]
   const cfg = providerConfig(id)
   const out = {
@@ -2216,6 +2218,7 @@ async function buildInfo(id, key, strict, limit, quiet, signal) {
     // refreshDeadline, and the whole listing with it (#4065)
     const began = Date.now()
     await fresh(id, k)
+    signal?.throwIfAborted()
     const saved = savedAuth(k)
     const held = refusedLists.get(k)
     if (held && saved.record && held.sign === signInOf(saved.record) && Date.now() - held.at < retryAfter(held.n)) {
@@ -2237,6 +2240,7 @@ async function buildInfo(id, key, strict, limit, quiet, signal) {
       const given = JSON.parse(JSON.stringify(out))
       const l = { tried: false, lastOk: false }
       const ask = () => listing.run(l, () => inScope(id, k, (local) => {
+        ctl.signal.throwIfAborted()
         bound = local
         return ph.models(given, { auth: authCopy(k), signal: ctl.signal })
       }, saved))
@@ -2253,6 +2257,7 @@ async function buildInfo(id, key, strict, limit, quiet, signal) {
       out.models = Object.fromEntries(Object.entries(next ?? {}).map(([k, m]) => [k, { ...m, id: k, providerID: id }]))
       refusedLists.delete(k)
     } catch (e) {
+      signal?.throwIfAborted()
       // a listing that gave up waiting: what the hook gives later is no
       // list a request should be built from
       if (e instanceof Late) out.late = true
@@ -2582,7 +2587,7 @@ async function providers({ proxies, off } = {}, signal) {
     const keep = (key, p) => (keepInfo(key, p, gen, { known, record: stored[key], ...(recovered ? { recovered: true } : {}) }), p)
     const through = (k) => proxies?.[id]?.[k ?? keys[0] ?? ""] ?? proxies?.[id]?.[""] ?? ""
     if (quiet.has(id)) {
-      const p = await info(id, undefined, false, listWait, true)
+      const p = await info(id, undefined, false, listWait, true, signal)
       return rowOf(id, a, keys, stored, p, [])
     }
     // every account is listed side by side, each hook given listWait: a

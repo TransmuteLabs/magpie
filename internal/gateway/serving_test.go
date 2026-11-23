@@ -4,12 +4,18 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/plugin"
+	"github.com/yetone/magpie/internal/testenv"
 )
 
 // A Kubernetes rolling update runs the new pod beside the old one on one
@@ -157,5 +163,67 @@ func TestServingReleaseJoinsOwnedWork(t *testing.T) {
 		unlock()
 	} else {
 		t.Fatal("the serving lock stayed held after shutdown")
+	}
+}
+
+func TestServingCommunityListingWaitsForOwnership(t *testing.T) {
+	bun := testenv.Bun(t)
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:0")
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	oldRetry := servingRetry
+	servingRetry = 10 * time.Millisecond
+	t.Cleanup(func() { servingRetry = oldRetry })
+
+	path := servingLockPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unlock, held := filelock.Lock(path, 0)
+	if !held {
+		t.Fatal("could not acquire the other gateway's serving lock")
+	}
+	release := sync.OnceFunc(unlock)
+	defer release()
+	spec, err := filepath.Abs("../plugin/testdata/fake/index.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listPath := plugin.ListPath()
+	writePlugins := func(data string) {
+		t.Helper()
+		if err := os.WriteFile(listPath, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		filememo.Forget()
+	}
+	writePlugins(`{"plugins":[]}`)
+	plugin.UseCached(nil)
+	stop, done := listening(t, New())
+	defer func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	writePlugins(`{"plugins":[{"spec":` + strconv.Quote(spec) + `}]}`)
+	plugin.Cached()
+	plugin.Refreshed()
+	if plugin.Running() {
+		t.Fatal("the waiting gateway started a host to list providers")
+	}
+	if _, listed := plugin.ListedAt(); listed {
+		t.Fatal("the waiting gateway published the provider list")
+	}
+
+	release()
+	waitFor(t, "the new owner to publish the provider list", func() bool {
+		_, listed := plugin.ListedAt()
+		return listed
+	})
+	ps, known := plugin.Listed()
+	if !known || len(ps) != 1 || ps[0].ID != "fakeco" {
+		t.Fatalf("the new owner's provider list: %+v, known %v", ps, known)
 	}
 }

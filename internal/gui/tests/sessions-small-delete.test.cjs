@@ -187,14 +187,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await ask.waitFor({ state: "detached" });
 
       // under a filter, only the ones it shows
-      await view.locator(".sm-filter").fill("login");
+      const filter = view.locator(".sm-filter");
+      await filter.fill("login");
+      await filter.press("Enter");
       await page.waitForFunction(() => document.querySelectorAll("#view-sessions .row.sm-sess").length === 1);
       await open();
       assert.deepEqual(await menu.locator(".pm-note").allTextContents(), [0, 1, 1, 1].map(w.k));
       await choose(1);
       assert.equal(await count(), await tr("{n} selected", { n: 1 }));
-      await view.locator(".sm-filter").fill("");
-      await view.locator(".sm-filter").dispatchEvent("input");
+      await filter.press("Escape");
+      assert.equal(await filter.inputValue(), "");
       await view.locator('.row.sm-sess[data-id="s-big"]').waitFor();
       assert.deepEqual(await ticked(), ["s-mid"]);
 
@@ -219,7 +221,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // the bar fits a narrow window: nothing spills out of it
       await page.setViewportSize({ width: 420, height: 620 });
       await page.waitForTimeout(100);
-      const spill = await view.locator(".sm-bar").evaluate((b) => [...b.children].filter((c) => !c.hidden && c.getBoundingClientRect().right > b.getBoundingClientRect().right + 1).map((c) => c.className));
+      const spill = await view.locator(".sm-bar").evaluate((b) => [...b.children].filter((c) => !c.hidden && c.getBoundingClientRect().right > b.getBoundingClientRect().right + 1).map((c) => c.className)).catch(async (err) => {
+        const state = await page.locator("html").evaluate(() => {
+          const v = document.querySelector("#view-sessions");
+          return {
+            width: innerWidth, active: document.querySelector(".view:not([hidden])")?.id,
+            loading: v?.classList.contains("loading"), selecting: v?.querySelector(".sm-select")?.getAttribute("aria-pressed"),
+            barHidden: v?.querySelector(".sm-bar")?.hidden, empty: v?.querySelector(".sm-body .empty-state")?.textContent.slice(0, 200),
+            rows: v?.querySelectorAll(".sm-sess").length,
+          };
+        }, undefined, { timeout: 500 }).catch(() => null);
+        t.diagnostic(JSON.stringify({ state, errors: errors.slice(-5).map((s) => s.slice(0, 200)) }));
+        throw err;
+      });
       assert.deepEqual(spill, [], "the bar's buttons stay inside it");
 
       const keys = ["By tokens", "Select sessions under", "Each used fewer than {n} tokens"];

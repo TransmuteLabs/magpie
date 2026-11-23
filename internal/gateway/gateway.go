@@ -902,6 +902,7 @@ var WhileServing []func(context.Context)
 // long as a stream takes. A bind error means another magpie is already
 // serving, which is fine for the caller to ignore.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	defer plugin.RequireBackgroundListingOwner()()
 	migrateLANKeyBestEffort()
 	ScopeOwnBrowserKey()
 	cfg, err := serverTLS()
@@ -993,13 +994,14 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	// and the OpenCode plugins another magpie turned on or off, added,
 	// removed or updated (magpie plugin … in a terminal) are this one's at
 	// once, as the window's change is, not on the next request
-	go plugin.KeepNoticing(freshCtx, filememo.OthersEvery)
+	noticed := make(chan struct{})
+	go func() { defer close(noticed); plugin.KeepNoticing(freshCtx, filememo.OthersEvery) }()
 	// and the MCP hub's servers that the Library no longer gives are ended
 	// It reads MCPHub, which a test swaps, so the gateway's end waits for
 	// it: once ListenAndServe has returned, nothing it started still looks.
 	pruned := make(chan struct{})
 	go func() { defer close(pruned); keepHubPruned(freshCtx) }()
-	defer func() { stopFresh(); <-pruned }()
+	defer func() { stopFresh(); <-pruned; <-noticed }()
 	srv := &http.Server{Handler: s.closesWhenHandedOff(s.Front()), ReadHeaderTimeout: 30 * time.Second, IdleTimeout: 5 * time.Minute, ConnState: s.unread.note}
 	// what the magpie serving the gateway does, and only it: at once, or
 	// once another magpie on this config folder lets go of it (serving.go:
@@ -1042,7 +1044,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		go egress.Keep(ctx, provider.ClaudeProxies)
 		// and fetches the partner list every hour, asked for or not
 		go provider.KeepPartnersFresh(ctx)
-		go provider.KeepPluginsListed(ctx) // models a plugin's vendor drops or adds, while magpie runs
+		stopPluginListings := plugin.ServeBackgroundListings(ctx, provider.KeepPluginsListed)
 		// and renews the plugins' sign-ins as they come due, used or not (#5080)
 		go provider.KeepPluginsSignedIn(ctx)
 		// and those a signed-in account's vendor adds (a ChatGPT plan's new GPT)
@@ -1062,6 +1064,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		stopAutoPicks := startAutoPicks(ctx)
 		stopSignIns := provider.KeepExtensionsSignedIn(ctx, s.extensions)
 		return func() {
+			stopPluginListings()
 			stopAutoPicks()
 			stopSignIns()
 		}

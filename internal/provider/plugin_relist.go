@@ -37,12 +37,7 @@ var (
 // relistPlugins asks the plugins for their providers and models again,
 // and keeps the answer (plugin.Providers); nil with no plugin installed or
 // no Bun to run one. Tests replace it.
-var relistPlugins = func(ctx context.Context) ([]plugin.Provider, error) {
-	if len(plugin.Load().Plugins) == 0 || !plugin.Running() && !plugin.HasBun() {
-		return nil, nil
-	}
-	return plugin.Providers(ctx)
-}
+var relistPlugins = plugin.RelistProviders
 
 // KeepPluginsListed lists the plugins' models again every relistEvery,
 // in the magpie serving the gateway, and drops the picks of models gone
@@ -65,6 +60,9 @@ func KeepPluginsListed(ctx context.Context) {
 		c, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		now, err := relistPlugins(c)
 		cancel()
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			log.Printf("listing the plugins' models again: %s (the last lists stay)", err)
 		} else if now != nil {

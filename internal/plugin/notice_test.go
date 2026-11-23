@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,5 +79,52 @@ func TestTerminalChangeIsNoticedWithoutARequest(t *testing.T) {
 	}
 	if !hostStale.Load() {
 		t.Fatal("the plugins changed, and the running host is not stale")
+	}
+}
+
+func TestTerminalRemovalRetiresTheLastHost(t *testing.T) {
+	sandbox(t)
+	defer ListInBackground(ListInBackground(false))
+	if err := os.MkdirAll(filepath.Dir(listPath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec := refreshAbsPath(t, "testdata/fake/index.js")
+	refreshWriteList(t, spec)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	first, err := get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := generation.Load()
+	noticing := make(chan struct{})
+	go func() {
+		defer close(noticing)
+		KeepNoticing(ctx, func() time.Duration { return 10 * time.Millisecond })
+	}()
+	defer func() { cancel(); <-noticing }()
+
+	writeList(t, `{"plugins":[`)
+	filememo.Forget()
+	waitFor(t, "the damaged list to be noticed", hostStale.Load)
+	if !first.alive() {
+		t.Fatal("the host was retired from an unreadable list")
+	}
+
+	writeList(t, `{"plugins":[]}`)
+	filememo.Forget()
+	select {
+	case <-first.dead:
+	case <-ctx.Done():
+		t.Fatal("the last host did not retire after the terminal removed its plugin")
+	}
+	if Running() || generation.Load() != before {
+		t.Fatal("removing the last plugin started a replacement host")
+	}
+	refreshWriteList(t, spec)
+	filememo.Forget()
+	ps, err := Providers(ctx)
+	if err != nil || len(ps) != 1 || ps[0].ID != "fakeco" || generation.Load() == before {
+		t.Fatalf("the reinstalled plugin did not start a new host: providers=%+v err=%v", ps, err)
 	}
 }

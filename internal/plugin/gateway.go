@@ -259,7 +259,7 @@ func GatewayBegin(ctx context.Context, body []byte, info GatewayContext) *Gatewa
 		hostMu.Unlock()
 		return nil
 	}
-	h, err := getLocked(start)
+	h, err := getLocked(start, false)
 	hostMu.Unlock()
 	if err != nil || start.Err() != nil {
 		return nil
@@ -357,7 +357,7 @@ func GatewaySignIn(ctx context.Context, ev SignInEvent) {
 		if hostMu.LockCtx(start) != nil {
 			return
 		}
-		h, err := getLocked(start)
+		h, err := getLocked(start, false)
 		hostMu.Unlock()
 		if err != nil {
 			return

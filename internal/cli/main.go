@@ -405,6 +405,9 @@ func runWithRestart(args []string, beforeRestart func()) error {
 	// files written, which its save no longer waits for; and a test's run
 	// leaves the catalog change hook as it found it
 	was := catalog.ChangedHook()
+	if servesPages(args) {
+		defer plugin.RequireBackgroundListingOwner()()
+	}
 	// a command that does its work and ends asks no plugin for its list
 	// in the background: that ask started a plugin host the command left
 	// behind as it exited, beside the running gateway's (#7146)
