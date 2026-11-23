@@ -35,7 +35,10 @@ func (t *idTidy) flush() []byte {
 
 func (t *idTidy) event(ev []byte) []byte {
 	data := eventData(ev)
-	if len(data) == 0 || !gjson.ValidBytes(data) {
+	if len(data) == 0 || len(t.ids) == 0 && getIn(data, "type").Str != "response.output_item.added" {
+		return ev
+	}
+	if !gjson.ValidBytes(data) {
 		return ev
 	}
 	e := gjson.ParseBytes(data)
