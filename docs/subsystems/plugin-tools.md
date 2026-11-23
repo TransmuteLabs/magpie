@@ -35,11 +35,15 @@ uses the existing leased `auth.refresh` transaction before the tool runs.
 Only the durable, exact refresh successor with usable expiry is adopted;
 manual credential replacements do not transfer the old call's authority.
 The selected package, configuration, enablement generation, account and network
-policy are checked again after the worker queue opens, at acceptance and
-before successful result publication. The selected effective configuration
-must match the worker and the current settings, including after a file
-replacement that preserves the CAS version. Reordering equivalent settings
-keeps the selection valid. A refusal after the queue leaves a
+policy are checked again when the worker's input writer can take the call,
+at acceptance and before successful result publication. At handoff the host
+checks the selected account, credentials and subscription owner together
+with the active worker configuration under the catalog and Store locks.
+It reads current login, discovery and proxy policy after any lock wait.
+The input writer starts the frame after the locks are released. The selected
+effective configuration must match the worker and current settings, including
+after a replacement that preserves the CAS version. Reordering equivalent
+settings keeps the selection valid. A refusal after the queue leaves a
 `not-started` receipt before the worker receives the tool call. Disabling and
 re-enabling a module revokes a prepared call even
 when its package and configuration stay the same. Disabled, paused or held
@@ -50,6 +54,10 @@ concurrent rotating exchange and revocation controls are exercised by
 `TestExtensionToolExpiryPreflight*` in the gateway package.
 `TestExtensionToolAccountRecheckedAfterWorkerQueue` checks interleaved login,
 credential, configuration and discovery changes through MCP `tools/call`.
+`TestExtensionToolAccountRecheckedAfterStdinDrains` also holds the worker's
+input pipe after its slots are available.
+`TestExtensionToolHandoffRechecksAuthorityAfterStoreWait` changes the account,
+policy or configuration after the tool reaches the writer.
 `TestExtensionToolPublicationKeepsSelectedAuthority` holds actual worker replies
 across revocation on MCP and both Library paths. The shared `Lease.Call` result
 check runs before usage/result publication and completed journaling; a revoked

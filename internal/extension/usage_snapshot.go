@@ -79,12 +79,16 @@ func (m *Manager) UsageSnapshot(ctx context.Context, scopes []sdk.Scope) (UsageS
 }
 
 func (m *Manager) withCatalogStoreRead(ctx context.Context, read func(context.Context, catalogView, *os.Root) error) error {
+	return m.withCatalogStore(ctx, false, read)
+}
+
+func (m *Manager) withCatalogStore(ctx context.Context, requireStoreLock bool, read func(context.Context, catalogView, *os.Root) error) error {
 	attempt := func(lockCtx context.Context) error {
 		return m.catalog.withLockedViewContext(ctx, lockCtx, func(view catalogView) error {
 			if err := lockCtx.Err(); err != nil {
 				return err
 			}
-			if err := m.store.withReadPrivate(ctx, false, func(private *os.Root) error {
+			if err := m.store.withReadPrivate(ctx, false, requireStoreLock, func(private *os.Root) error {
 				return read(ctx, view, private)
 			}); err != nil {
 				return err

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -194,9 +196,237 @@ func TestExtensionToolAccountRecheckedAfterWorkerQueue(test *testing.T) {
 	}
 }
 
+func TestExtensionToolAccountRecheckedAfterStdinDrains(test *testing.T) {
+	worker := buildToolRefreshWorker(test)
+	for _, change := range []string{"same CAS configuration", "reordered configuration"} {
+		test.Run(change, func(test *testing.T) {
+			fixture := installRefreshFixture(test, worker, sdk.FullContract().Version.Minor, time.Hour, nil)
+			ctx, cancel := context.WithTimeout(test.Context(), 20*time.Second)
+			var requests sync.WaitGroup
+			defer func() {
+				cancel()
+				requests.Wait()
+			}()
+			if _, err := fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
+				test.Fatal(err)
+			}
+			resume := stallRefreshInput(test, ctx, fixture)
+			requestID := randomToken()
+			ctx = extension.WithRequestMetadata(ctx, extension.RequestMetadata{Plugin: fixture.scope.Plugin, RequestID: requestID})
+			scope := fixture.scope
+			identity, _ := json.Marshal([]string{scope.Plugin, scope.Provider, scope.Account, "", "", requestID})
+			scope.Operation, scope.Attempt = fmt.Sprintf("request-%x", sha256.Sum256(identity)), 1
+			request := httptest.NewRequest(http.MethodPost, ToolsMCPPath, strings.NewReader(toolsCall(fixture.tool.name, string(refreshToolArgs)))).WithContext(ctx)
+			request.RemoteAddr, request.Host = "127.0.0.1:50000", "127.0.0.1:3425"
+			request.Header.Set("Content-Type", "application/json")
+			handler := lanGuard(New().Handler())
+			result := make(chan *httptest.ResponseRecorder, 1)
+			requests.Go(func() {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				result <- response
+			})
+			stacks := make([]byte, 1<<20)
+			waitToolRefreshPhase(test, ctx, "account tool waiting to write to stdin", func() bool {
+				for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
+					header, _, _ := bytes.Cut(stack, []byte("\n"))
+					if bytes.Contains(header, []byte("[select]")) &&
+						bytes.Contains(stack, []byte("(*Server).toolsMCPRun(")) &&
+						(bytes.Contains(stack, []byte("(*workerClient).send(")) ||
+							bytes.Contains(stack, []byte("(*workerClient).reserveWrite("))) {
+						return true
+					}
+				}
+				return false
+			})
+			receipt, err := fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
+			if err != nil || receipt.Scope != scope || receipt.State != "dispatched" || fixture.toolCalls.Load() != 0 {
+				test.Fatalf("tool did not wait before dispatch: %+v, %d calls: %v", receipt, fixture.toolCalls.Load(), err)
+			}
+			replaceToolConfigAtSameVersion(test, fixture, change)
+			resume()
+			successful := change == "reordered configuration"
+			select {
+			case response := <-result:
+				reply := readMCP(test, response)
+				if reply.Result.IsError == successful {
+					test.Errorf("unexpected MCP outcome: %s", response.Body)
+				}
+			case <-ctx.Done():
+				test.Fatal("account tool did not finish after stdin drained")
+			}
+			wantCalls, wantState := int32(0), "not-started"
+			if successful {
+				wantCalls, wantState = 1, "completed"
+			}
+			receipt, err = fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
+			if err != nil || receipt.Scope != scope || receipt.State != wantState ||
+				fixture.toolCalls.Load() != wantCalls || fixture.refreshes.Load() != 0 {
+				test.Fatalf("tool sent %d RPCs and %d refreshes, journaled %q; want %d RPCs, 0 refreshes and %q: %v",
+					fixture.toolCalls.Load(), fixture.refreshes.Load(), receipt.State, wantCalls, wantState, err)
+			}
+		})
+	}
+}
+
+func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
+	worker := buildToolRefreshWorker(test)
+	for _, change := range []string{
+		"unchanged", "account signed out", "same generation credentials", "login off", "discovery off",
+		"same CAS configuration", "reordered configuration",
+	} {
+		test.Run(change, func(test *testing.T) {
+			fixture := installRefreshFixture(test, worker, sdk.FullContract().Version.Minor, time.Hour, nil)
+			ctx, cancel := context.WithTimeout(test.Context(), 20*time.Second)
+			var requests sync.WaitGroup
+			original := runExtensionPluginTool
+			defer func() {
+				cancel()
+				requests.Wait()
+				runExtensionPluginTool = original
+			}()
+			if _, err := fixture.manager.CompareAndSwapModuleConfig(ctx, fixture.scope.Plugin, "0", json.RawMessage(toolConfigOriginal)); err != nil {
+				test.Fatal(err)
+			}
+			entry, config, err := fixture.manager.ActiveModuleConfig(ctx, fixture.scope.Plugin)
+			if err != nil {
+				test.Fatal(err)
+			}
+			selection, err := extension.NewToolAccountSelection(fixture.manager.Namespace(), entry, config)
+			if err != nil {
+				test.Fatal(err)
+			}
+			resume := stallRefreshInput(test, ctx, fixture)
+			reached := make(chan sdk.Scope, 1)
+			proceed := make(chan struct{})
+			runExtensionPluginTool = func(current context.Context, spec, name string, args json.RawMessage) (sdk.ToolResult, error) {
+				scope := extension.ToolScopeFrom(current)
+				var checks atomic.Int32
+				current = extension.WithToolAccountCheck(current, selection, func(admission context.Context) error {
+					if checks.Add(1) != 2 {
+						return nil
+					}
+					reached <- scope
+					select {
+					case <-proceed:
+						return nil
+					case <-admission.Done():
+						return admission.Err()
+					}
+				})
+				return original(current, spec, name, args)
+			}
+			result := make(chan error, 1)
+			ctx = extension.WithRequestMetadata(ctx, extension.RequestMetadata{Plugin: fixture.scope.Plugin, RequestID: test.Name()})
+			requests.Go(func() {
+				_, err := fixture.run(ctx, refreshToolArgs)
+				result <- err
+			})
+			waitToolGatewayStack(test, ctx, "tool queued at the stdin writer", "(*workerClient).reserveWrite(")
+			resume()
+			var scope sdk.Scope
+			select {
+			case scope = <-reached:
+			case err := <-result:
+				test.Fatalf("tool finished before final admission: %v", err)
+			case <-ctx.Done():
+				test.Fatal("tool never reached final admission")
+			}
+			receipt, err := fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
+			if err != nil || receipt.Scope != scope || receipt.State != "dispatched" || fixture.toolCalls.Load() != 0 {
+				test.Fatalf("tool did not reach the pre-write fence: %+v, %d calls: %v", receipt, fixture.toolCalls.Load(), err)
+			}
+			switch change {
+			case "account signed out":
+				peer := extension.NewManager(fixture.manager.Namespace())
+				test.Cleanup(func() { _ = peer.Close(context.Background()) })
+				if err := peer.DeleteSubscriptionAccount(ctx, scope, ""); err != nil {
+					test.Fatal(err)
+				}
+			case "login off":
+				if err := provider.SetLoginOn(provider.ExtensionProviderID(scope.Plugin, scope.Provider), scope.Account, false); err != nil {
+					test.Fatal(err)
+				}
+			}
+			private := filepath.Join(fixture.manager.Namespace(), "private")
+			release, held := filelock.Lock(filepath.Join(private, ".lock"), time.Second)
+			if !held {
+				test.Fatal("could not take the fixture's private Store lock")
+			}
+			release = sync.OnceFunc(release)
+			defer release()
+			close(proceed)
+			waitToolGatewayStack(test, ctx, "tool waiting for the private Store after policy check", "storeWaitLock(")
+			switch change {
+			case "same generation credentials":
+				path := filepath.Join(private, scope.Plugin, "accounts.json")
+				before, err := os.ReadFile(path)
+				if err != nil {
+					test.Fatal(err)
+				}
+				after := bytes.Replace(before, []byte("synthetic-original"), []byte("synthetic-replaced"), 1)
+				if bytes.Equal(before, after) {
+					test.Fatal("fixture credentials were missing")
+				}
+				writeToolHandoffReplacement(test, path, after)
+			case "discovery off":
+				current := settings.Load()
+				current.NoAccountDiscovery = true
+				if err := settings.Save(current); err != nil {
+					test.Fatal(err)
+				}
+			case "same CAS configuration", "reordered configuration":
+				replaceToolConfigFileAtSameVersion(test, fixture, change)
+			}
+			release()
+			err = <-result
+			wantCalls, wantState := int32(0), "not-started"
+			if change == "unchanged" || change == "reordered configuration" {
+				wantCalls, wantState = 1, "completed"
+				if err != nil {
+					test.Errorf("valid tool was refused: %v", err)
+				}
+			} else {
+				var outcome *extension.OutcomeError
+				if !errors.As(err, &outcome) || outcome.Outcome != wantState {
+					test.Errorf("revoked tool: got %v, want %s", err, wantState)
+				}
+			}
+			receipt, err = fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
+			if err != nil || receipt.Scope != scope || receipt.State != wantState ||
+				fixture.toolCalls.Load() != wantCalls || fixture.refreshes.Load() != 0 {
+				test.Fatalf("tool sent %d RPCs and %d refreshes, journaled %q; want %d RPCs, 0 refreshes and %q: %v",
+					fixture.toolCalls.Load(), fixture.refreshes.Load(), receipt.State, wantCalls, wantState, err)
+			}
+		})
+	}
+}
+
+func waitToolGatewayStack(test *testing.T, ctx context.Context, phase, frame string) {
+	test.Helper()
+	stacks := make([]byte, 1<<20)
+	waitToolRefreshPhase(test, ctx, phase, func() bool {
+		for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
+			if bytes.Contains(stack, []byte("(*Server).toolsMCPRun(")) && bytes.Contains(stack, []byte(frame)) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 const toolConfigOriginal = `{"mode":"fast","limit":1}`
 
 func replaceToolConfigAtSameVersion(test *testing.T, fixture *toolRefreshFixture, change string) {
+	test.Helper()
+	replacement := replaceToolConfigFileAtSameVersion(test, fixture, change)
+	config, err := fixture.manager.ModuleConfig(test.Context(), fixture.scope.Plugin)
+	if err != nil || config.Version != "1" || string(config.Values) != replacement {
+		test.Fatalf("replacement configuration was not read at CAS 1: %+v, %v", config, err)
+	}
+}
+
+func replaceToolConfigFileAtSameVersion(test *testing.T, fixture *toolRefreshFixture, change string) string {
 	test.Helper()
 	directory := filepath.Join(fixture.manager.Namespace(), "private", fixture.scope.Plugin, "state")
 	entries, err := os.ReadDir(directory)
@@ -220,6 +450,20 @@ func replaceToolConfigAtSameVersion(test *testing.T, fixture *toolRefreshFixture
 	if bytes.Equal(body, original) || len(body) != len(original) {
 		test.Fatal("configuration replacement did not preserve size")
 	}
+	writeToolHandoffReplacement(test, path, body)
+	replaced, err := os.Stat(path)
+	if err != nil || os.SameFile(info, replaced) || replaced.Size() != info.Size() || !replaced.ModTime().Equal(info.ModTime()) {
+		test.Fatalf("replacement did not preserve stamp or change file identity: %v, %v", replaced, err)
+	}
+	return replacement
+}
+
+func writeToolHandoffReplacement(test *testing.T, path string, body []byte) {
+	test.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		test.Fatal(err)
+	}
 	next := path + ".replacement"
 	if err := os.WriteFile(next, body, 0600); err != nil {
 		test.Fatal(err)
@@ -229,13 +473,5 @@ func replaceToolConfigAtSameVersion(test *testing.T, fixture *toolRefreshFixture
 	}
 	if err := os.Rename(next, path); err != nil {
 		test.Fatal(err)
-	}
-	replaced, err := os.Stat(path)
-	if err != nil || os.SameFile(info, replaced) || replaced.Size() != info.Size() || !replaced.ModTime().Equal(info.ModTime()) {
-		test.Fatalf("replacement did not preserve stamp or change file identity: %v, %v", replaced, err)
-	}
-	config, err := fixture.manager.ModuleConfig(test.Context(), fixture.scope.Plugin)
-	if err != nil || config.Version != "1" || string(config.Values) != replacement {
-		test.Fatalf("replacement configuration was not read at CAS 1: %+v, %v", config, err)
 	}
 }

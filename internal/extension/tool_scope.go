@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -41,9 +42,104 @@ func checkLeasedTool(ctx context.Context, lease *Lease, params any) (context.Con
 	return ctx, errors.New("extension tool is outside the executing generation's declaration")
 }
 
+func (lease *Lease) toolWritePreparation(ctx context.Context, method string, scope sdk.Scope, auth json.RawMessage) *workerCallPreparation {
+	if method != sdk.MethodToolCall || scope.Account == "" {
+		return nil
+	}
+	selected, ok := ctx.Value(toolAccountCheckKey{}).(ToolAccountSelection)
+	if !ok {
+		return nil
+	}
+	return &workerCallPreparation{
+		admit: func(current context.Context, commit func() error) error {
+			if err := checkWindowAdmission(current); err != nil {
+				return err
+			}
+			return lease.admitToolHandoff(current, selected, scope, auth, commit)
+		},
+		begin: func(current context.Context) error {
+			return current.Err()
+		},
+	}
+}
+
+func (lease *Lease) admitToolHandoff(ctx context.Context, selected ToolAccountSelection, scope sdk.Scope, auth json.RawMessage, commit func() error) error {
+	manager := lease.manager
+	if manager.isClosed() {
+		return errContributionRevoked
+	}
+	return manager.withCatalogStore(ctx, true, func(current context.Context, view catalogView, private *os.Root) error {
+		entry, found := view.lookup(scope.Plugin)
+		if !found || !activeRoot(entry) {
+			return errContributionRevoked
+		}
+		entry = view.enabledEntry(entry)
+		if !activeRoot(entry) {
+			return errContributionRevoked
+		}
+		if !selected.matches(entry) {
+			return errors.New("extension tool package or enablement changed")
+		}
+		if err := readStoreNamespace(current, private, savedSignInsDir, func(root *os.Root) error {
+			owners, err := manager.store.readSubscriptionOwners(root)
+			if err != nil {
+				return err
+			}
+			return checkSubscriptionOwner(current, scope, owners)
+		}); err != nil {
+			return err
+		}
+		return readStoreNamespace(current, private, scope.Plugin, func(root *os.Root) error {
+			config := sdk.ConfigSnapshot{Version: "0", Values: json.RawMessage(`{}`)}
+			if entry.Manifest.Contract.Version.Minor >= 1 {
+				state, err := storeReadState(root, sdk.Scope{Plugin: scope.Plugin}, moduleConfigKey)
+				if err != nil {
+					return err
+				}
+				config, err = manager.runtimeModuleConfigValue(entry, state.VersionedValue)
+				if err != nil {
+					return err
+				}
+			}
+			if !sameModuleConfig(config, selected.config) {
+				return errors.New("extension tool configuration changed")
+			}
+			records, err := manager.store.readAccounts(root, scope.Plugin)
+			if err != nil {
+				return err
+			}
+			index := refreshIndex(records, scope)
+			if index < 0 || records.Accounts[index].Deleted {
+				return storeError("not_found", "Extension tool account is unavailable.")
+			}
+			account := records.Accounts[index]
+			if account.Generation != scope.Generation || !sameToolHandoffAuth(account.Auth, auth) {
+				return storeError("stale_generation", "Extension tool account changed before dispatch.")
+			}
+			if check, ok := current.Value(toolHandoffPolicyKey{}).(func(context.Context) error); ok {
+				if err := check(current); err != nil {
+					return err
+				}
+			}
+			return commit()
+		})
+	})
+}
+
+func sameToolHandoffAuth(current, selected json.RawMessage) bool {
+	if bytes.Equal(current, selected) {
+		return true
+	}
+	currentWire, currentErr := json.Marshal(current)
+	selectedWire, selectedErr := json.Marshal(selected)
+	return currentErr == nil && selectedErr == nil && bytes.Equal(currentWire, selectedWire)
+}
+
 type toolScopeKey struct{}
 
 type toolAccountCheckKey struct{}
+
+type toolHandoffPolicyKey struct{}
 
 type ToolAccountSelection struct {
 	namespace        string
@@ -104,6 +200,10 @@ func WithToolAccountCheck(ctx context.Context, selected ToolAccountSelection, ch
 		return check(current)
 	})
 	return context.WithValue(ctx, toolAccountCheckKey{}, selected)
+}
+
+func WithToolHandoffPolicy(ctx context.Context, check func(context.Context) error) context.Context {
+	return context.WithValue(ctx, toolHandoffPolicyKey{}, check)
 }
 
 // WithToolScope carries authority resolved by the host for one tool call.

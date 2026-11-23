@@ -726,7 +726,7 @@ func (c *workerClient) callWithAdmission(ctx context.Context, method string, sco
 			c.finishAdmission(pending, release, dispatched)
 		}
 	}()
-	if prepare != nil {
+	if prepare != nil && prepare.auth != nil {
 		auth, err = prepare.auth(ctx)
 		if err != nil {
 			return nil, &OutcomeError{Outcome: "not-started", Cause: err}

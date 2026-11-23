@@ -257,10 +257,10 @@ func (s *Store) withReadStoreContext(ctx context.Context, name string, read func
 }
 
 func (s *Store) withReadPrivateContext(ctx context.Context, read func(*os.Root) error) error {
-	return s.withReadPrivate(ctx, true, read)
+	return s.withReadPrivate(ctx, true, false, read)
 }
 
-func (s *Store) withReadPrivate(ctx context.Context, wait bool, read func(*os.Root) error) error {
+func (s *Store) withReadPrivate(ctx context.Context, wait, requireLock bool, read func(*os.Root) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -269,6 +269,9 @@ func (s *Store) withReadPrivate(ctx context.Context, wait bool, read func(*os.Ro
 	}
 	root, err := storeRoot(s.root, false)
 	if errors.Is(err, os.ErrNotExist) {
+		if requireLock {
+			return storeUnreadable()
+		}
 		return read(nil)
 	}
 	if err != nil {
@@ -277,6 +280,9 @@ func (s *Store) withReadPrivate(ctx context.Context, wait bool, read func(*os.Ro
 	defer root.Close()
 	private, err := storeOpenDirectory(root, "private", false)
 	if errors.Is(err, os.ErrNotExist) {
+		if requireLock {
+			return storeUnreadable()
+		}
 		return read(nil)
 	}
 	if err != nil {
@@ -286,6 +292,9 @@ func (s *Store) withReadPrivate(ctx context.Context, wait bool, read func(*os.Ro
 
 	lock, info, err := storeOpenReadFile(private, ".lock", -1)
 	if errors.Is(err, os.ErrNotExist) {
+		if requireLock {
+			return storeUnreadable()
+		}
 		readErr := read(private)
 		if err := ctx.Err(); err != nil {
 			return err

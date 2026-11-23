@@ -746,11 +746,15 @@ func subscriptionJournalRevision(ctx context.Context, base string) string {
 }
 
 func (s *Store) checkSubscriptionView(ctx context.Context, scope sdk.Scope) error {
-	expected, _ := SubscriptionOwnerRevision(ctx)
 	rows, err := s.SubscriptionOwners(ctx)
 	if err != nil {
 		return err
 	}
+	return checkSubscriptionOwner(ctx, scope, rows)
+}
+
+func checkSubscriptionOwner(ctx context.Context, scope sdk.Scope, rows []SubscriptionOwner) error {
+	expected, _ := SubscriptionOwnerRevision(ctx)
 	for _, r := range rows {
 		if r.Module != scope.Plugin || r.Provider != scope.Provider {
 			continue

@@ -119,6 +119,16 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	}
 	ctx = network
 	choice, networkSelected = netproxy.Choice(ctx), true
+	checkSelectedPolicy := func(current context.Context, target sdk.Scope) error {
+		proxy, err := checkPolicy(current, target)
+		if err != nil {
+			return err
+		}
+		if proxy != choice {
+			return errors.New("extension tool network policy changed")
+		}
+		return nil
+	}
 	account, err := host.Store().RefreshedAccountContext(ctx, scope)
 	if err != nil {
 		return fail(err)
@@ -144,14 +154,7 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 		}
 		refreshScope := scope
 		refresh := extensionhost.WithToolRefreshCheck(ctx, runtimeSelection, func(current context.Context) error {
-			proxy, err := checkPolicy(current, refreshScope)
-			if err != nil {
-				return err
-			}
-			if proxy != choice {
-				return errors.New("extension tool network policy changed")
-			}
-			return nil
+			return checkSelectedPolicy(current, refreshScope)
 		})
 		if _, err := lease.Call(refresh, sdk.MethodAuthRefresh, refreshScope, sdk.AuthRefreshRequest{}, nil); err != nil {
 			return fail(err)
@@ -182,6 +185,9 @@ func PrepareExtensionAccountScope(ctx context.Context, scope sdk.Scope) (context
 	if err := admit(ctx); err != nil {
 		return fail(err)
 	}
+	ctx = extensionhost.WithToolHandoffPolicy(ctx, func(current context.Context) error {
+		return checkSelectedPolicy(current, scope)
+	})
 	return extensionhost.WithToolAccountCheck(ctx, runtimeSelection, admit), scope, nil
 }
 
