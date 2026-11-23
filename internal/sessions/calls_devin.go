@@ -168,7 +168,20 @@ type devinMessage struct {
 func readDevinCalls(f file) (*callFile, bool) {
 	st := &callFile{Agent: "devin", Path: f.path, Session: strings.TrimPrefix(f.key, "devin:")}
 	var cwd string
-	var msgs [][]byte
+	seen := map[string]bool{}
+	consume := func(b []byte) {
+		var m devinMessage
+		if json.Unmarshal(b, &m) != nil {
+			return
+		}
+		c, ok := devinCall(st, m)
+		if !ok || seen[c.Msg] {
+			return
+		}
+		seen[c.Msg] = true
+		c.Cwd = st.str(cwd)
+		st.Calls = append(st.Calls, c)
+	}
 	if i := strings.LastIndex(f.path, "#"); i >= 0 && !strings.HasSuffix(f.path, ".jsonl") {
 		path, sid := f.path[:i], f.path[i+1:]
 		if st.Session == "" {
@@ -185,7 +198,7 @@ func readDevinCalls(f file) (*callFile, bool) {
 			for rows.Next() {
 				var b []byte
 				if rows.Scan(&b) == nil {
-					msgs = append(msgs, b)
+					consume(b)
 				}
 			}
 		})
@@ -193,8 +206,8 @@ func readDevinCalls(f file) (*callFile, bool) {
 			return st, false
 		}
 	} else {
-		var ok bool
-		if msgs, ok = devinLogMessages(f.path); !ok {
+		msgs, ok := devinLogMessages(f.path)
+		if !ok {
 			return st, false
 		}
 		var meta struct {
@@ -206,20 +219,9 @@ func readDevinCalls(f file) (*callFile, bool) {
 		if st.Session == "" {
 			st.Session = filepath.Base(filepath.Dir(f.path))
 		}
-	}
-	seen := map[string]bool{}
-	for _, b := range msgs {
-		var m devinMessage
-		if json.Unmarshal(b, &m) != nil {
-			continue
+		for _, b := range msgs {
+			consume(b)
 		}
-		c, ok := devinCall(st, m)
-		if !ok || seen[c.Msg] {
-			continue
-		}
-		seen[c.Msg] = true
-		c.Cwd = st.str(cwd)
-		st.Calls = append(st.Calls, c)
 	}
 	sort.SliceStable(st.Calls, func(i, j int) bool { return st.Calls[i].Time.Before(st.Calls[j].Time) })
 	return st, true
