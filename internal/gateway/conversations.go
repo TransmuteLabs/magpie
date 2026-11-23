@@ -135,9 +135,8 @@ func conversationTurn(proto provider.Protocol, input, output []byte) sessions.Ga
 		}
 		// Keep tool definitions as context, including native tools the IR may
 		// not translate; never render embedded images or execute their content.
-		var raw map[string]json.RawMessage
-		if json.Unmarshal(input, &raw) == nil && len(raw["tools"]) > 0 {
-			t.Input = append(t.Input, sessions.Part{Role: "system", Kind: "context", Name: "Tools", Text: string(raw["tools"])})
+		if tools, found, _ := topMember(input, "tools"); found {
+			t.Input = append(t.Input, sessions.Part{Role: "system", Kind: "context", Name: "Tools", Text: string(tools)})
 		}
 		for _, m := range q.Messages {
 			t.Input = append(t.Input, conversationParts(m.Role, m.Parts)...)

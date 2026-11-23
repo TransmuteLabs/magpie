@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,35 @@ func TestGatewayConversationProtocols(t *testing.T) {
 			b, _ := json.Marshal(turn.Output)
 			if turn.Cut || !strings.Contains(string(b), tc.want) {
 				t.Fatalf("parsed: %+v", turn)
+			}
+		})
+	}
+}
+
+func TestGatewayConversationKeepsScrubbedToolDefinitions(t *testing.T) {
+	const output = `{"choices":[{"message":{"role":"assistant","content":"answer"}}]}`
+	const tool = `[ {"type":"function","function":{"name":"latest","parameters":{"password":"private-value"}}} ]`
+	const scrubbedTool = `[ {"type":"function","function":{"name":"latest","parameters":{"password":"[REDACTED]"}}} ]`
+	for _, scenario := range []struct {
+		name, members, want string
+	}{
+		{"last exact key", `"tools":[],"to\u006fls":` + tool + `,"Tools":[]`, scrubbedTool},
+		{"case sensitive", `"Tools":` + tool, ""},
+		{"explicit null", `"tools":null`, "null"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			input := `{"messages":[{"role":"user","content":"question"}],` + scenario.members + `}`
+			turn := conversationTurn(provider.Chat, []byte(input), []byte(output))
+			if turn.Cut || len(turn.Output) != 1 || turn.Output[0].Text != "answer" {
+				t.Fatalf("unexpected reply: %+v", turn)
+			}
+			var want []sessions.Part
+			if scenario.want != "" {
+				want = append(want, sessions.Part{Role: "system", Kind: "context", Name: "Tools", Text: scenario.want})
+			}
+			want = append(want, sessions.Part{Role: "user", Text: "question", Kind: "text"})
+			if !slices.Equal(turn.Input, want) {
+				t.Fatalf("recorded input = %+v, want %+v", turn.Input, want)
 			}
 		})
 	}
