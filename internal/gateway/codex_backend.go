@@ -2752,8 +2752,8 @@ func codexInputAs(body []byte, magpieModel, native bool) (_ []byte, compact bool
 	if !anyInputItem(body, func(it []byte) bool { return codexInputItemChanges(it, magpieModel, native) }) {
 		return body, false
 	}
-	var q map[string]json.RawMessage
-	if json.Unmarshal(body, &q) != nil {
+	q, borrowed := heldRawObjectView(body)
+	if !borrowed && json.Unmarshal(body, &q) != nil {
 		return body, false
 	}
 	var items []map[string]any

@@ -471,6 +471,18 @@ func rawObject(data []byte) (map[string]json.RawMessage, error) {
 	return m, err
 }
 
+func heldRawObjectView(data []byte) (map[string]json.RawMessage, bool) {
+	entry := heldJSONProof(data)
+	if entry.members == nil {
+		return nil, false
+	}
+	var fields map[string]json.RawMessage
+	if fillJSONIn(trimJSON(data), reflect.ValueOf(&fields).Elem(), entry.members, true) != nil {
+		return nil, false
+	}
+	return fields, true
+}
+
 // rawArray is json.Unmarshal(data, &a) for a a []json.RawMessage.
 func rawArray(data []byte) ([]json.RawMessage, error) {
 	var a []json.RawMessage
@@ -900,13 +912,20 @@ func validHash(data []byte) uint64 {
 var validHashed atomic.Pointer[func(data []byte)]
 
 func heldJSONKnownValid(data []byte) bool {
+	return heldJSONProof(data).valid
+}
+
+func heldJSONProof(data []byte) heldLong {
 	if len(data) < validMemoMin {
-		return false
+		return heldLong{}
 	}
 	heldBodies.Lock()
 	entry := heldBodies.long[unsafe.SliceData(data)]
 	heldBodies.Unlock()
-	return entry.valid && entry.n == len(data)
+	if !entry.valid || entry.n != len(data) {
+		return heldLong{}
+	}
+	return entry
 }
 
 // heldLongOf is what longBody finds of data when data is a body being
