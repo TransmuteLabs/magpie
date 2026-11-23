@@ -330,8 +330,9 @@ linked `MemoryOwner`.
 - A turn counts by what the user said, a user `text` part. WorkBuddy
   and its WorkBuddy AI and CodeBuddy Code variants write each turn as one
   block with a `<system-reminder data-role="user-context">` followed by
-  a `<user_query>`. `wbTyped` reads the query after the reminder's closing
-  line and keeps the reminder as context, including any tags inside it.
+  a `<user_query>`. `wbTyped` reads the query after the reminder's outer
+  closing line and keeps quoted boundaries within reminder sections as
+  context. An incomplete or ambiguous reminder remains context.
   Native WorkBuddy-family files and recordings attributed to those agents
   use that split for transcripts and titles. Ordinary input keeps its
   literal text (`TestWorkBuddyOneBlockTurnsAreSaid`, `TestGatewayOneBlockTurnSaid`).

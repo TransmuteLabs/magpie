@@ -429,6 +429,9 @@ func firstAsked(agent string, parts []Part) string {
 		if s == "" || strings.HasPrefix(s, "<") || strings.HasPrefix(s, "# AGENTS.md") || s == "[image]" {
 			continue
 		}
+		if buddy {
+			return title(s)
+		}
 		if t := untagged(s); t != "" {
 			return t
 		}

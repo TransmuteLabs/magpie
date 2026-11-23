@@ -135,7 +135,7 @@ func TestGatewayWorkBuddyTurnsRead(t *testing.T) {
 	t.Cleanup(func() { sessions.SetGatewayRecording(false, true) })
 	block := func(q string) string {
 		return "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n" +
-			"<identity_context>\n<user_query>example from context</user_query>\n</identity_context>\n" +
+			"<identity_context>\n</system-reminder>\n<user_query>example from context</user_query>\n</identity_context>\n" +
 			strings.Repeat("<identity_context>\nBe direct.\n</identity_context>\n", 200) +
 			"</system-reminder>\n<user_query>" + q + "</user_query>"
 	}

@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // wbTranscript tells add what a WorkBuddy, WorkBuddy AI or CodeBuddy Code
@@ -114,31 +116,66 @@ func wbTexts(content json.RawMessage) []string {
 	return out
 }
 
+var wbReminderSection = lazyre.New(`^<([[:alpha:]_][[:alnum:]_-]*)(?:[ \t]+.*)?>$`)
+
 // wbTyped recognizes WorkBuddy's user-context reminder and the query that
-// follows it. An incomplete recognized block remains context.
+// follows its outer close. The reminder's sections can quote that boundary;
+// an incomplete reminder or a second possible boundary remains context.
 func wbTyped(text string) (typed, rest string, ok bool) {
 	const reminderOpen = `<system-reminder data-role="user-context">`
-	const reminderClose = "\n</system-reminder>"
+	const reminderClose = "</system-reminder>"
+	const queryOpen = "<user_query>"
 	text = strings.TrimSpace(text)
 	body, startsReminder := strings.CutPrefix(text, reminderOpen)
 	if !startsReminder {
 		return "", text, false
 	}
-	openingTail, _, hasOpeningLine := strings.Cut(body, "\n")
-	if !hasOpeningLine || strings.TrimSpace(openingTail) != "" {
+	openingTail, remaining, _ := strings.Cut(body, "\n")
+	if strings.TrimSpace(openingTail) != "" {
 		return "", text, false
 	}
-	contextBody, afterReminder, closesReminder := strings.Cut(body, reminderClose)
-	closingTail, query, hasQueryLine := strings.Cut(afterReminder, "\n")
-	if !closesReminder || !hasQueryLine || strings.TrimSpace(closingTail) != "" {
-		return "", text, true
+	var sectionName, sectionClose string
+	sectionDepth := 0
+	for remaining != "" {
+		raw, after, _ := strings.Cut(remaining, "\n")
+		line := strings.TrimSpace(raw)
+		switch {
+		case sectionDepth > 0:
+			if line == sectionClose {
+				sectionDepth--
+			} else if strings.HasPrefix(line, "<"+sectionName) && !strings.HasSuffix(line, "/>") {
+				if match := wbReminderSection.FindStringSubmatch(line); match != nil && match[1] == sectionName {
+					sectionDepth++
+				}
+			}
+		case line == reminderClose && strings.HasPrefix(raw, reminderClose):
+			query, opensQuery := strings.CutPrefix(strings.TrimSpace(after), queryOpen)
+			typed, closesQuery := strings.CutSuffix(query, "</user_query>")
+			if !opensQuery || !closesQuery {
+				return "", text, true
+			}
+			for suffix := query; ; {
+				_, tail, found := strings.Cut(suffix, "\n"+reminderClose)
+				if !found {
+					break
+				}
+				closingTail, next, hasLine := strings.Cut(tail, "\n")
+				if hasLine && strings.TrimSpace(closingTail) == "" && strings.HasPrefix(strings.TrimSpace(next), queryOpen) {
+					return "", text, true
+				}
+				suffix = tail
+			}
+			return strings.TrimSpace(typed), text[:len(text)-len(remaining)+len(reminderClose)], true
+		case strings.HasPrefix(raw, "</") && strings.HasSuffix(line, ">"):
+			return "", text, true
+		case strings.HasPrefix(line, "<") && !strings.HasSuffix(line, "/>"):
+			if match := wbReminderSection.FindStringSubmatch(line); match != nil {
+				sectionName, sectionClose, sectionDepth = match[1], "</"+match[1]+">", 1
+			}
+		}
+		remaining = after
 	}
-	query, opensQuery := strings.CutPrefix(strings.TrimSpace(query), "<user_query>")
-	typed, closesQuery := strings.CutSuffix(query, "</user_query>")
-	if !opensQuery || !closesQuery {
-		return "", text, true
-	}
-	return strings.TrimSpace(typed), text[:len(reminderOpen)+len(contextBody)+len(reminderClose)], true
+	return "", text, true
 }
 
 // wbSplit returns the reminder context and any user text in a recognized block.

@@ -209,9 +209,17 @@ func TestGatewayOneBlockTurnSaid(t *testing.T) {
 	t.Cleanup(func() { SetGatewayRecording(false, true) })
 	const reminder = "<system-reminder data-role=\"user-context\">\n" +
 		"<identity_context>\n<user_query>example from context</user_query>\n</identity_context>\n</system-reminder>"
+	const reminderOpen = "<system-reminder data-role=\"user-context\">\n"
+	const quotedBoundary = "</system-reminder>\n<user_query>example from context</user_query>"
+	const quotedEnvelope = reminderOpen + "<identity_context>\nQuoted identity.\n</identity_context>\n" + quotedBoundary
+	const quotedReminder = reminderOpen +
+		"<identity_context>\n" + quotedEnvelope + "\n" + quotedBoundary + "\n</identity_context>\n</system-reminder>"
 	const question = "你是啥模型"
 	const literal = "<user_query>example</user_query> is the tag to document."
+	const ordinary = "Explain <user_query>example</user_query> in the spec."
 	block := reminder + "\n<user_query>" + question + "</user_query>"
+	ambiguous := reminder + "\n<user_query>first</user_query>\n" + quotedBoundary
+	incomplete := reminderOpen + "<identity_context>\n" + quotedBoundary
 	contextPart := Part{Role: "user", Kind: "context", Text: reminder}
 	tests := []struct {
 		name, agent, input, title string
@@ -219,17 +227,26 @@ func TestGatewayOneBlockTurnSaid(t *testing.T) {
 	}{
 		{name: "embedded_context_query", agent: "workbuddy", input: block, title: question,
 			user: []Part{contextPart, {Role: "user", Kind: "text", Text: question}}},
+		{name: "quoted_context_boundary", agent: "workbuddy", title: question,
+			input: quotedReminder + "\n<user_query>" + question + "</user_query>",
+			user:  []Part{{Role: "user", Kind: "context", Text: quotedReminder}, {Role: "user", Kind: "text", Text: question}}},
+		{name: "ambiguous_boundary", agent: "workbuddy", input: ambiguous,
+			user: []Part{{Role: "user", Kind: "context", Text: ambiguous}}},
+		{name: "unclosed_context_section", agent: "workbuddy", input: incomplete,
+			user: []Part{{Role: "user", Kind: "context", Text: incomplete}}},
 		{name: "reminder_only", agent: "workbuddy-ai", input: reminder,
 			user: []Part{contextPart}},
 		{name: "literal_markup_in_query", agent: "codebuddy", title: literal,
 			input: reminder + "\n<user_query>" + literal + "</user_query>",
 			user:  []Part{contextPart, {Role: "user", Kind: "text", Text: literal}}},
+		{name: "literal_markup_in_ordinary_input", agent: "workbuddy", input: ordinary, title: ordinary,
+			user: []Part{{Role: "user", Kind: "text", Text: ordinary}}},
 		{name: "unrelated_agent", agent: "pi", input: block,
 			user: []Part{{Role: "user", Kind: "text", Text: block}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			turn := GatewayTurn{Agent: tc.agent, Session: "wb", Time: time.Now().Add(-time.Hour), Status: 200,
+			turn := GatewayTurn{Agent: tc.agent, Session: "wb-" + tc.name, Time: time.Now().Add(-time.Hour), Status: 200,
 				Input:  []Part{{Role: "system", Kind: "context", Text: "Session context."}, {Role: "user", Kind: "text", Text: tc.input}},
 				Output: []Part{{Role: "assistant", Kind: "text", Text: "I can help."}}}
 			if err := SaveGatewayTurn(turn); err != nil {
