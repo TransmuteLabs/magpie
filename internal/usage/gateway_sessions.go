@@ -346,10 +346,20 @@ func foldGateway(snapshot *logSnapshot, meta string, alias func(string) string, 
 	}
 	tail := map[gatewayKey]*gatewayAcc{}
 	countGateway(blocks[cut:], time.Time{}, nil, alias, agents, priceOf, next.built, tail, nil, keep)
-	all := listed(next.built, tail)
-	out := make([]GatewaySession, 0, len(all))
-	for _, s := range all {
-		out = append(out, s)
+	size := len(next.built)
+	for key := range tail {
+		if _, sealed := next.built[key]; !sealed {
+			size++
+		}
+	}
+	out := make([]GatewaySession, 0, size)
+	for key, session := range next.built {
+		if _, updated := tail[key]; !updated {
+			out = append(out, session)
+		}
+	}
+	for _, session := range tail {
+		out = append(out, session.session())
 	}
 	sortGatewaySessions(out)
 	return out, next
