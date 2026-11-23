@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "fixture.m09",
+  "version": "1.0.0",
+  "runtime": "exec",
+  "entry": "worker",
+  "compatibility": {"hostAPI": "^1.20"},
+  "contract": {
+    "version": {"major": 1, "minor": 20},
+    "capabilities": ["outbound-executor", "account-auth"]
+  },
+  "providers": [{
+    "id": "relay",
+    "name": "M09 Responses relay",
+    "maxConcurrency": 32,
+    "protocols": ["responses"],
+    "models": [{
+      "id": "m1",
+      "protocols": ["responses"],
+      "contextWindow": 32768,
+      "maxOutput": 4096
+    }]
+  }]
+}
