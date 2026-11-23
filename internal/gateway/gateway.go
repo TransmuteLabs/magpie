@@ -5058,9 +5058,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			provider.Retire(c.p.ID, c.model)
 		}
 		outgrew := false // a failure that didn't say so was the request's length
+		attemptTokens := -1
 		if !hw.passing && !hw.refused && hw.code() >= 400 {
 			if req, err := parse(from, attemptBody); err == nil {
-				if msg, ok := tooLongUnsaid(c.p, c.model, estimate(req), s.heldOf(c.p.ID, c.model), hw.code(), hw.errBody()); ok {
+				attemptTokens = estimate(req)
+				if msg, ok := tooLongUnsaid(c.p, c.model, attemptTokens, s.heldOf(c.p.ID, c.model), hw.code(), hw.errBody()); ok {
 					// told as an overflow: not asked again, of this one or
 					// another, and nobody rests
 					hw.failure, hw.failMsg, outgrew = http.StatusBadRequest, msg, true
@@ -5531,7 +5533,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// no token estimate filters those members. Nobody rests.
 			tokens := 0
 			if hw.code() != http.StatusRequestEntityTooLarge {
-				if req, err := parse(from, attemptBody); err == nil {
+				if !outgrew && attemptTokens >= 0 && from != provider.Gemini &&
+					!bodyHas(attemptBody, sigMark+sigKept) && !bodyHas(attemptBody, reasonMark) &&
+					!bodyHasJSONEscape(attemptBody, "_tskr") {
+					tokens = attemptTokens
+				} else if req, err := parse(from, attemptBody); err == nil {
 					tokens = estimate(req)
 				}
 			}
