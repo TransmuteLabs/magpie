@@ -633,8 +633,8 @@ func TestActivationWatchFollowsAtomicReplacement(t *testing.T) {
 			root := filepath.Join(parent, "config", "extensions")
 			path := filepath.Join(root, "catalog.json")
 			watch := newActivationWatch(root)
-			if !mode.filesOnly && watch.filesOnly {
-				t.Skip("directory watching is not used on kqueue")
+			if watch.filesOnly {
+				t.Skip("kqueue replacement is covered by TestActivationVnodeFollowsAtomicReplacement")
 			}
 			watch.filesOnly = mode.filesOnly
 			watch.open(fsnotify.NewWatcher)

@@ -45,6 +45,95 @@ func TestActivationVnodeFollowsFirstConfig(t *testing.T) {
 	}
 }
 
+func TestActivationVnodeFollowsAtomicReplacement(t *testing.T) {
+	const id = "fixture"
+	for _, target := range []struct {
+		name string
+		path string
+	}{
+		{"catalog", "catalog.json"},
+		{"config", filepath.Join("private", id, "state", storeStateName(sdk.Scope{Plugin: id}, moduleConfigKey))},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, target.path)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			replacement := path + ".publish"
+			for _, name := range []string{path, replacement} {
+				if err := os.WriteFile(name, []byte("[]"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			watch := newActivationWatch(root)
+			watch.open(nil)
+			t.Cleanup(watch.close)
+			native, ok := watch.vnode.(*kqueueActivation)
+			if !ok {
+				t.Fatal("fixture watcher unavailable")
+			}
+			rearm := func() activationVnode {
+				t.Helper()
+				watch.begin()
+				watch.followConfig(id)
+				watch.finish()
+				entry := native.files[path]
+				if entry.file == nil {
+					t.Fatalf("%s was not registered", path)
+				}
+				current, err := os.Lstat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				opened, err := entry.file.Stat()
+				if err != nil || !os.SameFile(current, opened) {
+					t.Fatalf("watch descriptor does not match %s: %v", path, err)
+				}
+				return entry
+			}
+			wait := func(entry activationVnode, notes uint32) {
+				t.Helper()
+				deadline := time.NewTimer(10 * time.Second)
+				defer deadline.Stop()
+				for {
+					select {
+					case _, open := <-watch.vnodeChanges():
+						if !open {
+							t.Fatal("fixture watcher closed")
+						}
+						native.eventMu.Lock()
+						observed := native.pending[entry.fd]
+						native.eventMu.Unlock()
+						if observed&notes != 0 {
+							if !watch.vnodeRelevant() {
+								t.Fatalf("%s change did not schedule reconciliation", path)
+							}
+							return
+						}
+					case <-deadline.C:
+						t.Fatalf("did not see vnode flags %#x for %s", notes, path)
+					}
+				}
+			}
+
+			before := rearm()
+			if err := os.Rename(replacement, path); err != nil {
+				t.Fatal(err)
+			}
+			wait(before, unix.NOTE_DELETE|unix.NOTE_RENAME|unix.NOTE_ATTRIB)
+			after := rearm()
+			if os.SameFile(before.info, after.info) {
+				t.Fatal("replacement did not change the watched inode")
+			}
+			if err := os.WriteFile(path, []byte("[]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			wait(after, unix.NOTE_WRITE)
+		})
+	}
+}
+
 func TestActivationVnodeBoundsAndReleasesDescriptors(t *testing.T) {
 	root := t.TempDir()
 	for index := 0; index < activationWatchLimit+32; index++ {
