@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -168,30 +167,6 @@ func checkToolOwnerResult(test *testing.T, result map[string]any, account string
 		}
 	} else if call.Scope.Provider != "vendor" || !strings.Contains(string(call.Auth), `"token":"synthetic-original"`) {
 		test.Fatalf("private tool lost its account authority: %s", body)
-	}
-}
-
-func toolFixtureOwnerPath(fixture *toolRefreshFixture) string {
-	return filepath.Join(fixture.manager.Namespace(), "private", ".saved-signins", "subscription-owners.json")
-}
-
-func toolFixtureTransfer(revision string) string {
-	return `[{"module":"tool.refresh","provider":"vendor","publicID":"tool-fixture","revision":"` + revision + `","active":true,
-		"accounts":[{"key":"fixture-key","id":"selected","user":"fixture-user","loginID":"fixture-login"}],
-		"grantRevision":"` + strings.Repeat("a", 64) + `","digests":{"fixture-key":"` + strings.Repeat("b", 64) + `"},"tickets":["fixture-ticket"]}]`
-}
-
-func writeToolFixtureOwner(test *testing.T, path, body string) {
-	test.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		test.Fatal(err)
-	}
-	temporary := path + ".fixture.tmp"
-	if err := os.WriteFile(temporary, []byte(body), 0600); err != nil {
-		test.Fatal(err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		test.Fatal(err)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -274,9 +275,16 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 	for _, change := range []string{
 		"unchanged", "account signed out", "same generation credentials", "login off", "discovery off",
 		"same CAS configuration", "reordered configuration",
+		"owner unchanged", "owner replaced",
 	} {
 		test.Run(change, func(test *testing.T) {
 			fixture := installRefreshFixture(test, worker, sdk.FullContract().Version.Minor, time.Hour, nil)
+			tracksOwner := change == "owner unchanged" || change == "owner replaced"
+			finalAdmissionCheck := int32(2)
+			if tracksOwner {
+				finalAdmissionCheck = 3
+				writeToolFixtureOwner(test, toolFixtureOwnerPath(fixture), toolFixtureTransfer("fixture-owner"))
+			}
 			ctx, cancel := context.WithTimeout(test.Context(), 20*time.Second)
 			var requests sync.WaitGroup
 			original := runExtensionPluginTool
@@ -300,10 +308,13 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 			reached := make(chan sdk.Scope, 1)
 			proceed := make(chan struct{})
 			runExtensionPluginTool = func(current context.Context, spec, name string, args json.RawMessage) (sdk.ToolResult, error) {
+				if revision, _ := extension.SubscriptionOwnerRevision(current); tracksOwner && revision != "fixture-owner" {
+					return sdk.ToolResult{}, fmt.Errorf("tool prepared owner revision %q, want fixture-owner", revision)
+				}
 				scope := extension.ToolScopeFrom(current)
 				var checks atomic.Int32
 				current = extension.WithToolAccountCheck(current, selection, func(admission context.Context) error {
-					if checks.Add(1) != 2 {
+					if checks.Add(1) != finalAdmissionCheck {
 						return nil
 					}
 					reached <- scope
@@ -322,7 +333,7 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				_, err := fixture.run(ctx, refreshToolArgs)
 				result <- err
 			})
-			waitToolGatewayStack(test, ctx, "tool queued at the stdin writer", "(*workerClient).reserveWrite(")
+			waitToolGatewayStack(test, ctx, result, "tool queued at the stdin writer", "(*workerClient).reserveWrite(")
 			resume()
 			var scope sdk.Scope
 			select {
@@ -356,7 +367,7 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 			release = sync.OnceFunc(release)
 			defer release()
 			close(proceed)
-			waitToolGatewayStack(test, ctx, "tool waiting for the private Store after policy check", "storeWaitLock(")
+			waitToolGatewayStack(test, ctx, result, "tool waiting for the private Store after policy check", "storeWaitLock(", "(*Lease).admitToolHandoff(")
 			switch change {
 			case "same generation credentials":
 				path := filepath.Join(private, scope.Plugin, "accounts.json")
@@ -377,11 +388,13 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				}
 			case "same CAS configuration", "reordered configuration":
 				replaceToolConfigFileAtSameVersion(test, fixture, change)
+			case "owner replaced":
+				writeToolHandoffReplacement(test, toolFixtureOwnerPath(fixture), []byte(toolFixtureTransfer("another-owner")))
 			}
 			release()
 			err = <-result
 			wantCalls, wantState := int32(0), "not-started"
-			if change == "unchanged" || change == "reordered configuration" {
+			if change == "unchanged" || change == "reordered configuration" || change == "owner unchanged" {
 				wantCalls, wantState = 1, "completed"
 				if err != nil {
 					test.Errorf("valid tool was refused: %v", err)
@@ -390,6 +403,9 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				var outcome *extension.OutcomeError
 				if !errors.As(err, &outcome) || outcome.Outcome != wantState {
 					test.Errorf("revoked tool: got %v, want %s", err, wantState)
+				} else if change == "owner replaced" && (outcome.Cause == nil ||
+					outcome.Cause.Error() != "the subscription selection changed or is incomplete") {
+					test.Errorf("revoked tool returned a different pre-dispatch error: %v", outcome.Cause)
 				}
 			}
 			receipt, err = fixture.manager.Store().OperationContext(ctx, scope.Plugin, scope.Operation)
@@ -398,16 +414,64 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				test.Fatalf("tool sent %d RPCs and %d refreshes, journaled %q; want %d RPCs, 0 refreshes and %q: %v",
 					fixture.toolCalls.Load(), fixture.refreshes.Load(), receipt.State, wantCalls, wantState, err)
 			}
+			if change == "owner replaced" {
+				requests.Wait()
+				runExtensionPluginTool = func(current context.Context, spec, name string, args json.RawMessage) (sdk.ToolResult, error) {
+					if revision, _ := extension.SubscriptionOwnerRevision(current); revision != "another-owner" {
+						return sdk.ToolResult{}, fmt.Errorf("tool prepared owner revision %q, want another-owner", revision)
+					}
+					return original(current, spec, name, args)
+				}
+				fresh := extension.WithRequestMetadata(ctx, extension.RequestMetadata{
+					Plugin: fixture.scope.Plugin, RequestID: test.Name() + "/fresh-owner",
+				})
+				reply, err := fixture.run(fresh, refreshToolArgs)
+				if err != nil || reply["isError"] != false ||
+					fixture.toolCalls.Load() != 1 || fixture.refreshes.Load() != 0 {
+					test.Fatalf("fresh owner sent %d tool RPCs and %d refreshes with reply %+v: %v",
+						fixture.toolCalls.Load(), fixture.refreshes.Load(), reply, err)
+				}
+			}
 		})
 	}
 }
 
-func waitToolGatewayStack(test *testing.T, ctx context.Context, phase, frame string) {
+func toolFixtureOwnerPath(fixture *toolRefreshFixture) string {
+	return filepath.Join(fixture.manager.Namespace(), "private", ".saved-signins", "subscription-owners.json")
+}
+
+func toolFixtureTransfer(revision string) string {
+	return `[{"module":"tool.refresh","provider":"vendor","publicID":"tool-fixture","revision":"` + revision + `","active":true,
+		"accounts":[{"key":"fixture-key","id":"selected","user":"fixture-user","loginID":"fixture-login"}],
+		"grantRevision":"` + strings.Repeat("a", 64) + `","digests":{"fixture-key":"` + strings.Repeat("b", 64) + `"},"tickets":["fixture-ticket"]}]`
+}
+
+func writeToolFixtureOwner(test *testing.T, path, body string) {
+	test.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		test.Fatal(err)
+	}
+	temporary := path + ".fixture.tmp"
+	if err := os.WriteFile(temporary, []byte(body), 0600); err != nil {
+		test.Fatal(err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		test.Fatal(err)
+	}
+}
+
+func waitToolGatewayStack(test *testing.T, ctx context.Context, result <-chan error, phase string, frames ...string) {
 	test.Helper()
 	stacks := make([]byte, 1<<20)
 	waitToolRefreshPhase(test, ctx, phase, func() bool {
+		select {
+		case err := <-result:
+			test.Fatalf("tool finished before %s: %v", phase, err)
+		default:
+		}
 		for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
-			if bytes.Contains(stack, []byte("(*Server).toolsMCPRun(")) && bytes.Contains(stack, []byte(frame)) {
+			if bytes.Contains(stack, []byte("(*Server).toolsMCPRun(")) &&
+				!slices.ContainsFunc(frames, func(frame string) bool { return !bytes.Contains(stack, []byte(frame)) }) {
 				return true
 			}
 		}
