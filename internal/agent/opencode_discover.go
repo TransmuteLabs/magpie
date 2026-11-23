@@ -114,7 +114,8 @@ func openCodeFileAt(at place, path, id string, block func() any) ocFile {
 	if id != "opencode" {
 		return ocFile{path: path, block: block}
 	}
-	return ocFile{path: path, two: openCodeTwo(at), discover: openCodeDiscovers(openCodeVersionAt(at)), block: block}
+	version := openCodeVersionAt(at)
+	return ocFile{path: path, two: openCodeTwo(version), discover: openCodeDiscovers(version), block: block}
 }
 
 // withoutModels is block without its models, which the plugin lists.

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -22,14 +25,43 @@ import (
 // model under agents.title.model. For OpenCode 1, or a version not known,
 // it writes OpenCode 1's, which every OpenCode reads.
 
-// openCodeVersion is the version of the opencode on PATH, "" when not
-// known; a var so tests can fake it.
-var openCodeVersion = func() string { return (&Agent{ID: "opencode", Bin: "opencode"}).InstalledVersion() }
+// openCodeVersion is the local OpenCode version, "" when not known; a var
+// so tests can fake it.
+var openCodeVersion = func() string { return localOpenCodeVersion(runtime.GOOS) }
 
-// openCodeTwo is whether the OpenCode at a place is 2.x: the one on this
-// machine's PATH, or the distro's, as its probe found it.
-func openCodeTwo(at place) bool {
-	n, ok := openCodeVersionParts(openCodeVersionAt(at))
+var openCodeAppNames = []string{"OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"}
+
+func localOpenCodeVersion(goos string) string {
+	version := (&Agent{ID: "opencode", Bin: "opencode"}).InstalledVersion()
+	if version != "" || goos != "darwin" {
+		return version
+	}
+	for _, bundle := range inAppFolders(appFolders(), openCodeAppNames...) {
+		info, _ := bundleInfo(bundle)
+		switch info.id {
+		case "ai.opencode.desktop", "ai.opencode.desktop.beta", "ai.opencode.desktop.dev":
+		default:
+			continue
+		}
+		binary := filepath.Join(bundle, "Contents", "Resources", "opencode-cli")
+		if !isFile(binary) {
+			continue
+		}
+		data, err := os.ReadFile(binary + ".version")
+		if err != nil {
+			continue
+		}
+		shipped := strings.TrimPrefix(strings.TrimSpace(string(data)), "v")
+		if version := parseVersion(shipped); version != "" && version == shipped {
+			return version
+		}
+	}
+	return ""
+}
+
+// openCodeTwo is whether the OpenCode version uses 2.x config keys.
+func openCodeTwo(version string) bool {
+	n, ok := openCodeVersionParts(version)
 	return ok && n[0] >= 2
 }
 

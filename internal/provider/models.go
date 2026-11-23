@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/probelog"
@@ -362,6 +363,10 @@ func (p Provider) RefetchTaking(ctx context.Context) (ms []catalog.Model, droppe
 // (none for an account's, a plugin's or a decision-only provider's).
 func (p Provider) refetch(ctx context.Context) ([]catalog.Model, []string, map[string]bool, error) {
 	ctx = p.ownRequests(ctx, probelog.KindList)
+	if p.IsExtension() && p.Account.extension.discoversModels() {
+		ms, err := p.refetchExtensionModels(ctx)
+		return ms, nil, nil, err
+	}
 	if p.IsPlugin() {
 		// its plugin's list, read again: a pick it had and has no more
 		// goes as a built-in's does (plugin_relist.go)
@@ -411,6 +416,66 @@ func (p Provider) refetch(ctx context.Context) ([]catalog.Model, []string, map[s
 		log.Println(p.ID + ": " + derr.Error())
 	}
 	return ms, dropped, before, nil
+}
+
+func (p Provider) refetchExtensionModels(ctx context.Context) ([]catalog.Model, error) {
+	accounts := p.extensionModelAccounts()
+	if len(accounts) == 0 {
+		return nil, errors.New("no enabled extension accounts for model discovery")
+	}
+	var failed error
+	for _, account := range accounts {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(failed, err)
+		}
+		if _, _, err := account.fetchExtensionModelAccount(ctx, nil); err != nil {
+			failed = errors.Join(failed, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(failed, err)
+	}
+	return extensionServedModelsContext(ctx, accounts[0], accounts), failed
+}
+
+var extensionModelRefreshes sync.Map
+
+func (p Provider) fetchExtensionModelAccount(ctx context.Context, due extensionModelDue) (int, bool, error) {
+	binding := p.Account.extension
+	scope := binding.scope
+	scope.Generation = 0
+	key := binding.cacheKeyAt(scope) + "\x00" + binding.enableGeneration
+	done := make(chan struct{})
+	for {
+		previous, busy := extensionModelRefreshes.LoadOrStore(key, done)
+		if !busy {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return 0, false, ctx.Err()
+		case <-previous.(chan struct{}):
+		}
+	}
+	defer func() {
+		extensionModelRefreshes.Delete(key)
+		close(done)
+	}()
+	ctx = p.ownRequests(p.Via(ctx), probelog.KindList)
+	models, asked, err := binding.fetchModelsWithPolicy(ctx, checkExtensionModelRefresh, due)
+	return len(models), asked, err
+}
+
+func modelRefreshProviders(providers []Provider) []Provider {
+	var out []Provider
+	for _, p := range providers {
+		if !p.IsExtension() {
+			out = append(out, p)
+		} else if p.Account.extension.discoversModels() {
+			out = append(out, p.extensionModelAccounts()...)
+		}
+	}
+	return out
 }
 
 // liveIDs are the ids of every model in the provider's fetched list.
@@ -652,7 +717,9 @@ func (p Provider) ListAsks() bool {
 // last asked for one by FetchNew.
 var newFetches = struct {
 	sync.Mutex
-	m map[string]time.Time
+	m          map[string]time.Time
+	checkedAt  time.Time
+	checkedGen uint64
 }{m: map[string]time.Time{}}
 
 // newFetchRetry is how long FetchNew leaves an account whose list it
@@ -694,48 +761,26 @@ func FetchNewSoon(timeout time.Duration) {
 	}()
 }
 
-// FetchNewBehind is FetchNew in the background, started at once unless one
-// started so is still running: for the Providers page, which waited on it
-// (#541: ten seconds and more of placeholders, an account at a time and
-// behind start-up's own run). FetchingNew says when it is done.
+// FetchNewBehind runs the account inventory and FetchNew behind the
+// Providers page. A recent check stops unchanged pages from restarting
+// the work at each poll. FetchingNew says when it is done.
 func FetchNewBehind(timeout time.Duration) {
 	if !fetchingNew.CompareAndSwap(false, true) {
 		return
 	}
-	newSoonAt.Store(time.Now().UnixNano())
-	fetchNewGo(timeout)
-}
-
-// fetchNewGo is FetchNew in the background, counted in newRunning before
-// it returns when there is work, so a page reading FetchingNew straight
-// after is told; with none nothing is started or counted. Which accounts
-// are due is known at once: no CLI is asked who is signed in for a list
-// FetchNew fetches, since every built-in that asked one is retired and its
-// plugin lists its own accounts.
-func fetchNewGo(timeout time.Duration) {
-	run := func(fetch func()) {
-		newRunning.Add(1)
-		go func() {
-			defer newRunning.Add(-1)
-			defer fetchingNew.Store(false)
-			fetch()
-		}()
-	}
-	if !newFetches.TryLock() {
-		// behind a FetchNew under way, which the page doesn't wait on
-		run(func() { FetchNew(timeout) })
-		return
-	}
-	due, _ := newDue(All())
-	if len(due) == 0 {
+	if newFetches.TryLock() {
+		recent := newFetches.checkedGen == filememo.Gen() && time.Since(newFetches.checkedAt) < newSoonEvery
 		newFetches.Unlock()
-		fetchingNew.Store(false)
-		return
+		if recent {
+			fetchingNew.Store(false)
+			return
+		}
 	}
-	run(func() {
-		defer newFetches.Unlock()
-		fetchDue(due, timeout)
-	})
+	newSoonAt.Store(time.Now().UnixNano())
+	go func() {
+		defer fetchingNew.Store(false)
+		FetchNew(timeout)
+	}()
 }
 
 // newRunning counts the FetchNew calls under way, those started in the
@@ -763,22 +808,33 @@ func FetchNew(timeout time.Duration) (missing bool) {
 	defer newRunning.Add(-1)
 	newFetches.Lock()
 	defer newFetches.Unlock()
-	return fetchNewHeld(timeout)
+	newFetches.checkedAt = time.Time{}
+	generation := filememo.Gen()
+	missing, complete := fetchNewHeld(timeout)
+	if complete && generation == filememo.Gen() {
+		newFetches.checkedAt, newFetches.checkedGen = time.Now(), generation
+	}
+	return missing
 }
 
 // fetchNewHeld is FetchNew with newFetches held.
-func fetchNewHeld(timeout time.Duration) (missing bool) {
-	due, skipped := newDue(All())
-	if fetchDue(due, timeout) {
-		missing = true
+func fetchNewHeld(timeout time.Duration) (missing, complete bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	providers, complete := allWithStatusContext(ctx)
+	err := ctx.Err()
+	cancel()
+	if err != nil {
+		return true, false
 	}
+	due, skipped := newDue(providers)
+	missing = fetchDue(due, timeout) || !complete
 	// one waiting to be asked again, unless another's fetch listed it
 	for _, f := range skipped {
 		if _, ok := f.p.Listed(); !ok || f.decide {
 			missing = true
 		}
 	}
-	return missing
+	return missing, complete
 }
 
 // newFetch is a provider FetchNew asks for its list, and whether for its
@@ -788,10 +844,16 @@ type newFetch struct {
 	decide bool
 }
 
-// newDue is those of ps FetchNew asks for their lists now, and those
-// skipped as they failed less than newFetchRetry ago; newFetches held.
+// newDue separates the providers to check now from those in retry
+// backoff. SDK accounts check eligibility under their own refresh slot.
 func newDue(ps []Provider) (due, skipped []newFetch) {
-	for _, p := range ps {
+	now := time.Now()
+	for key, last := range newFetches.m {
+		if now.Sub(last) >= newFetchRetry {
+			delete(newFetches.m, key)
+		}
+	}
+	for _, p := range modelRefreshProviders(ps) {
 		// a list of decision models fetched before magpie kept their
 		// windows and input, or not fetched yet (ARNO on Discord)
 		// one switched off isn't asked (leftAlone): a signed-in
@@ -799,15 +861,18 @@ func newDue(ps []Provider) (due, skipped []newFetch) {
 		if p.Off {
 			continue
 		}
+		if p.IsExtension() {
+			due = append(due, newFetch{p: p})
+			continue
+		}
 		decide := p.decideListDue()
 		if !decide && (p.Account == nil || !p.Ready()) {
 			continue
 		}
-		// a plugin's accounts were listed with the plugin's providers
 		if _, ok := p.Listed(); ok && !decide {
 			continue
 		}
-		if t, ok := newFetches.m[p.ID]; ok && time.Since(t) < newFetchRetry {
+		if _, tried := newFetches.m[p.ID]; tried {
 			skipped = append(skipped, newFetch{p, decide})
 			continue
 		}
@@ -821,7 +886,14 @@ func newDue(ps []Provider) (due, skipped []newFetch) {
 func fetchDue(due []newFetch, timeout time.Duration) (failed bool) {
 	for _, f := range due {
 		p := f.p
-		// listed since by another's fetch, as a plugin's accounts are
+		if p.IsExtension() {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			if fetchNewExtension(ctx, p) {
+				failed = true
+			}
+			cancel()
+			continue
+		}
 		if _, ok := p.Listed(); ok && !f.decide {
 			continue
 		}
@@ -840,6 +912,26 @@ func fetchDue(due []newFetch, timeout time.Duration) (failed bool) {
 		cancel()
 	}
 	return failed
+}
+
+func fetchNewExtension(ctx context.Context, p Provider) (missing bool) {
+	_, asked, err := p.fetchExtensionModelAccount(ctx, func(key string, fetchedAt time.Time) bool {
+		if !fetchedAt.IsZero() {
+			return false
+		}
+		key += "\x00" + p.Account.extension.enableGeneration
+		now := time.Now()
+		if at, tried := newFetches.m[key]; tried && now.Sub(at) < newFetchRetry {
+			missing = true
+			return false
+		}
+		newFetches.m[key] = now
+		return true
+	})
+	if asked && err != nil {
+		log.Println(p.ID + ": " + err.Error())
+	}
+	return missing || err != nil
 }
 
 // a fetched list: every endpoint's models merged, the base kept for

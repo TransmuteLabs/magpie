@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,86 @@ func openCodeAt(t *testing.T, v string) {
 	was := openCodeVersion
 	openCodeVersion = func() string { return v }
 	t.Cleanup(func() { openCodeVersion = was })
+}
+
+func TestOpenCodeDesktopModelDiscovery(t *testing.T) {
+	const appID = "ai.opencode.desktop"
+	for _, probe := range []struct {
+		name, bundleID, sidecar, cli, want string
+		binary                             bool
+	}{
+		{name: "desktop", bundleID: appID, sidecar: "2.3.2\n", binary: true, want: "2.3.2"},
+		{name: "unversioned_cli", bundleID: appID, sidecar: "2.3.2", binary: true, cli: "no version", want: "2.3.2"},
+		{name: "older_cli", bundleID: appID, sidecar: "2.3.2", binary: true, cli: "1.3.9", want: "1.3.9"},
+		{name: "no_sidecar_version", bundleID: appID, binary: true},
+		{name: "bad_sidecar_version", bundleID: appID, sidecar: "invalid 2.3.2", binary: true},
+		{name: "no_sidecar_binary", bundleID: appID, sidecar: "2.3.2"},
+		{name: "other_app", bundleID: "example.other", sidecar: "2.3.2", binary: true},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			home, _ := codexHome(t, "", "")
+			thinkCatalog(t)
+			apps, bin := t.TempDir(), t.TempDir()
+			t.Setenv("PATH", bin)
+			wasVersion, wasFolders, wasRun := openCodeVersion, appFolders, runVersion
+			openCodeVersion = func() string { return localOpenCodeVersion("darwin") }
+			appFolders = func() []string { return []string{apps} }
+			runVersion = func(binary string) string {
+				if probe.cli == "" || filepath.Base(binary) != exe("opencode") {
+					t.Fatalf("unexpected CLI version probe for %s", binary)
+				}
+				return probe.cli
+			}
+			t.Cleanup(func() { openCodeVersion, appFolders, runVersion = wasVersion, wasFolders, wasRun })
+			if probe.cli != "" {
+				if err := os.WriteFile(filepath.Join(bin, exe("opencode")), []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			installApp(t, apps, "OpenCode.app", codexAppPlist(probe.bundleID, "8.0.0"))
+			resources := filepath.Join(apps, "OpenCode.app", "Contents", "Resources")
+			if err := os.Mkdir(resources, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if probe.binary {
+				if err := os.WriteFile(filepath.Join(resources, "opencode-cli"), []byte("sidecar"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if probe.sidecar != "" {
+				if err := os.WriteFile(filepath.Join(resources, "opencode-cli.version"), []byte(probe.sidecar), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version := openCodeVersion(); version != probe.want {
+				t.Fatalf("version = %q, want %q", version, probe.want)
+			}
+			oc := opencode(home, filepath.Join(home, ".config"))
+			if err := oc.Apply("model", "magpie/think/deep"); err != nil {
+				t.Fatal(err)
+			}
+			if err := oc.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if probe.want == "2.3.2" {
+				nativeOnly(t, oc.Path)
+				if _, ok := edit.GetJSON(oc.Path, "provider."+magpieID); ok {
+					t.Fatal("Desktop's config has a legacy magpie provider")
+				}
+				if _, ok := edit.GetJSON(oc.Path, openCodeNativeKey+".models"); ok {
+					t.Fatal("Desktop's config has a static model list")
+				}
+				plugin := pluginOf(oc.Path)
+				if !strings.HasPrefix(plugin, openCodePluginMark) || !strings.Contains(plugin, `"think/deep"`) {
+					t.Fatal("Desktop's config is missing magpie's model plugin or its fallback catalog")
+				}
+				return
+			}
+			if modelsUnder(t, oc.Path, "provider."+magpieID)["think/deep"] == nil || pluginOf(oc.Path) != "" {
+				t.Fatal("OpenCode config must have the static list")
+			}
+		})
+	}
 }
 
 // reasonCatalog gives the sandbox think's models (thinkCatalog) and
@@ -300,12 +381,12 @@ func TestOpenChamberAndOpenCode2AgreeOnWords(t *testing.T) {
 func TestOpenCodeTwo(t *testing.T) {
 	for v, want := range map[string]bool{"2.2.6": true, "v2.0.25": true, "10.1.0": true, "1.19.5": false, "": false, "opencode": false} {
 		openCodeAt(t, v)
-		if got := openCodeTwo(here(t.TempDir())); got != want {
+		if got := openCodeFileAt(here(t.TempDir()), "", "opencode", nil).two; got != want {
 			t.Errorf("here %q: %v, want %v", v, got, want)
 		}
 		openCodeAt(t, "2.2.6")
 		wsl := place{spell: func(s string) string { return s }, version: v}
-		if got := openCodeTwo(wsl); got != want {
+		if got := openCodeFileAt(wsl, "", "opencode", nil).two; got != want {
 			t.Errorf("wsl %q: %v, want %v", v, got, want)
 		}
 	}

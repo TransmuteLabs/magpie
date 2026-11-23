@@ -15,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	extensionhost "github.com/yetone/magpie/internal/extension"
+	"github.com/yetone/magpie/internal/filelock"
 	sdk "github.com/yetone/magpie/pkg/extension"
 	"github.com/yetone/magpie/pkg/protocolext"
 )
@@ -239,6 +241,297 @@ func TestExtensionProviderModelsAndQuotaUseAccountScope(t *testing.T) {
 	if quota.Error != "" || len(quota.Windows) != 1 || quota.Windows[0].Used != 62 || quota.Windows[0].ResetsAt == nil {
 		t.Fatalf("account quota: %+v", quota)
 	}
+}
+
+func TestExtensionProviderRefreshesEnabledAccountCatalogs(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	ctx := t.Context()
+	module := sdk.Scope{Plugin: host.manifest.ID}
+	const vendor = "vendor"
+	scope := func(account string, generation uint64) sdk.Scope {
+		return sdk.Scope{Plugin: module.Plugin, Provider: vendor, Account: account, Generation: generation}
+	}
+	save := func(account string, generation uint64) {
+		t.Helper()
+		if _, err := host.store.SaveAccount(extensionhost.Account{
+			Plugin: module.Plugin, Provider: vendor, ID: account, Auth: json.RawMessage(`{"access":"synthetic"}`),
+		}, generation); err != nil {
+			t.Fatal(err)
+		}
+		Changed()
+	}
+	save("carol", 0)
+	id := ExtensionProviderID(module.Plugin, vendor)
+	if err := SetLoginOn(id, "carol", false); err != nil {
+		t.Fatal(err)
+	}
+	var calls []sdk.Scope
+	host.call = func(_ context.Context, method string, selected sdk.Scope, params any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		calls = append(calls, selected)
+		if _, ok := params.(sdk.ModelsRequest); !ok || method != sdk.MethodProviderModels || selected.Account == "carol" {
+			return nil, errors.New("unexpected account catalog invocation")
+		}
+		if selected == scope("bob", 2) {
+			return json.RawMessage(`{"models":[]}`), nil
+		}
+		return json.Marshal(sdk.ModelsResult{Models: []sdk.Model{
+			{ID: selected.Account + "-model", Protocols: []protocolext.Protocol{"chat"}, ContextWindow: 32768, MaxOutput: 4096},
+		}})
+	}
+	requireCalls := func(want ...sdk.Scope) {
+		t.Helper()
+		if !slices.Equal(calls, want) {
+			t.Fatalf("catalog calls = %+v, want %+v", calls, want)
+		}
+		calls = nil
+	}
+	requireModels := func(models []catalog.Model, want ...string) {
+		t.Helper()
+		var ids []string
+		for _, model := range models {
+			ids = append(ids, model.ID)
+		}
+		if !slices.Equal(ids, want) {
+			t.Fatalf("catalog models = %v, want %v", ids, want)
+		}
+	}
+	findBinding := func(account string) *extensionAccount {
+		t.Helper()
+		providers, err := ExtensionProviders()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range providers {
+			if p.Account.User == account {
+				return p.Account.extension
+			}
+		}
+		t.Fatalf("account %s is unavailable", account)
+		return nil
+	}
+	root := func(binding *extensionAccount) extensionhost.VersionedValue {
+		t.Helper()
+		value, err := host.store.StateGetContext(ctx, module, binding.modelCatalogKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+
+	p, err := Find(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := scope("alice", 1), scope("bob", 1)
+	models, dropped, err := p.Refetch(ctx)
+	if err != nil || len(dropped) != 0 {
+		t.Fatalf("public refresh dropped %v: %v", dropped, err)
+	}
+	requireCalls(first, second)
+	requireModels(models, "alice-model", "bob-model")
+	requireModels(p.Account.models(), "alice-model", "bob-model")
+	alice, bob := findBinding("alice"), findBinding("bob")
+	aliceRoot, bobRoot := root(alice), root(bob)
+	if aliceRoot.Version == 0 || bobRoot.Version == 0 || bytes.Equal(aliceRoot.Value, bobRoot.Value) || root(findBinding("carol")).Version != 0 {
+		t.Fatal("each enabled account must keep its own durable catalog")
+	}
+	if _, err := p.Account.fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	requireCalls(first)
+	if !slices.Contains(RefreshLists(ctx), Listed{id, 2}) {
+		t.Fatal("RefreshLists missed the combined public provider")
+	}
+	requireCalls(first, second)
+
+	key := bob.modelCatalogKey()
+	path := host.store.ModelCatalogPath(module.Plugin, key)
+	old := time.Now().Add(-2 * accountListAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	extensionModelCache.Delete(key)
+	relistAccounts(ctx, time.Now())
+	requireCalls(second)
+	after := root(bob)
+	info, err := os.Stat(path)
+	if err != nil || !info.ModTime().Before(time.Now().Add(-accountListAge)) ||
+		after.Version != bobRoot.Version || !bytes.Equal(after.Value, bobRoot.Value) {
+		t.Fatalf("unchanged relist rewrote the durable catalog: %v", err)
+	}
+	relistAccounts(ctx, time.Now())
+	requireCalls()
+
+	save("bob", 1)
+	bob = findBinding("bob")
+	if root(bob).Version != 0 {
+		t.Fatal("a new generation reused the old catalog")
+	}
+	if FetchNew(3 * time.Second) {
+		t.Fatal("FetchNew left the new generation unlisted")
+	}
+	requireCalls(scope("bob", 2))
+	knownEmpty, known, err := bob.selectedModels(ctx)
+	if !known || err != nil || len(knownEmpty) != 0 {
+		t.Fatalf("empty discovered catalog = %v, known %v, error %v", knownEmpty, known, err)
+	}
+	if FetchNew(3 * time.Second) {
+		t.Fatal("FetchNew treated an empty catalog as missing")
+	}
+	requireCalls()
+
+	emptyRoot := root(bob)
+	if _, err := host.store.StateCASContext(ctx, module, bob.modelCatalogKey(), emptyRoot.Version, json.RawMessage(`{"schema":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !FetchNew(3 * time.Second) {
+		t.Fatal("FetchNew reported an unreadable catalog as resolved")
+	}
+	requireCalls()
+
+	save("bob", 2)
+	relistAccounts(ctx, time.Now())
+	requireCalls(scope("bob", 3))
+	if root(findBinding("bob")).Version == 0 {
+		t.Fatal("periodic refresh did not save the current generation")
+	}
+}
+
+func TestFetchNewBehindDoesNotWaitForExtensionStore(t *testing.T) {
+	host := fixtureExtensionProvider(t, true)
+	var calls atomic.Int32
+	host.call = func(_ context.Context, method string, _ sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+		if method != sdk.MethodProviderModels {
+			return nil, errors.New("unexpected SDK method")
+		}
+		calls.Add(1)
+		return json.RawMessage(`{"models":[{"id":"fixture-live"}]}`), nil
+	}
+	Changed()
+	unlock, held := filelock.Lock(filepath.Join(host.Namespace(), "private", ".lock"), time.Second)
+	if !held {
+		t.Fatal("could not hold the SDK Store")
+	}
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		FetchNewBehind(8 * time.Second)
+	}()
+	select {
+	case <-returned:
+		if !FetchingNew() {
+			unlock()
+			waitFetchingNew(t)
+			t.Fatal("the pending catalog check was not reported")
+		}
+	case <-time.After(4 * time.Second):
+		unlock()
+		<-returned
+		waitFetchingNew(t)
+		t.Fatal("FetchNewBehind waited for the SDK Store")
+	}
+	unlock()
+	waitFetchingNew(t)
+	if asked := calls.Load(); asked != 2 {
+		t.Fatalf("background check asked %d accounts, want 2", asked)
+	}
+}
+
+func TestFetchNewBehindRechecksAccountInventory(t *testing.T) {
+	const timeout = 5 * time.Second
+	t.Run("enabled_during_refresh", func(t *testing.T) {
+		host := fixtureExtensionProvider(t, true)
+		id := ExtensionProviderID(host.manifest.ID, "vendor")
+		if err := SetLoginOn(id, "bob", false); err != nil {
+			t.Fatal(err)
+		}
+		entered := make(chan struct{})
+		resume := make(chan struct{}, 1)
+		t.Cleanup(func() {
+			close(resume)
+			waitFetchingNew(t)
+		})
+		var aliceCalls, bobCalls atomic.Int32
+		host.call = func(ctx context.Context, method string, scope sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+			if method != sdk.MethodProviderModels || scope.Plugin != host.manifest.ID || scope.Provider != "vendor" || scope.Generation != 1 {
+				return nil, errors.New("unexpected catalog scope")
+			}
+			switch scope.Account {
+			case "alice":
+				if aliceCalls.Add(1) == 1 {
+					close(entered)
+					select {
+					case <-resume:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+			case "bob":
+				bobCalls.Add(1)
+			default:
+				return nil, errors.New("unexpected catalog account")
+			}
+			return json.Marshal(sdk.ModelsResult{Models: []sdk.Model{{ID: scope.Account + "-model"}}})
+		}
+		FetchNewBehind(timeout)
+		select {
+		case <-entered:
+		case <-time.After(timeout):
+			t.Fatal("Alice's catalog request did not start")
+		}
+		if err := SetLoginOn(id, "bob", true); err != nil {
+			t.Fatal(err)
+		}
+		resume <- struct{}{}
+		waitFetchingNew(t)
+		if alice, bob := aliceCalls.Load(), bobCalls.Load(); alice != 1 || bob != 0 {
+			t.Fatalf("first catalog check called Alice %d and Bob %d times, want 1 and 0", alice, bob)
+		}
+		FetchNewBehind(timeout)
+		waitFetchingNew(t)
+		if alice, bob := aliceCalls.Load(), bobCalls.Load(); alice != 1 || bob != 1 {
+			t.Fatalf("immediate follow-up called Alice %d and Bob %d times in total, want 1 and 1", alice, bob)
+		}
+		providers, err := ExtensionProviders()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pos := slices.IndexFunc(providers, func(p Provider) bool { return p.Account.User == "bob" })
+		if pos < 0 {
+			t.Fatal("Bob's account is missing")
+		}
+		binding := providers[pos].Account.extension
+		root, err := host.store.StateGetContext(t.Context(), sdk.Scope{Plugin: host.manifest.ID}, binding.modelCatalogKey())
+		if err != nil || root.Version == 0 {
+			t.Fatalf("Bob's catalog was not published: version %d, error %v", root.Version, err)
+		}
+	})
+	t.Run("incomplete_inventory", func(t *testing.T) {
+		host, _, healthy := fixtureExtensionDiscovery(t)
+		if err := SetLoginOn(healthy, "carol", false); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { waitFetchingNew(t) })
+		var calls atomic.Int32
+		host.call = func(_ context.Context, method string, scope sdk.Scope, _ any, _ func(extensionhost.Event) error) (json.RawMessage, error) {
+			if method != sdk.MethodProviderModels || scope.Plugin != host.manifest.ID {
+				return nil, errors.New("unexpected catalog call")
+			}
+			calls.Add(1)
+			return json.RawMessage(`{"models":[{"id":"discovered"}]}`), nil
+		}
+		host.configError = host.manifest.ID
+		missing := FetchNew(timeout)
+		if asked := calls.Load(); asked != 0 {
+			t.Fatalf("an unavailable module received %d catalog calls", asked)
+		}
+		host.configError = ""
+		FetchNewBehind(timeout)
+		waitFetchingNew(t)
+		if !missing || calls.Load() != 2 {
+			t.Fatalf("incomplete inventory reported missing %v and recovery asked %d accounts, want true and 2", missing, calls.Load())
+		}
+	})
 }
 
 func TestExtensionProviderStreamAndAcceptedReplayFence(t *testing.T) {

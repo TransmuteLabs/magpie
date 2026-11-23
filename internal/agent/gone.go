@@ -126,7 +126,7 @@ func (a *Agent) cliHeld() (held, known bool) {
 		if runtime.GOOS != "darwin" {
 			return false, false
 		}
-		return appHere("OpenCode.app", "OpenCode Beta.app", "OpenCode Dev.app"), true
+		return appHere(openCodeAppNames...), true
 	case "goose":
 		// Goose Desktop: known by its bundle on a Mac only
 		if runtime.GOOS != "darwin" {

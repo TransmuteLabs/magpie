@@ -1047,12 +1047,17 @@ func All() []Provider {
 
 // AllContext lists the configured providers and signed-in agents for ctx.
 func AllContext(ctx context.Context) []Provider {
-	shared := sharedAllContext(ctx)
-	out := make([]Provider, len(shared))
-	for i, p := range shared {
+	providers, _ := allWithStatusContext(ctx)
+	return providers
+}
+
+func allWithStatusContext(ctx context.Context) ([]Provider, bool) {
+	inventory := sharedProviderInventoryContext(ctx)
+	out := make([]Provider, len(inventory.providers))
+	for i, p := range inventory.providers {
 		out[i] = p.clone() // callers change theirs, Keys[i] and Headers included
 	}
-	return out
+	return out, inventory.complete
 }
 
 // sharedAll is All without its copies, only for reading: the providers a
@@ -1065,24 +1070,35 @@ func sharedAll() []Provider {
 }
 
 func sharedAllContext(ctx context.Context) []Provider {
-	held := heldOfContext(ctx, "all", func() []Provider { return allProvidersContext(ctx) })
+	return sharedProviderInventoryContext(ctx).providers
+}
+
+type providerInventory struct {
+	providers []Provider
+	complete  bool
+}
+
+func sharedProviderInventoryContext(ctx context.Context) providerInventory {
+	inventory := heldOfContext(ctx, "all", func() providerInventory { return allProvidersContext(ctx) })
+	providers := inventory.providers
 	// asked once, from the settings a held look has read already: asked for
 	// each account, settings.json was parsed for every account of every
 	// model's price (agent.magpieModels, the GUI's drift every 15s and dsh's
 	// round every 30s), most of an idle magpie's CPU (xsw on Discord)
 	off := sync.OnceValue(func() bool { return settings.AccountDiscoveryOffIn(heldSettings()) })
-	for i, p := range held {
+	for i, p := range providers {
 		if p.Account != nil && off() && !p.publicAccount() {
-			out := held[:i:i] // the first append copies
-			for _, p := range held[i+1:] {
+			out := providers[:i:i] // the first append copies
+			for _, p := range providers[i+1:] {
 				if p.Account == nil || p.publicAccount() {
 					out = append(out, p)
 				}
 			}
-			return out
+			inventory.providers = out
+			break
 		}
 	}
-	return held
+	return inventory
 }
 
 // clone is p with its settings unshared: slices, maps and pointers copied.
@@ -1159,12 +1175,13 @@ var AllBuilt atomic.Int64
 // by when it was asked, not by when the request that asked began (#2965).
 var AllBuiltAt atomic.Int64
 
-func allProvidersContext(ctx context.Context) []Provider {
+func allProvidersContext(ctx context.Context) providerInventory {
 	AllBuilt.Add(1)
 	AllBuiltAt.Store(time.Now().UnixNano())
-	f := load()
+	f, err := read()
 	out, picks := ownOf(f)
-	for _, a := range accountsContext(ctx) {
+	accounts, complete := accountsContext(ctx)
+	for _, a := range accounts {
 		if _, taken := find(out, a.ID); taken || picks[a.ID].Hidden {
 			continue
 		}
@@ -1177,7 +1194,7 @@ func allProvidersContext(ctx context.Context) []Provider {
 		}
 		out = append(out, a)
 	}
-	return ordered(out, f.Order)
+	return providerInventory{providers: ordered(out, f.Order), complete: complete && err == nil}
 }
 
 // ownOf is f's providers of the user's own, and the model picks it keeps

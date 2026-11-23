@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,11 +38,13 @@ func TestFetchingNewOnceStarted(t *testing.T) {
 
 	// the vendor answers once the test lets it
 	release := make(chan struct{}, 8)
+	var asked atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/backend-api/codex/models" {
 			w.WriteHeader(404)
 			return
 		}
+		asked.Add(1)
 		select {
 		case <-release:
 		case <-time.After(5 * time.Second):
@@ -66,6 +69,12 @@ func TestFetchingNewOnceStarted(t *testing.T) {
 	}
 	release <- struct{}{}
 	waitFetchingNew(t)
+
+	FetchNewBehind(5 * time.Second)
+	waitFetchingNew(t)
+	if calls := asked.Load(); calls != 1 {
+		t.Fatalf("rechecking after publication asked the vendor %d times in total, want 1", calls)
+	}
 
 	// the page asks again with the list in: nothing is due, nothing runs
 	FetchNewBehind(5 * time.Second)

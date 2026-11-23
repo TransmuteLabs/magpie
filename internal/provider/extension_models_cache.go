@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -37,6 +39,7 @@ type extensionModelSnapshot struct {
 	key         string
 	rootVersion uint64
 	rootDigest  [sha256.Size]byte
+	fetchedAt   time.Time
 	models      []sdk.Model
 	bytes       int
 }
@@ -59,7 +62,14 @@ func (memo *extensionModelMemo) Load(key string, rootVersion uint64, rootDigest 
 func (memo *extensionModelMemo) Store(snapshot extensionModelSnapshot) {
 	memo.mu.Lock()
 	defer memo.mu.Unlock()
-	memo.remove(memo.entries[snapshot.key])
+	if prior := memo.entries[snapshot.key]; prior != nil {
+		previous := prior.Value.(extensionModelSnapshot)
+		if snapshot.rootVersion == previous.rootVersion && snapshot.rootDigest == previous.rootDigest &&
+			snapshot.fetchedAt.Before(previous.fetchedAt) {
+			snapshot.fetchedAt = previous.fetchedAt
+		}
+		memo.remove(prior)
+	}
 	if snapshot.bytes > extensionModelCacheBytes {
 		return
 	}
@@ -196,6 +206,36 @@ func extensionModelsJSON(body []byte, target any) error {
 		return errors.New("extension model catalog is unreadable")
 	}
 	return nil
+}
+
+func (binding *extensionAccount) checkedModelCatalog(ctx context.Context) (extensionModelSnapshot, error) {
+	snapshot, publish, err := binding.readModelCatalog(ctx)
+	if err != nil {
+		return extensionModelSnapshot{}, err
+	}
+	if err := binding.checkSelected(ctx, true); err != nil {
+		return extensionModelSnapshot{}, err
+	}
+	if publish {
+		extensionModelCache.Store(snapshot)
+	}
+	return snapshot, nil
+}
+
+func (binding *extensionAccount) modelCatalogFetched(ctx context.Context) (string, time.Time, error) {
+	key := binding.modelCatalogKey()
+	snapshot, err := binding.checkedModelCatalog(ctx)
+	if err != nil || snapshot.rootVersion == 0 || !snapshot.fetchedAt.IsZero() {
+		return key, snapshot.fetchedAt, err
+	}
+	info, err := os.Lstat(binding.host.Store().ModelCatalogPath(binding.scope.Plugin, key))
+	if err != nil {
+		return key, time.Time{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return key, time.Time{}, errors.New("extension model catalog root is unavailable")
+	}
+	return key, info.ModTime(), nil
 }
 
 func (binding *extensionAccount) readModelCatalog(ctx context.Context) (extensionModelSnapshot, bool, error) {

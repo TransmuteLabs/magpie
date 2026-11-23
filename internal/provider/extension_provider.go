@@ -258,17 +258,19 @@ func extensionPolicies(providers []Provider) ([]savedLogin, error) {
 }
 
 func extensionAccounts() []Provider {
-	return extensionAccountsContext(context.Background())
+	providers, _ := extensionAccountsContext(context.Background())
+	return providers
 }
 
-func extensionAccountsContext(ctx context.Context) []Provider {
-	providers, _, err := providerExtensionsContext(ctx)
+func extensionAccountsContext(ctx context.Context) ([]Provider, bool) {
+	inventory, err := providerExtensionInventoryContext(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Printf("extension providers unavailable: %v", err)
 		}
-		return nil
+		return nil, false
 	}
+	providers := inventory.providers
 	seen := map[string]int{}
 	out := []Provider{}
 	for _, provider := range providers {
@@ -281,11 +283,12 @@ func extensionAccountsContext(ctx context.Context) []Provider {
 	}
 	for index := range out {
 		primary := out[index]
+		primary.Account.extensionPeers = providers
 		out[index].Account.extensionList = func(ctx context.Context) []catalog.Model {
 			return extensionServedModelsContext(ctx, primary, providers)
 		}
 	}
-	return out
+	return out, inventory.complete
 }
 
 func extensionServedModelsContext(ctx context.Context, primary Provider, providers []Provider) []catalog.Model {
@@ -313,6 +316,45 @@ func extensionServedModelsContext(ctx context.Context, primary Provider, provide
 		}
 	}
 	return out
+}
+
+func (binding *extensionAccount) discoversModels() bool {
+	return !binding.descriptor.AccountOnly() && binding.manifest.Contract.Has(sdk.ModelDiscovery)
+}
+
+func (p Provider) extensionModelAccounts() []Provider {
+	if p.Off || p.Hidden {
+		return nil
+	}
+	var accounts []Provider
+	if p.Account.extension.on() {
+		accounts = append(accounts, p)
+	}
+	for _, peer := range p.Account.extensionPeers {
+		if peer.ID == p.ID && peer.Account.User != p.Account.User && peer.Account.extension.on() {
+			accounts = append(accounts, withPicks(peer, p))
+		}
+	}
+	return accounts
+}
+
+func checkExtensionModelRefresh(ctx context.Context, identity extensionPublicIdentity) error {
+	stored, err := readCurrentProviders()
+	if err != nil {
+		return err
+	}
+	for _, p := range stored.Providers {
+		if p.ID == identity.provider && (p.Off || p.Hidden || hasEndpoint(p)) {
+			return errors.New("extension provider is unavailable for model discovery")
+		}
+	}
+	if identity.user != "" {
+		if err := requireExtensionAccountDiscovery(ctx); err != nil {
+			return err
+		}
+		return checkExtensionLoginForExecute(ctx, identity)
+	}
+	return ctx.Err()
 }
 
 func extensionProvider(binding *extensionAccount) Provider {
@@ -560,15 +602,9 @@ func (binding *extensionAccount) selectedModels(ctx context.Context) ([]catalog.
 		models, err := binding.projectModels(binding.descriptor.Models)
 		return models, false, err
 	}
-	snapshotModels, publish, err := binding.readModelCatalog(ctx)
+	snapshotModels, err := binding.checkedModelCatalog(ctx)
 	if err != nil {
 		return nil, false, err
-	}
-	if err := binding.checkSelected(ctx, true); err != nil {
-		return nil, false, err
-	}
-	if publish {
-		extensionModelCache.Store(snapshotModels)
 	}
 	models, known := snapshotModels.models, snapshotModels.rootVersion != 0
 	if !known {
@@ -630,25 +666,61 @@ func (binding *extensionAccount) projectModels(models []sdk.Model) ([]catalog.Mo
 }
 
 func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Model, error) {
+	models, _, err := binding.fetchModelsWithPolicy(ctx, nil, nil)
+	return models, err
+}
+
+type extensionModelDue func(key string, fetchedAt time.Time) bool
+
+func (binding *extensionAccount) fetchModelsWithPolicy(ctx context.Context, check extensionRefreshPolicy, due extensionModelDue) ([]catalog.Model, bool, error) {
 	if binding.descriptor.AccountOnly() {
-		return binding.modelsContext(ctx)
+		models, err := binding.modelsContext(ctx)
+		return models, false, err
 	}
-	prepared, err := binding.prepare(ctx)
+	selected, err := binding.checkedSelection(ctx, due != nil || binding.manifest.Contract.Version.Minor >= 9)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if due != nil {
+		pinned := *binding
+		pinned.scope, pinned.generation = selected.scope, nil
+		key, at, err := pinned.modelCatalogFetched(ctx)
+		if err != nil || !due(key, at) {
+			return nil, false, err
+		}
+	}
+	if check != nil {
+		if err := check(ctx, binding.identity()); err != nil {
+			return nil, false, err
+		}
+	}
+	prepared, err := binding.prepareSelection(ctx, selected, check)
+	if err != nil {
+		return nil, false, err
 	}
 	binding = prepared
 	if !binding.manifest.Contract.Has(sdk.ModelDiscovery) {
-		return binding.modelsContext(ctx)
+		models, err := binding.modelsContext(ctx)
+		return models, false, err
 	}
 	if binding.manifest.Contract.Version.Minor < 9 {
 		if err := binding.checkModelRevision(ctx); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
+	models, err := binding.discoverModels(ctx, check)
+	return models, true, err
+}
+
+func (binding *extensionAccount) discoverModels(ctx context.Context, check extensionRefreshPolicy) ([]catalog.Model, error) {
 	before, err := binding.host.Store().StateGetContext(ctx, sdk.Scope{Plugin: binding.scope.Plugin}, binding.modelCatalogKey())
 	if err != nil {
 		return nil, err
+	}
+	if check != nil {
+		if err := check(ctx, binding.identity()); err != nil {
+			return nil, err
+		}
 	}
 	ctx, err = extensionNetworkContext(extensionhost.WithSubscriptionOwnerRevision(ctx, binding.identity().revision), binding.scope)
 	if err != nil {
@@ -667,8 +739,9 @@ func (binding *extensionAccount) fetchModels(ctx context.Context) ([]catalog.Mod
 	}
 	snapshotModels, err := binding.writeModelCatalog(ctx, result, before)
 	if err == nil {
+		snapshotModels.fetchedAt = time.Now()
+		extensionModelCache.Store(snapshotModels)
 		if snapshotModels.rootVersion != before.Version {
-			extensionModelCache.Store(snapshotModels)
 			Changed()
 		}
 	} else if conflict, ok := errors.AsType[*sdk.Error](err); !ok || conflict.Code != "conflict" {

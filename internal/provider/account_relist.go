@@ -42,32 +42,49 @@ func KeepAccountsListed(ctx context.Context) {
 }
 
 // relistAccounts fetches the list of each account whose list is older than
-// accountListAge at now, and answers the ids it asked. An account with no
-// list yet is FetchNew's; a plugin's is listed by KeepPluginsListed; one
-// switched off isn't asked. A fetch that fails keeps the list there was
+// accountListAge at now, and answers the ids it asked. It also asks SDK
+// accounts missing the catalog for their current selection. FetchNew asks
+// for a built-in account's first list. KeepPluginsListed lists community
+// plugins. A fetch that fails keeps the list there was
 // (the fetch saves only what it got), and is tried at the next look.
 func relistAccounts(ctx context.Context, now time.Time) []string {
 	var asked []string
-	for _, p := range All() {
+	for _, p := range modelRefreshProviders(AllContext(ctx)) {
 		if p.Off || p.Account == nil || p.Account.fetch == nil || p.IsPlugin() || !p.Ready() {
-			continue
-		}
-		at, ok := p.Fetched()
-		if !ok || now.Sub(at) < accountListAge {
 			continue
 		}
 		if ctx.Err() != nil {
 			return asked
 		}
-		asked = append(asked, p.ID)
+		if !p.IsExtension() {
+			at, ok := p.Fetched()
+			if !ok || now.Sub(at) < accountListAge {
+				continue
+			}
+		}
 		fctx, cancel := context.WithTimeout(ctx, time.Minute)
-		ms, err := p.Fetch(fctx)
+		var count int
+		var tried bool
+		var err error
+		if p.IsExtension() {
+			count, tried, err = p.fetchExtensionModelAccount(fctx, func(_ string, fetchedAt time.Time) bool {
+				return fetchedAt.IsZero() || now.Sub(fetchedAt) >= accountListAge
+			})
+		} else {
+			models, fetchErr := p.Fetch(fctx)
+			count, tried, err = len(models), true, fetchErr
+		}
 		cancel()
+		if tried {
+			asked = append(asked, p.ID)
+		}
 		if err != nil {
 			log.Printf("%s: fetching its list again failed: %s (the last list stays)", p.ID, err)
 			continue
 		}
-		log.Printf("%s: fetched its list again, %d models", p.ID, len(ms))
+		if tried {
+			log.Printf("%s: fetched its list again, %d models", p.ID, count)
+		}
 	}
 	return asked
 }

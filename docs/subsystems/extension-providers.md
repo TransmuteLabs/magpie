@@ -208,7 +208,19 @@ subscription and the existing SDK provider ID unchanged.
 of models available to its enabled accounts; `Account.Lists` retains each
 account's own restriction. `Account.fetch` invokes `provider.models` and
 publishes a validated account-specific snapshot. A failed refresh keeps the
-previous snapshot. Cache namespaces use `Manager.Namespace` and distinguish
+previous snapshot. Refreshing a public SDK provider asks every enabled
+account through its own binding. Startup checks for missing snapshots.
+Periodic refresh checks for missing or old snapshots for the current account
+selection, including after a credential generation changes. These checks
+wait for any active public refresh of that account and then recheck its
+catalog. The Providers page reads the account inventory in the background.
+It reuses a recent inventory check only if it completed without a change in
+provider generation. An unreadable catalog leaves discovery unresolved. A
+confirmed empty snapshot satisfies a first-fetch check.
+
+A successful refresh of an unchanged snapshot records its time in the
+in-process cache. A cold cache uses the validated root's modification time.
+Cache namespaces use `Manager.Namespace` and distinguish
 store roots, package revisions, configuration versions, accounts and
 credential generations. The validated SDK catalog is also persisted in the
 existing private Store, so a fresh CLI can select dynamically discovered

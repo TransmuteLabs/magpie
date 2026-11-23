@@ -120,11 +120,12 @@ type Account struct {
 	pluginKey string // the account's key in plugin-auth.json
 	// wasHost is the built-in's API host, for a moved one's to show as it
 	// did; moved says there is one to show ("" too: Zed's had none).
-	wasHost       string
-	moved         bool
-	transport     func(req *http.Request) (*http.Response, error)
-	extension     *extensionAccount
-	extensionList func(context.Context) []catalog.Model
+	wasHost        string
+	moved          bool
+	transport      func(req *http.Request) (*http.Response, error)
+	extension      *extensionAccount
+	extensionList  func(context.Context) []catalog.Model
+	extensionPeers []Provider
 	// clientFor is the client a request of the account's goes through in
 	// place of the one it was given, nil for that one (zcode_start.go).
 	clientFor func(req *http.Request) *http.Client
@@ -975,12 +976,15 @@ func refreshFailed(status int, agent, msg string) error {
 
 // Accounts lists the signed-in agents as providers.
 func Accounts() []Provider {
-	return accountsContext(context.Background())
+	providers, _ := accountsContext(context.Background())
+	return providers
 }
 
-func accountsContext(ctx context.Context) []Provider {
+func accountsContext(ctx context.Context) ([]Provider, bool) {
 	if settings.AccountDiscoveryOff() {
-		return append(pluginAccountsContext(ctx), extensionAccountsContext(ctx)...)
+		plugins := pluginAccountsContext(ctx)
+		extensions, complete := extensionAccountsContext(ctx)
+		return append(plugins, extensions...), complete
 	}
 	rememberLogins(false)
 	home, _ := os.UserHomeDir()
@@ -1008,7 +1012,9 @@ func accountsContext(ctx context.Context) []Provider {
 	}
 	// a built-in moved onto its plugin is the plugin's now (migrate.go)
 	out = slices.DeleteFunc(out, func(p Provider) bool { return PluginServes(p.ID) })
-	return append(placeMoved(out, pluginAccountsContext(ctx)), extensionAccountsContext(ctx)...)
+	out = placeMoved(out, pluginAccountsContext(ctx))
+	extensions, complete := extensionAccountsContext(ctx)
+	return append(out, extensions...), complete
 }
 
 // builtinOrder is the built-ins' ids in the order Accounts lists them.
