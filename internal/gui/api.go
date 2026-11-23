@@ -1038,14 +1038,15 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 		}
 	}
 	searchState(&s, providers, models)
-	s.ImageGenAuto, s.ImageGenModels, s.ImageGenMissing = gateway.AutoDrawer(), []modelRef{}, gateway.DrawerMissing()
+	var drawers gateway.SettingsDrawers
+	s.ImageGenAuto, s.ImageGenModels, s.ImageGenMissing = drawers.Auto(providers), []modelRef{}, drawers.Missing()
 	for _, p := range providers {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
 		// those unticked in its editor left out, but the one picked here
 		// (321sssrt on X): a hidden pick still draws, and shows as picked
-		for _, m := range gateway.Drawers(p) {
+		for _, m := range drawers.Models(p) {
 			if p.DrawerHidden(m.ID) && gateway.ListedDrawer(s.ImageGen) != p.ID+"/"+m.ID {
 				continue
 			}
@@ -1062,13 +1063,13 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 	// listed from the groups themselves
 	listed := map[string]bool{}
 	for _, e := range models {
-		if e.Group != "" && gateway.GroupDraws(e.ID) {
+		if e.Group != "" && drawers.GroupDraws(e.ID) {
 			listed[e.ID] = true
 			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: e.ID, Name: e.Name, PName: e.Group})
 		}
 	}
 	for _, g := range groups {
-		if ref := g.Ref(); !g.Hidden && !g.Disabled && !listed[ref] && gateway.GroupDraws(ref) {
+		if ref := g.Ref(); !g.Hidden && !g.Disabled && !listed[ref] && drawers.GroupDraws(ref) {
 			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: ref, Name: cmp.Or(g.Name, g.ID), PName: g.ID})
 		}
 	}

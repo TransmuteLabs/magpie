@@ -122,18 +122,22 @@ func DrawerMissing() string { return drawerMissing(settings.Shared().ImageGen) }
 func DrawerMissingOf(v string) string { return drawerMissing(v) }
 
 func drawerMissing(v string) string {
+	return drawerMissingWith(v, Drawers)
+}
+
+func drawerMissingWith(v string, drawers func(provider.Provider) []catalog.Model) string {
 	if !provider.IsGroupRef(v) {
 		if v == "" || v == "off" {
 			return ""
 		}
-		if _, _, ok := resolveDrawing(v); ok {
+		if _, _, ok := resolveDrawingWith(v, drawers); ok {
 			return ""
 		}
 		return v
 	}
 	// a group of image models only is no model agents are offered, so
 	// Resolve doesn't take it: it is missing when none of it draws
-	if !GroupDraws(v) {
+	if !groupDrawsWith(v, drawers) {
 		return v
 	}
 	return ""
@@ -144,12 +148,17 @@ func drawerMissing(v string) string {
 // picked in Settings › Models › Images, and draws on those members in its routing's
 // order, moving on while one fails (drawingGroup, #2005).
 func GroupDraws(ref string) bool {
-	_, ms, ok := drawingMembers(ref)
+	return groupDrawsWith(ref, Drawers)
+}
+
+func groupDrawsWith(ref string, drawers func(provider.Provider) []catalog.Model) bool {
+	draws := func(p provider.Provider, model string) bool { return drawsModelWith(p, model, drawers) }
+	_, ms, ok := provider.FindDrawingGroup(ref, draws)
 	if !ok {
 		return false
 	}
 	for _, m := range ms {
-		if drawsModel(m.Provider, m.Model) {
+		if draws(m.Provider, m.Model) {
 			return true
 		}
 	}
@@ -167,17 +176,26 @@ func drawingMembers(ref string) (provider.Group, []provider.Member, bool) {
 // drawsModel is whether model is one of p's Drawers, a ChatGPT account's
 // other GPT Image names as its one (ListedDrawer).
 func drawsModel(p provider.Provider, model string) bool {
+	return drawsModelWith(p, model, Drawers)
+}
+
+func drawsModelWith(p provider.Provider, model string, drawers func(provider.Provider) []catalog.Model) bool {
 	_, id, _ := strings.Cut(ListedDrawer(p.ID+"/"+model), "/")
-	return slices.ContainsFunc(Drawers(p), func(m catalog.Model) bool { return m.ID == id })
+	return slices.ContainsFunc(drawers(p), func(m catalog.Model) bool { return m.ID == id })
 }
 
 func resolveDrawing(id string) (provider.Provider, string, bool) {
+	return resolveDrawingWith(id, Drawers)
+}
+
+func resolveDrawingWith(id string, drawers func(provider.Provider) []catalog.Model) (provider.Provider, string, bool) {
+	draws := func(p provider.Provider, model string) bool { return drawsModelWith(p, model, drawers) }
 	if provider.IsGroupRef(id) {
 		// its first member that draws: a group of image models only
 		// isn't among the models agents are offered, which Resolve reads
-		if _, ms, ok := drawingMembers(id); ok {
+		if _, ms, ok := provider.FindDrawingGroup(id, draws); ok {
 			for _, m := range ms {
-				if drawsModel(m.Provider, m.Model) {
+				if draws(m.Provider, m.Model) {
 					return m.Provider, m.Model, true
 				}
 			}
@@ -191,7 +209,7 @@ func resolveDrawing(id string) (provider.Provider, string, bool) {
 		// an image model of a key kept for them: Select none serves no
 		// chat model, yet the key still draws (netube99 on X, minimax-cn)
 		pid, model, _ := strings.Cut(id, "/")
-		if p, err := provider.Find(pid); err == nil && p.On() && !p.DecideOnly() && drawsModel(*p, model) {
+		if p, err := provider.Find(pid); err == nil && p.On() && !p.DecideOnly() && draws(*p, model) {
 			return *p, model, true
 		}
 		return provider.Resolve(id)
@@ -200,7 +218,7 @@ func resolveDrawing(id string) (provider.Provider, string, bool) {
 		if !p.On() || p.DecideOnly() {
 			continue
 		}
-		for _, m := range Drawers(p) {
+		for _, m := range drawers(p) {
 			if m.ID == id {
 				return p, m.ID, true
 			}
@@ -356,6 +374,44 @@ func drawsCodex(p provider.Provider) bool {
 // subscription's Grok Imagine, a WorkBuddy plan's those its config lists.
 func Drawers(p provider.Provider) []catalog.Model { return DrawersOf(p, p.Available) }
 
+type SettingsDrawers struct {
+	models map[*provider.Account][]catalog.Model
+}
+
+func (list *SettingsDrawers) Models(p provider.Provider) []catalog.Model {
+	if !p.IsExtension() {
+		return Drawers(p)
+	}
+	if models, ok := list.models[p.Account]; ok {
+		return models
+	}
+	available := false
+	models := DrawersOf(p, func() []catalog.Model {
+		models := p.Available()
+		available = len(models) != 0
+		return models
+	})
+	if available {
+		if list.models == nil {
+			list.models = make(map[*provider.Account][]catalog.Model)
+		}
+		list.models[p.Account] = models
+	}
+	return models
+}
+
+func (list *SettingsDrawers) GroupDraws(ref string) bool {
+	return groupDrawsWith(ref, list.Models)
+}
+
+func (list *SettingsDrawers) Missing() string {
+	return drawerMissingWith(settings.Shared().ImageGen, list.Models)
+}
+
+func (list *SettingsDrawers) Auto(providers []provider.Provider) string {
+	return autoDrawerWith(providers, list.Models)
+}
+
 // DrawersOf is Drawers with p's model list from avail, called only when
 // it is wanted: the Providers page has each provider's list at hand, and
 // reading it again for each was 15 MB of what twenty window polls
@@ -499,7 +555,10 @@ func drawersOf(p provider.Provider) []catalog.Model {
 // one still draws with it (resolveDrawing reads Drawers), as does a
 // Settings › Models › Images pick of one made before it was hidden.
 func OfferedDrawers(p provider.Provider) []catalog.Model {
-	ms := Drawers(p)
+	return offeredDrawers(p, Drawers(p))
+}
+
+func offeredDrawers(p provider.Provider, ms []catalog.Model) []catalog.Model {
 	if len(p.HiddenDrawers) == 0 {
 		return ms
 	}
@@ -541,6 +600,10 @@ func kindModel(p provider.Provider, id string) catalog.Model {
 // with no price is costed as the newest priced one, as OpenAI has priced each
 // alike (gpt-image-2 to 2.6: $5 in, $30 out). "" when none can.
 func AutoDrawer() string {
+	return autoDrawerWith(provider.All(), Drawers)
+}
+
+func autoDrawerWith(providers []provider.Provider, drawers func(provider.Provider) []catalog.Model) string {
 	type cand struct {
 		ref, released string
 		cost          float64
@@ -550,14 +613,14 @@ func AutoDrawer() string {
 	var cands []cand
 	newest, newestPriced := gptImageGen{}, gptImageGen{}
 	familyCost, haveFamilyCost := 0.0, false
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if !p.On() || p.DecideOnly() || drawsWorkBuddy(p) {
 			// WorkBuddy's images cost the plan's credits: it draws only
 			// with its model picked or named
 			continue
 		}
 		// one unticked in its editor isn't Automatic's choice
-		for _, m := range OfferedDrawers(p) {
+		for _, m := range offeredDrawers(p, drawers(p)) {
 			if drawsCodex(p) && m.ID != codexDrawer {
 				// Codex CLI draws with gpt-image-2 only; a plan may be
 				// refused the others (chatgpt.com: 403, #545)

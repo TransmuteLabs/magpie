@@ -52,6 +52,12 @@ Folding the list or leaving the page does not transfer focus to a new list.
 
 ### Settings publication across responses
 
+In one Settings response, `SettingsDrawers` shares an SDK provider's checked
+image-generation list between the Automatic pick, the offered models, and both
+group checks and the missing-pick check. An empty source model list is read again
+if needed. Each subsequent response builds its own list from the current SDK
+selection.
+
 The common `api`/`prefDeliver` owner in
 [`app.js`](../../internal/gui/assets/app.js) keeps Settings authority across
 cached and fresh state reads and declared Settings mutations. A response that
