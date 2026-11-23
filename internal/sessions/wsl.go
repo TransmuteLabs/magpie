@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"os"
@@ -91,15 +92,18 @@ var wslAgents = []struct{ agent, dir string }{
 }
 
 // wslScan lists the session files under a distro's home.
-func wslScan(h WSLHome, agents []string) []file {
+func wslScan(h WSLHome, agents []string, allowed func(string) bool) []file {
 	var out []file
 	for _, a := range wslAgents {
-		if !slices.Contains(agents, a.agent) {
+		if !slices.Contains(agents, a.agent) || !allowed(a.agent) {
 			continue
 		}
 		dir := filepath.Join(h.Home, a.dir)
 		if h.Open != nil {
 			dir = h.Open(dir)
+			if !allowed(a.agent) {
+				continue
+			}
 		}
 		switch a.agent {
 		case "claude":
@@ -178,6 +182,11 @@ type wslListing struct {
 	Running bool       `json:"-"` // as the last listing found it; false until one has
 }
 
+type wslRead struct {
+	agent string
+	calls bool
+}
+
 var wslSess struct {
 	sync.Mutex
 	gen    uint64 // Reset's: a listing started before one is dropped
@@ -188,7 +197,7 @@ var wslSess struct {
 	done   chan struct{}          // the listing under way, nil when none
 	kept   []byte                 // what sessions-wsl.json holds
 	listed map[string]time.Time
-	queued []string
+	queued []wslRead
 }
 
 var (
@@ -247,7 +256,7 @@ func wslFilesAs(calls bool, agents ...string) []file {
 		}
 		ready = ready && cached
 	}
-	wait := wslQueueLocked(needed)
+	wait := wslQueueLocked(needed, calls)
 	if ready {
 		wait = nil // what was found before is read now; the new listing comes next time
 	}
@@ -308,10 +317,11 @@ func wslFilesAs(calls bool, agents ...string) []file {
 	return out
 }
 
-func wslQueueLocked(agents []string) chan struct{} {
+func wslQueueLocked(agents []string, calls bool) chan struct{} {
 	for _, agent := range agents {
-		if !slices.Contains(wslSess.queued, agent) {
-			wslSess.queued = append(wslSess.queued, agent)
+		read := wslRead{agent, calls}
+		if !slices.Contains(wslSess.queued, read) {
+			wslSess.queued = append(wslSess.queued, read)
 		}
 	}
 	if wslSess.done == nil && len(wslSess.queued) != 0 {
@@ -329,18 +339,18 @@ func wslQueueLocked(agents []string) chan struct{} {
 // one's as they were. With no distros said at all (wsl.exe didn't answer)
 // every listing is kept, cold. A wsl.exe that answered with no distro an
 // agent is in (WSLListed) lets them all go.
-func wslList(gen uint64, done chan struct{}, agents []string) {
+func wslList(gen uint64, done chan struct{}, reads []wslRead) {
 	defer close(done)
-	for len(agents) != 0 {
-		wslListSelected(gen, agents)
+	for len(reads) != 0 {
+		wslListSelected(gen, reads)
 		wslSess.Lock()
 		if gen != wslSess.gen {
 			wslSess.Unlock()
 			return
 		}
-		wslSess.queued = slices.DeleteFunc(wslSess.queued, func(agent string) bool { return slices.Contains(agents, agent) })
-		agents = slices.Clone(wslSess.queued)
-		if len(agents) == 0 && wslSess.done == done {
+		wslSess.queued = slices.DeleteFunc(wslSess.queued, func(read wslRead) bool { return slices.Contains(reads, read) })
+		reads = slices.Clone(wslSess.queued)
+		if len(reads) == 0 && wslSess.done == done {
 			wslSess.done = nil
 		} else {
 			wslSess.at = time.Now()
@@ -349,10 +359,32 @@ func wslList(gen uint64, done chan struct{}, agents []string) {
 	}
 }
 
-func wslListSelected(gen uint64, agents []string) {
-	agents = slices.DeleteFunc(slices.Clone(agents), func(agent string) bool { return !Reads(agent) })
+func wslListSelected(gen uint64, reads []wslRead) {
+	if !wslLooking() {
+		return
+	}
+	var agents []string
+	for _, read := range reads {
+		if Reads(read.agent) && !slices.Contains(agents, read.agent) {
+			agents = append(agents, read.agent)
+		}
+	}
 	if len(agents) == 0 {
 		return
+	}
+	blocked := map[string]bool{}
+	allowed := func(agent string) bool {
+		if blocked[agent] {
+			return false
+		}
+		ctx := context.Background()
+		authority, err := inspectHistoryPublication(ctx)
+		if err == nil && (authority.native(agent) ||
+			slices.Contains(reads, wslRead{agent, true}) && authority.jsonlAccounting(ctx)[agent]) {
+			return true
+		}
+		blocked[agent] = true
+		return false
 	}
 	started := time.Now()
 	homes := WSLHomes()
@@ -378,8 +410,10 @@ func wslListSelected(gen uint64, agents []string) {
 			continue
 		}
 		l := &wslListing{Home: h.Home, Running: true, Files: []wslEntry{}}
-		for _, f := range wslScan(h, agents) {
-			l.Files = append(l.Files, wslEntryOf(f))
+		for _, f := range wslScan(h, agents, allowed) {
+			if !blocked[f.agent] {
+				l.Files = append(l.Files, wslEntryOf(f))
+			}
 		}
 		lists[h.Distro] = l
 	}
@@ -393,12 +427,16 @@ func wslListSelected(gen uint64, agents []string) {
 			lists[n] = &c
 		}
 	}
+	agents = slices.DeleteFunc(agents, func(agent string) bool { return !allowed(agent) })
 	wslSess.Lock()
 	defer wslSess.Unlock()
 	if gen != wslSess.gen {
 		return
 	}
 	for name, listing := range lists {
+		if listing.Running {
+			listing.Files = slices.DeleteFunc(listing.Files, func(entry wslEntry) bool { return blocked[entry.Agent] })
+		}
 		if previous := wslSess.lists[name]; previous != nil && previous.Home == listing.Home {
 			if listing.Running {
 				for _, entry := range previous.Files {
@@ -556,7 +594,7 @@ func wslRelistNow(items []moved) {
 		<-busy
 	}
 	wslSess.Lock()
-	done := wslQueueLocked(agents)
+	done := wslQueueLocked(agents, false)
 	wslSess.Unlock()
 	select {
 	case <-done:

@@ -367,32 +367,32 @@ func (history CallHistory) callFiles(out []file, codex []file) []file {
 			lists = append(lists, list())
 		}
 	}
-	wsl := func(list func(...string) []file, agents ...string) []file {
+	wsl := func(agents ...string) []file {
 		agents = slices.DeleteFunc(agents, func(id string) bool { return !history.allows(id) })
 		if len(agents) == 0 {
 			return nil
 		}
-		return list(agents...)
+		return wslCallFiles(agents...)
 	}
 	add("claude", claudeFiles)
 	add("claude-desktop", claudeDesktopFiles)
-	lists = append(lists, codex, wsl(wslFiles, "claude", "codex"))
+	lists = append(lists, codex, wsl("claude", "codex"))
 	add("opencode", openCodeCallFiles)
 	add("zcode", zcodeCallFiles)
 	add("dsh", dshCallFiles)
 	add("minimax-code", minimaxCallFiles)
 	add("kimi", kimiCallFiles)
-	lists = append(lists, wsl(wslFiles, "kimi"))
+	lists = append(lists, wsl("kimi"))
 	add("pi", piFiles)
 	add("raft", raftFiles)
 	add("cindy", cindyFiles)
 	add("omp", ompFiles)
-	lists = append(lists, wsl(wslFiles, "pi", "raft", "omp"))
+	lists = append(lists, wsl("pi", "raft", "omp"))
 	add("codebuddy", codebuddyCallFiles)
 	add("workbuddy-ai", workbuddyAIFiles)
 	add("agy", agyCallFiles)
 	add("antigravity", antigravityCallFiles)
-	lists = append(lists, wsl(wslFiles, "antigravity"), wsl(wslCallFiles, "agy"))
+	lists = append(lists, wsl("antigravity"), wsl("agy"))
 	add("devin", devinCallFiles)
 	add("droid", droidFiles)
 	add("workbuddy", workbuddyCallFiles)

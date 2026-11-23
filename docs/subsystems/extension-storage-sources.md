@@ -117,8 +117,10 @@ reads, including under a stale view. This applies equally to JSONL and storage
 sources; adding a Pi source requires no agent-specific guard. Ordinary read
 consent remains a separate prerequisite. Late output filtering remains a
 publication check, since it cannot prevent a native SQLite reader writing SHM.
-Call accounting has its own reader contract and is not delegated by a history
-descriptor.
+The WSL refresh queue keeps the history or call-accounting purpose of each
+reader and checks current authority before opening its root. Call accounting
+uses its own reader contract, including the exception for a current JSONL
+binding with no rooted-storage claim.
 The owner decision reads both durable JSONL bindings and rooted-storage
 consents before consulting the module catalog. Missing or corrupt catalog
 data preserves those claims; unreadable claims make native history

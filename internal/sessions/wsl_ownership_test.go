@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/extension"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 func TestAstraNativeHistoryWSLSelectionPreventsDelegatedScan(t *testing.T) {
@@ -77,14 +81,32 @@ func TestWSLSelectionPrecedesEveryReaderOpen(t *testing.T) {
 }
 
 func TestWSLHistorySelectionKeepsIndependentAccounting(t *testing.T) {
-	wslDistro(t)
-	previous := sourceView.Load()
-	t.Cleanup(func() { sourceView.Store(previous) })
-	view := &sessionSourceView{epoch: sourceEpoch.Load(), owners: map[string]bool{"pi": true}}
-	sourceView.Store(view)
+	home, _ := wslDistro(t)
+	dir := t.TempDir()
+	manifest := sdk.Manifest{Schema: 1, ID: "fixture-wsl-source", Version: "1.0.0", Runtime: "exec", Entry: "worker.exe",
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: 6}, Capabilities: []sdk.Capability{sdk.SessionSource}},
+		SessionSources: []sdk.SessionSourceDescriptor{{ID: "history", Agent: "pi", Codec: "fixture-jsonl", Container: "jsonl",
+			Resume: "none", Stores: []sdk.SessionSourceStore{{Slot: "main", HomeRelativePath: ".fixture-wsl"}},
+			Layout: sdk.SessionSourceLayout{Kind: "flat", IDFrom: "filename-stem"}}}}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHistoryAuthority(t, filepath.Join(dir, sdk.ManifestFile), body)
+	if err := os.WriteFile(filepath.Join(dir, manifest.Entry), []byte("accounting must not start the worker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager := sourceManager()
+	entry, err := extension.NewCatalog(manager.Namespace()).Install(t.Context(), dir, func(context.Context, extension.Installed) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BindSessionSourceNative(t.Context(), manifest.ID, "history", entry.Revision); err != nil {
+		t.Fatal(err)
+	}
 	readers := []nativeHistoryReader{{wsl: []string{"pi", "claude"}}}
 	for pass := 0; pass < 2; pass++ {
-		lists := nativeHistoryLists(view, readers, wslFiles)
+		lists := nativeHistoryLists(sourceView.Load(), readers, wslFiles)
 		wslSettle()
 		var claude bool
 		for _, list := range lists {
@@ -99,13 +121,54 @@ func TestWSLHistorySelectionKeepsIndependentAccounting(t *testing.T) {
 			t.Fatalf("pass %d lost native Claude history", pass)
 		}
 		var pi bool
-		for _, entry := range piCallFiles() {
-			pi = pi || entry.agent == "pi" && entry.m().wsl == "Ubuntu"
+		for _, source := range CallSources() {
+			pi = pi || source.Agent == "pi" && under(source.Path, home)
 		}
 		wslSettle()
 		if !pi {
 			t.Fatalf("pass %d history delegation suppressed independent Pi accounting", pass)
 		}
+	}
+}
+
+func TestWSLQueuedHistoryRechecksOwnershipBeforeOpen(t *testing.T) {
+	home, _ := wslDistro(t)
+	claudeRoot, piRoot := filepath.Join(home, ".claude"), filepath.Join(home, ".pi", "agent")
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var enteredOnce, releaseOnce sync.Once
+	var opened []string
+	WSLHomes = func() []WSLHome {
+		return []WSLHome{{Distro: "Ubuntu", Home: home, Running: true, Open: func(path string) string {
+			opened = append(opened, path)
+			if path == claudeRoot {
+				enteredOnce.Do(func() { close(entered) })
+				<-release
+			}
+			return path
+		}}}
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		<-finished
+		wslSettle()
+	})
+	go func() {
+		defer close(finished)
+		nativeHistoryLists(sourceView.Load(), []nativeHistoryReader{{wsl: []string{"claude", "pi"}}}, wslFiles)
+	}()
+	select {
+	case <-entered:
+	case <-finished:
+		t.Fatal("queued native list never opened its Claude control")
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued native list did not start")
+	}
+	delegateHistoryForTest(t, "pi")
+	releaseOnce.Do(func() { close(release) })
+	<-finished
+	wslSettle()
+	if !slices.Contains(opened, claudeRoot) || slices.Contains(opened, piRoot) {
+		t.Fatalf("native queue opened %v after Pi history was delegated", opened)
 	}
 }
 

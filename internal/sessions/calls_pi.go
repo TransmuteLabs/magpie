@@ -46,14 +46,6 @@ import (
 // Sessions leaves them (written before its header), and a call is keyed by
 // its entry's id and time, so Calls counts one twice in no case.
 
-// piCallFiles are Pi's and omp's session files, here and in WSL.
-func piCallFiles() []file {
-	out := append(piFiles(), raftFiles()...)
-	out = append(out, cindyFiles()...)
-	out = append(out, ompFiles()...)
-	return append(out, wslFiles("pi", "raft", "omp")...)
-}
-
 // piGateway is whether a provider is magpie's own entry, in agent's files.
 func piGateway(agent, provider string) bool {
 	if provider == "magpie" || provider == "dial" {
