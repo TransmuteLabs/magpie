@@ -329,11 +329,12 @@ linked `MemoryOwner`.
   source's cancellation or deadline, leave the same conversation due.
 - A turn counts by what the user said, a user `text` part. WorkBuddy
   and its WorkBuddy AI and CodeBuddy Code variants write each turn as one
-  block containing `<system-reminder>` context and the words in
-  `<user_query>`. This format appears in both native files and gateway
-  requests. `wbTyped` extracts the query as user text and keeps the rest
-  as context. Native and gateway transcripts and titles use that split
-  (`TestWorkBuddyOneBlockTurnsAreSaid`, `TestGatewayOneBlockTurnSaid`).
+  block with a `<system-reminder data-role="user-context">` followed by
+  a `<user_query>`. `wbTyped` reads the query after the reminder's closing
+  line and keeps the reminder as context, including any tags inside it.
+  Native WorkBuddy-family files and recordings attributed to those agents
+  use that split for transcripts and titles. Ordinary input keeps its
+  literal text (`TestWorkBuddyOneBlockTurnsAreSaid`, `TestGatewayOneBlockTurnSaid`).
   Earlier builds treated the whole block as context and could mark the
   conversation done without reading it. The first distillation run at
   reading version 1 clears those three agents' old done marks once

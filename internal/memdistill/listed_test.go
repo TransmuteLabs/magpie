@@ -135,7 +135,9 @@ func TestGatewayWorkBuddyTurnsRead(t *testing.T) {
 	t.Cleanup(func() { sessions.SetGatewayRecording(false, true) })
 	block := func(q string) string {
 		return "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n" +
-			strings.Repeat("<identity_context>\nBe direct.\n</identity_context>\n", 200) + "</system-reminder>\n<user_query>" + q + "</user_query>"
+			"<identity_context>\n<user_query>example from context</user_query>\n</identity_context>\n" +
+			strings.Repeat("<identity_context>\nBe direct.\n</identity_context>\n", 200) +
+			"</system-reminder>\n<user_query>" + q + "</user_query>"
 	}
 	at := sb.at.Add(-2 * time.Hour)
 	first := []sessions.Part{{Role: "user", Kind: "text", Text: block("we release with make ship")}}
@@ -154,7 +156,8 @@ func TestGatewayWorkBuddyTurnsRead(t *testing.T) {
 	if err != nil || res.Read != 1 || len(sb.asked) != 1 || sb.asked[0] != "auto/m User: we release with make ship" {
 		t.Fatalf("%+v %v %q", res, err, sb.asked)
 	}
-	if !strings.Contains(user, "User: never use npm here, pnpm only") || strings.Contains(user, "identity_context") {
+	if !strings.Contains(user, "User: never use npm here, pnpm only") ||
+		strings.Contains(user, "identity_context") || strings.Contains(user, "example from context") {
 		t.Fatalf("asked: %.400q", user)
 	}
 }

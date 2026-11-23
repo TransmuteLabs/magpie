@@ -398,7 +398,7 @@ func gatewayFileTitle(path, agent, id string) (title string, whole bool) {
 		lines++
 		var turn GatewayTurn
 		if json.Unmarshal(scan.Bytes(), &turn) == nil && turn.Agent == agent && turn.Session == id {
-			if t := firstAsked(turn.Input); t != "" {
+			if t := firstAsked(agent, turn.Input); t != "" {
 				return t, true
 			}
 		}
@@ -411,15 +411,20 @@ func gatewayFileTitle(path, agent, id string) (title string, whole bool) {
 
 // firstAsked is the first thing the user wrote in a request: not a tag an
 // agent wraps its context in, nor an image.
-func firstAsked(parts []Part) string {
+func firstAsked(agent string, parts []Part) string {
+	buddy := isBuddy(agent)
 	for _, p := range parts {
 		if p.Role != "user" || p.Kind != "text" {
 			continue
 		}
 		s := strings.TrimSpace(p.Text)
-		if typed, _, ok := wbTyped(s); ok && strings.HasPrefix(s, "<") {
-			// WorkBuddy's context and the user's words in one block
-			s = typed
+		if buddy {
+			if typed, _, ok := wbTyped(s); ok {
+				if typed != "" {
+					return title(typed)
+				}
+				continue
+			}
 		}
 		if s == "" || strings.HasPrefix(s, "<") || strings.HasPrefix(s, "# AGENTS.md") || s == "[image]" {
 			continue

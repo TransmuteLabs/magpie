@@ -136,13 +136,30 @@ func TestWorkBuddyOneBlockTurnsAreSaid(t *testing.T) {
 	claude, _ := setup(t)
 	home := filepath.Join(filepath.Dir(claude), "home")
 	copyTree(t, "testdata/workbuddy-one-block", filepath.Join(home, ".workbuddy"))
-	var s Session
-	for _, x := range List(100) {
-		if x.Agent == "workbuddy" {
-			s = x
-		}
+	const literal = "Explain <user_query>example</user_query> in the spec."
+	const wrappedID = "ac189729-58d4-45b8-b973-667a852aa5cc"
+	const ordinaryID = "2bf0fdb4-a140-4f52-88d1-9d39d0415f67"
+	message, err := json.Marshal(literal)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s.ID != "ac189729-58d4-45b8-b973-667a852aa5cc" || !s.Transcript {
+	ordinaryPath := filepath.Join(WorkBuddyDir(), "projects", "ordinary", ordinaryID+".jsonl")
+	writeLines(t, ordinaryPath,
+		`{"id":"ask","timestamp":1791056334140,"type":"message","role":"user","content":[{"type":"input_text","text":`+
+			string(message)+`}],"sessionId":"`+ordinaryID+`","cwd":"/work/ordinary"}`,
+		`{"id":"answer","timestamp":1791056343193,"type":"message","role":"assistant","content":"Here is the explanation."}`)
+	listed := List(100)
+	ordinary := find(t, listed, "workbuddy", ordinaryID)
+	ordinaryTranscript, err := TranscriptOf(ordinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Title != literal || len(ordinaryTranscript.Parts) != 2 ||
+		ordinaryTranscript.Parts[0] != (Part{Role: "user", Kind: "text", Text: literal}) {
+		t.Errorf("literal query changed: title %q, transcript %+v", ordinary.Title, ordinaryTranscript.Parts)
+	}
+	s := find(t, listed, "workbuddy", wrappedID)
+	if !s.Transcript {
 		t.Fatalf("WorkBuddy's session not listed readable: %+v", s)
 	}
 	tr, err := TranscriptOf(s)
@@ -190,27 +207,50 @@ func TestGatewayOneBlockTurnSaid(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { SetGatewayRecording(false, true) })
-	block := "<system-reminder data-role=\"user-context\">\n<user_info>\nOS Version: darwin\n</user_info>\n</system-reminder>\n<user_query>你是啥模型</user_query>"
-	turn := GatewayTurn{Agent: "workbuddy", Session: "wb", Time: time.Now().Add(-time.Hour), Status: 200,
-		Input:  []Part{{Role: "system", Kind: "context", Text: "You are WorkBuddy."}, {Role: "user", Kind: "text", Text: block}},
-		Output: []Part{{Role: "assistant", Kind: "text", Text: "我是 WorkBuddy 里的 AI 助手。"}}}
-	if err := SaveGatewayTurn(turn); err != nil {
-		t.Fatal(err)
+	const reminder = "<system-reminder data-role=\"user-context\">\n" +
+		"<identity_context>\n<user_query>example from context</user_query>\n</identity_context>\n</system-reminder>"
+	const question = "你是啥模型"
+	const literal = "<user_query>example</user_query> is the tag to document."
+	block := reminder + "\n<user_query>" + question + "</user_query>"
+	contextPart := Part{Role: "user", Kind: "context", Text: reminder}
+	tests := []struct {
+		name, agent, input, title string
+		user                      []Part
+	}{
+		{name: "embedded_context_query", agent: "workbuddy", input: block, title: question,
+			user: []Part{contextPart, {Role: "user", Kind: "text", Text: question}}},
+		{name: "reminder_only", agent: "workbuddy-ai", input: reminder,
+			user: []Part{contextPart}},
+		{name: "literal_markup_in_query", agent: "codebuddy", title: literal,
+			input: reminder + "\n<user_query>" + literal + "</user_query>",
+			user:  []Part{contextPart, {Role: "user", Kind: "text", Text: literal}}},
+		{name: "unrelated_agent", agent: "pi", input: block,
+			user: []Part{{Role: "user", Kind: "text", Text: block}}},
 	}
-	tr, err := GatewayTranscript("workbuddy", "wb")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var said []string
-	for _, p := range tr.Parts {
-		if p.Role == "user" && p.Kind == "text" {
-			said = append(said, p.Text)
-		}
-	}
-	if !slices.Equal(said, []string{"你是啥模型"}) {
-		t.Fatalf("said %q: %+v", said, tr.Parts)
-	}
-	if got := GatewayTitle("workbuddy", "wb"); got != "你是啥模型" {
-		t.Fatalf("title %q", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			turn := GatewayTurn{Agent: tc.agent, Session: "wb", Time: time.Now().Add(-time.Hour), Status: 200,
+				Input:  []Part{{Role: "system", Kind: "context", Text: "Session context."}, {Role: "user", Kind: "text", Text: tc.input}},
+				Output: []Part{{Role: "assistant", Kind: "text", Text: "I can help."}}}
+			if err := SaveGatewayTurn(turn); err != nil {
+				t.Fatal(err)
+			}
+			tr, err := GatewayTranscript(turn.Agent, turn.Session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var user []Part
+			for _, part := range tr.Parts {
+				if part.Role == "user" {
+					user = append(user, part)
+				}
+			}
+			if !slices.Equal(user, tc.user) {
+				t.Errorf("user parts %+v, want %+v", user, tc.user)
+			}
+			if got := GatewayTitle(turn.Agent, turn.Session); got != tc.title {
+				t.Errorf("title %q, want %q", got, tc.title)
+			}
+		})
 	}
 }

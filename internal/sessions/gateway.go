@@ -426,6 +426,7 @@ func GatewayTranscriptContext(ctx context.Context, agent, id string) (Transcript
 		out.Cut = true
 	}
 	var previous, system []Part
+	buddy := isBuddy(agent)
 	for _, turn := range turns {
 		out.Captured++
 		out.Cut = out.Cut || turn.Cut
@@ -452,10 +453,8 @@ func GatewayTranscriptContext(ctx context.Context, agent, id string) (Transcript
 			fresh = input[len(previous):]
 		}
 		for _, p := range fresh {
-			// a turn WorkBuddy (or Cursor) sends as its context and the
-			// user's words in one block, as in its own files (wbTyped)
 			parts := []Part{p}
-			if p.Role == "user" && p.Kind == "text" && strings.HasPrefix(strings.TrimSpace(p.Text), "<") {
+			if buddy && p.Role == "user" && p.Kind == "text" {
 				if split, ok := wbSplit(p.Text); ok {
 					parts = split
 				}

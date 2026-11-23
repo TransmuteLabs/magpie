@@ -6,8 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
-
-	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // wbTranscript tells add what a WorkBuddy, WorkBuddy AI or CodeBuddy Code
@@ -116,37 +114,34 @@ func wbTexts(content json.RawMessage) []string {
 	return out
 }
 
-// wbQuery is what was typed in a user block WorkBuddy writes whole: its
-// <system-reminder> context first, then <user_query> with the words.
-var wbQuery = lazyre.New(`(?s)<user_query>(.*?)</user_query>`)
-
-// wbTyped is what was typed in a user block, its <user_query>s, and the
-// rest of it (WorkBuddy's context); ok is false when it names no
-// user_query. WorkBuddy writes a turn as one block, the context and the
-// query together, so a block read as context whole for its leading "<"
-// left every WorkBuddy session with nothing the user said, and memory's
-// "Learn from conversations" passed each one over (bxgz233 on X).
+// wbTyped recognizes WorkBuddy's user-context reminder and the query that
+// follows it. An incomplete recognized block remains context.
 func wbTyped(text string) (typed, rest string, ok bool) {
-	ms := wbQuery.FindAllStringSubmatchIndex(text, -1)
-	if len(ms) == 0 {
+	const reminderOpen = `<system-reminder data-role="user-context">`
+	const reminderClose = "\n</system-reminder>"
+	text = strings.TrimSpace(text)
+	body, startsReminder := strings.CutPrefix(text, reminderOpen)
+	if !startsReminder {
 		return "", text, false
 	}
-	var q []string
-	var b strings.Builder
-	at := 0
-	for _, m := range ms {
-		if t := strings.TrimSpace(text[m[2]:m[3]]); t != "" {
-			q = append(q, t)
-		}
-		b.WriteString(text[at:m[0]])
-		at = m[1]
+	openingTail, _, hasOpeningLine := strings.Cut(body, "\n")
+	if !hasOpeningLine || strings.TrimSpace(openingTail) != "" {
+		return "", text, false
 	}
-	b.WriteString(text[at:])
-	return strings.Join(q, "\n"), strings.TrimSpace(b.String()), true
+	contextBody, afterReminder, closesReminder := strings.Cut(body, reminderClose)
+	closingTail, query, hasQueryLine := strings.Cut(afterReminder, "\n")
+	if !closesReminder || !hasQueryLine || strings.TrimSpace(closingTail) != "" {
+		return "", text, true
+	}
+	query, opensQuery := strings.CutPrefix(strings.TrimSpace(query), "<user_query>")
+	typed, closesQuery := strings.CutSuffix(query, "</user_query>")
+	if !opensQuery || !closesQuery {
+		return "", text, true
+	}
+	return strings.TrimSpace(typed), text[:len(reminderOpen)+len(contextBody)+len(reminderClose)], true
 }
 
-// wbSplit is a user block as parts when it names a user_query: the rest
-// as context, then what was typed as text.
+// wbSplit returns the reminder context and any user text in a recognized block.
 func wbSplit(text string) ([]Part, bool) {
 	typed, rest, ok := wbTyped(text)
 	if !ok {
