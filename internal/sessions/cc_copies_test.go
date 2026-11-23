@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -859,6 +860,127 @@ func TestClaudeKeptUUIDsOfAFileWrittenOver(t *testing.T) {
 	mu.Unlock()
 	if kept != nil {
 		t.Error("the uuids kept of a file written over still stand")
+	}
+}
+
+func TestClaudeUUIDScanAvoidsFieldCopies(t *testing.T) {
+	setup(t)
+	const count = 1024
+	const fork = "fork-owner-for-membership"
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	var body strings.Builder
+	for index := range count {
+		fmt.Fprintf(&body, `{"type":"user","uuid":"0c0c0c0c-0000-4000-8000-%012d","forkedFrom":{"sessionId":%q}}`+"\n", index, fork)
+	}
+	body.WriteString(`{"type":"assistant","uuid":"message\u002did"}` + "\n")
+	body.WriteString(`{"type":"assistant","uuid":""}` + "\n")
+	body.WriteString(`{"type":"progress","uuid":"ignored","nested":{"type":"assistant"}}` + "\n")
+	body.WriteString(`{"type":"assistant","uuid":17}` + "\n")
+	body.WriteString(`{"type":"assistant","uuid":` + "\n")
+	body.WriteString(`{"type":"assistant","uuid":"first","uuid":"second"}` + "\n")
+	if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := file{path: path, size: info.Size(), mod: modOf(info.ModTime())}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(ccUUIDMemo, path)
+		delete(ccUUIDDirty, path)
+		mu.Unlock()
+	})
+	allocs := testing.AllocsPerRun(5, func() {
+		delete(ccUUIDMemo, path)
+		ccUUIDsOf(input)
+	})
+	got := ccUUIDsOf(input)
+	if len(got) != count+3 || !got.has("message-id") || !got.has("") || !got.has("first") ||
+		got.has("second") || got.has("ignored") || ccUUIDMemo[path].forked != fork {
+		t.Fatalf("membership after scan: count=%d, fork=%q", len(got), ccUUIDMemo[path].forked)
+	}
+	for index := range count {
+		id := fmt.Sprintf("0c0c0c0c-0000-4000-8000-%012d", index)
+		if !got.has(id) {
+			t.Fatalf("missing message %s", id)
+		}
+	}
+	t.Logf("%d message UUIDs: %.0f allocations per scan", count, allocs)
+	if allocs >= count/2 {
+		t.Fatalf("UUID scan allocated %.0f times for %d messages", allocs, count)
+	}
+}
+
+func TestClaudeListContextKeepsCopyMembership(t *testing.T) {
+	claude, _ := setup(t)
+	copyID := ccForkOther
+	ccForkFixture(t, claude,
+		[2]string{"original.jsonl", ccOriginal},
+		[2]string{"original.jsonl", copyID},
+		[2]string{"fork-on.jsonl", ccForkOn})
+	copyPath := filepath.Join(claude, "projects", "-w-proj", copyID+".jsonl")
+	keeper := filepath.Join(claude, "projects", "-w-proj", ccForkOn+".jsonl")
+	replacement, err := os.ReadFile(filepath.Join("testdata", "claude-forks", "fork-other.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(original) >= len(replacement) {
+		t.Fatal("replacement must be longer than the copy before padding")
+	}
+	original = append(original, strings.Repeat("\n", len(replacement)-len(original))...)
+	writeCopy := func(body []byte, mod time.Time) {
+		t.Helper()
+		if err := os.WriteFile(copyPath, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(copyPath, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copyTime := time.Now().Add(-30 * time.Minute)
+	writeCopy(original, copyTime)
+	list := func() map[string]Session {
+		t.Helper()
+		rows, err := ListContext(context.Background(), 400)
+		if err != nil {
+			t.Fatal(err)
+		}
+		project := map[string]Session{}
+		for _, row := range rows {
+			if row.Agent == "claude" && row.Cwd == "/w/proj" {
+				project[row.ID] = row
+			}
+		}
+		return project
+	}
+	wantCopies := []string{copyID, ccOriginal}
+	for _, phase := range []string{"cold", "warm", "append"} {
+		if phase == "append" {
+			ccKeeperTurn(t, keeper, ccForkOn, 1)
+		}
+		rows := list()
+		if row := rows[ccForkOn]; len(rows) != 1 || !slices.Equal(row.Copies, wantCopies) {
+			t.Fatalf("%s: %d rows, keeper copies %v, want %v", phase, len(rows), row.Copies, wantCopies)
+		}
+	}
+	writeCopy(replacement, copyTime.Add(time.Minute))
+	rows := list()
+	if len(rows) != 2 || rows[copyID].ParentSession != ccForkOn || !slices.Equal(rows[ccForkOn].Copies, []string{ccOriginal}) {
+		t.Fatalf("rewrite: %d rows, fork parent %q, keeper copies %v", len(rows), rows[copyID].ParentSession, rows[ccForkOn].Copies)
+	}
+	if err := SetReads(nil, map[string]bool{"claude": false}); err != nil {
+		t.Fatal(err)
+	}
+	if rows := list(); len(rows) != 0 {
+		t.Fatalf("listing after revocation has %d Claude rows", len(rows))
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unsafe"
 
 	"github.com/tidwall/gjson"
 )
@@ -293,12 +294,8 @@ func ccUUIDsOf(f file) uuidSet {
 		return m.set
 	}
 	off, err := scanThin(f.path, m.off, nil, thinClaude, func(b []byte, _, _ int64) bool {
-		if !bytes.Contains(b, ccUser) && !bytes.Contains(b, ccAssistant) {
-			return true
-		}
-		r := gjson.GetManyBytes(b, "type", "uuid")
-		if t := r[0].String(); (t == "user" || t == "assistant") && r[1].Type == gjson.String {
-			m.set.add(r[1].Str)
+		if key, ok := ccUUIDKeyOf(b); ok {
+			m.set[key] = struct{}{}
 			if m.forked == "" && bytes.Contains(b, ccForked) {
 				m.forked = gjson.GetBytes(b, "forkedFrom.sessionId").String()
 			}
@@ -312,6 +309,20 @@ func ccUUIDsOf(f file) uuidSet {
 	}
 	m.size, m.mod = f.size, f.mod.UnixNano()
 	return m.set
+}
+
+func ccUUIDKeyOf(b []byte) ([16]byte, bool) {
+	if !bytes.Contains(b, ccUser) && !bytes.Contains(b, ccAssistant) {
+		return [16]byte{}, false
+	}
+	line := unsafe.String(unsafe.SliceData(b), len(b))
+	switch gjson.Get(line, "type").String() {
+	case "user", "assistant":
+		if id := gjson.Get(line, "uuid"); id.Type == gjson.String {
+			return uuidKey(id.Str), true
+		}
+	}
+	return [16]byte{}, false
 }
 
 // ccJoin is copies and branches (ccFamily) in one map, each by the key of
@@ -387,14 +398,14 @@ func ccRest(copyFile, keeper file) *state {
 	s := &state{}
 	ids := [][16]byte{}
 	_, err := scanThin(copyFile.path, 0, nil, thinClaude, func(b []byte, _, _ int64) bool {
-		if !bytes.Contains(b, ccUser) && !bytes.Contains(b, ccAssistant) {
+		key, ok := ccUUIDKeyOf(b)
+		if !ok {
 			return true
 		}
-		r := gjson.GetManyBytes(b, "type", "uuid")
-		if t := r[0].String(); t != "user" && t != "assistant" || r[1].Type != gjson.String || held.has(r[1].Str) {
+		if _, duplicate := held[key]; duplicate {
 			return true
 		}
-		ids = append(ids, uuidKey(r[1].Str))
+		ids = append(ids, key)
 		line(s, b, copyFile.main)
 		return true
 	})
