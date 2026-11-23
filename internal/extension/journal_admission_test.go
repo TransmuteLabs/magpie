@@ -105,3 +105,85 @@ func TestLeaseAcceptedDispatchRecordsCancellation(t *testing.T) {
 	_, err = manager.Call(t.Context(), scope.Plugin, sdk.MethodProviderExecute, scope, request, nil)
 	storeTestError(t, err, "operation_conflict")
 }
+
+func TestManagerCloseWaitsForProviderReceipt(t *testing.T) {
+	manager, scope := usageManager(t)
+	lease, err := manager.Acquire(t.Context(), scope.Plugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+
+	scope.Operation, scope.Attempt = "close-after-acceptance", 1
+	request := sdk.ExecuteRequest{Protocol: "chat", Model: "model", Body: json.RawMessage(`{}`)}
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	callCtx, cancelCall := context.WithCancel(ctx)
+	accepted, finished := make(chan struct{}), make(chan struct{})
+	var callErr error
+	go func() {
+		defer close(finished)
+		_, callErr = lease.Call(callCtx, sdk.MethodProviderExecute, scope, request, func(event Event) error {
+			if event.Name == "accepted" {
+				close(accepted)
+				<-callCtx.Done()
+				return callCtx.Err()
+			}
+			return nil
+		})
+	}()
+	defer func() {
+		cancelCall()
+		<-finished
+	}()
+	select {
+	case <-accepted:
+	case <-finished:
+		t.Fatalf("provider call ended before acceptance: %v", callErr)
+	case <-ctx.Done():
+		t.Fatal("provider call did not reach acceptance")
+	}
+
+	closeDeadline := func() {
+		t.Helper()
+		wait, stop := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer stop()
+		if err := manager.Close(wait); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("close with provider receipt still pending = %v, want deadline", err)
+		}
+	}
+	closeDeadline()
+	select {
+	case <-lease.client.done:
+	case <-ctx.Done():
+		t.Fatal("close did not stop the worker while the provider receipt was pending")
+	}
+	closeDeadline()
+
+	store := NewStore(manager.Namespace())
+	if entry, err := store.OperationContext(ctx, scope.Plugin, scope.Operation); err != nil || entry.Scope != scope || entry.State != "accepted" {
+		t.Fatalf("receipt before releasing the operation owner = %+v, %v", entry, err)
+	}
+	late := scope
+	late.Operation = "preheld-lease-after-close"
+	_, err = lease.Call(ctx, sdk.MethodProviderExecute, late, request, nil)
+	var outcome *OutcomeError
+	if !errors.As(err, &outcome) || outcome.Outcome != "not-started" {
+		t.Errorf("pre-held lease called after close = %v, want not-started", err)
+	}
+	_, err = store.OperationContext(ctx, late.Plugin, late.Operation)
+	storeTestError(t, err, "not_found")
+
+	cancelCall()
+	if err := manager.Close(ctx); err != nil {
+		t.Fatalf("close after releasing the operation owner: %v", err)
+	}
+	if entry, err := store.OperationContext(ctx, scope.Plugin, scope.Operation); err != nil || entry.Scope != scope || entry.State != "uncertain" {
+		t.Fatalf("receipt after close = %+v, %v", entry, err)
+	}
+	<-finished
+	outcome = nil
+	if !errors.Is(callErr, context.Canceled) || !errors.As(callErr, &outcome) || outcome.Outcome != "uncertain" {
+		t.Errorf("accepted owner returned %v, want uncertain cancellation", callErr)
+	}
+}

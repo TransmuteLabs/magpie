@@ -66,6 +66,7 @@ type Manager struct {
 	stopStarts        context.CancelFunc
 	startWG           sync.WaitGroup
 	retireWG          sync.WaitGroup
+	providerReceiptWG sync.WaitGroup
 	gatewayRuns       map[*GatewayRun]struct{}
 	refreshes         map[refreshKey]*refreshRun
 	refreshWG         sync.WaitGroup
@@ -1299,6 +1300,16 @@ func (l *Lease) callSelected(ctx context.Context, method string, scope sdk.Scope
 		if scope.Attempt == 0 {
 			scope.Attempt = 1
 		}
+		if method == sdk.MethodProviderExecute {
+			m.mu.Lock()
+			if m.closed {
+				m.mu.Unlock()
+				return nil, &OutcomeError{Outcome: "not-started", Cause: errors.New("extension manager is closed")}
+			}
+			m.providerReceiptWG.Add(1)
+			m.mu.Unlock()
+			defer m.providerReceiptWG.Done()
+		}
 		if _, err := m.store.journal(ctx, scope, "dispatched", method == sdk.MethodProviderExecute || accountTask); err != nil {
 			return nil, beforeProviderDispatch(method, err)
 		}
@@ -1959,6 +1970,7 @@ func (m *Manager) finishClose(workers map[string]*managedWorker, runs []*Gateway
 	}
 	m.startWG.Wait()
 	m.retireWG.Wait()
+	m.providerReceiptWG.Wait()
 	close(m.closeDone)
 }
 

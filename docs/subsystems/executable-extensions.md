@@ -489,9 +489,10 @@ lock order. Startup is registered while the manager lock is held, so shutdown
 joins it; neither startup I/O nor waiting for another start holds those locks.
 Restarting a failed transport cannot deadlock a refresh retaining its old lease.
 At CLI exit, including signal exit, Magpie gives the existing default SDK
-manager up to ten seconds to stop and join its components. Exit closes
-admission for the process, including calls arriving after the last manager
-has closed or before a manager has been used.
+manager up to ten seconds to stop its components and join provider execution
+owners through their final journal writes. The wait shares the shutdown
+deadline. Exit closes admission for the process, including provider execution
+on already acquired leases and calls arriving before a manager has been used.
 The `serve` and `web` restart paths apply the same process-wide fence before
 replacing the executable, including when another process serves the gateway.
 
