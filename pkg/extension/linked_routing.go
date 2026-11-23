@@ -69,6 +69,8 @@ type LinkedRoutingSeat struct {
 	// (a Kiro trial's). All but used up, it goes before those used up with
 	// nothing to go on with.
 	Credits bool
+	// Trial reports that the seat can continue on a plugin's trial credits.
+	Trial bool
 	// First: such an account the user set to spend its credits before
 	// another account (provider.CodexCreditsFirst): its windows running
 	// out never put it behind the others (seatTier), so it keeps the

@@ -545,8 +545,10 @@ body.side-nav #nav button.has-dot.can-fold::after { right: 28px; }
 .nav-sub > button { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; color: var(--ctl-fg); text-align: left; white-space: nowrap; transition: color .2s var(--ease); }
 .nav-sub > button > :is(svg, .nav-s-ic) { flex: none; width: 14px; height: 14px; margin-left: -2px; color: var(--muted); transition: color .2s var(--ease); }
 .nav-s:hover:not(.cur) > :is(svg, .nav-s-ic), .nav-s.cur > :is(svg, .nav-s-ic) { color: inherit; }
-/* an agent's own logo in the glyph's place (navicons.js navSubIc) */
-.nav-s-ic > .ic { display: flex; width: 100%; height: 100%; }
+/* an agent's own logo in the glyph's place (navicons.js navSubIc): a
+   glyph's strokes reach 2.5 to 13.5 of its 16, so the logo is drawn in the
+   middle 11 of the 14px box, not across all of it */
+.nav-s-ic > .ic { display: flex; width: 100%; height: 100%; padding: 1.5px; box-sizing: border-box; }
 .nav-sub > button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-sub > button > em { margin-left: auto; font-style: normal; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 /* an update waiting, in the sidebar's dot colour, as the words the dot means */
@@ -1850,6 +1852,9 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 /* a window too narrow for every column leaves out those the request's
    page says (#860), and narrows the names */
 .led.tight .lc-opt { display: none; }
+/* the input, as the whole prompt while the cache columns are left out */
+.led.tight .in-split .in-own { display: none; }
+.led.tight .in-split::after { content: attr(data-all); }
 .led.tight .model, .led.tight .where { max-width: 160px; }
 .led.tight th, .led.tight td { padding-left: 6px; padding-right: 6px; }
 .led.tighter .price-reference, .led.tight2 .lc-opt2 { display: none; }
@@ -3428,7 +3433,8 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .accent-pick .swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 /* not yet chosen, the own colour is an empty ring with a plus */
 .accent-pick .swatch.own:not(.on) { background: none; box-shadow: inset 0 0 0 1.5px var(--line); }
-.accent-pick .swatch.own:not(.on)::after { content: "+"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 13px; line-height: 1; color: var(--muted); }
+/* the plus is drawn, not typed: a "+" glyph sits where its font puts it, off the circle's centre */
+.accent-pick .swatch.own:not(.on)::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: linear-gradient(var(--muted), var(--muted)) center / 8px 1.5px no-repeat, linear-gradient(var(--muted), var(--muted)) center / 1.5px 8px no-repeat; }
 .accent-pick .swatch.own input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; padding: 0; cursor: default; }
 .wall-pick { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .wall-pick .wall-thumb { width: 40px; height: 26px; border-radius: 5px; object-fit: cover; box-shadow: inset 0 0 0 1px var(--line), 0 0 0 .5px var(--line); }
@@ -4098,6 +4104,11 @@ body:not(.side-nav) #addSheet > .row-head.stuck::before { opacity: 1; box-shadow
 .add-models .detect-row input { flex: 1; min-width: 0; }
 .add-models-list { max-height: 260px; overflow-y: auto; }
 .add-models-list .hint.err { color: var(--red); }
+/* an embedding or rerank kind under Fetch models: its ids, and the path
+   they are asked on (solider1394 on X) */
+.add-models-list .rgroup + .rgroup, .add-models-list .mchips + .rgroup { margin-top: 12px; }
+.rgroup .rkind { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.rgroup .hint { margin-top: 6px; }
 .detect-grid { display: grid; gap: 3px 10px; align-items: center; font-size: 11.5px; padding: 4px 0 2px; }
 .detect-grid .dg-head { color: var(--faint); font-size: 11px; }
 .detect-grid .dg-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }

@@ -1363,6 +1363,22 @@ tool ownership, stream rendering and accounting.
    (a Discord report, v0.1.2862). A turn told to a saved session says the
    same (`renderClaudeTurn`).
 
+When the latest assistant message was added locally by the client (Claude
+Code adds `No response requested.` with model `<synthetic>` on native
+resume), it is not a reply the upstream run returned. The Messages request
+keeps only its role and content, so selection skips only that known notice
+as a reply boundary and matches the complete history prefix held by a
+waiting run or saved session (`waitingPrefix`), with the account, model,
+settings and full tool definitions unchanged. Everything after that prefix,
+including any cancelled user message and the local assistant message, is
+sent as the increment (#3808). A quota refusal (`keepForReset`) or a
+busy/ended retry (`retryBranch`) cuts the run back to the key it took the
+turn at (`backKey`, or `fromKey` for a run started from a saved session)
+and takes the turn from the request again past the local reply
+(`turnFrom`), so the turn asked again still carries the cancelled message.
+Results owed to calls before the prefix cannot be replayed through this
+path. A resume with changed tool schemas still starts a new run.
+
 A Claude Code that ends before it answers a linked control request
 (`initialize`, the safety context) is reported with its
 exit status and the end of its stderr (`endedBefore`), as one that ends
@@ -1517,6 +1533,47 @@ tool_result message and telling the results again as text, which wasn't
 done: the reporter's requests aren't known, and a fork that took the
 lead's calls (`claimResume`) looks the same from here. The log now says
 which run ended and why.
+
+### A different turn after one given up on (#7535, recih)
+
+The user presses Esc and sends another prompt in place of the one
+cancelled, `/compact` among them. That request goes on from the same
+conversation (`nextTurn`'s key) with a different last turn. The rewound
+`-p` run still waits there, but an interactive run can't be taken back,
+and neither survives a gateway restart in between. Before, the next
+request then started a new Claude Code told the whole conversation
+(recih: 320,795 tokens written to the cache by a `/compact` after an Esc
+and an update).
+
+Now `serveSubscriptionAs` registers a turn with a known key
+(`watchCancel`) before it claims a run. When the client goes away, the
+`AfterFunc` first saves a copy of the run's session cut at the end of the
+reply before the turn (`keepBeforeTurn` with the cancelled key), then
+calls `letGo`. The copy goes on the shelf under that key with the
+ordinary shelf lifetime (`idleLongest`), so a different next turn
+resumes it with `--resume` and is told that turn alone. A `-p` run that
+rewound still answers in place, as `resume` comes before `unshelve`. The
+cut is taken only where the end is known: the session's length when the
+run was started from a saved one (`fromLen`, and `startRun` sets
+`backKey` only when the branch serves the whole turn), or the reply
+before the turn's row with `stop_reason` `end_turn`
+(`cutAfterReply(…, true)`), so a reply cut short mid-stream is never kept
+as the history. A run started anew for the turn (its session is a
+rendered history, no native boundary), one with the client's own cache
+marks, one handed over to Claude Code's own account (`handed`) and a
+gateway stopping keep nothing, as before.
+
+A request for the same key that arrives while a cancelled one is still
+cutting and rewinding waits for it (`waitCancelled`), and gives up when
+its own client goes away (499). `keepShelf`, as the gateway stops, waits
+for every cancellation already under way, so the copy is written to the
+shelf file. `abort` now skips once the request's context has ended, not
+only once the `AfterFunc` has run, so a failure in between doesn't end a
+run that `letGo` is taking back. `TestClaudeReplacementAfterCancel`
+(both modes, with and without a restart), `TestClaudeWaitForCancelledTurn`
+and `TestClaudeCancelledColdReplayIsNotShelved` hold it. Not measured
+against the real Anthropic: the reporter's `/compact` case wasn't run
+again with a real account.
 
 ### One key per waiting run
 
@@ -2405,6 +2462,7 @@ turn alone), `TestQuotaShelfFor`.
 ## Verification
 
 ```sh
+go test -tags nogui ./internal/gateway/ -run 'TestClaudeSyntheticResume|TestClaudeResumePrefix' -count=1
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeClientCache' -count=1
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeLeanPrompt' -count=1
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeTUIChosen$' -count=1
@@ -2419,7 +2477,7 @@ go test -tags nogui ./internal/gateway/ -run 'TestClaudeRunsHeldToTheRoom|TestCl
 go test -tags nogui ./internal/cli/ -run '^TestClaudeCodeRuns' -count=1
 go test -tags nogui ./internal/gateway/ -run '^TestClaudeRunsNamesEachProcess$' -count=1
 go test -tags nogui ./internal/settings/ -run '^TestClaudeRunsMostIsMachineLocal$' -count=1
-go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeHistoryCachedAcrossNewRuns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy|ClaudeIdle|ClaudeSideQuestion|ClaudeInteractiveSideQuestion|ClaudeCutSession|ClaudeForkBranches|ClaudeToolChoiceNone|ClaudeAside|ClaudeNoRunSaysWhy|ClaudeToolResultsNoRunSaysWhy|ClaudePromptToldUserText|ClaudePromptKeepsInstructions|ClaudeToolResultsGoOnWithTheUsersWords|ClaudeToolResultsKeepInstructions|ToolResultKeepsUserTextSentMidTurn|ClaudeTextToolCalls|ClaudeTextCallsHoldsOnlyTheLine|ClaudePromptSaysPastCallsAreARecord' -count=1
+go test -tags nogui ./internal/gateway/ -run 'ClaudeSubscriptionRunsTheDownloaded|ClaudeSubscriptionWithoutClaudeCode|ClaudeRewritten|LostMedia|ImagesTakenOut|RunLetGoWhenTheClientRewrote|ClaudeSessionTempFiles|ClaudeLetGo|ClaudeSessionFiles|ClaudeOldSessions|ClaudeSubscriptionReplySaysTheAllowance|ClaudeAllowanceHeaders|ClaudeForksAnsweringTheLeadsCalls|ClaudeTurnGivenUpOn|ClaudeReplacementAfterCancel|ClaudeWaitForCancelledTurn|ClaudeCancelledColdReplay|ClaudeToolResultsGivenUpOn|ClaudePromptMarksEarlierTurns|ClaudeHistoryCachedAcrossNewRuns|ClaudeUnloadableSession|ClaudeEndedRunSaysWhy|ClaudeIdle|ClaudeSideQuestion|ClaudeInteractiveSideQuestion|ClaudeCutSession|ClaudeForkBranches|ClaudeToolChoiceNone|ClaudeAside|ClaudeNoRunSaysWhy|ClaudeToolResultsNoRunSaysWhy|ClaudePromptToldUserText|ClaudePromptKeepsInstructions|ClaudeToolResultsGoOnWithTheUsersWords|ClaudeToolResultsKeepInstructions|ToolResultKeepsUserTextSentMidTurn|ClaudeTextToolCalls|ClaudeTextCallsHoldsOnlyTheLine|ClaudePromptSaysPastCallsAreARecord' -count=1
 go test -tags nogui ./internal/gateway/ -run 'TestClaudeTaskNotification|TestWithTaskNotices|TestClaudeTurnToldTheTaskNotification' -count=1
 go test -tags nogui ./internal/gateway/ -run 'TestClaudeAnswerAfterTheRunEnded|TestClaudeEndedRuns|TestClaudeTurnSentAgain|TestClaudeBranchFor' -count=1
 ```

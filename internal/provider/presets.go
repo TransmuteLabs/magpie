@@ -89,6 +89,14 @@ type PresetDef struct {
 	Videos       []string `json:"videos,omitempty"`
 	Speakers     []string `json:"speakers,omitempty"`
 	Transcribers []string `json:"transcribers,omitempty"`
+	// Searches is the vendor's word that it answers a web search tool
+	// offered on its Anthropic and Responses APIs by itself
+	// (web_search_20250305, web_search), as Provider.Searches is the
+	// user's: a partner that runs them (CoreCode). A provider added from
+	// it searches so with nothing set (PresetSearches). Codex's web.run
+	// is not covered: it asks alpha/search, which only the user's
+	// Provider.Searches sends a relay.
+	Searches bool `json:"searches,omitempty"`
 }
 
 // Region is one base-URL option of a preset that offers several. The first
@@ -261,17 +269,23 @@ var presets = []PresetDef{
 		// a GLM Coding Plan is served at its own OpenAI endpoint: a plan's key
 		// sent to the pay-as-you-go one is told it has no balance. The plan
 		// serves the Responses API at /api/v1 as well: its tool pages give
-		// it for Codex, wire_api = "responses" (#306)
+		// it for Codex, wire_api = "responses" (#306). The plan's models are
+		// looked up in models.dev's catalog of the plan first: a model the
+		// plan has before pay as you go does (GLM-5.4, which takes images;
+		// ApocalypseYun on X) is listed there alone, and read as a text
+		// model of no known window. membershipCatalogs keeps its $0 out of
+		// prices.
 		RegionLabel: "Plan", KeyPlans: true, Regions: []Region{
-			{ID: "api", Name: "Pay as you go", Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic"},
-			{ID: "coding", Name: "Coding Plan", Chat: "https://open.bigmodel.cn/api/coding/paas/v4", Responses: "https://open.bigmodel.cn/api/v1", Anthropic: "https://open.bigmodel.cn/api/anthropic"},
+			{ID: "api", Name: "Pay as you go", Chat: "https://open.bigmodel.cn/api/paas/v4", Anthropic: "https://open.bigmodel.cn/api/anthropic", Catalog: "zhipuai"},
+			{ID: "coding", Name: "Coding Plan", Chat: "https://open.bigmodel.cn/api/coding/paas/v4", Responses: "https://open.bigmodel.cn/api/v1", Anthropic: "https://open.bigmodel.cn/api/anthropic", Catalog: "zhipuai-coding-plan, zhipuai"},
 		}},
 	{ID: "zai", Name: "Z.ai", Icon: "zai", Kind: KindVendor, Catalog: "zhipuai",
 		Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic",
 		Website: "https://z.ai", KeysURL: "https://z.ai/manage-apikey/apikey-list",
+		// the plan's models looked up in its own catalog first, as Zhipu's
 		RegionLabel: "Plan", KeyPlans: true, Regions: []Region{
-			{ID: "api", Name: "Pay as you go", Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic"},
-			{ID: "coding", Name: "Coding Plan", Chat: "https://api.z.ai/api/coding/paas/v4", Responses: "https://api.z.ai/api/v1", Anthropic: "https://api.z.ai/api/anthropic"},
+			{ID: "api", Name: "Pay as you go", Chat: "https://api.z.ai/api/paas/v4", Anthropic: "https://api.z.ai/api/anthropic", Catalog: "zhipuai"},
+			{ID: "coding", Name: "Coding Plan", Chat: "https://api.z.ai/api/coding/paas/v4", Responses: "https://api.z.ai/api/v1", Anthropic: "https://api.z.ai/api/anthropic", Catalog: "zai-coding-plan, zhipuai"},
 		}},
 	{ID: "minimax", Name: "MiniMax", Icon: "minimax-color", Kind: KindVendor, Catalog: "minimax",
 		Chat: "https://api.minimax.io/v1", Anthropic: "https://api.minimax.io/anthropic",
@@ -422,8 +436,8 @@ var presets = []PresetDef{
 			{ID: "agent", Name: "Agent Plan", Chat: "https://ark.cn-beijing.volces.com/api/plan/v3", Responses: "https://ark.cn-beijing.volces.com/api/plan/v3", Anthropic: "https://ark.cn-beijing.volces.com/api/plan",
 				Models: arkPlanModels, Images: arkPlanImages,
 				Embeddings: []string{"doubao-embedding-vision"},
-				Drawers:    []string{"doubao-seedream-5-0-pro", "doubao-seedream-5.0-flash"},
-				Videos:     []string{"doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini", "doubao-seedance-2.5"}},
+				Drawers:    []string{"doubao-seedream-5-0-pro", "doubao-seedream-5.0-flash", "doubao-seedream-5.5"},
+				Videos:     []string{"doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini", "doubao-seedance-2.5", "doubao-seedance-2.5-flash"}},
 			{ID: "api", Name: "Pay as you go", Chat: "https://ark.cn-beijing.volces.com/api/v3", Responses: "https://ark.cn-beijing.volces.com/api/v3", Lists: true},
 		},
 		NoList: true},
@@ -965,6 +979,31 @@ func Preset(id string) *PresetDef {
 		return pr
 	}
 	return partnerPreset(id)
+}
+
+// PresetSearches is whether p, a key+URL provider, searches the web by
+// itself because its preset says so (PresetDef.Searches), at an address
+// of that preset's: one moved to another host by hand is the user's to
+// say. A partner's word holds while it is listed and after, as the
+// provider's other settings from it do (partnerPreset).
+func PresetSearches(p Provider) bool {
+	if p.Account != nil || p.IsPlugin() || p.Preset == "" {
+		return false
+	}
+	pr := Preset(p.Preset)
+	if pr == nil || !pr.Searches {
+		return false
+	}
+	hosts := []string{HostOf(pr.Anthropic), HostOf(pr.Responses)}
+	for _, r := range pr.Regions {
+		hosts = append(hosts, HostOf(r.Anthropic), HostOf(r.Responses))
+	}
+	for _, u := range []string{p.Anthropic, p.Responses} {
+		if h := HostOf(u); h != "" && slices.Contains(hosts, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // builtinPreset is the preset of that id built into magpie, partners'

@@ -17,5 +17,10 @@ func init() {
 		InUse:  lib.InUse,
 		Client: []string{"i18n.js", "library.css", "client.js"},
 		Parts:  []sdk.FeaturePart{{Slot: sdk.FeatureNavigationPage, Key: "library"}},
+		Settings: []sdk.FeatureSetting{{
+			Name: "hide", Kind: sdk.FeatureSettingString, Title: "Hidden sections",
+			Description: "The Library's tabs left out of its page; agents are given what they hold as before",
+			Default:     "",
+		}},
 	})
 }

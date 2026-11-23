@@ -118,6 +118,21 @@ const shot = async (page, name) => {
   await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `hub-${name}.png`) });
 };
 
+// two cards one over the other in the Library's body, with nothing between,
+// keep room between them (the owner, 11-23: the install card sat on the
+// Skill router's): every pair of boxed neighbours is at least 10px apart
+const crowded = (page) => page.evaluate(() => {
+  const boxed = (e) => { const c = getComputedStyle(e); return parseFloat(c.borderTopWidth) > 0 || c.backgroundColor !== "rgba(0, 0, 0, 0)"; };
+  const kids = [...document.querySelectorAll("#view-library .lib-body:not(.lib-skel) > *")].filter((e) => e.getBoundingClientRect().height);
+  const out = [];
+  for (let i = 1; i < kids.length; i++) {
+    if (!boxed(kids[i - 1]) || !boxed(kids[i])) continue;
+    const gap = kids[i].getBoundingClientRect().top - kids[i - 1].getBoundingClientRect().bottom;
+    if (gap < 10) out.push(`${kids[i - 1].className} | ${kids[i].className}: ${gap.toFixed(1)}px`);
+  }
+  return { n: kids.length, out };
+});
+
 const sideways = (page) => page.evaluate(() => {
   const over = [];
   const w = document.documentElement.clientWidth;
@@ -174,6 +189,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         });
         assert.ok(above, "the hub's row isn't above the servers");
         assert.deepEqual(await sideways(page), [], "sideways scroll, off");
+        { const c = await crowded(page); assert.ok(c.n > 2, "the body is measured"); assert.deepEqual(c.out, [], "cards apart, off"); }
 
         // on
         await sw.click();
@@ -209,6 +225,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         });
         assert.ok(fits, "the switch is outside its row");
         assert.deepEqual(await sideways(page), [], "sideways scroll, on");
+        { const c = await crowded(page); assert.ok(c.n > 2, "the body is measured"); assert.deepEqual(c.out, [], "cards apart, on"); }
 
         // Connect…: the agents, in their groups, each with where it stands
         await at.locator(".lib-hubconnect").click();
@@ -314,7 +331,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal((await app("windsurf").locator(".sub").textContent()).trim(), w("Paste it into ~/.codeium/windsurf/mcp_config.json"));
         assert.deepEqual(await copied("windsurf", "Windsurf"), { mcpServers: { magpie: { serverUrl: url } } });
         assert.deepEqual(await copied("json", w("Other")), { mcpServers: { magpie: { type: "http", url } } });
-        assert.deepEqual((await sheet.locator(".lib-hubcap").allTextContents()).map((x) => x.trim()), [w("From another computer, use the address magpie is reached at there, with a gateway key: Authorization: Bearer <key>."),
+        assert.deepEqual((await sheet.locator(".lib-hubcap").allTextContents()).map((x) => x.trim()), [w("From another computer, use the address magpie is reached at there, with a gateway key: Authorization: Bearer <key>. A key with a model, account or spend limit isn't given the servers that run as programs here."),
           ...(web ? [] : [w("For an app that doesn't search its tools itself: past {n} tools, it is given one that finds a tool and one that runs it.", { n: 10 })])]);
         assert.deepEqual(await sideways(page), [], "sideways scroll, apps");
         await shot(page, `${engine}-${lang}-${width}-apps`);

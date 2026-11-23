@@ -284,6 +284,7 @@ test("compat.js is the first of the page's own scripts", async () => {
   assert.equal(srcs[0], "compat.js", "loaded first: " + srcs.join(", "));
   assert(all.includes("pluginpages.js"), "the SDK bridge loader is in index.html");
   assert.match(stripComments(await read("pluginpages.js")), /\bimport\(\s*["']\.\/extensionwindows\.js["']\s*\)/, "pluginpages.js imports the SDK bridge");
+  // The provider editor and Fetch models load retrievalrows.js for embedding or rerank models.
   const sources = new Map(await Promise.all((await scripts()).map(async (file) => [file, await read(file)])));
   const loaded = loadedScripts(all, sources);
   for (const file of sources.keys()) assert.ok(loaded.has(file), file + " is not loaded by index.html or a reachable lazy import");

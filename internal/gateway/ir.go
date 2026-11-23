@@ -54,6 +54,12 @@ type Part struct {
 	Name string
 	Args json.RawMessage // a JSON object
 
+	// opens is on the first part of a user message of its own that
+	// mergeTurns joined after tool results (a Responses client's next
+	// message after a turn's function_call_output items), so turnIn reads
+	// it as the message it was
+	opens bool
+
 	// tool_result
 	CallID     string
 	IsError    bool
@@ -525,6 +531,10 @@ type Event struct {
 	// Wait: for KError, how long the vendor said to wait before asking
 	// again, when it said; sent on as Retry-After
 	Wait time.Duration
+	// Resets: for KError, when the limit that refused the request renews,
+	// as Anthropic told Claude Code (its rate_limit_event's resetsAt);
+	// the account rests till then (resetsHeader)
+	Resets time.Time
 	// Said: for KError, the vendor's own error as {"error":{…}}, when it
 	// said the request itself is at fault; its code and param go to a
 	// client answered whole (writeVendorError)
@@ -748,6 +758,7 @@ type collector struct {
 	errStatus int
 	errCode   string
 	errSaid   json.RawMessage
+	errResets time.Time
 }
 
 func (c *collector) last(k Kind) *Part {
@@ -870,7 +881,7 @@ func (c *collector) add(ev Event) {
 			c.res.Model = ev.Model // another model went on with the reply
 		}
 	case KError:
-		c.err, c.errStatus, c.errCode, c.errSaid = ev.Text, ev.Status, ev.Code, ev.Said
+		c.err, c.errStatus, c.errCode, c.errSaid, c.errResets = ev.Text, ev.Status, ev.Code, ev.Said, ev.Resets
 	case KSearch:
 		c.closeTool()
 		c.res.Parts = append(c.res.Parts, Part{Kind: Search, Text: ev.Text, Hits: ev.Hits})

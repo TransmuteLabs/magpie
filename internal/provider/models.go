@@ -49,7 +49,7 @@ func (p Provider) availableContext(ctx context.Context) []catalog.Model {
 		// a gateway's Jev among its chat models, with its window and input
 		ms = slices.Clone(ms)
 		for i, m := range ms {
-			if p.isDecisionContext(ctx, m) {
+			if p.isDecisionContext(ctx, m) && !p.ChatsToo(m.ID) {
 				ms[i] = withDecideFacts([]catalog.Model{m})[0]
 			}
 		}
@@ -2871,7 +2871,9 @@ func (p Provider) factoryFastPrice(model string) (catalog.Price, bool) {
 // MiMo's three Token Plan catalogs list all nine of its models at $0 too,
 // and stood before xiaomi's own prices, so a pay-as-you-go call was
 // counted at $0 (#1873, mengyianx).
-var membershipCatalogs = append(slices.Clone(kimiCodePlans), "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "xiaomi-token-plan-ams")
+// Zhipu's and Z.ai's GLM Coding Plan catalogs list theirs at $0 too.
+var membershipCatalogs = append(slices.Clone(kimiCodePlans), "xiaomi-token-plan-cn", "xiaomi-token-plan-sgp", "xiaomi-token-plan-ams",
+	"zhipuai-coding-plan", "zai-coding-plan")
 
 // kimiCodePlans are Kimi Code's membership catalogs, whose models are
 // priced as the Kimi API's (kimiCodeAPI).
@@ -2922,6 +2924,69 @@ func MakerPrice(model string) (catalog.Price, bool) {
 		return MakerPrice(f)
 	}
 	return catalog.Price{}, false
+}
+
+// KimiCodeSessionModel is the Kimi Code model a call in Kimi Code's own
+// session file was made on, when it names one: its wire file names the
+// call's model by the key of its [models."…"] table, and a Kimi Code
+// sign-in keys them "kimi-code/<model>" ("kimi-code/k3-256k", its
+// provider "managed:kimi-code"). The part before the slash is Kimi Code's
+// own name, not a provider of magpie's: the reporter's sign-in is magpie's
+// Kimi Code (China), "kimi-code-cn".
+func KimiCodeSessionModel(model string) (string, bool) {
+	pid, id, ok := strings.Cut(strings.TrimSpace(model), "/")
+	if !ok || (pid != "kimi-code" && pid != "kimi-code-cn") || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
+// KimiCodeSessionPrice is what a call Kimi Code made on its own sign-in,
+// not through magpie, costs the user (#3331, westlinkin): its model as the
+// session file names it, "kimi-code/k3-256k". It is priced as a call to a
+// Kimi Code membership the user has added, the one whose id the name
+// begins with first: the price they set for the model there (or for every
+// model of it, or for the model at any provider), the first membership
+// with one, else the first membership's price for it (the Kimi API model
+// it is, kimiCodeAPI), each with that membership's windows. With none
+// added it is the Kimi API model's list price (VectorLu), and a model the
+// API doesn't sell (kimi-for-coding) stays unpriced. A model that isn't a
+// Kimi Code sign-in's is false.
+func KimiCodeSessionPrice(s settings.Settings, model string) (catalog.Price, bool, []RateWindow) {
+	id, ok := KimiCodeSessionModel(model)
+	if !ok {
+		return catalog.Price{}, false, nil
+	}
+	pid, _, _ := strings.Cut(strings.TrimSpace(model), "/")
+	// the one named first, then the rest in the user's order
+	var members, rest []Provider
+	for _, p := range All() {
+		switch {
+		case !p.kimiCodeMember():
+		case p.ID == pid:
+			members = append(members, p)
+		default:
+			rest = append(rest, p)
+		}
+	}
+	members = append(members, rest...)
+	for _, p := range members {
+		if pr, ok := userPrice(s, p, id); ok {
+			pr.Peak = p.PeakOf(id)
+			return pr, true, p.RateWindows
+		}
+	}
+	for _, p := range members {
+		if pr, ok := tariffOf(s, p, true, id); ok {
+			return pr, true, p.RateWindows
+		}
+	}
+	if api, ok := kimiCodeAPI[strings.ToLower(id)]; ok {
+		if pr, ok := makerListPrice(api); ok {
+			return pr, true, nil
+		}
+	}
+	return catalog.Price{}, false, nil
 }
 
 // makerListPrice is a model id's list price at its maker: the price of
@@ -3933,7 +3998,7 @@ func entriesOfContext(ctx context.Context, of func(Provider) bool, off func(pid,
 			if off(p.ID, m.ID) { // the user turned it off (#1867)
 				continue
 			}
-			if !p.isDecisionContext(ctx, m) && !gone[p.ID+"/"+m.ID] {
+			if (!p.isDecisionContext(ctx, m) || p.ChatsToo(m.ID)) && !gone[p.ID+"/"+m.ID] {
 				out = append(out, sharedEntry(&p, m, s))
 			}
 		}
@@ -3954,6 +4019,21 @@ func InputsOf(m catalog.Model) []string {
 	return catalog.InputsOf(m.ID)
 }
 
+// imagesIn is whether p's model m takes images, and the explicit answer
+// behind it (nil when unknown): the source's word, else the catalog's,
+// with the user's own setting over both.
+func imagesIn(p *Provider, m catalog.Model, s settings.Settings) (bool, *bool) {
+	images := m.Images || catalog.SeesImages(m.ID)
+	if m.ImageInput != nil {
+		images = *m.ImageInput
+	}
+	imageInput := m.ImageInput
+	if override, ok := s.ModelImages[p.ID+"/"+m.ID]; ok {
+		images, imageInput = override, &override
+	}
+	return images, imageInput
+}
+
 // entryFor is one of a provider's models as the catalog carries it: the
 // window and the reply limit a request on it is routed and metered against,
 // with what the user set taken over the vendor's list and models.dev.
@@ -3966,14 +4046,7 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 func sharedEntry(p *Provider, m catalog.Model, s settings.Settings) Entry {
 	ctx := p.windowIn(m, s)
 	output := p.replyLimit(m, s)
-	images := m.Images || catalog.SeesImages(m.ID)
-	if m.ImageInput != nil {
-		images = *m.ImageInput
-	}
-	imageInput := m.ImageInput
-	if override, ok := s.ModelImages[p.ID+"/"+m.ID]; ok {
-		images, imageInput = override, &override
-	}
+	images, imageInput := imagesIn(p, m, s)
 	// a model its vendor lists with no name is called by its id: unnamed,
 	// an agent's list showed the whole magpie/<provider>/<model> (#955)
 	name := cmp.Or(m.Name, m.ID)
@@ -4165,7 +4238,7 @@ func resolveInContext(ctx context.Context, entries []Entry, id string) (Provider
 	for _, p := range heldOfContext(ctx, "listed", func() map[string][]*Provider {
 		return keptOfContext(ctx, "listed", func() map[string][]*Provider { return listedByContext(ctx) })
 	})[id] {
-		if !p.decidesModelContext(ctx, id) {
+		if !p.decidesModelContext(ctx, id) || p.ChatsToo(id) {
 			found = append(found, *p)
 		}
 	}

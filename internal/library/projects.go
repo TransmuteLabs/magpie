@@ -108,7 +108,9 @@ type Project struct {
 // (getProjectSkillsDir, @qoder-ai/qodercli 1.1.69, whose .agents/skills
 // a setting can turn off), CodeBuddy Code .codebuddy/skills
 // (getProjectSkillsDir, @tencent-ai/codebuddy-code 2.164.0) and Command
-// Code .commandcode/skills (commandcode.ai/docs/skills). DeepSeek Harness
+// Code .commandcode/skills (commandcode.ai/docs/skills), TRAE CN
+// .trae/skills (its workbench's joinPath(workspace, ".trae", "skills"),
+// 2.3.105403; docs.trae.cn/ide_skills). DeepSeek Harness
 // reads <projectRoot>/.dsh/skills and <projectRoot>/.agents/skills, the
 // project root being the nearest folder up from where it runs with a .git
 // in it, else that folder itself (the provider's roots and findProjectRoot,
@@ -139,6 +141,7 @@ var projectSkillsDirs = map[string]string{
 	"qoder-cn":    ".qoder/skills",
 	"codebuddy":   ".codebuddy/skills",
 	"commandcode": ".commandcode/skills",
+	"trae-cn":     ".trae/skills",
 }
 
 // ProjectSkillsDir is the folder, in a project, an agent reads its skills
@@ -199,9 +202,9 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 	}
 	want := map[string]string{} // entry → the skill
 	// the entries given as copies: all of them in a project that takes
-	// copies, else those an agent reads that skips a junction
-	// (skipsJunctions), which is magpie's link on Windows without the
-	// right to make a symlink
+	// copies, else those an agent reads that skips magpie's link there
+	// (projectCopies): Antigravity's on every system, and on Windows a
+	// junction, magpie's link without the right to make a symlink
 	copies := map[string]bool{}
 	for name, agents := range p.Skills {
 		if s := l.skill(name); s == nil || s.Dangling { // none, or its source is gone (skill_dangling.go)
@@ -211,7 +214,7 @@ func (l *Library) syncFolder(p *Project, res *Result, hubs map[string]*Server) {
 			if d := ProjectSkillsDir(id); d != "" {
 				e := d + "/" + name
 				want[e] = name
-				copies[e] = copies[e] || p.Copy || skipsJunctions(id)
+				copies[e] = copies[e] || p.Copy || projectCopies(id)
 			}
 		}
 	}
@@ -665,6 +668,13 @@ type ProjectView struct {
 	// ClaudePlugins are the plugins Claude Code has installed that the
 	// project turns on for itself
 	ClaudePlugins []string `json:"claudePlugins"`
+	// ClaudeNative are, by plugin, the ids Claude Code loads the project's
+	// plugins under itself here: magpie doesn't give them to Claude Code
+	// in the project. ClaudeTwice are those given to Claude Code
+	// user-wide that it loads itself here alone, which run twice in the
+	// project (claude_native_overlap.go)
+	ClaudeNative map[string]string `json:"claudeNative,omitempty"`
+	ClaudeTwice  map[string]string `json:"claudeTwice,omitempty"`
 	// Pi are the Pi packages the project has by magpie (#7249)
 	Pi []ProjectPiView `json:"pi"`
 	// Hooks are the library's hooks the project has on their own, for
@@ -681,6 +691,7 @@ type ProjectView struct {
 
 func projectViews(l *Library, problems []Problem) []ProjectView {
 	out := []ProjectView{}
+	userNatives := l.claudeNatives("")
 	for _, p := range l.Projects {
 		v := ProjectView{Dir: p.Dir, Name: filepath.Base(p.Dir), Copy: p.Copy, Skills: map[string][]string{}, Placed: append([]string{}, p.Placed...)}
 		for k, a := range p.Skills {
@@ -717,6 +728,7 @@ func projectViews(l *Library, problems []Problem) []ProjectView {
 			v.Plugins[k] = append([]string{}, a...)
 		}
 		v.ClaudePlugins = append([]string{}, p.ClaudePlugins...)
+		v.ClaudeNative, v.ClaudeTwice = l.projectClaudeOverlap(p, userNatives)
 		v.Pi = append([]ProjectPiView{}, p.piViews()...)
 		v.Hooks = map[string][]string{}
 		for k, a := range p.Hooks {
