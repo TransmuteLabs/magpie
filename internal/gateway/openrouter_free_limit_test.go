@@ -310,11 +310,21 @@ func TestOpenRouterUnscopedLimitStillRestsKey(t *testing.T) {
 }
 
 func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
+	testOpenRouterFreeTierWithTranslatedTool(t, "web_search")
+}
+
+func TestOpenRouterFreeTierWithTranslatedAdvisor(t *testing.T) {
+	testOpenRouterFreeTierWithTranslatedTool(t, advisorTool)
+}
+
+func testOpenRouterFreeTierWithTranslatedTool(t *testing.T, tool string) {
+	t.Helper()
 	const (
 		firstFree  = "x/a:free"
 		secondFree = "x/b:free"
 		paid       = "x/paid"
 		key        = "c33-search-key"
+		advisorID  = "adv/adv-pro"
 	)
 	for _, test := range []struct {
 		name, preset, source string
@@ -335,16 +345,51 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 			if err := settings.Save(opts); err != nil {
 				t.Fatal(err)
 			}
-			apis := newSearchAPIs(t)
-			if err := provider.SetSearchAPI(apis.api("tavily", "tvly-k")); err != nil {
-				t.Fatal(err)
+			var mu sync.Mutex
+			var tried []string
+			var secret string
+			tools := `{"type":"web_search_20250305","name":"web_search"}`
+			if tool == advisorTool {
+				adviceCalls := 0
+				advisor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					adviceCalls++
+					mu.Unlock()
+					http.Error(w, "unexpected advisor request", http.StatusBadRequest)
+				}))
+				t.Cleanup(func() {
+					advisor.Close()
+					mu.Lock()
+					defer mu.Unlock()
+					if adviceCalls != 0 {
+						t.Errorf("advisor received %d requests before any tool call", adviceCalls)
+					}
+				})
+				if err := provider.Save(provider.Provider{
+					ID: "adv", Name: "Advisor", Key: "advisor-key", Chat: advisor.URL + "/v1", Models: []string{"adv-pro"},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				secret = advisorKey(t, "group/mixed", "group/free", advisorID)
+				tools = `{"type":"advisor_20260301","name":"advisor","model":"` + advisorID + `"}`
+			} else {
+				apis := newSearchAPIs(t)
+				if err := provider.SetSearchAPI(apis.api("tavily", "tvly-k")); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					apis.mu.Lock()
+					defer apis.mu.Unlock()
+					if len(apis.asked) != 0 {
+						t.Errorf("unexpected search requests: %v", apis.asked)
+					}
+				})
 			}
 
 			reset := time.UnixMilli(time.Now().Add(2 * time.Minute).UnixMilli())
-			var mu sync.Mutex
-			var tried []string
 			vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					t.Errorf("unexpected translated %s request: %s %s", tool, r.Method, r.URL.Path)
 					http.NotFound(w, r)
 					return
 				}
@@ -358,9 +403,9 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 				}
 				err := json.NewDecoder(r.Body).Decode(&request)
 				if err != nil || !request.Stream || len(request.Tools) != 1 ||
-					request.Tools[0].Type != "function" || request.Tools[0].Function.Name != "web_search" ||
+					request.Tools[0].Type != "function" || request.Tools[0].Function.Name != tool ||
 					r.Header.Get("Authorization") != "Bearer "+key {
-					t.Errorf("expected translated search on the same key: request %+v, decode error %v", request, err)
+					t.Errorf("expected translated %s on the same key: request %+v, decode error %v", tool, request, err)
 					http.Error(w, "invalid fixture request", http.StatusBadRequest)
 					return
 				}
@@ -398,10 +443,12 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 			}
 			server := New()
 			send := func(group string) (int, string) {
-				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
-					`{"model":"group/`+group+`","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}],`+
-						`"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
-				))
+				body := `{"model":"group/` + group + `","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}],"tools":[` + tools + `]}`
+				if tool == advisorTool {
+					rec := sendAs(t, server, secret, body)
+					return rec.Code, rec.Body.String()
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 				req.Header.Set("x-api-key", Token)
 				req.RemoteAddr = "127.0.0.1:12345"
 				rec := httptest.NewRecorder()
@@ -416,7 +463,7 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 			assertTried := func(want ...string) {
 				t.Helper()
 				if got := modelsTried(); !slices.Equal(got, want) {
-					t.Fatalf("translated search models sent upstream: %v, want %v", got, want)
+					t.Fatalf("translated %s models sent upstream: %v, want %v", tool, got, want)
 				}
 			}
 
@@ -433,7 +480,7 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 				wantKey += "/\x00openrouter-free"
 			}
 			if rest == nil || rest.FreeTier != test.scoped || rest.Key != wantKey {
-				t.Fatalf("translated search refusal scope: %+v", rest)
+				t.Fatalf("translated %s refusal scope: %+v", tool, rest)
 			}
 			if test.scoped {
 				assertTried(firstFree, paid)
@@ -457,11 +504,6 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 					t.Fatalf("unscoped refusal did not hold the whole key: %d %s, rest %+v", code, body, rest)
 				}
 				assertTried(firstFree)
-			}
-			apis.mu.Lock()
-			defer apis.mu.Unlock()
-			if len(apis.asked) != 0 {
-				t.Fatalf("unexpected search requests: %v", apis.asked)
 			}
 		})
 	}
