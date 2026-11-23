@@ -46,6 +46,15 @@ func (*summaryHead) UnmarshalJSON(raw []byte) error {
 }
 
 func inspect(line []byte, spokenOnly bool) (sdk.SessionTreeNode, bool) {
+	if len(line) != 0 && line[0] == '{' {
+		if head, ok := projectTreeHead(line); ok {
+			if len(head.id) == 0 || bytes.Equal(head.kind, []byte("session")) || bytes.Equal(head.kind, []byte("title")) {
+				return sdk.SessionTreeNode{}, false
+			}
+			hasContent := treeHasContent(string(head.kind), string(head.role), spokenOnly)
+			return sdk.SessionTreeNode{ID: string(head.id), ParentID: string(head.parent), HasContent: hasContent}, true
+		}
+	}
 	var head struct {
 		treeLine[messageHead]
 		Summary summaryHead `json:"summary"`
@@ -53,11 +62,18 @@ func inspect(line []byte, spokenOnly bool) (sdk.SessionTreeNode, bool) {
 	if json.Unmarshal(line, &head) != nil || head.ID == "" || head.Type == "session" || head.Type == "title" {
 		return sdk.SessionTreeNode{}, false
 	}
-	hasContent := head.Type == "message" || head.Type == "compaction" || head.Type == "branch_summary"
-	if spokenOnly {
-		hasContent = head.Type == "message" && head.Message != nil && (head.Message.Role == "user" || head.Message.Role == "assistant")
+	var role string
+	if head.Message != nil {
+		role = head.Message.Role
 	}
-	return sdk.SessionTreeNode{ID: head.ID, ParentID: head.ParentID, HasContent: hasContent}, true
+	return sdk.SessionTreeNode{ID: head.ID, ParentID: head.ParentID, HasContent: treeHasContent(head.Type, role, spokenOnly)}, true
+}
+
+func treeHasContent(kind, role string, spokenOnly bool) bool {
+	if spokenOnly {
+		return kind == "message" && (role == "user" || role == "assistant")
+	}
+	return kind == "message" || kind == "compaction" || kind == "branch_summary"
 }
 
 func decode(line []byte, spokenOnly bool) (sdk.SessionTreeRecord, error) {
