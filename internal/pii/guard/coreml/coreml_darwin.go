@@ -18,6 +18,8 @@ static char *gmlErr(NSError *e, const char *what) {
 	return strdup(e.localizedDescription.UTF8String ?: what);
 }
 
+static const char gmlLogitsOS[] = "CoreML logits need macOS 12.3";
+
 // gmlCompile compiles the package at pkg into out (a .mlmodelc).
 static char *gmlCompile(const char *pkg, const char *out) {
 	@autoreleasepool {
@@ -41,6 +43,11 @@ static char *gmlCompile(const char *pkg, const char *out) {
 
 static void *gmlOpen(const char *path, char **errp) {
 	@autoreleasepool {
+		if (@available(macOS 12.3, *)) {
+		} else {
+			*errp = strdup(gmlLogitsOS);
+			return NULL;
+		}
 		MLModelConfiguration *cfg = [MLModelConfiguration new];
 		cfg.computeUnits = MLComputeUnitsAll;
 		NSError *err = nil;
@@ -128,15 +135,18 @@ static char *gmlRun(void *mp, const float *x, const float *mask, long s, long h,
 		long s1 = lg.strides[1].longValue, s2 = lg.strides[2].longValue;
 		MLMultiArrayDataType dt = lg.dataType;
 		if (dt != MLMultiArrayDataTypeFloat32 && dt != MLMultiArrayDataTypeFloat16) return strdup("logits are of another type");
-		[lg getBytesWithHandler:^(const void *b, NSInteger size) {
-			for (long t = 0; t < s; t++) {
-				for (long c = 0; c < k; c++) {
-					long i = t * s1 + c * s2;
-					out[t * k + c] = dt == MLMultiArrayDataTypeFloat32 ? ((const float *)b)[i] : (float)((const __fp16 *)b)[i];
+		if (@available(macOS 12.3, *)) {
+			[lg getBytesWithHandler:^(const void *b, NSInteger size) {
+				for (long t = 0; t < s; t++) {
+					for (long c = 0; c < k; c++) {
+						long i = t * s1 + c * s2;
+						out[t * k + c] = dt == MLMultiArrayDataTypeFloat32 ? ((const float *)b)[i] : (float)((const __fp16 *)b)[i];
+					}
 				}
-			}
-		}];
-		return NULL;
+			}];
+			return NULL;
+		}
+		return strdup(gmlLogitsOS);
 	}
 }
 */
