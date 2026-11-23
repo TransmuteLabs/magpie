@@ -75,6 +75,23 @@ func main() {
 				return nil, err
 			}
 			headers := sdk.HeadersEvent{Status: 200, Headers: http.Header{"Content-Type": {"application/json"}}}
+			var mode struct {
+				Stream bool
+			}
+			if request.Protocol == "chat" && json.Unmarshal(request.Body, &mode) == nil && mode.Stream {
+				chunk, err := json.Marshal(map[string]any{
+					"id": "canonical-fixture", "object": "chat.completion.chunk", "model": request.Model,
+					"choices": []any{map[string]any{"index": 0, "delta": map[string]any{
+						"role": "assistant", "content": string(captured)}, "finish_reason": "stop"}},
+					"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+				})
+				if err != nil {
+					return nil, err
+				}
+				headers.Headers.Set("Content-Type", "text/event-stream")
+				body = append([]byte("data: "), chunk...)
+				body = append(body, "\n\ndata: [DONE]\n\n"...)
+			}
 			switch request.Model {
 			case "wire-variant":
 				headers.SentModel = "vendor/wire-variant-high"
@@ -109,25 +126,9 @@ type canonicalExecution struct {
 
 func installCanonicalExtensionFixture(t *testing.T, modelIDs ...string) string {
 	t.Helper()
-	fresh(t)
-	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
-	t.Setenv("MAGPIE_ADDR", "")
-	directory := t.TempDir()
 	entry := "worker"
 	if runtime.GOOS == "windows" {
 		entry += ".exe"
-	}
-	source := filepath.Join(t.TempDir(), "worker.go")
-	if err := os.WriteFile(source, []byte(canonicalExtensionWorker), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	buildContext, stopBuild := context.WithTimeout(t.Context(), time.Minute)
-	defer stopBuild()
-	build := exec.CommandContext(buildContext, filepath.Join(runtime.GOROOT(), "bin", "go"), "build",
-		"-mod=readonly", "-o", filepath.Join(directory, entry), source)
-	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build canonical fixture: %v\n%s", err, output)
 	}
 	if len(modelIDs) == 0 {
 		modelIDs = []string{"m1"}
@@ -143,6 +144,28 @@ func installCanonicalExtensionFixture(t *testing.T, modelIDs ...string) string {
 		Providers: []sdk.ProviderDescriptor{{ID: "canonical", Name: "Canonical fixture",
 			Protocols: []protocolext.Protocol{"chat", "messages"},
 			Models:    models}},
+	}
+	installCanonicalExtensionManifest(t, manifest)
+	return provider.ExtensionProviderID(manifest.ID, manifest.Providers[0].ID)
+}
+
+func installCanonicalExtensionManifest(t *testing.T, manifest sdk.Manifest) {
+	t.Helper()
+	fresh(t)
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	t.Setenv("MAGPIE_ADDR", "")
+	directory := t.TempDir()
+	source := filepath.Join(t.TempDir(), "worker.go")
+	if err := os.WriteFile(source, []byte(canonicalExtensionWorker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	buildContext, stopBuild := context.WithTimeout(t.Context(), time.Minute)
+	defer stopBuild()
+	build := exec.CommandContext(buildContext, filepath.Join(runtime.GOROOT(), "bin", "go"), "build",
+		"-mod=readonly", "-o", filepath.Join(directory, manifest.Entry), source)
+	build.Env = append(os.Environ(), "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build canonical fixture: %v\n%s", err, output)
 	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {
@@ -165,7 +188,6 @@ func installCanonicalExtensionFixture(t *testing.T, modelIDs ...string) string {
 		t.Fatal(err)
 	}
 	provider.Changed()
-	return provider.ExtensionProviderID(manifest.ID, manifest.Providers[0].ID)
 }
 
 func readCanonicalExecution(t *testing.T, response *httptest.ResponseRecorder) canonicalExecution {
@@ -182,6 +204,11 @@ func readCanonicalExecution(t *testing.T, response *httptest.ResponseRecorder) c
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &reply); err != nil {
 		t.Fatal(err)
@@ -191,6 +218,8 @@ func readCanonicalExecution(t *testing.T, response *httptest.ResponseRecorder) c
 		content = reply.Choices[0].Message.Content
 	} else if len(reply.Content) == 1 {
 		content = reply.Content[0].Text
+	} else if len(reply.Output) == 1 && len(reply.Output[0].Content) == 1 {
+		content = reply.Output[0].Content[0].Text
 	}
 	var captured canonicalExecution
 	if err := json.Unmarshal([]byte(content), &captured); err != nil {

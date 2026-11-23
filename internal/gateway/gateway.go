@@ -7066,7 +7066,8 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 			}
 		}
 	}
-	if provider.OpenCodeURL(req.URL.String()) {
+	openCodeURL := provider.OpenCodeURL(req.URL.String())
+	if openCodeURL {
 		if zenFree {
 			// only what OpenCode 2.2.5 sends its gateway: an agent's own
 			// headers (Claude Code's x-stainless-*, Codex's originator)
@@ -7084,8 +7085,11 @@ func (s *Server) forwardOnce(ctx context.Context, p provider.Provider, to provid
 		// cache by and answer 400 without, from the folder the agent says
 		// it works in
 		provider.OpenCodeClient(req.Header, openCodeSeed(in, body), openCodeDir(factsOf(to, body).dir))
-		if v := in.Get("x-opencode-project"); v != "" {
-			// OpenCode's own, asking through magpie
+	}
+	if v := in.Get("x-opencode-project"); v != "" {
+		scope, extension := p.ExtensionScope()
+		if openCodeURL || extension && scope.Plugin == "opencode" &&
+			(scope.Provider == "opencode-go" || scope.Provider == "opencode-zen" || scope.Provider == "opencode-zen-free") {
 			req.Header.Set("x-opencode-project", v)
 		}
 	}
