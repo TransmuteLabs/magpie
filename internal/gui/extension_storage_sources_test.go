@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestStorageOwnerSelectionRejectsTrailingAndUnknownJSON(t *testing.T) {
@@ -25,7 +24,7 @@ func TestStorageOwnerSelectionRejectsTrailingAndUnknownJSON(t *testing.T) {
 
 func TestStorageOwnerRoutesKeepOrdinaryWebAuthenticationAndOrigin(t *testing.T) {
 	sandboxHome(t)
-	handler := webHandler("storage-proof", "fixture-key", time.Hour, nil, Handler(nil, nil))
+	handler := webHandler("storage-proof", "fixture-key", "", nil, Handler(nil, nil))
 	for _, path := range []string{"/api/sessions/storage-sources", "/api/sessions/storage-media?agent=opencode&session=selected&media=blob"} {
 		request := httptest.NewRequest("GET", "http://127.0.0.1"+path, nil)
 		response := httptest.NewRecorder()

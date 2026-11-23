@@ -7395,6 +7395,7 @@ function renderAdd() {
       newPartnerTiles ??= new Set();
       for (const p of partners) if (p.new && !p.added) newPartnerTiles.add(p.id);
       for (const pr of partners) grid.append(partnerTile(pr));
+      grid.classList.toggle("with-tile-notes", !!grid.querySelector(".tile.two"));
       partnersCounted ??= new Set();
       const fresh = partners.filter((p) => !partnersCounted.has(p.id));
       for (const p of fresh) partnersCounted.add(p.id);
