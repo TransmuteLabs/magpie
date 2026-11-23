@@ -229,10 +229,9 @@ func TestBuiltinConfig(t *testing.T) {
 	if rec := postBuiltin(h, `{"id":"library","config":{"hide":"hooks,env"}}`); rec.Code != http.StatusOK {
 		t.Fatalf("library hide: %d %s", rec.Code, rec.Body)
 	}
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/boot.js", nil))
-	if !strings.Contains(rec.Body.String(), `"pluginConfig":{"gateway":{"callsPage":50},"library":{"hide":"hooks,env"}}`) {
-		t.Fatalf("boot.js: %s", rec.Body)
+	boot := readBuiltinBoot(t, h)
+	if boot.PluginConfig["gateway"]["callsPage"] != float64(50) || boot.PluginConfig["library"]["hide"] != "hooks,env" {
+		t.Fatalf("boot.js pluginConfig: %+v", boot.PluginConfig)
 	}
 }
 
@@ -340,13 +339,14 @@ func TestGatewayBuiltinContributionLifecycle(t *testing.T) {
 	check(request("GET", "/api/plugins/builtin", ""), pluginrt.Active, 20)
 	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","config":{"callsPage":100}}`), pluginrt.Active, 100)
 	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","on":false}`), pluginrt.Disposed, 100)
-	if boot := request("GET", "/boot.js", ""); !strings.Contains(boot, `"featuresOff":["gateway"]`) ||
-		strings.Contains(boot, `"callsPage":100`) {
-		t.Fatalf("boot.js after retirement: %s", boot)
+	boot := readBuiltinBoot(t, handler)
+	if _, present := boot.PluginConfig["gateway"]; present || !slices.Contains(boot.FeaturesOff, "gateway") {
+		t.Fatalf("boot.js after retirement: %+v", boot)
 	}
 	check(request("POST", "/api/plugins/builtin", `{"id":"gateway","on":true}`), pluginrt.Active, 100)
-	if boot := request("GET", "/boot.js", ""); !strings.Contains(boot, `"pluginConfig":{"gateway":{"callsPage":100}}`) {
-		t.Fatalf("boot.js after re-enable: %s", boot)
+	boot = readBuiltinBoot(t, handler)
+	if boot.PluginConfig["gateway"]["callsPage"] != float64(100) || slices.Contains(boot.FeaturesOff, "gateway") {
+		t.Fatalf("boot.js after re-enable: %+v", boot)
 	}
 }
 
@@ -397,10 +397,9 @@ func TestGatewayBuiltinMalformedSettingsKeepAppliedConfig(t *testing.T) {
 	if !feature.On || !feature.Chosen || feature.Broken == "" || feature.Config["callsPage"] != float64(100) {
 		t.Errorf("malformed file lost applied gateway settings: %+v", feature)
 	}
-	boot := httptest.NewRecorder()
-	handler.ServeHTTP(boot, httptest.NewRequest("GET", "/boot.js", nil))
-	if boot.Code != http.StatusOK || !strings.Contains(boot.Body.String(), `"pluginConfig":{"gateway":{"callsPage":100}}`) {
-		t.Errorf("boot.js lost the applied Gateway callsPage: HTTP %d", boot.Code)
+	boot := readBuiltinBoot(t, handler)
+	if boot.PluginConfig["gateway"]["callsPage"] != float64(100) {
+		t.Errorf("boot.js lost the applied Gateway callsPage: %+v", boot.PluginConfig["gateway"])
 	}
 	for _, update := range []string{`{"id":"gateway","on":false}`, `{"id":"gateway","config":{"callsPage":50}}`} {
 		if response := postBuiltin(handler, update); response.Code != http.StatusBadRequest {
@@ -419,6 +418,38 @@ func TestGatewayBuiltinMalformedSettingsKeepAppliedConfig(t *testing.T) {
 	if feature := readGatewayBuiltin(t, handler, ""); feature.Broken != "" || feature.Config["callsPage"] != float64(20) {
 		t.Fatalf("removed setting did not return to its default: %+v", feature)
 	}
+}
+
+type builtinBoot struct {
+	FeaturesOff  []string
+	PluginConfig map[string]map[string]any
+}
+
+func readBuiltinBoot(t *testing.T, handler http.Handler) builtinBoot {
+	t.Helper()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("GET", "/boot.js", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /boot.js: %d %s", response.Code, response.Body)
+	}
+	line, _, _ := strings.Cut(response.Body.String(), "\n")
+	value, hasPrefix := strings.CutPrefix(line, "window.bootPrefs = ")
+	value, hasSuffix := strings.CutSuffix(value, ";")
+	if !hasPrefix || !hasSuffix {
+		t.Fatalf("unexpected boot.js assignment: %s", line)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+		t.Fatalf("decode boot.js: %v", err)
+	}
+	var boot builtinBoot
+	if err := json.Unmarshal(fields["featuresOff"], &boot.FeaturesOff); err != nil {
+		t.Fatalf("decode boot.js featuresOff: %v", err)
+	}
+	if err := json.Unmarshal(fields["pluginConfig"], &boot.PluginConfig); err != nil {
+		t.Fatalf("decode boot.js pluginConfig: %v", err)
+	}
+	return boot
 }
 
 func writeBuiltinYAML(t *testing.T, body string) {

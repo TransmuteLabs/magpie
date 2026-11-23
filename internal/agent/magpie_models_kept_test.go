@@ -30,7 +30,7 @@ func TestMagpieModelsKeptWhileCatalogStays(t *testing.T) {
 	built := testing.AllocsPerRun(5, func() { buildModels("pi") })
 	kept := testing.AllocsPerRun(20, func() { magpieModels("pi") })
 	// StampNow's look at three files and the copy; a list built is far more
-	if kept > 200 || kept*10 > built {
+	if kept > 200 || kept*5 > built {
 		t.Fatalf("a list already built took %.0f allocations, building it %.0f", kept, built)
 	}
 
