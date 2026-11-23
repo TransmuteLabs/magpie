@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,18 +31,23 @@ type storageWriterState struct {
 }
 
 type storageNativeFixture struct {
-	manager   *extension.Manager
-	entry     extension.Installed
-	writer    *json.Encoder
-	reader    *json.Decoder
-	stderr    *bytes.Buffer
-	initial   storageWriterState
-	consent   StorageSourceConsent
-	root      StorageSourceRoot
-	directory string
+	manager    *extension.Manager
+	entry      extension.Installed
+	writer     *json.Encoder
+	reader     *json.Decoder
+	stderrPath string
+	initial    storageWriterState
+	consent    StorageSourceConsent
+	root       StorageSourceRoot
+	directory  string
 }
 
-func installStorageNativeFixture(t *testing.T) *storageNativeFixture {
+func installStorageNativeFixture(t testing.TB) *storageNativeFixture {
+	t.Helper()
+	return startStorageNativeFixture(t, 0)
+}
+
+func startStorageNativeFixture(t testing.TB, rows int) *storageNativeFixture {
 	t.Helper()
 	distribution := os.Getenv("MAGPIE_STORAGE_TEST_DIST")
 	script := os.Getenv("MAGPIE_STORAGE_TEST_WRITER")
@@ -53,7 +59,11 @@ func installStorageNativeFixture(t *testing.T) *storageNativeFixture {
 		t.Fatal(err)
 	}
 	directory := OpenCodeDir()
-	command := proc.CommandContext(t.Context(), "python3", script, directory)
+	args := []string{script, directory}
+	if rows > 0 {
+		args = []string{"-c", scaleStorageWriter, script, directory, strconv.Itoa(rows)}
+	}
+	command := proc.CommandContext(t.Context(), "python3", args...)
 	input, err := command.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -62,19 +72,23 @@ func installStorageNativeFixture(t *testing.T) *storageNativeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stderr := &bytes.Buffer{}
+	stderr, err := os.CreateTemp(t.TempDir(), "writer-stderr-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
 	command.Stderr = stderr
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
+	fixture := &storageNativeFixture{writer: json.NewEncoder(input),
+		reader: json.NewDecoder(bufio.NewReader(output)), stderrPath: stderr.Name(), directory: directory}
 	t.Cleanup(func() {
 		_ = input.Close()
 		if err := command.Wait(); err != nil && t.Context().Err() == nil {
-			t.Errorf("owned SQLite writer failed: %v %s", err, stderr)
+			t.Errorf("owned SQLite writer failed: %v %s", err, fixture.stderrText())
 		}
 	})
-	fixture := &storageNativeFixture{writer: json.NewEncoder(input),
-		reader: json.NewDecoder(bufio.NewReader(output)), stderr: stderr, directory: directory}
 	fixture.initial = fixture.next(t)
 	if fixture.initial.PID == os.Getpid() || fixture.initial.PID <= 0 || fixture.initial.MainOnly != 0 {
 		t.Fatal("fixture did not establish a separate writer and a WAL-only committed session", fixture.initial)
@@ -111,16 +125,24 @@ func installStorageNativeFixture(t *testing.T) *storageNativeFixture {
 	return fixture
 }
 
-func (fixture *storageNativeFixture) next(t *testing.T) storageWriterState {
+func (fixture *storageNativeFixture) stderrText() string {
+	body, err := os.ReadFile(fixture.stderrPath)
+	if err != nil {
+		return err.Error()
+	}
+	return string(body)
+}
+
+func (fixture *storageNativeFixture) next(t testing.TB) storageWriterState {
 	t.Helper()
 	var state storageWriterState
 	if err := fixture.reader.Decode(&state); err != nil {
-		t.Fatal("owned SQLite writer did not reply", err, fixture.stderr)
+		t.Fatal("owned SQLite writer did not reply", err, fixture.stderrText())
 	}
 	return state
 }
 
-func (fixture *storageNativeFixture) ask(t *testing.T, command string) storageWriterState {
+func (fixture *storageNativeFixture) ask(t testing.TB, command string) storageWriterState {
 	t.Helper()
 	if err := fixture.writer.Encode(command); err != nil {
 		t.Fatal(err)
