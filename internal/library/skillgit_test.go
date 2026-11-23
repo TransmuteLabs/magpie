@@ -276,9 +276,9 @@ func TestGitErrorsSaid(t *testing.T) {
 		"remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://git.corp.example/team/skills.git/'\n": "git couldn't sign in",
 		"git@git.corp.example: Permission denied (publickey).\nfatal: Could not read from remote repository.\n":             "git couldn't sign in",
 		"Host key verification failed.\nfatal: Could not read from remote repository.\n":                                    "host key",
-		"fatal: couldn't find remote ref dev\n":                                                                             "has no branch or tag dev",
-		"fatal: unable to access 'https://git.corp.example/team/skills.git/': Could not resolve host: git.corp.example\n":   "couldn't reach git.corp.example",
-		"xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), missing xcrun\n":                "git isn't installed",
+		"fatal: couldn't find remote ref dev\n": "has no branch or tag dev",
+		"fatal: unable to access 'https://git.corp.example/team/skills.git/': Could not resolve host: git.corp.example\n": "couldn't reach git.corp.example",
+		"xcrun: error: invalid active developer path (/Library/Developer/CommandLineTools), missing xcrun\n":              "git isn't installed",
 	} {
 		if err := gitError(src, msg); !strings.Contains(err.Error(), want) {
 			t.Errorf("%q said as %q", msg, err)

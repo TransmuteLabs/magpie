@@ -18,10 +18,10 @@ func TestGeminiBase(t *testing.T) {
 		"https://generativelanguage.googleapis.com/":                                                           "https://generativelanguage.googleapis.com/v1beta",
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse": "https://generativelanguage.googleapis.com/v1beta",
 		"https://relay.example/proxy/v1beta/models":                                                            "https://relay.example/proxy/v1beta",
-		"https://relay.example":          "https://relay.example",
-		"https://relay.example/":         "https://relay.example",
-		"relay.example:8080":             "https://relay.example:8080",
-		"https://relay.example/proxy/v1": "https://relay.example/proxy/v1",
+		"https://relay.example":                                                                                "https://relay.example",
+		"https://relay.example/":                                                                               "https://relay.example",
+		"relay.example:8080":                                                                                   "https://relay.example:8080",
+		"https://relay.example/proxy/v1":                                                                       "https://relay.example/proxy/v1",
 	} {
 		if got := GeminiBase(in); got != want {
 			t.Errorf("GeminiBase(%q) = %q, want %q", in, got, want)
