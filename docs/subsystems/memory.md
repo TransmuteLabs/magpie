@@ -327,6 +327,19 @@ linked `MemoryOwner`.
   gateway-only one). A gateway session with nothing recorded has no turns
   and is passed over. Interrupted reads, including a delegated SDK
   source's cancellation or deadline, leave the same conversation due.
+- A turn counts by what the user said, a user `text` part. WorkBuddy
+  and its WorkBuddy AI and CodeBuddy Code variants write each turn as one
+  block containing `<system-reminder>` context and the words in
+  `<user_query>`. This format appears in both native files and gateway
+  requests. `wbTyped` extracts the query as user text and keeps the rest
+  as context. Native and gateway transcripts and titles use that split
+  (`TestWorkBuddyOneBlockTurnsAreSaid`, `TestGatewayOneBlockTurnSaid`).
+  Earlier builds treated the whole block as context and could mark the
+  conversation done without reading it. The first distillation run at
+  reading version 1 clears those three agents' old done marks once
+  (`State.Reads`, `reread`). Those conversations become eligible again
+  within the existing range and quiet-period rules
+  (`TestWorkBuddySessionsRead`, `TestGatewayWorkBuddyTurnsRead`).
 - What is sent: the conversation's user and assistant text only (no
   tools, no reasoning), cut to 24k characters keeping the head and the
   tail, plus the memories already kept for that project, under neutral

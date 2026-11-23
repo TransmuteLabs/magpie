@@ -51,6 +51,7 @@ type MemoryDistillationState struct {
 	Added      int                  `json:"added,omitempty"`
 	Error      string               `json:"error,omitempty"`
 	Left       int                  `json:"left,omitempty"`
+	Reads      int                  `json:"reads,omitempty"`
 	Dream      bool                 `json:"dream,omitempty"`
 	DreamSince time.Time            `json:"dreamSince,omitzero"`
 	Dreamt     time.Time            `json:"dreamt,omitzero"`

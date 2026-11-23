@@ -394,6 +394,7 @@ func readUpTo(ctx context.Context, auto func() string, complete Complete, limit 
 	if ctx.Err() != nil {
 		return Result{}, context.Cause(ctx)
 	}
+	reread(&st)
 	var res ran
 	var runErr error
 	if model == "" {
@@ -416,6 +417,7 @@ func readUpTo(ctx context.Context, auto func() string, complete Complete, limit 
 		if runErr != nil {
 			s.Error = runErr.Error()
 		}
+		reread(s)
 		if s.Done == nil {
 			s.Done = map[string]time.Time{}
 		}
@@ -526,6 +528,30 @@ func due(ctx context.Context, st State, t time.Time) ([]sessions.Session, time.T
 }
 
 func key(s sessions.Session) string { return s.Agent + "/" + s.ID }
+
+// reads is how sessions are read; each step names the agents read wrong
+// before it, whose sessions are read again. 1: WorkBuddy's turns, each
+// its context and the user's words in one block, were read as context
+// whole, so every session had no turns and was marked done unread
+// (bxgz233 on X).
+const reads = 1
+
+var rereadAgents = []string{"workbuddy", "workbuddy-ai", "codebuddy"}
+
+// reread drops the Done marks a reading older than reads made of the
+// agents it read wrong.
+func reread(s *State) {
+	if s.Reads >= reads {
+		return
+	}
+	for k := range s.Done {
+		agent, _, _ := strings.Cut(k, "/")
+		if slices.Contains(rereadAgents, agent) {
+			delete(s.Done, k)
+		}
+	}
+	s.Reads = reads
+}
 
 func run(ctx context.Context, ss []sessions.Session, oldest time.Time, model, effort string, complete Complete, limit int) (ran, error) {
 	r := ran{done: map[string]time.Time{}, oldest: oldest, left: len(ss)}
