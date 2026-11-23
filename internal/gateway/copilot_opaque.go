@@ -189,6 +189,7 @@ type copilotOpaqueTap struct {
 	io.ReadCloser
 	user, model string
 	buf         []byte
+	leading     int
 	whole, sure bool
 	done        bool
 	choices     map[int64]*opaqueChoice
@@ -203,8 +204,7 @@ type opaqueChoice struct {
 func (t *copilotOpaqueTap) Read(p []byte) (int, error) {
 	n, err := t.ReadCloser.Read(p)
 	if n > 0 && !t.done {
-		t.buf = append(t.buf, p[:n]...)
-		t.look()
+		t.look(p[:n])
 	}
 	if err == io.EOF && !t.done && t.whole {
 		t.done = true
@@ -214,20 +214,25 @@ func (t *copilotOpaqueTap) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// look tells a stream from a reply sent whole by its first byte, and reads
-// a stream's whole lines.
-func (t *copilotOpaqueTap) look() {
+// look classifies the reply at the first nonblank byte and reads a
+// stream's whole lines. Leading blanks are counted for the whole-reply
+// limit without keeping them.
+func (t *copilotOpaqueTap) look(b []byte) {
 	if !t.sure {
-		b := bytes.TrimLeft(t.buf, " \t\r\n")
+		trimmed := bytes.TrimLeft(b, " \t\r\n")
+		t.leading += min(len(b)-len(trimmed), opaqueWholeMost+1-t.leading)
+		b = trimmed
 		if len(b) == 0 {
 			return
 		}
 		t.sure, t.whole = true, b[0] == '{'
 	}
+	if t.whole && len(b) > opaqueWholeMost-t.leading-len(t.buf) {
+		t.done, t.buf = true, nil
+		return
+	}
+	t.buf = append(t.buf, b...)
 	if t.whole {
-		if len(t.buf) > opaqueWholeMost {
-			t.done, t.buf = true, nil
-		}
 		return
 	}
 	for {

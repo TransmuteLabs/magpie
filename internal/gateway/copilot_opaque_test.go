@@ -101,6 +101,44 @@ func opaqueOn(body string) string {
 	return ""
 }
 
+func TestCopilotOpaqueTapSkipsLeadingWhitespace(t *testing.T) {
+	const prefix = " \t\r\n \t\r\n"
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"stream", sse(`data: {"choices":[{"delta":{"reasoning_opaque":"seal"}}]}`,
+			`data: {"choices":[{"delta":{"tool_calls":[{"id":"call"}]}}]}`)},
+		{"whole", `{"choices":[{"message":{"reasoning_opaque":"seal","tool_calls":[{"id":"call"}]}}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fresh(t)
+			input := io.MultiReader(strings.NewReader(prefix), strings.NewReader(" "+tc.body))
+			tap := &copilotOpaqueTap{ReadCloser: io.NopCloser(input), user: "u", model: "m"}
+			var wire strings.Builder
+			var chunk [4]byte
+			for range 2 {
+				if _, err := io.ReadFull(tap, chunk[:]); err != nil {
+					t.Fatal(err)
+				}
+				wire.Write(chunk[:])
+				if cap(tap.buf) != 0 {
+					t.Fatalf("tap retained %d bytes of buffer before classifying the reply", cap(tap.buf))
+				}
+			}
+			if _, err := io.Copy(&wire, tap); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := wire.String(), prefix+" "+tc.body; got != want {
+				t.Errorf("reply bytes changed: got %q, want %q", got, want)
+			}
+			if got := keptOpaque("u", "m", "call"); got != "seal" {
+				t.Errorf("kept %q, want seal", got)
+			}
+		})
+	}
+}
+
 // Copilot seals a reply's reasoning in reasoning_opaque beside its tool
 // calls, and opens it again when the next turn carries it back, as VS
 // Code's Copilot Chat does (live: 275 prompt tokens with it, 227
