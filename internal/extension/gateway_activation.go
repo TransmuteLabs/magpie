@@ -283,6 +283,10 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 			delete(owner.retries, id)
 		}
 	}
+	if len(owner.leases) == len(desired) && len(owner.starting) == 0 &&
+		len(owner.draining) == 0 && len(owner.retries) == 0 {
+		return
+	}
 	owner.startReady()
 }
 
