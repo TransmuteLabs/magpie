@@ -24,7 +24,7 @@ import (
 
 // ccFamilyVersion changes when a group would be judged otherwise, so what
 // an older magpie kept is judged again.
-const ccFamilyVersion = 1
+const ccFamilyVersion = 2
 
 // ccFamilyOut is what a group of files came to: of its keys, those that
 // are copies and the one each is kept in, and those that are branches and
@@ -208,10 +208,14 @@ var ccRestKept struct {
 
 func ccRestPath() string { return filepath.Join(filepath.Dir(CachePath()), "cc-rest.json") }
 
-// ccRestKey names a rest by both files as they were when it was read.
+const ccRestKeyPrefix = "3\x00"
+
+// ccRestKey names a rest by both files and the keeper's indexed prefix
+// when the rest was read.
 func ccRestKey(copyPath string, m *ccRestOf) string {
-	return copyPath + "\x00" + m.keeper + "\x00" + strconv.FormatInt(m.size, 10) + "\x00" +
-		strconv.FormatInt(m.mod, 10) + "\x00" + strconv.FormatInt(m.ksize, 10) + "\x00" + strconv.FormatInt(m.kmod, 10)
+	return ccRestKeyPrefix + copyPath + "\x00" + m.keeper + "\x00" + strconv.FormatInt(m.size, 10) + "\x00" +
+		strconv.FormatInt(m.mod, 10) + "\x00" + strconv.FormatInt(m.ksize, 10) + "\x00" + strconv.FormatInt(m.kmod, 10) + "\x00" +
+		strconv.FormatInt(m.keeperPrefix.off, 10) + "\x00" + hex.EncodeToString(m.keeperPrefix.hash[:])
 }
 
 // ccRestLoad reads the kept rests into ccRestMemo, once for each place
@@ -235,22 +239,36 @@ func ccRestLoad() {
 		ids = decodeRestIDs(b)
 	}
 	for k, st := range files {
-		f := strings.Split(k, "\x00")
-		if len(f) != 6 || st == nil {
+		key, current := strings.CutPrefix(k, ccRestKeyPrefix)
+		if !current {
 			continue
 		}
-		var n [4]int64
+		f := strings.Split(key, "\x00")
+		if len(f) != 8 || st == nil || f[0] == "" || f[1] == "" {
+			continue
+		}
+		var n [5]int64
 		bad := false
 		for i := range n {
 			v, err := strconv.ParseInt(f[2+i], 10, 64)
 			n[i], bad = v, bad || err != nil
 		}
-		if bad {
+		if bad || n[0] < 0 || n[2] < 0 || n[4] < 0 || n[4] > n[2] {
+			continue
+		}
+		var hash digest
+		if len(f[7]) != hex.EncodedLen(len(hash)) {
+			continue
+		}
+		if _, err := hex.Decode(hash[:], []byte(f[7])); err != nil || hash == (digest{}) {
 			continue
 		}
 		if _, ok := ccRestMemo[f[0]]; !ok {
 			// ids known only when kept by the same key: nil is not known
-			ccRestMemo[f[0]] = &ccRestOf{size: n[0], mod: n[1], keeper: f[1], ksize: n[2], kmod: n[3], st: st, ids: ids[k]}
+			ccRestMemo[f[0]] = &ccRestOf{
+				size: n[0], mod: n[1], keeper: f[1], ksize: n[2], kmod: n[3],
+				keeperPrefix: ccPrefix{n[4], hash}, st: st, ids: ids[k],
+			}
 		}
 	}
 }

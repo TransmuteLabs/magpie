@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -860,6 +861,291 @@ func TestClaudeKeptUUIDsOfAFileWrittenOver(t *testing.T) {
 	mu.Unlock()
 	if kept != nil {
 		t.Error("the uuids kept of a file written over still stand")
+	}
+}
+
+func TestClaudeGrowingRewriteChangesCopyMembership(t *testing.T) {
+	claude, _ := setup(t)
+	ccForkFixture(t, claude,
+		[2]string{"original.jsonl", ccOriginal},
+		[2]string{"fork-on.jsonl", ccForkOn})
+	keeper := filepath.Join(claude, "projects", "-w-proj", ccForkOn+".jsonl")
+	list := func() map[string]Session {
+		t.Helper()
+		rows, err := ListContext(context.Background(), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		project := map[string]Session{}
+		for _, row := range rows {
+			if row.Agent == "claude" && row.Cwd == "/w/proj" {
+				project[row.ID] = row
+			}
+		}
+		return project
+	}
+	wantCopy := func(phase string) {
+		t.Helper()
+		rows := list()
+		if len(rows) != 1 || !slices.Equal(rows[ccForkOn].Copies, []string{ccOriginal}) {
+			t.Fatalf("%s: got %d rows and keeper copies %v", phase, len(rows), rows[ccForkOn].Copies)
+		}
+	}
+	wantCopy("warm")
+	warm, err := os.Stat(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scansMu sync.Mutex
+	var scans []int64
+	scanHook = func(path string, off int64) {
+		if path == keeper {
+			scansMu.Lock()
+			scans = append(scans, off)
+			scansMu.Unlock()
+		}
+	}
+	t.Cleanup(func() { scanHook = nil })
+	ccKeeperTurn(t, keeper, ccForkOn, 1)
+	wantCopy("append")
+	scansMu.Lock()
+	appendOffsets := slices.Clone(scans)
+	scansMu.Unlock()
+	if !slices.Equal(appendOffsets, []int64{warm.Size(), warm.Size()}) {
+		t.Fatalf("append: keeper scan offsets %v; want parse and UUID scan from %d", appendOffsets, warm.Size())
+	}
+	ccRewriteUUIDAndGrow(t, keeper, "74b57f13-e31f-4f67-900f-bd17e06ebe5f")
+	rows := list()
+	original, fork := rows[ccOriginal], rows[ccForkOn]
+	if len(rows) != 2 || original.ID != ccOriginal || original.ParentSession != "" ||
+		fork.ID != ccForkOn || fork.ParentSession != ccOriginal || fork.Role != "branch" ||
+		len(original.Copies) != 0 || len(fork.Copies) != 0 {
+		t.Fatalf("growing rewrite: got %d rows, original parent %q, fork parent %q, keeper copies %v; want the original with the fork under it and no copies", len(rows), original.ParentSession, fork.ParentSession, fork.Copies)
+	}
+}
+
+func TestClaudeGrowingRewriteRecountsBranchTokens(t *testing.T) {
+	ccCompactedBranchFixture(t)
+	if days, sessions := ccStatTokens(t); days.Input != 80 || sessions.Input != 80 {
+		t.Fatalf("before rewrite: tokens in = %d (days), %d (sessions); want 80", days.Input, sessions.Input)
+	}
+	claude := os.Getenv("CLAUDE_CONFIG_DIR")
+	keeper := filepath.Join(claude, "projects", "-w-proj", ccCompacted+".jsonl")
+	ccRewriteUUIDAndGrow(t, keeper, "be7232d0-8327-469f-80be-3f1450036bfa")
+	if days, sessions := ccStatTokens(t); days.Input != 90 || sessions.Input != 90 {
+		t.Fatalf("growing rewrite: tokens in = %d (days), %d (sessions); want 90 after the branch's formerly shared message becomes unique", days.Input, sessions.Input)
+	}
+}
+
+func TestClaudeShorterRewriteThenAppendRecountsBranchTokens(t *testing.T) {
+	for _, phase := range []string{"warm", "restart"} {
+		t.Run(phase, func(t *testing.T) {
+			ccCompactedBranchFixture(t)
+			project := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "-w-proj")
+			keeper := filepath.Join(project, ccCompacted+".jsonl")
+			branch := filepath.Join(project, ccBranch+".jsonl")
+			body, err := os.ReadFile(keeper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			regenerated := strings.ReplaceAll(string(body), "be7232d0-8327-469f-80be-3f1450036bfa", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+			if regenerated == string(body) {
+				t.Fatal("keeper lacks the shared reply")
+			}
+			if err := os.WriteFile(keeper, append(body, bytes.Repeat([]byte{'\n'}, 160)...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.Stat(keeper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if days, sessions := ccStatTokens(t); days.Input != 80 || sessions.Input != 80 {
+				t.Fatalf("initial tokens in = %d (days), %d (sessions); want 80", days.Input, sessions.Input)
+			}
+			if err := os.WriteFile(keeper, []byte(regenerated), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().Add(-20 * time.Minute)
+			if err := os.Chtimes(keeper, at, at); err != nil {
+				t.Fatal(err)
+			}
+			shorter, err := os.Stat(keeper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(original, shorter) || shorter.Size() >= original.Size() {
+				t.Fatal("the rewrite must shorten the same inode")
+			}
+			rows, err := ListContext(context.Background(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.ContainsFunc(rows, func(row Session) bool {
+				return row.Agent == "claude" && row.ID == ccBranch && row.ParentSession == ccCompacted
+			}) {
+				t.Fatal("the shorter keeper must still head the same branch")
+			}
+			mu.Lock()
+			membership, rest := ccUUIDMemo[keeper], ccRestMemo[branch]
+			mu.Unlock()
+			if membership == nil || membership.size != shorter.Size() || rest == nil || rest.ksize != original.Size() {
+				t.Fatal("listing must index the shorter membership without recounting the original rest")
+			}
+			if phase == "restart" {
+				Reset()
+			}
+			ccKeeperTurn(t, keeper, ccCompacted, 1)
+			grown, err := os.Stat(keeper)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(original, grown) || grown.Size() <= original.Size() {
+				t.Fatal("the append must grow the same inode past its original size")
+			}
+			if days, sessions := ccStatTokens(t); days.Input != 1090 || sessions.Input != 1090 {
+				t.Fatalf("shorten then append: tokens in = %d (days), %d (sessions); want 1090", days.Input, sessions.Input)
+			}
+		})
+	}
+}
+
+func TestClaudeBranchRestSurvivesNewerKeeperCheckpoint(t *testing.T) {
+	ccCompactedBranchFixture(t)
+	project := filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "projects", "-w-proj")
+	keeper := filepath.Join(project, ccCompacted+".jsonl")
+	branch := filepath.Join(project, ccBranch+".jsonl")
+	if days, sessions := ccStatTokens(t); days.Input != 80 || sessions.Input != 80 {
+		t.Fatalf("initial tokens in = %d (days), %d (sessions); want 80", days.Input, sessions.Input)
+	}
+	before, err := os.Stat(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ccKeeperTurn(t, keeper, ccCompacted, 1)
+	if _, err := ListContext(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	membership, rest := ccUUIDMemo[keeper], ccRestMemo[branch]
+	mu.Unlock()
+	if membership == nil || membership.size <= before.Size() || rest == nil || rest.ksize != before.Size() {
+		t.Fatal("listing must advance UUID membership while retaining an older rest checkpoint")
+	}
+	Reset()
+	ccKeeperTurn(t, keeper, ccCompacted, 2)
+	var scansMu sync.Mutex
+	var whole []string
+	scanHook = func(path string, off int64) {
+		if off == 0 && (path == keeper || path == branch) {
+			scansMu.Lock()
+			whole = append(whole, filepath.Base(path))
+			scansMu.Unlock()
+		}
+	}
+	t.Cleanup(func() { scanHook = nil })
+	if days, sessions := ccStatTokens(t); days.Input != 2080 || sessions.Input != 2080 {
+		t.Fatalf("after restart: tokens in = %d (days), %d (sessions); want 2080", days.Input, sessions.Input)
+	}
+	scansMu.Lock()
+	wholeScans := slices.Clone(whole)
+	scansMu.Unlock()
+	if len(wholeScans) != 0 {
+		t.Fatalf("genuine appends after an older rest checkpoint read files whole: %v", wholeScans)
+	}
+}
+
+func ccRewriteUUIDAndGrow(t *testing.T, keeper, oldUUID string) {
+	t.Helper()
+	before, err := os.Stat(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"uuid":"`+oldUUID+`"`) {
+		t.Fatalf("no message with UUID %s", oldUUID)
+	}
+	newUUID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	rewritten := strings.ReplaceAll(string(body), oldUUID, newUUID) + "\n"
+	if err := os.WriteFile(keeper, []byte(rewritten), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	at := before.ModTime().Add(time.Minute)
+	if err := os.Chtimes(keeper, at, at); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || after.Size() != before.Size()+1 || after.ModTime().Equal(before.ModTime()) {
+		t.Fatal("rewrite must change the timestamp and grow the same inode by one byte")
+	}
+}
+
+func TestClaudeLegacyFamilyCachesAreIgnored(t *testing.T) {
+	claude, _ := setup(t)
+	ccForkFixture(t, claude, [2]string{"fork-on.jsonl", ccForkOn})
+	keeper := filepath.Join(claude, "projects", "-w-proj", ccForkOn+".jsonl")
+	info, err := os.Stat(keeper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := file{path: keeper, size: info.Size(), mod: modOf(info.ModTime())}
+	mod := snapshot.mod.UnixNano()
+	stale := uuidSet{}
+	stale.add("74b57f13-e31f-4f67-900f-bd17e06ebe5f")
+	record := encodeUUIDs(keeper, &ccUUIDs{
+		size: info.Size(), mod: mod, off: info.Size(), set: stale, hash: prefixHash(keeper, info.Size()),
+	})
+	copy(record, "ccu1")
+	write := func(path string, body []byte) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uuidPath := ccUUIDFile(ccUUIDDir(), keeper)
+	write(uuidPath, record)
+	write(ccFamiliesPath(), []byte(`{"version":1,"groups":{"legacy":{"c":{"claude:copy":"claude:keeper"}}}}`))
+	legacyCopy := filepath.Join(filepath.Dir(keeper), ccOriginal+".jsonl")
+	legacyKey := fmt.Sprintf("%s\x00%s\x0012\x0034\x00%d\x00%d", legacyCopy, keeper, info.Size(), mod)
+	versionTwoKey := "2\x00" + legacyKey
+	pastEnd := ccRestKeyPrefix + fmt.Sprintf("%s\x00%d\x00%x", legacyKey, info.Size()+1, prefixHash(keeper, info.Size()))
+	zeroHash := ccRestKeyPrefix + fmt.Sprintf("%s\x00%d\x00%x", legacyKey, info.Size(), digest{})
+	invalidHash := ccRestKeyPrefix + fmt.Sprintf("%s\x00%d\x00%s", legacyKey, info.Size(), strings.Repeat("z", 32))
+	var rests bytes.Buffer
+	if err := encodeCache(&rests, cacheFile{
+		Version: cacheVersion, Zone: zone(), Parsers: parseVersions,
+		Files: map[string]*state{
+			legacyKey: {Agent: "claude"}, versionTwoKey: {Agent: "claude"},
+			pastEnd: {Agent: "claude"}, zeroHash: {Agent: "claude"}, invalidHash: {Agent: "claude"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	write(ccRestPath(), rests.Bytes())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if ccUUIDKept(snapshot) != nil {
+		t.Error("old UUID membership was accepted despite its unverified growth")
+	}
+	if path, ok := ccUUIDPathOf(uuidPath); !ok || path != keeper {
+		t.Error("the old UUID file's owner cannot be identified for pruning")
+	}
+	ccFamiliesLoad()
+	if ccFamilyKept("legacy") != nil {
+		t.Error("old family classification was accepted")
+	}
+	ccRestLoad()
+	if ccRestMemo[legacyCopy] != nil {
+		t.Error("old or malformed branch accounting was accepted")
 	}
 }
 

@@ -1559,15 +1559,23 @@ the session itself was hidden as a fork's copy. See
 A group's verdict is kept on disk by its files' sizes and times
 (`cc_family_memo.go`), and each copy's rest by both files. While the
 process runs, the uuids read of a group's files stay in memory, a group
-found on disk included, so when the keeper grows (the live session the
-copies were made of) the group is judged on the added lines only. A copy
-that didn't change keeps its rest while the keeper only grew and holds
-none of the rest's messages; one it now holds has the rest read again. A
+found on disk included. A growing file resumes the UUID scan from its
+previous offset when the indexed prefix still matches its fingerprint
+(`prefixHash`). This checks small prefixes in full and samples large
+ones. Each rest keeps the keeper's offset and fingerprint from the
+accounting read. A copy that didn't change keeps its rest across growth
+when that exact fingerprint still matches and the keeper holds none of
+the rest's messages. An append can reuse a matching fingerprint that the
+UUID scan already verified. An older fingerprint is checked once per
+distinct keeper prefix per accounting read, including after a restart.
+A detected rewrite recomputes membership and the affected rest. A
 long session resumed into copies of ~100 MB each re-read every copy whole
 on each turn, a second or more per change on the Sessions page (on X).
-After a start, the first change to such a group still reads each file's
-uuids once. See `TestClaudeKeeperTurnReadsNoCopy` and
-`TestClaudeKeeperTurnTheBranchHeldIsCountedOnce`.
+Persisted UUIDs can also resume after a restart when their prefix matches.
+Older family, UUID and rest cache entries are rebuilt as needed because
+their membership could have been carried over from an unchecked prefix.
+See `TestClaudeKeeperTurnReadsNoCopy`, `TestClaudeKeeperTurnAfterAStartReadsNoCopy`
+and `TestClaudeShorterRewriteThenAppendRecountsBranchTokens`.
 
 A session whose agent keeps its subagents' conversations beside its own
 lists them in `subagents` on the sessions API (`/api/sessions`, `one`, `manage`; #2261,

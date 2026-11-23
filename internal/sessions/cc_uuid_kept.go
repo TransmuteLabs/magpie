@@ -34,7 +34,7 @@ func ccUUIDFile(dir, path string) string {
 	return filepath.Join(dir, hex.EncodeToString(h[:12])+".bin")
 }
 
-const ccUUIDMagic = "ccu1"
+const ccUUIDMagic = "ccu2"
 
 // ccUUIDDirty is the files whose uuids changed since they were written.
 // Under mu.
@@ -167,9 +167,10 @@ func ccUUIDKept(f file) *ccUUIDs {
 	}
 	path, m, err := decodeUUIDs(b)
 	if err != nil || path != f.path || f.size < m.size || f.size == m.size && f.mod.UnixNano() != m.mod ||
-		m.off > f.size || m.hash == (digest{}) || prefixHash(f.path, m.off) != m.hash {
+		!m.prefix().matches(f) {
 		return nil
 	}
+	m.previous = m.prefix()
 	return m
 }
 
@@ -250,7 +251,7 @@ func ccUUIDPathOf(fp string) (string, bool) {
 	b := make([]byte, 4096+len(ccUUIDMagic)+binary.MaxVarintLen64)
 	k, _ := io.ReadFull(f, b)
 	b = b[:k]
-	if !bytes.HasPrefix(b, []byte(ccUUIDMagic)) {
+	if !bytes.HasPrefix(b, []byte(ccUUIDMagic)) && !bytes.HasPrefix(b, []byte("ccu1")) {
 		return "", false
 	}
 	b = b[len(ccUUIDMagic):]

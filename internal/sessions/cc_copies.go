@@ -259,9 +259,23 @@ type ccUUIDs struct {
 	size, mod, off int64
 	set            uuidSet
 	hash           digest // prefixHash of the file up to off
+	previous       ccPrefix
 	// forked is the session its messages say they were copied from
 	// (forkedFrom, which /branch writes on each), "" for none
 	forked string
+}
+
+type ccPrefix struct {
+	off  int64
+	hash digest
+}
+
+func (p ccPrefix) matches(f file) bool {
+	return p.off >= 0 && p.off <= f.size && p.hash != (digest{}) && prefixHash(f.path, p.off) == p.hash
+}
+
+func (m *ccUUIDs) prefix() ccPrefix {
+	return ccPrefix{m.off, m.hash}
 }
 
 // ccForkedFrom is the session /branch copied f's conversation from, as
@@ -276,21 +290,28 @@ func ccForkedFrom(f file) string {
 
 var ccForked = []byte(`"forkedFrom":{`)
 
-// ccUUIDsOf is the uuids of the messages in f, read on from where the last
-// read stopped while the file only grew.
+// ccUUIDsOf reads on from the previous offset when the indexed prefix
+// still matches.
 func ccUUIDsOf(f file) uuidSet {
+	mod := f.mod.UnixNano()
 	m := ccUUIDMemo[f.path]
 	if m == nil {
 		// what an earlier start read of it, read on from there
 		if m = ccUUIDKept(f); m != nil {
 			ccUUIDMemo[f.path] = m
 		}
+	} else if f.size > m.size {
+		if prefix := m.prefix(); prefix.matches(f) {
+			m.previous = prefix
+		} else {
+			m = nil
+		}
 	}
-	if m == nil || f.size < m.size || f.size == m.size && f.mod.UnixNano() != m.mod {
+	if m == nil || f.size < m.size || f.size == m.size && mod != m.mod {
 		m = &ccUUIDs{set: uuidSet{}}
 		ccUUIDMemo[f.path] = m
 	}
-	if m.size == f.size && m.mod == f.mod.UnixNano() {
+	if m.size == f.size && m.mod == mod {
 		return m.set
 	}
 	off, err := scanThin(f.path, m.off, nil, thinClaude, func(b []byte, _, _ int64) bool {
@@ -302,12 +323,13 @@ func ccUUIDsOf(f file) uuidSet {
 		}
 		return true
 	})
+	m.hash = digest{}
 	if err == nil {
 		m.off = off
 		m.hash = prefixHash(f.path, off)
 		ccUUIDDirty[f.path] = true
 	}
-	m.size, m.mod = f.size, f.mod.UnixNano()
+	m.size, m.mod = f.size, mod
 	return m.set
 }
 
@@ -359,15 +381,37 @@ func copiesByKeeper(copies map[string]string, groups map[string][]file) map[stri
 var ccRestMemo = map[string]*ccRestOf{}
 
 type ccRestOf struct {
-	size, mod   int64
-	keeper      string
-	ksize, kmod int64
-	st          *state
+	size, mod    int64
+	keeper       string
+	ksize, kmod  int64
+	keeperPrefix ccPrefix
+	st           *state
 	// ids is the uuids of the messages st was read from (uuidKey), nil
 	// when not known: while the copy stays as it is and the keeper only
 	// grows, st stands as long as the keeper holds none of them. Kept on
 	// disk with st (cc-rest-ids.bin).
 	ids [][16]byte
+}
+
+type ccRestCheck struct {
+	keeper string
+	prefix ccPrefix
+}
+
+func (m *ccUUIDs) preserves(f file, prefix ccPrefix, checks map[ccRestCheck]bool) bool {
+	if m.hash == (digest{}) || prefix.hash == (digest{}) || prefix.off > m.off {
+		return false
+	}
+	if prefix == m.prefix() || prefix == m.previous {
+		return true
+	}
+	key := ccRestCheck{f.path, prefix}
+	if ok, checked := checks[key]; checked {
+		return ok
+	}
+	ok := prefix.matches(f)
+	checks[key] = ok
+	return ok
 }
 
 // ccRest is the copy's file read for its messages the keeper's file
@@ -376,21 +420,23 @@ type ccRestOf struct {
 // left on another branch and a subagent's messages written in the file
 // are in no other file, and were spent all the same. Copies that are
 // copies through and through come out empty.
-func ccRest(copyFile, keeper file) *state {
+func ccRest(copyFile, keeper file, checks map[ccRestCheck]bool) *state {
 	m := ccRestMemo[copyFile.path]
-	if m != nil && m.size == copyFile.size && m.mod == copyFile.mod.UnixNano() &&
-		m.keeper == keeper.path && m.ksize == keeper.size && m.kmod == keeper.mod.UnixNano() {
+	sameCopy := m != nil && m.size == copyFile.size && m.mod == copyFile.mod.UnixNano() && m.keeper == keeper.path
+	if sameCopy && m.ksize == keeper.size && m.kmod == keeper.mod.UnixNano() {
 		return m.st
 	}
 	held := ccUUIDsOf(keeper)
+	keeperUUIDs := ccUUIDMemo[keeper.path]
 	// the keeper only grew (a live session the copies were made of): what
 	// it added is new messages, so the copy's rest is what it was unless
 	// the keeper now holds one of them, and the copy, as large as the
 	// session, is not read again on each turn
-	if m != nil && m.ids != nil && m.size == copyFile.size && m.mod == copyFile.mod.UnixNano() &&
-		m.keeper == keeper.path && keeper.size > m.ksize &&
+	if sameCopy && m.ids != nil && keeper.size > m.ksize &&
+		keeperUUIDs.preserves(keeper, m.keeperPrefix, checks) &&
 		!slices.ContainsFunc(m.ids, func(k [16]byte) bool { _, ok := held[k]; return ok }) {
 		m.ksize, m.kmod = keeper.size, keeper.mod.UnixNano()
+		m.keeperPrefix = keeperUUIDs.prefix()
 		ccRestKept.dirty = true
 		return m.st
 	}
@@ -414,8 +460,14 @@ func ccRest(copyFile, keeper file) *state {
 		// known to be one, until it reads
 		return cache[copyFile.path]
 	}
-	ccRestMemo[copyFile.path] = &ccRestOf{copyFile.size, copyFile.mod.UnixNano(), keeper.path, keeper.size, keeper.mod.UnixNano(), s, ids}
-	ccRestKept.dirty = true
+	if keeperUUIDs.hash != (digest{}) {
+		ccRestMemo[copyFile.path] = &ccRestOf{
+			size: copyFile.size, mod: copyFile.mod.UnixNano(),
+			keeper: keeper.path, ksize: keeper.size, kmod: keeper.mod.UnixNano(),
+			keeperPrefix: keeperUUIDs.prefix(), st: s, ids: ids,
+		}
+		ccRestKept.dirty = true
+	}
 	return s
 }
 
@@ -440,6 +492,7 @@ func ccCopyStates(files []file, copies map[string]string) map[string]*state {
 		}
 	}
 	out := map[string]*state{}
+	checks := map[ccRestCheck]bool{}
 	for _, f := range files {
 		keeper := copies[f.key]
 		if keeper == "" {
@@ -455,7 +508,7 @@ func ccCopyStates(files []file, copies map[string]string) map[string]*state {
 		if !ok {
 			continue
 		}
-		if st := ccRest(f, k); st != nil {
+		if st := ccRest(f, k, checks); st != nil {
 			out[f.path] = st
 		}
 	}
