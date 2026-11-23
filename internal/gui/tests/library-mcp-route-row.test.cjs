@@ -142,6 +142,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             assert.equal(await long.getAttribute("aria-checked"), "false");
             assert.equal((await long.textContent()).trim(), w(WORDS[1]));
             assert.equal(await long.getAttribute("title"), w(WORDS[5]));
+            assert.equal(await long.evaluate((badge) => getComputedStyle(badge.parentElement).whiteSpace), "normal", "the name can wrap beside its route button");
             assert.equal(await route(rowOf("magpie-image")).getAttribute("aria-checked"), "true");
             assert.deepEqual(await clear(page), [], "the tag clear of its neighbours");
             { const c = await crowded(page); assert.ok(c.n > 2, "the body is measured"); assert.deepEqual(c.out, [], "cards apart"); }

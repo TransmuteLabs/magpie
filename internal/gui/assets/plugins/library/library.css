@@ -63,7 +63,7 @@ body.window .lib-head { top: -2px; margin: -2px 0 0; padding: 8px 0 4px; }
    same room under it, before the card that follows: a .list has no margin,
    so the install card sat on the router's (the owner, 11-23). The room
    goes under the router's last piece, its row or the last why under it */
-.lib-hublist:not(:has(+ .lib-hub-why)), .lib-hub-why:not(:has(+ .lib-hub-why)) { margin-bottom: 16px; }
+.lib-hub-end { margin-bottom: 16px; }
 .lib-hub .lib-switch { align-self: center; }
 /* its switch stays beside its text in a narrow window, as a setting's does */
 .lib-list .row.lib-hub { flex-wrap: nowrap; }
@@ -248,7 +248,7 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-row .name .lib-tag { height: 17px; padding: 0 6px; margin-left: 7px; font-size: 10.5px; font-weight: 500; vertical-align: 1px; }
 /* a tag that can be clicked wraps under a long name instead of being cut off
    by its ellipsis, where a narrow window or a long translation needs it */
-.lib-row .name:has(> .lib-tag.link) { white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
+.lib-row .name.lib-name-wrap { white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
 .lib-tag.lib-new { color: var(--accent); background: var(--accent-soft); }
 .lib-tag.lib-new::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .lib-tag.lib-new.link { cursor: pointer; }
@@ -265,7 +265,6 @@ button.row.lib-hubfolded:hover { background: var(--pill); }
 .lib-tag.lib-route.lib-direct { color: var(--muted); background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
 @media (hover: hover) and (pointer: fine) { .lib-tag.lib-route:hover { color: var(--fg); } }
 .lib-tag.lib-route:active { transform: scale(.97); }
-.lib-row .name:has(> .lib-tag.lib-route) { white-space: normal; text-overflow: clip; overflow-wrap: anywhere; }
 .lib-tag.lib-signed { color: var(--green); background: var(--green-soft); }
 .lib-tag.lib-signed::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 

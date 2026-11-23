@@ -2952,6 +2952,7 @@ magpie.plugin("library", (ctx) => {
     const b = tag(t("In {plugin}", { plugin: x.bundle }), "lib-bundle",
       t("Comes with the Claude plugin {plugin}. Changing the plugin's agents, or turning it off and on, gives this to the plugin's agents again.", { plugin: x.bundle }));
     if (kind) {
+      nm.classList.add("lib-name-wrap");
       b.classList.add("link");
       b.dataset.bundle = x.bundle;
       b.onclick = (e) => { e.stopPropagation(); bundleOnly[kind] = x.bundle; render(); };
@@ -3021,7 +3022,7 @@ magpie.plugin("library", (ctx) => {
     // the router first, over the list (the owner, 11-21: at the list's
     // foot nobody found it), and always, with no server too: a row that
     // comes and goes reads as no such feature (the owner, 11-23)
-    body.append(...hubPart());
+    appendHub(body, hubPart());
     if (!lib.servers.length) {
       const add = button(t("＋ Add a server"), "action", () => editServer(null));
       body.append(empty(t("No servers in the library yet"), lib.foundServers.length && !agentless() ? t("Add one, or bring in those your agents already have, below.") : t("Paste a server's JSON from its README, or fill it in."), add));
@@ -3119,6 +3120,11 @@ magpie.plugin("library", (ctx) => {
     }
     body.append(...nativeSection("mcp"));
     body.append(discover("mcp"));
+  }
+
+  function appendHub(body, parts) {
+    parts[parts.length - 1].classList.add("lib-hub-end");
+    body.append(...parts);
   }
 
   // The MCP hub (#2679): magpie as each agent's one MCP server, handing
@@ -3591,7 +3597,10 @@ magpie.plugin("library", (ctx) => {
     else if (s.local) nm.append(tag(t("Not synced"), "lib-local", s.bridge ? bridgedWhy() : t("Sync never carries it to your other computers")));
     // through the hub or each agent's own entry (#4382), said on every
     // row while the hub is on and turned from there (MetalHqa on X)
-    if (lib.mcpHub && !agentless() && !picking) nm.append(routeTag(s));
+    if (lib.mcpHub && !agentless() && !picking) {
+      nm.classList.add("lib-name-wrap");
+      nm.append(routeTag(s));
+    }
     // its status beside the name, not in it: the name is still the name
     who.classList.add("lib-srvwho");
     who.append(nm, healthEl(s.name));
@@ -6150,7 +6159,7 @@ magpie.plugin("library", (ctx) => {
     // owner, 11-21: at the foot of a long list nobody found it), and
     // always: hidden while the library had no skill, the owner (11-23)
     // found no row and took it for no such feature
-    body.append(...skillRouterPart());
+    appendHub(body, skillRouterPart());
     body.append(installCard());
     pickingFor("skills", lib.skills);
     if (lib.skills.length) {
@@ -8056,7 +8065,7 @@ magpie.plugin("library", (ctx) => {
 
   function skillAutoPart() {
     if (!lib.autoUpdateSkills && !lib.skills.some((s) => s.kind === "github" || s.kind === "git")) return [];
-    const list = el("div", "list lib-list lib-hublist lib-skillauto");
+    const list = el("div", "list lib-list lib-hublist lib-hub-end lib-skillauto");
     const row = el("div", "row lib-row lib-hub");
     const who = el("div", "who");
     who.append(el("div", "name", t("Update by themselves")));
@@ -8735,6 +8744,7 @@ magpie.plugin("library", (ctx) => {
     } else if (c?.status === "update") {
       const b = tag(t("Update available"), "lib-new", t("Changed on GitHub since it was installed") + "\n" + checkLine(c));
       if (c.url) {
+        nm.classList.add("lib-name-wrap");
         b.classList.add("link");
         b.onclick = (e) => { e.stopPropagation(); browse(c.url); };
       }
@@ -8744,6 +8754,7 @@ magpie.plugin("library", (ctx) => {
       // GitHub's limit without a token: the tag leads to where one is
       // added, Settings › Network and sharing's GitHub row
       if (c.limited && !c.limited.token) {
+        nm.classList.add("lib-name-wrap");
         b.classList.add("link");
         b.onclick = (e) => { e.stopPropagation(); openSettingsAt(e, "network", "#githubList .row"); };
       }
@@ -8757,6 +8768,7 @@ magpie.plugin("library", (ctx) => {
     // a copy in an agent that differs from the library's skill (#896): a
     // sync makes it again
     if (s.behind?.length) {
+      nm.classList.add("lib-name-wrap");
       const b = tag(t("Copy out of date"), "lib-new link lib-behind", t("The copy in {agents} differs from the library's skill. Click to copy it again.", { agents: s.behind.map(nameOf).join(", ") }));
       b.setAttribute("role", "button");
       b.tabIndex = 0;

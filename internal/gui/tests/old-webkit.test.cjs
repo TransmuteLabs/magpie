@@ -28,7 +28,7 @@ const assets = path.resolve(__dirname, "../assets");
 // the page's scripts, the built-in plugins' under plugins/ among them, as
 // index.html names them
 const scripts = async () => (await fs.readdir(assets, { recursive: true })).map((f) => f.split(path.sep).join("/")).filter((f) => f.endsWith(".js")).sort();
-const styles = async () => (await fs.readdir(assets)).filter((f) => f.endsWith(".css")).sort();
+const styles = async () => (await fs.readdir(assets, { recursive: true })).map((f) => f.split(path.sep).join("/")).filter((f) => f.endsWith(".css")).sort();
 const read = (f) => fs.readFile(path.join(assets, f), "utf8");
 
 // Syntax Safari 15.0 can't parse; one of these fails the whole file.
@@ -297,6 +297,7 @@ test("the styles hold up in Safari 15.0", async () => {
     const lineOf = (i) => css.slice(0, i).split("\n").length;
     const each = (re, what) => { for (const m of css.matchAll(re)) bad.push(`${f}:~${lineOf(m.index)} ${what}: ${m[0].trim().slice(0, 90)}`); };
     each(/:has\(/g, ":has() (Safari 15.4)");
+    if (f.includes("/")) continue;
     each(/[\d.]+(dvh|svh|lvh|dvw|svw|lvw)\b/g, "dynamic viewport units (Safari 15.4)");
     each(/[^{}]*&[^{}]*\{/g, "nesting (Safari 16.5)");
     // a selector list with :focus-visible and more: all of it is dropped

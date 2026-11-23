@@ -5465,6 +5465,7 @@ function routingPage(part) {
         const bar = el("div", "bar quota-track"), bi = el("i");
         bi.style.width = fill(w);
         bar.append(bi);
+        row.classList.add("with-bar");
         row.append(bar);
       }
       // one cell each, alike (danzi002 on Discord: "显示的好乱"): its

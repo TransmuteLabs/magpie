@@ -126,7 +126,7 @@ body.window .sm-group .row.sm-sess { padding-left: 32px; }
 @container sm-tree (max-width: 600px) {
   .row.sess.sm-sess { flex-wrap: wrap; justify-content: flex-end; row-gap: 4px; padding-top: 7px; padding-bottom: 7px; }
   .row.sm-sess > .who { flex-basis: 100%; }
-  .row.sm-sess:has(> .sm-check) > .who { flex-basis: calc(100% - 22px); }
+  .row.sm-sess > .sm-check ~ .who { flex-basis: calc(100% - 22px); }
   /* the title has its own line: the cost keeps its width again, so each
      row's second line wraps at the same place and lines up (ysm119) */
   .row.sm-sess .cost { min-width: 58px; }

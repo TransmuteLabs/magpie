@@ -626,7 +626,7 @@ button.rt-session { cursor: pointer; }
    the flow, not absolute: Chromium put an absolute bar of a row in a
    column's unbroken block (.rt-lead) over the row above it */
 .rt-act .bar { height: 2px; margin: 2px 0 -4px; }
-.rt-act:has(> .bar) { padding-bottom: 8px; }
+.rt-act.with-bar { padding-bottom: 8px; }
 /* a provider's keys summed up in one row (#1319), opened to each */
 .rt-act.rt-keys { cursor: pointer; user-select: none; }
 .rt-act.rt-keys .chev { display: inline-flex; align-self: center; margin-left: auto; color: var(--muted); transition: transform .2s; }
