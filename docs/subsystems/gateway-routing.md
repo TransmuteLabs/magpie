@@ -352,6 +352,8 @@ the duration of a request. Edits take effect on subsequent requests.
 The vendor's `X-RateLimit-Reset` is a Unix timestamp in milliseconds.
 When the daily refusal gives no retry time, its documented reset is
 midnight UTC.
+The first upstream refusal keeps this scope when magpie translates a request
+and provides its own web search or advisor tool (`askTranslated`).
 Paid models stay eligible and can answer on the same key during the rest.
 An `upstream_provider_shared_pool` refusal keeps its existing model scope.
 Other refusals follow the usual cooldown rules. The Routing trace shows

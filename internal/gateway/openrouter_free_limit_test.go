@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -305,5 +306,163 @@ func TestOpenRouterUnscopedLimitStillRestsKey(t *testing.T) {
 	first := server.trace.routes[len(server.trace.routes)-1].Tries[0]
 	if first.Rest == nil || first.Rest.Key != "orf" || first.Rest.Model != "" {
 		t.Fatalf("unclassified refusal should rest the key: %+v", first.Rest)
+	}
+}
+
+func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
+	const (
+		firstFree  = "x/a:free"
+		secondFree = "x/b:free"
+		paid       = "x/paid"
+		key        = "c33-search-key"
+	)
+	for _, test := range []struct {
+		name, preset, source string
+		scoped               bool
+	}{
+		{"free_minute", "openrouter", "openrouter_free_tier_per_minute", true},
+		{"unknown", "openrouter", "openrouter_abuse_guard", false},
+		{"other_vendor", "", "openrouter_free_tier_per_minute", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fresh(t)
+			opts := settings.Load()
+			opts.Searcher = "off"
+			retries, extraDispatches := 0, 1
+			opts.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{
+				MaxRetries: &retries, MaxTotalRetries: &extraDispatches,
+			}}
+			if err := settings.Save(opts); err != nil {
+				t.Fatal(err)
+			}
+			apis := newSearchAPIs(t)
+			if err := provider.SetSearchAPI(apis.api("tavily", "tvly-k")); err != nil {
+				t.Fatal(err)
+			}
+
+			reset := time.UnixMilli(time.Now().Add(2 * time.Minute).UnixMilli())
+			var mu sync.Mutex
+			var tried []string
+			vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					http.NotFound(w, r)
+					return
+				}
+				var request struct {
+					Model  string
+					Stream bool
+					Tools  []struct {
+						Type     string
+						Function struct{ Name string }
+					}
+				}
+				err := json.NewDecoder(r.Body).Decode(&request)
+				if err != nil || !request.Stream || len(request.Tools) != 1 ||
+					request.Tools[0].Type != "function" || request.Tools[0].Function.Name != "web_search" ||
+					r.Header.Get("Authorization") != "Bearer "+key {
+					t.Errorf("expected translated search on the same key: request %+v, decode error %v", request, err)
+					http.Error(w, "invalid fixture request", http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				tried = append(tried, request.Model)
+				mu.Unlock()
+				if request.Model == firstFree {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.UnixMilli(), 10))
+					w.WriteHeader(http.StatusTooManyRequests)
+					fmt.Fprintf(w, `{"error":{"message":"Rate limit exceeded.","code":429,"metadata":{"limit_source":%q}}}`, test.source)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, sse(
+					fmt.Sprintf(`data: {"id":"ok","choices":[{"index":0,"delta":{"role":"assistant","content":%q}}]}`, request.Model),
+					`data: {"id":"ok","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}`,
+					`data: [DONE]`,
+				))
+			}))
+			t.Cleanup(vendor.Close)
+			if err := provider.Save(provider.Provider{
+				ID: "orf", Name: "Upstream", Preset: test.preset, Key: key, Chat: vendor.URL + "/v1",
+				Models: []string{firstFree, secondFree, paid},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, group := range []provider.Group{
+				{Name: "Mixed", Members: []string{"orf/" + firstFree, "orf/" + secondFree, "orf/" + paid}, Routing: provider.Ordered, Patience: provider.PatienceOff},
+				{Name: "Free", Members: []string{"orf/" + firstFree, "orf/" + secondFree}, Routing: provider.Ordered, Patience: provider.PatienceOff},
+			} {
+				if err := provider.SaveGroup(group); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := New()
+			send := func(group string) (int, string) {
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(
+					`{"model":"group/`+group+`","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}],`+
+						`"tools":[{"type":"web_search_20250305","name":"web_search"}]}`,
+				))
+				req.Header.Set("x-api-key", Token)
+				req.RemoteAddr = "127.0.0.1:12345"
+				rec := httptest.NewRecorder()
+				lanGuard(server.Handler()).ServeHTTP(rec, req)
+				return rec.Code, rec.Body.String()
+			}
+			modelsTried := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				return slices.Clone(tried)
+			}
+			assertTried := func(want ...string) {
+				t.Helper()
+				if got := modelsTried(); !slices.Equal(got, want) {
+					t.Fatalf("translated search models sent upstream: %v, want %v", got, want)
+				}
+			}
+
+			code, body := send("mixed")
+			route := server.trace.routes[len(server.trace.routes)-1]
+			rest := route.Tries[0].Rest
+			keyRest := rest != nil && rest.Key == "orf" && rest.Model == "" && !rest.FreeTier
+			held429 := code == http.StatusTooManyRequests && strings.Contains(body, "not asked again before")
+			if test.scoped && keyRest && held429 && slices.Equal(modelsTried(), []string{firstFree}) {
+				t.Fatal("confirmed OpenRouter free-tier refusal rested the whole key and held the paid fallback")
+			}
+			wantKey := "orf"
+			if test.scoped {
+				wantKey += "/\x00openrouter-free"
+			}
+			if rest == nil || rest.FreeTier != test.scoped || rest.Key != wantKey {
+				t.Fatalf("translated search refusal scope: %+v", rest)
+			}
+			if test.scoped {
+				assertTried(firstFree, paid)
+				if code != http.StatusOK || textOf(body) != paid {
+					t.Fatalf("translated group replied %d %s, want %q", code, body, paid)
+				}
+				if !rest.Until.Equal(reset) {
+					t.Fatalf("free-tier rest ends at %s, want %s", rest.Until, reset)
+				}
+				code, body = send("free")
+				if code != http.StatusTooManyRequests || !strings.Contains(body, "not asked again before") {
+					t.Fatalf("free group during scoped rest: %d %s", code, body)
+				}
+				code, body = send("mixed")
+				if code != http.StatusOK || textOf(body) != paid {
+					t.Fatalf("mixed group during scoped rest: %d %s", code, body)
+				}
+				assertTried(firstFree, paid, paid)
+			} else {
+				if !keyRest || !held429 {
+					t.Fatalf("unscoped refusal did not hold the whole key: %d %s, rest %+v", code, body, rest)
+				}
+				assertTried(firstFree)
+			}
+			apis.mu.Lock()
+			defer apis.mu.Unlock()
+			if len(apis.asked) != 0 {
+				t.Fatalf("unexpected search requests: %v", apis.asked)
+			}
+		})
 	}
 }

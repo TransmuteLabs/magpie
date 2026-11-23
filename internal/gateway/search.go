@@ -1500,7 +1500,11 @@ func (s *Server) searchRounds(ctx context.Context, q *Request, tool string, in <
 }
 
 // askTranslated is a round for a provider asked on to.
-func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model string, in http.Header, reply http.Header) round {
+func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model string, in, reply http.Header) round {
+	return s.askTranslatedRound(p, to, model, in, reply, nil)
+}
+
+func (s *Server) askTranslatedRound(p provider.Provider, to provider.Protocol, model string, in, reply http.Header, writer http.ResponseWriter) round {
 	first := true
 	return func(ctx context.Context, req *Request) (<-chan Event, int, string) {
 		q := *req
@@ -1513,6 +1517,9 @@ func (s *Server) askTranslated(p provider.Provider, to provider.Protocol, model 
 			b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 			res.Body.Close()
 			if first {
+				if writer != nil {
+					markOpenRouterLimit(writer, p, b)
+				}
 				keepRetry(reply, res.Header, b)
 			}
 			return nil, res.StatusCode, p.Name + ": " + provider.APIError(b, res.Status)

@@ -10281,7 +10281,7 @@ func (s *Server) translate(w http.ResponseWriter, r *http.Request, p provider.Pr
 	}
 	search := request.WebSearch && !searching(r.Context()) && canSearchFor(p) && (!searchesFor(p, to, model, request) || magpieSearches(r.Context(), p))
 	if search || request.Advisor != "" {
-		ask := antigravityRound(w, p, s.askTranslated(p, to, model, r.Header, w.Header()))
+		ask := antigravityRound(w, p, s.askTranslatedRound(p, to, model, r.Header, w.Header(), w))
 		if zen != nil {
 			ask = zenRound(zen.z, ask)
 		}
