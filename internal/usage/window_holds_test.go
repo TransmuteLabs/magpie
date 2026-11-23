@@ -152,7 +152,9 @@ func TestWindowHoldsNeedsTheWholeWindowLogged(t *testing.T) {
 	qs := []provider.SubscriptionQuota{{Provider: "claude", User: "dee@example.com", Windows: []provider.QuotaWindow{
 		{Name: "7 days", Used: 40, ResetsAt: &reset, Span: 7 * 24 * time.Hour}}}}
 	recs := []Record{{Time: now.Add(-time.Hour), Provider: "claude", ProviderAccount: "dee@example.com", Model: "claude-opus-4-7", Input: 100, Output: 100, Status: 200}}
+	reads := 0
 	read := func(fn func(Record)) {
+		reads++
 		for _, r := range recs {
 			fn(r)
 		}
@@ -160,6 +162,9 @@ func TestWindowHoldsNeedsTheWholeWindowLogged(t *testing.T) {
 	priceOf := func(Record) *catalog.Price { return nil }
 	if got := windowHolds(qs, now, now.Add(-2*24*time.Hour), priceOf, provider.Renames{}, nil, nil, read); got[0].Windows[0].Holds != nil || got[0].Windows[0].HoldsWhy != provider.HoldsBeforeLog {
 		t.Fatalf("the log began 2 days into the week, and the week was reckoned: %+v, why %q", got[0].Windows[0].Holds, got[0].Windows[0].HoldsWhy)
+	}
+	if reads != 0 {
+		t.Fatalf("scanned the log %d times with no estimable windows", reads)
 	}
 	got := windowHolds(qs, now, now.Add(-30*24*time.Hour), priceOf, provider.Renames{}, nil, nil, read)
 	if h := got[0].Windows[0].Holds; h == nil || h.Tokens != 500 || h.Priced {

@@ -231,7 +231,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 	}
 	paidOtherwise := map[runKey]bool{} // the vendor answered a call after a reading of none left
 	inRun := map[slot][]runKey{}       // the dry runs a counted call fell in
-	read(func(r Record) {
+	count := func(r Record) {
 		if r.IsRejected() || r.IsReported() || r.Input+r.Output == 0 {
 			return
 		}
@@ -281,7 +281,10 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 				unpriced[s] = true
 			}
 		}
-	})
+	}
+	if len(want) != 0 {
+		read(count)
+	}
 	out := make([]provider.SubscriptionQuota, len(qs))
 	copy(out, qs)
 	cloned := map[int]bool{}
