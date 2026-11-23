@@ -34,7 +34,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -245,9 +244,100 @@ var parsedMemories struct {
 	bytes   int64
 }
 
-// noted are the memory files read as broken, by name and hash, so each is
-// logged once.
-var noted sync.Map
+const notedMemoryFiles = 4096
+
+type malformedNotes struct {
+	dir      string
+	info     fs.FileInfo
+	byID     map[string]string
+	overflow bool
+}
+
+var noted malformedNotes
+
+type noteRead struct {
+	dir     string
+	checked bool
+	current bool
+	skipped bool
+}
+
+func memoryNoteRead(dir string) noteRead {
+	scan := noteRead{dir: dir}
+	if len(noted.byID) != 0 || noted.overflow {
+		scan.check()
+	}
+	return scan
+}
+
+func (scan *noteRead) check() bool {
+	if scan.checked {
+		return scan.current
+	}
+	scan.checked = true
+	info, err := memoryDirectoryInfo(scan.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		noted = malformedNotes{}
+	}
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if noted.dir != scan.dir || !os.SameFile(noted.info, info) {
+		noted = malformedNotes{dir: scan.dir, info: info}
+	}
+	scan.current = true
+	return true
+}
+
+func memoryDirectoryInfo(dir string) (fs.FileInfo, error) {
+	folder, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer folder.Close()
+	return folder.Stat()
+}
+
+func (scan *noteRead) warn(id, hash string, err error) {
+	if !scan.check() {
+		return
+	}
+	if previous, tracked := noted.byID[id]; tracked {
+		if previous == hash {
+			return
+		}
+	} else if len(noted.byID) == notedMemoryFiles {
+		scan.skipped = true
+		return
+	}
+	if noted.byID == nil {
+		noted.byID = make(map[string]string)
+	}
+	noted.byID[id] = hash
+	log.Printf("memory: %s.md can't be read, left as it is: %v", id, err)
+}
+
+func (scan *noteRead) forget(id string) {
+	if scan.current {
+		delete(noted.byID, id)
+	}
+}
+
+func (scan *noteRead) finish(broken map[string]bool) {
+	if !scan.current {
+		return
+	}
+	if broken != nil {
+		maps.DeleteFunc(noted.byID, func(id, _ string) bool { return !broken[id] })
+		if !scan.skipped && len(noted.byID) < notedMemoryFiles {
+			noted.overflow = false
+		}
+	}
+	if scan.skipped && len(noted.byID) == notedMemoryFiles && !noted.overflow {
+		log.Printf("memory: too many malformed memory files for individual warnings (limit %d)", notedMemoryFiles)
+		noted.overflow = true
+	}
+}
 
 // read reads memory from Dir, under mu: a change a journal holds is
 // finished first, memory.json moved in when Dir has none yet. A memory
@@ -274,6 +364,7 @@ func read() (*file, error) {
 		}
 	}
 	dir := Dir()
+	notes := memoryNoteRead(dir)
 	es, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
@@ -299,7 +390,7 @@ func read() (*file, error) {
 			continue
 		}
 		cached := parsedMemories.entries[id]
-		current, err := readMemoryFile(dir, id, info.ModTime(), &scratch, cached)
+		current, err := readMemoryFile(&notes, id, info.ModTime(), &scratch, cached)
 		if err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
 				f.broken[id], f.seen[id] = true, current.hash
@@ -330,6 +421,9 @@ func read() (*file, error) {
 		}
 		f.Memories = append(f.Memories, m)
 	}
+	if err == nil {
+		notes.finish(f.broken)
+	}
 	for id := range parsedMemories.entries {
 		if _, seen := f.seen[id]; !seen || f.broken[id] {
 			dropParsedMemory(id)
@@ -351,22 +445,25 @@ func dropParsedMemory(id string) {
 	}
 }
 
-func readMemoryFile(dir, id string, mod time.Time, scratch *[]byte, cached entry) (entry, error) {
-	filename := id + ".md"
-	data, err := steady.ReadThereInto(filepath.Join(dir, filename), *scratch)
+func readMemoryFile(notes *noteRead, id string, mod time.Time, scratch *[]byte, cached entry) (entry, error) {
+	data, err := steady.ReadThereInto(filepath.Join(notes.dir, id+".md"), *scratch)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			notes.forget(id)
+		}
 		return entry{}, err
 	}
 	*scratch = data[:0]
 	hash := hashOf(data)
 	if cached.memory != nil && hash == cached.hash && mod.Equal(cached.mod) {
+		notes.forget(id)
 		return cached, nil
 	}
 	record, err := decode(id, data, mod)
 	if err != nil {
-		if _, was := noted.LoadOrStore(filename+hash, true); !was {
-			log.Printf("memory: %s can't be read, left as it is: %v", filename, err)
-		}
+		notes.warn(id, hash, err)
+	} else {
+		notes.forget(id)
 	}
 	return entry{mod: mod, size: int64(len(data)), hash: hash, memory: record}, err
 }
@@ -511,6 +608,7 @@ func touch(ids []string, at time.Time) {
 		return
 	}
 	dir := Dir()
+	notes := memoryNoteRead(dir)
 	var scratch []byte
 	changed := false
 	for _, id := range ids {
@@ -520,13 +618,16 @@ func touch(ids []string, at time.Time) {
 		}
 		info, err := os.Lstat(filepath.Join(dir, id+".md"))
 		if err != nil || info.IsDir() {
+			if err == nil || errors.Is(err, fs.ErrNotExist) {
+				notes.forget(id)
+			}
 			continue
 		}
 		cached := entry{}
 		if parsedMemories.dir == dir {
 			cached = parsedMemories.entries[id]
 		}
-		if _, err := readMemoryFile(dir, id, info.ModTime(), &scratch, cached); err != nil {
+		if _, err := readMemoryFile(&notes, id, info.ModTime(), &scratch, cached); err != nil {
 			continue
 		}
 		if current.Used == nil {
@@ -535,6 +636,7 @@ func touch(ids []string, at time.Time) {
 		current.Used[id] = use{At: at, Uses: useOf.Uses + 1}
 		changed = true
 	}
+	notes.finish(nil)
 	if changed {
 		if write, err := metaChange(current, data); err == nil && write != nil {
 			_ = putDown([]op{*write})

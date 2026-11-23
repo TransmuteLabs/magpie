@@ -47,6 +47,16 @@ Rules:
   returns an error so the instructions keep what the agent has
   (`TestUnreadableFileIsNeverWrittenOver`,
   `TestCutShortMetaReadFromItsBackup`).
+- Each process remembers the latest malformed content fingerprint for up
+  to 4,096 IDs in the current Memory directory. An observed repair or
+  absence clears that ID's warning. An unknown read leaves its warning
+  state in place. At capacity, additional IDs share one overflow warning
+  until a full listing has room and reports no omitted warnings. A new
+  malformed revision of a tracked ID still warns while full. Switching
+  directories or replacing the directory resets this warning state.
+  If absence frees space at the end of a listing, a file skipped earlier
+  can warn on the next read. Warning state is updated only when the
+  directory can be identified.
 - `memory.json`, where memory was kept before, is moved into the folder on
   the first read, all of it under one journal, and kept as
   `memory.json.migrated` (`TestMemoryJSONIsMovedIn`). One that can't be
