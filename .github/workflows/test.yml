@@ -95,9 +95,8 @@ jobs:
 
       # A step cap: on 0dbdc7481's macOS run internal/library printed
       # nothing for 44 minutes past go test's own -timeout 30m (no panic, no
-      # stack, #5267), and main's later runs queued behind it until it was
-      # cancelled by hand. A share of macOS's packages takes ~20 minutes, and
-      # ubuntu's whole run ~11.
+      # stack, #5267). Stream macOS test events so a slow package cannot hide
+      # progress in the rest of its shard.
       - name: Test
         if: runner.os != 'Windows' && matrix.part != 'gateway'
         timeout-minutes: 45
@@ -105,9 +104,17 @@ jobs:
         env:
           PART: ${{ matrix.part }}
         run: |
-          go list -tags "${{ steps.tags.outputs.tags }}" ./... | grep -v '/internal/gateway$' |
-            if [ -n "$PART" ]; then build/pkg-shards.sh "${PART%/*}" "${PART#*/}"; else cat; fi |
-            xargs go test -timeout 30m -tags "${{ steps.tags.outputs.tags }}"
+          tags="${{ steps.tags.outputs.tags }}"
+          packages="$RUNNER_TEMP/test-packages"
+          go list -tags "$tags" ./... | grep -v '/internal/gateway$' > "$packages"
+          if [ -n "$PART" ]; then
+            shard="$RUNNER_TEMP/test-shard"
+            build/pkg-shards.sh "${PART%/*}" "${PART#*/}" < "$packages" > "$shard"
+            cat "$shard"
+            xargs go test -json -timeout 30m -tags "$tags" < "$shard"
+          else
+            xargs go test -timeout 30m -tags "$tags" < "$packages"
+          fi
 
       # internal/gateway's tests run one at a time (t.Setenv rules out
       # t.Parallel): 892s on mote for 4286 tests on 11-15, none over 20s,

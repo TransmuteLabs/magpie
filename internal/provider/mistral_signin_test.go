@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -98,6 +97,14 @@ func newFakeMistralConsole(t *testing.T) *fakeMistralConsole {
 	return f
 }
 
+func startMistralSignInForTest(test *testing.T) (string, string, error) {
+	id, page, err := StartMistralSignIn(test.Context())
+	if err == nil {
+		test.Cleanup(func() { CancelMistralSignIn(id) })
+	}
+	return id, page, err
+}
+
 // waitMistral reads the sign-in's state until it is no longer pending.
 func waitMistral(t *testing.T, id string) (state, why, key string) {
 	t.Helper()
@@ -119,7 +126,7 @@ func waitMistral(t *testing.T, id string) (state, why, key string) {
 func TestMistralSignInGetsVibeKey(t *testing.T) {
 	f := newFakeMistralConsole(t)
 	f.polls = []string{"pending", "pending", "completed"}
-	id, page, err := StartMistralSignIn(context.Background())
+	id, page, err := startMistralSignInForTest(t)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +177,7 @@ func TestMistralSignInEnds(t *testing.T) {
 			if c.exchange != nil {
 				f.exchange = c.exchange
 			}
-			id, _, err := StartMistralSignIn(context.Background())
+			id, _, err := startMistralSignInForTest(t)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -209,7 +216,7 @@ func TestMistralSignInStaysOnTheConsole(t *testing.T) {
 			} else {
 				f.poll = c.poll
 			}
-			if _, _, err := StartMistralSignIn(context.Background()); err == nil || !strings.Contains(err.Error(), "outside console.mistral.ai") {
+			if _, _, err := startMistralSignInForTest(t); err == nil || !strings.Contains(err.Error(), "outside console.mistral.ai") {
 				t.Fatalf("err = %v", err)
 			}
 		})
@@ -219,12 +226,33 @@ func TestMistralSignInStaysOnTheConsole(t *testing.T) {
 // A cancelled sign-in is forgotten and stops asking.
 func TestMistralSignInCancel(t *testing.T) {
 	newFakeMistralConsole(t)
-	id, _, err := StartMistralSignIn(context.Background())
+	id, _, err := startMistralSignInForTest(t)
 	if err != nil {
 		t.Fatal(err)
 	}
 	CancelMistralSignIn(id)
 	if s, _, _ := MistralSignInState(id); s != "" {
 		t.Fatalf("state after cancel = %q", s)
+	}
+}
+
+func TestMistralSignInRejectsRedirect(test *testing.T) {
+	destination := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		test.Error("redirect destination received an exchange request")
+		io.WriteString(response, `{"api_key":"redirected-key"}`)
+	}))
+	test.Cleanup(destination.Close)
+
+	console := newFakeMistralConsole(test)
+	console.mu.Lock()
+	console.exchange = func(response http.ResponseWriter) {
+		response.Header().Set("Location", destination.URL)
+		response.WriteHeader(http.StatusTemporaryRedirect)
+	}
+	console.mu.Unlock()
+
+	key, err := mistralExchange(test.Context(), mistralConsoleAPI, "p-1", "ex-1", "verifier")
+	if key != "" || err == nil || !strings.HasPrefix(err.Error(), "Mistral didn't finish the sign-in: 307") {
+		test.Fatalf("exchange returned key %q and error %v, want refused redirect", key, err)
 	}
 }

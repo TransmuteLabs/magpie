@@ -94,7 +94,9 @@ func mistralAsk(ctx context.Context, method, u string, body any) (int, []byte, e
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	client := *http.DefaultClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	res, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -119,10 +121,10 @@ func mistralUnder(u, base string) bool {
 }
 
 // mistralBrowserBase is the console's own origin, where the sign-in page is.
-func mistralBrowserBase() string {
-	u, err := url.Parse(mistralConsoleAPI)
+func mistralBrowserBase(api string) string {
+	u, err := url.Parse(api)
 	if err != nil {
-		return mistralConsoleAPI
+		return api
 	}
 	return u.Scheme + "://" + u.Host
 }
@@ -131,8 +133,9 @@ func mistralBrowserBase() string {
 // to ask MistralSignInState with, and the page the user signs in on, in
 // their own browser. magpie waits on it itself until the page runs out.
 func StartMistralSignIn(ctx context.Context) (id, page string, err error) {
+	api, pollInterval := mistralConsoleAPI, mistralSignInPoll
 	verifier, challenge := mistralPKCE()
-	code, raw, err := mistralAsk(ctx, http.MethodPost, mistralConsoleAPI+"/vibe/sign-in",
+	code, raw, err := mistralAsk(ctx, http.MethodPost, api+"/vibe/sign-in",
 		map[string]string{"code_challenge": challenge, "code_challenge_method": "S256"})
 	if err != nil {
 		return "", "", fmt.Errorf("couldn't reach Mistral: %w", err)
@@ -146,7 +149,7 @@ func StartMistralSignIn(ctx context.Context) (id, page string, err error) {
 	if code >= 300 || json.Unmarshal(raw, &r) != nil || r.ProcessID == "" || r.SignInURL == "" || r.PollURL == "" {
 		return "", "", fmt.Errorf("Mistral didn't start a sign-in: %d %s", code, volcHead(raw))
 	}
-	if !mistralUnder(r.SignInURL, mistralBrowserBase()) || !mistralUnder(r.PollURL, mistralConsoleAPI) {
+	if !mistralUnder(r.SignInURL, mistralBrowserBase(api)) || !mistralUnder(r.PollURL, api) {
 		return "", "", errors.New("Mistral's sign-in pointed outside console.mistral.ai: magpie didn't open it")
 	}
 	life := 10 * time.Minute
@@ -165,7 +168,7 @@ func StartMistralSignIn(ctx context.Context) (id, page string, err error) {
 	mistralFlows.Unlock()
 	go func() {
 		defer cancel()
-		key, err := mistralWait(wait, r.ProcessID, r.PollURL, verifier)
+		key, err := mistralWait(wait, api, r.ProcessID, r.PollURL, verifier, pollInterval)
 		mistralFlows.Lock()
 		defer mistralFlows.Unlock()
 		if mistralFlows.m[id] != f {
@@ -209,8 +212,8 @@ func CancelMistralSignIn(id string) {
 // mistralWait polls the sign-in until the user has signed in, then trades
 // it for the key, as Vibe's _wait_for_completion and exchange do: three
 // polls in a row that fail end it.
-func mistralWait(ctx context.Context, process, poll, verifier string) (string, error) {
-	t := time.NewTimer(mistralSignInPoll)
+func mistralWait(ctx context.Context, api, process, poll, verifier string, pollInterval time.Duration) (string, error) {
+	t := time.NewTimer(pollInterval)
 	defer t.Stop()
 	failed := 0
 	for {
@@ -222,7 +225,7 @@ func mistralWait(ctx context.Context, process, poll, verifier string) (string, e
 			return "", ctx.Err()
 		case <-t.C:
 		}
-		t.Reset(mistralSignInPoll)
+		t.Reset(pollInterval)
 		code, raw, err := mistralAsk(ctx, http.MethodGet, poll, nil)
 		if code == http.StatusGone {
 			return "", errors.New("the sign-in page ran out before you signed in: sign in again")
@@ -252,7 +255,7 @@ func mistralWait(ctx context.Context, process, poll, verifier string) (string, e
 			if r.ExchangeToken == "" {
 				return "", errors.New("you signed in, but Mistral gave nothing to finish it with: sign in again")
 			}
-			return mistralExchange(ctx, process, r.ExchangeToken, verifier)
+			return mistralExchange(ctx, api, process, r.ExchangeToken, verifier)
 		case "expired":
 			return "", errors.New("the sign-in page ran out before you signed in: sign in again")
 		case "denied":
@@ -269,8 +272,8 @@ func mistralWait(ctx context.Context, process, poll, verifier string) (string, e
 }
 
 // mistralExchange trades a finished sign-in for its key.
-func mistralExchange(ctx context.Context, process, token, verifier string) (string, error) {
-	code, raw, err := mistralAsk(ctx, http.MethodPost, mistralConsoleAPI+"/vibe/sign-in/"+url.PathEscape(process)+"/exchange",
+func mistralExchange(ctx context.Context, api, process, token, verifier string) (string, error) {
+	code, raw, err := mistralAsk(ctx, http.MethodPost, api+"/vibe/sign-in/"+url.PathEscape(process)+"/exchange",
 		map[string]string{"exchange_token": token, "code_verifier": verifier})
 	if err != nil {
 		return "", fmt.Errorf("couldn't reach Mistral to finish the sign-in: %w", err)

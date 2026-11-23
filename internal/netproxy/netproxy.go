@@ -12,6 +12,7 @@
 package netproxy
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -599,7 +600,12 @@ var schemeProxies = sync.OnceValues(func() (
 	withBypass func(*url.URL) (*url.URL, error),
 	withoutBypass func(*url.URL) (*url.URL, error),
 ) {
-	config := httpproxy.FromEnvironment()
+	config := httpproxy.Config{
+		HTTPProxy:  cmp.Or(os.Getenv("HTTP_PROXY"), os.Getenv("http_proxy")),
+		HTTPSProxy: cmp.Or(os.Getenv("HTTPS_PROXY"), os.Getenv("https_proxy")),
+		NoProxy:    cmp.Or(os.Getenv("NO_PROXY"), os.Getenv("no_proxy")),
+		CGI:        os.Getenv("REQUEST_METHOD") != "",
+	}
 	withBypass = config.ProxyFunc()
 	if config.NoProxy != "" {
 		config.NoProxy = ""
@@ -608,9 +614,9 @@ var schemeProxies = sync.OnceValues(func() (
 	return withBypass, withoutBypass
 })
 
-// fromEnv reads HTTPS_PROXY and HTTP_PROXY using Go's first-use snapshot
-// and matching rules, then falls back to ALL_PROXY. A NO_PROXY match for
-// a configured proxy selects the direct route.
+// fromEnv uses Go's first-use snapshot and matching rules with uppercase
+// proxy variables taking precedence, then falls back to ALL_PROXY. A
+// NO_PROXY match for a configured proxy selects the direct route.
 func fromEnv(u *url.URL) (proxy *url.URL, bypass bool, err error) {
 	withBypass, withoutBypass := schemeProxies()
 	if p, err := withBypass(u); p != nil || err != nil {

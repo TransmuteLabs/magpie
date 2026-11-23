@@ -468,6 +468,9 @@ balance card and is outside allowance windows, caps and cooldowns.
 
 ## Constraints and failure behavior
 
+Mistral Vibe sign-in treats a redirect from the Console's create, poll or
+exchange endpoint as a failed API call.
+
 An allowance deliberately not requested (a saved Claude account outside
 its card refresh, or allowances set to *When I ask*) can use the last
 reading with `readDeferred: true`. `AsOf` and `ReadAt` still date that
