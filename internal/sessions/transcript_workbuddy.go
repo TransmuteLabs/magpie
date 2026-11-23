@@ -116,7 +116,7 @@ func wbTexts(content json.RawMessage) []string {
 	return out
 }
 
-var wbReminderSection = lazyre.New(`^<([[:alpha:]_][[:alnum:]_-]*)(?:[ \t]+.*)?>$`)
+var wbReminderSection = lazyre.New(`^<([[:alpha:]_][[:alnum:]_-]*)(?:[ \t]+[[:alpha:]_][[:alnum:]_:-]*[ \t]*=[ \t]*(?:"[^"]*"|'[^']*'))*[ \t]*>$`)
 
 // wbTyped recognizes WorkBuddy's user-context reminder and the query that
 // follows its outer close. The reminder's sections can quote that boundary;

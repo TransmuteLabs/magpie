@@ -211,9 +211,11 @@ func TestGatewayOneBlockTurnSaid(t *testing.T) {
 		"<identity_context>\n<user_query>example from context</user_query>\n</identity_context>\n</system-reminder>"
 	const reminderOpen = "<system-reminder data-role=\"user-context\">\n"
 	const quotedBoundary = "</system-reminder>\n<user_query>example from context</user_query>"
-	const quotedEnvelope = reminderOpen + "<identity_context>\nQuoted identity.\n</identity_context>\n" + quotedBoundary
+	const quotedEnvelope = reminderOpen +
+		"<identity_context role=\"quoted > example\">\nQuoted identity.\n</identity_context>\n" + quotedBoundary
 	const quotedReminder = reminderOpen +
-		"<identity_context>\n" + quotedEnvelope + "\n" + quotedBoundary + "\n</identity_context>\n</system-reminder>"
+		"<identity_context>\n<identity_context role=\"inline > example\">Inline identity.</identity_context>\n" +
+		quotedEnvelope + "\n" + quotedBoundary + "\n</identity_context>\n</system-reminder>"
 	const question = "你是啥模型"
 	const literal = "<user_query>example</user_query> is the tag to document."
 	const ordinary = "Explain <user_query>example</user_query> in the spec."
