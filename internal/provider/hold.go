@@ -275,6 +275,8 @@ type Stamp struct {
 	accounts       extensionAccountFiles
 }
 
+const extensionCatalogStampIndex = 3
+
 // StampNow is the Stamp as things are now.
 func StampNow() Stamp {
 	held.Lock()
@@ -305,7 +307,10 @@ func stampNowFiles() [4]rootStamp {
 		return roots
 	}
 	stampLooks.Add(1)
-	roots = [4]rootStamp{stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath()), stampOf(extensionhost.CatalogPath())}
+	roots = [4]rootStamp{
+		stampOf(Path()), stampOf(settings.Path()), stampOf(catalog.CachePath()),
+		extensionCatalogStampIndex: stampOf(extensionhost.CatalogPath()),
+	}
 	held.Lock()
 	if held.holds > 0 {
 		held.stamp, held.stampAt = roots, time.Now()

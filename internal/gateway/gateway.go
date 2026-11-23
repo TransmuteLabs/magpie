@@ -2012,6 +2012,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, 400, err.Error())
 		return
 	}
+	provider.RefreshModelListSources(r.Context())
 	// its chat models, unless ?kind= asks for image or video models alone
 	if chat {
 		shown := catalogFor(r)

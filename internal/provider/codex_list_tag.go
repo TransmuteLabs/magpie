@@ -1,7 +1,7 @@
 package provider
 
 import (
-	"os"
+	"context"
 	"path/filepath"
 	"sync"
 	"time"
@@ -10,7 +10,6 @@ import (
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/settings"
-	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 // Codex's list's tag is asked for on every GET of its models and every
@@ -78,59 +77,13 @@ type codexTagGeneration struct {
 	stamp codexListStamp
 	at    time.Time
 	ready bool
-	roots []codexModelRoot
+	roots []extensionModelRoot
 	of    map[string]string
-}
-
-type codexModelRoot struct {
-	path string
-	info os.FileInfo
-}
-
-func codexModelRoots(stamp codexListStamp) ([]codexModelRoot, bool) {
-	if !stamp.extensions.ok {
-		return nil, true
-	}
-	selected, err := ExtensionProviders()
-	if err != nil {
-		return nil, false
-	}
-	var roots []codexModelRoot
-	for _, provider := range selected {
-		binding := provider.Account.extension
-		if !binding.manifest.Contract.Has(sdk.ModelDiscovery) || binding.descriptor.AccountOnly() {
-			continue
-		}
-		path := binding.host.Store().ModelCatalogPath(binding.scope.Plugin, binding.modelCatalogKey())
-		if path == "" {
-			return nil, false
-		}
-		info, err := os.Lstat(path)
-		if err != nil && !os.IsNotExist(err) || info != nil && !info.Mode().IsRegular() {
-			return nil, false
-		}
-		roots = append(roots, codexModelRoot{path, info})
-	}
-	return roots, true
-}
-
-func codexModelRootsCurrent(roots []codexModelRoot) bool {
-	for _, root := range roots {
-		info, err := os.Lstat(root.path)
-		if os.IsNotExist(err) && root.info == nil {
-			continue
-		}
-		if err != nil || root.info == nil || !os.SameFile(root.info, info) ||
-			root.info.Size() != info.Size() || root.info.ModTime() != info.ModTime() || root.info.Mode() != info.Mode() {
-			return false
-		}
-	}
-	return true
 }
 
 func refreshCodexTagSources(generation *codexTagGeneration, now time.Time) *codexTagGeneration {
 	stamp := generation.stamp
-	roots, complete := codexModelRoots(stamp)
+	roots, complete := extensionModelRoots(context.Background(), stamp.extensions.ok)
 	codexListTags.Lock()
 	defer codexListTags.Unlock()
 	if codexListTags.current != generation {
@@ -167,14 +120,14 @@ func codexListTag(kind string) string {
 	tag, kept := generation.of[kind]
 	codexListTags.Unlock()
 
-	if !generation.ready || !codexModelRootsCurrent(generation.roots) {
+	if !generation.ready || !extensionModelRootsCurrent(generation.roots) {
 		generation = refreshCodexTagSources(generation, now)
 	} else if kept {
 		return tag
 	}
 
 	value := buildCodexListTag(kind)
-	if !st.settled(now) || generation == nil || !generation.ready || !codexModelRootsCurrent(generation.roots) {
+	if !st.settled(now) || generation == nil || !generation.ready || !extensionModelRootsCurrent(generation.roots) {
 		return value
 	}
 

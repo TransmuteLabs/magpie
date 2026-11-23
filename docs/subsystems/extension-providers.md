@@ -268,6 +268,17 @@ process on the next request. The steady path checks only those files,
 with no catalog discovery or worker call. Model reads still validate the
 selected account and the root and chunk contents.
 
+The public gateway model list and each look during a long poll check the
+same SDK roots before reusing a held catalog projection. A peer refresh
+can change the filtered list and its ETag while the account and module
+configuration stay the same. Root checks on a warm request use the saved
+paths. If a module's enablement, configuration or provider projection
+could not be read, the root inventory is incomplete. The public list
+drops the held projection and retries root discovery on the next request
+even if the provider stamp stays the same. Codex also retries discovery
+before keeping a tag. Caller-specific visibility and ETag computation
+still happen after the catalog is read.
+
 The extension catalog file is also part of `Hold`'s root checks and
 `StampNow`. A catalog installed, enabled, disabled, upgraded or removed by
 another CLI invalidates provider and model snapshots on the next request,

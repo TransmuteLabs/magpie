@@ -72,19 +72,36 @@ func extensionProvidersWithPolicy() ([]Provider, []savedLogin, error) {
 }
 
 func providerExtensionsContext(ctx context.Context) ([]Provider, []savedLogin, error) {
+	inventory, err := providerExtensionInventoryContext(ctx)
+	return inventory.providers, inventory.saved, err
+}
+
+func providerExtensionInventoryContext(ctx context.Context) (extensionProviderInventory, error) {
 	return extensionProvidersWithPolicyContext(ctx, providerExtensionHost(),
 		func() extensionSubscriptionOwners { return heldSubscriptionOwnersContext(ctx) })
 }
 
-func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProviderHost, ownerSnapshot func() extensionSubscriptionOwners) ([]Provider, []savedLogin, error) {
+type extensionProviderInventory struct {
+	providers []Provider
+	saved     []savedLogin
+	complete  bool
+}
+
+func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProviderHost, ownerSnapshot func() extensionSubscriptionOwners) (extensionProviderInventory, error) {
 	modules, err := configuredProviderModules(ctx, host)
 	if err != nil {
-		return nil, nil, err
+		return extensionProviderInventory{}, err
 	}
 	out := []Provider{}
+	complete := true
 	owners := sync.OnceValue(ownerSnapshot)
 	for _, module := range modules {
+		if module.EnablementError != nil {
+			complete = false
+			continue
+		}
 		if module.ConfigError != nil {
+			complete = false
 			log.Printf("extension providers unavailable for %s: read module configuration: %v", module.Manifest.ID, module.ConfigError)
 			continue
 		}
@@ -92,8 +109,9 @@ func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProv
 		providers, err := projectExtensionProviders(ctx, host, module.Installed, modelRevision, owners)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
+				return extensionProviderInventory{}, ctx.Err()
 			}
+			complete = false
 			log.Printf("extension providers unavailable for %s: %v", module.Manifest.ID, err)
 			continue
 		}
@@ -101,9 +119,9 @@ func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProv
 	}
 	logins, err := extensionPolicies(out)
 	if err != nil {
-		return nil, nil, err
+		return extensionProviderInventory{}, err
 	}
-	return out, logins, nil
+	return extensionProviderInventory{providers: out, saved: logins, complete: complete}, nil
 }
 
 func enabledExtensionModule(ctx context.Context, host extensionProviderHost, id string) (extensionhost.Installed, error) {
@@ -753,7 +771,7 @@ func ExtensionLoginsByProvider(ctx context.Context) map[string][]Login {
 }
 
 func listExtensionLoginsWithOwnersContext(ctx context.Context, agent string, owners *extensionSubscriptionOwners) []Login {
-	providers, saved, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), func() extensionSubscriptionOwners {
+	inventory, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), func() extensionSubscriptionOwners {
 		if owners != nil {
 			return *owners
 		}
@@ -765,7 +783,7 @@ func listExtensionLoginsWithOwnersContext(ctx context.Context, agent string, own
 		}
 		return nil
 	}
-	return extensionLoginsFrom(providers, saved, agent)
+	return extensionLoginsFrom(inventory.providers, inventory.saved, agent)
 }
 
 func extensionLoginsFrom(providers []Provider, saved []savedLogin, agent string) []Login {

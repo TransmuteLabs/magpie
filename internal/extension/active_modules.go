@@ -13,8 +13,9 @@ func (m *Manager) ActiveModules(ctx context.Context) ([]Installed, error) {
 
 type ProviderModule struct {
 	Installed
-	ConfigVersion string
-	ConfigError   error
+	ConfigVersion   string
+	ConfigError     error
+	EnablementError error
 }
 
 func ProviderDiscoveryEligible(manifest sdk.Manifest, includeAccounts bool) bool {
@@ -34,7 +35,10 @@ func (m *Manager) ActiveProviderModules(ctx context.Context, includeAccounts boo
 				continue
 			}
 			entry = view.enabledEntry(entry)
-			if !activeRoot(entry) {
+			if entry.observerEnablementErr != nil {
+				modules = append(modules, ProviderModule{
+					Installed: cloneInstalled(entry), EnablementError: entry.observerEnablementErr,
+				})
 				continue
 			}
 			config, err := m.readActiveModuleConfig(ctx, entry)
