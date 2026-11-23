@@ -108,6 +108,13 @@ A usage window's `used` (percent) may be left out when the plugin can't tell it:
 
 A window that leaves out `used` but tells its count, `amount` of `limit` with both above 0, has the count's share (370 of 1000 is 37 used): [`quotaOfPlugin`](../../internal/provider/plugin_usage.go) fills `Used` from it, so the window is neither `Text` nor, unless the plugin set it, `Aside`, and routing reads it ([magpie-community/plugins#468](https://github.com/magpie-community/plugins/issues/468)). Before, such a window was text alone, and an account whose windows all told counts so was unknown to routing. An `amount` of 0 is what a left-out amount reads as, so a `limit` alone still says nothing. `aside: true` keeps a window out of routing (`allowanceOf`) whatever its count; the card and `/v1/magpie/quotas` still show it. `TestAWindowsCountIsItsShare` in [`plugin_usage_absent_test.go`](../../internal/provider/plugin_usage_absent_test.go) covers it.
 
+For a Community usage window, `models` lists the model IDs it counts and
+`notModels` excludes IDs from that scope. SenseNova lists Flash-Lite in both
+its general and dedicated pools. A full general pool therefore leaves the
+excluded models eligible while their dedicated pool has room.
+[`TestPluginGroupCapUsesProviderModelIDs`](../../internal/gateway/plugin_group_quota_alias_test.go)
+checks both pools through grouped Chat.
+
 ## Credits after a window
 
 A window may say `credits: true` when the account can continue on credits

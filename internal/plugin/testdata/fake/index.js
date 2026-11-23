@@ -107,6 +107,11 @@ export const FakePlugin = async ({ client }) => ({
       cfg.provider[ID].models["sensenova-u1.5-lite"] = { name: "sensenova-u1.5-lite", limit: { context: 131072, output: 32768 } }
       cfg.provider[ID].models["flux-2"] = { name: "Flux 2", provider: { npm: "@ai-sdk/anthropic" }, limit: { context: 1000, output: 100 } }
     }
+    if (process.env.FAKE_SENSENOVA_QUOTA) {
+      for (const id of ["glm-5.2", "sensenova-6.8-flash-lite"]) {
+        cfg.provider[ID].models[id] = { name: id, limit: { context: 1000, output: 100 } }
+      }
+    }
     // $FAKE_DECLARED_DRAWS: image models whose names say nothing, on the
     // provider's openai-compatible: one that says it gives images alone,
     // and one that answers in text and images, which chats (maonekone)

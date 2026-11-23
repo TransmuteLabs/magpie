@@ -23,6 +23,7 @@ func TestPluginGroupCapUsesProviderModelIDs(t *testing.T) {
 	fresh(t)
 	t.Setenv("MAGPIE_BUN", bun)
 	t.Setenv("FAKE_GLM", "1")
+	t.Setenv("FAKE_SENSENOVA_QUOTA", "1")
 	windowsPath := filepath.Join(t.TempDir(), "windows.json")
 	t.Setenv("FAKE_WINDOWS", windowsPath)
 	t.Cleanup(plugin.Settle)
@@ -77,6 +78,41 @@ func TestPluginGroupCapUsesProviderModelIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	run := func(t *testing.T, name string, members []string, windows []map[string]any, want string) {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"a@fake": windows})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(windowsPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !provider.ReadUsageNow(ctx, "plugin:fakeco", "a@fake") {
+			t.Fatal("could not refresh the account's allowance")
+		}
+		al := provider.Allowances("plugin:fakeco")["a@fake"]
+		if len(al) != len(windows) || al[0].Name != windows[0]["name"] || al[0].Used != 100 {
+			t.Fatalf("wrong allowance: %+v", al)
+		}
+		if err := provider.SaveGroup(provider.Group{Name: name, Routing: provider.Ordered, Members: members}); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		tried = nil
+		mu.Unlock()
+		code, body := postTo(t, New(), "/v1/chat/completions", `{"model":"group/`+name+`","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+		mu.Lock()
+		seen := slices.Clone(tried)
+		mu.Unlock()
+		if want != "" {
+			if code != 200 || !slices.Equal(seen, []string{want}) || !strings.Contains(body, "from "+want) {
+				t.Errorf("want only %s to answer: status %d, upstream %v, body %s", want, code, seen, body)
+			}
+		} else if code != 429 || len(seen) != 0 || !strings.Contains(body, "usage cap reached") {
+			t.Errorf("want both models held: status %d, upstream %v, body %s", code, seen, body)
+		}
+	}
+
 	for _, test := range []struct {
 		name     string
 		field    string
@@ -99,39 +135,42 @@ func TestPluginGroupCapUsesProviderModelIDs(t *testing.T) {
 			if test.freeFull {
 				windows = append(windows, map[string]any{"name": "free quota", "used": 100, "resetsAt": reset, "span": 18000, "models": []string{"fake-1"}})
 			}
-			raw, err := json.Marshal(map[string]any{"a@fake": windows})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(windowsPath, raw, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if !provider.ReadUsageNow(ctx, "plugin:fakeco", "a@fake") {
-				t.Fatal("could not refresh the account's allowance")
-			}
-			al := provider.Allowances("plugin:fakeco")["a@fake"]
-			if len(al) != len(windows) || al[0].Name != test.name || al[0].Used != 100 {
-				t.Fatalf("wrong allowance: %+v", al)
-			}
-			if err := provider.SaveGroup(provider.Group{Name: test.name, Routing: provider.Ordered,
-				Members: []string{"fakeco/paid-alias", "fakeco/free-alias"}}); err != nil {
-				t.Fatal(err)
-			}
-			mu.Lock()
-			tried = nil
-			mu.Unlock()
-			server := New()
-			code, body := postTo(t, server, "/v1/chat/completions", `{"model":"group/`+test.name+`","messages":[{"role":"user","content":"hi"}],"stream":true}`)
-			mu.Lock()
-			seen := slices.Clone(tried)
-			mu.Unlock()
+			var want string
 			if test.wantFree {
-				if code != 200 || !slices.Equal(seen, []string{"fake-1"}) || !strings.Contains(body, "from fake-1") {
-					t.Errorf("want only the free model to answer: status %d, upstream %v, body %s", code, seen, body)
-				}
-			} else if code != 429 || len(seen) != 0 || !strings.Contains(body, "usage cap reached") {
-				t.Errorf("want both models held: status %d, upstream %v, body %s", code, seen, body)
+				want = "fake-1"
 			}
+			run(t, test.name, []string{"fakeco/paid-alias", "fakeco/free-alias"}, windows, want)
+		})
+	}
+
+	const flash = "sensenova-6.8-flash-lite"
+	raw, err := os.ReadFile("testdata/sensenova-pool-windows.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name          string
+		second        string
+		dedicatedFull bool
+		want          string
+	}{
+		{name: "sensenova-dedicated-open", second: flash, want: flash},
+		{name: "sensenova-dedicated-full", second: flash, dedicatedFull: true},
+		{name: "sensenova-outside-general", second: "free-alias", dedicatedFull: true, want: "fake-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var windows []map[string]any
+			if err := json.Unmarshal(raw, &windows); err != nil {
+				t.Fatal(err)
+			}
+			reset := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+			for _, window := range windows {
+				window["resetsAt"] = reset
+				if test.dedicatedFull && window["name"] == "Flash-Lite积分池 · 5 hours" {
+					window["used"], window["amount"], window["display"] = 100, 120000, "120000 / 120000"
+				}
+			}
+			run(t, test.name, []string{"fakeco/glm-5.2", "fakeco/" + test.second}, windows, test.want)
 		})
 	}
 }

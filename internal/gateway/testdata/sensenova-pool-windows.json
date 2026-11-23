@@ -1,0 +1,48 @@
+[
+  {
+    "name": "通用积分池 · 5 hours",
+    "used": 100,
+    "resetsAt": "2026-10-31T21:45:40.000Z",
+    "display": "120000 / 120000",
+    "amount": 120000,
+    "limit": 120000,
+    "unit": "credits",
+    "span": 18000,
+    "models": ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "kimi-k2.6", "kimi-k3", "minimax-m2.7", "qwen3.6-27b", "sensenova-6.7-flash-lite", "sensenova-6.8-flash", "sensenova-6.8-flash-lite", "sensenova-mask", "sensenova-pe", "sensenova-u1-fast", "sensenova-u1-pro-previews-v2.3", "sensenova-u1.5-fast", "sensenova-u1.5-lite"],
+    "notModels": ["sensenova-6.7-flash-lite", "sensenova-6.8-flash-lite"]
+  },
+  {
+    "name": "通用积分池 · 7 days",
+    "used": 36.52379622666667,
+    "resetsAt": "2026-11-03T02:45:40.000Z",
+    "display": "438285.55 / 1200000",
+    "amount": 438285.55,
+    "limit": 1200000,
+    "unit": "credits",
+    "span": 604800,
+    "models": ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.1", "glm-5.2", "kimi-k2.6", "kimi-k3", "minimax-m2.7", "qwen3.6-27b", "sensenova-6.7-flash-lite", "sensenova-6.8-flash", "sensenova-6.8-flash-lite", "sensenova-mask", "sensenova-pe", "sensenova-u1-fast", "sensenova-u1-pro-previews-v2.3", "sensenova-u1.5-fast", "sensenova-u1.5-lite"],
+    "notModels": ["sensenova-6.7-flash-lite", "sensenova-6.8-flash-lite"]
+  },
+  {
+    "name": "Flash-Lite积分池 · 5 hours",
+    "used": 2.3980373333333334,
+    "resetsAt": "2026-10-31T21:45:40.000Z",
+    "display": "2877.64 / 120000",
+    "amount": 2877.64,
+    "limit": 120000,
+    "unit": "credits",
+    "span": 18000,
+    "models": ["sensenova-6.7-flash-lite", "sensenova-6.8-flash-lite"]
+  },
+  {
+    "name": "Flash-Lite积分池 · 7 days",
+    "used": 1.0622606,
+    "resetsAt": "2026-11-03T02:45:40.000Z",
+    "display": "12747.13 / 1200000",
+    "amount": 12747.13,
+    "limit": 1200000,
+    "unit": "credits",
+    "span": 604800,
+    "models": ["sensenova-6.7-flash-lite", "sensenova-6.8-flash-lite"]
+  }
+]

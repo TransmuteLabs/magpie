@@ -256,6 +256,9 @@ func quotaOfPlugin(q SubscriptionQuota, u plugin.Usage) SubscriptionQuota {
 		}
 		if set := idSetOf(x.Models); set != nil {
 			w.matches = set.has
+			if except := idSetOf(x.NotModels); except != nil {
+				w.matches = func(model string) bool { return set.has(model) && !except.has(model) }
+			}
 		} else if set := idSetOf(x.NotModels); set != nil {
 			w.matches = func(model string) bool { return !set.has(model) }
 		}
