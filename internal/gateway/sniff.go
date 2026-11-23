@@ -102,9 +102,7 @@ func (s *usageSniffer) line(line []byte) {
 		// Relays also send one JSON event per data line without blank separators.
 		// Parse a complete value now, but keep incomplete multiline JSON.
 		if len(s.data) == 0 {
-			if data := bytes.TrimSpace(rest); json.Valid(data) {
-				s.parse(data)
-			} else {
+			if !s.parseCompleteLine(bytes.TrimSpace(rest)) {
 				s.data = append(s.data, rest...)
 			}
 			return
@@ -116,6 +114,13 @@ func (s *usageSniffer) line(line []byte) {
 	}
 }
 
+func (s *usageSniffer) parseCompleteLine(data []byte) bool {
+	if s.proto == provider.Responses {
+		return s.parseEvent(data, true)
+	}
+	return json.Valid(data) && s.parseEvent(data, false)
+}
+
 func (s *usageSniffer) flushEvent() {
 	if len(s.data) > 0 {
 		s.parse(bytes.TrimSpace(s.data))
@@ -124,9 +129,16 @@ func (s *usageSniffer) flushEvent() {
 }
 
 func (s *usageSniffer) parse(b []byte) {
+	s.parseEvent(b, false)
+}
+
+func (s *usageSniffer) parseEvent(b []byte, completeJSONOnly bool) bool {
 	if s.sse && string(b) == "[DONE]" {
+		if completeJSONOnly {
+			return false
+		}
 		s.ended = true
-		return
+		return true
 	}
 	var t struct {
 		Type     string `json:"type"`
@@ -135,7 +147,14 @@ func (s *usageSniffer) parse(b []byte) {
 			Error any `json:"error"`
 		} `json:"response"`
 	}
-	if s.sse && json.Unmarshal(b, &t) == nil {
+	var statusErr error
+	if s.sse {
+		statusErr = json.Unmarshal(b, &t)
+		if _, invalid := statusErr.(*json.SyntaxError); completeJSONOnly && invalid {
+			return false
+		}
+	}
+	if s.sse && statusErr == nil {
 		switch {
 		case lastEvent(t.Type):
 			s.ended = true
@@ -278,6 +297,7 @@ func (s *usageSniffer) parse(b []byte) {
 			}
 		}
 	}
+	return true
 }
 
 // saw keeps a model the reply named.

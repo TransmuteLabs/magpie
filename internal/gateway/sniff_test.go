@@ -76,6 +76,54 @@ func TestSniffResponsesMultilineAndUnterminatedSSE(t *testing.T) {
 	}
 }
 
+func TestSniffResponsesLineCompleteness(t *testing.T) {
+	t.Run("one event per line", func(t *testing.T) {
+		s := newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"test-id\",\"model\":\"m\"}}\r\n" +
+			"data: {\"type\":\"response.completed\",\"sequence_number\":3,\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":4}}}\r\n"))
+		if !s.ended || s.u.ResponseID != "test-id" || s.u.Input != 12 || s.u.Output != 4 || s.served != "m" || s.resp.next != 4 {
+			t.Fatalf("events must be counted without blank separators: %+v", s)
+		}
+	})
+	t.Run("terminal decode rejects only its own fields", func(t *testing.T) {
+		s := newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: {\"type\":\"response.completed\",\"error\":1e400,\"response\":{\"usage\":{\"input_tokens\":12}}}\n"))
+		if s.ended || s.u.Input != 12 || len(s.data) != 0 {
+			t.Fatalf("valid JSON with a terminal type error must still count usage: %+v", s)
+		}
+	})
+	t.Run("usage decode rejects only its own fields", func(t *testing.T) {
+		s := newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"try again\"},\"usage\":true}}\n"))
+		if !s.ended || s.failed != "try again" || s.u.Input != 0 || len(s.data) != 0 {
+			t.Fatalf("valid JSON with a usage type error must still classify the terminal error: %+v", s)
+		}
+	})
+	t.Run("incomplete and invalid values stay pending", func(t *testing.T) {
+		s := newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: {\"type\":\"response.completed\",\"response\":\n"))
+		if s.ended || len(s.data) == 0 {
+			t.Fatalf("incomplete JSON was not held: %+v", s)
+		}
+		s.write([]byte("data: {\"usage\":{\"input_tokens\":12}}}\n"))
+		if !s.ended || s.u.Input != 12 || len(s.data) != 0 {
+			t.Fatalf("completed multiline JSON was not counted: %+v", s)
+		}
+		s = newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: {\"type\":\"response.completed\"}trailing\n"))
+		if s.ended || len(s.data) == 0 || s.whole() {
+			t.Fatalf("invalid JSON was counted as a terminal event: %+v", s)
+		}
+	})
+	t.Run("done marker waits for drain", func(t *testing.T) {
+		s := newSniffer(provider.Responses, "text/event-stream")
+		s.write([]byte("data: [DONE]\r\n"))
+		if s.ended || !s.whole() {
+			t.Fatalf("the marker must end the stream on drain: %+v", s)
+		}
+	})
+}
+
 // Some relays separate complete events with a single newline, not a blank line.
 // This case worked on main and must remain counted after multiline support.
 func TestSniffSingleNewlineEvents(t *testing.T) {
