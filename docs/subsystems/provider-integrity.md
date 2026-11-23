@@ -73,6 +73,15 @@ preserves that lifetime, and an older saved slot without an explicit
 lifetime remains valid until its next sign-in. The same check applies when
 routing falls back to the last saved reading.
 
+A successful SDK Usage-card refresh updates routing with the same selected
+account reading and model windows. It keeps sibling accounts' readings and
+does not request vendor usage again. If a provider-wide read is already in
+flight, it keeps that account's newer reading, even if it did not read
+the account, while the same binding remains current. An informational
+window with unknown usage does not hide the fresh ordinary windows.
+The per-account read status and routing's renewal notifications keep
+their existing checks.
+
 [`quota_last.go`](../../internal/provider/quota_last.go) keeps the latest
 successful account reading for transient usage failures. A fresh reading
 replaces the in-memory snapshot with its exact model matcher and read sequence,

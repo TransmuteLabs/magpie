@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -208,9 +209,68 @@ func refreshCards(ctx context.Context, provider, user string) (subs, plans, bala
 			subs = out
 		}
 		c.Unlock()
+		for _, quota := range subs {
+			publishRefreshedExtensionAllowance(ctx, quota)
+		}
 	}()
 	wg.Wait()
 	return subs, plans, balances
+}
+
+// publishRefreshedExtensionAllowance projects the selected SDK card into
+// routing from the same reading already accepted by the login cache.
+func publishRefreshedExtensionAllowance(ctx context.Context, quota SubscriptionQuota) {
+	if quota.extensionUsage == nil || !quota.extensionUsage.fresh || quota.Error != "" || quota.ReadDeferred || quota.readSeq == 0 {
+		return
+	}
+	if !quota.extensionUsage.currentContext(ctx) {
+		return
+	}
+	agent, user := quota.Provider, quota.User
+	allowance, known := projectRoutedAllowance(agent, user, quota, time.Now())
+	if !known {
+		return
+	}
+	key := agent + "/" + strings.ToLower(user)
+	c := &usedCache
+	loginUsageCache.Lock()
+	c.Lock()
+	binding := c.extensions[agent][user]
+	cached := loginUsageCache.m[binding]
+	state := cached.state()
+	snapshot, loading := c.m[agent], c.loading[agent] != nil
+	before := c.read[key]
+	if binding == "" || cached.read.extensionUsage != quota.extensionUsage || state.seq != quota.readSeq ||
+		before.seq >= state.seq || (snapshot == nil && !loading) || ctx.Err() != nil {
+		c.Unlock()
+		loginUsageCache.Unlock()
+		return
+	}
+	if snapshot != nil {
+		updated := maps.Clone(snapshot)
+		updated[user] = allowance
+		c.m[agent] = updated
+	}
+	if loading {
+		if c.refreshed == nil {
+			c.refreshed = map[string]map[string]refreshedAllowance{}
+		}
+		if c.refreshed[agent] == nil {
+			c.refreshed[agent] = map[string]refreshedAllowance{}
+		}
+		c.refreshed[agent][key] = refreshedAllowance{user: user, binding: binding, seq: state.seq, allowance: allowance}
+	}
+	if c.read == nil {
+		c.read = map[string]readState{}
+	}
+	if state.failed {
+		state.at = before.at
+	} else if state.at.IsZero() && cached.read.ReadAt != nil {
+		state.at = *cached.read.ReadAt
+	}
+	c.read[key] = state
+	c.Unlock()
+	loginUsageCache.Unlock()
 }
 
 // keepCardRead keeps q, an account's card read outside a refresh of it

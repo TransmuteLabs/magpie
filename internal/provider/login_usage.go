@@ -40,6 +40,7 @@ type loginUsageEntry struct {
 type readState struct {
 	at     time.Time
 	failed bool
+	seq    uint64
 }
 
 // state is what e says of the account's reading: a reading kept from
@@ -51,16 +52,16 @@ func (e loginUsageEntry) state() readState {
 	}
 	for _, window := range e.read.Windows {
 		if window.Unknown || window.AsOf != nil {
-			return readState{failed: true}
+			return readState{failed: true, seq: e.read.readSeq}
 		}
 	}
 	switch {
 	case e.read.AsOf != nil:
-		return readState{at: *e.read.AsOf, failed: true}
+		return readState{at: *e.read.AsOf, failed: true, seq: e.read.readSeq}
 	case e.read.Error != "" || e.read.ReadDeferred || len(e.read.Windows) == 0:
-		return readState{failed: true}
+		return readState{failed: true, seq: e.read.readSeq}
 	}
-	return readState{at: at}
+	return readState{at: at, seq: e.read.readSeq}
 }
 
 // asOf is e as it stands at now: a hold whose used-up window has started

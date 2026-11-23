@@ -295,6 +295,7 @@ var usedCache struct {
 	m          map[string]map[string]Allowance // agent → user → allowance
 	at         map[string]time.Time
 	loading    map[string]chan struct{} // closed when the fetch in flight is done
+	refreshed  map[string]map[string]refreshedAllowance
 	extensions map[string]map[string]string
 	community  map[string]map[string]communityAllowanceBinding
 	// renewed: the generation when an account's windows were started
@@ -317,6 +318,12 @@ var usedCache struct {
 	// held, or named none) that a reply told them of, by agent/user
 	// (NoteCodexLimits): known from that until a reading tells them
 	heard map[string]heardOnly
+}
+
+type refreshedAllowance struct {
+	user, binding string
+	seq           uint64
+	allowance     Allowance
 }
 
 // firstWait is how long a request waits for an agent's allowances the
@@ -1019,6 +1026,7 @@ func syncAllowanceBindings[Binding comparable](cache *map[string]map[string]Bind
 		delete(usedCache.m[agent], user)
 		key := agent + "/" + strings.ToLower(user)
 		delete(usedCache.read, key)
+		delete(usedCache.refreshed[agent], key)
 		delete(usedCache.seen, key)
 		delete(usedCache.heard, key)
 		delete(usedCache.renewed, key)
@@ -1076,6 +1084,8 @@ func readAllowances(agent string) map[string]Allowance {
 				readAt = time.Time{}
 			}
 			c.Lock()
+			refreshed := c.refreshed[agent]
+			delete(c.refreshed, agent)
 			if external && (!maps.Equal(captured, current) || !maps.Equal(c.extensions[agent], captured)) ||
 				(community != nil || len(c.community[agent]) != 0) && ctx.Err() != nil {
 				c.at[agent] = time.Time{}
@@ -1097,10 +1107,18 @@ func readAllowances(agent string) map[string]Allowance {
 			if c.read == nil {
 				c.read = map[string]readState{}
 			}
+			for key, refresh := range refreshed {
+				if current[refresh.user] == refresh.binding && c.read[key].seq == refresh.seq &&
+					states[refresh.user].seq <= refresh.seq && c.renewed[key] <= began {
+					all[refresh.user] = refresh.allowance
+					delete(states, refresh.user)
+				}
+			}
 			for user, st := range states {
 				key := agent + "/" + strings.ToLower(user)
-				if was := c.read[key].at; st.failed && was.After(st.at) {
-					st.at = was // the last good one's time stands
+				before := c.read[key]
+				if st.failed && before.at.After(st.at) {
+					st.at = before.at // the last good one's time stands
 				}
 				c.read[key] = st
 			}
@@ -1362,8 +1380,10 @@ func forgetAllowance(agent, user string) {
 		c.renewed = map[string]uint64{}
 	}
 	c.generation++
-	c.renewed[agent+"/"+strings.ToLower(user)] = c.generation
-	delete(c.seen, agent+"/"+strings.ToLower(user)) // told already, by renewedNow
+	key := agent + "/" + strings.ToLower(user)
+	c.renewed[key] = c.generation
+	delete(c.refreshed[agent], key)
+	delete(c.seen, key) // told already, by renewedNow
 	if c.at != nil {
 		c.at[agent] = time.Time{}
 	}
@@ -1393,8 +1413,8 @@ func StaleAllowance(agent, user string) {
 	loginUsageCache.Lock()
 	delete(loginUsageCache.m, key)
 	delete(loginUsageCache.pending, key) // nor a reading asked for before
-	loginUsageCache.Unlock()
 	usedCache.Lock()
+	delete(usedCache.refreshed[agent], agent+"/"+strings.ToLower(user))
 	if usedCache.at != nil {
 		usedCache.at[agent] = time.Time{}
 	}
@@ -1406,6 +1426,7 @@ func StaleAllowance(agent, user string) {
 		usedCache.stale[agent] = true
 	}
 	usedCache.Unlock()
+	loginUsageCache.Unlock()
 }
 
 // restartedBy marks every window as started again by a reset spent
@@ -1430,6 +1451,10 @@ func routedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Al
 	if q.extensionUsage != nil && !q.extensionUsage.current() {
 		return nil, false
 	}
+	return projectRoutedAllowance(agent, user, q, now)
+}
+
+func projectRoutedAllowance(agent, user string, q SubscriptionQuota, now time.Time) (Allowance, bool) {
 	if (q.extensionUsage == nil || !q.extensionUsage.fresh) &&
 		slices.ContainsFunc(q.Windows, func(window QuotaWindow) bool { return window.Unknown || window.AsOf != nil }) {
 		return nil, false
