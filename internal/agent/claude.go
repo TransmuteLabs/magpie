@@ -2116,11 +2116,11 @@ func claudeViaShared(fold bool) []Option {
 
 // buildClaudeVia is claudeViaMagpie built afresh.
 func buildClaudeVia(fold bool) []Option {
-	big := map[string]bool{}
-	for _, m := range sharedModels("claude") {
-		big[m.ID] = m.Context >= 1_000_000
-	}
 	opts := viaMagpie("claude", "")
+	big := make(map[string]bool, len(opts))
+	for _, o := range opts {
+		big[o.Ref] = o.Context >= 1_000_000
+	}
 	for i, o := range opts {
 		if big[o.Ref] {
 			opts[i].Value += "[1m]"

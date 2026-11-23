@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +13,64 @@ import (
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
+
+func TestClaudePickerMarksItsAgentWindows(t *testing.T) {
+	home := syncHome(t)
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{}`)
+	if err := provider.Save(provider.Provider{
+		ID: "windows", Name: "Window test", Key: "k", Chat: "http://127.0.0.1:1/v1",
+		Models: []string{"large", "small"}, Contexts: map[string]int{"large": 1_000_000, "small": 200_000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveGroup(provider.Group{
+		ID: "window-pair", Members: []string{"windows/large", "windows/small"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	picker := claude(home)
+	field := picker.Field("model")
+	if field == nil {
+		t.Fatal("Claude picker has no model field")
+	}
+	refs := []string{"windows/large", "windows/small", "group/window-pair"}
+	for _, test := range []struct {
+		name    string
+		windows map[string]int
+		want    []int
+	}{
+		{name: "catalog", want: []int{1_000_000, 200_000, 1_000_000}},
+		{
+			name:    "overridden",
+			windows: map[string]int{"windows/large": 999_999, "windows/small": 1_000_001, "group/window-pair": 999_999},
+			want:    []int{999_999, 1_000_001, 999_999},
+		},
+		{name: "restored", want: []int{1_000_000, 200_000, 1_000_000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := provider.SetAgentContexts("claude", test.windows); err != nil {
+				t.Fatal(err)
+			}
+			options := picker.Picks(*field, picker.Values())
+			for index, ref := range refs {
+				at := slices.IndexFunc(options, func(option Option) bool { return option.Ref == ref })
+				if at < 0 {
+					t.Fatalf("picker omitted %q", ref)
+				}
+				context := test.want[index]
+				value := ref
+				if context >= 1_000_000 {
+					value += "[1m]"
+				}
+				option := options[at]
+				if option.Context != context || option.Value != value {
+					t.Errorf("%s: picker context/value = %d/%q, want %d/%q", ref, option.Context, option.Value, context, value)
+				}
+			}
+		})
+	}
+}
 
 func TestClaudeModelPickPublishesContextWithRoute(t *testing.T) {
 	home, path := desktopWindowSandbox(t)
