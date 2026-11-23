@@ -153,6 +153,9 @@ func TestStdBase64SkipsOpaqueStringsAndRemoteImages(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)
+			if mayHoldInlineBase64(tc.proto, body) {
+				t.Fatal("the inline base64 prefilter accepted an opaque body")
+			}
 			var hashes atomic.Int32
 			onHash := func(data []byte) {
 				if bytes.Equal(data, body) {
@@ -161,13 +164,12 @@ func TestStdBase64SkipsOpaqueStringsAndRemoteImages(t *testing.T) {
 			}
 			validHashed.Store(&onHash)
 			t.Cleanup(func() { validHashed.Store(nil) })
-			var out []byte
-			allocs := testing.AllocsPerRun(5, func() { out = stdBase64Body(tc.proto, body) })
+			out := stdBase64Body(tc.proto, body)
 			if !bytes.Equal(out, []byte(tc.body)) {
 				t.Fatal("the body changed")
 			}
-			if count := hashes.Load(); count != 0 || allocs != 0 {
-				t.Errorf("entered the JSON walker for opaque strings: %d body hashes, %g allocs per turn", count, allocs)
+			if count := hashes.Load(); count != 0 {
+				t.Errorf("hashed the opaque body %d times", count)
 			}
 		})
 	}

@@ -935,6 +935,11 @@ func TestTransferredSubscriptionKeepsOrdinaryIdentity(t *testing.T) {
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
 	t.Setenv("MAGPIE_BUN", filepath.Join(t.TempDir(), "no-bun"))
 	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
+	background := plugin.ListInBackground(false)
+	t.Cleanup(func() {
+		plugin.UseCached(nil)
+		plugin.ListInBackground(background)
+	})
 	manager := providerAuthFixtureManager(t)
 	manifest := providerAuthFixtureManifest()
 	const id = "devin"
@@ -960,8 +965,22 @@ func TestTransferredSubscriptionKeepsOrdinaryIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	plugin.UseCached([]plugin.Provider{{ID: id, Name: "Community Devin", Spec: spec, Methods: []plugin.Method{{Type: "api", Label: "API key"}}}})
-	t.Cleanup(func() { plugin.UseCached(nil) })
+	packageDir := plugin.Target(spec)
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packageDir, "package.json"), []byte(`{"name":"`+spec+`","version":"0.1.45"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listed := []plugin.Provider{{ID: id, Name: "Community Devin", Spec: spec, Methods: []plugin.Method{{Type: "api", Label: "API key"}}}}
+	listedJSON, err := json.Marshal(listed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settings.Dir(), "plugin-providers.json"), listedJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugin.UseCached(listed)
 	provider.Changed()
 
 	mux := http.NewServeMux()
@@ -984,9 +1003,10 @@ func TestTransferredSubscriptionKeepsOrdinaryIdentity(t *testing.T) {
 			}
 		}
 		community := ownerRevision == ""
-		if slices.ContainsFunc(state.Plugins, func(sub pluginSubJSON) bool { return sub.ID == id }) != community ||
-			slices.Contains(state.SDKOwnedSubscriptions, id) == community {
-			t.Fatalf("Community and SDK availability disagree with owner revision %q", ownerRevision)
+		hasCommunity := slices.ContainsFunc(state.Plugins, func(sub pluginSubJSON) bool { return sub.ID == id })
+		hasSDK := slices.Contains(state.SDKOwnedSubscriptions, id)
+		if hasCommunity != community || hasSDK == community {
+			t.Fatalf("owner revision %q: Community available=%t, SDK owned=%t", ownerRevision, hasCommunity, hasSDK)
 		}
 		publicRows := 0
 		for _, row := range state.Providers {
@@ -1148,6 +1168,7 @@ func TestTransferredSubscriptionKeepsOrdinaryIdentity(t *testing.T) {
 	edit["expected"] = "1"
 	post("/api/provider/extension-options", edit, false)
 	legacyOption(id, true)
+	plugin.UseCached(nil)
 
 	owner = transfer("")
 	active = assertOwner(id, owner.Revision, user, "1")
