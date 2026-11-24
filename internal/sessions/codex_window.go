@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"weak"
 )
 
 // A Codex rollout's summary window (state.Codex) lived in memory alone, as
@@ -90,12 +91,11 @@ func codexWindowed(f file, old *state) *state {
 	return &c
 }
 
-// codexWindowsWritten are the summaries whose windows are on disk: a
-// parse is never changed once in the cache, so one written is not
-// written again.
+// codexWindowsWritten remembers which immutable parses were written without
+// keeping them alive after the cache releases them.
 var codexWindowsWritten struct {
 	sync.Mutex
-	files map[string]*state
+	files map[string]weak.Pointer[state]
 }
 
 // writeCodexWindows keeps the windows of files' rollouts on disk, and
@@ -106,7 +106,7 @@ func writeCodexWindows(files map[string]*state, sources ...map[string]*state) {
 	defer codexWindowsWritten.Unlock()
 	dir := codexWindowDir()
 	keep := map[string]bool{}
-	written := map[string]*state{}
+	written := map[string]weak.Pointer[state]{}
 	for path, s := range files {
 		if s == nil || s.Agent != "codex" || s.Codex == nil || s.ContentHash == (digest{}) {
 			continue
@@ -115,9 +115,10 @@ func writeCodexWindows(files map[string]*state, sources ...map[string]*state) {
 		if len(sources) > 0 && sources[0][path] != nil {
 			origin = sources[0][path]
 		}
+		originKey := weak.Make(origin)
 		name := filepath.Base(codexWindowPath(path))
-		if codexWindowsWritten.files[path] == origin {
-			keep[name], written[path] = true, origin
+		if codexWindowsWritten.files[path] == originKey {
+			keep[name], written[path] = true, originKey
 			continue
 		}
 		var data bytes.Buffer
@@ -143,7 +144,7 @@ func writeCodexWindows(files map[string]*state, sources ...map[string]*state) {
 			os.Remove(out.Name())
 			continue
 		}
-		keep[name], written[path] = true, origin
+		keep[name], written[path] = true, originKey
 	}
 	codexWindowsWritten.files = written
 	entries, _ := os.ReadDir(dir)
