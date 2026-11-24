@@ -159,10 +159,11 @@ func (cs *clientSockets) drain(ctx context.Context) {
 }
 
 // heldTurn is one reply a socket holds: the conversation up to and
-// with it.
+// with it. itemBytes counts the compact, escaped items without separators.
 type heldTurn struct {
-	id    string
-	items []json.RawMessage
+	id        string
+	items     []json.RawMessage
+	itemBytes int
 }
 
 type responsesSocket struct {
@@ -473,13 +474,13 @@ func (t *socketTurnRun) interrupt(id string) bool {
 }
 
 // held is the conversation a reply the socket holds ends.
-func (rs *responsesSocket) held(id string) ([]json.RawMessage, bool) {
+func (rs *responsesSocket) held(id string) (heldTurn, bool) {
 	for i := len(rs.turns) - 1; i >= 0; i-- {
 		if rs.turns[i].id == id {
-			return rs.turns[i].items, true
+			return rs.turns[i], true
 		}
 	}
-	return nil, false
+	return heldTurn{}, false
 }
 
 // keep holds the reply id ends: the conversation before this turn (held
@@ -487,13 +488,17 @@ func (rs *responsesSocket) held(id string) ([]json.RawMessage, bool) {
 // copied out of the frame it was read from: a view kept it whole, with
 // Codex's tools and instructions, on every turn a socket held, ~39 MB of
 // a long session's live heap.
-func (rs *responsesSocket) keep(id string, prior, fresh, reply []json.RawMessage) {
-	rs.keepOwned(id, prior, ownItems(fresh), reply)
+func (rs *responsesSocket) keep(id string, prior heldTurn, fresh, reply []json.RawMessage, freshBytes int) {
+	rs.keepOwned(id, prior, ownItems(fresh), reply, freshBytes)
 }
 
-func (rs *responsesSocket) keepOwned(id string, prior, fresh, reply []json.RawMessage) {
-	t := heldTurn{id: id, items: make([]json.RawMessage, 0, len(prior)+len(fresh)+len(reply))}
-	t.items = append(t.items, prior...)
+func (rs *responsesSocket) keepOwned(id string, prior heldTurn, fresh, reply []json.RawMessage, freshBytes int) {
+	t := heldTurn{
+		id:        id,
+		items:     make([]json.RawMessage, 0, len(prior.items)+len(fresh)+len(reply)),
+		itemBytes: prior.itemBytes + freshBytes + compactTurnItemBytes(reply),
+	}
+	t.items = append(t.items, prior.items...)
 	t.items = append(t.items, fresh...)
 	t.items = append(t.items, reply...)
 	rs.turns = append(rs.turns, t)
@@ -528,15 +533,15 @@ func compactSocketItems(items []json.RawMessage, n int) []json.RawMessage {
 	return out
 }
 
-func warmupInputSize(prior, fresh []json.RawMessage, limit int64) (compactSize int, fits bool) {
+func warmupInputSize(prior, fresh []json.RawMessage, limit int64) (freshBytes int, compact, fits bool) {
 	left := limit - 2 - int64(max(0, len(prior)+len(fresh)-1))
 	if left < 0 {
-		return 0, false
+		return 0, false, false
 	}
 	for _, item := range prior {
 		left -= compactJSONSize(item)
 		if left < 0 {
-			return 0, false
+			return 0, false, false
 		}
 	}
 	beforeFresh := left
@@ -544,15 +549,12 @@ func warmupInputSize(prior, fresh []json.RawMessage, limit int64) (compactSize i
 	for _, item := range fresh {
 		left -= compactJSONSize(item)
 		if left < 0 {
-			return 0, false
+			return 0, false, false
 		}
 		rawSize += int64(len(item))
 	}
 	encodedSize := beforeFresh - left
-	if rawSize > encodedSize {
-		return int(encodedSize), true
-	}
-	return 0, true
+	return int(encodedSize), rawSize > encodedSize, true
 }
 
 // turn serves one response.create.
@@ -569,7 +571,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_value", "input is neither text nor a list of items", "input")
 		return
 	}
-	var held []json.RawMessage
+	var held heldTurn
 	if raw := q["previous_response_id"]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		var id string
 		json.Unmarshal(raw, &id)
@@ -591,7 +593,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		if strings.HasPrefix(rs.path, CodexPath+"/") {
 			limit = rs.s.codexLimitOf()
 		}
-		compactSize, fits := warmupInputSize(held, fresh, limit)
+		freshBytes, compact, fits := warmupInputSize(held.items, fresh, limit)
 		if !fits {
 			const status = http.StatusRequestEntityTooLarge
 			rs.writeError(ctx, status, errorTypeFor(status), "", overLimit(limit).Error()+" — "+requestBytesHint, "")
@@ -613,25 +615,21 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		resp["usage"] = map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 		b, _ = json.Marshal(map[string]any{"type": "response.completed", "response": resp})
 		if rs.write(ctx, b) == nil {
-			if compactSize > 0 {
-				rs.keepOwned(id, held, compactSocketItems(fresh, compactSize), nil)
+			if compact {
+				rs.keepOwned(id, held, compactSocketItems(fresh, freshBytes), nil, freshBytes)
 			} else {
-				rs.keep(id, held, fresh, nil)
+				rs.keep(id, held, fresh, nil, freshBytes)
 			}
 		}
 		return
 	}
 	// the body the HTTP route would have had
-	input := fresh
-	if len(held) != 0 {
-		input = append(held[:len(held):len(held)], fresh...)
-	}
 	delete(q, "type")
 	delete(q, "previous_response_id")
 	delete(q, "generate")
 	// WebSocket mode is always streamed; clients omit the HTTP stream field.
 	q["stream"] = json.RawMessage("true")
-	body, err := turnBody(q, input)
+	body, freshBytes, err := turnBodyAfter(q, held, fresh)
 	if err != nil {
 		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_json", err.Error(), "")
 		return
@@ -660,7 +658,7 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		rs.stateTurn, rs.turnState = turnID, v
 	}
 	if out.id != "" && out.completed {
-		rs.keep(out.id, held, fresh, out.items)
+		rs.keep(out.id, held, fresh, out.items, freshBytes)
 	}
 }
 
@@ -675,20 +673,28 @@ var socketTurnBody func(body []byte)
 // doubles and is copied out: about five copies of a long conversation on
 // every turn, the garbage that sets the peak (marshalRaw has the rest).
 func turnBody(q map[string]json.RawMessage, input []json.RawMessage) ([]byte, error) {
+	body, _, err := turnBodyAfter(q, heldTurn{}, input)
+	return body, err
+}
+
+// turnBodyAfter sizes the held part from its previous encoding. It counts
+// the new items' bytes as it writes them, excluding the list's punctuation.
+func turnBodyAfter(q map[string]json.RawMessage, prior heldTurn, fresh []json.RawMessage) ([]byte, int, error) {
 	q["input"] = nil
-	n := 2
+	n := 2 + prior.itemBytes + len(prior.items)
 	keys := make([]string, 0, len(q))
 	for k, raw := range q {
 		n += len(k) + escapedSize(raw) + 4
 		keys = append(keys, k)
 	}
-	for _, raw := range input {
+	for _, raw := range fresh {
 		n += escapedSize(raw) + 1
 	}
 	slices.Sort(keys)
 	dst := make([]byte, 0, n)
 	dst = append(dst, '{')
 	ok := true
+	var freshBytes int
 	for i, k := range keys {
 		if i > 0 {
 			dst = append(dst, ',')
@@ -703,34 +709,69 @@ func turnBody(q map[string]json.RawMessage, input []json.RawMessage) ([]byte, er
 			}
 			continue
 		}
-		if input == nil {
+		if len(prior.items) == 0 && fresh == nil {
 			dst = append(dst, "null"...)
 			continue
 		}
 		dst = append(dst, '[')
-		for j, raw := range input {
-			if j > 0 {
-				dst = append(dst, ',')
-			}
-			if dst, ok = appendRawJSON(dst, raw, true, 2); !ok {
-				break
-			}
-		}
-		if !ok {
+		if dst, ok = appendTurnItems(dst, prior.items, false); !ok {
 			break
 		}
+		start := len(dst)
+		if dst, ok = appendTurnItems(dst, fresh, len(prior.items) > 0); !ok {
+			break
+		}
+		commas := len(fresh)
+		if len(prior.items) == 0 {
+			commas = max(0, commas-1)
+		}
+		freshBytes = len(dst) - start - commas
 		dst = append(dst, ']')
 	}
 	if ok {
-		return append(dst, '}'), nil
+		return append(dst, '}'), freshBytes, nil
 	}
 	// a value encoding/json refuses: it says why
+	input := fresh
+	if len(prior.items) != 0 {
+		input = append(prior.items[:len(prior.items):len(prior.items)], fresh...)
+	}
 	in, err := json.Marshal(input)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	q["input"] = in
-	return json.Marshal(q)
+	body, err := json.Marshal(q)
+	if err != nil {
+		return nil, 0, err
+	}
+	return body, compactTurnItemBytes(fresh), nil
+}
+
+func appendTurnItems(dst []byte, items []json.RawMessage, after bool) ([]byte, bool) {
+	for _, item := range items {
+		if after {
+			dst = append(dst, ',')
+		}
+		var ok bool
+		if dst, ok = appendRawJSON(dst, item, true, 2); !ok {
+			return dst, false
+		}
+		after = true
+	}
+	return dst, true
+}
+
+func compactTurnItemBytes(items []json.RawMessage) int {
+	var size int
+	for _, item := range items {
+		if item == nil {
+			size += len("null")
+		} else {
+			size += int(compactJSONSize(item))
+		}
+	}
+	return size
 }
 
 // escapedSize is about what appendRawJSON writes of raw: its length, and

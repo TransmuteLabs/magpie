@@ -25,6 +25,7 @@ import (
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 func TestResponsesSocketFreesQueuedFrameWhileOpen(t *testing.T) {
@@ -378,9 +379,10 @@ func TestResponsesSocketDoesNotRetainSpareBodyCapacity(t *testing.T) {
 func TestResponsesSocketReusesTurnBodyAfterRemovingTurnState(t *testing.T) {
 	for _, test := range []struct {
 		name, metadata, state string
-		phase                 bool
+		phase, padHistory     bool
 	}{
 		{name: "without metadata", phase: true},
+		{name: "padded held history", phase: true, padHistory: true},
 		{
 			name:     "explicit turn state",
 			metadata: `{"turn_id":"turn-2","x-codex-turn-state":"fixture-state"}`,
@@ -428,13 +430,19 @@ func TestResponsesSocketReusesTurnBodyAfterRemovingTurnState(t *testing.T) {
 			}
 			server := New()
 			front := server.Front()
+			secondDone := make(chan struct{})
 			public := httptest.NewServer(socketEntry(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				second := false
 				if body, ok := req.Body.(*socketRequestBody); ok {
 					mu.Lock()
 					posts = append(posts, post{body: body.data, size: req.ContentLength, state: req.Header.Get("X-Codex-Turn-State")})
+					second = len(posts) == 2
 					mu.Unlock()
 				}
 				front.ServeHTTP(w, req)
+				if second {
+					close(secondDone)
+				}
 			})))
 			t.Cleanup(public.Close)
 			t.Cleanup(func() {
@@ -452,7 +460,12 @@ func TestResponsesSocketReusesTurnBodyAfterRemovingTurnState(t *testing.T) {
 			}
 
 			history := codexSocketHistory(128)
+			if test.padHistory {
+				history[0] = strings.Replace(history[0], `"type":"message"`, `"type":`+strings.Repeat(" ", 64<<10)+`"message"`, 1)
+				history[0] = strings.Replace(history[0], "Read this file. ", "Read <this> & file \u2028\u2029. ", 1)
+			}
 			initial := codexCreate([]byte(keptTurn("turn-state-copy", "gpt-5.5", history...)))
+			start := time.Now()
 			first := client.turn(string(initial))
 			if end := last(first); end.Get("type").String() != "response.completed" || end.Get("response.id").String() != "resp-1" {
 				t.Fatalf("first turn ended as %s", end.Raw)
@@ -511,6 +524,47 @@ func TestResponsesSocketReusesTurnBodyAfterRemovingTurnState(t *testing.T) {
 				wire.Get("input.#").Int() != int64(wantItems) || wire.Get(fmt.Sprintf("input.%d", wantItems-1)).Raw != userAgain {
 				t.Fatalf("upstream continuation previous=%q items=%d, want %q and %d: %.400s",
 					wire.Get("previous_response_id").String(), wire.Get("input.#").Int(), wantPrevious, wantItems, second.msg)
+			}
+			if test.padHistory {
+				var firstFields, secondFields map[string]json.RawMessage
+				if err := json.Unmarshal(fake.turn(0).msg, &firstFields); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(second.msg, &secondFields); err != nil {
+					t.Fatal(err)
+				}
+				firstFields["input"] = json.RawMessage("[" + userAgain + "]")
+				firstFields["previous_response_id"] = json.RawMessage(`"resp-1"`)
+				wantWire, err := json.Marshal(firstFields)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gotWire, err := json.Marshal(secondFields)
+				if err != nil || !bytes.Equal(gotWire, wantWire) {
+					t.Fatalf("continuation changed the upstream envelope: %v\n got %.400s\nwant %.400s", err, gotWire, wantWire)
+				}
+
+				deadline := time.NewTimer(30 * time.Second)
+				defer deadline.Stop()
+				select {
+				case <-secondDone:
+				case <-deadline.C:
+					t.Fatal("second POST handler did not finish")
+				}
+				rows := slices.DeleteFunc(usage.Load(start), func(row usage.Record) bool {
+					return row.Endpoint != "/v1/responses"
+				})
+				if len(rows) != 2 {
+					t.Fatalf("saved %d usage rows for two turns", len(rows))
+				}
+				for index, row := range rows {
+					id := fmt.Sprintf("resp-%d", index+1)
+					if row.Status != http.StatusOK || row.ResponseID != id || row.Provider != "fixture" ||
+						row.Model != "gpt-5.5" || row.Input != 7 || row.Output != 1 ||
+						!row.Socket || row.UpBytes != len(fake.turn(index).msg) {
+						t.Fatalf("usage for %s: %+v", id, row)
+					}
+				}
 			}
 			t.Logf("frame=%d POST len/cap=%d/%d POST sha256=%x upstream frame=%d sha256=%x", len(frame),
 				len(continued.body), cap(continued.body), sha256.Sum256(continued.body), len(second.msg), sha256.Sum256(second.msg))

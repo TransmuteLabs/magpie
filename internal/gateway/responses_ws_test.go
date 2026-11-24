@@ -1296,14 +1296,18 @@ func TestHeldTurnOwnsItsInput(t *testing.T) {
 	prior := []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"before"}`)}
 	reply := []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","content":"ok"}`)}
 	rs := &responsesSocket{}
-	rs.keep("resp_1", prior, fresh, reply)
+	held := heldTurn{items: prior, itemBytes: len(prior[0])}
+	rs.keep("resp_1", held, fresh, reply, len(fresh[0])+len(fresh[1]))
 	want := `[{"type":"message","role":"user","content":"before"},{"type":"message","role":"user","content":"hi"},{"type":"message","role":"user","content":"again"},{"type":"message","role":"assistant","content":"ok"}]`
 	for i := range frame {
 		frame[i] = 'x'
 	}
-	items, ok := rs.held("resp_1")
-	if got, _ := json.Marshal(items); !ok || string(got) != want {
+	saved, ok := rs.held("resp_1")
+	if got, _ := json.Marshal(saved.items); !ok || string(got) != want {
 		t.Fatalf("held after the frame was written over: %s", got)
+	}
+	if size := len(want) - len(saved.items) - 1; saved.itemBytes != size {
+		t.Fatalf("held items have %d bytes, want %d", saved.itemBytes, size)
 	}
 }
 
