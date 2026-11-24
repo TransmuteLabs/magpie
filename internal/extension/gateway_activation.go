@@ -1,9 +1,12 @@
 package extension
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"log"
+	"maps"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ type GatewayActivation struct {
 	leases      map[string]activationLease
 	retries     map[string]activationRetry
 	desired     map[string]moduleGeneration
+	fallback    activationPlan
 	draining    map[string]activationLease
 	starting    map[string]activationStart
 	started     chan activationResult
@@ -62,6 +66,65 @@ type activationLease struct {
 	retired  <-chan struct{}
 	stopWake func()
 	since    time.Time
+}
+
+type activationPlan struct {
+	digest  [sha256.Size]byte
+	modules []string
+	valid   bool
+}
+
+type activationObservation struct {
+	previous  activationPlan
+	desired   map[string]moduleGeneration
+	digest    [sha256.Size]byte
+	indexed   bool
+	unchanged bool
+}
+
+func (observation *activationObservation) matches(view catalogView, tracked map[string]bool) bool {
+	plan := observation.previous
+	if !plan.valid || plan.digest != view.digest {
+		return false
+	}
+	for id := range tracked {
+		if _, exists := observation.desired[id]; !exists {
+			return false
+		}
+	}
+	for _, id := range plan.modules {
+		generation, exists := observation.desired[id]
+		if !exists || !tracked[id] && !generation.entry.Manifest.ActivatesGateway() {
+			return false
+		}
+	}
+	return true
+}
+
+func (observation *activationObservation) read(ctx context.Context, manager *Manager, view catalogView) map[string]moduleGeneration {
+	current := observation.desired
+	observation.indexed, observation.unchanged = true, true
+	for _, id := range observation.previous.modules {
+		generation, err := manager.workerGeneration(ctx, view, id)
+		if ctx.Err() != nil {
+			break
+		}
+		if observation.unchanged {
+			old := current[id]
+			if err == nil && old.entry.EnableGeneration == generation.entry.EnableGeneration &&
+				old.config.Version == generation.config.Version && bytes.Equal(old.config.Values, generation.config.Values) {
+				continue
+			}
+			current = maps.Clone(current)
+			observation.unchanged = false
+		}
+		if err == nil {
+			current[id] = generation
+		} else {
+			delete(current, id)
+		}
+	}
+	return current
 }
 
 // ListenerOwnerDraining identifies a canceled listener that still holds an
@@ -208,10 +271,11 @@ func (owner *GatewayActivation) run(stopping context.Context, openWatch func() (
 			pending = nil
 			owner.reconcile(watch)
 		case <-fallback.C:
+			allowChecked := pending == nil
 			debounce.Stop()
 			pending = nil
 			watch.open(openWatch)
-			owner.reconcile(watch)
+			owner.reconcileTurn(watch, allowChecked)
 		case <-sweep.C:
 			owner.reapSavedSignIns()
 		}
@@ -227,26 +291,46 @@ func (owner *GatewayActivation) reapSavedSignIns() {
 }
 
 func (owner *GatewayActivation) reconcile(watch *activationWatch) {
+	owner.reconcileTurn(watch, false)
+}
+
+func (owner *GatewayActivation) reconcileTurn(watch *activationWatch, allowChecked bool) {
 	manager := owner.manager
 	watch.begin()
 	var modules []string
 	var observe func(string)
+	var observation activationObservation
 	if watch.active() {
 		observe = func(id string) {
 			if len(modules) < activationWatchLimit-1 {
 				modules = append(modules, id)
 			}
 		}
+		if allowChecked && len(owner.starting) == 0 && len(owner.draining) == 0 && len(owner.retries) == 0 {
+			observation.previous = owner.fallback
+			observation.desired = owner.desired
+		}
 	}
-	desired, err := manager.reconcile(owner.ctx, true, observe)
+	desired, err := manager.reconcileObserved(owner.ctx, true, observe, &observation)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return
+	}
+	if observation.indexed {
+		modules = observation.previous.modules
 	}
 	for _, id := range modules {
 		watch.followConfig(id)
 	}
 	if watch.finish() {
 		owner.wake()
+		observation.unchanged = false
+	}
+	owner.fallback = activationPlan{
+		digest: observation.digest, modules: modules,
+		valid: err == nil && watch.active() && len(modules) < activationWatchLimit-1 && len(modules) == len(desired),
+	}
+	if err == nil && observation.unchanged && owner.hasCurrentLeases() {
+		return
 	}
 	owner.desired = desired
 	if err != nil {
@@ -288,6 +372,21 @@ func (owner *GatewayActivation) reconcile(watch *activationWatch) {
 		return
 	}
 	owner.startReady()
+}
+
+func (owner *GatewayActivation) hasCurrentLeases() bool {
+	covered := 0
+	for id, generation := range owner.desired {
+		if !generation.entry.Manifest.ActivatesGateway() {
+			continue
+		}
+		lease := owner.leases[id]
+		if lease.Lease == nil || !lease.worker.matches(generation.entry, generation.config) || !lease.client.alive() {
+			return false
+		}
+		covered++
+	}
+	return covered == len(owner.leases)
 }
 
 func sameActivationGeneration(current, expected moduleGeneration) bool {

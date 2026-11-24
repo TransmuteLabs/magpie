@@ -234,13 +234,32 @@ func AutoVision() string {
 
 // autoVision is AutoVision's pick, and whether it has allowance left.
 func autoVision() (string, bool) {
+	pick := chooseVision()
+	pick.settle()
+	return pick.model, pick.ready
+}
+
+type visionPick struct {
+	rankedSeer
+	held       string
+	heldServes bool
+}
+
+func chooseVision() visionPick {
 	held := heldPick(slotVision)
 	r := seersRankedHeld(nil, held)
 	if len(r) == 0 {
-		return "", false
+		return visionPick{}
 	}
-	settlePick(slotVision, held, slices.ContainsFunc(r, func(s rankedSeer) bool { return providerOfRef(s.model) == held }), providerOfRef(r[0].model))
-	return r[0].model, r[0].ready
+	return visionPick{
+		rankedSeer: r[0],
+		held:       held,
+		heldServes: slices.ContainsFunc(r, func(s rankedSeer) bool { return providerOfRef(s.model) == held }),
+	}
+}
+
+func (pick visionPick) settle() {
+	settlePick(slotVision, pick.held, pick.heldServes, providerOfRef(pick.model))
 }
 
 // rankedSeer is a model seersRanked names, and whether it has allowance.

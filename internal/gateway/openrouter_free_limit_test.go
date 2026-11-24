@@ -14,9 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tidwall/gjson"
+
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/requestpolicy"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 func TestOpenRouterFreeTierKeepsPaidGroupMemberReady(t *testing.T) {
@@ -315,6 +319,233 @@ func TestOpenRouterFreeTierWithTranslatedSearch(t *testing.T) {
 
 func TestOpenRouterFreeTierWithTranslatedAdvisor(t *testing.T) {
 	testOpenRouterFreeTierWithTranslatedTool(t, advisorTool)
+}
+
+func TestOpenRouterFreeTierDuringAdvisorCall(t *testing.T) {
+	const (
+		executor       = "c33-executor"
+		executorKey    = "c33-executor-key"
+		executorKeyID  = "9825af56db"
+		executorID     = "executor/" + executor
+		firstFree      = "x/advisor-a:free"
+		secondFree     = "x/advisor-b:free"
+		paid           = "x/advisor-paid"
+		vendorKey      = "c33-openrouter-key"
+		vendorKeyID    = "86289b5415"
+		callerAgent    = "claude-cli"
+		advisorGroup   = "group/advisor"
+		advice         = "Check the paid fallback before shipping."
+		advisorErrCode = "too_many_requests"
+	)
+	writeStream := func(w http.ResponseWriter, model, text, tool, args string, input, output int) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		response := strings.ReplaceAll(chatSSE(text, tool, args), `"model":"m"`, `"model":`+jsonStr(model))
+		counts := fmt.Sprintf(`data: {"id":"c","object":"chat.completion.chunk","model":%q,"choices":[],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			model, input, output, input+output)
+		io.WriteString(w, strings.Replace(response, "data: [DONE]", counts+"\n\ndata: [DONE]", 1))
+	}
+	for _, test := range []struct {
+		name, source string
+		scoped       bool
+	}{
+		{"free_minute", "openrouter_free_tier_per_minute", true},
+		{"unknown", "openrouter_abuse_guard", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fresh(t)
+			opts := settings.Load()
+			retries, extraDispatches := 0, 2
+			opts.RequestPolicy = &requestpolicy.Config{Defaults: requestpolicy.Options{
+				MaxRetries: &retries, MaxTotalRetries: &extraDispatches,
+			}}
+			if err := settings.Save(opts); err != nil {
+				t.Fatal(err)
+			}
+
+			reset := time.UnixMilli(time.Now().Add(2 * time.Minute).UnixMilli())
+			var mu sync.Mutex
+			var tried []string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+					http.NotFound(w, r)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				request := gjson.ParseBytes(body)
+				model := request.Get("model").String()
+				mu.Lock()
+				tried = append(tried, model)
+				mu.Unlock()
+				key := vendorKey
+				if model == executor {
+					key = executorKey
+				}
+				if err != nil || !request.Get("stream").Bool() || r.Header.Get("Authorization") != "Bearer "+key {
+					t.Errorf("invalid upstream request for %q: matched key=%v, stream=%v, read error %v",
+						model, r.Header.Get("Authorization") == "Bearer "+key, request.Get("stream").Bool(), err)
+					http.Error(w, "invalid fixture request", http.StatusBadRequest)
+					return
+				}
+
+				switch model {
+				case executor:
+					messages := request.Get("messages").Array()
+					if len(messages) > 1 && messages[len(messages)-1].Get("role").String() == "tool" {
+						call, result := messages[len(messages)-2].Get("tool_calls.0"), messages[len(messages)-1]
+						want := advice
+						if !test.scoped {
+							want = "The advisor failed: " + advisorErrCode
+						}
+						if id := call.Get("id").String(); id == "" || id != result.Get("tool_call_id").String() ||
+							call.Get("function.name").String() != advisorTool || !strings.Contains(result.Get("content").Raw, want) {
+							t.Errorf("the executor did not receive its advisor result: %s", body)
+						}
+						writeStream(w, executor, "Done.", "", "", 17, 5)
+						return
+					}
+					if !slices.ContainsFunc(request.Get("tools").Array(), func(tool gjson.Result) bool {
+						return tool.Get("function.name").String() == advisorTool
+					}) {
+						t.Errorf("the executor was not offered advisor(): %s", body)
+						http.Error(w, "advisor tool not offered", http.StatusBadRequest)
+						return
+					}
+					writeStream(w, executor, "Let me ask.", advisorTool, "{}", 11, 3)
+				case firstFree, paid:
+					if request.Get("tool_choice").String() != "none" || !strings.Contains(string(body), "Let me ask.") {
+						t.Errorf("the advisor did not receive the consultation: %s", body)
+					}
+					if model == paid {
+						writeStream(w, paid, advice, "", "", 41, 7)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.UnixMilli(), 10))
+					w.WriteHeader(http.StatusTooManyRequests)
+					fmt.Fprintf(w, `{"error":{"message":"Rate limit exceeded.","code":429,"metadata":{"limit_source":%q}}}`, test.source)
+				default:
+					t.Errorf("unexpected upstream model %q", model)
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			for _, p := range []provider.Provider{
+				{ID: "executor", Name: "Executor", Key: executorKey, Chat: upstream.URL + "/v1", Models: []string{executor}},
+				{ID: "orf", Name: "OpenRouter", Preset: "openrouter", Key: vendorKey, Chat: upstream.URL + "/v1", Models: []string{firstFree, secondFree, paid}},
+			} {
+				if err := provider.Save(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := provider.SaveGroup(provider.Group{
+				Name: "Advisor", Members: []string{"orf/" + firstFree, "orf/" + secondFree, "orf/" + paid},
+				Routing: provider.Ordered, Patience: provider.PatienceOff,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			keys, secrets := newCaller(t, "C33 caller")
+			if _, err := access.Update("models-key", access.Change{Key: keys[0].ID, Models: []string{executorID, advisorGroup}}); err != nil {
+				t.Fatal(err)
+			}
+			server := New()
+			body := strings.Replace(advisorTurn(executorID, advisorGroup), `"stream":true`, `"stream":false`, 1)
+			request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/v1/messages?beta=true", strings.NewReader(body))
+			request.RemoteAddr = "127.0.0.1:50001"
+			request.Header.Set("User-Agent", "claude-cli/2.1.316 (external, cli)")
+			request.Header.Set("Authorization", "Bearer "+secrets[0])
+			reply := httptest.NewRecorder()
+			server.Front().ServeHTTP(reply, request)
+			result := gjson.ParseBytes(reply.Body.Bytes())
+			blocks := result.Get("content").Array()
+			if reply.Code != http.StatusOK || result.Get("stop_reason").String() != "end_turn" || len(blocks) != 4 ||
+				strings.TrimSpace(blocks[3].Get("text").String()) != "Done." {
+				t.Fatalf("executor did not finish: %d %s", reply.Code, reply.Body)
+			}
+			call, answer := blocks[1], blocks[2]
+			id := call.Get("id").String()
+			if call.Get("type").String() != "server_tool_use" || call.Get("name").String() != advisorTool ||
+				!strings.HasPrefix(id, "srvtoolu_") || answer.Get("type").String() != "advisor_tool_result" ||
+				answer.Get("tool_use_id").String() != id {
+				t.Fatalf("advisor call and result do not pair: %s", reply.Body)
+			}
+
+			want := []string{executor, firstFree, executor}
+			advisorStatus, restKey := http.StatusTooManyRequests, "orf"
+			if test.scoped {
+				want = []string{executor, firstFree, paid, executor}
+				advisorStatus, restKey = http.StatusOK, "orf/\x00openrouter-free"
+				if answer.Get("content.type").String() != "advisor_result" || answer.Get("content.text").String() != advice {
+					t.Fatalf("advisor did not return the paid fallback's advice: %s", answer.Raw)
+				}
+			} else if answer.Get("content.type").String() != "advisor_tool_result_error" || answer.Get("content.error_code").String() != advisorErrCode {
+				t.Fatalf("unscoped refusal did not reach the executor as an advisor error: %s", answer.Raw)
+			}
+			mu.Lock()
+			got := slices.Clone(tried)
+			mu.Unlock()
+			if !slices.Equal(got, want) {
+				t.Fatalf("upstream order %v, want %v", got, want)
+			}
+
+			routes := server.Trace(t.Context(), 0, 0).Routes
+			if len(routes) != 2 {
+				t.Fatalf("expected executor and advisor routes, got %+v", routes)
+			}
+			executed, consulted := routes[0], routes[1]
+			if !executed.Done || executed.Model != executorID || executed.Status != http.StatusOK ||
+				!consulted.Done || consulted.Model != advisorGroup || consulted.Status != advisorStatus ||
+				executed.CallerKey != keys[0].ID || consulted.CallerKey != keys[0].ID ||
+				executed.Agent != callerAgent || consulted.Agent != callerAgent {
+				t.Fatalf("executor and advisor route attribution: %+v", routes)
+			}
+			if len(consulted.Tries) == 0 {
+				t.Fatal("advisor has no recorded attempts")
+			}
+			first := consulted.Tries[0]
+			if first.Model != firstFree || first.Status != http.StatusTooManyRequests ||
+				first.Rest == nil || first.Rest.Key != restKey || first.Rest.FreeTier != test.scoped {
+				t.Fatalf("advisor's first refusal has the wrong scope: %+v, rest %+v", first, first.Rest)
+			}
+			if _, held := RestOf("orf"); held == test.scoped {
+				t.Fatalf("whole key held=%v after advisor's %s refusal", held, test.name)
+			}
+			if test.scoped && (!first.Rest.Until.Equal(reset) || !slices.ContainsFunc(consulted.Tries, func(attempt Try) bool {
+				return attempt.ID == "orf" && attempt.Model == paid && attempt.Done && attempt.Status == http.StatusOK
+			})) {
+				t.Fatalf("advisor did not route to paid during the free rest: %+v, rest %+v", consulted, first.Rest)
+			}
+
+			var executorRows, advisorRows []usage.Record
+			for _, row := range usage.Load(time.Time{}) {
+				if row.RouteID == executed.ID {
+					executorRows = append(executorRows, row)
+				}
+				if row.RouteID == consulted.ID {
+					advisorRows = append(advisorRows, row)
+				}
+			}
+			if len(executorRows) != 1 || executorRows[0].CallerKeyID != keys[0].ID ||
+				executorRows[0].ProviderKeyID != executorKeyID || executorRows[0].Agent != callerAgent ||
+				executorRows[0].Provider != "executor" || executorRows[0].Model != executor ||
+				executorRows[0].Input != 28 || executorRows[0].Output != 8 || executorRows[0].Status != http.StatusOK {
+				t.Fatalf("executor Usage rows: %+v", executorRows)
+			}
+			if test.scoped {
+				if len(advisorRows) != 1 || advisorRows[0].CallerKeyID != keys[0].ID ||
+					advisorRows[0].ProviderKeyID != vendorKeyID || advisorRows[0].Agent != callerAgent ||
+					advisorRows[0].Provider != "orf" ||
+					advisorRows[0].Requested != advisorGroup || advisorRows[0].Model != paid || advisorRows[0].Served != paid ||
+					advisorRows[0].Input != 41 || advisorRows[0].Output != 7 || advisorRows[0].Status != http.StatusOK {
+					t.Fatalf("paid advisor Usage rows: %+v", advisorRows)
+				}
+			} else if slices.ContainsFunc(advisorRows, func(row usage.Record) bool {
+				return row.CallerKeyID != keys[0].ID || row.Agent != callerAgent || row.Status == http.StatusOK ||
+					row.Input+row.Output+row.CacheRead+row.CacheWrite != 0
+			}) {
+				t.Fatalf("unexpected Usage for the unscoped advisor refusal: %+v", advisorRows)
+			}
+		})
+	}
 }
 
 func testOpenRouterFreeTierWithTranslatedTool(t *testing.T, tool string) {

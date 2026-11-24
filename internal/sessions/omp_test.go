@@ -1,12 +1,15 @@
 package sessions
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
 const (
@@ -14,6 +17,77 @@ const (
 	ompFork  = "019a0000-0000-7000-8000-00000000000c"
 	ompNamed = "019a0000-0000-7000-8000-00000000000d"
 )
+
+func TestOmpConfigDirSessionSource(t *testing.T) {
+	for _, mode := range []string{"relative", "absolute"} {
+		t.Run(mode, func(t *testing.T) {
+			setup(t)
+			t.Setenv("PI_CODING_AGENT_DIR", "")
+			home, err := os.UserHomeDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			value := ".omp-work"
+			root := filepath.Join(home, value)
+			if mode == "absolute" {
+				root = filepath.Join(t.TempDir(), "omp work")
+				value = root
+			}
+			t.Setenv("PI_CONFIG_DIR", value)
+			agentDir := filepath.Join(root, "profiles", "work", "agent")
+			sessionsDir := filepath.Join(agentDir, "sessions")
+			copyTree(t, "testdata/omp/agent/sessions", sessionsDir)
+
+			readAll := false
+			setRead := func(allowed bool) {
+				t.Helper()
+				if err := SetReads(&readAll, map[string]bool{"omp": allowed}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setRead(false)
+			if _, found := Find("omp", ompMain); found {
+				t.Fatal("OMP journal listed without read consent")
+			}
+			if !slices.Contains(Found(), "omp") {
+				t.Fatal("configured OMP store unavailable for consent")
+			}
+
+			setRead(true)
+			const relative = "sessions/--work-omp--/2026-09-28T08-00-00-000Z_" + ompMain + ".jsonl"
+			session, found := Find("omp", ompMain)
+			if !found || session.Path != filepath.Join(agentDir, filepath.FromSlash(relative)) ||
+				session.Title != "Port the parser to omp" ||
+				!strings.Contains(session.Resume, "omp --profile work --resume "+ompMain) {
+				t.Fatalf("OMP did not select the configured profile journal: %+v", session)
+			}
+			source := sdk.SessionSourceDescriptor{Agent: "omp"}
+			slot := sdk.SessionSourceStore{Slot: "main", NativeRootSlot: "omp.sessions"}
+			if roots, err := sourceStoreRoots(source, slot); err != nil || !slices.Contains(roots, sessionsDir) {
+				t.Fatalf("configured profile missing from native Source roots: %v, %v", roots, err)
+			}
+			physical, err := filepath.EvalSymlinks(agentDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dir, path, err := sessionSourceRoot(session); err != nil || dir != physical || path != relative {
+				t.Fatalf("native source input = (%q, %q, %v), want (%q, %q)", dir, path, err, physical, relative)
+			}
+			if transcript, err := TranscriptOf(session); err != nil ||
+				len(transcript.Parts) == 0 || transcript.Parts[0].Text != "Port the parser" {
+				t.Fatalf("configured OMP transcript unavailable: %v", err)
+			}
+
+			setRead(false)
+			if _, found := Find("omp", ompMain); found {
+				t.Fatal("OMP journal listed after consent was revoked")
+			}
+			if _, err := TranscriptOf(session); !errors.Is(err, ErrNotRead) {
+				t.Fatalf("retained OMP session read after consent was revoked: %v", err)
+			}
+		})
+	}
+}
 
 // omp's sessions (#303): Pi's kind, with its title line and title changes,
 // model_usage entries, and its subagents' and advisor's sessions beside it.
@@ -48,9 +122,11 @@ func TestOmp(t *testing.T) {
 	if !m.Start.Equal(at("2026-09-28T08:00:00Z")) || !m.Last.Equal(at("2026-09-28T08:02:00Z")) {
 		t.Fatalf("omp times %s %s", m.Start, m.Last)
 	}
-	want := "cd '/work/omp' && omp --resume " + ompMain
+	want := "cd '/work/omp' && OMP_PROFILE=default omp --resume " + ompMain
 	if runtime.GOOS == "windows" {
-		want = "Set-Location -LiteralPath '/work/omp'; omp --resume " + ompMain
+		want = "Set-Location -LiteralPath '/work/omp'; " +
+			"& { $savedOMPProfile = $env:OMP_PROFILE; try { $env:OMP_PROFILE = 'default'; omp --resume " +
+			ompMain + " } finally { $env:OMP_PROFILE = $savedOMPProfile } }"
 	}
 	if m.Resume != want {
 		t.Fatalf("resume %q", m.Resume)

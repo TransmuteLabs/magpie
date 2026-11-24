@@ -349,8 +349,14 @@ parent for new entries while a selected path is missing and caps total watched
 paths at 128. A five-second fallback checks for missed changes, unavailable
 watches and new files and retries watch setup after a backend error.
 Notifications only schedule work. Reconciliation and
-admission still verify current bytes under their existing guards. Expired
-sign-ins are cleaned at startup and on a separate minute timer.
+admission still verify current bytes under their existing guards. In settled
+operation the fallback can reuse the last complete ordered module list
+after checking the current catalog bytes and tracked modules. It reads the
+current enablement and effective configuration for each selected module.
+Matching generations and live leases let it skip the full catalog scan and
+activation pass. Watch repair, worker retirement and independent revocation
+checks still run. Expired sign-ins are cleaned at startup and on a separate
+minute timer.
 Disable, removal, configuration replacement and shutdown release the lease
 and retire the cached generation through the manager's bounded drain and
 disposer. Activation waits for that module's retired component group,

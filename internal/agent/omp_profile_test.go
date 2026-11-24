@@ -159,14 +159,34 @@ func TestOmpProfilesDefaultRowAndConfigDir(t *testing.T) {
 	// PI_CONFIG_DIR moves the root, profiles and all
 	t.Setenv("OMP_PROFILE", "")
 	os.Unsetenv("OMP_PROFILE")
-	t.Setenv("PI_CONFIG_DIR", ".omp-work")
-	renamed := filepath.Join(home, ".omp-work", "profiles", "home", "agent")
-	writeFile(t, filepath.Join(renamed, "config.yml"), "modelRoles:\n  default: h/model-h\n")
-	if _, err := Find("omp#home"); err != nil {
-		t.Fatal(err)
-	}
-	if a, err := Find("omp"); err != nil || a.Dir != filepath.Join(home, ".omp-work", "agent") {
-		t.Fatalf("default under PI_CONFIG_DIR: %v %v", a, err)
+	for _, mode := range []string{"relative", "absolute"} {
+		t.Run(mode, func(t *testing.T) {
+			value := ".omp-work"
+			root := filepath.Join(home, value)
+			if mode == "absolute" {
+				root = filepath.Join(t.TempDir(), "omp work")
+				value = root
+			}
+			t.Setenv("PI_CONFIG_DIR", value)
+			for _, want := range []struct {
+				id, dir, model string
+			}{
+				{id: "omp", dir: filepath.Join(root, "agent"), model: "d/model-d"},
+				{id: "omp#home", dir: filepath.Join(root, "profiles", "home", "agent"), model: "h/model-h"},
+			} {
+				writeFile(t, filepath.Join(want.dir, "config.yml"), "modelRoles:\n  default: "+want.model+"\n")
+				row, err := Find(want.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if row.Dir != want.dir {
+					t.Fatalf("%s directory = %q, want %q", want.id, row.Dir, want.dir)
+				}
+				if field := row.Field("model"); field == nil || field.Get() != want.model {
+					t.Fatalf("%s did not read model %q from its configured directory", want.id, want.model)
+				}
+			}
+		})
 	}
 }
 

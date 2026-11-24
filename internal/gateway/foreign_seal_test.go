@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -161,6 +163,171 @@ func TestForeignSealAcrossGroupMembers(t *testing.T) {
 			t.Fatalf("stream=%v b was then sent %q", inStream, got)
 		}
 		a.sent()
+	}
+}
+
+func TestGroupImageRewriteKeepsRequestChanges(t *testing.T) {
+	const description = "\n[Image, as probe/eye describes it for this model, which can't see images:]\n" +
+		"A red square with the word HELLO in it.\n[End of the image's description]\n"
+	for _, test := range []struct {
+		name, replacement string
+		describe, floor   bool
+	}{
+		{name: "text"},
+		{name: "omitted", replacement: "[Image omitted: this model accepts text only.]"},
+		{name: "described", replacement: description, describe: true},
+		{name: "reply_floor", replacement: description, describe: true, floor: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server, imageVendor := eyed(t)
+			if test.describe {
+				pickVision(t, "probe/eye")
+			} else {
+				noVision(t)
+			}
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if !server.waitSightSaves(ctx) {
+					t.Error("image description did not finish saving")
+				}
+			})
+
+			vendor := &sealer{name: "text"}
+			type request struct {
+				Input     json.RawMessage `json:"input"`
+				Model     string          `json:"model"`
+				Stream    bool            `json:"stream"`
+				MaxOutput int             `json:"max_output_tokens"`
+			}
+			var mu sync.Mutex
+			var requests []request
+			takeRequests := func() []request {
+				mu.Lock()
+				defer mu.Unlock()
+				got := requests
+				requests = nil
+				return got
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+					http.NotFound(w, r)
+					return
+				}
+				raw, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					http.Error(w, "could not read fixture request", http.StatusBadRequest)
+					return
+				}
+				var sent request
+				if err := json.Unmarshal(raw, &sent); err != nil {
+					t.Error(err)
+					http.Error(w, "could not decode fixture request", http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				requests = append(requests, sent)
+				mu.Unlock()
+				if sent.MaxOutput == 1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, `{"error":{"message":"max_output_tokens must be at least 16","type":"invalid_request_error"}}`)
+					return
+				}
+				r.Body = io.NopCloser(strings.NewReader(string(raw)))
+				vendor.ServeHTTP(w, r)
+			}))
+			t.Cleanup(upstream.Close)
+			if err := provider.Save(provider.Provider{
+				ID: "seal-text", Name: "Seal Text", Key: "seal-text-key",
+				Models: []string{"grok-4"}, Responses: upstream.URL + "/v1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := catalog.SaveLive("seal-text", upstream.URL+"/v1", []catalog.Model{
+				{ID: "grok-4", ImageInput: imageInputBool(false)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.SaveGroup(provider.Group{
+				Name: "Images", Routing: provider.Ordered, Members: []string{"seal-text/grok-4", "probe/eye"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			const session = "seal-image-thread"
+			const foreign = `{"type":"reasoning","id":"rs_foreign","summary":[],"encrypted_content":"sealed-by-foreign"}`
+			const own = `{"type":"reasoning","id":"rs_own","summary":[],"encrypted_content":"sealed-by-text"}`
+			turn := func(input, extra string) *httptest.ResponseRecorder {
+				t.Helper()
+				body := `{"model":"group/images","stream":true` + extra + `,"input":[` + input + `]}`
+				req := httptest.NewRequestWithContext(
+					t.Context(), http.MethodPost, "http://127.0.0.1/v1/responses", strings.NewReader(body),
+				)
+				req.RemoteAddr = "127.0.0.1:12345"
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("session_id", session)
+				response := httptest.NewRecorder()
+				server.Front().ServeHTTP(response, req)
+				return response
+			}
+			opening := codexUser("Old picture.")
+			addForeign := "," + foreign
+			extra := ""
+			wantLimits := []int{0}
+			wantTries := 0
+			if test.floor {
+				addForeign, extra = "", `,"max_output_tokens":1`
+				wantLimits, wantTries = []int{1, 16}, 2
+			} else {
+				learned := turn(opening+addForeign, "")
+				got := takeRequests()
+				if learned.Code != http.StatusOK || len(got) != 2 {
+					t.Fatalf("first turn did not learn the refused seal: HTTP %d, %d requests, reply %s", learned.Code, len(got), learned.Body)
+				}
+				sameJSON(t, got[0].Input, "["+opening+addForeign+"]")
+				sameJSON(t, got[1].Input, "["+opening+"]")
+			}
+
+			older, wantOlder := opening, opening
+			if test.replacement != "" {
+				const image = `{"type":"input_image","image_url":"data:image/png;base64,c2VhbCBpbWFnZSBmaXh0dXJl"}`
+				const prefix = `{"type":"message","role":"user","content":[{"type":"input_text","text":"Old picture."},`
+				const suffix = `]}`
+				older = prefix + image + suffix
+				wantOlder = prefix + `{"type":"input_text","text":` + quote(test.replacement) + `}` + suffix
+			}
+			current := codexUser("Read the old caption.")
+			reply := turn(older+addForeign+","+own+","+current, extra)
+			got := takeRequests()
+			if len(got) != len(wantLimits) {
+				t.Fatalf("answer turn made %d target requests, want %d", len(got), len(wantLimits))
+			}
+			for index, sent := range got {
+				if sent.Model != "grok-4" || !sent.Stream || sent.MaxOutput != wantLimits[index] {
+					t.Fatalf("answer request %d: model=%q stream=%t max_output_tokens=%d, want grok-4, true, %d",
+						index+1, sent.Model, sent.Stream, sent.MaxOutput, wantLimits[index])
+				}
+				sameJSON(t, sent.Input, "["+wantOlder+","+own+","+current+"]")
+			}
+			if reply.Code != http.StatusOK || !strings.Contains(reply.Body.String(), `"delta":"from text"`) ||
+				!strings.Contains(reply.Body.String(), `"type":"response.completed"`) {
+				t.Fatalf("follow-up reply: %d %s", reply.Code, reply.Body)
+			}
+			descriptions := 0
+			if test.describe {
+				descriptions = 1
+			}
+			if got := len(imageVendor.sent("eye")); got != descriptions {
+				t.Fatalf("vision model was asked %d times, want %d", got, descriptions)
+			}
+			record := lastUsage(t)
+			if record.Session != session || record.Provider != "seal-text" || record.Model != "grok-4" ||
+				record.Input != 7 || record.Output != 1 || record.Status != http.StatusOK || record.Tries != wantTries {
+				t.Fatalf("wrong follow-up Usage: %+v", record)
+			}
+		})
 	}
 }
 

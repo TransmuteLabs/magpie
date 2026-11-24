@@ -296,6 +296,13 @@ func libraryRoutes(mux *http.ServeMux, w Windows) {
 		}
 		p, err := library.ProbeSkills(in.Source)
 		if err != nil {
+			var denied *library.SkillProbeAccessError
+			if errors.As(err, &denied) {
+				rw.Header().Set("Content-Type", "application/json")
+				rw.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(rw).Encode(map[string]string{"error": denied.Error()})
+				return
+			}
 			fail(rw, err)
 			return
 		}

@@ -3,6 +3,7 @@ package sessions
 import (
 	"cmp"
 	"context"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -62,12 +63,31 @@ func resumeCommand(distro, agent, id, cwd, path string) string {
 		if profile := ompProfile(path); profile != "" {
 			return resumeLine(distro, cwd, namedOMPResumeCommand(id, profile))
 		}
+		if distro == "" && path != "" {
+			if active, err := extensionOMPProfile(); err == nil && active != "" {
+				recipe = builtinomp.ResumeSession("default")
+			} else if filepath.IsAbs(path) {
+				run := linkedResumeCommand(recipe, id, nil)
+				return resumeLine("", cwd, defaultOMPResumeRun(run))
+			}
+		}
 	}
 	var launch func() string
 	if agent == "agy" && distro == "" {
 		launch = AgyStart
 	}
 	return resumeLine(distro, cwd, linkedResumeCommand(recipe, id, launch))
+}
+
+func defaultOMPResumeRun(run string) string {
+	if run == "" {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return "& { $savedOMPProfile = $env:OMP_PROFILE; try { $env:OMP_PROFILE = 'default'; " +
+			run + " } finally { $env:OMP_PROFILE = $savedOMPProfile } }"
+	}
+	return "OMP_PROFILE=default " + run
 }
 
 func namedOMPResumeCommand(id, profile string) string {

@@ -177,6 +177,49 @@ func (snapshot linkedActionSnapshot) matchesFile() (bool, error) {
 	return count == 0 && err == io.EOF, nil
 }
 
+func readLinkedActionSettings(files []LinkedActionFile, snapshots map[string]linkedActionSnapshot) (sdk.ActionSettings, error) {
+	settings := sdk.ActionSettings{Files: make([]sdk.ActionSettingFile, 0, len(files))}
+	for _, file := range files {
+		if _, exists := snapshots[file.Name]; exists {
+			return sdk.ActionSettings{}, fmt.Errorf("duplicate linked settings name %q", file.Name)
+		}
+		snapshot, err := readLinkedActionFile(file)
+		if err != nil {
+			return sdk.ActionSettings{}, edit.PreserveOnRollback(file.Path, err)
+		}
+		for _, other := range snapshots {
+			if snapshot.target == other.target || snapshot.info != nil && other.info != nil && os.SameFile(snapshot.info, other.info) {
+				return sdk.ActionSettings{}, fmt.Errorf("linked settings paths %q and %q name the same file", file.Path, other.file.Path)
+			}
+		}
+		snapshots[file.Name] = snapshot
+		settings.Files = append(settings.Files, snapshot.before.setting(file.Name))
+	}
+	return settings, nil
+}
+
+// PreviewLinkedAgentPlan runs a planner on the same snapshots as ApplyLinkedAgentPlan.
+func PreviewLinkedAgentPlan(planner func(sdk.ActionSettings) (sdk.AgentPlan, error), files ...LinkedActionFile) (sdk.ActionSettings, sdk.AgentPlan, error) {
+	snapshots := make(map[string]linkedActionSnapshot, len(files))
+	settings, err := readLinkedActionSettings(files, snapshots)
+	if err != nil {
+		return sdk.ActionSettings{}, sdk.AgentPlan{}, err
+	}
+	plan, err := planner(settings)
+	if err != nil {
+		return sdk.ActionSettings{}, sdk.AgentPlan{}, err
+	}
+	if err := validateActionOutput(plan.Files); err != nil {
+		return sdk.ActionSettings{}, sdk.AgentPlan{}, err
+	}
+	for _, file := range files {
+		if err := snapshots[file.Name].check(); err != nil {
+			return sdk.ActionSettings{}, sdk.AgentPlan{}, err
+		}
+	}
+	return settings, plan, nil
+}
+
 func ApplyLinkedAgentPlan[Options any](options Options, planner func(Options, sdk.ActionSettings) (sdk.AgentPlan, error), files ...LinkedActionFile) (err error) {
 	return ApplyLinkedAgentPlanWithCommit(options, planner, nil, files...)
 }
@@ -223,22 +266,9 @@ func ApplyLinkedAgentPlanWithCommit[Options any](options Options, planner func(O
 			err = edit.PreserveOnRollback(snapshot.file.Path, err)
 		}
 	}()
-	settings := sdk.ActionSettings{Files: make([]sdk.ActionSettingFile, 0, len(files))}
-	for _, file := range files {
-		if _, exists := snapshots[file.Name]; exists {
-			return fmt.Errorf("duplicate linked settings name %q", file.Name)
-		}
-		snapshot, err := readLinkedActionFile(file)
-		if err != nil {
-			return edit.PreserveOnRollback(file.Path, err)
-		}
-		for _, other := range snapshots {
-			if snapshot.target == other.target || snapshot.info != nil && other.info != nil && os.SameFile(snapshot.info, other.info) {
-				return fmt.Errorf("linked settings paths %q and %q name the same file", file.Path, other.file.Path)
-			}
-		}
-		snapshots[file.Name] = snapshot
-		settings.Files = append(settings.Files, snapshot.before.setting(file.Name))
+	settings, err := readLinkedActionSettings(files, snapshots)
+	if err != nil {
+		return err
 	}
 	plan, err := planner(options, settings)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"slices"
 	"time"
 
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -60,9 +61,6 @@ func Module() sdk.Module {
 			return sdk.ModuleReady{}, nil, nil
 		},
 		Handlers: map[string]sdk.Handler{
-			sdk.MethodProviderModels: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
-				return sdk.ModelsResult{}, nil
-			},
 			sdk.MethodAuthLogout: func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
 				_, err := record(ctx, "logout", call)
 				return nil, err
@@ -261,8 +259,11 @@ func Module() sdk.Module {
 			return sdk.UsageResult{Revision: request.Revision, Windows: []sdk.UsageWindow{{Name: "Weekly", Used: used}}}, nil
 		}
 	}
-	if manifest.Contract.Has(sdk.ProviderSignIn) {
+	if slices.Contains(sdk.RequiredMethods(manifest), sdk.MethodProviderModels) {
 		module.Handlers[sdk.MethodProviderModels] = func(ctx context.Context, call sdk.Call, _ *sdk.Stream) (any, error) {
+			if !manifest.Contract.Has(sdk.ProviderSignIn) {
+				return sdk.ModelsResult{}, nil
+			}
 			if call.Scope.Session == "hold-queue" {
 				config, err := record(ctx, "hold-queue", call)
 				if err != nil {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
@@ -275,15 +276,21 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 	for _, change := range []string{
 		"unchanged", "account signed out", "same generation credentials", "login off", "discovery off",
 		"same CAS configuration", "reordered configuration",
-		"owner unchanged", "owner replaced",
+		"owner unchanged", "owner replaced", "owner rollback",
 	} {
 		test.Run(change, func(test *testing.T) {
 			fixture := installRefreshFixture(test, worker, sdk.FullContract().Version.Minor, time.Hour, nil)
-			tracksOwner := change == "owner unchanged" || change == "owner replaced"
+			const ownerRevision = "fixture-owner"
+			tracksOwner := change == "owner unchanged" || change == "owner replaced" || change == "owner rollback"
 			finalAdmissionCheck := int32(2)
+			var rollbackID string
 			if tracksOwner {
 				finalAdmissionCheck = 3
-				writeToolFixtureOwner(test, toolFixtureOwnerPath(fixture), toolFixtureTransfer("fixture-owner"))
+				if change == "owner rollback" {
+					rollbackID = seedToolFixtureRollback(test, fixture, ownerRevision)
+				} else {
+					writeToolFixtureOwner(test, toolFixtureOwnerPath(fixture), toolFixtureTransfer(ownerRevision))
+				}
 			}
 			ctx, cancel := context.WithTimeout(test.Context(), 20*time.Second)
 			var requests sync.WaitGroup
@@ -308,8 +315,8 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 			reached := make(chan sdk.Scope, 1)
 			proceed := make(chan struct{})
 			runExtensionPluginTool = func(current context.Context, spec, name string, args json.RawMessage) (sdk.ToolResult, error) {
-				if revision, _ := extension.SubscriptionOwnerRevision(current); tracksOwner && revision != "fixture-owner" {
-					return sdk.ToolResult{}, fmt.Errorf("tool prepared owner revision %q, want fixture-owner", revision)
+				if revision, _ := extension.SubscriptionOwnerRevision(current); tracksOwner && revision != ownerRevision {
+					return sdk.ToolResult{}, fmt.Errorf("tool prepared owner revision %q, want %q", revision, ownerRevision)
 				}
 				scope := extension.ToolScopeFrom(current)
 				var checks atomic.Int32
@@ -333,7 +340,8 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				_, err := fixture.run(ctx, refreshToolArgs)
 				result <- err
 			})
-			waitToolGatewayStack(test, ctx, result, "tool queued at the stdin writer", "(*workerClient).reserveWrite(")
+			waitToolHandoffStack(test, ctx, result, "tool queued at the stdin writer",
+				"(*Server).toolsMCPRun(", "(*workerClient).reserveWrite(")
 			resume()
 			var scope sdk.Scope
 			select {
@@ -367,7 +375,9 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 			release = sync.OnceFunc(release)
 			defer release()
 			close(proceed)
-			waitToolGatewayStack(test, ctx, result, "tool waiting for the private Store after policy check", "storeWaitLock(", "(*Lease).admitToolHandoff(")
+			waitToolHandoffStack(test, ctx, result, "tool waiting for the private Store after policy check",
+				"(*Server).toolsMCPRun(", "(*Lease).admitToolHandoff(", "storeWaitLock(")
+			var rollback <-chan error
 			switch change {
 			case "same generation credentials":
 				path := filepath.Join(private, scope.Plugin, "accounts.json")
@@ -390,11 +400,31 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				replaceToolConfigFileAtSameVersion(test, fixture, change)
 			case "owner replaced":
 				writeToolHandoffReplacement(test, toolFixtureOwnerPath(fixture), []byte(toolFixtureTransfer("another-owner")))
+			case "owner rollback":
+				finished := make(chan error, 1)
+				rollback = finished
+				requests.Go(func() {
+					owner, err := provider.RollbackSavedPluginSubscription(ctx, fixture.manager, rollbackID, ownerRevision)
+					if owner.Revision != "" {
+						err = fmt.Errorf("busy rollback published revision %q with error %v", owner.Revision, err)
+					}
+					finished <- err
+				})
+				waitToolHandoffStack(test, ctx, rollback, "rollback waiting for the private Store under the catalog writer lock",
+					"RollbackSavedPluginSubscription(", "(*Manager).RollbackSavedSubscription(", "storeWaitLock(")
+				if fixture.toolCalls.Load() != 0 || fixture.refreshes.Load() != 0 {
+					test.Fatal("worker was called before the Store was released")
+				}
 			}
 			release()
+			if rollback != nil {
+				if err := <-rollback; err == nil || err.Error() != "the SDK subscription is busy; try again when its current operations finish" {
+					test.Fatalf("rollback overlapping a selected tool should be busy: %v", err)
+				}
+			}
 			err = <-result
 			wantCalls, wantState := int32(0), "not-started"
-			if change == "unchanged" || change == "reordered configuration" || change == "owner unchanged" {
+			if change == "unchanged" || change == "reordered configuration" || change == "owner unchanged" || change == "owner rollback" {
 				wantCalls, wantState = 1, "completed"
 				if err != nil {
 					test.Errorf("valid tool was refused: %v", err)
@@ -413,6 +443,23 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 				fixture.toolCalls.Load() != wantCalls || fixture.refreshes.Load() != 0 {
 				test.Fatalf("tool sent %d RPCs and %d refreshes, journaled %q; want %d RPCs, 0 refreshes and %q: %v",
 					fixture.toolCalls.Load(), fixture.refreshes.Load(), receipt.State, wantCalls, wantState, err)
+			}
+			if change == "owner rollback" {
+				publicID, revision, user, visible := provider.ExtensionPublicLogin(scope)
+				if !visible || publicID != rollbackID || revision != ownerRevision || user != "fixture-user" {
+					test.Fatalf("busy rollback changed the SDK login: %q %q %q visible=%t", publicID, revision, user, visible)
+				}
+				owner, err := provider.RollbackSavedPluginSubscription(ctx, fixture.manager, rollbackID, ownerRevision)
+				if err != nil || owner.Active || owner.Pending || owner.PublicID != rollbackID || owner.Revision == "" || owner.Revision == ownerRevision {
+					test.Fatalf("rollback after tool completion: %+v, %v", owner, err)
+				}
+				_, revision, _, visible = provider.ExtensionPublicLogin(scope)
+				community, restored := provider.PluginOf(rollbackID)
+				if visible || revision != owner.Revision || !restored || !community.SignedIn || community.ID != scope.Provider ||
+					len(community.Accounts) != 1 || community.Accounts[0].AccountID != user {
+					test.Fatalf("rollback did not restore the signed-in Community provider: SDK revision %q visible=%t, Community restored=%t signed-in=%t",
+						revision, visible, restored, community.SignedIn)
+				}
 			}
 			if change == "owner replaced" {
 				requests.Wait()
@@ -434,6 +481,42 @@ func TestExtensionToolHandoffRechecksAuthorityAfterStoreWait(test *testing.T) {
 			}
 		})
 	}
+}
+
+func seedToolFixtureRollback(test *testing.T, fixture *toolRefreshFixture, revision string) string {
+	test.Helper()
+	const spec = "@magpie-test/opencode-vendor-auth"
+	const user = "fixture-user"
+	const auth = `{"type":"api","key":"synthetic-community","accountId":"` + user + `"}`
+	providerID := fixture.scope.Provider
+	publicID := provider.PluginID(providerID)
+	background := plugin.ListInBackground(false)
+	plugin.UseCached(nil)
+	test.Cleanup(func() {
+		plugin.UseCached(nil)
+		plugin.ListInBackground(background)
+	})
+	for name, body := range map[string]string{
+		"plugins.json":          fmt.Sprintf(`{"plugins":[{"spec":%q}]}`, spec),
+		"plugin-providers.json": fmt.Sprintf(`[{"id":%q,"spec":%q,"name":"Fixture Community"}]`, providerID, spec),
+		"plugin-auth.json":      fmt.Sprintf(`{%q:%s}`, providerID, auth),
+		"logins.json":           fmt.Sprintf(`[{"agent":%q,"home":%q,"user":%q,"on":true}]`, "plugin:"+providerID, providerID, user),
+	} {
+		if err := os.WriteFile(filepath.Join(settings.Dir(), name), []byte(body), 0600); err != nil {
+			test.Fatal(err)
+		}
+	}
+	provider.Changed()
+	loginID := provider.LoginID(publicID, user)
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(auth)))
+	body := fmt.Sprintf(`[{"module":%q,"provider":%q,"publicID":%q,"revision":%q,"active":true,
+		"accounts":[{"key":%q,"id":%q,"user":%q,"loginID":%q}],
+		"grantRevision":%q,"digests":{%q:%q},"tickets":["fixture-ticket"],"generations":[%d]}]`,
+		fixture.scope.Plugin, providerID, publicID, revision, providerID, fixture.scope.Account, user, loginID,
+		strings.Repeat("a", 64), providerID, digest, fixture.scope.Generation)
+	writeToolFixtureOwner(test, toolFixtureOwnerPath(fixture), body)
+	provider.Changed()
+	return publicID
 }
 
 func toolFixtureOwnerPath(fixture *toolRefreshFixture) string {
@@ -460,18 +543,17 @@ func writeToolFixtureOwner(test *testing.T, path, body string) {
 	}
 }
 
-func waitToolGatewayStack(test *testing.T, ctx context.Context, result <-chan error, phase string, frames ...string) {
+func waitToolHandoffStack(test *testing.T, ctx context.Context, result <-chan error, phase string, frames ...string) {
 	test.Helper()
 	stacks := make([]byte, 1<<20)
 	waitToolRefreshPhase(test, ctx, phase, func() bool {
 		select {
 		case err := <-result:
-			test.Fatalf("tool finished before %s: %v", phase, err)
+			test.Fatalf("operation finished before %s: %v", phase, err)
 		default:
 		}
 		for stack := range bytes.SplitSeq(stacks[:runtime.Stack(stacks, true)], []byte("\n\n")) {
-			if bytes.Contains(stack, []byte("(*Server).toolsMCPRun(")) &&
-				!slices.ContainsFunc(frames, func(frame string) bool { return !bytes.Contains(stack, []byte(frame)) }) {
+			if !slices.ContainsFunc(frames, func(frame string) bool { return !bytes.Contains(stack, []byte(frame)) }) {
 				return true
 			}
 		}

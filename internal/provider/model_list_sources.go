@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	extensionhost "github.com/yetone/magpie/internal/extension"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
@@ -24,6 +25,7 @@ func extensionModelRoots(ctx context.Context, installed bool) ([]extensionModelR
 		return nil, false
 	}
 	var roots []extensionModelRoot
+	complete := inventory.complete
 	for _, selectedProvider := range inventory.providers {
 		binding := selectedProvider.Account.extension
 		if !binding.manifest.Contract.Has(sdk.ModelDiscovery) || binding.descriptor.AccountOnly() {
@@ -31,15 +33,17 @@ func extensionModelRoots(ctx context.Context, installed bool) ([]extensionModelR
 		}
 		path := binding.host.Store().ModelCatalogPath(binding.scope.Plugin, binding.modelCatalogKey())
 		if path == "" {
-			return nil, false
+			complete = false
+			continue
 		}
 		info, err := os.Lstat(path)
 		if err != nil && !os.IsNotExist(err) || info != nil && !info.Mode().IsRegular() {
-			return nil, false
+			complete = false
+			continue
 		}
 		roots = append(roots, extensionModelRoot{path, info})
 	}
-	return roots, inventory.complete
+	return roots, complete
 }
 
 func extensionModelRootsCurrent(roots []extensionModelRoot) bool {
@@ -67,28 +71,48 @@ func sameExtensionModelRoot(first, second extensionModelRoot) bool {
 	return first.path == second.path && first.sameFile(second.info)
 }
 
-type modelListObservation struct {
+// ModelListObservation records the catalog and its observed SDK roots.
+type ModelListObservation struct {
 	stamp Stamp
 	at    time.Time
 	roots []extensionModelRoot
 	ready bool
 }
 
+// Current checks the catalog stamp and known roots without rereading module
+// configuration. An incomplete observation still checks the roots it found.
+func (observation ModelListObservation) Current(ctx context.Context) bool {
+	return ctx.Err() == nil && extensionModelRootsCurrent(observation.roots) &&
+		observation.stamp == StampNow()
+}
+
+func (observation ModelListObservation) CurrentWithAccountSources(ctx context.Context) bool {
+	if observation.stamp.roots[extensionCatalogStampIndex].ok {
+		accounts, valid := extensionAccountObservations.observeContext(ctx, extensionhost.AccountStamp)
+		if valid && ctx.Err() == nil {
+			held.Lock()
+			holdAccountSourcesLocked(accounts)
+			held.Unlock()
+		}
+	}
+	return observation.Current(ctx)
+}
+
 var modelListSources struct {
 	sync.Mutex
-	current modelListObservation
+	current ModelListObservation
 }
 
 // RefreshModelListSources checks the SDK roots before rendering a gateway
 // model list. A changed or unavailable observation drops held and kept
 // projections before the list reads them again.
-func RefreshModelListSources(ctx context.Context) {
+func RefreshModelListSources(ctx context.Context) ModelListObservation {
 	stamp := StampNow()
 	modelListSources.Lock()
 	current := modelListSources.current
 	modelListSources.Unlock()
 	if current.ready && current.stamp == stamp && time.Since(current.at) < keptFor && extensionModelRootsCurrent(current.roots) {
-		return
+		return current
 	}
 
 	roots, ready := extensionModelRoots(ctx, stamp.roots[extensionCatalogStampIndex].ok)
@@ -96,13 +120,15 @@ func RefreshModelListSources(ctx context.Context) {
 	defer modelListSources.Unlock()
 	current = modelListSources.current
 	if ctx.Err() != nil || current.stamp.gen > stamp.gen {
-		return
+		return ModelListObservation{}
 	}
 	if !ready || !slices.EqualFunc(current.roots, roots, sameExtensionModelRoot) {
 		if !dropHeldAt(stamp.gen) {
-			return
+			return ModelListObservation{}
 		}
 		stamp.gen++
 	}
-	modelListSources.current = modelListObservation{stamp: stamp, at: time.Now(), roots: roots, ready: ready}
+	observation := ModelListObservation{stamp: stamp, at: time.Now(), roots: roots, ready: ready}
+	modelListSources.current = observation
+	return observation
 }

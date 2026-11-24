@@ -68,25 +68,43 @@ func leastEffort(model string) string {
 // VisionSettings gives the Settings row its automatic pick, any missing
 // manual pick, and the effective model's offered and fitted levels.
 func VisionSettings(picked, want string) (auto, missing string, levels []string, effort string) {
-	auto = AutoVision()
+	vision := ProjectVisionSettings(picked, want)
+	vision.Settle()
+	return vision.Auto, vision.Missing, vision.Levels, vision.Effort
+}
+
+// VisionProjection is the Settings row and the automatic pick it can settle
+// after its caller has accepted the catalog it was built from.
+type VisionProjection struct {
+	Auto, Missing string
+	Levels        []string
+	Effort        string
+	pick          visionPick
+}
+
+func ProjectVisionSettings(picked, want string) VisionProjection {
+	pick := chooseVision()
+	vision := VisionProjection{Auto: pick.model, pick: pick}
 	if picked == "off" {
-		return
+		return vision
 	}
 	if picked != "" {
 		if p, model, ok := provider.Resolve(picked); ok {
-			levels = ByStrength(p.Efforts(model))
+			vision.Levels = ByStrength(p.Efforts(model))
 		} else {
-			missing = picked
+			vision.Missing = picked
 		}
 	}
-	if auto != "" && (picked == "" || missing != "") {
-		levels = ModelEfforts(auto)
+	if vision.Auto != "" && (picked == "" || vision.Missing != "") {
+		vision.Levels = ModelEfforts(vision.Auto)
 	}
-	if want != "" && len(levels) != 0 {
-		effort = fitEffort(want, levels)
+	if want != "" && len(vision.Levels) != 0 {
+		vision.Effort = fitEffort(want, vision.Levels)
 	}
-	return
+	return vision
 }
+
+func (vision VisionProjection) Settle() { vision.pick.settle() }
 
 // searchEffort is the level the searcher's model, provider p's model, is
 // asked to search at: the one picked in Settings fitted to its levels,

@@ -41,8 +41,7 @@ const toolLoopRepeats = 8
 // toolLoopWho is who answered such a turn, as the Routing view names it.
 const toolLoopWho = "Tool loop stopped"
 
-// toolResultMarks are what each API's tool result is written with, for a
-// body with fewer than toolLoopRepeats of them to be let by unparsed.
+// toolResultMarks are the usual spellings of each API's tool results.
 var toolResultMarks = map[provider.Protocol][][]byte{
 	provider.Responses: {[]byte(`_output"`)}, // function_call_output, custom_tool_call_output, …
 	provider.Chat:      {[]byte(`"tool_call_id"`)},
@@ -81,7 +80,71 @@ func mayLoop(from provider.Protocol, body []byte) bool {
 	for _, m := range toolResultMarks[from] {
 		n += bytes.Count(body, m)
 	}
-	return n >= toolLoopRepeats
+	if n >= toolLoopRepeats {
+		return true
+	}
+	switch from {
+	case provider.Responses:
+		return (bodyHasJSONEscape(body, "_outputweb_search_call") || bodyHas(body, `"web_search_call"`)) &&
+			hasToolResultValues(body, "type", func(value string) bool {
+				return toolResultItem(value) || value == "web_search_call"
+			})
+	case provider.Chat:
+		return (bodyHas(body, `"tool"`) || bodyHasJSONEscape(body, "tool")) &&
+			hasToolResultValues(body, "role", func(value string) bool { return value == "tool" })
+	case provider.Anthropic:
+		return bodyHasJSONEscape(body, "tool_result") &&
+			hasToolResultValues(body, "type", func(value string) bool { return value == "tool_result" })
+	case provider.Gemini:
+		return hasGeminiResultMarks(body, toolLoopRepeats)
+	}
+	return false
+}
+
+// hasToolResultValues counts likely results in both literal and escaped
+// spellings. Only short role and type fields need decoding.
+func hasToolResultValues(body []byte, field string, isResult func(string) bool) bool {
+	left := toolLoopRepeats
+	for {
+		start := bytes.IndexByte(body, '"')
+		if start < 0 {
+			return false
+		}
+		end := skipJSONString(body, start)
+		key := body[start:end]
+		body = body[end:]
+		if !strings.EqualFold(toolLoopWord(key, len(field)), field) {
+			continue
+		}
+		colon := skipJSONSpace(body, 0)
+		if colon == len(body) || body[colon] != ':' {
+			continue
+		}
+		start = skipJSONSpace(body, colon+1)
+		if start == len(body) || body[start] != '"' {
+			continue
+		}
+		end = skipJSONString(body, start)
+		value := toolLoopWord(body[start:end], len("custom_tool_call_output"))
+		body = body[end:]
+		if isResult(value) {
+			left--
+			if left == 0 {
+				return true
+			}
+		}
+	}
+}
+
+func toolLoopWord(raw []byte, maxLen int) string {
+	if len(raw) < 2 || len(raw) > 2+6*maxLen || raw[len(raw)-1] != '"' {
+		return ""
+	}
+	word := bytesStr(raw[1 : len(raw)-1])
+	if strings.Contains(word, `\`) {
+		word, _ = unquoteJSON(raw)
+	}
+	return word
 }
 
 // conversationKey is where each API keeps a request's conversation.
@@ -154,7 +217,7 @@ func mayContainToolResult(from provider.Protocol, body []byte) bool {
 	case provider.Anthropic:
 		literal = bodyHas(body, `"tool_result"`)
 	case provider.Gemini:
-		literal = mayContainGeminiResult(body)
+		literal = hasGeminiResultMarks(body, 1)
 	default:
 		return true
 	}
@@ -175,9 +238,9 @@ func mayContainToolResult(from provider.Protocol, body []byte) bool {
 	}
 }
 
-// mayContainGeminiResult allows the underscores removed by geminiCamel
+// hasGeminiResultMarks allows the underscores removed by geminiCamel
 // and the case folding done by the Gemini decoder.
-func mayContainGeminiResult(body []byte) bool {
+func hasGeminiResultMarks(body []byte, need int) bool {
 	const field = "functionResponse"
 	rest := bytesStr(body)
 	for {
@@ -190,10 +253,14 @@ func mayContainGeminiResult(body []byte) bool {
 		if len(key) == 0 || key[0] != 'f' && key[0] != 'F' {
 			continue
 		}
-		key, _, found = strings.Cut(key, `"`)
-		if found && len(key)-strings.Count(key, "_") <= len(field)*utf8.UTFMax &&
+		key, after, found := strings.Cut(key, `"`)
+		if found && strings.HasPrefix(strings.TrimLeft(after, " \t\r\n"), ":") &&
+			len(key)-strings.Count(key, "_") <= len(field)*utf8.UTFMax &&
 			strings.EqualFold(strings.ReplaceAll(key, "_", ""), field) {
-			return true
+			need--
+			if need == 0 {
+				return true
+			}
 		}
 	}
 }

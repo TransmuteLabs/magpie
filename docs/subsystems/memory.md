@@ -476,8 +476,9 @@ meaning, since it downloads a model (~135 MB).
   and again when its text changes; vectors of texts gone are dropped
   (`TestIndexReadsOnce`). `Keep` reads them in the backend each minute and
   on a nudge (`Poke`); a search reads up to 16 missing ones itself, and
-  with none read yet it is by words while Keep reads. The model is let go
-  after 10 minutes unused.
+  with none read yet it is by words while Keep reads. Acquiring the model
+  restarts its 10-minute idle timer. Only the current idle timer can release
+  the cached model.
 - Memory binds the built-in embedder through
   [`MemorySemanticService`](../../pkg/extension/memory_semantic.go). The
   window's switch, progress status and backend keeper use that binding.

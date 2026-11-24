@@ -460,10 +460,14 @@ type reconcileCleanup struct {
 }
 
 func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, error) {
+	return m.reconcileObserved(ctx, activate, observeConfig, nil)
+}
+
+func (m *Manager) reconcileObserved(ctx context.Context, activate bool, observeConfig func(id string), observation *activationObservation) (map[string]moduleGeneration, error) {
 	if err := filelock.LockMutex(ctx, &m.reloadMu); err != nil {
 		return nil, err
 	}
-	current, cleanup, err := m.reconcileLocked(ctx, activate, observeConfig)
+	current, cleanup, err := m.reconcileLocked(ctx, activate, observeConfig, observation)
 	m.reloadMu.Unlock()
 	for _, owner := range cleanup.revoked {
 		owner.recordRevocation(ctx)
@@ -486,7 +490,7 @@ func (m *Manager) reconcile(ctx context.Context, activate bool, observeConfig fu
 	return current, ctx.Err()
 }
 
-func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeConfig func(id string)) (map[string]moduleGeneration, reconcileCleanup, error) {
+func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeConfig func(id string), observation *activationObservation) (map[string]moduleGeneration, reconcileCleanup, error) {
 	var cleanup reconcileCleanup
 	m.mu.Lock()
 	if m.closed {
@@ -503,26 +507,35 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 	for parent := range m.processes {
 		tracked[parent.scope.Plugin] = true
 	}
+	canUsePlan := observation != nil && len(m.windowAuthOwners) == 0 && len(m.processes) == 0
 	m.mu.Unlock()
 
-	current := make(map[string]moduleGeneration, len(tracked))
+	var current map[string]moduleGeneration
 	err := m.catalog.withView(ctx, func(view catalogView) error {
-		for _, entry := range view.entries {
-			if !activeRoot(entry) || (!tracked[entry.Manifest.ID] && !(activate && entry.Manifest.ActivatesGateway())) {
-				continue
-			}
-			if observeConfig != nil && entry.Manifest.Contract.Version.Minor >= 1 {
-				observeConfig(entry.Manifest.ID)
-			}
-			if entry = view.enabledEntry(entry); !activeRoot(entry) {
-				continue
-			}
-			config, err := m.runtimeModuleConfigContext(ctx, entry)
-			if err == nil {
-				current[entry.Manifest.ID] = moduleGeneration{entry, config}
-			}
-			if err := ctx.Err(); err != nil {
-				return err
+		if observation != nil {
+			observation.digest = view.digest
+		}
+		if canUsePlan && observation.matches(view, tracked) {
+			current = observation.read(ctx, m, view)
+		} else {
+			current = make(map[string]moduleGeneration, len(tracked))
+			for _, entry := range view.entries {
+				if !activeRoot(entry) || (!tracked[entry.Manifest.ID] && !(activate && entry.Manifest.ActivatesGateway())) {
+					continue
+				}
+				if observeConfig != nil && entry.Manifest.Contract.Version.Minor >= 1 {
+					observeConfig(entry.Manifest.ID)
+				}
+				if entry = view.enabledEntry(entry); !activeRoot(entry) {
+					continue
+				}
+				config, err := m.runtimeModuleConfigContext(ctx, entry)
+				if err == nil {
+					current[entry.Manifest.ID] = moduleGeneration{entry, config}
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 			}
 		}
 		if err := ctx.Err(); err != nil {
@@ -546,6 +559,9 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 		m.mu.Unlock()
 		return nil, cleanup, errors.New("extension manager is closed")
 	}
+	if observation != nil && (len(m.windowAuthOwners) != 0 || len(m.processes) != 0) {
+		observation.unchanged = false
+	}
 	var retiring []*managedWorker
 	for id, worker := range m.workers {
 		generation, found := current[id]
@@ -555,6 +571,9 @@ func (m *Manager) reconcileLocked(ctx context.Context, activate bool, observeCon
 		}
 	}
 	m.mu.Unlock()
+	if observation != nil && len(retiring) != 0 {
+		observation.unchanged = false
+	}
 	for _, worker := range retiring {
 		if stopped := m.retire(worker); stopped != nil && !activate {
 			cleanup.stopping = append(cleanup.stopping, stopped)

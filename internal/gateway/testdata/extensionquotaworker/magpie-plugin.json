@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "fixture.group-quota",
+  "version": "1.0.0",
+  "runtime": "native",
+  "entry": "worker.so",
+  "compatibility": {"hostAPI": "^1.20"},
+  "contract": {
+    "version": {"major": 1, "minor": 20},
+    "capabilities": ["outbound-executor", "account-auth", "usage-reporter"]
+  },
+  "providers": [{
+    "id": "vendor",
+    "name": "SDK quota fixture",
+    "protocols": ["chat"],
+    "models": [{
+      "id": "paid-native",
+      "protocols": ["chat"],
+      "contextWindow": 32768,
+      "maxOutput": 4096
+    }, {
+      "id": "free-native",
+      "protocols": ["chat"],
+      "contextWindow": 32768,
+      "maxOutput": 4096
+    }]
+  }]
+}

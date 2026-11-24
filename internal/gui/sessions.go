@@ -1347,11 +1347,18 @@ func agentLine(a *agent.Agent, launch, goos string) string {
 	if launch != "" {
 		return launch
 	}
-	if bin := a.BinPath(); bin != "" {
+	bin, profile := a.OMPProfileProgram()
+	args := ""
+	if profile == "" {
+		bin = a.BinPath()
+	} else {
+		args = " --profile " + profile
+	}
+	if bin != "" {
 		if goos == "windows" {
-			return "& '" + strings.ReplaceAll(bin, "'", "''") + "'"
+			return "& '" + strings.ReplaceAll(bin, "'", "''") + "'" + args
 		}
-		return shellQuote(bin)
+		return shellQuote(bin) + args
 	}
 	return ""
 }

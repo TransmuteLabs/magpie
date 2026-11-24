@@ -10375,7 +10375,7 @@ magpie.plugin("library", (ctx) => {
     const all = allTabs(), off = all.filter(([id]) => hide.has(id)).length;
     const b = el("button", "link lib-sections", off ? t("Sections · {n} hidden", { n: off }) : t("Sections"));
     b.type = "button";
-    menuOpener(b);
+    menuOf(b);
     b.onclick = (e) => {
       e.stopPropagation();
       const opts = all.map(([v, name]) => ({ v, name, literalName: true, note: "" }));

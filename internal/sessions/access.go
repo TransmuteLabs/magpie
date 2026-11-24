@@ -260,7 +260,7 @@ func Found() []string {
 	add("workbuddy", filepath.Join(WorkBuddyDir(), "projects"))
 	add("workbuddy-ai", filepath.Join(WorkBuddyAIDir(), "projects"))
 	add("codebuddy", filepath.Join(CodeBuddyDir(), "projects"))
-	add("omp", filepath.Join(OmpDir(), "sessions"))
+	add("omp", ompSessionRoots()...)
 	add("droid", filepath.Join(FactoryDir(), "sessions"))
 	add("cursor", filepath.Join(CursorDir(), "chats"), filepath.Join(cursorDataDir(), "projects"), cursorEditorDB())
 	add("hermes", HermesDirs()...)

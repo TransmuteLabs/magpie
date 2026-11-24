@@ -47,6 +47,7 @@ type extensionAccountFiles uint64
 type accountFileObservation struct {
 	start, done chan struct{}
 	revision    extensionAccountFiles
+	valid       bool
 }
 
 type accountFileObservations struct {
@@ -64,29 +65,48 @@ func extensionAccountFilesNow() extensionAccountFiles {
 }
 
 func (observations *accountFileObservations) observe(read func() (extensionhost.AccountFileStamp, error)) extensionAccountFiles {
-	observations.Lock()
-	if next := observations.next; next != nil {
-		observations.Unlock()
-		<-next.done
-		return next.revision
-	}
-	var batch *accountFileObservation
-	if observations.reading {
-		batch = &accountFileObservation{start: make(chan struct{}), done: make(chan struct{})}
-		observations.next = batch
-		observations.Unlock()
-		<-batch.start
-		observations.Lock()
-		observations.next = nil
-	}
-	observations.reading = true
-	observations.Unlock()
-	return observations.scan(batch, read)
+	revision, _ := observations.observeContext(context.Background(), read)
+	return revision
 }
 
-func (observations *accountFileObservations) scan(batch *accountFileObservation, read func() (extensionhost.AccountFileStamp, error)) (revision extensionAccountFiles) {
+func (observations *accountFileObservations) observeContext(ctx context.Context, read func() (extensionhost.AccountFileStamp, error)) (extensionAccountFiles, bool) {
+	if ctx.Err() != nil {
+		return 0, false
+	}
+	observations.Lock()
+	if !observations.reading {
+		observations.reading = true
+		observations.Unlock()
+		return observations.scan(nil, read)
+	}
+	batch := observations.next
+	if batch == nil {
+		batch = &accountFileObservation{start: make(chan struct{}), done: make(chan struct{})}
+		observations.next = batch
+	}
+	observations.Unlock()
+	select {
+	case <-ctx.Done():
+		return 0, false
+	case <-batch.start:
+	}
+	observations.Lock()
+	if observations.next == batch && ctx.Err() == nil {
+		observations.next = nil
+		observations.Unlock()
+		return observations.scan(batch, read)
+	}
+	observations.Unlock()
+	select {
+	case <-ctx.Done():
+		return 0, false
+	case <-batch.done:
+		return batch.revision, batch.valid
+	}
+}
+
+func (observations *accountFileObservations) scan(batch *accountFileObservation, read func() (extensionhost.AccountFileStamp, error)) (revision extensionAccountFiles, valid bool) {
 	var stamp extensionhost.AccountFileStamp
-	valid := false
 	defer func() {
 		observations.Lock()
 		if !valid || !stamp.Equal(observations.stamp) {
@@ -95,7 +115,7 @@ func (observations *accountFileObservations) scan(batch *accountFileObservation,
 		}
 		revision = observations.revision
 		if batch != nil {
-			batch.revision = revision
+			batch.revision, batch.valid = revision, valid
 			close(batch.done)
 		}
 		if next := observations.next; next != nil {
@@ -194,12 +214,7 @@ func Hold() (release func()) {
 func holdWithAccounts(read func() extensionAccountFiles) (release func()) {
 	accounts := read()
 	held.Lock()
-	if accounts > held.accounts {
-		held.accounts = accounts
-		held.built = nil
-		held.gen++
-		held.stampAt = time.Time{}
-	}
+	holdAccountSourcesLocked(accounts)
 	if held.holds == 0 {
 		// what was built under another environment (a HOME or config
 		// folder of its own: a test's) isn't this one's
@@ -228,6 +243,14 @@ func holdWithAccounts(read func() extensionAccountFiles) (release func()) {
 		}
 		held.Unlock()
 	})
+}
+
+func holdAccountSourcesLocked(accounts extensionAccountFiles) {
+	if accounts > held.accounts {
+		held.accounts = accounts
+		dropHeldLocked()
+		held.stampAt = time.Time{}
+	}
 }
 
 // Changed drops what is held: a provider, an account, a plugin or a

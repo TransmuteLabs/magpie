@@ -52,17 +52,8 @@ func ompProfileOK(name string) bool {
 		!strings.HasSuffix(name, ".") && !ompReserved.MatchString(name)
 }
 
-// ompRoot is where omp keeps its agent folder and its profiles: ~/.omp, or
-// ~/$PI_CONFIG_DIR when that variable renames it.
-func ompRoot(home string) string {
-	if d := appdir.Getenv("PI_CONFIG_DIR"); d != "" {
-		return filepath.Join(home, d)
-	}
-	return filepath.Join(home, ".omp")
-}
-
 // ompDir is omp's agent folder, found as omp's pi-utils (dirs.ts) finds it:
-// under ~/.omp, or ~/$PI_CONFIG_DIR; a profile's (OMP_PROFILE, else
+// under the config root (usually ~/.omp); a profile's (OMP_PROFILE, else
 // PI_PROFILE; "default" is none) is profiles/<name>/agent there; with none,
 // PI_CODING_AGENT_DIR — the variable Pi reads — moves it, else it is
 // agent there. omp takes that variable as given, without expanding "~".
@@ -71,7 +62,7 @@ func ompRoot(home string) string {
 // moved it, and Pi reads that variable too, so Pi's own folder may be what
 // it names.
 func ompDir(home string) (dir string, shared bool) {
-	root := ompRoot(home)
+	root := appdir.OMPConfigRoot(home)
 	p, set := appdir.LookupEnv("OMP_PROFILE")
 	if !set {
 		p = appdir.Getenv("PI_PROFILE")
@@ -93,15 +84,15 @@ func omp(home string) *Agent {
 	return a
 }
 
-// ompProfiles are the named omp profiles under ~/.omp/profiles (or
-// ~/$PI_CONFIG_DIR/profiles): each is an omp of its own, omp#<name>, with
-// its own config.yml and models.yml in profiles/<name>/agent. The one the
+// ompProfiles are the named omp profiles under profiles/ in the config root.
+// Each is an omp of its own, omp#<name>, with its own config.yml and
+// models.yml in profiles/<name>/agent. The one the
 // default row already picks (OMP_PROFILE) is left out, so it is not listed
 // twice, and the name rules are omp's own. A missing profiles folder is no
 // profiles, not an error; a profile whose agent folder has no config.yml
 // yet is still a row, and the first Set makes the file.
 func ompProfiles(home string) []*Agent {
-	root := ompRoot(home)
+	root := appdir.OMPConfigRoot(home)
 	entries, err := os.ReadDir(filepath.Join(root, "profiles"))
 	if err != nil {
 		return nil
@@ -130,6 +121,14 @@ func ompProfiles(home string) []*Agent {
 		out = append(out, a)
 	}
 	return out
+}
+
+func (a *Agent) OMPProfileProgram() (program, profile string) {
+	name, named := strings.CutPrefix(a.ID, "omp#")
+	if a.WSL != "" || !named || !ompProfileOK(name) {
+		return "", ""
+	}
+	return binAt("omp"), name
 }
 
 // ompIn is omp in a WSL distro (see wsl.go): ~/.omp/agent, as the

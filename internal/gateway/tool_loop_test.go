@@ -186,6 +186,97 @@ func TestToolLoopIsStoppedOnEveryProtocol(t *testing.T) {
 	}
 }
 
+func TestToolLoopRecognizesAlternateResultSpellings(t *testing.T) {
+	spellings := map[provider.Protocol][]struct {
+		name, literal, alternate string
+		count                    int
+	}{
+		provider.Responses: {
+			{"escaped_output", `"function_call_output"`, `"function_call_\u006futput"`, -1},
+			{"mixed_output", `"function_call_output"`, `"function_call_outpu\u0074"`, 1},
+		},
+		provider.Chat: {
+			{"escaped_call_id", `"tool_call_id"`, `"tool_call_\u0069d"`, -1},
+			{"escaped_role", `"role":"tool","tool_call_id"`, `"r\u006fle":"\u0074ool","TOOL_CALL_ID"`, -1},
+		},
+		provider.Anthropic: {
+			{"escaped_result", `"tool_result"`, `"tool_resul\u0074"`, -1},
+		},
+		provider.Gemini: {
+			{"folded_key", `"functionResponse"`, `"FUNCTIONRESPONSE"`, -1},
+			{"camelized_key", `"functionResponse"`, `"_FuNcTiOn_RE_sponse"`, -1},
+			{"unicode_key", `"functionResponse"`, `"functionRe\u017Fponse"`, -1},
+		},
+	}
+	for _, ask := range toolLoopAsks {
+		if !ask.stream || ask.name == "codex" {
+			continue
+		}
+		for _, spelling := range spellings[ask.from] {
+			t.Run(ask.name+"/"+spelling.name, func(t *testing.T) {
+				vendor := &countingVendor{}
+				url := toolLoopOn(t, vendor) + ask.path
+				body := func(turn exchangeOfTurn) string {
+					return strings.Replace(toolTurns(ask.from, toolLoopRepeats, turn, ask.stream),
+						spelling.literal, spelling.alternate, spelling.count)
+				}
+				got := askAgent(t, url, body(codexRead))
+				asked := vendor.asked.Load()
+				stopped, completed := strings.Contains(got, "This turn was stopped"), strings.Contains(got, ask.done)
+				if asked != 0 || !stopped || !completed {
+					t.Errorf("repeated exchange: vendor asked %d, stopped=%t, completed=%t", asked, stopped, completed)
+				}
+				got = askAgent(t, url, body(pollJob))
+				if calls := vendor.asked.Load() - asked; calls != 1 || !strings.Contains(got, "read it") || !strings.Contains(got, ask.done) {
+					t.Errorf("changing results: vendor asked %d times, reply %s", calls, got)
+				}
+			})
+		}
+	}
+}
+
+func TestToolLoopRecognizesRestoredSearchResults(t *testing.T) {
+	thinking := fmt.Sprintf(`{"type":"reasoning","encrypted_content":%q}`, claudeThinking("find the answer", "sig"))
+	search := `{"type":"web_search_call","action":{"query":"find the answer"}}`
+	var items []string
+	for range toolLoopRepeats {
+		items = append(items, thinking, search)
+	}
+	vendor := &countingVendor{}
+	url := toolLoopOn(t, vendor) + "/v1/responses"
+	got := askAgent(t, url, toolTurns(provider.Responses, 0, codexRead, true, items...))
+	stopped, completed := strings.Contains(got, "This turn was stopped"), strings.Contains(got, `"type":"response.completed"`)
+	if asked := vendor.asked.Load(); asked != 0 || !stopped || !completed || !strings.Contains(got, "find the answer") {
+		t.Errorf("repeated restored search: vendor asked %d, stopped=%t, completed=%t", asked, stopped, completed)
+	}
+}
+
+func TestToolLoopLetsLongProseBy(t *testing.T) {
+	for _, text := range []struct{ name, prefix string }{
+		{"plain", ""},
+		{"escaped_markup", "<env>Tools & files</env>\n"},
+	} {
+		t.Run(text.name, func(t *testing.T) {
+			prose, err := json.Marshal(text.prefix + strings.Repeat("continue this discussion. ", 2048))
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := fmt.Sprintf(`{"type":"message","role":"user","content":[{"type":"input_text","text":%s}]}`, prose)
+			body := toolTurns(provider.Responses, 0, codexRead, true, item)
+			if mayLoop(provider.Responses, []byte(body)) {
+				t.Error("ordinary prose entered the tool-loop parser")
+			}
+			vendor := &countingVendor{}
+			url := toolLoopOn(t, vendor) + "/v1/responses"
+			got := askAgent(t, url, body)
+			if asked := vendor.asked.Load(); asked != 1 || !strings.Contains(got, "read it") ||
+				!strings.Contains(got, `"type":"response.completed"`) {
+				t.Errorf("ordinary prose: vendor asked %d times, reply %s", asked, got)
+			}
+		})
+	}
+}
+
 // Codex on its own sign-in, a turn relayed to the ChatGPT backend as it
 // came, is stopped the same: its loop spends the user's ChatGPT plan.
 func TestToolLoopStoppedOnCodexsOwnSignIn(t *testing.T) {

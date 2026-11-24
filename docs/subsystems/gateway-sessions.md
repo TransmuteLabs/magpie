@@ -555,9 +555,11 @@ is written (`readsAllInTests`).
 
 `/api/sessions/reads` (GET; POST `{all, agents}`) in
 [`sessions_reads.go`](../../internal/gui/sessions_reads.go) gives the
-choice and the agents found (`sessions.Found`, by a stat of each agent's
-folder, nothing in it read; WSL distros are not looked into, Allow all
-covers them), and `sessions/manage` carries the same as `reads`. While
+choice and the agents found (`sessions.Found`, by checking store paths
+without reading journals; WSL distros are not looked into, Allow all
+covers them), and `sessions/manage` carries the same as `reads`. OMP uses
+the same local store roots as Sessions, including configured paths and
+profile or XDG stores (`TestSessionReadsFindsOMPStores`). While
 `asked` is false the Sessions page shows the consent (`consentCard` in
 the sessions plugin): each agent found with a switch, off; Allow selected
 saves `all: false` with each agent picked or not, Allow all `all: true`.

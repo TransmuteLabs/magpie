@@ -3765,9 +3765,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	groupUnknown := false
 	if isGroup && hasImage(from, body) {
 		if see, ok := seeing(); ok {
-			seenGroup = sync.OnceValues(func() ([]byte, error) {
-				return s.seenBody(withDescribeFor(r.Context(), call.Agent, call.Model, sessionOf(r.Header), groupUnknown), from, body, see)
-			})
+			var seenFrom, seen []byte
+			var seenErr error
+			seenGroup = func() ([]byte, error) {
+				if len(seenFrom) != len(body) || (len(body) > 0 && &seenFrom[0] != &body[0]) {
+					seen, seenErr = s.seenBody(withDescribeFor(r.Context(), call.Agent, call.Model, sessionOf(r.Header), groupUnknown), from, body, see)
+					seenFrom = body
+				}
+				return seen, seenErr
+			}
 		}
 	}
 	if isGroup && seenGroup == nil {
@@ -4427,13 +4433,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		var asking, asked, wrote atomic.Int64
 		var nt netTrace // where the try's time went (TryNet)
 		attemptBody := body
-		if from == provider.Responses {
-			// what another sealed, which this one refused earlier in the
-			// conversation, isn't sent to be refused again; its own is
-			if b, ok := withoutRefused(stuck, c.vendor(), attemptBody); ok {
-				attemptBody = b
-			}
-		}
 		if isGroup {
 			in := membersImageInput([]provider.Member{{Provider: c.p, Model: c.model}})
 			if seenGroup != nil && s.blindTo(c.p.ID, c.model, in) {
@@ -4457,6 +4456,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 				attemptBody = b
 			} else if in != nil && !*in {
 				attemptBody, _ = textOnlyBody(from, body) // omit images in prior turns and tool results
+			}
+		}
+		if from == provider.Responses {
+			// what another sealed, which this one refused earlier in the
+			// conversation, isn't sent to be refused again; its own is
+			if b, ok := withoutRefused(stuck, c.vendor(), attemptBody); ok {
+				attemptBody = b
 			}
 		}
 		// a middleware's onProvider changes what this provider is sent

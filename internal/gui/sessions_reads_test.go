@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -92,6 +93,96 @@ func TestSessionReadsRoutes(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("POST", "/api/sessions/reads", strings.NewReader("{")))
 	if w.Code == 200 {
 		t.Fatal("a body that isn't JSON was taken")
+	}
+}
+
+func TestSessionReadsFindsOMPStores(t *testing.T) {
+	const id = "019a0000-0000-7000-8000-00000000000a"
+	const filename = "2026-09-28T08-00-00-000Z_" + id + ".jsonl"
+	fixture, err := os.ReadFile("../sessions/testdata/omp/agent/sessions/--work-omp--/" + filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, store := range []struct {
+		name, root, config, override string
+		xdg                          bool
+	}{
+		{name: "default", root: ".omp/agent/sessions"},
+		{name: "profile", root: ".omp/profiles/work/agent/sessions"},
+		{name: "renamed_config", root: ".custom-omp/agent/sessions", config: ".custom-omp"},
+		{name: "agent_override", root: "shared-agent/sessions", override: "shared-agent"},
+		{name: "xdg_profile", root: "data/omp/profiles/work/sessions", xdg: true},
+	} {
+		t.Run(store.name, func(t *testing.T) {
+			if store.xdg && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+				t.Skip("OMP uses XDG data on Linux and macOS")
+			}
+			home := sandboxHome(t)
+			t.Setenv("XDG_DATA_HOME", filepath.Join(home, "data"))
+			if store.config != "" {
+				t.Setenv("PI_CONFIG_DIR", store.config)
+			}
+			if store.override != "" {
+				t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, store.override))
+			}
+			if err := settings.SetSessionReads(func(*settings.SessionReads) *settings.SessionReads {
+				return &settings.SessionReads{}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			sessions.Reset()
+			t.Cleanup(sessions.Reset)
+			mux := http.NewServeMux()
+			sessionReadsRoutes(mux)
+			call := func(method, body string) (readsJSON, []readAgentJSON) {
+				t.Helper()
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, httptest.NewRequest(method, "/api/sessions/reads", strings.NewReader(body)))
+				if response.Code != http.StatusOK {
+					t.Fatalf("%s reads: %d %s", method, response.Code, response.Body)
+				}
+				var result readsJSON
+				if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				var omp []readAgentJSON
+				for _, agent := range result.Found {
+					if agent.Agent == "omp" {
+						omp = append(omp, agent)
+					}
+				}
+				return result, omp
+			}
+
+			if _, omp := call(http.MethodGet, ""); len(omp) != 0 {
+				t.Fatalf("OMP offered with no store: %+v", omp)
+			}
+			journal := filepath.Join(home, filepath.FromSlash(store.root), "--work-omp--", filename)
+			if err := os.MkdirAll(filepath.Dir(journal), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(journal, fixture, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if reads, omp := call(http.MethodGet, ""); reads.Asked || reads.All || len(omp) != 1 || omp[0].On {
+				t.Fatalf("OMP consent row missing or already allowed: %+v", reads)
+			}
+			if _, ok := sessions.Find("omp", id); ok {
+				t.Fatal("OMP journal listed before consent")
+			}
+			if reads, omp := call(http.MethodPost, `{"all":false,"agents":{"omp":true}}`); !reads.Asked || reads.All || len(omp) != 1 || !omp[0].On {
+				t.Fatalf("OMP consent did not take effect: %+v", reads)
+			}
+			if row, ok := sessions.Find("omp", id); !ok || row.Path != journal || row.Title != "Port the parser to omp" {
+				t.Fatalf("allowed OMP journal not found at %q: %+v", journal, row)
+			}
+			if reads, omp := call(http.MethodPost, `{"agents":{"omp":false}}`); !reads.Asked || len(omp) != 1 || omp[0].On || omp[0].New {
+				t.Fatalf("OMP consent not revoked: %+v", reads)
+			}
+			if _, ok := sessions.Find("omp", id); ok {
+				t.Fatal("OMP journal still listed after consent was revoked")
+			}
+		})
 	}
 }
 

@@ -196,20 +196,21 @@ func (draft *desktopDraft) patch(path string, set []edit.KV, del ...string) erro
 }
 
 func desktopUpdate(paths []desktopPaths, change func(*desktopDraft, desktopPaths) error) error {
-	return desktopSettingsAction(paths, nil, func(draft *desktopDraft) error {
+	return desktopSettingsAction(paths, nil, desktopChangeAll(paths, change))
+}
+
+func desktopChangeAll(paths []desktopPaths, change func(*desktopDraft, desktopPaths) error) func(*desktopDraft) error {
+	return func(draft *desktopDraft) error {
 		for _, path := range paths {
 			if err := change(draft, path); err != nil {
 				return err
 			}
 		}
 		return nil
-	})
+	}
 }
 
-func desktopSettingsAction(paths []desktopPaths, commit func() error, change func(*desktopDraft) error, extra ...extension.LinkedActionFile) error {
-	stashMu.Lock()
-	defer stashMu.Unlock()
-	stashFile := stashPath()
+func desktopSettingsInputs(paths []desktopPaths, stashFile string, prior map[string]string, extra ...extension.LinkedActionFile) ([]extension.LinkedActionFile, error) {
 	inputs := []extension.LinkedActionFile{{Name: stashFile, Path: stashFile, Private: true}}
 	seen := map[string]bool{stashFile: true}
 	add := func(path string, private bool) {
@@ -218,24 +219,18 @@ func desktopSettingsAction(paths []desktopPaths, commit func() error, change fun
 			seen[path] = true
 		}
 	}
-	prior := stashLoad()
-	var missingDirs, cleanup []string
+	inputs = append(inputs, extra...)
 	for _, file := range extra {
-		inputs = append(inputs, file)
 		seen[file.Path] = true
-		dir := filepath.Dir(file.Path)
-		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
-			missingDirs = append(missingDirs, dir)
-		}
 	}
 	for _, p := range paths {
 		meta, err := desktopReadFields(p.meta)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		claims, err := desktopClaims(prior[desktopImported+p.key])
 		if err != nil {
-			return err
+			return nil, err
 		}
 		add(p.prof, true)
 		add(desktopProfilePath(p, desktopString(meta["appliedId"])), true)
@@ -247,47 +242,72 @@ func desktopSettingsAction(paths []desktopPaths, commit func() error, change fun
 		add(p.meta, false)
 		add(p.config3p, false)
 		add(p.config, false)
+	}
+	return inputs, nil
+}
+
+func desktopSettingsPlan(paths []desktopPaths, stashFile string, prior map[string]string, snapshot sdk.ActionSettings, change func(*desktopDraft) error) (sdk.AgentPlan, []string, error) {
+	draft := desktopDraft{
+		files:   make(map[string]sdk.ActionSettingFile, len(snapshot.Files)),
+		changes: map[string][]byte{}, saved: map[string]string{},
+	}
+	for _, file := range snapshot.Files {
+		draft.files[file.Path] = file
+	}
+	if raw := draft.body(stashFile); len(edit.TrimBOM(raw)) > 0 {
+		if json.Unmarshal(edit.TrimBOM(raw), &draft.saved) != nil || draft.saved == nil {
+			return sdk.AgentPlan{}, nil, edit.AtFile(stashFile, errors.New("invalid saved agent settings"))
+		}
+	}
+	if !maps.Equal(prior, draft.saved) {
+		return sdk.AgentPlan{}, nil, extension.ErrActionChanged
+	}
+	draft.adoptPackagedStash(paths)
+	if err := change(&draft); err != nil {
+		return sdk.AgentPlan{}, nil, err
+	}
+	if !maps.Equal(prior, draft.saved) {
+		body, err := json.MarshalIndent(draft.saved, "", "  ")
+		if err != nil {
+			return sdk.AgentPlan{}, nil, err
+		}
+		draft.changes[stashFile] = body
+	}
+	var plan sdk.AgentPlan
+	for _, file := range snapshot.Files {
+		if body, touched := draft.changes[file.Path]; touched && (file.Exists != (body != nil) || !bytes.Equal(file.Body, body)) {
+			plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, BeforeHash: file.BeforeHash, Body: body, Remove: body == nil})
+		}
+	}
+	return plan, draft.clean, nil
+}
+
+func desktopSettingsAction(paths []desktopPaths, commit func() error, change func(*desktopDraft) error, extra ...extension.LinkedActionFile) error {
+	stashMu.Lock()
+	defer stashMu.Unlock()
+	stashFile, prior := stashPath(), stashLoad()
+	inputs, err := desktopSettingsInputs(paths, stashFile, prior, extra...)
+	if err != nil {
+		return err
+	}
+	var missingDirs, cleanup []string
+	for _, file := range extra {
+		dir := filepath.Dir(file.Path)
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			missingDirs = append(missingDirs, dir)
+		}
+	}
+	for _, p := range paths {
 		for _, path := range []string{p.dir, p.dir3p, p.library} {
 			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 				missingDirs = append(missingDirs, path)
 			}
 		}
 	}
-	err := extension.ApplyLinkedAgentPlanWithCommit(change, func(change func(*desktopDraft) error, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
-		draft := desktopDraft{
-			files:   make(map[string]sdk.ActionSettingFile, len(snapshot.Files)),
-			changes: map[string][]byte{}, saved: map[string]string{},
-		}
-		for _, file := range snapshot.Files {
-			draft.files[file.Path] = file
-		}
-		if raw := draft.body(stashFile); len(edit.TrimBOM(raw)) > 0 {
-			if json.Unmarshal(edit.TrimBOM(raw), &draft.saved) != nil || draft.saved == nil {
-				return sdk.AgentPlan{}, edit.AtFile(stashFile, errors.New("invalid saved agent settings"))
-			}
-		}
-		if !maps.Equal(prior, draft.saved) {
-			return sdk.AgentPlan{}, extension.ErrActionChanged
-		}
-		draft.adoptPackagedStash(paths)
-		if err := change(&draft); err != nil {
-			return sdk.AgentPlan{}, err
-		}
-		if !maps.Equal(prior, draft.saved) {
-			body, err := json.MarshalIndent(draft.saved, "", "  ")
-			if err != nil {
-				return sdk.AgentPlan{}, err
-			}
-			draft.changes[stashFile] = body
-		}
-		cleanup = draft.clean
-		var plan sdk.AgentPlan
-		for _, file := range snapshot.Files {
-			if body, touched := draft.changes[file.Path]; touched && (file.Exists != (body != nil) || !bytes.Equal(file.Body, body)) {
-				plan.Files = append(plan.Files, sdk.FileChange{Path: file.Path, BeforeHash: file.BeforeHash, Body: body, Remove: body == nil})
-			}
-		}
-		return plan, nil
+	err = extension.ApplyLinkedAgentPlanWithCommit(change, func(change func(*desktopDraft) error, snapshot sdk.ActionSettings) (sdk.AgentPlan, error) {
+		plan, removeDirs, err := desktopSettingsPlan(paths, stashFile, prior, snapshot, change)
+		cleanup = removeDirs
+		return plan, err
 	}, commit, inputs...)
 	if err != nil {
 		cleanup = missingDirs

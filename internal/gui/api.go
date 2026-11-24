@@ -904,22 +904,33 @@ func routingOptionsContext(ctx context.Context) []routes.Option {
 }
 
 func settingsState() settingsJSON {
-	return settingsStateContext(context.Background())
+	state, _ := settingsStateContext(context.Background(), false)
+	return state
 }
 
 func writeSettingsState(rw http.ResponseWriter, r *http.Request) {
-	s := settingsStateContext(r.Context())
-	if r.Context().Err() == nil {
-		writeJSON(rw, s)
+	ctx := r.Context()
+	s, consistent := settingsStateContext(ctx, true)
+	if ctx.Err() != nil {
+		return
 	}
+	if !consistent {
+		http.Error(rw, "model catalog changed while preparing Settings", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(rw, s)
 }
 
-func settingsStateContext(ctx context.Context) settingsJSON {
+func settingsStateContext(ctx context.Context, checkModelSources bool) (settingsJSON, bool) {
+	var modelSources provider.ModelListObservation
+	if checkModelSources {
+		modelSources = provider.RefreshModelListSources(ctx)
+	}
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	providers, models, groups := provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
 	s.CheckinPlugins, s.CheckinAccounts = provider.CheckinSettingsContext(ctx)
 	if ctx.Err() != nil {
-		return s
+		return s, false
 	}
 	s.AddrEnv = os.Getenv("MAGPIE_ADDR")
 	s.NameEnv = settings.EnvName()
@@ -928,7 +939,7 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 	s.PanelKeys = panelKeysState()
 	s.RoutingOptions = routingOptionsContext(ctx)
 	if ctx.Err() != nil {
-		return s
+		return s, false
 	}
 	s.JSRoutings = []routes.Option{}
 	for _, option := range s.RoutingOptions {
@@ -1003,7 +1014,25 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 	s.Trae, s.TraeCheckins = provider.HasTrae(), provider.TraeCheckins()
 	s.MiniMax, s.MiniMaxCheckins = provider.HasMiniMax(), provider.MiniMaxCheckins()
 	s.Qoder, s.QoderCheckins = provider.HasQoder(), provider.QoderCheckins()
-	s.VisionAuto, s.VisionMissing, s.VisionEfforts, s.VisionEffortNow = gateway.VisionSettings(s.Vision, s.VisionEffort)
+	for attempt := range 2 {
+		if ctx.Err() != nil {
+			return s, false
+		}
+		vision := gateway.ProjectVisionSettings(s.Vision, s.VisionEffort)
+		if !checkModelSources || modelSources.CurrentWithAccountSources(ctx) {
+			if ctx.Err() != nil {
+				return s, false
+			}
+			s.VisionAuto, s.VisionMissing, s.VisionEfforts, s.VisionEffortNow = vision.Auto, vision.Missing, vision.Levels, vision.Effort
+			vision.Settle()
+			break
+		}
+		if attempt == 1 {
+			return s, false
+		}
+		modelSources = provider.RefreshModelListSources(ctx)
+		providers, models, groups = provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+	}
 	s.VisionModels = []modelRef{}
 	for _, e := range models {
 		if e.Images && (e.ImageInput == nil || *e.ImageInput) && (e.Group != "" || e.Provider.Ready()) {
@@ -1102,7 +1131,7 @@ func settingsStateContext(ctx context.Context) settingsJSON {
 	if s.CodexAgentsV1 {
 		s.Notice = agent.CodexSubAgentsV1Warning()
 	}
-	return s
+	return s, true
 }
 
 // latest is the latest of ts, nil when there is none.

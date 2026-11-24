@@ -25,9 +25,8 @@ import (
 // files, line by line (the owner's 断开 design: 删除、改回、保留), not a
 // sentence about it. What Disconnect does depends on the stash, the record
 // and each agent's own unwiring, so rather than a second account of it that
-// could say otherwise, magpie runs Disconnect itself on a copy: the agent's
-// config folder and magpie's own files under a temporary home, in a process
-// of its own (DryRunArg), and compares the copy with the files as they are.
+// could say otherwise, magpie uses the same plan or runs Disconnect itself
+// on copied files under a temporary home (DryRunArg).
 
 // DryRunArg is the command line's first word for the process that
 // disconnects an agent on a copy of its files (main.go).
@@ -86,10 +85,8 @@ type LineDiff struct {
 	Was  string `json:"was,omitempty"`
 }
 
-// DisconnectPreview is what Disconnect would change in the agent's files,
-// found by running it on a copy. An error is a preview not to be had (the
-// agent's files outside home, a WSL agent): the dialog then says it in
-// words.
+// DisconnectPreview is what Disconnect would change in the agent's files.
+// An error means the dialog describes the disconnect in words.
 func DisconnectPreview(a *Agent, exe string) ([]FileChange, error) {
 	if a.Native != nil {
 		plan, err := a.Native.Disconnect()
@@ -113,6 +110,9 @@ func DisconnectPreview(a *Agent, exe string) ([]FileChange, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
+	}
+	if a.ID == "claude-desktop" {
+		return desktopDisconnectPreview(home)
 	}
 	rel := func(p string) (string, bool) {
 		r, err := filepath.Rel(home, p)

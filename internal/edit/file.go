@@ -404,8 +404,11 @@ func Remove(path string) error {
 	return err
 }
 
+// RemoveUnlinks reports whether Remove takes away the name of an existing file.
+func RemoveUnlinks(path string) bool { return !IsLink(path) && !hardLinked(path) }
+
 func RemoveChecked(path string, check func() error, published *AtomicPublication) (bool, error) {
-	if !IsLink(path) && !hardLinked(path) {
+	if RemoveUnlinks(path) {
 		if check != nil {
 			if err := check(); err != nil {
 				return false, err

@@ -1,16 +1,24 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/coder/websocket"
+	"github.com/tidwall/gjson"
+
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/usage"
 )
 
 // keepTurn runs one Responses request through previousResponse, answered
@@ -74,6 +82,109 @@ func TestResentHistorySharesKeptBytes(t *testing.T) {
 	}
 }
 
+func TestResponsesSocketShortReplayDropsExpiredSuffix(test *testing.T) {
+	fresh(test)
+	previousStore := prevResponses
+	store := newPrevStore(prevCap, prevTTL)
+	const firstSecond = 100
+	var clock atomic.Int64
+	clock.Store(firstSecond)
+	store.now = func() time.Time { return time.Unix(clock.Load(), 0) }
+	prevResponses = store
+	test.Cleanup(func() { prevResponses = previousStore })
+
+	const firstID, shortID = "resp_prefix_full", "resp_prefix_short"
+	const replyItem = `{"type":"message","id":"msg_prefix_full","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"old answer"}]}`
+	const completed = `{"type":"response.completed","response":{"id":"` + firstID + `","object":"response","status":"completed","output":[` + replyItem + `],"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}`
+	const incomplete = `{"type":"response.incomplete","response":{"id":"` + shortID + `","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":11,"output_tokens":16,"total_tokens":27}}}`
+	upstream := &respUp{reply: func(writer http.ResponseWriter, _ *http.Request, attempt int) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		switch attempt {
+		case 1:
+			io.WriteString(writer, sse(
+				`data: {"type":"response.created","response":{"id":"`+firstID+`","object":"response","status":"in_progress","output":[]}}`,
+				`data: {"type":"response.output_item.done","output_index":0,"item":`+replyItem+`}`,
+				`data: `+completed,
+			))
+		case 2:
+			clock.Store(firstSecond + 2)
+			io.WriteString(writer, sse(
+				`data: {"type":"response.created","response":{"id":"`+shortID+`","object":"response","status":"in_progress","output":[]}}`,
+				`data: `+incomplete,
+			))
+		default:
+			http.Error(writer, "unexpected retry", http.StatusInternalServerError)
+		}
+	}}
+	sockUp(test, upstream)
+	server, front := sockServer(test)
+	client, _, err := dialSock(test, front, "/v1/responses", nil)
+	if err != nil {
+		test.Fatal(err)
+	}
+	const input = `[` + userHi + `]`
+	const frame = `{"type":"response.create","model":"fake/m1","store":true,"max_output_tokens":16,"input":` + input + `}`
+	for _, want := range []string{completed, incomplete} {
+		if terminal := last(client.turn(frame)).Raw; terminal != want {
+			test.Fatalf("terminal %s, want %s", terminal, want)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	closed := make(chan error, 1)
+	go func() {
+		_, _, readErr := client.c.Read(ctx)
+		closed <- readErr
+	}()
+	server.sockets.drain(ctx)
+	if ctx.Err() != nil {
+		test.Fatal("socket drain timed out")
+	}
+	if err := <-closed; websocket.CloseStatus(err) != websocket.StatusGoingAway {
+		test.Fatalf("socket close: %v", err)
+	}
+	if count := upstream.calls(); count != 2 {
+		test.Fatalf("%d upstream calls, want 2", count)
+	}
+	for index := range 2 {
+		request := gjson.ParseBytes(upstream.body(index))
+		if request.Get("input").Raw != input || request.Get("previous_response_id").Exists() {
+			test.Fatalf("upstream request %d: %s", index+1, request.Raw)
+		}
+	}
+	rows := usage.Load(time.Time{})
+	if len(rows) != 2 {
+		test.Fatalf("got %d Usage rows, want 2", len(rows))
+	}
+	for index, want := range [][2]int{{7, 1}, {11, 16}} {
+		row := rows[index]
+		if row.Status != http.StatusOK || row.Input != want[0] || row.Output != want[1] {
+			test.Fatalf("Usage row %d: %+v, want 200 and %v tokens", index+1, row, want)
+		}
+	}
+
+	fullKey, shortKey := prevKey{"key:", firstID}, prevKey{"key:", shortID}
+	full, ok := store.get(fullKey)
+	if !ok || len(full.items) != 2 || len(full.chunks) != 2 || string(full.items[1]) != replyItem {
+		test.Fatalf("full reply missing its separate output: %+v", full)
+	}
+	clock.Store(firstSecond + int64(prevTTL/time.Second) + 1)
+	if _, ok := store.get(fullKey); ok {
+		test.Fatal("full reply remained available after expiry")
+	}
+	short, ok := store.get(shortKey)
+	if !ok || len(short.items) != 1 || string(short.items[0]) != userHi || store.size != len(userHi) {
+		test.Fatalf("short reply does not hold exactly its prefix: %+v, %d bytes", short, store.size)
+	}
+	if unsafe.SliceData(short.items[0]) != unsafe.SliceData(full.items[0]) {
+		test.Fatal("the matching prefix bytes were copied")
+	}
+	if unsafe.SliceData(short.items) == unsafe.SliceData(full.items) {
+		test.Fatal("the short reply retains the expired reply's item array and output")
+	}
+}
+
 // TestPrevStoreCountsHeldBytes: over random turns sharing, following and
 // pushing each other out, the store's size is always the bytes of the
 // chunks its turns hold, each once, and every turn its own input and
@@ -110,7 +221,7 @@ func TestPrevStoreCountsHeldBytes(t *testing.T) {
 			fresh = []json.RawMessage{json.RawMessage(fmt.Sprintf(`"f%d"`, i))}
 			convs, ids = append(convs, nil), append(ids, "")
 		}
-		k := st.kept(scope, prior, fresh)
+		k, _ := st.kept(scope, prior, fresh)
 		if k.own < len(fresh[len(fresh)-1]) {
 			t.Fatalf("own %d under the new item", k.own)
 		}

@@ -99,6 +99,67 @@ func TestAgentOpenRunsOnlyTheAgent(t *testing.T) {
 	}
 }
 
+func TestAgentOpenStartsNamedOMPProfile(test *testing.T) {
+	home := sandboxHome(test)
+	config := filepath.Join(home, ".omp", "profiles", "work", "agent")
+	binDir := filepath.Join(home, "omp's bin")
+	for _, dir := range []string{config, binDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			test.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(config, "config.yml"), []byte("modelRoles:\n  default: own/model\n"), 0o600); err != nil {
+		test.Fatal(err)
+	}
+	executable, data := "omp", "#!/bin/sh\n"
+	if runtime.GOOS == "windows" {
+		executable, data = "omp.cmd", "@echo off\r\n"
+	}
+	program := filepath.Join(binDir, executable)
+	if err := os.WriteFile(program, []byte(data), 0o755); err != nil {
+		test.Fatal(err)
+	}
+	test.Setenv("PATH", binDir)
+	proc.Forget()
+	test.Cleanup(proc.Forget)
+
+	want := "'" + strings.ReplaceAll(program, "'", `'\''`) + "' --profile work"
+	if runtime.GOOS == "windows" {
+		want = "& '" + strings.ReplaceAll(program, "'", "''") + "' --profile work"
+	}
+	var opened []string
+	previous := agentTerminal
+	agentTerminal = func(command, _, _ string) error {
+		opened = append(opened, command)
+		return nil
+	}
+	test.Cleanup(func() { agentTerminal = previous })
+
+	handler := Handler(nil, nil)
+	listing := httptest.NewRecorder()
+	handler.ServeHTTP(listing, httptest.NewRequest("GET", "/api/state", nil))
+	var state stateJSON
+	if err := json.Unmarshal(listing.Body.Bytes(), &state); err != nil {
+		test.Fatal(err)
+	}
+	var row agentJSON
+	for _, candidate := range state.Agents {
+		if candidate.ID == "omp#work" {
+			row = candidate
+			break
+		}
+	}
+	if row.ID == "" || !row.Terminal || row.Command != want || row.Launch != "" {
+		test.Fatalf("OMP profile open: id=%q terminal=%v command=%q launch=%q, want %q",
+			row.ID, row.Terminal, row.Command, row.Launch, want)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("POST", "/api/agents/open", strings.NewReader(`{"agent":"omp#work"}`)))
+	if response.Code != http.StatusNoContent || len(opened) != 1 || opened[0] != want {
+		test.Fatalf("open OMP profile: status %d, commands %q, want %q", response.Code, opened, want)
+	}
+}
+
 // A desktop app's row has no command to open, and neither has an agent in
 // a WSL distro off Windows: no Open in terminal.
 func TestAgentCommandNeedsAProgram(t *testing.T) {

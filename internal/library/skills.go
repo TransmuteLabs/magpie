@@ -218,11 +218,16 @@ type meta struct {
 }
 
 func readMeta(dir string) (meta, bool) {
+	metadata, err := readSkillMeta(dir)
+	return metadata, err == nil
+}
+
+func readSkillMeta(dir string) (meta, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
 	if err != nil {
-		return meta{}, false
+		return meta{}, err
 	}
-	return parseMeta(b), true
+	return parseMeta(b), nil
 }
 
 // parseMeta reads a SKILL.md's front matter.
@@ -1028,6 +1033,13 @@ type Probe struct {
 	src  Source
 }
 
+// SkillProbeAccessError is a denial while scanning the selected local folder.
+type SkillProbeAccessError struct{ err error }
+
+func (denied *SkillProbeAccessError) Error() string { return denied.err.Error() }
+
+func (denied *SkillProbeAccessError) Unwrap() error { return denied.err }
+
 var probes = struct {
 	sync.Mutex
 	m map[string]*probeEntry
@@ -1295,25 +1307,39 @@ func untar(r io.Reader, dst string) error {
 // .claude/skills (#1964, UFO404). A skill the repository holds twice, in a
 // hidden folder or a plugin's, is listed once (unhiddenFirst).
 func candidates(root, sub, top string) []Candidate {
+	out, _ := scanSkillCandidates(root, sub, top)
+	return out
+}
+
+func scanSkillCandidates(root, sub, top string) ([]Candidate, error) {
 	base := filepath.Join(root, filepath.FromSlash(sub))
 	var out []Candidate
+	var denied error
+	noteDenied := func(err error) {
+		if denied == nil && errors.Is(err, fs.ErrPermission) {
+			denied = err
+		}
+	}
 	var walk func(dir string, depth int)
 	walk = func(dir string, depth int) {
-		if m, ok := readMeta(dir); ok {
+		if metadata, err := readSkillMeta(dir); err == nil {
 			rel, _ := filepath.Rel(root, dir)
 			folder := filepath.Base(dir)
 			if rel == "." {
 				rel, folder = "", top
 			}
-			out = append(out, Candidate{Path: filepath.ToSlash(rel), Name: nameFor(folder, m), Description: m.Description})
+			out = append(out, Candidate{Path: filepath.ToSlash(rel), Name: nameFor(folder, metadata), Description: metadata.Description})
 			if skillsBeside(dir) < 2 {
 				return
 			}
+		} else {
+			noteDenied(err)
 		}
 		if depth == 0 {
 			return
 		}
-		es, _ := os.ReadDir(dir)
+		es, err := os.ReadDir(dir)
+		noteDenied(err)
 		for _, e := range es {
 			n := e.Name()
 			if n == "node_modules" {
@@ -1326,7 +1352,9 @@ func candidates(root, sub, top string) []Candidate {
 				}
 				p, d = filepath.Join(p, "skills"), d-1
 			}
-			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			if fi, err := os.Stat(p); err != nil {
+				noteDenied(err)
+			} else if fi.IsDir() {
 				walk(p, d)
 			}
 		}
@@ -1335,7 +1363,7 @@ func candidates(root, sub, top string) []Candidate {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return unhiddenFirst(out, func(c Candidate) string { return c.Path }, func(a, b Candidate) bool {
 		return a.Name == b.Name || lastPart(a.Path) == lastPart(b.Path)
-	})
+	}), denied
 }
 
 // skillsBeside is how many folders directly under dir hold a SKILL.md of
@@ -1459,11 +1487,17 @@ func probeSkills(input, name string) (*Probe, error) {
 	p := &Probe{Source: input}
 	if dir := expand(input); filepath.IsAbs(dir) {
 		fi, err := os.Stat(dir)
+		if errors.Is(err, fs.ErrPermission) {
+			return nil, &SkillProbeAccessError{err: err}
+		}
 		if err != nil || !fi.IsDir() {
 			return nil, fmt.Errorf("%s isn't a folder", input)
 		}
 		p.Kind, p.root, p.src = "folder", dir, Source{Kind: "folder", Dir: dir}
-		p.Candidates = candidates(dir, "", filepath.Base(dir))
+		p.Candidates, err = scanSkillCandidates(dir, "", filepath.Base(dir))
+		if len(p.Candidates) == 0 && err != nil {
+			return nil, &SkillProbeAccessError{err: err}
+		}
 	} else if src, ok := githubSource(input); ok || isGit(input) {
 		if !ok {
 			src, _, _ = gitSource(input)
@@ -3092,13 +3126,14 @@ func compareTrees(a, b string, fa, fb map[string]treeEntry) (same, sure bool) {
 	if len(fa) != len(fb) {
 		return false, true
 	}
+	var scratch []byte
 	for rel, x := range fa {
 		y, ok := fb[rel]
 		if !ok || x != y {
 			return false, true
 		}
 		if x.link == "" {
-			if same, sure := sameFile(filepath.Join(a, rel), filepath.Join(b, rel)); !same {
+			if same, sure := sameFile(filepath.Join(a, rel), filepath.Join(b, rel), &scratch); !same {
 				return false, sure
 			}
 		}
@@ -3176,7 +3211,7 @@ func treeOf(root string) (tree, bool) {
 
 // sameFile is whether a and b hold the same bytes; sure is false when one
 // couldn't be read.
-func sameFile(a, b string) (same, sure bool) {
+func sameFile(a, b string, scratch *[]byte) (same, sure bool) {
 	fa, err := os.Open(a)
 	if err != nil {
 		return false, false
@@ -3187,7 +3222,11 @@ func sameFile(a, b string) (same, sure bool) {
 		return false, false
 	}
 	defer fb.Close()
-	ba, bb := make([]byte, 64<<10), make([]byte, 64<<10)
+	const chunkSize = 64 << 10
+	if *scratch == nil {
+		*scratch = make([]byte, 2*chunkSize)
+	}
+	ba, bb := (*scratch)[:chunkSize], (*scratch)[chunkSize:]
 	end := func(e error) bool { return e == io.EOF || e == io.ErrUnexpectedEOF }
 	for {
 		na, ea := io.ReadFull(fa, ba)

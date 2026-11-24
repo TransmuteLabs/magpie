@@ -280,16 +280,29 @@ process on the next request. The steady path checks only those files,
 with no catalog discovery or worker call. Model reads still validate the
 selected account and the root and chunk contents.
 
-The public gateway model list and each look during a long poll check the
-same SDK roots before reusing a held catalog projection. A peer refresh
-can change the filtered list and its ETag while the account and module
-configuration stay the same. Root checks on a warm request use the saved
-paths. If a module's enablement, configuration or provider projection
-could not be read, the root inventory is incomplete. The public list
-drops the held projection and retries root discovery on the next request
-even if the provider stamp stays the same. Codex also retries discovery
-before keeping a tag. Caller-specific visibility and ETag computation
-still happen after the catalog is read.
+The public gateway model list, each look during a long poll and the main
+Settings response check the same SDK roots before reusing a held catalog
+projection. This lets Settings update its offered and automatic vision
+models after a peer refresh even when account and module configuration
+stay the same. The public list can change its filtered models and ETag
+under the same conditions. Root checks on a warm request use the saved
+paths. After calculating the vision pick and effort, Settings checks those
+roots and the provider stamp again. The same SDK metadata scan checks
+accounts, module configuration, subscription ownership and the extension
+catalog. A peer can disable or enable an installed SDK during the request
+without changing its private state or model roots. When Settings observes
+that publication, it rebuilds the offered models, automatic pick and
+effort once. Settling the pick waits until the check succeeds. An unavailable
+metadata scan leaves the checked readers responsible for partial results.
+A second change returns a temporary error. After saving settings, this
+retry only reads the response and leaves the save applied.
+
+If a module's enablement, configuration or provider projection could not
+be read, the root inventory is incomplete. The public list drops the
+held projection and retries root discovery on the next request even if
+the provider stamp stays the same. Codex also retries discovery before
+keeping a tag. Caller-specific visibility and ETag computation still
+happen after the catalog is read.
 
 The extension catalog file is also part of `Hold`'s root checks and
 `StampNow`. A catalog installed, enabled, disabled, upgraded or removed by
@@ -299,8 +312,9 @@ including GUI snapshots keyed by the stamp. Local manager changes notify
 use the pure `extension.CatalogPath` helper and never acquire or replace the
 default manager under the provider cache lock.
 
-Private SDK account and root module-configuration metadata share a source
-stamp. Each new hold, including one overlapping an existing request, observes
+Private SDK account, root module-configuration, subscription-owner and
+extension catalog metadata share a source stamp. Each new hold,
+including one overlapping an existing request, observes
 a scan that starts after the hold arrives. Holds already waiting for the next
 scan share its revision. A hold arriving during a scan waits for a later
 scan. This lets a new hold detect another process's account
@@ -317,7 +331,7 @@ configured with different values. Reordering JSON
 object fields leaves their configuration current. Unrelated private state and
 account-local state do not invalidate it. `extension.AccountStamp` reads
 directory/file metadata and handle-derived portable file identities without
-reading credential contents, acquiring store locks or initializing a manager.
+reading credential or catalog contents, acquiring store locks or initializing a manager.
 Identity distinguishes an atomic replacement
 even when size, mode and mtime are preserved. Observations are serialized outside
 the global provider cache mutex and published with monotonically increasing

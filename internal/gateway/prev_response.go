@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -158,7 +159,9 @@ const prevShareLook = 4
 // not saying store false, as AI SDK clients) had each turn kept as a
 // whole copy: a 2 MB conversation filled the 256 MB cap in ~128 turns and
 // held it for prevTTL, and copied 2 MB a request to do it.
-func (s *prevStore) kept(scope string, prior *prevTurn, fresh []json.RawMessage) *prevTurn {
+// The second result reports whether the backing array still holds items
+// beyond the shared prefix.
+func (s *prevStore) kept(scope string, prior *prevTurn, fresh []json.RawMessage) (*prevTurn, bool) {
 	t := &prevTurn{}
 	var share *prevTurn
 	n := 0
@@ -198,7 +201,7 @@ func (s *prevStore) kept(scope string, prior *prevTurn, fresh []json.RawMessage)
 		}
 	}
 	t.add(ownItems(fresh))
-	return t
+	return t, share != nil && n < len(share.items) && len(fresh) == 0
 }
 
 // add puts items, held by none yet, after t's own as one new chunk.
@@ -490,7 +493,7 @@ func previousResponse(w http.ResponseWriter, r *http.Request, from provider.Prot
 	// whole body, tools and instructions with it, on every turn kept,
 	// while own counted only the items, so the cap bounded far less than
 	// was held.
-	kept := prevResponses.kept(scope, priorTurn, fresh)
+	kept, sharesUnusedItems := prevResponses.kept(scope, priorTurn, fresh)
 	if ask.id == "" {
 		// the answer note is wanted for a request naming none too
 		r = r.WithContext(context.WithValue(r.Context(), prevAskKey{}, ask))
@@ -512,6 +515,9 @@ func previousResponse(w http.ResponseWriter, r *http.Request, from provider.Prot
 			return
 		}
 		t := &prevTurn{key: prevKey{scope, id}, items: kept.items, own: kept.own, chunks: kept.chunks, ends: kept.ends}
+		if sharesUnusedItems && len(output) == 0 {
+			t.items = slices.Clone(t.items)
+		}
 		t.add(output)
 		ask.mu.Lock()
 		if ask.answered != "" {

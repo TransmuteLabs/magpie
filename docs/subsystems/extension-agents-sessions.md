@@ -191,8 +191,12 @@ uses the same `SessionResumeRecipe` type for native commands. The host uses
 the recipe's agent to check executable availability for listed sessions.
 Pi also uses its recipe for SDK sources that declare native Pi resume.
 OMP resolves the profile from the selected store for resume and from the
-chosen target for CarryOver. The host validates the profile before asking
-the module for arguments. The native command renderer rejects flag-like or
+chosen target for CarryOver. When Magpie uses the unnamed profile, a local
+journal's Resume command sets `OMP_PROFILE=default` for the launched OMP.
+That selects the default even if the terminal uses a named profile.
+OMP versions before profile support ignore that variable.
+The host validates named profiles before asking the module for arguments.
+The native command renderer rejects flag-like or
 overlong session IDs and admits only shell-safe atoms. The host retains the
 working-directory and WSL wrappers, Cursor's directory requirement and
 agy's local launch overlay.
@@ -924,8 +928,11 @@ Ordinary output resolves a host-owned native target before preparing its
 `CreateUnder` policy. Conventional `.claude/projects` and `.codex/sessions`
 prefixes select the current Claude/Codex config roots; `.omp/agent/sessions`
 selects OMP's configured root, absolute agent override, active profile or
-migrated XDG store. Named profiles select XDG only when that profile's
-own XDG directory exists. Other descriptor prefixes keep their literal
+migrated XDG store. OMP's config root is also used for native discovery and
+the `omp.sessions` Source slot. An absolute `PI_CONFIG_DIR` supplies that
+root directly, and a relative one is resolved under home. Named profiles
+select XDG only when that profile's own XDG directory exists. Other
+descriptor prefixes keep their literal
 HOME-relative behavior. No module option selects an arbitrary output root.
 
 Binding and preview create no target directories. The closest existing
@@ -950,7 +957,9 @@ caller; this adapter does not execute a shell. Targets with no existing
 native resume implementation, unknown source formats and explicitly selected
 file sets use manual conversion workflows. Host discovery includes current
 OMP config/agent roots and named XDG profile stores. Native resume identifies
-the configured profile, including through a symlinked root.
+the configured profile, including through a symlinked root. When Magpie runs
+with a named OMP profile, resuming a local session in the default store
+passes `--profile default` so OMP opens that store.
 
 Shared Pi/OMP stores use the recovered fixed 256-byte UTF-8 v1 OMP title slot
 to assign ownership before path deduplication. The probe reads that prefix

@@ -273,6 +273,7 @@ func fetchModel(ctx context.Context) error {
 
 // idleAfter is how long the model stays loaded with nothing to read.
 var idleAfter = 10 * time.Minute
+var startIdleTimer = time.AfterFunc
 
 // loadModel reads the model; a variable for tests, which give a fake.
 var loadModel = func(dir string) (embedder, error) { return guard.LoadEmbedder(dir) }
@@ -304,7 +305,15 @@ func model() (embedder, error) {
 	if mod.idle != nil {
 		mod.idle.Stop()
 	}
-	mod.idle = time.AfterFunc(idleAfter, unload)
+	var idle *time.Timer
+	idle = startIdleTimer(idleAfter, func() {
+		mod.mu.Lock()
+		defer mod.mu.Unlock()
+		if mod.idle == idle {
+			mod.idle, mod.e = nil, nil
+		}
+	})
+	mod.idle = idle
 	return mod.e, nil
 }
 

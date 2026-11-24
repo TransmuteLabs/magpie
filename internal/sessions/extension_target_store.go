@@ -242,11 +242,7 @@ func extensionOMPConfigRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	name := appdir.Getenv("PI_CONFIG_DIR")
-	if name == "" {
-		name = ".omp"
-	}
-	return filepath.Join(home, name), nil
+	return appdir.OMPConfigRoot(home), nil
 }
 
 func extensionOMPStore() (string, string, error) {

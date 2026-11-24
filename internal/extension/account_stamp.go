@@ -14,8 +14,9 @@ import (
 )
 
 type AccountFileStamp struct {
-	sum   [32]byte
-	files []os.FileInfo
+	sum     [32]byte
+	files   []os.FileInfo
+	catalog os.FileInfo
 }
 
 func (stamp AccountFileStamp) Equal(other AccountFileStamp) bool {
@@ -27,24 +28,48 @@ func (stamp AccountFileStamp) Equal(other AccountFileStamp) bool {
 			return false
 		}
 	}
-	return true
+	catalog, previous := stamp.catalog, other.catalog
+	if catalog == nil || previous == nil {
+		return catalog == previous
+	}
+	return catalog.Size() == previous.Size() && catalog.Mode() == previous.Mode() &&
+		catalog.ModTime().Equal(previous.ModTime()) && os.SameFile(catalog, previous)
 }
 
 func AccountStamp() (AccountFileStamp, error) {
 	return accountStampAt(filepath.Dir(CatalogPath()))
 }
 
-func accountStampAt(root string) (AccountFileStamp, error) {
+func accountStampAt(path string) (AccountFileStamp, error) {
+	root, err := NewCatalog(path).open(false)
+	if errors.Is(err, errCatalogRootMissing) {
+		return AccountFileStamp{sum: sha256.Sum256(nil)}, nil
+	}
+	if err != nil {
+		return AccountFileStamp{}, err
+	}
+	defer root.Close()
+	stamp, err := privateAccountStamp(root)
+	if err != nil {
+		return AccountFileStamp{}, err
+	}
+	stamp.catalog, err = accountFileInfo(root, "catalog.json")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return AccountFileStamp{}, err
+	}
+	return stamp, nil
+}
+
+func privateAccountStamp(root *os.Root) (AccountFileStamp, error) {
 	empty := AccountFileStamp{sum: sha256.Sum256(nil)}
-	path := filepath.Join(root, "private")
-	info, err := os.Lstat(path)
+	info, err := root.Lstat("private")
 	if errors.Is(err, os.ErrNotExist) {
 		return empty, nil
 	}
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return AccountFileStamp{}, fmt.Errorf("extension account stamp directory is unavailable")
 	}
-	directory, err := os.OpenRoot(path)
+	directory, err := root.OpenRoot("private")
 	if err != nil {
 		return AccountFileStamp{}, err
 	}

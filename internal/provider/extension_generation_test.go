@@ -165,6 +165,53 @@ func TestExtensionAccountObservationErrorInvalidatesHeldCatalog(t *testing.T) {
 	}
 }
 
+func TestExtensionAccountObservationCanceledWaiterLeavesNextScanAvailable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	stamp, err := extensionhost.AccountStamp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		var observations accountFileObservations
+		var reads atomic.Int64
+		unblock := make(chan struct{})
+		finish := sync.OnceFunc(func() { close(unblock) })
+		defer finish()
+		read := func() (extensionhost.AccountFileStamp, error) {
+			if reads.Add(1) == 1 {
+				<-unblock
+			}
+			return stamp, nil
+		}
+		first := make(chan extensionAccountFiles, 1)
+		go func() { first <- observations.observe(read) }()
+		synctest.Wait()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		canceled := make(chan bool, 1)
+		go func() {
+			_, valid := observations.observeContext(ctx, read)
+			canceled <- !valid
+		}()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		select {
+		case ok := <-canceled:
+			if !ok || reads.Load() != 1 {
+				t.Fatal("canceled waiter used an account observation")
+			}
+		default:
+			t.Fatal("canceled waiter stayed queued behind a metadata scan")
+		}
+		finish()
+		want := <-first
+		if got := observations.observe(read); got != want || reads.Load() != 2 {
+			t.Fatalf("hold after cancellation: revision=%d reads=%d, want %d and 2", got, reads.Load(), want)
+		}
+	})
+}
+
 func TestExtensionAccountObservationDoesNotHoldCatalogLock(t *testing.T) {
 	reading := make(chan struct{})
 	unblock := make(chan struct{})
