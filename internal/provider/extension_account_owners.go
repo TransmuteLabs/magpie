@@ -6,14 +6,15 @@ import (
 
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/settings"
+	sdk "github.com/yetone/magpie/pkg/extension"
 )
 
-func configuredProviderModules(ctx context.Context, host extensionProviderHost) ([]extensionhost.ProviderModule, error) {
+func configuredProviderModules(ctx context.Context, host extensionProviderHost, include func(sdk.Manifest) bool) ([]extensionhost.ProviderModule, error) {
 	includeAccounts := !settings.AccountDiscoveryOff()
 	if registry, ok := host.(interface {
-		ActiveProviderModules(context.Context, bool) ([]extensionhost.ProviderModule, error)
+		ActiveProviderModules(context.Context, bool, func(sdk.Manifest) bool) ([]extensionhost.ProviderModule, error)
 	}); ok {
-		return registry.ActiveProviderModules(ctx, includeAccounts)
+		return registry.ActiveProviderModules(ctx, includeAccounts, include)
 	}
 	entries, err := activeProviderModules(ctx, host)
 	if err != nil {
@@ -21,7 +22,8 @@ func configuredProviderModules(ctx context.Context, host extensionProviderHost) 
 	}
 	var modules []extensionhost.ProviderModule
 	for _, entry := range entries {
-		if !extensionhost.ProviderDiscoveryEligible(entry.Manifest, includeAccounts) {
+		if !extensionhost.ProviderDiscoveryEligible(entry.Manifest, includeAccounts) ||
+			include != nil && !include(entry.Manifest) {
 			continue
 		}
 		version, err := extensionConfigVersion(ctx, host, entry)

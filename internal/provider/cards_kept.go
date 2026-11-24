@@ -89,7 +89,7 @@ var cardAgents = []string{"claude", "codex", "copilot", "kiro", "zcode", "workbu
 func cardLogins(ctx context.Context) []Login {
 	agents := []string{}
 	host := providerExtensionHost()
-	inventory, _ := extensionProvidersWithPolicyContext(ctx, host, func() extensionSubscriptionOwners {
+	inventory, _ := extensionProvidersWithPolicyContext(ctx, host, "", func() extensionSubscriptionOwners {
 		owners, err := host.Store().SubscriptionOwners(ctx)
 		return extensionSubscriptionOwners{rows: owners, err: err}
 	})

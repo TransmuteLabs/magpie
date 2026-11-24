@@ -24,14 +24,15 @@ func ProviderDiscoveryEligible(manifest sdk.Manifest, includeAccounts bool) bool
 			slices.ContainsFunc(manifest.Providers, sdk.ProviderDescriptor.AccountOnly))
 }
 
-func (m *Manager) ActiveProviderModules(ctx context.Context, includeAccounts bool) ([]ProviderModule, error) {
+func (m *Manager) ActiveProviderModules(ctx context.Context, includeAccounts bool, include func(sdk.Manifest) bool) ([]ProviderModule, error) {
 	if m == nil || m.isClosed() {
 		return nil, errContributionRevoked
 	}
 	var modules []ProviderModule
 	err := m.catalog.withView(ctx, func(view catalogView) error {
 		for _, entry := range view.entries {
-			if !activeRoot(entry) || !ProviderDiscoveryEligible(entry.Manifest, includeAccounts) {
+			if !activeRoot(entry) || !ProviderDiscoveryEligible(entry.Manifest, includeAccounts) ||
+				include != nil && !include(entry.Manifest) {
 				continue
 			}
 			entry = view.enabledEntry(entry)

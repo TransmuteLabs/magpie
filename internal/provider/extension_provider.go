@@ -77,7 +77,7 @@ func providerExtensionsContext(ctx context.Context) ([]Provider, []savedLogin, e
 }
 
 func providerExtensionInventoryContext(ctx context.Context) (extensionProviderInventory, error) {
-	return extensionProvidersWithPolicyContext(ctx, providerExtensionHost(),
+	return extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), "",
 		func() extensionSubscriptionOwners { return heldSubscriptionOwnersContext(ctx) })
 }
 
@@ -87,14 +87,28 @@ type extensionProviderInventory struct {
 	complete  bool
 }
 
-func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProviderHost, ownerSnapshot func() extensionSubscriptionOwners) (extensionProviderInventory, error) {
-	modules, err := configuredProviderModules(ctx, host)
+func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProviderHost, agent string, ownerSnapshot func() extensionSubscriptionOwners) (extensionProviderInventory, error) {
+	include := extensionProviderModuleFilter(agent)
+	modules, err := configuredProviderModules(ctx, host, include)
 	if err != nil {
 		return extensionProviderInventory{}, err
 	}
+	owners := sync.OnceValue(ownerSnapshot)
+	if include != nil {
+		_, aliased := owners().byPublicID(agent)
+		if err := ctx.Err(); err != nil {
+			return extensionProviderInventory{}, err
+		}
+		if aliased {
+			modules, err = configuredProviderModules(ctx, host, nil)
+			if err != nil {
+				return extensionProviderInventory{}, err
+			}
+			owners = sync.OnceValue(ownerSnapshot)
+		}
+	}
 	out := []Provider{}
 	complete := true
-	owners := sync.OnceValue(ownerSnapshot)
 	for _, module := range modules {
 		if module.EnablementError != nil {
 			complete = false
@@ -122,6 +136,18 @@ func extensionProvidersWithPolicyContext(ctx context.Context, host extensionProv
 		return extensionProviderInventory{}, err
 	}
 	return extensionProviderInventory{providers: out, saved: logins, complete: complete}, nil
+}
+
+func extensionProviderModuleFilter(agent string) func(sdk.Manifest) bool {
+	if !strings.HasPrefix(agent, "extension-") {
+		return nil
+	}
+	return func(manifest sdk.Manifest) bool {
+		return slices.ContainsFunc(manifest.Providers, func(descriptor sdk.ProviderDescriptor) bool {
+			scope := sdk.Scope{Plugin: manifest.ID, Provider: descriptor.ID}
+			return extensionhost.ResolveSubscriptionLogin(nil, scope).Provider == agent
+		})
+	}
 }
 
 func enabledExtensionModule(ctx context.Context, host extensionProviderHost, id string) (extensionhost.Installed, error) {
@@ -779,12 +805,13 @@ func (p Provider) extensionAlsoOn() []Provider {
 }
 
 func (p Provider) extensionAlsoOnContext(ctx context.Context) []Provider {
-	all, _, err := providerExtensionsContext(ctx)
+	inventory, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), p.ID,
+		func() extensionSubscriptionOwners { return heldSubscriptionOwnersContext(ctx) })
 	if err != nil {
 		return nil
 	}
 	out := []Provider{}
-	for _, other := range all {
+	for _, other := range inventory.providers {
 		if other.ID == p.ID && other.Account.User != p.Account.User && other.Account.extension.on() {
 			out = append(out, other)
 		}
@@ -844,7 +871,7 @@ func ExtensionLoginsByProvider(ctx context.Context) map[string][]Login {
 }
 
 func listExtensionLoginsWithOwnersContext(ctx context.Context, agent string, owners *extensionSubscriptionOwners) []Login {
-	inventory, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), func() extensionSubscriptionOwners {
+	inventory, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), agent, func() extensionSubscriptionOwners {
 		if owners != nil {
 			return *owners
 		}

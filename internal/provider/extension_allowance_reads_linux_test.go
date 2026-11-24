@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	extensionhost "github.com/yetone/magpie/internal/extension"
 	"github.com/yetone/magpie/internal/proc"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"github.com/yetone/magpie/pkg/protocolext"
 )
 
 func TestExtensionAllowanceBatchesUsageRevisions(t *testing.T) {
@@ -123,5 +125,113 @@ func TestExtensionAllowanceBatchesUsageRevisions(t *testing.T) {
 				t.Fatal("warm routing launched a worker or vendor call")
 			}
 		})
+	}
+}
+
+func TestExtensionProviderAllowanceSkipsUnrelatedModuleStore(t *testing.T) {
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
+	manager := discoveryCatalogManager(t)
+	catalog := extensionhost.NewCatalog(manager.Namespace())
+	startWithNoAllowancesRead(t)
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "worker"), []byte("discovery must not start a worker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	const selectedModule, unrelatedModule = "fixture.scoped-allowance", "fixture.unrelated-allowance"
+	const selectedProvider = "selected-vendor"
+	manifest := sdk.Manifest{
+		Schema: sdk.ManifestSchema, Version: "1.0.0", Runtime: "exec", Entry: "worker",
+		Contract: sdk.Contract{Version: sdk.APIVersion{Major: 1, Minor: sdk.ModuleSettingsAPIMinor},
+			Capabilities: []sdk.Capability{sdk.AccountAuth, sdk.UsageReporter, sdk.OutboundExecutor}},
+		Providers: []sdk.ProviderDescriptor{{ID: "vendor", Name: "Fixture", Protocols: []protocolext.Protocol{protocolext.Chat},
+			Models: []sdk.Model{{ID: "m1", Name: "Fixture model", Vision: true}}}},
+	}
+	for _, target := range []struct{ module, provider string }{
+		{selectedModule, selectedProvider}, {unrelatedModule, "vendor"},
+	} {
+		manifest.ID, manifest.Providers[0].ID = target.module, target.provider
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := catalog.Install(t.Context(), source, func(context.Context, extensionhost.Installed) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		for _, user := range []string{"alice", "bob"} {
+			if _, err := manager.Store().SaveAccount(extensionhost.Account{Plugin: target.module, Provider: target.provider, ID: user,
+				Auth: json.RawMessage(`{"access":"fixture"}`)}, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	unrelated := filepath.Join(manager.Namespace(), "private", unrelatedModule, "accounts.json")
+	var providers []Provider
+	aggregateReads := countProviderCatalogReads(t, unrelated, func() {
+		var err error
+		providers, err = ExtensionProviders()
+		if err != nil || len(providers) != 4 {
+			t.Fatalf("fixture discovery = %d account rows, error %v", len(providers), err)
+		}
+	})
+	if aggregateReads == 0 {
+		t.Fatal("aggregate discovery did not read the unrelated account store")
+	}
+	id := ExtensionProviderID(selectedModule, selectedProvider)
+	bindings := make(map[string]string, 2)
+	var selected Provider
+	for _, candidate := range providers {
+		if candidate.ID != id {
+			continue
+		}
+		bindings[candidate.Account.User] = extensionUsageKey(t.Context(), candidate.Account.extension)
+		if candidate.Account.User == "alice" {
+			selected = candidate
+		}
+	}
+	if selected.Account == nil || len(bindings) != 2 {
+		t.Fatal("missing selected module's account scopes")
+	}
+
+	usedCache.Lock()
+	previousBindings := usedCache.extensions
+	usedCache.extensions = map[string]map[string]string{id: bindings}
+	usedCache.m[id] = map[string]Allowance{"alice": {{Used: 17}}, "bob": {{Used: 29}}}
+	usedCache.at[id] = time.Now()
+	usedCache.Unlock()
+	t.Cleanup(func() {
+		endReadsOut(t, "after scoped SDK allowance")
+		usedCache.Lock()
+		usedCache.extensions = previousBindings
+		usedCache.Unlock()
+	})
+
+	unrelatedReads := countProviderCatalogReads(t, unrelated, func() {
+		others := selected.AlsoOn()
+		if len(others) != 1 || others[0].Account.User != "bob" || others[0].ID != id {
+			t.Fatalf("selected peers = %+v", others)
+		}
+		allowances := Allowances(id)
+		if alice, bob := allowances["alice"], allowances["bob"]; len(allowances) != 2 ||
+			len(alice) != 1 || alice[0].Used != 17 || len(bob) != 1 || bob[0].Used != 29 {
+			t.Fatalf("selected allowances = %+v", allowances)
+		}
+	})
+	if unrelatedReads != 0 {
+		t.Errorf("peer and allowance reads opened an unrelated SDK account store %d times", unrelatedReads)
+	}
+
+	alias := ExtensionProviderID("fixture.retired", "vendor")
+	usageTestSubscriptionOwner(t, &fixtureExtensionProviderHost{namespace: manager.Namespace(), manifest: manifest}, alias)
+	logins, external := extensionLoginsContext(t.Context(), alias)
+	if !external || len(logins) != 2 || logins[0].Agent != alias || logins[0].extension.scope.Plugin != unrelatedModule {
+		t.Fatalf("owner alias did not select the unrelated module: %+v", logins)
+	}
+	if manager.Running(selectedModule) || manager.Running(unrelatedModule) {
+		t.Fatal("discovery started a fixture worker")
 	}
 }
