@@ -318,7 +318,7 @@ func TestSettingsVisionFollowsForeignSDKModuleConfig(t *testing.T) {
 
 func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 	const module, vendor, model = "fixture.settings-vision-enablement", "vendor", "peer-enabled-vision-mini"
-	const strategyID, strategyName = "peer-order", "Peer order"
+	const account, strategyID, strategyName = "fixture-account", "peer-order", "Peer order"
 	home := sandboxHome(t)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
@@ -326,17 +326,20 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 	manager := providerAuthFixtureManager(t)
 	manifest := authfixture.Manifest()
 	manifest.ID = module
+	manifest.Contract.Version.Minor = 8
 	manifest.Contract.Capabilities = []sdk.Capability{sdk.ModuleRPC, sdk.AccountAuth, sdk.OutboundExecutor}
 	manifest.Providers[0].Models = []sdk.Model{{ID: model, Vision: true, Efforts: []string{"low", "high"}}}
-	manifest.Actions = []sdk.ActionDescriptor{{
-		ID: authfixture.SettingsOrderAction, InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "read",
-	}}
+	manifest.Providers[0].Checkin = &sdk.AccountCheckinDescriptor{Action: authfixture.SettingsCheckinAction}
+	manifest.Actions = []sdk.ActionDescriptor{
+		{ID: authfixture.SettingsOrderAction, InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "read"},
+		{ID: authfixture.SettingsCheckinAction, InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "write"},
+	}
 	manifest.RoutingStrategies = []sdk.RoutingStrategyDescriptor{{
 		ID: strategyID, Name: strategyName, Action: authfixture.SettingsOrderAction,
 	}}
 	installProviderAuthFixture(t, manager, &manifest)
 	if _, err := manager.Store().SaveAccount(extension.Account{
-		Plugin: module, Provider: vendor, ID: "fixture-account", Auth: json.RawMessage(`{"token":"fixture"}`),
+		Plugin: module, Provider: vendor, ID: account, Auth: json.RawMessage(`{"token":"fixture"}`),
 	}, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +363,8 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 		}
 		return got
 	}
-	full := provider.ExtensionProviderID(module, vendor) + "/" + model
+	providerID := provider.ExtensionProviderID(module, vendor)
+	full := providerID + "/" + model
 	wantRoute := routes.Option{ID: module + "/" + strategyID, Name: strategyName, Plugin: module}
 	offers := func(models []modelRef) bool {
 		return slices.ContainsFunc(models, func(item modelRef) bool { return item.ID == full })
@@ -386,6 +390,16 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 		if routing != enabled || compatibility != enabled {
 			t.Errorf("%s (enabled=%t): Settings routingOptions=%t jsRoutings=%t",
 				phase, enabled, routing, compatibility)
+		}
+		pluginCheckin := slices.ContainsFunc(got.CheckinPlugins, func(row provider.PluginCheckin) bool {
+			return row.ID == providerID
+		})
+		accountCheckin := slices.ContainsFunc(got.CheckinAccounts, func(row provider.CheckinAccount) bool {
+			return row.By == "plugin:"+providerID && row.User == account
+		})
+		if pluginCheckin != enabled || accountCheckin != enabled {
+			t.Errorf("%s (enabled=%t): Settings check-in plugin=%t account=%t",
+				phase, enabled, pluginCheckin, accountCheckin)
 		}
 	}
 	check("warm", read(), true)

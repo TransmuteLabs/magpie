@@ -1026,6 +1026,7 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		}
 		modelSources = provider.RefreshModelListSources(ctx)
 		providers, models, groups = provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+		s.CheckinPlugins, s.CheckinAccounts = provider.CheckinSettingsContext(ctx)
 		if ctx.Err() != nil {
 			return s, false
 		}
