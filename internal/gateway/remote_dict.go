@@ -270,6 +270,7 @@ func (s *sentBodies) put(route string, d *sentDict) {
 	s.size += len(d.body)
 	for len(ds) > dictPerScope {
 		s.size -= len(ds[len(ds)-1].body)
+		ds[len(ds)-1] = nil
 		ds = ds[:len(ds)-1]
 	}
 	s.routes[route] = ds
@@ -284,6 +285,7 @@ func (s *sentBodies) put(route string, d *sentDict) {
 		}
 		ds := s.routes[oldR]
 		s.size -= len(old.body)
+		ds[len(ds)-1] = nil
 		if ds = ds[:len(ds)-1]; len(ds) == 0 {
 			delete(s.routes, oldR)
 		} else {

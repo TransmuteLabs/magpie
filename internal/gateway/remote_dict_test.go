@@ -271,10 +271,16 @@ func sameMessages(t *testing.T, vendor []byte, sent []byte) {
 func TestRemoteMagpieBodyGoesAgainstTheOneBefore(t *testing.T) {
 	h, vendor, hop := twoMagpies(t)
 	c := newAgentChat(t, 7)
-	for i := range 8 {
+	var sums [dictPerScope + 1]bodySum
+	var keptBytes int
+	for i := range sums {
 		body := c.turn(i)
-		if rec := askMessages(t, h, body); rec.Code != 200 || !strings.Contains(rec.Body.String(), "answer") {
+		rec := askMessages(t, h, body)
+		if rec.Code != 200 || !strings.Contains(rec.Body.String(), "answer") {
 			t.Fatalf("turn %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get(KeptBodyHeader) != "" {
+			t.Fatalf("turn %d returned the dictionary acknowledgment to the caller", i)
 		}
 		if hop.n() != i+1 || vendor.n() != i+1 {
 			t.Fatalf("turn %d: the other magpie asked %d times, the vendor %d", i, hop.n(), vendor.n())
@@ -292,6 +298,15 @@ func TestRemoteMagpieBodyGoesAgainstTheOneBefore(t *testing.T) {
 			// turn 5's screenshot is new, and as large compressed
 			t.Fatalf("turn %d went %q, %d bytes on the wire for %d", i, hd.Get("Content-Encoding"), wire, len(body))
 		}
+		decoded := []byte(hop.raw(i))
+		sameMessages(t, decoded, body)
+		sums[i] = sha256.Sum256(decoded)
+		if i != 0 {
+			if mustSum(t, hd.Get(BodyDigestHeader)) != sums[i] {
+				t.Fatalf("turn %d sent a digest that did not match the decoded bytes", i)
+			}
+			keptBytes += len(decoded)
+		}
 		sameMessages(t, []byte(vendor.raw(i)), body)
 		for k := range vendor.header(i) {
 			if strings.HasPrefix(strings.ToLower(k), "x-magpie-") || strings.EqualFold(k, availableDictHeader) {
@@ -300,6 +315,63 @@ func TestRemoteMagpieBodyGoesAgainstTheOneBefore(t *testing.T) {
 		}
 		if ce := vendor.header(i).Get("Content-Encoding"); ce != "" {
 			t.Fatalf("vendor sent Content-Encoding %q", ce)
+		}
+	}
+	sentDicts.mu.Lock()
+	defer sentDicts.mu.Unlock()
+	if len(sentDicts.routes) != 1 || sentDicts.size != keptBytes {
+		t.Fatalf("kept %d routes and %d bytes, want one route and %d bytes", len(sentDicts.routes), sentDicts.size, keptBytes)
+	}
+	for route, stored := range sentDicts.routes {
+		if !sentDicts.speaks[route] || len(stored) != dictPerScope {
+			t.Fatalf("kept %d acknowledged dictionaries for the route, want %d", len(stored), dictPerScope)
+		}
+		for i, dict := range stored {
+			if dict == nil || dict.sum != sums[dictPerScope-i] || sha256.Sum256(dict.body) != dict.sum {
+				t.Fatalf("kept dictionary %d does not match the acknowledged body", i)
+			}
+		}
+		for _, slot := range stored[len(stored):cap(stored)] {
+			if slot != nil {
+				t.Fatal("per-route eviction retained an outbound dictionary beyond the visible slice")
+			}
+		}
+	}
+}
+
+func TestSentBodiesByteEvictionReleasesBody(t *testing.T) {
+	sent := newSentBodies()
+	buffer := make([]byte, dictClientBytes/4)
+	var sums [5]bodySum
+	var keptBytes int
+	for i := range sums {
+		body := buffer[:len(buffer)-i]
+		sums[i] = sha256.Sum256(body)
+		route := "newer"
+		if i < 2 {
+			route = "oldest"
+		}
+		sent.put(route, &sentDict{sum: sums[i], body: body, when: time.Unix(int64(i), 0)})
+		if i != 0 {
+			keptBytes += len(body)
+		}
+	}
+	oldest, newer := sent.routes["oldest"], sent.routes["newer"]
+	if len(sent.routes) != 2 || sent.size != keptBytes || len(oldest) != 1 || len(newer) != 3 {
+		t.Fatalf("global eviction left %d routes of lengths %d and %d and %d bytes, want two routes of lengths 1 and 3 and %d bytes",
+			len(sent.routes), len(oldest), len(newer), sent.size, keptBytes)
+	}
+	if oldest[0] == nil || oldest[0].sum != sums[1] {
+		t.Fatal("global eviction removed the wrong dictionary from the oldest route")
+	}
+	for i, dict := range newer {
+		if dict == nil || dict.sum != sums[len(sums)-1-i] {
+			t.Fatalf("global eviction changed the newer route at dictionary %d", i)
+		}
+	}
+	for _, slot := range oldest[len(oldest):cap(oldest)] {
+		if slot != nil {
+			t.Fatal("global byte eviction retained an outbound dictionary beyond the visible slice")
 		}
 	}
 }
