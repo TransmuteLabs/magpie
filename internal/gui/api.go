@@ -941,12 +941,6 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 	if ctx.Err() != nil {
 		return s, false
 	}
-	s.JSRoutings = []routes.Option{}
-	for _, option := range s.RoutingOptions {
-		if strings.Contains(option.ID, "/") {
-			s.JSRoutings = append(s.JSRoutings, option)
-		}
-	}
 	s.OnNetwork = gateway.OnNetwork()
 	if list, env := gateway.AllowIPs(); env {
 		s.AllowIPsEnv, s.AllowIPsFromEnv = os.Getenv(gateway.AllowIPsEnv), list
@@ -1032,6 +1026,16 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		}
 		modelSources = provider.RefreshModelListSources(ctx)
 		providers, models, groups = provider.AllContext(ctx), provider.ServedContext(ctx), provider.GroupsContext(ctx)
+		if ctx.Err() != nil {
+			return s, false
+		}
+		s.RoutingOptions = routingOptionsContext(ctx)
+	}
+	s.JSRoutings = []routes.Option{}
+	for _, option := range s.RoutingOptions {
+		if strings.Contains(option.ID, "/") {
+			s.JSRoutings = append(s.JSRoutings, option)
+		}
 	}
 	s.VisionModels = []modelRef{}
 	for _, e := range models {

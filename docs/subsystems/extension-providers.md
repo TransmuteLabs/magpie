@@ -292,8 +292,10 @@ accounts, module configuration, subscription ownership and the extension
 catalog. A peer can disable or enable an installed SDK during the request
 without changing its private state or model roots. When Settings observes
 that publication, it rebuilds the offered models, automatic pick and
-effort once. Settling the pick waits until the check succeeds. An unavailable
-metadata scan leaves the checked readers responsible for partial results.
+effort and reads the routing choices again. The compatibility routing
+list uses the accepted routing choices. Settling the pick waits until the
+check succeeds. An unavailable metadata scan leaves the checked readers
+responsible for partial results.
 A second change returns a temporary error. After saving settings, this
 retry only reads the response and leaves the save applied.
 

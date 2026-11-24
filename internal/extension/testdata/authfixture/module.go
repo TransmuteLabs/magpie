@@ -13,6 +13,8 @@ import (
 	"github.com/yetone/magpie/pkg/protocolext"
 )
 
+const SettingsOrderAction = "settings-order"
+
 type Config struct {
 	Trace          string `json:"trace"`
 	Started        string `json:"started"`
@@ -281,6 +283,13 @@ func Module() sdk.Module {
 				}
 			}
 			return sdk.ModelsResult{Models: manifest.Providers[0].Models}, nil
+		}
+	}
+	if _, declared := manifest.ResolveAction(SettingsOrderAction); declared {
+		module.Actions = map[string]sdk.Handler{
+			SettingsOrderAction: func(context.Context, sdk.Call, *sdk.Stream) (any, error) {
+				return nil, errors.New("listing Settings executed a routing action")
+			},
 		}
 	}
 	return module

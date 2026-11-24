@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/extension/testdata/authfixture"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
 )
@@ -317,6 +318,7 @@ func TestSettingsVisionFollowsForeignSDKModuleConfig(t *testing.T) {
 
 func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 	const module, vendor, model = "fixture.settings-vision-enablement", "vendor", "peer-enabled-vision-mini"
+	const strategyID, strategyName = "peer-order", "Peer order"
 	home := sandboxHome(t)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
 	t.Setenv("MAGPIE_NO_ACCOUNTS", "")
@@ -326,6 +328,12 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 	manifest.ID = module
 	manifest.Contract.Capabilities = []sdk.Capability{sdk.ModuleRPC, sdk.AccountAuth, sdk.OutboundExecutor}
 	manifest.Providers[0].Models = []sdk.Model{{ID: model, Vision: true, Efforts: []string{"low", "high"}}}
+	manifest.Actions = []sdk.ActionDescriptor{{
+		ID: authfixture.SettingsOrderAction, InputSchema: json.RawMessage(`{"type":"object"}`), Effect: "read",
+	}}
+	manifest.RoutingStrategies = []sdk.RoutingStrategyDescriptor{{
+		ID: strategyID, Name: strategyName, Action: authfixture.SettingsOrderAction,
+	}}
 	installProviderAuthFixture(t, manager, &manifest)
 	if _, err := manager.Store().SaveAccount(extension.Account{
 		Plugin: module, Provider: vendor, ID: "fixture-account", Auth: json.RawMessage(`{"token":"fixture"}`),
@@ -340,6 +348,8 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 	provider.Changed()
 	t.Cleanup(provider.Changed)
 
+	previousServer := served.Swap(nil)
+	t.Cleanup(func() { served.Store(previousServer) })
 	handler := Handler(nil, nil)
 	read := func() settingsJSON {
 		t.Helper()
@@ -351,6 +361,7 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 		return got
 	}
 	full := provider.ExtensionProviderID(module, vendor) + "/" + model
+	wantRoute := routes.Option{ID: module + "/" + strategyID, Name: strategyName, Plugin: module}
 	offers := func(models []modelRef) bool {
 		return slices.ContainsFunc(models, func(item modelRef) bool { return item.ID == full })
 	}
@@ -369,6 +380,12 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 			!slices.Equal(got.VisionEfforts, wantLevels) || got.VisionEffortNow != wantEffort {
 			t.Fatalf("%s (enabled=%t): Settings auto=%q vision=%t title=%t levels=%v effort=%q",
 				phase, enabled, got.VisionAuto, offers(got.VisionModels), offers(got.TitleModels), got.VisionEfforts, got.VisionEffortNow)
+		}
+		routing := slices.Contains(got.RoutingOptions, wantRoute)
+		compatibility := slices.Contains(got.JSRoutings, wantRoute)
+		if routing != enabled || compatibility != enabled {
+			t.Errorf("%s (enabled=%t): Settings routingOptions=%t jsRoutings=%t",
+				phase, enabled, routing, compatibility)
 		}
 	}
 	check("warm", read(), true)
