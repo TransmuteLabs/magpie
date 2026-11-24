@@ -3386,7 +3386,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			imageInput, unknownSight = &no, imageInput == nil && !s.sightRefused(p.ID, model)
 		}
 	}
-	if imageInput != nil && !*imageInput {
+	if imageInput != nil && !*imageInput && (from != provider.Responses || mayHoldResponseImage(body)) {
 		var currentImage bool
 		if hasImage(from, body) {
 			if see, ok := seeing(); ok {

@@ -47,6 +47,8 @@ func TestKnownTextOnlyModelRejectsImagesBeforeUpstream(t *testing.T) {
 	cases := []struct{ path, body string }{
 		{"/v1/chat/completions", `{"model":"probe/text","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`},
 		{"/v1/responses", `{"model":"probe/text","input":[{"role":"user","content":[{"type":"input_text","text":"read"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}]}`},
+		{"/v1/responses", `{"model":"probe/text","i\u006eput":[{"role":"user","content":[{"type":"\u0069nput\u005fimage","image_url":"data:image/png;base64,aGVsbG8="}]}]}`},
+		{"/v1/responses", `{"model":"probe/text","input":[{"type":"agent_message","CONTENT":[{"TYPE":"input_image","TYPE":null,"image_url":"data:image/png;base64,aGVsbG8="}]}]}`},
 		{"/v1/messages", `{"model":"probe/text","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}`},
 		{"/v1beta/models/probe/text:generateContent", `{"contents":[{"role":"user","parts":[{"text":"read"},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}]}`},
 	}

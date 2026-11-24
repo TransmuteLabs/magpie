@@ -36,6 +36,10 @@ func hasImage(proto provider.Protocol, body []byte) bool {
 	return err == found
 }
 
+func mayHoldResponseImage(body []byte) bool {
+	return bodyHas(body, `"input_image"`) || bodyHasJSONEscape(body, "input_image")
+}
+
 // hasUnportableCurrentImage reports a current Responses image with no URL to
 // carry to another protocol. A file_id belongs to the Responses provider that
 // stored it; translating it as a URL or dropping it would mislead the model.
