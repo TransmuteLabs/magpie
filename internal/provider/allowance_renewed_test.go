@@ -306,6 +306,46 @@ func TestRenewedFrom(t *testing.T) {
 	}
 }
 
+func TestAllowanceRenewalFollowsModelScope(t *testing.T) {
+	now := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Hour)
+	general := Limit{Name: "General", Used: 100, Resets: reset, matches: func(model string) bool { return model == "general" }}
+	flash := Limit{Name: "Flash", Used: 100, Resets: reset, Model: "flash"}
+	shared := Limit{Name: "Shared", Used: 100, Resets: now.Add(30 * time.Minute)}
+	generalRead := general
+	generalRead.Used = 10
+	generalCycle := generalRead
+	generalCycle.Resets = reset.Add(5 * time.Hour)
+	flashCycle := flash
+	flashCycle.Used, flashCycle.Resets = 10, generalCycle.Resets
+	retargeted := flashCycle
+	retargeted.matches = func(model string) bool { return model == "flash-plus" }
+	pools := Allowance{general, flash}
+	withShared := Allowance{general, flash, shared}
+
+	for _, test := range []struct {
+		name           string
+		before, after  Allowance
+		started        bool
+		general, flash bool
+	}{
+		{name: "general_read", before: pools, after: Allowance{generalRead, flash}, general: true},
+		{name: "general_cycle", before: pools, after: Allowance{generalCycle, flash}, started: true, general: true},
+		{name: "flash_cycle", before: pools, after: Allowance{general, flashCycle}, started: true, flash: true},
+		{name: "shared_still_full_on_read", before: withShared, after: Allowance{generalRead, flash, shared}},
+		{name: "shared_still_full_on_cycle", before: withShared, after: Allowance{generalCycle, flash, shared}, started: true},
+		{name: "different_scope", before: pools, after: Allowance{general, retargeted}, started: true},
+		{name: "flash_not_read", before: pools, after: Allowance{generalCycle}, started: true, general: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			applies := test.after.renewalScope(reading{test.before, now}, 98, now, test.started)
+			if general, flash := applies("General"), applies("FLASH"); general != test.general || flash != test.flash {
+				t.Errorf("General/Flash renewal = %t/%t, want %t/%t", general, flash, test.general, test.flash)
+			}
+		})
+	}
+}
+
 // A window stands started again in fact — what a rest the vendor itself
 // gave the time of waits for, rather than the reading being renewedFrom
 // alone (#2718) — when one full at the last reading has its reset gone

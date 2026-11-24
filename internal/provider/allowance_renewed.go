@@ -30,17 +30,26 @@ type reading struct {
 // read alike, nor one renewed while another over the same models is
 // still full: the five hours started again in a week used up.
 func (a Allowance) renewedFrom(was Allowance, wasAt time.Time, share float64, now time.Time) bool {
+	return a.renewedWhere(was, wasAt, share, now, nil)
+}
+
+func (a Allowance) renewedWhere(was Allowance, wasAt time.Time, share float64, now time.Time, applies func(Limit) bool) bool {
 	type key struct{ name, model string }
 	keyOf := func(l Limit) key { return key{l.Name, l.Model} }
 	read := map[key]bool{}
 	for _, l := range a {
-		read[keyOf(l)] = true
+		if applies == nil || applies(l) {
+			read[keyOf(l)] = true
+		}
 	}
-	whole := func(l Limit) bool { return l.Model == "" && l.matches == nil }
 	sooner := func(in func(Limit) bool) bool {
 		in2 := func(l Limit) bool { return read[keyOf(l)] && in(l) }
 		return was.fullTill(in2, share, wasAt).After(a.fullTill(in2, share, now))
 	}
+	if applies != nil {
+		return sooner(applies)
+	}
+	whole := func(l Limit) bool { return l.Model == "" && l.matches == nil }
 	if sooner(whole) {
 		return true
 	}
@@ -62,13 +71,22 @@ func (a Allowance) renewedFrom(was Allowance, wasAt time.Time, share float64, no
 // by the vendor's word waits for this rather than that (#2718). A window
 // not read this time tells nothing here.
 func (a Allowance) startedAgain(was Allowance, wasAt time.Time, share float64, now time.Time) bool {
+	return a.startedWhere(was, wasAt, share, now, nil)
+}
+
+func (a Allowance) startedWhere(was Allowance, wasAt time.Time, share float64, now time.Time, applies func(Limit) bool) bool {
 	type key struct{ name, model string }
 	keyOf := func(l Limit) key { return key{l.Name, l.Model} }
 	read := map[key]time.Time{}
 	for _, l := range a {
-		read[keyOf(l)] = l.Resets
+		if applies == nil || applies(l) {
+			read[keyOf(l)] = l.Resets
+		}
 	}
 	for _, l := range was {
+		if applies != nil && !applies(l) {
+			continue
+		}
 		if l.Used < share || l.Resets.IsZero() || !l.Resets.After(wasAt) {
 			continue // not full at wasAt, its reset not said, or gone by already
 		}
@@ -81,6 +99,20 @@ func (a Allowance) startedAgain(was Allowance, wasAt time.Time, share float64, n
 		}
 	}
 	return false
+}
+
+func (a Allowance) renewalScope(was reading, share float64, now time.Time, started bool) func(string) bool {
+	return func(model string) bool {
+		model = strings.ToLower(model)
+		applies := func(limit Limit) bool { return limit.applies(model) }
+		if !a.fullTill(applies, share, now).IsZero() {
+			return false
+		}
+		if started {
+			return a.startedWhere(was.a, was.at, share, now, applies)
+		}
+		return a.renewedWhere(was.a, was.at, share, now, applies)
+	}
 }
 
 // fullTill is when the windows in leaves full at share at now renew: the

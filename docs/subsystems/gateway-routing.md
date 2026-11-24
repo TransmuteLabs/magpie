@@ -360,6 +360,12 @@ Other refusals follow the usual cooldown rules. The Routing trace shows
 the free-tier rest on the affected model rows. Its **Try now** button lifts
 the shared free-tier rest on that key.
 
+A subscription allowance refresh can release a model's quota rest or
+authorize an early retry when a renewed window counts its provider model
+ID and no applicable window in the new reading is still full. SenseNova's
+General window leaves Flash-Lite rests in place. The next cycle of
+Flash-Lite's own window can return it to selection.
+
 When an upstream says its key's group cannot dispatch Messages, the gateway
 uses another available API for a retryable request. It remembers the refusal
 for that upstream key or account at its Messages endpoint across models. The

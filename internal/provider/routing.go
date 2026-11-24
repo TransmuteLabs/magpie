@@ -1122,7 +1122,12 @@ func readAllowances(agent string) map[string]Allowance {
 				}
 				c.read[key] = st
 			}
-			var renewed, restarts, credits []string
+			type renewal struct {
+				user    string
+				applies func(string) bool
+			}
+			var renewed, restarts []renewal
+			var credits []string
 			for user, a := range all {
 				key := agent + "/" + strings.ToLower(user)
 				if c.renewed[key] > began {
@@ -1134,10 +1139,10 @@ func readAllowances(agent string) map[string]Allowance {
 				}
 				if was, ok := c.seen[key]; ok {
 					if a.renewedFrom(was.a, was.at, share, now) {
-						renewed = append(renewed, user)
+						renewed = append(renewed, renewal{user, a.renewalScope(was, share, now, false)})
 					}
 					if a.startedAgain(was.a, was.at, share, now) {
-						restarts = append(restarts, user)
+						restarts = append(restarts, renewal{user, a.renewalScope(was, share, now, true)})
 					}
 					if a.OnCredits() && !was.a.OnCredits() {
 						// credits it was not read to hold: bought once
@@ -1172,11 +1177,11 @@ func readAllowances(agent string) map[string]Allowance {
 			c.Unlock()
 			// told once the lock is let go (a hook may ask for these
 			// again), and before those waiting for them are let go
-			for _, user := range renewed {
-				tellRenewed(agent, user)
+			for _, change := range renewed {
+				tellAllowanceRenewal(agent, change.user, false, change.applies)
 			}
-			for _, user := range restarts {
-				tellStarted(agent, user)
+			for _, change := range restarts {
+				tellAllowanceRenewal(agent, change.user, true, change.applies)
 			}
 			for _, user := range credits {
 				if agent != "codex" || CodexCredits(user) {
@@ -1298,6 +1303,20 @@ var startedHooks struct {
 	fs []func(agent, user string)
 }
 
+// OnAllowanceRenewal reports when a reading renews or starts an allowance.
+// applies checks provider model IDs against the previous and current readings.
+// A nil applies carries an account-wide reset or a key's own renewal.
+func OnAllowanceRenewal(f func(agent, user string, started bool, applies func(string) bool)) {
+	allowanceRenewalHooks.Lock()
+	allowanceRenewalHooks.fs = append(allowanceRenewalHooks.fs, f)
+	allowanceRenewalHooks.Unlock()
+}
+
+var allowanceRenewalHooks struct {
+	sync.Mutex
+	fs []func(agent, user string, started bool, applies func(string) bool)
+}
+
 // renewedNow tells those OnRenewed asked, and forgets the account's
 // allowance as last read: its windows are not known till read again, and
 // what holds an account at a share of them (a cap, credits not spent)
@@ -1311,21 +1330,30 @@ func renewedNow(agent, user string) {
 
 // tellRenewed tells those OnRenewed asked.
 func tellRenewed(agent, user string) {
-	renewedHooks.Lock()
-	fs := renewedHooks.fs
-	renewedHooks.Unlock()
-	for _, f := range fs {
-		f(agent, user)
-	}
+	tellAllowanceRenewal(agent, user, false, nil)
 }
 
 // tellStarted tells those OnStarted asked.
 func tellStarted(agent, user string) {
-	startedHooks.Lock()
-	fs := startedHooks.fs
-	startedHooks.Unlock()
+	tellAllowanceRenewal(agent, user, true, nil)
+}
+
+func tellAllowanceRenewal(agent, user string, started bool, applies func(string) bool) {
+	allowanceRenewalHooks.Lock()
+	fs := allowanceRenewalHooks.fs
+	allowanceRenewalHooks.Unlock()
 	for _, f := range fs {
-		f(agent, user)
+		f(agent, user, started, applies)
+	}
+	hooks := &renewedHooks
+	if started {
+		hooks = &startedHooks
+	}
+	hooks.Lock()
+	observers := hooks.fs
+	hooks.Unlock()
+	for _, observe := range observers {
+		observe(agent, user)
 	}
 }
 

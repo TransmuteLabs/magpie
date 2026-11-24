@@ -949,6 +949,7 @@ type Rest struct {
 	// the subscription account resting, when it is one; agent "" and its
 	// provider.KeyAllowanceID for a key out of its own windows
 	agent, user string
+	ownModel    string
 	said        string    // the error it gave, for a failVerify held
 	hold        time.Time // until when a failVerify is answered without asking
 	// a key out of its allowance or credit for as long as magpie guessed,
@@ -1004,15 +1005,19 @@ func (r Rest) asksAt(now time.Time) time.Time {
 // full no more — its limit raised, or its usage reset — and its rest out
 // of them is lifted; a key's other rests aren't noted by it.
 func renewed(agent, user string) {
-	liftRests(agent, user, false)
+	allowanceRenewed(agent, user, false, nil)
 }
 
 // restarted lifts what a reading's word alone may not: the rests the
 // vendor itself gave the time of. Told as renewed is, when a window
 // stands started again in fact, or a reset was spent.
 func restarted(agent, user string) {
-	liftRests(agent, user, true)
-	if agent == "codex" {
+	allowanceRenewed(agent, user, true, nil)
+}
+
+func allowanceRenewed(agent, user string, started bool, applies func(string) bool) {
+	liftRests(agent, user, started, applies)
+	if started && agent == "codex" {
 		liftCodexHold(user)
 	}
 }
@@ -1020,13 +1025,16 @@ func restarted(agent, user string) {
 // liftRests lifts an account's rests out of quota, or of a window read
 // full: those no vendor timed by renewed's word alone, and those it did
 // only by restarted's.
-func liftRests(agent, user string, vendorTill bool) {
+func liftRests(agent, user string, vendorTill bool, applies func(string) bool) {
 	defer saveDropped() // after the lock is let go
 	restingUntil.Lock()
 	defer restingUntil.Unlock()
 	now := time.Now()
 	for k, r := range restingUntil.note {
 		if r.agent != agent || !strings.EqualFold(r.user, user) || !(r.Why == failQuota || r.By == "window" || r.Why == failCredit && agent == "codex") {
+			continue
+		}
+		if applies != nil && r.ownModel != "" && !applies(r.ownModel) {
 			continue
 		}
 		if timed := r.By == "resets" || r.By == "retry-after"; vendorTill != timed {
@@ -1102,8 +1110,7 @@ func creditsKnown(agent, user string) {
 }
 
 func init() {
-	provider.OnRenewed(renewed)
-	provider.OnStarted(restarted)
+	provider.OnAllowanceRenewal(allowanceRenewed)
 	provider.OnCredits(creditsKnown)
 }
 
@@ -1134,7 +1141,8 @@ func narrowWhenRead(c candidate, r Rest) {
 	defer narrowing.Done()
 	ctx, done := context.WithTimeout(context.Background(), allowanceWait)
 	defer done()
-	if !awaitAllowance(ctx, r.agent, r.user) || !c.pooled(time.Now()) {
+	if !awaitAllowance(ctx, r.agent, r.user) ||
+		!allowances(r.agent)[r.user].Pooled(r.ownModel, provider.SpentShareOf(c.p.Routing), time.Now()) {
 		return
 	}
 	id, rid := c.restKey(), c.restID()
@@ -2064,8 +2072,12 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 		r.FreeTier = true
 	}
 	r.Key = id
+	needsNarrowing := unread && id == c.restKey() && id != c.restID()
 	if id == c.restID() {
 		r.Model = c.model
+	}
+	if r.Model != "" || needsNarrowing {
+		r.ownModel = c.p.OwnModelID(c.model)
 	}
 	r.Rate = rateUntilSaid(why, r.By, body)
 	r.Probed = probeable(c, r, header, now) && !probeMissed(id, now)
@@ -2126,7 +2138,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	}
 	// shown on its row till the limit is over, past its rest
 	noteLimit(r, header, body, now)
-	if unread && id == c.restKey() && id != c.restID() {
+	if needsNarrowing {
 		narrowing.Add(1)
 		go narrowWhenRead(c, r)
 	}
