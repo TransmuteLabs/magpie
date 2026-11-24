@@ -41,7 +41,7 @@ var readOnlyRefused = []string{
 	// an update another magpie asks for
 	"POST " + provider.RemoteUpdatePath,
 	"GET /v1/magpie/route", "GET /v1/magpie/trace",
-	"GET " + ClaudeRunsPath, "GET " + HeapPath, "GET " + CPUPath, "GET " + GoroutinesPath,
+	"GET " + ClaudeRunsPath, "GET " + HeapPath, "GET " + heapStatsPath, "GET " + CPUPath, "GET " + GoroutinesPath,
 	"POST " + RestartPath,
 	AdminPath, "POST " + KeysPath, "GET " + KeysPath, "DELETE " + KeysPath + "/{id}", "POST " + OIDCKeysPath,
 	"GET /v1/magpie/omarchy", "OPTIONS /v1/magpie/omarchy",

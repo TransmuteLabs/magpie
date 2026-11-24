@@ -1170,8 +1170,8 @@ func (s *Server) handler(sharedListener bool) http.Handler {
 	if sharedListener {
 		next = lanGuard(next)
 	}
-	// the goroutine dump first, ahead of every lock the rest can be stuck
-	// on (dumpFirst). Each socket turn goes through the same guards.
+	// local diagnostics first, ahead of locks the rest can be stuck on.
+	// Each socket turn goes through the same guards.
 	return socketEntry(s.dumpFirst(s.withProtocolRegistry(next)))
 }
 
@@ -1259,6 +1259,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET "+ClaudeRunsPath, s.claudeRuns)
 	// a heap profile of this process, for magpie heap (loopback only)
 	mux.HandleFunc("GET "+HeapPath, s.heapProfile)
+	mux.HandleFunc("GET "+heapStatsPath, refuseHeapStats)
 	// a CPU profile of this process over some seconds, for magpie cpu
 	// (loopback only)
 	mux.HandleFunc("GET "+CPUPath, s.cpuProfile)

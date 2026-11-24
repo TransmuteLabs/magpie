@@ -2944,15 +2944,37 @@ collection (`runtime/pprof`'s `heap`, gzipped protobuf, which
 `magpie-heap-<date>-<time>.pb.gz` in the working folder, never over a file
 there. It prints the file and the runtime's numbers the gateway sends in
 `X-Magpie-Heap-Stats`: the process, `HeapAlloc` (and what is live after the
-collection), `HeapInuse`, `HeapSys`, `StackSys`, `Sys` (all Go took from
-the system; a footprint far above it is outside Go, such as the webview),
-`NumGC` and the goroutine count. The route answers only a program on this
+collection), `HeapInuse`, `HeapSys`, `StackSys`, `Sys` (Go's runtime
+memory total), `NumGC` and the goroutine count. The route answers only a program on this
 computer calling it as `localhost` or a loopback address: another machine,
 a proxy's or tunnel's client, any request with a browser's marks (an
 Origin, listed or not, `null`, `Sec-Fetch-*`, a `Mozilla/` user agent) and
 any other `Host` are refused 403, with a gateway key too. With
 `MAGPIE_ADDR` on an address that isn't loopback, the call isn't from
 loopback, so it is refused as well.
+
+For a memory sample while the process is busy, use
+`GET /v1/magpie/heap/stats` on its own gateway listener.
+
+```sh
+curl --noproxy '*' --fail --max-time 2 http://127.0.0.1:3425/v1/magpie/heap/stats
+```
+
+Use the gateway's loopback port if it differs. This request must be direct
+and carry no gateway key. Requests carrying forwarding headers are refused
+even with `MAGPIE_TRUST_PROXY=1`. The JSON response records the PID,
+kernel-reported process start, Magpie version and UTC times around one `runtime/metrics`
+read. It reports bytes occupied by heap objects, in-use, idle, released
+and total heap bytes, Go's total runtime memory, total and forced GC cycle
+counts and goroutines. `lastGCLiveBytes` describes the last GC. The sample
+initiates no collection and includes no heap profile or allocation stacks.
+
+Take OS footprint and RSS readings just before and after the request.
+Match all readings by PID and process start and retain the timestamps and
+both readings to show how much memory changed during the sample. Record
+each Bun, SDK or WebKit helper separately with its own process identity and
+timestamp. Go's runtime memory totals and the OS's resident and footprint
+measurements account for different things.
 
 `magpie cpu [<file>] [--seconds N]` is for a report of magpie using too
 much CPU (@LeiCheng42 on X, while Codex ran). It asks the same running
