@@ -801,10 +801,10 @@ func (p Provider) extensionAPIs(model string) []Protocol {
 }
 
 func (p Provider) extensionAlsoOn() []Provider {
-	return p.extensionAlsoOnContext(context.Background())
+	return p.extensionAlsoOnContext(context.Background(), false)
 }
 
-func (p Provider) extensionAlsoOnContext(ctx context.Context) []Provider {
+func (p Provider) extensionAlsoOnContext(ctx context.Context, withOff bool) []Provider {
 	inventory, err := extensionProvidersWithPolicyContext(ctx, providerExtensionHost(), p.ID,
 		func() extensionSubscriptionOwners { return heldSubscriptionOwnersContext(ctx) })
 	if err != nil {
@@ -812,8 +812,8 @@ func (p Provider) extensionAlsoOnContext(ctx context.Context) []Provider {
 	}
 	out := []Provider{}
 	for _, other := range inventory.providers {
-		if other.ID == p.ID && other.Account.User != p.Account.User && other.Account.extension.on() {
-			out = append(out, other)
+		if other.ID == p.ID && other.Account.User != p.Account.User && (other.Account.extension.on() || withOff) {
+			out = append(out, offIf(other, !other.Account.extension.on()))
 		}
 	}
 	return out

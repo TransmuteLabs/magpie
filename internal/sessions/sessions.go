@@ -126,7 +126,7 @@ type Session struct {
 	// Gateway: seen only through magpie's gateway, with no file of the
 	// agent's on this computer (external.go)
 	Gateway       bool          `json:"gateway,omitempty"`
-	Agent         string        `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, workbuddy-ai, codebuddy, droid, cursor, hermes, alma, openmausbot, liveagent, kimi, agy
+	Agent         string        `json:"agent"` // magpie agent id: claude, codex, opencode, pi, omp, zcode, dsh, cline, qoder, qoder-cn, grok, workbuddy, workbuddy-ai, codebuddy, droid, cursor, hermes, alma, openmausbot, catpaw, liveagent, kimi, agy
 	ID            string        `json:"id"`
 	Cwd           string        `json:"cwd"`
 	Title         string        `json:"title"` // the name it was given, else the agent's own title, else the first prompt
@@ -597,7 +597,9 @@ type fileMore struct {
 	alma *almaStore
 	// OpenMausBot: its database, bots and usage rows
 	omb *ombStore
-	rev string
+	// CatPaw: its database, and the conversation's title and folder
+	catpaw *catpawConv
+	rev    string
 	// agy: what conversation_summaries.db says of the conversation
 	agy    *agySummary
 	editor *cursorEditorMeta
@@ -1140,6 +1142,7 @@ func Dirs() []string {
 		{filepath.Dir(cursorEditorDB()), cursorEditorDB()},
 		{AlmaDir(), almaDB()},
 		{OpenMausBotDir(), ombDB()},
+		{CatPawDir(), catpawDB()},
 		{LiveAgentDir(), liveagentSessions()},
 		{MiniMaxDir(), minimaxSessions()},
 		{KimiCodeDir(), kimiSessions()},
@@ -1761,7 +1764,7 @@ func refreshContext(ctx context.Context, want, all []file) {
 		if f.cold {
 			continue // in a stopped WSL distro: what was read of it stands
 		}
-		if s := parsed(f.path); s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() || ccStale(f, s) || (f.agent == "hermes" && (f.m().hermes == nil || f.m().rev == "" || s.more().DBRevision != f.m().rev)) || ((f.agent == "alma" || f.agent == "openmausbot" || f.agent == "cursor" || f.agent == "agy" || f.agent == "antigravity") && s.more().DBRevision != f.m().rev) {
+		if s := parsed(f.path); s == nil || s.Size != f.size || s.Mod != f.mod.UnixNano() || ccStale(f, s) || (f.agent == "hermes" && (f.m().hermes == nil || f.m().rev == "" || s.more().DBRevision != f.m().rev)) || ((f.agent == "alma" || f.agent == "openmausbot" || f.agent == "catpaw" || f.agent == "cursor" || f.agent == "agy" || f.agent == "antigravity") && s.more().DBRevision != f.m().rev) {
 			if parsing[f.path] != nil {
 				// a refresh is reading it, another or this one (a path
 				// listed twice): its last parse stands until that one is
@@ -2469,6 +2472,8 @@ func parserFor(agent string) sessionParser {
 		return sessionParser{whole: parseAlma}
 	case "openmausbot":
 		return sessionParser{whole: parseOpenMausBot}
+	case "catpaw":
+		return sessionParser{whole: parseCatPaw}
 	case "liveagent":
 		return sessionParser{whole: parseLiveAgent}
 	case "opencode", "zcode":

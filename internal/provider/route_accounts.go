@@ -34,7 +34,16 @@ func (p Provider) AccountsOn() []AccountOn {
 
 // AccountsOnContext reads the eligible accounts in the caller's context.
 func (p Provider) AccountsOnContext(ctx context.Context) []AccountOn {
-	also := p.alsoOnWithPicks(ctx)
+	return p.accountsOrderedContext(ctx, p.alsoOnWithPicks(ctx))
+}
+
+// accountsOrdered is AccountsOn with p's other accounts on, also, read
+// already.
+func (p Provider) accountsOrdered(also []Provider) []AccountOn {
+	return p.accountsOrderedContext(context.Background(), also)
+}
+
+func (p Provider) accountsOrderedContext(ctx context.Context, also []Provider) []AccountOn {
 	var all []AccountOn
 	if len(also) == 0 || !p.ownPausedContext(ctx) {
 		all = append(all, AccountOn{Provider: p, Own: true})

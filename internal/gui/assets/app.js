@@ -450,7 +450,7 @@ function toneCheck(img) {
     swap();
   }, { once: true });
 }
-const pngIcons = new Set(["aigocode", "crush", "zcode", "alma", "hanako", "cindy", "lody", "typesafe", "atomcode", "snow", "mlx-serve", "gpustack", "mothx", "zoo-code", "kimi-code-desktop", "openbot", "avibe", "kun", "nowledge-mem"]);
+const pngIcons = new Set(["aigocode", "crush", "zcode", "alma", "hanako", "cindy", "lody", "typesafe", "atomcode", "snow", "mlx-serve", "gpustack", "mothx", "zoo-code", "kimi-code-desktop", "catpaw", "openbot", "avibe", "kun", "nowledge-mem"]);
 
 // lazy: a picture in a long list (Plugins' rows) is asked for near the
 // screen: each SVG an <img> draws is a ~0.6 MB webview document, kept (#909)
@@ -11687,7 +11687,7 @@ function renderModels(p) {
           const why = p.testsAs[as] ? t(p.testsAs[as]) : "";
           acts.push({ name, icon: PLAY_ICON, off: !!why, why, preview: true, tip: t("Asked as {agent} asks, for a relay that serves only {agent}", { agent }), run: () => testOne(id, as, "", c) });
         }
-        if (p.testPicks) acts.push({ name: "Test on account…", icon: PLAY_ICON, preview: true, tip: t("Pick the account or key the test is sent to"), run: () => openProtoMenu(c, p.testPicks.map((k) => ({ v: k.id, name: k.name, literalName: true })), null, (v) => testOne(id, "", v, c), "Account to test", "model-account-menu") });
+        if (p.testPicks) acts.push({ name: "Test on account…", icon: PLAY_ICON, preview: true, tip: t("Pick the account or key the test is sent to"), run: () => openProtoMenu(c, p.testPicks.map((k) => ({ v: k.id, literalName: true, ...k })), null, (v) => testOne(id, "", v, c), "Account to test", "model-account-menu") });
       }
       // its id as agents and the gateway name it, to paste where a model is
       // typed (ARNO, Discord: 右击菜单除了测试模型外，还能添加拷贝模型id的功能)

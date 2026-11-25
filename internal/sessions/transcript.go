@@ -45,7 +45,7 @@ func HasTranscript(agent string) bool {
 		return false
 	}
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "antigravity", "openmausbot", "liveagent", "workbuddy", "workbuddy-ai", "codebuddy":
+	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "antigravity", "openmausbot", "catpaw", "liveagent", "workbuddy", "workbuddy-ai", "codebuddy":
 		return true
 	}
 	return false
@@ -239,6 +239,8 @@ func readNativeHistoryParts(ctx context.Context, s Session, read historyRead, ad
 		return antigravityTranscriptOf(ctx, s.Path, keep, spokenOnly, add)
 	case "openmausbot":
 		return ombTranscript(ctx, s, spokenOnly, add)
+	case "catpaw":
+		return catpawTranscript(ctx, s, spokenOnly, add)
 	case "liveagent":
 		return liveagentTranscript(ctx, s.Path, spokenOnly, add)
 	case "workbuddy", "workbuddy-ai", "codebuddy":

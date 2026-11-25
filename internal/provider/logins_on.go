@@ -138,7 +138,7 @@ func (p Provider) AlsoOn() []Provider {
 }
 
 func (p Provider) alsoOnWithPicks(ctx context.Context) []Provider {
-	out := p.alsoOnContext(ctx)
+	out := p.alsoOnContext(ctx, false)
 	for i, q := range out {
 		out[i] = withPicks(q, p)
 	}
@@ -146,38 +146,40 @@ func (p Provider) alsoOnWithPicks(ctx context.Context) []Provider {
 }
 
 // alsoOn is AlsoOn as each sign-in makes its accounts, without the
-// provider's settings.
-func (p Provider) alsoOn() []Provider {
-	return p.alsoOnContext(context.Background())
+// provider's settings; withOff, the accounts turned off too, each marked
+// off (Account.off), for a test to be sent to one before it is turned on
+// (testAccounts).
+func (p Provider) alsoOn(withOff bool) []Provider {
+	return p.alsoOnContext(context.Background(), withOff)
 }
 
-func (p Provider) alsoOnContext(ctx context.Context) []Provider {
+func (p Provider) alsoOnContext(ctx context.Context, withOff bool) []Provider {
 	if p.IsExtension() {
-		return p.extensionAlsoOnContext(ctx)
+		return p.extensionAlsoOnContext(ctx, withOff)
 	}
 	if p.IsPlugin() {
-		return pluginAlsoOn(*p.Account.plugin)
+		return pluginAlsoOn(*p.Account.plugin, withOff)
 	}
 	if p.Account != nil && p.Account.Agent == "copilot" {
-		return copilotAlsoOn()
+		return copilotAlsoOn(withOff)
 	}
 	if p.Account != nil && p.Account.Agent == ChatGPTAPIID {
-		return siwcAlsoOn()
+		return siwcAlsoOn(withOff)
 	}
 	if p.Account != nil && (p.Account.Agent == "gemini" || p.Account.Agent == "antigravity") {
-		return googleAlsoOn(p.Account.Agent)
+		return googleAlsoOn(p.Account.Agent, withOff)
 	}
 	if p.Account == nil || p.Account.token != nil && !p.Account.standIn || (p.Account.Agent != "claude" && p.Account.Agent != "codex") {
 		return nil
 	}
 	var out []Provider
 	for _, l := range loginsContext(ctx, p.Account.Agent) {
-		if l.Active || l.first || !l.On {
+		if l.Active || l.first || !l.On && !withOff {
 			continue
 		}
 		agent, user := l.Agent, l.User
 		a := *p.Account
-		a.User, a.Plan, a.standIn = user, l.Plan, false
+		a.User, a.Plan, a.standIn, a.off = user, l.Plan, false, !l.On
 		a.token = func(ctx context.Context) (string, error) {
 			tok, _, err := savedLoginToken(ctx, agent, user)
 			return tok, err
@@ -198,6 +200,17 @@ func (p Provider) alsoOnContext(ctx context.Context) []Provider {
 		out = append(out, q)
 	}
 	return out
+}
+
+// offIf is q marked as an account the user turned off when off (alsoOn's
+// withOff).
+func offIf(q Provider, off bool) Provider {
+	if off && q.Account != nil {
+		a := *q.Account
+		a.off = true
+		q.Account = &a
+	}
+	return q
 }
 
 // Token is the access token of a saved account in use beside the agent's

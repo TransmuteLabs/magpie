@@ -38,6 +38,7 @@ func nativeHistoryReaders(zcode func() []file) []nativeHistoryReader {
 		{agent: "hermes", read: hermesFiles},
 		{agent: "alma", read: almaFiles},
 		{agent: "openmausbot", read: openmausbotFiles},
+		{agent: "catpaw", read: catpawFiles},
 		{agent: "liveagent", read: liveagentFiles},
 		{agent: "kimi", read: kimiFiles},
 		{agent: "agy", read: agyFiles},
