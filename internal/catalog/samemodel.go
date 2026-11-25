@@ -3,8 +3,6 @@ package catalog
 import (
 	"strings"
 	"unicode"
-
-	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // SameModel is a model's name as vendors agree on it: lowercase, without
@@ -31,11 +29,8 @@ func SameModel(id string) string {
 	if i := strings.LastIndex(k, "/"); i >= 0 {
 		k = k[i+1:]
 	}
-	// most ids have no gap but single dashes and no version dot: the
-	// Providers page asks this of every model of every list, and each was
-	// copied twice and matched against modelGaps all the same
 	if !singleDashes(k) {
-		k = modelGaps.ReplaceAllString(k, "-")
+		k = strings.Join(strings.FieldsFunc(k, modelGap), "-")
 	}
 	k = strings.Trim(k, "-")
 	if i := versionDot(k, 1); i > 0 {
@@ -70,18 +65,18 @@ func snapshotDate(s string) bool {
 	return false
 }
 
-// modelGaps are what SameModel spells as one "-": a run of spaces (a
-// no-break one too), "_" and "-".
-var modelGaps = lazyre.New(`[\s\p{Zs}_-]+`)
+func modelGap(r rune) bool {
+	switch r {
+	case '-', '_', '\t', '\n', '\f', '\r':
+		return true
+	}
+	return unicode.Is(unicode.Zs, r)
+}
 
-// singleDashes is whether modelGaps leaves k as it is: no gap in it but
-// single "-"s.
+// singleDashes reports whether the gaps in k are already single dashes.
 func singleDashes(k string) bool {
-	for i, r := range k {
-		switch {
-		case r == '_' || r == '\t' || r == '\n' || r == '\f' || r == '\r' || unicode.Is(unicode.Zs, r):
-			return false
-		case r == '-' && i+1 < len(k) && k[i+1] == '-':
+	for offset, char := range k {
+		if modelGap(char) && (char != '-' || (offset+1 < len(k) && k[offset+1] == '-')) {
 			return false
 		}
 	}

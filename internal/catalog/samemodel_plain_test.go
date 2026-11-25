@@ -1,13 +1,14 @@
 package catalog
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
 
 // sameModelAsBefore is SameModel as it was before its plain ids were
 // spared modelGaps and the copy.
-func sameModelAsBefore(id string) string {
+func sameModelAsBefore(id string, modelGaps *regexp.Regexp) string {
 	k := strings.ToLower(strings.TrimSpace(id))
 	if i := strings.LastIndex(k, "/"); i >= 0 {
 		k = k[i+1:]
@@ -29,13 +30,15 @@ func sameModelAsBefore(id string) string {
 // The Providers page asks SameModel of every model of every list: a plain
 // id is read without a copy, and every id reads as it did.
 func TestSameModelPlainIDsAllocateNothing(t *testing.T) {
+	modelGaps := regexp.MustCompile(`[\s\p{Zs}_-]+`)
 	for _, id := range []string{
 		"claude-opus-5-5-20260801", "anthropic/claude-sonnet-5", "Claude-Opus-5.5", "deepseek-v4p1", "GPT-6 Sol",
 		"gpt-6 sol", "a__b", "a--b", "-a-", "--", "", " ", "1.2.3", "v1.2p3", "x\tY\nz", "qwen3-coder-2507",
 		"gpt-4o-2024-08-06", "deepseek-v4-1-flash-260910", "m@20260801", "a-.-b", "1p", "p1", "1.p2", "kimi-k2-0905",
 		"accounts/fireworks/models/deepseek-v4p1", "a　b", "a -b", "a\vb", "_lead", "trail_",
+		"a\u0085_b", "a\f_\r\nb", "vendor/\u2003_name_\u202f", "a_\xff-b",
 	} {
-		if got, want := SameModel(id), sameModelAsBefore(id); got != want {
+		if got, want := SameModel(id), sameModelAsBefore(id, modelGaps); got != want {
 			t.Errorf("SameModel(%q) = %q, was %q", id, got, want)
 		}
 	}

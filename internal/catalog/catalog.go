@@ -2017,13 +2017,24 @@ func foundBy[T any](b string, get func(string) (T, bool)) (T, bool) {
 // claude-deepseek-v4.1-flash (#1383).
 var relayPrefixes = []string{"claude-"}
 
-// channelPrefix is any other word a relay puts before a model's id to name
+// afterChannel drops a word a relay puts before a model's id to name
 // the channel it serves it on: nyro-gpt-5.5, nyro-gemini-3.8-flash (#2157).
 // It is letters alone, as every such word models.dev's own lists put before
 // a model another of them lists is (openai-, databricks-, doubao-, zai-):
 // the model after it is the same model, its window, levels and images
 // included.
-var channelPrefix = lazyre.New(`^[a-z]{2,24}-`)
+func afterChannel(id string) string {
+	for offset := 0; offset < min(len(id), 25); offset++ {
+		char := id[offset]
+		if char == '-' && offset >= 2 {
+			return id[offset+1:]
+		}
+		if char < 'a' || char > 'z' {
+			break
+		}
+	}
+	return ""
+}
 
 // renamed is the model a relay renamed to b, when models.dev lists none
 // by b (found), and the window the rename names, if any: a window mark
@@ -2037,7 +2048,7 @@ var channelPrefix = lazyre.New(`^[a-z]{2,24}-`)
 // names a version ("claude-auto" is not the router "auto").
 func renamed(b string) (string, int, bool) { return renamedBy(b, true) }
 
-// renamedBy is renamed, a channel's word (channelPrefix) taken off only
+// renamedBy is renamed, a channel's word taken off only
 // with channels: the name a model is shown by keeps a channel's word, so
 // a relay's nyro-gpt-5.5 and its gpt-5.5 still read apart.
 func renamedBy(b string, channels bool) (string, int, bool) {
@@ -2059,8 +2070,8 @@ func renamedBy(b string, channels bool) (string, int, bool) {
 			return rest, w, true
 		}
 	}
-	if pre := channelPrefix.FindString(r); channels && pre != "" {
-		if rest := r[len(pre):]; strings.ContainsAny(rest, "0123456789") && knownModel(rest) {
+	if channels {
+		if rest := afterChannel(r); strings.ContainsAny(rest, "0123456789") && knownModel(rest) {
 			return rest, w, true
 		}
 	}
