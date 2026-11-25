@@ -64,6 +64,10 @@ const providerUsage = `usage:
                                           image-files=off sends DeepSeek's API an agent's images inline on every
                                           turn; image-files=on, the default, uploads each once (for a day)
                                           and names it by its file id
+                                          addresses=<url>[,<url>…], on a Remote magpie, its other addresses (the same
+                                          computer through Tailscale, EasyTier…): a request goes to the one that
+                                          last answered, and on to the next when it takes no connection;
+                                          addresses= clears them
                                           upstream-providers=on, on a Remote magpie, names its models by the
                                           provider serving each there (Claude · Office › RelayA); off, the
                                           default, as that magpie's own list names them
@@ -191,6 +195,9 @@ const providerUsage = `usage:
        magpie provider set my-relay resolve.relay.example.com=10.0.0.5,dns:gw.corp.example
                                    (Advanced › Connect to: connects to 10.0.0.5, then gw.corp.example's
                                     address, while TLS and Host still say relay.example.com)
+       magpie provider set office addresses=http://100.101.2.3:3425,http://10.144.0.2:3425
+                                   (Advanced › Other addresses: the office magpie through Tailscale and
+                                    EasyTier, asked when its own address takes no connection)
        magpie provider set my-relay search=yes
                                    (the relay answers Claude Code's WebSearch and Codex's web search itself, web_search
                                     and web.run's /alpha/search: those go to it as sent, not through magpie's search)
@@ -902,6 +909,9 @@ func saveNew(p provider.Provider) error {
 // only their picks that take a provider's in (eiyuuzaki2333 on X), and
 // says which.
 func joinPicks(p provider.Provider, before *provider.Provider) error {
+	if q, err := provider.Find(p.ID); err == nil {
+		p = *q // as saved: a remote magpie's pick its list dropped is set aside (goneKeptAside)
+	}
 	joined, err := provider.JoinPicks(p, before)
 	if err != nil {
 		return err
@@ -1332,6 +1342,13 @@ func applyPairs(p *provider.Provider, pairs []string) error {
 			default:
 				return fmt.Errorf("image-files=on|off, not %q", v)
 			}
+		case "addresses":
+			// a Remote magpie's other addresses (Provider.Addresses,
+			// evjohnicu on X); empty clears them
+			if !p.IsRemoteMagpie() {
+				return fmt.Errorf("addresses are a Remote magpie's; %s is not one", p.ID)
+			}
+			p.Addresses = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' })
 		case "upstream-providers":
 			// on: a Remote magpie's models named by the provider serving
 			// each there (Provider.UpstreamProviders, lcc580 on X)
@@ -2537,6 +2554,10 @@ func editPicks(p provider.Provider, args []string) ([]string, error) {
 // models were exposed before and after, and which went or came. A list
 // that replaced the old one says so, and how to add one instead.
 func printPicksChange(before, after provider.Provider, args []string) {
+	asked := after.Models
+	if q, err := provider.Find(after.ID); err == nil {
+		after = *q // as saved: a remote magpie's pick its list dropped is set aside (goneKeptAside)
+	}
 	ids := func(p provider.Provider) []string {
 		var out []string
 		for _, m := range p.Exposed() {
@@ -2587,6 +2608,11 @@ func printPicksChange(before, after provider.Provider, args []string) {
 	for _, id := range added {
 		if len(avail) > 0 && !avail[id] {
 			fmt.Println(" ", amber.Render("!"), after.ID+"/"+id, muted.Render("isn't in "+after.Name+"'s list; exposed as given"))
+		}
+	}
+	for _, id := range asked {
+		if !slices.Contains(after.Models, id) && slices.Contains(after.Delisted, id) {
+			fmt.Println(" ", amber.Render("!"), after.ID+"/"+id, muted.Render("left "+after.Name+"'s list; set aside until it lists it again"))
 		}
 	}
 }

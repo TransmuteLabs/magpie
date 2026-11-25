@@ -106,6 +106,8 @@ func GroupEndpoints(ms []Member) []string {
 // Messages-only Claude) stays on Chat, so that member keeps being
 // relayed; a Messages-only group stays on Chat too, as the thinking a
 // Claude member takes is known by its own model, not by the group's id.
+// dsh, which has a route per API, puts such a group on Messages or
+// Gemini's where every member is best there (agent's dshGroupAPIs).
 func GroupAPI(ms []Member) Protocol {
 	api, _ := agentGroupProtocols(ms, true, false)
 	return api

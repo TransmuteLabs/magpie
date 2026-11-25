@@ -152,8 +152,9 @@ func dshAt(at place) *Agent {
 			// running or not: agent-default-model is read for new
 			// ones only (#2359)
 			notes = append(notes, noticeDsh1.String())
-		} else if Running(`DeepSeek Harness\.app/`, `(^|/)dsh( |$)`, `(^|/)deepseek-harness( |$)`) {
-			// deepseek-harness is the desktop app's executable on Linux
+		} else if Running(`DeepSeek Harness\.app/`, `DSH (NEXT|Desktop)\.app/`, `(^|/)dsh( |$)`, `(^|/)deepseek-harness( |$)`, `(^|/)dsh-desktop(-next)?( |$)`) {
+			// deepseek-harness is the desktop app's executable on Linux,
+			// dsh-desktop-next and dsh-desktop the community shells'
 			notes = append(notes, noticeDsh2.String())
 		}
 		if dshSearchesHere(dir) && !gateway.CanSearch() {
@@ -2195,6 +2196,45 @@ func dshRouteFor(id string, models []catalog.Model) string {
 	return dshRoute
 }
 
+// dshGroupAPIs are the APIs a routing group not on Responses
+// (provider.GroupAPI) goes on in dsh, and whether it is asked adaptively
+// on Messages: the APIs every member's own list has (modelAPIs), so a
+// group of members each best on Messages, or on Gemini's, goes on that
+// route as each would alone, every member relaying it as it is (01huadalang
+// on Discord: a group of Gemini CLI models went on Chat). A member every
+// request to is translated anyway has no say. Messages is left out when
+// the members don't all ask adaptively, or all not (gateway.AsksAdaptively,
+// which the group's id doesn't answer): pi-ai asks the group one way for
+// every member. A group whose members share neither has none and stays on
+// Chat. Gemini's is the first where dsh speaks it, and the one after, if
+// any, where it doesn't (dshAskedOne), as for a lone Gemini model.
+func dshGroupAPIs(ms []provider.Member) (apis []string, adaptive bool) {
+	wires := provider.HeldSettings().Wires()
+	found, split := false, false
+	for _, m := range ms {
+		own := modelAPIs(&m.Provider, m.Model)
+		if len(own) == 0 {
+			continue
+		}
+		wire := provider.UpstreamNameIn(wires, m.Provider.ID, m.Model)
+		asks := gateway.AsksAdaptively(m.Model) || gateway.AsksAdaptively(wire)
+		if !found {
+			apis, adaptive, found = own, asks, true
+			continue
+		}
+		apis = slices.DeleteFunc(apis, func(a string) bool { return !slices.Contains(own, a) })
+		split = split || asks != adaptive
+	}
+	if split {
+		apis = slices.DeleteFunc(apis, func(a string) bool { return a == string(provider.Anthropic) })
+	}
+	apis = slices.DeleteFunc(apis, func(a string) bool { return a != string(provider.Anthropic) && a != string(provider.Gemini) })
+	if len(apis) == 0 {
+		return nil, false
+	}
+	return apis, adaptive && slices.Contains(apis, string(provider.Anthropic))
+}
+
 // dshAPI is the wire protocol a route of magpie's speaks, given the one it
 // has now and the one it is written with: the one it has when the gateway
 // speaks it — a user who switched a route to OpenAI Responses in dsh's
@@ -2355,17 +2395,58 @@ func dshLevelsWith(list, ref string, gemini bool) []string {
 // didn't): a home there is read by that dsh, not by this machine's.
 var dshDistros sync.Map
 
-// dshAppVersion is the version of DeepSeek Harness Desktop installed here,
-// "" when there is none or it doesn't say; a var for tests.
-var dshAppVersion = func() string {
-	a := &Agent{ID: "dsh"}
-	if !a.HasApp() {
-		return ""
+// dshAppVersion is the version of dsh the desktop apps installed here run,
+// the oldest when there are several: DeepSeek Harness Desktop's own, a
+// community shell's the dsh it bundles (dshBundledVersion), not the shell's
+// (DSH NEXT 2.0.24-next runs dsh 0.2.2-rc.5); "" when there is none,
+// "unknown" when one doesn't say. A var for tests (dshAppsVersion).
+var dshAppVersion = dshAppsVersion
+
+// dshAppsVersion is dshAppVersion as it reads this machine.
+func dshAppsVersion() string {
+	oldest := ""
+	for i, b := range desktopApps["dsh"].builds() {
+		if !b.installed() {
+			continue
+		}
+		v := b.version()
+		if i > 0 {
+			v = dshBundledVersion(b)
+		}
+		if v == "" {
+			return "unknown"
+		}
+		if oldest == "" || Newer(oldest, v) {
+			oldest = v
+		}
 	}
-	if v := a.AppVersion(); v != "" {
-		return v
+	return oldest
+}
+
+// dshBundledVersion is the dsh a community shell's Mac bundle runs: the
+// @deepseek-ai/dsh its Contents/Resources/app/package.json pins (DSH
+// NEXT's mac extraResources); "" when no bundle of it says, or names a
+// range. Elsewhere that manifest is inside app.asar, so it is "".
+func dshBundledVersion(app desktopApp) string {
+	for _, bundle := range macBundles(app) {
+		if info, ok := bundleInfo(bundle); !ok || info.id != app.id {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(bundle, "Contents", "Resources", "app", "package.json"))
+		if err != nil {
+			continue
+		}
+		var m struct {
+			Dependencies map[string]string `json:"dependencies"`
+		}
+		if json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		if v := strings.TrimSpace(m.Dependencies["@deepseek-ai/dsh"]); v != "" && v[0] >= '0' && v[0] <= '9' {
+			return v
+		}
 	}
-	return "unknown"
+	return ""
 }
 
 // dshSpeaksGemini says every dsh that reads the dsh home holding path
@@ -2502,12 +2583,13 @@ func dshKindConfig(k dshKind, models []catalog.Model, api, gw string) dshPiRoute
 		// a Gemini 3 or later: #6778) is asked adaptively too: pi-ai then
 		// sends the level itself, max as max (gateway.AsksAdaptively, the
 		// rule Pi's models.json is written by too)
+		// (a routing group by its members, catalog.Model.AsksAdaptively)
 		case api == "anthropic-messages":
 			wire := m.ID
 			if pid, model, ok := strings.Cut(m.ID, "/"); ok {
 				wire = provider.UpstreamNameIn(wires, pid, model)
 			}
-			if gateway.AsksAdaptively(m.ID) || gateway.AsksAdaptively(wire) {
+			if gateway.AsksAdaptively(m.ID) || gateway.AsksAdaptively(wire) || m.AsksAdaptively {
 				e.Compat = &dshPiCompat{ForceAdaptiveThinking: true}
 			}
 		case api == "openai-responses":

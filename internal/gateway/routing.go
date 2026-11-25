@@ -367,8 +367,10 @@ var (
 	// plannedWords: a 429 that says the plan's own allowance is used, rate
 	// words or not — a day's free requests, say, or a sub2api key's own
 	// 5-hour, day or 7-day limit ("api key 7天限额已用完", sent as
-	// rate_limit_exceeded).
-	plannedWords = lazyre.New(`(?i)quota|usage.?limit|(?:hit|reached) your .*limit|limit.{0,24}resets|per.?(day|week|month)|daily|weekly|monthly|额度|用量|套餐|限额已用完`)
+	// rate_limit_exceeded). 使用上限 is "usage limit" in Chinese: Zhipu's
+	// 1308 and 1310 say "已达到 5 小时的使用上限", "已达到每周/每月使用上限"
+	// under rate_limit_error (#3013).
+	plannedWords = lazyre.New(`(?i)quota|usage.?limit|(?:hit|reached) your .*limit|limit.{0,24}resets|per.?(day|week|month)|daily|weekly|monthly|额度|用量|使用上限|套餐|限额已用完`)
 	// minuteWords: a 429 that names a window of a minute or less, or the
 	// rate itself — tokens or requests per minute, TPM, RPM — which some
 	// vendors call a quota all the same: Gemini's "You exceeded your
@@ -620,11 +622,16 @@ func failure(status int, body []byte) string {
 	case status == 402, creditWords.Match(body) && (status != 429 || brokeWords.Match(body)),
 		bodyHas(body, "insufficient_quota") && !minuteRate(body):
 		return failCredit
-	case status == 429 && resetsWhen.Match(body):
+	case status == 429 && (resetsWhen.Match(body) || zhipuResets.Match(body)):
 		// out until the time it names, in whichever language it said so:
 		// WorkBuddy's Chinese refusal read as out of quota (用量), its
 		// English one as a rate limit, and each rested its own fallback
-		// (#1669)
+		// (#1669). Zhipu's 1308 and 1310 name theirs without a zone
+		// (zhipuResets): through its Anthropic endpoint, typed
+		// rate_limit_error, "[1308][已达到 5 小时的使用上限。您的限额将在 …
+		// 重置。]" read as a rate limit, so no reading of the key's windows
+		// lifted it, and a window reset on Zhipu's side was refused here
+		// till the old time (#3013, ColinWOoOOooo on X)
 		return failQuota
 	case status == 429 && minuteRate(body):
 		// a limit per minute, whatever it calls itself: back in a
@@ -1820,7 +1827,7 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 			// under below; another computer's magpie rests its model
 			// for it, as before
 			id := c.restKey()
-			if c.p.PaidBesideFree(c.model) || modelLimited(c, why, body) {
+			if c.p.PaidBesideFree(c.model) || c.p.FreeBesidePaid(c.model) || modelLimited(c, why, body) {
 				id = c.restID()
 			}
 			d, r.By, r.Failures, guessed = creditBackoff(id, header, body, now)
@@ -2068,9 +2075,13 @@ func (s *Server) restAfterMarked(c candidate, status int, header http.Header, bo
 	// the subscription serves other models free is that model's: the free
 	// ones draw on no credits, and the account still serves them (Creat.wu
 	// on Discord: WorkBuddy AI's 14018 "Credits exhausted" on glm-5.3-flash
-	// rested the account, and its free models went nowhere). A free model
-	// the vendor refuses all the same rests on its own refusal.
-	if (why == failCredit || why == failQuota) && c.p.PaidBesideFree(c.model) {
+	// rested the account, and its free models went nowhere; Winnie7572 on
+	// X and tkhs101's #7496: OpenCode Go's weekly limit on a paid model
+	// rested the key, and its free models, which Go still served, were
+	// answered the kept 429 in a millisecond). A free model the vendor
+	// refuses all the same rests on its own refusal, which says nothing
+	// of the paid ones (ggbdpq).
+	if (why == failCredit || why == failQuota) && (c.p.PaidBesideFree(c.model) || c.p.FreeBesidePaid(c.model)) {
 		id = c.restID()
 	}
 	if remoteModelRest(c, why, header) {

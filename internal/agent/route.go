@@ -442,6 +442,11 @@ func buildModels(agent string) []catalog.Model {
 			}
 		} else if api != "" {
 			m.APIs = []string{string(api)}
+		} else if e.Group != "" && (agent == "dsh" || agent == dsbotID) {
+			// dsh has a route per API, so a group every member of which
+			// is best on Messages or Gemini's goes on that route, as
+			// each member alone would (01huadalang on Discord)
+			m.APIs, m.AsksAdaptively = dshGroupAPIs(modelMembers)
 		}
 		m.Endpoints = endpoints
 		// Codex's /fast on a ChatGPT account's own GPT model, which
@@ -455,6 +460,36 @@ func buildModels(agent string) []catalog.Model {
 		out = append(out, m)
 	}
 	return out
+}
+
+// modelAPIs are a model's APIs in an agent's list (catalog.Model.APIs):
+// the one its provider serves it on best (Provider.Native), after
+// Gemini's where that is served too; none when every request to it is
+// translated anyway.
+func modelAPIs(p *provider.Provider, model string) []string {
+	if p.AgentGemini(model) {
+		// a Gemini model its provider serves on Gemini's API: there for
+		// omp and OmO, which take it first, not translated from
+		// Anthropic's (provider.AgentGemini); an agent with no Gemini API
+		// of its own (Pi, droid, dsh) keeps the one Native names
+		apis := []string{string(provider.Gemini)}
+		if n := p.Native(model); n != "" {
+			apis = append(apis, string(n))
+		}
+		return apis
+	}
+	if n := p.Native(model); n != "" {
+		return []string{string(n)}
+	}
+	// Gemini clients also reach Code Assist and Google plugins through the
+	// gateway's Gemini API, with translation as needed.
+	apis := p.APIs(model)
+	for _, pr := range p.Speaks() {
+		if (pr == provider.Gemini || pr == provider.CodeAssist) && (apis == nil || slices.Contains(apis, pr)) {
+			return []string{string(provider.Gemini)}
+		}
+	}
+	return nil
 }
 
 // describedNow is provider.Described, asked once for every agent's list
