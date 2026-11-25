@@ -227,7 +227,8 @@ a local test upstream, with no vendor credentials.
 #### DeepSeek Harness: the DeepSeek row by hand
 
 Connecting dsh gives it magpie's own routes on dsh's pi-ai adapter
-(`magpie`, `magpie-responses`, `magpie-anthropic`). dsh's DeepSeek row
+(`magpie`, `magpie-responses`, `magpie-anthropic`, and
+`magpie-gemini` from dsh 0.2.2-rc.2). dsh's DeepSeek row
 (`llm-deepseek`, the `deepseek-official` route) is dsh's: magpie never
 points it anywhere, and Disconnect leaves an entry of yours there alone.
 That row does more for DeepSeek's own models than pi-ai does: when dsh's
@@ -1319,14 +1320,20 @@ credentials are read when a request is signed.
 Each location serves models of its own, and Vertex AI has no list to ask which,
 so magpie gives each location the models it answered with on 2026-10-06
 (and Gemini 4: `gemini-4-argon` since 2026-10-13, `gemini-4-carbon` since
-2026-11-10 and `gemini-4-hydrogen` since 2026-11-12, at `global`, `us` and
-`eu`):
+2026-11-10, `gemini-4-hydrogen` since 2026-11-12 and `gemini-4-neon` since
+2026-11-18, at `global`, `us` and `eu`):
 
 | Location | Models |
 | --- | --- |
-| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
-| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
+| `global` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-pro-preview`, `gemini-3.1-pro-preview-customtools`, `gemini-3.1-flash-lite`, `gemini-3-flash-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `deepseek-ai/deepseek-v4.1-flash-maas`, `zai-org/glm-5.2-maas`, `openai/gpt-oss-120b-maas`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `claude-fable-5-1` |
+| `us`, `eu` | `gemini-3.8-flash`, `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-4-neon`, `gemini-4-carbon`, `gemini-4-hydrogen`, `gemini-4-argon`, `gemini-3.1-flash-lite` |
 | A region | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+
+A Gemini 4 or later model Google releases after these joins `global`, `us`
+and `eu` (and express mode) once [models.dev](https://models.dev)'s
+`google-vertex` entry lists it, ahead of the Gemini 4 models above, with no
+magpie update: magpie's catalog syncs from models.dev. A preview or a cyber
+model, which Google gives on its allowlist, is typed in.
 
 A region that serves one more, as asia-northeast1 serves `gemini-3.5-flash`,
 has it typed in with the rest you want:
