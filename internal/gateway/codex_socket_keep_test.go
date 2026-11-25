@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/coder/websocket"
 	"github.com/tidwall/gjson"
@@ -726,5 +727,168 @@ func TestCodexSocketRowCountsWhatTheSocketSent(t *testing.T) {
 	}
 	if rows[1].UpBytes > 1000 {
 		t.Errorf("the delta turn counted %d bytes up, the whole conversation", rows[1].UpBytes)
+	}
+}
+
+type dialContextSentinelKey struct{}
+
+type dialContextSentinel struct {
+	payload []byte
+}
+
+func keptPostWithSentinel(test *testing.T, acct, body string) weak.Pointer[dialContextSentinel] {
+	test.Helper()
+	sentinel := &dialContextSentinel{payload: make([]byte, 1<<20)}
+	sentinel.payload[0] = 1
+	ref := weak.Make(sentinel)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, CodexPath+"/responses", strings.NewReader(body)).
+		WithContext(context.WithValue(test.Context(), dialContextSentinelKey{}, sentinel))
+	req.Header.Set("Authorization", "Bearer chatgpt-token-"+acct)
+	req.Header.Set("chatgpt-account-id", acct)
+	New().Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "pong") ||
+		!strings.Contains(rec.Body.String(), "event: response.completed\n") {
+		test.Fatalf("%d, a reply without its end: %s", rec.Code, rec.Body.String())
+	}
+	return ref
+}
+
+func awaitWeakCleared[T any](ref weak.Pointer[T]) bool {
+	for range 30 {
+		runtime.GC()
+		runtime.Gosched()
+		if ref.Value() == nil {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return ref.Value() == nil
+}
+
+func TestCodexKeptSocketReleasesTurnContextWhilePooled(test *testing.T) {
+	socketOn(test)
+	backend := &fakeSocketBackend{keep: true}
+	backend.frames = keptReply(backend)
+	chatgpt(test, backend.ServeHTTP)
+
+	firstRef := keptPostWithSentinel(test, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing))
+	if kept := codexKeptCount(); kept != 1 {
+		test.Fatalf("kept sockets after first turn = %d, want 1", kept)
+	}
+	if !awaitWeakCleared(firstRef) {
+		test.Fatalf("kept upstream socket retained the first turn context while pooled (kept=%d)", codexKeptCount())
+	}
+	if kept := codexKeptCount(); kept != 1 {
+		test.Fatalf("kept sockets after GC = %d, want 1", kept)
+	}
+
+	secondRef := keptPostWithSentinel(test, "acct-1", keptTurn("conv-1", "gpt-5.5", userPing, asstPong, userAgain))
+	if posts, turns := backend.counts(); posts != 0 || turns != 2 || backend.opened() != 1 {
+		test.Fatalf("%d posts, %d turns on %d sockets; want both turns on the kept socket", posts, turns, backend.opened())
+	}
+	second := gjson.ParseBytes(backend.turn(1).msg)
+	if second.Get("previous_response_id").String() != "resp-1" || len(second.Get("input").Array()) != 1 {
+		test.Errorf("reused socket did not send delta turn: %s", backend.turn(1).msg)
+	}
+	if kept := codexKeptCount(); kept != 1 {
+		test.Fatalf("kept sockets after second turn = %d, want 1", kept)
+	}
+	if !awaitWeakCleared(secondRef) {
+		test.Fatalf("kept upstream socket retained the reused turn context while pooled (kept=%d)", codexKeptCount())
+	}
+}
+
+func TestResponsesSocketReleasedWhileUpstreamSocketKept(test *testing.T) {
+	fresh(test)
+	socketOn(test)
+
+	backend := &fakeSocketBackend{keep: true}
+	backend.frames = keptReply(backend)
+	upstream := httptest.NewServer(withoutAnonymousFixtureProbe(http.HandlerFunc(backend.ServeHTTP)))
+	test.Cleanup(upstream.Close)
+	if err := provider.Save(provider.Provider{
+		ID: "p22-fixture", Name: "P22 Fixture", Key: "p22-key", Models: []string{"gpt-5.5"},
+		Responses: upstream.URL + "/backend-api/codex", Socket: provider.SocketOn,
+	}); err != nil {
+		test.Fatal(err)
+	}
+
+	server, front := sockServer(test)
+	client, _, err := dialSock(test, front, "/v1/responses", http.Header{
+		"OpenAI-Beta": {"responses_websockets=2026-02-06"},
+	})
+	if err != nil {
+		test.Fatal(err)
+	}
+	frame := func(previous, input string) string {
+		return strings.Replace(create(previous, input, `"prompt_cache_key":"p22-pool-release"`), `"fake/m1"`, `"gpt-5.5"`, 1)
+	}
+	largeInput := strings.Replace(userMore, "and more", strings.Repeat("x", 1<<20), 1)
+
+	client.send(frame("", userHi))
+	events, err := client.until("response.completed", "error")
+	if err != nil || last(events).Get("type").String() != "response.completed" {
+		test.Fatalf("turn 1 failed: err=%v last=%v", err, last(events).Raw)
+	}
+	client.send(frame("resp-1", largeInput))
+	events, err = client.until("response.completed", "error")
+	if err != nil || last(events).Get("type").String() != "response.completed" {
+		test.Fatalf("turn 2 failed: err=%v last=%v", err, last(events).Raw)
+	}
+	if posts, turns := backend.counts(); posts != 0 || turns != 2 || backend.opened() != 1 {
+		test.Fatalf("got %d posts, %d turns, %d handshakes; want 0, 2, 1", posts, turns, backend.opened())
+	}
+	if kept := codexKeptCount(); kept != 1 {
+		test.Fatalf("kept upstream sockets = %d, want 1", kept)
+	}
+
+	var socketRef weak.Pointer[responsesSocket]
+	var historyRef weak.Pointer[byte]
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		server.sockets.mu.Lock()
+		for sock := range server.sockets.m {
+			sock.mu.Lock()
+			if !sock.turning && len(sock.turns) == 2 && len(sock.turns[1].items) >= 3 && len(sock.turns[1].items[2]) > 0 {
+				socketRef = weak.Make(sock)
+				historyRef = weak.Make(&sock.turns[1].items[2][0])
+			}
+			sock.mu.Unlock()
+		}
+		server.sockets.mu.Unlock()
+		if socketRef.Value() != nil && historyRef.Value() != nil {
+			break
+		}
+	}
+	if socketRef.Value() == nil || historyRef.Value() == nil {
+		test.Fatal("failed to capture public responsesSocket and large history item before close")
+	}
+
+	if err := client.c.CloseNow(); err != nil {
+		test.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		server.sockets.mu.Lock()
+		remaining := len(server.sockets.m)
+		server.sockets.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+	}
+	server.sockets.mu.Lock()
+	remaining := len(server.sockets.m)
+	server.sockets.mu.Unlock()
+	if remaining != 0 {
+		test.Fatalf("public sockets remaining after close = %d, want 0", remaining)
+	}
+
+	if !awaitWeakCleared(socketRef) {
+		test.Fatalf("closed public responsesSocket stayed alive while upstream socket remained pooled (kept=%d)", codexKeptCount())
+	}
+	if !awaitWeakCleared(historyRef) {
+		test.Fatalf("closed public responsesSocket large history stayed alive while upstream socket remained pooled (kept=%d)", codexKeptCount())
+	}
+	if kept := codexKeptCount(); kept != 1 {
+		test.Fatalf("kept upstream sockets after public close and GC = %d, want 1", kept)
 	}
 }

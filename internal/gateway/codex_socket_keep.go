@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -71,7 +70,6 @@ var (
 // got back.
 type codexKept struct {
 	c        *websocket.Conn
-	cancel   context.CancelFunc
 	key      string // "" for a turn that names no conversation
 	host     string
 	header   http.Header // the handshake's, as each reply carries them
@@ -98,7 +96,6 @@ type codexKept struct {
 func (k *codexKept) close() {
 	k.once.Do(func() {
 		k.c.CloseNow()
-		k.cancel()
 	})
 }
 
@@ -107,7 +104,6 @@ func (k *codexKept) closeNormally() {
 	k.once.Do(func() {
 		go func() {
 			k.c.Close(websocket.StatusNormalClosure, "")
-			k.cancel()
 		}()
 	})
 }

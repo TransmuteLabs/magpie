@@ -3594,6 +3594,13 @@ serves it on `/v1/responses`, `/responses` and the Codex backend's
   at most 256 KiB. An over-budget turn goes whole and supplies no base for
   the next delta. The next eligible whole turn establishes a base again.
   The usual WebSocket message-size fallback applies to these whole turns.
+  Once dialed, a kept vendor socket drops its handshake context and timer
+  reference and runs per-turn WebSocket reads and writes under a value-free
+  context that mirrors the request's deadline and cancellation
+  (`codexSocketIOContext`), releasing the watch as soon as the turn finishes
+  so a pooled upstream socket never pins a closed public `responsesSocket`
+  or its held turn history (`TestCodexKeptSocketReleasesTurnContextWhilePooled`,
+  `TestResponsesSocketReleasedWhileUpstreamSocketKept`).
 
 ## A Realtime session
 

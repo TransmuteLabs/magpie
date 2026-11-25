@@ -513,10 +513,17 @@ func codexSocketHeaders(req *http.Request, copilot bool) http.Header {
 // so (a provider's Socket "on" never is).
 func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *codexTurnShape, shun, relay, copilot bool) (*http.Response, error) {
 	// the socket may outlive the request, kept for the next turn: only
-	// the handshake ends with it
+	// the handshake ends with it, and neither the stopped timer nor the
+	// kept socket may hold req's context after dialing
 	ctx, cancel := context.WithCancel(context.WithoutCancel(req.Context()))
 	stop := context.AfterFunc(req.Context(), cancel)
-	timer := time.AfterFunc(codexSocketDial, cancel)
+	var fireCancel atomic.Pointer[context.CancelFunc]
+	fireCancel.Store(&cancel)
+	timer := time.AfterFunc(codexSocketDial, func() {
+		if fn := fireCancel.Swap(nil); fn != nil {
+			(*fn)()
+		}
+	})
 	u := *req.URL
 	c, hs, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{
 		HTTPClient:      &http.Client{Transport: t.next, CheckRedirect: provider.KeepsCredentials},
@@ -524,9 +531,10 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 		CompressionMode: websocket.CompressionNoContextTakeover,
 	})
 	stopped := timer.Stop()
+	fireCancel.Store(nil)
 	going := stop()
+	cancel()
 	if err != nil {
-		cancel()
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()
 		}
@@ -555,7 +563,6 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 	}
 	if !stopped || !going {
 		c.CloseNow()
-		cancel()
 		if req.Context().Err() != nil {
 			return nil, req.Context().Err()
 		}
@@ -573,8 +580,41 @@ func (t codexSocket) socket(req *http.Request, msg []byte, key string, shape *co
 		}
 		header[k] = vs
 	}
-	k := &codexKept{c: c, cancel: cancel, key: key, host: u.Host, header: header, opened: time.Now(), copilot: copilot, relay: relay}
+	k := &codexKept{c: c, key: key, host: u.Host, header: header, opened: time.Now(), copilot: copilot, relay: relay}
 	return t.turn(req, k, msg, shape, false, "")
+}
+
+// codexSocketIOContext mirrors parent's cancellation and deadline onto a
+// value-free context for websocket.Conn Write and Read calls: coder/websocket
+// retains the last Write and Read contexts on its pooled connection, so passing
+// req.Context() directly keeps the turn's request graph alive while the socket
+// waits in codexKeepPool.
+func codexSocketIOContext(parent context.Context) (context.Context, func()) {
+	if parent.Done() == nil {
+		return context.Background(), func() {}
+	}
+	base := context.Background()
+	stopDeadline := func() {}
+	if deadline, ok := parent.Deadline(); ok {
+		base, stopDeadline = context.WithDeadline(base, deadline)
+	}
+	ioCtx, cancel := context.WithCancelCause(base)
+	if parent.Err() != nil {
+		cancel(context.Cause(parent))
+		stopDeadline()
+		return ioCtx, func() {}
+	}
+	stop := context.AfterFunc(parent, func() {
+		cancel(context.Cause(parent))
+	})
+	var once sync.Once
+	return ioCtx, func() {
+		once.Do(func() {
+			stop()
+			cancel(nil)
+			stopDeadline()
+		})
+	}
 }
 
 // turn sends msg on k and reads the frames ahead of the reply proper. On
@@ -593,8 +633,10 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 		}
 		return err
 	}
+	ioCtx, releaseIO := codexSocketIOContext(req.Context())
 	trace := socketTrace(req, reused)
-	if err := k.c.Write(req.Context(), websocket.MessageText, msg); err != nil {
+	if err := k.c.Write(ioCtx, websocket.MessageText, msg); err != nil {
+		releaseIO()
 		k.close()
 		return nil, ended(err)
 	}
@@ -603,7 +645,7 @@ func (t codexSocket) turn(req *http.Request, k *codexKept, msg []byte, shape *co
 		trace.WroteRequest(httptrace.WroteRequestInfo{})
 	}
 	header := k.header.Clone()
-	body := &codexSocketBody{c: k.c, ctx: req.Context(), k: k, shape: shape}
+	body := &codexSocketBody{c: k.c, ctx: ioCtx, release: releaseIO, k: k, shape: shape}
 	for i := range codexSocketPrelude {
 		frame, err := body.frame()
 		if i == 0 && err == nil && trace != nil && trace.GotFirstResponseByte != nil {
@@ -839,17 +881,24 @@ func sseEvent(kind string, frame []byte) []byte {
 
 // codexSocketBody is the socket's frames read as server-sent events.
 type codexSocketBody struct {
-	c      *websocket.Conn
-	ctx    context.Context
-	k      *codexKept
-	shape  *codexTurnShape // nil: the socket isn't kept after the turn
-	output []itemSum
+	c       *websocket.Conn
+	ctx     context.Context
+	release func()
+	k       *codexKept
+	shape   *codexTurnShape // nil: the socket isn't kept after the turn
+	output  []itemSum
 	// sealed: which of output are reasoning items (codexKept.sealed)
 	sealed  []bool
 	pending []byte
 	done    bool
 	err     error
 	closed  atomic.Bool
+}
+
+func (b *codexSocketBody) releaseIO() {
+	if b.release != nil {
+		b.release()
+	}
 }
 
 // frame is the socket's next frame, nil for one the reply leaves out.
@@ -860,6 +909,7 @@ func (b *codexSocketBody) frame() ([]byte, error) {
 	typ, data, err := b.c.Read(b.ctx)
 	if err != nil {
 		b.done = true
+		b.releaseIO()
 		b.k.close()
 		if websocket.CloseStatus(err) == websocket.StatusNormalClosure {
 			return nil, io.EOF
@@ -887,6 +937,7 @@ func (b *codexSocketBody) frame() ([]byte, error) {
 		}
 	case "response.completed":
 		b.done = true
+		b.releaseIO()
 		if id := gjson.GetBytes(data, "response.id").String(); id != "" && b.shape != nil {
 			// kept for the conversation's next turn, which may carry on
 			// from this one
@@ -899,6 +950,7 @@ func (b *codexSocketBody) frame() ([]byte, error) {
 		}
 	case "response.failed", "response.incomplete", "response.done", "error":
 		b.done = true
+		b.releaseIO()
 		b.k.closeNormally()
 	}
 	return data, nil
@@ -940,5 +992,6 @@ func (b *codexSocketBody) Close() error {
 	if !b.done {
 		b.k.close()
 	}
+	b.releaseIO()
 	return nil
 }
