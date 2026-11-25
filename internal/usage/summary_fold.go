@@ -32,10 +32,11 @@ type summaryRun struct {
 	period         Period
 	historicalKeys map[string]bool
 	priceOf        func(Record) *catalog.Price
+	agents         agentResolver
 }
 
 func newSummaryRun(p Period, now, first time.Time, historicalKeys map[string]bool) *summaryRun {
-	u := &summaryRun{now: now, renamed: provider.UsageRenames()}
+	u := &summaryRun{now: now, renamed: provider.UsageRenames(), agents: newAgentResolver()}
 	// the names models' usage is counted under (SlouchyQuill507): a model's
 	// row sums its ids, each call priced by its own id first
 	u.alias = provider.UsageAlias()
@@ -237,7 +238,9 @@ func (c *summaryCounts) add(u *summaryRun, k *summaryKeying, r Record) {
 	if i >= 0 && i < len(c.series) {
 		c.series[i].add(r, pr)
 	}
-	id := ReportedAs(r.Agent) // one kept before magpie knew the agent by name
+	rawAgent := u.agents.agentOf(r.Agent)
+	id, _ := u.agents.clients.report(rawAgent) // one kept before magpie knew the agent by name
+	ownCall := isMagpieAgent(rawAgent)
 	a := c.agents.at(id, func() Group { return Group{ID: id} })
 	a.add(r, pr)
 	if r.Time.After(a.Last) {
@@ -253,7 +256,7 @@ func (c *summaryCounts) add(u *summaryRun, k *summaryKeying, r Record) {
 	}
 	m := c.models.at(key, func() Group { return Group{ID: key, Provider: r.Provider, Model: model, Host: host} })
 	m.add(r, pr)
-	m.addOwn(r, pr)
+	m.addOwnKnown(r, pr, ownCall)
 	if r.CallerKeyID != "" {
 		g := c.callerKeys.at(r.CallerKeyID, func() Group { return Group{ID: r.CallerKeyID, CallerKeyID: r.CallerKeyID} })
 		g.CallerKeyName = r.CallerKeyName
@@ -265,13 +268,13 @@ func (c *summaryCounts) add(u *summaryRun, k *summaryKeying, r Record) {
 		})
 		g.ProviderKeyName = r.ProviderKeyName
 		g.add(r, pr)
-		g.addOwn(r, pr)
+		g.addOwnKnown(r, pr, ownCall)
 	}
 	if k.accountProviders[r.Provider] {
 		who := r.Account()
 		g := c.accounts.at(r.Provider+"@"+who, func() Group { return Group{ID: r.Provider + "@" + who, Provider: r.Provider, Account: who} })
 		g.add(r, pr)
-		g.addOwn(r, pr)
+		g.addOwnKnown(r, pr, ownCall)
 	}
 	if r.Session != "" {
 		c.sessions.at(id+"|"+r.Session, func() Group { return Group{ID: r.Session, Agent: id} }).add(r, pr)

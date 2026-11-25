@@ -480,17 +480,11 @@ var builtinAgents = sync.OnceValue(func() []Known {
 	return Agents()
 })
 
-// knownAgents are magpie's own agents, then those plugins add.
-func knownAgents() []Known {
-	own := builtinAgents()
+func pluginAgents() []Known {
 	if PluginAgents == nil {
-		return own
+		return nil
 	}
-	more := PluginAgents()
-	if len(more) == 0 {
-		return own
-	}
-	return append(slices.Clip(own), more...)
+	return PluginAgents()
 }
 
 // IsAgent says whether id is an agent magpie knows, its own or a plugin's,
@@ -500,9 +494,11 @@ func IsAgent(id string) bool {
 }
 
 func KnownAgentID(id string) string {
-	for _, agent := range knownAgents() {
-		if agent.ID == id || slices.Contains(agent.Names, id) {
-			return agent.ID
+	for _, group := range [2][]Known{builtinAgents(), pluginAgents()} {
+		for _, agent := range group {
+			if agent.ID == id || slices.Contains(agent.Names, id) {
+				return agent.ID
+			}
 		}
 	}
 	return ""
@@ -512,9 +508,11 @@ func KnownAgentID(id string) string {
 // claude), its own plugin's for an agent a plugin adds; the id itself for
 // one magpie doesn't know, or knows by no other name.
 func AgentName(id string) string {
-	for _, k := range knownAgents() {
-		if k.ID == id && k.Name != "" {
-			return k.Name
+	for _, group := range [2][]Known{builtinAgents(), pluginAgents()} {
+		for _, known := range group {
+			if known.ID == id && known.Name != "" {
+				return known.Name
+			}
 		}
 	}
 	return id
@@ -551,24 +549,34 @@ func IsLibrary(id string) bool { return libraries[strings.ToLower(strings.TrimSp
 // AgentOf names the agent behind a client User-Agent. Known agents map to
 // their magpie id; anything else keeps its product name.
 func AgentOf(ua string) string {
-	return agentOf(ua, knownAgents())
+	return agentOfSplit(ua, builtinAgents(), pluginAgents())
 }
 
 func agentOf(ua string, agents []Known) string {
+	return agentOfSplit(ua, agents, nil)
+}
+
+func agentOfSplit(ua string, primary, extra []Known) string {
 	ua = strings.TrimSpace(ua)
 	name, _, _ := strings.Cut(ua, "/")
 	name, _, _ = strings.Cut(name, " ")
-	l := strings.ToLower(name)
+	lower := strings.ToLower(name)
 	// a name first: cursor-local is its own, though Cursor's UA (cursor)
 	// begins it
-	for _, k := range agents {
-		if slices.Contains(k.Names, l) {
-			return k.ID
+	for _, group := range [2][]Known{primary, extra} {
+		for _, known := range group {
+			if slices.Contains(known.Names, lower) {
+				return known.ID
+			}
 		}
 	}
-	for _, k := range agents {
-		if slices.ContainsFunc(k.UA, func(p string) bool { return strings.HasPrefix(l, p) }) {
-			return k.ID
+	for _, group := range [2][]Known{primary, extra} {
+		for _, known := range group {
+			for _, prefix := range known.UA {
+				if strings.HasPrefix(lower, prefix) {
+					return known.ID
+				}
+			}
 		}
 	}
 	if name == "" {
@@ -1114,7 +1122,11 @@ type OwnShare struct {
 
 // addOwn counts r in g's own share when magpie made it by itself.
 func (g *Group) addOwn(r Record, price *catalog.Price) {
-	if !r.ByMagpie() {
+	g.addOwnKnown(r, price, r.ByMagpie())
+}
+
+func (g *Group) addOwnKnown(r Record, price *catalog.Price, own bool) {
+	if !own {
 		return
 	}
 	if !r.HandedOn {
@@ -1130,7 +1142,10 @@ func (g *Group) addOwn(r Record, price *catalog.Price) {
 // its routing classifier, System One's decision, a web search or an
 // image description it asked for (#1839).
 func (r Record) ByMagpie() bool {
-	id := AgentOf(r.Agent)
+	return isMagpieAgent(AgentOf(r.Agent))
+}
+
+func isMagpieAgent(id string) bool {
 	// "magpie" as the agents know it; its own User-Agents (magpie-router/1,
 	// magpie-search/1) where they aren't loaded
 	return id == "magpie" || strings.HasPrefix(id, "magpie-")

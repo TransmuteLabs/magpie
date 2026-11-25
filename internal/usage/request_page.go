@@ -2977,8 +2977,9 @@ func pageFromLedgerAt(p Period, f Filter, offset, limit int, all Ledgered, now t
 	}
 	out.AgentModels = map[string][]Share{}
 	byAgent := map[string][]Row{}
+	resolveAgent := newAgentResolver()
 	for _, r := range all.Filtered(f.Without("modelAt")).Rows {
-		a := ReportedAs(r.Agent)
+		a := resolveAgent.reportedAs(r.Agent)
 		byAgent[a] = append(byAgent[a], r)
 	}
 	for a, rows := range byAgent {

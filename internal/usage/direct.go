@@ -94,12 +94,13 @@ func direct(p Period, now time.Time, rows []Row) Summary {
 		m[k].addRow(r)
 	}
 	alias := provider.UsageAlias() // each row priced by its own id already
+	resolveAgent := newAgentResolver()
 	for _, r := range rows {
 		if r.Source != "log" || r.IsRejected() || r.Time.Before(s.Since) || after(until, r.Time) {
 			continue
 		}
 		s.Totals.addRow(r)
-		id := ReportedAs(r.Agent)
+		id := resolveAgent.reportedAs(r.Agent)
 		put(agents, id, Group{ID: id}, r)
 		if a := agents[id]; r.Time.After(a.Last) {
 			a.Last = r.Time

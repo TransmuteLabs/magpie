@@ -72,18 +72,37 @@ type sessionAgents struct {
 
 var lastSessionAgents atomic.Pointer[sessionAgents]
 
+func sameKnownAgents(cached, own, more []Known) bool {
+	if len(cached) != len(own)+len(more) {
+		return false
+	}
+	for index, item := range own {
+		other := cached[index]
+		if other.ID != item.ID || !slices.Equal(other.Names, item.Names) || !slices.Equal(other.UA, item.UA) {
+			return false
+		}
+	}
+	for index, item := range more {
+		other := cached[len(own)+index]
+		if other.ID != item.ID || !slices.Equal(other.Names, item.Names) || !slices.Equal(other.UA, item.UA) {
+			return false
+		}
+	}
+	return true
+}
+
 func readSessionAgents() *sessionAgents {
-	clients, known := readClientAgents(), knownAgents()
-	if current := lastSessionAgents.Load(); current != nil && current.clients == clients &&
-		slices.EqualFunc(current.known, known, func(first, second Known) bool {
-			return first.ID == second.ID && slices.Equal(first.Names, second.Names) && slices.Equal(first.UA, second.UA)
-		}) {
+	clients, own, more := readClientAgents(), builtinAgents(), pluginAgents()
+	if current := lastSessionAgents.Load(); current != nil && current.clients == clients && sameKnownAgents(current.known, own, more) {
 		return current
 	}
-	known = slices.Clone(known)
-	for index := range known {
-		known[index].Names = slices.Clone(known[index].Names)
-		known[index].UA = slices.Clone(known[index].UA)
+	known := make([]Known, 0, len(own)+len(more))
+	for _, group := range [2][]Known{own, more} {
+		for _, item := range group {
+			item.Names = slices.Clone(item.Names)
+			item.UA = slices.Clone(item.UA)
+			known = append(known, item)
+		}
 	}
 	next := &sessionAgents{known: known, clients: clients}
 	lastSessionAgents.Store(next)
@@ -92,5 +111,39 @@ func readSessionAgents() *sessionAgents {
 
 func (agents *sessionAgents) reportedAs(ua string) string {
 	id, _ := agents.clients.report(agentOf(ua, agents.known))
+	return id
+}
+
+// agentResolver snapshots known agents and ClientAgents once for a pass over
+// usage rows, caching raw AgentOf lookups by User-Agent string.
+type agentResolver struct {
+	own     []Known
+	more    []Known
+	clients *clientMap
+	raw     map[string]string
+}
+
+func newAgentResolver() agentResolver {
+	return agentResolver{
+		own:     builtinAgents(),
+		more:    pluginAgents(),
+		clients: clientAs.Load(),
+	}
+}
+
+func (resolver *agentResolver) agentOf(ua string) string {
+	if id, ok := resolver.raw[ua]; ok {
+		return id
+	}
+	id := agentOfSplit(ua, resolver.own, resolver.more)
+	if resolver.raw == nil {
+		resolver.raw = map[string]string{}
+	}
+	resolver.raw[ua] = id
+	return id
+}
+
+func (resolver *agentResolver) reportedAs(ua string) string {
+	id, _ := resolver.clients.report(resolver.agentOf(ua))
 	return id
 }

@@ -427,8 +427,9 @@ func gatewayMatches(recs []Record, logs []sessions.Call) map[int]bool {
 
 func gatewayMatchesDetails(recs []Record, logs []sessions.Call) (map[int]bool, map[int]int, map[int]string, map[int]*bool) {
 	gateway, local := &rowChunk{}, &rowChunk{}
+	resolveAgent := newAgentResolver()
 	for i, r := range recs {
-		r.Agent = ReportedAs(r.Agent)
+		r.Agent = resolveAgent.reportedAs(r.Agent)
 		gateway.add(Row{Record: r}, "", int64(i), false)
 	}
 	for i, c := range logs {
@@ -482,8 +483,9 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 	rows = make([]Row, 0, len(recs)+len(logs))
 	agents, providers = []string{}, []string{}
 	identities := newSessionResolver(logs)
+	resolveAgent := newAgentResolver()
 	add := func(r Record, pr *catalog.Price, source, actor string) {
-		if a := ReportedAs(r.Agent); !slices.Contains(agents, a) {
+		if a := resolveAgent.reportedAs(r.Agent); !slices.Contains(agents, a) {
 			agents = append(agents, a)
 		}
 		if r.Provider != "" && !slices.Contains(providers, r.Provider) {
