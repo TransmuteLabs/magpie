@@ -96,7 +96,8 @@ type codexForkParent struct {
 
 type codexForkRead struct {
 	codexForkParent
-	done chan struct{}
+	done    chan struct{}
+	waiters int
 }
 
 const codexForksKept = 8
@@ -155,6 +156,7 @@ func codexCheckpointsOf(path string) (map[cxCheckpoint]bool, map[string]bool) {
 	}
 	for _, reading := range codexForks.reading {
 		if reading.path == path && sameCodexParent(reading.info, info) {
+			reading.waiters++
 			codexForks.Unlock()
 			file.Close()
 			<-reading.done

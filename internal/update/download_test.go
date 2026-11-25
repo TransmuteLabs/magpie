@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -259,66 +258,75 @@ func TestDownloadNotFoundIsNotRetried(t *testing.T) {
 // and the steps say so: the download, the wait to try again, the rest,
 // then the checksum.
 func TestDownloadStallIsTriedAgain(t *testing.T) {
-	quickRetries(t)
-	old := stallAfter
-	stallAfter = 300 * time.Millisecond
-	t.Cleanup(func() { stallAfter = old })
-	body := make([]byte, 600<<10)
-	for i := range body {
-		body[i] = byte(i * 13)
-	}
-	sum := sha256.Sum256(body)
-	cut := len(body) * 17 / 100
-	var mu sync.Mutex
-	var ranges []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		ranges = append(ranges, r.Header.Get("Range"))
-		first := len(ranges) == 1
-		mu.Unlock()
-		if first {
-			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-			w.Write(body[:cut])
-			w.(http.Flusher).Flush()
-			<-r.Context().Done() // silent, the connection open, until the client goes
-			return
+	synctest.Test(t, func(t *testing.T) {
+		quickRetries(t)
+		oldStall, oldClient := stallAfter, client
+		stallAfter = 300 * time.Millisecond
+		t.Cleanup(func() { stallAfter, client = oldStall, oldClient })
+		body := make([]byte, 600<<10)
+		for index := range body {
+			body[index] = byte(index * 13)
 		}
-		from, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.Header.Get("Range"), "bytes="), "-"))
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, len(body)-1, len(body)))
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)-from))
-		w.WriteHeader(http.StatusPartialContent)
-		w.Write(body[from:])
-	}))
-	defer srv.Close()
+		sum := sha256.Sum256(body)
+		cut := len(body) * 17 / 100
+		var ranges []string
+		client = &http.Client{
+			Timeout: oldClient.Timeout,
+			Transport: downloadTransport(func(request *http.Request) (*http.Response, error) {
+				ranges = append(ranges, request.Header.Get("Range"))
+				if len(ranges) == 1 {
+					prefix := bytes.NewReader(body[:cut])
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						ContentLength: int64(len(body)),
+						Header:        http.Header{"Content-Length": {strconv.Itoa(len(body))}},
+						Body: io.NopCloser(downloadReader(func(buffer []byte) (int, error) {
+							if prefix.Len() > 0 {
+								return prefix.Read(buffer)
+							}
+							<-request.Context().Done()
+							return 0, request.Context().Err()
+						})),
+					}, nil
+				}
+				from, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(request.Header.Get("Range"), "bytes="), "-"))
+				return &http.Response{
+					StatusCode:    http.StatusPartialContent,
+					ContentLength: int64(len(body) - from),
+					Header: http.Header{
+						"Content-Range":  {fmt.Sprintf("bytes %d-%d/%d", from, len(body)-1, len(body))},
+						"Content-Length": {strconv.Itoa(len(body) - from)},
+					},
+					Body: io.NopCloser(bytes.NewReader(body[from:])),
+				}, nil
+			}),
+		}
 
-	var steps []string
-	var done, total int64
-	ctx := WithProgress(context.Background(), func(d, t int64) { done, total = d, t })
-	ctx = WithStep(ctx, func(s string) {
-		if len(steps) == 0 || steps[len(steps)-1] != s {
-			steps = append(steps, s)
+		var steps []string
+		var done, total int64
+		ctx := WithProgress(context.Background(), func(d, t int64) { done, total = d, t })
+		ctx = WithStep(ctx, func(s string) {
+			if len(steps) == 0 || steps[len(steps)-1] != s {
+				steps = append(steps, s)
+			}
+		})
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		path := filepath.Join(t.TempDir(), "magpie.new")
+		start := time.Now()
+		if err := download(ctx, Asset{URL: "https://update.invalid/asset", Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
+			t.Fatalf("after %s at %d of %d bytes: %v", time.Since(start).Round(time.Millisecond), done, total, err)
+		}
+		if want := []string{"", fmt.Sprintf("bytes=%d-", cut)}; !slices.Equal(ranges, want) {
+			t.Fatalf("ranges asked = %q, want %q", ranges, want)
+		}
+		if got, _ := os.ReadFile(path); !bytes.Equal(got, body) {
+			t.Fatalf("file has %d bytes, not the release's", len(got))
+		}
+		if want := []string{StepDownload, StepRetry, StepDownload, StepVerify}; !slices.Equal(steps, want) {
+			t.Fatalf("steps = %q, want %q", steps, want)
 		}
 	})
-	// the update's own bound, far over the stall's, is what the old code
-	// waited out
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	path := filepath.Join(t.TempDir(), "magpie.new")
-	start := time.Now()
-	if err := download(ctx, Asset{URL: srv.URL, Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])}, path); err != nil {
-		t.Fatalf("after %s at %d of %d bytes: %v", time.Since(start).Round(time.Millisecond), done, total, err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if want := []string{"", fmt.Sprintf("bytes=%d-", cut)}; !slices.Equal(ranges, want) {
-		t.Fatalf("ranges asked = %q, want %q", ranges, want)
-	}
-	if b, _ := os.ReadFile(path); !bytes.Equal(b, body) {
-		t.Fatalf("file has %d bytes, not the release's", len(b))
-	}
-	if want := []string{StepDownload, StepRetry, StepDownload, StepVerify}; !slices.Equal(steps, want) {
-		t.Fatalf("steps = %q, want %q", steps, want)
-	}
 }
 
 type downloadTransport func(*http.Request) (*http.Response, error)

@@ -335,9 +335,9 @@ func TestForgetParsesClearsCodexForksCache(t *testing.T) {
 	go readParent()
 	for {
 		codexForks.Lock()
-		readingCount := len(codexForks.reading)
+		joined := len(codexForks.reading) == 1 && codexForks.reading[0].waiters == 1
 		codexForks.Unlock()
-		if readingCount == 1 {
+		if joined {
 			break
 		}
 		runtime.Gosched()

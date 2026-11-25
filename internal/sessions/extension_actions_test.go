@@ -49,7 +49,7 @@ func testSessionExtensionOrdinaryCarryOver(test *testing.T, profile string) {
 	}
 	dir := ".fixture/sessions"
 	destination := filepath.Join(home, filepath.FromSlash(dir))
-	resume := "omp --resume converted-session"
+	resume := defaultOMPResumeRun("omp --resume converted-session")
 	if profile != "" {
 		test.Setenv("OMP_PROFILE", profile)
 		dir = ".omp/agent/sessions"

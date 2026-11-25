@@ -123,16 +123,7 @@ func giveBackTelemetry(t *Telemetry) error {
 	if t == nil || stashShared()[t.all] == "" {
 		return nil
 	}
-	err := t.Set(false)
-	if errors.Is(err, errTelemetryUserOff) {
-		err = nil
-	} else if err != nil {
-		// on as far as magpie goes: what keeps it off is the user's
-		if st, gerr := t.Get(); gerr == nil && !hasOurs(st) {
-			err = nil
-		}
-	}
-	if err != nil {
+	if err := t.Set(false); err != nil && !errors.Is(err, errTelemetryUserOff) {
 		return err
 	}
 	forget(t.all)
@@ -149,9 +140,6 @@ func telemetryAllMarked() bool {
 	}
 	return false
 }
-
-// hasOurs: a state off by keys of magpie's, where Own are the user's
-func hasOurs(st TelemetryState) bool { return st.Off && len(st.Own) < len(st.Keys) }
 
 // KeepTelemetryAllOff turns off, while the switch for every agent is on,
 // the telemetry of an agent found since: with no window open to read the
