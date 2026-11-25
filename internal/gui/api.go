@@ -765,6 +765,13 @@ type searchAuthJSON struct {
 }
 
 func searchState(s *settingsJSON, providers []provider.Provider, models []provider.Entry) {
+	cfg := settings.Shared()
+	projection := gateway.ProjectSearchSettings(providers, cfg.Searcher, cfg.SearcherEffort)
+	projection.Settle()
+	applySearchState(s, providers, models, projection)
+}
+
+func applySearchState(s *settingsJSON, providers []provider.Provider, models []provider.Entry, projection gateway.SearchProjection) {
 	names := map[string]string{}
 	for _, e := range models {
 		names[e.ID] = cmp.Or(e.Name, e.Model)
@@ -797,14 +804,14 @@ func searchState(s *settingsJSON, providers []provider.Provider, models []provid
 		}
 		s.SearchVendors = append(s.SearchVendors, j)
 	}
-	s.SearchProvider = gateway.Searcher()
-	s.SearchAuto, s.SearchUnused = gateway.AutoSearcher(), gateway.SearcherUnused()
-	s.SearchEfforts, s.SearchEffortNow = gateway.SearchEfforts(), gateway.SearchEffortNow()
+	s.SearchProvider = projection.Searcher
+	s.SearchAuto, s.SearchUnused = projection.Auto, projection.Unused
+	s.SearchEfforts, s.SearchEffortNow = projection.Efforts, projection.EffortNow
 	if f, ok := gateway.SearcherFailed(); ok {
 		s.SearchFailed = &searchFailedJSON{Searcher: f.Searcher, Why: f.Why, NothingFound: f.NothingFound, NotSearched: f.NotSearched, Instead: f.Instead, At: f.At}
 	}
 	s.SearchChoices = []searchChoiceJSON{}
-	for _, c := range gateway.Searchers() {
+	for _, c := range projection.Choices {
 		p := c.Provider
 		j := searchChoiceJSON{ID: p.ID, Name: p.Name, Icon: p.Icon, Small: c.Small, SmallName: names[p.ID+"/"+c.Small], Models: []modelRef{}, Service: c.Service, Own: c.Own, Search: c.Search}
 		for _, m := range c.Models {
@@ -813,7 +820,8 @@ func searchState(s *settingsJSON, providers []provider.Provider, models []provid
 		}
 		s.SearchChoices = append(s.SearchChoices, j)
 	}
-	for _, p := range gateway.RelaysSaidToSearch() {
+	s.SearchRelays, s.SearchLeftOut = nil, nil
+	for _, p := range projection.Relays {
 		s.SearchRelays = append(s.SearchRelays, p.Name)
 	}
 	for _, p := range providers {
@@ -1014,16 +1022,24 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 		}
 		vision := gateway.ProjectVisionSettings(s.Vision, s.VisionEffort)
 		video := gateway.ProjectVideoSettings(s.VideoGen)
+		var drawers gateway.SettingsDrawers
+		drawer := drawers.Project(providers, s.ImageGen)
+		search := gateway.ProjectSearchSettings(providers, s.Searcher, s.SearcherEffort)
 		if ctx.Err() != nil {
 			return s, false
 		}
 		videoModels := videoSettingsModels(s.VideoGen, providers)
+		imageModels, imageShown, imageHidden := imageSettingsModels(s.ImageGen, providers, models, groups, &drawers)
 		if !checkModelSources || modelSources.CurrentWithAccountSources(ctx) {
 			if ctx.Err() != nil {
 				return s, false
 			}
 			s.VisionAuto, s.VisionMissing, s.VisionEfforts, s.VisionEffortNow = vision.Auto, vision.Missing, vision.Levels, vision.Effort
 			s.VideoGenAuto, s.VideoGenMissing, s.VideoGenModels = video.Auto, video.Missing, videoModels
+			s.ImageGenAuto, s.ImageGenMissing, s.ImageGenModels, s.ImageGenShown, s.ImageGenHidden = drawer.Auto, drawer.Missing, imageModels, imageShown, imageHidden
+			applySearchState(&s, providers, models, search)
+			search.Settle()
+			drawer.Settle()
 			video.Settle()
 			vision.Settle()
 			break
@@ -1083,46 +1099,6 @@ func settingsStateContext(ctx context.Context, checkModelSources bool) (settings
 			}
 		}
 	}
-	searchState(&s, providers, models)
-	var drawers gateway.SettingsDrawers
-	s.ImageGenAuto, s.ImageGenModels, s.ImageGenMissing = drawers.Auto(providers), []modelRef{}, drawers.Missing()
-	for _, p := range providers {
-		if !p.On() || p.DecideOnly() {
-			continue
-		}
-		// those unticked in its editor left out, but the one picked here
-		// (321sssrt on X): a hidden pick still draws, and shows as picked
-		for _, m := range drawers.Models(p) {
-			if p.DrawerHidden(m.ID) && gateway.ListedDrawer(s.ImageGen) != p.ID+"/"+m.ID {
-				continue
-			}
-			name := m.Name
-			if name == "" {
-				name = m.ID
-			}
-			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: p.ID + "/" + m.ID, Name: name, Provider: p.ID, PName: p.Name, Icon: p.Icon, VendorPicks: gateway.VendorPicksDrawer(p)})
-		}
-	}
-	// the routing groups with a member that draws (7up6666 on X): a
-	// group picked here draws on its members in its routing's order. One
-	// of image models only isn't served to agents (jzw690 on X), so it is
-	// listed from the groups themselves
-	listed := map[string]bool{}
-	for _, e := range models {
-		if e.Group != "" && drawers.GroupDraws(e.ID) {
-			listed[e.ID] = true
-			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: e.ID, Name: e.Name, PName: e.Group})
-		}
-	}
-	for _, g := range groups {
-		if ref := g.Ref(); !g.Hidden && !g.Disabled && !listed[ref] && drawers.GroupDraws(ref) {
-			s.ImageGenModels = append(s.ImageGenModels, modelRef{ID: ref, Name: cmp.Or(g.Name, g.ID), PName: g.ID})
-		}
-	}
-	if v := gateway.ListedDrawer(s.ImageGen); v != s.ImageGen {
-		s.ImageGenShown = v
-	}
-	s.ImageGenHidden = gateway.DrawerHidden(s.ImageGen)
 	// the Codex subagents row's warning: magpie's multi-agent V1 doesn't reach
 	// Codex where its own multi_agent_v2 is on in the config magpie routes, and
 	// magpie writes nothing there — the setting is the user's to turn off
@@ -1148,6 +1124,43 @@ func videoSettingsModels(picked string, providers []provider.Provider) []modelRe
 		}
 	}
 	return models
+}
+
+func imageSettingsModels(picked string, providers []provider.Provider, models []provider.Entry, groups []provider.Group, drawers *gateway.SettingsDrawers) ([]modelRef, string, bool) {
+	listedPick := gateway.ListedDrawer(picked)
+	items := []modelRef{}
+	for _, providerItem := range providers {
+		if !providerItem.On() || providerItem.DecideOnly() {
+			continue
+		}
+		for _, model := range drawers.Models(providerItem) {
+			if providerItem.DrawerHidden(model.ID) && listedPick != providerItem.ID+"/"+model.ID {
+				continue
+			}
+			name := model.Name
+			if name == "" {
+				name = model.ID
+			}
+			items = append(items, modelRef{ID: providerItem.ID + "/" + model.ID, Name: name, Provider: providerItem.ID, PName: providerItem.Name, Icon: providerItem.Icon, VendorPicks: gateway.VendorPicksDrawer(providerItem)})
+		}
+	}
+	listed := map[string]bool{}
+	for _, entry := range models {
+		if entry.Group != "" && drawers.GroupDraws(entry.ID) {
+			listed[entry.ID] = true
+			items = append(items, modelRef{ID: entry.ID, Name: entry.Name, PName: entry.Group})
+		}
+	}
+	for _, group := range groups {
+		if ref := group.Ref(); !group.Hidden && !group.Disabled && !listed[ref] && drawers.GroupDraws(ref) {
+			items = append(items, modelRef{ID: ref, Name: cmp.Or(group.Name, group.ID), PName: group.ID})
+		}
+	}
+	shown := ""
+	if listedPick != picked {
+		shown = listedPick
+	}
+	return items, shown, gateway.DrawerHidden(picked)
 }
 
 // latest is the latest of ts, nil when there is none.

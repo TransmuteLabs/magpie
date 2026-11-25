@@ -412,6 +412,14 @@ func autoSearcher() (provider.Provider, string, bool) {
 // autoSearcherReady is autoSearcher, and whether its pick has allowance
 // left.
 func autoSearcherReady() (provider.Provider, string, bool, bool) {
+	best, model, bestReady, have, held, heldServes := projectAutoSearcherReady(provider.All())
+	if have {
+		settlePick(slotSearcher, held, heldServes, best.ID)
+	}
+	return best, model, bestReady, have
+}
+
+func projectAutoSearcherReady(providers []provider.Provider) (provider.Provider, string, bool, bool, string, bool) {
 	var best provider.Provider
 	var model string
 	top, bestReady, have := 0, false, false
@@ -419,7 +427,7 @@ func autoSearcherReady() (provider.Provider, string, bool, bool) {
 	// readiness (heldPick, auto_picks.go): one added later, a Claude
 	// account's first of all, doesn't take the searches over
 	held, heldServes := heldPick(slotSearcher), false
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		r := searchRank(p)
 		if r < 0 || !p.On() {
 			continue
@@ -443,10 +451,7 @@ func autoSearcherReady() (provider.Provider, string, bool, bool) {
 		}
 		best, model, top, bestReady, have = p, m, r, ready, true
 	}
-	if have {
-		settlePick(slotSearcher, held, heldServes, best.ID)
-	}
-	return best, model, bestReady, have
+	return best, model, bestReady, have, held, heldServes
 }
 
 // Why the searcher Settings names isn't used, and magpie picks one itself.
@@ -468,16 +473,20 @@ func chosenSearcher() (*provider.Provider, string, string) {
 
 // namedSearcher is chosenSearcher of v, a searcher as Settings writes it.
 func namedSearcher(v string) (*provider.Provider, string, string) {
+	return namedSearcherFrom(provider.All(), v)
+}
+
+func namedSearcherFrom(providers []provider.Provider, v string) (*provider.Provider, string, string) {
 	v = strings.TrimSpace(v)
 	if v == "" || v == "off" {
 		return nil, "", ""
 	}
 	id, model, _ := strings.Cut(v, "/")
-	i := slices.IndexFunc(provider.All(), func(p provider.Provider) bool { return p.ID == id })
+	i := slices.IndexFunc(providers, func(p provider.Provider) bool { return p.ID == id })
 	if i < 0 {
 		return nil, "", SearcherGone
 	}
-	p := provider.All()[i]
+	p := providers[i]
 	r, _ := namedSearcherRank(p)
 	switch {
 	case !p.On():
@@ -507,8 +516,12 @@ func namedSearcher(v string) (*provider.Provider, string, string) {
 // would pick, then relays said to search, each with the model it would
 // search with.
 func Searchers() []SearcherChoice {
+	return searchersFrom(provider.All())
+}
+
+func searchersFrom(providers []provider.Provider) []SearcherChoice {
 	var out []SearcherChoice
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		r, manualOnly := namedSearcherRank(p)
 		if r < 0 || !p.On() {
 			continue
@@ -530,6 +543,62 @@ func Searchers() []SearcherChoice {
 	}
 	slices.SortStableFunc(out, func(a, b SearcherChoice) int { return cmp.Compare(a.rank, b.rank) })
 	return out
+}
+
+type SearchProjection struct {
+	Searcher  string
+	Auto      string
+	Unused    string
+	Efforts   []string
+	EffortNow string
+	Choices   []SearcherChoice
+	Relays    []provider.Provider
+
+	have       bool
+	held       string
+	heldServes bool
+	providerID string
+}
+
+func (projection SearchProjection) Settle() {
+	if projection.have {
+		settlePick(slotSearcher, projection.held, projection.heldServes, projection.providerID)
+	}
+}
+
+func ProjectSearchSettings(providers []provider.Provider, picked, effort string) SearchProjection {
+	autoProvider, autoModel, _, haveAuto, held, heldServes := projectAutoSearcherReady(providers)
+	projection := SearchProjection{
+		Choices:    searchersFrom(providers),
+		Relays:     relaysSaidToSearchFrom(providers),
+		have:       haveAuto,
+		held:       held,
+		heldServes: heldServes,
+	}
+	if haveAuto {
+		projection.providerID = autoProvider.ID
+		projection.Auto = searcherName(autoProvider, autoModel)
+	}
+	chosenProvider, chosenModel, unused := namedSearcherFrom(providers, picked)
+	projection.Unused = unused
+	var activeProvider provider.Provider
+	var activeModel string
+	var activeOK bool
+	if picked != "off" {
+		if unused == "" && chosenProvider != nil {
+			activeProvider, activeModel, activeOK = *chosenProvider, chosenModel, true
+		} else if haveAuto {
+			activeProvider, activeModel, activeOK = autoProvider, autoModel, true
+		}
+	}
+	if activeOK {
+		projection.Searcher = searcherName(activeProvider, activeModel)
+		if activeModel != "" && activeModel != codexSearchModel {
+			projection.Efforts = ModelEfforts(activeProvider.ID + "/" + activeModel)
+		}
+		projection.EffortNow = searchEffortWith(activeProvider, activeModel, effort)
+	}
+	return projection
 }
 
 // searcherModels are the models a searcher may be named with: those its
@@ -574,8 +643,12 @@ type SearcherChoice struct {
 // themselves but are not asked for another model unless Settings names them
 // (#359).
 func RelaysSaidToSearch() []provider.Provider {
+	return relaysSaidToSearchFrom(provider.All())
+}
+
+func relaysSaidToSearchFrom(providers []provider.Provider) []provider.Provider {
 	var out []provider.Provider
-	for _, p := range provider.All() {
+	for _, p := range providers {
 		if saidToSearch(p) && p.On() && searchRank(p) < 0 {
 			out = append(out, p)
 		}

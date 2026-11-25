@@ -56,7 +56,11 @@ In one Settings response, `SettingsDrawers` shares an SDK provider's checked
 image-generation list between the Automatic pick, the offered models, and both
 group checks and the missing-pick check. An empty source model list is read again
 if needed. Each subsequent response builds its own list from the current SDK
-selection.
+selection. The main Settings GET and POST compute image-generation (`SettingsDrawers.Project`),
+video (`ProjectVideoSettings`), vision (`ProjectVisionSettings`), and search
+(`ProjectSearchSettings`) projections inside the catalog-authority retry loop
+from the same `providers` snapshot and defer `Settle()` on `auto-picks.json`
+until the observation is accepted.
 
 The common `api`/`prefDeliver` owner in
 [`app.js`](../../internal/gui/assets/app.js) keeps Settings authority across

@@ -412,6 +412,23 @@ func (list *SettingsDrawers) Auto(providers []provider.Provider) string {
 	return autoDrawerWith(providers, list.Models)
 }
 
+type DrawerProjection struct {
+	Auto, Missing string
+	held          string
+	heldDraws     bool
+	providerID    string
+}
+
+func (drawer DrawerProjection) Settle() {
+	settlePick(slotDrawer, drawer.held, drawer.heldDraws, drawer.providerID)
+}
+
+func (list *SettingsDrawers) Project(providers []provider.Provider, picked string) DrawerProjection {
+	projection := projectAutoDrawerWith(providers, list.Models)
+	projection.Missing = drawerMissingWith(picked, list.Models)
+	return projection
+}
+
 // DrawersOf is Drawers with p's model list from avail, called only when
 // it is wanted: the Providers page has each provider's list at hand, and
 // reading it again for each was 15 MB of what twenty window polls
@@ -604,6 +621,12 @@ func AutoDrawer() string {
 }
 
 func autoDrawerWith(providers []provider.Provider, drawers func(provider.Provider) []catalog.Model) string {
+	projection := projectAutoDrawerWith(providers, drawers)
+	projection.Settle()
+	return projection.Auto
+}
+
+func projectAutoDrawerWith(providers []provider.Provider, drawers func(provider.Provider) []catalog.Model) DrawerProjection {
 	type cand struct {
 		ref, released string
 		cost          float64
@@ -665,8 +688,12 @@ func autoDrawerWith(providers []provider.Provider, drawers func(provider.Provide
 			best, bestCost, bestDate = c.ref, c.cost, c.released
 		}
 	}
-	settlePick(slotDrawer, held, heldDraws, providerOfRef(best))
-	return best
+	return DrawerProjection{
+		Auto:       best,
+		held:       held,
+		heldDraws:  heldDraws,
+		providerID: providerOfRef(best),
+	}
 }
 
 // gptImageGen orders OpenAI's image models: by version (gpt-image-2.6 over

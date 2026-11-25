@@ -20,6 +20,7 @@ import (
 	"github.com/yetone/magpie/internal/routes"
 	"github.com/yetone/magpie/internal/settings"
 	sdk "github.com/yetone/magpie/pkg/extension"
+	"github.com/yetone/magpie/pkg/protocolext"
 )
 
 func TestSettingsVisionEffectiveModel(t *testing.T) {
@@ -461,5 +462,155 @@ func TestSettingsVisionFollowsForeignSDKEnablement(t *testing.T) {
 		}
 		check("next request", read(), enabled)
 		check("overlapping publication", during, enabled)
+	}
+}
+
+func TestSettingsImageVideoAndSearchFollowSDKDisableAndCancel(t *testing.T) {
+	home := sandboxHome(t)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	t.Setenv("MAGPIE_NO_ACCOUNTS", "1")
+	t.Setenv("MAGPIE_PLUGIN_MARKET", "off")
+	t.Setenv("MAGPIE_ADDR", "")
+
+	const module, vendor = "fixture.settings-media", "vendor"
+	const imgModel, vidModel = "peer-fixture-canvas", "peer-fixture-movie"
+	providerID := provider.ExtensionProviderID(module, vendor)
+	imgRef := providerID + "/" + imgModel
+	vidRef := providerID + "/" + vidModel
+
+	manifest := sdk.Manifest{
+		Schema: sdk.ManifestSchema, ID: module, Version: "1.0.0", Runtime: "exec", Entry: "worker",
+		Contract: sdk.Contract{
+			Version:      sdk.APIVersion{Major: 1, Minor: 3},
+			Capabilities: []sdk.Capability{sdk.OutboundExecutor},
+		},
+		Providers: []sdk.ProviderDescriptor{{
+			ID: vendor, Name: "Settings media fixture", Protocols: []protocolext.Protocol{protocolext.Chat},
+			Operations: []sdk.ProviderOperation{sdk.OperationImageGenerate, sdk.OperationVideoCreate},
+			Models: []sdk.Model{
+				{ID: imgModel, Kind: "image", OutputModalities: []string{"image"}},
+				{ID: vidModel, Kind: "video", OutputModalities: []string{"video"}},
+			},
+		}},
+	}
+	source := t.TempDir()
+	rawManifest, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, sdk.ManifestFile), rawManifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, manifest.Entry), []byte("settings must not execute a worker"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := extension.Default()
+	peer := extension.NewCatalog(manager.Namespace())
+	if _, err := peer.Install(t.Context(), source, func(context.Context, extension.Installed) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.Save(settings.Settings{Currency: "usd", ImageGen: imgRef, VideoGen: vidRef}); err != nil {
+		t.Fatal(err)
+	}
+	picksPath := filepath.Join(filepath.Dir(provider.Path()), "auto-picks.json")
+	if err := os.WriteFile(picksPath, []byte(`{"seeded":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider.Changed()
+	t.Cleanup(provider.Changed)
+
+	previousServer := served.Swap(nil)
+	t.Cleanup(func() { served.Store(previousServer) })
+	previousLogin := loginState
+	t.Cleanup(func() { loginState = previousLogin })
+
+	handler := Handler(nil, nil)
+
+	// 1. Canceled request must not settle auto-picks.json.
+	reqCtx, cancel := context.WithCancel(t.Context())
+	loginState = func() autostart.State {
+		loginState = previousLogin
+		cancel()
+		return autostart.Off
+	}
+	cancelReply := do(handler, httptest.NewRequestWithContext(reqCtx, http.MethodGet, "/api/settings", nil))
+	if cancelReply.Body.Len() != 0 {
+		t.Fatalf("canceled Settings wrote body %q", cancelReply.Body.String())
+	}
+	picksRaw, err := os.ReadFile(picksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var picks struct {
+		Drawer string `json:"drawer"`
+		Video  string `json:"video"`
+	}
+	if err := json.Unmarshal(picksRaw, &picks); err != nil {
+		t.Fatal(err)
+	}
+	if picks.Drawer != "" || picks.Video != "" {
+		t.Fatalf("canceled Settings persisted holds: %+v", picks)
+	}
+
+	// 2. Peer disable overlapping Settings GET must recompute and never persist the withdrawn provider.
+	loginState = func() autostart.State {
+		loginState = previousLogin
+		if err := peer.SetEnabled(t.Context(), module, false); err != nil {
+			t.Fatal(err)
+		}
+		return autostart.Off
+	}
+	disabledReply := do(handler, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/settings", nil))
+	var disabled settingsJSON
+	if disabledReply.Code != http.StatusOK || json.Unmarshal(disabledReply.Body.Bytes(), &disabled) != nil {
+		t.Fatalf("GET /api/settings (disable): %d %s", disabledReply.Code, disabledReply.Body)
+	}
+	if disabled.ImageGenAuto != "" || disabled.ImageGenMissing != imgRef || len(disabled.ImageGenModels) != 0 {
+		t.Fatalf("disabled ImageGen stale: auto=%q missing=%q models=%v", disabled.ImageGenAuto, disabled.ImageGenMissing, disabled.ImageGenModels)
+	}
+	if disabled.VideoGenAuto != "" || disabled.VideoGenMissing != vidRef || len(disabled.VideoGenModels) != 0 {
+		t.Fatalf("disabled VideoGen stale: auto=%q missing=%q models=%v", disabled.VideoGenAuto, disabled.VideoGenMissing, disabled.VideoGenModels)
+	}
+	picksRaw, err = os.ReadFile(picksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(picksRaw, &picks); err != nil {
+		t.Fatal(err)
+	}
+	if picks.Drawer != "" || picks.Video != "" {
+		t.Fatalf("disabled Settings persisted withdrawn holds: %+v", picks)
+	}
+
+	// 3. Peer re-enable overlapping Settings GET must restore both projections and settle holds.
+	loginState = func() autostart.State {
+		loginState = previousLogin
+		if err := peer.SetEnabled(t.Context(), module, true); err != nil {
+			t.Fatal(err)
+		}
+		return autostart.Off
+	}
+	enabledReply := do(handler, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/settings", nil))
+	var enabled settingsJSON
+	if enabledReply.Code != http.StatusOK || json.Unmarshal(enabledReply.Body.Bytes(), &enabled) != nil {
+		t.Fatalf("GET /api/settings (enable): %d %s", enabledReply.Code, enabledReply.Body)
+	}
+	if enabled.ImageGenAuto != imgRef || enabled.ImageGenMissing != "" || !slices.ContainsFunc(enabled.ImageGenModels, func(m modelRef) bool { return m.ID == imgRef }) {
+		t.Fatalf("enabled ImageGen mismatch: auto=%q missing=%q models=%v", enabled.ImageGenAuto, enabled.ImageGenMissing, enabled.ImageGenModels)
+	}
+	if enabled.VideoGenAuto != vidRef || enabled.VideoGenMissing != "" || !slices.ContainsFunc(enabled.VideoGenModels, func(m modelRef) bool { return m.ID == vidRef }) {
+		t.Fatalf("enabled VideoGen mismatch: auto=%q missing=%q models=%v", enabled.VideoGenAuto, enabled.VideoGenMissing, enabled.VideoGenModels)
+	}
+	picksRaw, err = os.ReadFile(picksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(picksRaw, &picks); err != nil {
+		t.Fatal(err)
+	}
+	if picks.Drawer != providerID || picks.Video != providerID {
+		t.Fatalf("enabled Settings did not settle holds: %+v", picks)
 	}
 }

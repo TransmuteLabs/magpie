@@ -110,10 +110,14 @@ func (vision VisionProjection) Settle() { vision.pick.settle() }
 // asked to search at: the one picked in Settings fitted to its levels,
 // or "" to send none.
 func searchEffort(p provider.Provider, model string) string {
+	return searchEffortWith(p, model, settings.Shared().SearcherEffort)
+}
+
+func searchEffortWith(p provider.Provider, model, want string) string {
 	if model == "" || model == codexSearchModel {
 		return ""
 	}
-	return sideEffort(p.ID+"/"+model, settings.Shared().SearcherEffort)
+	return sideEffort(p.ID+"/"+model, want)
 }
 
 // SearchEffortNow is the level the searcher in use is asked at, when one
