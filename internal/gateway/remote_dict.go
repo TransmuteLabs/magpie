@@ -219,6 +219,8 @@ type sentBodies struct {
 	speaks map[string]bool        // routes whose magpie said it keeps bodies
 	size   int
 	now    func() time.Time
+	ttl    time.Duration
+	sweep  expirySweep
 }
 
 type sentDict struct {
@@ -231,7 +233,7 @@ type sentDict struct {
 var sentDicts = newSentBodies()
 
 func newSentBodies() *sentBodies {
-	return &sentBodies{routes: map[string][]*sentDict{}, speaks: map[string]bool{}, now: time.Now}
+	return &sentBodies{routes: map[string][]*sentDict{}, speaks: map[string]bool{}, now: time.Now, ttl: dictTTL}
 }
 
 // base is the kept body of route that body shares the most with, nil for
@@ -239,9 +241,10 @@ func newSentBodies() *sentBodies {
 func (s *sentBodies) base(route string, at anchors) (best *sentDict, speaks bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	most := dictShareMin - 1
 	for _, d := range s.routes[route] {
-		if s.now().Sub(d.when) > dictTTL {
+		if s.ttl > 0 && now.Sub(d.when) > s.ttl {
 			continue
 		}
 		if v := at.shared(d.at); v > most {
@@ -292,6 +295,9 @@ func (s *sentBodies) put(route string, d *sentDict) {
 			s.routes[oldR] = ds
 		}
 	}
+	if delay, more := s.pruneExpiredLocked(s.now()); more {
+		s.sweep.arm(delay, s.sweepExpired)
+	}
 }
 
 // forget lets go of a route's kept bodies, after its magpie didn't hold
@@ -303,6 +309,54 @@ func (s *sentBodies) forget(route string) {
 		s.size -= len(d.body)
 	}
 	delete(s.routes, route)
+	if len(s.routes) == 0 {
+		s.sweep.stop()
+	}
+}
+
+func (s *sentBodies) pruneExpiredLocked(now time.Time) (time.Duration, bool) {
+	if s.ttl <= 0 {
+		return 0, false
+	}
+	var next time.Duration
+	have := false
+	for route, ds := range s.routes {
+		kept := ds[:0]
+		for _, d := range ds {
+			age := now.Sub(d.when)
+			if age > s.ttl {
+				s.size -= len(d.body)
+				continue
+			}
+			kept = append(kept, d)
+			if left := s.ttl - age; !have || left < next {
+				next, have = left, true
+			}
+		}
+		for i := len(kept); i < len(ds); i++ {
+			ds[i] = nil
+		}
+		if len(kept) == 0 {
+			delete(s.routes, route)
+		} else {
+			s.routes[route] = kept
+		}
+	}
+	if len(s.routes) == 0 {
+		s.sweep.stop()
+	}
+	return next, have
+}
+
+func (s *sentBodies) sweepExpired(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sweep.fire(gen) {
+		return
+	}
+	if delay, more := s.pruneExpiredLocked(s.now()); more {
+		s.sweep.arm(delay, s.sweepExpired)
+	}
 }
 
 // unspoken: the route's magpie couldn't read the encoding at all (a
@@ -413,6 +467,8 @@ type keptBodies struct {
 	lru    list.List // of *heldDict, the front the latest used
 	size   int
 	now    func() time.Time
+	ttl    time.Duration
+	sweep  expirySweep
 }
 
 type heldDict struct {
@@ -425,7 +481,7 @@ type heldDict struct {
 var heldDicts = newKeptBodies()
 
 func newKeptBodies() *keptBodies {
-	return &keptBodies{scopes: map[string]map[bodySum]*list.Element{}, now: time.Now}
+	return &keptBodies{scopes: map[string]map[bodySum]*list.Element{}, now: time.Now, ttl: dictTTL}
 }
 
 func (k *keptBodies) get(scope string, sum bodySum) []byte {
@@ -436,11 +492,12 @@ func (k *keptBodies) get(scope string, sum bodySum) []byte {
 		return nil
 	}
 	b := el.Value.(*heldDict)
-	if k.now().Sub(b.when) > dictTTL {
+	now := k.now()
+	if k.ttl > 0 && now.Sub(b.when) > k.ttl {
 		k.drop(el)
 		return nil
 	}
-	b.when = k.now()
+	b.when = now
 	k.lru.MoveToFront(el)
 	return b.body
 }
@@ -449,15 +506,16 @@ func (k *keptBodies) put(scope string, body []byte) bodySum {
 	sum := sha256.Sum256(body)
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	now := k.now()
 	if el, ok := k.scopes[scope][sum]; ok {
-		el.Value.(*heldDict).when = k.now()
+		el.Value.(*heldDict).when = now
 		k.lru.MoveToFront(el)
 		return sum
 	}
 	if k.scopes[scope] == nil {
 		k.scopes[scope] = map[bodySum]*list.Element{}
 	}
-	k.scopes[scope][sum] = k.lru.PushFront(&heldDict{scope: scope, sum: sum, body: body, when: k.now()})
+	k.scopes[scope][sum] = k.lru.PushFront(&heldDict{scope: scope, sum: sum, body: body, when: now})
 	k.size += len(body)
 	// the scope's own bounds, then every scope's
 	n, held := 0, 0
@@ -465,7 +523,7 @@ func (k *keptBodies) put(scope string, body []byte) bodySum {
 		next := el.Next()
 		if b := el.Value.(*heldDict); b.scope == scope {
 			n, held = n+1, held+len(b.body)
-			if n > dictPerScope || held > dictScopeBytes || k.now().Sub(b.when) > dictTTL {
+			if n > dictPerScope || held > dictScopeBytes || (k.ttl > 0 && now.Sub(b.when) > k.ttl) {
 				k.drop(el)
 			}
 		}
@@ -473,6 +531,9 @@ func (k *keptBodies) put(scope string, body []byte) bodySum {
 	}
 	for k.size > dictServerBytes && k.lru.Len() > 0 {
 		k.drop(k.lru.Back())
+	}
+	if delay, more := k.pruneExpiredLocked(now); more {
+		k.sweep.arm(delay, k.sweepExpired)
 	}
 	return sum
 }
@@ -483,6 +544,34 @@ func (k *keptBodies) drop(el *list.Element) {
 	delete(k.scopes[b.scope], b.sum)
 	if len(k.scopes[b.scope]) == 0 {
 		delete(k.scopes, b.scope)
+	}
+	if k.lru.Len() == 0 {
+		k.sweep.stop()
+	}
+}
+
+func (k *keptBodies) pruneExpiredLocked(now time.Time) (time.Duration, bool) {
+	if k.ttl <= 0 {
+		return 0, false
+	}
+	for el := k.lru.Back(); el != nil; el = k.lru.Back() {
+		age := now.Sub(el.Value.(*heldDict).when)
+		if age <= k.ttl {
+			return k.ttl - age, true
+		}
+		k.drop(el)
+	}
+	return 0, false
+}
+
+func (k *keptBodies) sweepExpired(gen uint64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.sweep.fire(gen) {
+		return
+	}
+	if delay, more := k.pruneExpiredLocked(k.now()); more {
+		k.sweep.arm(delay, k.sweepExpired)
 	}
 }
 

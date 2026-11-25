@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -30,45 +31,69 @@ const (
 	// keptImagesMax is what the kept pictures take at most together, the
 	// least recently used going first
 	keptImagesMax = 128 << 20
+	// keptImagesTTL is how long an unviewed picture stays in keptImages
+	keptImagesTTL = 6 * time.Hour
 )
 
 type keptImage struct {
-	id  int64
-	sum [32]byte
-	b64 string
+	id   int64
+	sum  [32]byte
+	b64  string
+	when time.Time
 }
 
-var keptImages = struct {
+type keptImageStore struct {
 	sync.Mutex
 	bySum map[[32]byte]*list.Element
 	byID  map[int64]*list.Element
 	lru   *list.List // front: the newest
 	size  int
+	cap   int
+	ttl   time.Duration
+	now   func() time.Time
+	sweep expirySweep
 	next  int64
-}{bySum: map[[32]byte]*list.Element{}, byID: map[int64]*list.Element{}, lru: list.New()}
+}
+
+func newKeptImageStore(cap int, ttl time.Duration) *keptImageStore {
+	return &keptImageStore{
+		bySum: map[[32]byte]*list.Element{},
+		byID:  map[int64]*list.Element{},
+		lru:   list.New(),
+		cap:   cap,
+		ttl:   ttl,
+		now:   time.Now,
+	}
+}
+
+var keptImages = newKeptImageStore(keptImagesMax, keptImagesTTL)
 
 // keepImage keeps a picture's base64, giving its id; the same picture
 // keeps one id.
 func keepImage(b64 []byte) int64 {
+	return keptImages.put(b64)
+}
+
+func (k *keptImageStore) put(b64 []byte) int64 {
 	sum := sha256.Sum256(b64)
-	k := &keptImages
 	k.Lock()
 	defer k.Unlock()
+	now := k.now()
 	if e, ok := k.bySum[sum]; ok {
+		e.Value.(*keptImage).when = now
 		k.lru.MoveToFront(e)
 		return e.Value.(*keptImage).id
 	}
 	k.next++
-	im := &keptImage{id: k.next, sum: sum, b64: string(b64)}
+	im := &keptImage{id: k.next, sum: sum, b64: string(b64), when: now}
 	e := k.lru.PushFront(im)
 	k.bySum[sum], k.byID[im.id] = e, e
 	k.size += len(im.b64)
-	for k.size > keptImagesMax && k.lru.Len() > 1 {
-		old := k.lru.Back().Value.(*keptImage)
-		k.lru.Remove(k.lru.Back())
-		delete(k.bySum, old.sum)
-		delete(k.byID, old.id)
-		k.size -= len(old.b64)
+	for k.size > k.cap && k.lru.Len() > 1 {
+		k.dropLocked(k.lru.Back())
+	}
+	if delay, more := k.pruneExpiredLocked(now); more {
+		k.sweep.arm(delay, k.sweepExpired)
 	}
 	return im.id
 }
@@ -80,15 +105,60 @@ func keptImageOf(ref string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	k := &keptImages
+	return keptImages.get(id)
+}
+
+func (k *keptImageStore) get(id int64) (string, bool) {
 	k.Lock()
 	defer k.Unlock()
 	e, ok := k.byID[id]
 	if !ok {
 		return "", false
 	}
+	now := k.now()
+	im := e.Value.(*keptImage)
+	if k.ttl > 0 && now.Sub(im.when) > k.ttl {
+		k.dropLocked(e)
+		return "", false
+	}
+	im.when = now
 	k.lru.MoveToFront(e)
-	return e.Value.(*keptImage).b64, true
+	return im.b64, true
+}
+
+func (k *keptImageStore) dropLocked(e *list.Element) {
+	old := k.lru.Remove(e).(*keptImage)
+	delete(k.bySum, old.sum)
+	delete(k.byID, old.id)
+	k.size -= len(old.b64)
+	if k.lru.Len() == 0 {
+		k.sweep.stop()
+	}
+}
+
+func (k *keptImageStore) pruneExpiredLocked(now time.Time) (time.Duration, bool) {
+	if k.ttl <= 0 {
+		return 0, false
+	}
+	for e := k.lru.Back(); e != nil; e = k.lru.Back() {
+		age := now.Sub(e.Value.(*keptImage).when)
+		if age <= k.ttl {
+			return k.ttl - age, true
+		}
+		k.dropLocked(e)
+	}
+	return 0, false
+}
+
+func (k *keptImageStore) sweepExpired(gen uint64) {
+	k.Lock()
+	defer k.Unlock()
+	if !k.sweep.fire(gen) {
+		return
+	}
+	if delay, more := k.pruneExpiredLocked(k.now()); more {
+		k.sweep.arm(delay, k.sweepExpired)
+	}
 }
 
 // imageMagic is how a PNG, JPEG, GIF or WebP's base64 starts: an

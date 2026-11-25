@@ -84,6 +84,7 @@ type prevStore struct {
 	cap   int
 	ttl   time.Duration
 	now   func() time.Time
+	sweep expirySweep
 }
 
 var prevResponses = newPrevStore(prevCap, prevTTL)
@@ -100,7 +101,7 @@ func (s *prevStore) get(k prevKey) (*prevTurn, bool) {
 		return nil, false
 	}
 	t := e.Value.(*prevTurn)
-	if s.now().Sub(t.at) > s.ttl {
+	if s.ttl > 0 && s.now().Sub(t.at) > s.ttl {
 		s.drop(e)
 		return nil, false
 	}
@@ -130,9 +131,8 @@ func (s *prevStore) put(t *prevTurn) {
 	for s.size > s.cap {
 		s.drop(s.order.Back())
 	}
-	// and what has outlived its time, from the oldest
-	for e := s.order.Back(); e != nil && s.now().Sub(e.Value.(*prevTurn).at) > s.ttl; e = s.order.Back() {
-		s.drop(e)
+	if delay, more := s.pruneExpiredLocked(t.at); more {
+		s.sweep.arm(delay, s.sweepExpired)
 	}
 }
 
@@ -144,6 +144,39 @@ func (s *prevStore) drop(e *list.Element) {
 		if c.refs--; c.refs == 0 {
 			s.size -= c.size
 		}
+	}
+	if s.order.Len() == 0 {
+		s.sweep.stop()
+	}
+}
+
+func (s *prevStore) pruneExpiredLocked(now time.Time) (time.Duration, bool) {
+	if s.ttl <= 0 {
+		return 0, false
+	}
+	var next time.Duration
+	have := false
+	for e := s.order.Back(); e != nil; {
+		prev := e.Prev()
+		age := now.Sub(e.Value.(*prevTurn).at)
+		if age > s.ttl {
+			s.drop(e)
+		} else if left := s.ttl - age; !have || left < next {
+			next, have = left, true
+		}
+		e = prev
+	}
+	return next, have
+}
+
+func (s *prevStore) sweepExpired(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sweep.fire(gen) {
+		return
+	}
+	if delay, more := s.pruneExpiredLocked(s.now()); more {
+		s.sweep.arm(delay, s.sweepExpired)
 	}
 }
 

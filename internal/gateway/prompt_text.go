@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -191,14 +192,36 @@ func ArchivedPromptText(from provider.Protocol, body []byte, id int64, kind stri
 	return pt, ok
 }
 
+const archivedBodyTTL = 30 * time.Minute
+
+type archivedBodyCache struct {
+	sync.Mutex
+	id    int64
+	sum   [32]byte
+	body  []byte
+	when  time.Time
+	ttl   time.Duration
+	now   func() time.Time
+	sweep expirySweep
+}
+
+func (c *archivedBodyCache) sweepExpired(gen uint64) {
+	c.Lock()
+	defer c.Unlock()
+	if !c.sweep.fire(gen) || c.body == nil || c.ttl <= 0 {
+		return
+	}
+	age := c.now().Sub(c.when)
+	if age > c.ttl {
+		c.id, c.sum, c.body, c.when = 0, [32]byte{}, nil, time.Time{}
+		return
+	}
+	c.sweep.arm(c.ttl-age, c.sweepExpired)
+}
+
 // lastArchived is the archived body last masked for the card, so opening
 // its items one by one masks it once
-var lastArchived struct {
-	sync.Mutex
-	id   int64
-	sum  [32]byte
-	body []byte
-}
+var lastArchived = archivedBodyCache{ttl: archivedBodyTTL, now: time.Now}
 
 func archivedMasked(id int64, body []byte) ([]byte, bool) {
 	if len(body) == 0 {
@@ -206,10 +229,17 @@ func archivedMasked(id int64, body []byte) ([]byte, bool) {
 	}
 	sum := sha256.Sum256(body)
 	lastArchived.Lock()
-	if lastArchived.id == id && lastArchived.sum == sum {
-		b := lastArchived.body
-		lastArchived.Unlock()
-		return b, true
+	if lastArchived.id == id && lastArchived.sum == sum && lastArchived.body != nil {
+		now := lastArchived.now()
+		if lastArchived.ttl > 0 && now.Sub(lastArchived.when) > lastArchived.ttl {
+			lastArchived.id, lastArchived.sum, lastArchived.body, lastArchived.when = 0, [32]byte{}, nil, time.Time{}
+			lastArchived.sweep.stop()
+		} else {
+			lastArchived.when = now
+			b := lastArchived.body
+			lastArchived.Unlock()
+			return b, true
+		}
 	}
 	lastArchived.Unlock()
 	if body = leanImages(body, true); len(body) > promptBodyMax {
@@ -221,7 +251,10 @@ func archivedMasked(id int64, body []byte) ([]byte, bool) {
 	}
 	if retained := retainedPromptBody(masked); retained != nil {
 		lastArchived.Lock()
-		lastArchived.id, lastArchived.sum, lastArchived.body = id, sum, retained
+		lastArchived.id, lastArchived.sum, lastArchived.body, lastArchived.when = id, sum, retained, lastArchived.now()
+		if lastArchived.ttl > 0 {
+			lastArchived.sweep.arm(lastArchived.ttl, lastArchived.sweepExpired)
+		}
 		lastArchived.Unlock()
 		masked = retained
 	}

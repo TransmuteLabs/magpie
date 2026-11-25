@@ -82,18 +82,21 @@ type remoteSent struct {
 func (t *remoteSent) size() int { return len(t.input)*sha256.Size + len(t.output)*64 + len(t.id) }
 
 type remoteSentStore struct {
-	mu      sync.Mutex
-	m       map[string][]*remoteSent
-	order   list.List // front the newest
-	size    int
-	refused map[string]time.Time // route: when its magpie refused an id
-	now     func() time.Time
+	mu        sync.Mutex
+	m         map[string][]*remoteSent
+	order     list.List // front the newest
+	size      int
+	refused   map[string]time.Time // route: when its magpie refused an id
+	now       func() time.Time
+	ttl       time.Duration
+	refuseTTL time.Duration
+	sweep     expirySweep
 }
 
 var remoteTurns = newRemoteSentStore()
 
 func newRemoteSentStore() *remoteSentStore {
-	return &remoteSentStore{m: map[string][]*remoteSent{}, refused: map[string]time.Time{}, now: time.Now}
+	return &remoteSentStore{m: map[string][]*remoteSent{}, refused: map[string]time.Time{}, now: time.Now, ttl: prevTTL, refuseTTL: remoteRefusedWait}
 }
 
 // match is the newest turn kept under key that items continue: its input
@@ -102,8 +105,9 @@ func newRemoteSentStore() *remoteSentStore {
 func (s *remoteSentStore) match(key string, sums []itemSum, items []json.RawMessage) (best *remoteSent, n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.now()
 	for _, t := range s.m[key] {
-		if s.now().Sub(t.at) > prevTTL {
+		if s.ttl > 0 && now.Sub(t.at) > s.ttl {
 			continue
 		}
 		c := len(t.input) + len(t.output)
@@ -140,8 +144,8 @@ func (s *remoteSentStore) put(t, replaces *remoteSent) {
 	for s.size > remoteSentCap {
 		s.drop(s.order.Back().Value.(*remoteSent))
 	}
-	for e := s.order.Back(); e != nil && s.now().Sub(e.Value.(*remoteSent).at) > prevTTL; e = s.order.Back() {
-		s.drop(e.Value.(*remoteSent))
+	if delay, more := s.pruneExpiredLocked(t.at); more {
+		s.sweep.arm(delay, s.sweepExpired)
 	}
 }
 
@@ -165,6 +169,52 @@ func (s *remoteSentStore) drop(t *remoteSent) {
 	} else {
 		s.m[t.key] = l
 	}
+	if s.order.Len() == 0 && len(s.refused) == 0 {
+		s.sweep.stop()
+	}
+}
+
+func (s *remoteSentStore) pruneExpiredLocked(now time.Time) (time.Duration, bool) {
+	var next time.Duration
+	have := false
+	if s.ttl > 0 {
+		for e := s.order.Back(); e != nil; {
+			prev := e.Prev()
+			t := e.Value.(*remoteSent)
+			age := now.Sub(t.at)
+			if age > s.ttl {
+				s.drop(t)
+			} else if left := s.ttl - age; !have || left < next {
+				next, have = left, true
+			}
+			e = prev
+		}
+	}
+	if s.refuseTTL > 0 {
+		for route, at := range s.refused {
+			age := now.Sub(at)
+			if age > s.refuseTTL {
+				delete(s.refused, route)
+			} else if left := s.refuseTTL - age; !have || left < next {
+				next, have = left, true
+			}
+		}
+	}
+	if s.order.Len() == 0 && len(s.refused) == 0 {
+		s.sweep.stop()
+	}
+	return next, have
+}
+
+func (s *remoteSentStore) sweepExpired(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.sweep.fire(gen) {
+		return
+	}
+	if delay, more := s.pruneExpiredLocked(s.now()); more {
+		s.sweep.arm(delay, s.sweepExpired)
+	}
 }
 
 func (s *remoteSentStore) forget(t *remoteSent) {
@@ -176,15 +226,22 @@ func (s *remoteSentStore) forget(t *remoteSent) {
 func (s *remoteSentStore) refuse(route string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.refused[route] = s.now()
+	now := s.now()
+	s.refused[route] = now
+	if delay, more := s.pruneExpiredLocked(now); more {
+		s.sweep.arm(delay, s.sweepExpired)
+	}
 }
 
 func (s *remoteSentStore) waiting(route string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	at, ok := s.refused[route]
-	if ok && s.now().Sub(at) > remoteRefusedWait {
+	if ok && s.refuseTTL > 0 && s.now().Sub(at) > s.refuseTTL {
 		delete(s.refused, route)
+		if s.order.Len() == 0 && len(s.refused) == 0 {
+			s.sweep.stop()
+		}
 		return false
 	}
 	return ok
