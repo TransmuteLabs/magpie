@@ -954,7 +954,7 @@ func checkPluginFetchAccount(ctx context.Context, provider, account string, publ
 			first = login.Home
 		}
 	}
-	if switchedOff && auth.Account != first {
+	if switchedOff && auth.Account != first && !pinnedPluginTestAccount(ctx, provider, auth.Account) {
 		return fmt.Errorf("the plugin's selected account is switched off")
 	}
 	return ctx.Err()

@@ -568,6 +568,7 @@ func (p Provider) testOne(ctx context.Context, model string) Result {
 		if acct, found = p.accountNamed(ref); !found {
 			return Result{Model: model, Error: fmt.Sprintf("no account %q", ref)}
 		}
+		ctx = withPinnedTestAccount(ctx, acct.Account)
 	} else if ref != "" {
 		var found bool
 		if p, found = p.keyNamed(ref); !found {

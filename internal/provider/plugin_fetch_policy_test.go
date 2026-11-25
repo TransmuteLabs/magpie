@@ -253,3 +253,59 @@ func startDestinationFetch(t *testing.T, ctx context.Context, p Provider, sessio
 	}
 	return nil
 }
+
+func TestPinnedTestAllowsSwitchedOffNotHidden(t *testing.T) {
+	claudeHome(t)
+	epoch := "epoch-1"
+	saveLogins(t,
+		savedLogin{Agent: "plugin:fakeco", User: "a@fake", Home: "fakeco", On: true, First: true},
+		savedLogin{Agent: "plugin:fakeco", User: "b@fake", Home: "fakeco#2", On: false},
+		savedLogin{Agent: "plugin:fakeco", User: "c@fake", Home: "fakeco#3", On: false, Hidden: "removed"},
+		savedLogin{Agent: "ext:demo", User: "off@ext", Home: "off@ext", On: false},
+		savedLogin{Agent: "ext:demo", User: "hidden@ext", Home: "hidden@ext", On: false, Hidden: "removed"},
+	)
+	authOff := plugin.FetchAuth{Account: "fakeco#2", Epoch: &epoch}
+	if err := checkPluginFetchAccount(context.Background(), "fakeco", "fakeco#2", false, false, authOff); err == nil || !strings.Contains(err.Error(), "switched off") {
+		t.Fatalf("unpinned off account: err = %v", err)
+	}
+	wrongPinned := withPinnedTestAccount(context.Background(), &Account{
+		plugin:    &plugin.Provider{ID: "fakeco"},
+		pluginKey: "fakeco",
+	})
+	if err := checkPluginFetchAccount(wrongPinned, "fakeco", "fakeco#2", false, false, authOff); err == nil || !strings.Contains(err.Error(), "switched off") {
+		t.Fatalf("other account pinned: err = %v", err)
+	}
+	pinnedOff := withPinnedTestAccount(context.Background(), &Account{
+		plugin:    &plugin.Provider{ID: "fakeco"},
+		pluginKey: "fakeco#2",
+	})
+	if err := checkPluginFetchAccount(pinnedOff, "fakeco", "fakeco#2", false, false, authOff); err != nil {
+		t.Fatalf("pinned off account refused: %v", err)
+	}
+	authHidden := plugin.FetchAuth{Account: "fakeco#3", Epoch: &epoch}
+	pinnedHidden := withPinnedTestAccount(context.Background(), &Account{
+		plugin:    &plugin.Provider{ID: "fakeco"},
+		pluginKey: "fakeco#3",
+	})
+	if err := checkPluginFetchAccount(pinnedHidden, "fakeco", "fakeco#3", false, false, authHidden); err == nil || !strings.Contains(err.Error(), "hidden") {
+		t.Fatalf("pinned hidden account allowed: err = %v", err)
+	}
+
+	extOff := extensionPublicIdentity{provider: "demo", policyAgent: "ext:demo", user: "off@ext"}
+	if err := checkExtensionLoginForExecute(context.Background(), extOff); err == nil {
+		t.Fatal("unpinned off extension account allowed")
+	}
+	pinnedExtOff := withPinnedTestAccount(context.Background(), &Account{
+		extension: &extensionAccount{public: extOff},
+	})
+	if err := checkExtensionLoginForExecute(pinnedExtOff, extOff); err != nil {
+		t.Fatalf("pinned off extension account refused: %v", err)
+	}
+	extHidden := extensionPublicIdentity{provider: "demo", policyAgent: "ext:demo", user: "hidden@ext"}
+	pinnedExtHidden := withPinnedTestAccount(context.Background(), &Account{
+		extension: &extensionAccount{public: extHidden},
+	})
+	if err := checkExtensionLoginForExecute(pinnedExtHidden, extHidden); err == nil {
+		t.Fatal("pinned hidden extension account allowed")
+	}
+}

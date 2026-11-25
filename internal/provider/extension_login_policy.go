@@ -22,7 +22,9 @@ func checkExtensionLoginForExecute(ctx context.Context, identity extensionPublic
 		return err
 	}
 	if index := slices.IndexFunc(logins, identity.hasPolicy); index >= 0 && !extensionPolicyOn(logins[index]) {
-		return &sdk.Error{Code: "account_paused", Message: "The selected extension account is paused.", Outcome: "not-started"}
+		if logins[index].Hidden != "" || !pinnedExtensionTestAccount(ctx, identity) {
+			return &sdk.Error{Code: "account_paused", Message: "The selected extension account is paused.", Outcome: "not-started"}
+		}
 	}
 	return ctx.Err()
 }

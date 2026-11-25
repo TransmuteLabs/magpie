@@ -14,6 +14,15 @@ import (
 
 type testOnKey struct{}
 
+type pinnedTestAccount struct {
+	pluginProvider string
+	pluginAccount  string
+	extensionAgent string
+	extensionUser  string
+}
+
+type pinnedTestAccountKey struct{}
+
 // TestOn is ctx with Test and TestModels asking ref's account or key
 // ("" as routing picks one).
 func TestOn(ctx context.Context, ref string) context.Context {
@@ -23,6 +32,36 @@ func TestOn(ctx context.Context, ref string) context.Context {
 func testOnRef(ctx context.Context) string {
 	r, _ := ctx.Value(testOnKey{}).(string)
 	return r
+}
+
+func withPinnedTestAccount(ctx context.Context, acct *Account) context.Context {
+	if acct == nil {
+		return ctx
+	}
+	var pinned pinnedTestAccount
+	if acct.plugin != nil {
+		pinned.pluginProvider = acct.plugin.ID
+		pinned.pluginAccount = acct.pluginKey
+	}
+	if acct.extension != nil {
+		identity := acct.extension.identity()
+		pinned.extensionAgent = identity.policyAgent
+		pinned.extensionUser = identity.user
+	}
+	if pinned == (pinnedTestAccount{}) {
+		return ctx
+	}
+	return context.WithValue(ctx, pinnedTestAccountKey{}, pinned)
+}
+
+func pinnedPluginTestAccount(ctx context.Context, provider, account string) bool {
+	pinned, ok := ctx.Value(pinnedTestAccountKey{}).(pinnedTestAccount)
+	return ok && pinned.pluginProvider != "" && pinned.pluginProvider == provider && pinned.pluginAccount == account
+}
+
+func pinnedExtensionTestAccount(ctx context.Context, identity extensionPublicIdentity) bool {
+	pinned, ok := ctx.Value(pinnedTestAccountKey{}).(pinnedTestAccount)
+	return ok && pinned.extensionAgent != "" && pinned.extensionAgent == identity.policyAgent && pinned.extensionUser == identity.user
 }
 
 // TestPick is one account or key a test can be pinned to; Off, one the
